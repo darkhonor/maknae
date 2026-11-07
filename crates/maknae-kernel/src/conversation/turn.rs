@@ -1,7 +1,8 @@
 use super::bounds::{check_turn, BoundRefusal};
 use super::chain::{self, ChainHead, Extends};
 use super::record::ConversationRecord;
-use maknae_proto::{PromptReply, Turn};
+use super::store::{ConversationStore, StoreError};
+use maknae_proto::{ConversationId, PromptReply, Turn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnRefusal {
@@ -83,13 +84,33 @@ pub fn mark_full(rec: &mut ConversationRecord) {
     rec.full = true;
 }
 
+pub const MARK_FULL_ATTEMPTS: usize = 3;
+
+/// Re-reads the record on a moved fence, so a racing update cannot leave a full
+/// conversation unmarked.
+pub fn mark_full_at_any_fence(
+    store: &dyn ConversationStore,
+    id: &ConversationId,
+) -> Result<(), StoreError> {
+    for _ in 0..MARK_FULL_ATTEMPTS {
+        let rec = store.get(id)?;
+        match store.update(id, rec.fence, &mut mark_full) {
+            Err(StoreError::StaleFence) => {}
+            other => return other.map(|_| ()),
+        }
+    }
+    Err(StoreError::StaleFence)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::conversation::bounds::CONVERSATION_MAX_BYTES;
+    use crate::conversation::mem_store::MemStore;
     use crate::conversation::record::opened;
     use maknae_io::Zeroizing;
-    use maknae_proto::{ContentBlock, ConversationId, SecretText};
+    use maknae_proto::{ContentBlock, SecretText};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn text(s: &str) -> ContentBlock {
         ContentBlock::Text {
@@ -250,6 +271,93 @@ mod tests {
         assert_eq!(
             reply_step(&rec, &r),
             Err(TurnRefusal::Bound(BoundRefusal::ConversationFull))
+        );
+    }
+
+    struct Moving {
+        inner: MemStore,
+        moves: AtomicUsize,
+    }
+    impl ConversationStore for Moving {
+        fn create(
+            &self,
+            r: ConversationRecord,
+            m: usize,
+        ) -> Result<crate::conversation::store::Scan<()>, StoreError> {
+            self.inner.create(r, m)
+        }
+        fn get(&self, id: &ConversationId) -> Result<ConversationRecord, StoreError> {
+            self.inner.get(id)
+        }
+        fn update(
+            &self,
+            id: &ConversationId,
+            fence: u64,
+            f: &mut dyn FnMut(&mut ConversationRecord),
+        ) -> Result<ConversationRecord, StoreError> {
+            if self.moves.load(Ordering::SeqCst) > 0 {
+                self.moves.fetch_sub(1, Ordering::SeqCst);
+                let cur = self.inner.get(id)?;
+                self.inner
+                    .update(id, cur.fence, &mut |r| r.last_active += 1)?;
+            }
+            self.inner.update(id, fence, f)
+        }
+        fn remove(
+            &self,
+            id: &ConversationId,
+            fence: u64,
+        ) -> Result<ConversationRecord, StoreError> {
+            self.inner.remove(id, fence)
+        }
+        fn list_by_owner(
+            &self,
+            o: u32,
+            a: Option<&ConversationId>,
+            l: usize,
+        ) -> Result<crate::conversation::store::Scan<crate::conversation::store::Page>, StoreError>
+        {
+            self.inner.list_by_owner(o, a, l)
+        }
+        fn idle_for_owner(
+            &self,
+            o: u32,
+            t: u64,
+        ) -> Result<crate::conversation::store::Scan<Vec<ConversationRecord>>, StoreError> {
+            self.inner.idle_for_owner(o, t)
+        }
+    }
+
+    fn moving(moves: usize) -> (Moving, ConversationId) {
+        let store = Moving {
+            inner: MemStore::default(),
+            moves: AtomicUsize::new(0),
+        };
+        let rec = fresh();
+        let id = rec.id.clone();
+        store.create(rec, 1).unwrap();
+        store.moves.store(moves, Ordering::SeqCst);
+        (store, id)
+    }
+
+    #[test]
+    fn marking_full_survives_a_moved_fence_within_its_attempts() {
+        let (store, id) = moving(2);
+        assert_eq!(mark_full_at_any_fence(&store, &id), Ok(()));
+        assert!(store.get(&id).unwrap().full);
+    }
+
+    #[test]
+    fn marking_full_gives_up_after_its_attempts_and_says_so() {
+        let (store, id) = moving(3);
+        assert_eq!(
+            mark_full_at_any_fence(&store, &id),
+            Err(StoreError::StaleFence)
+        );
+        assert!(!store.get(&id).unwrap().full);
+        assert_eq!(
+            mark_full_at_any_fence(&store, &ConversationId::parse(&"d".repeat(32)).unwrap()),
+            Err(StoreError::NotFound)
         );
     }
 }

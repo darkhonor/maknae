@@ -370,7 +370,7 @@ pub fn build_authz_request(
             maknae_authz_basic::RESOURCE_CONVERSATION_STATE_KEY,
             AttrValue::Str(f.state.as_attr().to_owned()),
         );
-        if let Some(owner) = f.owner {
+        if let Some(owner) = f.owner_uid {
             resource.insert(
                 maknae_authz_basic::RESOURCE_CONVERSATION_OWNER_KEY,
                 AttrValue::Int(i64::from(owner)),
@@ -1201,7 +1201,7 @@ mod tests {
         ] {
             let facts = ConversationFacts {
                 state,
-                owner: Some(4242),
+                owner_uid: Some(4242),
                 extends,
             };
             let r = build_authz_request(
@@ -1225,7 +1225,7 @@ mod tests {
         }
         let ownerless = ConversationFacts {
             state: FactState::Error,
-            owner: None,
+            owner_uid: None,
             extends: None,
         };
         let r = build_authz_request(

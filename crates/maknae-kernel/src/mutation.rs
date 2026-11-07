@@ -53,26 +53,63 @@ fn busy_reason(busy: Busy) -> &'static str {
     }
 }
 
-pub(crate) async fn blocking<T, F>(timeout: Duration, f: F) -> Result<T, &'static str>
+pub(crate) const STORE_SLOTS_PER_UID: usize = 1;
+static STORE_SLOTS: OnceLock<std::sync::Mutex<std::collections::HashMap<u32, Arc<Semaphore>>>> =
+    OnceLock::new();
+
+fn store_slots(uid: u32) -> Arc<Semaphore> {
+    let mut slots = STORE_SLOTS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    slots.retain(|_, s| Arc::strong_count(s) > 1);
+    Arc::clone(
+        slots
+            .entry(uid)
+            .or_insert_with(|| Arc::new(Semaphore::new(STORE_SLOTS_PER_UID))),
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Blocked {
+    NotStarted,
+    Unknown,
+}
+
+impl std::fmt::Display for Blocked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NotStarted => "store work did not start within its bound",
+            Self::Unknown => "store work did not finish within its bound",
+        })
+    }
+}
+
+/// The requester's own slot first, then one of the shared workers; both follow
+/// the worker, so a stalled requester pins at most its own slots.
+pub(crate) async fn blocking<T, F>(uid: u32, timeout: Duration, f: F) -> Result<T, Blocked>
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    let run = async move {
-        let permit = capacity()
-            .acquire_owned()
-            .await
-            .map_err(|_| "blocking capacity closed")?;
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            f()
-        })
-        .await
-        .map_err(|_| "blocking work failed")
+    let deadline = tokio::time::Instant::now() + timeout;
+    let admitted = tokio::time::timeout_at(deadline, async {
+        let own = store_slots(uid).acquire_owned().await.ok()?;
+        let shared = capacity().acquire_owned().await.ok()?;
+        Some((own, shared))
+    })
+    .await;
+    let Ok(Some(held)) = admitted else {
+        return Err(Blocked::NotStarted);
     };
-    tokio::time::timeout(timeout, run)
-        .await
-        .unwrap_or(Err("blocking work timed out"))
+    let work = tokio::task::spawn_blocking(move || {
+        let _held = held;
+        f()
+    });
+    match tokio::time::timeout_at(deadline, work).await {
+        Ok(Ok(v)) => Ok(v),
+        _ => Err(Blocked::Unknown),
+    }
 }
 
 pub(crate) fn verify_cwd(fd: BorrowedFd<'_>, home: &Path, uid: u32) -> Result<String, String> {
@@ -908,6 +945,62 @@ async fn incomplete<E: AuditEmit>(
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stalled_requester_pins_only_its_own_store_slot() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let (stalled, other) = (4_170_101, 4_170_102);
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let held = Arc::new(std::sync::Mutex::new(held));
+        let entered = Arc::new(AtomicUsize::new(0));
+        let attempts: Vec<_> = (0..4)
+            .map(|_| {
+                let (held, entered) = (Arc::clone(&held), Arc::clone(&entered));
+                tokio::spawn(blocking(stalled, Duration::from_millis(300), move || {
+                    entered.fetch_add(1, SeqCst);
+                    let _ = held.lock().unwrap().recv();
+                }))
+            })
+            .collect();
+        let mut results = Vec::new();
+        for a in attempts {
+            results.push(a.await.unwrap());
+        }
+        results.sort_by_key(|r| *r == Err(Blocked::Unknown));
+        assert_eq!(
+            results,
+            vec![
+                Err(Blocked::NotStarted),
+                Err(Blocked::NotStarted),
+                Err(Blocked::NotStarted),
+                Err(Blocked::Unknown)
+            ]
+        );
+        assert_eq!(entered.load(SeqCst), STORE_SLOTS_PER_UID);
+        assert_eq!(
+            blocking(other, Duration::from_millis(300), || 7).await,
+            Ok(7)
+        );
+        assert!(mutating().try_admit(other, &capacity()).is_ok());
+        assert_eq!(
+            blocking(stalled, Duration::from_millis(100), || 1).await,
+            Err(Blocked::NotStarted)
+        );
+        release.send(()).unwrap();
+        assert_eq!(blocking(stalled, Duration::from_secs(2), || 1).await, Ok(1));
+    }
+
+    #[test]
+    fn blocked_work_names_whether_it_ever_started() {
+        assert_eq!(
+            Blocked::NotStarted.to_string(),
+            "store work did not start within its bound"
+        );
+        assert_eq!(
+            Blocked::Unknown.to_string(),
+            "store work did not finish within its bound"
+        );
+    }
 
     #[test]
     fn the_object_label_is_the_ceiling_operands_resolution_with_no_categories() {

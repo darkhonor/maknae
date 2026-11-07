@@ -31,7 +31,7 @@ pub fn extends_attr(e: Extends) -> &'static str {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConversationFacts {
     pub state: FactState,
-    pub owner: Option<u32>,
+    pub owner_uid: Option<u32>,
     pub extends: Option<Extends>,
 }
 
@@ -45,7 +45,7 @@ pub fn gather(
     let cited = cited?;
     let unknown = ConversationFacts {
         state: FactState::Unknown,
-        owner: Some(requester),
+        owner_uid: Some(requester),
         extends: None,
     };
     let Some(id) = ConversationId::parse(cited) else {
@@ -64,7 +64,7 @@ pub fn gather(
 
 const ERROR: ConversationFacts = ConversationFacts {
     state: FactState::Error,
-    owner: None,
+    owner_uid: None,
     extends: None,
 };
 
@@ -76,7 +76,7 @@ fn settle(
         Ok(extends) => (
             ConversationFacts {
                 state: FactState::Active,
-                owner: Some(rec.owner),
+                owner_uid: Some(rec.owner),
                 extends,
             },
             Some(rec),
@@ -188,7 +188,7 @@ mod tests {
     fn unknown() -> ConversationFacts {
         ConversationFacts {
             state: FactState::Unknown,
-            owner: Some(REQUESTER),
+            owner_uid: Some(REQUESTER),
             extends: None,
         }
     }
@@ -196,7 +196,7 @@ mod tests {
     fn error() -> ConversationFacts {
         ConversationFacts {
             state: FactState::Error,
-            owner: None,
+            owner_uid: None,
             extends: None,
         }
     }
@@ -276,7 +276,7 @@ mod tests {
             Some((
                 ConversationFacts {
                     state: FactState::Active,
-                    owner: Some(OWNER),
+                    owner_uid: Some(OWNER),
                     extends: None,
                 },
                 Some(r)
@@ -322,7 +322,7 @@ mod tests {
             (
                 ConversationFacts {
                     state: FactState::Active,
-                    owner: Some(OWNER),
+                    owner_uid: Some(OWNER),
                     extends: Some(Extends::Retry),
                 },
                 Some(r)

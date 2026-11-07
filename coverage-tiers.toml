@@ -79,6 +79,7 @@ files = [
   # #170: the append-only conversation chain, the reply binding, the facts the PDP
   # decides on, and the bounds. A wrong arm accepts a rewritten history as a continuation,
   # a forged Assistant turn as the delivered reply, or a store error as an unknown conversation.
+  "crates/maknae-kernel/src/conversation/answer.rs",
   "crates/maknae-kernel/src/conversation/bounds.rs",
   "crates/maknae-kernel/src/conversation/chain.rs",
   "crates/maknae-kernel/src/conversation/dir_store.rs",
