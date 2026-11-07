@@ -1510,8 +1510,76 @@ mod tests {
                     .map_err(other)?,
                 destinations: crate::validate_destinations(&src.policy().destinations)
                     .map_err(other)?,
-                subjects: crate::validate_subjects(src.policy(), &src.lookups).map_err(other)?,
+                subjects: subjects(src).map_err(Refused::Other)?,
             })
+        }
+
+        const TERMS: [&str; 12] = [
+            "admin.status",
+            "admin.config.show",
+            "admin.subject.list",
+            "admin.baseline.show",
+            "admin.baseline.accept",
+            "admin.contain",
+            "admin.release",
+            "session.prompt",
+            "fs.read",
+            "fs.write",
+            "fs.delete",
+            "fs.mkdir",
+        ];
+
+        /// `subjects:` read from the raw file, without `validate_subjects` or `decide::expand`.
+        fn subjects(src: &crate::PolicySource) -> Result<crate::decide::SubjectGrants, String> {
+            let terms = |patterns: &[maknae_config::ActionPattern]| {
+                let mut out = BTreeMap::new();
+                for p in patterns {
+                    let written = p.source();
+                    let (family, exact) = match written.strip_suffix(".*") {
+                        Some(f) => (f, None),
+                        None => (written.split('.').next().unwrap_or(""), Some(&written)),
+                    };
+                    if !["admin", "session", "fs", "terminal", "mcp"].contains(&family)
+                        || exact.is_some_and(|e| !TERMS.contains(&e.as_str()))
+                    {
+                        return Err(format!("oracle refuses {written}"));
+                    }
+                    for t in TERMS {
+                        let hit = match exact {
+                            Some(e) => t == e,
+                            None => t.starts_with(&format!("{family}.")),
+                        };
+                        if hit {
+                            out.entry(t).or_insert_with(|| written.clone());
+                        }
+                    }
+                }
+                Ok(out)
+            };
+            let uids = src.uid_map();
+            let mut by_uid = BTreeMap::new();
+            for (name, entry) in &src.policy().subjects {
+                let actions = match &entry.actions {
+                    Some(a) => Some(crate::decide::SubjectActionSet {
+                        allow: terms(&a.allow)?,
+                        deny: terms(&a.deny)?,
+                    }),
+                    None => None,
+                };
+                let Some(uid) = uids.get(name) else {
+                    continue;
+                };
+                let compiled = crate::decide::SubjectEntry {
+                    name: name.clone(),
+                    permissions: entry.permissions.clone(),
+                    actions,
+                    models: entry.models.clone(),
+                };
+                if by_uid.insert(*uid, compiled).is_some() {
+                    return Err(format!("oracle refuses a second subject on uid {uid}"));
+                }
+            }
+            Ok(crate::decide::SubjectGrants(by_uid))
         }
 
         mod pinned {
@@ -2187,21 +2255,49 @@ mod tests {
             ),
             &[("ursula", 1001), ("mallory", 666)],
         );
-        let snap = compiled(&subjects);
-        let oracle = tests::oracle::assemble(&subjects).unwrap();
-        assert_eq!(oracle.subjects, snap.loaded().subjects);
-        assert_eq!(oracle.subjects.get(1001).unwrap().name, "ursula");
         let auth = BasicAuthorizer::from_snapshot(
             principal(),
             subjects.paths().clone(),
             test_digest,
-            snap,
+            compiled(&subjects),
         );
-        for req in [whoami(501), whoami(1001), ssh_read(501), ssh_read(1001)] {
-            assert_eq!(
-                auth.decide_oracle(&subjects, &req),
-                auth.decide_reporting_role(&req)
-            );
+        let read = |uid: i64, path: &str| {
+            let mut r = ssh_read(uid);
+            r.resource
+                .0
+                .insert(RESOURCE_PATH_KEY, AttrValue::Str(path.into()));
+            r
+        };
+        let act = |uid: i64, action: &str| {
+            let mut r = liveness_req(Some(uid));
+            r.action = Action(action.into());
+            r
+        };
+        let shape = |v: &Verdict| match v {
+            Verdict::Permit { .. } => "permit".to_string(),
+            Verdict::NotApplicable { .. } => "absent".to_string(),
+            Verdict::Deny { reason } => reason.clone(),
+            Verdict::Indeterminate => "indeterminate".to_string(),
+        };
+        for (req, expected) in [
+            (whoami(501), "absent"),
+            (whoami(1001), "absent"),
+            (ssh_read(501), "absent"),
+            (ssh_read(1001), "denied by policy entry Read(~/.ssh/**)"),
+            (read(1001, "/home/operator/docs/a"), "permit"),
+            (
+                read(1001, "/home/operator/docs/secret/a"),
+                "denied by subjects.ursula.permissions entry Read(~/docs/secret/**)",
+            ),
+            (read(1001, "/home/operator/notes"), "absent"),
+            (
+                act(1001, "admin.status"),
+                "subject ursula: admin.status is not in subjects.ursula.actions allow",
+            ),
+        ] {
+            let oracle = auth.decide_oracle(&subjects, &req);
+            assert_eq!(shape(&oracle.0), expected, "{}", req.action.0);
+            assert_eq!(oracle, auth.decide_reporting_role(&req), "{}", req.action.0);
         }
         let broken = PolicySource {
             lookups: Lookups::new(),
@@ -4935,7 +5031,7 @@ mod tests {
         const EXPLICIT: &str = "schema_version: 1\nbindings: { admin: [alex], user: [ursula], guest: [gus], adversary: [mallory] }\n";
         const GRANTS: &str = "roles: { admin: { allow: [admin.status, admin.subject.list, session.prompt], deny: [admin.config.show] }, user: { allow: [session.prompt] } }\ndestinations: { user: { allow: [\"provider:openai\"] }, admin: { allow: [\"provider:anthropic\"] } }\n";
 
-        const SUBJECTS: &str = "subjects:\n  ursula:\n    permissions:\n      allow: [\"Read(~/docs/**)\"]\n      deny: [\"Read(~/docs/secret/**)\"]\n    actions:\n      allow: [\"fs.*\", \"session.prompt\"]\n    models:\n      allow: [\"openai/gpt-5\"]\n";
+        const SUBJECTS: &str = "subjects:\n  ursula:\n    permissions:\n      allow: [\"Read(~/projects/**)\", \"Write(~/projects/**)\"]\n      deny: [\"Read(~/projects/a/**)\"]\n    actions:\n      allow: [\"fs.*\", \"session.prompt\"]\n      deny: [\"fs.delete\"]\n    models:\n      allow: [\"openai/gpt-5\"]\n";
 
         fn explicit_with(admin: &str, user: &str, guest: &str, adversary: &str) -> String {
             format!("schema_version: 1\nbindings: {{ admin: [{admin}], user: [{user}], guest: [{guest}], adversary: [{adversary}] }}\n")
@@ -5202,15 +5298,10 @@ mod tests {
             let mut arms: std::collections::BTreeMap<&'static str, Arms> = Default::default();
             let mut grant_arms = (false, false, false);
             let mut subject_entries = 0;
+            let mut subject_arms = (false, false, false);
             for (variant, src, oracle_src) in policies() {
                 let snap = compiled(&src);
-                let subjects = &snap.loaded().subjects;
-                assert_eq!(
-                    &super::oracle::assemble(&oracle_src).unwrap().subjects,
-                    subjects,
-                    "{variant}"
-                );
-                subject_entries += subjects.0.len();
+                subject_entries += snap.loaded().subjects.0.len();
                 let auth = BasicAuthorizer::from_snapshot(
                     principal(),
                     src.paths().clone(),
@@ -5252,6 +5343,22 @@ mod tests {
                                 _ => {}
                             }
                         }
+                    }
+                    if let Verdict::Deny { reason } = &oracle.0 {
+                        if reason.starts_with("subject ursula: ") {
+                            subject_arms.0 = true
+                        } else if reason.starts_with("denied by subjects.ursula.permissions ") {
+                            subject_arms.1 = true
+                        }
+                    }
+                    if oracle.1 == Some("user")
+                        && matches!(oracle.0, Verdict::Permit { .. })
+                        && FS_TERMS.contains(&req.action.0.as_str())
+                        && auth.decide_cited(&req).rule.is_some_and(|r| {
+                            r.key.starts_with("rule:subjects.ursula.permissions:allow:")
+                        })
+                    {
+                        subject_arms.2 = true
                     }
                     if oracle != snap {
                         mismatches.push(format!(
@@ -5319,6 +5426,11 @@ mod tests {
             let other_cells = 55 + 4;
             assert_eq!(cells, 12 * 9 * (fs_cells + other_cells));
             assert_eq!(subject_entries, 1);
+            assert_eq!(
+                subject_arms,
+                (true, true, true),
+                "the subjects variant must decide by action limit, subject deny and subject allow"
+            );
             assert_eq!(
                 roles_seen,
                 [
