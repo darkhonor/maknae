@@ -178,6 +178,20 @@ pub enum EnrollError {
         recorded: bool,
     },
     HostNotEnrolled(String),
+    AgentBound {
+        agent: String,
+        account: String,
+        role: &'static str,
+    },
+    AgentNotInAgentGroup {
+        account: String,
+        group: &'static str,
+    },
+    AgentEntityMissing {
+        agent: String,
+        entity: String,
+        mount: String,
+    },
 }
 
 impl std::fmt::Display for EnrollError {
@@ -321,6 +335,27 @@ impl std::fmt::Display for EnrollError {
             EnrollError::HostNotEnrolled(detail) => write!(
                 f,
                 "this host is not enrolled ({detail}); run `sudo maknae enroll` first"
+            ),
+            EnrollError::AgentBound {
+                agent,
+                account,
+                role,
+            } => write!(
+                f,
+                "account {account} is bound to {role} in bindings.yaml, so it is a person's account and cannot be agent {agent}; give the Agent Daemon its own service account"
+            ),
+            EnrollError::AgentNotInAgentGroup { account, group } => write!(
+                f,
+                "account {account} is not in the {group} group; add it with `{}`, then run enroll again",
+                agent::agent_group_command(account)
+            ),
+            EnrollError::AgentEntityMissing {
+                agent,
+                entity,
+                mount,
+            } => write!(
+                f,
+                "Vault has no entity {entity} with an alias on auth/{mount}/; add {agent} to maknae_agents in deploy/vault-pki and run `terraform apply`, then run enroll again"
             ),
         }
     }

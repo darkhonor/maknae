@@ -77,7 +77,7 @@ pub use keychain_policy::{
 };
 #[cfg(unix)]
 pub use maknae_plane::SenderVerdict;
-pub use operator::OperatorClient;
+pub use operator::{EntityFacts, OperatorClient};
 pub use password_line::{PasswordFeed, PasswordLine};
 pub use peer_auth::{ChannelPeer, PeerAuth, SanRule};
 pub use peer_identity::{creds_match_listener_uid, creds_match_uid, listener_uid_is, peer_uid_is};

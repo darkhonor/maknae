@@ -110,6 +110,10 @@ pub enum MsgId {
     EnrollAgentEnrolled,
     /// Earlier SecretIDs of the agent were destroyed. Carries `{count}`.
     EnrollAgentRetired,
+    /// `maknaed` must be reloaded to see the enrollment. Carries `{command}`.
+    EnrollAgentReload,
+    /// The agent's account is not in the agent group. Carries `{account}`, `{group}` and `{command}`.
+    EnrollAgentGroup,
     /// The operator-context helper's self-verification (euid/egid) failed.
     HelperContextMismatch,
     /// The operator-context helper still carries root's supplementary groups —
@@ -169,6 +173,8 @@ pub const ALL: &[MsgId] = &[
     MsgId::EnrollAgentStarted,
     MsgId::EnrollAgentEnrolled,
     MsgId::EnrollAgentRetired,
+    MsgId::EnrollAgentReload,
+    MsgId::EnrollAgentGroup,
     MsgId::HelperContextMismatch,
     MsgId::HelperStillPrivileged,
     MsgId::CryptoFipsUnavailable,
@@ -356,13 +362,15 @@ mod tests {
                 | MsgId::EnrollAgentStarted
                 | MsgId::EnrollAgentEnrolled
                 | MsgId::EnrollAgentRetired
+                | MsgId::EnrollAgentReload
+                | MsgId::EnrollAgentGroup
                 | MsgId::HelperContextMismatch
                 | MsgId::HelperStillPrivileged
                 | MsgId::CryptoFipsUnavailable
                 | MsgId::CryptoPolicyDrift => {}
             }
         }
-        const VARIANT_COUNT: usize = 49;
+        const VARIANT_COUNT: usize = 51;
         assert_eq!(ALL.len(), VARIANT_COUNT);
         for &id in ALL {
             assert_covered(id);

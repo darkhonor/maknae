@@ -99,6 +99,12 @@ pub(crate) fn text(id: MsgId) -> &'static str {
             "에이전트 데몬 {agent} 등록이 완료됐어요. {role}의 SecretID를 이 호스트에 봉인했고, {cidrs}에서만 사용할 수 있어요"
         }
         MsgId::EnrollAgentRetired => "이 에이전트의 이전 SecretID {count}개를 폐기했어요",
+        MsgId::EnrollAgentReload => {
+            "maknaed가 실행 중이라면 다시 불러와서 이 등록을 반영하세요: {command}"
+        }
+        MsgId::EnrollAgentGroup => {
+            "{account}을(를) 에이전트로 등록하려면 먼저 {group} 그룹에 속해야 해요. 그룹에 추가한 뒤 enroll을 다시 실행하세요: {command}"
+        }
         MsgId::HelperContextMismatch => "운영자 컨텍스트 헬퍼가 예상된 신원으로 전환되지 않았어요",
         MsgId::HelperStillPrivileged => {
             "운영자 컨텍스트 헬퍼가 여전히 root의 그룹 소속을 갖고 있어요 — 거부해요"

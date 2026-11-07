@@ -834,15 +834,17 @@ audit:
 - The host is enrolled (`sudo maknae enroll`).
 - The agent's id is in Terraform's `maknae_agents` (`deploy/vault-pki`), which creates its AppRole role.
 - An operator Vault token carrying the `maknae-enroll-agent` policy, supplied by `--token-file` or a no-echo prompt.
-- A dedicated service account for the agent: it is not root, it is not the enrolling principal's account, its shell is one of the non-login shells `/usr/sbin/nologin`, `/sbin/nologin`, `/usr/bin/nologin`, `/bin/false` or `/usr/bin/false`, it is outside the `maknae` group, it is not a Maknae daemon account and is not a member (primary or supplementary) of the `_maknae` or `_maknae-egress` group, and no other agent is enrolled to it. Enrollment refuses any other account.
+- A dedicated service account for the agent: it is not root, it is not the enrolling principal's account, its shell is one of the non-login shells `/usr/sbin/nologin`, `/sbin/nologin`, `/usr/bin/nologin`, `/bin/false` or `/usr/bin/false`, it is outside the `maknae` group and a member of the `maknae-agents` group (enroll prints the `usermod -aG` or `dseditgroup` command and changes nothing), it is not named in `bindings.yaml`, it is not a Maknae daemon account and is not a member (primary or supplementary) of the `_maknae` or `_maknae-egress` group, and no other agent is enrolled to it. Enrollment refuses any other account.
 - The agent id is enrolled on this host only. Each agent id is enrolled on exactly one host: enrolling or rotating the same id on another host destroys this host's SecretID, because every enrollment retires every other SecretID on `agent-<id>`.
 - Linux: a usable TPM2. There is no plaintext fallback.
 - macOS: `/usr/local/bin/maknae-agentd` installed and Developer ID-signed, and the running `maknae` binary itself root-installed and Developer ID-signed. Enrollment refuses until both are.
 
 ```bash
 sudo maknae enroll agent <id> --account <service-account> --bind-cidr <cidr> [--bind-cidr <cidr>…] \
-  [--approle-mount <mount>] [--token-file <file>] [--verbose]
+  [--role user|guest] [--approle-mount <mount>] [--token-file <file>] [--verbose]
 ```
+
+`--role` defaults to `user`; `admin` is not a choice. After sealing the SecretID, enroll reads the Vault entity `maknae-agent-<id>`. It refuses, and destroys the new SecretID, when the entity is absent or has no alias on the agent mount, and it re-enables a disabled entity. It ends by telling you to reload `maknaed`.
 
 `--bind-cidr` is required, once per address range. The SecretID is minted with `cidr_list` and `token_bound_cidrs` set to those ranges, so Vault refuses it, and any token it yields, from a source address outside them. Vault sees the address after any NAT, so behind NAT bind the translated address. A prefix is plain decimal digits with no leading zero, an IPv4-mapped IPv6 range (`::ffff:a.b.c.d/n`) is taken as its IPv4 range, and enrollment refuses `0.0.0.0/0`, `::/0`, or any set of ranges that together covers every IPv4 or every IPv6 address. `--approle-mount` defaults to `maknae-agent-approle`; it may use only `A-Z`, `a-z`, `0-9`, `.`, `_`, `/` and `-`, and must differ from `maknaed`'s AppRole mount, which must use the same characters so the two can be compared.
 
@@ -853,7 +855,7 @@ sudo maknae enroll agent <id> --account <service-account> --bind-cidr <cidr> [--
 | `/etc/maknae/private/agent-<id>-secret-id.cred` (Linux) | the SecretID, a TPM2-bound `systemd-creds` credential named `maknae-agent-secret-id` |
 | System keychain (macOS) | an item with service `io.maknae.maknae-agentd` and account `<id>`, trusted only to `/usr/local/bin/maknae-agentd` |
 | `/etc/maknae/private/agent-<id>-enroll-state.yaml` | the mount, the role, and the `live`, `pending` and `retiring` SecretID accessors |
-| `/etc/maknae/agents/<id>.yaml` | the agent's id, account, uid, mount, role, RoleID, bound CIDRs and custody source |
+| `/etc/maknae/agents/<id>/enrollment.yaml` | the agent's id, account, uid, mount, AppRole role, RoleID, bound CIDRs, bound role and custody source (directory `root:_maknae 0750`) |
 
 **Rotating.** `sudo maknae enroll agent <id> --account <service-account> --bind-cidr <cidr>… --rotate` takes the same `--account` and mount as the enrollment, and `--bind-cidr` again. It mints and seals the new SecretID before destroying the old one, and an accessor stays recorded in the state file until its destroy succeeds. Every enrollment, first or rotating, also lists the role's SecretID accessors in Vault after sealing and retires each one except the new SecretID's, so a SecretID that an interrupted earlier run minted but never recorded is destroyed too. That includes a SecretID another host holds for the same id, which is why an agent id is enrolled on one host only. A different account or mount means de-enrolling first.
 
@@ -864,7 +866,7 @@ vault list auth/<mount>/role/agent-<id>/secret-id
 vault write auth/<mount>/role/agent-<id>/secret-id-accessor/destroy secret_id_accessor=<a>
 ```
 
-Then remove that state file, `/etc/maknae/agents/<id>.yaml` and the sealed credential: on Linux the `.cred` file, on macOS `security delete-generic-password -s io.maknae.maknae-agentd -a <id> /Library/Keychains/System.keychain`.
+Then remove that state file, `/etc/maknae/agents/<id>/enrollment.yaml` and the sealed credential: on Linux the `.cred` file, on macOS `security delete-generic-password -s io.maknae.maknae-agentd -a <id> /Library/Keychains/System.keychain`.
 
 ### 6.5 The `deployment` section
 

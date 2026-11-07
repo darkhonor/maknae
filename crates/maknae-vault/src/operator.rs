@@ -21,8 +21,41 @@ use crate::VaultError;
 use maknae_crypto::assert_fips_provider;
 use serde::Deserialize;
 use vaultrs::api::auth::approle::requests::GenerateNewSecretIDRequestBuilder;
+use vaultrs::api::identity::entity::responses::ReadEntityByNameResponse;
 use vaultrs::client::{VaultClient, VaultClientSettingsBuilder};
 use zeroize::Zeroizing;
+
+const AGENT_ENTITY_PREFIX: &str = "maknae-agent-";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntityFacts {
+    pub id: String,
+    pub disabled: bool,
+    pub alias_mounts: Vec<String>,
+}
+
+fn entity_facts(resp: ReadEntityByNameResponse) -> EntityFacts {
+    EntityFacts {
+        id: resp.id,
+        disabled: resp.disabled,
+        alias_mounts: resp.aliases.into_iter().map(|a| a.mount_path).collect(),
+    }
+}
+
+fn agent_entity_name(name: &str) -> Result<&str, VaultError> {
+    let id = name.strip_prefix(AGENT_ENTITY_PREFIX).unwrap_or_default();
+    let plain = !id.is_empty()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+    if plain {
+        Ok(name)
+    } else {
+        Err(VaultError::Operator(format!(
+            "{name:?} is not an agent entity name ({AGENT_ENTITY_PREFIX}<id>)"
+        )))
+    }
+}
 
 /// A token-authenticated Vault client for the operator-driven `enroll` flow.
 ///
@@ -190,6 +223,30 @@ impl OperatorClient {
         }
     }
 
+    /// The identity entity named `name`; `None` when Vault has none.
+    pub async fn entity(&self, name: &str) -> Result<Option<EntityFacts>, VaultError> {
+        match vaultrs::identity::entity::read_by_name(&self.inner, name).await {
+            Ok(resp) => Ok(Some(entity_facts(resp))),
+            Err(vaultrs::error::ClientError::APIError { code: 404, .. }) => Ok(None),
+            Err(e) => Err(VaultError::Operator(e.to_string())),
+        }
+    }
+
+    /// Set the `disabled` flag of an agent's entity, leaving its policies and metadata as they are.
+    pub async fn set_entity_disabled(&self, name: &str, disabled: bool) -> Result<(), VaultError> {
+        let name = agent_entity_name(name)?;
+        vaultrs::identity::entity::create_or_update_by_name(
+            &self.inner,
+            name,
+            Some(
+                vaultrs::api::identity::entity::requests::CreateEntityByNameRequest::builder()
+                    .disabled(disabled),
+            ),
+        )
+        .await
+        .map_err(|e| VaultError::Operator(e.to_string()))
+    }
+
     /// Fetch the maknae PKI intermediate's default issuer CA chain (PEM), for
     /// pinning on the newly enrolled deployment. `vaultrs` has no op for this
     /// endpoint, so it is executed via the hand-rolled `ReadDefaultIssuerJsonRequest`
@@ -270,6 +327,65 @@ mod tests {
         assert_eq!(req.cidr_list, want);
         assert_eq!(req.token_bound_cidrs, want);
         assert_eq!(req.metadata, None);
+    }
+
+    fn entity_response(disabled: bool, aliases: &[&str]) -> ReadEntityByNameResponse {
+        let aliases: Vec<_> = aliases
+            .iter()
+            .map(|path| {
+                serde_json::json!({
+                    "id": "a", "canonical_id": "e", "mount_accessor": "auth_approle_1",
+                    "name": "role", "creation_time": "t", "last_update_time": "t",
+                    "local": false, "mount_type": "approle", "mount_path": path,
+                })
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "id": "entity-1", "name": "maknae-agent-hobi", "disabled": disabled,
+            "policies": [], "last_update_time": "t", "creation_time": "t",
+            "aliases": aliases, "direct_group_ids": [], "group_ids": [],
+            "inherited_group_ids": [], "namespace_id": "root",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn entity_facts_carry_the_id_the_flag_and_every_alias_mount() {
+        let facts = entity_facts(entity_response(
+            true,
+            &["auth/maknae-agent-approle/", "auth/other/"],
+        ));
+        assert_eq!(
+            facts,
+            EntityFacts {
+                id: "entity-1".into(),
+                disabled: true,
+                alias_mounts: vec!["auth/maknae-agent-approle/".into(), "auth/other/".into()],
+            }
+        );
+        assert!(!entity_facts(entity_response(false, &[])).disabled);
+    }
+
+    #[test]
+    fn only_agent_entities_can_be_switched() {
+        assert_eq!(
+            agent_entity_name("maknae-agent-hobi").unwrap(),
+            "maknae-agent-hobi"
+        );
+        for bad in [
+            "",
+            "hobi",
+            "maknae-user-hobi",
+            "maknae-agent",
+            "maknae-agent-",
+            "maknae-agent-a/b",
+            "maknae-agent-../x",
+        ] {
+            assert!(
+                matches!(agent_entity_name(bad), Err(VaultError::Operator(_))),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]
