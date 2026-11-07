@@ -31,6 +31,27 @@ pub(crate) struct LoadedPolicy {
     pub(crate) roles: Roles,
     pub(crate) action_grants: ActionGrants,
     pub(crate) destinations: DestinationGrants,
+    #[allow(dead_code)]
+    pub(crate) subjects: SubjectGrants,
+}
+
+/// `subjects:` entries by resolved uid; a name that resolves to no account has none.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub(crate) struct SubjectGrants(pub(crate) std::collections::BTreeMap<u32, SubjectEntry>);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SubjectEntry {
+    pub(crate) name: String,
+    pub(crate) permissions: Option<maknae_config::SubjectPermissions>,
+    pub(crate) actions: Option<std::collections::BTreeMap<&'static str, String>>,
+    pub(crate) models: Option<Vec<maknae_config::ModelRef>>,
+}
+
+impl SubjectGrants {
+    #[allow(dead_code)]
+    pub(crate) fn get(&self, uid: u32) -> Option<&SubjectEntry> {
+        self.0.get(&uid)
+    }
 }
 
 /// The policy entry a verdict was decided by, in the terms the rule index keys on.
@@ -48,6 +69,11 @@ pub(crate) enum Cited {
     Destination {
         role: &'static str,
         destination: String,
+    },
+    SubjectPath {
+        subject: String,
+        effect: Effect,
+        source: String,
     },
 }
 
@@ -84,6 +110,37 @@ impl DestinationGrants {
 // One line: the drift gate's extractor reads only the matched line.
 #[rustfmt::skip]
 pub(crate) const GRANTABLE_ACTIONS: [&str; 8] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt"];
+
+/// The terms a `subjects:` action list or a family wildcard can name.
+#[rustfmt::skip]
+pub(crate) const ACTION_VOCABULARY: [&str; 12] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt", "fs.read", "fs.write", "fs.delete", "fs.mkdir"];
+
+/// An action entry as compiled against [`ACTION_VOCABULARY`]: `(term, entry as written)`.
+pub(crate) fn expand(
+    p: &maknae_config::ActionPattern,
+) -> Result<Vec<(&'static str, String)>, crate::AuthzBasicError> {
+    use crate::AuthzBasicError::{UngrantableAction, UnknownAction};
+    let source = p.source();
+    let (maknae_config::ActionPattern::Exact(name) | maknae_config::ActionPattern::Family(name)) =
+        p;
+    let class = match class_of(name) {
+        Some(Class::Kernel | Class::Liveness) => return Err(UngrantableAction(source)),
+        Some(c) => c,
+        None => return Err(UnknownAction(source)),
+    };
+    let terms: Vec<_> = ACTION_VOCABULARY
+        .into_iter()
+        .filter(|t| match p {
+            maknae_config::ActionPattern::Exact(e) => t == e,
+            maknae_config::ActionPattern::Family(_) => class_of(t) == Some(class),
+        })
+        .map(|t| (t, source.clone()))
+        .collect();
+    match p {
+        maknae_config::ActionPattern::Exact(_) if terms.is_empty() => Err(UnknownAction(source)),
+        _ => Ok(terms),
+    }
+}
 
 /// Byte-wise `&str` equality usable in a `const` context.
 ///
@@ -136,37 +193,21 @@ const _: () = {
     assert!(!str_eq(h, "admin.whoami"), "{}", WHY);
 };
 
-/// A validated action term: it appeared in [`GRANTABLE_ACTIONS`] at load time.
-/// A newtype rather than a bare `String` so the type system carries the
-/// validation -- an unvalidated term cannot be constructed here by accident.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
-pub(crate) struct ActionTerm(String);
+/// One expanded grant: the term and the entry it was written as.
+pub(crate) type Grant = (&'static str, String);
 
-impl ActionTerm {
-    /// Only `validate_grants` calls this, and only after checking membership
-    /// in [`GRANTABLE_ACTIONS`]. The name states the precondition the type
-    /// exists to carry.
-    pub(crate) fn validated(term: String) -> Self {
-        ActionTerm(term)
-    }
-
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-/// Validated per-role action grants: role key → (allow terms, deny terms).
+/// Validated per-role action grants: role key → (allow, deny), each expanded.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub(crate) struct ActionGrants(
-    pub(crate) std::collections::BTreeMap<String, (Vec<ActionTerm>, Vec<ActionTerm>)>,
+    pub(crate) std::collections::BTreeMap<String, (Vec<Grant>, Vec<Grant>)>,
 );
 
 impl ActionGrants {
     /// Construct from already-validated parts. Private to the crate, and the
-    /// only constructor besides `Default`, so every `ActionTerm` inside has
-    /// been through `validate_grants`.
+    /// only constructor besides `Default`, so every term inside has been
+    /// through `validate_grants`.
     pub(crate) fn from_validated(
-        m: std::collections::BTreeMap<String, (Vec<ActionTerm>, Vec<ActionTerm>)>,
+        m: std::collections::BTreeMap<String, (Vec<Grant>, Vec<Grant>)>,
     ) -> Self {
         ActionGrants(m)
     }
@@ -184,14 +225,14 @@ impl ActionGrants {
         let Some((allow, deny)) = self.0.get(role_key) else {
             return maknae_config::Match3::NoMatch;
         };
-        if let Some(t) = deny.iter().find(|t| t.as_str() == action) {
+        if let Some((_, source)) = deny.iter().find(|(t, _)| *t == action) {
             return maknae_config::Match3::DenyMatch {
-                source: t.as_str().to_string(),
+                source: source.clone(),
             };
         }
-        if let Some(t) = allow.iter().find(|t| t.as_str() == action) {
+        if let Some((_, source)) = allow.iter().find(|(t, _)| *t == action) {
             return maknae_config::Match3::AllowMatch {
-                source: t.as_str().to_string(),
+                source: source.clone(),
             };
         }
         maknae_config::Match3::NoMatch
@@ -746,6 +787,7 @@ mod tests {
             // seeing an empty grant map, or the pin stops pinning.
             action_grants: ActionGrants::default(),
             destinations: DestinationGrants::default(),
+            subjects: SubjectGrants::default(),
         }
     }
 
@@ -1493,6 +1535,90 @@ mod tests {
         assert!(str_eq(GRANTABLE_ACTIONS[0], "admin.status"));
     }
 
+    fn expanded(p: &str) -> Result<Vec<(&'static str, String)>, crate::AuthzBasicError> {
+        expand(&maknae_config::ActionPattern::parse(p).unwrap())
+    }
+
+    #[test]
+    fn a_family_wildcard_expands_to_its_members() {
+        let terms = |p: &str| -> Vec<&'static str> {
+            let got = expanded(p).unwrap();
+            assert!(got.iter().all(|(_, s)| s == p), "{p}: {got:?}");
+            got.into_iter().map(|(t, _)| t).collect()
+        };
+        assert_eq!(
+            terms("fs.*"),
+            ["fs.read", "fs.write", "fs.delete", "fs.mkdir"]
+        );
+        assert_eq!(
+            terms("admin.*"),
+            [
+                "admin.status",
+                "admin.config.show",
+                "admin.subject.list",
+                "admin.baseline.show",
+                "admin.baseline.accept",
+                "admin.contain",
+                "admin.release"
+            ]
+        );
+        assert_eq!(terms("session.*"), ["session.prompt"]);
+        assert!(terms("terminal.*").is_empty());
+        assert!(terms("mcp.*").is_empty());
+        assert_eq!(terms("fs.write"), ["fs.write"]);
+        assert_eq!(terms("admin.status"), ["admin.status"]);
+    }
+
+    #[test]
+    fn kernel_and_liveness_are_never_patterns() {
+        for p in ["kernel.*", "liveness.*", "kernel.contain", "liveness.ping"] {
+            assert_eq!(
+                expanded(p),
+                Err(crate::AuthzBasicError::UngrantableAction(p.into())),
+                "{p}"
+            );
+        }
+        for p in ["nope.*", "fs.exec", "admin.whoami", "admin.policy.reload"] {
+            assert_eq!(
+                expanded(p),
+                Err(crate::AuthzBasicError::UnknownAction(p.into())),
+                "{p}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_vocabulary_is_the_grantable_terms_and_the_four_fs_terms() {
+        assert_eq!(ACTION_VOCABULARY[..8], GRANTABLE_ACTIONS);
+        assert_eq!(
+            ACTION_VOCABULARY[8..],
+            ["fs.read", "fs.write", "fs.delete", "fs.mkdir"]
+        );
+    }
+
+    #[test]
+    fn the_fs_terms_of_the_vocabulary_are_the_fs_arm_guard() {
+        let lp = lp_with(Some(&[("admin", &["alex"])]), &[("alex", 1001)]);
+        let unbuilt = |t: &str| Verdict::NotApplicable {
+            note: Some(format!("term enumerated, not implemented: {t}")),
+        };
+        let fs_terms: Vec<&str> = crate::ACTION_TERMS
+            .iter()
+            .copied()
+            .filter(|t| class_of(t) == Some(Class::Fs))
+            .collect();
+        assert_eq!(fs_terms.len(), 10);
+        for t in fs_terms {
+            let mut req = request(Some(1001), t, Some("/home/operator/x"));
+            req.context.0.insert(
+                maknae_security::CONTEXT_FS_OPERATION,
+                AttrValue::Str("mkdir".into()),
+            );
+            let keyed = decide_loaded(&lp, &principal(), &req) != unbuilt(t);
+            assert_eq!(keyed, ACTION_VOCABULARY.contains(&t), "{t}");
+        }
+    }
+
     /// The arm's guard is a SECOND lock, and this is what proves it locks.
     ///
     /// `validate_grants` already refuses a term outside `GRANTABLE_ACTIONS` at
@@ -1506,7 +1632,7 @@ mod tests {
         let forged = ActionGrants::from_validated(std::collections::BTreeMap::from([(
             "admin".to_string(),
             (
-                vec![ActionTerm::validated("admin.policy.reload".into())],
+                vec![("admin.policy.reload", "admin.policy.reload".into())],
                 Vec::new(),
             ),
         )]));
@@ -1788,6 +1914,7 @@ mod tests {
             roles: Roles::File(resolve(&Some(bindings), &lookup).unwrap()),
             action_grants: crate::validate_grants(&policy.action_grants).unwrap(),
             destinations,
+            subjects: SubjectGrants::default(),
             policy,
         }
     }
@@ -1968,8 +2095,8 @@ mod tests {
         let grants = ActionGrants::from_validated(std::collections::BTreeMap::from([(
             "admin".to_string(),
             (
-                vec![ActionTerm::validated("admin.status".into())],
-                vec![ActionTerm::validated("admin.config.show".into())],
+                vec![("admin.status", "admin.status".into())],
+                vec![("admin.config.show", "admin.config.show".into())],
             ),
         )]));
         assert_eq!(

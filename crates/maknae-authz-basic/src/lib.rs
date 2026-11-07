@@ -72,6 +72,12 @@ pub enum AuthzBasicError {
     /// (#172: `user` may hold `session.prompt` only; the admin disclosure
     /// terms are admin-only, ADR-0010 decision 4 as superseded 2026-09-08).
     TermNotGrantableForRole { role: String, term: String },
+    /// A `subjects:` list names no family or term in the action vocabulary.
+    UnknownAction(String),
+    /// A `subjects:` list names a `kernel` or `liveness` family or term.
+    UngrantableAction(String),
+    /// Two `subjects:` names resolve to one account.
+    DuplicateSubjectUid { uid: u32, names: (String, String) },
     /// The snapshot compiler refused the policy against the persisted identity
     /// layer or the vocabulary.
     Compile(snapshot::CompileError),
@@ -98,6 +104,17 @@ impl std::fmt::Display for AuthzBasicError {
                 f,
                 "authz roles: `{term}` is not grantable to role `{role}` (admin: {}; user: session.prompt)",
                 decide::GRANTABLE_ACTIONS.join(", ")
+            ),
+            AuthzBasicError::UnknownAction(a) => {
+                write!(f, "authz subjects: `{a}` names no action family or term")
+            }
+            AuthzBasicError::UngrantableAction(a) => write!(
+                f,
+                "authz subjects: `{a}` is a kernel or liveness action and no list may name it"
+            ),
+            AuthzBasicError::DuplicateSubjectUid { uid, names: (a, b) } => write!(
+                f,
+                "authz subjects: `{a}` and `{b}` resolve to the same uid {uid}"
             ),
             AuthzBasicError::Compile(e) => write!(f, "authz {e}"),
         }
@@ -377,6 +394,7 @@ pub struct PolicySource {
     lookups: Lookups,
     lookup: NssLookup,
     resolved: binding::Resolved,
+    subjects: decide::SubjectGrants,
     principal: maknae_config::Principal,
     paths: PolicyPaths,
     policy_source: String,
@@ -398,7 +416,7 @@ impl PolicySource {
             .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
         let bindings = maknae_config::load_bindings(&paths.bindings)
             .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
-        let lookups = resolve_uid_map_with(&bindings, classify(lookup_uid))?;
+        let lookups = resolve_uid_map_with(&policy, &bindings, classify(lookup_uid))?;
         Self::from_lookups(policy, bindings, lookups, lookup_uid, principal, paths)
     }
 
@@ -412,7 +430,7 @@ impl PolicySource {
             .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
         let bindings = maknae_config::load_bindings_with_requirement(&paths.bindings, req)
             .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
-        let lookups = resolve_uid_map_with(&bindings, classify(lookup_uid))?;
+        let lookups = resolve_uid_map_with(&policy, &bindings, classify(lookup_uid))?;
         Self::from_lookups(policy, bindings, lookups, lookup_uid, principal, paths)
     }
 
@@ -441,12 +459,14 @@ impl PolicySource {
             .map_err(|e| AuthzBasicError::Bindings(e.to_string()))?;
         validate_grants(&policy.action_grants)?;
         validate_destinations(&policy.destinations)?;
+        let subjects = validate_subjects(&policy, &lookups)?;
         Ok(Self {
             policy,
             bindings,
             lookups,
             lookup,
             resolved,
+            subjects,
             principal,
             paths,
             policy_source,
@@ -459,7 +479,7 @@ impl PolicySource {
         &self,
         bindings: maknae_config::Bindings,
     ) -> Result<Self, AuthzBasicError> {
-        let lookups = resolve_uid_map_with(&bindings, classify(self.lookup))?;
+        let lookups = resolve_uid_map_with(&self.policy, &bindings, classify(self.lookup))?;
         self.with_bindings_resolved(bindings, lookups)
     }
 
@@ -476,7 +496,7 @@ impl PolicySource {
         bindings: maknae_config::Bindings,
         lookup: impl Fn(&str) -> Lookup,
     ) -> Result<Self, AuthzBasicError> {
-        let lookups = resolve_uid_map_with(&bindings, |n| {
+        let lookups = resolve_uid_map_with(&self.policy, &bindings, |n| {
             self.lookups.get(n).map_or_else(|| lookup(n), |&r| r.into())
         })?;
         self.with_bindings_resolved(bindings, lookups)
@@ -521,6 +541,10 @@ impl PolicySource {
 
     pub(crate) fn policy_source(&self) -> &str {
         &self.policy_source
+    }
+
+    pub(crate) fn subject_grants(&self) -> &decide::SubjectGrants {
+        &self.subjects
     }
 
     #[cfg(test)]
@@ -640,29 +664,93 @@ fn validate_grants(
             Some(r @ (role::Role::Admin | role::Role::User)) => r,
             Some(_) => return Err(AuthzBasicError::RoleNotSupportedYet(key.clone())),
         };
-        let check = |terms: &Vec<maknae_config::ActionPattern>| -> Result<Vec<decide::ActionTerm>, AuthzBasicError> {
-            terms
-                .iter()
-                .map(|p| {
-                    let maknae_config::ActionPattern::Exact(t) = p else {
-                        return Err(AuthzBasicError::UnknownActionTerm(p.source()));
-                    };
-                    if !decide::GRANTABLE_ACTIONS.contains(&t.as_str()) {
-                        return Err(AuthzBasicError::UnknownActionTerm(t.clone()));
-                    }
-                    if role == role::Role::User && t != "session.prompt" {
-                        return Err(AuthzBasicError::TermNotGrantableForRole {
-                            role: key.clone(),
-                            term: t.clone(),
-                        });
-                    }
-                    Ok(decide::ActionTerm::validated(t.clone()))
-                })
-                .collect()
+        let check = |entries: &Vec<maknae_config::ActionPattern>| -> Result<Vec<decide::Grant>, AuthzBasicError> {
+            let mut out = Vec::new();
+            for p in entries {
+                out.extend(role_terms(key, role, p)?.into_iter().map(|t| (t, p.source())));
+            }
+            Ok(out)
         };
         out.insert(key.clone(), (check(&grants.allow)?, check(&grants.deny)?));
     }
     Ok(decide::ActionGrants::from_validated(out))
+}
+
+/// The terms one written `roles:` entry grants `role`. A family keeps only the terms
+/// the role may hold, and one that keeps none is refused like an unknown term.
+pub(crate) fn role_terms(
+    key: &str,
+    role: role::Role,
+    p: &maknae_config::ActionPattern,
+) -> Result<Vec<&'static str>, AuthzBasicError> {
+    let unknown = || AuthzBasicError::UnknownActionTerm(p.source());
+    let holds = |t: &str| role != role::Role::User || t == "session.prompt";
+    let terms: Vec<&'static str> = decide::expand(p)
+        .map_err(|_| unknown())?
+        .into_iter()
+        .map(|(t, _)| t)
+        .filter(|t| decide::GRANTABLE_ACTIONS.contains(t))
+        .collect();
+    match p {
+        maknae_config::ActionPattern::Exact(t) => match terms.first() {
+            None => Err(unknown()),
+            Some(term) if !holds(term) => Err(AuthzBasicError::TermNotGrantableForRole {
+                role: key.to_string(),
+                term: t.clone(),
+            }),
+            Some(_) => Ok(terms),
+        },
+        maknae_config::ActionPattern::Family(_) => {
+            let held: Vec<&'static str> = terms.into_iter().filter(|t| holds(t)).collect();
+            if held.is_empty() {
+                Err(unknown())
+            } else {
+                Ok(held)
+            }
+        }
+    }
+}
+
+/// `subjects:` entries keyed by the uid each name resolves to. Every action list is
+/// validated, whether or not its name resolves.
+fn validate_subjects(
+    policy: &maknae_config::AuthzPolicy,
+    lookups: &Lookups,
+) -> Result<decide::SubjectGrants, AuthzBasicError> {
+    let mut out: std::collections::BTreeMap<u32, decide::SubjectEntry> = Default::default();
+    for (name, entry) in &policy.subjects {
+        let actions = match &entry.actions {
+            None => None,
+            Some(patterns) => {
+                let mut terms = std::collections::BTreeMap::new();
+                for p in patterns {
+                    for (t, source) in decide::expand(p)? {
+                        terms.entry(t).or_insert(source);
+                    }
+                }
+                Some(terms)
+            }
+        };
+        let Some(&Some(uid)) = lookups.get(name) else {
+            continue;
+        };
+        if let Some(first) = out.get(&uid) {
+            return Err(AuthzBasicError::DuplicateSubjectUid {
+                uid,
+                names: (first.name.clone(), name.clone()),
+            });
+        }
+        out.insert(
+            uid,
+            decide::SubjectEntry {
+                name: name.clone(),
+                permissions: entry.permissions.clone(),
+                actions,
+                models: entry.models.clone(),
+            },
+        );
+    }
+    Ok(decide::SubjectGrants(out))
 }
 
 /// What one account lookup said. `Absent` is decided per subject; `Failed`
@@ -705,33 +793,38 @@ pub(crate) fn classify_lookup(r: Result<Option<u32>, nix::errno::Errno>) -> Look
     }
 }
 
-/// One lookup per distinct bound username; a `uid:` entry needs none.
+/// One lookup per distinct bound or `subjects:` username; a `uid:` entry needs none.
 fn resolve_uid_map_with(
+    policy: &maknae_config::AuthzPolicy,
     bindings: &maknae_config::Bindings,
     lookup: impl Fn(&str) -> Lookup,
 ) -> Result<Lookups, AuthzBasicError> {
     let mut map = Lookups::new();
     let mut asked = std::collections::BTreeSet::new();
-    for entries in bindings.roles.iter().flat_map(|r| r.values()) {
-        for e in entries {
-            let maknae_config::BindingEntry::Name(name) = e else {
-                continue;
-            };
-            if !asked.insert(name.as_str()) {
-                continue;
+    let bound = bindings
+        .roles
+        .iter()
+        .flat_map(|r| r.values())
+        .flatten()
+        .filter_map(|e| match e {
+            maknae_config::BindingEntry::Name(name) => Some(name),
+            maknae_config::BindingEntry::Uid(_) => None,
+        });
+    for name in bound.chain(policy.subjects.keys()) {
+        if !asked.insert(name.as_str()) {
+            continue;
+        }
+        match lookup(name) {
+            Lookup::Found(uid) => {
+                map.insert(name.clone(), Some(uid));
             }
-            match lookup(name) {
-                Lookup::Found(uid) => {
-                    map.insert(name.clone(), Some(uid));
-                }
-                Lookup::Absent => {
-                    map.insert(name.clone(), None);
-                }
-                Lookup::Failed(errno) => {
-                    return Err(AuthzBasicError::Bindings(format!(
-                        "looking up '{name}' failed (errno {errno}); nothing was changed"
-                    )))
-                }
+            Lookup::Absent => {
+                map.insert(name.clone(), None);
+            }
+            Lookup::Failed(errno) => {
+                return Err(AuthzBasicError::Bindings(format!(
+                    "looking up '{name}' failed (errno {errno}); nothing was changed"
+                )))
             }
         }
     }
@@ -1403,6 +1496,7 @@ mod tests {
                     .map_err(other)?,
                 destinations: crate::validate_destinations(&src.policy().destinations)
                     .map_err(other)?,
+                subjects: crate::validate_subjects(src.policy(), &src.lookups).map_err(other)?,
             })
         }
 
@@ -1579,7 +1673,7 @@ mod tests {
         policy: maknae_config::AuthzPolicy,
         bindings: maknae_config::Bindings,
     ) -> Result<PolicySource, AuthzBasicError> {
-        let lookups = resolve_uid_map_with(&bindings, classify(lookup_uid))?;
+        let lookups = resolve_uid_map_with(&policy, &bindings, classify(lookup_uid))?;
         PolicySource::from_lookups(policy, bindings, lookups, lookup_uid, principal(), paths())
     }
 
@@ -1903,6 +1997,7 @@ mod tests {
             roles: binding::Roles::File(tests::oracle::resolve(&None, &UidMap::new()).unwrap()),
             action_grants,
             destinations: decide::DestinationGrants::default(),
+            subjects: decide::SubjectGrants::default(),
         };
         let ask = |uid: i64, action: &str| {
             let mut r = liveness_req(Some(uid));
@@ -2071,6 +2166,29 @@ mod tests {
                 auth.decide_reporting_role(&req)
             );
         }
+        let subjects = source_with(
+            &format!("{SHIPPED}subjects:\n  ursula:\n    permissions:\n      allow: [\"Read(~/docs/**)\"]\n      deny: [\"Read(~/docs/secret/**)\"]\n    actions:\n      allow: [\"fs.*\", \"session.prompt\"]\n    models:\n      allow: [\"openai/gpt-5\"]\n"),
+            Some(
+                "schema_version: 1\nbindings:\n  user: [\"ursula\"]\n  adversary: [\"mallory\"]\n",
+            ),
+            &[("ursula", 1001), ("mallory", 666)],
+        );
+        let snap = compiled(&subjects);
+        let oracle = tests::oracle::assemble(&subjects).unwrap();
+        assert_eq!(oracle.subjects, snap.loaded().subjects);
+        assert_eq!(oracle.subjects.get(1001).unwrap().name, "ursula");
+        let auth = BasicAuthorizer::from_snapshot(
+            principal(),
+            subjects.paths().clone(),
+            test_digest,
+            snap,
+        );
+        for req in [whoami(501), whoami(1001), ssh_read(501), ssh_read(1001)] {
+            assert_eq!(
+                auth.decide_oracle(&subjects, &req),
+                auth.decide_reporting_role(&req)
+            );
+        }
         let broken = PolicySource {
             lookups: Lookups::new(),
             ..src.clone()
@@ -2078,6 +2196,80 @@ mod tests {
         assert_eq!(
             auth.decide_oracle(&broken, &whoami(1001)),
             (Verdict::Indeterminate, None)
+        );
+    }
+
+    fn shipped_decisions() -> String {
+        let src = source_with(
+            SHIPPED,
+            Some("schema_version: 1\nbindings:\n  admin: [\"alex\"]\n  user: [\"ursula\"]\n  guest: [\"gus\"]\n  adversary: [\"mallory\"]\n"),
+            &[("alex", 1000), ("ursula", 1001), ("gus", 1002), ("mallory", 666)],
+        );
+        let auth =
+            BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, compiled(&src));
+        let mut out = String::new();
+        for term in ACTION_TERMS.iter().chain(KERNEL_TERMS.iter()) {
+            let op = match *term {
+                "fs.read" => Some("read"),
+                "fs.write" => Some("write-existing"),
+                "fs.delete" => Some("delete-entry"),
+                "fs.mkdir" => Some("mkdir"),
+                _ => None,
+            };
+            let targets: &[Option<&str>] = if op.is_some() {
+                &[
+                    Some("/home/operator/notes"),
+                    Some("/home/operator/projects/x"),
+                    Some("/home/operator/.ssh/id"),
+                    Some("/home/operator/.maknae/k"),
+                ]
+            } else {
+                &[None]
+            };
+            for uid in [1000_i64, 1001, 1002, 666, 4242] {
+                for path in targets {
+                    let mut r = liveness_req(Some(uid));
+                    r.action = Action((*term).into());
+                    r.subject.0.insert(
+                        maknae_security::SUBJECT_HOME,
+                        AttrValue::Str("/home/operator".into()),
+                    );
+                    r.resource
+                        .0
+                        .insert("destination", AttrValue::Str("provider:openai".into()));
+                    if let Some(p) = path {
+                        r.resource
+                            .0
+                            .insert(RESOURCE_PATH_KEY, AttrValue::Str((*p).into()));
+                    }
+                    r.context.0.insert(
+                        maknae_security::CONTEXT_DAC_LANE,
+                        AttrValue::Str("local".into()),
+                    );
+                    if let Some(o) = op {
+                        r.context.0.insert(
+                            maknae_security::CONTEXT_FS_OPERATION,
+                            AttrValue::Str(o.into()),
+                        );
+                    }
+                    let d = auth.decide_cited(&r);
+                    let rule = d.rule.map(|c| format!("{} in {}", c.key, c.section));
+                    out.push_str(&format!(
+                        "{uid} {term} {path:?} -> {:?} {:?} {rule:?}\n",
+                        d.verdict, d.role
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_shipped_authz_yaml_still_decides_identically() {
+        let got = shipped_decisions();
+        assert!(
+            got == include_str!("testdata/shipped-decisions.txt"),
+            "{got}"
         );
     }
 
@@ -3189,6 +3381,249 @@ mod tests {
         .is_ok());
     }
 
+    #[test]
+    fn role_errors_keep_unknown_action_term() {
+        for (role, entry) in [
+            ("admin", "admin.credential.rotate"),
+            ("admin", "fs.read"),
+            ("admin", "kernel.contain"),
+            ("admin", "fs.*"),
+            ("admin", "kernel.*"),
+            ("admin", "liveness.*"),
+            ("admin", "nope.*"),
+            ("admin", "terminal.*"),
+            ("user", "admin.*"),
+        ] {
+            for list in ["allow", "deny"] {
+                let got = finish(parse_with_roles(&format!(
+                    "roles:\n  {role}:\n    {list}: [\"{entry}\"]\n"
+                )));
+                assert_eq!(
+                    got.err(),
+                    Some(AuthzBasicError::UnknownActionTerm(entry.into())),
+                    "{role} {list} {entry}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn role_grants_take_family_wildcards_under_todays_role_rule() {
+        let src = finish(parse_with_roles(
+            "roles:\n  admin:\n    allow: [\"admin.*\", \"session.*\"]\n    deny: [\"admin.contain\"]\n  user:\n    allow: [\"session.*\"]\n",
+        ))
+        .unwrap();
+        let grants = validate_grants(&src.policy().action_grants).unwrap();
+        let (allow, deny) = &grants.0["admin"];
+        let mut admin: Vec<(&str, &str)> = allow.iter().map(|(t, s)| (*t, s.as_str())).collect();
+        admin.sort_unstable();
+        assert_eq!(
+            admin,
+            [
+                ("admin.baseline.accept", "admin.*"),
+                ("admin.baseline.show", "admin.*"),
+                ("admin.config.show", "admin.*"),
+                ("admin.contain", "admin.*"),
+                ("admin.release", "admin.*"),
+                ("admin.status", "admin.*"),
+                ("admin.subject.list", "admin.*"),
+                ("session.prompt", "session.*"),
+            ]
+        );
+        assert_eq!(deny, &[("admin.contain", "admin.contain".to_string())]);
+        assert_eq!(
+            grants.0["user"],
+            (vec![("session.prompt", "session.*".to_string())], vec![])
+        );
+        assert_eq!(
+            grants.evaluate3_action("admin", "admin.status"),
+            maknae_config::Match3::AllowMatch {
+                source: "admin.*".into()
+            }
+        );
+        assert_eq!(
+            grants.evaluate3_action("admin", "admin.contain"),
+            maknae_config::Match3::DenyMatch {
+                source: "admin.contain".into()
+            }
+        );
+        assert_eq!(
+            grants.evaluate3_action("admin", "admin.whoami"),
+            maknae_config::Match3::NoMatch
+        );
+    }
+
+    fn with_subjects(subjects: &str) -> maknae_config::AuthzPolicy {
+        parse(&format!("{EMPTY}subjects:\n{subjects}"))
+    }
+
+    fn finish_looking_up(
+        policy: maknae_config::AuthzPolicy,
+        lookup: impl Fn(&str) -> Lookup,
+    ) -> Result<PolicySource, AuthzBasicError> {
+        let bindings = bound(ADMIN_ROOT);
+        let lookups = resolve_uid_map_with(&policy, &bindings, lookup)?;
+        PolicySource::from_lookups(policy, bindings, lookups, lookup_uid, principal(), paths())
+    }
+
+    const ZED: &str = "  zed:\n    permissions:\n      allow: [\"Read(~/docs/**)\"]\n      deny: [\"Read(~/docs/secret/**)\"]\n    actions:\n      allow: [\"fs.*\", \"session.prompt\"]\n    models:\n      allow: [\"openai/gpt-5\"]\n";
+
+    #[test]
+    fn a_subject_name_resolves_to_its_uid() {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let src = finish_looking_up(with_subjects(ZED), |n| {
+            asked.borrow_mut().push(n.to_string());
+            match n {
+                "zed" => Lookup::Found(7001),
+                _ => Lookup::Found(0),
+            }
+        })
+        .unwrap();
+        assert_eq!(*asked.borrow(), ["root", "zed"]);
+        let grants = src.subject_grants();
+        assert_eq!(grants.0.keys().collect::<Vec<_>>(), [&7001]);
+        assert!(grants.get(0).is_none());
+        let zed = grants.get(7001).unwrap();
+        assert_eq!(zed.name, "zed");
+        assert_eq!(
+            zed.permissions.as_ref().unwrap().allow_sources(),
+            ["Read(~/docs/**)"]
+        );
+        assert_eq!(
+            zed.permissions.as_ref().unwrap().deny_sources(),
+            ["Read(~/docs/secret/**)"]
+        );
+        assert_eq!(
+            zed.actions.as_ref().unwrap(),
+            &[
+                ("fs.delete", "fs.*".to_string()),
+                ("fs.mkdir", "fs.*".to_string()),
+                ("fs.read", "fs.*".to_string()),
+                ("fs.write", "fs.*".to_string()),
+                ("session.prompt", "session.prompt".to_string()),
+            ]
+            .into_iter()
+            .collect()
+        );
+        assert_eq!(
+            zed.models.as_ref().unwrap(),
+            &[maknae_config::ModelRef {
+                provider: "openai".into(),
+                model: "gpt-5".into()
+            }]
+        );
+        let bare = finish_looking_up(with_subjects("  zed: {}\n"), |n| match n {
+            "zed" => Lookup::Found(7001),
+            _ => Lookup::Found(0),
+        })
+        .unwrap();
+        let zed = bare.subject_grants().get(7001).unwrap();
+        assert_eq!(
+            (&zed.permissions, &zed.actions, &zed.models),
+            (&None, &None, &None)
+        );
+    }
+
+    #[test]
+    fn an_absent_subject_name_is_inert() {
+        let found = |n: &str| match n {
+            "zed" => Lookup::Absent,
+            _ => Lookup::Found(0),
+        };
+        let src = finish_looking_up(with_subjects(ZED), found).unwrap();
+        assert!(src.subject_grants().0.is_empty());
+        assert!(src.answered("zed"));
+        let plain = finish_looking_up(parse(EMPTY), found).unwrap();
+        let (with, without) = (
+            BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, compiled(&src)),
+            BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, compiled(&plain)),
+        );
+        for req in [whoami(0), whoami(7001), ssh_read(0), ssh_read(7001)] {
+            assert_eq!(
+                with.decide_reporting_role(&req),
+                without.decide_reporting_role(&req)
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_subject_lookup_refuses_the_load() {
+        let got = finish_looking_up(with_subjects(ZED), |n| match n {
+            "zed" => Lookup::Failed(5),
+            _ => Lookup::Found(0),
+        });
+        assert_eq!(
+            got.err(),
+            Some(AuthzBasicError::Bindings(
+                "looking up 'zed' failed (errno 5); nothing was changed".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn two_names_for_one_uid_refuse_the_load() {
+        let got = finish_looking_up(with_subjects("  amy: {}\n  zed: {}\n"), |n| match n {
+            "root" => Lookup::Found(0),
+            _ => Lookup::Found(7001),
+        });
+        assert_eq!(
+            got.err(),
+            Some(AuthzBasicError::DuplicateSubjectUid {
+                uid: 7001,
+                names: ("amy".into(), "zed".into())
+            })
+        );
+        assert!(
+            finish_looking_up(with_subjects("  amy: {}\n  zed: {}\n"), |n| match n {
+                "amy" => Lookup::Found(7001),
+                "zed" => Lookup::Found(7002),
+                _ => Lookup::Found(0),
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_subject_action_list_is_validated_whether_or_not_its_name_resolves() {
+        for (entry, want) in [
+            (
+                "kernel.*",
+                AuthzBasicError::UngrantableAction("kernel.*".into()),
+            ),
+            ("fs.exec", AuthzBasicError::UnknownAction("fs.exec".into())),
+        ] {
+            for lookup in [Lookup::Found(7001), Lookup::Absent] {
+                let got = finish_looking_up(
+                    with_subjects(&format!(
+                        "  zed:\n    actions:\n      allow: [\"{entry}\"]\n"
+                    )),
+                    |n| if n == "zed" { lookup } else { Lookup::Found(0) },
+                );
+                assert_eq!(got.err(), Some(want.clone()), "{entry} {lookup:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn subject_errors_name_the_offending_token() {
+        assert_eq!(
+            AuthzBasicError::DuplicateSubjectUid {
+                uid: 7001,
+                names: ("amy".into(), "zed".into())
+            }
+            .to_string(),
+            "authz subjects: `amy` and `zed` resolve to the same uid 7001"
+        );
+        assert_eq!(
+            AuthzBasicError::UnknownAction("fs.exec".into()).to_string(),
+            "authz subjects: `fs.exec` names no action family or term"
+        );
+        assert_eq!(
+            AuthzBasicError::UngrantableAction("kernel.*".into()).to_string(),
+            "authz subjects: `kernel.*` is a kernel or liveness action and no list may name it"
+        );
+    }
+
     /// Validation gates the DENY list too: a typo'd deny would read as a
     /// denial in force while denying nothing.
     #[test]
@@ -3427,7 +3862,8 @@ mod tests {
         )
         .unwrap();
         let calls = std::cell::RefCell::new(Vec::new());
-        let map = resolve_uid_map_with(&b, |n| {
+        let none = parse(EMPTY);
+        let map = resolve_uid_map_with(&none, &b, |n| {
             calls.borrow_mut().push(n.to_string());
             match n {
                 "alex" => Lookup::Found(1000),
@@ -3451,7 +3887,7 @@ mod tests {
             ["alex", "mallory", "ghost"],
             "each name once; uid entries are never looked up"
         );
-        let e = resolve_uid_map_with(&b, |n| {
+        let e = resolve_uid_map_with(&none, &b, |n| {
             if n == "mallory" {
                 Lookup::Failed(5)
             } else {
@@ -3466,7 +3902,7 @@ mod tests {
             )
         );
         assert_eq!(
-            resolve_uid_map_with(&maknae_config::Bindings::missing(), |_| {
+            resolve_uid_map_with(&none, &maknae_config::Bindings::missing(), |_| {
                 Lookup::Failed(5)
             }),
             Ok(Lookups::new())
@@ -4345,6 +4781,8 @@ mod tests {
         const EXPLICIT: &str = "schema_version: 1\nbindings: { admin: [alex], user: [ursula], guest: [gus], adversary: [mallory] }\n";
         const GRANTS: &str = "roles: { admin: { allow: [admin.status, admin.subject.list, session.prompt], deny: [admin.config.show] }, user: { allow: [session.prompt] } }\ndestinations: { user: { allow: [\"provider:openai\"] }, admin: { allow: [\"provider:anthropic\"] } }\n";
 
+        const SUBJECTS: &str = "subjects:\n  ursula:\n    permissions:\n      allow: [\"Read(~/docs/**)\"]\n      deny: [\"Read(~/docs/secret/**)\"]\n    actions:\n      allow: [\"fs.*\", \"session.prompt\"]\n    models:\n      allow: [\"openai/gpt-5\"]\n";
+
         fn explicit_with(admin: &str, user: &str, guest: &str, adversary: &str) -> String {
             format!("schema_version: 1\nbindings: {{ admin: [{admin}], user: [{user}], guest: [{guest}], adversary: [{adversary}] }}\n")
         }
@@ -4373,6 +4811,10 @@ mod tests {
                         Some(EXPLICIT),
                         uids,
                     ),
+                ),
+                same(
+                    "explicit+subjects",
+                    source_with(&format!("{SHIPPED}{SUBJECTS}"), Some(EXPLICIT), uids),
                 ),
                 same(
                     "explicit-no-match",
@@ -4605,12 +5047,21 @@ mod tests {
             let mut roles_seen = std::collections::BTreeSet::new();
             let mut arms: std::collections::BTreeMap<&'static str, Arms> = Default::default();
             let mut grant_arms = (false, false, false);
+            let mut subject_entries = 0;
             for (variant, src, oracle_src) in policies() {
+                let snap = compiled(&src);
+                let subjects = &snap.loaded().subjects;
+                assert_eq!(
+                    &super::oracle::assemble(&oracle_src).unwrap().subjects,
+                    subjects,
+                    "{variant}"
+                );
+                subject_entries += subjects.0.len();
                 let auth = BasicAuthorizer::from_snapshot(
                     principal(),
                     src.paths().clone(),
                     test_digest,
-                    compiled(&src),
+                    snap,
                 );
                 let mut check = |req: maknae_security::Request, cell: &dyn Fn() -> String| {
                     cells += 1;
@@ -4712,7 +5163,8 @@ mod tests {
             );
             let fs_cells = 4 * 7 * 22 * 5 + 7 * 22 * 5;
             let other_cells = 55 + 4;
-            assert_eq!(cells, 11 * 9 * (fs_cells + other_cells));
+            assert_eq!(cells, 12 * 9 * (fs_cells + other_cells));
+            assert_eq!(subject_entries, 1);
             assert_eq!(
                 roles_seen,
                 [
@@ -4757,6 +5209,7 @@ mod tests {
                     None,
                     None,
                     Some(0),
+                    Some(4),
                     Some(4),
                     Some(4),
                     Some(1),

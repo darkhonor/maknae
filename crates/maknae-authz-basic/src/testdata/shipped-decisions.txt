@@ -1,0 +1,360 @@
+1000 liveness.ping None -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") None
+1001 liveness.ping None -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") None
+1002 liveness.ping None -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("guest") None
+666 liveness.ping None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 liveness.ping None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 admin.whoami None -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") None
+1001 admin.whoami None -> NotApplicable { note: Some("role user: no rule for admin.whoami") } Some("user") None
+1002 admin.whoami None -> NotApplicable { note: Some("role guest: no rule for admin.whoami") } Some("guest") None
+666 admin.whoami None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 admin.whoami None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 admin.status None -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:roles.admin:allow:0 in /etc/maknae/authz.yaml#roles.admin")
+1001 admin.status None -> NotApplicable { note: Some("role user: no rule for admin.status") } Some("user") None
+1002 admin.status None -> NotApplicable { note: Some("role guest: no rule for admin.status") } Some("guest") None
+666 admin.status None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 admin.status None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 admin.config.show None -> NotApplicable { note: Some("role admin: no rule for admin.config.show") } Some("admin") None
+1001 admin.config.show None -> NotApplicable { note: Some("role user: no rule for admin.config.show") } Some("user") None
+1002 admin.config.show None -> NotApplicable { note: Some("role guest: no rule for admin.config.show") } Some("guest") None
+666 admin.config.show None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 admin.config.show None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 admin.audit.tail None -> NotApplicable { note: Some("term enumerated, not implemented: admin.audit.tail") } Some("admin") None
+1001 admin.audit.tail None -> NotApplicable { note: Some("role user: no rule for admin.audit.tail") } Some("user") None
+1002 admin.audit.tail None -> NotApplicable { note: Some("role guest: no rule for admin.audit.tail") } Some("guest") None
+666 admin.audit.tail None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 admin.audit.tail None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 admin.policy.reload None -> NotApplicable { note: Some("term enumerated, not implemented: admin.policy.reload") } Some("admin") None
+1001 admin.policy.reload None -> NotApplicable { note: Some("role user: no rule for admin.policy.reload") } Some("user") None
+1002 admin.policy.reload None -> NotApplicable { note: Some("role guest: no rule for admin.policy.reload") } Some("guest") None
+666 admin.policy.reload None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 admin.policy.reload None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 admin.subject.list None -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:roles.admin:allow:1 in /etc/maknae/authz.yaml#roles.admin")
+1001 admin.subject.list None -> NotApplicable { note: Some("role user: no rule for admin.subject.list") } Some("user") None
+1002 admin.subject.list None -> NotApplicable { note: Some("role guest: no rule for admin.subject.list") } Some("guest") None
+666 admin.subject.list None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 admin.subject.list None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 admin.subject.bind None -> NotApplicable { note: Some("term enumerated, not implemented: admin.subject.bind") } Some("admin") None
+1001 admin.subject.bind None -> NotApplicable { note: Some("role user: no rule for admin.subject.bind") } Some("user") None
+1002 admin.subject.bind None -> NotApplicable { note: Some("role guest: no rule for admin.subject.bind") } Some("guest") None
+666 admin.subject.bind None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 admin.subject.bind None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 admin.subject.unbind None -> NotApplicable { note: Some("term enumerated, not implemented: admin.subject.unbind") } Some("admin") None
+1001 admin.subject.unbind None -> NotApplicable { note: Some("role user: no rule for admin.subject.unbind") } Some("user") None
+1002 admin.subject.unbind None -> NotApplicable { note: Some("role guest: no rule for admin.subject.unbind") } Some("guest") None
+666 admin.subject.unbind None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 admin.subject.unbind None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 admin.contain None -> NotApplicable { note: Some("role admin: no rule for admin.contain") } Some("admin") None
+1001 admin.contain None -> NotApplicable { note: Some("role user: no rule for admin.contain") } Some("user") None
+1002 admin.contain None -> NotApplicable { note: Some("role guest: no rule for admin.contain") } Some("guest") None
+666 admin.contain None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 admin.contain None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 admin.release None -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:roles.admin:allow:4 in /etc/maknae/authz.yaml#roles.admin")
+1001 admin.release None -> NotApplicable { note: Some("role user: no rule for admin.release") } Some("user") None
+1002 admin.release None -> NotApplicable { note: Some("role guest: no rule for admin.release") } Some("guest") None
+666 admin.release None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 admin.release None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 admin.credential.rotate None -> NotApplicable { note: Some("term enumerated, not implemented: admin.credential.rotate") } Some("admin") None
+1001 admin.credential.rotate None -> NotApplicable { note: Some("role user: no rule for admin.credential.rotate") } Some("user") None
+1002 admin.credential.rotate None -> NotApplicable { note: Some("role guest: no rule for admin.credential.rotate") } Some("guest") None
+666 admin.credential.rotate None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 admin.credential.rotate None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 admin.provider.list None -> NotApplicable { note: Some("term enumerated, not implemented: admin.provider.list") } Some("admin") None
+1001 admin.provider.list None -> NotApplicable { note: Some("role user: no rule for admin.provider.list") } Some("user") None
+1002 admin.provider.list None -> NotApplicable { note: Some("role guest: no rule for admin.provider.list") } Some("guest") None
+666 admin.provider.list None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 admin.provider.list None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 admin.provider.set None -> NotApplicable { note: Some("term enumerated, not implemented: admin.provider.set") } Some("admin") None
+1001 admin.provider.set None -> NotApplicable { note: Some("role user: no rule for admin.provider.set") } Some("user") None
+1002 admin.provider.set None -> NotApplicable { note: Some("role guest: no rule for admin.provider.set") } Some("guest") None
+666 admin.provider.set None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 admin.provider.set None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 admin.provider.disable None -> NotApplicable { note: Some("term enumerated, not implemented: admin.provider.disable") } Some("admin") None
+1001 admin.provider.disable None -> NotApplicable { note: Some("role user: no rule for admin.provider.disable") } Some("user") None
+1002 admin.provider.disable None -> NotApplicable { note: Some("role guest: no rule for admin.provider.disable") } Some("guest") None
+666 admin.provider.disable None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 admin.provider.disable None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 admin.session.list None -> NotApplicable { note: Some("term enumerated, not implemented: admin.session.list") } Some("admin") None
+1001 admin.session.list None -> NotApplicable { note: Some("role user: no rule for admin.session.list") } Some("user") None
+1002 admin.session.list None -> NotApplicable { note: Some("role guest: no rule for admin.session.list") } Some("guest") None
+666 admin.session.list None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 admin.session.list None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 admin.session.terminate None -> NotApplicable { note: Some("term enumerated, not implemented: admin.session.terminate") } Some("admin") None
+1001 admin.session.terminate None -> NotApplicable { note: Some("role user: no rule for admin.session.terminate") } Some("user") None
+1002 admin.session.terminate None -> NotApplicable { note: Some("role guest: no rule for admin.session.terminate") } Some("guest") None
+666 admin.session.terminate None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 admin.session.terminate None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 admin.baseline.show None -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:roles.admin:allow:2 in /etc/maknae/authz.yaml#roles.admin")
+1001 admin.baseline.show None -> NotApplicable { note: Some("role user: no rule for admin.baseline.show") } Some("user") None
+1002 admin.baseline.show None -> NotApplicable { note: Some("role guest: no rule for admin.baseline.show") } Some("guest") None
+666 admin.baseline.show None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 admin.baseline.show None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 admin.baseline.accept None -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:roles.admin:allow:3 in /etc/maknae/authz.yaml#roles.admin")
+1001 admin.baseline.accept None -> NotApplicable { note: Some("role user: no rule for admin.baseline.accept") } Some("user") None
+1002 admin.baseline.accept None -> NotApplicable { note: Some("role guest: no rule for admin.baseline.accept") } Some("guest") None
+666 admin.baseline.accept None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 admin.baseline.accept None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 session.new None -> NotApplicable { note: Some("term enumerated, not implemented: session.new") } Some("admin") None
+1001 session.new None -> NotApplicable { note: Some("role user: no rule for session.new") } Some("user") None
+1002 session.new None -> NotApplicable { note: Some("role guest: no rule for session.new") } Some("guest") None
+666 session.new None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 session.new None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 session.resume None -> NotApplicable { note: Some("term enumerated, not implemented: session.resume") } Some("admin") None
+1001 session.resume None -> NotApplicable { note: Some("role user: no rule for session.resume") } Some("user") None
+1002 session.resume None -> NotApplicable { note: Some("role guest: no rule for session.resume") } Some("guest") None
+666 session.resume None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 session.resume None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 session.close None -> NotApplicable { note: Some("term enumerated, not implemented: session.close") } Some("admin") None
+1001 session.close None -> NotApplicable { note: Some("role user: no rule for session.close") } Some("user") None
+1002 session.close None -> NotApplicable { note: Some("role guest: no rule for session.close") } Some("guest") None
+666 session.close None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 session.close None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 session.delete None -> NotApplicable { note: Some("term enumerated, not implemented: session.delete") } Some("admin") None
+1001 session.delete None -> NotApplicable { note: Some("role user: no rule for session.delete") } Some("user") None
+1002 session.delete None -> NotApplicable { note: Some("role guest: no rule for session.delete") } Some("guest") None
+666 session.delete None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 session.delete None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 session.list None -> NotApplicable { note: Some("term enumerated, not implemented: session.list") } Some("admin") None
+1001 session.list None -> NotApplicable { note: Some("role user: no rule for session.list") } Some("user") None
+1002 session.list None -> NotApplicable { note: Some("role guest: no rule for session.list") } Some("guest") None
+666 session.list None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 session.list None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 session.fork None -> NotApplicable { note: Some("term enumerated, not implemented: session.fork") } Some("admin") None
+1001 session.fork None -> NotApplicable { note: Some("role user: no rule for session.fork") } Some("user") None
+1002 session.fork None -> NotApplicable { note: Some("role guest: no rule for session.fork") } Some("guest") None
+666 session.fork None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 session.fork None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 session.prompt None -> NotApplicable { note: Some("role admin: no rule for session.prompt") } Some("admin") None
+1001 session.prompt None -> NotApplicable { note: Some("role user: no rule for session.prompt") } Some("user") None
+1002 session.prompt None -> NotApplicable { note: Some("role guest: no rule for session.prompt") } Some("guest") None
+666 session.prompt None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 session.prompt None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 session.cancel None -> NotApplicable { note: Some("term enumerated, not implemented: session.cancel") } Some("admin") None
+1001 session.cancel None -> NotApplicable { note: Some("role user: no rule for session.cancel") } Some("user") None
+1002 session.cancel None -> NotApplicable { note: Some("role guest: no rule for session.cancel") } Some("guest") None
+666 session.cancel None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 session.cancel None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 session.set_config_option None -> NotApplicable { note: Some("term enumerated, not implemented: session.set_config_option") } Some("admin") None
+1001 session.set_config_option None -> NotApplicable { note: Some("role user: no rule for session.set_config_option") } Some("user") None
+1002 session.set_config_option None -> NotApplicable { note: Some("role guest: no rule for session.set_config_option") } Some("guest") None
+666 session.set_config_option None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 session.set_config_option None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 session.set_mode None -> NotApplicable { note: Some("term enumerated, not implemented: session.set_mode") } Some("admin") None
+1001 session.set_mode None -> NotApplicable { note: Some("role user: no rule for session.set_mode") } Some("user") None
+1002 session.set_mode None -> NotApplicable { note: Some("role guest: no rule for session.set_mode") } Some("guest") None
+666 session.set_mode None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 session.set_mode None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 session.load None -> NotApplicable { note: Some("term enumerated, not implemented: session.load") } Some("admin") None
+1001 session.load None -> NotApplicable { note: Some("role user: no rule for session.load") } Some("user") None
+1002 session.load None -> NotApplicable { note: Some("role guest: no rule for session.load") } Some("guest") None
+666 session.load None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 session.load None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 session.update None -> NotApplicable { note: Some("term enumerated, not implemented: session.update") } Some("admin") None
+1001 session.update None -> NotApplicable { note: Some("role user: no rule for session.update") } Some("user") None
+1002 session.update None -> NotApplicable { note: Some("role guest: no rule for session.update") } Some("guest") None
+666 session.update None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 session.update None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 session.request_permission None -> NotApplicable { note: Some("term enumerated, not implemented: session.request_permission") } Some("admin") None
+1001 session.request_permission None -> NotApplicable { note: Some("role user: no rule for session.request_permission") } Some("user") None
+1002 session.request_permission None -> NotApplicable { note: Some("role guest: no rule for session.request_permission") } Some("guest") None
+666 session.request_permission None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 session.request_permission None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 session.elicit.create None -> NotApplicable { note: Some("term enumerated, not implemented: session.elicit.create") } Some("admin") None
+1001 session.elicit.create None -> NotApplicable { note: Some("role user: no rule for session.elicit.create") } Some("user") None
+1002 session.elicit.create None -> NotApplicable { note: Some("role guest: no rule for session.elicit.create") } Some("guest") None
+666 session.elicit.create None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 session.elicit.create None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 session.elicit.complete None -> NotApplicable { note: Some("term enumerated, not implemented: session.elicit.complete") } Some("admin") None
+1001 session.elicit.complete None -> NotApplicable { note: Some("role user: no rule for session.elicit.complete") } Some("user") None
+1002 session.elicit.complete None -> NotApplicable { note: Some("role guest: no rule for session.elicit.complete") } Some("guest") None
+666 session.elicit.complete None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 session.elicit.complete None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 session.compact None -> NotApplicable { note: Some("term enumerated, not implemented: session.compact") } Some("admin") None
+1001 session.compact None -> NotApplicable { note: Some("role user: no rule for session.compact") } Some("user") None
+1002 session.compact None -> NotApplicable { note: Some("role guest: no rule for session.compact") } Some("guest") None
+666 session.compact None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 session.compact None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 fs.read Some("/home/operator/notes") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:0 in /etc/maknae/authz.yaml#permissions")
+1000 fs.read Some("/home/operator/projects/x") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:0 in /etc/maknae/authz.yaml#permissions")
+1000 fs.read Some("/home/operator/.ssh/id") -> Deny { reason: "denied by policy entry Read(~/.ssh/**)" } Some("admin") Some("rule:permissions:deny:0 in /etc/maknae/authz.yaml#permissions")
+1000 fs.read Some("/home/operator/.maknae/k") -> Deny { reason: "denied by policy entry Read(~/.maknae/**)" } Some("admin") Some("rule:permissions:deny:8 in /etc/maknae/authz.yaml#permissions")
+1001 fs.read Some("/home/operator/notes") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:permissions:allow:0 in /etc/maknae/authz.yaml#permissions")
+1001 fs.read Some("/home/operator/projects/x") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:permissions:allow:0 in /etc/maknae/authz.yaml#permissions")
+1001 fs.read Some("/home/operator/.ssh/id") -> Deny { reason: "denied by policy entry Read(~/.ssh/**)" } Some("user") Some("rule:permissions:deny:0 in /etc/maknae/authz.yaml#permissions")
+1001 fs.read Some("/home/operator/.maknae/k") -> Deny { reason: "denied by policy entry Read(~/.maknae/**)" } Some("user") Some("rule:permissions:deny:8 in /etc/maknae/authz.yaml#permissions")
+1002 fs.read Some("/home/operator/notes") -> NotApplicable { note: Some("role guest: no rule for fs.read") } Some("guest") None
+1002 fs.read Some("/home/operator/projects/x") -> NotApplicable { note: Some("role guest: no rule for fs.read") } Some("guest") None
+1002 fs.read Some("/home/operator/.ssh/id") -> NotApplicable { note: Some("role guest: no rule for fs.read") } Some("guest") None
+1002 fs.read Some("/home/operator/.maknae/k") -> NotApplicable { note: Some("role guest: no rule for fs.read") } Some("guest") None
+666 fs.read Some("/home/operator/notes") -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+666 fs.read Some("/home/operator/projects/x") -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+666 fs.read Some("/home/operator/.ssh/id") -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+666 fs.read Some("/home/operator/.maknae/k") -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 fs.read Some("/home/operator/notes") -> NotApplicable { note: Some("subject resolves to no role") } None None
+4242 fs.read Some("/home/operator/projects/x") -> NotApplicable { note: Some("subject resolves to no role") } None None
+4242 fs.read Some("/home/operator/.ssh/id") -> NotApplicable { note: Some("subject resolves to no role") } None None
+4242 fs.read Some("/home/operator/.maknae/k") -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 fs.write Some("/home/operator/notes") -> NotApplicable { note: Some("role admin: no capability entry for fs.write") } Some("admin") None
+1000 fs.write Some("/home/operator/projects/x") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:1 in /etc/maknae/authz.yaml#permissions")
+1000 fs.write Some("/home/operator/.ssh/id") -> Deny { reason: "denied by policy entry Write(~/.ssh/**)" } Some("admin") Some("rule:permissions:deny:9 in /etc/maknae/authz.yaml#permissions")
+1000 fs.write Some("/home/operator/.maknae/k") -> Deny { reason: "denied by policy entry Write(~/.maknae/**)" } Some("admin") Some("rule:permissions:deny:17 in /etc/maknae/authz.yaml#permissions")
+1001 fs.write Some("/home/operator/notes") -> NotApplicable { note: Some("role user: no capability entry for fs.write") } Some("user") None
+1001 fs.write Some("/home/operator/projects/x") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:permissions:allow:1 in /etc/maknae/authz.yaml#permissions")
+1001 fs.write Some("/home/operator/.ssh/id") -> Deny { reason: "denied by policy entry Write(~/.ssh/**)" } Some("user") Some("rule:permissions:deny:9 in /etc/maknae/authz.yaml#permissions")
+1001 fs.write Some("/home/operator/.maknae/k") -> Deny { reason: "denied by policy entry Write(~/.maknae/**)" } Some("user") Some("rule:permissions:deny:17 in /etc/maknae/authz.yaml#permissions")
+1002 fs.write Some("/home/operator/notes") -> NotApplicable { note: Some("role guest: no rule for fs.write") } Some("guest") None
+1002 fs.write Some("/home/operator/projects/x") -> NotApplicable { note: Some("role guest: no rule for fs.write") } Some("guest") None
+1002 fs.write Some("/home/operator/.ssh/id") -> NotApplicable { note: Some("role guest: no rule for fs.write") } Some("guest") None
+1002 fs.write Some("/home/operator/.maknae/k") -> NotApplicable { note: Some("role guest: no rule for fs.write") } Some("guest") None
+666 fs.write Some("/home/operator/notes") -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+666 fs.write Some("/home/operator/projects/x") -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+666 fs.write Some("/home/operator/.ssh/id") -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+666 fs.write Some("/home/operator/.maknae/k") -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 fs.write Some("/home/operator/notes") -> NotApplicable { note: Some("subject resolves to no role") } None None
+4242 fs.write Some("/home/operator/projects/x") -> NotApplicable { note: Some("subject resolves to no role") } None None
+4242 fs.write Some("/home/operator/.ssh/id") -> NotApplicable { note: Some("subject resolves to no role") } None None
+4242 fs.write Some("/home/operator/.maknae/k") -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 fs.delete Some("/home/operator/notes") -> NotApplicable { note: Some("role admin: no capability entry for fs.delete") } Some("admin") None
+1000 fs.delete Some("/home/operator/projects/x") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:1 in /etc/maknae/authz.yaml#permissions")
+1000 fs.delete Some("/home/operator/.ssh/id") -> Deny { reason: "denied by policy entry Write(~/.ssh/**)" } Some("admin") Some("rule:permissions:deny:9 in /etc/maknae/authz.yaml#permissions")
+1000 fs.delete Some("/home/operator/.maknae/k") -> Deny { reason: "denied by policy entry Write(~/.maknae/**)" } Some("admin") Some("rule:permissions:deny:17 in /etc/maknae/authz.yaml#permissions")
+1001 fs.delete Some("/home/operator/notes") -> NotApplicable { note: Some("role user: no capability entry for fs.delete") } Some("user") None
+1001 fs.delete Some("/home/operator/projects/x") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:permissions:allow:1 in /etc/maknae/authz.yaml#permissions")
+1001 fs.delete Some("/home/operator/.ssh/id") -> Deny { reason: "denied by policy entry Write(~/.ssh/**)" } Some("user") Some("rule:permissions:deny:9 in /etc/maknae/authz.yaml#permissions")
+1001 fs.delete Some("/home/operator/.maknae/k") -> Deny { reason: "denied by policy entry Write(~/.maknae/**)" } Some("user") Some("rule:permissions:deny:17 in /etc/maknae/authz.yaml#permissions")
+1002 fs.delete Some("/home/operator/notes") -> NotApplicable { note: Some("role guest: no rule for fs.delete") } Some("guest") None
+1002 fs.delete Some("/home/operator/projects/x") -> NotApplicable { note: Some("role guest: no rule for fs.delete") } Some("guest") None
+1002 fs.delete Some("/home/operator/.ssh/id") -> NotApplicable { note: Some("role guest: no rule for fs.delete") } Some("guest") None
+1002 fs.delete Some("/home/operator/.maknae/k") -> NotApplicable { note: Some("role guest: no rule for fs.delete") } Some("guest") None
+666 fs.delete Some("/home/operator/notes") -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+666 fs.delete Some("/home/operator/projects/x") -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+666 fs.delete Some("/home/operator/.ssh/id") -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+666 fs.delete Some("/home/operator/.maknae/k") -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 fs.delete Some("/home/operator/notes") -> NotApplicable { note: Some("subject resolves to no role") } None None
+4242 fs.delete Some("/home/operator/projects/x") -> NotApplicable { note: Some("subject resolves to no role") } None None
+4242 fs.delete Some("/home/operator/.ssh/id") -> NotApplicable { note: Some("subject resolves to no role") } None None
+4242 fs.delete Some("/home/operator/.maknae/k") -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 fs.move None -> NotApplicable { note: Some("term enumerated, not implemented: fs.move") } Some("admin") None
+1001 fs.move None -> NotApplicable { note: Some("role user: no rule for fs.move") } Some("user") None
+1002 fs.move None -> NotApplicable { note: Some("role guest: no rule for fs.move") } Some("guest") None
+666 fs.move None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 fs.move None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 fs.list None -> NotApplicable { note: Some("term enumerated, not implemented: fs.list") } Some("admin") None
+1001 fs.list None -> NotApplicable { note: Some("role user: no rule for fs.list") } Some("user") None
+1002 fs.list None -> NotApplicable { note: Some("role guest: no rule for fs.list") } Some("guest") None
+666 fs.list None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 fs.list None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 fs.stat None -> NotApplicable { note: Some("term enumerated, not implemented: fs.stat") } Some("admin") None
+1001 fs.stat None -> NotApplicable { note: Some("role user: no rule for fs.stat") } Some("user") None
+1002 fs.stat None -> NotApplicable { note: Some("role guest: no rule for fs.stat") } Some("guest") None
+666 fs.stat None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 fs.stat None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 fs.mkdir Some("/home/operator/notes") -> NotApplicable { note: Some("role admin: no capability entry for fs.mkdir") } Some("admin") None
+1000 fs.mkdir Some("/home/operator/projects/x") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:1 in /etc/maknae/authz.yaml#permissions")
+1000 fs.mkdir Some("/home/operator/.ssh/id") -> Deny { reason: "denied by policy entry Write(~/.ssh/**)" } Some("admin") Some("rule:permissions:deny:9 in /etc/maknae/authz.yaml#permissions")
+1000 fs.mkdir Some("/home/operator/.maknae/k") -> Deny { reason: "denied by policy entry Write(~/.maknae/**)" } Some("admin") Some("rule:permissions:deny:17 in /etc/maknae/authz.yaml#permissions")
+1001 fs.mkdir Some("/home/operator/notes") -> NotApplicable { note: Some("role user: no capability entry for fs.mkdir") } Some("user") None
+1001 fs.mkdir Some("/home/operator/projects/x") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:permissions:allow:1 in /etc/maknae/authz.yaml#permissions")
+1001 fs.mkdir Some("/home/operator/.ssh/id") -> Deny { reason: "denied by policy entry Write(~/.ssh/**)" } Some("user") Some("rule:permissions:deny:9 in /etc/maknae/authz.yaml#permissions")
+1001 fs.mkdir Some("/home/operator/.maknae/k") -> Deny { reason: "denied by policy entry Write(~/.maknae/**)" } Some("user") Some("rule:permissions:deny:17 in /etc/maknae/authz.yaml#permissions")
+1002 fs.mkdir Some("/home/operator/notes") -> NotApplicable { note: Some("role guest: no rule for fs.mkdir") } Some("guest") None
+1002 fs.mkdir Some("/home/operator/projects/x") -> NotApplicable { note: Some("role guest: no rule for fs.mkdir") } Some("guest") None
+1002 fs.mkdir Some("/home/operator/.ssh/id") -> NotApplicable { note: Some("role guest: no rule for fs.mkdir") } Some("guest") None
+1002 fs.mkdir Some("/home/operator/.maknae/k") -> NotApplicable { note: Some("role guest: no rule for fs.mkdir") } Some("guest") None
+666 fs.mkdir Some("/home/operator/notes") -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+666 fs.mkdir Some("/home/operator/projects/x") -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+666 fs.mkdir Some("/home/operator/.ssh/id") -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+666 fs.mkdir Some("/home/operator/.maknae/k") -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 fs.mkdir Some("/home/operator/notes") -> NotApplicable { note: Some("subject resolves to no role") } None None
+4242 fs.mkdir Some("/home/operator/projects/x") -> NotApplicable { note: Some("subject resolves to no role") } None None
+4242 fs.mkdir Some("/home/operator/.ssh/id") -> NotApplicable { note: Some("subject resolves to no role") } None None
+4242 fs.mkdir Some("/home/operator/.maknae/k") -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 fs.link None -> NotApplicable { note: Some("term enumerated, not implemented: fs.link") } Some("admin") None
+1001 fs.link None -> NotApplicable { note: Some("role user: no rule for fs.link") } Some("user") None
+1002 fs.link None -> NotApplicable { note: Some("role guest: no rule for fs.link") } Some("guest") None
+666 fs.link None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 fs.link None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 fs.chmod None -> NotApplicable { note: Some("term enumerated, not implemented: fs.chmod") } Some("admin") None
+1001 fs.chmod None -> NotApplicable { note: Some("role user: no rule for fs.chmod") } Some("user") None
+1002 fs.chmod None -> NotApplicable { note: Some("role guest: no rule for fs.chmod") } Some("guest") None
+666 fs.chmod None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 fs.chmod None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 fs.chown None -> NotApplicable { note: Some("term enumerated, not implemented: fs.chown") } Some("admin") None
+1001 fs.chown None -> NotApplicable { note: Some("role user: no rule for fs.chown") } Some("user") None
+1002 fs.chown None -> NotApplicable { note: Some("role guest: no rule for fs.chown") } Some("guest") None
+666 fs.chown None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 fs.chown None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 terminal.create None -> NotApplicable { note: Some("term enumerated, not implemented: terminal.create") } Some("admin") None
+1001 terminal.create None -> NotApplicable { note: Some("role user: no rule for terminal.create") } Some("user") None
+1002 terminal.create None -> NotApplicable { note: Some("role guest: no rule for terminal.create") } Some("guest") None
+666 terminal.create None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 terminal.create None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 terminal.output None -> NotApplicable { note: Some("term enumerated, not implemented: terminal.output") } Some("admin") None
+1001 terminal.output None -> NotApplicable { note: Some("role user: no rule for terminal.output") } Some("user") None
+1002 terminal.output None -> NotApplicable { note: Some("role guest: no rule for terminal.output") } Some("guest") None
+666 terminal.output None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 terminal.output None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 terminal.wait_for_exit None -> NotApplicable { note: Some("term enumerated, not implemented: terminal.wait_for_exit") } Some("admin") None
+1001 terminal.wait_for_exit None -> NotApplicable { note: Some("role user: no rule for terminal.wait_for_exit") } Some("user") None
+1002 terminal.wait_for_exit None -> NotApplicable { note: Some("role guest: no rule for terminal.wait_for_exit") } Some("guest") None
+666 terminal.wait_for_exit None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 terminal.wait_for_exit None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 terminal.kill None -> NotApplicable { note: Some("term enumerated, not implemented: terminal.kill") } Some("admin") None
+1001 terminal.kill None -> NotApplicable { note: Some("role user: no rule for terminal.kill") } Some("user") None
+1002 terminal.kill None -> NotApplicable { note: Some("role guest: no rule for terminal.kill") } Some("guest") None
+666 terminal.kill None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 terminal.kill None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 terminal.release None -> NotApplicable { note: Some("term enumerated, not implemented: terminal.release") } Some("admin") None
+1001 terminal.release None -> NotApplicable { note: Some("role user: no rule for terminal.release") } Some("user") None
+1002 terminal.release None -> NotApplicable { note: Some("role guest: no rule for terminal.release") } Some("guest") None
+666 terminal.release None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 terminal.release None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 terminal.input None -> NotApplicable { note: Some("term enumerated, not implemented: terminal.input") } Some("admin") None
+1001 terminal.input None -> NotApplicable { note: Some("role user: no rule for terminal.input") } Some("user") None
+1002 terminal.input None -> NotApplicable { note: Some("role guest: no rule for terminal.input") } Some("guest") None
+666 terminal.input None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 terminal.input None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 mcp.connect None -> NotApplicable { note: Some("term enumerated, not implemented: mcp.connect") } Some("admin") None
+1001 mcp.connect None -> NotApplicable { note: Some("role user: no rule for mcp.connect") } Some("user") None
+1002 mcp.connect None -> NotApplicable { note: Some("role guest: no rule for mcp.connect") } Some("guest") None
+666 mcp.connect None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 mcp.connect None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 mcp.disconnect None -> NotApplicable { note: Some("term enumerated, not implemented: mcp.disconnect") } Some("admin") None
+1001 mcp.disconnect None -> NotApplicable { note: Some("role user: no rule for mcp.disconnect") } Some("user") None
+1002 mcp.disconnect None -> NotApplicable { note: Some("role guest: no rule for mcp.disconnect") } Some("guest") None
+666 mcp.disconnect None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 mcp.disconnect None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 mcp.message None -> NotApplicable { note: Some("term enumerated, not implemented: mcp.message") } Some("admin") None
+1001 mcp.message None -> NotApplicable { note: Some("role user: no rule for mcp.message") } Some("user") None
+1002 mcp.message None -> NotApplicable { note: Some("role guest: no rule for mcp.message") } Some("guest") None
+666 mcp.message None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 mcp.message None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 mcp.tool.call None -> NotApplicable { note: Some("term enumerated, not implemented: mcp.tool.call") } Some("admin") None
+1001 mcp.tool.call None -> NotApplicable { note: Some("role user: no rule for mcp.tool.call") } Some("user") None
+1002 mcp.tool.call None -> NotApplicable { note: Some("role guest: no rule for mcp.tool.call") } Some("guest") None
+666 mcp.tool.call None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 mcp.tool.call None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 mcp.resource.read None -> NotApplicable { note: Some("term enumerated, not implemented: mcp.resource.read") } Some("admin") None
+1001 mcp.resource.read None -> NotApplicable { note: Some("role user: no rule for mcp.resource.read") } Some("user") None
+1002 mcp.resource.read None -> NotApplicable { note: Some("role guest: no rule for mcp.resource.read") } Some("guest") None
+666 mcp.resource.read None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 mcp.resource.read None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 mcp.prompt.get None -> NotApplicable { note: Some("term enumerated, not implemented: mcp.prompt.get") } Some("admin") None
+1001 mcp.prompt.get None -> NotApplicable { note: Some("role user: no rule for mcp.prompt.get") } Some("user") None
+1002 mcp.prompt.get None -> NotApplicable { note: Some("role guest: no rule for mcp.prompt.get") } Some("guest") None
+666 mcp.prompt.get None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 mcp.prompt.get None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 mcp.sampling.create None -> NotApplicable { note: Some("term enumerated, not implemented: mcp.sampling.create") } Some("admin") None
+1001 mcp.sampling.create None -> NotApplicable { note: Some("role user: no rule for mcp.sampling.create") } Some("user") None
+1002 mcp.sampling.create None -> NotApplicable { note: Some("role guest: no rule for mcp.sampling.create") } Some("guest") None
+666 mcp.sampling.create None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 mcp.sampling.create None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 kernel.contain None -> NotApplicable { note: Some("kernel action requested by a subject that is not the kernel: kernel.contain") } None None
+1001 kernel.contain None -> NotApplicable { note: Some("kernel action requested by a subject that is not the kernel: kernel.contain") } None None
+1002 kernel.contain None -> NotApplicable { note: Some("kernel action requested by a subject that is not the kernel: kernel.contain") } None None
+666 kernel.contain None -> NotApplicable { note: Some("kernel action requested by a subject that is not the kernel: kernel.contain") } None None
+4242 kernel.contain None -> NotApplicable { note: Some("kernel action requested by a subject that is not the kernel: kernel.contain") } None None
+1000 kernel.session.terminate None -> NotApplicable { note: Some("kernel action requested by a subject that is not the kernel: kernel.session.terminate") } None None
+1001 kernel.session.terminate None -> NotApplicable { note: Some("kernel action requested by a subject that is not the kernel: kernel.session.terminate") } None None
+1002 kernel.session.terminate None -> NotApplicable { note: Some("kernel action requested by a subject that is not the kernel: kernel.session.terminate") } None None
+666 kernel.session.terminate None -> NotApplicable { note: Some("kernel action requested by a subject that is not the kernel: kernel.session.terminate") } None None
+4242 kernel.session.terminate None -> NotApplicable { note: Some("kernel action requested by a subject that is not the kernel: kernel.session.terminate") } None None

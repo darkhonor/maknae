@@ -659,6 +659,9 @@ expect_reject "feature-resolution-pin/normal-dep-enables-seam" "$here/feature-re
 # ---- verb-vocabulary-drift (#67): the action vocabulary vs its manifest ----
 # Durable fixtures, not a one-off manual proof: a gate is only trusted once it
 # has been OBSERVED failing, and that observation must be re-run on every PR.
+VOCAB_DEFAULT='pub(crate) const ACTION_VOCABULARY: [&str; 1] = ["admin.status"];'
+VOCAB_ROW='action-vocab	admin.status	subject-limitable	a `subjects:` actions list may limit it; it never grants'
+# Every fixture carries this vocabulary line and its row together (#608).
 vocab_fixture() { # <manifest-body> — builds a minimal repo the gate can read
   local fixture
   fixture="$(mktemp -d -p "$NC_TMP")"
@@ -688,9 +691,14 @@ FIX
   # The spelling here must MATCH production exactly -- `pub(crate)`, one line --
   # or the control exercises a different anchor than the one that ships.
   # $2 overrides the grantable constant, for the subset control below.
-  printf '%s\n' "${2:-pub(crate) const GRANTABLE_ACTIONS: [&str; 8] = [\"admin.status\", \"admin.config.show\", \"admin.subject.list\", \"admin.baseline.show\", \"admin.baseline.accept\", \"admin.contain\", \"admin.release\", \"session.prompt\"];}" \
-    > "$fixture/crates/maknae-authz-basic/src/decide.rs"
-  printf '%s' "$1" > "$fixture/ci/gates/verb-manifest.txt"
+  # $5 overrides the vocabulary line; set and empty means no line at all.
+  printf '%s\n%s\n' "${2:-pub(crate) const GRANTABLE_ACTIONS: [&str; 8] = [\"admin.status\", \"admin.config.show\", \"admin.subject.list\", \"admin.baseline.show\", \"admin.baseline.accept\", \"admin.contain\", \"admin.release\", \"session.prompt\"];}" \
+    "${5-$VOCAB_DEFAULT}" > "$fixture/crates/maknae-authz-basic/src/decide.rs"
+  {
+    printf '%s' "$1"
+    case "$1" in '' | *$'\n') ;; *) printf '\n' ;; esac
+    printf '%s\n' "$VOCAB_ROW"
+  } > "$fixture/ci/gates/verb-manifest.txt"
   # $4 is the shipped authz.yaml (#490); the default grants nothing.
   mkdir -p "$fixture/packaging/common"
   printf '%s' "${4:-schema_version: 1
@@ -756,7 +764,7 @@ expect_reject_because "verb-vocabulary-drift/grantable-with-no-disposition" \
 # grantable term that has an action behind it -- and the subset rule added for
 # #162 means a fixture claiming the other two is not clean. It caught this
 # fixture the moment it was written, which is the control working.
-# Five = 2 actions + kernel.contain + Read + 1 grantable.
+# Six = 2 actions + kernel.contain + Read + 1 grantable + 1 action-vocab.
 # Rationales carry the #181 clause vocabulary: the clause check runs LAST in
 # the gate, so a CLEAN fixture must satisfy it (the five reject fixtures above
 # keep short rationales because the inventory/subset checks fire first).
@@ -767,7 +775,7 @@ capability	Read	granted	the only grammar capability
 grantable	admin.status	grantable-not-granted	operator MAY grant per-role via `roles:`
 '
 fx="$(vocab_fixture "$CLEAN_VOCAB" 'pub(crate) const GRANTABLE_ACTIONS: [&str; 1] = ["admin.status"];')"
-expect_accept "verb-vocabulary-drift/clean-fixture-passes" ": 5 terms," "$fx/ci/gates/verb-vocabulary-drift.sh"
+expect_accept "verb-vocabulary-drift/clean-fixture-passes" ": 6 terms," "$fx/ci/gates/verb-vocabulary-drift.sh"
 # #165 test 18: a kernel-action row with no constant behind it.
 fx="$(vocab_fixture "${CLEAN_VOCAB}kernel-action	kernel.retired	not-granted	no Verb variant
 " 'pub(crate) const GRANTABLE_ACTIONS: [&str; 1] = ["admin.status"];')"
@@ -789,7 +797,7 @@ expect_reject_because "verb-vocabulary-drift/grantable-term-with-no-grantable-ro
 fx="$(vocab_fixture "${CLEAN_VOCAB}${PROMPT_ACTION_ROW}
 ${PROMPT_GRANTABLE_ROW}
 " "$PROMPT_CONST" "$PROMPT_ARM")"
-expect_accept "verb-vocabulary-drift/prompt-rows-consistent" ": 7 terms," "$fx/ci/gates/verb-vocabulary-drift.sh"
+expect_accept "verb-vocabulary-drift/prompt-rows-consistent" ": 8 terms," "$fx/ci/gates/verb-vocabulary-drift.sh"
 
 # REJECT (#181, durable): a row whose disposition and rationale DISAGREE — the
 # rationale lacks its (kind, disposition) clause. The one-time capture of the
@@ -844,6 +852,21 @@ expect_reject_because "verb-vocabulary-drift/grantable-not-a-real-action" \
   "no matching action term" "$fx/ci/gates/verb-vocabulary-drift.sh"
 
 
+# #608: the action vocabulary is a fifth inventory. A vocabulary term with no
+# manifest row rejects; the same fixture with the row accepts; no vocabulary
+# line at all rejects on the floor, not on the inventory diff.
+FS_VOCAB='pub(crate) const ACTION_VOCABULARY: [&str; 2] = ["admin.status", "fs.read"];'
+FS_VOCAB_ROW='action-vocab	fs.read	subject-limitable	a `subjects:` actions list may limit it; it never grants'
+fx="$(vocab_fixture "$CLEAN_VOCAB" 'pub(crate) const GRANTABLE_ACTIONS: [&str; 1] = ["admin.status"];' "" "" "$FS_VOCAB")"
+expect_reject_because "verb-vocabulary-drift/vocabulary-term-with-no-row" \
+  "+action-vocab	fs.read" "$fx/ci/gates/verb-vocabulary-drift.sh"
+fx="$(vocab_fixture "${CLEAN_VOCAB}${FS_VOCAB_ROW}
+" 'pub(crate) const GRANTABLE_ACTIONS: [&str; 1] = ["admin.status"];' "" "" "$FS_VOCAB")"
+expect_accept "verb-vocabulary-drift/vocabulary-rows-consistent" ": 7 terms," "$fx/ci/gates/verb-vocabulary-drift.sh"
+fx="$(vocab_fixture "$CLEAN_VOCAB" 'pub(crate) const GRANTABLE_ACTIONS: [&str; 1] = ["admin.status"];' "" "" "")"
+expect_reject_because "verb-vocabulary-drift/no-vocabulary-line" \
+  "no ACTION_VOCABULARY terms read" "$fx/ci/gates/verb-vocabulary-drift.sh"
+
 # The shipped grants (#490): the terms the shipped authz.yaml grants must be the
 # manifest's shipped-file dispositions exactly, and only under roles.admin.allow.
 SHIPPED_VOCAB='action	liveness.ping	granted	shipped; the fixture liveness term
@@ -861,7 +884,7 @@ roles:
       - "admin.status"
 '
 fx="$(vocab_fixture "$SHIPPED_VOCAB" "$SHIPPED_CONST" "" "$SHIPPED_FILE")"
-expect_accept "verb-vocab/shipped-grants-match" ": 5 terms, manifest exact, 1 shipped grants" "$fx/ci/gates/verb-vocabulary-drift.sh"
+expect_accept "verb-vocab/shipped-grants-match" ": 6 terms, manifest exact, 1 shipped grants" "$fx/ci/gates/verb-vocabulary-drift.sh"
 
 fx="$(vocab_fixture "$SHIPPED_VOCAB" "$SHIPPED_CONST" "" "${SHIPPED_FILE}      - \"admin.config.show\"
 ")"
