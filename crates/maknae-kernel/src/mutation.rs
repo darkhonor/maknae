@@ -1,5 +1,9 @@
 //! Mutation preparation and the durable-intent gate. Every effect is a subject-side
 //! attempt; its progress and completion are client reported.
+use crate::conversation::{
+    facts::{gather, ConversationFacts},
+    store::ConversationStore,
+};
 use crate::{
     blocking_guard::AUDIT_APPEND_TIMEOUT,
     handler::{build_authz_request, delegated_plan, discharge_plan, lexical_pregate},
@@ -18,7 +22,7 @@ use maknae_proto::{
     WriteMode, PROTOCOL_VERSION,
 };
 use maknae_security::{AttrValue, Authorizer, Decision, FsOperation, Lane};
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, BorrowedFd};
 use std::{
     os::fd::OwnedFd,
     path::{Path, PathBuf},
@@ -40,6 +44,55 @@ fn capacity() -> Arc<Semaphore> {
 }
 fn mutating() -> &'static UidGate {
     MUTATING.get_or_init(UidGate::default)
+}
+
+fn busy_reason(busy: Busy) -> &'static str {
+    match busy {
+        Busy::Requester => "mutation worker budget exhausted for this requester",
+        Busy::Global => "mutation worker budget exhausted",
+    }
+}
+
+pub(crate) async fn blocking<T, F>(timeout: Duration, f: F) -> Result<T, &'static str>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let run = async move {
+        let permit = capacity()
+            .acquire_owned()
+            .await
+            .map_err(|_| "blocking capacity closed")?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            f()
+        })
+        .await
+        .map_err(|_| "blocking work failed")
+    };
+    tokio::time::timeout(timeout, run)
+        .await
+        .unwrap_or(Err("blocking work timed out"))
+}
+
+pub(crate) fn verify_cwd(fd: BorrowedFd<'_>, home: &Path, uid: u32) -> Result<String, String> {
+    if home == Path::new("/") {
+        return Err(crate::authz::HomeUnavailable::Unresolvable.reason());
+    }
+    let fd = fd
+        .try_clone_to_owned()
+        .map_err(|e| format!("cwd evidence refused: {e}"))?;
+    let directory = maknae_io::verify_mutation_directory(
+        fd,
+        MutationRequired {
+            confined_beneath: home.to_path_buf(),
+            root_required: delegated_plan(home, uid).root_required,
+        },
+    )
+    .map_err(|e| format!("cwd evidence refused: {e}"))?;
+    let path = directory.path().to_str().ok_or("non-UTF-8 cwd")?.to_owned();
+    checked(&path)?;
+    Ok(path)
 }
 
 enum Evidence {
@@ -65,6 +118,14 @@ fn path(verb: &Verb) -> Option<&str> {
         _ => None,
     }
 }
+fn cited(verb: &Verb) -> Option<&str> {
+    match verb {
+        Verb::FsWrite { conversation, .. } | Verb::Read { conversation, .. } => {
+            conversation.as_deref()
+        }
+        _ => None,
+    }
+}
 fn normal(component: &str) -> bool {
     !component.is_empty()
         && component != "."
@@ -72,7 +133,7 @@ fn normal(component: &str) -> bool {
         && !component.contains('/')
         && !component.contains('\0')
 }
-fn checked(path: &str) -> Result<(), String> {
+pub(crate) fn checked(path: &str) -> Result<(), String> {
     if path.len() > maknae_proto::MAX_MUTATION_PATH_BYTES || path.contains('\0') {
         return Err("mutation path limit or NUL".into());
     }
@@ -253,12 +314,13 @@ fn authorize<P: Authorizer>(
     home: Option<&Path>,
     authorizer: &P,
     policy_name: &str,
+    facts: Option<&ConversationFacts>,
 ) -> Result<(DecidedBy, maknae_proto::ObjectLabel), AuthorizeErr> {
     let requests: Vec<_> = prepared
         .paths
         .iter()
         .map(|path| {
-            let mut request = build_authz_request(verb, uid, home, Lane::Local, None, None, None);
+            let mut request = build_authz_request(verb, uid, home, Lane::Local, None, facts, None);
             request
                 .resource
                 .0
@@ -469,6 +531,7 @@ pub(crate) async fn handle<S, E, P>(
     authz_timeout: Duration,
     caps: AttemptCaps,
     policy_name: &str,
+    conversations: Arc<dyn ConversationStore>,
 ) -> bool
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -489,11 +552,7 @@ where
     let (claim, permit) = match mutating().try_admit(uid, &capacity()) {
         Ok(slot) => slot.split(),
         Err(busy) => {
-            let reason = match busy {
-                Busy::Requester => "mutation worker budget exhausted for this requester",
-                Busy::Global => "mutation worker budget exhausted",
-            };
-            refuse(stream, cfg, &*emit, record, reason.into()).await;
+            refuse(stream, cfg, &*emit, record, busy_reason(busy).into()).await;
             return true;
         }
     };
@@ -505,6 +564,7 @@ where
         tokio::task::spawn_blocking(move || {
             let _claim = claim;
             let prepared = prepare(original.clone(), fd, &home, uid, lane)?;
+            let gathered = gather(&*conversations, uid, cited(&original), None);
             let decision = authorize(
                 &prepared,
                 &original,
@@ -512,7 +572,12 @@ where
                 Some(&home),
                 &*authorizer,
                 &policy_name,
+                gathered.as_ref().map(|(facts, _)| facts),
             );
+            if let (Ok(_), Some((_, Some(rec)))) = (&decision, &gathered) {
+                let now = crate::run::unix_now();
+                let _ = conversations.update(&rec.id, rec.fence, &mut |r| r.last_active = now);
+            }
             Ok::<_, String>((prepared, permit, decision))
         }),
     )
@@ -1183,6 +1248,7 @@ mod tests {
             Duration::from_secs(10),
             AttemptCaps::default(),
             "US",
+            Arc::new(crate::conversation::mem_store::MemStore::default()),
         );
         let second_emit = Arc::new(Recorder::default());
         let second = async {
@@ -1222,6 +1288,7 @@ mod tests {
                     Duration::from_secs(10),
                     AttemptCaps::default(),
                     "US",
+                    Arc::new(crate::conversation::mem_store::MemStore::default()),
                 )
                 .await
             );
@@ -1280,6 +1347,7 @@ mod tests {
                     Duration::from_secs(10),
                     AttemptCaps::default(),
                     "US",
+                    Arc::new(crate::conversation::mem_store::MemStore::default()),
                 )
                 .await
             );
@@ -1315,6 +1383,7 @@ mod tests {
                 Duration::from_secs(1),
                 AttemptCaps::default(),
                 "US",
+                Arc::new(crate::conversation::mem_store::MemStore::default()),
             )
             .await
         );
@@ -1350,6 +1419,7 @@ mod tests {
                 Duration::from_secs(1),
                 AttemptCaps::default(),
                 "US",
+                Arc::new(crate::conversation::mem_store::MemStore::default()),
             )
             .await
         );
@@ -1385,6 +1455,7 @@ mod tests {
             Duration::from_millis(20),
             AttemptCaps::default(),
             "US",
+            Arc::new(crate::conversation::mem_store::MemStore::default()),
         )
         .await;
         assert!(emit
@@ -1419,6 +1490,7 @@ mod tests {
                 Duration::from_secs(1),
                 AttemptCaps::default(),
                 "US",
+                Arc::new(crate::conversation::mem_store::MemStore::default()),
             )
             .await
         );
@@ -1448,6 +1520,7 @@ mod tests {
                 Duration::from_secs(1),
                 AttemptCaps::default(),
                 "US",
+                Arc::new(crate::conversation::mem_store::MemStore::default()),
             )
             .await
         );
@@ -1640,6 +1713,7 @@ mod tests {
             Some(&fx.root),
             &pdp,
             "US",
+            None,
         )
         .expect("both paths decided on the snapshot in force when the mutation began");
         let rule = by.1.expect("the permit cites its allow rule");
@@ -1651,6 +1725,7 @@ mod tests {
             Some(&fx.root),
             &pdp,
             "US",
+            None,
         )
         .unwrap_err();
         assert!(reason.contains("Write(~/one/two)"), "{reason}");
@@ -1677,6 +1752,7 @@ mod tests {
             Some(&fx.root),
             &pdp,
             "US",
+            None,
         )
         .unwrap();
         assert!(by.1.is_some(), "the permit itself cites a rule");
@@ -1687,6 +1763,7 @@ mod tests {
             Some(&fx.root),
             &pdp,
             "NO-SUCH-SYSTEM",
+            None,
         )
         .unwrap_err();
         assert_eq!(reason, "object label unresolved");

@@ -399,7 +399,8 @@ async fn read_then_write_then_answer_leaves_the_sequence_the_issue_names_in_the_
         records: Arc::clone(&records),
         egress: egress.clone(),
     };
-    let mut transcript = Transcript::new("agent-e2e-conv", "edit notes.txt");
+    let conv = plane.fx.open_conversation().await;
+    let mut transcript = Transcript::new(conv.as_str(), "edit notes.txt");
     let out = drive(
         &mut plane,
         &mut transcript,
@@ -461,11 +462,11 @@ async fn read_then_write_then_answer_leaves_the_sequence_the_issue_names_in_the_
     );
     assert!(reads
         .iter()
-        .all(|r| r.conversation.as_deref() == Some("agent-e2e-conv")));
+        .all(|r| r.conversation.as_deref() == Some(conv.as_str())));
     assert!(recs
         .iter()
         .filter(|r| r.action == "session.prompt")
-        .all(|r| r.egress.as_ref().map(|e| e.conversation.as_str()) == Some("agent-e2e-conv")));
+        .all(|r| r.egress.as_ref().map(|e| e.conversation.as_str()) == Some(conv.as_str())));
     let writes: Vec<_> = recs.iter().filter(|r| r.action == "fs.write").collect();
     assert_eq!(
         writes.len(),
@@ -484,7 +485,7 @@ async fn read_then_write_then_answer_leaves_the_sequence_the_issue_names_in_the_
     );
     assert!(writes
         .iter()
-        .all(|r| r.conversation.as_deref() == Some("agent-e2e-conv")));
+        .all(|r| r.conversation.as_deref() == Some(conv.as_str())));
     // The drained count, and it detects UNDER-consumption only:
     // `Scripted::send` answers an empty queue with
     // `EgressFailure::Transport("script exhausted")` rather than panicking, so
@@ -539,7 +540,8 @@ async fn a_denied_read_reaches_the_model_as_not_authorized_and_is_a_deny_in_the_
         records: Arc::clone(&records),
         egress: egress.clone(),
     };
-    let mut transcript = Transcript::new("agent-deny-conv", "read my key");
+    let conv = plane.fx.open_conversation().await;
+    let mut transcript = Transcript::new(conv.as_str(), "read my key");
     drive(
         &mut plane,
         &mut transcript,
@@ -618,7 +620,8 @@ async fn an_over_bound_write_is_a_tool_error_its_sibling_read_runs_and_the_trail
         records: Arc::clone(&records),
         egress: egress.clone(),
     };
-    let mut transcript = Transcript::new("agent-426-conv", "write a big file");
+    let conv = plane.fx.open_conversation().await;
+    let mut transcript = Transcript::new(conv.as_str(), "write a big file");
     drive(
         &mut plane,
         &mut transcript,
@@ -719,7 +722,8 @@ async fn a_write_outside_the_allow_is_unknown_to_the_model_and_a_deny_in_the_tra
         records: Arc::clone(&records),
         egress: egress.clone(),
     };
-    let mut transcript = Transcript::new("agent-wd-conv", "overwrite it");
+    let conv = plane.fx.open_conversation().await;
+    let mut transcript = Transcript::new(conv.as_str(), "overwrite it");
     drive(
         &mut plane,
         &mut transcript,
@@ -744,7 +748,7 @@ async fn a_write_outside_the_allow_is_unknown_to_the_model_and_a_deny_in_the_tra
         .find(|r| r.action == "fs.write")
         .expect("an fs.write record");
     assert_eq!(w.outcome.result, "deny");
-    assert_eq!(w.conversation.as_deref(), Some("agent-wd-conv"));
+    assert_eq!(w.conversation.as_deref(), Some(conv.as_str()));
     assert_eq!(
         egress.remaining(),
         0,
@@ -769,7 +773,8 @@ async fn the_step_budget_trips_and_no_further_prompt_reaches_the_kernel() {
         records: Arc::clone(&records),
         egress: egress.clone(),
     };
-    let mut transcript = Transcript::new("agent-budget-conv", "loop forever");
+    let conv = plane.fx.open_conversation().await;
+    let mut transcript = Transcript::new(conv.as_str(), "loop forever");
     let out = drive(
         &mut plane,
         &mut transcript,

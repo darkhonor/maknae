@@ -52,7 +52,7 @@ async fn the_egress_refusal_record_carries_the_decided_role() {
     let _ = fx
         .roundtrip(
             Verb::SessionPrompt {
-                conversation: "conv-1".into(),
+                conversation: common::CONV.into(),
                 turns: vec![maknae_proto::Turn::User {
                     content: vec![maknae_proto::ContentBlock::Text {
                         text: maknae_proto::SecretText(maknae_io::Zeroizing::new("hi".into())),

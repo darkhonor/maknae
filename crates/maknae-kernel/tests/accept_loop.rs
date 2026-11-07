@@ -328,6 +328,7 @@ async fn drive_into(
             drain,
             gate,
             lifetime,
+            common::conversations(),
         )
         .await;
     });
@@ -515,6 +516,7 @@ async fn stalled_handshake_does_not_block_next_connection() {
             common::serving(),
             host_gate(),
             Duration::MAX,
+            common::conversations(),
         )
         .await;
     });
@@ -617,6 +619,7 @@ async fn at_capacity_audit_does_not_block_accept_loop() {
             common::serving(),
             host_gate(),
             Duration::MAX,
+            common::conversations(),
         )
         .await;
     });
@@ -715,6 +718,7 @@ async fn every_at_capacity_refusal_is_recorded_or_counted() {
             common::serving(),
             host_gate(),
             Duration::MAX,
+            common::conversations(),
         )
         .await;
     });
@@ -781,6 +785,7 @@ async fn supervisor_exit_stops_the_loop_and_reports_failure() {
             common::serving(),
             host_gate(),
             Duration::MAX,
+            common::conversations(),
         ),
     )
     .await
@@ -845,6 +850,7 @@ async fn a_listener_that_authenticates_otherwise_than_its_class_serves_nothing()
             common::serving(),
             host_gate(),
             Duration::MAX,
+            common::conversations(),
         ),
     )
     .await
@@ -902,6 +908,7 @@ async fn shutdown_signal_yields_graceful_outcome() {
         common::serving(),
         host_gate(),
         Duration::MAX,
+        common::conversations(),
     ));
     tx.send(()).expect("shutdown receiver must still be alive");
     let outcome = tokio::time::timeout(Duration::from_secs(5), loop_task)

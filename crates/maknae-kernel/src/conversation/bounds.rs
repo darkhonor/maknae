@@ -20,6 +20,10 @@ impl BoundRefusal {
         }
     }
 
+    pub fn wire_code(self) -> maknae_proto::ProtoErrCode {
+        maknae_proto::ProtoErrCode::TooLarge
+    }
+
     pub fn from_store(e: &StoreError) -> Option<Self> {
         match e {
             StoreError::OwnerFull => Some(Self::OwnerFull),
@@ -131,6 +135,13 @@ mod tests {
             BoundRefusal::OwnerFull.message(),
             "too many active conversations"
         );
+    }
+
+    #[test]
+    fn every_bound_refusal_answers_too_large() {
+        for r in [BoundRefusal::ConversationFull, BoundRefusal::OwnerFull] {
+            assert_eq!(r.wire_code(), maknae_proto::ProtoErrCode::TooLarge);
+        }
     }
 
     #[test]

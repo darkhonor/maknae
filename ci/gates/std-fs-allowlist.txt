@@ -92,6 +92,9 @@ crates/maknae-vault/src/stream.rs|let _ = std::fs::remove_file(&self.path);
 # load-bearing three ways (ADR-0009 decision 5). Do not "complete" these fields.
 crates/maknae-kernel/src/handler.rs|owner: None,
 crates/maknae-kernel/src/handler.rs|mode_mask: None,
+# #170: `ConversationFacts::owner` for a record the store could not read; a
+# conversation's owner uid, not a filesystem requirement.
+crates/maknae-kernel/src/conversation/facts.rs|owner: None,
 
 # #158 audit admission retains OS DAC on its configured parent; the leaf has artifact checks.
 crates/maknae-audit-append/src/sink.rs|&maknae_io::AnchorRequired::OS_DAC,

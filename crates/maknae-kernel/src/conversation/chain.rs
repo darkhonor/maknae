@@ -179,6 +179,10 @@ fn digest_of(
     Ok(finish(h))
 }
 
+pub fn reply_bytes(reply: &PromptReply) -> Result<u64, ChainError> {
+    encoded_len(&(&reply.blocks, &reply.tool_calls))
+}
+
 pub fn reply_digest(reply: &PromptReply) -> Result<[u8; 32], ChainError> {
     digest_of(&reply.blocks, &reply.tool_calls)
 }
@@ -421,6 +425,15 @@ mod tests {
         assert_eq!(ChainHead::from_hex(&"g".repeat(64)), None);
         assert_eq!(ChainHead::from_hex(&"A".repeat(64)), None);
         assert_eq!(ChainHead::from_hex(&"é".repeat(32)), None);
+    }
+
+    #[test]
+    fn reply_bytes_counts_the_digested_cbor() {
+        let r = reply("hello");
+        let mut b = Vec::new();
+        ciborium::into_writer(&(&r.blocks, &r.tool_calls), &mut b).unwrap();
+        assert_eq!(reply_bytes(&r).unwrap(), b.len() as u64);
+        assert!(reply_bytes(&reply("hello world")).unwrap() > reply_bytes(&r).unwrap());
     }
 
     #[test]

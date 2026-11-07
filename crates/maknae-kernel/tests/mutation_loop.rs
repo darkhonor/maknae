@@ -196,14 +196,8 @@ async fn a_loop_write_records_its_conversation_on_intent_progress_and_completion
     let target = fx.root.join("unique-existing-write-sentinel");
     std::fs::write(&target, b"old").unwrap();
     let records = Records::new(0);
-    let (mut client, task, held) = replace_start(
-        &fx,
-        &target,
-        b"new",
-        records.clone(),
-        Some("conv-265-sentinel"),
-    )
-    .await;
+    let (mut client, task, held) =
+        replace_start(&fx, &target, b"new", records.clone(), Some(common::CONV)).await;
     let grant = granted(&mut client).await;
     replace_as_subject(&mut client, &grant, &held, b"new").await;
     drop(client);
@@ -212,11 +206,7 @@ async fn a_loop_write_records_its_conversation_on_intent_progress_and_completion
     assert_eq!(records.len(), 4, "{records:?}");
     assert_eq!(records[0].conversation, None);
     for r in &records[1..] {
-        assert_eq!(
-            r.conversation.as_deref(),
-            Some("conv-265-sentinel"),
-            "{r:?}"
-        );
+        assert_eq!(r.conversation.as_deref(), Some(common::CONV), "{r:?}");
     }
     assert_eq!(std::fs::read(&target).unwrap(), b"new");
 }
@@ -1403,6 +1393,7 @@ async fn failed_grant_or_ack_write_stops_before_accepting_more_client_reports() 
             Duration::from_secs(2),
             fds,
             common::no_baseline(),
+            common::conversations(),
         ));
         let request = maknae_proto::encode_request(&maknae_proto::Request {
             protocol_version: maknae_proto::PROTOCOL_VERSION,

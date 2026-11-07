@@ -125,6 +125,7 @@ async fn audit_failure_withholds_response() {
         authz.1,
         maknae_io::DelegatedFds::new(0),
         common::no_baseline(),
+        common::conversations(),
     )
     .await;
 
@@ -180,6 +181,7 @@ async fn admission_audit_failure_withholds_response_without_reading_request() {
         authz.1,
         maknae_io::DelegatedFds::new(0),
         common::no_baseline(),
+        common::conversations(),
     )
     .await;
 
@@ -239,6 +241,7 @@ async fn deny_audits_then_closes() {
         authz.1,
         maknae_io::DelegatedFds::new(0),
         common::no_baseline(),
+        common::conversations(),
     )
     .await;
 
@@ -300,6 +303,7 @@ async fn happy_ping_responds() {
         authz.1,
         maknae_io::DelegatedFds::new(0),
         common::no_baseline(),
+        common::conversations(),
     )
     .await;
 
@@ -353,6 +357,7 @@ async fn permit_admission_precedes_request_record() {
         authz.1,
         maknae_io::DelegatedFds::new(0),
         common::no_baseline(),
+        common::conversations(),
     )
     .await;
 
@@ -413,6 +418,7 @@ async fn happy_whoami_carries_peer_facts() {
         authz.1,
         maknae_io::DelegatedFds::new(0),
         common::no_baseline(),
+        common::conversations(),
     )
     .await;
 
@@ -457,6 +463,7 @@ async fn read_timeout_closes() {
         authz.1,
         maknae_io::DelegatedFds::new(0),
         common::no_baseline(),
+        common::conversations(),
     )
     .await;
     let elapsed = start.elapsed();
@@ -516,6 +523,7 @@ async fn configured_au3_1_is_stamped_onto_every_record() {
         authz.1,
         maknae_io::DelegatedFds::new(0),
         common::no_baseline(),
+        common::conversations(),
     )
     .await;
     let recs = emit.records();
@@ -551,6 +559,7 @@ async fn configured_au3_1_is_stamped_onto_every_record() {
         authz.1,
         maknae_io::DelegatedFds::new(0),
         common::no_baseline(),
+        common::conversations(),
     )
     .await;
     let recs2 = emit2.records();
@@ -616,6 +625,7 @@ async fn unread_response_does_not_hang_the_handler() {
             authz.1,
             maknae_io::DelegatedFds::new(0),
             common::no_baseline(),
+            common::conversations(),
         ),
     )
     .await;
@@ -676,6 +686,7 @@ async fn serve_raw(
         authz.1,
         maknae_io::DelegatedFds::new(0),
         common::no_baseline(),
+        common::conversations(),
     )
     .await;
     let caps = maknae_proto::FrameCaps {
@@ -725,7 +736,7 @@ async fn a_ping_declared_as_a_prompt_is_refused_and_recorded() {
 #[tokio::test]
 async fn a_small_prompt_declared_control_is_refused_as_a_mismatch() {
     let body = request_bytes(maknae_proto::Verb::SessionPrompt {
-        conversation: "c".into(),
+        conversation: common::CONV.into(),
         turns: vec![],
         output_tokens: None,
         choice: None,
@@ -752,7 +763,7 @@ async fn a_read_declared_as_a_prompt_is_refused_as_a_mismatch() {
 async fn a_prompt_class_frame_uses_the_prompt_cap() {
     let text = maknae_proto::SecretText(maknae_io::Zeroizing::new("x".repeat(200 * 1024)));
     let body = request_bytes(maknae_proto::Verb::SessionPrompt {
-        conversation: "c".into(),
+        conversation: common::CONV.into(),
         turns: vec![maknae_proto::Turn::User {
             content: vec![maknae_proto::ContentBlock::Text { text }],
         }],

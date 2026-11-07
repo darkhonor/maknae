@@ -86,6 +86,7 @@ files = [
   "crates/maknae-kernel/src/conversation/mem_store.rs",
   "crates/maknae-kernel/src/conversation/record.rs",
   "crates/maknae-kernel/src/conversation/store.rs",
+  "crates/maknae-kernel/src/conversation/turn.rs",
   # The CBOR byte-string content codec (#77): a wrong major type halves the
   # read ceiling and mis-routes oversize; the visitor is a refusal surface.
   "crates/maknae-proto/src/bytes.rs",
