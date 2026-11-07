@@ -60,18 +60,18 @@ pub fn group_gid(name: &str) -> Result<Option<u32>, AccountLookupError> {
 }
 
 pub fn daemon_facts() -> Result<DaemonFacts, AccountLookupError> {
-    let mut facts = DaemonFacts {
-        uids: Vec::new(),
-        gids: Vec::new(),
-    };
+    let resolve = |e: nix::Error| AccountLookupError::Resolve(e.to_string());
+    let mut users = Vec::new();
+    let mut groups = Vec::new();
     for name in MAKNAE_DAEMON_ACCOUNTS {
-        let user = User::from_name(name).map_err(|e| AccountLookupError::Resolve(e.to_string()))?;
-        if let Some(user) = user {
-            facts.uids.push(user.uid.as_raw());
-            facts.gids.push(user.gid.as_raw());
+        if let Some(user) = User::from_name(name).map_err(resolve)? {
+            users.push((user.uid.as_raw(), user.gid.as_raw()));
+        }
+        if let Some(group) = Group::from_name(name).map_err(resolve)? {
+            groups.push(group.gid.as_raw());
         }
     }
-    Ok(facts)
+    Ok(DaemonFacts::assemble(&users, &groups))
 }
 
 #[cfg(test)]

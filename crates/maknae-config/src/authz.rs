@@ -859,6 +859,7 @@ fn subject_list(v: &Value, what: &str) -> Result<Vec<String>, AuthzError> {
 }
 
 fn subject_section<'a>(
+    level: &str,
     name: &str,
     body: &'a [(String, Value)],
     key: &str,
@@ -867,7 +868,7 @@ fn subject_section<'a>(
     match get(body, key) {
         None => Ok(None),
         Some(Value::Map(m)) => {
-            check_known_keys(&format!("authz.subjects.{name}.{key}"), m, allowed)?;
+            check_known_keys(&format!("{level}.{key}"), m, allowed)?;
             Ok(Some(m))
         }
         Some(_) => Err(AuthzError::Yaml(format!(
@@ -892,17 +893,22 @@ pub fn parse_subject_entry(name: &str, body: &Value) -> Result<SubjectPolicy, Au
 }
 
 fn parse_subject(name: &str, body: &Value) -> Result<SubjectPolicy, AuthzError> {
+    parse_subject_at(&format!("authz.subjects.{name}"), name, body)
+}
+
+/// `level` is the dotted label an unknown-key refusal names for this entry.
+pub(crate) fn parse_subject_at(
+    level: &str,
+    name: &str,
+    body: &Value,
+) -> Result<SubjectPolicy, AuthzError> {
     let Value::Map(body) = body else {
         return Err(AuthzError::Yaml(format!(
             "subjects: entry `{name}` must be a map"
         )));
     };
-    check_known_keys(
-        &format!("authz.subjects.{name}"),
-        body,
-        &["permissions", "actions", "models"],
-    )?;
-    let permissions = subject_section(name, body, "permissions", &["allow", "deny"])?
+    check_known_keys(level, body, &["permissions", "actions", "models"])?;
+    let permissions = subject_section(level, name, body, "permissions", &["allow", "deny"])?
         .map(|pm| {
             let list = |key: &str| {
                 get(pm, key)
@@ -924,7 +930,7 @@ fn parse_subject(name: &str, body: &Value) -> Result<SubjectPolicy, AuthzError> 
             })
         })
         .transpose()?;
-    let actions = subject_section(name, body, "actions", &["allow", "deny"])?
+    let actions = subject_section(level, name, body, "actions", &["allow", "deny"])?
         .map(|am| {
             let list = |key: &str| {
                 get(am, key)
@@ -941,7 +947,7 @@ fn parse_subject(name: &str, body: &Value) -> Result<SubjectPolicy, AuthzError> 
             })
         })
         .transpose()?;
-    let models = subject_section(name, body, "models", &["allow"])?
+    let models = subject_section(level, name, body, "models", &["allow"])?
         .map(|mm| {
             get(mm, "allow")
                 .map(|v| subject_list(v, "models"))

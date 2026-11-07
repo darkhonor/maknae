@@ -25,10 +25,40 @@ pub enum AccountLookupError {
     Unanswered { user: String, why: String },
 }
 
+impl std::fmt::Display for AccountLookupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Resolve(why) => write!(f, "host account lookup failed: {why}"),
+            Self::Unanswered { user, why } => {
+                write!(f, "the groups of account {user} could not be read: {why}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AccountLookupError {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonFacts {
     pub uids: Vec<u32>,
     pub gids: Vec<u32>,
+}
+
+impl DaemonFacts {
+    /// `users` is each daemon user's `(uid, primary gid)`; `groups` is each daemon
+    /// group's gid, which need not equal its user's primary gid.
+    pub fn assemble(users: &[(u32, u32)], groups: &[u32]) -> DaemonFacts {
+        let mut gids: Vec<u32> = Vec::new();
+        for gid in users.iter().map(|u| u.1).chain(groups.iter().copied()) {
+            if !gids.contains(&gid) {
+                gids.push(gid);
+            }
+        }
+        DaemonFacts {
+            uids: users.iter().map(|u| u.0).collect(),
+            gids,
+        }
+    }
 }
 
 pub(crate) struct Passwd {
@@ -192,6 +222,47 @@ mod tests {
         assert_eq!(
             named_group_db("ann", Ok(daemon), failing).map(|_| ()),
             Err(unanswered("EBUSY"))
+        );
+    }
+
+    #[test]
+    fn a_daemon_group_whose_gid_differs_from_its_users_is_a_daemon_gid() {
+        assert_eq!(
+            DaemonFacts::assemble(&[(970, 970), (971, 971)], &[970, 975]),
+            DaemonFacts {
+                uids: vec![970, 971],
+                gids: vec![970, 971, 975],
+            }
+        );
+    }
+
+    #[test]
+    fn a_daemon_group_without_its_user_is_a_daemon_gid() {
+        assert_eq!(
+            DaemonFacts::assemble(&[], &[975]),
+            DaemonFacts {
+                uids: vec![],
+                gids: vec![975],
+            }
+        );
+        assert_eq!(
+            DaemonFacts::assemble(&[(970, 970)], &[]),
+            DaemonFacts {
+                uids: vec![970],
+                gids: vec![970],
+            }
+        );
+    }
+
+    #[test]
+    fn a_lookup_error_renders_its_cause() {
+        assert_eq!(
+            AccountLookupError::Resolve("EIO".into()).to_string(),
+            "host account lookup failed: EIO"
+        );
+        assert_eq!(
+            unanswered("EIO").to_string(),
+            "the groups of account ann could not be read: EIO"
         );
     }
 

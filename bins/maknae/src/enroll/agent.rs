@@ -708,6 +708,19 @@ fn owner_error(what: &str, e: impl std::fmt::Display) -> EnrollError {
     EnrollError::Owner(format!("{what}: {e}"))
 }
 
+fn named_account(
+    requested: &str,
+    acct: Option<maknae_io::HostAccount>,
+) -> Result<Option<maknae_io::HostAccount>, EnrollError> {
+    match acct {
+        Some(a) if a.name != requested => Err(EnrollError::Owner(format!(
+            "account {requested} shares uid {} with account {}; give the Agent Daemon an account with its own uid",
+            a.uid, a.name
+        ))),
+        other => Ok(other),
+    }
+}
+
 fn check_account(
     args: &AgentArgs,
     agent: &AgentId,
@@ -718,14 +731,15 @@ fn check_account(
         .map_err(|e| owner_error(&format!("user {}", args.account), e))?
     {
         Some(u) => maknae_io::host_account(u.uid.as_raw())
-            .map_err(|e| owner_error(&format!("user {}", args.account), format!("{e:?}")))?,
+            .map_err(|e| owner_error(&format!("user {}", args.account), e))?,
         None => None,
     };
+    let acct = named_account(&args.account, acct)?;
     let maknae_gid = maknae_io::group_gid(maknae_io::MAKNAE_GROUP)
-        .map_err(|e| owner_error("group maknae", format!("{e:?}")))?
+        .map_err(|e| owner_error("group maknae", e))?
         .ok_or_else(|| EnrollError::Owner("no maknae group".to_string()))?;
-    let daemons = maknae_io::daemon_facts()
-        .map_err(|e| owner_error("Maknae daemon accounts", format!("{e:?}")))?;
+    let daemons =
+        maknae_io::daemon_facts().map_err(|e| owner_error("Maknae daemon accounts", e))?;
     maknae_vault::agent_enroll::service_account_check(
         acct.as_ref(),
         &args.account,
@@ -929,6 +943,40 @@ pub(crate) async fn run_enroll_agent(
         );
     }
     Ok(summary)
+}
+
+#[cfg(test)]
+mod named_account_tests {
+    use super::*;
+
+    fn acct(name: &str) -> maknae_io::HostAccount {
+        maknae_io::HostAccount {
+            uid: 990,
+            name: name.into(),
+            primary_gid: 990,
+            shell: "/usr/sbin/nologin".into(),
+            dir: "/var/empty".into(),
+            named_groups: vec![990],
+        }
+    }
+
+    #[test]
+    fn the_requested_account_passes_through() {
+        assert_eq!(
+            named_account("hobi-svc", Some(acct("hobi-svc"))).unwrap(),
+            Some(acct("hobi-svc"))
+        );
+        assert_eq!(named_account("hobi-svc", None).unwrap(), None);
+    }
+
+    #[test]
+    fn a_uid_shared_with_another_name_is_refused() {
+        let got = named_account("hobi-svc", Some(acct("toor"))).map_err(|e| e.to_string());
+        assert_eq!(
+            got,
+            Err("account hobi-svc shares uid 990 with account toor; give the Agent Daemon an account with its own uid".into())
+        );
+    }
 }
 
 #[cfg(test)]

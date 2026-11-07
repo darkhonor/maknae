@@ -202,7 +202,7 @@ pub fn parse_agent_policy(id: &AgentId, text: &str) -> Result<AgentPolicy, Authz
         )));
     };
     crate::reject_unknown_keys(
-        &format!("{AGENTS_DIR}/{}/{POLICY_FILE}", id.as_str()),
+        "policy",
         map,
         &[
             "schema_version",
@@ -225,7 +225,7 @@ pub fn parse_agent_policy(id: &AgentId, text: &str) -> Result<AgentPolicy, Authz
         .collect();
     Ok(AgentPolicy {
         id: id.clone(),
-        entry: crate::authz::parse_subject_entry(id.as_str(), &Value::Map(entry))?,
+        entry: crate::authz::parse_subject_at("policy", id.as_str(), &Value::Map(entry))?,
         canonical: crate::value::canonical_json(&root),
         taskers: field(map, "taskers").map(taskers).transpose()?,
     })
@@ -591,6 +591,27 @@ mod tests {
     }
 
     #[test]
+    fn a_member_of_a_daemon_group_with_its_own_gid_is_a_daemon_account() {
+        let daemons = DaemonFacts::assemble(&[(971, 971)], &[975]);
+        let host = HostAccounts {
+            maknae_gid: Some(980),
+            principal_uid: 1000,
+            daemons: &daemons,
+            other_agents: &[],
+        };
+        let mut a = account();
+        a.named_groups = vec![990, 975];
+        assert_eq!(
+            service_account_check(Some(&a), &a.name, &hobi(), &host),
+            Err(AccountRefusal::MaknaeDaemonAccount("hobi-svc".into()))
+        );
+        assert_eq!(
+            service_account_check(Some(&account()), "hobi-svc", &hobi(), &host),
+            Ok(())
+        );
+    }
+
+    #[test]
     fn a_supplementary_maknae_member_is_refused() {
         let mut a = account();
         a.named_groups = vec![990, 980];
@@ -891,10 +912,18 @@ mod tests {
             "schema_version: 1\nbogus: 1\n",
             0o640,
         );
-        assert!(
-            matches!(f.load(), Err(ConfigError::InvalidAgent(ref m)) if m.contains("bogus")),
-            "{:?}",
-            f.load()
+        assert_eq!(
+            f.load().map_err(|e| e.to_string()),
+            Err("agent configuration refused: agents/hobi/policy.yaml: unknown key 'bogus' in 'policy'".into())
+        );
+        f.file(
+            &format!("hobi/{POLICY_FILE}"),
+            "schema_version: 1\npermissions:\n  extra: []\n",
+            0o640,
+        );
+        assert_eq!(
+            f.load().map_err(|e| e.to_string()),
+            Err("agent configuration refused: agents/hobi/policy.yaml: unknown key 'extra' in 'policy.permissions'".into())
         );
     }
 
@@ -1009,7 +1038,12 @@ mod tests {
         assert_eq!(f.load(), Ok(AgentsLoad::default()));
         let gone = Fixture::new("gone_root");
         let root = gone.root.join("nope");
-        assert!(load_agents_required(&root, agents_dir_required(), agent_file_required()).is_err());
+        assert_eq!(
+            load_agents_required(&root, agents_dir_required(), agent_file_required()),
+            Err(ConfigError::NotFound {
+                path: root.display().to_string()
+            })
+        );
     }
 
     #[test]
