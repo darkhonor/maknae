@@ -124,8 +124,8 @@ variable "maknae_users" {
   default = {}
 
   validation {
-    condition     = alltrue([for name in keys(var.maknae_users) : can(regex("^[a-z0-9_]([a-z0-9._-]{0,30}[a-z0-9_])?$", name)) && name != "data"])
-    error_message = "Each maknae_users key must be 1-32 bytes of [a-z0-9._-], starting and ending with [a-z0-9_], and not 'data': Vault userpass lower-cases usernames, and maknaed derives the key path from the local username and refuses a 'data' segment in it."
+    condition     = alltrue([for name in keys(var.maknae_users) : can(regex("^[a-z0-9_]([a-z0-9._-]{0,30}[a-z0-9_])?$", name)) && name != "data" && !startswith(name, "agent-")])
+    error_message = "Each maknae_users key must be 1-32 bytes of [a-z0-9._-], starting and ending with [a-z0-9_], not 'data', and must not start with 'agent-' (the entity maknae-agent-<id> belongs to an agent, and the maknae-enroll-agent policy may write any entity named maknae-agent-*): Vault userpass lower-cases usernames, and maknaed derives the key path from the local username and refuses a 'data' segment in it."
   }
 }
 

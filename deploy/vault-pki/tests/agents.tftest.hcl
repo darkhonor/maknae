@@ -64,7 +64,10 @@ run "agents_shape" {
       path "maknae-kv/undelete/maknae/agents/hobi/*" { capabilities = ["deny"] }
       path "maknae-kv/subkeys/maknae/agents/hobi" { capabilities = ["deny"] }
       path "maknae-kv/subkeys/maknae/agents/hobi/*" { capabilities = ["deny"] }
-      path "maknae-pki-int/sign/maknae-agent-hobi" { capabilities = ["update"] }
+      path "maknae-pki-int/sign/maknae-agent-hobi" {
+        capabilities      = ["update"]
+        denied_parameters = { "not_after" = [] }
+      }
       path "maknae-pki-int/issuer/default/json" { capabilities = ["read"] }
       path "auth/token/renew-self"  { capabilities = ["update"] }
       path "auth/token/lookup-self" { capabilities = ["read"] }
@@ -329,7 +332,10 @@ run "agent_pki_role_and_grant" {
       path "maknae-kv/undelete/maknae/agents/hobi/*" { capabilities = ["deny"] }
       path "maknae-kv/subkeys/maknae/agents/hobi" { capabilities = ["deny"] }
       path "maknae-kv/subkeys/maknae/agents/hobi/*" { capabilities = ["deny"] }
-      path "${vault_mount.maknae_int.path}/sign/maknae-agent-hobi" { capabilities = ["update"] }
+      path "${vault_mount.maknae_int.path}/sign/maknae-agent-hobi" {
+        capabilities      = ["update"]
+        denied_parameters = { "not_after" = [] }
+      }
       path "${vault_mount.maknae_int.path}/issuer/default/json" { capabilities = ["read"] }
       path "auth/token/renew-self"  { capabilities = ["update"] }
       path "auth/token/lookup-self" { capabilities = ["read"] }
@@ -397,5 +403,44 @@ run "agent_entity_and_alias" {
   assert {
     condition     = output.agent_entity_names == { hobi = "maknae-agent-hobi", suga = "maknae-agent-suga" } && output.agent_pki_role_names == { hobi = "maknae-agent-hobi", suga = "maknae-agent-suga" }
     error_message = "outputs name each agent's entity and PKI role"
+  }
+}
+
+run "every_sign_grant_denies_not_after" {
+  command = plan
+  variables {
+    maknae_users = { alice = { password_version = 1 } }
+  }
+
+  assert {
+    condition     = alltrue([for id, p in vault_policy.agent : strcontains(p.policy, "sign/maknae-agent-${id}\" {\n  capabilities      = [\"update\"]\n  denied_parameters = { \"not_after\" = [] }\n}")])
+    error_message = "every agent sign grant denies a caller-supplied not_after"
+  }
+  assert {
+    condition     = strcontains(vault_policy.maknae_kernel.policy, "sign/maknae-kernel\" {\n  capabilities      = [\"update\"]\n  denied_parameters = { \"not_after\" = [] }\n}")
+    error_message = "the kernel sign grant denies a caller-supplied not_after"
+  }
+  assert {
+    condition     = strcontains(vault_policy.maknae_user.policy, "sign/maknae-cli\" {\n  capabilities      = [\"update\"]\n  denied_parameters = { \"not_after\" = [] }\n}")
+    error_message = "the CLI sign grant denies a caller-supplied not_after"
+  }
+}
+
+run "user_key_in_the_agent_entity_namespace_refused" {
+  command = plan
+  variables {
+    maknae_users = { "agent-hobi" = { password_version = 1 } }
+  }
+  expect_failures = [var.maknae_users]
+}
+
+run "user_keys_near_the_agent_prefix_accepted" {
+  command = plan
+  variables {
+    maknae_users = { agentx = { password_version = 1 }, agent = { password_version = 1 } }
+  }
+  assert {
+    condition     = vault_identity_entity.maknae_user["agentx"].name == "maknae-agentx" && vault_identity_entity.maknae_user["agent"].name == "maknae-agent"
+    error_message = "only keys starting with agent- collide with the maknae-agent-* entity namespace"
   }
 }

@@ -34,7 +34,10 @@ resource "vault_policy" "agent" {
     path "${format(local.agent_kv, "undelete", each.key)}/*" { capabilities = ["deny"] }
     path "${format(local.agent_kv, "subkeys", each.key)}" { capabilities = ["deny"] }
     path "${format(local.agent_kv, "subkeys", each.key)}/*" { capabilities = ["deny"] }
-    path "${vault_mount.maknae_int.path}/sign/maknae-agent-${each.key}" { capabilities = ["update"] }
+    path "${vault_mount.maknae_int.path}/sign/maknae-agent-${each.key}" {
+      capabilities      = ["update"]
+      denied_parameters = { "not_after" = [] }
+    }
     path "${vault_mount.maknae_int.path}/issuer/default/json" { capabilities = ["read"] }
     path "auth/token/renew-self"  { capabilities = ["update"] }
     path "auth/token/lookup-self" { capabilities = ["read"] }
