@@ -174,7 +174,7 @@ pub(crate) const GRANTABLE_ACTIONS: [&str; 8] = ["admin.status", "admin.config.s
 
 /// The terms a `subjects:` action list or a family wildcard can name.
 #[rustfmt::skip]
-pub(crate) const ACTION_VOCABULARY: [&str; 12] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt", "fs.read", "fs.write", "fs.delete", "fs.mkdir"];
+pub(crate) const ACTION_VOCABULARY: [&str; 13] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt", "fs.read", "fs.write", "fs.delete", "fs.mkdir", "session.new"];
 
 /// An action entry as compiled against [`ACTION_VOCABULARY`]: `(term, entry as written)`.
 pub(crate) fn expand(
@@ -762,6 +762,7 @@ fn agent_arm(
         | None => {}
     }
     let granted = entry
+        .filter(|e| matches!(e.origin, SubjectOrigin::Agent(_)))
         .and_then(|e| e.actions.as_ref())
         .is_some_and(|set| set.allow.contains_key(action) && !set.deny.contains_key(action));
     if AGENT_DEFAULT_DENIED.contains(&action) && !granted {
@@ -1767,7 +1768,7 @@ mod tests {
                 "admin.release"
             ]
         );
-        assert_eq!(terms("session.*"), ["session.prompt"]);
+        assert_eq!(terms("session.*"), ["session.prompt", "session.new"]);
         assert!(terms("terminal.*").is_empty());
         assert!(terms("mcp.*").is_empty());
         assert_eq!(terms("fs.write"), ["fs.write"]);
@@ -1793,11 +1794,17 @@ mod tests {
     }
 
     #[test]
-    fn the_vocabulary_is_the_grantable_terms_and_the_four_fs_terms() {
+    fn the_vocabulary_is_the_grantable_terms_the_four_fs_terms_and_session_new() {
         assert_eq!(ACTION_VOCABULARY[..8], GRANTABLE_ACTIONS);
         assert_eq!(
             ACTION_VOCABULARY[8..],
-            ["fs.read", "fs.write", "fs.delete", "fs.mkdir"]
+            [
+                "fs.read",
+                "fs.write",
+                "fs.delete",
+                "fs.mkdir",
+                "session.new"
+            ]
         );
     }
 
@@ -3787,7 +3794,7 @@ mod tests {
         for policy in [
             None,
             Some("schema_version: 1\n"),
-            Some("schema_version: 1\nactions:\n  allow: [\"session.*\"]\n"),
+            Some("schema_version: 1\nactions:\n  allow: [\"session.prompt\"]\n"),
             Some("schema_version: 1\nactions:\n  allow: []\n"),
         ] {
             for role in ["user", "guest"] {
@@ -3800,80 +3807,115 @@ mod tests {
         assert_eq!(AGENT_DEFAULT_DENIED, ["session.new"]);
     }
 
-    fn grant_session_new(lp: &mut LoadedPolicy, allow: bool, deny: bool) {
-        let entry = lp.subjects.0.get_mut(&HOBI_UID).unwrap();
-        let set = entry.actions.get_or_insert_with(Default::default);
-        if allow {
-            set.allow.insert("session.new", "session.new".into());
-        }
-        if deny {
-            set.deny.insert("session.new", "session.*".into());
-        }
-    }
-
     #[test]
     fn a_policy_grant_lifts_the_session_new_default() {
-        let policy = Some("schema_version: 1\nactions:\n  allow: [\"session.prompt\"]\n");
-        let req = as_hobi("session.new");
-        let mut lp = lp_agent("user", policy);
-        assert_eq!(
-            agent_arm(
-                &lp.agents,
-                lp.subjects.get(HOBI_UID),
-                HOBI_UID,
-                Role::User,
-                &req
-            ),
-            Some(deny(SESSION_NEW_DEFAULT))
-        );
-        grant_session_new(&mut lp, true, false);
-        assert_eq!(
-            agent_arm(
-                &lp.agents,
-                lp.subjects.get(HOBI_UID),
-                HOBI_UID,
-                Role::User,
-                &req
-            ),
-            None
-        );
-        let d = decide_loaded_cited(&lp, &principal(), &req);
-        assert!(matches!(d.verdict, Verdict::NotApplicable { .. }), "{d:?}");
-        assert_eq!(
-            agent_arm(
-                &lp.agents,
-                lp.subjects.get(HOBI_UID),
-                HOBI_UID,
-                Role::Guest,
-                &req
-            ),
-            None
-        );
+        for allow in [
+            "[\"session.new\"]",
+            "[\"session.*\"]",
+            "[\"session.prompt\", \"session.new\"]",
+        ] {
+            let policy = format!("schema_version: 1\nactions:\n  allow: {allow}\n");
+            for role in ["user", "guest"] {
+                let lp = lp_agent(role, Some(&policy));
+                let req = as_hobi("session.new");
+                assert_eq!(
+                    agent_arm(
+                        &lp.agents,
+                        lp.subjects.get(HOBI_UID),
+                        HOBI_UID,
+                        Role::User,
+                        &req
+                    ),
+                    None,
+                    "{allow}"
+                );
+                let d = decide_loaded_cited(&lp, &principal(), &req);
+                assert_eq!(
+                    d.verdict,
+                    Verdict::NotApplicable {
+                        note: Some(format!("role {role}: no rule for session.new"))
+                    },
+                    "{role} {allow}"
+                );
+            }
+        }
     }
 
     #[test]
     fn a_policy_deny_keeps_the_session_new_default() {
-        let req = as_hobi("session.new");
-        for (allow, deny_it) in [(true, true), (false, true)] {
-            let mut lp = lp_agent("user", None);
-            grant_session_new(&mut lp, allow, deny_it);
+        for actions in [
+            "  allow: [\"session.*\"]\n  deny: [\"session.new\"]\n",
+            "  allow: [\"session.new\"]\n  deny: [\"session.*\"]\n",
+            "  allow: [\"session.new\"]\n  deny: [\"session.new\"]\n",
+        ] {
+            let policy = format!("schema_version: 1\nactions:\n{actions}");
+            let lp = lp_agent("user", Some(&policy));
             assert_eq!(
-                agent_arm(
-                    &lp.agents,
-                    lp.subjects.get(HOBI_UID),
-                    HOBI_UID,
-                    Role::User,
-                    &req
-                ),
-                Some(deny(SESSION_NEW_DEFAULT)),
-                "{allow} {deny_it}"
-            );
-            assert_eq!(
-                decide_loaded_cited(&lp, &principal(), &req).verdict,
+                decide_loaded_cited(&lp, &principal(), &as_hobi("session.new")).verdict,
                 deny(SESSION_NEW_DEFAULT),
-                "{allow} {deny_it}"
+                "{actions}"
             );
         }
+    }
+
+    #[test]
+    fn only_the_agents_own_policy_lifts_the_session_new_default() {
+        let lp = lp_agent("user", None);
+        let mut allow = BTreeMap::new();
+        allow.insert("session.new", "session.new".to_string());
+        let authz_entry = SubjectEntry {
+            name: "hobi-svc".into(),
+            permissions: None,
+            actions: Some(SubjectActionSet {
+                allow,
+                deny: BTreeMap::new(),
+            }),
+            models: None,
+            origin: SubjectOrigin::Authz,
+        };
+        let req = as_hobi("session.new");
+        assert_eq!(
+            agent_arm(&lp.agents, Some(&authz_entry), HOBI_UID, Role::User, &req),
+            Some(deny(SESSION_NEW_DEFAULT))
+        );
+        let agent_entry = SubjectEntry {
+            origin: SubjectOrigin::Agent("hobi".into()),
+            ..authz_entry
+        };
+        assert_eq!(
+            agent_arm(&lp.agents, Some(&agent_entry), HOBI_UID, Role::User, &req),
+            None
+        );
+    }
+
+    #[test]
+    fn session_new_is_subject_limitable_and_never_role_grantable() {
+        let site = format!(
+            "{SUBJECT_SITE}{}",
+            sentinel_entry("    actions:\n      allow: [\"session.new\"]\n")
+        );
+        let policy = maknae_config::parse_authz(&site).unwrap();
+        let subjects = crate::validate_subjects(&policy, &subject_lookups()).unwrap();
+        assert!(subjects
+            .get(SENTINEL_UID)
+            .unwrap()
+            .actions
+            .as_ref()
+            .unwrap()
+            .allow
+            .contains_key("session.new"));
+        for role in ["user", "admin"] {
+            let body = format!("schema_version: 1\npermissions:\n  allow: []\n  deny: []\nroles:\n  {role}:\n    allow: [\"session.new\"]\n");
+            let policy = maknae_config::parse_authz(&body).unwrap();
+            assert_eq!(
+                crate::validate_grants(&policy.action_grants),
+                Err(crate::AuthzBasicError::UnknownActionTerm(
+                    "session.new".into()
+                )),
+                "{role}"
+            );
+        }
+        assert!(!GRANTABLE_ACTIONS.contains(&"session.new"));
     }
 
     #[test]

@@ -16014,7 +16014,15 @@ mod reload_tests {
 
         std::fs::remove_file(dir.join("enrollment.yaml")).unwrap();
         bounded(fx.reloader.run()).await.unwrap();
-        assert_eq!(agent_whoami_as(&fx, 2001, "hobi").1, None);
+        assert_eq!(
+            agent_whoami_as(&fx, 2001, "hobi"),
+            (
+                maknae_security::Verdict::Deny {
+                    reason: "agent channel: uid 2001 is not enrolled agent hobi".into()
+                },
+                None
+            )
+        );
         assert_eq!(fx.baseline().snapshot().agent_uid("hobi"), None);
         assert_eq!(
             identity_records(&fx.reload_records())[1..],

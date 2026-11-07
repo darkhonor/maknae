@@ -84,3 +84,4 @@ action-vocab	fs.read	subject-limitable	a `subjects:` actions list may limit it; 
 action-vocab	fs.write	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608)
 action-vocab	fs.delete	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608)
 action-vocab	fs.mkdir	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608)
+action-vocab	session.new	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608); an agent's policy.yaml allow lifts only its default deny (#609, R-S); no role may grant it until #170
