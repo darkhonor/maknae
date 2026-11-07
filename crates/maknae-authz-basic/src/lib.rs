@@ -2278,21 +2278,41 @@ mod tests {
         out
     }
 
+    fn first_difference(got: &str, want: &str) -> Option<String> {
+        if got == want {
+            return None;
+        }
+        let (gl, wl) = (got.lines().count(), want.lines().count());
+        Some(
+            match got.lines().zip(want.lines()).enumerate().find(|(_, (g, w))| g != w) {
+                Some((i, (g, w))) => format!(
+                    "first difference at line {i} (got {gl} lines, expected {wl}):\n expected: {w}\n      got: {g}"
+                ),
+                None => format!("lines agree up to {}; got {gl} lines, expected {wl}", gl.min(wl)),
+            },
+        )
+    }
+
+    #[test]
+    fn the_first_difference_names_the_line_or_the_length() {
+        assert_eq!(first_difference("a\nb\n", "a\nb\n"), None);
+        let mid = first_difference("a\nX\nc\n", "a\nb\nc\n").unwrap();
+        assert!(
+            mid.contains("line 1") && mid.contains("expected: b") && mid.contains("got: X"),
+            "{mid}"
+        );
+        let tail = first_difference("a\nb\nc\n", "a\nb\n").unwrap();
+        assert_eq!(tail, "lines agree up to 2; got 3 lines, expected 2");
+        let short = first_difference("a\n", "a\nb\n").unwrap();
+        assert_eq!(short, "lines agree up to 1; got 1 lines, expected 2");
+    }
+
     #[test]
     fn the_shipped_authz_yaml_still_decides_identically() {
         let got = shipped_decisions();
         let want = include_str!("testdata/shipped-decisions.txt");
-        if got != want {
-            let (i, (g, w)) = got
-                .lines()
-                .zip(want.lines())
-                .enumerate()
-                .find(|(_, (g, w))| g != w)
-                .unwrap_or((
-                    got.lines().count().min(want.lines().count()),
-                    ("<length differs>", "<length differs>"),
-                ));
-            panic!("first difference at line {i}:\n expected: {w}\n      got: {g}");
+        if let Some(d) = first_difference(&got, want) {
+            panic!("{d}");
         }
     }
 
@@ -3681,6 +3701,45 @@ mod tests {
                 assert_eq!(got.err(), Some(want.clone()), "{entry} {lookup:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_failed_lookup_for_a_name_in_bindings_and_subjects_names_bindings() {
+        let got = resolve_uid_map_with(
+            &with_subjects("  zed: {}\n"),
+            &maknae_config::parse_bindings("schema_version: 1\nbindings:\n  user: [\"zed\"]\n")
+                .unwrap(),
+            |_| Lookup::Failed(5),
+        )
+        .unwrap_err();
+        assert!(matches!(got, AuthzBasicError::Bindings(_)), "{got:?}");
+    }
+
+    #[test]
+    fn a_deny_only_subject_has_an_empty_allow_set() {
+        let src = finish_looking_up(
+            with_subjects("  zed:\n    actions:\n      deny: [\"fs.delete\"]\n"),
+            |n| {
+                if n == "zed" {
+                    Lookup::Found(7001)
+                } else {
+                    Lookup::Found(0)
+                }
+            },
+        )
+        .unwrap();
+        let actions = src
+            .subject_grants()
+            .get(7001)
+            .unwrap()
+            .actions
+            .clone()
+            .unwrap();
+        assert!(actions.allow.is_empty());
+        assert_eq!(
+            actions.deny.keys().copied().collect::<Vec<_>>(),
+            ["fs.delete"]
+        );
     }
 
     #[test]
