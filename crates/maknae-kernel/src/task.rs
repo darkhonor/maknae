@@ -408,6 +408,28 @@ pub(crate) async fn submit_task<P: Authorizer + Send + Sync + 'static>(
     sub: TaskSubmission,
     emit: &impl AuditEmit,
 ) -> Result<Arc<TaskObject>, TaskRefusal> {
+    let pdp = Decider {
+        authorizer,
+        breaker: crate::run::authz_decide_breaker(),
+    };
+    submit_under(pdp, store, view, ctx, by, sub, emit).await
+}
+
+/// The PDP and the request path's decision breaker it is admitted under.
+struct Decider<P> {
+    authorizer: Arc<P>,
+    breaker: Arc<tokio::sync::Mutex<crate::blocking_guard::BlockingBreaker>>,
+}
+
+async fn submit_under<P: Authorizer + Send + Sync + 'static>(
+    pdp: Decider<P>,
+    store: &TaskStore,
+    view: &dyn EnrollmentView,
+    ctx: &SubmitCtx<'_>,
+    by: Submitter,
+    sub: TaskSubmission,
+    emit: &impl AuditEmit,
+) -> Result<Arc<TaskObject>, TaskRefusal> {
     let (uid, agent, tasker) = match &by {
         Submitter::User { uid, .. } => (*uid, None, Tasker::Uid(*uid)),
         Submitter::Agent { agent, uid, .. } => (
@@ -427,7 +449,7 @@ pub(crate) async fn submit_task<P: Authorizer + Send + Sync + 'static>(
         parent: None,
         role: None,
     };
-    let decided = decide(authorizer, store, view, ctx, &by, sub, &mut attempt).await;
+    let decided = decide(pdp, store, view, ctx, &by, sub, &mut attempt).await;
     let rec = match &decided {
         Ok(task) => attempt.record(ctx, Some(task), None),
         Err(refusal) => attempt.record(ctx, None, Some(refusal)),
@@ -446,7 +468,7 @@ pub(crate) async fn submit_task<P: Authorizer + Send + Sync + 'static>(
 }
 
 async fn decide<P: Authorizer + Send + Sync + 'static>(
-    authorizer: Arc<P>,
+    pdp: Decider<P>,
     store: &TaskStore,
     view: &dyn EnrollmentView,
     ctx: &SubmitCtx<'_>,
@@ -473,11 +495,7 @@ async fn decide<P: Authorizer + Send + Sync + 'static>(
     };
     let (generation, enrolled) = store.observe(view, &target);
     let req = task_request(by, target.as_str());
-    let decided = crate::blocking_guard::within_blocking(ctx.decide_timeout, move || {
-        maknae_security::guarded_decide_cited(&*authorizer, &req)
-    })
-    .await
-    .map_err(|e| TaskRefusal::Denied(format!("authorization decision failed: {e}")))?;
+    let decided = decide_admitted(pdp, ctx.decide_timeout, req).await?;
     attempt.role = decided.role;
     match maknae_security::finalize(decided.verdict) {
         maknae_security::Decision::Permit { obligations } => {
@@ -497,9 +515,67 @@ async fn decide<P: Authorizer + Send + Sync + 'static>(
     )
 }
 
+/// The request path's admission, offload and breaker bookkeeping (`run.rs`, the decide arm).
+async fn decide_admitted<P: Authorizer + Send + Sync + 'static>(
+    pdp: Decider<P>,
+    bound: std::time::Duration,
+    req: maknae_security::Request,
+) -> Result<maknae_security::Decided, TaskRefusal> {
+    use crate::blocking_guard::{BreakerAdmission, BreakerTransition};
+    let denied = |reason: &str| Err(TaskRefusal::Denied(reason.to_string()));
+    let admission = pdp
+        .breaker
+        .lock()
+        .await
+        .begin_attempt_at(std::time::Instant::now());
+    match admission {
+        BreakerAdmission::RefuseOpen => {
+            return denied("authorization decision circuit breaker open")
+        }
+        BreakerAdmission::RefuseAtCapacity => {
+            return denied("authorization decision blocking worker budget exhausted")
+        }
+        BreakerAdmission::Admit => {}
+    }
+    let authorizer = pdp.authorizer;
+    let decided = tokio::time::timeout(
+        bound,
+        tokio::task::spawn_blocking(move || {
+            maknae_security::guarded_decide_cited(&*authorizer, &req)
+        }),
+    )
+    .await;
+    match decided {
+        Ok(Ok(d)) => {
+            pdp.breaker.lock().await.record_success();
+            Ok(d)
+        }
+        Ok(Err(_join)) => {
+            pdp.breaker.lock().await.record_success();
+            denied("authorization decision failed (join)")
+        }
+        Err(_elapsed) => {
+            if pdp
+                .breaker
+                .lock()
+                .await
+                .record_timeout_at(std::time::Instant::now())
+                == BreakerTransition::Tripped
+            {
+                eprintln!(
+                    "maknaed: authorization decision circuit breaker tripped after repeated {}s blocking timeouts — failing closed without spawning more policy work",
+                    bound.as_secs()
+                );
+            }
+            denied("authorization decision timed out")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blocking_guard::BlockingBreaker;
     use crate::enrollment::{FixedEnrollment, SnapshotEnrollment};
     use crate::test_fixtures::{fixture, DirGuard};
     use crate::Composition;
@@ -516,6 +592,7 @@ mod tests {
     const HOBI_AGAIN: u32 = 2004;
     const SESSION: u64 = 77;
     const BOUND: std::time::Duration = std::time::Duration::from_secs(5);
+    type Breaker = Arc<tokio::sync::Mutex<BlockingBreaker>>;
     const PROMPT: &str = "task-11-prompt-sentinel";
     const AUTHZ: &str = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nroles:\n  user:\n    allow: [\"session.task\"]\n";
 
@@ -970,7 +1047,7 @@ mod tests {
         by: Submitter,
         sub: TaskSubmission,
         emit: &Recorder,
-        bound: std::time::Duration,
+        (bound, breaker): (std::time::Duration, Option<Breaker>),
     ) -> Result<Arc<TaskObject>, TaskRefusal> {
         let w = wctx();
         let ctx = SubmitCtx {
@@ -980,7 +1057,11 @@ mod tests {
             user: Some("alice"),
             decide_timeout: bound,
         };
-        submit_task(a, store, v, &ctx, by, sub, emit).await
+        let pdp = Decider {
+            authorizer: a,
+            breaker: breaker.unwrap_or_default(),
+        };
+        submit_under(pdp, store, v, &ctx, by, sub, emit).await
     }
 
     async fn submit(
@@ -991,7 +1072,7 @@ mod tests {
         emit: &Recorder,
     ) -> Result<Arc<TaskObject>, TaskRefusal> {
         let view = SnapshotEnrollment(pdp.clone());
-        submit_via(pdp.clone(), store, &view, by, sub(to), emit, BOUND).await
+        submit_via(pdp.clone(), store, &view, by, sub(to), emit, (BOUND, None)).await
     }
 
     #[tokio::test]
@@ -1027,7 +1108,7 @@ mod tests {
             user(),
             sub("ghost"),
             &emit,
-            BOUND,
+            (BOUND, None),
         )
         .await
         .unwrap_err();
@@ -1039,9 +1120,17 @@ mod tests {
         assert_eq!(store.len(), 0);
         let mut bad = sub("hobi");
         bad.version = TASK_VERSION + 1;
-        let refused = submit_via(counting.clone(), &store, &view, user(), bad, &emit, BOUND)
-            .await
-            .unwrap_err();
+        let refused = submit_via(
+            counting.clone(),
+            &store,
+            &view,
+            user(),
+            bad,
+            &emit,
+            (BOUND, None),
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(refused, TaskRefusal::Schema(_)), "{refused:?}");
         assert_eq!(counting.calls.load(Ordering::SeqCst), 1, "no decision");
         assert_eq!(store.len(), 0);
@@ -1248,7 +1337,7 @@ mod tests {
             agent("hobi", HOBI, Some(parent.task_id)),
             sub("jin"),
             &emit,
-            BOUND,
+            (BOUND, None),
         )
         .await
         .unwrap_err();
@@ -1318,7 +1407,7 @@ mod tests {
             user(),
             sub("hobi"),
             &emit,
-            BOUND,
+            (BOUND, None),
         )
         .await
         .unwrap_err();
@@ -1338,9 +1427,17 @@ mod tests {
         let purging = store.clone();
         let racing = hooked(pdp.clone(), move || purging.purge_agent(&id("hobi")));
         let view = SnapshotEnrollment(pdp.clone());
-        let refused = submit_via(racing, &store, &view, user(), sub("hobi"), &emit, BOUND)
-            .await
-            .unwrap_err();
+        let refused = submit_via(
+            racing,
+            &store,
+            &view,
+            user(),
+            sub("hobi"),
+            &emit,
+            (BOUND, None),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(refused, TaskRefusal::AgentGone);
         assert_eq!(store.len(), 0);
         assert_eq!(emit.records().len(), 1);
@@ -1365,9 +1462,17 @@ mod tests {
             reloading.baseline().reload_from_file().unwrap();
         });
         let view = SnapshotEnrollment(pdp.clone());
-        let refused = submit_via(racing, &store, &view, user(), sub("hobi"), &emit, BOUND)
-            .await
-            .unwrap_err();
+        let refused = submit_via(
+            racing,
+            &store,
+            &view,
+            user(),
+            sub("hobi"),
+            &emit,
+            (BOUND, None),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(
             pdp.baseline().snapshot().agent_uid("hobi"),
             Some(HOBI_AGAIN)
@@ -1440,7 +1545,7 @@ mod tests {
             user(),
             sub("hobi"),
             &emit,
-            BOUND,
+            (BOUND, None),
         )
         .await
         .unwrap_err();
@@ -1456,6 +1561,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_authorizer_that_stalls_past_the_bound_is_refused_and_audited() {
+        let breaker: Breaker = Arc::new(tokio::sync::Mutex::new(BlockingBreaker::new(1)));
         let store = TaskStore::new();
         let emit = Recorder::new();
         let refused = submit_via(
@@ -1465,15 +1571,114 @@ mod tests {
             user(),
             sub("hobi"),
             &emit,
-            std::time::Duration::from_millis(50),
+            (std::time::Duration::from_millis(50), Some(breaker.clone())),
         )
         .await
         .unwrap_err();
-        let want = "authorization decision failed: did not complete within 50ms";
+        let want = "authorization decision timed out";
         assert_eq!(refused, TaskRefusal::Denied(want.into()));
+        assert!(
+            breaker.lock().await.is_open_at(std::time::Instant::now()),
+            "the timeout is recorded on the breaker"
+        );
         assert_eq!(store.len(), 0);
         let records = emit.records();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].outcome.reason, want);
+    }
+
+    #[tokio::test]
+    async fn an_open_breaker_refuses_without_calling_the_pdp() {
+        let (_g, pdp) = pdp("breaker-open");
+        let store = TaskStore::new();
+        let emit = Recorder::new();
+        let counting = hooked(pdp.clone(), || {});
+        let view = SnapshotEnrollment(pdp.clone());
+        let open: Breaker = Arc::new(tokio::sync::Mutex::new(BlockingBreaker::new(0)));
+        let refused = submit_via(
+            counting.clone(),
+            &store,
+            &view,
+            user(),
+            sub("hobi"),
+            &emit,
+            (BOUND, Some(open)),
+        )
+        .await
+        .unwrap_err();
+        let want = "authorization decision circuit breaker open";
+        assert_eq!(refused, TaskRefusal::Denied(want.into()));
+        let full: Breaker = Arc::default();
+        for _ in 0..crate::BLOCKING_BREAKER_MAX_IN_FLIGHT {
+            full.lock()
+                .await
+                .begin_attempt_at(std::time::Instant::now());
+        }
+        let refused = submit_via(
+            counting.clone(),
+            &store,
+            &view,
+            user(),
+            sub("hobi"),
+            &emit,
+            (BOUND, Some(full.clone())),
+        )
+        .await
+        .unwrap_err();
+        let full_reason = "authorization decision blocking worker budget exhausted";
+        assert_eq!(refused, TaskRefusal::Denied(full_reason.into()));
+        assert_eq!(counting.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(store.len(), 0);
+        let reasons: Vec<_> = emit
+            .records()
+            .into_iter()
+            .map(|r| r.outcome.reason)
+            .collect();
+        assert_eq!(reasons, [want, full_reason]);
+    }
+
+    #[tokio::test]
+    async fn a_decision_releases_its_breaker_slot() {
+        let (_g, pdp) = pdp("breaker-slot");
+        let store = TaskStore::new();
+        let emit = Recorder::new();
+        let view = SnapshotEnrollment(pdp.clone());
+        let one: Breaker = Arc::default();
+        for _ in 1..crate::BLOCKING_BREAKER_MAX_IN_FLIGHT {
+            one.lock().await.begin_attempt_at(std::time::Instant::now());
+        }
+        for _ in 0..2 {
+            submit_via(
+                pdp.clone(),
+                &store,
+                &view,
+                user(),
+                sub("hobi"),
+                &emit,
+                (BOUND, Some(one.clone())),
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn submit_task_decides_under_the_request_paths_breaker() {
+        let (_g, pdp) = pdp("global-breaker");
+        let store = TaskStore::new();
+        let emit = Recorder::new();
+        let w = wctx();
+        let ctx = SubmitCtx {
+            where_: &w,
+            session_id: SESSION,
+            seq: 5,
+            user: None,
+            decide_timeout: BOUND,
+        };
+        let view = SnapshotEnrollment(pdp.clone());
+        submit_task(pdp.clone(), &store, &view, &ctx, user(), sub("hobi"), &emit)
+            .await
+            .unwrap();
+        assert_eq!(store.len(), 1);
     }
 }

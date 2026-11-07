@@ -91,7 +91,7 @@ static GROUP_LOOKUP_BREAKER: OnceLock<Arc<tokio::sync::Mutex<BlockingBreaker>>> 
 // expiry, already abandoned.
 static EGRESS_SEND_BREAKER: OnceLock<Arc<tokio::sync::Mutex<BlockingBreaker>>> = OnceLock::new();
 
-fn authz_decide_breaker() -> Arc<tokio::sync::Mutex<BlockingBreaker>> {
+pub(crate) fn authz_decide_breaker() -> Arc<tokio::sync::Mutex<BlockingBreaker>> {
     Arc::clone(AUTHZ_DECIDE_BREAKER.get_or_init(|| Arc::new(Default::default())))
 }
 
