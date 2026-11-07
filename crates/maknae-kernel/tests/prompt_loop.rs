@@ -169,7 +169,7 @@ fn last_prompt_record(records: &Records) -> maknae_audit_append::AuditRecord {
 }
 
 const GRANTED: &str =
-    "roles:\n  user:\n    allow: [\"session.prompt\"]\ndestinations:\n  user:\n    allow: [\"provider:openai\"]\n";
+    "roles:\n  user:\n    allow: [\"session.prompt\", \"session.new\"]\ndestinations:\n  user:\n    allow: [\"provider:openai\"]\n";
 
 // Record sequence on the recorder for one prompt: admission (1), then the
 // intent (2) and the outcome (3); the Unavailable leg emits admission then one
@@ -1688,7 +1688,7 @@ async fn a_prompt_admitted_before_a_live_install_and_decided_after_it_is_refused
     let mut fx = Fixture::with_policy(
         "prompt-live-race",
         "Read",
-        "roles:\n  admin:\n    allow: [\"session.prompt\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\", \"provider:anthropic\"]\n",
+        "roles:\n  admin:\n    allow: [\"session.prompt\", \"session.new\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\", \"provider:anthropic\"]\n",
     );
     std::fs::remove_file(fx.paths().bindings).unwrap();
     let peer = fx.principal.clone();

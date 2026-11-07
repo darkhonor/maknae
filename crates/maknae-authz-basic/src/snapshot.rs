@@ -540,7 +540,7 @@ mod tests {
 
     const SHIPPED: &str = include_str!("../../../packaging/common/authz.yaml");
     const BINDINGS: &str = "schema_version: 1\nbindings:\n  admin: [\"alex\"]\n  user: [\"ursula\"]\n  guest: [\"gus\"]\n  adversary: [\"mallory\"]\n";
-    const WITH_GRANTS_AND_DESTS: &str = "schema_version: 1\nroles:\n  admin:\n    allow: [\"admin.status\"]\n    deny: [\"admin.config.show\"]\n  user:\n    allow: [\"session.prompt\"]\ndestinations:\n  user:\n    allow: [\"provider:openai\"]\n";
+    const WITH_GRANTS_AND_DESTS: &str = "schema_version: 1\nroles:\n  admin:\n    allow: [\"admin.status\"]\n    deny: [\"admin.config.show\"]\n  user:\n    allow: [\"session.prompt\", \"session.new\"]\ndestinations:\n  user:\n    allow: [\"provider:openai\"]\n";
     const PATH: &str = "/etc/maknae/authz.yaml";
     const DIR: &str = "/etc/maknae";
     const LABEL: &str = "UNCLASSIFIED";
@@ -934,7 +934,7 @@ mod tests {
         assert!(g
             .lookup(SECTION, &format!("{PATH}#schema_version"))
             .is_none());
-        assert_eq!(g.nodes().iter().filter(|n| n.kind == RULE).count(), 4);
+        assert_eq!(g.nodes().iter().filter(|n| n.kind == RULE).count(), 5);
     }
 
     fn rebuilt(
@@ -1287,6 +1287,23 @@ mod tests {
         if let Some(d) = dest {
             r.insert("destination", maknae_security::AttrValue::Str(d.into()));
         }
+        if matches!(
+            action,
+            "session.prompt" | "session.close" | "session.delete"
+        ) {
+            r.insert(
+                "conversation_state",
+                maknae_security::AttrValue::Str("active".into()),
+            );
+            r.insert(
+                "conversation_owner",
+                maknae_security::AttrValue::Int(i64::from(uid)),
+            );
+            r.insert(
+                "conversation_extends",
+                maknae_security::AttrValue::Str("advance".into()),
+            );
+        }
         let mut c = Attributes::new();
         c.insert(
             maknae_security::CONTEXT_DAC_LANE,
@@ -1307,7 +1324,7 @@ mod tests {
     #[test]
     fn every_citation_the_decision_core_emits_resolves_in_the_index() {
         let s = source_with(&format!(
-            "{}roles:\n  admin:\n    allow: [\"admin.*\", \"session.prompt\"]\n    deny: [\"admin.config.show\"]\n  user:\n    allow: [\"session.prompt\"]\n    deny: [\"session.prompt\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\"]\n",
+            "{}roles:\n  admin:\n    allow: [\"admin.*\", \"session.*\"]\n    deny: [\"admin.config.show\"]\n  user:\n    allow: [\"session.prompt\"]\n    deny: [\"session.prompt\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\"]\n",
             crate::tests::shipped_without_roles()
         ), Some(BINDINGS));
         let snap = snap(&s);
@@ -1325,6 +1342,11 @@ mod tests {
             sec_request(1000, "admin.contain", None, None),
             sec_request(1000, "session.prompt", None, Some("provider:openai")),
             sec_request(1001, "session.prompt", None, Some("provider:openai")),
+            sec_request(1000, "session.new", Some("/home/operator/notes"), None),
+            sec_request(1000, "session.new", Some("/home/operator/.ssh/k"), None),
+            sec_request(1000, "session.close", None, None),
+            sec_request(1000, "session.list", None, None),
+            sec_request(1000, "session.delete", None, None),
         ];
         for req in cases {
             let d = crate::decide::decide_loaded_cited(&snap.loaded, &principal(), &req);

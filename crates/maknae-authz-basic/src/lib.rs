@@ -37,6 +37,15 @@ use snapshot::Snapshot;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock};
 
+/// The grantable terms `user` may hold.
+pub(crate) const USER_GRANTABLE: [&str; 5] = [
+    "session.prompt",
+    "session.new",
+    "session.close",
+    "session.list",
+    "session.delete",
+];
+
 /// Subject attribute key for the authenticated uid (pinned for #77; ADR-0018:
 /// the per-request authorization principal is the uid, from peer-cred).
 pub const SUBJECT_UID_KEY: &str = decide::SUBJECT_UID;
@@ -69,7 +78,7 @@ pub enum AuthzBasicError {
     /// (#162). Carries the offending term.
     UnknownActionTerm(String),
     /// A `roles:` list names a grantable term that THIS role may not hold
-    /// (#172: `user` may hold `session.prompt` only; the admin disclosure
+    /// (#172, #170: `user` may hold the session terms only; the admin disclosure
     /// terms are admin-only, ADR-0010 decision 4 as superseded 2026-09-08).
     TermNotGrantableForRole { role: String, term: String },
     /// A `subjects:` list names no family or term in the action vocabulary.
@@ -83,6 +92,9 @@ pub enum AuthzBasicError {
     /// The snapshot compiler refused the policy against the persisted identity
     /// layer or the vocabulary.
     Compile(snapshot::CompileError),
+    /// A `roles:` or `subjects:` scope leaves a person able to prompt but not to
+    /// open a conversation (#170). Carries the scope, e.g. `roles.user`.
+    PromptWithoutNew { scope: String },
 }
 
 impl std::fmt::Display for AuthzBasicError {
@@ -105,8 +117,9 @@ impl std::fmt::Display for AuthzBasicError {
             ),
             AuthzBasicError::TermNotGrantableForRole { role, term } => write!(
                 f,
-                "authz roles: `{term}` is not grantable to role `{role}` (admin: {}; user: session.prompt)",
-                decide::GRANTABLE_ACTIONS.join(", ")
+                "authz roles: `{term}` is not grantable to role `{role}` (admin: {}; user: {})",
+                decide::GRANTABLE_ACTIONS.join(", "),
+                USER_GRANTABLE.join(", ")
             ),
             AuthzBasicError::UnknownAction(a) => {
                 write!(f, "authz subjects: `{a}` names no action family or term")
@@ -120,6 +133,10 @@ impl std::fmt::Display for AuthzBasicError {
                 "authz subjects: `{a}` and `{b}` resolve to the same uid {uid}"
             ),
             AuthzBasicError::Compile(e) => write!(f, "authz {e}"),
+            AuthzBasicError::PromptWithoutNew { scope } => write!(
+                f,
+                "`{scope}`: session.prompt needs session.new (a person who can prompt must be able to open a conversation)"
+            ),
         }
     }
 }
@@ -651,7 +668,7 @@ fn validate_destinations(
 /// Three checks, because `Role::from_key` answers only the first: the key is
 /// a role; the role may hold grants at all (`admin` and, since #172, `user`;
 /// `guest`/`adversary` are structural); and the term is one that role may
-/// hold (`user`: `session.prompt` only — the admin disclosure terms stay
+/// hold (`user`: the session terms only — the admin disclosure terms stay
 /// admin-only, ADR-0010 decision 4 as superseded 2026-09-08). Gates **both**
 /// `allow` and `deny`, so a typo'd deny cannot be silently accepted as an
 /// unenforced denial. *(Corrected 2026-09-09: this said Phase 1 grants
@@ -674,9 +691,31 @@ fn validate_grants(
             }
             Ok(out)
         };
-        out.insert(key.clone(), (check(&grants.allow)?, check(&grants.deny)?));
+        let (allow, deny) = (check(&grants.allow)?, check(&grants.deny)?);
+        validate_prompt_pairing(
+            &format!("roles.{key}"),
+            allow.iter().map(|(t, _)| *t),
+            deny.iter().map(|(t, _)| *t),
+        )?;
+        out.insert(key.clone(), (allow, deny));
     }
     Ok(decide::ActionGrants::from_validated(out))
+}
+
+/// A person who may prompt must be able to open a conversation (#170): the
+/// effective set (allow minus deny) holding `session.prompt` must hold `session.new`.
+fn validate_prompt_pairing<'a>(
+    scope: &str,
+    allow: impl Iterator<Item = &'a str> + Clone,
+    deny: impl Iterator<Item = &'a str> + Clone,
+) -> Result<(), AuthzBasicError> {
+    let holds = |t: &str| allow.clone().any(|a| a == t) && !deny.clone().any(|d| d == t);
+    if holds("session.prompt") && !holds("session.new") {
+        return Err(AuthzBasicError::PromptWithoutNew {
+            scope: scope.to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// The terms one written `roles:` entry grants `role`. A family keeps only the terms
@@ -687,7 +726,7 @@ pub(crate) fn role_terms(
     p: &maknae_config::ActionPattern,
 ) -> Result<Vec<&'static str>, AuthzBasicError> {
     let unknown = || AuthzBasicError::UnknownActionTerm(p.source());
-    let holds = |t: &str| role != role::Role::User || t == "session.prompt";
+    let holds = |t: &str| role != role::Role::User || USER_GRANTABLE.contains(&t);
     let terms: Vec<&'static str> = decide::expand(p)
         .map_err(|_| unknown())?
         .into_iter()
@@ -734,10 +773,16 @@ fn validate_subjects(
                     }
                     Ok::<_, AuthzBasicError>(terms)
                 };
-                Some(decide::SubjectActionSet {
+                let set = decide::SubjectActionSet {
                     allow: expand_all(&lists.allow)?,
                     deny: expand_all(&lists.deny)?,
-                })
+                };
+                validate_prompt_pairing(
+                    &format!("subjects.{name}"),
+                    set.allow.keys().copied(),
+                    set.deny.keys().copied(),
+                )?;
+                Some(set)
             }
         };
         let Some(&Some(uid)) = lookups.get(name) else {
@@ -1295,7 +1340,11 @@ mod tests {
                 "admin.baseline.accept",
                 "admin.contain",
                 "admin.release",
-                "session.prompt"
+                "session.prompt",
+                "session.new",
+                "session.close",
+                "session.list",
+                "session.delete"
             ]
         );
     }
@@ -1514,7 +1563,7 @@ mod tests {
             })
         }
 
-        const TERMS: [&str; 12] = [
+        const TERMS: [&str; 16] = [
             "admin.status",
             "admin.config.show",
             "admin.subject.list",
@@ -1523,6 +1572,10 @@ mod tests {
             "admin.contain",
             "admin.release",
             "session.prompt",
+            "session.new",
+            "session.close",
+            "session.list",
+            "session.delete",
             "fs.read",
             "fs.write",
             "fs.delete",
@@ -1941,7 +1994,7 @@ mod tests {
             .map(|t| format!("      - \"{t}\"\n"))
             .collect();
         let authz = format!(
-            "{EMPTY}roles:\n  admin:\n    allow:\n{grants}  user:\n    allow: [\"session.prompt\"]\n"
+            "{EMPTY}roles:\n  admin:\n    allow:\n{grants}  user:\n    allow: [\"session.prompt\", \"session.new\"]\n"
         );
         let bindings =
             "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary: [\"mallory\"]\n";
@@ -2249,7 +2302,7 @@ mod tests {
             );
         }
         let subjects = source_with(
-            &format!("{SHIPPED}subjects:\n  ursula:\n    permissions:\n      allow: [\"Read(~/docs/**)\"]\n      deny: [\"Read(~/docs/secret/**)\"]\n    actions:\n      allow: [\"fs.*\", \"session.prompt\"]\n    models:\n      allow: [\"openai/gpt-5\"]\n"),
+            &format!("{SHIPPED}subjects:\n  ursula:\n    permissions:\n      allow: [\"Read(~/docs/**)\"]\n      deny: [\"Read(~/docs/secret/**)\"]\n    actions:\n      allow: [\"fs.*\", \"session.prompt\", \"session.new\"]\n    models:\n      allow: [\"openai/gpt-5\"]\n"),
             Some(
                 "schema_version: 1\nbindings:\n  user: [\"ursula\"]\n  adversary: [\"mallory\"]\n",
             ),
@@ -3463,7 +3516,7 @@ mod tests {
             "{got:?}"
         );
         assert!(finish(parse_with_roles(
-            "roles:\n  user:\n    allow: [\"session.prompt\"]\n"
+            "roles:\n  user:\n    allow: [\"session.prompt\", \"session.new\"]\n"
         ))
         .is_ok());
     }
@@ -3571,13 +3624,22 @@ mod tests {
                 ("admin.release", "admin.*"),
                 ("admin.status", "admin.*"),
                 ("admin.subject.list", "admin.*"),
+                ("session.close", "session.*"),
+                ("session.delete", "session.*"),
+                ("session.list", "session.*"),
+                ("session.new", "session.*"),
                 ("session.prompt", "session.*"),
             ]
         );
         assert_eq!(deny, &[("admin.contain", "admin.contain".to_string())]);
         assert_eq!(
             grants.0["user"],
-            (vec![("session.prompt", "session.*".to_string())], vec![])
+            (
+                USER_GRANTABLE
+                    .map(|t| (t, "session.*".to_string()))
+                    .to_vec(),
+                vec![]
+            )
         );
         assert_eq!(
             grants.evaluate3_action("admin", "admin.status"),
@@ -3610,7 +3672,7 @@ mod tests {
         PolicySource::from_lookups(policy, bindings, lookups, lookup_uid, principal(), paths())
     }
 
-    const ZED: &str = "  zed:\n    permissions:\n      allow: [\"Read(~/docs/**)\"]\n      deny: [\"Read(~/docs/secret/**)\"]\n    actions:\n      allow: [\"fs.*\", \"session.prompt\"]\n    models:\n      allow: [\"openai/gpt-5\"]\n";
+    const ZED: &str = "  zed:\n    permissions:\n      allow: [\"Read(~/docs/**)\"]\n      deny: [\"Read(~/docs/secret/**)\"]\n    actions:\n      allow: [\"fs.*\", \"session.prompt\", \"session.new\"]\n    models:\n      allow: [\"openai/gpt-5\"]\n";
 
     #[test]
     fn a_subject_name_resolves_to_its_uid() {
@@ -3645,6 +3707,7 @@ mod tests {
                 ("fs.mkdir", "fs.*".to_string()),
                 ("fs.read", "fs.*".to_string()),
                 ("fs.write", "fs.*".to_string()),
+                ("session.new", "session.new".to_string()),
                 ("session.prompt", "session.prompt".to_string()),
             ]
             .into_iter()
@@ -3890,6 +3953,151 @@ mod tests {
             matches!(got, Err(AuthzBasicError::UnknownActionTerm(ref t)) if t == "admin.credential.rotate"),
             "deny lists are gated identically to allow lists, got {got:?}"
         );
+    }
+
+    #[test]
+    fn a_role_with_prompt_but_not_new_refuses_at_load() {
+        for (role, lists) in [
+            ("user", "allow: [\"session.prompt\"]"),
+            ("admin", "allow: [\"session.prompt\", \"session.list\"]"),
+            (
+                "user",
+                "allow: [\"session.*\"]\n    deny: [\"session.new\"]",
+            ),
+            (
+                "user",
+                "allow: [\"session.prompt\", \"session.new\"]\n    deny: [\"session.new\"]",
+            ),
+        ] {
+            let got = finish(parse_with_roles(&format!(
+                "roles:\n  {role}:\n    {lists}\n"
+            )));
+            assert_eq!(
+                got.err(),
+                Some(AuthzBasicError::PromptWithoutNew {
+                    scope: format!("roles.{role}")
+                }),
+                "{role}: {lists}"
+            );
+        }
+        for lists in [
+            "allow: [\"session.prompt\", \"session.new\"]",
+            "allow: [\"session.*\"]",
+            "allow: [\"session.new\"]",
+            "allow: [\"session.*\"]\n    deny: [\"session.prompt\", \"session.new\"]",
+            "allow: [\"session.prompt\"]\n    deny: [\"session.prompt\"]",
+            "allow: [\"session.list\"]",
+        ] {
+            assert!(
+                finish(parse_with_roles(&format!("roles:\n  user:\n    {lists}\n"))).is_ok(),
+                "{lists}"
+            );
+        }
+        assert_eq!(
+            AuthzBasicError::PromptWithoutNew {
+                scope: "roles.user".into()
+            }
+            .to_string(),
+            "`roles.user`: session.prompt needs session.new (a person who can prompt must be able to open a conversation)"
+        );
+    }
+
+    #[test]
+    fn a_subject_with_prompt_but_not_new_refuses_at_load() {
+        let lookup = |n: &str| match n {
+            "sentinel-170-pairing" => Lookup::Found(7170),
+            _ => Lookup::Found(0),
+        };
+        for (actions, resolves) in [
+            ("allow: [\"session.prompt\"]", true),
+            (
+                "allow: [\"session.*\"]\n      deny: [\"session.new\"]",
+                true,
+            ),
+            ("allow: [\"session.prompt\", \"fs.*\"]", false),
+        ] {
+            let name = if resolves {
+                "sentinel-170-pairing"
+            } else {
+                "sentinel-170-unresolved"
+            };
+            let got = finish_looking_up(
+                with_subjects(&format!("  {name}:\n    actions:\n      {actions}\n")),
+                |n| {
+                    if n == "sentinel-170-unresolved" {
+                        Lookup::Absent
+                    } else {
+                        lookup(n)
+                    }
+                },
+            );
+            assert_eq!(
+                got.err(),
+                Some(AuthzBasicError::PromptWithoutNew {
+                    scope: format!("subjects.{name}")
+                }),
+                "{actions}"
+            );
+        }
+        for actions in [
+            "allow: [\"session.prompt\", \"session.new\"]",
+            "allow: [\"session.*\"]\n      deny: [\"session.prompt\"]",
+            "allow: [\"fs.*\"]",
+        ] {
+            assert!(
+                finish_looking_up(
+                    with_subjects(&format!(
+                        "  sentinel-170-pairing:\n    actions:\n      {actions}\n"
+                    )),
+                    lookup,
+                )
+                .is_ok(),
+                "{actions}"
+            );
+        }
+        assert!(finish_looking_up(
+            with_subjects(
+                "  sentinel-170-pairing:\n    permissions:\n      allow: [\"Read(~/**)\"]\n"
+            ),
+            lookup,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn guest_or_adversary_grants_refuse_at_load() {
+        for key in ["guest", "adversary"] {
+            for term in [
+                "session.new",
+                "session.close",
+                "session.list",
+                "session.delete",
+                "session.*",
+            ] {
+                assert_eq!(
+                    finish(parse_with_roles(&format!(
+                        "roles:\n  {key}:\n    allow: [\"{term}\"]\n"
+                    )))
+                    .err(),
+                    Some(AuthzBasicError::RoleNotSupportedYet(key.into())),
+                    "{key} {term}"
+                );
+            }
+        }
+        for term in [
+            "session.new",
+            "session.close",
+            "session.list",
+            "session.delete",
+        ] {
+            assert!(
+                finish(parse_with_roles(&format!(
+                    "roles:\n  user:\n    allow: [\"{term}\"]\n"
+                )))
+                .is_ok(),
+                "user may hold {term}"
+            );
+        }
     }
 
     /// A valid `roles:` block loads. The refusal tests above all pass against
@@ -5062,9 +5270,9 @@ mod tests {
             ("mallory", 666),
         ];
         const EXPLICIT: &str = "schema_version: 1\nbindings: { admin: [alex], user: [ursula], guest: [gus], adversary: [mallory] }\n";
-        const GRANTS: &str = "roles: { admin: { allow: [admin.status, admin.subject.list, session.prompt], deny: [admin.config.show] }, user: { allow: [session.prompt] } }\ndestinations: { user: { allow: [\"provider:openai\"] }, admin: { allow: [\"provider:anthropic\"] } }\n";
+        const GRANTS: &str = "roles: { admin: { allow: [admin.status, admin.subject.list, session.prompt, session.new], deny: [admin.config.show] }, user: { allow: [session.prompt, session.new] } }\ndestinations: { user: { allow: [\"provider:openai\"] }, admin: { allow: [\"provider:anthropic\"] } }\n";
 
-        const SUBJECTS: &str = "subjects:\n  ursula:\n    permissions:\n      allow: [\"Read(~/projects/**)\", \"Write(~/projects/**)\"]\n      deny: [\"Read(~/projects/a/**)\"]\n    actions:\n      allow: [\"fs.*\", \"session.prompt\"]\n      deny: [\"fs.delete\"]\n    models:\n      allow: [\"openai/gpt-5\"]\n";
+        const SUBJECTS: &str = "subjects:\n  ursula:\n    permissions:\n      allow: [\"Read(~/projects/**)\", \"Write(~/projects/**)\"]\n      deny: [\"Read(~/projects/a/**)\"]\n    actions:\n      allow: [\"fs.*\", \"session.prompt\", \"session.new\"]\n      deny: [\"fs.delete\"]\n    models:\n      allow: [\"openai/gpt-5\"]\n";
 
         fn explicit_with(admin: &str, user: &str, guest: &str, adversary: &str) -> String {
             format!("schema_version: 1\nbindings: {{ admin: [{admin}], user: [{user}], guest: [{guest}], adversary: [{adversary}] }}\n")
@@ -5431,7 +5639,7 @@ mod tests {
                             }
                         } else if *term == "session.prompt" {
                             for d in &destinations {
-                                let req = request(
+                                let mut req = request(
                                     term,
                                     uid,
                                     &None,
@@ -5439,6 +5647,23 @@ mod tests {
                                     false,
                                     None,
                                 );
+                                let owner = match uid {
+                                    Some(AttrValue::Int(u)) => *u,
+                                    _ => 0,
+                                };
+                                for (k, v) in [
+                                    (
+                                        decide::RESOURCE_CONVERSATION_STATE,
+                                        AttrValue::Str("active".into()),
+                                    ),
+                                    (decide::RESOURCE_CONVERSATION_OWNER, AttrValue::Int(owner)),
+                                    (
+                                        decide::RESOURCE_CONVERSATION_EXTENDS,
+                                        AttrValue::Str("advance".into()),
+                                    ),
+                                ] {
+                                    req.resource.0.insert(k, v);
+                                }
                                 check(req, &|| format!("{term} uid={uid:?} destination={d:?}"));
                             }
                         } else {

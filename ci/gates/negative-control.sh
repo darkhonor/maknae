@@ -692,7 +692,7 @@ FIX
   # or the control exercises a different anchor than the one that ships.
   # $2 overrides the grantable constant, for the subset control below.
   # $5 overrides the vocabulary line; set and empty means no line at all.
-  printf '%s\n%s\n' "${2:-pub(crate) const GRANTABLE_ACTIONS: [&str; 8] = [\"admin.status\", \"admin.config.show\", \"admin.subject.list\", \"admin.baseline.show\", \"admin.baseline.accept\", \"admin.contain\", \"admin.release\", \"session.prompt\"];}" \
+  printf '%s\n%s\n' "${2:-pub(crate) const GRANTABLE_ACTIONS: [&str; 12] = [\"admin.status\", \"admin.config.show\", \"admin.subject.list\", \"admin.baseline.show\", \"admin.baseline.accept\", \"admin.contain\", \"admin.release\", \"session.prompt\", \"session.new\", \"session.close\", \"session.list\", \"session.delete\"];}" \
     "${5-$VOCAB_DEFAULT}" > "$fixture/crates/maknae-authz-basic/src/decide.rs"
   {
     printf '%s' "$1"

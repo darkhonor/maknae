@@ -826,7 +826,11 @@ mod tests {
                 "admin.baseline.accept",
                 "admin.contain",
                 "admin.release",
-                "session.prompt"
+                "session.prompt",
+                "session.new",
+                "session.close",
+                "session.list",
+                "session.delete"
             ],
             "the hand-copied list in the class test above must match the constant"
         );

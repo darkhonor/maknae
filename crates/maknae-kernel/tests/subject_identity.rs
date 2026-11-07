@@ -46,7 +46,7 @@ async fn the_record_carries_the_role_the_decision_was_made_on_for_every_shipped_
 /// trail reads `role=none`.
 #[tokio::test]
 async fn the_egress_refusal_record_carries_the_decided_role() {
-    const GRANTED: &str = "roles:\n  user:\n    allow: [\"session.prompt\"]\ndestinations:\n  user:\n    allow: [\"provider:openai\"]\n";
+    const GRANTED: &str = "roles:\n  user:\n    allow: [\"session.prompt\", \"session.new\"]\ndestinations:\n  user:\n    allow: [\"provider:openai\"]\n";
     let fx = Fixture::with_policy("prompt-role", "Read", GRANTED);
     let records = Records::new(0);
     let _ = fx

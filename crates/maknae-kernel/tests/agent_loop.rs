@@ -350,7 +350,7 @@ async fn acked(
 // The roles: + destinations: tail that makes session.prompt decidable for the
 // `user` role — identical to prompt_loop.rs:143 and subject_identity.rs:49.
 const GRANTED: &str =
-    "roles:\n  user:\n    allow: [\"session.prompt\"]\ndestinations:\n  user:\n    allow: [\"provider:openai\"]\n";
+    "roles:\n  user:\n    allow: [\"session.prompt\", \"session.new\"]\ndestinations:\n  user:\n    allow: [\"provider:openai\"]\n";
 
 fn script(egress: &Scripted, replies: impl IntoIterator<Item = PromptReply>) {
     egress.replies.lock().unwrap().extend(replies);
