@@ -18,12 +18,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use maknae_audit_append::{AuditEmit, AuditError, AuditRecord, SessionIds};
-use maknae_kernel::session_facts::{AccountFact, AccountState, LoginFact, NotCheckedWhy};
+use maknae_kernel::session_facts::{AccountFact, AccountState, NotCheckedWhy};
 use maknae_kernel::FactsGate;
 use maknae_kernel::{Admission, ChannelClass, Conn, PlaneAccept, ServeOutcome, WhereCtx};
 use maknae_vault::{
-    AcceptRejection, ChannelPeer, PeerAuth, PeerCreds, PeerProcess, RejectReason, SenderVerdict,
-    VaultError,
+    AcceptRejection, ChannelPeer, PeerAuth, PeerCreds, RejectReason, SenderVerdict, VaultError,
 };
 use tokio::io::DuplexStream;
 use tokio::time::Instant;
@@ -69,8 +68,8 @@ impl AuditEmit for RecEmit {
 /// split behaves: rejections still audit, and a stalled handshake does not block the loop.
 enum Scripted {
     Ok(DuplexStream, ChannelPeer, u32),
-    /// An OK connection whose peer process handle and sender verdict are given.
-    OkWith(DuplexStream, ChannelPeer, u32, PeerProcess, SenderVerdict),
+    /// An OK connection whose sender verdict is given.
+    OkWith(DuplexStream, ChannelPeer, u32, SenderVerdict),
     Reject(AcceptRejection),
     /// `accept_raw` succeeds, but `finish_handshake` sleeps this long before yielding an OK
     /// connection — simulating a peer that stalls the TLS handshake.
@@ -80,7 +79,7 @@ enum Scripted {
 
 /// The raw handle `accept_raw` hands to `finish_handshake` (opaque, like `RawPlaneConn`).
 enum FakeRaw {
-    Conn(DuplexStream, ChannelPeer, u32, PeerProcess, SenderVerdict),
+    Conn(DuplexStream, ChannelPeer, u32, SenderVerdict),
     Reject(AcceptRejection),
     Stall(Duration, DuplexStream, ChannelPeer, u32),
 }
@@ -89,7 +88,6 @@ fn conn(
     stream: DuplexStream,
     peer: ChannelPeer,
     uid: u32,
-    process: PeerProcess,
     sender: SenderVerdict,
 ) -> Conn<DuplexStream> {
     Conn {
@@ -97,8 +95,6 @@ fn conn(
         stream,
         peer,
         peer_uid: uid,
-        process: Arc::new(process),
-        peer_pid: Some(4242),
         sender,
     }
 }
@@ -143,19 +139,12 @@ impl PlaneAccept for FakeAccept {
         }
         match item {
             Some(Scripted::Ok(stream, peer, uid)) => Ok((
-                FakeRaw::Conn(
-                    stream,
-                    peer,
-                    uid,
-                    PeerProcess::Unavailable,
-                    SenderVerdict::default(),
-                ),
+                FakeRaw::Conn(stream, peer, uid, SenderVerdict::default()),
                 creds(uid),
             )),
-            Some(Scripted::OkWith(stream, peer, uid, process, sender)) => Ok((
-                FakeRaw::Conn(stream, peer, uid, process, sender),
-                creds(uid),
-            )),
+            Some(Scripted::OkWith(stream, peer, uid, sender)) => {
+                Ok((FakeRaw::Conn(stream, peer, uid, sender), creds(uid)))
+            }
             Some(Scripted::Reject(rej)) => {
                 let c = rej.peer_creds.unwrap_or_else(|| creds(0));
                 Ok((FakeRaw::Reject(rej), c))
@@ -178,19 +167,11 @@ impl PlaneAccept for FakeAccept {
         _handshake_timeout: Duration,
     ) -> Result<Conn<DuplexStream>, AcceptRejection> {
         match raw {
-            FakeRaw::Conn(stream, peer, uid, process, sender) => {
-                Ok(conn(stream, peer, uid, process, sender))
-            }
+            FakeRaw::Conn(stream, peer, uid, sender) => Ok(conn(stream, peer, uid, sender)),
             FakeRaw::Reject(rej) => Err(rej),
             FakeRaw::Stall(d, stream, peer, uid) => {
                 tokio::time::sleep(d).await;
-                Ok(conn(
-                    stream,
-                    peer,
-                    uid,
-                    PeerProcess::Unavailable,
-                    SenderVerdict::default(),
-                ))
+                Ok(conn(stream, peer, uid, SenderVerdict::default()))
             }
         }
     }
@@ -276,7 +257,7 @@ async fn drive_class(
 }
 
 /// The host's own sources, with no account source declared: the membership the
-/// accept loop always asked, and a login no fake peer process can satisfy.
+/// accept loop always asked.
 fn host_gate() -> Arc<FactsGate> {
     FactsGate::for_test(
         Arc::new(maknae_kernel::session_facts::HostSessionFacts {
@@ -1224,11 +1205,6 @@ async fn a_member_whose_account_was_deleted_is_refused_at_the_request() {
 }
 
 #[tokio::test]
-async fn a_logged_out_process_is_refused_at_the_request() {
-    refused_at_the_request(common::with_login(LoginFact::NotActive), "logout").await;
-}
-
-#[tokio::test]
 async fn a_locked_local_account_is_refused() {
     let locked = || common::member_facts(AccountFact::Checked(AccountState::Locked));
     refused_at_the_request(locked(), "account-locked").await;
@@ -1512,7 +1488,6 @@ async fn refused_for_its_sender(server: DuplexStream, client: DuplexStream) {
             server,
             certified("spiffe://d/plane/cli"),
             SESSION_UID,
-            PeerProcess::Unavailable,
             mismatched_sender().await,
         )],
         common::ScriptedFacts::gate(vec![common::active_member()]),
@@ -1567,72 +1542,41 @@ async fn a_frame_read_timeout_ends_idle() {
     assert_eq!(answer(client).await, None);
 }
 
-/// A member whose process was alive at connect and is asked of the host's own
-/// mapping afterwards.
-struct ExitsAfterConnect(std::sync::atomic::AtomicUsize);
+/// An active member on every gather, whatever process the connection came from.
+struct AlwaysActiveMember;
 
-impl maknae_kernel::SessionFacts for ExitsAfterConnect {
+impl maknae_kernel::SessionFacts for AlwaysActiveMember {
     fn membership(
         &self,
-        admission: maknae_kernel::Admission,
-        uid: u32,
+        _admission: maknae_kernel::Admission,
+        _uid: u32,
     ) -> Result<maknae_kernel::Membership, maknae_kernel::AuthzError> {
-        let _ = (admission, uid);
         common::active_member().membership
     }
 
-    fn login(
-        &self,
-        process: &PeerProcess,
-        pid: Option<u32>,
-        uid: u32,
-        user: Option<&str>,
-    ) -> LoginFact {
-        if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
-            return LoginFact::Live;
-        }
-        maknae_kernel::SessionFacts::login(
-            &maknae_kernel::session_facts::HostSessionFacts {
-                account_source: maknae_config::AccountSource::None,
-            },
-            process,
-            pid,
-            uid,
-            user,
-        )
-    }
-
     fn account(&self, _uid: u32) -> AccountFact {
-        AccountFact::NotChecked(NotCheckedWhy::Configured)
+        common::active_member().account
     }
 }
 
 #[tokio::test]
-async fn a_peer_process_that_exited_is_refused() {
-    let (Scripted::Ok(server, peer, uid), client) = pinging().await else {
-        unreachable!()
-    };
+async fn a_member_whose_process_has_no_login_is_admitted() {
+    let (conn, client) = pinging().await;
     let recs = drive_facts(
-        vec![Scripted::OkWith(
-            server,
-            peer,
-            uid,
-            PeerProcess::Gone,
-            SenderVerdict::default(),
-        )],
-        FactsGate::for_test(
-            Arc::new(ExitsAfterConnect(std::sync::atomic::AtomicUsize::new(0))),
-            Duration::from_secs(5),
-        ),
+        vec![conn],
+        FactsGate::for_test(Arc::new(AlwaysActiveMember), Duration::from_secs(5)),
     )
     .await;
     assert_eq!(
         trail(&of_session(&recs)),
         vec![
-            admitted("not-checked:configured"),
-            row("request", "liveness.ping", "deny", "logout"),
-            terminated("deny", "logout"),
+            admitted("active"),
+            row("request", "liveness.ping", "permit", "authorized"),
+            terminated("permit", "disconnect"),
         ]
     );
-    assert_unauthorized(answer(client).await);
+    assert!(matches!(
+        answer(client).await,
+        Some(maknae_proto::RespResult::Ok(maknae_proto::Payload::Pong))
+    ));
 }

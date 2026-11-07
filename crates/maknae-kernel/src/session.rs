@@ -6,24 +6,17 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use maknae_audit_append::Seq;
-use maknae_vault::{PeerProcess, SenderVerdict};
+use maknae_vault::SenderVerdict;
 
 use crate::authz::Ending;
 use crate::blocking_guard::{BlockingBreaker, BreakerAdmission, BreakerTransition};
 use crate::deployment::Platform;
 use crate::groupres::{AuthzError, Membership};
 use crate::handler::Admission;
-use crate::session_facts::{AccountFact, AccountState, LoginFact};
+use crate::session_facts::{AccountFact, AccountState};
 
 pub trait SessionFacts: Send + Sync {
     fn membership(&self, admission: Admission, uid: u32) -> Result<Membership, AuthzError>;
-    fn login(
-        &self,
-        process: &PeerProcess,
-        pid: Option<u32>,
-        uid: u32,
-        user: Option<&str>,
-    ) -> LoginFact;
     fn account(&self, uid: u32) -> AccountFact;
 }
 
@@ -32,7 +25,6 @@ pub trait SessionFacts: Send + Sync {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Facts {
     pub membership: Result<Membership, AuthzError>,
-    pub login: LoginFact,
     pub account: AccountFact,
     pub answered: bool,
 }
@@ -41,7 +33,6 @@ impl Facts {
     fn unanswered(why: &str) -> Self {
         Facts {
             membership: Err(AuthzError::Resolve(why.to_string())),
-            login: LoginFact::Unavailable(why.to_string()),
             account: AccountFact::Checked(AccountState::Unknown(why.to_string())),
             answered: false,
         }
@@ -71,7 +62,7 @@ impl FactsGate {
     }
 }
 
-/// A member with a live login whose account state this platform does not read.
+/// A member whose account state this platform does not read.
 #[cfg(any(test, feature = "hermetic-test-seam"))]
 pub struct AllowFacts {
     pub user: Option<String>,
@@ -88,30 +79,14 @@ impl SessionFacts for AllowFacts {
         })
     }
 
-    fn login(
-        &self,
-        _process: &PeerProcess,
-        _pid: Option<u32>,
-        _uid: u32,
-        _user: Option<&str>,
-    ) -> LoginFact {
-        LoginFact::Live
-    }
-
     fn account(&self, _uid: u32) -> AccountFact {
         AccountFact::NotChecked(crate::session_facts::NotCheckedWhy::Platform)
     }
 }
 
 /// Every lookup the decision needs, as one blocking unit under the gate's breaker
-/// and bound. `login` is asked for the name this same `membership` resolved.
-pub(crate) async fn gather(
-    gate: &FactsGate,
-    admission: Admission,
-    uid: u32,
-    process: Arc<PeerProcess>,
-    pid: Option<u32>,
-) -> Facts {
+/// and bound.
+pub(crate) async fn gather(gate: &FactsGate, admission: Admission, uid: u32) -> Facts {
     let now = Instant::now();
     let admitted = gate.breaker.lock().await.begin_attempt_at(now);
     match admitted {
@@ -132,12 +107,9 @@ pub(crate) async fn gather(
                 gate.bound,
                 tokio::task::spawn_blocking(move || {
                     let membership = facts.membership(admission, uid);
-                    let name = membership.as_ref().ok().map(|m| m.user.as_str());
-                    let login = facts.login(&process, pid, uid, name);
                     let account = facts.account(uid);
                     Facts {
                         membership,
-                        login,
                         account,
                         answered: true,
                     }
@@ -178,8 +150,6 @@ pub struct SessionRecord {
     pub session_id: u64,
     pub lane: maknae_security::Lane,
     pub admission: Admission,
-    pub process: Arc<PeerProcess>,
-    pub pid: Option<u32>,
     pub sender: SenderVerdict,
     pub account: AccountFact,
     pub seq: Seq,
@@ -216,8 +186,6 @@ impl SessionRecord {
             session_id: 1,
             lane: maknae_security::Lane::Local,
             admission: Admission::MaknaeGroupMember,
-            process: Arc::new(PeerProcess::Unavailable),
-            pid: None,
             sender: SenderVerdict::default(),
             account: AccountFact::NotChecked(crate::session_facts::NotCheckedWhy::Platform),
             seq: Seq::new(),
@@ -240,13 +208,11 @@ mod tests {
     use super::*;
     use crate::authz::DenyCause;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Mutex;
 
     struct Probe {
         calls: AtomicUsize,
         delay: Duration,
         member: Result<Membership, AuthzError>,
-        seen_user: Mutex<Option<Option<String>>>,
     }
 
     impl Probe {
@@ -255,7 +221,6 @@ mod tests {
                 calls: AtomicUsize::new(0),
                 delay,
                 member,
-                seen_user: Mutex::new(None),
             })
         }
     }
@@ -265,17 +230,6 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             std::thread::sleep(self.delay);
             self.member.clone()
-        }
-
-        fn login(
-            &self,
-            _process: &PeerProcess,
-            _pid: Option<u32>,
-            _uid: u32,
-            user: Option<&str>,
-        ) -> LoginFact {
-            *self.seen_user.lock().unwrap() = Some(user.map(str::to_string));
-            LoginFact::NotActive
         }
 
         fn account(&self, _uid: u32) -> AccountFact {
@@ -296,25 +250,17 @@ mod tests {
     }
 
     async fn ask(gate: &FactsGate) -> Facts {
-        gather(
-            gate,
-            Admission::MaknaeGroupMember,
-            4242,
-            Arc::new(PeerProcess::Gone),
-            Some(1),
-        )
-        .await
+        gather(gate, Admission::MaknaeGroupMember, 4242).await
     }
 
     #[tokio::test]
-    async fn the_three_answers_are_gathered_together() {
+    async fn the_answers_are_gathered_together() {
         let probe = Probe::new(Duration::ZERO, resolved("ann"));
         let got = ask(&gate(&probe, Duration::from_secs(5))).await;
         assert_eq!(
             got,
             Facts {
                 membership: resolved("ann"),
-                login: LoginFact::NotActive,
                 account: AccountFact::Checked(AccountState::Expired),
                 answered: true,
             }
@@ -322,21 +268,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_login_is_asked_for_the_name_this_lookup_resolved() {
-        let probe = Probe::new(Duration::ZERO, resolved("renamed"));
-        ask(&gate(&probe, Duration::from_secs(5))).await;
-        assert_eq!(
-            *probe.seen_user.lock().unwrap(),
-            Some(Some("renamed".to_string()))
-        );
-    }
-
-    #[tokio::test]
-    async fn a_failed_membership_is_unanswered_and_names_no_user() {
+    async fn a_failed_membership_is_carried_as_it_failed() {
         let probe = Probe::new(Duration::ZERO, Err(AuthzError::Resolve("nss".into())));
         let got = ask(&gate(&probe, Duration::from_secs(5))).await;
         assert_eq!(got.membership, Err(AuthzError::Resolve("nss".into())));
-        assert_eq!(*probe.seen_user.lock().unwrap(), Some(None));
     }
 
     #[tokio::test]
@@ -387,15 +322,6 @@ mod tests {
         fn membership(&self, _admission: Admission, _uid: u32) -> Result<Membership, AuthzError> {
             panic!("lookup panicked")
         }
-        fn login(
-            &self,
-            _process: &PeerProcess,
-            _pid: Option<u32>,
-            _uid: u32,
-            _user: Option<&str>,
-        ) -> LoginFact {
-            LoginFact::Live
-        }
         fn account(&self, _uid: u32) -> AccountFact {
             AccountFact::Checked(AccountState::Active)
         }
@@ -437,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn the_allowing_facts_answer_a_live_member_whose_account_is_not_read() {
+    fn the_allowing_facts_answer_a_member_whose_account_is_not_read() {
         let named = AllowFacts {
             user: Some("ann".into()),
             dir: Some("/home/ann".into()),
@@ -455,7 +381,6 @@ mod tests {
         assert!(m.in_group);
         assert_eq!(m.user, "allow-7");
         assert_eq!(m.dir, PathBuf::new());
-        assert_eq!(f.login(&PeerProcess::Gone, None, 7, None), LoginFact::Live);
         assert_eq!(
             f.account(7),
             AccountFact::NotChecked(crate::session_facts::NotCheckedWhy::Platform)

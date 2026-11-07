@@ -998,14 +998,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         .await;
         return;
     }
-    let facts = gather(
-        &gate,
-        session.admission,
-        peer_uid,
-        Arc::clone(&session.process),
-        session.pid,
-    )
-    .await;
+    let facts = gather(&gate, session.admission, peer_uid).await;
     // #115: this request's own lookup names the user and home it is decided on.
     let (_, peer_user, peer_dir) = admission_facts(&facts.membership);
     match revalidate(session.uid, peer_uid, &facts) {
@@ -2891,8 +2884,6 @@ pub struct Conn<S> {
     /// layer (ADR-0009). A property of the accepted CONNECTION, like the peer facts
     /// above — and like them, established by the door rather than read off the wire.
     pub delegated: maknae_io::DelegatedFds,
-    pub process: Arc<maknae_vault::PeerProcess>,
-    pub peer_pid: Option<u32>,
     pub sender: maknae_vault::SenderVerdict,
 }
 /// The accept surface the run-loop consumes, split into a prompt raw-accept and a bounded
@@ -2946,21 +2937,17 @@ impl PlaneAccept for PlaneListener {
         peer_creds: PeerCreds,
         handshake_timeout: Duration,
     ) -> Result<Conn<AuthenticatedStream>, AcceptRejection> {
-        let mut stream =
+        let stream =
             PlaneListener::finish_handshake(self, raw, peer_creds, handshake_timeout).await?;
         let peer = stream.peer().clone();
         let peer_uid = stream.peer_creds().uid;
-        let peer_pid = stream.peer_creds().pid;
         let delegated = stream.delegated();
-        let process = Arc::new(stream.take_peer_process());
         let sender = stream.sender_verdict();
         Ok(Conn {
             stream,
             peer,
             peer_uid,
             delegated,
-            process,
-            peer_pid,
             sender,
         })
     }
@@ -3248,19 +3235,11 @@ where
                                                 peer,
                                                 peer_uid: uid,
                                                 delegated,
-                                                process,
-                                                peer_pid,
                                                 sender,
                                             } = conn;
                                             let peer_uri = peer_san(&peer).map(str::to_string);
-                                            let facts = gather(
-                                                &gate,
-                                                class.admission,
-                                                uid,
-                                                Arc::clone(&process),
-                                                peer_pid,
-                                            )
-                                            .await;
+                                            let facts =
+                                                gather(&gate, class.admission, uid).await;
                                             // #275: the username rides the membership lookup.
                                             let (_, user, _) =
                                                 admission_facts(&facts.membership);
@@ -3286,8 +3265,6 @@ where
                                                         session_id,
                                                         lane: class.lane,
                                                         admission: class.admission,
-                                                        process,
-                                                        pid: peer_pid,
                                                         sender,
                                                         account: facts.account,
                                                         seq: Seq::new(),

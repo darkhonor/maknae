@@ -1,12 +1,11 @@
 //! Connection-admission and per-request session decisions (spec §5, #115). Pure; T1/0-missed.
 use crate::groupres::AuthzError;
 use crate::session::Facts;
-use crate::session_facts::{AccountFact, AccountState, LoginFact, NotCheckedWhy};
+use crate::session_facts::{AccountFact, AccountState, NotCheckedWhy};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DenyCause {
     NotMember,
-    Logout(LoginFact),
     Account(AccountState),
     SenderMismatch,
     Infrastructure(FactSource),
@@ -16,7 +15,6 @@ pub enum DenyCause {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FactSource {
     Group,
-    Login,
     Account,
     SessionMap,
     Audit,
@@ -27,7 +25,6 @@ impl FactSource {
     pub fn name(self) -> &'static str {
         match self {
             FactSource::Group => "group",
-            FactSource::Login => "login",
             FactSource::Account => "account",
             FactSource::SessionMap => "session-map",
             FactSource::Audit => "audit",
@@ -51,7 +48,7 @@ pub enum Ending {
 }
 
 /// Whether the session may serve this request, on facts gathered for it alone
-/// (ADR-0006 decision 4): the uid map, then membership, login and account state.
+/// (ADR-0006 decision 4): the uid map, then membership and account state.
 pub fn revalidate(bound_uid: u32, request_uid: u32, f: &Facts) -> Revalidation {
     if bound_uid != request_uid {
         return Revalidation::Deny(DenyCause::Infrastructure(FactSource::SessionMap));
@@ -70,18 +67,6 @@ pub fn revalidate(bound_uid: u32, request_uid: u32, f: &Facts) -> Revalidation {
             }
         }
     }
-    match &f.login {
-        LoginFact::Live => {}
-        LoginFact::Unavailable(_) => {
-            return Revalidation::Deny(DenyCause::Infrastructure(FactSource::Login));
-        }
-        LoginFact::NoSession
-        | LoginFact::NotUserClass
-        | LoginFact::NotActive
-        | LoginFact::ProcessGone => {
-            return Revalidation::Deny(DenyCause::Logout(f.login.clone()));
-        }
-    }
     match &f.account {
         AccountFact::Checked(AccountState::Active) | AccountFact::NotChecked(_) => {
             Revalidation::Continue
@@ -98,7 +83,6 @@ pub fn revalidate(bound_uid: u32, request_uid: u32, f: &Facts) -> Revalidation {
 pub fn cause_reason(c: &DenyCause) -> &'static str {
     match c {
         DenyCause::NotMember => "not-member",
-        DenyCause::Logout(_) => "logout",
         DenyCause::Account(AccountState::Locked) => "account-locked",
         DenyCause::Account(AccountState::Expired) => "account-expired",
         DenyCause::Account(AccountState::Disabled) => "account-disabled",
@@ -106,7 +90,6 @@ pub fn cause_reason(c: &DenyCause) -> &'static str {
         DenyCause::Account(AccountState::Unknown(_)) => "account-unknown",
         DenyCause::SenderMismatch => "sender-mismatch",
         DenyCause::Infrastructure(FactSource::Group) => "infrastructure:group",
-        DenyCause::Infrastructure(FactSource::Login) => "infrastructure:login",
         DenyCause::Infrastructure(FactSource::Account) => "infrastructure:account",
         DenyCause::Infrastructure(FactSource::SessionMap) => "infrastructure:session-map",
         DenyCause::Infrastructure(FactSource::Audit) => "infrastructure:audit",
@@ -117,10 +100,7 @@ pub fn cause_reason(c: &DenyCause) -> &'static str {
 pub fn cause_posture(c: &DenyCause) -> &'static str {
     match c {
         DenyCause::Infrastructure(_) => "unavailable",
-        DenyCause::NotMember
-        | DenyCause::Logout(_)
-        | DenyCause::Account(_)
-        | DenyCause::SenderMismatch => "unauthorized",
+        DenyCause::NotMember | DenyCause::Account(_) | DenyCause::SenderMismatch => "unauthorized",
     }
 }
 
@@ -685,7 +665,6 @@ mod tests {
     fn member(in_group: bool) -> Facts {
         Facts {
             membership: Ok(membership(in_group, "s-115-sentinel")),
-            login: LoginFact::Live,
             account: AccountFact::Checked(AccountState::Active),
             answered: true,
         }
@@ -696,7 +675,7 @@ mod tests {
     }
 
     #[test]
-    fn a_live_active_member_continues() {
+    fn an_active_member_continues() {
         assert_eq!(revalidate(7, 7, &member(true)), Revalidation::Continue);
     }
 
@@ -728,7 +707,6 @@ mod tests {
     fn each_source_has_its_name() {
         for (source, name) in [
             (FactSource::Group, "group"),
-            (FactSource::Login, "login"),
             (FactSource::Account, "account"),
             (FactSource::SessionMap, "session-map"),
             (FactSource::Audit, "audit"),
@@ -742,7 +720,7 @@ mod tests {
     fn an_unanswered_membership_is_infrastructure() {
         let mut f = member(true);
         f.membership = Err(AuthzError::Resolve("nss".into()));
-        f.login = LoginFact::NoSession;
+        f.account = AccountFact::Checked(AccountState::Locked);
         assert_eq!(
             revalidate(7, 7, &f),
             deny(DenyCause::Infrastructure(FactSource::Group))
@@ -756,7 +734,7 @@ mod tests {
             user: "s-115-sentinel".into(),
             why: "EIO".into(),
         });
-        f.login = LoginFact::NoSession;
+        f.account = AccountFact::Checked(AccountState::Locked);
         assert_eq!(
             revalidate(7, 7, &f),
             deny(DenyCause::Infrastructure(FactSource::Group))
@@ -767,41 +745,15 @@ mod tests {
     fn a_deleted_account_is_not_a_member() {
         let mut f = member(true);
         f.membership = Err(AuthzError::NoUser);
-        f.login = LoginFact::Unavailable("x".into());
+        f.account = AccountFact::Checked(AccountState::Locked);
         assert_eq!(revalidate(7, 7, &f), deny(DenyCause::NotMember));
     }
 
     #[test]
     fn a_non_member_is_not_a_member() {
         let mut f = member(false);
-        f.login = LoginFact::Unavailable("x".into());
-        assert_eq!(revalidate(7, 7, &f), deny(DenyCause::NotMember));
-    }
-
-    #[test]
-    fn an_unanswered_login_is_infrastructure() {
-        let mut f = member(true);
-        f.login = LoginFact::Unavailable("cgroup".into());
         f.account = AccountFact::Checked(AccountState::Locked);
-        assert_eq!(
-            revalidate(7, 7, &f),
-            deny(DenyCause::Infrastructure(FactSource::Login))
-        );
-    }
-
-    #[test]
-    fn every_login_that_is_not_live_is_a_logout() {
-        for login in [
-            LoginFact::NoSession,
-            LoginFact::NotUserClass,
-            LoginFact::NotActive,
-            LoginFact::ProcessGone,
-        ] {
-            let mut f = member(true);
-            f.login = login.clone();
-            f.account = AccountFact::Checked(AccountState::Unknown("x".into()));
-            assert_eq!(revalidate(7, 7, &f), deny(DenyCause::Logout(login)));
-        }
+        assert_eq!(revalidate(7, 7, &f), deny(DenyCause::NotMember));
     }
 
     #[test]
@@ -845,11 +797,6 @@ mod tests {
         for (cause, reason, posture) in [
             (DenyCause::NotMember, "not-member", "unauthorized"),
             (
-                DenyCause::Logout(LoginFact::ProcessGone),
-                "logout",
-                "unauthorized",
-            ),
-            (
                 DenyCause::Account(AccountState::Locked),
                 "account-locked",
                 "unauthorized",
@@ -878,11 +825,6 @@ mod tests {
             (
                 DenyCause::Infrastructure(FactSource::Group),
                 "infrastructure:group",
-                "unavailable",
-            ),
-            (
-                DenyCause::Infrastructure(FactSource::Login),
-                "infrastructure:login",
                 "unavailable",
             ),
             (
@@ -959,8 +901,8 @@ mod tests {
                 "unauthorized",
             ),
             (
-                Ending::Denied(DenyCause::Infrastructure(FactSource::Login)),
-                "infrastructure:login",
+                Ending::Denied(DenyCause::Infrastructure(FactSource::Group)),
+                "infrastructure:group",
                 "deny",
                 "unavailable",
             ),

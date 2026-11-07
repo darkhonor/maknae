@@ -1242,7 +1242,7 @@ pub fn serving() -> tokio::sync::watch::Receiver<maknae_kernel::Drain> {
     tokio::sync::watch::channel(maknae_kernel::Drain::Serving).1
 }
 
-use maknae_kernel::session_facts::{AccountFact, AccountState, LoginFact};
+use maknae_kernel::session_facts::{AccountFact, AccountState};
 
 /// Session facts answered from a script, one `Facts` per gather, each after its
 /// delay; an exhausted script answers nothing, an infrastructure denial.
@@ -1297,19 +1297,6 @@ impl maknae_kernel::SessionFacts for ScriptedFacts {
         }
     }
 
-    fn login(
-        &self,
-        _process: &maknae_vault::PeerProcess,
-        _pid: Option<u32>,
-        _uid: u32,
-        _user: Option<&str>,
-    ) -> LoginFact {
-        match self.answer() {
-            Some(f) => f.login,
-            None => LoginFact::Unavailable("scripted: no answer".into()),
-        }
-    }
-
     fn account(&self, _uid: u32) -> AccountFact {
         match self.answer() {
             Some(f) => f.account,
@@ -1318,7 +1305,7 @@ impl maknae_kernel::SessionFacts for ScriptedFacts {
     }
 }
 
-/// A live member whose account state is `account`.
+/// A member whose account state is `account`.
 pub fn member_facts(account: AccountFact) -> maknae_kernel::Facts {
     maknae_kernel::Facts {
         membership: Ok(maknae_kernel::Membership {
@@ -1326,7 +1313,6 @@ pub fn member_facts(account: AccountFact) -> maknae_kernel::Facts {
             user: "scripted".into(),
             dir: fixture_home(),
         }),
-        login: LoginFact::Live,
         account,
         answered: true,
     }
@@ -1341,11 +1327,5 @@ pub fn non_member() -> maknae_kernel::Facts {
     if let Ok(m) = f.membership.as_mut() {
         m.in_group = false;
     }
-    f
-}
-
-pub fn with_login(login: LoginFact) -> maknae_kernel::Facts {
-    let mut f = active_member();
-    f.login = login;
     f
 }
