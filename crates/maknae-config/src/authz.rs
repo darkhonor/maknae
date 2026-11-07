@@ -2987,7 +2987,7 @@ mod tests {
         assert_eq!(ActionPattern::parse("fs.*").unwrap().source(), "fs.*");
         assert_eq!(ActionPattern::parse("fs.read").unwrap().source(), "fs.read");
         for bad in [
-            "*", "fs.*.x", "fs*", "FS.*", ".*", "fs.", "", "fs..read", "fs read",
+            "*", "fs.*.x", "fs*", "FS.*", ".*", "fs.", "", "fs..read", "fs read", "admin", "fs",
         ] {
             assert!(
                 matches!(ActionPattern::parse(bad), Err(AuthzError::BadPattern(ref p)) if p == bad),
