@@ -3031,6 +3031,14 @@ mod tests {
         );
         assert_eq!(ActionPattern::parse("fs.*").unwrap().source(), "fs.*");
         assert_eq!(ActionPattern::parse("fs.read").unwrap().source(), "fs.read");
+        assert_eq!(
+            ActionPattern::parse("mcp_2.tool_9").unwrap(),
+            ActionPattern::Exact("mcp_2.tool_9".into())
+        );
+        assert_eq!(
+            ActionPattern::parse("mcp_2.*").unwrap(),
+            ActionPattern::Family("mcp_2".into())
+        );
         for bad in [
             "*", "fs.*.x", "fs*", "FS.*", ".*", "fs.", "", "fs..read", "fs read", "admin", "fs",
         ] {
