@@ -4,7 +4,7 @@ use std::net::IpAddr;
 pub const DEFAULT_AGENT_APPROLE_MOUNT: &str = "maknae-agent-approle";
 pub const AGENT_CREDENTIAL_NAME: &str = "maknae-agent-secret-id";
 pub const AGENT_SIGNING_IDENTIFIER: &str = "io.maknae.maknae-agentd";
-pub const MAKNAE_DAEMON_ACCOUNTS: [&str; 2] = ["_maknae", "_maknae-egress"];
+pub use maknae_io::MAKNAE_DAEMON_ACCOUNTS;
 pub const NON_LOGIN_SHELLS: [&str; 5] = [
     "/usr/sbin/nologin",
     "/sbin/nologin",
