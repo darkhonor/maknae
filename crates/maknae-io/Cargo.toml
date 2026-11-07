@@ -34,14 +34,13 @@ nix = { version = "0.31", default-features = false, features = ["fs", "dir", "ui
 #       forbids it (ADR-0027 confines `unsafe` to maknae-sys), or holding bare RawFds with
 #       hand-rolled close-on-drop — the exact leak-on-the-refusal-path hazard ADR-0009
 #       names. It also parses SCM_CREDENTIALS into `UCred` (#115).
-# process — pidfd_open, the peer process handle for the live-login check (#115).
-# `default-features = false` keeps it to "std" + "net" + "process"; the fs/thread/event
+# `default-features = false` keeps it to "std" + "net"; the fs/process/thread/event
 # APIs are not compiled in.
 # EXACT PIN: rustix holds the `unsafe` ancillary-data parsing this crate trusts for
 # delegated descriptors and sender credentials, so `cargo update` must not move it
 # without a reviewed bump. 1.1.6 is the floor: 1.1.5 does not compile with "net"
 # alone (`mod timespec` was not gated on `net`; bytecodealliance/rustix#1681).
-rustix = { version = "=1.1.6", default-features = false, features = ["std", "net", "process"] }
+rustix = { version = "=1.1.6", default-features = false, features = ["std", "net"] }
 # Credential reads return Zeroizing<..> so the buffer is wiped on drop rather than left
 # in freed heap. Re-exported from lib.rs so consumers need no zeroize pin of their own.
 zeroize = { version = "1", default-features = false, features = ["alloc"] }

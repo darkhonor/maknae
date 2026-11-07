@@ -696,14 +696,6 @@ mod accept_reject {
         stream.read_exact(&mut buf).await.expect("one frame");
         assert_eq!(&buf, b"FRAME");
         assert!(!stream.sender_verdict().mismatched());
-        assert!(matches!(
-            stream.take_peer_process(),
-            crate::PeerProcess::Pidfd(_)
-        ));
-        assert!(matches!(
-            stream.take_peer_process(),
-            crate::PeerProcess::Unavailable
-        ));
     }
 
     #[cfg(target_os = "linux")]

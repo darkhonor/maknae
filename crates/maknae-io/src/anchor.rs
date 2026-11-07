@@ -253,10 +253,6 @@ impl Anchor {
         self.probed
     }
 
-    pub(crate) fn fd(&self) -> &OwnedFd {
-        &self.fd
-    }
-
     /// Re-judge the PINNED directory -- the fd this anchor holds -- against a
     /// requirement stricter than the one it was opened under. `fstat` on the held
     /// fd, never a path: a caller that learns mid-load it needs a stronger

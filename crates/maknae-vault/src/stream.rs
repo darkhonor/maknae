@@ -2,7 +2,6 @@
 //! transport REPORTS the authenticated channel peer + captured peer-creds; it does NOT
 //! decide uid policy or emit audit (Boundary A — those are the Stage-3 daemon's).
 use crate::peer_auth::{decide, PeerAuthRefusal};
-use crate::peer_process::{self, PeerProcess};
 use crate::peercred::{self, PeerCreds};
 use crate::resolver::PlaneCertResolver;
 use crate::{
@@ -116,7 +115,6 @@ pub struct AuthenticatedStream {
     peer: ChannelPeer,
     peer_creds: PeerCreds,
     delegated: maknae_io::DelegatedFds,
-    peer_process: PeerProcess,
     sender_verdict: maknae_plane::SenderVerdict,
     /// Present only on a CLIENT stream: the handle for arming the descriptor the next
     /// request carries. `None` server-side — delegation is one-directional.
@@ -145,12 +143,6 @@ impl AuthenticatedStream {
     /// stream. Arming earlier would have let the handshake's own writes consume it.
     pub fn armer(&self) -> Option<maknae_plane::FdArmer> {
         self.armer.clone()
-    }
-
-    /// The handle on the connecting process taken at the handshake, moved out;
-    /// `Unavailable` on a client stream and after the first take.
-    pub fn take_peer_process(&mut self) -> PeerProcess {
-        std::mem::replace(&mut self.peer_process, PeerProcess::Unavailable)
     }
 
     /// Whether a read on this connection was refused for its sender.
@@ -374,10 +366,6 @@ pub(crate) async fn finish_handshake_on(
     let Ok(expected) = expected_sender(&peer_creds) else {
         return Err(refuse(peer_creds, RejectReason::PeerCredCapture));
     };
-    let peer_process = {
-        use std::os::fd::AsFd;
-        peer_process::capture(raw.0.as_fd(), &peer_creds)
-    };
     // Interposed BEFORE the acceptor: rustls reads through this, and tokio's own
     // `read(2)` path would destroy every attached descriptor with no error at all.
     let collector =
@@ -403,7 +391,6 @@ pub(crate) async fn finish_handshake_on(
                 peer,
                 peer_creds,
                 delegated,
-                peer_process,
                 sender_verdict,
                 // Server-side: nothing to arm. The daemon never delegates outward.
                 armer: None,
@@ -473,7 +460,6 @@ impl PlaneConnector {
             // daemon), so a CLIENT-side stream can never legitimately receive a
             // descriptor. A queue that cannot hold one says so structurally.
             delegated: maknae_io::DelegatedFds::new(0),
-            peer_process: PeerProcess::Unavailable,
             sender_verdict: maknae_plane::SenderVerdict::default(),
             armer: Some(armer),
         })

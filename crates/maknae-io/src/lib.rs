@@ -74,11 +74,7 @@ pub use delegated::{
 };
 pub use error::{IoError, IoKind};
 pub use home::{canonical_home, session_home};
-#[cfg(target_os = "macos")]
-pub use host_facts::logged_in_users;
-#[cfg(target_os = "linux")]
-pub use host_facts::pidfd_open;
-pub use host_facts::{console_owner_uid, presence, read_pseudo_file};
+pub use host_facts::presence;
 pub use mutation::{
     read_held_file, read_held_page, replace_held_file, verify_mutation_directory, DirectoryCursor,
     EffectState, FileVersion, MutationDirectory, MutationEffect, MutationEffectKind,
