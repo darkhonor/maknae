@@ -29,6 +29,13 @@ audit:
   # closed on an audit-open error). Pinned here so it is never defaulted.
   jsonl_path: /var/log/maknae/audit.jsonl
 
+deployment:
+  # The kind of host: linux-host, macos-host or container. The daemon checks it
+  # against the host at boot and refuses a mismatch. Set by enroll, which also
+  # writes account_source on linux-host (userdb, or none without
+  # systemd-userdbd); the key must be absent on container.
+  mode: linux-host
+
 # principal: written by `maknae enroll` (name / uid). Absent by design in
 # the shipped skeleton — its absence keeps the daemon from starting until
 # enrollment.

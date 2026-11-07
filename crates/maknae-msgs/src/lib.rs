@@ -59,6 +59,9 @@ pub enum MsgId {
     EnrollGraphKeyKept,
     /// Enroll created a graph key while a kernel graph store exists.
     EnrollGraphStoreExists,
+    /// Enroll wrote `deployment.account_source: none`: this host has no
+    /// systemd-userdbd, so account state is not checked.
+    EnrollAccountSourceNone,
     /// Re-exec'd operator-context CLI provisioning (spec §4.1 step 7).
     EnrollProvisioningCli,
     /// The final posture summary. Carries a `{cli_dir}` placeholder.
@@ -143,6 +146,7 @@ pub const ALL: &[MsgId] = &[
     MsgId::EnrollGraphKeyCreated,
     MsgId::EnrollGraphKeyKept,
     MsgId::EnrollGraphStoreExists,
+    MsgId::EnrollAccountSourceNone,
     MsgId::EnrollProvisioningCli,
     MsgId::EnrollPostureSummary,
     MsgId::EnrollReloginNote,
@@ -329,6 +333,7 @@ mod tests {
                 | MsgId::EnrollGraphKeyCreated
                 | MsgId::EnrollGraphKeyKept
                 | MsgId::EnrollGraphStoreExists
+                | MsgId::EnrollAccountSourceNone
                 | MsgId::EnrollProvisioningCli
                 | MsgId::EnrollPostureSummary
                 | MsgId::EnrollReloginNote
@@ -357,7 +362,7 @@ mod tests {
                 | MsgId::CryptoPolicyDrift => {}
             }
         }
-        const VARIANT_COUNT: usize = 48;
+        const VARIANT_COUNT: usize = 49;
         assert_eq!(ALL.len(), VARIANT_COUNT);
         for &id in ALL {
             assert_covered(id);
@@ -403,6 +408,17 @@ mod tests {
                     "{locale:?} {id:?}: {m}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn the_account_source_warning_names_the_key_and_the_missing_service() {
+        for locale in [Locale::EnUs, Locale::KoKr] {
+            let m = msg(locale, MsgId::EnrollAccountSourceNone);
+            assert!(
+                m.contains("deployment.account_source: none") && m.contains("systemd-userdbd"),
+                "{locale:?}: {m}"
+            );
         }
     }
 

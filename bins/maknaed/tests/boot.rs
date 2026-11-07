@@ -1,9 +1,8 @@
 //! maknaed startup exit-code contract. A bad/absent config → exit 1 (fail-closed at the
-//! config gate). A GOOD config now advances the full run-loop startup (FIPS install +
-//! assert → boot → audit sink → plane-credential mint), so in CI — where there is no live
-//! Vault — it also fails closed (exit 1), but PAST the FIPS + config gates: the daemon no
-//! longer exits 0 on boot because a successful start begins serving forever. The
-//! `good_config_passes_gates_then_fails_without_vault` test pins that distinction on stderr.
+//! config gate). A GOOD config passes the FIPS gate and fails closed (exit 1) at the
+//! first refusal the test host imposes: the root-ownership check for an unprivileged
+//! run, the missing sections and state directory for root. The
+//! `good_config_passes_gates_then_fails_without_vault` test pins that phase on stderr.
 //!
 //! Unix-only: the boot path enforces Unix permissions (non-Unix → PermissionsUnsupported),
 //! so these assertions are meaningful only on Unix. On non-Unix this file is empty.
@@ -11,7 +10,7 @@
 
 use maknae_msgs::{msg, Locale, MsgId};
 use maknae_vault::VaultError;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -41,10 +40,15 @@ fn put(dir: &Path, name: &str, body: &str, mode: u32) {
 #[test]
 fn good_config_passes_gates_then_fails_without_vault() {
     let d = new_dir("good");
+    let mode = if cfg!(target_os = "macos") {
+        "macos-host"
+    } else {
+        "linux-host"
+    };
     put(
         &d.0,
         "maknae.yaml",
-        "core:\n  identity:\n    name: t\n",
+        &format!("core:\n  identity:\n    name: t\ndeployment:\n  mode: {mode}\n"),
         0o640,
     );
     let out = Command::new(bin())
@@ -70,8 +74,18 @@ fn good_config_passes_gates_then_fails_without_vault() {
     );
     assert!(
         !stderr.to_lowercase().contains("unknown section")
-            && !stderr.to_lowercase().contains("ceiling"),
+            && !stderr.to_lowercase().contains("ceiling")
+            && !stderr.contains("deployment"),
         "a good config must clear config validation; stderr: {stderr}"
+    );
+    let phase = if std::fs::metadata(&d.0).unwrap().uid() == 0 {
+        "required config section 'audit' is missing"
+    } else {
+        "must be owned by root"
+    };
+    assert!(
+        stderr.contains(phase),
+        "the good config stops at {phase:?}; stderr: {stderr}"
     );
 }
 

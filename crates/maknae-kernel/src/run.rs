@@ -61,19 +61,22 @@ use tokio::sync::mpsc;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-use crate::authz::{admission_facts, authorize_connection, ConnDecision, HOME_RESOLVE_TIMEOUT};
+use crate::authz::{
+    admission_facts, admission_reason, cause_posture, cause_reason, ending_posture, ending_reason,
+    ending_result, revalidate, DenyCause, Ending, FactSource, Revalidation, HOME_RESOLVE_TIMEOUT,
+};
 use crate::baseline_check::{Invalid, Mode};
 use crate::blocking_guard::{
     within_blocking, BlockingBreaker, BreakerAdmission, BreakerTransition, AUDIT_APPEND_TIMEOUT,
     BLOCKING_OPERATION_TIMEOUT, SCAN_BACK_TIMEOUT,
 };
 use crate::boot_gate::authz_boot_gate;
-use crate::groupres::{maknae_gid, uid_in_maknae_group};
+use crate::groupres::maknae_gid;
 use crate::handler::{
     build_authz_request, build_whoami, discharge_plan, dispatch_verb, lexical_pregate, may_respond,
-    peer_san, verb_to_action, Admission, ChannelClass, Dispatch, Drain, ServeOutcome,
-    AUTHZ_DECIDE_TIMEOUT,
+    peer_san, verb_to_action, ChannelClass, Dispatch, Drain, ServeOutcome, AUTHZ_DECIDE_TIMEOUT,
 };
+use crate::session::{gather, FactsGate, SessionRecord};
 use maknae_proto::{encode_response_zeroizing, ProtoErrCode, ProtoError};
 use maknae_security::{
     combine, finalize, guarded_decide_cited, Authorizer, Decision, RuleCitation,
@@ -485,8 +488,9 @@ const HANDLER_DRAIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 /// both ceilings by a test.
 fn handler_drain_bound(cfg: &TransportConfig, egress_deadline: Duration) -> Duration {
     // One connection's bounded work, in the order the handler performs it:
-    // the TLS handshake (inside the handler, not on the loop), the peer's
-    // group lookup, the admission audit append, the frame read, the requester home's resolution (filesystem
+    // the TLS handshake (inside the handler, not on the loop), the connect-time
+    // session-fact gather, the admission audit append, the frame read, the
+    // request's session-fact gather (#115), the requester home's resolution (filesystem
     // verbs only), the PDP decision, the verb's own blocking step under the
     // same bound (the subject enumeration — a second `AUTHZ_DECIDE_TIMEOUT`,
     // review round 6), the provider call, the response write (bounded by the
@@ -495,6 +499,7 @@ fn handler_drain_bound(cfg: &TransportConfig, egress_deadline: Duration) -> Dura
         + Duration::from_millis(maknae_config::GROUP_LOOKUP_TIMEOUT_MS)
         + Duration::from_millis(maknae_config::ADMISSION_AUDIT_TIMEOUT_MS)
         + Duration::from_millis(cfg.read_timeout_ms)
+        + Duration::from_millis(maknae_config::GROUP_LOOKUP_TIMEOUT_MS)
         + HOME_RESOLVE_TIMEOUT
         + crate::handler::AUTHZ_DECIDE_TIMEOUT
         + crate::handler::AUTHZ_DECIDE_TIMEOUT
@@ -699,6 +704,7 @@ fn reject_reason_str(reason: &RejectReason) -> &'static str {
         RejectReason::UnexpectedClientCert => "unexpected client certificate",
         RejectReason::PeerCredCapture => "peer-credential capture failed",
         RejectReason::Io => "socket accept io error",
+        RejectReason::SenderMismatch => "sender-mismatch",
     }
 }
 
@@ -710,12 +716,9 @@ fn reject_reason_str(reason: &RejectReason) -> &'static str {
 pub async fn handle<S, E, P>(
     stream: S,
     peer_uri: Option<String>,
-    peer_uid: u32,
-    class_admitted: bool,
-    peer_user: Option<String>,
-    peer_dir: Option<PathBuf>,
+    session: Arc<SessionRecord>,
+    gate: Arc<FactsGate>,
     emit: Arc<E>,
-    session_id: u64,
     cfg: TransportConfig,
     au3_1: serde_json::Value,
     authorizer: Arc<P>,
@@ -726,7 +729,6 @@ pub async fn handle<S, E, P>(
     kernel_graph: Arc<Option<KernelGraphStatus>>,
     egress: Arc<dyn crate::egress::Egress>,
     authz_decide_timeout: Duration,
-    lane: maknae_security::Lane,
     delegated: maknae_io::DelegatedFds,
     ops: Arc<dyn AdminOps>,
 ) where
@@ -737,12 +739,9 @@ pub async fn handle<S, E, P>(
     handle_with_attempt_caps(
         stream,
         peer_uri,
-        peer_uid,
-        class_admitted,
-        peer_user,
-        peer_dir,
+        session,
+        gate,
         emit,
-        session_id,
         cfg,
         au3_1,
         authorizer,
@@ -753,7 +752,6 @@ pub async fn handle<S, E, P>(
         kernel_graph,
         egress,
         authz_decide_timeout,
-        lane,
         delegated,
         ops,
         crate::mutation::AttemptCaps::default(),
@@ -766,37 +764,26 @@ pub async fn handle<S, E, P>(
 /// `tokio::spawn`ed call is `'static`.
 ///
 /// Sequence (spec §6):
-/// 1. `authorize_connection(channel_authenticated = true, class_admitted)` — the stream exists
-///    only because the channel class's TLS-layer requirement was met, so
-///    `channel_authenticated` is `true`; `class_admitted` is the class admission result. On
-///    `Deny` → emit an AU-3 `connection`/`deny` record and close WITHOUT reading a verb.
-/// 2. On `Permit`, emit the `connection`/permit admission record (seq 1) and GATE on
-///    it (codex round-8 P1, same `may_respond` gate as step 4): a failed admission
-///    append closes the connection WITHOUT reading the request or serving — a session
-///    whose admission cannot be durably recorded must never be served, even if the
-///    later request-record append would have succeeded.
-/// 3. Read one frame within `read_timeout_ms`; a timeout / truncation / decode failure
+/// 1. `session` exists only because every connect-time check passed (the accept loop
+///    audits a refusal itself). Emit the `connection`/permit admission record (seq 1)
+///    and GATE on it (codex round-8 P1, same `may_respond` gate as step 4): a failed
+///    admission append closes the connection WITHOUT reading the request or serving.
+/// 2. Read one frame within `read_timeout_ms`; a timeout / truncation / decode failure
 ///    emits a `deny` record and closes (no response).
+/// 3. Re-decide the session on current facts (#115) before any verb is decided.
 /// 4. Audit-then-respond (ADR-0019): emit the `request` record; only if that append
 ///    ALSO succeeded (`may_respond(true)`) is the response released. Both the
-///    admission record (step 2) and the request record (step 4) must be durably
+///    admission record (step 1) and the request record (step 4) must be durably
 ///    appended before any response frame is written.
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_with_attempt_caps<S, E, P>(
     mut stream: S,
     peer_uri: Option<String>,
-    peer_uid: u32,
-    class_admitted: bool,
-    // #275: the peer OS username, resolved on the blocking pool alongside the
-    // group check. `None` on every fail-closed accept-loop arm, where not
-    // spawning NSS work is the point -- the record then renders
-    // `subject=unknown`, which is honest.
-    // It also chooses the key path's `<username>` segment (ADR-0028 §3), so it
-    // must stay kernel-resolved from the peer uid, never taken from the request.
-    peer_user: Option<String>,
-    peer_dir: Option<PathBuf>,
+    // `session.user` also chooses the key path's `<username>` segment (ADR-0028 §3),
+    // so it stays kernel-resolved from the peer uid, never taken from the request.
+    session: Arc<SessionRecord>,
+    gate: Arc<FactsGate>,
     emit: Arc<E>,
-    session_id: u64,
     cfg: TransportConfig,
     au3_1: serde_json::Value,
     authorizer: Arc<P>,
@@ -814,10 +801,6 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     // #172: the egress backend behind the seam. `Unavailable` in Cooky.
     egress: Arc<dyn crate::egress::Egress>,
     authz_decide_timeout: Duration,
-    // Which boundary accepted this connection. Supplied by the accept loop that owns
-    // the listener — never inferred here, and never readable from the request
-    // (ADR-0009 decision 8).
-    lane: maknae_security::Lane,
     // The descriptors this connection's peer delegated, oldest first. Correlation is
     // FIFO. Exact on Linux (no merging across `sendmsg` boundaries); weaker on
     // macOS, which coalesces — measured. Correct either way for ONE fd-bearing
@@ -832,95 +815,53 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     E: AuditEmit + Send + Sync + 'static,
     P: Authorizer + Send + Sync + 'static,
 {
-    let seq = Seq::new();
+    let _post_request = EndsOnSenderMismatch(Arc::clone(&session));
+    let peer_uid = session.uid;
+    let session_id = session.session_id;
+    let lane = session.lane;
+    let peer_user = session.user.clone();
+    let seq = &session.seq;
     let host = hostname();
     let socket = cfg.socket_path.display().to_string();
 
-    // 1. Connection admission (the transport has already authenticated the peer for its channel class). ADR-0019's
-    //    scheme audits admission at seq 1 for BOTH outcomes: a deny closes here; a permit
-    //    emits a `connection`/permit AU-3 record (seq 1) BEFORE the request is read, and
-    //    (codex round-8 P1) GATES on it — the request record follows at seq 2 only once
-    //    the admission record is durably written, so a served session's trail is always
-    //    complete.
-    match authorize_connection(true, class_admitted) {
-        ConnDecision::Deny { reason } => {
-            let mut rec = make_record(
-                "connection",
-                &host,
-                &socket,
-                peer_uid,
-                None,
-                None,
-                peer_uri.as_deref(),
-                session_id,
-                seq.next(),
-                "connect",
-                None,
-                "deny",
-                &reason,
-                "unauthorized",
-                &au3_1,
-            );
-            // #275: the peer identity, bounded and audit-only.
-            rec.subject.user = admitted_user(peer_user.as_deref());
-            if let Err(e) = emit
-                .emit_within(
-                    &rec,
-                    Duration::from_millis(maknae_config::ADMISSION_AUDIT_TIMEOUT_MS),
-                )
-                .await
-            {
-                // Mid-life audit-write failure on a deny path is logged but does not change
-                // the already-fail-closed outcome (the connection is refused); the permit
-                // path gates on audit success, deny paths already deny.
-                crate::diag::report(format!(
-                    "maknaed: admission audit append failed or is unconfirmed on connection-deny (group check) for peer_uid={peer_uid} peer_uri={peer_uri:?} — the rejection proceeded: {e}"
-                ));
-            }
-            close_bounded(&mut stream).await;
-            return;
+    // 1. Admission record at seq 1 (ADR-0019). HARD GATE (codex round-8 P1): the
+    //    admission append must succeed before the request is even read, exactly like
+    //    the request-record gate below. A failed admission append must not be papered
+    //    over by a later-successful request append.
+    let mut rec = make_record(
+        "connection",
+        &host,
+        &socket,
+        peer_uid,
+        None,
+        None,
+        peer_uri.as_deref(),
+        session_id,
+        seq.next(),
+        "connect",
+        None,
+        "permit",
+        &admission_reason(&session.account),
+        "authorized",
+        &au3_1,
+    );
+    // #275: the peer identity, bounded and audit-only.
+    rec.subject.user = admitted_user(peer_user.as_deref());
+    let admission_result = emit
+        .emit_within(
+            &rec,
+            Duration::from_millis(maknae_config::ADMISSION_AUDIT_TIMEOUT_MS),
+        )
+        .await;
+    if !may_respond(admission_result.is_ok()) {
+        if let Err(e) = admission_result {
+            crate::diag::report(format!(
+                "maknaed: admission audit write failed for peer_uid={peer_uid} peer_uri={peer_uri:?} session_id={session_id} — closing without serving: {e}"
+            ));
         }
-        ConnDecision::Permit => {
-            // Admission record at seq 1 (ADR-0019). HARD GATE (codex round-8 P1): unlike
-            // the deny paths (nothing to serve there), a permit connection WILL serve a
-            // response — so the admission append must succeed before the request is even
-            // read, exactly like the request-record gate below. A failed admission append
-            // must not be papered over by a later-successful request append.
-            let mut rec = make_record(
-                "connection",
-                &host,
-                &socket,
-                peer_uid,
-                None,
-                None,
-                peer_uri.as_deref(),
-                session_id,
-                seq.next(),
-                "connect",
-                None,
-                "permit",
-                "admitted",
-                "authorized",
-                &au3_1,
-            );
-            // #275: the peer identity, bounded and audit-only.
-            rec.subject.user = admitted_user(peer_user.as_deref());
-            let admission_result = emit
-                .emit_within(
-                    &rec,
-                    Duration::from_millis(maknae_config::ADMISSION_AUDIT_TIMEOUT_MS),
-                )
-                .await;
-            if !may_respond(admission_result.is_ok()) {
-                if let Err(e) = admission_result {
-                    crate::diag::report(format!(
-                        "maknaed: admission audit write failed for peer_uid={peer_uid} peer_uri={peer_uri:?} session_id={session_id} — closing without serving: {e}"
-                    ));
-                }
-                close_bounded(&mut stream).await;
-                return;
-            }
-        }
+        session.end(Ending::Denied(DenyCause::Infrastructure(FactSource::Audit)));
+        close_bounded(&mut stream).await;
+        return;
     }
 
     // 2. Read exactly one request frame, bounded by read_timeout + the frame cap.
@@ -930,7 +871,23 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     )
     .await;
     let body = match read {
+        Err(_) | Ok(Err(_)) if session.sender.mismatched() => {
+            end_session(
+                &mut stream,
+                &emit,
+                (&host, &socket),
+                (&session, session.user.as_deref()),
+                peer_uri.as_deref(),
+                (&cfg, FrameClass::Control),
+                "read",
+                Ending::Denied(DenyCause::SenderMismatch),
+                &au3_1,
+            )
+            .await;
+            return;
+        }
         Err(_elapsed) => {
+            session.end(Ending::Idle);
             emit_request_deny(
                 &emit,
                 &host,
@@ -943,6 +900,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 seq.next(),
                 "read",
                 "read timeout",
+                "unauthorized",
                 &au3_1,
             )
             .await;
@@ -962,6 +920,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 seq.next(),
                 "read",
                 &format!("frame read failed: {e}"),
+                "unauthorized",
                 &au3_1,
             )
             .await;
@@ -990,6 +949,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 // value, so a malformed prompt would carry prompt text into the
                 // trail through `{e}`.
                 &format!("malformed request: {}", e.category()),
+                "unauthorized",
                 &au3_1,
             )
             .await;
@@ -1014,10 +974,65 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 verb_to_action(&request.verb),
                 class_of(&request.verb)
             ),
+            "unauthorized",
             &au3_1,
         )
         .await;
         close_bounded(&mut stream).await;
+        return;
+    }
+
+    let action = verb_to_action(&request.verb);
+    if session.expired() {
+        end_session(
+            &mut stream,
+            &emit,
+            (&host, &socket),
+            (&session, session.user.as_deref()),
+            peer_uri.as_deref(),
+            (&cfg, class),
+            action,
+            Ending::Lifetime,
+            &au3_1,
+        )
+        .await;
+        return;
+    }
+    let facts = gather(&gate, session.admission, peer_uid).await;
+    // #115: this request's own lookup names the user and home it is decided on.
+    let (_, peer_user, peer_dir) = admission_facts(&facts.membership);
+    match revalidate(session.uid, peer_uid, &facts) {
+        Revalidation::Continue => {}
+        Revalidation::Deny(cause) => {
+            report_unanswered(&cause, peer_uid, session_id);
+            end_session(
+                &mut stream,
+                &emit,
+                (&host, &socket),
+                (&session, peer_user.as_deref()),
+                peer_uri.as_deref(),
+                (&cfg, class),
+                action,
+                Ending::Denied(cause),
+                &au3_1,
+            )
+            .await;
+            return;
+        }
+    }
+    if session.expired() {
+        end_session(
+            &mut stream,
+            &emit,
+            (&host, &socket),
+            (&session, peer_user.as_deref()),
+            peer_uri.as_deref(),
+            (&cfg, class),
+            action,
+            Ending::Lifetime,
+            &au3_1,
+        )
+        .await;
         return;
     }
 
@@ -1173,7 +1188,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             Arc::clone(&emit),
             crate::authz::admitted_home(peer_uid, peer_dir).await,
             &cfg,
-            &seq,
+            seq,
             record,
             authz_decide_timeout,
             attempt_caps,
@@ -1962,7 +1977,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         decided_role,
                         decided_rule.as_ref(),
                         session_id,
-                        &seq,
+                        seq,
                         verb_to_action(&request.verb),
                         &au3_1,
                     )
@@ -1982,7 +1997,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         decided_role,
                         decided_rule.as_ref(),
                         session_id,
-                        &seq,
+                        seq,
                         verb_to_action(&request.verb),
                         &au3_1,
                     )
@@ -2330,7 +2345,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                                     decided_role,
                                     decided_rule.as_ref(),
                                     session_id,
-                                    &seq,
+                                    seq,
                                     "session.prompt",
                                     &au3_1,
                                 )
@@ -2350,7 +2365,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                                     decided_role,
                                     decided_rule.as_ref(),
                                     session_id,
-                                    &seq,
+                                    seq,
                                     "session.prompt",
                                     &au3_1,
                                 )
@@ -2682,34 +2697,177 @@ async fn emit_request_deny<E: AuditEmit + Send + Sync>(
     seq: u64,
     action: &str,
     reason: &str,
+    posture: &str,
     au3_1: &serde_json::Value,
 ) {
     let mut rec = make_record(
-        "request",
-        host,
-        socket,
-        uid,
-        None,
-        None,
-        peer_uri,
-        session_id,
-        seq,
-        action,
-        None,
-        "deny",
-        reason,
-        "unauthorized",
-        au3_1,
+        "request", host, socket, uid, None, None, peer_uri, session_id, seq, action, None, "deny",
+        reason, posture, au3_1,
     );
     // #275: the peer identity, bounded and audit-only.
     rec.subject.user = admitted_user(peer_user);
     rec.subject.role = role.map(str::to_string);
     if let Err(e) = emit.emit_within(&rec, AUDIT_APPEND_TIMEOUT).await {
-        // See the group-check deny above: logged, not control-flow-changing — the
-        // caller already closes the connection regardless.
+        // Logged, not control-flow-changing — the caller already closes the
+        // connection regardless.
         eprintln!(
             "maknaed: AUDIT WRITE FAILED on request-deny ({action}) for peer_uid={uid} peer_uri={peer_uri:?} — rejection proceeded without a durable record: {e}"
         );
+    }
+}
+
+/// Refuse the request this session is serving as the PDP-deny path does (the cause
+/// goes to the trail, the generic frame only after it is durable), record why the
+/// session ends, and close.
+#[allow(clippy::too_many_arguments)]
+async fn end_session<S, E: AuditEmit + Send + Sync>(
+    stream: &mut S,
+    emit: &Arc<E>,
+    (host, socket): (&str, &str),
+    (session, user): (&SessionRecord, Option<&str>),
+    peer_uri: Option<&str>,
+    (cfg, class): (&TransportConfig, FrameClass),
+    action: &str,
+    ending: Ending,
+    au3_1: &serde_json::Value,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let appended = emit_request_outcome(
+        emit,
+        host,
+        socket,
+        session.uid,
+        peer_uri,
+        user,
+        None,
+        None,
+        session.session_id,
+        session.seq.next(),
+        action,
+        None,
+        None,
+        "deny",
+        ending_reason(&ending),
+        ending_posture(&ending),
+        au3_1,
+    )
+    .await;
+    if may_respond(appended) {
+        write_error_bounded(
+            stream,
+            cfg,
+            class,
+            ProtoErrCode::Unauthorized,
+            "not authorized",
+        )
+        .await;
+    }
+    session.end(ending);
+    close_bounded(stream).await;
+}
+
+/// A read after the request (the mutation report) fails closed on a foreign
+/// writer; this names that cause on the session's ending.
+struct EndsOnSenderMismatch(Arc<SessionRecord>);
+
+impl Drop for EndsOnSenderMismatch {
+    fn drop(&mut self) {
+        if self.0.sender.mismatched() {
+            self.0.end(Ending::Denied(DenyCause::SenderMismatch));
+        }
+    }
+}
+
+fn report_unanswered(cause: &DenyCause, uid: u32, session_id: u64) {
+    if let DenyCause::Infrastructure(source) = cause {
+        crate::diag::report(format!(
+            "maknaed: the {} source could not answer for uid={uid} session_id={session_id} — denied",
+            source.name()
+        ));
+    }
+}
+
+/// The record that closes a served session's trail; bounded, and its failure only reported.
+async fn emit_termination<E: AuditEmit + Send + Sync>(
+    emit: &E,
+    wctx: &WhereCtx,
+    session: &SessionRecord,
+    peer_uri: Option<&str>,
+) {
+    let ending = session.ending();
+    let mut rec = make_record(
+        "session",
+        &wctx.host,
+        &wctx.socket,
+        session.uid,
+        None,
+        None,
+        peer_uri,
+        session.session_id,
+        session.seq.next(),
+        "terminate",
+        None,
+        ending_result(&ending),
+        ending_reason(&ending),
+        ending_posture(&ending),
+        &wctx.au3_1,
+    );
+    rec.subject.user = admitted_user(session.user.as_deref());
+    if let Err(e) = emit
+        .emit_within(
+            &rec,
+            Duration::from_millis(maknae_config::ADMISSION_AUDIT_TIMEOUT_MS),
+        )
+        .await
+    {
+        crate::diag::report(format!(
+            "maknaed: session termination audit append failed for peer_uid={} session_id={}: {e}",
+            session.uid, session.session_id
+        ));
+    }
+}
+
+/// The admission refusal of a connection no session was opened for (seq 1, ADR-0019).
+#[allow(clippy::too_many_arguments)]
+async fn emit_connect_deny<E: AuditEmit + Send + Sync>(
+    emit: &E,
+    wctx: &WhereCtx,
+    uid: u32,
+    peer_uri: Option<&str>,
+    user: Option<&str>,
+    session_id: u64,
+    cause: &DenyCause,
+) {
+    let mut rec = make_record(
+        "connection",
+        &wctx.host,
+        &wctx.socket,
+        uid,
+        None,
+        None,
+        peer_uri,
+        session_id,
+        1,
+        "connect",
+        None,
+        "deny",
+        cause_reason(cause),
+        cause_posture(cause),
+        &wctx.au3_1,
+    );
+    // #275: the peer identity, bounded and audit-only.
+    rec.subject.user = admitted_user(user);
+    if let Err(e) = emit
+        .emit_within(
+            &rec,
+            Duration::from_millis(maknae_config::ADMISSION_AUDIT_TIMEOUT_MS),
+        )
+        .await
+    {
+        crate::diag::report(format!(
+            "maknaed: admission audit append failed or is unconfirmed on connection-deny for peer_uid={uid} peer_uri={peer_uri:?} — the rejection proceeded: {e}"
+        ));
     }
 }
 
@@ -2726,6 +2884,7 @@ pub struct Conn<S> {
     /// layer (ADR-0009). A property of the accepted CONNECTION, like the peer facts
     /// above — and like them, established by the door rather than read off the wire.
     pub delegated: maknae_io::DelegatedFds,
+    pub sender: maknae_vault::SenderVerdict,
 }
 /// The accept surface the run-loop consumes, split into a prompt raw-accept and a bounded
 /// handshake so a stalled TLS handshake cannot serialize acceptance (anti-DoS, spec §6a).
@@ -2783,11 +2942,13 @@ impl PlaneAccept for PlaneListener {
         let peer = stream.peer().clone();
         let peer_uid = stream.peer_creds().uid;
         let delegated = stream.delegated();
+        let sender = stream.sender_verdict();
         Ok(Conn {
             stream,
             peer,
             peer_uid,
             delegated,
+            sender,
         })
     }
 }
@@ -2918,6 +3079,9 @@ pub async fn accept_loop<A, E, P>(
     egress: Arc<dyn crate::egress::Egress>,
     ops: Arc<dyn AdminOps>,
     drain: tokio::sync::watch::Receiver<Drain>,
+    gate: Arc<FactsGate>,
+    // The absolute bound on one connection, checked between stages (ADR-0006 decision 4's visit clock).
+    lifetime: Duration,
 ) -> ServeOutcome
 where
     A: PlaneAccept + Send + Sync + 'static,
@@ -3054,8 +3218,10 @@ where
                                 let kernel_graph = Arc::clone(&kernel_graph);
                                 let egress = Arc::clone(&egress);
                                 let ops = Arc::clone(&ops);
+                                let gate = Arc::clone(&gate);
                                 handlers.spawn(async move {
                                     let _permit = permit; // held for the connection's life
+                                    let opened_at = Instant::now();
                                     // The bounded TLS handshake runs HERE, under the permit —
                                     // a stalled handshake occupies ONE slot for at most
                                     // handshake_timeout, never the accept loop.
@@ -3064,112 +3230,83 @@ where
                                         .await
                                     {
                                         Ok(conn) => {
-                                            // Group half resolved here — on the BLOCKING pool, not
-                                            // this async worker: `uid_in_maknae_group` makes
-                                            // synchronous NSS calls (getgrnam/getpwuid), and a
-                                            // stalled directory backend (SSS/LDAP) would otherwise
-                                            // pin worker threads until a handful of stuck lookups
-                                            // starve the whole runtime — accept loop included
-                                            // (same inline-blocking DoS class as the handshake and
-                                            // fsync findings). Fail-closed to false on any
-                                            // resolution OR join error (handle then Denies+audits).
-                                            let uid = conn.peer_uid;
-                                            // Bounded join: a stalled NSS backend must not
-                                            // pin this permit indefinitely — on elapse,
-                                            // fail closed (deny + audit) and release the
-                                            // permit; the orphaned blocking lookup finishes
-                                            // in the background.
-                                            let group_breaker = group_lookup_breaker();
-                                            let now = Instant::now();
-                                            let breaker =
-                                                group_breaker.lock().await.begin_attempt_at(now);
-                                            // #275, #435: the peer's username and
-                                            // raw home ride the SAME blocking lookup
-                                            // as membership. Absent on every
-                                            // fail-closed arm.
-                                            let lane = class.lane;
-                                            let (admitted, peer_user, peer_dir) = match breaker {
-                                                BreakerAdmission::RefuseOpen => {
-                                                    if group_breaker
-                                                        .lock()
-                                                        .await
-                                                        .should_log_refusal_at(now)
-                                                    {
-                                                        eprintln!(
-                                                            "maknaed: `maknae` group lookup circuit breaker open for uid={uid} — failing closed without spawning more NSS work"
-                                                        );
-                                                    }
-                                                    admission_facts(None)
+                                            let Conn {
+                                                mut stream,
+                                                peer,
+                                                peer_uid: uid,
+                                                delegated,
+                                                sender,
+                                            } = conn;
+                                            let peer_uri = peer_san(&peer).map(str::to_string);
+                                            let facts =
+                                                gather(&gate, class.admission, uid).await;
+                                            // #275: the username rides the membership lookup.
+                                            let (_, user, _) =
+                                                admission_facts(&facts.membership);
+                                            match revalidate(uid, uid, &facts) {
+                                                Revalidation::Deny(cause) => {
+                                                    report_unanswered(&cause, uid, session_id);
+                                                    emit_connect_deny(
+                                                        &*emit,
+                                                        &wctx,
+                                                        uid,
+                                                        peer_uri.as_deref(),
+                                                        user.as_deref(),
+                                                        session_id,
+                                                        &cause,
+                                                    )
+                                                    .await;
+                                                    close_bounded(&mut stream).await;
                                                 }
-                                                BreakerAdmission::RefuseAtCapacity => admission_facts(None),
-                                                BreakerAdmission::Admit => match tokio::time::timeout(
-                                                    Duration::from_millis(maknae_config::GROUP_LOOKUP_TIMEOUT_MS),
-                                                    tokio::task::spawn_blocking(move || {
-                                                        match class.admission {
-                                                            Admission::MaknaeGroupMember => {
-                                                                uid_in_maknae_group(uid)
-                                                            }
-                                                        }
-                                                    }),
-                                                )
-                                                .await
-                                                {
-                                                    Ok(join) => {
-                                                        // The NSS worker returned or panicked;
-                                                        // either way it is no longer an orphan.
-                                                        group_breaker.lock().await.record_success();
-                                                        match join {
-                                                            Ok(Ok(m)) => admission_facts(Some(m)),
-                                                            _ => admission_facts(None),
-                                                        }
-                                                    }
-                                                    Err(_elapsed) => {
-                                                        if group_breaker
-                                                            .lock()
-                                                            .await
-                                                            .record_timeout_at(Instant::now())
-                                                            == BreakerTransition::Tripped
-                                                        {
-                                                            eprintln!(
-                                                                "maknaed: `maknae` group lookup circuit breaker tripped after repeated {}s blocking timeouts — failing closed without spawning more NSS work",
-                                                                maknae_config::GROUP_LOOKUP_TIMEOUT_MS / 1_000
-                                                            );
-                                                        } else {
-                                                            eprintln!(
-                                                                "maknaed: `maknae` group lookup for uid={uid} stalled past {}s — failing closed (deny)",
-                                                                maknae_config::GROUP_LOOKUP_TIMEOUT_MS / 1_000
-                                                            );
-                                                        }
-                                                        admission_facts(None)
-                                                    }
-                                                },
-                                            };
-                                            // The one production binding of the
-                                            // T1-pinned decide-timeout const —
-                                            // accepted-documented as ungated T3
-                                            // (value pinned in handler.rs, behavior
-                                            // proven in the handle() suite).
-                                            handle(
-                                                conn.stream,
-                                                peer_san(&conn.peer).map(str::to_string),
-                                                conn.peer_uid,
-                                                admitted,
-                                                peer_user,
-                                                peer_dir,
-                                                emit, session_id, cfg, wctx.au3_1,
-                                                authorizer,
-                                                live,
-                                                authz_backend_name,
-                                                classification_policy_name,
-                                                plane_key_name,
-                                                kernel_graph,
-                                                egress,
-                                                AUTHZ_DECIDE_TIMEOUT,
-                                                lane,
-                                                conn.delegated,
-                                                ops,
-                                            )
-                                            .await;
+                                                Revalidation::Continue => {
+                                                    let session = Arc::new(SessionRecord {
+                                                        uid,
+                                                        user,
+                                                        session_id,
+                                                        lane: class.lane,
+                                                        admission: class.admission,
+                                                        sender,
+                                                        account: facts.account,
+                                                        seq: Seq::new(),
+                                                        opened_at,
+                                                        lifetime,
+                                                        platform: crate::deployment::Platform::of_build(),
+                                                        ending: std::sync::OnceLock::new(),
+                                                    });
+                                                    // The one production binding of the
+                                                    // T1-pinned decide-timeout const —
+                                                    // accepted-documented as ungated T3
+                                                    // (value pinned in handler.rs, behavior
+                                                    // proven in the handle() suite).
+                                                    handle(
+                                                        stream,
+                                                        peer_uri.clone(),
+                                                        Arc::clone(&session),
+                                                        gate,
+                                                        Arc::clone(&emit),
+                                                        cfg,
+                                                        wctx.au3_1.clone(),
+                                                        authorizer,
+                                                        live,
+                                                        authz_backend_name,
+                                                        classification_policy_name,
+                                                        plane_key_name,
+                                                        kernel_graph,
+                                                        egress,
+                                                        AUTHZ_DECIDE_TIMEOUT,
+                                                        delegated,
+                                                        ops,
+                                                    )
+                                                    .await;
+                                                    emit_termination(
+                                                        &*emit,
+                                                        &wctx,
+                                                        &session,
+                                                        peer_uri.as_deref(),
+                                                    )
+                                                    .await;
+                                                }
+                                            }
                                         }
                                         // A surfaced peer-authentication rejection: audit WHO/WHY and drop
                                         // (Boundary A — the transport reports, the daemon audits).
@@ -6400,18 +6537,19 @@ fn inconsistency(b: &BaselineLayer) -> Option<String> {
             "the accepted baseline's recorded digest does not match its sections".to_string(),
         );
     }
-    let declared =
-        match maknae_config::Document::from_baseline(&sections).and_then(crate::boot::assemble) {
-            Ok(declared) => declared,
-            Err(e) => {
-                return Some(format!(
-                    "the accepted baseline's sections do not assemble: {e}"
-                ))
-            }
-        };
+    let declared = match maknae_config::Document::from_baseline(&sections)
+        .and_then(|doc| crate::boot::declared(&doc))
+    {
+        Ok(declared) => declared,
+        Err(e) => {
+            return Some(format!(
+                "the accepted baseline's sections do not assemble: {e}"
+            ))
+        }
+    };
     let (system, ceiling) = (
-        declared.classification_policy_name(),
-        &declared.ceiling().classification.name,
+        declared.policy.name(),
+        &declared.ceiling.classification.name,
     );
     (system != b.system || *ceiling != b.ceiling).then(|| {
         format!(
@@ -6691,8 +6829,17 @@ async fn boot_after_sink(
         egress: egress_cfg,
         audit,
         principal,
+        deployment,
         ..
     } = validated;
+    if let Some(line) = account_source_diag(deployment, || {
+        matches!(
+            maknae_io::presence(Path::new(crate::session_facts::USERDB_MULTIPLEXER)),
+            Ok(true)
+        )
+    }) {
+        eprintln!("{line}");
+    }
     if let Some(why) = inconsistent {
         return Err(graph_refusal(GraphFailure::Inconsistent(why), state_dir));
     }
@@ -7024,6 +7171,7 @@ async fn boot_after_sink(
         egress,
         hup,
         Arc::new(reloader),
+        deployment,
     )
     .await;
 
@@ -7067,10 +7215,22 @@ async fn serve_after_mint<B>(
     egress: Arc<dyn crate::egress::Egress>,
     hup: tokio::signal::unix::Signal,
     reloader: Arc<Reloader<B, maknae_audit_append::AuditSink>>,
+    deployment: maknae_config::Deployment,
 ) -> Result<ServeOutcome, String>
 where
     B: maknae_authz_basic::Baseline,
 {
+    if !crate::deployment::client_listener_wanted(deployment.mode) {
+        eprintln!(
+            "maknaed: deployment.mode is {}; no client listener is bound",
+            deployment.mode.as_str()
+        );
+        let signalled = install_shutdown_signal()?;
+        return Ok(tokio::select! {
+            _ = signalled => ServeOutcome::GracefulShutdown,
+            joined = supervisor => ServeOutcome::SupervisorExited(supervisor_exit_reason(joined)),
+        });
+    }
     // Resolve the `maknae` gid BEFORE bind (codex round-7 P1) and fail closed if it can't:
     // under the normal service-account setup `maknaed`'s PRIMARY group is NOT `maknae`
     // (it's a supplementary member), so a bare bind would group-own the 0660 socket by the
@@ -7123,6 +7283,14 @@ where
     );
     let live = Arc::clone(authorizer.live());
     let ops: Arc<dyn AdminOps> = Arc::clone(&reloader) as _;
+    let gate = Arc::new(FactsGate {
+        facts: Arc::new(crate::session_facts::HostSessionFacts {
+            account_source: deployment.account_source,
+        }),
+        breaker: group_lookup_breaker(),
+        bound: Duration::from_millis(maknae_config::GROUP_LOOKUP_TIMEOUT_MS),
+    });
+    let lifetime = handler_drain_bound(&transport, egress.deadline());
     let outcome = accept_loop(
         listener,
         class,
@@ -7141,6 +7309,8 @@ where
         egress,
         ops,
         drain.clone(),
+        gate,
+        lifetime,
     )
     .await;
     reloader.stop(&reloads).await;
@@ -7180,6 +7350,26 @@ fn install_shutdown_signal() -> Result<impl Future<Output = ()> + Send, String> 
             _ = intr.recv() => {}
         }
     })
+}
+
+/// A boot diagnostic only: what the probe sees never changes the declared source.
+fn account_source_diag(
+    d: maknae_config::Deployment,
+    multiplexer_present: impl FnOnce() -> bool,
+) -> Option<&'static str> {
+    match (d.mode, d.account_source) {
+        (maknae_config::DeploymentMode::LinuxHost, maknae_config::AccountSource::None) => Some(
+            "maknaed: deployment.account_source is none: account state (locked, expired) is not checked on this host",
+        ),
+        (maknae_config::DeploymentMode::LinuxHost, maknae_config::AccountSource::Userdb) => {
+            (!multiplexer_present()).then_some(
+                "maknaed: deployment.account_source is userdb but /run/systemd/userdb/io.systemd.Multiplexer is not present: every local account will be refused as infrastructure:account until systemd-userdbd answers; set deployment.account_source: none to declare the gap",
+            )
+        }
+        (maknae_config::DeploymentMode::MacosHost | maknae_config::DeploymentMode::Container, _) => {
+            None
+        }
+    }
 }
 
 /// Best-effort host label for AU-3c. Not security-load-bearing (the security-relevant
@@ -7270,6 +7460,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_a_linux_host_that_declared_no_account_source_says_so_at_boot() {
+        use maknae_config::{AccountSource, Deployment, DeploymentMode};
+        let d = |mode, account_source| Deployment {
+            mode,
+            account_source,
+        };
+        for present in [true, false] {
+            let line =
+                account_source_diag(d(DeploymentMode::LinuxHost, AccountSource::None), || {
+                    present
+                })
+                .unwrap();
+            assert!(line.contains("account_source is none"), "{line}");
+        }
+        for quiet in [
+            d(DeploymentMode::MacosHost, AccountSource::None),
+            d(DeploymentMode::Container, AccountSource::None),
+        ] {
+            assert_eq!(account_source_diag(quiet, || false), None, "{quiet:?}");
+        }
+        assert_eq!(
+            account_source_diag(d(DeploymentMode::LinuxHost, AccountSource::Userdb), || true),
+            None
+        );
+    }
+
+    #[test]
+    fn a_declared_userdb_without_its_socket_says_what_will_be_refused() {
+        use maknae_config::{AccountSource, Deployment, DeploymentMode};
+        let line = account_source_diag(
+            Deployment {
+                mode: DeploymentMode::LinuxHost,
+                account_source: AccountSource::Userdb,
+            },
+            || false,
+        )
+        .unwrap();
+        for part in [
+            crate::session_facts::USERDB_MULTIPLEXER,
+            "every local account will be refused as infrastructure:account until systemd-userdbd answers",
+            "set deployment.account_source: none to declare the gap",
+        ] {
+            assert!(line.contains(part), "{line}");
+        }
+    }
+
+    #[test]
     fn the_sync_records_are_a_graph_pseudo_action() {
         assert!(GRAPH_PSEUDO_ACTIONS.contains(&"graph.sync"));
     }
@@ -7312,6 +7549,7 @@ mod tests {
             RejectReason::UnexpectedClientCert,
             RejectReason::PeerCredCapture,
             RejectReason::Io,
+            RejectReason::SenderMismatch,
         ];
         let labels: Vec<&str> = all.iter().map(reject_reason_str).collect();
         for l in &labels {
@@ -7377,16 +7615,16 @@ mod tests {
     /// `Unavailable` backend's zero deadline) the bound is the old one.
     #[test]
     fn the_handler_drain_bound_covers_the_egress_deadline() {
-        // at the transport defaults (5 s handshake, 5 s read): 5 + 5 + 5 + 5
-        // + 5 + 5 + 5 + 0 + 5 + 1 + 10 = 51 s with no provider, plus the deadline with one
+        // at the transport defaults (5 s handshake, 5 s read): 5 + 5 + 5 + 5 + 5
+        // + 5 + 5 + 5 + 0 + 5 + 1 + 10 = 56 s with no provider, plus the deadline with one
         let cfg = maknae_config::transport_from_section(None).unwrap();
         assert_eq!(
             handler_drain_bound(&cfg, Duration::ZERO),
-            Duration::from_secs(51)
+            Duration::from_secs(56)
         );
         assert_eq!(
             handler_drain_bound(&cfg, Duration::from_secs(120)),
-            Duration::from_secs(171)
+            Duration::from_secs(176)
         );
     }
 
@@ -7744,10 +7982,11 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
              vault:\n  addr: https://v.example:8200\n  plane_key: ecdsa-p521-sha512\n\
              transport:\n  socket_path: {}\n\
              audit:\n  jsonl_path: {}\n\
-             {}",
+             {}{}",
             d.0.join("maknaed.sock").display(),
             d.0.join("audit.jsonl").display(),
             principal_block,
+            crate::test_fixtures::DEPLOYMENT_YAML,
         );
         put(&d.0, "maknae.yaml", &yaml, 0o640);
         for f in [
@@ -10666,6 +10905,12 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
+        fn presence(&self, path: &Path) -> Result<bool, String> {
+            Ok(path == Path::new(crate::deployment::SYSTEMD_RUNNING))
+        }
+        fn env_var(&self, _: &str) -> Option<String> {
+            None
+        }
     }
 
     fn test_seams() -> BootSeams {
@@ -10768,9 +11013,10 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     /// The common fixture's maknae.yaml with `core_extra` under `core:`, the trail at `audit`, and `tail` appended.
     fn write_yaml(d: &Dir, core_extra: &str, vault_addr: &str, audit: &Path, tail: &str) {
         let yaml = format!(
-            "core:\n  deployment_id: dev-01\n{core_extra}vault:\n  addr: {vault_addr}\ntransport:\n  socket_path: {}\naudit:\n  jsonl_path: {}\n{PRINCIPAL_BLOCK}{tail}",
+            "core:\n  deployment_id: dev-01\n{core_extra}vault:\n  addr: {vault_addr}\ntransport:\n  socket_path: {}\naudit:\n  jsonl_path: {}\n{PRINCIPAL_BLOCK}{}{tail}",
             d.0.join("maknaed.sock").display(),
             audit.display(),
+            crate::test_fixtures::DEPLOYMENT_YAML,
         );
         put(&d.0, "maknae.yaml", &yaml, 0o640);
     }
@@ -11097,6 +11343,111 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         assert_eq!(revision_of_store(&d), revision);
     }
 
+    fn without_deployment(d: &Dir) {
+        let mut b = accepted(d);
+        assert!(b.sections.remove("deployment").is_some());
+        b.sha256 = crate::baseline::accepted_digest(&b.sections.clone().into());
+        rewrite_baseline(d, Some(&b));
+    }
+
+    #[test]
+    fn a_baseline_accepted_without_deployment_follows_the_files_at_start() {
+        let _g = env_lock();
+        let d = fixture("deployment-follows");
+        let _ = boot(&d);
+        without_deployment(&d);
+        let before = trail_of(&d, "audit.jsonl").len();
+        let _ = boot(&d);
+        let recs = trail_of(&d, "audit.jsonl")[before..].to_vec();
+        assert!(
+            recs.iter().any(|r| r.action == GRAPH_BASELINE_ACTION
+                && r.outcome.reason == "deployment follows maknae.yaml at start"),
+            "{:?}",
+            recs.iter().map(|r| &r.outcome.reason).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            accepted(&d).sections["deployment"],
+            crate::test_fixtures::DEPLOYMENT
+        );
+    }
+
+    #[test]
+    fn a_baseline_accepted_without_deployment_and_an_invalid_file_refuses_naming_the_key() {
+        let _g = env_lock();
+        let d = fixture("deployment-pre-115");
+        let _ = boot(&d);
+        without_deployment(&d);
+        write_yaml(
+            &d,
+            "  unknown_key: 1\n",
+            "https://v.example:8200",
+            &d.0.join("audit.jsonl"),
+            "",
+        );
+        let r = boot(&d);
+        let Err(e @ RunError::Other(m)) = &r else {
+            panic!("expected the start refusal, got {r:?}");
+        };
+        assert!(
+            m.starts_with("accepted baseline cannot start: ")
+                && m.contains("deployment.mode")
+                && m.contains("linux-host, macos-host, container"),
+            "{m}"
+        );
+        assert_eq!(refusal_exit_code(e), 1);
+    }
+
+    #[test]
+    fn a_baseline_with_deployment_keeps_running_over_an_invalid_file() {
+        let _g = env_lock();
+        let d = fixture("deployment-kept");
+        let _ = boot(&d);
+        let stored = accepted(&d).sections["deployment"].clone();
+        let yaml = std::fs::read_to_string(d.0.join("maknae.yaml")).unwrap();
+        put(
+            &d.0,
+            "maknae.yaml",
+            &yaml.replace(crate::test_fixtures::DEPLOYMENT_YAML, ""),
+            0o640,
+        );
+        let before = trail_of(&d, "audit.jsonl").len();
+        let _ = boot(&d);
+        let recs = trail_of(&d, "audit.jsonl")[before..].to_vec();
+        let b = baseline_records(&recs);
+        assert_eq!(b.len(), 1, "{b:?}");
+        assert_eq!(b[0].1, crate::baseline::INVALID_RECORDED);
+        assert_eq!(accepted(&d).sections["deployment"], stored);
+    }
+
+    #[test]
+    fn a_mode_the_host_contradicts_refuses_the_first_start_audited() {
+        let _g = env_lock();
+        let d = fixture("deployment-contradicted");
+        let yaml = std::fs::read_to_string(d.0.join("maknae.yaml")).unwrap();
+        put(
+            &d.0,
+            "maknae.yaml",
+            &yaml.replace(
+                crate::test_fixtures::DEPLOYMENT_YAML,
+                "deployment:\n  mode: container\n",
+            ),
+            0o640,
+        );
+        let r = boot(&d);
+        let Err(e @ RunError::Other(m)) = &r else {
+            panic!("expected the start refusal, got {r:?}");
+        };
+        assert!(m.contains("deployment.mode is container"), "{m}");
+        assert_eq!(refusal_exit_code(e), 1);
+        let recs = trail_of(&d, "audit.jsonl");
+        assert_eq!(recs.len(), 1, "{recs:?}");
+        assert_eq!(
+            (recs[0].action.as_str(), recs[0].outcome.reason.as_str()),
+            ("start", m.as_str())
+        );
+        assert!(!state_dir(&d.0).join(STORE_FILE).exists());
+    }
+
     #[test]
     fn vault_follows_the_file_at_start_and_is_recorded() {
         let _g = env_lock();
@@ -11395,9 +11746,10 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
 
     fn yaml_with_offload(d: &Dir, trail: &Path) {
         let yaml = format!(
-            "core:\n  deployment_id: dev-01\nvault:\n  addr: https://v.example:8200\ntransport:\n  socket_path: {}\naudit:\n  jsonl_path: {}\n  siem: https://siem.example:6514\n{PRINCIPAL_BLOCK}",
+            "core:\n  deployment_id: dev-01\nvault:\n  addr: https://v.example:8200\ntransport:\n  socket_path: {}\naudit:\n  jsonl_path: {}\n  siem: https://siem.example:6514\n{PRINCIPAL_BLOCK}{}",
             d.0.join("maknaed.sock").display(),
             trail.display(),
+            crate::test_fixtures::DEPLOYMENT_YAML,
         );
         put(&d.0, "maknae.yaml", &yaml, 0o640);
     }
@@ -11607,9 +11959,10 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let d = fixture("accepted-restart");
         let _ = boot(&d);
         let yaml = format!(
-            "core:\n  deployment_id: dev-01\nvault:\n  addr: https://v.example:8200\ntransport:\n  socket_path: {}\n  max_connections: 7\naudit:\n  jsonl_path: {}\n{PRINCIPAL_BLOCK}",
+            "core:\n  deployment_id: dev-01\nvault:\n  addr: https://v.example:8200\ntransport:\n  socket_path: {}\n  max_connections: 7\naudit:\n  jsonl_path: {}\n{PRINCIPAL_BLOCK}{}",
             d.0.join("maknaed.sock").display(),
             d.0.join("audit.jsonl").display(),
+            crate::test_fixtures::DEPLOYMENT_YAML,
         );
         put(&d.0, "maknae.yaml", &yaml, 0o640);
         accept_shown(&d);
@@ -11969,6 +12322,19 @@ mod home_resolution_tests {
         home: &Path,
         authorizer: Arc<crate::Composition<maknae_authz_basic::HermeticAuthorizer>>,
     ) -> (RespResult, Vec<AuditRecord>) {
+        serve_admitted_as(verb, uid, user, user, home, authorizer).await
+    }
+
+    /// `admitted` is the name the connection was admitted under; the request's own
+    /// lookup answers `user` and `home`.
+    async fn serve_admitted_as(
+        verb: Verb,
+        uid: u32,
+        admitted: &str,
+        user: &str,
+        home: &Path,
+        authorizer: Arc<crate::Composition<maknae_authz_basic::HermeticAuthorizer>>,
+    ) -> (RespResult, Vec<AuditRecord>) {
         let (mut client, server) = tokio::io::duplex(256 * 1024);
         let body = maknae_proto::encode_request(&maknae_proto::Request {
             protocol_version: PROTOCOL_VERSION,
@@ -11983,12 +12349,9 @@ mod home_resolution_tests {
         handle(
             server,
             Some("spiffe://d/plane/cli".to_string()),
-            uid,
-            true,
-            Some(user.to_string()),
-            Some(home.to_path_buf()),
+            SessionRecord::for_test(uid, Some(admitted.to_string())).into(),
+            FactsGate::allow_as(Some(user.to_string()), Some(home.to_path_buf())),
             emit.clone(),
-            1,
             maknae_config::transport_from_section(None).unwrap(),
             serde_json::json!({}),
             authorizer,
@@ -11999,7 +12362,6 @@ mod home_resolution_tests {
             Arc::new(None),
             crate::egress::unavailable_egress(),
             Duration::from_secs(10),
-            maknae_security::Lane::Local,
             maknae_io::DelegatedFds::new(1),
             baseline_stub::no_baseline(),
         )
@@ -12099,6 +12461,100 @@ mod home_resolution_tests {
         );
         drop(held);
     }
+
+    #[tokio::test]
+    async fn a_request_is_decided_on_the_name_and_home_its_own_lookup_resolved() {
+        let uid = 4_115_000;
+        let raw = std::env::temp_dir().join(format!("run_fresh_home_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&raw);
+        std::fs::create_dir(&raw).unwrap();
+        let dir = Dir(raw.canonicalize().unwrap());
+        std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(
+            dir.0.join("authz.yaml"),
+            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            dir.0.join("authz.yaml"),
+            std::fs::Permissions::from_mode(0o640),
+        )
+        .unwrap();
+        let us = &maknae_config::BasicPolicy;
+        let authorizer = Arc::new(crate::Composition::new(
+            maknae_authz_basic::HermeticAuthorizer::new(
+                maknae_authz_basic::PolicyPaths::in_dir(&dir.0),
+                maknae_config::Principal {
+                    name: "operator".into(),
+                    uid,
+                },
+                maknae_config::TargetRequired {
+                    owner: None,
+                    mode_mask: Some(0o022),
+                    nlink_exactly_one: false,
+                    regular_file: true,
+                    max_bytes: None,
+                },
+                maknae_crypto::sha256,
+            )
+            .unwrap(),
+            crate::CeilingAuthorizer::new(maknae_config::Ceiling::baseline_for(us), us),
+        ));
+        let read = || Verb::Read {
+            path: dir.0.join("x").to_str().unwrap().into(),
+            conversation: None,
+            page: None,
+        };
+        let unresolvable = crate::authz::HomeUnavailable::Unresolvable.reason();
+
+        let (_, records) = serve_admitted_as(
+            Verb::Ping,
+            uid,
+            "admitted-115",
+            "renamed-115",
+            &dir.0,
+            authorizer.clone(),
+        )
+        .await;
+        assert_eq!(
+            records
+                .iter()
+                .map(|r| (r.event.as_str(), r.subject.user.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("connection", Some("admitted-115")),
+                ("request", Some("renamed-115"))
+            ]
+        );
+
+        let (_, records) = serve_admitted_as(
+            read(),
+            uid,
+            "admitted-115",
+            "renamed-115",
+            &dir.0.join("moved-away"),
+            authorizer.clone(),
+        )
+        .await;
+        let last = records.last().expect("a request record");
+        assert_eq!(last.outcome.reason, unresolvable);
+        assert_eq!(last.subject.user.as_deref(), Some("renamed-115"));
+
+        let (_, records) = serve_admitted_as(
+            read(),
+            uid,
+            "admitted-115",
+            "renamed-115",
+            &dir.0,
+            authorizer,
+        )
+        .await;
+        assert_ne!(
+            records.last().expect("a request record").outcome.reason,
+            unresolvable,
+            "the home this request resolved is the one confined to"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -12153,7 +12609,7 @@ mod admission_bound_tests {
         Duration::from_millis(maknae_config::ADMISSION_AUDIT_TIMEOUT_MS)
     }
 
-    async fn drive(in_group: bool, delay: Duration) -> (Vec<u8>, usize, Duration) {
+    async fn drive(delay: Duration) -> (Vec<u8>, usize, Duration) {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -12206,12 +12662,9 @@ mod admission_bound_tests {
             handle(
                 server,
                 Some("spiffe://d/plane/cli".to_string()),
-                uid,
-                in_group,
-                Some("operator".to_string()),
-                Some(root.clone()),
+                SessionRecord::for_test(uid, Some("operator".to_string())).into(),
+                FactsGate::allow_as(Some("operator".to_string()), Some(root.clone())),
                 emit.clone(),
-                1,
                 maknae_config::transport_from_section(None).unwrap(),
                 serde_json::json!({}),
                 authorizer,
@@ -12222,7 +12675,6 @@ mod admission_bound_tests {
                 Arc::new(None),
                 crate::egress::unavailable_egress(),
                 Duration::from_secs(10),
-                maknae_security::Lane::Local,
                 maknae_io::DelegatedFds::new(1),
                 baseline_stub::no_baseline(),
             ),
@@ -12238,7 +12690,7 @@ mod admission_bound_tests {
 
     #[tokio::test(start_paused = true)]
     async fn an_admission_append_slower_than_its_bound_closes_without_serving() {
-        let (buf, calls, elapsed) = drive(true, Duration::from_secs(60)).await;
+        let (buf, calls, elapsed) = drive(Duration::from_secs(60)).await;
         assert!(elapsed < bound() + Duration::from_secs(1), "{elapsed:?}");
         assert!(buf.is_empty(), "no response frame was written");
         assert!(calls >= 1);
@@ -12246,17 +12698,65 @@ mod admission_bound_tests {
 
     #[tokio::test(start_paused = true)]
     async fn an_admission_append_inside_its_bound_is_served() {
-        let (buf, calls, _) = drive(true, bound() - Duration::from_millis(1)).await;
+        let (buf, calls, _) = drive(bound() - Duration::from_millis(1)).await;
         assert!(!buf.is_empty(), "a reply frame was written");
         assert!(calls >= 1);
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_deny_paths_admission_append_is_bounded_too() {
-        let (buf, calls, elapsed) = drive(false, Duration::from_secs(60)).await;
-        assert!(elapsed < bound() + Duration::from_secs(1), "{elapsed:?}");
-        assert!(buf.is_empty());
-        assert!(calls >= 1);
+        let emit = SlowAdmission {
+            delay: Duration::from_secs(60),
+            bounded_calls: AtomicUsize::new(0),
+        };
+        let wctx = WhereCtx {
+            host: "h".into(),
+            socket: "s".into(),
+            au3_1: serde_json::json!({}),
+        };
+        let t0 = tokio::time::Instant::now();
+        emit_connect_deny(&emit, &wctx, 7, None, None, 1, &DenyCause::NotMember).await;
+        assert!(t0.elapsed() < bound() + Duration::from_secs(1));
+        assert_eq!(emit.bounded_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_termination_append_is_bounded_and_does_not_hang_the_handler() {
+        struct Stalled(AtomicUsize);
+        impl AuditEmit for Stalled {
+            fn emit(
+                &self,
+                _rec: &AuditRecord,
+            ) -> impl std::future::Future<Output = Result<(), maknae_audit_append::AuditError>> + Send
+            {
+                std::future::pending()
+            }
+            fn emit_within(
+                &self,
+                _rec: &AuditRecord,
+                bound: Duration,
+            ) -> impl std::future::Future<Output = Result<(), maknae_audit_append::AuditError>> + Send
+            {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    tokio::time::sleep(bound).await;
+                    Err(maknae_audit_append::AuditError::WritePrimary(
+                        "unconfirmed".into(),
+                    ))
+                }
+            }
+        }
+        let emit = Stalled(AtomicUsize::new(0));
+        let wctx = WhereCtx {
+            host: "h".into(),
+            socket: "s".into(),
+            au3_1: serde_json::json!({}),
+        };
+        let session = SessionRecord::for_test(7, None);
+        let t0 = tokio::time::Instant::now();
+        emit_termination(&emit, &wctx, &session, None).await;
+        assert!(t0.elapsed() <= bound() + Duration::from_secs(1));
+        assert_eq!(emit.0.load(Ordering::SeqCst), 1);
     }
 
     struct StalledPlain {
@@ -12619,6 +13119,7 @@ mod graph_audit_bound_tests {
                 3,
                 "whoami",
                 "no",
+                "unauthorized",
                 &au3,
             ),
         )
@@ -12913,7 +13414,8 @@ mod reload_fixture {
             }
         }
         format!(
-            "core:\n  deployment_id: dev-01\n{core_extra}vault:\n  addr: {vault_addr}\ntransport:\n  socket_path: {socket}\n{transport}audit:\n  jsonl_path: {trail}\n{audit}principal:\n  name: op\n  uid: {uid}\n{rest}",
+            "core:\n  deployment_id: dev-01\n{core_extra}vault:\n  addr: {vault_addr}\ntransport:\n  socket_path: {socket}\n{transport}audit:\n  jsonl_path: {trail}\n{audit}principal:\n  name: op\n  uid: {uid}\n{deployment}{rest}",
+            deployment = crate::test_fixtures::DEPLOYMENT_YAML,
         )
     }
 
@@ -13862,6 +14364,11 @@ mod baseline_accept_tests {
                 "{tag}: the running ceiling still refuses SECRET content"
             );
             assert_eq!(fx.stored().unwrap().ceiling, "SECRET", "{tag}");
+            assert_eq!(
+                fx.stored().unwrap().sections["deployment"],
+                crate::test_fixtures::DEPLOYMENT,
+                "{tag}"
+            );
         }
     }
 
@@ -16329,7 +16836,7 @@ mod reload_tests {
                 IdleAccept,
                 ChannelClass {
                     peer_auth: PeerAuth::Certless,
-                    admission: Admission::MaknaeGroupMember,
+                    admission: crate::handler::Admission::MaknaeGroupMember,
                     lane: maknae_security::Lane::Local,
                     socket: "s".into(),
                 },
@@ -16352,6 +16859,8 @@ mod reload_tests {
                 crate::egress::unavailable_egress(),
                 baseline_stub::no_baseline(),
                 baseline_stub::serving(),
+                FactsGate::allow_as(None, None),
+                Duration::MAX,
             ),
         )
         .await
@@ -16432,7 +16941,7 @@ mod reload_tests {
                 IdleAccept,
                 ChannelClass {
                     peer_auth: PeerAuth::Certless,
-                    admission: Admission::MaknaeGroupMember,
+                    admission: crate::handler::Admission::MaknaeGroupMember,
                     lane: maknae_security::Lane::Local,
                     socket: "s".into(),
                 },
@@ -16455,6 +16964,8 @@ mod reload_tests {
                 crate::egress::unavailable_egress(),
                 baseline_stub::no_baseline(),
                 baseline_stub::serving(),
+                FactsGate::allow_as(None, None),
+                Duration::MAX,
             ),
         )
         .await

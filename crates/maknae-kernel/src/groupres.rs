@@ -1,15 +1,24 @@
 //! Peer-uid → `maknae`-group membership (spec §5). T3 I/O; fail-closed. CROSS-PLATFORM.
-use nix::unistd::{Group, Uid, User};
+use nix::unistd::{Gid, Group, Uid, User};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthzError {
     Resolve(String),
+    /// The user database answered: no account has this uid.
+    NoUser,
+    /// The user resolved, but the group source failed, so membership is undecided.
+    Unanswered {
+        user: String,
+        why: String,
+    },
 }
 
-/// Resolve the `maknae` group by name — shared by [`uid_in_maknae_group`] and
-/// [`maknae_gid`] so the group name is hardcoded in exactly one place.
+/// Shared by [`uid_in_maknae_group`] and [`maknae_gid`] so the group name is
+/// hardcoded in exactly one place.
+const MAKNAE_GROUP: &str = "maknae";
+
 fn resolve_maknae_group() -> Result<Group, AuthzError> {
-    Group::from_name("maknae")
+    Group::from_name(MAKNAE_GROUP)
         .map_err(|e| AuthzError::Resolve(e.to_string()))?
         .ok_or_else(|| AuthzError::Resolve("no `maknae` group".into()))
 }
@@ -53,43 +62,63 @@ pub fn uid_in_maknae_group(uid: u32) -> Result<Membership, AuthzError> {
     // available. The membership answer may fail; the identity should survive it.
     let user = User::from_uid(Uid::from_raw(uid))
         .map_err(|e| AuthzError::Resolve(e.to_string()))?
-        .ok_or_else(|| AuthzError::Resolve(format!("no user for uid {uid}")))?;
-    let name = user.name.clone();
+        .ok_or(AuthzError::NoUser)?;
+    membership_of(
+        &user.name,
+        user.gid,
+        user.dir,
+        Group::from_name(MAKNAE_GROUP).map_err(|e| e.to_string()),
+        supplementary_groups,
+    )
+}
+
+/// A failed group source leaves membership undecided (an infrastructure denial)
+/// and keeps the username; a host with no `maknae` group is an answer.
+fn membership_of(
+    name: &str,
+    gid: Gid,
+    dir: std::path::PathBuf,
+    group: Result<Option<Group>, String>,
+    supplementary: impl FnOnce(&str, Gid) -> Result<Vec<Gid>, String>,
+) -> Result<Membership, AuthzError> {
     let member = |in_group: bool| {
         Ok(Membership {
             in_group,
-            user: name.clone(),
-            dir: user.dir.clone(),
+            user: name.to_string(),
+            dir,
         })
     };
-    // A group that cannot be resolved is NOT a member -- fail closed -- but the
-    // username stands.
-    let Ok(grp) = resolve_maknae_group() else {
-        return member(false);
+    let unanswered = |why: String| {
+        Err(AuthzError::Unanswered {
+            user: name.to_string(),
+            why,
+        })
+    };
+    let grp = match group {
+        Ok(Some(grp)) => grp,
+        Ok(None) => return member(false),
+        Err(why) => return unanswered(why),
     };
     // Explicit membership (gr_mem) — populated on both Linux and macOS (Directory Services).
-    if grp.mem.contains(&user.name) {
+    if grp.mem.iter().any(|m| m == name) || gid == grp.gid {
         return member(true);
     }
-    // Primary group.
-    if user.gid == grp.gid {
-        return member(true);
+    match supplementary(name, gid) {
+        Ok(groups) => member(groups.contains(&grp.gid)),
+        Err(why) => unanswered(why),
     }
-    // Supplementary groups: getgrouplist exists on Linux; nix cfg-gates it OUT on Apple targets.
-    #[cfg(target_os = "linux")]
-    {
-        use std::ffi::CString;
-        let cname =
-            CString::new(user.name.clone()).map_err(|e| AuthzError::Resolve(e.to_string()))?;
-        // A failed supplementary-group lookup is NOT a member -- fail closed --
-        // but it must not discard the username we already have (#275).
-        match nix::unistd::getgrouplist(&cname, user.gid) {
-            Ok(groups) if groups.contains(&grp.gid) => return member(true),
-            Ok(_) => {}
-            Err(_) => return member(false),
-        }
-    }
-    member(false)
+}
+
+#[cfg(target_os = "linux")]
+fn supplementary_groups(name: &str, gid: Gid) -> Result<Vec<Gid>, String> {
+    let cname = std::ffi::CString::new(name).map_err(|e| e.to_string())?;
+    nix::unistd::getgrouplist(&cname, gid).map_err(|e| e.to_string())
+}
+
+// nix cfg-gates getgrouplist out on Apple targets; gr_mem carries membership there.
+#[cfg(not(target_os = "linux"))]
+fn supplementary_groups(_name: &str, _gid: Gid) -> Result<Vec<Gid>, String> {
+    Ok(Vec::new())
 }
 
 #[cfg(test)]
@@ -110,7 +139,92 @@ mod tests {
         match maknae_gid() {
             Ok(_gid) => {} // a host that DOES have `maknae` — fine, resolved.
             Err(AuthzError::Resolve(msg)) => assert!(!msg.is_empty()),
+            Err(AuthzError::NoUser | AuthzError::Unanswered { .. }) => {
+                panic!("the gid lookup names no user")
+            }
         }
+    }
+
+    fn group(gid: u32, mem: &[&str]) -> Group {
+        Group {
+            name: MAKNAE_GROUP.into(),
+            passwd: std::ffi::CString::new("x").unwrap(),
+            gid: Gid::from_raw(gid),
+            mem: mem.iter().map(|m| m.to_string()).collect(),
+        }
+    }
+
+    fn decide(
+        primary: u32,
+        lookup: Result<Option<Group>, String>,
+        supplementary: Result<Vec<u32>, String>,
+    ) -> Result<Membership, AuthzError> {
+        membership_of(
+            "ann",
+            Gid::from_raw(primary),
+            "/home/ann".into(),
+            lookup,
+            |name, gid| {
+                assert_eq!((name, gid), ("ann", Gid::from_raw(primary)));
+                supplementary.map(|g| g.into_iter().map(Gid::from_raw).collect())
+            },
+        )
+    }
+
+    fn answered(in_group: bool) -> Result<Membership, AuthzError> {
+        Ok(Membership {
+            in_group,
+            user: "ann".into(),
+            dir: "/home/ann".into(),
+        })
+    }
+
+    fn unanswered(why: &str) -> Result<Membership, AuthzError> {
+        Err(AuthzError::Unanswered {
+            user: "ann".into(),
+            why: why.into(),
+        })
+    }
+
+    #[test]
+    fn each_group_source_answer_decides_membership_or_leaves_it_undecided() {
+        let never = || Err::<Vec<u32>, _>("not asked".to_string());
+        assert_eq!(decide(100, Ok(None), never()), answered(false));
+        assert_eq!(decide(100, Err("EIO".into()), never()), unanswered("EIO"));
+        assert_eq!(
+            decide(100, Ok(Some(group(900, &["ann"]))), never()),
+            answered(true)
+        );
+        assert_eq!(
+            decide(900, Ok(Some(group(900, &[]))), never()),
+            answered(true)
+        );
+        assert_eq!(
+            decide(100, Ok(Some(group(900, &["bob"]))), Ok(vec![100, 900])),
+            answered(true)
+        );
+        assert_eq!(
+            decide(100, Ok(Some(group(900, &[]))), Ok(vec![100])),
+            answered(false)
+        );
+        assert_eq!(
+            decide(100, Ok(Some(group(900, &[]))), Err("ENOMEM".into())),
+            unanswered("ENOMEM")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_name_the_supplementary_lookup_cannot_carry_is_undecided() {
+        assert!(supplementary_groups("a\0b", Gid::from_raw(0)).is_err());
+        assert!(supplementary_groups(
+            &nix::unistd::User::from_uid(nix::unistd::geteuid())
+                .unwrap()
+                .unwrap()
+                .name,
+            nix::unistd::getegid()
+        )
+        .is_ok());
     }
 
     /// #275: the username is a property of the PEER UID and must be populated

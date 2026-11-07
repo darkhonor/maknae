@@ -52,6 +52,14 @@ impl crate::baseline_check::Env for HostEnv {
             .map(drop)
             .map_err(|e| e.to_string())
     }
+
+    fn presence(&self, path: &Path) -> Result<bool, String> {
+        maknae_io::presence(path).map_err(|e| e.to_string())
+    }
+
+    fn env_var(&self, key: &str) -> Option<String> {
+        std::env::var(key).ok()
+    }
 }
 
 #[cfg(test)]
@@ -100,5 +108,10 @@ mod tests {
         assert!(env.deputy_reachable(&sock).is_err());
         let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
         assert_eq!(env.deputy_reachable(&sock), Ok(()));
+        assert_eq!(env.presence(&sock), Ok(true));
+        assert_eq!(env.presence(&dir.path().join("absent")), Ok(false));
+        assert!(env.presence(Path::new("relative")).is_err());
+        assert_eq!(env.env_var("PATH"), std::env::var("PATH").ok());
+        assert_eq!(env.env_var("MAKNAE_TEST_UNSET_VARIABLE"), None);
     }
 }

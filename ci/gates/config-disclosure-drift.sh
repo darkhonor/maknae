@@ -47,6 +47,7 @@ SURFACE=(
   "crates/maknae-config/src/egress_cfg.rs|EgressConfig|egress|2|config"
   "crates/maknae-config/src/audit_cfg.rs|AuditConfig|audit|4|config"
   "crates/maknae-config/src/principal.rs|Principal|principal|2|config"
+  "crates/maknae-config/src/deployment.rs|Deployment|deployment|2|config"
   # The `providers` section (#153): five disclosed leaves per authorized provider; keys are per user, never here.
   "crates/maknae-config/src/providers.rs|AuthorizedProvider|providers[]|5|config"
   # NOTE: `Ceiling` spans TWO YAML levels. Six fields sit under
@@ -103,6 +104,8 @@ SURFACE=(
 LEAF_ENUMS=(
   "containment.outcome|crates/maknae-proto/src/wire.rs|ContainmentOutcome"
   "vault.plane_key|crates/maknae-crypto/src/plane_key.rs|PlaneKey"
+  "deployment.mode|crates/maknae-config/src/deployment.rs|DeploymentMode"
+  "deployment.account_source|crates/maknae-config/src/deployment.rs|AccountSource"
 )
 
 leaf_enum_check() { # <field-path> <file> <type>

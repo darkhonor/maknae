@@ -240,6 +240,7 @@ enroll → serve → AppArmor-enforce-clean cycle is **not yet validated — def
   today it governs the read path (#77). Per-binary MAC separation is a future
   tool-exec increment.
 - **Home access (#365)** — the daemon holds `getattr` and receipt-only `ioctl` over home content (`maknae.te`), no AppArmor home rule, and no ACL; `ProtectHome=read-only`. Serve-time enforce-clean on Rocky 10 (SELinux enforcing, a `0700` home, each kept permission shown load-bearing). On Debian 13 a probe confined by the shipped profile showed AppArmor does not mediate these operations; a full AppArmor serve is the Debian bullet below.
+- **Session facts (#115)** — `systemd_userdbd_stream_connect` lets `maknaed_t` ask `systemd-userdbd` for the local account's state; `/etc/passwd` comes from base policy and `auth_use_nsswitch`. The policy compiles on Rocky 9 and 10 and `sesearch` finds the access; an enforcing-host serve is not yet measured, nor is the AppArmor profile's under enforcement.
 - **RHEL 9 enroll → serve** — enroll expected to complete (#73), neither run live yet (see above).
 - **Debian 13 full enroll → serve → AppArmor-enforce-clean** — deb builds/installs and
   both AppArmor profiles load, but the daemon has not been run under the AppArmor

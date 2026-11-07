@@ -5,10 +5,10 @@
 //! Maknae reads only its own config; nothing external is read at boot.
 
 use maknae_config::{
-    ceiling_from_core, load_config_root_owned, policy_name_from_core, providers_from_section,
-    refuse_plaintext_keys, Ceiling, ClassificationPolicy, ConfigError, Document, IngestPosture,
-    ProviderSet, SectionSpec, Value, AUDIT_SECTION, EGRESS_SECTION, PRINCIPAL_SECTION,
-    PROVIDERS_SECTION, TRANSPORT_SECTION,
+    ceiling_from_core, deployment_from_section, load_config_root_owned, policy_name_from_core,
+    providers_from_section, refuse_plaintext_keys, Ceiling, ClassificationPolicy, ConfigError,
+    Deployment, Document, IngestPosture, ProviderSet, SectionSpec, Value, AUDIT_SECTION,
+    DEPLOYMENT_SECTION, EGRESS_SECTION, PRINCIPAL_SECTION, PROVIDERS_SECTION, TRANSPORT_SECTION,
 };
 use maknae_vault::VAULT_SECTION;
 use std::path::Path;
@@ -25,6 +25,15 @@ pub struct BootConfig {
     ceiling: Ceiling,
     policy: &'static dyn ClassificationPolicy,
     providers: ProviderSet,
+    deployment: Deployment,
+}
+
+/// What a document declares about classification and providers, without the
+/// host facts `deployment` adds.
+pub(crate) struct Declared {
+    pub(crate) ceiling: Ceiling,
+    pub(crate) policy: &'static dyn ClassificationPolicy,
+    pub(crate) providers: ProviderSet,
 }
 
 impl std::fmt::Debug for BootConfig {
@@ -33,6 +42,7 @@ impl std::fmt::Debug for BootConfig {
             .field("document", &self.document)
             .field("policy", &self.policy.name())
             .field("providers", &self.providers)
+            .field("deployment", &self.deployment)
             .finish_non_exhaustive()
     }
 }
@@ -62,6 +72,10 @@ impl BootConfig {
 
     pub fn providers(&self) -> &ProviderSet {
         &self.providers
+    }
+
+    pub fn deployment(&self) -> Deployment {
+        self.deployment
     }
 
     pub fn shadowed_sections<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Value> + 'a {
@@ -115,7 +129,7 @@ pub fn read_files_as_owner(config_dir: &Path) -> Result<Document, ConfigError> {
 /// The sections the daemon registers, as literal blocks: the disclosure drift
 /// gate reads each registration's `name:` operand from this file, so the list
 /// is never built by a loop (and this comment never spells the block's opener).
-fn boot_specs() -> [SectionSpec; 7] {
+fn boot_specs() -> [SectionSpec; 8] {
     [
         SectionSpec {
             name: LAKE_SECTION.to_string(),
@@ -145,6 +159,10 @@ fn boot_specs() -> [SectionSpec; 7] {
             name: EGRESS_SECTION.to_string(),
             required: false,
         },
+        SectionSpec {
+            name: DEPLOYMENT_SECTION.to_string(),
+            required: false,
+        },
     ]
 }
 
@@ -155,8 +173,26 @@ pub fn boot_as_owner(config_dir: &Path) -> Result<BootConfig, ConfigError> {
 }
 
 /// Everything after the load: the classification system, the ceiling through
-/// it, the provider.
+/// it, the provider, the deployment.
 pub(crate) fn assemble(document: Document) -> Result<BootConfig, ConfigError> {
+    let Declared {
+        ceiling,
+        policy,
+        providers,
+    } = declared(&document)?;
+    let deployment = deployment_from_section(document.section(DEPLOYMENT_SECTION))?;
+    Ok(BootConfig {
+        document,
+        ceiling,
+        policy,
+        providers,
+        deployment,
+    })
+}
+
+/// [`assemble`] without the `deployment` section, which an accepted baseline
+/// recorded before #115 does not hold.
+pub(crate) fn declared(document: &Document) -> Result<Declared, ConfigError> {
     // The SYSTEM first, then the ceiling THROUGH it (ADR-0022): a name this
     // build does not carry refuses boot before any level is read, and a
     // level the selected system does not rank refuses it in the reader.
@@ -191,8 +227,7 @@ pub(crate) fn assemble(document: Document) -> Result<BootConfig, ConfigError> {
         refuse_plaintext_keys(shadowed)?;
     }
     let providers = providers_from_section(document.section(PROVIDERS_SECTION))?;
-    Ok(BootConfig {
-        document,
+    Ok(Declared {
         ceiling,
         policy,
         providers,
@@ -265,7 +300,7 @@ mod tests {
 
     // A full, conformant, above-baseline (SECRET) core ceiling block.
     #[cfg(unix)]
-    const SECRET_CORE: &str = "core:\n  handling:\n    ceiling:\n      classification: SECRET\n      sci: false\n      releasable_to: []\n      cui_permitted: false\n      cui_categories_permitted: []\n      dissemination_permitted: [\"Distribution Statement A\"]\n    accreditation_ref: null\n";
+    const SECRET_BASE: &str = "core:\n  handling:\n    ceiling:\n      classification: SECRET\n      sci: false\n      releasable_to: []\n      cui_permitted: false\n      cui_categories_permitted: []\n      dissemination_permitted: [\"Distribution Statement A\"]\n    accreditation_ref: null\ndeployment:\n  mode: linux-host\n";
 
     /// #210: a key `core` does not carry must refuse the boot rather than be
     /// silently ignored. `handling` mistyped means the whole ceiling block is
@@ -308,7 +343,7 @@ mod tests {
              ceiling:\n      classification: UNCLASSIFIED\n      sci: false\n      \
              releasable_to: []\n      cui_permitted: false\n      \
              cui_categories_permitted: []\n      \
-             dissemination_permitted: [\"Distribution Statement A\"]\n",
+             dissemination_permitted: [\"Distribution Statement A\"]\ndeployment:\n  mode: linux-host\n",
             0o640,
         );
         match owned(&d.0) {
@@ -328,7 +363,7 @@ mod tests {
         put(
             &d.0,
             "maknae.yaml",
-            "core:\n  identity:\n    name: test\n",
+            "core:\n  identity:\n    name: test\ndeployment:\n  mode: linux-host\n",
             0o640,
         );
         let cfg = owned(&d.0).expect("boots");
@@ -344,19 +379,69 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn refused_for_want_of_deployment(r: Result<BootConfig, ConfigError>) {
+        match r {
+            Err(ConfigError::InvalidDeployment(m)) => {
+                assert!(m.contains("deployment.mode"), "{m}");
+                for mode in ["linux-host", "macos-host", "container"] {
+                    assert!(m.contains(mode), "{m}");
+                }
+            }
+            other => panic!("expected InvalidDeployment, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
-    fn empty_base_boots_public() {
+    fn an_empty_base_refuses_for_want_of_deployment() {
         let d = new_dir("empty");
         put(&d.0, "maknae.yaml", "", 0o640);
+        refused_for_want_of_deployment(owned(&d.0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_config_without_deployment_refuses_the_boot() {
+        let d = new_dir("no-deployment");
+        put(
+            &d.0,
+            "maknae.yaml",
+            "core:\n  deployment_id: dev-01\nvault:\n  addr: https://v.example:8200\n\
+             audit:\n  jsonl_path: /var/log/maknae/audit.jsonl\n\
+             principal:\n  name: alice\n  uid: 1000\n",
+            0o640,
+        );
+        refused_for_want_of_deployment(owned(&d.0));
+        put(&d.0, "maknae.yaml", "deployment: {}\n", 0o640);
+        refused_for_want_of_deployment(owned(&d.0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_deployment_is_carried() {
+        let d = new_dir("deployment");
+        put(
+            &d.0,
+            "maknae.yaml",
+            "deployment:\n  mode: container\n",
+            0o640,
+        );
         let cfg = owned(&d.0).expect("boots");
-        assert_eq!(cfg.ingest_posture(), maknae_config::IngestPosture::Public);
+        assert_eq!(
+            cfg.deployment(),
+            maknae_config::Deployment {
+                mode: maknae_config::DeploymentMode::Container,
+                account_source: maknae_config::AccountSource::None,
+            }
+        );
+        assert!(format!("{cfg:?}").contains("Container"), "{cfg:?}");
     }
 
     #[cfg(unix)]
     #[test]
     fn above_baseline_core_boots_gated() {
         let d = new_dir("secret");
-        put(&d.0, "maknae.yaml", SECRET_CORE, 0o640);
+        put(&d.0, "maknae.yaml", SECRET_BASE, 0o640);
         let cfg = owned(&d.0).expect("boots");
         assert_eq!(cfg.ingest_posture(), maknae_config::IngestPosture::Gated);
         let level = &cfg.ceiling().classification;
@@ -372,7 +457,7 @@ mod tests {
     #[test]
     fn a_case_variant_level_boots() {
         let d = new_dir("caseok");
-        let y = SECRET_CORE.replace("classification: SECRET", "classification: Unclassified");
+        let y = SECRET_BASE.replace("classification: SECRET", "classification: Unclassified");
         put(&d.0, "maknae.yaml", &y, 0o640);
         let cfg = owned(&d.0).expect("boots");
         assert_eq!(cfg.ceiling().classification.name, "UNCLASSIFIED");
@@ -385,7 +470,7 @@ mod tests {
     #[test]
     fn an_aus_enclave_boots_on_protected() {
         let d = new_dir("aus");
-        let y = SECRET_CORE
+        let y = SECRET_BASE
             .replace("classification: SECRET", "classification: PROTECTED")
             .replace(
                 "    accreditation_ref: null\n",
@@ -409,7 +494,7 @@ mod tests {
     #[test]
     fn the_official_sensitive_rung_boots_when_quoted() {
         let d = new_dir("aus-os");
-        let y = SECRET_CORE
+        let y = SECRET_BASE
             .replace(
                 "classification: SECRET",
                 "classification: \"Official: Sensitive\"",
@@ -441,7 +526,7 @@ mod tests {
     #[test]
     fn a_us_enclave_refuses_protected() {
         let d = new_dir("usprot");
-        let y = SECRET_CORE.replace("classification: SECRET", "classification: PROTECTED");
+        let y = SECRET_BASE.replace("classification: SECRET", "classification: PROTECTED");
         put(&d.0, "maknae.yaml", &y, 0o640);
         match owned(&d.0) {
             Err(maknae_config::ConfigError::InvalidCeiling { reason }) => {
@@ -457,7 +542,7 @@ mod tests {
     #[test]
     fn an_unknown_classification_system_refuses_boot() {
         let d = new_dir("rok");
-        let y = SECRET_CORE.replace(
+        let y = SECRET_BASE.replace(
             "    accreditation_ref: null\n",
             "    accreditation_ref: null\n    policy: ROK\n",
         );
@@ -469,7 +554,7 @@ mod tests {
             other => panic!("expected UnknownClassificationPolicy, got {other:?}"),
         }
         // And a mistyped `policy` value is the ceiling reader's refusal.
-        let y = SECRET_CORE.replace(
+        let y = SECRET_BASE.replace(
             "    accreditation_ref: null\n",
             "    accreditation_ref: null\n    policy: 7\n",
         );
@@ -487,7 +572,7 @@ mod tests {
         put(
             &d.0,
             "maknae.yaml",
-            "core:\n  identity:\n    name: t\nlake:\n  in_scope_domains: [a]\n",
+            "core:\n  identity:\n    name: t\nlake:\n  in_scope_domains: [a]\ndeployment:\n  mode: linux-host\n",
             0o640,
         );
         let cfg = owned(&d.0).expect("boots");
@@ -504,7 +589,7 @@ mod tests {
             &d.0,
             "maknae.yaml",
             "core:\n  identity:\n    name: t\n\
-             principal:\n  name: alice\n  uid: 1000\n",
+             principal:\n  name: alice\n  uid: 1000\ndeployment:\n  mode: linux-host\n",
             0o640,
         );
         let cfg = owned(&d.0).expect("boots with a principal block");
@@ -528,7 +613,7 @@ mod tests {
         put(
             &d.0,
             "maknae.yaml",
-            "core:\n  identity:\n    name: t\n",
+            "core:\n  identity:\n    name: t\ndeployment:\n  mode: linux-host\n",
             0o640,
         );
         let cfg = owned(&d.0).expect("pre-Jackrabbit config without principal still boots");
@@ -565,7 +650,7 @@ mod tests {
             "core:\n  deployment_id: dev-01\n  identity:\n    name: t\n\
              vault:\n  addr: https://v.example:8200\n\
              transport:\n  socket_path: /run/maknae/maknaed.sock\n\
-             audit:\n  jsonl_path: /var/log/maknae/audit.jsonl\n",
+             audit:\n  jsonl_path: /var/log/maknae/audit.jsonl\ndeployment:\n  mode: linux-host\n",
             0o640,
         );
         let cfg = owned(&d.0).expect("combined config boots");
@@ -588,7 +673,7 @@ mod tests {
             &d.0,
             "maknae.yaml",
             "core:\n  deployment_id: dev-01\n  identity:\n    name: t\n\
-             vault:\n  addr: https://v.example:8200\n  user_auth:\n    type: ldap\n",
+             vault:\n  addr: https://v.example:8200\n  user_auth:\n    type: ldap\ndeployment:\n  mode: linux-host\n",
             0o640,
         );
         let cfg = owned(&d.0).expect("the document loads; the vault parse is what refuses");
@@ -623,7 +708,7 @@ mod tests {
     #[test]
     fn invalid_ceiling_refused() {
         let d = new_dir("badceil");
-        let bad = SECRET_CORE.replace("classification: SECRET", "classification: SEKRET");
+        let bad = SECRET_BASE.replace("classification: SECRET", "classification: SEKRET");
         put(&d.0, "maknae.yaml", &bad, 0o640);
         assert!(matches!(
             owned(&d.0),
@@ -656,7 +741,12 @@ mod tests {
     #[test]
     fn symlinked_config_d_entry_refused() {
         let d = new_dir("sl");
-        put(&d.0, "maknae.yaml", "core: {}\n", 0o640);
+        put(
+            &d.0,
+            "maknae.yaml",
+            "core: {}\ndeployment:\n  mode: linux-host\n",
+            0o640,
+        );
         let cd = d.0.join("config.d");
         std::fs::create_dir(&cd).unwrap();
         std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o750)).unwrap();
@@ -687,14 +777,14 @@ mod tests {
         put(
             &d.0,
             "maknae.yaml",
-            "core:\n  identity:\n    name: t\n",
+            "core:\n  identity:\n    name: t\ndeployment:\n  mode: linux-host\n",
             0o640,
         );
         assert!(owned(&d.0).unwrap().providers().is_empty());
         put(
             &d.0,
             "maknae.yaml",
-            &format!("core:\n  identity:\n    name: t\n{PROVIDERS_BLOCK}"),
+            &format!("core:\n  identity:\n    name: t\ndeployment:\n  mode: linux-host\n{PROVIDERS_BLOCK}"),
             0o640,
         );
         let cfg = owned(&d.0).unwrap();
@@ -750,7 +840,12 @@ mod tests {
     #[test]
     fn a_set_authorized_through_config_d_is_verified_at_its_own_file() {
         let d = new_dir("providers-cd");
-        put(&d.0, "maknae.yaml", "core: {}\n", 0o640);
+        put(
+            &d.0,
+            "maknae.yaml",
+            "core: {}\ndeployment:\n  mode: linux-host\n",
+            0o640,
+        );
         let cd = d.0.join("config.d");
         std::fs::create_dir(&cd).unwrap();
         std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o750)).unwrap();
@@ -846,7 +941,12 @@ mod tests {
     #[test]
     fn production_boot_holds_every_source_to_root() {
         let d = new_dir("every-source-prod");
-        put(&d.0, "maknae.yaml", "core: {}\n", 0o640);
+        put(
+            &d.0,
+            "maknae.yaml",
+            "core: {}\ndeployment:\n  mode: linux-host\n",
+            0o640,
+        );
         let cd = d.0.join("config.d");
         std::fs::create_dir(&cd).unwrap();
         std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o750)).unwrap();
@@ -896,7 +996,7 @@ mod tests {
         put(
             &d.0,
             "maknae.yaml",
-            "core: {}\nvault:\n  addr: https://vault.example:8200\n  kv_mount: maknae-kv\n",
+            "core: {}\nvault:\n  addr: https://vault.example:8200\n  kv_mount: maknae-kv\ndeployment:\n  mode: linux-host\n",
             0o640,
         );
         let cd = d.0.join("config.d");

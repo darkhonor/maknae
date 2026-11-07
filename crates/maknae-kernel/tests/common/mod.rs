@@ -578,6 +578,69 @@ impl Fixture {
     where
         P: maknae_security::Authorizer + Send + Sync + 'static,
     {
+        self.start_in(
+            Arc::new(self.session()),
+            authz,
+            live,
+            verb,
+            fd,
+            records,
+            config,
+            egress,
+            attempt_caps,
+        )
+    }
+    pub fn session(&self) -> maknae_kernel::SessionRecord {
+        maknae_kernel::SessionRecord::for_test(self.peer_uid, self.peer_user.clone())
+            .with_session_id(718)
+    }
+    /// The default starter over a session the caller keeps, to read its ending.
+    pub fn start_in_session(
+        &self,
+        session: Arc<maknae_kernel::SessionRecord>,
+        verb: Verb,
+        fd: Option<OwnedFd>,
+        records: Arc<impl AuditEmit + Send + Sync + 'static>,
+    ) -> (
+        tokio::io::DuplexStream,
+        tokio::task::JoinHandle<()>,
+        Vec<u8>,
+    ) {
+        self.start_in(
+            session,
+            self.authorizer(),
+            Arc::new(maknae_kernel::LiveConfig::new(
+                Default::default(),
+                authority(None),
+            )),
+            verb,
+            fd,
+            records,
+            maknae_config::transport_from_section(None).unwrap(),
+            maknae_kernel::unavailable_egress(),
+            maknae_kernel::AttemptCaps::default(),
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn start_in<P>(
+        &self,
+        session: Arc<maknae_kernel::SessionRecord>,
+        authz: Arc<P>,
+        live: Arc<maknae_kernel::LiveConfig>,
+        verb: Verb,
+        fd: Option<OwnedFd>,
+        records: Arc<impl AuditEmit + Send + Sync + 'static>,
+        config: maknae_config::TransportConfig,
+        egress: Arc<dyn maknae_kernel::Egress>,
+        attempt_caps: maknae_kernel::AttemptCaps,
+    ) -> (
+        tokio::io::DuplexStream,
+        tokio::task::JoinHandle<()>,
+        Vec<u8>,
+    )
+    where
+        P: maknae_security::Authorizer + Send + Sync + 'static,
+    {
         let (client, server) = tokio::io::duplex(65536);
         let fds = maknae_io::DelegatedFds::new(4);
         if let Some(fd) = fd {
@@ -587,12 +650,9 @@ impl Fixture {
         let served = maknae_kernel::handle_with_attempt_caps(
             server,
             Some("spiffe://d/plane/cli".into()),
-            self.peer_uid,
-            true,
-            self.peer_user.clone(),
-            self.requester_home.clone(),
+            session,
+            maknae_kernel::FactsGate::allow_as(self.peer_user.clone(), self.requester_home.clone()),
             records,
-            718,
             config,
             serde_json::json!({"mutation": "untrusted extension"}),
             authz,
@@ -603,7 +663,6 @@ impl Fixture {
             std::sync::Arc::new(None),
             egress,
             Duration::from_secs(2),
-            maknae_security::Lane::Local,
             fds,
             no_baseline(),
             attempt_caps,
@@ -1181,4 +1240,92 @@ impl<A> Counting<A> {
 
 pub fn serving() -> tokio::sync::watch::Receiver<maknae_kernel::Drain> {
     tokio::sync::watch::channel(maknae_kernel::Drain::Serving).1
+}
+
+use maknae_kernel::session_facts::{AccountFact, AccountState};
+
+/// Session facts answered from a script, one `Facts` per gather, each after its
+/// delay; an exhausted script answers nothing, an infrastructure denial.
+pub struct ScriptedFacts {
+    script: Mutex<std::collections::VecDeque<(Duration, maknae_kernel::Facts)>>,
+    current: Mutex<Option<maknae_kernel::Facts>>,
+}
+
+impl ScriptedFacts {
+    pub fn gate(script: Vec<maknae_kernel::Facts>) -> Arc<maknae_kernel::FactsGate> {
+        Self::gate_with(
+            script.into_iter().map(|f| (Duration::ZERO, f)).collect(),
+            Duration::from_secs(5),
+        )
+    }
+
+    pub fn gate_with(
+        script: Vec<(Duration, maknae_kernel::Facts)>,
+        bound: Duration,
+    ) -> Arc<maknae_kernel::FactsGate> {
+        maknae_kernel::FactsGate::for_test(
+            Arc::new(ScriptedFacts {
+                script: Mutex::new(script.into_iter().collect()),
+                current: Mutex::new(None),
+            }),
+            bound,
+        )
+    }
+
+    fn answer(&self) -> Option<maknae_kernel::Facts> {
+        self.current.lock().unwrap().clone()
+    }
+}
+
+impl maknae_kernel::SessionFacts for ScriptedFacts {
+    fn membership(
+        &self,
+        _admission: maknae_kernel::Admission,
+        _uid: u32,
+    ) -> Result<maknae_kernel::Membership, maknae_kernel::AuthzError> {
+        let next = self.script.lock().unwrap().pop_front();
+        if let Some((delay, _)) = &next {
+            std::thread::sleep(*delay);
+        }
+        let facts = next.map(|(_, f)| f);
+        self.current.lock().unwrap().clone_from(&facts);
+        match facts {
+            Some(f) => f.membership,
+            None => Err(maknae_kernel::AuthzError::Resolve(
+                "scripted: no answer".into(),
+            )),
+        }
+    }
+
+    fn account(&self, _uid: u32) -> AccountFact {
+        match self.answer() {
+            Some(f) => f.account,
+            None => AccountFact::Checked(AccountState::Unknown("scripted: no answer".into())),
+        }
+    }
+}
+
+/// A member whose account state is `account`.
+pub fn member_facts(account: AccountFact) -> maknae_kernel::Facts {
+    maknae_kernel::Facts {
+        membership: Ok(maknae_kernel::Membership {
+            in_group: true,
+            user: "scripted".into(),
+            dir: fixture_home(),
+        }),
+        account,
+        answered: true,
+    }
+}
+
+pub fn active_member() -> maknae_kernel::Facts {
+    member_facts(AccountFact::Checked(AccountState::Active))
+}
+
+pub fn non_member() -> maknae_kernel::Facts {
+    let mut f = active_member();
+    if let Ok(m) = f.membership.as_mut() {
+        m.in_group = false;
+    }
+    f
 }

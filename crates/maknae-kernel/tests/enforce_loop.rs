@@ -282,12 +282,9 @@ where
     let task = tokio::spawn(maknae_kernel::handle(
         server,
         Some("spiffe://d/plane/cli".to_string()),
-        peer_uid,
-        true,
-        None,
-        peer_home.map(std::path::Path::to_path_buf),
+        maknae_kernel::SessionRecord::for_test(peer_uid, None).into(),
+        maknae_kernel::FactsGate::allow_as(None, peer_home.map(std::path::Path::to_path_buf)),
         emit,
-        1,
         maknae_config::transport_from_section(None).unwrap(),
         serde_json::json!({}),
         authorizer,
@@ -298,7 +295,6 @@ where
         std::sync::Arc::new(None),
         maknae_kernel::unavailable_egress(),
         timeout,
-        maknae_security::Lane::Local,
         fds,
         common::no_baseline(),
     ));
@@ -446,12 +442,9 @@ where
     maknae_kernel::handle(
         server,
         Some("spiffe://d/plane/cli".to_string()),
-        peer_uid,
-        true,
-        None,
-        peer_home.map(std::path::Path::to_path_buf),
+        maknae_kernel::SessionRecord::for_test(peer_uid, None).into(),
+        maknae_kernel::FactsGate::allow_as(None, peer_home.map(std::path::Path::to_path_buf)),
         emit,
-        1,
         transport,
         serde_json::json!({}),
         authorizer,
@@ -462,7 +455,6 @@ where
         kernel_graph,
         maknae_kernel::unavailable_egress(),
         timeout,
-        maknae_security::Lane::Local,
         delegated,
         ops,
     )
@@ -1833,7 +1825,7 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
     let cfg = fx.dir.join("maknae.yaml");
     std::fs::write(
         &cfg,
-        "core:\n  handling:\n    ceiling:\n      classification: protected\n      sci: false\n      releasable_to: []\n      cui_permitted: false\n      cui_categories_permitted: []\n      dissemination_permitted: [\"Distribution Statement A\"]\n    accreditation_ref: null\n    policy: aus\n",
+        "core:\n  handling:\n    ceiling:\n      classification: protected\n      sci: false\n      releasable_to: []\n      cui_permitted: false\n      cui_categories_permitted: []\n      dissemination_permitted: [\"Distribution Statement A\"]\n    accreditation_ref: null\n    policy: aus\ndeployment:\n  mode: linux-host\n",
     )
     .unwrap();
     std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o640)).unwrap();
@@ -3699,12 +3691,9 @@ async fn drive_baseline(
     maknae_kernel::handle(
         server,
         Some("spiffe://d/plane/cli".to_string()),
-        nix::unistd::geteuid().as_raw(),
-        true,
-        None,
-        Some(fx.dir.clone()),
+        maknae_kernel::SessionRecord::for_test(nix::unistd::geteuid().as_raw(), None).into(),
+        maknae_kernel::FactsGate::allow_as(None, Some(fx.dir.clone())),
         emit,
-        1,
         maknae_config::transport_from_section(None).unwrap(),
         serde_json::json!({}),
         authorizer,
@@ -3715,7 +3704,6 @@ async fn drive_baseline(
         std::sync::Arc::new(None),
         maknae_kernel::unavailable_egress(),
         Duration::from_secs(5),
-        maknae_security::Lane::Local,
         maknae_io::DelegatedFds::new(0),
         Arc::new(baseline),
     )

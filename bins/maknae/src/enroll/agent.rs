@@ -1723,6 +1723,7 @@ mod tests {
             None,
             "/var/log/maknae/audit.jsonl",
             false,
+            true,
             None,
             &op,
             "ml-dsa-87",

@@ -138,6 +138,59 @@ async fn granted(client: &mut tokio::io::DuplexStream) -> maknae_proto::Mutation
     }
 }
 #[tokio::test]
+async fn a_foreign_writer_during_the_report_read_ends_the_session_as_a_sender_mismatch() {
+    let fx = Fixture::new("report_sender_mismatch", "Write");
+    let target = fx.root.join("unique-existing-write-sentinel");
+    std::fs::write(&target, b"original").unwrap();
+    let (writer, reader) = tokio::net::UnixStream::pair().unwrap();
+    let mut collector = maknae_plane::FdCollector::new(
+        reader,
+        1,
+        Some(maknae_io::ExpectedSender {
+            pid: 1,
+            uid: u32::MAX,
+        }),
+    );
+    let mut session = fx.session();
+    session.sender = collector.sender_verdict();
+    let session = Arc::new(session);
+    let records = Records::new(0);
+    let held = maknae_io::open_path_for_delegation(&target).unwrap();
+    let (mut client, task, body) = fx.start_in_session(
+        Arc::clone(&session),
+        write_verb(&target, b"new", None),
+        Some(held),
+        records.clone(),
+    );
+    common::write_frame(&mut client, &body).await.unwrap();
+    granted(&mut client).await;
+    assert!(!session.sender.mismatched());
+    writer.writable().await.unwrap();
+    writer.try_write(b"x").unwrap();
+    let mut byte = [0u8; 1];
+    let refused = tokio::io::AsyncReadExt::read(&mut collector, &mut byte).await;
+    assert!(refused.is_err(), "{refused:?}");
+    drop(client);
+    task.await.unwrap();
+    let ending = session.ending();
+    assert_eq!(
+        ending,
+        maknae_kernel::Ending::Denied(maknae_kernel::DenyCause::SenderMismatch)
+    );
+    assert_eq!(
+        (
+            maknae_kernel::ending_reason(&ending),
+            maknae_kernel::ending_result(&ending)
+        ),
+        ("sender-mismatch", "deny")
+    );
+    assert_eq!(
+        records.snapshot().last().unwrap().outcome.reason,
+        "mutation report missing or malformed; effects unknown"
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"original");
+}
+#[tokio::test]
 async fn a_loop_write_records_its_conversation_on_intent_progress_and_completion() {
     let fx = Fixture::new("conversation_success", "Write");
     let target = fx.root.join("unique-existing-write-sentinel");
@@ -1333,12 +1386,11 @@ async fn failed_grant_or_ack_write_stops_before_accepting_more_client_reports() 
                 fail: fail.clone(),
             },
             Some("spiffe://d/plane/cli".into()),
-            fx.peer_uid,
-            true,
-            None,
-            fx.requester_home.clone(),
+            maknae_kernel::SessionRecord::for_test(fx.peer_uid, None)
+                .with_session_id(718)
+                .into(),
+            maknae_kernel::FactsGate::allow_as(None, fx.requester_home.clone()),
             records.clone(),
-            718,
             maknae_config::transport_from_section(None).unwrap(),
             serde_json::json!({}),
             fx.authorizer(),
@@ -1349,7 +1401,6 @@ async fn failed_grant_or_ack_write_stops_before_accepting_more_client_reports() 
             std::sync::Arc::new(None),
             maknae_kernel::unavailable_egress(),
             Duration::from_secs(2),
-            maknae_security::Lane::Local,
             fds,
             common::no_baseline(),
         ));

@@ -21,6 +21,9 @@ pub(crate) struct FakeEnv {
     pub(crate) reachable: Result<(), String>,
     pub(crate) accounts: Vec<ReaderAccount>,
     pub(crate) probed: Mutex<Vec<String>>,
+    pub(crate) present: Vec<PathBuf>,
+    pub(crate) unreadable: Vec<PathBuf>,
+    pub(crate) vars: Vec<(String, String)>,
 }
 
 impl Default for FakeEnv {
@@ -33,6 +36,9 @@ impl Default for FakeEnv {
             reachable: Ok(()),
             accounts: Vec::new(),
             probed: Mutex::new(Vec::new()),
+            present: vec![crate::deployment::SYSTEMD_RUNNING.into()],
+            unreadable: Vec::new(),
+            vars: Vec::new(),
         }
     }
 }
@@ -98,6 +104,18 @@ impl Env for FakeEnv {
             .push(format!("connect {}", path.display()));
         self.reachable.clone()
     }
+    fn presence(&self, path: &Path) -> Result<bool, String> {
+        if self.unreadable.iter().any(|p| p == path) {
+            return Err("Permission denied (os error 13)".into());
+        }
+        Ok(self.present.iter().any(|p| p == path))
+    }
+    fn env_var(&self, key: &str) -> Option<String> {
+        self.vars
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+    }
 }
 
 pub(crate) fn doc(pairs: &[(&str, &str)]) -> Document {
@@ -112,12 +130,24 @@ const PRINCIPAL: &str = r#"{"name":"op","uid":1000}"#;
 pub(crate) const PROVIDERS: &str =
     r#"[{"endpoint":"https://api.example.test/v1","models":["m"],"name":"openai"}]"#;
 const VAULT: &str = r#"{"addr":"https://v:8200"}"#;
+/// The `deployment` section this build's own host mode passes with.
+pub(crate) const DEPLOYMENT: &str = if cfg!(target_os = "macos") {
+    r#"{"mode":"macos-host"}"#
+} else {
+    r#"{"mode":"linux-host"}"#
+};
+pub(crate) const DEPLOYMENT_YAML: &str = if cfg!(target_os = "macos") {
+    "deployment:\n  mode: macos-host\n"
+} else {
+    "deployment:\n  mode: linux-host\n"
+};
 pub(crate) fn minimal() -> Vec<(&'static str, &'static str)> {
     vec![
         ("core", r#"{"deployment_id":"d"}"#),
         ("audit", AUDIT),
         ("principal", PRINCIPAL),
         ("vault", VAULT),
+        ("deployment", DEPLOYMENT),
     ]
 }
 

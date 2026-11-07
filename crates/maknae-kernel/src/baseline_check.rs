@@ -17,6 +17,7 @@ pub struct Validated {
     pub egress_bounds: Option<maknae_config::EgressBounds>,
     /// Resolved only in `Mode::Accept`; empty in `Mode::Boot`.
     pub readers: Vec<maknae_config::ReaderAccount>,
+    pub deployment: maknae_config::Deployment,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +77,9 @@ pub trait Env: maknae_config::ReaderLookup + Send + Sync {
     fn listener_bindable(&self, path: &Path) -> Result<(), String>;
     /// Connect to the deputy's socket at `path` and close.
     fn deputy_reachable(&self, path: &Path) -> Result<(), String>;
+    /// Whether `path` exists; `Err` when that cannot be determined.
+    fn presence(&self, path: &Path) -> Result<bool, String>;
+    fn env_var(&self, key: &str) -> Option<String>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,8 +109,9 @@ pub fn validate_file(
 }
 
 /// Today's boot order and exit codes: sections (1, pre-sink); offload (4); a present
-/// principal, shadowed ones included (3); egress bounds, egress account, root vault
-/// keys (1); an absent principal (3); the vault block (1); at accept, the readers.
+/// principal, shadowed ones included (3); the deployment mode against the host, egress
+/// bounds, egress account, root vault keys (1); an absent principal (3); the vault
+/// block (1); at accept, the readers.
 pub fn validate(
     doc: Document,
     mode: Mode,
@@ -126,6 +131,13 @@ pub fn validate(
     let principal =
         maknae_config::principal_from_section(boot.section(maknae_config::PRINCIPAL_SECTION))
             .map_err(|e| Invalid::Principal(e.to_string()))?;
+    let deployment = boot.deployment();
+    crate::deployment::verify_deployment(
+        deployment.mode,
+        env,
+        crate::deployment::Platform::of_build(),
+    )
+    .map_err(Invalid::Environment)?;
     let egress_bounds = if boot.providers().is_empty() {
         None
     } else {
@@ -172,6 +184,7 @@ pub fn validate(
         principal,
         egress_bounds,
         readers,
+        deployment,
     })
 }
 
@@ -695,6 +708,98 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn the_deployment_is_validated_and_carried() {
+        let v = validate(
+            doc(&minimal()),
+            Mode::Boot,
+            Path::new("/e"),
+            &FakeEnv::default(),
+        )
+        .unwrap();
+        let expected = if cfg!(target_os = "macos") {
+            maknae_config::DeploymentMode::MacosHost
+        } else {
+            maknae_config::DeploymentMode::LinuxHost
+        };
+        assert_eq!(v.deployment.mode, expected);
+        let mut contradicted = minimal();
+        contradicted.retain(|(k, _)| *k != "deployment");
+        contradicted.push(("deployment", r#"{"mode":"container"}"#));
+        let refused = validate(
+            doc(&contradicted),
+            Mode::Boot,
+            Path::new("/e"),
+            &FakeEnv::default(),
+        );
+        assert!(
+            matches!(&refused, Err(Invalid::Environment(m)) if m.contains("deployment.mode is container")),
+            "{refused:?}"
+        );
+        assert_eq!(refused.unwrap_err().exit_code(), 1);
+        let mut absent = minimal();
+        absent.retain(|(k, _)| *k != "deployment");
+        let refused = validate(
+            doc(&absent),
+            Mode::Boot,
+            Path::new("/e"),
+            &FakeEnv::default(),
+        );
+        assert!(
+            matches!(&refused, Err(Invalid::Document(m)) if m.contains("deployment.mode")),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_baseline_without_deployment_runs_with_the_files_deployment() {
+        let env = FakeEnv::default();
+        let mix_valid = |mix: &BaselineSections| {
+            validate(
+                Document::from_baseline(mix).unwrap(),
+                Mode::Boot,
+                Path::new("/e"),
+                &env,
+            )
+            .map(drop)
+            .map_err(|e| e.cause().to_string())
+        };
+        let file = sections(&minimal());
+        let mut pre_115 = file.clone();
+        pre_115.remove("deployment");
+        let start = crate::baseline::at_boot(Some(&pre_115), Ok(file.clone()), mix_valid).unwrap();
+        assert_eq!(start.run, file);
+        assert_eq!(start.pending, None);
+        assert_eq!(
+            start.events,
+            vec!["deployment follows maknae.yaml at start".to_string()]
+        );
+
+        let kept =
+            crate::baseline::at_boot(Some(&file), Err("bad yaml".into()), mix_valid).unwrap();
+        assert_eq!(kept.run, file);
+        assert!(validate(
+            Document::from_baseline(&kept.run).unwrap(),
+            Mode::Boot,
+            Path::new("/e"),
+            &env
+        )
+        .is_ok());
+
+        let stuck =
+            crate::baseline::at_boot(Some(&pre_115), Err("bad yaml".into()), mix_valid).unwrap();
+        let refused = validate(
+            Document::from_baseline(&stuck.run).unwrap(),
+            Mode::Boot,
+            Path::new("/e"),
+            &env,
+        );
+        assert!(
+            matches!(&refused, Err(Invalid::Document(m)) if m.contains("deployment.mode")),
+            "{refused:?}"
+        );
+    }
+
     fn file_with(base: &str, members: &[(&str, &str)]) -> Document {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().to_path_buf();
@@ -1020,7 +1125,10 @@ mod tests {
     #[test]
     fn validate_file_refuses_what_config_d_shadowed_in_todays_order() {
         let vault = file_with(
-            "core:\n  deployment_id: d\naudit:\n  jsonl_path: /x\nprincipal:\n  name: op\n  uid: 1000\nvault:\n  addr: https://v:8200\n  kv_mount: kv\n",
+            &format!(
+                "{}core:\n  deployment_id: d\naudit:\n  jsonl_path: /x\nprincipal:\n  name: op\n  uid: 1000\nvault:\n  addr: https://v:8200\n  kv_mount: kv\n",
+                crate::test_fixtures::DEPLOYMENT_YAML
+            ),
             &[("10-vault.yaml", "vault:\n  addr: https://v:8200\n")],
         );
         let refused =
@@ -1030,7 +1138,10 @@ mod tests {
             "{refused:?}"
         );
         let both = file_with(
-            "core:\n  deployment_id: d\naudit:\n  jsonl_path: /x\n  siem: https://s\nprincipal:\n  name: op\n  uid: 1000\n  home: /h\nvault:\n  addr: https://v:8200\n",
+            &format!(
+                "{}core:\n  deployment_id: d\naudit:\n  jsonl_path: /x\n  siem: https://s\nprincipal:\n  name: op\n  uid: 1000\n  home: /h\nvault:\n  addr: https://v:8200\n",
+                crate::test_fixtures::DEPLOYMENT_YAML
+            ),
             &[("10-both.yaml", "principal:\n  name: op\n  uid: 1000\n")],
         );
         assert!(matches!(
@@ -1038,7 +1149,10 @@ mod tests {
             Err(Invalid::Offload(_))
         ));
         let principal_first = file_with(
-            "core:\n  deployment_id: d\naudit:\n  jsonl_path: /x\nprincipal:\n  name: op\n  uid: 1000\n  home: /h\nvault:\n  addr: https://v:8200\n  kv_mount: kv\n",
+            &format!(
+                "{}core:\n  deployment_id: d\naudit:\n  jsonl_path: /x\nprincipal:\n  name: op\n  uid: 1000\n  home: /h\nvault:\n  addr: https://v:8200\n  kv_mount: kv\n",
+                crate::test_fixtures::DEPLOYMENT_YAML
+            ),
             &[
                 ("10-principal.yaml", "principal:\n  name: op\n  uid: 1000\n"),
                 ("20-vault.yaml", "vault:\n  addr: https://v:8200\n"),

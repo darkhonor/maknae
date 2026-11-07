@@ -535,7 +535,11 @@ mod tests {
             // world-accessible (InsecurePermissions on 0755); mirror run.rs's
             // boot fixtures: 0700 directory, 0640 file.
             std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-            std::fs::write(dir.join("maknae.yaml"), core).unwrap();
+            std::fs::write(
+                dir.join("maknae.yaml"),
+                format!("{core}{}", crate::test_fixtures::DEPLOYMENT_YAML),
+            )
+            .unwrap();
             std::fs::set_permissions(
                 dir.join("maknae.yaml"),
                 std::fs::Permissions::from_mode(0o640),

@@ -1,28 +1,160 @@
-//! Connection-admission decision (spec §5). Pure; T1/0-missed.
+//! Connection-admission and per-request session decisions (spec §5, #115). Pure; T1/0-missed.
+use crate::groupres::AuthzError;
+use crate::session::Facts;
+use crate::session_facts::{AccountFact, AccountState, NotCheckedWhy};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConnDecision {
-    Permit,
-    Deny { reason: String },
+pub enum DenyCause {
+    NotMember,
+    Account(AccountState),
+    SenderMismatch,
+    Infrastructure(FactSource),
 }
 
-pub fn authorize_connection(channel_authenticated: bool, admitted: bool) -> ConnDecision {
-    match (channel_authenticated, admitted) {
-        (true, true) => ConnDecision::Permit,
-        (false, _) => ConnDecision::Deny {
-            reason: "channel not authenticated".into(),
-        },
-        (true, false) => ConnDecision::Deny {
-            reason: "peer uid not in `maknae` group".into(),
-        },
+/// The fact source that could not answer, named in an infrastructure denial.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactSource {
+    Group,
+    Account,
+    SessionMap,
+    Audit,
+    SessionFacts,
+}
+
+impl FactSource {
+    pub fn name(self) -> &'static str {
+        match self {
+            FactSource::Group => "group",
+            FactSource::Account => "account",
+            FactSource::SessionMap => "session-map",
+            FactSource::Audit => "audit",
+            FactSource::SessionFacts => "session-facts",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Revalidation {
+    Continue,
+    Deny(DenyCause),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ending {
+    Disconnect,
+    Idle,
+    Lifetime,
+    Denied(DenyCause),
+}
+
+/// Whether the session may serve this request, on facts gathered for it alone
+/// (ADR-0006 decision 4): the uid map, then membership and account state.
+pub fn revalidate(bound_uid: u32, request_uid: u32, f: &Facts) -> Revalidation {
+    if bound_uid != request_uid {
+        return Revalidation::Deny(DenyCause::Infrastructure(FactSource::SessionMap));
+    }
+    if !f.answered {
+        return Revalidation::Deny(DenyCause::Infrastructure(FactSource::SessionFacts));
+    }
+    match &f.membership {
+        Err(AuthzError::Resolve(_) | AuthzError::Unanswered { .. }) => {
+            return Revalidation::Deny(DenyCause::Infrastructure(FactSource::Group));
+        }
+        Err(AuthzError::NoUser) => return Revalidation::Deny(DenyCause::NotMember),
+        Ok(m) => {
+            if !m.in_group {
+                return Revalidation::Deny(DenyCause::NotMember);
+            }
+        }
+    }
+    match &f.account {
+        AccountFact::Checked(AccountState::Active) | AccountFact::NotChecked(_) => {
+            Revalidation::Continue
+        }
+        AccountFact::Checked(AccountState::Unknown(_)) => {
+            Revalidation::Deny(DenyCause::Infrastructure(FactSource::Account))
+        }
+        AccountFact::Checked(
+            state @ (AccountState::Locked | AccountState::Expired | AccountState::Disabled),
+        ) => Revalidation::Deny(DenyCause::Account(state.clone())),
+    }
+}
+
+pub fn cause_reason(c: &DenyCause) -> &'static str {
+    match c {
+        DenyCause::NotMember => "not-member",
+        DenyCause::Account(AccountState::Locked) => "account-locked",
+        DenyCause::Account(AccountState::Expired) => "account-expired",
+        DenyCause::Account(AccountState::Disabled) => "account-disabled",
+        DenyCause::Account(AccountState::Active) => "account-active",
+        DenyCause::Account(AccountState::Unknown(_)) => "account-unknown",
+        DenyCause::SenderMismatch => "sender-mismatch",
+        DenyCause::Infrastructure(FactSource::Group) => "infrastructure:group",
+        DenyCause::Infrastructure(FactSource::Account) => "infrastructure:account",
+        DenyCause::Infrastructure(FactSource::SessionMap) => "infrastructure:session-map",
+        DenyCause::Infrastructure(FactSource::Audit) => "infrastructure:audit",
+        DenyCause::Infrastructure(FactSource::SessionFacts) => "infrastructure:session-facts",
+    }
+}
+
+pub fn cause_posture(c: &DenyCause) -> &'static str {
+    match c {
+        DenyCause::Infrastructure(_) => "unavailable",
+        DenyCause::NotMember | DenyCause::Account(_) | DenyCause::SenderMismatch => "unauthorized",
+    }
+}
+
+pub fn account_label(a: &AccountFact) -> &'static str {
+    match a {
+        AccountFact::Checked(AccountState::Active) => "active",
+        AccountFact::Checked(AccountState::Locked) => "locked",
+        AccountFact::Checked(AccountState::Expired) => "expired",
+        AccountFact::Checked(AccountState::Disabled) => "disabled",
+        AccountFact::Checked(AccountState::Unknown(_)) => "unknown",
+        AccountFact::NotChecked(NotCheckedWhy::DirectoryAccount) => "not-checked:directory",
+        AccountFact::NotChecked(NotCheckedWhy::Platform) => "not-checked:platform",
+        AccountFact::NotChecked(NotCheckedWhy::Configured) => "not-checked:configured",
+    }
+}
+
+pub fn admission_reason(a: &AccountFact) -> String {
+    format!("admitted (account: {})", account_label(a))
+}
+
+pub fn ending_reason(e: &Ending) -> &'static str {
+    match e {
+        Ending::Disconnect => "disconnect",
+        Ending::Idle => "idle",
+        Ending::Lifetime => "lifetime",
+        Ending::Denied(c) => cause_reason(c),
+    }
+}
+
+pub fn ending_result(e: &Ending) -> &'static str {
+    match e {
+        Ending::Disconnect => "permit",
+        Ending::Idle | Ending::Lifetime | Ending::Denied(_) => "deny",
+    }
+}
+
+pub fn ending_posture(e: &Ending) -> &'static str {
+    match e {
+        Ending::Disconnect | Ending::Idle | Ending::Lifetime => "stopped",
+        Ending::Denied(c) => cause_posture(c),
     }
 }
 
 pub fn admission_facts(
-    looked_up: Option<crate::groupres::Membership>,
+    looked_up: &Result<crate::groupres::Membership, AuthzError>,
 ) -> (bool, Option<String>, Option<std::path::PathBuf>) {
     match looked_up {
-        Some(m) => (m.in_group, Some(m.user), m.in_group.then_some(m.dir)),
-        None => (false, None, None),
+        Ok(m) => (
+            m.in_group,
+            Some(m.user.clone()),
+            m.in_group.then(|| m.dir.clone()),
+        ),
+        Err(AuthzError::Unanswered { user, .. }) => (false, Some(user.clone()), None),
+        Err(AuthzError::Resolve(_) | AuthzError::NoUser) => (false, None, None),
     }
 }
 
@@ -219,7 +351,7 @@ mod tests {
     #[test]
     fn a_member_carries_its_user_and_raw_home_through() {
         assert_eq!(
-            admission_facts(Some(membership(true, "b-435-sentinel"))),
+            admission_facts(&Ok(membership(true, "b-435-sentinel"))),
             (
                 true,
                 Some("b-435-sentinel".to_string()),
@@ -231,14 +363,24 @@ mod tests {
     #[test]
     fn a_non_member_keeps_its_user_but_never_its_home() {
         assert_eq!(
-            admission_facts(Some(membership(false, "c-435-sentinel"))),
+            admission_facts(&Ok(membership(false, "c-435-sentinel"))),
             (false, Some("c-435-sentinel".to_string()), None)
         );
     }
 
     #[test]
     fn a_failed_lookup_admits_no_one_and_carries_no_home() {
-        assert_eq!(admission_facts(None), (false, None, None));
+        for failed in [AuthzError::Resolve("nss".into()), AuthzError::NoUser] {
+            assert_eq!(admission_facts(&Err(failed)), (false, None, None));
+        }
+        let unanswered = AuthzError::Unanswered {
+            user: "d-115-sentinel".into(),
+            why: "EIO".into(),
+        };
+        assert_eq!(
+            admission_facts(&Err(unanswered)),
+            (false, Some("d-115-sentinel".to_string()), None)
+        );
     }
 
     const FAST: std::time::Duration = std::time::Duration::from_millis(20);
@@ -520,38 +662,260 @@ mod tests {
         assert_eq!(got, Err(HomeUnavailable::Unresolvable));
     }
 
-    #[test]
-    fn permit_only_when_both() {
-        assert!(matches!(
-            authorize_connection(true, true),
-            ConnDecision::Permit
-        ));
+    fn member(in_group: bool) -> Facts {
+        Facts {
+            membership: Ok(membership(in_group, "s-115-sentinel")),
+            account: AccountFact::Checked(AccountState::Active),
+            answered: true,
+        }
     }
+
+    fn deny(c: DenyCause) -> Revalidation {
+        Revalidation::Deny(c)
+    }
+
     #[test]
-    fn deny_when_not_in_group() {
+    fn an_active_member_continues() {
+        assert_eq!(revalidate(7, 7, &member(true)), Revalidation::Continue);
+    }
+
+    #[test]
+    fn a_uid_that_is_not_the_bound_uid_is_a_session_map_failure() {
+        let mut f = member(false);
+        f.membership = Err(AuthzError::Resolve("nss".into()));
         assert_eq!(
-            authorize_connection(true, false),
-            ConnDecision::Deny {
-                reason: "peer uid not in `maknae` group".into()
-            }
+            revalidate(7, 8, &f),
+            deny(DenyCause::Infrastructure(FactSource::SessionMap))
         );
     }
+
     #[test]
-    fn deny_when_channel_unauthenticated() {
+    fn a_gather_that_did_not_answer_names_the_session_facts_not_a_source() {
+        let mut f = member(true);
+        f.answered = false;
         assert_eq!(
-            authorize_connection(false, true),
-            ConnDecision::Deny {
-                reason: "channel not authenticated".into()
-            }
+            revalidate(7, 7, &f),
+            deny(DenyCause::Infrastructure(FactSource::SessionFacts))
+        );
+        assert_eq!(
+            revalidate(7, 8, &f),
+            deny(DenyCause::Infrastructure(FactSource::SessionMap))
         );
     }
+
     #[test]
-    fn deny_when_neither() {
+    fn each_source_has_its_name() {
+        for (source, name) in [
+            (FactSource::Group, "group"),
+            (FactSource::Account, "account"),
+            (FactSource::SessionMap, "session-map"),
+            (FactSource::Audit, "audit"),
+            (FactSource::SessionFacts, "session-facts"),
+        ] {
+            assert_eq!(source.name(), name);
+        }
+    }
+
+    #[test]
+    fn an_unanswered_membership_is_infrastructure() {
+        let mut f = member(true);
+        f.membership = Err(AuthzError::Resolve("nss".into()));
+        f.account = AccountFact::Checked(AccountState::Locked);
         assert_eq!(
-            authorize_connection(false, false),
-            ConnDecision::Deny {
-                reason: "channel not authenticated".into()
-            }
+            revalidate(7, 7, &f),
+            deny(DenyCause::Infrastructure(FactSource::Group))
         );
+    }
+
+    #[test]
+    fn a_failed_group_source_is_infrastructure_not_de_enrollment() {
+        let mut f = member(true);
+        f.membership = Err(AuthzError::Unanswered {
+            user: "s-115-sentinel".into(),
+            why: "EIO".into(),
+        });
+        f.account = AccountFact::Checked(AccountState::Locked);
+        assert_eq!(
+            revalidate(7, 7, &f),
+            deny(DenyCause::Infrastructure(FactSource::Group))
+        );
+    }
+
+    #[test]
+    fn a_deleted_account_is_not_a_member() {
+        let mut f = member(true);
+        f.membership = Err(AuthzError::NoUser);
+        f.account = AccountFact::Checked(AccountState::Locked);
+        assert_eq!(revalidate(7, 7, &f), deny(DenyCause::NotMember));
+    }
+
+    #[test]
+    fn a_non_member_is_not_a_member() {
+        let mut f = member(false);
+        f.account = AccountFact::Checked(AccountState::Locked);
+        assert_eq!(revalidate(7, 7, &f), deny(DenyCause::NotMember));
+    }
+
+    #[test]
+    fn an_unknown_account_is_infrastructure() {
+        let mut f = member(true);
+        f.account = AccountFact::Checked(AccountState::Unknown("userdb".into()));
+        assert_eq!(
+            revalidate(7, 7, &f),
+            deny(DenyCause::Infrastructure(FactSource::Account))
+        );
+    }
+
+    #[test]
+    fn a_locked_expired_or_disabled_account_is_refused_by_its_state() {
+        for state in [
+            AccountState::Locked,
+            AccountState::Expired,
+            AccountState::Disabled,
+        ] {
+            let mut f = member(true);
+            f.account = AccountFact::Checked(state.clone());
+            assert_eq!(revalidate(7, 7, &f), deny(DenyCause::Account(state)));
+        }
+    }
+
+    #[test]
+    fn a_not_checked_account_continues() {
+        for why in [
+            NotCheckedWhy::DirectoryAccount,
+            NotCheckedWhy::Platform,
+            NotCheckedWhy::Configured,
+        ] {
+            let mut f = member(true);
+            f.account = AccountFact::NotChecked(why);
+            assert_eq!(revalidate(7, 7, &f), Revalidation::Continue);
+        }
+    }
+
+    #[test]
+    fn each_cause_has_its_audit_reason_and_posture() {
+        for (cause, reason, posture) in [
+            (DenyCause::NotMember, "not-member", "unauthorized"),
+            (
+                DenyCause::Account(AccountState::Locked),
+                "account-locked",
+                "unauthorized",
+            ),
+            (
+                DenyCause::Account(AccountState::Expired),
+                "account-expired",
+                "unauthorized",
+            ),
+            (
+                DenyCause::Account(AccountState::Disabled),
+                "account-disabled",
+                "unauthorized",
+            ),
+            (
+                DenyCause::Account(AccountState::Active),
+                "account-active",
+                "unauthorized",
+            ),
+            (
+                DenyCause::Account(AccountState::Unknown("x".into())),
+                "account-unknown",
+                "unauthorized",
+            ),
+            (DenyCause::SenderMismatch, "sender-mismatch", "unauthorized"),
+            (
+                DenyCause::Infrastructure(FactSource::Group),
+                "infrastructure:group",
+                "unavailable",
+            ),
+            (
+                DenyCause::Infrastructure(FactSource::Account),
+                "infrastructure:account",
+                "unavailable",
+            ),
+            (
+                DenyCause::Infrastructure(FactSource::SessionMap),
+                "infrastructure:session-map",
+                "unavailable",
+            ),
+            (
+                DenyCause::Infrastructure(FactSource::Audit),
+                "infrastructure:audit",
+                "unavailable",
+            ),
+            (
+                DenyCause::Infrastructure(FactSource::SessionFacts),
+                "infrastructure:session-facts",
+                "unavailable",
+            ),
+        ] {
+            assert_eq!(
+                (cause_reason(&cause), cause_posture(&cause)),
+                (reason, posture),
+                "{cause:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_admission_reason_says_what_was_and_was_not_checked() {
+        for (account, label) in [
+            (AccountFact::Checked(AccountState::Active), "active"),
+            (AccountFact::Checked(AccountState::Locked), "locked"),
+            (AccountFact::Checked(AccountState::Expired), "expired"),
+            (AccountFact::Checked(AccountState::Disabled), "disabled"),
+            (
+                AccountFact::Checked(AccountState::Unknown("x".into())),
+                "unknown",
+            ),
+            (
+                AccountFact::NotChecked(NotCheckedWhy::DirectoryAccount),
+                "not-checked:directory",
+            ),
+            (
+                AccountFact::NotChecked(NotCheckedWhy::Platform),
+                "not-checked:platform",
+            ),
+            (
+                AccountFact::NotChecked(NotCheckedWhy::Configured),
+                "not-checked:configured",
+            ),
+        ] {
+            assert_eq!(account_label(&account), label);
+            assert_eq!(
+                admission_reason(&account),
+                format!("admitted (account: {label})")
+            );
+        }
+    }
+
+    #[test]
+    fn each_ending_has_its_termination_reason_result_and_posture() {
+        for (ending, reason, result, posture) in [
+            (Ending::Disconnect, "disconnect", "permit", "stopped"),
+            (Ending::Idle, "idle", "deny", "stopped"),
+            (Ending::Lifetime, "lifetime", "deny", "stopped"),
+            (
+                Ending::Denied(DenyCause::NotMember),
+                "not-member",
+                "deny",
+                "unauthorized",
+            ),
+            (
+                Ending::Denied(DenyCause::Infrastructure(FactSource::Group)),
+                "infrastructure:group",
+                "deny",
+                "unavailable",
+            ),
+        ] {
+            assert_eq!(
+                (
+                    ending_reason(&ending),
+                    ending_result(&ending),
+                    ending_posture(&ending)
+                ),
+                (reason, result, posture),
+                "{ending:?}"
+            );
+        }
     }
 }

@@ -198,6 +198,8 @@ pub const NEVER_SCRUB_ENV: &[&str] = &[
     // ProtectHostname=yes gives a private UTS namespace and blocks
     // sethostname; it does nothing to the environment block.)
     "HOSTNAME",
+    "KUBERNETES_SERVICE_HOST",
+    "container",
 ];
 
 /// The scrub, over an injected remover. Each `main` passes
@@ -270,6 +272,8 @@ mod tests {
             "LANG",
             "PATH",
             "HOSTNAME",
+            "KUBERNETES_SERVICE_HOST",
+            "container",
         ] {
             assert!(
                 NEVER_SCRUB_ENV.contains(&must),

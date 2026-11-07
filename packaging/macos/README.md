@@ -238,6 +238,7 @@ means for a FIPS-posture product.
 
 - `packaging/isolation-contract.md` — the normative property × profile table
 - **ADR-0009** — the `F_GETPATH` lane and its verification condition
-- **ADR-0006** decision 4 — the macOS local-authentication predicate (`auid` + `utmpx`/console)
+- **ADR-0006** decision 4 — the macOS local-authentication predicate (kernel-attested peer uid +
+  `maknae`-group membership per request, bounded by the visit clock; account state not read)
   and its documented attribution residual (no per-message sender credentials)
 - the maintainer's out-of-repo host notes — why no standing Linux host can verify macOS

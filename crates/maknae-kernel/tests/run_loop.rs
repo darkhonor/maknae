@@ -110,12 +110,9 @@ async fn audit_failure_withholds_response() {
     maknae_kernel::handle(
         s,
         Some("spiffe://d/plane/cli".to_string()),
-        501,
-        true,
-        None,
-        Some(common::fixture_home()),
+        maknae_kernel::SessionRecord::for_test(501, None).into(),
+        maknae_kernel::FactsGate::allow_as(None, Some(common::fixture_home())),
         emit.clone(),
-        1,
         default_cfg(),
         serde_json::json!({}),
         authz.0.clone(),
@@ -126,7 +123,6 @@ async fn audit_failure_withholds_response() {
         std::sync::Arc::new(None),
         maknae_kernel::unavailable_egress(),
         authz.1,
-        maknae_security::Lane::Local,
         maknae_io::DelegatedFds::new(0),
         common::no_baseline(),
     )
@@ -167,12 +163,11 @@ async fn admission_audit_failure_withholds_response_without_reading_request() {
     maknae_kernel::handle(
         s,
         Some("spiffe://d/plane/cli".to_string()),
-        501,
-        true,
-        None, // in_group -> Permit
-        Some(common::fixture_home()),
+        maknae_kernel::SessionRecord::for_test(501, None)
+            .with_session_id(99)
+            .into(),
+        maknae_kernel::FactsGate::allow_as(None, Some(common::fixture_home())),
         emit.clone(),
-        99,
         default_cfg(),
         serde_json::json!({}),
         authz.0.clone(),
@@ -183,7 +178,6 @@ async fn admission_audit_failure_withholds_response_without_reading_request() {
         std::sync::Arc::new(None),
         maknae_kernel::unavailable_egress(),
         authz.1,
-        maknae_security::Lane::Local,
         maknae_io::DelegatedFds::new(0),
         common::no_baseline(),
     )
@@ -221,19 +215,18 @@ async fn admission_audit_failure_withholds_response_without_reading_request() {
 async fn deny_audits_then_closes() {
     let (mut c, s) = tokio::io::duplex(4096);
     let emit = RecEmit::new(false);
-    // A client that is NOT in the maknae group: no verb is even read.
+    // A member de-enrolled since its connection was admitted: no verb is decided.
     write_ping(&mut c).await;
 
     let authz = permissive_authz();
     maknae_kernel::handle(
         s,
         Some("spiffe://d/plane/cli".to_string()),
-        501,
-        false,
-        None, // in_group = false → Deny
-        Some(common::fixture_home()),
+        maknae_kernel::SessionRecord::for_test(501, None)
+            .with_session_id(7)
+            .into(),
+        common::ScriptedFacts::gate(vec![common::non_member()]),
         emit.clone(),
-        7,
         default_cfg(),
         serde_json::json!({}),
         authz.0.clone(),
@@ -244,36 +237,42 @@ async fn deny_audits_then_closes() {
         std::sync::Arc::new(None),
         maknae_kernel::unavailable_egress(),
         authz.1,
-        maknae_security::Lane::Local,
         maknae_io::DelegatedFds::new(0),
         common::no_baseline(),
     )
     .await;
 
     let recs = emit.records();
-    let deny = recs
-        .iter()
-        .find(|r| r.event == "connection")
-        .expect("a connection/deny record must be emitted");
+    assert_eq!(recs.len(), 2, "{recs:?}");
+    assert_eq!(
+        (recs[0].event.as_str(), recs[0].outcome.result.as_str()),
+        ("connection", "permit")
+    );
+    let deny = &recs[1];
+    assert_eq!(
+        (deny.event.as_str(), deny.action.as_str(), deny.seq),
+        ("request", "liveness.ping", 2)
+    );
     assert_eq!(deny.outcome.result, "deny");
     assert_eq!(deny.outcome.posture, "unauthorized");
-    assert!(
-        deny.outcome.reason.contains("maknae"),
-        "deny reason should name the maknae-group check, got {:?}",
-        deny.outcome.reason
-    );
+    assert_eq!(deny.outcome.reason, "not-member");
     assert_eq!(deny.session_id, 7);
 
-    // No response frame.
-    let r = tokio::time::timeout(
+    let frame = tokio::time::timeout(
         Duration::from_millis(200),
         common::read_frame(&mut c, 65536),
     )
-    .await;
-    assert!(
-        r.is_err() || r.unwrap().is_err(),
-        "deny must write no response"
-    );
+    .await
+    .expect("the refusal is answered")
+    .expect("a response frame");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        maknae_proto::RespResult::Err(e) => assert_eq!(
+            (e.code, e.message.as_str()),
+            (maknae_proto::ProtoErrCode::Unauthorized, "not authorized"),
+            "the cause stays in the trail"
+        ),
+        other => panic!("expected the generic Unauthorized frame, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -286,12 +285,9 @@ async fn happy_ping_responds() {
     maknae_kernel::handle(
         s,
         Some("spiffe://d/plane/cli".to_string()),
-        501,
-        true,
-        None,
-        Some(common::fixture_home()),
+        maknae_kernel::SessionRecord::for_test(501, None).into(),
+        maknae_kernel::FactsGate::allow_as(None, Some(common::fixture_home())),
         emit.clone(),
-        1,
         default_cfg(),
         serde_json::json!({}),
         authz.0.clone(),
@@ -302,7 +298,6 @@ async fn happy_ping_responds() {
         std::sync::Arc::new(None),
         maknae_kernel::unavailable_egress(),
         authz.1,
-        maknae_security::Lane::Local,
         maknae_io::DelegatedFds::new(0),
         common::no_baseline(),
     )
@@ -341,12 +336,11 @@ async fn permit_admission_precedes_request_record() {
     maknae_kernel::handle(
         s,
         Some("spiffe://d/plane/cli".to_string()),
-        501,
-        true,
-        None, // in_group -> Permit
-        Some(common::fixture_home()),
+        maknae_kernel::SessionRecord::for_test(501, None)
+            .with_session_id(42)
+            .into(),
+        maknae_kernel::FactsGate::allow_as(None, Some(common::fixture_home())),
         emit.clone(),
-        42,
         default_cfg(),
         serde_json::json!({}),
         authz.0.clone(),
@@ -357,7 +351,6 @@ async fn permit_admission_precedes_request_record() {
         std::sync::Arc::new(None),
         maknae_kernel::unavailable_egress(),
         authz.1,
-        maknae_security::Lane::Local,
         maknae_io::DelegatedFds::new(0),
         common::no_baseline(),
     )
@@ -405,12 +398,9 @@ async fn happy_whoami_carries_peer_facts() {
     maknae_kernel::handle(
         s,
         Some("spiffe://d/plane/cli".to_string()),
-        501,
-        true,
-        None,
-        Some(common::fixture_home()),
+        maknae_kernel::SessionRecord::for_test(501, None).into(),
+        maknae_kernel::FactsGate::allow_as(None, Some(common::fixture_home())),
         emit.clone(),
-        1,
         default_cfg(),
         serde_json::json!({}),
         authz.0.clone(),
@@ -421,7 +411,6 @@ async fn happy_whoami_carries_peer_facts() {
         std::sync::Arc::new(None),
         maknae_kernel::unavailable_egress(),
         authz.1,
-        maknae_security::Lane::Local,
         maknae_io::DelegatedFds::new(0),
         common::no_baseline(),
     )
@@ -453,12 +442,9 @@ async fn read_timeout_closes() {
     maknae_kernel::handle(
         s,
         Some("spiffe://d/plane/cli".to_string()),
-        501,
-        true,
-        None,
-        Some(common::fixture_home()),
+        maknae_kernel::SessionRecord::for_test(501, None).into(),
+        maknae_kernel::FactsGate::allow_as(None, Some(common::fixture_home())),
         emit.clone(),
-        1,
         cfg,
         serde_json::json!({}),
         authz.0.clone(),
@@ -469,7 +455,6 @@ async fn read_timeout_closes() {
         std::sync::Arc::new(None),
         maknae_kernel::unavailable_egress(),
         authz.1,
-        maknae_security::Lane::Local,
         maknae_io::DelegatedFds::new(0),
         common::no_baseline(),
     )
@@ -516,12 +501,9 @@ async fn configured_au3_1_is_stamped_onto_every_record() {
     maknae_kernel::handle(
         s,
         Some("spiffe://d/plane/cli".to_string()),
-        501,
-        true,
-        None,
-        Some(common::fixture_home()),
+        maknae_kernel::SessionRecord::for_test(501, None).into(),
+        maknae_kernel::FactsGate::allow_as(None, Some(common::fixture_home())),
         emit.clone(),
-        1,
         default_cfg(),
         au3_1.clone(),
         authz.0.clone(),
@@ -532,7 +514,6 @@ async fn configured_au3_1_is_stamped_onto_every_record() {
         std::sync::Arc::new(None),
         maknae_kernel::unavailable_egress(),
         authz.1,
-        maknae_security::Lane::Local,
         maknae_io::DelegatedFds::new(0),
         common::no_baseline(),
     )
@@ -547,7 +528,7 @@ async fn configured_au3_1_is_stamped_onto_every_record() {
         );
     }
 
-    // Deny path (group check fails, no verb even read).
+    // Deny path (the request-time group check fails, no verb decided).
     let (mut c2, s2) = tokio::io::duplex(4096);
     let emit2 = RecEmit::new(false);
     write_ping(&mut c2).await;
@@ -555,12 +536,9 @@ async fn configured_au3_1_is_stamped_onto_every_record() {
     maknae_kernel::handle(
         s2,
         Some("spiffe://d/plane/cli".to_string()),
-        501,
-        false,
-        None, // in_group = false -> Deny
-        Some(common::fixture_home()),
+        maknae_kernel::SessionRecord::for_test(501, None).into(),
+        common::ScriptedFacts::gate(vec![common::non_member()]),
         emit2.clone(),
-        1,
         default_cfg(),
         au3_1.clone(),
         authz.0.clone(),
@@ -571,7 +549,6 @@ async fn configured_au3_1_is_stamped_onto_every_record() {
         std::sync::Arc::new(None),
         maknae_kernel::unavailable_egress(),
         authz.1,
-        maknae_security::Lane::Local,
         maknae_io::DelegatedFds::new(0),
         common::no_baseline(),
     )
@@ -579,8 +556,8 @@ async fn configured_au3_1_is_stamped_onto_every_record() {
     let recs2 = emit2.records();
     let deny = recs2
         .iter()
-        .find(|r| r.event == "connection")
-        .expect("a connection/deny record must be emitted");
+        .find(|r| r.event == "request" && r.outcome.result == "deny")
+        .expect("a request/deny record must be emitted");
     assert_eq!(
         deny.au3_1, au3_1,
         "the deny-path record's au3_1 must carry the configured value, not the hardcoded \
@@ -622,12 +599,11 @@ async fn unread_response_does_not_hang_the_handler() {
         maknae_kernel::handle(
             server,
             Some("spiffe://d/plane/cli".to_string()),
-            501,
-            true,
-            None,
-            Some(common::fixture_home()),
+            maknae_kernel::SessionRecord::for_test(501, None)
+                .with_session_id(7)
+                .into(),
+            maknae_kernel::FactsGate::allow_as(None, Some(common::fixture_home())),
             emit.clone(),
-            7,
             cfg,
             serde_json::json!({}),
             authz.0.clone(),
@@ -638,7 +614,6 @@ async fn unread_response_does_not_hang_the_handler() {
             std::sync::Arc::new(None),
             maknae_kernel::unavailable_egress(),
             authz.1,
-            maknae_security::Lane::Local,
             maknae_io::DelegatedFds::new(0),
             common::no_baseline(),
         ),
@@ -684,12 +659,11 @@ async fn serve_raw(
     maknae_kernel::handle(
         s,
         Some("spiffe://d/plane/cli".to_string()),
-        501,
-        true,
-        None,
-        Some(common::fixture_home()),
+        maknae_kernel::SessionRecord::for_test(501, None)
+            .with_session_id(9)
+            .into(),
+        maknae_kernel::FactsGate::allow_as(None, Some(common::fixture_home())),
         emit.clone(),
-        9,
         cfg,
         serde_json::json!({}),
         authz.0.clone(),
@@ -700,7 +674,6 @@ async fn serve_raw(
         std::sync::Arc::new(None),
         maknae_kernel::unavailable_egress(),
         authz.1,
-        maknae_security::Lane::Local,
         maknae_io::DelegatedFds::new(0),
         common::no_baseline(),
     )

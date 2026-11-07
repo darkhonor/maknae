@@ -75,6 +75,8 @@ pub use keychain_policy::{
     read_gated, KeychainDelete, KeychainItem, KeychainPlane, CLI_TOKEN_KEYCHAIN_ITEM,
     KEYCHAIN_ACCOUNT, SYSTEM_KEYCHAIN,
 };
+#[cfg(unix)]
+pub use maknae_plane::SenderVerdict;
 pub use operator::OperatorClient;
 pub use password_line::{PasswordFeed, PasswordLine};
 pub use peer_auth::{ChannelPeer, PeerAuth, SanRule};

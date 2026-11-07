@@ -1,4 +1,4 @@
-policy_module(maknae, 1.0.1)
+policy_module(maknae, 1.0.3)
 
 ########################################
 # Type declarations
@@ -191,6 +191,8 @@ allow maknaed_t user_home_type:file { getattr ioctl };
 allowxperm maknaed_t user_home_dir_t:dir ioctl 0x0000;
 allowxperm maknaed_t user_home_type:dir ioctl 0x0000;
 allowxperm maknaed_t user_home_type:file ioctl 0x0000;
+
+systemd_userdbd_stream_connect(maknaed_t)
 
 # CRITICAL (maknae-specific; Microkosmos has no analog — it uses EnvironmentFile=):
 # LoadCredentialEncrypted= makes systemd DECRYPT the SecretID into a per-service

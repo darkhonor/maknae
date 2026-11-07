@@ -277,6 +277,10 @@ pub(crate) fn stat_path(path: &Path) -> nix::Result<FileStat> {
     nix::sys::stat::stat(path)
 }
 
+pub(crate) fn lstat_path(path: &Path) -> nix::Result<FileStat> {
+    nix::sys::stat::lstat(path)
+}
+
 pub(crate) fn fstat<F: AsFd>(fd: &F) -> nix::Result<FileStat> {
     nix::sys::stat::fstat(fd)
 }

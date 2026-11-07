@@ -65,12 +65,25 @@ files = [
   # records, and what admin.status and admin.subject.list report for each subject;
   # a wrong arm hides a released containment or mislabels a contained subject.
   "crates/maknae-kernel/src/identity_report.rs",
+  # #115: the account state each request is re-decided on. A wrong arm reads a
+  # locked, expired or not-yet-valid account as active. The Varlink transport is varlink.rs (T2).
+  "crates/maknae-kernel/src/session_facts/userdb.rs",
+  # #115: which host source answers each fact (host_account_linux.rs: a directory
+  # account is not checked, an unreadable passwd is unknown; host_account_macos.rs:
+  # macOS reads none) and the gather that asks them as one bounded unit (session.rs).
+  # A wrong arm checks the wrong account or answers a stalled source as answered.
+  "crates/maknae-kernel/src/session_facts/mod.rs",
+  "crates/maknae-kernel/src/session_facts/host_account_linux.rs",
+  "crates/maknae-kernel/src/session_facts/host_account_macos.rs",
+  "crates/maknae-kernel/src/session.rs",
   # The CBOR byte-string content codec (#77): a wrong major type halves the
   # read ceiling and mis-routes oversize; the visitor is a refusal surface.
   "crates/maknae-proto/src/bytes.rs",
   "crates/maknae-io/src/anchor.rs",
   # #596: the one "this user's home" translation, shared by the client and the kernel.
   "crates/maknae-io/src/home.rs",
+  # #115: path presence; reading a refusal as absence misjudges the deployment-mode self-check.
+  "crates/maknae-io/src/host_facts.rs",
   "crates/maknae-io/src/checks.rs",
   # ADR-0009 confinement: every line is a refusal path, and the failure mode is
   # exact — a wrong branch hands a subject an object outside its home,
@@ -111,6 +124,9 @@ files = [
   # kernel config-boot: the boot gate resolves the runtime ingest posture and must
   # fail closed. In [t1].files ONLY (own 95% floor; NOT ratchet_cohort).
   "crates/maknae-kernel/src/boot.rs",
+  # #115: the deployment self-check and the listener decision; a wrong arm boots
+  # a mode the host contradicts, or binds the client listener in a container.
+  "crates/maknae-kernel/src/deployment.rs",
   # maknae-vault Stage 1: the plane-cert client's PURE decision logic. The URI-SAN
   # verifier is the register's single consciously-owned code; the CSR shape + config
   # + FIPS decision are fail-closed gates. Each in [t1].files ONLY (own 95% floor;
@@ -203,6 +219,9 @@ files = [
   # the T1 line-drawing rule. In [t1].files ONLY (own 95% floor; NOT
   # ratchet_cohort).
   "crates/maknae-config/src/principal.rs",
+  # #115: the `deployment` section; a wrong arm boots a container as a host, or
+  # checks no account state on a host that declared a source.
+  "crates/maknae-config/src/deployment.rs",
   # PR-J1 Task 6: the authz policy schema v1 (spec §7; RBAC-decided per ADR-0020) — the
   # Claude-Code/Codex-style permission grammar (Read patterns) a future
   # per-request PDP evaluates, plus the secure fail-closed load (symlink
@@ -347,15 +366,15 @@ mutants_features = { maknae-config = ["hermetic-test-seam"], maknae-authz-basic 
 
 [t2]
 floor_production_region = 90
-# The client-plane descriptor adapter (ADR-0009). NOT T1, by the line-drawing rule
-# above and not by convenience: if this silently breaks, delegated descriptors are
-# LOST, and an absent descriptor is a `Deny` (ADR-0009 decision 2) -- it cannot yield
-# a Permit for an access policy denies. The queue is per-connection, so a mis-ordered
-# take stays within one subject, and the PDP decides on the path of whichever
-# descriptor is actually used (decision 6), so the verdict follows the object rather
-# than diverging from it. What IS at stake here is availability and descriptor
-# exhaustion, which is a T2 concern. The security-relevant half -- the recvmsg,
-# CMSG_CLOEXEC, the per-message bound, the checks -- is in maknae-io and is T1.
+# The client-plane descriptor adapter (ADR-0009) and its per-read sender check.
+# The adapter's own failure modes are availability: a lost descriptor is a `Deny`
+# (ADR-0009 decision 2), the queue is per-connection, and the PDP decides on the
+# path of the descriptor actually used (decision 6). The sender check IS an
+# authorization control (another process's bytes taken as the subject's request),
+# so its decision, `maknae_io::sender_admitted`, is T1 in maknae-io's delegated.rs
+# with the recvmsg, CMSG_CLOEXEC, the per-message bound and the descriptor checks.
+# What stays here is the I/O around it: calling it on every read, the sticky
+# verdict, and queueing descriptors only after it admits.
 files = [
   # #240a: the kernel-side egress transport. T2, not T1, and by the repo's own
   # line-drawing rather than by convenience: this file is socket I/O — connect,
@@ -369,6 +388,11 @@ files = [
   # Vault key path on the wire to an unauthenticated peer, and the test failed
   # on the byte count.
   "crates/maknae-kernel/src/egress_socket.rs",
+  # #115: the userdb Varlink transport, tiered as egress_socket.rs: socket I/O whose
+  # retry predicates and frame end are table-tested, and whose listener check
+  # before the write is proven by userdb.rs's fake-server test. The reply mapping
+  # is userdb.rs (T1).
+  "crates/maknae-kernel/src/session_facts/varlink.rs",
   # #421: the bounded, non-blocking diagnostic sink for the admission path. T2:
   # a broken queue wedges a connection handler or drops diagnostics (availability),
   # and it carries no verdict. Mutation-visible: the tests pin the drop count.
@@ -826,12 +850,48 @@ path = "crates/maknae-kernel/src/egress_socket.rs"
 anchor = "continue; // EAGAIN or EINTR: re-ask the budget"
 why = "the write-leg retry taken (EAGAIN after poll reported writable, or EINTR): not controllable through a real socket; the decision (`write_is_retried`) is proven on a table and the hard-error direction on the wire"
 
+# #115: the userdb Varlink transport (varlink.rs). Errno passthroughs with no decision.
+[[exception]]
+path = "crates/maknae-kernel/src/session_facts/varlink.rs"
+anchor = "Err(e) => return Err(io::Error::other(format!(\"poll: {e}\"))),"
+why = "poll on a live, borrowed fd cannot fail (a closed fd reports POLLNVAL as ready, not an error); pure errno passthrough"
+
+[[exception]]
+path = "crates/maknae-kernel/src/session_facts/varlink.rs"
+anchor = "Err(e) => return Err(io::Error::other(format!(\"socket: {e}\"))),"
+why = "socket(2) fails only at the descriptor or memory limit, which a unit test cannot impose without starving the parallel harness; pure errno passthrough"
+
+[[exception]]
+path = "crates/maknae-kernel/src/session_facts/varlink.rs"
+anchor = "Err(e) => return Err(io::Error::other(format!(\"listener credentials: {e}\"))),"
+why = "SO_PEERCRED / LOCAL_PEERCRED on a socket that has just connected cannot fail; pure passthrough. The admit and refuse arms are tested over a real listener"
+
 # [[env_bound_override]] — §9 discriminator. t1/t2 only;
 # closed grammar ^target_os:(linux|macos|windows)$.
 [[env_bound_override]]
 path = "crates/maknae-sys/src/macos.rs"
 env_bound = "target_os:macos"
 why = "the getattrlist FFI call (ADR-0027) compiles only on macOS, so the Linux CI lane has no regions for it. Its floor is enforced where coverage-tiers.sh runs on a macOS host (the opt-in pre-push hook and local runs); no CI lane enforces it. The parser it calls, reply.rs, is plain T1 and CI-enforced"
+
+[[env_bound_override]]
+path = "crates/maknae-kernel/src/session_facts/userdb.rs"
+env_bound = "target_os:linux"
+why = "systemd-userdbd and /etc/passwd locality are Linux account sources, so a macOS coverage run has no regions for it. The Linux CI lane enforces its floor"
+
+[[env_bound_override]]
+path = "crates/maknae-kernel/src/session_facts/host_account_linux.rs"
+env_bound = "target_os:linux"
+why = "the account-source choice for the Linux sources, compiled only on Linux, so a macOS coverage run has no regions for it. The Linux CI lane enforces its floor"
+
+[[env_bound_override]]
+path = "crates/maknae-kernel/src/session_facts/host_account_macos.rs"
+env_bound = "target_os:macos"
+why = "the macOS account answer (a stated gap) compiles only on macOS, so the Linux CI lane has no regions for it. Its floor is enforced where coverage-tiers.sh runs on a macOS host; no CI lane enforces it"
+
+[[env_bound_override]]
+path = "crates/maknae-kernel/src/session_facts/varlink.rs"
+env_bound = "target_os:linux"
+why = "the userdb transport is compiled only on Linux, so a macOS coverage run has no regions for it. The Linux CI lane enforces its floor"
 
 [[env_bound_override]]
 path = "crates/maknae-sys/src/linux.rs"
