@@ -65,6 +65,10 @@ files = [
   # records, and what admin.status and admin.subject.list report for each subject;
   # a wrong arm hides a released containment or mislabels a contained subject.
   "crates/maknae-kernel/src/identity_report.rs",
+  # #609: the task store's binding of each task to its agent and uid, and the
+  # submission order (PDP before store); a wrong arm hands an agent another's task.
+  "crates/maknae-kernel/src/task.rs",
+  "crates/maknae-kernel/src/enrollment.rs",
   # #115: the account state each request is re-decided on. A wrong arm reads a
   # locked, expired or not-yet-valid account as active. The Varlink transport is varlink.rs (T2).
   "crates/maknae-kernel/src/session_facts/userdb.rs",

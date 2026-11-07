@@ -632,7 +632,7 @@ fn admitted_user(user: Option<&str>) -> Option<String> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn make_record(
+pub(crate) fn make_record(
     event: &str,
     host: &str,
     socket: &str,
@@ -667,6 +667,10 @@ fn make_record(
             user: None,
             role: None,
             plane_uri_san: peer_uri.map(str::to_string),
+            agent: None,
+            task_id: None,
+            parent_task_id: None,
+            tasker: None,
         },
         action: action.to_string(),
         object: object.map(str::to_string),
@@ -7405,7 +7409,7 @@ fn account_source_diag(
 /// Best-effort host label for AU-3c. Not security-load-bearing (the security-relevant
 /// AU-3 facts are the peer uid / plane URI-SAN / outcome); a missing hostname degrades
 /// only correlation, so this never fails the daemon.
-fn hostname() -> String {
+pub(crate) fn hostname() -> String {
     std::env::var("HOSTNAME")
         .ok()
         .filter(|h| !h.is_empty())

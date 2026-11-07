@@ -1,0 +1,75 @@
+//! Which agents the installed snapshot enrolls, and under which uid (#609).
+use std::sync::Arc;
+
+use maknae_authz_basic::Baseline;
+use maknae_config::AgentId;
+
+use crate::Composition;
+
+pub trait EnrollmentView: Send + Sync {
+    fn agent_uid(&self, id: &AgentId) -> Option<u32>;
+    fn is_enrolled(&self, uid: u32) -> bool;
+}
+
+pub struct SnapshotEnrollment<B: Baseline>(pub Arc<Composition<B>>);
+
+impl<B: Baseline> EnrollmentView for SnapshotEnrollment<B> {
+    fn agent_uid(&self, id: &AgentId) -> Option<u32> {
+        self.0.baseline().snapshot().agent_uid(id.as_str())
+    }
+
+    fn is_enrolled(&self, uid: u32) -> bool {
+        self.0.baseline().snapshot().agent_of(uid).is_some()
+    }
+}
+
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+pub struct FixedEnrollment(pub std::collections::BTreeMap<AgentId, u32>);
+
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+impl EnrollmentView for FixedEnrollment {
+    fn agent_uid(&self, id: &AgentId) -> Option<u32> {
+        self.0.get(id).copied()
+    }
+
+    fn is_enrolled(&self, uid: u32) -> bool {
+        self.0.values().any(|u| *u == uid)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id(s: &str) -> AgentId {
+        AgentId::parse(s).unwrap()
+    }
+
+    #[test]
+    fn the_fixed_view_answers_by_id_and_by_uid() {
+        let view = FixedEnrollment([(id("hobi"), 2001)].into());
+        assert_eq!(view.agent_uid(&id("hobi")), Some(2001));
+        assert_eq!(view.agent_uid(&id("jin")), None);
+        assert!(view.is_enrolled(2001));
+        assert!(!view.is_enrolled(2002));
+    }
+
+    #[test]
+    fn the_snapshot_view_reads_the_installed_snapshot() {
+        let (_g, basic) = crate::test_fixtures::fixture(
+            "enrollment-view",
+            crate::test_fixtures::READ_POLICY,
+            None,
+        );
+        let pdp = Arc::new(Composition::new(
+            basic,
+            crate::CeilingAuthorizer::new(
+                maknae_config::Ceiling::baseline_for(&maknae_config::BasicPolicy),
+                &maknae_config::BasicPolicy,
+            ),
+        ));
+        let view = SnapshotEnrollment(pdp);
+        assert_eq!(view.agent_uid(&id("hobi")), None);
+        assert!(!view.is_enrolled(nix::unistd::geteuid().as_raw()));
+    }
+}
