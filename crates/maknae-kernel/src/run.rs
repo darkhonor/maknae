@@ -4396,6 +4396,7 @@ fn unix_now() -> u64 {
 async fn publish_boot_identity<E: AuditEmit + Send + Sync>(
     status: &crate::identity_report::IdentityStatus,
     snapshot: &maknae_authz_basic::snapshot::Snapshot,
+    principal_uid: u32,
     released: &[maknae_graph::identity::Released],
     sink: &Arc<E>,
     ctx: &BootCtx<'_>,
@@ -4404,6 +4405,7 @@ async fn publish_boot_identity<E: AuditEmit + Send + Sync>(
         status,
         crate::identity_report::Published::of(
             snapshot,
+            principal_uid,
             crate::identity_report::transition_problems(released),
         ),
         snapshot.identity_problems(),
@@ -4861,6 +4863,7 @@ where
             .store(committed.revision, AtomicOrdering::Release);
         let published = crate::identity_report::Published::of(
             &snapshot,
+            self.authorizer.baseline().principal().uid,
             crate::identity_report::transition_problems(&released),
         );
         self.authorizer.baseline().install(snapshot);
@@ -4908,6 +4911,7 @@ where
         use crate::containment::{permits, Probed};
         let pdp = Arc::clone(&self.authorizer);
         let installed = self.authorizer.baseline().snapshot();
+        let principal_uid = self.authorizer.baseline().principal().uid;
         let job = move || {
             let probe = |uid| {
                 crate::handler::build_authz_request(
@@ -4929,10 +4933,11 @@ where
                     releasers: None,
                 });
             }
-            let probes: Vec<_> = crate::containment::releaser_uids(candidate.subject_entries())?
-                .into_iter()
-                .map(probe)
-                .collect();
+            let probes: Vec<_> =
+                crate::containment::releaser_uids(candidate.subject_entries(principal_uid))?
+                    .into_iter()
+                    .map(probe)
+                    .collect();
             Ok(Probed {
                 self_holds,
                 releasers: Some(
@@ -5334,7 +5339,7 @@ where
     /// published and recorded as the identity it now is.
     async fn republish_principal_admin(&self, ctx: &BootCtx<'_>, uid: u32) {
         let snapshot = self.authorizer.baseline().snapshot();
-        if snapshot.subjects().is_some() {
+        if snapshot.has_explicit_bindings() {
             return;
         }
         let promoted = maknae_authz_basic::IdentityProblem::PrincipalAdmin { uid };
@@ -5346,8 +5351,9 @@ where
             .cloned()
             .chain([promoted.clone()])
             .collect();
-        self.identity
-            .publish(crate::identity_report::Published::of(&snapshot, carried));
+        self.identity.publish(crate::identity_report::Published::of(
+            &snapshot, uid, carried,
+        ));
         let (result, reason, posture) = crate::identity_report::record_fields(&promoted);
         eprintln!("maknaed: identity: {reason}");
         let rec = ctx.record(GRAPH_IDENTITY_ACTION, result, &reason, posture, None);
@@ -5979,6 +5985,7 @@ where
     fn install(&self, candidate: ReloadCandidate) {
         let published = crate::identity_report::Published::of(
             &candidate.snapshot,
+            self.reloader.authorizer.baseline().principal().uid,
             crate::identity_report::transition_problems(&candidate.released),
         );
         self.reloader
@@ -7000,6 +7007,7 @@ async fn boot_after_sink(
     publish_boot_identity(
         &booted.status.identity,
         &maknae_authz_basic::Baseline::snapshot(authorizer.baseline()),
+        maknae_authz_basic::Baseline::principal(authorizer.baseline()).uid,
         &booted.released,
         sink,
         &graph_ctx,
@@ -14213,6 +14221,7 @@ mod reload_fixture {
         publish_boot_identity(
             &booted.status.identity,
             &baseline.snapshot(),
+            baseline.principal().uid,
             &booted.released,
             &sink,
             &ctx,
@@ -14489,6 +14498,47 @@ mod baseline_accept_tests {
             .seen()
             .iter()
             .any(|s| s.action == GRAPH_IDENTITY_ACTION && s.reason == promoted.to_string()));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_principal_accept_with_agents_and_no_bindings_republishes_the_principal_admin() {
+        let opts = Opts {
+            bindings: None,
+            ..Opts::default()
+        };
+        let fx = fixture_with("principal-admin-agents", opts).await;
+        fx.baseline().set_hosts(maknae_authz_basic::HostLookups {
+            account: super::reload_tests::hobi_account,
+            daemons: super::reload_tests::no_daemons,
+            group: super::reload_tests::no_group,
+        });
+        let dir = fx.dir.join("agents").join("hobi");
+        std::fs::create_dir_all(&dir).unwrap();
+        for d in [fx.dir.join("agents"), dir.clone()] {
+            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o750)).unwrap();
+        }
+        write_0640(
+            &dir.join("enrollment.yaml"),
+            "agent_id: hobi\naccount: hobi-svc\nuid: 2001\nrole: user\n",
+        );
+        fx.reloader.run().await.unwrap();
+        assert_eq!(fx.baseline().snapshot().agent_uid("hobi"), Some(2001));
+        let uid = nix::unistd::geteuid().as_raw().wrapping_add(1);
+        fx.write_yaml_principal(uid, "");
+        let shown = fx.show().await;
+        accepted(fx.accept(&shown.hash).await);
+        let promoted = maknae_authz_basic::IdentityProblem::PrincipalAdmin { uid };
+        assert!(fx.status.identity.current().contains(&promoted));
+        assert!(fx
+            .seen()
+            .iter()
+            .any(|s| s.action == GRAPH_IDENTITY_ACTION && s.reason == promoted.to_string()));
+        assert!(fx
+            .status
+            .identity
+            .subjects()
+            .iter()
+            .any(|s| s.uid == Some(uid) && s.state == maknae_authz_basic::SubjectState::Principal));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -15830,7 +15880,7 @@ mod reload_tests {
             .collect()
     }
 
-    fn hobi_account(uid: u32) -> Result<Option<maknae_io::HostAccount>, String> {
+    pub(super) fn hobi_account(uid: u32) -> Result<Option<maknae_io::HostAccount>, String> {
         Ok((uid == 2001).then(|| maknae_io::HostAccount {
             uid,
             name: "hobi-svc".into(),
@@ -15841,14 +15891,14 @@ mod reload_tests {
         }))
     }
 
-    fn no_daemons() -> Result<maknae_io::DaemonFacts, String> {
+    pub(super) fn no_daemons() -> Result<maknae_io::DaemonFacts, String> {
         Ok(maknae_io::DaemonFacts {
             uids: Vec::new(),
             gids: Vec::new(),
         })
     }
 
-    fn no_group(_: &str) -> Result<Option<u32>, String> {
+    pub(super) fn no_group(_: &str) -> Result<Option<u32>, String> {
         Ok(None)
     }
 
@@ -15946,10 +15996,12 @@ mod reload_tests {
         }
         bounded(fx.reloader.run()).await.unwrap();
         let views = crate::identity_report::subject_views(
-            fx.baseline().snapshot().subjects().unwrap(),
+            fx.baseline().snapshot().subjects(principal().uid).unwrap(),
             &fx.status.identity.subjects(),
             &fx.status.identity.agents(),
         );
+        let me = principal().uid;
+        let label = format!("uid {me}");
         assert_eq!(
             views
                 .iter()
@@ -15957,15 +16009,20 @@ mod reload_tests {
                     v.uid,
                     v.label.as_str(),
                     v.state.as_str(),
-                    v.agent.as_deref()
+                    v.agent.as_deref(),
+                    v.principal
                 ))
                 .collect::<Vec<_>>(),
-            [(
-                Some(2001),
-                "hobi-svc (uid 2001)",
-                "bound user",
-                Some("hobi")
-            )]
+            [
+                (Some(me), label.as_str(), "bound admin", None, true),
+                (
+                    Some(2001),
+                    "hobi-svc (uid 2001)",
+                    "bound user",
+                    Some("hobi"),
+                    false
+                )
+            ]
         );
     }
 
@@ -16399,7 +16456,7 @@ mod reload_tests {
             ("graph.identity", "deny", "unavailable")
         );
         assert_eq!(fx.status.identity.counts(), ["unresolved_adversary=1"]);
-        let subjects = fx.baseline().snapshot().subjects().unwrap();
+        let subjects = fx.baseline().snapshot().subjects(principal().uid).unwrap();
         assert!(subjects
             .iter()
             .any(|b| b.role == "adversary" && b.members == ["uid:4242"]));
@@ -16450,7 +16507,14 @@ mod reload_tests {
         let status = crate::identity_report::IdentityStatus::default();
         let refused = tokio::time::timeout(
             Duration::from_secs(60),
-            publish_boot_identity(&status, &snapshot, &[], &fx.reloader.sink, &ctx),
+            publish_boot_identity(
+                &status,
+                &snapshot,
+                principal().uid,
+                &[],
+                &fx.reloader.sink,
+                &ctx,
+            ),
         )
         .await
         .expect("the identity record must give up within its bound");
@@ -16491,7 +16555,7 @@ mod reload_tests {
         .await
         .unwrap();
         let status = crate::identity_report::IdentityStatus::default();
-        publish_boot_identity(&status, &snapshot, &[], sink, &ctx)
+        publish_boot_identity(&status, &snapshot, principal().uid, &[], sink, &ctx)
             .await
             .unwrap();
         let recs: Vec<AuditRecord> = std::fs::read_to_string(fx.dir.join("audit.jsonl"))
@@ -16518,7 +16582,8 @@ mod reload_tests {
         assert_eq!(status.counts(), ["unresolved=1", "unresolved_adversary=1"]);
         sink.fail_identity
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        let refused = publish_boot_identity(&status, &snapshot, &[], sink, &ctx).await;
+        let refused =
+            publish_boot_identity(&status, &snapshot, principal().uid, &[], sink, &ctx).await;
         assert!(
             matches!(&refused, Err(e) if e.to_string().contains("identity append refused")),
             "{refused:?}"
@@ -16736,11 +16801,17 @@ mod reload_tests {
     #[tokio::test]
     async fn a_bindings_yaml_without_the_key_keeps_empty_bindings_at_reload() {
         let fx = fixture("brm", AUTHZ, Some("schema_version: 1\nbindings: {}\n")).await;
-        assert_eq!(fx.baseline().snapshot().subjects(), Some(vec![]));
+        assert_eq!(
+            fx.baseline().snapshot().subjects(principal().uid),
+            Some(vec![])
+        );
         fx.write_bindings("schema_version: 1\n");
         let applied = bounded(fx.reloader.run()).await.unwrap();
         assert!(!applied.persisted, "the bindings Section node stays");
-        assert_eq!(fx.baseline().snapshot().subjects(), Some(vec![]));
+        assert_eq!(
+            fx.baseline().snapshot().subjects(principal().uid),
+            Some(vec![])
+        );
         assert_eq!(fx.sync_lines(), ["unsynced=0", "conflict=0", "file=lost"]);
     }
 
@@ -17699,7 +17770,7 @@ mod reload_tests {
             sync_seen(&fx, from),
             ["conflict: \"daemon\" changed in bindings.yaml and by an unsynced live transition; failed closed: unbound"]
         );
-        let subjects = fx.baseline().snapshot().subjects().unwrap();
+        let subjects = fx.baseline().snapshot().subjects(principal().uid).unwrap();
         assert!(
             !subjects.iter().any(|b| b
                 .members

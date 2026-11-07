@@ -159,6 +159,7 @@ fn published_status(
         .identity
         .publish(maknae_kernel::identity_report::Published::of(
             &maknae_authz_basic::Baseline::snapshot(authorizer),
+            maknae_authz_basic::Baseline::principal(authorizer).uid,
             [],
         ));
     status
@@ -2024,6 +2025,7 @@ async fn a_granted_subject_list_reports_the_policy_file_bindings() {
                         label: "root (uid 0)".into(),
                         state: "bound admin".into(),
                         agent: None,
+                        principal: false,
                     },
                     maknae_proto::RoleBindingView {
                         role: "user".into(),
@@ -2032,6 +2034,7 @@ async fn a_granted_subject_list_reports_the_policy_file_bindings() {
                         label: "no-such-user-maknae-496 (no account)".into(),
                         state: "unresolved (no account)".into(),
                         agent: None,
+                        principal: false,
                     },
                 ],
                 "root resolves to uid 0 and is reported by uid; the name with no \

@@ -104,8 +104,13 @@ pub struct Published {
 }
 
 impl Published {
-    /// The snapshot's problems followed by `released`, and the snapshot's subjects.
-    pub fn of(snapshot: &Snapshot, released: impl IntoIterator<Item = IdentityProblem>) -> Self {
+    /// The snapshot's problems followed by `released`, and the subjects it lists with
+    /// `principal_uid` as the enrolled principal.
+    pub fn of(
+        snapshot: &Snapshot,
+        principal_uid: u32,
+        released: impl IntoIterator<Item = IdentityProblem>,
+    ) -> Self {
         Self {
             problems: snapshot
                 .identity_problems()
@@ -113,7 +118,10 @@ impl Published {
                 .cloned()
                 .chain(released)
                 .collect(),
-            subjects: snapshot.subject_entries().unwrap_or_default().into(),
+            subjects: snapshot
+                .subject_entries(principal_uid)
+                .unwrap_or_default()
+                .into(),
             agents: Arc::new(snapshot.agents()),
         }
     }
@@ -192,6 +200,7 @@ pub fn label(s: &ListedSubject) -> String {
 pub fn state(s: &ListedSubject) -> String {
     match &s.state {
         SubjectState::Bound(role) => format!("bound {role}"),
+        SubjectState::Principal => "bound admin".into(),
         SubjectState::Contained => "contained".into(),
         SubjectState::CarriedForward => "contained (carried forward)".into(),
         SubjectState::Unbound(roles) => format!("unbound (conflict: {})", roles.join(", ")),
@@ -207,6 +216,7 @@ pub fn state(s: &ListedSubject) -> String {
 fn role_of(s: &ListedSubject) -> Option<&'static str> {
     match &s.state {
         SubjectState::Bound(role) | SubjectState::Unresolved(role) => Some(role),
+        SubjectState::Principal => Some("admin"),
         SubjectState::Contained | SubjectState::CarriedForward => Some(ADVERSARY),
         SubjectState::Unbound(_) => None,
     }
@@ -215,7 +225,10 @@ fn role_of(s: &ListedSubject) -> Option<&'static str> {
 fn binds(s: &ListedSubject) -> bool {
     matches!(
         s.state,
-        SubjectState::Bound(_) | SubjectState::Contained | SubjectState::CarriedForward
+        SubjectState::Bound(_)
+            | SubjectState::Principal
+            | SubjectState::Contained
+            | SubjectState::CarriedForward
     )
 }
 
@@ -227,6 +240,7 @@ fn view(s: &ListedSubject, role: String, members: Vec<String>) -> RoleBindingVie
         label: label(s),
         state: state(s),
         agent: None,
+        principal: matches!(s.state, SubjectState::Principal),
     }
 }
 
@@ -261,6 +275,7 @@ pub fn subject_views(
                         role: b.role.clone(),
                         members: vec![m],
                         agent: None,
+                        principal: false,
                     }
                 }
             });
@@ -709,6 +724,21 @@ mod tests {
                     "unresolved adversary (no account, not contained)"
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn the_principal_row_is_marked() {
+        let got = subject_views(
+            vec![binding("admin", &["uid:501"])],
+            &[listed(Some(501), &[], SubjectState::Principal)],
+            &BTreeMap::new(),
+        );
+        assert_eq!(
+            got.iter()
+                .map(|v| (v.uid, v.label.as_str(), v.state.as_str(), v.principal))
+                .collect::<Vec<_>>(),
+            [(Some(501), "uid 501", "bound admin", true)]
         );
     }
 

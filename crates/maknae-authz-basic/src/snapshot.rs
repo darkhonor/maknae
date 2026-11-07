@@ -77,14 +77,40 @@ impl Snapshot {
         self.persisted.revision()
     }
 
-    pub fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
-        self.loaded.roles.as_subject_bindings()
+    pub fn has_explicit_bindings(&self) -> bool {
+        self.loaded.roles.explicit()
+    }
+
+    fn principal_listed(&self, principal_uid: u32) -> bool {
+        !self.has_explicit_bindings() && !self.loaded.agents.0.contains_key(&principal_uid)
+    }
+
+    /// Without explicit bindings, the principal's admin beside the enrolled agents.
+    pub fn subjects(&self, principal_uid: u32) -> Option<Vec<maknae_security::SubjectBinding>> {
+        let mut out = self.loaded.roles.as_subject_bindings()?;
+        if self.principal_listed(principal_uid) {
+            out.push(maknae_security::SubjectBinding {
+                role: crate::role::Role::Admin.key().into(),
+                members: vec![format!("uid:{principal_uid}")],
+            });
+            out.sort_by(|a, b| a.role.cmp(&b.role));
+        }
+        Some(out)
     }
 
     /// Every subject the load named, with what that load made of it; `None` when
-    /// bindings are absent.
-    pub fn subject_entries(&self) -> Option<Vec<crate::ListedSubject>> {
-        self.loaded.roles.entries(&self.problems)
+    /// bindings are absent and no agent is enrolled.
+    pub fn subject_entries(&self, principal_uid: u32) -> Option<Vec<crate::ListedSubject>> {
+        let mut out = self.loaded.roles.entries(&self.problems)?;
+        if self.principal_listed(principal_uid) {
+            out.push(crate::ListedSubject {
+                uid: Some(principal_uid),
+                names: Vec::new(),
+                state: crate::SubjectState::Principal,
+            });
+            out.sort_by_key(|s| (s.uid.is_none(), s.uid));
+        }
+        Some(out)
     }
 
     /// The subjects the load this snapshot was compiled from could not bind as written.
@@ -1263,10 +1289,10 @@ mod tests {
         let snap = snap(&s);
         assert!(matches!(snap.loaded.roles, Roles::Graph(_)));
         let file = crate::tests::oracle::assemble(&s).unwrap();
-        assert_eq!(snap.subjects(), file.roles.as_subject_bindings());
-        assert!(snap.subjects().is_some());
+        assert_eq!(snap.subjects(0), file.roles.as_subject_bindings());
+        assert!(snap.subjects(0).is_some());
         let none = source(SHIPPED);
-        assert_eq!(super::tests::snap(&none).subjects(), None);
+        assert_eq!(super::tests::snap(&none).subjects(0), None);
         assert_eq!(snap.loaded.policy, *s.policy());
         assert_eq!(snap.loaded.action_grants, file.action_grants);
         assert_eq!(snap.loaded.destinations, file.destinations);

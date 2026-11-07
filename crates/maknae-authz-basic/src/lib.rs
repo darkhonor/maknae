@@ -933,30 +933,43 @@ fn tasker_names(load: &maknae_config::AgentsLoad) -> Vec<String> {
         .collect()
 }
 
+/// `admin` wins over every other role, by the account's name, a `uid:` entry or any
+/// name resolving to its uid.
 fn bound_role(
     bindings: &maknae_config::Bindings,
     resolved: &binding::Resolved,
     account: &str,
     uid: u32,
 ) -> Option<role::Role> {
-    if let Some(role) = maknae_config::bindings_conflict(bindings, account, uid) {
-        return role::Role::from_key(role);
+    let mut held: Vec<role::Role> = Vec::new();
+    for (key, entries) in bindings.roles.iter().flatten() {
+        let named = entries.iter().any(|e| match e {
+            maknae_config::BindingEntry::Name(n) => n == account,
+            maknae_config::BindingEntry::Uid(u) => *u == uid,
+        });
+        if named {
+            held.extend(role::Role::from_key(key));
+        }
     }
-    let by_uid = resolved
-        .subjects
-        .iter()
-        .find(|(u, _, _)| *u == uid)
-        .map(|(_, role, _)| *role);
-    match by_uid {
-        Some(role::Role::Adversary) => None,
-        Some(r @ (role::Role::Admin | role::Role::User | role::Role::Guest)) => Some(r),
-        None => resolved.problems.iter().find_map(|p| match p {
-            IdentityProblem::Unbound { uid: u, roles, .. } if *u == uid => {
-                roles.first().and_then(|r| role::Role::from_key(r))
+    held.extend(
+        resolved
+            .subjects
+            .iter()
+            .filter(|(u, _, _)| *u == uid)
+            .map(|(_, r, _)| *r),
+    );
+    for p in &resolved.problems {
+        if let IdentityProblem::Unbound { uid: u, roles, .. }
+        | IdentityProblem::Contained { uid: u, roles, .. } = p
+        {
+            if *u == uid {
+                held.extend(roles.iter().filter_map(|r| role::Role::from_key(r)));
             }
-            _ => None,
-        }),
+        }
     }
+    [role::Role::Admin, role::Role::User, role::Role::Guest]
+        .into_iter()
+        .find(|r| held.contains(r))
 }
 
 /// An account that passed every service-account check and is bound under `admin` is
@@ -1077,12 +1090,34 @@ fn enroll(
     Ok(out)
 }
 
-/// A live edit looks nothing up and can only drop an agent the new bindings name.
+/// A live edit looks nothing up and can only drop an agent the new bindings name. An
+/// enrollment ignored as `Bound` passed every account check, so `admin` refuses it too.
 fn rebound(
     mut kept: AgentOutcome,
     bindings: &maknae_config::Bindings,
     resolved: &binding::Resolved,
 ) -> Result<AgentOutcome, AuthzBasicError> {
+    for p in &kept.problems {
+        let IdentityProblem::AgentRefused {
+            agent,
+            uid,
+            why: AgentRefusal::Bound { .. },
+        } = p
+        else {
+            continue;
+        };
+        let Some(e) = kept
+            .load
+            .enrollments
+            .iter()
+            .find(|e| e.id.as_str() == agent)
+        else {
+            continue;
+        };
+        if let Some(role) = bound_role(bindings, resolved, &e.account, *uid) {
+            bound_refusal(&e.id, &e.account, role)?;
+        }
+    }
     let enrolled = std::mem::take(&mut kept.enrolled);
     for (id, (uid, account, role)) in enrolled {
         match bound_role(bindings, resolved, &account, uid) {
@@ -1443,7 +1478,7 @@ impl maknae_security::Authorizer for BasicAuthorizer {
     }
 
     fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
-        self.snapshot().subjects()
+        self.snapshot().subjects(self.current_principal().uid)
     }
 
     fn backend_name(&self) -> String {
@@ -2032,6 +2067,10 @@ mod tests {
                         })
                         .collect(),
                 )
+            }
+
+            pub(crate) fn explicit(&self) -> bool {
+                self.explicit
             }
 
             pub(crate) fn with_agents(mut self, agents: BTreeMap<u32, Role>) -> Self {
@@ -3479,7 +3518,7 @@ mod tests {
             state,
         };
         assert_eq!(
-            next.subject_entries().unwrap(),
+            next.subject_entries(principal().uid).unwrap(),
             [
                 e(Some(666), &["mallory"], SubjectState::CarriedForward),
                 e(Some(1000), &["alex"], SubjectState::Bound("admin")),
@@ -3496,7 +3535,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            compiled(&source_with(SHIPPED, None, &resolving)).subject_entries(),
+            compiled(&source_with(SHIPPED, None, &resolving)).subject_entries(principal().uid),
             None,
             "absent bindings enumerate nothing"
         );
@@ -3506,7 +3545,7 @@ mod tests {
                 Some("schema_version: 1\nbindings: {}\n"),
                 &resolving
             ))
-            .subject_entries(),
+            .subject_entries(principal().uid),
             Some(vec![])
         );
     }
@@ -3649,7 +3688,7 @@ mod tests {
             "'mallory' under adversary no longer resolves; uid 666 stays contained (carried forward); this overrides bob (admin), bobby (user)"
         );
         assert_eq!(
-            next.subject_entries().unwrap(),
+            next.subject_entries(principal().uid).unwrap(),
             [crate::ListedSubject {
                 uid: Some(666),
                 names: vec!["mallory".into(), "bob".into(), "bobby".into()],
@@ -3736,7 +3775,7 @@ mod tests {
             }]
         );
         assert_eq!(
-            next.subject_entries().unwrap(),
+            next.subject_entries(principal().uid).unwrap(),
             [
                 crate::ListedSubject {
                     uid: Some(1001),
@@ -3766,7 +3805,7 @@ mod tests {
             &[("alice", 1001), ("alicia", 1001)],
         ));
         assert_eq!(
-            first.subject_entries().unwrap(),
+            first.subject_entries(principal().uid).unwrap(),
             [crate::ListedSubject {
                 uid: Some(1001),
                 names: vec!["alice".into(), "alicia".into()],
@@ -4685,7 +4724,7 @@ mod tests {
         ));
         let principal_req = liveness_req(Some(501));
         for absent in [&missing, &no_key] {
-            assert_eq!(absent.subjects(), None);
+            assert_eq!(absent.subjects(501), None);
             let a = BasicAuthorizer::from_snapshot(
                 principal(),
                 paths(),
@@ -4694,7 +4733,7 @@ mod tests {
             );
             assert_eq!(a.decide_reporting_role(&principal_req).1, Some("admin"));
         }
-        assert_eq!(empty.subjects(), Some(vec![]));
+        assert_eq!(empty.subjects(501), Some(vec![]));
         let e = BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, empty);
         assert_eq!(e.decide_reporting_role(&principal_req).1, None);
     }
@@ -6139,7 +6178,7 @@ mod tests {
                     .unwrap()
                     .roles
                     .as_subject_bindings();
-                let snap = compiled(&src).subjects();
+                let snap = compiled(&src).subjects(principal().uid);
                 assert_eq!(oracle, snap, "{variant}");
                 seen.push(oracle.map(|v| v.len()));
             }
@@ -6800,6 +6839,60 @@ mod tests {
                 ))
                 .unwrap();
             assert_eq!(user.agent_uid("hobi"), None);
+            let then_admin = user.with_live_bindings(bound(
+                "schema_version: 1\nbindings:\n  admin: [\"root\", \"hobi-svc\"]\n",
+            ));
+            assert_eq!(then_admin.unwrap_err(), admin_refusal(), "user, then admin");
+        }
+
+        #[test]
+        fn a_live_edit_moving_a_load_bound_agent_to_admin_is_refused() {
+            let mut src = source(
+                Some("schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"hobi-svc\"]\n"),
+                &[("root", 0), ("hobi-svc", HOBI)],
+                load(vec![hobi()], &[]),
+            );
+            assert_eq!(src.agent_uid("hobi"), None);
+            src.set_account_lookup(unanswered_account);
+            let got = src.with_live_bindings(bound(
+                "schema_version: 1\nbindings:\n  admin: [\"root\", \"hobi-svc\"]\n",
+            ));
+            assert_eq!(got.unwrap_err(), admin_refusal());
+        }
+
+        #[test]
+        fn an_admin_binding_by_any_path_refuses_whatever_else_lists_the_account() {
+            for bindings in [
+                "schema_version: 1\nbindings:\n  user: [\"hobi-svc\"]\n  admin: [\"alias\"]\n",
+                "schema_version: 1\nbindings:\n  guest: [\"hobi-svc\"]\n  admin: [\"alias\"]\n",
+                "schema_version: 1\nbindings:\n  admin: [\"hobi-svc\"]\n  user: [\"alias\"]\n",
+                "schema_version: 1\nbindings:\n  user: [\"alias\"]\n  admin: [\"hobi-svc\"]\n",
+                "schema_version: 1\nbindings:\n  adversary: [\"hobi-svc\"]\n  admin: [\"alias\"]\n",
+            ] {
+                let got = try_source(
+                    SHIPPED,
+                    Some(bindings),
+                    &[("hobi-svc", HOBI), ("alias", HOBI)],
+                    load(vec![hobi()], &[]),
+                );
+                assert_eq!(got.unwrap_err(), admin_refusal(), "{bindings}");
+            }
+            let user_and_guest = source(
+                Some(
+                    "schema_version: 1\nbindings:\n  guest: [\"hobi-svc\"]\n  user: [\"alias\"]\n",
+                ),
+                &[("hobi-svc", HOBI), ("alias", HOBI)],
+                load(vec![hobi()], &[]),
+            );
+            assert_eq!(user_and_guest.agent_uid("hobi"), None);
+            assert_eq!(
+                user_and_guest
+                    .identity_problems()
+                    .iter()
+                    .filter(|p| matches!(p, IdentityProblem::AgentRefused { .. }))
+                    .collect::<Vec<_>>(),
+                [&refused("hobi", HOBI, AgentRefusal::Bound { role: "user" })]
+            );
         }
 
         #[test]
@@ -6839,33 +6932,49 @@ mod tests {
         fn the_subject_list_names_enrolled_agents_without_explicit_bindings() {
             let gone = enrollment("gone", "ghost-svc", 4040, AgentRole::User);
             let snap = compiled(&source(None, &[], load(vec![hobi(), gone], &[])));
+            assert!(!snap.has_explicit_bindings());
+            let binding = |role: &str, uid: u32| maknae_security::SubjectBinding {
+                role: role.into(),
+                members: vec![format!("uid:{uid}")],
+            };
             assert_eq!(
-                snap.subjects(),
-                Some(vec![maknae_security::SubjectBinding {
-                    role: "user".into(),
-                    members: vec!["uid:2001".into()],
-                }])
+                snap.subjects(501),
+                Some(vec![binding("admin", 501), binding("user", HOBI)])
             );
             assert_eq!(
-                snap.subject_entries(),
-                Some(vec![ListedSubject {
-                    uid: Some(HOBI),
-                    names: vec!["hobi-svc".into()],
-                    state: SubjectState::Bound("user"),
-                }])
+                snap.subject_entries(501),
+                Some(vec![
+                    ListedSubject {
+                        uid: Some(501),
+                        names: vec![],
+                        state: SubjectState::Principal,
+                    },
+                    ListedSubject {
+                        uid: Some(HOBI),
+                        names: vec!["hobi-svc".into()],
+                        state: SubjectState::Bound("user"),
+                    },
+                ])
             );
+            assert_eq!(snap.subjects(HOBI), Some(vec![binding("user", HOBI)]));
             assert_eq!(snap.agents(), [(HOBI, "hobi".to_string())].into());
+            let a = auth(&source(None, &[], load(vec![hobi()], &[])), 501);
+            assert_eq!(
+                maknae_security::Authorizer::subjects(&a),
+                Some(vec![binding("admin", 501), binding("user", HOBI)])
+            );
             let none = compiled(&source(None, &[], load(vec![], &[])));
-            assert_eq!(none.subjects(), None);
-            assert_eq!(none.subject_entries(), None);
+            assert_eq!(none.subjects(501), None);
+            assert_eq!(none.subject_entries(501), None);
             let explicit = compiled(&source(
                 Some(URSULA_USER),
                 &[("ursula", URSULA)],
                 load(vec![hobi()], &[]),
             ));
+            assert!(explicit.has_explicit_bindings());
             assert_eq!(
                 explicit
-                    .subject_entries()
+                    .subject_entries(501)
                     .unwrap()
                     .iter()
                     .map(|s| s.uid)

@@ -538,6 +538,8 @@ pub struct ListedSubject {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SubjectState {
     Bound(&'static str),
+    /// The enrolled principal, admin because `bindings.yaml` has no `bindings:` key.
+    Principal,
     Contained,
     CarriedForward,
     /// The roles its names are listed under; it holds none of them.
@@ -568,6 +570,14 @@ impl Roles {
             #[cfg(test)]
             Roles::File(r) => r.as_subject_bindings(),
             Roles::Graph(g) => g.as_subject_bindings(),
+        }
+    }
+
+    pub(crate) fn explicit(&self) -> bool {
+        match self {
+            #[cfg(test)]
+            Roles::File(r) => r.explicit(),
+            Roles::Graph(g) => g.explicit,
         }
     }
 

@@ -1032,6 +1032,9 @@ pub struct RoleBindingView {
     /// The enrolled agent's id, for a subject an agent runs as.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    /// The enrolled principal, admin because `bindings.yaml` has no `bindings:` key.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub principal: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1474,6 +1477,7 @@ mod tests {
                 label: String::new(),
                 state: String::new(),
                 agent: None,
+                principal: false,
             }
         );
         let entry = RoleBindingView {
@@ -1483,6 +1487,7 @@ mod tests {
             label: "uid 666 (mallory)".into(),
             state: "contained (carried forward)".into(),
             agent: None,
+            principal: false,
         };
         let mut new_bytes = Vec::new();
         ciborium::into_writer(&entry, &mut new_bytes).unwrap();
@@ -1498,13 +1503,21 @@ mod tests {
             !format!("{fields:?}").contains("agent"),
             "an absent agent is not written"
         );
+        assert!(
+            !format!("{fields:?}").contains("principal"),
+            "a non-principal is not marked"
+        );
         let agent = RoleBindingView {
             agent: Some("hobi".into()),
             ..entry.clone()
         };
+        let principal = RoleBindingView {
+            principal: true,
+            ..entry.clone()
+        };
         let r = Response {
             protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(Payload::SubjectList(vec![entry, agent])),
+            result: RespResult::Ok(Payload::SubjectList(vec![entry, agent, principal])),
         };
         assert_eq!(decode_response(&encode_response(&r).unwrap()).unwrap(), r);
     }

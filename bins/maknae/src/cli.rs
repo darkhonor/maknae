@@ -774,9 +774,10 @@ fn subject_table(entries: &[maknae_proto::RoleBindingView]) -> Vec<String> {
                 } else {
                     e.label.clone()
                 }),
-                terminal_safe(&match &e.agent {
-                    Some(a) => format!("{} (agent {a})", e.state),
-                    None => e.state.clone(),
+                terminal_safe(&match (&e.agent, e.principal) {
+                    (Some(a), _) => format!("{} (agent {a})", e.state),
+                    (None, true) => format!("{} (principal)", e.state),
+                    (None, false) => e.state.clone(),
                 }),
             ]
         })
@@ -1635,6 +1636,7 @@ mod tests {
             label: label.into(),
             state: state.into(),
             agent: None,
+            principal: false,
         }
     }
 
@@ -1686,6 +1688,16 @@ mod tests {
             subject_table(&[entry("user", &["uid:1", "uid:2"], None, "", "")]),
             ["UID  ROLE  SUBJECT       STATE", "-    user  uid:1, uid:2"],
             "an older daemon's per-role entry"
+        );
+    }
+
+    #[test]
+    fn the_principals_row_is_marked() {
+        let mut p = entry("admin", &[], Some(501), "uid 501", "bound admin");
+        p.principal = true;
+        assert_eq!(
+            subject_table(&[p])[1],
+            "501  admin  uid 501  bound admin (principal)"
         );
     }
 
