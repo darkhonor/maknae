@@ -1,6 +1,6 @@
 use crate::agent_enroll::AgentId;
 use crate::plane::Plane;
-use crate::verify::{agent_from_san, leaf_not_after, verify_uri_san, VerifyError};
+use crate::verify::{leaf_not_after, verify_san, verify_uri_san, VerifiedSan, VerifyError};
 use maknae_crypto::rustls::pki_types::CertificateDer;
 use maknae_crypto::tls::{PeerIdentity, PeerLeaf};
 use std::time::SystemTime;
@@ -80,12 +80,10 @@ pub(crate) fn decide(
         (PeerAuth::Certless, Some(_)) => Err(PeerAuthRefusal::UnexpectedClientCert),
         (PeerAuth::PlaneLeaf { .. }, None) => Err(PeerAuthRefusal::NoClientCert),
         (PeerAuth::PlaneLeaf { accept }, Some(leaf)) => {
-            let san = verify_uri_san(leaf.as_ref(), accept).map_err(PeerAuthRefusal::San)?;
-            match accept {
-                SanRule::Exact(_) => Ok(ChannelPeer::Certified(san)),
-                SanRule::Agent { trust_domain } => {
-                    let agent = agent_from_san(trust_domain, &san)
-                        .ok_or(PeerAuthRefusal::San(VerifyError::ParseError))?;
+            let verified = verify_san(leaf.as_ref(), accept).map_err(PeerAuthRefusal::San)?;
+            match verified {
+                VerifiedSan::Plane(san) => Ok(ChannelPeer::Certified(san)),
+                VerifiedSan::Agent { san, agent } => {
                     let not_after = leaf_not_after(leaf.as_ref()).map_err(PeerAuthRefusal::San)?;
                     Ok(ChannelPeer::Agent {
                         san,
