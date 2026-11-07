@@ -52,6 +52,17 @@ pub const SUBJECT_UID_KEY: &str = decide::SUBJECT_UID;
 /// Resource attribute key carrying the (already-resolved) filesystem path for
 /// `fs.*` actions (spec §4.4).
 pub const RESOURCE_PATH_KEY: &str = decide::RESOURCE_PATH;
+/// The conversation a request cites, as the kernel's store reported it (#170):
+/// its owner's uid, its state, and how the request's turns extend its chain.
+pub const RESOURCE_CONVERSATION_OWNER_KEY: &str = decide::RESOURCE_CONVERSATION_OWNER;
+pub const RESOURCE_CONVERSATION_STATE_KEY: &str = decide::RESOURCE_CONVERSATION_STATE;
+pub const RESOURCE_CONVERSATION_EXTENDS_KEY: &str = decide::RESOURCE_CONVERSATION_EXTENDS;
+pub const CONVERSATION_ACTIVE: &str = decide::CONVERSATION_ACTIVE;
+pub const CONVERSATION_UNKNOWN: &str = decide::CONVERSATION_UNKNOWN;
+pub const CONVERSATION_ERROR: &str = decide::CONVERSATION_ERROR;
+pub const EXTENDS_RETRY: &str = decide::EXTENDS_RETRY;
+pub const EXTENDS_ADVANCE: &str = decide::EXTENDS_ADVANCE;
+pub const EXTENDS_REWRITE: &str = decide::EXTENDS_REWRITE;
 
 /// Why loading or compiling the policy refused (all fail-closed; §3a). The
 /// daemon's boot gate (#77) surfaces this as a boot refusal, a reload as a

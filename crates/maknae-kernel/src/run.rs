@@ -1259,7 +1259,15 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     // parent contract: combine([guarded_decide]) + finalize. Timeout or join
     // failure converts AT THE CALL SITE to a Deny with its own reason
     // (finalize(Indeterminate) would hardcode a different string).
-    let sec_req = build_authz_request(&request.verb, peer_uid, None, lane, admitted.as_ref());
+    let sec_req = build_authz_request(
+        &request.verb,
+        peer_uid,
+        None,
+        lane,
+        admitted.as_ref(),
+        None,
+        None,
+    );
     let permitted_req = sec_req.clone();
     let authz_breaker = authz_decide_breaker();
     let authz_admission = { authz_breaker.lock().await.begin_attempt_at(Instant::now()) };
@@ -1448,7 +1456,11 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             close_bounded(&mut stream).await;
             return;
         }
-        Dispatch::NoBehaviour => {
+        Dispatch::NoBehaviour
+        | Dispatch::ConversationNewRequested
+        | Dispatch::ConversationCloseRequested
+        | Dispatch::ConversationListRequested
+        | Dispatch::ConversationDeleteRequested => {
             // Decided and PERMITTED above; the term simply has no behaviour.
             // Same audit-then-respond gate as every sibling path — the record
             // must be durable before any frame is released (ADR-0019).
@@ -1948,7 +1960,13 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         }
                     }
                 }
-                Dispatch::NoBehaviour | Dispatch::MutationRequested | Dispatch::PromptRequested => {
+                Dispatch::NoBehaviour
+                | Dispatch::MutationRequested
+                | Dispatch::PromptRequested
+                | Dispatch::ConversationNewRequested
+                | Dispatch::ConversationCloseRequested
+                | Dispatch::ConversationListRequested
+                | Dispatch::ConversationDeleteRequested => {
                     unreachable!("outer match routes unprepared operations")
                 }
             };
@@ -4893,6 +4911,8 @@ where
                     uid,
                     None,
                     maknae_security::Lane::Local,
+                    None,
+                    None,
                     None,
                 )
             };
@@ -8736,6 +8756,8 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             None,
             maknae_security::Lane::Local,
             None,
+            None,
+            None,
         );
         assert_eq!(
             pdp.decide(&req),
@@ -8820,6 +8842,8 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             None,
             maknae_security::Lane::Local,
             None,
+            None,
+            None,
         ))
     }
 
@@ -8869,6 +8893,8 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             7,
             None,
             maknae_security::Lane::Local,
+            None,
+            None,
             None,
         );
         assert_eq!(
@@ -13604,6 +13630,8 @@ mod reload_fixture {
                     None,
                     maknae_security::Lane::Local,
                     None,
+                    None,
+                    None,
                 ))
         }
 
@@ -13735,7 +13763,15 @@ mod reload_fixture {
 
         /// The request the accept loop builds for `verb` from `uid` on the local lane.
         pub(super) fn permitted_request(verb: &Verb, uid: u32) -> maknae_security::Request {
-            crate::handler::build_authz_request(verb, uid, None, maknae_security::Lane::Local, None)
+            crate::handler::build_authz_request(
+                verb,
+                uid,
+                None,
+                maknae_security::Lane::Local,
+                None,
+                None,
+                None,
+            )
         }
 
         fn next_session(&self) -> u64 {
@@ -13757,6 +13793,8 @@ mod reload_fixture {
                 uid,
                 None,
                 maknae_security::Lane::Local,
+                None,
+                None,
                 None,
             );
             req.action = maknae_security::Action(action.to_string());
@@ -15784,6 +15822,8 @@ mod reload_tests {
                 None,
                 maknae_security::Lane::Local,
                 None,
+                None,
+                None,
             ))
     }
 
@@ -17624,6 +17664,8 @@ mod reload_tests {
                 None,
                 maknae_security::Lane::Local,
                 None,
+                None,
+                None,
             ))
     }
 
@@ -19063,6 +19105,8 @@ mod reload_tests {
                     4242,
                     None,
                     maknae_security::Lane::Local,
+                    None,
+                    None,
                     None,
                 ),
             ),

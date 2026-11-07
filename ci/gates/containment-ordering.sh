@@ -147,7 +147,7 @@ if [ -n "$lib_lexed" ]; then
         }
       }
       rest = text; off = 0
-      split("decide_loaded_cited decide_loaded_with_role GRANTABLE_ACTIONS SUBJECT_UID RESOURCE_PATH Decided ActionGrants Grant DestinationGrants SubjectGrants SubjectEntry SubjectActionSet expand", names, " ")
+      split("decide_loaded_cited decide_loaded_with_role GRANTABLE_ACTIONS SUBJECT_UID RESOURCE_PATH Decided ActionGrants Grant DestinationGrants SubjectGrants SubjectEntry SubjectActionSet expand RESOURCE_CONVERSATION_OWNER RESOURCE_CONVERSATION_STATE RESOURCE_CONVERSATION_EXTENDS CONVERSATION_ACTIVE CONVERSATION_UNKNOWN CONVERSATION_ERROR EXTENDS_RETRY EXTENDS_ADVANCE EXTENDS_REWRITE", names, " ")
       for (k in names) allowed[tolower(names[k])] = 1
       while (match(rest, /(^|[^A-Za-z0-9_])decide::[A-Za-z_][A-Za-z0-9_]*/)) {
         name = substr(rest, RSTART, RLENGTH); sub(/^.*decide::/, "", name)

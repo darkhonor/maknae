@@ -28,6 +28,12 @@ pub(crate) const RESOURCE_MODEL: &str = "model";
 pub(crate) const RESOURCE_CONVERSATION_OWNER: &str = "conversation_owner";
 pub(crate) const RESOURCE_CONVERSATION_STATE: &str = "conversation_state";
 pub(crate) const RESOURCE_CONVERSATION_EXTENDS: &str = "conversation_extends";
+pub(crate) const CONVERSATION_ACTIVE: &str = "active";
+pub(crate) const CONVERSATION_UNKNOWN: &str = "unknown";
+pub(crate) const CONVERSATION_ERROR: &str = "error";
+pub(crate) const EXTENDS_RETRY: &str = "retry";
+pub(crate) const EXTENDS_ADVANCE: &str = "advance";
+pub(crate) const EXTENDS_REWRITE: &str = "rewrite";
 
 /// One loaded policy snapshot: the parsed grammar + validated bindings.
 pub(crate) struct LoadedPolicy {
@@ -393,13 +399,13 @@ fn conversation(req: &SecRequest, uid: u32) -> Option<Conversation> {
         _ => return None,
     };
     match state {
-        "active" => match attrs.get(RESOURCE_CONVERSATION_OWNER) {
+        CONVERSATION_ACTIVE => match attrs.get(RESOURCE_CONVERSATION_OWNER) {
             Some(AttrValue::Int(owner)) => Some(Conversation::Active {
                 owned: *owner == i64::from(uid),
             }),
             _ => None,
         },
-        "unknown" => Some(Conversation::Unknown),
+        CONVERSATION_UNKNOWN => Some(Conversation::Unknown),
         _ => None,
     }
 }
@@ -473,8 +479,8 @@ fn decide_prompt(
         None => return (Verdict::Indeterminate, None),
     }
     match req.resource.0.str(RESOURCE_CONVERSATION_EXTENDS) {
-        Some("retry" | "advance") => {}
-        Some("rewrite") => return refused("history rewrite refused"),
+        Some(EXTENDS_RETRY | EXTENDS_ADVANCE) => {}
+        Some(EXTENDS_REWRITE) => return refused("history rewrite refused"),
         _ => return (Verdict::Indeterminate, None),
     }
     let destination = match req.resource.0.get(RESOURCE_DESTINATION) {
