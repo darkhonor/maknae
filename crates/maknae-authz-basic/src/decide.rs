@@ -2743,7 +2743,6 @@ mod tests {
             .collect()
     }
 
-    /// The operator as admin, the sentinel in `role`, every part built by the real parser and validators.
     fn lp_subject(role: &str, subjects_block: &str) -> LoadedPolicy {
         let policy =
             maknae_config::parse_authz(&format!("{SUBJECT_SITE}{subjects_block}")).unwrap();
@@ -2868,13 +2867,57 @@ mod tests {
                 site(Effect::Deny, "Read(~/.ssh/**)")
             )
         );
-        assert!(matches!(
+        assert_eq!(
             ask("private/k"),
-            (Verdict::Deny { .. }, ref c) if *c == by_subject(Effect::Deny, "Read(~/private/**)")
-        ));
+            (
+                Verdict::Deny {
+                    reason: format!(
+                        "denied by subjects.{SENTINEL}.permissions entry Read(~/private/**)"
+                    )
+                },
+                by_subject(Effect::Deny, "Read(~/private/**)")
+            )
+        );
         assert_eq!(
             ask("notes"),
             (permit_with_audit(), by_subject(Effect::Allow, "Read(~/**)"))
+        );
+    }
+
+    #[test]
+    fn a_delete_tree_is_decided_by_the_subject_set() {
+        let delete_tree = |rel: &str| {
+            let mut r = fs_op(SENTINEL_UID, "fs.delete", rel);
+            r.context.0.insert(
+                maknae_security::CONTEXT_FS_OPERATION,
+                AttrValue::Str("delete-tree".into()),
+            );
+            r
+        };
+        let narrow = lp_subject(
+            "user",
+            &sentinel_entry("    permissions:\n      allow: [\"Read(~/notes/**)\"]\n"),
+        );
+        let refused = decide_loaded_cited(&narrow, &principal(), &delete_tree("x"));
+        assert!(
+            matches!(
+                maknae_security::finalize(refused.verdict.clone()),
+                maknae_security::Decision::Deny { .. }
+            ),
+            "the site Write(~/**) must not reach a subject with its own set: {refused:?}"
+        );
+        assert_eq!(refused.cited, None);
+        let covering = lp_subject(
+            "user",
+            &sentinel_entry("    permissions:\n      allow: [\"Write(~/scratch/**)\"]\n"),
+        );
+        let permitted = decide_loaded_cited(&covering, &principal(), &delete_tree("scratch/x"));
+        assert_eq!(
+            (permitted.verdict, permitted.cited),
+            (
+                permit_with_audit(),
+                by_subject(Effect::Allow, "Write(~/scratch/**)")
+            )
         );
     }
 
