@@ -246,8 +246,9 @@ mount (an AppRole login's entity alias is its RoleID). `maknae enroll agent` ref
 agent whose entity lacks that alias. `disabled` is not managed by Terraform
 (`ignore_changes`), so `maknae enroll agent` can toggle it. `maknae-enroll-agent` grants
 `read` and `update` on `identity/entity/name/maknae-agent-*` with
-`allowed_parameters = { "disabled" = [] }`: it can set `disabled` and nothing else (no
-policy, alias or metadata change).
+`allowed_parameters = { "disabled" = [] }`: it can write the `disabled` field and no other
+(no policy, alias or metadata change). Vault creates a missing entity on that write, so the
+grant can also create a `maknae-agent-*` entity, which holds no alias or policy and is inert.
 
 If an agent has already logged in before the alias was provisioned, Vault created an alias
 automatically (#558). Import it before the first apply so the explicit alias does not
