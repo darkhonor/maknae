@@ -65,10 +65,9 @@ pub fn destination_entry_is_acceptable(entry: &str) -> bool {
 }
 
 /// One role's action grants as they appear on disk (#162): the `allow` and
-/// `deny` lists under `roles.<name>`. **Raw strings, deliberately** —
-/// whether `"admin"` names a real role and whether `"admin.status"` names a
-/// real term are `maknae-authz-basic`'s questions, and answering them here
-/// would put policy semantics in the parser. This crate owns grammar.
+/// `deny` lists under `roles.<name>`, parsed to [`ActionPattern`]s. This crate
+/// owns the syntax; whether `"admin"` names a real role and whether a term or
+/// family exists are `maknae-authz-basic`'s questions.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct RawActionGrants {
     pub allow: Vec<ActionPattern>,
@@ -100,7 +99,7 @@ impl ActionPattern {
                 Err(bad())
             };
         }
-        if s.split('.').all(segment_ok) {
+        if s.contains('.') && s.split('.').all(segment_ok) {
             Ok(ActionPattern::Exact(s.to_string()))
         } else {
             Err(bad())
@@ -283,7 +282,7 @@ impl AuthzPolicy {
         }) {
             return Err(HomeUnbound);
         }
-        for list in &deny {
+        for list in deny.iter().flatten() {
             for (i, p) in list.patterns.iter().enumerate() {
                 if p.matches_req(req, home)? {
                     return Ok(Match3::DenyMatch {
@@ -292,7 +291,7 @@ impl AuthzPolicy {
                 }
             }
         }
-        for list in &allow {
+        for list in [&allow] {
             for (i, p) in list.patterns.iter().enumerate() {
                 if p.matches_req(req, home)? {
                     return Ok(Match3::AllowMatch {
@@ -307,31 +306,31 @@ impl AuthzPolicy {
     fn lists<'a>(
         &'a self,
         subject: Option<&'a SubjectPermissions>,
-    ) -> (Vec<SourcedList<'a>>, Vec<SourcedList<'a>>) {
+    ) -> ([Option<SourcedList<'a>>; 2], SourcedList<'a>) {
         let site_deny = SourcedList {
             patterns: &self.deny,
             sources: &self.deny_sources,
         };
         match subject {
             None => (
-                vec![site_deny],
-                vec![SourcedList {
+                [Some(site_deny), None],
+                SourcedList {
                     patterns: &self.allow,
                     sources: &self.allow_sources,
-                }],
+                },
             ),
             Some(s) => (
-                vec![
-                    site_deny,
-                    SourcedList {
+                [
+                    Some(site_deny),
+                    Some(SourcedList {
                         patterns: &s.deny,
                         sources: &s.deny_sources,
-                    },
+                    }),
                 ],
-                vec![SourcedList {
+                SourcedList {
                     patterns: &s.allow,
                     sources: &s.allow_sources,
-                }],
+                },
             ),
         }
     }
@@ -375,7 +374,7 @@ impl AuthzPolicy {
         ) {
             return Err(HomeUnbound);
         }
-        for list in &deny {
+        for list in deny.iter().flatten() {
             for (i, pattern) in list.patterns.iter().enumerate() {
                 if let Pattern::Write(glob) = pattern {
                     if glob.may_intersect_subtree(text, home)? {
@@ -386,7 +385,7 @@ impl AuthzPolicy {
                 }
             }
         }
-        for list in &allow {
+        for list in [&allow] {
             for (i, pattern) in list.patterns.iter().enumerate() {
                 if let Pattern::Write(glob) = pattern {
                     if glob.covers_subtree(text, home)? {
@@ -417,14 +416,15 @@ impl SourcedList<'_> {
 
 fn unbound_home(
     home: Option<&Path>,
-    deny: &[SourcedList<'_>],
-    allow: &[SourcedList<'_>],
+    deny: &[Option<SourcedList<'_>>; 2],
+    allow: &SourcedList<'_>,
     mut wants: impl FnMut(&Pattern) -> bool,
 ) -> bool {
     home.is_none()
         && deny
             .iter()
-            .chain(allow)
+            .flatten()
+            .chain([allow])
             .flat_map(|l| l.patterns)
             .any(&mut wants)
 }
@@ -3004,17 +3004,34 @@ mod tests {
 
     #[test]
     fn subjects_refuse_unknown_keys_at_each_level() {
-        for body in [
-            "subjects:\n  alice:\n    extra: {}\n",
-            "subjects:\n  alice:\n    actions:\n      deny: []\n",
-            "subjects:\n  alice:\n    permissions:\n      other: []\n",
-            "subjects:\n  alice:\n    models:\n      deny: []\n",
+        for (body, section, key) in [
+            (
+                "subjects:\n  alice:\n    extra: {}\n",
+                "authz.subjects.alice",
+                "extra",
+            ),
+            (
+                "subjects:\n  alice:\n    actions:\n      deny: []\n",
+                "authz.subjects.alice.actions",
+                "deny",
+            ),
+            (
+                "subjects:\n  alice:\n    permissions:\n      other: []\n",
+                "authz.subjects.alice.permissions",
+                "other",
+            ),
+            (
+                "subjects:\n  alice:\n    models:\n      deny: []\n",
+                "authz.subjects.alice.models",
+                "deny",
+            ),
         ] {
-            assert!(
-                matches!(
-                    subj(body),
-                    Err(AuthzError::Config(ConfigError::UnknownKey { .. }))
-                ),
+            assert_eq!(
+                subj(body),
+                Err(AuthzError::Config(ConfigError::UnknownKey {
+                    section: section.into(),
+                    key: key.into()
+                })),
                 "{body}"
             );
         }
@@ -3026,22 +3043,76 @@ mod tests {
             let r = subj(&format!(
                 "subjects:\n  alice:\n    models:\n      allow: [\"{m}\"]\n"
             ));
-            assert!(matches!(r, Err(AuthzError::Yaml(_))), "{m}: {r:?}");
+            assert_eq!(
+                r,
+                Err(AuthzError::Yaml(format!(
+                    "subjects: model `{m}` is not `<provider>/<model>`"
+                ))),
+                "{m}"
+            );
         }
         let r = subj("subjects:\n  alice:\n    permissions:\n      allow: [\"Read(rel)\"]\n");
-        assert!(matches!(r, Err(AuthzError::BadPattern(_))), "{r:?}");
+        assert_eq!(r, Err(AuthzError::BadPattern("rel".into())));
+        let r = subj("subjects:\n  alice:\n    permissions:\n      deny: [\"Exec(/x)\"]\n");
+        assert_eq!(r, Err(AuthzError::BadPattern("Exec(/x)".into())));
         let r = subj("subjects:\n  alice:\n    actions:\n      allow: [\"fs.*.x\"]\n");
-        assert!(matches!(r, Err(AuthzError::BadPattern(_))), "{r:?}");
-        for body in [
-            "subjects:\n  alice: [x]\n",
-            "subjects:\n  alice:\n",
-            "subjects: [alice]\n",
-            "subjects:\n  alice:\n    actions: [fs.read]\n",
-            "subjects:\n  alice:\n    models:\n      allow: x\n",
-            "subjects:\n  alice:\n    models:\n      allow: [1]\n",
+        assert_eq!(r, Err(AuthzError::BadPattern("fs.*.x".into())));
+        for (body, part) in [
+            ("subjects:\n  alice: [x]\n", "entry `alice` must be a map"),
+            ("subjects:\n  alice:\n", "entry `alice` must be a map"),
+            ("subjects: [alice]\n", "subjects section must be a map"),
+            (
+                "subjects:\n  alice:\n    actions: [fs.read]\n",
+                "`actions` for `alice` must be a map",
+            ),
+            (
+                "subjects:\n  alice:\n    models:\n      allow: x\n",
+                "models must be a sequence",
+            ),
+            (
+                "subjects:\n  alice:\n    models:\n      allow: [1]\n",
+                "models entries must be strings",
+            ),
+            (
+                "subjects:\n  alice:\n    permissions:\n      allow: x\n",
+                "permissions must be a sequence",
+            ),
         ] {
             let r = subj(body);
-            assert!(matches!(r, Err(AuthzError::Yaml(_))), "{body}: {r:?}");
+            assert!(
+                matches!(&r, Err(AuthzError::Yaml(m)) if m.contains(part)),
+                "{body}: {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_floored_unbound_home_check_chains_over_the_consulted_lists() {
+        let tilde = "Read(~/x/**)";
+        let abs = "Read(/srv/**)";
+        let req = Request::Read(Path::new("/srv/f"));
+        for (site_allow, site_deny, sub_allow, sub_deny, want) in [
+            (abs, abs, abs, tilde, Err(HomeUnbound)),
+            (abs, abs, tilde, abs, Err(HomeUnbound)),
+            (abs, tilde, abs, abs, Err(HomeUnbound)),
+            (
+                tilde,
+                abs,
+                abs,
+                abs,
+                Ok(Match3::DenyMatch { source: abs.into() }),
+            ),
+        ] {
+            let p = parse_authz(&format!(
+                "schema_version: 1\npermissions:\n  allow: [\"{site_allow}\"]\n  deny: [\"{site_deny}\"]\nsubjects:\n  alice:\n    permissions:\n      allow: [\"{sub_allow}\"]\n      deny: [\"{sub_deny}\"]\n"
+            ))
+            .unwrap();
+            let s = p.subjects["alice"].permissions.as_ref();
+            assert_eq!(
+                p.evaluate3_floored(s, &req, None),
+                want,
+                "{site_allow} {site_deny} {sub_allow} {sub_deny}"
+            );
         }
     }
 

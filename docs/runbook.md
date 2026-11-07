@@ -480,7 +480,7 @@ canonical-sorted — `maknae-audit-append/src/record.rs` — not declaration ord
 
 ### 7. Grants, destinations and subjects (`authz.yaml`)
 
-Three additive keys govern what a role may DO beyond the built-in rules. The packaged
+Three additive keys govern what a role, and with `subjects:` an individual account, may DO beyond the built-in rules. The packaged
 `authz.yaml` grants `admin` five terms and allowlists nothing: no prompt is permitted
 until you write a `destinations:` entry.
 
