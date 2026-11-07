@@ -100,6 +100,7 @@ where
 pub struct Published {
     problems: Arc<[IdentityProblem]>,
     subjects: Arc<[ListedSubject]>,
+    agents: Arc<BTreeMap<u32, String>>,
 }
 
 impl Published {
@@ -113,6 +114,7 @@ impl Published {
                 .chain(released)
                 .collect(),
             subjects: snapshot.subject_entries().unwrap_or_default().into(),
+            agents: Arc::new(snapshot.agents()),
         }
     }
 }
@@ -148,6 +150,10 @@ impl IdentityStatus {
 
     pub fn subjects(&self) -> Arc<[ListedSubject]> {
         self.get().subjects
+    }
+
+    pub fn agents(&self) -> Arc<BTreeMap<u32, String>> {
+        self.get().agents
     }
 
     /// How many published subjects are contained, carried forward included.
@@ -220,6 +226,7 @@ fn view(s: &ListedSubject, role: String, members: Vec<String>) -> RoleBindingVie
         uid: s.uid,
         label: label(s),
         state: state(s),
+        agent: None,
     }
 }
 
@@ -229,6 +236,7 @@ fn view(s: &ListedSubject, role: String, members: Vec<String>) -> RoleBindingVie
 pub fn subject_views(
     bindings: Vec<SubjectBinding>,
     listed: &[ListedSubject],
+    agents: &BTreeMap<u32, String>,
 ) -> Vec<RoleBindingView> {
     let mut out = Vec::new();
     for b in bindings {
@@ -252,6 +260,7 @@ pub fn subject_views(
                         },
                         role: b.role.clone(),
                         members: vec![m],
+                        agent: None,
                     }
                 }
             });
@@ -263,6 +272,9 @@ pub fn subject_views(
             role_of(s).unwrap_or_default().to_string(),
             Vec::new(),
         ));
+    }
+    for v in &mut out {
+        v.agent = v.uid.and_then(|u| agents.get(&u).cloned());
     }
     out.sort_by(|a, b| (a.uid.is_none(), a.uid, &a.label).cmp(&(b.uid.is_none(), b.uid, &b.label)));
     out
@@ -477,6 +489,7 @@ mod tests {
                 listed(None, &["e"], SubjectState::Unresolved("adversary")),
                 listed(Some(5), &[], SubjectState::Contained),
             ]),
+            agents: Default::default(),
         });
         assert_eq!(s.contained(), 3);
     }
@@ -490,6 +503,7 @@ mod tests {
         Published {
             problems: problems.into(),
             subjects: Arc::from(vec![listed(Some(1), &["a"], SubjectState::Bound("user"))]),
+            agents: Default::default(),
         }
     }
 
@@ -635,6 +649,7 @@ mod tests {
                 binding("adversary", &["uid:4242", "uid:666"]),
             ],
             &table,
+            &BTreeMap::new(),
         );
         let rows: Vec<Row> = got
             .iter()
@@ -698,6 +713,31 @@ mod tests {
     }
 
     #[test]
+    fn an_enrolled_agents_entry_carries_its_id() {
+        let table = [
+            listed(Some(1000), &["alex"], SubjectState::Bound("admin")),
+            listed(Some(2001), &["hobi-svc"], SubjectState::Bound("user")),
+        ];
+        let got = subject_views(
+            vec![
+                binding("admin", &["uid:1000"]),
+                binding("user", &["uid:2001"]),
+            ],
+            &table,
+            &[(2001, "hobi".to_string())].into(),
+        );
+        assert_eq!(
+            got.iter()
+                .map(|v| (v.uid, v.label.as_str(), v.agent.as_deref()))
+                .collect::<Vec<_>>(),
+            [
+                (Some(1000), "alex (uid 1000)", None),
+                (Some(2001), "hobi-svc (uid 2001)", Some("hobi")),
+            ]
+        );
+    }
+
+    #[test]
     fn a_member_the_load_does_not_describe_is_listed_from_the_binding_alone() {
         let table = [listed(Some(1000), &["alex"], SubjectState::Bound("user"))];
         let got = subject_views(
@@ -706,6 +746,7 @@ mod tests {
                 binding("adversary", &["uid:5"]),
             ],
             &table,
+            &BTreeMap::new(),
         );
         let rows: Vec<(Option<u32>, &str, &str)> = got
             .iter()
@@ -720,6 +761,6 @@ mod tests {
             ],
             "a role the load disagrees on is not described by it"
         );
-        assert!(subject_views(vec![], &[]).is_empty());
+        assert!(subject_views(vec![], &[], &BTreeMap::new()).is_empty());
     }
 }

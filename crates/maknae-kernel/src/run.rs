@@ -1637,14 +1637,14 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         }
                     };
                     match enumerated {
-                        Ok(b) => Payload::SubjectList(crate::identity_report::subject_views(
-                            b,
-                            &kernel_graph
-                                .as_ref()
-                                .as_ref()
-                                .map(|k| k.identity.subjects())
-                                .unwrap_or_default(),
-                        )),
+                        Ok(b) => {
+                            let identity = kernel_graph.as_ref().as_ref().map(|k| &k.identity);
+                            Payload::SubjectList(crate::identity_report::subject_views(
+                                b,
+                                &identity.map(|i| i.subjects()).unwrap_or_default(),
+                                &identity.map(|i| i.agents()).unwrap_or_default(),
+                            ))
+                        }
                         Err(why) => {
                             // A SECOND record, correcting the posture.
                             //
@@ -15922,6 +15922,54 @@ mod reload_tests {
     }
 
     #[tokio::test]
+    async fn the_subject_list_names_an_enrolled_agent_without_explicit_bindings() {
+        let fx = fixture("agents_listed", AUTHZ, None).await;
+        fx.baseline().set_hosts(maknae_authz_basic::HostLookups {
+            account: hobi_account,
+            daemons: no_daemons,
+            group: no_group,
+        });
+        for (id, account, uid) in [("hobi", "hobi-svc", 2001), ("gone", "ghost-svc", 4040)] {
+            let dir = fx.dir.join("agents").join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            for d in [fx.dir.join("agents"), dir.clone()] {
+                std::fs::set_permissions(
+                    &d,
+                    <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o750),
+                )
+                .unwrap();
+            }
+            write_0640(
+                &dir.join("enrollment.yaml"),
+                &format!("agent_id: {id}\naccount: {account}\nuid: {uid}\nrole: user\n"),
+            );
+        }
+        bounded(fx.reloader.run()).await.unwrap();
+        let views = crate::identity_report::subject_views(
+            fx.baseline().snapshot().subjects().unwrap(),
+            &fx.status.identity.subjects(),
+            &fx.status.identity.agents(),
+        );
+        assert_eq!(
+            views
+                .iter()
+                .map(|v| (
+                    v.uid,
+                    v.label.as_str(),
+                    v.state.as_str(),
+                    v.agent.as_deref()
+                ))
+                .collect::<Vec<_>>(),
+            [(
+                Some(2001),
+                "hobi-svc (uid 2001)",
+                "bound user",
+                Some("hobi")
+            )]
+        );
+    }
+
+    #[tokio::test]
     async fn a_contained_name_that_stops_resolving_is_carried_through_boot_and_reload() {
         let fx = fixture_seeded(
             "carried",
@@ -16355,7 +16403,11 @@ mod reload_tests {
         assert!(subjects
             .iter()
             .any(|b| b.role == "adversary" && b.members == ["uid:4242"]));
-        let views = crate::identity_report::subject_views(subjects, &fx.status.identity.subjects());
+        let views = crate::identity_report::subject_views(
+            subjects,
+            &fx.status.identity.subjects(),
+            &fx.status.identity.agents(),
+        );
         assert_eq!(
             views
                 .iter()

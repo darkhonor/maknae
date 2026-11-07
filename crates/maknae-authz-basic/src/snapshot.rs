@@ -106,6 +106,10 @@ impl Snapshot {
         self.loaded.taskers.0.get(agent).map(Option::as_ref)
     }
 
+    pub fn agents(&self) -> BTreeMap<u32, String> {
+        self.loaded.agents.0.clone()
+    }
+
     pub fn agent_of(&self, uid: u32) -> Option<&str> {
         self.loaded.agents.0.get(&uid).map(String::as_str)
     }

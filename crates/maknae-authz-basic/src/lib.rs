@@ -82,6 +82,8 @@ pub enum AuthzBasicError {
     DuplicateSubjectUid { uid: u32, names: (String, String) },
     /// A host lookup an enrollment or a `taskers:` entry needs failed.
     AgentLookup(String),
+    /// An agent's service account is bound to `admin` in `bindings.yaml`.
+    AgentAccountAdmin { agent: String, account: String },
     /// An enrolled agent's uid is also an `authz.yaml` `subjects:` entry.
     AgentPolicyTwice {
         agent: String,
@@ -128,6 +130,10 @@ impl std::fmt::Display for AuthzBasicError {
                 "authz subjects: `{a}` and `{b}` resolve to the same uid {uid}"
             ),
             AuthzBasicError::AgentLookup(m) => write!(f, "authz agents: {m}"),
+            AuthzBasicError::AgentAccountAdmin { agent, account } => write!(
+                f,
+                "authz agents: the service account {account} of agent `{agent}` is bound to admin in bindings.yaml; an agent never holds admin"
+            ),
             AuthzBasicError::AgentPolicyTwice {
                 agent,
                 account,
@@ -647,7 +653,7 @@ impl PolicySource {
         let mut subjects = validate_subjects(&policy, &lookups)?;
         let agents = match agents {
             Agents::Load(load) => enroll(load, hosts, &principal, &bindings, &resolved)?,
-            Agents::Kept(kept) => rebound(kept, &bindings, &resolved),
+            Agents::Kept(kept) => rebound(kept, &bindings, &resolved)?,
         };
         let agents = AgentOutcome {
             taskers: resolve_taskers(&agents.load, &lookups, &agents.enrolled),
@@ -932,9 +938,9 @@ fn bound_role(
     resolved: &binding::Resolved,
     account: &str,
     uid: u32,
-) -> Option<&'static str> {
+) -> Option<role::Role> {
     if let Some(role) = maknae_config::bindings_conflict(bindings, account, uid) {
-        return Some(role);
+        return role::Role::from_key(role);
     }
     let by_uid = resolved
         .subjects
@@ -943,11 +949,31 @@ fn bound_role(
         .map(|(_, role, _)| *role);
     match by_uid {
         Some(role::Role::Adversary) => None,
-        Some(r @ (role::Role::Admin | role::Role::User | role::Role::Guest)) => Some(r.key()),
+        Some(r @ (role::Role::Admin | role::Role::User | role::Role::Guest)) => Some(r),
         None => resolved.problems.iter().find_map(|p| match p {
-            IdentityProblem::Unbound { uid: u, roles, .. } if *u == uid => roles.first().copied(),
+            IdentityProblem::Unbound { uid: u, roles, .. } if *u == uid => {
+                roles.first().and_then(|r| role::Role::from_key(r))
+            }
             _ => None,
         }),
+    }
+}
+
+/// An account that passed every service-account check and is bound under `admin` is
+/// an agent's, so it refuses the load; under any other role the enrollment is ignored.
+fn bound_refusal(
+    id: &maknae_config::AgentId,
+    account: &str,
+    role: role::Role,
+) -> Result<AgentRefusal, AuthzBasicError> {
+    match role {
+        role::Role::Admin => Err(AuthzBasicError::AgentAccountAdmin {
+            agent: id.as_str().to_string(),
+            account: account.to_string(),
+        }),
+        role::Role::User | role::Role::Guest | role::Role::Adversary => {
+            Ok(AgentRefusal::Bound { role: role.key() })
+        }
     }
 }
 
@@ -1040,7 +1066,8 @@ fn enroll(
             continue;
         }
         if let Some(role) = bound_role(bindings, resolved, &e.account, e.uid) {
-            out.problems.push(refused(AgentRefusal::Bound { role }));
+            out.problems
+                .push(refused(bound_refusal(&e.id, &e.account, role)?));
             continue;
         }
         out.enrolled
@@ -1055,21 +1082,21 @@ fn rebound(
     mut kept: AgentOutcome,
     bindings: &maknae_config::Bindings,
     resolved: &binding::Resolved,
-) -> AgentOutcome {
+) -> Result<AgentOutcome, AuthzBasicError> {
     let enrolled = std::mem::take(&mut kept.enrolled);
     for (id, (uid, account, role)) in enrolled {
         match bound_role(bindings, resolved, &account, uid) {
             Some(bound) => kept.problems.push(IdentityProblem::AgentRefused {
                 agent: id.as_str().to_string(),
                 uid,
-                why: AgentRefusal::Bound { role: bound },
+                why: bound_refusal(&id, &account, bound)?,
             }),
             None => {
                 kept.enrolled.insert(id, (uid, account, role));
             }
         }
     }
-    kept
+    Ok(kept)
 }
 
 /// An absent account or an agent this load did not enroll is inert.
@@ -1979,7 +2006,7 @@ mod tests {
             pub(crate) fn as_subject_bindings(
                 &self,
             ) -> Option<Vec<maknae_security::SubjectBinding>> {
-                if !self.explicit {
+                if !self.explicit && self.agents.is_empty() {
                     return None;
                 }
                 let mut out: std::collections::BTreeMap<String, Vec<String>> = Default::default();
@@ -6688,7 +6715,7 @@ mod tests {
 
         #[test]
         fn a_bindings_entry_for_an_agent_other_than_adversary_ignores_the_enrollment() {
-            for role in ["admin", "user", "guest"] {
+            for role in ["user", "guest"] {
                 let bindings = format!("schema_version: 1\nbindings:\n  {role}: [\"hobi-svc\"]\n");
                 let src = source(
                     Some(&bindings),
@@ -6714,35 +6741,137 @@ mod tests {
         #[test]
         fn a_bindings_name_that_resolves_to_an_agents_uid_ignores_the_enrollment() {
             let src = source(
-                Some("schema_version: 1\nbindings:\n  admin: [\"alias\"]\n"),
+                Some("schema_version: 1\nbindings:\n  user: [\"alias\"]\n"),
                 &[("alias", HOBI)],
                 load(vec![hobi()], &[]),
             );
             assert_eq!(
                 src.identity_problems(),
-                [refused("hobi", HOBI, AgentRefusal::Bound { role: "admin" })]
+                [refused("hobi", HOBI, AgentRefusal::Bound { role: "user" })]
             );
             assert_eq!(compiled(&src).agent_uid("hobi"), None);
-            assert_eq!(role_of(&src, HOBI), Some("admin"));
+            assert_eq!(role_of(&src, HOBI), Some("user"));
+        }
+
+        fn admin_refusal() -> AuthzBasicError {
+            AuthzBasicError::AgentAccountAdmin {
+                agent: "hobi".into(),
+                account: "hobi-svc".into(),
+            }
+        }
+
+        #[test]
+        fn an_agent_service_account_bound_to_admin_refuses_the_load() {
+            for (bindings, uids) in [
+                (
+                    "schema_version: 1\nbindings:\n  admin: [\"hobi-svc\"]\n",
+                    &[("hobi-svc", HOBI)],
+                ),
+                (
+                    "schema_version: 1\nbindings:\n  admin: [\"alias\"]\n",
+                    &[("alias", HOBI)],
+                ),
+            ] {
+                let got = try_source(SHIPPED, Some(bindings), uids, load(vec![hobi()], &[]));
+                assert_eq!(got.unwrap_err(), admin_refusal(), "{bindings}");
+            }
+            assert_eq!(
+                admin_refusal().to_string(),
+                "authz agents: the service account hobi-svc of agent `hobi` is bound to admin in bindings.yaml; an agent never holds admin"
+            );
+        }
+
+        #[test]
+        fn a_live_edit_binding_an_agent_to_admin_is_refused() {
+            let mut src = source(
+                Some("schema_version: 1\nbindings:\n  admin: [\"root\"]\n"),
+                &[("root", 0), ("hobi-svc", HOBI)],
+                load(vec![hobi()], &[]),
+            );
+            assert_eq!(src.agent_uid("hobi"), Some(HOBI));
+            src.set_account_lookup(unanswered_account);
+            let got = src.with_live_bindings(bound(
+                "schema_version: 1\nbindings:\n  admin: [\"root\", \"hobi-svc\"]\n",
+            ));
+            assert_eq!(got.unwrap_err(), admin_refusal());
+            let user = src
+                .with_live_bindings(bound(
+                    "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"hobi-svc\"]\n",
+                ))
+                .unwrap();
+            assert_eq!(user.agent_uid("hobi"), None);
         }
 
         #[test]
         fn a_human_named_by_an_enrollment_is_not_locked_out() {
-            let src = source(
-                Some("schema_version: 1\nbindings:\n  user: [\"jin\"]\n"),
-                &[("jin", JIN)],
-                load(vec![enrollment("jin", "jin", JIN, AgentRole::Guest)], &[]),
+            for role in ["user", "admin"] {
+                let bindings = format!("schema_version: 1\nbindings:\n  {role}: [\"jin\"]\n");
+                let src = source(
+                    Some(&bindings),
+                    &[("jin", JIN)],
+                    load(vec![enrollment("jin", "jin", JIN, AgentRole::Guest)], &[]),
+                );
+                assert_eq!(
+                    src.identity_problems(),
+                    [refused(
+                        "jin",
+                        JIN,
+                        AgentRefusal::Account(AccountRefusal::MaknaeGroupMember)
+                    )],
+                    "{role}"
+                );
+                assert_eq!(compiled(&src).agent_uid("jin"), None, "{role}");
+                assert_eq!(role_of(&src, JIN), Some(role), "{role}");
+            }
+            let shelled = source(
+                Some("schema_version: 1\nbindings:\n  admin: [\"rm-svc\"]\n"),
+                &[("rm-svc", SHELLED)],
+                load(
+                    vec![enrollment("rm", "rm-svc", SHELLED, AgentRole::User)],
+                    &[],
+                ),
+            );
+            assert_eq!(role_of(&shelled, SHELLED), Some("admin"));
+            assert_eq!(shelled.agent_uid("rm"), None);
+        }
+
+        #[test]
+        fn the_subject_list_names_enrolled_agents_without_explicit_bindings() {
+            let gone = enrollment("gone", "ghost-svc", 4040, AgentRole::User);
+            let snap = compiled(&source(None, &[], load(vec![hobi(), gone], &[])));
+            assert_eq!(
+                snap.subjects(),
+                Some(vec![maknae_security::SubjectBinding {
+                    role: "user".into(),
+                    members: vec!["uid:2001".into()],
+                }])
             );
             assert_eq!(
-                src.identity_problems(),
-                [refused(
-                    "jin",
-                    JIN,
-                    AgentRefusal::Account(AccountRefusal::MaknaeGroupMember)
-                )]
+                snap.subject_entries(),
+                Some(vec![ListedSubject {
+                    uid: Some(HOBI),
+                    names: vec!["hobi-svc".into()],
+                    state: SubjectState::Bound("user"),
+                }])
             );
-            assert_eq!(compiled(&src).agent_uid("jin"), None);
-            assert_eq!(role_of(&src, JIN), Some("user"));
+            assert_eq!(snap.agents(), [(HOBI, "hobi".to_string())].into());
+            let none = compiled(&source(None, &[], load(vec![], &[])));
+            assert_eq!(none.subjects(), None);
+            assert_eq!(none.subject_entries(), None);
+            let explicit = compiled(&source(
+                Some(URSULA_USER),
+                &[("ursula", URSULA)],
+                load(vec![hobi()], &[]),
+            ));
+            assert_eq!(
+                explicit
+                    .subject_entries()
+                    .unwrap()
+                    .iter()
+                    .map(|s| s.uid)
+                    .collect::<Vec<_>>(),
+                [Some(URSULA), Some(HOBI)]
+            );
         }
 
         #[test]

@@ -386,12 +386,19 @@ impl GraphBindings {
             .map_or(Resolution::NoRole, Resolution::Role)
     }
 
+    fn listed(&self, subject: &maknae_graph::record::NodeRecord) -> bool {
+        self.explicit || self.graph.in_edges(subject.id, ENROLLS).next().is_some()
+    }
+
+    /// Without explicit bindings only enrolled agents are listed, and with none `None`.
     pub(crate) fn as_subject_bindings(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
-        if !self.explicit {
-            return None;
-        }
         let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for s in self.graph.nodes().iter().filter(|n| n.kind == SUBJECT) {
+        for s in self
+            .graph
+            .nodes()
+            .iter()
+            .filter(|n| n.kind == SUBJECT && self.listed(n))
+        {
             let role = if self.graph.out_edges(s.id, CONTAINED).next().is_some() {
                 Some(ADVERSARY.to_string())
             } else {
@@ -406,6 +413,9 @@ impl GraphBindings {
                 out.entry(role).or_default().push(s.key.clone());
             }
         }
+        if !self.explicit && out.is_empty() {
+            return None;
+        }
         Some(
             out.into_iter()
                 .map(|(role, mut members)| {
@@ -418,11 +428,13 @@ impl GraphBindings {
 
     /// Every subject the load named, bound or not; `None` when bindings are absent.
     pub(crate) fn entries(&self, problems: &[IdentityProblem]) -> Option<Vec<ListedSubject>> {
-        if !self.explicit {
-            return None;
-        }
         let mut out = Vec::new();
-        for s in self.graph.nodes().iter().filter(|n| n.kind == SUBJECT) {
+        for s in self
+            .graph
+            .nodes()
+            .iter()
+            .filter(|n| n.kind == SUBJECT && self.listed(n))
+        {
             let Some(maknae_graph::record::AttrValue::U64(uid)) = s.attrs.get(ATTR_UID) else {
                 continue;
             };
@@ -503,6 +515,9 @@ impl GraphBindings {
                 | IdentityProblem::AgentRefused { .. }
                 | IdentityProblem::AgentSkipped { .. } => continue,
             });
+        }
+        if !self.explicit && out.is_empty() {
+            return None;
         }
         out.sort_by(|a, b| {
             (a.uid.is_none(), a.uid, &a.names).cmp(&(b.uid.is_none(), b.uid, &b.names))
@@ -1156,7 +1171,18 @@ mod tests {
             assert_eq!(g.role_for(uid, principal), want, "{uid}");
             assert_eq!(file.role_for(uid, principal), want, "{uid}");
         }
-        assert_eq!(g.as_subject_bindings(), None);
+        let agents_only = Some(vec![
+            maknae_security::SubjectBinding {
+                role: "guest".into(),
+                members: vec!["uid:2002".into()],
+            },
+            maknae_security::SubjectBinding {
+                role: "user".into(),
+                members: vec!["uid:2001".into()],
+            },
+        ]);
+        assert_eq!(g.as_subject_bindings(), agents_only);
+        assert_eq!(file.as_subject_bindings(), agents_only);
     }
 
     #[test]

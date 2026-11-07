@@ -2023,6 +2023,7 @@ async fn a_granted_subject_list_reports_the_policy_file_bindings() {
                         uid: Some(0),
                         label: "root (uid 0)".into(),
                         state: "bound admin".into(),
+                        agent: None,
                     },
                     maknae_proto::RoleBindingView {
                         role: "user".into(),
@@ -2030,6 +2031,7 @@ async fn a_granted_subject_list_reports_the_policy_file_bindings() {
                         uid: None,
                         label: "no-such-user-maknae-496 (no account)".into(),
                         state: "unresolved (no account)".into(),
+                        agent: None,
                     },
                 ],
                 "root resolves to uid 0 and is reported by uid; the name with no \

@@ -1029,6 +1029,9 @@ pub struct RoleBindingView {
     /// `unresolved adversary (no account, not contained)`.
     #[serde(default)]
     pub state: String,
+    /// The enrolled agent's id, for a subject an agent runs as.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1470,6 +1473,7 @@ mod tests {
                 uid: None,
                 label: String::new(),
                 state: String::new(),
+                agent: None,
             }
         );
         let entry = RoleBindingView {
@@ -1478,6 +1482,7 @@ mod tests {
             uid: Some(666),
             label: "uid 666 (mallory)".into(),
             state: "contained (carried forward)".into(),
+            agent: None,
         };
         let mut new_bytes = Vec::new();
         ciborium::into_writer(&entry, &mut new_bytes).unwrap();
@@ -1486,9 +1491,20 @@ mod tests {
             (old.role.as_str(), old.members),
             ("adversary", vec!["uid:666".to_string()])
         );
+        let mut plain = Vec::new();
+        ciborium::into_writer(&entry, &mut plain).unwrap();
+        let fields: ciborium::Value = ciborium::from_reader(plain.as_slice()).unwrap();
+        assert!(
+            !format!("{fields:?}").contains("agent"),
+            "an absent agent is not written"
+        );
+        let agent = RoleBindingView {
+            agent: Some("hobi".into()),
+            ..entry.clone()
+        };
         let r = Response {
             protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(Payload::SubjectList(vec![entry])),
+            result: RespResult::Ok(Payload::SubjectList(vec![entry, agent])),
         };
         assert_eq!(decode_response(&encode_response(&r).unwrap()).unwrap(), r);
     }
