@@ -23,9 +23,10 @@ permissions:
     - "Write(~/.docker/config.json)"
     - "Write(~/.maknae/**)"
 
-# Per-account limits (#608, ADR-0032). An entry only narrows what the account's
-# role holds. Its permissions allow replaces the allow list above for that
-# account; the deny list above always applies. Uncomment and edit to use:
+# Per-account limits (#608, ADR-0032). An entry's actions and models only narrow
+# what the account's role holds. Its permissions allow replaces the allow list
+# above for that account and may reach paths that list does not cover; the deny
+# list above always applies. Uncomment and edit to use:
 #
 # subjects:
 #   notes-agent:

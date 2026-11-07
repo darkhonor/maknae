@@ -564,8 +564,11 @@ destinations:                # #172: per-role egress allowlist for session.promp
 - **When an edit applies.** `maknaed` decides from a snapshot of `authz.yaml` compiled at
   start; an edit applies at the next [reload](#reload-the-policy) or restart.
 
-Two worked `subjects:` entries. Each only narrows what the account's role already holds;
-neither grants anything. A HomeLab entry, written with family wildcards:
+Two worked `subjects:` entries. `actions` and `models` only narrow what the account's role
+holds, and neither entry grants an action its role lacks. `permissions.allow` replaces the
+site `allow` for that account, so it may reach paths the site `allow` does not cover; the
+site `deny` list still applies, and so do the account's own uid and gid. A HomeLab entry,
+written with family wildcards:
 
 ```yaml
 subjects:
@@ -586,8 +589,9 @@ subjects:
 ```
 
 `notes-agent` reads and writes `~/notes` only, may create directories there but never
-delete, and prompts only `local/llama`. The site `deny` list still applies under its own
-`allow`, so `~/.ssh` and the other credential paths stay out of reach. `fs.*` and
+delete, and prompts only `local/llama`, and only if its role is granted `session.prompt`
+and `provider:local` is in its role's `destinations:`. The site `deny` list still applies
+under its own `allow`, so `~/.ssh` and the other credential paths stay out of reach. `fs.*` and
 `session.*` also cover any action a later release adds to those families.
 
 An enterprise entry, written with exact terms so a new release adds nothing:

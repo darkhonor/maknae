@@ -23,7 +23,7 @@ The policy language also named actions only by exact term. A home user who wants
 - `actions: {allow, deny}` — action patterns (decision 2);
 - `models: {allow}` — `"<provider>/<model>"`, split on the first `/`.
 
-Unknown keys at any level refuse the load. The key is additive, so `schema_version` stays `1`, and roles stay compiled in: `subjects:` declares no role and binds none. An entry only narrows. It never grants an action the subject's role does not hold: `session.prompt` still needs the role's grant, and file actions still need `admin` or `user`. A policy that does not compile refuses boot and is refused on reload, which keeps the previous snapshot. *Failure it prevents:* without a per-account entry, the only narrower scope is another role, and roles are a fixed, structural set.
+Unknown keys at any level refuse the load. The key is additive, so `schema_version` stays `1`, and roles stay compiled in: `subjects:` declares no role and binds none. An entry's `actions` and `models` only narrow what the subject's role holds. Its `permissions.allow` replaces the site allow for that account (decision 4), so it may reach paths the site allow does not cover, bounded by the site deny floor and by what the account's uid and gid can reach. No key grants an action the subject's role does not hold: `session.prompt` still needs the role's grant, and file actions still need `admin` or `user`. A policy that does not compile refuses boot and is refused on reload, which keeps the previous snapshot. *Failure it prevents:* without a per-account entry, the only narrower scope is another role, and roles are a fixed, structural set.
 
 ### 2. Action patterns: an exact term or a family wildcard, everywhere policy names actions
 
@@ -35,7 +35,7 @@ A wildcard is expanded **at compile**, against the binary's compiled action voca
 
 `kernel` and `liveness` terms and families are refused in every list. `admin.whoami` is outside every subject limit, as `liveness` is: it is not in the action vocabulary, so an `actions:` list cannot name it and no list can revoke it. No subject limit can revoke it; which roles may ask is unchanged.
 
-In `roles:`, expansion keeps the existing role rule: a role may hold only what it could hold before (`user`: `session.prompt` only), so `user` with `admin.*` is refused at load exactly as `user` with `admin.status` is, and `admin` with `admin.*` expands to the seven grantable admin terms. `fs` terms stay ungrantable in roles, because paths decide file access. An error in `roles:` is reported as before, so the existing messages do not change.
+In `roles:`, expansion keeps the existing role rule: a role may hold only what it could hold before (`user`: `session.prompt` only), so `user` with `admin.*` and `user` with `admin.status` are both refused at load: the family, which expands to nothing `user` may hold, as an unknown term (`UnknownActionTerm`), and the exact term as not grantable to that role (`TermNotGrantableForRole`). `admin` with `admin.*` expands to the seven grantable admin terms. `fs` terms stay ungrantable in roles, because paths decide file access. An error in `roles:` is reported as before, so the existing messages do not change.
 
 ### 3. Deny beats allow, whatever the specificity
 

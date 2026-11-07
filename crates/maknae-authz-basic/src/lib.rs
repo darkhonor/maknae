@@ -4735,6 +4735,34 @@ mod tests {
         }
 
         #[test]
+        fn a_reload_whose_subjects_fail_keeps_the_installed_snapshot_deciding() {
+            const GRANT: &str = "roles:\n  admin:\n    allow: [\"admin.status\"]\n";
+            let fx = Fixture::new("subjfail");
+            let auth = fx.authorizer("admin");
+            write(
+                &fx.policy(),
+                &format!("{EMPTY}{GRANT}subjects:\n  root:\n    actions:\n      allow: [\"admin.status\"]\n"),
+            );
+            auth.reload_from_file().unwrap();
+            let status = admin_request(0, "admin.status");
+            let decided = auth.decide(&status);
+            assert!(matches!(decided, Verdict::Permit { .. }), "{decided:?}");
+            let before = auth.snapshot();
+            write(
+                &fx.policy(),
+                &format!(
+                    "{EMPTY}{GRANT}subjects:\n  root:\n    actions:\n      allow: [\"fs.read\", \"fs.exec\"]\n"
+                ),
+            );
+            assert_eq!(
+                auth.reload_from_file(),
+                Err(AuthzBasicError::UnknownAction("fs.exec".into()))
+            );
+            assert!(Arc::ptr_eq(&before, &auth.snapshot()));
+            assert_eq!(auth.decide(&status), decided);
+        }
+
+        #[test]
         fn trait_path_flips_only_at_reload() {
             let fx = Fixture::new("flip");
             let auth = fx.authorizer("admin");

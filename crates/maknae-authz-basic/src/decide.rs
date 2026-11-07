@@ -3071,7 +3071,8 @@ mod tests {
     }
 
     #[test]
-    fn an_off_list_model_entry_is_inert_and_an_entry_free_subject_is_not_asked_for_a_model() {
+    fn an_extra_model_entry_does_not_block_a_listed_model_and_an_entry_free_subject_is_not_asked_for_a_model(
+    ) {
         let lp = lp_subject(
             "user",
             &sentinel_entry("    models:\n      allow: [\"openai/gone\", \"openai/a\"]\n"),

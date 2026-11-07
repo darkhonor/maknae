@@ -876,6 +876,17 @@ fn subject_section<'a>(
     }
 }
 
+fn subject_name_fault(fault: crate::bindings::NameFault) -> String {
+    use crate::bindings::NameFault;
+    let why = match fault {
+        NameFault::Empty => "an empty account name restricts nobody; remove it",
+        NameFault::Colon => "an account name cannot contain ':'",
+        NameFault::Comma => "an account name cannot contain ','",
+        NameFault::Control => "an account name cannot contain a control character",
+    };
+    format!("subjects: {why}")
+}
+
 fn parse_subject(name: &str, body: &Value) -> Result<SubjectPolicy, AuthzError> {
     let Value::Map(body) = body else {
         return Err(AuthzError::Yaml(format!(
@@ -1098,6 +1109,9 @@ fn parse_policy(body: &str) -> Result<AuthzPolicy, AuthzError> {
         Some(Value::Map(sm)) => {
             let mut out = std::collections::BTreeMap::new();
             for (name, body) in sm {
+                if let Some(fault) = crate::bindings::name_fault(name) {
+                    return Err(AuthzError::Yaml(subject_name_fault(fault)));
+                }
                 out.insert(name.clone(), parse_subject(name, body)?);
             }
             out
@@ -3137,6 +3151,34 @@ mod tests {
                 "{body}: {r:?}"
             );
         }
+    }
+
+    fn assert_subject_key_refused(key: &str, part: &str) {
+        let r = subj(&format!("subjects:\n  {key}: {{}}\n"));
+        assert!(
+            matches!(&r, Err(AuthzError::Yaml(m)) if m.starts_with("subjects:") && m.contains(part)),
+            "{key}: {r:?}"
+        );
+    }
+
+    #[test]
+    fn subjects_refuse_an_empty_account_name() {
+        assert_subject_key_refused("\"\"", "empty");
+    }
+
+    #[test]
+    fn subjects_refuse_an_account_name_with_a_colon() {
+        assert_subject_key_refused("\"uid:7\"", "':'");
+    }
+
+    #[test]
+    fn subjects_refuse_an_account_name_with_a_comma() {
+        assert_subject_key_refused("\"a,b\"", "','");
+    }
+
+    #[test]
+    fn subjects_refuse_an_account_name_with_a_control_character() {
+        assert_subject_key_refused("\"a\\u001b[31m\"", "control");
     }
 
     #[test]
