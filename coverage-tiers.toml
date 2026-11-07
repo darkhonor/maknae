@@ -65,16 +65,13 @@ files = [
   # records, and what admin.status and admin.subject.list report for each subject;
   # a wrong arm hides a released containment or mislabels a contained subject.
   "crates/maknae-kernel/src/identity_report.rs",
-  # #115: the session facts each request is re-decided on. A wrong arm reads a
-  # logged-out, background or delegated-subtree process as a live login, or a
+  # #115: the account state each request is re-decided on. A wrong arm reads a
   # locked, expired or not-yet-valid account as active. The Varlink transport is varlink.rs (T2).
-  "crates/maknae-kernel/src/session_facts/logind.rs",
   "crates/maknae-kernel/src/session_facts/userdb.rs",
-  "crates/maknae-kernel/src/session_facts/macos_login.rs",
-  # #115: which host source answers each fact (mod.rs: an exited peer is a logout, a
-  # directory account is not checked, an unreadable passwd is unknown) and the gather
-  # that asks them as one bounded unit (session.rs). A wrong arm checks the wrong
-  # account, asks the login of the wrong user, or answers a stalled source as live.
+  # #115: which host source answers each fact (mod.rs: a directory account is not
+  # checked, an unreadable passwd is unknown) and the gather that asks them as one
+  # bounded unit (session.rs). A wrong arm checks the wrong account or answers a
+  # stalled source as answered.
   "crates/maknae-kernel/src/session_facts/mod.rs",
   "crates/maknae-kernel/src/session.rs",
   # The CBOR byte-string content codec (#77): a wrong major type halves the
@@ -83,7 +80,7 @@ files = [
   "crates/maknae-io/src/anchor.rs",
   # #596: the one "this user's home" translation, shared by the client and the kernel.
   "crates/maknae-io/src/home.rs",
-  # #115: the session-liveness facts; reading a refusal as absence would admit a logged-out user.
+  # #115: path presence; reading a refusal as absence misjudges the deployment-mode self-check.
   "crates/maknae-io/src/host_facts.rs",
   "crates/maknae-io/src/checks.rs",
   # ADR-0009 confinement: every line is a refusal path, and the failure mode is
@@ -179,10 +176,6 @@ files = [
   # peercred.rs because that one is whole-file mutation-excluded (syscall I/O),
   # which would make a T1 tier there vacuous — zero mutants, zero missed.
   "crates/maknae-vault/src/peer_identity.rs",
-  # #115: the peer-process handle's decisions (errno classification, the fallback's
-  # uid and liveness admission, the status parse), split from the whole-file
-  # mutation-excluded syscall wrappers in peer_process.rs.
-  "crates/maknae-vault/src/peer_process_rules.rs",
   # #240b: the provider request/response MAPPING, T1 by #240's own declaration.
   # Everything it parses is bytes from a third party outside the enforcement
   # boundary; a shape we do not recognise must be a refusal the loop sees, never
@@ -325,8 +318,6 @@ files = [
   # #490: whether a prepared audit trail carries the append-only flag; a false "yes" moves the trail to a file the daemon can rewrite.
   "crates/maknae-sys/src/flags.rs",
   "crates/maknae-sys/src/linux.rs",
-  # #115: the macOS login records; a wrong name or a wrong record type admits a logged-out user.
-  "crates/maknae-sys/src/utmpx.rs",
   # The kernel graph's schema and codec (#485): a wrong check loads a forged enforcement state.
   "crates/maknae-graph/src/bytes.rs",
   "crates/maknae-graph/src/format.rs",
@@ -676,10 +667,6 @@ path = "crates/maknae-vault/src/peercred.rs"
 why = "nix getsockopt peer-creds (Stage 2); syscall I/O, cross-platform"
 
 [[t3]]
-path = "crates/maknae-vault/src/peer_process.rs"
-why = "#115: the peer-process handle's syscalls (SO_PEERPIDFD, pidfd_open, the /proc status read, the pidfd poll, LOCAL_PEERTOKEN), whose reachable arms depend on the host kernel, like peercred.rs. Every decision they feed is in peer_process_rules.rs (T1); the wiring is proven by tests on el9 (fallback) and el10 (SO_PEERPIDFD)"
-
-[[t3]]
 path = "crates/maknae-vault/src/stream.rs"
 why = "PlaneListener/PlaneConnector/AuthenticatedStream (Stage 2); async I/O"
 
@@ -861,17 +848,6 @@ path = "crates/maknae-kernel/src/egress_socket.rs"
 anchor = "continue; // EAGAIN or EINTR: re-ask the budget"
 why = "the write-leg retry taken (EAGAIN after poll reported writable, or EINTR): not controllable through a real socket; the decision (`write_is_retried`) is proven on a table and the hard-error direction on the wire"
 
-# #115: pidfd liveness. The decisions are provoked for real (a live and an exited process).
-[[exception]]
-path = "crates/maknae-kernel/src/session_facts/logind.rs"
-anchor = "Err(Errno::EINTR) => continue,"
-why = "a zero-timeout poll interrupted by a signal: retried; cannot be provoked without a signal delivered mid-syscall"
-
-[[exception]]
-path = "crates/maknae-kernel/src/session_facts/logind.rs"
-anchor = "Err(_) => return false,"
-why = "poll on a borrowed, open pidfd cannot fail (a closed fd reports POLLNVAL, which is not alive); the fail-closed arm of an errno passthrough"
-
 # #115: the userdb Varlink transport (varlink.rs). Errno passthroughs with no decision.
 [[exception]]
 path = "crates/maknae-kernel/src/session_facts/varlink.rs"
@@ -896,21 +872,6 @@ env_bound = "target_os:macos"
 why = "the getattrlist FFI call (ADR-0027) compiles only on macOS, so the Linux CI lane has no regions for it. Its floor is enforced where coverage-tiers.sh runs on a macOS host (the opt-in pre-push hook and local runs); no CI lane enforces it. The parser it calls, reply.rs, is plain T1 and CI-enforced"
 
 [[env_bound_override]]
-path = "crates/maknae-sys/src/utmpx.rs"
-env_bound = "target_os:macos"
-why = "the getutxent FFI loop (ADR-0027) compiles only on macOS, so the Linux CI lane has no regions for it. Its floor is enforced where coverage-tiers.sh runs on a macOS host, as for macos.rs"
-
-[[env_bound_override]]
-path = "crates/maknae-vault/src/peer_process_rules.rs"
-env_bound = "target_os:linux"
-why = "the pidfd decisions exist only where pidfds do, so a macOS coverage run has no regions for it. The Linux CI lane enforces its floor"
-
-[[env_bound_override]]
-path = "crates/maknae-kernel/src/session_facts/logind.rs"
-env_bound = "target_os:linux"
-why = "logind and pidfds exist only on Linux, so a macOS coverage run has no regions for it. The Linux CI lane enforces its floor"
-
-[[env_bound_override]]
 path = "crates/maknae-kernel/src/session_facts/userdb.rs"
 env_bound = "target_os:linux"
 why = "systemd-userdbd and /etc/passwd locality are Linux account sources, so a macOS coverage run has no regions for it. The Linux CI lane enforces its floor"
@@ -919,11 +880,6 @@ why = "systemd-userdbd and /etc/passwd locality are Linux account sources, so a 
 path = "crates/maknae-kernel/src/session_facts/varlink.rs"
 env_bound = "target_os:linux"
 why = "the userdb transport is compiled only on Linux, so a macOS coverage run has no regions for it. The Linux CI lane enforces its floor"
-
-[[env_bound_override]]
-path = "crates/maknae-kernel/src/session_facts/macos_login.rs"
-env_bound = "target_os:macos"
-why = "the audit-token and utmpx login fact is macOS-only, so the Linux CI lane has no regions for it. Its floor is enforced where coverage-tiers.sh runs on a macOS host, as for maknae-sys's macos.rs"
 
 [[env_bound_override]]
 path = "crates/maknae-sys/src/linux.rs"
@@ -1044,17 +1000,6 @@ path = "crates/maknae-io/src/anchor.rs"
 anchor = "            Err(nix::errno::Errno::EINTR) => continue, // retry the probe"
 end_anchor = "                return Err(crate::checks::map_errno_no_disambiguation(probe_err, full))"
 why = "the one-byte size probe's EINTR retry and its read-error arm. EINTR needs signal delivery mid-syscall; the error arm needs a read to fail on an fd whose fill loop just succeeded, i.e. EIO on a healthy FS. Neither is provokable from a unit test without a seam. The DECISION this loop feeds — size_verdict — is covered in all four quadrants on every platform, and its production wiring by the procfs (grew) and sysfs (shrank) fixtures"
-
-[[exception]]
-path = "crates/maknae-io/src/host_facts.rs"
-anchor = "            Err(Errno::EINTR) => continue,"
-end_anchor = "            Err(e) => return Err(map_errno_no_disambiguation(e, path)),"
-why = "read_pseudo_file's read loop: EINTR needs signal delivery mid-syscall and a mid-read Err is EIO on a healthy FS; neither is provokable from a unit test without a seam. Both are pure control flow; the cap decision after the loop is covered by a_file_over_cap_is_refused and a_file_within_cap_reads_whole"
-
-[[exception]]
-path = "crates/maknae-io/src/host_facts.rs"
-anchor = "    let st = syscall::fstat(&fd).map_err(|e| map_errno_no_disambiguation(e, path))?;"
-why = "fstat on the fd openat just returned cannot fail on a healthy FS; a pure errno passthrough with no decision, as anchor.rs's same-shaped exception records"
 
 [[exception]]
 path = "crates/maknae-io/src/anchor.rs"
