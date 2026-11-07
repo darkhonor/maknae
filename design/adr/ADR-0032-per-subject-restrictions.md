@@ -29,11 +29,11 @@ Unknown keys at any level refuse the load. The key is additive, so `schema_versi
 
 An action entry is an exact term (`fs.read`, `session.prompt`, `admin.status`) or a family wildcard `<family>.*` (`fs.*`, `admin.*`, `session.*`, `terminal.*`, `mcp.*`). The families are the closed action-class vocabulary of `maknae-authz-basic`. A home user writes `fs.*`; an enterprise lists exact terms; both write the same language. The same patterns apply in a subject's `actions:` and in `roles.<role>.allow` and `deny`.
 
-A wildcard is expanded **at compile**, against the binary's compiled action vocabulary (the grantable terms plus `fs.read`, `fs.write`, `fs.delete` and `fs.mkdir`), so the decision path compares exact terms only, and each citation keeps the entry as written. A family with no members today (`terminal.*`, `mcp.*`) expands to nothing and is accepted.
+A wildcard is expanded **at compile**, against the binary's compiled action vocabulary (the grantable terms plus `fs.read`, `fs.write`, `fs.delete` and `fs.mkdir`), so the decision path compares exact terms only, and each citation keeps the entry as written. In a subject's `actions:`, a family with no members today (`terminal.*`, `mcp.*`) expands to nothing and is accepted. In `roles:`, a family that expands to nothing the role may hold is refused as an unknown term.
 
 **A wildcard covers the members a later binary adds to its family.** An enterprise that wants no such growth lists exact terms. *Failure it prevents:* a wildcard frozen at the terms that existed when the policy was written would silently stop matching the family it names, and a home policy would need editing at every release.
 
-`kernel` and `liveness` terms and families are refused in every list. `admin.whoami` is outside every subject limit, as `liveness` is: it is not in the action vocabulary, so an `actions:` list cannot name it and no list can revoke it. Every subject can always ask who it is.
+`kernel` and `liveness` terms and families are refused in every list. `admin.whoami` is outside every subject limit, as `liveness` is: it is not in the action vocabulary, so an `actions:` list cannot name it and no list can revoke it. No subject limit can revoke it; which roles may ask is unchanged.
 
 In `roles:`, expansion keeps the existing role rule: a role may hold only what it could hold before (`user`: `session.prompt` only), so `user` with `admin.*` is refused at load exactly as `user` with `admin.status` is, and `admin` with `admin.*` expands to the seven grantable admin terms. `fs` terms stay ungrantable in roles, because paths decide file access. An error in `roles:` is reported as before, so the existing messages do not change.
 

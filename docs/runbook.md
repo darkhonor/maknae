@@ -527,6 +527,42 @@ destinations:                # #172: per-role egress allowlist for session.promp
   reads "everything in fs except delete"). A wildcard also covers members a later release
   adds to its family; list exact terms to avoid that growth. `kernel`, `liveness` and
   `admin.whoami` cannot be named or limited.
+- **Separation of duties (recommended).** Bind the loop's account to `user`. An
+  admin-bound loop also holds the disclosure verbs, and a loop that has been injected can
+  quote `admin.config.show` into its next prompt; a `user`-bound loop cannot ask. The
+  single-account HomeLab shape collapses both roles into one person, and the trail still
+  names every destination, every intent and every outcome.
+- **What a prompt carries.** Text-only content blocks (any other kind is refused before
+  the decision, `BadRequest` on the wire) and a conversation id of at most 32 bytes in
+  `[A-Za-z0-9._-]`. The trail records the text's length and a 32-hex digest, never the text.
+- **Egress deputy and a Vault outage (#240b).** The deputy makes no Vault login and does
+  not contact Vault at start-up (`bins/maknae-egress/src/main.rs`): it reaches Vault only per turn, to
+  look up and unwrap the user's wrapping token. During an outage the user's own CLI
+  cannot mint its leaf or make its wrapped read of the key, so the turn fails before it
+  reaches the kernel. If Vault becomes unreachable after the CLI's read, the deputy's
+  lookup or unwrap fails, it answers refused-before-send, and `maknaed` records the turn's outcome
+  `egress.status:"Failed"`; the deputy's journal shows `OpenFailed(Vault)`. Nothing has
+  to be restarted when Vault returns.
+- **A permitted prompt, and where it goes (#240).** With providers authorized, a
+  permitted `session.prompt` is handed to the egress deputy over `egress.socket_path`
+  (§6.2 of the configuration reference) under `egress.deadline_ms`; the trail carries the
+  intent before the send and the outcome after it. With no providers authorized, the
+  kernel refuses the prompt at admission, reason
+  `no model access: no providers are authorized on this host`. Before the deputy's
+  socket exists, the prompt is refused with posture `unavailable` and reason
+  `egress backend not ready`. Either way the wire says `Unauthorized` like every
+  refusal — build state is never disclosed there. **The deputy's socket unit is
+  preset-disabled and nothing enables it for you:** `sudo systemctl enable --now
+  maknae-egress.socket`, or every permitted prompt is refused as not ready (enroll's
+  closing hint says so). The deputy keeps no key cache: each turn's key is read fresh
+  under the user's own login, so rotating a key in Vault needs no restart.
+- **Boot refuses when providers are authorized but the deputy cannot be found.**
+  `maknaed: refusing to start: providers are authorized but the egress deputy's account
+  '_maknae-egress' does not exist on this host` — the package creates the account; on a
+  source-built host create it (`packaging/common/maknae.sysusers`) before authorizing a
+  provider.
+- **When an edit applies.** `maknaed` decides from a snapshot of `authz.yaml` compiled at
+  start; an edit applies at the next [reload](#reload-the-policy) or restart.
 
 Two worked `subjects:` entries. Each only narrows what the account's role already holds;
 neither grants anything. A HomeLab entry, written with family wildcards:
@@ -578,43 +614,6 @@ subjects:
 is in its role's `destinations:`. An `actions:` entry is a complete list: an action in a
 limited family that its `allow` does not name is refused, so an entry with only `deny`
 refuses every limited action.
-
-- **Separation of duties (recommended).** Bind the loop's account to `user`. An
-  admin-bound loop also holds the disclosure verbs, and a loop that has been injected can
-  quote `admin.config.show` into its next prompt; a `user`-bound loop cannot ask. The
-  single-account HomeLab shape collapses both roles into one person, and the trail still
-  names every destination, every intent and every outcome.
-- **What a prompt carries.** Text-only content blocks (any other kind is refused before
-  the decision, `BadRequest` on the wire) and a conversation id of at most 32 bytes in
-  `[A-Za-z0-9._-]`. The trail records the text's length and a 32-hex digest, never the text.
-- **Egress deputy and a Vault outage (#240b).** The deputy makes no Vault login and does
-  not contact Vault at start-up (`bins/maknae-egress/src/main.rs`): it reaches Vault only per turn, to
-  look up and unwrap the user's wrapping token. During an outage the user's own CLI
-  cannot mint its leaf or make its wrapped read of the key, so the turn fails before it
-  reaches the kernel. If Vault becomes unreachable after the CLI's read, the deputy's
-  lookup or unwrap fails, it answers refused-before-send, and `maknaed` records the turn's outcome
-  `egress.status:"Failed"`; the deputy's journal shows `OpenFailed(Vault)`. Nothing has
-  to be restarted when Vault returns.
-- **A permitted prompt, and where it goes (#240).** With providers authorized, a
-  permitted `session.prompt` is handed to the egress deputy over `egress.socket_path`
-  (§6.2 of the configuration reference) under `egress.deadline_ms`; the trail carries the
-  intent before the send and the outcome after it. With no providers authorized, the
-  kernel refuses the prompt at admission, reason
-  `no model access: no providers are authorized on this host`. Before the deputy's
-  socket exists, the prompt is refused with posture `unavailable` and reason
-  `egress backend not ready`. Either way the wire says `Unauthorized` like every
-  refusal — build state is never disclosed there. **The deputy's socket unit is
-  preset-disabled and nothing enables it for you:** `sudo systemctl enable --now
-  maknae-egress.socket`, or every permitted prompt is refused as not ready (enroll's
-  closing hint says so). The deputy keeps no key cache: each turn's key is read fresh
-  under the user's own login, so rotating a key in Vault needs no restart.
-- **Boot refuses when providers are authorized but the deputy cannot be found.**
-  `maknaed: refusing to start: providers are authorized but the egress deputy's account
-  '_maknae-egress' does not exist on this host` — the package creates the account; on a
-  source-built host create it (`packaging/common/maknae.sysusers`) before authorizing a
-  provider.
-- **When an edit applies.** `maknaed` decides from a snapshot of `authz.yaml` compiled at
-  start; an edit applies at the next [reload](#reload-the-policy) or restart.
 
 ### What it proves
 
