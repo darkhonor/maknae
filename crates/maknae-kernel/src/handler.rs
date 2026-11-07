@@ -841,9 +841,8 @@ mod tests {
         );
         assert!(
             all_dispatch(&built),
-            "every grantable term must dispatch to a real arm — a grantable \
-             term with NoBehaviour is granted-but-unbuilt, which ADR-0010 \
-             defines out of existence"
+            "every grantable term other than session.task must dispatch to a \
+             real arm"
         );
         // The discriminator discriminates: a known ungrantable term has no
         // real arm, so the helper must say false — otherwise the assert above

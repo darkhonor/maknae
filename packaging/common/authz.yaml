@@ -44,9 +44,9 @@ permissions:
 #       allow:
 #         - "local/llama"
 
-# The administrative terms the enrolled administrator (`admin`) holds on a fresh
-# install: the basic operation of a single-user host (#490). Edit the list to
-# grant fewer or more; `admin.config.show` and `admin.contain` are grantable the same way.
+# The terms each role holds on a fresh install (#490, #609); `session.task` tasks an
+# enrolled agent and is refused until task delivery is built. Edit the lists to grant
+# fewer or more; `admin.config.show`, `admin.contain` and `session.prompt` are grantable too.
 roles:
   admin:
     allow:
