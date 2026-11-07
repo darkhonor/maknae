@@ -1993,6 +1993,23 @@ PYFIX
 expect_reject_because "config-disclosure-drift/nested-wire-struct-without-an-entry" \
   "SUBTREE" "$fx/ci/gates/config-disclosure-drift.sh"
 
+# A one-line struct variant carries fields, so it cannot be listed `unit`.
+fx="$(cfg_fixture "$CFG_OK")"
+python3 - "$fx" <<'PYFIX'
+import pathlib, sys
+root = pathlib.Path(sys.argv[1])
+w = root / "crates/maknae-proto/src/wire.rs"
+old = "    Containment(ContainmentView),\n"
+assert w.read_text().count(old) == 1
+w.write_text(w.read_text().replace(old, old + "    Token { secret: String },\n"))
+g = root / "ci/gates/config-disclosure-drift.sh"
+old = '  "Pong|unit"\n'
+assert g.read_text().count(old) == 1
+g.write_text(g.read_text().replace(old, old + '  "Token|unit"\n'))
+PYFIX
+expect_reject_because "config-disclosure-drift/one-line-struct-variant-is-not-unit" \
+  "is listed 'unit' but carries" "$fx/ci/gates/config-disclosure-drift.sh"
+
 
 # ACCEPT, against the REAL repo: each gate's reported examined-set is
 # CROSS-CHECKED against an independent derivation. Not a baked number -- a

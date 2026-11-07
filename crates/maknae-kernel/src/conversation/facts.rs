@@ -35,11 +35,7 @@ pub struct ConversationFacts {
     pub extends: Option<Extends>,
 }
 
-/// The facts the PDP decides a conversation-citing request on, read from the
-/// kernel's own store. `None` when the request cites nothing. A conversation the
-/// store does not hold is `Unknown` and names `requester` as its owner (the
-/// caller's peer-credential uid, never a client-supplied value). Any store or
-/// chain failure other than `NotFound` is `Error`, never `Unknown`.
+/// NotFound or an unparseable id → Unknown, owned by the requester; any other failure → Error.
 pub fn gather(
     store: &dyn ConversationStore,
     requester: u32,

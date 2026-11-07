@@ -300,10 +300,21 @@ payload_variants="$(awk '
       if (rest ~ /^[[:space:]]*\{$/) { sv=name; svop=""; next }
       op=""
       if (match(rest, /^\(.*\),?$/)) { op=substr(rest, 2, length(rest)-3) }
+      else if (match(rest, /^[[:space:]]*\{.*\},?$/)) {
+        op=rest
+        sub(/^[[:space:]]*\{[[:space:]]*/, "", op); sub(/[[:space:]]*\},?$/, "", op)
+        op="{ " op " }"
+      }
+      else if (rest !~ /^,?$/) { op="__UNPARSED__" rest }
       print name "\t" op
     }
   }
 ' "$WIRE_FILE")"
+unparsed="$(printf '%s\n' "$payload_variants" | awk -F'\t' 'index($2, "__UNPARSED__") == 1 {print $1}')"
+if [ -n "$unparsed" ]; then
+  echo "FAIL: Payload variant(s) whose operand this gate cannot read: $(echo $unparsed)"
+  exit 1
+fi
 listed_names="$(printf '%s\n' "${PAYLOAD_DISPOSITIONS[@]}" | cut -d'|' -f1 | sort)"
 actual_names="$(printf '%s\n' "$payload_variants" | cut -f1 | sort)"
 if [ "$listed_names" != "$actual_names" ]; then
