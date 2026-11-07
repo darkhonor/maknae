@@ -86,6 +86,9 @@ files = [
   # non-member as a maknae member or a failed group source as an empty one.
   "crates/maknae-io/src/account_facts.rs",
   "crates/maknae-kernel/src/membership.rs",
+  # #609: agent id, role, enrollment and policy parse, the agents/ loader and the
+  # service-account predicate; a wrong arm admits an admin-bound or human account.
+  "crates/maknae-config/src/agents.rs",
   # #115: path presence; reading a refusal as absence misjudges the deployment-mode self-check.
   "crates/maknae-io/src/host_facts.rs",
   "crates/maknae-io/src/checks.rs",

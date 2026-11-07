@@ -6,10 +6,7 @@ use clap::Args;
 use maknae_config::Value;
 use maknae_io::{AnchorRequired, FileOwner, IoError, IoKind, Mode, StrategyPref, TargetRequired};
 use maknae_msgs::{msg, Locale, MsgId};
-use maknae_vault::agent_enroll::{
-    AccountFacts, AgentId, BindCidrs, HostAccounts, DEFAULT_AGENT_APPROLE_MOUNT,
-    MAKNAE_DAEMON_ACCOUNTS,
-};
+use maknae_vault::agent_enroll::{AgentId, BindCidrs, HostAccounts, DEFAULT_AGENT_APPROLE_MOUNT};
 use std::path::{Path, PathBuf};
 use yaml_rust2::Yaml;
 use zeroize::Zeroizing;
@@ -717,42 +714,26 @@ fn check_account(
     host: &HostEnrollment,
     other_agents: &[(String, u32)],
 ) -> Result<u32, EnrollError> {
-    use nix::unistd::{Group, User};
-    let acct = User::from_name(&args.account)
+    let acct = match nix::unistd::User::from_name(&args.account)
         .map_err(|e| owner_error(&format!("user {}", args.account), e))?
-        .map(|u| AccountFacts {
-            name: u.name,
-            uid: u.uid.as_raw(),
-            primary_gid: u.gid.as_raw(),
-            shell: u.shell.to_string_lossy().into_owned(),
-        });
-    let maknae = Group::from_name("maknae")
-        .map_err(|e| owner_error("group maknae", e))?
+    {
+        Some(u) => maknae_io::host_account(u.uid.as_raw())
+            .map_err(|e| owner_error(&format!("user {}", args.account), format!("{e:?}")))?,
+        None => None,
+    };
+    let maknae_gid = maknae_io::group_gid(maknae_io::MAKNAE_GROUP)
+        .map_err(|e| owner_error("group maknae", format!("{e:?}")))?
         .ok_or_else(|| EnrollError::Owner("no maknae group".to_string()))?;
-    let mut daemon_uids = Vec::new();
-    let mut daemon_groups = Vec::new();
-    for name in MAKNAE_DAEMON_ACCOUNTS {
-        if let Some(uid) =
-            maknae_vault::account_uid(name).map_err(|e| owner_error(&format!("user {name}"), e))?
-        {
-            daemon_uids.push(uid);
-        }
-        if let Some(g) =
-            Group::from_name(name).map_err(|e| owner_error(&format!("group {name}"), e))?
-        {
-            daemon_groups.push((g.gid.as_raw(), g.mem));
-        }
-    }
+    let daemons = maknae_io::daemon_facts()
+        .map_err(|e| owner_error("Maknae daemon accounts", format!("{e:?}")))?;
     maknae_vault::agent_enroll::service_account_check(
         acct.as_ref(),
         &args.account,
         agent,
         &HostAccounts {
-            maknae_gid: maknae.gid.as_raw(),
-            maknae_members: &maknae.mem,
+            maknae_gid: Some(maknae_gid),
             principal_uid: host.principal_uid,
-            daemon_uids: &daemon_uids,
-            daemon_groups: &daemon_groups,
+            daemons: &daemons,
             other_agents,
         },
     )?;

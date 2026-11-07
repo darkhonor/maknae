@@ -340,6 +340,18 @@ impl From<maknae_vault::agent_enroll::AgentEnrollError> for EnrollError {
     }
 }
 
+impl From<maknae_vault::agent_enroll::InvalidAgentId> for EnrollError {
+    fn from(e: maknae_vault::agent_enroll::InvalidAgentId) -> Self {
+        EnrollError::Agent(e.into())
+    }
+}
+
+impl From<maknae_vault::agent_enroll::AccountRefusal> for EnrollError {
+    fn from(e: maknae_vault::agent_enroll::AccountRefusal) -> Self {
+        EnrollError::Agent(e.into())
+    }
+}
+
 impl From<maknae_seal::SealError> for EnrollError {
     fn from(e: maknae_seal::SealError) -> Self {
         EnrollError::Seal(e)

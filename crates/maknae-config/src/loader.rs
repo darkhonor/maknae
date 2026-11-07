@@ -74,7 +74,7 @@ pub(crate) fn read_secure_required(
 }
 
 #[cfg(unix)]
-fn map_io(e: maknae_io::IoError) -> ConfigError {
+pub(crate) fn map_io(e: maknae_io::IoError) -> ConfigError {
     match e {
         maknae_io::IoError::Symlink { path } => ConfigError::Symlink {
             path: path.display().to_string(),

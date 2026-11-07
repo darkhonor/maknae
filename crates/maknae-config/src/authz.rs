@@ -887,6 +887,10 @@ fn subject_name_fault(fault: crate::bindings::NameFault) -> String {
     format!("subjects: {why}")
 }
 
+pub fn parse_subject_entry(name: &str, body: &Value) -> Result<SubjectPolicy, AuthzError> {
+    parse_subject(name, body)
+}
+
 fn parse_subject(name: &str, body: &Value) -> Result<SubjectPolicy, AuthzError> {
     let Value::Map(body) = body else {
         return Err(AuthzError::Yaml(format!(
