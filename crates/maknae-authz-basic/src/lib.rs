@@ -2379,12 +2379,17 @@ mod tests {
             return None;
         }
         let (gl, wl) = (got.lines().count(), want.lines().count());
+        let got_lines = if gl == 1 {
+            "1 line".to_string()
+        } else {
+            format!("{gl} lines")
+        };
         Some(
             match got.lines().zip(want.lines()).enumerate().find(|(_, (g, w))| g != w) {
                 Some((i, (g, w))) => format!(
-                    "first difference at line {i} (got {gl} lines, expected {wl}):\n expected: {w}\n      got: {g}"
+                    "first difference at line {i} (got {got_lines}, expected {wl}):\n expected: {w}\n      got: {g}"
                 ),
-                None => format!("lines agree up to {}; got {gl} lines, expected {wl}", gl.min(wl)),
+                None => format!("lines agree up to {}; got {got_lines}, expected {wl}", gl.min(wl)),
             },
         )
     }
@@ -2400,7 +2405,7 @@ mod tests {
         let tail = first_difference("a\nb\nc\n", "a\nb\n").unwrap();
         assert_eq!(tail, "lines agree up to 2; got 3 lines, expected 2");
         let short = first_difference("a\n", "a\nb\n").unwrap();
-        assert_eq!(short, "lines agree up to 1; got 1 lines, expected 2");
+        assert_eq!(short, "lines agree up to 1; got 1 line, expected 2");
     }
 
     #[test]

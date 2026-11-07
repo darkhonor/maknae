@@ -332,11 +332,9 @@ fn no_rule_note(role_key: &str, action: &str) -> String {
     format!("role {role_key}: no rule for {action}")
 }
 
-/// The `session.prompt` arm (#172): the role's own action grant AND the
-/// kernel-resolved destination in the role's allowlist. Deny-overrides inside
-/// the role; an absent grant is an absence (finalize refuses once). An absent
-/// destination attribute means no provider is registered: a Deny the trail
-/// must show, not a policy gap.
+/// The `session.prompt` arm (#172, #608): the role's grant, the kernel-resolved
+/// destination in the role's allowlist, and, when the subject lists `models`, the
+/// admitted model in that list. A missing destination is a Deny, not a policy gap.
 fn decide_prompt(
     lp: &LoadedPolicy,
     req: &SecRequest,

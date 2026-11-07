@@ -676,6 +676,17 @@ mod tests {
                 .get("model")
                 .is_none()
         );
+        assert!(build_authz_request(
+            &Verb::Ping,
+            1002,
+            None,
+            maknae_security::Lane::Local,
+            Some(&admitted)
+        )
+        .resource
+        .0
+        .get("model")
+        .is_none());
     }
 
     #[test]
