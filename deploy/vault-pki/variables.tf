@@ -44,6 +44,17 @@ variable "leaf_ttl_seconds" {
   default     = 259200
 }
 
+variable "agent_leaf_ttl_seconds" {
+  type        = number
+  description = "Agent plane leaf cert ttl/max_ttl, in seconds. Default 1h. Must not exceed leaf_ttl_seconds."
+  default     = 3600
+
+  validation {
+    condition     = var.agent_leaf_ttl_seconds > 0 && var.agent_leaf_ttl_seconds <= var.leaf_ttl_seconds
+    error_message = "agent_leaf_ttl_seconds must be > 0 and <= leaf_ttl_seconds: the intermediate mount caps leaf TTLs and an agent leaf never outlives a plane leaf."
+  }
+}
+
 variable "token_period" {
   type        = number
   description = "Period for the `maknaed` daemon's PERIODIC token (ADR-0018): the token renews indefinitely as long as it is renewed within each period and is never force-expired by a max-TTL ceiling — only genuine Vault failure or revocation fails it closed. A shorter period tightens custody (a leaked/orphaned token dies sooner after the last renewal) at the cost of transient-outage tolerance; longer favors availability. Mirrors the retired 24h operational cadence as a renewable floor. Seconds. Default 24h."

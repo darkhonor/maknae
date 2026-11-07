@@ -52,6 +52,11 @@ The Rust plane-cert client (`maknae-vault`) and the TLS transport consume this P
   `maknae_agents`: the policy allows only a wrapped read of
   `<kv_mount>/data/<agent_prefix>/<id>/*`; the role issues a bounded, non-periodic token
   carrying that policy alone (see "Agent credentials").
+- **`maknae-agent-<id>` PKI role, entity and alias** (#609) — per agent: a client-only,
+  unstored plane-leaf role on the intermediate mount that admits only
+  `spiffe://<deployment_id>/plane/agent/<id>` (TTL `agent_leaf_ttl_seconds`, default 1h, at
+  most `leaf_ttl_seconds`), and an identity entity `maknae-agent-<id>` whose alias is the
+  role's RoleID on the agent mount.
 - **`maknae-admin-agent-credentials` policy** — what an administrator attaches to their own
   token to write agent credentials; it reaches nothing outside `<agent_prefix>`.
 - **`maknae-enroll-agent` policy** — what an operator attaches to their own token to run
@@ -231,8 +236,33 @@ on `.../role/+/secret-id`, and `update` on `.../role/+/secret-id-accessor/destro
 nothing else. `list` lets enrollment find and retire a SecretID that an interrupted earlier
 run minted but never recorded.
 
+### Agent identity and certificate (#609)
+
+Each agent's policy also lets it `update` `<int_mount>/sign/maknae-agent-<id>` and read
+`<int_mount>/issuer/default/json`. It grants nothing on any `revoke` path.
+
+`maknae-agent-<id>` is an identity entity with one alias: the agent's RoleID on the agent
+mount (an AppRole login's entity alias is its RoleID). `maknae enroll agent` refuses an
+agent whose entity lacks that alias. `disabled` is not managed by Terraform
+(`ignore_changes`), so `maknae enroll agent` can toggle it. `maknae-enroll-agent` grants
+`read` and `update` on `identity/entity/name/maknae-agent-*` with
+`allowed_parameters = { "disabled" = [] }`: it can set `disabled` and nothing else (no
+policy, alias or metadata change).
+
+If an agent has already logged in before the alias was provisioned, Vault created an alias
+automatically (#558). Import it before the first apply so the explicit alias does not
+collide:
+
+```sh
+terraform import 'vault_identity_entity_alias.agent["<id>"]' <alias id>
+```
+
+Revocation scope: disabling the entity makes Vault refuse that agent's existing tokens at
+once, and they end by `agent_token_max_ttl`. No lease prefix is used, because
+`revoke-prefix` on the agent mount would cover every agent.
+
 The separate mount keeps agent login leases off `maknaed`'s prefix. It does **not**
-separate one agent's leases from another's; per-agent revocation is #472.
+separate one agent's leases from another's; per-agent revocation is the entity `disabled` flag above.
 
 To write a credential, an administrator attaches `maknae-admin-agent-credentials` to an
 admin token, then writes the KV v2 data path directly (`read -s` keeps both secrets off the
