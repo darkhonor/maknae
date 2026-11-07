@@ -705,6 +705,9 @@ fn drop_vanished(layer: &mut IdentityLayer, compiled: &CompiledSet) -> Vec<u32> 
     layer
         .aliases
         .retain(|_, u| subjects.iter().any(|s| s.uid == *u && s.role == ADVERSARY));
+    layer
+        .agents
+        .retain(|_, u| subjects.iter().any(|s| s.uid == *u));
     drop.into_iter().map(|s| s.uid).collect()
 }
 
@@ -1373,6 +1376,38 @@ mod tests {
         };
         let (l, _) = migrated_layer(&stored, &file(), &persisted_compiled_set("UNOFFICIAL"));
         assert_eq!(l.aliases, [("keep".to_string(), 5)].into());
+    }
+
+    #[test]
+    fn a_vanished_subject_takes_its_agents_with_it() {
+        let stored = IdentityLayer {
+            subjects: vec![subject(0, "admin"), subject(5, "user"), subject(4, "gone")],
+            agents: [("kept", 5), ("orphan", 4)]
+                .map(|(n, u)| (n.to_string(), u))
+                .into(),
+            ..file()
+        };
+        let compiled = persisted_compiled_set("UNOFFICIAL");
+        let (l, unbound) = migrated_layer(&stored, &file(), &compiled);
+        assert_eq!(unbound, vec![4]);
+        assert_eq!(l.agents, [("kept".to_string(), 5)].into());
+        maknae_graph::identity::build(
+            &l,
+            None,
+            None,
+            &compiled,
+            [0; 32],
+            1,
+            maknae_graph::record::ProvenanceKind::Seed,
+        )
+        .unwrap();
+        assert_eq!(
+            maknae_graph::identity::agent_changes(&stored, &l),
+            [maknae_graph::identity::AgentChange::Removed {
+                agent: "orphan".into(),
+                uid: 4
+            }]
+        );
     }
 
     #[test]

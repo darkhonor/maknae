@@ -2144,6 +2144,55 @@ mod tests {
                 what: "more than one enrolls edge"
             })
         );
+        let with_agent = |key: &str, uid: Option<AttrValue>| {
+            rebuild(
+                &g,
+                |_| true,
+                vec![],
+                |n| {
+                    if n.id != agent.id {
+                        return n;
+                    }
+                    NodeRecord {
+                        key: key.into(),
+                        attrs: uid
+                            .clone()
+                            .map(|v| (ATTR_UID.to_string(), v))
+                            .into_iter()
+                            .collect(),
+                        ..n
+                    }
+                },
+            )
+            .unwrap()
+        };
+        let bad_uid = IdentityError::BadAttr {
+            node: agent.id.0,
+            attr: ATTR_UID,
+        };
+        for (key, uid, want) in [
+            (
+                crate::kernel::agent_key(""),
+                Some(AttrValue::U64(2001)),
+                IdentityError::Ambiguous {
+                    node: agent.id.0,
+                    what: "agent key without an id",
+                },
+            ),
+            (crate::kernel::agent_key("hobi"), None, bad_uid.clone()),
+            (
+                crate::kernel::agent_key("hobi"),
+                Some(AttrValue::Str("2001".into())),
+                bad_uid.clone(),
+            ),
+            (
+                crate::kernel::agent_key("hobi"),
+                Some(AttrValue::U64(u64::from(u32::MAX) + 1)),
+                bad_uid.clone(),
+            ),
+        ] {
+            assert_eq!(extract(&with_agent(&key, uid)), Err(want), "{key}");
+        }
         let hobi = g.lookup(crate::kernel::SUBJECT, "uid:2001").unwrap().id;
         let unbound = rebuild(&g, |e| !(e.kind == BINDS && e.from == hobi), vec![], |n| n).unwrap();
         assert_eq!(
