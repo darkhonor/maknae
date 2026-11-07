@@ -764,7 +764,7 @@ print(data["indirect"] or "")' "$embeds_file" 2>/dev/null)"; then
     while IFS= read -r feat; do
       [ -n "$feat" ] && extra_mutants_flags+=(--features "$feat")
     done < <(toml_mutants_features_for "$cname")
-    if [ "$cname" = "maknae-io" ] || [ "$cname" = "maknae-sys" ]; then
+    if [ "$cname" = "maknae-io" ] || [ "$cname" = "maknae-sys" ] || [ "$cname" = "maknae-kernel" ]; then
       if ! native_exclusion="$(bash "$here/mutation-platform.sh")"; then
         fail "cannot select native syscall mutants"; continue
       fi

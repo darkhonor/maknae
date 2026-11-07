@@ -68,11 +68,13 @@ files = [
   # #115: the account state each request is re-decided on. A wrong arm reads a
   # locked, expired or not-yet-valid account as active. The Varlink transport is varlink.rs (T2).
   "crates/maknae-kernel/src/session_facts/userdb.rs",
-  # #115: which host source answers each fact (mod.rs: a directory account is not
-  # checked, an unreadable passwd is unknown) and the gather that asks them as one
-  # bounded unit (session.rs). A wrong arm checks the wrong account or answers a
-  # stalled source as answered.
+  # #115: which host source answers each fact (host_account_linux.rs: a directory
+  # account is not checked, an unreadable passwd is unknown; host_account_macos.rs:
+  # macOS reads none) and the gather that asks them as one bounded unit (session.rs).
+  # A wrong arm checks the wrong account or answers a stalled source as answered.
   "crates/maknae-kernel/src/session_facts/mod.rs",
+  "crates/maknae-kernel/src/session_facts/host_account_linux.rs",
+  "crates/maknae-kernel/src/session_facts/host_account_macos.rs",
   "crates/maknae-kernel/src/session.rs",
   # The CBOR byte-string content codec (#77): a wrong major type halves the
   # read ceiling and mis-routes oversize; the visitor is a refusal surface.
@@ -875,6 +877,16 @@ why = "the getattrlist FFI call (ADR-0027) compiles only on macOS, so the Linux 
 path = "crates/maknae-kernel/src/session_facts/userdb.rs"
 env_bound = "target_os:linux"
 why = "systemd-userdbd and /etc/passwd locality are Linux account sources, so a macOS coverage run has no regions for it. The Linux CI lane enforces its floor"
+
+[[env_bound_override]]
+path = "crates/maknae-kernel/src/session_facts/host_account_linux.rs"
+env_bound = "target_os:linux"
+why = "the account-source choice for the Linux sources, compiled only on Linux, so a macOS coverage run has no regions for it. The Linux CI lane enforces its floor"
+
+[[env_bound_override]]
+path = "crates/maknae-kernel/src/session_facts/host_account_macos.rs"
+env_bound = "target_os:macos"
+why = "the macOS account answer (a stated gap) compiles only on macOS, so the Linux CI lane has no regions for it. Its floor is enforced where coverage-tiers.sh runs on a macOS host; no CI lane enforces it"
 
 [[env_bound_override]]
 path = "crates/maknae-kernel/src/session_facts/varlink.rs"
