@@ -3,7 +3,10 @@
 //! asserts the peer leaf carries EXACTLY the expected plane URI-SAN and nothing
 //! else. SAN extraction via `x509-parser` (webpki is verification-only and does not
 //! enumerate SANs — verified).
+use crate::agent_enroll::AgentId;
+use crate::agent_uri_san;
 use crate::peer_auth::SanRule;
+use std::time::{Duration, SystemTime};
 use x509_parser::extensions::{GeneralName, ParsedExtension};
 use x509_parser::prelude::*;
 
@@ -51,7 +54,26 @@ pub fn verify_uri_san(peer_cert_der: &[u8], rule: &SanRule) -> Result<String, Ve
     match (rule, uris.pop()) {
         (SanRule::Exact(want), Some(got)) if uris.is_empty() && got == *want => Ok(got),
         (SanRule::Exact(_), _) => Err(VerifyError::WrongSan { found: all_sans }),
+        (SanRule::Agent { trust_domain }, Some(got))
+            if uris.is_empty() && agent_from_san(trust_domain, &got).is_some() =>
+        {
+            Ok(got)
+        }
+        (SanRule::Agent { .. }, _) => Err(VerifyError::WrongSan { found: all_sans }),
     }
+}
+
+pub(crate) fn agent_from_san(trust_domain: &str, san: &str) -> Option<AgentId> {
+    let id = san.strip_prefix(&format!("spiffe://{trust_domain}/plane/agent/"))?;
+    let agent = AgentId::parse(id).ok()?;
+    (agent_uri_san(trust_domain, &agent) == san).then_some(agent)
+}
+
+pub fn leaf_not_after(der: &[u8]) -> Result<SystemTime, VerifyError> {
+    let (_, cert) = X509Certificate::from_der(der).map_err(|_| VerifyError::ParseError)?;
+    let secs = u64::try_from(cert.validity().not_after.timestamp())
+        .map_err(|_| VerifyError::ParseError)?;
+    Ok(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
 }
 
 #[cfg(test)]
@@ -150,6 +172,81 @@ mod tests {
             check(&der, Plane::Kernel, "dev-01"),
             Err(VerifyError::ExtraSans)
         );
+    }
+
+    fn agent_rule() -> SanRule {
+        SanRule::Agent {
+            trust_domain: "d".to_string(),
+        }
+    }
+
+    #[test]
+    fn the_agent_rule_accepts_an_agent_san_and_names_it() {
+        let der = leaf_with_uri_sans(&["spiffe://d/plane/agent/hobi.2_x-y"]);
+        assert_eq!(
+            verify_uri_san(&der, &agent_rule()),
+            Ok("spiffe://d/plane/agent/hobi.2_x-y".to_string())
+        );
+        let id = crate::agent_enroll::AgentId::parse("hobi").unwrap();
+        assert_eq!(
+            crate::agent_uri_san("d", &id),
+            "spiffe://d/plane/agent/hobi"
+        );
+    }
+
+    #[test]
+    fn the_agent_rule_refuses() {
+        for bad in [
+            "spiffe://d/plane/cli",
+            "spiffe://d/plane/kernel",
+            "spiffe://other/plane/agent/hobi",
+            "spiffe://d/plane/agent/",
+            "spiffe://d/plane/agent/HOBI",
+            "spiffe://d/plane/agent/a*",
+            "spiffe://d/plane/agent/hobi/x",
+            "spiffe://d/plane/agent/data",
+        ] {
+            let der = leaf_with_uri_sans(&[bad]);
+            assert!(
+                matches!(
+                    verify_uri_san(&der, &agent_rule()),
+                    Err(VerifyError::WrongSan { .. })
+                ),
+                "{bad}"
+            );
+        }
+        let der = cert_with_sans(vec![rcgen::SanType::DnsName("hobi".try_into().unwrap())]);
+        assert!(matches!(
+            verify_uri_san(&der, &agent_rule()),
+            Err(VerifyError::WrongSan { .. })
+        ));
+        let exact = SanRule::Exact("spiffe://d/plane/agent/hobi".to_string());
+        let der = leaf_with_uri_sans(&["spiffe://d/plane/cli"]);
+        assert!(verify_uri_san(&der, &exact).is_err());
+    }
+
+    #[test]
+    fn the_agent_rule_refuses_a_second_san() {
+        let der = leaf_with_uri_sans(&[
+            "spiffe://d/plane/agent/hobi",
+            "spiffe://d/plane/agent/other",
+        ]);
+        assert_eq!(
+            verify_uri_san(&der, &agent_rule()),
+            Err(VerifyError::ExtraSans)
+        );
+    }
+
+    #[test]
+    fn leaf_not_after_reads_the_validity() {
+        let mut params = rcgen::CertificateParams::new(vec![]).unwrap();
+        params.not_before = rcgen::date_time_ymd(2030, 1, 1);
+        params.not_after = rcgen::date_time_ymd(2031, 6, 7);
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+        let der = params.self_signed(&key).unwrap().der().to_vec();
+        let want = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_938_556_800);
+        assert_eq!(leaf_not_after(&der), Ok(want));
+        assert_eq!(leaf_not_after(b"junk"), Err(VerifyError::ParseError));
     }
 
     #[test]

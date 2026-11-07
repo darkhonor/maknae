@@ -149,7 +149,7 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
 
 pub fn peer_san(peer: &ChannelPeer) -> Option<&str> {
     match peer {
-        ChannelPeer::Certified(san) => Some(san),
+        ChannelPeer::Certified(san) | ChannelPeer::Agent { san, .. } => Some(san),
         ChannelPeer::Certless => None,
     }
 }
@@ -981,6 +981,16 @@ mod tests {
             Some("spiffe://d/plane/cli")
         );
         assert_eq!(peer_san(&ChannelPeer::Certless), None);
+    }
+
+    #[test]
+    fn peer_san_names_an_agent_peer() {
+        let peer = ChannelPeer::Agent {
+            san: "spiffe://d/plane/agent/hobi".to_string(),
+            agent: maknae_vault::agent_enroll::AgentId::parse("hobi").unwrap(),
+            not_after: std::time::UNIX_EPOCH,
+        };
+        assert_eq!(peer_san(&peer), Some("spiffe://d/plane/agent/hobi"));
     }
 
     #[test]

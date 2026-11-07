@@ -82,7 +82,7 @@ pub use password_line::{PasswordFeed, PasswordLine};
 pub use peer_auth::{ChannelPeer, PeerAuth, SanRule};
 pub use peer_identity::{creds_match_listener_uid, creds_match_uid, listener_uid_is, peer_uid_is};
 pub use peercred::PeerCreds;
-pub use plane::Plane;
+pub use plane::{agent_uri_san, Plane};
 pub use refusal::crypto_refusal_message;
 pub use seal_key_io::read_egress_seal_key;
 #[cfg(unix)]
@@ -124,7 +124,7 @@ pub use user_login::{
     MAX_USERNAME_BYTES,
 };
 pub use vault_api::{VaultApi, VAULT_API_TIMEOUT};
-pub use verify::{verify_uri_san, VerifyError};
+pub use verify::{leaf_not_after, verify_uri_san, VerifyError};
 pub use wrap::{
     aad_parts, kv_data_path, AadParts, KvDataPath, WrapExpectation, WrapLookup, WrappedSecret,
     WrappingToken, MAX_KV_DATA_PATH_BYTES, MAX_WRAP_TTL, USER_KEY_WRAP_TTL,
