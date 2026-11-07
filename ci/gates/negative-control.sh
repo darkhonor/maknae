@@ -6097,6 +6097,73 @@ printf '#[allow(unsafe_code)]\nunsafe fn one() -> u8 {\n    1\n}\n\n#[allow(unsa
 expect_reject_because "unsafe-lint/an-in-source-allow-of-a-forbidden-lint-is-refused" \
   "incompatible with previous forbid" ul_clippy "$ul_allow"
 
+# #170: each conversation decision, removed, turns its own tests red. One copy of
+# the tracked tree, built into the shared target so only workspace crates rebuild;
+# each mutant is applied, tested and reverted in that copy.
+if command -v cargo >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+  cv_root="$(cd "$here/../.." && pwd)"
+  cv_ws="$(mktemp -d -p "$NC_TMP")"
+  ( cd "$cv_root" && git ls-files -z | tar --null -T - -cf - ) | tar -xf - -C "$cv_ws"
+  cv_target="${CARGO_TARGET_DIR:-$cv_root/target}"
+  cv_suite() { # <crate> <filter> — FAIL when the filtered suite goes red
+    local out
+    if out="$(cd "$cv_ws" && CARGO_TARGET_DIR="$cv_target" cargo test --quiet --locked --offline -p "$1" --lib -- "$2" 2>&1)"; then
+      echo "conversation-suite: $1 $2 green"
+    elif grep -q "test result: FAILED" <<<"$out"; then
+      grep -E '^    [a-z_:]+$' <<<"$out" || true
+      echo "FAIL: $1 $2 went red"; return 1
+    else
+      printf '%s\n' "$out"; echo "conversation-suite: $1 did not build"; return 2
+    fi
+  }
+  cv_mutant() { # <file> <old> <new> <crate> <filter>
+    local f="$cv_ws/$1" rc=0
+    cp "$f" "$f.orig"
+    if ! python3 -c 'import sys
+p, old, new = sys.argv[1:4]
+s = open(p).read()
+if s.count(old) != 1:
+    sys.exit(1)
+open(p, "w").write(s.replace(old, new))' "$f" "$2" "$3"; then
+      mv "$f.orig" "$f"; echo "conversation-suite: mutation site not found in $1"; return 3
+    fi
+    cv_suite "$4" "$5" || rc=$?
+    mv "$f.orig" "$f"
+    return "$rc"
+  }
+  CHAIN=crates/maknae-kernel/src/conversation/chain.rs
+  expect_accept "conversation/kernel-chain-suite-is-green" "conversation-suite: maknae-kernel" \
+    cv_suite maknae-kernel conversation::chain
+  expect_reject_because "conversation/extends-without-the-prefix-check-goes-red" \
+    "extends_classifies_retry_advance_and_rewrite" cv_mutant "$CHAIN" \
+    '    if advance(&ChainHead::genesis(id), prefix)? != *rec_head {
+        return Ok(Extends::Rewrite);
+    }
+' '    let _ = (advance(&ChainHead::genesis(id), prefix)?, rec_head);
+' maknae-kernel conversation::chain
+  expect_reject_because "conversation/extends-without-the-last-reply-comparison-goes-red" \
+    "extends_classifies_retry_advance_and_rewrite" cv_mutant "$CHAIN" \
+    '            if assistant_digest(first)?.as_ref() != Some(bound) {
+                return Ok(Extends::Rewrite);
+            }
+' '            let _ = (assistant_digest(first)?, bound);
+' maknae-kernel conversation::chain
+  expect_accept "conversation/authz-session-suite-is-green" "conversation-suite: maknae-authz-basic" \
+    cv_suite maknae-authz-basic prompt_but_not_new
+  expect_reject_because "conversation/close-without-the-owner-comparison-goes-red" \
+    "close_and_delete_are_owner_only" cv_mutant crates/maknae-authz-basic/src/decide.rs \
+    '        ("session.close", Some(Conversation::Active { owned: true }))
+' '        ("session.close", Some(Conversation::Active { .. }))
+' maknae-authz-basic close_and_delete_are_owner_only
+  expect_reject_because "conversation/load-without-the-prompt-new-pairing-goes-red" \
+    "a_role_with_prompt_but_not_new_refuses_at_load" cv_mutant crates/maknae-authz-basic/src/lib.rs \
+    '    if holds("session.prompt") && !holds("session.new") {' \
+    '    if false && holds("session.prompt") && !holds("session.new") {' \
+    maknae-authz-basic prompt_but_not_new
+else
+  skipped=$((skipped+6))
+fi
+
 # The skip count is REPORTED, because `$total` is environment-dependent: probes
 # that need `cargo-auditable`, and the root-guarded ones, drop out silently and
 # a bare `N/N` then looks identical to a full run. CONTRIBUTING tells readers to
