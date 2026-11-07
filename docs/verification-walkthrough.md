@@ -1,6 +1,6 @@
 # Verification walkthrough
 
-This page is for a verification event: an assessor at the keyboard, with the administrator beside them, checking that one user's model access and key stay apart from another's (C1 to C10), and that every client session is re-checked against the host (C11 to C16). Each claim below names the control that enforces it, the command that shows it, and what the command prints, copied from the code. Each claim also has a **Measured** line. It cites existing evidence or the named tests, or it says "not yet measured". Nothing on this page has been run end to end as one session.
+This page is for a verification event: an assessor at the keyboard, with the administrator beside them, checking that one user's model access and key stay apart from another's (C1 to C10), and that every client session is re-checked against the host (C11 to C15). Each claim below names the control that enforces it, the command that shows it, and what the command prints, copied from the code. Each claim also has a **Measured** line. It cites existing evidence or the named tests, or it says "not yet measured". Nothing on this page has been run end to end as one session.
 
 Controls are cited two ways. A pair such as `cli_b × key_a` is a cell of the isolation matrix: a subject (`cli_a`, `cli_b`, `agentd`, `kernel`, `egress`, `vault`, `model`) against an object (`key_a`, `key_b`, `wrap`, `sealed`, `prompt`, `meta`). A step label in code type, such as `open the seal under this request's AAD`, names a step of the credential-path sequence diagram. Both diagrams are in `design/diagrams/`.
 
@@ -16,12 +16,11 @@ Controls are cited two ways. A pair such as `cli_b × key_a` is a cell of the is
 | C8 | Revoking B's token stops B's next run and leaves A unaffected | not yet measured |
 | C9 | Withdrawing a user's model access takes host authority, not their `providers.yaml` | not yet measured |
 | C10 | Seal-key rotation fails closed until restart | yes, on Rocky 10.2; on macOS 26.6.2 without the deputy's log line |
-| C11 | A process left behind by a logout is refused | by tests; not yet measured on a host |
-| C12 | Removing a user from `maknae` refuses their next request | by tests; not yet measured on a host |
-| C13 | An expired local account is refused | by tests; not yet measured on a host |
-| C14 | A connection handed to another uid is refused (Linux) | by tests; not yet measured on a host |
-| C15 | A `deployment.mode` the host contradicts does not run | by tests; not yet measured on a host |
-| C16 | `deployment.mode: container` binds no client socket | by tests; not yet measured on a host |
+| C11 | Removing a user from `maknae` refuses their next request | by tests; not yet measured on a host |
+| C12 | An expired local account is refused | by tests; not yet measured on a host |
+| C13 | A connection handed to another uid is refused (Linux) | by tests; not yet measured on a host |
+| C14 | A `deployment.mode` the host contradicts does not run | by tests; not yet measured on a host |
+| C15 | `deployment.mode: container` binds no client socket | by tests; not yet measured on a host |
 
 ## Before you start
 
@@ -29,7 +28,7 @@ Controls are cited two ways. A pair such as `cli_b × key_a` is a cell of the is
 
 - listed in Terraform's `maknae_users` with a password set ([step 1](first-provider.md#1-create-the-user-in-vault));
 - bound in `/etc/maknae/bindings.yaml` to a role that `/etc/maknae/authz.yaml` grants `session.prompt` and `provider:openai` (step 4a, part 3);
-- logged in, each in their own login session ([U1](first-provider.md#u1-log-in));
+- logged in to Vault with `maknae login` ([U1](first-provider.md#u1-log-in));
 - holding their own key at subpath `openai`, field `api_key` ([U2](first-provider.md#u2-store-your-key-in-vault));
 - holding their own `~/.maknae/providers.yaml` with one entry for `openai` and `gpt-5.6-luna` ([U3](first-provider.md#u3-choose-your-provider)).
 
@@ -355,9 +354,9 @@ maknae-egress: connection refused: OpenFailed(Seal)
 
 **Measured.** 2026-10-02 on Rocky 10.2 (`.42`): after `enroll --rotate-seal-key`, the prompt was refused, with the journal showing `OpenFailed(Seal)` and the trail `deny` `send failed`, `Failed`. After `systemctl try-restart maknae-egress.service`, the prompt got the reply `Hi there`. On macOS 26.6.2 (Wrathion): after `enroll --rotate-seal-key`, the prompt was refused, with the trail status `Failed`, `send failed`. After `launchctl kickstart -k system/io.maknae.maknae-egress`, the prompt got the reply `Hi there`. The `OpenFailed(Seal)` line in `maknae-egress.err` on macOS: not yet measured.
 
-## Session checks (C11 to C16)
+## Session checks (C11 to C15)
 
-These use B, logged in over SSH. The administrator's audit query for them:
+These use B, with a shell open on the host. The administrator's audit query for them:
 
 ```bash
 sudo jq -c 'select(.event=="connection" or .event=="session" or (.event=="request" and .outcome.result=="deny")) | {ts, event, action, session: .session_id, user: .subject.user, result: .outcome.result, reason: .outcome.reason}' /var/log/maknae/audit.jsonl | tail -n 6
@@ -365,26 +364,7 @@ sudo jq -c 'select(.event=="connection" or .event=="session" or (.event=="reques
 
 A refusal at connect gets no answer, so the CLI exits non-zero without a daemon reply. A refusal at a request prints `maknae: daemon refused: Unauthorized: not authorized`. The reason is only in the trail ([runbook, Session checks](runbook.md#session-checks)).
 
-## C11. A process left behind by a logout is refused
-
-**Claim.** A process whose login session has ended is refused, even though its uid is enrolled.
-
-**Control.** ADR-0006 decision 4 (iii), T11: the connecting process's own logind session must be `CLASS=user` and `active` or `online`; on macOS the audit session and a `utmpx` record or the console. Tests: `a_logged_out_process_is_refused_at_the_request`, `a_closing_record_is_not_active`, `a_process_outside_a_session_scope_has_no_session` (`crates/maknae-kernel`).
-
-**Command.** As B, over SSH, with no other login for B on the host:
-
-```bash
-nohup sh -c 'sleep 30; maknae ping' > /tmp/maknae-c11.out 2>&1 &
-exit
-```
-
-After 30 seconds, log in again and read `/tmp/maknae-c11.out`.
-
-**Expected.** The file shows a failure, not `pong`. The trail has a `connection` / `connect` record for B with `"result":"deny"`, `"reason":"logout"`. The CLI reads B's stored login before it connects; if that read fails once B's session has ended, no record is written and the run does not count. On macOS, a GUI or second SSH login for B would let it through (the uid-scoped residual in ADR-0006 decision 4).
-
-**Measured.** Not yet measured.
-
-## C12. Removing a user from `maknae` refuses their next request
+## C11. Removing a user from `maknae` refuses their next request
 
 **Claim.** Group membership is read at every connect and every request, so de-enrollment needs no new login to take effect.
 
@@ -402,7 +382,7 @@ Then the administrator adds B back (`sudo usermod -aG maknae <B>`; macOS: `sudo 
 
 **Measured.** Not yet measured.
 
-## C13. An expired local account is refused
+## C12. An expired local account is refused
 
 **Claim.** On Linux with `deployment.account_source: userdb`, a local account `systemd-userdbd` reports expired, locked or not yet valid is refused.
 
@@ -420,7 +400,7 @@ Then the administrator restores it: `sudo chage -E -1 <B>`.
 
 **Measured.** Not yet measured.
 
-## C14. A connection handed to another uid is refused (Linux)
+## C13. A connection handed to another uid is refused (Linux)
 
 **Claim.** Bytes written over a connection by any process other than the one that connected are refused; passing the descriptor carries no identity.
 
@@ -431,7 +411,7 @@ Then the administrator restores it: `sudo chage -E -1 <B>`.
 ```bash
 python3 -c '
 import os, socket
-p = "/tmp/maknae-c14.sock"
+p = "/tmp/maknae-c13.sock"
 s = socket.socket(socket.AF_UNIX); s.bind(p); os.chmod(p, 0o777); s.listen(1)
 c, _ = s.accept()
 _, fds, _, _ = socket.recv_fds(c, 1, 1)
@@ -445,18 +425,18 @@ A, in another shell, connects to the daemon and hands B the connection:
 python3 -c '
 import socket, time
 d = socket.socket(socket.AF_UNIX); d.connect("/run/maknae/maknaed.sock")
-c = socket.socket(socket.AF_UNIX); c.connect("/tmp/maknae-c14.sock")
+c = socket.socket(socket.AF_UNIX); c.connect("/tmp/maknae-c13.sock")
 socket.send_fds(c, [b"x"], [d.fileno()]); time.sleep(10)
 '
 ```
 
-Remove `/tmp/maknae-c14.sock` afterwards.
+Remove `/tmp/maknae-c13.sock` afterwards.
 
 **Expected.** The trail has a `connection` / `connect` deny for A's uid with `"reason":"sender-mismatch"`. macOS has no per-message sender credentials; there the record reads `tls handshake failed`, and the residual is bounded by the visit clock (ADR-0006 decision 4).
 
 **Measured.** Not yet measured.
 
-## C15. A `deployment.mode` the host contradicts does not run
+## C14. A `deployment.mode` the host contradicts does not run
 
 **Claim.** The daemon verifies its declared mode against the host at every start and never runs a mode the host contradicts.
 
@@ -468,13 +448,13 @@ Remove `/tmp/maknae-c14.sock` afterwards.
 
 **Measured.** Not yet measured.
 
-## C16. `deployment.mode: container` binds no client socket
+## C15. `deployment.mode: container` binds no client socket
 
 **Claim.** In container mode there is no client socket to reach, so a shell inside the container has nothing to connect to.
 
 **Control.** ADR-0006 decision 4 §Platform scope, T12. Test: `only_a_container_binds_no_client_listener` (`crates/maknae-kernel/src/deployment.rs`).
 
-**Command.** On a Linux test host, the administrator gives the unit a corroborating marker with `sudo systemctl edit maknaed` (`[Service]` and `Environment=container=c16`), sets `mode: container` and removes the `account_source` line under `deployment:`, restarts `maknaed`, and runs `maknae ping` as A. Then removes the drop-in, restores `mode: linux-host` and the `account_source` line as it was (`userdb` or `none`) and restarts.
+**Command.** On a Linux test host, the administrator gives the unit a corroborating marker with `sudo systemctl edit maknaed` (`[Service]` and `Environment=container=c15`), sets `mode: container` and removes the `account_source` line under `deployment:`, restarts `maknaed`, and runs `maknae ping` as A. Then removes the drop-in, restores `mode: linux-host` and the `account_source` line as it was (`userdb` or `none`) and restarts.
 
 **Expected.** The journal has `maknaed: deployment.mode is container; no client listener is bound`, `/run/maknae/maknaed.sock` does not exist, and `maknae ping` fails to connect. The daemon writes no record for the attempt: there is nothing daemon-side to refuse it.
 

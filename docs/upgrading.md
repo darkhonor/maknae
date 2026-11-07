@@ -6,7 +6,7 @@ Each release that needs an action from you lists it here, newest first. Read eve
 
 ## Session checks and the `deployment` section (#115)
 
-`maknaed` now re-checks every connection and every request against the host: `maknae`-group membership, a live login session of the connecting process, and on Linux the local account's state and the sender of every message ([runbook](runbook.md#session-checks)). Run `maknae` from your own console or SSH login; a cron job, a service, `sudo -u <other>` and a terminal started by current GNOME are refused.
+`maknaed` now re-checks every connection and every request against the host: `maknae`-group membership, and on Linux the local account's state and the sender of every message ([runbook](runbook.md#session-checks)). No login session is required: a `tmux` session, a desktop terminal, a cron job or a user service under an enrolled uid is decided by the same checks.
 
 **Add a `deployment` section to `/etc/maknae/maknae.yaml` immediately before you upgrade.** The new daemon refuses to start without one (exit 1), and its journal names `deployment.mode` and the three values it accepts. The daemon you are replacing refuses the section as unknown (`UnknownSection`), so add it only when nothing will restart or reload `maknaed` before the upgrade does. On Debian, `maknae.yaml` is a conffile: when dpkg asks about it during the upgrade, keep your version. The section follows the file at start ([configuration §6.5](configuration.md#65-the-deployment-section)), so no `maknae baseline-accept` is needed. Add, as root, at the top level of the file:
 
@@ -33,7 +33,7 @@ Each release that needs an action from you lists it here, newest first. Read eve
     mode: macos-host
   ```
 
-Re-enrolling with `sudo maknae enroll` writes the same section; on Linux it chooses `userdb` or `none` by whether the `systemd-userdbd.socket` unit is installed. On SELinux and AppArmor hosts the upgrade's policy and profile grant the new reads (the peer's `/proc/<pid>/cgroup` and `status`, `/run/systemd/sessions`, `/etc/passwd`, and the userdbd socket).
+Re-enrolling with `sudo maknae enroll` writes the same section; on Linux it chooses `userdb` or `none` by whether the `systemd-userdbd.socket` unit is installed. On SELinux and AppArmor hosts the upgrade's policy and profile grant the new reads (`/etc/passwd` and the userdbd socket).
 
 ---
 

@@ -555,8 +555,8 @@ destinations:                # #172: per-role egress allowlist for session.promp
   proof the kernel-verified fact, not a client-asserted one, is what's in the response.
 - **Group ADMISSION** — you are in `maknae` (step 1); `authorize_connection` permits the
   connection on `(channel_authenticated=true, admitted=true)`, where `admitted` is the
-  client class's admission rule: `maknae`-group membership, with a live login session
-  and the account's state ([Session checks](#session-checks)). The daemon re-reads the
+  client class's admission rule: `maknae`-group membership and the account's state
+  ([Session checks](#session-checks)). The daemon re-reads the
   group at every connect and every request, so removing yourself from it refuses the
   next command without a new login: a `connect` record with `deny` and reason
   `not-member`, no response, non-zero CLI exit. Admission is the TRANSPORT half.
@@ -1391,13 +1391,12 @@ The `syncing` records are written ahead of the store transition at their revisio
 `maknaed` decides every client connection, and every request on it, on facts it reads from the host at that moment; it caches none of them. Each check runs at connect and again before each request's policy decision:
 
 - **Membership.** The peer uid is in the `maknae` group, resolved from the host's user database.
-- **A live login.** On Linux, the connecting process is in its own logind session: its `/proc/<pid>/cgroup` names a `session-<id>.scope` under `user-<uid>.slice`, and `/run/systemd/sessions/<id>` says `CLASS=user` and `STATE=active` or `online`. On macOS, the process has a login audit session and the user has a `utmpx` login record, or owns the console.
 - **Account state** (Linux, `deployment.account_source: userdb`). `systemd-userdbd` reports the local account neither locked, expired nor not yet valid. A directory-backed account (SSSD, LDAP, AD), every macOS account and a host set to `account_source: none` are not checked; the admission record says which (`not-checked:directory`, `not-checked:platform`, `not-checked:configured`).
 - **The sender** (Linux). Every read on the connection comes from the process that connected, by its kernel-attested pid and uid.
 
-The three host lookups share one 5-second bound and a circuit breaker. The connection also ends after `transport.read_timeout_ms` without a request (`idle`), and the daemon refuses a request on a connection older than its absolute lifetime (`lifetime`). That lifetime is the handler drain bound: 56 s at the defaults, plus `egress.deadline_ms` when a provider is configured (336 s at the default deadline; 821 s at every ceiling).
+The two host lookups share one 5-second bound and a circuit breaker. The connection also ends after `transport.read_timeout_ms` without a request (`idle`), and the daemon refuses a request on a connection older than its absolute lifetime (`lifetime`). That lifetime is the handler drain bound: 56 s at the defaults, plus `egress.deadline_ms` when a provider is configured (336 s at the default deadline; 821 s at every ceiling).
 
-Run `maknae` from your own console or SSH login. These are refused, by design: a cron or at job, a systemd service or `systemd-run` unit, a lingering user manager, a process left behind after its session logged out, `sudo -u <other>` or `su - <other>` (both keep your session), and a terminal that current GNOME starts, which runs outside any session scope.
+No login session is required. A process of your own uid outside one, such as a persistent `tmux` session, a desktop terminal, a cron or at job, a `systemd --user` service or a lingering user's unit, is decided by the same checks as one started from a console or SSH login. Code running as your uid already holds everything your uid holds, so a login check would not separate it from you. To revoke a user, remove them from `maknae` or lock the account (Linux); either takes effect at the next request, including on an open connection. On macOS only membership is checked per request, with the visit clock: account state is not read, and there is no sender check.
 
 ### What the trail shows
 
@@ -1415,10 +1414,9 @@ A termination that reads `disconnect` with `permit` means the session itself was
 | Reason | Posture | Meaning | What to do |
 |---|---|---|---|
 | `not-member` | `unauthorized` | The uid is not in `maknae`, or no account has it any more. An NSS stack that answers "no such user" during a directory outage also lands here. | Nothing, if the user was de-enrolled. Otherwise `id <user>`; on a domain-joined host, check the directory. |
-| `logout` | `unauthorized` | The connecting process has no qualifying login: no session scope, a session that is not `CLASS=user` (`background`, `manager`, systemd 256's `user-early`, `user-light`, `user-incomplete`), a session that is not active (`closing` after logout), or the process exited before the check. | Run the command from your own console or SSH login. `loginctl session-status` shows your session's class and state. |
 | `account-locked`, `account-expired`, `account-disabled` | `unauthorized` | `systemd-userdbd` reports the account locked, past its expiry, or not valid until a later date. | `userdbctl user <name> --output=json` shows the record (`locked`, `notAfterUSec`, `notBeforeUSec`). Correct the account, for example `chage -E -1 <name>` for an expiry. |
 | `sender-mismatch` | `unauthorized` | Bytes arrived from a process other than the one that connected: the connection was handed to another process, or the client runs with a real uid different from its effective uid. | Treat it as an attribution event: find the process. Run `maknae` directly, not through a setuid wrapper. |
-| `infrastructure:<source>` | `unavailable` | A source did not answer, so the daemon denied. `<source>` is `group`, `login`, `account`, `session-map`, `session-facts` (the lookup as a whole did not answer in time) or `audit` (the admission record could not be appended). The journal names it too: `maknaed: the <source> source could not answer for uid=<uid> session_id=<id> — denied`. | See below. |
+| `infrastructure:<source>` | `unavailable` | A source did not answer, so the daemon denied. `<source>` is `group`, `account`, `session-map`, `session-facts` (the lookup as a whole did not answer in time) or `audit` (the admission record could not be appended). The journal names it too: `maknaed: the <source> source could not answer for uid=<uid> session_id=<id> — denied`. | See below. |
 | `idle` | `stopped` | No request arrived within `transport.read_timeout_ms`; the request record reads `read timeout`. | Nothing. |
 | `lifetime` | `stopped` | The connection outlived its absolute lifetime. | Nothing; the client reconnects. |
 | `disconnect` | `stopped` | The session ended normally. | Nothing. |
@@ -1426,9 +1424,8 @@ A termination that reads `disconnect` with `permit` means the session itself was
 **An `infrastructure` denial, by source.**
 
 - `infrastructure:group`: the user database did not answer (NSS, SSSD). Check `getent group maknae`.
-- `infrastructure:login`: the cgroup or the session record could not be read. A `/proc` mounted with `hidepid` hides other users' processes from `_maknae` and denies every connection here: `findmnt -o OPTIONS /proc`. On SELinux, a peer that runs outside a user domain (`unconfined_t`, `staff_t`, `user_t` and the other login domains are user domains) cannot have its `/proc` files read and lands here too. On el9 (kernel before 6.5) a client that has exited but not yet been reaped lands here, not under `logout`.
 - `infrastructure:account`: `/etc/passwd` could not be read, `systemd-userdbd` did not answer in 2 seconds, its socket is absent, or its record has no password-aging fields (an account with no shadow entry). Check `systemctl status systemd-userdbd.socket` and `userdbctl user <name>`. When the socket is absent at start, `maknaed` says so in the journal: `deployment.account_source is userdb but /run/systemd/userdb/io.systemd.Multiplexer is not present`. On a host without `systemd-userdbd`, set `deployment.account_source: none` (configuration §6.5) and restart.
-- `infrastructure:session-facts`: the lookups as a whole (group, login and account together) did not answer within the 5-second bound, or were refused before they ran. Which of the three was slow is not known; the journal says `session fact lookup for uid=<uid> stalled past 5000ms`, `session fact lookup circuit breaker open`, `... tripped` (lookups kept timing out, and connections are denied without a lookup while it is open) or `blocking worker budget exhausted`. Check all three: `getent group maknae`, `loginctl list-sessions` and `userdbctl user <name>`, and look for a slow directory (SSSD) or a stalled `systemd-logind` or `systemd-userdbd`.
+- `infrastructure:session-facts`: the lookups as a whole (group and account together) did not answer within the 5-second bound, or were refused before they ran. Which of the two was slow is not known; the journal says `session fact lookup for uid=<uid> stalled past 5000ms`, `session fact lookup circuit breaker open`, `... tripped` (lookups kept timing out, and connections are denied without a lookup while it is open) or `blocking worker budget exhausted`. Check both: `getent group maknae` and `userdbctl user <name>`, and look for a slow directory (SSSD) or a stalled `systemd-userdbd`.
 - `infrastructure:session-map`: the uid on the request was not the uid the session was bound to. It is a defensive check that should never fire; report it.
 - `infrastructure:audit`: the admission record could not be appended, so the session was not served. See [The audit trail](#the-audit-trail).
 
