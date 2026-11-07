@@ -99,9 +99,6 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         MsgId::EnrollAgentReload => {
             "If maknaed is running, reload it so it sees this enrollment: {command}"
         }
-        MsgId::EnrollAgentGroup => {
-            "{account} must be in the {group} group before it can be enrolled as an agent; add it, then run enroll again: {command}"
-        }
         MsgId::HelperContextMismatch => {
             "Operator-context helper did not land in the expected identity"
         }

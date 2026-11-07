@@ -187,6 +187,9 @@ pub enum EnrollError {
         account: String,
         group: &'static str,
     },
+    AgentGroupMissing {
+        group: &'static str,
+    },
     AgentEntityMissing {
         agent: String,
         entity: String,
@@ -313,7 +316,7 @@ impl std::fmt::Display for EnrollError {
             ),
             EnrollError::AgentRetireFailed { agent, accessors } => write!(
                 f,
-                "agent {agent} has its new SecretID, but these earlier SecretID accessors could not be destroyed: {}; they stay recorded, and the next --rotate retries them",
+                "agent {agent} has its new SecretID, but these earlier SecretID accessors could not be destroyed: {}; they stay recorded, and the next --rotate retries them. A disabled Vault entity for this agent stays disabled until a --rotate retires them all",
                 accessors.join(", ")
             ),
             EnrollError::AgentOrphanedAccessor {
@@ -348,6 +351,11 @@ impl std::fmt::Display for EnrollError {
                 f,
                 "account {account} is not in the {group} group; add it with `{}`, then run enroll again",
                 agent::agent_group_command(account)
+            ),
+            EnrollError::AgentGroupMissing { group } => write!(
+                f,
+                "the {group} group does not exist; the Maknae package creates it, so reinstall the package, or create it with `{}`, then run enroll again",
+                agent::agent_group_create_command()
             ),
             EnrollError::AgentEntityMissing {
                 agent,

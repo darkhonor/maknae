@@ -294,32 +294,12 @@ fn entity_name(agent: &AgentId) -> String {
     format!("maknae-agent-{}", agent.as_str())
 }
 
-fn has_alias_on(entity: &maknae_vault::EntityFacts, mount: &str) -> bool {
+fn has_alias_on(entity: &maknae_vault::EntityFacts, mount: &str, role_id: &str) -> bool {
     let want = format!("auth/{}", mount.trim_matches('/'));
     entity
-        .alias_mounts
+        .aliases
         .iter()
-        .any(|p| p.trim_matches('/') == want)
-}
-
-async fn abandon<O: AgentOps>(
-    ops: &O,
-    agent: &AgentId,
-    base: &AgentState,
-    acc: String,
-    cause: EnrollError,
-) -> EnrollError {
-    match ops.destroy(&base.approle_mount, &base.role, &acc).await {
-        Ok(()) => {
-            let _ = ops.write_state(agent, base);
-            cause
-        }
-        Err(_) => EnrollError::AgentOrphanedAccessor {
-            accessor: acc,
-            cause: cause.to_string(),
-            recorded: true,
-        },
-    }
+        .any(|a| a.mount_path.trim_matches('/') == want && a.name == role_id)
 }
 
 pub(crate) struct AgentPlan {
@@ -378,6 +358,17 @@ pub(crate) async fn enroll_agent<O: AgentOps>(
     let mount = plan.mount.as_str();
     let role = plan.agent.role_name();
     let role_id = ops.read_role_id(mount, &role).await?;
+    let entity = entity_name(&plan.agent);
+    let reenable = match ops.entity(&entity).await? {
+        Some(facts) if has_alias_on(&facts, mount, &role_id) => facts.disabled,
+        _ => {
+            return Err(EnrollError::AgentEntityMissing {
+                agent: id.to_string(),
+                entity,
+                mount: plan.mount.clone(),
+            })
+        }
+    };
     let (secret, acc) = ops.mint(mount, &role, &plan.cidrs).await?;
 
     let base = AgentState {
@@ -403,21 +394,19 @@ pub(crate) async fn enroll_agent<O: AgentOps>(
     drop(secret);
     let source = match sealed {
         Ok(source) => source,
-        Err(e) => return Err(abandon(ops, &plan.agent, &base, acc, e).await),
-    };
-
-    let entity = entity_name(&plan.agent);
-    let reenable = match ops.entity(&entity).await {
-        Ok(Some(facts)) if has_alias_on(&facts, mount) => facts.disabled,
-        Ok(_) => {
-            let missing = EnrollError::AgentEntityMissing {
-                agent: id.to_string(),
-                entity,
-                mount: plan.mount.clone(),
-            };
-            return Err(abandon(ops, &plan.agent, &base, acc, missing).await);
+        Err(e) => {
+            return Err(match ops.destroy(mount, &role, &acc).await {
+                Ok(()) => {
+                    let _ = ops.write_state(&plan.agent, &base);
+                    e
+                }
+                Err(_) => EnrollError::AgentOrphanedAccessor {
+                    accessor: acc,
+                    cause: e.to_string(),
+                    recorded: true,
+                },
+            });
         }
-        Err(e) => return Err(abandon(ops, &plan.agent, &base, acc, e).await),
     };
 
     let listed = ops.list_accessors(mount, &role).await?;
@@ -463,9 +452,8 @@ pub(crate) async fn enroll_agent<O: AgentOps>(
         ..live
     };
     ops.write_state(&plan.agent, &done)?;
-    if reenable {
-        ops.set_entity_disabled(&entity_name(&plan.agent), false)
-            .await?;
+    if reenable && failures.is_empty() {
+        ops.set_entity_disabled(&entity, false).await?;
     }
     if !failures.is_empty() {
         return Err(EnrollError::AgentRetireFailed {
@@ -818,6 +806,15 @@ pub(crate) fn agent_group_command(account: &str) -> String {
     }
 }
 
+pub(crate) fn agent_group_create_command() -> String {
+    let group = maknae_io::MAKNAE_AGENTS_GROUP;
+    if cfg!(target_os = "macos") {
+        format!("dseditgroup -o create {group}")
+    } else {
+        format!("groupadd --system {group}")
+    }
+}
+
 fn admit_account(
     requested: &str,
     agent: &AgentId,
@@ -836,7 +833,12 @@ fn admit_account(
             role,
         });
     }
-    if !agents_gid.is_some_and(|g| acct.named_groups.contains(&g)) {
+    let Some(agents_gid) = agents_gid else {
+        return Err(EnrollError::AgentGroupMissing {
+            group: maknae_io::MAKNAE_AGENTS_GROUP,
+        });
+    };
+    if !acct.named_groups.contains(&agents_gid) {
         return Err(EnrollError::AgentNotInAgentGroup {
             account: requested.to_string(),
             group: maknae_io::MAKNAE_AGENTS_GROUP,
@@ -980,6 +982,24 @@ fn platform_gate(verbose: bool) -> Result<(), EnrollError> {
     }
 }
 
+async fn admit_then_enroll<P, Fut>(
+    admit: impl FnOnce() -> Result<u32, EnrollError>,
+    build: impl FnOnce() -> Fut,
+    mut plan: AgentPlan,
+    host: &HostEnrollment,
+    prior_record: Option<&AgentRecord>,
+    prior_state: AgentState,
+) -> Result<AgentOutcome, EnrollError>
+where
+    P: std::ops::Deref,
+    P::Target: AgentOps + Sized,
+    Fut: std::future::Future<Output = Result<P, EnrollError>>,
+{
+    plan.uid = admit()?;
+    let ops = build().await?;
+    enroll_agent(&*ops, &plan, host, prior_record, prior_state).await
+}
+
 pub(crate) async fn run_enroll_agent(
     args: &AgentArgs,
     locale: Locale,
@@ -1026,53 +1046,50 @@ pub(crate) async fn run_enroll_agent(
 
     let (prior_record, other_agents) = read_records(&agents, &agent)?;
     let prior_state = read_state(&private, &agent)?;
-    let uid = check_account(args, &agent, &host, &other_agents).inspect_err(|e| {
-        if let EnrollError::AgentNotInAgentGroup { account, group } = e {
-            errln!(
-                "{}",
-                msg(locale, MsgId::EnrollAgentGroup)
-                    .replace("{account}", account)
-                    .replace("{group}", group)
-                    .replace("{command}", &agent_group_command(account))
-            );
-        }
-    })?;
-
-    #[cfg(target_os = "macos")]
-    let team = platform_gate().await?;
-    #[cfg(not(target_os = "macos"))]
-    platform_gate(args.verbose)?;
-
-    let token = super::intake_token_from(args.token_file.as_deref(), locale)?;
-    let client = maknae_vault::OperatorClient::new(&host.vault_addr, Path::new(VAULT_CA), token)?;
-    let ops = RealAgentOps {
-        client,
-        private,
-        agents,
-        daemon_gid,
-        resolver,
-        #[cfg(not(target_os = "macos"))]
-        verbose: args.verbose,
-        #[cfg(target_os = "macos")]
-        team,
-    };
     let plan = AgentPlan {
-        agent,
+        agent: agent.clone(),
         account: args.account.clone(),
-        uid,
+        uid: 0,
         mount: args.approle_mount.clone(),
         cidrs,
         role: args.role.into(),
         rotate: args.rotate,
     };
+    let outcome = admit_then_enroll(
+        || check_account(args, &agent, &host, &other_agents),
+        || async {
+            #[cfg(target_os = "macos")]
+            let team = platform_gate().await?;
+            #[cfg(not(target_os = "macos"))]
+            platform_gate(args.verbose)?;
 
-    println!(
-        "{}",
-        msg(locale, MsgId::EnrollAgentStarted).replace("{agent}", plan.agent.as_str())
-    );
-    let outcome = enroll_agent(&ops, &plan, &host, prior_record.as_ref(), prior_state).await?;
+            let token = super::intake_token_from(args.token_file.as_deref(), locale)?;
+            let client =
+                maknae_vault::OperatorClient::new(&host.vault_addr, Path::new(VAULT_CA), token)?;
+            println!(
+                "{}",
+                msg(locale, MsgId::EnrollAgentStarted).replace("{agent}", agent.as_str())
+            );
+            Ok(Box::new(RealAgentOps {
+                client,
+                private,
+                agents,
+                daemon_gid,
+                resolver,
+                #[cfg(not(target_os = "macos"))]
+                verbose: args.verbose,
+                #[cfg(target_os = "macos")]
+                team,
+            }))
+        },
+        plan,
+        &host,
+        prior_record.as_ref(),
+        prior_state,
+    )
+    .await?;
     let mut summary = msg(locale, MsgId::EnrollAgentEnrolled)
-        .replace("{agent}", plan.agent.as_str())
+        .replace("{agent}", &outcome.record.agent_id)
         .replace("{role}", &outcome.record.role_name)
         .replace("{cidrs}", &outcome.record.bind_cidrs.join(", "));
     if outcome.retired > 0 {
@@ -1250,7 +1267,7 @@ mod tests {
             self.check("entity")?;
             Ok(match &*self.entity.borrow() {
                 Some(configured) => configured.clone(),
-                None => Some(entity_facts(false, &[ENTITY_MOUNT])),
+                None => Some(healthy(false)),
             })
         }
 
@@ -1275,12 +1292,22 @@ mod tests {
     const ENTITY_MOUNT: &str = "auth/maknae-agent-approle/";
     const ROLE: &str = "agent-hobi";
 
-    fn entity_facts(disabled: bool, mounts: &[&str]) -> maknae_vault::EntityFacts {
+    fn entity_facts(disabled: bool, aliases: &[(&str, &str)]) -> maknae_vault::EntityFacts {
         maknae_vault::EntityFacts {
             id: "entity-id-1".into(),
             disabled,
-            alias_mounts: strings(mounts),
+            aliases: aliases
+                .iter()
+                .map(|(mount_path, name)| maknae_vault::EntityAlias {
+                    mount_path: (*mount_path).into(),
+                    name: (*name).into(),
+                })
+                .collect(),
         }
+    }
+
+    fn healthy(disabled: bool) -> maknae_vault::EntityFacts {
+        entity_facts(disabled, &[(ENTITY_MOUNT, ROLE_ID)])
     }
 
     fn plan(rotate: bool) -> AgentPlan {
@@ -1366,10 +1393,10 @@ mod tests {
             fake.log(),
             strings(&[
                 "read_role_id",
+                "entity maknae-agent-hobi",
                 "mint:maknae-agent-approle:agent-hobi:10.0.0.5/32",
                 "state",
                 "seal",
-                "entity maknae-agent-hobi",
                 "list",
                 "record",
                 "state",
@@ -1488,10 +1515,10 @@ mod tests {
             fake.log(),
             strings(&[
                 "read_role_id",
+                "entity maknae-agent-hobi",
                 "mint:maknae-agent-approle:agent-hobi:10.0.0.5/32",
                 "state",
                 "seal",
-                "entity maknae-agent-hobi",
                 "list",
                 "record",
                 "state",
@@ -1568,6 +1595,7 @@ mod tests {
             fake.log(),
             strings(&[
                 "read_role_id",
+                "entity maknae-agent-hobi",
                 "mint:maknae-agent-approle:agent-hobi:10.0.0.5/32",
                 "state",
                 "destroy:acc-new",
@@ -1610,6 +1638,7 @@ mod tests {
             fake.log(),
             strings(&[
                 "read_role_id",
+                "entity maknae-agent-hobi",
                 "mint:maknae-agent-approle:agent-hobi:10.0.0.5/32",
                 "state",
                 "seal",
@@ -2112,16 +2141,29 @@ mod tests {
 
     #[tokio::test]
     async fn an_account_bound_in_bindings_is_refused_before_vault() {
-        let fake = Fake::default();
         for role in ["admin", "user", "guest"] {
-            let got = admit(account(&[990, AGENTS_GID]), Some(AGENTS_GID), &bound(role));
+            let fake = Fake::default();
+            let built = Cell::new(false);
+            let got = admit_then_enroll(
+                || admit(account(&[990, AGENTS_GID]), Some(AGENTS_GID), &bound(role)),
+                || async {
+                    built.set(true);
+                    Ok(&fake)
+                },
+                plan(false),
+                &host(),
+                None,
+                AgentState::default(),
+            )
+            .await;
             assert!(
                 matches!(&got, Err(EnrollError::AgentBound { agent, account, role: r })
                     if agent == "hobi" && account == "hobi-svc" && *r == role),
                 "{role}: {got:?}"
             );
+            assert!(!built.get(), "{role}: the Vault client was built");
+            assert!(fake.log().is_empty(), "{role}: {:?}", fake.log());
         }
-        assert!(fake.log().is_empty());
     }
 
     #[test]
@@ -2132,7 +2174,10 @@ mod tests {
         } else {
             "usermod -aG maknae-agents hobi-svc"
         };
-        for (groups, gid) in [(vec![990], Some(AGENTS_GID)), (vec![990, AGENTS_GID], None)] {
+        for (groups, gid) in [
+            (vec![990], Some(AGENTS_GID)),
+            (vec![990, 5], Some(AGENTS_GID)),
+        ] {
             let e = admit(account(&groups), gid, &none).unwrap_err();
             assert!(
                 matches!(&e, EnrollError::AgentNotInAgentGroup { account, group }
@@ -2149,7 +2194,7 @@ mod tests {
 
     #[tokio::test]
     async fn re_enrollment_re_enables_a_disabled_entity() {
-        let fake = Fake::default().with_entity(Some(entity_facts(true, &[ENTITY_MOUNT])));
+        let fake = Fake::default().with_entity(Some(healthy(true)));
         let (r, s) = prior(&["a"], &[], &[]);
         enroll_agent(&fake, &plan(true), &host(), Some(&r), s)
             .await
@@ -2168,14 +2213,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_missing_entity_refuses_after_sealing_and_destroys_the_new_secret_id() {
+    async fn a_missing_entity_refuses_before_minting_anything() {
+        let other_role = entity_facts(false, &[(ENTITY_MOUNT, "another-role-id")]);
+        let other_mount = entity_facts(false, &[("auth/other/", ROLE_ID)]);
         for entity in [
             None,
             Some(entity_facts(false, &[])),
-            Some(entity_facts(false, &["auth/other/"])),
+            Some(other_mount),
+            Some(other_role),
         ] {
             let fake = Fake::default().with_entity(entity);
-            let e = first(&fake).await.unwrap_err();
+            let e = rotate(&fake, &["a"], &[], &[]).await.unwrap_err();
             assert!(
                 matches!(&e, EnrollError::AgentEntityMissing { agent, entity, mount }
                     if agent == "hobi" && entity == "maknae-agent-hobi" && mount == MOUNT),
@@ -2184,18 +2232,43 @@ mod tests {
             assert!(e.to_string().contains("terraform apply"), "{e}");
             assert_eq!(
                 fake.log(),
-                strings(&[
-                    "read_role_id",
-                    "mint:maknae-agent-approle:agent-hobi:10.0.0.5/32",
-                    "state",
-                    "seal",
-                    "entity maknae-agent-hobi",
-                    "destroy:acc-new",
-                    "state",
-                ])
+                strings(&["read_role_id", "entity maknae-agent-hobi"])
             );
-            assert!(!fake.log().contains(&"record".to_string()));
         }
+    }
+
+    #[tokio::test]
+    async fn an_entity_read_error_refuses_before_minting_anything() {
+        let fake = Fake::failing(&["entity"]);
+        assert!(first(&fake).await.is_err());
+        assert_eq!(
+            fake.log(),
+            strings(&["read_role_id", "entity maknae-agent-hobi"])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_disabled_entity_stays_disabled_while_old_secret_ids_survive() {
+        let fake = Fake::failing(&["destroy:b"]).with_entity(Some(healthy(true)));
+        let e = rotate(&fake, &["a", "b"], &[], &[]).await.unwrap_err();
+        assert!(matches!(&e, EnrollError::AgentRetireFailed { .. }), "{e:?}");
+        assert!(e.to_string().contains("stays disabled"), "{e}");
+        assert!(!fake.log().iter().any(|l| l.starts_with("set_entity")));
+    }
+
+    #[tokio::test]
+    async fn the_refusal_for_a_missing_group_names_the_group_not_usermod() {
+        let none = maknae_config::Bindings::absent();
+        let e = admit(account(&[990]), None, &none).unwrap_err();
+        assert!(
+            matches!(&e, EnrollError::AgentGroupMissing { group } if *group == "maknae-agents"),
+            "{e:?}"
+        );
+        let text = e.to_string();
+        assert!(
+            text.contains("does not exist") && !text.contains("usermod"),
+            "{text}"
+        );
     }
 
     #[test]

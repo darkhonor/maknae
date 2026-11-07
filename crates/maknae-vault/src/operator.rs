@@ -28,17 +28,30 @@ use zeroize::Zeroizing;
 const AGENT_ENTITY_PREFIX: &str = "maknae-agent-";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntityAlias {
+    pub mount_path: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EntityFacts {
     pub id: String,
     pub disabled: bool,
-    pub alias_mounts: Vec<String>,
+    pub aliases: Vec<EntityAlias>,
 }
 
 fn entity_facts(resp: ReadEntityByNameResponse) -> EntityFacts {
     EntityFacts {
         id: resp.id,
         disabled: resp.disabled,
-        alias_mounts: resp.aliases.into_iter().map(|a| a.mount_path).collect(),
+        aliases: resp
+            .aliases
+            .into_iter()
+            .map(|a| EntityAlias {
+                mount_path: a.mount_path,
+                name: a.name,
+            })
+            .collect(),
     }
 }
 
@@ -329,13 +342,13 @@ mod tests {
         assert_eq!(req.metadata, None);
     }
 
-    fn entity_response(disabled: bool, aliases: &[&str]) -> ReadEntityByNameResponse {
+    fn entity_response(disabled: bool, aliases: &[(&str, &str)]) -> ReadEntityByNameResponse {
         let aliases: Vec<_> = aliases
             .iter()
-            .map(|path| {
+            .map(|(path, name)| {
                 serde_json::json!({
                     "id": "a", "canonical_id": "e", "mount_accessor": "auth_approle_1",
-                    "name": "role", "creation_time": "t", "last_update_time": "t",
+                    "name": name, "creation_time": "t", "last_update_time": "t",
                     "local": false, "mount_type": "approle", "mount_path": path,
                 })
             })
@@ -353,14 +366,26 @@ mod tests {
     fn entity_facts_carry_the_id_the_flag_and_every_alias_mount() {
         let facts = entity_facts(entity_response(
             true,
-            &["auth/maknae-agent-approle/", "auth/other/"],
+            &[
+                ("auth/maknae-agent-approle/", "role-id-1"),
+                ("auth/other/", "other-name"),
+            ],
         ));
         assert_eq!(
             facts,
             EntityFacts {
                 id: "entity-1".into(),
                 disabled: true,
-                alias_mounts: vec!["auth/maknae-agent-approle/".into(), "auth/other/".into()],
+                aliases: vec![
+                    EntityAlias {
+                        mount_path: "auth/maknae-agent-approle/".into(),
+                        name: "role-id-1".into()
+                    },
+                    EntityAlias {
+                        mount_path: "auth/other/".into(),
+                        name: "other-name".into()
+                    },
+                ],
             }
         );
         assert!(!entity_facts(entity_response(false, &[])).disabled);

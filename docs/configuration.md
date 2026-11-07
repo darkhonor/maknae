@@ -832,9 +832,9 @@ audit:
 **Prerequisites.**
 
 - The host is enrolled (`sudo maknae enroll`).
-- The agent's id is in Terraform's `maknae_agents` (`deploy/vault-pki`), which creates its AppRole role.
+- The agent's id is in Terraform's `maknae_agents` (`deploy/vault-pki`), which creates its AppRole role, its Vault entity `maknae-agent-<id>` and the entity's alias on the agent mount, named by the role's RoleID. Enrollment refuses before it mints anything when any of them is missing.
 - An operator Vault token carrying the `maknae-enroll-agent` policy, supplied by `--token-file` or a no-echo prompt.
-- A dedicated service account for the agent: it is not root, it is not the enrolling principal's account, its shell is one of the non-login shells `/usr/sbin/nologin`, `/sbin/nologin`, `/usr/bin/nologin`, `/bin/false` or `/usr/bin/false`, it is outside the `maknae` group and a member of the `maknae-agents` group (enroll prints the `usermod -aG` or `dseditgroup` command and changes nothing), it is not named in `bindings.yaml`, it is not a Maknae daemon account and is not a member (primary or supplementary) of the `_maknae` or `_maknae-egress` group, and no other agent is enrolled to it. Enrollment refuses any other account.
+- A dedicated service account for the agent: it is not root, it is not the enrolling principal's account, its shell is one of the non-login shells `/usr/sbin/nologin`, `/sbin/nologin`, `/usr/bin/nologin`, `/bin/false` or `/usr/bin/false`, it is outside the `maknae` group and a member of the `maknae-agents` group (enroll prints the `usermod -aG` or `dseditgroup` command and changes nothing), it is not bound in `bindings.yaml` by name or uid, it is not a Maknae daemon account and is not a member (primary or supplementary) of the `_maknae` or `_maknae-egress` group, and no other agent is enrolled to it. Enrollment refuses any other account.
 - The agent id is enrolled on this host only. Each agent id is enrolled on exactly one host: enrolling or rotating the same id on another host destroys this host's SecretID, because every enrollment retires every other SecretID on `agent-<id>`.
 - Linux: a usable TPM2. There is no plaintext fallback.
 - macOS: `/usr/local/bin/maknae-agentd` installed and Developer ID-signed, and the running `maknae` binary itself root-installed and Developer ID-signed. Enrollment refuses until both are.
@@ -844,7 +844,9 @@ sudo maknae enroll agent <id> --account <service-account> --bind-cidr <cidr> [--
   [--role user|guest] [--approle-mount <mount>] [--token-file <file>] [--verbose]
 ```
 
-`--role` defaults to `user`; `admin` is not a choice. After sealing the SecretID, enroll reads the Vault entity `maknae-agent-<id>`. It refuses, and destroys the new SecretID, when the entity is absent or has no alias on the agent mount, and it re-enables a disabled entity. It ends by telling you to reload `maknaed`.
+`--role` defaults to `user`; `admin` is not a choice. Before minting a SecretID, enroll reads the Vault entity `maknae-agent-<id>` and refuses, with no side effect, when it is absent or has no alias on the agent mount named by the role's RoleID. A disabled entity is re-enabled as the last step, and only when every earlier SecretID of the role was destroyed; if any destroy failed, the entity stays disabled until a `--rotate` retires them all. Enroll ends by telling you to reload `maknaed`.
+
+Re-enabling an entity makes the tokens issued before it was disabled usable again until they reach `agent_token_max_ttl`. Disabling does not revoke them. To avoid that window, wait out `agent_token_max_ttl` after disabling an agent before re-enrolling it.
 
 `--bind-cidr` is required, once per address range. The SecretID is minted with `cidr_list` and `token_bound_cidrs` set to those ranges, so Vault refuses it, and any token it yields, from a source address outside them. Vault sees the address after any NAT, so behind NAT bind the translated address. A prefix is plain decimal digits with no leading zero, an IPv4-mapped IPv6 range (`::ffff:a.b.c.d/n`) is taken as its IPv4 range, and enrollment refuses `0.0.0.0/0`, `::/0`, or any set of ranges that together covers every IPv4 or every IPv6 address. `--approle-mount` defaults to `maknae-agent-approle`; it may use only `A-Z`, `a-z`, `0-9`, `.`, `_`, `/` and `-`, and must differ from `maknaed`'s AppRole mount, which must use the same characters so the two can be compared.
 
