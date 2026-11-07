@@ -15906,6 +15906,29 @@ mod reload_tests {
             ))
     }
 
+    fn agent_whoami_as(
+        fx: &Fx,
+        uid: u32,
+        id: &str,
+    ) -> (maknae_security::Verdict, Option<&'static str>) {
+        let mut r = crate::handler::build_authz_request(
+            &Verb::Whoami,
+            uid,
+            None,
+            maknae_security::Lane::Local,
+            None,
+        );
+        r.subject.0.insert(
+            maknae_security::SUBJECT_CHANNEL,
+            maknae_security::AttrValue::Str(maknae_security::CHANNEL_AGENT.into()),
+        );
+        r.subject.0.insert(
+            maknae_security::SUBJECT_AGENT,
+            maknae_security::AttrValue::Str(id.into()),
+        );
+        fx.reloader.authorizer.decide_reporting_role(&r)
+    }
+
     fn identity_records(recs: &[AuditRecord]) -> Vec<(String, String, String)> {
         recs.iter()
             .filter(|r| r.action == "graph.identity")
@@ -15964,7 +15987,7 @@ mod reload_tests {
         );
         let applied = bounded(fx.reloader.run()).await.unwrap();
         assert!(applied.persisted);
-        assert_eq!(whoami_as(&fx, 2001).1, Some("user"));
+        assert_eq!(agent_whoami_as(&fx, 2001, "hobi").1, Some("user"));
         assert_eq!(fx.baseline().snapshot().agent_uid("hobi"), Some(2001));
         let recs = fx.reload_records();
         assert_eq!(
@@ -15991,7 +16014,7 @@ mod reload_tests {
 
         std::fs::remove_file(dir.join("enrollment.yaml")).unwrap();
         bounded(fx.reloader.run()).await.unwrap();
-        assert_eq!(whoami_as(&fx, 2001).1, None);
+        assert_eq!(agent_whoami_as(&fx, 2001, "hobi").1, None);
         assert_eq!(fx.baseline().snapshot().agent_uid("hobi"), None);
         assert_eq!(
             identity_records(&fx.reload_records())[1..],

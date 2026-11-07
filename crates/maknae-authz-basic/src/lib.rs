@@ -6450,9 +6450,31 @@ mod tests {
             )
         }
 
+        fn agent_channel(mut r: maknae_security::Request, agent: &str) -> maknae_security::Request {
+            r.subject.0.insert(
+                maknae_security::SUBJECT_CHANNEL,
+                AttrValue::Str(maknae_security::CHANNEL_AGENT.into()),
+            );
+            r.subject
+                .0
+                .insert(maknae_security::SUBJECT_AGENT, AttrValue::Str(agent.into()));
+            r
+        }
+
+        fn stamped(
+            src: &PolicySource,
+            r: maknae_security::Request,
+            uid: u32,
+        ) -> maknae_security::Request {
+            match compiled(src).agent_of(uid) {
+                Some(id) => agent_channel(r, id),
+                None => r,
+            }
+        }
+
         fn role_of(src: &PolicySource, uid: u32) -> Option<&'static str> {
             auth(src, 501)
-                .decide_reporting_role(&whoami(i64::from(uid)))
+                .decide_reporting_role(&stamped(src, whoami(i64::from(uid)), uid))
                 .1
         }
 
@@ -6536,7 +6558,8 @@ mod tests {
             let src = source(None, &[], load(vec![hobi()], &[]));
             let a = auth(&src, HOBI);
             assert_eq!(
-                a.decide_reporting_role(&whoami(i64::from(HOBI))).1,
+                a.decide_reporting_role(&agent_channel(whoami(i64::from(HOBI)), "hobi"))
+                    .1,
                 Some("user")
             );
             assert_eq!(a.decide_reporting_role(&whoami(501)).1, None);
@@ -6584,6 +6607,56 @@ mod tests {
                 )]
             );
             assert_eq!(role_of(&src, SHELLED), None);
+        }
+
+        #[test]
+        fn the_uid_of_an_ignored_enrollment_on_the_agent_channel_is_denied() {
+            let src = source(
+                None,
+                &[],
+                load(
+                    vec![enrollment("rm", "rm-svc", SHELLED, AgentRole::User)],
+                    &[],
+                ),
+            );
+            assert_eq!(src.agent_uid("rm"), None);
+            let a = auth(&src, 501);
+            let client = a.decide_cited(&liveness_req(Some(i64::from(SHELLED))));
+            assert_eq!(
+                client.verdict,
+                Verdict::NotApplicable {
+                    note: Some("subject resolves to no role".into())
+                }
+            );
+            let agent =
+                a.decide_cited(&agent_channel(liveness_req(Some(i64::from(SHELLED))), "rm"));
+            assert_eq!(
+                agent.verdict,
+                Verdict::Deny {
+                    reason: format!("agent channel: uid {SHELLED} is not enrolled agent rm")
+                }
+            );
+            assert_eq!(agent.role, None);
+        }
+
+        #[test]
+        fn a_de_enrolled_uid_with_no_role_on_the_agent_channel_is_denied_with_the_agent_reason() {
+            let enrolled = source(None, &[], load(vec![hobi()], &[]));
+            let req = agent_channel(liveness_req(Some(i64::from(HOBI))), "hobi");
+            assert_eq!(
+                auth(&enrolled, 501).decide_cited(&req).verdict,
+                audit_permit()
+            );
+            let removed = source(None, &[], load(vec![], &[]));
+            assert_eq!(removed.agent_uid("hobi"), None);
+            let d = auth(&removed, 501).decide_cited(&req);
+            assert_eq!(
+                d.verdict,
+                Verdict::Deny {
+                    reason: format!("agent channel: uid {HOBI} is not enrolled agent hobi")
+                }
+            );
+            assert_eq!(d.role, None);
         }
 
         #[test]
@@ -7111,7 +7184,7 @@ mod tests {
                 load(vec![hobi()], &[]),
             );
             let a = auth(&src, 501);
-            let agent = a.decide_cited(&read(HOBI, "/home/operator/notes"));
+            let agent = a.decide_cited(&agent_channel(read(HOBI, "/home/operator/notes"), "hobi"));
             assert!(
                 matches!(agent.verdict, Verdict::NotApplicable { .. }),
                 "{agent:?}"
@@ -7127,7 +7200,7 @@ mod tests {
         fn an_agent_policy_permits_what_it_names_and_cites_its_file() {
             let src = source(None, &[], load(vec![hobi()], &[("hobi", HOBI_POLICY)]));
             let a = auth(&src, 501);
-            let d = a.decide_cited(&read(HOBI, "/home/operator/docs/a"));
+            let d = a.decide_cited(&agent_channel(read(HOBI, "/home/operator/docs/a"), "hobi"));
             assert_eq!(d.verdict, audit_permit());
             let rule = d.rule.expect("an agent's path permit cites its rule");
             assert_eq!(
@@ -7163,7 +7236,10 @@ mod tests {
         #[test]
         fn the_site_deny_floor_holds_under_an_agent_policy() {
             let src = source(None, &[], load(vec![hobi()], &[("hobi", HOBI_POLICY)]));
-            let d = auth(&src, 501).decide_cited(&read(HOBI, "/home/operator/.ssh/id_rsa"));
+            let d = auth(&src, 501).decide_cited(&agent_channel(
+                read(HOBI, "/home/operator/.ssh/id_rsa"),
+                "hobi",
+            ));
             assert_eq!(
                 d.verdict,
                 Verdict::Deny {
@@ -7176,7 +7252,10 @@ mod tests {
         #[test]
         fn an_agent_policy_deny_beats_its_allow() {
             let src = source(None, &[], load(vec![hobi()], &[("hobi", HOBI_POLICY)]));
-            let d = auth(&src, 501).decide_cited(&read(HOBI, "/home/operator/docs/secret/a"));
+            let d = auth(&src, 501).decide_cited(&agent_channel(
+                read(HOBI, "/home/operator/docs/secret/a"),
+                "hobi",
+            ));
             assert_eq!(
                 d.verdict,
                 Verdict::Deny {
@@ -7196,13 +7275,13 @@ mod tests {
                     )],
                 ),
             );
-            let mut status = whoami(i64::from(HOBI));
-            status.action = Action("admin.status".into());
+            let mut status = agent_channel(whoami(i64::from(HOBI)), "hobi");
+            status.action = Action("session.prompt".into());
             assert_eq!(
                 auth(&limited, 501).decide(&status),
                 Verdict::Deny {
                     reason:
-                        "subject hobi-svc: admin.status is not in agents.hobi.policy.actions allow"
+                        "subject hobi-svc: session.prompt is not in agents.hobi.policy.actions allow"
                             .into()
                 }
             );
