@@ -527,6 +527,58 @@ destinations:                # #172: per-role egress allowlist for session.promp
   reads "everything in fs except delete"). A wildcard also covers members a later release
   adds to its family; list exact terms to avoid that growth. `kernel`, `liveness` and
   `admin.whoami` cannot be named or limited.
+
+Two worked `subjects:` entries. Each only narrows what the account's role already holds;
+neither grants anything. A HomeLab entry, written with family wildcards:
+
+```yaml
+subjects:
+  notes-agent:                   # an account bound to user in bindings.yaml
+    permissions:
+      allow:
+        - "Read(~/notes/**)"
+        - "Write(~/notes/**)"
+    actions:
+      allow:
+        - "fs.*"
+        - "session.*"
+      deny:
+        - "fs.delete"
+    models:
+      allow:
+        - "local/llama"
+```
+
+`notes-agent` reads and writes `~/notes` only, may create directories there but never
+delete, and prompts only `local/llama`. The site `deny` list still applies under its own
+`allow`, so `~/.ssh` and the other credential paths stay out of reach. `fs.*` and
+`session.*` also cover any action a later release adds to those families.
+
+An enterprise entry, written with exact terms so a new release adds nothing:
+
+```yaml
+subjects:
+  build-svc:
+    permissions:
+      allow:
+        - "Read(~/src/**)"
+      deny:
+        - "Read(~/src/secrets/**)"
+    actions:
+      allow:
+        - "fs.read"
+        - "session.prompt"
+    models:
+      allow:
+        - "openai/gpt-5.6"
+```
+
+`build-svc` reads `~/src` except `~/src/secrets`, writes nothing, and prompts only
+`openai/gpt-5.6`, and only if its role is granted `session.prompt` and `provider:openai`
+is in its role's `destinations:`. An `actions:` entry is a complete list: an action in a
+limited family that its `allow` does not name is refused, so an entry with only `deny`
+refuses every limited action.
+
 - **Separation of duties (recommended).** Bind the loop's account to `user`. An
   admin-bound loop also holds the disclosure verbs, and a loop that has been injected can
   quote `admin.config.show` into its next prompt; a `user`-bound loop cannot ask. The

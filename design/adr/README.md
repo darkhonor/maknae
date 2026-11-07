@@ -35,6 +35,7 @@ Because this is a single-operator private project and every ADR carries its **to
 | 0029 | The kernel enforcement-state graph — one kernel-owned graph holds running config, policy and live enforcement state; seeded from `/etc/maknae`, persisted, encrypted at rest, synced back under root control; custom binary format v1 | Accepted (maintainer-ruled 2026-10-07) |
 | 0030 | Cryptographic libraries are confined: declared only by crypto-profile-awslc4, reached only through maknae-crypto (amended 2026-10-31, ADR-0031); re-exports rustls only (rcgen for tests); deny.toml bans enforce it | Accepted (maintainer-ruled 2026-10-27) |
 | 0031 | Maknae's cryptography comes from crypto-profile — `maknae-crypto` adapts `crypto-profile-awslc4` (4.x line, exact pins, cadence via crypto-profile releases); `preferred` profile; external connections TLS 1.3 only; no built-in rustls provider | Accepted (maintainer-ruled 2026-10-31) |
+| 0032 | Per-subject restrictions — `subjects:` in `authz.yaml` narrows one account's file permissions (site deny always a floor), actions and models; action patterns (exact term or `<family>.*`, expanded at compile) in subject limits and role grants; deny beats allow whatever the specificity; agents never hold `admin` (built in #609) | Accepted (maintainer-ruled 2026-11-07) |
 
 A number not in this table is available. The registry lists **written ADRs only** — no reservations.
 
