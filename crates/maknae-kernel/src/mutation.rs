@@ -948,6 +948,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stalled_requester_pins_only_its_own_store_slot() {
+        let _turn = EUID_TURN.lock().await;
         use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
         let (stalled, other) = (4_170_101, 4_170_102);
         let (release, held) = std::sync::mpsc::channel::<()>();
@@ -977,11 +978,14 @@ mod tests {
             ]
         );
         assert_eq!(entered.load(SeqCst), STORE_SLOTS_PER_UID);
-        assert_eq!(
-            blocking(other, Duration::from_millis(300), || 7).await,
-            Ok(7)
+        assert_eq!(blocking(other, Duration::from_secs(5), || 7).await, Ok(7));
+        assert!(mutating().try_claim(other).is_some());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), capacity().acquire_owned())
+                .await
+                .is_ok(),
+            "a shared worker is still free for another requester's mutation"
         );
-        assert!(mutating().try_admit(other, &capacity()).is_ok());
         assert_eq!(
             blocking(stalled, Duration::from_millis(100), || 1).await,
             Err(Blocked::NotStarted)
