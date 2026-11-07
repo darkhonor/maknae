@@ -132,6 +132,9 @@ impl<B: Blobs> ConversationStore for BlobStore<B> {
         rec: ConversationRecord,
         max_for_owner: usize,
     ) -> Result<Scan<()>, StoreError> {
+        if rec.fence != 0 {
+            return Err(StoreError::StaleFence);
+        }
         let _serial = self.serial();
         match self.read(&rec.id) {
             Err(StoreError::NotFound) => {}
@@ -358,6 +361,7 @@ mod tests {
     both!(
         create_then_get_round_trips,
         create_twice_is_exists,
+        create_with_a_nonzero_fence_is_refused,
         create_over_an_unreadable_record_is_refused_and_leaves_it,
         create_at_the_owner_bound_is_owner_full_and_concurrent_creates_cannot_exceed_it,
         update_with_a_stale_fence_is_refused,
@@ -387,6 +391,19 @@ mod tests {
         again.cwd = "/elsewhere".into();
         assert_eq!(fx.store().create(again, 32), Err(StoreError::Exists));
         assert_eq!(fx.store().get(&r.id).unwrap(), r);
+    }
+
+    fn create_with_a_nonzero_fence_is_refused(fx: &mut dyn Fixture) {
+        let mut r = rec(1000, 50);
+        r.fence = 1;
+        assert_eq!(
+            fx.store().create(r.clone(), 32),
+            Err(StoreError::StaleFence)
+        );
+        assert_eq!(fx.store().get(&r.id), Err(StoreError::NotFound));
+        r.fence = 0;
+        fx.store().create(r.clone(), 32).unwrap();
+        assert_eq!(fx.store().get(&r.id).unwrap().fence, 0);
     }
 
     fn create_over_an_unreadable_record_is_refused_and_leaves_it(fx: &mut dyn Fixture) {

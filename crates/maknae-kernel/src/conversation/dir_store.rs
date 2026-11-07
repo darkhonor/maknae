@@ -85,10 +85,10 @@ impl Blobs for DirBlobs {
 
     fn save(&self, name: &str, plain: &[u8]) -> Result<(), StoreError> {
         let sealed = seal(plain, &self.key).map_err(|e| StoreError::Io(e.to_string()))?;
-        match self.anchor.publish(&file(name), None, &sealed, Mode(0o600)) {
-            Ok(_) | Err(IoError::PublishedNotDurable { .. }) => Ok(()),
-            Err(e) => Err(io(e)),
-        }
+        self.anchor
+            .publish(&file(name), None, &sealed, Mode(0o600))
+            .map(|_| ())
+            .map_err(io)
     }
 
     fn delete(&self, name: &str) -> Result<(), StoreError> {
