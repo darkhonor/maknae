@@ -438,7 +438,7 @@ fn exit_code(r: &Result<Outcome, String>) -> u8 {
 }
 
 pub(crate) fn kernel_gid() -> Result<u32, String> {
-    nix::unistd::Group::from_name("_maknae")
+    maknae_io::group_by_name("_maknae")
         .map_err(|e| format!("group _maknae: {e}"))?
         .map(|g| g.gid.as_raw())
         .ok_or_else(|| "no such group: _maknae; is maknae installed?".to_string())

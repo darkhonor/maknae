@@ -82,7 +82,7 @@ pub(crate) fn write_reseed_marker(
 }
 
 pub(crate) fn kernel_uid() -> Result<u32, String> {
-    nix::unistd::User::from_name(KERNEL_USER)
+    maknae_io::user_by_name(KERNEL_USER)
         .map_err(|e| format!("user {KERNEL_USER}: {e}"))?
         .map(|u| u.uid.as_raw())
         .ok_or_else(|| format!("no such user: {KERNEL_USER}; is maknae installed?"))

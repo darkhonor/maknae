@@ -456,6 +456,17 @@ struct AgentOutcome {
     taskers: decide::AgentTaskers,
 }
 
+struct Parts {
+    policy: maknae_config::AuthzPolicy,
+    bindings: maknae_config::Bindings,
+    lookups: Lookups,
+    lookup: NssLookup,
+    hosts: HostLookups,
+    agents: Agents,
+    principal: maknae_config::Principal,
+    paths: PolicyPaths,
+}
+
 enum Agents {
     Load(maknae_config::AgentsLoad),
     Kept(AgentOutcome),
@@ -550,16 +561,16 @@ impl PolicySource {
     ) -> Result<Self, AuthzBasicError> {
         let lookups =
             resolve_uid_map_with(&policy, &bindings, &tasker_names(&agents), classify(lookup))?;
-        Self::from_lookups(
+        Self::from_lookups(Parts {
             policy,
             bindings,
             lookups,
             lookup,
             hosts,
-            Agents::Load(agents),
+            agents: Agents::Load(agents),
             principal,
             paths,
-        )
+        })
     }
 
     pub fn from_parts(
@@ -604,29 +615,29 @@ impl PolicySource {
         paths: PolicyPaths,
     ) -> Result<Self, AuthzBasicError> {
         let lookups = uid_map.into_iter().map(|(n, u)| (n, Some(u))).collect();
-        Self::from_lookups(
+        Self::from_lookups(Parts {
             policy,
             bindings,
             lookups,
-            lookup_uid,
+            lookup: lookup_uid,
             hosts,
-            Agents::Load(agents),
+            agents: Agents::Load(agents),
             principal,
             paths,
-        )
+        })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn from_lookups(
-        policy: maknae_config::AuthzPolicy,
-        bindings: maknae_config::Bindings,
-        lookups: Lookups,
-        lookup: NssLookup,
-        hosts: HostLookups,
-        agents: Agents,
-        principal: maknae_config::Principal,
-        paths: PolicyPaths,
-    ) -> Result<Self, AuthzBasicError> {
+    fn from_lookups(parts: Parts) -> Result<Self, AuthzBasicError> {
+        let Parts {
+            policy,
+            bindings,
+            lookups,
+            lookup,
+            hosts,
+            agents,
+            principal,
+            paths,
+        } = parts;
         let policy_source = utf8(&paths.authz)?;
         let identity_source = utf8(&paths.bindings)?;
         let resolved = binding::resolve_subjects(&bindings, &found(&lookups))
@@ -677,16 +688,16 @@ impl PolicySource {
             &tasker_names(&self.agents.load),
             classify(self.lookup),
         )?;
-        Self::from_lookups(
-            self.policy.clone(),
+        Self::from_lookups(Parts {
+            policy: self.policy.clone(),
             bindings,
             lookups,
-            self.lookup,
-            self.hosts,
-            Agents::Load(self.agents.load.clone()),
-            self.principal.clone(),
-            self.paths.clone(),
-        )
+            lookup: self.lookup,
+            hosts: self.hosts,
+            agents: Agents::Load(self.agents.load.clone()),
+            principal: self.principal.clone(),
+            paths: self.paths.clone(),
+        })
     }
 
     /// Blocking only for a name this load never looked up; the rest reuse its answers.
@@ -716,16 +727,16 @@ impl PolicySource {
         bindings: maknae_config::Bindings,
         lookups: Lookups,
     ) -> Result<Self, AuthzBasicError> {
-        Self::from_lookups(
-            self.policy.clone(),
+        Self::from_lookups(Parts {
+            policy: self.policy.clone(),
             bindings,
             lookups,
-            self.lookup,
-            self.hosts,
-            Agents::Kept(self.agents.clone()),
-            self.principal.clone(),
-            self.paths.clone(),
-        )
+            lookup: self.lookup,
+            hosts: self.hosts,
+            agents: Agents::Kept(self.agents.clone()),
+            principal: self.principal.clone(),
+            paths: self.paths.clone(),
+        })
     }
 
     /// Every later resolution of this source asks `lookup` instead of the host.
@@ -839,10 +850,9 @@ impl PolicySource {
             .collect()
     }
 
-    /// The identity layer `bindings.yaml` and the enrolled agents declare; `source` is
-    /// the bindings path and `bindings_sha256` is `None` iff the file has no `bindings:`
-    /// key. Subjects are in uid order, the order `identity::extract` produces, so an
-    /// unchanged load compares equal to its persisted layer.
+    /// `bindings_sha256` is `None` iff `bindings.yaml` has no `bindings:` key. Subjects are
+    /// in uid order, as `identity::extract` produces them, so an unchanged load compares
+    /// equal to its persisted layer.
     pub fn identity_layer(
         &self,
         label: &str,
@@ -1300,16 +1310,11 @@ fn found(lookups: &Lookups) -> UidMap {
         .collect()
 }
 
-/// getpwnam(3)'s "not found" spellings are `Ok(None)`, `ENOENT`, `ESRCH`, `EBADF`
-/// and `EPERM`; every other errno, `ERANGE` and errno 0 included, is a failed lookup.
 #[cfg(unix)]
 pub(crate) fn classify_lookup(r: Result<Option<u32>, nix::errno::Errno>) -> Lookup {
-    use nix::errno::Errno;
-    match r {
+    match maknae_io::not_found_is_none(r) {
         Ok(Some(uid)) => Lookup::Found(uid),
-        Ok(None) | Err(Errno::ENOENT | Errno::ESRCH | Errno::EBADF | Errno::EPERM) => {
-            Lookup::Absent
-        }
+        Ok(None) => Lookup::Absent,
         Err(e) => Lookup::Failed(e as i32),
     }
 }
@@ -1377,11 +1382,7 @@ fn lookup_uid(name: &str) -> Result<Option<u32>, i32> {
     }
     #[cfg(unix)]
     {
-        // nix reads errno on a non-zero return; macOS getpwnam_r returns ERANGE
-        // without setting it, so a stale not-found errno must not survive to here.
-        nix::errno::Errno::clear();
-        match classify_lookup(nix::unistd::User::from_name(name).map(|u| u.map(|u| u.uid.as_raw())))
-        {
+        match classify_lookup(maknae_io::user_by_name(name).map(|u| u.map(|u| u.uid.as_raw()))) {
             Lookup::Found(uid) => Ok(Some(uid)),
             Lookup::Absent => Ok(None),
             Lookup::Failed(errno) => Err(errno),
@@ -2333,16 +2334,16 @@ mod tests {
         bindings: maknae_config::Bindings,
     ) -> Result<PolicySource, AuthzBasicError> {
         let lookups = resolve_uid_map_with(&policy, &bindings, &[], classify(lookup_uid))?;
-        PolicySource::from_lookups(
+        PolicySource::from_lookups(Parts {
             policy,
             bindings,
             lookups,
-            lookup_uid,
-            HostLookups::HOST,
-            Agents::Load(Default::default()),
-            principal(),
-            paths(),
-        )
+            lookup: lookup_uid,
+            hosts: HostLookups::HOST,
+            agents: Agents::Load(Default::default()),
+            principal: principal(),
+            paths: paths(),
+        })
     }
 
     fn bound(body: &str) -> maknae_config::Bindings {
@@ -2434,16 +2435,18 @@ mod tests {
     }
 
     fn source_with_lookups(lookups: &[(&str, Option<u32>)]) -> PolicySource {
-        PolicySource::from_lookups(
-            parse(EMPTY),
-            bound("schema_version: 1\nbindings:\n  admin: [\"alice\"]\n  user: [\"ghost\"]\n"),
-            lookups.iter().map(|(n, u)| (n.to_string(), *u)).collect(),
-            lookup_uid,
-            HostLookups::HOST,
-            Agents::Load(Default::default()),
-            principal(),
-            paths(),
-        )
+        PolicySource::from_lookups(Parts {
+            policy: parse(EMPTY),
+            bindings: bound(
+                "schema_version: 1\nbindings:\n  admin: [\"alice\"]\n  user: [\"ghost\"]\n",
+            ),
+            lookups: lookups.iter().map(|(n, u)| (n.to_string(), *u)).collect(),
+            lookup: lookup_uid,
+            hosts: HostLookups::HOST,
+            agents: Agents::Load(Default::default()),
+            principal: principal(),
+            paths: paths(),
+        })
         .unwrap()
     }
 
@@ -4200,16 +4203,16 @@ mod tests {
     ) -> Result<PolicySource, AuthzBasicError> {
         let bindings = bound(ADMIN_ROOT);
         let lookups = resolve_uid_map_with(&policy, &bindings, &[], lookup)?;
-        PolicySource::from_lookups(
+        PolicySource::from_lookups(Parts {
             policy,
             bindings,
             lookups,
-            lookup_uid,
-            HostLookups::HOST,
-            Agents::Load(Default::default()),
-            principal(),
-            paths(),
-        )
+            lookup: lookup_uid,
+            hosts: HostLookups::HOST,
+            agents: Agents::Load(Default::default()),
+            principal: principal(),
+            paths: paths(),
+        })
     }
 
     const ZED: &str = "  zed:\n    permissions:\n      allow: [\"Read(~/docs/**)\"]\n      deny: [\"Read(~/docs/secret/**)\"]\n    actions:\n      allow: [\"fs.*\", \"session.prompt\"]\n    models:\n      allow: [\"openai/gpt-5\"]\n";
@@ -6631,6 +6634,56 @@ mod tests {
                     "{got:?}"
                 );
             }
+        }
+
+        fn enoent_account(uid: u32) -> Result<Option<HostAccount>, String> {
+            maknae_io::not_found_is_none(Err::<Option<HostAccount>, _>(nix::errno::Errno::ENOENT))
+                .map_err(|e| format!("uid {uid}: {e}"))
+        }
+
+        fn erange_account(uid: u32) -> Result<Option<HostAccount>, String> {
+            maknae_io::not_found_is_none(Err::<Option<HostAccount>, _>(nix::errno::Errno::ERANGE))
+                .map_err(|e| format!("uid {uid}: {e}"))
+        }
+
+        #[test]
+        fn a_not_found_errno_for_an_enrolled_uid_is_no_such_account_and_the_load_succeeds() {
+            let enoent = HostLookups {
+                account: enoent_account,
+                ..HOSTS
+            };
+            let src = PolicySource::from_parts_with_hosts(
+                parse(SHIPPED),
+                maknae_config::Bindings::missing(),
+                Default::default(),
+                load(vec![hobi()], &[]),
+                enoent,
+                principal(),
+                paths(),
+            )
+            .unwrap();
+            assert_eq!(src.agent_uid("hobi"), None);
+            assert_eq!(
+                src.identity_problems(),
+                [refused(
+                    "hobi",
+                    HOBI,
+                    AgentRefusal::Account(AccountRefusal::NoSuchAccount("hobi-svc".into()))
+                )]
+            );
+            let erange = PolicySource::from_parts_with_hosts(
+                parse(SHIPPED),
+                maknae_config::Bindings::missing(),
+                Default::default(),
+                load(vec![hobi()], &[]),
+                HostLookups {
+                    account: erange_account,
+                    ..HOSTS
+                },
+                principal(),
+                paths(),
+            );
+            assert!(matches!(erange, Err(AuthzBasicError::AgentLookup(_))));
         }
 
         #[test]

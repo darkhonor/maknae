@@ -1204,6 +1204,10 @@ async fn seed(
         revision,
         ProvenanceKind::Seed,
     )?;
+    let changes = identity::agent_changes(&IdentityLayer::default(), inputs.identity);
+    if !changes.is_empty() {
+        audit.agents(revision, &changes).await?;
+    }
     audit.intent_seed(revision, authorized).await?;
     audit.baseline(revision, inputs.baseline_events).await?;
     let rejected = match prior {

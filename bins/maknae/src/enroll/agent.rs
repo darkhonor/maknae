@@ -853,7 +853,7 @@ fn check_account(
     host: &HostEnrollment,
     other_agents: &[(String, u32)],
 ) -> Result<u32, EnrollError> {
-    let acct = match nix::unistd::User::from_name(&args.account)
+    let acct = match maknae_io::user_by_name(&args.account)
         .map_err(|e| owner_error(&format!("user {}", args.account), e))?
     {
         Some(u) => maknae_io::host_account(u.uid.as_raw())

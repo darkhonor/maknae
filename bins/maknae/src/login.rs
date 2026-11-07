@@ -38,7 +38,7 @@ pub(crate) fn now_unix() -> Result<u64, String> {
 
 pub(crate) fn local_username() -> Result<String, String> {
     let uid = nix::unistd::geteuid();
-    let user = nix::unistd::User::from_uid(uid)
+    let user = maknae_io::user_by_uid(uid.as_raw())
         .map_err(|e| format!("cannot look up uid {uid}: {e}"))?
         .ok_or_else(|| format!("uid {uid} has no account name"))?;
     userpass_username_is_acceptable(&user.name).map_err(|why| {

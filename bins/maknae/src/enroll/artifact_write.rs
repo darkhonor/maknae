@@ -75,14 +75,14 @@ impl OwnerResolver for SelfOwnerResolver {
 }
 
 fn group_gid(name: &str) -> Result<Gid, EnrollError> {
-    nix::unistd::Group::from_name(name)
+    maknae_io::group_by_name(name)
         .map_err(|e| EnrollError::Owner(format!("group {name}: {e}")))?
         .map(|g| g.gid)
         .ok_or_else(|| EnrollError::Owner(format!("no such group: {name}")))
 }
 
 fn user_uid_gid(name: &str) -> Result<(Uid, Gid), EnrollError> {
-    let u = nix::unistd::User::from_name(name)
+    let u = maknae_io::user_by_name(name)
         .map_err(|e| EnrollError::Owner(format!("user {name}: {e}")))?
         .ok_or_else(|| EnrollError::Owner(format!("no such user: {name}")))?;
     Ok((u.uid, u.gid))

@@ -420,7 +420,7 @@ pub trait PasswdLookup {
     fn lookup(&self, uid: u32) -> Option<(String, PathBuf, u32)>;
 }
 
-/// The real passwd lookup, via `nix::unistd::User::from_uid` (spec §4.1's path
+/// The real passwd lookup, via `maknae_io::user_by_uid` (spec §4.1's path
 /// rule: `getpwuid($SUDO_UID)`, never `$HOME`).
 pub struct RealPasswd;
 
@@ -437,9 +437,7 @@ fn canonical_home(dir: PathBuf) -> PathBuf {
 
 impl PasswdLookup for RealPasswd {
     fn lookup(&self, uid: u32) -> Option<(String, PathBuf, u32)> {
-        let user = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid))
-            .ok()
-            .flatten()?;
+        let user = maknae_io::user_by_uid(uid).ok().flatten()?;
         Some((user.name, canonical_home(user.dir), user.gid.as_raw()))
     }
 }
@@ -1709,14 +1707,14 @@ async fn place_graph_key(
 // ============================================================================
 
 fn is_already_maknae_group_member(name: &str, uid: u32) -> Result<bool, EnrollError> {
-    let grp = nix::unistd::Group::from_name("maknae")
+    let grp = maknae_io::group_by_name("maknae")
         .map_err(|e| EnrollError::Owner(format!("group maknae: {e}")))?
         .ok_or_else(|| EnrollError::Owner("no `maknae` group".to_string()))?;
     if grp.mem.iter().any(|m| m == name) {
         return Ok(true);
     }
-    if let Some(user) = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid))
-        .map_err(|e| EnrollError::Owner(e.to_string()))?
+    if let Some(user) =
+        maknae_io::user_by_uid(uid).map_err(|e| EnrollError::Owner(e.to_string()))?
     {
         if user.gid == grp.gid {
             return Ok(true);
@@ -2081,7 +2079,7 @@ const LEGACY_INCLUDE_SIGNATURE: &str =
 /// `u:_maknae:rx` home ACL and enroll's AppArmor local include. The daemon
 /// needs neither (#365). Linux, root context; warn-only, like every enroll grant.
 fn revoke_legacy_home_access(home: &Path, verbose: bool) {
-    if let Ok(Some(user)) = nix::unistd::User::from_name(LEGACY_HOME_ACL_USER) {
+    if let Ok(Some(user)) = maknae_io::user_by_name(LEGACY_HOME_ACL_USER) {
         revoke_home_acl(home, user.uid.as_raw(), verbose);
     }
     if !Path::new("/etc/apparmor.d").is_dir() {
