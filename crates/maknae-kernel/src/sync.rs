@@ -366,6 +366,7 @@ mod tests {
             src.policy().clone(),
             b,
             uids(),
+            maknae_config::AgentsLoad::default(),
             src.principal().clone(),
             src.paths().clone(),
         )
@@ -379,6 +380,7 @@ mod tests {
             maknae_config::parse_authz("schema_version: 1\n").unwrap(),
             bindings,
             uids(),
+            maknae_config::AgentsLoad::default(),
             maknae_config::Principal {
                 name: "op".into(),
                 uid: 1000,
@@ -672,6 +674,86 @@ mod tests {
                     .into()
             )
         );
+    }
+
+    fn hobi_account(uid: u32) -> Result<Option<maknae_io::HostAccount>, String> {
+        Ok((uid == 2001).then(|| maknae_io::HostAccount {
+            uid,
+            name: "hobi-svc".into(),
+            primary_gid: uid,
+            shell: "/usr/sbin/nologin".into(),
+            dir: "/var/empty".into(),
+            named_groups: Vec::new(),
+        }))
+    }
+
+    fn no_daemons() -> Result<maknae_io::DaemonFacts, String> {
+        Ok(maknae_io::DaemonFacts {
+            uids: Vec::new(),
+            gids: Vec::new(),
+        })
+    }
+
+    fn no_group(_: &str) -> Result<Option<u32>, String> {
+        Ok(None)
+    }
+
+    #[test]
+    fn every_constructor_carries_agents() {
+        let agents = maknae_config::AgentsLoad {
+            enrollments: vec![maknae_config::AgentEnrollment {
+                id: maknae_config::AgentId::parse("hobi").unwrap(),
+                account: "hobi-svc".into(),
+                uid: 2001,
+                role: maknae_config::AgentRole::User,
+            }],
+            ..Default::default()
+        };
+        let base = source(ROOT_BINDINGS);
+        let parts = PolicySource::from_parts_with_hosts(
+            base.policy().clone(),
+            base.bindings().clone(),
+            uids(),
+            agents,
+            maknae_authz_basic::HostLookups {
+                account: hobi_account,
+                daemons: no_daemons,
+                group: no_group,
+            },
+            base.principal().clone(),
+            base.paths().clone(),
+        )
+        .unwrap();
+        let reloaded = parts.with_bindings(parts.bindings().clone()).unwrap();
+        let live = parts
+            .with_live_bindings(
+                maknae_config::parse_bindings(
+                    "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"eve\"]\n",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let mut resolved = false;
+        let merged = merge_source_with(parts.clone(), Some(&kept_live()), |src, b| {
+            resolved = true;
+            src.with_live_bindings(b)
+        })
+        .unwrap();
+        assert!(resolved);
+        assert!(has(&merged, 4242, ADVERSARY));
+        for (what, src) in [
+            ("from_parts", &parts),
+            ("with_bindings", &reloaded),
+            ("with_live_bindings", &live),
+            ("merge_source_with", &merged.source),
+        ] {
+            assert_eq!(src.agent_uid("hobi"), Some(2001), "{what}");
+            assert_eq!(
+                src.identity_layer("UNCLASSIFIED", None).agents,
+                [("hobi".to_string(), 2001)].into(),
+                "{what}"
+            );
+        }
     }
 
     #[test]

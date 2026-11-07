@@ -92,6 +92,24 @@ impl Snapshot {
         &self.problems
     }
 
+    pub fn agent_uid(&self, id: &str) -> Option<u32> {
+        self.loaded
+            .agents
+            .0
+            .iter()
+            .find(|(_, a)| a.as_str() == id)
+            .map(|(uid, _)| *uid)
+    }
+
+    /// The uids an enrolled agent's `taskers:` names; `Some(None)` where it lists none.
+    pub fn taskers(&self, agent: &str) -> Option<Option<&std::collections::BTreeSet<u32>>> {
+        self.loaded.taskers.0.get(agent).map(Option::as_ref)
+    }
+
+    pub fn agent_of(&self, uid: u32) -> Option<&str> {
+        self.loaded.agents.0.get(&uid).map(String::as_str)
+    }
+
     pub(crate) fn loaded(&self) -> &LoadedPolicy {
         &self.loaded
     }
@@ -179,14 +197,26 @@ impl Compiler {
         digests: &BTreeMap<String, [u8; 32]>,
         parent: &str,
     ) -> Result<(NodeId, String), CompileError> {
+        let (source_id, source) = (self.source_id, self.source.clone());
+        self.section_of(source_id, &source, name, digests, parent)
+    }
+
+    fn section_of(
+        &mut self,
+        source_id: NodeId,
+        source: &str,
+        name: &str,
+        digests: &BTreeMap<String, [u8; 32]>,
+        parent: &str,
+    ) -> Result<(NodeId, String), CompileError> {
         let d = digests
             .get(parent)
             .ok_or_else(|| CompileError::Policy(format!("no digest for section `{parent}`")))?;
-        let key = format!("{}#{name}", self.source);
+        let key = format!("{source}#{name}");
         let mut attrs = Attrs::new();
         attrs.insert(ATTR_SHA256.into(), AttrValue::Str(hex(d)));
         let id = self.add_node(SECTION, key.clone(), attrs);
-        self.add_edge(id, PART_OF, self.source_id);
+        self.add_edge(id, PART_OF, source_id);
         Ok((id, key))
     }
 
@@ -439,6 +469,39 @@ pub fn compile(
         }
     }
 
+    for (id, path, p) in source.agent_policies() {
+        let path = path.to_str().map(str::to_string).ok_or_else(|| {
+            CompileError::Policy(format!("agent {id}'s policy path is not UTF-8"))
+        })?;
+        let source_id = c.add_node(CONFIG_SOURCE, path.clone(), Attrs::new());
+        let name = format!("agents.{id}");
+        let sec = c.section_of(source_id, &path, &name, section_sha256, &name)?;
+        let Some(permissions) = p.entry.permissions.as_ref() else {
+            continue;
+        };
+        for (effect, entries) in [
+            (Effect::Deny, permissions.deny_sources()),
+            (Effect::Allow, permissions.allow_sources()),
+        ] {
+            let word = effect_attrs(effect).1;
+            for (i, entry) in entries.iter().enumerate() {
+                let mut attrs = Attrs::new();
+                attrs.insert(ATTR_ENTRY.into(), AttrValue::Str(entry.clone()));
+                attrs.insert(ATTR_EFFECT.into(), AttrValue::Str(word.into()));
+                c.rule(
+                    format!("rule:agents.{id}.permissions:{word}:{i}"),
+                    attrs,
+                    &sec,
+                    Cited::AgentPath {
+                        agent: id.to_string(),
+                        effect,
+                        source: entry.clone(),
+                    },
+                );
+            }
+        }
+    }
+
     let builder = c.nodes.into_iter().fold(
         GraphBuilder::new(GraphSpace::Kernel, revision),
         GraphBuilder::node,
@@ -455,6 +518,8 @@ pub fn compile(
         action_grants,
         destinations,
         subjects: source.subject_grants().clone(),
+        agents: source.agent_uids(),
+        taskers: source.agent_taskers().clone(),
     };
     Ok(Snapshot {
         graph,
@@ -577,6 +642,7 @@ mod tests {
                 ("mallory", 666),
                 ("root", 0),
             ]),
+            maknae_config::AgentsLoad::default(),
             principal(),
             crate::PolicyPaths::in_dir(std::path::Path::new(DIR)),
         )
@@ -1075,6 +1141,7 @@ mod tests {
             maknae_config::parse_bindings(&format!("schema_version: 1\nbindings:\n{body}"))
                 .unwrap(),
             uids(&[("root", 0), ("toor", 0), ("alex", 1000)]),
+            maknae_config::AgentsLoad::default(),
             principal(),
             crate::PolicyPaths::in_dir(std::path::Path::new(DIR)),
         )

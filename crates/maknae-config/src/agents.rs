@@ -366,6 +366,43 @@ pub enum AccountRefusal {
     AccountInUse { account: String, agent: String },
 }
 
+impl std::fmt::Display for AccountRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoSuchAccount(a) => write!(
+                f,
+                "no account named {a} exists on this host; create a service account for the Agent Daemon first"
+            ),
+            Self::RootAccount => write!(
+                f,
+                "the account is root; run the Agent Daemon under its own unprivileged service account"
+            ),
+            Self::IsPrincipal => write!(
+                f,
+                "the account is the principal's own account; run the Agent Daemon under a separate service account"
+            ),
+            Self::MaknaeDaemonAccount(a) => write!(
+                f,
+                "account {a} belongs to a Maknae daemon or can read its files; run the Agent Daemon under its own service account"
+            ),
+            Self::MaknaeGroupMember => write!(
+                f,
+                "the account is in the maknae group, which grants read of Maknae's configuration; use an account outside it"
+            ),
+            Self::LoginShell(s) => write!(
+                f,
+                "the account's shell {s} is not a non-login shell; give the Agent Daemon account /usr/sbin/nologin (Linux) or /usr/bin/false (macOS)"
+            ),
+            Self::AccountInUse { account, agent } => write!(
+                f,
+                "account {account} is already enrolled for agent {agent}; each Agent Daemon needs its own account"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AccountRefusal {}
+
 pub struct HostAccounts<'a> {
     pub maknae_gid: Option<u32>,
     pub principal_uid: u32,

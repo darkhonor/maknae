@@ -16,13 +16,7 @@ pub enum AgentEnrollError {
     InvalidCidr(String),
     CatchAllCidr(String),
     HostBitsSet { given: String, network: String },
-    NoSuchAccount(String),
-    RootAccount,
-    IsPrincipal,
-    MaknaeDaemonAccount(String),
-    MaknaeGroupMember,
-    LoginShell(String),
-    AccountInUse { account: String, agent: String },
+    Account(AccountRefusal),
 }
 
 impl fmt::Display for AgentEnrollError {
@@ -47,34 +41,7 @@ impl fmt::Display for AgentEnrollError {
             Self::HostBitsSet { given, network } => {
                 write!(f, "{given} has host bits set; use {network}")
             }
-            Self::NoSuchAccount(a) => write!(
-                f,
-                "no account named {a} exists on this host; create a service account for the Agent Daemon first"
-            ),
-            Self::RootAccount => write!(
-                f,
-                "the account is root; run the Agent Daemon under its own unprivileged service account"
-            ),
-            Self::IsPrincipal => write!(
-                f,
-                "the account is the principal's own account; run the Agent Daemon under a separate service account"
-            ),
-            Self::MaknaeDaemonAccount(a) => write!(
-                f,
-                "account {a} belongs to a Maknae daemon or can read its files; run the Agent Daemon under its own service account"
-            ),
-            Self::MaknaeGroupMember => write!(
-                f,
-                "the account is in the maknae group, which grants read of Maknae's configuration; use an account outside it"
-            ),
-            Self::LoginShell(s) => write!(
-                f,
-                "the account's shell {s} is not a non-login shell; give the Agent Daemon account /usr/sbin/nologin (Linux) or /usr/bin/false (macOS)"
-            ),
-            Self::AccountInUse { account, agent } => write!(
-                f,
-                "account {account} is already enrolled for agent {agent}; each Agent Daemon needs its own account"
-            ),
+            Self::Account(r) => write!(f, "{r}"),
         }
     }
 }
@@ -89,17 +56,7 @@ impl From<InvalidAgentId> for AgentEnrollError {
 
 impl From<AccountRefusal> for AgentEnrollError {
     fn from(r: AccountRefusal) -> Self {
-        match r {
-            AccountRefusal::NoSuchAccount(a) => Self::NoSuchAccount(a),
-            AccountRefusal::RootAccount => Self::RootAccount,
-            AccountRefusal::IsPrincipal => Self::IsPrincipal,
-            AccountRefusal::MaknaeDaemonAccount(a) => Self::MaknaeDaemonAccount(a),
-            AccountRefusal::MaknaeGroupMember => Self::MaknaeGroupMember,
-            AccountRefusal::LoginShell(s) => Self::LoginShell(s),
-            AccountRefusal::AccountInUse { account, agent } => {
-                Self::AccountInUse { account, agent }
-            }
-        }
+        Self::Account(r)
     }
 }
 
@@ -457,26 +414,36 @@ mod tests {
         let h = host(&[]);
         assert_eq!(
             service_account_check(None, "ghost", &hobi(), &h).map_err(AgentEnrollError::from),
-            Err(AgentEnrollError::NoSuchAccount("ghost".into()))
+            Err(AgentEnrollError::Account(AccountRefusal::NoSuchAccount(
+                "ghost".into()
+            )))
         );
         let mut a = acct();
         a.uid = 0;
-        assert_eq!(check(&a, &h), Err(AgentEnrollError::RootAccount));
+        assert_eq!(
+            check(&a, &h),
+            Err(AgentEnrollError::Account(AccountRefusal::RootAccount))
+        );
         let mut a = acct();
         a.uid = 1000;
-        assert_eq!(check(&a, &h), Err(AgentEnrollError::IsPrincipal));
+        assert_eq!(
+            check(&a, &h),
+            Err(AgentEnrollError::Account(AccountRefusal::IsPrincipal))
+        );
         let mut a = acct();
         a.uid = 970;
         assert_eq!(
             check(&a, &h),
-            Err(AgentEnrollError::MaknaeDaemonAccount("hobi-svc".into()))
+            Err(AgentEnrollError::Account(
+                AccountRefusal::MaknaeDaemonAccount("hobi-svc".into())
+            ))
         );
         let mut a = acct();
         a.name = "_maknae-egress".into();
         assert_eq!(
             check(&a, &h),
-            Err(AgentEnrollError::MaknaeDaemonAccount(
-                "_maknae-egress".into()
+            Err(AgentEnrollError::Account(
+                AccountRefusal::MaknaeDaemonAccount("_maknae-egress".into())
             ))
         );
         let mut a = acct();
@@ -484,34 +451,39 @@ mod tests {
         a.named_groups = vec![970];
         assert_eq!(
             check(&a, &h),
-            Err(AgentEnrollError::MaknaeDaemonAccount("hobi-svc".into()))
+            Err(AgentEnrollError::Account(
+                AccountRefusal::MaknaeDaemonAccount("hobi-svc".into())
+            ))
         );
         let mut a = acct();
         a.name = "egress-helper".into();
         a.named_groups = vec![990, 971];
         assert_eq!(
             check(&a, &h),
-            Err(AgentEnrollError::MaknaeDaemonAccount(
-                "egress-helper".into()
+            Err(AgentEnrollError::Account(
+                AccountRefusal::MaknaeDaemonAccount("egress-helper".into())
             ))
         );
         let mut a = acct();
         a.primary_gid = 980;
         a.named_groups = vec![980];
-        assert_eq!(check(&a, &h), Err(AgentEnrollError::MaknaeGroupMember));
+        assert_eq!(
+            check(&a, &h),
+            Err(AgentEnrollError::Account(AccountRefusal::MaknaeGroupMember))
+        );
         let mut member = acct();
         member.named_groups = vec![990, 980];
         assert_eq!(
             check(&member, &host(&[])),
-            Err(AgentEnrollError::MaknaeGroupMember)
+            Err(AgentEnrollError::Account(AccountRefusal::MaknaeGroupMember))
         );
         let others = vec![("suga".to_string(), 990)];
         assert_eq!(
             check(&acct(), &host(&others)),
-            Err(AgentEnrollError::AccountInUse {
+            Err(AgentEnrollError::Account(AccountRefusal::AccountInUse {
                 account: "hobi-svc".into(),
                 agent: "suga".into()
-            })
+            }))
         );
     }
 
@@ -553,7 +525,9 @@ mod tests {
             a.shell = format!(" {sh} ");
             assert_eq!(
                 check(&a, &h),
-                Err(AgentEnrollError::LoginShell(sh.into())),
+                Err(AgentEnrollError::Account(AccountRefusal::LoginShell(
+                    sh.into()
+                ))),
                 "{sh:?}"
             );
         }
@@ -562,7 +536,9 @@ mod tests {
             a.shell = empty.into();
             assert_eq!(
                 check(&a, &h),
-                Err(AgentEnrollError::LoginShell("(empty)".into())),
+                Err(AgentEnrollError::Account(AccountRefusal::LoginShell(
+                    "(empty)".into()
+                ))),
                 "{empty:?}"
             );
         }
@@ -575,7 +551,9 @@ mod tests {
         let others = vec![("suga".to_string(), 990)];
         assert_eq!(
             check(&a, &host(&others)),
-            Err(AgentEnrollError::LoginShell("/bin/bash".into()))
+            Err(AgentEnrollError::Account(AccountRefusal::LoginShell(
+                "/bin/bash".into()
+            )))
         );
     }
 
@@ -596,23 +574,35 @@ mod tests {
                 },
                 "g has host bits set; use n",
             ),
-            (AgentEnrollError::NoSuchAccount("ghost".into()), "ghost"),
-            (AgentEnrollError::RootAccount, "root"),
-            (AgentEnrollError::IsPrincipal, "principal"),
             (
-                AgentEnrollError::MaknaeDaemonAccount("dm".into()),
+                AgentEnrollError::Account(AccountRefusal::NoSuchAccount("ghost".into())),
+                "ghost",
+            ),
+            (
+                AgentEnrollError::Account(AccountRefusal::RootAccount),
+                "root",
+            ),
+            (
+                AgentEnrollError::Account(AccountRefusal::IsPrincipal),
+                "principal",
+            ),
+            (
+                AgentEnrollError::Account(AccountRefusal::MaknaeDaemonAccount("dm".into())),
                 "account dm",
             ),
-            (AgentEnrollError::MaknaeGroupMember, "maknae group"),
             (
-                AgentEnrollError::LoginShell("/bin/bash".into()),
+                AgentEnrollError::Account(AccountRefusal::MaknaeGroupMember),
+                "maknae group",
+            ),
+            (
+                AgentEnrollError::Account(AccountRefusal::LoginShell("/bin/bash".into())),
                 "shell /bin/bash is not a non-login shell",
             ),
             (
-                AgentEnrollError::AccountInUse {
+                AgentEnrollError::Account(AccountRefusal::AccountInUse {
                     account: "a".into(),
                     agent: "b".into(),
-                },
+                }),
                 "account a is already enrolled for agent b",
             ),
         ];

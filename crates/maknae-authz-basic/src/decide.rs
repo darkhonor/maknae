@@ -33,6 +33,23 @@ pub(crate) struct LoadedPolicy {
     pub(crate) action_grants: ActionGrants,
     pub(crate) destinations: DestinationGrants,
     pub(crate) subjects: SubjectGrants,
+    pub(crate) agents: AgentUids,
+    pub(crate) taskers: AgentTaskers,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub(crate) struct AgentUids(pub(crate) std::collections::BTreeMap<u32, String>);
+
+/// Each enrolled agent's `taskers:` resolved to uids; `None` where its policy lists none.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub(crate) struct AgentTaskers(
+    pub(crate) std::collections::BTreeMap<String, Option<std::collections::BTreeSet<u32>>>,
+);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SubjectOrigin {
+    Authz,
+    Agent(String),
 }
 
 /// `subjects:` entries by resolved uid; a name that resolves to no account has none.
@@ -45,6 +62,31 @@ pub(crate) struct SubjectEntry {
     pub(crate) permissions: Option<maknae_config::SubjectPermissions>,
     pub(crate) actions: Option<SubjectActionSet>,
     pub(crate) models: Option<Vec<maknae_config::ModelRef>>,
+    pub(crate) origin: SubjectOrigin,
+}
+
+impl SubjectEntry {
+    fn section(&self) -> String {
+        match &self.origin {
+            SubjectOrigin::Authz => format!("subjects.{}", self.name),
+            SubjectOrigin::Agent(id) => format!("agents.{id}.policy"),
+        }
+    }
+
+    fn cited_path(&self, effect: Effect, source: String) -> Cited {
+        match &self.origin {
+            SubjectOrigin::Authz => Cited::SubjectPath {
+                subject: self.name.clone(),
+                effect,
+                source,
+            },
+            SubjectOrigin::Agent(id) => Cited::AgentPath {
+                agent: id.clone(),
+                effect,
+                source,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -77,6 +119,11 @@ pub(crate) enum Cited {
     },
     SubjectPath {
         subject: String,
+        effect: Effect,
+        source: String,
+    },
+    AgentPath {
+        agent: String,
         effect: Effect,
         source: String,
     },
@@ -387,7 +434,7 @@ fn decide_prompt(
             None,
         );
     }
-    if let Some((name, listed)) = subject.and_then(|s| Some((&s.name, s.models.as_ref()?))) {
+    if let Some((entry, listed)) = subject.and_then(|s| Some((s, s.models.as_ref()?))) {
         let model = match req.resource.0.get(RESOURCE_MODEL) {
             Some(AttrValue::Str(m)) => m.as_str(),
             _ => return (Verdict::Indeterminate, None),
@@ -396,7 +443,9 @@ fn decide_prompt(
             return (
                 Verdict::Deny {
                     reason: format!(
-                        "subject {name}: model {model} is not in subjects.{name}.models allow"
+                        "subject {}: model {model} is not in {}.models allow",
+                        entry.name,
+                        entry.section()
                     ),
                 },
                 None,
@@ -643,19 +692,17 @@ fn action_limit(entry: Option<&SubjectEntry>, action: &str) -> Option<Verdict> {
         Some(Class::Admin) if action == "admin.whoami" => return None,
         Some(Class::Admin | Class::Session | Class::Fs | Class::Terminal | Class::Mcp) => {}
     }
-    let name = &entry.name;
+    let (name, section) = (&entry.name, entry.section());
     if let Some(source) = set.deny.get(action) {
         return Some(Verdict::Deny {
-            reason: format!(
-                "subject {name}: {action} denied by subjects.{name}.actions entry {source}"
-            ),
+            reason: format!("subject {name}: {action} denied by {section}.actions entry {source}"),
         });
     }
     if set.allow.contains_key(action) {
         None
     } else {
         Some(Verdict::Deny {
-            reason: format!("subject {name}: {action} is not in subjects.{name}.actions allow"),
+            reason: format!("subject {name}: {action} is not in {section}.actions allow"),
         })
     }
 }
@@ -748,7 +795,7 @@ fn decide_fs(
         Some(AttrValue::Str(h)) => Some(std::path::Path::new(h.as_str())),
         Some(_) => return (Verdict::Indeterminate, None),
     };
-    let subject = entry.and_then(|e| e.permissions.as_ref().map(|p| (e.name.as_str(), p)));
+    let subject = entry.and_then(|e| e.permissions.as_ref().map(|p| (e, p)));
     let set = subject.map(|(_, p)| p);
     let matched = match scope {
         FsScope::Read => {
@@ -765,18 +812,14 @@ fn decide_fs(
         return (Verdict::Indeterminate, None);
     };
     match (matched, subject) {
-        (maknae_config::Match3::DenyMatch { source }, Some((name, _)))
+        (maknae_config::Match3::DenyMatch { source }, Some((e, _)))
             if !lp.policy.deny_sources().contains(&source) =>
         {
             (
                 Verdict::Deny {
-                    reason: format!("denied by subjects.{name}.permissions entry {source}"),
+                    reason: format!("denied by {}.permissions entry {source}", e.section()),
                 },
-                Some(Cited::SubjectPath {
-                    subject: name.to_string(),
-                    effect: Effect::Deny,
-                    source,
-                }),
+                Some(e.cited_path(Effect::Deny, source)),
             )
         }
         (maknae_config::Match3::DenyMatch { source }, _) => (
@@ -790,13 +833,9 @@ fn decide_fs(
                 source,
             }),
         ),
-        (maknae_config::Match3::AllowMatch { source }, Some((name, _))) => (
+        (maknae_config::Match3::AllowMatch { source }, Some((e, _))) => (
             permit_with_audit(),
-            Some(Cited::SubjectPath {
-                subject: name.to_string(),
-                effect: Effect::Allow,
-                source,
-            }),
+            Some(e.cited_path(Effect::Allow, source)),
         ),
         (maknae_config::Match3::AllowMatch { source }, None) => (
             permit_with_audit(),
@@ -864,6 +903,8 @@ mod tests {
             action_grants: ActionGrants::default(),
             destinations: DestinationGrants::default(),
             subjects: SubjectGrants::default(),
+            agents: Default::default(),
+            taskers: Default::default(),
         }
     }
 
@@ -1991,6 +2032,8 @@ mod tests {
             action_grants: crate::validate_grants(&policy.action_grants).unwrap(),
             destinations,
             subjects: SubjectGrants::default(),
+            agents: Default::default(),
+            taskers: Default::default(),
             policy,
         }
     }
@@ -2771,6 +2814,8 @@ mod tests {
             action_grants: crate::validate_grants(&policy.action_grants).unwrap(),
             destinations: crate::validate_destinations(&policy.destinations).unwrap(),
             subjects: crate::validate_subjects(&policy, &lookups).unwrap(),
+            agents: Default::default(),
+            taskers: Default::default(),
             policy,
         }
     }

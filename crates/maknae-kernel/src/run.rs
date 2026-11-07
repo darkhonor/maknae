@@ -3973,6 +3973,15 @@ impl<E: AuditEmit + Send + Sync> BootAudit for GraphBootAudit<'_, E> {
         }
     }
 
+    fn agents(
+        &mut self,
+        revision: u64,
+        changes: &[maknae_graph::identity::AgentChange],
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        let reasons: Vec<String> = changes.iter().map(agent_change_reason).collect();
+        self.write_ahead_each(GRAPH_IDENTITY_ACTION, &reasons, revision, "enrolling")
+    }
+
     fn baseline(
         &mut self,
         revision: u64,
@@ -3987,6 +3996,19 @@ impl<E: AuditEmit + Send + Sync> BootAudit for GraphBootAudit<'_, E> {
         events: &[String],
     ) -> impl Future<Output = Result<(), StoreError>> + Send {
         self.write_ahead_each(GRAPH_SYNC_ACTION, events, revision, "syncing")
+    }
+}
+
+fn agent_change_reason(c: &maknae_graph::identity::AgentChange) -> String {
+    match c {
+        maknae_graph::identity::AgentChange::Enrolled { agent, uid } => format!(
+            "agent '{}' (uid {uid}) is enrolled",
+            maknae_authz_basic::shown(agent)
+        ),
+        maknae_graph::identity::AgentChange::Removed { agent, uid } => format!(
+            "agent '{}' (uid {uid}) is no longer enrolled",
+            maknae_authz_basic::shown(agent)
+        ),
     }
 }
 
@@ -8631,6 +8653,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             maknae_config::parse_authz("schema_version: 1\n").unwrap(),
             maknae_config::parse_bindings("schema_version: 1\n").unwrap(),
             Default::default(),
+            maknae_config::AgentsLoad::default(),
             maknae_config::Principal {
                 name: "op".into(),
                 uid: 1000,
@@ -8693,6 +8716,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             )
             .unwrap(),
             [("root".to_string(), 0)].into_iter().collect(),
+            maknae_config::AgentsLoad::default(),
             maknae_config::Principal {
                 name: "op".into(),
                 uid: 1000,
@@ -8756,6 +8780,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             [("root".to_string(), 0), ("seven".to_string(), 7)]
                 .into_iter()
                 .collect(),
+            maknae_config::AgentsLoad::default(),
             maknae_config::Principal {
                 name: "op".into(),
                 uid: 1000,
@@ -9008,6 +9033,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             )
             .unwrap(),
             [("root".to_string(), 0)].into_iter().collect(),
+            maknae_config::AgentsLoad::default(),
             maknae_config::Principal {
                 name: "op".into(),
                 uid: 1000,
@@ -9298,6 +9324,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             maknae_config::parse_authz("schema_version: 1\n").unwrap(),
             maknae_config::Bindings::missing(),
             Default::default(),
+            maknae_config::AgentsLoad::default(),
             maknae_config::Principal {
                 name: "op".into(),
                 uid: 1000,
@@ -9332,6 +9359,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
                 maknae_config::parse_bindings(b).unwrap()
             }),
             [("root".to_string(), 0)].into_iter().collect(),
+            maknae_config::AgentsLoad::default(),
             maknae_config::Principal {
                 name: "op".into(),
                 uid: 1000,
@@ -15800,6 +15828,97 @@ mod reload_tests {
                 )
             })
             .collect()
+    }
+
+    fn hobi_account(uid: u32) -> Result<Option<maknae_io::HostAccount>, String> {
+        Ok((uid == 2001).then(|| maknae_io::HostAccount {
+            uid,
+            name: "hobi-svc".into(),
+            primary_gid: uid,
+            shell: "/usr/sbin/nologin".into(),
+            dir: "/var/empty".into(),
+            named_groups: Vec::new(),
+        }))
+    }
+
+    fn no_daemons() -> Result<maknae_io::DaemonFacts, String> {
+        Ok(maknae_io::DaemonFacts {
+            uids: Vec::new(),
+            gids: Vec::new(),
+        })
+    }
+
+    fn no_group(_: &str) -> Result<Option<u32>, String> {
+        Ok(None)
+    }
+
+    #[tokio::test]
+    async fn a_reload_records_each_agent_enrolled_and_removed() {
+        let fx = fixture("agents_recorded", AUTHZ, Some(ROOT_ADMIN)).await;
+        fx.baseline().set_hosts(maknae_authz_basic::HostLookups {
+            account: hobi_account,
+            daemons: no_daemons,
+            group: no_group,
+        });
+        let dir = fx.dir.join("agents").join("hobi");
+        std::fs::create_dir_all(&dir).unwrap();
+        for d in [fx.dir.join("agents"), dir.clone()] {
+            std::fs::set_permissions(
+                &d,
+                <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o750),
+            )
+            .unwrap();
+        }
+        write_0640(
+            &dir.join("enrollment.yaml"),
+            "agent_id: hobi\naccount: hobi-svc\nuid: 2001\nrole: user\n",
+        );
+        let applied = bounded(fx.reloader.run()).await.unwrap();
+        assert!(applied.persisted);
+        assert_eq!(whoami_as(&fx, 2001).1, Some("user"));
+        assert_eq!(fx.baseline().snapshot().agent_uid("hobi"), Some(2001));
+        let recs = fx.reload_records();
+        assert_eq!(
+            identity_records(&recs),
+            [(
+                "permit".to_string(),
+                "authorized".to_string(),
+                "agent 'hobi' (uid 2001) is enrolled".to_string()
+            )]
+        );
+        let tail: Vec<&str> = recs[recs.len() - 4..]
+            .iter()
+            .map(|r| r.action.as_str())
+            .collect();
+        assert_eq!(
+            tail,
+            [
+                "graph.identity",
+                "graph.transition",
+                "graph.checkpoint",
+                "graph.reload"
+            ]
+        );
+
+        std::fs::remove_file(dir.join("enrollment.yaml")).unwrap();
+        bounded(fx.reloader.run()).await.unwrap();
+        assert_eq!(whoami_as(&fx, 2001).1, None);
+        assert_eq!(fx.baseline().snapshot().agent_uid("hobi"), None);
+        assert_eq!(
+            identity_records(&fx.reload_records())[1..],
+            [
+                (
+                    "permit".to_string(),
+                    "authorized".to_string(),
+                    "agent 'hobi' (uid 2001) is no longer enrolled".to_string()
+                ),
+                (
+                    "deny".to_string(),
+                    "unavailable".to_string(),
+                    "agents/hobi is skipped: it holds no enrollment.yaml".to_string()
+                )
+            ]
+        );
     }
 
     #[tokio::test]

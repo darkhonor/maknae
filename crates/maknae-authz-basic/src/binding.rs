@@ -16,7 +16,9 @@
 use crate::role::Role;
 use maknae_graph::graph::Graph;
 use maknae_graph::identity::{bindings_section_key, claim_names, subject_key};
-use maknae_graph::kernel::{ADVERSARY, ATTR_NAME, ATTR_UID, BINDS, CONTAINED, SECTION, SUBJECT};
+use maknae_graph::kernel::{
+    ADVERSARY, ATTR_NAME, ATTR_UID, BINDS, CONTAINED, ENROLLS, SECTION, SUBJECT,
+};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -62,6 +64,39 @@ pub enum IdentityProblem {
     PrincipalAdmin {
         uid: u32,
     },
+    AgentRefused {
+        agent: String,
+        uid: u32,
+        why: AgentRefusal,
+    },
+    AgentSkipped {
+        entry: String,
+        why: &'static str,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AgentRefusal {
+    Account(maknae_config::AccountRefusal),
+    AccountChanged { now: String },
+    Bound { role: &'static str },
+}
+
+impl std::fmt::Display for AgentRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Account(r) => write!(f, "{r}"),
+            Self::AccountChanged { now } => write!(
+                f,
+                "the enrolled uid now belongs to account '{}'; enroll the agent again",
+                shown(now)
+            ),
+            Self::Bound { role } => write!(
+                f,
+                "bindings.yaml lists the account under {role}; an agent's role comes from its enrollment"
+            ),
+        }
+    }
 }
 
 /// A name as a problem's text prints it: `escape_default`, then `,` as `\,`. A name
@@ -98,16 +133,21 @@ impl IdentityProblem {
             Self::CarriedForward { .. } => "carried_forward",
             Self::Released { .. } => "released",
             Self::PrincipalAdmin { .. } => "principal_admin",
+            Self::AgentRefused { .. } => "agent_refused",
+            Self::AgentSkipped { .. } => "agent_skipped",
         }
     }
 
     pub fn uid(&self) -> Option<u32> {
         match self {
-            Self::Unresolved { .. } | Self::UnresolvedAdversary { .. } => None,
+            Self::Unresolved { .. }
+            | Self::UnresolvedAdversary { .. }
+            | Self::AgentSkipped { .. } => None,
             Self::Contained { uid, .. }
             | Self::Unbound { uid, .. }
             | Self::CarriedForward { uid, .. }
             | Self::Released { uid, .. }
+            | Self::AgentRefused { uid, .. }
             | Self::PrincipalAdmin { uid } => Some(*uid),
         }
     }
@@ -124,6 +164,8 @@ impl IdentityProblem {
                 .chain(overrides.iter().map(|(n, _)| n.clone()))
                 .collect(),
             Self::Released { name, .. } => vec![name.clone()],
+            Self::AgentRefused { agent, .. } => vec![agent.clone()],
+            Self::AgentSkipped { entry, .. } => vec![entry.clone()],
             Self::PrincipalAdmin { .. } => Vec::new(),
         }
     }
@@ -138,6 +180,15 @@ impl IdentityProblem {
                 .collect(),
             Self::Released { .. } => vec![ADVERSARY],
             Self::PrincipalAdmin { .. } => vec![Role::Admin.key()],
+            Self::AgentRefused {
+                why: AgentRefusal::Bound { role },
+                ..
+            } => vec![*role],
+            Self::AgentRefused {
+                why: AgentRefusal::Account(_) | AgentRefusal::AccountChanged { .. },
+                ..
+            }
+            | Self::AgentSkipped { .. } => Vec::new(),
         }
     }
 }
@@ -198,6 +249,14 @@ impl std::fmt::Display for IdentityProblem {
                 f,
                 "uid {uid}, the enrolled principal, now holds admin: bindings.yaml has no bindings: key"
             ),
+            Self::AgentRefused { agent, uid, why } => write!(
+                f,
+                "agent '{}' (uid {uid}) is not enrolled: {why}",
+                shown(agent)
+            ),
+            Self::AgentSkipped { entry, why } => {
+                write!(f, "agents/{} is skipped: {why}", shown(entry))
+            }
         }
     }
 }
@@ -301,16 +360,19 @@ impl GraphBindings {
         Self { graph, explicit }
     }
 
-    /// `contained` is consulted before `binds`, so containment outranks any binding.
+    /// `contained` is consulted before `binds`, so containment outranks any binding. An
+    /// enrolled agent resolves by its hops before the principal shortcut.
     pub(crate) fn role_for(&self, uid: u32, principal_uid: u32) -> Resolution {
-        if !self.explicit {
+        let subject = self.graph.lookup(SUBJECT, &subject_key(uid));
+        let enrolled = subject.is_some_and(|s| self.graph.in_edges(s.id, ENROLLS).next().is_some());
+        if !self.explicit && !enrolled {
             return if uid == principal_uid {
                 Resolution::Role(Role::Admin)
             } else {
                 Resolution::NoRole
             };
         }
-        let Some(subject) = self.graph.lookup(SUBJECT, &subject_key(uid)) else {
+        let Some(subject) = subject else {
             return Resolution::NoRole;
         };
         if self.graph.out_edges(subject.id, CONTAINED).next().is_some() {
@@ -437,7 +499,9 @@ impl GraphBindings {
                 IdentityProblem::Contained { .. }
                 | IdentityProblem::CarriedForward { .. }
                 | IdentityProblem::Released { .. }
-                | IdentityProblem::PrincipalAdmin { .. } => continue,
+                | IdentityProblem::PrincipalAdmin { .. }
+                | IdentityProblem::AgentRefused { .. }
+                | IdentityProblem::AgentSkipped { .. } => continue,
             });
         }
         out.sort_by(|a, b| {
@@ -851,6 +915,57 @@ mod tests {
                 vec!["admin"],
                 "uid 501, the enrolled principal, now holds admin: bindings.yaml has no bindings: key",
             ),
+            (
+                IdentityProblem::AgentRefused {
+                    agent: "hobi".into(),
+                    uid: 2001,
+                    why: AgentRefusal::Account(maknae_config::AccountRefusal::LoginShell(
+                        "/bin/bash".into(),
+                    )),
+                },
+                "agent_refused",
+                Some(2001),
+                vec!["hobi"],
+                vec![],
+                "agent 'hobi' (uid 2001) is not enrolled: the account's shell /bin/bash is not a non-login shell; give the Agent Daemon account /usr/sbin/nologin (Linux) or /usr/bin/false (macOS)",
+            ),
+            (
+                IdentityProblem::AgentRefused {
+                    agent: "hobi".into(),
+                    uid: 2001,
+                    why: AgentRefusal::AccountChanged {
+                        now: "new\nsvc".into(),
+                    },
+                },
+                "agent_refused",
+                Some(2001),
+                vec!["hobi"],
+                vec![],
+                "agent 'hobi' (uid 2001) is not enrolled: the enrolled uid now belongs to account 'new\\nsvc'; enroll the agent again",
+            ),
+            (
+                IdentityProblem::AgentRefused {
+                    agent: "hobi".into(),
+                    uid: 2001,
+                    why: AgentRefusal::Bound { role: "user" },
+                },
+                "agent_refused",
+                Some(2001),
+                vec!["hobi"],
+                vec!["user"],
+                "agent 'hobi' (uid 2001) is not enrolled: bindings.yaml lists the account under user; an agent's role comes from its enrollment",
+            ),
+            (
+                IdentityProblem::AgentSkipped {
+                    entry: "a,b".into(),
+                    why: "it is not a directory",
+                },
+                "agent_skipped",
+                None,
+                vec!["a,b"],
+                vec![],
+                "agents/a\\,b is skipped: it is not a directory",
+            ),
         ];
         for (p, kind, uid, names, roles, text) in cases {
             assert_eq!(p.kind(), kind);
@@ -1022,6 +1137,29 @@ mod tests {
     }
 
     #[test]
+    fn an_enrolled_agent_resolves_by_hops_before_the_principal_shortcut() {
+        let mut l = layer(
+            false,
+            &[(2001, "hobi-svc", "user"), (2002, "suga-svc", "guest")],
+        );
+        l.agents = [("hobi".to_string(), 2001), ("suga".to_string(), 2002)].into();
+        let g = GraphBindings::new(graph(&l), SOURCE);
+        let file = resolve(&None, &UidMap::new())
+            .unwrap()
+            .with_agents([(2001, Role::User), (2002, Role::Guest)].into());
+        for (uid, principal, want) in [
+            (2001, 2001, Resolution::Role(Role::User)),
+            (2002, 2002, Resolution::Role(Role::Guest)),
+            (PRINCIPAL_UID, PRINCIPAL_UID, Resolution::Role(Role::Admin)),
+            (4242, PRINCIPAL_UID, Resolution::NoRole),
+        ] {
+            assert_eq!(g.role_for(uid, principal), want, "{uid}");
+            assert_eq!(file.role_for(uid, principal), want, "{uid}");
+        }
+        assert_eq!(g.as_subject_bindings(), None);
+    }
+
+    #[test]
     fn absent_and_empty_bindings_differ() {
         let absent = GraphBindings::new(graph(&layer(false, &[])), SOURCE);
         assert_eq!(
@@ -1050,7 +1188,7 @@ mod tests {
 
     #[test]
     fn explicit_bindings_resolve_by_graph_hops() {
-        let l = layer(
+        let mut l = layer(
             true,
             &[
                 (1000, "alex", "admin"),
@@ -1058,8 +1196,10 @@ mod tests {
                 (1002, "gus", "guest"),
                 (666, "mallory", "adversary"),
                 (1003, "alice", "admin"),
+                (2001, "hobi-svc", "user"),
             ],
         );
+        l.agents = [("hobi".to_string(), 2001)].into();
         let g = GraphBindings::new(graph(&l), SOURCE);
         assert_eq!(g.role_for(1000, 1000), Resolution::Role(Role::Admin));
         assert_eq!(g.role_for(1001, 1000), Resolution::Role(Role::User));
@@ -1082,12 +1222,17 @@ mod tests {
                 ("mallory", 666),
             ]),
         )
-        .unwrap();
+        .unwrap()
+        .with_agents([(2001, Role::User)].into());
         let want = file.as_subject_bindings();
+        assert!(want
+            .iter()
+            .flatten()
+            .any(|b| b.role == "user" && b.members.contains(&"uid:2001".to_string())));
         assert_eq!(g.as_subject_bindings(), want);
         assert_eq!(Roles::Graph(g.clone()).as_subject_bindings(), want);
         assert_eq!(Roles::File(file.clone()).as_subject_bindings(), want);
-        for uid in [1000, 1001, 1002, 666, 4242] {
+        for uid in [1000, 1001, 1002, 666, 4242, 2001, 2004] {
             assert_eq!(
                 Roles::Graph(g.clone()).role_for(uid, 1000),
                 file.role_for(uid, 1000)
@@ -1262,6 +1407,8 @@ mod tests {
             action_grants: crate::validate_grants(&policy.action_grants).unwrap(),
             destinations: crate::validate_destinations(&policy.destinations).unwrap(),
             subjects: crate::decide::SubjectGrants::default(),
+            agents: Default::default(),
+            taskers: Default::default(),
             policy,
         }
     }

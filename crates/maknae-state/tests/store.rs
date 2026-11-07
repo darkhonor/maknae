@@ -37,6 +37,7 @@ enum Event {
     Migrate(u64, Option<[u8; 32]>, [u8; 32], Vec<u32>),
     Transition(u64, String),
     Released(u64, Vec<Released>),
+    Agents(u64, Vec<maknae_graph::identity::AgentChange>),
     Baseline(u64, Vec<String>),
     Sync(u64, Vec<String>),
 }
@@ -123,6 +124,15 @@ impl BootAudit for Recorder {
             self.store_bytes_at_released = Some(fs::read(p).unwrap());
         }
         ready(refuse(self.fail_released, "released"))
+    }
+
+    fn agents(
+        &mut self,
+        revision: u64,
+        changes: &[maknae_graph::identity::AgentChange],
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        self.events.push(Event::Agents(revision, changes.to_vec()));
+        ready(Ok(()))
     }
 
     fn baseline(
@@ -2657,6 +2667,14 @@ impl BootAudit for Racer<'_> {
         released: &[Released],
     ) -> impl Future<Output = Result<(), StoreError>> + Send {
         self.inner.released(revision, released)
+    }
+
+    fn agents(
+        &mut self,
+        revision: u64,
+        changes: &[maknae_graph::identity::AgentChange],
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        self.inner.agents(revision, changes)
     }
 
     fn sync(

@@ -536,6 +536,13 @@ pub trait BootAudit {
         revision: u64,
         released: &[identity::Released],
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
+    /// Written ahead of the persist of a transition that enrolls or removes these agents;
+    /// an append failure refuses as `released`'s does.
+    fn agents(
+        &mut self,
+        revision: u64,
+        changes: &[identity::AgentChange],
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
     /// Written ahead of a persist that changes the baseline; an append failure refuses
     /// as `released`'s does.
     fn baseline(
@@ -950,6 +957,10 @@ async fn load(
         if !released.is_empty() {
             audit.released(next.revision(), &released).await?;
         }
+        let changes = identity::agent_changes(&layer, &file);
+        if !changes.is_empty() {
+            audit.agents(next.revision(), &changes).await?;
+        }
         if baseline_changed {
             audit
                 .baseline(next.revision(), inputs.baseline_events)
@@ -1121,9 +1132,9 @@ async fn transition(
         Ok(Some(file)) => Some(decode_store(&file, key)?.extracted),
         Err(e) => return Err(StoreError::StoreFileRefused(e.to_string())),
     };
-    let (stored_baseline, stored_sync) = match stored {
-        Some(e) => (e.baseline, e.sync),
-        None => (None, None),
+    let (stored_layer, stored_baseline, stored_sync) = match stored {
+        Some(e) => (Some(e.layer), e.baseline, e.sync),
+        None => (None, None, None),
     };
     let unrecorded = if t.baseline_events.is_empty() {
         proposed.baseline != stored_baseline
@@ -1136,6 +1147,10 @@ async fn transition(
     check_sync(&t, stored_sync.as_ref(), proposed.sync.as_ref())?;
     if !t.released.is_empty() {
         audit.released(revision, t.released).await?;
+    }
+    let changes = identity::agent_changes(&stored_layer.unwrap_or_default(), &proposed.layer);
+    if !changes.is_empty() {
+        audit.agents(revision, &changes).await?;
     }
     if !t.baseline_events.is_empty() {
         audit.baseline(revision, t.baseline_events).await?;

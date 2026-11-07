@@ -19,8 +19,14 @@ pub fn record_fields(p: &IdentityProblem) -> (&'static str, String, &'static str
         IdentityProblem::Released { .. } | IdentityProblem::PrincipalAdmin { .. } => {
             ("permit", p.to_string(), "authorized")
         }
-        IdentityProblem::UnresolvedAdversary { .. } => ("deny", p.to_string(), "unavailable"),
-        _ => ("deny", p.to_string(), "unauthorized"),
+        IdentityProblem::UnresolvedAdversary { .. } | IdentityProblem::AgentSkipped { .. } => {
+            ("deny", p.to_string(), "unavailable")
+        }
+        IdentityProblem::Unresolved { .. }
+        | IdentityProblem::Contained { .. }
+        | IdentityProblem::Unbound { .. }
+        | IdentityProblem::CarriedForward { .. }
+        | IdentityProblem::AgentRefused { .. } => ("deny", p.to_string(), "unauthorized"),
     }
 }
 
@@ -330,6 +336,50 @@ mod tests {
             assert_eq!(record_fields(&p).1, p.to_string());
         }
         assert_eq!(GRAPH_IDENTITY_ACTION, "graph.identity");
+    }
+
+    #[test]
+    fn identity_report_counts_agent_refused_and_agent_skipped() {
+        let p = [
+            IdentityProblem::AgentRefused {
+                agent: "hobi".into(),
+                uid: 2001,
+                why: maknae_authz_basic::AgentRefusal::Bound { role: "user" },
+            },
+            IdentityProblem::AgentSkipped {
+                entry: "stray".into(),
+                why: "it is not a directory",
+            },
+        ];
+        assert_eq!(counts(&p), ["agent_refused=1", "agent_skipped=1"]);
+        assert_eq!(
+            p.iter()
+                .map(|p| {
+                    let (result, reason, posture) = record_fields(p);
+                    (result, reason, posture)
+                })
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "deny",
+                    "agent 'hobi' (uid 2001) is not enrolled: bindings.yaml lists the account under user; an agent's role comes from its enrollment".to_string(),
+                    "unauthorized"
+                ),
+                (
+                    "deny",
+                    "agents/stray is skipped: it is not a directory".to_string(),
+                    "unavailable"
+                ),
+            ]
+        );
+        let ok = Ok(crate::reload::Applied {
+            revision: 3,
+            persisted: false,
+            durability_error: None,
+            checkpoint_error: None,
+        });
+        assert_eq!(recorded_after(&ok, &[], &p), p);
+        assert!(recorded_after(&ok, &p, &p).is_empty());
     }
 
     #[test]
