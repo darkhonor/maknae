@@ -76,6 +76,9 @@ files = [
   "crates/maknae-kernel/src/session_facts/host_account_linux.rs",
   "crates/maknae-kernel/src/session_facts/host_account_macos.rs",
   "crates/maknae-kernel/src/session.rs",
+  # #170: the append-only conversation chain and the reply binding. A wrong arm
+  # accepts a rewritten history as a continuation or a forged Assistant turn as the delivered reply.
+  "crates/maknae-kernel/src/conversation/chain.rs",
   # The CBOR byte-string content codec (#77): a wrong major type halves the
   # read ceiling and mis-routes oversize; the visitor is a refusal surface.
   "crates/maknae-proto/src/bytes.rs",
@@ -513,6 +516,10 @@ why = "type declarations (subject/resource/action/context/request) + derives; no
 [[t3]]
 path = "crates/maknae-kernel/src/test_fixtures.rs"
 why = "test-only fixtures shared by the kernel's module test suites (the gate requires `#[cfg(test)]` to be followed by a line beginning `mod `, which rules out `pub(crate) mod tests`); declared under `#[cfg(test)]` in lib.rs, so it has no production regions"
+
+[[t3]]
+path = "crates/maknae-kernel/src/conversation/mod.rs"
+why = "#170: module declarations only; the chain logic is chain.rs (T1)"
 
 [[t3]]
 path = "crates/maknae-kernel/src/lib.rs"

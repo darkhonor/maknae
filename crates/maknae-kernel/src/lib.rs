@@ -13,6 +13,7 @@ mod ceiling_authz;
 pub mod classification;
 mod composition;
 mod containment;
+pub mod conversation;
 mod deployment;
 mod diag;
 mod egress;
