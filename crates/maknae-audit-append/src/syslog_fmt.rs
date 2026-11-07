@@ -129,7 +129,7 @@ fn macos_summary(
     outcome: Scrubbed<'_>,
     subject: Scrubbed<'_>,
     role: Scrubbed<'_>,
-    task: [(&str, Option<Scrubbed<'_>>); 3],
+    task: [(&str, Option<Scrubbed<'_>>); 4],
     session_id: u64,
     seq: u64,
 ) -> String {
@@ -177,6 +177,7 @@ pub(crate) fn format_line_unchecked(
     let task = [
         ("agent", rec.subject.agent.as_deref().map(scrub)),
         ("task", rec.subject.task_id.as_deref().map(scrub)),
+        ("parent", rec.subject.parent_task_id.as_deref().map(scrub)),
         ("tasker", rec.subject.tasker.as_deref().map(scrub)),
     ];
     line.push_str(&macos_summary(
@@ -892,13 +893,15 @@ mod tests {
         r.subject.agent = Some("hobi".into());
         r.subject.task_id = Some("0f".repeat(16));
         r.subject.tasker = Some("agent:jin".into());
+        r.subject.parent_task_id = Some("a0".repeat(16));
         let s = format_record(&r, PrimaryOutcome::Ok)
             .unwrap()
             .into_full()
             .unwrap();
         let want = format!(
-            "maknae audit: fs.read deny subject=alice role=none agent=hobi task={} tasker=agent:jin session=7 seq=3 ",
-            "0f".repeat(16)
+            "maknae audit: fs.read deny subject=alice role=none agent=hobi task={} parent={} tasker=agent:jin session=7 seq=3 ",
+            "0f".repeat(16),
+            "a0".repeat(16)
         );
         assert!(s.starts_with(&want), "{s}");
         r.subject.tasker = Some("MAKNAE_OUTCOME=permit".into());

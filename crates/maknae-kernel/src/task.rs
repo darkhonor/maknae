@@ -57,6 +57,7 @@ pub struct StoredTask {
 struct Held {
     tasks: BTreeMap<TaskId, StoredTask>,
     generations: BTreeMap<AgentId, u64>,
+    enrolled: BTreeMap<AgentId, u32>,
 }
 
 impl Held {
@@ -101,23 +102,48 @@ impl TaskStore {
         self.held().purge(agent);
     }
 
+    /// Purges every agent whose (id, uid) the view no longer holds as last seen,
+    /// whether or not it holds tasks (M8).
     pub fn retain_enrolled(&self, view: &dyn EnrollmentView) {
         let mut held = self.held();
-        let gone: std::collections::BTreeSet<AgentId> = held
-            .tasks
-            .values()
-            .filter(|t| view.agent_uid(&t.agent) != Some(t.agent_uid))
-            .map(|t| t.agent.clone())
+        let known: std::collections::BTreeSet<AgentId> = held
+            .enrolled
+            .keys()
+            .chain(held.tasks.values().map(|t| &t.agent))
+            .cloned()
             .collect();
-        for agent in &gone {
-            held.purge(agent);
+        for agent in known {
+            let now = view.agent_uid(&agent);
+            let stale = held.enrolled.get(&agent).is_some_and(|u| now != Some(*u))
+                || held
+                    .tasks
+                    .values()
+                    .any(|t| t.agent == agent && now != Some(t.agent_uid));
+            if stale {
+                held.purge(&agent);
+            }
+            match now {
+                Some(uid) => held.enrolled.insert(agent, uid),
+                None => held.enrolled.remove(&agent),
+            };
         }
+    }
+
+    /// The agent's generation and enrolled uid, read together before a decision.
+    fn observe(&self, view: &dyn EnrollmentView, agent: &AgentId) -> (u64, Option<u32>) {
+        let mut held = self.held();
+        let uid = view.agent_uid(agent);
+        if let Some(u) = uid {
+            held.enrolled.entry(agent.clone()).or_insert(u);
+        }
+        (held.generation(agent), uid)
     }
 
     pub fn mint(
         &self,
         view: &dyn EnrollmentView,
         generation: u64,
+        agent_uid: u32,
         tasker: Tasker,
         parent: Option<TaskId>,
         sub: TaskSubmission,
@@ -127,14 +153,21 @@ impl TaskStore {
             maknae_crypto::random::fill(&mut id[..]).map_err(|_| TaskRefusal::Random)?;
             Ok(id)
         };
-        self.mint_with(&mut draw, view, generation, tasker, parent, sub)
+        self.mint_with(
+            &mut draw,
+            view,
+            (generation, agent_uid),
+            tasker,
+            parent,
+            sub,
+        )
     }
 
     fn mint_with(
         &self,
         draw: &mut dyn FnMut() -> Result<[u8; 16], TaskRefusal>,
         view: &dyn EnrollmentView,
-        generation: u64,
+        (generation, agent_uid): (u64, u32),
         tasker: Tasker,
         parent: Option<TaskId>,
         sub: TaskSubmission,
@@ -151,7 +184,7 @@ impl TaskStore {
             labels: sub.labels,
         });
         loop {
-            match self.place(view, &agent, generation, &task)? {
+            match self.place(view, &agent, generation, agent_uid, &task)? {
                 Placed::Stored => return Ok(task),
                 Placed::Collided => Arc::make_mut(&mut task).task_id = TaskId(draw()?),
             }
@@ -163,11 +196,11 @@ impl TaskStore {
         view: &dyn EnrollmentView,
         agent: &AgentId,
         generation: u64,
+        agent_uid: u32,
         task: &Arc<TaskObject>,
     ) -> Result<Placed, TaskRefusal> {
         let mut held = self.held();
-        let agent_uid = view.agent_uid(agent).ok_or(TaskRefusal::AgentGone)?;
-        if held.generation(agent) != generation {
+        if view.agent_uid(agent) != Some(agent_uid) || held.generation(agent) != generation {
             return Err(TaskRefusal::AgentGone);
         }
         if held.tasks.values().filter(|t| t.agent == *agent).count() >= MAX_LIVE_TASKS_PER_AGENT {
@@ -305,6 +338,15 @@ fn task_request(by: &Submitter, target: &str) -> maknae_security::Request {
     }
 }
 
+/// The connection a submission arrived on, for its audit record and its decision bound.
+pub(crate) struct SubmitCtx<'a> {
+    pub where_: &'a crate::run::WhereCtx,
+    pub session_id: u64,
+    pub seq: u64,
+    pub user: Option<&'a str>,
+    pub decide_timeout: std::time::Duration,
+}
+
 struct Attempt {
     uid: u32,
     agent: Option<AgentId>,
@@ -317,6 +359,7 @@ struct Attempt {
 impl Attempt {
     fn record(
         &self,
+        ctx: &SubmitCtx<'_>,
         task: Option<&TaskObject>,
         refusal: Option<&TaskRefusal>,
     ) -> maknae_audit_append::AuditRecord {
@@ -326,21 +369,22 @@ impl Attempt {
         };
         let mut rec = crate::run::make_record(
             "request",
-            &crate::run::hostname(),
-            "",
+            &ctx.where_.host,
+            &ctx.where_.socket,
             self.uid,
             None,
             None,
             None,
-            0,
-            0,
+            ctx.session_id,
+            ctx.seq,
             "session.task",
             Some(&format!("agent:{}", self.target)),
             result,
             &reason,
             posture,
-            &serde_json::json!({}),
+            &ctx.where_.au3_1,
         );
+        rec.subject.user = crate::run::admitted_user_pub(ctx.user);
         rec.subject.role = self.role.map(str::to_string);
         rec.subject.agent = self.agent.as_ref().map(|a| a.as_str().to_string());
         rec.subject.task_id = task.map(|t| t.task_id.to_string());
@@ -355,10 +399,11 @@ impl Attempt {
     not(test),
     expect(dead_code, reason = "#610's TaskSubmit arm is the caller")
 )]
-pub(crate) async fn submit_task<P: Authorizer>(
-    authorizer: &P,
+pub(crate) async fn submit_task<P: Authorizer + Send + Sync + 'static>(
+    authorizer: Arc<P>,
     store: &TaskStore,
     view: &dyn EnrollmentView,
+    ctx: &SubmitCtx<'_>,
     by: Submitter,
     sub: TaskSubmission,
     emit: &impl AuditEmit,
@@ -382,10 +427,10 @@ pub(crate) async fn submit_task<P: Authorizer>(
         parent: None,
         role: None,
     };
-    let decided = decide(authorizer, store, view, &by, sub, &mut attempt);
+    let decided = decide(authorizer, store, view, ctx, &by, sub, &mut attempt).await;
     let rec = match &decided {
-        Ok(task) => attempt.record(Some(task), None),
-        Err(refusal) => attempt.record(None, Some(refusal)),
+        Ok(task) => attempt.record(ctx, Some(task), None),
+        Err(refusal) => attempt.record(ctx, None, Some(refusal)),
     };
     let audited = emit
         .emit_within(&rec, crate::blocking_guard::AUDIT_APPEND_TIMEOUT)
@@ -400,10 +445,11 @@ pub(crate) async fn submit_task<P: Authorizer>(
     }
 }
 
-fn decide<P: Authorizer>(
-    authorizer: &P,
+async fn decide<P: Authorizer + Send + Sync + 'static>(
+    authorizer: Arc<P>,
     store: &TaskStore,
     view: &dyn EnrollmentView,
+    ctx: &SubmitCtx<'_>,
     by: &Submitter,
     sub: TaskSubmission,
     attempt: &mut Attempt,
@@ -425,8 +471,13 @@ fn decide<P: Authorizer>(
             Some(*t)
         }
     };
-    let generation = store.generation(&target);
-    let decided = authorizer.decide_cited(&task_request(by, target.as_str()));
+    let (generation, enrolled) = store.observe(view, &target);
+    let req = task_request(by, target.as_str());
+    let decided = crate::blocking_guard::within_blocking(ctx.decide_timeout, move || {
+        maknae_security::guarded_decide_cited(&*authorizer, &req)
+    })
+    .await
+    .map_err(|e| TaskRefusal::Denied(format!("authorization decision failed: {e}")))?;
     attempt.role = decided.role;
     match maknae_security::finalize(decided.verdict) {
         maknae_security::Decision::Permit { obligations } => {
@@ -435,9 +486,11 @@ fn decide<P: Authorizer>(
         }
         maknae_security::Decision::Deny { reason } => return Err(TaskRefusal::Denied(reason)),
     }
+    let agent_uid = enrolled.ok_or(TaskRefusal::AgentGone)?;
     store.mint(
         view,
         generation,
+        agent_uid,
         attempt.tasker.clone(),
         attempt.parent,
         sub,
@@ -460,6 +513,9 @@ mod tests {
     const HOBI: u32 = 2001;
     const JIN: u32 = 2002;
     const SUGA: u32 = 2003;
+    const HOBI_AGAIN: u32 = 2004;
+    const SESSION: u64 = 77;
+    const BOUND: std::time::Duration = std::time::Duration::from_secs(5);
     const PROMPT: &str = "task-11-prompt-sentinel";
     const AUTHZ: &str = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nroles:\n  user:\n    allow: [\"session.task\"]\n";
 
@@ -488,6 +544,7 @@ mod tests {
             .mint(
                 v,
                 store.generation(&id(agent)),
+                v.0[&id(agent)],
                 Tasker::Uid(1000),
                 None,
                 sub(agent),
@@ -505,7 +562,7 @@ mod tests {
         };
         let parent = TaskId([7; 16]);
         let a = store
-            .mint(&v, 0, tasker.clone(), Some(parent), sub("hobi"))
+            .mint(&v, 0, HOBI, tasker.clone(), Some(parent), sub("hobi"))
             .unwrap();
         let b = mint(&store, &v, "hobi");
         assert_ne!(a.task_id, b.task_id);
@@ -528,10 +585,10 @@ mod tests {
         let mut draws = [[1u8; 16], [1; 16], [2; 16]].into_iter();
         let mut draw = || Ok(draws.next().unwrap());
         let first = store
-            .mint_with(&mut draw, &v, 0, Tasker::Uid(1), None, sub("hobi"))
+            .mint_with(&mut draw, &v, (0, HOBI), Tasker::Uid(1), None, sub("hobi"))
             .unwrap();
         let second = store
-            .mint_with(&mut draw, &v, 0, Tasker::Uid(1), None, sub("hobi"))
+            .mint_with(&mut draw, &v, (0, HOBI), Tasker::Uid(1), None, sub("hobi"))
             .unwrap();
         assert_eq!(first.task_id, TaskId([1; 16]));
         assert_eq!(second.task_id, TaskId([2; 16]));
@@ -539,7 +596,14 @@ mod tests {
         let mut failing = || Err(TaskRefusal::Random);
         assert_eq!(
             store
-                .mint_with(&mut failing, &v, 0, Tasker::Uid(1), None, sub("hobi"))
+                .mint_with(
+                    &mut failing,
+                    &v,
+                    (0, HOBI),
+                    Tasker::Uid(1),
+                    None,
+                    sub("hobi")
+                )
                 .unwrap_err(),
             TaskRefusal::Random
         );
@@ -623,7 +687,7 @@ mod tests {
             .collect();
         assert_eq!(
             store
-                .mint(&v, 0, Tasker::Uid(1000), None, sub("hobi"))
+                .mint(&v, 0, HOBI, Tasker::Uid(1000), None, sub("hobi"))
                 .unwrap_err(),
             TaskRefusal::AtCapacity {
                 agent: "hobi".into()
@@ -644,6 +708,7 @@ mod tests {
                 .mint(
                     &view(&[("jin", JIN)]),
                     0,
+                    HOBI,
                     Tasker::Uid(1000),
                     None,
                     sub("hobi")
@@ -653,7 +718,7 @@ mod tests {
         );
         assert_eq!(store.len(), 0);
         assert!(matches!(
-            store.mint(&view(&[]), 0, Tasker::Uid(1000), None, sub("Not An Id")),
+            store.mint(&view(&[]), 0, 0, Tasker::Uid(1000), None, sub("Not An Id")),
             Err(TaskRefusal::Schema(_))
         ));
     }
@@ -666,7 +731,7 @@ mod tests {
         store.purge_agent(&id("hobi"));
         assert_eq!(
             store
-                .mint(&v, read, Tasker::Uid(1000), None, sub("hobi"))
+                .mint(&v, read, HOBI, Tasker::Uid(1000), None, sub("hobi"))
                 .unwrap_err(),
             TaskRefusal::AgentGone
         );
@@ -752,7 +817,7 @@ mod tests {
 
     fn accounts(uid: u32) -> Result<Option<maknae_io::HostAccount>, String> {
         let name = match uid {
-            HOBI => "hobi-svc",
+            HOBI | HOBI_AGAIN => "hobi-svc",
             JIN => "jin-svc",
             SUGA => "suga-svc",
             _ => return Ok(None),
@@ -841,9 +906,21 @@ mod tests {
         (g, pdp)
     }
 
-    struct Counting<'a, P>(&'a P, AtomicUsize);
+    struct Hooked<P> {
+        inner: Arc<P>,
+        calls: AtomicUsize,
+        after: Box<dyn Fn() + Send + Sync>,
+    }
 
-    impl<P: Authorizer> Authorizer for Counting<'_, P> {
+    fn hooked<P>(inner: Arc<P>, after: impl Fn() + Send + Sync + 'static) -> Arc<Hooked<P>> {
+        Arc::new(Hooked {
+            inner,
+            calls: AtomicUsize::new(0),
+            after: Box::new(after),
+        })
+    }
+
+    impl<P: Authorizer> Authorizer for Hooked<P> {
         fn decide(&self, req: &Request) -> Verdict {
             self.decide_cited(req).verdict
         }
@@ -852,8 +929,10 @@ mod tests {
             (d.verdict, d.role)
         }
         fn decide_cited(&self, req: &Request) -> Decided {
-            self.1.fetch_add(1, Ordering::SeqCst);
-            self.0.decide_cited(req)
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let decided = self.inner.decide_cited(req);
+            (self.after)();
+            decided
         }
         fn decide_cited_all(&self, reqs: &[Request]) -> Vec<Decided> {
             reqs.iter().map(|r| self.decide_cited(r)).collect()
@@ -876,6 +955,34 @@ mod tests {
         }
     }
 
+    fn wctx() -> crate::run::WhereCtx {
+        crate::run::WhereCtx {
+            host: "task-host".into(),
+            socket: "/run/maknae/task-11.sock".into(),
+            au3_1: serde_json::json!({ "site": "task-11" }),
+        }
+    }
+
+    async fn submit_via<P: Authorizer + Send + Sync + 'static>(
+        a: Arc<P>,
+        store: &TaskStore,
+        v: &dyn EnrollmentView,
+        by: Submitter,
+        sub: TaskSubmission,
+        emit: &Recorder,
+        bound: std::time::Duration,
+    ) -> Result<Arc<TaskObject>, TaskRefusal> {
+        let w = wctx();
+        let ctx = SubmitCtx {
+            where_: &w,
+            session_id: SESSION,
+            seq: 5,
+            user: Some("alice"),
+            decide_timeout: bound,
+        };
+        submit_task(a, store, v, &ctx, by, sub, emit).await
+    }
+
     async fn submit(
         pdp: &Pdp,
         store: &TaskStore,
@@ -883,15 +990,8 @@ mod tests {
         to: &str,
         emit: &Recorder,
     ) -> Result<Arc<TaskObject>, TaskRefusal> {
-        submit_task(
-            &**pdp,
-            store,
-            &SnapshotEnrollment(pdp.clone()),
-            by,
-            sub(to),
-            emit,
-        )
-        .await
+        let view = SnapshotEnrollment(pdp.clone());
+        submit_via(pdp.clone(), store, &view, by, sub(to), emit, BOUND).await
     }
 
     #[tokio::test]
@@ -918,14 +1018,16 @@ mod tests {
         let (_g, pdp) = pdp("refused");
         let store = TaskStore::new();
         let emit = Recorder::new();
-        let counting = Counting(&*pdp, AtomicUsize::new(0));
-        let refused = submit_task(
-            &counting,
+        let counting = hooked(pdp.clone(), || {});
+        let view = SnapshotEnrollment(pdp.clone());
+        let refused = submit_via(
+            counting.clone(),
             &store,
-            &SnapshotEnrollment(pdp.clone()),
+            &view,
             user(),
             sub("ghost"),
             &emit,
+            BOUND,
         )
         .await
         .unwrap_err();
@@ -933,22 +1035,15 @@ mod tests {
             refused,
             TaskRefusal::Denied("session.task: agent ghost is not enrolled".into())
         );
-        assert_eq!(counting.1.load(Ordering::SeqCst), 1);
+        assert_eq!(counting.calls.load(Ordering::SeqCst), 1);
         assert_eq!(store.len(), 0);
         let mut bad = sub("hobi");
         bad.version = TASK_VERSION + 1;
-        let refused = submit_task(
-            &counting,
-            &store,
-            &SnapshotEnrollment(pdp.clone()),
-            user(),
-            bad,
-            &emit,
-        )
-        .await
-        .unwrap_err();
+        let refused = submit_via(counting.clone(), &store, &view, user(), bad, &emit, BOUND)
+            .await
+            .unwrap_err();
         assert!(matches!(refused, TaskRefusal::Schema(_)), "{refused:?}");
-        assert_eq!(counting.1.load(Ordering::SeqCst), 1, "no decision");
+        assert_eq!(counting.calls.load(Ordering::SeqCst), 1, "no decision");
         assert_eq!(store.len(), 0);
         let records = emit.records();
         assert_eq!(records.len(), 2);
@@ -1020,6 +1115,15 @@ mod tests {
             .unwrap_err();
         let records = emit.records();
         assert_eq!(records.len(), 3, "one record per submission");
+        for r in &records {
+            assert_eq!(
+                (r.where_.host.as_str(), r.where_.socket.as_str()),
+                ("task-host", "/run/maknae/task-11.sock")
+            );
+            assert_eq!((r.session_id, r.seq), (SESSION, 5));
+            assert_eq!(r.subject.user.as_deref(), Some("alice"));
+            assert_eq!(r.au3_1, serde_json::json!({ "site": "task-11" }));
+        }
         let r = &records[0];
         assert_eq!(r.action, "session.task");
         assert_eq!(r.object.as_deref(), Some("agent:hobi"));
@@ -1135,21 +1239,22 @@ mod tests {
         let emit = Recorder::new();
         let parent = submit(&pdp, &store, user(), "hobi", &emit).await.unwrap();
         store.purge_agent(&id("hobi"));
-        let counting = Counting(&*pdp, AtomicUsize::new(0));
+        let counting = hooked(pdp.clone(), || {});
         let view = SnapshotEnrollment(pdp.clone());
-        let refused = submit_task(
-            &counting,
+        let refused = submit_via(
+            counting.clone(),
             &store,
             &view,
             agent("hobi", HOBI, Some(parent.task_id)),
             sub("jin"),
             &emit,
+            BOUND,
         )
         .await
         .unwrap_err();
         assert_eq!(refused, TaskRefusal::ParentNotHeld);
         assert_eq!(
-            counting.1.load(Ordering::SeqCst),
+            counting.calls.load(Ordering::SeqCst),
             0,
             "refused before the PDP"
         );
@@ -1186,30 +1291,6 @@ mod tests {
         assert_eq!(emit.records()[0].subject.parent_task_id, None);
     }
 
-    struct PurgeDuring<'a, P> {
-        inner: &'a P,
-        store: &'a TaskStore,
-        agent: AgentId,
-    }
-
-    impl<P: Authorizer> Authorizer for PurgeDuring<'_, P> {
-        fn decide(&self, req: &Request) -> Verdict {
-            self.decide_cited(req).verdict
-        }
-        fn decide_reporting_role(&self, req: &Request) -> (Verdict, Option<&'static str>) {
-            let d = self.decide_cited(req);
-            (d.verdict, d.role)
-        }
-        fn decide_cited(&self, req: &Request) -> Decided {
-            let decided = self.inner.decide_cited(req);
-            self.store.purge_agent(&self.agent);
-            decided
-        }
-        fn decide_cited_all(&self, reqs: &[Request]) -> Vec<Decided> {
-            reqs.iter().map(|r| self.decide_cited(r)).collect()
-        }
-    }
-
     struct Obliging;
 
     impl Authorizer for Obliging {
@@ -1230,13 +1311,14 @@ mod tests {
     async fn a_permit_with_an_unhonorable_obligation_is_refused() {
         let store = TaskStore::new();
         let emit = Recorder::new();
-        let refused = submit_task(
-            &Obliging,
+        let refused = submit_via(
+            Arc::new(Obliging),
             &store,
             &view(&[("hobi", HOBI)]),
             user(),
             sub("hobi"),
             &emit,
+            BOUND,
         )
         .await
         .unwrap_err();
@@ -1251,26 +1333,147 @@ mod tests {
     #[tokio::test]
     async fn a_mint_racing_a_purge_does_not_insert() {
         let (_g, pdp) = pdp("race");
-        let store = TaskStore::new();
+        let store = Arc::new(TaskStore::new());
         let emit = Recorder::new();
-        let racing = PurgeDuring {
-            inner: &*pdp,
-            store: &store,
-            agent: id("hobi"),
-        };
-        let refused = submit_task(
-            &racing,
-            &store,
-            &SnapshotEnrollment(pdp.clone()),
-            user(),
-            sub("hobi"),
-            &emit,
-        )
-        .await
-        .unwrap_err();
+        let purging = store.clone();
+        let racing = hooked(pdp.clone(), move || purging.purge_agent(&id("hobi")));
+        let view = SnapshotEnrollment(pdp.clone());
+        let refused = submit_via(racing, &store, &view, user(), sub("hobi"), &emit, BOUND)
+            .await
+            .unwrap_err();
         assert_eq!(refused, TaskRefusal::AgentGone);
         assert_eq!(store.len(), 0);
         assert_eq!(emit.records().len(), 1);
         assert_eq!(emit.records()[0].outcome.result, "deny");
+    }
+
+    #[tokio::test]
+    async fn a_re_enrollment_between_the_decision_and_the_mint_does_not_insert() {
+        let (g, pdp) = pdp("re-enrolled");
+        let store = TaskStore::new();
+        let emit = Recorder::new();
+        let file =
+            g.0.join(maknae_config::AGENTS_DIR)
+                .join("hobi")
+                .join(maknae_config::ENROLLMENT_FILE);
+        let reloading = pdp.clone();
+        let racing = hooked(pdp.clone(), move || {
+            put(
+                &file,
+                &format!("agent_id: hobi\naccount: hobi-svc\nuid: {HOBI_AGAIN}\nrole: user\n"),
+            );
+            reloading.baseline().reload_from_file().unwrap();
+        });
+        let view = SnapshotEnrollment(pdp.clone());
+        let refused = submit_via(racing, &store, &view, user(), sub("hobi"), &emit, BOUND)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            pdp.baseline().snapshot().agent_uid("hobi"),
+            Some(HOBI_AGAIN)
+        );
+        assert_eq!(refused, TaskRefusal::AgentGone);
+        assert_eq!(store.len(), 0);
+        assert_eq!(emit.records().len(), 1);
+        assert_eq!(emit.records()[0].outcome.result, "deny");
+    }
+
+    #[test]
+    fn retain_enrolled_bumps_an_agent_whose_uid_changed_though_it_holds_no_task() {
+        let store = TaskStore::new();
+        let first = view(&[("hobi", HOBI), ("jin", JIN)]);
+        assert_eq!(store.observe(&first, &id("hobi")), (0, Some(HOBI)));
+        assert_eq!(store.observe(&first, &id("jin")), (0, Some(JIN)));
+        assert_eq!(store.observe(&first, &id("suga")), (0, None));
+        store.retain_enrolled(&first);
+        assert_eq!(store.generation(&id("hobi")), 0);
+        store.retain_enrolled(&view(&[("hobi", HOBI_AGAIN), ("jin", JIN)]));
+        assert_eq!(store.generation(&id("hobi")), 1);
+        assert_eq!(store.generation(&id("jin")), 0);
+        store.retain_enrolled(&view(&[("hobi", HOBI_AGAIN)]));
+        assert_eq!(store.generation(&id("hobi")), 1);
+        assert_eq!(store.generation(&id("jin")), 1);
+        store.retain_enrolled(&view(&[("hobi", HOBI_AGAIN)]));
+        assert_eq!(store.generation(&id("jin")), 1);
+        let back = view(&[("hobi", HOBI_AGAIN), ("jin", JIN)]);
+        assert_eq!(store.observe(&back, &id("jin")), (1, Some(JIN)));
+        store.retain_enrolled(&back);
+        assert_eq!(store.generation(&id("jin")), 1);
+        store.retain_enrolled(&view(&[("hobi", HOBI_AGAIN), ("jin", 4242)]));
+        assert_eq!(store.generation(&id("jin")), 2);
+        assert_eq!(store.len(), 0);
+    }
+
+    struct Panicking;
+
+    impl Authorizer for Panicking {
+        fn decide(&self, _: &Request) -> Verdict {
+            panic!("task-11 authorizer panic")
+        }
+        fn decide_cited_all(&self, reqs: &[Request]) -> Vec<Decided> {
+            reqs.iter().map(|r| self.decide_cited(r)).collect()
+        }
+    }
+
+    struct Stalling;
+
+    impl Authorizer for Stalling {
+        fn decide(&self, _: &Request) -> Verdict {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            Verdict::Permit {
+                obligations: Vec::new(),
+            }
+        }
+        fn decide_cited_all(&self, reqs: &[Request]) -> Vec<Decided> {
+            reqs.iter().map(|r| self.decide_cited(r)).collect()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_panicking_authorizer_is_refused_and_audited() {
+        let store = TaskStore::new();
+        let emit = Recorder::new();
+        let refused = submit_via(
+            Arc::new(Panicking),
+            &store,
+            &view(&[("hobi", HOBI)]),
+            user(),
+            sub("hobi"),
+            &emit,
+            BOUND,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            refused,
+            TaskRefusal::Denied("indeterminate (fail-closed)".into())
+        );
+        assert_eq!(store.len(), 0);
+        let records = emit.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].outcome.reason, "indeterminate (fail-closed)");
+    }
+
+    #[tokio::test]
+    async fn an_authorizer_that_stalls_past_the_bound_is_refused_and_audited() {
+        let store = TaskStore::new();
+        let emit = Recorder::new();
+        let refused = submit_via(
+            Arc::new(Stalling),
+            &store,
+            &view(&[("hobi", HOBI)]),
+            user(),
+            sub("hobi"),
+            &emit,
+            std::time::Duration::from_millis(50),
+        )
+        .await
+        .unwrap_err();
+        let want = "authorization decision failed: did not complete within 50ms";
+        assert_eq!(refused, TaskRefusal::Denied(want.into()));
+        assert_eq!(store.len(), 0);
+        let records = emit.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].outcome.reason, want);
     }
 }
