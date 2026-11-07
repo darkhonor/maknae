@@ -478,9 +478,9 @@ on the wire (the client sees the generic `not authorized`):
 accept; seq 2+ are the per-request records above. Exact key order is
 canonical-sorted — `maknae-audit-append/src/record.rs` — not declaration order.)
 
-### 7. Grants and destinations (`authz.yaml`)
+### 7. Grants, destinations and subjects (`authz.yaml`)
 
-Two additive keys govern what a role may DO beyond the built-in rules. The packaged
+Three additive keys govern what a role may DO beyond the built-in rules. The packaged
 `authz.yaml` grants `admin` five terms and allowlists nothing: no prompt is permitted
 until you write a `destinations:` entry.
 
@@ -506,6 +506,19 @@ destinations:                # #172: per-role egress allowlist for session.promp
   matching the `name` of an entry in the authorized `providers` list. URL patterns are a later grammar and are
   refused now. An absent or empty allowlist refuses every prompt: the second condition of
   `session.prompt` is the destination, and it never defaults open.
+- **Action patterns.** Wherever policy names actions, an entry is an exact term
+  (`fs.read`, `session.prompt`) or a family wildcard `<family>.*` (`fs.*`, `admin.*`):
+  lowercase `[a-z0-9_]` segments separated by `.`, with `*` only as the whole last
+  segment. Anything else (`*`, `fs*`, `fs.*.x`, `FS.*`) refuses at load. Role `allow` and
+  `deny` lists take the same syntax.
+- **`subjects:` (#608).** Maps an account name to up to three optional keys:
+  `permissions: {allow, deny}` (the `permissions:` path grammar), `actions: {allow}`
+  (action patterns) and `models: {allow}` (`<provider>/<model>`, split on the first `/`).
+  Unknown keys at any level refuse. When a subject has `permissions`, its `allow`
+  replaces the site `allow` for that subject; the site `deny` always applies as a floor
+  and the subject's own `deny` adds to it. Absent, the site set applies. An entry for an
+  account that does not resolve is inert, as for `bindings.yaml`; a `models:` entry that
+  names an unlisted provider or model is inert too.
 - **Separation of duties (recommended).** Bind the loop's account to `user`. An
   admin-bound loop also holds the disclosure verbs, and a loop that has been injected can
   quote `admin.config.show` into its next prompt; a `user`-bound loop cannot ask. The

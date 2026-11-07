@@ -640,10 +640,13 @@ fn validate_grants(
             Some(r @ (role::Role::Admin | role::Role::User)) => r,
             Some(_) => return Err(AuthzBasicError::RoleNotSupportedYet(key.clone())),
         };
-        let check = |terms: &Vec<String>| -> Result<Vec<decide::ActionTerm>, AuthzBasicError> {
+        let check = |terms: &Vec<maknae_config::ActionPattern>| -> Result<Vec<decide::ActionTerm>, AuthzBasicError> {
             terms
                 .iter()
-                .map(|t| {
+                .map(|p| {
+                    let maknae_config::ActionPattern::Exact(t) = p else {
+                        return Err(AuthzBasicError::UnknownActionTerm(p.source()));
+                    };
                     if !decide::GRANTABLE_ACTIONS.contains(&t.as_str()) {
                         return Err(AuthzBasicError::UnknownActionTerm(t.clone()));
                     }
@@ -1992,7 +1995,14 @@ mod tests {
         let roles: Vec<&String> = policy.action_grants.keys().collect();
         assert_eq!(roles, ["admin"]);
         let admin = &policy.action_grants["admin"];
-        assert_eq!(admin.allow, SHIPPED_ADMIN_TERMS);
+        assert_eq!(
+            admin
+                .allow
+                .iter()
+                .map(maknae_config::ActionPattern::source)
+                .collect::<Vec<_>>(),
+            SHIPPED_ADMIN_TERMS
+        );
         assert!(admin.deny.is_empty());
         assert!(policy.destinations.is_empty());
     }

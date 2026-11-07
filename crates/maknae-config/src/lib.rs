@@ -81,8 +81,9 @@ pub use bindings_sync::{
 // HermeticAuthorizer, #77) can NAME the requirement type without a maknae-io
 // dependency of their own; unix-gated like the fn whose signature carries it.
 pub use authz::{
-    destination_entry_is_acceptable, load_authz, parse_authz, AuthzError, AuthzPolicy, HomeUnbound,
-    Match3, PathGlob, Pattern, RawActionGrants, RawDestinations, Request,
+    destination_entry_is_acceptable, load_authz, parse_authz, ActionPattern, AuthzError,
+    AuthzPolicy, HomeUnbound, Match3, ModelRef, PathGlob, Pattern, RawActionGrants,
+    RawDestinations, Request, SubjectPermissions, SubjectPolicy,
 };
 pub use baseline_doc::{document_sections, value_from_canonical_json, BaselineSections};
 pub use bounds::{
