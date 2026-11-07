@@ -20,15 +20,15 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 // break (strict-equality check both directions) and was NOT authorized.
 pub const PROTOCOL_VERSION: u16 = 1;
 
-/// Upper bound on the loop's conversation identifier (#241). Informational
-/// only: recorded, never decided on. 32, not 64: it is written into every
-/// egress audit record, and the macOS unified-log line cap was measured with
+/// Upper bound on the loop's conversation identifier (#241). 32, not 64: it is
+/// written into every egress audit record, and the macOS unified-log line cap was measured with
 /// this bound (maknae-audit-append `syslog_fmt.rs` tests).
 pub const MAX_CONVERSATION_ID_BYTES: usize = 32;
 
 /// `[A-Za-z0-9._-]{1,32}`: it reaches audit records and terminals, so no
 /// whitespace, no control bytes, no path separators. Enforced by the kernel
-/// before the PDP sees the request; the decoder stays shape-only.
+/// before the PDP sees the request; the decoder stays shape-only. A
+/// kernel-assigned [`crate::ConversationId`] always satisfies it.
 pub fn conversation_id_is_acceptable(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= MAX_CONVERSATION_ID_BYTES
@@ -453,26 +453,26 @@ pub enum Verb {
     /// operator's tool for cutting off a connection, and therefore abusable as
     /// one.
     AdminSessionTerminate,
-    /// Begin a conversation with an agent runtime. This is where the agent's tool
-    /// authority is provisioned — in an ACP v2 deployment the MCP servers Maknae
-    /// hands into the session are named here, making this a capability-granting
-    /// call, not bookkeeping. *(ADR-0023: not built in Cooky, where each loop turn
-    /// is one connection and one audit session; the kernel holds no conversation
-    /// identity spanning connections (multi-frame exchanges within one
-    /// connection exist — the mutation lane — the identity does not), and a
-    /// conversation that outlives a process is Velveteen's.)*
-    SessionNew,
+    /// Open a conversation the kernel records. The kernel assigns the
+    /// [`crate::ConversationId`]; `cwd` is the working directory the conversation
+    /// is recorded under (at most [`crate::MAX_MUTATION_PATH_BYTES`]), recorded
+    /// and decided on, not a confinement. Provisions no tool authority: MCP
+    /// provisioning is #151.
+    SessionNew { cwd: String },
     /// Reattach to an existing conversation. The caller obtains its content and
     /// history — a disclosure, and for a conversation the caller may not have
     /// started, that is the authorization-relevant fact. Inherits the provenance
     /// and high-water mark already on it.
     SessionResume,
-    /// End a conversation, leaving its record intact.
-    SessionClose,
-    /// Destroy conversation state. Irreversible.
-    SessionDelete,
-    /// Enumerate conversations. Discloses their existence and metadata.
-    SessionList,
+    /// Close the caller's conversation, leaving its record intact.
+    SessionClose { conversation: crate::ConversationId },
+    /// Destroy the caller's conversation record. Irreversible.
+    SessionDelete { conversation: crate::ConversationId },
+    /// Enumerate the caller's conversations a page at a time, resuming after
+    /// `cursor`. Discloses their existence and metadata.
+    SessionList {
+        cursor: Option<crate::ConversationId>,
+    },
     /// Branch a conversation. The mechanism #7 proposed for per-subject replies
     /// in a shared audience (#147). The fork inherits the parent's provenance and
     /// high-water mark; forking is never a way to shed them.
@@ -490,8 +490,7 @@ pub enum Verb {
     /// term #147's destination governance attaches to; its default is #153's.
     /// Un-recallable once sent — which is why it is two-phase, not audited
     /// after the fact. **Operands (#172, Cooky):** `conversation` is the loop's
-    /// identifier, bounded by [`conversation_id_is_acceptable`],
-    /// informational, never a verdict input; `turns` is the transcript — text
+    /// identifier, bounded by [`conversation_id_is_acceptable`]; `turns` is the transcript — text
     /// only in Cooky, roles per [`Turn`]. Additive payload on the existing
     /// variant name.
     SessionPrompt {
@@ -560,7 +559,7 @@ pub enum Verb {
         content_length: u64,
         mode: crate::WriteMode,
         /// The loop's conversation identifier (#265), under the same rule as
-        /// `SessionPrompt`'s: recorded, never decided on.
+        /// `SessionPrompt`'s.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         conversation: Option<String>,
     },
@@ -687,6 +686,16 @@ pub enum Payload {
     Baseline(BaselineView),
     /// The outcome of a permitted `admin.contain` or `admin.release` (#165).
     Containment(ContainmentView),
+    /// A permitted `session.new`: the conversation just opened.
+    ConversationOpened(crate::ConversationView),
+    /// A permitted `session.close`: the conversation as it stands, closed.
+    ConversationClosed(crate::ConversationView),
+    /// A permitted `session.list`: one page of the caller's conversations.
+    ConversationList(crate::ConversationPage),
+    /// A permitted `session.delete`: the conversation whose record is gone.
+    ConversationDeleted {
+        conversation: crate::ConversationId,
+    },
 }
 
 /// The reason's byte limit, measured after normalisation.
@@ -1083,7 +1092,8 @@ pub fn admits(declared: FrameClass, verb: &Verb) -> bool {
 pub fn class_of(verb: &Verb) -> FrameClass {
     match verb {
         Verb::SessionPrompt { .. } => FrameClass::Prompt,
-        Verb::Read { .. }
+        Verb::SessionNew { .. }
+        | Verb::Read { .. }
         | Verb::FsWrite { .. }
         | Verb::FsDelete { .. }
         | Verb::FsMove
@@ -1112,11 +1122,10 @@ pub fn class_of(verb: &Verb) -> FrameClass {
         | Verb::AdminProviderDisable
         | Verb::AdminSessionList
         | Verb::AdminSessionTerminate
-        | Verb::SessionNew
         | Verb::SessionResume
-        | Verb::SessionClose
-        | Verb::SessionDelete
-        | Verb::SessionList
+        | Verb::SessionClose { .. }
+        | Verb::SessionDelete { .. }
+        | Verb::SessionList { .. }
         | Verb::SessionFork
         | Verb::SessionCancel
         | Verb::SessionSetconfigoption
@@ -3050,6 +3059,157 @@ mod tests {
             MAX_MUTATION_DEPTH, MAX_MUTATION_PATH_BYTES,
         };
 
+        fn cid() -> crate::ConversationId {
+            crate::ConversationId::parse(&"0123456789abcdef".repeat(2)).unwrap()
+        }
+
+        fn view(cwd: String) -> crate::ConversationView {
+            crate::ConversationView {
+                conversation: cid(),
+                cwd,
+                opened_at: u64::MAX,
+                last_active: u64::MAX,
+                turns: u64::MAX,
+                bytes: u64::MAX,
+                chain_head: "f".repeat(64),
+            }
+        }
+
+        fn round_trip(verb: Verb) -> Verb {
+            let bytes = encode_request(&Request {
+                protocol_version: PROTOCOL_VERSION,
+                verb,
+            })
+            .unwrap();
+            decode_request(&bytes).unwrap().verb
+        }
+
+        #[test]
+        fn the_session_verbs_carry_their_operands() {
+            let cases = [
+                (
+                    Verb::SessionNew {
+                        cwd: "/work".into(),
+                    },
+                    FrameClass::Attempt,
+                ),
+                (
+                    Verb::SessionClose {
+                        conversation: cid(),
+                    },
+                    FrameClass::Control,
+                ),
+                (
+                    Verb::SessionDelete {
+                        conversation: cid(),
+                    },
+                    FrameClass::Control,
+                ),
+                (
+                    Verb::SessionList {
+                        cursor: Some(cid()),
+                    },
+                    FrameClass::Control,
+                ),
+                (Verb::SessionList { cursor: None }, FrameClass::Control),
+            ];
+            for (verb, class) in cases {
+                assert_eq!(class_of(&verb), class, "{verb:?}");
+                assert_eq!(round_trip(verb.clone()), verb);
+            }
+        }
+
+        #[test]
+        fn a_conversation_id_is_exactly_32_lowercase_hex() {
+            let good = "0123456789abcdef0123456789abcdef";
+            let id = crate::ConversationId::parse(good).unwrap();
+            assert_eq!(id.as_str(), good);
+            assert!(conversation_id_is_acceptable(id.as_str()));
+            for bad in [
+                &good[..31],
+                &format!("{good}0"),
+                &good.to_uppercase(),
+                &format!("c{good}"),
+                &format!("g{}", &good[1..]),
+                "",
+            ] {
+                assert!(crate::ConversationId::parse(bad).is_none(), "{bad}");
+                assert!(crate::ConversationId::try_from(bad.to_owned()).is_err());
+            }
+        }
+
+        #[test]
+        fn a_malformed_id_fails_decode() {
+            let value = |id: &str| {
+                ciborium::Value::Map(vec![
+                    (
+                        ciborium::Value::Text("protocol_version".into()),
+                        ciborium::Value::Integer(PROTOCOL_VERSION.into()),
+                    ),
+                    (
+                        ciborium::Value::Text("verb".into()),
+                        ciborium::Value::Map(vec![(
+                            ciborium::Value::Text("SessionClose".into()),
+                            ciborium::Value::Map(vec![(
+                                ciborium::Value::Text("conversation".into()),
+                                ciborium::Value::Text(id.into()),
+                            )]),
+                        )]),
+                    ),
+                ])
+            };
+            let encode = |v: &ciborium::Value| {
+                let mut b = Vec::new();
+                ciborium::into_writer(v, &mut b).unwrap();
+                b
+            };
+            assert!(decode_request(&encode(&value("x"))).is_err());
+            let ok = decode_request(&encode(&value(cid().as_str()))).unwrap();
+            assert_eq!(
+                ok.verb,
+                Verb::SessionClose {
+                    conversation: cid()
+                }
+            );
+        }
+
+        #[test]
+        fn session_verbs_fit_their_frames() {
+            assert_eq!(PROTOCOL_VERSION, 1);
+            let new = encode_request(&Request {
+                protocol_version: PROTOCOL_VERSION,
+                verb: Verb::SessionNew {
+                    cwd: "a".repeat(MAX_MUTATION_PATH_BYTES),
+                },
+            })
+            .unwrap();
+            assert!(new.len() <= ATTEMPT_REQUEST_MAX);
+            let list = encode_request(&Request {
+                protocol_version: PROTOCOL_VERSION,
+                verb: Verb::SessionList {
+                    cursor: Some(cid()),
+                },
+            })
+            .unwrap();
+            assert!(list.len() <= CONTROL_REQUEST_MAX);
+            let page = Payload::ConversationList(crate::ConversationPage {
+                entries: (0..12)
+                    .map(|_| view("a".repeat(MAX_MUTATION_PATH_BYTES)))
+                    .collect(),
+                next: Some(cid()),
+            });
+            let resp = encode_response(&Response {
+                protocol_version: PROTOCOL_VERSION,
+                result: RespResult::Ok(page),
+            })
+            .unwrap();
+            assert!(
+                resp.len() <= crate::frame::CONTROL_RESPONSE_MAX,
+                "{}",
+                resp.len()
+            );
+        }
+
         fn every_verb() -> Vec<(Verb, FrameClass)> {
             vec![
                 (Verb::Ping, FrameClass::Control),
@@ -3087,11 +3247,21 @@ mod tests {
                 (Verb::AdminProviderDisable, FrameClass::Control),
                 (Verb::AdminSessionList, FrameClass::Control),
                 (Verb::AdminSessionTerminate, FrameClass::Control),
-                (Verb::SessionNew, FrameClass::Control),
+                (Verb::SessionNew { cwd: "/p".into() }, FrameClass::Attempt),
                 (Verb::SessionResume, FrameClass::Control),
-                (Verb::SessionClose, FrameClass::Control),
-                (Verb::SessionDelete, FrameClass::Control),
-                (Verb::SessionList, FrameClass::Control),
+                (
+                    Verb::SessionClose {
+                        conversation: cid(),
+                    },
+                    FrameClass::Control,
+                ),
+                (
+                    Verb::SessionDelete {
+                        conversation: cid(),
+                    },
+                    FrameClass::Control,
+                ),
+                (Verb::SessionList { cursor: None }, FrameClass::Control),
                 (Verb::SessionFork, FrameClass::Control),
                 (
                     Verb::SessionPrompt {

@@ -110,11 +110,11 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         | Verb::AdminProviderDisable
         | Verb::AdminSessionList
         | Verb::AdminSessionTerminate
-        | Verb::SessionNew
+        | Verb::SessionNew { .. }
         | Verb::SessionResume
-        | Verb::SessionClose
-        | Verb::SessionDelete
-        | Verb::SessionList
+        | Verb::SessionClose { .. }
+        | Verb::SessionDelete { .. }
+        | Verb::SessionList { .. }
         | Verb::SessionFork
         | Verb::SessionCancel
         | Verb::SessionSetconfigoption
@@ -277,11 +277,11 @@ pub fn verb_to_action(verb: &Verb) -> &'static str {
         Verb::AdminProviderDisable => "admin.provider.disable",
         Verb::AdminSessionList => "admin.session.list",
         Verb::AdminSessionTerminate => "admin.session.terminate",
-        Verb::SessionNew => "session.new",
+        Verb::SessionNew { .. } => "session.new",
         Verb::SessionResume => "session.resume",
-        Verb::SessionClose => "session.close",
-        Verb::SessionDelete => "session.delete",
-        Verb::SessionList => "session.list",
+        Verb::SessionClose { .. } => "session.close",
+        Verb::SessionDelete { .. } => "session.delete",
+        Verb::SessionList { .. } => "session.list",
         Verb::SessionFork => "session.fork",
         Verb::SessionPrompt { .. } => "session.prompt",
         Verb::SessionCancel => "session.cancel",
@@ -1340,11 +1340,21 @@ mod tests {
             Verb::AdminProviderDisable,
             Verb::AdminSessionList,
             Verb::AdminSessionTerminate,
-            Verb::SessionNew,
+            Verb::SessionNew { cwd: "/w".into() },
             Verb::SessionResume,
-            Verb::SessionClose,
-            Verb::SessionDelete,
-            Verb::SessionList,
+            Verb::SessionClose {
+                conversation: maknae_proto::ConversationId::parse(
+                    "0123456789abcdef0123456789abcdef",
+                )
+                .unwrap(),
+            },
+            Verb::SessionDelete {
+                conversation: maknae_proto::ConversationId::parse(
+                    "0123456789abcdef0123456789abcdef",
+                )
+                .unwrap(),
+            },
+            Verb::SessionList { cursor: None },
             Verb::SessionFork,
             Verb::SessionPrompt {
                 conversation: "c".into(),

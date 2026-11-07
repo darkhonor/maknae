@@ -287,6 +287,10 @@ fn payload_kind(p: &Payload) -> &'static str {
         Payload::PromptReply(_) => "prompt reply",
         Payload::Baseline(_) => "baseline view",
         Payload::Containment(_) => "containment",
+        Payload::ConversationOpened(_) => "conversation opened",
+        Payload::ConversationClosed(_) => "conversation closed",
+        Payload::ConversationList(_) => "conversation list",
+        Payload::ConversationDeleted { .. } => "conversation deleted",
     }
 }
 
@@ -868,7 +872,11 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
         | (v, p @ Payload::SubjectList(_))
         | (v, p @ Payload::PromptReply(_))
         | (v, p @ Payload::Baseline(_))
-        | (v, p @ Payload::Containment(_)) => Err(format!(
+        | (v, p @ Payload::Containment(_))
+        | (v, p @ Payload::ConversationOpened(_))
+        | (v, p @ Payload::ConversationClosed(_))
+        | (v, p @ Payload::ConversationList(_))
+        | (v, p @ Payload::ConversationDeleted { .. }) => Err(format!(
             "protocol error: daemon returned a {} payload for a {} request",
             payload_kind(&p),
             v.kind()

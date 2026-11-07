@@ -1,5 +1,6 @@
 //! maknae-proto — kernel decision request/response, THE versioned contract.
 mod bytes;
+mod conversation;
 mod egress_frame;
 mod error;
 mod frame;
@@ -7,6 +8,7 @@ mod mutation;
 mod sealed;
 mod wire;
 pub use bytes::Bytes;
+pub use conversation::*;
 pub use egress_frame::*;
 pub use error::*;
 pub use frame::*;

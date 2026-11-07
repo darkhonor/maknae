@@ -1755,7 +1755,9 @@ async fn an_unentitled_caller_gets_unauthorized_never_notimplemented() {
     fx.write_bindings(BINDINGS_ROOT_USER); // root -> user: no management grant
     for verb in [
         maknae_proto::Verb::AdminStatus,
-        maknae_proto::Verb::SessionNew,
+        maknae_proto::Verb::SessionNew {
+            cwd: "/work".into(),
+        },
         maknae_proto::Verb::FsWrite {
             path: "/home/test/x".into(),
             content_length: 0,
