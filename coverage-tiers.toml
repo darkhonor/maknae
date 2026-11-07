@@ -79,6 +79,10 @@ files = [
   # #170: the append-only conversation chain and the reply binding. A wrong arm
   # accepts a rewritten history as a continuation or a forged Assistant turn as the delivered reply.
   "crates/maknae-kernel/src/conversation/chain.rs",
+  "crates/maknae-kernel/src/conversation/dir_store.rs",
+  "crates/maknae-kernel/src/conversation/mem_store.rs",
+  "crates/maknae-kernel/src/conversation/record.rs",
+  "crates/maknae-kernel/src/conversation/store.rs",
   # The CBOR byte-string content codec (#77): a wrong major type halves the
   # read ceiling and mis-routes oversize; the visitor is a refusal surface.
   "crates/maknae-proto/src/bytes.rs",

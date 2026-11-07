@@ -10,3 +10,5 @@ pub const STORE_FILE: &str = "kernel.graph";
 pub const MIRROR_FILE: &str = "bindings.mirror.yaml";
 pub const MARKER_FILE: &str = "reseed.authorized";
 pub const MARKER_MAX_BYTES: u64 = 4096;
+
+pub const CONVERSATIONS_DIR: &str = "conversations";

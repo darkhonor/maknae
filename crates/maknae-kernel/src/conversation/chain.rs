@@ -1,5 +1,5 @@
 use maknae_proto::{ContentBlock, ConversationId, PromptReply, ProposedToolCall, Turn};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Serialize)]
 enum TurnRef<'a> {
@@ -36,8 +36,23 @@ impl<'a> From<&'a Turn> for TurnRef<'a> {
 const CHAIN_TAG: &[u8] = b"maknae-conversation-chain-v1";
 const REPLY_TAG: &[u8] = b"maknae-conversation-reply-v1";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct ChainHead([u8; 32]);
+
+impl TryFrom<String> for ChainHead {
+    type Error = &'static str;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Self::from_hex(&s).ok_or("chain head must be 64 lowercase hex characters")
+    }
+}
+
+impl From<ChainHead> for String {
+    fn from(h: ChainHead) -> String {
+        h.to_hex()
+    }
+}
 
 impl ChainHead {
     pub fn genesis(id: &ConversationId) -> Self {
