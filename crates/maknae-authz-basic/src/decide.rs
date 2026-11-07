@@ -3968,4 +3968,44 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn session_new_honours_a_subjects_narrowed_permissions() {
+        const NAME: &str = "sentinel-170-subject-narrowed-cwd";
+        const UID: u32 = 1705;
+        let policy = maknae_config::parse_authz(&format!(
+            "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\nroles:\n  user:\n    allow: [\"session.new\"]\nsubjects:\n  {NAME}:\n    permissions:\n      allow: [\"Read(~/docs/**)\"]\n"
+        ))
+        .unwrap();
+        let lookups: crate::Lookups = [(NAME.to_string(), Some(UID))].into_iter().collect();
+        let bindings = BTreeMap::from([("user".to_string(), vec![NAME.to_string()])]);
+        let lp = LoadedPolicy {
+            roles: Roles::File(resolve(&Some(bindings), &crate::found(&lookups)).unwrap()),
+            action_grants: crate::validate_grants(&policy.action_grants).unwrap(),
+            destinations: crate::validate_destinations(&policy.destinations).unwrap(),
+            subjects: crate::validate_subjects(&policy, &lookups).unwrap(),
+            policy,
+        };
+        let at = |path: &str| request(Some(UID.into()), "session.new", Some(path));
+        let outside = decide_loaded_cited(&lp, &principal(), &at("/home/operator/projects/x"));
+        assert_eq!(
+            (outside.verdict, outside.cited),
+            (
+                Verdict::NotApplicable {
+                    note: Some("role user: no capability entry for session.new".into())
+                },
+                None
+            )
+        );
+        let inside = decide_loaded_cited(&lp, &principal(), &at("/home/operator/docs/x"));
+        assert_eq!(inside.verdict, permit_with_audit());
+        assert_eq!(
+            inside.cited,
+            Some(Cited::SubjectPath {
+                subject: NAME.into(),
+                effect: Effect::Allow,
+                source: "Read(~/docs/**)".into()
+            })
+        );
+    }
 }
