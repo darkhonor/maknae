@@ -129,6 +129,12 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    fn private_dir() -> tempfile::TempDir {
+        let d = tempfile::tempdir().expect("tempdir");
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        d
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn a_proc_file_reads_despite_zero_size() {
@@ -140,7 +146,7 @@ mod tests {
 
     #[test]
     fn a_file_within_cap_reads_whole() {
-        let d = tempfile::tempdir().expect("tempdir");
+        let d = private_dir();
         let p = d.path().join("f");
         std::fs::write(&p, [7u8; 100]).expect("write");
         assert_eq!(
@@ -151,7 +157,7 @@ mod tests {
 
     #[test]
     fn a_file_over_cap_is_refused() {
-        let d = tempfile::tempdir().expect("tempdir");
+        let d = private_dir();
         let p = d.path().join("f");
         std::fs::write(&p, [7u8; 100]).expect("write");
         match read_pseudo_file(&p, 10) {
@@ -164,7 +170,7 @@ mod tests {
 
     #[test]
     fn a_symlink_leaf_is_refused() {
-        let d = tempfile::tempdir().expect("tempdir");
+        let d = private_dir();
         let real = d.path().join("real");
         std::fs::write(&real, b"x").expect("write");
         let link = d.path().join("link");
@@ -177,7 +183,7 @@ mod tests {
 
     #[test]
     fn a_non_regular_leaf_is_refused() {
-        let d = tempfile::tempdir().expect("tempdir");
+        let d = private_dir();
         let pipe = d.path().join("pipe");
         nix::unistd::mkfifo(&pipe, nix::sys::stat::Mode::S_IRUSR).expect("mkfifo");
         match read_pseudo_file(&pipe, 64) {
@@ -188,7 +194,7 @@ mod tests {
 
     #[test]
     fn a_writable_parent_is_refused() {
-        let d = tempfile::tempdir().expect("tempdir");
+        let d = private_dir();
         let p = d.path().join("f");
         std::fs::write(&p, b"x").expect("write");
         std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o777)).expect("chmod");
@@ -276,7 +282,7 @@ mod tests {
 
     #[test]
     fn a_non_device_has_no_console_owner() {
-        let d = tempfile::tempdir().expect("tempdir");
+        let d = private_dir();
         let f = d.path().join("console");
         std::fs::write(&f, b"x").expect("write");
         assert_eq!(
@@ -301,7 +307,7 @@ mod tests {
 
     #[test]
     fn presence_reports_absent_and_present() {
-        let d = tempfile::tempdir().expect("tempdir");
+        let d = private_dir();
         assert!(!presence(&d.path().join("missing")).expect("absent"));
         let f = d.path().join("f");
         std::fs::write(&f, b"x").expect("write");
@@ -320,7 +326,7 @@ mod tests {
     #[test]
     fn presence_refuses_on_eacces() {
         crate::testutil::unprivileged("host_facts::tests::presence_refuses_on_eacces", || {
-            let d = tempfile::tempdir().expect("tempdir");
+            let d = private_dir();
             let locked = d.path().join("locked");
             std::fs::create_dir(&locked).expect("mkdir");
             std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
@@ -344,7 +350,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn absent_login_records_are_an_error() {
-        let d = tempfile::tempdir().expect("tempdir");
+        let d = private_dir();
         assert_eq!(
             logged_in_users_from(&d.path().join("utmpx"))
                 .expect_err("absent")

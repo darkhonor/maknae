@@ -151,6 +151,13 @@ mod tests {
     use super::*;
     use std::cell::Cell;
     use std::os::fd::AsFd;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn private_dir() -> tempfile::TempDir {
+        let d = tempfile::tempdir().expect("tempdir");
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        d
+    }
 
     fn sid(text: &str) -> Option<String> {
         session_id_from_cgroup(text, 1000)
@@ -373,14 +380,17 @@ mod tests {
     }
 
     fn sessions_with(id: &str, body: &str) -> tempfile::TempDir {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join(id), body).expect("write record");
+        let dir = private_dir();
+        let path = dir.path().join(id);
+        std::fs::write(&path, body).expect("write record");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("chmod record");
         dir
     }
 
     #[test]
     fn a_process_dead_before_the_read_is_gone() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = private_dir();
         let got = login_at(
             dir.path(),
             owned_by_me(),
@@ -393,14 +403,14 @@ mod tests {
 
     #[test]
     fn a_failed_cgroup_read_of_a_live_process_is_unavailable() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = private_dir();
         let got = login_at(dir.path(), owned_by_me(), uid(), answers(&[true]), denied);
         assert!(matches!(got, LoginFact::Unavailable(_)), "{got:?}");
     }
 
     #[test]
     fn a_failed_cgroup_read_of_an_exited_process_is_gone() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = private_dir();
         let got = login_at(
             dir.path(),
             owned_by_me(),
@@ -426,7 +436,7 @@ mod tests {
 
     #[test]
     fn a_process_outside_a_session_scope_has_no_session() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = private_dir();
         let got = login_at(dir.path(), owned_by_me(), uid(), answers(&[true]), || {
             Ok(Zeroizing::new(b"0::/system.slice/cron.service\n".to_vec()))
         });
@@ -474,7 +484,7 @@ mod tests {
 
     #[test]
     fn a_missing_sessions_directory_is_unavailable() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = private_dir();
         let absent = dir.path().join("sessions");
         let got = login_at(
             &absent,
@@ -505,7 +515,6 @@ mod tests {
 
     #[test]
     fn a_group_writable_record_is_unavailable() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = sessions_with("4", &format!("UID={}\nCLASS=user\nSTATE=active\n", uid()));
         std::fs::set_permissions(dir.path().join("4"), std::fs::Permissions::from_mode(0o664))
             .expect("chmod");
