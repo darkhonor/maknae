@@ -338,7 +338,7 @@ pub fn admitted_user_for_test(user: Option<&str>) -> Option<String> {
 /// kernel-derived. ADR-0024's "the uid is the whole subject" is the identity
 /// claim; the home is a separate kernel-stamped attribute. `Read` carries the
 /// client-supplied path as the resource `path` attribute, and an admitted
-/// `session.prompt` carries `destination`; the context carries the lane.
+/// `session.prompt` carries `destination` and `model`; the context carries the lane.
 pub fn build_authz_request(
     verb: &Verb,
     peer_uid: u32,
@@ -360,6 +360,10 @@ pub fn build_authz_request(
         resource.insert(
             "destination",
             AttrValue::Str(format!("provider:{}", a.provider.name)),
+        );
+        resource.insert(
+            "model",
+            AttrValue::Str(format!("{}/{}", a.provider.name, a.model)),
         );
     }
     // The lane is an ARGUMENT, never derived from `verb`. That is the point: the
@@ -611,6 +615,67 @@ mod tests {
         .0
         .get("destination")
         .is_none());
+    }
+
+    #[test]
+    fn the_admitted_model_is_stamped_beside_the_destination() {
+        use maknae_config::Value;
+        let set = maknae_config::providers_from_section(Some(&Value::Seq(vec![Value::Map(vec![
+            ("name".into(), Value::Str("openrouter".into())),
+            (
+                "endpoint".into(),
+                Value::Str("https://api.example.test/v1".into()),
+            ),
+            (
+                "models".into(),
+                Value::Seq(vec![Value::Str("meta/llama-3".into())]),
+            ),
+        ])])))
+        .unwrap();
+        let choice = maknae_proto::ProviderChoice {
+            provider: "openrouter".into(),
+            model: "meta/llama-3".into(),
+            key_subpath: "openrouter/personal".into(),
+            key_field: "api_key".into(),
+            sealed_key: maknae_proto::SealedKey::new(vec![
+                0x5a;
+                maknae_proto::SEALED_KEY_MIN_BYTES
+            ])
+            .unwrap(),
+        };
+        let admitted = crate::provider_choice::admit_choice(
+            &set,
+            Some(&choice),
+            Some("alice"),
+            "maknae/users",
+        )
+        .unwrap();
+        let v = Verb::SessionPrompt {
+            conversation: "c".into(),
+            turns: vec![],
+            output_tokens: None,
+            choice: Some(choice.clone()),
+        };
+        let r = build_authz_request(
+            &v,
+            1002,
+            None,
+            maknae_security::Lane::Local,
+            Some(&admitted),
+        );
+        assert_eq!(
+            r.resource.0.get("model"),
+            Some(&maknae_security::AttrValue::Str(
+                "openrouter/meta/llama-3".into()
+            ))
+        );
+        assert!(
+            build_authz_request(&v, 1002, None, maknae_security::Lane::Local, None)
+                .resource
+                .0
+                .get("model")
+                .is_none()
+        );
     }
 
     #[test]

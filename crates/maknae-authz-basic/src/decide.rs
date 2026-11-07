@@ -24,6 +24,7 @@ pub(crate) const RESOURCE_PATH: &str = "path";
 /// `session.prompt` (#172): `provider:<name>` from the admitted provider choice.
 /// Set by the kernel, never the client; the arm refuses it absent.
 pub(crate) const RESOURCE_DESTINATION: &str = "destination";
+pub(crate) const RESOURCE_MODEL: &str = "model";
 
 /// One loaded policy snapshot: the parsed grammar + validated bindings.
 pub(crate) struct LoadedPolicy {
@@ -340,6 +341,7 @@ fn decide_prompt(
     lp: &LoadedPolicy,
     req: &SecRequest,
     role_key: &'static str,
+    subject: Option<&SubjectEntry>,
 ) -> (Verdict, Option<Cited>) {
     match lp
         .action_grants
@@ -379,22 +381,37 @@ fn decide_prompt(
             )
         }
     };
-    if lp.destinations.allows(role_key, destination) {
-        (
-            permit_with_audit(),
-            Some(Cited::Destination {
-                role: role_key,
-                destination: destination.to_string(),
-            }),
-        )
-    } else {
-        (
+    if !lp.destinations.allows(role_key, destination) {
+        return (
             Verdict::Deny {
                 reason: format!("destination not allowlisted for role {role_key}: {destination}"),
             },
             None,
-        )
+        );
     }
+    if let Some((name, listed)) = subject.and_then(|s| Some((&s.name, s.models.as_ref()?))) {
+        let model = match req.resource.0.get(RESOURCE_MODEL) {
+            Some(AttrValue::Str(m)) => m.as_str(),
+            _ => return (Verdict::Indeterminate, None),
+        };
+        if !listed.iter().any(|m| m.as_resource() == model) {
+            return (
+                Verdict::Deny {
+                    reason: format!(
+                        "subject {name}: model {model} is not in subjects.{name}.models allow"
+                    ),
+                },
+                None,
+            );
+        }
+    }
+    (
+        permit_with_audit(),
+        Some(Cited::Destination {
+            role: role_key,
+            destination: destination.to_string(),
+        }),
+    )
 }
 
 /// (loaded policy, principal, request) → verdict. Spec §4 steps 2–6.
@@ -516,7 +533,7 @@ pub(crate) fn decide_loaded_cited(
         // precede both or it is dead for that role; it sits after the fs arms
         // only for reading order (their guards key on other action strings).
         Role::Admin | Role::User if req.action.0 == "session.prompt" => {
-            decide_prompt(lp, req, role.key())
+            decide_prompt(lp, req, role.key(), lp.subjects.get(uid))
         }
         Role::Guest | Role::User => match class {
             Some(Class::Liveness) => (permit_with_audit(), None),
@@ -3017,6 +3034,62 @@ mod tests {
         );
         let ssh = decide_loaded_cited(&lp, &principal(), &fs_op(SENTINEL_UID, "fs.read", ".ssh/k"));
         assert_eq!(ssh.cited, site(Effect::Deny, "Read(~/.ssh/**)"));
+    }
+
+    fn model_req(uid: u32, model: Option<AttrValue>) -> SecRequest {
+        let mut r = prompt_req(uid, Some("provider:openai"));
+        if let Some(m) = model {
+            r.resource.0.insert("model", m);
+        }
+        r
+    }
+
+    #[test]
+    fn a_subject_model_limit_refuses_an_unlisted_model() {
+        let lp = lp_subject(
+            "user",
+            &sentinel_entry("    models:\n      allow: [\"openai/a\"]\n"),
+        );
+        let b = decide_loaded_cited(
+            &lp,
+            &principal(),
+            &model_req(SENTINEL_UID, Some(AttrValue::Str("openai/b".into()))),
+        );
+        assert!(
+            matches!(&b.verdict, Verdict::Deny { reason } if reason.contains(SENTINEL) && reason.contains("openai/b") && reason.contains("subjects")),
+            "{b:?}"
+        );
+        assert_eq!(b.cited, None);
+        let a = decide_loaded_cited(
+            &lp,
+            &principal(),
+            &model_req(SENTINEL_UID, Some(AttrValue::Str("openai/a".into()))),
+        );
+        assert!(matches!(a.verdict, Verdict::Permit { .. }), "{a:?}");
+        for bad in [None, Some(AttrValue::Int(1))] {
+            let d = decide_loaded_cited(&lp, &principal(), &model_req(SENTINEL_UID, bad));
+            assert_eq!(d.verdict, Verdict::Indeterminate);
+        }
+    }
+
+    #[test]
+    fn an_off_list_model_entry_is_inert_and_an_entry_free_subject_is_not_asked_for_a_model() {
+        let lp = lp_subject(
+            "user",
+            &sentinel_entry("    models:\n      allow: [\"openai/gone\", \"openai/a\"]\n"),
+        );
+        let a = decide_loaded_cited(
+            &lp,
+            &principal(),
+            &model_req(SENTINEL_UID, Some(AttrValue::Str("openai/a".into()))),
+        );
+        assert!(matches!(a.verdict, Verdict::Permit { .. }), "{a:?}");
+        let lp = lp_subject(
+            "user",
+            &sentinel_entry("    actions:\n      allow: [\"session.prompt\"]\n"),
+        );
+        let d = decide_loaded_cited(&lp, &principal(), &model_req(SENTINEL_UID, None));
+        assert!(matches!(d.verdict, Verdict::Permit { .. }), "{d:?}");
     }
 
     #[test]
