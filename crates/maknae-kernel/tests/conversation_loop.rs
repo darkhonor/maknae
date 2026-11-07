@@ -8,7 +8,7 @@ use maknae_proto::{
     SecretText, Turn, Verb,
 };
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -652,10 +652,23 @@ async fn the_new_record_names_owner_cwd_and_id() {
     }
 }
 
-/// A store whose first update loses to another loop's update of the same record.
+/// A store whose `lose_at`th update loses to another loop's update of the same
+/// record, and whose removals can be made to overrun.
 struct Racing {
     inner: Arc<dyn ConversationStore>,
-    raced: AtomicBool,
+    lose_at: usize,
+    updates: AtomicUsize,
+    remove_stall: Duration,
+}
+impl Racing {
+    fn over(inner: &Arc<dyn ConversationStore>, lose_at: usize) -> Arc<Self> {
+        Arc::new(Self {
+            inner: Arc::clone(inner),
+            lose_at,
+            updates: AtomicUsize::new(0),
+            remove_stall: Duration::ZERO,
+        })
+    }
 }
 impl ConversationStore for Racing {
     fn create(
@@ -674,7 +687,7 @@ impl ConversationStore for Racing {
         fence: u64,
         f: &mut dyn FnMut(&mut ConversationRecord),
     ) -> Result<ConversationRecord, StoreError> {
-        if !self.raced.swap(true, Ordering::SeqCst) {
+        if self.updates.fetch_add(1, Ordering::SeqCst) + 1 == self.lose_at {
             let winner = self.inner.get(id)?;
             self.inner
                 .update(id, winner.fence, &mut |r| r.last_active += 1)?;
@@ -682,6 +695,7 @@ impl ConversationStore for Racing {
         self.inner.update(id, fence, f)
     }
     fn remove(&self, id: &ConversationId, fence: u64) -> Result<ConversationRecord, StoreError> {
+        std::thread::sleep(self.remove_stall);
         self.inner.remove(id, fence)
     }
     fn list_by_owner(
@@ -705,10 +719,7 @@ impl ConversationStore for Racing {
 async fn a_racing_second_loop_is_refused_before_egress() {
     let mut rig = Rig::new("race", Kind::Mem);
     let conv = rig.open().await;
-    rig.fx.conversations = Arc::new(Racing {
-        inner: Arc::clone(&rig.fx.conversations),
-        raced: AtomicBool::new(false),
-    });
+    rig.fx.conversations = Racing::over(&rig.fx.conversations, 1);
     let eg = Script::of([Ok(reply("never"))]);
     let records = Records::new(0);
     let resp = rig
@@ -1002,4 +1013,56 @@ async fn agents_are_denied_session_new_by_default() {
     let resp = rig.new_at(&cwd, Some(fd), &records).await.unwrap();
     refused_with(&resp, ProtoErrCode::Unauthorized);
     assert!(rig.held().is_empty());
+}
+
+#[tokio::test]
+async fn a_racing_update_after_the_send_withholds_the_reply() {
+    let mut rig = Rig::new("race-reply", Kind::Mem);
+    let conv = rig.open().await;
+    let plain = Arc::clone(&rig.fx.conversations);
+    rig.fx.conversations = Racing::over(&plain, 2);
+    let eg = Script::of([Ok(reply("withheld"))]);
+    let records = Records::new(0);
+    let resp = rig
+        .send(prompt(&conv, vec![user("a")]), None, &records, eg.clone())
+        .await
+        .unwrap();
+    refused_with(&resp, ProtoErrCode::Unauthorized);
+    let outcome = last_of(&records, "session.prompt");
+    assert_eq!(
+        outcome.outcome.reason,
+        "reply refused: conversation changed"
+    );
+    assert_eq!(
+        outcome.egress.unwrap().status,
+        maknae_audit_append::EgressStatus::LandedUndelivered
+    );
+    assert_eq!(eg.sends(), 1);
+    let rec = plain.get(&id(&conv)).unwrap();
+    assert_eq!((rec.turns, rec.last_reply), (1, None));
+}
+
+#[tokio::test]
+async fn deleting_an_active_conversation_removes_its_record() {
+    let rig = Rig::new("delete-own", Kind::Dir);
+    let conv = rig.open().await;
+    let records = Records::new(0);
+    let resp = rig
+        .control(
+            Verb::SessionDelete {
+                conversation: id(&conv),
+            },
+            &records,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        resp.result,
+        RespResult::Ok(Payload::ConversationDeleted { ref conversation }) if conversation.as_str() == conv
+    ));
+    assert_eq!(rig.store().get(&id(&conv)), Err(StoreError::NotFound));
+    let recs = of_action(&records, "session.delete");
+    assert_eq!(recs.len(), 2, "{recs:?}");
+    assert_eq!(recs[1].outcome.reason, "conversation deleted");
+    assert_eq!(recs[1].object.as_deref(), rig.cwd().to_str());
 }

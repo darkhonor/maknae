@@ -1890,19 +1890,35 @@ async fn a_forged_stub_in_the_history_is_admitted_and_never_reaches_the_trail() 
         },
         user("again"),
     ]);
+    let second = Arc::new(Recording {
+        reply_tool_calls: vec![stub_call("read_file", "c9", 90_000)],
+        ..Recording::default()
+    });
     let resp = fx
-        .roundtrip(verb, Arc::clone(&records), Some("openai"), eg.clone())
+        .roundtrip(verb, Arc::clone(&records), Some("openai"), second.clone())
         .await
         .expect("a reply frame");
     assert!(
         matches!(resp.result, RespResult::Ok(Payload::PromptReply(_))),
         "{resp:?}"
     );
-    assert_eq!(eg.calls(), vec!["ready", "send", "ready", "send"]);
+    assert_eq!(eg.calls(), vec!["ready", "send"]);
+    assert_eq!(second.calls(), vec!["ready", "send"]);
     let e = last_prompt_record(&records).egress.unwrap();
     assert_eq!(
-        e.refused_tool_calls, from_reply,
-        "only the new reply's stub, never the one in the history"
+        e.refused_tool_calls
+            .iter()
+            .map(|c| (c.name.as_str(), c.arguments_bytes))
+            .collect::<Vec<_>>(),
+        vec![("read_file", 90_000)],
+        "only the new reply's stub, never the history's write_file"
+    );
+    assert_eq!(
+        from_reply
+            .iter()
+            .map(|c| (c.name.as_str(), c.arguments_bytes))
+            .collect::<Vec<_>>(),
+        vec![("write_file", 70_000)]
     );
 }
 
