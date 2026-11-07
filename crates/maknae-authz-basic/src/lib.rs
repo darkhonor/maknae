@@ -6846,6 +6846,55 @@ mod tests {
         }
 
         #[test]
+        fn every_live_edit_chain_ending_with_an_agent_under_admin_is_refused() {
+            const ROOT: &str = "schema_version: 1\nbindings:\n  admin: [\"root\"]\n";
+            const ADMIN: &str = "schema_version: 1\nbindings:\n  admin: [\"root\", \"hobi-svc\"]\n";
+            for (tag, steps, last) in [
+                (
+                    "guest, then admin",
+                    vec!["schema_version: 1\nbindings:\n  admin: [\"root\"]\n  guest: [\"hobi-svc\"]\n"],
+                    ADMIN,
+                ),
+                (
+                    "contained, released, then admin",
+                    vec![
+                        "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary: [\"hobi-svc\"]\n",
+                        ROOT,
+                    ],
+                    ADMIN,
+                ),
+                (
+                    "an alias added, then moved to admin",
+                    vec!["schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"alias\"]\n"],
+                    "schema_version: 1\nbindings:\n  admin: [\"root\", \"alias\"]\n",
+                ),
+                (
+                    "removed, then re-added under admin",
+                    vec![
+                        "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"hobi-svc\"]\n",
+                        ROOT,
+                    ],
+                    ADMIN,
+                ),
+            ] {
+                let mut src = source(
+                    Some(ROOT),
+                    &[("root", 0), ("hobi-svc", HOBI), ("alias", HOBI)],
+                    load(vec![hobi()], &[]),
+                );
+                assert_eq!(src.agent_uid("hobi"), Some(HOBI), "{tag}");
+                src.set_account_lookup(unanswered_account);
+                for step in steps {
+                    src = src
+                        .with_live_bindings(bound(step))
+                        .unwrap_or_else(|e| panic!("{tag}: {step}: {e}"));
+                }
+                let got = src.with_live_bindings(bound(last));
+                assert_eq!(got.unwrap_err(), admin_refusal(), "{tag}");
+            }
+        }
+
+        #[test]
         fn a_live_edit_moving_a_load_bound_agent_to_admin_is_refused() {
             let mut src = source(
                 Some("schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"hobi-svc\"]\n"),

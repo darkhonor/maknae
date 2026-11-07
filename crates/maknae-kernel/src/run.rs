@@ -5339,7 +5339,7 @@ where
     /// published and recorded as the identity it now is.
     async fn republish_principal_admin(&self, ctx: &BootCtx<'_>, uid: u32) {
         let snapshot = self.authorizer.baseline().snapshot();
-        if snapshot.has_explicit_bindings() {
+        if snapshot.has_explicit_bindings() || snapshot.agent_of(uid).is_some() {
             return;
         }
         let promoted = maknae_authz_basic::IdentityProblem::PrincipalAdmin { uid };
@@ -14539,6 +14539,45 @@ mod baseline_accept_tests {
             .subjects()
             .iter()
             .any(|s| s.uid == Some(uid) && s.state == maknae_authz_basic::SubjectState::Principal));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_principal_accept_naming_an_enrolled_agent_publishes_no_principal_admin() {
+        let opts = Opts {
+            bindings: None,
+            ..Opts::default()
+        };
+        let fx = fixture_with("principal-admin-agent-uid", opts).await;
+        fx.baseline().set_hosts(maknae_authz_basic::HostLookups {
+            account: super::reload_tests::hobi_account,
+            daemons: super::reload_tests::no_daemons,
+            group: super::reload_tests::no_group,
+        });
+        let dir = fx.dir.join("agents").join("hobi");
+        std::fs::create_dir_all(&dir).unwrap();
+        for d in [fx.dir.join("agents"), dir.clone()] {
+            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o750)).unwrap();
+        }
+        write_0640(
+            &dir.join("enrollment.yaml"),
+            "agent_id: hobi\naccount: hobi-svc\nuid: 2001\nrole: user\n",
+        );
+        fx.reloader.run().await.unwrap();
+        assert_eq!(fx.baseline().snapshot().agent_of(2001), Some("hobi"));
+        fx.write_yaml_principal(2001, "");
+        let shown = fx.show().await;
+        accepted(fx.accept(&shown.hash).await);
+        assert_eq!(fx.composition().baseline().principal().uid, 2001);
+        let promoted = maknae_authz_basic::IdentityProblem::PrincipalAdmin { uid: 2001 };
+        assert!(
+            !fx.status.identity.current().contains(&promoted),
+            "{:?}",
+            fx.status.identity.current()
+        );
+        assert!(!fx
+            .seen()
+            .iter()
+            .any(|s| s.action == GRAPH_IDENTITY_ACTION && s.reason == promoted.to_string()));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
