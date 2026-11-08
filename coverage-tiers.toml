@@ -1124,3 +1124,23 @@ why = "a write to an fd openat just returned fails only on ENOSPC/EIO, not provo
 [[t3]]
 path = "crates/maknae-proto/src/mutation.rs"
 why = "Mutation exchange serde data declarations and bounds only; report validation is kernel mutation_exchange.rs (T1)."
+
+[[exception]]
+path = "crates/maknae-kernel/src/conversation/record.rs"
+anchor = ".map_err(|_| StoreError::Io(\"no conversation id from the system random source\".into()))?"
+why = "the system random source failing is not provokable from a unit test without a seam; a pure propagation with no decision"
+
+[[exception]]
+path = "crates/maknae-kernel/src/conversation/record.rs"
+anchor = "ciborium::into_writer(rec, &mut out).map_err(|e| StoreError::Io(e.to_string()))?;"
+why = "serializing a derived struct into a Vec cannot fail; not provokable from a unit test without a seam; a pure propagation with no decision"
+
+[[exception]]
+path = "crates/maknae-kernel/src/conversation/dir_store.rs"
+anchor = "            e => io(e),"
+why = "a flock failure other than EWOULDBLOCK on a just-opened anchor fd is not provokable from a unit test without a seam; the Locked arm that carries the decision IS covered"
+
+[[exception]]
+path = "crates/maknae-kernel/src/conversation/dir_store.rs"
+anchor = "let sealed = seal(plain, &self.key).map_err(|e| StoreError::Io(e.to_string()))?;"
+why = "seal fails only when the random source or the AEAD key setup fails, neither provokable from a unit test without a seam; a pure propagation with no decision"
