@@ -68,7 +68,7 @@ pub use agents::{
     bindings_conflict, load_agents, parse_agent_enrollment, parse_agent_policy,
     service_account_check, AccountRefusal, AgentEnrollment, AgentId, AgentPolicy, AgentRole,
     AgentsLoad, HostAccounts, InvalidAgentId, SkippedAgentEntry, TaskerRef, AGENTS_DIR,
-    ENROLLMENT_FILE, NON_LOGIN_SHELLS, POLICY_FILE,
+    AGENT_ENTITY_PREFIX, ENROLLMENT_FILE, NON_LOGIN_SHELLS, POLICY_FILE,
 };
 pub use audit_cfg::{
     audit_from_section, resolve_readers, AuditConfig, ReaderAccount, ReaderLookup, AUDIT_SECTION,

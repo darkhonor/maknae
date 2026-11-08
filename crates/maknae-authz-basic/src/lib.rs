@@ -646,14 +646,15 @@ impl PolicySource {
         } = parts;
         let policy_source = utf8(&paths.authz)?;
         let identity_source = utf8(&paths.bindings)?;
-        let resolved = binding::resolve_subjects(&bindings, &found(&lookups))
+        let uid_of = found(&lookups);
+        let resolved = binding::resolve_subjects(&bindings, &uid_of)
             .map_err(|e| AuthzBasicError::Bindings(e.to_string()))?;
         validate_grants(&policy.action_grants)?;
         validate_destinations(&policy.destinations)?;
         let mut subjects = validate_subjects(&policy, &lookups)?;
         let agents = match agents {
-            Agents::Load(load) => enroll(load, hosts, &principal, &bindings, &resolved)?,
-            Agents::Kept(kept) => rebound(kept, &bindings, &resolved)?,
+            Agents::Load(load) => enroll(load, hosts, &principal, &bindings, &uid_of)?,
+            Agents::Kept(kept) => rebound(kept, &bindings, &uid_of)?,
         };
         let agents = AgentOutcome {
             taskers: resolve_taskers(&agents.load, &lookups, &agents.enrolled),
@@ -933,43 +934,14 @@ fn tasker_names(load: &maknae_config::AgentsLoad) -> Vec<String> {
         .collect()
 }
 
-/// `admin` wins over every other role, by the account's name, a `uid:` entry or any
-/// name resolving to its uid.
 fn bound_role(
     bindings: &maknae_config::Bindings,
-    resolved: &binding::Resolved,
+    uid_of: &UidMap,
     account: &str,
     uid: u32,
 ) -> Option<role::Role> {
-    let mut held: Vec<role::Role> = Vec::new();
-    for (key, entries) in bindings.roles.iter().flatten() {
-        let named = entries.iter().any(|e| match e {
-            maknae_config::BindingEntry::Name(n) => n == account,
-            maknae_config::BindingEntry::Uid(u) => *u == uid,
-        });
-        if named {
-            held.extend(role::Role::from_key(key));
-        }
-    }
-    held.extend(
-        resolved
-            .subjects
-            .iter()
-            .filter(|(u, _, _)| *u == uid)
-            .map(|(_, r, _)| *r),
-    );
-    for p in &resolved.problems {
-        if let IdentityProblem::Unbound { uid: u, roles, .. }
-        | IdentityProblem::Contained { uid: u, roles, .. } = p
-        {
-            if *u == uid {
-                held.extend(roles.iter().filter_map(|r| role::Role::from_key(r)));
-            }
-        }
-    }
-    [role::Role::Admin, role::Role::User, role::Role::Guest]
-        .into_iter()
-        .find(|r| held.contains(r))
+    maknae_config::bindings_conflict(bindings, account, uid, |n| uid_of.get(n).copied())
+        .and_then(role::Role::from_key)
 }
 
 /// An account that passed every service-account check and is bound under `admin` is
@@ -997,7 +969,7 @@ fn enroll(
     hosts: HostLookups,
     principal: &maknae_config::Principal,
     bindings: &maknae_config::Bindings,
-    resolved: &binding::Resolved,
+    uid_of: &UidMap,
 ) -> Result<AgentOutcome, AuthzBasicError> {
     let mut out = AgentOutcome {
         problems: load
@@ -1078,7 +1050,7 @@ fn enroll(
             )));
             continue;
         }
-        if let Some(role) = bound_role(bindings, resolved, &e.account, e.uid) {
+        if let Some(role) = bound_role(bindings, uid_of, &e.account, e.uid) {
             out.problems
                 .push(refused(bound_refusal(&e.id, &e.account, role)?));
             continue;
@@ -1095,7 +1067,7 @@ fn enroll(
 fn rebound(
     mut kept: AgentOutcome,
     bindings: &maknae_config::Bindings,
-    resolved: &binding::Resolved,
+    uid_of: &UidMap,
 ) -> Result<AgentOutcome, AuthzBasicError> {
     for p in &kept.problems {
         let IdentityProblem::AgentRefused {
@@ -1114,13 +1086,13 @@ fn rebound(
         else {
             continue;
         };
-        if let Some(role) = bound_role(bindings, resolved, &e.account, *uid) {
+        if let Some(role) = bound_role(bindings, uid_of, &e.account, *uid) {
             bound_refusal(&e.id, &e.account, role)?;
         }
     }
     let enrolled = std::mem::take(&mut kept.enrolled);
     for (id, (uid, account, role)) in enrolled {
-        match bound_role(bindings, resolved, &account, uid) {
+        match bound_role(bindings, uid_of, &account, uid) {
             Some(bound) => kept.problems.push(IdentityProblem::AgentRefused {
                 agent: id.as_str().to_string(),
                 uid,

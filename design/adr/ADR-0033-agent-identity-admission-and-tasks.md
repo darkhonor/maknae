@@ -23,7 +23,7 @@ An agent's configuration lives under `/etc/maknae/agents/<id>/`. `enrollment.yam
 
 An enrollment binds the agent to `user` (the default) or `guest`; `admin` is not a value the record, the CLI or the parser accepts. `bindings.yaml` may name an agent's account only under `adversary`, which contains it. The `admin` refusal is made three times, by independent code:
 
-- **the CLI:** `maknae enroll agent --role` offers `user` and `guest`, and enrollment refuses an account `bindings.yaml` binds under `admin`, `user` or `guest`, by name or uid;
+- **the CLI:** `maknae enroll agent --role` offers `user` and `guest`, and enrollment refuses an account `bindings.yaml` binds under `admin`, `user` or `guest`, by name, by uid or by another name for its uid. It decides the binding with `maknae_config::bindings_conflict`, the predicate the rebuild runs;
 - **the rebuild:** an enrollment refused only because `bindings.yaml` binds its account, where the account passes every other check (decision 3), is a load refusal when the binding is under `admin`, by name or by uid alias (`AuthzBasicError::AgentAccountAdmin`; the previous snapshot stands). This holds on a reload and on a live identity edit alike (maintainer, 2026-11-08, #609). Under `user` or `guest` that enrollment is ignored (decision 3); under `adversary` it is enrolled and contained;
 - **the graph:** the identity layer persists each enrolled agent as an `Agent` node with one `enrolls` edge to its `Subject`, and refuses a layer in which that subject is bound to `admin` (`IdentityError::AgentAdmin`), on write and on load ([ADR-0029](ADR-0029-kernel-enforcement-state-graph.md) decision 7's amendment).
 

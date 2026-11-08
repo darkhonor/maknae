@@ -16,16 +16,15 @@
 //! as direct deps — both already transitive via `vaultrs`, so `cargo deny` stays
 //! green). The hand-rolled endpoint mirrors the pattern in vaultrs' own
 //! `src/api/pki/requests.rs` (`#[derive(Endpoint)]` + `#[endpoint(path = ..., ...)]`).
-use crate::agent_enroll::BindCidrs;
+use crate::agent_enroll::{AgentId, BindCidrs};
 use crate::VaultError;
+use maknae_config::AGENT_ENTITY_PREFIX;
 use maknae_crypto::assert_fips_provider;
 use serde::Deserialize;
 use vaultrs::api::auth::approle::requests::GenerateNewSecretIDRequestBuilder;
 use vaultrs::api::identity::entity::responses::ReadEntityByNameResponse;
 use vaultrs::client::{VaultClient, VaultClientSettingsBuilder};
 use zeroize::Zeroizing;
-
-const AGENT_ENTITY_PREFIX: &str = "maknae-agent-";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EntityAlias {
@@ -57,11 +56,7 @@ fn entity_facts(resp: ReadEntityByNameResponse) -> EntityFacts {
 
 fn agent_entity_name(name: &str) -> Result<&str, VaultError> {
     let id = name.strip_prefix(AGENT_ENTITY_PREFIX).unwrap_or_default();
-    let plain = !id.is_empty()
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
-    if plain {
+    if AgentId::parse(id).is_ok() {
         Ok(name)
     } else {
         Err(VaultError::Operator(format!(
@@ -418,6 +413,8 @@ mod tests {
             "maknae-agent-",
             "maknae-agent-a/b",
             "maknae-agent-../x",
+            "maknae-agent-HOBI",
+            "maknae-agent-data",
         ] {
             assert!(
                 matches!(agent_entity_name(bad), Err(VaultError::Operator(_))),

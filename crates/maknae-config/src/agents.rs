@@ -59,7 +59,13 @@ impl AgentId {
     pub fn role_name(&self) -> String {
         format!("agent-{}", self.0)
     }
+
+    pub fn entity_name(&self) -> String {
+        format!("{AGENT_ENTITY_PREFIX}{}", self.0)
+    }
 }
+
+pub const AGENT_ENTITY_PREFIX: &str = "maknae-agent-";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentRole {
@@ -456,12 +462,19 @@ pub fn service_account_check(
     Ok(())
 }
 
-pub fn bindings_conflict(bindings: &Bindings, account: &str, uid: u32) -> Option<&'static str> {
+/// The highest of `admin`, `user` and `guest` whose entries name the account: by its name,
+/// a `uid:` entry, or another name `uid_of` resolves to its uid.
+pub fn bindings_conflict(
+    bindings: &Bindings,
+    account: &str,
+    uid: u32,
+    uid_of: impl Fn(&str) -> Option<u32>,
+) -> Option<&'static str> {
     let roles = bindings.roles.as_ref()?;
     ["admin", "user", "guest"].into_iter().find(|role| {
         roles.get(*role).is_some_and(|members| {
             members.iter().any(|m| match m {
-                BindingEntry::Name(n) => n == account,
+                BindingEntry::Name(n) => n == account || uid_of(n) == Some(uid),
                 BindingEntry::Uid(u) => *u == uid,
             })
         })
@@ -1233,30 +1246,51 @@ mod tests {
     fn bindings_conflict_names_admin_user_and_guest_by_name_or_uid() {
         for role in ["admin", "user", "guest"] {
             let by_name = bindings(&format!("  {role}: [\"hobi-svc\"]\n"));
-            assert_eq!(bindings_conflict(&by_name, "hobi-svc", 990), Some(role));
+            assert_eq!(
+                bindings_conflict(&by_name, "hobi-svc", 990, none),
+                Some(role)
+            );
             let by_uid = bindings(&format!("  {role}: [{{uid: 990}}]\n"));
-            assert_eq!(bindings_conflict(&by_uid, "hobi-svc", 990), Some(role));
-            assert_eq!(bindings_conflict(&by_uid, "hobi-svc", 991), None);
-            assert_eq!(bindings_conflict(&by_name, "suga-svc", 990), None);
+            assert_eq!(
+                bindings_conflict(&by_uid, "hobi-svc", 990, none),
+                Some(role)
+            );
+            assert_eq!(bindings_conflict(&by_uid, "hobi-svc", 991, none), None);
+            assert_eq!(bindings_conflict(&by_name, "suga-svc", 990, none), None);
         }
         let both = bindings("  user: [\"hobi-svc\"]\n  admin: [{uid: 990}]\n");
-        assert_eq!(bindings_conflict(&both, "hobi-svc", 990), Some("admin"));
+        assert_eq!(
+            bindings_conflict(&both, "hobi-svc", 990, none),
+            Some("admin")
+        );
+    }
+
+    fn none(_: &str) -> Option<u32> {
+        None
+    }
+
+    #[test]
+    fn bindings_conflict_names_a_role_bound_by_a_uid_alias() {
+        let alias = |n: &str| (n == "hobi-alt").then_some(990);
+        let b = bindings("  user: [\"hobi-svc\"]\n  admin: [\"hobi-alt\"]\n");
+        assert_eq!(bindings_conflict(&b, "hobi-svc", 990, alias), Some("admin"));
+        assert_eq!(bindings_conflict(&b, "suga-svc", 991, alias), None);
     }
 
     #[test]
     fn bindings_conflict_ignores_adversary_and_absent() {
         let adv = bindings("  adversary: [\"hobi-svc\", {uid: 990}]\n");
-        assert_eq!(bindings_conflict(&adv, "hobi-svc", 990), None);
+        assert_eq!(bindings_conflict(&adv, "hobi-svc", 990, none), None);
         assert_eq!(
-            bindings_conflict(&Bindings::absent(), "hobi-svc", 990),
+            bindings_conflict(&Bindings::absent(), "hobi-svc", 990, none),
             None
         );
         assert_eq!(
-            bindings_conflict(&Bindings::missing(), "hobi-svc", 990),
+            bindings_conflict(&Bindings::missing(), "hobi-svc", 990, none),
             None
         );
         assert_eq!(
-            bindings_conflict(&bindings("  admin: []\n"), "hobi-svc", 990),
+            bindings_conflict(&bindings("  admin: []\n"), "hobi-svc", 990, none),
             None
         );
     }

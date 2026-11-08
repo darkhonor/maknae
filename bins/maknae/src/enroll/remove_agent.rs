@@ -1,7 +1,7 @@
 use super::agent::{
-    check_mount, dedup, entity_name, has_alias_on, io_error, is_not_found, open_dir, read_host,
-    read_records, read_state, AgentState, AgentVaultOps, HasVault, RealVault, AGENTS_DIR,
-    PRIVATE_DIR, RELOAD_COMMAND, VAULT_CA,
+    check_mount, dedup, has_alias_on, io_error, is_not_found, open_dir, read_host, read_records,
+    read_state, AgentState, AgentVaultOps, HasVault, RealVault, AGENTS_DIR, PRIVATE_DIR,
+    RELOAD_COMMAND, VAULT_CA,
 };
 use super::EnrollError;
 use crate::stderr::errln;
@@ -76,7 +76,7 @@ pub(crate) async fn remove_agent<O: RemoveOps>(
     let mount = state.approle_mount.clone();
     let mount = mount.as_str();
     let role = agent.role_name();
-    let entity = entity_name(agent);
+    let entity = agent.entity_name();
     let recorded = dedup(
         state
             .live

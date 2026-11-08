@@ -7,6 +7,7 @@ use maknae_config::{AgentRole, Value};
 use maknae_io::{AnchorRequired, FileOwner, IoError, IoKind, Mode, StrategyPref, TargetRequired};
 use maknae_msgs::{msg, Locale, MsgId};
 use maknae_vault::agent_enroll::{AgentId, BindCidrs, HostAccounts, DEFAULT_AGENT_APPROLE_MOUNT};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use yaml_rust2::Yaml;
 use zeroize::Zeroizing;
@@ -294,10 +295,6 @@ pub(crate) trait AgentOps: AgentVaultOps {
     fn write_record(&self, record: &AgentRecord) -> Result<(), EnrollError>;
 }
 
-pub(crate) fn entity_name(agent: &AgentId) -> String {
-    format!("maknae-agent-{}", agent.as_str())
-}
-
 pub(crate) fn has_alias_on(entity: &maknae_vault::EntityFacts, mount: &str, role_id: &str) -> bool {
     let want = format!("auth/{}", mount.trim_matches('/'));
     entity
@@ -362,7 +359,7 @@ pub(crate) async fn enroll_agent<O: AgentOps>(
     let mount = plan.mount.as_str();
     let role = plan.agent.role_name();
     let role_id = ops.read_role_id(mount, &role).await?;
-    let entity = entity_name(&plan.agent);
+    let entity = plan.agent.entity_name();
     let reenable = match ops.entity(&entity).await? {
         Some(facts) if has_alias_on(&facts, mount, &role_id) => facts.disabled,
         _ => {
@@ -870,11 +867,14 @@ fn admit_account(
     host: &HostAccounts<'_>,
     agents_gid: Option<u32>,
     bindings: &maknae_config::Bindings,
+    uid_of: &BTreeMap<String, u32>,
 ) -> Result<u32, EnrollError> {
     let acct = named_account(requested, acct)?;
     maknae_vault::agent_enroll::service_account_check(acct.as_ref(), requested, agent, host)?;
     let acct = acct.ok_or_else(|| EnrollError::Owner(format!("no such user: {requested}")))?;
-    if let Some(role) = maknae_config::bindings_conflict(bindings, requested, acct.uid) {
+    if let Some(role) =
+        maknae_config::bindings_conflict(bindings, requested, acct.uid, |n| uid_of.get(n).copied())
+    {
         return Err(EnrollError::AgentBound {
             agent: agent.as_str().to_string(),
             account: requested.to_string(),
@@ -930,7 +930,23 @@ fn check_account(
         },
         agents_gid,
         &bindings,
+        &binding_uids(&bindings)?,
     )
+}
+
+fn binding_uids(bindings: &maknae_config::Bindings) -> Result<BTreeMap<String, u32>, EnrollError> {
+    let mut out = BTreeMap::new();
+    for entry in bindings.roles.iter().flatten().flat_map(|(_, e)| e) {
+        let maknae_config::BindingEntry::Name(name) = entry else {
+            continue;
+        };
+        if let Some(u) =
+            maknae_io::user_by_name(name).map_err(|e| owner_error(&format!("user {name}"), e))?
+        {
+            out.insert(name.clone(), u.uid.as_raw());
+        }
+    }
+    Ok(out)
 }
 
 pub(crate) fn read_host() -> Result<HostEnrollment, EnrollError> {
@@ -2185,6 +2201,15 @@ pub(crate) mod tests {
         agents_gid: Option<u32>,
         bindings: &maknae_config::Bindings,
     ) -> Result<u32, EnrollError> {
+        admit_aliased(acct, agents_gid, bindings, &BTreeMap::new())
+    }
+
+    fn admit_aliased(
+        acct: maknae_io::HostAccount,
+        agents_gid: Option<u32>,
+        bindings: &maknae_config::Bindings,
+        uid_of: &BTreeMap<String, u32>,
+    ) -> Result<u32, EnrollError> {
         let daemons = maknae_io::DaemonFacts {
             uids: vec![970, 971],
             gids: vec![970, 971],
@@ -2201,7 +2226,24 @@ pub(crate) mod tests {
             },
             agents_gid,
             bindings,
+            uid_of,
         )
+    }
+
+    #[test]
+    fn an_account_a_uid_alias_binds_to_admin_is_refused() {
+        let b = maknae_config::parse_bindings(
+            "schema_version: 1\nbindings:\n  admin: [\"hobi-alt\"]\n",
+        )
+        .unwrap();
+        let alias = BTreeMap::from([("hobi-alt".to_string(), 990)]);
+        let e =
+            admit_aliased(account(&[990, AGENTS_GID]), Some(AGENTS_GID), &b, &alias).unwrap_err();
+        assert!(
+            matches!(&e, EnrollError::AgentBound { account, role, .. }
+                if account == "hobi-svc" && *role == "admin"),
+            "{e:?}"
+        );
     }
 
     fn bound(role: &str) -> maknae_config::Bindings {
