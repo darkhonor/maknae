@@ -612,48 +612,57 @@ git -C "$tmpF4" init -q
 git -C "$tmpF4" add ci/gates/std-fs-drift.sh ci/gates/std-fs-allowlist.txt crates/x/src/transport_tests.rs
 expect_reject "std-fs-drift/external-test-lost-cfg" "$tmpF4/ci/gates/std-fs-drift.sh" "$tmpF4"
 
-# --- Fixture G: feature-resolution-pin (#77) — a production binary whose
-# NORMAL dependency enables hermetic-test-seam must be rejected. Synthetic
+# --- Fixture G: feature-resolution-pin (#77, #609) — a production binary whose
+# NORMAL dependency enables a test-only feature must be rejected: maknae-config's
+# hermetic-test-seam, maknae-vault's or maknae-crypto's test-support. Synthetic
 # path-deps-only workspace (the pin needs a full cargo resolve, unlike p1's
-# --no-deps metadata): "maknaed" normally-depends on a "maknae-config" that
-# declares the feature, WITH the feature enabled.
-tmpG="$(mktemp -d -p "$NC_TMP")"
-mkdir -p "$tmpG/crates/maknae-config/src" "$tmpG/bins/maknaed/src" "$tmpG/bins/maknae/src" "$tmpG/bins/maknae-spifc/src"
-cat > "$tmpG/Cargo.toml" <<'EOF_G'
+# --no-deps metadata). frp_fixture <bin> <crate> <feature> enables <crate>/<feature>
+# in <bin>'s normal dependency; an empty <bin> builds the clean control.
+frp_fixture() {
+  local root bin crate
+  root="$(mktemp -d -p "$NC_TMP")"
+  cat > "$root/Cargo.toml" <<'EOF_G'
 [workspace]
 resolver = "3"
-members = ["crates/maknae-config", "bins/maknaed", "bins/maknae", "bins/maknae-spifc"]
+members = ["crates/maknae-config", "crates/maknae-vault", "crates/maknae-crypto", "bins/maknaed", "bins/maknae", "bins/maknae-egress", "bins/maknae-spifc"]
 EOF_G
-cat > "$tmpG/crates/maknae-config/Cargo.toml" <<'EOF_G'
+  for crate in maknae-config maknae-vault maknae-crypto; do
+    mkdir -p "$root/crates/$crate/src"
+    echo '' > "$root/crates/$crate/src/lib.rs"
+    cat > "$root/crates/$crate/Cargo.toml" <<EOF_G
 [package]
-name = "maknae-config"
+name = "$crate"
 version = "0.0.0"
 edition = "2021"
 [features]
 hermetic-test-seam = []
+test-support = []
 EOF_G
-echo '' > "$tmpG/crates/maknae-config/src/lib.rs"
-for b in maknaed maknae maknae-spifc; do
-  cat > "$tmpG/bins/$b/Cargo.toml" <<EOF_G
-[package]
-name = "$b"
-version = "0.0.0"
-edition = "2021"
-[dependencies]
-maknae-config = { path = "../../crates/maknae-config" }
-EOF_G
-  echo 'fn main() {}' > "$tmpG/bins/$b/src/main.rs"
-done
-# The violation: maknaed's NORMAL dep enables the seam feature.
-cat > "$tmpG/bins/maknaed/Cargo.toml" <<'EOF_G'
-[package]
-name = "maknaed"
-version = "0.0.0"
-edition = "2021"
-[dependencies]
-maknae-config = { path = "../../crates/maknae-config", features = ["hermetic-test-seam"] }
-EOF_G
-expect_reject "feature-resolution-pin/normal-dep-enables-seam" "$here/feature-resolution-pin.sh" "$tmpG"
+  done
+  for bin in maknaed maknae maknae-egress maknae-spifc; do
+    mkdir -p "$root/bins/$bin/src"
+    echo 'fn main() {}' > "$root/bins/$bin/src/main.rs"
+    {
+      printf '[package]\nname = "%s"\nversion = "0.0.0"\nedition = "2021"\n[dependencies]\n' "$bin"
+      for crate in maknae-config maknae-vault maknae-crypto; do
+        if [ "$bin" = "$1" ] && [ "$crate" = "$2" ]; then
+          printf '%s = { path = "../../crates/%s", features = ["%s"] }\n' "$crate" "$crate" "$3"
+        else
+          printf '%s = { path = "../../crates/%s" }\n' "$crate" "$crate"
+        fi
+      done
+    } > "$root/bins/$bin/Cargo.toml"
+  done
+  echo "$root"
+}
+expect_reject_because "feature-resolution-pin/normal-dep-enables-seam" "enables hermetic-test-seam" \
+  "$here/feature-resolution-pin.sh" "$(frp_fixture maknaed maknae-config hermetic-test-seam)"
+expect_reject_because "feature-resolution-pin/normal-dep-enables-vault-test-support" "enables maknae-vault/test-support" \
+  "$here/feature-resolution-pin.sh" "$(frp_fixture maknaed maknae-vault test-support)"
+expect_reject_because "feature-resolution-pin/egress-enables-crypto-test-support" "enables maknae-crypto/test-support" \
+  "$here/feature-resolution-pin.sh" "$(frp_fixture maknae-egress maknae-crypto test-support)"
+expect_accept "feature-resolution-pin/clean" "feature-resolution-pin: ok" \
+  "$here/feature-resolution-pin.sh" "$(frp_fixture "" "" "")"
 
 
 # ---- verb-vocabulary-drift (#67): the action vocabulary vs its manifest ----

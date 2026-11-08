@@ -105,6 +105,13 @@ impl Held {
     }
 }
 
+/// The agent's generation and enrolled uid, as read before the decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Enrolled {
+    pub generation: u64,
+    pub agent_uid: u32,
+}
+
 /// Live tasks, in memory for `maknaed`'s life (Q4).
 #[derive(Default)]
 pub struct TaskStore {
@@ -177,7 +184,7 @@ impl TaskStore {
         &self,
         signer: &dyn TaskSigner,
         view: &dyn EnrollmentView,
-        (generation, agent_uid): (u64, u32),
+        enrolled: Enrolled,
         tasker: Tasker,
         parent: Option<TaskId>,
         sub: TaskSubmission,
@@ -187,15 +194,7 @@ impl TaskStore {
             maknae_crypto::random::fill(&mut id[..]).map_err(|_| TaskRefusal::Random)?;
             Ok(id)
         };
-        self.mint_with(
-            &mut draw,
-            signer,
-            view,
-            (generation, agent_uid),
-            tasker,
-            parent,
-            sub,
-        )
+        self.mint_with(&mut draw, signer, view, enrolled, tasker, parent, sub)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -204,11 +203,15 @@ impl TaskStore {
         draw: &mut dyn FnMut() -> Result<[u8; 16], TaskRefusal>,
         signer: &dyn TaskSigner,
         view: &dyn EnrollmentView,
-        (generation, agent_uid): (u64, u32),
+        enrolled: Enrolled,
         tasker: Tasker,
         parent: Option<TaskId>,
         sub: TaskSubmission,
     ) -> Result<Arc<SignedTask>, TaskRefusal> {
+        let Enrolled {
+            generation,
+            agent_uid,
+        } = enrolled;
         let agent = target(&sub)?;
         let mut task = TaskObject {
             schema: maknae_proto::TASK_SCHEMA.into(),
@@ -276,30 +279,31 @@ impl TaskStore {
         Ok(stored.task.clone())
     }
 
-    /// Re-signs, outside the store lock, each stored task whose signing leaf is not the
-    /// signer's current one; a task replaced or withdrawn meanwhile is left as it is.
-    pub fn resign_stale(&self, signer: &dyn TaskSigner) {
-        let Some(current) = signer.current_leaf() else {
-            return;
-        };
-        let stale: Vec<Arc<SignedTask>> = self
+    /// Called when a task is handed out (#610): re-signs it outside the store lock when its
+    /// signing leaf is not the signer's current one. Without a current leaf, or a signature,
+    /// nothing is handed out. A task replaced meanwhile is handed out as replaced.
+    pub fn resign_if_stale(
+        &self,
+        id: &TaskId,
+        signer: &dyn TaskSigner,
+    ) -> Result<Arc<SignedTask>, TaskRefusal> {
+        let held = self
             .held()
             .tasks
-            .values()
-            .filter(|t| maknae_vault::task_sig::leaf_fingerprint(&t.task.signature.leaf) != current)
+            .get(id)
             .map(|t| t.task.clone())
-            .collect();
-        for old in stale {
-            let Ok(fresh) = signer.sign(old.task.clone()) else {
-                continue;
-            };
-            let mut held = self.held();
-            if let Some(slot) = held.tasks.get_mut(&old.task.task_id) {
-                if Arc::ptr_eq(&slot.task, &old) {
-                    slot.task = Arc::new(fresh);
-                }
-            }
+            .ok_or(TaskRefusal::Unknown)?;
+        let current = signer.current_leaf().ok_or(TaskRefusal::Unsigned)?;
+        if maknae_vault::task_sig::leaf_fingerprint(&held.signature.leaf.0) == current {
+            return Ok(held);
         }
+        let fresh = Arc::new(signer.sign(held.task.clone())?);
+        let mut store = self.held();
+        let slot = store.tasks.get_mut(id).ok_or(TaskRefusal::Unknown)?;
+        if Arc::ptr_eq(&slot.task, &held) {
+            slot.task = fresh;
+        }
+        Ok(slot.task.clone())
     }
 
     fn withdraw(&self, id: &TaskId) {
@@ -584,7 +588,10 @@ async fn decide<P: Authorizer + Send + Sync + 'static>(
     store.mint(
         signer,
         view,
-        (generation, agent_uid),
+        Enrolled {
+            generation,
+            agent_uid,
+        },
         attempt.tasker.clone(),
         attempt.parent,
         sub,
@@ -641,6 +648,13 @@ mod tests {
 
     fn id(s: &str) -> AgentId {
         AgentId::parse(s).unwrap()
+    }
+
+    fn at(generation: u64, agent_uid: u32) -> Enrolled {
+        Enrolled {
+            generation,
+            agent_uid,
+        }
     }
 
     struct LeafSigner {
@@ -704,7 +718,7 @@ mod tests {
                 .mint(
                     &NoIdentity,
                     &v,
-                    (0, HOBI),
+                    at(0, HOBI),
                     Tasker::Uid(1000),
                     None,
                     sub("hobi")
@@ -719,7 +733,7 @@ mod tests {
                 .mint(
                     &signing,
                     &v,
-                    (0, HOBI),
+                    at(0, HOBI),
                     Tasker::Uid(1000),
                     None,
                     sub("hobi"),
@@ -742,7 +756,7 @@ mod tests {
                     &mut draw,
                     signer(),
                     &v,
-                    (0, HOBI),
+                    at(0, HOBI),
                     Tasker::Uid(1),
                     None,
                     sub("hobi"),
@@ -768,7 +782,7 @@ mod tests {
     }
 
     #[test]
-    fn resign_stale_leaves_a_task_replaced_or_withdrawn_while_it_signed() {
+    fn resign_if_stale_leaves_a_task_replaced_or_withdrawn_while_it_signed() {
         let signing = LeafSigner::new(PlaneKey::EcdsaP384Sha384);
         let store = TaskStore::new();
         let v = view(&[("hobi", HOBI)]);
@@ -776,12 +790,13 @@ mod tests {
             .mint(
                 &signing,
                 &v,
-                (0, HOBI),
+                at(0, HOBI),
                 Tasker::Uid(1000),
                 None,
                 sub("hobi"),
             )
             .unwrap();
+        let task_id = old.task.task_id;
         signing.rotate();
         let replacement = signing.sign(old.task.clone()).unwrap();
         let replacing = DuringSign {
@@ -791,59 +806,70 @@ mod tests {
             }),
         };
         signing.rotate();
-        store.resign_stale(&replacing);
-        let held = store.resolve(&old.task.task_id, &id("hobi"), HOBI).unwrap();
-        assert_eq!(*held, replacement, "the replacement is not overwritten");
+        let handed = store.resign_if_stale(&task_id, &replacing).unwrap();
+        assert_eq!(*handed, replacement, "the replacement is handed out");
+        let held = store.resolve(&task_id, &id("hobi"), HOBI).unwrap();
+        assert!(Arc::ptr_eq(&held, &handed), "and not overwritten");
         let withdrawing = DuringSign {
             inner: &signing,
             during: Box::new(|| store.purge_agent(&id("hobi"))),
         };
-        store.resign_stale(&withdrawing);
+        assert_eq!(
+            store.resign_if_stale(&task_id, &withdrawing).unwrap_err(),
+            TaskRefusal::Unknown
+        );
         assert_eq!(store.len(), 0, "a withdrawn task is not put back");
     }
 
     #[test]
-    fn resign_stale_gives_a_verifying_signature_under_the_current_leaf() {
+    fn resign_if_stale_gives_a_verifying_signature_under_the_current_leaf() {
         for k in PlaneKey::ALL {
             let signing = LeafSigner::new(k);
             let store = TaskStore::new();
             let v = view(&[("hobi", HOBI), ("jin", JIN)]);
             let mint_by = |s: &LeafSigner, to: &str| {
                 store
-                    .mint(s, &v, (0, v.0[&id(to)]), Tasker::Uid(1000), None, sub(to))
+                    .mint(s, &v, at(0, v.0[&id(to)]), Tasker::Uid(1000), None, sub(to))
                     .unwrap()
             };
             let before = mint_by(&signing, "hobi");
             let first = signing.current_leaf().unwrap();
             assert_eq!(
-                maknae_vault::task_sig::leaf_fingerprint(&before.signature.leaf),
+                maknae_vault::task_sig::leaf_fingerprint(&before.signature.leaf.0),
                 first
             );
             signing.rotate();
             let current = signing.current_leaf().unwrap();
             assert_ne!(current, first, "{k:?}");
             let fresh = mint_by(&signing, "jin");
-            store.resign_stale(&NoIdentity);
-            let kept = store
-                .resolve(&before.task.task_id, &id("hobi"), HOBI)
-                .unwrap();
-            assert!(
-                Arc::ptr_eq(&kept, &before),
-                "no current leaf, nothing re-signed"
+            let id_before = before.task.task_id;
+            assert_eq!(
+                store.resign_if_stale(&id_before, &NoIdentity).unwrap_err(),
+                TaskRefusal::Unsigned,
+                "no current leaf: nothing is handed out"
             );
-            store.resign_stale(&signing);
-            let after = store
-                .resolve(&before.task.task_id, &id("hobi"), HOBI)
-                .unwrap();
+            let kept = store.resolve(&id_before, &id("hobi"), HOBI).unwrap();
+            assert!(Arc::ptr_eq(&kept, &before), "{k:?}");
+            let after = store.resign_if_stale(&id_before, &signing).unwrap();
             assert_eq!(after.task, before.task, "{k:?}");
             assert_eq!(
-                maknae_vault::task_sig::leaf_fingerprint(&after.signature.leaf),
+                maknae_vault::task_sig::leaf_fingerprint(&after.signature.leaf.0),
                 current,
                 "{k:?}"
             );
             assert_eq!(signing.verify(&after), Ok(()), "{k:?}");
-            let untouched = store.resolve(&fresh.task.task_id, &id("jin"), JIN).unwrap();
+            let stored = store.resolve(&id_before, &id("hobi"), HOBI).unwrap();
+            assert!(Arc::ptr_eq(&stored, &after), "{k:?}");
+            let untouched = store
+                .resign_if_stale(&fresh.task.task_id, &signing)
+                .unwrap();
             assert!(Arc::ptr_eq(&untouched, &fresh), "{k:?}");
+            let mut unknown = id_before;
+            unknown.0[0] ^= 0xff;
+            assert_eq!(
+                store.resign_if_stale(&unknown, &signing).unwrap_err(),
+                TaskRefusal::Unknown
+            );
         }
     }
 
@@ -868,7 +894,7 @@ mod tests {
             .mint(
                 signer(),
                 v,
-                (store.generation(&id(agent)), v.0[&id(agent)]),
+                at(store.generation(&id(agent)), v.0[&id(agent)]),
                 Tasker::Uid(1000),
                 None,
                 sub(agent),
@@ -889,7 +915,7 @@ mod tests {
             .mint(
                 signer(),
                 &v,
-                (0, HOBI),
+                at(0, HOBI),
                 tasker.clone(),
                 Some(parent),
                 sub("hobi"),
@@ -923,7 +949,7 @@ mod tests {
                 &mut draw,
                 signer(),
                 &v,
-                (0, HOBI),
+                at(0, HOBI),
                 Tasker::Uid(1),
                 None,
                 sub("hobi"),
@@ -934,7 +960,7 @@ mod tests {
                 &mut draw,
                 signer(),
                 &v,
-                (0, HOBI),
+                at(0, HOBI),
                 Tasker::Uid(1),
                 None,
                 sub("hobi"),
@@ -950,7 +976,7 @@ mod tests {
                     &mut failing,
                     signer(),
                     &v,
-                    (0, HOBI),
+                    at(0, HOBI),
                     Tasker::Uid(1),
                     None,
                     sub("hobi")
@@ -1051,7 +1077,7 @@ mod tests {
                 .mint(
                     signer(),
                     &v,
-                    (0, HOBI),
+                    at(0, HOBI),
                     Tasker::Uid(1000),
                     None,
                     sub("hobi")
@@ -1076,7 +1102,7 @@ mod tests {
                 .mint(
                     signer(),
                     &view(&[("jin", JIN)]),
-                    (0, HOBI),
+                    at(0, HOBI),
                     Tasker::Uid(1000),
                     None,
                     sub("hobi")
@@ -1089,7 +1115,7 @@ mod tests {
             store.mint(
                 signer(),
                 &view(&[]),
-                (0, 0),
+                at(0, 0),
                 Tasker::Uid(1000),
                 None,
                 sub("Not An Id")
@@ -1109,7 +1135,7 @@ mod tests {
                 .mint(
                     signer(),
                     &v,
-                    (read, HOBI),
+                    at(read, HOBI),
                     Tasker::Uid(1000),
                     None,
                     sub("hobi")

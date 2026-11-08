@@ -1,5 +1,5 @@
 //! The task object (#609): a fixed, versioned CBOR record of one task given to an agent.
-use crate::SecretText;
+use crate::{Bytes, SecretText};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
 pub const TASK_SCHEMA: &str = "maknae.task";
@@ -149,15 +149,56 @@ impl std::fmt::Debug for TaskObject {
 
 pub const TASK_SIGNING_CONTEXT: &[u8] = b"maknae.task.v1\0";
 pub const TASK_ENVELOPE_MARGIN: usize = 4096;
+/// The most a signature's `alg`, `leaf`, `chain` and `sig` may hold together. A delivery
+/// frame for a signed task needs `prompt_max_bytes + TASK_ENVELOPE_MARGIN +
+/// TASK_SIGNATURE_MAX_BYTES`.
+pub const TASK_SIGNATURE_MAX_BYTES: usize = 32 * 1024;
+pub const TASK_CHAIN_MAX: usize = 2;
 
 /// `alg` is the `vault.plane_key` name; `chain` holds the intermediates after `leaf`.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, try_from = "TaskSignatureWire")]
 pub struct TaskSignature {
     pub alg: String,
-    pub leaf: Vec<u8>,
-    pub chain: Vec<Vec<u8>>,
-    pub sig: Vec<u8>,
+    pub leaf: Bytes,
+    pub chain: Vec<Bytes>,
+    pub sig: Bytes,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskSignatureWire {
+    alg: String,
+    leaf: Bytes,
+    chain: Vec<Bytes>,
+    sig: Bytes,
+}
+
+impl TryFrom<TaskSignatureWire> for TaskSignature {
+    type Error = String;
+    fn try_from(w: TaskSignatureWire) -> Result<Self, String> {
+        if w.chain.len() > TASK_CHAIN_MAX {
+            return Err(format!(
+                "task signature chain of {} exceeds {TASK_CHAIN_MAX}",
+                w.chain.len()
+            ));
+        }
+        let held = [w.alg.len(), w.leaf.0.len(), w.sig.0.len()]
+            .into_iter()
+            .chain(w.chain.iter().map(|c| c.0.len()))
+            .fold(0usize, usize::saturating_add);
+        if held > TASK_SIGNATURE_MAX_BYTES {
+            return Err(format!(
+                "task signature of {held} bytes exceeds {TASK_SIGNATURE_MAX_BYTES}"
+            ));
+        }
+        Ok(TaskSignature {
+            alg: w.alg,
+            leaf: w.leaf,
+            chain: w.chain,
+            sig: w.sig,
+        })
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -383,16 +424,57 @@ mod tests {
         }
     }
 
+    fn signature(alg: &str, leaf: &[u8], chain: &[&[u8]], sig: &[u8]) -> TaskSignature {
+        let b = |v: &[u8]| Bytes::new(v.to_vec().into());
+        TaskSignature {
+            alg: alg.into(),
+            leaf: b(leaf),
+            chain: chain.iter().map(|c| b(c)).collect(),
+            sig: b(sig),
+        }
+    }
+
+    #[test]
+    fn the_signature_fields_are_cbor_byte_strings() {
+        let golden = hex("a4
+             63 616c67 61 61
+             64 6c656166 41 01
+             65 636861696e 81 41 02
+             63 736967 41 03");
+        let sig = signature("a", &[1], &[&[2]], &[3]);
+        assert_eq!(enc(&sig), golden);
+        assert_eq!(dec::<TaskSignature>(&golden).unwrap(), sig);
+    }
+
+    #[test]
+    fn a_signature_over_its_bounds_is_refused() {
+        let alg = "ml-dsa-87";
+        let half = (TASK_SIGNATURE_MAX_BYTES - alg.len()) / 2;
+        let rest = TASK_SIGNATURE_MAX_BYTES - alg.len() - half;
+        let at_bound = signature(alg, &vec![1; half], &[], &vec![2; rest]);
+        assert_eq!(dec::<TaskSignature>(&enc(&at_bound)).unwrap(), at_bound);
+        let over = signature(alg, &vec![1; half], &[], &vec![2; rest + 1]);
+        let err = dec::<TaskSignature>(&enc(&over)).unwrap_err();
+        assert!(err.contains("task signature"), "{err}");
+        let one: &[u8] = &[3];
+        let chain = vec![one; TASK_CHAIN_MAX];
+        let longest = signature(alg, &[1], &chain, &[2]);
+        assert_eq!(dec::<TaskSignature>(&enc(&longest)).unwrap(), longest);
+        let chain = vec![one; TASK_CHAIN_MAX + 1];
+        let err = dec::<TaskSignature>(&enc(&signature(alg, &[1], &chain, &[2]))).unwrap_err();
+        assert!(err.contains("task signature"), "{err}");
+        let signed = enc(&SignedTask {
+            task: object(Tasker::Uid(1000), None),
+            signature: signature(alg, &[1], &chain, &[2]),
+        });
+        assert!(dec::<SignedTask>(&signed).is_err());
+    }
+
     #[test]
     fn a_signed_task_is_the_object_beside_its_signature() {
         let signed = SignedTask {
             task: object(Tasker::Uid(1000), None),
-            signature: TaskSignature {
-                alg: "ml-dsa-87".into(),
-                leaf: vec![1],
-                chain: vec![vec![2]],
-                sig: vec![3],
-            },
+            signature: signature("ml-dsa-87", &[1], &[&[2]], &[3]),
         };
         let value: ciborium::Value = dec(&enc(&signed)).unwrap();
         let keys: Vec<&str> = value

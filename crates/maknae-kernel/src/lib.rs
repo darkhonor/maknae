@@ -84,7 +84,7 @@ pub use session::{Facts, FactsGate, SessionFacts, SessionRecord};
 #[cfg(any(test, feature = "hermetic-test-seam"))]
 pub use task::TaskObjectForTest;
 pub use task::{
-    PlaneSigner, StoredTask, Submitter, TaskRefusal, TaskSigner, TaskStore,
+    Enrolled, PlaneSigner, StoredTask, Submitter, TaskRefusal, TaskSigner, TaskStore,
     MAX_LIVE_TASKS_PER_AGENT,
 };
 

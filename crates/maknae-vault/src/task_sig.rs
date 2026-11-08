@@ -6,7 +6,7 @@ use maknae_crypto::plane_key::PlaneKey;
 use maknae_crypto::rustls::client::danger::ServerCertVerifier;
 use maknae_crypto::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use maknae_proto::{
-    task_signing_bytes, Ask, SignedTask, TaskObject, TaskSignature, TASK_ENVELOPE_MARGIN,
+    task_signing_bytes, Ask, Bytes, SignedTask, TaskObject, TaskSignature, TASK_ENVELOPE_MARGIN,
 };
 use std::time::SystemTime;
 use x509_parser::certificate::X509Certificate;
@@ -52,9 +52,9 @@ pub fn sign_task(identity: &PlaneIdentity, task: TaskObject) -> Result<SignedTas
         task,
         signature: TaskSignature {
             alg: identity.plane_key().as_str().into(),
-            leaf,
-            chain,
-            sig,
+            leaf: Bytes::new(leaf.into()),
+            chain: chain.into_iter().map(|c| Bytes::new(c.into())).collect(),
+            sig: Bytes::new(sig.into()),
         },
     })
 }
@@ -90,20 +90,20 @@ fn kernel_leaf<'a>(
     let chain: Vec<CertificateDer<'_>> = sig
         .chain
         .iter()
-        .map(|c| CertificateDer::from(c.as_slice()))
+        .map(|c| CertificateDer::from(c.0.as_slice()))
         .collect();
     let at = UnixTime::since_unix_epoch(now.duration_since(std::time::UNIX_EPOCH).ok()?);
     let name = ServerName::try_from("maknae.invalid").ok()?;
     verifier
         .verify_server_cert(
-            &CertificateDer::from(sig.leaf.as_slice()),
+            &CertificateDer::from(sig.leaf.0.as_slice()),
             &chain,
             &name,
             &[],
             at,
         )
         .ok()?;
-    X509Certificate::from_der(&sig.leaf).ok().map(|(_, c)| c)
+    X509Certificate::from_der(&sig.leaf.0).ok().map(|(_, c)| c)
 }
 
 pub fn verify_task(
@@ -129,7 +129,7 @@ pub fn verify_task(
         alg.into(),
         &leaf.public_key().subject_public_key.data,
         &msg,
-        &sig.sig,
+        &sig.sig.0,
     )
     .map_err(|_| TaskSignatureError::BadSignature)
 }
@@ -334,8 +334,9 @@ mod tests {
             let id = ca.kernel(k, None);
             let signed = sign_task(&id, task("suga")).unwrap();
             let der = crate::tls::pem_chain_to_der(&id).unwrap();
-            assert_eq!(signed.signature.leaf, der[0].to_vec());
-            assert_eq!(signed.signature.chain, vec![der[1].to_vec()]);
+            assert_eq!(*signed.signature.leaf.0, der[0].to_vec());
+            assert_eq!(signed.signature.chain.len(), 1);
+            assert_eq!(*signed.signature.chain[0].0, der[1].to_vec());
             assert_eq!(verify(&ca, "suga", &signed), Ok(()));
             let mut swapped = signed.clone();
             swapped.signature.sig = sign_task(&id, task("hobi")).unwrap().signature.sig;
@@ -354,8 +355,8 @@ mod tests {
         let b = ca.kernel(PlaneKey::EcdsaP384Sha384, None);
         let signed = sign_task(&a, task("suga")).unwrap();
         let fa = identity_fingerprint(&a).unwrap();
-        assert_eq!(fa, leaf_fingerprint(&signed.signature.leaf));
-        assert_eq!(fa, maknae_crypto::sha256(&signed.signature.leaf));
+        assert_eq!(fa, leaf_fingerprint(&signed.signature.leaf.0));
+        assert_eq!(fa, maknae_crypto::sha256(&signed.signature.leaf.0));
         assert_ne!(fa, identity_fingerprint(&b).unwrap());
     }
 
@@ -438,6 +439,33 @@ mod tests {
     }
 
     #[test]
+    fn a_signed_ml_dsa_task_at_the_prompt_cap_fits_its_frame_formula() {
+        use maknae_proto::{TASK_CHAIN_MAX, TASK_SIGNATURE_MAX_BYTES};
+        let k = PlaneKey::MlDsa87;
+        let ca = TestCa::new(k);
+        let cap = maknae_config::TransportConfig::default().prompt_max_bytes;
+        let mut big = task("suga");
+        big.ask = Ask::Prompt {
+            prompt: SecretText("p".repeat(cap).into()),
+        };
+        let signed = sign_task(&ca.kernel(k, None), big).unwrap();
+        let s = &signed.signature;
+        let intermediate = s.chain[0].0.len();
+        let held = s.alg.len() + s.leaf.0.len() + s.sig.0.len() + intermediate;
+        let worst = held + (TASK_CHAIN_MAX - s.chain.len()) * intermediate;
+        assert!(worst <= TASK_SIGNATURE_MAX_BYTES, "{worst}");
+        let mut wire = Vec::new();
+        ciborium::into_writer(&signed, &mut wire).unwrap();
+        assert!(
+            wire.len() <= cap + TASK_ENVELOPE_MARGIN + TASK_SIGNATURE_MAX_BYTES,
+            "{}",
+            wire.len()
+        );
+        let back: SignedTask = ciborium::from_reader(wire.as_slice()).unwrap();
+        assert_eq!(verify(&ca, "suga", &back), Ok(()));
+    }
+
+    #[test]
     fn the_signature_is_beside_the_object() {
         for k in PlaneKey::ALL {
             let ca = TestCa::new(k);
@@ -461,9 +489,9 @@ mod tests {
             maknae_crypto::signature::verify(
                 maknae_crypto::admitted(),
                 k.into(),
-                &spki_key(&back.signature.leaf),
+                &spki_key(&back.signature.leaf.0),
                 &decoded_bytes,
-                &back.signature.sig,
+                &back.signature.sig.0,
             )
             .unwrap();
             assert_eq!(verify(&ca, "suga", &back), Ok(()), "{k:?}");
