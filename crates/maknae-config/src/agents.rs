@@ -1098,6 +1098,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "hermetic-test-seam")]
     #[test]
     fn load_agents_with_requirement_reads_under_the_given_requirement() {
         use std::os::unix::fs::MetadataExt;
