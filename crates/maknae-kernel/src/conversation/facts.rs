@@ -226,6 +226,7 @@ mod tests {
             StoreError::IdMismatch,
             StoreError::Corrupt,
             StoreError::Io("sentinel-170-io".into()),
+            StoreError::NotDurable("sentinel-170-unflushed".into()),
         ] {
             assert_eq!(
                 gather(&Failing(e.clone()), REQUESTER, Some(cited.as_str()), None),

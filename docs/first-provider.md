@@ -472,6 +472,7 @@ A provider answer that could not be used reaches you as a different line, in "Th
 | `history rewrite refused` | the turns sent do not extend, exactly, the turns the kernel recorded for this conversation | start `maknae agent` again; the shipped loop never rewrites, so another client sent it |
 | `conversation is full` | the conversation holds 256 MiB of request turns and replies; the wire code is `TooLarge` | start `maknae agent` again |
 | `reply refused: conversation changed` or `reply refused: conversation full` | the provider answered, but before its reply was bound the conversation moved on or filled; the trail records `LandedUndelivered`, so the turn was billed | start `maknae agent` again |
+| `outcome unknown: conversation store not flushed: …` or `reply refused: conversation outcome unknown` | the kernel wrote the conversation record, but the host did not confirm the write reached the disk; the record may hold the change, or lose it after a crash | start `maknae agent` again; the host's disk needs attention |
 
 **Refused when the conversation opens.** `maknae agent` opens a conversation before its first prompt. In the trail, `session.new` is denied with the reason below. A grant refusal prints `maknae: the kernel refused to open a conversation in <dir>: …`; a bound prints `maknae: the kernel did not open a conversation: <reason>`.
 

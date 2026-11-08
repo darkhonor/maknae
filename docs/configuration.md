@@ -313,6 +313,7 @@ The shipped file grants all five to `admin` and none to `user`. It has no `desti
 - A retry after a delivered reply is sent to the provider again, which answers anew.
 - Idle expiry reads the wall clock, so a clock change moves it.
 - A loop ended by SIGHUP, SIGQUIT or a panic leaves its conversation open until the idle sweep closes it.
+- A store write or removal the host does not confirm reached the disk is answered `Unauthorized` and audited `outcome unknown`: the record may hold the change, or lose it after a crash, so an open conversation can hold a slot until the idle sweep closes it.
 - A corrupt record is never counted, listed, closed or deleted, and stays so.
 - An unreadable record is audited again on each scan that meets it, and a failed idle-sweep scan records nothing.
 - Each scan reads the whole store, so its cost grows with every owner's conversations (#616).

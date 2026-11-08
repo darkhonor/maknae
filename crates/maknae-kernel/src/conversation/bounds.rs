@@ -32,7 +32,8 @@ impl BoundRefusal {
             | StoreError::Exists
             | StoreError::IdMismatch
             | StoreError::Corrupt
-            | StoreError::Io(_) => None,
+            | StoreError::Io(_)
+            | StoreError::NotDurable(_) => None,
         }
     }
 }
@@ -157,6 +158,7 @@ mod tests {
             StoreError::IdMismatch,
             StoreError::Corrupt,
             StoreError::Io("x".into()),
+            StoreError::NotDurable("x".into()),
         ] {
             assert_eq!(BoundRefusal::from_store(&e), None, "{e:?}");
         }

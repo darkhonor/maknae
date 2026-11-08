@@ -425,12 +425,17 @@ pub fn open_failure(e: &PlaneError, cwd: &Path) -> String {
 pub fn close_line(closed: &Closed, conversation: &str) -> Option<String> {
     let why = match closed {
         Closed::Closed(_) | Closed::NotOpened => return None,
+        Closed::TimedOut => {
+            return Some(format!(
+                "maknae agent: whether conversation {conversation} was closed is unknown (no answer within {} s); if it was not, the kernel closes it at your next session.new or session.list once it has been idle 24 hours",
+                CLOSE_WITHIN.as_secs()
+            ))
+        }
         Closed::Failed(PlaneError::Refused) => "the kernel refused the close".to_string(),
         Closed::Failed(PlaneError::Transport(m) | PlaneError::Declined { reason: m, .. }) => {
             m.clone()
         }
         Closed::Failed(other) => format!("{other:?}"),
-        Closed::TimedOut => format!("no answer within {} s", CLOSE_WITHIN.as_secs()),
     };
     Some(format!(
         "maknae agent: conversation {conversation} was not closed ({why}); the kernel closes it at your next session.new or session.list once it has been idle 24 hours"
@@ -1521,7 +1526,6 @@ mod tests {
                 Closed::Failed(PlaneError::Unavailable),
                 "Unavailable".to_string(),
             ),
-            (Closed::TimedOut, "no answer within 5 s".to_string()),
         ] {
             assert_eq!(
                 close_line(&closed, id),
@@ -1530,6 +1534,12 @@ mod tests {
                 ))
             );
         }
+        assert_eq!(
+            close_line(&Closed::TimedOut, id),
+            Some(format!(
+                "maknae agent: whether conversation {id} was closed is unknown (no answer within 5 s); if it was not, the kernel closes it at your next session.new or session.list once it has been idle 24 hours"
+            ))
+        );
     }
 
     #[test]

@@ -67,6 +67,32 @@ fn publish_synced<F: AsFd>(
     Ok(Strategy::Portable)
 }
 
+pub(crate) fn remove_at_durable<F: AsFd>(
+    dirfd: &F,
+    name: &str,
+    at: &Path,
+) -> Result<bool, IoError> {
+    remove_synced(dirfd, name, at, syscall::fsync_fd)
+}
+
+fn remove_synced<F: AsFd>(
+    dirfd: &F,
+    name: &str,
+    at: &Path,
+    sync_dir: impl FnOnce(&F) -> nix::Result<()>,
+) -> Result<bool, IoError> {
+    match syscall::remove_at(dirfd, name, false) {
+        Ok(()) => {}
+        Err(nix::errno::Errno::ENOENT) => return Ok(false),
+        Err(e) => return Err(crate::checks::map_errno_no_disambiguation(e, at)),
+    }
+    sync_dir(dirfd).map_err(|e| IoError::RemovedNotDurable {
+        path: at.to_path_buf(),
+        kind: crate::checks::kind_of_errno(e),
+    })?;
+    Ok(true)
+}
+
 fn publish_raw<F: AsFd>(
     dirfd: &F,
     final_name: &str,
@@ -242,6 +268,60 @@ mod tests {
         })
         .unwrap_err();
         assert!(matches!(e, IoError::Io { .. }), "{e:?}");
+    }
+
+    #[test]
+    fn a_failed_directory_sync_after_the_unlink_is_removed_not_durable() {
+        let d = tempfile::tempdir().unwrap();
+        let dirfd = std::fs::File::open(d.path()).unwrap();
+        std::fs::write(d.path().join("f"), b"old").unwrap();
+        let at = d.path().join("f");
+        use nix::errno::Errno;
+        let e = remove_synced(&dirfd, "f", &at, |_| Err(Errno::EIO)).unwrap_err();
+        assert_eq!(
+            e,
+            IoError::RemovedNotDurable {
+                path: at.clone(),
+                kind: crate::IoKind::Other {
+                    raw: Errno::EIO as i32
+                },
+            }
+        );
+        assert!(std::fs::symlink_metadata(&at).is_err());
+    }
+
+    #[test]
+    fn an_unlink_is_synced_before_it_is_reported_removed() {
+        let d = tempfile::tempdir().unwrap();
+        let dirfd = std::fs::File::open(d.path()).unwrap();
+        std::fs::write(d.path().join("f"), b"old").unwrap();
+        let at = d.path().join("f");
+        let mut synced = false;
+        let removed = remove_synced(&dirfd, "f", &at, |_| {
+            synced = true;
+            Ok(())
+        })
+        .unwrap();
+        assert!(removed && synced);
+    }
+
+    #[test]
+    fn an_absent_name_or_a_failed_unlink_never_runs_the_directory_sync() {
+        let d = tempfile::tempdir().unwrap();
+        let dirfd = std::fs::File::open(d.path()).unwrap();
+        let absent = d.path().join("absent");
+        assert_eq!(
+            remove_synced(&dirfd, "absent", &absent, |_| panic!(
+                "nothing was unlinked"
+            )),
+            Ok(false)
+        );
+        std::fs::create_dir(d.path().join("busy")).unwrap();
+        let busy = d.path().join("busy");
+        let e =
+            remove_synced(&dirfd, "busy", &busy, |_| panic!("nothing was unlinked")).unwrap_err();
+        assert!(matches!(e, IoError::Io { .. }), "{e:?}");
+        assert!(busy.is_dir());
     }
 
     /// The pid is not decoration: without it a counter restarting at 0 each process

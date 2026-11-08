@@ -12,6 +12,7 @@ pub enum StoreError {
     IdMismatch,
     Corrupt,
     Io(String),
+    NotDurable(String),
 }
 
 impl fmt::Display for StoreError {
@@ -24,6 +25,22 @@ impl fmt::Display for StoreError {
             Self::IdMismatch => f.write_str("conversation record names another conversation"),
             Self::Corrupt => f.write_str("conversation record cannot be opened"),
             Self::Io(cause) => write!(f, "conversation store: {cause}"),
+            Self::NotDurable(cause) => write!(f, "conversation store not flushed: {cause}"),
+        }
+    }
+}
+
+impl StoreError {
+    pub fn outcome_unknown(&self) -> bool {
+        match self {
+            Self::NotDurable(_) => true,
+            Self::NotFound
+            | Self::StaleFence
+            | Self::Exists
+            | Self::OwnerFull
+            | Self::IdMismatch
+            | Self::Corrupt
+            | Self::Io(_) => false,
         }
     }
 }

@@ -1238,3 +1238,99 @@ async fn the_shipped_policy_lets_a_user_run_the_session_verbs_and_stops_a_prompt
 ) {
     shipped_session_lifecycle("user").await;
 }
+
+struct Unflushed(Arc<dyn ConversationStore>);
+impl Unflushed {
+    fn unflushed() -> StoreError {
+        StoreError::NotDurable("sentinel-170-unflushed".into())
+    }
+}
+impl ConversationStore for Unflushed {
+    fn create(
+        &self,
+        rec: ConversationRecord,
+        max: usize,
+    ) -> Result<maknae_kernel::Scan<()>, StoreError> {
+        self.0.create(rec, max)?;
+        Err(Self::unflushed())
+    }
+    fn get(&self, id: &ConversationId) -> Result<ConversationRecord, StoreError> {
+        self.0.get(id)
+    }
+    fn update(
+        &self,
+        id: &ConversationId,
+        fence: u64,
+        f: &mut dyn FnMut(&mut ConversationRecord),
+    ) -> Result<ConversationRecord, StoreError> {
+        self.0.update(id, fence, f)
+    }
+    fn remove(&self, id: &ConversationId, fence: u64) -> Result<ConversationRecord, StoreError> {
+        self.0.remove(id, fence)?;
+        Err(Self::unflushed())
+    }
+    fn list_by_owner(
+        &self,
+        owner: u32,
+        after: Option<&ConversationId>,
+        limit: usize,
+    ) -> Result<maknae_kernel::Scan<maknae_kernel::Page>, StoreError> {
+        self.0.list_by_owner(owner, after, limit)
+    }
+    fn idle_for_owner(
+        &self,
+        owner: u32,
+        older_than: u64,
+    ) -> Result<maknae_kernel::Scan<Vec<ConversationRecord>>, StoreError> {
+        self.0.idle_for_owner(owner, older_than)
+    }
+}
+
+const UNFLUSHED: &str = "outcome unknown: conversation store not flushed: sentinel-170-unflushed";
+
+#[tokio::test]
+async fn a_create_that_was_not_flushed_is_refused_as_outcome_unknown() {
+    let mut rig = Rig::new("unflushed-new", Kind::Mem);
+    let plain = Arc::clone(&rig.fx.conversations);
+    rig.fx.conversations = Arc::new(Unflushed(Arc::clone(&plain)));
+    let cwd = rig.cwd();
+    let records = Records::new(0);
+    let fd = maknae_io::open_directory_for_delegation(&cwd).unwrap();
+    let resp = rig.new_at(&cwd, Some(fd), &records).await.unwrap();
+    refused_with(&resp, ProtoErrCode::Unauthorized);
+    let rec = last_of(&records, "session.new");
+    assert_eq!(rec.outcome.reason, UNFLUSHED);
+    assert_eq!(rec.outcome.posture, "unavailable");
+    assert_eq!(
+        plain
+            .list_by_owner(rig.uid(), None, usize::MAX)
+            .unwrap()
+            .value
+            .0
+            .len(),
+        1,
+        "the record landed, which is why the trail says unknown"
+    );
+}
+
+#[tokio::test]
+async fn a_close_that_was_not_flushed_is_refused_as_outcome_unknown() {
+    let mut rig = Rig::new("unflushed-close", Kind::Mem);
+    let conv = rig.open().await;
+    let plain = Arc::clone(&rig.fx.conversations);
+    rig.fx.conversations = Arc::new(Unflushed(Arc::clone(&plain)));
+    let records = Records::new(0);
+    let resp = rig
+        .control(
+            Verb::SessionClose {
+                conversation: id(&conv),
+            },
+            &records,
+        )
+        .await
+        .unwrap();
+    refused_with(&resp, ProtoErrCode::Unauthorized);
+    let rec = last_of(&records, "session.close");
+    assert_eq!(rec.outcome.reason, UNFLUSHED);
+    assert_eq!(rec.outcome.posture, "unavailable");
+}

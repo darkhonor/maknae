@@ -535,6 +535,7 @@ pub enum ReplyRefusal {
     Unusable(maknae_proto::ReplyDefect),
     ConversationFull,
     ConversationChanged,
+    ConversationOutcomeUnknown,
 }
 
 pub fn refusal_answer(r: ReplyRefusal) -> (maknae_proto::ProtoErrCode, &'static str) {
@@ -551,7 +552,9 @@ pub fn refusal_answer(r: ReplyRefusal) -> (maknae_proto::ProtoErrCode, &'static 
             let b = crate::conversation::bounds::BoundRefusal::ConversationFull;
             (b.wire_code(), b.message())
         }
-        ReplyRefusal::ConversationChanged => (C::Unauthorized, "not authorized"),
+        ReplyRefusal::ConversationChanged | ReplyRefusal::ConversationOutcomeUnknown => {
+            (C::Unauthorized, "not authorized")
+        }
     }
 }
 
@@ -761,6 +764,17 @@ pub fn outcome_for(
             reply_length,
             "permit",
             "reply refused: conversation changed".into(),
+            "unavailable",
+        ),
+        SendOutcome::LandedUndelivered {
+            reply_length,
+            refusal: ReplyRefusal::ConversationOutcomeUnknown,
+            ..
+        } => (
+            EgressStatus::LandedUndelivered,
+            reply_length,
+            "permit",
+            "reply refused: conversation outcome unknown".into(),
             "unavailable",
         ),
     };
@@ -2281,6 +2295,18 @@ mod tests {
             ),
             (
                 SendOutcome::LandedUndelivered {
+                    reply_length: Some(6),
+                    refusal: ReplyRefusal::ConversationOutcomeUnknown,
+                    usage: None,
+                },
+                EgressStatus::LandedUndelivered,
+                "permit",
+                "reply refused: conversation outcome unknown",
+                "unavailable",
+                Some(6),
+            ),
+            (
+                SendOutcome::LandedUndelivered {
                     reply_length: Some(3),
                     refusal: ReplyRefusal::ToolCallUnacceptable,
                     usage: None,
@@ -2450,6 +2476,10 @@ mod tests {
             ),
             (
                 ReplyRefusal::ConversationChanged,
+                (C::Unauthorized, "not authorized"),
+            ),
+            (
+                ReplyRefusal::ConversationOutcomeUnknown,
                 (C::Unauthorized, "not authorized"),
             ),
         ] {

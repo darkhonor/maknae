@@ -2446,10 +2446,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         ),
                         Err((refusal, unmarked)) => {
                             if let Some(why) = unmarked {
-                                let mut rec = refuse_turn(
-                                    &format!("conversation not marked full: {why}"),
-                                    "unavailable",
-                                );
+                                let mut rec = refuse_turn(&why, "unavailable");
                                 rec.outcome.result = "permit".into();
                                 emit_or_report(
                                     &emit,
@@ -3162,7 +3159,7 @@ async fn bind_reply(
         let unmarked = full
             .then(|| mark_full_at_any_fence(&*store, &rec.id).err())
             .flatten()
-            .map(|e| e.to_string());
+            .map(|e| crate::conversation::answer::mark_full_failure(&e));
         Err((refusal, unmarked))
     })
     .await;

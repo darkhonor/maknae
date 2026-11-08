@@ -40,6 +40,9 @@ pub enum EffectFailure {
 
 pub fn effect_answer(f: &EffectFailure) -> Answer {
     match f {
+        EffectFailure::Store(e) if e.outcome_unknown() => {
+            unauthorized(format!("outcome unknown: {e}"), "unavailable")
+        }
         EffectFailure::Store(e) => match BoundRefusal::from_store(e) {
             Some(b) => bound(b),
             None => unauthorized(format!("not done: {e}"), "unavailable"),
@@ -76,6 +79,9 @@ pub fn advance_answer(f: &StepFailure) -> Answer {
             "conversation turns cannot be encoded".into(),
             "unauthorized",
         ),
+        StepFailure::Store(e) if e.outcome_unknown() => {
+            unauthorized(format!("outcome unknown: {e}"), "unavailable")
+        }
         StepFailure::Store(e) => unauthorized(
             format!("conversation changed before the send: {e}"),
             "unauthorized",
@@ -90,6 +96,9 @@ pub fn advance_answer(f: &StepFailure) -> Answer {
 pub fn reply_refusal(f: &StepFailure) -> (bool, ReplyRefusal) {
     match f {
         StepFailure::Turn(TurnRefusal::Bound(_)) => (true, ReplyRefusal::ConversationFull),
+        StepFailure::Store(e) if e.outcome_unknown() => {
+            (false, ReplyRefusal::ConversationOutcomeUnknown)
+        }
         StepFailure::NoConversation
         | StepFailure::Turn(TurnRefusal::Rewrite | TurnRefusal::Unencodable)
         | StepFailure::Store(_)
@@ -105,6 +114,13 @@ pub fn sweep_outcome(r: &Result<(), EffectFailure>) -> (String, &'static str) {
             "authorized",
         ),
         Err(f) => (format!("idle; {}", effect_answer(f).reason), "unavailable"),
+    }
+}
+
+pub fn mark_full_failure(e: &StoreError) -> String {
+    match e.outcome_unknown() {
+        true => format!("conversation full mark outcome unknown: {e}"),
+        false => format!("conversation not marked full: {e}"),
     }
 }
 
@@ -153,6 +169,75 @@ mod tests {
                 DENIED
             )
         );
+    }
+
+    fn unflushed() -> StoreError {
+        StoreError::NotDurable("sentinel-170-unflushed".into())
+    }
+
+    const UNFLUSHED: &str =
+        "outcome unknown: conversation store not flushed: sentinel-170-unflushed";
+
+    #[test]
+    fn an_unflushed_store_effect_is_unknown_never_not_done() {
+        let a = effect_answer(&EffectFailure::Store(unflushed()));
+        assert_eq!(
+            (a.reason.as_str(), a.posture, wire(&a)),
+            (UNFLUSHED, "unavailable", DENIED)
+        );
+    }
+
+    #[test]
+    fn an_unflushed_advance_is_unknown_never_a_changed_conversation() {
+        let a = advance_answer(&StepFailure::Store(unflushed()));
+        assert_eq!(
+            (a.reason.as_str(), a.posture, wire(&a)),
+            (UNFLUSHED, "unavailable", DENIED)
+        );
+    }
+
+    #[test]
+    fn an_unflushed_reply_binding_is_unknown_never_a_changed_conversation() {
+        assert_eq!(
+            reply_refusal(&StepFailure::Store(unflushed())),
+            (false, ReplyRefusal::ConversationOutcomeUnknown)
+        );
+    }
+
+    #[test]
+    fn an_unflushed_idle_close_is_unknown_never_moved_on() {
+        assert_eq!(
+            sweep_outcome(&Err(EffectFailure::Store(unflushed()))),
+            (format!("idle; {UNFLUSHED}"), "unavailable")
+        );
+    }
+
+    #[test]
+    fn an_unflushed_full_mark_is_unknown_and_every_other_failure_is_not_marked() {
+        assert_eq!(
+            mark_full_failure(&unflushed()),
+            "conversation full mark outcome unknown: conversation store not flushed: sentinel-170-unflushed"
+        );
+        assert_eq!(
+            mark_full_failure(&StoreError::StaleFence),
+            "conversation not marked full: conversation changed since it was read"
+        );
+    }
+
+    #[test]
+    fn only_an_unflushed_effect_has_an_unknown_outcome() {
+        assert!(unflushed().outcome_unknown());
+        for e in [
+            StoreError::NotFound,
+            StoreError::StaleFence,
+            StoreError::Exists,
+            StoreError::OwnerFull,
+            StoreError::IdMismatch,
+            StoreError::Corrupt,
+            StoreError::Io("x".into()),
+        ] {
+            assert!(!e.outcome_unknown(), "{e:?}");
+        }
     }
 
     #[test]

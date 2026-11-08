@@ -695,6 +695,25 @@ impl Anchor {
         rel: &Path,
         desc: Option<DescendantRequired>,
     ) -> Result<Outcome<bool>, IoError> {
+        self.remove_with(rel, desc, false)
+    }
+
+    /// [`Anchor::remove`], then a sync of the parent directory: `Ok(true)` means the
+    /// unlink is durable, and [`IoError::RemovedNotDurable`] means it happened unsynced.
+    pub fn remove_durable(
+        &self,
+        rel: &Path,
+        desc: Option<DescendantRequired>,
+    ) -> Result<Outcome<bool>, IoError> {
+        self.remove_with(rel, desc, true)
+    }
+
+    fn remove_with(
+        &self,
+        rel: &Path,
+        desc: Option<DescendantRequired>,
+        durable: bool,
+    ) -> Result<Outcome<bool>, IoError> {
         let (norm, name) = self.split_target(rel, desc.as_ref())?;
         let dir = norm.parent().unwrap_or(Path::new(""));
         let full = self.path.join(&norm);
@@ -714,6 +733,12 @@ impl Anchor {
             None => self.fd.as_fd(),
         };
 
+        if durable {
+            return Ok(Outcome {
+                value: crate::write::remove_at_durable(&base, &name, &full)?,
+                effective_strategy: Strategy::Portable,
+            });
+        }
         let removed = match crate::syscall::remove_at(&base, &name, false) {
             Ok(()) => true,
             Err(nix::errno::Errno::ENOENT) => false,
@@ -2965,6 +2990,30 @@ mod tests {
         let e = a.remove(Path::new("sub"), None).unwrap_err();
         assert!(matches!(e, IoError::Io { .. }), "{e:?}");
         assert!(a.path.join("sub").is_dir());
+    }
+
+    #[test]
+    fn remove_durable_unlinks_a_file_and_reports_it() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        std::fs::write(a.path.join("token"), b"x").unwrap();
+        assert!(a.remove_durable(Path::new("token"), None).unwrap().value);
+        assert!(std::fs::symlink_metadata(a.path.join("token")).is_err());
+        assert!(!a.remove_durable(Path::new("token"), None).unwrap().value);
+    }
+
+    #[test]
+    fn remove_durable_refuses_a_directory_and_a_walk_refusal() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        std::fs::create_dir(a.path.join("sub")).unwrap();
+        let e = a.remove_durable(Path::new("sub"), None).unwrap_err();
+        assert!(matches!(e, IoError::Io { .. }), "{e:?}");
+        assert!(a.path.join("sub").is_dir());
+        assert!(matches!(
+            a.remove_durable(Path::new("../x"), None).unwrap_err(),
+            IoError::EscapesAnchor { .. }
+        ));
     }
 
     #[test]

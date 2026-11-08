@@ -54,6 +54,9 @@ fn io(e: IoError) -> StoreError {
             kind: IoKind::NotFound,
             ..
         } => StoreError::NotFound,
+        e @ (IoError::PublishedNotDurable { .. } | IoError::RemovedNotDurable { .. }) => {
+            StoreError::NotDurable(e.to_string())
+        }
         e => StoreError::Io(e.to_string()),
     }
 }
@@ -92,7 +95,12 @@ impl Blobs for DirBlobs {
     }
 
     fn delete(&self, name: &str) -> Result<(), StoreError> {
-        match self.anchor.remove(&file(name), None).map_err(io)?.value {
+        match self
+            .anchor
+            .remove_durable(&file(name), None)
+            .map_err(io)?
+            .value
+        {
             true => Ok(()),
             false => Err(StoreError::NotFound),
         }
@@ -132,6 +140,25 @@ mod tests {
     fn open_in(tmp: &tempfile::TempDir) -> DirStore {
         fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
         DirStore::open(tmp.path(), nix::unistd::geteuid().as_raw(), key()).unwrap()
+    }
+
+    #[test]
+    fn an_unflushed_publish_or_unlink_is_not_durable() {
+        let path = PathBuf::from("/s/c.conv");
+        let kind = IoKind::Other { raw: 5 };
+        for e in [
+            IoError::PublishedNotDurable {
+                path: path.clone(),
+                kind: kind.clone(),
+            },
+            IoError::RemovedNotDurable {
+                path: path.clone(),
+                kind: kind.clone(),
+            },
+        ] {
+            let want = StoreError::NotDurable(e.to_string());
+            assert_eq!(io(e), want);
+        }
     }
 
     #[test]
