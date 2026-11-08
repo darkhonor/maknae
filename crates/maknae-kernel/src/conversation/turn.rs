@@ -86,8 +86,6 @@ pub fn mark_full(rec: &mut ConversationRecord) {
 
 pub const MARK_FULL_ATTEMPTS: usize = 3;
 
-/// Re-reads the record on a moved fence, so a racing update cannot leave a full
-/// conversation unmarked.
 pub fn mark_full_at_any_fence(
     store: &dyn ConversationStore,
     id: &ConversationId,

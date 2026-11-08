@@ -37,7 +37,6 @@ use snapshot::Snapshot;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock};
 
-/// The grantable terms `user` may hold.
 pub(crate) const USER_GRANTABLE: [&str; 5] = [
     "session.prompt",
     "session.new",
@@ -52,8 +51,6 @@ pub const SUBJECT_UID_KEY: &str = decide::SUBJECT_UID;
 /// Resource attribute key carrying the (already-resolved) filesystem path for
 /// `fs.*` actions (spec §4.4).
 pub const RESOURCE_PATH_KEY: &str = decide::RESOURCE_PATH;
-/// The conversation a request cites, as the kernel's store reported it (#170):
-/// its owner's uid, its state, and how the request's turns extend its chain.
 pub const RESOURCE_CONVERSATION_OWNER_KEY: &str = decide::RESOURCE_CONVERSATION_OWNER;
 pub const RESOURCE_CONVERSATION_STATE_KEY: &str = decide::RESOURCE_CONVERSATION_STATE;
 pub const RESOURCE_CONVERSATION_EXTENDS_KEY: &str = decide::RESOURCE_CONVERSATION_EXTENDS;
@@ -91,7 +88,10 @@ pub enum AuthzBasicError {
     /// A `roles:` list names a grantable term that THIS role may not hold
     /// (#172, #170: `user` may hold the session terms only; the admin disclosure
     /// terms are admin-only, ADR-0010 decision 4 as superseded 2026-09-08).
-    TermNotGrantableForRole { role: String, term: String },
+    TermNotGrantableForRole {
+        role: String,
+        term: String,
+    },
     /// A `subjects:` list names no family or term in the action vocabulary.
     UnknownAction(String),
     /// A `subjects:` list names a `kernel` or `liveness` family or term.
@@ -99,13 +99,16 @@ pub enum AuthzBasicError {
     /// An account lookup for a `subjects:` name failed.
     SubjectLookup(String),
     /// Two `subjects:` names resolve to one account.
-    DuplicateSubjectUid { uid: u32, names: (String, String) },
+    DuplicateSubjectUid {
+        uid: u32,
+        names: (String, String),
+    },
     /// The snapshot compiler refused the policy against the persisted identity
     /// layer or the vocabulary.
     Compile(snapshot::CompileError),
-    /// A `roles:` or `subjects:` scope leaves a person able to prompt but not to
-    /// open a conversation (#170). Carries the scope, e.g. `roles.user`.
-    PromptWithoutNew { scope: String },
+    PromptWithoutNew {
+        scope: String,
+    },
 }
 
 impl std::fmt::Display for AuthzBasicError {
@@ -713,8 +716,6 @@ fn validate_grants(
     Ok(decide::ActionGrants::from_validated(out))
 }
 
-/// A person who may prompt must be able to open a conversation (#170): the
-/// effective set (allow minus deny) holding `session.prompt` must hold `session.new`.
 fn validate_prompt_pairing<'a>(
     scope: &str,
     allow: impl Iterator<Item = &'a str> + Clone,

@@ -38,7 +38,6 @@ pub enum EffectFailure {
     Blocked(Blocked),
 }
 
-/// The corrective outcome of a store effect that did not complete as asked.
 pub fn effect_answer(f: &EffectFailure) -> Answer {
     match f {
         EffectFailure::Store(e) => match BoundRefusal::from_store(e) {
@@ -55,7 +54,6 @@ pub fn effect_answer(f: &EffectFailure) -> Answer {
     }
 }
 
-/// A prompt's record step that failed: before the send, or binding the reply.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepFailure {
     NoConversation,
@@ -89,8 +87,6 @@ pub fn advance_answer(f: &StepFailure) -> Answer {
     }
 }
 
-/// Whether the failed reply binding marks the conversation full, and the
-/// refusal the undelivered reply is recorded under.
 pub fn reply_refusal(f: &StepFailure) -> (bool, ReplyRefusal) {
     match f {
         StepFailure::Turn(TurnRefusal::Bound(_)) => (true, ReplyRefusal::ConversationFull),
@@ -205,6 +201,10 @@ mod tests {
             (
                 StepFailure::Blocked(Blocked::NotStarted),
                 &format!("conversation update unavailable: {}", Blocked::NotStarted),
+            ),
+            (
+                StepFailure::Blocked(Blocked::Unknown),
+                &format!("conversation update unavailable: {}", Blocked::Unknown),
             ),
         ] {
             let a = advance_answer(&f);

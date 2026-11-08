@@ -35,7 +35,6 @@ pub struct ConversationFacts {
     pub extends: Option<Extends>,
 }
 
-/// NotFound or an unparseable id → Unknown, owned by the requester; any other failure → Error.
 pub fn gather(
     store: &dyn ConversationStore,
     requester: u32,

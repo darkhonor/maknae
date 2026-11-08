@@ -261,7 +261,6 @@ pub fn conversations() -> Arc<dyn maknae_kernel::ConversationStore> {
     Arc::new(maknae_kernel::MemStore::default())
 }
 
-/// Held by every fixture's store for its peer, so prompts in suites about other things have one.
 pub const CONV: &str = "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0";
 
 pub fn open_record(id: &str, owner: u32, cwd: &str) -> maknae_kernel::ConversationRecord {

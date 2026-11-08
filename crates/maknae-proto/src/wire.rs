@@ -453,23 +453,18 @@ pub enum Verb {
     /// operator's tool for cutting off a connection, and therefore abusable as
     /// one.
     AdminSessionTerminate,
-    /// Open a conversation the kernel records. The kernel assigns the
-    /// [`crate::ConversationId`]; `cwd` is the working directory the conversation
-    /// is recorded under (at most [`crate::MAX_MUTATION_PATH_BYTES`]), recorded
-    /// and decided on, not a confinement. Provisions no tool authority: MCP
-    /// provisioning is #151.
+    /// Open a conversation the kernel records; `cwd` is recorded and decided on, not a confinement.
     SessionNew { cwd: String },
     /// Reattach to an existing conversation. The caller obtains its content and
     /// history — a disclosure, and for a conversation the caller may not have
     /// started, that is the authorization-relevant fact. Inherits the provenance
     /// and high-water mark already on it.
     SessionResume,
-    /// Close the caller's conversation, leaving its record intact.
+    /// End a conversation, leaving its record intact.
     SessionClose { conversation: crate::ConversationId },
-    /// Destroy the caller's conversation record. Irreversible.
+    /// Destroy conversation state. Irreversible.
     SessionDelete { conversation: crate::ConversationId },
-    /// Enumerate the caller's conversations a page at a time, resuming after
-    /// `cursor`. Discloses their existence and metadata.
+    /// Enumerate conversations. Discloses their existence and metadata.
     SessionList {
         cursor: Option<crate::ConversationId>,
     },
@@ -686,13 +681,9 @@ pub enum Payload {
     Baseline(BaselineView),
     /// The outcome of a permitted `admin.contain` or `admin.release` (#165).
     Containment(ContainmentView),
-    /// A permitted `session.new`: the conversation just opened.
     ConversationOpened(crate::ConversationView),
-    /// A permitted `session.close`: the conversation as it stands, closed.
     ConversationClosed(crate::ConversationView),
-    /// A permitted `session.list`: one page of the caller's conversations.
     ConversationList(crate::ConversationPage),
-    /// A permitted `session.delete`: the conversation whose record is gone.
     ConversationDeleted {
         conversation: crate::ConversationId,
     },

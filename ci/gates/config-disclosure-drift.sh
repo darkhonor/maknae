@@ -87,8 +87,6 @@ SURFACE=(
   # The fifth wire disclosure struct, after StatusView, RoleBindingView, WhoamiView and BaselineView;
   # a field added to it reaches every holder of either verb.
   "crates/maknae-proto/src/wire.rs|ContainmentView|containment|3|wire"
-  # #170: session.new and session.close return one view, session.list a page of them.
-  # A struct-typed wire field is decided through its own entry, whose prefix is the field's path.
   "crates/maknae-proto/src/conversation.rs|ConversationView|conversation|7|wire"
   "crates/maknae-proto/src/conversation.rs|ConversationPage|conversation_list|2|wire"
   "crates/maknae-proto/src/conversation.rs|ConversationView|conversation_list.entries|7|wire"
@@ -113,9 +111,7 @@ LEAF_ENUMS=(
   "deployment.account_source|crates/maknae-config/src/deployment.rs|AccountSource"
 )
 
-# Fields whose type is a newtype over one String: one string on the wire, so a
-# leaf. The type must be declared exactly `pub struct <Type>(String);` in the
-# named file, which must also hold the field's struct.
+# Fields whose type is a `pub struct <Type>(String);` newtype in the named file: one string on the wire, so a leaf.
 LEAF_NEWTYPES=(
   "conversation.conversation|crates/maknae-proto/src/conversation.rs|ConversationId"
   "conversation_list.entries.conversation|crates/maknae-proto/src/conversation.rs|ConversationId"

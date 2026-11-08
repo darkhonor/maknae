@@ -85,8 +85,7 @@ impl std::fmt::Display for Blocked {
     }
 }
 
-/// The requester's own slot first, then one of the shared workers; both follow
-/// the worker, so a stalled requester pins at most its own slots.
+/// Runs on the requester's own slot, then a shared worker.
 pub(crate) async fn blocking<T, F>(uid: u32, timeout: Duration, f: F) -> Result<T, Blocked>
 where
     T: Send + 'static,
@@ -611,15 +610,20 @@ where
                 &policy_name,
                 gathered.as_ref().map(|(facts, _)| facts),
             );
+            let mut touch_failure = None;
             if let (Ok(_), Some((_, Some(rec)))) = (&decision, &gathered) {
                 let now = crate::run::unix_now();
-                let _ = conversations.update(&rec.id, rec.fence, &mut |r| r.last_active = now);
+                if let Err(e) =
+                    conversations.update(&rec.id, rec.fence, &mut |r| r.last_active = now)
+                {
+                    touch_failure = Some(e.to_string());
+                }
             }
-            Ok::<_, String>((prepared, permit, decision))
+            Ok::<_, String>((prepared, permit, decision, touch_failure))
         }),
     )
     .await;
-    let (prepared, permit, decision) = match prepared {
+    let (prepared, permit, decision, touch_failure) = match prepared {
         Ok(Ok(Ok(p))) => p,
         Ok(Ok(Err(reason))) => {
             refuse(stream, cfg, &*emit, record, reason).await;
@@ -692,6 +696,16 @@ where
     )
     .await
     {
+        if let Some(why) = touch_failure {
+            let mut note = intent.record.clone();
+            note.seq = seq.next();
+            note.mutation = None;
+            note.outcome.reason = format!("conversation activity not recorded: {why}");
+            note.outcome.posture = "unavailable".into();
+            if let Err(e) = emit.emit_within(&note, AUDIT_APPEND_TIMEOUT).await {
+                eprintln!("maknaed: AUDIT WRITE FAILED on conversation record: {e}");
+            }
+        }
         attempt(
             stream,
             cfg,

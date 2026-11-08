@@ -1952,7 +1952,6 @@ expect_accept "config-disclosure-drift/config-vec-of-struct-is-a-leaf" \
 fx="$(cfg_fixture "$CFG_OK")"
 expect_accept "config-disclosure-drift/clean-fixture-passes" ": 71 paths decided, 81 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
 
-# #170: a String newtype is a leaf only while it is one.
 fx="$(cfg_fixture "$CFG_OK")"
 python3 - "$fx" <<'PYFIX'
 import pathlib, sys
@@ -1964,7 +1963,6 @@ PYFIX
 expect_reject_because "config-disclosure-drift/leaf-newtype-over-a-non-string" \
   "it is not a String newtype" "$fx/ci/gates/config-disclosure-drift.sh"
 
-# #170: a leaf struct variant that gains a second field is no longer a leaf.
 fx="$(cfg_fixture "$CFG_OK")"
 python3 - "$fx" <<'PYFIX'
 import pathlib, sys
@@ -1976,12 +1974,10 @@ PYFIX
 expect_reject_because "config-disclosure-drift/leaf-variant-gains-a-field" \
   "a leaf variant has exactly one field" "$fx/ci/gates/config-disclosure-drift.sh"
 
-# #170: a struct-typed wire field's own fields still each need a decision.
 fx="$(cfg_fixture "$(cfg_manifest "^always${TABCH}conversation_list\.entries\.cwd${TABCH}")")"
 expect_reject_because "config-disclosure-drift/nested-surface-field-with-no-decision" \
   "NO recorded disclosure decision" "$fx/ci/gates/config-disclosure-drift.sh"
 
-# #170: without its own SURFACE entry a struct-typed wire field is a subtree.
 fx="$(cfg_fixture "$CFG_OK")"
 python3 - "$fx" <<'PYFIX'
 import pathlib, sys
@@ -1993,7 +1989,6 @@ PYFIX
 expect_reject_because "config-disclosure-drift/nested-wire-struct-without-an-entry" \
   "SUBTREE" "$fx/ci/gates/config-disclosure-drift.sh"
 
-# A one-line struct variant carries fields, so it cannot be listed `unit`.
 fx="$(cfg_fixture "$CFG_OK")"
 python3 - "$fx" <<'PYFIX'
 import pathlib, sys
@@ -6097,9 +6092,7 @@ printf '#[allow(unsafe_code)]\nunsafe fn one() -> u8 {\n    1\n}\n\n#[allow(unsa
 expect_reject_because "unsafe-lint/an-in-source-allow-of-a-forbidden-lint-is-refused" \
   "incompatible with previous forbid" ul_clippy "$ul_allow"
 
-# #170: each conversation decision, removed, turns its own tests red. One copy of
-# the tracked tree, built into the shared target so only workspace crates rebuild;
-# each mutant is applied, tested and reverted in that copy.
+# #170: each conversation decision, removed, turns its own tests red.
 if command -v cargo >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
   cv_root="$(cd "$here/../.." && pwd)"
   cv_ws="$(mktemp -d -p "$NC_TMP")"

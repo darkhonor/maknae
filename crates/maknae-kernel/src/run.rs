@@ -3119,8 +3119,6 @@ fn effect<T>(
     }
 }
 
-/// Updates at the fence the prompt was decided on, so a racing loop loses here,
-/// before anything is sent.
 async fn advance_conversation(
     store: &Arc<dyn ConversationStore>,
     uid: u32,
@@ -3151,8 +3149,6 @@ async fn advance_conversation(
     .unwrap_or_else(|b| Err(StepFailure::Blocked(b)))
 }
 
-/// `Err` carries the refusal and, when the conversation could not be marked
-/// full, why.
 async fn bind_reply(
     store: &Arc<dyn ConversationStore>,
     uid: u32,

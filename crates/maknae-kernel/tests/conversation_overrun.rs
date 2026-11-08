@@ -1,5 +1,4 @@
-//! #170: a store effect that overruns its bound. Its own binary: the stalled
-//! worker holds the test euid's store slot past every other test's timeout.
+//! The stalled worker holds the euid's store slot past other tests' timeouts: own binary.
 mod common;
 use common::{Fixture, Records};
 use maknae_kernel::{ConversationRecord, ConversationStore, ConversationStoreError as StoreError};

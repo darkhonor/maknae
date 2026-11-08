@@ -1,11 +1,7 @@
-//! Kernel-recorded conversation identity and the views the session verbs return.
 use serde::{Deserialize, Serialize};
 
 pub const CONVERSATION_ID_HEX_LEN: usize = 32;
 
-/// A kernel-assigned conversation id: exactly 32 lowercase hex characters.
-/// Decoding goes through [`ConversationId::parse`], so a malformed id fails the
-/// frame decode.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct ConversationId(String);
@@ -40,7 +36,6 @@ impl From<ConversationId> for String {
     }
 }
 
-/// One conversation's record as the owner sees it. Times are epoch seconds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationView {
     pub conversation: ConversationId,
@@ -52,7 +47,6 @@ pub struct ConversationView {
     pub chain_head: String,
 }
 
-/// One page of the owner's conversations; `next` is the cursor for the page after it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationPage {
     pub entries: Vec<ConversationView>,

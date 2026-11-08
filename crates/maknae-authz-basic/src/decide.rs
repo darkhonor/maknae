@@ -356,8 +356,6 @@ fn refused(reason: &str) -> Decision {
     )
 }
 
-/// The role's own grant for `term`: the allowing entry as written, or the
-/// decision an explicit deny or an absent grant makes.
 fn granted(lp: &LoadedPolicy, role_key: &'static str, term: &str) -> Result<String, Decision> {
     match lp.action_grants.evaluate3_action(role_key, term) {
         maknae_config::Match3::AllowMatch { source } => Ok(source),
@@ -380,15 +378,13 @@ fn granted(lp: &LoadedPolicy, role_key: &'static str, term: &str) -> Result<Stri
     }
 }
 
-/// The conversation a request cites, as the kernel's store reported it (#170).
 enum Conversation {
     Absent,
     Active { owned: bool },
     Unknown,
 }
 
-/// `None` is failed-to-evaluate: a store error, an unrecognised state, or a
-/// conversation attribute absent or wrong-typed where the state requires it.
+/// `None` is failed-to-evaluate.
 fn conversation(req: &SecRequest, uid: u32) -> Option<Conversation> {
     let attrs = &req.resource.0;
     let state = match attrs.get(RESOURCE_CONVERSATION_STATE) {
@@ -424,8 +420,6 @@ fn grant_permit(role_key: &'static str, source: String) -> Decision {
     )
 }
 
-/// `session.new`, `.close`, `.list` and `.delete` (#170), each decided on the
-/// role's own grant first.
 fn decide_session(
     lp: &LoadedPolicy,
     req: &SecRequest,
@@ -456,11 +450,7 @@ fn decide_session(
     }
 }
 
-/// The `session.prompt` arm (#172, #608, #170): the role's grant, an active
-/// conversation the subject owns that the request extends rather than rewrites,
-/// the kernel-resolved destination in the role's allowlist, and, when the subject
-/// lists `models`, the admitted model in that list. A missing destination is a
-/// Deny, not a policy gap.
+/// A missing destination is a Deny, not a policy gap.
 fn decide_prompt(
     lp: &LoadedPolicy,
     req: &SecRequest,
@@ -3393,8 +3383,6 @@ mod tests {
             Err(crate::AuthzBasicError::UnknownAction("admin.whoami".into()))
         );
     }
-
-    // ---- #170: the session verbs and the conversation binding ----
 
     const S170_ADMIN: u32 = 1701;
     const S170_USER: u32 = 1702;

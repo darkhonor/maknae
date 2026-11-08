@@ -1,5 +1,3 @@
-//! #170: kernel-recorded conversations through the real `handle()`, the real
-//! composed PDP and a real recorder, on both conversation stores.
 mod common;
 use common::{Fixture, Records};
 use maknae_kernel::{ConversationRecord, ConversationStore, ConversationStoreError as StoreError};
@@ -652,8 +650,6 @@ async fn the_new_record_names_owner_cwd_and_id() {
     }
 }
 
-/// A store whose `lose_at`th update loses to another loop's update of the same
-/// record, and whose removals can be made to overrun.
 struct Racing {
     inner: Arc<dyn ConversationStore>,
     lose_at: usize,
@@ -977,6 +973,41 @@ async fn an_fs_read_citing_the_callers_conversation_touches_it_and_leaves_the_ch
         (after.chain, after.turns, after.bytes),
         (before.chain, before.turns, before.bytes)
     );
+}
+
+#[tokio::test]
+async fn a_failed_activity_touch_is_recorded_and_the_read_still_runs() {
+    let mut rig = Rig::new("fs-touch-fails", Kind::Mem);
+    let conv = rig.open().await;
+    rig.fx.conversations = Racing::over(&rig.fx.conversations, 1);
+    let target = rig.fx.root.join("readable");
+    std::fs::write(&target, b"content").unwrap();
+    let held = maknae_io::open_path_for_delegation(&target).unwrap();
+    let records = Records::new(0);
+    let (mut client, task, body) = rig.fx.start(
+        Verb::Read {
+            path: target.to_str().unwrap().into(),
+            conversation: Some(conv.clone()),
+            page: None,
+        },
+        Some(held.try_clone().unwrap()),
+        Arc::clone(&records),
+    );
+    common::write_frame(&mut client, &body).await.unwrap();
+    let run = common::read_as_subject(&mut client, Some(&held)).await;
+    drop(client);
+    task.await.unwrap();
+    assert_eq!(run.finish, Some(maknae_proto::ReportedFinish::Success));
+    let noted: Vec<_> = of_action(&records, "fs.read")
+        .into_iter()
+        .filter(|r| {
+            r.outcome
+                .reason
+                .starts_with("conversation activity not recorded: ")
+        })
+        .collect();
+    assert_eq!(noted.len(), 1, "{:?}", records.snapshot());
+    assert_eq!(noted[0].outcome.result, "permit");
 }
 
 #[tokio::test]
