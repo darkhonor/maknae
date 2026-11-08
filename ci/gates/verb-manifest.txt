@@ -21,13 +21,13 @@ action	admin.provider.set	not-granted	enumerated, decided, unbuilt — answers U
 action	admin.provider.disable	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
 action	admin.session.list	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
 action	admin.session.terminate	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
-action	session.new	not-granted-but-grantable	BUILT (#170): open a kernel-recorded conversation, owner-scoped, its cwd decided as a Read by the role's path policy (recorded, not a confinement), within the subject's `subjects:` actions limit (#608). Ungranted by default; operator MAY grant per-role — see the grantable row
+action	session.new	granted-in-shipped-file	BUILT (#170): open a kernel-recorded conversation, owner-scoped, its cwd recorded as the kernel reports it, neither decided nor confined (#617), within the subject's `subjects:` actions limit (#608). granted to admin by the shipped authz.yaml; an install's own authz.yaml decides
 action	session.resume	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
-action	session.close	not-granted-but-grantable	BUILT (#170): close an active conversation the subject owns; another subject's or an inactive one is refused. Ungranted by default; operator MAY grant per-role — see the grantable row
-action	session.delete	not-granted-but-grantable	BUILT (#170): delete a conversation the subject owns, or an archived one, on the grant. Ungranted by default; operator MAY grant per-role — see the grantable row
-action	session.list	not-granted-but-grantable	BUILT (#170): list the subject's own conversations, paged. Ungranted by default; operator MAY grant per-role — see the grantable row
+action	session.close	granted-in-shipped-file	BUILT (#170): close an active conversation the subject owns; another subject's or an inactive one is refused. granted to admin by the shipped authz.yaml; an install's own authz.yaml decides
+action	session.delete	granted-in-shipped-file	BUILT (#170): delete a conversation the subject owns, or an archived one, on the grant. granted to admin by the shipped authz.yaml; an install's own authz.yaml decides
+action	session.list	granted-in-shipped-file	BUILT (#170): list the subject's own conversations, paged. granted to admin by the shipped authz.yaml; an install's own authz.yaml decides
 action	session.fork	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
-action	session.prompt	not-granted-but-grantable	BUILT (#172, Cooky): the egress verb — decided by the role's own grant, an active conversation the subject owns that the request extends (#170), AND the destinations: allowlist, within the subject's `subjects:` actions and models limits (#608), write-ahead intent, text only, Unavailable backend until #240. Ungranted by default; operator MAY grant per-role — see the grantable row
+action	session.prompt	granted-in-shipped-file	BUILT (#172, Cooky): the egress verb — decided by the role's own grant, an active conversation the subject owns that the request extends (#170), AND the destinations: allowlist, within the subject's `subjects:` actions and models limits (#608), write-ahead intent, text only, Unavailable backend until #240. granted to admin by the shipped authz.yaml; an install's own authz.yaml decides
 action	session.cancel	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
 action	session.set_config_option	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
 action	session.set_mode	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
@@ -70,11 +70,11 @@ grantable	admin.baseline.show	grantable-shipped-granted	operator MAY grant per-r
 grantable	admin.baseline.accept	grantable-shipped-granted	operator MAY grant per-role via `roles:`; the shipped authz.yaml grants it to admin (#490)
 grantable	admin.contain	grantable-not-granted	operator MAY grant per-role via `roles:` (#165); ships ungranted
 grantable	admin.release	grantable-shipped-granted	operator MAY grant per-role via `roles:`; the shipped authz.yaml grants it to admin (#165)
-grantable	session.prompt	grantable-not-granted	operator MAY grant per-role via `roles:` (#162), admin or user, with a destination via destinations: (#172); a person's effective grant must also hold session.new (#170); ships ungranted and unlisted
-grantable	session.new	grantable-not-granted	operator MAY grant per-role via `roles:` (#170), admin or user; ships ungranted
-grantable	session.close	grantable-not-granted	operator MAY grant per-role via `roles:` (#170), admin or user; ships ungranted
-grantable	session.list	grantable-not-granted	operator MAY grant per-role via `roles:` (#170), admin or user; ships ungranted
-grantable	session.delete	grantable-not-granted	operator MAY grant per-role via `roles:` (#170), admin or user; ships ungranted
+grantable	session.prompt	grantable-shipped-granted	operator MAY grant per-role via `roles:`; the shipped authz.yaml grants it to admin (#162, #170); a destination via destinations: (#172) is still needed and the shipped file has none; a person's effective grant must also hold session.new (#170)
+grantable	session.new	grantable-shipped-granted	operator MAY grant per-role via `roles:`; the shipped authz.yaml grants it to admin (#170)
+grantable	session.close	grantable-shipped-granted	operator MAY grant per-role via `roles:`; the shipped authz.yaml grants it to admin (#170)
+grantable	session.list	grantable-shipped-granted	operator MAY grant per-role via `roles:`; the shipped authz.yaml grants it to admin (#170)
+grantable	session.delete	grantable-shipped-granted	operator MAY grant per-role via `roles:`; the shipped authz.yaml grants it to admin (#170)
 capability	Write	granted	grammar capability; shipped Write(~/projects/**) allow, independent of Read; paired sensitive-path denies (#158)
 action-vocab	admin.status	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608)
 action-vocab	admin.config.show	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608)

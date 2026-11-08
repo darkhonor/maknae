@@ -254,7 +254,7 @@ bindings:
 - **Deleting is not resetting.** Once the store holds bindings from a `bindings:` key, a `bindings.yaml` that is missing or has no `bindings:` key changes nothing at a start or a reload: every binding and containment stands, the loss is recorded as `graph.sync` `lost: …`, `maknae status` shows `bindings.yaml lost`, and `sudo maknae policy sync` restores the file. Returning to principal-as-admin takes `sudo maknae reseed` over a `bindings.yaml` with no `bindings:` key. The one exception is the first start of this version over a store that has no merge state yet, which refuses (exit 3) instead ([runbook](runbook.md#the-kernel-graph-store-refuses-to-start)). No package upgrade recreates a deleted `bindings.yaml`: dpkg does not reinstall a conffile you removed, and the RPM and macOS packages install the shipped file only when no kernel graph store exists.
 - **Merged with live state.** `maknaed` does not take the file as it stands: at each start and reload it merges the file entry by entry with the bindings it enforces, which may hold live edits not yet in the file, and an entry changed differently on both sides fails closed ([runbook](runbook.md#how-bindingsyaml-and-live-state-merge)).
 - **Live containment.** `maknae contain` and `maknae release` ([runbook](runbook.md#contain-a-subject-over-the-wire)) change the enforced bindings without touching this file. A live containment appears here as `- uid: <n>` under `adversary` after `sudo maknae policy sync`, and never with its reason. A release removes every `adversary` entry that claims the uid, including a name listed here; its removal reaches this file only through a sync run at a terminal.
-- **Grants.** `authz.yaml`'s `roles.admin.allow` holds the administrative terms. The shipped file grants `admin.status`, `admin.subject.list`, `admin.baseline.show`, `admin.baseline.accept` and `admin.release`. `admin.contain` is grantable but not granted, so add it deliberately. `admin.contain` and `admin.release` are grantable to `admin` only: a grant of either to `user`, `guest` or `adversary` refuses at load.
+- **Grants.** `authz.yaml`'s `roles.admin.allow` holds the administrative terms. The shipped file grants `admin.status`, `admin.subject.list`, `admin.baseline.show`, `admin.baseline.accept`, `admin.release` and the five conversation terms (§2.4). `admin.contain` is grantable but not granted, so add it deliberately. `admin.contain` and `admin.release` are grantable to `admin` only: a grant of either to `user`, `guest` or `adversary` refuses at load.
 - **A synced file.** `sudo maknae policy sync` writes this file from the bindings `maknaed` enforces, in the grammar above, `root:_maknae 0640`. The installed file starts with one comment line, `# installed by sudo maknae policy sync from maknaed's mirror at revision <n>`, lists each role's entries one per line, quoted, with `- uid: <n>` for an id, and keeps no other comment ([runbook](runbook.md#sync-live-identity-changes-back-to-bindingsyaml)).
 
 **What refuses the whole file.** A defect in the file itself refuses the whole load: the start refuses with exit 3, and a reload is refused with the running policy left as it was. The defects are: YAML that does not parse or has the wrong shape, a missing or unknown `schema_version`, an unknown top-level key, an unknown role key (`bindings names unknown role '<key>'`), the same entry twice in one list (`identity '<name>' listed twice in one role`), a `uid:` entry outside `adversary`, an unquoted number in a list, a name that is empty or contains `:`, `,` or a control character, and the ownership and mode failures above. An account lookup that fails, as distinct from one that finds no such user, also refuses the whole load: `looking up '<name>' failed (errno <n>); nothing was changed`. On macOS this includes an account whose passwd record is larger than 4 KiB, which refuses every load while it is named in the file (#501).
@@ -280,6 +280,37 @@ Each of these is a `graph.identity` audit record and a journal line, such as `ma
 To contain an id independently of the directory, list it as `- uid: <n>`. On Linux `maknaed.service` is ordered after `nss-user-lookup.target`, so it starts after the local lookup services that pull the target in (such as sssd) have started; it does not wait for the directory server to be reachable, and on a host with no such service the ordering does nothing. launchd has no such ordering. So on both platforms carry-forward and `uid:` entries are the controls for an outage, and after an outage at boot or at a reload, reload once the directory is back.
 
 **When an edit applies.** At the next reload or restart (runbook, "Reload the policy"), merged with the live state as above. A reload reads `authz.yaml` and `bindings.yaml` together as one policy: if either is refused, neither edit applies and the running policy stands.
+
+### 2.4 Conversations (#170)
+
+The kernel records each conversation a loop opens: an owner, the working directory it was opened in, a hash chain over the request turns, and counts of turns and bytes. It never stores turn content. Records live in the `conversations/` directory beside the kernel graph store, sealed under the same key (`/var/lib/maknae/conversations` on Linux, `/usr/local/var/db/maknae/state/conversations` on macOS).
+
+**The five terms.** `authz.yaml` grants a role these by name, never as `session.*`:
+
+| Term | Effect |
+|---|---|
+| `session.new` | open a conversation |
+| `session.prompt` | send turns on an active conversation the subject owns |
+| `session.list` | list the subject's own conversations |
+| `session.close` | close an active conversation the subject owns |
+| `session.delete` | delete a conversation the subject owns |
+
+The shipped file grants all five to `admin` and none to `user`. It has no `destinations:` key, so a prompt is refused at the destination check until you add one ([first provider](first-provider.md#4-allow-the-prompt)). Agents are refused `session.new` unless an agent `policy.yaml` grants it.
+
+**The working directory is recorded, not decided.** `session.new` is decided by the grant alone. The kernel records the directory the client's descriptor resolves to, as the kernel reports it, and neither decides it as a read nor confines the conversation to it. A symlinked directory is recorded as its target. The only file system restrictions are those the OS imposes and the `permissions:` entries of `authz.yaml` on each `fs.*` request. Home confinement for `fs.*` is tracked in #617.
+
+**The pairing rule.** In `authz.yaml`, a role or a `subjects:` entry whose effective grant (allow minus deny, after family expansion) holds `session.prompt` without `session.new` refuses the whole file at load. An agent's `policy.yaml` is exempt.
+
+**Bounds.**
+
+- A conversation idle for 24 hours is closed, audited with reason `idle`, when its owner next makes a conversation request; closing frees its slot.
+- An owner may hold at most 32 active conversations (`OWNER_MAX_ACTIVE`). A `session.new` past that is refused after the grant is permitted.
+- A conversation holds at most 256 MiB of request turns.
+- A `session.list` page holds at most 12 conversations.
+
+**Single host.** The store admits one `maknaed` per state directory: the directory is locked exclusively while the daemon runs. Sharing it between hosts is not supported (#616).
+
+**From the CLI.** `maknae session list [--cwd <dir>]` lists the caller's conversations, optionally those opened in one directory. `maknae session close <id>` closes one by its 32-character id. The loop opens a conversation at start and closes it on exit and on Ctrl-C.
 
 ---
 

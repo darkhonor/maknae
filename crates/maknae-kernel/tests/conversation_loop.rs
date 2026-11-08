@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const GRANTS: &str = "roles:\n  user:\n    allow: [\"session.prompt\", \"session.new\", \"session.close\", \"session.list\", \"session.delete\"]\ndestinations:\n  user:\n    allow: [\"provider:openai\"]\n";
+const SHIPPED_POLICY: &str = include_str!("../../../packaging/common/authz.yaml");
 const FOREIGN_UID: u32 = 4_170_999;
 const FOREIGN_ID: &str = "f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0";
 const MAX_BYTES: u64 = 256 << 20;
@@ -140,6 +141,16 @@ impl Rig {
         let dir = self.dir.as_ref().expect("a directory store");
         self.fx.conversations = common::conversations();
         self.fx.conversations = dir_store(dir.path());
+    }
+    fn under_shipped(self, role: &str) -> Self {
+        let paths = self.fx.paths();
+        common::write_0640(&paths.authz, SHIPPED_POLICY);
+        let name = self.fx.peer_user.clone().unwrap();
+        common::write_0640(
+            &paths.bindings,
+            &format!("schema_version: 1\nbindings:\n  {role}: [\"{name}\"]\n"),
+        );
+        self
     }
     fn store(&self) -> &dyn ConversationStore {
         &*self.fx.conversations
@@ -1121,4 +1132,76 @@ async fn deleting_an_active_conversation_removes_its_record() {
     assert_eq!(recs.len(), 2, "{recs:?}");
     assert_eq!(recs[1].outcome.reason, "conversation deleted");
     assert_eq!(recs[1].object.as_deref(), rig.cwd().to_str());
+}
+
+async fn shipped_session_lifecycle(role: &str) {
+    let rig = Rig::new(&format!("shipped-{role}"), Kind::Mem).under_shipped(role);
+    let conv = rig.open().await;
+    let list = rig
+        .control(Verb::SessionList { cursor: None }, &Records::new(0))
+        .await
+        .unwrap();
+    let RespResult::Ok(Payload::ConversationList(page)) = list.result else {
+        panic!("{list:?}")
+    };
+    assert_eq!(page.entries.len(), 1);
+
+    let eg = Script::of([]);
+    let records = Records::new(0);
+    let resp = rig
+        .send(prompt(&conv, vec![user("a")]), None, &records, eg.clone())
+        .await
+        .unwrap();
+    refused_with(&resp, ProtoErrCode::Unauthorized);
+    assert_eq!(eg.sends(), 0);
+    let denied = last_of(&records, "session.prompt");
+    assert_eq!(denied.outcome.result, "deny");
+    assert!(
+        denied
+            .outcome
+            .reason
+            .contains("destination not allowlisted"),
+        "{denied:?}"
+    );
+
+    let closed = rig
+        .control(
+            Verb::SessionClose {
+                conversation: id(&conv),
+            },
+            &Records::new(0),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        closed.result,
+        RespResult::Ok(Payload::ConversationClosed(_))
+    ));
+    let other = rig.open().await;
+    let deleted = rig
+        .control(
+            Verb::SessionDelete {
+                conversation: id(&other),
+            },
+            &Records::new(0),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        deleted.result,
+        RespResult::Ok(Payload::ConversationDeleted { .. })
+    ));
+}
+
+#[tokio::test]
+async fn the_shipped_policy_lets_admin_run_the_session_verbs_and_stops_a_prompt_at_the_destination_check(
+) {
+    shipped_session_lifecycle("admin").await;
+}
+
+#[tokio::test]
+#[ignore = "#609: user-side session grants ship at the rebase"]
+async fn the_shipped_policy_lets_a_user_run_the_session_verbs_and_stops_a_prompt_at_the_destination_check(
+) {
+    shipped_session_lifecycle("user").await;
 }

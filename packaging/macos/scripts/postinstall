@@ -213,6 +213,17 @@ fi
 chmod 0700 "$STATE"
 verify "$STATE ownership/mode" "$MUID $MGID 700" "$(stat -f '%u %g %Lp' "$STATE")"
 
+CONV="$STATE/conversations"
+install -d -m 0700 -o "$MUID" -g "$MGID" "$CONV"
+if [ -n "$(find "$CONV" -xdev -maxdepth 1 -nouser -print -quit)" ]; then
+    hold_dir "$CONV" || { echo "maknae: cannot hold $CONV as root 0700 with no ACL; it is left root-owned" >&2; exit 1; }
+    find "$CONV" -xdev -mindepth 1 -maxdepth 1 -type f -links 1 -nouser \
+        -exec chown -h "$MUID:$MGID" {} +
+    chown "$MUID:$MGID" "$CONV"
+fi
+chmod 0700 "$CONV"
+verify "$CONV ownership/mode" "$MUID $MGID 700" "$(stat -f '%u %g %Lp' "$CONV")"
+
 if [ "$DISABLE_MAKNAED" = false ] && [ "$WAS_LOADED" = "true" ]; then
     # Upgrade of a running daemon: the payload replaced the file but the live
     # process still holds the old inode. Restart it onto the new binary, exactly as

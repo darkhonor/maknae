@@ -55,3 +55,8 @@ roles:
       - "admin.baseline.show"
       - "admin.baseline.accept"
       - "admin.release"
+      - "session.prompt"
+      - "session.new"
+      - "session.close"
+      - "session.list"
+      - "session.delete"

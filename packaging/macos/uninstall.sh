@@ -144,7 +144,7 @@ if [ -d /var/log/maknae ] && [ ! -L /var/log/maknae ]; then
 fi
 
 echo "RETAINED: /var/log/maknae and /etc/maknae; remove by hand for a full teardown."
-echo "RETAINED: the kernel graph state at /usr/local/var/db/maknae/state and its key, System-keychain item io.maknae.maknaed.graph; remove both by hand for a full teardown."
+echo "RETAINED: the kernel graph state and conversation store at /usr/local/var/db/maknae/state and the graph key, System-keychain item io.maknae.maknaed.graph; remove both by hand for a full teardown."
 [ "$ace_left" = false ] || echo "FAILED: /etc/maknae still carries, or could not be read back for, the deputy's ACE or an orphaned user:<UUID> ACE" >&2
 [ -z "$kc_left" ] || echo "FAILED: System-keychain item(s) remain:$kc_left" >&2
 [ "$seal_left" = false ] || echo "FAILED: $SEAL_PUB_DIR/seal.pub remains" >&2

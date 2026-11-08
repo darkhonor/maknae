@@ -489,7 +489,7 @@ roles:                       # #162: per-role action grants; deny beats allow in
   admin:
     allow: ["admin.status", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.release"]   # as packaged (#490, #165)
   user:
-    allow: ["session.prompt"]
+    allow: ["session.prompt", "session.new", "session.close", "session.list", "session.delete"]
 destinations:                # #172: per-role egress allowlist for session.prompt
   user:
     allow: ["provider:openai"]   # provider:<name>, an authorized provider's name (configuration §6.1)
@@ -847,10 +847,9 @@ As yourself, not root, store your own API key in Vault under your own login: [fi
 
 ### 7. Grant the prompt
 
-Edit `/etc/maknae/authz.yaml` in place. The packaged file already has a `roles:` key granting `admin` its five administrative terms, and a second `roles:` key refuses the whole file, so add `session.prompt` to that list and append a `destinations:` key. `sudoedit` and `tee -a` keep the file's owner, mode and label. Step 9's restart applies it; a daemon that is already serving applies it at the next reload, `sudo systemctl reload maknaed` ([Reload the policy](#reload-the-policy)):
+Edit `/etc/maknae/authz.yaml` in place. The packaged file already has a `roles:` key granting `admin` its five administrative terms, and a second `roles:` key refuses the whole file, so append a `destinations:` key; the packaged list already holds `session.prompt` and the four conversation terms beside it. `sudoedit` and `tee -a` keep the file's owner, mode and label. Step 9's restart applies it; a daemon that is already serving applies it at the next reload, `sudo systemctl reload maknaed` ([Reload the policy](#reload-the-policy)):
 
 ```bash
-sudoedit /etc/maknae/authz.yaml      # add - "session.prompt" under roles: admin: allow:
 sudo tee -a /etc/maknae/authz.yaml >/dev/null <<'EOF'
 destinations:
   admin:
@@ -871,6 +870,10 @@ roles:
       - "admin.baseline.accept"
       - "admin.release"
       - "session.prompt"
+      - "session.new"
+      - "session.close"
+      - "session.list"
+      - "session.delete"
 destinations:
   admin:
     allow: ["provider:openai"]

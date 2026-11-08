@@ -93,7 +93,7 @@
 1002 admin.baseline.accept None -> NotApplicable { note: Some("role guest: no rule for admin.baseline.accept") } Some("guest") None
 666 admin.baseline.accept None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
 4242 admin.baseline.accept None -> NotApplicable { note: Some("subject resolves to no role") } None None
-1000 session.new None -> NotApplicable { note: Some("role admin: no rule for session.new") } Some("admin") None
+1000 session.new None -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:roles.admin:allow:6 in /etc/maknae/authz.yaml#roles.admin")
 1001 session.new None -> NotApplicable { note: Some("role user: no rule for session.new") } Some("user") None
 1002 session.new None -> NotApplicable { note: Some("role guest: no rule for session.new") } Some("guest") None
 666 session.new None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
@@ -103,17 +103,17 @@
 1002 session.resume None -> NotApplicable { note: Some("role guest: no rule for session.resume") } Some("guest") None
 666 session.resume None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
 4242 session.resume None -> NotApplicable { note: Some("subject resolves to no role") } None None
-1000 session.close None -> NotApplicable { note: Some("role admin: no rule for session.close") } Some("admin") None
+1000 session.close None -> Indeterminate Some("admin") None
 1001 session.close None -> NotApplicable { note: Some("role user: no rule for session.close") } Some("user") None
 1002 session.close None -> NotApplicable { note: Some("role guest: no rule for session.close") } Some("guest") None
 666 session.close None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
 4242 session.close None -> NotApplicable { note: Some("subject resolves to no role") } None None
-1000 session.delete None -> NotApplicable { note: Some("role admin: no rule for session.delete") } Some("admin") None
+1000 session.delete None -> Indeterminate Some("admin") None
 1001 session.delete None -> NotApplicable { note: Some("role user: no rule for session.delete") } Some("user") None
 1002 session.delete None -> NotApplicable { note: Some("role guest: no rule for session.delete") } Some("guest") None
 666 session.delete None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
 4242 session.delete None -> NotApplicable { note: Some("subject resolves to no role") } None None
-1000 session.list None -> NotApplicable { note: Some("role admin: no rule for session.list") } Some("admin") None
+1000 session.list None -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:roles.admin:allow:8 in /etc/maknae/authz.yaml#roles.admin")
 1001 session.list None -> NotApplicable { note: Some("role user: no rule for session.list") } Some("user") None
 1002 session.list None -> NotApplicable { note: Some("role guest: no rule for session.list") } Some("guest") None
 666 session.list None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
@@ -123,7 +123,7 @@
 1002 session.fork None -> NotApplicable { note: Some("role guest: no rule for session.fork") } Some("guest") None
 666 session.fork None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
 4242 session.fork None -> NotApplicable { note: Some("subject resolves to no role") } None None
-1000 session.prompt None -> NotApplicable { note: Some("role admin: no rule for session.prompt") } Some("admin") None
+1000 session.prompt None -> Deny { reason: "prompt needs an active conversation" } Some("admin") None
 1001 session.prompt None -> NotApplicable { note: Some("role user: no rule for session.prompt") } Some("user") None
 1002 session.prompt None -> NotApplicable { note: Some("role guest: no rule for session.prompt") } Some("guest") None
 666 session.prompt None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None

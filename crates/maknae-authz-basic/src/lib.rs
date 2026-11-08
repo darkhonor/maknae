@@ -2151,7 +2151,21 @@ mod tests {
             r.action = Action(action.into());
             decide::decide_loaded(&lp, &principal(), &r)
         };
-        for term in SHIPPED_ADMIN_TERMS {
+        let (plain, session) = SHIPPED_ADMIN_TERMS.split_at(5);
+        for term in session {
+            assert!(
+                !matches!(ask(501, term), Verdict::NotApplicable { .. }),
+                "{term} for the principal"
+            );
+            assert_eq!(
+                ask(4242, term),
+                Verdict::NotApplicable {
+                    note: Some("subject resolves to no role".into())
+                },
+                "{term} for an unbound uid"
+            );
+        }
+        for term in plain {
             assert_eq!(ask(501, term), audit_permit(), "{term} for the principal");
             assert_eq!(
                 ask(4242, term),
@@ -2183,12 +2197,17 @@ mod tests {
         );
     }
 
-    const SHIPPED_ADMIN_TERMS: [&str; 5] = [
+    const SHIPPED_ADMIN_TERMS: [&str; 10] = [
         "admin.status",
         "admin.subject.list",
         "admin.baseline.show",
         "admin.baseline.accept",
         "admin.release",
+        "session.prompt",
+        "session.new",
+        "session.close",
+        "session.list",
+        "session.delete",
     ];
 
     #[test]
@@ -2232,7 +2251,7 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_file_grants_admin_exactly_the_five_terms() {
+    fn the_shipped_file_grants_admin_exactly_the_ten_terms() {
         let policy = maknae_config::parse_authz(SHIPPED).expect("shipped authz.yaml parses");
         let roles: Vec<&String> = policy.action_grants.keys().collect();
         assert_eq!(roles, ["admin"]);

@@ -119,7 +119,7 @@ sudo chmod 0640 /etc/maknae/config.d/10-provider.yaml
 
 ### 4. Allow the prompt
 
-Nothing may reach a model until policy says so. The packaged `authz.yaml` already has a `roles:` key granting `admin` its five administrative terms, and a second `roles:` key refuses the whole file, so edit it in place (`sudoedit /etc/maknae/authz.yaml`): add `session.prompt` to `admin`'s list and add a `destinations:` key. The end of the file then reads:
+Nothing may reach a model until policy says so. The packaged `authz.yaml` already has a `roles:` key granting `admin` its five administrative terms and the five conversation terms, and a second `roles:` key refuses the whole file, so edit it in place (`sudoedit /etc/maknae/authz.yaml`): add a `destinations:` key. The end of the file then reads:
 
 ```yaml
 roles:
@@ -131,6 +131,10 @@ roles:
       - "admin.baseline.accept"
       - "admin.release"
       - "session.prompt"
+      - "session.new"
+      - "session.close"
+      - "session.list"
+      - "session.delete"
 destinations:
   admin:
     allow: ["provider:openai"]
@@ -183,7 +187,7 @@ Enroll writes `~/.maknae` only for the account that ran it. Each further local u
 
    Create each directory with `install -d` as shown. Do not use `install -D` to create the parents: it makes them `root`-owned and `0755`.
 
-3. **Bind the user to the `user` role and grant it.** Two files change, and both are edited in place (`sudoedit /etc/maknae/bindings.yaml /etc/maknae/authz.yaml`); do not append with `tee -a`, because a second `roles:` key refuses the whole document. `bindings.yaml` says who holds which role: once its `bindings:` block exists, only the names it lists have a role, so list yourself under `admin` too. `authz.yaml` says what each role may do: `user` is the only other role that may be granted `session.prompt`, and each role needs its own action grant and its own destination; without them the user's prompts are denied with `role user: no rule for session.prompt` in the trail, and the user sees only the generic refusal (`PROMPT_REFUSED`, below). With the administrator `alice` and the user `bob`, the complete `bindings.yaml` is:
+3. **Bind the user to the `user` role and grant it.** Two files change, and both are edited in place (`sudoedit /etc/maknae/bindings.yaml /etc/maknae/authz.yaml`); do not append with `tee -a`, because a second `roles:` key refuses the whole document. `bindings.yaml` says who holds which role: once its `bindings:` block exists, only the names it lists have a role, so list yourself under `admin` too. `authz.yaml` says what each role may do: `user` is the only other role that may be granted `session.prompt`, and each role needs its own action grants (`session.prompt` with `session.new` beside it, or the file refuses to load) and its own destination; without them the user's prompts are denied with `role user: no rule for session.prompt` in the trail, and the user sees only the generic refusal (`PROMPT_REFUSED`, below). With the administrator `alice` and the user `bob`, the complete `bindings.yaml` is:
 
    ```yaml
    schema_version: 1
@@ -228,8 +232,17 @@ Enroll writes `~/.maknae` only for the account that ran it. Each further local u
          - "admin.baseline.accept"
          - "admin.release"
          - "session.prompt"
+         - "session.new"
+         - "session.close"
+         - "session.list"
+         - "session.delete"
      user:
-       allow: ["session.prompt"]
+       allow:
+         - "session.prompt"
+         - "session.new"
+         - "session.close"
+         - "session.list"
+         - "session.delete"
    destinations:
      admin:
        allow: ["provider:openai"]
