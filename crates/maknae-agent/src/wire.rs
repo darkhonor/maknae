@@ -170,7 +170,7 @@ pub fn prompt_outcome(
 }
 
 /// Only the kernel's `ConversationOpened` opens; an `Unauthorized` refusal is
-/// `Refused`, any other refusal carries the kernel's message.
+/// `Refused`, any other refusal is `Declined` with the wire's code.
 pub fn open_outcome(sent: Result<WireOutcome, String>) -> Result<ConversationId, PlaneError> {
     match sent {
         Ok(WireOutcome::Payload(Payload::ConversationOpened(v))) => Ok(v.conversation),
@@ -198,9 +198,10 @@ fn conversation_failure(verb: &str, sent: Result<WireOutcome, String>) -> PlaneE
             code: maknae_proto::ProtoErrCode::Unauthorized,
             ..
         }) => PlaneError::Refused,
-        Ok(WireOutcome::Refused { message, .. }) => {
-            PlaneError::Transport(format!("the kernel did not complete {verb}: {message}"))
-        }
+        Ok(WireOutcome::Refused { code, message, .. }) => PlaneError::Declined {
+            code,
+            reason: message,
+        },
         Ok(other) => PlaneError::Transport(format!(
             "protocol error: unexpected reply to {verb}: {other:?}"
         )),
@@ -519,9 +520,10 @@ mod tests {
         );
         assert_eq!(
             open_outcome(refused(maknae_proto::ProtoErrCode::TooLarge)),
-            Err(PlaneError::Transport(
-                "the kernel did not complete session.new: too many active conversations".into()
-            ))
+            Err(PlaneError::Declined {
+                code: maknae_proto::ProtoErrCode::TooLarge,
+                reason: "too many active conversations".into(),
+            })
         );
         match open_outcome(Ok(WireOutcome::Payload(Payload::ConversationClosed(view(
             A,

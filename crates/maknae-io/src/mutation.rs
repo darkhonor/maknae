@@ -139,7 +139,7 @@ fn check_root(path: &Path) -> Result<(), IoError> {
     Ok(())
 }
 
-fn ensure_directory(fd: &OwnedFd, path: &Path) -> Result<nix::sys::stat::FileStat, IoError> {
+fn ensure_directory(fd: &impl AsFd, path: &Path) -> Result<nix::sys::stat::FileStat, IoError> {
     let st = syscall::fstat(fd).map_err(at(path))?;
     if st.st_mode & nix::libc::S_IFMT != nix::libc::S_IFDIR {
         return Err(io_error(nix::errno::Errno::ENOTDIR, path));
@@ -167,6 +167,15 @@ pub fn verify_mutation_directory(
         device: st.st_dev,
         deadline: None,
     })
+}
+
+/// The kernel's path for a delegated directory, with no confinement root: it
+/// locates the directory and authorizes nothing beneath it.
+pub fn verify_unconfined_directory(fd: BorrowedFd<'_>) -> Result<PathBuf, IoError> {
+    let path = crate::delegated::delegated_path(fd)?;
+    checked_path(&path)?;
+    ensure_directory(&fd, &path)?;
+    Ok(path)
 }
 
 fn same_path(actual: &Path, expected: &Path) -> Result<(), IoError> {
@@ -1323,6 +1332,53 @@ mod tests {
                 EffectState::NoEffect
             );
             assert!(!empty.join("detached-sentinel").exists());
+        }
+    }
+
+    #[test]
+    fn an_unconfined_directory_is_its_kernel_path_and_nothing_else_passes() {
+        let d = tempfile::tempdir().unwrap();
+        let real = root(&d).join("work");
+        std::fs::create_dir(&real).unwrap();
+        symlink(&real, root(&d).join("link")).unwrap();
+        let via_link: OwnedFd = File::open(root(&d).join("link")).unwrap().into();
+        assert_eq!(
+            verify_unconfined_directory(via_link.as_fd()),
+            Ok(crate::resolve_dir(&real).unwrap())
+        );
+
+        let file = real.join("f");
+        std::fs::write(&file, b"x").unwrap();
+        let f: OwnedFd = File::open(&file).unwrap().into();
+        assert!(matches!(
+            verify_unconfined_directory(f.as_fd()),
+            Err(IoError::Io {
+                kind: crate::IoKind::NotADirectory,
+                ..
+            })
+        ));
+
+        let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        assert!(matches!(
+            verify_unconfined_directory(socket.as_fd()),
+            Err(IoError::FdPathUnavailable { .. })
+        ));
+
+        #[cfg(target_os = "linux")]
+        {
+            let gone = root(&d).join("gone");
+            std::fs::create_dir(&gone).unwrap();
+            let fd: OwnedFd = File::open(&gone).unwrap().into();
+            std::fs::remove_dir(&gone).unwrap();
+            assert!(verify_unconfined_directory(fd.as_fd()).is_err());
+
+            let odd = root(&d).join(std::ffi::OsStr::from_bytes(b"odd-\xff"));
+            std::fs::create_dir(&odd).unwrap();
+            let fd: OwnedFd = File::open(&odd).unwrap().into();
+            assert_eq!(
+                verify_unconfined_directory(fd.as_fd()),
+                Err(IoError::NonUtf8Component { path: odd })
+            );
         }
     }
 

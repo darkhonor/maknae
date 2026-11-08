@@ -282,18 +282,43 @@ async fn new_then_prompt_then_close_round_trip() {
 }
 
 #[tokio::test]
-async fn a_denied_cwd_creates_nothing_and_answers_unauthorized_or_deny() {
-    let rig = Rig::with_rules("denied-cwd", Kind::Mem, &["Read(~/secret/**)"], GRANTS);
+async fn a_cwd_outside_the_home_opens_and_is_recorded_as_the_kernel_reports_it() {
+    let rig = Rig::with_rules("outside-cwd", Kind::Mem, &["Read(~/secret/**)"], GRANTS);
+    let outside = tempfile::tempdir().unwrap();
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let outside_kernel = maknae_io::resolve_dir(outside.path()).unwrap();
+    assert!(!outside_kernel.starts_with(&rig.fx.root));
+    if let Some(home) = home.and_then(|h| maknae_io::resolve_dir(&h).ok()) {
+        assert!(!outside_kernel.starts_with(home), "{outside_kernel:?}");
+    }
     let secret = rig.fx.root.join("secret/x");
     std::fs::create_dir_all(&secret).unwrap();
+    for asked in [outside.path().to_path_buf(), secret] {
+        let records = Records::new(0);
+        let fd = maknae_io::open_directory_for_delegation(&asked).unwrap();
+        let resp = rig.new_at(&asked, Some(fd), &records).await.unwrap();
+        let RespResult::Ok(Payload::ConversationOpened(view)) = resp.result else {
+            panic!("{asked:?}: {resp:?}")
+        };
+        let kernel = maknae_io::resolve_dir(&asked).unwrap();
+        assert_eq!(view.cwd, kernel.to_str().unwrap());
+        assert_eq!(
+            rig.store().get(&view.conversation).unwrap().cwd,
+            kernel.to_str().unwrap()
+        );
+        let intent = &of_action(&records, "session.new")[0];
+        assert_eq!(intent.outcome.result, "permit");
+        assert_eq!(intent.object.as_deref(), kernel.to_str());
+    }
+    assert_eq!(rig.held().len(), 2);
+}
+
+#[tokio::test]
+async fn a_non_directory_cwd_descriptor_is_refused() {
+    let rig = Rig::new("non-dir-cwd", Kind::Mem);
     let file = rig.fx.root.join("a-file");
     std::fs::write(&file, b"f").unwrap();
     let cases: Vec<(std::path::PathBuf, Option<std::os::fd::OwnedFd>, &str)> = vec![
-        (
-            secret.clone(),
-            Some(maknae_io::open_directory_for_delegation(&secret).unwrap()),
-            "Read(~/secret/**)",
-        ),
         (
             file.clone(),
             Some(maknae_io::open_path_for_delegation(&file).unwrap()),
@@ -313,7 +338,7 @@ async fn a_denied_cwd_creates_nothing_and_answers_unauthorized_or_deny() {
 }
 
 #[tokio::test]
-async fn a_symlinked_cwd_is_decided_by_its_target() {
+async fn a_symlinked_cwd_is_recorded_as_its_target() {
     let rig = Rig::new("symlink-cwd", Kind::Mem);
     let real = rig.fx.root.join("real");
     std::fs::create_dir_all(&real).unwrap();

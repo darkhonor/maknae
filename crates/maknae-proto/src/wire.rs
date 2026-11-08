@@ -453,7 +453,7 @@ pub enum Verb {
     /// operator's tool for cutting off a connection, and therefore abusable as
     /// one.
     AdminSessionTerminate,
-    /// Open a conversation the kernel records; `cwd` is recorded and decided on, not a confinement.
+    /// Open a conversation the kernel records; `cwd` is recorded, never decided on or confined.
     SessionNew { cwd: String },
     /// Reattach to an existing conversation. The caller obtains its content and
     /// history — a disclosure, and for a conversation the caller may not have

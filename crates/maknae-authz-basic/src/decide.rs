@@ -425,7 +425,6 @@ fn decide_session(
     req: &SecRequest,
     role_key: &'static str,
     uid: u32,
-    entry: Option<&SubjectEntry>,
 ) -> Decision {
     let action = req.action.0.as_str();
     let source = match granted(lp, role_key, action) {
@@ -437,7 +436,7 @@ fn decide_session(
             if req.context.0.str(maknae_security::CONTEXT_DAC_LANE) != Some("local") {
                 return refused("session.new requires a local subject");
             }
-            decide_fs(lp, req, role_key, FsScope::Read, entry, uid)
+            grant_permit(role_key, source)
         }
         ("session.list", _) => grant_permit(role_key, source),
         ("session.close", Some(Conversation::Active { owned: true }))
@@ -645,7 +644,7 @@ pub(crate) fn decide_loaded_cited(
                 "session.new" | "session.close" | "session.list" | "session.delete"
             ) =>
         {
-            decide_session(lp, req, role.key(), uid, lp.subjects.get(uid))
+            decide_session(lp, req, role.key(), uid)
         }
         Role::Guest | Role::User => match class {
             Some(Class::Liveness) => (permit_with_audit(), None),
@@ -3492,15 +3491,11 @@ mod tests {
             for term in SESSION_TERMS {
                 let d = decide_loaded_cited(&lp, &principal(), &granted_req(uid, term, "arm"));
                 assert_eq!(d.verdict, permit_with_audit(), "{role} {term}");
-                let want = if term == "session.new" {
-                    Some(Cited::Path {
-                        effect: Effect::Allow,
-                        source: "Read(~/**)".into(),
-                    })
-                } else {
-                    grant_cite(role, written.unwrap_or(term))
-                };
-                assert_eq!(d.cited, want, "{role} {term}");
+                assert_eq!(
+                    d.cited,
+                    grant_cite(role, written.unwrap_or(term)),
+                    "{role} {term}"
+                );
             }
         }
     }
@@ -3542,46 +3537,29 @@ mod tests {
     }
 
     #[test]
-    fn session_new_decides_cwd_through_decide_fs() {
+    fn session_new_is_decided_by_the_grant_alone_wherever_its_cwd() {
         let lp = lp_170("new", ALL_SESSION_GRANTS);
-        let at = |path: &str| request(Some(S170_USER.into()), "session.new", Some(path));
-        let inside = decide_loaded_cited(&lp, &principal(), &at("/home/operator/sentinel-170-new"));
-        assert_eq!(inside.verdict, permit_with_audit());
-        let denied = decide_loaded_cited(
-            &lp,
-            &principal(),
-            &at("/home/operator/.ssh/sentinel-170-new"),
+        let at = |path: Option<&str>| request(Some(S170_USER.into()), "session.new", path);
+        for path in [
+            Some("/home/operator/sentinel-170-new"),
+            Some("/home/operator/.ssh/sentinel-170-new"),
+            Some("/srv/sentinel-170-new"),
+            Some("/home/operator/../sentinel-170-new"),
+            None,
+        ] {
+            let d = decide_loaded_cited(&lp, &principal(), &at(path));
+            assert_eq!(d.verdict, permit_with_audit(), "{path:?}");
+            assert_eq!(d.cited, grant_cite("user", "session.*"), "{path:?}");
+        }
+        let denied = lp_170(
+            "new-denied",
+            "roles:\n  user:\n    allow: [\"session.close\", \"session.new\"]\n    deny: [\"session.new\"]\n",
         );
         assert_eq!(
-            denied.verdict,
-            deny("denied by policy entry Read(~/.ssh/**)")
+            decide_loaded(&denied, &principal(), &at(Some("/srv/sentinel-170-new"))),
+            deny("denied by role grant session.new")
         );
-        assert_eq!(
-            denied.cited,
-            Some(Cited::Path {
-                effect: Effect::Deny,
-                source: "Read(~/.ssh/**)".into()
-            })
-        );
-        assert_eq!(
-            decide_loaded(&lp, &principal(), &at("/srv/sentinel-170-new")),
-            Verdict::NotApplicable {
-                note: Some("role user: no capability entry for session.new".into())
-            }
-        );
-        assert_eq!(
-            decide_loaded(&lp, &principal(), &at("/home/operator/../sentinel-170-new")),
-            deny("non-canonical resource path ('..' component)")
-        );
-        assert_eq!(
-            decide_loaded(
-                &lp,
-                &principal(),
-                &request(Some(S170_USER.into()), "session.new", None)
-            ),
-            Verdict::Indeterminate
-        );
-        let mut remote = at("/home/operator/sentinel-170-new");
+        let mut remote = at(Some("/home/operator/sentinel-170-new"));
         remote.context.0.insert(
             maknae_security::CONTEXT_DAC_LANE,
             AttrValue::Str("remote".into()),
@@ -3964,7 +3942,7 @@ mod tests {
     }
 
     #[test]
-    fn session_new_honours_a_subjects_narrowed_permissions() {
+    fn session_new_ignores_a_subjects_narrowed_permissions() {
         const NAME: &str = "sentinel-170-subject-narrowed-cwd";
         const UID: u32 = 1705;
         let policy = maknae_config::parse_authz(&format!(
@@ -3981,25 +3959,10 @@ mod tests {
             policy,
         };
         let at = |path: &str| request(Some(UID.into()), "session.new", Some(path));
-        let outside = decide_loaded_cited(&lp, &principal(), &at("/home/operator/projects/x"));
-        assert_eq!(
-            (outside.verdict, outside.cited),
-            (
-                Verdict::NotApplicable {
-                    note: Some("role user: no capability entry for session.new".into())
-                },
-                None
-            )
-        );
-        let inside = decide_loaded_cited(&lp, &principal(), &at("/home/operator/docs/x"));
-        assert_eq!(inside.verdict, permit_with_audit());
-        assert_eq!(
-            inside.cited,
-            Some(Cited::SubjectPath {
-                subject: NAME.into(),
-                effect: Effect::Allow,
-                source: "Read(~/docs/**)".into()
-            })
-        );
+        for path in ["/home/operator/projects/x", "/home/operator/docs/x"] {
+            let d = decide_loaded_cited(&lp, &principal(), &at(path));
+            assert_eq!(d.verdict, permit_with_audit(), "{path}");
+            assert_eq!(d.cited, grant_cite("user", "session.new"), "{path}");
+        }
     }
 }

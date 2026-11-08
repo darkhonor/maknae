@@ -1188,7 +1188,6 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             &authorizer,
             &live,
             &conversations,
-            peer_dir,
             authz_decide_timeout,
             &classification_policy_name,
         )
@@ -2779,7 +2778,6 @@ async fn serve_conversation_verb<S, E, P>(
     authorizer: &Arc<P>,
     live: &Arc<crate::live::LiveConfig>,
     store: &Arc<dyn ConversationStore>,
-    peer_dir: Option<PathBuf>,
     timeout: Duration,
     policy_name: &str,
 ) where
@@ -2808,7 +2806,6 @@ async fn serve_conversation_verb<S, E, P>(
         rec
     };
 
-    let mut home = None;
     let mut verified = None;
     let mut gathered = None;
     if let Some(cwd) = &asked {
@@ -2821,22 +2818,14 @@ async fn serve_conversation_verb<S, E, P>(
                 .await;
             return;
         }
-        let h = match crate::authz::admitted_home(uid, peer_dir).await {
-            Ok(h) => h,
-            Err(cause) => {
-                trail.unauthorized(stream, &early(&cause.reason())).await;
-                return;
-            }
-        };
         let Some(fd) = delegated.take() else {
             trail
                 .unauthorized(stream, &early("cwd descriptor missing"))
                 .await;
             return;
         };
-        let at = h.clone();
         match crate::mutation::blocking(uid, timeout, move || {
-            crate::mutation::verify_cwd(std::os::fd::AsFd::as_fd(&fd), &at, uid)
+            crate::mutation::verify_cwd(std::os::fd::AsFd::as_fd(&fd))
         })
         .await
         {
@@ -2850,7 +2839,6 @@ async fn serve_conversation_verb<S, E, P>(
                 return;
             }
         }
-        home = Some(h);
     }
     if let Some(id) = &cited {
         let (s, id) = (Arc::clone(store), id.clone());
@@ -2875,7 +2863,7 @@ async fn serve_conversation_verb<S, E, P>(
     let sec_req = build_authz_request(
         verb,
         uid,
-        home.as_deref(),
+        None,
         lane,
         None,
         gathered.as_ref().map(|(f, _)| f),

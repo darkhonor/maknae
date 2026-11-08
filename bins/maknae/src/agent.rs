@@ -373,7 +373,8 @@ pub async fn drive_to<P: Plane + Send>(
     err: &mut (impl Write + Send),
 ) -> std::io::Result<Outcome> {
     let never = std::future::pending::<std::convert::Infallible>();
-    match converse_to(session, plane, never, CLOSE_WITHIN, err).await? {
+    let deadline = || tokio::time::sleep(CLOSE_WITHIN);
+    match converse_to(session, plane, never, deadline, err).await? {
         (Ended::Ran(outcome), _) => Ok(outcome),
         (Ended::Interrupted(never), _) => match never {},
     }
@@ -382,29 +383,24 @@ pub async fn drive_to<P: Plane + Send>(
 /// A failed print stops the session before its next plane call, so nothing new
 /// is started on the subject's behalf after output is lost; a granted attempt
 /// finishes. The kernel's conversation is closed however the run ends.
-pub async fn converse_to<P: Plane + Send, S>(
+pub async fn converse_to<P: Plane + Send, S, D: Future<Output = ()> + Send>(
     session: &mut Session,
     plane: &mut P,
     interrupt: impl Future<Output = S> + Send,
-    close_within: std::time::Duration,
+    close_deadline: impl FnOnce() -> D,
     err: &mut (impl Write + Send),
 ) -> std::io::Result<(Ended<S>, Closed)> {
     let handle = session.handle();
     let mut failed: Option<std::io::Error> = None;
     let result = session
-        .converse(
-            plane,
-            interrupt,
-            || tokio::time::sleep(close_within),
-            &mut |e| {
-                if failed.is_none() {
-                    if let Err(e) = print_event(&e, err) {
-                        handle.stop();
-                        failed = Some(e);
-                    }
+        .converse(plane, interrupt, close_deadline, &mut |e| {
+            if failed.is_none() {
+                if let Err(e) = print_event(&e, err) {
+                    handle.stop();
+                    failed = Some(e);
                 }
-            },
-        )
+            }
+        })
         .await;
     match failed {
         Some(e) => Err(e),
@@ -417,9 +413,12 @@ pub const CLOSE_WITHIN: std::time::Duration = std::time::Duration::from_secs(5);
 pub fn open_failure(e: &PlaneError, cwd: &Path) -> String {
     match e {
         PlaneError::Refused => format!(
-            "the kernel refused to open a conversation in {}: the working directory must be inside your home, and your role must hold session.new; the reason is in the host's audit trail (ask your administrator)",
+            "the kernel refused to open a conversation in {}: your role must hold session.new, and the working directory must be one you can open; the reason is in the host's audit trail (ask your administrator)",
             cwd.display()
         ),
+        PlaneError::Declined { reason, .. } => {
+            format!("the kernel did not open a conversation: {reason}")
+        }
         PlaneError::Transport(m) => format!("could not open a conversation: {m}"),
         other => format!("could not open a conversation: {other:?}"),
     }
@@ -429,7 +428,9 @@ pub fn close_line(closed: &Closed, conversation: &str) -> Option<String> {
     let why = match closed {
         Closed::Closed(_) | Closed::NotOpened => return None,
         Closed::Failed(PlaneError::Refused) => "the kernel refused the close".to_string(),
-        Closed::Failed(PlaneError::Transport(m)) => m.clone(),
+        Closed::Failed(PlaneError::Transport(m) | PlaneError::Declined { reason: m, .. }) => {
+            m.clone()
+        }
         Closed::Failed(other) => format!("{other:?}"),
         Closed::TimedOut => format!("no answer within {} s", CLOSE_WITHIN.as_secs()),
     };
@@ -442,25 +443,44 @@ pub fn interrupted_status(signal: i32) -> u8 {
     u8::try_from(128 + signal).unwrap_or(u8::MAX)
 }
 
-async fn next_signal(signal: Option<tokio::signal::unix::Signal>) {
-    match signal {
-        Some(mut s) => {
-            s.recv().await;
+async fn next_signal(signal: Option<&mut tokio::signal::unix::Signal>) {
+    if let Some(s) = signal {
+        if s.recv().await.is_some() {
+            return;
         }
-        None => std::future::pending().await,
     }
+    std::future::pending().await
 }
 
 /// A kind that cannot be registered keeps its default disposition, so it still ends the process.
-async fn interrupted() -> i32 {
-    use nix::sys::signal::Signal;
-    use tokio::signal::unix::{signal, SignalKind};
-    let int = signal(SignalKind::interrupt()).ok();
-    let term = signal(SignalKind::terminate()).ok();
-    tokio::select! {
-        () = next_signal(int) => Signal::SIGINT as i32,
-        () = next_signal(term) => Signal::SIGTERM as i32,
+struct Signals {
+    int: Option<tokio::signal::unix::Signal>,
+    term: Option<tokio::signal::unix::Signal>,
+}
+
+impl Signals {
+    fn register() -> Self {
+        use tokio::signal::unix::{signal, SignalKind};
+        Signals {
+            int: signal(SignalKind::interrupt()).ok(),
+            term: signal(SignalKind::terminate()).ok(),
+        }
     }
+
+    async fn next(&mut self) -> i32 {
+        use nix::sys::signal::Signal;
+        tokio::select! {
+            () = next_signal(self.int.as_mut()) => Signal::SIGINT as i32,
+            () = next_signal(self.term.as_mut()) => Signal::SIGTERM as i32,
+        }
+    }
+}
+
+/// Armed when the run ends, so a signal during the close or the shutdown ends
+/// the process at once instead of waiting them out.
+fn exit_on_next_signal(exit: impl FnOnce(u8) + Send + 'static) {
+    let mut signals = Signals::register();
+    tokio::spawn(async move { exit(interrupted_status(signals.next().await)) });
 }
 
 /// Mirrors `execute()`'s setup (FIPS provider, config, user token, mint).
@@ -545,11 +565,16 @@ pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
             return Err(open_failure(&e, &cwd));
         }
     };
+    let mut signals = Signals::register();
+    let deadline = || {
+        exit_on_next_signal(|code| std::process::exit(i32::from(code)));
+        tokio::time::sleep(CLOSE_WITHIN)
+    };
     let result = converse_to(
         &mut session,
         &mut plane,
-        interrupted(),
-        CLOSE_WITHIN,
+        signals.next(),
+        deadline,
         &mut std::io::stderr(),
     )
     .await;
@@ -1433,7 +1458,7 @@ mod tests {
             p.write_diags = VecDeque::from([ARMING]);
             let mut session = open(&mut p).await.unwrap();
             let never = std::future::pending::<i32>();
-            let ended = converse_to(&mut session, &mut p, never, CLOSE_WITHIN, &mut Broken).await;
+            let ended = converse_to(&mut session, &mut p, never, || async {}, &mut Broken).await;
             assert_eq!(ended.unwrap_err().kind(), std::io::ErrorKind::BrokenPipe);
             assert_eq!(p.closes, vec![KERNEL_ID.to_string()]);
 
@@ -1441,7 +1466,7 @@ mod tests {
             let mut session = open(&mut p).await.unwrap();
             let never = std::future::pending::<i32>();
             let (ended, closed) =
-                converse_to(&mut session, &mut p, never, CLOSE_WITHIN, &mut Vec::new())
+                converse_to(&mut session, &mut p, never, || async {}, &mut Vec::new())
                     .await
                     .unwrap();
             assert_eq!(p.closes, vec![KERNEL_ID.to_string()]);
@@ -1484,6 +1509,13 @@ mod tests {
                 "reset".to_string(),
             ),
             (
+                Closed::Failed(PlaneError::Declined {
+                    code: maknae_proto::ProtoErrCode::Internal,
+                    reason: "store unavailable".into(),
+                }),
+                "store unavailable".to_string(),
+            ),
+            (
                 Closed::Failed(PlaneError::Unavailable),
                 "Unavailable".to_string(),
             ),
@@ -1503,7 +1535,17 @@ mod tests {
         let cwd = std::path::Path::new("/home/a/w");
         assert_eq!(
             open_failure(&PlaneError::Refused, cwd),
-            "the kernel refused to open a conversation in /home/a/w: the working directory must be inside your home, and your role must hold session.new; the reason is in the host's audit trail (ask your administrator)"
+            "the kernel refused to open a conversation in /home/a/w: your role must hold session.new, and the working directory must be one you can open; the reason is in the host's audit trail (ask your administrator)"
+        );
+        assert_eq!(
+            open_failure(
+                &PlaneError::Declined {
+                    code: maknae_proto::ProtoErrCode::TooLarge,
+                    reason: "too many active conversations".into(),
+                },
+                cwd
+            ),
+            "the kernel did not open a conversation: too many active conversations"
         );
         assert_eq!(
             open_failure(&PlaneError::Transport("reset".into()), cwd),
@@ -1520,5 +1562,105 @@ mod tests {
         assert_eq!(interrupted_status(2), 130);
         assert_eq!(interrupted_status(15), 143);
         assert_eq!(interrupted_status(200), u8::MAX);
+    }
+
+    struct Hanging {
+        closes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl Plane for Hanging {
+        async fn open(
+            &mut self,
+            _: &std::path::Path,
+        ) -> Result<maknae_proto::ConversationId, PlaneError> {
+            Ok(maknae_proto::ConversationId::parse(&"b".repeat(32)).unwrap())
+        }
+        async fn close(
+            &mut self,
+            _: &maknae_proto::ConversationId,
+        ) -> Result<maknae_proto::ConversationView, PlaneError> {
+            self.closes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::future::pending().await
+        }
+        async fn prompt(
+            &mut self,
+            _: &str,
+            _: &[maknae_proto::Turn],
+        ) -> Result<maknae_proto::PromptReply, PlaneError> {
+            std::future::pending().await
+        }
+        async fn read(
+            &mut self,
+            _: &str,
+            _: &str,
+            _: maknae_proto::PageRequest,
+        ) -> maknae_agent::plane::ReadOutcome {
+            std::future::pending().await
+        }
+        async fn write(
+            &mut self,
+            _: &str,
+            _: &str,
+            _: &[u8],
+            _: maknae_agent::plane::ReadBasis,
+        ) -> maknae_agent::plane::WriteOutcome {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_second_signal_during_the_close_exits_at_once_with_its_status() {
+        use nix::sys::signal::{kill, Signal};
+        use nix::unistd::Pid;
+        let closes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut plane = Hanging {
+            closes: std::sync::Arc::clone(&closes),
+        };
+        let budget = Budget {
+            max_steps: 2,
+            max_tool_calls_per_step: 1,
+        };
+        let context = ContextBudget::new(maknae_proto::MAX_CONTEXT_TOKENS, None).unwrap();
+        let mut session = Session::open(&mut plane, Path::new("/w"), "q", budget, context, None)
+            .await
+            .unwrap();
+        let (exit_tx, exit_rx) = tokio::sync::oneshot::channel::<u8>();
+        let (armed_tx, armed_rx) = tokio::sync::oneshot::channel::<()>();
+        let mut signals = Signals::register();
+        let conversing = async move {
+            let deadline = move || {
+                exit_on_next_signal(move |code| {
+                    let _ = exit_tx.send(code);
+                });
+                let _ = armed_tx.send(());
+                std::future::pending::<()>()
+            };
+            converse_to(
+                &mut session,
+                &mut plane,
+                signals.next(),
+                deadline,
+                &mut Vec::new(),
+            )
+            .await
+        };
+        let driver = async {
+            tokio::task::yield_now().await;
+            kill(Pid::this(), Signal::SIGINT).unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(10), armed_rx)
+                .await
+                .expect("the close did not begin after the first signal")
+                .unwrap();
+            kill(Pid::this(), Signal::SIGTERM).unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(10), exit_rx)
+                .await
+                .expect("the second signal did not exit")
+                .unwrap()
+        };
+        tokio::select! {
+            code = driver => assert_eq!(code, 143),
+            ended = conversing => panic!("the close cannot finish: {:?}", ended.map(|(_, c)| c)),
+        }
+        assert_eq!(closes.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

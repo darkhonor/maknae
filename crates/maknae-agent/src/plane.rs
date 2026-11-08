@@ -126,6 +126,12 @@ pub enum PlaneError {
     ReplyUnusable(maknae_proto::ReplyDefect),
     /// The exchange was not attempted for lack of capacity; nothing was sent.
     Unavailable,
+    /// A conversation verb refused for something other than authorization,
+    /// with the wire's own code and the kernel's reason.
+    Declined {
+        code: maknae_proto::ProtoErrCode,
+        reason: String,
+    },
 }
 
 pub trait Plane {
@@ -215,6 +221,10 @@ mod tests {
             PlaneError::Malformed,
             PlaneError::ReplyUnusable(maknae_proto::ReplyDefect::Empty),
             PlaneError::Unavailable,
+            PlaneError::Declined {
+                code: maknae_proto::ProtoErrCode::TooLarge,
+                reason: "r".into(),
+            },
         ];
         for (i, a) in errs.iter().enumerate() {
             assert_eq!(a.clone(), *a);

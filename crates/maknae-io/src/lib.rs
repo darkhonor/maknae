@@ -76,9 +76,9 @@ pub use error::{IoError, IoKind};
 pub use home::{canonical_home, session_home};
 pub use host_facts::presence;
 pub use mutation::{
-    read_held_file, read_held_page, replace_held_file, verify_mutation_directory, DirectoryCursor,
-    EffectState, FileVersion, MutationDirectory, MutationEffect, MutationEffectKind,
-    MutationFailure, MutationRequired, WriteBase,
+    read_held_file, read_held_page, replace_held_file, verify_mutation_directory,
+    verify_unconfined_directory, DirectoryCursor, EffectState, FileVersion, MutationDirectory,
+    MutationEffect, MutationEffectKind, MutationFailure, MutationRequired, WriteBase,
 };
 pub use normalize::normalize;
 pub use page::{read_page, Page, PageNext, PageWindow};

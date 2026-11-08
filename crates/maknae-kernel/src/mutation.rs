@@ -111,22 +111,10 @@ where
     }
 }
 
-pub(crate) fn verify_cwd(fd: BorrowedFd<'_>, home: &Path, uid: u32) -> Result<String, String> {
-    if home == Path::new("/") {
-        return Err(crate::authz::HomeUnavailable::Unresolvable.reason());
-    }
-    let fd = fd
-        .try_clone_to_owned()
+pub(crate) fn verify_cwd(fd: BorrowedFd<'_>) -> Result<String, String> {
+    let path = maknae_io::verify_unconfined_directory(fd)
         .map_err(|e| format!("cwd evidence refused: {e}"))?;
-    let directory = maknae_io::verify_mutation_directory(
-        fd,
-        MutationRequired {
-            confined_beneath: home.to_path_buf(),
-            root_required: delegated_plan(home, uid).root_required,
-        },
-    )
-    .map_err(|e| format!("cwd evidence refused: {e}"))?;
-    let path = directory.path().to_str().ok_or("non-UTF-8 cwd")?.to_owned();
+    let path = path.to_str().ok_or("non-UTF-8 cwd")?.to_owned();
     checked(&path)?;
     Ok(path)
 }

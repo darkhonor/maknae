@@ -205,7 +205,7 @@ pub async fn drive_session<P: Plane>(
                     steps_used,
                 }
             }
-            Err(PlaneError::Refused) => {
+            Err(PlaneError::Refused | PlaneError::Declined { .. }) => {
                 return Outcome {
                     answer: None,
                     stopped: Some(StopReason::PromptRefused),
@@ -1182,6 +1182,13 @@ mod tests {
         for (err, want) in [
             (PlaneError::FrameTooLarge, StopReason::FrameBound),
             (PlaneError::Refused, StopReason::PromptRefused),
+            (
+                PlaneError::Declined {
+                    code: maknae_proto::ProtoErrCode::TooLarge,
+                    reason: "r".into(),
+                },
+                StopReason::PromptRefused,
+            ),
             // Its OWN reason, never folded into `PromptRefused`: the CLI
             // prints a different line for it, because a pre-gate `BadRequest`
             // provably never reached the provider.
