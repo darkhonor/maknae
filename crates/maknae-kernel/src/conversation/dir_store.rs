@@ -106,6 +106,25 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
+    #[test]
+    fn the_unit_creates_the_conversation_store_for_the_daemon_alone() {
+        let unit = include_str!("../../../../packaging/common/maknaed.service");
+        let lines: Vec<&str> = unit.lines().map(str::trim).collect();
+        for want in [
+            "StateDirectory=maknae maknae/conversations",
+            "StateDirectoryMode=0700",
+        ] {
+            assert_eq!(lines.iter().filter(|l| **l == want).count(), 1, "{want}");
+        }
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l.starts_with("StateDirectory"))
+                .count(),
+            2
+        );
+    }
+
     fn key() -> WrappingKey {
         WrappingKey::new(Zeroizing::new([7u8; KEY_LEN]))
     }
