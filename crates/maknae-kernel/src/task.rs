@@ -408,11 +408,14 @@ pub(crate) async fn submit_task<P: Authorizer + Send + Sync + 'static>(
     sub: TaskSubmission,
     emit: &impl AuditEmit,
 ) -> Result<Arc<TaskObject>, TaskRefusal> {
-    let pdp = Decider {
+    submit_under(decider(authorizer), store, view, ctx, by, sub, emit).await
+}
+
+fn decider<P>(authorizer: Arc<P>) -> Decider<P> {
+    Decider {
         authorizer,
         breaker: crate::run::authz_decide_breaker(),
-    };
-    submit_under(pdp, store, view, ctx, by, sub, emit).await
+    }
 }
 
 /// The PDP and the request path's decision breaker it is admitted under.
@@ -1644,5 +1647,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(store.len(), 1);
+        assert!(Arc::ptr_eq(
+            &decider(pdp).breaker,
+            &crate::run::authz_decide_breaker()
+        ));
     }
 }

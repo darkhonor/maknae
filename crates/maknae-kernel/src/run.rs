@@ -7824,6 +7824,7 @@ mod subject_list_offload_tripwire {
         let read = body
             .find("guarded_subjects(")
             .expect("the enumeration reads through the guarded seam");
+        assert_eq!(body.matches("guarded_subjects(").count(), 1);
         assert!(
             admitted < read,
             "the policy read must be the work `admit_blocking` runs, not a call before it"

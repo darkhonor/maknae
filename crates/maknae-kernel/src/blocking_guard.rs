@@ -338,6 +338,9 @@ mod tests {
     #[tokio::test]
     async fn admit_blocking_reports_a_join_failure_without_counting_it() {
         let b = breaker(1);
+        for _ in 1..BLOCKING_BREAKER_MAX_IN_FLIGHT {
+            b.lock().await.begin_attempt_at(Instant::now());
+        }
         let got = admit_blocking(&b, Duration::from_secs(5), "test", || -> u8 {
             panic!("admit_blocking join probe")
         })
