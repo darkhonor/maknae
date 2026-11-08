@@ -3189,6 +3189,64 @@ mod tests {
         assert!(out.lines().any(|l| l.starts_with("group:0:")), "{out}");
     }
 
+    /// Run as root with `MAKNAE_ROOT_HOST_TESTS=1` on a disposable test host only: it
+    /// creates the `_maknae` account when the host lacks one, and removes what it created.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn revoke_legacy_home_access_drops_the_daemons_home_acl() {
+        if std::env::var_os("MAKNAE_ROOT_HOST_TESTS").is_none() || !nix::unistd::geteuid().is_root()
+        {
+            return;
+        }
+        struct Created(bool, PathBuf);
+        impl Drop for Created {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.1);
+                if self.0 {
+                    let _ = std::process::Command::new("userdel")
+                        .arg(LEGACY_HOME_ACL_USER)
+                        .status();
+                }
+            }
+        }
+        let created = maknae_io::user_by_name(LEGACY_HOME_ACL_USER)
+            .unwrap()
+            .is_none();
+        if created {
+            assert!(std::process::Command::new("useradd")
+                .args(["--system", "--no-create-home", "--shell", "/sbin/nologin"])
+                .arg(LEGACY_HOME_ACL_USER)
+                .status()
+                .unwrap()
+                .success());
+        }
+        let home = std::env::temp_dir().join(format!("revoke_legacy_{}", std::process::id()));
+        let _guard = Created(created, home.clone());
+        std::fs::create_dir_all(&home).unwrap();
+        let uid = maknae_io::user_by_name(LEGACY_HOME_ACL_USER)
+            .unwrap()
+            .unwrap()
+            .uid
+            .as_raw();
+        let acl = || {
+            let out = std::process::Command::new("getfacl")
+                .args(["-p", "-n", "--omit-header"])
+                .arg(&home)
+                .output()
+                .unwrap();
+            names_acl_entry(&String::from_utf8_lossy(&out.stdout), &uid.to_string())
+        };
+        assert!(std::process::Command::new("setfacl")
+            .args(["-m", &format!("u:{uid}:rx")])
+            .arg(&home)
+            .status()
+            .unwrap()
+            .success());
+        assert!(acl());
+        revoke_legacy_home_access(&home, false);
+        assert!(!acl(), "the daemon's home ACL is still there");
+    }
+
     // ---- preflight_check (Step 2 TDD) --------------------------------------
 
     struct MockPasswd(Vec<(u32, String, PathBuf, u32)>);
