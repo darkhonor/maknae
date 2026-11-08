@@ -847,7 +847,7 @@ sudo maknae enroll agent <id> --account <service-account> --bind-cidr <cidr> [--
 
 `--role` defaults to `user`; `admin` is not a choice. Before minting a SecretID, enroll reads the Vault entity `maknae-agent-<id>` and refuses, with no side effect, when it is absent or has no alias on the agent mount named by the role's RoleID. A disabled entity is re-enabled as the last step, and only when every earlier SecretID of the role was destroyed; if any destroy failed, the entity stays disabled until a `--rotate` retires them all. Enroll ends by telling you to reload `maknaed`.
 
-Re-enabling an entity makes the tokens issued before it was disabled usable again until they reach `agent_token_max_ttl`. Disabling does not revoke them. To avoid that window, wait out `agent_token_max_ttl` after disabling an agent before re-enrolling it.
+Re-enabling an entity makes the tokens issued before it was disabled usable again until they reach `agent_token_max_ttl`. Disabling does not revoke them.
 
 `--bind-cidr` is required, once per address range. The SecretID is minted with `cidr_list` and `token_bound_cidrs` set to those ranges, so Vault refuses it, and any token it yields, from a source address outside them. Vault sees the address after any NAT, so behind NAT bind the translated address. A prefix is plain decimal digits with no leading zero, an IPv4-mapped IPv6 range (`::ffff:a.b.c.d/n`) is taken as its IPv4 range, and enrollment refuses `0.0.0.0/0`, `::/0`, or any set of ranges that together covers every IPv4 or every IPv6 address. `--approle-mount` defaults to `maknae-agent-approle`; it may use only `A-Z`, `a-z`, `0-9`, `.`, `_`, `/` and `-`, and must differ from `maknaed`'s AppRole mount, which must use the same characters so the two can be compared.
 
