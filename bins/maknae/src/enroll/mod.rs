@@ -540,8 +540,7 @@ pub struct EnrollArgs {
     /// The AppRole auth mount `maknaed` logs in through (persisted into the daemon config).
     #[arg(long, default_value_t = maknae_vault::DEFAULT_APPROLE_MOUNT.to_string())]
     pub approle_mount: String,
-    /// The intermediate PKI mount (defaults to the Terraform default; ALWAYS
-    /// persisted).
+    /// The intermediate PKI mount (always persisted).
     #[arg(long, default_value_t = maknae_vault::DEFAULT_PKI_INT_MOUNT.to_string())]
     pub pki_int_mount: String,
     /// The userpass auth mount users log in through with `maknae login`.
@@ -554,7 +553,7 @@ pub struct EnrollArgs {
     #[arg(long, default_value = "maknae/users")]
     pub user_prefix: String,
     /// The plane identity key algorithm (`vault.plane_key`): ml-dsa-87, ecdsa-p384-sha384 or ecdsa-p521-sha512. Must
-    /// equal deploy/vault-pki's plane_key_algorithm.
+    /// equal the key type of the Vault PKI roles.
     #[arg(long, default_value = "ml-dsa-87")]
     pub plane_key: String,
     /// Read the Vault token from this file instead of an interactive prompt.

@@ -11,6 +11,8 @@ agent credentials.
 
 The Rust plane-cert client (`maknae-vault`) and the TLS transport consume this PKI.
 
+This Terraform is one way to create the Vault objects Maknae uses, not a requirement: Maknae checks the mounts, roles, policies and entities it needs, not how they were made, and a deployment may manage Vault its own way. `docs/configuration.md` §6.4 and ADR-0033 decision 9 list what an Agent Daemon needs.
+
 ## What it stands up
 
 - **Root CA** (`maknae-pki-root`, `plane_key_algorithm`: ML-DSA-87 by default, ~10y) — signs exactly one thing: the
@@ -60,8 +62,9 @@ The Rust plane-cert client (`maknae-vault`) and the TLS transport consume this P
 - **`maknae-admin-agent-credentials` policy** — what an administrator attaches to their own
   token to write agent credentials; it reaches nothing outside `<agent_prefix>`.
 - **`maknae-enroll-agent` policy** — what an operator attaches to their own token to run
-  `maknae enroll agent` and `maknae enroll remove-agent`: read a role's RoleID, mint its
-  SecretID, destroy a SecretID accessor, on the agent mount only.
+  `maknae enroll agent` and `maknae enroll remove-agent`: read a role's RoleID, mint, list
+  and destroy its SecretIDs, on the agent mount only, and read and set only the `disabled`
+  field of a `maknae-agent-*` entity.
 
 ## Requirements
 
@@ -235,13 +238,15 @@ operator token carrying `maknae-enroll-agent`) mints the agent's SecretID bound 
 administrator attaches it to the operator's identity the same way as `maknae-enroll`. It
 allows `read` on `auth/<agent_approle_path>/role/+/role-id`, `create`, `update` and `list`
 on `.../role/+/secret-id`, and `update` on `.../role/+/secret-id-accessor/destroy`, and
-nothing else. `list` lets enrollment find and retire a SecretID that an interrupted earlier
+the entity grant under "Agent identity and certificate" below; nothing else. `list` lets enrollment find and retire a SecretID that an interrupted earlier
 run minted but never recorded.
 
 ### Agent identity and certificate (#609)
 
 Each agent's policy also lets it `update` `<int_mount>/sign/maknae-agent-<id>` and read
-`<int_mount>/issuer/default/json`. It grants nothing on any `revoke` path.
+`<int_mount>/issuer/default/json`. It grants nothing on any `revoke` path. The sign grant
+denies the `not_after` parameter, as the `maknae-kernel` and `maknae-cli` sign grants do, so
+the role's TTL bounds every leaf.
 
 `maknae-agent-<id>` is an identity entity with one alias: the agent's RoleID on the agent
 mount (an AppRole login's entity alias is its RoleID). `maknae enroll agent` refuses an
@@ -262,7 +267,12 @@ terraform import 'vault_identity_entity_alias.agent["<id>"]' <alias id>
 
 Revocation scope: disabling the entity makes Vault refuse that agent's existing tokens at
 once, and they end by `agent_token_max_ttl`. No lease prefix is used, because
-`revoke-prefix` on the agent mount would cover every agent.
+`revoke-prefix` on the agent mount would cover every agent. Disabling does not revoke:
+`maknae enroll remove-agent` records no token accessor, so a login token the agent already
+holds stays valid until `agent_token_max_ttl`, refused only while the entity stays disabled.
+Re-enabling the entity, as a re-enrollment does, makes the tokens issued before it was
+disabled usable again until `agent_token_max_ttl`; to avoid that, wait out
+`agent_token_max_ttl` before re-enrolling a removed agent.
 
 The separate mount keeps agent login leases off `maknaed`'s prefix. It does **not**
 separate one agent's leases from another's; per-agent revocation is the entity `disabled` flag above.
