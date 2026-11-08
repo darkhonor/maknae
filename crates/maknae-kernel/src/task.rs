@@ -2211,4 +2211,256 @@ mod tests {
             &crate::run::authz_decide_breaker()
         ));
     }
+
+    /// Gated: set `MAKNAE_TEST_VAULT_BIN` to a `vault` binary. Starts a throwaway
+    /// `vault server -dev -dev-tls` on loopback, gives it the kernel plane's PKI and
+    /// AppRole, mints a real leaf, and stops the server.
+    #[tokio::test]
+    async fn the_plane_signer_reports_the_minted_leaf() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::{Child, Command, Stdio};
+        let Some(bin) = std::env::var_os("MAKNAE_TEST_VAULT_BIN") else {
+            return;
+        };
+        struct Dev(Child, std::path::PathBuf);
+        impl Drop for Dev {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+                let _ = std::fs::remove_dir_all(&self.1);
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("maknae-dev-vault-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("tls")).unwrap();
+        std::fs::create_dir_all(dir.join("vault-tls")).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let addr = format!("https://127.0.0.1:{port}");
+        let child = Command::new(&bin)
+            .args(["server", "-dev", "-dev-tls", "-dev-root-token-id=root"])
+            .arg(format!("-dev-listen-address=127.0.0.1:{port}"))
+            .arg(format!(
+                "-dev-tls-cert-dir={}",
+                dir.join("vault-tls").display()
+            ))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let _dev = Dev(child, dir.clone());
+        let vault_ca = dir.join("vault-tls").join("vault-ca.pem");
+        let vault = |args: &[&str], stdin: Option<&str>| -> String {
+            use std::io::Write;
+            let mut c = Command::new(&bin)
+                .args(args)
+                .env("VAULT_ADDR", &addr)
+                .env("VAULT_CACERT", &vault_ca)
+                .env("VAULT_TOKEN", "root")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut input = c.stdin.take().unwrap();
+            input.write_all(stdin.unwrap_or("").as_bytes()).unwrap();
+            drop(input);
+            let out = c.wait_with_output().unwrap();
+            assert!(
+                out.status.success(),
+                "vault {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap()
+        };
+        let mut up = false;
+        for _ in 0..100 {
+            let status = Command::new(&bin)
+                .arg("status")
+                .env("VAULT_ADDR", &addr)
+                .env("VAULT_CACERT", &vault_ca)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap();
+            if status.success() {
+                up = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(up, "the dev Vault did not come up");
+
+        let ec = ["key_type=ec", "key_bits=384"];
+        vault(
+            &[
+                "secrets",
+                "enable",
+                "-path=maknae-pki",
+                "-max-lease-ttl=87600h",
+                "pki",
+            ],
+            None,
+        );
+        let root = vault(
+            &[
+                &[
+                    "write",
+                    "-field=certificate",
+                    "maknae-pki/root/generate/internal",
+                    "common_name=root",
+                    "ttl=87600h",
+                ][..],
+                &ec[..],
+            ]
+            .concat(),
+            None,
+        );
+        vault(
+            &[
+                "secrets",
+                "enable",
+                "-path=maknae-pki-int",
+                "-max-lease-ttl=43800h",
+                "pki",
+            ],
+            None,
+        );
+        let csr = vault(
+            &[
+                &[
+                    "write",
+                    "-field=csr",
+                    "maknae-pki-int/intermediate/generate/internal",
+                    "common_name=int",
+                ][..],
+                &ec[..],
+            ]
+            .concat(),
+            None,
+        );
+        let int = vault(
+            &[
+                "write",
+                "-field=certificate",
+                "maknae-pki/root/sign-intermediate",
+                "csr=-",
+                "format=pem",
+                "ttl=43800h",
+            ],
+            Some(&csr),
+        );
+        vault(
+            &[
+                "write",
+                "maknae-pki-int/intermediate/set-signed",
+                "certificate=-",
+            ],
+            Some(&format!("{}\n{}", int.trim(), root.trim())),
+        );
+        vault(
+            &[
+                &[
+                    "write",
+                    "maknae-pki-int/roles/maknae-kernel",
+                    "allowed_uri_sans=spiffe://dev-01/plane/kernel",
+                    "use_csr_sans=true",
+                    "use_csr_common_name=false",
+                    "allow_ip_sans=false",
+                    "allow_localhost=false",
+                    "allow_wildcard_certificates=false",
+                    "require_cn=false",
+                    "key_usage=DigitalSignature",
+                    "signature_bits=384",
+                    "ttl=3600",
+                    "max_ttl=3600",
+                ][..],
+                &ec[..],
+            ]
+            .concat(),
+            None,
+        );
+        vault(
+            &["policy", "write", "maknae-kernel", "-"],
+            Some(
+                "path \"maknae-pki-int/sign/maknae-kernel\" { capabilities = [\"update\"] }\n\
+                 path \"maknae-pki-int/revoke\" { capabilities = [\"update\"] }\n\
+                 path \"maknae-pki-int/issuer/default/json\" { capabilities = [\"read\"] }\n\
+                 path \"auth/token/renew-self\" { capabilities = [\"update\"] }\n\
+                 path \"auth/token/lookup-self\" { capabilities = [\"read\"] }\n\
+                 path \"auth/token/revoke-self\" { capabilities = [\"update\"] }\n",
+            ),
+        );
+        vault(&["auth", "enable", "-path=maknae-approle", "approle"], None);
+        vault(
+            &[
+                "write",
+                "auth/maknae-approle/role/maknaed",
+                "token_policies=maknae-kernel",
+                "token_no_default_policy=true",
+            ],
+            None,
+        );
+        let role_id = vault(
+            &[
+                "read",
+                "-field=role_id",
+                "auth/maknae-approle/role/maknaed/role-id",
+            ],
+            None,
+        );
+        let secret_id = vault(
+            &[
+                "write",
+                "-f",
+                "-field=secret_id",
+                "auth/maknae-approle/role/maknaed/secret-id",
+            ],
+            None,
+        );
+
+        let file = |rel: &str, body: &str| {
+            let path = dir.join(rel);
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        };
+        file(
+            "maknae.yaml",
+            &format!("core:\n  deployment_id: dev-01\nvault:\n  addr: {addr}\n  plane_key: ecdsa-p384-sha384\n"),
+        );
+        file("tls/maknae-root-ca.crt", &root);
+        file("tls/maknae-int-ca.crt", &int);
+        file(
+            "tls/vault-ca.crt",
+            &std::fs::read_to_string(&vault_ca).unwrap(),
+        );
+        file("maknaed-approle-id", &role_id);
+        maknae_crypto::init().unwrap();
+        let doc = maknae_config::load_config(
+            &dir,
+            &[maknae_config::SectionSpec {
+                name: "vault".to_string(),
+                required: true,
+            }],
+        )
+        .unwrap();
+        let client = Arc::new(
+            maknae_vault::PlaneClient::from_document_with_secret(
+                &doc,
+                &dir,
+                maknae_vault::Plane::Kernel,
+                maknae_io::Zeroizing::new(secret_id.trim().to_string()),
+            )
+            .unwrap(),
+        );
+        let plane = PlaneSigner(Arc::clone(&client));
+        assert_eq!(plane.current_leaf(), None, "no leaf before the first mint");
+        let minted = client.mint().await.unwrap();
+        let want = maknae_vault::task_sig::identity_fingerprint(&minted).unwrap();
+        assert_eq!(plane.current_leaf(), Some(want));
+    }
 }
