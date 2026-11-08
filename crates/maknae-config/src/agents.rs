@@ -1083,6 +1083,111 @@ mod tests {
     }
 
     #[test]
+    fn load_agents_holds_the_tree_to_root_ownership() {
+        use std::os::unix::fs::MetadataExt;
+        let f = Fixture::new("production");
+        f.enroll("hobi", &enrollment("hobi", "hobi-svc", 990, "user"));
+        let got = load_agents(&f.root);
+        if std::fs::metadata(&f.root).unwrap().uid() == 0 {
+            assert_eq!(got.unwrap().enrollments.len(), 1);
+        } else {
+            assert!(
+                matches!(&got, Err(ConfigError::Io(m)) if m.contains("require 0")),
+                "{got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn load_agents_with_requirement_reads_under_the_given_requirement() {
+        use std::os::unix::fs::MetadataExt;
+        let f = Fixture::new("seam");
+        f.enroll("hobi", &enrollment("hobi", "hobi-svc", 990, "user"));
+        let uid = std::fs::metadata(&f.root).unwrap().uid();
+        let got = load_agents_with_requirement(
+            &f.root,
+            AnchorRequired {
+                owner: Some(uid),
+                ..agents_dir_required()
+            },
+            TargetRequired {
+                owner: Some(uid),
+                ..agent_file_required()
+            },
+        )
+        .unwrap();
+        assert_eq!(got, f.load().unwrap());
+        assert_eq!(got.enrollments[0].id, hobi());
+    }
+
+    #[test]
+    fn a_missing_agent_directory_under_read_optional_is_an_error_not_absence() {
+        use std::os::unix::fs::MetadataExt;
+        let f = Fixture::new("gone_intermediate");
+        let agents = f.agents();
+        let uid = std::fs::metadata(&f.root).unwrap().uid();
+        let dir = AnchorRequired {
+            owner: Some(uid),
+            ..agents_dir_required()
+        };
+        let desc = DescendantRequired {
+            owner: dir.owner,
+            mode_mask: dir.mode_mask,
+        };
+        let target = TargetRequired {
+            owner: Some(uid),
+            ..agent_file_required()
+        };
+        let abs = std::path::absolute(&agents).unwrap();
+        let anchor = maknae_io::open_anchor(&abs, dir, StrategyPref::Auto).unwrap();
+        let rel = Path::new("nope").join(ENROLLMENT_FILE);
+        assert!(
+            read_optional(&anchor, &abs, &rel, &desc, &target).is_err(),
+            "a missing agent directory is not a missing enrollment"
+        );
+        f.dir("nope");
+        assert_eq!(read_optional(&anchor, &abs, &rel, &desc, &target), Ok(None));
+    }
+
+    #[test]
+    fn entity_name_is_the_prefixed_id() {
+        assert_eq!(hobi().entity_name(), "maknae-agent-hobi");
+        assert!(hobi().entity_name().starts_with(AGENT_ENTITY_PREFIX));
+    }
+
+    #[test]
+    fn every_account_refusal_says_what_to_do() {
+        let shown = [
+            (
+                AccountRefusal::NoSuchAccount("ghost".into()),
+                "no account named ghost",
+            ),
+            (AccountRefusal::RootAccount, "the account is root"),
+            (AccountRefusal::IsPrincipal, "principal's own account"),
+            (
+                AccountRefusal::MaknaeDaemonAccount("_maknae".into()),
+                "account _maknae belongs to a Maknae daemon",
+            ),
+            (AccountRefusal::MaknaeGroupMember, "in the maknae group"),
+            (
+                AccountRefusal::LoginShell("/bin/bash".into()),
+                "shell /bin/bash is not",
+            ),
+            (
+                AccountRefusal::AccountInUse {
+                    account: "hobi-svc".into(),
+                    agent: "suga".into(),
+                },
+                "account hobi-svc is already enrolled for agent suga",
+            ),
+        ];
+        for (refusal, want) in shown {
+            let text = refusal.to_string();
+            assert!(text.contains(want), "{text}");
+        }
+    }
+
+    #[test]
     fn a_missing_agents_directory_is_no_agents() {
         let f = Fixture::new("missing");
         assert_eq!(f.load(), Ok(AgentsLoad::default()));
