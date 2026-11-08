@@ -75,7 +75,7 @@ mod tests {
 
     #[test]
     fn the_snapshot_view_names_an_enrolled_agent_by_id_and_by_uid() {
-        let (g, mut basic) = crate::test_fixtures::fixture(
+        let (g, basic) = crate::test_fixtures::fixture(
             "enrollment-view-hobi",
             crate::test_fixtures::READ_POLICY,
             None,
