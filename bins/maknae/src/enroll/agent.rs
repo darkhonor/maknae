@@ -2580,6 +2580,19 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn read_records_refuses_a_record_others_can_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let (d, agents) = scratch_anchor("records-mode");
+        std::fs::create_dir(d.join("hobi")).unwrap();
+        let path = d.join("hobi").join(maknae_config::ENROLLMENT_FILE);
+        std::fs::write(&path, record().to_yaml()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let got = read_records(&agents, &hobi_id());
+        assert!(matches!(&got, Err(EnrollError::Io { .. })), "{got:?}");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
     fn agent_group_create_command_names_the_agent_group() {
         let want = if cfg!(target_os = "macos") {
             "dseditgroup -o create maknae-agents"
