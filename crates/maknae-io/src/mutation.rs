@@ -1357,10 +1357,17 @@ mod tests {
         ));
 
         let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
-        assert!(matches!(
-            verify_unconfined_directory(socket.as_fd()),
-            Err(IoError::FdPathUnavailable { .. })
-        ));
+        let refused = verify_unconfined_directory(socket.as_fd());
+        #[cfg(target_os = "linux")]
+        assert!(
+            matches!(&refused, Err(IoError::InvalidMutationPath { path }) if path.to_string_lossy().starts_with("socket:[")),
+            "{refused:?}"
+        );
+        #[cfg(not(target_os = "linux"))]
+        assert!(
+            matches!(refused, Err(IoError::FdPathUnavailable { .. })),
+            "{refused:?}"
+        );
 
         #[cfg(target_os = "linux")]
         {
