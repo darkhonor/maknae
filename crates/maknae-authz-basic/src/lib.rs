@@ -5080,6 +5080,56 @@ mod tests {
         use maknae_security::{Authorizer, Verdict};
         use std::os::unix::fs::PermissionsExt;
 
+        fn hobi_account(uid: u32) -> Result<Option<maknae_io::HostAccount>, String> {
+            Ok((uid == 2001).then(|| maknae_io::HostAccount {
+                uid,
+                name: "hobi-svc".into(),
+                primary_gid: uid,
+                shell: "/usr/sbin/nologin".into(),
+                dir: "/var/empty".into(),
+                named_groups: Vec::new(),
+            }))
+        }
+
+        fn no_daemons() -> Result<maknae_io::DaemonFacts, String> {
+            Ok(maknae_io::DaemonFacts {
+                uids: Vec::new(),
+                gids: Vec::new(),
+            })
+        }
+
+        fn no_group(_: &str) -> Result<Option<u32>, String> {
+            Ok(None)
+        }
+
+        #[test]
+        fn set_hosts_decides_the_next_load_with_the_given_lookups() {
+            let fx = Fixture::new("set_hosts");
+            write(&fx.policy(), EMPTY);
+            let dir = fx.0.join(maknae_config::AGENTS_DIR).join("hobi");
+            std::fs::create_dir_all(&dir).unwrap();
+            write(
+                &dir.join(maknae_config::ENROLLMENT_FILE),
+                "agent_id: hobi\naccount: hobi-svc\nuid: 2001\nrole: user\n",
+            );
+            let auth = HermeticAuthorizer::new(fx.paths(), principal(), fixture_req(), test_digest)
+                .unwrap();
+            auth.set_hosts(HostLookups {
+                account: |_| Ok(None),
+                daemons: no_daemons,
+                group: no_group,
+            });
+            auth.reload_from_file().unwrap();
+            assert_eq!(auth.snapshot().agent_uid("hobi"), None);
+            auth.set_hosts(HostLookups {
+                account: hobi_account,
+                daemons: no_daemons,
+                group: no_group,
+            });
+            auth.reload_from_file().unwrap();
+            assert_eq!(auth.snapshot().agent_uid("hobi"), Some(2001));
+        }
+
         fn fixture_req() -> maknae_config::TargetRequired {
             maknae_config::TargetRequired {
                 owner: None,
