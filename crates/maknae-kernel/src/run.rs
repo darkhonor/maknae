@@ -823,7 +823,10 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     E: AuditEmit + Send + Sync + 'static,
     P: Authorizer + Send + Sync + 'static,
 {
-    let emit = Arc::new(SessionEmit::new(emit, session.agent()));
+    let emit = Arc::new(SessionEmit {
+        inner: emit,
+        session: Arc::clone(&session),
+    });
     let _post_request = EndsOnSenderMismatch(Arc::clone(&session));
     let peer_uid = session.uid;
     let session_id = session.session_id;
@@ -1075,7 +1078,9 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             task: task.as_deref(),
         },
     };
-    emit.cite(&stamp);
+    if let Some(t) = task.as_deref() {
+        session.cite(t);
+    }
 
     // 2½. THE PDP (spec D2, #77): every request is decided through the seam
     // before the audit-then-respond step. For a Read, the lexical pre-gate
@@ -2810,7 +2815,7 @@ async fn emit_termination<E: AuditEmit + Send + Sync>(
         &wctx.au3_1,
     );
     rec.subject.user = admitted_user(session.user.as_deref());
-    rec.subject.agent = session.agent().map(|a| a.as_str().to_string());
+    session.stamp(&mut rec);
     if let Err(e) = emit
         .emit_within(
             &rec,
@@ -2890,44 +2895,16 @@ impl AgentAdmission {
     }
 }
 
-/// Stamps the session's agent, and the task its request cites once resolved, on every
-/// record the session appends.
+/// Appends through `inner`, stamped by the session (`SessionRecord::stamp`).
 struct SessionEmit<E> {
     inner: Arc<E>,
-    agent: Option<String>,
-    task: OnceLock<(String, String)>,
+    session: Arc<SessionRecord>,
 }
 
 impl<E> SessionEmit<E> {
-    fn new(inner: Arc<E>, agent: Option<&maknae_config::AgentId>) -> Self {
-        SessionEmit {
-            inner,
-            agent: agent.map(|a| a.as_str().to_string()),
-            task: OnceLock::new(),
-        }
-    }
-
-    fn cite(&self, stamp: &Stamp<'_>) {
-        match stamp {
-            Stamp::Client | Stamp::Agent { task: None, .. } => {}
-            Stamp::Agent { task: Some(t), .. } => {
-                let _ = self.task.set((
-                    t.task.task_id.to_string(),
-                    maknae_proto::tasker_text(&t.task.tasker),
-                ));
-            }
-        }
-    }
-
     fn stamped(&self, rec: &AuditRecord) -> AuditRecord {
         let mut rec = rec.clone();
-        if let Some(agent) = &self.agent {
-            rec.subject.agent = Some(agent.clone());
-        }
-        if let Some((id, tasker)) = self.task.get() {
-            rec.subject.task_id = Some(id.clone());
-            rec.subject.tasker = Some(tasker.clone());
-        }
+        self.session.stamp(&mut rec);
         rec
     }
 }
@@ -3378,6 +3355,7 @@ where
                                                         lifetime,
                                                         platform: crate::deployment::Platform::of_build(),
                                                         ending: std::sync::OnceLock::new(),
+                                                        task: std::sync::OnceLock::new(),
                                                     });
                                                     // The one production binding of the
                                                     // T1-pinned decide-timeout const —

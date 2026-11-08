@@ -1321,6 +1321,11 @@ mod tests {
             SessionChannel::of(Admission::EnrolledAgent, &ChannelPeer::Certless),
             Err(Ending::Denied(DenyCause::NotEnrolled))
         );
+        assert_eq!(
+            SessionChannel::of(Admission::MaknaeGroupMember, &hobi_leaf()),
+            Err(Ending::Denied(DenyCause::NotEnrolled)),
+            "an agent leaf never opens a client channel"
+        );
     }
 
     #[test]

@@ -348,13 +348,6 @@ pub fn admitted_user_for_test(user: Option<&str>) -> Option<String> {
     crate::run::admitted_user_pub(user)
 }
 
-/// Build the seam Request from the verb + kernel-verified peer uid. Subject
-/// carries the kernel-verified `uid` (i64 carriage of the u32 — lossless) and,
-/// when the kernel resolves one, the requester's home `~` binds to; both are
-/// kernel-derived. ADR-0024's "the uid is the whole subject" is the identity
-/// claim; the home is a separate kernel-stamped attribute. `Read` carries the
-/// client-supplied path as the resource `path` attribute, and an admitted
-/// `session.prompt` carries `destination` and `model`; the context carries the lane.
 /// The channel facts the kernel stamps on a client request (H2, L9).
 #[derive(Clone, Copy)]
 pub enum Stamp<'a> {
@@ -365,6 +358,13 @@ pub enum Stamp<'a> {
     },
 }
 
+/// Build the seam Request from the verb + kernel-verified peer uid. Subject
+/// carries the kernel-verified `uid` (i64 carriage of the u32 — lossless) and,
+/// when the kernel resolves one, the requester's home `~` binds to; both are
+/// kernel-derived. ADR-0024's "the uid is the whole subject" is the identity
+/// claim; the home is a separate kernel-stamped attribute. `Read` carries the
+/// client-supplied path as the resource `path` attribute, and an admitted
+/// `session.prompt` carries `destination` and `model`; the context carries the lane.
 pub fn build_authz_request(
     verb: &Verb,
     peer_uid: u32,

@@ -161,10 +161,12 @@ impl SessionChannel {
     ) -> Result<SessionChannel, Ending> {
         use maknae_vault::ChannelPeer;
         match (admission, peer) {
-            (
-                Admission::MaknaeGroupMember,
-                ChannelPeer::Certless | ChannelPeer::Certified(_) | ChannelPeer::Agent { .. },
-            ) => Ok(SessionChannel::Client),
+            (Admission::MaknaeGroupMember, ChannelPeer::Certless | ChannelPeer::Certified(_)) => {
+                Ok(SessionChannel::Client)
+            }
+            (Admission::MaknaeGroupMember, ChannelPeer::Agent { .. }) => {
+                Err(Ending::Denied(crate::authz::DenyCause::NotEnrolled))
+            }
             (
                 Admission::EnrolledAgent,
                 ChannelPeer::Agent {
@@ -203,6 +205,8 @@ pub struct SessionRecord {
     pub lifetime: Duration,
     pub platform: Platform,
     pub(crate) ending: OnceLock<Ending>,
+    /// The `task_id` and `tasker` of the task the session's request cited, once resolved.
+    pub(crate) task: OnceLock<(String, String)>,
 }
 
 impl SessionRecord {
@@ -240,6 +244,24 @@ impl SessionRecord {
         }
     }
 
+    pub(crate) fn cite(&self, task: &maknae_proto::SignedTask) {
+        let _ = self.task.set((
+            task.task.task_id.to_string(),
+            maknae_proto::tasker_text(&task.task.tasker),
+        ));
+    }
+
+    /// Stamps the session's agent and, once resolved, its cited task on `rec`.
+    pub(crate) fn stamp(&self, rec: &mut maknae_audit_append::AuditRecord) {
+        if let Some(agent) = self.agent() {
+            rec.subject.agent = Some(agent.as_str().to_string());
+        }
+        if let Some((id, tasker)) = self.task.get() {
+            rec.subject.task_id = Some(id.clone());
+            rec.subject.tasker = Some(tasker.clone());
+        }
+    }
+
     pub fn agent(&self) -> Option<&maknae_config::AgentId> {
         match &self.channel {
             SessionChannel::Client => None,
@@ -263,6 +285,7 @@ impl SessionRecord {
             lifetime: Duration::MAX,
             platform: Platform::of_build(),
             ending: OnceLock::new(),
+            task: OnceLock::new(),
         }
     }
 

@@ -2279,4 +2279,21 @@ async fn an_agent_request_citing_its_task_is_stamped_and_audited() {
         ),
         "{request:?}"
     );
+    let terminate = recs
+        .iter()
+        .find(|r| r.event == "session" && r.source.uid == me)
+        .expect("the terminate record");
+    assert_eq!(
+        (
+            terminate.subject.agent.as_deref(),
+            terminate.subject.task_id.as_deref(),
+            terminate.subject.tasker.as_deref(),
+        ),
+        (
+            Some("hobi"),
+            Some(id.to_string().as_str()),
+            Some("uid:1002")
+        ),
+        "{terminate:?}"
+    );
 }
