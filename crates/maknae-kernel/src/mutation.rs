@@ -54,6 +54,11 @@ fn busy_reason(busy: Busy) -> &'static str {
 }
 
 pub(crate) const STORE_SLOTS_PER_UID: usize = 1;
+const STORE_WORKERS: usize = 16;
+static STORE_CAPACITY: OnceLock<Arc<Semaphore>> = OnceLock::new();
+fn store_capacity() -> Arc<Semaphore> {
+    Arc::clone(STORE_CAPACITY.get_or_init(|| Arc::new(Semaphore::new(STORE_WORKERS))))
+}
 static STORE_SLOTS: OnceLock<std::sync::Mutex<std::collections::HashMap<u32, Arc<Semaphore>>>> =
     OnceLock::new();
 
@@ -85,7 +90,7 @@ impl std::fmt::Display for Blocked {
     }
 }
 
-/// Runs on the requester's own slot, then a shared worker.
+/// Runs on the requester's own slot, then a store worker; never on the mutation pool.
 pub(crate) async fn blocking<T, F>(uid: u32, timeout: Duration, f: F) -> Result<T, Blocked>
 where
     T: Send + 'static,
@@ -94,7 +99,7 @@ where
     let deadline = tokio::time::Instant::now() + timeout;
     let admitted = tokio::time::timeout_at(deadline, async {
         let own = store_slots(uid).acquire_owned().await.ok()?;
-        let shared = capacity().acquire_owned().await.ok()?;
+        let shared = store_capacity().acquire_owned().await.ok()?;
         Some((own, shared))
     })
     .await;

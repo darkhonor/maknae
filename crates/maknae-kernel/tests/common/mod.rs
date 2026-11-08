@@ -255,6 +255,7 @@ pub struct Fixture {
     pub peer_user: Option<String>,
     pub requester_home: Option<PathBuf>,
     pub conversations: Arc<dyn maknae_kernel::ConversationStore>,
+    pub take_turns: bool,
 }
 
 pub fn conversations() -> Arc<dyn maknae_kernel::ConversationStore> {
@@ -409,6 +410,7 @@ impl Fixture {
             peer_user: Some(name),
             requester_home: Some(root.clone()),
             conversations: seeded(nix::unistd::geteuid().as_raw(), root.to_str().unwrap()),
+            take_turns: true,
             root,
             principal,
         }
@@ -685,7 +687,7 @@ impl Fixture {
         if let Some(fd) = fd {
             fds.push(fd);
         }
-        let turn = verb.clone();
+        let turn = self.take_turns.then(|| verb.clone());
         let served = maknae_kernel::handle_with_attempt_caps(
             server,
             Some("spiffe://d/plane/cli".into()),
@@ -708,7 +710,10 @@ impl Fixture {
             Arc::clone(&self.conversations),
         );
         let task = tokio::spawn(async move {
-            let _turn = fs_turn(&turn).await;
+            let _turn = match &turn {
+                Some(verb) => fs_turn(verb).await,
+                None => None,
+            };
             served.await
         });
         let body = maknae_proto::encode_request(&maknae_proto::Request {
