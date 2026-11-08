@@ -1,7 +1,7 @@
 use super::agent::{
-    check_mount, dedup, entity_name, has_alias_on, io_error, open_dir, read_host, read_records,
-    read_state, AgentState, AgentVaultOps, HasVault, RealVault, AGENTS_DIR, PRIVATE_DIR,
-    RELOAD_COMMAND, VAULT_CA,
+    check_mount, dedup, entity_name, has_alias_on, io_error, is_not_found, open_dir, read_host,
+    read_records, read_state, AgentState, AgentVaultOps, HasVault, RealVault, AGENTS_DIR,
+    PRIVATE_DIR, RELOAD_COMMAND, VAULT_CA,
 };
 use super::EnrollError;
 use crate::stderr::errln;
@@ -176,10 +176,11 @@ pub(crate) fn remove_enrollment_file(
     agent: &AgentId,
 ) -> Result<(), EnrollError> {
     let rel = Path::new(agent.as_str()).join(maknae_config::ENROLLMENT_FILE);
-    agents
-        .remove(&rel, None)
-        .map(|_| ())
-        .map_err(|e| io_error(&Path::new(AGENTS_DIR).join(&rel), e))
+    match agents.remove(&rel, None) {
+        Ok(_) => Ok(()),
+        Err(e) if is_not_found(&e) => Ok(()),
+        Err(e) => Err(io_error(&Path::new(AGENTS_DIR).join(&rel), e)),
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -657,6 +658,41 @@ mod tests {
             std::fs::read_to_string(d.join("hobi").join("policy.yaml")).unwrap(),
             "subjects: []"
         );
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_removed_agent_directory_counts_as_removed() {
+        let d = scratch("gone");
+        let agents = maknae_io::open_anchor(
+            &d,
+            maknae_io::AnchorRequired {
+                owner: None,
+                mode_mask: None,
+            },
+            maknae_io::StrategyPref::Auto,
+        )
+        .unwrap();
+        std::fs::remove_dir_all(d.join("hobi")).unwrap();
+        remove_enrollment_file(&agents, &hobi()).unwrap();
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_non_directory_at_the_agent_path_still_refuses() {
+        let d = scratch("notdir");
+        let agents = maknae_io::open_anchor(
+            &d,
+            maknae_io::AnchorRequired {
+                owner: None,
+                mode_mask: None,
+            },
+            maknae_io::StrategyPref::Auto,
+        )
+        .unwrap();
+        std::fs::remove_dir_all(d.join("hobi")).unwrap();
+        std::os::unix::fs::symlink("/tmp", d.join("hobi")).unwrap();
+        assert!(remove_enrollment_file(&agents, &hobi()).is_err());
         std::fs::remove_dir_all(&d).unwrap();
     }
 

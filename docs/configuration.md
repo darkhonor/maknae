@@ -903,7 +903,7 @@ sudo maknae enroll remove-agent <id> [--token-file <file>] [--verbose]
 
 It takes the same operator token as enrollment (`--token-file` or a no-echo prompt, never an argument) and runs in this order:
 
-1. It removes `/etc/maknae/agents/<id>/enrollment.yaml`, so the next reload of `maknaed` drops the agent whatever Vault does.
+1. It removes `/etc/maknae/agents/<id>/enrollment.yaml`, so the next reload of `maknaed` drops the agent whatever Vault does. A file or directory that is already gone counts as removed, so a run after a failed one completes from the state file.
 2. It reads the agent's Vault role. When the role read errors for any reason other than not-found, it refuses. When the role is not found, it reads the entity `maknae-agent-<id>` (which does not depend on the mount): if the entity exists too, it refuses, saying the role was not found on the mount while the entity still exists (the recorded mount may be wrong), and changes nothing in Vault or locally beyond step 1. If both are not found, Vault holds neither, so it skips the disable and the destroys, removes the sealed SecretID and the state file, and says the Vault role and entity were already absent. When the role exists, it reads the entity; if the entity is absent or has no alias on the agent mount named by the role's RoleID, it stops before changing anything in Vault and names what remains: the sealed SecretID and state file that exist, and the recorded accessors. Restore the entity and run it again, or clean Vault by hand.
 3. It disables the entity.
 4. It destroys every SecretID accessor of `agent-<id>` that the state file records or Vault lists. An accessor whose destroy fails stays recorded, the command exits non-zero, and running it again retries.
