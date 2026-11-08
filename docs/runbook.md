@@ -220,7 +220,7 @@ To switch a deployment:
 
 A mismatch fails closed at the first mint: Vault refuses the CSR, for example `pki/sign
 rejected: Vault returned 400: role requires keys of type ec (check that vault.plane_key ml-dsa-87
-matches deploy/vault-pki's plane_key_algorithm, and that Vault is 2.2.0 or later for ml-dsa-87)`. A plane chained to a
+matches the key type of the Vault PKI role (key_type/key_bits), and that Vault is 2.2.0 or later for ml-dsa-87)`. A plane chained to a
 different CA fails the pinned chain at the handshake.
 
 ### Teardown
@@ -1098,7 +1098,7 @@ With enroll's defaults and the subpath `openai`, the path is `maknae-kv/metadata
 
 ## Reload the policy
 
-`maknaed` decides every request from a snapshot of `/etc/maknae/authz.yaml`, `/etc/maknae/bindings.yaml` and `/etc/maknae/agents/` compiled when it starts. An edit to either file changes nothing until you reload the daemon or restart it:
+`maknaed` decides every request from a snapshot of `/etc/maknae/authz.yaml`, `/etc/maknae/bindings.yaml` and `/etc/maknae/agents/` compiled when it starts. An edit to any of them changes nothing until you reload the daemon or restart it:
 
 ```bash
 sudo systemctl reload maknaed                          # Linux
@@ -1109,7 +1109,7 @@ Both send `SIGHUP`, as does `kill -HUP <pid>` for a daemon started by hand. The 
 
 - **What a reload reads.** `authz.yaml`, `bindings.yaml` and each enrolled agent's `agents/<id>/enrollment.yaml` and `policy.yaml`, together, as one policy ([Enroll an Agent Daemon](#enroll-an-agent-daemon)). It also reads `maknae.yaml` and `config.d/`, only to refresh the pending baseline change that `maknae status` reports; a reload never applies a baseline change, and a `maknae.yaml` that does not validate never refuses a reload. A baseline change applies only through `maknae baseline-accept` ([Change the configuration](#change-the-configuration)).
 - **The bindings are merged, not replaced.** A reload merges `bindings.yaml` with the bindings `maknaed` enforces, entry by entry, against the file it last loaded ([How bindings.yaml and live state merge](#how-bindingsyaml-and-live-state-merge)). An entry root changed takes the file's value; an entry only a live edit changed keeps the live value; an entry both changed fails closed and is counted as a conflict. A file that now holds what `maknaed` already enforces, as after `sudo maknae policy sync`, is adopted with no root edit recorded. A `bindings.yaml` that is missing, or has lost its `bindings:` key, changes nothing once the store holds explicit bindings: the reload is applied, every binding stands, and the loss is recorded.
-- **All or nothing.** A reload loads and validates both files and resolves every username in `bindings.yaml` on the host, as a start does, so a new username needs only a reload. If any file fails (it does not parse or validate, `authz.yaml` still carries `bindings:`, an agent's `enrollment.yaml` or `policy.yaml` does not parse, `bindings.yaml` binds an agent's service account under `admin`, or an account lookup fails rather than finding no such user), the reload is refused before it touches the store, and the running policy stands; an `authz.yaml` edit made at the same time as a refused `bindings.yaml` edit does not apply either. A name with no account on the host does not refuse the reload: that name alone is affected, and a `graph.identity` record reports it ([Bind a user, contain a subject](#bind-a-user-contain-a-subject); configuration §2.3 lists what refuses the whole file and what is decided per subject). A reload refused while writing the store also keeps the running policy; see the first case under "Records that look out of order" below. The journal (`journalctl -u maknaed`; on macOS `/usr/local/var/log/maknae/maknaed.err`) says `maknaed: reload refused: <cause>; the previous policy stands`. An invalid `authz.yaml` or `bindings.yaml` at start refuses to start, with exit 3.
+- **All or nothing.** A reload loads and validates all of them and resolves every username in `bindings.yaml` on the host, as a start does, so a new username needs only a reload. If any file fails (it does not parse or validate, `authz.yaml` still carries `bindings:`, an agent's `enrollment.yaml` or `policy.yaml` does not parse, `bindings.yaml` binds an agent's service account under `admin`, or an account lookup fails rather than finding no such user), the reload is refused before it touches the store, and the running policy stands; an `authz.yaml` edit made at the same time as a refused `bindings.yaml` edit does not apply either. A name with no account on the host does not refuse the reload: that name alone is affected, and a `graph.identity` record reports it ([Bind a user, contain a subject](#bind-a-user-contain-a-subject); configuration §2.3 lists what refuses the whole file and what is decided per subject). A reload refused while writing the store also keeps the running policy; see the first case under "Records that look out of order" below. The journal (`journalctl -u maknaed`; on macOS `/usr/local/var/log/maknae/maknaed.err`) says `maknaed: reload refused: <cause>; the previous policy stands`. An invalid `authz.yaml` or `bindings.yaml` at start refuses to start, with exit 3.
 - **One at a time.** Reloads run in turn. Signals that arrive while one runs produce one more reload, and a `SIGHUP` sent while the daemon is starting is applied once it serves. One that lands in the first milliseconds of the process, before its handler exists, ends it; systemd (`RestartForceExitStatus=SIGHUP`) and launchd (`KeepAlive`) start it again, after `RestartSec` (5 seconds) on Linux.
 - **Restarting into an accepted baseline.** Once an accept that applies by restart has begun, a reload is refused (`reload refused: shutdown`).
 - **Stopping.** A graceful stop abandons a reload that is still loading the file, recorded as `reload refused: shutdown`. It waits up to 5 seconds for a reload that already holds its turn (writing the store or its audit records), then stops without it, so the stop record and the token revoke never wait on a reload for longer than that.
@@ -1514,7 +1514,7 @@ An Agent Daemon runs under its own service account, one per agent, and reaches `
        - "session.prompt"
    ```
 
-   Add `taskers:` to say who may task it, for example `taskers: ["alice", "agent:jin"]`; another agent may task it only when listed here.
+   Add `taskers:` to say who may task it, for example `taskers: ["alice", "agent:jin"]`; another agent may task it only when listed here. Tasking is refused on the wire until task delivery is built (#610); `taskers:` takes effect then.
 
 6. **Reload `maknaed`** ([Reload the policy](#reload-the-policy)), then confirm:
 
@@ -1531,7 +1531,7 @@ An Agent Daemon runs under its own service account, one per agent, and reaches `
    sudo maknae enroll remove-agent hobi
    ```
 
-   It removes `enrollment.yaml`, disables the Vault entity, destroys the SecretIDs and removes the sealed SecretID. Then reload: until a reload succeeds, the agent stays admitted. After it, the agent's next request is refused, its tasks are dropped, and the account is an ordinary account again. `policy.yaml` and the directory stay; delete them by hand if you will not re-enroll. A login token the agent already holds stays valid until `agent_token_max_ttl`, refused only while the entity stays disabled; re-enrolling re-enables the entity and revives such a token, so wait out `agent_token_max_ttl` before re-enrolling a removed agent.
+   It removes `enrollment.yaml`, disables the Vault entity, destroys the SecretIDs and removes the sealed SecretID. Then reload: until a reload succeeds, the agent stays admitted. After it, the agent's next request is refused, its tasks are dropped, and the account is an ordinary account again. `policy.yaml` and the directory stay; delete them by hand if you will not re-enroll. A login token the agent already holds stays valid until `agent_token_max_ttl`, refused only while the entity stays disabled. When the role and the entity were both already absent, nothing is disabled, and a held token lives until `agent_token_max_ttl`. Re-enrolling re-enables the entity and revives such a token, so wait out `agent_token_max_ttl` before re-enrolling a removed agent.
 
 ## Session checks
 

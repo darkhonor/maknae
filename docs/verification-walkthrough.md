@@ -26,7 +26,7 @@ Controls are cited two ways. A pair such as `cli_b × key_a` is a cell of the is
 
 **Two local users, A and B.** A is the administrator who ran `sudo maknae enroll`. B was added by [first-provider step 4a](first-provider.md#4a-add-another-local-user). Both are:
 
-- listed in Terraform's `maknae_users` with a password set ([step 1](first-provider.md#1-create-the-user-in-vault));
+- Vault userpass users with a password set ([step 1](first-provider.md#1-create-the-user-in-vault));
 - bound in `/etc/maknae/bindings.yaml` to a role that `/etc/maknae/authz.yaml` grants `session.prompt` and `provider:openai` (step 4a, part 3);
 - logged in to Vault with `maknae login` ([U1](first-provider.md#u1-log-in));
 - holding their own key at subpath `openai`, field `api_key` ([U2](first-provider.md#u2-store-your-key-in-vault));
@@ -467,4 +467,4 @@ These clean-up steps are not yet measured.
 - B runs `maknae login` again (C8).
 - Check that A's and B's `~/.maknae/providers.yaml` are their originals and that no `providers.yaml.orig` or `providers.yaml.aside` is left (C4, C7, C9).
 - Run `unset VT` in every shell that read a token.
-- If the event added B only for this check, remove B from `bindings:` in `/etc/maknae/bindings.yaml` and reload `maknaed` (step 4a, part 3), then remove B from `maknae_users` and apply.
+- If the event added B only for this check, remove B from `bindings:` in `/etc/maknae/bindings.yaml` and reload `maknaed` (step 4a, part 3), then remove B's Vault userpass user and entity (with `deploy/vault-pki`, remove B from `maknae_users` and apply).

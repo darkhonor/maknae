@@ -13,7 +13,7 @@ The single-user path passed on Rocky 10.2 and on macOS 26.6.2 with a Developer I
   - **What enroll checks.** Enroll refuses unless `maknae`, `maknaed` and `maknae-egress` are root-installed and signed with Developer ID by one team, with Hardened Runtime and no entitlements (ADR-0018 decision 6).
   - **The development-build refusals.** A `maknae` built with `cargo` and run from your own `target/` directory is refused first, at the root-install check: enroll prints `Enrollment preflight check failed`, then `Enrollment failed: <path> could be replaced by a non-root user (…); the keychain item would trust whatever sits there`. An installed ad-hoc package passes that check and is refused at the Developer ID check, on `maknae` itself: enroll prints `Enrollment preflight check failed`, then `Enrollment failed: /usr/local/bin/maknae is not a Developer ID release build of this team (no team identifier); the keychain item would trust it (ADR-0018 decision 6)`.
   - **`--insecure-plaintext-secret`** is refused on macOS.
-- **A Vault set up from `deploy/vault-pki`** (its Terraform applied), and an administrator Vault token that may run enroll and set user passwords. The defaults this walkthrough uses come from `deploy/vault-pki`: the userpass mount `maknae-userpass`, the KV v2 mount `maknae-kv`, and each user's keys under `maknae/users/<username>/`. If your Vault uses other names, use yours everywhere below.
+- **A Vault holding Maknae's objects** (the PKI mounts and roles, the `maknaed` AppRole, the userpass mount, the KV v2 mount, the `maknae-user` policy, and a userpass user and entity per person; `deploy/vault-pki` is one way to create them), and an administrator Vault token that may run enroll and set user passwords. The defaults this walkthrough uses are `deploy/vault-pki`'s: the userpass mount `maknae-userpass`, the KV v2 mount `maknae-kv`, and each user's keys under `maknae/users/<username>/`. If your Vault uses other names, use yours everywhere below.
 - **The `vault` CLI** on the host, for the administrator's step 1 and each user's step U2.
 - **An API key** for an OpenAI-compatible endpoint. Each user stores their own.
 
@@ -23,7 +23,7 @@ The administrator is the account that runs `sudo maknae enroll`. That account is
 
 ### 1. Create the user in Vault
 
-Every person who will use `maknae agent`, the administrator included, is a Vault userpass user. List each local account name in Terraform's `maknae_users` input (`deploy/vault-pki/variables.tf`) and apply:
+Every person who will use `maknae agent`, the administrator included, is a Vault userpass user named after their local account, with an identity entity `maknae-<user>` whose alias is that username on the userpass mount, and that entity a member of the `maknae-users` group, which carries the `maknae-user` policy. Create them however you manage Vault. With `deploy/vault-pki`, list each local account name in its `maknae_users` input (`deploy/vault-pki/variables.tf`) and apply:
 
 ```hcl
 maknae_users = {
@@ -31,7 +31,7 @@ maknae_users = {
 }
 ```
 
-Each key is the local account name: 1 to 32 bytes of `[a-z0-9._-]`, starting and ending with `[a-z0-9_]`, and not `data`. Terraform creates the user with a random password that nobody learns; it is in neither the plan nor the state. Incrementing `password_version` replaces that user's password with a new random one. See `deploy/vault-pki/README.md` *Users and passwords* for what else resets a password.
+The username is the local account name: 1 to 32 bytes of `[a-z0-9._-]`, starting and ending with `[a-z0-9_]`, not `data`, and not starting with `agent-`. `deploy/vault-pki` creates the user with a random password that nobody learns; it is in neither the plan nor the state. Incrementing `password_version` replaces that user's password with a new random one. See `deploy/vault-pki/README.md` *Users and passwords* for what else resets a password.
 
 Then set the user's real password, with your administrator token, in the same shell:
 
@@ -64,14 +64,14 @@ sudo maknae enroll \
 
 Enroll prompts for your administrator Vault token (`--token-file <path>` reads it from a file instead). Runbook Chapter 4, step 3, explains every flag. On Linux, run enroll from a direct login whose `id -Z` shows `unconfined_u`, not from `sudo su` out of a confined account. On macOS, the flags are the same.
 
-Four flags name the Vault layout, and each **must equal** its Terraform input:
+Four flags name the Vault layout, and each **must equal** what your Vault holds:
 
-| Enroll flag | Default | Terraform input |
+| Enroll flag | Default | Your Vault (`deploy/vault-pki` input) |
 |---|---|---|
-| `--userpass-mount` | `maknae-userpass` | `userpass_mount` |
-| `--kv-mount` | `maknae-kv` | `kv_mount_path` |
-| `--user-prefix` | `maknae/users` | `user_prefix` |
-| `--plane-key` | `ml-dsa-87` | `plane_key_algorithm` (`ml-dsa-87` needs Vault 2.2.0+; `ecdsa-p384-sha384` or `ecdsa-p521-sha512` otherwise) |
+| `--userpass-mount` | `maknae-userpass` | the userpass mount (`userpass_mount`) |
+| `--kv-mount` | `maknae-kv` | the KV v2 mount (`kv_mount_path`) |
+| `--user-prefix` | `maknae/users` | the prefix of the users' key paths (`user_prefix`) |
+| `--plane-key` | `ml-dsa-87` | the key type of the PKI roles (`plane_key_algorithm`; `ml-dsa-87` needs Vault 2.2.0+; `ecdsa-p384-sha384` or `ecdsa-p521-sha512` otherwise) |
 
 Enroll writes `--kv-mount` and `--user-prefix` into `/etc/maknae/egress-bounds.yaml` (`root:root 0644`), all four into the `vault` block of your own `~/.maknae/maknae.yaml`, and `--userpass-mount` and `--plane-key` into the root `maknae.yaml`. You do not write `egress-bounds.yaml` by hand, except to add the optional `call_timeout_ms` for a slow self-hosted model (`docs/configuration.md` §6.1.3); the next enroll drops it again (#525).
 
@@ -239,7 +239,7 @@ Enroll writes `~/.maknae` only for the account that ran it. Each further local u
 
    **Reload `maknaed` after saving** (`sudo systemctl reload maknaed`; on macOS, `sudo launchctl kill SIGHUP system/io.maknae.maknaed`). Until the reload the daemon keeps deciding from the policy it already had, so the new user has no role yet. The reload reads both files and resolves every name in `bindings.yaml` on the host; no restart is needed. If either file does not validate, the reload is refused and the running policy stands, with the cause in the journal (`maknaed: reload refused: <cause>; the previous policy stands`) and on a `graph.reload` record. A name with no account on the host does not refuse the reload: that name holds no role, the rest loads, and the journal says `maknaed: identity: 'bob' under user has no account on this host; it holds no role`. The audit trail records the same on a `graph.identity` record, `maknae status` counts it, and `maknae subject-list` shows `bob (no account)` as `unresolved (no account)` ([runbook](runbook.md#bind-a-user-contain-a-subject)). Create the account, then reload again.
 
-4. **Add the user to `maknae_users`** and set their password (step 1).
+4. **Create the user's Vault userpass user and entity** and set their password (step 1).
 
 The user then follows [You (the user)](#you-the-user).
 
@@ -303,7 +303,7 @@ maknae: logged in to Vault as <name>; the token is held in <custody> and is vali
 
 `<custody>` is `your default keychain (usually login)` on macOS; on Linux it is `a systemd-creds user credential` where `systemd-creds --user` is available (systemd 256 or later), and otherwise `a 0600 file (systemd-creds --user is unavailable here)`. Only the token is stored, never the password.
 
-The token lasts 8 hours (Terraform's `token_ttl`, with a 24-hour `token_max_ttl`, `deploy/vault-pki/main.tf`), and Maknae never renews it: log in again when it expires. `maknae logout` revokes it at Vault and erases it.
+The token lasts as long as the userpass user's `token_ttl` (8 hours, with a 24-hour `token_max_ttl`, in `deploy/vault-pki/main.tf`), and Maknae never renews it: log in again when it expires. `maknae logout` revokes it at Vault and erases it.
 
 ### U2. Store your key in Vault
 

@@ -5,7 +5,7 @@
 use maknae_vault::{OperatorClient, VaultError};
 use zeroize::Zeroizing;
 
-/// The daemon's AppRole (Terraform `maknaed`, spec §4.5).
+/// The daemon's AppRole.
 pub const DAEMON_ROLE: &str = "maknaed";
 /// The roles enroll provisions.
 pub const ROLES: [&str; 1] = [DAEMON_ROLE];
