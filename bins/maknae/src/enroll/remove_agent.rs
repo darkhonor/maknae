@@ -730,7 +730,13 @@ mod tests {
         }
     }
 
-    fn real_remove_ops(tag: &str) -> (PathBuf, PathBuf, RealRemoveOps) {
+    fn real_remove_ops(
+        tag: &str,
+    ) -> (
+        super::super::agent::tests::Scratch,
+        super::super::agent::tests::Scratch,
+        RealRemoveOps,
+    ) {
         use super::super::agent::tests::{scratch_anchor, unreachable_vault};
         let (agents_dir, agents) = scratch_anchor(&format!("{tag}-agents"));
         let (private_dir, private) = scratch_anchor(&format!("{tag}-private"));
@@ -747,31 +753,27 @@ mod tests {
 
     #[test]
     fn real_remove_enrollment_unlinks_the_record() {
-        let (agents_dir, private_dir, ops) = real_remove_ops("rm-enrollment");
+        let (agents_dir, _private_dir, ops) = real_remove_ops("rm-enrollment");
         let record = agents_dir.join("hobi").join(maknae_config::ENROLLMENT_FILE);
         std::fs::create_dir(agents_dir.join("hobi")).unwrap();
         std::fs::write(&record, "x").unwrap();
         ops.remove_enrollment(&hobi()).unwrap();
         assert!(!record.exists());
-        std::fs::remove_dir_all(&agents_dir).unwrap();
-        std::fs::remove_dir_all(&private_dir).unwrap();
     }
 
     #[test]
     fn real_remove_state_unlinks_the_state_file() {
-        let (agents_dir, private_dir, ops) = real_remove_ops("rm-state");
+        let (_agents_dir, private_dir, ops) = real_remove_ops("rm-state");
         let path = private_dir.join(super::super::agent::state_file(&hobi()));
         std::fs::write(&path, "x").unwrap();
         ops.remove_state(&hobi()).unwrap();
         assert!(!path.exists());
-        std::fs::remove_dir_all(&agents_dir).unwrap();
-        std::fs::remove_dir_all(&private_dir).unwrap();
     }
 
     #[cfg(not(target_os = "macos"))]
     #[tokio::test]
     async fn real_leftovers_name_what_is_on_disk_and_removal_clears_it() {
-        let (agents_dir, private_dir, ops) = real_remove_ops("rm-leftovers");
+        let (_agents_dir, private_dir, ops) = real_remove_ops("rm-leftovers");
         assert_eq!(ops.leftovers(&hobi()).await.unwrap(), Vec::<String>::new());
         let sealed = private_dir.join(sealed_leaf());
         std::fs::write(&sealed, "x").unwrap();
@@ -798,8 +800,6 @@ mod tests {
             .unwrap());
         ops.remove_state(&hobi()).unwrap();
         assert_eq!(ops.leftovers(&hobi()).await.unwrap(), Vec::<String>::new());
-        std::fs::remove_dir_all(&agents_dir).unwrap();
-        std::fs::remove_dir_all(&private_dir).unwrap();
     }
 
     #[tokio::test]

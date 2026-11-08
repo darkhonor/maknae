@@ -2430,7 +2430,22 @@ pub(crate) mod tests {
         ));
     }
 
-    pub(crate) fn scratch_anchor(tag: &str) -> (PathBuf, maknae_io::Anchor) {
+    pub(crate) struct Scratch(PathBuf);
+
+    impl std::ops::Deref for Scratch {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    pub(crate) fn scratch_anchor(tag: &str) -> (Scratch, maknae_io::Anchor) {
         let d = std::env::temp_dir().join(format!("maknae-agent-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
@@ -2443,7 +2458,7 @@ pub(crate) mod tests {
             StrategyPref::Auto,
         )
         .unwrap();
-        (d, anchor)
+        (Scratch(d), anchor)
     }
 
     pub(crate) fn unreachable_vault(tag: &str, private: maknae_io::Anchor) -> RealVault {
@@ -2461,9 +2476,9 @@ pub(crate) mod tests {
         nix::unistd::geteuid().is_root()
     }
 
-    fn real_ops(tag: &str) -> (PathBuf, RealAgentOps) {
+    fn real_ops(tag: &str) -> ([Scratch; 2], RealAgentOps) {
         let (d, agents) = scratch_anchor(&format!("{tag}-agents"));
-        let (_, private) = scratch_anchor(&format!("{tag}-private"));
+        let (p, private) = scratch_anchor(&format!("{tag}-private"));
         let ops = RealAgentOps {
             vault: unreachable_vault(tag, private),
             agents,
@@ -2477,12 +2492,12 @@ pub(crate) mod tests {
             #[cfg(target_os = "macos")]
             team: String::new(),
         };
-        (d, ops)
+        ([d, p], ops)
     }
 
     #[tokio::test]
     async fn every_vault_call_reports_an_unreachable_vault() {
-        let (d, ops) = real_ops("vault-down");
+        let (_scratch, ops) = real_ops("vault-down");
         fn refused<T>(r: Result<T, EnrollError>) {
             let e = r.err();
             assert!(matches!(e, Some(EnrollError::Vault(_))), "{e:?}");
@@ -2495,7 +2510,6 @@ pub(crate) mod tests {
         refused(ops.set_entity_disabled("maknae-agent-hobi", true).await);
         let cidrs = BindCidrs::parse(&["10.0.0.5".to_string()]).unwrap();
         refused(ops.mint(MOUNT, ROLE, &cidrs).await);
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -2516,7 +2530,6 @@ pub(crate) mod tests {
             assert!(matches!(&got, Err(EnrollError::Io { .. })), "{got:?}");
             assert!(!path.exists());
         }
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -2524,11 +2537,10 @@ pub(crate) mod tests {
         if running_as_root() {
             return;
         }
-        let (d, ops) = real_ops("write-record");
+        let ([d, _], ops) = real_ops("write-record");
         let got = ops.write_record(&record());
         assert!(got.is_err(), "{got:?}");
         assert!(!d.join("hobi").exists());
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     fn write_0640(path: &Path, body: &str) {
@@ -2549,7 +2561,6 @@ pub(crate) mod tests {
         write_0640(&d.join("jin"), &record().to_yaml());
         let (prior, others) = read_records(&agents, &hobi_id()).unwrap();
         assert_eq!((prior, others), (None, vec![]));
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -2576,7 +2587,6 @@ pub(crate) mod tests {
                 "{got:?}"
             );
         }
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -2589,7 +2599,6 @@ pub(crate) mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
         let got = read_records(&agents, &hobi_id());
         assert!(matches!(&got, Err(EnrollError::Io { .. })), "{got:?}");
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
