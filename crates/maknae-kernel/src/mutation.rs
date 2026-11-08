@@ -953,6 +953,20 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    #[test]
+    fn a_released_store_slot_is_pruned() {
+        let (released, held) = (4_170_201, 4_170_202);
+        drop(store_slots(released));
+        let _held = store_slots(held);
+        let slots = STORE_SLOTS
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(!slots.contains_key(&released));
+        assert!(slots.contains_key(&held));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stalled_requester_pins_only_its_own_store_slot() {
         let _turn = EUID_TURN.lock().await;

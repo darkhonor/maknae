@@ -574,7 +574,8 @@ mod tests {
         let mut seen = Vec::new();
         let mut sizes = Vec::new();
         let mut after: Option<ConversationId> = None;
-        loop {
+        for fetched in 0.. {
+            assert!(fetched < 3, "paging did not end after the third page");
             let page = fx.store().list_by_owner(1000, after.as_ref(), 12).unwrap();
             assert!(page.unreadable.is_empty());
             let (entries, next) = page.value;
