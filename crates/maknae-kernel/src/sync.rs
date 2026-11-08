@@ -676,28 +676,6 @@ mod tests {
         );
     }
 
-    fn hobi_account(uid: u32) -> Result<Option<maknae_io::HostAccount>, String> {
-        Ok((uid == 2001).then(|| maknae_io::HostAccount {
-            uid,
-            name: "hobi-svc".into(),
-            primary_gid: uid,
-            shell: "/usr/sbin/nologin".into(),
-            dir: "/var/empty".into(),
-            named_groups: Vec::new(),
-        }))
-    }
-
-    fn no_daemons() -> Result<maknae_io::DaemonFacts, String> {
-        Ok(maknae_io::DaemonFacts {
-            uids: Vec::new(),
-            gids: Vec::new(),
-        })
-    }
-
-    fn no_group(_: &str) -> Result<Option<u32>, String> {
-        Ok(None)
-    }
-
     #[test]
     fn every_constructor_carries_agents() {
         let agents = maknae_config::AgentsLoad {
@@ -715,11 +693,7 @@ mod tests {
             base.bindings().clone(),
             uids(),
             agents,
-            maknae_authz_basic::HostLookups {
-                account: hobi_account,
-                daemons: no_daemons,
-                group: no_group,
-            },
+            crate::test_fixtures::HOBI_HOSTS,
             base.principal().clone(),
             base.paths().clone(),
         )

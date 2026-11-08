@@ -261,7 +261,7 @@ fn agent_dir(config: &Path, id: &str) -> PathBuf {
     dir
 }
 
-fn write_0640(path: &Path, body: &str) {
+pub(crate) fn write_0640(path: &Path, body: &str) {
     use std::os::unix::fs::PermissionsExt;
     std::fs::write(path, body).unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640)).unwrap();
@@ -280,6 +280,35 @@ pub(crate) fn write_agent_policy(config: &Path, id: &str, yaml: &str) {
         &agent_dir(config, id).join(maknae_config::POLICY_FILE),
         yaml,
     );
+}
+
+/// Host lookups that know one account, `hobi-svc` at uid 2001, no daemons and no groups.
+pub(crate) const HOBI_HOSTS: maknae_authz_basic::HostLookups = maknae_authz_basic::HostLookups {
+    account: hobi_account,
+    daemons: no_daemons,
+    group: no_group,
+};
+
+fn hobi_account(uid: u32) -> Result<Option<maknae_io::HostAccount>, String> {
+    Ok((uid == 2001).then(|| maknae_io::HostAccount {
+        uid,
+        name: "hobi-svc".into(),
+        primary_gid: uid,
+        shell: "/usr/sbin/nologin".into(),
+        dir: "/var/empty".into(),
+        named_groups: Vec::new(),
+    }))
+}
+
+fn no_daemons() -> Result<maknae_io::DaemonFacts, String> {
+    Ok(maknae_io::DaemonFacts {
+        uids: Vec::new(),
+        gids: Vec::new(),
+    })
+}
+
+fn no_group(_: &str) -> Result<Option<u32>, String> {
+    Ok(None)
 }
 
 /// The de-enrollment act.

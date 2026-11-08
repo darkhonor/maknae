@@ -646,7 +646,6 @@ mod tests {
     use maknae_security::{Decided, Request, Verdict};
     use maknae_vault::task_sig::TaskSignatureError;
     use maknae_vault::test_pki::{TestCa, TRUST_DOMAIN};
-    use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     const HOBI: u32 = 2001;
@@ -1379,22 +1378,6 @@ mod tests {
         }))
     }
 
-    fn no_daemons() -> Result<maknae_io::DaemonFacts, String> {
-        Ok(maknae_io::DaemonFacts {
-            uids: Vec::new(),
-            gids: Vec::new(),
-        })
-    }
-
-    fn no_group(_: &str) -> Result<Option<u32>, String> {
-        Ok(None)
-    }
-
-    fn put(path: &std::path::Path, body: &str) {
-        std::fs::write(path, body).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640)).unwrap();
-    }
-
     fn me() -> u32 {
         nix::unistd::geteuid().as_raw()
     }
@@ -1411,10 +1394,8 @@ mod tests {
         let (g, basic) = fixture(&format!("task-{tag}"), AUTHZ, Some(&bindings));
         basic.set_hosts(maknae_authz_basic::HostLookups {
             account: accounts,
-            daemons: no_daemons,
-            group: no_group,
+            ..crate::test_fixtures::HOBI_HOSTS
         });
-        let agents = g.0.join(maknae_config::AGENTS_DIR);
         for (agent, uid, policy) in [
             ("hobi", HOBI, None),
             (
@@ -1428,17 +1409,9 @@ mod tests {
                 Some("schema_version: 1\nactions:\n  allow: [\"session.task\"]\n  deny: [\"session.task\"]\n"),
             ),
         ] {
-            let dir = agents.join(agent);
-            std::fs::create_dir_all(&dir).unwrap();
-            for d in [&agents, &dir] {
-                std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o750)).unwrap();
-            }
-            put(
-                &dir.join(maknae_config::ENROLLMENT_FILE),
-                &format!("agent_id: {agent}\naccount: {agent}-svc\nuid: {uid}\nrole: user\n"),
-            );
+            crate::test_fixtures::write_agent(&g.0, agent, &format!("{agent}-svc"), uid, "user");
             if let Some(p) = policy {
-                put(&dir.join(maknae_config::POLICY_FILE), p);
+                crate::test_fixtures::write_agent_policy(&g.0, agent, p);
             }
         }
         basic.reload_from_file().unwrap();
@@ -1926,16 +1899,10 @@ mod tests {
         let (g, pdp) = pdp("re-enrolled");
         let store = TaskStore::new();
         let emit = Recorder::new();
-        let file =
-            g.0.join(maknae_config::AGENTS_DIR)
-                .join("hobi")
-                .join(maknae_config::ENROLLMENT_FILE);
+        let config = g.0.clone();
         let reloading = pdp.clone();
         let racing = hooked(pdp.clone(), move || {
-            put(
-                &file,
-                &format!("agent_id: hobi\naccount: hobi-svc\nuid: {HOBI_AGAIN}\nrole: user\n"),
-            );
+            crate::test_fixtures::write_agent(&config, "hobi", "hobi-svc", HOBI_AGAIN, "user");
             reloading.baseline().reload_from_file().unwrap();
         });
         let view = SnapshotEnrollment(pdp.clone());

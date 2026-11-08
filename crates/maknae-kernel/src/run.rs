@@ -14313,10 +14313,7 @@ mod reload_fixture {
         }
     }
 
-    pub(super) fn write_0640(path: &Path, body: &str) {
-        std::fs::write(path, body).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640)).unwrap();
-    }
+    pub(super) use crate::test_fixtures::write_0640;
 
     pub(super) async fn fixture(tag: &str, authz: &str, bindings: Option<&str>) -> Fx {
         fixture_gated(tag, authz, bindings, None).await
@@ -14896,20 +14893,8 @@ mod baseline_accept_tests {
             ..Opts::default()
         };
         let fx = fixture_with("principal-admin-agents", opts).await;
-        fx.baseline().set_hosts(maknae_authz_basic::HostLookups {
-            account: super::reload_tests::hobi_account,
-            daemons: super::reload_tests::no_daemons,
-            group: super::reload_tests::no_group,
-        });
-        let dir = fx.dir.join("agents").join("hobi");
-        std::fs::create_dir_all(&dir).unwrap();
-        for d in [fx.dir.join("agents"), dir.clone()] {
-            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o750)).unwrap();
-        }
-        write_0640(
-            &dir.join("enrollment.yaml"),
-            "agent_id: hobi\naccount: hobi-svc\nuid: 2001\nrole: user\n",
-        );
+        fx.baseline().set_hosts(crate::test_fixtures::HOBI_HOSTS);
+        crate::test_fixtures::write_agent(&fx.dir, "hobi", "hobi-svc", 2001, "user");
         fx.reloader.run().await.unwrap();
         assert_eq!(fx.baseline().snapshot().agent_uid("hobi"), Some(2001));
         let uid = nix::unistd::geteuid().as_raw().wrapping_add(1);
@@ -14937,20 +14922,8 @@ mod baseline_accept_tests {
             ..Opts::default()
         };
         let fx = fixture_with("principal-admin-agent-uid", opts).await;
-        fx.baseline().set_hosts(maknae_authz_basic::HostLookups {
-            account: super::reload_tests::hobi_account,
-            daemons: super::reload_tests::no_daemons,
-            group: super::reload_tests::no_group,
-        });
-        let dir = fx.dir.join("agents").join("hobi");
-        std::fs::create_dir_all(&dir).unwrap();
-        for d in [fx.dir.join("agents"), dir.clone()] {
-            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o750)).unwrap();
-        }
-        write_0640(
-            &dir.join("enrollment.yaml"),
-            "agent_id: hobi\naccount: hobi-svc\nuid: 2001\nrole: user\n",
-        );
+        fx.baseline().set_hosts(crate::test_fixtures::HOBI_HOSTS);
+        crate::test_fixtures::write_agent(&fx.dir, "hobi", "hobi-svc", 2001, "user");
         fx.reloader.run().await.unwrap();
         assert_eq!(fx.baseline().snapshot().agent_of(2001), Some("hobi"));
         fx.write_yaml_principal(2001, "");
@@ -16333,49 +16306,11 @@ mod reload_tests {
             .collect()
     }
 
-    pub(super) fn hobi_account(uid: u32) -> Result<Option<maknae_io::HostAccount>, String> {
-        Ok((uid == 2001).then(|| maknae_io::HostAccount {
-            uid,
-            name: "hobi-svc".into(),
-            primary_gid: uid,
-            shell: "/usr/sbin/nologin".into(),
-            dir: "/var/empty".into(),
-            named_groups: Vec::new(),
-        }))
-    }
-
-    pub(super) fn no_daemons() -> Result<maknae_io::DaemonFacts, String> {
-        Ok(maknae_io::DaemonFacts {
-            uids: Vec::new(),
-            gids: Vec::new(),
-        })
-    }
-
-    pub(super) fn no_group(_: &str) -> Result<Option<u32>, String> {
-        Ok(None)
-    }
-
     #[tokio::test]
     async fn a_reload_records_each_agent_enrolled_and_removed() {
         let fx = fixture("agents_recorded", AUTHZ, Some(ROOT_ADMIN)).await;
-        fx.baseline().set_hosts(maknae_authz_basic::HostLookups {
-            account: hobi_account,
-            daemons: no_daemons,
-            group: no_group,
-        });
-        let dir = fx.dir.join("agents").join("hobi");
-        std::fs::create_dir_all(&dir).unwrap();
-        for d in [fx.dir.join("agents"), dir.clone()] {
-            std::fs::set_permissions(
-                &d,
-                <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o750),
-            )
-            .unwrap();
-        }
-        write_0640(
-            &dir.join("enrollment.yaml"),
-            "agent_id: hobi\naccount: hobi-svc\nuid: 2001\nrole: user\n",
-        );
+        fx.baseline().set_hosts(crate::test_fixtures::HOBI_HOSTS);
+        fx.write_agent("hobi", "hobi-svc", 2001, "user");
         let applied = bounded(fx.reloader.run()).await.unwrap();
         assert!(applied.persisted);
         assert_eq!(agent_whoami_as(&fx, 2001, "hobi").1, Some("user"));
@@ -16403,7 +16338,7 @@ mod reload_tests {
             ]
         );
 
-        std::fs::remove_file(dir.join("enrollment.yaml")).unwrap();
+        fx.remove_enrollment("hobi");
         bounded(fx.reloader.run()).await.unwrap();
         assert_eq!(
             agent_whoami_as(&fx, 2001, "hobi"),
@@ -16435,25 +16370,9 @@ mod reload_tests {
     #[tokio::test]
     async fn the_subject_list_names_an_enrolled_agent_without_explicit_bindings() {
         let fx = fixture("agents_listed", AUTHZ, None).await;
-        fx.baseline().set_hosts(maknae_authz_basic::HostLookups {
-            account: hobi_account,
-            daemons: no_daemons,
-            group: no_group,
-        });
+        fx.baseline().set_hosts(crate::test_fixtures::HOBI_HOSTS);
         for (id, account, uid) in [("hobi", "hobi-svc", 2001), ("gone", "ghost-svc", 4040)] {
-            let dir = fx.dir.join("agents").join(id);
-            std::fs::create_dir_all(&dir).unwrap();
-            for d in [fx.dir.join("agents"), dir.clone()] {
-                std::fs::set_permissions(
-                    &d,
-                    <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o750),
-                )
-                .unwrap();
-            }
-            write_0640(
-                &dir.join("enrollment.yaml"),
-                &format!("agent_id: {id}\naccount: {account}\nuid: {uid}\nrole: user\n"),
-            );
+            fx.write_agent(id, account, uid, "user");
         }
         bounded(fx.reloader.run()).await.unwrap();
         let views = crate::identity_report::subject_views(
@@ -20188,7 +20107,6 @@ mod journal_capture {
 #[cfg(test)]
 mod agent_listener_tests {
     use super::reload_fixture::*;
-    use super::reload_tests::{hobi_account, no_daemons, no_group};
     use super::*;
     use crate::task::TaskObjectForTest;
     use maknae_authz_basic::Baseline;
@@ -20250,11 +20168,7 @@ mod agent_listener_tests {
 
     async fn enrolling(tag: &str) -> Fx {
         let fx = fixture(tag, AUTHZ, Some(ROOT_ADMIN)).await;
-        fx.baseline().set_hosts(maknae_authz_basic::HostLookups {
-            account: hobi_account,
-            daemons: no_daemons,
-            group: no_group,
-        });
+        fx.baseline().set_hosts(crate::test_fixtures::HOBI_HOSTS);
         fx
     }
 
