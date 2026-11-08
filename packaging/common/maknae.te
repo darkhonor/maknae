@@ -237,10 +237,10 @@ allow maknaed_t maknae_state_t:file { create read write open getattr rename unli
 # PathChanged= inotify watch needs file read (#491)
 allow init_t maknae_state_t:file read;
 
-# UDS bind + chgrp in /run/maknae.
-# el10's systemd 257 labels the RuntimeDirectory=maknae dir `maknae_runtime_t`
+# UDS bind + chgrp in /run/maknae and /run/maknae-agent.
+# el10's systemd 257 labels the RuntimeDirectory= dirs `maknae_runtime_t`
 # (from the .fc), so el10 uses the tight grants below. el9's systemd 252 does NOT
-# relabel RuntimeDirectory dirs — it creates /run/maknae as `var_run_t` and
+# relabel RuntimeDirectory dirs — it creates both as `var_run_t` and
 # bypasses both the .fc selabel and a type-transition (empirically confirmed on
 # Rocky 9 fresh-boot, #101: filetrans had no effect). So on el9 the daemon binds
 # its socket in a var_run_t dir and needs the var_run_t grants too. This is
@@ -261,7 +261,8 @@ allow maknaed_t self:unix_stream_socket { create bind listen accept connect read
 # fallback. Without these the newly selected SocketEgress is denied before a
 # frame is exchanged (found by codex review of #240). What bounds it: the
 # only sock_files the daemon may write are maknae_runtime_t ones, so the
-# connectto reaches nothing outside /run/maknae and /run/maknae-egress; no
+# connectto reaches nothing outside /run/maknae, /run/maknae-agent and
+# /run/maknae-egress; no
 # bind, listen or accept is granted on the deputy's socket.
 allow maknaed_t maknae_runtime_t:sock_file write;
 allow maknaed_t { maknae_egress_t init_t }:unix_stream_socket connectto;

@@ -188,6 +188,24 @@ fn bounded_u64(
     }
 }
 
+/// An absolute path with no `..` component, so the directory comparison is on components.
+fn socket_path_of(section: &Value, field: &str, default: &str) -> Result<PathBuf, ConfigError> {
+    let path = match get(section, field) {
+        None => return Ok(PathBuf::from(default)),
+        Some(v) => PathBuf::from(as_str(v).ok_or_else(|| err(field, "must be a string"))?),
+    };
+    if !path.is_absolute() {
+        return Err(err(field, format!("{} is not absolute", path.display())));
+    }
+    if path
+        .components()
+        .any(|c| c == std::path::Component::ParentDir)
+    {
+        return Err(err(field, format!("{} contains `..`", path.display())));
+    }
+    Ok(path)
+}
+
 /// Read the `transport` section (spec/task-brief §Interfaces). `None` (the
 /// section is absent) → all-default [`TransportConfig`]. Each field is
 /// independently range-validated when present; absent-field default fills in
@@ -212,16 +230,9 @@ pub fn transport_from_section(v: Option<&Value>) -> Result<TransportConfig, Conf
         ));
     }
 
-    let socket_path = match get(section, "socket_path") {
-        None => PathBuf::from(DEFAULT_SOCKET_PATH),
-        Some(v) => PathBuf::from(as_str(v).ok_or_else(|| err("socket_path", "must be a string"))?),
-    };
-    let agent_socket_path = match get(section, "agent_socket_path") {
-        None => PathBuf::from(DEFAULT_AGENT_SOCKET_PATH),
-        Some(Value::Str(s)) if !s.is_empty() => PathBuf::from(s),
-        Some(Value::Str(_)) => return Err(err("agent_socket_path", "must not be empty")),
-        Some(_) => return Err(err("agent_socket_path", "must be a string")),
-    };
+    let socket_path = socket_path_of(section, "socket_path", DEFAULT_SOCKET_PATH)?;
+    let agent_socket_path =
+        socket_path_of(section, "agent_socket_path", DEFAULT_AGENT_SOCKET_PATH)?;
     if agent_socket_path.parent() == socket_path.parent() {
         return Err(err(
             "agent_socket_path",
@@ -627,6 +638,26 @@ mod tests {
                 transport_from_section(Some(&v)),
                 Err(ConfigError::InvalidTransport(_))
             ));
+        }
+    }
+
+    #[test]
+    fn a_socket_path_that_is_relative_or_climbs_refuses() {
+        for field in ["socket_path", "agent_socket_path"] {
+            for bad in [
+                "maknae-agent/maknaed.sock",
+                "./maknaed.sock",
+                "/run/maknae-agent/../maknae/maknaed.sock",
+                "/run/../run/maknae-x/maknaed.sock",
+            ] {
+                let v = Value::Map(vec![(field.to_string(), Value::Str(bad.into()))]);
+                match transport_from_section(Some(&v)) {
+                    Err(ConfigError::InvalidTransport(why)) => {
+                        assert!(why.contains(&format!("transport.{field}")), "{why}");
+                    }
+                    other => panic!("{field}={bad}: expected InvalidTransport, got {other:?}"),
+                }
+            }
         }
     }
 

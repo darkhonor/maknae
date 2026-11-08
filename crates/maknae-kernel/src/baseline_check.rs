@@ -247,6 +247,12 @@ pub fn check_sockets(
     if *listener != transport.socket_path {
         probe(listener, env.listener_bindable(listener))?;
     }
+    let agents = &proposed.transport.agent_socket_path;
+    if crate::deployment::agent_listener_wanted(proposed.deployment.mode)
+        && *agents != transport.agent_socket_path
+    {
+        probe(agents, env.listener_bindable(agents))?;
+    }
     let deputy = &proposed.egress.socket_path;
     if !proposed.boot.providers().is_empty() && *deputy != egress.socket_path {
         probe(deputy, env.deputy_reachable(deputy))?;
@@ -965,6 +971,50 @@ mod tests {
         let same_paths = sections(&both);
         let env = FakeEnv::with_bounds();
         assert_eq!(check_sockets(&same_paths, &v, &env), Ok(()));
+        assert!(env.probed().is_empty(), "{:?}", env.probed());
+    }
+
+    #[test]
+    fn check_sockets_probes_a_changed_agent_socket_on_a_host_only() {
+        let accepted = sections(&minimal());
+        let mut moved = minimal();
+        moved.push((
+            "transport",
+            r#"{"agent_socket_path":"/run/maknae-agents-moved/a.sock"}"#,
+        ));
+        let mut v = validate(
+            doc(&moved),
+            Mode::Accept,
+            Path::new("/e"),
+            &FakeEnv::default(),
+        )
+        .unwrap();
+        let env = FakeEnv::default();
+        assert_eq!(check_sockets(&accepted, &v, &env), Ok(()));
+        assert_eq!(
+            env.probed(),
+            vec!["bind /run/maknae-agents-moved/a.sock".to_string()]
+        );
+        let env = FakeEnv {
+            bindable: Err("EACCES".into()),
+            ..FakeEnv::default()
+        };
+        assert_eq!(
+            check_sockets(&accepted, &v, &env),
+            Err(Invalid::Document(
+                "/run/maknae-agents-moved/a.sock: EACCES".to_string()
+            ))
+        );
+        let env = FakeEnv::default();
+        assert_eq!(check_sockets(&sections(&moved), &v, &env), Ok(()));
+        assert!(env.probed().is_empty(), "{:?}", env.probed());
+
+        v.deployment.mode = maknae_config::DeploymentMode::Container;
+        let env = FakeEnv {
+            bindable: Err("probed".into()),
+            ..FakeEnv::default()
+        };
+        assert_eq!(check_sockets(&accepted, &v, &env), Ok(()));
         assert!(env.probed().is_empty(), "{:?}", env.probed());
     }
 
