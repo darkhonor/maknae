@@ -299,6 +299,7 @@ where
         timeout,
         fds,
         common::no_baseline(),
+        maknae_kernel::AgentAdmission::none(),
     ));
     common::write_frame(&mut client, &request_frame(verb))
         .await
@@ -459,6 +460,7 @@ where
         timeout,
         delegated,
         ops,
+        maknae_kernel::AgentAdmission::none(),
     )
     .await;
     match tokio::time::timeout(
@@ -3712,6 +3714,7 @@ async fn drive_baseline(
         Duration::from_secs(5),
         maknae_io::DelegatedFds::new(0),
         Arc::new(baseline),
+        maknae_kernel::AgentAdmission::none(),
     )
     .await;
     let frame = tokio::time::timeout(

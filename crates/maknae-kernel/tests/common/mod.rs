@@ -666,6 +666,7 @@ impl Fixture {
             fds,
             no_baseline(),
             attempt_caps,
+            maknae_kernel::AgentAdmission::none(),
         );
         let task = tokio::spawn(async move {
             let _turn = fs_turn(&turn).await;

@@ -390,37 +390,33 @@ pub enum Submitter {
     },
 }
 
-fn task_request(by: &Submitter, target: &str) -> maknae_security::Request {
-    use maknae_security::{
-        Action, AttrValue, Attributes, Context, Request, Resource, Subject, CHANNEL_AGENT,
-        CHANNEL_CLIENT, RESOURCE_AGENT, SUBJECT_AGENT, SUBJECT_CHANNEL, SUBJECT_HOME,
-    };
-    let mut subject = Attributes::new();
-    let (uid, home) = match by {
-        Submitter::User { uid, home } => {
-            subject.insert(SUBJECT_CHANNEL, AttrValue::Str(CHANNEL_CLIENT.into()));
-            (*uid, home)
-        }
+fn task_request(
+    by: &Submitter,
+    target: &str,
+    parent: Option<&SignedTask>,
+    sub: &TaskSubmission,
+) -> maknae_security::Request {
+    use crate::handler::{build_authz_request, Stamp};
+    use maknae_security::{AttrValue, Lane, RESOURCE_AGENT};
+    let (uid, home, stamp) = match by {
+        Submitter::User { uid, home } => (*uid, home, Stamp::Client),
         Submitter::Agent {
             agent, uid, home, ..
-        } => {
-            subject.insert(SUBJECT_CHANNEL, AttrValue::Str(CHANNEL_AGENT.into()));
-            subject.insert(SUBJECT_AGENT, AttrValue::Str(agent.as_str().into()));
-            (*uid, home)
-        }
+        } => (
+            *uid,
+            home,
+            Stamp::Agent {
+                agent,
+                task: parent,
+            },
+        ),
     };
-    subject.insert("uid", AttrValue::Int(i64::from(uid)));
-    if let Some(h) = home.as_deref().and_then(std::path::Path::to_str) {
-        subject.insert(SUBJECT_HOME, AttrValue::Str(h.to_owned()));
-    }
-    let mut resource = Attributes::new();
-    resource.insert(RESOURCE_AGENT, AttrValue::Str(target.to_owned()));
-    Request {
-        subject: Subject(subject),
-        resource: Resource(resource),
-        action: Action("session.task".into()),
-        context: Context(Attributes::new()),
-    }
+    let verb = maknae_proto::Verb::TaskSubmit { task: sub.clone() };
+    let mut req = build_authz_request(&verb, uid, home.as_deref(), Lane::Local, None, &stamp);
+    req.resource
+        .0
+        .insert(RESOURCE_AGENT, AttrValue::Str(target.to_owned()));
+    req
 }
 
 /// The connection a submission arrived on, for its audit record and its decision bound.
@@ -572,23 +568,22 @@ async fn decide<P: Authorizer + Send + Sync + 'static>(
 ) -> Result<Arc<SignedTask>, TaskRefusal> {
     maknae_proto::validate_submission(&sub).map_err(|e| TaskRefusal::Schema(e.to_string()))?;
     let target = target(&sub)?;
-    attempt.parent = match by {
-        Submitter::User { .. } => None,
-        Submitter::Agent { under: None, .. } => None,
+    let parent = match by {
+        Submitter::User { .. } | Submitter::Agent { under: None, .. } => None,
         Submitter::Agent {
             agent,
             uid,
             under: Some(t),
             ..
-        } => {
+        } => Some(
             store
                 .resolve(t, agent, *uid)
-                .map_err(|_| TaskRefusal::ParentNotHeld)?;
-            Some(*t)
-        }
+                .map_err(|_| TaskRefusal::ParentNotHeld)?,
+        ),
     };
+    attempt.parent = parent.as_ref().map(|t| t.task.task_id);
     let (generation, enrolled) = store.observe(view, &target);
-    let req = task_request(by, target.as_str());
+    let req = task_request(by, target.as_str(), parent.as_deref(), &sub);
     let decided = decide_admitted(pdp, ctx.decide_timeout, req).await?;
     attempt.role = decided.role;
     match maknae_security::finalize(decided.verdict) {

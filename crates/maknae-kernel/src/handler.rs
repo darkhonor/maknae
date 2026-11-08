@@ -12,6 +12,7 @@ use maknae_vault::{ChannelPeer, PeerAuth, VaultError};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Admission {
     MaknaeGroupMember,
+    EnrolledAgent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +29,19 @@ pub fn client_class(transport: &maknae_config::TransportConfig) -> ChannelClass 
         admission: Admission::MaknaeGroupMember,
         lane: maknae_security::Lane::Local,
         socket: transport.socket_path.clone(),
+    }
+}
+
+pub fn agent_class(socket: std::path::PathBuf, trust_domain: &str) -> ChannelClass {
+    ChannelClass {
+        peer_auth: PeerAuth::PlaneLeaf {
+            accept: maknae_vault::SanRule::Agent {
+                trust_domain: trust_domain.to_string(),
+            },
+        },
+        admission: Admission::EnrolledAgent,
+        lane: maknae_security::Lane::Local,
+        socket,
     }
 }
 
@@ -341,16 +355,51 @@ pub fn admitted_user_for_test(user: Option<&str>) -> Option<String> {
 /// claim; the home is a separate kernel-stamped attribute. `Read` carries the
 /// client-supplied path as the resource `path` attribute, and an admitted
 /// `session.prompt` carries `destination` and `model`; the context carries the lane.
+/// The channel facts the kernel stamps on a client request (H2, L9).
+#[derive(Clone, Copy)]
+pub enum Stamp<'a> {
+    Client,
+    Agent {
+        agent: &'a maknae_config::AgentId,
+        task: Option<&'a maknae_proto::SignedTask>,
+    },
+}
+
 pub fn build_authz_request(
     verb: &Verb,
     peer_uid: u32,
     home: Option<&std::path::Path>,
     lane: maknae_security::Lane,
     admitted: Option<&crate::provider_choice::AdmittedChoice<'_>>,
+    stamp: &Stamp<'_>,
 ) -> maknae_security::Request {
     use maknae_security::{Action, AttrValue, Attributes, Context, Resource, Subject};
     let mut subject = Attributes::new();
     subject.insert("uid", AttrValue::Int(i64::from(peer_uid)));
+    let channel = match stamp {
+        Stamp::Client => maknae_security::CHANNEL_CLIENT,
+        Stamp::Agent { agent, task } => {
+            subject.insert(
+                maknae_security::SUBJECT_AGENT,
+                AttrValue::Str(agent.as_str().into()),
+            );
+            if let Some(t) = task {
+                subject.insert(
+                    maknae_security::SUBJECT_TASK,
+                    AttrValue::Str(t.task.task_id.to_string()),
+                );
+                subject.insert(
+                    maknae_security::SUBJECT_TASKER,
+                    AttrValue::Str(maknae_proto::tasker_text(&t.task.tasker)),
+                );
+            }
+            maknae_security::CHANNEL_AGENT
+        }
+    };
+    subject.insert(
+        maknae_security::SUBJECT_CHANNEL,
+        AttrValue::Str(channel.into()),
+    );
     if let Some(h) = home.and_then(std::path::Path::to_str) {
         subject.insert(maknae_security::SUBJECT_HOME, AttrValue::Str(h.to_owned()));
     }
@@ -516,6 +565,82 @@ mod tests {
     }
 
     #[test]
+    fn the_agent_class_takes_an_agent_leaf_on_its_own_socket() {
+        assert_eq!(
+            agent_class("/run/maknae/agent.sock".into(), "d"),
+            ChannelClass {
+                peer_auth: PeerAuth::PlaneLeaf {
+                    accept: maknae_vault::SanRule::Agent {
+                        trust_domain: "d".into()
+                    }
+                },
+                admission: Admission::EnrolledAgent,
+                lane: maknae_security::Lane::Local,
+                socket: "/run/maknae/agent.sock".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn the_stamp_names_the_channel_the_agent_and_the_cited_task() {
+        use crate::task::TaskObjectForTest;
+        use maknae_security::{
+            AttrValue, CHANNEL_AGENT, CHANNEL_CLIENT, SUBJECT_AGENT, SUBJECT_CHANNEL, SUBJECT_TASK,
+            SUBJECT_TASKER,
+        };
+        let get = |r: &maknae_security::Request, k: &str| r.subject.0.get(k).cloned();
+        let s = |v: &str| Some(AttrValue::Str(v.into()));
+        let local = maknae_security::Lane::Local;
+        let client = build_authz_request(&Verb::Whoami, 501, None, local, None, &Stamp::Client);
+        assert_eq!(get(&client, SUBJECT_CHANNEL), s(CHANNEL_CLIENT));
+        for k in [SUBJECT_AGENT, SUBJECT_TASK, SUBJECT_TASKER] {
+            assert_eq!(get(&client, k), None, "{k}");
+        }
+        let hobi = maknae_config::AgentId::parse("hobi").unwrap();
+        let bare = build_authz_request(
+            &Verb::Whoami,
+            2001,
+            None,
+            local,
+            None,
+            &Stamp::Agent {
+                agent: &hobi,
+                task: None,
+            },
+        );
+        assert_eq!(get(&bare, SUBJECT_CHANNEL), s(CHANNEL_AGENT));
+        assert_eq!(get(&bare, SUBJECT_AGENT), s("hobi"));
+        assert_eq!(get(&bare, SUBJECT_TASK), None);
+        assert_eq!(get(&bare, SUBJECT_TASKER), None);
+        let task = maknae_proto::SignedTask {
+            task: maknae_proto::TaskObject::for_test("hobi", 1002),
+            signature: maknae_proto::TaskSignature {
+                alg: "test".into(),
+                leaf: maknae_proto::Bytes::new(vec![1].into()),
+                chain: Vec::new(),
+                sig: maknae_proto::Bytes::new(vec![2].into()),
+            },
+        };
+        let tasked = build_authz_request(
+            &Verb::Whoami,
+            2001,
+            None,
+            local,
+            None,
+            &Stamp::Agent {
+                agent: &hobi,
+                task: Some(&task),
+            },
+        );
+        assert_eq!(get(&tasked, SUBJECT_AGENT), s("hobi"));
+        assert_eq!(
+            get(&tasked, SUBJECT_TASK),
+            s(&task.task.task_id.to_string())
+        );
+        assert_eq!(get(&tasked, SUBJECT_TASKER), s("uid:1002"));
+    }
+
+    #[test]
     fn exactly_the_four_file_actions_are_filesystem_verbs() {
         let file_actions = ["fs.read", "fs.write", "fs.delete", "fs.mkdir"];
         let verbs = all_verbs();
@@ -594,24 +719,31 @@ mod tests {
             None,
             maknae_security::Lane::Local,
             Some(&admitted),
+            &Stamp::Client,
         );
         assert_eq!(
             r.resource.0.get("destination"),
             Some(&maknae_security::AttrValue::Str("provider:openai".into()))
         );
-        assert!(
-            build_authz_request(&v, 1002, None, maknae_security::Lane::Local, None)
-                .resource
-                .0
-                .get("destination")
-                .is_none()
-        );
+        assert!(build_authz_request(
+            &v,
+            1002,
+            None,
+            maknae_security::Lane::Local,
+            None,
+            &Stamp::Client,
+        )
+        .resource
+        .0
+        .get("destination")
+        .is_none());
         assert!(build_authz_request(
             &Verb::Ping,
             1002,
             None,
             maknae_security::Lane::Local,
-            Some(&admitted)
+            Some(&admitted),
+            &Stamp::Client,
         )
         .resource
         .0
@@ -664,6 +796,7 @@ mod tests {
             None,
             maknae_security::Lane::Local,
             Some(&admitted),
+            &Stamp::Client,
         );
         assert_eq!(
             r.resource.0.get("model"),
@@ -671,19 +804,25 @@ mod tests {
                 "openrouter/meta/llama-3".into()
             ))
         );
-        assert!(
-            build_authz_request(&v, 1002, None, maknae_security::Lane::Local, None)
-                .resource
-                .0
-                .get("model")
-                .is_none()
-        );
+        assert!(build_authz_request(
+            &v,
+            1002,
+            None,
+            maknae_security::Lane::Local,
+            None,
+            &Stamp::Client,
+        )
+        .resource
+        .0
+        .get("model")
+        .is_none());
         assert!(build_authz_request(
             &Verb::Ping,
             1002,
             None,
             maknae_security::Lane::Local,
-            Some(&admitted)
+            Some(&admitted),
+            &Stamp::Client,
         )
         .resource
         .0
@@ -1094,13 +1233,20 @@ mod tests {
             Some(home),
             maknae_security::Lane::Local,
             None,
+            &Stamp::Client,
         );
         assert_eq!(
             with.subject.0.str(maknae_security::SUBJECT_HOME),
             Some("/home/b")
         );
-        let without =
-            build_authz_request(&Verb::Ping, 501, None, maknae_security::Lane::Local, None);
+        let without = build_authz_request(
+            &Verb::Ping,
+            501,
+            None,
+            maknae_security::Lane::Local,
+            None,
+            &Stamp::Client,
+        );
         assert_eq!(without.subject.0.get(maknae_security::SUBJECT_HOME), None);
     }
 
@@ -1114,13 +1260,21 @@ mod tests {
             Some(home),
             maknae_security::Lane::Local,
             None,
+            &Stamp::Client,
         );
         assert_eq!(req.subject.0.get(maknae_security::SUBJECT_HOME), None);
     }
 
     #[test]
     fn request_carries_uid_lossless_at_both_extremes() {
-        let r = build_authz_request(&Verb::Ping, 0, None, maknae_security::Lane::Local, None);
+        let r = build_authz_request(
+            &Verb::Ping,
+            0,
+            None,
+            maknae_security::Lane::Local,
+            None,
+            &Stamp::Client,
+        );
         assert_eq!(
             r.subject.0.get("uid"),
             Some(&maknae_security::AttrValue::Int(0))
@@ -1131,6 +1285,7 @@ mod tests {
             None,
             maknae_security::Lane::Local,
             None,
+            &Stamp::Client,
         );
         assert_eq!(
             r.subject.0.get("uid"),
@@ -1140,7 +1295,14 @@ mod tests {
 
     #[test]
     fn request_action_matches_taxonomy_and_resource_is_empty_for_non_read() {
-        let r = build_authz_request(&Verb::Whoami, 501, None, maknae_security::Lane::Local, None);
+        let r = build_authz_request(
+            &Verb::Whoami,
+            501,
+            None,
+            maknae_security::Lane::Local,
+            None,
+            &Stamp::Client,
+        );
         assert_eq!(r.action.0, "admin.whoami");
         assert!(r.resource.0.is_empty());
         // Context is no longer empty: every request carries its lane (ADR-0009 D8).
@@ -1162,6 +1324,7 @@ mod tests {
             None,
             maknae_security::Lane::Local,
             None,
+            &Stamp::Client,
         );
         assert_eq!(r.action.0, "fs.read");
         assert_eq!(
@@ -1183,8 +1346,10 @@ mod tests {
 
         // The same verb on both lanes: the stamp follows the ARGUMENT, so it cannot
         // be a function of anything the client sent.
-        let local = build_authz_request(&Verb::Whoami, 501, None, Lane::Local, None);
-        let remote = build_authz_request(&Verb::Whoami, 501, None, Lane::Remote, None);
+        let local =
+            build_authz_request(&Verb::Whoami, 501, None, Lane::Local, None, &Stamp::Client);
+        let remote =
+            build_authz_request(&Verb::Whoami, 501, None, Lane::Remote, None, &Stamp::Client);
         assert_eq!(
             local.context.0.get(CONTEXT_DAC_LANE),
             Some(&AttrValue::Str("local".into()))
@@ -1205,6 +1370,7 @@ mod tests {
             None,
             Lane::Local,
             None,
+            &Stamp::Client,
         );
         assert_eq!(
             smuggled.context.0.get(CONTEXT_DAC_LANE),
@@ -1532,7 +1698,14 @@ mod tests {
     #[test]
     fn only_read_carries_a_resource_attribute() {
         for v in all_verbs() {
-            let r = build_authz_request(&v, 501, None, maknae_security::Lane::Local, None);
+            let r = build_authz_request(
+                &v,
+                501,
+                None,
+                maknae_security::Lane::Local,
+                None,
+                &Stamp::Client,
+            );
             if matches!(v, Verb::Read { .. }) {
                 assert!(
                     r.resource.0.str("path").is_some(),
@@ -1560,6 +1733,7 @@ mod tests {
             None,
             maknae_security::Lane::Local,
             None,
+            &Stamp::Client,
         );
         assert!(!format!("{r:?}").contains(&hash));
         assert_eq!(
@@ -1714,7 +1888,14 @@ mod tests {
     #[test]
     fn no_client_request_carries_the_initiator() {
         for v in all_verbs() {
-            let r = build_authz_request(&v, 0, None, maknae_security::Lane::Local, None);
+            let r = build_authz_request(
+                &v,
+                0,
+                None,
+                maknae_security::Lane::Local,
+                None,
+                &Stamp::Client,
+            );
             assert!(
                 r.subject
                     .0
@@ -1740,7 +1921,14 @@ mod tests {
         ] {
             let dbg = format!(
                 "{:?}",
-                build_authz_request(&v, 501, None, maknae_security::Lane::Local, None)
+                build_authz_request(
+                    &v,
+                    501,
+                    None,
+                    maknae_security::Lane::Local,
+                    None,
+                    &Stamp::Client,
+                )
             );
             for s in ["SENTINEL", "424242"] {
                 assert!(!dbg.contains(s), "{v:?}: {dbg}");

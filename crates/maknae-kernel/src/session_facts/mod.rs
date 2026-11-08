@@ -56,9 +56,8 @@ impl crate::session::SessionFacts for HostSessionFacts {
         uid: u32,
     ) -> Result<crate::groupres::Membership, crate::groupres::AuthzError> {
         match admission {
-            crate::handler::Admission::MaknaeGroupMember => {
-                crate::groupres::uid_in_maknae_group(uid)
-            }
+            crate::handler::Admission::MaknaeGroupMember
+            | crate::handler::Admission::EnrolledAgent => crate::groupres::uid_in_maknae_group(uid),
         }
     }
 
@@ -91,6 +90,21 @@ mod tests {
         assert_eq!(
             host(AccountSource::None)
                 .membership(crate::handler::Admission::MaknaeGroupMember, 4_000_000_000),
+            Err(crate::groupres::AuthzError::NoUser)
+        );
+    }
+
+    #[test]
+    fn an_agents_membership_is_the_same_group_read() {
+        use crate::handler::Admission;
+        let me = nix::unistd::geteuid().as_raw();
+        let h = host(AccountSource::None);
+        assert_eq!(
+            h.membership(Admission::EnrolledAgent, me),
+            h.membership(Admission::MaknaeGroupMember, me)
+        );
+        assert_eq!(
+            h.membership(Admission::EnrolledAgent, 4_000_000_000),
             Err(crate::groupres::AuthzError::NoUser)
         );
     }

@@ -2,7 +2,7 @@
 //! attempt; its progress and completion are client reported.
 use crate::{
     blocking_guard::AUDIT_APPEND_TIMEOUT,
-    handler::{build_authz_request, delegated_plan, discharge_plan, lexical_pregate},
+    handler::{build_authz_request, delegated_plan, discharge_plan, lexical_pregate, Stamp},
     uid_gate::{Busy, UidGate},
     MutationExchange,
 };
@@ -253,12 +253,13 @@ fn authorize<P: Authorizer>(
     home: Option<&Path>,
     authorizer: &P,
     policy_name: &str,
+    stamp: &Stamp<'_>,
 ) -> Result<(DecidedBy, maknae_proto::ObjectLabel), AuthorizeErr> {
     let requests: Vec<_> = prepared
         .paths
         .iter()
         .map(|path| {
-            let mut request = build_authz_request(verb, uid, home, Lane::Local, None);
+            let mut request = build_authz_request(verb, uid, home, Lane::Local, None, stamp);
             request
                 .resource
                 .0
@@ -469,6 +470,7 @@ pub(crate) async fn handle<S, E, P>(
     authz_timeout: Duration,
     caps: AttemptCaps,
     policy_name: &str,
+    stamp: &Stamp<'_>,
 ) -> bool
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -500,11 +502,22 @@ where
     let fd = delegated.take();
     let original = verb.clone();
     let policy_name = policy_name.to_string();
+    let stamped = match stamp {
+        Stamp::Client => None,
+        Stamp::Agent { agent, task } => Some(((*agent).clone(), task.cloned())),
+    };
     let prepared = tokio::time::timeout(
         authz_timeout,
         tokio::task::spawn_blocking(move || {
             let _claim = claim;
             let prepared = prepare(original.clone(), fd, &home, uid, lane)?;
+            let stamp = match &stamped {
+                None => Stamp::Client,
+                Some((agent, task)) => Stamp::Agent {
+                    agent,
+                    task: task.as_ref(),
+                },
+            };
             let decision = authorize(
                 &prepared,
                 &original,
@@ -512,6 +525,7 @@ where
                 Some(&home),
                 &*authorizer,
                 &policy_name,
+                &stamp,
             );
             Ok::<_, String>((prepared, permit, decision))
         }),
@@ -851,19 +865,19 @@ mod tests {
             conversation: None,
             page: None,
         };
-        let plain = build_authz_request(&verb, 1000, None, Lane::Local, None);
+        let plain = build_authz_request(&verb, 1000, None, Lane::Local, None, &Stamp::Client);
         let us = object_label("US", &plain).unwrap();
         assert_eq!(
             (us.level.as_str(), us.categories.len()),
             ("UNCLASSIFIED", 0)
         );
-        let mut marked = build_authz_request(&verb, 1000, None, Lane::Local, None);
+        let mut marked = build_authz_request(&verb, 1000, None, Lane::Local, None, &Stamp::Client);
         marked.resource.0.insert(
             maknae_security::RESOURCE_CLASSIFICATION,
             AttrValue::Str("SECRET//NOFORN".into()),
         );
         assert_eq!(object_label("US", &marked).unwrap().level, "SECRET");
-        let mut foreign = build_authz_request(&verb, 1000, None, Lane::Local, None);
+        let mut foreign = build_authz_request(&verb, 1000, None, Lane::Local, None, &Stamp::Client);
         foreign.resource.0.insert(
             maknae_security::RESOURCE_CLASSIFICATION,
             AttrValue::Str("NOT A LEVEL".into()),
@@ -1183,6 +1197,7 @@ mod tests {
             Duration::from_secs(10),
             AttemptCaps::default(),
             "US",
+            &Stamp::Client,
         );
         let second_emit = Arc::new(Recorder::default());
         let second = async {
@@ -1222,6 +1237,7 @@ mod tests {
                     Duration::from_secs(10),
                     AttemptCaps::default(),
                     "US",
+                    &Stamp::Client,
                 )
                 .await
             );
@@ -1280,6 +1296,7 @@ mod tests {
                     Duration::from_secs(10),
                     AttemptCaps::default(),
                     "US",
+                    &Stamp::Client,
                 )
                 .await
             );
@@ -1315,6 +1332,7 @@ mod tests {
                 Duration::from_secs(1),
                 AttemptCaps::default(),
                 "US",
+                &Stamp::Client,
             )
             .await
         );
@@ -1350,6 +1368,7 @@ mod tests {
                 Duration::from_secs(1),
                 AttemptCaps::default(),
                 "US",
+                &Stamp::Client,
             )
             .await
         );
@@ -1385,6 +1404,7 @@ mod tests {
             Duration::from_millis(20),
             AttemptCaps::default(),
             "US",
+            &Stamp::Client,
         )
         .await;
         assert!(emit
@@ -1419,6 +1439,7 @@ mod tests {
                 Duration::from_secs(1),
                 AttemptCaps::default(),
                 "US",
+                &Stamp::Client,
             )
             .await
         );
@@ -1448,6 +1469,7 @@ mod tests {
                 Duration::from_secs(1),
                 AttemptCaps::default(),
                 "US",
+                &Stamp::Client,
             )
             .await
         );
@@ -1640,6 +1662,7 @@ mod tests {
             Some(&fx.root),
             &pdp,
             "US",
+            &Stamp::Client,
         )
         .expect("both paths decided on the snapshot in force when the mutation began");
         let rule = by.1.expect("the permit cites its allow rule");
@@ -1651,6 +1674,7 @@ mod tests {
             Some(&fx.root),
             &pdp,
             "US",
+            &Stamp::Client,
         )
         .unwrap_err();
         assert!(reason.contains("Write(~/one/two)"), "{reason}");
@@ -1677,6 +1701,7 @@ mod tests {
             Some(&fx.root),
             &pdp,
             "US",
+            &Stamp::Client,
         )
         .unwrap();
         assert!(by.1.is_some(), "the permit itself cites a rule");
@@ -1687,6 +1712,7 @@ mod tests {
             Some(&fx.root),
             &pdp,
             "NO-SUCH-SYSTEM",
+            &Stamp::Client,
         )
         .unwrap_err();
         assert_eq!(reason, "object label unresolved");

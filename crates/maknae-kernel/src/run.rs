@@ -62,8 +62,8 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::authz::{
-    admission_facts, admission_reason, cause_posture, cause_reason, ending_posture, ending_reason,
-    ending_result, revalidate, DenyCause, Ending, FactSource, Revalidation, HOME_RESOLVE_TIMEOUT,
+    admission_facts, admission_reason, admit, ending_posture, ending_reason, ending_result,
+    revalidate, task_for, DenyCause, Ending, FactSource, Revalidation, HOME_RESOLVE_TIMEOUT,
 };
 use crate::baseline_check::{Invalid, Mode};
 use crate::blocking_guard::{
@@ -74,9 +74,10 @@ use crate::boot_gate::authz_boot_gate;
 use crate::groupres::maknae_gid;
 use crate::handler::{
     build_authz_request, build_whoami, discharge_plan, dispatch_verb, lexical_pregate, may_respond,
-    peer_san, verb_to_action, ChannelClass, Dispatch, Drain, ServeOutcome, AUTHZ_DECIDE_TIMEOUT,
+    peer_san, verb_to_action, ChannelClass, Dispatch, Drain, ServeOutcome, Stamp,
+    AUTHZ_DECIDE_TIMEOUT,
 };
-use crate::session::{gather, FactsGate, SessionRecord};
+use crate::session::{gather, FactsGate, SessionChannel, SessionRecord};
 use maknae_proto::{encode_response_zeroizing, ProtoErrCode, ProtoError};
 use maknae_security::{
     combine, finalize, guarded_decide_cited, Authorizer, Decision, RuleCitation,
@@ -735,6 +736,7 @@ pub async fn handle<S, E, P>(
     authz_decide_timeout: Duration,
     delegated: maknae_io::DelegatedFds,
     ops: Arc<dyn AdminOps>,
+    agents: AgentAdmission,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     E: AuditEmit + Send + Sync + 'static,
@@ -759,6 +761,7 @@ pub async fn handle<S, E, P>(
         delegated,
         ops,
         crate::mutation::AttemptCaps::default(),
+        agents,
     )
     .await
 }
@@ -814,11 +817,13 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     // The admin verbs that reach the reload turn.
     ops: Arc<dyn AdminOps>,
     attempt_caps: crate::mutation::AttemptCaps,
+    agents: AgentAdmission,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     E: AuditEmit + Send + Sync + 'static,
     P: Authorizer + Send + Sync + 'static,
 {
+    let emit = Arc::new(SessionEmit::new(emit, session.agent()));
     let _post_request = EndsOnSenderMismatch(Arc::clone(&session));
     let peer_uid = session.uid;
     let session_id = session.session_id;
@@ -987,7 +992,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     }
 
     let action = verb_to_action(&request.verb);
-    if session.expired() {
+    if let Some(ending) = session.expiry() {
         end_session(
             &mut stream,
             &emit,
@@ -996,7 +1001,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             peer_uri.as_deref(),
             (&cfg, class),
             action,
-            Ending::Lifetime,
+            ending,
             &au3_1,
         )
         .await;
@@ -1004,8 +1009,8 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     }
     let facts = gather(&gate, session.admission, peer_uid).await;
     // #115: this request's own lookup names the user and home it is decided on.
-    let (_, peer_user, peer_dir) = admission_facts(&facts.membership);
-    match revalidate(session.uid, peer_uid, &facts) {
+    let (_, peer_user, peer_dir) = admission_facts(session.admission, &facts.membership);
+    match revalidate(session.admission, session.uid, peer_uid, &facts) {
         Revalidation::Continue => {}
         Revalidation::Deny(cause) => {
             report_unanswered(&cause, peer_uid, session_id);
@@ -1024,7 +1029,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             return;
         }
     }
-    if session.expired() {
+    if let Some(ending) = session.expiry() {
         end_session(
             &mut stream,
             &emit,
@@ -1033,12 +1038,44 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             peer_uri.as_deref(),
             (&cfg, class),
             action,
-            Ending::Lifetime,
+            ending,
             &au3_1,
         )
         .await;
         return;
     }
+    let task = match task_for(
+        session.admission,
+        request.task.as_ref(),
+        session.agent(),
+        peer_uid,
+        &agents.tasks,
+    ) {
+        Ok(task) => task,
+        Err(cause) => {
+            end_session(
+                &mut stream,
+                &emit,
+                (&host, &socket),
+                (&session, peer_user.as_deref()),
+                peer_uri.as_deref(),
+                (&cfg, class),
+                action,
+                Ending::Denied(cause),
+                &au3_1,
+            )
+            .await;
+            return;
+        }
+    };
+    let stamp = match &session.channel {
+        SessionChannel::Client => Stamp::Client,
+        SessionChannel::Agent { agent, .. } => Stamp::Agent {
+            agent,
+            task: task.as_deref(),
+        },
+    };
+    emit.cite(&stamp);
 
     // 2½. THE PDP (spec D2, #77): every request is decided through the seam
     // before the audit-then-respond step. For a Read, the lexical pre-gate
@@ -1197,6 +1234,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             authz_decide_timeout,
             attempt_caps,
             &classification_policy_name,
+            &stamp,
         )
         .await;
         close_bounded(&mut stream).await;
@@ -1263,7 +1301,14 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     // parent contract: combine([guarded_decide]) + finalize. Timeout or join
     // failure converts AT THE CALL SITE to a Deny with its own reason
     // (finalize(Indeterminate) would hardcode a different string).
-    let sec_req = build_authz_request(&request.verb, peer_uid, None, lane, admitted.as_ref());
+    let sec_req = build_authz_request(
+        &request.verb,
+        peer_uid,
+        None,
+        lane,
+        admitted.as_ref(),
+        &stamp,
+    );
     let permitted_req = sec_req.clone();
     let authz_breaker = authz_decide_breaker();
     // #275: the role rides out WITH the verdict so the audit record attests the
@@ -2765,6 +2810,7 @@ async fn emit_termination<E: AuditEmit + Send + Sync>(
         &wctx.au3_1,
     );
     rec.subject.user = admitted_user(session.user.as_deref());
+    rec.subject.agent = session.agent().map(|a| a.as_str().to_string());
     if let Err(e) = emit
         .emit_within(
             &rec,
@@ -2788,7 +2834,7 @@ async fn emit_connect_deny<E: AuditEmit + Send + Sync>(
     peer_uri: Option<&str>,
     user: Option<&str>,
     session_id: u64,
-    cause: &DenyCause,
+    ending: &Ending,
 ) {
     let mut rec = make_record(
         "connection",
@@ -2802,9 +2848,9 @@ async fn emit_connect_deny<E: AuditEmit + Send + Sync>(
         1,
         "connect",
         None,
-        "deny",
-        cause_reason(cause),
-        cause_posture(cause),
+        ending_result(ending),
+        ending_reason(ending),
+        ending_posture(ending),
         &wctx.au3_1,
     );
     // #275: the peer identity, bounded and audit-only.
@@ -2825,6 +2871,85 @@ async fn emit_connect_deny<E: AuditEmit + Send + Sync>(
 // ---------------------------------------------------------------------------
 // Layer 2: the accept loop.
 // ---------------------------------------------------------------------------
+
+/// What the agent channel is admitted and resolved against (H4): the enrollment view
+/// at connect, and the task store per request.
+#[derive(Clone)]
+pub struct AgentAdmission {
+    pub view: Arc<dyn crate::enrollment::EnrollmentView>,
+    pub tasks: Arc<crate::task::TaskStore>,
+}
+
+impl AgentAdmission {
+    #[cfg(any(test, feature = "hermetic-test-seam"))]
+    pub fn none() -> Self {
+        AgentAdmission {
+            view: Arc::new(crate::enrollment::FixedEnrollment(Default::default())),
+            tasks: Arc::new(crate::task::TaskStore::new()),
+        }
+    }
+}
+
+/// Stamps the session's agent, and the task its request cites once resolved, on every
+/// record the session appends.
+struct SessionEmit<E> {
+    inner: Arc<E>,
+    agent: Option<String>,
+    task: OnceLock<(String, String)>,
+}
+
+impl<E> SessionEmit<E> {
+    fn new(inner: Arc<E>, agent: Option<&maknae_config::AgentId>) -> Self {
+        SessionEmit {
+            inner,
+            agent: agent.map(|a| a.as_str().to_string()),
+            task: OnceLock::new(),
+        }
+    }
+
+    fn cite(&self, stamp: &Stamp<'_>) {
+        match stamp {
+            Stamp::Client | Stamp::Agent { task: None, .. } => {}
+            Stamp::Agent { task: Some(t), .. } => {
+                let _ = self.task.set((
+                    t.task.task_id.to_string(),
+                    maknae_proto::tasker_text(&t.task.tasker),
+                ));
+            }
+        }
+    }
+
+    fn stamped(&self, rec: &AuditRecord) -> AuditRecord {
+        let mut rec = rec.clone();
+        if let Some(agent) = &self.agent {
+            rec.subject.agent = Some(agent.clone());
+        }
+        if let Some((id, tasker)) = self.task.get() {
+            rec.subject.task_id = Some(id.clone());
+            rec.subject.tasker = Some(tasker.clone());
+        }
+        rec
+    }
+}
+
+impl<E: AuditEmit + Send + Sync + 'static> AuditEmit for SessionEmit<E> {
+    fn emit(
+        &self,
+        rec: &AuditRecord,
+    ) -> impl Future<Output = Result<(), maknae_audit_append::AuditError>> + Send {
+        let (inner, rec) = (Arc::clone(&self.inner), self.stamped(rec));
+        async move { inner.emit(&rec).await }
+    }
+
+    fn emit_within(
+        &self,
+        rec: &AuditRecord,
+        bound: Duration,
+    ) -> impl Future<Output = Result<(), maknae_audit_append::AuditError>> + Send {
+        let (inner, rec) = (Arc::clone(&self.inner), self.stamped(rec));
+        async move { inner.emit_within(&rec, bound).await }
+    }
+}
 
 /// One accepted, authenticated connection with the peer facts the daemon polices.
 pub struct Conn<S> {
@@ -3033,6 +3158,7 @@ pub async fn accept_loop<A, E, P>(
     gate: Arc<FactsGate>,
     // The absolute bound on one connection, checked between stages (ADR-0006 decision 4's visit clock).
     lifetime: Duration,
+    agents: AgentAdmission,
 ) -> ServeOutcome
 where
     A: PlaneAccept + Send + Sync + 'static,
@@ -3170,6 +3296,7 @@ where
                                 let egress = Arc::clone(&egress);
                                 let ops = Arc::clone(&ops);
                                 let gate = Arc::clone(&gate);
+                                let agents = agents.clone();
                                 handlers.spawn(async move {
                                     let _permit = permit; // held for the connection's life
                                     let opened_at = Instant::now();
@@ -3189,12 +3316,39 @@ where
                                                 sender,
                                             } = conn;
                                             let peer_uri = peer_san(&peer).map(str::to_string);
+                                            let admitted = admit(
+                                                class.admission,
+                                                &peer,
+                                                uid,
+                                                &*agents.view,
+                                            )
+                                            .map_err(Ending::Denied)
+                                            .and_then(|()| {
+                                                SessionChannel::of(class.admission, &peer)
+                                            });
+                                            let channel = match admitted {
+                                                Ok(channel) => channel,
+                                                Err(ending) => {
+                                                    emit_connect_deny(
+                                                        &*emit,
+                                                        &wctx,
+                                                        uid,
+                                                        peer_uri.as_deref(),
+                                                        None,
+                                                        session_id,
+                                                        &ending,
+                                                    )
+                                                    .await;
+                                                    close_bounded(&mut stream).await;
+                                                    return;
+                                                }
+                                            };
                                             let facts =
                                                 gather(&gate, class.admission, uid).await;
                                             // #275: the username rides the membership lookup.
                                             let (_, user, _) =
-                                                admission_facts(&facts.membership);
-                                            match revalidate(uid, uid, &facts) {
+                                                admission_facts(class.admission, &facts.membership);
+                                            match revalidate(class.admission, uid, uid, &facts) {
                                                 Revalidation::Deny(cause) => {
                                                     report_unanswered(&cause, uid, session_id);
                                                     emit_connect_deny(
@@ -3204,7 +3358,7 @@ where
                                                         peer_uri.as_deref(),
                                                         user.as_deref(),
                                                         session_id,
-                                                        &cause,
+                                                        &Ending::Denied(cause),
                                                     )
                                                     .await;
                                                     close_bounded(&mut stream).await;
@@ -3216,6 +3370,7 @@ where
                                                         session_id,
                                                         lane: class.lane,
                                                         admission: class.admission,
+                                                        channel,
                                                         sender,
                                                         account: facts.account,
                                                         seq: Seq::new(),
@@ -3247,6 +3402,7 @@ where
                                                         AUTHZ_DECIDE_TIMEOUT,
                                                         delegated,
                                                         ops,
+                                                        agents,
                                                     )
                                                     .await;
                                                     emit_termination(
@@ -4871,6 +5027,7 @@ where
                     None,
                     maknae_security::Lane::Local,
                     None,
+                    &Stamp::Client,
                 )
             };
             let self_holds = (requester == target).then(|| {
@@ -7272,6 +7429,12 @@ where
         bound: Duration::from_millis(maknae_config::GROUP_LOOKUP_TIMEOUT_MS),
     });
     let lifetime = handler_drain_bound(&transport, egress.deadline());
+    let agents = AgentAdmission {
+        view: Arc::new(crate::enrollment::SnapshotEnrollment(Arc::clone(
+            &authorizer,
+        ))),
+        tasks: Arc::new(crate::task::TaskStore::new()),
+    };
     let outcome = accept_loop(
         listener,
         class,
@@ -7292,6 +7455,7 @@ where
         drain.clone(),
         gate,
         lifetime,
+        agents,
     )
     .await;
     reloader.stop(&reloads).await;
@@ -8731,6 +8895,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             None,
             maknae_security::Lane::Local,
             None,
+            &crate::handler::Stamp::Client,
         );
         assert_eq!(
             pdp.decide(&req),
@@ -8816,6 +8981,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             None,
             maknae_security::Lane::Local,
             None,
+            &crate::handler::Stamp::Client,
         ))
     }
 
@@ -8866,6 +9032,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             None,
             maknae_security::Lane::Local,
             None,
+            &crate::handler::Stamp::Client,
         );
         assert_eq!(
             maknae_security::Authorizer::decide(&pdp, &contained),
@@ -12365,6 +12532,7 @@ mod home_resolution_tests {
             Duration::from_secs(10),
             maknae_io::DelegatedFds::new(1),
             baseline_stub::no_baseline(),
+            crate::run::AgentAdmission::none(),
         )
         .await;
         let caps = maknae_proto::FrameCaps {
@@ -12679,6 +12847,7 @@ mod admission_bound_tests {
                 Duration::from_secs(10),
                 maknae_io::DelegatedFds::new(1),
                 baseline_stub::no_baseline(),
+                crate::run::AgentAdmission::none(),
             ),
         )
         .await
@@ -12717,7 +12886,16 @@ mod admission_bound_tests {
             au3_1: serde_json::json!({}),
         };
         let t0 = tokio::time::Instant::now();
-        emit_connect_deny(&emit, &wctx, 7, None, None, 1, &DenyCause::NotMember).await;
+        emit_connect_deny(
+            &emit,
+            &wctx,
+            7,
+            None,
+            None,
+            1,
+            &Ending::Denied(DenyCause::NotMember),
+        )
+        .await;
         assert!(t0.elapsed() < bound() + Duration::from_secs(1));
         assert_eq!(emit.bounded_calls.load(Ordering::SeqCst), 1);
     }
@@ -12882,7 +13060,10 @@ mod graph_audit_bound_tests {
     struct Stall;
 
     impl AuditEmit for Stall {
-        fn emit(&self, _: &AuditRecord) -> impl Future<Output = Result<(), AuditError>> + Send {
+        fn emit(
+            &self,
+            _: &AuditRecord,
+        ) -> impl Future<Output = Result<(), maknae_audit_append::AuditError>> + Send {
             std::future::pending()
         }
     }
@@ -12976,6 +13157,7 @@ mod graph_audit_bound_tests {
             [
                 ("src/mutation.rs", "tokio::time::timeout_at(deadline, emit.emit(&record)).await,"),
                 ("src/mutation.rs", "emit.emit(&record),"),
+                ("src/run.rs", "async move { inner.emit(&rec).await }"),
                 (
                     "src/run.rs",
                     "match tokio::time::timeout(AUDIT_DRAIN_SHUTDOWN_TIMEOUT, emit.emit(&stop)).await {"
@@ -13606,6 +13788,7 @@ mod reload_fixture {
                     None,
                     maknae_security::Lane::Local,
                     None,
+                    &crate::handler::Stamp::Client,
                 ))
         }
 
@@ -13737,7 +13920,14 @@ mod reload_fixture {
 
         /// The request the accept loop builds for `verb` from `uid` on the local lane.
         pub(super) fn permitted_request(verb: &Verb, uid: u32) -> maknae_security::Request {
-            crate::handler::build_authz_request(verb, uid, None, maknae_security::Lane::Local, None)
+            crate::handler::build_authz_request(
+                verb,
+                uid,
+                None,
+                maknae_security::Lane::Local,
+                None,
+                &crate::handler::Stamp::Client,
+            )
         }
 
         fn next_session(&self) -> u64 {
@@ -13760,6 +13950,7 @@ mod reload_fixture {
                 None,
                 maknae_security::Lane::Local,
                 None,
+                &crate::handler::Stamp::Client,
             );
             req.action = maknae_security::Action(action.to_string());
             self.reloader.authorizer.decide(&req)
@@ -15867,6 +16058,7 @@ mod reload_tests {
                 None,
                 maknae_security::Lane::Local,
                 None,
+                &crate::handler::Stamp::Client,
             ))
     }
 
@@ -15881,6 +16073,7 @@ mod reload_tests {
             None,
             maknae_security::Lane::Local,
             None,
+            &crate::handler::Stamp::Client,
         );
         r.subject.0.insert(
             maknae_security::SUBJECT_CHANNEL,
@@ -17139,6 +17332,7 @@ mod reload_tests {
                 baseline_stub::serving(),
                 FactsGate::allow_as(None, None),
                 Duration::MAX,
+                crate::run::AgentAdmission::none(),
             ),
         )
         .await
@@ -17244,6 +17438,7 @@ mod reload_tests {
                 baseline_stub::serving(),
                 FactsGate::allow_as(None, None),
                 Duration::MAX,
+                crate::run::AgentAdmission::none(),
             ),
         )
         .await
@@ -17902,6 +18097,7 @@ mod reload_tests {
                 None,
                 maknae_security::Lane::Local,
                 None,
+                &crate::handler::Stamp::Client,
             ))
     }
 
@@ -19342,6 +19538,7 @@ mod reload_tests {
                     None,
                     maknae_security::Lane::Local,
                     None,
+                    &crate::handler::Stamp::Client,
                 ),
             ),
             adversary(),

@@ -1,7 +1,16 @@
 //! Connection-admission and per-request session decisions (spec §5, #115). Pure; T1/0-missed.
+use std::sync::Arc;
+
+use maknae_config::AgentId;
+use maknae_proto::{SignedTask, TaskId};
+use maknae_vault::ChannelPeer;
+
+use crate::enrollment::EnrollmentView;
 use crate::groupres::AuthzError;
+use crate::handler::Admission;
 use crate::session::Facts;
 use crate::session_facts::{AccountFact, AccountState, NotCheckedWhy};
+use crate::task::{TaskRefusal, TaskStore};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DenyCause {
@@ -9,6 +18,11 @@ pub enum DenyCause {
     Account(AccountState),
     SenderMismatch,
     Infrastructure(FactSource),
+    AgentAccount,
+    NotEnrolled,
+    HumanAccount,
+    TaskOnClientChannel,
+    Task(TaskRefusal),
 }
 
 /// The fact source that could not answer, named in an infrastructure denial.
@@ -44,28 +58,77 @@ pub enum Ending {
     Disconnect,
     Idle,
     Lifetime,
+    LeafExpired,
     Denied(DenyCause),
+}
+
+/// The connection-time standing of `uid` on a channel of class `class`, against the
+/// installed enrollment (H4).
+pub fn admit(
+    class: Admission,
+    peer: &ChannelPeer,
+    uid: u32,
+    view: &dyn EnrollmentView,
+) -> Result<(), DenyCause> {
+    match class {
+        Admission::EnrolledAgent => match peer {
+            ChannelPeer::Agent { agent, .. } if view.agent_uid(agent) == Some(uid) => Ok(()),
+            ChannelPeer::Agent { .. } | ChannelPeer::Certless | ChannelPeer::Certified(_) => {
+                Err(DenyCause::NotEnrolled)
+            }
+        },
+        Admission::MaknaeGroupMember if view.is_enrolled(uid) => Err(DenyCause::AgentAccount),
+        Admission::MaknaeGroupMember => Ok(()),
+    }
+}
+
+/// The task a request cites, resolved for this channel (L6).
+pub fn task_for(
+    admission: Admission,
+    cited: Option<&TaskId>,
+    agent: Option<&AgentId>,
+    uid: u32,
+    store: &TaskStore,
+) -> Result<Option<Arc<SignedTask>>, DenyCause> {
+    let Some(id) = cited else {
+        return Ok(None);
+    };
+    match (admission, agent) {
+        (Admission::MaknaeGroupMember, _) => Err(DenyCause::TaskOnClientChannel),
+        (Admission::EnrolledAgent, None) => Err(DenyCause::NotEnrolled),
+        (Admission::EnrolledAgent, Some(agent)) => store
+            .resolve(id, agent, uid)
+            .map(Some)
+            .map_err(DenyCause::Task),
+    }
 }
 
 /// Whether the session may serve this request, on facts gathered for it alone
 /// (ADR-0006 decision 4): the uid map, then membership and account state.
-pub fn revalidate(bound_uid: u32, request_uid: u32, f: &Facts) -> Revalidation {
+pub fn revalidate(
+    admission: Admission,
+    bound_uid: u32,
+    request_uid: u32,
+    f: &Facts,
+) -> Revalidation {
     if bound_uid != request_uid {
         return Revalidation::Deny(DenyCause::Infrastructure(FactSource::SessionMap));
     }
     if !f.answered {
         return Revalidation::Deny(DenyCause::Infrastructure(FactSource::SessionFacts));
     }
-    match &f.membership {
-        Err(AuthzError::Resolve(_) | AuthzError::Unanswered { .. }) => {
-            return Revalidation::Deny(DenyCause::Infrastructure(FactSource::Group));
-        }
-        Err(AuthzError::NoUser) => return Revalidation::Deny(DenyCause::NotMember),
-        Ok(m) => {
-            if !m.in_group {
-                return Revalidation::Deny(DenyCause::NotMember);
-            }
-        }
+    let refused = match (admission, &f.membership) {
+        (
+            Admission::MaknaeGroupMember | Admission::EnrolledAgent,
+            Err(AuthzError::Resolve(_) | AuthzError::Unanswered { .. }),
+        ) => Some(DenyCause::Infrastructure(FactSource::Group)),
+        (Admission::MaknaeGroupMember, Err(AuthzError::NoUser)) => Some(DenyCause::NotMember),
+        (Admission::MaknaeGroupMember, Ok(m)) => (!m.in_group).then_some(DenyCause::NotMember),
+        (Admission::EnrolledAgent, Err(AuthzError::NoUser)) => Some(DenyCause::NotEnrolled),
+        (Admission::EnrolledAgent, Ok(m)) => m.in_group.then_some(DenyCause::HumanAccount),
+    };
+    if let Some(cause) = refused {
+        return Revalidation::Deny(cause);
     }
     match &f.account {
         AccountFact::Checked(AccountState::Active) | AccountFact::NotChecked(_) => {
@@ -94,13 +157,40 @@ pub fn cause_reason(c: &DenyCause) -> &'static str {
         DenyCause::Infrastructure(FactSource::SessionMap) => "infrastructure:session-map",
         DenyCause::Infrastructure(FactSource::Audit) => "infrastructure:audit",
         DenyCause::Infrastructure(FactSource::SessionFacts) => "infrastructure:session-facts",
+        DenyCause::AgentAccount => "agent-account",
+        DenyCause::NotEnrolled => "not-enrolled",
+        DenyCause::HumanAccount => "human-account",
+        DenyCause::TaskOnClientChannel => "task-on-client-channel",
+        DenyCause::Task(r) => task_reason(r),
+    }
+}
+
+fn task_reason(r: &TaskRefusal) -> &'static str {
+    match r {
+        TaskRefusal::Unknown => "task-unknown",
+        TaskRefusal::OtherAgent => "task-other-agent",
+        TaskRefusal::Schema(_) => "task-schema",
+        TaskRefusal::Denied(_) => "task-denied",
+        TaskRefusal::AtCapacity { .. } => "task-at-capacity",
+        TaskRefusal::ParentNotHeld => "task-parent-not-held",
+        TaskRefusal::AgentGone => "task-agent-gone",
+        TaskRefusal::Random => "task-random",
+        TaskRefusal::Audit(_) => "task-audit",
+        TaskRefusal::Unsigned => "task-unsigned",
     }
 }
 
 pub fn cause_posture(c: &DenyCause) -> &'static str {
     match c {
         DenyCause::Infrastructure(_) => "unavailable",
-        DenyCause::NotMember | DenyCause::Account(_) | DenyCause::SenderMismatch => "unauthorized",
+        DenyCause::NotMember
+        | DenyCause::Account(_)
+        | DenyCause::SenderMismatch
+        | DenyCause::AgentAccount
+        | DenyCause::NotEnrolled
+        | DenyCause::HumanAccount
+        | DenyCause::TaskOnClientChannel
+        | DenyCause::Task(_) => "unauthorized",
     }
 }
 
@@ -126,6 +216,7 @@ pub fn ending_reason(e: &Ending) -> &'static str {
         Ending::Disconnect => "disconnect",
         Ending::Idle => "idle",
         Ending::Lifetime => "lifetime",
+        Ending::LeafExpired => "leaf-expired",
         Ending::Denied(c) => cause_reason(c),
     }
 }
@@ -133,26 +224,33 @@ pub fn ending_reason(e: &Ending) -> &'static str {
 pub fn ending_result(e: &Ending) -> &'static str {
     match e {
         Ending::Disconnect => "permit",
-        Ending::Idle | Ending::Lifetime | Ending::Denied(_) => "deny",
+        Ending::Idle | Ending::Lifetime | Ending::LeafExpired | Ending::Denied(_) => "deny",
     }
 }
 
 pub fn ending_posture(e: &Ending) -> &'static str {
     match e {
-        Ending::Disconnect | Ending::Idle | Ending::Lifetime => "stopped",
+        Ending::Disconnect | Ending::Idle | Ending::Lifetime | Ending::LeafExpired => "stopped",
         Ending::Denied(c) => cause_posture(c),
     }
 }
 
 pub fn admission_facts(
+    admission: Admission,
     looked_up: &Result<crate::groupres::Membership, AuthzError>,
 ) -> (bool, Option<String>, Option<std::path::PathBuf>) {
     match looked_up {
-        Ok(m) => (
-            m.in_group,
-            Some(m.user.clone()),
-            m.in_group.then(|| m.dir.clone()),
-        ),
+        Ok(m) => {
+            let admitted = match admission {
+                Admission::MaknaeGroupMember => m.in_group,
+                Admission::EnrolledAgent => !m.in_group,
+            };
+            (
+                m.in_group,
+                Some(m.user.clone()),
+                admitted.then(|| m.dir.clone()),
+            )
+        }
         Err(AuthzError::Unanswered { user, .. }) => (false, Some(user.clone()), None),
         Err(AuthzError::Resolve(_) | AuthzError::NoUser) => (false, None, None),
     }
@@ -351,7 +449,10 @@ mod tests {
     #[test]
     fn a_member_carries_its_user_and_raw_home_through() {
         assert_eq!(
-            admission_facts(&Ok(membership(true, "b-435-sentinel"))),
+            admission_facts(
+                Admission::MaknaeGroupMember,
+                &Ok(membership(true, "b-435-sentinel"))
+            ),
             (
                 true,
                 Some("b-435-sentinel".to_string()),
@@ -363,7 +464,10 @@ mod tests {
     #[test]
     fn a_non_member_keeps_its_user_but_never_its_home() {
         assert_eq!(
-            admission_facts(&Ok(membership(false, "c-435-sentinel"))),
+            admission_facts(
+                Admission::MaknaeGroupMember,
+                &Ok(membership(false, "c-435-sentinel"))
+            ),
             (false, Some("c-435-sentinel".to_string()), None)
         );
     }
@@ -371,14 +475,17 @@ mod tests {
     #[test]
     fn a_failed_lookup_admits_no_one_and_carries_no_home() {
         for failed in [AuthzError::Resolve("nss".into()), AuthzError::NoUser] {
-            assert_eq!(admission_facts(&Err(failed)), (false, None, None));
+            assert_eq!(
+                admission_facts(Admission::MaknaeGroupMember, &Err(failed)),
+                (false, None, None)
+            );
         }
         let unanswered = AuthzError::Unanswered {
             user: "d-115-sentinel".into(),
             why: "EIO".into(),
         };
         assert_eq!(
-            admission_facts(&Err(unanswered)),
+            admission_facts(Admission::MaknaeGroupMember, &Err(unanswered)),
             (false, Some("d-115-sentinel".to_string()), None)
         );
     }
@@ -676,7 +783,10 @@ mod tests {
 
     #[test]
     fn an_active_member_continues() {
-        assert_eq!(revalidate(7, 7, &member(true)), Revalidation::Continue);
+        assert_eq!(
+            revalidate(Admission::MaknaeGroupMember, 7, 7, &member(true)),
+            Revalidation::Continue
+        );
     }
 
     #[test]
@@ -684,7 +794,7 @@ mod tests {
         let mut f = member(false);
         f.membership = Err(AuthzError::Resolve("nss".into()));
         assert_eq!(
-            revalidate(7, 8, &f),
+            revalidate(Admission::MaknaeGroupMember, 7, 8, &f),
             deny(DenyCause::Infrastructure(FactSource::SessionMap))
         );
     }
@@ -694,11 +804,11 @@ mod tests {
         let mut f = member(true);
         f.answered = false;
         assert_eq!(
-            revalidate(7, 7, &f),
+            revalidate(Admission::MaknaeGroupMember, 7, 7, &f),
             deny(DenyCause::Infrastructure(FactSource::SessionFacts))
         );
         assert_eq!(
-            revalidate(7, 8, &f),
+            revalidate(Admission::MaknaeGroupMember, 7, 8, &f),
             deny(DenyCause::Infrastructure(FactSource::SessionMap))
         );
     }
@@ -722,7 +832,7 @@ mod tests {
         f.membership = Err(AuthzError::Resolve("nss".into()));
         f.account = AccountFact::Checked(AccountState::Locked);
         assert_eq!(
-            revalidate(7, 7, &f),
+            revalidate(Admission::MaknaeGroupMember, 7, 7, &f),
             deny(DenyCause::Infrastructure(FactSource::Group))
         );
     }
@@ -736,7 +846,7 @@ mod tests {
         });
         f.account = AccountFact::Checked(AccountState::Locked);
         assert_eq!(
-            revalidate(7, 7, &f),
+            revalidate(Admission::MaknaeGroupMember, 7, 7, &f),
             deny(DenyCause::Infrastructure(FactSource::Group))
         );
     }
@@ -746,14 +856,20 @@ mod tests {
         let mut f = member(true);
         f.membership = Err(AuthzError::NoUser);
         f.account = AccountFact::Checked(AccountState::Locked);
-        assert_eq!(revalidate(7, 7, &f), deny(DenyCause::NotMember));
+        assert_eq!(
+            revalidate(Admission::MaknaeGroupMember, 7, 7, &f),
+            deny(DenyCause::NotMember)
+        );
     }
 
     #[test]
     fn a_non_member_is_not_a_member() {
         let mut f = member(false);
         f.account = AccountFact::Checked(AccountState::Locked);
-        assert_eq!(revalidate(7, 7, &f), deny(DenyCause::NotMember));
+        assert_eq!(
+            revalidate(Admission::MaknaeGroupMember, 7, 7, &f),
+            deny(DenyCause::NotMember)
+        );
     }
 
     #[test]
@@ -761,7 +877,7 @@ mod tests {
         let mut f = member(true);
         f.account = AccountFact::Checked(AccountState::Unknown("userdb".into()));
         assert_eq!(
-            revalidate(7, 7, &f),
+            revalidate(Admission::MaknaeGroupMember, 7, 7, &f),
             deny(DenyCause::Infrastructure(FactSource::Account))
         );
     }
@@ -775,7 +891,10 @@ mod tests {
         ] {
             let mut f = member(true);
             f.account = AccountFact::Checked(state.clone());
-            assert_eq!(revalidate(7, 7, &f), deny(DenyCause::Account(state)));
+            assert_eq!(
+                revalidate(Admission::MaknaeGroupMember, 7, 7, &f),
+                deny(DenyCause::Account(state))
+            );
         }
     }
 
@@ -788,7 +907,10 @@ mod tests {
         ] {
             let mut f = member(true);
             f.account = AccountFact::NotChecked(why);
-            assert_eq!(revalidate(7, 7, &f), Revalidation::Continue);
+            assert_eq!(
+                revalidate(Admission::MaknaeGroupMember, 7, 7, &f),
+                Revalidation::Continue
+            );
         }
     }
 
@@ -854,6 +976,377 @@ mod tests {
                 "{cause:?}"
             );
         }
+    }
+
+    const HOBI: u32 = 2001;
+    const JIN: u32 = 2002;
+
+    fn agent(id: &str) -> AgentId {
+        AgentId::parse(id).unwrap()
+    }
+
+    fn enrolled(pairs: &[(&str, u32)]) -> crate::enrollment::FixedEnrollment {
+        crate::enrollment::FixedEnrollment(pairs.iter().map(|(a, u)| (agent(a), *u)).collect())
+    }
+
+    fn leaf(id: &str, not_after: std::time::SystemTime) -> ChannelPeer {
+        ChannelPeer::Agent {
+            san: maknae_vault::agent_uri_san("d", &agent(id)),
+            agent: agent(id),
+            not_after,
+        }
+    }
+
+    fn hobi_leaf() -> ChannelPeer {
+        leaf(
+            "hobi",
+            std::time::SystemTime::now() + std::time::Duration::from_secs(3600),
+        )
+    }
+
+    #[test]
+    fn an_enrolled_agent_is_admitted() {
+        assert_eq!(
+            admit(
+                Admission::EnrolledAgent,
+                &hobi_leaf(),
+                HOBI,
+                &enrolled(&[("hobi", HOBI)])
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_wrong_uid_is_refused_at_connect() {
+        let view = enrolled(&[("hobi", HOBI), ("jin", JIN)]);
+        assert_eq!(
+            admit(Admission::EnrolledAgent, &hobi_leaf(), JIN, &view),
+            Err(DenyCause::NotEnrolled)
+        );
+    }
+
+    #[test]
+    fn a_de_enrolled_agent_is_refused_at_connect() {
+        let view = enrolled(&[("jin", JIN)]);
+        assert_eq!(
+            admit(Admission::EnrolledAgent, &hobi_leaf(), HOBI, &view),
+            Err(DenyCause::NotEnrolled)
+        );
+        for peer in [
+            ChannelPeer::Certless,
+            ChannelPeer::Certified("spiffe://d/plane/cli".into()),
+        ] {
+            assert_eq!(
+                admit(
+                    Admission::EnrolledAgent,
+                    &peer,
+                    HOBI,
+                    &enrolled(&[("hobi", HOBI)])
+                ),
+                Err(DenyCause::NotEnrolled),
+                "{peer:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_agent_uid_is_refused_on_the_client_socket() {
+        assert_eq!(
+            admit(
+                Admission::MaknaeGroupMember,
+                &ChannelPeer::Certless,
+                HOBI,
+                &enrolled(&[("hobi", HOBI)])
+            ),
+            Err(DenyCause::AgentAccount)
+        );
+    }
+
+    #[test]
+    fn the_uid_of_an_ignored_enrollment_is_an_ordinary_account_on_the_client_socket() {
+        assert_eq!(
+            admit(
+                Admission::MaknaeGroupMember,
+                &ChannelPeer::Certless,
+                HOBI,
+                &enrolled(&[("jin", JIN)])
+            ),
+            Ok(())
+        );
+    }
+
+    fn outside_maknae() -> Facts {
+        Facts {
+            membership: Ok(membership(false, "hobi-svc")),
+            account: AccountFact::Checked(AccountState::Active),
+            answered: true,
+        }
+    }
+
+    #[test]
+    fn an_agent_outside_maknae_continues_on_its_account_state() {
+        let a = Admission::EnrolledAgent;
+        assert_eq!(
+            revalidate(a, HOBI, HOBI, &outside_maknae()),
+            Revalidation::Continue
+        );
+        let mut locked = outside_maknae();
+        locked.account = AccountFact::Checked(AccountState::Locked);
+        assert_eq!(
+            revalidate(a, HOBI, HOBI, &locked),
+            deny(DenyCause::Account(AccountState::Locked))
+        );
+        assert_eq!(
+            revalidate(a, HOBI, JIN, &outside_maknae()),
+            deny(DenyCause::Infrastructure(FactSource::SessionMap))
+        );
+    }
+
+    #[test]
+    fn an_agent_session_whose_account_joins_maknae_is_refused_at_the_next_request() {
+        let mut joined = outside_maknae();
+        joined.membership = Ok(membership(true, "hobi-svc"));
+        assert_eq!(
+            revalidate(Admission::EnrolledAgent, HOBI, HOBI, &joined),
+            deny(DenyCause::HumanAccount)
+        );
+    }
+
+    #[test]
+    fn an_unanswered_group_source_is_infrastructure_for_an_agent() {
+        for failed in [
+            AuthzError::Resolve("nss".into()),
+            AuthzError::Unanswered {
+                user: "hobi-svc".into(),
+                why: "EIO".into(),
+            },
+        ] {
+            let mut f = outside_maknae();
+            f.membership = Err(failed);
+            assert_eq!(
+                revalidate(Admission::EnrolledAgent, HOBI, HOBI, &f),
+                deny(DenyCause::Infrastructure(FactSource::Group))
+            );
+        }
+    }
+
+    #[test]
+    fn a_gone_agent_account_is_not_enrolled() {
+        let mut f = outside_maknae();
+        f.membership = Err(AuthzError::NoUser);
+        assert_eq!(
+            revalidate(Admission::EnrolledAgent, HOBI, HOBI, &f),
+            deny(DenyCause::NotEnrolled)
+        );
+    }
+
+    #[test]
+    fn an_agents_home_is_its_own_directory_outside_maknae() {
+        assert_eq!(
+            admission_facts(Admission::EnrolledAgent, &Ok(membership(false, "hobi-svc"))),
+            (
+                false,
+                Some("hobi-svc".to_string()),
+                Some(std::path::PathBuf::from("/home/hobi-svc"))
+            )
+        );
+        assert_eq!(
+            admission_facts(Admission::EnrolledAgent, &Ok(membership(true, "hobi-svc"))),
+            (true, Some("hobi-svc".to_string()), None)
+        );
+    }
+
+    fn task_of(id: &str, tasker_uid: u32) -> SignedTask {
+        use crate::task::TaskObjectForTest;
+        SignedTask {
+            task: maknae_proto::TaskObject::for_test(id, tasker_uid),
+            signature: maknae_proto::TaskSignature {
+                alg: "test".into(),
+                leaf: maknae_proto::Bytes::new(vec![1].into()),
+                chain: Vec::new(),
+                sig: maknae_proto::Bytes::new(vec![2].into()),
+            },
+        }
+    }
+
+    #[test]
+    fn a_request_citing_an_unknown_task_is_refused() {
+        let store = TaskStore::new();
+        let unknown = task_of("hobi", 1000).task.task_id;
+        assert_eq!(
+            task_for(
+                Admission::EnrolledAgent,
+                Some(&unknown),
+                Some(&agent("hobi")),
+                HOBI,
+                &store
+            ),
+            Err(DenyCause::Task(TaskRefusal::Unknown))
+        );
+    }
+
+    #[test]
+    fn a_request_citing_another_agents_task_is_refused() {
+        let store = TaskStore::new();
+        let jins = store.insert_for_test(task_of("jin", 1000), JIN);
+        let hobis = store.insert_for_test(task_of("hobi", 1000), HOBI);
+        assert_eq!(
+            task_for(
+                Admission::EnrolledAgent,
+                Some(&jins.task.task_id),
+                Some(&agent("hobi")),
+                HOBI,
+                &store
+            ),
+            Err(DenyCause::Task(TaskRefusal::OtherAgent))
+        );
+        assert_eq!(
+            task_for(
+                Admission::EnrolledAgent,
+                Some(&hobis.task.task_id),
+                Some(&agent("hobi")),
+                JIN,
+                &store
+            ),
+            Err(DenyCause::Task(TaskRefusal::OtherAgent))
+        );
+        let own = task_for(
+            Admission::EnrolledAgent,
+            Some(&hobis.task.task_id),
+            Some(&agent("hobi")),
+            HOBI,
+            &store,
+        )
+        .unwrap()
+        .expect("its own task resolves");
+        assert!(Arc::ptr_eq(&own, &hobis));
+    }
+
+    #[test]
+    fn a_task_id_on_the_client_channel_is_refused() {
+        let store = TaskStore::new();
+        let held = store.insert_for_test(task_of("hobi", 1000), HOBI);
+        assert_eq!(
+            task_for(
+                Admission::MaknaeGroupMember,
+                Some(&held.task.task_id),
+                None,
+                HOBI,
+                &store
+            ),
+            Err(DenyCause::TaskOnClientChannel)
+        );
+        assert_eq!(
+            task_for(Admission::MaknaeGroupMember, None, None, HOBI, &store),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn an_agent_request_without_a_task_is_decided_on_its_own_policy() {
+        let store = TaskStore::new();
+        store.insert_for_test(task_of("hobi", 1000), HOBI);
+        assert_eq!(
+            task_for(
+                Admission::EnrolledAgent,
+                None,
+                Some(&agent("hobi")),
+                HOBI,
+                &store
+            ),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn the_session_ends_at_the_leaf_or_the_visit_clock_whichever_is_first() {
+        use crate::session::{SessionChannel, SessionRecord};
+        use std::time::{Duration, Instant, SystemTime};
+        let now = Instant::now();
+        let at = |opened_ago: u64, lifetime: u64, leaf_in: Option<i64>| {
+            let mut s = SessionRecord::for_test(HOBI, None);
+            s.opened_at = now - Duration::from_secs(opened_ago);
+            s.lifetime = Duration::from_secs(lifetime);
+            if let Some(d) = leaf_in {
+                let leaf_expires = if d >= 0 {
+                    now + Duration::from_secs(d.unsigned_abs())
+                } else {
+                    now - Duration::from_secs(d.unsigned_abs())
+                };
+                s.channel = SessionChannel::Agent {
+                    agent: agent("hobi"),
+                    leaf_expires,
+                };
+            }
+            s.expiry()
+        };
+        assert_eq!(at(10, 60, None), None);
+        assert_eq!(at(10, 5, None), Some(Ending::Lifetime));
+        assert_eq!(at(10, 60, Some(60)), None);
+        assert_eq!(at(10, 60, Some(-1)), Some(Ending::LeafExpired));
+        assert_eq!(at(10, 5, Some(60)), Some(Ending::Lifetime));
+        assert_eq!(at(100, 5, Some(-1)), Some(Ending::Lifetime));
+        assert_eq!(at(100, 99, Some(-5)), Some(Ending::LeafExpired));
+
+        let fresh = SessionChannel::of(
+            Admission::EnrolledAgent,
+            &leaf("hobi", SystemTime::now() + Duration::from_secs(600)),
+        )
+        .unwrap();
+        match fresh {
+            SessionChannel::Agent {
+                agent: a,
+                leaf_expires,
+            } => {
+                assert_eq!(a, agent("hobi"));
+                let left = leaf_expires.saturating_duration_since(Instant::now());
+                assert!(left > Duration::from_secs(590) && left <= Duration::from_secs(600));
+            }
+            SessionChannel::Client => panic!("an agent leaf opens an agent channel"),
+        }
+        assert_eq!(
+            SessionChannel::of(
+                Admission::EnrolledAgent,
+                &leaf("hobi", SystemTime::now() - Duration::from_secs(1))
+            ),
+            Err(Ending::LeafExpired),
+            "a leaf already expired at admission is refused"
+        );
+        assert_eq!(
+            SessionChannel::of(Admission::MaknaeGroupMember, &ChannelPeer::Certless),
+            Ok(SessionChannel::Client)
+        );
+        assert_eq!(
+            SessionChannel::of(Admission::EnrolledAgent, &ChannelPeer::Certless),
+            Err(Ending::Denied(DenyCause::NotEnrolled))
+        );
+    }
+
+    #[test]
+    fn each_agent_and_task_cause_has_its_audit_reason_and_posture() {
+        for (cause, reason) in [
+            (DenyCause::AgentAccount, "agent-account"),
+            (DenyCause::NotEnrolled, "not-enrolled"),
+            (DenyCause::HumanAccount, "human-account"),
+            (DenyCause::TaskOnClientChannel, "task-on-client-channel"),
+            (DenyCause::Task(TaskRefusal::Unknown), "task-unknown"),
+            (DenyCause::Task(TaskRefusal::OtherAgent), "task-other-agent"),
+        ] {
+            assert_eq!(
+                (cause_reason(&cause), cause_posture(&cause)),
+                (reason, "unauthorized"),
+                "{cause:?}"
+            );
+        }
+        assert_eq!(
+            (
+                ending_reason(&Ending::LeafExpired),
+                ending_result(&Ending::LeafExpired),
+                ending_posture(&Ending::LeafExpired)
+            ),
+            ("leaf-expired", "deny", "stopped")
+        );
     }
 
     #[test]
