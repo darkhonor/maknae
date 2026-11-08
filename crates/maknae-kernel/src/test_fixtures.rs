@@ -249,3 +249,46 @@ pub(crate) fn permitted_read_marked(home: &std::path::Path, marking: Option<&str
 
 pub(crate) const READ_POLICY: &str =
     "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\n  deny: []\n";
+
+fn agent_dir(config: &Path, id: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let agents = config.join(maknae_config::AGENTS_DIR);
+    let dir = agents.join(id);
+    std::fs::create_dir_all(&dir).unwrap();
+    for d in [&agents, &dir] {
+        std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o750)).unwrap();
+    }
+    dir
+}
+
+fn write_0640(path: &Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, body).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640)).unwrap();
+}
+
+/// `<config>/agents/<id>/enrollment.yaml`, as `maknae enroll agent` writes it.
+pub(crate) fn write_agent(config: &Path, id: &str, account: &str, uid: u32, role: &str) {
+    write_0640(
+        &agent_dir(config, id).join(maknae_config::ENROLLMENT_FILE),
+        &format!("agent_id: {id}\naccount: {account}\nuid: {uid}\nrole: {role}\n"),
+    );
+}
+
+pub(crate) fn write_agent_policy(config: &Path, id: &str, yaml: &str) {
+    write_0640(
+        &agent_dir(config, id).join(maknae_config::POLICY_FILE),
+        yaml,
+    );
+}
+
+/// The de-enrollment act (R3).
+pub(crate) fn remove_enrollment(config: &Path, id: &str) {
+    std::fs::remove_file(
+        config
+            .join(maknae_config::AGENTS_DIR)
+            .join(id)
+            .join(maknae_config::ENROLLMENT_FILE),
+    )
+    .unwrap();
+}

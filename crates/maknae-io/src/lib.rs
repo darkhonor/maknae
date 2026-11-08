@@ -64,8 +64,8 @@ mod walk;
 mod write;
 
 pub use account::{
-    daemon_facts, group_by_gid, group_by_name, group_gid, host_account, not_found_is_none,
-    user_by_name, user_by_uid,
+    daemon_facts, group_by_gid, group_by_name, group_gid, host_account, maknae_agents_gid,
+    not_found_is_none, user_by_name, user_by_uid,
 };
 pub use account_facts::{
     AccountLookupError, DaemonFacts, HostAccount, MAKNAE_AGENTS_GROUP, MAKNAE_DAEMON_ACCOUNTS,

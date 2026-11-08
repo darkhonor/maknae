@@ -3033,6 +3033,24 @@ fn offload_refusal(
     }
 }
 
+async fn stop_supervisor(supervisor: &mut tokio::task::JoinHandle<maknae_vault::VaultError>) {
+    supervisor.abort();
+    match tokio::time::timeout(SUPERVISOR_ABORT_REAP_TIMEOUT, supervisor).await {
+        // Cancelled is the abort's own outcome; anything else is an exit that raced it.
+        Ok(Err(e)) if e.is_cancelled() => {}
+        Ok(joined) => {
+            let reason = supervisor_exit_reason(joined);
+            eprintln!("maknaed: credential supervisor had already exited at shutdown ({reason})");
+        }
+        Err(_elapsed) => {
+            eprintln!(
+                "maknaed: credential supervisor did not stop within {}s of abort; the plane token revoke may wait on its lock (bounded)",
+                SUPERVISOR_ABORT_REAP_TIMEOUT.as_secs()
+            );
+        }
+    }
+}
+
 /// Turn the credential supervisor's joined outcome into the `VaultError` that caused
 /// it to stop — the direct error the supervisor's own future resolved to (e.g.
 /// `RenewalExpired`), or, if the task panicked or was cancelled instead of returning
@@ -3103,8 +3121,8 @@ async fn drain_refusal_audit<E: AuditEmit + Send + Sync + 'static>(
     }
 }
 
-/// The anti-DoS accept loop (spec §6a/§10). Bounds live handlers with a
-/// `cfg.max_connections` semaphore; audits-and-continues on a surfaced peer-authentication
+/// The anti-DoS accept loop (spec §6a/§10). Bounds live handlers with `capacity`,
+/// this listener's own semaphore (R4); audits-and-continues on a surfaced peer-authentication
 /// rejection (never `?` — a bad handshake must not kill the daemon); fast-closes at
 /// capacity. Also `select!`s on `supervisor` (codex round-5 P1): the credential
 /// supervisor's handle resolving means it gave up (retry window exhausted) and cleared
@@ -3120,6 +3138,7 @@ pub async fn accept_loop<A, E, P>(
     emit: Arc<E>,
     session_ids: Arc<SessionIds>,
     mut cfg: TransportConfig,
+    capacity: Arc<Semaphore>,
     mut wctx: WhereCtx,
     shutdown: impl Future<Output = ()> + Send,
     supervisor: tokio::task::JoinHandle<maknae_vault::VaultError>,
@@ -3154,7 +3173,7 @@ where
     cfg.socket_path = class.socket.clone();
     wctx.socket = class.socket.display().to_string();
     let class = Arc::new(class);
-    let sem = Arc::new(Semaphore::new(cfg.max_connections as usize));
+    let sem = capacity;
     let handshake_timeout = Duration::from_millis(cfg.handshake_timeout_ms);
     // Shared so each spawned task can drive the bounded handshake off the accept path.
     let acceptor = Arc::new(acceptor);
@@ -3475,24 +3494,7 @@ where
     // the path where it already exited — that handle has been polled to
     // completion and must not be polled again.
     if !matches!(outcome, ServeOutcome::SupervisorExited(_)) {
-        supervisor.abort();
-        match tokio::time::timeout(SUPERVISOR_ABORT_REAP_TIMEOUT, &mut supervisor).await {
-            // The expected outcome of an abort; anything else is an exit the
-            // select above did not get to report (both ready in one wakeup).
-            Ok(Err(e)) if e.is_cancelled() => {}
-            Ok(joined) => {
-                let reason = supervisor_exit_reason(joined);
-                eprintln!(
-                    "maknaed: credential supervisor had already exited at shutdown ({reason})"
-                );
-            }
-            Err(_elapsed) => {
-                eprintln!(
-                    "maknaed: credential supervisor did not stop within {}s of abort; the plane token revoke may wait on its lock (bounded)",
-                    SUPERVISOR_ABORT_REAP_TIMEOUT.as_secs()
-                );
-            }
-        }
+        stop_supervisor(&mut supervisor).await;
     }
 
     // Stopped accepting (done — we broke the loop, either way). Drain in-flight
@@ -4668,6 +4670,8 @@ struct Reloader<B: maknae_authz_basic::Baseline, E> {
     /// Admits a containment target's account lookup.
     lookup_breaker: Arc<tokio::sync::Mutex<BlockingBreaker>>,
     containment: Arc<ContainmentStatus>,
+    /// Reconciled against every installed snapshot (M9).
+    tasks: Arc<crate::task::TaskStore>,
     #[cfg(test)]
     load_gate: Option<Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>>,
     #[cfg(test)]
@@ -4766,6 +4770,29 @@ where
         req: LiveRequest<'_>,
     ) -> Result<LiveApplied, crate::containment::LiveRefusal> {
         self.live_edit_resolving(req, &mut None).await
+    }
+
+    /// What the agent listener admits against: this PDP's snapshot and the store it reconciles.
+    fn agent_admission(&self) -> AgentAdmission {
+        AgentAdmission {
+            view: Arc::new(crate::enrollment::SnapshotEnrollment(Arc::clone(
+                &self.authorizer,
+            ))),
+            tasks: Arc::clone(&self.tasks),
+        }
+    }
+
+    /// Installs `snapshot`, or keeps the installed one when only the live values changed, then
+    /// purges every task whose agent it no longer enrolls. Called after the install's own locks
+    /// are released: `retain_enrolled` reads the snapshot under the store lock.
+    fn install_and_reconcile(&self, snapshot: Option<Arc<maknae_authz_basic::snapshot::Snapshot>>) {
+        if let Some(snapshot) = snapshot {
+            self.authorizer.baseline().install(snapshot);
+        }
+        self.tasks
+            .retain_enrolled(&crate::enrollment::SnapshotEnrollment(Arc::clone(
+                &self.authorizer,
+            )));
     }
 
     /// A live edit; `released` is set to the uid a release acted on, resolved in the turn.
@@ -4951,7 +4978,7 @@ where
             self.authorizer.baseline().principal().uid,
             crate::identity_report::transition_problems(&released),
         );
-        self.authorizer.baseline().install(snapshot);
+        self.install_and_reconcile(Some(snapshot));
         self.identity.publish(published);
         *self
             .applied_source
@@ -5351,6 +5378,7 @@ where
             accepted: plan.proposed.clone(),
             pending: None,
         });
+        let held_live = held.is_some();
         let applied = match held {
             None => Ok("restarting to apply"),
             Some(held) => {
@@ -5378,6 +5406,9 @@ where
         guard.live_unsettled = false;
         self.publish_mirror(&next, &ctx).await;
         drop(guard);
+        if applied.is_ok() && held_live {
+            self.install_and_reconcile(None);
+        }
         drop(turn);
         let revision = committed.revision;
         let (result, reason, posture) = match &applied {
@@ -6075,9 +6106,7 @@ where
             crate::identity_report::transition_problems(&candidate.released),
         );
         self.reloader
-            .authorizer
-            .baseline()
-            .install(candidate.snapshot);
+            .install_and_reconcile(Some(candidate.snapshot));
         *self
             .reloader
             .applied_source
@@ -7140,6 +7169,9 @@ async fn boot_after_sink(
         maknae_vault::Plane::Kernel,
     )
     .map_err(|e| RunError::Other(e.to_string()))?;
+    let trust_domain = maknae_vault::vault_config_from_document(boot.document())
+        .map_err(|e| RunError::Other(e.to_string()))?
+        .deployment_id;
     let ca = maknae_vault::load_ca_pin(config_dir).map_err(|e| RunError::Other(e.to_string()))?;
     let trust =
         maknae_vault::TrustBundle::from_pins(&[&ca]).map_err(|e| RunError::Other(e.to_string()))?;
@@ -7264,6 +7296,7 @@ async fn boot_after_sink(
         lookup_bound: BLOCKING_OPERATION_TIMEOUT,
         lookup_breaker: account_lookup_breaker(),
         containment: containment_status,
+        tasks: Arc::new(crate::task::TaskStore::new()),
         #[cfg(test)]
         load_gate: None,
         #[cfg(test)]
@@ -7288,6 +7321,7 @@ async fn boot_after_sink(
         hup,
         Arc::new(reloader),
         deployment,
+        &trust_domain,
     )
     .await;
 
@@ -7332,6 +7366,7 @@ async fn serve_after_mint<B>(
     hup: tokio::signal::unix::Signal,
     reloader: Arc<Reloader<B, maknae_audit_append::AuditSink>>,
     deployment: maknae_config::Deployment,
+    trust_domain: &str,
 ) -> Result<ServeOutcome, String>
 where
     B: maknae_authz_basic::Baseline,
@@ -7356,16 +7391,38 @@ where
     // `client.shutdown().await` revokes the minted token before returning `ExitCode::FAILURE`.
     let gid =
         maknae_gid().map_err(|e| format!("resolving `maknae` group for the socket: {e:?}"))?;
+    let agents_gid = crate::deployment::agent_listener_wanted(deployment.mode)
+        .then(|| {
+            crate::groupres::maknae_agents_gid()
+                .map_err(|e| format!("resolving `maknae-agents` group for the agent socket: {e:?}"))
+        })
+        .transpose()?;
     let class = crate::handler::client_class(&transport);
     let identity = maknae_vault::ServerIdentity::attach(client).map_err(|e| e.to_string())?;
     let listener = PlaneListener::bind(
         &class.socket,
-        identity,
+        Arc::clone(&identity),
         Arc::clone(trust),
         &class.peer_auth,
         Some(gid),
     )
     .map_err(|e| e.to_string())?;
+    let agent_listener = match agents_gid {
+        None => None,
+        Some(agents_gid) => {
+            let class =
+                crate::handler::agent_class(transport.agent_socket_path.clone(), trust_domain);
+            let listener = PlaneListener::bind(
+                &class.socket,
+                identity,
+                Arc::clone(trust),
+                &class.peer_auth,
+                Some(agents_gid),
+            )
+            .map_err(|e| e.to_string())?;
+            Some((listener, class))
+        }
+    };
     // `session_ids` is the SAME allocator `run_inner` used for this boot's AU-3
     // boot-level records (spec §5.3): every real connection's `next_session()`
     // therefore shares the one per-boot nonce, starting its counter at 1.
@@ -7407,38 +7464,224 @@ where
         bound: Duration::from_millis(maknae_config::GROUP_LOOKUP_TIMEOUT_MS),
     });
     let lifetime = handler_drain_bound(&transport, egress.deadline());
-    let agents = AgentAdmission {
-        view: Arc::new(crate::enrollment::SnapshotEnrollment(Arc::clone(
-            &authorizer,
-        ))),
-        tasks: Arc::new(crate::task::TaskStore::new()),
+    let agents = reloader.agent_admission();
+    let max_connections = transport.max_connections;
+    let serve = |listener: PlaneListener, class: ChannelClass| {
+        let sink = Arc::clone(sink);
+        let session_ids = Arc::clone(&session_ids);
+        let transport = transport.clone();
+        let wctx = wctx.clone();
+        let authorizer = Arc::clone(&authorizer);
+        let live = Arc::clone(&live);
+        let authz_backend_name = Arc::clone(&authz_backend_name);
+        let classification_policy_name = Arc::clone(&classification_policy_name);
+        let plane_key_name = Arc::clone(&plane_key_name);
+        let kernel_graph = Arc::clone(&kernel_graph);
+        let egress = Arc::clone(&egress);
+        let ops = Arc::clone(&ops);
+        let drain = drain.clone();
+        let gate = Arc::clone(&gate);
+        let agents = agents.clone();
+        move |run: LoopRun| {
+            accept_loop(
+                listener,
+                class,
+                sink,
+                session_ids,
+                transport,
+                run.capacity,
+                wctx,
+                run.shutdown,
+                run.supervisor,
+                authorizer,
+                live,
+                authz_backend_name,
+                classification_policy_name,
+                plane_key_name,
+                kernel_graph,
+                egress,
+                ops,
+                drain,
+                gate,
+                lifetime,
+                agents,
+            )
+        }
     };
-    let outcome = accept_loop(
-        listener,
-        class,
-        Arc::clone(sink),
-        session_ids,
-        transport,
-        wctx,
+    let outcome = serve_listeners(
+        max_connections,
         shutdown,
         supervisor,
-        authorizer,
-        live,
-        authz_backend_name,
-        classification_policy_name,
-        plane_key_name,
-        kernel_graph,
-        egress,
-        ops,
-        drain.clone(),
-        gate,
-        lifetime,
-        agents,
+        serve(listener, class),
+        agent_listener.map(|(listener, class)| serve(listener, class)),
     )
     .await;
     reloader.stop(&reloads).await;
     let drained = *drain.borrow();
     Ok(crate::handler::after_drain(outcome, drained))
+}
+
+/// What one listener's accept loop is stopped by, and the connections it may hold (R4).
+pub(crate) struct LoopRun {
+    pub(crate) shutdown: std::pin::Pin<Box<dyn Future<Output = ()> + Send>>,
+    pub(crate) supervisor: tokio::task::JoinHandle<maknae_vault::VaultError>,
+    pub(crate) capacity: Arc<Semaphore>,
+}
+
+/// Runs the client loop and, on a host, the agent loop, each with its own connection
+/// semaphore (R4), until `shutdown`, a supervisor exit or either loop's own end stops both
+/// (M6). One task owns the credential supervisor; each loop gets a handle that resolves,
+/// with the supervisor's reason, only once it has exited.
+async fn serve_listeners<C, A, FC, FA>(
+    max_connections: u32,
+    shutdown: impl Future<Output = ()> + Send,
+    supervisor: tokio::task::JoinHandle<maknae_vault::VaultError>,
+    client: FC,
+    agent: Option<FA>,
+) -> ServeOutcome
+where
+    FC: FnOnce(LoopRun) -> C,
+    FA: FnOnce(LoopRun) -> A,
+    C: Future<Output = ServeOutcome>,
+    A: Future<Output = ServeOutcome>,
+{
+    let (stop, _) = tokio::sync::watch::channel(false);
+    let exited: Arc<SupervisorExit> = Arc::default();
+    let owner = tokio::spawn(own_supervisor(
+        supervisor,
+        stop.clone(),
+        Arc::clone(&exited),
+    ));
+    let client = {
+        let run = loop_run(&stop, &exited, max_connections);
+        let stop = stop.clone();
+        let listen = client(run);
+        async move {
+            let outcome = listen.await;
+            stop.send_replace(true);
+            outcome
+        }
+    };
+    let agent = agent.map(|agent| {
+        let run = loop_run(&stop, &exited, max_connections);
+        let stop = stop.clone();
+        let listen = agent(run);
+        async move {
+            let outcome = listen.await;
+            stop.send_replace(true);
+            outcome
+        }
+    });
+    let agent = async move {
+        match agent {
+            Some(agent) => Some(agent.await),
+            None => None,
+        }
+    };
+    let signalled = {
+        let stop = stop.clone();
+        let mut stopping = stop.subscribe();
+        async move {
+            tokio::select! {
+                () = shutdown => {
+                    stop.send_replace(true);
+                }
+                _ = stopping.wait_for(|s| *s) => {}
+            }
+        }
+    };
+    let ((client, agent), ()) = tokio::join!(async { tokio::join!(client, agent) }, signalled);
+    let _ = owner.await;
+    let reason = exited
+        .reason
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    combine_outcomes(reason, client, agent)
+}
+
+/// The supervisor's exit: the error itself for the combined outcome, and its text for each
+/// loop's handle, since `VaultError` is not `Clone`.
+#[derive(Default)]
+struct SupervisorExit {
+    reason: std::sync::Mutex<Option<maknae_vault::VaultError>>,
+    shown: std::sync::OnceLock<String>,
+}
+
+fn loop_run(
+    stop: &tokio::sync::watch::Sender<bool>,
+    exited: &Arc<SupervisorExit>,
+    max_connections: u32,
+) -> LoopRun {
+    let (mut stopping, mut exiting) = (stop.subscribe(), stop.subscribe());
+    let (stopped, reason) = (Arc::clone(exited), Arc::clone(exited));
+    LoopRun {
+        shutdown: Box::pin(async move {
+            let _ = stopping.wait_for(|s| *s).await;
+            if stopped.shown.get().is_some() {
+                std::future::pending::<()>().await;
+            }
+        }),
+        supervisor: tokio::spawn(async move {
+            let _ = exiting.wait_for(|s| *s).await;
+            match reason.shown.get() {
+                Some(shown) => maknae_vault::VaultError::Renew(shown.clone()),
+                None => std::future::pending().await,
+            }
+        }),
+        capacity: Arc::new(Semaphore::new(max_connections as usize)),
+    }
+}
+
+/// Records the supervisor's exit and stops both loops, or stops the supervisor once they stop.
+async fn own_supervisor(
+    mut supervisor: tokio::task::JoinHandle<maknae_vault::VaultError>,
+    stop: tokio::sync::watch::Sender<bool>,
+    exited: Arc<SupervisorExit>,
+) {
+    let mut stopping = stop.subscribe();
+    let stopping = async move {
+        let _ = stopping.wait_for(|s| *s).await;
+    };
+    tokio::select! {
+        joined = &mut supervisor => {
+            let reason = supervisor_exit_reason(joined);
+            let _ = exited.shown.set(reason.to_string());
+            *exited
+                .reason
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(reason);
+            stop.send_replace(true);
+        }
+        () = stopping => stop_supervisor(&mut supervisor).await,
+    }
+}
+
+/// A supervisor exit wins, with its reason; then a channel mismatch; then the rest (fail closed).
+fn combine_outcomes(
+    exited: Option<maknae_vault::VaultError>,
+    client: ServeOutcome,
+    agent: Option<ServeOutcome>,
+) -> ServeOutcome {
+    if let Some(reason) = exited {
+        return ServeOutcome::SupervisorExited(reason);
+    }
+    fn severity(o: &ServeOutcome) -> u8 {
+        match o {
+            ServeOutcome::GracefulShutdown => 0,
+            ServeOutcome::ApplyByRestart => 1,
+            ServeOutcome::AcceptAbandoned => 2,
+            ServeOutcome::ChannelMismatch => 3,
+            ServeOutcome::SupervisorExited(_) => 4,
+        }
+    }
+    agent.into_iter().fold(client, |worst, next| {
+        if severity(&next) > severity(&worst) {
+            next
+        } else {
+            worst
+        }
+    })
 }
 
 /// Resolves on a signal, or once a restart-class accept has persisted or failed; a
@@ -13740,6 +13983,18 @@ mod reload_fixture {
             *self.reloader.persisted.write().unwrap() = graph;
         }
 
+        pub(super) fn write_agent(&self, id: &str, account: &str, uid: u32, role: &str) {
+            crate::test_fixtures::write_agent(&self.dir, id, account, uid, role);
+        }
+
+        pub(super) fn write_agent_policy(&self, id: &str, yaml: &str) {
+            crate::test_fixtures::write_agent_policy(&self.dir, id, yaml);
+        }
+
+        pub(super) fn remove_enrollment(&self, id: &str) {
+            crate::test_fixtures::remove_enrollment(&self.dir, id);
+        }
+
         pub(super) fn reload_records(&self) -> Vec<AuditRecord> {
             std::fs::read_to_string(self.dir.join("audit.jsonl"))
                 .unwrap()
@@ -14417,6 +14672,7 @@ mod reload_fixture {
             lookup_bound: opts.lookup_bound,
             lookup_breaker: Arc::default(),
             containment: Arc::clone(&status.containment),
+            tasks: Arc::new(crate::task::TaskStore::new()),
             load_gate: opts.load_gate.map(|g| Arc::new(std::sync::Mutex::new(g))),
             load_entered: std::sync::Mutex::new(None),
             release_resolved: std::sync::Mutex::new(None),
@@ -17292,6 +17548,7 @@ mod reload_tests {
                 Arc::clone(&fx.reloader.sink),
                 Arc::new(SessionIds::new()),
                 maknae_config::transport_from_section(None).unwrap(),
+                Arc::new(Semaphore::new(64)),
                 WhereCtx {
                     host: "h".into(),
                     socket: "s".into(),
@@ -17398,6 +17655,7 @@ mod reload_tests {
                 Arc::clone(&fx.reloader.sink),
                 Arc::new(SessionIds::new()),
                 maknae_config::transport_from_section(None).unwrap(),
+                Arc::new(Semaphore::new(64)),
                 WhereCtx {
                     host: "h".into(),
                     socket: "s".into(),
@@ -19923,5 +20181,651 @@ mod journal_capture {
             .cloned()
             .collect();
         (found, all.len())
+    }
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+mod agent_listener_tests {
+    use super::reload_fixture::*;
+    use super::reload_tests::{hobi_account, no_daemons, no_group};
+    use super::*;
+    use crate::task::TaskObjectForTest;
+    use maknae_authz_basic::Baseline;
+
+    const HOBI_UID: u32 = 2001;
+
+    #[derive(Default)]
+    struct Recorder(std::sync::Mutex<Vec<AuditRecord>>);
+
+    impl Recorder {
+        fn records(&self) -> Vec<AuditRecord> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    impl AuditEmit for Recorder {
+        fn emit(
+            &self,
+            record: &AuditRecord,
+        ) -> impl Future<Output = Result<(), maknae_audit_append::AuditError>> + Send {
+            self.0.lock().unwrap().push(record.clone());
+            async { Ok(()) }
+        }
+    }
+
+    struct AgentAccount;
+
+    impl crate::session::SessionFacts for AgentAccount {
+        fn membership(
+            &self,
+            _admission: crate::handler::Admission,
+            _uid: u32,
+        ) -> Result<crate::groupres::Membership, crate::groupres::AuthzError> {
+            Ok(crate::groupres::Membership {
+                in_group: false,
+                user: "hobi-svc".into(),
+                dir: "/var/empty".into(),
+            })
+        }
+
+        fn account(&self, _uid: u32) -> crate::session_facts::AccountFact {
+            crate::session_facts::AccountFact::NotChecked(
+                crate::session_facts::NotCheckedWhy::Platform,
+            )
+        }
+    }
+
+    fn hobi() -> maknae_config::AgentId {
+        maknae_config::AgentId::parse("hobi").unwrap()
+    }
+
+    fn hobi_leaf() -> maknae_vault::ChannelPeer {
+        maknae_vault::ChannelPeer::Agent {
+            san: maknae_vault::agent_uri_san("d", &hobi()),
+            agent: hobi(),
+            not_after: std::time::SystemTime::now() + Duration::from_secs(3600),
+        }
+    }
+
+    async fn enrolling(tag: &str) -> Fx {
+        let fx = fixture(tag, AUTHZ, Some(ROOT_ADMIN)).await;
+        fx.baseline().set_hosts(maknae_authz_basic::HostLookups {
+            account: hobi_account,
+            daemons: no_daemons,
+            group: no_group,
+        });
+        fx
+    }
+
+    async fn reload(fx: &Fx) {
+        tokio::time::timeout(Duration::from_secs(60), fx.reloader.run())
+            .await
+            .expect("the reload returns")
+            .expect("the reload applies");
+    }
+
+    struct Session {
+        client: tokio::io::DuplexStream,
+        emit: Arc<Recorder>,
+        _served: tokio::task::JoinHandle<()>,
+    }
+
+    /// Admits hobi's leaf at connect against the agent listener's admission, then serves it.
+    fn connect(fx: &Fx) -> Result<Session, crate::authz::DenyCause> {
+        let agents = fx.reloader.agent_admission();
+        let peer = hobi_leaf();
+        crate::authz::admit(
+            crate::handler::Admission::EnrolledAgent,
+            &peer,
+            HOBI_UID,
+            &*agents.view,
+        )?;
+        let mut session = SessionRecord::for_test(HOBI_UID, Some("hobi-svc".into()));
+        session.admission = crate::handler::Admission::EnrolledAgent;
+        session.channel =
+            SessionChannel::of(crate::handler::Admission::EnrolledAgent, &peer).unwrap();
+        let (client, server) = tokio::io::duplex(256 * 1024);
+        let emit = Arc::new(Recorder::default());
+        let authorizer = Arc::clone(&fx.reloader.authorizer);
+        let backend = Arc::new(maknae_security::guarded_backend_name(&*authorizer));
+        let served = tokio::spawn(handle(
+            server,
+            peer_san(&peer).map(str::to_string),
+            Arc::new(session),
+            FactsGate::for_test(Arc::new(AgentAccount), Duration::from_secs(5)),
+            Arc::clone(&emit),
+            maknae_config::transport_from_section(None).unwrap(),
+            serde_json::json!({}),
+            authorizer,
+            Arc::new(crate::live::LiveConfig::new(ConfigView::default(), None)),
+            backend,
+            Arc::new("US".to_string()),
+            Arc::new("ml-dsa-87".to_string()),
+            Arc::new(None),
+            crate::egress::unavailable_egress(),
+            Duration::from_secs(10),
+            maknae_io::DelegatedFds::new(1),
+            baseline_stub::no_baseline(),
+            agents,
+        ));
+        Ok(Session {
+            client,
+            emit,
+            _served: served,
+        })
+    }
+
+    async fn ping(session: &mut Session) -> maknae_proto::RespResult {
+        let body = maknae_proto::encode_request(&maknae_proto::Request {
+            task: None,
+            protocol_version: PROTOCOL_VERSION,
+            verb: Verb::Ping,
+        })
+        .unwrap();
+        maknae_proto::write_frame(
+            &mut session.client,
+            maknae_proto::class_of(&Verb::Ping),
+            &body,
+        )
+        .await
+        .unwrap();
+        let caps = maknae_proto::FrameCaps {
+            control: 1 << 20,
+            attempt: 1 << 20,
+            prompt: 1 << 20,
+        };
+        let (_, reply) = tokio::time::timeout(
+            Duration::from_secs(10),
+            maknae_proto::read_frame_zeroizing(&mut session.client, &caps),
+        )
+        .await
+        .expect("a reply in time")
+        .expect("a reply frame");
+        maknae_proto::decode_response(&reply).unwrap().result
+    }
+
+    fn pings(session: &Session) -> Vec<(String, String)> {
+        session
+            .emit
+            .records()
+            .into_iter()
+            .filter(|r| r.action == "liveness.ping")
+            .map(|r| (r.outcome.result, r.outcome.reason))
+            .collect()
+    }
+
+    fn signed_for_hobi() -> maknae_proto::SignedTask {
+        maknae_proto::SignedTask {
+            task: maknae_proto::TaskObject::for_test("hobi", 1002),
+            signature: maknae_proto::TaskSignature {
+                alg: "test".into(),
+                leaf: maknae_proto::Bytes::new(vec![1].into()),
+                chain: Vec::new(),
+                sig: maknae_proto::Bytes::new(vec![2].into()),
+            },
+        }
+    }
+
+    fn identity_reasons(fx: &Fx) -> Vec<String> {
+        fx.reload_records()
+            .into_iter()
+            .filter(|r| r.action == GRAPH_IDENTITY_ACTION)
+            .map(|r| r.outcome.reason)
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_de_enrolled_agent_is_refused_at_the_next_request_after_reload() {
+        let fx = enrolling("agent-de-enrolled").await;
+        fx.write_agent("hobi", "hobi-svc", HOBI_UID, "user");
+        reload(&fx).await;
+        let mut first = connect(&fx).expect("hobi is admitted at connect");
+        assert!(
+            matches!(
+                ping(&mut first).await,
+                maknae_proto::RespResult::Ok(maknae_proto::Payload::Pong)
+            ),
+            "{:?}",
+            pings(&first)
+        );
+        let mut open = connect(&fx).expect("hobi is admitted before the reload");
+        let task = fx
+            .reloader
+            .tasks
+            .insert_for_test(signed_for_hobi(), HOBI_UID);
+        let id = task.task.task_id;
+        assert!(fx.reloader.tasks.resolve(&id, &hobi(), HOBI_UID).is_ok());
+
+        fx.remove_enrollment("hobi");
+        reload(&fx).await;
+
+        assert!(
+            matches!(ping(&mut open).await, maknae_proto::RespResult::Err(_)),
+            "{:?}",
+            pings(&open)
+        );
+        assert_eq!(
+            pings(&open).last().unwrap(),
+            &(
+                "deny".to_string(),
+                format!("agent channel: uid {HOBI_UID} is not enrolled agent hobi")
+            )
+        );
+        assert!(
+            identity_reasons(&fx).contains(&format!(
+                "agent 'hobi' (uid {HOBI_UID}) is no longer enrolled"
+            )),
+            "{:?}",
+            identity_reasons(&fx)
+        );
+        assert_eq!(
+            fx.reloader.tasks.resolve(&id, &hobi(), HOBI_UID).err(),
+            Some(crate::task::TaskRefusal::Unknown)
+        );
+        assert_eq!(
+            connect(&fx).err(),
+            Some(crate::authz::DenyCause::NotEnrolled)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reload_that_enrolls_an_agent_admits_it() {
+        let fx = enrolling("agent-enrolled").await;
+        assert_eq!(
+            connect(&fx).err(),
+            Some(crate::authz::DenyCause::NotEnrolled)
+        );
+        fx.write_agent("hobi", "hobi-svc", HOBI_UID, "user");
+        fx.write_agent_policy(
+            "hobi",
+            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n",
+        );
+        reload(&fx).await;
+        assert!(
+            identity_reasons(&fx).contains(&format!("agent 'hobi' (uid {HOBI_UID}) is enrolled")),
+            "{:?}",
+            identity_reasons(&fx)
+        );
+        let mut session = connect(&fx).expect("the reload admits hobi");
+        assert!(
+            matches!(
+                ping(&mut session).await,
+                maknae_proto::RespResult::Ok(maknae_proto::Payload::Pong)
+            ),
+            "{:?}",
+            pings(&session)
+        );
+    }
+
+    fn hobi_svc_is_2001(name: &str) -> Result<Option<u32>, i32> {
+        Ok(match name {
+            "root" => Some(0),
+            "hobi-svc" => Some(HOBI_UID),
+            _ => None,
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_live_edit_that_drops_an_agent_purges_its_tasks() {
+        let fx = enrolling("agent-live-drop").await;
+        fx.write_agent("hobi", "hobi-svc", HOBI_UID, "user");
+        reload(&fx).await;
+        assert_eq!(fx.baseline().snapshot().agent_uid("hobi"), Some(HOBI_UID));
+        let id = fx
+            .reloader
+            .tasks
+            .insert_for_test(signed_for_hobi(), HOBI_UID)
+            .task
+            .task_id;
+        fx.forget_answers(ROOT_ADMIN, hobi_svc_is_2001);
+        fx.live_edit(maknae_config::LiveEdit::Bind {
+            name: "hobi-svc".into(),
+            role: maknae_config::BoundRole::User,
+        })
+        .await;
+        assert_eq!(fx.baseline().snapshot().agent_uid("hobi"), None);
+        assert_eq!(
+            fx.reloader.tasks.resolve(&id, &hobi(), HOBI_UID).err(),
+            Some(crate::task::TaskRefusal::Unknown)
+        );
+    }
+
+    /// One connection per listener: accepted after `after`, its handshake refused after `hold`.
+    struct OneConnection {
+        auth: PeerAuth,
+        uid: u32,
+        after: Duration,
+        hold: Duration,
+        taken: std::sync::atomic::AtomicBool,
+    }
+
+    impl OneConnection {
+        fn new(auth: PeerAuth, uid: u32, after: Duration, hold: Duration) -> Self {
+            OneConnection {
+                auth,
+                uid,
+                after,
+                hold,
+                taken: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+
+        fn creds(&self) -> PeerCreds {
+            PeerCreds {
+                uid: self.uid,
+                gid: None,
+                pid: None,
+            }
+        }
+    }
+
+    impl PlaneAccept for OneConnection {
+        type Raw = ();
+        type Stream = tokio::io::DuplexStream;
+
+        fn peer_auth(&self) -> &PeerAuth {
+            &self.auth
+        }
+
+        async fn accept_raw(&self) -> Result<((), PeerCreds), maknae_vault::RawAcceptError> {
+            if self.taken.swap(true, AtomicOrdering::SeqCst) {
+                std::future::pending::<()>().await;
+            }
+            tokio::time::sleep(self.after).await;
+            Ok(((), self.creds()))
+        }
+
+        async fn finish_handshake(
+            &self,
+            _raw: (),
+            peer_creds: PeerCreds,
+            _handshake_timeout: Duration,
+        ) -> Result<Conn<tokio::io::DuplexStream>, AcceptRejection> {
+            tokio::time::sleep(self.hold).await;
+            Err(AcceptRejection {
+                peer_creds: Some(peer_creds),
+                reason: maknae_vault::RejectReason::Handshake,
+            })
+        }
+    }
+
+    fn client_socket() -> ChannelClass {
+        let mut t = maknae_config::transport_from_section(None).unwrap();
+        t.socket_path = "/run/maknae/test-client.sock".into();
+        crate::handler::client_class(&t)
+    }
+
+    fn agent_socket() -> ChannelClass {
+        crate::handler::agent_class("/run/maknae-agent/test-agent.sock".into(), "d")
+    }
+
+    fn serving<A: PlaneAccept + Send + Sync + 'static>(
+        fx: &Fx,
+        acceptor: A,
+        class: ChannelClass,
+        emit: &Arc<Recorder>,
+    ) -> impl FnOnce(LoopRun) -> std::pin::Pin<Box<dyn Future<Output = ServeOutcome> + Send>> {
+        let authorizer = Arc::clone(&fx.reloader.authorizer);
+        let emit = Arc::clone(emit);
+        let agents = fx.reloader.agent_admission();
+        move |run: LoopRun| {
+            Box::pin(accept_loop(
+                acceptor,
+                class,
+                emit,
+                Arc::new(SessionIds::new()),
+                maknae_config::transport_from_section(None).unwrap(),
+                run.capacity,
+                WhereCtx {
+                    host: "h".into(),
+                    socket: "s".into(),
+                    au3_1: serde_json::Value::Null,
+                },
+                run.shutdown,
+                run.supervisor,
+                authorizer,
+                Arc::new(crate::live::LiveConfig::new(ConfigView::default(), None)),
+                Arc::new("b".into()),
+                Arc::new("US".into()),
+                Arc::new("ml-dsa-87".to_string()),
+                Arc::new(None),
+                crate::egress::unavailable_egress(),
+                baseline_stub::no_baseline(),
+                baseline_stub::serving(),
+                FactsGate::allow_as(None, None),
+                Duration::MAX,
+                agents,
+            ))
+        }
+    }
+
+    fn connections(emit: &Recorder) -> Vec<(String, String, String)> {
+        emit.records()
+            .into_iter()
+            .filter(|r| r.event == "connection")
+            .map(|r| (r.where_.socket, r.outcome.result, r.outcome.reason))
+            .collect()
+    }
+
+    fn stops(emit: &Recorder) -> Vec<(String, String)> {
+        let mut s: Vec<(String, String)> = emit
+            .records()
+            .into_iter()
+            .filter(|r| r.event == "shutdown")
+            .map(|r| (r.where_.socket, r.outcome.reason))
+            .collect();
+        s.sort();
+        s
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agents_at_capacity_do_not_take_client_slots() {
+        let fx = enrolling("agent-capacity").await;
+        let emit = Arc::new(Recorder::default());
+        let agent = OneConnection::new(
+            agent_socket().peer_auth,
+            HOBI_UID,
+            Duration::ZERO,
+            Duration::from_millis(800),
+        );
+        let client = OneConnection::new(
+            PeerAuth::Certless,
+            4242,
+            Duration::from_millis(200),
+            Duration::ZERO,
+        );
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(20),
+            serve_listeners(
+                1,
+                tokio::time::sleep(Duration::from_millis(1500)),
+                tokio::spawn(std::future::pending()),
+                serving(&fx, client, client_socket(), &emit),
+                Some(serving(&fx, agent, agent_socket(), &emit)),
+            ),
+        )
+        .await
+        .expect("both listeners stop");
+        assert!(matches!(outcome, ServeOutcome::GracefulShutdown));
+        let mut seen = connections(&emit);
+        seen.sort();
+        assert_eq!(
+            seen,
+            [
+                (
+                    "/run/maknae-agent/test-agent.sock".to_string(),
+                    "deny".to_string(),
+                    reject_reason_str(&maknae_vault::RejectReason::Handshake).to_string()
+                ),
+                (
+                    "/run/maknae/test-client.sock".to_string(),
+                    "deny".to_string(),
+                    reject_reason_str(&maknae_vault::RejectReason::Handshake).to_string()
+                ),
+            ],
+            "neither listener refused its connection at capacity"
+        );
+    }
+
+    struct Mismatched;
+
+    impl PlaneAccept for Mismatched {
+        type Raw = ();
+        type Stream = tokio::io::DuplexStream;
+
+        fn peer_auth(&self) -> &PeerAuth {
+            &PeerAuth::Certless
+        }
+
+        async fn accept_raw(&self) -> Result<((), PeerCreds), maknae_vault::RawAcceptError> {
+            std::future::pending().await
+        }
+
+        async fn finish_handshake(
+            &self,
+            _raw: (),
+            _peer_creds: PeerCreds,
+            _handshake_timeout: Duration,
+        ) -> Result<Conn<tokio::io::DuplexStream>, AcceptRejection> {
+            unreachable!("nothing is accepted")
+        }
+    }
+
+    fn idle(auth: PeerAuth) -> OneConnection {
+        let mut c = OneConnection::new(auth, 0, Duration::ZERO, Duration::ZERO);
+        c.taken = std::sync::atomic::AtomicBool::new(true);
+        c
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_supervisor_exit_stops_both_listeners() {
+        let fx = enrolling("agent-supervisor").await;
+        let emit = Arc::new(Recorder::default());
+        let supervisor = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            maknae_vault::VaultError::RenewalExpired
+        });
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(20),
+            serve_listeners(
+                4,
+                std::future::pending(),
+                supervisor,
+                serving(&fx, idle(PeerAuth::Certless), client_socket(), &emit),
+                Some(serving(
+                    &fx,
+                    idle(agent_socket().peer_auth),
+                    agent_socket(),
+                    &emit,
+                )),
+            ),
+        )
+        .await
+        .expect("a supervisor exit stops both listeners");
+        assert!(
+            matches!(
+                outcome,
+                ServeOutcome::SupervisorExited(maknae_vault::VaultError::RenewalExpired)
+            ),
+            "{outcome:?}"
+        );
+        let why = format!(
+            "shutdown: credential supervisor exited: {}",
+            maknae_vault::VaultError::Renew(maknae_vault::VaultError::RenewalExpired.to_string())
+        );
+        assert_eq!(
+            stops(&emit),
+            [
+                ("/run/maknae-agent/test-agent.sock".to_string(), why.clone()),
+                ("/run/maknae/test-client.sock".to_string(), why),
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn either_loop_ending_stops_the_other() {
+        let fx = enrolling("agent-either").await;
+        for agent_ends in [true, false] {
+            let emit = Arc::new(Recorder::default());
+            let supervisor = tokio::spawn(std::future::pending());
+            let watched = supervisor.abort_handle();
+            let outcome = if agent_ends {
+                tokio::time::timeout(
+                    Duration::from_secs(20),
+                    serve_listeners(
+                        4,
+                        std::future::pending(),
+                        supervisor,
+                        serving(&fx, idle(PeerAuth::Certless), client_socket(), &emit),
+                        Some(serving(&fx, Mismatched, agent_socket(), &emit)),
+                    ),
+                )
+                .await
+            } else {
+                let mut mismatched = client_socket();
+                mismatched.peer_auth = agent_socket().peer_auth;
+                tokio::time::timeout(
+                    Duration::from_secs(20),
+                    serve_listeners(
+                        4,
+                        std::future::pending(),
+                        supervisor,
+                        serving(&fx, Mismatched, mismatched, &emit),
+                        Some(serving(
+                            &fx,
+                            idle(agent_socket().peer_auth),
+                            agent_socket(),
+                            &emit,
+                        )),
+                    ),
+                )
+                .await
+            }
+            .unwrap_or_else(|_| panic!("agent_ends={agent_ends}: the other loop was not stopped"));
+            assert!(
+                matches!(outcome, ServeOutcome::ChannelMismatch),
+                "agent_ends={agent_ends}: {outcome:?}"
+            );
+            assert_eq!(stops(&emit).len(), 2, "agent_ends={agent_ends}");
+            assert!(
+                watched.is_finished(),
+                "the credential supervisor is stopped"
+            );
+        }
+    }
+
+    #[test]
+    fn the_combined_outcome_prefers_supervisor_exit_then_mismatch() {
+        use ServeOutcome::{ChannelMismatch, GracefulShutdown, SupervisorExited};
+        let renewal = || maknae_vault::VaultError::RenewalExpired;
+        let stored = combine_outcomes(Some(renewal()), GracefulShutdown, Some(GracefulShutdown));
+        assert!(
+            matches!(
+                stored,
+                SupervisorExited(maknae_vault::VaultError::RenewalExpired)
+            ),
+            "{stored:?}"
+        );
+        for (client, agent) in [
+            (ChannelMismatch, Some(SupervisorExited(renewal()))),
+            (SupervisorExited(renewal()), Some(ChannelMismatch)),
+            (SupervisorExited(renewal()), None),
+        ] {
+            let got = combine_outcomes(None, client, agent);
+            assert!(matches!(got, SupervisorExited(_)), "{got:?}");
+        }
+        for (client, agent) in [
+            (GracefulShutdown, Some(ChannelMismatch)),
+            (ChannelMismatch, Some(GracefulShutdown)),
+            (ChannelMismatch, None),
+        ] {
+            let got = combine_outcomes(None, client, agent);
+            assert!(matches!(got, ChannelMismatch), "{got:?}");
+        }
+        let got = combine_outcomes(None, GracefulShutdown, Some(GracefulShutdown));
+        assert!(matches!(got, GracefulShutdown), "{got:?}");
+        let got = combine_outcomes(None, GracefulShutdown, None);
+        assert!(matches!(got, GracefulShutdown), "{got:?}");
     }
 }

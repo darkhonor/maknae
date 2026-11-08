@@ -118,7 +118,7 @@ install -d -m 0700 %{buildroot}%{_localstatedir}/lib/maknae
 # erase keeps the trail and an upgrade never replaces the append-only inode.
 
 %pre
-# Create the _maknae and _maknae-egress accounts and the maknae operator group
+# Create the _maknae and _maknae-egress accounts and the maknae and maknae-agents groups
 # BEFORE payload unpack so rpm -V never sees owner drift.
 %sysusers_create_compat %{SOURCE3}
 %selinux_relabel_pre -s %{selinuxtype}

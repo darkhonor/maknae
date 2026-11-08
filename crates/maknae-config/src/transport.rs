@@ -9,8 +9,9 @@ use std::path::PathBuf;
 pub const TRANSPORT_SECTION: &str = "transport";
 
 /// #210: the keys this section's parser reads — the closed vocabulary.
-pub(crate) const TRANSPORT_KEYS: [&str; 5] = [
+pub(crate) const TRANSPORT_KEYS: [&str; 6] = [
     "socket_path",
+    "agent_socket_path",
     "max_connections",
     "prompt_max_bytes",
     "handshake_timeout_ms",
@@ -22,9 +23,16 @@ const DEFAULT_PROMPT_MAX_BYTES: usize = 1_048_576;
 const DEFAULT_HANDSHAKE_TIMEOUT_MS: u64 = 5000;
 const DEFAULT_READ_TIMEOUT_MS: u64 = 5000;
 const DEFAULT_SOCKET_PATH: &str = "/run/maknae/maknaed.sock";
+const DEFAULT_AGENT_SOCKET_PATH: &str = if cfg!(target_os = "macos") {
+    MACOS_AGENT_SOCKET_PATH
+} else {
+    "/run/maknae-agent/maknaed.sock"
+};
 
 /// The macOS daemon's socket path.
 pub const MACOS_DAEMON_SOCKET_PATH: &str = "/usr/local/var/run/maknae/maknaed.sock";
+/// The macOS daemon's agent socket path.
+pub const MACOS_AGENT_SOCKET_PATH: &str = "/usr/local/var/run/maknae-agent/maknaed.sock";
 
 const MAX_CONNECTIONS_RANGE: std::ops::RangeInclusive<i64> = 1..=4096;
 /// The smallest `prompt_max_bytes` an operator can set. Exported because the
@@ -63,6 +71,7 @@ pub const ADMISSION_AUDIT_TIMEOUT_MS: u64 = 5_000;
 #[derive(Clone, Debug)]
 pub struct TransportConfig {
     pub socket_path: PathBuf,
+    pub agent_socket_path: PathBuf,
     pub max_connections: u32,
     pub prompt_max_bytes: usize,
     pub handshake_timeout_ms: u64,
@@ -73,6 +82,7 @@ impl Default for TransportConfig {
     fn default() -> Self {
         TransportConfig {
             socket_path: PathBuf::from(DEFAULT_SOCKET_PATH),
+            agent_socket_path: PathBuf::from(DEFAULT_AGENT_SOCKET_PATH),
             max_connections: DEFAULT_MAX_CONNECTIONS,
             prompt_max_bytes: DEFAULT_PROMPT_MAX_BYTES,
             handshake_timeout_ms: DEFAULT_HANDSHAKE_TIMEOUT_MS,
@@ -206,6 +216,22 @@ pub fn transport_from_section(v: Option<&Value>) -> Result<TransportConfig, Conf
         None => PathBuf::from(DEFAULT_SOCKET_PATH),
         Some(v) => PathBuf::from(as_str(v).ok_or_else(|| err("socket_path", "must be a string"))?),
     };
+    let agent_socket_path = match get(section, "agent_socket_path") {
+        None => PathBuf::from(DEFAULT_AGENT_SOCKET_PATH),
+        Some(Value::Str(s)) if !s.is_empty() => PathBuf::from(s),
+        Some(Value::Str(_)) => return Err(err("agent_socket_path", "must not be empty")),
+        Some(_) => return Err(err("agent_socket_path", "must be a string")),
+    };
+    if agent_socket_path.parent() == socket_path.parent() {
+        return Err(err(
+            "agent_socket_path",
+            format!(
+                "{} is in the directory of transport.socket_path ({})",
+                agent_socket_path.display(),
+                socket_path.display()
+            ),
+        ));
+    }
     let max_connections = bounded_u32(
         section,
         "max_connections",
@@ -233,6 +259,7 @@ pub fn transport_from_section(v: Option<&Value>) -> Result<TransportConfig, Conf
 
     Ok(TransportConfig {
         socket_path,
+        agent_socket_path,
         max_connections,
         prompt_max_bytes,
         handshake_timeout_ms,
@@ -519,6 +546,7 @@ mod tests {
     fn every_key_the_parser_reads_is_accepted() {
         let v = Value::Map(vec![
             ("socket_path".into(), Value::Null),
+            ("agent_socket_path".into(), Value::Null),
             ("max_connections".into(), Value::Null),
             ("prompt_max_bytes".into(), Value::Null),
             ("handshake_timeout_ms".into(), Value::Null),
@@ -529,6 +557,77 @@ mod tests {
             !matches!(e, Err(ConfigError::UnknownKey { .. })),
             "a key the parser reads was rejected: {e:?}"
         );
+    }
+
+    #[test]
+    fn agent_socket_path_defaults_per_platform() {
+        let want = if cfg!(target_os = "macos") {
+            MACOS_AGENT_SOCKET_PATH
+        } else {
+            "/run/maknae-agent/maknaed.sock"
+        };
+        assert_eq!(
+            TransportConfig::default().agent_socket_path,
+            PathBuf::from(want)
+        );
+        assert_eq!(
+            transport_from_section(None).unwrap().agent_socket_path,
+            PathBuf::from(want)
+        );
+        let v = Value::Map(vec![("max_connections".into(), Value::Int(8))]);
+        assert_eq!(
+            transport_from_section(Some(&v)).unwrap().agent_socket_path,
+            PathBuf::from(want)
+        );
+        let v = Value::Map(vec![(
+            "agent_socket_path".into(),
+            Value::Str("/run/elsewhere/agents.sock".into()),
+        )]);
+        assert_eq!(
+            transport_from_section(Some(&v)).unwrap().agent_socket_path,
+            PathBuf::from("/run/elsewhere/agents.sock")
+        );
+    }
+
+    #[test]
+    fn agent_socket_in_the_client_socket_directory_refuses() {
+        for (client, agent) in [
+            (None, "/run/maknae/agent.sock"),
+            (None, "/run/maknae/maknaed.sock"),
+            (
+                Some("/run/maknae-agent/client.sock"),
+                "/run/maknae-agent/maknaed.sock",
+            ),
+            (Some("/srv/m/client.sock"), "/srv/m/agent.sock"),
+        ] {
+            let mut entries = vec![("agent_socket_path".to_string(), Value::Str(agent.into()))];
+            if let Some(c) = client {
+                entries.push(("socket_path".into(), Value::Str(c.into())));
+            }
+            match transport_from_section(Some(&Value::Map(entries))) {
+                Err(ConfigError::InvalidTransport(why)) => {
+                    assert!(why.contains("transport.agent_socket_path"), "{why}");
+                }
+                other => panic!("{client:?} {agent}: expected InvalidTransport, got {other:?}"),
+            }
+        }
+        let v = Value::Map(vec![(
+            "socket_path".into(),
+            Value::Str("/run/maknae-agent/client.sock".into()),
+        )]);
+        if !cfg!(target_os = "macos") {
+            assert!(matches!(
+                transport_from_section(Some(&v)),
+                Err(ConfigError::InvalidTransport(_))
+            ));
+        }
+        for bad in [Value::Int(1), Value::Str(String::new())] {
+            let v = Value::Map(vec![("agent_socket_path".into(), bad)]);
+            assert!(matches!(
+                transport_from_section(Some(&v)),
+                Err(ConfigError::InvalidTransport(_))
+            ));
+        }
     }
 
     #[test]

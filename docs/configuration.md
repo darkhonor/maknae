@@ -291,7 +291,7 @@ To contain an id independently of the directory, list it as `- uid: <n>`. On Lin
 > |---|---|
 > | `core` (own level) | `schema_version`, `deployment_id`, `identity`, `handling` |
 > | `core.handling` | `ceiling`, `accreditation_ref`, `policy` |
-> | `transport` | `socket_path`, `max_connections`, `prompt_max_bytes`, `handshake_timeout_ms`, `read_timeout_ms` |
+> | `transport` | `socket_path`, `agent_socket_path`, `max_connections`, `prompt_max_bytes`, `handshake_timeout_ms`, `read_timeout_ms`. `agent_socket_path` is where a host-mode `maknaed` accepts enrolled agents: `/run/maknae-agent/maknaed.sock` on Linux, `/usr/local/var/run/maknae-agent/maknaed.sock` on macOS. A value in the directory of `socket_path` refuses the configuration. |
 > | `audit` | `jsonl_path`, `siem`, `au3_1`, `readers` (§6.3) |
 > | `principal` | `name`, `uid` |
 > | `vault` | `addr`, `approle_mount`, `pki_int_mount`, `deployment_id`, `insecure_plaintext_secret_path`, `user_auth`, `kv_mount`, `user_prefix`, `plane_key` (`crates/maknae-vault/src/config.rs`). In the **root** `maknae.yaml`, `kv_mount` and `user_prefix` refuse boot — `vault.kv_mount in the root maknae.yaml is not read by maknaed: set kv_mount in egress-bounds.yaml` (likewise `user_prefix`), shadowed `config.d/` blocks included — because the host's copy lives in `egress-bounds.yaml` (§6.1.3); they belong in each user's `maknae.yaml` (§6.1.2) |

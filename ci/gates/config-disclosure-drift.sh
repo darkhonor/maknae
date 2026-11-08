@@ -42,7 +42,7 @@ MANIFEST=ci/gates/config-disclosure-manifest.txt
 # per entry answers it: a dropped field, a dropped entry, or a field the
 # extractor cannot see all change a number a human must edit deliberately.
 SURFACE=(
-  "crates/maknae-config/src/transport.rs|TransportConfig|transport|5|config"
+  "crates/maknae-config/src/transport.rs|TransportConfig|transport|6|config"
   # The `egress` section (#240): the deputy's socket and the provider deadline.
   "crates/maknae-config/src/egress_cfg.rs|EgressConfig|egress|2|config"
   "crates/maknae-config/src/audit_cfg.rs|AuditConfig|audit|4|config"

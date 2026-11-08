@@ -1,5 +1,5 @@
 //! Peer-uid → `maknae`-group membership (spec §5). T3 I/O; fail-closed. CROSS-PLATFORM.
-use maknae_io::{AccountLookupError, MAKNAE_GROUP};
+use maknae_io::{AccountLookupError, MAKNAE_AGENTS_GROUP, MAKNAE_GROUP};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthzError {
@@ -19,10 +19,22 @@ pub enum AuthzError {
 /// supplementary group there). Fails closed (`Err`) if the group cannot be resolved — the
 /// caller must refuse to serve rather than bind a socket group-owned by the wrong group.
 pub fn maknae_gid() -> Result<nix::unistd::Gid, AuthzError> {
-    maknae_io::group_gid(MAKNAE_GROUP)
+    named_gid(MAKNAE_GROUP, maknae_io::group_gid(MAKNAE_GROUP))
+}
+
+/// The `maknae-agents` gid that group-owns the agent socket; a missing group refuses start.
+pub fn maknae_agents_gid() -> Result<nix::unistd::Gid, AuthzError> {
+    named_gid(MAKNAE_AGENTS_GROUP, maknae_io::maknae_agents_gid())
+}
+
+fn named_gid(
+    name: &str,
+    found: Result<Option<u32>, AccountLookupError>,
+) -> Result<nix::unistd::Gid, AuthzError> {
+    found
         .map_err(|e| AuthzError::Resolve(lookup_why(e)))?
         .map(nix::unistd::Gid::from_raw)
-        .ok_or_else(|| AuthzError::Resolve("no `maknae` group".into()))
+        .ok_or_else(|| AuthzError::Resolve(format!("no `{name}` group")))
 }
 
 fn lookup_why(e: AccountLookupError) -> String {
@@ -71,6 +83,25 @@ mod tests {
                 panic!("the gid lookup names no user")
             }
         }
+    }
+
+    #[test]
+    fn a_missing_or_unanswered_group_refuses_the_socket() {
+        assert_eq!(
+            named_gid(MAKNAE_AGENTS_GROUP, Ok(Some(4242))),
+            Ok(nix::unistd::Gid::from_raw(4242))
+        );
+        assert_eq!(
+            named_gid(MAKNAE_AGENTS_GROUP, Ok(None)),
+            Err(AuthzError::Resolve("no `maknae-agents` group".into()))
+        );
+        assert_eq!(
+            named_gid(
+                MAKNAE_AGENTS_GROUP,
+                Err(AccountLookupError::Resolve("EIO".into()))
+            ),
+            Err(AuthzError::Resolve("EIO".into()))
+        );
     }
 
     /// #275: the username is a property of the PEER UID and must be populated

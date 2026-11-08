@@ -103,6 +103,10 @@ pub fn group_gid(name: &str) -> Result<Option<u32>, AccountLookupError> {
         .map(|g| g.gid.as_raw()))
 }
 
+pub fn maknae_agents_gid() -> Result<Option<u32>, AccountLookupError> {
+    group_gid(MAKNAE_AGENTS_GROUP)
+}
+
 pub fn daemon_facts() -> Result<DaemonFacts, AccountLookupError> {
     let resolve = |e: nix::Error| AccountLookupError::Resolve(e.to_string());
     let mut users = Vec::new();
@@ -146,6 +150,11 @@ mod tests {
     #[test]
     fn an_unknown_uid_is_none() {
         assert_eq!(host_account(4_000_000_000), Ok(None));
+    }
+
+    #[test]
+    fn the_agents_gid_is_the_agents_group_lookup() {
+        assert_eq!(maknae_agents_gid(), group_gid(MAKNAE_AGENTS_GROUP));
     }
 
     #[test]

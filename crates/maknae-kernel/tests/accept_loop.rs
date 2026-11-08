@@ -225,6 +225,10 @@ fn certified(san: &str) -> ChannelPeer {
     ChannelPeer::Certified(san.to_string())
 }
 
+fn capacity(cfg: &maknae_config::TransportConfig) -> Arc<tokio::sync::Semaphore> {
+    Arc::new(tokio::sync::Semaphore::new(cfg.max_connections as usize))
+}
+
 fn cfg_with(max_connections: u32, read_timeout_ms: u64) -> maknae_config::TransportConfig {
     let mut c = maknae_config::transport_from_section(None).unwrap();
     c.max_connections = max_connections;
@@ -326,7 +330,8 @@ async fn drive_into(
             class,
             emit_for_loop,
             session_ids,
-            cfg,
+            cfg.clone(),
+            capacity(&cfg),
             wctx(),
             shutdown,
             pending_supervisor(),
@@ -514,7 +519,8 @@ async fn stalled_handshake_does_not_block_next_connection() {
             client_class(),
             emit_for_loop,
             session_ids,
-            cfg,
+            cfg.clone(),
+            capacity(&cfg),
             wctx(),
             std::future::pending::<()>(),
             pending_supervisor(),
@@ -617,7 +623,8 @@ async fn at_capacity_audit_does_not_block_accept_loop() {
             client_class(),
             emit_for_loop,
             session_ids,
-            cfg,
+            cfg.clone(),
+            capacity(&cfg),
             wctx(),
             std::future::pending::<()>(),
             pending_supervisor(),
@@ -715,6 +722,7 @@ async fn every_at_capacity_refusal_is_recorded_or_counted() {
             emit_for_loop,
             Arc::new(SessionIds::with_nonce(1)),
             cfg_with(1, 150),
+            capacity(&cfg_with(1, 150)),
             wctx(),
             async move {
                 let _ = rx.await;
@@ -783,7 +791,8 @@ async fn supervisor_exit_stops_the_loop_and_reports_failure() {
             client_class(),
             emit.clone(),
             session_ids,
-            cfg,
+            cfg.clone(),
+            capacity(&cfg),
             wctx(),
             std::future::pending::<()>(), // shutdown never fires in this test
             supervisor,
@@ -849,6 +858,7 @@ async fn a_listener_that_authenticates_otherwise_than_its_class_serves_nothing()
             emit.clone(),
             Arc::new(SessionIds::with_nonce(1)),
             cfg_with(64, 150),
+            capacity(&cfg_with(64, 150)),
             wctx(),
             shutdown,
             pending_supervisor(),
@@ -906,7 +916,8 @@ async fn shutdown_signal_yields_graceful_outcome() {
         client_class(),
         emit.clone(),
         session_ids,
-        cfg,
+        cfg.clone(),
+        capacity(&cfg),
         wctx(),
         shutdown,
         pending_supervisor(),
@@ -1729,6 +1740,7 @@ where
             emit_for_loop,
             Arc::new(SessionIds::with_nonce(1)),
             cfg_with(8, 500),
+            capacity(&cfg_with(8, 500)),
             wctx(),
             async move {
                 let _ = rx.await;

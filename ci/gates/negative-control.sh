@@ -1143,6 +1143,7 @@ FIX
   cat > "$fixture/crates/maknae-config/src/transport.rs" <<FIX
 pub struct TransportConfig {
     pub socket_path: PathBuf,
+    pub agent_socket_path: PathBuf,
     pub max_connections: u32,
     pub prompt_max_bytes: usize,
     pub handshake_timeout_ms: u64,
@@ -1299,7 +1300,7 @@ mask	lake	the Knowledge Lake schema, not ours
 # the whole loop kept finding, and the shape the regex extraction could not see.
 fx="$(cfg_fixture "$CFG_OK" 'pub debug_core_dump_path: PathBuf,')"
 expect_reject_because "config-disclosure-drift/config-struct-field-changes-the-count" \
-  "yielded 6 field(s), expected 5" "$fx/ci/gates/config-disclosure-drift.sh"
+  "yielded 7 field(s), expected 6" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: check 4b -- a counted field with no manifest decision. Named
 # `struct-field-with-no-decision` and probed by APPENDING a field, this fired on
@@ -1310,16 +1311,16 @@ expect_reject_because "config-disclosure-drift/config-struct-field-changes-the-c
 # config surface, while the harness printed neg-ok. Bump the SURFACE count so
 # the field is legitimately counted, and decide the transport fields
 # INDIVIDUALLY (as the real manifest does) so the new one is genuinely undecided.
-fx="$(cfg_fixture "$(printf '%s' "$CFG_OK" | sed "s|^disclose${TABCH}transport${TABCH}.*|disclose${TABCH}transport.socket_path${TABCH}shape\ndisclose${TABCH}transport.max_connections${TABCH}shape\ndisclose${TABCH}transport.prompt_max_bytes${TABCH}shape\ndisclose${TABCH}transport.handshake_timeout_ms${TABCH}shape\ndisclose${TABCH}transport.read_timeout_ms${TABCH}shape|")" \
+fx="$(cfg_fixture "$(printf '%s' "$CFG_OK" | sed "s|^disclose${TABCH}transport${TABCH}.*|disclose${TABCH}transport.socket_path${TABCH}shape\ndisclose${TABCH}transport.agent_socket_path${TABCH}shape\ndisclose${TABCH}transport.max_connections${TABCH}shape\ndisclose${TABCH}transport.prompt_max_bytes${TABCH}shape\ndisclose${TABCH}transport.handshake_timeout_ms${TABCH}shape\ndisclose${TABCH}transport.read_timeout_ms${TABCH}shape|")" \
   'pub debug_core_dump_path: PathBuf,')"
 python3 - "$fx" <<'PY'
 import pathlib, sys
 root = pathlib.Path(sys.argv[1])
 g = root / "ci/gates/config-disclosure-drift.sh"
 s = g.read_text()
-old = "TransportConfig|transport|5|config"
+old = "TransportConfig|transport|6|config"
 assert s.count(old) == 1, "fixture count anchor moved"
-g.write_text(s.replace(old, "TransportConfig|transport|6|config"))
+g.write_text(s.replace(old, "TransportConfig|transport|7|config"))
 # The CODE side must itemize too, or check 3 (DISCLOSABLE-vs-manifest
 # agreement) fires first and 4b is again never reached.
 d = root / "crates/maknae-config/src/document.rs"
@@ -1327,7 +1328,7 @@ t = d.read_text()
 assert t.count('    "transport",\n') == 1, "fixture DISCLOSABLE anchor moved"
 d.write_text(t.replace('    "transport",\n', "".join(
     '    "transport.%s",\n' % f for f in
-    ("socket_path", "max_connections", "prompt_max_bytes",
+    ("socket_path", "agent_socket_path", "max_connections", "prompt_max_bytes",
      "handshake_timeout_ms", "read_timeout_ms"))))
 PY
 expect_reject_because "config-disclosure-drift/struct-field-with-no-decision" \
@@ -1393,13 +1394,13 @@ expect_reject "config-disclosure-drift/registered-section-with-no-surface-entry"
 # while the count stayed put.
 fx="$(cfg_fixture "$CFG_OK" 'pub(crate) session_token_path: PathBuf,')"
 expect_reject_because "config-disclosure-drift/pub-crate-field-not-counted" \
-  "yielded 6 field(s), expected 5" "$fx/ci/gates/config-disclosure-drift.sh"
+  "yielded 7 field(s), expected 6" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a raw-identifier field. `type` is a Rust keyword and an entirely
 # ordinary YAML key.
 fx="$(cfg_fixture "$CFG_OK" 'pub r#type: String,')"
 expect_reject_because "config-disclosure-drift/raw-identifier-field-not-counted" \
-  "yielded 6 field(s), expected 5" "$fx/ci/gates/config-disclosure-drift.sh"
+  "yielded 7 field(s), expected 6" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a SectionSpec registered with a STRING LITERAL name. boot.rs's own
 # grammar accepts it, and keying the cross-check on `[A-Z_]+_SECTION` const
@@ -1420,7 +1421,7 @@ expect_reject "config-disclosure-drift/string-literal-section-registration" "$fx
 # the two are the same property, one keyword apart.
 fx="$(cfg_fixture "$CFG_OK" 'session_token_path: PathBuf,')"
 expect_reject_because "config-disclosure-drift/private-field-not-counted" \
-  "yielded 6 field(s), expected 5" "$fx/ci/gates/config-disclosure-drift.sh"
+  "yielded 7 field(s), expected 6" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a scalar field turned into a config STRUCT. The silent variant of
 # the depth-blind tally: the field count does not change, so nothing else in
@@ -1965,7 +1966,7 @@ expect_accept "config-disclosure-drift/config-vec-of-struct-is-a-leaf" \
 # ACCEPT: the clean fixture passes and reports both counts. Without this every
 # rejection above would stay green against a gate that refuses everything.
 fx="$(cfg_fixture "$CFG_OK")"
-expect_accept "config-disclosure-drift/clean-fixture-passes" ": 58 paths decided, 67 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/clean-fixture-passes" ": 58 paths decided, 68 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
 
 
 # ACCEPT, against the REAL repo: each gate's reported examined-set is
@@ -2028,7 +2029,7 @@ expect_reported_count "p1-manifest/packages-match-the-workspace" "ok (" "$exp_p1
 # control; asserting it here means any future silent shrink is a red build.
 
 expect_accept "config-disclosure-drift/real-repo-counts-pinned" \
-  ": 69 paths decided, 67 struct fields covered" "$here/config-disclosure-drift.sh"
+  ": 70 paths decided, 68 struct fields covered" "$here/config-disclosure-drift.sh"
 
 
 # #158: a grant's own disclosure inventory must reject new data and type changes.

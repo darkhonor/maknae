@@ -304,6 +304,8 @@ sudo chown "$(whoami)":maknae /usr/local/var/run/maknae
 sudo chmod 0750 /usr/local/var/run/maknae
 ```
 
+On a host mode `maknaed` also binds the agent socket, `transport.agent_socket_path`, group-owned by `maknae-agents`, and refuses to start when that group does not exist. For a manual run, create the group (`sudo groupadd --system maknae-agents`, or `sudo dseditgroup -o create maknae-agents` on macOS), add your account to it so the daemon can group-own the socket, and create the directory the same way with group `maknae-agents`: `/run/maknae-agent` on Linux, `/usr/local/var/run/maknae-agent` on macOS.
+
 Point `maknae.yaml`'s `transport.socket_path` at whichever of these you created (or leave
 the default and use `/run/maknae/maknaed.sock` on Linux).
 
