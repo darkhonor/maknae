@@ -82,6 +82,31 @@ async fn held_mutation_attempts_do_not_refuse_another_uids_conversation_work() {
         }
         stalled.push((client, task));
     }
+    let overflow = Records::new(0);
+    let (mut client, task, body) = fx.start(
+        Verb::FsWrite {
+            path: target.to_str().unwrap().into(),
+            content_length: 1,
+            mode: WriteMode::Existing,
+            conversation: None,
+        },
+        Some(maknae_io::open_path_for_delegation(&target).unwrap()),
+        Arc::clone(&overflow),
+    );
+    common::write_frame(&mut client, &body).await.unwrap();
+    let refused = next_response(&mut client).await.result;
+    assert!(
+        !matches!(refused, RespResult::Ok(Payload::MutationAttempt(_))),
+        "the mutation pool was not full: {refused:?}"
+    );
+    assert!(
+        overflow.snapshot().iter().any(|r| r
+            .outcome
+            .reason
+            .contains("mutation worker budget exhausted")),
+        "the overflow write was not refused by the mutation budget"
+    );
+    stalled.push((client, task));
     let nobody = nix::unistd::User::from_name("nobody")
         .unwrap()
         .expect("a nobody account");

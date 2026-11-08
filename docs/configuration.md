@@ -318,7 +318,7 @@ The shipped file grants all five to `admin` and none to `user`. It has no `desti
 - Each scan reads the whole store, so its cost grows with every owner's conversations (#616).
 - `session.delete` of an id the kernel does not hold is permitted, so it tells the caller whether an id is held; ids are 128 random bits.
 - A prompt's chain advance is written before its egress intent, so after a crash the record can cover a request whose only audit record is a deny, or none; the loop's retry is admitted.
-- When marking a conversation full fails, its owner can be billed again for a reply the kernel then refuses; each attempt is audited.
+- When marking a conversation full fails, or the reply binding never starts within its bound, its owner can be billed again for a reply the kernel then refuses; each attempt is audited.
 
 **Single host.** The store admits one `maknaed` per state directory: the directory is locked exclusively while the daemon runs. Sharing it between hosts is not supported (#616).
 

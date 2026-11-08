@@ -6096,7 +6096,7 @@ expect_reject_because "unsafe-lint/an-in-source-allow-of-a-forbidden-lint-is-ref
 if command -v cargo >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
   cv_root="$(cd "$here/../.." && pwd)"
   cv_ws="$(mktemp -d -p "$NC_TMP")"
-  ( cd "$cv_root" && git ls-files -z | tar --null -T - -cf - ) | tar -xf - -C "$cv_ws"
+  ( cd "$cv_root" && git ls-files -z | tar --null -T - -cf - ) | tar -xmf - -C "$cv_ws"
   cv_target="$cv_root/target/negative-control"
   cv_suite() { # <crate> <filter> — FAIL when the filtered suite goes red
     local out
@@ -6122,7 +6122,6 @@ open(p, "w").write(s.replace(old, new))' "$f" "$2" "$3"; then
     fi
     cv_suite "$4" "$5" || rc=$?
     mv "$f.orig" "$f"
-    touch "$f"
     return "$rc"
   }
   CHAIN=crates/maknae-kernel/src/conversation/chain.rs
