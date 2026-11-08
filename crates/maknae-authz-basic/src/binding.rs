@@ -1196,6 +1196,25 @@ mod tests {
     }
 
     #[test]
+    fn without_bindings_only_enrolled_agents_are_listed() {
+        let mut l = layer(
+            false,
+            &[(2001, "hobi-svc", "user"), (3000, "stray-svc", "user")],
+        );
+        l.agents = [("hobi".to_string(), 2001)].into();
+        let g = GraphBindings::new(graph(&l), SOURCE);
+        assert_eq!(
+            g.as_subject_bindings(),
+            Some(vec![maknae_security::SubjectBinding {
+                role: "user".into(),
+                members: vec!["uid:2001".into()],
+            }])
+        );
+        let listed: Vec<Option<u32>> = g.entries(&[]).unwrap().iter().map(|s| s.uid).collect();
+        assert_eq!(listed, vec![Some(2001)]);
+    }
+
+    #[test]
     fn absent_and_empty_bindings_differ() {
         let absent = GraphBindings::new(graph(&layer(false, &[])), SOURCE);
         assert_eq!(

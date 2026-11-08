@@ -758,11 +758,6 @@ impl PolicySource {
     }
 
     #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
-    pub fn set_daemon_lookup(&mut self, lookup: DaemonLookup) {
-        self.hosts.daemons = lookup;
-    }
-
-    #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
     pub fn set_group_lookup(&mut self, lookup: GroupLookup) {
         self.hosts.group = lookup;
     }
@@ -5048,6 +5043,28 @@ mod tests {
                 "{got:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_host_lookups_read_this_hosts_accounts_and_groups() {
+        let uid = nix::unistd::geteuid();
+        let gid = nix::unistd::getegid();
+        let acct = (HostLookups::HOST.account)(uid.as_raw())
+            .unwrap()
+            .expect("the test account has a passwd entry");
+        assert_eq!(acct.uid, uid.as_raw());
+        assert_eq!(acct.primary_gid, gid.as_raw());
+        let group = nix::unistd::Group::from_gid(gid)
+            .unwrap()
+            .expect("the test account's group has a group entry");
+        assert_eq!(
+            (HostLookups::HOST.group)(&group.name),
+            Ok(Some(gid.as_raw()))
+        );
+        assert_eq!(
+            (HostLookups::HOST.group)("maknae-no-such-group-609"),
+            Ok(None)
+        );
     }
 
     /// In-crate killers for the feature-gated wrapper (`cargo mutants -p` runs
