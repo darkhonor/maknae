@@ -28,6 +28,7 @@ use x509_parser::prelude::FromDer;
 use zeroize::Zeroizing;
 
 struct IdentityInner {
+    plane_key: PlaneKey,
     leaf_pem: String,
     key_der: Zeroizing<Vec<u8>>,
     chain_pem: Vec<String>,
@@ -50,6 +51,31 @@ impl PlaneIdentity {
     /// `CertifiedKey` in `tls.rs`; never handed to a caller).
     pub(crate) fn key_der(&self) -> &[u8] {
         &self.0.key_der
+    }
+    pub(crate) fn plane_key(&self) -> PlaneKey {
+        self.0.plane_key
+    }
+    pub(crate) fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, VaultError> {
+        let key = maknae_crypto::signature::KeyPair::from_pkcs8_der(
+            maknae_crypto::admitted(),
+            self.0.plane_key.into(),
+            self.key_der(),
+        )?;
+        Ok(key.sign(msg)?)
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn from_parts_for_test(
+        plane_key: PlaneKey,
+        leaf_pem: String,
+        chain_pem: Vec<String>,
+        key_der: Zeroizing<Vec<u8>>,
+    ) -> Self {
+        PlaneIdentity(Arc::new(IdentityInner {
+            plane_key,
+            leaf_pem,
+            key_der,
+            chain_pem,
+        }))
     }
 }
 
@@ -550,6 +576,7 @@ impl PlaneClient {
         self.leaf_ttl_secs.store(leaf_ttl_secs, Ordering::Relaxed);
 
         let id = PlaneIdentity(Arc::new(IdentityInner {
+            plane_key: self.plane_key,
             leaf_pem,
             key_der,
             chain_pem,
@@ -819,6 +846,7 @@ impl SupervisorCtx {
         let (issued_at, ttl_secs) = leaf_validity_unix(&leaf_pem)?;
 
         let id = PlaneIdentity(Arc::new(IdentityInner {
+            plane_key: self.plane_key,
             leaf_pem,
             key_der,
             chain_pem,

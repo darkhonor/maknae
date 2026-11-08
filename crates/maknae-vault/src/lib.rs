@@ -44,6 +44,9 @@ mod socket;
 mod stream;
 mod supervisor;
 mod supervisor_run;
+pub mod task_sig;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_pki;
 mod tls;
 #[cfg(unix)]
 mod token_record;

@@ -7,6 +7,7 @@ use maknae_crypto::signature::SpkiParams;
 use x509_parser::certification_request::X509CertificationRequest;
 use x509_parser::extensions::{GeneralName, ParsedExtension};
 use x509_parser::prelude::FromDer;
+use x509_parser::x509::SubjectPublicKeyInfo;
 
 fn parse_csr(pem: &str) -> Option<Vec<u8>> {
     let (_, pem) = x509_parser::pem::parse_x509_pem(pem.as_bytes()).ok()?;
@@ -60,7 +61,11 @@ pub fn csr_key_is(pem: &str, key: PlaneKey) -> bool {
     let Ok((_, csr)) = X509CertificationRequest::from_der(&der) else {
         return false;
     };
-    let spki = &csr.certification_request_info.subject_pki;
+    spki_is(&csr.certification_request_info.subject_pki, key)
+}
+
+/// True iff `spki` is exactly `key`'s algorithm (`PlaneKey::matches_spki`).
+pub(crate) fn spki_is(spki: &SubjectPublicKeyInfo<'_>, key: PlaneKey) -> bool {
     let params = match &spki.algorithm.parameters {
         None => SpkiParams::Absent,
         Some(p) => match p.as_oid() {

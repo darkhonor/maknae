@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use maknae_audit_append::AuditEmit;
 use maknae_config::AgentId;
-use maknae_proto::{TaskId, TaskObject, TaskSubmission, Tasker};
+use maknae_proto::{SignedTask, TaskId, TaskObject, TaskSubmission, Tasker};
 use maknae_security::Authorizer;
 
 use crate::enrollment::EnrollmentView;
@@ -23,6 +23,7 @@ pub enum TaskRefusal {
     AgentGone,
     Random,
     Audit(String),
+    Unsigned,
 }
 
 impl std::fmt::Display for TaskRefusal {
@@ -42,13 +43,45 @@ impl std::fmt::Display for TaskRefusal {
             TaskRefusal::AgentGone => f.write_str("the target agent is no longer enrolled"),
             TaskRefusal::Random => f.write_str("no task id could be drawn"),
             TaskRefusal::Audit(why) => write!(f, "the task was not audited: {why}"),
+            TaskRefusal::Unsigned => f.write_str("the task could not be signed"),
         }
     }
 }
 
+/// Signs each task the kernel authorizes (R-S). `current_leaf` is the SHA-256 of the
+/// current signing leaf's DER.
+pub trait TaskSigner: Send + Sync {
+    fn sign(&self, task: TaskObject) -> Result<SignedTask, TaskRefusal>;
+    fn current_leaf(&self) -> Option<[u8; 32]>;
+}
+
+/// Signs with the kernel's current `plane/kernel` leaf.
+pub struct PlaneSigner(pub Arc<maknae_vault::PlaneClient>);
+
+impl TaskSigner for PlaneSigner {
+    fn sign(&self, task: TaskObject) -> Result<SignedTask, TaskRefusal> {
+        signed_by(self.0.current_identity().as_ref(), task)
+    }
+    fn current_leaf(&self) -> Option<[u8; 32]> {
+        leaf_of(self.0.current_identity().as_ref())
+    }
+}
+
+fn signed_by(
+    identity: Option<&maknae_vault::PlaneIdentity>,
+    task: TaskObject,
+) -> Result<SignedTask, TaskRefusal> {
+    let identity = identity.ok_or(TaskRefusal::Unsigned)?;
+    maknae_vault::task_sig::sign_task(identity, task).map_err(|_| TaskRefusal::Unsigned)
+}
+
+fn leaf_of(identity: Option<&maknae_vault::PlaneIdentity>) -> Option<[u8; 32]> {
+    maknae_vault::task_sig::identity_fingerprint(identity?).ok()
+}
+
 /// A task bound to the agent id and the uid enrolled when it was minted (M2).
 pub struct StoredTask {
-    pub task: Arc<TaskObject>,
+    pub task: Arc<SignedTask>,
     pub agent: AgentId,
     pub agent_uid: u32,
 }
@@ -139,15 +172,16 @@ impl TaskStore {
         (held.generation(agent), uid)
     }
 
+    /// Signs before storing, outside the store lock; an unsigned task is never stored.
     pub fn mint(
         &self,
+        signer: &dyn TaskSigner,
         view: &dyn EnrollmentView,
-        generation: u64,
-        agent_uid: u32,
+        (generation, agent_uid): (u64, u32),
         tasker: Tasker,
         parent: Option<TaskId>,
         sub: TaskSubmission,
-    ) -> Result<Arc<TaskObject>, TaskRefusal> {
+    ) -> Result<Arc<SignedTask>, TaskRefusal> {
         let mut draw = || {
             let mut id = [0u8; 16];
             maknae_crypto::random::fill(&mut id[..]).map_err(|_| TaskRefusal::Random)?;
@@ -155,6 +189,7 @@ impl TaskStore {
         };
         self.mint_with(
             &mut draw,
+            signer,
             view,
             (generation, agent_uid),
             tasker,
@@ -163,17 +198,19 @@ impl TaskStore {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn mint_with(
         &self,
         draw: &mut dyn FnMut() -> Result<[u8; 16], TaskRefusal>,
+        signer: &dyn TaskSigner,
         view: &dyn EnrollmentView,
         (generation, agent_uid): (u64, u32),
         tasker: Tasker,
         parent: Option<TaskId>,
         sub: TaskSubmission,
-    ) -> Result<Arc<TaskObject>, TaskRefusal> {
+    ) -> Result<Arc<SignedTask>, TaskRefusal> {
         let agent = target(&sub)?;
-        let mut task = Arc::new(TaskObject {
+        let mut task = TaskObject {
             schema: maknae_proto::TASK_SCHEMA.into(),
             version: maknae_proto::TASK_VERSION,
             task_id: TaskId(draw()?),
@@ -182,11 +219,15 @@ impl TaskStore {
             agent: sub.agent,
             ask: sub.ask,
             labels: sub.labels,
-        });
+        };
         loop {
-            match self.place(view, &agent, generation, agent_uid, &task)? {
-                Placed::Stored => return Ok(task),
-                Placed::Collided => Arc::make_mut(&mut task).task_id = TaskId(draw()?),
+            let signed = Arc::new(signer.sign(task)?);
+            match self.place(view, &agent, generation, agent_uid, &signed)? {
+                Placed::Stored => return Ok(signed),
+                Placed::Collided => {
+                    task = signed.task.clone();
+                    task.task_id = TaskId(draw()?);
+                }
             }
         }
     }
@@ -197,7 +238,7 @@ impl TaskStore {
         agent: &AgentId,
         generation: u64,
         agent_uid: u32,
-        task: &Arc<TaskObject>,
+        task: &Arc<SignedTask>,
     ) -> Result<Placed, TaskRefusal> {
         let mut held = self.held();
         if view.agent_uid(agent) != Some(agent_uid) || held.generation(agent) != generation {
@@ -208,7 +249,7 @@ impl TaskStore {
                 agent: agent.as_str().to_string(),
             });
         }
-        match held.tasks.entry(task.task_id) {
+        match held.tasks.entry(task.task.task_id) {
             std::collections::btree_map::Entry::Occupied(_) => Ok(Placed::Collided),
             std::collections::btree_map::Entry::Vacant(slot) => {
                 slot.insert(StoredTask {
@@ -226,7 +267,7 @@ impl TaskStore {
         id: &TaskId,
         agent: &AgentId,
         uid: u32,
-    ) -> Result<Arc<TaskObject>, TaskRefusal> {
+    ) -> Result<Arc<SignedTask>, TaskRefusal> {
         let held = self.held();
         let stored = held.tasks.get(id).ok_or(TaskRefusal::Unknown)?;
         if stored.agent != *agent || stored.agent_uid != uid {
@@ -235,16 +276,42 @@ impl TaskStore {
         Ok(stored.task.clone())
     }
 
+    /// Re-signs, outside the store lock, each stored task whose signing leaf is not the
+    /// signer's current one; a task replaced or withdrawn meanwhile is left as it is.
+    pub fn resign_stale(&self, signer: &dyn TaskSigner) {
+        let Some(current) = signer.current_leaf() else {
+            return;
+        };
+        let stale: Vec<Arc<SignedTask>> = self
+            .held()
+            .tasks
+            .values()
+            .filter(|t| maknae_vault::task_sig::leaf_fingerprint(&t.task.signature.leaf) != current)
+            .map(|t| t.task.clone())
+            .collect();
+        for old in stale {
+            let Ok(fresh) = signer.sign(old.task.clone()) else {
+                continue;
+            };
+            let mut held = self.held();
+            if let Some(slot) = held.tasks.get_mut(&old.task.task_id) {
+                if Arc::ptr_eq(&slot.task, &old) {
+                    slot.task = Arc::new(fresh);
+                }
+            }
+        }
+    }
+
     fn withdraw(&self, id: &TaskId) {
         self.held().tasks.remove(id);
     }
 
     #[cfg(any(test, feature = "hermetic-test-seam"))]
-    pub fn insert_for_test(&self, obj: TaskObject, agent_uid: u32) -> Arc<TaskObject> {
-        let agent = AgentId::parse(&obj.agent).expect("a test task names a valid agent id");
-        let task = Arc::new(obj);
+    pub fn insert_for_test(&self, signed: SignedTask, agent_uid: u32) -> Arc<SignedTask> {
+        let agent = AgentId::parse(&signed.task.agent).expect("a test task names a valid agent id");
+        let task = Arc::new(signed);
         self.held().tasks.insert(
-            task.task_id,
+            task.task.task_id,
             StoredTask {
                 task: task.clone(),
                 agent,
@@ -399,16 +466,18 @@ impl Attempt {
     not(test),
     expect(dead_code, reason = "#610's TaskSubmit arm is the caller")
 )]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn submit_task<P: Authorizer + Send + Sync + 'static>(
     authorizer: Arc<P>,
     store: &TaskStore,
+    signer: &dyn TaskSigner,
     view: &dyn EnrollmentView,
     ctx: &SubmitCtx<'_>,
     by: Submitter,
     sub: TaskSubmission,
     emit: &impl AuditEmit,
-) -> Result<Arc<TaskObject>, TaskRefusal> {
-    submit_under(decider(authorizer), store, view, ctx, by, sub, emit).await
+) -> Result<Arc<SignedTask>, TaskRefusal> {
+    submit_under(decider(authorizer), store, signer, view, ctx, by, sub, emit).await
 }
 
 fn decider<P>(authorizer: Arc<P>) -> Decider<P> {
@@ -424,15 +493,17 @@ struct Decider<P> {
     breaker: Arc<tokio::sync::Mutex<crate::blocking_guard::BlockingBreaker>>,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn submit_under<P: Authorizer + Send + Sync + 'static>(
     pdp: Decider<P>,
     store: &TaskStore,
+    signer: &dyn TaskSigner,
     view: &dyn EnrollmentView,
     ctx: &SubmitCtx<'_>,
     by: Submitter,
     sub: TaskSubmission,
     emit: &impl AuditEmit,
-) -> Result<Arc<TaskObject>, TaskRefusal> {
+) -> Result<Arc<SignedTask>, TaskRefusal> {
     let (uid, agent, tasker) = match &by {
         Submitter::User { uid, .. } => (*uid, None, Tasker::Uid(*uid)),
         Submitter::Agent { agent, uid, .. } => (
@@ -452,9 +523,9 @@ async fn submit_under<P: Authorizer + Send + Sync + 'static>(
         parent: None,
         role: None,
     };
-    let decided = decide(pdp, store, view, ctx, &by, sub, &mut attempt).await;
+    let decided = decide(pdp, store, signer, view, ctx, &by, sub, &mut attempt).await;
     let rec = match &decided {
-        Ok(task) => attempt.record(ctx, Some(task), None),
+        Ok(signed) => attempt.record(ctx, Some(&signed.task), None),
         Err(refusal) => attempt.record(ctx, None, Some(refusal)),
     };
     let audited = emit
@@ -462,23 +533,25 @@ async fn submit_under<P: Authorizer + Send + Sync + 'static>(
         .await;
     match (decided, audited) {
         (Ok(task), Ok(())) => Ok(task),
-        (Ok(task), Err(e)) => {
-            store.withdraw(&task.task_id);
+        (Ok(signed), Err(e)) => {
+            store.withdraw(&signed.task.task_id);
             Err(TaskRefusal::Audit(e.to_string()))
         }
         (Err(refusal), _) => Err(refusal),
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn decide<P: Authorizer + Send + Sync + 'static>(
     pdp: Decider<P>,
     store: &TaskStore,
+    signer: &dyn TaskSigner,
     view: &dyn EnrollmentView,
     ctx: &SubmitCtx<'_>,
     by: &Submitter,
     sub: TaskSubmission,
     attempt: &mut Attempt,
-) -> Result<Arc<TaskObject>, TaskRefusal> {
+) -> Result<Arc<SignedTask>, TaskRefusal> {
     maknae_proto::validate_submission(&sub).map_err(|e| TaskRefusal::Schema(e.to_string()))?;
     let target = target(&sub)?;
     attempt.parent = match by {
@@ -509,9 +582,9 @@ async fn decide<P: Authorizer + Send + Sync + 'static>(
     }
     let agent_uid = enrolled.ok_or(TaskRefusal::AgentGone)?;
     store.mint(
+        signer,
         view,
-        generation,
-        agent_uid,
+        (generation, agent_uid),
         attempt.tasker.clone(),
         attempt.parent,
         sub,
@@ -548,8 +621,11 @@ mod tests {
     use crate::Composition;
     use maknae_audit_append::{AuditError, AuditRecord};
     use maknae_authz_basic::{Baseline, HermeticAuthorizer};
+    use maknae_crypto::plane_key::PlaneKey;
     use maknae_proto::{Ask, Labels, SecretText, TASK_SCHEMA, TASK_VERSION};
     use maknae_security::{Decided, Request, Verdict};
+    use maknae_vault::task_sig::TaskSignatureError;
+    use maknae_vault::test_pki::{TestCa, TRUST_DOMAIN};
     use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -565,6 +641,210 @@ mod tests {
 
     fn id(s: &str) -> AgentId {
         AgentId::parse(s).unwrap()
+    }
+
+    struct LeafSigner {
+        ca: TestCa,
+        key: PlaneKey,
+        identity: Mutex<maknae_vault::PlaneIdentity>,
+    }
+
+    impl LeafSigner {
+        fn new(key: PlaneKey) -> Self {
+            let ca = TestCa::new(key);
+            let identity = Mutex::new(ca.kernel(key, None));
+            Self { ca, key, identity }
+        }
+        fn rotate(&self) {
+            *self.identity.lock().unwrap() = self.ca.kernel(self.key, None);
+        }
+        fn verify(&self, signed: &SignedTask) -> Result<(), TaskSignatureError> {
+            maknae_vault::task_sig::verify_task(
+                &self.ca.trust(),
+                TRUST_DOMAIN,
+                &id(&signed.task.agent),
+                signed,
+                std::time::SystemTime::now(),
+            )
+        }
+    }
+
+    impl TaskSigner for LeafSigner {
+        fn sign(&self, task: TaskObject) -> Result<SignedTask, TaskRefusal> {
+            signed_by(Some(&self.identity.lock().unwrap()), task)
+        }
+        fn current_leaf(&self) -> Option<[u8; 32]> {
+            leaf_of(Some(&self.identity.lock().unwrap()))
+        }
+    }
+
+    struct NoIdentity;
+
+    impl TaskSigner for NoIdentity {
+        fn sign(&self, task: TaskObject) -> Result<SignedTask, TaskRefusal> {
+            signed_by(None, task)
+        }
+        fn current_leaf(&self) -> Option<[u8; 32]> {
+            leaf_of(None)
+        }
+    }
+
+    fn signer() -> &'static LeafSigner {
+        static SIGNER: std::sync::OnceLock<LeafSigner> = std::sync::OnceLock::new();
+        SIGNER.get_or_init(|| LeafSigner::new(PlaneKey::EcdsaP384Sha384))
+    }
+
+    #[test]
+    fn mint_never_stores_an_unsigned_task() {
+        let store = TaskStore::new();
+        let v = view(&[("hobi", HOBI)]);
+        assert_eq!(NoIdentity.current_leaf(), None);
+        assert_eq!(
+            store
+                .mint(
+                    &NoIdentity,
+                    &v,
+                    (0, HOBI),
+                    Tasker::Uid(1000),
+                    None,
+                    sub("hobi")
+                )
+                .unwrap_err(),
+            TaskRefusal::Unsigned
+        );
+        assert_eq!(store.len(), 0);
+        for k in PlaneKey::ALL {
+            let signing = LeafSigner::new(k);
+            let held = store
+                .mint(
+                    &signing,
+                    &v,
+                    (0, HOBI),
+                    Tasker::Uid(1000),
+                    None,
+                    sub("hobi"),
+                )
+                .unwrap();
+            assert_eq!(signing.verify(&held), Ok(()), "{k:?}");
+        }
+        assert_eq!(store.len(), PlaneKey::ALL.len());
+    }
+
+    #[test]
+    fn a_collision_is_signed_again_under_the_new_id() {
+        let store = TaskStore::new();
+        let v = view(&[("hobi", HOBI)]);
+        let mut draws = [[1u8; 16], [1; 16], [2; 16]].into_iter();
+        let mut draw = || Ok(draws.next().unwrap());
+        for _ in 0..2 {
+            let signed = store
+                .mint_with(
+                    &mut draw,
+                    signer(),
+                    &v,
+                    (0, HOBI),
+                    Tasker::Uid(1),
+                    None,
+                    sub("hobi"),
+                )
+                .unwrap();
+            assert_eq!(signer().verify(&signed), Ok(()));
+        }
+    }
+
+    struct DuringSign<'a> {
+        inner: &'a LeafSigner,
+        during: Box<dyn Fn() + Send + Sync + 'a>,
+    }
+
+    impl TaskSigner for DuringSign<'_> {
+        fn sign(&self, task: TaskObject) -> Result<SignedTask, TaskRefusal> {
+            (self.during)();
+            self.inner.sign(task)
+        }
+        fn current_leaf(&self) -> Option<[u8; 32]> {
+            self.inner.current_leaf()
+        }
+    }
+
+    #[test]
+    fn resign_stale_leaves_a_task_replaced_or_withdrawn_while_it_signed() {
+        let signing = LeafSigner::new(PlaneKey::EcdsaP384Sha384);
+        let store = TaskStore::new();
+        let v = view(&[("hobi", HOBI)]);
+        let old = store
+            .mint(
+                &signing,
+                &v,
+                (0, HOBI),
+                Tasker::Uid(1000),
+                None,
+                sub("hobi"),
+            )
+            .unwrap();
+        signing.rotate();
+        let replacement = signing.sign(old.task.clone()).unwrap();
+        let replacing = DuringSign {
+            inner: &signing,
+            during: Box::new(|| {
+                store.insert_for_test(replacement.clone(), HOBI);
+            }),
+        };
+        signing.rotate();
+        store.resign_stale(&replacing);
+        let held = store.resolve(&old.task.task_id, &id("hobi"), HOBI).unwrap();
+        assert_eq!(*held, replacement, "the replacement is not overwritten");
+        let withdrawing = DuringSign {
+            inner: &signing,
+            during: Box::new(|| store.purge_agent(&id("hobi"))),
+        };
+        store.resign_stale(&withdrawing);
+        assert_eq!(store.len(), 0, "a withdrawn task is not put back");
+    }
+
+    #[test]
+    fn resign_stale_gives_a_verifying_signature_under_the_current_leaf() {
+        for k in PlaneKey::ALL {
+            let signing = LeafSigner::new(k);
+            let store = TaskStore::new();
+            let v = view(&[("hobi", HOBI), ("jin", JIN)]);
+            let mint_by = |s: &LeafSigner, to: &str| {
+                store
+                    .mint(s, &v, (0, v.0[&id(to)]), Tasker::Uid(1000), None, sub(to))
+                    .unwrap()
+            };
+            let before = mint_by(&signing, "hobi");
+            let first = signing.current_leaf().unwrap();
+            assert_eq!(
+                maknae_vault::task_sig::leaf_fingerprint(&before.signature.leaf),
+                first
+            );
+            signing.rotate();
+            let current = signing.current_leaf().unwrap();
+            assert_ne!(current, first, "{k:?}");
+            let fresh = mint_by(&signing, "jin");
+            store.resign_stale(&NoIdentity);
+            let kept = store
+                .resolve(&before.task.task_id, &id("hobi"), HOBI)
+                .unwrap();
+            assert!(
+                Arc::ptr_eq(&kept, &before),
+                "no current leaf, nothing re-signed"
+            );
+            store.resign_stale(&signing);
+            let after = store
+                .resolve(&before.task.task_id, &id("hobi"), HOBI)
+                .unwrap();
+            assert_eq!(after.task, before.task, "{k:?}");
+            assert_eq!(
+                maknae_vault::task_sig::leaf_fingerprint(&after.signature.leaf),
+                current,
+                "{k:?}"
+            );
+            assert_eq!(signing.verify(&after), Ok(()), "{k:?}");
+            let untouched = store.resolve(&fresh.task.task_id, &id("jin"), JIN).unwrap();
+            assert!(Arc::ptr_eq(&untouched, &fresh), "{k:?}");
+        }
     }
 
     fn sub(agent: &str) -> TaskSubmission {
@@ -583,12 +863,12 @@ mod tests {
         FixedEnrollment(pairs.iter().map(|(a, u)| (id(a), *u)).collect())
     }
 
-    fn mint(store: &TaskStore, v: &FixedEnrollment, agent: &str) -> Arc<TaskObject> {
+    fn mint(store: &TaskStore, v: &FixedEnrollment, agent: &str) -> Arc<SignedTask> {
         store
             .mint(
+                signer(),
                 v,
-                store.generation(&id(agent)),
-                v.0[&id(agent)],
+                (store.generation(&id(agent)), v.0[&id(agent)]),
                 Tasker::Uid(1000),
                 None,
                 sub(agent),
@@ -606,19 +886,29 @@ mod tests {
         };
         let parent = TaskId([7; 16]);
         let a = store
-            .mint(&v, 0, HOBI, tasker.clone(), Some(parent), sub("hobi"))
+            .mint(
+                signer(),
+                &v,
+                (0, HOBI),
+                tasker.clone(),
+                Some(parent),
+                sub("hobi"),
+            )
             .unwrap();
         let b = mint(&store, &v, "hobi");
-        assert_ne!(a.task_id, b.task_id);
-        assert_eq!(a.tasker, tasker);
-        assert_eq!(a.parent, Some(parent));
-        assert_eq!(a.agent, "hobi");
-        assert_eq!((a.schema.as_str(), a.version), (TASK_SCHEMA, TASK_VERSION));
-        assert_eq!(a.ask, sub("hobi").ask);
-        assert_eq!(b.tasker, Tasker::Uid(1000));
-        assert_eq!(b.parent, None);
+        assert_ne!(a.task.task_id, b.task.task_id);
+        assert_eq!(a.task.tasker, tasker);
+        assert_eq!(a.task.parent, Some(parent));
+        assert_eq!(a.task.agent, "hobi");
+        assert_eq!(
+            (a.task.schema.as_str(), a.task.version),
+            (TASK_SCHEMA, TASK_VERSION)
+        );
+        assert_eq!(a.task.ask, sub("hobi").ask);
+        assert_eq!(b.task.tasker, Tasker::Uid(1000));
+        assert_eq!(b.task.parent, None);
         assert_eq!(store.len(), 2);
-        let got = store.resolve(&a.task_id, &id("hobi"), HOBI).unwrap();
+        let got = store.resolve(&a.task.task_id, &id("hobi"), HOBI).unwrap();
         assert!(Arc::ptr_eq(&got, &a));
     }
 
@@ -629,19 +919,36 @@ mod tests {
         let mut draws = [[1u8; 16], [1; 16], [2; 16]].into_iter();
         let mut draw = || Ok(draws.next().unwrap());
         let first = store
-            .mint_with(&mut draw, &v, (0, HOBI), Tasker::Uid(1), None, sub("hobi"))
+            .mint_with(
+                &mut draw,
+                signer(),
+                &v,
+                (0, HOBI),
+                Tasker::Uid(1),
+                None,
+                sub("hobi"),
+            )
             .unwrap();
         let second = store
-            .mint_with(&mut draw, &v, (0, HOBI), Tasker::Uid(1), None, sub("hobi"))
+            .mint_with(
+                &mut draw,
+                signer(),
+                &v,
+                (0, HOBI),
+                Tasker::Uid(1),
+                None,
+                sub("hobi"),
+            )
             .unwrap();
-        assert_eq!(first.task_id, TaskId([1; 16]));
-        assert_eq!(second.task_id, TaskId([2; 16]));
+        assert_eq!(first.task.task_id, TaskId([1; 16]));
+        assert_eq!(second.task.task_id, TaskId([2; 16]));
         assert_eq!(store.len(), 2);
         let mut failing = || Err(TaskRefusal::Random);
         assert_eq!(
             store
                 .mint_with(
                     &mut failing,
+                    signer(),
                     &v,
                     (0, HOBI),
                     Tasker::Uid(1),
@@ -658,13 +965,13 @@ mod tests {
         let store = TaskStore::new();
         let v = view(&[("hobi", HOBI)]);
         let held = mint(&store, &v, "hobi");
-        let mut other = held.task_id;
+        let mut other = held.task.task_id;
         other.0[0] ^= 0xff;
         assert_eq!(
             store.resolve(&other, &id("hobi"), HOBI).unwrap_err(),
             TaskRefusal::Unknown
         );
-        assert!(store.resolve(&held.task_id, &id("hobi"), HOBI).is_ok());
+        assert!(store.resolve(&held.task.task_id, &id("hobi"), HOBI).is_ok());
     }
 
     #[test]
@@ -673,11 +980,15 @@ mod tests {
         let v = view(&[("hobi", HOBI), ("jin", JIN)]);
         let hobis = mint(&store, &v, "hobi");
         assert_eq!(
-            store.resolve(&hobis.task_id, &id("jin"), JIN).unwrap_err(),
+            store
+                .resolve(&hobis.task.task_id, &id("jin"), JIN)
+                .unwrap_err(),
             TaskRefusal::OtherAgent
         );
         assert_eq!(
-            store.resolve(&hobis.task_id, &id("jin"), HOBI).unwrap_err(),
+            store
+                .resolve(&hobis.task.task_id, &id("jin"), HOBI)
+                .unwrap_err(),
             TaskRefusal::OtherAgent
         );
     }
@@ -687,19 +998,23 @@ mod tests {
         let store = TaskStore::new();
         let old = mint(&store, &view(&[("hobi", HOBI)]), "hobi");
         assert_eq!(
-            store.resolve(&old.task_id, &id("hobi"), 4040).unwrap_err(),
+            store
+                .resolve(&old.task.task_id, &id("hobi"), 4040)
+                .unwrap_err(),
             TaskRefusal::OtherAgent
         );
         let before = store.generation(&id("hobi"));
         let kept = mint(&store, &view(&[("jin", JIN)]), "jin");
         store.retain_enrolled(&view(&[("hobi", 4040), ("jin", JIN)]));
         assert_eq!(
-            store.resolve(&old.task_id, &id("hobi"), HOBI).unwrap_err(),
+            store
+                .resolve(&old.task.task_id, &id("hobi"), HOBI)
+                .unwrap_err(),
             TaskRefusal::Unknown
         );
         assert_eq!(store.generation(&id("hobi")), before + 1);
         assert_eq!(store.generation(&id("jin")), 0);
-        assert!(store.resolve(&kept.task_id, &id("jin"), JIN).is_ok());
+        assert!(store.resolve(&kept.task.task_id, &id("jin"), JIN).is_ok());
         store.retain_enrolled(&view(&[]));
         assert_eq!(store.len(), 0);
         assert_eq!(store.generation(&id("jin")), 1);
@@ -713,10 +1028,12 @@ mod tests {
         let kept = mint(&store, &v, "jin");
         store.purge_agent(&id("hobi"));
         assert_eq!(
-            store.resolve(&gone.task_id, &id("hobi"), HOBI).unwrap_err(),
+            store
+                .resolve(&gone.task.task_id, &id("hobi"), HOBI)
+                .unwrap_err(),
             TaskRefusal::Unknown
         );
-        assert!(store.resolve(&kept.task_id, &id("jin"), JIN).is_ok());
+        assert!(store.resolve(&kept.task.task_id, &id("jin"), JIN).is_ok());
         assert_eq!(store.generation(&id("hobi")), 1);
         store.purge_agent(&id("hobi"));
         assert_eq!(store.generation(&id("hobi")), 2);
@@ -731,7 +1048,14 @@ mod tests {
             .collect();
         assert_eq!(
             store
-                .mint(&v, 0, HOBI, Tasker::Uid(1000), None, sub("hobi"))
+                .mint(
+                    signer(),
+                    &v,
+                    (0, HOBI),
+                    Tasker::Uid(1000),
+                    None,
+                    sub("hobi")
+                )
                 .unwrap_err(),
             TaskRefusal::AtCapacity {
                 agent: "hobi".into()
@@ -739,7 +1063,7 @@ mod tests {
         );
         assert_eq!(store.len(), MAX_LIVE_TASKS_PER_AGENT);
         for t in &held {
-            assert!(store.resolve(&t.task_id, &id("hobi"), HOBI).is_ok());
+            assert!(store.resolve(&t.task.task_id, &id("hobi"), HOBI).is_ok());
         }
         mint(&store, &v, "jin");
     }
@@ -750,9 +1074,9 @@ mod tests {
         assert_eq!(
             store
                 .mint(
+                    signer(),
                     &view(&[("jin", JIN)]),
-                    0,
-                    HOBI,
+                    (0, HOBI),
                     Tasker::Uid(1000),
                     None,
                     sub("hobi")
@@ -762,7 +1086,14 @@ mod tests {
         );
         assert_eq!(store.len(), 0);
         assert!(matches!(
-            store.mint(&view(&[]), 0, 0, Tasker::Uid(1000), None, sub("Not An Id")),
+            store.mint(
+                signer(),
+                &view(&[]),
+                (0, 0),
+                Tasker::Uid(1000),
+                None,
+                sub("Not An Id")
+            ),
             Err(TaskRefusal::Schema(_))
         ));
     }
@@ -775,7 +1106,14 @@ mod tests {
         store.purge_agent(&id("hobi"));
         assert_eq!(
             store
-                .mint(&v, read, HOBI, Tasker::Uid(1000), None, sub("hobi"))
+                .mint(
+                    signer(),
+                    &v,
+                    (read, HOBI),
+                    Tasker::Uid(1000),
+                    None,
+                    sub("hobi")
+                )
                 .unwrap_err(),
             TaskRefusal::AgentGone
         );
@@ -785,10 +1123,15 @@ mod tests {
     #[test]
     fn the_test_seam_inserts_a_task_bound_to_its_agent() {
         let store = TaskStore::new();
-        let held = store.insert_for_test(TaskObject::for_test("hobi", 1000), HOBI);
-        assert_eq!(held.tasker, Tasker::Uid(1000));
-        assert_eq!(held.agent, "hobi");
-        let got = store.resolve(&held.task_id, &id("hobi"), HOBI).unwrap();
+        let held = store.insert_for_test(
+            signer().sign(TaskObject::for_test("hobi", 1000)).unwrap(),
+            HOBI,
+        );
+        assert_eq!(held.task.tasker, Tasker::Uid(1000));
+        assert_eq!(held.task.agent, "hobi");
+        let got = store
+            .resolve(&held.task.task_id, &id("hobi"), HOBI)
+            .unwrap();
         assert!(Arc::ptr_eq(&got, &held));
         assert_ne!(
             TaskObject::for_test("hobi", 1).task_id,
@@ -822,6 +1165,7 @@ mod tests {
                 TaskRefusal::Audit("sink".into()),
                 "the task was not audited: sink",
             ),
+            (TaskRefusal::Unsigned, "the task could not be signed"),
         ];
         for (refusal, text) in cases {
             assert_eq!(refusal.to_string(), text);
@@ -1015,7 +1359,7 @@ mod tests {
         sub: TaskSubmission,
         emit: &Recorder,
         (bound, breaker): (std::time::Duration, Option<Breaker>),
-    ) -> Result<Arc<TaskObject>, TaskRefusal> {
+    ) -> Result<Arc<SignedTask>, TaskRefusal> {
         let w = wctx();
         let ctx = SubmitCtx {
             where_: &w,
@@ -1028,7 +1372,7 @@ mod tests {
             authorizer: a,
             breaker: breaker.unwrap_or_default(),
         };
-        submit_under(pdp, store, v, &ctx, by, sub, emit).await
+        submit_under(pdp, store, signer(), v, &ctx, by, sub, emit).await
     }
 
     async fn submit(
@@ -1037,7 +1381,7 @@ mod tests {
         by: Submitter,
         to: &str,
         emit: &Recorder,
-    ) -> Result<Arc<TaskObject>, TaskRefusal> {
+    ) -> Result<Arc<SignedTask>, TaskRefusal> {
         let view = SnapshotEnrollment(pdp.clone());
         submit_via(pdp.clone(), store, &view, by, sub(to), emit, (BOUND, None)).await
     }
@@ -1048,9 +1392,11 @@ mod tests {
         let store = TaskStore::new();
         let emit = Recorder::new();
         let task = submit(&pdp, &store, user(), "hobi", &emit).await.unwrap();
-        assert_eq!(task.agent, "hobi");
+        assert_eq!(task.task.agent, "hobi");
         assert_eq!(store.len(), 1);
-        let held = store.resolve(&task.task_id, &id("hobi"), HOBI).unwrap();
+        let held = store
+            .resolve(&task.task.task_id, &id("hobi"), HOBI)
+            .unwrap();
         assert!(Arc::ptr_eq(&held, &task));
         assert_eq!(
             submit(&pdp, &store, user(), "jin", &emit)
@@ -1114,12 +1460,12 @@ mod tests {
         let store = TaskStore::new();
         let emit = Recorder::new();
         let by_user = submit(&pdp, &store, user(), "hobi", &emit).await.unwrap();
-        assert_eq!(by_user.tasker, Tasker::Uid(me()));
+        assert_eq!(by_user.task.tasker, Tasker::Uid(me()));
         let by_agent = submit(&pdp, &store, agent("hobi", HOBI, None), "jin", &emit)
             .await
             .unwrap();
         assert_eq!(
-            by_agent.tasker,
+            by_agent.task.tasker,
             Tasker::Agent {
                 agent: "hobi".into(),
                 uid: HOBI
@@ -1160,7 +1506,7 @@ mod tests {
         let child = submit(
             &pdp,
             &store,
-            agent("hobi", HOBI, Some(first.task_id)),
+            agent("hobi", HOBI, Some(first.task.task_id)),
             "jin",
             &emit,
         )
@@ -1186,7 +1532,7 @@ mod tests {
         assert_eq!(r.outcome.result, "permit");
         assert_eq!(r.source.uid, me());
         assert_eq!(r.subject.role.as_deref(), Some("user"));
-        assert_eq!(r.subject.task_id, Some(first.task_id.to_string()));
+        assert_eq!(r.subject.task_id, Some(first.task.task_id.to_string()));
         assert_eq!(
             r.subject.tasker.as_deref(),
             Some(format!("uid:{}", me()).as_str())
@@ -1199,8 +1545,11 @@ mod tests {
         assert_eq!(r.object.as_deref(), Some("agent:jin"));
         assert_eq!(r.source.uid, HOBI);
         assert_eq!(r.subject.agent.as_deref(), Some("hobi"));
-        assert_eq!(r.subject.task_id, Some(child.task_id.to_string()));
-        assert_eq!(r.subject.parent_task_id, Some(first.task_id.to_string()));
+        assert_eq!(r.subject.task_id, Some(child.task.task_id.to_string()));
+        assert_eq!(
+            r.subject.parent_task_id,
+            Some(first.task.task_id.to_string())
+        );
         assert_eq!(r.subject.tasker.as_deref(), Some("agent:hobi"));
         let r = &records[2];
         assert_eq!(r.outcome.result, "deny");
@@ -1259,21 +1608,21 @@ mod tests {
         let child = submit(
             &pdp,
             &store,
-            agent("hobi", HOBI, Some(parent.task_id)),
+            agent("hobi", HOBI, Some(parent.task.task_id)),
             "jin",
             &emit,
         )
         .await
         .unwrap();
-        assert_eq!(child.parent, Some(parent.task_id));
+        assert_eq!(child.task.parent, Some(parent.task.task_id));
         assert_eq!(
-            child.tasker,
+            child.task.tasker,
             Tasker::Agent {
                 agent: "hobi".into(),
                 uid: HOBI
             }
         );
-        assert_eq!(child.agent, "jin");
+        assert_eq!(child.task.agent, "jin");
     }
 
     #[tokio::test]
@@ -1285,7 +1634,7 @@ mod tests {
         let child = submit(&pdp, &store, agent("hobi", HOBI, None), "jin", &emit)
             .await
             .unwrap();
-        assert_eq!(child.parent, None);
+        assert_eq!(child.task.parent, None);
     }
 
     #[tokio::test]
@@ -1301,7 +1650,7 @@ mod tests {
             counting.clone(),
             &store,
             &view,
-            agent("hobi", HOBI, Some(parent.task_id)),
+            agent("hobi", HOBI, Some(parent.task.task_id)),
             sub("jin"),
             &emit,
             (BOUND, None),
@@ -1321,7 +1670,7 @@ mod tests {
         let refused = submit(
             &pdp,
             &store,
-            agent("hobi", HOBI, Some(jins.task_id)),
+            agent("hobi", HOBI, Some(jins.task.task_id)),
             "jin",
             &emit,
         )
@@ -1343,7 +1692,7 @@ mod tests {
         let store = TaskStore::new();
         let emit = Recorder::new();
         let task = submit(&pdp, &store, user(), "hobi", &emit).await.unwrap();
-        assert_eq!(task.parent, None);
+        assert_eq!(task.task.parent, None);
         assert_eq!(emit.records()[0].subject.parent_task_id, None);
     }
 
@@ -1643,9 +1992,18 @@ mod tests {
             decide_timeout: BOUND,
         };
         let view = SnapshotEnrollment(pdp.clone());
-        submit_task(pdp.clone(), &store, &view, &ctx, user(), sub("hobi"), &emit)
-            .await
-            .unwrap();
+        submit_task(
+            pdp.clone(),
+            &store,
+            signer(),
+            &view,
+            &ctx,
+            user(),
+            sub("hobi"),
+            &emit,
+        )
+        .await
+        .unwrap();
         assert_eq!(store.len(), 1);
         assert!(Arc::ptr_eq(
             &decider(pdp).breaker,

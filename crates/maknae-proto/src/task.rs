@@ -147,6 +147,44 @@ impl std::fmt::Debug for TaskObject {
     }
 }
 
+pub const TASK_SIGNING_CONTEXT: &[u8] = b"maknae.task.v1\0";
+pub const TASK_ENVELOPE_MARGIN: usize = 4096;
+
+/// `alg` is the `vault.plane_key` name; `chain` holds the intermediates after `leaf`.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskSignature {
+    pub alg: String,
+    pub leaf: Vec<u8>,
+    pub chain: Vec<Vec<u8>>,
+    pub sig: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignedTask {
+    pub task: TaskObject,
+    pub signature: TaskSignature,
+}
+
+/// The context, then the object's CBOR, in one zeroizing buffer of `max_bytes` that never grows.
+pub fn task_signing_bytes(
+    task: &TaskObject,
+    max_bytes: usize,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, crate::ProtoCodecError> {
+    use std::io::Write;
+    let mut buf = zeroize::Zeroizing::new(vec![0; max_bytes]);
+    let mut writer = std::io::Cursor::new(buf.as_mut_slice());
+    writer
+        .write_all(TASK_SIGNING_CONTEXT)
+        .map_err(|e| crate::ProtoCodecError::Encode(e.to_string()))?;
+    ciborium::into_writer(task, &mut writer)
+        .map_err(|e| crate::ProtoCodecError::Encode(e.to_string()))?;
+    let len = writer.position() as usize;
+    buf.truncate(len);
+    Ok(buf)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TaskSchemaError {
     Schema(String),
@@ -306,6 +344,65 @@ mod tests {
         let obj = object(Tasker::Uid(1000), None);
         assert_eq!(enc(&obj), golden);
         assert_eq!(dec::<TaskObject>(&golden).unwrap(), obj);
+    }
+
+    #[test]
+    fn the_signing_bytes_have_the_v1_golden_shape() {
+        let golden = hex("6d616b6e61652e7461736b2e763100
+             a8
+             66 736368656d61 6b 6d616b6e61652e7461736b
+             67 76657273696f6e 01
+             67 7461736b5f6964 50 000102030405060708090a0b0c0d0e0f
+             66 7461736b6572 a1 63 556964 19 03e8
+             66 706172656e74 f6
+             65 6167656e74 64 686f6269
+             63 61736b a1 66 50726f6d7074 a1 66 70726f6d7074 62 6869
+             66 6c6162656c73 a0");
+        let obj = object(Tasker::Uid(1000), None);
+        let bytes = task_signing_bytes(&obj, TASK_ENVELOPE_MARGIN).unwrap();
+        assert_eq!(bytes.as_slice(), golden.as_slice());
+        assert_eq!(&bytes[..TASK_SIGNING_CONTEXT.len()], TASK_SIGNING_CONTEXT);
+        assert_eq!(bytes.capacity(), TASK_ENVELOPE_MARGIN, "allocated once");
+    }
+
+    #[test]
+    fn signing_bytes_over_the_bound_are_refused() {
+        let obj = object(Tasker::Uid(1000), None);
+        let exact = task_signing_bytes(&obj, TASK_ENVELOPE_MARGIN)
+            .unwrap()
+            .len();
+        assert_eq!(task_signing_bytes(&obj, exact).unwrap().len(), exact);
+        for short in [exact - 1, TASK_SIGNING_CONTEXT.len() - 1, 0] {
+            assert!(
+                matches!(
+                    task_signing_bytes(&obj, short),
+                    Err(crate::ProtoCodecError::Encode(_))
+                ),
+                "{short}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_signed_task_is_the_object_beside_its_signature() {
+        let signed = SignedTask {
+            task: object(Tasker::Uid(1000), None),
+            signature: TaskSignature {
+                alg: "ml-dsa-87".into(),
+                leaf: vec![1],
+                chain: vec![vec![2]],
+                sig: vec![3],
+            },
+        };
+        let value: ciborium::Value = dec(&enc(&signed)).unwrap();
+        let keys: Vec<&str> = value
+            .as_map()
+            .unwrap()
+            .iter()
+            .map(|(k, _)| k.as_text().unwrap())
+            .collect();
+        assert_eq!(keys, ["task", "signature"]);
+        assert_eq!(dec::<SignedTask>(&enc(&signed)).unwrap(), signed);
     }
 
     #[test]

@@ -147,6 +147,8 @@ files = [
   "crates/maknae-vault/src/peer_auth.rs",
   "crates/maknae-vault/src/trust_bundle.rs",
   "crates/maknae-vault/src/csr.rs",
+  # #609: kernel-signed tasks; a wrong arm in verify_task accepts a forged or foreign task.
+  "crates/maknae-vault/src/task_sig.rs",
   "crates/maknae-vault/src/plane.rs",
   "crates/maknae-vault/src/config.rs",
   # maknae-crypto (ADR-0030, ADR-0031, #589): the plane signature key subset.
@@ -684,6 +686,10 @@ why = "nix getsockopt peer-creds (Stage 2); syscall I/O, cross-platform"
 [[t3]]
 path = "crates/maknae-vault/src/stream.rs"
 why = "PlaneListener/PlaneConnector/AuthenticatedStream (Stage 2); async I/O"
+
+[[t3]]
+path = "crates/maknae-vault/src/test_pki.rs"
+why = "#609: a test CA and the plane identities it issues, compiled only under cfg(test) or the test-support feature; fixture code with no production regions"
 
 [[t3]]
 path = "crates/maknae-vault/src/transport_tests.rs"

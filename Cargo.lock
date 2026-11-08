@@ -1325,11 +1325,13 @@ version = "0.0.0"
 dependencies = [
  "arc-swap",
  "bytes",
+ "ciborium",
  "maknae-config",
  "maknae-crypto",
  "maknae-io",
  "maknae-msgs",
  "maknae-plane",
+ "maknae-proto",
  "maknae-seal",
  "nix",
  "reqwest",

@@ -11,8 +11,12 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+test-support = ["maknae-crypto/test-support"]
+
 [dependencies]
 maknae-config = { path = "../maknae-config" }
+maknae-proto = { path = "../maknae-proto" }
 
 # vaultrs 0.8.0 (reqwest 0.13, rustify 0.7). `rustls-no-provider`, NOT `rustls`: from
 # reqwest 0.13 the `rustls` feature installs the non-FIPS aws-lc-rs provider as the
@@ -71,4 +75,5 @@ maknae-crypto = { path = "../maknae-crypto", features = ["test-support"] }
 # `/etc/hostname` does not exist on macOS, which the darwin-native job caught.
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros", "io-util", "test-util"] }
+ciborium = "0.2"
 maknae-seal = { path = "../maknae-seal" }
