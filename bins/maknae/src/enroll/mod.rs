@@ -3907,12 +3907,15 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
 -----END CERTIFICATE-----\n";
 
     fn fixture_operator_client(tag: &str) -> maknae_vault::OperatorClient {
+        operator_client_at(tag, "https://vault.invalid.example:8200")
+    }
+
+    pub(super) fn operator_client_at(tag: &str, addr: &str) -> maknae_vault::OperatorClient {
         let ca_path = std::env::temp_dir().join(format!(
             "maknae-enroll-rotate-fixture-ca-{}-{tag}.pem",
             std::process::id()
         ));
         std::fs::write(&ca_path, FIXTURE_CA_PEM).unwrap();
-        // A well-formed https:// address that is never actually connected to —
         // `OperatorClient::new` only builds settings + reads/parses the CA
         // file; it makes no request (verified against vaultrs 0.8.0).
         // Since vaultrs 0.8.0 (reqwest 0.13 under `rustls-no-provider`) building
@@ -3922,7 +3925,7 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
         // the typed guard in the PR that took this bump.
         maknae_crypto::init().unwrap();
         let client = maknae_vault::OperatorClient::new(
-            "https://vault.invalid.example:8200",
+            addr,
             &ca_path,
             Zeroizing::new("test-token".to_string()),
         )
@@ -4815,5 +4818,58 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
             );
             assert!(prod.contains("crate::policy_sync::install("));
         }
+    }
+
+    #[test]
+    fn real_passwd_answers_with_the_accounts_own_entry() {
+        let uid = nix::unistd::geteuid();
+        let me = nix::unistd::User::from_uid(uid)
+            .unwrap()
+            .expect("the test account has a passwd entry");
+        let (name, home, gid) = RealPasswd.lookup(uid.as_raw()).expect("found");
+        assert_eq!(name, me.name);
+        assert_eq!(gid, me.gid.as_raw());
+        assert_eq!(home, me.dir.canonicalize().unwrap_or(me.dir));
+        assert!(home.is_absolute(), "{}", home.display());
+    }
+
+    #[test]
+    fn group_membership_reads_the_maknae_group() {
+        let me = nix::unistd::User::from_uid(nix::unistd::geteuid())
+            .unwrap()
+            .expect("the test account has a passwd entry");
+        let got = is_already_maknae_group_member(&me.name, me.uid.as_raw());
+        match nix::unistd::Group::from_name("maknae").unwrap() {
+            None => assert!(
+                matches!(&got, Err(EnrollError::Owner(m)) if m == "no `maknae` group"),
+                "{got:?}"
+            ),
+            Some(g) => assert_eq!(got.unwrap(), g.mem.contains(&me.name) || me.gid == g.gid,),
+        }
+    }
+
+    #[derive(clap::Parser, Debug)]
+    struct EnrollCli {
+        #[command(flatten)]
+        args: EnrollArgs,
+    }
+
+    #[tokio::test]
+    async fn run_enroll_off_root_exits_failure() {
+        use clap::Parser;
+        if nix::unistd::geteuid().is_root() {
+            return;
+        }
+        let cli = EnrollCli::try_parse_from([
+            "maknae",
+            "agent",
+            "hobi",
+            "--account",
+            "hobi-svc",
+            "--bind-cidr",
+            "10.0.0.5",
+        ])
+        .unwrap();
+        assert_eq!(run_enroll(cli.args).await, ExitCode::FAILURE);
     }
 }

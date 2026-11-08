@@ -2030,4 +2030,15 @@ mod tests {
             .lines()
             .any(|l| l == "neverallow maknae_egress_t maknae_state_t:{ dir file } *;"));
     }
+
+    #[test]
+    fn kernel_gid_is_the_maknae_daemon_group_or_a_refusal() {
+        match nix::unistd::Group::from_name("_maknae").unwrap() {
+            Some(g) => assert_eq!(kernel_gid(), Ok(g.gid.as_raw())),
+            None => assert_eq!(
+                kernel_gid(),
+                Err("no such group: _maknae; is maknae installed?".to_string())
+            ),
+        }
+    }
 }

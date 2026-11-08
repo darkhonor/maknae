@@ -2429,4 +2429,198 @@ pub(crate) mod tests {
             EnrollError::Command { ref detail, .. } if detail == "exit 1"
         ));
     }
+
+    pub(crate) fn scratch_anchor(tag: &str) -> (PathBuf, maknae_io::Anchor) {
+        let d = std::env::temp_dir().join(format!("maknae-agent-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let anchor = maknae_io::open_anchor(
+            &d,
+            AnchorRequired {
+                owner: None,
+                mode_mask: None,
+            },
+            StrategyPref::Auto,
+        )
+        .unwrap();
+        (d, anchor)
+    }
+
+    pub(crate) fn unreachable_vault(tag: &str, private: maknae_io::Anchor) -> RealVault {
+        RealVault {
+            client: super::super::tests::operator_client_at(tag, "https://127.0.0.1:1"),
+            private,
+        }
+    }
+
+    fn hobi_id() -> AgentId {
+        AgentId::parse("hobi").unwrap()
+    }
+
+    fn running_as_root() -> bool {
+        nix::unistd::geteuid().is_root()
+    }
+
+    fn real_ops(tag: &str) -> (PathBuf, RealAgentOps) {
+        let (d, agents) = scratch_anchor(&format!("{tag}-agents"));
+        let (_, private) = scratch_anchor(&format!("{tag}-private"));
+        let ops = RealAgentOps {
+            vault: unreachable_vault(tag, private),
+            agents,
+            daemon_gid: nix::unistd::getegid().as_raw(),
+            resolver: artifact_write::RealOwnerResolver {
+                operator_uid: nix::unistd::geteuid().as_raw(),
+                operator_gid: nix::unistd::getegid().as_raw(),
+            },
+            #[cfg(not(target_os = "macos"))]
+            verbose: false,
+            #[cfg(target_os = "macos")]
+            team: String::new(),
+        };
+        (d, ops)
+    }
+
+    #[tokio::test]
+    async fn every_vault_call_reports_an_unreachable_vault() {
+        let (d, ops) = real_ops("vault-down");
+        fn refused<T>(r: Result<T, EnrollError>) {
+            let e = r.err();
+            assert!(matches!(e, Some(EnrollError::Vault(_))), "{e:?}");
+        }
+        refused(ops.read_role_id(MOUNT, ROLE).await);
+        refused(ops.find_role_id(MOUNT, ROLE).await);
+        refused(ops.destroy(MOUNT, ROLE, "accessor-1").await);
+        refused(ops.list_accessors(MOUNT, ROLE).await);
+        refused(ops.entity("maknae-agent-hobi").await);
+        refused(ops.set_entity_disabled("maknae-agent-hobi", true).await);
+        let cidrs = BindCidrs::parse(&["10.0.0.5".to_string()]).unwrap();
+        refused(ops.mint(MOUNT, ROLE, &cidrs).await);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn write_state_publishes_a_root_owned_0600_file_or_refuses() {
+        use std::os::unix::fs::PermissionsExt;
+        let (d, private) = scratch_anchor("write-state");
+        let vault = unreachable_vault("write-state", private);
+        let s = state(&["a"], &["p"], &[]);
+        let got = vault.write_state(&hobi_id(), &s);
+        let path = d.join(state_file(&hobi_id()));
+        if running_as_root() {
+            got.unwrap();
+            let text = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(AgentState::parse(&text).unwrap(), s);
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        } else {
+            assert!(matches!(&got, Err(EnrollError::Io { .. })), "{got:?}");
+            assert!(!path.exists());
+        }
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn write_record_off_root_is_refused_and_writes_nothing() {
+        if running_as_root() {
+            return;
+        }
+        let (d, ops) = real_ops("write-record");
+        let got = ops.write_record(&record());
+        assert!(got.is_err(), "{got:?}");
+        assert!(!d.join("hobi").exists());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    fn write_0640(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, body).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    }
+
+    #[test]
+    fn read_records_skips_what_is_not_an_agent_directory() {
+        let (d, agents) = scratch_anchor("records-skip");
+        std::fs::create_dir(d.join("hobi")).unwrap();
+        std::fs::create_dir(d.join("Not An Id!")).unwrap();
+        write_0640(
+            &d.join("Not An Id!").join(maknae_config::ENROLLMENT_FILE),
+            &record().to_yaml(),
+        );
+        write_0640(&d.join("jin"), &record().to_yaml());
+        let (prior, others) = read_records(&agents, &hobi_id()).unwrap();
+        assert_eq!((prior, others), (None, vec![]));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn read_records_reads_root_owned_records_and_refuses_any_other() {
+        let (d, agents) = scratch_anchor("records-read");
+        for id in ["hobi", "jin"] {
+            std::fs::create_dir(d.join(id)).unwrap();
+            let mut r = record();
+            r.agent_id = id.into();
+            r.uid = if id == "hobi" { 990 } else { 991 };
+            write_0640(
+                &d.join(id).join(maknae_config::ENROLLMENT_FILE),
+                &r.to_yaml(),
+            );
+        }
+        let got = read_records(&agents, &hobi_id());
+        if running_as_root() {
+            let (prior, others) = got.unwrap();
+            assert_eq!(prior, Some(record()));
+            assert_eq!(others, vec![("jin".to_string(), 991)]);
+        } else {
+            assert!(
+                matches!(&got, Err(EnrollError::Io { source, .. }) if source.contains("require 0")),
+                "{got:?}"
+            );
+        }
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn agent_group_create_command_names_the_agent_group() {
+        let want = if cfg!(target_os = "macos") {
+            "dseditgroup -o create maknae-agents"
+        } else {
+            "groupadd --system maknae-agents"
+        };
+        assert_eq!(agent_group_create_command(), want);
+    }
+
+    #[test]
+    fn binding_uids_maps_only_the_names_passwd_knows() {
+        let me = nix::unistd::User::from_uid(nix::unistd::geteuid())
+            .unwrap()
+            .expect("the test account has a passwd entry");
+        let b = maknae_config::parse_bindings(&format!(
+            "schema_version: 1\nbindings:\n  admin: [\"root\", {{uid: 4242}}]\n  user: [\"{}\", \"maknae-no-such-user-609\"]\n",
+            me.name
+        ))
+        .unwrap();
+        let got = binding_uids(&b).unwrap();
+        assert_eq!(
+            got,
+            BTreeMap::from([("root".to_string(), 0), (me.name.clone(), me.uid.as_raw())])
+        );
+    }
+
+    #[test]
+    fn check_account_refuses_an_account_the_host_does_not_have() {
+        let mut args = parse_args(&[]).unwrap();
+        args.account = "maknae-no-such-user-609".into();
+        let got = check_account(&args, &hobi_id(), &host(), &[]);
+        assert!(got.is_err(), "{got:?}");
+    }
+
+    #[tokio::test]
+    async fn run_enroll_agent_off_root_is_refused_before_anything_else() {
+        if running_as_root() {
+            return;
+        }
+        let args = parse_args(&[]).unwrap();
+        let got = run_enroll_agent(&args, Locale::EnUs).await;
+        assert!(matches!(got, Err(EnrollError::NotRoot)), "{got:?}");
+    }
 }

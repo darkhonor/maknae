@@ -277,4 +277,15 @@ mod tests {
         assert!(err.starts_with("cannot use the state directory "), "{err}");
         assert!(!scratch.0.join(MARKER_FILE).exists());
     }
+
+    #[test]
+    fn kernel_uid_is_the_maknae_daemon_account_or_a_refusal() {
+        match nix::unistd::User::from_name(KERNEL_USER).unwrap() {
+            Some(u) => assert_eq!(kernel_uid(), Ok(u.uid.as_raw())),
+            None => assert_eq!(
+                kernel_uid(),
+                Err(format!("no such user: {KERNEL_USER}; is maknae installed?"))
+            ),
+        }
+    }
 }

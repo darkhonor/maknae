@@ -709,4 +709,106 @@ mod tests {
         assert!(Cli::try_parse_from(["maknae", "hobi", "--token", "s.x"]).is_err());
         assert!(Cli::try_parse_from(["maknae"]).is_err());
     }
+
+    #[tokio::test]
+    async fn a_missing_role_names_recorded_accessors_only_when_there_are_some() {
+        let present = strings(&["the sealed SecretID", "the enroll state file"]);
+        for (recorded, extra) in [
+            (&[][..], None),
+            (&["a", "p"][..], Some("SecretID accessors a, p")),
+        ] {
+            let fake = Fake::failing(&["role_missing"]);
+            let e = remove_agent(&fake, &hobi(), state(recorded, &[], &[]))
+                .await
+                .unwrap_err();
+            let mut want = present.clone();
+            want.extend(extra.map(String::from));
+            assert!(
+                matches!(&e, EnrollError::AgentRoleMissing { remains, .. } if *remains == want),
+                "{e:?}"
+            );
+        }
+    }
+
+    fn real_remove_ops(tag: &str) -> (PathBuf, PathBuf, RealRemoveOps) {
+        use super::super::agent::tests::{scratch_anchor, unreachable_vault};
+        let (agents_dir, agents) = scratch_anchor(&format!("{tag}-agents"));
+        let (private_dir, private) = scratch_anchor(&format!("{tag}-private"));
+        let ops = RealRemoveOps {
+            vault: unreachable_vault(tag, private),
+            agents,
+        };
+        (agents_dir, private_dir, ops)
+    }
+
+    fn sealed_leaf() -> PathBuf {
+        PathBuf::from(super::super::agent::cred_path(&hobi()).file_name().unwrap())
+    }
+
+    #[test]
+    fn real_remove_enrollment_unlinks_the_record() {
+        let (agents_dir, private_dir, ops) = real_remove_ops("rm-enrollment");
+        let record = agents_dir.join("hobi").join(maknae_config::ENROLLMENT_FILE);
+        std::fs::create_dir(agents_dir.join("hobi")).unwrap();
+        std::fs::write(&record, "x").unwrap();
+        ops.remove_enrollment(&hobi()).unwrap();
+        assert!(!record.exists());
+        std::fs::remove_dir_all(&agents_dir).unwrap();
+        std::fs::remove_dir_all(&private_dir).unwrap();
+    }
+
+    #[test]
+    fn real_remove_state_unlinks_the_state_file() {
+        let (agents_dir, private_dir, ops) = real_remove_ops("rm-state");
+        let path = private_dir.join(super::super::agent::state_file(&hobi()));
+        std::fs::write(&path, "x").unwrap();
+        ops.remove_state(&hobi()).unwrap();
+        assert!(!path.exists());
+        std::fs::remove_dir_all(&agents_dir).unwrap();
+        std::fs::remove_dir_all(&private_dir).unwrap();
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn real_leftovers_name_what_is_on_disk_and_removal_clears_it() {
+        let (agents_dir, private_dir, ops) = real_remove_ops("rm-leftovers");
+        assert_eq!(ops.leftovers(&hobi()).await.unwrap(), Vec::<String>::new());
+        let sealed = private_dir.join(sealed_leaf());
+        std::fs::write(&sealed, "x").unwrap();
+        assert!(sealed_secret_present(&ops.vault.private, &hobi())
+            .await
+            .unwrap());
+        assert_eq!(
+            ops.leftovers(&hobi()).await.unwrap(),
+            strings(&["the sealed SecretID"])
+        );
+        std::fs::write(
+            private_dir.join(super::super::agent::state_file(&hobi())),
+            "x",
+        )
+        .unwrap();
+        assert_eq!(
+            ops.leftovers(&hobi()).await.unwrap(),
+            strings(&["the sealed SecretID", "the enroll state file"])
+        );
+        ops.remove_sealed_secret(&hobi()).await.unwrap();
+        assert!(!sealed.exists());
+        assert!(!sealed_secret_present(&ops.vault.private, &hobi())
+            .await
+            .unwrap());
+        ops.remove_state(&hobi()).unwrap();
+        assert_eq!(ops.leftovers(&hobi()).await.unwrap(), Vec::<String>::new());
+        std::fs::remove_dir_all(&agents_dir).unwrap();
+        std::fs::remove_dir_all(&private_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_remove_agent_off_root_is_refused_before_anything_else() {
+        if nix::unistd::geteuid().is_root() {
+            return;
+        }
+        let cli = Cli::try_parse_from(["maknae", "hobi"]).unwrap();
+        let got = run_remove_agent(&cli.args, Locale::EnUs).await;
+        assert!(matches!(got, Err(EnrollError::NotRoot)), "{got:?}");
+    }
 }

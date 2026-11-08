@@ -1011,4 +1011,15 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn local_username_is_the_effective_accounts_passwd_name() {
+        let me = nix::unistd::User::from_uid(nix::unistd::geteuid())
+            .unwrap()
+            .expect("the test account has a passwd entry");
+        match local_username() {
+            Ok(name) => assert_eq!(name, me.name),
+            Err(e) => assert!(e.contains(&format!("{:?}", me.name)), "{e}"),
+        }
+    }
 }
