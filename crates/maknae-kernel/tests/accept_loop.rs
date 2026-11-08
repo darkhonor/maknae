@@ -2131,6 +2131,7 @@ async fn an_fs_write_citing_another_agents_task_is_refused() {
     let home = common::second_home("agent609-other-task");
     let me = nix::unistd::geteuid().as_raw();
     let jins = signed_for("jin");
+    let cited = jins.task.task_id;
     let (conn, client) = asking(
         agent_leaf("hobi"),
         me,
@@ -2151,12 +2152,13 @@ async fn an_fs_write_citing_another_agents_task_is_refused() {
         .iter()
         .filter(|r| r.source.uid == me && r.event != "shutdown")
         .collect();
+    let reason = format!("task-other-agent:{cited}");
     assert_eq!(
         trail(&session),
         vec![
             admitted("not-checked:platform"),
-            row("request", "fs.write", "deny", "task-other-agent"),
-            terminated("deny", "task-other-agent"),
+            row("request", "fs.write", "deny", &reason),
+            terminated("deny", &reason),
         ]
     );
     assert!(pdp.asked("fs.write").is_empty(), "refused before the PDP");
