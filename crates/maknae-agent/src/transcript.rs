@@ -1,6 +1,4 @@
-//! The turns the loop re-sends on every call, under the id the kernel assigned
-//! at `session.new`. The kernel records the conversation and checks each
-//! re-send against it (#170); the frame cap bounds what is re-sent.
+//! The turns the loop re-sends on every call.
 use maknae_proto::{ContentBlock, PromptReply, SecretText, Turn};
 use zeroize::Zeroizing;
 

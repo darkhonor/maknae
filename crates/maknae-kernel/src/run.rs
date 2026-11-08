@@ -1364,7 +1364,6 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         lane,
         admitted.as_ref(),
         gathered.as_ref().map(|(facts, _)| facts),
-        None,
     );
     let permitted_req = sec_req.clone();
     let (verdict, decided_role, decided_rule) = decide_bounded(
@@ -2867,7 +2866,6 @@ async fn serve_conversation_verb<S, E, P>(
         lane,
         None,
         gathered.as_ref().map(|(f, _)| f),
-        verified.as_deref(),
     );
     let (verdict, role, rule) =
         decide_bounded(authorizer, live, sec_req, generation, timeout).await;
@@ -5741,7 +5739,6 @@ where
                     uid,
                     None,
                     maknae_security::Lane::Local,
-                    None,
                     None,
                     None,
                 )
@@ -9623,7 +9620,6 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             maknae_security::Lane::Local,
             None,
             None,
-            None,
         );
         assert_eq!(
             pdp.decide(&req),
@@ -9709,7 +9705,6 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             maknae_security::Lane::Local,
             None,
             None,
-            None,
         ))
     }
 
@@ -9759,7 +9754,6 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             7,
             None,
             maknae_security::Lane::Local,
-            None,
             None,
             None,
         );
@@ -14536,7 +14530,6 @@ mod reload_fixture {
                     maknae_security::Lane::Local,
                     None,
                     None,
-                    None,
                 ))
         }
 
@@ -14675,7 +14668,6 @@ mod reload_fixture {
                 maknae_security::Lane::Local,
                 None,
                 None,
-                None,
             )
         }
 
@@ -14698,7 +14690,6 @@ mod reload_fixture {
                 uid,
                 None,
                 maknae_security::Lane::Local,
-                None,
                 None,
                 None,
             );
@@ -16728,7 +16719,6 @@ mod reload_tests {
                 maknae_security::Lane::Local,
                 None,
                 None,
-                None,
             ))
     }
 
@@ -18572,7 +18562,6 @@ mod reload_tests {
                 maknae_security::Lane::Local,
                 None,
                 None,
-                None,
             ))
     }
 
@@ -20012,7 +20001,6 @@ mod reload_tests {
                     4242,
                     None,
                     maknae_security::Lane::Local,
-                    None,
                     None,
                     None,
                 ),

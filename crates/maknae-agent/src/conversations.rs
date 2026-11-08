@@ -1,12 +1,11 @@
-//! `maknae session list`: every page of the caller's conversations, then the
-//! `--cwd` filter, applied here because the wire carries none.
+//! `maknae session list`: all pages, then the client-side `--cwd` filter.
 use crate::wire::WireOutcome;
 use maknae_proto::{ConversationId, ConversationPage, ConversationView, Payload, Verb};
 use std::future::Future;
 use std::path::Path;
 
-/// Follows `next` until the daemon sends none; a cursor that does not advance
-/// is a protocol error, so a looping daemon cannot hold the CLI.
+pub const MAX_LIST_PAGES: usize = 64;
+
 pub async fn list_all<F, Fut>(mut send: F) -> Result<Vec<ConversationView>, String>
 where
     F: FnMut(Verb) -> Fut,
@@ -14,7 +13,7 @@ where
 {
     let mut entries = Vec::new();
     let mut cursor: Option<ConversationId> = None;
-    loop {
+    for _ in 0..MAX_LIST_PAGES {
         let page = list_page(
             send(Verb::SessionList {
                 cursor: cursor.clone(),
@@ -32,6 +31,9 @@ where
             Some(next) => cursor = Some(next),
         }
     }
+    Err(format!(
+        "protocol error: the daemon's session.list exceeded {MAX_LIST_PAGES} pages"
+    ))
 }
 
 fn list_page(sent: Result<WireOutcome, String>) -> Result<ConversationPage, String> {
@@ -47,7 +49,6 @@ fn list_page(sent: Result<WireOutcome, String>) -> Result<ConversationPage, Stri
     }
 }
 
-/// `cwd` must already be in the kernel's resolved form, as each record's is.
 pub fn in_cwd(entries: Vec<ConversationView>, cwd: Option<&Path>) -> Vec<ConversationView> {
     match cwd {
         None => entries,
@@ -154,6 +155,37 @@ mod tests {
         .await;
         assert_eq!(listed, Ok(vec![]));
         assert_eq!(sent.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn an_endless_advancing_cursor_stops_at_the_page_cap_with_an_error() {
+        let mut sent = 0usize;
+        let listed = list_all(|_| {
+            sent += 1;
+            let n = u8::try_from(sent).unwrap();
+            async move { page(vec![], Some(n)) }
+        })
+        .await;
+        assert_eq!(
+            listed,
+            Err(format!(
+                "protocol error: the daemon's session.list exceeded {MAX_LIST_PAGES} pages"
+            ))
+        );
+        assert_eq!(sent, MAX_LIST_PAGES);
+    }
+
+    #[tokio::test]
+    async fn the_last_allowed_page_may_end_the_listing() {
+        let mut sent = 0usize;
+        let listed = list_all(|_| {
+            sent += 1;
+            let next = (sent < MAX_LIST_PAGES).then(|| u8::try_from(sent).unwrap());
+            async move { page(vec![], next) }
+        })
+        .await;
+        assert_eq!(listed, Ok(vec![]));
+        assert_eq!(sent, MAX_LIST_PAGES);
     }
 
     #[tokio::test]

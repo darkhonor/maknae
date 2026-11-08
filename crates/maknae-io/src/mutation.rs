@@ -169,8 +169,6 @@ pub fn verify_mutation_directory(
     })
 }
 
-/// The kernel's path for a delegated directory, with no confinement root: it
-/// locates the directory and authorizes nothing beneath it.
 pub fn verify_unconfined_directory(fd: BorrowedFd<'_>) -> Result<PathBuf, IoError> {
     let path = crate::delegated::delegated_path(fd)?;
     checked_path(&path)?;

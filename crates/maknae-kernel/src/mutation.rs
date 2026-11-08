@@ -344,7 +344,7 @@ fn authorize<P: Authorizer>(
         .paths
         .iter()
         .map(|path| {
-            let mut request = build_authz_request(verb, uid, home, Lane::Local, None, facts, None);
+            let mut request = build_authz_request(verb, uid, home, Lane::Local, None, facts);
             request
                 .resource
                 .0
@@ -1015,19 +1015,19 @@ mod tests {
             conversation: None,
             page: None,
         };
-        let plain = build_authz_request(&verb, 1000, None, Lane::Local, None, None, None);
+        let plain = build_authz_request(&verb, 1000, None, Lane::Local, None, None);
         let us = object_label("US", &plain).unwrap();
         assert_eq!(
             (us.level.as_str(), us.categories.len()),
             ("UNCLASSIFIED", 0)
         );
-        let mut marked = build_authz_request(&verb, 1000, None, Lane::Local, None, None, None);
+        let mut marked = build_authz_request(&verb, 1000, None, Lane::Local, None, None);
         marked.resource.0.insert(
             maknae_security::RESOURCE_CLASSIFICATION,
             AttrValue::Str("SECRET//NOFORN".into()),
         );
         assert_eq!(object_label("US", &marked).unwrap().level, "SECRET");
-        let mut foreign = build_authz_request(&verb, 1000, None, Lane::Local, None, None, None);
+        let mut foreign = build_authz_request(&verb, 1000, None, Lane::Local, None, None);
         foreign.resource.0.insert(
             maknae_security::RESOURCE_CLASSIFICATION,
             AttrValue::Str("NOT A LEVEL".into()),

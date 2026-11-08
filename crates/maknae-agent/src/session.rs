@@ -33,7 +33,6 @@ pub enum Ended<S> {
     Interrupted(S),
 }
 
-/// A conversation left open is closed by the kernel's idle expiry.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Closed {
     Closed(ConversationView),
@@ -169,8 +168,6 @@ impl Session {
         outcome
     }
 
-    /// Closes the kernel's conversation however the run ended, `interrupt`
-    /// included; the session takes no further prompt.
     pub async fn converse<P, S, D>(
         &mut self,
         plane: &mut P,

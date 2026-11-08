@@ -126,8 +126,6 @@ pub enum PlaneError {
     ReplyUnusable(maknae_proto::ReplyDefect),
     /// The exchange was not attempted for lack of capacity; nothing was sent.
     Unavailable,
-    /// A conversation verb refused for something other than authorization,
-    /// with the wire's own code and the kernel's reason.
     Declined {
         code: maknae_proto::ProtoErrCode,
         reason: String,

@@ -169,8 +169,6 @@ pub fn prompt_outcome(
     }
 }
 
-/// Only the kernel's `ConversationOpened` opens; an `Unauthorized` refusal is
-/// `Refused`, any other refusal is `Declined` with the wire's code.
 pub fn open_outcome(sent: Result<WireOutcome, String>) -> Result<ConversationId, PlaneError> {
     match sent {
         Ok(WireOutcome::Payload(Payload::ConversationOpened(v))) => Ok(v.conversation),
@@ -178,8 +176,6 @@ pub fn open_outcome(sent: Result<WireOutcome, String>) -> Result<ConversationId,
     }
 }
 
-/// A `ConversationClosed` for a conversation other than the one asked about is
-/// a protocol error, not a close.
 pub fn close_outcome(
     asked: &ConversationId,
     sent: Result<WireOutcome, String>,

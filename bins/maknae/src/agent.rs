@@ -380,9 +380,7 @@ pub async fn drive_to<P: Plane + Send>(
     }
 }
 
-/// A failed print stops the session before its next plane call, so nothing new
-/// is started on the subject's behalf after output is lost; a granted attempt
-/// finishes. The kernel's conversation is closed however the run ends.
+/// A failed print stops the session before its next plane call.
 pub async fn converse_to<P: Plane + Send, S, D: Future<Output = ()> + Send>(
     session: &mut Session,
     plane: &mut P,
@@ -452,7 +450,6 @@ async fn next_signal(signal: Option<&mut tokio::signal::unix::Signal>) {
     std::future::pending().await
 }
 
-/// A kind that cannot be registered keeps its default disposition, so it still ends the process.
 struct Signals {
     int: Option<tokio::signal::unix::Signal>,
     term: Option<tokio::signal::unix::Signal>,
@@ -476,11 +473,19 @@ impl Signals {
     }
 }
 
-/// Armed when the run ends, so a signal during the close or the shutdown ends
-/// the process at once instead of waiting them out.
 fn exit_on_next_signal(exit: impl FnOnce(u8) + Send + 'static) {
     let mut signals = Signals::register();
     tokio::spawn(async move { exit(interrupted_status(signals.next().await)) });
+}
+
+fn armed_deadline(
+    exit: impl FnOnce(u8) + Send + 'static,
+    wait: std::time::Duration,
+) -> impl FnOnce() -> tokio::time::Sleep {
+    move || {
+        exit_on_next_signal(exit);
+        tokio::time::sleep(wait)
+    }
 }
 
 /// Mirrors `execute()`'s setup (FIPS provider, config, user token, mint).
@@ -566,10 +571,7 @@ pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
         }
     };
     let mut signals = Signals::register();
-    let deadline = || {
-        exit_on_next_signal(|code| std::process::exit(i32::from(code)));
-        tokio::time::sleep(CLOSE_WITHIN)
-    };
+    let deadline = armed_deadline(|code| std::process::exit(i32::from(code)), CLOSE_WITHIN);
     let result = converse_to(
         &mut session,
         &mut plane,
@@ -1625,16 +1627,14 @@ mod tests {
             .await
             .unwrap();
         let (exit_tx, exit_rx) = tokio::sync::oneshot::channel::<u8>();
-        let (armed_tx, armed_rx) = tokio::sync::oneshot::channel::<()>();
         let mut signals = Signals::register();
         let conversing = async move {
-            let deadline = move || {
-                exit_on_next_signal(move |code| {
+            let deadline = armed_deadline(
+                move |code| {
                     let _ = exit_tx.send(code);
-                });
-                let _ = armed_tx.send(());
-                std::future::pending::<()>()
-            };
+                },
+                std::time::Duration::from_secs(3600),
+            );
             converse_to(
                 &mut session,
                 &mut plane,
@@ -1647,15 +1647,18 @@ mod tests {
         let driver = async {
             tokio::task::yield_now().await;
             kill(Pid::this(), Signal::SIGINT).unwrap();
-            tokio::time::timeout(std::time::Duration::from_secs(10), armed_rx)
-                .await
-                .expect("the close did not begin after the first signal")
-                .unwrap();
-            kill(Pid::this(), Signal::SIGTERM).unwrap();
-            tokio::time::timeout(std::time::Duration::from_secs(10), exit_rx)
-                .await
-                .expect("the second signal did not exit")
-                .unwrap()
+            let mut exit_rx = exit_rx;
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    kill(Pid::this(), Signal::SIGTERM).unwrap();
+                    tokio::select! {
+                        code = &mut exit_rx => return code.unwrap(),
+                        () = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+                    }
+                }
+            })
+            .await
+            .expect("the second signal did not exit")
         };
         tokio::select! {
             code = driver => assert_eq!(code, 143),

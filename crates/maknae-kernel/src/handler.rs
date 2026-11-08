@@ -350,7 +350,6 @@ pub fn build_authz_request(
     lane: maknae_security::Lane,
     admitted: Option<&crate::provider_choice::AdmittedChoice<'_>>,
     facts: Option<&crate::conversation::facts::ConversationFacts>,
-    verified_cwd: Option<&str>,
 ) -> maknae_security::Request {
     use maknae_security::{Action, AttrValue, Attributes, Context, Resource, Subject};
     let mut subject = Attributes::new();
@@ -361,9 +360,6 @@ pub fn build_authz_request(
     let mut resource = Attributes::new();
     if let Verb::Read { path, .. } = verb {
         resource.insert("path", AttrValue::Str(path.clone()));
-    }
-    if let (Verb::SessionNew { .. }, Some(cwd)) = (verb, verified_cwd) {
-        resource.insert("path", AttrValue::Str(cwd.to_owned()));
     }
     if let Some(f) = facts {
         resource.insert(
@@ -620,25 +616,18 @@ mod tests {
             maknae_security::Lane::Local,
             Some(&admitted),
             None,
-            None,
         );
         assert_eq!(
             r.resource.0.get("destination"),
             Some(&maknae_security::AttrValue::Str("provider:openai".into()))
         );
-        assert!(build_authz_request(
-            &v,
-            1002,
-            None,
-            maknae_security::Lane::Local,
-            None,
-            None,
-            None
-        )
-        .resource
-        .0
-        .get("destination")
-        .is_none());
+        assert!(
+            build_authz_request(&v, 1002, None, maknae_security::Lane::Local, None, None,)
+                .resource
+                .0
+                .get("destination")
+                .is_none()
+        );
         assert!(build_authz_request(
             &Verb::Ping,
             1002,
@@ -646,7 +635,6 @@ mod tests {
             maknae_security::Lane::Local,
             Some(&admitted),
             None,
-            None
         )
         .resource
         .0
@@ -700,7 +688,6 @@ mod tests {
             maknae_security::Lane::Local,
             Some(&admitted),
             None,
-            None,
         );
         assert_eq!(
             r.resource.0.get("model"),
@@ -708,19 +695,13 @@ mod tests {
                 "openrouter/meta/llama-3".into()
             ))
         );
-        assert!(build_authz_request(
-            &v,
-            1002,
-            None,
-            maknae_security::Lane::Local,
-            None,
-            None,
-            None
-        )
-        .resource
-        .0
-        .get("model")
-        .is_none());
+        assert!(
+            build_authz_request(&v, 1002, None, maknae_security::Lane::Local, None, None,)
+                .resource
+                .0
+                .get("model")
+                .is_none()
+        );
         assert!(build_authz_request(
             &Verb::Ping,
             1002,
@@ -728,7 +709,6 @@ mod tests {
             maknae_security::Lane::Local,
             Some(&admitted),
             None,
-            None
         )
         .resource
         .0
@@ -1211,7 +1191,6 @@ mod tests {
                 maknae_security::Lane::Local,
                 None,
                 Some(&facts),
-                None,
             );
             assert_eq!(
                 conv_attrs(&r),
@@ -1235,7 +1214,6 @@ mod tests {
             maknae_security::Lane::Local,
             None,
             Some(&ownerless),
-            None,
         );
         assert_eq!(conv_attrs(&r), [s("error").as_ref(), None, None]);
     }
@@ -1245,53 +1223,18 @@ mod tests {
         let verb = Verb::SessionDelete {
             conversation: cid(),
         };
-        let r = build_authz_request(
-            &verb,
-            1170,
-            None,
-            maknae_security::Lane::Local,
-            None,
-            None,
-            None,
-        );
+        let r = build_authz_request(&verb, 1170, None, maknae_security::Lane::Local, None, None);
         assert_eq!(conv_attrs(&r), [None, None, None]);
         assert!(r.resource.0.get("path").is_none());
     }
 
     #[test]
-    fn session_new_carries_only_the_verified_cwd_as_its_path() {
-        use maknae_security::AttrValue;
+    fn session_new_carries_no_resource_path() {
         let new = Verb::SessionNew {
             cwd: "/home/sentinel-170/as-sent".into(),
         };
-        let build = |v: &Verb, cwd: Option<&str>| {
-            build_authz_request(v, 1170, None, maknae_security::Lane::Local, None, None, cwd)
-        };
-        assert_eq!(
-            build(&new, Some("/home/sentinel-170/verified"))
-                .resource
-                .0
-                .get("path"),
-            Some(&AttrValue::Str("/home/sentinel-170/verified".into()))
-        );
-        assert!(build(&new, None).resource.0.get("path").is_none());
-        assert!(build(&Verb::Ping, Some("/home/sentinel-170/verified"))
-            .resource
-            .0
-            .get("path")
-            .is_none());
-        let read = Verb::Read {
-            path: "/home/sentinel-170/file".into(),
-            conversation: None,
-            page: None,
-        };
-        assert_eq!(
-            build(&read, Some("/home/sentinel-170/verified"))
-                .resource
-                .0
-                .get("path"),
-            Some(&AttrValue::Str("/home/sentinel-170/file".into()))
-        );
+        let r = build_authz_request(&new, 1170, None, maknae_security::Lane::Local, None, None);
+        assert!(r.resource.0.get("path").is_none());
     }
 
     #[test]
@@ -1304,7 +1247,6 @@ mod tests {
             maknae_security::Lane::Local,
             None,
             None,
-            None,
         );
         assert_eq!(
             with.subject.0.str(maknae_security::SUBJECT_HOME),
@@ -1315,7 +1257,6 @@ mod tests {
             501,
             None,
             maknae_security::Lane::Local,
-            None,
             None,
             None,
         );
@@ -1333,7 +1274,6 @@ mod tests {
             maknae_security::Lane::Local,
             None,
             None,
-            None,
         );
         assert_eq!(req.subject.0.get(maknae_security::SUBJECT_HOME), None);
     }
@@ -1347,7 +1287,6 @@ mod tests {
             maknae_security::Lane::Local,
             None,
             None,
-            None,
         );
         assert_eq!(
             r.subject.0.get("uid"),
@@ -1358,7 +1297,6 @@ mod tests {
             u32::MAX,
             None,
             maknae_security::Lane::Local,
-            None,
             None,
             None,
         );
@@ -1375,7 +1313,6 @@ mod tests {
             501,
             None,
             maknae_security::Lane::Local,
-            None,
             None,
             None,
         );
@@ -1401,7 +1338,6 @@ mod tests {
             maknae_security::Lane::Local,
             None,
             None,
-            None,
         );
         assert_eq!(r.action.0, "fs.read");
         assert_eq!(
@@ -1423,8 +1359,8 @@ mod tests {
 
         // The same verb on both lanes: the stamp follows the ARGUMENT, so it cannot
         // be a function of anything the client sent.
-        let local = build_authz_request(&Verb::Whoami, 501, None, Lane::Local, None, None, None);
-        let remote = build_authz_request(&Verb::Whoami, 501, None, Lane::Remote, None, None, None);
+        let local = build_authz_request(&Verb::Whoami, 501, None, Lane::Local, None, None);
+        let remote = build_authz_request(&Verb::Whoami, 501, None, Lane::Remote, None, None);
         assert_eq!(
             local.context.0.get(CONTEXT_DAC_LANE),
             Some(&AttrValue::Str("local".into()))
@@ -1444,7 +1380,6 @@ mod tests {
             501,
             None,
             Lane::Local,
-            None,
             None,
             None,
         );
@@ -1773,15 +1708,7 @@ mod tests {
     #[test]
     fn only_read_carries_a_resource_attribute() {
         for v in all_verbs() {
-            let r = build_authz_request(
-                &v,
-                501,
-                None,
-                maknae_security::Lane::Local,
-                None,
-                None,
-                None,
-            );
+            let r = build_authz_request(&v, 501, None, maknae_security::Lane::Local, None, None);
             if matches!(v, Verb::Read { .. }) {
                 assert!(
                     r.resource.0.str("path").is_some(),
@@ -1808,7 +1735,6 @@ mod tests {
             501,
             None,
             maknae_security::Lane::Local,
-            None,
             None,
             None,
         );
@@ -1964,8 +1890,7 @@ mod tests {
     #[test]
     fn no_client_request_carries_the_initiator() {
         for v in all_verbs() {
-            let r =
-                build_authz_request(&v, 0, None, maknae_security::Lane::Local, None, None, None);
+            let r = build_authz_request(&v, 0, None, maknae_security::Lane::Local, None, None);
             assert!(
                 r.subject
                     .0
@@ -1991,15 +1916,7 @@ mod tests {
         ] {
             let dbg = format!(
                 "{:?}",
-                build_authz_request(
-                    &v,
-                    501,
-                    None,
-                    maknae_security::Lane::Local,
-                    None,
-                    None,
-                    None
-                )
+                build_authz_request(&v, 501, None, maknae_security::Lane::Local, None, None,)
             );
             for s in ["SENTINEL", "424242"] {
                 assert!(!dbg.contains(s), "{v:?}: {dbg}");
