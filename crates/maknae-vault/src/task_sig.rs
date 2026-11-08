@@ -1,4 +1,4 @@
-//! Kernel-signed tasks (#609, R-S). A valid signature proves a task's origin, not that it is
+//! Kernel-signed tasks (#609). A valid signature proves a task's origin, not that it is
 //! still live: the kernel's task store stays authoritative (ADR-0033).
 use crate::agent_enroll::AgentId;
 use crate::{Plane, PlaneIdentity, SanRule, TrustBundle, VaultError};

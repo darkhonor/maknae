@@ -46,7 +46,7 @@ impl AgentUids {
     }
 }
 
-/// Actions an enrolled agent holds only when its own `policy.yaml` grants them (R-S).
+/// Actions an enrolled agent holds only when its own `policy.yaml` grants them (ADR-0033 decision 4).
 const AGENT_DEFAULT_DENIED: [&str; 1] = ["session.new"];
 
 /// Each enrolled agent's `taskers:` resolved to uids; `None` where its policy lists none.
@@ -471,7 +471,7 @@ fn decide_prompt(
     )
 }
 
-/// The `taskers:` default (R-TD): without a list only people may task the agent.
+/// The `taskers:` default: without a list only people may task the agent.
 pub(crate) fn taskers_admit(
     list: Option<&std::collections::BTreeSet<u32>>,
     uid: u32,

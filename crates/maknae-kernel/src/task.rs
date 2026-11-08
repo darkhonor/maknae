@@ -48,7 +48,7 @@ impl std::fmt::Display for TaskRefusal {
     }
 }
 
-/// Signs each task the kernel authorizes (R-S). `current_leaf` is the SHA-256 of the
+/// Signs each task the kernel authorizes. `current_leaf` is the SHA-256 of the
 /// current signing leaf's DER.
 pub trait TaskSigner: Send + Sync {
     fn sign(&self, task: TaskObject) -> Result<SignedTask, TaskRefusal>;
@@ -79,7 +79,7 @@ fn leaf_of(identity: Option<&maknae_vault::PlaneIdentity>) -> Option<[u8; 32]> {
     maknae_vault::task_sig::identity_fingerprint(identity?).ok()
 }
 
-/// A task bound to the agent id and the uid enrolled when it was minted (M2).
+/// A task bound to the agent id and the uid enrolled when it was minted.
 pub struct StoredTask {
     pub task: Arc<SignedTask>,
     pub agent: AgentId,
@@ -112,7 +112,7 @@ pub struct Enrolled {
     pub agent_uid: u32,
 }
 
-/// Live tasks, in memory for `maknaed`'s life (Q4).
+/// Live tasks, in memory for `maknaed`'s life.
 #[derive(Default)]
 pub struct TaskStore {
     held: Mutex<Held>,
@@ -143,7 +143,7 @@ impl TaskStore {
     }
 
     /// Purges every agent whose (id, uid) the view no longer holds as last seen,
-    /// whether or not it holds tasks (M8).
+    /// whether or not it holds tasks.
     pub fn retain_enrolled(&self, view: &dyn EnrollmentView) {
         let mut held = self.held();
         let known: std::collections::BTreeSet<AgentId> = held
@@ -331,7 +331,7 @@ impl TaskStore {
     }
 }
 
-/// The stored task `id`, if it is bound to this agent id and uid (M2).
+/// The stored task `id`, if it is bound to this agent id and uid.
 fn owned(
     held: &Held,
     id: &TaskId,
@@ -374,7 +374,7 @@ impl TaskObjectForTest for TaskObject {
     }
 }
 
-/// Built by the kernel from the authenticated session, never from the submission (H5).
+/// Built by the kernel from the authenticated session, never from the submission.
 /// `under` is the task the submitting request cited, already resolved by the kernel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Submitter {
@@ -475,7 +475,7 @@ impl Attempt {
     }
 }
 
-/// Decides one `session.task` submission and stores it only on `Permit` (R-T, R-O).
+/// Decides one `session.task` submission and stores it only on `Permit`.
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "#610's TaskSubmit arm is the caller")

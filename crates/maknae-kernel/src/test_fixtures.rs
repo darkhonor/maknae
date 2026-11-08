@@ -282,7 +282,7 @@ pub(crate) fn write_agent_policy(config: &Path, id: &str, yaml: &str) {
     );
 }
 
-/// The de-enrollment act (R3).
+/// The de-enrollment act.
 pub(crate) fn remove_enrollment(config: &Path, id: &str) {
     std::fs::remove_file(
         config

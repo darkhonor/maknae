@@ -2877,7 +2877,7 @@ async fn emit_connect_deny<E: AuditEmit + Send + Sync>(
 // Layer 2: the accept loop.
 // ---------------------------------------------------------------------------
 
-/// What the agent channel is admitted and resolved against (H4): the enrollment view
+/// What the agent channel is admitted and resolved against: the enrollment view
 /// at connect, and the task store per request.
 #[derive(Clone)]
 pub struct AgentAdmission {
@@ -3122,7 +3122,7 @@ async fn drain_refusal_audit<E: AuditEmit + Send + Sync + 'static>(
 }
 
 /// The anti-DoS accept loop (spec §6a/§10). Bounds live handlers with `capacity`,
-/// this listener's own semaphore (R4); audits-and-continues on a surfaced peer-authentication
+/// this listener's own semaphore; audits-and-continues on a surfaced peer-authentication
 /// rejection (never `?` — a bad handshake must not kill the daemon); fast-closes at
 /// capacity. Also `select!`s on `supervisor` (codex round-5 P1): the credential
 /// supervisor's handle resolving means it gave up (retry window exhausted) and cleared
@@ -4670,7 +4670,7 @@ struct Reloader<B: maknae_authz_basic::Baseline, E> {
     /// Admits a containment target's account lookup.
     lookup_breaker: Arc<tokio::sync::Mutex<BlockingBreaker>>,
     containment: Arc<ContainmentStatus>,
-    /// Reconciled against every installed snapshot (M9).
+    /// Reconciled against every installed snapshot.
     tasks: Arc<crate::task::TaskStore>,
     #[cfg(test)]
     load_gate: Option<Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>>,
@@ -7521,7 +7521,7 @@ where
     Ok(crate::handler::after_drain(outcome, drained))
 }
 
-/// What one listener's accept loop is stopped by, and the connections it may hold (R4).
+/// What one listener's accept loop is stopped by, and the connections it may hold.
 pub(crate) struct LoopRun {
     pub(crate) shutdown: std::pin::Pin<Box<dyn Future<Output = ()> + Send>>,
     pub(crate) supervisor: tokio::task::JoinHandle<maknae_vault::VaultError>,
@@ -7529,9 +7529,8 @@ pub(crate) struct LoopRun {
 }
 
 /// Runs the client loop and, on a host, the agent loop, each with its own connection
-/// semaphore (R4), until `shutdown`, a supervisor exit or either loop's own end stops both
-/// (M6). One task owns the credential supervisor; each loop gets a handle that resolves,
-/// with the supervisor's reason, only once it has exited.
+/// semaphore, until `shutdown`, a supervisor exit or either loop's end stops both. Each
+/// loop's supervisor handle resolves with the supervisor's reason only once it has exited.
 async fn serve_listeners<C, A, FC, FA>(
     max_connections: u32,
     shutdown: impl Future<Output = ()> + Send,

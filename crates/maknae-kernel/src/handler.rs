@@ -348,7 +348,7 @@ pub fn admitted_user_for_test(user: Option<&str>) -> Option<String> {
     crate::run::admitted_user_pub(user)
 }
 
-/// The channel facts the kernel stamps on a client request (H2, L9).
+/// The channel facts the kernel stamps on a client request.
 #[derive(Clone, Copy)]
 pub enum Stamp<'a> {
     Client,
@@ -976,7 +976,7 @@ mod tests {
             real.iter().partition(|t| **t == "session.task");
         assert!(
             !all_dispatch(&unbuilt),
-            "session.task is decided in #609 and built by #610 (ruling Q2)"
+            "session.task is decided in #609 and built by #610"
         );
         assert!(
             all_dispatch(&built),

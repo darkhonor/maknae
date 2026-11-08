@@ -72,7 +72,7 @@ grantable	admin.baseline.accept	grantable-shipped-granted	operator MAY grant per
 grantable	admin.contain	grantable-not-granted	operator MAY grant per-role via `roles:` (#165); ships ungranted
 grantable	admin.release	grantable-shipped-granted	operator MAY grant per-role via `roles:`; the shipped authz.yaml grants it to admin (#165)
 grantable	session.prompt	grantable-not-granted	operator MAY grant per-role via `roles:` (#162), admin or user, with a destination via destinations: (#172); ships ungranted and unlisted
-grantable	session.task	grantable-shipped-granted-admin-and-user	operator MAY grant per-role via roles:; the shipped authz.yaml grants it to admin and user (#609, H-1)
+grantable	session.task	grantable-shipped-granted-admin-and-user	operator MAY grant per-role via roles:; the shipped authz.yaml grants it to admin and user (#609)
 capability	Write	granted	grammar capability; shipped Write(~/projects/**) allow, independent of Read; paired sensitive-path denies (#158)
 action-vocab	admin.status	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608)
 action-vocab	admin.config.show	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608)
@@ -86,5 +86,5 @@ action-vocab	fs.read	subject-limitable	a `subjects:` actions list may limit it; 
 action-vocab	fs.write	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608)
 action-vocab	fs.delete	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608)
 action-vocab	fs.mkdir	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608)
-action-vocab	session.new	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608); an agent's policy.yaml allow lifts only its default deny (#609, R-S); no role may grant it until #170
+action-vocab	session.new	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608); an agent's policy.yaml allow lifts only its default deny (#609, ADR-0033 decision 4); no role may grant it until #170
 action-vocab	session.task	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608); an agent's policy.yaml actions list limits it the same way (#609)

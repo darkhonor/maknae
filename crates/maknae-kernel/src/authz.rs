@@ -63,7 +63,7 @@ pub enum Ending {
 }
 
 /// The connection-time standing of `uid` on a channel of class `class`, against the
-/// installed enrollment (H4).
+/// installed enrollment.
 pub fn admit(
     class: Admission,
     peer: &ChannelPeer,
@@ -82,7 +82,7 @@ pub fn admit(
     }
 }
 
-/// The task a request cites, resolved for this channel (L6).
+/// The task a request cites, resolved for this channel.
 pub fn task_for(
     admission: Admission,
     cited: Option<&TaskId>,

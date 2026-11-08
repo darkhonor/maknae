@@ -912,7 +912,7 @@ fx="$(vocab_fixture "$SHIPPED_VOCAB" "$SHIPPED_CONST" "" "${SHIPPED_FILE}  user:
 expect_reject_because "verb-vocab/shipped-grant-to-another-role" \
   "may grant only roles.admin.allow" "$fx/ci/gates/verb-vocabulary-drift.sh"
 
-# H-1 (#609): roles.user.allow may carry exactly the terms whose grantable row has the
+# #609: roles.user.allow may carry exactly the terms whose grantable row has the
 # admin-and-user disposition, and such a term is granted to both roles.
 USER_VOCAB="${SHIPPED_VOCAB}action	session.task	granted-in-shipped-file	granted to admin by the shipped authz.yaml; an install's own authz.yaml decides
 grantable	session.task	grantable-shipped-granted-admin-and-user	operator MAY grant per-role via roles:; the shipped authz.yaml grants it to admin and user

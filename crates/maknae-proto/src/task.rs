@@ -65,7 +65,7 @@ impl std::str::FromStr for TaskId {
     }
 }
 
-/// Who gave the task (R-O). `Remote` has no uid, so its request carries none.
+/// Who gave the task. `Remote` has no uid, so its request carries none.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum Tasker {
@@ -94,7 +94,7 @@ impl std::fmt::Debug for Ask {
 #[serde(deny_unknown_fields)]
 pub struct Labels {}
 
-/// What a tasker sends. The id, the tasker and the parent are the kernel's (H5).
+/// What a tasker sends. The id, the tasker and the parent are the kernel's.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskSubmission {
@@ -245,7 +245,7 @@ impl std::fmt::Display for TaskSchemaError {
 
 impl std::error::Error for TaskSchemaError {}
 
-/// The one formatter for the audit field and the `tasker` subject attribute (M10).
+/// The one formatter for the audit field and the `tasker` subject attribute.
 pub fn tasker_text(t: &Tasker) -> String {
     match t {
         Tasker::Uid(uid) => format!("uid:{uid}"),

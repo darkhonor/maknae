@@ -143,7 +143,7 @@ fi
 # The shipped grants (#490): the terms the shipped authz.yaml grants must be
 # exactly the manifest's shipped-file dispositions, both directions. Only
 # `roles.admin.allow` may carry them, and `roles.user.allow` exactly the terms
-# whose grantable row is `grantable-shipped-granted-admin-and-user` (#609, H-1).
+# whose grantable row is `grantable-shipped-granted-admin-and-user` (#609).
 SHIPPED_AUTHZ=packaging/common/authz.yaml
 [ -f "$SHIPPED_AUTHZ" ] || { echo "FAIL: missing $SHIPPED_AUTHZ"; exit 1; }
 other_roles_key=$(grep -nEv '^[[:space:]]*(#.*)?$' "$SHIPPED_AUTHZ" | grep -Ev '^[0-9]+:roles:' \
