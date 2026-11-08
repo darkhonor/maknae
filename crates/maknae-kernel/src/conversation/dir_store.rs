@@ -98,3 +98,138 @@ impl Blobs for DirBlobs {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use maknae_state::envelope::KEY_LEN;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn key() -> WrappingKey {
+        WrappingKey::new(Zeroizing::new([7u8; KEY_LEN]))
+    }
+
+    fn open_in(tmp: &tempfile::TempDir) -> DirStore {
+        fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        DirStore::open(tmp.path(), nix::unistd::geteuid().as_raw(), key()).unwrap()
+    }
+
+    #[test]
+    fn deleting_an_absent_record_is_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open_in(&tmp);
+        assert_eq!(store.blobs.delete("absent"), Err(StoreError::NotFound));
+    }
+
+    #[test]
+    fn deleting_a_saved_record_removes_its_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open_in(&tmp);
+        store.blobs.save("gone", b"payload").unwrap();
+        assert!(tmp.path().join("gone.conv").exists());
+        store.blobs.delete("gone").unwrap();
+        assert!(!tmp.path().join("gone.conv").exists());
+        assert_eq!(store.blobs.load("gone").unwrap_err(), StoreError::NotFound);
+    }
+
+    #[test]
+    fn a_saved_record_loads_back_and_only_suffixed_files_are_named() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open_in(&tmp);
+        store.blobs.save("kept", b"payload").unwrap();
+        fs::write(tmp.path().join("stray.txt"), b"x").unwrap();
+        assert_eq!(&**store.blobs.load("kept").unwrap(), b"payload");
+        assert_eq!(store.blobs.names().unwrap(), vec!["kept".to_owned()]);
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_sealed_envelope_is_corrupt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open_in(&tmp);
+        let path = tmp.path().join("junk.conv");
+        fs::write(&path, b"not an envelope").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(store.blobs.load("junk").unwrap_err(), StoreError::Corrupt);
+    }
+
+    #[test]
+    fn a_record_over_the_size_bound_is_an_io_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open_in(&tmp);
+        let path = tmp.path().join("big.conv");
+        fs::write(&path, vec![0u8; RECORD_MAX_BYTES as usize + 1]).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(matches!(store.blobs.load("big"), Err(StoreError::Io(_))));
+    }
+
+    #[test]
+    fn a_record_with_a_second_link_is_an_io_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open_in(&tmp);
+        store.blobs.save("linked", b"payload").unwrap();
+        fs::hard_link(
+            tmp.path().join("linked.conv"),
+            tmp.path().join("alias.conv"),
+        )
+        .unwrap();
+        assert!(matches!(store.blobs.load("linked"), Err(StoreError::Io(_))));
+    }
+
+    #[test]
+    fn a_directory_named_like_a_record_is_an_io_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open_in(&tmp);
+        fs::create_dir(tmp.path().join("dir.conv")).unwrap();
+        assert!(matches!(store.blobs.load("dir"), Err(StoreError::Io(_))));
+    }
+
+    #[test]
+    fn a_non_directory_anchor_is_an_io_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("file");
+        fs::write(&path, b"x").unwrap();
+        let uid = nix::unistd::geteuid().as_raw();
+        assert!(matches!(
+            DirStore::open(&path, uid, key()),
+            Err(StoreError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn a_missing_anchor_is_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let uid = nix::unistd::geteuid().as_raw();
+        assert!(matches!(
+            DirStore::open(&tmp.path().join("absent"), uid, key()),
+            Err(StoreError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn a_read_only_directory_refuses_a_delete_as_an_io_error() {
+        if nix::unistd::geteuid().is_root() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open_in(&tmp);
+        store.blobs.save("held", b"payload").unwrap();
+        fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o500)).unwrap();
+        let denied = store.blobs.delete("held");
+        fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(matches!(denied, Err(StoreError::Io(_))));
+        assert_eq!(&**store.blobs.load("held").unwrap(), b"payload");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_name_that_is_not_utf8_is_not_a_record() {
+        use std::os::unix::ffi::OsStrExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open_in(&tmp);
+        store.blobs.save("kept", b"payload").unwrap();
+        let odd = std::ffi::OsStr::from_bytes(b"\xff\xfe.conv");
+        fs::write(tmp.path().join(odd), b"x").unwrap();
+        assert_eq!(store.blobs.names().unwrap(), vec!["kept".to_owned()]);
+    }
+}

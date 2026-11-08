@@ -150,4 +150,59 @@ mod tests {
             }
         );
     }
+
+    fn sample() -> ConversationRecord {
+        let id = ConversationId::parse(&"c".repeat(32)).unwrap();
+        let mut rec = opened(id, 5, "/w".into(), 3, "UNCLASSIFIED");
+        rec.last_reply = Some([9u8; 32]);
+        rec.fence = 4;
+        rec.provenance.sources.push("src".into());
+        rec
+    }
+
+    #[test]
+    fn an_encoded_record_decodes_to_itself() {
+        let rec = sample();
+        assert_eq!(decode(&encode(&rec).unwrap(), &rec.id).unwrap(), rec);
+    }
+
+    #[test]
+    fn a_record_naming_another_conversation_is_an_id_mismatch() {
+        let rec = sample();
+        let other = ConversationId::parse(&"d".repeat(32)).unwrap();
+        assert_eq!(
+            decode(&encode(&rec).unwrap(), &other),
+            Err(StoreError::IdMismatch)
+        );
+    }
+
+    #[test]
+    fn bytes_that_are_not_cbor_are_corrupt() {
+        let id = sample().id;
+        assert_eq!(decode(&[0xff, 0xff, 0xff], &id), Err(StoreError::Corrupt));
+        assert_eq!(decode(&[], &id), Err(StoreError::Corrupt));
+    }
+
+    #[test]
+    fn a_truncated_record_is_corrupt() {
+        let rec = sample();
+        let bytes = encode(&rec).unwrap();
+        assert_eq!(
+            decode(&bytes[..bytes.len() / 2], &rec.id),
+            Err(StoreError::Corrupt)
+        );
+    }
+
+    #[test]
+    fn a_record_with_an_unknown_field_is_corrupt() {
+        let rec = sample();
+        let mut value: ciborium::Value = ciborium::from_reader(&encode(&rec).unwrap()[..]).unwrap();
+        value.as_map_mut().unwrap().push((
+            ciborium::Value::Text("extra".into()),
+            ciborium::Value::Bool(true),
+        ));
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&value, &mut bytes).unwrap();
+        assert_eq!(decode(&bytes, &rec.id), Err(StoreError::Corrupt));
+    }
 }
