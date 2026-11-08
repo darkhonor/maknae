@@ -67,8 +67,8 @@ use crate::authz::{
 };
 use crate::baseline_check::{Invalid, Mode};
 use crate::blocking_guard::{
-    within_blocking, BlockingBreaker, BreakerAdmission, BreakerTransition, AUDIT_APPEND_TIMEOUT,
-    BLOCKING_OPERATION_TIMEOUT, SCAN_BACK_TIMEOUT,
+    admit_blocking, within_blocking, BlockingBreaker, BreakerAdmission, BreakerTransition, Offload,
+    AUDIT_APPEND_TIMEOUT, BLOCKING_OPERATION_TIMEOUT, SCAN_BACK_TIMEOUT,
 };
 use crate::boot_gate::authz_boot_gate;
 use crate::groupres::maknae_gid;
@@ -1266,7 +1266,6 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     let sec_req = build_authz_request(&request.verb, peer_uid, None, lane, admitted.as_ref());
     let permitted_req = sec_req.clone();
     let authz_breaker = authz_decide_breaker();
-    let authz_admission = { authz_breaker.lock().await.begin_attempt_at(Instant::now()) };
     // #275: the role rides out WITH the verdict so the audit record attests the
     // role this very decision was made on. `combine(vec![..])` is preserved
     // deliberately: it is what turns an Indeterminate into the
@@ -1274,65 +1273,45 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     // the wrapper would change that string silently.
     let mut decided_role: Option<&'static str> = None;
     let mut decided_rule: Option<RuleCitation> = None;
-    let verdict = match authz_admission {
-        BreakerAdmission::RefuseOpen => maknae_security::Verdict::Deny {
+    let decided = {
+        let (a, live) = (Arc::clone(&authorizer), Arc::clone(&live));
+        admit_blocking(
+            &authz_breaker,
+            authz_decide_timeout,
+            "authorization decision",
+            move || {
+                let d = guarded_decide_cited(&*a, &sec_req);
+                (combine(vec![d.verdict]), d.role, d.rule, live.generation())
+            },
+        )
+        .await
+    };
+    let verdict = match decided {
+        Err(Offload::Open) => maknae_security::Verdict::Deny {
             reason: "authorization decision circuit breaker open".into(),
         },
-        BreakerAdmission::RefuseAtCapacity => maknae_security::Verdict::Deny {
+        Err(Offload::AtCapacity) => maknae_security::Verdict::Deny {
             reason: "authorization decision blocking worker budget exhausted".into(),
         },
-        BreakerAdmission::Admit => {
-            let decided = {
-                let (a, live) = (Arc::clone(&authorizer), Arc::clone(&live));
-                tokio::time::timeout(
-                    authz_decide_timeout,
-                    tokio::task::spawn_blocking(move || {
-                        let d = guarded_decide_cited(&*a, &sec_req);
-                        (combine(vec![d.verdict]), d.role, d.rule, live.generation())
-                    }),
-                )
-                .await
-            };
-            match decided {
-                // A live install landed between admission and the decision: the
-                // request was admitted on values the decision did not see.
-                Ok(Ok((_, role, _, generation))) if generation != admitted_generation => {
-                    authz_breaker.lock().await.record_success();
-                    decided_role = role;
-                    maknae_security::Verdict::Deny {
-                        reason: "the live baseline changed between admission and decision".into(),
-                    }
-                }
-                Ok(Ok((v, role, rule, _))) => {
-                    authz_breaker.lock().await.record_success();
-                    decided_role = role;
-                    decided_rule = rule;
-                    v
-                }
-                Ok(Err(_join)) => {
-                    // Join failure means the blocking worker ended instead of
-                    // being orphaned; fail closed for this request, but do not
-                    // count it against the timeout breaker.
-                    authz_breaker.lock().await.record_success();
-                    maknae_security::Verdict::Deny {
-                        reason: "authorization decision failed (join)".into(),
-                    }
-                }
-                Err(_elapsed) => {
-                    if authz_breaker.lock().await.record_timeout_at(Instant::now())
-                        == BreakerTransition::Tripped
-                    {
-                        eprintln!(
-                        "maknaed: authorization decision circuit breaker tripped after repeated {}s blocking timeouts — failing closed without spawning more policy work",
-                        authz_decide_timeout.as_secs()
-                    );
-                    }
-                    maknae_security::Verdict::Deny {
-                        reason: "authorization decision timed out".into(),
-                    }
-                }
+        // A live install landed between admission and the decision: the
+        // request was admitted on values the decision did not see.
+        Ok((_, role, _, generation)) if generation != admitted_generation => {
+            decided_role = role;
+            maknae_security::Verdict::Deny {
+                reason: "the live baseline changed between admission and decision".into(),
             }
         }
+        Ok((v, role, rule, _)) => {
+            decided_role = role;
+            decided_rule = rule;
+            v
+        }
+        Err(Offload::Join) => maknae_security::Verdict::Deny {
+            reason: "authorization decision failed (join)".into(),
+        },
+        Err(Offload::TimedOut) => maknae_security::Verdict::Deny {
+            reason: "authorization decision timed out".into(),
+        },
     };
     let obligations = match finalize(verdict) {
         Decision::Deny { reason } => {

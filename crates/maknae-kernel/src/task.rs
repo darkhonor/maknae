@@ -515,61 +515,25 @@ async fn decide<P: Authorizer + Send + Sync + 'static>(
     )
 }
 
-/// The request path's admission, offload and breaker bookkeeping (`run.rs`, the decide arm).
 async fn decide_admitted<P: Authorizer + Send + Sync + 'static>(
     pdp: Decider<P>,
     bound: std::time::Duration,
     req: maknae_security::Request,
 ) -> Result<maknae_security::Decided, TaskRefusal> {
-    use crate::blocking_guard::{BreakerAdmission, BreakerTransition};
-    let denied = |reason: &str| Err(TaskRefusal::Denied(reason.to_string()));
-    let admission = pdp
-        .breaker
-        .lock()
-        .await
-        .begin_attempt_at(std::time::Instant::now());
-    match admission {
-        BreakerAdmission::RefuseOpen => {
-            return denied("authorization decision circuit breaker open")
-        }
-        BreakerAdmission::RefuseAtCapacity => {
-            return denied("authorization decision blocking worker budget exhausted")
-        }
-        BreakerAdmission::Admit => {}
-    }
+    use crate::blocking_guard::{admit_blocking, Offload};
     let authorizer = pdp.authorizer;
-    let decided = tokio::time::timeout(
-        bound,
-        tokio::task::spawn_blocking(move || {
-            maknae_security::guarded_decide_cited(&*authorizer, &req)
-        }),
-    )
+    let decided = admit_blocking(&pdp.breaker, bound, "authorization decision", move || {
+        maknae_security::guarded_decide_cited(&*authorizer, &req)
+    })
     .await;
-    match decided {
-        Ok(Ok(d)) => {
-            pdp.breaker.lock().await.record_success();
-            Ok(d)
-        }
-        Ok(Err(_join)) => {
-            pdp.breaker.lock().await.record_success();
-            denied("authorization decision failed (join)")
-        }
-        Err(_elapsed) => {
-            if pdp
-                .breaker
-                .lock()
-                .await
-                .record_timeout_at(std::time::Instant::now())
-                == BreakerTransition::Tripped
-            {
-                eprintln!(
-                    "maknaed: authorization decision circuit breaker tripped after repeated {}s blocking timeouts — failing closed without spawning more policy work",
-                    bound.as_secs()
-                );
-            }
-            denied("authorization decision timed out")
-        }
-    }
+    let reason = match decided {
+        Ok(d) => return Ok(d),
+        Err(Offload::Open) => "authorization decision circuit breaker open",
+        Err(Offload::AtCapacity) => "authorization decision blocking worker budget exhausted",
+        Err(Offload::Join) => "authorization decision failed (join)",
+        Err(Offload::TimedOut) => "authorization decision timed out",
+    };
+    Err(TaskRefusal::Denied(reason.into()))
 }
 
 #[cfg(test)]
