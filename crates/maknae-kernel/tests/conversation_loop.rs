@@ -349,6 +349,39 @@ async fn a_non_directory_cwd_descriptor_is_refused() {
 }
 
 #[tokio::test]
+async fn a_subject_without_the_grant_never_has_its_cwd_verified() {
+    let rig = Rig::with_rules(
+        "ungranted-cwd",
+        Kind::Mem,
+        &[],
+        "roles:\n  user:\n    allow: [\"session.list\"]\n",
+    );
+    let file = rig.fx.root.join("a-file");
+    std::fs::write(&file, b"f").unwrap();
+    let cases: Vec<(std::path::PathBuf, Option<std::os::fd::OwnedFd>)> = vec![
+        (
+            file.clone(),
+            Some(maknae_io::open_path_for_delegation(&file).unwrap()),
+        ),
+        (rig.cwd(), None),
+        (std::path::PathBuf::from("relative"), None),
+    ];
+    for (cwd, fd) in cases {
+        let records = Records::new(0);
+        let resp = rig.new_at(&cwd, fd, &records).await.unwrap();
+        refused_with(&resp, ProtoErrCode::Unauthorized);
+        let rec = last_of(&records, "session.new");
+        assert_eq!(rec.outcome.result, "deny");
+        assert_eq!(
+            rec.outcome.reason, "role user: no rule for session.new",
+            "{cwd:?}"
+        );
+        assert!(rec.object.is_none(), "{rec:?}");
+    }
+    assert!(rig.held().is_empty());
+}
+
+#[tokio::test]
 async fn a_symlinked_cwd_is_recorded_as_its_target() {
     let rig = Rig::new("symlink-cwd", Kind::Mem);
     let real = rig.fx.root.join("real");

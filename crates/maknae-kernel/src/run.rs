@@ -2805,40 +2805,7 @@ async fn serve_conversation_verb<S, E, P>(
         rec
     };
 
-    let mut verified = None;
     let mut gathered = None;
-    if let Some(cwd) = &asked {
-        if let Err(why) = crate::mutation::checked(cwd) {
-            trail
-                .unauthorized(
-                    stream,
-                    &early(&format!("cwd fails operand pre-gate: {why}")),
-                )
-                .await;
-            return;
-        }
-        let Some(fd) = delegated.take() else {
-            trail
-                .unauthorized(stream, &early("cwd descriptor missing"))
-                .await;
-            return;
-        };
-        match crate::mutation::blocking(uid, timeout, move || {
-            crate::mutation::verify_cwd(std::os::fd::AsFd::as_fd(&fd))
-        })
-        .await
-        {
-            Ok(Ok(path)) => verified = Some(path),
-            Ok(Err(why)) => {
-                trail.unauthorized(stream, &early(&why)).await;
-                return;
-            }
-            Err(why) => {
-                trail.unauthorized(stream, &early(&why.to_string())).await;
-                return;
-            }
-        }
-    }
     if let Some(id) = &cited {
         let (s, id) = (Arc::clone(store), id.clone());
         match crate::mutation::blocking(uid, timeout, move || {
@@ -2873,9 +2840,13 @@ async fn serve_conversation_verb<S, E, P>(
         let mut rec = trail.record(action, result, reason, posture);
         rec.subject.role = role.map(str::to_string);
         rec.rule = rule.as_ref().map(rule_audit);
-        rec.object.clone_from(&verified);
-        rec.object_requested = asked.clone().filter(|a| Some(a) != verified.as_ref());
+        rec.object_requested.clone_from(&asked);
         rec.conversation = cited.as_ref().map(|c| c.as_str().to_owned());
+        rec
+    };
+    let at = |mut rec: AuditRecord, cwd: &str| {
+        rec.object = Some(cwd.to_owned());
+        rec.object_requested = asked.clone().filter(|a| a != cwd);
         rec
     };
     match finalize(verdict) {
@@ -2906,12 +2877,39 @@ async fn serve_conversation_verb<S, E, P>(
         )
     };
     match verb {
-        Verb::SessionNew { .. } => {
-            let Some(cwd) = verified.clone() else {
+        Verb::SessionNew { cwd: requested } => {
+            let refuse_cwd = |why: &str| decided("deny", why, "unauthorized");
+            if let Err(why) = crate::mutation::checked(requested) {
                 trail
-                    .unauthorized(stream, &decided("deny", "cwd unverified", "unauthorized"))
+                    .unauthorized(
+                        stream,
+                        &refuse_cwd(&format!("cwd fails operand pre-gate: {why}")),
+                    )
                     .await;
                 return;
+            }
+            let Some(fd) = delegated.take() else {
+                trail
+                    .unauthorized(stream, &refuse_cwd("cwd descriptor missing"))
+                    .await;
+                return;
+            };
+            let cwd = match crate::mutation::blocking(uid, timeout, move || {
+                crate::mutation::verify_cwd(std::os::fd::AsFd::as_fd(&fd))
+            })
+            .await
+            {
+                Ok(Ok(path)) => path,
+                Ok(Err(why)) => {
+                    trail.unauthorized(stream, &refuse_cwd(&why)).await;
+                    return;
+                }
+                Err(why) => {
+                    trail
+                        .unauthorized(stream, &refuse_cwd(&why.to_string()))
+                        .await;
+                    return;
+                }
             };
             let Some(lowest) =
                 crate::classification::select(policy_name).map(|p| p.unmarked().name)
@@ -2919,7 +2917,10 @@ async fn serve_conversation_verb<S, E, P>(
                 trail
                     .unauthorized(
                         stream,
-                        &decided("deny", "classification system unresolved", "unavailable"),
+                        &at(
+                            decided("deny", "classification system unresolved", "unavailable"),
+                            &cwd,
+                        ),
                     )
                     .await;
                 return;
@@ -2929,13 +2930,16 @@ async fn serve_conversation_verb<S, E, P>(
                 Ok(id) => id,
                 Err(e) => {
                     trail
-                        .unauthorized(stream, &decided("deny", &e.to_string(), "unavailable"))
+                        .unauthorized(
+                            stream,
+                            &at(decided("deny", &e.to_string(), "unavailable"), &cwd),
+                        )
                         .await;
                     return;
                 }
             };
-            let rec = record::opened(id.clone(), uid, cwd, now, &lowest);
-            let mut intent = decided("permit", "intent recorded", "authorized");
+            let rec = record::opened(id.clone(), uid, cwd.clone(), now, &lowest);
+            let mut intent = at(decided("permit", "intent recorded", "authorized"), &cwd);
             intent.conversation = Some(id.as_str().to_owned());
             if !trail.record_bounded(&intent).await {
                 return;
