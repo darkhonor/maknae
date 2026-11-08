@@ -291,7 +291,7 @@ To contain an id independently of the directory, list it as `- uid: <n>`. On Lin
 > |---|---|
 > | `core` (own level) | `schema_version`, `deployment_id`, `identity`, `handling` |
 > | `core.handling` | `ceiling`, `accreditation_ref`, `policy` |
-> | `transport` | `socket_path`, `max_connections`, `prompt_max_bytes`, `handshake_timeout_ms`, `read_timeout_ms` |
+> | `transport` | `socket_path`, `agent_socket_path`, `max_connections`, `prompt_max_bytes`, `handshake_timeout_ms`, `read_timeout_ms`. `agent_socket_path` is where a host-mode `maknaed` accepts enrolled agents: `/run/maknae-agent/maknaed.sock` on Linux, `/usr/local/var/run/maknae-agent/maknaed.sock` on macOS. A value in the directory of `socket_path` refuses the configuration. |
 > | `audit` | `jsonl_path`, `siem`, `au3_1`, `readers` (§6.3) |
 > | `principal` | `name`, `uid` |
 > | `vault` | `addr`, `approle_mount`, `pki_int_mount`, `deployment_id`, `insecure_plaintext_secret_path`, `user_auth`, `kv_mount`, `user_prefix`, `plane_key` (`crates/maknae-vault/src/config.rs`). In the **root** `maknae.yaml`, `kv_mount` and `user_prefix` refuse boot — `vault.kv_mount in the root maknae.yaml is not read by maknaed: set kv_mount in egress-bounds.yaml` (likewise `user_prefix`), shadowed `config.d/` blocks included — because the host's copy lives in `egress-bounds.yaml` (§6.1.3); they belong in each user's `maknae.yaml` (§6.1.2) |
@@ -691,8 +691,8 @@ vault:
 ```
 
 - **`kv_mount` and `user_prefix`** are required by `maknae agent`, and enroll writes them from `--kv-mount` (default `maknae-kv`) and `--user-prefix` (default `maknae/users`). Each is at most 256 bytes of `[A-Za-z0-9._/-]`, with no empty, `.`, `..` or `data` segment and no leading or trailing `/`. When one is missing, `maknae agent` stops with ``vault.kv_mount is not set in your maknae.yaml: `sudo maknae enroll` writes it`` (likewise `vault.user_prefix`). Only `maknae agent` requires them, but every CLI verb parses the `vault` block, so a malformed value refuses every verb.
-- **`user_auth { type, mount }`** says how `maknae login` authenticates. An absent block means userpass on `maknae-userpass`. When the block is present, `type` is required and must be `userpass`; anything else refuses with ``vault.user_auth.type "<type>" is not supported: the only method is `userpass` ``. `mount` defaults to `maknae-userpass` and is a bare mount name: a leading `auth` segment refuses (`invalid Vault mount: vault.user_auth.mount starts with 'auth' — the auth/ prefix is composed by the client; write the bare mount name as Terraform declares it`), as does a character outside `[A-Za-z0-9._/-]`, whitespace, or an empty, `.` or `..` segment. Keys other than `type` and `mount` refuse with `unknown key '<key>' in 'vault.user_auth'`. The root `maknae.yaml` may carry the same block.
-- **`plane_key`** (`ml-dsa-87`, `ecdsa-p384-sha384` or `ecdsa-p521-sha512`; absent means `ml-dsa-87`) is the key algorithm this plane mints its identity with. It must equal `deploy/vault-pki`'s `plane_key_algorithm`, in the root `maknae.yaml` (the daemon's plane) and in each user's (the CLI's plane): Vault refuses a CSR of another key type or size, and a refusal whose message concerns the key adds a hint naming both settings. `ml-dsa-87` needs a Vault 2.2.0+ PKI. Any other value refuses with ``vault.plane_key `<value>` is not one of ml-dsa-87, ecdsa-p384-sha384, ecdsa-p521-sha512``. `maknae enroll` writes it into both files from `--plane-key` (default `ml-dsa-87`), so a deployment that keeps EC passes `--plane-key ecdsa-p384-sha384` (or `ecdsa-p521-sha512`) on every enroll. `admin.status` reports the value the daemon booted with, and the boot trail's posture record names it. `admin.config.show` reports the accepted configuration snapshot, which an edit changes only once the baseline is accepted (§6.4); the plane uses the new value only after a restart.
+- **`user_auth { type, mount }`** says how `maknae login` authenticates. An absent block means userpass on `maknae-userpass`. When the block is present, `type` is required and must be `userpass`; anything else refuses with ``vault.user_auth.type "<type>" is not supported: the only method is `userpass` ``. `mount` defaults to `maknae-userpass` and is a bare mount name: a leading `auth` segment refuses (`invalid Vault mount: vault.user_auth.mount starts with 'auth' — the auth/ prefix is composed by the client; write the bare mount name`), as does a character outside `[A-Za-z0-9._/-]`, whitespace, or an empty, `.` or `..` segment. Keys other than `type` and `mount` refuse with `unknown key '<key>' in 'vault.user_auth'`. The root `maknae.yaml` may carry the same block.
+- **`plane_key`** (`ml-dsa-87`, `ecdsa-p384-sha384` or `ecdsa-p521-sha512`; absent means `ml-dsa-87`) is the key algorithm this plane mints its identity with. It must equal the key type of the Vault PKI roles (with `deploy/vault-pki`, its `plane_key_algorithm`), in the root `maknae.yaml` (the daemon's plane) and in each user's (the CLI's plane): Vault refuses a CSR of another key type or size, and a refusal whose message concerns the key adds a hint naming both settings. `ml-dsa-87` needs a Vault 2.2.0+ PKI. Any other value refuses with ``vault.plane_key `<value>` is not one of ml-dsa-87, ecdsa-p384-sha384, ecdsa-p521-sha512``. `maknae enroll` writes it into both files from `--plane-key` (default `ml-dsa-87`), so a deployment that keeps EC passes `--plane-key ecdsa-p384-sha384` (or `ecdsa-p521-sha512`) on every enroll. `admin.status` reports the value the daemon booted with, and the boot trail's posture record names it. `admin.config.show` reports the accepted configuration snapshot, which an edit changes only once the baseline is accepted (§6.4); the plane uses the new value only after a restart.
 - **They must match the host.** A user whose `kv_mount` or `user_prefix` differs from the host's `egress-bounds.yaml` (§6.1.3) seals a key the Egress Daemon cannot open: the seal binds the key path from the user's copy, the deputy opens it under the path from the host's, so it refuses with `OpenFailed(Seal)` before any Vault request or provider I/O; `maknaed` records every such turn `Failed` (ADR-0028 §5, amended, and §6). The user sees only the generic refusal text (§6.1.1). Keep both files written from the same enroll flags.
 
 ### 6.1.3 `egress-bounds.yaml`
@@ -832,17 +832,22 @@ audit:
 **Prerequisites.**
 
 - The host is enrolled (`sudo maknae enroll`).
-- The agent's id is in Terraform's `maknae_agents` (`deploy/vault-pki`), which creates its AppRole role.
-- An operator Vault token carrying the `maknae-enroll-agent` policy, supplied by `--token-file` or a no-echo prompt.
-- A dedicated service account for the agent: it is not root, it is not the enrolling principal's account, its shell is one of the non-login shells `/usr/sbin/nologin`, `/sbin/nologin`, `/usr/bin/nologin`, `/bin/false` or `/usr/bin/false`, it is outside the `maknae` group, it is not a Maknae daemon account and is not a member (primary or supplementary) of the `_maknae` or `_maknae-egress` group, and no other agent is enrolled to it. Enrollment refuses any other account.
+- The agent's Vault objects exist: the AppRole role `agent-<id>` on the agent mount, and the entity `maknae-agent-<id>` with an alias on that mount whose name is the role's RoleID (`deploy/vault-pki` is one way to create them; how they are made is the deployment's choice). Enrollment refuses before it mints anything when any of them is missing.
+- For the agent to mint its plane leaf, two more Vault objects, which enrollment does not check: the policy `maknae-agent-<id>` on the role, granting `update` on `<pki_int_mount>/sign/maknae-agent-<id>` with the `not_after` parameter denied and no `revoke` path, and the PKI role `maknae-agent-<id>` on the intermediate mount, client-only and `no_store`, admitting only the URI-SAN `spiffe://<deployment_id>/plane/agent/<id>`, with a TTL no longer than the plane leaves' (`deploy/vault-pki` sets the agent leaf to 1 hour by default). The agent's token must have a `token_max_ttl` (never 0); the residuals below are bounded by it.
+- An operator Vault token carrying the `maknae-enroll-agent` policy, supplied by `--token-file` or a no-echo prompt. The policy grants, on the agent mount only: reading a role's RoleID, creating SecretIDs, listing and destroying SecretID accessors; and `read` and `update` on `identity/entity/name/maknae-agent-*`, where `update` may set only the `disabled` field.
+- A dedicated service account for the agent: it is not root, it is not the enrolling principal's account, its shell is one of the non-login shells `/usr/sbin/nologin`, `/sbin/nologin`, `/usr/bin/nologin`, `/bin/false` or `/usr/bin/false`, it is outside the `maknae` group and a member of the `maknae-agents` group (enroll prints the `usermod -aG` or `dseditgroup` command and changes nothing), it is not bound in `bindings.yaml` under `admin`, `user` or `guest`, by name or uid (`adversary` contains it), it is not a Maknae daemon account and is not a member (primary or supplementary) of the `_maknae` or `_maknae-egress` group, and no other agent is enrolled to it. Enrollment refuses any other account.
 - The agent id is enrolled on this host only. Each agent id is enrolled on exactly one host: enrolling or rotating the same id on another host destroys this host's SecretID, because every enrollment retires every other SecretID on `agent-<id>`.
 - Linux: a usable TPM2. There is no plaintext fallback.
 - macOS: `/usr/local/bin/maknae-agentd` installed and Developer ID-signed, and the running `maknae` binary itself root-installed and Developer ID-signed. Enrollment refuses until both are.
 
 ```bash
 sudo maknae enroll agent <id> --account <service-account> --bind-cidr <cidr> [--bind-cidr <cidr>…] \
-  [--approle-mount <mount>] [--token-file <file>] [--verbose]
+  [--role user|guest] [--approle-mount <mount>] [--token-file <file>] [--verbose]
 ```
+
+`--role` defaults to `user`; `admin` is not a choice. Before minting a SecretID, enroll reads the Vault entity `maknae-agent-<id>` and refuses, with no side effect, when it is absent or has no alias on the agent mount named by the role's RoleID. A disabled entity is re-enabled as the last step, and only when every earlier SecretID of the role was destroyed; if any destroy failed, the entity stays disabled until a `--rotate` retires them all. Enroll ends by telling you to reload `maknaed`.
+
+Re-enabling an entity makes the tokens issued before it was disabled usable again until they reach `agent_token_max_ttl`. Disabling does not revoke them.
 
 `--bind-cidr` is required, once per address range. The SecretID is minted with `cidr_list` and `token_bound_cidrs` set to those ranges, so Vault refuses it, and any token it yields, from a source address outside them. Vault sees the address after any NAT, so behind NAT bind the translated address. A prefix is plain decimal digits with no leading zero, an IPv4-mapped IPv6 range (`::ffff:a.b.c.d/n`) is taken as its IPv4 range, and enrollment refuses `0.0.0.0/0`, `::/0`, or any set of ranges that together covers every IPv4 or every IPv6 address. `--approle-mount` defaults to `maknae-agent-approle`; it may use only `A-Z`, `a-z`, `0-9`, `.`, `_`, `/` and `-`, and must differ from `maknaed`'s AppRole mount, which must use the same characters so the two can be compared.
 
@@ -853,18 +858,58 @@ sudo maknae enroll agent <id> --account <service-account> --bind-cidr <cidr> [--
 | `/etc/maknae/private/agent-<id>-secret-id.cred` (Linux) | the SecretID, a TPM2-bound `systemd-creds` credential named `maknae-agent-secret-id` |
 | System keychain (macOS) | an item with service `io.maknae.maknae-agentd` and account `<id>`, trusted only to `/usr/local/bin/maknae-agentd` |
 | `/etc/maknae/private/agent-<id>-enroll-state.yaml` | the mount, the role, and the `live`, `pending` and `retiring` SecretID accessors |
-| `/etc/maknae/agents/<id>.yaml` | the agent's id, account, uid, mount, role, RoleID, bound CIDRs and custody source |
+| `/etc/maknae/agents/<id>/enrollment.yaml` | the agent's id, account, uid, mount, AppRole role, RoleID, bound CIDRs, bound role and custody source (directory `root:_maknae 0750`) |
 
 **Rotating.** `sudo maknae enroll agent <id> --account <service-account> --bind-cidr <cidr>… --rotate` takes the same `--account` and mount as the enrollment, and `--bind-cidr` again. It mints and seals the new SecretID before destroying the old one, and an accessor stays recorded in the state file until its destroy succeeds. Every enrollment, first or rotating, also lists the role's SecretID accessors in Vault after sealing and retires each one except the new SecretID's, so a SecretID that an interrupted earlier run minted but never recorded is destroyed too. That includes a SecretID another host holds for the same id, which is why an agent id is enrolled on one host only. A different account or mount means de-enrolling first.
 
-**De-enrolling.** Until de-enrollment ships (#472), do it by hand. List the role's SecretID accessors with an operator token that carries the policy, and destroy each one:
+**What `maknaed` reads.** At every start and reload `maknaed` reads `/etc/maknae/agents/` with `authz.yaml` and `bindings.yaml`, as one policy. The directory and every file in it must be owned by root, not group- or world-writable and not world-readable, and each file must be a regular file with one link and at most 64 KiB. For each `agents/<id>/` that holds an `enrollment.yaml`, it runs the same account checks enrollment ran (above) and also refuses an enrollment whose recorded uid now names another account or whose account `bindings.yaml` binds under `admin`, `user` or `guest`. An enrollment that fails is ignored: the account keeps whatever role `bindings.yaml` gives it and the client socket as before, it is never admitted on the agent socket, and a `graph.identity` record says `agent '<id>' (uid <n>) is not enrolled: <why>`. The exception refuses the whole reload, and the running policy stands: an account that passes every other check but that `bindings.yaml` binds under `admin`, by name or `uid:` entry (``authz agents: the service account <account> of agent `<id>` is bound to admin in bindings.yaml; an agent never holds admin``). The same binding made by a live edit is refused the same way. `bindings.yaml` may list an enrolled agent's account under `adversary`, which contains it.
 
-```bash
-vault list auth/<mount>/role/agent-<id>/secret-id
-vault write auth/<mount>/role/agent-<id>/secret-id-accessor/destroy secret_id_accessor=<a>
+Each agent accepted is recorded as `agent '<id>' (uid <n>) is enrolled`, and one that is gone as `agent '<id>' (uid <n>) is no longer enrolled` (both `graph.identity`, `graph.anchor:"enrolling"`). A directory with no `enrollment.yaml`, a name that is not an agent id, or an entry that is not a directory is skipped and recorded as `agents/<entry> is skipped: <why>`. An `enrollment.yaml` or `policy.yaml` that does not parse, or an `enrollment.yaml` whose `agent_id` is not its directory's name, refuses the reload. A `policy.yaml` without an `enrollment.yaml` beside it is not read. `maknae status` counts these problems, and `maknae subject-list` lists each enrolled agent with its id; when `bindings.yaml` has no `bindings:` key it also lists the principal as `admin`, marked as the principal.
+
+**The agent's policy (`policy.yaml`).** `/etc/maknae/agents/<id>/policy.yaml` is written by hand, as root, and holds this agent's limits; they never live in `authz.yaml`, and an `authz.yaml` `subjects:` entry that names an enrolled agent's account refuses the reload. Its keys are `schema_version: 1` and, each optional, the three keys of an `authz.yaml` `subjects:` entry (`permissions`, `actions` and `models`, with the grammar and rules of the runbook's Chapter 3 §7 and ADR-0032: the site `deny` is a floor, deny beats allow, and a limit never grants) and `taskers`:
+
+```yaml
+schema_version: 1
+permissions:
+  allow:
+    - "Read(~/notes/**)"
+    - "Write(~/notes/**)"
+actions:
+  allow:
+    - "fs.read"
+    - "fs.write"
+    - "fs.mkdir"
+    - "session.prompt"
+models:
+  allow:
+    - "local/llama"
+taskers:
+  - "alice"
+  - "uid:1001"
+  - "agent:hobi"
 ```
 
-Then remove that state file, `/etc/maknae/agents/<id>.yaml` and the sealed credential: on Linux the `.cred` file, on macOS `security delete-generic-password -s io.maknae.maknae-agentd -a <id> /Library/Keychains/System.keychain`.
+- An agent with no `policy.yaml`, or one without `permissions`, holds no file access through Maknae's tools.
+- `admin.*` is always refused to an agent, except `admin.whoami`; no file can grant it.
+- `session.new` is refused to an agent unless its `actions.allow` holds it (`session.new` or `session.*`) and its `actions.deny` does not. It still needs the role's grant, which no role holds yet.
+- `taskers` names who may task this agent with `session.task`: account names, `uid:<n>` entries and `agent:<id>` entries. Without the key, only people may task it; another agent may task it only when listed. `taskers: []` admits nobody. Each tasker also needs `session.task` from its own role; the shipped `authz.yaml` grants it to `admin` and `user`. Tasking an agent is refused on the wire until task delivery is built (#610).
+- Unknown keys, and any `schema_version` other than `1`, refuse the reload.
+
+**De-enrolling.**
+
+```bash
+sudo maknae enroll remove-agent <id> [--token-file <file>] [--verbose]
+```
+
+It takes the same operator token as enrollment (`--token-file` or a no-echo prompt, never an argument) and runs in this order:
+
+1. It removes `/etc/maknae/agents/<id>/enrollment.yaml`, so the next reload of `maknaed` drops the agent whatever Vault does. A file or directory that is already gone counts as removed, so a run after a failed one completes from the state file.
+2. It reads the agent's Vault role. When the role read errors for any reason other than not-found, it refuses. When the role is not found, it reads the entity `maknae-agent-<id>` (which does not depend on the mount): if the entity exists too, it refuses, saying the role was not found on the mount while the entity still exists (the recorded mount may be wrong), and changes nothing in Vault or locally beyond step 1. If both are not found, Vault holds neither, so it skips the disable and the destroys, removes the sealed SecretID and the state file, and says the Vault role and entity were already absent. When the role exists, it reads the entity; if the entity is absent or has no alias on the agent mount named by the role's RoleID, it stops before changing anything in Vault and names what remains: the sealed SecretID and state file that exist, and the recorded accessors. Restore the entity and run it again, or clean Vault by hand.
+3. It disables the entity.
+4. It destroys every SecretID accessor of `agent-<id>` that the state file records or Vault lists. An accessor whose destroy fails stays recorded, the command exits non-zero, and running it again retries.
+5. When no accessor remains, it removes the sealed SecretID (the `.cred` file on Linux, the keychain item on macOS) and the state file.
+
+It ends by telling you to reload `maknaed`. The agent's `policy.yaml` and its directory are left in place, and the entity stays disabled. Disabling does not revoke tokens already issued, and `remove-agent` cannot revoke them because no token accessor is recorded: a login token the agent already holds stays valid until `agent_token_max_ttl`.
 
 ### 6.5 The `deployment` section
 

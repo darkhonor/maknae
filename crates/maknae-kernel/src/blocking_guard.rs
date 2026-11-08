@@ -52,6 +52,51 @@ pub async fn within_blocking<T: Send + 'static>(
     }
 }
 
+/// Why [`admit_blocking`] produced no value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Offload {
+    Open,
+    AtCapacity,
+    Join,
+    TimedOut,
+}
+
+/// `work` on the blocking pool, admitted by `breaker` and bounded by `bound`: a
+/// timeout is counted against the breaker; an answer or a join failure is not.
+pub async fn admit_blocking<T: Send + 'static>(
+    breaker: &tokio::sync::Mutex<BlockingBreaker>,
+    bound: Duration,
+    label: &str,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, Offload> {
+    let admission = { breaker.lock().await.begin_attempt_at(Instant::now()) };
+    match admission {
+        BreakerAdmission::RefuseOpen => return Err(Offload::Open),
+        BreakerAdmission::RefuseAtCapacity => return Err(Offload::AtCapacity),
+        BreakerAdmission::Admit => {}
+    }
+    match tokio::time::timeout(bound, tokio::task::spawn_blocking(work)).await {
+        Ok(Ok(v)) => {
+            breaker.lock().await.record_success();
+            Ok(v)
+        }
+        Ok(Err(_join)) => {
+            breaker.lock().await.record_success();
+            Err(Offload::Join)
+        }
+        Err(_elapsed) => {
+            if breaker.lock().await.record_timeout_at(Instant::now()) == BreakerTransition::Tripped
+            {
+                eprintln!(
+                    "maknaed: {label} circuit breaker tripped after repeated {}s blocking timeouts — failing closed without spawning more policy work",
+                    bound.as_secs()
+                );
+            }
+            Err(Offload::TimedOut)
+        }
+    }
+}
+
 /// Fixed recovery delay before one half-open probe may be admitted. This is not
 /// configurable: policy, read, and NSS blocking guards must not be operator-
 /// weakenable at runtime.
@@ -241,6 +286,87 @@ mod tests {
             got.as_ref()
                 .is_err_and(|e| e.starts_with("blocking task failed: ")),
             "{got:?}"
+        );
+    }
+
+    fn breaker(trip_after: u8) -> tokio::sync::Mutex<BlockingBreaker> {
+        tokio::sync::Mutex::new(BlockingBreaker::new(trip_after))
+    }
+
+    #[tokio::test]
+    async fn admit_blocking_returns_the_work_and_releases_its_slot() {
+        let b = breaker(BLOCKING_BREAKER_TRIP_AFTER);
+        for _ in 1..BLOCKING_BREAKER_MAX_IN_FLIGHT {
+            b.lock().await.begin_attempt_at(Instant::now());
+        }
+        for n in 0..3u8 {
+            assert_eq!(
+                admit_blocking(&b, Duration::from_secs(5), "test", move || n).await,
+                Ok(n)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn admit_blocking_refuses_an_open_breaker_without_running_the_work() {
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let r = ran.clone();
+        let got = admit_blocking(&breaker(0), Duration::from_secs(5), "test", move || {
+            r.store(true, std::sync::atomic::Ordering::SeqCst)
+        })
+        .await;
+        assert_eq!(got, Err(Offload::Open));
+        assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn admit_blocking_refuses_at_capacity_without_running_the_work() {
+        let b = breaker(BLOCKING_BREAKER_TRIP_AFTER);
+        for _ in 0..BLOCKING_BREAKER_MAX_IN_FLIGHT {
+            b.lock().await.begin_attempt_at(Instant::now());
+        }
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let r = ran.clone();
+        let got = admit_blocking(&b, Duration::from_secs(5), "test", move || {
+            r.store(true, std::sync::atomic::Ordering::SeqCst)
+        })
+        .await;
+        assert_eq!(got, Err(Offload::AtCapacity));
+        assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn admit_blocking_reports_a_join_failure_without_counting_it() {
+        let b = breaker(1);
+        for _ in 1..BLOCKING_BREAKER_MAX_IN_FLIGHT {
+            b.lock().await.begin_attempt_at(Instant::now());
+        }
+        let got = admit_blocking(&b, Duration::from_secs(5), "test", || -> u8 {
+            panic!("admit_blocking join probe")
+        })
+        .await;
+        assert_eq!(got, Err(Offload::Join));
+        assert!(!b.lock().await.is_open_at(Instant::now()));
+        assert_eq!(
+            admit_blocking(&b, Duration::from_secs(5), "test", || 9u8).await,
+            Ok(9)
+        );
+    }
+
+    #[tokio::test]
+    async fn admit_blocking_counts_a_timeout_and_trips() {
+        let b = breaker(2);
+        for tripped in [false, true] {
+            let got = admit_blocking(&b, Duration::from_millis(20), "test", || {
+                std::thread::sleep(Duration::from_millis(300))
+            })
+            .await;
+            assert_eq!(got, Err(Offload::TimedOut));
+            assert_eq!(b.lock().await.is_open_at(Instant::now()), tripped);
+        }
+        assert_eq!(
+            admit_blocking(&b, Duration::from_secs(5), "test", || 1u8).await,
+            Err(Offload::Open)
         );
     }
 

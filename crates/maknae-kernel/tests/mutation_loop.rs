@@ -179,7 +179,7 @@ async fn a_foreign_writer_during_the_report_read_ends_the_session_as_a_sender_mi
     );
     assert_eq!(
         (
-            maknae_kernel::ending_reason(&ending),
+            &*maknae_kernel::ending_reason(&ending),
             maknae_kernel::ending_result(&ending)
         ),
         ("sender-mismatch", "deny")
@@ -1403,8 +1403,10 @@ async fn failed_grant_or_ack_write_stops_before_accepting_more_client_reports() 
             Duration::from_secs(2),
             fds,
             common::no_baseline(),
+            maknae_kernel::AgentAdmission::none(),
         ));
         let request = maknae_proto::encode_request(&maknae_proto::Request {
+            task: None,
             protocol_version: maknae_proto::PROTOCOL_VERSION,
             verb: create_verb(&fx),
         })

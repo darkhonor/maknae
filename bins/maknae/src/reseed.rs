@@ -82,7 +82,7 @@ pub(crate) fn write_reseed_marker(
 }
 
 pub(crate) fn kernel_uid() -> Result<u32, String> {
-    nix::unistd::User::from_name(KERNEL_USER)
+    maknae_io::user_by_name(KERNEL_USER)
         .map_err(|e| format!("user {KERNEL_USER}: {e}"))?
         .map(|u| u.uid.as_raw())
         .ok_or_else(|| format!("no such user: {KERNEL_USER}; is maknae installed?"))
@@ -276,5 +276,16 @@ mod tests {
         let err = write_reseed_marker(&scratch.0, euid() + 1, euid(), 1).unwrap_err();
         assert!(err.starts_with("cannot use the state directory "), "{err}");
         assert!(!scratch.0.join(MARKER_FILE).exists());
+    }
+
+    #[test]
+    fn kernel_uid_is_the_maknae_daemon_account_or_a_refusal() {
+        match nix::unistd::User::from_name(KERNEL_USER).unwrap() {
+            Some(u) => assert_eq!(kernel_uid(), Ok(u.uid.as_raw())),
+            None => assert_eq!(
+                kernel_uid(),
+                Err(format!("no such user: {KERNEL_USER}; is maknae installed?"))
+            ),
+        }
     }
 }

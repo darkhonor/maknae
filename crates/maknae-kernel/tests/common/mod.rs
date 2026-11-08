@@ -666,12 +666,14 @@ impl Fixture {
             fds,
             no_baseline(),
             attempt_caps,
+            maknae_kernel::AgentAdmission::none(),
         );
         let task = tokio::spawn(async move {
             let _turn = fs_turn(&turn).await;
             served.await
         });
         let body = maknae_proto::encode_request(&maknae_proto::Request {
+            task: None,
             protocol_version: maknae_proto::PROTOCOL_VERSION,
             verb,
         })

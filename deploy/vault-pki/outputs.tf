@@ -104,3 +104,13 @@ output "agent_enroll_policy_name" {
   description = "Policy an operator attaches to their own token to run maknae enroll agent."
   value       = vault_policy.enroll_agent.name
 }
+
+output "agent_pki_role_names" {
+  description = "PKI role name per agent id, on the intermediate mount."
+  value       = { for id, r in vault_pki_secret_backend_role.agent : id => r.name }
+}
+
+output "agent_entity_names" {
+  description = "Identity entity name per agent id."
+  value       = { for id, e in vault_identity_entity.agent : id => e.name }
+}

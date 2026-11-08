@@ -34,10 +34,45 @@ resource "vault_policy" "agent" {
     path "${format(local.agent_kv, "undelete", each.key)}/*" { capabilities = ["deny"] }
     path "${format(local.agent_kv, "subkeys", each.key)}" { capabilities = ["deny"] }
     path "${format(local.agent_kv, "subkeys", each.key)}/*" { capabilities = ["deny"] }
+    path "${vault_mount.maknae_int.path}/sign/maknae-agent-${each.key}" {
+      capabilities      = ["update"]
+      denied_parameters = { "not_after" = [] }
+    }
+    path "${vault_mount.maknae_int.path}/issuer/default/json" { capabilities = ["read"] }
     path "auth/token/renew-self"  { capabilities = ["update"] }
     path "auth/token/lookup-self" { capabilities = ["read"] }
     path "auth/token/revoke-self" { capabilities = ["update"] }
   EOT
+}
+
+resource "vault_pki_secret_backend_role" "agent" {
+  for_each       = var.maknae_agents
+  backend        = vault_mount.maknae_int.path
+  name           = "maknae-agent-${each.key}"
+  key_type       = local.plane_key.key_type
+  key_bits       = local.plane_key.key_bits
+  parameter_set  = local.plane_key.parameter_set
+  signature_bits = local.plane_key.signature_bits
+
+  allowed_uri_sans    = ["spiffe://${var.deployment_id}/plane/agent/${each.key}"]
+  use_csr_sans        = true
+  use_csr_common_name = false
+
+  allow_ip_sans               = false
+  allow_localhost             = false
+  allow_wildcard_certificates = false
+  allowed_domains             = []
+  allowed_other_sans          = []
+  require_cn                  = false
+  allow_any_name              = false
+
+  key_usage   = ["DigitalSignature"]
+  client_flag = true
+  server_flag = false
+  no_store    = true
+
+  ttl     = var.agent_leaf_ttl_seconds
+  max_ttl = var.agent_leaf_ttl_seconds
 }
 
 resource "vault_approle_auth_backend_role" "agent" {
@@ -53,6 +88,22 @@ resource "vault_approle_auth_backend_role" "agent" {
   token_no_default_policy = true
   bind_secret_id          = true
   token_type              = "service"
+}
+
+resource "vault_identity_entity" "agent" {
+  for_each = var.maknae_agents
+  name     = "maknae-agent-${each.key}"
+
+  lifecycle {
+    ignore_changes = [disabled]
+  }
+}
+
+resource "vault_identity_entity_alias" "agent" {
+  for_each       = var.maknae_agents
+  name           = vault_approle_auth_backend_role.agent[each.key].role_id
+  mount_accessor = vault_auth_backend.agent_approle.accessor
+  canonical_id   = vault_identity_entity.agent[each.key].id
 }
 
 resource "vault_policy" "agent_credential_admin" {
@@ -76,5 +127,9 @@ resource "vault_policy" "enroll_agent" {
     path "auth/${vault_auth_backend.agent_approle.path}/role/+/role-id"                    { capabilities = ["read"] }
     path "auth/${vault_auth_backend.agent_approle.path}/role/+/secret-id"                  { capabilities = ["create", "update", "list"] }
     path "auth/${vault_auth_backend.agent_approle.path}/role/+/secret-id-accessor/destroy" { capabilities = ["update"] }
+    path "identity/entity/name/maknae-agent-*" {
+      capabilities       = ["read", "update"]
+      allowed_parameters = { "disabled" = [] }
+    }
   EOT
 }

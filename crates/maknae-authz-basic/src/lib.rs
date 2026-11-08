@@ -32,7 +32,7 @@ mod vocabulary;
 pub use vocabulary::{class_name, compiled_set, ACTION_TERMS, CLASSES, KERNEL_TERMS};
 
 use binding::UidMap;
-pub use binding::{shown, IdentityProblem, ListedSubject, SubjectState};
+pub use binding::{shown, AgentRefusal, IdentityProblem, ListedSubject, SubjectState};
 use snapshot::Snapshot;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock};
@@ -69,7 +69,7 @@ pub enum AuthzBasicError {
     /// (#162). Carries the offending term.
     UnknownActionTerm(String),
     /// A `roles:` list names a grantable term that THIS role may not hold
-    /// (#172: `user` may hold `session.prompt` only; the admin disclosure
+    /// (#172, #609: `user` may hold `session.prompt` and `session.task` only; the admin disclosure
     /// terms are admin-only, ADR-0010 decision 4 as superseded 2026-09-08).
     TermNotGrantableForRole { role: String, term: String },
     /// A `subjects:` list names no family or term in the action vocabulary.
@@ -80,6 +80,16 @@ pub enum AuthzBasicError {
     SubjectLookup(String),
     /// Two `subjects:` names resolve to one account.
     DuplicateSubjectUid { uid: u32, names: (String, String) },
+    /// A host lookup an enrollment or a `taskers:` entry needs failed.
+    AgentLookup(String),
+    /// An agent's service account is bound to `admin` in `bindings.yaml`.
+    AgentAccountAdmin { agent: String, account: String },
+    /// An enrolled agent's uid is also an `authz.yaml` `subjects:` entry.
+    AgentPolicyTwice {
+        agent: String,
+        account: String,
+        name: String,
+    },
     /// The snapshot compiler refused the policy against the persisted identity
     /// layer or the vocabulary.
     Compile(snapshot::CompileError),
@@ -105,7 +115,7 @@ impl std::fmt::Display for AuthzBasicError {
             ),
             AuthzBasicError::TermNotGrantableForRole { role, term } => write!(
                 f,
-                "authz roles: `{term}` is not grantable to role `{role}` (admin: {}; user: session.prompt)",
+                "authz roles: `{term}` is not grantable to role `{role}` (admin: {}; user: session.prompt, session.task)",
                 decide::GRANTABLE_ACTIONS.join(", ")
             ),
             AuthzBasicError::UnknownAction(a) => {
@@ -118,6 +128,19 @@ impl std::fmt::Display for AuthzBasicError {
             AuthzBasicError::DuplicateSubjectUid { uid, names: (a, b) } => write!(
                 f,
                 "authz subjects: `{a}` and `{b}` resolve to the same uid {uid}"
+            ),
+            AuthzBasicError::AgentLookup(m) => write!(f, "authz agents: {m}"),
+            AuthzBasicError::AgentAccountAdmin { agent, account } => write!(
+                f,
+                "authz agents: the service account {account} of agent `{agent}` is bound to admin in bindings.yaml; an agent never holds admin"
+            ),
+            AuthzBasicError::AgentPolicyTwice {
+                agent,
+                account,
+                name,
+            } => write!(
+                f,
+                "authz subjects: `{name}` is the account of agent `{agent}` ({account}); an agent's policy lives only in agents/{agent}/policy.yaml"
             ),
             AuthzBasicError::Compile(e) => write!(f, "authz {e}"),
         }
@@ -365,12 +388,13 @@ impl maknae_security::Authorizer for Candidate<'_> {
     }
 }
 
-/// Where the two policy files live: `authz.yaml` (grants, denies, roles) and
-/// `bindings.yaml` (identity).
+/// Where the policy files live: `authz.yaml` (grants, denies, roles), `bindings.yaml`
+/// (identity) and the `agents/` directory under `config_dir`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyPaths {
     pub authz: PathBuf,
     pub bindings: PathBuf,
+    pub config_dir: PathBuf,
 }
 
 impl PolicyPaths {
@@ -378,7 +402,15 @@ impl PolicyPaths {
         Self {
             authz: dir.join("authz.yaml"),
             bindings: dir.join(maknae_config::BINDINGS_FILE),
+            config_dir: dir.to_path_buf(),
         }
+    }
+
+    fn agent_policy(&self, id: &str) -> PathBuf {
+        self.config_dir
+            .join(maknae_config::AGENTS_DIR)
+            .join(id)
+            .join(maknae_config::POLICY_FILE)
     }
 }
 
@@ -388,15 +420,76 @@ fn utf8(p: &Path) -> Result<String, AuthzBasicError> {
         .ok_or_else(|| AuthzBasicError::Load(format!("policy path {} is not UTF-8", p.display())))
 }
 
-/// A loaded, validated `authz.yaml` and `bindings.yaml` with the bound usernames
-/// resolved to uids: the policy input the snapshot compiler takes.
+pub type AccountLookup = fn(u32) -> Result<Option<maknae_io::HostAccount>, String>;
+pub type DaemonLookup = fn() -> Result<maknae_io::DaemonFacts, String>;
+pub type GroupLookup = fn(&str) -> Result<Option<u32>, String>;
+
+#[derive(Clone, Copy, Debug)]
+pub struct HostLookups {
+    pub account: AccountLookup,
+    pub daemons: DaemonLookup,
+    pub group: GroupLookup,
+}
+
+impl HostLookups {
+    pub const HOST: HostLookups = HostLookups {
+        account: host_account,
+        daemons: daemon_facts,
+        group: group_gid,
+    };
+}
+
+fn host_account(uid: u32) -> Result<Option<maknae_io::HostAccount>, String> {
+    maknae_io::host_account(uid).map_err(|e| e.to_string())
+}
+
+fn daemon_facts() -> Result<maknae_io::DaemonFacts, String> {
+    maknae_io::daemon_facts().map_err(|e| e.to_string())
+}
+
+fn group_gid(name: &str) -> Result<Option<u32>, String> {
+    maknae_io::group_gid(name).map_err(|e| e.to_string())
+}
+
+/// What a file load made of `agents/`: computed once with host lookups, and reused by a
+/// live identity edit, which can only drop an agent its bindings now name.
+#[derive(Debug, Clone, Default)]
+struct AgentOutcome {
+    load: maknae_config::AgentsLoad,
+    enrolled:
+        std::collections::BTreeMap<maknae_config::AgentId, (u32, String, maknae_config::AgentRole)>,
+    problems: Vec<IdentityProblem>,
+    taskers: decide::AgentTaskers,
+}
+
+struct Parts {
+    policy: maknae_config::AuthzPolicy,
+    bindings: maknae_config::Bindings,
+    lookups: Lookups,
+    lookup: NssLookup,
+    hosts: HostLookups,
+    agents: Agents,
+    principal: maknae_config::Principal,
+    paths: PolicyPaths,
+}
+
+enum Agents {
+    Load(maknae_config::AgentsLoad),
+    Kept(AgentOutcome),
+}
+
+/// A loaded, validated `authz.yaml`, `bindings.yaml` and `agents/` with the bound
+/// usernames resolved to uids: the policy input the snapshot compiler takes.
 #[derive(Debug, Clone)]
 pub struct PolicySource {
     policy: maknae_config::AuthzPolicy,
     bindings: maknae_config::Bindings,
     lookups: Lookups,
     lookup: NssLookup,
+    hosts: HostLookups,
     resolved: binding::Resolved,
+    agents: AgentOutcome,
+    problems: Vec<IdentityProblem>,
     subjects: decide::SubjectGrants,
     principal: maknae_config::Principal,
     paths: PolicyPaths,
@@ -410,7 +503,7 @@ type NssLookup = fn(&str) -> Result<Option<u32>, i32>;
 
 impl PolicySource {
     /// The production loaders (root-owned, `mode & 0o027 == 0`, symlink-refused) for
-    /// both files, then one getpwnam per bound username and eager validation.
+    /// every file, then one getpwnam per bound username and eager validation.
     pub fn load(
         paths: PolicyPaths,
         principal: maknae_config::Principal,
@@ -419,8 +512,17 @@ impl PolicySource {
             .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
         let bindings = maknae_config::load_bindings(&paths.bindings)
             .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
-        let lookups = resolve_uid_map_with(&policy, &bindings, classify(lookup_uid))?;
-        Self::from_lookups(policy, bindings, lookups, lookup_uid, principal, paths)
+        let agents = maknae_config::load_agents(&paths.config_dir)
+            .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
+        Self::resolved_from(
+            policy,
+            bindings,
+            agents,
+            lookup_uid,
+            HostLookups::HOST,
+            principal,
+            paths,
+        )
     }
 
     #[cfg(all(unix, feature = "hermetic-test-seam"))]
@@ -429,46 +531,151 @@ impl PolicySource {
         principal: maknae_config::Principal,
         req: maknae_config::TargetRequired,
     ) -> Result<Self, AuthzBasicError> {
+        Self::load_with_hosts(paths, principal, req, HostLookups::HOST)
+    }
+
+    #[cfg(all(unix, feature = "hermetic-test-seam"))]
+    pub fn load_with_hosts(
+        paths: PolicyPaths,
+        principal: maknae_config::Principal,
+        req: maknae_config::TargetRequired,
+        hosts: HostLookups,
+    ) -> Result<Self, AuthzBasicError> {
         let policy = maknae_config::load_authz_with_requirement(&paths.authz, req.clone())
             .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
-        let bindings = maknae_config::load_bindings_with_requirement(&paths.bindings, req)
+        let bindings = maknae_config::load_bindings_with_requirement(&paths.bindings, req.clone())
             .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
-        let lookups = resolve_uid_map_with(&policy, &bindings, classify(lookup_uid))?;
-        Self::from_lookups(policy, bindings, lookups, lookup_uid, principal, paths)
+        let dir = maknae_io::AnchorRequired {
+            owner: req.owner,
+            mode_mask: req.mode_mask,
+        };
+        let agents = maknae_config::load_agents_with_requirement(&paths.config_dir, dir, req)
+            .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
+        Self::resolved_from(
+            policy, bindings, agents, lookup_uid, hosts, principal, paths,
+        )
+    }
+
+    fn resolved_from(
+        policy: maknae_config::AuthzPolicy,
+        bindings: maknae_config::Bindings,
+        agents: maknae_config::AgentsLoad,
+        lookup: NssLookup,
+        hosts: HostLookups,
+        principal: maknae_config::Principal,
+        paths: PolicyPaths,
+    ) -> Result<Self, AuthzBasicError> {
+        let lookups =
+            resolve_uid_map_with(&policy, &bindings, &tasker_names(&agents), classify(lookup))?;
+        Self::from_lookups(Parts {
+            policy,
+            bindings,
+            lookups,
+            lookup,
+            hosts,
+            agents: Agents::Load(agents),
+            principal,
+            paths,
+        })
     }
 
     pub fn from_parts(
         policy: maknae_config::AuthzPolicy,
         bindings: maknae_config::Bindings,
         uid_map: std::collections::BTreeMap<String, u32>,
+        agents: maknae_config::AgentsLoad,
+        principal: maknae_config::Principal,
+        paths: PolicyPaths,
+    ) -> Result<Self, AuthzBasicError> {
+        Self::parts_with(
+            policy,
+            bindings,
+            uid_map,
+            agents,
+            HostLookups::HOST,
+            principal,
+            paths,
+        )
+    }
+
+    #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
+    pub fn from_parts_with_hosts(
+        policy: maknae_config::AuthzPolicy,
+        bindings: maknae_config::Bindings,
+        uid_map: std::collections::BTreeMap<String, u32>,
+        agents: maknae_config::AgentsLoad,
+        hosts: HostLookups,
+        principal: maknae_config::Principal,
+        paths: PolicyPaths,
+    ) -> Result<Self, AuthzBasicError> {
+        Self::parts_with(policy, bindings, uid_map, agents, hosts, principal, paths)
+    }
+
+    fn parts_with(
+        policy: maknae_config::AuthzPolicy,
+        bindings: maknae_config::Bindings,
+        uid_map: std::collections::BTreeMap<String, u32>,
+        agents: maknae_config::AgentsLoad,
+        hosts: HostLookups,
         principal: maknae_config::Principal,
         paths: PolicyPaths,
     ) -> Result<Self, AuthzBasicError> {
         let lookups = uid_map.into_iter().map(|(n, u)| (n, Some(u))).collect();
-        Self::from_lookups(policy, bindings, lookups, lookup_uid, principal, paths)
+        Self::from_lookups(Parts {
+            policy,
+            bindings,
+            lookups,
+            lookup: lookup_uid,
+            hosts,
+            agents: Agents::Load(agents),
+            principal,
+            paths,
+        })
     }
 
-    fn from_lookups(
-        policy: maknae_config::AuthzPolicy,
-        bindings: maknae_config::Bindings,
-        lookups: Lookups,
-        lookup: NssLookup,
-        principal: maknae_config::Principal,
-        paths: PolicyPaths,
-    ) -> Result<Self, AuthzBasicError> {
+    fn from_lookups(parts: Parts) -> Result<Self, AuthzBasicError> {
+        let Parts {
+            policy,
+            bindings,
+            lookups,
+            lookup,
+            hosts,
+            agents,
+            principal,
+            paths,
+        } = parts;
         let policy_source = utf8(&paths.authz)?;
         let identity_source = utf8(&paths.bindings)?;
-        let resolved = binding::resolve_subjects(&bindings, &found(&lookups))
+        let uid_of = found(&lookups);
+        let resolved = binding::resolve_subjects(&bindings, &uid_of)
             .map_err(|e| AuthzBasicError::Bindings(e.to_string()))?;
         validate_grants(&policy.action_grants)?;
         validate_destinations(&policy.destinations)?;
-        let subjects = validate_subjects(&policy, &lookups)?;
+        let mut subjects = validate_subjects(&policy, &lookups)?;
+        let agents = match agents {
+            Agents::Load(load) => enroll(load, hosts, &principal, &bindings, &uid_of)?,
+            Agents::Kept(kept) => rebound(kept, &bindings, &uid_of)?,
+        };
+        let agents = AgentOutcome {
+            taskers: resolve_taskers(&agents.load, &lookups, &agents.enrolled),
+            ..agents
+        };
+        agent_subjects(&agents, &mut subjects)?;
+        let problems = resolved
+            .problems
+            .iter()
+            .chain(&agents.problems)
+            .cloned()
+            .collect();
         Ok(Self {
             policy,
             bindings,
             lookups,
             lookup,
+            hosts,
             resolved,
+            agents,
+            problems,
             subjects,
             principal,
             paths,
@@ -477,13 +684,27 @@ impl PolicySource {
         })
     }
 
-    /// Blocking: one getpwnam per bound username.
+    /// Blocking: one getpwnam per bound username, and the host account of each enrollment.
     pub fn with_bindings(
         &self,
         bindings: maknae_config::Bindings,
     ) -> Result<Self, AuthzBasicError> {
-        let lookups = resolve_uid_map_with(&self.policy, &bindings, classify(self.lookup))?;
-        self.with_bindings_resolved(bindings, lookups)
+        let lookups = resolve_uid_map_with(
+            &self.policy,
+            &bindings,
+            &tasker_names(&self.agents.load),
+            classify(self.lookup),
+        )?;
+        Self::from_lookups(Parts {
+            policy: self.policy.clone(),
+            bindings,
+            lookups,
+            lookup: self.lookup,
+            hosts: self.hosts,
+            agents: Agents::Load(self.agents.load.clone()),
+            principal: self.principal.clone(),
+            paths: self.paths.clone(),
+        })
     }
 
     /// Blocking only for a name this load never looked up; the rest reuse its answers.
@@ -499,9 +720,12 @@ impl PolicySource {
         bindings: maknae_config::Bindings,
         lookup: impl Fn(&str) -> Lookup,
     ) -> Result<Self, AuthzBasicError> {
-        let lookups = resolve_uid_map_with(&self.policy, &bindings, |n| {
-            self.lookups.get(n).map_or_else(|| lookup(n), |&r| r.into())
-        })?;
+        let lookups = resolve_uid_map_with(
+            &self.policy,
+            &bindings,
+            &tasker_names(&self.agents.load),
+            |n| self.lookups.get(n).map_or_else(|| lookup(n), |&r| r.into()),
+        )?;
         self.with_bindings_resolved(bindings, lookups)
     }
 
@@ -510,20 +734,32 @@ impl PolicySource {
         bindings: maknae_config::Bindings,
         lookups: Lookups,
     ) -> Result<Self, AuthzBasicError> {
-        Self::from_lookups(
-            self.policy.clone(),
+        Self::from_lookups(Parts {
+            policy: self.policy.clone(),
             bindings,
             lookups,
-            self.lookup,
-            self.principal.clone(),
-            self.paths.clone(),
-        )
+            lookup: self.lookup,
+            hosts: self.hosts,
+            agents: Agents::Kept(self.agents.clone()),
+            principal: self.principal.clone(),
+            paths: self.paths.clone(),
+        })
     }
 
     /// Every later resolution of this source asks `lookup` instead of the host.
     #[cfg(all(unix, feature = "hermetic-test-seam"))]
     pub fn set_lookup(&mut self, lookup: fn(&str) -> Result<Option<u32>, i32>) {
         self.lookup = lookup;
+    }
+
+    #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
+    pub fn set_account_lookup(&mut self, lookup: AccountLookup) {
+        self.hosts.account = lookup;
+    }
+
+    #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
+    pub fn set_group_lookup(&mut self, lookup: GroupLookup) {
+        self.hosts.group = lookup;
     }
 
     pub fn policy(&self) -> &maknae_config::AuthzPolicy {
@@ -542,12 +778,45 @@ impl PolicySource {
         &self.paths
     }
 
+    pub fn agent_uid(&self, id: &str) -> Option<u32> {
+        self.agents
+            .enrolled
+            .iter()
+            .find(|(a, _)| a.as_str() == id)
+            .map(|(_, (uid, _, _))| *uid)
+    }
+
     pub(crate) fn policy_source(&self) -> &str {
         &self.policy_source
     }
 
     pub(crate) fn subject_grants(&self) -> &decide::SubjectGrants {
         &self.subjects
+    }
+
+    pub(crate) fn agent_uids(&self) -> decide::AgentUids {
+        decide::AgentUids(
+            self.agents
+                .enrolled
+                .iter()
+                .map(|(id, (uid, _, _))| (*uid, id.as_str().to_string()))
+                .collect(),
+        )
+    }
+
+    pub(crate) fn agent_taskers(&self) -> &decide::AgentTaskers {
+        &self.agents.taskers
+    }
+
+    pub(crate) fn agent_policies(
+        &self,
+    ) -> impl Iterator<Item = (&str, PathBuf, &maknae_config::AgentPolicy)> {
+        self.agents
+            .load
+            .policies
+            .iter()
+            .filter(|p| self.agents.enrolled.contains_key(&p.id))
+            .map(|p| (p.id.as_str(), self.paths.agent_policy(p.id.as_str()), p))
     }
 
     #[cfg(test)]
@@ -560,9 +829,10 @@ impl PolicySource {
         self.lookups.clone()
     }
 
-    /// The subjects this load could not bind as written; each is decided alone.
+    /// The subjects and enrollments this load could not take as written; each is decided
+    /// alone.
     pub fn identity_problems(&self) -> &[IdentityProblem] {
-        &self.resolved.problems
+        &self.problems
     }
 
     /// Whether this load asked for `name`, found or absent.
@@ -582,36 +852,53 @@ impl PolicySource {
             .collect()
     }
 
-    /// The identity layer `bindings.yaml` declares; `source` is its path and
-    /// `bindings_sha256` is `None` iff the file has no `bindings:` key. Subjects are in
-    /// uid order, the order `identity::extract` produces, so an unchanged file compares
+    /// `bindings_sha256` is `None` iff `bindings.yaml` has no `bindings:` key. Subjects are
+    /// in uid order, as `identity::extract` produces them, so an unchanged load compares
     /// equal to its persisted layer.
     pub fn identity_layer(
         &self,
         label: &str,
         bindings_sha256: Option<[u8; 32]>,
     ) -> maknae_graph::identity::IdentityLayer {
+        let mut subjects: Vec<maknae_graph::identity::SubjectEntry> = self
+            .resolved
+            .subjects
+            .iter()
+            .map(|(uid, role, name)| maknae_graph::identity::SubjectEntry {
+                uid: *uid,
+                name: name.clone(),
+                role: role.key().into(),
+            })
+            .collect();
+        for (uid, account, role) in self.agents.enrolled.values() {
+            if !subjects.iter().any(|s| s.uid == *uid) {
+                subjects.push(maknae_graph::identity::SubjectEntry {
+                    uid: *uid,
+                    name: account.clone(),
+                    role: role.key().into(),
+                });
+            }
+        }
+        subjects.sort_by_key(|s| s.uid);
         maknae_graph::identity::IdentityLayer {
             source: self.identity_source.clone(),
             label: label.into(),
             bindings_sha256,
-            subjects: self
-                .resolved
-                .subjects
-                .iter()
-                .map(|(uid, role, name)| maknae_graph::identity::SubjectEntry {
-                    uid: *uid,
-                    name: name.clone(),
-                    role: role.key().into(),
-                })
-                .collect(),
+            subjects,
             aliases: std::collections::BTreeMap::new(),
+            agents: self
+                .agents
+                .enrolled
+                .iter()
+                .map(|(id, (uid, _, _))| (id.as_str().to_string(), *uid))
+                .collect(),
         }
         .with_claims(self.resolved.adversary_names.clone())
     }
 
-    /// `authz.yaml`'s top-level sections, plus `"bindings"` from `bindings.yaml` when it
-    /// has the key, each canonical JSON through the caller's digest, by key.
+    /// `authz.yaml`'s top-level sections, `"bindings"` from `bindings.yaml` when it has
+    /// the key, and `"agents.<id>"` for each enrolled agent's `policy.yaml`, each
+    /// canonical JSON through the caller's digest, by key.
     pub fn section_digests(
         &self,
         digest: fn(&[u8]) -> [u8; 32],
@@ -624,8 +911,288 @@ impl PolicySource {
         if let Some(b) = self.bindings.section_canonical() {
             out.insert("bindings".into(), digest(b.as_bytes()));
         }
+        for (id, _, p) in self.agent_policies() {
+            out.insert(format!("agents.{id}"), digest(p.canonical.as_bytes()));
+        }
         out
     }
+}
+
+fn tasker_names(load: &maknae_config::AgentsLoad) -> Vec<String> {
+    load.policies
+        .iter()
+        .flat_map(|p| p.taskers.iter().flatten())
+        .filter_map(|t| match t {
+            maknae_config::TaskerRef::Account(name) => Some(name.clone()),
+            maknae_config::TaskerRef::Uid(_) | maknae_config::TaskerRef::Agent(_) => None,
+        })
+        .collect()
+}
+
+fn bound_role(
+    bindings: &maknae_config::Bindings,
+    uid_of: &UidMap,
+    account: &str,
+    uid: u32,
+) -> Option<role::Role> {
+    maknae_config::bindings_conflict(bindings, account, uid, |n| uid_of.get(n).copied())
+        .and_then(role::Role::from_key)
+}
+
+/// An account that passed every service-account check and is bound under `admin` is
+/// an agent's, so it refuses the load; under any other role the enrollment is ignored.
+fn bound_refusal(
+    id: &maknae_config::AgentId,
+    account: &str,
+    role: role::Role,
+) -> Result<AgentRefusal, AuthzBasicError> {
+    match role {
+        role::Role::Admin => Err(AuthzBasicError::AgentAccountAdmin {
+            agent: id.as_str().to_string(),
+            account: account.to_string(),
+        }),
+        role::Role::User | role::Role::Guest | role::Role::Adversary => {
+            Ok(AgentRefusal::Bound { role: role.key() })
+        }
+    }
+}
+
+/// Per enrollment, in order: the account at the recorded uid, the service-account
+/// predicate, then `bindings.yaml`.
+fn enroll(
+    load: maknae_config::AgentsLoad,
+    hosts: HostLookups,
+    principal: &maknae_config::Principal,
+    bindings: &maknae_config::Bindings,
+    uid_of: &UidMap,
+) -> Result<AgentOutcome, AuthzBasicError> {
+    let mut out = AgentOutcome {
+        problems: load
+            .skipped
+            .iter()
+            .map(|s| {
+                let (entry, why) = match s {
+                    maknae_config::SkippedAgentEntry::NotADirectory(e) => {
+                        (e, "it is not a directory")
+                    }
+                    maknae_config::SkippedAgentEntry::NoEnrollment(e) => {
+                        (e, "it holds no enrollment.yaml")
+                    }
+                    maknae_config::SkippedAgentEntry::InvalidName(e) => {
+                        (e, "its name is not an agent id")
+                    }
+                };
+                IdentityProblem::AgentSkipped {
+                    entry: entry.clone(),
+                    why,
+                }
+            })
+            .collect(),
+        ..AgentOutcome::default()
+    };
+    if load.enrollments.is_empty() {
+        out.load = load;
+        return Ok(out);
+    }
+    let failed = |what: &str, e: String| {
+        AuthzBasicError::AgentLookup(format!(
+            "looking up {what} failed ({e}); nothing was changed"
+        ))
+    };
+    let daemons = (hosts.daemons)().map_err(|e| failed("the Maknae daemon accounts", e))?;
+    let maknae_gid =
+        (hosts.group)(maknae_io::MAKNAE_GROUP).map_err(|e| failed("the maknae group", e))?;
+    let others: Vec<(String, u32)> = load
+        .enrollments
+        .iter()
+        .map(|e| (e.id.as_str().to_string(), e.uid))
+        .collect();
+    let host = maknae_config::HostAccounts {
+        maknae_gid,
+        principal_uid: principal.uid,
+        daemons: &daemons,
+        other_agents: &others,
+    };
+    for e in &load.enrollments {
+        let acct = (hosts.account)(e.uid).map_err(|err| failed(&format!("uid {}", e.uid), err))?;
+        let refused = |why| IdentityProblem::AgentRefused {
+            agent: e.id.as_str().to_string(),
+            uid: e.uid,
+            why,
+        };
+        if let Some(a) = acct.as_ref().filter(|a| a.name != e.account) {
+            out.problems.push(refused(AgentRefusal::AccountChanged {
+                now: a.name.clone(),
+            }));
+            continue;
+        }
+        if let Err(r) =
+            maknae_config::service_account_check(acct.as_ref(), &e.account, &e.id, &host)
+        {
+            out.problems.push(refused(AgentRefusal::Account(r)));
+            continue;
+        }
+        if let Some(other) = load
+            .enrollments
+            .iter()
+            .find(|o| o.id != e.id && o.account == e.account)
+        {
+            out.problems.push(refused(AgentRefusal::Account(
+                maknae_config::AccountRefusal::AccountInUse {
+                    account: e.account.clone(),
+                    agent: other.id.as_str().to_string(),
+                },
+            )));
+            continue;
+        }
+        if let Some(role) = bound_role(bindings, uid_of, &e.account, e.uid) {
+            out.problems
+                .push(refused(bound_refusal(&e.id, &e.account, role)?));
+            continue;
+        }
+        out.enrolled
+            .insert(e.id.clone(), (e.uid, e.account.clone(), e.role));
+    }
+    out.load = load;
+    Ok(out)
+}
+
+/// A live edit looks nothing up and can only drop an agent the new bindings name. An
+/// enrollment ignored as `Bound` passed every account check, so `admin` refuses it too.
+fn rebound(
+    mut kept: AgentOutcome,
+    bindings: &maknae_config::Bindings,
+    uid_of: &UidMap,
+) -> Result<AgentOutcome, AuthzBasicError> {
+    for p in &kept.problems {
+        let IdentityProblem::AgentRefused {
+            agent,
+            uid,
+            why: AgentRefusal::Bound { .. },
+        } = p
+        else {
+            continue;
+        };
+        let Some(e) = kept
+            .load
+            .enrollments
+            .iter()
+            .find(|e| e.id.as_str() == agent)
+        else {
+            continue;
+        };
+        if let Some(role) = bound_role(bindings, uid_of, &e.account, *uid) {
+            bound_refusal(&e.id, &e.account, role)?;
+        }
+    }
+    let enrolled = std::mem::take(&mut kept.enrolled);
+    for (id, (uid, account, role)) in enrolled {
+        match bound_role(bindings, uid_of, &account, uid) {
+            Some(bound) => kept.problems.push(IdentityProblem::AgentRefused {
+                agent: id.as_str().to_string(),
+                uid,
+                why: bound_refusal(&id, &account, bound)?,
+            }),
+            None => {
+                kept.enrolled.insert(id, (uid, account, role));
+            }
+        }
+    }
+    Ok(kept)
+}
+
+/// An absent account or an agent this load did not enroll is inert.
+fn resolve_taskers(
+    load: &maknae_config::AgentsLoad,
+    lookups: &Lookups,
+    enrolled: &std::collections::BTreeMap<
+        maknae_config::AgentId,
+        (u32, String, maknae_config::AgentRole),
+    >,
+) -> decide::AgentTaskers {
+    let policy = |id: &maknae_config::AgentId| load.policies.iter().find(|p| p.id == *id);
+    decide::AgentTaskers(
+        enrolled
+            .keys()
+            .map(|id| {
+                let listed = policy(id).and_then(|p| p.taskers.as_ref()).map(|taskers| {
+                    taskers
+                        .iter()
+                        .filter_map(|t| match t {
+                            maknae_config::TaskerRef::Uid(uid) => Some(*uid),
+                            maknae_config::TaskerRef::Account(name) => {
+                                lookups.get(name).copied().flatten()
+                            }
+                            maknae_config::TaskerRef::Agent(a) => {
+                                enrolled.get(a).map(|(uid, _, _)| *uid)
+                            }
+                        })
+                        .collect()
+                });
+                (id.as_str().to_string(), listed)
+            })
+            .collect(),
+    )
+}
+
+/// An enrolled agent's uid that `authz.yaml` `subjects:` also resolves refuses the load.
+fn agent_subjects(
+    agents: &AgentOutcome,
+    subjects: &mut decide::SubjectGrants,
+) -> Result<(), AuthzBasicError> {
+    let mut entries = std::collections::BTreeMap::new();
+    for p in &agents.load.policies {
+        entries.insert(p.id.clone(), (action_set(&p.entry)?, &p.entry));
+    }
+    for (id, (uid, account, _)) in &agents.enrolled {
+        if let Some(named) = subjects.0.get(uid) {
+            return Err(AuthzBasicError::AgentPolicyTwice {
+                agent: id.as_str().to_string(),
+                account: account.clone(),
+                name: named.name.clone(),
+            });
+        }
+        let (actions, entry) = match entries.get(id) {
+            Some((actions, entry)) => (actions.clone(), Some(*entry)),
+            None => (None, None),
+        };
+        subjects.0.insert(
+            *uid,
+            decide::SubjectEntry {
+                name: account.clone(),
+                permissions: Some(
+                    entry
+                        .and_then(|e| e.permissions.clone())
+                        .unwrap_or_default(),
+                ),
+                actions,
+                models: entry.and_then(|e| e.models.clone()),
+                origin: decide::SubjectOrigin::Agent(id.as_str().to_string()),
+            },
+        );
+    }
+    Ok(())
+}
+
+fn action_set(
+    entry: &maknae_config::SubjectPolicy,
+) -> Result<Option<decide::SubjectActionSet>, AuthzBasicError> {
+    let Some(lists) = &entry.actions else {
+        return Ok(None);
+    };
+    let expand_all = |patterns: &[maknae_config::ActionPattern]| {
+        let mut terms = std::collections::BTreeMap::new();
+        for p in patterns {
+            for (t, source) in decide::expand(p)? {
+                terms.entry(t).or_insert(source);
+            }
+        }
+        Ok::<_, AuthzBasicError>(terms)
+    };
+    Ok(Some(decide::SubjectActionSet {
+        allow: expand_all(&lists.allow)?,
+        deny: expand_all(&lists.deny)?,
+    }))
 }
 
 /// `destinations:` keys must be roles that can hold a prompt grant (#172):
@@ -651,7 +1218,7 @@ fn validate_destinations(
 /// Three checks, because `Role::from_key` answers only the first: the key is
 /// a role; the role may hold grants at all (`admin` and, since #172, `user`;
 /// `guest`/`adversary` are structural); and the term is one that role may
-/// hold (`user`: `session.prompt` only — the admin disclosure terms stay
+/// hold (`user`: `session.prompt` and `session.task` only — the admin disclosure terms stay
 /// admin-only, ADR-0010 decision 4 as superseded 2026-09-08). Gates **both**
 /// `allow` and `deny`, so a typo'd deny cannot be silently accepted as an
 /// unenforced denial. *(Corrected 2026-09-09: this said Phase 1 grants
@@ -687,7 +1254,8 @@ pub(crate) fn role_terms(
     p: &maknae_config::ActionPattern,
 ) -> Result<Vec<&'static str>, AuthzBasicError> {
     let unknown = || AuthzBasicError::UnknownActionTerm(p.source());
-    let holds = |t: &str| role != role::Role::User || t == "session.prompt";
+    let holds =
+        |t: &str| role != role::Role::User || matches!(t, "session.prompt" | "session.task");
     let terms: Vec<&'static str> = decide::expand(p)
         .map_err(|_| unknown())?
         .into_iter()
@@ -722,24 +1290,7 @@ fn validate_subjects(
 ) -> Result<decide::SubjectGrants, AuthzBasicError> {
     let mut out: std::collections::BTreeMap<u32, decide::SubjectEntry> = Default::default();
     for (name, entry) in &policy.subjects {
-        let actions = match &entry.actions {
-            None => None,
-            Some(lists) => {
-                let expand_all = |patterns: &[maknae_config::ActionPattern]| {
-                    let mut terms = std::collections::BTreeMap::new();
-                    for p in patterns {
-                        for (t, source) in decide::expand(p)? {
-                            terms.entry(t).or_insert(source);
-                        }
-                    }
-                    Ok::<_, AuthzBasicError>(terms)
-                };
-                Some(decide::SubjectActionSet {
-                    allow: expand_all(&lists.allow)?,
-                    deny: expand_all(&lists.deny)?,
-                })
-            }
-        };
+        let actions = action_set(entry)?;
         let Some(&Some(uid)) = lookups.get(name) else {
             continue;
         };
@@ -756,6 +1307,7 @@ fn validate_subjects(
                 permissions: entry.permissions.clone(),
                 actions,
                 models: entry.models.clone(),
+                origin: decide::SubjectOrigin::Authz,
             },
         );
     }
@@ -788,24 +1340,21 @@ fn found(lookups: &Lookups) -> UidMap {
         .collect()
 }
 
-/// getpwnam(3)'s "not found" spellings are `Ok(None)`, `ENOENT`, `ESRCH`, `EBADF`
-/// and `EPERM`; every other errno, `ERANGE` and errno 0 included, is a failed lookup.
 #[cfg(unix)]
 pub(crate) fn classify_lookup(r: Result<Option<u32>, nix::errno::Errno>) -> Lookup {
-    use nix::errno::Errno;
-    match r {
+    match maknae_io::not_found_is_none(r) {
         Ok(Some(uid)) => Lookup::Found(uid),
-        Ok(None) | Err(Errno::ENOENT | Errno::ESRCH | Errno::EBADF | Errno::EPERM) => {
-            Lookup::Absent
-        }
+        Ok(None) => Lookup::Absent,
         Err(e) => Lookup::Failed(e as i32),
     }
 }
 
-/// One lookup per distinct bound or `subjects:` username; a `uid:` entry needs none.
+/// One lookup per distinct bound, `subjects:` or `taskers:` username; a `uid:` entry
+/// needs none.
 fn resolve_uid_map_with(
     policy: &maknae_config::AuthzPolicy,
     bindings: &maknae_config::Bindings,
+    taskers: &[String],
     lookup: impl Fn(&str) -> Lookup,
 ) -> Result<Lookups, AuthzBasicError> {
     let mut map = Lookups::new();
@@ -821,7 +1370,12 @@ fn resolve_uid_map_with(
         })
         .collect();
     let bound_names: std::collections::BTreeSet<&str> = bound.iter().map(|n| n.as_str()).collect();
-    for name in bound.iter().copied().chain(policy.subjects.keys()) {
+    for name in bound
+        .iter()
+        .copied()
+        .chain(policy.subjects.keys())
+        .chain(taskers)
+    {
         if !asked.insert(name.as_str()) {
             continue;
         }
@@ -836,8 +1390,10 @@ fn resolve_uid_map_with(
                 let m = format!("looking up '{name}' failed (errno {errno}); nothing was changed");
                 return Err(if bound_names.contains(name.as_str()) {
                     AuthzBasicError::Bindings(m)
-                } else {
+                } else if policy.subjects.contains_key(name) {
                     AuthzBasicError::SubjectLookup(m)
+                } else {
+                    AuthzBasicError::AgentLookup(m)
                 });
             }
         }
@@ -856,11 +1412,7 @@ fn lookup_uid(name: &str) -> Result<Option<u32>, i32> {
     }
     #[cfg(unix)]
     {
-        // nix reads errno on a non-zero return; macOS getpwnam_r returns ERANGE
-        // without setting it, so a stale not-found errno must not survive to here.
-        nix::errno::Errno::clear();
-        match classify_lookup(nix::unistd::User::from_name(name).map(|u| u.map(|u| u.uid.as_raw())))
-        {
+        match classify_lookup(maknae_io::user_by_name(name).map(|u| u.map(|u| u.uid.as_raw()))) {
             Lookup::Found(uid) => Ok(Some(uid)),
             Lookup::Absent => Ok(None),
             Lookup::Failed(errno) => Err(errno),
@@ -894,7 +1446,7 @@ impl maknae_security::Authorizer for BasicAuthorizer {
     }
 
     fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
-        self.snapshot().subjects()
+        self.snapshot().subjects(self.current_principal().uid)
     }
 
     fn backend_name(&self) -> String {
@@ -1015,10 +1567,11 @@ impl Baseline for HermeticAuthorizer {
     }
 
     fn load_source(&self) -> Result<PolicySource, AuthzBasicError> {
-        PolicySource::load_with_requirement(
+        PolicySource::load_with_hosts(
             self.inner.paths.clone(),
             Baseline::principal(&self.inner),
             self.req.clone(),
+            *self.hosts.read().unwrap_or_else(PoisonError::into_inner),
         )
     }
 
@@ -1039,6 +1592,7 @@ pub struct HermeticAuthorizer {
     inner: BasicAuthorizer,
     req: maknae_config::TargetRequired,
     label: String,
+    hosts: RwLock<HostLookups>,
 }
 
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
@@ -1060,6 +1614,7 @@ impl HermeticAuthorizer {
             inner: BasicAuthorizer::from_snapshot(principal, paths, digest, snapshot),
             req,
             label,
+            hosts: RwLock::new(HostLookups::HOST),
         })
     }
 
@@ -1089,6 +1644,7 @@ impl HermeticAuthorizer {
             inner: BasicAuthorizer::from_snapshot(principal, paths, digest, Arc::new(snapshot)),
             req,
             label,
+            hosts: RwLock::new(HostLookups::HOST),
         })
     }
 
@@ -1103,6 +1659,10 @@ impl HermeticAuthorizer {
             self.inner.digest,
             Some(current.persisted()),
         )
+    }
+
+    pub fn set_hosts(&self, hosts: HostLookups) {
+        *self.hosts.write().unwrap_or_else(PoisonError::into_inner) = hosts;
     }
 
     /// [`Self::compile_from_file`] then install; an `Err` leaves the old snapshot.
@@ -1295,7 +1855,8 @@ mod tests {
                 "admin.baseline.accept",
                 "admin.contain",
                 "admin.release",
-                "session.prompt"
+                "session.prompt",
+                "session.task"
             ]
         );
     }
@@ -1347,6 +1908,7 @@ mod tests {
         #[derive(Clone, Debug, PartialEq, Eq)]
         pub(crate) struct ResolvedBindings {
             by_uid: BTreeMap<u32, (Role, String)>,
+            agents: BTreeMap<u32, Role>,
             /// The `bindings:` key was PRESENT in the file → defaults suppressed
             /// entirely (spec §3 precedence; what makes `admin: []` mean "no admin").
             explicit: bool,
@@ -1393,6 +1955,7 @@ mod tests {
             let Some(map) = bindings else {
                 return Ok(ResolvedBindings {
                     by_uid: BTreeMap::new(),
+                    agents: BTreeMap::new(),
                     explicit: false,
                 });
             };
@@ -1437,6 +2000,7 @@ mod tests {
             }
             Ok(ResolvedBindings {
                 by_uid,
+                agents: BTreeMap::new(),
                 explicit: true,
             })
         }
@@ -1446,11 +2010,20 @@ mod tests {
             pub(crate) fn as_subject_bindings(
                 &self,
             ) -> Option<Vec<maknae_security::SubjectBinding>> {
-                if !self.explicit {
+                if !self.explicit && self.agents.is_empty() {
                     return None;
                 }
                 let mut out: std::collections::BTreeMap<String, Vec<String>> = Default::default();
                 for (uid, (role, _)) in self.by_uid.iter() {
+                    out.entry(role.key().to_string())
+                        .or_default()
+                        .push(format!("uid:{uid}"));
+                }
+                for (uid, role) in self
+                    .agents
+                    .iter()
+                    .filter(|(u, _)| !self.by_uid.contains_key(u))
+                {
                     out.entry(role.key().to_string())
                         .or_default()
                         .push(format!("uid:{uid}"));
@@ -1465,8 +2038,24 @@ mod tests {
                 )
             }
 
-            /// Subject → role on the uid; defaults apply only without a `bindings:` key.
+            pub(crate) fn explicit(&self) -> bool {
+                self.explicit
+            }
+
+            pub(crate) fn with_agents(mut self, agents: BTreeMap<u32, Role>) -> Self {
+                self.agents = agents;
+                self
+            }
+
+            /// Subject → role on the uid; an enrolled agent holds its own role unless
+            /// contained, and defaults apply only without a `bindings:` key.
             pub(crate) fn role_for(&self, uid: u32, principal_uid: u32) -> Resolution {
+                if let Some(role) = self.agents.get(&uid) {
+                    return match self.by_uid.get(&uid) {
+                        Some((Role::Adversary, _)) => Resolution::Role(Role::Adversary),
+                        _ => Resolution::Role(*role),
+                    };
+                }
                 if self.explicit {
                     match self.by_uid.get(&uid) {
                         Some((r, _)) => Resolution::Role(*r),
@@ -1504,14 +2093,32 @@ mod tests {
             Ok(crate::decide::LoadedPolicy {
                 policy: src.policy().clone(),
                 roles: crate::binding::Roles::File(
-                    resolve(&legacy, &uid_map).map_err(Refused::Bindings)?,
+                    resolve(&legacy, &uid_map)
+                        .map_err(Refused::Bindings)?
+                        .with_agents(agent_roles(src)),
                 ),
                 action_grants: crate::validate_grants(&src.policy().action_grants)
                     .map_err(other)?,
                 destinations: crate::validate_destinations(&src.policy().destinations)
                     .map_err(other)?,
                 subjects: subjects(src).map_err(Refused::Other)?,
+                agents: src.agent_uids(),
+                taskers: src.agent_taskers().clone(),
             })
+        }
+
+        pub(crate) fn agent_roles(src: &crate::PolicySource) -> BTreeMap<u32, Role> {
+            src.agents
+                .enrolled
+                .values()
+                .map(|(uid, _, role)| {
+                    let role = match role {
+                        maknae_config::AgentRole::User => Role::User,
+                        maknae_config::AgentRole::Guest => Role::Guest,
+                    };
+                    (*uid, role)
+                })
+                .collect()
         }
 
         const TERMS: [&str; 12] = [
@@ -1574,9 +2181,15 @@ mod tests {
                     permissions: entry.permissions.clone(),
                     actions,
                     models: entry.models.clone(),
+                    origin: crate::decide::SubjectOrigin::Authz,
                 };
                 if by_uid.insert(*uid, compiled).is_some() {
                     return Err(format!("oracle refuses a second subject on uid {uid}"));
+                }
+            }
+            for (uid, entry) in &src.subject_grants().0 {
+                if matches!(entry.origin, crate::decide::SubjectOrigin::Agent(_)) {
+                    by_uid.insert(*uid, entry.clone());
                 }
             }
             Ok(crate::decide::SubjectGrants(by_uid))
@@ -1755,8 +2368,17 @@ mod tests {
         policy: maknae_config::AuthzPolicy,
         bindings: maknae_config::Bindings,
     ) -> Result<PolicySource, AuthzBasicError> {
-        let lookups = resolve_uid_map_with(&policy, &bindings, classify(lookup_uid))?;
-        PolicySource::from_lookups(policy, bindings, lookups, lookup_uid, principal(), paths())
+        let lookups = resolve_uid_map_with(&policy, &bindings, &[], classify(lookup_uid))?;
+        PolicySource::from_lookups(Parts {
+            policy,
+            bindings,
+            lookups,
+            lookup: lookup_uid,
+            hosts: HostLookups::HOST,
+            agents: Agents::Load(Default::default()),
+            principal: principal(),
+            paths: paths(),
+        })
     }
 
     fn bound(body: &str) -> maknae_config::Bindings {
@@ -1772,6 +2394,7 @@ mod tests {
             parse(authz),
             bindings.map_or_else(maknae_config::Bindings::missing, bound),
             uids.iter().map(|(n, u)| (n.to_string(), *u)).collect(),
+            maknae_config::AgentsLoad::default(),
             principal(),
             paths(),
         )
@@ -1847,14 +2470,18 @@ mod tests {
     }
 
     fn source_with_lookups(lookups: &[(&str, Option<u32>)]) -> PolicySource {
-        PolicySource::from_lookups(
-            parse(EMPTY),
-            bound("schema_version: 1\nbindings:\n  admin: [\"alice\"]\n  user: [\"ghost\"]\n"),
-            lookups.iter().map(|(n, u)| (n.to_string(), *u)).collect(),
-            lookup_uid,
-            principal(),
-            paths(),
-        )
+        PolicySource::from_lookups(Parts {
+            policy: parse(EMPTY),
+            bindings: bound(
+                "schema_version: 1\nbindings:\n  admin: [\"alice\"]\n  user: [\"ghost\"]\n",
+            ),
+            lookups: lookups.iter().map(|(n, u)| (n.to_string(), *u)).collect(),
+            lookup: lookup_uid,
+            hosts: HostLookups::HOST,
+            agents: Agents::Load(Default::default()),
+            principal: principal(),
+            paths: paths(),
+        })
         .unwrap()
     }
 
@@ -2080,6 +2707,8 @@ mod tests {
             action_grants,
             destinations: decide::DestinationGrants::default(),
             subjects: decide::SubjectGrants::default(),
+            agents: Default::default(),
+            taskers: Default::default(),
         };
         let ask = |uid: i64, action: &str| {
             let mut r = liveness_req(Some(uid));
@@ -2167,21 +2796,24 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_file_grants_admin_exactly_the_five_terms() {
+    fn the_shipped_file_grants_admin_the_five_terms_and_both_roles_session_task() {
         let policy = maknae_config::parse_authz(SHIPPED).expect("shipped authz.yaml parses");
         let roles: Vec<&String> = policy.action_grants.keys().collect();
-        assert_eq!(roles, ["admin"]);
-        let admin = &policy.action_grants["admin"];
-        assert_eq!(
-            admin
+        assert_eq!(roles, ["admin", "user"]);
+        let allowed = |role: &str| -> Vec<String> {
+            policy.action_grants[role]
                 .allow
                 .iter()
                 .map(maknae_config::ActionPattern::source)
-                .collect::<Vec<_>>(),
-            SHIPPED_ADMIN_TERMS
-        );
-        assert!(admin.deny.is_empty());
+                .collect()
+        };
+        let mut admin_terms = SHIPPED_ADMIN_TERMS.to_vec();
+        admin_terms.push("session.task");
+        assert_eq!(allowed("admin"), admin_terms);
+        assert_eq!(allowed("user"), ["session.task"]);
+        assert!(policy.action_grants.values().all(|g| g.deny.is_empty()));
         assert!(policy.destinations.is_empty());
+        assert!(validate_grants(&policy.action_grants).is_ok());
     }
 
     /// The decision names its rule, from the snapshot it was made on.
@@ -2858,7 +3490,7 @@ mod tests {
             state,
         };
         assert_eq!(
-            next.subject_entries().unwrap(),
+            next.subject_entries(principal().uid).unwrap(),
             [
                 e(Some(666), &["mallory"], SubjectState::CarriedForward),
                 e(Some(1000), &["alex"], SubjectState::Bound("admin")),
@@ -2875,7 +3507,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            compiled(&source_with(SHIPPED, None, &resolving)).subject_entries(),
+            compiled(&source_with(SHIPPED, None, &resolving)).subject_entries(principal().uid),
             None,
             "absent bindings enumerate nothing"
         );
@@ -2885,7 +3517,7 @@ mod tests {
                 Some("schema_version: 1\nbindings: {}\n"),
                 &resolving
             ))
-            .subject_entries(),
+            .subject_entries(principal().uid),
             Some(vec![])
         );
     }
@@ -3028,7 +3660,7 @@ mod tests {
             "'mallory' under adversary no longer resolves; uid 666 stays contained (carried forward); this overrides bob (admin), bobby (user)"
         );
         assert_eq!(
-            next.subject_entries().unwrap(),
+            next.subject_entries(principal().uid).unwrap(),
             [crate::ListedSubject {
                 uid: Some(666),
                 names: vec!["mallory".into(), "bob".into(), "bobby".into()],
@@ -3115,7 +3747,7 @@ mod tests {
             }]
         );
         assert_eq!(
-            next.subject_entries().unwrap(),
+            next.subject_entries(principal().uid).unwrap(),
             [
                 crate::ListedSubject {
                     uid: Some(1001),
@@ -3145,7 +3777,7 @@ mod tests {
             &[("alice", 1001), ("alicia", 1001)],
         ));
         assert_eq!(
-            first.subject_entries().unwrap(),
+            first.subject_entries(principal().uid).unwrap(),
             [crate::ListedSubject {
                 uid: Some(1001),
                 names: vec!["alice".into(), "alicia".into()],
@@ -3219,6 +3851,7 @@ mod tests {
             maknae_graph::identity::build(
                 &maknae_graph::identity::IdentityLayer {
                     aliases: Default::default(),
+                    agents: Default::default(),
                     source: PATH.into(),
                     label: LABEL.into(),
                     bindings_sha256: Some([7; 32]),
@@ -3275,6 +3908,7 @@ mod tests {
             maknae_graph::identity::build(
                 &maknae_graph::identity::IdentityLayer {
                     aliases: Default::default(),
+                    agents: Default::default(),
                     source: PATH.into(),
                     label: LABEL.into(),
                     bindings_sha256: Some([7; 32]),
@@ -3469,6 +4103,37 @@ mod tests {
     }
 
     #[test]
+    fn user_may_hold_session_task_and_its_family_keeps_both_session_terms() {
+        assert_eq!(
+            role_terms(
+                "user",
+                role::Role::User,
+                &maknae_config::ActionPattern::Exact("session.task".into())
+            ),
+            Ok(vec!["session.task"])
+        );
+        assert_eq!(
+            role_terms(
+                "user",
+                role::Role::User,
+                &maknae_config::ActionPattern::Family("session".into())
+            ),
+            Ok(vec!["session.prompt", "session.task"])
+        );
+        assert!(finish(parse_with_roles(
+            "roles:\n  user:\n    allow: [\"session.task\"]\n    deny: [\"session.task\"]\n  admin:\n    allow: [\"session.task\"]\n"
+        ))
+        .is_ok());
+        let got = finish(parse_with_roles(
+            "roles:\n  user:\n    allow: [\"admin.subject.list\"]\n",
+        ));
+        assert!(
+            matches!(got, Err(AuthzBasicError::TermNotGrantableForRole { ref role, ref term }) if role == "user" && term == "admin.subject.list"),
+            "{got:?}"
+        );
+    }
+
+    #[test]
     fn destinations_for_a_structural_or_unknown_role_refuse_at_boot_naming_the_role() {
         for (role, want_unknown) in [("guest", false), ("adversary", false), ("ghost", true)] {
             let got = finish(parse_with_roles(&format!(
@@ -3572,12 +4237,19 @@ mod tests {
                 ("admin.status", "admin.*"),
                 ("admin.subject.list", "admin.*"),
                 ("session.prompt", "session.*"),
+                ("session.task", "session.*"),
             ]
         );
         assert_eq!(deny, &[("admin.contain", "admin.contain".to_string())]);
         assert_eq!(
             grants.0["user"],
-            (vec![("session.prompt", "session.*".to_string())], vec![])
+            (
+                vec![
+                    ("session.prompt", "session.*".to_string()),
+                    ("session.task", "session.*".to_string())
+                ],
+                vec![]
+            )
         );
         assert_eq!(
             grants.evaluate3_action("admin", "admin.status"),
@@ -3606,8 +4278,17 @@ mod tests {
         lookup: impl Fn(&str) -> Lookup,
     ) -> Result<PolicySource, AuthzBasicError> {
         let bindings = bound(ADMIN_ROOT);
-        let lookups = resolve_uid_map_with(&policy, &bindings, lookup)?;
-        PolicySource::from_lookups(policy, bindings, lookups, lookup_uid, principal(), paths())
+        let lookups = resolve_uid_map_with(&policy, &bindings, &[], lookup)?;
+        PolicySource::from_lookups(Parts {
+            policy,
+            bindings,
+            lookups,
+            lookup: lookup_uid,
+            hosts: HostLookups::HOST,
+            agents: Agents::Load(Default::default()),
+            principal: principal(),
+            paths: paths(),
+        })
     }
 
     const ZED: &str = "  zed:\n    permissions:\n      allow: [\"Read(~/docs/**)\"]\n      deny: [\"Read(~/docs/secret/**)\"]\n    actions:\n      allow: [\"fs.*\", \"session.prompt\"]\n    models:\n      allow: [\"openai/gpt-5\"]\n";
@@ -3810,6 +4491,7 @@ mod tests {
             &with_subjects("  zed: {}\n"),
             &maknae_config::parse_bindings("schema_version: 1\nbindings:\n  user: [\"zed\"]\n")
                 .unwrap(),
+            &[],
             |_| Lookup::Failed(5),
         )
         .unwrap_err();
@@ -4009,6 +4691,7 @@ mod tests {
             PolicyPaths {
                 authz: "/x/authz.yaml".into(),
                 bindings: "/x/bindings.yaml".into(),
+                config_dir: "/x".into(),
             }
         );
     }
@@ -4051,7 +4734,7 @@ mod tests {
         ));
         let principal_req = liveness_req(Some(501));
         for absent in [&missing, &no_key] {
-            assert_eq!(absent.subjects(), None);
+            assert_eq!(absent.subjects(501), None);
             let a = BasicAuthorizer::from_snapshot(
                 principal(),
                 paths(),
@@ -4060,7 +4743,7 @@ mod tests {
             );
             assert_eq!(a.decide_reporting_role(&principal_req).1, Some("admin"));
         }
-        assert_eq!(empty.subjects(), Some(vec![]));
+        assert_eq!(empty.subjects(501), Some(vec![]));
         let e = BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, empty);
         assert_eq!(e.decide_reporting_role(&principal_req).1, None);
     }
@@ -4071,6 +4754,7 @@ mod tests {
             parse(SHIPPED),
             bound("schema_version: 1\nbindings:\n  user: [{uid: 7}]\n"),
             UidMap::new(),
+            maknae_config::AgentsLoad::default(),
             principal(),
             paths(),
         );
@@ -4118,7 +4802,7 @@ mod tests {
         .unwrap();
         let calls = std::cell::RefCell::new(Vec::new());
         let none = parse(EMPTY);
-        let map = resolve_uid_map_with(&none, &b, |n| {
+        let map = resolve_uid_map_with(&none, &b, &[], |n| {
             calls.borrow_mut().push(n.to_string());
             match n {
                 "alex" => Lookup::Found(1000),
@@ -4142,7 +4826,7 @@ mod tests {
             ["alex", "mallory", "ghost"],
             "each name once; uid entries are never looked up"
         );
-        let e = resolve_uid_map_with(&none, &b, |n| {
+        let e = resolve_uid_map_with(&none, &b, &[], |n| {
             if n == "mallory" {
                 Lookup::Failed(5)
             } else {
@@ -4157,7 +4841,7 @@ mod tests {
             )
         );
         assert_eq!(
-            resolve_uid_map_with(&none, &maknae_config::Bindings::missing(), |_| {
+            resolve_uid_map_with(&none, &maknae_config::Bindings::missing(), &[], |_| {
                 Lookup::Failed(5)
             }),
             Ok(Lookups::new())
@@ -4225,6 +4909,7 @@ mod tests {
             policy.clone(),
             bindings.clone(),
             uid_map.clone(),
+            maknae_config::AgentsLoad::default(),
             principal(),
             paths(),
         )
@@ -4244,6 +4929,7 @@ mod tests {
             layer,
             maknae_graph::identity::IdentityLayer {
                 aliases: Default::default(),
+                agents: Default::default(),
                 source: "/etc/maknae/bindings.yaml".into(),
                 label: "UNCLASSIFIED".into(),
                 bindings_sha256: Some([4; 32]),
@@ -4274,6 +4960,7 @@ mod tests {
                 parse("schema_version: 1\n"),
                 maknae_config::Bindings::missing(),
                 UidMap::new(),
+                maknae_config::AgentsLoad::default(),
                 principal(),
                 paths,
             );
@@ -4291,6 +4978,7 @@ mod tests {
                 maknae_config::parse_authz(body).unwrap(),
                 maknae_config::Bindings::missing(),
                 uids.iter().map(|(n, u)| (n.to_string(), *u)).collect(),
+                maknae_config::AgentsLoad::default(),
                 principal(),
                 paths(),
             )
@@ -4299,6 +4987,7 @@ mod tests {
             parse("schema_version: 1\n"),
             bound("schema_version: 1\nbindings:\n  user: [\"ghost\"]\n"),
             UidMap::new(),
+            maknae_config::AgentsLoad::default(),
             principal(),
             paths(),
         )
@@ -4309,6 +4998,7 @@ mod tests {
                 parse("schema_version: 1\n"),
                 bound("schema_version: 1\nbindings:\n  gest: [\"ghost\"]\n"),
                 UidMap::new(),
+                maknae_config::AgentsLoad::default(),
                 principal(),
                 paths(),
             ),
@@ -4355,6 +5045,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_host_lookups_read_this_hosts_accounts_and_groups() {
+        let uid = nix::unistd::geteuid();
+        let gid = nix::unistd::getegid();
+        let acct = (HostLookups::HOST.account)(uid.as_raw())
+            .unwrap()
+            .expect("the test account has a passwd entry");
+        assert_eq!(acct.uid, uid.as_raw());
+        assert_eq!(acct.primary_gid, gid.as_raw());
+        let group = nix::unistd::Group::from_gid(gid)
+            .unwrap()
+            .expect("the test account's group has a group entry");
+        assert_eq!(
+            (HostLookups::HOST.group)(&group.name),
+            Ok(Some(gid.as_raw()))
+        );
+        assert_eq!(
+            (HostLookups::HOST.group)("maknae-no-such-group-609"),
+            Ok(None)
+        );
+    }
+
     /// In-crate killers for the feature-gated wrapper (`cargo mutants -p` runs
     /// only in-package tests, so these — not the kernel e2e — are what kill the
     /// wrapper's mutants when the mutation lane enables the feature).
@@ -4367,6 +5079,60 @@ mod tests {
         };
         use maknae_security::{Authorizer, Verdict};
         use std::os::unix::fs::PermissionsExt;
+
+        fn hobi_account(uid: u32) -> Result<Option<maknae_io::HostAccount>, String> {
+            Ok((uid == 2001).then(|| maknae_io::HostAccount {
+                uid,
+                name: "hobi-svc".into(),
+                primary_gid: uid,
+                shell: "/usr/sbin/nologin".into(),
+                dir: "/var/empty".into(),
+                named_groups: Vec::new(),
+            }))
+        }
+
+        fn no_daemons() -> Result<maknae_io::DaemonFacts, String> {
+            Ok(maknae_io::DaemonFacts {
+                uids: Vec::new(),
+                gids: Vec::new(),
+            })
+        }
+
+        fn no_group(_: &str) -> Result<Option<u32>, String> {
+            Ok(None)
+        }
+
+        #[test]
+        fn set_hosts_decides_the_next_load_with_the_given_lookups() {
+            let fx = Fixture::new("set_hosts");
+            write(&fx.policy(), EMPTY);
+            let agents = fx.0.join(maknae_config::AGENTS_DIR);
+            let dir = agents.join("hobi");
+            std::fs::create_dir_all(&dir).unwrap();
+            for d in [&agents, &dir] {
+                std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o750)).unwrap();
+            }
+            write(
+                &dir.join(maknae_config::ENROLLMENT_FILE),
+                "agent_id: hobi\naccount: hobi-svc\nuid: 2001\nrole: user\n",
+            );
+            let auth = HermeticAuthorizer::new(fx.paths(), principal(), fixture_req(), test_digest)
+                .unwrap();
+            auth.set_hosts(HostLookups {
+                account: |_| Ok(None),
+                daemons: no_daemons,
+                group: no_group,
+            });
+            auth.reload_from_file().unwrap();
+            assert_eq!(auth.snapshot().agent_uid("hobi"), None);
+            auth.set_hosts(HostLookups {
+                account: hobi_account,
+                daemons: no_daemons,
+                group: no_group,
+            });
+            auth.reload_from_file().unwrap();
+            assert_eq!(auth.snapshot().agent_uid("hobi"), Some(2001));
+        }
 
         fn fixture_req() -> maknae_config::TargetRequired {
             maknae_config::TargetRequired {
@@ -5295,7 +6061,7 @@ mod tests {
                 .chain(KERNEL_TERMS.iter())
                 .copied()
                 .collect();
-            assert_eq!(terms.len(), 60);
+            assert_eq!(terms.len(), 61);
             let (uids, paths, homes, ops) = (uids(), paths(), homes(), operations());
             assert_eq!(
                 (uids.len(), paths.len(), homes.len(), ops.len()),
@@ -5323,7 +6089,7 @@ mod tests {
                     distinct(&ops),
                     distinct(&destinations),
                 ),
-                (60, 9, 22, 5, 7, 4)
+                (61, 9, 22, 5, 7, 4)
             );
             let mut cells = 0usize;
             let mut mismatches: Vec<String> = Vec::new();
@@ -5456,7 +6222,7 @@ mod tests {
                 &mismatches[..mismatches.len().min(10)]
             );
             let fs_cells = 4 * 7 * 22 * 5 + 7 * 22 * 5;
-            let other_cells = 55 + 4;
+            let other_cells = 56 + 4;
             assert_eq!(cells, 12 * 9 * (fs_cells + other_cells));
             assert_eq!(subject_entries, 1);
             assert_eq!(
@@ -5498,7 +6264,7 @@ mod tests {
                     .unwrap()
                     .roles
                     .as_subject_bindings();
-                let snap = compiled(&src).subjects();
+                let snap = compiled(&src).subjects(principal().uid);
                 assert_eq!(oracle, snap, "{variant}");
                 seen.push(oracle.map(|v| v.len()));
             }
@@ -5610,6 +6376,1145 @@ mod tests {
                     "{variant}"
                 );
                 assert_eq!(src.identity_problems(), [problem], "{variant}");
+            }
+        }
+    }
+
+    mod agents {
+        use super::*;
+        use maknae_config::{AccountRefusal, AgentEnrollment, AgentId, AgentRole, AgentsLoad};
+        use maknae_io::{DaemonFacts, HostAccount};
+
+        const HOBI: u32 = 2001;
+        const SUGA: u32 = 2002;
+        const JIN: u32 = 2003;
+        const SHELLED: u32 = 2004;
+        const JOINER: u32 = 2005;
+        const MOVED: u32 = 2006;
+        const TWIN: u32 = 2007;
+        const DAEMON: u32 = 970;
+        const MAKNAE_GID: u32 = 980;
+        const URSULA: u32 = 1001;
+
+        fn svc(name: &str, uid: u32) -> HostAccount {
+            HostAccount {
+                uid,
+                name: name.into(),
+                primary_gid: uid,
+                shell: "/usr/sbin/nologin".into(),
+                dir: "/var/empty".into(),
+                named_groups: Vec::new(),
+            }
+        }
+
+        fn account(uid: u32) -> Result<Option<HostAccount>, String> {
+            Ok(match uid {
+                HOBI => Some(svc("hobi-svc", HOBI)),
+                SUGA => Some(svc("suga-svc", SUGA)),
+                JIN => Some(HostAccount {
+                    shell: "/bin/zsh".into(),
+                    named_groups: vec![MAKNAE_GID],
+                    ..svc("jin", JIN)
+                }),
+                SHELLED => Some(HostAccount {
+                    shell: "/bin/bash".into(),
+                    ..svc("rm-svc", SHELLED)
+                }),
+                JOINER => Some(svc("jk-svc", JOINER)),
+                MOVED => Some(svc("new-svc", MOVED)),
+                TWIN => Some(svc("hobi-svc", TWIN)),
+                DAEMON => Some(svc("egress-helper", DAEMON)),
+                501 => Some(svc("operator", 501)),
+                _ => None,
+            })
+        }
+
+        fn joined(uid: u32) -> Result<Option<HostAccount>, String> {
+            match uid {
+                JOINER => Ok(Some(HostAccount {
+                    named_groups: vec![MAKNAE_GID],
+                    ..svc("jk-svc", JOINER)
+                })),
+                other => account(other),
+            }
+        }
+
+        fn daemons() -> Result<DaemonFacts, String> {
+            Ok(DaemonFacts {
+                uids: vec![DAEMON],
+                gids: vec![DAEMON],
+            })
+        }
+
+        fn group(name: &str) -> Result<Option<u32>, String> {
+            Ok((name == maknae_io::MAKNAE_GROUP).then_some(MAKNAE_GID))
+        }
+
+        fn no_group(_: &str) -> Result<Option<u32>, String> {
+            Ok(None)
+        }
+
+        fn unanswered_account(_: u32) -> Result<Option<HostAccount>, String> {
+            Err("the account database did not answer".into())
+        }
+
+        fn unanswered_daemons() -> Result<DaemonFacts, String> {
+            Err("the account database did not answer".into())
+        }
+
+        fn unanswered_group(_: &str) -> Result<Option<u32>, String> {
+            Err("the group database did not answer".into())
+        }
+
+        const HOSTS: HostLookups = HostLookups {
+            account,
+            daemons,
+            group,
+        };
+
+        fn enrollment(id: &str, account: &str, uid: u32, role: AgentRole) -> AgentEnrollment {
+            AgentEnrollment {
+                id: AgentId::parse(id).unwrap(),
+                account: account.into(),
+                uid,
+                role,
+            }
+        }
+
+        fn hobi() -> AgentEnrollment {
+            enrollment("hobi", "hobi-svc", HOBI, AgentRole::User)
+        }
+
+        fn load(enrollments: Vec<AgentEnrollment>, policies: &[(&str, &str)]) -> AgentsLoad {
+            AgentsLoad {
+                enrollments,
+                policies: policies
+                    .iter()
+                    .map(|(id, body)| {
+                        maknae_config::parse_agent_policy(&AgentId::parse(id).unwrap(), body)
+                            .unwrap()
+                    })
+                    .collect(),
+                skipped: Vec::new(),
+            }
+        }
+
+        fn try_source(
+            authz: &str,
+            bindings: Option<&str>,
+            uids: &[(&str, u32)],
+            agents: AgentsLoad,
+        ) -> Result<PolicySource, AuthzBasicError> {
+            PolicySource::from_parts_with_hosts(
+                parse(authz),
+                bindings.map_or_else(maknae_config::Bindings::missing, bound),
+                uids.iter().map(|(n, u)| (n.to_string(), *u)).collect(),
+                agents,
+                HOSTS,
+                principal(),
+                paths(),
+            )
+        }
+
+        fn source(
+            bindings: Option<&str>,
+            uids: &[(&str, u32)],
+            agents: AgentsLoad,
+        ) -> PolicySource {
+            try_source(SHIPPED, bindings, uids, agents).unwrap()
+        }
+
+        fn auth(src: &PolicySource, principal_uid: u32) -> BasicAuthorizer {
+            BasicAuthorizer::from_snapshot(
+                maknae_config::Principal {
+                    name: "operator".into(),
+                    uid: principal_uid,
+                },
+                src.paths().clone(),
+                test_digest,
+                compiled(src),
+            )
+        }
+
+        fn agent_channel(mut r: maknae_security::Request, agent: &str) -> maknae_security::Request {
+            r.subject.0.insert(
+                maknae_security::SUBJECT_CHANNEL,
+                AttrValue::Str(maknae_security::CHANNEL_AGENT.into()),
+            );
+            r.subject
+                .0
+                .insert(maknae_security::SUBJECT_AGENT, AttrValue::Str(agent.into()));
+            r
+        }
+
+        fn stamped(
+            src: &PolicySource,
+            r: maknae_security::Request,
+            uid: u32,
+        ) -> maknae_security::Request {
+            match compiled(src).agent_of(uid) {
+                Some(id) => agent_channel(r, id),
+                None => r,
+            }
+        }
+
+        fn role_of(src: &PolicySource, uid: u32) -> Option<&'static str> {
+            auth(src, 501)
+                .decide_reporting_role(&stamped(src, whoami(i64::from(uid)), uid))
+                .1
+        }
+
+        fn refused(agent: &str, uid: u32, why: AgentRefusal) -> IdentityProblem {
+            IdentityProblem::AgentRefused {
+                agent: agent.into(),
+                uid,
+                why,
+            }
+        }
+
+        fn read(uid: u32, path: &str) -> maknae_security::Request {
+            let mut r = ssh_read(i64::from(uid));
+            r.resource
+                .0
+                .insert(RESOURCE_PATH_KEY, AttrValue::Str(path.into()));
+            r
+        }
+
+        #[test]
+        fn an_enrolled_agent_is_bound_to_its_role_without_bindings() {
+            let suga = enrollment("suga", "suga-svc", SUGA, AgentRole::Guest);
+            let src = source(None, &[], load(vec![hobi(), suga], &[]));
+            let snap = compiled(&src);
+            assert_eq!(snap.agent_uid("hobi"), Some(HOBI));
+            assert_eq!(snap.agent_uid("suga"), Some(SUGA));
+            assert_eq!(snap.agent_of(HOBI), Some("hobi"));
+            assert_eq!(snap.agent_of(501), None);
+            assert_eq!(role_of(&src, HOBI), Some("user"));
+            assert_eq!(role_of(&src, SUGA), Some("guest"));
+            assert!(src.identity_problems().is_empty());
+            let layer = src.identity_layer(LABEL, None);
+            assert_eq!(
+                layer.agents,
+                [("hobi".to_string(), HOBI), ("suga".to_string(), SUGA)].into()
+            );
+            assert_eq!(
+                layer
+                    .subjects
+                    .iter()
+                    .map(|s| (s.uid, s.name.as_str(), s.role.as_str()))
+                    .collect::<Vec<_>>(),
+                [(HOBI, "hobi-svc", "user"), (SUGA, "suga-svc", "guest")]
+            );
+        }
+
+        #[test]
+        fn the_principal_stays_admin_beside_an_agent_without_bindings() {
+            let src = source(None, &[], load(vec![hobi()], &[]));
+            assert_eq!(role_of(&src, 501), Some("admin"));
+            assert_eq!(role_of(&src, 4242), None);
+            assert_eq!(role_of(&src, HOBI), Some("user"));
+        }
+
+        #[test]
+        fn an_enrollment_of_the_principals_uid_is_ignored_and_the_principal_stays_admin() {
+            let src = source(
+                None,
+                &[],
+                load(
+                    vec![enrollment("hobi", "operator", 501, AgentRole::User)],
+                    &[],
+                ),
+            );
+            assert_eq!(
+                src.identity_problems(),
+                [refused(
+                    "hobi",
+                    501,
+                    AgentRefusal::Account(AccountRefusal::IsPrincipal)
+                )]
+            );
+            let snap = compiled(&src);
+            assert_eq!(snap.agent_uid("hobi"), None);
+            assert_eq!(snap.agent_of(501), None);
+            assert_eq!(role_of(&src, 501), Some("admin"));
+        }
+
+        #[test]
+        fn an_enrolled_agent_that_becomes_the_principal_is_not_admin() {
+            let src = source(None, &[], load(vec![hobi()], &[]));
+            let a = auth(&src, HOBI);
+            assert_eq!(
+                a.decide_reporting_role(&agent_channel(whoami(i64::from(HOBI)), "hobi"))
+                    .1,
+                Some("user")
+            );
+            assert_eq!(a.decide_reporting_role(&whoami(501)).1, None);
+        }
+
+        #[test]
+        fn an_agent_account_that_joins_maknae_is_not_enrolled_at_the_next_load() {
+            let joiner = enrollment("jk", "jk-svc", JOINER, AgentRole::User);
+            let mut src = source(None, &[], load(vec![joiner], &[]));
+            assert_eq!(src.agent_uid("jk"), Some(JOINER));
+            src.set_account_lookup(joined);
+            let next = src.with_bindings(src.bindings().clone()).unwrap();
+            assert_eq!(next.agent_uid("jk"), None);
+            assert_eq!(
+                next.identity_problems(),
+                [refused(
+                    "jk",
+                    JOINER,
+                    AgentRefusal::Account(AccountRefusal::MaknaeGroupMember)
+                )]
+            );
+            assert_eq!(compiled(&next).agent_uid("jk"), None);
+            src.set_group_lookup(no_group);
+            let no_maknae_group = src.with_bindings(src.bindings().clone()).unwrap();
+            assert_eq!(no_maknae_group.agent_uid("jk"), Some(JOINER));
+        }
+
+        #[test]
+        fn an_agent_with_a_login_shell_is_not_enrolled() {
+            let src = source(
+                None,
+                &[],
+                load(
+                    vec![enrollment("rm", "rm-svc", SHELLED, AgentRole::User)],
+                    &[],
+                ),
+            );
+            assert_eq!(src.agent_uid("rm"), None);
+            assert_eq!(
+                src.identity_problems(),
+                [refused(
+                    "rm",
+                    SHELLED,
+                    AgentRefusal::Account(AccountRefusal::LoginShell("/bin/bash".into()))
+                )]
+            );
+            assert_eq!(role_of(&src, SHELLED), None);
+        }
+
+        #[test]
+        fn the_uid_of_an_ignored_enrollment_on_the_agent_channel_is_denied() {
+            let src = source(
+                None,
+                &[],
+                load(
+                    vec![enrollment("rm", "rm-svc", SHELLED, AgentRole::User)],
+                    &[],
+                ),
+            );
+            assert_eq!(src.agent_uid("rm"), None);
+            let a = auth(&src, 501);
+            let client = a.decide_cited(&liveness_req(Some(i64::from(SHELLED))));
+            assert_eq!(
+                client.verdict,
+                Verdict::NotApplicable {
+                    note: Some("subject resolves to no role".into())
+                }
+            );
+            let agent =
+                a.decide_cited(&agent_channel(liveness_req(Some(i64::from(SHELLED))), "rm"));
+            assert_eq!(
+                agent.verdict,
+                Verdict::Deny {
+                    reason: format!("agent channel: uid {SHELLED} is not enrolled agent rm")
+                }
+            );
+            assert_eq!(agent.role, None);
+        }
+
+        #[test]
+        fn a_de_enrolled_uid_with_no_role_on_the_agent_channel_is_denied_with_the_agent_reason() {
+            let enrolled = source(None, &[], load(vec![hobi()], &[]));
+            let req = agent_channel(liveness_req(Some(i64::from(HOBI))), "hobi");
+            assert_eq!(
+                auth(&enrolled, 501).decide_cited(&req).verdict,
+                audit_permit()
+            );
+            let removed = source(None, &[], load(vec![], &[]));
+            assert_eq!(removed.agent_uid("hobi"), None);
+            let d = auth(&removed, 501).decide_cited(&req);
+            assert_eq!(
+                d.verdict,
+                Verdict::Deny {
+                    reason: format!("agent channel: uid {HOBI} is not enrolled agent hobi")
+                }
+            );
+            assert_eq!(d.role, None);
+        }
+
+        #[test]
+        fn a_daemon_account_is_not_enrolled() {
+            let src = source(
+                None,
+                &[],
+                load(
+                    vec![enrollment("eg", "egress-helper", DAEMON, AgentRole::User)],
+                    &[],
+                ),
+            );
+            assert_eq!(src.agent_uid("eg"), None);
+            assert_eq!(
+                src.identity_problems(),
+                [refused(
+                    "eg",
+                    DAEMON,
+                    AgentRefusal::Account(AccountRefusal::MaknaeDaemonAccount(
+                        "egress-helper".into()
+                    ))
+                )]
+            );
+        }
+
+        #[test]
+        fn two_enrollments_of_one_uid_are_both_refused() {
+            let suga = enrollment("suga", "hobi-svc", HOBI, AgentRole::User);
+            let src = source(None, &[], load(vec![hobi(), suga], &[]));
+            assert_eq!(src.agent_uid("hobi"), None);
+            assert_eq!(src.agent_uid("suga"), None);
+            let in_use = |agent: &str| {
+                AgentRefusal::Account(AccountRefusal::AccountInUse {
+                    account: "hobi-svc".into(),
+                    agent: agent.into(),
+                })
+            };
+            assert_eq!(
+                src.identity_problems(),
+                [
+                    refused("hobi", HOBI, in_use("suga")),
+                    refused("suga", HOBI, in_use("hobi"))
+                ]
+            );
+            let twin = enrollment("twin", "hobi-svc", TWIN, AgentRole::User);
+            let src = source(None, &[], load(vec![hobi(), twin], &[]));
+            assert_eq!(src.agent_uid("hobi"), None);
+            assert_eq!(src.agent_uid("twin"), None);
+            assert_eq!(
+                src.identity_problems(),
+                [
+                    refused("hobi", HOBI, in_use("twin")),
+                    refused("twin", TWIN, in_use("hobi"))
+                ]
+            );
+            assert!(compiled(&src).agent_of(HOBI).is_none());
+        }
+
+        #[test]
+        fn a_recorded_uid_that_now_names_another_account_is_not_enrolled() {
+            let moved = enrollment("moved", "old-svc", MOVED, AgentRole::User);
+            let gone = enrollment("gone", "ghost-svc", 4040, AgentRole::User);
+            let src = source(None, &[], load(vec![moved, gone], &[]));
+            assert_eq!(src.agent_uid("moved"), None);
+            assert_eq!(src.agent_uid("gone"), None);
+            assert_eq!(
+                src.identity_problems(),
+                [
+                    refused(
+                        "moved",
+                        MOVED,
+                        AgentRefusal::AccountChanged {
+                            now: "new-svc".into()
+                        }
+                    ),
+                    refused(
+                        "gone",
+                        4040,
+                        AgentRefusal::Account(AccountRefusal::NoSuchAccount("ghost-svc".into()))
+                    )
+                ]
+            );
+            assert_eq!(role_of(&src, MOVED), None);
+        }
+
+        #[test]
+        fn a_failed_host_lookup_refuses_the_load() {
+            let hosts = [
+                HostLookups {
+                    account: unanswered_account,
+                    ..HOSTS
+                },
+                HostLookups {
+                    daemons: unanswered_daemons,
+                    ..HOSTS
+                },
+                HostLookups {
+                    group: unanswered_group,
+                    ..HOSTS
+                },
+            ];
+            for hosts in hosts {
+                let got = PolicySource::from_parts_with_hosts(
+                    parse(SHIPPED),
+                    maknae_config::Bindings::missing(),
+                    Default::default(),
+                    load(vec![hobi()], &[]),
+                    hosts,
+                    principal(),
+                    paths(),
+                );
+                assert!(
+                    matches!(got, Err(AuthzBasicError::AgentLookup(ref m)) if m.contains("did not answer")),
+                    "{got:?}"
+                );
+            }
+        }
+
+        fn enoent_account(uid: u32) -> Result<Option<HostAccount>, String> {
+            maknae_io::not_found_is_none(Err::<Option<HostAccount>, _>(nix::errno::Errno::ENOENT))
+                .map_err(|e| format!("uid {uid}: {e}"))
+        }
+
+        fn erange_account(uid: u32) -> Result<Option<HostAccount>, String> {
+            maknae_io::not_found_is_none(Err::<Option<HostAccount>, _>(nix::errno::Errno::ERANGE))
+                .map_err(|e| format!("uid {uid}: {e}"))
+        }
+
+        #[test]
+        fn a_not_found_errno_for_an_enrolled_uid_is_no_such_account_and_the_load_succeeds() {
+            let enoent = HostLookups {
+                account: enoent_account,
+                ..HOSTS
+            };
+            let src = PolicySource::from_parts_with_hosts(
+                parse(SHIPPED),
+                maknae_config::Bindings::missing(),
+                Default::default(),
+                load(vec![hobi()], &[]),
+                enoent,
+                principal(),
+                paths(),
+            )
+            .unwrap();
+            assert_eq!(src.agent_uid("hobi"), None);
+            assert_eq!(
+                src.identity_problems(),
+                [refused(
+                    "hobi",
+                    HOBI,
+                    AgentRefusal::Account(AccountRefusal::NoSuchAccount("hobi-svc".into()))
+                )]
+            );
+            let erange = PolicySource::from_parts_with_hosts(
+                parse(SHIPPED),
+                maknae_config::Bindings::missing(),
+                Default::default(),
+                load(vec![hobi()], &[]),
+                HostLookups {
+                    account: erange_account,
+                    ..HOSTS
+                },
+                principal(),
+                paths(),
+            );
+            assert!(matches!(erange, Err(AuthzBasicError::AgentLookup(_))));
+        }
+
+        #[test]
+        fn a_bindings_entry_for_an_agent_other_than_adversary_ignores_the_enrollment() {
+            for role in ["user", "guest"] {
+                let bindings = format!("schema_version: 1\nbindings:\n  {role}: [\"hobi-svc\"]\n");
+                let src = source(
+                    Some(&bindings),
+                    &[("hobi-svc", HOBI)],
+                    load(vec![hobi()], &[]),
+                );
+                assert_eq!(
+                    src.identity_problems(),
+                    [refused(
+                        "hobi",
+                        HOBI,
+                        AgentRefusal::Bound {
+                            role: crate::role::Role::from_key(role).unwrap().key()
+                        }
+                    )],
+                    "{role}"
+                );
+                assert_eq!(compiled(&src).agent_uid("hobi"), None, "{role}");
+                assert_eq!(role_of(&src, HOBI), Some(role), "{role}");
+            }
+        }
+
+        #[test]
+        fn a_bindings_name_that_resolves_to_an_agents_uid_ignores_the_enrollment() {
+            let src = source(
+                Some("schema_version: 1\nbindings:\n  user: [\"alias\"]\n"),
+                &[("alias", HOBI)],
+                load(vec![hobi()], &[]),
+            );
+            assert_eq!(
+                src.identity_problems(),
+                [refused("hobi", HOBI, AgentRefusal::Bound { role: "user" })]
+            );
+            assert_eq!(compiled(&src).agent_uid("hobi"), None);
+            assert_eq!(role_of(&src, HOBI), Some("user"));
+        }
+
+        fn admin_refusal() -> AuthzBasicError {
+            AuthzBasicError::AgentAccountAdmin {
+                agent: "hobi".into(),
+                account: "hobi-svc".into(),
+            }
+        }
+
+        #[test]
+        fn an_agent_service_account_bound_to_admin_refuses_the_load() {
+            for (bindings, uids) in [
+                (
+                    "schema_version: 1\nbindings:\n  admin: [\"hobi-svc\"]\n",
+                    &[("hobi-svc", HOBI)],
+                ),
+                (
+                    "schema_version: 1\nbindings:\n  admin: [\"alias\"]\n",
+                    &[("alias", HOBI)],
+                ),
+            ] {
+                let got = try_source(SHIPPED, Some(bindings), uids, load(vec![hobi()], &[]));
+                assert_eq!(got.unwrap_err(), admin_refusal(), "{bindings}");
+            }
+            assert_eq!(
+                admin_refusal().to_string(),
+                "authz agents: the service account hobi-svc of agent `hobi` is bound to admin in bindings.yaml; an agent never holds admin"
+            );
+        }
+
+        #[test]
+        fn a_live_edit_binding_an_agent_to_admin_is_refused() {
+            let mut src = source(
+                Some("schema_version: 1\nbindings:\n  admin: [\"root\"]\n"),
+                &[("root", 0), ("hobi-svc", HOBI)],
+                load(vec![hobi()], &[]),
+            );
+            assert_eq!(src.agent_uid("hobi"), Some(HOBI));
+            src.set_account_lookup(unanswered_account);
+            let got = src.with_live_bindings(bound(
+                "schema_version: 1\nbindings:\n  admin: [\"root\", \"hobi-svc\"]\n",
+            ));
+            assert_eq!(got.unwrap_err(), admin_refusal());
+            let user = src
+                .with_live_bindings(bound(
+                    "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"hobi-svc\"]\n",
+                ))
+                .unwrap();
+            assert_eq!(user.agent_uid("hobi"), None);
+            let then_admin = user.with_live_bindings(bound(
+                "schema_version: 1\nbindings:\n  admin: [\"root\", \"hobi-svc\"]\n",
+            ));
+            assert_eq!(then_admin.unwrap_err(), admin_refusal(), "user, then admin");
+        }
+
+        #[test]
+        fn every_live_edit_chain_ending_with_an_agent_under_admin_is_refused() {
+            const ROOT: &str = "schema_version: 1\nbindings:\n  admin: [\"root\"]\n";
+            const ADMIN: &str = "schema_version: 1\nbindings:\n  admin: [\"root\", \"hobi-svc\"]\n";
+            for (tag, steps, last) in [
+                (
+                    "guest, then admin",
+                    vec!["schema_version: 1\nbindings:\n  admin: [\"root\"]\n  guest: [\"hobi-svc\"]\n"],
+                    ADMIN,
+                ),
+                (
+                    "contained, released, then admin",
+                    vec![
+                        "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary: [\"hobi-svc\"]\n",
+                        ROOT,
+                    ],
+                    ADMIN,
+                ),
+                (
+                    "an alias added, then moved to admin",
+                    vec!["schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"alias\"]\n"],
+                    "schema_version: 1\nbindings:\n  admin: [\"root\", \"alias\"]\n",
+                ),
+                (
+                    "removed, then re-added under admin",
+                    vec![
+                        "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"hobi-svc\"]\n",
+                        ROOT,
+                    ],
+                    ADMIN,
+                ),
+            ] {
+                let mut src = source(
+                    Some(ROOT),
+                    &[("root", 0), ("hobi-svc", HOBI), ("alias", HOBI)],
+                    load(vec![hobi()], &[]),
+                );
+                assert_eq!(src.agent_uid("hobi"), Some(HOBI), "{tag}");
+                src.set_account_lookup(unanswered_account);
+                for step in steps {
+                    src = src
+                        .with_live_bindings(bound(step))
+                        .unwrap_or_else(|e| panic!("{tag}: {step}: {e}"));
+                }
+                let got = src.with_live_bindings(bound(last));
+                assert_eq!(got.unwrap_err(), admin_refusal(), "{tag}");
+            }
+        }
+
+        #[test]
+        fn a_live_edit_moving_a_load_bound_agent_to_admin_is_refused() {
+            let mut src = source(
+                Some("schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"hobi-svc\"]\n"),
+                &[("root", 0), ("hobi-svc", HOBI)],
+                load(vec![hobi()], &[]),
+            );
+            assert_eq!(src.agent_uid("hobi"), None);
+            src.set_account_lookup(unanswered_account);
+            let got = src.with_live_bindings(bound(
+                "schema_version: 1\nbindings:\n  admin: [\"root\", \"hobi-svc\"]\n",
+            ));
+            assert_eq!(got.unwrap_err(), admin_refusal());
+        }
+
+        #[test]
+        fn an_admin_binding_by_any_path_refuses_whatever_else_lists_the_account() {
+            for bindings in [
+                "schema_version: 1\nbindings:\n  user: [\"hobi-svc\"]\n  admin: [\"alias\"]\n",
+                "schema_version: 1\nbindings:\n  guest: [\"hobi-svc\"]\n  admin: [\"alias\"]\n",
+                "schema_version: 1\nbindings:\n  admin: [\"hobi-svc\"]\n  user: [\"alias\"]\n",
+                "schema_version: 1\nbindings:\n  user: [\"alias\"]\n  admin: [\"hobi-svc\"]\n",
+                "schema_version: 1\nbindings:\n  adversary: [\"hobi-svc\"]\n  admin: [\"alias\"]\n",
+            ] {
+                let got = try_source(
+                    SHIPPED,
+                    Some(bindings),
+                    &[("hobi-svc", HOBI), ("alias", HOBI)],
+                    load(vec![hobi()], &[]),
+                );
+                assert_eq!(got.unwrap_err(), admin_refusal(), "{bindings}");
+            }
+            let user_and_guest = source(
+                Some(
+                    "schema_version: 1\nbindings:\n  guest: [\"hobi-svc\"]\n  user: [\"alias\"]\n",
+                ),
+                &[("hobi-svc", HOBI), ("alias", HOBI)],
+                load(vec![hobi()], &[]),
+            );
+            assert_eq!(user_and_guest.agent_uid("hobi"), None);
+            assert_eq!(
+                user_and_guest
+                    .identity_problems()
+                    .iter()
+                    .filter(|p| matches!(p, IdentityProblem::AgentRefused { .. }))
+                    .collect::<Vec<_>>(),
+                [&refused("hobi", HOBI, AgentRefusal::Bound { role: "user" })]
+            );
+        }
+
+        #[test]
+        fn a_human_named_by_an_enrollment_is_not_locked_out() {
+            for role in ["user", "admin"] {
+                let bindings = format!("schema_version: 1\nbindings:\n  {role}: [\"jin\"]\n");
+                let src = source(
+                    Some(&bindings),
+                    &[("jin", JIN)],
+                    load(vec![enrollment("jin", "jin", JIN, AgentRole::Guest)], &[]),
+                );
+                assert_eq!(
+                    src.identity_problems(),
+                    [refused(
+                        "jin",
+                        JIN,
+                        AgentRefusal::Account(AccountRefusal::MaknaeGroupMember)
+                    )],
+                    "{role}"
+                );
+                assert_eq!(compiled(&src).agent_uid("jin"), None, "{role}");
+                assert_eq!(role_of(&src, JIN), Some(role), "{role}");
+            }
+            let shelled = source(
+                Some("schema_version: 1\nbindings:\n  admin: [\"rm-svc\"]\n"),
+                &[("rm-svc", SHELLED)],
+                load(
+                    vec![enrollment("rm", "rm-svc", SHELLED, AgentRole::User)],
+                    &[],
+                ),
+            );
+            assert_eq!(role_of(&shelled, SHELLED), Some("admin"));
+            assert_eq!(shelled.agent_uid("rm"), None);
+        }
+
+        #[test]
+        fn the_subject_list_names_enrolled_agents_without_explicit_bindings() {
+            let gone = enrollment("gone", "ghost-svc", 4040, AgentRole::User);
+            let snap = compiled(&source(None, &[], load(vec![hobi(), gone], &[])));
+            assert!(!snap.has_explicit_bindings());
+            let binding = |role: &str, uid: u32| maknae_security::SubjectBinding {
+                role: role.into(),
+                members: vec![format!("uid:{uid}")],
+            };
+            assert_eq!(
+                snap.subjects(501),
+                Some(vec![binding("admin", 501), binding("user", HOBI)])
+            );
+            assert_eq!(
+                snap.subject_entries(501),
+                Some(vec![
+                    ListedSubject {
+                        uid: Some(501),
+                        names: vec![],
+                        state: SubjectState::Principal,
+                    },
+                    ListedSubject {
+                        uid: Some(HOBI),
+                        names: vec!["hobi-svc".into()],
+                        state: SubjectState::Bound("user"),
+                    },
+                ])
+            );
+            assert_eq!(snap.subjects(HOBI), Some(vec![binding("user", HOBI)]));
+            assert_eq!(snap.agents(), [(HOBI, "hobi".to_string())].into());
+            let a = auth(&source(None, &[], load(vec![hobi()], &[])), 501);
+            assert_eq!(
+                maknae_security::Authorizer::subjects(&a),
+                Some(vec![binding("admin", 501), binding("user", HOBI)])
+            );
+            let none = compiled(&source(None, &[], load(vec![], &[])));
+            assert_eq!(none.subjects(501), None);
+            assert_eq!(none.subject_entries(501), None);
+            let explicit = compiled(&source(
+                Some(URSULA_USER),
+                &[("ursula", URSULA)],
+                load(vec![hobi()], &[]),
+            ));
+            assert!(explicit.has_explicit_bindings());
+            assert_eq!(
+                explicit
+                    .subject_entries(501)
+                    .unwrap()
+                    .iter()
+                    .map(|s| s.uid)
+                    .collect::<Vec<_>>(),
+                [Some(URSULA), Some(HOBI)]
+            );
+        }
+
+        #[test]
+        fn an_agent_listed_as_adversary_is_enrolled_and_contained() {
+            let src = source(
+                Some("schema_version: 1\nbindings:\n  adversary: [\"hobi-svc\"]\n"),
+                &[("hobi-svc", HOBI)],
+                load(vec![hobi()], &[]),
+            );
+            assert!(src.identity_problems().is_empty());
+            assert_eq!(compiled(&src).agent_uid("hobi"), Some(HOBI));
+            assert_eq!(role_of(&src, HOBI), Some("adversary"));
+        }
+
+        #[test]
+        fn a_live_contain_succeeds_while_the_account_lookup_fails() {
+            let mut src = source(
+                Some("schema_version: 1\nbindings:\n  user: [\"ursula\"]\n"),
+                &[("ursula", URSULA)],
+                load(vec![hobi()], &[]),
+            );
+            src.set_account_lookup(unanswered_account);
+            assert!(matches!(
+                src.with_bindings(src.bindings().clone()),
+                Err(AuthzBasicError::AgentLookup(_))
+            ));
+            let live = src
+                .with_live_bindings(bound(
+                    "schema_version: 1\nbindings:\n  user: [\"ursula\"]\n  adversary: [{uid: 4242}]\n",
+                ))
+                .unwrap();
+            assert_eq!(live.agent_uid("hobi"), Some(HOBI));
+            assert_eq!(compiled(&live).agent_uid("hobi"), Some(HOBI));
+        }
+
+        #[test]
+        fn a_live_edit_cannot_change_the_agent_set() {
+            let named = source(
+                Some("schema_version: 1\nbindings:\n  user: [\"hobi-svc\"]\n"),
+                &[("hobi-svc", HOBI)],
+                load(vec![hobi()], &[]),
+            );
+            assert_eq!(named.agent_uid("hobi"), None);
+            let unnamed = named
+                .with_live_bindings(bound("schema_version: 1\nbindings:\n  user: [\"root\"]\n"))
+                .unwrap();
+            assert_eq!(unnamed.agent_uid("hobi"), None, "a live edit adds no agent");
+
+            let src = source(
+                Some("schema_version: 1\nbindings:\n  admin: [\"root\"]\n"),
+                &[("root", 0), ("hobi-svc", HOBI)],
+                load(vec![hobi()], &[]),
+            );
+            assert_eq!(src.agent_uid("hobi"), Some(HOBI));
+            let bound_user = src
+                .with_live_bindings(bound(
+                    "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"hobi-svc\"]\n",
+                ))
+                .unwrap();
+            assert_eq!(bound_user.agent_uid("hobi"), None);
+            assert_eq!(
+                bound_user.identity_problems(),
+                [refused("hobi", HOBI, AgentRefusal::Bound { role: "user" })]
+            );
+            assert_eq!(role_of(&bound_user, HOBI), Some("user"));
+            let back = bound_user
+                .with_live_bindings(bound("schema_version: 1\nbindings:\n  admin: [\"root\"]\n"))
+                .unwrap();
+            assert_eq!(back.agent_uid("hobi"), None, "only a file load enrolls");
+        }
+
+        const URSULA_USER: &str = "schema_version: 1\nbindings:\n  user: [\"ursula\"]\n";
+
+        #[test]
+        fn an_agent_without_policy_reads_nothing() {
+            let src = source(
+                Some(URSULA_USER),
+                &[("ursula", URSULA)],
+                load(vec![hobi()], &[]),
+            );
+            let a = auth(&src, 501);
+            let agent = a.decide_cited(&agent_channel(read(HOBI, "/home/operator/notes"), "hobi"));
+            assert!(
+                matches!(agent.verdict, Verdict::NotApplicable { .. }),
+                "{agent:?}"
+            );
+            assert_eq!(agent.role, Some("user"));
+            let human = a.decide_cited(&read(URSULA, "/home/operator/notes"));
+            assert_eq!(human.verdict, audit_permit());
+        }
+
+        const HOBI_POLICY: &str = "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: [\"Read(~/docs/secret/**)\"]\n";
+
+        #[test]
+        fn an_agent_policy_permits_what_it_names_and_cites_its_file() {
+            let src = source(None, &[], load(vec![hobi()], &[("hobi", HOBI_POLICY)]));
+            let a = auth(&src, 501);
+            let d = a.decide_cited(&agent_channel(read(HOBI, "/home/operator/docs/a"), "hobi"));
+            assert_eq!(d.verdict, audit_permit());
+            let rule = d.rule.expect("an agent's path permit cites its rule");
+            assert_eq!(
+                rule.section,
+                "/etc/maknae/agents/hobi/policy.yaml#agents.hobi"
+            );
+            assert_eq!(rule.key, "rule:agents.hobi.permissions:allow:0");
+            let graph = a.snapshot().graph().clone();
+            let node = graph.node(maknae_graph::record::NodeId(rule.node)).unwrap();
+            assert_eq!(node.key, rule.key);
+            let section = graph
+                .lookup(maknae_graph::kernel::SECTION, &rule.section)
+                .expect("the agent policy section is a node");
+            let file = graph
+                .lookup(
+                    maknae_graph::kernel::CONFIG_SOURCE,
+                    "/etc/maknae/agents/hobi/policy.yaml",
+                )
+                .expect("the agent policy file is a config source");
+            assert!(graph
+                .out_edges(section.id, maknae_graph::kernel::PART_OF)
+                .any(|e| e.to == file.id));
+            let digests = src.section_digests(test_digest);
+            let canonical = &load(vec![], &[("hobi", HOBI_POLICY)]).policies[0].canonical;
+            assert_eq!(digests["agents.hobi"], test_digest(canonical.as_bytes()));
+            let without = source(None, &[], load(vec![hobi()], &[]));
+            assert_ne!(
+                compiled(&src).policy_sha256(test_digest),
+                compiled(&without).policy_sha256(test_digest)
+            );
+        }
+
+        #[test]
+        fn the_site_deny_floor_holds_under_an_agent_policy() {
+            let src = source(None, &[], load(vec![hobi()], &[("hobi", HOBI_POLICY)]));
+            let d = auth(&src, 501).decide_cited(&agent_channel(
+                read(HOBI, "/home/operator/.ssh/id_rsa"),
+                "hobi",
+            ));
+            assert_eq!(
+                d.verdict,
+                Verdict::Deny {
+                    reason: "denied by policy entry Read(~/.ssh/**)".into()
+                }
+            );
+            assert_eq!(d.rule.unwrap().section, format!("{PATH}#permissions"));
+        }
+
+        #[test]
+        fn an_agent_policy_deny_beats_its_allow() {
+            let src = source(None, &[], load(vec![hobi()], &[("hobi", HOBI_POLICY)]));
+            let d = auth(&src, 501).decide_cited(&agent_channel(
+                read(HOBI, "/home/operator/docs/secret/a"),
+                "hobi",
+            ));
+            assert_eq!(
+                d.verdict,
+                Verdict::Deny {
+                    reason: "denied by agents.hobi.policy.permissions entry Read(~/docs/secret/**)"
+                        .into()
+                }
+            );
+            assert_eq!(d.rule.unwrap().key, "rule:agents.hobi.permissions:deny:0");
+            let limited = source(
+                None,
+                &[],
+                load(
+                    vec![hobi()],
+                    &[(
+                        "hobi",
+                        "schema_version: 1\nactions:\n  allow: [\"fs.read\"]\n",
+                    )],
+                ),
+            );
+            let mut status = agent_channel(whoami(i64::from(HOBI)), "hobi");
+            status.action = Action("session.prompt".into());
+            assert_eq!(
+                auth(&limited, 501).decide(&status),
+                Verdict::Deny {
+                    reason:
+                        "subject hobi-svc: session.prompt is not in agents.hobi.policy.actions allow"
+                            .into()
+                }
+            );
+        }
+
+        #[test]
+        fn an_agent_also_named_in_authz_subjects_refuses_the_load() {
+            let authz = format!(
+                "{SHIPPED}subjects:\n  hobi-svc:\n    actions:\n      allow: [\"fs.read\"]\n"
+            );
+            let got = try_source(&authz, None, &[("hobi-svc", HOBI)], load(vec![hobi()], &[]));
+            assert_eq!(
+                got.unwrap_err(),
+                AuthzBasicError::AgentPolicyTwice {
+                    agent: "hobi".into(),
+                    account: "hobi-svc".into(),
+                    name: "hobi-svc".into()
+                }
+            );
+            let shelled = format!(
+                "{SHIPPED}subjects:\n  rm-svc:\n    actions:\n      allow: [\"fs.read\"]\n"
+            );
+            let ignored = try_source(
+                &shelled,
+                None,
+                &[("rm-svc", SHELLED)],
+                load(
+                    vec![enrollment("rm", "rm-svc", SHELLED, AgentRole::User)],
+                    &[],
+                ),
+            )
+            .unwrap();
+            assert_eq!(ignored.agent_uid("rm"), None);
+        }
+
+        #[test]
+        fn an_agent_uid_named_in_authz_subjects_under_another_name_refuses_the_load() {
+            let authz =
+                format!("{SHIPPED}subjects:\n  alias:\n    actions:\n      allow: [\"fs.read\"]\n");
+            let got = try_source(&authz, None, &[("alias", HOBI)], load(vec![hobi()], &[]));
+            assert_eq!(
+                got.unwrap_err(),
+                AuthzBasicError::AgentPolicyTwice {
+                    agent: "hobi".into(),
+                    account: "hobi-svc".into(),
+                    name: "alias".into()
+                }
+            );
+            assert_eq!(
+                AuthzBasicError::AgentPolicyTwice {
+                    agent: "hobi".into(),
+                    account: "hobi-svc".into(),
+                    name: "alias".into()
+                }
+                .to_string(),
+                "authz subjects: `alias` is the account of agent `hobi` (hobi-svc); an agent's policy lives only in agents/hobi/policy.yaml"
+            );
+        }
+
+        #[test]
+        fn taskers_resolve_accounts_uids_and_enrolled_agents() {
+            let suga = enrollment("suga", "suga-svc", SUGA, AgentRole::User);
+            let src = source(
+                None,
+                &[("ursula", URSULA)],
+                load(
+                    vec![hobi(), suga],
+                    &[(
+                        "hobi",
+                        "schema_version: 1\ntaskers: [\"uid:1500\", \"ursula\", \"agent:suga\", \"agent:ghost\"]\n",
+                    )],
+                ),
+            );
+            let snap = compiled(&src);
+            let want: std::collections::BTreeSet<u32> = [1500, URSULA, SUGA].into();
+            assert_eq!(snap.taskers("hobi"), Some(Some(&want)));
+            assert_eq!(snap.taskers("suga"), Some(None));
+            assert_eq!(snap.taskers("ghost"), None);
+        }
+
+        #[test]
+        fn an_unresolved_tasker_account_is_inert() {
+            let policy = "schema_version: 1\ntaskers: [\"no-such-account-609\", \"agent:jin\"]\n";
+            let src = source(None, &[], load(vec![hobi()], &[("hobi", policy)]));
+            let empty = std::collections::BTreeSet::new();
+            assert_eq!(compiled(&src).taskers("hobi"), Some(Some(&empty)));
+            let reloaded = src.with_bindings(src.bindings().clone()).unwrap();
+            assert!(reloaded.answered("no-such-account-609"));
+            assert_eq!(compiled(&reloaded).taskers("hobi"), Some(Some(&empty)));
+        }
+
+        #[test]
+        fn a_skipped_entry_is_reported_and_the_load_succeeds() {
+            let mut agents = load(vec![hobi()], &[]);
+            agents.skipped = vec![
+                maknae_config::SkippedAgentEntry::InvalidName("Bad".into()),
+                maknae_config::SkippedAgentEntry::NoEnrollment("old".into()),
+                maknae_config::SkippedAgentEntry::NotADirectory("stray".into()),
+            ];
+            let src = source(None, &[], agents);
+            assert_eq!(src.agent_uid("hobi"), Some(HOBI));
+            let skipped = |entry: &str, why| IdentityProblem::AgentSkipped {
+                entry: entry.into(),
+                why,
+            };
+            assert_eq!(
+                src.identity_problems(),
+                [
+                    skipped("Bad", "its name is not an agent id"),
+                    skipped("old", "it holds no enrollment.yaml"),
+                    skipped("stray", "it is not a directory"),
+                ]
+            );
+            assert_eq!(
+                compiled(&src).identity_problems().as_ref(),
+                src.identity_problems()
+            );
+        }
+
+        #[test]
+        fn the_file_resolver_and_the_graph_agree_on_agents() {
+            let src = source(
+                Some("schema_version: 1\nbindings:\n  user: [\"ursula\"]\n  admin: [\"jin\"]\n"),
+                &[("ursula", URSULA), ("jin", JIN)],
+                load(
+                    vec![hobi(), enrollment("jin", "jin", JIN, AgentRole::Guest)],
+                    &[],
+                ),
+            );
+            let a = auth(&src, 501);
+            for uid in [HOBI, JIN, URSULA, 501, 4242] {
+                let req = whoami(i64::from(uid));
+                assert_eq!(
+                    a.decide_oracle(&src, &req),
+                    a.decide_reporting_role(&req),
+                    "{uid}"
+                );
+            }
+            let none = source(None, &[], load(vec![hobi()], &[]));
+            let a = auth(&none, HOBI);
+            for uid in [HOBI, 501] {
+                let req = whoami(i64::from(uid));
+                assert_eq!(
+                    a.decide_oracle(&none, &req),
+                    a.decide_reporting_role(&req),
+                    "{uid}"
+                );
             }
         }
     }

@@ -249,3 +249,75 @@ pub(crate) fn permitted_read_marked(home: &std::path::Path, marking: Option<&str
 
 pub(crate) const READ_POLICY: &str =
     "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\n  deny: []\n";
+
+fn agent_dir(config: &Path, id: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let agents = config.join(maknae_config::AGENTS_DIR);
+    let dir = agents.join(id);
+    std::fs::create_dir_all(&dir).unwrap();
+    for d in [&agents, &dir] {
+        std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o750)).unwrap();
+    }
+    dir
+}
+
+pub(crate) fn write_0640(path: &Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, body).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640)).unwrap();
+}
+
+/// `<config>/agents/<id>/enrollment.yaml`, as `maknae enroll agent` writes it.
+pub(crate) fn write_agent(config: &Path, id: &str, account: &str, uid: u32, role: &str) {
+    write_0640(
+        &agent_dir(config, id).join(maknae_config::ENROLLMENT_FILE),
+        &format!("agent_id: {id}\naccount: {account}\nuid: {uid}\nrole: {role}\n"),
+    );
+}
+
+pub(crate) fn write_agent_policy(config: &Path, id: &str, yaml: &str) {
+    write_0640(
+        &agent_dir(config, id).join(maknae_config::POLICY_FILE),
+        yaml,
+    );
+}
+
+/// Host lookups that know one account, `hobi-svc` at uid 2001, no daemons and no groups.
+pub(crate) const HOBI_HOSTS: maknae_authz_basic::HostLookups = maknae_authz_basic::HostLookups {
+    account: hobi_account,
+    daemons: no_daemons,
+    group: no_group,
+};
+
+fn hobi_account(uid: u32) -> Result<Option<maknae_io::HostAccount>, String> {
+    Ok((uid == 2001).then(|| maknae_io::HostAccount {
+        uid,
+        name: "hobi-svc".into(),
+        primary_gid: uid,
+        shell: "/usr/sbin/nologin".into(),
+        dir: "/var/empty".into(),
+        named_groups: Vec::new(),
+    }))
+}
+
+fn no_daemons() -> Result<maknae_io::DaemonFacts, String> {
+    Ok(maknae_io::DaemonFacts {
+        uids: Vec::new(),
+        gids: Vec::new(),
+    })
+}
+
+fn no_group(_: &str) -> Result<Option<u32>, String> {
+    Ok(None)
+}
+
+/// The de-enrollment act.
+pub(crate) fn remove_enrollment(config: &Path, id: &str) {
+    std::fs::remove_file(
+        config
+            .join(maknae_config::AGENTS_DIR)
+            .join(id)
+            .join(maknae_config::ENROLLMENT_FILE),
+    )
+    .unwrap();
+}

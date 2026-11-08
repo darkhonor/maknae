@@ -114,6 +114,12 @@ phase1() {
         '')  fail "no deputy runtime-dir install line found in preinstall" ;;
         *)   fail "deputy runtime dir not -o \"\$EGRESS_UID\" -g \"\$MAKNAE_GID\": $ert_line" ;;
     esac
+    art_line="$(grep -E '^install -d .*/usr/local/var/run/maknae-agent$' "$HERE/scripts/preinstall" || true)"
+    case "$art_line" in
+        *'-m 0750 -o "$MAKNAE_UID" -g "$AGENTS_GID"'*) ok "agent runtime dir is _maknae:maknae-agents 0750 (D1 for the agent socket)" ;;
+        '')  fail "no agent runtime-dir install line found in preinstall" ;;
+        *)   fail "agent runtime dir not -m 0750 -o \"\$MAKNAE_UID\" -g \"\$AGENTS_GID\": $art_line" ;;
+    esac
     elog_line="$(grep -E '^install -d .*/usr/local/var/log/maknae-egress$' "$HERE/scripts/preinstall" | tr -s ' ')"
     case "$elog_line" in
         *'-m 0750 -o "$EGRESS_UID" -g "$EGRESS_GID"'*) ok "deputy log dir is _maknae-egress:_maknae-egress 0750" ;;
@@ -453,6 +459,7 @@ REFUSE
             && ok "$n uid $have matches receipt" || fail "$n uid '$have' != receipt '$want'"
     done
     dscl . -read /Groups/maknae >/dev/null 2>&1 && ok "operator group exists" || fail "operator group MISSING"
+    dscl . -read /Groups/maknae-agents >/dev/null 2>&1 && ok "agents group exists" || fail "agents group MISSING"
 
     # --- PROVENANCE LIFECYCLE: install -> upgrade -> REPLACEMENT -> uninstall --
     # PR #287 review, blocking findings 1 and 3. Two distinct failures, opposite in
@@ -462,8 +469,8 @@ REFUSE
     #   (2) stickiness must NOT survive a re-numbering, or an administrator's
     #       replacement account inherits our ownership claim and uninstall DELETES
     #       IT. Fix (1) naively introduces (2), which is why both are tested.
-    # All FOUR flags are covered — two users and two groups — not just the users.
-    local FLAGS="MaknaeUIDCreatedByUs MaknaeGIDCreatedByUs MaknaeEgressUIDCreatedByUs MaknaeEgressGIDCreatedByUs"
+    # All FIVE flags are covered — two users and three groups — not just the users.
+    local FLAGS="MaknaeUIDCreatedByUs MaknaeGIDCreatedByUs MaknaeEgressUIDCreatedByUs MaknaeEgressGIDCreatedByUs MaknaeAgentsGIDCreatedByUs"
     for k in $FLAGS; do
         [ "$(plutil -extract "$k" raw -o - "$R" 2>/dev/null)" = "true" ] \
             && ok "fresh install: $k = true" || fail "fresh install: $k is not true"
@@ -532,7 +539,7 @@ REFUSE
         && ok "REPLACEMENT: ownership claim DECLINED (flag false) — admin account is safe" \
         || fail "REPLACEMENT: flag stayed true — uninstall would delete the ADMIN's account"
     # The three untouched records must keep their claim; declining must be per-record.
-    for k in MaknaeUIDCreatedByUs MaknaeGIDCreatedByUs MaknaeEgressGIDCreatedByUs; do
+    for k in MaknaeUIDCreatedByUs MaknaeGIDCreatedByUs MaknaeEgressGIDCreatedByUs MaknaeAgentsGIDCreatedByUs; do
         [ "$(plutil -extract "$k" raw -o - "$R" 2>/dev/null)" = "true" ] \
             && ok "REPLACEMENT: $k unaffected (still true)" \
             || fail "REPLACEMENT: $k was collaterally dropped — declining must be per-record"
@@ -551,6 +558,7 @@ REFUSE
         || fail "/var/log/maknae carries an ACE after a reader-free install"
     check_mode "drwxr-x--- _maknae maknae"  /usr/local/var/run/maknae
     check_mode "drwxr-x--- _maknae-egress _maknae" /usr/local/var/run/maknae-egress
+    check_mode "drwxr-x--- _maknae maknae-agents" /usr/local/var/run/maknae-agent
     check_mode "drwxr-x--- _maknae _maknae"  /usr/local/var/log/maknae
     check_mode "drwxr-x--- _maknae-egress _maknae-egress" /usr/local/var/log/maknae-egress
 
@@ -684,7 +692,14 @@ PROBE
     install -d -m 0755 "/Library/Application Support/Maknae/pki" \
         && install -m 0644 /dev/null "/Library/Application Support/Maknae/pki/seal.pub" \
         && ok "planted the published seal.pub" || fail "could not plant seal.pub"
+    local agents_ours
+    agents_ours="$(plutil -extract MaknaeAgentsGIDCreatedByUs raw -o - /usr/local/var/db/maknae/install-receipt.plist 2>/dev/null)"
     "$HERE/uninstall.sh" >/dev/null && ok "uninstall.sh ran" || fail "uninstall.sh failed"
+    if dscl . -read /Groups/maknae-agents >/dev/null 2>&1; then
+        [ "$agents_ours" != "true" ] && ok "agents group kept: the receipt does not record creating it"             || fail "agents group still present although the receipt records creating it"
+    else
+        [ "$agents_ours" = "true" ] && ok "agents group removed: the receipt records creating it"             || fail "agents group removed although the receipt does not record creating it"
+    fi
     [ ! -e /usr/local/bin/maknaed ] && ok "binary removed" || fail "binary still present"
     [ ! -e "/Library/LaunchDaemons/${LABEL}.plist" ] && ok "plist removed" || fail "plist still present"
     [ ! -e /usr/local/lib/maknae ] && ok "FIPS dylib removed" || fail "FIPS dylib still present"
@@ -716,7 +731,7 @@ PROBE
     for gone in /usr/local/bin/maknae-egress /Library/LaunchDaemons/io.maknae.maknae-egress.plist \
                 /Library/LaunchDaemons/io.maknae.policy-sync.plist /Library/Logs/maknae-policy-sync.log \
                 /usr/local/var/run/maknae-egress /usr/local/var/log/maknae-egress \
-                /usr/local/var/run/maknae /usr/local/var/log/maknae \
+                /usr/local/var/run/maknae /usr/local/var/log/maknae /usr/local/var/run/maknae-agent \
                 "/Library/Application Support/Maknae/pki"; do
         [ ! -e "$gone" ] && ok "removed $gone" || fail "still present: $gone"
     done

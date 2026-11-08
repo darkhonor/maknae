@@ -38,7 +38,7 @@ pub(crate) fn now_unix() -> Result<u64, String> {
 
 pub(crate) fn local_username() -> Result<String, String> {
     let uid = nix::unistd::geteuid();
-    let user = nix::unistd::User::from_uid(uid)
+    let user = maknae_io::user_by_uid(uid.as_raw())
         .map_err(|e| format!("cannot look up uid {uid}: {e}"))?
         .ok_or_else(|| format!("uid {uid} has no account name"))?;
     userpass_username_is_acceptable(&user.name).map_err(|why| {
@@ -1009,6 +1009,17 @@ mod tests {
             ] {
                 assert!(!src.contains(needle), "{needle}");
             }
+        }
+    }
+
+    #[test]
+    fn local_username_is_the_effective_accounts_passwd_name() {
+        let me = nix::unistd::User::from_uid(nix::unistd::geteuid())
+            .unwrap()
+            .expect("the test account has a passwd entry");
+        match local_username() {
+            Ok(name) => assert_eq!(name, me.name),
+            Err(e) => assert!(e.contains(&format!("{:?}", me.name)), "{e}"),
         }
     }
 }

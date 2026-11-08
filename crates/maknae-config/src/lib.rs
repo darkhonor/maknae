@@ -30,6 +30,8 @@
 //! ships the US system ([`BasicPolicy`]) and orders nothing itself.
 #![forbid(unsafe_code)]
 
+#[cfg(unix)]
+mod agents;
 mod audit_cfg;
 mod authz;
 mod baseline_doc;
@@ -59,6 +61,15 @@ mod value;
 pub use loader::load_config_root_owned_with_requirement;
 pub use loader::{load_config, load_config_root_owned};
 
+#[cfg(all(unix, feature = "hermetic-test-seam"))]
+pub use agents::load_agents_with_requirement;
+#[cfg(unix)]
+pub use agents::{
+    bindings_conflict, load_agents, parse_agent_enrollment, parse_agent_policy,
+    service_account_check, AccountRefusal, AgentEnrollment, AgentId, AgentPolicy, AgentRole,
+    AgentsLoad, HostAccounts, InvalidAgentId, SkippedAgentEntry, TaskerRef, AGENTS_DIR,
+    AGENT_ENTITY_PREFIX, ENROLLMENT_FILE, NON_LOGIN_SHELLS, POLICY_FILE,
+};
 pub use audit_cfg::{
     audit_from_section, resolve_readers, AuditConfig, ReaderAccount, ReaderLookup, AUDIT_SECTION,
     READER_UID_FLOOR, REFUSED_READER_NAMES, REFUSED_READER_UIDS,
@@ -81,8 +92,8 @@ pub use bindings_sync::{
 // HermeticAuthorizer, #77) can NAME the requirement type without a maknae-io
 // dependency of their own; unix-gated like the fn whose signature carries it.
 pub use authz::{
-    destination_entry_is_acceptable, load_authz, parse_authz, ActionPattern, AuthzError,
-    AuthzPolicy, HomeUnbound, Match3, ModelRef, PathGlob, Pattern, RawActionGrants,
+    destination_entry_is_acceptable, load_authz, parse_authz, parse_subject_entry, ActionPattern,
+    AuthzError, AuthzPolicy, HomeUnbound, Match3, ModelRef, PathGlob, Pattern, RawActionGrants,
     RawDestinations, Request, SubjectActions, SubjectPermissions, SubjectPolicy,
 };
 pub use baseline_doc::{document_sections, value_from_canonical_json, BaselineSections};
@@ -127,7 +138,8 @@ pub use transport::{
     content_write_bound, transport_from_section, TransportConfig, ADMIN_REPLY_MARGIN_MS,
     ADMISSION_AUDIT_TIMEOUT_MS, BASELINE_ACCEPT_REPLY_STAGES, BLOCKING_STAGE_TIMEOUT_MS,
     CONTAINMENT_REPLY_STAGES, GROUP_LOOKUP_TIMEOUT_MS, HOME_RESOLVE_TIMEOUT_MS,
-    MACOS_DAEMON_SOCKET_PATH, PROMPT_MAX_BYTES_FLOOR, TRANSPORT_SECTION, TRANSPORT_TIMEOUT_MS_MAX,
+    MACOS_AGENT_SOCKET_PATH, MACOS_DAEMON_SOCKET_PATH, PROMPT_MAX_BYTES_FLOOR, TRANSPORT_SECTION,
+    TRANSPORT_TIMEOUT_MS_MAX,
 };
 pub use user_providers::{
     user_providers_from_document, UserProviderEntry, UserProviders, USER_PROVIDERS_FILE,

@@ -17,11 +17,13 @@ mod deployment;
 mod diag;
 mod egress;
 mod egress_socket;
+mod enrollment;
 mod groupres;
 mod handler;
 mod host_env;
 pub mod identity_report;
 pub mod live;
+mod membership;
 mod mutation;
 mod mutation_exchange;
 mod posture;
@@ -31,6 +33,7 @@ mod run;
 mod session;
 pub mod session_facts;
 pub mod sync;
+mod task;
 mod uid_gate;
 pub mod vocabulary;
 pub use authz::*;
@@ -51,12 +54,15 @@ pub use egress::{
     EGRESS_MAX_REPLY_FRAME_BYTES, EGRESS_USER,
 };
 pub use egress_socket::SocketEgress;
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+pub use enrollment::FixedEnrollment;
+pub use enrollment::{EnrollmentView, SnapshotEnrollment};
 pub use groupres::*;
 pub use handler::{
-    admits, admitted_user_for_test, after_drain, build_authz_request, build_whoami, client_class,
-    dispatch_verb, is_filesystem_verb, may_respond, may_stop, serve_outcome_to_exit_code,
-    Admission, ChannelClass, Dispatch, Drain, ServeOutcome, APPLY_BY_RESTART_EXIT_CODE,
-    KERNEL_ACTIONS,
+    admits, admitted_user_for_test, after_drain, agent_class, build_authz_request, build_whoami,
+    client_class, dispatch_verb, is_filesystem_verb, may_respond, may_stop,
+    serve_outcome_to_exit_code, Admission, ChannelClass, Dispatch, Drain, ServeOutcome, Stamp,
+    APPLY_BY_RESTART_EXIT_CODE, KERNEL_ACTIONS,
 };
 pub use live::{LiveConfig, LiveValues};
 pub use mutation::AttemptCaps;
@@ -68,13 +74,20 @@ pub use provider_choice::{
     admit_choice, provider_authority, AdmittedChoice, ChoiceRefusal, ProviderAuthority,
 };
 pub use run::{
-    accept_loop, handle, handle_with_attempt_caps, run, AcceptAnswer, AdminOps, BaselineOps,
-    BoxFuture, ConfigView, Conn, ContainAnswer, ContainRequest, ContainmentOps, ContainmentStatus,
-    Corrective, KernelGraphStatus, PlaneAccept, ReleaseRequest, WhereCtx, MAX_SUBJECT_USER_BYTES,
+    accept_loop, handle, handle_with_attempt_caps, run, AcceptAnswer, AdminOps, AgentAdmission,
+    BaselineOps, BoxFuture, ConfigView, Conn, ContainAnswer, ContainRequest, ContainmentOps,
+    ContainmentStatus, Corrective, KernelGraphStatus, PlaneAccept, ReleaseRequest, WhereCtx,
+    MAX_SUBJECT_USER_BYTES,
 };
 #[cfg(any(test, feature = "hermetic-test-seam"))]
 pub use session::AllowFacts;
-pub use session::{Facts, FactsGate, SessionFacts, SessionRecord};
+pub use session::{Facts, FactsGate, SessionChannel, SessionFacts, SessionRecord};
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+pub use task::TaskObjectForTest;
+pub use task::{
+    Enrolled, PlaneSigner, StoredTask, Submitter, TaskRefusal, TaskSigner, TaskStore,
+    MAX_LIVE_TASKS_PER_AGENT,
+};
 
 #[used]
 pub static PRIVILEGED_MARKER: &[u8] = b"PRIVILEGED_MAKNAE_KERNEL";

@@ -42,7 +42,7 @@ MANIFEST=ci/gates/config-disclosure-manifest.txt
 # per entry answers it: a dropped field, a dropped entry, or a field the
 # extractor cannot see all change a number a human must edit deliberately.
 SURFACE=(
-  "crates/maknae-config/src/transport.rs|TransportConfig|transport|5|config"
+  "crates/maknae-config/src/transport.rs|TransportConfig|transport|6|config"
   # The `egress` section (#240): the deputy's socket and the provider deadline.
   "crates/maknae-config/src/egress_cfg.rs|EgressConfig|egress|2|config"
   "crates/maknae-config/src/audit_cfg.rs|AuditConfig|audit|4|config"
@@ -74,7 +74,7 @@ SURFACE=(
   # grant. (This note used to cite the reserved `agent` binding; ADR-0024
   # struck that token, #276. The argument is unchanged: bindings are disclosed
   # policy state, and a field added to their view ships unreviewed.)
-  "crates/maknae-proto/src/wire.rs|RoleBindingView|binding|5|wire"
+  "crates/maknae-proto/src/wire.rs|RoleBindingView|binding|7|wire"
   # The THIRD wire disclosure struct. Its two fields are the caller's OWN peer
   # facts rather than deployment config, which is a defensible reason to scope
   # it out -- but that rule was nowhere written, `RoleBindingView` (policy-file

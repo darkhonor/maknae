@@ -23,6 +23,7 @@ pub mod artifact_write;
 mod helper;
 #[cfg(any(target_os = "macos", test))]
 mod keychain_write;
+mod remove_agent;
 pub mod vault_ops;
 
 use crate::stderr::errln;
@@ -178,6 +179,34 @@ pub enum EnrollError {
         recorded: bool,
     },
     HostNotEnrolled(String),
+    AgentBound {
+        agent: String,
+        account: String,
+        role: &'static str,
+    },
+    AgentNotInAgentGroup {
+        account: String,
+        group: &'static str,
+    },
+    AgentGroupMissing {
+        group: &'static str,
+    },
+    AgentEntityMissing {
+        agent: String,
+        entity: String,
+        mount: String,
+        remains: Vec<String>,
+    },
+    AgentRoleMissing {
+        agent: String,
+        mount: String,
+        entity: String,
+        remains: Vec<String>,
+    },
+    AgentRemoveRetireFailed {
+        agent: String,
+        accessors: Vec<String>,
+    },
 }
 
 impl std::fmt::Display for EnrollError {
@@ -299,7 +328,7 @@ impl std::fmt::Display for EnrollError {
             ),
             EnrollError::AgentRetireFailed { agent, accessors } => write!(
                 f,
-                "agent {agent} has its new SecretID, but these earlier SecretID accessors could not be destroyed: {}; they stay recorded, and the next --rotate retries them",
+                "agent {agent} has its new SecretID, but these earlier SecretID accessors could not be destroyed: {}; they stay recorded, and the next --rotate retries them. A disabled Vault entity for this agent stays disabled until a --rotate retires them all",
                 accessors.join(", ")
             ),
             EnrollError::AgentOrphanedAccessor {
@@ -322,6 +351,58 @@ impl std::fmt::Display for EnrollError {
                 f,
                 "this host is not enrolled ({detail}); run `sudo maknae enroll` first"
             ),
+            EnrollError::AgentBound {
+                agent,
+                account,
+                role,
+            } => write!(
+                f,
+                "account {account} is bound to {role} in bindings.yaml, so it is a person's account and cannot be agent {agent}; give the Agent Daemon its own service account"
+            ),
+            EnrollError::AgentNotInAgentGroup { account, group } => write!(
+                f,
+                "account {account} is not in the {group} group; add it with `{}`, then run enroll again",
+                agent::agent_group_command(account)
+            ),
+            EnrollError::AgentGroupMissing { group } => write!(
+                f,
+                "the {group} group does not exist; the Maknae package creates it, so reinstall the package, or create it with `{}`, then run enroll again",
+                agent::agent_group_create_command()
+            ),
+            EnrollError::AgentEntityMissing {
+                agent,
+                entity,
+                mount,
+                remains,
+            } if remains.is_empty() => write!(
+                f,
+                "Vault has no entity {entity} with an alias on auth/{mount}/; create the AppRole role agent-{agent} on auth/{mount}/, the entity {entity} and the entity's alias on that mount named by the role's RoleID (deploy/vault-pki can create them), then run enroll again"
+            ),
+            EnrollError::AgentEntityMissing {
+                agent,
+                entity,
+                mount,
+                remains,
+            } => write!(
+                f,
+                "agent {agent} is no longer loaded by maknaed after its next reload, but Vault has no entity {entity} with an alias on auth/{mount}/, so nothing in Vault was disabled or destroyed; still in place: {}. Restore the entity and its alias on that mount, named by the role's RoleID, and run remove-agent again, or clean Vault by hand",
+                remains.join("; ")
+            ),
+            EnrollError::AgentRoleMissing {
+                agent,
+                mount,
+                entity,
+                remains,
+            } => write!(
+                f,
+                "agent {agent}: the AppRole role was not found on mount {mount}, but the Vault entity {entity} still exists, so the mount may be wrong and nothing in Vault was disabled or destroyed; still in place: {}. Check the mount; if the agent's role and entity were deleted in Vault, run remove-agent again",
+                remains.join("; ")
+            ),
+            EnrollError::AgentRemoveRetireFailed { agent, accessors } => write!(
+                f,
+                "agent {agent} is de-enrolled and its Vault entity is disabled, but these SecretID accessors could not be destroyed: {}; they stay recorded with the sealed SecretID, and running `maknae enroll remove-agent {agent}` again retries them",
+                accessors.join(", ")
+            ),
         }
     }
 }
@@ -337,6 +418,18 @@ impl From<maknae_vault::VaultError> for EnrollError {
 impl From<maknae_vault::agent_enroll::AgentEnrollError> for EnrollError {
     fn from(e: maknae_vault::agent_enroll::AgentEnrollError) -> Self {
         EnrollError::Agent(e)
+    }
+}
+
+impl From<maknae_vault::agent_enroll::InvalidAgentId> for EnrollError {
+    fn from(e: maknae_vault::agent_enroll::InvalidAgentId) -> Self {
+        EnrollError::Agent(e.into())
+    }
+}
+
+impl From<maknae_vault::agent_enroll::AccountRefusal> for EnrollError {
+    fn from(e: maknae_vault::agent_enroll::AccountRefusal) -> Self {
+        EnrollError::Agent(e.into())
     }
 }
 
@@ -365,7 +458,7 @@ pub trait PasswdLookup {
     fn lookup(&self, uid: u32) -> Option<(String, PathBuf, u32)>;
 }
 
-/// The real passwd lookup, via `nix::unistd::User::from_uid` (spec §4.1's path
+/// The real passwd lookup, via `maknae_io::user_by_uid` (spec §4.1's path
 /// rule: `getpwuid($SUDO_UID)`, never `$HOME`).
 pub struct RealPasswd;
 
@@ -382,9 +475,7 @@ fn canonical_home(dir: PathBuf) -> PathBuf {
 
 impl PasswdLookup for RealPasswd {
     fn lookup(&self, uid: u32) -> Option<(String, PathBuf, u32)> {
-        let user = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid))
-            .ok()
-            .flatten()?;
+        let user = maknae_io::user_by_uid(uid).ok().flatten()?;
         Some((user.name, canonical_home(user.dir), user.gid.as_raw()))
     }
 }
@@ -449,8 +540,7 @@ pub struct EnrollArgs {
     /// The AppRole auth mount `maknaed` logs in through (persisted into the daemon config).
     #[arg(long, default_value_t = maknae_vault::DEFAULT_APPROLE_MOUNT.to_string())]
     pub approle_mount: String,
-    /// The intermediate PKI mount (defaults to the Terraform default; ALWAYS
-    /// persisted).
+    /// The intermediate PKI mount (always persisted).
     #[arg(long, default_value_t = maknae_vault::DEFAULT_PKI_INT_MOUNT.to_string())]
     pub pki_int_mount: String,
     /// The userpass auth mount users log in through with `maknae login`.
@@ -463,7 +553,7 @@ pub struct EnrollArgs {
     #[arg(long, default_value = "maknae/users")]
     pub user_prefix: String,
     /// The plane identity key algorithm (`vault.plane_key`): ml-dsa-87, ecdsa-p384-sha384 or ecdsa-p521-sha512. Must
-    /// equal deploy/vault-pki's plane_key_algorithm.
+    /// equal the key type of the Vault PKI roles.
     #[arg(long, default_value = "ml-dsa-87")]
     pub plane_key: String,
     /// Read the Vault token from this file instead of an interactive prompt.
@@ -510,6 +600,8 @@ impl EnrollArgs {
 pub enum EnrollSub {
     /// Enroll an Agent Daemon: seal its own AppRole SecretID, bound to the given addresses.
     Agent(agent::AgentArgs),
+    /// De-enroll an Agent Daemon: drop its enrollment, disable its entity, destroy its SecretIDs.
+    RemoveAgent(remove_agent::RemoveAgentArgs),
 }
 
 /// Identity/verbosity args shared by every `enroll-helper` verb.
@@ -1654,14 +1746,14 @@ async fn place_graph_key(
 // ============================================================================
 
 fn is_already_maknae_group_member(name: &str, uid: u32) -> Result<bool, EnrollError> {
-    let grp = nix::unistd::Group::from_name("maknae")
+    let grp = maknae_io::group_by_name("maknae")
         .map_err(|e| EnrollError::Owner(format!("group maknae: {e}")))?
         .ok_or_else(|| EnrollError::Owner("no `maknae` group".to_string()))?;
     if grp.mem.iter().any(|m| m == name) {
         return Ok(true);
     }
-    if let Some(user) = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid))
-        .map_err(|e| EnrollError::Owner(e.to_string()))?
+    if let Some(user) =
+        maknae_io::user_by_uid(uid).map_err(|e| EnrollError::Owner(e.to_string()))?
     {
         if user.gid == grp.gid {
             return Ok(true);
@@ -1888,8 +1980,14 @@ pub async fn run_enroll(args: EnrollArgs) -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
-    if let Some(EnrollSub::Agent(a)) = &args.sub {
-        return report(agent::run_enroll_agent(a, locale).await, locale);
+    match &args.sub {
+        Some(EnrollSub::Agent(a)) => {
+            return report(agent::run_enroll_agent(a, locale).await, locale)
+        }
+        Some(EnrollSub::RemoveAgent(a)) => {
+            return report(remove_agent::run_remove_agent(a, locale).await, locale)
+        }
+        None => {}
     }
     println!("{}", msg(locale, MsgId::EnrollStarted));
     report(enroll_inner(&args, locale).await, locale)
@@ -2026,7 +2124,7 @@ const LEGACY_INCLUDE_SIGNATURE: &str =
 /// `u:_maknae:rx` home ACL and enroll's AppArmor local include. The daemon
 /// needs neither (#365). Linux, root context; warn-only, like every enroll grant.
 fn revoke_legacy_home_access(home: &Path, verbose: bool) {
-    if let Ok(Some(user)) = nix::unistd::User::from_name(LEGACY_HOME_ACL_USER) {
+    if let Ok(Some(user)) = maknae_io::user_by_name(LEGACY_HOME_ACL_USER) {
         revoke_home_acl(home, user.uid.as_raw(), verbose);
     }
     if !Path::new("/etc/apparmor.d").is_dir() {
@@ -3091,6 +3189,64 @@ mod tests {
         assert!(out.lines().any(|l| l.starts_with("group:0:")), "{out}");
     }
 
+    /// Run as root with `MAKNAE_ROOT_HOST_TESTS=1` on a disposable test host only: it
+    /// creates the `_maknae` account when the host lacks one, and removes what it created.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn revoke_legacy_home_access_drops_the_daemons_home_acl() {
+        if std::env::var_os("MAKNAE_ROOT_HOST_TESTS").is_none() || !nix::unistd::geteuid().is_root()
+        {
+            return;
+        }
+        struct Created(bool, PathBuf);
+        impl Drop for Created {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.1);
+                if self.0 {
+                    let _ = std::process::Command::new("userdel")
+                        .arg(LEGACY_HOME_ACL_USER)
+                        .status();
+                }
+            }
+        }
+        let created = maknae_io::user_by_name(LEGACY_HOME_ACL_USER)
+            .unwrap()
+            .is_none();
+        if created {
+            assert!(std::process::Command::new("useradd")
+                .args(["--system", "--no-create-home", "--shell", "/sbin/nologin"])
+                .arg(LEGACY_HOME_ACL_USER)
+                .status()
+                .unwrap()
+                .success());
+        }
+        let home = std::env::temp_dir().join(format!("revoke_legacy_{}", std::process::id()));
+        let _guard = Created(created, home.clone());
+        std::fs::create_dir_all(&home).unwrap();
+        let uid = maknae_io::user_by_name(LEGACY_HOME_ACL_USER)
+            .unwrap()
+            .unwrap()
+            .uid
+            .as_raw();
+        let acl = || {
+            let out = std::process::Command::new("getfacl")
+                .args(["-p", "-n", "--omit-header"])
+                .arg(&home)
+                .output()
+                .unwrap();
+            names_acl_entry(&String::from_utf8_lossy(&out.stdout), &uid.to_string())
+        };
+        assert!(std::process::Command::new("setfacl")
+            .args(["-m", &format!("u:{uid}:rx")])
+            .arg(&home)
+            .status()
+            .unwrap()
+            .success());
+        assert!(acl());
+        revoke_legacy_home_access(&home, false);
+        assert!(!acl(), "the daemon's home ACL is still there");
+    }
+
     // ---- preflight_check (Step 2 TDD) --------------------------------------
 
     struct MockPasswd(Vec<(u32, String, PathBuf, u32)>);
@@ -3809,12 +3965,15 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
 -----END CERTIFICATE-----\n";
 
     fn fixture_operator_client(tag: &str) -> maknae_vault::OperatorClient {
+        operator_client_at(tag, "https://vault.invalid.example:8200")
+    }
+
+    pub(super) fn operator_client_at(tag: &str, addr: &str) -> maknae_vault::OperatorClient {
         let ca_path = std::env::temp_dir().join(format!(
             "maknae-enroll-rotate-fixture-ca-{}-{tag}.pem",
             std::process::id()
         ));
         std::fs::write(&ca_path, FIXTURE_CA_PEM).unwrap();
-        // A well-formed https:// address that is never actually connected to —
         // `OperatorClient::new` only builds settings + reads/parses the CA
         // file; it makes no request (verified against vaultrs 0.8.0).
         // Since vaultrs 0.8.0 (reqwest 0.13 under `rustls-no-provider`) building
@@ -3824,7 +3983,7 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
         // the typed guard in the PR that took this bump.
         maknae_crypto::init().unwrap();
         let client = maknae_vault::OperatorClient::new(
-            "https://vault.invalid.example:8200",
+            addr,
             &ca_path,
             Zeroizing::new("test-token".to_string()),
         )
@@ -4717,5 +4876,58 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
             );
             assert!(prod.contains("crate::policy_sync::install("));
         }
+    }
+
+    #[test]
+    fn real_passwd_answers_with_the_accounts_own_entry() {
+        let uid = nix::unistd::geteuid();
+        let me = nix::unistd::User::from_uid(uid)
+            .unwrap()
+            .expect("the test account has a passwd entry");
+        let (name, home, gid) = RealPasswd.lookup(uid.as_raw()).expect("found");
+        assert_eq!(name, me.name);
+        assert_eq!(gid, me.gid.as_raw());
+        assert_eq!(home, me.dir.canonicalize().unwrap_or(me.dir));
+        assert!(home.is_absolute(), "{}", home.display());
+    }
+
+    #[test]
+    fn group_membership_reads_the_maknae_group() {
+        let me = nix::unistd::User::from_uid(nix::unistd::geteuid())
+            .unwrap()
+            .expect("the test account has a passwd entry");
+        let got = is_already_maknae_group_member(&me.name, me.uid.as_raw());
+        match nix::unistd::Group::from_name("maknae").unwrap() {
+            None => assert!(
+                matches!(&got, Err(EnrollError::Owner(m)) if m == "no `maknae` group"),
+                "{got:?}"
+            ),
+            Some(g) => assert_eq!(got.unwrap(), g.mem.contains(&me.name) || me.gid == g.gid,),
+        }
+    }
+
+    #[derive(clap::Parser, Debug)]
+    struct EnrollCli {
+        #[command(flatten)]
+        args: EnrollArgs,
+    }
+
+    #[tokio::test]
+    async fn run_enroll_off_root_exits_failure() {
+        use clap::Parser;
+        if nix::unistd::geteuid().is_root() {
+            return;
+        }
+        let cli = EnrollCli::try_parse_from([
+            "maknae",
+            "agent",
+            "hobi",
+            "--account",
+            "hobi-svc",
+            "--bind-cidr",
+            "10.0.0.5",
+        ])
+        .unwrap();
+        assert_eq!(run_enroll(cli.args).await, ExitCode::FAILURE);
     }
 }

@@ -20,7 +20,7 @@ pub fn canonical_home(dir: &Path) -> Option<PathBuf> {
 /// The calling process's own home: the passwd record for its effective uid,
 /// never `$HOME` and never a lookup by name.
 pub fn session_home() -> Option<PathBuf> {
-    nix::unistd::User::from_uid(nix::unistd::geteuid())
+    crate::user_by_uid(nix::unistd::geteuid().as_raw())
         .ok()
         .flatten()
         .and_then(|u| canonical_home(&u.dir))

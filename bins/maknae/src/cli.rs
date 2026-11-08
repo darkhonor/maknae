@@ -774,7 +774,11 @@ fn subject_table(entries: &[maknae_proto::RoleBindingView]) -> Vec<String> {
                 } else {
                     e.label.clone()
                 }),
-                terminal_safe(&e.state),
+                terminal_safe(&match (&e.agent, e.principal) {
+                    (Some(a), _) => format!("{} (agent {a})", e.state),
+                    (None, true) => format!("{} (principal)", e.state),
+                    (None, false) => e.state.clone(),
+                }),
             ]
         })
         .collect();
@@ -1330,7 +1334,7 @@ mod tests {
                     assert!(!a.rotate);
                     assert_eq!(a.token_file, None);
                 }
-                None => panic!("expected the agent subcommand"),
+                Some(EnrollSub::RemoveAgent(_)) | None => panic!("expected the agent subcommand"),
             },
             other => panic!("expected Command::Enroll, got {other:?}"),
         }
@@ -1631,6 +1635,8 @@ mod tests {
             uid,
             label: label.into(),
             state: state.into(),
+            agent: None,
+            principal: false,
         }
     }
 
@@ -1682,6 +1688,29 @@ mod tests {
             subject_table(&[entry("user", &["uid:1", "uid:2"], None, "", "")]),
             ["UID  ROLE  SUBJECT       STATE", "-    user  uid:1, uid:2"],
             "an older daemon's per-role entry"
+        );
+    }
+
+    #[test]
+    fn the_principals_row_is_marked() {
+        let mut p = entry("admin", &[], Some(501), "uid 501", "bound admin");
+        p.principal = true;
+        assert_eq!(
+            subject_table(&[p])[1],
+            "501  admin  uid 501  bound admin (principal)"
+        );
+    }
+
+    #[test]
+    fn an_agents_row_names_its_agent() {
+        let mut agent = entry("user", &[], Some(2001), "hobi-svc (uid 2001)", "bound user");
+        agent.agent = Some("hobi\u{1b}".into());
+        assert_eq!(
+            subject_table(&[agent]),
+            [
+                "UID   ROLE  SUBJECT              STATE",
+                "2001  user  hobi-svc (uid 2001)  bound user (agent hobi\\u{1b})",
+            ]
         );
     }
 

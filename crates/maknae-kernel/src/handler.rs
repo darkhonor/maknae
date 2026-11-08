@@ -12,6 +12,7 @@ use maknae_vault::{ChannelPeer, PeerAuth, VaultError};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Admission {
     MaknaeGroupMember,
+    EnrolledAgent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +29,19 @@ pub fn client_class(transport: &maknae_config::TransportConfig) -> ChannelClass 
         admission: Admission::MaknaeGroupMember,
         lane: maknae_security::Lane::Local,
         socket: transport.socket_path.clone(),
+    }
+}
+
+pub fn agent_class(socket: std::path::PathBuf, trust_domain: &str) -> ChannelClass {
+    ChannelClass {
+        peer_auth: PeerAuth::PlaneLeaf {
+            accept: maknae_vault::SanRule::Agent {
+                trust_domain: trust_domain.to_string(),
+            },
+        },
+        admission: Admission::EnrolledAgent,
+        lane: maknae_security::Lane::Local,
+        socket,
     }
 }
 
@@ -143,13 +157,14 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         | Verb::McpToolCall
         | Verb::McpResourceRead
         | Verb::McpPromptGet
-        | Verb::McpSamplingCreate => Dispatch::NoBehaviour,
+        | Verb::McpSamplingCreate
+        | Verb::TaskSubmit { .. } => Dispatch::NoBehaviour,
     }
 }
 
 pub fn peer_san(peer: &ChannelPeer) -> Option<&str> {
     match peer {
-        ChannelPeer::Certified(san) => Some(san),
+        ChannelPeer::Certified(san) | ChannelPeer::Agent { san, .. } => Some(san),
         ChannelPeer::Certless => None,
     }
 }
@@ -316,6 +331,7 @@ pub fn verb_to_action(verb: &Verb) -> &'static str {
         Verb::McpResourceRead => "mcp.resource.read",
         Verb::McpPromptGet => "mcp.prompt.get",
         Verb::McpSamplingCreate => "mcp.sampling.create",
+        Verb::TaskSubmit { .. } => "session.task",
     }
 }
 
@@ -332,6 +348,32 @@ pub fn admitted_user_for_test(user: Option<&str>) -> Option<String> {
     crate::run::admitted_user_pub(user)
 }
 
+/// The channel facts the kernel stamps on a client request.
+#[derive(Clone, Copy)]
+pub enum Stamp<'a> {
+    Client,
+    Agent {
+        agent: &'a maknae_config::AgentId,
+        task: Option<&'a TaskStamp>,
+    },
+}
+
+/// The cited task's id and tasker, the only task facts a request is stamped with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskStamp {
+    pub id: maknae_proto::TaskId,
+    pub tasker: String,
+}
+
+impl TaskStamp {
+    pub fn of(task: &maknae_proto::TaskObject) -> Self {
+        Self {
+            id: task.task_id,
+            tasker: maknae_proto::tasker_text(&task.tasker),
+        }
+    }
+}
+
 /// Build the seam Request from the verb + kernel-verified peer uid. Subject
 /// carries the kernel-verified `uid` (i64 carriage of the u32 — lossless) and,
 /// when the kernel resolves one, the requester's home `~` binds to; both are
@@ -345,10 +387,35 @@ pub fn build_authz_request(
     home: Option<&std::path::Path>,
     lane: maknae_security::Lane,
     admitted: Option<&crate::provider_choice::AdmittedChoice<'_>>,
+    stamp: &Stamp<'_>,
 ) -> maknae_security::Request {
     use maknae_security::{Action, AttrValue, Attributes, Context, Resource, Subject};
     let mut subject = Attributes::new();
     subject.insert("uid", AttrValue::Int(i64::from(peer_uid)));
+    let channel = match stamp {
+        Stamp::Client => maknae_security::CHANNEL_CLIENT,
+        Stamp::Agent { agent, task } => {
+            subject.insert(
+                maknae_security::SUBJECT_AGENT,
+                AttrValue::Str(agent.as_str().into()),
+            );
+            if let Some(t) = task {
+                subject.insert(
+                    maknae_security::SUBJECT_TASK,
+                    AttrValue::Str(t.id.to_string()),
+                );
+                subject.insert(
+                    maknae_security::SUBJECT_TASKER,
+                    AttrValue::Str(t.tasker.clone()),
+                );
+            }
+            maknae_security::CHANNEL_AGENT
+        }
+    };
+    subject.insert(
+        maknae_security::SUBJECT_CHANNEL,
+        AttrValue::Str(channel.into()),
+    );
     if let Some(h) = home.and_then(std::path::Path::to_str) {
         subject.insert(maknae_security::SUBJECT_HOME, AttrValue::Str(h.to_owned()));
     }
@@ -514,6 +581,71 @@ mod tests {
     }
 
     #[test]
+    fn the_agent_class_takes_an_agent_leaf_on_its_own_socket() {
+        assert_eq!(
+            agent_class("/run/maknae/agent.sock".into(), "d"),
+            ChannelClass {
+                peer_auth: PeerAuth::PlaneLeaf {
+                    accept: maknae_vault::SanRule::Agent {
+                        trust_domain: "d".into()
+                    }
+                },
+                admission: Admission::EnrolledAgent,
+                lane: maknae_security::Lane::Local,
+                socket: "/run/maknae/agent.sock".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn the_stamp_names_the_channel_the_agent_and_the_cited_task() {
+        use crate::task::TaskObjectForTest;
+        use maknae_security::{
+            AttrValue, CHANNEL_AGENT, CHANNEL_CLIENT, SUBJECT_AGENT, SUBJECT_CHANNEL, SUBJECT_TASK,
+            SUBJECT_TASKER,
+        };
+        let get = |r: &maknae_security::Request, k: &str| r.subject.0.get(k).cloned();
+        let s = |v: &str| Some(AttrValue::Str(v.into()));
+        let local = maknae_security::Lane::Local;
+        let client = build_authz_request(&Verb::Whoami, 501, None, local, None, &Stamp::Client);
+        assert_eq!(get(&client, SUBJECT_CHANNEL), s(CHANNEL_CLIENT));
+        for k in [SUBJECT_AGENT, SUBJECT_TASK, SUBJECT_TASKER] {
+            assert_eq!(get(&client, k), None, "{k}");
+        }
+        let hobi = maknae_config::AgentId::parse("hobi").unwrap();
+        let bare = build_authz_request(
+            &Verb::Whoami,
+            2001,
+            None,
+            local,
+            None,
+            &Stamp::Agent {
+                agent: &hobi,
+                task: None,
+            },
+        );
+        assert_eq!(get(&bare, SUBJECT_CHANNEL), s(CHANNEL_AGENT));
+        assert_eq!(get(&bare, SUBJECT_AGENT), s("hobi"));
+        assert_eq!(get(&bare, SUBJECT_TASK), None);
+        assert_eq!(get(&bare, SUBJECT_TASKER), None);
+        let task = TaskStamp::of(&maknae_proto::TaskObject::for_test("hobi", 1002));
+        let tasked = build_authz_request(
+            &Verb::Whoami,
+            2001,
+            None,
+            local,
+            None,
+            &Stamp::Agent {
+                agent: &hobi,
+                task: Some(&task),
+            },
+        );
+        assert_eq!(get(&tasked, SUBJECT_AGENT), s("hobi"));
+        assert_eq!(get(&tasked, SUBJECT_TASK), s(&task.id.to_string()));
+        assert_eq!(get(&tasked, SUBJECT_TASKER), s("uid:1002"));
+    }
+
+    #[test]
     fn exactly_the_four_file_actions_are_filesystem_verbs() {
         let file_actions = ["fs.read", "fs.write", "fs.delete", "fs.mkdir"];
         let verbs = all_verbs();
@@ -592,24 +724,31 @@ mod tests {
             None,
             maknae_security::Lane::Local,
             Some(&admitted),
+            &Stamp::Client,
         );
         assert_eq!(
             r.resource.0.get("destination"),
             Some(&maknae_security::AttrValue::Str("provider:openai".into()))
         );
-        assert!(
-            build_authz_request(&v, 1002, None, maknae_security::Lane::Local, None)
-                .resource
-                .0
-                .get("destination")
-                .is_none()
-        );
+        assert!(build_authz_request(
+            &v,
+            1002,
+            None,
+            maknae_security::Lane::Local,
+            None,
+            &Stamp::Client,
+        )
+        .resource
+        .0
+        .get("destination")
+        .is_none());
         assert!(build_authz_request(
             &Verb::Ping,
             1002,
             None,
             maknae_security::Lane::Local,
-            Some(&admitted)
+            Some(&admitted),
+            &Stamp::Client,
         )
         .resource
         .0
@@ -662,6 +801,7 @@ mod tests {
             None,
             maknae_security::Lane::Local,
             Some(&admitted),
+            &Stamp::Client,
         );
         assert_eq!(
             r.resource.0.get("model"),
@@ -669,19 +809,25 @@ mod tests {
                 "openrouter/meta/llama-3".into()
             ))
         );
-        assert!(
-            build_authz_request(&v, 1002, None, maknae_security::Lane::Local, None)
-                .resource
-                .0
-                .get("model")
-                .is_none()
-        );
+        assert!(build_authz_request(
+            &v,
+            1002,
+            None,
+            maknae_security::Lane::Local,
+            None,
+            &Stamp::Client,
+        )
+        .resource
+        .0
+        .get("model")
+        .is_none());
         assert!(build_authz_request(
             &Verb::Ping,
             1002,
             None,
             maknae_security::Lane::Local,
-            Some(&admitted)
+            Some(&admitted),
+            &Stamp::Client,
         )
         .resource
         .0
@@ -826,15 +972,21 @@ mod tests {
                 "admin.baseline.accept",
                 "admin.contain",
                 "admin.release",
-                "session.prompt"
+                "session.prompt",
+                "session.task"
             ],
             "the hand-copied list in the class test above must match the constant"
         );
+        let (unbuilt, built): (Vec<&str>, Vec<&str>) =
+            real.iter().partition(|t| **t == "session.task");
         assert!(
-            all_dispatch(real),
-            "every grantable term must dispatch to a real arm — a grantable \
-             term with NoBehaviour is granted-but-unbuilt, which ADR-0010 \
-             defines out of existence"
+            !all_dispatch(&unbuilt),
+            "session.task is decided in #609 and built by #610"
+        );
+        assert!(
+            all_dispatch(&built),
+            "every grantable term other than session.task must dispatch to a \
+             real arm"
         );
         // The discriminator discriminates: a known ungrantable term has no
         // real arm, so the helper must say false — otherwise the assert above
@@ -984,6 +1136,16 @@ mod tests {
     }
 
     #[test]
+    fn peer_san_names_an_agent_peer() {
+        let peer = ChannelPeer::Agent {
+            san: "spiffe://d/plane/agent/hobi".to_string(),
+            agent: maknae_vault::agent_enroll::AgentId::parse("hobi").unwrap(),
+            not_after: std::time::UNIX_EPOCH,
+        };
+        assert_eq!(peer_san(&peer), Some("spiffe://d/plane/agent/hobi"));
+    }
+
+    #[test]
     fn build_whoami_is_not_pong() {
         // A mutant returning Payload::Pong must fail.
         assert_ne!(build_whoami(Some("spiffe://d/plane/cli"), 1), Payload::Pong);
@@ -1076,13 +1238,20 @@ mod tests {
             Some(home),
             maknae_security::Lane::Local,
             None,
+            &Stamp::Client,
         );
         assert_eq!(
             with.subject.0.str(maknae_security::SUBJECT_HOME),
             Some("/home/b")
         );
-        let without =
-            build_authz_request(&Verb::Ping, 501, None, maknae_security::Lane::Local, None);
+        let without = build_authz_request(
+            &Verb::Ping,
+            501,
+            None,
+            maknae_security::Lane::Local,
+            None,
+            &Stamp::Client,
+        );
         assert_eq!(without.subject.0.get(maknae_security::SUBJECT_HOME), None);
     }
 
@@ -1096,13 +1265,21 @@ mod tests {
             Some(home),
             maknae_security::Lane::Local,
             None,
+            &Stamp::Client,
         );
         assert_eq!(req.subject.0.get(maknae_security::SUBJECT_HOME), None);
     }
 
     #[test]
     fn request_carries_uid_lossless_at_both_extremes() {
-        let r = build_authz_request(&Verb::Ping, 0, None, maknae_security::Lane::Local, None);
+        let r = build_authz_request(
+            &Verb::Ping,
+            0,
+            None,
+            maknae_security::Lane::Local,
+            None,
+            &Stamp::Client,
+        );
         assert_eq!(
             r.subject.0.get("uid"),
             Some(&maknae_security::AttrValue::Int(0))
@@ -1113,6 +1290,7 @@ mod tests {
             None,
             maknae_security::Lane::Local,
             None,
+            &Stamp::Client,
         );
         assert_eq!(
             r.subject.0.get("uid"),
@@ -1122,7 +1300,14 @@ mod tests {
 
     #[test]
     fn request_action_matches_taxonomy_and_resource_is_empty_for_non_read() {
-        let r = build_authz_request(&Verb::Whoami, 501, None, maknae_security::Lane::Local, None);
+        let r = build_authz_request(
+            &Verb::Whoami,
+            501,
+            None,
+            maknae_security::Lane::Local,
+            None,
+            &Stamp::Client,
+        );
         assert_eq!(r.action.0, "admin.whoami");
         assert!(r.resource.0.is_empty());
         // Context is no longer empty: every request carries its lane (ADR-0009 D8).
@@ -1144,6 +1329,7 @@ mod tests {
             None,
             maknae_security::Lane::Local,
             None,
+            &Stamp::Client,
         );
         assert_eq!(r.action.0, "fs.read");
         assert_eq!(
@@ -1165,8 +1351,10 @@ mod tests {
 
         // The same verb on both lanes: the stamp follows the ARGUMENT, so it cannot
         // be a function of anything the client sent.
-        let local = build_authz_request(&Verb::Whoami, 501, None, Lane::Local, None);
-        let remote = build_authz_request(&Verb::Whoami, 501, None, Lane::Remote, None);
+        let local =
+            build_authz_request(&Verb::Whoami, 501, None, Lane::Local, None, &Stamp::Client);
+        let remote =
+            build_authz_request(&Verb::Whoami, 501, None, Lane::Remote, None, &Stamp::Client);
         assert_eq!(
             local.context.0.get(CONTEXT_DAC_LANE),
             Some(&AttrValue::Str("local".into()))
@@ -1187,6 +1375,7 @@ mod tests {
             None,
             Lane::Local,
             None,
+            &Stamp::Client,
         );
         assert_eq!(
             smuggled.context.0.get(CONTEXT_DAC_LANE),
@@ -1400,12 +1589,23 @@ mod tests {
             Verb::McpResourceRead,
             Verb::McpPromptGet,
             Verb::McpSamplingCreate,
+            Verb::TaskSubmit {
+                task: maknae_proto::TaskSubmission {
+                    schema: maknae_proto::TASK_SCHEMA.into(),
+                    version: maknae_proto::TASK_VERSION,
+                    agent: "hobi".into(),
+                    ask: maknae_proto::Ask::Prompt {
+                        prompt: maknae_proto::SecretText(maknae_io::Zeroizing::new("p".into())),
+                    },
+                    labels: maknae_proto::Labels {},
+                },
+            },
         ]
     }
 
     /// #148: every term is EXACTLY one of control plane or content-bearing, and
     /// the split is what the vocabulary says it is. Pinned over `all_verbs()`
-    /// (58 client action terms) + the two `kernel.*` pseudo-actions, AND
+    /// (59 client action terms) + the two `kernel.*` pseudo-actions, AND
     /// `all_verbs()` is cross-checked against `ci/gates/verb-manifest.txt`'s
     /// `action` rows (critical-review round 1 of PR B: the manifest is
     /// extracted from `verb_to_action`, which the compiler forces a new
@@ -1503,7 +1703,14 @@ mod tests {
     #[test]
     fn only_read_carries_a_resource_attribute() {
         for v in all_verbs() {
-            let r = build_authz_request(&v, 501, None, maknae_security::Lane::Local, None);
+            let r = build_authz_request(
+                &v,
+                501,
+                None,
+                maknae_security::Lane::Local,
+                None,
+                &Stamp::Client,
+            );
             if matches!(v, Verb::Read { .. }) {
                 assert!(
                     r.resource.0.str("path").is_some(),
@@ -1531,6 +1738,7 @@ mod tests {
             None,
             maknae_security::Lane::Local,
             None,
+            &Stamp::Client,
         );
         assert!(!format!("{r:?}").contains(&hash));
         assert_eq!(
@@ -1545,8 +1753,8 @@ mod tests {
 
     /// #67 D4: the vocabulary is the size the spec says.
     #[test]
-    fn the_vocabulary_is_fifty_eight_client_reachable_terms() {
-        assert_eq!(all_verbs().len(), 58);
+    fn the_vocabulary_is_fifty_nine_client_reachable_terms() {
+        assert_eq!(all_verbs().len(), 59);
     }
 
     /// Two terms sharing an action string would be decided as one another —
@@ -1632,6 +1840,7 @@ mod tests {
             ),
         ] {
             let bytes = maknae_proto::encode_request(&maknae_proto::Request {
+                task: None,
                 protocol_version: maknae_proto::PROTOCOL_VERSION,
                 verb,
             })
@@ -1684,7 +1893,14 @@ mod tests {
     #[test]
     fn no_client_request_carries_the_initiator() {
         for v in all_verbs() {
-            let r = build_authz_request(&v, 0, None, maknae_security::Lane::Local, None);
+            let r = build_authz_request(
+                &v,
+                0,
+                None,
+                maknae_security::Lane::Local,
+                None,
+                &Stamp::Client,
+            );
             assert!(
                 r.subject
                     .0
@@ -1710,7 +1926,14 @@ mod tests {
         ] {
             let dbg = format!(
                 "{:?}",
-                build_authz_request(&v, 501, None, maknae_security::Lane::Local, None)
+                build_authz_request(
+                    &v,
+                    501,
+                    None,
+                    maknae_security::Lane::Local,
+                    None,
+                    &Stamp::Client,
+                )
             );
             for s in ["SENTINEL", "424242"] {
                 assert!(!dbg.contains(s), "{v:?}: {dbg}");

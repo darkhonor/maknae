@@ -19,8 +19,14 @@ pub fn record_fields(p: &IdentityProblem) -> (&'static str, String, &'static str
         IdentityProblem::Released { .. } | IdentityProblem::PrincipalAdmin { .. } => {
             ("permit", p.to_string(), "authorized")
         }
-        IdentityProblem::UnresolvedAdversary { .. } => ("deny", p.to_string(), "unavailable"),
-        _ => ("deny", p.to_string(), "unauthorized"),
+        IdentityProblem::UnresolvedAdversary { .. } | IdentityProblem::AgentSkipped { .. } => {
+            ("deny", p.to_string(), "unavailable")
+        }
+        IdentityProblem::Unresolved { .. }
+        | IdentityProblem::Contained { .. }
+        | IdentityProblem::Unbound { .. }
+        | IdentityProblem::CarriedForward { .. }
+        | IdentityProblem::AgentRefused { .. } => ("deny", p.to_string(), "unauthorized"),
     }
 }
 
@@ -94,11 +100,17 @@ where
 pub struct Published {
     problems: Arc<[IdentityProblem]>,
     subjects: Arc<[ListedSubject]>,
+    agents: Arc<BTreeMap<u32, String>>,
 }
 
 impl Published {
-    /// The snapshot's problems followed by `released`, and the snapshot's subjects.
-    pub fn of(snapshot: &Snapshot, released: impl IntoIterator<Item = IdentityProblem>) -> Self {
+    /// The snapshot's problems followed by `released`, and the subjects it lists with
+    /// `principal_uid` as the enrolled principal.
+    pub fn of(
+        snapshot: &Snapshot,
+        principal_uid: u32,
+        released: impl IntoIterator<Item = IdentityProblem>,
+    ) -> Self {
         Self {
             problems: snapshot
                 .identity_problems()
@@ -106,7 +118,11 @@ impl Published {
                 .cloned()
                 .chain(released)
                 .collect(),
-            subjects: snapshot.subject_entries().unwrap_or_default().into(),
+            subjects: snapshot
+                .subject_entries(principal_uid)
+                .unwrap_or_default()
+                .into(),
+            agents: Arc::new(snapshot.agents()),
         }
     }
 }
@@ -142,6 +158,10 @@ impl IdentityStatus {
 
     pub fn subjects(&self) -> Arc<[ListedSubject]> {
         self.get().subjects
+    }
+
+    pub fn agents(&self) -> Arc<BTreeMap<u32, String>> {
+        self.get().agents
     }
 
     /// How many published subjects are contained, carried forward included.
@@ -180,6 +200,7 @@ pub fn label(s: &ListedSubject) -> String {
 pub fn state(s: &ListedSubject) -> String {
     match &s.state {
         SubjectState::Bound(role) => format!("bound {role}"),
+        SubjectState::Principal => "bound admin".into(),
         SubjectState::Contained => "contained".into(),
         SubjectState::CarriedForward => "contained (carried forward)".into(),
         SubjectState::Unbound(roles) => format!("unbound (conflict: {})", roles.join(", ")),
@@ -195,6 +216,7 @@ pub fn state(s: &ListedSubject) -> String {
 fn role_of(s: &ListedSubject) -> Option<&'static str> {
     match &s.state {
         SubjectState::Bound(role) | SubjectState::Unresolved(role) => Some(role),
+        SubjectState::Principal => Some("admin"),
         SubjectState::Contained | SubjectState::CarriedForward => Some(ADVERSARY),
         SubjectState::Unbound(_) => None,
     }
@@ -203,7 +225,10 @@ fn role_of(s: &ListedSubject) -> Option<&'static str> {
 fn binds(s: &ListedSubject) -> bool {
     matches!(
         s.state,
-        SubjectState::Bound(_) | SubjectState::Contained | SubjectState::CarriedForward
+        SubjectState::Bound(_)
+            | SubjectState::Principal
+            | SubjectState::Contained
+            | SubjectState::CarriedForward
     )
 }
 
@@ -214,6 +239,8 @@ fn view(s: &ListedSubject, role: String, members: Vec<String>) -> RoleBindingVie
         uid: s.uid,
         label: label(s),
         state: state(s),
+        agent: None,
+        principal: matches!(s.state, SubjectState::Principal),
     }
 }
 
@@ -223,6 +250,7 @@ fn view(s: &ListedSubject, role: String, members: Vec<String>) -> RoleBindingVie
 pub fn subject_views(
     bindings: Vec<SubjectBinding>,
     listed: &[ListedSubject],
+    agents: &BTreeMap<u32, String>,
 ) -> Vec<RoleBindingView> {
     let mut out = Vec::new();
     for b in bindings {
@@ -246,6 +274,8 @@ pub fn subject_views(
                         },
                         role: b.role.clone(),
                         members: vec![m],
+                        agent: None,
+                        principal: false,
                     }
                 }
             });
@@ -257,6 +287,9 @@ pub fn subject_views(
             role_of(s).unwrap_or_default().to_string(),
             Vec::new(),
         ));
+    }
+    for v in &mut out {
+        v.agent = v.uid.and_then(|u| agents.get(&u).cloned());
     }
     out.sort_by(|a, b| (a.uid.is_none(), a.uid, &a.label).cmp(&(b.uid.is_none(), b.uid, &b.label)));
     out
@@ -330,6 +363,50 @@ mod tests {
             assert_eq!(record_fields(&p).1, p.to_string());
         }
         assert_eq!(GRAPH_IDENTITY_ACTION, "graph.identity");
+    }
+
+    #[test]
+    fn identity_report_counts_agent_refused_and_agent_skipped() {
+        let p = [
+            IdentityProblem::AgentRefused {
+                agent: "hobi".into(),
+                uid: 2001,
+                why: maknae_authz_basic::AgentRefusal::Bound { role: "user" },
+            },
+            IdentityProblem::AgentSkipped {
+                entry: "stray".into(),
+                why: "it is not a directory",
+            },
+        ];
+        assert_eq!(counts(&p), ["agent_refused=1", "agent_skipped=1"]);
+        assert_eq!(
+            p.iter()
+                .map(|p| {
+                    let (result, reason, posture) = record_fields(p);
+                    (result, reason, posture)
+                })
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "deny",
+                    "agent 'hobi' (uid 2001) is not enrolled: bindings.yaml lists the account under user; an agent's role comes from its enrollment".to_string(),
+                    "unauthorized"
+                ),
+                (
+                    "deny",
+                    "agents/stray is skipped: it is not a directory".to_string(),
+                    "unavailable"
+                ),
+            ]
+        );
+        let ok = Ok(crate::reload::Applied {
+            revision: 3,
+            persisted: false,
+            durability_error: None,
+            checkpoint_error: None,
+        });
+        assert_eq!(recorded_after(&ok, &[], &p), p);
+        assert!(recorded_after(&ok, &p, &p).is_empty());
     }
 
     #[test]
@@ -427,6 +504,7 @@ mod tests {
                 listed(None, &["e"], SubjectState::Unresolved("adversary")),
                 listed(Some(5), &[], SubjectState::Contained),
             ]),
+            agents: Default::default(),
         });
         assert_eq!(s.contained(), 3);
     }
@@ -440,6 +518,7 @@ mod tests {
         Published {
             problems: problems.into(),
             subjects: Arc::from(vec![listed(Some(1), &["a"], SubjectState::Bound("user"))]),
+            agents: Default::default(),
         }
     }
 
@@ -585,6 +664,7 @@ mod tests {
                 binding("adversary", &["uid:4242", "uid:666"]),
             ],
             &table,
+            &BTreeMap::new(),
         );
         let rows: Vec<Row> = got
             .iter()
@@ -648,6 +728,46 @@ mod tests {
     }
 
     #[test]
+    fn the_principal_row_is_marked() {
+        let got = subject_views(
+            vec![binding("admin", &["uid:501"])],
+            &[listed(Some(501), &[], SubjectState::Principal)],
+            &BTreeMap::new(),
+        );
+        assert_eq!(
+            got.iter()
+                .map(|v| (v.uid, v.label.as_str(), v.state.as_str(), v.principal))
+                .collect::<Vec<_>>(),
+            [(Some(501), "uid 501", "bound admin", true)]
+        );
+    }
+
+    #[test]
+    fn an_enrolled_agents_entry_carries_its_id() {
+        let table = [
+            listed(Some(1000), &["alex"], SubjectState::Bound("admin")),
+            listed(Some(2001), &["hobi-svc"], SubjectState::Bound("user")),
+        ];
+        let got = subject_views(
+            vec![
+                binding("admin", &["uid:1000"]),
+                binding("user", &["uid:2001"]),
+            ],
+            &table,
+            &[(2001, "hobi".to_string())].into(),
+        );
+        assert_eq!(
+            got.iter()
+                .map(|v| (v.uid, v.label.as_str(), v.agent.as_deref()))
+                .collect::<Vec<_>>(),
+            [
+                (Some(1000), "alex (uid 1000)", None),
+                (Some(2001), "hobi-svc (uid 2001)", Some("hobi")),
+            ]
+        );
+    }
+
+    #[test]
     fn a_member_the_load_does_not_describe_is_listed_from_the_binding_alone() {
         let table = [listed(Some(1000), &["alex"], SubjectState::Bound("user"))];
         let got = subject_views(
@@ -656,6 +776,7 @@ mod tests {
                 binding("adversary", &["uid:5"]),
             ],
             &table,
+            &BTreeMap::new(),
         );
         let rows: Vec<(Option<u32>, &str, &str)> = got
             .iter()
@@ -670,6 +791,6 @@ mod tests {
             ],
             "a role the load disagrees on is not described by it"
         );
-        assert!(subject_views(vec![], &[]).is_empty());
+        assert!(subject_views(vec![], &[], &BTreeMap::new()).is_empty());
     }
 }

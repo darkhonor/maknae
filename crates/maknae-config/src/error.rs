@@ -110,6 +110,8 @@ pub enum ConfigError {
     UserProviders(String),
     /// A persisted baseline section is not the canonical JSON this crate writes (#490).
     BaselineValue(String),
+    /// An `agents/<id>/` enrollment or policy was refused.
+    InvalidAgent(String),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -211,6 +213,9 @@ impl std::fmt::Display for ConfigError {
             }
             ConfigError::BaselineValue(reason) => {
                 write!(f, "baseline value refused: {reason}")
+            }
+            ConfigError::InvalidAgent(reason) => {
+                write!(f, "agent configuration refused: {reason}")
             }
         }
     }
@@ -431,6 +436,14 @@ mod tests {
                 ConfigError::BaselineValue("baseline section core: x".into())
             ),
             "baseline value refused: baseline section core: x"
+        );
+    }
+
+    #[test]
+    fn display_covers_invalid_agent() {
+        assert_eq!(
+            ConfigError::InvalidAgent("agents/hobi/enrollment.yaml: x".into()).to_string(),
+            "agent configuration refused: agents/hobi/enrollment.yaml: x"
         );
     }
 }

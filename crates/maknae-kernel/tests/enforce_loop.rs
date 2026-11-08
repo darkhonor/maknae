@@ -159,6 +159,7 @@ fn published_status(
         .identity
         .publish(maknae_kernel::identity_report::Published::of(
             &maknae_authz_basic::Baseline::snapshot(authorizer),
+            maknae_authz_basic::Baseline::principal(authorizer).uid,
             [],
         ));
     status
@@ -166,6 +167,7 @@ fn published_status(
 
 fn request_frame(verb: maknae_proto::Verb) -> Vec<u8> {
     maknae_proto::encode_request(&maknae_proto::Request {
+        task: None,
         protocol_version: maknae_proto::PROTOCOL_VERSION,
         verb,
     })
@@ -297,6 +299,7 @@ where
         timeout,
         fds,
         common::no_baseline(),
+        maknae_kernel::AgentAdmission::none(),
     ));
     common::write_frame(&mut client, &request_frame(verb))
         .await
@@ -457,6 +460,7 @@ where
         timeout,
         delegated,
         ops,
+        maknae_kernel::AgentAdmission::none(),
     )
     .await;
     match tokio::time::timeout(
@@ -2023,6 +2027,8 @@ async fn a_granted_subject_list_reports_the_policy_file_bindings() {
                         uid: Some(0),
                         label: "root (uid 0)".into(),
                         state: "bound admin".into(),
+                        agent: None,
+                        principal: false,
                     },
                     maknae_proto::RoleBindingView {
                         role: "user".into(),
@@ -2030,6 +2036,8 @@ async fn a_granted_subject_list_reports_the_policy_file_bindings() {
                         uid: None,
                         label: "no-such-user-maknae-496 (no account)".into(),
                         state: "unresolved (no account)".into(),
+                        agent: None,
+                        principal: false,
                     },
                 ],
                 "root resolves to uid 0 and is reported by uid; the name with no \
@@ -3706,6 +3714,7 @@ async fn drive_baseline(
         Duration::from_secs(5),
         maknae_io::DelegatedFds::new(0),
         Arc::new(baseline),
+        maknae_kernel::AgentAdmission::none(),
     )
     .await;
     let frame = tokio::time::timeout(

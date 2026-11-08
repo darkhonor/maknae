@@ -18,3 +18,4 @@
 /var/lib/maknae(/.*)?           gen_context(system_u:object_r:maknae_state_t,s0)
 /run/maknae(/.*)?               gen_context(system_u:object_r:maknae_runtime_t,s0)
 /run/maknae-egress(/.*)?        gen_context(system_u:object_r:maknae_runtime_t,s0)
+/run/maknae-agent(/.*)?         gen_context(system_u:object_r:maknae_runtime_t,s0)

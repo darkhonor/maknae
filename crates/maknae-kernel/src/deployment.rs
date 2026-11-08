@@ -40,6 +40,13 @@ pub(crate) fn client_listener_wanted(mode: DeploymentMode) -> bool {
     }
 }
 
+pub(crate) fn agent_listener_wanted(mode: DeploymentMode) -> bool {
+    match mode {
+        DeploymentMode::LinuxHost | DeploymentMode::MacosHost => true,
+        DeploymentMode::Container => false,
+    }
+}
+
 fn refuse(mode: DeploymentMode, why: impl std::fmt::Display) -> String {
     format!("deployment.mode is {}, but {why}", mode.as_str())
 }
@@ -228,5 +235,12 @@ mod tests {
         assert!(client_listener_wanted(LinuxHost));
         assert!(client_listener_wanted(MacosHost));
         assert!(!client_listener_wanted(Container));
+    }
+
+    #[test]
+    fn only_a_container_binds_no_agent_listener() {
+        assert!(agent_listener_wanted(LinuxHost));
+        assert!(agent_listener_wanted(MacosHost));
+        assert!(!agent_listener_wanted(Container));
     }
 }

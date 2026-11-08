@@ -33,6 +33,32 @@ pub(crate) struct LoadedPolicy {
     pub(crate) action_grants: ActionGrants,
     pub(crate) destinations: DestinationGrants,
     pub(crate) subjects: SubjectGrants,
+    pub(crate) agents: AgentUids,
+    pub(crate) taskers: AgentTaskers,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub(crate) struct AgentUids(pub(crate) std::collections::BTreeMap<u32, String>);
+
+impl AgentUids {
+    pub(crate) fn get(&self, uid: u32) -> Option<&str> {
+        self.0.get(&uid).map(String::as_str)
+    }
+}
+
+/// Actions an enrolled agent holds only when its own `policy.yaml` grants them (ADR-0033 decision 4).
+const AGENT_DEFAULT_DENIED: [&str; 1] = ["session.new"];
+
+/// Each enrolled agent's `taskers:` resolved to uids; `None` where its policy lists none.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub(crate) struct AgentTaskers(
+    pub(crate) std::collections::BTreeMap<String, Option<std::collections::BTreeSet<u32>>>,
+);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SubjectOrigin {
+    Authz,
+    Agent(String),
 }
 
 /// `subjects:` entries by resolved uid; a name that resolves to no account has none.
@@ -45,6 +71,31 @@ pub(crate) struct SubjectEntry {
     pub(crate) permissions: Option<maknae_config::SubjectPermissions>,
     pub(crate) actions: Option<SubjectActionSet>,
     pub(crate) models: Option<Vec<maknae_config::ModelRef>>,
+    pub(crate) origin: SubjectOrigin,
+}
+
+impl SubjectEntry {
+    fn section(&self) -> String {
+        match &self.origin {
+            SubjectOrigin::Authz => format!("subjects.{}", self.name),
+            SubjectOrigin::Agent(id) => format!("agents.{id}.policy"),
+        }
+    }
+
+    fn cited_path(&self, effect: Effect, source: String) -> Cited {
+        match &self.origin {
+            SubjectOrigin::Authz => Cited::SubjectPath {
+                subject: self.name.clone(),
+                effect,
+                source,
+            },
+            SubjectOrigin::Agent(id) => Cited::AgentPath {
+                agent: id.clone(),
+                effect,
+                source,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -80,6 +131,11 @@ pub(crate) enum Cited {
         effect: Effect,
         source: String,
     },
+    AgentPath {
+        agent: String,
+        effect: Effect,
+        source: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -111,14 +167,14 @@ impl DestinationGrants {
 }
 
 /// The terms `roles:` may grant or deny; a term absent here is refused at load. Only
-/// `session.prompt` may be granted to `user`; `admin.baseline.accept` changes state.
+/// `session.prompt` and `session.task` may be granted to `user`; `admin.baseline.accept` changes state.
 // One line: the drift gate's extractor reads only the matched line.
 #[rustfmt::skip]
-pub(crate) const GRANTABLE_ACTIONS: [&str; 8] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt"];
+pub(crate) const GRANTABLE_ACTIONS: [&str; 9] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt", "session.task"];
 
 /// The terms a `subjects:` action list or a family wildcard can name.
 #[rustfmt::skip]
-pub(crate) const ACTION_VOCABULARY: [&str; 12] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt", "fs.read", "fs.write", "fs.delete", "fs.mkdir"];
+pub(crate) const ACTION_VOCABULARY: [&str; 14] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt", "session.task", "fs.read", "fs.write", "fs.delete", "fs.mkdir", "session.new"];
 
 /// An action entry as compiled against [`ACTION_VOCABULARY`]: `(term, entry as written)`.
 pub(crate) fn expand(
@@ -186,7 +242,7 @@ const fn str_eq(a: &str, b: &str) -> bool {
 /// demands the fourth assertion, which is the failure mode an unrolled check
 /// would otherwise have had.
 const _: () = {
-    let [a, b, c, d, e, f, g, h] = GRANTABLE_ACTIONS;
+    let [a, b, c, d, e, f, g, h, i] = GRANTABLE_ACTIONS;
     const WHY: &str = "admin.whoami is unconditional for admins and must not be grantable";
     assert!(!str_eq(a, "admin.whoami"), "{}", WHY);
     assert!(!str_eq(b, "admin.whoami"), "{}", WHY);
@@ -196,6 +252,7 @@ const _: () = {
     assert!(!str_eq(f, "admin.whoami"), "{}", WHY);
     assert!(!str_eq(g, "admin.whoami"), "{}", WHY);
     assert!(!str_eq(h, "admin.whoami"), "{}", WHY);
+    assert!(!str_eq(i, "admin.whoami"), "{}", WHY);
 };
 
 /// One expanded grant: the term and the entry it was written as.
@@ -387,7 +444,7 @@ fn decide_prompt(
             None,
         );
     }
-    if let Some((name, listed)) = subject.and_then(|s| Some((&s.name, s.models.as_ref()?))) {
+    if let Some((entry, listed)) = subject.and_then(|s| Some((s, s.models.as_ref()?))) {
         let model = match req.resource.0.get(RESOURCE_MODEL) {
             Some(AttrValue::Str(m)) => m.as_str(),
             _ => return (Verdict::Indeterminate, None),
@@ -396,7 +453,9 @@ fn decide_prompt(
             return (
                 Verdict::Deny {
                     reason: format!(
-                        "subject {name}: model {model} is not in subjects.{name}.models allow"
+                        "subject {}: model {model} is not in {}.models allow",
+                        entry.name,
+                        entry.section()
                     ),
                 },
                 None,
@@ -408,6 +467,74 @@ fn decide_prompt(
         Some(Cited::Destination {
             role: role_key,
             destination: destination.to_string(),
+        }),
+    )
+}
+
+/// The `taskers:` default: without a list only people may task the agent.
+pub(crate) fn taskers_admit(
+    list: Option<&std::collections::BTreeSet<u32>>,
+    uid: u32,
+    requester_is_agent: bool,
+) -> bool {
+    match list {
+        None => !requester_is_agent,
+        Some(l) => l.contains(&uid),
+    }
+}
+
+/// The `session.task` arm (#609): the role's grant, an enrolled target, and the
+/// target's `taskers:` admitting the requester, all from this snapshot.
+fn decide_task(
+    lp: &LoadedPolicy,
+    req: &SecRequest,
+    role_key: &'static str,
+    uid: u32,
+) -> (Verdict, Option<Cited>) {
+    let deny = |reason: String| (Verdict::Deny { reason }, None);
+    let source = match lp.action_grants.evaluate3_action(role_key, "session.task") {
+        maknae_config::Match3::DenyMatch { source } => {
+            return (
+                Verdict::Deny {
+                    reason: format!("denied by role grant {source}"),
+                },
+                Some(Cited::Grant {
+                    role: role_key,
+                    term: source,
+                    effect: Effect::Deny,
+                }),
+            )
+        }
+        maknae_config::Match3::NoMatch => {
+            return (
+                Verdict::NotApplicable {
+                    note: Some(no_rule_note(role_key, "session.task")),
+                },
+                None,
+            )
+        }
+        maknae_config::Match3::AllowMatch { source } => source,
+    };
+    let target = match req.resource.0.get(maknae_security::RESOURCE_AGENT) {
+        Some(AttrValue::Str(t)) => t.as_str(),
+        Some(_) => return (Verdict::Indeterminate, None),
+        None => return deny("no agent on session.task".into()),
+    };
+    if !lp.agents.0.values().any(|id| id == target) {
+        return deny(format!("session.task: agent {target} is not enrolled"));
+    }
+    let Some(list) = lp.taskers.0.get(target) else {
+        return (Verdict::Indeterminate, None);
+    };
+    if !taskers_admit(list.as_ref(), uid, lp.agents.get(uid).is_some()) {
+        return deny(format!("agent {target}: uid {uid} is not a tasker"));
+    }
+    (
+        permit_with_audit(),
+        Some(Cited::Grant {
+            role: role_key,
+            term: source,
+            effect: Effect::Allow,
         }),
     )
 }
@@ -479,6 +606,9 @@ pub(crate) fn decide_loaded_cited(
     if class_of(&req.action.0) == Some(Class::Kernel) {
         return undecided(kernel_decided(req));
     }
+    if let Some(reason) = channel_refusal(&lp.agents, uid, req) {
+        return undecided(Verdict::Deny { reason });
+    }
     let role = match lp.roles.role_for(uid, principal.uid) {
         Resolution::Role(r) => r,
         // Case-1 testimony (#181): the FACT, audit-only. The absence still
@@ -502,12 +632,19 @@ pub(crate) fn decide_loaded_cited(
             None,
         ),
         Role::Admin | Role::User | Role::Guest
-            if action_limit(lp.subjects.get(uid), &req.action.0).is_some() =>
+            if let Some(decided) = agent_arm(&lp.agents, lp.subjects.get(uid), uid, role, req) =>
         {
-            (
-                action_limit(lp.subjects.get(uid), &req.action.0).unwrap_or(Verdict::Indeterminate),
-                None,
-            )
+            (decided, None)
+        }
+        Role::Admin | Role::User | Role::Guest
+            if let Some(limited) = action_limit(lp.subjects.get(uid), &req.action.0) =>
+        {
+            (limited, None)
+        }
+        Role::User | Role::Guest
+            if req.action.0 == "admin.whoami" && lp.agents.get(uid).is_some() =>
+        {
+            (permit_with_audit(), None)
         }
         // #158, operator ruling 2026-09-07: admin governs Maknae management,
         // not filesystem privilege. Users and admins share the universal path
@@ -532,6 +669,9 @@ pub(crate) fn decide_loaded_cited(
         // only for reading order (their guards key on other action strings).
         Role::Admin | Role::User if req.action.0 == "session.prompt" => {
             decide_prompt(lp, req, role.key(), lp.subjects.get(uid))
+        }
+        Role::Admin | Role::User if req.action.0 == "session.task" => {
+            decide_task(lp, req, role.key(), uid)
         }
         Role::Guest | Role::User => match class {
             Some(Class::Liveness) => (permit_with_audit(), None),
@@ -638,6 +778,73 @@ pub(crate) fn decide_loaded_cited(
     }
 }
 
+fn channel_refusal(agents: &AgentUids, uid: u32, req: &SecRequest) -> Option<String> {
+    let enrolled = agents.get(uid);
+    let off_channel = || enrolled.map(|id| format!("agent {id}: not on the agent channel"));
+    match req.subject.0.get(maknae_security::SUBJECT_CHANNEL) {
+        None => off_channel(),
+        Some(AttrValue::Str(c)) if c == maknae_security::CHANNEL_CLIENT => off_channel(),
+        Some(AttrValue::Str(c)) if c == maknae_security::CHANNEL_AGENT => {
+            let named = match req.subject.0.get(maknae_security::SUBJECT_AGENT) {
+                Some(AttrValue::Str(a)) => Some(a.as_str()),
+                _ => None,
+            };
+            match (enrolled, named) {
+                (Some(id), Some(n)) if id == n => None,
+                (_, n) => Some(format!(
+                    "agent channel: uid {uid} is not enrolled agent {}",
+                    n.unwrap_or("(none)")
+                )),
+            }
+        }
+        Some(_) => Some(format!("channel: uid {uid} arrived on no known channel")),
+    }
+}
+
+fn agent_arm(
+    agents: &AgentUids,
+    entry: Option<&SubjectEntry>,
+    uid: u32,
+    role: Role,
+    req: &SecRequest,
+) -> Option<Verdict> {
+    let id = agents.get(uid)?;
+    let action = req.action.0.as_str();
+    let deny = |reason: String| Some(Verdict::Deny { reason });
+    match role {
+        Role::Admin => return deny(format!("agent {id}: an agent never holds admin")),
+        Role::Adversary => return deny("subject contained: role=adversary".into()),
+        Role::User | Role::Guest => {}
+    }
+    match class_of(action) {
+        Some(Class::Admin) if action == "admin.whoami" => return None,
+        Some(Class::Admin) => {
+            return deny(format!(
+                "agent {id}: {action} is never permitted to an agent"
+            ))
+        }
+        Some(
+            Class::Liveness
+            | Class::Session
+            | Class::Fs
+            | Class::Terminal
+            | Class::Mcp
+            | Class::Kernel,
+        )
+        | None => {}
+    }
+    let granted = entry
+        .filter(|e| matches!(e.origin, SubjectOrigin::Agent(_)))
+        .and_then(|e| e.actions.as_ref())
+        .is_some_and(|set| set.allow.contains_key(action) && !set.deny.contains_key(action));
+    if AGENT_DEFAULT_DENIED.contains(&action) && !granted {
+        return deny(format!(
+            "agent {id}: {action} needs a grant in its policy.yaml"
+        ));
+    }
+    None
+}
+
 fn action_limit(entry: Option<&SubjectEntry>, action: &str) -> Option<Verdict> {
     let entry = entry?;
     let set = entry.actions.as_ref()?;
@@ -646,19 +853,17 @@ fn action_limit(entry: Option<&SubjectEntry>, action: &str) -> Option<Verdict> {
         Some(Class::Admin) if action == "admin.whoami" => return None,
         Some(Class::Admin | Class::Session | Class::Fs | Class::Terminal | Class::Mcp) => {}
     }
-    let name = &entry.name;
+    let (name, section) = (&entry.name, entry.section());
     if let Some(source) = set.deny.get(action) {
         return Some(Verdict::Deny {
-            reason: format!(
-                "subject {name}: {action} denied by subjects.{name}.actions entry {source}"
-            ),
+            reason: format!("subject {name}: {action} denied by {section}.actions entry {source}"),
         });
     }
     if set.allow.contains_key(action) {
         None
     } else {
         Some(Verdict::Deny {
-            reason: format!("subject {name}: {action} is not in subjects.{name}.actions allow"),
+            reason: format!("subject {name}: {action} is not in {section}.actions allow"),
         })
     }
 }
@@ -751,7 +956,7 @@ fn decide_fs(
         Some(AttrValue::Str(h)) => Some(std::path::Path::new(h.as_str())),
         Some(_) => return (Verdict::Indeterminate, None),
     };
-    let subject = entry.and_then(|e| e.permissions.as_ref().map(|p| (e.name.as_str(), p)));
+    let subject = entry.and_then(|e| e.permissions.as_ref().map(|p| (e, p)));
     let set = subject.map(|(_, p)| p);
     let matched = match scope {
         FsScope::Read => {
@@ -768,18 +973,14 @@ fn decide_fs(
         return (Verdict::Indeterminate, None);
     };
     match (matched, subject) {
-        (maknae_config::Match3::DenyMatch { source }, Some((name, _)))
+        (maknae_config::Match3::DenyMatch { source }, Some((e, _)))
             if !lp.policy.deny_sources().contains(&source) =>
         {
             (
                 Verdict::Deny {
-                    reason: format!("denied by subjects.{name}.permissions entry {source}"),
+                    reason: format!("denied by {}.permissions entry {source}", e.section()),
                 },
-                Some(Cited::SubjectPath {
-                    subject: name.to_string(),
-                    effect: Effect::Deny,
-                    source,
-                }),
+                Some(e.cited_path(Effect::Deny, source)),
             )
         }
         (maknae_config::Match3::DenyMatch { source }, _) => (
@@ -793,13 +994,9 @@ fn decide_fs(
                 source,
             }),
         ),
-        (maknae_config::Match3::AllowMatch { source }, Some((name, _))) => (
+        (maknae_config::Match3::AllowMatch { source }, Some((e, _))) => (
             permit_with_audit(),
-            Some(Cited::SubjectPath {
-                subject: name.to_string(),
-                effect: Effect::Allow,
-                source,
-            }),
+            Some(e.cited_path(Effect::Allow, source)),
         ),
         (maknae_config::Match3::AllowMatch { source }, None) => (
             permit_with_audit(),
@@ -867,6 +1064,8 @@ mod tests {
             action_grants: ActionGrants::default(),
             destinations: DestinationGrants::default(),
             subjects: SubjectGrants::default(),
+            agents: Default::default(),
+            taskers: Default::default(),
         }
     }
 
@@ -1641,7 +1840,10 @@ mod tests {
                 "admin.release"
             ]
         );
-        assert_eq!(terms("session.*"), ["session.prompt"]);
+        assert_eq!(
+            terms("session.*"),
+            ["session.prompt", "session.task", "session.new"]
+        );
         assert!(terms("terminal.*").is_empty());
         assert!(terms("mcp.*").is_empty());
         assert_eq!(terms("fs.write"), ["fs.write"]);
@@ -1667,11 +1869,17 @@ mod tests {
     }
 
     #[test]
-    fn the_vocabulary_is_the_grantable_terms_and_the_four_fs_terms() {
-        assert_eq!(ACTION_VOCABULARY[..8], GRANTABLE_ACTIONS);
+    fn the_vocabulary_is_the_grantable_terms_the_four_fs_terms_and_session_new() {
+        assert_eq!(ACTION_VOCABULARY[..9], GRANTABLE_ACTIONS);
         assert_eq!(
-            ACTION_VOCABULARY[8..],
-            ["fs.read", "fs.write", "fs.delete", "fs.mkdir"]
+            ACTION_VOCABULARY[9..],
+            [
+                "fs.read",
+                "fs.write",
+                "fs.delete",
+                "fs.mkdir",
+                "session.new"
+            ]
         );
     }
 
@@ -1751,15 +1959,17 @@ mod tests {
         // Structural: a grantable term that no arm consults would abstain.
         // Granted in full to admin, with the prompt term's second condition
         // (the destination attribute) satisfied for that term only.
-        let lp = lp_with_grants(
-            "roles:\n  admin:\n    allow: [\"admin.status\", \"admin.config.show\", \"admin.subject.list\", \"admin.baseline.show\", \"admin.baseline.accept\", \"admin.contain\", \"admin.release\", \"session.prompt\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\"]\n",
+        let mut lp = lp_with_grants(
+            "roles:\n  admin:\n    allow: [\"admin.status\", \"admin.config.show\", \"admin.subject.list\", \"admin.baseline.show\", \"admin.baseline.accept\", \"admin.contain\", \"admin.release\", \"session.prompt\", \"session.task\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\"]\n",
             GRANT_UIDS,
         );
+        lp.agents.0.insert(HOBI_UID, "hobi".into());
+        lp.taskers.0.insert("hobi".into(), None);
         for t in GRANTABLE_ACTIONS {
-            let req = if t == "session.prompt" {
-                prompt_req(1001, Some("provider:openai"))
-            } else {
-                request(Some(1001), t, None)
+            let req = match t {
+                "session.prompt" => prompt_req(1001, Some("provider:openai")),
+                "session.task" => task_req(1001, Some(AttrValue::Str("hobi".into()))),
+                _ => request(Some(1001), t, None),
             };
             assert_eq!(
                 decide_loaded(&lp, &principal(), &req),
@@ -1994,6 +2204,8 @@ mod tests {
             action_grants: crate::validate_grants(&policy.action_grants).unwrap(),
             destinations,
             subjects: SubjectGrants::default(),
+            agents: Default::default(),
+            taskers: Default::default(),
             policy,
         }
     }
@@ -2774,6 +2986,8 @@ mod tests {
             action_grants: crate::validate_grants(&policy.action_grants).unwrap(),
             destinations: crate::validate_destinations(&policy.destinations).unwrap(),
             subjects: crate::validate_subjects(&policy, &lookups).unwrap(),
+            agents: Default::default(),
+            taskers: Default::default(),
             policy,
         }
     }
@@ -3249,5 +3463,843 @@ mod tests {
             crate::validate_subjects(&named, &subject_lookups()),
             Err(crate::AuthzBasicError::UnknownAction("admin.whoami".into()))
         );
+    }
+
+    const HOBI_UID: u32 = 2001;
+    const HUMAN_UID: u32 = 1002;
+    const AGENT_SITE: &str = "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: [\"Read(~/.ssh/**)\"]\nroles:\n  admin:\n    allow: [\"admin.*\", \"session.prompt\"]\n  user:\n    allow: [\"session.prompt\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\"]\n  user:\n    allow: [\"provider:openai\"]\n";
+
+    fn lp_agent_over(role: &str, agent_policy: Option<&str>, enrolled: bool) -> LoadedPolicy {
+        let policy = maknae_config::parse_authz(AGENT_SITE).unwrap();
+        let lookups: crate::Lookups = [
+            ("operator", OPERATOR_UID),
+            ("hobi-svc", HOBI_UID),
+            ("ursula", HUMAN_UID),
+        ]
+        .into_iter()
+        .map(|(n, u)| (n.to_string(), Some(u)))
+        .collect();
+        let mut bindings: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        bindings.insert("admin".into(), vec!["operator".into()]);
+        bindings
+            .entry("user".into())
+            .or_default()
+            .push("ursula".into());
+        if !role.is_empty() {
+            bindings
+                .entry(role.into())
+                .or_default()
+                .push("hobi-svc".into());
+        }
+        let mut subjects = crate::validate_subjects(&policy, &lookups).unwrap();
+        let mut agents = AgentUids::default();
+        if enrolled {
+            let id = maknae_config::AgentId::parse("hobi").unwrap();
+            let outcome = crate::AgentOutcome {
+                load: maknae_config::AgentsLoad {
+                    enrollments: Vec::new(),
+                    policies: agent_policy
+                        .map(|b| maknae_config::parse_agent_policy(&id, b).unwrap())
+                        .into_iter()
+                        .collect(),
+                    skipped: Vec::new(),
+                },
+                enrolled: [(
+                    id,
+                    (HOBI_UID, "hobi-svc".into(), maknae_config::AgentRole::User),
+                )]
+                .into(),
+                problems: Vec::new(),
+                taskers: Default::default(),
+            };
+            crate::agent_subjects(&outcome, &mut subjects).unwrap();
+            agents.0.insert(HOBI_UID, "hobi".into());
+        }
+        LoadedPolicy {
+            roles: Roles::File(resolve(&Some(bindings), &crate::found(&lookups)).unwrap()),
+            action_grants: crate::validate_grants(&policy.action_grants).unwrap(),
+            destinations: crate::validate_destinations(&policy.destinations).unwrap(),
+            subjects,
+            agents,
+            taskers: Default::default(),
+            policy,
+        }
+    }
+
+    fn lp_agent(role: &str, agent_policy: Option<&str>) -> LoadedPolicy {
+        lp_agent_over(role, agent_policy, true)
+    }
+
+    fn on_channel(mut r: SecRequest, channel: Option<&str>, agent: Option<&str>) -> SecRequest {
+        if let Some(c) = channel {
+            r.subject
+                .0
+                .insert(maknae_security::SUBJECT_CHANNEL, AttrValue::Str(c.into()));
+        }
+        if let Some(a) = agent {
+            r.subject
+                .0
+                .insert(maknae_security::SUBJECT_AGENT, AttrValue::Str(a.into()));
+        }
+        r
+    }
+
+    fn as_hobi(action: &str) -> SecRequest {
+        on_channel(
+            any_action(HOBI_UID, action),
+            Some(maknae_security::CHANNEL_AGENT),
+            Some("hobi"),
+        )
+    }
+
+    fn deny(reason: &str) -> Verdict {
+        Verdict::Deny {
+            reason: reason.into(),
+        }
+    }
+
+    fn admin_terms() -> impl Iterator<Item = &'static str> {
+        GRANTABLE_ACTIONS
+            .into_iter()
+            .filter(|t| class_of(t) == Some(Class::Admin))
+    }
+
+    #[test]
+    fn an_agent_with_admin_wildcard_in_its_policy_is_denied() {
+        let lp = lp_agent(
+            "user",
+            Some("schema_version: 1\nactions:\n  allow: [\"admin.*\"]\n"),
+        );
+        let d = decide_loaded_cited(&lp, &principal(), &as_hobi("admin.status"));
+        assert_eq!(
+            d.verdict,
+            deny("agent hobi: admin.status is never permitted to an agent")
+        );
+        assert_eq!(d.role, Some("user"));
+    }
+
+    #[test]
+    fn an_agent_bound_to_admin_with_a_role_grant_is_still_denied() {
+        let lp = lp_agent("admin", None);
+        for term in admin_terms() {
+            let d = decide_loaded_cited(&lp, &principal(), &as_hobi(term));
+            assert!(
+                matches!(&d.verdict, Verdict::Deny { reason } if reason.contains("hobi")),
+                "{term}: {d:?}"
+            );
+            let human = decide_loaded_cited(&lp, &principal(), &any_action(OPERATOR_UID, term));
+            assert_eq!(human.verdict, permit_with_audit(), "{term}");
+        }
+    }
+
+    #[test]
+    fn a_user_agent_may_ask_whoami() {
+        let d = decide_loaded_cited(
+            &lp_agent("user", None),
+            &principal(),
+            &as_hobi("admin.whoami"),
+        );
+        assert_eq!(d.verdict, permit_with_audit());
+        assert_eq!(d.role, Some("user"));
+        let guest = lp_agent("guest", None);
+        assert_eq!(
+            decide_loaded_cited(&guest, &principal(), &as_hobi("admin.whoami")).verdict,
+            permit_with_audit()
+        );
+        let human =
+            decide_loaded_cited(&guest, &principal(), &any_action(HUMAN_UID, "admin.whoami"));
+        assert!(
+            matches!(human.verdict, Verdict::NotApplicable { .. }),
+            "{human:?}"
+        );
+    }
+
+    #[test]
+    fn a_whoami_permit_follows_the_action_limit() {
+        let lp = lp_agent(
+            "user",
+            Some("schema_version: 1\nactions:\n  allow: []\n  deny: [\"admin.*\"]\n"),
+        );
+        assert_eq!(
+            decide_loaded_cited(&lp, &principal(), &as_hobi("admin.whoami")).verdict,
+            permit_with_audit()
+        );
+        assert_eq!(
+            decide_loaded_cited(&lp, &principal(), &as_hobi("session.prompt")).verdict,
+            deny("subject hobi-svc: session.prompt is not in agents.hobi.policy.actions allow")
+        );
+    }
+
+    #[test]
+    fn an_enrolled_agent_resolving_to_admin_is_denied_everything() {
+        let lp = lp_agent("admin", None);
+        for action in ["admin.whoami", "liveness.ping", "session.prompt", "fs.read"] {
+            let d = decide_loaded_cited(&lp, &principal(), &as_hobi(action));
+            assert_eq!(
+                d.verdict,
+                deny("agent hobi: an agent never holds admin"),
+                "{action}"
+            );
+            assert_eq!(d.role, Some("admin"), "{action}");
+        }
+    }
+
+    #[test]
+    fn the_pdp_refuses_an_agent_channel_request_whose_agent_names_another_uid() {
+        let lp = lp_agent("user", None);
+        let agent = Some(maknae_security::CHANNEL_AGENT);
+        for (uid, named, reason) in [
+            (
+                HOBI_UID,
+                Some("suga"),
+                "agent channel: uid 2001 is not enrolled agent suga",
+            ),
+            (
+                HOBI_UID,
+                None,
+                "agent channel: uid 2001 is not enrolled agent (none)",
+            ),
+            (
+                HUMAN_UID,
+                Some("hobi"),
+                "agent channel: uid 1002 is not enrolled agent hobi",
+            ),
+        ] {
+            let d = decide_loaded_cited(
+                &lp,
+                &principal(),
+                &on_channel(any_action(uid, "liveness.ping"), agent, named),
+            );
+            assert_eq!(
+                d,
+                Decided {
+                    verdict: deny(reason),
+                    role: None,
+                    cited: None
+                },
+                "{uid} {named:?}"
+            );
+        }
+        let mut wrong_type = any_action(HOBI_UID, "liveness.ping");
+        wrong_type.subject.0.insert(
+            maknae_security::SUBJECT_CHANNEL,
+            AttrValue::Str("agent".into()),
+        );
+        wrong_type
+            .subject
+            .0
+            .insert(maknae_security::SUBJECT_AGENT, AttrValue::Int(2001));
+        assert_eq!(
+            decide_loaded_cited(&lp, &principal(), &wrong_type).verdict,
+            deny("agent channel: uid 2001 is not enrolled agent (none)")
+        );
+    }
+
+    #[test]
+    fn an_agent_uid_on_the_client_channel_is_denied() {
+        for role in ["user", "guest", "admin", "adversary"] {
+            let lp = lp_agent(role, None);
+            for channel in [Some(maknae_security::CHANNEL_CLIENT), None] {
+                for action in ["liveness.ping", "admin.whoami"] {
+                    let d = decide_loaded_cited(
+                        &lp,
+                        &principal(),
+                        &on_channel(any_action(HOBI_UID, action), channel, Some("hobi")),
+                    );
+                    assert_eq!(
+                        d,
+                        Decided {
+                            verdict: deny("agent hobi: not on the agent channel"),
+                            role: None,
+                            cited: None
+                        },
+                        "{role} {channel:?} {action}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_human_on_the_agent_channel_is_denied() {
+        let lp = lp_agent("user", None);
+        for uid in [HUMAN_UID, OPERATOR_UID, OTHER_UID] {
+            let d = decide_loaded_cited(
+                &lp,
+                &principal(),
+                &on_channel(
+                    any_action(uid, "liveness.ping"),
+                    Some(maknae_security::CHANNEL_AGENT),
+                    None,
+                ),
+            );
+            assert_eq!(
+                d.verdict,
+                deny(&format!(
+                    "agent channel: uid {uid} is not enrolled agent (none)"
+                )),
+                "{uid}"
+            );
+            assert_eq!(d.role, None, "{uid}");
+        }
+    }
+
+    #[test]
+    fn an_unrecognised_channel_is_denied() {
+        let lp = lp_agent("user", None);
+        for uid in [HUMAN_UID, HOBI_UID] {
+            let mut r = any_action(uid, "liveness.ping");
+            r.subject.0.insert(
+                maknae_security::SUBJECT_CHANNEL,
+                AttrValue::Str("remote".into()),
+            );
+            assert_eq!(
+                decide_loaded_cited(&lp, &principal(), &r).verdict,
+                deny(&format!("channel: uid {uid} arrived on no known channel")),
+                "{uid}"
+            );
+            r.subject
+                .0
+                .insert(maknae_security::SUBJECT_CHANNEL, AttrValue::Int(1));
+            assert_eq!(
+                decide_loaded_cited(&lp, &principal(), &r).verdict,
+                deny(&format!("channel: uid {uid} arrived on no known channel")),
+                "{uid}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_contained_agent_is_reported_contained() {
+        let lp = lp_agent("adversary", None);
+        assert_eq!(
+            agent_arm(
+                &lp.agents,
+                lp.subjects.get(HOBI_UID),
+                HOBI_UID,
+                Role::Adversary,
+                &as_hobi("admin.whoami")
+            ),
+            Some(deny("subject contained: role=adversary"))
+        );
+        for action in ["liveness.ping", "admin.whoami", "admin.status"] {
+            assert_eq!(
+                decide_loaded_cited(&lp, &principal(), &as_hobi(action)),
+                Decided {
+                    verdict: deny("subject contained: role=adversary"),
+                    role: Some("adversary"),
+                    cited: None
+                },
+                "{action}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_arm_leaves_session_and_fs_to_their_own_arms() {
+        let lp = lp_agent(
+            "user",
+            Some("schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\nactions:\n  allow: [\"fs.read\", \"session.prompt\"]\n"),
+        );
+        let read = decide_loaded_cited(&lp, &principal(), &as_hobi("fs.read"));
+        assert_eq!(read.verdict, permit_with_audit());
+        assert_eq!(
+            read.cited,
+            Some(Cited::AgentPath {
+                agent: "hobi".into(),
+                effect: Effect::Allow,
+                source: "Read(~/**)".into()
+            })
+        );
+        let prompt = decide_loaded_cited(&lp, &principal(), &as_hobi("session.prompt"));
+        assert_eq!(prompt.verdict, permit_with_audit());
+        assert_eq!(
+            prompt.cited,
+            Some(Cited::Destination {
+                role: "user",
+                destination: "provider:openai".into()
+            })
+        );
+        assert_eq!(
+            decide_loaded_cited(&lp, &principal(), &as_hobi("fs.write")).verdict,
+            deny("subject hobi-svc: fs.write is not in agents.hobi.policy.actions allow")
+        );
+        assert_eq!(
+            decide_loaded_cited(&lp, &principal(), &as_hobi("liveness.ping")).verdict,
+            permit_with_audit()
+        );
+    }
+
+    #[test]
+    fn requests_without_a_channel_attribute_are_unchanged_for_non_agents() {
+        let with = lp_agent("user", None);
+        let without = lp_agent_over("", None, false);
+        for uid in [HUMAN_UID, OPERATOR_UID, OTHER_UID] {
+            for action in [
+                "liveness.ping",
+                "admin.whoami",
+                "admin.status",
+                "session.prompt",
+                "session.new",
+                "fs.read",
+            ] {
+                let bare = any_action(uid, action);
+                let today = decide_loaded_cited(&without, &principal(), &bare);
+                assert_eq!(
+                    decide_loaded_cited(&with, &principal(), &bare),
+                    today,
+                    "{uid} {action}"
+                );
+                let client = on_channel(bare, Some(maknae_security::CHANNEL_CLIENT), None);
+                assert_eq!(
+                    decide_loaded_cited(&with, &principal(), &client),
+                    today,
+                    "{uid} {action} client"
+                );
+            }
+        }
+        assert!(matches!(
+            decide_loaded_cited(&with, &principal(), &any_action(HUMAN_UID, "session.new")).verdict,
+            Verdict::NotApplicable { .. }
+        ));
+    }
+
+    const SESSION_NEW_DEFAULT: &str = "agent hobi: session.new needs a grant in its policy.yaml";
+
+    #[test]
+    fn an_agent_asking_session_new_without_a_grant_is_denied() {
+        for policy in [
+            None,
+            Some("schema_version: 1\n"),
+            Some("schema_version: 1\nactions:\n  allow: [\"session.prompt\"]\n"),
+            Some("schema_version: 1\nactions:\n  allow: []\n"),
+        ] {
+            for role in ["user", "guest"] {
+                let lp = lp_agent(role, policy);
+                let d = decide_loaded_cited(&lp, &principal(), &as_hobi("session.new"));
+                assert_eq!(d.verdict, deny(SESSION_NEW_DEFAULT), "{role} {policy:?}");
+                assert_eq!(d.role, Some(role), "{policy:?}");
+            }
+        }
+        assert_eq!(AGENT_DEFAULT_DENIED, ["session.new"]);
+    }
+
+    #[test]
+    fn a_policy_grant_lifts_the_session_new_default() {
+        for allow in [
+            "[\"session.new\"]",
+            "[\"session.*\"]",
+            "[\"session.prompt\", \"session.new\"]",
+        ] {
+            let policy = format!("schema_version: 1\nactions:\n  allow: {allow}\n");
+            for role in ["user", "guest"] {
+                let lp = lp_agent(role, Some(&policy));
+                let req = as_hobi("session.new");
+                assert_eq!(
+                    agent_arm(
+                        &lp.agents,
+                        lp.subjects.get(HOBI_UID),
+                        HOBI_UID,
+                        Role::User,
+                        &req
+                    ),
+                    None,
+                    "{allow}"
+                );
+                let d = decide_loaded_cited(&lp, &principal(), &req);
+                assert_eq!(
+                    d.verdict,
+                    Verdict::NotApplicable {
+                        note: Some(format!("role {role}: no rule for session.new"))
+                    },
+                    "{role} {allow}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_policy_deny_keeps_the_session_new_default() {
+        for actions in [
+            "  allow: [\"session.*\"]\n  deny: [\"session.new\"]\n",
+            "  allow: [\"session.new\"]\n  deny: [\"session.*\"]\n",
+            "  allow: [\"session.new\"]\n  deny: [\"session.new\"]\n",
+        ] {
+            let policy = format!("schema_version: 1\nactions:\n{actions}");
+            let lp = lp_agent("user", Some(&policy));
+            assert_eq!(
+                decide_loaded_cited(&lp, &principal(), &as_hobi("session.new")).verdict,
+                deny(SESSION_NEW_DEFAULT),
+                "{actions}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_agents_own_policy_lifts_the_session_new_default() {
+        let lp = lp_agent("user", None);
+        let mut allow = BTreeMap::new();
+        allow.insert("session.new", "session.new".to_string());
+        let authz_entry = SubjectEntry {
+            name: "hobi-svc".into(),
+            permissions: None,
+            actions: Some(SubjectActionSet {
+                allow,
+                deny: BTreeMap::new(),
+            }),
+            models: None,
+            origin: SubjectOrigin::Authz,
+        };
+        let req = as_hobi("session.new");
+        assert_eq!(
+            agent_arm(&lp.agents, Some(&authz_entry), HOBI_UID, Role::User, &req),
+            Some(deny(SESSION_NEW_DEFAULT))
+        );
+        let agent_entry = SubjectEntry {
+            origin: SubjectOrigin::Agent("hobi".into()),
+            ..authz_entry
+        };
+        assert_eq!(
+            agent_arm(&lp.agents, Some(&agent_entry), HOBI_UID, Role::User, &req),
+            None
+        );
+    }
+
+    #[test]
+    fn session_new_is_subject_limitable_and_never_role_grantable() {
+        let site = format!(
+            "{SUBJECT_SITE}{}",
+            sentinel_entry("    actions:\n      allow: [\"session.new\"]\n")
+        );
+        let policy = maknae_config::parse_authz(&site).unwrap();
+        let subjects = crate::validate_subjects(&policy, &subject_lookups()).unwrap();
+        assert!(subjects
+            .get(SENTINEL_UID)
+            .unwrap()
+            .actions
+            .as_ref()
+            .unwrap()
+            .allow
+            .contains_key("session.new"));
+        for role in ["user", "admin"] {
+            let body = format!("schema_version: 1\npermissions:\n  allow: []\n  deny: []\nroles:\n  {role}:\n    allow: [\"session.new\"]\n");
+            let policy = maknae_config::parse_authz(&body).unwrap();
+            assert_eq!(
+                crate::validate_grants(&policy.action_grants),
+                Err(crate::AuthzBasicError::UnknownActionTerm(
+                    "session.new".into()
+                )),
+                "{role}"
+            );
+        }
+        assert!(!GRANTABLE_ACTIONS.contains(&"session.new"));
+    }
+
+    #[test]
+    fn the_agent_arm_abstains_for_a_uid_that_is_not_an_enrolled_agent() {
+        let lp = lp_agent("user", None);
+        for role in [Role::Admin, Role::User, Role::Guest, Role::Adversary] {
+            for action in ["admin.status", "session.new", "liveness.ping"] {
+                let req = any_action(HUMAN_UID, action);
+                assert_eq!(
+                    agent_arm(
+                        &lp.agents,
+                        lp.subjects.get(HUMAN_UID),
+                        HUMAN_UID,
+                        role,
+                        &req
+                    ),
+                    None,
+                    "{role:?} {action}"
+                );
+            }
+        }
+    }
+
+    const JIN_UID: u32 = 2002;
+    const GWEN_UID: u32 = 1003;
+    const TASK_ROLES: &str =
+        "roles:\n  admin:\n    allow: [\"session.task\"]\n  user:\n    allow: [\"session.task\"]\n";
+
+    fn lp_task(site: &str, hobi_taskers: Option<&[u32]>) -> LoadedPolicy {
+        let policy = maknae_config::parse_authz(&format!(
+            "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n{site}"
+        ))
+        .unwrap();
+        let lookups: crate::Lookups = [
+            ("operator", OPERATOR_UID),
+            ("ursula", HUMAN_UID),
+            ("gwen", GWEN_UID),
+            ("hobi-svc", HOBI_UID),
+            ("jin-svc", JIN_UID),
+        ]
+        .into_iter()
+        .map(|(n, u)| (n.to_string(), Some(u)))
+        .collect();
+        let bindings: BTreeMap<String, Vec<String>> = [
+            ("admin", vec!["operator"]),
+            ("user", vec!["ursula", "hobi-svc", "jin-svc"]),
+            ("guest", vec!["gwen"]),
+        ]
+        .into_iter()
+        .map(|(r, n)| (r.to_string(), n.into_iter().map(String::from).collect()))
+        .collect();
+        let mut subjects = crate::validate_subjects(&policy, &lookups).unwrap();
+        let enrolled = [("hobi", HOBI_UID, "hobi-svc"), ("jin", JIN_UID, "jin-svc")];
+        let outcome = crate::AgentOutcome {
+            load: maknae_config::AgentsLoad::default(),
+            enrolled: enrolled
+                .iter()
+                .map(|(id, uid, account)| {
+                    (
+                        maknae_config::AgentId::parse(id).unwrap(),
+                        (*uid, account.to_string(), maknae_config::AgentRole::User),
+                    )
+                })
+                .collect(),
+            problems: Vec::new(),
+            taskers: Default::default(),
+        };
+        crate::agent_subjects(&outcome, &mut subjects).unwrap();
+        let mut agents = AgentUids::default();
+        let mut taskers = AgentTaskers::default();
+        for (id, uid, _) in enrolled {
+            agents.0.insert(uid, id.into());
+            taskers.0.insert(id.into(), None);
+        }
+        taskers.0.insert(
+            "hobi".into(),
+            hobi_taskers.map(|l| l.iter().copied().collect()),
+        );
+        LoadedPolicy {
+            roles: Roles::File(resolve(&Some(bindings), &crate::found(&lookups)).unwrap()),
+            action_grants: crate::validate_grants(&policy.action_grants).unwrap(),
+            destinations: crate::validate_destinations(&policy.destinations).unwrap(),
+            subjects,
+            agents,
+            taskers,
+            policy,
+        }
+    }
+
+    fn task_req(uid: u32, target: Option<AttrValue>) -> SecRequest {
+        let mut r = request(Some(i64::from(uid)), "session.task", None);
+        if let Some(t) = target {
+            r.resource.0.insert(maknae_security::RESOURCE_AGENT, t);
+        }
+        r
+    }
+
+    fn task_of(uid: u32, target: &str) -> SecRequest {
+        let r = task_req(uid, Some(AttrValue::Str(target.into())));
+        if uid == JIN_UID {
+            on_channel(r, Some(maknae_security::CHANNEL_AGENT), Some("jin"))
+        } else {
+            r
+        }
+    }
+
+    fn task_verdict(lp: &LoadedPolicy, uid: u32, target: &str) -> Verdict {
+        decide_loaded_cited(lp, &principal(), &task_of(uid, target)).verdict
+    }
+
+    fn not_a_tasker(uid: u32) -> Verdict {
+        deny(&format!("agent hobi: uid {uid} is not a tasker"))
+    }
+
+    #[test]
+    fn a_user_with_the_grant_may_task_an_enrolled_agent() {
+        let lp = lp_task(TASK_ROLES, None);
+        for (uid, role) in [(HUMAN_UID, "user"), (OPERATOR_UID, "admin")] {
+            let d = decide_loaded_cited(&lp, &principal(), &task_of(uid, "hobi"));
+            assert_eq!(d.verdict, permit_with_audit(), "{role}");
+            assert_eq!(d.role, Some(role));
+            assert_eq!(
+                d.cited,
+                Some(Cited::Grant {
+                    role: if role == "admin" { "admin" } else { "user" },
+                    term: "session.task".into(),
+                    effect: Effect::Allow,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn tasking_an_agent_that_is_not_enrolled_is_denied() {
+        let lp = lp_task(TASK_ROLES, None);
+        for target in ["ghost", "hobi-svc", ""] {
+            assert_eq!(
+                task_verdict(&lp, HUMAN_UID, target),
+                deny(&format!("session.task: agent {target} is not enrolled")),
+                "{target}"
+            );
+        }
+        let d = decide_loaded_cited(&lp, &principal(), &task_req(HUMAN_UID, None));
+        assert_eq!(d.verdict, deny("no agent on session.task"));
+        let d = decide_loaded_cited(
+            &lp,
+            &principal(),
+            &task_req(HUMAN_UID, Some(AttrValue::Int(i64::from(HOBI_UID)))),
+        );
+        assert_eq!(d.verdict, Verdict::Indeterminate);
+    }
+
+    #[test]
+    fn tasking_without_the_grant_is_not_applicable() {
+        let lp = lp_task("", None);
+        for (uid, role) in [(HUMAN_UID, "user"), (OPERATOR_UID, "admin")] {
+            let d = decide_loaded_cited(&lp, &principal(), &task_of(uid, "hobi"));
+            assert_eq!(
+                d.verdict,
+                Verdict::NotApplicable {
+                    note: Some(format!("role {role}: no rule for session.task"))
+                }
+            );
+            assert_eq!(d.cited, None);
+        }
+        let lp = lp_task(
+            "roles:\n  user:\n    allow: [\"session.*\"]\n    deny: [\"session.task\"]\n",
+            None,
+        );
+        let d = decide_loaded_cited(&lp, &principal(), &task_of(HUMAN_UID, "hobi"));
+        assert_eq!(d.verdict, deny("denied by role grant session.task"));
+        assert_eq!(
+            d.cited,
+            Some(Cited::Grant {
+                role: "user",
+                term: "session.task".into(),
+                effect: Effect::Deny,
+            })
+        );
+        let lp = lp_task("roles:\n  admin:\n    allow: [\"session.task\"]\n", None);
+        assert_eq!(
+            task_verdict(&lp, HUMAN_UID, "hobi"),
+            Verdict::NotApplicable {
+                note: Some("role user: no rule for session.task".into())
+            }
+        );
+    }
+
+    #[test]
+    fn a_guest_may_not_task() {
+        let lp = lp_task(TASK_ROLES, None);
+        let d = decide_loaded_cited(&lp, &principal(), &task_of(GWEN_UID, "hobi"));
+        assert_eq!(
+            d.verdict,
+            Verdict::NotApplicable {
+                note: Some("role guest: no rule for session.task".into())
+            }
+        );
+        assert_eq!(d.role, Some("guest"));
+    }
+
+    #[test]
+    fn a_subject_actions_limit_can_withhold_session_task() {
+        let lp = lp_task(
+            &format!(
+                "{TASK_ROLES}subjects:\n  ursula:\n    actions:\n      allow: [\"session.prompt\"]\n"
+            ),
+            None,
+        );
+        assert_eq!(
+            task_verdict(&lp, HUMAN_UID, "hobi"),
+            deny("subject ursula: session.task is not in subjects.ursula.actions allow")
+        );
+        assert_eq!(task_verdict(&lp, OPERATOR_UID, "hobi"), permit_with_audit());
+        let lp = lp_task(
+            &format!(
+                "{TASK_ROLES}subjects:\n  ursula:\n    actions:\n      allow: [\"session.*\"]\n      deny: [\"session.task\"]\n"
+            ),
+            None,
+        );
+        assert_eq!(
+            task_verdict(&lp, HUMAN_UID, "hobi"),
+            deny(
+                "subject ursula: session.task denied by subjects.ursula.actions entry session.task"
+            )
+        );
+    }
+
+    #[test]
+    fn a_listed_tasker_is_permitted() {
+        let lp = lp_task(TASK_ROLES, Some(&[HUMAN_UID]));
+        assert_eq!(task_verdict(&lp, HUMAN_UID, "hobi"), permit_with_audit());
+    }
+
+    #[test]
+    fn an_unlisted_user_is_refused() {
+        let lp = lp_task(TASK_ROLES, Some(&[1500]));
+        assert_eq!(
+            task_verdict(&lp, HUMAN_UID, "hobi"),
+            not_a_tasker(HUMAN_UID)
+        );
+        assert_eq!(
+            task_verdict(&lp, OPERATOR_UID, "hobi"),
+            not_a_tasker(OPERATOR_UID)
+        );
+    }
+
+    #[test]
+    fn an_unlisted_agent_is_refused() {
+        let lp = lp_task(TASK_ROLES, Some(&[HUMAN_UID]));
+        assert_eq!(task_verdict(&lp, JIN_UID, "hobi"), not_a_tasker(JIN_UID));
+    }
+
+    #[test]
+    fn an_absent_taskers_list_permits_a_user() {
+        let lp = lp_task(TASK_ROLES, None);
+        assert_eq!(task_verdict(&lp, HUMAN_UID, "hobi"), permit_with_audit());
+        assert_eq!(task_verdict(&lp, OPERATOR_UID, "hobi"), permit_with_audit());
+    }
+
+    #[test]
+    fn an_absent_taskers_list_refuses_an_agent() {
+        let lp = lp_task(TASK_ROLES, None);
+        assert_eq!(task_verdict(&lp, JIN_UID, "hobi"), not_a_tasker(JIN_UID));
+        assert_eq!(
+            task_verdict(&lp, HUMAN_UID, "jin"),
+            permit_with_audit(),
+            "jin's own list is absent too"
+        );
+    }
+
+    #[test]
+    fn a_listed_agent_is_permitted() {
+        let lp = lp_task(TASK_ROLES, Some(&[JIN_UID]));
+        let d = decide_loaded_cited(&lp, &principal(), &task_of(JIN_UID, "hobi"));
+        assert_eq!(d.verdict, permit_with_audit());
+        assert_eq!(d.role, Some("user"));
+        assert_eq!(
+            task_verdict(&lp, HUMAN_UID, "hobi"),
+            not_a_tasker(HUMAN_UID)
+        );
+    }
+
+    #[test]
+    fn an_empty_taskers_list_refuses_everyone() {
+        let lp = lp_task(TASK_ROLES, Some(&[]));
+        for uid in [HUMAN_UID, OPERATOR_UID, JIN_UID] {
+            assert_eq!(task_verdict(&lp, uid, "hobi"), not_a_tasker(uid), "{uid}");
+        }
+    }
+
+    #[test]
+    fn taskers_admit_holds_the_default() {
+        let listed: std::collections::BTreeSet<u32> = [5, 7].into();
+        for agent in [false, true] {
+            assert!(taskers_admit(Some(&listed), 5, agent));
+            assert!(!taskers_admit(Some(&listed), 6, agent));
+            assert!(!taskers_admit(Some(&Default::default()), 5, agent));
+        }
+        assert!(taskers_admit(None, 5, false));
+        assert!(!taskers_admit(None, 5, true));
+    }
+
+    #[test]
+    fn a_target_with_no_taskers_entry_is_indeterminate() {
+        let mut lp = lp_task(TASK_ROLES, None);
+        lp.taskers.0.remove("hobi");
+        assert_eq!(task_verdict(&lp, HUMAN_UID, "hobi"), Verdict::Indeterminate);
     }
 }

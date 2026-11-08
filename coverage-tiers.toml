@@ -65,6 +65,10 @@ files = [
   # records, and what admin.status and admin.subject.list report for each subject;
   # a wrong arm hides a released containment or mislabels a contained subject.
   "crates/maknae-kernel/src/identity_report.rs",
+  # #609: the task store's binding of each task to its agent and uid, and the
+  # submission order (PDP before store); a wrong arm hands an agent another's task.
+  "crates/maknae-kernel/src/task.rs",
+  "crates/maknae-kernel/src/enrollment.rs",
   # #115: the account state each request is re-decided on. A wrong arm reads a
   # locked, expired or not-yet-valid account as active. The Varlink transport is varlink.rs (T2).
   "crates/maknae-kernel/src/session_facts/userdb.rs",
@@ -82,6 +86,13 @@ files = [
   "crates/maknae-io/src/anchor.rs",
   # #596: the one "this user's home" translation, shared by the client and the kernel.
   "crates/maknae-io/src/home.rs",
+  # #609: a host account assembled from passwd and group sources; a wrong arm reads a
+  # non-member as a maknae member or a failed group source as an empty one.
+  "crates/maknae-io/src/account_facts.rs",
+  "crates/maknae-kernel/src/membership.rs",
+  # #609: agent id, role, enrollment and policy parse, the agents/ loader and the
+  # service-account predicate; a wrong arm admits an admin-bound or human account.
+  "crates/maknae-config/src/agents.rs",
   # #115: path presence; reading a refusal as absence misjudges the deployment-mode self-check.
   "crates/maknae-io/src/host_facts.rs",
   "crates/maknae-io/src/checks.rs",
@@ -136,6 +147,8 @@ files = [
   "crates/maknae-vault/src/peer_auth.rs",
   "crates/maknae-vault/src/trust_bundle.rs",
   "crates/maknae-vault/src/csr.rs",
+  # #609: kernel-signed tasks; a wrong arm in verify_task accepts a forged or foreign task.
+  "crates/maknae-vault/src/task_sig.rs",
   "crates/maknae-vault/src/plane.rs",
   "crates/maknae-vault/src/config.rs",
   # maknae-crypto (ADR-0030, ADR-0031, #589): the plane signature key subset.
@@ -174,6 +187,8 @@ files = [
   # and the provider key path out of operator-visible error strings.
   "crates/maknae-proto/src/egress_frame.rs",
   "crates/maknae-proto/src/sealed.rs",
+  # #609: the task object; its decode refusals and redacting Debug are the control.
+  "crates/maknae-proto/src/task.rs",
   # #240a D3-A: the PURE peer-identity decision. It is a separate file from
   # peercred.rs because that one is whole-file mutation-excluded (syscall I/O),
   # which would make a T1 tier there vacuous — zero mutants, zero missed.
@@ -673,6 +688,10 @@ path = "crates/maknae-vault/src/stream.rs"
 why = "PlaneListener/PlaneConnector/AuthenticatedStream (Stage 2); async I/O"
 
 [[t3]]
+path = "crates/maknae-vault/src/test_pki.rs"
+why = "#609: a test CA and the plane identities it issues, compiled only under cfg(test) or the test-support feature; fixture code with no production regions"
+
+[[t3]]
 path = "crates/maknae-vault/src/transport_tests.rs"
 why = "in-process mTLS negative suite (Stage 2, Task 10); #[cfg(test)] unit module, report-only test code"
 
@@ -701,6 +720,10 @@ why = "AuditError enum + Display/Error declarations only; no decision logic"
 [[t3]]
 path = "crates/maknae-kernel/src/host_env.rs"
 why = "#490: the validator's host environment — the egress bounds file, NSS, the prepared-trail open and the socket probes; the rules they feed are baseline_check.rs (T1). Mutation-excluded (mutants.toml)"
+
+[[t3]]
+path = "crates/maknae-io/src/account.rs"
+why = "nix User/Group/getgrouplist calls — syscall I/O, cross-platform; the pure assembly it feeds is account_facts.rs (T1). Mutation-excluded (mutants.toml)"
 
 [[t3]]
 path = "crates/maknae-kernel/src/groupres.rs"
@@ -760,6 +783,10 @@ why = "thin OperatorClient call wrappers; the pure pieces (split_ca_chain, still
 [[t3]]
 path = "bins/maknae/src/enroll/agent.rs"
 why = "#168: maknae enroll agent's orchestration behind the AgentOps seam; the rotation order, the rollback naming of an orphaned accessor, the no-leak property of the SecretID, the state and record YAML round trips and the host-config parse carry real unit tests against a recording fake; the decisions are T1 in maknae-vault/src/agent_enroll.rs"
+
+[[t3]]
+path = "bins/maknae/src/enroll/remove_agent.rs"
+why = "#609: maknae enroll remove-agent's orchestration behind the RemoveOps seam; the step order, the refusal that names what remains, the retained accessor after a failed destroy and the policy.yaml-untouched property carry real unit tests against the recording fake from agent.rs"
 
 [[t3]]
 path = "bins/maknae/src/enroll/helper.rs"

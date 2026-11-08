@@ -17,7 +17,9 @@ use maknae_crypto::rustls::{ClientConfig, ServerConfig};
 use maknae_crypto::tls::{ClientVerifierHandle, ServerVerifierHandle};
 use std::sync::Arc;
 
-fn pem_chain_to_der(id: &PlaneIdentity) -> Result<Vec<CertificateDer<'static>>, VaultError> {
+pub(crate) fn pem_chain_to_der(
+    id: &PlaneIdentity,
+) -> Result<Vec<CertificateDer<'static>>, VaultError> {
     // leaf first, then the (single) issuing intermediate — presented chain [leaf, int].
     let mut out = Vec::new();
     for pem in std::iter::once(id.leaf_pem()).chain(id.chain_pem().iter().map(|s| s.as_str())) {

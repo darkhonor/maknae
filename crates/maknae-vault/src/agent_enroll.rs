@@ -4,14 +4,10 @@ use std::net::IpAddr;
 pub const DEFAULT_AGENT_APPROLE_MOUNT: &str = "maknae-agent-approle";
 pub const AGENT_CREDENTIAL_NAME: &str = "maknae-agent-secret-id";
 pub const AGENT_SIGNING_IDENTIFIER: &str = "io.maknae.maknae-agentd";
-pub const MAKNAE_DAEMON_ACCOUNTS: [&str; 2] = ["_maknae", "_maknae-egress"];
-pub const NON_LOGIN_SHELLS: [&str; 5] = [
-    "/usr/sbin/nologin",
-    "/sbin/nologin",
-    "/usr/bin/nologin",
-    "/bin/false",
-    "/usr/bin/false",
-];
+pub use maknae_config::{
+    service_account_check, AccountRefusal, AgentId, HostAccounts, InvalidAgentId, NON_LOGIN_SHELLS,
+};
+pub use maknae_io::{HostAccount, MAKNAE_DAEMON_ACCOUNTS};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AgentEnrollError {
@@ -20,13 +16,7 @@ pub enum AgentEnrollError {
     InvalidCidr(String),
     CatchAllCidr(String),
     HostBitsSet { given: String, network: String },
-    NoSuchAccount(String),
-    RootAccount,
-    IsPrincipal,
-    MaknaeDaemonAccount(String),
-    MaknaeGroupMember,
-    LoginShell(String),
-    AccountInUse { account: String, agent: String },
+    Account(AccountRefusal),
 }
 
 impl fmt::Display for AgentEnrollError {
@@ -51,66 +41,22 @@ impl fmt::Display for AgentEnrollError {
             Self::HostBitsSet { given, network } => {
                 write!(f, "{given} has host bits set; use {network}")
             }
-            Self::NoSuchAccount(a) => write!(
-                f,
-                "no account named {a} exists on this host; create a service account for the Agent Daemon first"
-            ),
-            Self::RootAccount => write!(
-                f,
-                "the account is root; run the Agent Daemon under its own unprivileged service account"
-            ),
-            Self::IsPrincipal => write!(
-                f,
-                "the account is the principal's own account; run the Agent Daemon under a separate service account"
-            ),
-            Self::MaknaeDaemonAccount(a) => write!(
-                f,
-                "account {a} belongs to a Maknae daemon or can read its files; run the Agent Daemon under its own service account"
-            ),
-            Self::MaknaeGroupMember => write!(
-                f,
-                "the account is in the maknae group, which grants read of Maknae's configuration; use an account outside it"
-            ),
-            Self::LoginShell(s) => write!(
-                f,
-                "the account's shell {s} is not a non-login shell; give the Agent Daemon account /usr/sbin/nologin (Linux) or /usr/bin/false (macOS)"
-            ),
-            Self::AccountInUse { account, agent } => write!(
-                f,
-                "account {account} is already enrolled for agent {agent}; each Agent Daemon needs its own account"
-            ),
+            Self::Account(r) => write!(f, "{r}"),
         }
     }
 }
 
 impl std::error::Error for AgentEnrollError {}
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AgentId(String);
-
-impl AgentId {
-    pub fn parse(raw: &str) -> Result<Self, AgentEnrollError> {
-        let bytes = raw.as_bytes();
-        let edge = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_';
-        let inner = |b: u8| edge(b) || b == b'.' || b == b'-';
-        let ok = (1..=32).contains(&bytes.len())
-            && edge(bytes[0])
-            && edge(bytes[bytes.len() - 1])
-            && bytes.iter().all(|&b| inner(b))
-            && raw != "data";
-        if ok {
-            Ok(Self(raw.to_string()))
-        } else {
-            Err(AgentEnrollError::InvalidAgentId(raw.to_string()))
-        }
+impl From<InvalidAgentId> for AgentEnrollError {
+    fn from(e: InvalidAgentId) -> Self {
+        Self::InvalidAgentId(e.0)
     }
+}
 
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    pub fn role_name(&self) -> String {
-        format!("agent-{}", self.0)
+impl From<AccountRefusal> for AgentEnrollError {
+    fn from(r: AccountRefusal) -> Self {
+        Self::Account(r)
     }
 }
 
@@ -216,66 +162,6 @@ fn canonical_cidr(item: &str) -> Result<(IpAddr, u32), AgentEnrollError> {
     Ok((addr, prefix))
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AccountFacts {
-    pub name: String,
-    pub uid: u32,
-    pub primary_gid: u32,
-    pub shell: String,
-}
-
-pub struct HostAccounts<'a> {
-    pub maknae_gid: u32,
-    pub maknae_members: &'a [String],
-    pub principal_uid: u32,
-    pub daemon_uids: &'a [u32],
-    pub daemon_groups: &'a [(u32, Vec<String>)],
-    pub other_agents: &'a [(String, u32)],
-}
-
-pub fn service_account_check(
-    acct: Option<&AccountFacts>,
-    account_name: &str,
-    agent: &AgentId,
-    host: &HostAccounts<'_>,
-) -> Result<(), AgentEnrollError> {
-    let acct = acct.ok_or_else(|| AgentEnrollError::NoSuchAccount(account_name.to_string()))?;
-    if acct.uid == 0 {
-        return Err(AgentEnrollError::RootAccount);
-    }
-    if acct.uid == host.principal_uid {
-        return Err(AgentEnrollError::IsPrincipal);
-    }
-    let daemon = MAKNAE_DAEMON_ACCOUNTS.contains(&acct.name.as_str())
-        || host.daemon_uids.contains(&acct.uid)
-        || host
-            .daemon_groups
-            .iter()
-            .any(|(gid, members)| *gid == acct.primary_gid || members.contains(&acct.name));
-    if daemon {
-        return Err(AgentEnrollError::MaknaeDaemonAccount(acct.name.clone()));
-    }
-    if acct.primary_gid == host.maknae_gid || host.maknae_members.contains(&acct.name) {
-        return Err(AgentEnrollError::MaknaeGroupMember);
-    }
-    let shell = acct.shell.trim();
-    if !NON_LOGIN_SHELLS.contains(&shell) {
-        let shown = if shell.is_empty() { "(empty)" } else { shell };
-        return Err(AgentEnrollError::LoginShell(shown.to_string()));
-    }
-    if let Some((other, _)) = host
-        .other_agents
-        .iter()
-        .find(|(id, uid)| id != agent.as_str() && *uid == acct.uid)
-    {
-        return Err(AgentEnrollError::AccountInUse {
-            account: acct.name.clone(),
-            agent: other.clone(),
-        });
-    }
-    Ok(())
-}
-
 pub fn accessor_already_gone(code: u16, errors: &[String]) -> bool {
     errors
         .iter()
@@ -291,31 +177,33 @@ pub fn list_is_empty(code: u16, errors: &[String]) -> bool {
 mod tests {
     use super::*;
 
-    fn acct() -> AccountFacts {
-        AccountFacts {
+    fn acct() -> HostAccount {
+        HostAccount {
             name: "hobi-svc".into(),
             uid: 990,
             primary_gid: 990,
             shell: "/usr/sbin/nologin".into(),
+            dir: "/var/empty".into(),
+            named_groups: vec![990],
         }
     }
     fn hobi() -> AgentId {
         AgentId::parse("hobi").unwrap()
     }
-    static DAEMON_GROUPS: std::sync::OnceLock<Vec<(u32, Vec<String>)>> = std::sync::OnceLock::new();
-    fn host<'a>(members: &'a [String], others: &'a [(String, u32)]) -> HostAccounts<'a> {
+    static DAEMON_FACTS: std::sync::OnceLock<maknae_io::DaemonFacts> = std::sync::OnceLock::new();
+    fn host<'a>(others: &'a [(String, u32)]) -> HostAccounts<'a> {
         HostAccounts {
-            maknae_gid: 980,
-            maknae_members: members,
+            maknae_gid: Some(980),
             principal_uid: 1000,
-            daemon_uids: &[970, 971],
-            daemon_groups: DAEMON_GROUPS
-                .get_or_init(|| vec![(970, vec![]), (971, vec!["egress-helper".to_string()])]),
+            daemons: DAEMON_FACTS.get_or_init(|| maknae_io::DaemonFacts {
+                uids: vec![970, 971],
+                gids: vec![970, 971],
+            }),
             other_agents: others,
         }
     }
-    fn check(a: &AccountFacts, h: &HostAccounts<'_>) -> Result<(), AgentEnrollError> {
-        service_account_check(Some(a), &a.name, &hobi(), h)
+    fn check(a: &HostAccount, h: &HostAccounts<'_>) -> Result<(), AgentEnrollError> {
+        service_account_check(Some(a), &a.name, &hobi(), h).map_err(AgentEnrollError::from)
     }
 
     #[test]
@@ -342,7 +230,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    AgentId::parse(bad),
+                    AgentId::parse(bad).map_err(AgentEnrollError::from),
                     Err(AgentEnrollError::InvalidAgentId(_))
                 ),
                 "{bad:?}"
@@ -512,71 +400,90 @@ mod tests {
 
     #[test]
     fn a_service_account_passes() {
-        assert_eq!(check(&acct(), &host(&[], &[])), Ok(()));
+        assert_eq!(check(&acct(), &host(&[])), Ok(()));
     }
 
     #[test]
     fn an_account_already_enrolled_for_this_same_agent_passes() {
         let own = vec![("hobi".to_string(), 990)];
-        assert_eq!(check(&acct(), &host(&[], &own)), Ok(()));
+        assert_eq!(check(&acct(), &host(&own)), Ok(()));
     }
 
     #[test]
     fn each_human_or_shared_signal_is_refused() {
-        let h = host(&[], &[]);
+        let h = host(&[]);
         assert_eq!(
-            service_account_check(None, "ghost", &hobi(), &h),
-            Err(AgentEnrollError::NoSuchAccount("ghost".into()))
+            service_account_check(None, "ghost", &hobi(), &h).map_err(AgentEnrollError::from),
+            Err(AgentEnrollError::Account(AccountRefusal::NoSuchAccount(
+                "ghost".into()
+            )))
         );
         let mut a = acct();
         a.uid = 0;
-        assert_eq!(check(&a, &h), Err(AgentEnrollError::RootAccount));
+        assert_eq!(
+            check(&a, &h),
+            Err(AgentEnrollError::Account(AccountRefusal::RootAccount))
+        );
         let mut a = acct();
         a.uid = 1000;
-        assert_eq!(check(&a, &h), Err(AgentEnrollError::IsPrincipal));
+        assert_eq!(
+            check(&a, &h),
+            Err(AgentEnrollError::Account(AccountRefusal::IsPrincipal))
+        );
         let mut a = acct();
         a.uid = 970;
         assert_eq!(
             check(&a, &h),
-            Err(AgentEnrollError::MaknaeDaemonAccount("hobi-svc".into()))
+            Err(AgentEnrollError::Account(
+                AccountRefusal::MaknaeDaemonAccount("hobi-svc".into())
+            ))
         );
         let mut a = acct();
         a.name = "_maknae-egress".into();
         assert_eq!(
             check(&a, &h),
-            Err(AgentEnrollError::MaknaeDaemonAccount(
-                "_maknae-egress".into()
+            Err(AgentEnrollError::Account(
+                AccountRefusal::MaknaeDaemonAccount("_maknae-egress".into())
             ))
         );
         let mut a = acct();
         a.primary_gid = 970;
+        a.named_groups = vec![970];
         assert_eq!(
             check(&a, &h),
-            Err(AgentEnrollError::MaknaeDaemonAccount("hobi-svc".into()))
+            Err(AgentEnrollError::Account(
+                AccountRefusal::MaknaeDaemonAccount("hobi-svc".into())
+            ))
         );
         let mut a = acct();
         a.name = "egress-helper".into();
+        a.named_groups = vec![990, 971];
         assert_eq!(
             check(&a, &h),
-            Err(AgentEnrollError::MaknaeDaemonAccount(
-                "egress-helper".into()
+            Err(AgentEnrollError::Account(
+                AccountRefusal::MaknaeDaemonAccount("egress-helper".into())
             ))
         );
         let mut a = acct();
         a.primary_gid = 980;
-        assert_eq!(check(&a, &h), Err(AgentEnrollError::MaknaeGroupMember));
-        let members = vec!["hobi-svc".to_string()];
+        a.named_groups = vec![980];
         assert_eq!(
-            check(&acct(), &host(&members, &[])),
-            Err(AgentEnrollError::MaknaeGroupMember)
+            check(&a, &h),
+            Err(AgentEnrollError::Account(AccountRefusal::MaknaeGroupMember))
+        );
+        let mut member = acct();
+        member.named_groups = vec![990, 980];
+        assert_eq!(
+            check(&member, &host(&[])),
+            Err(AgentEnrollError::Account(AccountRefusal::MaknaeGroupMember))
         );
         let others = vec![("suga".to_string(), 990)];
         assert_eq!(
-            check(&acct(), &host(&[], &others)),
-            Err(AgentEnrollError::AccountInUse {
+            check(&acct(), &host(&others)),
+            Err(AgentEnrollError::Account(AccountRefusal::AccountInUse {
                 account: "hobi-svc".into(),
                 agent: "suga".into()
-            })
+            }))
         );
     }
 
@@ -598,7 +505,7 @@ mod tests {
 
     #[test]
     fn only_an_allowlisted_non_login_shell_passes() {
-        let h = host(&[], &[]);
+        let h = host(&[]);
         for sh in NON_LOGIN_SHELLS {
             for spelled in [sh.to_string(), format!(" {sh} ")] {
                 let mut a = acct();
@@ -618,7 +525,9 @@ mod tests {
             a.shell = format!(" {sh} ");
             assert_eq!(
                 check(&a, &h),
-                Err(AgentEnrollError::LoginShell(sh.into())),
+                Err(AgentEnrollError::Account(AccountRefusal::LoginShell(
+                    sh.into()
+                ))),
                 "{sh:?}"
             );
         }
@@ -627,7 +536,9 @@ mod tests {
             a.shell = empty.into();
             assert_eq!(
                 check(&a, &h),
-                Err(AgentEnrollError::LoginShell("(empty)".into())),
+                Err(AgentEnrollError::Account(AccountRefusal::LoginShell(
+                    "(empty)".into()
+                ))),
                 "{empty:?}"
             );
         }
@@ -639,8 +550,10 @@ mod tests {
         a.shell = "/bin/bash".into();
         let others = vec![("suga".to_string(), 990)];
         assert_eq!(
-            check(&a, &host(&[], &others)),
-            Err(AgentEnrollError::LoginShell("/bin/bash".into()))
+            check(&a, &host(&others)),
+            Err(AgentEnrollError::Account(AccountRefusal::LoginShell(
+                "/bin/bash".into()
+            )))
         );
     }
 
@@ -661,23 +574,35 @@ mod tests {
                 },
                 "g has host bits set; use n",
             ),
-            (AgentEnrollError::NoSuchAccount("ghost".into()), "ghost"),
-            (AgentEnrollError::RootAccount, "root"),
-            (AgentEnrollError::IsPrincipal, "principal"),
             (
-                AgentEnrollError::MaknaeDaemonAccount("dm".into()),
+                AgentEnrollError::Account(AccountRefusal::NoSuchAccount("ghost".into())),
+                "ghost",
+            ),
+            (
+                AgentEnrollError::Account(AccountRefusal::RootAccount),
+                "root",
+            ),
+            (
+                AgentEnrollError::Account(AccountRefusal::IsPrincipal),
+                "principal",
+            ),
+            (
+                AgentEnrollError::Account(AccountRefusal::MaknaeDaemonAccount("dm".into())),
                 "account dm",
             ),
-            (AgentEnrollError::MaknaeGroupMember, "maknae group"),
             (
-                AgentEnrollError::LoginShell("/bin/bash".into()),
+                AgentEnrollError::Account(AccountRefusal::MaknaeGroupMember),
+                "maknae group",
+            ),
+            (
+                AgentEnrollError::Account(AccountRefusal::LoginShell("/bin/bash".into())),
                 "shell /bin/bash is not a non-login shell",
             ),
             (
-                AgentEnrollError::AccountInUse {
+                AgentEnrollError::Account(AccountRefusal::AccountInUse {
                     account: "a".into(),
                     agent: "b".into(),
-                },
+                }),
                 "account a is already enrolled for agent b",
             ),
         ];

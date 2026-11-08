@@ -36,6 +36,21 @@ pub const SUBJECT_INITIATOR: &str = "initiator";
 /// The [`SUBJECT_INITIATOR`] value of a request the kernel makes on its own behalf.
 pub const INITIATOR_KERNEL: &str = "kernel";
 
+/// The listener a request arrived on, [`CHANNEL_CLIENT`] or [`CHANNEL_AGENT`]; kernel-stamped.
+pub const SUBJECT_CHANNEL: &str = "channel";
+pub const CHANNEL_CLIENT: &str = "client";
+pub const CHANNEL_AGENT: &str = "agent";
+
+/// The agent id from the verified agent-plane SAN; kernel-stamped.
+pub const SUBJECT_AGENT: &str = "agent";
+
+/// The task a request cites and that task's tasker; kernel-stamped.
+pub const SUBJECT_TASK: &str = "task";
+pub const SUBJECT_TASKER: &str = "tasker";
+
+/// The target agent of a `session.task` request.
+pub const RESOURCE_AGENT: &str = "agent";
+
 /// No PEP stamps this; a filesystem attempt carrying it is refused (ADR-0009 decision 8). Owner, mode and gid are never put on a request for a backend to recompute.
 pub const RESOURCE_OS_ACCESSIBLE: &str = "os_accessible";
 
@@ -171,6 +186,17 @@ mod tests {
     fn the_kernel_initiator_spelling_is_pinned() {
         assert_eq!(SUBJECT_INITIATOR, "initiator");
         assert_eq!(INITIATOR_KERNEL, "kernel");
+    }
+
+    #[test]
+    fn the_agent_attribute_spellings_are_pinned() {
+        assert_eq!(SUBJECT_CHANNEL, "channel");
+        assert_eq!(CHANNEL_CLIENT, "client");
+        assert_eq!(CHANNEL_AGENT, "agent");
+        assert_eq!(SUBJECT_AGENT, "agent");
+        assert_eq!(SUBJECT_TASK, "task");
+        assert_eq!(SUBJECT_TASKER, "tasker");
+        assert_eq!(RESOURCE_AGENT, "agent");
     }
 
     use crate::value::{AttrValue, Attributes};

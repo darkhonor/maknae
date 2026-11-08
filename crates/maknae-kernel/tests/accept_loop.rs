@@ -75,6 +75,8 @@ enum Scripted {
     /// connection — simulating a peer that stalls the TLS handshake.
     Stall(Duration, DuplexStream, ChannelPeer, u32),
     RawFail(maknae_vault::RawAcceptError),
+    /// An OK connection that delegated these descriptors.
+    Delegating(DuplexStream, ChannelPeer, u32, maknae_io::DelegatedFds),
 }
 
 /// The raw handle `accept_raw` hands to `finish_handshake` (opaque, like `RawPlaneConn`).
@@ -82,6 +84,7 @@ enum FakeRaw {
     Conn(DuplexStream, ChannelPeer, u32, SenderVerdict),
     Reject(AcceptRejection),
     Stall(Duration, DuplexStream, ChannelPeer, u32),
+    Delegating(DuplexStream, ChannelPeer, u32, maknae_io::DelegatedFds),
 }
 
 fn conn(
@@ -110,10 +113,13 @@ struct FakeAccept {
 }
 impl FakeAccept {
     fn new(items: Vec<Scripted>) -> Self {
+        Self::authenticating(items, PeerAuth::Certless)
+    }
+    fn authenticating(items: Vec<Scripted>, peer_auth: PeerAuth) -> Self {
         FakeAccept {
             queue: Mutex::new(items.into_iter().collect()),
             popped: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            peer_auth: PeerAuth::Certless,
+            peer_auth,
         }
     }
     fn pop_counter(&self) -> Arc<std::sync::atomic::AtomicUsize> {
@@ -153,6 +159,9 @@ impl PlaneAccept for FakeAccept {
                 Ok((FakeRaw::Stall(d, stream, peer, uid), creds(uid)))
             }
             Some(Scripted::RawFail(e)) => Err(e),
+            Some(Scripted::Delegating(stream, peer, uid, fds)) => {
+                Ok((FakeRaw::Delegating(stream, peer, uid, fds), creds(uid)))
+            }
             None => {
                 std::future::pending::<()>().await;
                 unreachable!()
@@ -173,6 +182,10 @@ impl PlaneAccept for FakeAccept {
                 tokio::time::sleep(d).await;
                 Ok(conn(stream, peer, uid, SenderVerdict::default()))
             }
+            FakeRaw::Delegating(stream, peer, uid, delegated) => Ok(Conn {
+                delegated,
+                ..conn(stream, peer, uid, SenderVerdict::default())
+            }),
         }
     }
 }
@@ -210,6 +223,10 @@ fn class_on(socket: &str) -> ChannelClass {
 
 fn certified(san: &str) -> ChannelPeer {
     ChannelPeer::Certified(san.to_string())
+}
+
+fn capacity(cfg: &maknae_config::TransportConfig) -> Arc<tokio::sync::Semaphore> {
+    Arc::new(tokio::sync::Semaphore::new(cfg.max_connections as usize))
 }
 
 fn cfg_with(max_connections: u32, read_timeout_ms: u64) -> maknae_config::TransportConfig {
@@ -313,7 +330,8 @@ async fn drive_into(
             class,
             emit_for_loop,
             session_ids,
-            cfg,
+            cfg.clone(),
+            capacity(&cfg),
             wctx(),
             shutdown,
             pending_supervisor(),
@@ -328,6 +346,7 @@ async fn drive_into(
             drain,
             gate,
             lifetime,
+            maknae_kernel::AgentAdmission::none(),
         )
         .await;
     });
@@ -500,7 +519,8 @@ async fn stalled_handshake_does_not_block_next_connection() {
             client_class(),
             emit_for_loop,
             session_ids,
-            cfg,
+            cfg.clone(),
+            capacity(&cfg),
             wctx(),
             std::future::pending::<()>(),
             pending_supervisor(),
@@ -515,6 +535,7 @@ async fn stalled_handshake_does_not_block_next_connection() {
             common::serving(),
             host_gate(),
             Duration::MAX,
+            maknae_kernel::AgentAdmission::none(),
         )
         .await;
     });
@@ -602,7 +623,8 @@ async fn at_capacity_audit_does_not_block_accept_loop() {
             client_class(),
             emit_for_loop,
             session_ids,
-            cfg,
+            cfg.clone(),
+            capacity(&cfg),
             wctx(),
             std::future::pending::<()>(),
             pending_supervisor(),
@@ -617,6 +639,7 @@ async fn at_capacity_audit_does_not_block_accept_loop() {
             common::serving(),
             host_gate(),
             Duration::MAX,
+            maknae_kernel::AgentAdmission::none(),
         )
         .await;
     });
@@ -699,6 +722,7 @@ async fn every_at_capacity_refusal_is_recorded_or_counted() {
             emit_for_loop,
             Arc::new(SessionIds::with_nonce(1)),
             cfg_with(1, 150),
+            capacity(&cfg_with(1, 150)),
             wctx(),
             async move {
                 let _ = rx.await;
@@ -715,6 +739,7 @@ async fn every_at_capacity_refusal_is_recorded_or_counted() {
             common::serving(),
             host_gate(),
             Duration::MAX,
+            maknae_kernel::AgentAdmission::none(),
         )
         .await;
     });
@@ -766,7 +791,8 @@ async fn supervisor_exit_stops_the_loop_and_reports_failure() {
             client_class(),
             emit.clone(),
             session_ids,
-            cfg,
+            cfg.clone(),
+            capacity(&cfg),
             wctx(),
             std::future::pending::<()>(), // shutdown never fires in this test
             supervisor,
@@ -781,6 +807,7 @@ async fn supervisor_exit_stops_the_loop_and_reports_failure() {
             common::serving(),
             host_gate(),
             Duration::MAX,
+            maknae_kernel::AgentAdmission::none(),
         ),
     )
     .await
@@ -831,6 +858,7 @@ async fn a_listener_that_authenticates_otherwise_than_its_class_serves_nothing()
             emit.clone(),
             Arc::new(SessionIds::with_nonce(1)),
             cfg_with(64, 150),
+            capacity(&cfg_with(64, 150)),
             wctx(),
             shutdown,
             pending_supervisor(),
@@ -845,6 +873,7 @@ async fn a_listener_that_authenticates_otherwise_than_its_class_serves_nothing()
             common::serving(),
             host_gate(),
             Duration::MAX,
+            maknae_kernel::AgentAdmission::none(),
         ),
     )
     .await
@@ -887,7 +916,8 @@ async fn shutdown_signal_yields_graceful_outcome() {
         client_class(),
         emit.clone(),
         session_ids,
-        cfg,
+        cfg.clone(),
+        capacity(&cfg),
         wctx(),
         shutdown,
         pending_supervisor(),
@@ -902,6 +932,7 @@ async fn shutdown_signal_yields_graceful_outcome() {
         common::serving(),
         host_gate(),
         Duration::MAX,
+        maknae_kernel::AgentAdmission::none(),
     ));
     tx.send(()).expect("shutdown receiver must still be alive");
     let outcome = tokio::time::timeout(Duration::from_secs(5), loop_task)
@@ -1033,6 +1064,7 @@ const SESSION_UID: u32 = 11_500;
 async fn pinging() -> (Scripted, DuplexStream) {
     let (mut client, server) = tokio::io::duplex(4096);
     let ping = maknae_proto::encode_request(&maknae_proto::Request {
+        task: None,
         protocol_version: maknae_proto::PROTOCOL_VERSION,
         verb: maknae_proto::Verb::Ping,
     })
@@ -1579,4 +1611,703 @@ async fn an_active_member_is_admitted_and_served_without_a_login_session() {
         answer(client).await,
         Some(maknae_proto::RespResult::Ok(maknae_proto::Payload::Pong))
     ));
+}
+
+const AGENT_SOCKET: &str = "/run/maknae/test-agent.sock";
+const TD: &str = "d";
+const HOBI: u32 = 12_001;
+const JIN: u32 = 12_002;
+const MEMBER: u32 = 12_500;
+
+fn agent_id(id: &str) -> maknae_config::AgentId {
+    maknae_config::AgentId::parse(id).unwrap()
+}
+
+fn agent_leaf(id: &str) -> ChannelPeer {
+    ChannelPeer::Agent {
+        san: maknae_vault::agent_uri_san(TD, &agent_id(id)),
+        agent: agent_id(id),
+        not_after: std::time::SystemTime::now() + Duration::from_secs(3600),
+    }
+}
+
+fn agents(pairs: &[(&str, u32)]) -> maknae_kernel::AgentAdmission {
+    maknae_kernel::AgentAdmission {
+        view: Arc::new(maknae_kernel::FixedEnrollment(
+            pairs.iter().map(|(a, u)| (agent_id(a), *u)).collect(),
+        )),
+        tasks: Arc::new(maknae_kernel::TaskStore::new()),
+    }
+}
+
+struct AccountFacts {
+    user: &'static str,
+    dir: std::path::PathBuf,
+    in_group: bool,
+}
+
+impl maknae_kernel::SessionFacts for AccountFacts {
+    fn membership(
+        &self,
+        _admission: maknae_kernel::Admission,
+        _uid: u32,
+    ) -> Result<maknae_kernel::Membership, maknae_kernel::AuthzError> {
+        Ok(maknae_kernel::Membership {
+            in_group: self.in_group,
+            user: self.user.into(),
+            dir: self.dir.clone(),
+        })
+    }
+
+    fn account(&self, _uid: u32) -> AccountFact {
+        AccountFact::NotChecked(NotCheckedWhy::Platform)
+    }
+}
+
+fn account_gate(user: &'static str, dir: std::path::PathBuf, in_group: bool) -> Arc<FactsGate> {
+    FactsGate::for_test(
+        Arc::new(AccountFacts {
+            user,
+            dir,
+            in_group,
+        }),
+        Duration::from_secs(5),
+    )
+}
+
+struct Seen<P> {
+    inner: Arc<P>,
+    asked: Mutex<Vec<maknae_security::Request>>,
+}
+
+impl<P> Seen<P> {
+    fn new(inner: Arc<P>) -> Arc<Self> {
+        Arc::new(Seen {
+            inner,
+            asked: Mutex::new(Vec::new()),
+        })
+    }
+    fn asked(&self, action: &str) -> Vec<maknae_security::Request> {
+        self.asked
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.action.0 == action)
+            .cloned()
+            .collect()
+    }
+}
+
+impl<P: maknae_security::Authorizer> maknae_security::Authorizer for Seen<P> {
+    fn decide(&self, req: &maknae_security::Request) -> maknae_security::Verdict {
+        self.decide_cited(req).verdict
+    }
+    fn decide_reporting_role(
+        &self,
+        req: &maknae_security::Request,
+    ) -> (maknae_security::Verdict, Option<&'static str>) {
+        let d = self.decide_cited(req);
+        (d.verdict, d.role)
+    }
+    fn decide_cited(&self, req: &maknae_security::Request) -> maknae_security::Decided {
+        self.asked.lock().unwrap().push(req.clone());
+        self.inner.decide_cited(req)
+    }
+    fn decide_cited_all(&self, reqs: &[maknae_security::Request]) -> Vec<maknae_security::Decided> {
+        self.asked.lock().unwrap().extend(reqs.iter().cloned());
+        self.inner.decide_cited_all(reqs)
+    }
+}
+
+async fn drive_channel<P>(
+    class: ChannelClass,
+    script: Vec<Scripted>,
+    gate: Arc<FactsGate>,
+    authorizer: Arc<P>,
+    agents: maknae_kernel::AgentAdmission,
+) -> Vec<AuditRecord>
+where
+    P: maknae_security::Authorizer + Send + Sync + 'static,
+{
+    let emit = RecEmit::new();
+    let acceptor = FakeAccept::authenticating(script, class.peer_auth.clone());
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let emit_for_loop = emit.clone();
+    let loop_task = tokio::spawn(async move {
+        maknae_kernel::accept_loop(
+            acceptor,
+            class,
+            emit_for_loop,
+            Arc::new(SessionIds::with_nonce(1)),
+            cfg_with(8, 500),
+            capacity(&cfg_with(8, 500)),
+            wctx(),
+            async move {
+                let _ = rx.await;
+            },
+            pending_supervisor(),
+            authorizer,
+            Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
+            Arc::new("test-backend".to_string()),
+            Arc::new("US".to_string()),
+            Arc::new("ml-dsa-87".to_string()),
+            Arc::new(None),
+            maknae_kernel::unavailable_egress(),
+            common::no_baseline(),
+            common::serving(),
+            gate,
+            Duration::MAX,
+            agents,
+        )
+        .await;
+    });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let _ = tx.send(());
+    loop_task.await.unwrap();
+    emit.records()
+}
+
+fn agent_socket() -> ChannelClass {
+    maknae_kernel::agent_class(AGENT_SOCKET.into(), TD)
+}
+
+async fn asking(
+    peer: ChannelPeer,
+    uid: u32,
+    verb: maknae_proto::Verb,
+    task: Option<maknae_proto::TaskId>,
+    fds: maknae_io::DelegatedFds,
+) -> (Scripted, DuplexStream) {
+    let (mut client, server) = tokio::io::duplex(65536);
+    let body = maknae_proto::encode_request(&maknae_proto::Request {
+        task,
+        protocol_version: maknae_proto::PROTOCOL_VERSION,
+        verb,
+    })
+    .unwrap();
+    common::write_frame(&mut client, &body).await.unwrap();
+    (Scripted::Delegating(server, peer, uid, fds), client)
+}
+
+fn uid_records(recs: &[AuditRecord], uid: u32) -> Vec<&AuditRecord> {
+    recs.iter().filter(|r| r.source.uid == uid).collect()
+}
+
+#[tokio::test]
+async fn an_enrolled_agent_is_admitted_on_the_agent_socket() {
+    let (conn, client) = asking(
+        agent_leaf("hobi"),
+        HOBI,
+        maknae_proto::Verb::Ping,
+        None,
+        maknae_io::DelegatedFds::new(0),
+    )
+    .await;
+    let recs = drive_channel(
+        agent_socket(),
+        vec![conn],
+        account_gate("hobi-svc", "/var/empty".into(), false),
+        Arc::new(common::AlwaysPermit),
+        agents(&[("hobi", HOBI)]),
+    )
+    .await;
+    drop(client);
+    let session = uid_records(&recs, HOBI);
+    let connect = session
+        .iter()
+        .find(|r| r.event == "connection")
+        .expect("a connection record");
+    assert_eq!(
+        (
+            connect.outcome.result.as_str(),
+            connect.source.plane_uri_san.as_deref(),
+            connect.subject.agent.as_deref(),
+            connect.where_.socket.as_str(),
+        ),
+        (
+            "permit",
+            Some("spiffe://d/plane/agent/hobi"),
+            Some("hobi"),
+            AGENT_SOCKET
+        ),
+        "{session:?}"
+    );
+    assert!(
+        session
+            .iter()
+            .all(|r| r.subject.agent.as_deref() == Some("hobi")),
+        "every record of the session names its agent: {session:?}"
+    );
+    assert!(session.iter().any(|r| r.event == "session"), "{session:?}");
+}
+
+#[tokio::test]
+async fn an_enrolled_leaf_from_another_agents_uid_is_refused() {
+    let (conn, client) = asking(
+        agent_leaf("hobi"),
+        JIN,
+        maknae_proto::Verb::Ping,
+        None,
+        maknae_io::DelegatedFds::new(0),
+    )
+    .await;
+    let recs = drive_channel(
+        agent_socket(),
+        vec![conn],
+        account_gate("jin-svc", "/var/empty".into(), false),
+        Arc::new(common::AlwaysPermit),
+        agents(&[("hobi", HOBI), ("jin", JIN)]),
+    )
+    .await;
+    assert_eq!(
+        trail(&uid_records(&recs, JIN)),
+        vec![row("connection", "connect", "deny", "not-enrolled")]
+    );
+    assert_eq!(answer(client).await, None);
+}
+
+#[tokio::test]
+async fn a_maknae_member_presenting_an_enrolled_agents_leaf_is_refused() {
+    let (conn, client) = asking(
+        agent_leaf("hobi"),
+        MEMBER,
+        maknae_proto::Verb::Ping,
+        None,
+        maknae_io::DelegatedFds::new(0),
+    )
+    .await;
+    let recs = drive_channel(
+        agent_socket(),
+        vec![conn],
+        account_gate("ann", "/var/empty".into(), true),
+        Arc::new(common::AlwaysPermit),
+        agents(&[("hobi", HOBI)]),
+    )
+    .await;
+    assert_eq!(
+        trail(&uid_records(&recs, MEMBER)),
+        vec![row("connection", "connect", "deny", "not-enrolled")]
+    );
+    assert_eq!(answer(client).await, None);
+}
+
+#[tokio::test]
+async fn a_cron_job_under_a_humans_uid_acts_only_as_that_human_on_the_client_socket() {
+    let fx = common::Fixture::new("cron-on-client-609", "Read");
+    let pdp = Seen::new(fx.authorizer());
+    let (conn, client) = asking(
+        ChannelPeer::Certless,
+        fx.peer_uid,
+        maknae_proto::Verb::Ping,
+        None,
+        maknae_io::DelegatedFds::new(0),
+    )
+    .await;
+    let recs = drive_channel(
+        client_class(),
+        vec![conn],
+        account_gate("cron-human", "/var/empty".into(), true),
+        Arc::clone(&pdp),
+        agents(&[("hobi", HOBI)]),
+    )
+    .await;
+    drop(client);
+    let asked = pdp.asked("liveness.ping");
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    let subject = &asked[0].subject.0;
+    assert_eq!(
+        subject.get(maknae_security::SUBJECT_CHANNEL),
+        Some(&maknae_security::AttrValue::Str(
+            maknae_security::CHANNEL_CLIENT.into()
+        ))
+    );
+    for k in [
+        maknae_security::SUBJECT_AGENT,
+        maknae_security::SUBJECT_TASK,
+        maknae_security::SUBJECT_TASKER,
+    ] {
+        assert_eq!(subject.get(k), None, "{k}");
+    }
+    let request = recs
+        .iter()
+        .find(|r| r.event == "request" && r.action == "liveness.ping")
+        .expect("the ping request record");
+    assert_eq!(
+        (
+            request.outcome.result.as_str(),
+            request.subject.role.as_deref(),
+            request.subject.agent.as_deref()
+        ),
+        ("permit", Some("user"), None),
+        "{request:?}"
+    );
+    std::fs::remove_dir_all(&fx.root).ok();
+}
+
+/// A composed PDP whose one enrolled agent, `hobi`, is the test euid's account and
+/// whose `policy.yaml` grants `Read` and `Write` over its home.
+fn agent_pdp(
+    tag: &str,
+) -> (
+    common::DirGuard,
+    Arc<maknae_kernel::Composition<maknae_authz_basic::HermeticAuthorizer>>,
+) {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join(format!("agent609_{tag}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let root = common::DirGuard(root.canonicalize().unwrap());
+    let paths = maknae_authz_basic::PolicyPaths::in_dir(&root);
+    common::write_0640(
+        &paths.authz,
+        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n",
+    );
+    common::write_0640(
+        &paths.bindings,
+        "schema_version: 1\nbindings:\n  admin: [\"root\"]\n",
+    );
+    let agents = root.join(maknae_config::AGENTS_DIR);
+    let hobi = agents.join("hobi");
+    std::fs::create_dir_all(&hobi).unwrap();
+    for d in [&agents, &hobi] {
+        std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o750)).unwrap();
+    }
+    let me = nix::unistd::geteuid().as_raw();
+    common::write_0640(
+        &hobi.join(maknae_config::ENROLLMENT_FILE),
+        &format!("agent_id: hobi\naccount: hobi-svc\nuid: {me}\nrole: user\n"),
+    );
+    common::write_0640(
+        &hobi.join(maknae_config::POLICY_FILE),
+        "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Write(~/**)\"]\n  deny: []\n",
+    );
+    let basic = maknae_authz_basic::HermeticAuthorizer::new(
+        paths,
+        maknae_config::Principal {
+            name: "operator".into(),
+            uid: me + 1,
+        },
+        maknae_config::TargetRequired {
+            owner: None,
+            mode_mask: Some(0o022),
+            nlink_exactly_one: false,
+            regular_file: true,
+            max_bytes: None,
+        },
+        maknae_crypto::sha256,
+    )
+    .unwrap();
+    basic.set_hosts(maknae_authz_basic::HostLookups {
+        account: |uid| {
+            Ok(
+                (uid == nix::unistd::geteuid().as_raw()).then(|| maknae_io::HostAccount {
+                    uid,
+                    name: "hobi-svc".into(),
+                    primary_gid: uid,
+                    shell: "/usr/sbin/nologin".into(),
+                    dir: "/var/empty".into(),
+                    named_groups: Vec::new(),
+                }),
+            )
+        },
+        daemons: || {
+            Ok(maknae_io::DaemonFacts {
+                uids: Vec::new(),
+                gids: Vec::new(),
+            })
+        },
+        group: |_| Ok(None),
+    });
+    basic.reload_from_file().unwrap();
+    let us = &maknae_config::BasicPolicy;
+    let pdp = Arc::new(maknae_kernel::Composition::new(
+        basic,
+        maknae_kernel::CeilingAuthorizer::new(maknae_config::Ceiling::baseline_for(us), us),
+    ));
+    assert_eq!(
+        maknae_authz_basic::Baseline::snapshot(pdp.baseline()).agent_uid("hobi"),
+        Some(me)
+    );
+    (root, pdp)
+}
+
+fn signed_for(agent: &str) -> maknae_proto::SignedTask {
+    use maknae_kernel::TaskObjectForTest;
+    maknae_proto::SignedTask {
+        task: maknae_proto::TaskObject::for_test(agent, 1002),
+        signature: maknae_proto::TaskSignature {
+            alg: "test".into(),
+            leaf: maknae_proto::Bytes::new(vec![1].into()),
+            chain: Vec::new(),
+            sig: maknae_proto::Bytes::new(vec![2].into()),
+        },
+    }
+}
+
+fn euid_hobi(held: &[(maknae_proto::SignedTask, u32)]) -> maknae_kernel::AgentAdmission {
+    let a = agents(&[("hobi", nix::unistd::geteuid().as_raw())]);
+    for (task, uid) in held {
+        a.tasks.insert_for_test(task.clone(), *uid);
+    }
+    a
+}
+
+static FS_TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn first_answer(client: &mut DuplexStream) -> Option<maknae_proto::RespResult> {
+    tokio::time::timeout(Duration::from_secs(2), common::read_frame(client, 1 << 20))
+        .await
+        .ok()?
+        .ok()
+        .and_then(|b| maknae_proto::decode_response(&b).ok())
+        .map(|r| r.result)
+}
+
+fn directory_fd(dir: &std::path::Path) -> maknae_io::DelegatedFds {
+    let fds = maknae_io::DelegatedFds::new(4);
+    fds.push(std::fs::File::open(dir).unwrap().into());
+    fds
+}
+
+fn create_in(dir: &std::path::Path) -> maknae_proto::Verb {
+    maknae_proto::Verb::FsWrite {
+        path: dir.join("agent-609-created").to_str().unwrap().into(),
+        content_length: 7,
+        mode: maknae_proto::WriteMode::CreateExclusive,
+        conversation: None,
+    }
+}
+
+#[tokio::test]
+async fn an_agent_write_in_its_home_is_permitted_on_the_agent_channel() {
+    let _turn = FS_TURN.lock().await;
+    let (_root, pdp) = agent_pdp("write-home");
+    let home = common::second_home("agent609-write");
+    let me = nix::unistd::geteuid().as_raw();
+    let (conn, mut client) = asking(
+        agent_leaf("hobi"),
+        me,
+        create_in(&home),
+        None,
+        directory_fd(&home),
+    )
+    .await;
+    let (recs, answered) = tokio::join!(
+        drive_channel(
+            agent_socket(),
+            vec![conn],
+            account_gate("hobi-svc", home.to_path_buf(), false),
+            pdp,
+            euid_hobi(&[]),
+        ),
+        async {
+            let got = first_answer(&mut client).await;
+            drop(client);
+            got
+        }
+    );
+    assert!(
+        matches!(
+            answered,
+            Some(maknae_proto::RespResult::Ok(
+                maknae_proto::Payload::MutationAttempt(_)
+            ))
+        ),
+        "the agent's own policy grants the write: {answered:?} {recs:?}"
+    );
+    let write = recs
+        .iter()
+        .find(|r| r.action == "fs.write")
+        .expect("the fs.write record");
+    assert_eq!(write.subject.agent.as_deref(), Some("hobi"), "{write:?}");
+}
+
+#[tokio::test]
+async fn an_fs_write_citing_another_agents_task_is_refused() {
+    let _turn = FS_TURN.lock().await;
+    let (_root, pdp) = agent_pdp("write-other-task");
+    let pdp = Seen::new(pdp);
+    let home = common::second_home("agent609-other-task");
+    let me = nix::unistd::geteuid().as_raw();
+    let jins = signed_for("jin");
+    let cited = jins.task.task_id;
+    let (conn, client) = asking(
+        agent_leaf("hobi"),
+        me,
+        create_in(&home),
+        Some(jins.task.task_id),
+        directory_fd(&home),
+    )
+    .await;
+    let recs = drive_channel(
+        agent_socket(),
+        vec![conn],
+        account_gate("hobi-svc", home.to_path_buf(), false),
+        Arc::clone(&pdp),
+        euid_hobi(&[(jins, JIN)]),
+    )
+    .await;
+    let session: Vec<&AuditRecord> = recs
+        .iter()
+        .filter(|r| r.source.uid == me && r.event != "shutdown")
+        .collect();
+    let reason = format!("task-other-agent:{cited}");
+    assert_eq!(
+        trail(&session),
+        vec![
+            admitted("not-checked:platform"),
+            row("request", "fs.write", "deny", &reason),
+            terminated("deny", &reason),
+        ]
+    );
+    assert!(pdp.asked("fs.write").is_empty(), "refused before the PDP");
+    assert!(!home.join("agent-609-created").exists());
+    let mut client = client;
+    match first_answer(&mut client).await {
+        Some(maknae_proto::RespResult::Err(e)) => assert_eq!(
+            (e.code, e.message.as_str()),
+            (maknae_proto::ProtoErrCode::Unauthorized, "not authorized")
+        ),
+        other => panic!("expected the generic Unauthorized frame, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_read_citing_the_agents_own_task_carries_subject_task() {
+    let _turn = FS_TURN.lock().await;
+    let (_root, pdp) = agent_pdp("read-own-task");
+    let pdp = Seen::new(pdp);
+    let home = common::second_home("agent609-read");
+    let file = home.join("notes");
+    common::write_0640(&file, "agent-609-notes");
+    let me = nix::unistd::geteuid().as_raw();
+    let own = signed_for("hobi");
+    let id = own.task.task_id;
+    let fds = maknae_io::DelegatedFds::new(4);
+    fds.push(maknae_io::open_path_for_delegation(&file).unwrap());
+    let (conn, mut client) = asking(
+        agent_leaf("hobi"),
+        me,
+        maknae_proto::Verb::Read {
+            path: file.to_str().unwrap().into(),
+            conversation: None,
+            page: None,
+        },
+        Some(id),
+        fds,
+    )
+    .await;
+    let (recs, _) = tokio::join!(
+        drive_channel(
+            agent_socket(),
+            vec![conn],
+            account_gate("hobi-svc", home.to_path_buf(), false),
+            Arc::clone(&pdp),
+            euid_hobi(&[(own, me)]),
+        ),
+        async {
+            let got = first_answer(&mut client).await;
+            drop(client);
+            got
+        }
+    );
+    let asked = pdp.asked("fs.read");
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert_eq!(
+        asked[0].subject.0.get(maknae_security::SUBJECT_TASK),
+        Some(&maknae_security::AttrValue::Str(id.to_string()))
+    );
+    let read = recs
+        .iter()
+        .find(|r| r.action == "fs.read")
+        .expect("the fs.read record");
+    assert_eq!(
+        (
+            read.subject.task_id.as_deref(),
+            read.subject.agent.as_deref()
+        ),
+        (Some(id.to_string().as_str()), Some("hobi")),
+        "{read:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_agent_request_citing_its_task_is_stamped_and_audited() {
+    let (_root, pdp) = agent_pdp("whoami-own-task");
+    let pdp = Seen::new(pdp);
+    let me = nix::unistd::geteuid().as_raw();
+    let own = signed_for("hobi");
+    let id = own.task.task_id;
+    let (conn, client) = asking(
+        agent_leaf("hobi"),
+        me,
+        maknae_proto::Verb::Whoami,
+        Some(id),
+        maknae_io::DelegatedFds::new(0),
+    )
+    .await;
+    let recs = drive_channel(
+        agent_socket(),
+        vec![conn],
+        account_gate("hobi-svc", "/var/empty".into(), false),
+        Arc::clone(&pdp),
+        euid_hobi(&[(own, me)]),
+    )
+    .await;
+    drop(client);
+    let asked = pdp.asked("admin.whoami");
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    let s = |v: &str| Some(maknae_security::AttrValue::Str(v.into()));
+    let subject = &asked[0].subject.0;
+    assert_eq!(
+        (
+            subject.get(maknae_security::SUBJECT_CHANNEL).cloned(),
+            subject.get(maknae_security::SUBJECT_AGENT).cloned(),
+            subject.get(maknae_security::SUBJECT_TASK).cloned(),
+            subject.get(maknae_security::SUBJECT_TASKER).cloned(),
+        ),
+        (
+            s(maknae_security::CHANNEL_AGENT),
+            s("hobi"),
+            s(&id.to_string()),
+            s("uid:1002")
+        )
+    );
+    let request = recs
+        .iter()
+        .find(|r| r.event == "request" && r.action == "admin.whoami")
+        .expect("the whoami request record");
+    assert_eq!(
+        (
+            request.outcome.result.as_str(),
+            request.subject.agent.as_deref(),
+            request.subject.task_id.as_deref(),
+            request.subject.tasker.as_deref(),
+        ),
+        (
+            "permit",
+            Some("hobi"),
+            Some(id.to_string().as_str()),
+            Some("uid:1002")
+        ),
+        "{request:?}"
+    );
+    let terminate = recs
+        .iter()
+        .find(|r| r.event == "session" && r.source.uid == me)
+        .expect("the terminate record");
+    assert_eq!(
+        (
+            terminate.subject.agent.as_deref(),
+            terminate.subject.task_id.as_deref(),
+            terminate.subject.tasker.as_deref(),
+        ),
+        (
+            Some("hobi"),
+            Some(id.to_string().as_str()),
+            Some("uid:1002")
+        ),
+        "{terminate:?}"
+    );
 }

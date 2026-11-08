@@ -129,15 +129,21 @@ fn macos_summary(
     outcome: Scrubbed<'_>,
     subject: Scrubbed<'_>,
     role: Scrubbed<'_>,
+    task: [(&str, Option<Scrubbed<'_>>); 4],
     session_id: u64,
     seq: u64,
 ) -> String {
+    let task: String = task
+        .iter()
+        .filter_map(|(key, v)| v.map(|v| format!(" {key}={}", v.as_str())))
+        .collect();
     format!(
-        "maknae audit: {} {} subject={} role={} session={} seq={}",
+        "maknae audit: {} {} subject={} role={}{} session={} seq={}",
         action.as_str(),
         outcome.as_str(),
         subject.as_str(),
         role.as_str(),
+        task,
         session_id,
         seq
     )
@@ -168,11 +174,18 @@ pub(crate) fn format_line_unchecked(
     // mutant on an unobservable capacity hint is equivalent-and-reported-MISSED,
     // and this is a [t1] zero-missed file with no exclusion available.
     let mut line = String::new();
+    let task = [
+        ("agent", rec.subject.agent.as_deref().map(scrub)),
+        ("task", rec.subject.task_id.as_deref().map(scrub)),
+        ("parent", rec.subject.parent_task_id.as_deref().map(scrub)),
+        ("tasker", rec.subject.tasker.as_deref().map(scrub)),
+    ];
     line.push_str(&macos_summary(
         action,
         outcome,
         subject,
         role,
+        task,
         f.session_id,
         f.seq,
     ));
@@ -791,6 +804,10 @@ mod tests {
                 user: Some("alice".into()),
                 role: None,
                 plane_uri_san: None,
+                agent: None,
+                task_id: None,
+                parent_task_id: None,
+                tasker: None,
             },
             action: "fs.read".into(),
             object: Some("/home/alice/.ssh/id_rsa".into()),
@@ -868,6 +885,32 @@ mod tests {
             s.starts_with("maknae audit: fs.read deny subject=alice role=none session=7 seq=3 "),
             "summary text not as specified: {s}"
         );
+    }
+
+    #[test]
+    fn the_summary_names_agent_task_and_tasker() {
+        let mut r = rec("no");
+        r.subject.agent = Some("hobi".into());
+        r.subject.task_id = Some("0f".repeat(16));
+        r.subject.tasker = Some("agent:jin".into());
+        r.subject.parent_task_id = Some("a0".repeat(16));
+        let s = format_record(&r, PrimaryOutcome::Ok)
+            .unwrap()
+            .into_full()
+            .unwrap();
+        let want = format!(
+            "maknae audit: fs.read deny subject=alice role=none agent=hobi task={} parent={} tasker=agent:jin session=7 seq=3 ",
+            "0f".repeat(16),
+            "a0".repeat(16)
+        );
+        assert!(s.starts_with(&want), "{s}");
+        r.subject.tasker = Some("MAKNAE_OUTCOME=permit".into());
+        let s = format_record(&r, PrimaryOutcome::Ok)
+            .unwrap()
+            .into_full()
+            .unwrap();
+        assert!(s.contains(" tasker=invalid session=7"), "{s}");
+        assert!(!s[..s.find("MAKNAE_RECORD=").unwrap()].contains("MAKNAE_OUTCOME=permit"));
     }
 
     #[test]

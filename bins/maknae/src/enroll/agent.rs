@@ -2,17 +2,30 @@ use super::artifact_table::{Artifact, ContentKind, Owner};
 use super::artifact_write::{self, emit_yaml, yaml_map, OwnerResolver};
 use super::EnrollError;
 use crate::stderr::errln;
-use clap::Args;
-use maknae_config::Value;
+use clap::{Args, ValueEnum};
+use maknae_config::{AgentRole, Value};
 use maknae_io::{AnchorRequired, FileOwner, IoError, IoKind, Mode, StrategyPref, TargetRequired};
 use maknae_msgs::{msg, Locale, MsgId};
-use maknae_vault::agent_enroll::{
-    AccountFacts, AgentId, BindCidrs, HostAccounts, DEFAULT_AGENT_APPROLE_MOUNT,
-    MAKNAE_DAEMON_ACCOUNTS,
-};
+use maknae_vault::agent_enroll::{AgentId, BindCidrs, HostAccounts, DEFAULT_AGENT_APPROLE_MOUNT};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use yaml_rust2::Yaml;
 use zeroize::Zeroizing;
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum RoleArg {
+    User,
+    Guest,
+}
+
+impl From<RoleArg> for AgentRole {
+    fn from(r: RoleArg) -> Self {
+        match r {
+            RoleArg::User => AgentRole::User,
+            RoleArg::Guest => AgentRole::Guest,
+        }
+    }
+}
 
 /// `maknae enroll agent` — enroll one Agent Daemon on this host.
 #[derive(Args, Debug, Clone)]
@@ -26,6 +39,9 @@ pub struct AgentArgs {
     /// An address or CIDR the SecretID may be used from (repeatable).
     #[arg(long = "bind-cidr", required = true)]
     pub bind_cidr: Vec<String>,
+    /// The role the agent is bound to; an agent is never `admin`.
+    #[arg(long, value_enum, default_value_t = RoleArg::User)]
+    pub role: RoleArg,
     /// The AppRole auth mount the agent's role lives on.
     #[arg(long, default_value = DEFAULT_AGENT_APPROLE_MOUNT)]
     pub approle_mount: String,
@@ -40,20 +56,20 @@ pub struct AgentArgs {
     pub verbose: bool,
 }
 
-const PRIVATE_DIR: &str = "/etc/maknae/private";
+pub(crate) const PRIVATE_DIR: &str = "/etc/maknae/private";
 const ETC_DIR: &str = "/etc/maknae";
 const AGENTS_ENTRY: &str = "agents";
-const AGENTS_DIR: &str = "/etc/maknae/agents";
+pub(crate) const AGENTS_DIR: &str = "/etc/maknae/agents";
 const HOST_CONFIG: &str = "/etc/maknae/maknae.yaml";
-const VAULT_CA: &str = "/etc/maknae/tls/vault-ca.crt";
+pub(crate) const VAULT_CA: &str = "/etc/maknae/tls/vault-ca.crt";
+#[cfg(target_os = "macos")]
+pub(crate) const RELOAD_COMMAND: &str = "sudo launchctl kill SIGHUP system/io.maknae.maknaed";
+#[cfg(not(target_os = "macos"))]
+pub(crate) const RELOAD_COMMAND: &str = "sudo systemctl reload maknaed";
 const SMALL_FILE: u64 = 64 * 1024;
 
-fn state_file(agent: &AgentId) -> String {
+pub(crate) fn state_file(agent: &AgentId) -> String {
     format!("agent-{}-enroll-state.yaml", agent.as_str())
-}
-
-fn record_file(agent_id: &str) -> String {
-    format!("{agent_id}.yaml")
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -66,7 +82,9 @@ pub(crate) fn state_path(agent: &AgentId) -> PathBuf {
 }
 
 pub(crate) fn record_path(agent: &AgentId) -> PathBuf {
-    Path::new(AGENTS_DIR).join(record_file(agent.as_str()))
+    Path::new(AGENTS_DIR)
+        .join(agent.as_str())
+        .join(maknae_config::ENROLLMENT_FILE)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -154,6 +172,7 @@ pub(crate) struct AgentRecord {
     pub role_name: String,
     pub role_id: String,
     pub bind_cidrs: Vec<String>,
+    pub role: AgentRole,
     pub source: SecretSource,
 }
 
@@ -167,6 +186,7 @@ impl AgentRecord {
             ("role_name", Yaml::String(self.role_name.clone())),
             ("role_id", Yaml::String(self.role_id.clone())),
             ("bind_cidrs", yaml_list(&self.bind_cidrs)),
+            ("role", Yaml::String(self.role.key().to_string())),
             ("source", Yaml::String(self.source.as_str().to_string())),
         ]))
     }
@@ -188,6 +208,9 @@ impl AgentRecord {
                 )))
             }
         };
+        let role = req_str(&doc, "role", WHAT)?;
+        let role = AgentRole::parse(&role)
+            .ok_or_else(|| EnrollError::State(format!("{WHAT}: unknown role {role:?}")))?;
         Ok(Self {
             agent_id: req_str(&doc, "agent_id", WHAT)?,
             account: req_str(&doc, "account", WHAT)?,
@@ -196,6 +219,7 @@ impl AgentRecord {
             role_name: req_str(&doc, "role_name", WHAT)?,
             role_id: req_str(&doc, "role_id", WHAT)?,
             bind_cidrs: req_list(&doc, "bind_cidrs", WHAT)?,
+            role,
             source,
         })
     }
@@ -246,23 +270,37 @@ fn req_list(doc: &Value, key: &str, what: &str) -> Result<Vec<String>, EnrollErr
     }
 }
 
-pub(crate) trait AgentOps {
+pub(crate) trait AgentVaultOps {
     async fn read_role_id(&self, mount: &str, role: &str) -> Result<String, EnrollError>;
+    async fn find_role_id(&self, mount: &str, role: &str) -> Result<Option<String>, EnrollError>;
+    async fn destroy(&self, mount: &str, role: &str, accessor: &str) -> Result<(), EnrollError>;
+    async fn list_accessors(&self, mount: &str, role: &str) -> Result<Vec<String>, EnrollError>;
+    fn write_state(&self, agent: &AgentId, state: &AgentState) -> Result<(), EnrollError>;
+    async fn entity(&self, name: &str) -> Result<Option<maknae_vault::EntityFacts>, EnrollError>;
+    async fn set_entity_disabled(&self, name: &str, disabled: bool) -> Result<(), EnrollError>;
+}
+
+pub(crate) trait AgentOps: AgentVaultOps {
     async fn mint(
         &self,
         mount: &str,
         role: &str,
         cidrs: &BindCidrs,
     ) -> Result<(Zeroizing<String>, String), EnrollError>;
-    async fn destroy(&self, mount: &str, role: &str, accessor: &str) -> Result<(), EnrollError>;
-    async fn list_accessors(&self, mount: &str, role: &str) -> Result<Vec<String>, EnrollError>;
     async fn seal(
         &self,
         agent: &AgentId,
         secret: &Zeroizing<String>,
     ) -> Result<SecretSource, EnrollError>;
-    fn write_state(&self, agent: &AgentId, state: &AgentState) -> Result<(), EnrollError>;
     fn write_record(&self, record: &AgentRecord) -> Result<(), EnrollError>;
+}
+
+pub(crate) fn has_alias_on(entity: &maknae_vault::EntityFacts, mount: &str, role_id: &str) -> bool {
+    let want = format!("auth/{}", mount.trim_matches('/'));
+    entity
+        .aliases
+        .iter()
+        .any(|a| a.mount_path.trim_matches('/') == want && a.name == role_id)
 }
 
 pub(crate) struct AgentPlan {
@@ -271,6 +309,7 @@ pub(crate) struct AgentPlan {
     pub uid: u32,
     pub mount: String,
     pub cidrs: BindCidrs,
+    pub role: AgentRole,
     pub rotate: bool,
 }
 
@@ -320,6 +359,18 @@ pub(crate) async fn enroll_agent<O: AgentOps>(
     let mount = plan.mount.as_str();
     let role = plan.agent.role_name();
     let role_id = ops.read_role_id(mount, &role).await?;
+    let entity = plan.agent.entity_name();
+    let reenable = match ops.entity(&entity).await? {
+        Some(facts) if has_alias_on(&facts, mount, &role_id) => facts.disabled,
+        _ => {
+            return Err(EnrollError::AgentEntityMissing {
+                agent: id.to_string(),
+                entity,
+                mount: plan.mount.clone(),
+                remains: Vec::new(),
+            })
+        }
+    };
     let (secret, acc) = ops.mint(mount, &role, &plan.cidrs).await?;
 
     let base = AgentState {
@@ -379,6 +430,7 @@ pub(crate) async fn enroll_agent<O: AgentOps>(
         role_name: role.clone(),
         role_id,
         bind_cidrs: plan.cidrs.as_slice().to_vec(),
+        role: plan.role,
         source,
     };
     ops.write_record(&record)?;
@@ -402,6 +454,9 @@ pub(crate) async fn enroll_agent<O: AgentOps>(
         ..live
     };
     ops.write_state(&plan.agent, &done)?;
+    if reenable && failures.is_empty() {
+        ops.set_entity_disabled(&entity, false).await?;
+    }
     if !failures.is_empty() {
         return Err(EnrollError::AgentRetireFailed {
             agent: id.to_string(),
@@ -411,7 +466,7 @@ pub(crate) async fn enroll_agent<O: AgentOps>(
     Ok(AgentOutcome { record, retired })
 }
 
-fn dedup<'a>(items: impl Iterator<Item = &'a String>) -> Vec<String> {
+pub(crate) fn dedup<'a>(items: impl Iterator<Item = &'a String>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for i in items {
         if !out.contains(i) {
@@ -421,14 +476,14 @@ fn dedup<'a>(items: impl Iterator<Item = &'a String>) -> Vec<String> {
     out
 }
 
-fn io_error(path: &Path, e: IoError) -> EnrollError {
+pub(crate) fn io_error(path: &Path, e: IoError) -> EnrollError {
     EnrollError::Io {
         path: path.to_path_buf(),
         source: e.to_string(),
     }
 }
 
-fn is_not_found(e: &IoError) -> bool {
+pub(crate) fn is_not_found(e: &IoError) -> bool {
     matches!(
         e,
         IoError::Io {
@@ -517,15 +572,88 @@ fn scrub_secret(e: EnrollError, secret: &Zeroizing<String>) -> EnrollError {
     }
 }
 
+pub(crate) struct RealVault {
+    pub(crate) client: maknae_vault::OperatorClient,
+    pub(crate) private: maknae_io::Anchor,
+}
+
+pub(crate) trait HasVault {
+    fn vault(&self) -> &RealVault;
+}
+
+impl HasVault for RealVault {
+    fn vault(&self) -> &RealVault {
+        self
+    }
+}
+
+impl<T: HasVault> AgentVaultOps for T {
+    async fn read_role_id(&self, mount: &str, role: &str) -> Result<String, EnrollError> {
+        Ok(self.vault().client.read_role_id(mount, role).await?)
+    }
+
+    async fn find_role_id(&self, mount: &str, role: &str) -> Result<Option<String>, EnrollError> {
+        Ok(self.vault().client.find_role_id(mount, role).await?)
+    }
+
+    async fn destroy(&self, mount: &str, role: &str, accessor: &str) -> Result<(), EnrollError> {
+        Ok(self
+            .vault()
+            .client
+            .destroy_accessor_if_present(mount, role, accessor)
+            .await?)
+    }
+
+    async fn list_accessors(&self, mount: &str, role: &str) -> Result<Vec<String>, EnrollError> {
+        Ok(self
+            .vault()
+            .client
+            .list_secret_id_accessors(mount, role)
+            .await?)
+    }
+
+    fn write_state(&self, agent: &AgentId, state: &AgentState) -> Result<(), EnrollError> {
+        self.vault()
+            .private
+            .publish_owned(
+                Path::new(&state_file(agent)),
+                None,
+                state.to_yaml().as_bytes(),
+                Mode(0o600),
+                FileOwner { uid: 0, gid: 0 },
+            )
+            .map(|_| ())
+            .map_err(|e| io_error(&state_path(agent), e))
+    }
+
+    async fn entity(&self, name: &str) -> Result<Option<maknae_vault::EntityFacts>, EnrollError> {
+        Ok(self.vault().client.entity(name).await?)
+    }
+
+    async fn set_entity_disabled(&self, name: &str, disabled: bool) -> Result<(), EnrollError> {
+        Ok(self
+            .vault()
+            .client
+            .set_entity_disabled(name, disabled)
+            .await?)
+    }
+}
+
 struct RealAgentOps {
-    client: maknae_vault::OperatorClient,
-    private: maknae_io::Anchor,
+    vault: RealVault,
     agents: maknae_io::Anchor,
     daemon_gid: u32,
+    resolver: artifact_write::RealOwnerResolver,
     #[cfg(not(target_os = "macos"))]
     verbose: bool,
     #[cfg(target_os = "macos")]
     team: String,
+}
+
+impl HasVault for RealAgentOps {
+    fn vault(&self) -> &RealVault {
+        &self.vault
+    }
 }
 
 impl RealAgentOps {
@@ -565,28 +693,17 @@ impl RealAgentOps {
 }
 
 impl AgentOps for RealAgentOps {
-    async fn read_role_id(&self, mount: &str, role: &str) -> Result<String, EnrollError> {
-        Ok(self.client.read_role_id(mount, role).await?)
-    }
-
     async fn mint(
         &self,
         mount: &str,
         role: &str,
         cidrs: &BindCidrs,
     ) -> Result<(Zeroizing<String>, String), EnrollError> {
-        Ok(self.client.mint_bound_secret_id(mount, role, cidrs).await?)
-    }
-
-    async fn destroy(&self, mount: &str, role: &str, accessor: &str) -> Result<(), EnrollError> {
         Ok(self
+            .vault
             .client
-            .destroy_accessor_if_present(mount, role, accessor)
+            .mint_bound_secret_id(mount, role, cidrs)
             .await?)
-    }
-
-    async fn list_accessors(&self, mount: &str, role: &str) -> Result<Vec<String>, EnrollError> {
-        Ok(self.client.list_secret_id_accessors(mount, role).await?)
     }
 
     async fn seal(
@@ -599,24 +716,20 @@ impl AgentOps for RealAgentOps {
             .map_err(|e| scrub_secret(e, secret))
     }
 
-    fn write_state(&self, agent: &AgentId, state: &AgentState) -> Result<(), EnrollError> {
-        self.private
-            .publish_owned(
-                Path::new(&state_file(agent)),
-                None,
-                state.to_yaml().as_bytes(),
-                Mode(0o600),
-                FileOwner { uid: 0, gid: 0 },
-            )
-            .map(|_| ())
-            .map_err(|e| io_error(&state_path(agent), e))
-    }
-
     fn write_record(&self, record: &AgentRecord) -> Result<(), EnrollError> {
         let agent = AgentId::parse(&record.agent_id)?;
+        artifact_write::ensure_dir(
+            &Artifact {
+                path: Path::new(AGENTS_DIR).join(agent.as_str()),
+                owner: Owner::RootMaknaeGroup,
+                mode: 0o750,
+                content: ContentKind::Dir,
+            },
+            &self.resolver,
+        )?;
         self.agents
             .publish_owned(
-                Path::new(&record_file(agent.as_str())),
+                &Path::new(agent.as_str()).join(maknae_config::ENROLLMENT_FILE),
                 None,
                 record.to_yaml().as_bytes(),
                 Mode(0o640),
@@ -653,7 +766,7 @@ impl OwnerResolver for RootOnly {
 
 type OtherAgent = (String, u32);
 
-fn read_records(
+pub(crate) fn read_records(
     agents: &maknae_io::Anchor,
     agent: &AgentId,
 ) -> Result<(Option<AgentRecord>, Vec<OtherAgent>), EnrollError> {
@@ -667,24 +780,26 @@ fn read_records(
         let Some(name) = entry.name.to_str() else {
             continue;
         };
-        let Some(stem) = name.strip_suffix(".yaml") else {
+        if entry.kind != maknae_io::Kind::Dir || AgentId::parse(name).is_err() {
             continue;
+        }
+        let rel = Path::new(name).join(maknae_config::ENROLLMENT_FILE);
+        let path = Path::new(AGENTS_DIR).join(&rel);
+        let bytes = match agents.read(&rel, None, root_file(0o027, SMALL_FILE)) {
+            Ok(out) => out.value,
+            Err(e) if is_not_found(&e) => continue,
+            Err(e) => return Err(io_error(&path, e)),
         };
-        let path = Path::new(AGENTS_DIR).join(name);
-        let bytes = agents
-            .read(Path::new(name), None, root_file(0o027, SMALL_FILE))
-            .map_err(|e| io_error(&path, e))?
-            .value;
         let record = AgentRecord::parse(&utf8(&path, &bytes)?)
             .map_err(|e| EnrollError::State(format!("{}: {e}", path.display())))?;
-        if record.agent_id != stem {
+        if record.agent_id != name {
             return Err(EnrollError::State(format!(
                 "{}: records agent {}",
                 path.display(),
                 record.agent_id
             )));
         }
-        if stem == agent.as_str() {
+        if name == agent.as_str() {
             prior = Some(record);
         } else {
             others.push((record.agent_id, record.uid));
@@ -693,7 +808,10 @@ fn read_records(
     Ok((prior, others))
 }
 
-fn read_state(private: &maknae_io::Anchor, agent: &AgentId) -> Result<AgentState, EnrollError> {
+pub(crate) fn read_state(
+    private: &maknae_io::Anchor,
+    agent: &AgentId,
+) -> Result<AgentState, EnrollError> {
     let path = state_path(agent);
     match private.read(
         Path::new(&state_file(agent)),
@@ -711,56 +829,127 @@ fn owner_error(what: &str, e: impl std::fmt::Display) -> EnrollError {
     EnrollError::Owner(format!("{what}: {e}"))
 }
 
+fn named_account(
+    requested: &str,
+    acct: Option<maknae_io::HostAccount>,
+) -> Result<Option<maknae_io::HostAccount>, EnrollError> {
+    match acct {
+        Some(a) if a.name != requested => Err(EnrollError::Owner(format!(
+            "account {requested} shares uid {} with account {}; give the Agent Daemon an account with its own uid",
+            a.uid, a.name
+        ))),
+        other => Ok(other),
+    }
+}
+
+pub(crate) fn agent_group_command(account: &str) -> String {
+    let group = maknae_io::MAKNAE_AGENTS_GROUP;
+    if cfg!(target_os = "macos") {
+        format!("dseditgroup -o edit -a {account} -t user {group}")
+    } else {
+        format!("usermod -aG {group} {account}")
+    }
+}
+
+pub(crate) fn agent_group_create_command() -> String {
+    let group = maknae_io::MAKNAE_AGENTS_GROUP;
+    if cfg!(target_os = "macos") {
+        format!("dseditgroup -o create {group}")
+    } else {
+        format!("groupadd --system {group}")
+    }
+}
+
+fn admit_account(
+    requested: &str,
+    agent: &AgentId,
+    acct: Option<maknae_io::HostAccount>,
+    host: &HostAccounts<'_>,
+    agents_gid: Option<u32>,
+    bindings: &maknae_config::Bindings,
+    uid_of: &BTreeMap<String, u32>,
+) -> Result<u32, EnrollError> {
+    let acct = named_account(requested, acct)?;
+    maknae_vault::agent_enroll::service_account_check(acct.as_ref(), requested, agent, host)?;
+    let acct = acct.ok_or_else(|| EnrollError::Owner(format!("no such user: {requested}")))?;
+    if let Some(role) =
+        maknae_config::bindings_conflict(bindings, requested, acct.uid, |n| uid_of.get(n).copied())
+    {
+        return Err(EnrollError::AgentBound {
+            agent: agent.as_str().to_string(),
+            account: requested.to_string(),
+            role,
+        });
+    }
+    let Some(agents_gid) = agents_gid else {
+        return Err(EnrollError::AgentGroupMissing {
+            group: maknae_io::MAKNAE_AGENTS_GROUP,
+        });
+    };
+    if !acct.named_groups.contains(&agents_gid) {
+        return Err(EnrollError::AgentNotInAgentGroup {
+            account: requested.to_string(),
+            group: maknae_io::MAKNAE_AGENTS_GROUP,
+        });
+    }
+    Ok(acct.uid)
+}
+
 fn check_account(
     args: &AgentArgs,
     agent: &AgentId,
     host: &HostEnrollment,
     other_agents: &[(String, u32)],
 ) -> Result<u32, EnrollError> {
-    use nix::unistd::{Group, User};
-    let acct = User::from_name(&args.account)
+    let acct = match maknae_io::user_by_name(&args.account)
         .map_err(|e| owner_error(&format!("user {}", args.account), e))?
-        .map(|u| AccountFacts {
-            name: u.name,
-            uid: u.uid.as_raw(),
-            primary_gid: u.gid.as_raw(),
-            shell: u.shell.to_string_lossy().into_owned(),
-        });
-    let maknae = Group::from_name("maknae")
+    {
+        Some(u) => maknae_io::host_account(u.uid.as_raw())
+            .map_err(|e| owner_error(&format!("user {}", args.account), e))?,
+        None => None,
+    };
+    let maknae_gid = maknae_io::group_gid(maknae_io::MAKNAE_GROUP)
         .map_err(|e| owner_error("group maknae", e))?
         .ok_or_else(|| EnrollError::Owner("no maknae group".to_string()))?;
-    let mut daemon_uids = Vec::new();
-    let mut daemon_groups = Vec::new();
-    for name in MAKNAE_DAEMON_ACCOUNTS {
-        if let Some(uid) =
-            maknae_vault::account_uid(name).map_err(|e| owner_error(&format!("user {name}"), e))?
-        {
-            daemon_uids.push(uid);
-        }
-        if let Some(g) =
-            Group::from_name(name).map_err(|e| owner_error(&format!("group {name}"), e))?
-        {
-            daemon_groups.push((g.gid.as_raw(), g.mem));
-        }
-    }
-    maknae_vault::agent_enroll::service_account_check(
-        acct.as_ref(),
+    let agents_gid = maknae_io::group_gid(maknae_io::MAKNAE_AGENTS_GROUP)
+        .map_err(|e| owner_error("group maknae-agents", e))?;
+    let daemons =
+        maknae_io::daemon_facts().map_err(|e| owner_error("Maknae daemon accounts", e))?;
+    let bindings =
+        maknae_config::load_bindings(&Path::new(ETC_DIR).join(maknae_config::BINDINGS_FILE))
+            .map_err(|e| EnrollError::Bindings(format!("bindings.yaml: {e}")))?;
+    admit_account(
         &args.account,
         agent,
+        acct,
         &HostAccounts {
-            maknae_gid: maknae.gid.as_raw(),
-            maknae_members: &maknae.mem,
+            maknae_gid: Some(maknae_gid),
             principal_uid: host.principal_uid,
-            daemon_uids: &daemon_uids,
-            daemon_groups: &daemon_groups,
+            daemons: &daemons,
             other_agents,
         },
-    )?;
-    acct.map(|a| a.uid)
-        .ok_or_else(|| EnrollError::Owner(format!("no such user: {}", args.account)))
+        agents_gid,
+        &bindings,
+        &binding_uids(&bindings)?,
+    )
 }
 
-fn read_host() -> Result<HostEnrollment, EnrollError> {
+fn binding_uids(bindings: &maknae_config::Bindings) -> Result<BTreeMap<String, u32>, EnrollError> {
+    let mut out = BTreeMap::new();
+    for entry in bindings.roles.iter().flatten().flat_map(|(_, e)| e) {
+        let maknae_config::BindingEntry::Name(name) = entry else {
+            continue;
+        };
+        if let Some(u) =
+            maknae_io::user_by_name(name).map_err(|e| owner_error(&format!("user {name}"), e))?
+        {
+            out.insert(name.clone(), u.uid.as_raw());
+        }
+    }
+    Ok(out)
+}
+
+pub(crate) fn read_host() -> Result<HostEnrollment, EnrollError> {
     let path = Path::new(HOST_CONFIG);
     let out = maknae_io::read_absolute(
         path,
@@ -783,7 +972,7 @@ fn read_host() -> Result<HostEnrollment, EnrollError> {
     parse_host_enrollment(&utf8(path, &out.value)?)
 }
 
-fn check_mount(what: &str, mount: &str) -> Result<(), EnrollError> {
+pub(crate) fn check_mount(what: &str, mount: &str) -> Result<(), EnrollError> {
     maknae_config::mount_path_is_acceptable(mount)
         .map_err(|why| EnrollError::InvalidVaultMount(format!("{what} {why}")))?;
     if !maknae_config::vault_path_is_safe(mount) {
@@ -815,7 +1004,7 @@ fn agents_dir_kind() -> Result<Option<maknae_io::Kind>, EnrollError> {
         .map(|e| e.kind))
 }
 
-fn open_dir(path: &str, mode_mask: u32) -> Result<maknae_io::Anchor, EnrollError> {
+pub(crate) fn open_dir(path: &str, mode_mask: u32) -> Result<maknae_io::Anchor, EnrollError> {
     maknae_io::open_anchor(
         Path::new(path),
         AnchorRequired {
@@ -855,6 +1044,24 @@ fn platform_gate(verbose: bool) -> Result<(), EnrollError> {
             detail: "agent credentials are sealed with systemd-creds --with-key=tpm2; this host has no usable TPM2".to_string(),
         })
     }
+}
+
+async fn admit_then_enroll<P, Fut>(
+    admit: impl FnOnce() -> Result<u32, EnrollError>,
+    build: impl FnOnce() -> Fut,
+    mut plan: AgentPlan,
+    host: &HostEnrollment,
+    prior_record: Option<&AgentRecord>,
+    prior_state: AgentState,
+) -> Result<AgentOutcome, EnrollError>
+where
+    P: std::ops::Deref,
+    P::Target: AgentOps + Sized,
+    Fut: std::future::Future<Output = Result<P, EnrollError>>,
+{
+    plan.uid = admit()?;
+    let ops = build().await?;
+    enroll_agent(&*ops, &plan, host, prior_record, prior_state).await
 }
 
 pub(crate) async fn run_enroll_agent(
@@ -903,41 +1110,49 @@ pub(crate) async fn run_enroll_agent(
 
     let (prior_record, other_agents) = read_records(&agents, &agent)?;
     let prior_state = read_state(&private, &agent)?;
-    let uid = check_account(args, &agent, &host, &other_agents)?;
-
-    #[cfg(target_os = "macos")]
-    let team = platform_gate().await?;
-    #[cfg(not(target_os = "macos"))]
-    platform_gate(args.verbose)?;
-
-    let token = super::intake_token_from(args.token_file.as_deref(), locale)?;
-    let client = maknae_vault::OperatorClient::new(&host.vault_addr, Path::new(VAULT_CA), token)?;
-    let ops = RealAgentOps {
-        client,
-        private,
-        agents,
-        daemon_gid,
-        #[cfg(not(target_os = "macos"))]
-        verbose: args.verbose,
-        #[cfg(target_os = "macos")]
-        team,
-    };
     let plan = AgentPlan {
-        agent,
+        agent: agent.clone(),
         account: args.account.clone(),
-        uid,
+        uid: 0,
         mount: args.approle_mount.clone(),
         cidrs,
+        role: args.role.into(),
         rotate: args.rotate,
     };
+    let outcome = admit_then_enroll(
+        || check_account(args, &agent, &host, &other_agents),
+        || async {
+            #[cfg(target_os = "macos")]
+            let team = platform_gate().await?;
+            #[cfg(not(target_os = "macos"))]
+            platform_gate(args.verbose)?;
 
-    println!(
-        "{}",
-        msg(locale, MsgId::EnrollAgentStarted).replace("{agent}", plan.agent.as_str())
-    );
-    let outcome = enroll_agent(&ops, &plan, &host, prior_record.as_ref(), prior_state).await?;
+            let token = super::intake_token_from(args.token_file.as_deref(), locale)?;
+            let client =
+                maknae_vault::OperatorClient::new(&host.vault_addr, Path::new(VAULT_CA), token)?;
+            println!(
+                "{}",
+                msg(locale, MsgId::EnrollAgentStarted).replace("{agent}", agent.as_str())
+            );
+            Ok(Box::new(RealAgentOps {
+                vault: RealVault { client, private },
+                agents,
+                daemon_gid,
+                resolver,
+                #[cfg(not(target_os = "macos"))]
+                verbose: args.verbose,
+                #[cfg(target_os = "macos")]
+                team,
+            }))
+        },
+        plan,
+        &host,
+        prior_record.as_ref(),
+        prior_state,
+    )
+    .await?;
     let mut summary = msg(locale, MsgId::EnrollAgentEnrolled)
-        .replace("{agent}", plan.agent.as_str())
+        .replace("{agent}", &outcome.record.agent_id)
         .replace("{role}", &outcome.record.role_name)
         .replace("{cidrs}", &outcome.record.bind_cidrs.join(", "));
     if outcome.retired > 0 {
@@ -947,31 +1162,70 @@ pub(crate) async fn run_enroll_agent(
                 .replace("{count}", &outcome.retired.to_string()),
         );
     }
+    summary.push('\n');
+    summary.push_str(&msg(locale, MsgId::EnrollAgentReload).replace("{command}", RELOAD_COMMAND));
     Ok(summary)
 }
 
 #[cfg(test)]
-mod tests {
+mod named_account_tests {
+    use super::*;
+
+    fn acct(name: &str) -> maknae_io::HostAccount {
+        maknae_io::HostAccount {
+            uid: 990,
+            name: name.into(),
+            primary_gid: 990,
+            shell: "/usr/sbin/nologin".into(),
+            dir: "/var/empty".into(),
+            named_groups: vec![990],
+        }
+    }
+
+    #[test]
+    fn the_requested_account_passes_through() {
+        assert_eq!(
+            named_account("hobi-svc", Some(acct("hobi-svc"))).unwrap(),
+            Some(acct("hobi-svc"))
+        );
+        assert_eq!(named_account("hobi-svc", None).unwrap(), None);
+    }
+
+    #[test]
+    fn a_uid_shared_with_another_name_is_refused() {
+        let got = named_account("hobi-svc", Some(acct("toor"))).map_err(|e| e.to_string());
+        assert_eq!(
+            got,
+            Err("account hobi-svc shares uid 990 with account toor; give the Agent Daemon an account with its own uid".into())
+        );
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
     use std::collections::HashSet;
 
     const SENTINEL: &str = "5ec7e7aa-0000-4000-8000-5ec7e7aa0000";
-    const ROLE_ID: &str = "role-uuid-1111-2222-3333-444455556666";
+    pub(crate) const ROLE_ID: &str = "role-uuid-1111-2222-3333-444455556666";
 
     #[derive(Default)]
-    struct Fake {
-        log: RefCell<Vec<String>>,
-        fail: RefCell<HashSet<String>>,
-        states: RefCell<Vec<AgentState>>,
+    pub(crate) struct Fake {
+        pub(crate) log: RefCell<Vec<String>>,
+        pub(crate) fail: RefCell<HashSet<String>>,
+        pub(crate) states: RefCell<Vec<AgentState>>,
         written: RefCell<Vec<u8>>,
         sealed: RefCell<Vec<String>>,
         state_calls: Cell<usize>,
-        listed: RefCell<Vec<String>>,
+        pub(crate) listed: RefCell<Vec<String>>,
+        entity: RefCell<Option<Option<maknae_vault::EntityFacts>>>,
+        pub(crate) scopes: RefCell<Vec<(String, String)>>,
+        pub(crate) present: RefCell<Option<Vec<String>>>,
     }
 
     impl Fake {
-        fn failing(keys: &[&str]) -> Self {
+        pub(crate) fn failing(keys: &[&str]) -> Self {
             let f = Fake::default();
             f.fail
                 .borrow_mut()
@@ -979,7 +1233,7 @@ mod tests {
             f
         }
 
-        fn check(&self, key: &str) -> Result<(), EnrollError> {
+        pub(crate) fn check(&self, key: &str) -> Result<(), EnrollError> {
             if self.fail.borrow().contains(key) {
                 Err(EnrollError::State(format!("{key} failed")))
             } else {
@@ -987,46 +1241,54 @@ mod tests {
             }
         }
 
-        fn listing(self, accessors: &[&str]) -> Self {
+        pub(crate) fn listing(self, accessors: &[&str]) -> Self {
             *self.listed.borrow_mut() = strings(accessors);
             self
         }
 
-        fn log(&self) -> Vec<String> {
+        pub(crate) fn with_entity(self, entity: Option<maknae_vault::EntityFacts>) -> Self {
+            *self.entity.borrow_mut() = Some(entity);
+            self
+        }
+
+        pub(crate) fn log(&self) -> Vec<String> {
             self.log.borrow().clone()
         }
 
-        fn states(&self) -> Vec<AgentState> {
+        pub(crate) fn states(&self) -> Vec<AgentState> {
             self.states.borrow().clone()
         }
     }
 
-    impl AgentOps for Fake {
-        async fn read_role_id(&self, _mount: &str, _role: &str) -> Result<String, EnrollError> {
+    impl AgentVaultOps for Fake {
+        async fn read_role_id(&self, mount: &str, role: &str) -> Result<String, EnrollError> {
+            self.scopes.borrow_mut().push((mount.into(), role.into()));
             self.log.borrow_mut().push("read_role_id".into());
             Ok(ROLE_ID.into())
         }
 
-        async fn mint(
+        async fn find_role_id(
             &self,
             mount: &str,
             role: &str,
-            cidrs: &BindCidrs,
-        ) -> Result<(Zeroizing<String>, String), EnrollError> {
-            self.log.borrow_mut().push(format!(
-                "mint:{mount}:{role}:{}",
-                cidrs.as_slice().join(",")
-            ));
-            self.check("mint")?;
-            Ok((Zeroizing::new(SENTINEL.into()), "acc-new".into()))
+        ) -> Result<Option<String>, EnrollError> {
+            self.scopes.borrow_mut().push((mount.into(), role.into()));
+            self.log.borrow_mut().push("read_role_id".into());
+            self.check("find_role_id")?;
+            Ok(if self.fail.borrow().contains("role_missing") {
+                None
+            } else {
+                Some(ROLE_ID.into())
+            })
         }
 
         async fn destroy(
             &self,
-            _mount: &str,
-            _role: &str,
+            mount: &str,
+            role: &str,
             accessor: &str,
         ) -> Result<(), EnrollError> {
+            self.scopes.borrow_mut().push((mount.into(), role.into()));
             let key = format!("destroy:{accessor}");
             self.log.borrow_mut().push(key.clone());
             self.check(&key)
@@ -1034,23 +1296,13 @@ mod tests {
 
         async fn list_accessors(
             &self,
-            _mount: &str,
-            _role: &str,
+            mount: &str,
+            role: &str,
         ) -> Result<Vec<String>, EnrollError> {
+            self.scopes.borrow_mut().push((mount.into(), role.into()));
             self.log.borrow_mut().push("list".into());
             self.check("list")?;
             Ok(self.listed.borrow().clone())
-        }
-
-        async fn seal(
-            &self,
-            _agent: &AgentId,
-            secret: &Zeroizing<String>,
-        ) -> Result<SecretSource, EnrollError> {
-            self.log.borrow_mut().push("seal".into());
-            self.sealed.borrow_mut().push(secret.to_string());
-            self.check("seal")?;
-            Ok(SecretSource::Tpm2)
         }
 
         fn write_state(&self, _agent: &AgentId, state: &AgentState) -> Result<(), EnrollError> {
@@ -1065,6 +1317,52 @@ mod tests {
             Ok(())
         }
 
+        async fn entity(
+            &self,
+            name: &str,
+        ) -> Result<Option<maknae_vault::EntityFacts>, EnrollError> {
+            self.log.borrow_mut().push(format!("entity {name}"));
+            self.check("entity")?;
+            Ok(match &*self.entity.borrow() {
+                Some(configured) => configured.clone(),
+                None => Some(healthy(false)),
+            })
+        }
+
+        async fn set_entity_disabled(&self, name: &str, disabled: bool) -> Result<(), EnrollError> {
+            self.log
+                .borrow_mut()
+                .push(format!("set_entity_disabled {name} {disabled}"));
+            self.check("set_entity_disabled")
+        }
+    }
+
+    impl AgentOps for Fake {
+        async fn mint(
+            &self,
+            mount: &str,
+            role: &str,
+            cidrs: &BindCidrs,
+        ) -> Result<(Zeroizing<String>, String), EnrollError> {
+            self.log.borrow_mut().push(format!(
+                "mint:{mount}:{role}:{}",
+                cidrs.as_slice().join(",")
+            ));
+            self.check("mint")?;
+            Ok((Zeroizing::new(SENTINEL.into()), "acc-new".into()))
+        }
+
+        async fn seal(
+            &self,
+            _agent: &AgentId,
+            secret: &Zeroizing<String>,
+        ) -> Result<SecretSource, EnrollError> {
+            self.log.borrow_mut().push("seal".into());
+            self.sealed.borrow_mut().push(secret.to_string());
+            self.check("seal")?;
+            Ok(SecretSource::Tpm2)
+        }
+
         fn write_record(&self, record: &AgentRecord) -> Result<(), EnrollError> {
             self.log.borrow_mut().push("record".into());
             self.check("record")?;
@@ -1075,8 +1373,30 @@ mod tests {
         }
     }
 
-    const MOUNT: &str = "maknae-agent-approle";
-    const ROLE: &str = "agent-hobi";
+    pub(crate) const MOUNT: &str = "maknae-agent-approle";
+    pub(crate) const ENTITY_MOUNT: &str = "auth/maknae-agent-approle/";
+    pub(crate) const ROLE: &str = "agent-hobi";
+
+    pub(crate) fn entity_facts(
+        disabled: bool,
+        aliases: &[(&str, &str)],
+    ) -> maknae_vault::EntityFacts {
+        maknae_vault::EntityFacts {
+            id: "entity-id-1".into(),
+            disabled,
+            aliases: aliases
+                .iter()
+                .map(|(mount_path, name)| maknae_vault::EntityAlias {
+                    mount_path: (*mount_path).into(),
+                    name: (*name).into(),
+                })
+                .collect(),
+        }
+    }
+
+    pub(crate) fn healthy(disabled: bool) -> maknae_vault::EntityFacts {
+        entity_facts(disabled, &[(ENTITY_MOUNT, ROLE_ID)])
+    }
 
     fn plan(rotate: bool) -> AgentPlan {
         AgentPlan {
@@ -1085,6 +1405,7 @@ mod tests {
             uid: 990,
             mount: MOUNT.into(),
             cidrs: BindCidrs::parse(&["10.0.0.5".to_string()]).unwrap(),
+            role: AgentRole::User,
             rotate,
         }
     }
@@ -1097,7 +1418,7 @@ mod tests {
         }
     }
 
-    fn strings(xs: &[&str]) -> Vec<String> {
+    pub(crate) fn strings(xs: &[&str]) -> Vec<String> {
         xs.iter().map(|s| s.to_string()).collect()
     }
 
@@ -1110,6 +1431,7 @@ mod tests {
             role_name: ROLE.into(),
             role_id: "role-uuid-old".into(),
             bind_cidrs: strings(&["10.0.0.5/32"]),
+            role: AgentRole::User,
             source: SecretSource::Tpm2,
         }
     }
@@ -1127,7 +1449,7 @@ mod tests {
         )
     }
 
-    fn state(live: &[&str], pending: &[&str], retiring: &[&str]) -> AgentState {
+    pub(crate) fn state(live: &[&str], pending: &[&str], retiring: &[&str]) -> AgentState {
         AgentState {
             approle_mount: MOUNT.into(),
             role: ROLE.into(),
@@ -1159,6 +1481,7 @@ mod tests {
             fake.log(),
             strings(&[
                 "read_role_id",
+                "entity maknae-agent-hobi",
                 "mint:maknae-agent-approle:agent-hobi:10.0.0.5/32",
                 "state",
                 "seal",
@@ -1280,6 +1603,7 @@ mod tests {
             fake.log(),
             strings(&[
                 "read_role_id",
+                "entity maknae-agent-hobi",
                 "mint:maknae-agent-approle:agent-hobi:10.0.0.5/32",
                 "state",
                 "seal",
@@ -1321,7 +1645,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            fake.log()[7..],
+            fake.log()[8..],
             strings(&["destroy:acc-stale", "destroy:gone", "state"])[..]
         );
         assert_eq!(fake.states().last(), Some(&state(&["acc-new"], &[], &[])));
@@ -1338,7 +1662,7 @@ mod tests {
             "{e:?}"
         );
         assert_eq!(
-            fake.log()[6..],
+            fake.log()[7..],
             strings(&["state", "destroy:a", "destroy:b", "state"])[..]
         );
         assert_eq!(
@@ -1359,6 +1683,7 @@ mod tests {
             fake.log(),
             strings(&[
                 "read_role_id",
+                "entity maknae-agent-hobi",
                 "mint:maknae-agent-approle:agent-hobi:10.0.0.5/32",
                 "state",
                 "destroy:acc-new",
@@ -1401,6 +1726,7 @@ mod tests {
             fake.log(),
             strings(&[
                 "read_role_id",
+                "entity maknae-agent-hobi",
                 "mint:maknae-agent-approle:agent-hobi:10.0.0.5/32",
                 "state",
                 "seal",
@@ -1481,7 +1807,7 @@ mod tests {
         let fake = Fake::default().listing(&["stray", "acc-new"]);
         let out = first(&fake).await.unwrap();
         assert_eq!(
-            fake.log()[4..],
+            fake.log()[5..],
             strings(&["list", "record", "state", "destroy:stray", "state"])[..]
         );
         assert_eq!(
@@ -1787,9 +2113,275 @@ mod tests {
             state_path(&id),
             std::path::Path::new("/etc/maknae/private/agent-hobi-enroll-state.yaml")
         );
+    }
+
+    #[test]
+    fn the_record_lands_in_the_agents_own_directory() {
+        let id = AgentId::parse("hobi").unwrap();
         assert_eq!(
             record_path(&id),
-            std::path::Path::new("/etc/maknae/agents/hobi.yaml")
+            std::path::Path::new("/etc/maknae/agents/hobi/enrollment.yaml")
+        );
+    }
+
+    #[test]
+    fn the_record_round_trips_its_role() {
+        let id = AgentId::parse("hobi").unwrap();
+        for role in [AgentRole::User, AgentRole::Guest] {
+            let r = AgentRecord { role, ..record() };
+            let yaml = r.to_yaml();
+            assert!(yaml.contains(&format!("role: {}", role.key())), "{yaml}");
+            assert_eq!(AgentRecord::parse(&yaml).unwrap(), r);
+            let enrolled = maknae_config::parse_agent_enrollment(&id, &yaml).unwrap();
+            assert_eq!((enrolled.role, enrolled.uid), (role, 990));
+        }
+        let admin = record().to_yaml().replace("role: user", "role: admin");
+        assert!(matches!(
+            AgentRecord::parse(&admin),
+            Err(EnrollError::State(_))
+        ));
+        let missing = record().to_yaml().replace("role: user\n", "");
+        assert!(matches!(
+            AgentRecord::parse(&missing),
+            Err(EnrollError::State(_))
+        ));
+    }
+
+    #[derive(clap::Parser, Debug)]
+    struct Cli {
+        #[command(flatten)]
+        agent: AgentArgs,
+    }
+
+    fn parse_args(extra: &[&str]) -> Result<AgentArgs, clap::Error> {
+        use clap::Parser;
+        let base = [
+            "maknae",
+            "hobi",
+            "--account",
+            "hobi-svc",
+            "--bind-cidr",
+            "10.0.0.5",
+        ];
+        Cli::try_parse_from(base.iter().chain(extra)).map(|c| c.agent)
+    }
+
+    #[test]
+    fn role_admin_is_not_a_choice() {
+        assert!(parse_args(&["--role", "admin"]).is_err());
+        assert_eq!(
+            AgentRole::from(parse_args(&["--role", "guest"]).unwrap().role),
+            AgentRole::Guest
+        );
+    }
+
+    #[test]
+    fn the_role_defaults_to_user() {
+        assert_eq!(
+            AgentRole::from(parse_args(&[]).unwrap().role),
+            AgentRole::User
+        );
+    }
+
+    fn account(groups: &[u32]) -> maknae_io::HostAccount {
+        maknae_io::HostAccount {
+            uid: 990,
+            name: "hobi-svc".into(),
+            primary_gid: 990,
+            shell: "/usr/sbin/nologin".into(),
+            dir: "/var/empty".into(),
+            named_groups: groups.to_vec(),
+        }
+    }
+
+    const AGENTS_GID: u32 = 960;
+
+    fn admit(
+        acct: maknae_io::HostAccount,
+        agents_gid: Option<u32>,
+        bindings: &maknae_config::Bindings,
+    ) -> Result<u32, EnrollError> {
+        admit_aliased(acct, agents_gid, bindings, &BTreeMap::new())
+    }
+
+    fn admit_aliased(
+        acct: maknae_io::HostAccount,
+        agents_gid: Option<u32>,
+        bindings: &maknae_config::Bindings,
+        uid_of: &BTreeMap<String, u32>,
+    ) -> Result<u32, EnrollError> {
+        let daemons = maknae_io::DaemonFacts {
+            uids: vec![970, 971],
+            gids: vec![970, 971],
+        };
+        admit_account(
+            "hobi-svc",
+            &AgentId::parse("hobi").unwrap(),
+            Some(acct),
+            &HostAccounts {
+                maknae_gid: Some(950),
+                principal_uid: 1000,
+                daemons: &daemons,
+                other_agents: &[],
+            },
+            agents_gid,
+            bindings,
+            uid_of,
+        )
+    }
+
+    #[test]
+    fn an_account_a_uid_alias_binds_to_admin_is_refused() {
+        let b = maknae_config::parse_bindings(
+            "schema_version: 1\nbindings:\n  admin: [\"hobi-alt\"]\n",
+        )
+        .unwrap();
+        let alias = BTreeMap::from([("hobi-alt".to_string(), 990)]);
+        let e =
+            admit_aliased(account(&[990, AGENTS_GID]), Some(AGENTS_GID), &b, &alias).unwrap_err();
+        assert!(
+            matches!(&e, EnrollError::AgentBound { account, role, .. }
+                if account == "hobi-svc" && *role == "admin"),
+            "{e:?}"
+        );
+    }
+
+    fn bound(role: &str) -> maknae_config::Bindings {
+        maknae_config::parse_bindings(&format!(
+            "schema_version: 1\nbindings:\n  {role}: [\"hobi-svc\"]\n"
+        ))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_account_bound_in_bindings_is_refused_before_vault() {
+        for role in ["admin", "user", "guest"] {
+            let fake = Fake::default();
+            let built = Cell::new(false);
+            let got = admit_then_enroll(
+                || admit(account(&[990, AGENTS_GID]), Some(AGENTS_GID), &bound(role)),
+                || async {
+                    built.set(true);
+                    Ok(&fake)
+                },
+                plan(false),
+                &host(),
+                None,
+                AgentState::default(),
+            )
+            .await;
+            assert!(
+                matches!(&got, Err(EnrollError::AgentBound { agent, account, role: r })
+                    if agent == "hobi" && account == "hobi-svc" && *r == role),
+                "{role}: {got:?}"
+            );
+            assert!(!built.get(), "{role}: the Vault client was built");
+            assert!(fake.log().is_empty(), "{role}: {:?}", fake.log());
+        }
+    }
+
+    #[test]
+    fn an_account_outside_the_agent_group_is_refused_with_the_command() {
+        let none = maknae_config::Bindings::absent();
+        let command = if cfg!(target_os = "macos") {
+            "dseditgroup -o edit -a hobi-svc -t user maknae-agents"
+        } else {
+            "usermod -aG maknae-agents hobi-svc"
+        };
+        for (groups, gid) in [
+            (vec![990], Some(AGENTS_GID)),
+            (vec![990, 5], Some(AGENTS_GID)),
+        ] {
+            let e = admit(account(&groups), gid, &none).unwrap_err();
+            assert!(
+                matches!(&e, EnrollError::AgentNotInAgentGroup { account, group }
+                    if account == "hobi-svc" && *group == "maknae-agents"),
+                "{e:?}"
+            );
+            assert!(e.to_string().contains(command), "{e}");
+        }
+        assert_eq!(
+            admit(account(&[990, AGENTS_GID]), Some(AGENTS_GID), &none).unwrap(),
+            990
+        );
+    }
+
+    #[tokio::test]
+    async fn re_enrollment_re_enables_a_disabled_entity() {
+        let fake = Fake::default().with_entity(Some(healthy(true)));
+        let (r, s) = prior(&["a"], &[], &[]);
+        enroll_agent(&fake, &plan(true), &host(), Some(&r), s)
+            .await
+            .unwrap();
+        assert_eq!(
+            fake.log().last().map(String::as_str),
+            Some("set_entity_disabled maknae-agent-hobi false")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_enabled_entity_is_left_alone() {
+        let fake = Fake::default();
+        first(&fake).await.unwrap();
+        assert!(!fake.log().iter().any(|l| l.starts_with("set_entity")));
+    }
+
+    #[tokio::test]
+    async fn a_missing_entity_refuses_before_minting_anything() {
+        let other_role = entity_facts(false, &[(ENTITY_MOUNT, "another-role-id")]);
+        let other_mount = entity_facts(false, &[("auth/other/", ROLE_ID)]);
+        for entity in [
+            None,
+            Some(entity_facts(false, &[])),
+            Some(other_mount),
+            Some(other_role),
+        ] {
+            let fake = Fake::default().with_entity(entity);
+            let e = rotate(&fake, &["a"], &[], &[]).await.unwrap_err();
+            assert!(
+                matches!(&e, EnrollError::AgentEntityMissing { agent, entity, mount, .. }
+                    if agent == "hobi" && entity == "maknae-agent-hobi" && mount == MOUNT),
+                "{e:?}"
+            );
+            assert!(e.to_string().contains("create the AppRole role"), "{e}");
+            assert_eq!(
+                fake.log(),
+                strings(&["read_role_id", "entity maknae-agent-hobi"])
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_entity_read_error_refuses_before_minting_anything() {
+        let fake = Fake::failing(&["entity"]);
+        assert!(first(&fake).await.is_err());
+        assert_eq!(
+            fake.log(),
+            strings(&["read_role_id", "entity maknae-agent-hobi"])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_disabled_entity_stays_disabled_while_old_secret_ids_survive() {
+        let fake = Fake::failing(&["destroy:b"]).with_entity(Some(healthy(true)));
+        let e = rotate(&fake, &["a", "b"], &[], &[]).await.unwrap_err();
+        assert!(matches!(&e, EnrollError::AgentRetireFailed { .. }), "{e:?}");
+        assert!(e.to_string().contains("stays disabled"), "{e}");
+        assert!(!fake.log().iter().any(|l| l.starts_with("set_entity")));
+    }
+
+    #[tokio::test]
+    async fn the_refusal_for_a_missing_group_names_the_group_not_usermod() {
+        let none = maknae_config::Bindings::absent();
+        let e = admit(account(&[990]), None, &none).unwrap_err();
+        assert!(
+            matches!(&e, EnrollError::AgentGroupMissing { group } if *group == "maknae-agents"),
+            "{e:?}"
+        );
+        let text = e.to_string();
+        assert!(
+            text.contains("does not exist") && !text.contains("usermod"),
+            "{text}"
         );
     }
 
@@ -1836,5 +2428,221 @@ mod tests {
             clean,
             EnrollError::Command { ref detail, .. } if detail == "exit 1"
         ));
+    }
+
+    pub(crate) struct Scratch(PathBuf);
+
+    impl std::ops::Deref for Scratch {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    pub(crate) fn scratch_anchor(tag: &str) -> (Scratch, maknae_io::Anchor) {
+        let d = std::env::temp_dir().join(format!("maknae-agent-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let anchor = maknae_io::open_anchor(
+            &d,
+            AnchorRequired {
+                owner: None,
+                mode_mask: None,
+            },
+            StrategyPref::Auto,
+        )
+        .unwrap();
+        (Scratch(d), anchor)
+    }
+
+    pub(crate) fn unreachable_vault(tag: &str, private: maknae_io::Anchor) -> RealVault {
+        RealVault {
+            client: super::super::tests::operator_client_at(tag, "https://127.0.0.1:1"),
+            private,
+        }
+    }
+
+    fn hobi_id() -> AgentId {
+        AgentId::parse("hobi").unwrap()
+    }
+
+    fn running_as_root() -> bool {
+        nix::unistd::geteuid().is_root()
+    }
+
+    fn real_ops(tag: &str) -> ([Scratch; 2], RealAgentOps) {
+        let (d, agents) = scratch_anchor(&format!("{tag}-agents"));
+        let (p, private) = scratch_anchor(&format!("{tag}-private"));
+        let ops = RealAgentOps {
+            vault: unreachable_vault(tag, private),
+            agents,
+            daemon_gid: nix::unistd::getegid().as_raw(),
+            resolver: artifact_write::RealOwnerResolver {
+                operator_uid: nix::unistd::geteuid().as_raw(),
+                operator_gid: nix::unistd::getegid().as_raw(),
+            },
+            #[cfg(not(target_os = "macos"))]
+            verbose: false,
+            #[cfg(target_os = "macos")]
+            team: String::new(),
+        };
+        ([d, p], ops)
+    }
+
+    #[tokio::test]
+    async fn every_vault_call_reports_an_unreachable_vault() {
+        let (_scratch, ops) = real_ops("vault-down");
+        fn refused<T>(r: Result<T, EnrollError>) {
+            let e = r.err();
+            assert!(matches!(e, Some(EnrollError::Vault(_))), "{e:?}");
+        }
+        refused(ops.read_role_id(MOUNT, ROLE).await);
+        refused(ops.find_role_id(MOUNT, ROLE).await);
+        refused(ops.destroy(MOUNT, ROLE, "accessor-1").await);
+        refused(ops.list_accessors(MOUNT, ROLE).await);
+        refused(ops.entity("maknae-agent-hobi").await);
+        refused(ops.set_entity_disabled("maknae-agent-hobi", true).await);
+        let cidrs = BindCidrs::parse(&["10.0.0.5".to_string()]).unwrap();
+        refused(ops.mint(MOUNT, ROLE, &cidrs).await);
+    }
+
+    #[test]
+    fn write_state_publishes_a_root_owned_0600_file_or_refuses() {
+        use std::os::unix::fs::PermissionsExt;
+        let (d, private) = scratch_anchor("write-state");
+        let vault = unreachable_vault("write-state", private);
+        let s = state(&["a"], &["p"], &[]);
+        let got = vault.write_state(&hobi_id(), &s);
+        let path = d.join(state_file(&hobi_id()));
+        if running_as_root() {
+            got.unwrap();
+            let text = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(AgentState::parse(&text).unwrap(), s);
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        } else {
+            assert!(matches!(&got, Err(EnrollError::Io { .. })), "{got:?}");
+            assert!(!path.exists());
+        }
+    }
+
+    #[test]
+    fn write_record_off_root_is_refused_and_writes_nothing() {
+        if running_as_root() {
+            return;
+        }
+        let ([d, _], ops) = real_ops("write-record");
+        let got = ops.write_record(&record());
+        assert!(got.is_err(), "{got:?}");
+        assert!(!d.join("hobi").exists());
+    }
+
+    fn write_0640(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, body).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    }
+
+    #[test]
+    fn read_records_skips_what_is_not_an_agent_directory() {
+        let (d, agents) = scratch_anchor("records-skip");
+        std::fs::create_dir(d.join("hobi")).unwrap();
+        std::fs::create_dir(d.join("Not An Id!")).unwrap();
+        write_0640(
+            &d.join("Not An Id!").join(maknae_config::ENROLLMENT_FILE),
+            &record().to_yaml(),
+        );
+        write_0640(&d.join("jin"), &record().to_yaml());
+        let (prior, others) = read_records(&agents, &hobi_id()).unwrap();
+        assert_eq!((prior, others), (None, vec![]));
+    }
+
+    #[test]
+    fn read_records_reads_root_owned_records_and_refuses_any_other() {
+        let (d, agents) = scratch_anchor("records-read");
+        for id in ["hobi", "jin"] {
+            std::fs::create_dir(d.join(id)).unwrap();
+            let mut r = record();
+            r.agent_id = id.into();
+            r.uid = if id == "hobi" { 990 } else { 991 };
+            write_0640(
+                &d.join(id).join(maknae_config::ENROLLMENT_FILE),
+                &r.to_yaml(),
+            );
+        }
+        let got = read_records(&agents, &hobi_id());
+        if running_as_root() {
+            let (prior, others) = got.unwrap();
+            assert_eq!(prior, Some(record()));
+            assert_eq!(others, vec![("jin".to_string(), 991)]);
+        } else {
+            assert!(
+                matches!(&got, Err(EnrollError::Io { source, .. }) if source.contains("require 0")),
+                "{got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn read_records_refuses_a_record_others_can_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let (d, agents) = scratch_anchor("records-mode");
+        std::fs::create_dir(d.join("hobi")).unwrap();
+        let path = d.join("hobi").join(maknae_config::ENROLLMENT_FILE);
+        std::fs::write(&path, record().to_yaml()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let got = read_records(&agents, &hobi_id());
+        assert!(matches!(&got, Err(EnrollError::Io { .. })), "{got:?}");
+    }
+
+    #[test]
+    fn agent_group_create_command_names_the_agent_group() {
+        let want = if cfg!(target_os = "macos") {
+            "dseditgroup -o create maknae-agents"
+        } else {
+            "groupadd --system maknae-agents"
+        };
+        assert_eq!(agent_group_create_command(), want);
+    }
+
+    #[test]
+    fn binding_uids_maps_only_the_names_passwd_knows() {
+        let me = nix::unistd::User::from_uid(nix::unistd::geteuid())
+            .unwrap()
+            .expect("the test account has a passwd entry");
+        let b = maknae_config::parse_bindings(&format!(
+            "schema_version: 1\nbindings:\n  admin: [\"root\", {{uid: 4242}}]\n  user: [\"{}\", \"maknae-no-such-user-609\"]\n",
+            me.name
+        ))
+        .unwrap();
+        let got = binding_uids(&b).unwrap();
+        assert_eq!(
+            got,
+            BTreeMap::from([("root".to_string(), 0), (me.name.clone(), me.uid.as_raw())])
+        );
+    }
+
+    #[test]
+    fn check_account_refuses_an_account_the_host_does_not_have() {
+        let mut args = parse_args(&[]).unwrap();
+        args.account = "maknae-no-such-user-609".into();
+        let got = check_account(&args, &hobi_id(), &host(), &[]);
+        assert!(got.is_err(), "{got:?}");
+    }
+
+    #[tokio::test]
+    async fn run_enroll_agent_off_root_is_refused_before_anything_else() {
+        if running_as_root() {
+            return;
+        }
+        let args = parse_args(&[]).unwrap();
+        let got = run_enroll_agent(&args, Locale::EnUs).await;
+        assert!(matches!(got, Err(EnrollError::NotRoot)), "{got:?}");
     }
 }

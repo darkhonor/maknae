@@ -96,6 +96,16 @@ pub(crate) fn text(id: MsgId) -> &'static str {
             "Agent Daemon {agent} is enrolled: the SecretID for {role} is sealed on this host and works only from {cidrs}"
         }
         MsgId::EnrollAgentRetired => "Destroyed {count} earlier SecretID(s) of this agent",
+        MsgId::EnrollAgentReload => {
+            "If maknaed is running, reload it so it sees this enrollment: {command}"
+        }
+        MsgId::EnrollAgentRemoveStarted => "Removing the Agent Daemon {agent}",
+        MsgId::EnrollAgentRemoved => {
+            "Agent Daemon {agent} is removed: its enrollment is gone, its Vault entity is disabled, and {count} SecretID(s) were destroyed; its policy.yaml and directory are untouched"
+        }
+        MsgId::EnrollAgentRoleAbsent => {
+            "Vault's role and entity for agent {agent} were already absent; the local sealed SecretID and state were removed"
+        }
         MsgId::HelperContextMismatch => {
             "Operator-context helper did not land in the expected identity"
         }

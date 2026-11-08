@@ -16,6 +16,7 @@ pub const CONTAINMENT: NodeKind = NodeKind(10);
 pub const PENDING_CHANGE: NodeKind = NodeKind(11);
 pub const SYNC_BASE: NodeKind = NodeKind(12);
 pub const INSTANCE: NodeKind = NodeKind(13);
+pub const AGENT: NodeKind = NodeKind(14);
 
 pub const BINDS: EdgeKind = EdgeKind(1);
 pub const CONTAINED: EdgeKind = EdgeKind(2);
@@ -29,10 +30,12 @@ pub const DECLARED_BY: EdgeKind = EdgeKind(9);
 pub const PART_OF: EdgeKind = EdgeKind(10);
 pub const PENDING_FOR: EdgeKind = EdgeKind(11);
 pub const LEVEL_OF: EdgeKind = EdgeKind(12);
+pub const ENROLLS: EdgeKind = EdgeKind(13);
 
+pub const ADMIN: &str = "admin";
 pub const ADVERSARY: &str = "adversary";
 
-pub const ROLES: [&str; 4] = ["admin", "user", "guest", ADVERSARY];
+pub const ROLES: [&str; 4] = [ADMIN, "user", "guest", ADVERSARY];
 pub const VOCABULARY_SOURCE_KEY: &str = "binary:vocabulary";
 pub const ATTR_SHA256: &str = "sha256";
 pub const ATTR_NAME: &str = "name";
@@ -42,6 +45,10 @@ pub const ATTR_VALUE: &str = "value";
 pub const ATTR_BASE: &str = "base";
 pub const ATTR_LIVE: &str = "live";
 pub const ATTR_CONFLICTS: &str = "conflicts";
+
+pub fn agent_key(id: &str) -> String {
+    format!("agent:{id}")
+}
 
 pub fn persisted_compiled_set(label: &str) -> CompiledSet {
     CompiledSet::new(
@@ -73,6 +80,7 @@ pub static SCHEMA: Schema = Schema {
         (PENDING_CHANGE, "PendingChange"),
         (SYNC_BASE, "SyncBase"),
         (INSTANCE, "Instance"),
+        (AGENT, "Agent"),
     ],
     edge_kinds: &[
         (BINDS, "binds"),
@@ -87,6 +95,7 @@ pub static SCHEMA: Schema = Schema {
         (PART_OF, "part_of"),
         (PENDING_FOR, "pending_for"),
         (LEVEL_OF, "level_of"),
+        (ENROLLS, "enrolls"),
     ],
     triples: &[
         (SUBJECT, BINDS, ROLE),
@@ -107,6 +116,7 @@ pub static SCHEMA: Schema = Schema {
         (INSTANCE, DECLARED_BY, SECTION),
         (CONTAINMENT, DECLARED_BY, SECTION),
         (SYNC_BASE, PART_OF, CONFIG_SOURCE),
+        (AGENT, ENROLLS, SUBJECT),
     ],
     compiled_kinds: &[ROLE, TERM, CLASS],
     forbidden_targets: &[(BINDS, ROLE, ADVERSARY)],
@@ -177,6 +187,7 @@ mod tests {
                 (NodeKind(11), "PendingChange"),
                 (NodeKind(12), "SyncBase"),
                 (NodeKind(13), "Instance"),
+                (NodeKind(14), "Agent"),
             ]
         );
         assert_eq!(
@@ -194,6 +205,7 @@ mod tests {
                 (EdgeKind(10), "part_of"),
                 (EdgeKind(11), "pending_for"),
                 (EdgeKind(12), "level_of"),
+                (EdgeKind(13), "enrolls"),
             ]
         );
         assert_eq!(
@@ -217,10 +229,27 @@ mod tests {
                 (INSTANCE, DECLARED_BY, SECTION),
                 (CONTAINMENT, DECLARED_BY, SECTION),
                 (SYNC_BASE, PART_OF, CONFIG_SOURCE),
+                (AGENT, ENROLLS, SUBJECT),
             ]
         );
         assert_eq!(SCHEMA.compiled_kinds, &[ROLE, TERM, CLASS]);
         assert_eq!(SCHEMA.forbidden_targets, &[(BINDS, ROLE, ADVERSARY)]);
+    }
+
+    #[test]
+    fn the_schema_permits_agent_enrolls_subject_only() {
+        assert_eq!(AGENT, NodeKind(14));
+        assert_eq!(ENROLLS, EdgeKind(13));
+        assert_eq!(SCHEMA.node_kind_name(AGENT), Some("Agent"));
+        assert_eq!(SCHEMA.edge_kind_name(ENROLLS), Some("enrolls"));
+        let enrolls: Vec<_> = SCHEMA
+            .triples
+            .iter()
+            .filter(|(f, e, t)| *f == AGENT || *e == ENROLLS || *t == AGENT)
+            .collect();
+        assert_eq!(enrolls, [&(AGENT, ENROLLS, SUBJECT)]);
+        assert!(!SCHEMA.is_compiled(AGENT));
+        assert_eq!(agent_key("hobi"), "agent:hobi");
     }
 
     #[test]

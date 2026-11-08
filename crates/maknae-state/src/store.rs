@@ -536,6 +536,13 @@ pub trait BootAudit {
         revision: u64,
         released: &[identity::Released],
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
+    /// Written ahead of the persist of a transition that enrolls or removes these agents;
+    /// an append failure refuses as `released`'s does.
+    fn agents(
+        &mut self,
+        revision: u64,
+        changes: &[identity::AgentChange],
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
     /// Written ahead of a persist that changes the baseline; an append failure refuses
     /// as `released`'s does.
     fn baseline(
@@ -705,6 +712,9 @@ fn drop_vanished(layer: &mut IdentityLayer, compiled: &CompiledSet) -> Vec<u32> 
     layer
         .aliases
         .retain(|_, u| subjects.iter().any(|s| s.uid == *u && s.role == ADVERSARY));
+    layer
+        .agents
+        .retain(|_, u| subjects.iter().any(|s| s.uid == *u));
     drop.into_iter().map(|s| s.uid).collect()
 }
 
@@ -947,6 +957,10 @@ async fn load(
         if !released.is_empty() {
             audit.released(next.revision(), &released).await?;
         }
+        let changes = identity::agent_changes(&layer, &file);
+        if !changes.is_empty() {
+            audit.agents(next.revision(), &changes).await?;
+        }
         if baseline_changed {
             audit
                 .baseline(next.revision(), inputs.baseline_events)
@@ -1118,9 +1132,9 @@ async fn transition(
         Ok(Some(file)) => Some(decode_store(&file, key)?.extracted),
         Err(e) => return Err(StoreError::StoreFileRefused(e.to_string())),
     };
-    let (stored_baseline, stored_sync) = match stored {
-        Some(e) => (e.baseline, e.sync),
-        None => (None, None),
+    let (stored_layer, stored_baseline, stored_sync) = match stored {
+        Some(e) => (Some(e.layer), e.baseline, e.sync),
+        None => (None, None, None),
     };
     let unrecorded = if t.baseline_events.is_empty() {
         proposed.baseline != stored_baseline
@@ -1133,6 +1147,10 @@ async fn transition(
     check_sync(&t, stored_sync.as_ref(), proposed.sync.as_ref())?;
     if !t.released.is_empty() {
         audit.released(revision, t.released).await?;
+    }
+    let changes = identity::agent_changes(&stored_layer.unwrap_or_default(), &proposed.layer);
+    if !changes.is_empty() {
+        audit.agents(revision, &changes).await?;
     }
     if !t.baseline_events.is_empty() {
         audit.baseline(revision, t.baseline_events).await?;
@@ -1186,6 +1204,10 @@ async fn seed(
         revision,
         ProvenanceKind::Seed,
     )?;
+    let changes = identity::agent_changes(&IdentityLayer::default(), inputs.identity);
+    if !changes.is_empty() {
+        audit.agents(revision, &changes).await?;
+    }
     audit.intent_seed(revision, authorized).await?;
     audit.baseline(revision, inputs.baseline_events).await?;
     let rejected = match prior {
@@ -1244,6 +1266,7 @@ mod tests {
     fn file() -> IdentityLayer {
         IdentityLayer {
             aliases: Default::default(),
+            agents: Default::default(),
             source: "/etc/maknae/authz.yaml".into(),
             label: "UNOFFICIAL".into(),
             bindings_sha256: Some([1; 32]),
@@ -1306,6 +1329,7 @@ mod tests {
             l,
             IdentityLayer {
                 aliases: Default::default(),
+                agents: Default::default(),
                 source: "/etc/maknae/authz.yaml".into(),
                 label: "UNOFFICIAL".into(),
                 bindings_sha256: None,
@@ -1319,6 +1343,7 @@ mod tests {
     fn a_populated_layer_keeps_its_source_bindings_and_subjects_under_the_binarys_label() {
         let stored = IdentityLayer {
             aliases: Default::default(),
+            agents: Default::default(),
             source: "/old/authz.yaml".into(),
             label: "UNCLASSIFIED".into(),
             bindings_sha256: Some([2; 32]),
@@ -1365,10 +1390,43 @@ mod tests {
             aliases: [("keep", 5), ("bound", 0), ("gone", 4)]
                 .map(|(n, u)| (n.to_string(), u))
                 .into(),
+            agents: Default::default(),
             ..file()
         };
         let (l, _) = migrated_layer(&stored, &file(), &persisted_compiled_set("UNOFFICIAL"));
         assert_eq!(l.aliases, [("keep".to_string(), 5)].into());
+    }
+
+    #[test]
+    fn a_vanished_subject_takes_its_agents_with_it() {
+        let stored = IdentityLayer {
+            subjects: vec![subject(0, "admin"), subject(5, "user"), subject(4, "gone")],
+            agents: [("kept", 5), ("orphan", 4)]
+                .map(|(n, u)| (n.to_string(), u))
+                .into(),
+            ..file()
+        };
+        let compiled = persisted_compiled_set("UNOFFICIAL");
+        let (l, unbound) = migrated_layer(&stored, &file(), &compiled);
+        assert_eq!(unbound, vec![4]);
+        assert_eq!(l.agents, [("kept".to_string(), 5)].into());
+        maknae_graph::identity::build(
+            &l,
+            None,
+            None,
+            &compiled,
+            [0; 32],
+            1,
+            maknae_graph::record::ProvenanceKind::Seed,
+        )
+        .unwrap();
+        assert_eq!(
+            maknae_graph::identity::agent_changes(&stored, &l),
+            [maknae_graph::identity::AgentChange::Removed {
+                agent: "orphan".into(),
+                uid: 4
+            }]
+        );
     }
 
     #[test]
