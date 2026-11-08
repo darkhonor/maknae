@@ -777,7 +777,7 @@ print(data["indirect"] or "")' "$embeds_file" 2>/dev/null)"; then
       run_env+=(-u CLICOLOR_FORCE NEXTEST_PROFILE=mutants CARGO_TERM_COLOR=never NEXTEST_RETRIES=0
                 NEXTEST_STATUS_LEVEL=fail NEXTEST_FINAL_STATUS_LEVEL=fail)
     fi
-    run_env+=(TMPDIR="$mut_tmp")
+    run_env+=(-u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR -u CARGO_BUILD_BUILD_DIR TMPDIR="$mut_tmp")
     diff_flags=()
     judge_flags=()
     if [ -n "$in_diff" ]; then

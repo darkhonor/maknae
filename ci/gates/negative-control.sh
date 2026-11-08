@@ -6097,10 +6097,10 @@ if command -v cargo >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
   cv_root="$(cd "$here/../.." && pwd)"
   cv_ws="$(mktemp -d -p "$NC_TMP")"
   ( cd "$cv_root" && git ls-files -z | tar --null -T - -cf - ) | tar -xf - -C "$cv_ws"
-  cv_target="${CARGO_TARGET_DIR:-$cv_root/target}"
+  cv_target="$cv_root/target/negative-control"
   cv_suite() { # <crate> <filter> — FAIL when the filtered suite goes red
     local out
-    if out="$(cd "$cv_ws" && CARGO_TARGET_DIR="$cv_target" cargo test --quiet --locked --offline -p "$1" --lib -- "$2" 2>&1)"; then
+    if out="$(cd "$cv_ws" && CARGO_TARGET_DIR="$cv_target" CARGO_BUILD_BUILD_DIR="$cv_target" cargo test --quiet --locked --offline -p "$1" --lib -- "$2" 2>&1)"; then
       echo "conversation-suite: $1 $2 green"
     elif grep -q "test result: FAILED" <<<"$out"; then
       grep -E '^    [a-z_:]+$' <<<"$out" || true
@@ -6122,6 +6122,7 @@ open(p, "w").write(s.replace(old, new))' "$f" "$2" "$3"; then
     fi
     cv_suite "$4" "$5" || rc=$?
     mv "$f.orig" "$f"
+    touch "$f"
     return "$rc"
   }
   CHAIN=crates/maknae-kernel/src/conversation/chain.rs
