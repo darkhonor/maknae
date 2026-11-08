@@ -1305,6 +1305,7 @@ mod tests {
         assert_eq!(at(10, 5, Some(60)), Some(Ending::Lifetime));
         assert_eq!(at(100, 5, Some(-1)), Some(Ending::Lifetime));
         assert_eq!(at(100, 99, Some(-5)), Some(Ending::LeafExpired));
+        assert_eq!(at(100, 50, Some(-50)), Some(Ending::Lifetime));
 
         let fresh = SessionChannel::of(
             Admission::EnrolledAgent,

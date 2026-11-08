@@ -72,4 +72,26 @@ mod tests {
         assert_eq!(view.agent_uid(&id("hobi")), None);
         assert!(!view.is_enrolled(nix::unistd::geteuid().as_raw()));
     }
+
+    #[test]
+    fn the_snapshot_view_names_an_enrolled_agent_by_id_and_by_uid() {
+        let (g, mut basic) = crate::test_fixtures::fixture(
+            "enrollment-view-hobi",
+            crate::test_fixtures::READ_POLICY,
+            None,
+        );
+        basic.set_hosts(crate::test_fixtures::HOBI_HOSTS);
+        crate::test_fixtures::write_agent(&g.0, "hobi", "hobi-svc", 2001, "user");
+        basic.reload_from_file().unwrap();
+        let view = SnapshotEnrollment(Arc::new(Composition::new(
+            basic,
+            crate::CeilingAuthorizer::new(
+                maknae_config::Ceiling::baseline_for(&maknae_config::BasicPolicy),
+                &maknae_config::BasicPolicy,
+            ),
+        )));
+        assert_eq!(view.agent_uid(&id("hobi")), Some(2001));
+        assert!(view.is_enrolled(2001));
+        assert!(!view.is_enrolled(2002));
+    }
 }
