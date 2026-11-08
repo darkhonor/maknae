@@ -600,7 +600,8 @@ if [ "$mutants_mode" != "" ]; then
       oracle_ok=0
     fi
   fi
-  if ! mut_tmp="$(mktemp -d "${TMPDIR:-/tmp}/maknae-mutants.XXXXXXXX")"; then
+  tmp_base="${TMPDIR:-/tmp}"
+  if ! mut_tmp="$(mktemp -d "${tmp_base%/}/maknae-mutants.XXXXXXXX")"; then
     fail "cannot create the mutation scratch dir under ${TMPDIR:-/tmp}"
     printf '%d violation(s).\n' "$fail_n"; exit 1
   fi
@@ -770,14 +771,14 @@ print(data["indirect"] or "")' "$embeds_file" 2>/dev/null)"; then
       fi
       extra_mutants_flags+=(--exclude-re "$native_exclusion")
     fi
-    run_env=()
+    run_env=(-u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR -u CARGO_BUILD_BUILD_DIR)
     if [ "$cname" = "maknae-io" ]; then
       extra_mutants_flags+=(--minimum-test-timeout 60 --test-tool nextest)
       for v in $(compgen -e | grep '^NEXTEST_' || true); do run_env+=(-u "$v"); done
       run_env+=(-u CLICOLOR_FORCE NEXTEST_PROFILE=mutants CARGO_TERM_COLOR=never NEXTEST_RETRIES=0
                 NEXTEST_STATUS_LEVEL=fail NEXTEST_FINAL_STATUS_LEVEL=fail)
     fi
-    run_env+=(-u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR -u CARGO_BUILD_BUILD_DIR TMPDIR="$mut_tmp")
+    run_env+=(TMPDIR="$mut_tmp")
     diff_flags=()
     judge_flags=()
     if [ -n "$in_diff" ]; then
