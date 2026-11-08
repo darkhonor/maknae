@@ -471,6 +471,14 @@ mod tests {
     }
 
     #[test]
+    fn an_ml_dsa_87_signature_beside_a_two_certificate_chain_fits_the_bound() {
+        let cert = vec![7u8; 7 * 1024];
+        let chain: Vec<&[u8]> = vec![&cert; TASK_CHAIN_MAX];
+        let real = signature("ml-dsa-87", &cert, &chain, &[9; 4627]);
+        assert_eq!(dec::<TaskSignature>(&enc(&real)).unwrap(), real);
+    }
+
+    #[test]
     fn a_signed_task_is_the_object_beside_its_signature() {
         let signed = SignedTask {
             task: object(Tasker::Uid(1000), None),
@@ -646,6 +654,15 @@ mod tests {
             assert!(dec::<TaskId>(&b).is_err(), "{b:02x?}");
         }
         assert!(dec::<TaskId>(&enc(&[0u8; 16].to_vec())).is_err());
+        let err = dec::<TaskId>(&enc(&Bytes::new(vec![0u8; 15].into()))).unwrap_err();
+        assert!(err.contains("expected a 16-byte byte string"), "{err}");
+        assert_eq!(
+            "0123456789abcdef0a1b2c3d4e5f6978".parse::<TaskId>(),
+            Ok(TaskId([
+                0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x0a, 0x1b, 0x2c, 0x3d, 0x4e, 0x5f,
+                0x69, 0x78
+            ]))
+        );
         for bad in [
             "",
             "f0f1f2f3f4f5f6f7f8f9fafbfcfdfef",
