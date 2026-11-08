@@ -97,7 +97,6 @@ Operator ruling 2026-09-07. `read_file` → `fs.read`; `write_file` → `fs.writ
   - Idle expiry reads the wall clock, so a clock jump shortens or lengthens it.
   - A prompt's chain advance and an `fs.*` request's `last_active` touch are written before the egress intent or the mutation intent. A crash between them leaves the record covering a request whose only audit record is a deny, or none; the retry path absorbs it.
   - When marking a conversation full fails three fence retries, or the reply binding never starts within its bound, the conversation is not marked full, so its owner can be billed again for a reply the kernel then refuses; each attempt is audited.
-  - A bind that times out after the mark-full landed can be audited `conversation changed` rather than `conversation full`.
   - A store write or removal whose directory sync fails is answered `Unauthorized` and audited `outcome unknown`, never done and never not done: the record may hold the change or lose it after a crash, so a `session.new` so answered can hold a slot until the idle sweep closes it, and a close, delete or idle expiry so answered can leave the record active after a crash.
   - An `fs.*` request's `last_active` touch moves the fence, so a prompt in flight on the same conversation can be refused as changed, including after the provider has answered: that reply is withheld.
   - A failed idle-sweep scan is silent; nothing is closed and nothing is recorded.

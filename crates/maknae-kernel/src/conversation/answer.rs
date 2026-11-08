@@ -86,8 +86,12 @@ pub fn advance_answer(f: &StepFailure) -> Answer {
             format!("conversation changed before the send: {e}"),
             "unauthorized",
         ),
-        StepFailure::Blocked(b) => unauthorized(
-            format!("conversation update unavailable: {b}"),
+        StepFailure::Blocked(Blocked::Unknown) => unauthorized(
+            format!("outcome unknown: {}", Blocked::Unknown),
+            "unavailable",
+        ),
+        StepFailure::Blocked(Blocked::NotStarted) => unauthorized(
+            format!("conversation update unavailable: {}", Blocked::NotStarted),
             "unauthorized",
         ),
     }
@@ -99,10 +103,11 @@ pub fn reply_refusal(f: &StepFailure) -> (bool, ReplyRefusal) {
         StepFailure::Store(e) if e.outcome_unknown() => {
             (false, ReplyRefusal::ConversationOutcomeUnknown)
         }
+        StepFailure::Blocked(Blocked::Unknown) => (false, ReplyRefusal::ConversationOutcomeUnknown),
         StepFailure::NoConversation
         | StepFailure::Turn(TurnRefusal::Rewrite | TurnRefusal::Unencodable)
         | StepFailure::Store(_)
-        | StepFailure::Blocked(_) => (false, ReplyRefusal::ConversationChanged),
+        | StepFailure::Blocked(Blocked::NotStarted) => (false, ReplyRefusal::ConversationChanged),
     }
 }
 
@@ -287,10 +292,6 @@ mod tests {
                 StepFailure::Blocked(Blocked::NotStarted),
                 &format!("conversation update unavailable: {}", Blocked::NotStarted),
             ),
-            (
-                StepFailure::Blocked(Blocked::Unknown),
-                &format!("conversation update unavailable: {}", Blocked::Unknown),
-            ),
         ] {
             let a = advance_answer(&f);
             assert_eq!(
@@ -299,6 +300,15 @@ mod tests {
                 "{f:?}"
             );
         }
+        let overran = advance_answer(&StepFailure::Blocked(Blocked::Unknown));
+        assert_eq!(
+            (overran.reason.as_str(), overran.posture, wire(&overran)),
+            (
+                format!("outcome unknown: {}", Blocked::Unknown).as_str(),
+                "unavailable",
+                DENIED
+            )
+        );
     }
 
     #[test]
@@ -309,13 +319,17 @@ mod tests {
             ))),
             (true, ReplyRefusal::ConversationFull)
         );
+        assert_eq!(
+            reply_refusal(&StepFailure::Blocked(Blocked::Unknown)),
+            (false, ReplyRefusal::ConversationOutcomeUnknown)
+        );
         for f in [
             StepFailure::NoConversation,
             StepFailure::Turn(TurnRefusal::Rewrite),
             StepFailure::Turn(TurnRefusal::Unencodable),
             StepFailure::Store(StoreError::StaleFence),
             StepFailure::Store(StoreError::NotFound),
-            StepFailure::Blocked(Blocked::Unknown),
+            StepFailure::Blocked(Blocked::NotStarted),
         ] {
             assert_eq!(
                 reply_refusal(&f),
