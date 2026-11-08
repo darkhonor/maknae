@@ -747,6 +747,7 @@ mod tests {
         (agents_dir, private_dir, ops)
     }
 
+    #[cfg(not(target_os = "macos"))]
     fn sealed_leaf() -> PathBuf {
         PathBuf::from(super::super::agent::cred_path(&hobi()).file_name().unwrap())
     }
