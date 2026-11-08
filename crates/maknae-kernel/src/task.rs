@@ -395,10 +395,11 @@ fn task_request(
     target: &str,
     parent: Option<&SignedTask>,
     sub: &TaskSubmission,
+    lane: maknae_security::Lane,
 ) -> maknae_security::Request {
     use crate::handler::{build_authz_request, Stamp, TaskStamp};
     let parent = parent.map(|p| TaskStamp::of(&p.task));
-    use maknae_security::{AttrValue, Lane, RESOURCE_AGENT};
+    use maknae_security::{AttrValue, RESOURCE_AGENT};
     let (uid, home, stamp) = match by {
         Submitter::User { uid, home } => (*uid, home, Stamp::Client),
         Submitter::Agent {
@@ -413,7 +414,7 @@ fn task_request(
         ),
     };
     let verb = maknae_proto::Verb::TaskSubmit { task: sub.clone() };
-    let mut req = build_authz_request(&verb, uid, home.as_deref(), Lane::Local, None, &stamp);
+    let mut req = build_authz_request(&verb, uid, home.as_deref(), lane, None, &stamp);
     req.resource
         .0
         .insert(RESOURCE_AGENT, AttrValue::Str(target.to_owned()));
@@ -426,6 +427,8 @@ pub(crate) struct SubmitCtx<'a> {
     pub session_id: u64,
     pub seq: u64,
     pub user: Option<&'a str>,
+    pub peer_uri: Option<&'a str>,
+    pub lane: maknae_security::Lane,
     pub decide_timeout: std::time::Duration,
 }
 
@@ -456,7 +459,7 @@ impl Attempt {
             self.uid,
             None,
             None,
-            None,
+            ctx.peer_uri,
             ctx.session_id,
             ctx.seq,
             "session.task",
@@ -584,7 +587,7 @@ async fn decide<P: Authorizer + Send + Sync + 'static>(
     };
     attempt.parent = parent.as_ref().map(|t| t.task.task_id);
     let (generation, enrolled) = store.observe(view, &target);
-    let req = task_request(by, target.as_str(), parent.as_deref(), &sub);
+    let req = task_request(by, target.as_str(), parent.as_deref(), &sub, ctx.lane);
     let decided = decide_admitted(pdp, ctx.decide_timeout, req).await?;
     attempt.role = decided.role;
     match maknae_security::finalize(decided.verdict) {
@@ -1522,6 +1525,8 @@ mod tests {
             session_id: SESSION,
             seq: 5,
             user: Some("alice"),
+            peer_uri: None,
+            lane: maknae_security::Lane::Local,
             decide_timeout: bound,
         };
         let pdp = Decider {
@@ -2134,6 +2139,77 @@ mod tests {
         }
     }
 
+    struct Capturing<P> {
+        inner: Arc<P>,
+        seen: Mutex<Vec<Request>>,
+    }
+
+    impl<P: Authorizer> Authorizer for Capturing<P> {
+        fn decide(&self, req: &Request) -> Verdict {
+            self.decide_cited(req).verdict
+        }
+        fn decide_reporting_role(&self, req: &Request) -> (Verdict, Option<&'static str>) {
+            let d = self.decide_cited(req);
+            (d.verdict, d.role)
+        }
+        fn decide_cited(&self, req: &Request) -> Decided {
+            self.seen.lock().unwrap().push(req.clone());
+            self.inner.decide_cited(req)
+        }
+        fn decide_cited_all(&self, reqs: &[Request]) -> Vec<Decided> {
+            reqs.iter().map(|r| self.decide_cited(r)).collect()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_submission_carries_its_connections_san_and_lane() {
+        let (_g, pdp) = pdp("san-lane");
+        let store = TaskStore::new();
+        let emit = Recorder::new();
+        let view = SnapshotEnrollment(pdp.clone());
+        let parent = submit(&pdp, &store, user(), "hobi", &emit).await.unwrap();
+        let capturing = Arc::new(Capturing {
+            inner: pdp.clone(),
+            seen: Mutex::default(),
+        });
+        let w = wctx();
+        let ctx = SubmitCtx {
+            where_: &w,
+            session_id: SESSION,
+            seq: 6,
+            user: None,
+            peer_uri: Some("spiffe://d/plane/agent/hobi"),
+            lane: maknae_security::Lane::Remote,
+            decide_timeout: BOUND,
+        };
+        let pdp_under = Decider {
+            authorizer: capturing.clone(),
+            breaker: Breaker::default(),
+        };
+        let _ = submit_under(
+            pdp_under,
+            &store,
+            signer(),
+            &view,
+            &ctx,
+            agent("hobi", HOBI, Some(parent.task.task_id)),
+            sub("jin"),
+            &emit,
+        )
+        .await;
+        let last = emit.records().pop().unwrap();
+        assert_eq!(
+            last.subject.plane_uri_san.as_deref(),
+            Some("spiffe://d/plane/agent/hobi")
+        );
+        let seen = capturing.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(
+            seen[0].context.0.get(maknae_security::CONTEXT_DAC_LANE),
+            Some(&maknae_security::AttrValue::Str("remote".into()))
+        );
+    }
+
     #[tokio::test]
     async fn submit_task_decides_under_the_request_paths_breaker() {
         let (_g, pdp) = pdp("global-breaker");
@@ -2145,6 +2221,8 @@ mod tests {
             session_id: SESSION,
             seq: 5,
             user: None,
+            peer_uri: None,
+            lane: maknae_security::Lane::Local,
             decide_timeout: BOUND,
         };
         let view = SnapshotEnrollment(pdp.clone());
