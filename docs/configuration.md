@@ -283,7 +283,7 @@ To contain an id independently of the directory, list it as `- uid: <n>`. On Lin
 
 ### 2.4 Conversations (#170)
 
-The kernel records each conversation a loop opens: an owner, the working directory it was opened in, a hash chain over the request turns, and counts of turns and bytes. It never stores turn content. Records live in the `conversations/` directory beside the kernel graph store, sealed under the same key (`/var/lib/maknae/conversations` on Linux, `/usr/local/var/db/maknae/state/conversations` on macOS).
+The kernel records each conversation a loop opens: an owner, the working directory it was opened in, a hash chain over the request turns, the digest of the reply last bound to it, and counts of turns and bytes. It never stores turn content. Records live in the `conversations/` directory beside the kernel graph store, sealed under the same key (`/var/lib/maknae/conversations` on Linux, `/usr/local/var/db/maknae/state/conversations` on macOS).
 
 **The five terms.** `authz.yaml` grants a role these by name, never as `session.*`:
 
@@ -293,20 +293,32 @@ The kernel records each conversation a loop opens: an owner, the working directo
 | `session.prompt` | send turns on an active conversation the subject owns |
 | `session.list` | list the subject's own conversations |
 | `session.close` | close an active conversation the subject owns |
-| `session.delete` | delete a conversation the subject owns |
+| `session.delete` | delete an active conversation the subject owns. For an id the kernel does not hold, the kernel names the caller as its owner, so the grant alone permits it; the outcome reads `conversation deleted; the kernel held no record` |
 
 The shipped file grants all five to `admin` and none to `user`. It has no `destinations:` key, so a prompt is refused at the destination check until you add one ([first provider](first-provider.md#4-allow-the-prompt)). Agents are refused `session.new` unless an agent `policy.yaml` grants it.
 
-**The working directory is recorded, not decided.** `session.new` is decided by the grant alone. The kernel records the directory the client's descriptor resolves to, as the kernel reports it, and neither decides it as a read nor confines the conversation to it. A symlinked directory is recorded as its target. The only file system restrictions are those the OS imposes and the `permissions:` entries of `authz.yaml` on each `fs.*` request. Home confinement for `fs.*` is tracked in #617.
+**The working directory is recorded, not decided.** `session.new` is decided by the grant alone; only once the grant permits does the kernel check the client's descriptor. It records the directory the descriptor resolves to, as the kernel reports it, and neither decides it as a read nor confines the conversation to it. A symlinked directory is recorded as its target. The only file system restrictions are those the OS imposes and the `permissions:` entries of `authz.yaml` on each `fs.*` request. Home confinement for `fs.*` is tracked in #617.
 
 **The pairing rule.** In `authz.yaml`, a role or a `subjects:` entry whose effective grant (allow minus deny, after family expansion) holds `session.prompt` without `session.new` refuses the whole file at load. An agent's `policy.yaml` is exempt.
 
 **Bounds.**
 
-- A conversation idle for 24 hours is closed, audited with reason `idle`, when its owner next makes a conversation request; closing frees its slot.
+- A conversation idle for 24 hours is closed, audited with reason `idle`, at its owner's next `session.new` or `session.list`; closing frees its slot. No other request closes it.
 - An owner may hold at most 32 active conversations (`OWNER_MAX_ACTIVE`). A `session.new` past that is refused after the grant is permitted.
-- A conversation holds at most 256 MiB of request turns.
+- A conversation holds at most 256 MiB, counting its request turns and the replies bound to it.
 - A `session.list` page holds at most 12 conversations.
+
+**Known limits.**
+
+- A retry after a delivered reply is sent to the provider again, which answers anew.
+- Idle expiry reads the wall clock, so a clock change moves it.
+- A loop ended by SIGHUP, SIGQUIT or a panic leaves its conversation open until the idle sweep closes it.
+- A corrupt record is never counted, listed, closed or deleted, and stays so.
+- An unreadable record is audited again on each scan that meets it, and a failed idle-sweep scan records nothing.
+- Each scan reads the whole store, so its cost grows with every owner's conversations (#616).
+- `session.delete` of an id the kernel does not hold is permitted, so it tells the caller whether an id is held; ids are 128 random bits.
+- A prompt's chain advance is written before its egress intent, so after a crash the record can cover a request whose only audit record is a deny, or none; the loop's retry is admitted.
+- When marking a conversation full fails, its owner can be billed again for a reply the kernel then refuses; each attempt is audited.
 
 **Single host.** The store admits one `maknaed` per state directory: the directory is locked exclusively while the daemon runs. Sharing it between hosts is not supported (#616).
 

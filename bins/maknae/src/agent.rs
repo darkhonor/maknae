@@ -433,7 +433,7 @@ pub fn close_line(closed: &Closed, conversation: &str) -> Option<String> {
         Closed::TimedOut => format!("no answer within {} s", CLOSE_WITHIN.as_secs()),
     };
     Some(format!(
-        "maknae agent: conversation {conversation} was not closed ({why}); the kernel closes it after 24 hours idle"
+        "maknae agent: conversation {conversation} was not closed ({why}); the kernel closes it at your next session.new or session.list once it has been idle 24 hours"
     ))
 }
 
@@ -1481,7 +1481,7 @@ mod tests {
             ));
             assert_eq!(
                 close_line(&closed, KERNEL_ID).unwrap(),
-                format!("maknae agent: conversation {KERNEL_ID} was not closed (daemon gone); the kernel closes it after 24 hours idle")
+                format!("maknae agent: conversation {KERNEL_ID} was not closed (daemon gone); the kernel closes it at your next session.new or session.list once it has been idle 24 hours")
             );
         }
     }
@@ -1500,7 +1500,7 @@ mod tests {
         };
         assert_eq!(close_line(&Closed::Closed(view), id), None);
         assert_eq!(close_line(&Closed::NotOpened, id), None);
-        let tail = "; the kernel closes it after 24 hours idle";
+        let tail = "; the kernel closes it at your next session.new or session.list once it has been idle 24 hours";
         for (closed, why) in [
             (
                 Closed::Failed(PlaneError::Refused),

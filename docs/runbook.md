@@ -533,8 +533,8 @@ destinations:                # #172: per-role egress allowlist for session.promp
   single-account HomeLab shape collapses both roles into one person, and the trail still
   names every destination, every intent and every outcome.
 - **What a prompt carries.** Text-only content blocks (any other kind is refused before
-  the decision, `BadRequest` on the wire) and a conversation id of at most 32 bytes in
-  `[A-Za-z0-9._-]`. The trail records the text's length and a 32-hex digest, never the text.
+  the decision, `BadRequest` on the wire) and a conversation id of exactly 32 lowercase
+  hex characters, minted by the kernel at `session.new`. The trail records the text's length and a 32-hex digest, never the text.
 - **Egress deputy and a Vault outage (#240b).** The deputy makes no Vault login and does
   not contact Vault at start-up (`bins/maknae-egress/src/main.rs`): it reaches Vault only per turn, to
   look up and unwrap the user's wrapping token. During an outage the user's own CLI
