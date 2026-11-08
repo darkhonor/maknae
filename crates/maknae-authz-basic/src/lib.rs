@@ -5106,8 +5106,12 @@ mod tests {
         fn set_hosts_decides_the_next_load_with_the_given_lookups() {
             let fx = Fixture::new("set_hosts");
             write(&fx.policy(), EMPTY);
-            let dir = fx.0.join(maknae_config::AGENTS_DIR).join("hobi");
+            let agents = fx.0.join(maknae_config::AGENTS_DIR);
+            let dir = agents.join("hobi");
             std::fs::create_dir_all(&dir).unwrap();
+            for d in [&agents, &dir] {
+                std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o750)).unwrap();
+            }
             write(
                 &dir.join(maknae_config::ENROLLMENT_FILE),
                 "agent_id: hobi\naccount: hobi-svc\nuid: 2001\nrole: user\n",
