@@ -44,8 +44,8 @@ permissions:
 #       allow:
 #         - "local/llama"
 
-# The administrative terms the enrolled administrator (`admin`) holds on a fresh
-# install: the basic operation of a single-user host (#490). Edit the list to
+# The terms the enrolled administrator (`admin`) holds on a fresh install: basic
+# operation of a single-user host (#490) and the session terms (#170). Edit the list to
 # grant fewer or more; `admin.config.show` and `admin.contain` are grantable the same way.
 roles:
   admin:

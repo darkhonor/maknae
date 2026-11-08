@@ -481,13 +481,13 @@ canonical-sorted — `maknae-audit-append/src/record.rs` — not declaration ord
 ### 7. Grants, destinations and subjects (`authz.yaml`)
 
 Three additive keys govern what a role, and with `subjects:` an individual account, may DO beyond the built-in rules. The packaged
-`authz.yaml` grants `admin` five terms and allowlists nothing: no prompt is permitted
+`authz.yaml` grants `admin` five administrative terms and the five session terms, and allowlists nothing: no prompt is permitted
 until you write a `destinations:` entry.
 
 ```yaml
 roles:                       # #162: per-role action grants; deny beats allow inside a role
   admin:
-    allow: ["admin.status", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.release"]   # as packaged (#490, #165)
+    allow: ["admin.status", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.release", "session.prompt", "session.new", "session.close", "session.list", "session.delete"]   # as packaged
   user:
     allow: ["session.prompt", "session.new", "session.close", "session.list", "session.delete"]
 destinations:                # #172: per-role egress allowlist for session.prompt
@@ -497,8 +497,8 @@ destinations:                # #172: per-role egress allowlist for session.promp
 
 - **Which terms a role may hold.** `admin`: `admin.status`, `admin.config.show`,
   `admin.subject.list`, `admin.baseline.show`, `admin.baseline.accept`,
-  `admin.contain`, `admin.release` and `session.prompt`. `user`: `session.prompt`
-  only — writing an `admin.*` term under `user` refuses at boot, naming both the role and
+  `admin.contain`, `admin.release`, `session.prompt`, `session.new`, `session.close`,
+  `session.list` and `session.delete`. `user`: the five `session.*` terms — writing an `admin.*` term under `user` refuses at boot, naming both the role and
   the term. `guest` and `adversary` are structural and take no grants; a `roles:` or
   `destinations:` key naming them refuses at boot too.
 - **`destinations:` grammar.** Allow-only (a `deny:` key refuses at load, so it cannot be
@@ -608,6 +608,7 @@ subjects:
       allow:
         - "fs.read"
         - "session.prompt"
+        - "session.new"
     models:
       allow:
         - "openai/gpt-5.6"
@@ -1069,7 +1070,7 @@ Search with `grep`: on a STIG'd Rocky 10 host `ausearch -m AVC` was measured mis
 ```bash
 sudo systemctl disable --now maknae-egress.socket maknae-egress.service
 sudo rm /etc/maknae/config.d/10-provider.yaml
-sudoedit /etc/maknae/authz.yaml                 # remove step 7's session.prompt line and destinations: block
+sudoedit /etc/maknae/authz.yaml                 # remove step 7's destinations: block
 sudo systemctl reload maknaed                   # applies the authz.yaml edit
 maknae baseline-show                            # the providers removal, apply restart
 maknae baseline-accept <hash>                   # maknaed restarts into it

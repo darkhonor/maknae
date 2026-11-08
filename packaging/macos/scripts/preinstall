@@ -212,7 +212,6 @@ install -d -m 0755 -o 0             -g 0               /usr/local/lib/maknae
 install -d -m 0750 -o "$MAKNAE_UID" -g "$OPERATOR_GID" /usr/local/var/run/maknae
 install -d -m 0755 -o 0             -g 0               "$RECEIPT_DIR"
 install -d -m 0700 -o "$MAKNAE_UID" -g "$MAKNAE_GID"   /usr/local/var/db/maknae/state
-install -d -m 0700 -o "$MAKNAE_UID" -g "$MAKNAE_GID"   /usr/local/var/db/maknae/state/conversations
 
 # VERIFY the D1 row landed. BSD `install -d` exits 0 even when its chown FAILS
 # (measured: `install -d -g 99999 ...` prints "Operation not permitted" and still
