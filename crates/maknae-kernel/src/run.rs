@@ -1566,58 +1566,26 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 // because it never sees them.
                 Dispatch::SubjectListRequested => {
                     let subj_breaker = authz_decide_breaker();
-                    let admission = { subj_breaker.lock().await.begin_attempt_at(Instant::now()) };
-                    let enumerated = match admission {
-                        BreakerAdmission::RefuseOpen => Err("enumeration circuit breaker open"),
-                        BreakerAdmission::RefuseAtCapacity => {
+                    let a = Arc::clone(&authorizer);
+                    let out = admit_blocking(
+                        &subj_breaker,
+                        authz_decide_timeout,
+                        "authorization decision",
+                        move || maknae_security::guarded_subjects(&*a),
+                    )
+                    .await;
+                    // A JOIN failure is not counted against the breaker, a TIMEOUT
+                    // is (`admit_blocking`). `Ok(None)` is the backend answering
+                    // "I cannot enumerate", which an auditor must tell from a wedged mount.
+                    let enumerated = match out {
+                        Err(Offload::Open) => Err("enumeration circuit breaker open"),
+                        Err(Offload::AtCapacity) => {
                             Err("enumeration blocking worker budget exhausted")
                         }
-                        BreakerAdmission::Admit => {
-                            let a = Arc::clone(&authorizer);
-                            let out = tokio::time::timeout(
-                                authz_decide_timeout,
-                                tokio::task::spawn_blocking(move || {
-                                    maknae_security::guarded_subjects(&*a)
-                                }),
-                            )
-                            .await;
-                            match out {
-                                Ok(Ok(Some(v))) => {
-                                    subj_breaker.lock().await.record_success();
-                                    Ok(v)
-                                }
-                                // The backend ANSWERED, and its answer is "I
-                                // cannot enumerate" -- permanent, benign, and
-                                // the shipped default's state. An auditor must
-                                // be able to tell it from a wedged mount.
-                                Ok(Ok(None)) => {
-                                    subj_breaker.lock().await.record_success();
-                                    Err("backend does not enumerate bindings")
-                                }
-                                // A JOIN failure is not counted against the
-                                // breaker -- same as the decide path, where a
-                                // panicked/cancelled task is not evidence that
-                                // the filesystem is wedged.
-                                Ok(Err(_join)) => {
-                                    subj_breaker.lock().await.record_success();
-                                    Err("enumeration failed (join)")
-                                }
-                                // A TIMEOUT is, and it is the signal that
-                                // trips: repeated blocking reads against a
-                                // stalled mount must stop spawning more.
-                                Err(_elapsed) => {
-                                    if subj_breaker.lock().await.record_timeout_at(Instant::now())
-                                        == BreakerTransition::Tripped
-                                    {
-                                        eprintln!(
-                                            "maknaed: authorization decision circuit breaker tripped after repeated {}s blocking timeouts — failing closed without spawning more policy work",
-                                            authz_decide_timeout.as_secs()
-                                        );
-                                    }
-                                    Err("enumeration timed out")
-                                }
-                            }
-                        }
+                        Ok(Some(v)) => Ok(v),
+                        Ok(None) => Err("backend does not enumerate bindings"),
+                        Err(Offload::Join) => Err("enumeration failed (join)"),
+                        Err(Offload::TimedOut) => Err("enumeration timed out"),
                     };
                     match enumerated {
                         Ok(b) => {
@@ -7838,25 +7806,35 @@ mod subject_list_offload_tripwire {
             .collect::<Vec<_>>()
             .join("\n");
         let body = body.as_str();
-        for needle in [
-            "authz_decide_breaker()",
-            "begin_attempt_at",
-            "tokio::time::timeout",
-            "spawn_blocking",
-            "record_timeout_at",
-        ] {
-            assert!(
-                body.contains(needle),
+        let breaker = body
+            .find("let subj_breaker = authz_decide_breaker();")
+            .expect("the enumeration is admitted under the decide breaker");
+        let admitted = body
+            .find("admit_blocking(")
+            .filter(|at| {
+                body[at + "admit_blocking(".len()..]
+                    .trim_start()
+                    .starts_with("&subj_breaker,")
+            })
+            .expect(
                 "`subjects()` must run under the same offload discipline as the \
-                 decide path — missing `{needle}`. If this is a deliberate \
-                 change, the sync policy read is back on the async worker."
+                 decide path: `admit_blocking` on the decide breaker",
+            );
+        assert!(breaker < admitted);
+        let read = body
+            .find("guarded_subjects(")
+            .expect("the enumeration reads through the guarded seam");
+        assert!(
+            admitted < read,
+            "the policy read must be the work `admit_blocking` runs, not a call before it"
+        );
+        for inline in ["spawn_blocking", "authorizer.subjects()", ".subjects();"] {
+            assert!(
+                !body.contains(inline),
+                "`{inline}` in the arm: the enumeration is back outside the \
+                 admitted offload, the exact regression this tripwire exists to catch"
             );
         }
-        assert!(
-            !body.contains("= authorizer.subjects();"),
-            "a bare inline `authorizer.subjects()` is the exact regression this \
-             tripwire exists to catch"
-        );
     }
 }
 
