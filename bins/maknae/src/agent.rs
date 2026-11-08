@@ -3,8 +3,8 @@
 //! policy, and asks the kernel for everything (ADR-0023 d2, d4).
 use maknae_agent::budget::{prompt_cap, ContextBudget, Notice};
 use maknae_agent::drive::{Budget, LoopEvent, Outcome, StopReason};
-use maknae_agent::plane::Plane;
-use maknae_agent::session::Session;
+use maknae_agent::plane::{Plane, PlaneError};
+use maknae_agent::session::{Closed, Ended, Session};
 use maknae_config::{UserProviderEntry, UserProviders, Value};
 use maknae_loop::keys::KeySupply;
 use maknae_loop::plane::LoopPlane;
@@ -366,28 +366,100 @@ pub fn print_end(
     Ok(2)
 }
 
-/// A failed print stops the session before its next plane call, so nothing new
-/// is started on the subject's behalf after output is lost; a granted attempt finishes.
+#[cfg(test)]
 pub async fn drive_to<P: Plane + Send>(
     session: &mut Session,
     plane: &mut P,
     err: &mut (impl Write + Send),
 ) -> std::io::Result<Outcome> {
+    let never = std::future::pending::<std::convert::Infallible>();
+    match converse_to(session, plane, never, CLOSE_WITHIN, err).await? {
+        (Ended::Ran(outcome), _) => Ok(outcome),
+        (Ended::Interrupted(never), _) => match never {},
+    }
+}
+
+/// A failed print stops the session before its next plane call, so nothing new
+/// is started on the subject's behalf after output is lost; a granted attempt
+/// finishes. The kernel's conversation is closed however the run ends.
+pub async fn converse_to<P: Plane + Send, S>(
+    session: &mut Session,
+    plane: &mut P,
+    interrupt: impl Future<Output = S> + Send,
+    close_within: std::time::Duration,
+    err: &mut (impl Write + Send),
+) -> std::io::Result<(Ended<S>, Closed)> {
     let handle = session.handle();
     let mut failed: Option<std::io::Error> = None;
-    let outcome = session
-        .run(plane, &mut |e| {
-            if failed.is_none() {
-                if let Err(e) = print_event(&e, err) {
-                    handle.stop();
-                    failed = Some(e);
+    let result = session
+        .converse(
+            plane,
+            interrupt,
+            || tokio::time::sleep(close_within),
+            &mut |e| {
+                if failed.is_none() {
+                    if let Err(e) = print_event(&e, err) {
+                        handle.stop();
+                        failed = Some(e);
+                    }
                 }
-            }
-        })
+            },
+        )
         .await;
     match failed {
         Some(e) => Err(e),
-        None => Ok(outcome),
+        None => Ok(result),
+    }
+}
+
+pub const CLOSE_WITHIN: std::time::Duration = std::time::Duration::from_secs(5);
+
+pub fn open_failure(e: &PlaneError, cwd: &Path) -> String {
+    match e {
+        PlaneError::Refused => format!(
+            "the kernel refused to open a conversation in {}: the working directory must be inside your home, and your role must hold session.new; the reason is in the host's audit trail (ask your administrator)",
+            cwd.display()
+        ),
+        PlaneError::Transport(m) => format!("could not open a conversation: {m}"),
+        other => format!("could not open a conversation: {other:?}"),
+    }
+}
+
+pub fn close_line(closed: &Closed, conversation: &str) -> Option<String> {
+    let why = match closed {
+        Closed::Closed(_) | Closed::NotOpened => return None,
+        Closed::Failed(PlaneError::Refused) => "the kernel refused the close".to_string(),
+        Closed::Failed(PlaneError::Transport(m)) => m.clone(),
+        Closed::Failed(other) => format!("{other:?}"),
+        Closed::TimedOut => format!("no answer within {} s", CLOSE_WITHIN.as_secs()),
+    };
+    Some(format!(
+        "maknae agent: conversation {conversation} was not closed ({why}); the kernel closes it after 24 hours idle"
+    ))
+}
+
+pub fn interrupted_status(signal: i32) -> u8 {
+    u8::try_from(128 + signal).unwrap_or(u8::MAX)
+}
+
+async fn next_signal(signal: Option<tokio::signal::unix::Signal>) {
+    match signal {
+        Some(mut s) => {
+            s.recv().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// A kind that cannot be registered keeps its default disposition, so it still ends the process.
+async fn interrupted() -> i32 {
+    use nix::sys::signal::Signal;
+    use tokio::signal::unix::{signal, SignalKind};
+    let int = signal(SignalKind::interrupt()).ok();
+    let term = signal(SignalKind::terminate()).ok();
+    tokio::select! {
+        () = next_signal(int) => Signal::SIGINT as i32,
+        () = next_signal(term) => Signal::SIGTERM as i32,
     }
 }
 
@@ -433,7 +505,8 @@ pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
     let write_max = transport.prompt_max_bytes;
     let mut transport = transport;
     transport.prompt_max_bytes = loop_prompt_cap(context.context_tokens(), explicit);
-    let id = maknae_loop::id::mint_conversation_id()?;
+    let cwd =
+        std::env::current_dir().map_err(|e| format!("cannot read the working directory: {e}"))?;
     // One snapshot per session: `~` cannot change meaning for this process (#596).
     let home = snapshot_home(HOME_SNAPSHOT_TIMEOUT, maknae_io::session_home).await;
     let client = PlaneClient::for_user(&document, &dir, token_copy(&session.token)?)
@@ -463,15 +536,44 @@ pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
         max_steps: agent.max_steps,
         max_tool_calls_per_step: agent.max_tool_calls_per_step,
     };
-    let mut session = Session::new(id, &prompt, budget, context, home);
-    let outcome = drive_to(&mut session, &mut plane, &mut std::io::stderr()).await;
-    plane.into_client().shutdown().await;
-    finish(
-        outcome,
-        &budget,
-        &mut std::io::stdout(),
+    let opened = Session::open(&mut plane, &cwd, &prompt, budget, context, home).await;
+    print_diagnostics(&mut plane);
+    let mut session = match opened {
+        Ok(session) => session,
+        Err(e) => {
+            plane.into_client().shutdown().await;
+            return Err(open_failure(&e, &cwd));
+        }
+    };
+    let result = converse_to(
+        &mut session,
+        &mut plane,
+        interrupted(),
+        CLOSE_WITHIN,
         &mut std::io::stderr(),
     )
+    .await;
+    print_diagnostics(&mut plane);
+    plane.into_client().shutdown().await;
+    let (ended, closed) = result.map_err(|e| e.to_string())?;
+    if let Some(line) = close_line(&closed, session.conversation()) {
+        crate::stderr::line(&mut std::io::stderr(), format_args!("{line}"));
+    }
+    match ended {
+        Ended::Ran(outcome) => finish(
+            Ok(outcome),
+            &budget,
+            &mut std::io::stdout(),
+            &mut std::io::stderr(),
+        ),
+        Ended::Interrupted(signal) => Ok(interrupted_status(signal)),
+    }
+}
+
+fn print_diagnostics<P: Plane>(plane: &mut P) {
+    for line in plane.take_diagnostics() {
+        crate::stderr::line(&mut std::io::stderr(), format_args!("{line}"));
+    }
 }
 
 pub fn finish(
@@ -1015,8 +1117,23 @@ mod tests {
             queued: Vec<String>,
             prompts: usize,
             writes: usize,
+            closes: Vec<String>,
         }
+        const KERNEL_ID: &str = "0123456789abcdef0123456789abcdef";
         impl Plane for Fake {
+            async fn open(
+                &mut self,
+                _: &std::path::Path,
+            ) -> Result<maknae_proto::ConversationId, PlaneError> {
+                Ok(maknae_proto::ConversationId::parse(KERNEL_ID).unwrap())
+            }
+            async fn close(
+                &mut self,
+                c: &maknae_proto::ConversationId,
+            ) -> Result<maknae_proto::ConversationView, PlaneError> {
+                self.closes.push(c.as_str().into());
+                Err(PlaneError::Transport("daemon gone".into()))
+            }
             async fn prompt(
                 &mut self,
                 _c: &str,
@@ -1057,6 +1174,7 @@ mod tests {
                 queued: vec![],
                 prompts: 0,
                 writes: 0,
+                closes: vec![],
             }
         }
         fn budget() -> Budget {
@@ -1294,5 +1412,113 @@ mod tests {
                 "nothing ran after the failed print"
             );
         }
+
+        #[tokio::test]
+        async fn an_opened_conversation_is_closed_when_the_print_fails_and_when_it_answers() {
+            async fn open(p: &mut Fake) -> Result<Session, PlaneError> {
+                Session::open(
+                    p,
+                    std::path::Path::new("/w"),
+                    "q",
+                    budget(),
+                    unmetered(),
+                    None,
+                )
+                .await
+            }
+            let mut p = fake(vec![
+                reply(None, &[("c1", "/w/a")]),
+                reply(Some("done"), &[]),
+            ]);
+            p.write_diags = VecDeque::from([ARMING]);
+            let mut session = open(&mut p).await.unwrap();
+            let never = std::future::pending::<i32>();
+            let ended = converse_to(&mut session, &mut p, never, CLOSE_WITHIN, &mut Broken).await;
+            assert_eq!(ended.unwrap_err().kind(), std::io::ErrorKind::BrokenPipe);
+            assert_eq!(p.closes, vec![KERNEL_ID.to_string()]);
+
+            let mut p = fake(vec![reply(Some("done"), &[])]);
+            let mut session = open(&mut p).await.unwrap();
+            let never = std::future::pending::<i32>();
+            let (ended, closed) =
+                converse_to(&mut session, &mut p, never, CLOSE_WITHIN, &mut Vec::new())
+                    .await
+                    .unwrap();
+            assert_eq!(p.closes, vec![KERNEL_ID.to_string()]);
+            assert!(matches!(
+                ended,
+                Ended::Ran(Outcome {
+                    answer: Some(_),
+                    ..
+                })
+            ));
+            assert_eq!(
+                close_line(&closed, KERNEL_ID).unwrap(),
+                format!("maknae agent: conversation {KERNEL_ID} was not closed (daemon gone); the kernel closes it after 24 hours idle")
+            );
+        }
+    }
+
+    #[test]
+    fn a_conversation_left_open_is_named_with_its_backstop() {
+        let id = "0123456789abcdef0123456789abcdef";
+        let view = maknae_proto::ConversationView {
+            conversation: maknae_proto::ConversationId::parse(id).unwrap(),
+            cwd: "/w".into(),
+            opened_at: 1,
+            last_active: 2,
+            turns: 0,
+            bytes: 0,
+            chain_head: "h".into(),
+        };
+        assert_eq!(close_line(&Closed::Closed(view), id), None);
+        assert_eq!(close_line(&Closed::NotOpened, id), None);
+        let tail = "; the kernel closes it after 24 hours idle";
+        for (closed, why) in [
+            (
+                Closed::Failed(PlaneError::Refused),
+                "the kernel refused the close".to_string(),
+            ),
+            (
+                Closed::Failed(PlaneError::Transport("reset".into())),
+                "reset".to_string(),
+            ),
+            (
+                Closed::Failed(PlaneError::Unavailable),
+                "Unavailable".to_string(),
+            ),
+            (Closed::TimedOut, "no answer within 5 s".to_string()),
+        ] {
+            assert_eq!(
+                close_line(&closed, id),
+                Some(format!(
+                    "maknae agent: conversation {id} was not closed ({why}){tail}"
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn a_refused_open_names_the_cwd_and_what_it_needs() {
+        let cwd = std::path::Path::new("/home/a/w");
+        assert_eq!(
+            open_failure(&PlaneError::Refused, cwd),
+            "the kernel refused to open a conversation in /home/a/w: the working directory must be inside your home, and your role must hold session.new; the reason is in the host's audit trail (ask your administrator)"
+        );
+        assert_eq!(
+            open_failure(&PlaneError::Transport("reset".into()), cwd),
+            "could not open a conversation: reset"
+        );
+        assert_eq!(
+            open_failure(&PlaneError::Unavailable, cwd),
+            "could not open a conversation: Unavailable"
+        );
+    }
+
+    #[test]
+    fn an_interrupt_exits_with_128_plus_the_signal() {
+        assert_eq!(interrupted_status(2), 130);
+        assert_eq!(interrupted_status(15), 143);
+        assert_eq!(interrupted_status(200), u8::MAX);
     }
 }

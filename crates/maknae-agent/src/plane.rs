@@ -1,8 +1,9 @@
 //! The seam between the brain and the world. The brain calls these; it never
 //! opens a socket or a file. The CLI implements it over the plane client; the
 //! kernel's tests implement it over the in-process fixture — same brain, both.
-use maknae_proto::{PromptReply, Turn};
+use maknae_proto::{ConversationId, ConversationView, PromptReply, Turn};
 use std::future::Future;
+use std::path::Path;
 
 /// `Refused` is the wire's `Unauthorized` on an ARMED read — for a read that
 /// word is honest (no side effect). `Unavailable` is everything else: a missing
@@ -128,6 +129,14 @@ pub enum PlaneError {
 }
 
 pub trait Plane {
+    fn open(
+        &mut self,
+        cwd: &Path,
+    ) -> impl Future<Output = Result<ConversationId, PlaneError>> + Send;
+    fn close(
+        &mut self,
+        conversation: &ConversationId,
+    ) -> impl Future<Output = Result<ConversationView, PlaneError>> + Send;
     fn prompt(
         &mut self,
         conversation: &str,

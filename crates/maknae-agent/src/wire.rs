@@ -2,7 +2,7 @@
 //! [`WireOutcome`] converts into it, so the decisions below stay in this crate,
 //! where they are mutation-tested.
 use crate::plane::{PlaneError, ReadBasis, ReadOutcome, ReadPage, WriteOutcome};
-use maknae_proto::Payload;
+use maknae_proto::{ConversationId, ConversationView, Payload};
 
 /// What an existing file must be before a replace writes it (#388). The
 /// agent's loop sends `Unread` or `Read`; `maknae write` sends `Unchecked`.
@@ -166,6 +166,45 @@ pub fn prompt_outcome(
             "protocol error: unexpected reply to session.prompt: {other:?}"
         ))),
         Err(m) => Err(PlaneError::Transport(m)),
+    }
+}
+
+/// Only the kernel's `ConversationOpened` opens; an `Unauthorized` refusal is
+/// `Refused`, any other refusal carries the kernel's message.
+pub fn open_outcome(sent: Result<WireOutcome, String>) -> Result<ConversationId, PlaneError> {
+    match sent {
+        Ok(WireOutcome::Payload(Payload::ConversationOpened(v))) => Ok(v.conversation),
+        other => Err(conversation_failure("session.new", other)),
+    }
+}
+
+/// A `ConversationClosed` for a conversation other than the one asked about is
+/// a protocol error, not a close.
+pub fn close_outcome(
+    asked: &ConversationId,
+    sent: Result<WireOutcome, String>,
+) -> Result<ConversationView, PlaneError> {
+    match sent {
+        Ok(WireOutcome::Payload(Payload::ConversationClosed(v))) if v.conversation == *asked => {
+            Ok(v)
+        }
+        other => Err(conversation_failure("session.close", other)),
+    }
+}
+
+fn conversation_failure(verb: &str, sent: Result<WireOutcome, String>) -> PlaneError {
+    match sent {
+        Ok(WireOutcome::Refused {
+            code: maknae_proto::ProtoErrCode::Unauthorized,
+            ..
+        }) => PlaneError::Refused,
+        Ok(WireOutcome::Refused { message, .. }) => {
+            PlaneError::Transport(format!("the kernel did not complete {verb}: {message}"))
+        }
+        Ok(other) => PlaneError::Transport(format!(
+            "protocol error: unexpected reply to {verb}: {other:?}"
+        )),
+        Err(m) => PlaneError::Transport(m),
     }
 }
 
@@ -433,5 +472,101 @@ mod tests {
         assert!(!d.contains("SENTINEL-WIRE-BYTES"), "{d}");
         assert!(!d.contains("Zeroizing"), "{d}");
         assert!(d.contains("<19 bytes>"), "{d}");
+    }
+
+    fn view(id: &str) -> ConversationView {
+        ConversationView {
+            conversation: ConversationId::parse(id).unwrap(),
+            cwd: "/home/a/w".into(),
+            opened_at: 1,
+            last_active: 2,
+            turns: 0,
+            bytes: 0,
+            chain_head: "h".into(),
+        }
+    }
+
+    fn refused(code: maknae_proto::ProtoErrCode) -> Result<WireOutcome, String> {
+        Ok(WireOutcome::Refused {
+            code,
+            message: "too many active conversations".into(),
+            armed: true,
+        })
+    }
+
+    const A: &str = "0123456789abcdef0123456789abcdef";
+    const B: &str = "fedcba9876543210fedcba9876543210";
+
+    #[test]
+    fn only_an_opened_conversation_opens_and_an_unauthorized_open_is_refused() {
+        assert_eq!(
+            open_outcome(Ok(WireOutcome::Payload(Payload::ConversationOpened(view(
+                A
+            ))))),
+            Ok(ConversationId::parse(A).unwrap())
+        );
+        assert_eq!(
+            open_outcome(refused(maknae_proto::ProtoErrCode::Unauthorized)),
+            Err(PlaneError::Refused)
+        );
+        assert_eq!(
+            open_outcome(Ok(WireOutcome::Refused {
+                code: maknae_proto::ProtoErrCode::Unauthorized,
+                message: "not authorized".into(),
+                armed: false,
+            })),
+            Err(PlaneError::Refused)
+        );
+        assert_eq!(
+            open_outcome(refused(maknae_proto::ProtoErrCode::TooLarge)),
+            Err(PlaneError::Transport(
+                "the kernel did not complete session.new: too many active conversations".into()
+            ))
+        );
+        match open_outcome(Ok(WireOutcome::Payload(Payload::ConversationClosed(view(
+            A,
+        ))))) {
+            Err(PlaneError::Transport(m)) => {
+                assert!(
+                    m.starts_with("protocol error: unexpected reply to session.new"),
+                    "{m}"
+                )
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            open_outcome(Err("connection reset".into())),
+            Err(PlaneError::Transport("connection reset".into()))
+        );
+    }
+
+    #[test]
+    fn a_close_is_accepted_only_for_the_conversation_asked_about() {
+        let a = ConversationId::parse(A).unwrap();
+        let closed = |id| Ok(WireOutcome::Payload(Payload::ConversationClosed(view(id))));
+        assert_eq!(close_outcome(&a, closed(A)), Ok(view(A)));
+        match close_outcome(&a, closed(B)) {
+            Err(PlaneError::Transport(m)) => {
+                assert!(
+                    m.starts_with("protocol error: unexpected reply to session.close"),
+                    "{m}"
+                )
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            close_outcome(&a, refused(maknae_proto::ProtoErrCode::Unauthorized)),
+            Err(PlaneError::Refused)
+        );
+        assert_eq!(
+            close_outcome(
+                &a,
+                Ok(WireOutcome::Payload(Payload::ConversationOpened(view(A))))
+            ),
+            Err(PlaneError::Transport(format!(
+                "protocol error: unexpected reply to session.close: {:?}",
+                WireOutcome::Payload(Payload::ConversationOpened(view(A)))
+            )))
+        );
     }
 }

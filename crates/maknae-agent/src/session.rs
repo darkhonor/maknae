@@ -4,10 +4,14 @@
 //! between sessions except through the kernel.
 use crate::budget::{ContextBudget, Meter};
 use crate::drive::{drive_session, Budget, LoopEvent, Outcome, Seen, StopReason};
-use crate::plane::Plane;
+use crate::plane::{Plane, PlaneError};
 use crate::transcript::Transcript;
+use maknae_proto::{ConversationId, ConversationView};
+use std::future::Future;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::task::Poll;
 
 /// Stops one session before its next plane call. A cooperative courtesy: the
 /// stop that must hold without the loop's cooperation is enforced elsewhere.
@@ -23,6 +27,40 @@ impl LoopHandle {
 #[derive(Debug, PartialEq, Eq)]
 pub struct SessionClosed;
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum Ended<S> {
+    Ran(Outcome),
+    Interrupted(S),
+}
+
+/// A conversation left open is closed by the kernel's idle expiry.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Closed {
+    Closed(ConversationView),
+    Failed(PlaneError),
+    TimedOut,
+    NotOpened,
+}
+
+enum Either<A, B> {
+    Left(A),
+    Right(B),
+}
+
+async fn first<A: Future, B: Future>(a: A, b: B) -> Either<A::Output, B::Output> {
+    let (mut a, mut b) = (std::pin::pin!(a), std::pin::pin!(b));
+    std::future::poll_fn(|cx| {
+        if let Poll::Ready(v) = a.as_mut().poll(cx) {
+            return Poll::Ready(Either::Left(v));
+        }
+        if let Poll::Ready(v) = b.as_mut().poll(cx) {
+            return Poll::Ready(Either::Right(v));
+        }
+        Poll::Pending
+    })
+    .await
+}
+
 pub struct Session {
     transcript: Transcript,
     seen: Seen,
@@ -32,6 +70,7 @@ pub struct Session {
     answered: bool,
     pending: bool,
     home: Option<String>,
+    kernel: Option<ConversationId>,
 }
 
 impl Session {
@@ -51,7 +90,22 @@ impl Session {
             answered: false,
             pending: true,
             home,
+            kernel: None,
         }
+    }
+
+    pub async fn open<P: Plane + Send>(
+        plane: &mut P,
+        cwd: &Path,
+        first_prompt: &str,
+        budget: Budget,
+        context: ContextBudget,
+        home: Option<String>,
+    ) -> Result<Self, PlaneError> {
+        let id = plane.open(cwd).await?;
+        let mut session = Session::new(id.as_str(), first_prompt, budget, context, home);
+        session.kernel = Some(id);
+        Ok(session)
     }
 
     pub fn handle(&self) -> LoopHandle {
@@ -113,6 +167,35 @@ impl Session {
         }
         self.answered = outcome.answer.is_some();
         outcome
+    }
+
+    /// Closes the kernel's conversation however the run ended, `interrupt`
+    /// included; the session takes no further prompt.
+    pub async fn converse<P, S, D>(
+        &mut self,
+        plane: &mut P,
+        interrupt: impl Future<Output = S> + Send,
+        close_deadline: impl FnOnce() -> D,
+        emit: &mut (impl FnMut(LoopEvent) + Send),
+    ) -> (Ended<S>, Closed)
+    where
+        P: Plane + Send,
+        D: Future<Output = ()> + Send,
+    {
+        let ended = match first(self.run(plane, emit), interrupt).await {
+            Either::Left(outcome) => Ended::Ran(outcome),
+            Either::Right(signal) => Ended::Interrupted(signal),
+        };
+        self.answered = false;
+        let closed = match &self.kernel {
+            None => Closed::NotOpened,
+            Some(id) => match first(plane.close(id), close_deadline()).await {
+                Either::Left(Ok(view)) => Closed::Closed(view),
+                Either::Left(Err(e)) => Closed::Failed(e),
+                Either::Right(()) => Closed::TimedOut,
+            },
+        };
+        (ended, closed)
     }
 }
 
@@ -179,11 +262,53 @@ mod tests {
         yields: bool,
         started: Option<tokio::sync::oneshot::Sender<()>>,
         release: Option<tokio::sync::oneshot::Receiver<()>>,
+        log: Vec<String>,
+        refuse_open: bool,
+        prompt_error: Option<PlaneError>,
+        prompt_hangs: bool,
+        close_error: Option<PlaneError>,
+        close_hangs: bool,
+    }
+    const KERNEL_ID: &str = "00112233445566778899aabbccddeeff";
+    fn view(id: &ConversationId) -> ConversationView {
+        ConversationView {
+            conversation: id.clone(),
+            cwd: "/home/a/w".into(),
+            opened_at: 1,
+            last_active: 2,
+            turns: 1,
+            bytes: 2,
+            chain_head: "h".into(),
+        }
     }
     impl Plane for Fake {
+        async fn open(&mut self, cwd: &Path) -> Result<ConversationId, PlaneError> {
+            self.log.push(format!("open {}", cwd.display()));
+            if self.refuse_open {
+                return Err(PlaneError::Refused);
+            }
+            Ok(ConversationId::parse(KERNEL_ID).unwrap())
+        }
+        async fn close(&mut self, id: &ConversationId) -> Result<ConversationView, PlaneError> {
+            self.log.push(format!("close {}", id.as_str()));
+            if self.close_hangs {
+                std::future::pending::<()>().await;
+            }
+            match self.close_error.take() {
+                Some(e) => Err(e),
+                None => Ok(view(id)),
+            }
+        }
         async fn prompt(&mut self, c: &str, t: &[Turn]) -> Result<PromptReply, PlaneError> {
             if self.yields {
                 tokio::task::yield_now().await;
+            }
+            self.log.push(format!("prompt {c}"));
+            if self.prompt_hangs {
+                std::future::pending::<()>().await;
+            }
+            if let Some(e) = self.prompt_error.take() {
+                return Err(e);
             }
             self.prompts.push((c.into(), t.len()));
             Ok(self.replies.pop_front().expect("script exhausted"))
@@ -530,5 +655,163 @@ mod tests {
         let s = Session::new("c", "q", budget(), unmetered(), None);
         let b = s.budget();
         assert_eq!((b.max_steps, b.max_tool_calls_per_step), (8, 2));
+    }
+
+    async fn opened(p: &mut Fake) -> Result<Session, PlaneError> {
+        Session::open(p, Path::new("/home/a/w"), "go", budget(), unmetered(), None).await
+    }
+
+    async fn converse_with(
+        s: &mut Session,
+        p: &mut Fake,
+        interrupt: Option<i32>,
+        deadline_passed: bool,
+    ) -> (Ended<i32>, Closed) {
+        let interrupt = async move {
+            match interrupt {
+                Some(sig) => sig,
+                None => std::future::pending().await,
+            }
+        };
+        let deadline = move || async move {
+            if !deadline_passed {
+                std::future::pending::<()>().await;
+            }
+        };
+        s.converse(p, interrupt, deadline, &mut |_| {}).await
+    }
+
+    #[tokio::test]
+    async fn the_loop_opens_before_the_first_turn_and_seals_with_the_kernel_id() {
+        let mut p = fake(vec![answer("hi")]);
+        let mut s = opened(&mut p).await.unwrap();
+        assert_eq!(s.conversation(), KERNEL_ID);
+        let (ended, closed) = converse_with(&mut s, &mut p, None, false).await;
+        assert_eq!(
+            p.log,
+            vec![
+                "open /home/a/w".to_string(),
+                format!("prompt {KERNEL_ID}"),
+                format!("close {KERNEL_ID}"),
+            ]
+        );
+        assert_eq!(p.prompts, vec![(KERNEL_ID.to_string(), 1)]);
+        assert_eq!(
+            ended,
+            Ended::Ran(Outcome {
+                answer: Some("hi".into()),
+                stopped: None,
+                steps_used: 1,
+            })
+        );
+        let id = ConversationId::parse(KERNEL_ID).unwrap();
+        assert_eq!(closed, Closed::Closed(view(&id)));
+        assert_eq!(s.prompt("again"), Err(SessionClosed));
+    }
+
+    #[tokio::test]
+    async fn the_loop_closes_on_normal_exit_on_error_and_on_sigint() {
+        let close = format!("close {KERNEL_ID}");
+        let id = ConversationId::parse(KERNEL_ID).unwrap();
+
+        let mut p = fake(vec![answer("hi")]);
+        let mut s = opened(&mut p).await.unwrap();
+        let (ended, closed) = converse_with(&mut s, &mut p, None, false).await;
+        assert!(matches!(
+            ended,
+            Ended::Ran(Outcome {
+                answer: Some(_),
+                ..
+            })
+        ));
+        assert_eq!(closed, Closed::Closed(view(&id)));
+        assert_eq!(p.log.last(), Some(&close));
+
+        let mut p = Fake {
+            prompt_error: Some(PlaneError::Transport("reset".into())),
+            ..fake(vec![])
+        };
+        let mut s = opened(&mut p).await.unwrap();
+        let (ended, closed) = converse_with(&mut s, &mut p, None, false).await;
+        assert_eq!(
+            ended,
+            Ended::Ran(Outcome {
+                answer: None,
+                stopped: Some(StopReason::Transport("reset".into())),
+                steps_used: 0,
+            })
+        );
+        assert_eq!(closed, Closed::Closed(view(&id)));
+        assert_eq!(p.log.last(), Some(&close));
+
+        let mut p = Fake {
+            prompt_hangs: true,
+            ..fake(vec![])
+        };
+        let mut s = opened(&mut p).await.unwrap();
+        let (ended, closed) = converse_with(&mut s, &mut p, Some(2), false).await;
+        assert_eq!(ended, Ended::Interrupted(2));
+        assert_eq!(closed, Closed::Closed(view(&id)));
+        assert_eq!(
+            p.log,
+            vec![
+                "open /home/a/w".to_string(),
+                format!("prompt {KERNEL_ID}"),
+                close
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_open_stops_with_a_typed_error() {
+        let mut p = Fake {
+            refuse_open: true,
+            ..fake(vec![answer("never")])
+        };
+        assert_eq!(opened(&mut p).await.err(), Some(PlaneError::Refused));
+        assert_eq!(p.log, vec!["open /home/a/w".to_string()]);
+        assert!(p.prompts.is_empty());
+        assert_eq!(p.replies.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_or_overrun_close_is_reported_and_an_unopened_session_closes_nothing() {
+        let mut p = Fake {
+            close_error: Some(PlaneError::Refused),
+            ..fake(vec![answer("hi")])
+        };
+        let mut s = opened(&mut p).await.unwrap();
+        let (_, closed) = converse_with(&mut s, &mut p, None, false).await;
+        assert_eq!(closed, Closed::Failed(PlaneError::Refused));
+
+        let mut p = Fake {
+            close_hangs: true,
+            ..fake(vec![answer("hi")])
+        };
+        let mut s = opened(&mut p).await.unwrap();
+        let (_, closed) = converse_with(&mut s, &mut p, None, true).await;
+        assert_eq!(closed, Closed::TimedOut);
+        assert_eq!(p.log.last(), Some(&format!("close {KERNEL_ID}")));
+
+        let mut p = fake(vec![answer("hi")]);
+        let mut s = Session::new("c", "go", budget(), unmetered(), None);
+        let (ended, closed) = converse_with(&mut s, &mut p, None, true).await;
+        assert!(matches!(
+            ended,
+            Ended::Ran(Outcome {
+                answer: Some(_),
+                ..
+            })
+        ));
+        assert_eq!(closed, Closed::NotOpened);
+        assert_eq!(p.log, vec!["prompt c".to_string()]);
+    }
+
+    #[test]
+    fn converse_is_send() {
+        fn assert_send<T: Send>(_: T) {}
+        let mut s = Session::new("c", "q", budget(), unmetered(), None);
+        let mut p = fake(vec![]);
+        assert_send(s.converse(&mut p, async { 0 }, || async {}, &mut |_| {}));
     }
 }
