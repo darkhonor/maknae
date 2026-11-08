@@ -2750,7 +2750,7 @@ async fn end_session<S, E: AuditEmit + Send + Sync>(
         None,
         None,
         "deny",
-        ending_reason(&ending),
+        &ending_reason(&ending),
         ending_posture(&ending),
         au3_1,
     )
@@ -2811,7 +2811,7 @@ async fn emit_termination<E: AuditEmit + Send + Sync>(
         "terminate",
         None,
         ending_result(&ending),
-        ending_reason(&ending),
+        &ending_reason(&ending),
         ending_posture(&ending),
         &wctx.au3_1,
     );
@@ -2855,7 +2855,7 @@ async fn emit_connect_deny<E: AuditEmit + Send + Sync>(
         "connect",
         None,
         ending_result(ending),
-        ending_reason(ending),
+        &ending_reason(ending),
         ending_posture(ending),
         &wctx.au3_1,
     );
@@ -20317,8 +20317,15 @@ mod agent_listener_tests {
     }
 
     async fn ping(session: &mut Session) -> maknae_proto::RespResult {
+        ping_citing(session, None).await
+    }
+
+    async fn ping_citing(
+        session: &mut Session,
+        task: Option<maknae_proto::TaskId>,
+    ) -> maknae_proto::RespResult {
         let body = maknae_proto::encode_request(&maknae_proto::Request {
-            task: None,
+            task,
             protocol_version: PROTOCOL_VERSION,
             verb: Verb::Ping,
         })
@@ -20426,6 +20433,34 @@ mod agent_listener_tests {
         assert_eq!(
             connect(&fx).err(),
             Some(crate::authz::DenyCause::NotEnrolled)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_task_citation_names_the_cited_id() {
+        let fx = enrolling("agent-cites-unknown").await;
+        fx.write_agent("hobi", "hobi-svc", HOBI_UID, "user");
+        reload(&fx).await;
+        let unknown = maknae_proto::TaskId([0xab; 16]);
+        let mut session = connect(&fx).expect("hobi is admitted");
+        assert!(matches!(
+            ping_citing(&mut session, Some(unknown)).await,
+            maknae_proto::RespResult::Err(_)
+        ));
+        let want = format!("task-unknown:{unknown}");
+        assert_eq!(
+            pings(&session).last().unwrap(),
+            &("deny".to_string(), want.clone())
+        );
+        assert!(
+            session
+                .emit
+                .records()
+                .iter()
+                .filter(|r| r.outcome.reason.starts_with("task-"))
+                .all(|r| r.outcome.reason == want),
+            "{:?}",
+            session.emit.records()
         );
     }
 

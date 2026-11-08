@@ -22,7 +22,7 @@ pub enum DenyCause {
     NotEnrolled,
     HumanAccount,
     TaskOnClientChannel,
-    Task(TaskRefusal),
+    Task { refusal: TaskRefusal, cited: TaskId },
 }
 
 /// The fact source that could not answer, named in an infrastructure denial.
@@ -96,10 +96,15 @@ pub fn task_for(
     match (admission, agent) {
         (Admission::MaknaeGroupMember, _) => Err(DenyCause::TaskOnClientChannel),
         (Admission::EnrolledAgent, None) => Err(DenyCause::NotEnrolled),
-        (Admission::EnrolledAgent, Some(agent)) => store
-            .resolve(id, agent, uid)
-            .map(Some)
-            .map_err(DenyCause::Task),
+        (Admission::EnrolledAgent, Some(agent)) => {
+            store
+                .resolve(id, agent, uid)
+                .map(Some)
+                .map_err(|refusal| DenyCause::Task {
+                    refusal,
+                    cited: *id,
+                })
+        }
     }
 }
 
@@ -143,8 +148,8 @@ pub fn revalidate(
     }
 }
 
-pub fn cause_reason(c: &DenyCause) -> &'static str {
-    match c {
+pub fn cause_reason(c: &DenyCause) -> std::borrow::Cow<'static, str> {
+    let fixed = match c {
         DenyCause::NotMember => "not-member",
         DenyCause::Account(AccountState::Locked) => "account-locked",
         DenyCause::Account(AccountState::Expired) => "account-expired",
@@ -161,8 +166,11 @@ pub fn cause_reason(c: &DenyCause) -> &'static str {
         DenyCause::NotEnrolled => "not-enrolled",
         DenyCause::HumanAccount => "human-account",
         DenyCause::TaskOnClientChannel => "task-on-client-channel",
-        DenyCause::Task(r) => task_reason(r),
-    }
+        DenyCause::Task { refusal, cited } => {
+            return format!("{}:{cited}", task_reason(refusal)).into();
+        }
+    };
+    fixed.into()
 }
 
 fn task_reason(r: &TaskRefusal) -> &'static str {
@@ -190,7 +198,7 @@ pub fn cause_posture(c: &DenyCause) -> &'static str {
         | DenyCause::NotEnrolled
         | DenyCause::HumanAccount
         | DenyCause::TaskOnClientChannel
-        | DenyCause::Task(_) => "unauthorized",
+        | DenyCause::Task { .. } => "unauthorized",
     }
 }
 
@@ -211,12 +219,12 @@ pub fn admission_reason(a: &AccountFact) -> String {
     format!("admitted (account: {})", account_label(a))
 }
 
-pub fn ending_reason(e: &Ending) -> &'static str {
+pub fn ending_reason(e: &Ending) -> std::borrow::Cow<'static, str> {
     match e {
-        Ending::Disconnect => "disconnect",
-        Ending::Idle => "idle",
-        Ending::Lifetime => "lifetime",
-        Ending::LeafExpired => "leaf-expired",
+        Ending::Disconnect => "disconnect".into(),
+        Ending::Idle => "idle".into(),
+        Ending::Lifetime => "lifetime".into(),
+        Ending::LeafExpired => "leaf-expired".into(),
         Ending::Denied(c) => cause_reason(c),
     }
 }
@@ -971,7 +979,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                (cause_reason(&cause), cause_posture(&cause)),
+                (&*cause_reason(&cause), cause_posture(&cause)),
                 (reason, posture),
                 "{cause:?}"
             );
@@ -1182,7 +1190,10 @@ mod tests {
                 HOBI,
                 &store
             ),
-            Err(DenyCause::Task(TaskRefusal::Unknown))
+            Err(DenyCause::Task {
+                refusal: TaskRefusal::Unknown,
+                cited: unknown
+            })
         );
     }
 
@@ -1199,7 +1210,10 @@ mod tests {
                 HOBI,
                 &store
             ),
-            Err(DenyCause::Task(TaskRefusal::OtherAgent))
+            Err(DenyCause::Task {
+                refusal: TaskRefusal::OtherAgent,
+                cited: jins.task.task_id
+            })
         );
         assert_eq!(
             task_for(
@@ -1209,7 +1223,10 @@ mod tests {
                 JIN,
                 &store
             ),
-            Err(DenyCause::Task(TaskRefusal::OtherAgent))
+            Err(DenyCause::Task {
+                refusal: TaskRefusal::OtherAgent,
+                cited: hobis.task.task_id
+            })
         );
         let own = task_for(
             Admission::EnrolledAgent,
@@ -1330,23 +1347,40 @@ mod tests {
 
     #[test]
     fn each_agent_and_task_cause_has_its_audit_reason_and_posture() {
+        let cited = TaskId([0x0f; 16]);
+        let hex = "0f".repeat(16);
         for (cause, reason) in [
-            (DenyCause::AgentAccount, "agent-account"),
-            (DenyCause::NotEnrolled, "not-enrolled"),
-            (DenyCause::HumanAccount, "human-account"),
-            (DenyCause::TaskOnClientChannel, "task-on-client-channel"),
-            (DenyCause::Task(TaskRefusal::Unknown), "task-unknown"),
-            (DenyCause::Task(TaskRefusal::OtherAgent), "task-other-agent"),
+            (DenyCause::AgentAccount, "agent-account".to_string()),
+            (DenyCause::NotEnrolled, "not-enrolled".to_string()),
+            (DenyCause::HumanAccount, "human-account".to_string()),
+            (
+                DenyCause::TaskOnClientChannel,
+                "task-on-client-channel".to_string(),
+            ),
+            (
+                DenyCause::Task {
+                    refusal: TaskRefusal::Unknown,
+                    cited,
+                },
+                format!("task-unknown:{hex}"),
+            ),
+            (
+                DenyCause::Task {
+                    refusal: TaskRefusal::OtherAgent,
+                    cited,
+                },
+                format!("task-other-agent:{hex}"),
+            ),
         ] {
             assert_eq!(
-                (cause_reason(&cause), cause_posture(&cause)),
+                (cause_reason(&cause).into_owned(), cause_posture(&cause)),
                 (reason, "unauthorized"),
                 "{cause:?}"
             );
         }
         assert_eq!(
             (
-                ending_reason(&Ending::LeafExpired),
+                &*ending_reason(&Ending::LeafExpired),
                 ending_result(&Ending::LeafExpired),
                 ending_posture(&Ending::LeafExpired)
             ),
@@ -1407,7 +1441,7 @@ mod tests {
         ] {
             assert_eq!(
                 (
-                    ending_reason(&ending),
+                    &*ending_reason(&ending),
                     ending_result(&ending),
                     ending_posture(&ending)
                 ),

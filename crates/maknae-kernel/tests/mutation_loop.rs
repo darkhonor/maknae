@@ -179,7 +179,7 @@ async fn a_foreign_writer_during_the_report_read_ends_the_session_as_a_sender_mi
     );
     assert_eq!(
         (
-            maknae_kernel::ending_reason(&ending),
+            &*maknae_kernel::ending_reason(&ending),
             maknae_kernel::ending_result(&ending)
         ),
         ("sender-mismatch", "deny")
