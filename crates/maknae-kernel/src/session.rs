@@ -244,11 +244,8 @@ impl SessionRecord {
         }
     }
 
-    pub(crate) fn cite(&self, task: &maknae_proto::SignedTask) {
-        let _ = self.task.set((
-            task.task.task_id.to_string(),
-            maknae_proto::tasker_text(&task.task.tasker),
-        ));
+    pub(crate) fn cite(&self, task: &crate::handler::TaskStamp) {
+        let _ = self.task.set((task.id.to_string(), task.tasker.clone()));
     }
 
     /// Stamps the session's agent and, once resolved, its cited task on `rec`.

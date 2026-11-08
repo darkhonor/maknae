@@ -354,8 +354,24 @@ pub enum Stamp<'a> {
     Client,
     Agent {
         agent: &'a maknae_config::AgentId,
-        task: Option<&'a maknae_proto::SignedTask>,
+        task: Option<&'a TaskStamp>,
     },
+}
+
+/// The cited task's id and tasker, the only task facts a request is stamped with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskStamp {
+    pub id: maknae_proto::TaskId,
+    pub tasker: String,
+}
+
+impl TaskStamp {
+    pub fn of(task: &maknae_proto::TaskObject) -> Self {
+        Self {
+            id: task.task_id,
+            tasker: maknae_proto::tasker_text(&task.tasker),
+        }
+    }
 }
 
 /// Build the seam Request from the verb + kernel-verified peer uid. Subject
@@ -386,11 +402,11 @@ pub fn build_authz_request(
             if let Some(t) = task {
                 subject.insert(
                     maknae_security::SUBJECT_TASK,
-                    AttrValue::Str(t.task.task_id.to_string()),
+                    AttrValue::Str(t.id.to_string()),
                 );
                 subject.insert(
                     maknae_security::SUBJECT_TASKER,
-                    AttrValue::Str(maknae_proto::tasker_text(&t.task.tasker)),
+                    AttrValue::Str(t.tasker.clone()),
                 );
             }
             maknae_security::CHANNEL_AGENT
@@ -612,15 +628,7 @@ mod tests {
         assert_eq!(get(&bare, SUBJECT_AGENT), s("hobi"));
         assert_eq!(get(&bare, SUBJECT_TASK), None);
         assert_eq!(get(&bare, SUBJECT_TASKER), None);
-        let task = maknae_proto::SignedTask {
-            task: maknae_proto::TaskObject::for_test("hobi", 1002),
-            signature: maknae_proto::TaskSignature {
-                alg: "test".into(),
-                leaf: maknae_proto::Bytes::new(vec![1].into()),
-                chain: Vec::new(),
-                sig: maknae_proto::Bytes::new(vec![2].into()),
-            },
-        };
+        let task = TaskStamp::of(&maknae_proto::TaskObject::for_test("hobi", 1002));
         let tasked = build_authz_request(
             &Verb::Whoami,
             2001,
@@ -633,10 +641,7 @@ mod tests {
             },
         );
         assert_eq!(get(&tasked, SUBJECT_AGENT), s("hobi"));
-        assert_eq!(
-            get(&tasked, SUBJECT_TASK),
-            s(&task.task.task_id.to_string())
-        );
+        assert_eq!(get(&tasked, SUBJECT_TASK), s(&task.id.to_string()));
         assert_eq!(get(&tasked, SUBJECT_TASKER), s("uid:1002"));
     }
 

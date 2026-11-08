@@ -1071,14 +1071,15 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             return;
         }
     };
+    let task = task.map(|t| crate::handler::TaskStamp::of(&t.task));
     let stamp = match &session.channel {
         SessionChannel::Client => Stamp::Client,
         SessionChannel::Agent { agent, .. } => Stamp::Agent {
             agent,
-            task: task.as_deref(),
+            task: task.as_ref(),
         },
     };
-    if let Some(t) = task.as_deref() {
+    if let Some(t) = &task {
         session.cite(t);
     }
 

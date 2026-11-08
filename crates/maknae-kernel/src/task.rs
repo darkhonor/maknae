@@ -396,7 +396,8 @@ fn task_request(
     parent: Option<&SignedTask>,
     sub: &TaskSubmission,
 ) -> maknae_security::Request {
-    use crate::handler::{build_authz_request, Stamp};
+    use crate::handler::{build_authz_request, Stamp, TaskStamp};
+    let parent = parent.map(|p| TaskStamp::of(&p.task));
     use maknae_security::{AttrValue, Lane, RESOURCE_AGENT};
     let (uid, home, stamp) = match by {
         Submitter::User { uid, home } => (*uid, home, Stamp::Client),
@@ -407,7 +408,7 @@ fn task_request(
             home,
             Stamp::Agent {
                 agent,
-                task: parent,
+                task: parent.as_ref(),
             },
         ),
     };
