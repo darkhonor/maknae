@@ -103,6 +103,9 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         MsgId::EnrollAgentRemoved => {
             "Agent Daemon {agent} is removed: its enrollment is gone, its Vault entity is disabled, and {count} SecretID(s) were destroyed; its policy.yaml and directory are untouched"
         }
+        MsgId::EnrollAgentRoleAbsent => {
+            "Vault's role for agent {agent} is already absent, so its SecretIDs are gone with it; only the local sealed SecretID and state were removed"
+        }
         MsgId::HelperContextMismatch => {
             "Operator-context helper did not land in the expected identity"
         }

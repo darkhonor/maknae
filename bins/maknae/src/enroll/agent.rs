@@ -271,6 +271,7 @@ fn req_list(doc: &Value, key: &str, what: &str) -> Result<Vec<String>, EnrollErr
 
 pub(crate) trait AgentVaultOps {
     async fn read_role_id(&self, mount: &str, role: &str) -> Result<String, EnrollError>;
+    async fn find_role_id(&self, mount: &str, role: &str) -> Result<Option<String>, EnrollError>;
     async fn destroy(&self, mount: &str, role: &str, accessor: &str) -> Result<(), EnrollError>;
     async fn list_accessors(&self, mount: &str, role: &str) -> Result<Vec<String>, EnrollError>;
     fn write_state(&self, agent: &AgentId, state: &AgentState) -> Result<(), EnrollError>;
@@ -592,6 +593,10 @@ impl HasVault for RealVault {
 impl<T: HasVault> AgentVaultOps for T {
     async fn read_role_id(&self, mount: &str, role: &str) -> Result<String, EnrollError> {
         Ok(self.vault().client.read_role_id(mount, role).await?)
+    }
+
+    async fn find_role_id(&self, mount: &str, role: &str) -> Result<Option<String>, EnrollError> {
+        Ok(self.vault().client.find_role_id(mount, role).await?)
     }
 
     async fn destroy(&self, mount: &str, role: &str, accessor: &str) -> Result<(), EnrollError> {
@@ -1200,6 +1205,7 @@ pub(crate) mod tests {
         pub(crate) listed: RefCell<Vec<String>>,
         entity: RefCell<Option<Option<maknae_vault::EntityFacts>>>,
         pub(crate) scopes: RefCell<Vec<(String, String)>>,
+        pub(crate) present: RefCell<Option<Vec<String>>>,
     }
 
     impl Fake {
@@ -1243,6 +1249,21 @@ pub(crate) mod tests {
             self.scopes.borrow_mut().push((mount.into(), role.into()));
             self.log.borrow_mut().push("read_role_id".into());
             Ok(ROLE_ID.into())
+        }
+
+        async fn find_role_id(
+            &self,
+            mount: &str,
+            role: &str,
+        ) -> Result<Option<String>, EnrollError> {
+            self.scopes.borrow_mut().push((mount.into(), role.into()));
+            self.log.borrow_mut().push("read_role_id".into());
+            self.check("find_role_id")?;
+            Ok(if self.fail.borrow().contains("role_missing") {
+                None
+            } else {
+                Some(ROLE_ID.into())
+            })
         }
 
         async fn destroy(

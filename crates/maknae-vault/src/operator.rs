@@ -146,6 +146,19 @@ impl OperatorClient {
         Ok(resp.role_id)
     }
 
+    /// The RoleID of `role`; `None` when Vault has no such role.
+    pub async fn find_role_id(
+        &self,
+        mount: &str,
+        role: &str,
+    ) -> Result<Option<String>, VaultError> {
+        match vaultrs::auth::approle::role::read_id(&self.inner, mount, role).await {
+            Ok(resp) => Ok(Some(resp.role_id)),
+            Err(vaultrs::error::ClientError::APIError { code: 404, .. }) => Ok(None),
+            Err(e) => Err(VaultError::Operator(e.to_string())),
+        }
+    }
+
     /// Mint a new SecretID for `role`, returning `(secret, accessor)`. The secret is
     /// held in `Zeroizing` and MUST NOT be cloned into a bare `String` or logged; the
     /// accessor is non-secret and is what `destroy_accessor` needs to roll the

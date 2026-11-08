@@ -106,6 +106,9 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         MsgId::EnrollAgentRemoved => {
             "에이전트 데몬 {agent}을(를) 제거했어요. 등록 파일을 지웠고, Vault 엔티티를 비활성화했고, SecretID {count}개를 폐기했어요. policy.yaml과 디렉터리는 그대로 두었어요"
         }
+        MsgId::EnrollAgentRoleAbsent => {
+            "에이전트 {agent}의 Vault 역할이 이미 없어요. SecretID도 함께 사라졌으므로 이 호스트의 봉인된 SecretID와 상태만 지웠어요"
+        }
         MsgId::HelperContextMismatch => "운영자 컨텍스트 헬퍼가 예상된 신원으로 전환되지 않았어요",
         MsgId::HelperStillPrivileged => {
             "운영자 컨텍스트 헬퍼가 여전히 root의 그룹 소속을 갖고 있어요 — 거부해요"

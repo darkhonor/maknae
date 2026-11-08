@@ -198,6 +198,15 @@ async fn delete_item(service: &str, account: &str) -> Result<(), EnrollError> {
     }
 }
 
+pub(crate) fn agent_keychain_item(
+    agent: &maknae_vault::agent_enroll::AgentId,
+) -> (&'static str, String) {
+    (
+        maknae_vault::agent_enroll::AGENT_SIGNING_IDENTIFIER,
+        agent.as_str().to_string(),
+    )
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) async fn seal_agent_secret_macos(
     secret: &str,
@@ -208,11 +217,12 @@ pub(crate) async fn seal_agent_secret_macos(
     validate_secret_id(secret)?;
     check_install_path(std::path::Path::new(AGENT_BINARY))?;
     verify_release(AGENT_BINARY, AGENT_SIGNING_IDENTIFIER, team).await?;
-    delete_item(AGENT_SIGNING_IDENTIFIER, agent.as_str()).await?;
+    let (service, account) = agent_keychain_item(agent);
+    delete_item(service, &account).await?;
     add_verified_item(
         secret,
-        AGENT_SIGNING_IDENTIFIER,
-        agent.as_str(),
+        service,
+        &account,
         AGENT_BINARY,
         AGENT_SIGNING_IDENTIFIER,
         team,
@@ -224,11 +234,28 @@ pub(crate) async fn seal_agent_secret_macos(
 pub(crate) async fn delete_agent_secret_macos(
     agent: &maknae_vault::agent_enroll::AgentId,
 ) -> Result<(), EnrollError> {
-    delete_item(
-        maknae_vault::agent_enroll::AGENT_SIGNING_IDENTIFIER,
-        agent.as_str(),
+    let (service, account) = agent_keychain_item(agent);
+    delete_item(service, &account).await
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) async fn agent_secret_present_macos(
+    agent: &maknae_vault::agent_enroll::AgentId,
+) -> Result<bool, EnrollError> {
+    let (service, account) = agent_keychain_item(agent);
+    let out = run(
+        SECURITY,
+        &[
+            "find-generic-password",
+            "-a",
+            &account,
+            "-s",
+            service,
+            SYSTEM_KEYCHAIN,
+        ],
     )
-    .await
+    .await?;
+    Ok(out.status.success())
 }
 
 /// Adds the item without deleting a previous one: `add-generic-password`
@@ -812,6 +839,18 @@ mod tests {
                 ]
             );
         }
+    }
+
+    #[test]
+    fn seal_and_delete_share_one_agent_item() {
+        let id = maknae_vault::agent_enroll::AgentId::parse("hobi").unwrap();
+        assert_eq!(
+            agent_keychain_item(&id),
+            (
+                maknae_vault::agent_enroll::AGENT_SIGNING_IDENTIFIER,
+                "hobi".to_string()
+            )
+        );
     }
 
     #[test]

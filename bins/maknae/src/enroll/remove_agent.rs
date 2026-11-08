@@ -29,11 +29,41 @@ pub(crate) trait RemoveOps: AgentVaultOps {
     fn remove_enrollment(&self, agent: &AgentId) -> Result<(), EnrollError>;
     async fn remove_sealed_secret(&self, agent: &AgentId) -> Result<(), EnrollError>;
     fn remove_state(&self, agent: &AgentId) -> Result<(), EnrollError>;
+    async fn leftovers(&self, agent: &AgentId) -> Result<Vec<String>, EnrollError>;
+}
+
+pub(crate) fn resolve_mount(
+    agent: &AgentId,
+    record_mount: Option<&str>,
+    state_mount: &str,
+    host_mount: &str,
+) -> Result<String, EnrollError> {
+    let mount = match (record_mount, state_mount.is_empty()) {
+        (None, true) => {
+            return Err(EnrollError::State(format!(
+                "agent {} is not enrolled on this host",
+                agent.as_str()
+            )))
+        }
+        (Some(r), true) => r,
+        (Some(r), false) if r != state_mount => {
+            return Err(EnrollError::State(format!(
+                "agent {}: enrollment.yaml names mount {r} but the state file names {state_mount}; resolve the difference by hand",
+                agent.as_str()
+            )))
+        }
+        (_, false) => state_mount,
+    };
+    if mount == host_mount {
+        return Err(EnrollError::AgentMountIsDaemons(mount.to_string()));
+    }
+    Ok(mount.to_string())
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct RemoveOutcome {
     pub destroyed: usize,
+    pub role_absent: bool,
 }
 
 pub(crate) async fn remove_agent<O: RemoveOps>(
@@ -54,14 +84,18 @@ pub(crate) async fn remove_agent<O: RemoveOps>(
             .chain(&state.pending)
             .chain(&state.retiring),
     );
-    let role_id = ops.read_role_id(mount, &role).await?;
+    let Some(role_id) = ops.find_role_id(mount, &role).await? else {
+        ops.remove_sealed_secret(agent).await?;
+        ops.remove_state(agent)?;
+        return Ok(RemoveOutcome {
+            destroyed: 0,
+            role_absent: true,
+        });
+    };
     match ops.entity(&entity).await? {
         Some(facts) if has_alias_on(&facts, mount, &role_id) => {}
         _ => {
-            let mut remains = vec![
-                "the sealed SecretID".to_string(),
-                "the enroll state file".to_string(),
-            ];
+            let mut remains = ops.leftovers(agent).await?;
             if !recorded.is_empty() {
                 remains.push(format!("SecretID accessors {}", recorded.join(", ")));
             }
@@ -108,13 +142,18 @@ pub(crate) async fn remove_agent<O: RemoveOps>(
     ops.remove_state(agent)?;
     Ok(RemoveOutcome {
         destroyed: all.len(),
+        role_absent: false,
     })
 }
 
 fn summary(locale: Locale, agent: &AgentId, out: &RemoveOutcome) -> String {
-    let mut text = msg(locale, MsgId::EnrollAgentRemoved)
-        .replace("{agent}", agent.as_str())
-        .replace("{count}", &out.destroyed.to_string());
+    let mut text = if out.role_absent {
+        msg(locale, MsgId::EnrollAgentRoleAbsent).replace("{agent}", agent.as_str())
+    } else {
+        msg(locale, MsgId::EnrollAgentRemoved)
+            .replace("{agent}", agent.as_str())
+            .replace("{count}", &out.destroyed.to_string())
+    };
     text.push('\n');
     text.push_str(&msg(locale, MsgId::EnrollAgentReload).replace("{command}", RELOAD_COMMAND));
     text
@@ -129,6 +168,27 @@ pub(crate) fn remove_enrollment_file(
         .remove(&rel, None)
         .map(|_| ())
         .map_err(|e| io_error(&Path::new(AGENTS_DIR).join(&rel), e))
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn sealed_secret_present(
+    private: &maknae_io::Anchor,
+    agent: &AgentId,
+) -> Result<bool, EnrollError> {
+    let path = super::agent::cred_path(agent);
+    let leaf = path.file_name().map(PathBuf::from).unwrap_or_default();
+    private
+        .entry_identity(leaf.as_os_str())
+        .map(|i| i.is_some())
+        .map_err(|e| io_error(&path, e))
+}
+
+#[cfg(target_os = "macos")]
+async fn sealed_secret_present(
+    _private: &maknae_io::Anchor,
+    agent: &AgentId,
+) -> Result<bool, EnrollError> {
+    super::keychain_write::agent_secret_present_macos(agent).await
 }
 
 struct RealRemoveOps {
@@ -161,6 +221,23 @@ impl RemoveOps for RealRemoveOps {
     #[cfg(target_os = "macos")]
     async fn remove_sealed_secret(&self, agent: &AgentId) -> Result<(), EnrollError> {
         super::keychain_write::delete_agent_secret_macos(agent).await
+    }
+
+    async fn leftovers(&self, agent: &AgentId) -> Result<Vec<String>, EnrollError> {
+        let mut out = Vec::new();
+        if sealed_secret_present(&self.vault.private, agent).await? {
+            out.push("the sealed SecretID".to_string());
+        }
+        let state = super::agent::state_file(agent);
+        let present = self
+            .vault
+            .private
+            .entry_identity(std::ffi::OsStr::new(&state))
+            .map_err(|e| io_error(&super::agent::state_path(agent), e))?;
+        if present.is_some() {
+            out.push("the enroll state file".to_string());
+        }
+        Ok(out)
     }
 
     fn remove_state(&self, agent: &AgentId) -> Result<(), EnrollError> {
@@ -198,28 +275,13 @@ pub(crate) async fn run_remove_agent(
 
     let (record, _) = read_records(&agents, &agent)?;
     let mut state = read_state(&private, &agent)?;
-    let mount = match (&record, state.approle_mount.is_empty()) {
-        (None, true) => {
-            return Err(EnrollError::State(format!(
-                "agent {} is not enrolled on this host",
-                agent.as_str()
-            )))
-        }
-        (Some(r), true) => r.approle_mount.clone(),
-        (Some(r), false) if r.approle_mount != state.approle_mount => {
-            return Err(EnrollError::State(format!(
-                "agent {}: enrollment.yaml names mount {} but the state file names {}; resolve the difference by hand",
-                agent.as_str(),
-                r.approle_mount,
-                state.approle_mount
-            )))
-        }
-        (_, false) => state.approle_mount.clone(),
-    };
+    let mount = resolve_mount(
+        &agent,
+        record.as_ref().map(|r| r.approle_mount.as_str()),
+        &state.approle_mount,
+        &host.approle_mount,
+    )?;
     check_mount("the agent's AppRole mount", &mount)?;
-    if mount == host.approle_mount {
-        return Err(EnrollError::AgentMountIsDaemons(mount));
-    }
     state.approle_mount = mount;
     state.role = agent.role_name();
 
@@ -259,6 +321,14 @@ mod tests {
         fn remove_state(&self, _agent: &AgentId) -> Result<(), EnrollError> {
             self.log.borrow_mut().push("remove_state".into());
             self.check("remove_state")
+        }
+
+        async fn leftovers(&self, _agent: &AgentId) -> Result<Vec<String>, EnrollError> {
+            Ok(self
+                .present
+                .borrow()
+                .clone()
+                .unwrap_or_else(|| strings(&["the sealed SecretID", "the enroll state file"])))
         }
     }
 
@@ -300,7 +370,13 @@ mod tests {
             ])
         );
         assert_eq!(fake.states(), vec![state(&[], &[], &["a", "p", "r", "l"])]);
-        assert_eq!(out, RemoveOutcome { destroyed: 4 });
+        assert_eq!(
+            out,
+            RemoveOutcome {
+                destroyed: 4,
+                role_absent: false
+            }
+        );
     }
 
     #[tokio::test]
@@ -316,7 +392,6 @@ mod tests {
             assert_eq!(role, ROLE);
         }
         for line in fake.log() {
-            assert!(!line.contains("maknae-approle"), "{line}");
             assert!(!line.contains("lease"), "{line}");
             if line.starts_with("entity ") || line.starts_with("set_entity_disabled ") {
                 assert!(line.contains("maknae-agent-hobi"), "{line}");
@@ -400,10 +475,117 @@ mod tests {
 
     #[test]
     fn remove_agent_tells_the_operator_to_reload() {
-        let out = summary(Locale::EnUs, &hobi(), &RemoveOutcome { destroyed: 2 });
+        let out = summary(
+            Locale::EnUs,
+            &hobi(),
+            &RemoveOutcome {
+                destroyed: 2,
+                role_absent: false,
+            },
+        );
         assert!(out.contains(RELOAD_COMMAND), "{out}");
         assert!(out.contains("hobi") && out.contains('2'), "{out}");
         assert!(out.contains("policy.yaml"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn a_missing_role_completes_locally_and_skips_vault() {
+        let fake = Fake::failing(&["role_missing"]);
+        let out = remove_agent(&fake, &hobi(), state(&["a"], &["p"], &[]))
+            .await
+            .unwrap();
+        assert_eq!(
+            fake.log(),
+            strings(&[
+                "remove_enrollment",
+                "read_role_id",
+                "remove_sealed_secret",
+                "remove_state",
+            ])
+        );
+        assert_eq!(
+            out,
+            RemoveOutcome {
+                destroyed: 0,
+                role_absent: true
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_role_read_error_that_is_not_a_404_refuses() {
+        let fake = Fake::failing(&["find_role_id"]);
+        remove_agent(&fake, &hobi(), state(&["a"], &[], &[]))
+            .await
+            .unwrap_err();
+        assert_eq!(fake.log(), strings(&["remove_enrollment", "read_role_id"]));
+    }
+
+    #[tokio::test]
+    async fn a_present_role_with_a_missing_entity_still_refuses() {
+        let fake = Fake::default().with_entity(None);
+        let e = remove_agent(&fake, &hobi(), state(&["a"], &[], &[]))
+            .await
+            .unwrap_err();
+        assert!(matches!(e, EnrollError::AgentEntityMissing { .. }), "{e:?}");
+        assert!(!fake.log().contains(&"remove_sealed_secret".to_string()));
+    }
+
+    #[tokio::test]
+    async fn remains_names_only_what_exists() {
+        let fake = Fake::default().with_entity(None);
+        *fake.present.borrow_mut() = Some(Vec::new());
+        let e = remove_agent(&fake, &hobi(), state(&[], &[], &[]))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&e, EnrollError::AgentEntityMissing { remains, .. } if remains.is_empty()),
+            "{e:?}"
+        );
+        let fake = Fake::default().with_entity(None);
+        *fake.present.borrow_mut() = Some(strings(&["the enroll state file"]));
+        let e = remove_agent(&fake, &hobi(), state(&["a"], &[], &[]))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&e, EnrollError::AgentEntityMissing { remains, .. }
+                if *remains == strings(&["the enroll state file", "SecretID accessors a"])),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn an_absent_role_is_reported_in_the_summary() {
+        let out = summary(
+            Locale::EnUs,
+            &hobi(),
+            &RemoveOutcome {
+                destroyed: 0,
+                role_absent: true,
+            },
+        );
+        assert!(out.contains("already absent"), "{out}");
+        assert!(out.contains(RELOAD_COMMAND), "{out}");
+    }
+
+    #[test]
+    fn resolve_mount_branches() {
+        let a = hobi();
+        let r = |rec, st, host| resolve_mount(&a, rec, st, host);
+        assert_eq!(r(Some("m"), "", "d").unwrap(), "m");
+        assert_eq!(r(None, "m", "d").unwrap(), "m");
+        assert_eq!(r(Some("m"), "m", "d").unwrap(), "m");
+        let e = r(None, "", "d").unwrap_err();
+        assert!(e.to_string().contains("not enrolled"), "{e}");
+        let e = r(Some("m1"), "m2", "d").unwrap_err();
+        assert!(
+            e.to_string().contains("m1") && e.to_string().contains("m2"),
+            "{e}"
+        );
+        let e = r(Some("d"), "", "d").unwrap_err();
+        assert!(matches!(e, EnrollError::AgentMountIsDaemons(m) if m == "d"));
+        let e = r(None, "d", "d").unwrap_err();
+        assert!(matches!(e, EnrollError::AgentMountIsDaemons(_)));
     }
 
     fn scratch(tag: &str) -> PathBuf {
