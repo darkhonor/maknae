@@ -785,6 +785,10 @@ path = "bins/maknae/src/enroll/agent.rs"
 why = "#168: maknae enroll agent's orchestration behind the AgentOps seam; the rotation order, the rollback naming of an orphaned accessor, the no-leak property of the SecretID, the state and record YAML round trips and the host-config parse carry real unit tests against a recording fake; the decisions are T1 in maknae-vault/src/agent_enroll.rs"
 
 [[t3]]
+path = "bins/maknae/src/enroll/remove_agent.rs"
+why = "#609: maknae enroll remove-agent's orchestration behind the RemoveOps seam; the step order, the refusal that names what remains, the retained accessor after a failed destroy and the policy.yaml-untouched property carry real unit tests against the recording fake from agent.rs"
+
+[[t3]]
 path = "bins/maknae/src/enroll/helper.rs"
 why = "the operator-context helper — self-verification and the CLI configuration write; the id-G parser and the identity refusal carry real unit tests, the write runs through artifact_write's tested writer"
 

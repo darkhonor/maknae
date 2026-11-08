@@ -60,8 +60,8 @@ The Rust plane-cert client (`maknae-vault`) and the TLS transport consume this P
 - **`maknae-admin-agent-credentials` policy** — what an administrator attaches to their own
   token to write agent credentials; it reaches nothing outside `<agent_prefix>`.
 - **`maknae-enroll-agent` policy** — what an operator attaches to their own token to run
-  `maknae enroll agent`: read a role's RoleID, mint its SecretID, destroy a SecretID accessor,
-  on the agent mount only.
+  `maknae enroll agent` and `maknae enroll remove-agent`: read a role's RoleID, mint its
+  SecretID, destroy a SecretID accessor, on the agent mount only.
 
 ## Requirements
 

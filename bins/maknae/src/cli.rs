@@ -1334,7 +1334,7 @@ mod tests {
                     assert!(!a.rotate);
                     assert_eq!(a.token_file, None);
                 }
-                None => panic!("expected the agent subcommand"),
+                Some(EnrollSub::RemoveAgent(_)) | None => panic!("expected the agent subcommand"),
             },
             other => panic!("expected Command::Enroll, got {other:?}"),
         }

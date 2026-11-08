@@ -23,6 +23,7 @@ pub mod artifact_write;
 mod helper;
 #[cfg(any(target_os = "macos", test))]
 mod keychain_write;
+mod remove_agent;
 pub mod vault_ops;
 
 use crate::stderr::errln;
@@ -194,6 +195,11 @@ pub enum EnrollError {
         agent: String,
         entity: String,
         mount: String,
+        remains: Vec<String>,
+    },
+    AgentRemoveRetireFailed {
+        agent: String,
+        accessors: Vec<String>,
     },
 }
 
@@ -361,9 +367,25 @@ impl std::fmt::Display for EnrollError {
                 agent,
                 entity,
                 mount,
-            } => write!(
+                remains,
+            } if remains.is_empty() => write!(
                 f,
                 "Vault has no entity {entity} with an alias on auth/{mount}/; add {agent} to maknae_agents in deploy/vault-pki and run `terraform apply`, then run enroll again"
+            ),
+            EnrollError::AgentEntityMissing {
+                agent,
+                entity,
+                mount,
+                remains,
+            } => write!(
+                f,
+                "agent {agent} is no longer loaded by maknaed after its next reload, but Vault has no entity {entity} with an alias on auth/{mount}/, so nothing in Vault was disabled or destroyed; still in place: {}. Restore the entity in deploy/vault-pki with `terraform apply` and run remove-agent again, or clean Vault by hand",
+                remains.join("; ")
+            ),
+            EnrollError::AgentRemoveRetireFailed { agent, accessors } => write!(
+                f,
+                "agent {agent} is de-enrolled and its Vault entity is disabled, but these SecretID accessors could not be destroyed: {}; they stay recorded with the sealed SecretID, and running `maknae enroll remove-agent {agent}` again retries them",
+                accessors.join(", ")
             ),
         }
     }
@@ -563,6 +585,8 @@ impl EnrollArgs {
 pub enum EnrollSub {
     /// Enroll an Agent Daemon: seal its own AppRole SecretID, bound to the given addresses.
     Agent(agent::AgentArgs),
+    /// De-enroll an Agent Daemon: drop its enrollment, disable its entity, destroy its SecretIDs.
+    RemoveAgent(remove_agent::RemoveAgentArgs),
 }
 
 /// Identity/verbosity args shared by every `enroll-helper` verb.
@@ -1941,8 +1965,14 @@ pub async fn run_enroll(args: EnrollArgs) -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
-    if let Some(EnrollSub::Agent(a)) = &args.sub {
-        return report(agent::run_enroll_agent(a, locale).await, locale);
+    match &args.sub {
+        Some(EnrollSub::Agent(a)) => {
+            return report(agent::run_enroll_agent(a, locale).await, locale)
+        }
+        Some(EnrollSub::RemoveAgent(a)) => {
+            return report(remove_agent::run_remove_agent(a, locale).await, locale)
+        }
+        None => {}
     }
     println!("{}", msg(locale, MsgId::EnrollStarted));
     report(enroll_inner(&args, locale).await, locale)

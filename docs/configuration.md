@@ -861,14 +861,21 @@ Re-enabling an entity makes the tokens issued before it was disabled usable agai
 
 **Rotating.** `sudo maknae enroll agent <id> --account <service-account> --bind-cidr <cidr>… --rotate` takes the same `--account` and mount as the enrollment, and `--bind-cidr` again. It mints and seals the new SecretID before destroying the old one, and an accessor stays recorded in the state file until its destroy succeeds. Every enrollment, first or rotating, also lists the role's SecretID accessors in Vault after sealing and retires each one except the new SecretID's, so a SecretID that an interrupted earlier run minted but never recorded is destroyed too. That includes a SecretID another host holds for the same id, which is why an agent id is enrolled on one host only. A different account or mount means de-enrolling first.
 
-**De-enrolling.** Until de-enrollment ships (#472), do it by hand. List the role's SecretID accessors with an operator token that carries the policy, and destroy each one:
+**De-enrolling.**
 
 ```bash
-vault list auth/<mount>/role/agent-<id>/secret-id
-vault write auth/<mount>/role/agent-<id>/secret-id-accessor/destroy secret_id_accessor=<a>
+sudo maknae enroll remove-agent <id> [--token-file <file>] [--verbose]
 ```
 
-Then remove that state file, `/etc/maknae/agents/<id>/enrollment.yaml` and the sealed credential: on Linux the `.cred` file, on macOS `security delete-generic-password -s io.maknae.maknae-agentd -a <id> /Library/Keychains/System.keychain`.
+It takes the same operator token as enrollment (`--token-file` or a no-echo prompt, never an argument) and runs in this order:
+
+1. It removes `/etc/maknae/agents/<id>/enrollment.yaml`, so the next reload of `maknaed` drops the agent whatever Vault does.
+2. It reads the Vault entity `maknae-agent-<id>`. When the entity is absent or has no alias on the agent mount named by the role's RoleID, it stops before touching Vault and names what remains: the sealed SecretID, the state file and the recorded accessors. Restore the entity and run it again, or clean Vault by hand.
+3. It disables the entity.
+4. It destroys every SecretID accessor of `agent-<id>` that the state file records or Vault lists. An accessor whose destroy fails stays recorded, the command exits non-zero, and running it again retries.
+5. When no accessor remains, it removes the sealed SecretID (the `.cred` file on Linux, the keychain item on macOS) and the state file.
+
+It ends by telling you to reload `maknaed`. The agent's `policy.yaml` and its directory are left in place, and the entity stays disabled. Disabling does not revoke tokens already issued; they work until they reach `agent_token_max_ttl`.
 
 ### 6.5 The `deployment` section
 

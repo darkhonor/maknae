@@ -102,6 +102,10 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         MsgId::EnrollAgentReload => {
             "maknaed가 실행 중이라면 다시 불러와서 이 등록을 반영하세요: {command}"
         }
+        MsgId::EnrollAgentRemoveStarted => "에이전트 데몬 {agent}을(를) 제거하고 있어요",
+        MsgId::EnrollAgentRemoved => {
+            "에이전트 데몬 {agent}을(를) 제거했어요. 등록 파일을 지웠고, Vault 엔티티를 비활성화했고, SecretID {count}개를 폐기했어요. policy.yaml과 디렉터리는 그대로 두었어요"
+        }
         MsgId::HelperContextMismatch => "운영자 컨텍스트 헬퍼가 예상된 신원으로 전환되지 않았어요",
         MsgId::HelperStillPrivileged => {
             "운영자 컨텍스트 헬퍼가 여전히 root의 그룹 소속을 갖고 있어요 — 거부해요"

@@ -220,6 +220,17 @@ pub(crate) async fn seal_agent_secret_macos(
     .await
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) async fn delete_agent_secret_macos(
+    agent: &maknae_vault::agent_enroll::AgentId,
+) -> Result<(), EnrollError> {
+    delete_item(
+        maknae_vault::agent_enroll::AGENT_SIGNING_IDENTIFIER,
+        agent.as_str(),
+    )
+    .await
+}
+
 /// Adds the item without deleting a previous one: `add-generic-password`
 /// without `-U` fails on an existing item rather than replacing it.
 #[cfg(target_os = "macos")]

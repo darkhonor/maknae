@@ -99,6 +99,10 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         MsgId::EnrollAgentReload => {
             "If maknaed is running, reload it so it sees this enrollment: {command}"
         }
+        MsgId::EnrollAgentRemoveStarted => "Removing the Agent Daemon {agent}",
+        MsgId::EnrollAgentRemoved => {
+            "Agent Daemon {agent} is removed: its enrollment is gone, its Vault entity is disabled, and {count} SecretID(s) were destroyed; its policy.yaml and directory are untouched"
+        }
         MsgId::HelperContextMismatch => {
             "Operator-context helper did not land in the expected identity"
         }

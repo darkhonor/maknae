@@ -55,19 +55,19 @@ pub struct AgentArgs {
     pub verbose: bool,
 }
 
-const PRIVATE_DIR: &str = "/etc/maknae/private";
+pub(crate) const PRIVATE_DIR: &str = "/etc/maknae/private";
 const ETC_DIR: &str = "/etc/maknae";
 const AGENTS_ENTRY: &str = "agents";
-const AGENTS_DIR: &str = "/etc/maknae/agents";
+pub(crate) const AGENTS_DIR: &str = "/etc/maknae/agents";
 const HOST_CONFIG: &str = "/etc/maknae/maknae.yaml";
-const VAULT_CA: &str = "/etc/maknae/tls/vault-ca.crt";
+pub(crate) const VAULT_CA: &str = "/etc/maknae/tls/vault-ca.crt";
 #[cfg(target_os = "macos")]
-const RELOAD_COMMAND: &str = "sudo launchctl kill SIGHUP system/io.maknae.maknaed";
+pub(crate) const RELOAD_COMMAND: &str = "sudo launchctl kill SIGHUP system/io.maknae.maknaed";
 #[cfg(not(target_os = "macos"))]
-const RELOAD_COMMAND: &str = "sudo systemctl reload maknaed";
+pub(crate) const RELOAD_COMMAND: &str = "sudo systemctl reload maknaed";
 const SMALL_FILE: u64 = 64 * 1024;
 
-fn state_file(agent: &AgentId) -> String {
+pub(crate) fn state_file(agent: &AgentId) -> String {
     format!("agent-{}-enroll-state.yaml", agent.as_str())
 }
 
@@ -269,32 +269,35 @@ fn req_list(doc: &Value, key: &str, what: &str) -> Result<Vec<String>, EnrollErr
     }
 }
 
-pub(crate) trait AgentOps {
+pub(crate) trait AgentVaultOps {
     async fn read_role_id(&self, mount: &str, role: &str) -> Result<String, EnrollError>;
+    async fn destroy(&self, mount: &str, role: &str, accessor: &str) -> Result<(), EnrollError>;
+    async fn list_accessors(&self, mount: &str, role: &str) -> Result<Vec<String>, EnrollError>;
+    fn write_state(&self, agent: &AgentId, state: &AgentState) -> Result<(), EnrollError>;
+    async fn entity(&self, name: &str) -> Result<Option<maknae_vault::EntityFacts>, EnrollError>;
+    async fn set_entity_disabled(&self, name: &str, disabled: bool) -> Result<(), EnrollError>;
+}
+
+pub(crate) trait AgentOps: AgentVaultOps {
     async fn mint(
         &self,
         mount: &str,
         role: &str,
         cidrs: &BindCidrs,
     ) -> Result<(Zeroizing<String>, String), EnrollError>;
-    async fn destroy(&self, mount: &str, role: &str, accessor: &str) -> Result<(), EnrollError>;
-    async fn list_accessors(&self, mount: &str, role: &str) -> Result<Vec<String>, EnrollError>;
     async fn seal(
         &self,
         agent: &AgentId,
         secret: &Zeroizing<String>,
     ) -> Result<SecretSource, EnrollError>;
-    fn write_state(&self, agent: &AgentId, state: &AgentState) -> Result<(), EnrollError>;
-    async fn entity(&self, name: &str) -> Result<Option<maknae_vault::EntityFacts>, EnrollError>;
-    async fn set_entity_disabled(&self, name: &str, disabled: bool) -> Result<(), EnrollError>;
     fn write_record(&self, record: &AgentRecord) -> Result<(), EnrollError>;
 }
 
-fn entity_name(agent: &AgentId) -> String {
+pub(crate) fn entity_name(agent: &AgentId) -> String {
     format!("maknae-agent-{}", agent.as_str())
 }
 
-fn has_alias_on(entity: &maknae_vault::EntityFacts, mount: &str, role_id: &str) -> bool {
+pub(crate) fn has_alias_on(entity: &maknae_vault::EntityFacts, mount: &str, role_id: &str) -> bool {
     let want = format!("auth/{}", mount.trim_matches('/'));
     entity
         .aliases
@@ -366,6 +369,7 @@ pub(crate) async fn enroll_agent<O: AgentOps>(
                 agent: id.to_string(),
                 entity,
                 mount: plan.mount.clone(),
+                remains: Vec::new(),
             })
         }
     };
@@ -464,7 +468,7 @@ pub(crate) async fn enroll_agent<O: AgentOps>(
     Ok(AgentOutcome { record, retired })
 }
 
-fn dedup<'a>(items: impl Iterator<Item = &'a String>) -> Vec<String> {
+pub(crate) fn dedup<'a>(items: impl Iterator<Item = &'a String>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for i in items {
         if !out.contains(i) {
@@ -474,14 +478,14 @@ fn dedup<'a>(items: impl Iterator<Item = &'a String>) -> Vec<String> {
     out
 }
 
-fn io_error(path: &Path, e: IoError) -> EnrollError {
+pub(crate) fn io_error(path: &Path, e: IoError) -> EnrollError {
     EnrollError::Io {
         path: path.to_path_buf(),
         source: e.to_string(),
     }
 }
 
-fn is_not_found(e: &IoError) -> bool {
+pub(crate) fn is_not_found(e: &IoError) -> bool {
     matches!(
         e,
         IoError::Io {
@@ -570,9 +574,71 @@ fn scrub_secret(e: EnrollError, secret: &Zeroizing<String>) -> EnrollError {
     }
 }
 
+pub(crate) struct RealVault {
+    pub(crate) client: maknae_vault::OperatorClient,
+    pub(crate) private: maknae_io::Anchor,
+}
+
+pub(crate) trait HasVault {
+    fn vault(&self) -> &RealVault;
+}
+
+impl HasVault for RealVault {
+    fn vault(&self) -> &RealVault {
+        self
+    }
+}
+
+impl<T: HasVault> AgentVaultOps for T {
+    async fn read_role_id(&self, mount: &str, role: &str) -> Result<String, EnrollError> {
+        Ok(self.vault().client.read_role_id(mount, role).await?)
+    }
+
+    async fn destroy(&self, mount: &str, role: &str, accessor: &str) -> Result<(), EnrollError> {
+        Ok(self
+            .vault()
+            .client
+            .destroy_accessor_if_present(mount, role, accessor)
+            .await?)
+    }
+
+    async fn list_accessors(&self, mount: &str, role: &str) -> Result<Vec<String>, EnrollError> {
+        Ok(self
+            .vault()
+            .client
+            .list_secret_id_accessors(mount, role)
+            .await?)
+    }
+
+    fn write_state(&self, agent: &AgentId, state: &AgentState) -> Result<(), EnrollError> {
+        self.vault()
+            .private
+            .publish_owned(
+                Path::new(&state_file(agent)),
+                None,
+                state.to_yaml().as_bytes(),
+                Mode(0o600),
+                FileOwner { uid: 0, gid: 0 },
+            )
+            .map(|_| ())
+            .map_err(|e| io_error(&state_path(agent), e))
+    }
+
+    async fn entity(&self, name: &str) -> Result<Option<maknae_vault::EntityFacts>, EnrollError> {
+        Ok(self.vault().client.entity(name).await?)
+    }
+
+    async fn set_entity_disabled(&self, name: &str, disabled: bool) -> Result<(), EnrollError> {
+        Ok(self
+            .vault()
+            .client
+            .set_entity_disabled(name, disabled)
+            .await?)
+    }
+}
+
 struct RealAgentOps {
-    client: maknae_vault::OperatorClient,
-    private: maknae_io::Anchor,
+    vault: RealVault,
     agents: maknae_io::Anchor,
     daemon_gid: u32,
     resolver: artifact_write::RealOwnerResolver,
@@ -580,6 +646,12 @@ struct RealAgentOps {
     verbose: bool,
     #[cfg(target_os = "macos")]
     team: String,
+}
+
+impl HasVault for RealAgentOps {
+    fn vault(&self) -> &RealVault {
+        &self.vault
+    }
 }
 
 impl RealAgentOps {
@@ -619,28 +691,17 @@ impl RealAgentOps {
 }
 
 impl AgentOps for RealAgentOps {
-    async fn read_role_id(&self, mount: &str, role: &str) -> Result<String, EnrollError> {
-        Ok(self.client.read_role_id(mount, role).await?)
-    }
-
     async fn mint(
         &self,
         mount: &str,
         role: &str,
         cidrs: &BindCidrs,
     ) -> Result<(Zeroizing<String>, String), EnrollError> {
-        Ok(self.client.mint_bound_secret_id(mount, role, cidrs).await?)
-    }
-
-    async fn destroy(&self, mount: &str, role: &str, accessor: &str) -> Result<(), EnrollError> {
         Ok(self
+            .vault
             .client
-            .destroy_accessor_if_present(mount, role, accessor)
+            .mint_bound_secret_id(mount, role, cidrs)
             .await?)
-    }
-
-    async fn list_accessors(&self, mount: &str, role: &str) -> Result<Vec<String>, EnrollError> {
-        Ok(self.client.list_secret_id_accessors(mount, role).await?)
     }
 
     async fn seal(
@@ -651,27 +712,6 @@ impl AgentOps for RealAgentOps {
         self.seal_platform(agent, secret.as_str())
             .await
             .map_err(|e| scrub_secret(e, secret))
-    }
-
-    fn write_state(&self, agent: &AgentId, state: &AgentState) -> Result<(), EnrollError> {
-        self.private
-            .publish_owned(
-                Path::new(&state_file(agent)),
-                None,
-                state.to_yaml().as_bytes(),
-                Mode(0o600),
-                FileOwner { uid: 0, gid: 0 },
-            )
-            .map(|_| ())
-            .map_err(|e| io_error(&state_path(agent), e))
-    }
-
-    async fn entity(&self, name: &str) -> Result<Option<maknae_vault::EntityFacts>, EnrollError> {
-        Ok(self.client.entity(name).await?)
-    }
-
-    async fn set_entity_disabled(&self, name: &str, disabled: bool) -> Result<(), EnrollError> {
-        Ok(self.client.set_entity_disabled(name, disabled).await?)
     }
 
     fn write_record(&self, record: &AgentRecord) -> Result<(), EnrollError> {
@@ -724,7 +764,7 @@ impl OwnerResolver for RootOnly {
 
 type OtherAgent = (String, u32);
 
-fn read_records(
+pub(crate) fn read_records(
     agents: &maknae_io::Anchor,
     agent: &AgentId,
 ) -> Result<(Option<AgentRecord>, Vec<OtherAgent>), EnrollError> {
@@ -766,7 +806,10 @@ fn read_records(
     Ok((prior, others))
 }
 
-fn read_state(private: &maknae_io::Anchor, agent: &AgentId) -> Result<AgentState, EnrollError> {
+pub(crate) fn read_state(
+    private: &maknae_io::Anchor,
+    agent: &AgentId,
+) -> Result<AgentState, EnrollError> {
     let path = state_path(agent);
     match private.read(
         Path::new(&state_file(agent)),
@@ -885,7 +928,7 @@ fn check_account(
     )
 }
 
-fn read_host() -> Result<HostEnrollment, EnrollError> {
+pub(crate) fn read_host() -> Result<HostEnrollment, EnrollError> {
     let path = Path::new(HOST_CONFIG);
     let out = maknae_io::read_absolute(
         path,
@@ -908,7 +951,7 @@ fn read_host() -> Result<HostEnrollment, EnrollError> {
     parse_host_enrollment(&utf8(path, &out.value)?)
 }
 
-fn check_mount(what: &str, mount: &str) -> Result<(), EnrollError> {
+pub(crate) fn check_mount(what: &str, mount: &str) -> Result<(), EnrollError> {
     maknae_config::mount_path_is_acceptable(mount)
         .map_err(|why| EnrollError::InvalidVaultMount(format!("{what} {why}")))?;
     if !maknae_config::vault_path_is_safe(mount) {
@@ -940,7 +983,7 @@ fn agents_dir_kind() -> Result<Option<maknae_io::Kind>, EnrollError> {
         .map(|e| e.kind))
 }
 
-fn open_dir(path: &str, mode_mask: u32) -> Result<maknae_io::Anchor, EnrollError> {
+pub(crate) fn open_dir(path: &str, mode_mask: u32) -> Result<maknae_io::Anchor, EnrollError> {
     maknae_io::open_anchor(
         Path::new(path),
         AnchorRequired {
@@ -1071,8 +1114,7 @@ pub(crate) async fn run_enroll_agent(
                 msg(locale, MsgId::EnrollAgentStarted).replace("{agent}", agent.as_str())
             );
             Ok(Box::new(RealAgentOps {
-                client,
-                private,
+                vault: RealVault { client, private },
                 agents,
                 daemon_gid,
                 resolver,
@@ -1139,28 +1181,29 @@ mod named_account_tests {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
     use std::collections::HashSet;
 
     const SENTINEL: &str = "5ec7e7aa-0000-4000-8000-5ec7e7aa0000";
-    const ROLE_ID: &str = "role-uuid-1111-2222-3333-444455556666";
+    pub(crate) const ROLE_ID: &str = "role-uuid-1111-2222-3333-444455556666";
 
     #[derive(Default)]
-    struct Fake {
-        log: RefCell<Vec<String>>,
-        fail: RefCell<HashSet<String>>,
-        states: RefCell<Vec<AgentState>>,
+    pub(crate) struct Fake {
+        pub(crate) log: RefCell<Vec<String>>,
+        pub(crate) fail: RefCell<HashSet<String>>,
+        pub(crate) states: RefCell<Vec<AgentState>>,
         written: RefCell<Vec<u8>>,
         sealed: RefCell<Vec<String>>,
         state_calls: Cell<usize>,
-        listed: RefCell<Vec<String>>,
+        pub(crate) listed: RefCell<Vec<String>>,
         entity: RefCell<Option<Option<maknae_vault::EntityFacts>>>,
+        pub(crate) scopes: RefCell<Vec<(String, String)>>,
     }
 
     impl Fake {
-        fn failing(keys: &[&str]) -> Self {
+        pub(crate) fn failing(keys: &[&str]) -> Self {
             let f = Fake::default();
             f.fail
                 .borrow_mut()
@@ -1168,7 +1211,7 @@ mod tests {
             f
         }
 
-        fn check(&self, key: &str) -> Result<(), EnrollError> {
+        pub(crate) fn check(&self, key: &str) -> Result<(), EnrollError> {
             if self.fail.borrow().contains(key) {
                 Err(EnrollError::State(format!("{key} failed")))
             } else {
@@ -1176,51 +1219,39 @@ mod tests {
             }
         }
 
-        fn listing(self, accessors: &[&str]) -> Self {
+        pub(crate) fn listing(self, accessors: &[&str]) -> Self {
             *self.listed.borrow_mut() = strings(accessors);
             self
         }
 
-        fn with_entity(self, entity: Option<maknae_vault::EntityFacts>) -> Self {
+        pub(crate) fn with_entity(self, entity: Option<maknae_vault::EntityFacts>) -> Self {
             *self.entity.borrow_mut() = Some(entity);
             self
         }
 
-        fn log(&self) -> Vec<String> {
+        pub(crate) fn log(&self) -> Vec<String> {
             self.log.borrow().clone()
         }
 
-        fn states(&self) -> Vec<AgentState> {
+        pub(crate) fn states(&self) -> Vec<AgentState> {
             self.states.borrow().clone()
         }
     }
 
-    impl AgentOps for Fake {
-        async fn read_role_id(&self, _mount: &str, _role: &str) -> Result<String, EnrollError> {
+    impl AgentVaultOps for Fake {
+        async fn read_role_id(&self, mount: &str, role: &str) -> Result<String, EnrollError> {
+            self.scopes.borrow_mut().push((mount.into(), role.into()));
             self.log.borrow_mut().push("read_role_id".into());
             Ok(ROLE_ID.into())
         }
 
-        async fn mint(
+        async fn destroy(
             &self,
             mount: &str,
             role: &str,
-            cidrs: &BindCidrs,
-        ) -> Result<(Zeroizing<String>, String), EnrollError> {
-            self.log.borrow_mut().push(format!(
-                "mint:{mount}:{role}:{}",
-                cidrs.as_slice().join(",")
-            ));
-            self.check("mint")?;
-            Ok((Zeroizing::new(SENTINEL.into()), "acc-new".into()))
-        }
-
-        async fn destroy(
-            &self,
-            _mount: &str,
-            _role: &str,
             accessor: &str,
         ) -> Result<(), EnrollError> {
+            self.scopes.borrow_mut().push((mount.into(), role.into()));
             let key = format!("destroy:{accessor}");
             self.log.borrow_mut().push(key.clone());
             self.check(&key)
@@ -1228,23 +1259,13 @@ mod tests {
 
         async fn list_accessors(
             &self,
-            _mount: &str,
-            _role: &str,
+            mount: &str,
+            role: &str,
         ) -> Result<Vec<String>, EnrollError> {
+            self.scopes.borrow_mut().push((mount.into(), role.into()));
             self.log.borrow_mut().push("list".into());
             self.check("list")?;
             Ok(self.listed.borrow().clone())
-        }
-
-        async fn seal(
-            &self,
-            _agent: &AgentId,
-            secret: &Zeroizing<String>,
-        ) -> Result<SecretSource, EnrollError> {
-            self.log.borrow_mut().push("seal".into());
-            self.sealed.borrow_mut().push(secret.to_string());
-            self.check("seal")?;
-            Ok(SecretSource::Tpm2)
         }
 
         fn write_state(&self, _agent: &AgentId, state: &AgentState) -> Result<(), EnrollError> {
@@ -1277,6 +1298,33 @@ mod tests {
                 .push(format!("set_entity_disabled {name} {disabled}"));
             self.check("set_entity_disabled")
         }
+    }
+
+    impl AgentOps for Fake {
+        async fn mint(
+            &self,
+            mount: &str,
+            role: &str,
+            cidrs: &BindCidrs,
+        ) -> Result<(Zeroizing<String>, String), EnrollError> {
+            self.log.borrow_mut().push(format!(
+                "mint:{mount}:{role}:{}",
+                cidrs.as_slice().join(",")
+            ));
+            self.check("mint")?;
+            Ok((Zeroizing::new(SENTINEL.into()), "acc-new".into()))
+        }
+
+        async fn seal(
+            &self,
+            _agent: &AgentId,
+            secret: &Zeroizing<String>,
+        ) -> Result<SecretSource, EnrollError> {
+            self.log.borrow_mut().push("seal".into());
+            self.sealed.borrow_mut().push(secret.to_string());
+            self.check("seal")?;
+            Ok(SecretSource::Tpm2)
+        }
 
         fn write_record(&self, record: &AgentRecord) -> Result<(), EnrollError> {
             self.log.borrow_mut().push("record".into());
@@ -1288,11 +1336,14 @@ mod tests {
         }
     }
 
-    const MOUNT: &str = "maknae-agent-approle";
-    const ENTITY_MOUNT: &str = "auth/maknae-agent-approle/";
-    const ROLE: &str = "agent-hobi";
+    pub(crate) const MOUNT: &str = "maknae-agent-approle";
+    pub(crate) const ENTITY_MOUNT: &str = "auth/maknae-agent-approle/";
+    pub(crate) const ROLE: &str = "agent-hobi";
 
-    fn entity_facts(disabled: bool, aliases: &[(&str, &str)]) -> maknae_vault::EntityFacts {
+    pub(crate) fn entity_facts(
+        disabled: bool,
+        aliases: &[(&str, &str)],
+    ) -> maknae_vault::EntityFacts {
         maknae_vault::EntityFacts {
             id: "entity-id-1".into(),
             disabled,
@@ -1306,7 +1357,7 @@ mod tests {
         }
     }
 
-    fn healthy(disabled: bool) -> maknae_vault::EntityFacts {
+    pub(crate) fn healthy(disabled: bool) -> maknae_vault::EntityFacts {
         entity_facts(disabled, &[(ENTITY_MOUNT, ROLE_ID)])
     }
 
@@ -1330,7 +1381,7 @@ mod tests {
         }
     }
 
-    fn strings(xs: &[&str]) -> Vec<String> {
+    pub(crate) fn strings(xs: &[&str]) -> Vec<String> {
         xs.iter().map(|s| s.to_string()).collect()
     }
 
@@ -1361,7 +1412,7 @@ mod tests {
         )
     }
 
-    fn state(live: &[&str], pending: &[&str], retiring: &[&str]) -> AgentState {
+    pub(crate) fn state(live: &[&str], pending: &[&str], retiring: &[&str]) -> AgentState {
         AgentState {
             approle_mount: MOUNT.into(),
             role: ROLE.into(),
@@ -2225,7 +2276,7 @@ mod tests {
             let fake = Fake::default().with_entity(entity);
             let e = rotate(&fake, &["a"], &[], &[]).await.unwrap_err();
             assert!(
-                matches!(&e, EnrollError::AgentEntityMissing { agent, entity, mount }
+                matches!(&e, EnrollError::AgentEntityMissing { agent, entity, mount, .. }
                     if agent == "hobi" && entity == "maknae-agent-hobi" && mount == MOUNT),
                 "{e:?}"
             );
