@@ -207,6 +207,10 @@ pub(crate) fn agent_keychain_item(
     )
 }
 
+pub(crate) fn agent_presence(code: Option<i32>, stdout: &str) -> Result<bool, String> {
+    classify_find(code, stdout)
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) async fn seal_agent_secret_macos(
     secret: &str,
@@ -243,19 +247,9 @@ pub(crate) async fn agent_secret_present_macos(
     agent: &maknae_vault::agent_enroll::AgentId,
 ) -> Result<bool, EnrollError> {
     let (service, account) = agent_keychain_item(agent);
-    let out = run(
-        SECURITY,
-        &[
-            "find-generic-password",
-            "-a",
-            &account,
-            "-s",
-            service,
-            SYSTEM_KEYCHAIN,
-        ],
-    )
-    .await?;
-    Ok(out.status.success())
+    let out = run(SECURITY, &find_args(service, &account)).await?;
+    agent_presence(out.status.code(), &String::from_utf8_lossy(&out.stdout))
+        .map_err(|detail| EnrollError::Keychain { op: "find", detail })
 }
 
 /// Adds the item without deleting a previous one: `add-generic-password`
@@ -838,6 +832,16 @@ mod tests {
                     SYSTEM_KEYCHAIN
                 ]
             );
+        }
+    }
+
+    #[test]
+    fn a_failed_agent_probe_is_an_error_not_an_absence() {
+        let system = "keychain: \"/Library/Keychains/System.keychain\"\n";
+        assert!(matches!(agent_presence(Some(0), system), Ok(true)));
+        assert!(matches!(agent_presence(Some(44), ""), Ok(false)));
+        for code in [Some(1), Some(51), None] {
+            assert!(agent_presence(code, system).is_err(), "{code:?}");
         }
     }
 

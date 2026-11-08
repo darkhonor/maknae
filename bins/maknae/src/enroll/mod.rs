@@ -197,6 +197,12 @@ pub enum EnrollError {
         mount: String,
         remains: Vec<String>,
     },
+    AgentRoleMissing {
+        agent: String,
+        mount: String,
+        entity: String,
+        remains: Vec<String>,
+    },
     AgentRemoveRetireFailed {
         agent: String,
         accessors: Vec<String>,
@@ -370,7 +376,7 @@ impl std::fmt::Display for EnrollError {
                 remains,
             } if remains.is_empty() => write!(
                 f,
-                "Vault has no entity {entity} with an alias on auth/{mount}/; add {agent} to maknae_agents in deploy/vault-pki and run `terraform apply`, then run enroll again"
+                "Vault has no entity {entity} with an alias on auth/{mount}/; create the AppRole role agent-{agent} on auth/{mount}/, the entity {entity} and the entity's alias on that mount named by the role's RoleID (deploy/vault-pki can create them), then run enroll again"
             ),
             EnrollError::AgentEntityMissing {
                 agent,
@@ -379,7 +385,17 @@ impl std::fmt::Display for EnrollError {
                 remains,
             } => write!(
                 f,
-                "agent {agent} is no longer loaded by maknaed after its next reload, but Vault has no entity {entity} with an alias on auth/{mount}/, so nothing in Vault was disabled or destroyed; still in place: {}. Restore the entity in deploy/vault-pki with `terraform apply` and run remove-agent again, or clean Vault by hand",
+                "agent {agent} is no longer loaded by maknaed after its next reload, but Vault has no entity {entity} with an alias on auth/{mount}/, so nothing in Vault was disabled or destroyed; still in place: {}. Restore the entity and its alias on that mount, named by the role's RoleID, and run remove-agent again, or clean Vault by hand",
+                remains.join("; ")
+            ),
+            EnrollError::AgentRoleMissing {
+                agent,
+                mount,
+                entity,
+                remains,
+            } => write!(
+                f,
+                "agent {agent}: the AppRole role was not found on mount {mount}, but the Vault entity {entity} still exists, so the mount may be wrong and nothing in Vault was disabled or destroyed; still in place: {}. Check the mount; if the agent's role and entity were deleted in Vault, run remove-agent again",
                 remains.join("; ")
             ),
             EnrollError::AgentRemoveRetireFailed { agent, accessors } => write!(

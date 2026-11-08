@@ -832,8 +832,8 @@ audit:
 **Prerequisites.**
 
 - The host is enrolled (`sudo maknae enroll`).
-- The agent's id is in Terraform's `maknae_agents` (`deploy/vault-pki`), which creates its AppRole role, its Vault entity `maknae-agent-<id>` and the entity's alias on the agent mount, named by the role's RoleID. Enrollment refuses before it mints anything when any of them is missing.
-- An operator Vault token carrying the `maknae-enroll-agent` policy, supplied by `--token-file` or a no-echo prompt.
+- The agent's Vault objects exist: the AppRole role `agent-<id>` on the agent mount, and the entity `maknae-agent-<id>` with an alias on that mount whose name is the role's RoleID (`deploy/vault-pki` can create them). Enrollment refuses before it mints anything when any of them is missing.
+- An operator Vault token carrying the `maknae-enroll-agent` policy, supplied by `--token-file` or a no-echo prompt. The policy grants, on the agent mount only: reading a role's RoleID, creating SecretIDs, listing and destroying SecretID accessors; and `read` and `update` on `identity/entity/name/maknae-agent-*`, where `update` may set only the `disabled` field.
 - A dedicated service account for the agent: it is not root, it is not the enrolling principal's account, its shell is one of the non-login shells `/usr/sbin/nologin`, `/sbin/nologin`, `/usr/bin/nologin`, `/bin/false` or `/usr/bin/false`, it is outside the `maknae` group and a member of the `maknae-agents` group (enroll prints the `usermod -aG` or `dseditgroup` command and changes nothing), it is not bound in `bindings.yaml` by name or uid, it is not a Maknae daemon account and is not a member (primary or supplementary) of the `_maknae` or `_maknae-egress` group, and no other agent is enrolled to it. Enrollment refuses any other account.
 - The agent id is enrolled on this host only. Each agent id is enrolled on exactly one host: enrolling or rotating the same id on another host destroys this host's SecretID, because every enrollment retires every other SecretID on `agent-<id>`.
 - Linux: a usable TPM2. There is no plaintext fallback.
@@ -870,12 +870,12 @@ sudo maknae enroll remove-agent <id> [--token-file <file>] [--verbose]
 It takes the same operator token as enrollment (`--token-file` or a no-echo prompt, never an argument) and runs in this order:
 
 1. It removes `/etc/maknae/agents/<id>/enrollment.yaml`, so the next reload of `maknaed` drops the agent whatever Vault does.
-2. It reads the agent's Vault role. When Vault reports the role absent (404), the role's SecretIDs went with it, so the command skips the entity and the destroys, removes the sealed SecretID and the state file, and says the role was already absent; any other read error refuses. When the role exists, it reads the entity `maknae-agent-<id>`; if the entity is absent or has no alias on the agent mount named by the role's RoleID, it stops before changing anything in Vault and names what remains: the sealed SecretID and state file that exist, and the recorded accessors. Restore the entity and run it again, or clean Vault by hand.
+2. It reads the agent's Vault role. When the role read errors for any reason other than not-found, it refuses. When the role is not found, it reads the entity `maknae-agent-<id>` (which does not depend on the mount): if the entity exists too, it refuses, saying the role was not found on the mount while the entity still exists (the recorded mount may be wrong), and changes nothing in Vault or locally beyond step 1. If both are not found, Vault holds neither, so it skips the disable and the destroys, removes the sealed SecretID and the state file, and says the Vault role and entity were already absent. When the role exists, it reads the entity; if the entity is absent or has no alias on the agent mount named by the role's RoleID, it stops before changing anything in Vault and names what remains: the sealed SecretID and state file that exist, and the recorded accessors. Restore the entity and run it again, or clean Vault by hand.
 3. It disables the entity.
 4. It destroys every SecretID accessor of `agent-<id>` that the state file records or Vault lists. An accessor whose destroy fails stays recorded, the command exits non-zero, and running it again retries.
 5. When no accessor remains, it removes the sealed SecretID (the `.cred` file on Linux, the keychain item on macOS) and the state file.
 
-It ends by telling you to reload `maknaed`. The agent's `policy.yaml` and its directory are left in place, and the entity stays disabled. Disabling does not revoke tokens already issued; they work until they reach `agent_token_max_ttl`.
+It ends by telling you to reload `maknaed`. The agent's `policy.yaml` and its directory are left in place, and the entity stays disabled. Disabling does not revoke tokens already issued, and `remove-agent` cannot revoke them because no token accessor is recorded: a login token the agent already holds stays valid until `agent_token_max_ttl`.
 
 ### 6.5 The `deployment` section
 

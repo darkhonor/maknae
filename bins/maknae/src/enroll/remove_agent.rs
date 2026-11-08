@@ -85,6 +85,18 @@ pub(crate) async fn remove_agent<O: RemoveOps>(
             .chain(&state.retiring),
     );
     let Some(role_id) = ops.find_role_id(mount, &role).await? else {
+        if ops.entity(&entity).await?.is_some() {
+            let mut remains = ops.leftovers(agent).await?;
+            if !recorded.is_empty() {
+                remains.push(format!("SecretID accessors {}", recorded.join(", ")));
+            }
+            return Err(EnrollError::AgentRoleMissing {
+                agent: agent.as_str().to_string(),
+                mount: mount.to_string(),
+                entity,
+                remains,
+            });
+        }
         ops.remove_sealed_secret(agent).await?;
         ops.remove_state(agent)?;
         return Ok(RemoveOutcome {
@@ -490,7 +502,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_role_completes_locally_and_skips_vault() {
-        let fake = Fake::failing(&["role_missing"]);
+        let fake = Fake::failing(&["role_missing"]).with_entity(None);
         let out = remove_agent(&fake, &hobi(), state(&["a"], &["p"], &[]))
             .await
             .unwrap();
@@ -499,6 +511,7 @@ mod tests {
             strings(&[
                 "remove_enrollment",
                 "read_role_id",
+                "entity maknae-agent-hobi",
                 "remove_sealed_secret",
                 "remove_state",
             ])
@@ -510,6 +523,30 @@ mod tests {
                 role_absent: true
             }
         );
+    }
+
+    #[tokio::test]
+    async fn a_missing_role_with_a_live_entity_refuses_and_keeps_local_files() {
+        let fake = Fake::failing(&["role_missing"]);
+        let e = remove_agent(&fake, &hobi(), state(&["a"], &[], &[]))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&e, EnrollError::AgentRoleMissing { mount, entity, remains, .. }
+                if mount == MOUNT && entity == "maknae-agent-hobi" && !remains.is_empty()),
+            "{e:?}"
+        );
+        let shown = e.to_string();
+        assert!(
+            shown.contains("role was not found") && shown.contains("still exists"),
+            "{shown}"
+        );
+        let log = fake.log();
+        assert!(!log.contains(&"remove_sealed_secret".to_string()));
+        assert!(!log.contains(&"remove_state".to_string()));
+        assert!(!log
+            .iter()
+            .any(|l| l.starts_with("destroy:") || l.starts_with("set_entity")));
     }
 
     #[tokio::test]
@@ -564,7 +601,11 @@ mod tests {
                 role_absent: true,
             },
         );
-        assert!(out.contains("already absent"), "{out}");
+        assert!(
+            out.contains("role and entity for agent hobi were already absent"),
+            "{out}"
+        );
+        assert!(!out.contains("gone with"), "{out}");
         assert!(out.contains(RELOAD_COMMAND), "{out}");
     }
 

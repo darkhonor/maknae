@@ -2301,7 +2301,7 @@ pub(crate) mod tests {
                     if agent == "hobi" && entity == "maknae-agent-hobi" && mount == MOUNT),
                 "{e:?}"
             );
-            assert!(e.to_string().contains("terraform apply"), "{e}");
+            assert!(e.to_string().contains("create the AppRole role"), "{e}");
             assert_eq!(
                 fake.log(),
                 strings(&["read_role_id", "entity maknae-agent-hobi"])
