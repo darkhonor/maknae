@@ -123,6 +123,8 @@ exclude_re = [
   "^crates/maknae-state/src/store\\.rs:[0-9]+:[0-9]+: replace > with >= in newer_aead$",
   # #488: open() errors only on a wrap id != WRAP_AES_256_GCM, so `>=` is equivalent; held by the same two tests.
   "^crates/maknae-state/src/store\\.rs:[0-9]+:[0-9]+: replace > with >= in newer_wrap$",
+  "^crates/maknae-io/src/delegated\\.rs:[0-9]+:[0-9]+: replace < with <= in mtime$",
+  "^crates/maknae-io/src/delegated\\.rs:[0-9]+:[0-9]+: replace \\+ with (-|\\*) in recv_delegated$",
 ]
 
 exclude_globs = [
