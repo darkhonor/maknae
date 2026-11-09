@@ -196,12 +196,17 @@ async fn sealed_secret_present(
         .map_err(|e| io_error(&path, e))
 }
 
-#[cfg(target_os = "macos")]
-async fn sealed_secret_present(
-    _private: &maknae_io::Anchor,
+#[cfg(not(target_os = "macos"))]
+fn remove_sealed_secret_file(
+    private: &maknae_io::Anchor,
     agent: &AgentId,
-) -> Result<bool, EnrollError> {
-    super::keychain_write::agent_secret_present_macos(agent).await
+) -> Result<(), EnrollError> {
+    let name = super::agent::cred_path(agent);
+    let leaf = name.file_name().map(PathBuf::from).unwrap_or_default();
+    private
+        .remove(&leaf, None)
+        .map(|_| ())
+        .map_err(|e: IoError| io_error(&name, e))
 }
 
 struct RealRemoveOps {
@@ -220,25 +225,20 @@ impl RemoveOps for RealRemoveOps {
         remove_enrollment_file(&self.agents, agent)
     }
 
-    #[cfg(not(target_os = "macos"))]
     async fn remove_sealed_secret(&self, agent: &AgentId) -> Result<(), EnrollError> {
-        let name = super::agent::cred_path(agent);
-        let leaf = name.file_name().map(PathBuf::from).unwrap_or_default();
-        self.vault
-            .private
-            .remove(&leaf, None)
-            .map(|_| ())
-            .map_err(|e: IoError| io_error(&name, e))
-    }
-
-    #[cfg(target_os = "macos")]
-    async fn remove_sealed_secret(&self, agent: &AgentId) -> Result<(), EnrollError> {
-        super::keychain_write::delete_agent_secret_macos(agent).await
+        #[cfg(target_os = "macos")]
+        return super::keychain_write::delete_agent_secret_macos(agent).await;
+        #[cfg(not(target_os = "macos"))]
+        remove_sealed_secret_file(&self.vault.private, agent)
     }
 
     async fn leftovers(&self, agent: &AgentId) -> Result<Vec<String>, EnrollError> {
         let mut out = Vec::new();
-        if sealed_secret_present(&self.vault.private, agent).await? {
+        #[cfg(target_os = "macos")]
+        let sealed = super::keychain_write::agent_secret_present_macos(agent).await?;
+        #[cfg(not(target_os = "macos"))]
+        let sealed = sealed_secret_present(&self.vault.private, agent).await?;
+        if sealed {
             out.push("the sealed SecretID".to_string());
         }
         let state = super::agent::state_file(agent);
@@ -637,23 +637,6 @@ mod tests {
         d
     }
 
-    #[cfg(target_os = "macos")]
-    #[tokio::test]
-    async fn an_agent_never_sealed_leaves_no_sealed_secret_behind() {
-        let d = scratch("never-sealed");
-        let private = maknae_io::open_anchor(
-            &d,
-            maknae_io::AnchorRequired {
-                owner: None,
-                mode_mask: None,
-            },
-            maknae_io::StrategyPref::Auto,
-        )
-        .unwrap();
-        let id = AgentId::parse("neversealedprobe").unwrap();
-        assert!(!sealed_secret_present(&private, &id).await.unwrap());
-    }
-
     #[test]
     fn remove_leaves_policy_yaml() {
         let d = scratch("policy");
@@ -818,6 +801,21 @@ mod tests {
             .unwrap());
         ops.remove_state(&hobi()).unwrap();
         assert_eq!(ops.leftovers(&hobi()).await.unwrap(), Vec::<String>::new());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn real_leftovers_on_macos_name_the_state_file_and_no_unsealed_secret() {
+        let (_agents_dir, private_dir, ops) = real_remove_ops("rm-leftovers-macos");
+        let id = AgentId::parse("neversealedprobe").unwrap();
+        assert_eq!(ops.leftovers(&id).await.unwrap(), Vec::<String>::new());
+        std::fs::write(private_dir.join(super::super::agent::state_file(&id)), "x").unwrap();
+        assert_eq!(
+            ops.leftovers(&id).await.unwrap(),
+            strings(&["the enroll state file"])
+        );
+        ops.remove_state(&id).unwrap();
+        assert_eq!(ops.leftovers(&id).await.unwrap(), Vec::<String>::new());
     }
 
     #[tokio::test]
