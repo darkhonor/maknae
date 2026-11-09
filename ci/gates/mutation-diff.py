@@ -537,6 +537,8 @@ def compiled(root, base, head, workspace, target):
     mutants = contract(root, head_sha, dirs)
     identities = {}
     for path in changed_names(root, base_sha, head_sha):
+        if not path.endswith(".rs"):
+            continue
         try:
             stat = os.stat(tree / path)
         except OSError:
@@ -544,11 +546,10 @@ def compiled(root, base, head, workspace, target):
         identities[(stat.st_dev, stat.st_ino)] = path
     if not identities:
         return {}
-    whole = set(scope_crates(root, base, head, workspace))
     result = {}
-    for crate in sorted((mutants & set(found)) - whole):
+    for crate in sorted(mutants & set(found)):
         inputs = production_inputs(tree, found[crate], features_of(tiers_text, crate), Path(target))
-        hits = sorted(path for key, path in identities.items() if key in inputs)
+        hits = sorted(path for key, path in identities.items() if key in inputs and within(path, dirs[crate]))
         if hits:
             result[crate] = hits
     return result
@@ -995,6 +996,56 @@ def unmappable(root, head, workspace):
             if script_path(directory, script) is None:
                 return (f"FAIL: --in-diff: build script {script} of mutation crate {crate} "
                         "lies outside the repository — use the whole-package run")
+        problem = non_rs_source(root, sha, crate, directory, paths)
+        if problem:
+            return problem
+    return None
+
+
+PATH_ATTRIBUTE = re.compile(r'#\s*\[\s*path\s*=\s*"([^"]*)"')
+
+
+def target_paths(manifest):
+    if not isinstance(manifest, dict):
+        return []
+    lib = manifest.get("lib")
+    found = [lib.get("path")] if isinstance(lib, dict) else []
+    for kind in ("bin", "test"):
+        tables = manifest.get(kind)
+        if isinstance(tables, list):
+            found += [t.get("path") for t in tables if isinstance(t, dict)]
+    return [p for p in found if isinstance(p, str)]
+
+
+def blobs(root, sha, paths):
+    done = subprocess.run(["git", "-C", str(root), "cat-file", "--batch"], capture_output=True,
+                          env=git_env(), check=False, input="".join(f"{sha}:{p}\n" for p in paths).encode())
+    if done.returncode != 0:
+        raise ScopeError(f"FAIL: git cat-file --batch failed: {done.stderr.decode().strip()}")
+    out, at, found = done.stdout, 0, []
+    for path in paths:
+        end = out.index(b"\n", at)
+        header = out[at:end].decode().split(" ")
+        if len(header) != 3 or header[1] != "blob":
+            raise ScopeError(f"FAIL: cannot read {path} at {sha}")
+        size = int(header[2])
+        found.append(out[end + 1:end + 1 + size])
+        at = end + 1 + size + 1
+    return found
+
+
+def non_rs_source(root, sha, crate, directory, paths):
+    for target in target_paths(parse_toml(show(root, sha, join(directory, "Cargo.toml")))):
+        if not target.endswith(".rs"):
+            shown = script_path(directory, target) or target
+            return (f"FAIL: --in-diff: {shown} is compiled into mutation crate {crate} but does not end in .rs; "
+                    "the in-diff mapping cannot read it — rename it to .rs")
+    sources = sorted(p for p in paths if p.endswith(".rs") and within(p, directory))
+    for path, blob in zip(sources, blobs(root, sha, sources)):
+        for value in PATH_ATTRIBUTE.findall(blob.decode(errors="replace")):
+            if not value.endswith(".rs"):
+                return (f'FAIL: --in-diff: {path} declares #[path = "{value}"], which does not end in .rs; '
+                        "the in-diff mapping cannot read it — rename it to .rs")
     return None
 
 

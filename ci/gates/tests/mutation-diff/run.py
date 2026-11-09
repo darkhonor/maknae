@@ -705,6 +705,32 @@ class Unmappable(unittest.TestCase):
         self.commit("drop")
         self.assertAccepted()
 
+    def test_unmappable_a_non_rs_target_path_is_refused(self):
+        for table in ('[lib]\npath = "src/main.rust"\n', '[[bin]]\nname = "beta"\npath = "src/main.rust"\n',
+                      '[[test]]\nname = "t"\npath = "src/main.rust"\n'):
+            with self.subTest(table=table):
+                self.put("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra="\n" + table))
+                self.put("crates/beta/src/main.rust", "fn main() {}\n")
+                self.commit("target")
+                try:
+                    self.assertRefused("FAIL: --in-diff: crates/beta/src/main.rust is compiled into mutation crate "
+                                       "beta but does not end in .rs", "rename it to .rs")
+                finally:
+                    self.git("reset", "-q", "--hard", "HEAD~1")
+
+    def test_unmappable_a_non_rs_path_attribute_is_refused(self):
+        self.put("crates/beta/src/lib.rs", '#[path = "gen.inc"]\nmod generated;\n')
+        self.put("crates/beta/src/gen.inc", "pub fn g() {}\n")
+        self.commit("path")
+        self.assertRefused('crates/beta/src/lib.rs declares #[path = "gen.inc"], which does not end in .rs',
+                           "rename it to .rs")
+
+    def test_unmappable_an_rs_target_path_is_accepted(self):
+        self.put("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra='\n[lib]\npath = "src/x.rs"\n'))
+        self.put("crates/beta/src/x.rs", "pub fn x() {}\n")
+        self.commit("target")
+        self.assertAccepted()
+
     def test_unmappable_build_script_in_a_non_mutation_crate_is_ignored(self):
         self.put("crates/gamma/Cargo.toml", MANIFEST.format(n="gamma", extra='build = "src/build.rs"\n'))
         self.commit("build")
@@ -751,29 +777,38 @@ class Compiled(unittest.TestCase):
         self.commit("edit")
         self.assertCompiled({"beta": ["crates/beta/src/policy.rs"]})
 
-    def test_compiled_dep_info_comes_before_the_documentation_exemption(self):
+    def test_compiled_a_non_rust_input_is_not_an_owned_change(self):
         self.base({"crates/beta/src/lib.rs": 'pub fn check() -> bool {\n    include_str!("../../../README.md").trim() == "ALLOW"\n}\n',
                    "README.md": "ALLOW\n"})
         self.put("README.md", "DENY\n")
         self.commit("edit")
-        self.assertCompiled({"beta": ["README.md"]})
+        self.assertCompiled({})
 
     def test_compiled_a_dep_info_entry_that_does_not_resolve_fails(self):
-        self.base({"crates/beta/src/lib.rs": 'pub fn check() -> bool {\n    include_str!("policy\\nname.txt") == "ALLOW"\n}\n',
-                   "crates/beta/src/policy\nname.txt": "ALLOW"})
+        lib = 'pub fn check() -> bool {\n    include_str!("policy\\nname.txt") == "ALLOW"\n}\n'
+        self.base({"crates/beta/src/lib.rs": lib, "crates/beta/src/policy\nname.txt": "ALLOW"})
         self.put("crates/beta/src/policy\nname.txt", "DENY")
+        self.put("crates/beta/src/lib.rs", lib + "// edited\n")
         self.commit("edit")
         result = self.compiled()
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertRegex(result.stderr, r'FAIL: beta: dep-info entry "[^"]*" in beta-\w+\.d does not '
                                         r"resolve to a file")
 
-    def test_compiled_another_crates_file_is_compiled_into_the_embedding_crate(self):
+    def test_compiled_another_crates_embedded_file_is_owned_by_no_one(self):
         self.base({"crates/alpha/src/lib.rs": 'pub fn check() -> bool {\n    include_str!("../../beta/src/policy.rs") == "x"\n}\n',
                    "crates/beta/src/policy.rs": "ALLOW\n"})
         self.put("crates/beta/src/policy.rs", "DENY\n")
         self.commit("edit")
-        self.assertCompiled({"alpha": ["crates/beta/src/policy.rs"]})
+        self.assertCompiled({})
+
+    def test_compiled_only_rust_files_are_owned(self):
+        self.base({"crates/beta/src/lib.rs": "pub mod x;\npub fn p() -> &'static str {\n    include_str!(\"prompt.txt\")\n}\n",
+                   "crates/beta/src/x.rs": "pub fn x() {}\n", "crates/beta/src/prompt.txt": "be brief\n"})
+        self.put("crates/beta/src/prompt.txt", "be terse\n")
+        self.put("crates/beta/src/x.rs", "pub fn x() -> u8 {\n    1\n}\n")
+        self.commit("edit")
+        self.assertCompiled({"beta": ["crates/beta/src/x.rs"]})
 
     def test_compiled_a_module_file_is_compiled_into_its_crate(self):
         self.base({"crates/beta/src/lib.rs": "pub mod x;\n", "crates/beta/src/x.rs": "pub fn x() {}\n"})
@@ -844,11 +879,13 @@ class Compiled(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("FAIL: beta: cargo check of its production targets failed", result.stderr)
 
-    def test_compiled_a_scope_crate_is_not_checked(self):
+    def test_compiled_a_scope_file_change_does_not_exempt_a_crate(self):
         self.put("crates/beta/src/lib.rs", "pub fn broken( {\n")
         self.put(".cargo/mutants.toml", "exclude_globs = []\n")
         self.commit("edit")
-        self.assertCompiled({})
+        result = self.compiled()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("FAIL: beta: cargo check of its production targets failed", result.stderr)
 
     def test_compiled_git_env_is_ignored(self):
         self.put("crates/beta/src/lib.rs", "pub fn x() {}\n")
