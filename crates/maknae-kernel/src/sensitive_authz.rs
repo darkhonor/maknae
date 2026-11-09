@@ -411,6 +411,14 @@ mod tests {
             "a delete that names no operation is decided as a tree"
         );
         assert_eq!(
+            op.decide(&with_op(
+                req("fs.delete", Some("/home/u"), home),
+                FsOperation::Read
+            )),
+            deny("sensitive: host ~/.ssh/**"),
+            "a delete carrying any other operation is still decided as a tree"
+        );
+        assert_eq!(
             op.decide(&req("fs.write", Some("/home/u"), home)),
             NA,
             "only a delete is decided as a tree"
