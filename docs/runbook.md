@@ -485,15 +485,15 @@ canonical-sorted — `maknae-audit-append/src/record.rs` — not declaration ord
 ### 7. Grants, destinations and subjects (`authz.yaml`)
 
 Three additive keys govern what a role, and with `subjects:` an individual account, may DO beyond the built-in rules. The packaged
-`authz.yaml` grants `admin` five terms and allowlists nothing: no prompt is permitted
+`authz.yaml` grants `admin` five administrative terms, and both `admin` and `user` the five conversation terms and `session.task`; it allowlists nothing: no prompt is permitted
 until you write a `destinations:` entry.
 
 ```yaml
 roles:                       # #162: per-role action grants; deny beats allow inside a role
   admin:
-    allow: ["admin.status", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.release"]   # as packaged (#490, #165)
+    allow: ["admin.status", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.release", "session.prompt", "session.new", "session.close", "session.list", "session.delete", "session.task"]   # as packaged
   user:
-    allow: ["session.prompt"]
+    allow: ["session.prompt", "session.new", "session.close", "session.list", "session.delete", "session.task"]   # as packaged
 destinations:                # #172: per-role egress allowlist for session.prompt
   user:
     allow: ["provider:openai"]   # provider:<name>, an authorized provider's name (configuration §6.1)
@@ -501,8 +501,8 @@ destinations:                # #172: per-role egress allowlist for session.promp
 
 - **Which terms a role may hold.** `admin`: `admin.status`, `admin.config.show`,
   `admin.subject.list`, `admin.baseline.show`, `admin.baseline.accept`,
-  `admin.contain`, `admin.release` and `session.prompt`. `user`: `session.prompt`
-  only — writing an `admin.*` term under `user` refuses at boot, naming both the role and
+  `admin.contain`, `admin.release`, `session.prompt`, `session.new`, `session.close`,
+  `session.list`, `session.delete` and `session.task`. `user`: the six `session.*` terms — writing an `admin.*` term under `user` refuses at boot, naming both the role and
   the term. `guest` and `adversary` are structural and take no grants; a `roles:` or
   `destinations:` key naming them refuses at boot too.
 - **`destinations:` grammar.** Allow-only (a `deny:` key refuses at load, so it cannot be
@@ -537,8 +537,8 @@ destinations:                # #172: per-role egress allowlist for session.promp
   single-account HomeLab shape collapses both roles into one person, and the trail still
   names every destination, every intent and every outcome.
 - **What a prompt carries.** Text-only content blocks (any other kind is refused before
-  the decision, `BadRequest` on the wire) and a conversation id of at most 32 bytes in
-  `[A-Za-z0-9._-]`. The trail records the text's length and a 32-hex digest, never the text.
+  the decision, `BadRequest` on the wire) and a conversation id of exactly 32 lowercase
+  hex characters, minted by the kernel at `session.new`. The trail records the text's length and a 32-hex digest, never the text.
 - **Egress deputy and a Vault outage (#240b).** The deputy makes no Vault login and does
   not contact Vault at start-up (`bins/maknae-egress/src/main.rs`): it reaches Vault only per turn, to
   look up and unwrap the user's wrapping token. During an outage the user's own CLI
@@ -612,6 +612,7 @@ subjects:
       allow:
         - "fs.read"
         - "session.prompt"
+        - "session.new"
     models:
       allow:
         - "openai/gpt-5.6"
@@ -855,10 +856,9 @@ As yourself, not root, store your own API key in Vault under your own login: [fi
 
 ### 7. Grant the prompt
 
-Edit `/etc/maknae/authz.yaml` in place. The packaged file already has a `roles:` key granting `admin` its five administrative terms, and a second `roles:` key refuses the whole file, so add `session.prompt` to that list and append a `destinations:` key. `sudoedit` and `tee -a` keep the file's owner, mode and label. Step 9's restart applies it; a daemon that is already serving applies it at the next reload, `sudo systemctl reload maknaed` ([Reload the policy](#reload-the-policy)):
+Edit `/etc/maknae/authz.yaml` in place. The packaged file already has a `roles:` key granting `admin` and `user` their terms, and a second `roles:` key refuses the whole file, so append a `destinations:` key; the packaged list already holds `session.prompt` and the four conversation terms beside it. `sudoedit` and `tee -a` keep the file's owner, mode and label. Step 9's restart applies it; a daemon that is already serving applies it at the next reload, `sudo systemctl reload maknaed` ([Reload the policy](#reload-the-policy)):
 
 ```bash
-sudoedit /etc/maknae/authz.yaml      # add - "session.prompt" under roles: admin: allow:
 sudo tee -a /etc/maknae/authz.yaml >/dev/null <<'EOF'
 destinations:
   admin:
@@ -879,6 +879,10 @@ roles:
       - "admin.baseline.accept"
       - "admin.release"
       - "session.prompt"
+      - "session.new"
+      - "session.close"
+      - "session.list"
+      - "session.delete"
 destinations:
   admin:
     allow: ["provider:openai"]
@@ -1074,7 +1078,7 @@ Search with `grep`: on a STIG'd Rocky 10 host `ausearch -m AVC` was measured mis
 ```bash
 sudo systemctl disable --now maknae-egress.socket maknae-egress.service
 sudo rm /etc/maknae/config.d/10-provider.yaml
-sudoedit /etc/maknae/authz.yaml                 # remove step 7's session.prompt line and destinations: block
+sudoedit /etc/maknae/authz.yaml                 # remove step 7's destinations: block
 sudo systemctl reload maknaed                   # applies the authz.yaml edit
 maknae baseline-show                            # the providers removal, apply restart
 maknae baseline-accept <hash>                   # maknaed restarts into it

@@ -21,13 +21,13 @@ action	admin.provider.set	not-granted	enumerated, decided, unbuilt — answers U
 action	admin.provider.disable	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
 action	admin.session.list	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
 action	admin.session.terminate	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
-action	session.new	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
+action	session.new	granted-in-shipped-file	BUILT (#170): open a kernel-recorded conversation, owner-scoped, its cwd recorded as the kernel reports it, neither decided nor confined (#617), within the subject's `subjects:` actions limit (#608). granted to admin by the shipped authz.yaml; an install's own authz.yaml decides. The shipped file grants it to user as well; see the grantable row
 action	session.resume	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
-action	session.close	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
-action	session.delete	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
-action	session.list	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
+action	session.close	granted-in-shipped-file	BUILT (#170): close an active conversation the subject owns; another subject's or an inactive one is refused. granted to admin by the shipped authz.yaml; an install's own authz.yaml decides. The shipped file grants it to user as well; see the grantable row
+action	session.delete	granted-in-shipped-file	BUILT (#170): delete a conversation the subject owns, or an archived one, on the grant. granted to admin by the shipped authz.yaml; an install's own authz.yaml decides. The shipped file grants it to user as well; see the grantable row
+action	session.list	granted-in-shipped-file	BUILT (#170): list the subject's own conversations, paged. granted to admin by the shipped authz.yaml; an install's own authz.yaml decides. The shipped file grants it to user as well; see the grantable row
 action	session.fork	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
-action	session.prompt	not-granted-but-grantable	BUILT (#172, Cooky): the egress verb — decided by the role's own grant AND the destinations: allowlist, within the subject's `subjects:` actions and models limits (#608), write-ahead intent, text only, Unavailable backend until #240. Ungranted by default; operator MAY grant per-role — see the grantable row
+action	session.prompt	granted-in-shipped-file	BUILT (#172, Cooky): the egress verb — decided by the role's own grant, an active conversation the subject owns that the request extends (#170), AND the destinations: allowlist, within the subject's `subjects:` actions and models limits (#608), write-ahead intent, text only, Unavailable backend until #240. granted to admin by the shipped authz.yaml; an install's own authz.yaml decides. The shipped file grants it to user as well; see the grantable row
 action	session.cancel	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
 action	session.set_config_option	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
 action	session.set_mode	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
@@ -71,7 +71,11 @@ grantable	admin.baseline.show	grantable-shipped-granted	operator MAY grant per-r
 grantable	admin.baseline.accept	grantable-shipped-granted	operator MAY grant per-role via `roles:`; the shipped authz.yaml grants it to admin (#490)
 grantable	admin.contain	grantable-not-granted	operator MAY grant per-role via `roles:` (#165); ships ungranted
 grantable	admin.release	grantable-shipped-granted	operator MAY grant per-role via `roles:`; the shipped authz.yaml grants it to admin (#165)
-grantable	session.prompt	grantable-not-granted	operator MAY grant per-role via `roles:` (#162), admin or user, with a destination via destinations: (#172); ships ungranted and unlisted
+grantable	session.prompt	grantable-shipped-granted-admin-and-user	operator MAY grant per-role via roles:; the shipped authz.yaml grants it to admin and user (#162, #170, #609); a destination via destinations: (#172) is still needed and the shipped file has none; a person's effective grant must also hold session.new (#170)
+grantable	session.new	grantable-shipped-granted-admin-and-user	operator MAY grant per-role via roles:; the shipped authz.yaml grants it to admin and user (#170, #609)
+grantable	session.close	grantable-shipped-granted-admin-and-user	operator MAY grant per-role via roles:; the shipped authz.yaml grants it to admin and user (#170, #609)
+grantable	session.list	grantable-shipped-granted-admin-and-user	operator MAY grant per-role via roles:; the shipped authz.yaml grants it to admin and user (#170, #609)
+grantable	session.delete	grantable-shipped-granted-admin-and-user	operator MAY grant per-role via roles:; the shipped authz.yaml grants it to admin and user (#170, #609)
 grantable	session.task	grantable-shipped-granted-admin-and-user	operator MAY grant per-role via roles:; the shipped authz.yaml grants it to admin and user (#609)
 capability	Write	granted	grammar capability; shipped Write(~/projects/**) allow, independent of Read; paired sensitive-path denies (#158)
 action-vocab	admin.status	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608)
@@ -82,9 +86,12 @@ action-vocab	admin.baseline.accept	subject-limitable	a `subjects:` actions list 
 action-vocab	admin.contain	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608)
 action-vocab	admin.release	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608)
 action-vocab	session.prompt	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608)
+action-vocab	session.new	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608, #170); an agent's policy.yaml allow lifts only its default deny (#609, ADR-0033 decision 4)
+action-vocab	session.close	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608, #170)
+action-vocab	session.list	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608, #170)
+action-vocab	session.delete	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608, #170)
+action-vocab	session.task	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608); an agent's policy.yaml actions list limits it the same way (#609)
 action-vocab	fs.read	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608)
 action-vocab	fs.write	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608)
 action-vocab	fs.delete	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608)
 action-vocab	fs.mkdir	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608)
-action-vocab	session.new	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608); an agent's policy.yaml allow lifts only its default deny (#609, ADR-0033 decision 4); no role may grant it until #170
-action-vocab	session.task	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608); an agent's policy.yaml actions list limits it the same way (#609)

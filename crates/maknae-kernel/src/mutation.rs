@@ -1,5 +1,9 @@
 //! Mutation preparation and the durable-intent gate. Every effect is a subject-side
 //! attempt; its progress and completion are client reported.
+use crate::conversation::{
+    facts::{gather, ConversationFacts},
+    store::ConversationStore,
+};
 use crate::{
     blocking_guard::AUDIT_APPEND_TIMEOUT,
     handler::{build_authz_request, delegated_plan, discharge_plan, lexical_pregate, Stamp},
@@ -18,7 +22,7 @@ use maknae_proto::{
     WriteMode, PROTOCOL_VERSION,
 };
 use maknae_security::{AttrValue, Authorizer, Decision, FsOperation, Lane};
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, BorrowedFd};
 use std::{
     os::fd::OwnedFd,
     path::{Path, PathBuf},
@@ -40,6 +44,84 @@ fn capacity() -> Arc<Semaphore> {
 }
 fn mutating() -> &'static UidGate {
     MUTATING.get_or_init(UidGate::default)
+}
+
+fn busy_reason(busy: Busy) -> &'static str {
+    match busy {
+        Busy::Requester => "mutation worker budget exhausted for this requester",
+        Busy::Global => "mutation worker budget exhausted",
+    }
+}
+
+pub(crate) const STORE_SLOTS_PER_UID: usize = 1;
+const STORE_WORKERS: usize = 16;
+static STORE_CAPACITY: OnceLock<Arc<Semaphore>> = OnceLock::new();
+fn store_capacity() -> Arc<Semaphore> {
+    Arc::clone(STORE_CAPACITY.get_or_init(|| Arc::new(Semaphore::new(STORE_WORKERS))))
+}
+static STORE_SLOTS: OnceLock<std::sync::Mutex<std::collections::HashMap<u32, Arc<Semaphore>>>> =
+    OnceLock::new();
+
+fn store_slots(uid: u32) -> Arc<Semaphore> {
+    let mut slots = STORE_SLOTS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    slots.retain(|_, s| Arc::strong_count(s) > 1);
+    Arc::clone(
+        slots
+            .entry(uid)
+            .or_insert_with(|| Arc::new(Semaphore::new(STORE_SLOTS_PER_UID))),
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Blocked {
+    NotStarted,
+    Unknown,
+}
+
+impl std::fmt::Display for Blocked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NotStarted => "store work did not start within its bound",
+            Self::Unknown => "store work did not finish within its bound",
+        })
+    }
+}
+
+/// Runs on the requester's own slot, then a store worker; never on the mutation pool.
+pub(crate) async fn blocking<T, F>(uid: u32, timeout: Duration, f: F) -> Result<T, Blocked>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    let admitted = tokio::time::timeout_at(deadline, async {
+        let own = store_slots(uid).acquire_owned().await.ok()?;
+        let shared = store_capacity().acquire_owned().await.ok()?;
+        Some((own, shared))
+    })
+    .await;
+    let Ok(Some(held)) = admitted else {
+        return Err(Blocked::NotStarted);
+    };
+    let work = tokio::task::spawn_blocking(move || {
+        let _held = held;
+        f()
+    });
+    match tokio::time::timeout_at(deadline, work).await {
+        Ok(Ok(v)) => Ok(v),
+        _ => Err(Blocked::Unknown),
+    }
+}
+
+pub(crate) fn verify_cwd(fd: BorrowedFd<'_>) -> Result<String, String> {
+    let path = maknae_io::verify_unconfined_directory(fd)
+        .map_err(|e| format!("cwd evidence refused: {e}"))?;
+    let path = path.to_str().ok_or("non-UTF-8 cwd")?.to_owned();
+    checked(&path)?;
+    Ok(path)
 }
 
 enum Evidence {
@@ -65,6 +147,14 @@ fn path(verb: &Verb) -> Option<&str> {
         _ => None,
     }
 }
+fn cited(verb: &Verb) -> Option<&str> {
+    match verb {
+        Verb::FsWrite { conversation, .. } | Verb::Read { conversation, .. } => {
+            conversation.as_deref()
+        }
+        _ => None,
+    }
+}
 fn normal(component: &str) -> bool {
     !component.is_empty()
         && component != "."
@@ -72,7 +162,7 @@ fn normal(component: &str) -> bool {
         && !component.contains('/')
         && !component.contains('\0')
 }
-fn checked(path: &str) -> Result<(), String> {
+pub(crate) fn checked(path: &str) -> Result<(), String> {
     if path.len() > maknae_proto::MAX_MUTATION_PATH_BYTES || path.contains('\0') {
         return Err("mutation path limit or NUL".into());
     }
@@ -246,6 +336,7 @@ type AuthorizeErr = (String, String, DecidedBy);
 /// decided, in both arms (on a deny, the path that refused, #275), and that
 /// path's rule, except on a deny written in place of a permit that was never
 /// acted on.
+#[allow(clippy::too_many_arguments)]
 fn authorize<P: Authorizer>(
     prepared: &PreparedMutation,
     verb: &Verb,
@@ -253,13 +344,14 @@ fn authorize<P: Authorizer>(
     home: Option<&Path>,
     authorizer: &P,
     policy_name: &str,
+    facts: Option<&ConversationFacts>,
     stamp: &Stamp<'_>,
 ) -> Result<(DecidedBy, maknae_proto::ObjectLabel), AuthorizeErr> {
     let requests: Vec<_> = prepared
         .paths
         .iter()
         .map(|path| {
-            let mut request = build_authz_request(verb, uid, home, Lane::Local, None, stamp);
+            let mut request = build_authz_request(verb, uid, home, Lane::Local, None, facts, stamp);
             request
                 .resource
                 .0
@@ -470,6 +562,7 @@ pub(crate) async fn handle<S, E, P>(
     authz_timeout: Duration,
     caps: AttemptCaps,
     policy_name: &str,
+    conversations: Arc<dyn ConversationStore>,
     stamp: &Stamp<'_>,
 ) -> bool
 where
@@ -491,11 +584,7 @@ where
     let (claim, permit) = match mutating().try_admit(uid, &capacity()) {
         Ok(slot) => slot.split(),
         Err(busy) => {
-            let reason = match busy {
-                Busy::Requester => "mutation worker budget exhausted for this requester",
-                Busy::Global => "mutation worker budget exhausted",
-            };
-            refuse(stream, cfg, &*emit, record, reason.into()).await;
+            refuse(stream, cfg, &*emit, record, busy_reason(busy).into()).await;
             return true;
         }
     };
@@ -511,6 +600,7 @@ where
         tokio::task::spawn_blocking(move || {
             let _claim = claim;
             let prepared = prepare(original.clone(), fd, &home, uid, lane)?;
+            let gathered = gather(&*conversations, uid, cited(&original), None);
             let stamp = match &stamped {
                 None => Stamp::Client,
                 Some((agent, task)) => Stamp::Agent {
@@ -525,13 +615,23 @@ where
                 Some(&home),
                 &*authorizer,
                 &policy_name,
+                gathered.as_ref().map(|(facts, _)| facts),
                 &stamp,
             );
-            Ok::<_, String>((prepared, permit, decision))
+            let mut touch_failure = None;
+            if let (Ok(_), Some((_, Some(rec)))) = (&decision, &gathered) {
+                let now = crate::run::unix_now();
+                if let Err(e) =
+                    conversations.update(&rec.id, rec.fence, &mut |r| r.last_active = now)
+                {
+                    touch_failure = Some(e.to_string());
+                }
+            }
+            Ok::<_, String>((prepared, permit, decision, touch_failure))
         }),
     )
     .await;
-    let (prepared, permit, decision) = match prepared {
+    let (prepared, permit, decision, touch_failure) = match prepared {
         Ok(Ok(Ok(p))) => p,
         Ok(Ok(Err(reason))) => {
             refuse(stream, cfg, &*emit, record, reason).await;
@@ -604,6 +704,16 @@ where
     )
     .await
     {
+        if let Some(why) = touch_failure {
+            let mut note = intent.record.clone();
+            note.seq = seq.next();
+            note.mutation = None;
+            note.outcome.reason = format!("conversation activity not recorded: {why}");
+            note.outcome.posture = "unavailable".into();
+            if let Err(e) = emit.emit_within(&note, AUDIT_APPEND_TIMEOUT).await {
+                eprintln!("maknaed: AUDIT WRITE FAILED on conversation record: {e}");
+            }
+        }
         attempt(
             stream,
             cfg,
@@ -859,25 +969,101 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
+    fn a_released_store_slot_is_pruned() {
+        let (released, held) = (4_170_201, 4_170_202);
+        drop(store_slots(released));
+        let _held = store_slots(held);
+        let slots = STORE_SLOTS
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(!slots.contains_key(&released));
+        assert!(slots.contains_key(&held));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stalled_requester_pins_only_its_own_store_slot() {
+        let _turn = EUID_TURN.lock().await;
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let (stalled, other) = (4_170_101, 4_170_102);
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let held = Arc::new(std::sync::Mutex::new(held));
+        let entered = Arc::new(AtomicUsize::new(0));
+        let attempts: Vec<_> = (0..4)
+            .map(|_| {
+                let (held, entered) = (Arc::clone(&held), Arc::clone(&entered));
+                tokio::spawn(blocking(stalled, Duration::from_millis(300), move || {
+                    entered.fetch_add(1, SeqCst);
+                    let _ = held.lock().unwrap().recv();
+                }))
+            })
+            .collect();
+        let mut results = Vec::new();
+        for a in attempts {
+            results.push(a.await.unwrap());
+        }
+        results.sort_by_key(|r| *r == Err(Blocked::Unknown));
+        assert_eq!(
+            results,
+            vec![
+                Err(Blocked::NotStarted),
+                Err(Blocked::NotStarted),
+                Err(Blocked::NotStarted),
+                Err(Blocked::Unknown)
+            ]
+        );
+        assert_eq!(entered.load(SeqCst), STORE_SLOTS_PER_UID);
+        assert_eq!(blocking(other, Duration::from_secs(5), || 7).await, Ok(7));
+        assert!(mutating().try_claim(other).is_some());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), capacity().acquire_owned())
+                .await
+                .is_ok(),
+            "a shared worker is still free for another requester's mutation"
+        );
+        assert_eq!(
+            blocking(stalled, Duration::from_millis(100), || 1).await,
+            Err(Blocked::NotStarted)
+        );
+        release.send(()).unwrap();
+        assert_eq!(blocking(stalled, Duration::from_secs(2), || 1).await, Ok(1));
+    }
+
+    #[test]
+    fn blocked_work_names_whether_it_ever_started() {
+        assert_eq!(
+            Blocked::NotStarted.to_string(),
+            "store work did not start within its bound"
+        );
+        assert_eq!(
+            Blocked::Unknown.to_string(),
+            "store work did not finish within its bound"
+        );
+    }
+
+    #[test]
     fn the_object_label_is_the_ceiling_operands_resolution_with_no_categories() {
         let verb = Verb::Read {
             path: "/h/f".into(),
             conversation: None,
             page: None,
         };
-        let plain = build_authz_request(&verb, 1000, None, Lane::Local, None, &Stamp::Client);
+        let plain = build_authz_request(&verb, 1000, None, Lane::Local, None, None, &Stamp::Client);
         let us = object_label("US", &plain).unwrap();
         assert_eq!(
             (us.level.as_str(), us.categories.len()),
             ("UNCLASSIFIED", 0)
         );
-        let mut marked = build_authz_request(&verb, 1000, None, Lane::Local, None, &Stamp::Client);
+        let mut marked =
+            build_authz_request(&verb, 1000, None, Lane::Local, None, None, &Stamp::Client);
         marked.resource.0.insert(
             maknae_security::RESOURCE_CLASSIFICATION,
             AttrValue::Str("SECRET//NOFORN".into()),
         );
         assert_eq!(object_label("US", &marked).unwrap().level, "SECRET");
-        let mut foreign = build_authz_request(&verb, 1000, None, Lane::Local, None, &Stamp::Client);
+        let mut foreign =
+            build_authz_request(&verb, 1000, None, Lane::Local, None, None, &Stamp::Client);
         foreign.resource.0.insert(
             maknae_security::RESOURCE_CLASSIFICATION,
             AttrValue::Str("NOT A LEVEL".into()),
@@ -1197,6 +1383,7 @@ mod tests {
             Duration::from_secs(10),
             AttemptCaps::default(),
             "US",
+            Arc::new(crate::conversation::mem_store::MemStore::default()),
             &Stamp::Client,
         );
         let second_emit = Arc::new(Recorder::default());
@@ -1237,6 +1424,7 @@ mod tests {
                     Duration::from_secs(10),
                     AttemptCaps::default(),
                     "US",
+                    Arc::new(crate::conversation::mem_store::MemStore::default()),
                     &Stamp::Client,
                 )
                 .await
@@ -1296,6 +1484,7 @@ mod tests {
                     Duration::from_secs(10),
                     AttemptCaps::default(),
                     "US",
+                    Arc::new(crate::conversation::mem_store::MemStore::default()),
                     &Stamp::Client,
                 )
                 .await
@@ -1332,6 +1521,7 @@ mod tests {
                 Duration::from_secs(1),
                 AttemptCaps::default(),
                 "US",
+                Arc::new(crate::conversation::mem_store::MemStore::default()),
                 &Stamp::Client,
             )
             .await
@@ -1368,6 +1558,7 @@ mod tests {
                 Duration::from_secs(1),
                 AttemptCaps::default(),
                 "US",
+                Arc::new(crate::conversation::mem_store::MemStore::default()),
                 &Stamp::Client,
             )
             .await
@@ -1404,6 +1595,7 @@ mod tests {
             Duration::from_millis(20),
             AttemptCaps::default(),
             "US",
+            Arc::new(crate::conversation::mem_store::MemStore::default()),
             &Stamp::Client,
         )
         .await;
@@ -1439,6 +1631,7 @@ mod tests {
                 Duration::from_secs(1),
                 AttemptCaps::default(),
                 "US",
+                Arc::new(crate::conversation::mem_store::MemStore::default()),
                 &Stamp::Client,
             )
             .await
@@ -1469,6 +1662,7 @@ mod tests {
                 Duration::from_secs(1),
                 AttemptCaps::default(),
                 "US",
+                Arc::new(crate::conversation::mem_store::MemStore::default()),
                 &Stamp::Client,
             )
             .await
@@ -1662,6 +1856,7 @@ mod tests {
             Some(&fx.root),
             &pdp,
             "US",
+            None,
             &Stamp::Client,
         )
         .expect("both paths decided on the snapshot in force when the mutation began");
@@ -1674,6 +1869,7 @@ mod tests {
             Some(&fx.root),
             &pdp,
             "US",
+            None,
             &Stamp::Client,
         )
         .unwrap_err();
@@ -1701,6 +1897,7 @@ mod tests {
             Some(&fx.root),
             &pdp,
             "US",
+            None,
             &Stamp::Client,
         )
         .unwrap();
@@ -1712,6 +1909,7 @@ mod tests {
             Some(&fx.root),
             &pdp,
             "NO-SUCH-SYSTEM",
+            None,
             &Stamp::Client,
         )
         .unwrap_err();

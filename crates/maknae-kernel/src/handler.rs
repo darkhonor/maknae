@@ -89,6 +89,10 @@ pub enum Dispatch {
     ContainRequested,
     /// The peer asked to lift a containment; the target is read from the verb by the arm, never passed to the PDP.
     ReleaseRequested,
+    ConversationNewRequested,
+    ConversationCloseRequested,
+    ConversationListRequested,
+    ConversationDeleteRequested,
 }
 
 /// The verbs routed to `mutation::handle`; only these resolve the requester's home.
@@ -114,6 +118,10 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         Verb::AdminContain { .. } => Dispatch::ContainRequested,
         Verb::AdminRelease { .. } => Dispatch::ReleaseRequested,
         Verb::SessionPrompt { .. } => Dispatch::PromptRequested,
+        Verb::SessionNew { .. } => Dispatch::ConversationNewRequested,
+        Verb::SessionClose { .. } => Dispatch::ConversationCloseRequested,
+        Verb::SessionList { .. } => Dispatch::ConversationListRequested,
+        Verb::SessionDelete { .. } => Dispatch::ConversationDeleteRequested,
         Verb::AdminAuditTail
         | Verb::AdminPolicyReload
         | Verb::AdminSubjectBind
@@ -124,11 +132,7 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         | Verb::AdminProviderDisable
         | Verb::AdminSessionList
         | Verb::AdminSessionTerminate
-        | Verb::SessionNew
         | Verb::SessionResume
-        | Verb::SessionClose
-        | Verb::SessionDelete
-        | Verb::SessionList
         | Verb::SessionFork
         | Verb::SessionCancel
         | Verb::SessionSetconfigoption
@@ -292,11 +296,11 @@ pub fn verb_to_action(verb: &Verb) -> &'static str {
         Verb::AdminProviderDisable => "admin.provider.disable",
         Verb::AdminSessionList => "admin.session.list",
         Verb::AdminSessionTerminate => "admin.session.terminate",
-        Verb::SessionNew => "session.new",
+        Verb::SessionNew { .. } => "session.new",
         Verb::SessionResume => "session.resume",
-        Verb::SessionClose => "session.close",
-        Verb::SessionDelete => "session.delete",
-        Verb::SessionList => "session.list",
+        Verb::SessionClose { .. } => "session.close",
+        Verb::SessionDelete { .. } => "session.delete",
+        Verb::SessionList { .. } => "session.list",
         Verb::SessionFork => "session.fork",
         Verb::SessionPrompt { .. } => "session.prompt",
         Verb::SessionCancel => "session.cancel",
@@ -387,6 +391,7 @@ pub fn build_authz_request(
     home: Option<&std::path::Path>,
     lane: maknae_security::Lane,
     admitted: Option<&crate::provider_choice::AdmittedChoice<'_>>,
+    facts: Option<&crate::conversation::facts::ConversationFacts>,
     stamp: &Stamp<'_>,
 ) -> maknae_security::Request {
     use maknae_security::{Action, AttrValue, Attributes, Context, Resource, Subject};
@@ -422,6 +427,24 @@ pub fn build_authz_request(
     let mut resource = Attributes::new();
     if let Verb::Read { path, .. } = verb {
         resource.insert("path", AttrValue::Str(path.clone()));
+    }
+    if let Some(f) = facts {
+        resource.insert(
+            maknae_authz_basic::RESOURCE_CONVERSATION_STATE_KEY,
+            AttrValue::Str(f.state.as_attr().to_owned()),
+        );
+        if let Some(owner) = f.owner_uid {
+            resource.insert(
+                maknae_authz_basic::RESOURCE_CONVERSATION_OWNER_KEY,
+                AttrValue::Int(i64::from(owner)),
+            );
+        }
+        if let Some(e) = f.extends {
+            resource.insert(
+                maknae_authz_basic::RESOURCE_CONVERSATION_EXTENDS_KEY,
+                AttrValue::Str(crate::conversation::facts::extends_attr(e).to_owned()),
+            );
+        }
     }
     if let (Verb::SessionPrompt { .. }, Some(a)) = (verb, admitted) {
         resource.insert(
@@ -607,7 +630,8 @@ mod tests {
         let get = |r: &maknae_security::Request, k: &str| r.subject.0.get(k).cloned();
         let s = |v: &str| Some(AttrValue::Str(v.into()));
         let local = maknae_security::Lane::Local;
-        let client = build_authz_request(&Verb::Whoami, 501, None, local, None, &Stamp::Client);
+        let client =
+            build_authz_request(&Verb::Whoami, 501, None, local, None, None, &Stamp::Client);
         assert_eq!(get(&client, SUBJECT_CHANNEL), s(CHANNEL_CLIENT));
         for k in [SUBJECT_AGENT, SUBJECT_TASK, SUBJECT_TASKER] {
             assert_eq!(get(&client, k), None, "{k}");
@@ -618,6 +642,7 @@ mod tests {
             2001,
             None,
             local,
+            None,
             None,
             &Stamp::Agent {
                 agent: &hobi,
@@ -634,6 +659,7 @@ mod tests {
             2001,
             None,
             local,
+            None,
             None,
             &Stamp::Agent {
                 agent: &hobi,
@@ -724,6 +750,7 @@ mod tests {
             None,
             maknae_security::Lane::Local,
             Some(&admitted),
+            None,
             &Stamp::Client,
         );
         assert_eq!(
@@ -735,6 +762,7 @@ mod tests {
             1002,
             None,
             maknae_security::Lane::Local,
+            None,
             None,
             &Stamp::Client,
         )
@@ -748,6 +776,7 @@ mod tests {
             None,
             maknae_security::Lane::Local,
             Some(&admitted),
+            None,
             &Stamp::Client,
         )
         .resource
@@ -801,6 +830,7 @@ mod tests {
             None,
             maknae_security::Lane::Local,
             Some(&admitted),
+            None,
             &Stamp::Client,
         );
         assert_eq!(
@@ -815,6 +845,7 @@ mod tests {
             None,
             maknae_security::Lane::Local,
             None,
+            None,
             &Stamp::Client,
         )
         .resource
@@ -827,6 +858,7 @@ mod tests {
             None,
             maknae_security::Lane::Local,
             Some(&admitted),
+            None,
             &Stamp::Client,
         )
         .resource
@@ -973,6 +1005,10 @@ mod tests {
                 "admin.contain",
                 "admin.release",
                 "session.prompt",
+                "session.new",
+                "session.close",
+                "session.list",
+                "session.delete",
                 "session.task"
             ],
             "the hand-copied list in the class test above must match the constant"
@@ -1229,6 +1265,163 @@ mod tests {
 
     // ---- build_authz_request ----
 
+    fn cid() -> maknae_proto::ConversationId {
+        maknae_proto::ConversationId::parse(&"5".repeat(32)).unwrap()
+    }
+
+    #[test]
+    fn dispatch_maps_each_session_verb() {
+        assert_eq!(
+            dispatch_verb(&Verb::SessionNew {
+                cwd: "/home/sentinel-170".into()
+            }),
+            Dispatch::ConversationNewRequested
+        );
+        assert_eq!(
+            dispatch_verb(&Verb::SessionClose {
+                conversation: cid()
+            }),
+            Dispatch::ConversationCloseRequested
+        );
+        assert_eq!(
+            dispatch_verb(&Verb::SessionList { cursor: None }),
+            Dispatch::ConversationListRequested
+        );
+        assert_eq!(
+            dispatch_verb(&Verb::SessionDelete {
+                conversation: cid()
+            }),
+            Dispatch::ConversationDeleteRequested
+        );
+        assert!(!is_filesystem_verb(&Verb::SessionNew {
+            cwd: "/home/sentinel-170".into()
+        }));
+    }
+
+    fn conv_attrs(r: &maknae_security::Request) -> [Option<&maknae_security::AttrValue>; 3] {
+        [
+            r.resource
+                .0
+                .get(maknae_authz_basic::RESOURCE_CONVERSATION_STATE_KEY),
+            r.resource
+                .0
+                .get(maknae_authz_basic::RESOURCE_CONVERSATION_OWNER_KEY),
+            r.resource
+                .0
+                .get(maknae_authz_basic::RESOURCE_CONVERSATION_EXTENDS_KEY),
+        ]
+    }
+
+    #[test]
+    fn build_authz_request_writes_conversation_attributes() {
+        use crate::conversation::chain::Extends;
+        use crate::conversation::facts::{ConversationFacts, FactState};
+        use maknae_security::AttrValue;
+        let verb = Verb::SessionPrompt {
+            conversation: cid().as_str().into(),
+            turns: vec![],
+            output_tokens: None,
+            choice: None,
+        };
+        let s = |v: &str| Some(AttrValue::Str(v.into()));
+        for (state, extends, want_state, want_extends) in [
+            (
+                FactState::Active,
+                Some(Extends::Advance { new: 1 }),
+                "active",
+                s("advance"),
+            ),
+            (
+                FactState::Active,
+                Some(Extends::Retry),
+                "active",
+                s("retry"),
+            ),
+            (
+                FactState::Active,
+                Some(Extends::Rewrite),
+                "active",
+                s("rewrite"),
+            ),
+            (FactState::Unknown, None, "unknown", None),
+            (FactState::Error, None, "error", None),
+        ] {
+            let facts = ConversationFacts {
+                state,
+                owner_uid: Some(4242),
+                extends,
+            };
+            let r = build_authz_request(
+                &verb,
+                1170,
+                None,
+                maknae_security::Lane::Local,
+                None,
+                Some(&facts),
+                &Stamp::Client,
+            );
+            assert_eq!(
+                conv_attrs(&r),
+                [
+                    s(want_state).as_ref(),
+                    Some(&AttrValue::Int(4242)),
+                    want_extends.as_ref()
+                ],
+                "{state:?} {extends:?}"
+            );
+        }
+        let ownerless = ConversationFacts {
+            state: FactState::Error,
+            owner_uid: None,
+            extends: None,
+        };
+        let r = build_authz_request(
+            &verb,
+            1170,
+            None,
+            maknae_security::Lane::Local,
+            None,
+            Some(&ownerless),
+            &Stamp::Client,
+        );
+        assert_eq!(conv_attrs(&r), [s("error").as_ref(), None, None]);
+    }
+
+    #[test]
+    fn no_conversation_means_no_attributes() {
+        let verb = Verb::SessionDelete {
+            conversation: cid(),
+        };
+        let r = build_authz_request(
+            &verb,
+            1170,
+            None,
+            maknae_security::Lane::Local,
+            None,
+            None,
+            &Stamp::Client,
+        );
+        assert_eq!(conv_attrs(&r), [None, None, None]);
+        assert!(r.resource.0.get("path").is_none());
+    }
+
+    #[test]
+    fn session_new_carries_no_resource_path() {
+        let new = Verb::SessionNew {
+            cwd: "/home/sentinel-170/as-sent".into(),
+        };
+        let r = build_authz_request(
+            &new,
+            1170,
+            None,
+            maknae_security::Lane::Local,
+            None,
+            None,
+            &Stamp::Client,
+        );
+        assert!(r.resource.0.get("path").is_none());
+    }
+
     #[test]
     fn the_home_is_stamped_on_the_subject_only_when_the_kernel_has_one() {
         let home = std::path::Path::new("/home/b");
@@ -1237,6 +1430,7 @@ mod tests {
             501,
             Some(home),
             maknae_security::Lane::Local,
+            None,
             None,
             &Stamp::Client,
         );
@@ -1249,6 +1443,7 @@ mod tests {
             501,
             None,
             maknae_security::Lane::Local,
+            None,
             None,
             &Stamp::Client,
         );
@@ -1265,6 +1460,7 @@ mod tests {
             Some(home),
             maknae_security::Lane::Local,
             None,
+            None,
             &Stamp::Client,
         );
         assert_eq!(req.subject.0.get(maknae_security::SUBJECT_HOME), None);
@@ -1278,6 +1474,7 @@ mod tests {
             None,
             maknae_security::Lane::Local,
             None,
+            None,
             &Stamp::Client,
         );
         assert_eq!(
@@ -1289,6 +1486,7 @@ mod tests {
             u32::MAX,
             None,
             maknae_security::Lane::Local,
+            None,
             None,
             &Stamp::Client,
         );
@@ -1305,6 +1503,7 @@ mod tests {
             501,
             None,
             maknae_security::Lane::Local,
+            None,
             None,
             &Stamp::Client,
         );
@@ -1329,6 +1528,7 @@ mod tests {
             None,
             maknae_security::Lane::Local,
             None,
+            None,
             &Stamp::Client,
         );
         assert_eq!(r.action.0, "fs.read");
@@ -1351,10 +1551,24 @@ mod tests {
 
         // The same verb on both lanes: the stamp follows the ARGUMENT, so it cannot
         // be a function of anything the client sent.
-        let local =
-            build_authz_request(&Verb::Whoami, 501, None, Lane::Local, None, &Stamp::Client);
-        let remote =
-            build_authz_request(&Verb::Whoami, 501, None, Lane::Remote, None, &Stamp::Client);
+        let local = build_authz_request(
+            &Verb::Whoami,
+            501,
+            None,
+            Lane::Local,
+            None,
+            None,
+            &Stamp::Client,
+        );
+        let remote = build_authz_request(
+            &Verb::Whoami,
+            501,
+            None,
+            Lane::Remote,
+            None,
+            None,
+            &Stamp::Client,
+        );
         assert_eq!(
             local.context.0.get(CONTEXT_DAC_LANE),
             Some(&AttrValue::Str("local".into()))
@@ -1374,6 +1588,7 @@ mod tests {
             501,
             None,
             Lane::Local,
+            None,
             None,
             &Stamp::Client,
         );
@@ -1529,11 +1744,21 @@ mod tests {
             Verb::AdminProviderDisable,
             Verb::AdminSessionList,
             Verb::AdminSessionTerminate,
-            Verb::SessionNew,
+            Verb::SessionNew { cwd: "/w".into() },
             Verb::SessionResume,
-            Verb::SessionClose,
-            Verb::SessionDelete,
-            Verb::SessionList,
+            Verb::SessionClose {
+                conversation: maknae_proto::ConversationId::parse(
+                    "0123456789abcdef0123456789abcdef",
+                )
+                .unwrap(),
+            },
+            Verb::SessionDelete {
+                conversation: maknae_proto::ConversationId::parse(
+                    "0123456789abcdef0123456789abcdef",
+                )
+                .unwrap(),
+            },
+            Verb::SessionList { cursor: None },
             Verb::SessionFork,
             Verb::SessionPrompt {
                 conversation: "c".into(),
@@ -1709,6 +1934,7 @@ mod tests {
                 None,
                 maknae_security::Lane::Local,
                 None,
+                None,
                 &Stamp::Client,
             );
             if matches!(v, Verb::Read { .. }) {
@@ -1737,6 +1963,7 @@ mod tests {
             501,
             None,
             maknae_security::Lane::Local,
+            None,
             None,
             &Stamp::Client,
         );
@@ -1899,6 +2126,7 @@ mod tests {
                 None,
                 maknae_security::Lane::Local,
                 None,
+                None,
                 &Stamp::Client,
             );
             assert!(
@@ -1931,6 +2159,7 @@ mod tests {
                     501,
                     None,
                     maknae_security::Lane::Local,
+                    None,
                     None,
                     &Stamp::Client,
                 )

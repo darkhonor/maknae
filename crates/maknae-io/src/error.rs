@@ -171,6 +171,11 @@ pub enum IoError {
         path: PathBuf,
         kind: IoKind,
     },
+    /// The unlink happened, then the directory sync failed: the name may return after a crash.
+    RemovedNotDurable {
+        path: PathBuf,
+        kind: IoKind,
+    },
 }
 
 impl std::fmt::Display for IoError {
@@ -263,6 +268,11 @@ impl std::fmt::Display for IoError {
                 "published, but the directory sync failed ({kind:?}): {}",
                 path.display()
             ),
+            Self::RemovedNotDurable { path, kind } => write!(
+                f,
+                "removed, but the directory sync failed ({kind:?}): {}",
+                path.display()
+            ),
         }
     }
 }
@@ -301,6 +311,14 @@ mod tests {
             }
             .to_string(),
             "published, but the directory sync failed (Other { raw: 5 }): /etc/maknae/cfg"
+        );
+        assert_eq!(
+            IoError::RemovedNotDurable {
+                path: p.clone(),
+                kind: IoKind::Other { raw: 5 },
+            }
+            .to_string(),
+            "removed, but the directory sync failed (Other { raw: 5 }): /etc/maknae/cfg"
         );
         assert_eq!(
             IoError::SizeChanged {

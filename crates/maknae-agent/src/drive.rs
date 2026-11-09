@@ -80,6 +80,7 @@ pub fn step(reply: &PromptReply, steps_remaining: u32, budget: &Budget) -> Next 
     Next::Execute(reply.tool_calls.clone())
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub struct Outcome {
     pub answer: Option<String>,
     pub stopped: Option<StopReason>,
@@ -204,7 +205,7 @@ pub async fn drive_session<P: Plane>(
                     steps_used,
                 }
             }
-            Err(PlaneError::Refused) => {
+            Err(PlaneError::Refused | PlaneError::Declined { .. }) => {
                 return Outcome {
                     answer: None,
                     stopped: Some(StopReason::PromptRefused),
@@ -453,6 +454,18 @@ mod tests {
         write_outcome: WriteOutcome,
     }
     impl Plane for Scripted {
+        async fn open(
+            &mut self,
+            _: &std::path::Path,
+        ) -> Result<maknae_proto::ConversationId, PlaneError> {
+            Err(PlaneError::Unavailable)
+        }
+        async fn close(
+            &mut self,
+            _: &maknae_proto::ConversationId,
+        ) -> Result<maknae_proto::ConversationView, PlaneError> {
+            Err(PlaneError::Unavailable)
+        }
         async fn prompt(&mut self, _c: &str, t: &[Turn]) -> Result<PromptReply, PlaneError> {
             self.prompts += 1;
             self.seen.push(t.to_vec());
@@ -1169,6 +1182,13 @@ mod tests {
         for (err, want) in [
             (PlaneError::FrameTooLarge, StopReason::FrameBound),
             (PlaneError::Refused, StopReason::PromptRefused),
+            (
+                PlaneError::Declined {
+                    code: maknae_proto::ProtoErrCode::TooLarge,
+                    reason: "r".into(),
+                },
+                StopReason::PromptRefused,
+            ),
             // Its OWN reason, never folded into `PromptRefused`: the CLI
             // prints a different line for it, because a pre-gate `BadRequest`
             // provably never reached the provider.
@@ -1421,6 +1441,18 @@ mod tests {
         stop: &'a AtomicBool,
     }
     impl Plane for StopOnWrite<'_> {
+        async fn open(
+            &mut self,
+            _: &std::path::Path,
+        ) -> Result<maknae_proto::ConversationId, PlaneError> {
+            Err(PlaneError::Unavailable)
+        }
+        async fn close(
+            &mut self,
+            _: &maknae_proto::ConversationId,
+        ) -> Result<maknae_proto::ConversationView, PlaneError> {
+            Err(PlaneError::Unavailable)
+        }
         async fn prompt(&mut self, c: &str, t: &[Turn]) -> Result<PromptReply, PlaneError> {
             self.inner.prompt(c, t).await
         }
@@ -1457,6 +1489,18 @@ mod tests {
         stop: &'a AtomicBool,
     }
     impl Plane for StopOnFirstPrompt<'_> {
+        async fn open(
+            &mut self,
+            _: &std::path::Path,
+        ) -> Result<maknae_proto::ConversationId, PlaneError> {
+            Err(PlaneError::Unavailable)
+        }
+        async fn close(
+            &mut self,
+            _: &maknae_proto::ConversationId,
+        ) -> Result<maknae_proto::ConversationView, PlaneError> {
+            Err(PlaneError::Unavailable)
+        }
         async fn prompt(&mut self, c: &str, t: &[Turn]) -> Result<PromptReply, PlaneError> {
             self.stop.store(true, Ordering::Release);
             self.inner.prompt(c, t).await
@@ -1593,6 +1637,18 @@ mod tests {
         queued: Vec<String>,
     }
     impl Plane for Diagnosing {
+        async fn open(
+            &mut self,
+            _: &std::path::Path,
+        ) -> Result<maknae_proto::ConversationId, PlaneError> {
+            Err(PlaneError::Unavailable)
+        }
+        async fn close(
+            &mut self,
+            _: &maknae_proto::ConversationId,
+        ) -> Result<maknae_proto::ConversationView, PlaneError> {
+            Err(PlaneError::Unavailable)
+        }
         async fn prompt(&mut self, c: &str, t: &[Turn]) -> Result<PromptReply, PlaneError> {
             if let Some(d) = self.on_prompt.pop_front() {
                 self.queued.push(d.into());

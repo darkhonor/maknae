@@ -25,6 +25,15 @@ pub(crate) const RESOURCE_PATH: &str = "path";
 /// Set by the kernel, never the client; the arm refuses it absent.
 pub(crate) const RESOURCE_DESTINATION: &str = "destination";
 pub(crate) const RESOURCE_MODEL: &str = "model";
+pub(crate) const RESOURCE_CONVERSATION_OWNER: &str = "conversation_owner";
+pub(crate) const RESOURCE_CONVERSATION_STATE: &str = "conversation_state";
+pub(crate) const RESOURCE_CONVERSATION_EXTENDS: &str = "conversation_extends";
+pub(crate) const CONVERSATION_ACTIVE: &str = "active";
+pub(crate) const CONVERSATION_UNKNOWN: &str = "unknown";
+pub(crate) const CONVERSATION_ERROR: &str = "error";
+pub(crate) const EXTENDS_RETRY: &str = "retry";
+pub(crate) const EXTENDS_ADVANCE: &str = "advance";
+pub(crate) const EXTENDS_REWRITE: &str = "rewrite";
 
 /// One loaded policy snapshot: the parsed grammar + validated bindings.
 pub(crate) struct LoadedPolicy {
@@ -167,14 +176,14 @@ impl DestinationGrants {
 }
 
 /// The terms `roles:` may grant or deny; a term absent here is refused at load. Only
-/// `session.prompt` and `session.task` may be granted to `user`; `admin.baseline.accept` changes state.
+/// [`crate::USER_GRANTABLE`] may be granted to `user`; `admin.baseline.accept` changes state.
 // One line: the drift gate's extractor reads only the matched line.
 #[rustfmt::skip]
-pub(crate) const GRANTABLE_ACTIONS: [&str; 9] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt", "session.task"];
+pub(crate) const GRANTABLE_ACTIONS: [&str; 13] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt", "session.new", "session.close", "session.list", "session.delete", "session.task"];
 
 /// The terms a `subjects:` action list or a family wildcard can name.
 #[rustfmt::skip]
-pub(crate) const ACTION_VOCABULARY: [&str; 14] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt", "session.task", "fs.read", "fs.write", "fs.delete", "fs.mkdir", "session.new"];
+pub(crate) const ACTION_VOCABULARY: [&str; 17] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt", "session.new", "session.close", "session.list", "session.delete", "session.task", "fs.read", "fs.write", "fs.delete", "fs.mkdir"];
 
 /// An action entry as compiled against [`ACTION_VOCABULARY`]: `(term, entry as written)`.
 pub(crate) fn expand(
@@ -242,7 +251,7 @@ const fn str_eq(a: &str, b: &str) -> bool {
 /// demands the fourth assertion, which is the failure mode an unrolled check
 /// would otherwise have had.
 const _: () = {
-    let [a, b, c, d, e, f, g, h, i] = GRANTABLE_ACTIONS;
+    let [a, b, c, d, e, f, g, h, i, j, k, l, m] = GRANTABLE_ACTIONS;
     const WHY: &str = "admin.whoami is unconditional for admins and must not be grantable";
     assert!(!str_eq(a, "admin.whoami"), "{}", WHY);
     assert!(!str_eq(b, "admin.whoami"), "{}", WHY);
@@ -253,6 +262,10 @@ const _: () = {
     assert!(!str_eq(g, "admin.whoami"), "{}", WHY);
     assert!(!str_eq(h, "admin.whoami"), "{}", WHY);
     assert!(!str_eq(i, "admin.whoami"), "{}", WHY);
+    assert!(!str_eq(j, "admin.whoami"), "{}", WHY);
+    assert!(!str_eq(k, "admin.whoami"), "{}", WHY);
+    assert!(!str_eq(l, "admin.whoami"), "{}", WHY);
+    assert!(!str_eq(m, "admin.whoami"), "{}", WHY);
 };
 
 /// One expanded grant: the term and the entry it was written as.
@@ -389,40 +402,132 @@ fn no_rule_note(role_key: &str, action: &str) -> String {
     format!("role {role_key}: no rule for {action}")
 }
 
-/// The `session.prompt` arm (#172, #608): the role's grant, the kernel-resolved
-/// destination in the role's allowlist, and, when the subject lists `models`, the
-/// admitted model in that list. A missing destination is a Deny, not a policy gap.
+type Decision = (Verdict, Option<Cited>);
+
+fn refused(reason: &str) -> Decision {
+    (
+        Verdict::Deny {
+            reason: reason.into(),
+        },
+        None,
+    )
+}
+
+fn granted(lp: &LoadedPolicy, role_key: &'static str, term: &str) -> Result<String, Decision> {
+    match lp.action_grants.evaluate3_action(role_key, term) {
+        maknae_config::Match3::AllowMatch { source } => Ok(source),
+        maknae_config::Match3::DenyMatch { source } => Err((
+            Verdict::Deny {
+                reason: format!("denied by role grant {source}"),
+            },
+            Some(Cited::Grant {
+                role: role_key,
+                term: source,
+                effect: Effect::Deny,
+            }),
+        )),
+        maknae_config::Match3::NoMatch => Err((
+            Verdict::NotApplicable {
+                note: Some(no_rule_note(role_key, term)),
+            },
+            None,
+        )),
+    }
+}
+
+enum Conversation {
+    Absent,
+    Active { owned: bool },
+    Unknown,
+}
+
+/// `None` is failed-to-evaluate.
+fn conversation(req: &SecRequest, uid: u32) -> Option<Conversation> {
+    let attrs = &req.resource.0;
+    let state = match attrs.get(RESOURCE_CONVERSATION_STATE) {
+        None if attrs.get(RESOURCE_CONVERSATION_OWNER).is_none() => {
+            return Some(Conversation::Absent)
+        }
+        Some(AttrValue::Str(s)) => s.as_str(),
+        _ => return None,
+    };
+    match state {
+        CONVERSATION_ACTIVE => match attrs.get(RESOURCE_CONVERSATION_OWNER) {
+            Some(AttrValue::Int(owner)) => Some(Conversation::Active {
+                owned: *owner == i64::from(uid),
+            }),
+            _ => None,
+        },
+        CONVERSATION_UNKNOWN => Some(Conversation::Unknown),
+        _ => None,
+    }
+}
+
+const NOT_ACTIVE: &str = "conversation not active";
+const FOREIGN: &str = "conversation belongs to another subject";
+
+fn grant_permit(role_key: &'static str, source: String) -> Decision {
+    (
+        permit_with_audit(),
+        Some(Cited::Grant {
+            role: role_key,
+            term: source,
+            effect: Effect::Allow,
+        }),
+    )
+}
+
+fn decide_session(
+    lp: &LoadedPolicy,
+    req: &SecRequest,
+    role_key: &'static str,
+    uid: u32,
+) -> Decision {
+    let action = req.action.0.as_str();
+    let source = match granted(lp, role_key, action) {
+        Ok(source) => source,
+        Err(decision) => return decision,
+    };
+    match (action, conversation(req, uid)) {
+        ("session.new", _) => {
+            if req.context.0.str(maknae_security::CONTEXT_DAC_LANE) != Some("local") {
+                return refused("session.new requires a local subject");
+            }
+            grant_permit(role_key, source)
+        }
+        ("session.list", _) => grant_permit(role_key, source),
+        ("session.close", Some(Conversation::Active { owned: true }))
+        | ("session.delete", Some(Conversation::Active { owned: true } | Conversation::Unknown)) => {
+            grant_permit(role_key, source)
+        }
+        (_, Some(Conversation::Active { owned: false })) => refused(FOREIGN),
+        ("session.close", Some(Conversation::Unknown)) => refused(NOT_ACTIVE),
+        _ => (Verdict::Indeterminate, None),
+    }
+}
+
+/// A missing destination is a Deny, not a policy gap.
 fn decide_prompt(
     lp: &LoadedPolicy,
     req: &SecRequest,
     role_key: &'static str,
+    uid: u32,
     subject: Option<&SubjectEntry>,
-) -> (Verdict, Option<Cited>) {
-    match lp
-        .action_grants
-        .evaluate3_action(role_key, "session.prompt")
-    {
-        maknae_config::Match3::DenyMatch { source } => {
-            return (
-                Verdict::Deny {
-                    reason: format!("denied by role grant {source}"),
-                },
-                Some(Cited::Grant {
-                    role: role_key,
-                    term: source,
-                    effect: Effect::Deny,
-                }),
-            )
-        }
-        maknae_config::Match3::NoMatch => {
-            return (
-                Verdict::NotApplicable {
-                    note: Some(no_rule_note(role_key, "session.prompt")),
-                },
-                None,
-            )
-        }
-        maknae_config::Match3::AllowMatch { .. } => {}
+) -> Decision {
+    if let Err(decision) = granted(lp, role_key, "session.prompt") {
+        return decision;
+    }
+    match conversation(req, uid) {
+        Some(Conversation::Active { owned: true }) => {}
+        Some(Conversation::Absent) => return refused("prompt needs an active conversation"),
+        Some(Conversation::Unknown) => return refused(NOT_ACTIVE),
+        Some(Conversation::Active { owned: false }) => return refused(FOREIGN),
+        None => return (Verdict::Indeterminate, None),
+    }
+    match req.resource.0.str(RESOURCE_CONVERSATION_EXTENDS) {
+        Some(EXTENDS_RETRY | EXTENDS_ADVANCE) => {}
+        Some(EXTENDS_REWRITE) => return refused("history rewrite refused"),
+        _ => return (Verdict::Indeterminate, None),
     }
     let destination = match req.resource.0.get(RESOURCE_DESTINATION) {
         Some(AttrValue::Str(d)) => d.as_str(),
@@ -657,7 +762,7 @@ pub(crate) fn decide_loaded_cited(
             ) =>
         {
             match attempt_scope(req) {
-                Ok(scope) => decide_fs(lp, req, role.key(), scope, lp.subjects.get(uid)),
+                Ok(scope) => decide_fs(lp, req, role.key(), scope, lp.subjects.get(uid), uid),
                 Err(verdict) => (verdict, None),
             }
         }
@@ -668,7 +773,15 @@ pub(crate) fn decide_loaded_cited(
         // precede both or it is dead for that role; it sits after the fs arms
         // only for reading order (their guards key on other action strings).
         Role::Admin | Role::User if req.action.0 == "session.prompt" => {
-            decide_prompt(lp, req, role.key(), lp.subjects.get(uid))
+            decide_prompt(lp, req, role.key(), uid, lp.subjects.get(uid))
+        }
+        Role::Admin | Role::User
+            if matches!(
+                req.action.0.as_str(),
+                "session.new" | "session.close" | "session.list" | "session.delete"
+            ) =>
+        {
+            decide_session(lp, req, role.key(), uid)
         }
         Role::Admin | Role::User if req.action.0 == "session.task" => {
             decide_task(lp, req, role.key(), uid)
@@ -934,7 +1047,14 @@ fn decide_fs(
     role_key: &str,
     scope: FsScope,
     entry: Option<&SubjectEntry>,
-) -> (Verdict, Option<Cited>) {
+    uid: u32,
+) -> Decision {
+    match conversation(req, uid) {
+        Some(Conversation::Absent | Conversation::Active { owned: true }) => {}
+        Some(Conversation::Unknown) => return refused(NOT_ACTIVE),
+        Some(Conversation::Active { owned: false }) => return refused(FOREIGN),
+        None => return (Verdict::Indeterminate, None),
+    }
     let path = match req.resource.0.get(RESOURCE_PATH) {
         Some(AttrValue::Str(s)) => s.as_str(),
         // Required at THIS point of use: absent or wrong-typed → Indeterminate.
@@ -1842,7 +1962,14 @@ mod tests {
         );
         assert_eq!(
             terms("session.*"),
-            ["session.prompt", "session.task", "session.new"]
+            [
+                "session.prompt",
+                "session.new",
+                "session.close",
+                "session.list",
+                "session.delete",
+                "session.task"
+            ]
         );
         assert!(terms("terminal.*").is_empty());
         assert!(terms("mcp.*").is_empty());
@@ -1869,17 +1996,11 @@ mod tests {
     }
 
     #[test]
-    fn the_vocabulary_is_the_grantable_terms_the_four_fs_terms_and_session_new() {
-        assert_eq!(ACTION_VOCABULARY[..9], GRANTABLE_ACTIONS);
+    fn the_vocabulary_is_the_grantable_terms_and_the_four_fs_terms() {
+        assert_eq!(ACTION_VOCABULARY[..13], GRANTABLE_ACTIONS);
         assert_eq!(
-            ACTION_VOCABULARY[9..],
-            [
-                "fs.read",
-                "fs.write",
-                "fs.delete",
-                "fs.mkdir",
-                "session.new"
-            ]
+            ACTION_VOCABULARY[13..],
+            ["fs.read", "fs.write", "fs.delete", "fs.mkdir"]
         );
     }
 
@@ -1956,23 +2077,18 @@ mod tests {
     /// is impossible by construction. It was impossible by one check, not two.
     #[test]
     fn every_grantable_term_has_an_arm_that_consults_grants() {
-        // Structural: a grantable term that no arm consults would abstain.
-        // Granted in full to admin, with the prompt term's second condition
-        // (the destination attribute) satisfied for that term only.
         let mut lp = lp_with_grants(
-            "roles:\n  admin:\n    allow: [\"admin.status\", \"admin.config.show\", \"admin.subject.list\", \"admin.baseline.show\", \"admin.baseline.accept\", \"admin.contain\", \"admin.release\", \"session.prompt\", \"session.task\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\"]\n",
+            &format!(
+                "roles:\n  admin:\n    allow: [{}]\ndestinations:\n  admin:\n    allow: [\"provider:openai\"]\n",
+                GRANTABLE_ACTIONS.map(|t| format!("\"{t}\"")).join(", ")
+            ),
             GRANT_UIDS,
         );
         lp.agents.0.insert(HOBI_UID, "hobi".into());
         lp.taskers.0.insert("hobi".into(), None);
         for t in GRANTABLE_ACTIONS {
-            let req = match t {
-                "session.prompt" => prompt_req(1001, Some("provider:openai")),
-                "session.task" => task_req(1001, Some(AttrValue::Str("hobi".into()))),
-                _ => request(Some(1001), t, None),
-            };
             assert_eq!(
-                decide_loaded(&lp, &principal(), &req),
+                decide_loaded(&lp, &principal(), &granted_req(1001, t, "every-grantable")),
                 permit_with_audit(),
                 "`{t}` is grantable but no arm consulted its grant"
             );
@@ -1980,6 +2096,14 @@ mod tests {
     }
 
     fn prompt_req(uid: u32, destination: Option<&str>) -> SecRequest {
+        with_conversation(
+            bare_prompt(uid, destination),
+            Some(AttrValue::Str("active".into())),
+            Some(AttrValue::Int(uid.into())),
+            Some(AttrValue::Str("advance".into())),
+        )
+    }
+    fn bare_prompt(uid: u32, destination: Option<&str>) -> SecRequest {
         let mut r = request(Some(uid as i64), "session.prompt", None);
         if let Some(d) = destination {
             r.resource
@@ -1991,7 +2115,7 @@ mod tests {
     fn lp_prompt(roles: &str, dests: &str) -> LoadedPolicy {
         lp_with_grants(&format!("{roles}{dests}"), GRANT_UIDS)
     }
-    const USER_PROMPT: &str = "roles:\n  user:\n    allow: [\"session.prompt\"]\n";
+    const USER_PROMPT: &str = "roles:\n  user:\n    allow: [\"session.prompt\", \"session.new\"]\n";
     const USER_OPENAI: &str = "destinations:\n  user:\n    allow: [\"provider:openai\"]\n";
 
     #[test]
@@ -2100,7 +2224,7 @@ mod tests {
     #[test]
     fn prompt_grants_are_per_role_admin_and_user_do_not_share() {
         let lp = lp_prompt(
-            "roles:\n  admin:\n    allow: [\"session.prompt\"]\n",
+            "roles:\n  admin:\n    allow: [\"session.prompt\", \"session.new\"]\n",
             "destinations:\n  admin:\n    allow: [\"provider:openai\"]\n",
         );
         assert_eq!(
@@ -2421,7 +2545,7 @@ mod tests {
     #[test]
     fn the_baseline_terms_permit_only_a_granted_admin() {
         let lp = lp_with_grants(
-            "roles:\n  admin:\n    allow: [\"admin.status\", \"admin.config.show\", \"admin.subject.list\", \"admin.baseline.show\", \"admin.baseline.accept\", \"admin.contain\", \"admin.release\", \"session.prompt\"]\n",
+            "roles:\n  admin:\n    allow: [\"admin.status\", \"admin.config.show\", \"admin.subject.list\", \"admin.baseline.show\", \"admin.baseline.accept\", \"admin.contain\", \"admin.release\", \"session.prompt\", \"session.new\"]\n",
             GRANT_UIDS,
         );
         for term in ["admin.baseline.show", "admin.baseline.accept"] {
@@ -2878,7 +3002,7 @@ mod tests {
     #[test]
     fn decide_loaded_cited_names_the_entry_for_every_cited_arm() {
         let lp = lp_with_grants(
-            "roles:\n  admin:\n    allow: [\"admin.status\", \"session.prompt\"]\n    deny: [\"admin.config.show\"]\n  user:\n    allow: [\"session.prompt\"]\n    deny: [\"session.prompt\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\"]\n",
+            "roles:\n  admin:\n    allow: [\"admin.status\", \"session.prompt\", \"session.new\"]\n    deny: [\"admin.config.show\"]\n  user:\n    allow: [\"session.prompt\"]\n    deny: [\"session.prompt\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\"]\n",
             GRANT_UIDS,
         );
         let path = |uid: u32, p: &str| request(Some(i64::from(uid)), "fs.read", Some(p));
@@ -2961,7 +3085,7 @@ mod tests {
 
     const SENTINEL: &str = "subject-608-sentinel";
     const SENTINEL_UID: u32 = 1608;
-    const SUBJECT_SITE: &str = "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Write(~/**)\"]\n  deny: [\"Read(~/.ssh/**)\"]\nroles:\n  admin:\n    allow: [\"admin.status\", \"session.prompt\"]\n  user:\n    allow: [\"session.prompt\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\"]\n  user:\n    allow: [\"provider:openai\"]\n";
+    const SUBJECT_SITE: &str = "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Write(~/**)\"]\n  deny: [\"Read(~/.ssh/**)\"]\nroles:\n  admin:\n    allow: [\"admin.status\", \"session.prompt\", \"session.new\"]\n  user:\n    allow: [\"session.prompt\", \"session.new\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\"]\n  user:\n    allow: [\"provider:openai\"]\n";
 
     fn subject_lookups() -> crate::Lookups {
         [("operator", OPERATOR_UID), (SENTINEL, SENTINEL_UID)]
@@ -3299,7 +3423,7 @@ mod tests {
         assert!(matches!(a.verdict, Verdict::Permit { .. }), "{a:?}");
         let lp = lp_subject(
             "user",
-            &sentinel_entry("    actions:\n      allow: [\"session.prompt\"]\n"),
+            &sentinel_entry("    actions:\n      allow: [\"session.prompt\", \"session.new\"]\n"),
         );
         let d = decide_loaded_cited(&lp, &principal(), &model_req(SENTINEL_UID, None));
         assert!(matches!(d.verdict, Verdict::Permit { .. }), "{d:?}");
@@ -3465,9 +3589,597 @@ mod tests {
         );
     }
 
+    const S170_ADMIN: u32 = 1701;
+    const S170_USER: u32 = 1702;
+    const S170_GUEST: u32 = 1703;
+    const S170_ADVERSARY: u32 = 1704;
+    const S170_OTHER: i64 = 1799;
+    const SESSION_TERMS: [&str; 4] = [
+        "session.new",
+        "session.close",
+        "session.list",
+        "session.delete",
+    ];
+
+    fn lp_170(case: &str, roles_block: &str) -> LoadedPolicy {
+        let body = format!(
+            "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\n  deny:\n    - \"Read(~/.ssh/**)\"\n{roles_block}"
+        );
+        let policy = maknae_config::parse_authz(&body).unwrap();
+        let names = [
+            ("admin", format!("sentinel-170-{case}-admin"), S170_ADMIN),
+            ("user", format!("sentinel-170-{case}"), S170_USER),
+            ("guest", format!("sentinel-170-{case}-guest"), S170_GUEST),
+            (
+                "adversary",
+                format!("sentinel-170-{case}-adversary"),
+                S170_ADVERSARY,
+            ),
+        ];
+        let lookup: UidMap = names.iter().map(|(_, n, u)| (n.clone(), *u)).collect();
+        let bindings = names
+            .iter()
+            .map(|(r, n, _)| (r.to_string(), vec![n.clone()]))
+            .collect();
+        let destinations = crate::validate_destinations(&policy.destinations).unwrap();
+        LoadedPolicy {
+            roles: Roles::File(resolve(&Some(bindings), &lookup).unwrap()),
+            action_grants: crate::validate_grants(&policy.action_grants).unwrap(),
+            destinations,
+            subjects: SubjectGrants::default(),
+            agents: AgentUids::default(),
+            taskers: AgentTaskers::default(),
+            policy,
+        }
+    }
+
+    fn with_conversation(
+        mut r: SecRequest,
+        state: Option<AttrValue>,
+        owner: Option<AttrValue>,
+        extends: Option<AttrValue>,
+    ) -> SecRequest {
+        for (k, v) in [
+            (RESOURCE_CONVERSATION_STATE, state),
+            (RESOURCE_CONVERSATION_OWNER, owner),
+            (RESOURCE_CONVERSATION_EXTENDS, extends),
+        ] {
+            if let Some(v) = v {
+                r.resource.0.insert(k, v);
+            }
+        }
+        r
+    }
+
+    fn conv(uid: u32, action: &str, state: &str, owner: i64) -> SecRequest {
+        with_conversation(
+            request(Some(uid.into()), action, None),
+            Some(AttrValue::Str(state.into())),
+            Some(AttrValue::Int(owner)),
+            None,
+        )
+    }
+
+    fn granted_req(uid: u32, term: &str, case: &str) -> SecRequest {
+        match term {
+            "session.prompt" => prompt_req(uid, Some("provider:openai")),
+            "session.new" => request(
+                Some(uid.into()),
+                term,
+                Some(&format!("/home/operator/sentinel-170-{case}")),
+            ),
+            "session.close" | "session.delete" => conv(uid, term, "active", uid.into()),
+            "session.task" => task_req(uid, Some(AttrValue::Str("hobi".into()))),
+            _ => request(Some(uid.into()), term, None),
+        }
+    }
+
+    const ALL_SESSION_GRANTS: &str = "roles:\n  admin:\n    allow: [\"session.prompt\", \"session.new\", \"session.close\", \"session.list\", \"session.delete\"]\n  user:\n    allow: [\"session.*\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\"]\n  user:\n    allow: [\"provider:openai\"]\n";
+
+    fn grant_cite(role: &'static str, term: &str) -> Option<Cited> {
+        Some(Cited::Grant {
+            role,
+            term: term.into(),
+            effect: Effect::Allow,
+        })
+    }
+
+    fn deny(reason: &str) -> Verdict {
+        Verdict::Deny {
+            reason: reason.into(),
+        }
+    }
+
+    #[test]
+    fn each_session_term_is_decided_by_its_arm() {
+        let lp = lp_170("arm", ALL_SESSION_GRANTS);
+        for (uid, role, written) in [
+            (S170_ADMIN, "admin", None),
+            (S170_USER, "user", Some("session.*")),
+        ] {
+            for term in SESSION_TERMS {
+                let d = decide_loaded_cited(&lp, &principal(), &granted_req(uid, term, "arm"));
+                assert_eq!(d.verdict, permit_with_audit(), "{role} {term}");
+                assert_eq!(
+                    d.cited,
+                    grant_cite(role, written.unwrap_or(term)),
+                    "{role} {term}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ungranted_session_terms_answer_no_rule() {
+        let lp = lp_170("ungranted", "");
+        for (uid, role) in [(S170_ADMIN, "admin"), (S170_USER, "user")] {
+            for term in SESSION_TERMS.into_iter().chain(["session.prompt"]) {
+                assert_eq!(
+                    decide_loaded(&lp, &principal(), &granted_req(uid, term, "ungranted")),
+                    Verdict::NotApplicable {
+                        note: Some(format!("role {role}: no rule for {term}"))
+                    },
+                    "{role} {term}"
+                );
+            }
+        }
+        let denied = lp_170(
+            "denied",
+            "roles:\n  user:\n    allow: [\"session.*\"]\n    deny: [\"session.list\", \"session.close\"]\n",
+        );
+        for term in ["session.list", "session.close"] {
+            let d = decide_loaded_cited(
+                &denied,
+                &principal(),
+                &granted_req(S170_USER, term, "denied"),
+            );
+            assert_eq!(d.verdict, deny(&format!("denied by role grant {term}")));
+            assert_eq!(
+                d.cited,
+                Some(Cited::Grant {
+                    role: "user",
+                    term: term.into(),
+                    effect: Effect::Deny
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn session_new_is_decided_by_the_grant_alone_wherever_its_cwd() {
+        let lp = lp_170("new", ALL_SESSION_GRANTS);
+        let at = |path: Option<&str>| request(Some(S170_USER.into()), "session.new", path);
+        for path in [
+            Some("/home/operator/sentinel-170-new"),
+            Some("/home/operator/.ssh/sentinel-170-new"),
+            Some("/srv/sentinel-170-new"),
+            Some("/home/operator/../sentinel-170-new"),
+            None,
+        ] {
+            let d = decide_loaded_cited(&lp, &principal(), &at(path));
+            assert_eq!(d.verdict, permit_with_audit(), "{path:?}");
+            assert_eq!(d.cited, grant_cite("user", "session.*"), "{path:?}");
+        }
+        let denied = lp_170(
+            "new-denied",
+            "roles:\n  user:\n    allow: [\"session.close\", \"session.new\"]\n    deny: [\"session.new\"]\n",
+        );
+        assert_eq!(
+            decide_loaded(&denied, &principal(), &at(Some("/srv/sentinel-170-new"))),
+            deny("denied by role grant session.new")
+        );
+        let mut remote = at(Some("/home/operator/sentinel-170-new"));
+        remote.context.0.insert(
+            maknae_security::CONTEXT_DAC_LANE,
+            AttrValue::Str("remote".into()),
+        );
+        assert_eq!(
+            decide_loaded(&lp, &principal(), &remote),
+            deny("session.new requires a local subject")
+        );
+        remote.context = Context(Attributes::new());
+        assert_eq!(
+            decide_loaded(&lp, &principal(), &remote),
+            deny("session.new requires a local subject")
+        );
+    }
+
+    #[test]
+    fn close_and_delete_are_owner_only() {
+        let lp = lp_170("owner", ALL_SESSION_GRANTS);
+        for uid in [S170_ADMIN, S170_USER] {
+            for term in ["session.close", "session.delete"] {
+                assert_eq!(
+                    decide_loaded(&lp, &principal(), &conv(uid, term, "active", uid.into())),
+                    permit_with_audit(),
+                    "{uid} {term}"
+                );
+                assert_eq!(
+                    decide_loaded(&lp, &principal(), &conv(uid, term, "active", S170_OTHER)),
+                    deny("conversation belongs to another subject"),
+                    "{uid} {term}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn delete_of_an_archived_conversation_permits_on_the_grant() {
+        let lp = lp_170("archived", ALL_SESSION_GRANTS);
+        let d = decide_loaded_cited(
+            &lp,
+            &principal(),
+            &conv(S170_USER, "session.delete", "unknown", S170_OTHER),
+        );
+        assert_eq!(d.verdict, permit_with_audit());
+        assert_eq!(d.cited, grant_cite("user", "session.*"));
+        assert!(matches!(
+            decide_loaded(
+                &lp_170("archived-none", ""),
+                &principal(),
+                &conv(S170_USER, "session.delete", "unknown", S170_OTHER)
+            ),
+            Verdict::NotApplicable { .. }
+        ));
+    }
+
+    #[test]
+    fn close_of_an_unknown_conversation_is_denied() {
+        let lp = lp_170("unknown", ALL_SESSION_GRANTS);
+        for owner in [S170_USER.into(), S170_OTHER] {
+            assert_eq!(
+                decide_loaded(
+                    &lp,
+                    &principal(),
+                    &conv(S170_USER, "session.close", "unknown", owner)
+                ),
+                deny("conversation not active")
+            );
+        }
+    }
+
+    #[test]
+    fn a_store_error_is_indeterminate_never_permit() {
+        let lp = lp_170("error", ALL_SESSION_GRANTS);
+        let own = || Some(AttrValue::Int(S170_USER.into()));
+        let state = |s: &str| Some(AttrValue::Str(s.into()));
+        let reqs = |st: Option<AttrValue>, owner: Option<AttrValue>, ext: Option<AttrValue>| {
+            let mut fs = request(
+                Some(S170_USER.into()),
+                "fs.read",
+                Some("/home/operator/sentinel-170-error"),
+            );
+            fs = with_conversation(fs, st.clone(), owner.clone(), None);
+            vec![
+                with_conversation(
+                    request(Some(S170_USER.into()), "session.close", None),
+                    st.clone(),
+                    owner.clone(),
+                    None,
+                ),
+                with_conversation(
+                    request(Some(S170_USER.into()), "session.delete", None),
+                    st.clone(),
+                    owner.clone(),
+                    None,
+                ),
+                with_conversation(
+                    bare_prompt(S170_USER, Some("provider:openai")),
+                    st,
+                    owner,
+                    ext,
+                ),
+                fs,
+            ]
+        };
+        let advance = || Some(AttrValue::Str("advance".into()));
+        for (case, st, owner) in [
+            ("error", state("error"), own()),
+            ("unrecognised state", state("sentinel-170-state"), own()),
+            ("state wrong type", Some(AttrValue::Int(1)), own()),
+            (
+                "owner wrong type",
+                state("active"),
+                Some(AttrValue::Str("1702".into())),
+            ),
+            ("owner absent", state("active"), None),
+            ("owner without state", None, own()),
+        ] {
+            for r in reqs(st.clone(), owner.clone(), advance()) {
+                assert_eq!(
+                    decide_loaded(&lp, &principal(), &r),
+                    Verdict::Indeterminate,
+                    "{case}: {}",
+                    r.action.0
+                );
+            }
+        }
+        for (case, ext) in [
+            ("extends absent", None),
+            ("extends wrong type", Some(AttrValue::Int(0))),
+            (
+                "extends unrecognised",
+                Some(AttrValue::Str("sentinel-170-extends".into())),
+            ),
+        ] {
+            let r = with_conversation(
+                bare_prompt(S170_USER, Some("provider:openai")),
+                state("active"),
+                own(),
+                ext,
+            );
+            assert_eq!(
+                decide_loaded(&lp, &principal(), &r),
+                Verdict::Indeterminate,
+                "{case}"
+            );
+        }
+        for term in ["session.close", "session.delete"] {
+            assert_eq!(
+                decide_loaded(
+                    &lp,
+                    &principal(),
+                    &request(Some(S170_USER.into()), term, None)
+                ),
+                Verdict::Indeterminate,
+                "{term} with no conversation"
+            );
+        }
+    }
+
+    #[test]
+    fn close_does_not_imply_delete() {
+        let lp = lp_170(
+            "close-only",
+            "roles:\n  user:\n    allow: [\"session.close\"]\n",
+        );
+        assert_eq!(
+            decide_loaded(
+                &lp,
+                &principal(),
+                &granted_req(S170_USER, "session.close", "close-only")
+            ),
+            permit_with_audit()
+        );
+        assert_eq!(
+            decide_loaded(
+                &lp,
+                &principal(),
+                &granted_req(S170_USER, "session.delete", "close-only")
+            ),
+            Verdict::NotApplicable {
+                note: Some("role user: no rule for session.delete".into())
+            }
+        );
+    }
+
+    #[test]
+    fn new_does_not_imply_list() {
+        let lp = lp_170(
+            "new-only",
+            "roles:\n  user:\n    allow: [\"session.new\"]\n",
+        );
+        assert_eq!(
+            decide_loaded(
+                &lp,
+                &principal(),
+                &granted_req(S170_USER, "session.new", "new-only")
+            ),
+            permit_with_audit()
+        );
+        assert_eq!(
+            decide_loaded(
+                &lp,
+                &principal(),
+                &granted_req(S170_USER, "session.list", "new-only")
+            ),
+            Verdict::NotApplicable {
+                note: Some("role user: no rule for session.list".into())
+            }
+        );
+    }
+
+    #[test]
+    fn a_prompt_without_an_active_owned_extending_conversation_is_denied() {
+        let lp = lp_170("prompt", ALL_SESSION_GRANTS);
+        let state = |s: &str| Some(AttrValue::Str(s.into()));
+        let mine = || Some(AttrValue::Int(S170_USER.into()));
+        let advance = || state("advance");
+        for (st, owner, ext, reason) in [
+            (None, None, None, "prompt needs an active conversation"),
+            (None, None, advance(), "prompt needs an active conversation"),
+            (
+                state("unknown"),
+                mine(),
+                advance(),
+                "conversation not active",
+            ),
+            (state("unknown"), None, None, "conversation not active"),
+            (
+                state("active"),
+                Some(AttrValue::Int(S170_OTHER)),
+                advance(),
+                "conversation belongs to another subject",
+            ),
+            (
+                state("active"),
+                mine(),
+                state("rewrite"),
+                "history rewrite refused",
+            ),
+        ] {
+            for uid in [S170_ADMIN, S170_USER] {
+                let owner = owner.clone().map(|o| match o {
+                    AttrValue::Int(i) if i == i64::from(S170_USER) => AttrValue::Int(uid.into()),
+                    o => o,
+                });
+                let r = with_conversation(
+                    bare_prompt(uid, Some("provider:openai")),
+                    st.clone(),
+                    owner,
+                    ext.clone(),
+                );
+                assert_eq!(
+                    decide_loaded(&lp, &principal(), &r),
+                    deny(reason),
+                    "{uid} {reason}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_prompt_retry_and_advance_are_permitted() {
+        let lp = lp_170("extend", ALL_SESSION_GRANTS);
+        for ext in ["retry", "advance"] {
+            for uid in [S170_ADMIN, S170_USER] {
+                let r = with_conversation(
+                    bare_prompt(uid, Some("provider:openai")),
+                    Some(AttrValue::Str("active".into())),
+                    Some(AttrValue::Int(uid.into())),
+                    Some(AttrValue::Str(ext.into())),
+                );
+                let d = decide_loaded_cited(&lp, &principal(), &r);
+                assert_eq!(d.verdict, permit_with_audit(), "{uid} {ext}");
+                assert!(matches!(d.cited, Some(Cited::Destination { .. })));
+            }
+        }
+    }
+
+    fn fs_read_170(owner: Option<i64>, state: Option<&str>) -> SecRequest {
+        with_conversation(
+            request(
+                Some(S170_USER.into()),
+                "fs.read",
+                Some("/home/operator/sentinel-170-fs"),
+            ),
+            state.map(|s| AttrValue::Str(s.into())),
+            owner.map(AttrValue::Int),
+            None,
+        )
+    }
+
+    #[test]
+    fn fs_read_citing_a_foreign_conversation_is_denied() {
+        let lp = lp_170("fs", ALL_SESSION_GRANTS);
+        assert_eq!(
+            decide_loaded(
+                &lp,
+                &principal(),
+                &fs_read_170(Some(S170_OTHER), Some("active"))
+            ),
+            deny("conversation belongs to another subject")
+        );
+        assert_eq!(
+            decide_loaded(
+                &lp,
+                &principal(),
+                &fs_read_170(Some(S170_USER.into()), Some("unknown"))
+            ),
+            deny("conversation not active")
+        );
+        assert_eq!(
+            decide_loaded(
+                &lp,
+                &principal(),
+                &fs_read_170(Some(S170_USER.into()), Some("active"))
+            ),
+            permit_with_audit()
+        );
+        let mut write = fs_read_170(Some(S170_OTHER), Some("active"));
+        write.action.0 = "fs.write".into();
+        write.context.0.insert(
+            maknae_security::CONTEXT_FS_OPERATION,
+            AttrValue::Str("write-existing".into()),
+        );
+        assert_eq!(
+            decide_loaded(&lp, &principal(), &write),
+            deny("conversation belongs to another subject")
+        );
+    }
+
+    #[test]
+    fn fs_read_without_a_conversation_is_unchanged() {
+        let lp = lp_170("fs-none", ALL_SESSION_GRANTS);
+        let d = decide_loaded_cited(&lp, &principal(), &fs_read_170(None, None));
+        assert_eq!(d.verdict, permit_with_audit());
+        assert_eq!(
+            d.cited,
+            Some(Cited::Path {
+                effect: Effect::Allow,
+                source: "Read(~/**)".into()
+            })
+        );
+        let mut denied = fs_read_170(None, None);
+        denied.resource.0.insert(
+            RESOURCE_PATH,
+            AttrValue::Str("/home/operator/.ssh/sentinel-170-fs".into()),
+        );
+        assert_eq!(
+            decide_loaded(&lp, &principal(), &denied),
+            deny("denied by policy entry Read(~/.ssh/**)")
+        );
+    }
+
+    #[test]
+    fn adversary_is_denied_all_four_before_class() {
+        let lp = lp_170("adversary", ALL_SESSION_GRANTS);
+        for term in SESSION_TERMS.into_iter().chain(["session.prompt"]) {
+            let d = decide_loaded_cited(
+                &lp,
+                &principal(),
+                &granted_req(S170_ADVERSARY, term, "adversary"),
+            );
+            assert_eq!(
+                d.verdict,
+                deny("subject contained: role=adversary"),
+                "{term}"
+            );
+            assert_eq!((d.role, d.cited), (Some("adversary"), None), "{term}");
+            assert_eq!(
+                decide_loaded(
+                    &lp,
+                    &principal(),
+                    &granted_req(S170_GUEST, term, "adversary")
+                ),
+                Verdict::NotApplicable {
+                    note: Some(format!("role guest: no rule for {term}"))
+                },
+                "{term}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_new_ignores_a_subjects_narrowed_permissions() {
+        const NAME: &str = "sentinel-170-subject-narrowed-cwd";
+        const UID: u32 = 1705;
+        let policy = maknae_config::parse_authz(&format!(
+            "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\nroles:\n  user:\n    allow: [\"session.new\"]\nsubjects:\n  {NAME}:\n    permissions:\n      allow: [\"Read(~/docs/**)\"]\n"
+        ))
+        .unwrap();
+        let lookups: crate::Lookups = [(NAME.to_string(), Some(UID))].into_iter().collect();
+        let bindings = BTreeMap::from([("user".to_string(), vec![NAME.to_string()])]);
+        let lp = LoadedPolicy {
+            roles: Roles::File(resolve(&Some(bindings), &crate::found(&lookups)).unwrap()),
+            action_grants: crate::validate_grants(&policy.action_grants).unwrap(),
+            destinations: crate::validate_destinations(&policy.destinations).unwrap(),
+            subjects: crate::validate_subjects(&policy, &lookups).unwrap(),
+            agents: AgentUids::default(),
+            taskers: AgentTaskers::default(),
+            policy,
+        };
+        let at = |path: &str| request(Some(UID.into()), "session.new", Some(path));
+        for path in ["/home/operator/projects/x", "/home/operator/docs/x"] {
+            let d = decide_loaded_cited(&lp, &principal(), &at(path));
+            assert_eq!(d.verdict, permit_with_audit(), "{path}");
+            assert_eq!(d.cited, grant_cite("user", "session.new"), "{path}");
+        }
+    }
+
     const HOBI_UID: u32 = 2001;
     const HUMAN_UID: u32 = 1002;
-    const AGENT_SITE: &str = "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: [\"Read(~/.ssh/**)\"]\nroles:\n  admin:\n    allow: [\"admin.*\", \"session.prompt\"]\n  user:\n    allow: [\"session.prompt\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\"]\n  user:\n    allow: [\"provider:openai\"]\n";
+    const AGENT_SITE: &str = "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: [\"Read(~/.ssh/**)\"]\nroles:\n  admin:\n    allow: [\"admin.*\", \"session.prompt\", \"session.new\"]\n  user:\n    allow: [\"session.prompt\", \"session.new\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\"]\n  user:\n    allow: [\"provider:openai\"]\n";
 
     fn lp_agent_over(role: &str, agent_policy: Option<&str>, enrolled: bool) -> LoadedPolicy {
         let policy = maknae_config::parse_authz(AGENT_SITE).unwrap();
@@ -3550,12 +4262,6 @@ mod tests {
             Some(maknae_security::CHANNEL_AGENT),
             Some("hobi"),
         )
-    }
-
-    fn deny(reason: &str) -> Verdict {
-        Verdict::Deny {
-            reason: reason.into(),
-        }
     }
 
     fn admin_terms() -> impl Iterator<Item = &'static str> {
@@ -3858,10 +4564,10 @@ mod tests {
                 );
             }
         }
-        assert!(matches!(
+        assert_eq!(
             decide_loaded_cited(&with, &principal(), &any_action(HUMAN_UID, "session.new")).verdict,
-            Verdict::NotApplicable { .. }
-        ));
+            permit_with_audit()
+        );
     }
 
     const SESSION_NEW_DEFAULT: &str = "agent hobi: session.new needs a grant in its policy.yaml";
@@ -3906,14 +4612,14 @@ mod tests {
                     None,
                     "{allow}"
                 );
-                let d = decide_loaded_cited(&lp, &principal(), &req);
-                assert_eq!(
-                    d.verdict,
-                    Verdict::NotApplicable {
-                        note: Some(format!("role {role}: no rule for session.new"))
+                let want = match role {
+                    "user" => permit_with_audit(),
+                    _ => Verdict::NotApplicable {
+                        note: Some(format!("role {role}: no rule for session.new")),
                     },
-                    "{role} {allow}"
-                );
+                };
+                let d = decide_loaded_cited(&lp, &principal(), &req);
+                assert_eq!(d.verdict, want, "{role} {allow}");
             }
         }
     }
@@ -3966,7 +4672,7 @@ mod tests {
     }
 
     #[test]
-    fn session_new_is_subject_limitable_and_never_role_grantable() {
+    fn session_new_is_subject_limitable_and_role_grantable() {
         let site = format!(
             "{SUBJECT_SITE}{}",
             sentinel_entry("    actions:\n      allow: [\"session.new\"]\n")
@@ -3984,15 +4690,12 @@ mod tests {
         for role in ["user", "admin"] {
             let body = format!("schema_version: 1\npermissions:\n  allow: []\n  deny: []\nroles:\n  {role}:\n    allow: [\"session.new\"]\n");
             let policy = maknae_config::parse_authz(&body).unwrap();
-            assert_eq!(
-                crate::validate_grants(&policy.action_grants),
-                Err(crate::AuthzBasicError::UnknownActionTerm(
-                    "session.new".into()
-                )),
+            assert!(
+                crate::validate_grants(&policy.action_grants).is_ok(),
                 "{role}"
             );
         }
-        assert!(!GRANTABLE_ACTIONS.contains(&"session.new"));
+        assert!(GRANTABLE_ACTIONS.contains(&"session.new"));
     }
 
     #[test]
@@ -4198,7 +4901,7 @@ mod tests {
     fn a_subject_actions_limit_can_withhold_session_task() {
         let lp = lp_task(
             &format!(
-                "{TASK_ROLES}subjects:\n  ursula:\n    actions:\n      allow: [\"session.prompt\"]\n"
+                "{TASK_ROLES}subjects:\n  ursula:\n    actions:\n      allow: [\"session.prompt\", \"session.new\"]\n"
             ),
             None,
         );

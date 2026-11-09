@@ -299,6 +299,7 @@ where
         timeout,
         fds,
         common::no_baseline(),
+        common::conversations(),
         maknae_kernel::AgentAdmission::none(),
     ));
     common::write_frame(&mut client, &request_frame(verb))
@@ -460,6 +461,7 @@ where
         timeout,
         delegated,
         ops,
+        common::conversations(),
         maknae_kernel::AgentAdmission::none(),
     )
     .await;
@@ -1759,7 +1761,16 @@ async fn an_unentitled_caller_gets_unauthorized_never_notimplemented() {
     fx.write_bindings(BINDINGS_ROOT_USER); // root -> user: no management grant
     for verb in [
         maknae_proto::Verb::AdminStatus,
-        maknae_proto::Verb::SessionNew,
+        maknae_proto::Verb::SessionNew {
+            cwd: "/work".into(),
+        },
+        maknae_proto::Verb::SessionList { cursor: None },
+        maknae_proto::Verb::SessionClose {
+            conversation: maknae_proto::ConversationId::parse(&"a".repeat(32)).unwrap(),
+        },
+        maknae_proto::Verb::SessionDelete {
+            conversation: maknae_proto::ConversationId::parse(&"a".repeat(32)).unwrap(),
+        },
         maknae_proto::Verb::FsWrite {
             path: "/home/test/x".into(),
             content_length: 0,
@@ -3714,6 +3725,7 @@ async fn drive_baseline(
         Duration::from_secs(5),
         maknae_io::DelegatedFds::new(0),
         Arc::new(baseline),
+        common::conversations(),
         maknae_kernel::AgentAdmission::none(),
     )
     .await;

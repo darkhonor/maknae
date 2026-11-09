@@ -1,6 +1,4 @@
-//! The turns the loop re-sends on every call. The loop is stateless and the
-//! kernel holds no conversation (ADR-0023 d7), so this is the whole memory
-//! there is, and the frame cap bounds it.
+//! The turns the loop re-sends on every call.
 use maknae_proto::{ContentBlock, PromptReply, SecretText, Turn};
 use zeroize::Zeroizing;
 

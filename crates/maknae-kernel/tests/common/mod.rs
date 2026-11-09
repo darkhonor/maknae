@@ -238,7 +238,7 @@ impl AuditEmit for Records {
 static FS_TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 pub async fn fs_turn(verb: &Verb) -> Option<tokio::sync::MutexGuard<'static, ()>> {
-    if maknae_kernel::is_filesystem_verb(verb) {
+    if maknae_kernel::is_filesystem_verb(verb) || matches!(verb, Verb::SessionNew { .. }) {
         Some(FS_TURN.lock().await)
     } else {
         None
@@ -254,6 +254,45 @@ pub struct Fixture {
     pub peer_uid: u32,
     pub peer_user: Option<String>,
     pub requester_home: Option<PathBuf>,
+    pub conversations: Arc<dyn maknae_kernel::ConversationStore>,
+    pub take_turns: bool,
+}
+
+pub fn conversations() -> Arc<dyn maknae_kernel::ConversationStore> {
+    Arc::new(maknae_kernel::MemStore::default())
+}
+
+pub const CONV: &str = "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0";
+
+pub fn open_record(id: &str, owner: u32, cwd: &str) -> maknae_kernel::ConversationRecord {
+    let id = maknae_proto::ConversationId::parse(id).expect("a conversation id");
+    maknae_kernel::ConversationRecord {
+        chain: maknae_kernel::ChainHead::genesis(&id),
+        id,
+        owner,
+        cwd: cwd.into(),
+        opened_at: 1,
+        last_active: now(),
+        full: false,
+        turns: 0,
+        bytes: 0,
+        last_reply: None,
+        fence: 0,
+        provenance: maknae_kernel::Provenance::new("UNCLASSIFIED"),
+    }
+}
+
+pub fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+pub fn seeded(owner: u32, cwd: &str) -> Arc<dyn maknae_kernel::ConversationStore> {
+    let store = conversations();
+    store.create(open_record(CONV, owner, cwd), 32).unwrap();
+    store
 }
 
 /// The test euid's username. It must pass `userpass_username_is_acceptable`
@@ -370,6 +409,8 @@ impl Fixture {
             peer_uid: nix::unistd::geteuid().as_raw(),
             peer_user: Some(name),
             requester_home: Some(root.clone()),
+            conversations: seeded(nix::unistd::geteuid().as_raw(), root.to_str().unwrap()),
+            take_turns: true,
             root,
             principal,
         }
@@ -646,7 +687,7 @@ impl Fixture {
         if let Some(fd) = fd {
             fds.push(fd);
         }
-        let turn = verb.clone();
+        let turn = self.take_turns.then(|| verb.clone());
         let served = maknae_kernel::handle_with_attempt_caps(
             server,
             Some("spiffe://d/plane/cli".into()),
@@ -666,10 +707,14 @@ impl Fixture {
             fds,
             no_baseline(),
             attempt_caps,
+            Arc::clone(&self.conversations),
             maknae_kernel::AgentAdmission::none(),
         );
         let task = tokio::spawn(async move {
-            let _turn = fs_turn(&turn).await;
+            let _turn = match &turn {
+                Some(verb) => fs_turn(verb).await,
+                None => None,
+            };
             served.await
         });
         let body = maknae_proto::encode_request(&maknae_proto::Request {
@@ -680,6 +725,36 @@ impl Fixture {
         .unwrap();
         // The client write happens in the driver, leaving this reusable for reports.
         (client, task, body)
+    }
+    pub async fn open_conversation(&self) -> String {
+        let cwd = self.root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let fd = maknae_io::open_directory_for_delegation(&cwd).unwrap();
+        let records = Records::new(0);
+        let (client, task, body) = self.start(
+            Verb::SessionNew {
+                cwd: cwd.to_str().unwrap().into(),
+            },
+            Some(fd),
+            Arc::clone(&records),
+        );
+        match Self::exchange(client, task, &body)
+            .await
+            .expect("a session.new frame")
+            .result
+        {
+            maknae_proto::RespResult::Ok(maknae_proto::Payload::ConversationOpened(v)) => {
+                v.conversation.as_str().to_owned()
+            }
+            other => panic!(
+                "session.new refused: {other:?}: {:?}",
+                records
+                    .snapshot()
+                    .iter()
+                    .map(|r| r.outcome.reason.clone())
+                    .collect::<Vec<_>>()
+            ),
+        }
     }
     /// One request, one frame back (`None` when the daemon closed frameless:
     /// the audit-failure discipline), under the default transport.

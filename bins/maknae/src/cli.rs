@@ -176,6 +176,11 @@ enum Command {
         #[arg(long)]
         stopped: bool,
     },
+    /// Your kernel-recorded conversations.
+    Session {
+        #[command(subcommand)]
+        action: SessionCommand,
+    },
     /// Run the agent loop on one prompt (ADR-0023).
     Agent {
         /// The providers.yaml entry to use instead of the default.
@@ -202,6 +207,17 @@ enum Command {
     /// user-facing verb.
     #[command(hide = true, name = "enroll-helper")]
     EnrollHelper(crate::enroll::HelperArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum SessionCommand {
+    /// List your conversations, every page. --cwd keeps those opened in DIR.
+    List {
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Close the conversation with this id; its record is kept.
+    Close { conversation: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -252,6 +268,12 @@ enum Verb {
     Release {
         target: maknae_proto::ContainTarget,
     },
+    SessionList {
+        cwd: Option<PathBuf>,
+    },
+    SessionClose {
+        conversation: maknae_proto::ConversationId,
+    },
 }
 
 impl Verb {
@@ -271,6 +293,8 @@ impl Verb {
             Verb::AdminBaselineAccept { .. } => "baseline accept",
             Verb::Contain { .. } => "contain",
             Verb::Release { .. } => "release",
+            Verb::SessionList { .. } => "session list",
+            Verb::SessionClose { .. } => "session close",
         }
     }
 }
@@ -287,6 +311,10 @@ fn payload_kind(p: &Payload) -> &'static str {
         Payload::PromptReply(_) => "prompt reply",
         Payload::Baseline(_) => "baseline view",
         Payload::Containment(_) => "containment",
+        Payload::ConversationOpened(_) => "conversation opened",
+        Payload::ConversationClosed(_) => "conversation closed",
+        Payload::ConversationList(_) => "conversation list",
+        Payload::ConversationDeleted { .. } => "conversation deleted",
     }
 }
 
@@ -343,6 +371,10 @@ impl From<Verb> for maknae_proto::Verb {
             }
             Verb::Contain { target, reason } => maknae_proto::Verb::AdminContain { target, reason },
             Verb::Release { target } => maknae_proto::Verb::AdminRelease { target },
+            Verb::SessionList { .. } => maknae_proto::Verb::SessionList { cursor: None },
+            Verb::SessionClose { conversation } => {
+                maknae_proto::Verb::SessionClose { conversation }
+            }
         }
     }
 }
@@ -447,6 +479,26 @@ async fn round_trip(
     client: &PlaneClient,
     trust: &std::sync::Arc<maknae_vault::TrustBundle>,
 ) -> Result<bool, String> {
+    if let Verb::SessionList { cwd } = &verb {
+        let entries = maknae_agent::conversations::list_all(|v| async move {
+            send_verb(
+                v,
+                None,
+                maknae_loop::mutation::WriteCheck::Unchecked,
+                transport,
+                client,
+                trust,
+                &mut |l| errln!("{l}"),
+            )
+            .await
+            .map(maknae_agent::wire::WireOutcome::from)
+        })
+        .await?;
+        for v in maknae_agent::conversations::in_cwd(entries, cwd.as_deref()) {
+            println!("{}", conversation_line(&v));
+        }
+        return Ok(true);
+    }
     if let Verb::Read { path, page: None } = &verb {
         let mut stdout = std::io::stdout().lock();
         return maknae_loop::mutation::stream_pages(
@@ -800,6 +852,18 @@ fn subject_table(entries: &[maknae_proto::RoleBindingView]) -> Vec<String> {
         .collect()
 }
 
+fn conversation_line(v: &maknae_proto::ConversationView) -> String {
+    format!(
+        "{}  {}  turns {}  bytes {}  opened {}  last active {}",
+        v.conversation.as_str(),
+        terminal_safe(&v.cwd),
+        v.turns,
+        v.bytes,
+        v.opened_at,
+        v.last_active
+    )
+}
+
 pub fn whoami_line(w: &maknae_proto::WhoamiView) -> String {
     match &w.peer_plane_uri_san {
         Some(san) => format!("{san} uid={}", w.peer_uid),
@@ -855,6 +919,12 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
             println!("{}", containment_line(&v, &c)?);
             Ok(())
         }
+        (Verb::SessionClose { conversation }, Payload::ConversationClosed(v))
+            if v.conversation == conversation =>
+        {
+            println!("closed {}", conversation_line(&v));
+            Ok(())
+        }
         // A payload for a DIFFERENT verb than we sent — a protocol error.
         //
         // Written as an explicit list of the wrong-payload cases rather than a
@@ -872,7 +942,11 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
         | (v, p @ Payload::SubjectList(_))
         | (v, p @ Payload::PromptReply(_))
         | (v, p @ Payload::Baseline(_))
-        | (v, p @ Payload::Containment(_)) => Err(format!(
+        | (v, p @ Payload::Containment(_))
+        | (v, p @ Payload::ConversationOpened(_))
+        | (v, p @ Payload::ConversationClosed(_))
+        | (v, p @ Payload::ConversationList(_))
+        | (v, p @ Payload::ConversationDeleted { .. }) => Err(format!(
             "protocol error: daemon returned a {} payload for a {} request",
             payload_kind(&p),
             v.kind()
@@ -964,6 +1038,9 @@ pub async fn run_cli() -> ExitCode {
                 }
             }
         }
+        Command::Session { action } => {
+            operand_exit(session_verb(action), &mut std::io::stderr()).await
+        }
         Command::Agent { provider, prompt } => agent_exit(
             crate::agent::run(provider, prompt).await,
             &mut std::io::stderr(),
@@ -976,6 +1053,26 @@ pub async fn run_cli() -> ExitCode {
             action: PolicyCommand::Sync { check },
         } => crate::policy_sync::run(nix::unistd::geteuid().as_raw(), check),
         Command::EnrollHelper(args) => crate::enroll::run_enroll_helper(args).await,
+    }
+}
+
+fn session_verb(action: SessionCommand) -> Result<Verb, String> {
+    match action {
+        SessionCommand::List { cwd: None } => Ok(Verb::SessionList { cwd: None }),
+        SessionCommand::List { cwd: Some(dir) } => {
+            let dir = std::path::absolute(&dir)
+                .map_err(|e| format!("maknae: cannot absolutize {}: {e}", dir.display()))?;
+            let resolved = maknae_io::resolve_dir(&dir)
+                .map_err(|e| format!("maknae: cannot resolve {}: {e}", dir.display()))?;
+            Ok(Verb::SessionList {
+                cwd: Some(resolved),
+            })
+        }
+        SessionCommand::Close { conversation } => maknae_proto::ConversationId::parse(&conversation)
+            .map(|conversation| Verb::SessionClose { conversation })
+            .ok_or_else(|| {
+                "maknae: a conversation id is 32 lowercase hex characters, as `maknae session list` prints it".to_string()
+            }),
     }
 }
 
@@ -2461,6 +2558,132 @@ mod tests {
         assert_eq!(
             containment_status_line(&["subjects=\u{7}".into()]),
             Some("containment: subjects=\\u{7}".into())
+        );
+    }
+
+    fn session_action(args: &[&str]) -> SessionCommand {
+        match Cli::try_parse_from(args).expect("parses").command {
+            Command::Session { action } => action,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_close_closes_by_id() {
+        const ID: &str = "0123456789abcdef0123456789abcdef";
+        let id = maknae_proto::ConversationId::parse(ID).unwrap();
+        let verb = session_verb(session_action(&["maknae", "session", "close", ID])).unwrap();
+        assert_eq!(
+            verb,
+            Verb::SessionClose {
+                conversation: id.clone()
+            }
+        );
+        assert_eq!(verb.kind(), "session close");
+        assert_eq!(
+            maknae_proto::Verb::from(verb.clone()),
+            maknae_proto::Verb::SessionClose {
+                conversation: id.clone()
+            }
+        );
+        let closed = |c: &maknae_proto::ConversationId| maknae_proto::ConversationView {
+            conversation: c.clone(),
+            cwd: "/home/a/w".into(),
+            opened_at: 1,
+            last_active: 2,
+            turns: 3,
+            bytes: 4,
+            chain_head: "h".into(),
+        };
+        assert_eq!(
+            print_payload_for_verb(verb.clone(), Payload::ConversationClosed(closed(&id))),
+            Ok(())
+        );
+        let other = maknae_proto::ConversationId::parse(&"f".repeat(32)).unwrap();
+        assert_eq!(
+            print_payload_for_verb(verb, Payload::ConversationClosed(closed(&other))),
+            Err(
+                "protocol error: daemon returned a conversation closed payload for a session close request"
+                    .into()
+            )
+        );
+        for bad in [
+            "0123",
+            &ID.to_uppercase(),
+            &format!("{ID}0"),
+            "c0123456789abcdef",
+        ] {
+            assert_eq!(
+                session_verb(session_action(&["maknae", "session", "close", bad])),
+                Err("maknae: a conversation id is 32 lowercase hex characters, as `maknae session list` prints it".into()),
+                "{bad}"
+            );
+        }
+        assert!(Cli::try_parse_from(["maknae", "session", "close"]).is_err());
+    }
+
+    #[test]
+    fn session_list_sends_one_unfiltered_verb_and_resolves_its_cwd_locally() {
+        let verb = session_verb(session_action(&["maknae", "session", "list"])).unwrap();
+        assert_eq!(verb, Verb::SessionList { cwd: None });
+        assert_eq!(verb.kind(), "session list");
+        assert_eq!(
+            maknae_proto::Verb::from(verb),
+            maknae_proto::Verb::SessionList { cursor: None }
+        );
+
+        let dir = std::env::temp_dir().join(format!("maknae-cli-session-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("w")).unwrap();
+        std::os::unix::fs::symlink(dir.join("w"), dir.join("link")).unwrap();
+        let resolved = maknae_io::resolve_dir(&dir.join("w")).unwrap();
+        let link = dir.join("link");
+        let verb = session_verb(session_action(&[
+            "maknae",
+            "session",
+            "list",
+            "--cwd",
+            link.to_str().unwrap(),
+        ]))
+        .unwrap();
+        assert_eq!(
+            verb,
+            Verb::SessionList {
+                cwd: Some(resolved)
+            }
+        );
+        let missing = dir.join("missing");
+        let refused = session_verb(session_action(&[
+            "maknae",
+            "session",
+            "list",
+            "--cwd",
+            missing.to_str().unwrap(),
+        ]))
+        .unwrap_err();
+        assert!(refused.starts_with("maknae: cannot resolve "), "{refused}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_conversation_line_is_terminal_safe() {
+        let v = maknae_proto::ConversationView {
+            conversation: maknae_proto::ConversationId::parse(&"a".repeat(32)).unwrap(),
+            cwd: "/home/a/\u{1b}[2Jx".into(),
+            opened_at: 10,
+            last_active: 20,
+            turns: 3,
+            bytes: 4,
+            chain_head: "h".into(),
+        };
+        let line = conversation_line(&v);
+        assert!(!line.contains('\u{1b}'), "{line}");
+        assert_eq!(
+            line,
+            format!(
+                "{}  /home/a/\\u{{1b}}[2Jx  turns 3  bytes 4  opened 10  last active 20",
+                "a".repeat(32)
+            )
         );
     }
 }

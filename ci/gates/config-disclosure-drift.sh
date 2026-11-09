@@ -87,6 +87,9 @@ SURFACE=(
   # The fifth wire disclosure struct, after StatusView, RoleBindingView, WhoamiView and BaselineView;
   # a field added to it reaches every holder of either verb.
   "crates/maknae-proto/src/wire.rs|ContainmentView|containment|3|wire"
+  "crates/maknae-proto/src/conversation.rs|ConversationView|conversation|7|wire"
+  "crates/maknae-proto/src/conversation.rs|ConversationPage|conversation_list|2|wire"
+  "crates/maknae-proto/src/conversation.rs|ConversationView|conversation_list.entries|7|wire"
   "crates/maknae-vault/src/config.rs|VaultConfig|vault|9|config"
   "crates/maknae-vault/src/config.rs|UserAuthConfig|vault.user_auth|2|config"
 )
@@ -107,6 +110,24 @@ LEAF_ENUMS=(
   "deployment.mode|crates/maknae-config/src/deployment.rs|DeploymentMode"
   "deployment.account_source|crates/maknae-config/src/deployment.rs|AccountSource"
 )
+
+# Fields whose type is a `pub struct <Type>(String);` newtype in the named file: one string on the wire, so a leaf.
+LEAF_NEWTYPES=(
+  "conversation.conversation|crates/maknae-proto/src/conversation.rs|ConversationId"
+  "conversation_list.entries.conversation|crates/maknae-proto/src/conversation.rs|ConversationId"
+  "conversation_list.next|crates/maknae-proto/src/conversation.rs|ConversationId"
+)
+
+newtype_check() { # <label> <file> <type>
+  local label="$1" file="$2" ty="$3" nexact nany
+  [ -f "$file" ] || { echo "FAIL: leaf-newtype row '$label': '$file' does not exist."; return 1; }
+  nexact="$(grep -cxE "pub struct $ty\(String\);" "$file" || true)"
+  nany="$(grep -cE "(^|[^A-Za-z0-9_])(struct|enum|union|type|trait|mod|as)[[:space:]]+$ty([^A-Za-z0-9_]|$)" "$file" || true)"
+  if [ "$nexact" != "1" ] || [ "$nany" != "1" ]; then
+    echo "FAIL: leaf-newtype row '$label': '$file' must declare '$ty' exactly once, as 'pub struct $ty(String);', and name it nowhere else as an item; it is not a String newtype."
+    return 1
+  fi
+}
 
 leaf_enum_check() { # <field-path> <file> <type>
   local fp="$1" file="$2" ty="$3" ndef nother structfile body prefix
@@ -195,7 +216,9 @@ done
 # own naming convention, both directions: every `pub struct <Name>View` in the
 # wire file has a SURFACE row, and every wire SURFACE row names such a struct.
 WIRE_FILE="crates/maknae-proto/src/wire.rs"
-wire_declared="$(grep -oE '^(pub([[:space:]]|\([^)]*\)[[:space:]]))?struct [A-Za-z0-9_]+View\b' "$WIRE_FILE" \
+WIRE_VIEW_FILES="$WIRE_FILE crates/maknae-proto/src/conversation.rs"
+# shellcheck disable=SC2086
+wire_declared="$(grep -ohE '^(pub([[:space:]]|\([^)]*\)[[:space:]]))?struct [A-Za-z0-9_]+View\b' $WIRE_VIEW_FILES \
   | awk '{print $NF}' | sort -u)"
 # `if`, NOT an `[ ... ] && ...` AND-list: when the LAST SURFACE row is a
 # config row the AND-list fails, the loop's status is 1, and under
@@ -205,6 +228,13 @@ wire_declared="$(grep -oE '^(pub([[:space:]]|\([^)]*\)[[:space:]]))?struct [A-Za
 wire_listed="$(for entry in "${SURFACE[@]}"; do
   IFS='|' read -r f st _ _ k <<< "$entry"
   if [ "$k" = "wire" ] && [ "$f" = "$WIRE_FILE" ]; then echo "$st"; fi
+  case "$k|$st|$f" in
+    "wire|"*View"|"*) [ "$f" = "$WIRE_FILE" ] || case " $WIRE_VIEW_FILES " in *" $f "*) echo "$st" ;; esac ;;
+  esac
+done | sort -u)"
+wire_all="$(for entry in "${SURFACE[@]}"; do
+  IFS='|' read -r _ st _ _ k <<< "$entry"
+  if [ "$k" = "wire" ]; then echo "$st"; fi
 done | sort -u)"
 if [ "$wire_listed" != "$wire_declared" ]; then
   echo "FAIL: wire disclosure structs and the SURFACE table disagree:"
@@ -231,6 +261,8 @@ fi
 #   struct:X    -- discloses workspace struct X, which must be a wire SURFACE
 #                  row (every field decided) AND be named in the variant's own
 #                  operand, so this table cannot quietly lie about the type.
+#   leaf:T      -- a struct variant with exactly one field, of type T, a
+#                  String newtype (`pub struct T(String);`).
 PAYLOAD_DISPOSITIONS=(
   "Pong|unit"
   "Whoami|struct:WhoamiView"
@@ -241,6 +273,10 @@ PAYLOAD_DISPOSITIONS=(
   "Baseline|struct:BaselineView"
   "Containment|struct:ContainmentView"
   "PromptReply|bytes"   # #172: the provider's reply, released only on the session.prompt Permit (its own PEP)
+  "ConversationOpened|struct:ConversationView"
+  "ConversationClosed|struct:ConversationView"
+  "ConversationList|struct:ConversationPage"
+  "ConversationDeleted|leaf:ConversationId"   # #170: the id the caller named on session.delete
 )
 payload_variants="$(awk '
   /^pub enum Payload \{/ { inenum=1; next }
@@ -249,15 +285,32 @@ payload_variants="$(awk '
     line=$0
     sub(/^[[:space:]]+/, "", line)
     if (line ~ /^\/\// || line ~ /^#/) next
+    if (sv != "") {
+      if (line ~ /^\},?$/) { print sv "\t{ " svop " }"; sv=""; next }
+      svop = (svop == "" ? line : svop " " line)
+      next
+    }
     if (match(line, /^[A-Za-z_][A-Za-z0-9_]*/)) {
       name=substr(line, 1, RLENGTH)
       rest=substr(line, RLENGTH+1)
+      if (rest ~ /^[[:space:]]*\{$/) { sv=name; svop=""; next }
       op=""
       if (match(rest, /^\(.*\),?$/)) { op=substr(rest, 2, length(rest)-3) }
+      else if (match(rest, /^[[:space:]]*\{.*\},?$/)) {
+        op=rest
+        sub(/^[[:space:]]*\{[[:space:]]*/, "", op); sub(/[[:space:]]*\},?$/, "", op)
+        op="{ " op " }"
+      }
+      else if (rest !~ /^,?$/) { op="__UNPARSED__" rest }
       print name "\t" op
     }
   }
 ' "$WIRE_FILE")"
+unparsed="$(printf '%s\n' "$payload_variants" | awk -F'\t' 'index($2, "__UNPARSED__") == 1 {print $1}')"
+if [ -n "$unparsed" ]; then
+  echo "FAIL: Payload variant(s) whose operand this gate cannot read: $(echo $unparsed)"
+  exit 1
+fi
 listed_names="$(printf '%s\n' "${PAYLOAD_DISPOSITIONS[@]}" | cut -d'|' -f1 | sort)"
 actual_names="$(printf '%s\n' "$payload_variants" | cut -f1 | sort)"
 if [ "$listed_names" != "$actual_names" ]; then
@@ -289,10 +342,23 @@ for row in "${PAYLOAD_DISPOSITIONS[@]}"; do
         *"$st"*) ;;
         *) echo "FAIL: Payload::$vname is listed as disclosing '$st' but its operand is '$operand' — the table is lying about the type"; exit 1 ;;
       esac
-      case " $(echo $wire_listed) " in
+      case " $(echo $wire_all) " in
         *" $st "*) ;;
         *) echo "FAIL: Payload::$vname discloses '$st', which has no wire SURFACE row"; exit 1 ;;
       esac ;;
+    leaf:*)
+      st="${disp#leaf:}"
+      if ! printf '%s' "$operand" | grep -qxE "\{ [a-z_][a-z0-9_]*: (crate::)?$st,? \}"; then
+        echo "FAIL: Payload::$vname is listed 'leaf:$st' but carries '$operand'; a leaf variant has exactly one field, of type $st"
+        exit 1
+      fi
+      nt_file=""
+      for row in "${LEAF_NEWTYPES[@]}"; do
+        IFS='|' read -r _ lf lt <<< "$row"
+        [ "$lt" = "$st" ] && nt_file="$lf"
+      done
+      [ -n "$nt_file" ] || { echo "FAIL: Payload::$vname is listed 'leaf:$st', which has no LEAF_NEWTYPES row"; exit 1; }
+      newtype_check "Payload::$vname" "$nt_file" "$st" || exit 1 ;;
     *) echo "FAIL: unknown payload disposition '$disp' for Payload::$vname"; exit 1 ;;
   esac
 done
@@ -767,6 +833,29 @@ while IFS=$'\t' read -r fpath fty fkind; do
     fi
   done
   [ -z "$leaf_row" ] || continue
+  for row in "${LEAF_NEWTYPES[@]}"; do
+    IFS='|' read -r lp lf lt <<< "$row"
+    if [ "$lp" = "$fpath" ] && [ "$lt" = "$bare" ]; then
+      raw=$(printf '%s' "$fty" | sed -E -e ':a' -e "s#^${wrappers}<##" -e 'ta' | sed -E 's/>+$//')
+      if [ "$raw" != "$lt" ]; then
+        echo "FAIL: leaf-newtype row '$lp': the field's type is spelled '$fty', not exactly '$lt'; a path may name another item."
+        exit 1
+      fi
+      structfile=""
+      for entry in "${SURFACE[@]}"; do
+        IFS='|' read -r ef _ ep _ <<< "$entry"
+        [ "$ep" = "${lp%.*}" ] && structfile="$ef"
+      done
+      if [ "$structfile" != "$lf" ]; then
+        echo "FAIL: leaf-newtype row '$lp': its struct is in '${structfile:-no SURFACE entry}', not in '$lf', so '$lt' may not resolve to this newtype."
+        exit 1
+      fi
+      newtype_check "$lp" "$lf" "$lt" || exit 1
+      echo "$lp" >> "$tmp/leaf-used"
+      leaf_row=1
+    fi
+  done
+  [ -z "$leaf_row" ] || continue
   if [ "$bare" != "__DYNAMIC_MAP__" ]; then
     # `struct` OR `enum`: an enum can carry a map variant just as a struct can
     # carry map fields, and matching only `struct` would leave every
@@ -801,7 +890,7 @@ while IFS=$'\t' read -r fpath fty fkind; do
   covered=""
   for entry in "${SURFACE[@]}"; do
     IFS='|' read -r _ _ p _ <<< "$entry"
-    [ "$p" = "$fpath" ] && covered=1
+    if [ "$p" = "$fpath" ]; then covered=1; echo "$fpath" >> "$tmp/nested"; fi
   done
   while read -r m; do
     [ -n "$m" ] || continue
@@ -820,10 +909,10 @@ while IFS=$'\t' read -r fpath fty fkind; do
     exit 1
   fi
 done < "$tmp/fields"
-for row in "${LEAF_ENUMS[@]}"; do
+for row in "${LEAF_ENUMS[@]}" "${LEAF_NEWTYPES[@]}"; do
   IFS='|' read -r lp _ _ <<< "$row"
   if ! grep -qxF "$lp" "$tmp/leaf-used" 2>/dev/null; then
-    echo "FAIL: leaf-enum row '$lp' matched no field of that path and type; a stale row is removed, not kept."
+    echo "FAIL: leaf row '$lp' matched no field of that path and type; a stale row is removed, not kept."
     exit 1
   fi
 done
@@ -933,6 +1022,7 @@ fi
 undecided=""
 while read -r path; do
   [ -n "$path" ] || continue
+  if grep -qxF "$path" "$tmp/nested" 2>/dev/null; then continue; fi
   ok=""
   while read -r m; do
     [ -n "$m" ] || continue

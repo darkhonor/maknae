@@ -533,6 +533,9 @@ pub enum ReplyRefusal {
     /// Reasoning over `MAX_REASONING_BYTES`; the deputy drops it, so this is a deputy defect.
     ReasoningUnacceptable,
     Unusable(maknae_proto::ReplyDefect),
+    ConversationFull,
+    ConversationChanged,
+    ConversationOutcomeUnknown,
 }
 
 pub fn refusal_answer(r: ReplyRefusal) -> (maknae_proto::ProtoErrCode, &'static str) {
@@ -545,6 +548,13 @@ pub fn refusal_answer(r: ReplyRefusal) -> (maknae_proto::ProtoErrCode, &'static 
             (C::ReplyUnusable(D::OverBound), U)
         }
         ReplyRefusal::Unusable(d) => (C::ReplyUnusable(d), U),
+        ReplyRefusal::ConversationFull => {
+            let b = crate::conversation::bounds::BoundRefusal::ConversationFull;
+            (b.wire_code(), b.message())
+        }
+        ReplyRefusal::ConversationChanged | ReplyRefusal::ConversationOutcomeUnknown => {
+            (C::Unauthorized, "not authorized")
+        }
     }
 }
 
@@ -732,6 +742,39 @@ pub fn outcome_for(
             reply_length,
             "permit",
             format!("reply unusable: {}", d.name()).into(),
+            "unavailable",
+        ),
+        SendOutcome::LandedUndelivered {
+            reply_length,
+            refusal: ReplyRefusal::ConversationFull,
+            ..
+        } => (
+            EgressStatus::LandedUndelivered,
+            reply_length,
+            "permit",
+            "reply refused: conversation full".into(),
+            "refused-oversize",
+        ),
+        SendOutcome::LandedUndelivered {
+            reply_length,
+            refusal: ReplyRefusal::ConversationChanged,
+            ..
+        } => (
+            EgressStatus::LandedUndelivered,
+            reply_length,
+            "permit",
+            "reply refused: conversation changed".into(),
+            "unavailable",
+        ),
+        SendOutcome::LandedUndelivered {
+            reply_length,
+            refusal: ReplyRefusal::ConversationOutcomeUnknown,
+            ..
+        } => (
+            EgressStatus::LandedUndelivered,
+            reply_length,
+            "permit",
+            "reply refused: conversation outcome unknown".into(),
             "unavailable",
         ),
     };
@@ -2232,6 +2275,42 @@ mod tests {
             ),
             (
                 SendOutcome::LandedUndelivered {
+                    reply_length: Some(4),
+                    refusal: ReplyRefusal::ConversationFull,
+                    usage: None,
+                },
+                EgressStatus::LandedUndelivered,
+                "permit",
+                "reply refused: conversation full",
+                "refused-oversize",
+                Some(4),
+            ),
+            (
+                SendOutcome::LandedUndelivered {
+                    reply_length: Some(5),
+                    refusal: ReplyRefusal::ConversationChanged,
+                    usage: None,
+                },
+                EgressStatus::LandedUndelivered,
+                "permit",
+                "reply refused: conversation changed",
+                "unavailable",
+                Some(5),
+            ),
+            (
+                SendOutcome::LandedUndelivered {
+                    reply_length: Some(6),
+                    refusal: ReplyRefusal::ConversationOutcomeUnknown,
+                    usage: None,
+                },
+                EgressStatus::LandedUndelivered,
+                "permit",
+                "reply refused: conversation outcome unknown",
+                "unavailable",
+                Some(6),
+            ),
+            (
+                SendOutcome::LandedUndelivered {
                     reply_length: Some(3),
                     refusal: ReplyRefusal::ToolCallUnacceptable,
                     usage: None,
@@ -2394,6 +2473,18 @@ mod tests {
             (
                 ReplyRefusal::Unusable(ReplyDefect::ProviderAuth),
                 (C::ReplyUnusable(ReplyDefect::ProviderAuth), unusable),
+            ),
+            (
+                ReplyRefusal::ConversationFull,
+                (C::TooLarge, "conversation is full"),
+            ),
+            (
+                ReplyRefusal::ConversationChanged,
+                (C::Unauthorized, "not authorized"),
+            ),
+            (
+                ReplyRefusal::ConversationOutcomeUnknown,
+                (C::Unauthorized, "not authorized"),
             ),
         ] {
             assert_eq!(refusal_answer(refusal), want, "{refusal:?}");

@@ -346,6 +346,7 @@ async fn drive_into(
             drain,
             gate,
             lifetime,
+            common::conversations(),
             maknae_kernel::AgentAdmission::none(),
         )
         .await;
@@ -535,6 +536,7 @@ async fn stalled_handshake_does_not_block_next_connection() {
             common::serving(),
             host_gate(),
             Duration::MAX,
+            common::conversations(),
             maknae_kernel::AgentAdmission::none(),
         )
         .await;
@@ -639,6 +641,7 @@ async fn at_capacity_audit_does_not_block_accept_loop() {
             common::serving(),
             host_gate(),
             Duration::MAX,
+            common::conversations(),
             maknae_kernel::AgentAdmission::none(),
         )
         .await;
@@ -739,6 +742,7 @@ async fn every_at_capacity_refusal_is_recorded_or_counted() {
             common::serving(),
             host_gate(),
             Duration::MAX,
+            common::conversations(),
             maknae_kernel::AgentAdmission::none(),
         )
         .await;
@@ -807,6 +811,7 @@ async fn supervisor_exit_stops_the_loop_and_reports_failure() {
             common::serving(),
             host_gate(),
             Duration::MAX,
+            common::conversations(),
             maknae_kernel::AgentAdmission::none(),
         ),
     )
@@ -873,6 +878,7 @@ async fn a_listener_that_authenticates_otherwise_than_its_class_serves_nothing()
             common::serving(),
             host_gate(),
             Duration::MAX,
+            common::conversations(),
             maknae_kernel::AgentAdmission::none(),
         ),
     )
@@ -932,6 +938,7 @@ async fn shutdown_signal_yields_graceful_outcome() {
         common::serving(),
         host_gate(),
         Duration::MAX,
+        common::conversations(),
         maknae_kernel::AgentAdmission::none(),
     ));
     tx.send(()).expect("shutdown receiver must still be alive");
@@ -1757,6 +1764,7 @@ where
             common::serving(),
             gate,
             Duration::MAX,
+            common::conversations(),
             agents,
         )
         .await;
@@ -1952,6 +1960,19 @@ fn agent_pdp(
     common::DirGuard,
     Arc<maknae_kernel::Composition<maknae_authz_basic::HermeticAuthorizer>>,
 ) {
+    agent_pdp_over(
+        tag,
+        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n",
+    )
+}
+
+fn agent_pdp_over(
+    tag: &str,
+    authz: &str,
+) -> (
+    common::DirGuard,
+    Arc<maknae_kernel::Composition<maknae_authz_basic::HermeticAuthorizer>>,
+) {
     use std::os::unix::fs::PermissionsExt;
     let root = std::env::temp_dir().join(format!("agent609_{tag}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -1959,10 +1980,7 @@ fn agent_pdp(
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
     let root = common::DirGuard(root.canonicalize().unwrap());
     let paths = maknae_authz_basic::PolicyPaths::in_dir(&root);
-    common::write_0640(
-        &paths.authz,
-        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n",
-    );
+    common::write_0640(&paths.authz, authz);
     common::write_0640(
         &paths.bindings,
         "schema_version: 1\nbindings:\n  admin: [\"root\"]\n",
@@ -2309,5 +2327,71 @@ async fn an_agent_request_citing_its_task_is_stamped_and_audited() {
             Some("uid:1002")
         ),
         "{terminate:?}"
+    );
+}
+
+#[tokio::test]
+async fn agents_are_denied_session_new_by_default() {
+    let _turn = FS_TURN.lock().await;
+    let (_root, pdp) = agent_pdp_over(
+        "session-new-default",
+        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nroles:\n  user:\n    allow: [\"session.new\"]\n",
+    );
+    let pdp = Seen::new(pdp);
+    let home = common::second_home("agent609-session-new");
+    let me = nix::unistd::geteuid().as_raw();
+    let (conn, mut client) = asking(
+        agent_leaf("hobi"),
+        me,
+        maknae_proto::Verb::SessionNew {
+            cwd: home.to_str().unwrap().into(),
+        },
+        None,
+        directory_fd(&home),
+    )
+    .await;
+    let (recs, answered) = tokio::join!(
+        drive_channel(
+            agent_socket(),
+            vec![conn],
+            account_gate("hobi-svc", home.to_path_buf(), false),
+            Arc::clone(&pdp),
+            euid_hobi(&[]),
+        ),
+        async {
+            let got = first_answer(&mut client).await;
+            drop(client);
+            got
+        }
+    );
+    match answered {
+        Some(maknae_proto::RespResult::Err(e)) => assert_eq!(
+            (e.code, e.message.as_str()),
+            (maknae_proto::ProtoErrCode::Unauthorized, "not authorized")
+        ),
+        other => panic!("expected the generic Unauthorized frame, got {other:?} {recs:?}"),
+    }
+    let asked = pdp.asked("session.new");
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert_eq!(
+        asked[0].subject.0.get(maknae_security::SUBJECT_AGENT),
+        Some(&maknae_security::AttrValue::Str("hobi".into()))
+    );
+    let new = recs
+        .iter()
+        .find(|r| r.event == "request" && r.action == "session.new")
+        .expect("the session.new record");
+    assert_eq!(
+        (
+            new.outcome.result.as_str(),
+            new.outcome.reason.as_str(),
+            new.subject.agent.as_deref()
+        ),
+        (
+            "deny",
+            "agent hobi: session.new needs a grant in its policy.yaml",
+            Some("hobi")
+        ),
+        "{new:?}"
     );
 }

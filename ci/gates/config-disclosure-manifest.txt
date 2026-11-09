@@ -86,3 +86,18 @@ always	binding.agent	the enrolled agent id of a subject an agent runs as (#609);
 always	binding.principal	whether the row is the enrolled principal, admin because bindings.yaml has no bindings: key (#609); a flag, omitted when false, so the listing never hides the only admin
 always	whoami.peer_plane_uri_san	the caller's own verified plane identity; it is who they already are
 always	whoami.peer_uid	the caller's own uid, which they can read with getuid()
+always	conversation.conversation	session.new and session.close (#170): the caller's own conversation: its kernel-assigned id, which the caller cites on every later request
+always	conversation.cwd	session.new and session.close (#170): the caller's own conversation: the working directory the caller opened it in, as the PDP decided it
+always	conversation.opened_at	session.new and session.close (#170): the caller's own conversation: when it was opened, epoch seconds
+always	conversation.last_active	session.new and session.close (#170): the caller's own conversation: when it last changed, epoch seconds; the caller can predict its idle expiry
+always	conversation.turns	session.new and session.close (#170): the caller's own conversation: how many request turns its chain covers; a count, never content
+always	conversation.bytes	session.new and session.close (#170): the caller's own conversation: the bytes counted against its cap; a count, never content
+always	conversation.chain_head	session.new and session.close (#170): the caller's own conversation: the chain digest over turns the caller sent; derived from the caller's own content, discloses none of it
+always	conversation_list.entries.conversation	session.list (#170): one of the caller's own conversations: its kernel-assigned id, which the caller cites on every later request
+always	conversation_list.entries.cwd	session.list (#170): one of the caller's own conversations: the working directory the caller opened it in, as the PDP decided it
+always	conversation_list.entries.opened_at	session.list (#170): one of the caller's own conversations: when it was opened, epoch seconds
+always	conversation_list.entries.last_active	session.list (#170): one of the caller's own conversations: when it last changed, epoch seconds; the caller can predict its idle expiry
+always	conversation_list.entries.turns	session.list (#170): one of the caller's own conversations: how many request turns its chain covers; a count, never content
+always	conversation_list.entries.bytes	session.list (#170): one of the caller's own conversations: the bytes counted against its cap; a count, never content
+always	conversation_list.entries.chain_head	session.list (#170): one of the caller's own conversations: the chain digest over turns the caller sent; derived from the caller's own content, discloses none of it
+always	conversation_list.next	session.list (#170): the cursor for the next page, the id of one of the caller's own conversations

@@ -11,9 +11,9 @@
 //!      (added 2026-08-31, #162) `roles:` grant semantics: an unknown role, a
 //!      structural role (`guest`/`adversary`), a term outside
 //!      `GRANTABLE_ACTIONS`, or a term the role may not hold (`user` holds
-//!      `session.prompt` only; corrected 2026-09-09, #172: the term set is
-//!      two-role now), or (added 2026-09-09, #172) `destinations:` role-key
-//!      semantics. One trigger: the load validates all of them eagerly;
+//!      the session terms only), a person's `session.prompt` without
+//!      `session.new` (#170), or (added 2026-09-09, #172) `destinations:`
+//!      role-key semantics. One trigger: the load validates all of them eagerly;
 //!   3. the snapshot compiler refuses the loaded policy against the booted
 //!      kernel graph's identity layer or the binary's vocabulary (#489).
 

@@ -138,6 +138,15 @@ phase1() {
         '')  fail "no kernel graph state-dir install line found in preinstall" ;;
         *)   fail "kernel graph state dir not -m 0700 -o \"\$MAKNAE_UID\" -g \"\$MAKNAE_GID\": $state_line" ;;
     esac
+    grep -qE '^install -d .*/usr/local/var/db/maknae/state/conversations$' "$HERE/scripts/preinstall" \
+        && fail "preinstall creates the conversation store beneath a daemon-owned state dir" \
+        || ok "preinstall leaves the conversation store to postinstall"
+    grep -qF 'hold_dir "$CONV"' "$HERE/scripts/postinstall" \
+        && ok "postinstall holds the conversation store while root works on it" \
+        || fail "postinstall does not hold the conversation store"
+    grep -qF 'verify "$CONV ownership/mode" "$MUID $MGID 700"' "$HERE/scripts/postinstall" \
+        && ok "postinstall verifies the conversation store dir" \
+        || fail "postinstall does not verify the conversation store dir"
     grep -qF 'verify "$STATE ownership/mode" "$MUID $MGID 700"' "$HERE/scripts/postinstall" \
         && ok "postinstall verifies the kernel graph state dir" \
         || fail "postinstall does not verify the kernel graph state dir"

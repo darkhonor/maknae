@@ -142,6 +142,7 @@ pub fn prepare_checked(
             result
         }
         proto::Verb::Read { path, .. } => maknae_io::open_path_for_delegation(Path::new(path)),
+        proto::Verb::SessionNew { cwd } => maknae_io::open_directory_for_delegation(Path::new(cwd)),
         _ => return None,
     };
     let (fd, error) = match opened {
@@ -1941,6 +1942,47 @@ mod tests {
             assert_eq!(checked_write(path.clone(), check).check, check);
         }
         assert_eq!(prepare_write(path).unwrap().check, WriteCheck::Unchecked);
+    }
+    #[test]
+    fn a_session_new_delegates_its_cwd_as_a_directory_descriptor() {
+        let d = Fixture::new();
+        let cwd = d.path("work");
+        std::fs::create_dir(&cwd).unwrap();
+        let prepared = prepare_checked(
+            proto::Verb::SessionNew { cwd: cwd.clone() },
+            None,
+            WriteCheck::Unchecked,
+        )
+        .unwrap();
+        let fd = prepared.descriptor().unwrap().expect("a cwd descriptor");
+        let stat = nix::sys::stat::fstat(&fd).unwrap();
+        assert_eq!(
+            stat.st_mode & nix::sys::stat::SFlag::S_IFMT.bits(),
+            nix::sys::stat::SFlag::S_IFDIR.bits()
+        );
+        assert_eq!(prepared.preparation_error(), None);
+        assert_eq!(
+            prepared.request(),
+            &proto::Verb::SessionNew { cwd: cwd.clone() }
+        );
+
+        let file = d.path("not-a-dir");
+        std::fs::write(&file, b"x").unwrap();
+        let unarmed = prepare_checked(
+            proto::Verb::SessionNew { cwd: file },
+            None,
+            WriteCheck::Unchecked,
+        )
+        .unwrap();
+        assert!(unarmed.descriptor().unwrap().is_none());
+        assert!(unarmed.preparation_error().is_some());
+
+        assert!(prepare_checked(
+            proto::Verb::SessionList { cursor: None },
+            None,
+            WriteCheck::Unchecked
+        )
+        .is_none());
     }
     #[test]
     fn the_check_maps_to_its_base() {

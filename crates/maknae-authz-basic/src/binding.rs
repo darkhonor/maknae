@@ -1454,7 +1454,7 @@ mod tests {
         let policy = maknae_config::parse_authz(&format!(
             "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\nroles:\n  admin:\n    allow:\n{}  user:\n    allow:\n{}",
             quoted(&crate::decide::GRANTABLE_ACTIONS),
-            quoted(&["session.prompt"]),
+            quoted(&["session.prompt", "session.new"]),
         ))
         .unwrap();
         crate::decide::LoadedPolicy {

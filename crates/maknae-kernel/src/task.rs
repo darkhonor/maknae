@@ -414,7 +414,7 @@ fn task_request(
         ),
     };
     let verb = maknae_proto::Verb::TaskSubmit { task: sub.clone() };
-    let mut req = build_authz_request(&verb, uid, home.as_deref(), lane, None, &stamp);
+    let mut req = build_authz_request(&verb, uid, home.as_deref(), lane, None, None, &stamp);
     req.resource
         .0
         .insert(RESOURCE_AGENT, AttrValue::Str(target.to_owned()));

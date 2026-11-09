@@ -37,6 +37,8 @@ maknae-msgs = { path = "../maknae-msgs" }
 nix = { version = "0.31", default-features = false, features = ["user", "poll", "socket"] } # poll: the egress socket's and userdb call's wall-clock budgets; socket: the userdb call's non-blocking connect (session_facts/varlink.rs)
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal", "io-util"] }
 serde_json = "1"
+serde = { workspace = true, features = ["derive"] }
+ciborium = { workspace = true }
 
 [dev-dependencies]
 maknae-kernel = { path = ".", features = ["hermetic-test-seam"] }

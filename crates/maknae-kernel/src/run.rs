@@ -71,6 +71,8 @@ use crate::blocking_guard::{
     AUDIT_APPEND_TIMEOUT, BLOCKING_OPERATION_TIMEOUT, SCAN_BACK_TIMEOUT,
 };
 use crate::boot_gate::authz_boot_gate;
+use crate::conversation::answer::{EffectFailure, StepFailure};
+use crate::conversation::store::{ConversationStore, StoreError as ConversationError};
 use crate::groupres::maknae_gid;
 use crate::handler::{
     build_authz_request, build_whoami, discharge_plan, dispatch_verb, lexical_pregate, may_respond,
@@ -736,6 +738,7 @@ pub async fn handle<S, E, P>(
     authz_decide_timeout: Duration,
     delegated: maknae_io::DelegatedFds,
     ops: Arc<dyn AdminOps>,
+    conversations: Arc<dyn ConversationStore>,
     agents: AgentAdmission,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -761,6 +764,7 @@ pub async fn handle<S, E, P>(
         delegated,
         ops,
         crate::mutation::AttemptCaps::default(),
+        conversations,
         agents,
     )
     .await
@@ -817,6 +821,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     // The admin verbs that reach the reload turn.
     ops: Arc<dyn AdminOps>,
     attempt_caps: crate::mutation::AttemptCaps,
+    conversations: Arc<dyn ConversationStore>,
     agents: AgentAdmission,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -1201,6 +1206,44 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         return;
     }
 
+    if matches!(
+        dispatch_verb(&request.verb),
+        Dispatch::ConversationNewRequested
+            | Dispatch::ConversationCloseRequested
+            | Dispatch::ConversationListRequested
+            | Dispatch::ConversationDeleteRequested
+    ) {
+        let trail = Trail {
+            emit: &emit,
+            cfg: &cfg,
+            class,
+            host: &host,
+            socket: &socket,
+            uid: peer_uid,
+            peer_uri: peer_uri.as_deref(),
+            peer_user: peer_user.as_deref(),
+            session_id,
+            seq,
+            au3_1: &au3_1,
+        };
+        serve_conversation_verb(
+            &mut stream,
+            &trail,
+            &request.verb,
+            lane,
+            &delegated,
+            &authorizer,
+            &live,
+            &conversations,
+            authz_decide_timeout,
+            &classification_policy_name,
+            &stamp,
+        )
+        .await;
+        close_bounded(&mut stream).await;
+        return;
+    }
+
     if crate::handler::is_filesystem_verb(&request.verb) {
         let mut record = make_record(
             "request",
@@ -1240,6 +1283,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             authz_decide_timeout,
             attempt_caps,
             &classification_policy_name,
+            Arc::clone(&conversations),
             &stamp,
         )
         .await;
@@ -1307,63 +1351,79 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     // parent contract: combine([guarded_decide]) + finalize. Timeout or join
     // failure converts AT THE CALL SITE to a Deny with its own reason
     // (finalize(Indeterminate) would hardcode a different string).
+    let gathered = match &request.verb {
+        Verb::SessionPrompt {
+            conversation,
+            turns,
+            ..
+        } => {
+            let (store, cited, held) = (
+                Arc::clone(&conversations),
+                conversation.clone(),
+                turns.clone(),
+            );
+            match crate::mutation::blocking(peer_uid, authz_decide_timeout, move || {
+                crate::conversation::facts::gather(&*store, peer_uid, Some(&cited), Some(&held))
+            })
+            .await
+            {
+                Ok(gathered) => gathered,
+                Err(why) => {
+                    let appended = emit_request_outcome(
+                        &emit,
+                        &host,
+                        &socket,
+                        peer_uid,
+                        peer_uri.as_deref(),
+                        peer_user.as_deref(),
+                        None,
+                        None,
+                        session_id,
+                        seq.next(),
+                        "session.prompt",
+                        None,
+                        None,
+                        "deny",
+                        &format!("conversation facts unavailable: {why}"),
+                        "unauthorized",
+                        &au3_1,
+                    )
+                    .await;
+                    if may_respond(appended) {
+                        write_error_bounded(
+                            &mut stream,
+                            &cfg,
+                            class,
+                            ProtoErrCode::Unauthorized,
+                            "not authorized",
+                        )
+                        .await;
+                    }
+                    close_bounded(&mut stream).await;
+                    return;
+                }
+            }
+        }
+        _ => None,
+    };
     let sec_req = build_authz_request(
         &request.verb,
         peer_uid,
         None,
         lane,
         admitted.as_ref(),
+        gathered.as_ref().map(|(facts, _)| facts),
         &stamp,
     );
     let permitted_req = sec_req.clone();
-    let authz_breaker = authz_decide_breaker();
-    // #275: the role rides out WITH the verdict so the audit record attests the
-    // role this very decision was made on. `combine(vec![..])` is preserved
-    // deliberately: it is what turns an Indeterminate into the
-    // "indeterminate operand blocks (fail-closed)" trail string, and dropping
-    // the wrapper would change that string silently.
-    let mut decided_role: Option<&'static str> = None;
-    let mut decided_rule: Option<RuleCitation> = None;
-    let decided = {
-        let (a, live) = (Arc::clone(&authorizer), Arc::clone(&live));
-        admit_blocking(
-            &authz_breaker,
-            authz_decide_timeout,
-            "authorization decision",
-            move || {
-                let d = guarded_decide_cited(&*a, &sec_req);
-                (combine(vec![d.verdict]), d.role, d.rule, live.generation())
-            },
-        )
-        .await
-    };
-    let verdict = match decided {
-        Err(Offload::Open) => maknae_security::Verdict::Deny {
-            reason: "authorization decision circuit breaker open".into(),
-        },
-        Err(Offload::AtCapacity) => maknae_security::Verdict::Deny {
-            reason: "authorization decision blocking worker budget exhausted".into(),
-        },
-        // A live install landed between admission and the decision: the
-        // request was admitted on values the decision did not see.
-        Ok((_, role, _, generation)) if generation != admitted_generation => {
-            decided_role = role;
-            maknae_security::Verdict::Deny {
-                reason: "the live baseline changed between admission and decision".into(),
-            }
-        }
-        Ok((v, role, rule, _)) => {
-            decided_role = role;
-            decided_rule = rule;
-            v
-        }
-        Err(Offload::Join) => maknae_security::Verdict::Deny {
-            reason: "authorization decision failed (join)".into(),
-        },
-        Err(Offload::TimedOut) => maknae_security::Verdict::Deny {
-            reason: "authorization decision timed out".into(),
-        },
-    };
+    let (verdict, decided_role, decided_rule) = decide_bounded(
+        &authorizer,
+        &live,
+        sec_req,
+        admitted_generation,
+        authz_decide_timeout,
+    )
+    .await;
     let obligations = match finalize(verdict) {
         Decision::Deny { reason } => {
             // Deny: the reason goes to the TRAIL, never the wire (spec D3);
@@ -1448,7 +1508,11 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     // the response write and claims only authorization facts true at append
     // time.
     match dispatch_verb(&request.verb) {
-        Dispatch::MutationRequested => {
+        Dispatch::MutationRequested
+        | Dispatch::ConversationNewRequested
+        | Dispatch::ConversationCloseRequested
+        | Dispatch::ConversationListRequested
+        | Dispatch::ConversationDeleteRequested => {
             let appended = emit_request_outcome(
                 &emit,
                 &host,
@@ -1464,7 +1528,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 None,
                 None,
                 "deny",
-                "mutation dispatch reached without prepared evidence",
+                "dispatch reached without prepared evidence",
                 "unauthorized",
                 &au3_1,
             )
@@ -1950,7 +2014,13 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         }
                     }
                 }
-                Dispatch::NoBehaviour | Dispatch::MutationRequested | Dispatch::PromptRequested => {
+                Dispatch::NoBehaviour
+                | Dispatch::MutationRequested
+                | Dispatch::PromptRequested
+                | Dispatch::ConversationNewRequested
+                | Dispatch::ConversationCloseRequested
+                | Dispatch::ConversationListRequested
+                | Dispatch::ConversationDeleteRequested => {
                     unreachable!("outer match routes unprepared operations")
                 }
             };
@@ -2065,6 +2135,60 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 prompt_tokens: None,
                 completion_tokens: None,
                 refused_tool_calls: vec![],
+            };
+            let refuse_turn = |reason: &str, posture: &str| {
+                let mut rec = make_record(
+                    "request",
+                    &host,
+                    &socket,
+                    peer_uid,
+                    None,
+                    None,
+                    peer_uri.as_deref(),
+                    session_id,
+                    seq.next(),
+                    "session.prompt",
+                    Some(&destination),
+                    "deny",
+                    reason,
+                    posture,
+                    &au3_1,
+                );
+                rec.subject.user = admitted_user(peer_user.as_deref());
+                rec.subject.role = decided_role.map(str::to_string);
+                rec.rule = decided_rule.as_ref().map(rule_audit);
+                rec.conversation = Some(conversation.clone());
+                rec
+            };
+            let advanced = match advance_conversation(
+                &conversations,
+                peer_uid,
+                authz_decide_timeout,
+                gathered,
+                turns,
+            )
+            .await
+            {
+                Ok(rec) => rec,
+                Err(failure) => {
+                    let refused = crate::conversation::answer::advance_answer(&failure);
+                    let rec = refuse_turn(&refused.reason, refused.posture);
+                    if may_respond(
+                        emit_or_report(&emit, &rec, "conversation refusal", peer_uid, session_id)
+                            .await,
+                    ) {
+                        write_error_bounded(
+                            &mut stream,
+                            &cfg,
+                            class,
+                            refused.code,
+                            refused.message,
+                        )
+                        .await;
+                    }
+                    close_bounded(&mut stream).await;
+                    return;
+                }
             };
             // 1. readiness BEFORE any intent: a refusal is not a send.
             if let Err(_f) = egress.ready() {
@@ -2314,6 +2438,56 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 // The worker keeps running detached; its late reply is dropped.
                 Err(_elapsed) => (crate::egress::SendOutcome::DeadlineExpired, None),
             };
+            let (send_outcome, reply) = match (send_outcome, reply) {
+                (
+                    crate::egress::SendOutcome::Sent {
+                        reply_length,
+                        usage,
+                    },
+                    Some(reply),
+                ) => {
+                    match bind_reply(
+                        &conversations,
+                        peer_uid,
+                        authz_decide_timeout,
+                        &advanced,
+                        &reply,
+                    )
+                    .await
+                    {
+                        Ok(()) => (
+                            crate::egress::SendOutcome::Sent {
+                                reply_length,
+                                usage,
+                            },
+                            Some(reply),
+                        ),
+                        Err((refusal, unmarked)) => {
+                            if let Some(why) = unmarked {
+                                let mut rec = refuse_turn(&why, "unavailable");
+                                rec.outcome.result = "permit".into();
+                                emit_or_report(
+                                    &emit,
+                                    &rec,
+                                    "conversation record",
+                                    peer_uid,
+                                    session_id,
+                                )
+                                .await;
+                            }
+                            (
+                                crate::egress::SendOutcome::LandedUndelivered {
+                                    reply_length: Some(reply_length),
+                                    refusal,
+                                    usage,
+                                },
+                                None,
+                            )
+                        }
+                    }
+                }
+                other => other,
+            };
             // 4. the outcome record, then the reply: audit-then-respond on the
             //    release leg (#146).
             let mut outcome =
@@ -2406,6 +2580,672 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         }
     }
     close_bounded(&mut stream).await;
+}
+
+struct Trail<'a, E> {
+    emit: &'a Arc<E>,
+    cfg: &'a TransportConfig,
+    class: FrameClass,
+    host: &'a str,
+    socket: &'a str,
+    uid: u32,
+    peer_uri: Option<&'a str>,
+    peer_user: Option<&'a str>,
+    session_id: u64,
+    seq: &'a Seq,
+    au3_1: &'a serde_json::Value,
+}
+
+impl<E: AuditEmit + Send + Sync> Trail<'_, E> {
+    fn record(&self, action: &str, result: &str, reason: &str, posture: &str) -> AuditRecord {
+        let mut rec = make_record(
+            "request",
+            self.host,
+            self.socket,
+            self.uid,
+            None,
+            None,
+            self.peer_uri,
+            self.session_id,
+            self.seq.next(),
+            action,
+            None,
+            result,
+            reason,
+            posture,
+            self.au3_1,
+        );
+        rec.subject.user = admitted_user(self.peer_user);
+        rec
+    }
+
+    fn outcome(&self, intent: &AuditRecord, reason: &str, posture: &str) -> AuditRecord {
+        let mut rec = intent.clone();
+        rec.seq = self.seq.next();
+        rec.ts = rfc3339_now();
+        rec.outcome.reason = reason.into();
+        rec.outcome.posture = posture.into();
+        rec
+    }
+
+    async fn record_bounded(&self, rec: &AuditRecord) -> bool {
+        emit_or_report(
+            self.emit,
+            rec,
+            "conversation record",
+            self.uid,
+            self.session_id,
+        )
+        .await
+    }
+
+    async fn refuse<S>(&self, stream: &mut S, rec: &AuditRecord, code: ProtoErrCode, message: &str)
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        if may_respond(self.record_bounded(rec).await) {
+            write_error_bounded(stream, self.cfg, self.class, code, message).await;
+        }
+    }
+
+    async fn unauthorized<S>(&self, stream: &mut S, rec: &AuditRecord)
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        self.refuse(stream, rec, ProtoErrCode::Unauthorized, "not authorized")
+            .await;
+    }
+
+    async fn unreadable(&self, action: &str, names: &[String]) {
+        for name in names {
+            let mut rec = self.record(
+                action,
+                "deny",
+                "conversation record unreadable",
+                "unavailable",
+            );
+            rec.object = Some(name.clone());
+            self.record_bounded(&rec).await;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn deliver<S>(
+        &self,
+        stream: &mut S,
+        outcome: &AuditRecord,
+        payload: Payload,
+        role: Option<&'static str>,
+        rule: Option<&RuleCitation>,
+        action: &str,
+    ) where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        if !may_respond(self.record_bounded(outcome).await) {
+            return;
+        }
+        let response = Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(payload),
+        };
+        match encode_response(&response) {
+            Ok(bytes) => {
+                write_frame_bounded(
+                    stream,
+                    self.cfg,
+                    self.class,
+                    &bytes,
+                    self.emit,
+                    self.host,
+                    self.socket,
+                    self.uid,
+                    self.peer_uri,
+                    self.peer_user,
+                    role,
+                    rule,
+                    self.session_id,
+                    self.seq,
+                    action,
+                    self.au3_1,
+                )
+                .await
+            }
+            Err(_) => {
+                refuse_unencodable_bounded(
+                    stream,
+                    self.cfg,
+                    self.class,
+                    self.emit,
+                    self.host,
+                    self.socket,
+                    self.uid,
+                    self.peer_uri,
+                    self.peer_user,
+                    role,
+                    rule,
+                    self.session_id,
+                    self.seq,
+                    action,
+                    self.au3_1,
+                )
+                .await
+            }
+        }
+    }
+}
+
+fn chain_summary(rec: &crate::conversation::record::ConversationRecord) -> String {
+    format!(
+        "head={} turns={} bytes={}",
+        rec.chain.to_hex(),
+        rec.turns,
+        rec.bytes
+    )
+}
+
+async fn sweep_idle<E: AuditEmit + Send + Sync>(
+    trail: &Trail<'_, E>,
+    store: &Arc<dyn ConversationStore>,
+    now: u64,
+    timeout: Duration,
+) {
+    let uid = trail.uid;
+    let s = Arc::clone(store);
+    let Ok(Ok(scan)) = crate::mutation::blocking(uid, timeout, move || {
+        s.idle_for_owner(uid, crate::conversation::bounds::idle_cutoff(now))
+    })
+    .await
+    else {
+        return;
+    };
+    trail.unreadable("session.close", &scan.unreadable).await;
+    for rec in scan.value {
+        let mut intent = trail.record(
+            "session.close",
+            "permit",
+            &format!("idle; intent recorded; {}", chain_summary(&rec)),
+            "authorized",
+        );
+        intent.object = Some(rec.cwd.clone());
+        intent.conversation = Some(rec.id.as_str().to_owned());
+        if !trail.record_bounded(&intent).await {
+            return;
+        }
+        let (s, id, fence) = (Arc::clone(store), rec.id.clone(), rec.fence);
+        let removed =
+            effect(crate::mutation::blocking(uid, timeout, move || s.remove(&id, fence)).await)
+                .map(|_| ());
+        let (reason, posture) = crate::conversation::answer::sweep_outcome(&removed);
+        trail
+            .record_bounded(&trail.outcome(&intent, &reason, posture))
+            .await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn serve_conversation_verb<S, E, P>(
+    stream: &mut S,
+    trail: &Trail<'_, E>,
+    verb: &Verb,
+    lane: maknae_security::Lane,
+    delegated: &maknae_io::DelegatedFds,
+    authorizer: &Arc<P>,
+    live: &Arc<crate::live::LiveConfig>,
+    store: &Arc<dyn ConversationStore>,
+    timeout: Duration,
+    policy_name: &str,
+    stamp: &Stamp<'_>,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    E: AuditEmit + Send + Sync + 'static,
+    P: Authorizer + Send + Sync + 'static,
+{
+    use crate::conversation::{bounds, facts, record};
+    let action = verb_to_action(verb);
+    let uid = trail.uid;
+    let (_, _, generation) = live.admission();
+    let cited = match verb {
+        Verb::SessionClose { conversation } | Verb::SessionDelete { conversation } => {
+            Some(conversation.clone())
+        }
+        _ => None,
+    };
+    let asked = match verb {
+        Verb::SessionNew { cwd } => Some(cwd.clone()),
+        _ => None,
+    };
+    let early = |reason: &str| {
+        let mut rec = trail.record(action, "deny", reason, "unauthorized");
+        rec.object_requested.clone_from(&asked);
+        rec.conversation = cited.as_ref().map(|c| c.as_str().to_owned());
+        rec
+    };
+
+    let mut gathered = None;
+    if let Some(id) = &cited {
+        let (s, id) = (Arc::clone(store), id.clone());
+        match crate::mutation::blocking(uid, timeout, move || {
+            facts::gather(&*s, uid, Some(id.as_str()), None)
+        })
+        .await
+        {
+            Ok(g) => gathered = g,
+            Err(why) => {
+                trail
+                    .unauthorized(
+                        stream,
+                        &early(&format!("conversation facts unavailable: {why}")),
+                    )
+                    .await;
+                return;
+            }
+        }
+    }
+
+    let sec_req = build_authz_request(
+        verb,
+        uid,
+        None,
+        lane,
+        None,
+        gathered.as_ref().map(|(f, _)| f),
+        stamp,
+    );
+    let (verdict, role, rule) =
+        decide_bounded(authorizer, live, sec_req, generation, timeout).await;
+    let decided = |result: &str, reason: &str, posture: &str| {
+        let mut rec = trail.record(action, result, reason, posture);
+        rec.subject.role = role.map(str::to_string);
+        rec.rule = rule.as_ref().map(rule_audit);
+        rec.object_requested.clone_from(&asked);
+        rec.conversation = cited.as_ref().map(|c| c.as_str().to_owned());
+        rec
+    };
+    let at = |mut rec: AuditRecord, cwd: &str| {
+        rec.object = Some(cwd.to_owned());
+        rec.object_requested = asked.clone().filter(|a| a != cwd);
+        rec
+    };
+    match finalize(verdict) {
+        Decision::Deny { reason } => {
+            trail
+                .unauthorized(stream, &decided("deny", &reason, "unauthorized"))
+                .await;
+            return;
+        }
+        Decision::Permit { obligations } => {
+            if let Err(unhonorable) = discharge_plan(&obligations) {
+                let reason = format!("unhonorable obligation: {}", unhonorable.0);
+                trail
+                    .unauthorized(stream, &decided("deny", &reason, "unauthorized"))
+                    .await;
+                return;
+            }
+        }
+    }
+
+    let now = unix_now();
+    let failed = |intent: &AuditRecord, f: &EffectFailure| {
+        let a = crate::conversation::answer::effect_answer(f);
+        (
+            trail.outcome(intent, &a.reason, a.posture),
+            a.code,
+            a.message,
+        )
+    };
+    match verb {
+        Verb::SessionNew { cwd: requested } => {
+            let refuse_cwd = |why: &str| decided("deny", why, "unauthorized");
+            if let Err(why) = crate::mutation::checked(requested) {
+                trail
+                    .unauthorized(
+                        stream,
+                        &refuse_cwd(&format!("cwd fails operand pre-gate: {why}")),
+                    )
+                    .await;
+                return;
+            }
+            let Some(fd) = delegated.take() else {
+                trail
+                    .unauthorized(stream, &refuse_cwd("cwd descriptor missing"))
+                    .await;
+                return;
+            };
+            let cwd = match crate::mutation::blocking(uid, timeout, move || {
+                crate::mutation::verify_cwd(std::os::fd::AsFd::as_fd(&fd))
+            })
+            .await
+            {
+                Ok(Ok(path)) => path,
+                Ok(Err(why)) => {
+                    trail.unauthorized(stream, &refuse_cwd(&why)).await;
+                    return;
+                }
+                Err(why) => {
+                    trail
+                        .unauthorized(stream, &refuse_cwd(&why.to_string()))
+                        .await;
+                    return;
+                }
+            };
+            let Some(lowest) =
+                crate::classification::select(policy_name).map(|p| p.unmarked().name)
+            else {
+                trail
+                    .unauthorized(
+                        stream,
+                        &at(
+                            decided("deny", "classification system unresolved", "unavailable"),
+                            &cwd,
+                        ),
+                    )
+                    .await;
+                return;
+            };
+            sweep_idle(trail, store, now, timeout).await;
+            let id = match record::mint_id() {
+                Ok(id) => id,
+                Err(e) => {
+                    trail
+                        .unauthorized(
+                            stream,
+                            &at(decided("deny", &e.to_string(), "unavailable"), &cwd),
+                        )
+                        .await;
+                    return;
+                }
+            };
+            let rec = record::opened(id.clone(), uid, cwd.clone(), now, &lowest);
+            let mut intent = at(decided("permit", "intent recorded", "authorized"), &cwd);
+            intent.conversation = Some(id.as_str().to_owned());
+            if !trail.record_bounded(&intent).await {
+                return;
+            }
+            let (s, r) = (Arc::clone(store), rec.clone());
+            let created = effect(
+                crate::mutation::blocking(uid, timeout, move || {
+                    s.create(r, bounds::OWNER_MAX_ACTIVE)
+                })
+                .await,
+            );
+            match created {
+                Ok(scan) => {
+                    trail.unreadable(action, &scan.unreadable).await;
+                    let outcome = trail.outcome(&intent, "conversation opened", "authorized");
+                    let payload = Payload::ConversationOpened(record::view(&rec));
+                    trail
+                        .deliver(stream, &outcome, payload, role, rule.as_ref(), action)
+                        .await;
+                }
+                Err(f) => {
+                    let (outcome, code, message) = failed(&intent, &f);
+                    trail.refuse(stream, &outcome, code, message).await;
+                }
+            }
+        }
+        Verb::SessionClose { conversation } => {
+            let Some((_, Some(rec))) = gathered else {
+                trail
+                    .unauthorized(
+                        stream,
+                        &decided("deny", "conversation not active", "unauthorized"),
+                    )
+                    .await;
+                return;
+            };
+            let mut intent = decided(
+                "permit",
+                &format!("intent recorded; {}", chain_summary(&rec)),
+                "authorized",
+            );
+            intent.object = Some(rec.cwd.clone());
+            if !trail.record_bounded(&intent).await {
+                return;
+            }
+            let (s, id, fence) = (Arc::clone(store), conversation.clone(), rec.fence);
+            match effect(
+                crate::mutation::blocking(uid, timeout, move || s.remove(&id, fence)).await,
+            ) {
+                Ok(closed) => {
+                    let outcome = trail.outcome(&intent, "conversation closed", "authorized");
+                    let payload = Payload::ConversationClosed(record::view(&closed));
+                    trail
+                        .deliver(stream, &outcome, payload, role, rule.as_ref(), action)
+                        .await;
+                }
+                Err(f) => {
+                    let (outcome, code, message) = failed(&intent, &f);
+                    trail.refuse(stream, &outcome, code, message).await;
+                }
+            }
+        }
+        Verb::SessionList { cursor } => {
+            sweep_idle(trail, store, now, timeout).await;
+            let (s, after) = (Arc::clone(store), cursor.clone());
+            let listed = crate::mutation::blocking(uid, timeout, move || {
+                s.list_by_owner(uid, after.as_ref(), bounds::page_limit())
+            })
+            .await;
+            match listed {
+                Ok(Ok(scan)) => {
+                    trail.unreadable(action, &scan.unreadable).await;
+                    let (entries, next) = scan.value;
+                    let outcome = decided(
+                        "permit",
+                        &format!("listed {} conversations", entries.len()),
+                        "authorized",
+                    );
+                    let payload = Payload::ConversationList(maknae_proto::ConversationPage {
+                        entries: entries.iter().map(record::view).collect(),
+                        next,
+                    });
+                    trail
+                        .deliver(stream, &outcome, payload, role, rule.as_ref(), action)
+                        .await;
+                }
+                Ok(Err(e)) => {
+                    let a = crate::conversation::answer::effect_answer(&EffectFailure::Store(e));
+                    let rec = decided("permit", &a.reason, a.posture);
+                    trail.refuse(stream, &rec, a.code, a.message).await;
+                }
+                Err(b) => {
+                    let a = crate::conversation::answer::effect_answer(&EffectFailure::Blocked(b));
+                    let rec = decided("permit", &a.reason, a.posture);
+                    trail.refuse(stream, &rec, a.code, a.message).await;
+                }
+            }
+        }
+        Verb::SessionDelete { conversation } => {
+            let Some((found, rec)) = gathered else {
+                trail
+                    .unauthorized(
+                        stream,
+                        &decided("deny", "conversation not gathered", "unauthorized"),
+                    )
+                    .await;
+                return;
+            };
+            let mut intent = decided("permit", "intent recorded", "authorized");
+            intent.object = rec.as_ref().map(|r| r.cwd.clone());
+            if !trail.record_bounded(&intent).await {
+                return;
+            }
+            use crate::conversation::answer::{delete_step, DeleteStep};
+            let done = match (
+                delete_step(facts::delete_effect(found.state), rec.is_some()),
+                rec,
+            ) {
+                (DeleteStep::Remove, Some(rec)) => {
+                    let (s, id, fence) = (Arc::clone(store), conversation.clone(), rec.fence);
+                    effect(
+                        crate::mutation::blocking(uid, timeout, move || s.remove(&id, fence)).await,
+                    )
+                    .map(|_| "conversation deleted")
+                }
+                (DeleteStep::NothingHeld, _) => {
+                    Ok("conversation deleted; the kernel held no record")
+                }
+                (DeleteStep::Remove | DeleteStep::Refuse, _) => {
+                    Err(EffectFailure::Store(ConversationError::Corrupt))
+                }
+            };
+            match done {
+                Ok(reason) => {
+                    let outcome = trail.outcome(&intent, reason, "authorized");
+                    let payload = Payload::ConversationDeleted {
+                        conversation: conversation.clone(),
+                    };
+                    trail
+                        .deliver(stream, &outcome, payload, role, rule.as_ref(), action)
+                        .await;
+                }
+                Err(f) => {
+                    let (outcome, code, message) = failed(&intent, &f);
+                    trail.refuse(stream, &outcome, code, message).await;
+                }
+            }
+        }
+        _ => {
+            trail
+                .unauthorized(
+                    stream,
+                    &decided("deny", "not a conversation verb", "unauthorized"),
+                )
+                .await;
+        }
+    }
+}
+
+fn effect<T>(
+    r: Result<Result<T, ConversationError>, crate::mutation::Blocked>,
+) -> Result<T, EffectFailure> {
+    match r {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Err(EffectFailure::Store(e)),
+        Err(b) => Err(EffectFailure::Blocked(b)),
+    }
+}
+
+async fn advance_conversation(
+    store: &Arc<dyn ConversationStore>,
+    uid: u32,
+    timeout: Duration,
+    gathered: Option<(
+        crate::conversation::facts::ConversationFacts,
+        Option<crate::conversation::record::ConversationRecord>,
+    )>,
+    turns: &[maknae_proto::Turn],
+) -> Result<crate::conversation::record::ConversationRecord, StepFailure> {
+    use crate::conversation::turn::{apply_request, request_step};
+    let (Some(extends), Some(rec)) = (
+        gathered.as_ref().and_then(|(facts, _)| facts.extends),
+        gathered.and_then(|(_, rec)| rec),
+    ) else {
+        return Err(StepFailure::NoConversation);
+    };
+    let (store, held, now) = (Arc::clone(store), turns.to_vec(), unix_now());
+    crate::mutation::blocking(uid, timeout, move || {
+        let step = request_step(&rec, extends, &held).map_err(StepFailure::Turn)?;
+        store
+            .update(&rec.id, rec.fence, &mut |r| {
+                apply_request(r, step.as_ref(), now)
+            })
+            .map_err(StepFailure::Store)
+    })
+    .await
+    .unwrap_or_else(|b| Err(StepFailure::Blocked(b)))
+}
+
+async fn bind_reply(
+    store: &Arc<dyn ConversationStore>,
+    uid: u32,
+    timeout: Duration,
+    rec: &crate::conversation::record::ConversationRecord,
+    reply: &maknae_proto::PromptReply,
+) -> Result<(), (crate::egress::ReplyRefusal, Option<String>)> {
+    use crate::conversation::answer::reply_refusal;
+    use crate::conversation::turn::{apply_reply, mark_full_at_any_fence, reply_step};
+    let (store, rec, reply, now) = (Arc::clone(store), rec.clone(), reply.clone(), unix_now());
+    let bound = crate::mutation::blocking(uid, timeout, move || {
+        let failure = match reply_step(&rec, &reply) {
+            Ok(step) => match store.update(&rec.id, rec.fence, &mut |r| apply_reply(r, &step, now))
+            {
+                Ok(_) => return Ok(()),
+                Err(e) => StepFailure::Store(e),
+            },
+            Err(t) => StepFailure::Turn(t),
+        };
+        let (full, refusal) = reply_refusal(&failure);
+        let unmarked = full
+            .then(|| mark_full_at_any_fence(&*store, &rec.id).err())
+            .flatten()
+            .map(|e| crate::conversation::answer::mark_full_failure(&e));
+        Err((refusal, unmarked))
+    })
+    .await;
+    bound.unwrap_or_else(|b| Err((reply_refusal(&StepFailure::Blocked(b)).1, None)))
+}
+
+async fn decide_bounded<P: Authorizer + Send + Sync + 'static>(
+    authorizer: &Arc<P>,
+    live: &Arc<crate::live::LiveConfig>,
+    sec_req: maknae_security::Request,
+    admitted_generation: u64,
+    authz_decide_timeout: Duration,
+) -> (
+    maknae_security::Verdict,
+    Option<&'static str>,
+    Option<RuleCitation>,
+) {
+    let authz_breaker = authz_decide_breaker();
+    // #275: the role rides out WITH the verdict so the audit record attests the
+    // role this very decision was made on. `combine(vec![..])` is preserved
+    // deliberately: it is what turns an Indeterminate into the
+    // "indeterminate operand blocks (fail-closed)" trail string, and dropping
+    // the wrapper would change that string silently.
+    let mut decided_role: Option<&'static str> = None;
+    let mut decided_rule: Option<RuleCitation> = None;
+    let decided = {
+        let (a, live) = (Arc::clone(authorizer), Arc::clone(live));
+        admit_blocking(
+            &authz_breaker,
+            authz_decide_timeout,
+            "authorization decision",
+            move || {
+                let d = guarded_decide_cited(&*a, &sec_req);
+                (combine(vec![d.verdict]), d.role, d.rule, live.generation())
+            },
+        )
+        .await
+    };
+    let verdict = match decided {
+        Err(Offload::Open) => maknae_security::Verdict::Deny {
+            reason: "authorization decision circuit breaker open".into(),
+        },
+        Err(Offload::AtCapacity) => maknae_security::Verdict::Deny {
+            reason: "authorization decision blocking worker budget exhausted".into(),
+        },
+        // A live install landed between admission and the decision: the
+        // request was admitted on values the decision did not see.
+        Ok((_, role, _, generation)) if generation != admitted_generation => {
+            decided_role = role;
+            maknae_security::Verdict::Deny {
+                reason: "the live baseline changed between admission and decision".into(),
+            }
+        }
+        Ok((v, role, rule, _)) => {
+            decided_role = role;
+            decided_rule = rule;
+            v
+        }
+        Err(Offload::Join) => maknae_security::Verdict::Deny {
+            reason: "authorization decision failed (join)".into(),
+        },
+        Err(Offload::TimedOut) => maknae_security::Verdict::Deny {
+            reason: "authorization decision timed out".into(),
+        },
+    };
+    (verdict, decided_role, decided_rule)
 }
 
 /// Append a pre-built record and say so in the journal if it fails, like every
@@ -3155,6 +3995,7 @@ pub async fn accept_loop<A, E, P>(
     gate: Arc<FactsGate>,
     // The absolute bound on one connection, checked between stages (ADR-0006 decision 4's visit clock).
     lifetime: Duration,
+    conversations: Arc<dyn ConversationStore>,
     agents: AgentAdmission,
 ) -> ServeOutcome
 where
@@ -3292,6 +4133,7 @@ where
                                 let kernel_graph = Arc::clone(&kernel_graph);
                                 let egress = Arc::clone(&egress);
                                 let ops = Arc::clone(&ops);
+                                let conversations = Arc::clone(&conversations);
                                 let gate = Arc::clone(&gate);
                                 let agents = agents.clone();
                                 handlers.spawn(async move {
@@ -3400,6 +4242,7 @@ where
                                                         AUTHZ_DECIDE_TIMEOUT,
                                                         delegated,
                                                         ops,
+                                                        conversations,
                                                         agents,
                                                     )
                                                     .await;
@@ -3628,6 +4471,7 @@ pub fn run(config_dir: &Path) -> ExitCode {
         open_prepared: maknae_audit_append::AuditSink::open_prepared,
         scan: production_scan,
         policy_load: maknae_authz_basic::PolicySource::load,
+        conversations_open: production_conversations,
     };
     let code = runtime.block_on(async move {
         match run_inner(
@@ -4473,7 +5317,7 @@ fn kernel_graph_status(report: &BootReport) -> KernelGraphStatus {
     KernelGraphStatus::new(report.revision, anchor)
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
@@ -5032,6 +5876,7 @@ where
                     uid,
                     None,
                     maknae_security::Lane::Local,
+                    None,
                     None,
                     &Stamp::Client,
                 )
@@ -6433,6 +7278,38 @@ struct BootSeams {
     open_prepared: TrailOpener,
     scan: TrailScanner,
     policy_load: PolicyLoader,
+    conversations_open: ConversationsOpener,
+}
+
+type ConversationsOpener =
+    fn(&Path, u32, WrappingKey) -> Result<Arc<dyn ConversationStore>, ConversationError>;
+
+fn production_conversations(
+    dir: &Path,
+    owner: u32,
+    key: WrappingKey,
+) -> Result<Arc<dyn ConversationStore>, ConversationError> {
+    Ok(Arc::new(crate::conversation::dir_store::DirStore::open(
+        dir, owner, key,
+    )?))
+}
+
+fn open_conversations(
+    config_dir: &Path,
+    state_dir: &Path,
+    seams: &BootSeams,
+    owner: u32,
+) -> Result<Arc<dyn ConversationStore>, RunError> {
+    let dir = state_dir.join(maknae_config::state::CONVERSATIONS_DIR);
+    let refused = |e: String| {
+        RunError::Other(format!(
+            "conversation store {} cannot be opened: {e}",
+            dir.display()
+        ))
+    };
+    let key = (seams.graph_key)(config_dir).map_err(|e| refused(e.to_string()))?;
+    (seams.conversations_open)(&dir, owner, WrappingKey::new(key.into_bytes()))
+        .map_err(|e| refused(e.to_string()))
 }
 
 fn production_graph_key(
@@ -7061,6 +7938,7 @@ async fn boot_after_sink(
         source,
         lost,
     } = merged;
+    let conversations = open_conversations(config_dir, state_dir, seams, euid)?;
     booted.status.baseline = crate::baseline::BaselineStatus::new(crate::baseline::BaselineState {
         accepted: run,
         pending: pending.clone(),
@@ -7322,6 +8200,7 @@ async fn boot_after_sink(
         hup,
         Arc::new(reloader),
         deployment,
+        conversations,
         &trust_domain,
     )
     .await;
@@ -7367,6 +8246,7 @@ async fn serve_after_mint<B>(
     hup: tokio::signal::unix::Signal,
     reloader: Arc<Reloader<B, maknae_audit_append::AuditSink>>,
     deployment: maknae_config::Deployment,
+    conversations: Arc<dyn ConversationStore>,
     trust_domain: &str,
 ) -> Result<ServeOutcome, String>
 where
@@ -7482,6 +8362,7 @@ where
         let ops = Arc::clone(&ops);
         let drain = drain.clone();
         let gate = Arc::clone(&gate);
+        let conversations = Arc::clone(&conversations);
         let agents = agents.clone();
         move |run: LoopRun| {
             accept_loop(
@@ -7505,6 +8386,7 @@ where
                 drain,
                 gate,
                 lifetime,
+                conversations,
                 agents,
             )
         }
@@ -9116,6 +9998,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             None,
             maknae_security::Lane::Local,
             None,
+            None,
             &crate::handler::Stamp::Client,
         );
         assert_eq!(
@@ -9202,6 +10085,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             None,
             maknae_security::Lane::Local,
             None,
+            None,
             &crate::handler::Stamp::Client,
         ))
     }
@@ -9252,6 +10136,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             7,
             None,
             maknae_security::Lane::Local,
+            None,
             None,
             &crate::handler::Stamp::Client,
         );
@@ -11310,7 +12195,16 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             open_prepared: maknae_audit_append::AuditSink::open_existing,
             scan: production_scan,
             policy_load: maknae_authz_basic::PolicySource::load,
+            conversations_open: memory_conversations,
         }
+    }
+
+    fn memory_conversations(
+        _: &Path,
+        _: u32,
+        _: WrappingKey,
+    ) -> Result<Arc<dyn ConversationStore>, ConversationError> {
+        Ok(Arc::new(crate::conversation::mem_store::MemStore::default()))
     }
 
     fn euid_owned_policy(
@@ -11423,6 +12317,34 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
 
     fn boot(d: &Dir) -> Result<ServeOutcome, RunError> {
         block_on_run_inner_with(&d.0, seams_with(TestEnv::default()))
+    }
+
+    fn refusing_conversations(
+        _: &Path,
+        _: u32,
+        _: WrappingKey,
+    ) -> Result<Arc<dyn ConversationStore>, ConversationError> {
+        Err(ConversationError::Io("sentinel-170-store-refused".into()))
+    }
+
+    #[test]
+    fn a_conversation_store_that_does_not_open_refuses_boot_naming_its_path() {
+        let _g = env_lock();
+        let d = fixture("conversations-refused");
+        let r = block_on_run_inner_with(
+            &d.0,
+            BootSeams {
+                conversations_open: refusing_conversations,
+                ..seams_with(TestEnv::default())
+            },
+        );
+        let path = state_dir(&d.0).join(maknae_config::state::CONVERSATIONS_DIR);
+        assert!(
+            matches!(&r, Err(RunError::Other(m)) if m.contains(&path.display().to_string())
+                && m.contains("sentinel-170-store-refused")),
+            "{r:?}"
+        );
+        assert_eq!(refusal_exit_code(&r.unwrap_err()), 1);
     }
 
     fn store_graph(d: &Dir) -> maknae_graph::graph::Graph {
@@ -12753,6 +13675,7 @@ mod home_resolution_tests {
             Duration::from_secs(10),
             maknae_io::DelegatedFds::new(1),
             baseline_stub::no_baseline(),
+            Arc::new(crate::conversation::mem_store::MemStore::default()),
             crate::run::AgentAdmission::none(),
         )
         .await;
@@ -13068,6 +13991,7 @@ mod admission_bound_tests {
                 Duration::from_secs(10),
                 maknae_io::DelegatedFds::new(1),
                 baseline_stub::no_baseline(),
+                Arc::new(crate::conversation::mem_store::MemStore::default()),
                 crate::run::AgentAdmission::none(),
             ),
         )
@@ -14021,6 +14945,7 @@ mod reload_fixture {
                     None,
                     maknae_security::Lane::Local,
                     None,
+                    None,
                     &crate::handler::Stamp::Client,
                 ))
         }
@@ -14159,6 +15084,7 @@ mod reload_fixture {
                 None,
                 maknae_security::Lane::Local,
                 None,
+                None,
                 &crate::handler::Stamp::Client,
             )
         }
@@ -14182,6 +15108,7 @@ mod reload_fixture {
                 uid,
                 None,
                 maknae_security::Lane::Local,
+                None,
                 None,
                 &crate::handler::Stamp::Client,
             );
@@ -16265,6 +17192,7 @@ mod reload_tests {
                 None,
                 maknae_security::Lane::Local,
                 None,
+                None,
                 &crate::handler::Stamp::Client,
             ))
     }
@@ -16279,6 +17207,7 @@ mod reload_tests {
             uid,
             None,
             maknae_security::Lane::Local,
+            None,
             None,
             &crate::handler::Stamp::Client,
         );
@@ -17486,6 +18415,7 @@ mod reload_tests {
                 baseline_stub::serving(),
                 FactsGate::allow_as(None, None),
                 Duration::MAX,
+                Arc::new(crate::conversation::mem_store::MemStore::default()),
                 crate::run::AgentAdmission::none(),
             ),
         )
@@ -17593,6 +18523,7 @@ mod reload_tests {
                 baseline_stub::serving(),
                 FactsGate::allow_as(None, None),
                 Duration::MAX,
+                Arc::new(crate::conversation::mem_store::MemStore::default()),
                 crate::run::AgentAdmission::none(),
             ),
         )
@@ -18251,6 +19182,7 @@ mod reload_tests {
                 0,
                 None,
                 maknae_security::Lane::Local,
+                None,
                 None,
                 &crate::handler::Stamp::Client,
             ))
@@ -19693,6 +20625,7 @@ mod reload_tests {
                     None,
                     maknae_security::Lane::Local,
                     None,
+                    None,
                     &crate::handler::Stamp::Client,
                 ),
             ),
@@ -20221,6 +21154,7 @@ mod agent_listener_tests {
             Duration::from_secs(10),
             maknae_io::DelegatedFds::new(1),
             baseline_stub::no_baseline(),
+            Arc::new(crate::conversation::mem_store::MemStore::default()),
             agents,
         ));
         Ok(Session {
@@ -20544,6 +21478,7 @@ mod agent_listener_tests {
                 baseline_stub::serving(),
                 FactsGate::allow_as(None, None),
                 Duration::MAX,
+                Arc::new(crate::conversation::mem_store::MemStore::default()),
                 agents,
             ))
         }

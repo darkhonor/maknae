@@ -325,11 +325,15 @@ pub fn refuse_access_bearing(fd: BorrowedFd<'_>, path: &std::path::Path) -> Resu
     }
 }
 
+pub(crate) fn delegated_path(fd: BorrowedFd<'_>) -> Result<std::path::PathBuf, IoError> {
+    crate::syscall::fd_path(&fd).map_err(|e| IoError::FdPathUnavailable {
+        kind: crate::checks::kind_of_errno(e),
+    })
+}
+
 /// Verify a subject-delegated descriptor's location and kind. Does not consume the fd.
 pub fn verify_delegated(fd: BorrowedFd<'_>, req: DelegatedRequired) -> Result<Delegated, IoError> {
-    let path = crate::syscall::fd_path(&fd).map_err(|e| IoError::FdPathUnavailable {
-        kind: crate::checks::kind_of_errno(e),
-    })?;
+    let path = delegated_path(fd)?;
     // The confinement root's OWN soundness, before it is used as a boundary: a root
     // that any non-principal can write is not a boundary at all. `stat` by path, not
     // an open — the open is what a `0700` home refuses (ADR-0009 decision 7).

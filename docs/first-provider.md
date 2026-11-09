@@ -119,7 +119,7 @@ sudo chmod 0640 /etc/maknae/config.d/10-provider.yaml
 
 ### 4. Allow the prompt
 
-Nothing may reach a model until policy says so. The packaged `authz.yaml` already has a `roles:` key granting `admin` its five administrative terms, and a second `roles:` key refuses the whole file, so edit it in place (`sudoedit /etc/maknae/authz.yaml`): add `session.prompt` to `admin`'s list and add a `destinations:` key. The end of the file then reads:
+Nothing may reach a model until policy says so. The packaged `authz.yaml` already has a `roles:` key granting `admin` its five administrative terms and the five conversation terms, and a second `roles:` key refuses the whole file, so edit it in place (`sudoedit /etc/maknae/authz.yaml`): add a `destinations:` key. The end of the file then reads:
 
 ```yaml
 roles:
@@ -131,6 +131,10 @@ roles:
       - "admin.baseline.accept"
       - "admin.release"
       - "session.prompt"
+      - "session.new"
+      - "session.close"
+      - "session.list"
+      - "session.delete"
 destinations:
   admin:
     allow: ["provider:openai"]
@@ -144,7 +148,7 @@ The enrolled administrator resolves to the `admin` role while `/etc/maknae/bindi
 
 Enroll writes `~/.maknae` only for the account that ran it. Each further local user needs four things from you.
 
-**A second user works in their own home.** For each request the kernel resolves the requesting user's home from the kernel-verified peer ID, confines file actions to it, and `~` in `authz.yaml` means that home for every role. The shipped `Read(~/.maknae/**)` deny therefore protects each user's own `~/.maknae`. A grant for a folder that does not exist yet permits once the folder is created, with no restart. The home is resolved only for a file action, after the request arrives. If it cannot be used, conversation turns, `whoami`, liveness and admin commands still work, and file actions are refused. The user sees only `not authorized`; the cause is in the audit record's reason, `requester home unavailable: <cause>`, which the administrator reads with the `jq` query in [runbook step 11](runbook.md#11-quote-the-audit-trail). The cause is `unresolvable` when the home does not exist, is not a directory, is `/` or is not valid UTF-8; `timed out` when it does not resolve within the time limit, as on a hung network mount; `at capacity for this requester` when that user already has a resolution in progress; and `at capacity` when every resolution slot is busy. Each user can have at most one home resolution and one file-action preparation running at a time, so a stalled home delays only that user's file actions, and a file action from a user whose previous one is still being prepared or decided is refused with `mutation worker budget exhausted for this requester`. Other users are affected only when as many users as there are slots (16) are stalled at once. What a second user's file actions do was read from the code, not yet measured.
+**A second user works in their own home.** For each request the kernel resolves the requesting user's home from the kernel-verified peer ID, confines file actions to it, and `~` in `authz.yaml` means that home for every role. The shipped `Read(~/.maknae/**)` deny therefore protects each user's own `~/.maknae`. A grant for a folder that does not exist yet permits once the folder is created, with no restart. The home is resolved only for a file action, after the request arrives. If it cannot be used, conversation turns, `whoami`, liveness and admin commands still work, and file actions are refused. The user sees only `not authorized`; the cause is in the audit record's reason, `requester home unavailable: <cause>`, which the administrator reads with the `jq` query in [runbook step 11](runbook.md#11-quote-the-audit-trail). The cause is `unresolvable` when the home does not exist, is not a directory, is `/` or is not valid UTF-8; `timed out` when it does not resolve within the time limit, as on a hung network mount; `at capacity for this requester` when that user already has a resolution in progress; and `at capacity` when every resolution slot is busy. Each user can have at most one home resolution and one file-action preparation running at a time, so a stalled home delays only that user's file actions, and a file action from a user whose previous one is still being prepared or decided is refused with `mutation worker budget exhausted for this requester`. A granted file action then keeps one of 16 shared workers until its client reports it finished or the read timeout passes, so 16 granted file actions in flight, from one user or several, refuse every user's next file action with `mutation worker budget exhausted`. Conversation bookkeeping (`session.new`, `close`, `list`, `delete`, and each prompt's conversation check and reply) does not use those workers: each user has one store slot beside a separate pool of 16 store workers, so a stalled store request delays only that user's next one, and other users only when 16 users' store requests are stalled at once. What a second user's file actions do was read from the code, not yet measured.
 
 **On a multi-user host, other local users can read a running `maknae agent`'s prompt and `--provider` from its command line** (#436, undecided).
 
@@ -183,7 +187,7 @@ Enroll writes `~/.maknae` only for the account that ran it. Each further local u
 
    Create each directory with `install -d` as shown. Do not use `install -D` to create the parents: it makes them `root`-owned and `0755`.
 
-3. **Bind the user to the `user` role and grant it.** Two files change, and both are edited in place (`sudoedit /etc/maknae/bindings.yaml /etc/maknae/authz.yaml`); do not append with `tee -a`, because a second `roles:` key refuses the whole document. `bindings.yaml` says who holds which role: once its `bindings:` block exists, only the names it lists have a role, so list yourself under `admin` too. `authz.yaml` says what each role may do: `user` is the only other role that may be granted `session.prompt`, and each role needs its own action grant and its own destination; without them the user's prompts are denied with `role user: no rule for session.prompt` in the trail, and the user sees only the generic refusal (`PROMPT_REFUSED`, below). With the administrator `alice` and the user `bob`, the complete `bindings.yaml` is:
+3. **Bind the user to the `user` role and grant it.** Two files change, and both are edited in place (`sudoedit /etc/maknae/bindings.yaml /etc/maknae/authz.yaml`); do not append with `tee -a`, because a second `roles:` key refuses the whole document. `bindings.yaml` says who holds which role: once its `bindings:` block exists, only the names it lists have a role, so list yourself under `admin` too. `authz.yaml` says what each role may do: the shipped file already grants `user` the session terms (`session.prompt` needs `session.new` beside it, or the file refuses to load), and what it lacks is a destination for each role; without one the user's prompts are denied at the destination check, and the user sees only the generic refusal (`PROMPT_REFUSED`, below). With the administrator `alice` and the user `bob`, the complete `bindings.yaml` is:
 
    ```yaml
    schema_version: 1
@@ -228,8 +232,19 @@ Enroll writes `~/.maknae` only for the account that ran it. Each further local u
          - "admin.baseline.accept"
          - "admin.release"
          - "session.prompt"
+         - "session.new"
+         - "session.close"
+         - "session.list"
+         - "session.delete"
+         - "session.task"
      user:
-       allow: ["session.prompt"]
+       allow:
+         - "session.prompt"
+         - "session.new"
+         - "session.close"
+         - "session.list"
+         - "session.delete"
+         - "session.task"
    destinations:
      admin:
        allow: ["provider:openai"]
@@ -453,6 +468,20 @@ A provider answer that could not be used reaches you as a different line, in "Th
 | `role <role>: no rule for session.prompt` | the policy has no `session.prompt` grant for your role | step 4 (step 4a for a second user) |
 | `destination not allowlisted for role <role>: provider:<name>` | your role may prompt, but not to that provider | add `provider:<name>` to your role's `destinations` (step 4, 4a) |
 | `egress backend not ready` | the deputy's socket is not running | `sudo systemctl enable --now maknae-egress.socket`; on macOS, step 5's loop |
+| `prompt needs an active conversation` | the prompt named a conversation id the kernel does not hold | start `maknae agent` again; it opens a new conversation |
+| `conversation not active` | the conversation was closed: at the end of its run, by `maknae session close`, or by the idle sweep | start `maknae agent` again |
+| `conversation belongs to another subject` | the prompt named a conversation another user opened | start `maknae agent` again; the shipped CLI only names its own |
+| `history rewrite refused` | the turns sent do not extend, exactly, the turns the kernel recorded for this conversation | start `maknae agent` again; the shipped loop never rewrites, so another client sent it |
+| `conversation is full` | the conversation holds 256 MiB of request turns and replies; the wire code is `TooLarge` | start `maknae agent` again |
+| `reply refused: conversation changed` or `reply refused: conversation full` | the provider answered, but before its reply was bound the conversation moved on or filled; the trail records `LandedUndelivered`, so the turn was billed | start `maknae agent` again |
+| `outcome unknown: conversation store not flushed: …` or `reply refused: conversation outcome unknown` | the kernel wrote the conversation record, but the host did not confirm the write reached the disk; the record may hold the change, or lose it after a crash | start `maknae agent` again; the host's disk needs attention |
+
+**Refused when the conversation opens.** `maknae agent` opens a conversation before its first prompt. In the trail, `session.new` is denied with the reason below. A grant refusal prints `maknae: the kernel refused to open a conversation in <dir>: …`; a bound prints `maknae: the kernel did not open a conversation: <reason>`.
+
+| Your administrator's audit shows | Why | Fix |
+|---|---|---|
+| `role <role>: no rule for session.new` | the policy has no `session.new` grant for your role | grant `session.new` beside `session.prompt` (step 4, 4a) |
+| `too many active conversations` | you hold 32 active conversations; the wire code is `TooLarge` | `maknae session list`, then `maknae session close <id>` for the ones you no longer need |
 
 **The provider's reply was unusable.** The provider answered, but nothing was delivered. You see `maknae agent: stopped: ` and one of the lines below, exit 2. The trail records the prompt `permit`, `LandedUndelivered`, posture `unavailable`, reason `reply unusable: <name>`; the Egress Daemon's journal holds the detail (for a provider error, `maknae-egress: provider answered <code> (conversation …): <body, key masked>`; otherwise `maknae-egress: provider reply unusable (conversation …): <name>`). The turn is not resent. When the kernel itself finds the reply empty, a tool call over its bounds or reasoning over its bound (the Egress Daemon did not catch it first), the trail keeps `reply refused: empty`, `reply refused: tool call` or `reply refused: reasoning`, posture `unauthorized`, with a `reply_length`, and you see the `empty` or `over-bound` line. With a small daemon `transport.prompt_max_bytes`, several tool calls that are each within the bound can be refused together as over the frame cap: you see `PROMPT_REFUSED`, the trail records `reply refused: oversize` and `LandedUndelivered`, and the journal has no line.
 

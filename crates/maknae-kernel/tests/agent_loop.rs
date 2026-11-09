@@ -148,6 +148,37 @@ impl FixturePlane {
     }
 }
 impl Plane for FixturePlane {
+    async fn open(
+        &mut self,
+        cwd: &std::path::Path,
+    ) -> Result<maknae_proto::ConversationId, PlaneError> {
+        let fd = maknae_io::open_directory_for_delegation(cwd).ok();
+        let verb = Verb::SessionNew {
+            cwd: cwd.to_str().unwrap().into(),
+        };
+        match self.verb(verb, fd).await.result {
+            RespResult::Ok(Payload::ConversationOpened(v)) => Ok(v.conversation),
+            RespResult::Err(e) if e.code == maknae_proto::ProtoErrCode::Unauthorized => {
+                Err(PlaneError::Refused)
+            }
+            other => Err(PlaneError::Transport(format!("{other:?}"))),
+        }
+    }
+    async fn close(
+        &mut self,
+        conversation: &maknae_proto::ConversationId,
+    ) -> Result<maknae_proto::ConversationView, PlaneError> {
+        let verb = Verb::SessionClose {
+            conversation: conversation.clone(),
+        };
+        match self.verb(verb, None).await.result {
+            RespResult::Ok(Payload::ConversationClosed(v)) => Ok(v),
+            RespResult::Err(e) if e.code == maknae_proto::ProtoErrCode::Unauthorized => {
+                Err(PlaneError::Refused)
+            }
+            other => Err(PlaneError::Transport(format!("{other:?}"))),
+        }
+    }
     async fn prompt(
         &mut self,
         conversation: &str,
@@ -350,7 +381,7 @@ async fn acked(
 // The roles: + destinations: tail that makes session.prompt decidable for the
 // `user` role — identical to prompt_loop.rs:143 and subject_identity.rs:49.
 const GRANTED: &str =
-    "roles:\n  user:\n    allow: [\"session.prompt\"]\ndestinations:\n  user:\n    allow: [\"provider:openai\"]\n";
+    "roles:\n  user:\n    allow: [\"session.prompt\", \"session.new\"]\ndestinations:\n  user:\n    allow: [\"provider:openai\"]\n";
 
 fn script(egress: &Scripted, replies: impl IntoIterator<Item = PromptReply>) {
     egress.replies.lock().unwrap().extend(replies);
@@ -399,7 +430,8 @@ async fn read_then_write_then_answer_leaves_the_sequence_the_issue_names_in_the_
         records: Arc::clone(&records),
         egress: egress.clone(),
     };
-    let mut transcript = Transcript::new("agent-e2e-conv", "edit notes.txt");
+    let conv = plane.fx.open_conversation().await;
+    let mut transcript = Transcript::new(conv.as_str(), "edit notes.txt");
     let out = drive(
         &mut plane,
         &mut transcript,
@@ -461,11 +493,11 @@ async fn read_then_write_then_answer_leaves_the_sequence_the_issue_names_in_the_
     );
     assert!(reads
         .iter()
-        .all(|r| r.conversation.as_deref() == Some("agent-e2e-conv")));
+        .all(|r| r.conversation.as_deref() == Some(conv.as_str())));
     assert!(recs
         .iter()
         .filter(|r| r.action == "session.prompt")
-        .all(|r| r.egress.as_ref().map(|e| e.conversation.as_str()) == Some("agent-e2e-conv")));
+        .all(|r| r.egress.as_ref().map(|e| e.conversation.as_str()) == Some(conv.as_str())));
     let writes: Vec<_> = recs.iter().filter(|r| r.action == "fs.write").collect();
     assert_eq!(
         writes.len(),
@@ -484,7 +516,7 @@ async fn read_then_write_then_answer_leaves_the_sequence_the_issue_names_in_the_
     );
     assert!(writes
         .iter()
-        .all(|r| r.conversation.as_deref() == Some("agent-e2e-conv")));
+        .all(|r| r.conversation.as_deref() == Some(conv.as_str())));
     // The drained count, and it detects UNDER-consumption only:
     // `Scripted::send` answers an empty queue with
     // `EgressFailure::Transport("script exhausted")` rather than panicking, so
@@ -539,7 +571,8 @@ async fn a_denied_read_reaches_the_model_as_not_authorized_and_is_a_deny_in_the_
         records: Arc::clone(&records),
         egress: egress.clone(),
     };
-    let mut transcript = Transcript::new("agent-deny-conv", "read my key");
+    let conv = plane.fx.open_conversation().await;
+    let mut transcript = Transcript::new(conv.as_str(), "read my key");
     drive(
         &mut plane,
         &mut transcript,
@@ -618,7 +651,8 @@ async fn an_over_bound_write_is_a_tool_error_its_sibling_read_runs_and_the_trail
         records: Arc::clone(&records),
         egress: egress.clone(),
     };
-    let mut transcript = Transcript::new("agent-426-conv", "write a big file");
+    let conv = plane.fx.open_conversation().await;
+    let mut transcript = Transcript::new(conv.as_str(), "write a big file");
     drive(
         &mut plane,
         &mut transcript,
@@ -719,7 +753,8 @@ async fn a_write_outside_the_allow_is_unknown_to_the_model_and_a_deny_in_the_tra
         records: Arc::clone(&records),
         egress: egress.clone(),
     };
-    let mut transcript = Transcript::new("agent-wd-conv", "overwrite it");
+    let conv = plane.fx.open_conversation().await;
+    let mut transcript = Transcript::new(conv.as_str(), "overwrite it");
     drive(
         &mut plane,
         &mut transcript,
@@ -744,7 +779,7 @@ async fn a_write_outside_the_allow_is_unknown_to_the_model_and_a_deny_in_the_tra
         .find(|r| r.action == "fs.write")
         .expect("an fs.write record");
     assert_eq!(w.outcome.result, "deny");
-    assert_eq!(w.conversation.as_deref(), Some("agent-wd-conv"));
+    assert_eq!(w.conversation.as_deref(), Some(conv.as_str()));
     assert_eq!(
         egress.remaining(),
         0,
@@ -769,7 +804,8 @@ async fn the_step_budget_trips_and_no_further_prompt_reaches_the_kernel() {
         records: Arc::clone(&records),
         egress: egress.clone(),
     };
-    let mut transcript = Transcript::new("agent-budget-conv", "loop forever");
+    let conv = plane.fx.open_conversation().await;
+    let mut transcript = Transcript::new(conv.as_str(), "loop forever");
     let out = drive(
         &mut plane,
         &mut transcript,
@@ -813,4 +849,87 @@ async fn the_step_budget_trips_and_no_further_prompt_reaches_the_kernel() {
 
 fn unmetered() -> Meter {
     Meter::new(ContextBudget::new(maknae_proto::MAX_CONTEXT_TOKENS, None).unwrap())
+}
+
+#[tokio::test]
+async fn a_session_opens_converses_and_closes_one_kernel_conversation() {
+    let granted = "roles:\n  user:\n    allow: [\"session.prompt\", \"session.new\", \"session.close\"]\ndestinations:\n  user:\n    allow: [\"provider:openai\"]\n";
+    let fx = Fixture::with_rules("agent-open-close", &["Read"], &[], granted);
+    let cwd = fx.root.join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let egress = Arc::new(Scripted::default());
+    script(
+        &egress,
+        [PromptReply {
+            reasoning: None,
+            blocks: vec![text("hello")],
+            tool_calls: vec![],
+            usage: None,
+        }],
+    );
+    let records = Records::new(0);
+    let mut plane = FixturePlane {
+        fx,
+        records: Arc::clone(&records),
+        egress: egress.clone(),
+    };
+    let mut session = maknae_agent::session::Session::open(
+        &mut plane,
+        &cwd,
+        "hi",
+        Budget {
+            max_steps: 2,
+            max_tool_calls_per_step: 1,
+        },
+        ContextBudget::new(maknae_proto::MAX_CONTEXT_TOKENS, None).unwrap(),
+        None,
+    )
+    .await
+    .expect("the kernel opens the conversation");
+    let conv = session.conversation().to_string();
+    assert!(
+        maknae_proto::ConversationId::parse(&conv).is_some(),
+        "{conv}"
+    );
+    let (ended, closed) = session
+        .converse(
+            &mut plane,
+            std::future::pending::<()>(),
+            std::future::pending::<()>,
+            &mut |_| {},
+        )
+        .await;
+    match ended {
+        maknae_agent::session::Ended::Ran(o) => assert_eq!(o.answer.as_deref(), Some("hello")),
+        maknae_agent::session::Ended::Interrupted(()) => panic!("not interrupted"),
+    }
+    match closed {
+        maknae_agent::session::Closed::Closed(v) => {
+            assert_eq!(v.conversation.as_str(), conv);
+            assert_eq!(v.turns, 1);
+        }
+        other => panic!("{other:?}"),
+    }
+    let recs = records.snapshot();
+    let trail: Vec<(&str, &str)> = recs
+        .iter()
+        .map(|r| (r.action.as_str(), r.outcome.result.as_str()))
+        .collect();
+    let new = trail
+        .iter()
+        .position(|a| *a == ("session.new", "permit"))
+        .unwrap_or_else(|| panic!("{trail:?}"));
+    let prompt = trail
+        .iter()
+        .position(|(a, _)| *a == "session.prompt")
+        .unwrap_or_else(|| panic!("{trail:?}"));
+    let close = trail
+        .iter()
+        .position(|a| *a == ("session.close", "permit"))
+        .unwrap_or_else(|| panic!("{trail:?}"));
+    assert!(new < prompt && prompt < close, "{trail:?}");
+    assert!(recs
+        .iter()
+        .filter(|r| r.action == "session.prompt")
+        .all(|r| r.egress.as_ref().map(|e| e.conversation.as_str()) == Some(conv.as_str())));
 }

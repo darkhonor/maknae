@@ -701,7 +701,7 @@ FIX
   # or the control exercises a different anchor than the one that ships.
   # $2 overrides the grantable constant, for the subset control below.
   # $5 overrides the vocabulary line; set and empty means no line at all.
-  printf '%s\n%s\n' "${2:-pub(crate) const GRANTABLE_ACTIONS: [&str; 8] = [\"admin.status\", \"admin.config.show\", \"admin.subject.list\", \"admin.baseline.show\", \"admin.baseline.accept\", \"admin.contain\", \"admin.release\", \"session.prompt\"];}" \
+  printf '%s\n%s\n' "${2:-pub(crate) const GRANTABLE_ACTIONS: [&str; 12] = [\"admin.status\", \"admin.config.show\", \"admin.subject.list\", \"admin.baseline.show\", \"admin.baseline.accept\", \"admin.contain\", \"admin.release\", \"session.prompt\", \"session.new\", \"session.close\", \"session.list\", \"session.delete\"];}" \
     "${5-$VOCAB_DEFAULT}" > "$fixture/crates/maknae-authz-basic/src/decide.rs"
   {
     printf '%s' "$1"
@@ -1079,6 +1079,30 @@ pub enum Payload {
     PromptReply(PromptReply),
     Baseline(BaselineView),
     Containment(ContainmentView),
+    ConversationOpened(crate::ConversationView),
+    ConversationClosed(crate::ConversationView),
+    ConversationList(crate::ConversationPage),
+    ConversationDeleted {
+        conversation: crate::ConversationId,
+    },
+}
+FIX
+  cat > "$fixture/crates/maknae-proto/src/conversation.rs" <<'FIX'
+pub struct ConversationId(String);
+
+pub struct ConversationView {
+    pub conversation: ConversationId,
+    pub cwd: String,
+    pub opened_at: u64,
+    pub last_active: u64,
+    pub turns: u64,
+    pub bytes: u64,
+    pub chain_head: String,
+}
+
+pub struct ConversationPage {
+    pub entries: Vec<ConversationView>,
+    pub next: Option<ConversationId>,
 }
 FIX
   cp "$here/mutation-disclosure.py" "$fixture/ci/gates/"
@@ -1293,6 +1317,21 @@ always	binding.agent	ships by construction
 always	binding.principal	ships by construction
 always	whoami.peer_plane_uri_san	ships by construction
 always	whoami.peer_uid	ships by construction
+always	conversation.conversation	ships by construction
+always	conversation.cwd	ships by construction
+always	conversation.opened_at	ships by construction
+always	conversation.last_active	ships by construction
+always	conversation.turns	ships by construction
+always	conversation.bytes	ships by construction
+always	conversation.chain_head	ships by construction
+always	conversation_list.entries.conversation	ships by construction
+always	conversation_list.entries.cwd	ships by construction
+always	conversation_list.entries.opened_at	ships by construction
+always	conversation_list.entries.last_active	ships by construction
+always	conversation_list.entries.turns	ships by construction
+always	conversation_list.entries.bytes	ships by construction
+always	conversation_list.entries.chain_head	ships by construction
+always	conversation_list.next	ships by construction
 mask	lake	the Knowledge Lake schema, not ours
 '
 
@@ -1372,7 +1411,7 @@ cat > "$fx/crates/maknae-config/src/document.rs" <<'FIX'
 const DISCLOSABLE: &[&str] = &["transport", "providers[].name", "providers[].endpoint", "providers[].models", "providers[].models[]", "providers[].reasoning_effort", "providers[].output_tokens_field", "vault.addr", "vault.approle_mount", "vault.pki_int_mount", "vault.deployment_id", "vault.user_auth", "vault.user_auth.type", "vault.user_auth.mount", "vault.kv_mount", "vault.user_prefix", "vault.plane_key", "audit.jsonl_path", "principal", "egress.socket_path", "egress.deadline_ms", "deployment.mode", "deployment.account_source"];
 const SUPPRESSED: &[&str] = &["vault.insecure_plaintext_secret_path", "core.handling", "audit.au3_1"];
 FIX
-expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" ": 58 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" ": 73 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a section registered in boot.rs with no SURFACE entry. THE THIRD
 # fail-open, and the one that closes the PROPERTY rather than an instance: the
@@ -1943,7 +1982,7 @@ fi
 # go check a sed flag. This probe pins the corrected order.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'std::sync::Arc<String>')"
 expect_accept "config-disclosure-drift/qualified-wrapper-is-a-leaf" \
-  ": 58 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 73 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the config-surface `Vec` exemption holds for the QUALIFIED spelling
 # too. Under the old post-loop `s/.*:://`, `Vec<crate::Principal>` reduced to
@@ -1952,7 +1991,7 @@ expect_accept "config-disclosure-drift/qualified-wrapper-is-a-leaf" \
 # the unqualified `config-vec-of-struct-is-a-leaf` probe below cannot see.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'Vec<crate::Principal>')"
 expect_accept "config-disclosure-drift/qualified-config-vec-is-still-a-leaf" \
-  ": 58 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 73 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the mirror image. `Vec<WorkspaceStruct>` on a CONFIG surface is a
 # LEAF -- only a sequence whose element paths are declared is walked;
@@ -1961,12 +2000,65 @@ expect_accept "config-disclosure-drift/qualified-config-vec-is-still-a-leaf" \
 # did not, and every config row was silently held to the wire rule.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'Vec<Principal>')"
 expect_accept "config-disclosure-drift/config-vec-of-struct-is-a-leaf" \
-  ": 58 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 73 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the clean fixture passes and reports both counts. Without this every
 # rejection above would stay green against a gate that refuses everything.
 fx="$(cfg_fixture "$CFG_OK")"
-expect_accept "config-disclosure-drift/clean-fixture-passes" ": 58 paths decided, 68 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/clean-fixture-passes" ": 73 paths decided, 84 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
+
+fx="$(cfg_fixture "$CFG_OK")"
+python3 - "$fx" <<'PYFIX'
+import pathlib, sys
+c = pathlib.Path(sys.argv[1]) / "crates/maknae-proto/src/conversation.rs"
+old = "pub struct ConversationId(String);\n"
+assert c.read_text().count(old) == 1
+c.write_text(c.read_text().replace(old, "pub struct ConversationId(Vec<String>);\n"))
+PYFIX
+expect_reject_because "config-disclosure-drift/leaf-newtype-over-a-non-string" \
+  "it is not a String newtype" "$fx/ci/gates/config-disclosure-drift.sh"
+
+fx="$(cfg_fixture "$CFG_OK")"
+python3 - "$fx" <<'PYFIX'
+import pathlib, sys
+w = pathlib.Path(sys.argv[1]) / "crates/maknae-proto/src/wire.rs"
+old = "        conversation: crate::ConversationId,\n    },\n"
+assert w.read_text().count(old) == 1
+w.write_text(w.read_text().replace(old, "        conversation: crate::ConversationId,\n        cwd: String,\n    },\n"))
+PYFIX
+expect_reject_because "config-disclosure-drift/leaf-variant-gains-a-field" \
+  "a leaf variant has exactly one field" "$fx/ci/gates/config-disclosure-drift.sh"
+
+fx="$(cfg_fixture "$(cfg_manifest "^always${TABCH}conversation_list\.entries\.cwd${TABCH}")")"
+expect_reject_because "config-disclosure-drift/nested-surface-field-with-no-decision" \
+  "NO recorded disclosure decision" "$fx/ci/gates/config-disclosure-drift.sh"
+
+fx="$(cfg_fixture "$CFG_OK")"
+python3 - "$fx" <<'PYFIX'
+import pathlib, sys
+g = pathlib.Path(sys.argv[1]) / "ci/gates/config-disclosure-drift.sh"
+old = '  "crates/maknae-proto/src/conversation.rs|ConversationView|conversation_list.entries|7|wire"\n'
+assert g.read_text().count(old) == 1
+g.write_text(g.read_text().replace(old, ""))
+PYFIX
+expect_reject_because "config-disclosure-drift/nested-wire-struct-without-an-entry" \
+  "SUBTREE" "$fx/ci/gates/config-disclosure-drift.sh"
+
+fx="$(cfg_fixture "$CFG_OK")"
+python3 - "$fx" <<'PYFIX'
+import pathlib, sys
+root = pathlib.Path(sys.argv[1])
+w = root / "crates/maknae-proto/src/wire.rs"
+old = "    Containment(ContainmentView),\n"
+assert w.read_text().count(old) == 1
+w.write_text(w.read_text().replace(old, old + "    Token { secret: String },\n"))
+g = root / "ci/gates/config-disclosure-drift.sh"
+old = '  "Pong|unit"\n'
+assert g.read_text().count(old) == 1
+g.write_text(g.read_text().replace(old, old + '  "Token|unit"\n'))
+PYFIX
+expect_reject_because "config-disclosure-drift/one-line-struct-variant-is-not-unit" \
+  "is listed 'unit' but carries" "$fx/ci/gates/config-disclosure-drift.sh"
 
 
 # ACCEPT, against the REAL repo: each gate's reported examined-set is
@@ -2029,7 +2121,7 @@ expect_reported_count "p1-manifest/packages-match-the-workspace" "ok (" "$exp_p1
 # control; asserting it here means any future silent shrink is a red build.
 
 expect_accept "config-disclosure-drift/real-repo-counts-pinned" \
-  ": 70 paths decided, 68 struct fields covered" "$here/config-disclosure-drift.sh"
+  ": 85 paths decided, 84 struct fields covered" "$here/config-disclosure-drift.sh"
 
 
 # #158: a grant's own disclosure inventory must reject new data and type changes.
@@ -6064,6 +6156,71 @@ ul_allow="$(ul_fixture)"
 printf '#[allow(unsafe_code)]\nunsafe fn one() -> u8 {\n    1\n}\n\n#[allow(unsafe_code, clippy::undocumented_unsafe_blocks)]\npub fn f() -> u8 {\n    unsafe { one() }\n}\n' > "$ul_allow/src/lib.rs"
 expect_reject_because "unsafe-lint/an-in-source-allow-of-a-forbidden-lint-is-refused" \
   "incompatible with previous forbid" ul_clippy "$ul_allow"
+
+# #170: each conversation decision, removed, turns its own tests red.
+if command -v cargo >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+  cv_root="$(cd "$here/../.." && pwd)"
+  cv_ws="$(mktemp -d -p "$NC_TMP")"
+  ( cd "$cv_root" && git ls-files -z | tar --null -T - -cf - ) | tar -xmf - -C "$cv_ws"
+  cv_target="$cv_root/target/negative-control"
+  cv_suite() { # <crate> <filter> — FAIL when the filtered suite goes red
+    local out
+    if out="$(cd "$cv_ws" && CARGO_TARGET_DIR="$cv_target" CARGO_BUILD_BUILD_DIR="$cv_target" cargo test --quiet --locked --offline -p "$1" --lib -- "$2" 2>&1)"; then
+      echo "conversation-suite: $1 $2 green"
+    elif grep -q "test result: FAILED" <<<"$out"; then
+      grep -E '^    [a-z_:]+$' <<<"$out" || true
+      echo "FAIL: $1 $2 went red"; return 1
+    else
+      printf '%s\n' "$out"; echo "conversation-suite: $1 did not build"; return 2
+    fi
+  }
+  cv_mutant() { # <file> <old> <new> <crate> <filter>
+    local f="$cv_ws/$1" rc=0
+    cp "$f" "$f.orig"
+    if ! python3 -c 'import sys
+p, old, new = sys.argv[1:4]
+s = open(p).read()
+if s.count(old) != 1:
+    sys.exit(1)
+open(p, "w").write(s.replace(old, new))' "$f" "$2" "$3"; then
+      mv "$f.orig" "$f"; echo "conversation-suite: mutation site not found in $1"; return 3
+    fi
+    cv_suite "$4" "$5" || rc=$?
+    mv "$f.orig" "$f"
+    return "$rc"
+  }
+  CHAIN=crates/maknae-kernel/src/conversation/chain.rs
+  expect_accept "conversation/kernel-chain-suite-is-green" "conversation-suite: maknae-kernel" \
+    cv_suite maknae-kernel conversation::chain
+  expect_reject_because "conversation/extends-without-the-prefix-check-goes-red" \
+    "extends_classifies_retry_advance_and_rewrite" cv_mutant "$CHAIN" \
+    '    if advance(&ChainHead::genesis(id), prefix)? != *rec_head {
+        return Ok(Extends::Rewrite);
+    }
+' '    let _ = (advance(&ChainHead::genesis(id), prefix)?, rec_head);
+' maknae-kernel conversation::chain
+  expect_reject_because "conversation/extends-without-the-last-reply-comparison-goes-red" \
+    "extends_classifies_retry_advance_and_rewrite" cv_mutant "$CHAIN" \
+    '            if assistant_digest(first)?.as_ref() != Some(bound) {
+                return Ok(Extends::Rewrite);
+            }
+' '            let _ = (assistant_digest(first)?, bound);
+' maknae-kernel conversation::chain
+  expect_accept "conversation/authz-session-suite-is-green" "conversation-suite: maknae-authz-basic" \
+    cv_suite maknae-authz-basic prompt_but_not_new
+  expect_reject_because "conversation/close-without-the-owner-comparison-goes-red" \
+    "close_and_delete_are_owner_only" cv_mutant crates/maknae-authz-basic/src/decide.rs \
+    '        ("session.close", Some(Conversation::Active { owned: true }))
+' '        ("session.close", Some(Conversation::Active { .. }))
+' maknae-authz-basic close_and_delete_are_owner_only
+  expect_reject_because "conversation/load-without-the-prompt-new-pairing-goes-red" \
+    "a_role_with_prompt_but_not_new_refuses_at_load" cv_mutant crates/maknae-authz-basic/src/lib.rs \
+    '    if holds("session.prompt") && !holds("session.new") {' \
+    '    if false && holds("session.prompt") && !holds("session.new") {' \
+    maknae-authz-basic prompt_but_not_new
+else
+  skipped=$((skipped+6))
+fi
 
 # The skip count is REPORTED, because `$total` is environment-dependent: probes
 # that need `cargo-auditable`, and the root-guarded ones, drop out silently and

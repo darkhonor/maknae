@@ -13,6 +13,7 @@ mod ceiling_authz;
 pub mod classification;
 mod composition;
 mod containment;
+mod conversation;
 mod deployment;
 mod diag;
 mod egress;
@@ -47,6 +48,16 @@ pub use boot_gate::{
 };
 pub use ceiling_authz::CeilingAuthorizer;
 pub use composition::Composition;
+pub use conversation::chain::ChainHead;
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+pub use conversation::dir_store::DirStore;
+pub use conversation::facts::{ConversationFacts, FactState};
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+pub use conversation::mem_store::MemStore;
+pub use conversation::record::{ConversationRecord, Provenance};
+pub use conversation::store::{
+    ConversationStore, Page, Scan, StoreError as ConversationStoreError,
+};
 pub use egress::{
     admitted_reply, outcome_for_failure, production_egress, production_egress_with, reply_capacity,
     reply_text_length, unavailable_egress, DurableEgressIntent, Egress, EgressBootRefusal,

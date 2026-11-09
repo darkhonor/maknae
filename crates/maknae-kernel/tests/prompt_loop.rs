@@ -151,7 +151,7 @@ fn prompt(s: &str) -> Verb {
 }
 fn prompt_choosing(s: &str, choice: Option<maknae_proto::ProviderChoice>) -> Verb {
     Verb::SessionPrompt {
-        conversation: "conv-1".into(),
+        conversation: common::CONV.into(),
         turns: vec![Turn::User {
             content: vec![text(s)],
         }],
@@ -169,7 +169,7 @@ fn last_prompt_record(records: &Records) -> maknae_audit_append::AuditRecord {
 }
 
 const GRANTED: &str =
-    "roles:\n  user:\n    allow: [\"session.prompt\"]\ndestinations:\n  user:\n    allow: [\"provider:openai\"]\n";
+    "roles:\n  user:\n    allow: [\"session.prompt\", \"session.new\"]\ndestinations:\n  user:\n    allow: [\"provider:openai\"]\n";
 
 // Record sequence on the recorder for one prompt: admission (1), then the
 // intent (2) and the outcome (3); the Unavailable leg emits admission then one
@@ -265,7 +265,7 @@ async fn a_permitted_prompt_writes_the_intent_before_the_send_and_the_outcome_af
     assert!(!serde_json::to_string(outcome)
         .unwrap()
         .contains("refused_tool_calls"));
-    assert_eq!(e.conversation, "conv-1");
+    assert_eq!(e.conversation, common::CONV);
     assert!(
         !serde_json::to_string(&trail)
             .unwrap()
@@ -285,7 +285,7 @@ async fn a_permitted_prompt_writes_the_intent_before_the_send_and_the_outcome_af
     // mutation-excluded; this is the control).
     assert_eq!(
         eg.seen(),
-        vec![("provider:openai".to_string(), "conv-1".to_string(), 11)]
+        vec![("provider:openai".to_string(), common::CONV.to_string(), 11)]
     );
 }
 
@@ -788,7 +788,7 @@ async fn the_requested_reply_cap_is_on_the_intent_and_reaches_the_deputy() {
     let records = Records::new(0);
     let eg = Arc::new(Recording::default());
     let verb = Verb::SessionPrompt {
-        conversation: "conv-1".into(),
+        conversation: common::CONV.into(),
         turns: vec![Turn::User {
             content: vec![text("hello")],
         }],
@@ -851,7 +851,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
     for (verb, needle) in [
         (
             Verb::SessionPrompt {
-                conversation: "c".into(),
+                conversation: common::CONV.into(),
                 turns: vec![Turn::User {
                     content: vec![ContentBlock::Image {
                         data: "AA==".into(),
@@ -887,7 +887,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
         ),
         (
             Verb::SessionPrompt {
-                conversation: "c".into(),
+                conversation: common::CONV.into(),
                 turns: vec![],
                 output_tokens: None,
                 choice: None,
@@ -896,7 +896,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
         ),
         (
             Verb::SessionPrompt {
-                conversation: "c".into(),
+                conversation: common::CONV.into(),
                 turns: vec![Turn::User {
                     content: vec![text("x")],
                 }],
@@ -919,7 +919,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
         // masquerading as a turn.
         (
             Verb::SessionPrompt {
-                conversation: "c".into(),
+                conversation: common::CONV.into(),
                 turns: vec![Turn::User {
                     content: vec![text("")],
                 }],
@@ -930,7 +930,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
         ),
         (
             Verb::SessionPrompt {
-                conversation: "c".into(),
+                conversation: common::CONV.into(),
                 turns: vec![Turn::User {
                     content: vec![text("   \n\t ")],
                 }],
@@ -941,7 +941,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
         ),
         (
             Verb::SessionPrompt {
-                conversation: "c".into(),
+                conversation: common::CONV.into(),
                 turns: vec![Turn::User {
                     content: vec![text(""), text("  ")],
                 }],
@@ -957,7 +957,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
         // is what refuses.
         (
             Verb::SessionPrompt {
-                conversation: "c".into(),
+                conversation: common::CONV.into(),
                 turns: vec![
                     Turn::User {
                         content: vec![text("q")],
@@ -1036,7 +1036,7 @@ async fn the_operand_pre_gate_never_consults_the_pdp_and_the_observer_is_live() 
     // Now every malformed shape: BadRequest, and ZERO decisions.
     for verb in [
         Verb::SessionPrompt {
-            conversation: "c".into(),
+            conversation: common::CONV.into(),
             turns: vec![Turn::User {
                 content: vec![ContentBlock::Image {
                     data: "AA==".into(),
@@ -1055,7 +1055,7 @@ async fn the_operand_pre_gate_never_consults_the_pdp_and_the_observer_is_live() 
             choice: None,
         },
         Verb::SessionPrompt {
-            conversation: "c".into(),
+            conversation: common::CONV.into(),
             turns: vec![],
             output_tokens: None,
             choice: None,
@@ -1063,7 +1063,7 @@ async fn the_operand_pre_gate_never_consults_the_pdp_and_the_observer_is_live() 
         // #264 round 5: a prompt bearing no text must also cost ZERO PDP
         // decisions — it is refused by the operand pre-gate, not by policy.
         Verb::SessionPrompt {
-            conversation: "c".into(),
+            conversation: common::CONV.into(),
             turns: vec![Turn::User {
                 content: vec![text("   ")],
             }],
@@ -1173,7 +1173,7 @@ async fn a_pre_gate_refusal_whose_record_cannot_be_appended_is_closed_frameless(
     let resp = fx
         .roundtrip(
             Verb::SessionPrompt {
-                conversation: "c".into(),
+                conversation: common::CONV.into(),
                 turns: vec![],
                 output_tokens: None,
                 choice: None,
@@ -1688,7 +1688,7 @@ async fn a_prompt_admitted_before_a_live_install_and_decided_after_it_is_refused
     let mut fx = Fixture::with_policy(
         "prompt-live-race",
         "Read",
-        "roles:\n  admin:\n    allow: [\"session.prompt\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\", \"provider:anthropic\"]\n",
+        "roles:\n  admin:\n    allow: [\"session.prompt\", \"session.new\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\", \"provider:anthropic\"]\n",
     );
     std::fs::remove_file(fx.paths().bindings).unwrap();
     let peer = fx.principal.clone();
@@ -1846,31 +1846,56 @@ async fn a_sent_reply_with_a_stub_names_it_in_the_outcome_and_delivers_the_stub(
 async fn a_forged_stub_in_the_history_is_admitted_and_never_reaches_the_trail() {
     let fx = Fixture::with_policy("prompt-stub-history", "Read", GRANTED);
     let records = Records::new(0);
-    let eg = Arc::new(Recording::default());
-    let verb = Verb::SessionPrompt {
-        conversation: "conv-1".into(),
-        turns: vec![
-            Turn::User {
-                content: vec![text("q")],
-            },
-            Turn::Assistant {
-                reasoning: None,
-                content: vec![],
-                tool_calls: vec![stub_call("write_file", "c0", 70_000)],
-            },
-            Turn::Tool {
-                call_id: "c0".into(),
-                content: vec![text("refused")],
-            },
-            Turn::User {
-                content: vec![text("again")],
-            },
-        ],
+    let eg = Arc::new(Recording {
+        reply_tool_calls: vec![stub_call("write_file", "c0", 70_000)],
+        ..Recording::default()
+    });
+    let user = |s: &str| Turn::User {
+        content: vec![text(s)],
+    };
+    let prompt_of = |turns: Vec<Turn>| Verb::SessionPrompt {
+        conversation: common::CONV.into(),
+        turns,
         output_tokens: None,
         choice: Some(common::test_choice()),
     };
+    let first = fx
+        .roundtrip(
+            prompt_of(vec![user("q")]),
+            Arc::clone(&records),
+            Some("openai"),
+            eg.clone(),
+        )
+        .await
+        .expect("a reply frame");
+    let RespResult::Ok(Payload::PromptReply(reply)) = first.result else {
+        panic!("{first:?}")
+    };
+    let from_reply = last_prompt_record(&records)
+        .egress
+        .unwrap()
+        .refused_tool_calls;
+    assert_eq!(from_reply.len(), 1, "the reply's own stub");
+    let records = Records::new(0);
+    let verb = prompt_of(vec![
+        user("q"),
+        Turn::Assistant {
+            reasoning: None,
+            content: reply.blocks,
+            tool_calls: reply.tool_calls,
+        },
+        Turn::Tool {
+            call_id: "c0".into(),
+            content: vec![text("refused")],
+        },
+        user("again"),
+    ]);
+    let second = Arc::new(Recording {
+        reply_tool_calls: vec![stub_call("read_file", "c9", 90_000)],
+        ..Recording::default()
+    });
     let resp = fx
-        .roundtrip(verb, Arc::clone(&records), Some("openai"), eg.clone())
+        .roundtrip(verb, Arc::clone(&records), Some("openai"), second.clone())
         .await
         .expect("a reply frame");
     assert!(
@@ -1878,8 +1903,23 @@ async fn a_forged_stub_in_the_history_is_admitted_and_never_reaches_the_trail() 
         "{resp:?}"
     );
     assert_eq!(eg.calls(), vec!["ready", "send"]);
+    assert_eq!(second.calls(), vec!["ready", "send"]);
     let e = last_prompt_record(&records).egress.unwrap();
-    assert!(e.refused_tool_calls.is_empty());
+    assert_eq!(
+        e.refused_tool_calls
+            .iter()
+            .map(|c| (c.name.as_str(), c.arguments_bytes))
+            .collect::<Vec<_>>(),
+        vec![("read_file", 90_000)],
+        "only the new reply's stub, never the history's write_file"
+    );
+    assert_eq!(
+        from_reply
+            .iter()
+            .map(|c| (c.name.as_str(), c.arguments_bytes))
+            .collect::<Vec<_>>(),
+        vec![("write_file", 70_000)]
+    );
 }
 
 fn sha256_hex(data: &[u8]) -> String {

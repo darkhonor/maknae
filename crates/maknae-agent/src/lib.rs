@@ -10,6 +10,7 @@
 //! binary's tokio, `process` included, so "its dependency surface
 //! cannot open a file or a socket" would be false of the shipped graph.
 pub mod budget;
+pub mod conversations;
 pub mod drive;
 pub mod plane;
 pub mod render;

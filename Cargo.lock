@@ -1178,6 +1178,7 @@ dependencies = [
 name = "maknae-kernel"
 version = "0.0.0"
 dependencies = [
+ "ciborium",
  "maknae-agent",
  "maknae-audit",
  "maknae-audit-append",
@@ -1198,6 +1199,7 @@ dependencies = [
  "maknae-subject-ctx-mint",
  "maknae-vault",
  "nix",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

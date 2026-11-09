@@ -4,9 +4,12 @@
 use crate::keys::KeySupply;
 use crate::send::{send_verb, write_request};
 use maknae_agent::plane::{Plane, PlaneError, ReadBasis, ReadOutcome, WriteOutcome};
-use maknae_agent::wire::{check_for, prompt_outcome, read_outcome, write_outcome, WireOutcome};
+use maknae_agent::wire::{
+    check_for, close_outcome, open_outcome, prompt_outcome, read_outcome, write_outcome,
+    WireOutcome,
+};
 use maknae_config::TransportConfig;
-use maknae_proto::{ProviderChoice, Turn, Verb};
+use maknae_proto::{ConversationId, ConversationView, ProviderChoice, Turn, Verb};
 use maknae_vault::{PlaneClient, TrustBundle};
 use std::sync::Arc;
 
@@ -84,6 +87,47 @@ impl<K: KeySupply> LoopPlane<K> {
 }
 
 impl<K: KeySupply> Plane for LoopPlane<K> {
+    async fn open(&mut self, cwd: &std::path::Path) -> Result<ConversationId, PlaneError> {
+        let cwd = cwd.to_str().ok_or_else(|| {
+            PlaneError::Transport("the working directory is not valid UTF-8".into())
+        })?;
+        let diagnostics = &mut self.diagnostics;
+        open_outcome(
+            send_verb(
+                Verb::SessionNew { cwd: cwd.into() },
+                None,
+                crate::mutation::WriteCheck::Unchecked,
+                &self.transport,
+                &self.client,
+                &self.trust,
+                &mut |l| diagnostics.push(l),
+            )
+            .await
+            .map(WireOutcome::from),
+        )
+    }
+    async fn close(
+        &mut self,
+        conversation: &ConversationId,
+    ) -> Result<ConversationView, PlaneError> {
+        let diagnostics = &mut self.diagnostics;
+        close_outcome(
+            conversation,
+            send_verb(
+                Verb::SessionClose {
+                    conversation: conversation.clone(),
+                },
+                None,
+                crate::mutation::WriteCheck::Unchecked,
+                &self.transport,
+                &self.client,
+                &self.trust,
+                &mut |l| diagnostics.push(l),
+            )
+            .await
+            .map(WireOutcome::from),
+        )
+    }
     async fn prompt(
         &mut self,
         conversation: &str,
@@ -290,7 +334,7 @@ mod tests {
         let body = &src[src
             .find(concat!("impl<K: KeySupply> Plane ", "for LoopPlane"))
             .unwrap()..];
-        assert_eq!(body.matches(concat!("diagnostics", ".push(l)")).count(), 3);
+        assert_eq!(body.matches(concat!("diagnostics", ".push(l)")).count(), 5);
         assert!(body.contains(concat!(
             "fn take_diagnostics(&mut self) -> Vec<String> {\n",
             "        std::mem::take(&mut self.diagnostics)"

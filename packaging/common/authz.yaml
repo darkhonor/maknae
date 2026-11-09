@@ -44,9 +44,10 @@ permissions:
 #       allow:
 #         - "local/llama"
 
-# The terms each role holds on a fresh install (#490, #609); `session.task` tasks an
-# enrolled agent and is refused until task delivery is built. Edit the lists to grant
-# fewer or more; `admin.config.show`, `admin.contain` and `session.prompt` are grantable too.
+# The terms each role holds on a fresh install: basic operation of a single-user host
+# for `admin` (#490), and for both roles the conversation terms (#170) and `session.task`
+# (#609), which tasks an enrolled agent and is refused until task delivery is built. Edit
+# the lists to grant fewer or more; `admin.config.show` and `admin.contain` are grantable too.
 roles:
   admin:
     allow:
@@ -55,7 +56,17 @@ roles:
       - "admin.baseline.show"
       - "admin.baseline.accept"
       - "admin.release"
+      - "session.prompt"
+      - "session.new"
+      - "session.close"
+      - "session.list"
+      - "session.delete"
       - "session.task"
   user:
     allow:
+      - "session.prompt"
+      - "session.new"
+      - "session.close"
+      - "session.list"
+      - "session.delete"
       - "session.task"
