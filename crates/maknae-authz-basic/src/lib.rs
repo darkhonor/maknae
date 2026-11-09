@@ -5634,6 +5634,22 @@ mod tests {
         }
 
         #[test]
+        fn a_batch_on_a_snapshot_answers_each_request_as_a_single_decision_does() {
+            let fx = Fixture::new("batch-on-snapshot");
+            let auth = fx.authorizer("admin");
+            let reqs = [whoami(0), admin_request(0, "admin.status")];
+            let snap = auth.snapshot();
+            let all = Baseline::decide_cited_all_on(&auth, &snap, &reqs);
+            assert_eq!(all.len(), reqs.len());
+            for (got, req) in all.iter().zip(&reqs) {
+                assert_eq!(
+                    format!("{:?}", got.verdict),
+                    format!("{:?}", auth.decide_cited(req).verdict)
+                );
+            }
+        }
+
+        #[test]
         fn a_candidate_decides_on_its_own_snapshot_not_the_installed_one() {
             let fx = Fixture::new("candidate");
             let auth = fx.authorizer("admin");
