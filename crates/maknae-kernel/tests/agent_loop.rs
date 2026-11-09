@@ -21,8 +21,9 @@
 //! at all. Third, the egress backend here is a scripted in-process `Egress`;
 //! the full chain — brain to kernel to `maknae-egress` to a provider in one
 //! process — is #242's evidence, not this file's. Fourth, and the widest:
-//! `FixturePlane` re-implements the CLI's `read_outcome`, `write_outcome` and
-//! `prompt_outcome` mappings BY HAND, because `bins/maknae` is a binary crate
+//! `FixturePlane` re-implements the CLI's `write_outcome` and
+//! `prompt_outcome` mappings BY HAND (a refused read goes through the real
+//! `maknae_agent::wire::read_outcome`), because `bins/maknae` is a binary crate
 //! and unreachable from a kernel integration test. Nothing here can go red if
 //! one of those mappers changes; their faithfulness to this fixture is by
 //! inspection, and the mappers' own discriminating tests live beside them in
@@ -267,10 +268,12 @@ impl Plane for FixturePlane {
                     changed: false,
                 })
             }
-            (None, Some(RespResult::Err(e)), true)
-                if e.code == maknae_proto::ProtoErrCode::Unauthorized =>
-            {
-                ReadOutcome::Refused
+            (None, Some(RespResult::Err(e)), armed) => {
+                maknae_agent::wire::read_outcome(Ok(maknae_agent::wire::WireOutcome::Refused {
+                    code: e.code,
+                    message: e.message,
+                    armed,
+                }))
             }
             _ => ReadOutcome::Unavailable,
         }
@@ -609,6 +612,86 @@ async fn a_denied_read_reaches_the_model_as_not_authorized_and_is_a_deny_in_the_
         0,
         "the loop asked for every scripted reply"
     );
+}
+
+#[tokio::test]
+async fn a_protected_read_renders_the_same_bytes_whether_or_not_the_file_exists() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = Fixture::with_rules("agent-protected", &["Read"], &[], GRANTED);
+    let here = fx.root.join("secret-here");
+    let gone = fx.root.join("secret-gone");
+    let locked = fx.root.join("secret-locked");
+    for f in [&here, &locked] {
+        std::fs::write(f, "PRIVATE-617").unwrap();
+    }
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    common::write_0640(
+        &fx.paths().sensitive,
+        "schema_version: 1\nsensitive:\n  - \"~/secret*\"\n",
+    );
+    let armed: Vec<bool> = [&here, &gone, &locked]
+        .iter()
+        .map(|p| maknae_io::open_path_for_delegation(p).is_ok())
+        .collect();
+    assert!(
+        armed[0] && !armed[1],
+        "premise: one armed, one unarmed: {armed:?}"
+    );
+    let egress = Arc::new(Scripted::default());
+    let read = |id: &str, p: &std::path::Path| {
+        call(id, "read_file", &format!(r#"{{"path":"{}"}}"#, p.display()))
+    };
+    script(
+        &egress,
+        [
+            PromptReply {
+                reasoning: None,
+                blocks: vec![],
+                tool_calls: vec![read("c1", &here), read("c2", &gone), read("c3", &locked)],
+                usage: None,
+            },
+            PromptReply {
+                reasoning: None,
+                blocks: vec![text("done")],
+                tool_calls: vec![],
+                usage: None,
+            },
+        ],
+    );
+    let records = Records::new(0);
+    let mut plane = FixturePlane {
+        fx,
+        records: Arc::clone(&records),
+        egress: egress.clone(),
+    };
+    let conv = plane.fx.open_conversation().await;
+    let mut transcript = Transcript::new(conv.as_str(), "read my secrets");
+    drive(
+        &mut plane,
+        &mut transcript,
+        &Budget {
+            max_steps: 3,
+            max_tool_calls_per_step: 3,
+        },
+        &mut unmetered(),
+        &mut |_: &Notice| {},
+    )
+    .await;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let rendered: Vec<String> = transcript.turns()[2..5].iter().map(tool_text).collect();
+    assert_eq!(
+        rendered,
+        vec![format!("{}\n\nsteps remaining: 2", maknae_agent::render::PROTECTED); 3]
+    );
+    let reads: Vec<_> = records
+        .snapshot()
+        .into_iter()
+        .filter(|r| r.action == "fs.read")
+        .collect();
+    assert_eq!(reads.len(), 3, "{reads:?}");
+    for r in reads {
+        assert_eq!(r.outcome.reason, "sensitive: host ~/secret*");
+    }
 }
 
 #[tokio::test]

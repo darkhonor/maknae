@@ -1,7 +1,7 @@
 //! The wire's answers, as the loop reads them. Pure: the client that produced a
 //! [`WireOutcome`] converts into it, so the decisions below stay in this crate,
 //! where they are mutation-tested.
-use crate::plane::{PlaneError, ReadBasis, ReadOutcome, ReadPage, WriteOutcome};
+use crate::plane::{PlaneError, ProtectedBy, ReadBasis, ReadOutcome, ReadPage, WriteOutcome};
 use maknae_proto::{ConversationId, ConversationView, Payload};
 
 /// What an existing file must be before a replace writes it (#388). The
@@ -68,6 +68,9 @@ pub enum WireOutcome {
 /// without an acknowledged `Success` (OS refusal, limit, changed object, lost
 /// ack): a fact about the attempt, not a verdict.
 pub fn read_outcome(sent: Result<WireOutcome, String>) -> ReadOutcome {
+    if let Some(by) = protected(&sent) {
+        return ReadOutcome::Protected(by);
+    }
     match sent {
         Ok(WireOutcome::ReadDone { read: Some(r) }) => ReadOutcome::Content(ReadPage {
             content: r.content,
@@ -105,6 +108,9 @@ pub fn read_outcome(sent: Result<WireOutcome, String>) -> ReadOutcome {
 /// acknowledged. It is `Stale`; every other non-applied completion stays
 /// `Unknown`.
 pub fn write_outcome(sent: Result<WireOutcome, String>) -> WriteOutcome {
+    if let Some(by) = protected(&sent) {
+        return WriteOutcome::Protected(by);
+    }
     match sent {
         Ok(WireOutcome::WriteDone {
             applied: true,
@@ -117,6 +123,22 @@ pub fn write_outcome(sent: Result<WireOutcome, String>) -> WriteOutcome {
             ..
         }) => WriteOutcome::Stale,
         _ => WriteOutcome::Unknown,
+    }
+}
+
+/// A `Protected` refusal, decided before `armed` is looked at: the kernel answers it on
+/// the asked path alone, so an unarmed request renders exactly as an armed one.
+fn protected(sent: &Result<WireOutcome, String>) -> Option<ProtectedBy> {
+    match sent {
+        Ok(WireOutcome::Refused {
+            code: maknae_proto::ProtoErrCode::Protected,
+            message,
+            ..
+        }) => maknae_proto::protected_parts(message).map(|(list, entry)| ProtectedBy {
+            list: list.into(),
+            entry: entry.into(),
+        }),
+        _ => None,
     }
 }
 
@@ -456,6 +478,55 @@ mod tests {
             read_outcome(Err("handshake timed out".into())),
             ReadOutcome::Unavailable
         );
+    }
+
+    fn protected_frame(armed: bool) -> Result<WireOutcome, String> {
+        Ok(WireOutcome::Refused {
+            code: maknae_proto::ProtoErrCode::Protected,
+            message: maknae_proto::protected_message(
+                maknae_proto::HOST_SENSITIVE_LIST,
+                "~/.ssh/**",
+            ),
+            armed,
+        })
+    }
+
+    fn by() -> ProtectedBy {
+        ProtectedBy {
+            list: maknae_proto::HOST_SENSITIVE_LIST.into(),
+            entry: "~/.ssh/**".into(),
+        }
+    }
+
+    #[test]
+    fn a_protected_refusal_is_protected_whether_or_not_it_was_armed() {
+        for armed in [true, false] {
+            assert_eq!(
+                read_outcome(protected_frame(armed)),
+                ReadOutcome::Protected(by()),
+                "{armed}"
+            );
+            assert_eq!(
+                write_outcome(protected_frame(armed)),
+                WriteOutcome::Protected(by()),
+                "{armed}"
+            );
+        }
+        let malformed = Ok(WireOutcome::Refused {
+            code: maknae_proto::ProtoErrCode::Protected,
+            message: "not authorized".into(),
+            armed: true,
+        });
+        assert_eq!(read_outcome(malformed), ReadOutcome::Unavailable);
+        let unauthorized = Ok(WireOutcome::Refused {
+            code: maknae_proto::ProtoErrCode::Unauthorized,
+            message: maknae_proto::protected_message(
+                maknae_proto::HOST_SENSITIVE_LIST,
+                "~/.ssh/**",
+            ),
+            armed: true,
+        });
+        assert_eq!(read_outcome(unauthorized), ReadOutcome::Refused);
     }
 
     #[test]

@@ -743,7 +743,7 @@ pub async fn handle<S, E, P>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     E: AuditEmit + Send + Sync + 'static,
-    P: Authorizer + Send + Sync + 'static,
+    P: Authorizer + crate::SensitiveNow + Send + Sync + 'static,
 {
     handle_with_attempt_caps(
         stream,
@@ -826,7 +826,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     E: AuditEmit + Send + Sync + 'static,
-    P: Authorizer + Send + Sync + 'static,
+    P: Authorizer + crate::SensitiveNow + Send + Sync + 'static,
 {
     let emit = Arc::new(SessionEmit {
         inner: emit,
@@ -1285,6 +1285,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             &classification_policy_name,
             Arc::clone(&conversations),
             &stamp,
+            authorizer.sensitive_now(),
         )
         .await;
         close_bounded(&mut stream).await;
@@ -4011,7 +4012,7 @@ pub async fn accept_loop<A, E, P>(
 where
     A: PlaneAccept + Send + Sync + 'static,
     E: AuditEmit + Send + Sync + 'static,
-    P: Authorizer + Send + Sync + 'static,
+    P: Authorizer + crate::SensitiveNow + Send + Sync + 'static,
 {
     let channel_mismatch = acceptor.peer_auth() != &class.peer_auth;
     if channel_mismatch {

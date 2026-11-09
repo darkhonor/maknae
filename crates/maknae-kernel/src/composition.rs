@@ -107,6 +107,11 @@ impl<B: Baseline> Composition<B> {
         &self.ceiling
     }
 
+    /// The installed snapshot's host `sensitive.yaml` list.
+    pub fn sensitive_now(&self) -> Arc<maknae_config::SensitiveList> {
+        Arc::clone(self.baseline.snapshot().sensitive())
+    }
+
     #[cfg(any(test, feature = "hermetic-test-seam"))]
     pub fn install_live(&self, values: crate::live::LiveValues) -> Result<(), String> {
         self.install_live_within(
@@ -214,6 +219,12 @@ impl<B: Baseline> Composition<B> {
         };
         let sensitive = SensitiveAuthorizer::new(snap.sensitive());
         decide(&self.operands_with(&base, &sensitive))
+    }
+}
+
+impl<B: Baseline> crate::sensitive_authz::SensitiveNow for Composition<B> {
+    fn sensitive_now(&self) -> Arc<maknae_config::SensitiveList> {
+        Composition::sensitive_now(self)
     }
 }
 

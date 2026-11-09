@@ -262,22 +262,31 @@ impl Rig {
         target: &std::path::Path,
         conversation: &str,
     ) -> (Response, maknae_audit_append::AuditRecord) {
+        let (resp, rec) = self.read_answer(target, Some(conversation)).await;
+        refused_with(&resp, ProtoErrCode::Unauthorized);
+        (resp, rec)
+    }
+    /// Armed when the subject can open `target`, unarmed otherwise.
+    async fn read_answer(
+        &self,
+        target: &std::path::Path,
+        conversation: Option<&str>,
+    ) -> (Response, maknae_audit_append::AuditRecord) {
         let records = Records::new(0);
-        let fd = maknae_io::open_path_for_delegation(target).unwrap();
+        let fd = maknae_io::open_path_for_delegation(target).ok();
         let resp = self
             .send(
                 Verb::Read {
                     path: target.to_str().unwrap().into(),
-                    conversation: Some(conversation.into()),
+                    conversation: conversation.map(str::to_owned),
                     page: None,
                 },
-                Some(fd),
+                fd,
                 &records,
                 maknae_kernel::unavailable_egress(),
             )
             .await
             .unwrap();
-        refused_with(&resp, ProtoErrCode::Unauthorized);
         let rec = last_of(&records, "fs.read");
         assert!(rec.mutation.is_none(), "{rec:?}");
         (resp, rec)
@@ -1390,16 +1399,30 @@ fn kernel_path(p: &std::path::Path) -> String {
         .to_owned()
 }
 
+fn protected_by(resp: &Response, list: &str, entry: &str) {
+    refused_with(resp, ProtoErrCode::Protected);
+    let RespResult::Err(e) = &resp.result else {
+        unreachable!()
+    };
+    assert_eq!(e.message, maknae_proto::protected_message(list, entry));
+}
+
 #[tokio::test]
 async fn a_personal_entry_refuses_in_its_conversation() {
     let rig = Rig::new("personal-own", Kind::Mem);
     let a_key = rig.fx.root.join("a-key");
     std::fs::write(&a_key, b"sentinel-617-a").unwrap();
+    std::os::unix::fs::symlink(&rig.fx.root, rig.fx.root.join("via")).unwrap();
+    let alias = rig.fx.root.join("via/a-key");
     let entry = kernel_path(&a_key);
     let own = rig.open_listing(vec![entry.clone()]).await;
     let plain = rig.open().await;
 
-    let (resp, rec) = rig.read_refused(&a_key, &own).await;
+    let (resp, rec) = rig.read_answer(&a_key, Some(&own)).await;
+    protected_by(&resp, maknae_proto::PERSONAL_SENSITIVE_LIST, &entry);
+    assert_eq!(rec.outcome.reason, format!("sensitive: personal {entry}"));
+
+    let (resp, rec) = rig.read_refused(&alias, &own).await;
     assert_eq!(rec.outcome.reason, format!("sensitive: personal {entry}"));
     let RespResult::Err(e) = &resp.result else {
         unreachable!()
@@ -1409,6 +1432,69 @@ async fn a_personal_entry_refuses_in_its_conversation() {
     let ran = Some(maknae_proto::ReportedFinish::Success);
     assert_eq!(rig.read_runs(&a_key, Some(&plain)).await, ran);
     assert_eq!(rig.read_runs(&a_key, None).await, ran);
+}
+
+#[tokio::test]
+async fn a_personal_entry_matching_nothing_on_disk_answers_protected_only_in_its_conversation() {
+    let rig = Rig::new("personal-ghost", Kind::Mem);
+    let ghost = rig.fx.root.join("ghost-617");
+    let entry = format!("{}/ghost-617", kernel_path(&rig.fx.root));
+    let own = rig.open_listing(vec![entry.clone()]).await;
+    let plain = rig.open().await;
+    let mut foreign = common::open_record(FOREIGN_ID, FOREIGN_UID, "/home/other");
+    foreign.sensitive = vec![entry.clone()];
+    rig.seed(foreign);
+    assert!(
+        !ghost.exists(),
+        "premise: the entry matches nothing on disk"
+    );
+
+    let (resp, rec) = rig.read_answer(&ghost, Some(&own)).await;
+    protected_by(&resp, maknae_proto::PERSONAL_SENSITIVE_LIST, &entry);
+    assert_eq!(rec.outcome.reason, format!("sensitive: personal {entry}"));
+
+    for cited in [Some(plain.as_str()), None, Some(FOREIGN_ID)] {
+        let (resp, rec) = rig.read_answer(&ghost, cited).await;
+        refused_with(&resp, ProtoErrCode::Unauthorized);
+        assert!(!rec.outcome.reason.contains("sensitive"), "{rec:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_foreign_conversations_personal_entry_never_answers_protected() {
+    let rig = Rig::new("personal-foreign-protected", Kind::Mem);
+    let a_key = rig.fx.root.join("a-key");
+    std::fs::write(&a_key, b"sentinel-617-a").unwrap();
+    let entry = kernel_path(&a_key);
+    let mut foreign = common::open_record(FOREIGN_ID, FOREIGN_UID, "/home/other");
+    foreign.sensitive = vec![entry.clone()];
+    rig.seed(foreign);
+
+    let records = Records::new(0);
+    let (client, task, body) = rig.fx.start_egress(
+        Verb::Read {
+            path: a_key.to_str().unwrap().into(),
+            conversation: Some(FOREIGN_ID.into()),
+            page: None,
+        },
+        Some(maknae_io::open_path_for_delegation(&a_key).unwrap()),
+        Arc::clone(&records),
+        maknae_config::transport_from_section(None).unwrap(),
+        Some("openai"),
+        maknae_kernel::unavailable_egress(),
+    );
+    let received = Fixture::exchange_raw(client, task, &body).await;
+    assert!(
+        !received.windows(entry.len()).any(|w| w == entry.as_bytes()),
+        "A's entry never reaches B's wire"
+    );
+    let resp = Fixture::decode_received(&received).await.expect("a frame");
+    refused_with(&resp, ProtoErrCode::Unauthorized);
+    let rec = last_of(&records, "fs.read");
+    assert_eq!(
+        rec.outcome.reason,
+        "conversation belongs to another subject"
+    );
 }
 
 #[tokio::test]

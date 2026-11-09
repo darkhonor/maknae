@@ -533,7 +533,7 @@ impl Fixture {
         Vec<u8>,
     )
     where
-        P: maknae_security::Authorizer + Send + Sync + 'static,
+        P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
     {
         self.start_with_authorizer_and_caps(
             authz,
@@ -587,7 +587,7 @@ impl Fixture {
         Vec<u8>,
     )
     where
-        P: maknae_security::Authorizer + Send + Sync + 'static,
+        P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
     {
         self.start_with_live(
             authz,
@@ -621,7 +621,7 @@ impl Fixture {
         Vec<u8>,
     )
     where
-        P: maknae_security::Authorizer + Send + Sync + 'static,
+        P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
     {
         self.start_in(
             Arc::new(self.session()),
@@ -684,7 +684,7 @@ impl Fixture {
         Vec<u8>,
     )
     where
-        P: maknae_security::Authorizer + Send + Sync + 'static,
+        P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
     {
         let (client, server) = tokio::io::duplex(65536);
         let fds = maknae_io::DelegatedFds::new(4);
@@ -800,7 +800,7 @@ impl Fixture {
         egress: Arc<dyn maknae_kernel::Egress>,
     ) -> Option<Response>
     where
-        P: maknae_security::Authorizer + Send + Sync + 'static,
+        P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
     {
         let (client, task, body) = self.start_with_authorizer(
             authz,
@@ -838,10 +838,19 @@ impl Fixture {
     /// asserts `is_none()` proves frameless closure and not merely "no
     /// complete frame arrived".
     pub async fn exchange(
-        mut client: tokio::io::DuplexStream,
+        client: tokio::io::DuplexStream,
         task: tokio::task::JoinHandle<()>,
         body: &[u8],
     ) -> Option<Response> {
+        Self::decode_received(&Self::exchange_raw(client, task, body).await).await
+    }
+
+    /// Every byte the daemon wrote before it closed.
+    pub async fn exchange_raw(
+        mut client: tokio::io::DuplexStream,
+        task: tokio::task::JoinHandle<()>,
+        body: &[u8],
+    ) -> Vec<u8> {
         use tokio::io::AsyncReadExt;
         write_frame(&mut client, body).await.unwrap();
         let mut received = Vec::new();
@@ -853,10 +862,14 @@ impl Fixture {
             .await
             .expect("the handler must finish within 3s")
             .unwrap();
+        received
+    }
+
+    pub async fn decode_received(received: &[u8]) -> Option<Response> {
         if received.is_empty() {
             return None;
         }
-        let mut cursor = &received[..];
+        let mut cursor = received;
         let frame = read_frame(&mut cursor, 65536)
             .await
             .expect("bytes on the wire must be one complete frame, never a partial one");
@@ -1410,4 +1423,40 @@ pub fn non_member() -> maknae_kernel::Facts {
         m.in_group = false;
     }
     f
+}
+
+impl maknae_kernel::SensitiveNow for AlwaysPermit {
+    fn sensitive_now(&self) -> std::sync::Arc<maknae_config::SensitiveList> {
+        std::sync::Arc::new(maknae_config::SensitiveList::empty())
+    }
+}
+
+impl maknae_kernel::SensitiveNow for SleepAuthorizer {
+    fn sensitive_now(&self) -> std::sync::Arc<maknae_config::SensitiveList> {
+        std::sync::Arc::new(maknae_config::SensitiveList::empty())
+    }
+}
+
+impl maknae_kernel::SensitiveNow for HostileObligation {
+    fn sensitive_now(&self) -> std::sync::Arc<maknae_config::SensitiveList> {
+        std::sync::Arc::new(maknae_config::SensitiveList::empty())
+    }
+}
+
+impl maknae_kernel::SensitiveNow for CitingPermit {
+    fn sensitive_now(&self) -> std::sync::Arc<maknae_config::SensitiveList> {
+        std::sync::Arc::new(maknae_config::SensitiveList::empty())
+    }
+}
+
+impl maknae_kernel::SensitiveNow for PanickingName {
+    fn sensitive_now(&self) -> std::sync::Arc<maknae_config::SensitiveList> {
+        std::sync::Arc::new(maknae_config::SensitiveList::empty())
+    }
+}
+
+impl<A: maknae_kernel::SensitiveNow> maknae_kernel::SensitiveNow for Counting<A> {
+    fn sensitive_now(&self) -> std::sync::Arc<maknae_config::SensitiveList> {
+        self.inner.sensitive_now()
+    }
 }

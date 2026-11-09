@@ -1734,7 +1734,7 @@ async fn drive_channel<P>(
     agents: maknae_kernel::AgentAdmission,
 ) -> Vec<AuditRecord>
 where
-    P: maknae_security::Authorizer + Send + Sync + 'static,
+    P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
 {
     let emit = RecEmit::new();
     let acceptor = FakeAccept::authenticating(script, class.peer_auth.clone());
@@ -2269,13 +2269,16 @@ async fn an_agent_channel_request_meets_the_host_list() {
     let pdp = Seen::new(pdp);
     let me = nix::unistd::geteuid().as_raw();
     let own = signed_for("hobi");
+    let via = home.join("via");
+    std::os::unix::fs::symlink(&*home, &via).unwrap();
+    let asked_path = via.join("notes");
     let fds = maknae_io::DelegatedFds::new(4);
-    fds.push(maknae_io::open_path_for_delegation(&file).unwrap());
+    fds.push(maknae_io::open_path_for_delegation(&asked_path).unwrap());
     let (conn, mut client) = asking(
         agent_leaf("hobi"),
         me,
         maknae_proto::Verb::Read {
-            path: file.to_str().unwrap().into(),
+            path: asked_path.to_str().unwrap().into(),
             conversation: None,
             page: None,
         },
@@ -2475,4 +2478,10 @@ async fn agents_are_denied_session_new_by_default() {
         ),
         "{new:?}"
     );
+}
+
+impl<P: maknae_kernel::SensitiveNow> maknae_kernel::SensitiveNow for Seen<P> {
+    fn sensitive_now(&self) -> std::sync::Arc<maknae_config::SensitiveList> {
+        self.inner.sensitive_now()
+    }
 }

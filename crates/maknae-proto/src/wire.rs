@@ -297,6 +297,22 @@ pub const REPLY_UNUSABLE_MESSAGE: &str = "the provider's reply was unusable";
 pub const EGRESS_UNAVAILABLE_MESSAGE: &str =
     "the model service is at capacity or restarting; nothing was sent";
 
+pub const HOST_SENSITIVE_LIST: &str = "/etc/maknae/sensitive.yaml";
+pub const PERSONAL_SENSITIVE_LIST: &str = "~/.maknae/sensitive.yaml";
+
+/// A `Protected` refusal's message: the list and the entry, for the user's client only.
+pub fn protected_message(list: &str, entry: &str) -> String {
+    format!("{list}: {entry}")
+}
+
+/// The list and entry of a `Protected` message, `None` for any other shape.
+pub fn protected_parts(message: &str) -> Option<(&str, &str)> {
+    let (list, entry) = message.split_once(": ")?;
+    [HOST_SENSITIVE_LIST, PERSONAL_SENSITIVE_LIST]
+        .contains(&list)
+        .then_some((list, entry))
+}
+
 impl ReplyDefect {
     pub const ALL: [ReplyDefect; 11] = [
         ReplyDefect::Malformed,
@@ -1076,6 +1092,9 @@ pub enum ProtoErrCode {
     /// budget was spent. Nothing left the host. Availability is not
     /// confidential, so it is named (#321).
     EgressUnavailable,
+    /// The asked path is on a `sensitive.yaml` list, whether or not it exists.
+    /// The message is [`protected_message`]; a client never shows it to the model.
+    Protected,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1405,6 +1424,34 @@ mod tests {
         ciborium::into_writer(&resp, &mut buf).unwrap();
         let back: Response = ciborium::from_reader(&buf[..]).unwrap();
         assert_eq!(back, resp);
+    }
+
+    #[test]
+    fn protected_round_trips_with_its_list_and_entry() {
+        let resp = Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Err(ProtoError {
+                code: ProtoErrCode::Protected,
+                message: protected_message(HOST_SENSITIVE_LIST, "~/.ssh/**"),
+            }),
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&resp, &mut buf).unwrap();
+        let back: Response = ciborium::from_reader(&buf[..]).unwrap();
+        assert_eq!(back, resp);
+        let RespResult::Err(e) = back.result else {
+            unreachable!()
+        };
+        assert_eq!(
+            protected_parts(&e.message),
+            Some((HOST_SENSITIVE_LIST, "~/.ssh/**"))
+        );
+        assert_eq!(
+            protected_parts(&protected_message(PERSONAL_SENSITIVE_LIST, "/a: b")),
+            Some((PERSONAL_SENSITIVE_LIST, "/a: b"))
+        );
+        assert_eq!(protected_parts("not authorized"), None);
+        assert_eq!(protected_parts("/elsewhere.yaml: ~/.ssh/**"), None);
     }
 
     #[test]

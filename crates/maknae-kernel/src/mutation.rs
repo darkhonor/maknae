@@ -5,6 +5,7 @@ use crate::conversation::{
     record::ConversationRecord,
     store::ConversationStore,
 };
+use crate::sensitive_authz::{sensitive_match, SensitiveMatch};
 use crate::{
     blocking_guard::AUDIT_APPEND_TIMEOUT,
     handler::{build_authz_request, delegated_plan, discharge_plan, lexical_pregate, Stamp},
@@ -15,7 +16,7 @@ use maknae_audit_append::{
     AuditEmit, AuditRecord, MutationAudit, MutationEffectKind, MutationEffectRecord,
     MutationOperation, MutationOrigin, MutationPhase, MutationStatus, Seq,
 };
-use maknae_config::TransportConfig;
+use maknae_config::{SensitiveList, TransportConfig};
 use maknae_io::MutationDirectory;
 use maknae_proto::{
     MutationGrant, MutationId, MutationLimits, MutationReport, MutationScope, Payload,
@@ -401,6 +402,46 @@ fn owned_personal(record: Option<&ConversationRecord>, uid: u32) -> Option<AttrV
         .filter(|rec| rec.owner == uid)
         .map(|rec| AttrValue::Set(rec.sensitive.iter().cloned().collect()))
 }
+/// The answer for an asked path on either list, decided before any descriptor, so it
+/// depends only on the path.
+struct Protection {
+    list: &'static str,
+    reason: String,
+    entry: String,
+}
+
+fn protection(
+    asked: &str,
+    home: &Path,
+    host: &SensitiveList,
+    personal: Option<&AttrValue>,
+) -> Option<Protection> {
+    let personal = match personal {
+        Some(AttrValue::Set(entries)) => {
+            SensitiveList::from_entries(&entries.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
+        }
+        _ => SensitiveList::empty(),
+    };
+    let (list, tag, entry) = match sensitive_match(
+        Path::new(asked),
+        Some(home),
+        host,
+        &personal,
+        maknae_config::native_fold(),
+    ) {
+        SensitiveMatch::Host(entry) => (maknae_proto::HOST_SENSITIVE_LIST, "host", entry),
+        SensitiveMatch::Personal(entry) => {
+            (maknae_proto::PERSONAL_SENSITIVE_LIST, "personal", entry)
+        }
+        SensitiveMatch::None | SensitiveMatch::Unbound => return None,
+    };
+    Some(Protection {
+        list,
+        reason: format!("sensitive: {tag} {entry}"),
+        entry,
+    })
+}
 fn mutation_meta(
     seq: u64,
     phase: MutationPhase,
@@ -509,8 +550,22 @@ async fn refuse<S: AsyncWrite + Unpin, E: AuditEmit>(
     stream: &mut S,
     cfg: &TransportConfig,
     emit: &E,
+    record: AuditRecord,
+    reason: String,
+) {
+    let answer = ProtoError {
+        code: ProtoErrCode::Unauthorized,
+        message: "not authorized".into(),
+    };
+    refuse_with(stream, cfg, emit, record, reason, answer).await;
+}
+async fn refuse_with<S: AsyncWrite + Unpin, E: AuditEmit>(
+    stream: &mut S,
+    cfg: &TransportConfig,
+    emit: &E,
     mut record: AuditRecord,
     reason: String,
+    answer: ProtoError,
 ) {
     record.outcome.result = "deny".into();
     record.outcome.reason = reason;
@@ -525,10 +580,7 @@ async fn refuse<S: AsyncWrite + Unpin, E: AuditEmit>(
             cfg,
             Response {
                 protocol_version: PROTOCOL_VERSION,
-                result: RespResult::Err(ProtoError {
-                    code: ProtoErrCode::Unauthorized,
-                    message: "not authorized".into(),
-                }),
+                result: RespResult::Err(answer),
             },
         )
         .await;
@@ -569,6 +621,7 @@ pub(crate) async fn handle<S, E, P>(
     policy_name: &str,
     conversations: Arc<dyn ConversationStore>,
     stamp: &Stamp<'_>,
+    sensitive: Arc<SensitiveList>,
 ) -> bool
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -604,9 +657,14 @@ where
         authz_timeout,
         tokio::task::spawn_blocking(move || {
             let _claim = claim;
-            let prepared = prepare(original.clone(), fd, &home, lane)?;
+            let asked = path(&original).ok_or("not a mutation")?;
+            checked(asked)?;
             let gathered = gather(&*conversations, uid, cited(&original), None);
             let personal = owned_personal(gathered.as_ref().and_then(|(_, rec)| rec.as_ref()), uid);
+            if let Some(p) = protection(asked, &home, &sensitive, personal.as_ref()) {
+                return Ok(Err(p));
+            }
+            let prepared = prepare(original.clone(), fd, &home, lane)?;
             let stamp = match &stamped {
                 None => Stamp::Client,
                 Some((agent, task)) => Stamp::Agent {
@@ -634,12 +692,20 @@ where
                     touch_failure = Some(e.to_string());
                 }
             }
-            Ok::<_, String>((prepared, permit, decision, touch_failure))
+            Ok::<_, String>(Ok((prepared, permit, decision, touch_failure)))
         }),
     )
     .await;
     let (prepared, permit, decision, touch_failure) = match prepared {
-        Ok(Ok(Ok(p))) => p,
+        Ok(Ok(Ok(Ok(p)))) => p,
+        Ok(Ok(Ok(Err(p)))) => {
+            let answer = ProtoError {
+                code: ProtoErrCode::Protected,
+                message: maknae_proto::protected_message(p.list, &p.entry),
+            };
+            refuse_with(stream, cfg, &*emit, record, p.reason, answer).await;
+            return true;
+        }
         Ok(Ok(Err(reason))) => {
             refuse(stream, cfg, &*emit, record, reason).await;
             return true;
@@ -1374,6 +1440,7 @@ mod tests {
             "US",
             Arc::new(crate::conversation::mem_store::MemStore::default()),
             &Stamp::Client,
+            Arc::new(SensitiveList::empty()),
         );
         let second_emit = Arc::new(Recorder::default());
         let second = async {
@@ -1415,6 +1482,7 @@ mod tests {
                     "US",
                     Arc::new(crate::conversation::mem_store::MemStore::default()),
                     &Stamp::Client,
+                    Arc::new(SensitiveList::empty()),
                 )
                 .await
             );
@@ -1475,6 +1543,7 @@ mod tests {
                     "US",
                     Arc::new(crate::conversation::mem_store::MemStore::default()),
                     &Stamp::Client,
+                    Arc::new(SensitiveList::empty()),
                 )
                 .await
             );
@@ -1512,6 +1581,7 @@ mod tests {
                 "US",
                 Arc::new(crate::conversation::mem_store::MemStore::default()),
                 &Stamp::Client,
+                Arc::new(SensitiveList::empty()),
             )
             .await
         );
@@ -1549,6 +1619,7 @@ mod tests {
                 "US",
                 Arc::new(crate::conversation::mem_store::MemStore::default()),
                 &Stamp::Client,
+                Arc::new(SensitiveList::empty()),
             )
             .await
         );
@@ -1586,6 +1657,7 @@ mod tests {
             "US",
             Arc::new(crate::conversation::mem_store::MemStore::default()),
             &Stamp::Client,
+            Arc::new(SensitiveList::empty()),
         )
         .await;
         assert!(emit
@@ -1622,6 +1694,7 @@ mod tests {
                 "US",
                 Arc::new(crate::conversation::mem_store::MemStore::default()),
                 &Stamp::Client,
+                Arc::new(SensitiveList::empty()),
             )
             .await
         );
@@ -1653,6 +1726,7 @@ mod tests {
                 "US",
                 Arc::new(crate::conversation::mem_store::MemStore::default()),
                 &Stamp::Client,
+                Arc::new(SensitiveList::empty()),
             )
             .await
         );

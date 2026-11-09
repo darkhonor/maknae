@@ -91,6 +91,7 @@ pub use run::{
     ContainmentStatus, Corrective, KernelGraphStatus, PlaneAccept, ReleaseRequest, WhereCtx,
     MAX_SUBJECT_USER_BYTES,
 };
+pub use sensitive_authz::SensitiveNow;
 pub use sensitive_authz::{sensitive_match, SensitiveMatch};
 #[cfg(any(test, feature = "hermetic-test-seam"))]
 pub use session::AllowFacts;

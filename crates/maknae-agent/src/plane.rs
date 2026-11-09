@@ -51,11 +51,20 @@ impl std::fmt::Debug for ReadPage {
     }
 }
 
+/// Which `sensitive.yaml` list protects an asked path, and the entry: for the user,
+/// never for the model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtectedBy {
+    pub list: String,
+    pub entry: String,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub enum ReadOutcome {
     Content(ReadPage),
     Refused,
     Unavailable,
+    Protected(ProtectedBy),
 }
 
 /// Redacting, by hand — the crate convention (`route.rs`'s `ToolRequest`,
@@ -72,6 +81,7 @@ impl std::fmt::Debug for ReadOutcome {
                 .finish(),
             ReadOutcome::Refused => f.write_str("Refused"),
             ReadOutcome::Unavailable => f.write_str("Unavailable"),
+            ReadOutcome::Protected(by) => f.debug_tuple("Protected").field(by).finish(),
         }
     }
 }
@@ -96,6 +106,7 @@ pub enum WriteOutcome {
     Stale,
     Unknown,
     NotSent,
+    Protected(ProtectedBy),
 }
 
 /// What the loop knows of a file it is about to replace (#388).
@@ -188,6 +199,10 @@ mod tests {
             ReadOutcome::Content(test_page(&[1])),
             ReadOutcome::Refused,
             ReadOutcome::Unavailable,
+            ReadOutcome::Protected(ProtectedBy {
+                list: "l".into(),
+                entry: "e".into(),
+            }),
         ];
         for (i, a) in reads.iter().enumerate() {
             assert_eq!(a.clone(), *a);
@@ -202,6 +217,10 @@ mod tests {
             WriteOutcome::Stale,
             WriteOutcome::Unknown,
             WriteOutcome::NotSent,
+            WriteOutcome::Protected(ProtectedBy {
+                list: "l".into(),
+                entry: "e".into(),
+            }),
         ];
         for (i, a) in writes.iter().enumerate() {
             assert_eq!(a.clone(), *a);
@@ -211,7 +230,7 @@ mod tests {
         }
         assert_eq!(
             format!("{writes:?}"),
-            "[Applied(None), Applied(Some([1, 1, 1, 1, 1, 1, 1])), Stale, Unknown, NotSent]"
+            "[Applied(None), Applied(Some([1, 1, 1, 1, 1, 1, 1])), Stale, Unknown, NotSent, Protected(ProtectedBy { list: \"l\", entry: \"e\" })]"
         );
         let errs = [
             PlaneError::FrameTooLarge,

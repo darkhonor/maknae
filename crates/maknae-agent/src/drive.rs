@@ -96,6 +96,11 @@ pub type Seen = std::collections::HashMap<String, [i64; 7]>;
 pub enum LoopEvent {
     Notice(Notice),
     Diagnostic(String),
+    /// A tool call the kernel answered `Protected`: for the user's terminal only.
+    Protected {
+        path: String,
+        by: crate::plane::ProtectedBy,
+    },
     /// The text is in the run's `Outcome`; the event carries none of it.
     Answered,
     Stopped(StopReason),
@@ -311,6 +316,10 @@ pub async fn drive_session<P: Plane>(
                             }
                             ReadOutcome::Refused => ToolOutcome::ReadRefused,
                             ReadOutcome::Unavailable => ToolOutcome::ReadUnavailable,
+                            ReadOutcome::Protected(by) => {
+                                emit(LoopEvent::Protected { path: path.clone(), by });
+                                ToolOutcome::Protected
+                            }
                             }
                         }
                         Ok(ToolRequest::Write { path, content, .. }) => {
@@ -337,6 +346,10 @@ pub async fn drive_session<P: Plane>(
                                 }
                                 WriteOutcome::Unknown => ToolOutcome::WriteUnknown,
                                 WriteOutcome::NotSent => ToolOutcome::WriteNotSent,
+                                WriteOutcome::Protected(by) => {
+                                    emit(LoopEvent::Protected { path: path.clone(), by });
+                                    ToolOutcome::Protected
+                                }
                             }
                         }
                     };
@@ -876,6 +889,71 @@ mod tests {
         let out = drive_unmetered(&mut p, &mut t, &budget()).await;
         assert_eq!(out.answer.as_deref(), Some("I could not read that"));
         assert!(tool_text(&t.turns()[2]).starts_with("Not authorized"));
+    }
+    #[tokio::test]
+    async fn a_protected_call_tells_the_user_the_entry_and_the_model_only_that_it_is_protected() {
+        let by = ProtectedBy {
+            list: maknae_proto::HOST_SENSITIVE_LIST.into(),
+            entry: "/x/.ssh/**".into(),
+        };
+        let mut p = scripted(vec![
+            PromptReply {
+                reasoning: None,
+                blocks: vec![],
+                tool_calls: vec![
+                    call("c1", "read_file", r#"{"path":"/x/.ssh/id_rsa"}"#),
+                    call(
+                        "c2",
+                        "write_file",
+                        r#"{"path":"/x/.ssh/config","content":"y"}"#,
+                    ),
+                ],
+                usage: None,
+            },
+            PromptReply {
+                reasoning: None,
+                blocks: vec![text("ok")],
+                tool_calls: vec![],
+                usage: None,
+            },
+        ]);
+        p.read_outcome = ReadOutcome::Protected(by.clone());
+        p.write_outcome = WriteOutcome::Protected(by.clone());
+        let mut t = Transcript::new("conv", "q");
+        let mut events = vec![];
+        drive_session(
+            &mut p,
+            &mut t,
+            &mut Seen::new(),
+            &budget(),
+            &mut Meter::new(ContextBudget::new(1_000_000, None).unwrap()),
+            &AtomicBool::new(false),
+            &mut |e| events.push(e),
+            None,
+        )
+        .await;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, LoopEvent::Protected { .. }))
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![
+                LoopEvent::Protected {
+                    path: "/x/.ssh/id_rsa".into(),
+                    by: by.clone(),
+                },
+                LoopEvent::Protected {
+                    path: "/x/.ssh/config".into(),
+                    by,
+                },
+            ]
+        );
+        for i in [2, 3] {
+            let said = tool_text(&t.turns()[i]);
+            assert!(said.starts_with(crate::render::PROTECTED), "{said}");
+            assert!(!said.contains(".ssh"), "{said}");
+        }
     }
     #[tokio::test]
     async fn an_uncertain_write_is_attempted_exactly_once_and_an_unsent_one_is_a_tool_error() {

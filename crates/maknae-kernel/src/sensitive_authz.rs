@@ -72,6 +72,18 @@ fn first_match(
     }
 }
 
+/// The host list a request path matches its asked path against for the `Protected`
+/// answer. Enforcement never reads it: the operand decides on each batch's snapshot.
+pub trait SensitiveNow {
+    fn sensitive_now(&self) -> std::sync::Arc<SensitiveList>;
+}
+
+impl<B: maknae_authz_basic::Baseline> SensitiveNow for B {
+    fn sensitive_now(&self) -> std::sync::Arc<SensitiveList> {
+        std::sync::Arc::clone(self.snapshot().sensitive())
+    }
+}
+
 /// The operand over one snapshot's host list; the composition builds it per decision
 /// batch from the snapshot the baseline decides on.
 pub struct SensitiveAuthorizer<'s> {

@@ -342,6 +342,11 @@ pub fn print_event(e: &LoopEvent, err: &mut impl Write) -> std::io::Result<()> {
     match e {
         LoopEvent::Notice(n) => writeln!(err, "{}", warning_line(n)),
         LoopEvent::Diagnostic(d) => writeln!(err, "{d}"),
+        LoopEvent::Protected { path, by } => writeln!(
+            err,
+            "{}",
+            crate::cli::protected_line(path, &by.list, &by.entry)
+        ),
         _ => Ok(()),
     }
 }
@@ -1509,6 +1514,26 @@ mod tests {
                     format!("maknae agent: {}\n", stop_line(Some(r), &b))
                 );
             }
+        }
+
+        #[test]
+        fn a_protected_tool_call_prints_the_cli_line_to_the_user() {
+            let mut err = vec![];
+            print_event(
+                &LoopEvent::Protected {
+                    path: "/home/u/.ssh/id_rsa".into(),
+                    by: maknae_agent::plane::ProtectedBy {
+                        list: maknae_proto::HOST_SENSITIVE_LIST.into(),
+                        entry: "~/.ssh/**".into(),
+                    },
+                },
+                &mut err,
+            )
+            .unwrap();
+            assert_eq!(
+                String::from_utf8(err).unwrap(),
+                "maknae: /home/u/.ssh/id_rsa is protected by /etc/maknae/sensitive.yaml (~/.ssh/**). Maknae will not touch it; run this outside Maknae.\n"
+            );
         }
 
         #[test]

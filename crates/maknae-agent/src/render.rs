@@ -25,6 +25,7 @@ pub enum ToolOutcome {
     WriteUnread,
     WriteUnknown,
     WriteNotSent,
+    Protected,
     NotRun,
     BadCall(String),
 }
@@ -55,6 +56,7 @@ impl std::fmt::Debug for ToolOutcome {
             ToolOutcome::WriteUnread => f.write_str("WriteUnread"),
             ToolOutcome::WriteUnknown => f.write_str("WriteUnknown"),
             ToolOutcome::WriteNotSent => f.write_str("WriteNotSent"),
+            ToolOutcome::Protected => f.write_str("Protected"),
             ToolOutcome::NotRun => f.write_str("NotRun"),
             ToolOutcome::BadCall(why) => f.debug_tuple("BadCall").field(why).finish(),
         }
@@ -72,6 +74,8 @@ pub const NOT_WRITTEN_UNREAD: &str =
 pub const READ_UNAVAILABLE: &str = "read unavailable — do not retry";
 /// A LOCAL pre-send refusal is a tool error, not an unknown outcome.
 pub const WRITE_NOT_SENT: &str = "tool error: write not sent — content exceeds the frame bound";
+/// Names no list and no entry: the user is told those, the model never is.
+pub const PROTECTED: &str = "protected by policy — ask the user to do this outside Maknae";
 /// A call skipped because the host stopped the loop: not the model's error.
 pub const NOT_RUN: &str = "not run: the loop was stopped";
 
@@ -201,7 +205,7 @@ pub fn render(outcome: &ToolOutcome, steps_remaining: u32) -> Zeroizing<String> 
         // allocates at exactly `len`, so `render`'s suffix `push_str`
         // reallocates and frees each of these buffers. What it frees is a
         // HEAP COPY of a compiled-in constant — `NOT_AUTHORIZED`,
-        // `READ_UNAVAILABLE`, `APPLIED`, `OUTCOME_UNKNOWN`, `WRITE_NOT_SENT`,
+        // `READ_UNAVAILABLE`, `APPLIED`, `OUTCOME_UNKNOWN`, `WRITE_NOT_SENT`, `PROTECTED`,
         // `NOT_WRITTEN_STALE`, `NOT_WRITTEN_UNREAD`, `NOT_RUN` — never the `.rodata`
         // original, which is not freed at all, so
         // nothing secret is freed and headroom would buy nothing. One arm is
@@ -219,6 +223,7 @@ pub fn render(outcome: &ToolOutcome, steps_remaining: u32) -> Zeroizing<String> 
         ToolOutcome::WriteUnread => Zeroizing::new(NOT_WRITTEN_UNREAD.to_string()),
         ToolOutcome::WriteUnknown => Zeroizing::new(OUTCOME_UNKNOWN.to_string()),
         ToolOutcome::WriteNotSent => Zeroizing::new(WRITE_NOT_SENT.to_string()),
+        ToolOutcome::Protected => Zeroizing::new(PROTECTED.to_string()),
         ToolOutcome::NotRun => Zeroizing::new(NOT_RUN.to_string()),
         ToolOutcome::BadCall(why) => Zeroizing::new(format!("tool error: {why}")),
     };
@@ -283,6 +288,23 @@ mod tests {
             render(&ToolOutcome::ReadUnavailable, 4).as_str(),
             "read unavailable — do not retry\n\nsteps remaining: 4"
         );
+    }
+    #[test]
+    fn the_model_text_names_no_entry() {
+        let out = render(&ToolOutcome::Protected, 2);
+        assert_eq!(
+            out.as_str(),
+            "protected by policy — ask the user to do this outside Maknae\n\nsteps remaining: 2"
+        );
+        for leak in [
+            maknae_proto::HOST_SENSITIVE_LIST,
+            maknae_proto::PERSONAL_SENSITIVE_LIST,
+            "sensitive.yaml",
+            "~/",
+            "/etc",
+        ] {
+            assert!(!out.contains(leak), "{leak}");
+        }
     }
     fn a_page(content: &[u8], next: Option<(u64, u64)>, eof: bool) -> ReadPage {
         ReadPage {

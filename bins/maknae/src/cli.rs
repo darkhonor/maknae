@@ -297,6 +297,34 @@ impl Verb {
             Verb::SessionClose { .. } => "session close",
         }
     }
+
+    fn path(&self) -> Option<&str> {
+        match self {
+            Verb::Read { path, .. }
+            | Verb::Write { path }
+            | Verb::Delete { path, .. }
+            | Verb::Mkdir { path, .. } => Some(path),
+            _ => None,
+        }
+    }
+}
+
+pub(crate) fn protected_line(path: &str, list: &str, entry: &str) -> String {
+    format!(
+        "maknae: {} is protected by {} ({}). Maknae will not touch it; run this outside Maknae.",
+        terminal_safe(path),
+        terminal_safe(list),
+        terminal_safe(entry)
+    )
+}
+
+fn refusal_line(path: Option<&str>, code: &maknae_proto::ProtoErrCode, message: &str) -> String {
+    if *code == maknae_proto::ProtoErrCode::Protected {
+        if let (Some(path), Some((list, entry))) = (path, maknae_proto::protected_parts(message)) {
+            return protected_line(path, list, entry);
+        }
+    }
+    format!("maknae: daemon refused: {code:?}: {message}")
 }
 
 /// A payload's kind, for messages that must not carry its content.
@@ -522,7 +550,7 @@ async fn round_trip(
                     {
                         SentOutcome::ReadDone { read } => Ok(read),
                         SentOutcome::Refused { code, message, .. } => {
-                            errln!("maknae: daemon refused: {code:?}: {message}");
+                            errln!("{}", refusal_line(Some(path), &code, &message));
                             Ok(None)
                         }
                         _ => Err("protocol error: a read answered with something else".into()),
@@ -568,7 +596,7 @@ async fn round_trip(
         }
         SentOutcome::ReadDone { read: None } => Ok(false),
         SentOutcome::Refused { code, message, .. } => {
-            errln!("maknae: daemon refused: {code:?}: {message}");
+            errln!("{}", refusal_line(verb.path(), &code, &message));
             Ok(false)
         }
     }
@@ -1149,6 +1177,52 @@ mod tests {
         assert_eq!(agent_exit(Err("boom".into()), &mut err), ExitCode::from(1));
         assert_eq!(err, b"maknae: boom\n");
         assert_eq!(agent_exit(Ok(2), &mut ClosedStderr), ExitCode::from(2));
+    }
+
+    #[test]
+    fn the_cli_names_the_list_and_entry() {
+        use maknae_proto::{protected_message, ProtoErrCode, PERSONAL_SENSITIVE_LIST};
+        for verb in [
+            Verb::Read {
+                path: "/srv/k".into(),
+                page: None,
+            },
+            Verb::Write {
+                path: "/srv/k".into(),
+            },
+            Verb::Delete {
+                path: "/srv/k".into(),
+                recursive: false,
+            },
+            Verb::Mkdir {
+                path: "/srv/k".into(),
+                parents: false,
+            },
+        ] {
+            assert_eq!(
+                refusal_line(
+                    verb.path(),
+                    &ProtoErrCode::Protected,
+                    &protected_message(PERSONAL_SENSITIVE_LIST, "/srv/*")
+                ),
+                "maknae: /srv/k is protected by ~/.maknae/sensitive.yaml (/srv/*). Maknae will not touch it; run this outside Maknae.",
+                "{}",
+                verb.kind()
+            );
+        }
+        assert_eq!(
+            refusal_line(
+                Some("/srv/k"),
+                &ProtoErrCode::Unauthorized,
+                "not authorized"
+            ),
+            "maknae: daemon refused: Unauthorized: not authorized"
+        );
+        assert_eq!(
+            refusal_line(Some("/srv/k\x1b[2J"), &ProtoErrCode::Protected, "/etc/maknae/sensitive.yaml: /srv/*"),
+            "maknae: /srv/k\\u{1b}[2J is protected by /etc/maknae/sensitive.yaml (/srv/*). Maknae will not touch it; run this outside Maknae."
+        );
+        assert_eq!(Verb::Ping.path(), None);
     }
 
     #[test]

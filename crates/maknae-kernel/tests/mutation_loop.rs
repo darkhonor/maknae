@@ -1825,15 +1825,19 @@ async fn read_outside(
     target: &std::path::Path,
 ) -> (common::ReadRun, Vec<AuditRecord>) {
     let records = Records::new(0);
-    let held = maknae_io::open_path_for_delegation(target).unwrap();
+    let held = maknae_io::open_path_for_delegation(target).ok();
     let verb = Verb::Read {
         path: target.to_str().unwrap().into(),
         conversation: None,
         page: None,
     };
-    let (mut client, task, body) = fx.start(verb, Some(held.try_clone().unwrap()), records.clone());
+    let (mut client, task, body) = fx.start(
+        verb,
+        held.as_ref().map(|fd| fd.try_clone().unwrap()),
+        records.clone(),
+    );
     common::write_frame(&mut client, &body).await.unwrap();
-    let run = common::read_as_subject(&mut client, Some(&held)).await;
+    let run = common::read_as_subject(&mut client, held.as_ref()).await;
     drop(client);
     task.await.unwrap();
     (run, records.snapshot())
@@ -1952,6 +1956,48 @@ fn assert_read_refused(run: &common::ReadRun, records: &[AuditRecord], reason: &
     assert_eq!(last.outcome.reason, reason);
 }
 
+fn assert_protected_by(result: &RespResult, entry: &str) {
+    match result {
+        RespResult::Err(e) => {
+            assert_eq!(e.code, maknae_proto::ProtoErrCode::Protected, "{e:?}");
+            assert_eq!(
+                e.message,
+                maknae_proto::protected_message(maknae_proto::HOST_SENSITIVE_LIST, entry)
+            );
+        }
+        other => panic!("expected Protected, got {other:?}"),
+    }
+}
+
+fn assert_read_protected(run: &common::ReadRun, records: &[AuditRecord], entry: &str) {
+    assert!(run.content.is_none(), "{:?}", records.last());
+    let frame = run.first.as_ref().expect("a refusal frame");
+    assert!(!frame
+        .windows(SENSITIVE_SENTINEL.len())
+        .any(|w| w == SENSITIVE_SENTINEL));
+    match maknae_proto::decode_response(frame).unwrap().result {
+        RespResult::Err(e) => {
+            assert_eq!(e.code, maknae_proto::ProtoErrCode::Protected);
+            assert_eq!(
+                e.message,
+                maknae_proto::protected_message(maknae_proto::HOST_SENSITIVE_LIST, entry)
+            );
+        }
+        other => panic!("expected Protected, got {other:?}"),
+    }
+    let last = records.last().expect("a request record");
+    assert_eq!(last.outcome.result, "deny");
+    assert_eq!(last.outcome.reason, format!("sensitive: host {entry}"));
+    assert!(last.mutation.is_none(), "{last:?}");
+}
+
+/// A directory symlink onto `dir`, so a path asked through it is not the path the kernel reports.
+fn via(dir: &std::path::Path) -> std::path::PathBuf {
+    let link = dir.join("via-617");
+    std::os::unix::fs::symlink(dir, &link).unwrap();
+    link
+}
+
 fn assert_read_served(run: &common::ReadRun, records: &[AuditRecord]) {
     assert_eq!(
         run.content.as_deref().map(Vec::as_slice),
@@ -1973,6 +2019,45 @@ async fn an_admin_grant_of_everything_cannot_read_a_protected_file() {
     let (run, records) = read_outside(&fx, &open).await;
     assert_read_served(&run, &records);
     let (run, records) = read_outside(&fx, &secret).await;
+    assert_read_protected(&run, &records, secret.to_str().unwrap());
+    let (run, records) = read_outside(&fx, &via(&outside).join("secret")).await;
+    assert_read_refused(
+        &run,
+        &records,
+        &format!("sensitive: host {}", secret.display()),
+    );
+}
+
+#[tokio::test]
+async fn a_protected_path_answers_protected_whether_or_not_it_exists() {
+    let fx = admin_of_everything("sensitive_existence");
+    let outside = outside_the_home(&fx, "sensitive_existence");
+    let here = outside.join("secret-here");
+    let gone = outside.join("secret-gone");
+    std::fs::write(&here, SENSITIVE_SENTINEL).unwrap();
+    let entry = format!("{}/secret*", outside.display());
+    host_list(&fx, &[&entry]);
+    let (here_run, records) = read_outside(&fx, &here).await;
+    assert_read_protected(&here_run, &records, &entry);
+    let (gone_run, records) = read_outside(&fx, &gone).await;
+    assert_read_protected(&gone_run, &records, &entry);
+    assert_eq!(
+        here_run.first, gone_run.first,
+        "the answer depends only on the path"
+    );
+    assert!(!gone.exists());
+}
+
+#[tokio::test]
+async fn a_symlink_to_a_protected_file_answers_uniformly_not_protected() {
+    let fx = admin_of_everything("sensitive_symlink_file");
+    let outside = outside_the_home(&fx, "sensitive_symlink_file");
+    let secret = outside.join("secret");
+    std::fs::write(&secret, SENSITIVE_SENTINEL).unwrap();
+    let link = outside.join("innocent");
+    std::os::unix::fs::symlink(&secret, &link).unwrap();
+    host_list(&fx, &[secret.to_str().unwrap()]);
+    let (run, records) = read_outside(&fx, &link).await;
     assert_read_refused(
         &run,
         &records,
@@ -2012,6 +2097,7 @@ async fn a_protected_file_cannot_be_written_deleted_or_created_under() {
     drop(client);
     task.await.unwrap();
     assert_refused(&result, &records.snapshot()[1], &reason);
+    assert_protected_by(&result, &entry);
 
     for verb in [
         Verb::FsDelete {
@@ -2023,6 +2109,7 @@ async fn a_protected_file_cannot_be_written_deleted_or_created_under() {
     ] {
         let (result, record) = second_subject_attempt(&fx, verb, &vault).await;
         assert_refused(&result, &record, &reason);
+        assert_protected_by(&result, &entry);
     }
     let (result, record) = second_subject_attempt(
         &fx,
@@ -2200,6 +2287,8 @@ async fn an_admin_etc_entry_refuses_a_read_asked_as_private_etc() {
     host_list(&fx, &[&entry]);
     let asked = std::path::Path::new("/private").join(secret.strip_prefix("/").unwrap());
     let (run, records) = read_outside(&fx, &asked).await;
+    assert_read_protected(&run, &records, &entry);
+    let (run, records) = read_outside(&fx, &via(&dir).join("secret")).await;
     assert_read_refused(&run, &records, &format!("sensitive: host {entry}"));
     assert!(
         records
@@ -2229,6 +2318,8 @@ async fn a_case_variant_of_a_protected_path_is_refused_on_macos() {
     );
     host_list(&fx, &["~/.SSH/**"]);
     let (run, records) = read_outside(&fx, &asked).await;
+    assert_read_protected(&run, &records, "~/.SSH/**");
+    let (run, records) = read_outside(&fx, &via(&fx.root).join(".ssh/id")).await;
     assert_read_refused(&run, &records, "sensitive: host ~/.SSH/**");
 }
 
@@ -2246,5 +2337,7 @@ async fn an_entry_spelling_the_homes_leaf_in_another_case_is_refused_on_macos() 
     );
     host_list(&fx, &[&entry]);
     let (run, records) = read_outside(&fx, &fx.root.join(".ssh/id")).await;
+    assert_read_protected(&run, &records, &entry);
+    let (run, records) = read_outside(&fx, &via(&fx.root).join(".ssh/id")).await;
     assert_read_refused(&run, &records, &format!("sensitive: host {entry}"));
 }
