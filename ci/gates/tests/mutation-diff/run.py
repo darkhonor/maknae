@@ -722,6 +722,11 @@ class Compiled(unittest.TestCase):
                                                "crates/a/src/my data.txt", "crates/a/src/lib.rs"])
 
 
+def untracked_message(listed, hint):
+    return (f"FAIL: beta: cargo-mutants walks {listed} under a spelling the tracked tree at HEAD does not have; "
+            "the in-diff mapping cannot read it" + (" — rename the tracked file to that spelling" if hint else "") + "\n")
+
+
 class Tracked(unittest.TestCase):
     setUp, git, put, commit = Workspace.setUp, Workspace.git, Workspace.put, Workspace.commit
 
@@ -735,13 +740,24 @@ class Tracked(unittest.TestCase):
         self.assertEqual((result.returncode, result.stdout), (0, ""), result.stderr)
 
     def test_tracked_a_listed_file_that_is_not_a_tracked_path_fails(self):
-        for listed in ("crates/beta/src/LIB.rs", "crates/beta/src/Lib.rs", "./crates/beta/src/lib.rs",
-                       "crates/beta/src/caf\u0065\u0301.rs"):
+        for listed, hint in (("crates/beta/src/LIB.rs", True), ("crates/beta/src/Lib.rs", True),
+                             ("./crates/beta/src/lib.rs", False)):
             with self.subTest(listed=listed):
                 result = self.tracked(["crates/beta/src/lib.rs", listed])
                 self.assertEqual(result.returncode, 1, result.stderr)
-                self.assertEqual(result.stdout, f"FAIL: beta: cargo-mutants lists {listed}, which is not a tracked "
-                                 "path at HEAD; the in-diff mapping cannot read it — rename it to match\n")
+                self.assertEqual(result.stdout, untracked_message(listed, hint))
+
+    def test_tracked_a_listing_that_differs_only_in_normalisation_fails(self):
+        nfc, nfd = "crates/beta/src/caf\u00e9.rs", "crates/beta/src/cafe\u0301.rs"
+        self.put(nfc, "pub fn f() {}\n")
+        self.commit("nfc")
+        self.assertEqual(self.git("-c", "core.quotePath=false", "ls-files", "crates/beta/src").splitlines(),
+                         [nfc, "crates/beta/src/lib.rs"])
+        result = self.tracked([nfc])
+        self.assertEqual((result.returncode, result.stdout), (0, ""), result.stderr)
+        result = self.tracked([nfd])
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.stdout, untracked_message(nfd, True))
 
     def test_tracked_an_empty_listing_passes(self):
         listing = self.root / "whole.json"

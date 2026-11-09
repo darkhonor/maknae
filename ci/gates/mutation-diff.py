@@ -618,16 +618,22 @@ def non_rs_source(root, sha, crate, directory, paths):
     return None
 
 
-def untracked(root, head, pkg, whole):
+def folded(path):
+    return unicodedata.normalize("NFC", path).casefold()
+
+
+def tracked(pkg, whole, root, head):
     sha = resolve(root, head)
     listing = git(root, "ls-tree", "-r", "-z", "--full-tree", "--name-only", sha)
     if listing.returncode != 0:
         raise InputError(f"FAIL: git ls-tree {sha} failed: {listing.stderr.decode().strip()}")
     paths = set(listing.stdout.decode().split("\0"))
+    spellings = {folded(p) for p in paths}
     for mutant in whole:
         if mutant["file"] not in paths:
-            return (f"FAIL: {pkg}: cargo-mutants lists {mutant['file']}, which is not a tracked path at HEAD; "
-                    "the in-diff mapping cannot read it — rename it to match")
+            hint = " — rename the tracked file to that spelling" if folded(mutant["file"]) in spellings else ""
+            return (f"FAIL: {pkg}: cargo-mutants walks {mutant['file']} under a spelling the tracked tree at HEAD "
+                    f"does not have; the in-diff mapping cannot read it{hint}")
     return None
 
 
@@ -722,7 +728,7 @@ def main(argv):
                 print(problem)
                 return 1
         elif len(argv) == 5 and command == "tracked":
-            problem = untracked(argv[3], argv[4], argv[1], read_list(argv[1], argv[2]))
+            problem = tracked(argv[1], read_list(argv[1], argv[2]), argv[3], argv[4])
             if problem:
                 print(problem)
                 return 1

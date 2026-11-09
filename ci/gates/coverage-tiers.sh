@@ -820,7 +820,8 @@ if [ "$fail_n" -gt 0 ]; then
   exit 1
 fi
 if [ "${partial_n:-0}" -gt 0 ]; then
-  echo "PASS (partial: $partial_n crates not run): coverage-tiers gate"
+  noun=crates; [ "$partial_n" -eq 1 ] && noun=crate
+  echo "PASS (partial: $partial_n $noun not run): coverage-tiers gate"
 else
   echo "PASS: coverage-tiers gate"
 fi

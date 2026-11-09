@@ -673,7 +673,7 @@ class InDiff(unittest.TestCase):
         self.assertIn("RUN a: 2 in-diff mutants", out)
         self.assertIn(PARTIAL_B, out)
         self.assertEqual([r[2] for r in self.runs()], ["a"])
-        self.assertIn("PASS (partial: 1 crates not run): coverage-tiers gate", out)
+        self.assertIn("PASS (partial: 1 crate not run): coverage-tiers gate", out)
         self.assertNotIn("PASS: coverage-tiers gate", out)
 
     def test_in_diff_partial_still_fails_a_survivor_in_a_selected_crate(self):
@@ -689,7 +689,7 @@ class InDiff(unittest.TestCase):
         self.assertIn(PARTIAL_B, out)
         self.assertIn("SKIP: a: no mutant on a changed line", out)
         self.assertEqual(self.runs(), [])
-        self.assertIn("PASS (partial: 1 crates not run): coverage-tiers gate", out)
+        self.assertIn("PASS (partial: 1 crate not run): coverage-tiers gate", out)
         self.assertNotIn("PASS: coverage-tiers gate", out)
 
     def test_in_diff_partial_prints_nothing_when_every_changed_crate_is_selected(self):
@@ -699,6 +699,14 @@ class InDiff(unittest.TestCase):
         self.assertEqual(result.returncode, 0, out)
         self.assertNotIn("PARTIAL:", out)
         self.assertIn("PASS: coverage-tiers gate", out)
+
+    def test_in_diff_partial_counts_every_crate_not_run(self):
+        repo = self.in_diff_repo({**EDIT_A, **B_EDIT})
+        result, out = self.gate(repo, "--mutants", "--in-diff", "base", "--partial", whole=WHOLE_EDIT)
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn(PARTIAL_B, out)
+        self.assertIn("PASS (partial: 2 crates not run): coverage-tiers gate", out)
+        self.assertEqual(self.runs(), [])
 
     def test_in_diff_partial_keeps_the_unknown_crate_refusal(self):
         repo = self.in_diff_repo(EDIT_A)
@@ -1252,8 +1260,8 @@ class InDiff(unittest.TestCase):
         repo = self.in_diff_repo(EDIT_A)
         spelled = [dict(m, file="./" + m["file"]) for m in WHOLE_EDIT]
         result, out = self.gate(repo, whole=spelled, indiff=spelled[:2])
-        self.assertFails(result, out, "FAIL: a: cargo-mutants lists ./crates/a/src/lib.rs, which is not a tracked "
-                         "path at HEAD")
+        self.assertFails(result, out, "FAIL: a: cargo-mutants walks ./crates/a/src/lib.rs under a spelling the "
+                         "tracked tree at HEAD does not have; the in-diff mapping cannot read it\n")
         self.assertEqual(self.runs(), [])
 
     def test_in_diff_a_case_variant_rs_suffix_is_refused(self):
