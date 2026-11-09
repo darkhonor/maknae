@@ -361,6 +361,7 @@ struct Worker {
     content: Option<maknae_io::Zeroizing<Vec<u8>>>,
     page: Option<PageMeta>,
     stale: bool,
+    withheld: bool,
     version: Option<maknae_io::FileVersion>,
 }
 struct Step {
@@ -576,7 +577,12 @@ impl Worker {
                         }
                     }
                     Err(e) => {
-                        self.stale = matches!(e.source, IoError::StaleBase { .. });
+                        if matches!(e.source, IoError::StaleBase { .. }) {
+                            let readable =
+                                maknae_io::held_file_is_readable(held.as_fd(), Path::new(&path));
+                            self.stale = readable;
+                            self.withheld = !readable;
+                        }
                         error_step(e, ReportedEffect::ReplacedFile, path)
                     }
                 }
@@ -849,6 +855,7 @@ pub async fn execute<S: AsyncRead + AsyncWrite + Unpin + Send>(
     .map(|a| WriteEnd {
         applied: a.success,
         stale: a.stale,
+        withheld: a.withheld,
         version: a.version.map(|v| v.key()),
     })
 }
@@ -898,15 +905,19 @@ struct Attempted {
     content: Option<maknae_io::Zeroizing<Vec<u8>>>,
     page: Option<PageMeta>,
     stale: bool,
+    withheld: bool,
     version: Option<maknae_io::FileVersion>,
 }
 
 /// A write attempt's end: `stale` is true only when the #388 check refused it,
-/// before any write syscall; `version` is the written file's, when known.
+/// before any write syscall, and the file is readable; `withheld` replaces it when
+/// the subject cannot read the file (ADR-0034 decision 7). `version` is the
+/// written file's, when known.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WriteEnd {
     pub applied: bool,
     pub stale: bool,
+    pub withheld: bool,
     pub version: Option<[i64; 7]>,
 }
 async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
@@ -1017,6 +1028,7 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
             content: None,
             page: None,
             stale: false,
+            withheld: false,
             version: None,
         })
     });
@@ -1055,7 +1067,12 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
                 next.next_index,
             )
             .await?;
-            if let Some(line) = stop_line(outcome, reading, next.stale, next.next_index) {
+            if let Some(line) = stop_line(
+                outcome,
+                reading,
+                next.stale || next.withheld,
+                next.next_index,
+            ) {
                 diag(line);
             }
             return Ok(Attempted {
@@ -1063,6 +1080,7 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
                 content: next.content.take(),
                 page: next.page.take(),
                 stale: next.stale,
+                withheld: next.withheld,
                 version: next.version,
             });
         }
@@ -1924,6 +1942,74 @@ mod tests {
             ),
             "{reports:?}"
         );
+    }
+    fn the_model_is_told(end: WriteEnd) -> maknae_agent::plane::WriteOutcome {
+        maknae_agent::wire::write_outcome(Ok(maknae_agent::wire::WireOutcome::WriteDone {
+            applied: end.applied,
+            stale: end.stale,
+            withheld: end.withheld,
+            version: end.version,
+        }))
+    }
+    #[tokio::test]
+    async fn a_write_to_a_readable_unread_file_still_says_unread() {
+        let d = Fixture::new();
+        for (name, check) in [
+            ("readable-unread-sentinel", WriteCheck::Unread),
+            ("readable-stale-sentinel", WriteCheck::Read([9; 7])),
+        ] {
+            let path = d.path(name);
+            std::fs::write(&path, b"readable").unwrap();
+            let (end, _) =
+                acknowledged_end(checked_write(path.clone(), check), replace_grant(&path)).await;
+            let end = end.unwrap();
+            assert!(
+                !end.applied && end.stale && !end.withheld,
+                "{name}: {end:?}"
+            );
+            assert_eq!(
+                the_model_is_told(end),
+                maknae_agent::plane::WriteOutcome::Stale
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), b"readable");
+        }
+    }
+    #[tokio::test]
+    async fn a_write_to_a_file_the_os_will_not_let_the_loop_read_answers_unavailable() {
+        if nix::unistd::geteuid().is_root() {
+            panic!("a_write_to_a_file_the_os_will_not_let_the_loop_read_answers_unavailable: running as root, which reads a 0200 file and voids the premise; run as an unprivileged user");
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let d = Fixture::new();
+        for (name, check) in [
+            ("write-only-unread-sentinel", WriteCheck::Unread),
+            ("write-only-stale-sentinel", WriteCheck::Read([9; 7])),
+        ] {
+            let path = d.path(name);
+            std::fs::write(&path, b"write only").unwrap();
+            let armed_while_readable = checked_write(path.clone(), check);
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o200)).unwrap();
+            #[cfg(target_os = "macos")]
+            assert!(
+                checked_write(path.clone(), check)
+                    .descriptor()
+                    .unwrap()
+                    .is_none(),
+                "{name}: macOS arms with O_RDONLY, so the request goes out unarmed"
+            );
+            let (end, _) = acknowledged_end(armed_while_readable, replace_grant(&path)).await;
+            let end = end.unwrap();
+            assert!(
+                !end.applied && !end.stale && end.withheld,
+                "{name}: {end:?}"
+            );
+            assert_eq!(
+                the_model_is_told(end),
+                maknae_agent::plane::WriteOutcome::Unavailable
+            );
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"write only", "{name}");
+        }
     }
     #[test]
     fn prepare_checked_carries_the_check_into_the_prepared_mutation() {
@@ -2952,6 +3038,7 @@ mod tests {
             content: None,
             page: None,
             stale: false,
+            withheld: false,
             version: None,
         }
     }

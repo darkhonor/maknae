@@ -892,7 +892,7 @@ An `authz.yaml` kept from before #490 has no `roles:` key ([upgrading](upgrading
 
 **Grant `admin`, not `user`.** Enroll writes `bindings.yaml` with a `bindings:` key that lists you under **`admin`** (step 3), so the grants belong under `admin`. Only a keyless host that has not been re-enrolled falls back to resolving the enrolled principal to `admin` (`crates/maknae-authz-basic/src/binding.rs`); if you edit `bindings:` there, that fallback stops applying and the grants belong under whichever role you bind ([Bind a user, contain a subject](#bind-a-user-contain-a-subject)).
 
-The shipped path rules already allow `Read(~/**)` and `Write(~/projects/**)`, so the write target must be under `~/projects/`.
+The shipped path rules already allow `Read(~/**)` and `Write(~/projects/**)`, so the write target must be under `~/projects/`. A write needs `Read` on its path as well as `Write`: a `Write(...)` rule with no `Read(...)` rule covering the same path permits no write, from the agent or from `maknae write`.
 
 ### 8. Prepare the files
 
@@ -1003,7 +1003,7 @@ Every read is paged: each page is its own decided, recorded `fs.read` attempt of
 
 Since #388 the agent replaces an existing file only if it has read that file in this conversation and the file has not changed since — Claude Code's rule. A new file needs no read.
 
-- **What the model is told.** `not written — the file exists and you have not read it; read it first, then write`, or `not written — the file changed since you read it; read it again, then write`. Nothing was written in either case; the model reads, then writes again. A path the policy refuses is still answered `outcome unknown` and never "read it first": the check runs only after the kernel grants the attempt.
+- **What the model is told.** `not written — the file exists and you have not read it; read it first, then write`, or `not written — the file changed since you read it; read it again, then write`. Nothing was written in either case; the model reads, then writes again. Either answer is given only when the agent's own read-open of the file succeeds; a file it cannot read (mode `0200`) answers `unavailable — do not retry`. A path the policy refuses answers `unavailable — do not retry` too, never "read it first": the kernel refuses in place of the grant, before the check runs.
 - **What changes count.** The device, inode, size and modification time. A change to permissions or extended attributes alone (`chmod`, `restorecon`) does not refuse a write. A same-size edit within one timestamp tick is not seen, as for paged reads (§12a).
 - **The agent's own writes.** An applied write records the written file's version, so the agent may write the same file again without reading it.
 - **The trail.** A refused replacement has its `fs.write` intent, as every write does, and a completion with `ReportedPathChanged` and no effect. Since #388 that completion can mean "the agent had not read the file, or it changed since", not only a race. The agent's user sees it only in the model's answer and the trail; nothing is printed to the terminal.

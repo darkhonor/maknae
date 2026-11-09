@@ -90,13 +90,13 @@ The host list binds **every** file request, conversation or not, including the u
 
 ### 7. One answer for every refusal
 
-The model does not learn that a refused file exists. Every refusal of a file verb reaches the model as one constant, `unavailable — do not retry`, whatever the cause: missing, unarmable, denied by a grant, refused by the OS, refused by the ceiling, refused by `sensitive.yaml`, or refused by a descriptor check (multiple links, wrong kind). The same text also covers transport and capacity faults, so it names no cause. The standing prompt says what it can mean.
+The model does not learn that a refused file exists. Every refusal of a file verb reaches the model as one constant, `unavailable — do not retry`, whatever the cause: missing, unarmable, denied by a grant, refused by the OS, refused by the ceiling, refused by `sensitive.yaml`, or refused by a descriptor check (multiple links, wrong kind). The same text also covers transport and capacity faults, so it names no cause. The standing prompt (`crates/maknae-llm/prompt/core-prompt.txt`) says what it can mean: some files are withheld by policy and look exactly like missing ones, so the model must not infer state (logged in, configured, installed) from a credential or configuration file it could not read, must check that state with the tool that owns it, and must never ask the user to paste a credential, key or token. The prompt names no file and no list.
 
 A few answers stay distinct because they reveal nothing about a path: `outcome unknown` for a write whose effect may have landed, a malformed tool call, and the step budget. A write refused before any effect gets the uniform answer.
 
 **Writes need `Read` as well as `Write`** (spec amendment A4). Every `fs.write`, creating or replacing, is permitted only when the PDP permits both `Write` and `Read` on the same path. Otherwise a `Write`-only grant would create a missing file but refuse an existing one, and the difference would tell the model the file exists. **A `Write`-only grant now permits nothing**, for the user's direct CLI as for the model. `not written — the file exists and you have not read it` (`WriteBase::Unread`) and the stale-base answer are released only when the loop's own read-open of the file succeeds.
 
-The audit trail distinguishes every cause. ADR-0019's rule of no disclosure without a durable record is unchanged.
+The audit trail distinguishes every cause. A write refused by its `Read` half is recorded with the reason `fs.write needs fs.read: ` followed by the read's own reason. ADR-0019's rule of no disclosure without a durable record is unchanged.
 
 ### 8. A protected path answers `Protected`, decided on the asked path
 

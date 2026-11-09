@@ -33,6 +33,10 @@ async fn drive_in(
     task.await.unwrap();
     response
 }
+/// `fs.write` needs `Read` as well as `Write` on its path (ADR-0034 decision 7).
+fn writer(tag: &str) -> Fixture {
+    Fixture::with_rules(tag, &["Read", "Write"], &[], "")
+}
 fn write_verb(target: &std::path::Path, bytes: &[u8], conversation: Option<&str>) -> Verb {
     Verb::FsWrite {
         path: target.to_str().unwrap().into(),
@@ -139,7 +143,7 @@ async fn granted(client: &mut tokio::io::DuplexStream) -> maknae_proto::Mutation
 }
 #[tokio::test]
 async fn a_foreign_writer_during_the_report_read_ends_the_session_as_a_sender_mismatch() {
-    let fx = Fixture::new("report_sender_mismatch", "Write");
+    let fx = writer("report_sender_mismatch");
     let target = fx.root.join("unique-existing-write-sentinel");
     std::fs::write(&target, b"original").unwrap();
     let (writer, reader) = tokio::net::UnixStream::pair().unwrap();
@@ -192,7 +196,7 @@ async fn a_foreign_writer_during_the_report_read_ends_the_session_as_a_sender_mi
 }
 #[tokio::test]
 async fn a_loop_write_records_its_conversation_on_intent_progress_and_completion() {
-    let fx = Fixture::new("conversation_success", "Write");
+    let fx = writer("conversation_success");
     let target = fx.root.join("unique-existing-write-sentinel");
     std::fs::write(&target, b"old").unwrap();
     let records = Records::new(0);
@@ -290,7 +294,7 @@ async fn failed_intent_preserves_existing_bytes_and_length() {
 #[tokio::test]
 async fn failed_progress_append_withholds_the_ack_and_claims_no_rollback() {
     use maknae_proto::{EffectEntry, MutationReport, ReportedEffect};
-    let fx = Fixture::new("completion_fail", "Write");
+    let fx = writer("completion_fail");
     let target = fx.root.join("unique-existing-write-sentinel");
     std::fs::write(&target, b"old").unwrap();
     let records = Records::new(3);
@@ -426,7 +430,7 @@ async fn a_replacement_delegating_a_writable_descriptor_is_refused_before_intent
 
 #[tokio::test]
 async fn permitted_alias_write_audits_requested_and_verified_objects() {
-    let fx = Fixture::new("permitted_alias_audit", "Write");
+    let fx = writer("permitted_alias_audit");
     let target = fx.root.join("unique-verified-alias-write-sentinel");
     let alias = fx.root.join("unique-requested-write-alias");
     std::fs::write(&target, b"original-alias-target").unwrap();
@@ -555,7 +559,7 @@ async fn ack(client: &mut tokio::io::DuplexStream) -> Option<maknae_proto::Mutat
 }
 #[tokio::test]
 async fn namespace_grant_requires_durable_intent_and_never_creates_as_daemon() {
-    let fx = Fixture::new("grant_order", "Write");
+    let fx = writer("grant_order");
     let records = GateRecords::new(2);
     let (mut client, task) = namespace_start(&fx, records.clone(), create_verb(&fx)).await;
     records.entered.notified().await;
@@ -578,7 +582,7 @@ async fn namespace_grant_requires_durable_intent_and_never_creates_as_daemon() {
 #[tokio::test]
 async fn false_namespace_success_is_only_client_reported_and_ack_waits_for_audit() {
     use maknae_proto::{EffectEntry, MutationReport, ReportedEffect, ReportedFinish};
-    let fx = Fixture::new("false_client_success", "Write");
+    let fx = writer("false_client_success");
     let records = GateRecords::new(3);
     let (mut client, task) = namespace_start(&fx, records.clone(), create_verb(&fx)).await;
     let RespResult::Ok(Payload::MutationAttempt(grant)) =
@@ -642,7 +646,7 @@ async fn false_namespace_success_is_only_client_reported_and_ack_waits_for_audit
 #[tokio::test]
 async fn mismatched_report_and_failed_report_audit_send_no_ack() {
     for (tag, fail, wrong) in [("wrong_id", 0, true), ("report_audit_failure", 3, false)] {
-        let fx = Fixture::new(tag, "Write");
+        let fx = writer(tag);
         let records = Records::new(fail);
         let (mut client, task) = namespace_start(&fx, records.clone(), create_verb(&fx)).await;
         let RespResult::Ok(Payload::MutationAttempt(grant)) =
@@ -690,7 +694,7 @@ async fn mismatched_report_and_failed_report_audit_send_no_ack() {
 }
 #[tokio::test]
 async fn a_replacement_grant_waits_for_durable_intent_and_the_daemon_never_writes() {
-    let fx = Fixture::new("cancel_waiter", "Write");
+    let fx = writer("cancel_waiter");
     let target = fx.root.join("unique-existing-write-sentinel");
     std::fs::write(&target, b"original").unwrap();
     let records = GateRecords::new(2);
@@ -782,7 +786,7 @@ async fn mkdir_every_prefix_is_decided_and_alias_deny_uses_verified_path() {
 #[tokio::test]
 async fn user_and_admin_share_write_policy_and_bad_mkdir_suffix_cannot_grant() {
     for role in ["user", "admin"] {
-        let fx = Fixture::new(&format!("same_policy_{role}"), "Write");
+        let fx = writer(&format!("same_policy_{role}"));
         let bindings = std::fs::read_to_string(fx.paths().bindings)
             .unwrap()
             .replace("  user:", &format!("  {role}:"));
@@ -1014,7 +1018,7 @@ async fn namespace_progress_does_not_extend_configured_absolute_deadline() {
 #[tokio::test]
 async fn a_replacement_grant_accepts_only_replaced_file_reports() {
     use maknae_proto::{EffectEntry, MutationReport, ReportedEffect};
-    let fx = Fixture::new("late_rename", "Write");
+    let fx = writer("late_rename");
     let target = fx.root.join("unique-existing-write-sentinel");
     std::fs::write(&target, b"unmodified-after-wrong-report").unwrap();
     let records = Records::new(0);
@@ -1057,7 +1061,7 @@ async fn a_replacement_grant_accepts_only_replaced_file_reports() {
 }
 #[tokio::test]
 async fn a_replacement_refused_by_the_os_is_client_reported_os_refused() {
-    let fx = Fixture::new("replace_os_refused", "Write");
+    let fx = writer("replace_os_refused");
     let target = fx.root.join("unique-existing-write-sentinel");
     std::fs::write(&target, b"os-refused-sentinel").unwrap();
     let records = Records::new(0);
@@ -1178,7 +1182,7 @@ async fn oversized_grant_is_withheld_even_when_the_prepare_frame_fits() {
 
 #[tokio::test]
 async fn exact_grant_frame_budget_allows_reported_effect_but_one_byte_less_does_not() {
-    let fx = Fixture::new("exact_grant_frame", "Write");
+    let fx = writer("exact_grant_frame");
     let target = fx.root.join("unique-created-client-sentinel");
     // Measure an actual composed-policy grant. The next connection uses the
     // same request, correlation and timeout, so only its frame budget changes.
@@ -1363,7 +1367,7 @@ impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for FailWrites<S> {
 #[tokio::test]
 async fn failed_grant_or_ack_write_stops_before_accepting_more_client_reports() {
     for (tag, fail_grant) in [("grant_write_failed", true), ("ack_write_failed", false)] {
-        let fx = Fixture::new(tag, "Write");
+        let fx = writer(tag);
         let records = Records::new(0);
         let fail = Arc::new(std::sync::atomic::AtomicBool::new(fail_grant));
         let (mut client, server) = tokio::io::duplex(65536);
@@ -1564,7 +1568,7 @@ async fn single_mkdir_grants_exact_created_directory_and_success_requires_one_ef
 async fn a_replacement_is_a_client_reported_attempt_and_the_daemon_never_writes() {
     use maknae_audit_append::{MutationOperation, MutationOrigin, MutationPhase, MutationStatus};
     use maknae_proto::{MutationScope, ReportedEffect};
-    let fx = Fixture::new("replace_client_reported", "Write");
+    let fx = writer("replace_client_reported");
     let target = fx.root.join("unique-replace-attempt-sentinel");
     std::fs::write(&target, b"original-longer-sentinel").unwrap();
     let held = maknae_io::open_path_for_delegation(&target).unwrap();
@@ -1655,7 +1659,7 @@ fn assert_refused(result: &RespResult, record: &AuditRecord, reason_prefix: &str
 #[tokio::test]
 async fn a_second_user_creates_beneath_their_own_home() {
     let b = common::second_home("mutation_create_own");
-    let fx = Fixture::new("create_own", "Write").with_requester_home(Some(b.0.clone()));
+    let fx = writer("create_own").with_requester_home(Some(b.0.clone()));
     let target = b.join("new");
     let (result, record) = second_subject_attempt(&fx, create_in(&target), &b).await;
     assert_granted(
@@ -1889,7 +1893,13 @@ async fn a_granted_write_outside_the_home_lands() {
     let outside = outside_the_home(&fx, "write");
     let target = outside.join("notes");
     std::fs::write(&target, b"before").unwrap();
-    site_allow(&fx, &format!("Write({}/**)", outside.display()));
+    site_allows(
+        &fx,
+        &[
+            &format!("Read({}/**)", outside.display()),
+            &format!("Write({}/**)", outside.display()),
+        ],
+    );
     let records = Records::new(0);
     let (mut client, task, held) =
         replace_start(&fx, &target, OUTSIDE_SENTINEL, records.clone(), None).await;

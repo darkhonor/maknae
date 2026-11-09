@@ -5,12 +5,11 @@ use maknae_proto::{ConversationId, ConversationView, PromptReply, Turn};
 use std::future::Future;
 use std::path::Path;
 
-/// `Refused` is the wire's `Unauthorized` on an ARMED read — for a read that
-/// word is honest (no side effect). `Unavailable` is everything else: a missing
-/// frame or a timeout, a `BadRequest` (a client-shape fault the subject can
-/// fix, not a decision), an UNARMED refusal of any code (`armed: false`: the
-/// client could not prepare a descriptor), and a grant that ended without an
-/// acknowledged success. None of these is a verdict on content. The mapping is
+/// `Refused` is the wire's `Unauthorized` on an ARMED read. `Unavailable` is
+/// everything else: a missing frame or a timeout, a `BadRequest`, an UNARMED
+/// refusal of any code (`armed: false`: the client could not prepare a
+/// descriptor), and a grant that ended without an acknowledged success. The
+/// model is told both in the same words (ADR-0034 decision 7); the mapping is
 /// made and tested in [`crate::wire::read_outcome`].
 ///
 /// `Content` carries a [`ReadPage`] whose bytes are the CLI's own zeroizing
@@ -86,24 +85,22 @@ impl std::fmt::Debug for ReadOutcome {
     }
 }
 
-/// ONLY a clean `Applied`; everything that came back from the wire other than
-/// that — `Unauthorized`, a non-Applied completion, a missing frame, a
-/// client-reported non-success — is `Unknown`, because on the wire the loop
-/// cannot tell uncertain from refused and must not manufacture certainty
-/// (ADR-0023 d4). `NotSent` is the one LOCAL refusal (the encoded request
-/// exceeds the frame bound, judged before a byte leaves the process): nothing
-/// is on the trail and the file is untouched, so "may have happened" would be
-/// false.
-///
-/// **Amended 2026-09-28 (#388):** `Stale` is certain too, not a guess. The
-/// client's read-before-write check refused it inside the granted attempt
-/// before any write syscall, and the no-effect completion was acknowledged.
-/// `Applied` carries the written file's version key when the client could read
-/// it back.
+/// `Applied` only for a clean client-reported completion, with the written
+/// file's version key when the client could read it back. `Stale` and
+/// `Unavailable` are certain no-effect outcomes: `Stale` when the client's
+/// read-before-write check refused the attempt before any write syscall (#388);
+/// `Unavailable` for a refusal in place of the grant, which the kernel sends only
+/// before any effect, or a stale result the client withheld because its own
+/// read-open of the file failed (ADR-0034 decision 7). Anything else after the
+/// grant is `Unknown`: there the loop cannot tell uncertain from refused and must
+/// not manufacture certainty (ADR-0023 d4). `NotSent` is the one LOCAL refusal
+/// (the encoded request exceeds the frame bound, judged before a byte leaves the
+/// process): nothing is on the trail and the file is untouched.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteOutcome {
     Applied(Option<[i64; 7]>),
     Stale,
+    Unavailable,
     Unknown,
     NotSent,
     Protected(ProtectedBy),
@@ -215,6 +212,7 @@ mod tests {
             WriteOutcome::Applied(None),
             WriteOutcome::Applied(Some([1; 7])),
             WriteOutcome::Stale,
+            WriteOutcome::Unavailable,
             WriteOutcome::Unknown,
             WriteOutcome::NotSent,
             WriteOutcome::Protected(ProtectedBy {
@@ -230,7 +228,7 @@ mod tests {
         }
         assert_eq!(
             format!("{writes:?}"),
-            "[Applied(None), Applied(Some([1, 1, 1, 1, 1, 1, 1])), Stale, Unknown, NotSent, Protected(ProtectedBy { list: \"l\", entry: \"e\" })]"
+            "[Applied(None), Applied(Some([1, 1, 1, 1, 1, 1, 1])), Stale, Unavailable, Unknown, NotSent, Protected(ProtectedBy { list: \"l\", entry: \"e\" })]"
         );
         let errs = [
             PlaneError::FrameTooLarge,

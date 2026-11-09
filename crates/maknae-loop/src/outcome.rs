@@ -16,11 +16,13 @@ pub enum SentOutcome {
     /// `Ok(true)` — a CLAIM (ADR-0023 decision 4), never a kernel assertion.
     ///
     /// `stale` (#388): the client's own read-before-write check refused it before
-    /// any write syscall, so it is certain nothing was written. `version` is the
-    /// written file's, when known.
+    /// any write syscall, so it is certain nothing was written. `withheld` is set
+    /// instead when the client could not read the file. `version` is the written
+    /// file's, when known.
     WriteDone {
         applied: bool,
         stale: bool,
+        withheld: bool,
         version: Option<[i64; 7]>,
     },
     /// A read attempt ended; `read` is `Some` only after an acknowledged client-reported `Success`.
@@ -43,10 +45,12 @@ impl From<SentOutcome> for maknae_agent::wire::WireOutcome {
             SentOutcome::WriteDone {
                 applied,
                 stale,
+                withheld,
                 version,
             } => WireOutcome::WriteDone {
                 applied,
                 stale,
+                withheld,
                 version,
             },
             SentOutcome::ReadDone { read } => WireOutcome::ReadDone {
@@ -121,17 +125,23 @@ mod tests {
             WireOutcome::from(SentOutcome::ReadDone { read: None }),
             WireOutcome::ReadDone { read: None }
         ));
-        for (applied, stale, version) in [(true, false, Some([9; 7])), (false, true, None)] {
+        for (applied, stale, withheld, version) in [
+            (true, false, false, Some([9; 7])),
+            (false, true, false, None),
+            (false, false, true, None),
+        ] {
             match WireOutcome::from(SentOutcome::WriteDone {
                 applied,
                 stale,
+                withheld,
                 version,
             }) {
                 WireOutcome::WriteDone {
                     applied: a,
                     stale: s,
+                    withheld: w,
                     version: v,
-                } => assert_eq!((a, s, v), (applied, stale, version)),
+                } => assert_eq!((a, s, w, v), (applied, stale, withheld, version)),
                 other => panic!("{other:?}"),
             }
         }

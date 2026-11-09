@@ -324,10 +324,25 @@ fn prepare(
 type DecidedBy = (Option<&'static str>, Option<maknae_security::RuleCitation>);
 type AuthorizeErr = (String, String, DecidedBy);
 
-/// Decides every path from one snapshot. Returns the role of the last path
-/// decided, in both arms (on a deny, the path that refused, #275), and that
-/// path's rule, except on a deny written in place of a permit that was never
-/// acted on.
+const WRITE_NEEDS_READ: &str = "fs.write needs fs.read: ";
+
+/// The `fs.read` twin of a write's request (ADR-0034 decision 7): a write is permitted
+/// only when a read of the same path would be.
+fn read_of(write: &maknae_security::Request) -> maknae_security::Request {
+    let mut read = write.clone();
+    read.action = maknae_security::Action("fs.read".into());
+    read.context.0.insert(
+        maknae_security::CONTEXT_FS_OPERATION,
+        AttrValue::Str(FsOperation::Read.as_str().into()),
+    );
+    read
+}
+
+/// Decides every path from one snapshot, and for an `fs.write` the `fs.read` twin
+/// of each path too. Returns the role of the last path decided, in both arms (on a
+/// deny, the path that refused, #275), and that path's rule, except on a deny
+/// written in place of a permit that was never acted on. A permit cites the
+/// write's rule; a deny cites the request that refused.
 #[allow(clippy::too_many_arguments)]
 fn authorize<P: Authorizer>(
     prepared: &PreparedMutation,
@@ -340,37 +355,37 @@ fn authorize<P: Authorizer>(
     personal: Option<&AttrValue>,
     stamp: &Stamp<'_>,
 ) -> Result<(DecidedBy, maknae_proto::ObjectLabel), AuthorizeErr> {
-    let requests: Vec<_> = prepared
-        .paths
-        .iter()
-        .map(|path| {
-            let mut request = build_authz_request(verb, uid, home, Lane::Local, None, facts, stamp);
-            request
-                .resource
-                .0
-                .insert("path", AttrValue::Str(path.clone()));
+    let with_read = matches!(verb, Verb::FsWrite { .. });
+    let mut requests = Vec::new();
+    for path in &prepared.paths {
+        let mut request = build_authz_request(verb, uid, home, Lane::Local, None, facts, stamp);
+        request
+            .resource
+            .0
+            .insert("path", AttrValue::Str(path.clone()));
+        request.context.0.insert(
+            maknae_security::CONTEXT_FS_OPERATION,
+            AttrValue::Str(prepared.kind.as_str().into()),
+        );
+        if let Some(personal) = personal {
             request.context.0.insert(
-                maknae_security::CONTEXT_FS_OPERATION,
-                AttrValue::Str(prepared.kind.as_str().into()),
+                maknae_security::CONTEXT_SENSITIVE_PERSONAL,
+                personal.clone(),
             );
-            if let Some(personal) = personal {
-                request.context.0.insert(
-                    maknae_security::CONTEXT_SENSITIVE_PERSONAL,
-                    personal.clone(),
-                );
-            }
-            request
-        })
-        .collect();
+        }
+        let read = with_read.then(|| read_of(&request));
+        requests.push(request);
+        requests.extend(read);
+    }
+    let stride = if with_read { 2 } else { 1 };
+    let verdicts = maknae_security::guarded_decide_cited_all(authorizer, &requests);
     let mut decided: DecidedBy = (None, None);
-    for (path, d) in prepared
-        .paths
-        .iter()
-        .zip(maknae_security::guarded_decide_cited_all(
-            authorizer, &requests,
-        ))
-    {
-        decided = (d.role, d.rule);
+    for (i, d) in verdicts.into_iter().enumerate() {
+        let path = &prepared.paths[i / stride];
+        let read = i % stride == 1;
+        if !read {
+            decided = (d.role, d.rule.clone());
+        }
         // `combine(vec![..])` preserved: it is what produces the
         // "indeterminate operand blocks (fail-closed)" trail string.
         match maknae_security::finalize(maknae_security::combine(vec![d.verdict])) {
@@ -381,6 +396,13 @@ fn authorize<P: Authorizer>(
                     (decided.0, None),
                 )
             })?,
+            Decision::Deny { reason } if read => {
+                return Err((
+                    format!("{WRITE_NEEDS_READ}{reason}"),
+                    path.clone(),
+                    (d.role, d.rule),
+                ))
+            }
             Decision::Deny { reason } => return Err((reason, path.clone(), decided)),
         }
     }
@@ -1251,7 +1273,7 @@ mod tests {
         let files = [
             (
                 &paths.authz,
-                "schema_version: 1\npermissions:\n  allow:\n    - \"Write(~/**)\"\n  deny: []\n"
+                "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\n    - \"Write(~/**)\"\n  deny: []\n"
                     .to_string(),
             ),
             (
@@ -1934,6 +1956,85 @@ mod tests {
         .unwrap_err();
         assert!(reason.contains("Write(~/one/two)"), "{reason}");
         assert_eq!(path, prepared.paths[1]);
+    }
+    #[tokio::test]
+    async fn a_write_is_permitted_only_when_a_read_of_the_same_path_is() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let pdp = fixture_pdp(&fx);
+        let policy = fx.root.join("authz.yaml");
+        let existing = fx.root.join("write-needs-read-existing");
+        std::fs::write(&existing, b"x").unwrap();
+        let created = fx.root.join("write-needs-read-created");
+        let write = |p: &Path, mode| Verb::FsWrite {
+            path: p.to_str().unwrap().into(),
+            content_length: 1,
+            mode,
+            conversation: None,
+        };
+        let cases = [
+            (
+                write(&existing, maknae_proto::WriteMode::Existing),
+                maknae_io::open_path_for_delegation(&existing).unwrap(),
+            ),
+            (
+                write(&created, maknae_proto::WriteMode::CreateExclusive),
+                fx.fd(),
+            ),
+        ];
+        let decide = |verb: &Verb, fd: &OwnedFd| {
+            let prepared = prepare(
+                verb.clone(),
+                Some(fd.try_clone().unwrap()),
+                &fx.root,
+                Lane::Local,
+            )
+            .unwrap();
+            authorize(
+                &prepared,
+                verb,
+                fx.principal.uid,
+                Some(&fx.root),
+                &pdp,
+                "US",
+                None,
+                None,
+                &Stamp::Client,
+            )
+        };
+        let reload = |allow: &str, deny: &str| {
+            std::fs::write(
+                &policy,
+                format!("schema_version: 1\npermissions:\n  allow:\n{allow}  deny:{deny}\n"),
+            )
+            .unwrap();
+            pdp.baseline().reload_from_file().unwrap();
+        };
+        reload("    - \"Write(~/**)\"\n", " []");
+        for (verb, fd) in &cases {
+            let (reason, path, _) = decide(verb, fd).unwrap_err();
+            assert!(reason.starts_with(WRITE_NEEDS_READ), "{reason}");
+            assert!(reason.contains("fs.read"), "{reason}");
+            assert_eq!(Some(path.as_str()), super::path(verb));
+        }
+        reload("    - \"Read(~/**)\"\n    - \"Write(~/**)\"\n", " []");
+        for (verb, fd) in &cases {
+            let (by, _) = decide(verb, fd).expect("Read and Write both permit");
+            let rule = by.1.expect("the permit cites a rule");
+            assert_eq!(rule.key, "rule:permissions:allow:1", "the Write allow");
+        }
+        reload(
+            "    - \"Read(~/**)\"\n    - \"Write(~/**)\"\n",
+            "\n    - \"Read(~/write-needs-read-*)\"",
+        );
+        for (verb, fd) in &cases {
+            let (reason, _, by) = decide(verb, fd).unwrap_err();
+            assert!(reason.starts_with(WRITE_NEEDS_READ), "{reason}");
+            assert!(reason.contains("Read(~/write-needs-read-*)"), "{reason}");
+            let rule = by.1.expect("the deny cites the read's rule");
+            assert_eq!(rule.key, "rule:permissions:deny:0", "the Read deny");
+        }
+        assert!(!created.exists());
     }
     #[test]
     fn a_personal_list_that_does_not_parse_answers_no_protection() {

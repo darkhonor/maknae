@@ -254,6 +254,7 @@ pub async fn send_verb(
             Ok(SentOutcome::WriteDone {
                 applied: end.applied,
                 stale: end.stale,
+                withheld: end.withheld,
                 version: end.version,
             })
         }

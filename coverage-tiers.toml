@@ -865,7 +865,7 @@ why = "serde_json writes only UTF-8, so from_utf8 on its output cannot fail; the
 
 [[exception]]
 path = "crates/maknae-agent/src/render.rs"
-anchor = "None => Zeroizing::new(READ_UNAVAILABLE.to_string()),"
+anchor = "None => Zeroizing::new(UNAVAILABLE.to_string()),"
 why = "json_exact returns None only if serde fails on a plain struct of strings, integers and booleans, which it cannot; json_exact's None paths are tested directly"
 
 # #240: the egress socket's budget, both legs (egress_socket.rs). Errno

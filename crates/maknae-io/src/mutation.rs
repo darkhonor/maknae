@@ -304,6 +304,16 @@ fn replace_held_file_with(
     Ok(fstat(&fd).ok().map(|st| FileVersion::of(&st)))
 }
 
+/// Whether the subject can open a held file for reading: the same pin, reopen and
+/// binding checks a read makes, without reading.
+pub fn held_file_is_readable(held: BorrowedFd<'_>, expected: &Path) -> bool {
+    let Ok(pinned) = pin(held, expected, &SINGLE_LINK_REGULAR) else {
+        return false;
+    };
+    syscall::reopen_readable(&held, expected)
+        .is_ok_and(|fd| bound_to(&fd, &pinned, expected, &SINGLE_LINK_REGULAR).is_ok())
+}
+
 pub fn read_held_file(
     held: BorrowedFd<'_>,
     expected: &Path,
@@ -691,6 +701,28 @@ mod tests {
     }
     fn version(p: &Path) -> FileVersion {
         FileVersion::of(&nix::sys::stat::stat(p).unwrap())
+    }
+    #[test]
+    fn a_held_file_is_readable_only_when_a_read_could_open_it() {
+        use std::os::unix::fs::PermissionsExt;
+        assert!(
+            !nix::unistd::geteuid().is_root(),
+            "running as root, which opens a 0200 file and voids the premise"
+        );
+        let d = tempfile::tempdir().unwrap();
+        let p = root(&d).join("readable-sentinel");
+        std::fs::write(&p, b"x").unwrap();
+        let fd = held(&p);
+        assert!(held_file_is_readable(fd.as_fd(), &p));
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o200)).unwrap();
+        assert!(!held_file_is_readable(fd.as_fd(), &p));
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(!held_file_is_readable(
+            fd.as_fd(),
+            &root(&d).join("other-name")
+        ));
+        std::fs::hard_link(&p, root(&d).join("second-link")).unwrap();
+        assert!(!held_file_is_readable(fd.as_fd(), &p));
     }
     #[test]
     fn a_matching_base_replaces_and_returns_the_written_version() {

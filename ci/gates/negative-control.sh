@@ -6252,8 +6252,26 @@ open(p, "w").write(s.replace(old, new))' "$f" "$2" "$3"; then
 ' '        let _ = (self.host, req, decide_sensitive);
         Verdict::NotApplicable { note: None }
 ' maknae-kernel sensitive_authz
+  expect_accept "uniform/agent-render-suite-is-green" "conversation-suite: maknae-agent" \
+    cv_suite maknae-agent render::tests
+  expect_reject_because "uniform/a-distinct-denied-text-goes-red" \
+    "every_file_refusal_renders_the_same_bytes" cv_mutant crates/maknae-agent/src/render.rs \
+    '        ToolOutcome::ReadRefused | ToolOutcome::ReadUnavailable | ToolOutcome::WriteUnavailable => {' \
+    '        ToolOutcome::ReadRefused => Zeroizing::new("Not authorized".to_string()),
+        ToolOutcome::ReadUnavailable | ToolOutcome::WriteUnavailable => {' \
+    maknae-agent render::tests
+  expect_reject_because "uniform/a-refused-write-told-unknown-goes-red" \
+    "a_write_refused_before_the_grant_is_unavailable" cv_mutant crates/maknae-agent/src/wire.rs \
+    '        | Ok(WireOutcome::Refused { .. }) => WriteOutcome::Unavailable,' \
+    '        | Ok(WireOutcome::Refused { code: maknae_proto::ProtoErrCode::Protected, .. }) => WriteOutcome::Unavailable,' \
+    maknae-agent wire::tests
+  expect_reject_because "uniform/a-write-decided-without-read-goes-red" \
+    "a_write_is_permitted_only_when_a_read_of_the_same_path_is" cv_mutant crates/maknae-kernel/src/mutation.rs \
+    '    let with_read = matches!(verb, Verb::FsWrite { .. });' \
+    '    let with_read = matches!(verb, Verb::FsMkdir { .. }) && false;' \
+    maknae-kernel mutation::tests::a_write_is_permitted
 else
-  skipped=$((skipped+8))
+  skipped=$((skipped+12))
 fi
 
 # The skip count is REPORTED, because `$total` is environment-dependent: probes
