@@ -199,4 +199,3 @@ Dated as-built amendment; rides the #617 PR. Five statements:
 3. **The field is a marker; every decision is made over one snapshot.** The marker names the operand (`maknae-sensitive`) and contributes no subjects; decided directly, it answers `Indeterminate`. A decision builds a `SensitiveAuthorizer` over the host list of the same snapshot the baseline decides on. The live path loads the installed snapshot once per batch and decides the baseline on it through the sealed `Baseline::decide_cited_all_on`. The reload's candidate path uses the candidate snapshot's list. A reload therefore cannot pair one snapshot's grants with another snapshot's list.
 4. **Fold order is baseline, ceiling, sensitive.** The baseline is still first, so its absence testimony still outranks (#181).
 5. **Evidence.** `admin.status` reports `maknae-authz-basic+maknae-ceiling+maknae-sensitive`, and the boot record's reason adds `; sensitive: <n> host entries`.
-
