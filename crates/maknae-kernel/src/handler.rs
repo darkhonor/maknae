@@ -1264,7 +1264,8 @@ mod tests {
     fn dispatch_maps_each_session_verb() {
         assert_eq!(
             dispatch_verb(&Verb::SessionNew {
-                cwd: "/home/sentinel-170".into()
+                cwd: "/home/sentinel-170".into(),
+                sensitive: vec![],
             }),
             Dispatch::ConversationNewRequested
         );
@@ -1285,7 +1286,8 @@ mod tests {
             Dispatch::ConversationDeleteRequested
         );
         assert!(!is_filesystem_verb(&Verb::SessionNew {
-            cwd: "/home/sentinel-170".into()
+            cwd: "/home/sentinel-170".into(),
+            sensitive: vec![],
         }));
     }
 
@@ -1400,6 +1402,7 @@ mod tests {
     fn session_new_carries_no_resource_path() {
         let new = Verb::SessionNew {
             cwd: "/home/sentinel-170/as-sent".into(),
+            sensitive: vec![],
         };
         let r = build_authz_request(
             &new,
@@ -1720,7 +1723,10 @@ mod tests {
             Verb::AdminProviderDisable,
             Verb::AdminSessionList,
             Verb::AdminSessionTerminate,
-            Verb::SessionNew { cwd: "/w".into() },
+            Verb::SessionNew {
+                cwd: "/w".into(),
+                sensitive: vec![],
+            },
             Verb::SessionResume,
             Verb::SessionClose {
                 conversation: maknae_proto::ConversationId::parse(

@@ -406,6 +406,54 @@ pub async fn converse_to<P: Plane + Send, S, D: Future<Output = ()> + Send>(
     }
 }
 
+/// `file` as the user knows it: under their home, written from `~`.
+pub fn shown(file: &Path, home: Option<&str>) -> String {
+    match home.and_then(|h| file.strip_prefix(h).ok()) {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => file.display().to_string(),
+    }
+}
+
+/// The personal `sensitive.yaml` entries `session.new` carries: refused, naming the
+/// file, when the file is malformed, an entry is longer than a path, or the list does
+/// not fit one request frame.
+pub fn personal_sensitive(
+    dir: &Path,
+    home: Option<&str>,
+    cwd: &Path,
+) -> Result<Vec<String>, String> {
+    let file = shown(&dir.join(maknae_config::SENSITIVE_FILE), home);
+    let list = maknae_config::load_user_sensitive(dir).map_err(|e| match e {
+        maknae_config::ConfigError::InvalidSensitive(why) => format!("{file}: {why}"),
+        other => format!("{file}: {other}"),
+    })?;
+    let entries: Vec<String> = list.entries().map(str::to_owned).collect();
+    let limit = maknae_proto::MAX_MUTATION_PATH_BYTES;
+    if let Some(long) = entries.iter().find(|e| e.len() > limit) {
+        return Err(format!(
+            "{file}: entry '{}…' is longer than {limit} bytes",
+            long.chars().take(32).collect::<String>()
+        ));
+    }
+    let size = maknae_proto::encode_request(&maknae_proto::Request {
+        protocol_version: maknae_proto::PROTOCOL_VERSION,
+        task: None,
+        verb: maknae_proto::Verb::SessionNew {
+            cwd: cwd.to_string_lossy().into_owned(),
+            sensitive: entries.clone(),
+        },
+    })
+    .map_err(|e| format!("{file}: {e}"))?
+    .len();
+    let max = maknae_proto::ATTEMPT_REQUEST_MAX;
+    if size > max {
+        return Err(format!(
+            "{file} is too large to send ({size} bytes; the limit is {max})"
+        ));
+    }
+    Ok(entries)
+}
+
 pub const CLOSE_WITHIN: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub fn open_failure(e: &PlaneError, cwd: &Path) -> String {
@@ -539,6 +587,7 @@ pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
         std::env::current_dir().map_err(|e| format!("cannot read the working directory: {e}"))?;
     // One snapshot per session: `~` cannot change meaning for this process (#596).
     let home = snapshot_home(HOME_SNAPSHOT_TIMEOUT, maknae_io::session_home).await;
+    let sensitive = personal_sensitive(&dir, home.as_deref(), &cwd)?;
     let client = PlaneClient::for_user(&document, &dir, token_copy(&session.token)?)
         .map_err(|e| e.to_string())?;
     let ca = maknae_vault::load_ca_pin(&dir).map_err(|e| e.to_string())?;
@@ -566,7 +615,7 @@ pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
         max_steps: agent.max_steps,
         max_tool_calls_per_step: agent.max_tool_calls_per_step,
     };
-    let opened = Session::open(&mut plane, &cwd, &prompt, budget, context, home).await;
+    let opened = Session::open(&mut plane, &cwd, &sensitive, &prompt, budget, context, home).await;
     print_diagnostics(&mut plane);
     let mut session = match opened {
         Ok(session) => session,
@@ -620,6 +669,160 @@ pub fn finish(
 
 #[cfg(test)]
 mod tests {
+    struct Home(std::path::PathBuf);
+
+    impl Home {
+        fn new() -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let home = std::env::temp_dir().join(format!(
+                "maknae-agent-personal-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = std::fs::remove_dir_all(&home);
+            let dir = home.join(".maknae");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            Home(home)
+        }
+        fn dir(&self) -> std::path::PathBuf {
+            self.0.join(".maknae")
+        }
+        fn home(&self) -> Option<&str> {
+            self.0.to_str()
+        }
+        fn write(&self, body: &str) {
+            use std::os::unix::fs::PermissionsExt;
+            let f = self.dir().join(maknae_config::SENSITIVE_FILE);
+            std::fs::write(&f, body).unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        fn personal(&self) -> Result<Vec<String>, String> {
+            super::personal_sensitive(&self.dir(), self.home(), std::path::Path::new("/w"))
+        }
+    }
+
+    impl Drop for Home {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn an_absent_personal_file_is_no_entries() {
+        assert_eq!(Home::new().personal(), Ok(vec![]));
+    }
+
+    #[test]
+    fn a_personal_file_is_sent_as_written() {
+        let h = Home::new();
+        h.write("schema_version: 1\nsensitive: [\"~/sentinel-617/**\", \"/srv/sentinel-617\"]\n");
+        assert_eq!(
+            h.personal(),
+            Ok(vec!["~/sentinel-617/**".into(), "/srv/sentinel-617".into()])
+        );
+    }
+
+    #[test]
+    fn a_malformed_personal_file_stops_before_open() {
+        let h = Home::new();
+        h.write("schema_version: 1\nsensitive: [\"~bob/x\"]\n");
+        let why = h.personal().unwrap_err();
+        assert!(
+            why.starts_with("~/.maknae/sensitive.yaml: entry '~bob/x'"),
+            "{why}"
+        );
+        let mut err = Vec::new();
+        let code = crate::cli::agent_exit(Err(why), &mut err);
+        assert_eq!(code, std::process::ExitCode::from(1));
+        assert!(String::from_utf8(err)
+            .unwrap()
+            .starts_with("maknae: ~/.maknae/sensitive.yaml: entry '~bob/x'"));
+    }
+
+    #[test]
+    fn a_personal_entry_longer_than_a_path_is_refused() {
+        let h = Home::new();
+        let long = format!("/{}", "a".repeat(maknae_proto::MAX_MUTATION_PATH_BYTES));
+        h.write(&format!("schema_version: 1\nsensitive: [\"{long}\"]\n"));
+        let why = h.personal().unwrap_err();
+        assert!(
+            why.starts_with("~/.maknae/sensitive.yaml: entry '/aaa")
+                && why.ends_with("is longer than 4096 bytes"),
+            "{why}"
+        );
+        let exact = format!("/{}", "a".repeat(maknae_proto::MAX_MUTATION_PATH_BYTES - 1));
+        h.write(&format!("schema_version: 1\nsensitive: [\"{exact}\"]\n"));
+        assert_eq!(h.personal(), Ok(vec![exact]));
+    }
+
+    #[test]
+    fn a_personal_file_too_large_for_one_frame_stops_with_a_named_message() {
+        let h = Home::new();
+        let entries: Vec<String> = (0..17)
+            .map(|n| format!("\"/s{n:02}/{}\"", "a".repeat(4000)))
+            .collect();
+        h.write(&format!(
+            "schema_version: 1\nsensitive: [{}]\n",
+            entries.join(", ")
+        ));
+        let why = h.personal().unwrap_err();
+        let size = maknae_proto::encode_request(&maknae_proto::Request {
+            protocol_version: maknae_proto::PROTOCOL_VERSION,
+            task: None,
+            verb: maknae_proto::Verb::SessionNew {
+                cwd: "/w".into(),
+                sensitive: (0..17)
+                    .map(|n| format!("/s{n:02}/{}", "a".repeat(4000)))
+                    .collect(),
+            },
+        })
+        .unwrap()
+        .len();
+        assert_eq!(
+            why,
+            format!(
+                "~/.maknae/sensitive.yaml is too large to send ({size} bytes; the limit is 65536)"
+            )
+        );
+        h.write(&format!(
+            "schema_version: 1\nsensitive: [{}]\n",
+            entries[..16].join(", ")
+        ));
+        assert_eq!(h.personal().map(|e| e.len()), Ok(16));
+    }
+
+    #[test]
+    fn a_file_outside_the_home_is_named_in_full() {
+        assert_eq!(
+            super::shown(
+                std::path::Path::new("/etc/x/sensitive.yaml"),
+                Some("/home/a")
+            ),
+            "/etc/x/sensitive.yaml"
+        );
+        assert_eq!(
+            super::shown(
+                std::path::Path::new("/home/a/.maknae/sensitive.yaml"),
+                Some("/home/a")
+            ),
+            "~/.maknae/sensitive.yaml"
+        );
+        assert_eq!(
+            super::shown(std::path::Path::new("/home/a/.maknae/sensitive.yaml"), None),
+            "/home/a/.maknae/sensitive.yaml"
+        );
+        assert_eq!(
+            super::shown(
+                std::path::Path::new("/home/ab/sensitive.yaml"),
+                Some("/home/a")
+            ),
+            "/home/ab/sensitive.yaml"
+        );
+    }
+
     #[tokio::test]
     async fn a_stalled_home_lookup_snapshots_no_home() {
         let fast = std::time::Duration::from_millis(20);
@@ -1156,6 +1359,7 @@ mod tests {
             async fn open(
                 &mut self,
                 _: &std::path::Path,
+                _: &[String],
             ) -> Result<maknae_proto::ConversationId, PlaneError> {
                 Ok(maknae_proto::ConversationId::parse(KERNEL_ID).unwrap())
             }
@@ -1451,6 +1655,7 @@ mod tests {
                 Session::open(
                     p,
                     std::path::Path::new("/w"),
+                    &[],
                     "q",
                     budget(),
                     unmetered(),
@@ -1583,6 +1788,7 @@ mod tests {
         async fn open(
             &mut self,
             _: &std::path::Path,
+            _: &[String],
         ) -> Result<maknae_proto::ConversationId, PlaneError> {
             Ok(maknae_proto::ConversationId::parse(&"b".repeat(32)).unwrap())
         }
@@ -1633,9 +1839,10 @@ mod tests {
             max_tool_calls_per_step: 1,
         };
         let context = ContextBudget::new(maknae_proto::MAX_CONTEXT_TOKENS, None).unwrap();
-        let mut session = Session::open(&mut plane, Path::new("/w"), "q", budget, context, None)
-            .await
-            .unwrap();
+        let mut session =
+            Session::open(&mut plane, Path::new("/w"), &[], "q", budget, context, None)
+                .await
+                .unwrap();
         let (exit_tx, exit_rx) = tokio::sync::oneshot::channel::<u8>();
         let mut signals = Signals::register();
         let conversing = async move {

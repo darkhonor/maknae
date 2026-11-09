@@ -2,6 +2,7 @@
 //! attempt; its progress and completion are client reported.
 use crate::conversation::{
     facts::{gather, ConversationFacts},
+    record::ConversationRecord,
     store::ConversationStore,
 };
 use crate::{
@@ -335,6 +336,7 @@ fn authorize<P: Authorizer>(
     authorizer: &P,
     policy_name: &str,
     facts: Option<&ConversationFacts>,
+    personal: Option<&AttrValue>,
     stamp: &Stamp<'_>,
 ) -> Result<(DecidedBy, maknae_proto::ObjectLabel), AuthorizeErr> {
     let requests: Vec<_> = prepared
@@ -350,6 +352,12 @@ fn authorize<P: Authorizer>(
                 maknae_security::CONTEXT_FS_OPERATION,
                 AttrValue::Str(prepared.kind.as_str().into()),
             );
+            if let Some(personal) = personal {
+                request.context.0.insert(
+                    maknae_security::CONTEXT_SENSITIVE_PERSONAL,
+                    personal.clone(),
+                );
+            }
             request
         })
         .collect();
@@ -385,6 +393,13 @@ fn authorize<P: Authorizer>(
         )
     })?;
     Ok((decided, label))
+}
+/// The cited conversation's personal list, only when the requester owns it: a foreign
+/// record is returned by `gather` and refused by the PDP, and contributes nothing here.
+fn owned_personal(record: Option<&ConversationRecord>, uid: u32) -> Option<AttrValue> {
+    record
+        .filter(|rec| rec.owner == uid)
+        .map(|rec| AttrValue::Set(rec.sensitive.iter().cloned().collect()))
 }
 fn mutation_meta(
     seq: u64,
@@ -591,6 +606,7 @@ where
             let _claim = claim;
             let prepared = prepare(original.clone(), fd, &home, lane)?;
             let gathered = gather(&*conversations, uid, cited(&original), None);
+            let personal = owned_personal(gathered.as_ref().and_then(|(_, rec)| rec.as_ref()), uid);
             let stamp = match &stamped {
                 None => Stamp::Client,
                 Some((agent, task)) => Stamp::Agent {
@@ -606,6 +622,7 @@ where
                 &*authorizer,
                 &policy_name,
                 gathered.as_ref().map(|(facts, _)| facts),
+                personal.as_ref(),
                 &stamp,
             );
             let mut touch_failure = None;
@@ -1809,6 +1826,7 @@ mod tests {
             &pdp,
             "US",
             None,
+            None,
             &Stamp::Client,
         )
         .expect("both paths decided on the snapshot in force when the mutation began");
@@ -1822,11 +1840,54 @@ mod tests {
             &pdp,
             "US",
             None,
+            None,
             &Stamp::Client,
         )
         .unwrap_err();
         assert!(reason.contains("Write(~/one/two)"), "{reason}");
         assert_eq!(path, prepared.paths[1]);
+    }
+    #[test]
+    fn only_the_requesters_own_conversation_contributes_its_personal_list() {
+        let id = maknae_proto::ConversationId::parse(&"6".repeat(32)).unwrap();
+        let mut rec = crate::conversation::record::opened(id, 1001, "/w".into(), 1, "UNCLASSIFIED");
+        rec.sensitive = vec!["~/sentinel-617-a".into(), "/srv/sentinel-617".into()];
+        assert_eq!(
+            owned_personal(Some(&rec), 1001),
+            Some(AttrValue::Set(
+                ["/srv/sentinel-617".to_string(), "~/sentinel-617-a".into()].into()
+            ))
+        );
+        assert_eq!(owned_personal(Some(&rec), 1002), None);
+        assert_eq!(owned_personal(None, 1001), None);
+    }
+    #[tokio::test]
+    async fn the_personal_list_is_decided_on_every_path_of_the_request() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let pdp = fixture_pdp(&fx);
+        let verb = fx.mkdir(true, vec!["one".into(), "two".into()]);
+        let prepared = prepare(verb.clone(), Some(fx.fd()), &fx.root, Lane::Local).unwrap();
+        let first = prepared.paths[0].clone();
+        let decide = |personal: Option<&AttrValue>| {
+            authorize(
+                &prepared,
+                &verb,
+                fx.principal.uid,
+                Some(&fx.root),
+                &pdp,
+                "US",
+                None,
+                personal,
+                &Stamp::Client,
+            )
+        };
+        assert!(decide(None).is_ok());
+        assert!(decide(Some(&AttrValue::Set(Default::default()))).is_ok());
+        let personal = AttrValue::Set([first.clone()].into());
+        let (reason, path, _) = decide(Some(&personal)).unwrap_err();
+        assert_eq!(reason, format!("sensitive: personal {first}"));
+        assert_eq!(path, first);
     }
     #[tokio::test]
     async fn a_deny_in_place_of_an_unacted_permit_cites_no_rule() {
@@ -1843,6 +1904,7 @@ mod tests {
             &pdp,
             "US",
             None,
+            None,
             &Stamp::Client,
         )
         .unwrap();
@@ -1854,6 +1916,7 @@ mod tests {
             Some(&fx.root),
             &pdp,
             "NO-SUCH-SYSTEM",
+            None,
             None,
             &Stamp::Client,
         )

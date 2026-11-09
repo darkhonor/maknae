@@ -505,7 +505,7 @@ why = "opens a ROOT-owned artifact through maknae-io; no unit test can create on
 
 [[t3]]
 path = "crates/maknae-config/src/user_providers_io.rs"
-why = "#153: reads ~/.maknae/providers.yaml through maknae-config's existing maknae-io read (CONFIG_ARTIFACT) and maps an absent file to no providers; the parser and the selection it feeds are pure and T1 in user_providers.rs (the bounds/bounds_io split)"
+why = "#153: reads ~/.maknae/providers.yaml through maknae-config's existing maknae-io read (CONFIG_ARTIFACT) and maps an absent file to no providers; the parser and the selection it feeds are pure and T1 in user_providers.rs (the bounds/bounds_io split). #617: reads ~/.maknae/sensitive.yaml the same way, an absent file meaning no entries; its parser is T1 in sensitive.rs"
 
 [[t3]]
 path = "bins/maknae-egress/src/main.rs"

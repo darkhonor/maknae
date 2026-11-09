@@ -78,6 +78,7 @@ mod tests {
             last_reply: None,
             fence: 0,
             provenance: Provenance::new("UNCLASSIFIED"),
+            sensitive: Vec::new(),
         }
     }
 

@@ -34,6 +34,8 @@ pub struct ConversationRecord {
     pub last_reply: Option<[u8; 32]>,
     pub fence: u64,
     pub provenance: Provenance,
+    #[serde(default)]
+    pub sensitive: Vec<String>,
 }
 
 pub fn mint_id() -> Result<ConversationId, StoreError> {
@@ -64,7 +66,22 @@ pub fn opened(
         last_reply: None,
         fence: 0,
         provenance: Provenance::new(lowest_level),
+        sensitive: Vec::new(),
     }
+}
+
+/// The personal `sensitive.yaml` entries `session.new` carries, refused whole if one
+/// is too long for a path or fails the host list's parser.
+pub fn personal_sensitive(entries: &[String]) -> Result<(), String> {
+    let limit = maknae_proto::MAX_MUTATION_PATH_BYTES;
+    if let Some(at) = entries.iter().position(|e| e.len() > limit) {
+        return Err(format!(
+            "personal sensitive entry {at} is longer than {limit} bytes"
+        ));
+    }
+    maknae_config::SensitiveList::from_entries(entries)
+        .map(drop)
+        .map_err(|e| format!("personal {e}"))
 }
 
 pub fn view(rec: &ConversationRecord) -> maknae_proto::ConversationView {
@@ -101,6 +118,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_malformed_personal_entry_is_refused_with_the_entry_named() {
+        assert_eq!(personal_sensitive(&[]), Ok(()));
+        assert_eq!(
+            personal_sensitive(&["~/sentinel-617/**".into(), "/srv/sentinel-617".into()]),
+            Ok(())
+        );
+        let why = personal_sensitive(&["/ok".into(), "~bob/x".into()]).unwrap_err();
+        assert!(why.starts_with("personal sensitive.yaml: "), "{why}");
+        assert!(why.contains("'~bob/x'"), "{why}");
+    }
+
+    #[test]
+    fn a_personal_entry_is_bounded_by_the_path_limit() {
+        let limit = maknae_proto::MAX_MUTATION_PATH_BYTES;
+        let exact = format!("/{}", "a".repeat(limit - 1));
+        assert_eq!(personal_sensitive(std::slice::from_ref(&exact)), Ok(()));
+        let over = format!("{exact}a");
+        assert_eq!(
+            personal_sensitive(&["/ok".into(), over]),
+            Err(format!(
+                "personal sensitive entry 1 is longer than {limit} bytes"
+            ))
+        );
+    }
+
+    #[test]
+    fn a_record_written_before_the_personal_list_decodes_with_none() {
+        let id = ConversationId::parse(&"c".repeat(32)).unwrap();
+        let rec = opened(id.clone(), 9, "/w".into(), 1, "UNCLASSIFIED");
+        let mut value: ciborium::Value =
+            ciborium::from_reader(encode(&rec).unwrap().as_slice()).unwrap();
+        let ciborium::Value::Map(fields) = &mut value else {
+            panic!("a record encodes as a map");
+        };
+        fields.retain(|(k, _)| k.as_text() != Some("sensitive"));
+        let mut legacy = Vec::new();
+        ciborium::into_writer(&value, &mut legacy).unwrap();
+        assert_eq!(decode(&legacy, &id).unwrap(), rec);
+    }
+
+    #[test]
     fn a_minted_id_is_acceptable_and_fresh() {
         let a = mint_id().unwrap();
         assert!(maknae_proto::conversation_id_is_acceptable(a.as_str()));
@@ -126,6 +184,7 @@ mod tests {
                 last_reply: None,
                 fence: 0,
                 provenance: Provenance::new("UNCLASSIFIED"),
+                sensitive: Vec::new(),
             }
         );
     }

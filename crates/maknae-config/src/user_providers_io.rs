@@ -1,4 +1,7 @@
-use crate::{user_providers_from_document, ConfigError, UserProviders, USER_PROVIDERS_FILE};
+use crate::{
+    user_providers_from_document, ConfigError, SensitiveList, UserProviders, SENSITIVE_FILE,
+    USER_PROVIDERS_FILE,
+};
 use std::path::Path;
 
 pub fn load_user_providers(cli_dir: &Path) -> Result<UserProviders, ConfigError> {
@@ -6,6 +9,25 @@ pub fn load_user_providers(cli_dir: &Path) -> Result<UserProviders, ConfigError>
         Ok(doc) => user_providers_from_document(&doc),
         Err(ConfigError::NotFound { .. }) => Ok(UserProviders::empty()),
         Err(e) => Err(e),
+    }
+}
+
+pub fn load_user_sensitive(cli_dir: &Path) -> Result<SensitiveList, ConfigError> {
+    #[cfg(not(unix))]
+    {
+        let _ = cli_dir;
+        Err(ConfigError::PermissionsUnsupported)
+    }
+    #[cfg(unix)]
+    {
+        match crate::loader::read_secure(&cli_dir.join(SENSITIVE_FILE)) {
+            Ok(body) => SensitiveList::parse(&body).map_err(|e| match e {
+                ConfigError::InvalidSensitive(_) => e,
+                other => ConfigError::InvalidSensitive(other.to_string()),
+            }),
+            Err(ConfigError::NotFound { .. }) => Ok(SensitiveList::empty()),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -43,6 +65,66 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[cfg(unix)]
+    impl Dir {
+        fn write_sensitive(&self, body: &str, mode: u32) {
+            use std::os::unix::fs::PermissionsExt;
+            let f = self.0.join(crate::SENSITIVE_FILE);
+            std::fs::write(&f, body).unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_absent_personal_file_is_no_entries() {
+        let d = Dir::new("sensitive-absent");
+        assert_eq!(load_user_sensitive(&d.0).unwrap(), SensitiveList::empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_personal_file_is_read_and_parsed() {
+        let d = Dir::new("sensitive-present");
+        d.write_sensitive(
+            "schema_version: 1\nsensitive: [\"~/sentinel-617-a/**\", \"/srv/sentinel-617\"]\n",
+            0o600,
+        );
+        let list = load_user_sensitive(&d.0).unwrap();
+        assert_eq!(
+            list.entries().collect::<Vec<_>>(),
+            ["~/sentinel-617-a/**", "/srv/sentinel-617"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_malformed_personal_file_is_refused_with_its_cause() {
+        let d = Dir::new("sensitive-malformed");
+        d.write_sensitive("schema_version: 1\nsensitive: [\"~bob/x\"]\n", 0o600);
+        let err = load_user_sensitive(&d.0).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::InvalidSensitive(m) if m.contains("~bob/x")),
+            "{err:?}"
+        );
+        d.write_sensitive("schema_version: 1\nsensitive: [\n", 0o600);
+        assert!(matches!(
+            load_user_sensitive(&d.0),
+            Err(ConfigError::InvalidSensitive(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_personal_file_other_users_can_read_is_refused() {
+        let d = Dir::new("sensitive-other-readable");
+        d.write_sensitive("schema_version: 1\nsensitive: []\n", 0o604);
+        assert!(matches!(
+            load_user_sensitive(&d.0),
+            Err(ConfigError::InsecurePermissions { .. })
+        ));
     }
 
     #[cfg(unix)]

@@ -141,7 +141,9 @@ pub fn prepare_checked(
             result
         }
         proto::Verb::Read { path, .. } => maknae_io::open_path_for_delegation(Path::new(path)),
-        proto::Verb::SessionNew { cwd } => maknae_io::open_directory_for_delegation(Path::new(cwd)),
+        proto::Verb::SessionNew { cwd, .. } => {
+            maknae_io::open_directory_for_delegation(Path::new(cwd))
+        }
         _ => return None,
     };
     let (fd, error) = match opened {
@@ -1942,7 +1944,10 @@ mod tests {
         let cwd = d.path("work");
         std::fs::create_dir(&cwd).unwrap();
         let prepared = prepare_checked(
-            proto::Verb::SessionNew { cwd: cwd.clone() },
+            proto::Verb::SessionNew {
+                cwd: cwd.clone(),
+                sensitive: vec![],
+            },
             None,
             WriteCheck::Unchecked,
         )
@@ -1956,13 +1961,19 @@ mod tests {
         assert_eq!(prepared.preparation_error(), None);
         assert_eq!(
             prepared.request(),
-            &proto::Verb::SessionNew { cwd: cwd.clone() }
+            &proto::Verb::SessionNew {
+                cwd: cwd.clone(),
+                sensitive: vec![]
+            }
         );
 
         let file = d.path("not-a-dir");
         std::fs::write(&file, b"x").unwrap();
         let unarmed = prepare_checked(
-            proto::Verb::SessionNew { cwd: file },
+            proto::Verb::SessionNew {
+                cwd: file,
+                sensitive: vec![],
+            },
             None,
             WriteCheck::Unchecked,
         )

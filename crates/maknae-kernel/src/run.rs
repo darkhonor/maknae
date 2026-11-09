@@ -2811,7 +2811,7 @@ async fn serve_conversation_verb<S, E, P>(
         _ => None,
     };
     let asked = match verb {
-        Verb::SessionNew { cwd } => Some(cwd.clone()),
+        Verb::SessionNew { cwd, .. } => Some(cwd.clone()),
         _ => None,
     };
     let early = |reason: &str| {
@@ -2894,7 +2894,10 @@ async fn serve_conversation_verb<S, E, P>(
         )
     };
     match verb {
-        Verb::SessionNew { cwd: requested } => {
+        Verb::SessionNew {
+            cwd: requested,
+            sensitive,
+        } => {
             let refuse_cwd = |why: &str| decided("deny", why, "unauthorized");
             if let Err(why) = crate::mutation::checked(requested) {
                 trail
@@ -2903,6 +2906,10 @@ async fn serve_conversation_verb<S, E, P>(
                         &refuse_cwd(&format!("cwd fails operand pre-gate: {why}")),
                     )
                     .await;
+                return;
+            }
+            if let Err(why) = record::personal_sensitive(sensitive) {
+                trail.unauthorized(stream, &refuse_cwd(&why)).await;
                 return;
             }
             let Some(fd) = delegated.take() else {
@@ -2955,7 +2962,10 @@ async fn serve_conversation_verb<S, E, P>(
                     return;
                 }
             };
-            let rec = record::opened(id.clone(), uid, cwd.clone(), now, &lowest);
+            let rec = record::ConversationRecord {
+                sensitive: sensitive.clone(),
+                ..record::opened(id.clone(), uid, cwd.clone(), now, &lowest)
+            };
             let mut intent = at(decided("permit", "intent recorded", "authorized"), &cwd);
             intent.conversation = Some(id.as_str().to_owned());
             if !trail.record_bounded(&intent).await {

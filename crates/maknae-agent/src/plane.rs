@@ -136,6 +136,7 @@ pub trait Plane {
     fn open(
         &mut self,
         cwd: &Path,
+        sensitive: &[String],
     ) -> impl Future<Output = Result<ConversationId, PlaneError>> + Send;
     fn close(
         &mut self,

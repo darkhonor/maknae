@@ -1091,7 +1091,7 @@ async fn operand_exit(verb: Result<Verb, String>, err: &mut impl std::io::Write)
 /// `Command`-enum restructure).
 /// Best-effort: the error may be that stderr itself is gone, and the exit
 /// code must still be 1.
-fn agent_exit(result: Result<u8, String>, err: &mut impl std::io::Write) -> ExitCode {
+pub(crate) fn agent_exit(result: Result<u8, String>, err: &mut impl std::io::Write) -> ExitCode {
     match result {
         Ok(code) => ExitCode::from(code),
         Err(e) => {

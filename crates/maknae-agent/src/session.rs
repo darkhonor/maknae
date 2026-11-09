@@ -96,12 +96,13 @@ impl Session {
     pub async fn open<P: Plane + Send>(
         plane: &mut P,
         cwd: &Path,
+        sensitive: &[String],
         first_prompt: &str,
         budget: Budget,
         context: ContextBudget,
         home: Option<String>,
     ) -> Result<Self, PlaneError> {
-        let id = plane.open(cwd).await?;
+        let id = plane.open(cwd, sensitive).await?;
         let mut session = Session::new(id.as_str(), first_prompt, budget, context, home);
         session.kernel = Some(id);
         Ok(session)
@@ -260,6 +261,7 @@ mod tests {
         started: Option<tokio::sync::oneshot::Sender<()>>,
         release: Option<tokio::sync::oneshot::Receiver<()>>,
         log: Vec<String>,
+        sensitive: Vec<String>,
         refuse_open: bool,
         prompt_error: Option<PlaneError>,
         prompt_hangs: bool,
@@ -279,8 +281,13 @@ mod tests {
         }
     }
     impl Plane for Fake {
-        async fn open(&mut self, cwd: &Path) -> Result<ConversationId, PlaneError> {
+        async fn open(
+            &mut self,
+            cwd: &Path,
+            sensitive: &[String],
+        ) -> Result<ConversationId, PlaneError> {
             self.log.push(format!("open {}", cwd.display()));
+            self.sensitive = sensitive.to_vec();
             if self.refuse_open {
                 return Err(PlaneError::Refused);
             }
@@ -655,7 +662,16 @@ mod tests {
     }
 
     async fn opened(p: &mut Fake) -> Result<Session, PlaneError> {
-        Session::open(p, Path::new("/home/a/w"), "go", budget(), unmetered(), None).await
+        Session::open(
+            p,
+            Path::new("/home/a/w"),
+            &["~/sentinel-617/**".to_string()],
+            "go",
+            budget(),
+            unmetered(),
+            None,
+        )
+        .await
     }
 
     async fn converse_with(
@@ -767,6 +783,7 @@ mod tests {
         };
         assert_eq!(opened(&mut p).await.err(), Some(PlaneError::Refused));
         assert_eq!(p.log, vec!["open /home/a/w".to_string()]);
+        assert_eq!(p.sensitive, ["~/sentinel-617/**"]);
         assert!(p.prompts.is_empty());
         assert_eq!(p.replies.len(), 1);
     }

@@ -279,6 +279,7 @@ pub fn open_record(id: &str, owner: u32, cwd: &str) -> maknae_kernel::Conversati
         last_reply: None,
         fence: 0,
         provenance: maknae_kernel::Provenance::new("UNCLASSIFIED"),
+        sensitive: Vec::new(),
     }
 }
 
@@ -737,6 +738,7 @@ impl Fixture {
         let (client, task, body) = self.start(
             Verb::SessionNew {
                 cwd: cwd.to_str().unwrap().into(),
+                sensitive: vec![],
             },
             Some(fd),
             Arc::clone(&records),

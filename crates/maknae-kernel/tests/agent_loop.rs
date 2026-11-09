@@ -151,10 +151,12 @@ impl Plane for FixturePlane {
     async fn open(
         &mut self,
         cwd: &std::path::Path,
+        sensitive: &[String],
     ) -> Result<maknae_proto::ConversationId, PlaneError> {
         let fd = maknae_io::open_directory_for_delegation(cwd).ok();
         let verb = Verb::SessionNew {
             cwd: cwd.to_str().unwrap().into(),
+            sensitive: sensitive.to_vec(),
         };
         match self.verb(verb, fd).await.result {
             RespResult::Ok(Payload::ConversationOpened(v)) => Ok(v.conversation),
@@ -876,6 +878,7 @@ async fn a_session_opens_converses_and_closes_one_kernel_conversation() {
     let mut session = maknae_agent::session::Session::open(
         &mut plane,
         &cwd,
+        &[],
         "hi",
         Budget {
             max_steps: 2,

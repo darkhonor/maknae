@@ -454,7 +454,13 @@ pub enum Verb {
     /// one.
     AdminSessionTerminate,
     /// Open a conversation the kernel records; `cwd` is recorded, never decided on or confined.
-    SessionNew { cwd: String },
+    /// `sensitive` is the user's personal `sensitive.yaml` entries, applied to the
+    /// conversation's file requests.
+    SessionNew {
+        cwd: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        sensitive: Vec<String>,
+    },
     /// Reattach to an existing conversation. The caller obtains its content and
     /// history — a disclosure, and for a conversation the caller may not have
     /// started, that is the authorization-relevant fact. Inherits the provenance
@@ -3140,6 +3146,7 @@ mod tests {
                 (
                     Verb::SessionNew {
                         cwd: "/work".into(),
+                        sensitive: vec![],
                     },
                     FrameClass::Attempt,
                 ),
@@ -3167,6 +3174,50 @@ mod tests {
                 assert_eq!(class_of(&verb), class, "{verb:?}");
                 assert_eq!(round_trip(verb.clone()), verb);
             }
+        }
+
+        #[test]
+        fn the_personal_list_is_an_additive_field_of_session_new() {
+            let listed = Verb::SessionNew {
+                cwd: "/work".into(),
+                sensitive: vec!["~/sentinel-617/**".into()],
+            };
+            assert_eq!(round_trip(listed.clone()), listed);
+            let encode = |v: &ciborium::Value| {
+                let mut b = Vec::new();
+                ciborium::into_writer(v, &mut b).unwrap();
+                b
+            };
+            let before = ciborium::Value::Map(vec![
+                (
+                    ciborium::Value::Text("protocol_version".into()),
+                    ciborium::Value::Integer(PROTOCOL_VERSION.into()),
+                ),
+                (
+                    ciborium::Value::Text("verb".into()),
+                    ciborium::Value::Map(vec![(
+                        ciborium::Value::Text("SessionNew".into()),
+                        ciborium::Value::Map(vec![(
+                            ciborium::Value::Text("cwd".into()),
+                            ciborium::Value::Text("/work".into()),
+                        )]),
+                    )]),
+                ),
+            ]);
+            let unlisted = Verb::SessionNew {
+                cwd: "/work".into(),
+                sensitive: vec![],
+            };
+            assert_eq!(decode_request(&encode(&before)).unwrap().verb, unlisted);
+            assert_eq!(
+                encode_request(&Request {
+                    protocol_version: PROTOCOL_VERSION,
+                    task: None,
+                    verb: unlisted,
+                })
+                .unwrap(),
+                encode(&before)
+            );
         }
 
         #[test]
@@ -3231,6 +3282,7 @@ mod tests {
                 task: None,
                 verb: Verb::SessionNew {
                     cwd: "a".repeat(MAX_MUTATION_PATH_BYTES),
+                    sensitive: vec![],
                 },
             })
             .unwrap();
@@ -3299,7 +3351,13 @@ mod tests {
                 (Verb::AdminProviderDisable, FrameClass::Control),
                 (Verb::AdminSessionList, FrameClass::Control),
                 (Verb::AdminSessionTerminate, FrameClass::Control),
-                (Verb::SessionNew { cwd: "/p".into() }, FrameClass::Attempt),
+                (
+                    Verb::SessionNew {
+                        cwd: "/p".into(),
+                        sensitive: vec![],
+                    },
+                    FrameClass::Attempt,
+                ),
                 (Verb::SessionResume, FrameClass::Control),
                 (
                     Verb::SessionClose {

@@ -457,6 +457,7 @@ mod tests {
         async fn open(
             &mut self,
             _: &std::path::Path,
+            _: &[String],
         ) -> Result<maknae_proto::ConversationId, PlaneError> {
             Err(PlaneError::Unavailable)
         }
@@ -1444,6 +1445,7 @@ mod tests {
         async fn open(
             &mut self,
             _: &std::path::Path,
+            _: &[String],
         ) -> Result<maknae_proto::ConversationId, PlaneError> {
             Err(PlaneError::Unavailable)
         }
@@ -1492,6 +1494,7 @@ mod tests {
         async fn open(
             &mut self,
             _: &std::path::Path,
+            _: &[String],
         ) -> Result<maknae_proto::ConversationId, PlaneError> {
             Err(PlaneError::Unavailable)
         }
@@ -1640,6 +1643,7 @@ mod tests {
         async fn open(
             &mut self,
             _: &std::path::Path,
+            _: &[String],
         ) -> Result<maknae_proto::ConversationId, PlaneError> {
             Err(PlaneError::Unavailable)
         }

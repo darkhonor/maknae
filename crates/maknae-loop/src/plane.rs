@@ -87,14 +87,21 @@ impl<K: KeySupply> LoopPlane<K> {
 }
 
 impl<K: KeySupply> Plane for LoopPlane<K> {
-    async fn open(&mut self, cwd: &std::path::Path) -> Result<ConversationId, PlaneError> {
+    async fn open(
+        &mut self,
+        cwd: &std::path::Path,
+        sensitive: &[String],
+    ) -> Result<ConversationId, PlaneError> {
         let cwd = cwd.to_str().ok_or_else(|| {
             PlaneError::Transport("the working directory is not valid UTF-8".into())
         })?;
         let diagnostics = &mut self.diagnostics;
         open_outcome(
             send_verb(
-                Verb::SessionNew { cwd: cwd.into() },
+                Verb::SessionNew {
+                    cwd: cwd.into(),
+                    sensitive: sensitive.to_vec(),
+                },
                 None,
                 crate::mutation::WriteCheck::Unchecked,
                 &self.transport,

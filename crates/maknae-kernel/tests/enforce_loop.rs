@@ -1671,6 +1671,7 @@ async fn an_unentitled_caller_gets_unauthorized_never_notimplemented() {
         maknae_proto::Verb::AdminStatus,
         maknae_proto::Verb::SessionNew {
             cwd: "/work".into(),
+            sensitive: vec![],
         },
         maknae_proto::Verb::SessionList { cursor: None },
         maknae_proto::Verb::SessionClose {

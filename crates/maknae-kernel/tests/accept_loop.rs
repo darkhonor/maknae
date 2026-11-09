@@ -2425,6 +2425,7 @@ async fn agents_are_denied_session_new_by_default() {
         me,
         maknae_proto::Verb::SessionNew {
             cwd: home.to_str().unwrap().into(),
+            sensitive: vec![],
         },
         None,
         directory_fd(&home),
