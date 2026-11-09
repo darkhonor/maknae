@@ -18,17 +18,7 @@ GIT_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 BINARY = re.compile(r"^(?:Binary files .* differ|GIT binary patch)$")
 ABSENT = re.compile(r"does not exist in|exists on disk, but not in")
-DEPENDENCY_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
 PRODUCTION_LIB = frozenset(("lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"))
-SCOPE_FILES = frozenset(("Cargo.toml", "coverage-tiers.toml", ".cargo/config", ".cargo/config.toml",
-                         ".cargo/mutants.toml", ".config/nextest.toml", "rust-toolchain",
-                         "rust-toolchain.toml", ".github/workflows/ci.yml", "ci/affected.py",
-                         "ci/gates/coverage-tiers.sh", "ci/gates/mutation-oracle.sh",
-                         "ci/gates/mutation-platform.sh", "ci/gates/mutation-diff.py",
-                         "ci/gates/mutation-terminated.txt"))
-
-
-SCOPE_FOLDED = frozenset(name.casefold() for name in SCOPE_FILES)
 
 
 class DiffError(Exception):
@@ -324,44 +314,6 @@ def changed_names(root, base_sha, head_sha):
         raise ScopeError("FAIL: a changed path is not UTF-8") from None
 
 
-def owner_of(path, dirs):
-    owner, size = None, -1
-    for crate, directory in dirs.items():
-        if directory == ".":
-            n = 0
-        elif path.startswith(directory + "/"):
-            n = len(directory)
-        else:
-            continue
-        if n > size:
-            owner, size = crate, n
-    return owner
-
-
-def without_dependencies(manifest):
-    data = {k: v for k, v in manifest.items() if k not in DEPENDENCY_TABLES}
-    if isinstance(data.get("target"), dict):
-        targets = {cfg: {k: v for k, v in table.items() if k not in DEPENDENCY_TABLES}
-                   if isinstance(table, dict) else table for cfg, table in data["target"].items()}
-        data["target"] = {cfg: table for cfg, table in targets.items() if table != {}}
-        if not data["target"]:
-            del data["target"]
-    if isinstance(data.get("workspace"), dict):
-        data["workspace"] = {k: v for k, v in data["workspace"].items() if k != "dependencies"}
-    return data
-
-
-def dependency_only(root, base_sha, head_sha, path):
-    if Path(path).name != "Cargo.toml":
-        return False
-    old, new = show(root, base_sha, path), show(root, head_sha, path)
-    if old is None or new is None:
-        return False
-    old_data, new_data = parse_toml(old), parse_toml(new)
-    return (old_data is not None and new_data is not None
-            and without_dependencies(old_data) == without_dependencies(new_data))
-
-
 def within(path, directory):
     return directory in (".", "") or path == directory or path.startswith(directory + "/")
 
@@ -390,42 +342,9 @@ def script_path(directory, script):
     return None if path == ".." or path.startswith("../") else path
 
 
-def script_crates(root, shas, mutants, dirs):
-    found = set()
-    for crate in sorted(mutants & set(dirs)):
-        for sha in shas:
-            present = lambda path, sha=sha: show(root, sha, path) is not None
-            if build_scripts(root, sha, dirs[crate], present):
-                found.add(crate)
-    return found
-
-
-def exempt(root, base_sha, head_sha, path, docs_only):
-    return docs_only(path) or path == "Cargo.lock" or dependency_only(root, base_sha, head_sha, path)
-
-
 def contract(root, sha, dirs):
     head_tiers = tiers(show(root, sha, "coverage-tiers.toml"))
     return head_tiers if head_tiers is not None else set(dirs)
-
-
-def scope_crates(root, base, head, workspace=None):
-    base_sha, head_sha = resolve(root, base), resolve(root, head)
-    dirs = workspace_crates(workspace or root)
-    mutants = contract(root, head_sha, dirs)
-    docs_only = affected().docs_only
-    built = script_crates(root, (base_sha, head_sha), mutants, dirs)
-    selected = set()
-    for path in changed_names(root, base_sha, head_sha):
-        selected.update(built)
-        if exempt(root, base_sha, head_sha, path, docs_only):
-            continue
-        if path.casefold() in SCOPE_FOLDED:
-            selected.update(mutants)
-        elif posixpath.basename(path).casefold() == "cargo.toml":
-            owner = owner_of(path, dirs)
-            selected.update(mutants if owner is None or dirs[owner] == "." else {owner})
-    return sorted(selected & mutants)
 
 
 def features_of(text, crate):
@@ -512,21 +431,6 @@ def production_inputs(tree, package, features, target):
     return set(found.get(package["name"], {}))
 
 
-def workspace_sources(root, sha, tree, target):
-    found = packages(tree)
-    members = {p["id"]: name for name, p in found.items()}
-    tiers_text = show(root, sha, "coverage-tiers.toml")
-    runs = [("workspace", ["--workspace", "--lib", "--bins"], [])]
-    for crate in sorted(contract(root, sha, found) & set(found)):
-        runs.append((crate, ["--package", crate, *selectors(found[crate])], features_of(tiers_text, crate)))
-    sources = {}
-    for label, args, features in runs:
-        for name, files in check_inputs(tree, label, args, features, target, members).items():
-            for key, path in files.items():
-                sources.setdefault(key, (path, set()))[1].add(name)
-    return sources
-
-
 def compiled(root, base, head, workspace, target):
     base_sha, head_sha = resolve(root, base), resolve(root, head)
     tree = Path(os.path.realpath(workspace))
@@ -553,319 +457,6 @@ def compiled(root, base, head, workspace, target):
         if hits:
             result[crate] = hits
     return result
-
-
-def read_files(crate, path):
-    text = Path(path).read_text()
-    if not text.strip():
-        raise DiffError(f"FAIL: {crate}: cargo mutants --list-files printed nothing")
-    try:
-        data = json.loads(text)
-        if not isinstance(data, list):
-            raise ValueError
-        listed = set()
-        for entry in data:
-            if not isinstance(entry, dict) or entry["package"] != crate or not isinstance(entry["path"], str):
-                raise ValueError
-            listed.add(entry["path"])
-    except (ValueError, KeyError, TypeError):
-        raise DiffError(f"FAIL: {crate}: cargo mutants --list-files printed no file list") from None
-    return listed
-
-
-class LexError(Exception):
-    pass
-
-
-STRING = re.compile(r'(b|c)?r(#*)"|(b|c)?"')
-ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", "0": "\0", "'": "'", '"': '"'}
-WORD = re.compile(r"\w+")
-
-
-def unescape(body):
-    out, i = [], 0
-    while i < len(body):
-        ch = body[i]
-        i += 1
-        if ch != "\\":
-            out.append(ch)
-            continue
-        if i >= len(body):
-            raise LexError("dangling escape")
-        kind = body[i]
-        i += 1
-        if kind in ESCAPES:
-            out.append(ESCAPES[kind])
-        elif kind == "x":
-            out.append(chr(int(body[i:i + 2], 16)))
-            i += 2
-        elif kind == "u" and body[i:i + 1] == "{":
-            end = body.index("}", i)
-            out.append(chr(int(body[i + 1:end].replace("_", ""), 16)))
-            i = end + 1
-        elif kind == "\n":
-            while i < len(body) and body[i] in " \t\n\r":
-                i += 1
-        else:
-            raise LexError(f"unknown escape \\{kind}")
-    return "".join(out)
-
-
-def tokens(text):
-    found, i, n = [], 0, len(text)
-    while i < n:
-        ch = text[i]
-        if ch.isspace():
-            i += 1
-        elif text.startswith("//", i):
-            end = text.find("\n", i)
-            i = n if end < 0 else end
-        elif text.startswith("/*", i):
-            depth, i = 1, i + 2
-            while depth:
-                if i >= n:
-                    raise LexError("unterminated block comment")
-                if text.startswith("/*", i):
-                    depth, i = depth + 1, i + 2
-                elif text.startswith("*/", i):
-                    depth, i = depth - 1, i + 2
-                else:
-                    i += 1
-        elif (literal := STRING.match(text, i)) is not None:
-            start = literal.end()
-            if literal.group(2) is not None:
-                close = '"' + literal.group(2)
-                end = text.find(close, start)
-                if end < 0:
-                    raise LexError("unterminated raw string")
-                value, i = text[start:end], end + len(close)
-            else:
-                end = start
-                while end < n and text[end] != '"':
-                    end += 2 if text[end] == "\\" else 1
-                if end >= n:
-                    raise LexError("unterminated string")
-                value, i = unescape(text[start:end]), end + 1
-            plain = literal.group(1) is None and literal.group(3) is None
-            found.append(("str" if plain else "bytes", value))
-        elif ch == "'" or text.startswith("b'", i):
-            j = i + (2 if ch == "b" else 1)
-            if text.startswith("\\", j):
-                end = text.find("'", j + 2)
-                if end < 0:
-                    raise LexError("unterminated character literal")
-                found.append(("char", text[j:end]))
-                i = end + 1
-            elif j + 1 < n and text[j + 1] == "'":
-                found.append(("char", text[j]))
-                i = j + 2
-            else:
-                word = WORD.match(text, j)
-                found.append(("lifetime", word.group() if word else ""))
-                i = word.end() if word else j
-        elif ch.isalpha() or ch == "_":
-            word = WORD.match(text, i)
-            i = word.end()
-            if word.group() == "r" and text.startswith("#", i) and (raw := WORD.match(text, i + 1)):
-                word, i = raw, raw.end()
-            found.append(("ident", word.group()))
-        elif ch.isdigit():
-            i = WORD.match(text, i).end()
-            found.append(("number", ""))
-        else:
-            found.append(("punct", ch))
-            i += 1
-    return found
-
-
-PAIRS = {"(": ")", "[": "]", "{": "}"}
-CFG_OPEN = [("punct", "#"), ("punct", "["), ("ident", "cfg"), ("punct", "(")]
-
-
-def closing(toks, at):
-    depth = 0
-    for k in range(at, len(toks)):
-        kind, value = toks[k]
-        if kind == "punct" and value in PAIRS:
-            depth += 1
-        elif kind == "punct" and value in PAIRS.values():
-            depth -= 1
-            if depth == 0:
-                return k
-    raise LexError("unbalanced delimiters")
-
-
-def test_only(pred):
-    if pred == [("ident", "test")]:
-        return True
-    if pred[:2] != [("ident", "all"), ("punct", "(")] or closing(pred, 1) != len(pred) - 1:
-        return False
-    args, depth, current = [], 0, []
-    for tok in pred[2:-1]:
-        if tok[0] == "punct" and tok[1] in PAIRS:
-            depth += 1
-        elif tok[0] == "punct" and tok[1] in PAIRS.values():
-            depth -= 1
-        if depth == 0 and tok == ("punct", ","):
-            args.append(current)
-            current = []
-        else:
-            current.append(tok)
-    args.append(current)
-    return [("ident", "test")] in args
-
-
-def test_module_end(toks, at):
-    if toks[at:at + 4] != CFG_OPEN:
-        return None
-    close = closing(toks, at + 3)
-    if not test_only(toks[at + 4:close]) or toks[close + 1:close + 2] != [("punct", "]")]:
-        return None
-    k = close + 2
-    while toks[k:k + 2] == [("punct", "#"), ("punct", "[")]:
-        k = closing(toks, k + 1) + 1
-    if toks[k:k + 1] == [("ident", "pub")]:
-        k += 1
-        if toks[k:k + 1] == [("punct", "(")]:
-            k = closing(toks, k) + 1
-    if (toks[k:k + 1] == [("ident", "mod")] and k + 2 < len(toks) and toks[k + 1][0] == "ident"
-            and toks[k + 2] == ("punct", "{")):
-        return closing(toks, k + 2)
-    return None
-
-
-INCLUDE_MACROS = ("include_str", "include_bytes")
-COLONS = [("punct", ":"), ("punct", ":")]
-
-
-def plain_path(toks, k):
-    if k < 2 or toks[k - 2:k] != COLONS:
-        return True
-    if k < 3 or toks[k - 3] not in (("ident", "std"), ("ident", "core")):
-        return False
-    j = k - 3
-    return j < 2 or toks[j - 2:j] != COLONS or j < 3 or toks[j - 3][0] != "ident"
-
-
-def direct_call(toks, k):
-    if not plain_path(toks, k) or toks[k + 1:k + 2] != [("punct", "!")] or k + 2 >= len(toks) \
-            or toks[k + 2][0] != "punct" or toks[k + 2][1] not in PAIRS:
-        return None
-    end = closing(toks, k + 2)
-    args = toks[k + 3:end]
-    if args and args[0][0] == "str" and args[1:] in ([], [("punct", ",")]):
-        return end, args[0][1]
-    return None
-
-
-def includes(text):
-    toks = tokens(text)
-    literal, indirect, k = [], False, 0
-    while k < len(toks):
-        end = test_module_end(toks, k)
-        if end is not None:
-            k = end + 1
-        elif (toks[k] == ("ident", "macro_rules") and toks[k + 1:k + 2] == [("punct", "!")]
-              and k + 3 < len(toks) and toks[k + 2][0] == "ident" and toks[k + 3][0] == "punct"
-              and toks[k + 3][1] in PAIRS):
-            end = closing(toks, k + 3)
-            indirect = indirect or any(tok[0] == "ident" and tok[1] in INCLUDE_MACROS
-                                       for tok in toks[k + 4:end])
-            k = end + 1
-        elif toks[k][0] == "ident" and toks[k][1] in INCLUDE_MACROS:
-            call = direct_call(toks, k)
-            if call is None:
-                indirect = True
-                k += 1
-            else:
-                literal.append(call[1])
-                k = call[0] + 1
-        else:
-            k += 1
-    return literal, indirect
-
-
-def embeds(root, base, head, workspace, target):
-    base_sha, head_sha = resolve(root, base), resolve(root, head)
-    if not changed_names(root, base_sha, head_sha):
-        return {"indirect": None, "targets": {}}
-    tree = Path(os.path.realpath(workspace))
-    built = Path(target)
-    scanned = []
-    for path, sites in workspace_sources(root, head_sha, tree, built).values():
-        real = Path(os.path.realpath(path))
-        if contains(built, real):
-            continue
-        name = Path(os.path.relpath(real, tree)).as_posix() if contains(tree, real) else str(real)
-        scanned.append((name, Path(path), sites))
-    indirect, targets = None, {}
-    for name, file, sites in sorted(scanned, key=lambda entry: entry[0]):
-        try:
-            raw = file.read_bytes()
-            if not any(macro.encode() in raw for macro in INCLUDE_MACROS):
-                continue
-            literal, dynamic = includes(raw.decode())
-        except (OSError, UnicodeError, ValueError, LexError) as exc:
-            raise ScopeError(f"FAIL: cannot scan {name} for include_str!/include_bytes!: {exc}") from None
-        if dynamic and indirect is None:
-            indirect = name
-        for value in literal:
-            embedded = Path(os.path.realpath(Path(value) if os.path.isabs(value) else file.parent / value))
-            if not embedded.is_file() or not contains(tree, embedded):
-                continue
-            key = Path(os.path.relpath(embedded, tree)).as_posix()
-            targets.setdefault(key, set()).update(sites)
-    return {"indirect": indirect, "targets": {k: sorted(s) for k, s in sorted(targets.items())}}
-
-
-def read_embeds(crate, path):
-    try:
-        data = json.loads(Path(path).read_text())
-        if (not isinstance(data, dict) or not isinstance(data.get("targets"), dict)
-                or not (data.get("indirect") is None or isinstance(data["indirect"], str))):
-            raise ValueError
-    except ValueError:
-        raise DiffError(f"FAIL: {crate}: unreadable include-site list {path}") from None
-    return data
-
-
-def unlisted(crate, files, inputs, workspace, embed_file):
-    listed = read_files(crate, files)
-    try:
-        data = json.loads(Path(inputs).read_text())
-        changed = data.get(crate, [])
-        if not isinstance(changed, list) or not all(isinstance(p, str) for p in changed):
-            raise ValueError
-    except (ValueError, AttributeError):
-        raise DiffError(f"FAIL: {crate}: unreadable compiled-input list {inputs}") from None
-    found = read_embeds(crate, embed_file)
-    if not changed:
-        return None
-    if found["indirect"] is not None:
-        return f"whole: {crate}: include_str/include_bytes used indirectly in {found['indirect']}"
-    tree = Path(os.path.realpath(workspace))
-    sites = {}
-    for target, owners in found["targets"].items():
-        try:
-            stat = os.stat(tree / target)
-        except OSError:
-            continue
-        sites[(stat.st_dev, stat.st_ino)] = set(owners)
-    for path in changed:
-        try:
-            stat = os.stat(tree / path)
-        except OSError:
-            raise DiffError(f"FAIL: {crate}: changed {path} is not in the snapshot") from None
-        owners = sites.get((stat.st_dev, stat.st_ino), set())
-        if crate in owners:
-            return f"whole: {crate}: changed {path} is embedded by include_str!/include_bytes!"
-    for name in sorted(listed):
-        if not name.endswith(".rs"):
-            return f"whole: {crate}: walked source {name} is not a .rs file the in-diff mapping reads"
-    for path in changed:
-        if path not in listed:
-            return f"whole: {crate}: changed {path} is compiled into {crate} but not walked by cargo-mutants"
-    return None
 
 
 def contains(directory, path):
@@ -1122,8 +713,6 @@ def main(argv):
             line, status = classify(pkg, changed, read_list(pkg, argv[3]), read_list(pkg, argv[4]))
             print(line)
             return status
-        elif len(argv) in (4, 5) and command == "scope":
-            print(json.dumps(scope_crates(*argv[1:])))
         elif len(argv) in (4, 5) and command == "paths":
             for name in check_paths(argv[1], argv[2], read_diff(argv[3]), *argv[4:]):
                 print(name)
@@ -1136,12 +725,6 @@ def main(argv):
             snapshot(argv[1], argv[2], argv[3])
         elif len(argv) == 6 and command == "compiled":
             print(json.dumps(compiled(*argv[1:])))
-        elif len(argv) == 6 and command == "embeds":
-            print(json.dumps(embeds(*argv[1:])))
-        elif len(argv) == 6 and command == "unlisted":
-            line = unlisted(*argv[1:])
-            if line:
-                print(line)
         elif len(argv) == 3 and command == "config-guard":
             problem = config_guard(*argv[1:])
             if problem:
@@ -1154,12 +737,9 @@ def main(argv):
                 return 1
         else:
             print("FAIL: usage: mutation-diff.py changed-lines <diff> | classify <pkg> <diff> "
-                  "<whole> <indiff> | scope <root> <base> <head> [<workspace>] | paths <root> <base> "
-                  "<diff> [<head>] | history <root> | snapshot <root> <rev> <dest> | "
-                  "compiled <root> <base> <head> <workspace> <target> | "
-                  "embeds <root> <base> <head> <workspace> <target> | "
-                  "unlisted <crate> <files> <compiled> <workspace> <embeds> | unmappable <root> <head> <workspace> | "
-                  "config-guard <root> <head>",
+                  "<whole> <indiff> | paths <root> <base> <diff> [<head>] | history <root> | "
+                  "snapshot <root> <rev> <dest> | compiled <root> <base> <head> <workspace> <target> | "
+                  "unmappable <root> <head> <workspace> | config-guard <root> <head>",
                   file=sys.stderr)
             return 1
     except (DiffError, ScopeError) as exc:
