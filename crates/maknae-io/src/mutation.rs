@@ -154,8 +154,8 @@ fn same_path(actual: &Path, expected: &Path) -> Result<(), IoError> {
     Ok(())
 }
 
-fn unwritten(mut e: MutationFailure, offset: usize) -> MutationFailure {
-    e.before_write = offset == 0;
+fn unwritten(mut e: MutationFailure, tried: bool) -> MutationFailure {
+    e.before_write = !tried;
     e
 }
 
@@ -168,13 +168,15 @@ fn replace_bytes(
     sync: impl Fn(&OwnedFd) -> nix::Result<()>,
 ) -> Result<(), MutationFailure> {
     let mut offset = 0;
+    let mut tried = false;
     while offset < bytes.len() {
         let state = if offset == 0 {
             EffectState::NoEffect
         } else {
             EffectState::Partial
         };
-        check().map_err(|e| unwritten(failure(path, state, e), offset))?;
+        check().map_err(|e| unwritten(failure(path, state, e), tried))?;
+        tried = true;
         let count = match write(fd, &bytes[offset..], offset as i64) {
             Err(nix::errno::Errno::EINTR) => continue,
             result => result.map_err(|e| failure(path, state, io_error(e, path)))?,
@@ -189,7 +191,7 @@ fn replace_bytes(
     } else {
         EffectState::Partial
     };
-    check().map_err(|e| unwritten(failure(path, state, e), offset))?;
+    check().map_err(|e| unwritten(failure(path, state, e), tried))?;
     // A valid slice is bounded by isize::MAX; both supported targets have 64-bit
     // pointers, so its length is always representable by the syscall offset.
     let length = bytes.len() as i64;
@@ -990,6 +992,34 @@ mod tests {
             assert!(e.before_write, "{} bytes: {e:?}", bytes.len());
         }
         assert_eq!(std::fs::read(&p).unwrap(), b"kept");
+    }
+    #[test]
+    fn a_check_that_fails_after_an_interrupted_write_is_not_before_any_write() {
+        let d = tempfile::tempdir().unwrap();
+        let p = root(&d).join("eintr-sentinel");
+        std::fs::write(&p, b"kept").unwrap();
+        let checks = std::cell::Cell::new(0);
+        let fd = std::fs::OpenOptions::new().write(true).open(&p).unwrap();
+        let e = replace_bytes(
+            &fd.into(),
+            &p,
+            b"x",
+            || {
+                checks.set(checks.get() + 1);
+                if checks.get() == 1 {
+                    Ok(())
+                } else {
+                    Err(IoError::MutationPathChanged {
+                        path: "/moved".into(),
+                    })
+                }
+            },
+            |_, _, _| Err(nix::errno::Errno::EINTR),
+            |_| panic!("no sync may follow a failed check"),
+        )
+        .unwrap_err();
+        assert_eq!(checks.get(), 2);
+        assert!(!e.before_write, "a write syscall was attempted: {e:?}");
     }
     #[test]
     fn a_replace_whose_first_write_fails_may_have_reached_the_file() {

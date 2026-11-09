@@ -92,11 +92,10 @@ pub fn read_outcome(sent: Result<WireOutcome, String>) -> ReadOutcome {
 
 /// The write half, pure for the same reason. Only a clean `WriteDone { applied:
 /// true }` is `Applied`. A `Refused` frame is `Unavailable`: the kernel refuses
-/// only in place of the grant, before any effect. So is a `withheld` completion,
-/// which the client sets when it certifies no effect syscall was attempted,
-/// including a failure before the grant (the client's `NotAttempted`); a `stale`
-/// one is `Stale`. Every `Err` and every other completion is `Unknown` (ADR-0023
-/// d4). `NotSent` is decided from `write_request`'s `Err`, before `send_verb`.
+/// only in place of the grant, before any effect. A `withheld` completion (ADR-0034
+/// decision 7) is `Unavailable`; a `stale` one is `Stale`. Every `Err` and every
+/// other completion is `Unknown` (ADR-0023 d4). `NotSent` is decided from
+/// `write_request`'s `Err`, before `send_verb`.
 pub fn write_outcome(sent: Result<WireOutcome, String>) -> WriteOutcome {
     if let Some(by) = protected(&sent) {
         return WriteOutcome::Protected(by);

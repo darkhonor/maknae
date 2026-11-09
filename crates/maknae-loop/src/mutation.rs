@@ -964,9 +964,9 @@ struct Attempted {
 }
 
 /// A write attempt's end: `stale` is true only when the #388 check refused it,
-/// before any write syscall, and the file is readable; `withheld` is set for any
-/// other failure decided before a write syscall (ADR-0034 decision 7). `version` is the
-/// written file's, when known.
+/// before any write syscall, and the file is readable; `withheld` only when the client
+/// certified that no effect syscall was attempted (ADR-0034 decision 7). `version` is
+/// the written file's, when known.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WriteEnd {
     pub applied: bool,
@@ -1180,7 +1180,9 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
             .await;
             if let Err(why) = reported {
                 return match lost_finish(next.withheld, next.stale) {
-                    LostFinish::NoEffect => Ok(no_effect(reading, writing, &why, diag)),
+                    LostFinish::NoEffect => {
+                        Ok(no_effect(reading, writing && !next.diverted, &why, diag))
+                    }
                     LostFinish::Stale => Ok(Attempted {
                         success: false,
                         content: None,
@@ -2640,6 +2642,98 @@ mod tests {
             Path::new(&d.path("effect-parent")).exists(),
             "the first effect landed"
         );
+    }
+    #[tokio::test]
+    async fn a_refused_unlink_whose_finish_ack_is_lost_stays_unknown() {
+        let d = Fixture::new();
+        let path = d.path("unlink-attempted-sentinel");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(d.path("unlink-attempted-sentinel/kept"), b"x").unwrap();
+        let g = grant(MutationScope::Exact {
+            path: path.clone(),
+            effect: ReportedEffect::DeletedEntry,
+        });
+        let (end, _) = end_with(
+            prepare(delete(path.clone(), false), None).unwrap(),
+            g,
+            proto::ATTEMPT_REQUEST_MAX,
+            Instant::now(),
+            false,
+        )
+        .await;
+        assert!(
+            end.is_err(),
+            "an attempted unlink is not certified: {end:?}"
+        );
+        assert!(Path::new(&d.path("unlink-attempted-sentinel/kept")).exists());
+    }
+    #[tokio::test]
+    async fn a_held_parent_whose_finish_ack_is_lost_says_nothing_was_changed() {
+        let d = Fixture::new();
+        std::fs::create_dir(d.path("lost-nested-parent")).unwrap();
+        let path = d.path("lost-nested-parent/grant-sentinel");
+        let (end, lines) = end_with(
+            checked_write(path.clone(), WriteCheck::Unread),
+            create_grant(&d.path("grant-sentinel")),
+            proto::ATTEMPT_REQUEST_MAX,
+            Instant::now(),
+            false,
+        )
+        .await;
+        assert!(end.unwrap().withheld);
+        assert!(
+            lines.len() == 1
+                && lines[0].starts_with("mutation not performed: ")
+                && lines[0].ends_with("; nothing was changed"),
+            "{lines:?}"
+        );
+    }
+    #[tokio::test]
+    async fn a_stale_refusal_whose_finish_ack_is_lost_stays_stale() {
+        let d = Fixture::new();
+        let path = d.path("lost-stale-sentinel");
+        std::fs::write(&path, b"readable").unwrap();
+        let (end, _) = end_with(
+            checked_write(path.clone(), WriteCheck::Read([9; 7])),
+            replace_grant(&path),
+            proto::ATTEMPT_REQUEST_MAX,
+            Instant::now(),
+            false,
+        )
+        .await;
+        let end = end.unwrap();
+        assert!(!end.applied && end.stale && !end.withheld, "{end:?}");
+        assert_eq!(
+            the_model_is_told(end),
+            maknae_agent::plane::WriteOutcome::Stale
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"readable");
+    }
+    async fn delete_stopped_after_an_attempt(acks: Acks) -> Result<WriteEnd, String> {
+        let d = Fixture::new();
+        let root = d.path("delete-attempted-root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(d.path("delete-attempted-root/only"), b"x").unwrap();
+        let mut g = grant(MutationScope::RecursiveDelete { root: root.clone() });
+        g.limits.max_effects = 1;
+        let (end, _) = end_acked(
+            prepare(delete(root.clone(), true), None).unwrap(),
+            g,
+            proto::ATTEMPT_REQUEST_MAX,
+            Instant::now(),
+            acks,
+        )
+        .await;
+        assert!(!Path::new(&d.path("delete-attempted-root/only")).exists());
+        assert!(Path::new(&root).is_dir());
+        end
+    }
+    #[tokio::test]
+    async fn a_delete_stopped_after_an_attempted_unlink_is_never_withheld() {
+        let end = delete_stopped_after_an_attempt(Acks::All).await.unwrap();
+        assert!(!end.applied && !end.withheld, "{end:?}");
+        let lost = delete_stopped_after_an_attempt(Acks::BatchesOnly).await;
+        assert!(lost.is_err(), "{lost:?}");
     }
     #[test]
     fn prepare_checked_carries_the_check_into_the_prepared_mutation() {

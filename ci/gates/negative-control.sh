@@ -6309,8 +6309,19 @@ open(p, "w").write(s.replace(old, new))' "$f" "$2" "$3"; then
     '            Work::Withheld { path } => {
                 self.withheld = false;' \
     maknae-loop mutation::tests::a_parent_that_differs
+  expect_reject_because "uniform/a-lost-ack-after-an-attempted-unlink-told-no-effect-goes-red" \
+    "a_refused_unlink_whose_finish_ack_is_lost_stays_unknown" cv_mutant crates/maknae-loop/src/mutation.rs \
+    '                return match lost_finish(next.withheld, next.stale) {' \
+    '                return match lost_finish(next.next_index == 0 && outcome != ReportedFinish::Success, next.stale) {' \
+    maknae-loop mutation::tests::a_refused_unlink_whose
+  expect_reject_because "uniform/a-delete-stopped-after-an-unlink-told-withheld-goes-red" \
+    "a_delete_stopped_after_an_attempted_unlink_is_never_withheld" cv_mutant crates/maknae-loop/src/mutation.rs \
+    '                    self.attempted = true;
+                    match target_parent.remove_entry(&target_leaf) {' \
+    '                    match target_parent.remove_entry(&target_leaf) {' \
+    maknae-loop mutation::tests::a_delete_stopped_after
 else
-  skipped=$((skipped+19))
+  skipped=$((skipped+21))
 fi
 
 # The skip count is REPORTED, because `$total` is environment-dependent: probes
