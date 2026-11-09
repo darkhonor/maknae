@@ -73,6 +73,8 @@ The list is decided by a third named, non-removable field of `Composition`, besi
 
 The host list and the baseline's grants are taken from one snapshot per decision batch, so a reload can never pair one snapshot's grants with another snapshot's list.
 
+A file request the operand cannot evaluate is `Indeterminate`, which `finalize` denies: no path, a path that is not canonical, a personal entry that does not parse, or a `~` entry with no home when no other entry matches. An `fs.delete` that names no operation is decided as a tree.
+
 **Path forms.** A deny that misses because the same file has a different spelling is a permit, so matching folds every form the kernel can report for one object:
 
 - **macOS:** case-insensitive, by Unicode lowercase (`str::to_lowercase`) of the entry, the path and the home that anchors `~`. A leading `/System/Volumes/Data` is stripped, and a leading `/private/etc`, `/private/tmp` or `/private/var` is mapped to `/etc`, `/tmp` or `/var`, on both the entry and the path. An entry written either way therefore matches what `F_GETPATH` reports, and no entry needs a `/private` twin. APFS is also normalization-insensitive. An entry and a path that differ only in NFC versus NFD are a **named residual**: such an entry can miss.

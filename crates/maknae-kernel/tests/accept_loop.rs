@@ -2252,6 +2252,85 @@ async fn a_read_citing_the_agents_own_task_carries_subject_task() {
 }
 
 #[tokio::test]
+async fn an_agent_channel_request_meets_the_host_list() {
+    let _turn = FS_TURN.lock().await;
+    let (root, pdp) = agent_pdp("read-sensitive");
+    let home = common::second_home("agent617-sensitive");
+    let file = home.join("notes");
+    common::write_0640(&file, "maknae-617-sensitive-sentinel");
+    common::write_0640(
+        &maknae_authz_basic::PolicyPaths::in_dir(&root).sensitive,
+        &format!(
+            "schema_version: 1\nsensitive:\n  - \"{}\"\n",
+            file.display()
+        ),
+    );
+    pdp.baseline().reload_from_file().unwrap();
+    let pdp = Seen::new(pdp);
+    let me = nix::unistd::geteuid().as_raw();
+    let own = signed_for("hobi");
+    let fds = maknae_io::DelegatedFds::new(4);
+    fds.push(maknae_io::open_path_for_delegation(&file).unwrap());
+    let (conn, mut client) = asking(
+        agent_leaf("hobi"),
+        me,
+        maknae_proto::Verb::Read {
+            path: file.to_str().unwrap().into(),
+            conversation: None,
+            page: None,
+        },
+        Some(own.task.task_id),
+        fds,
+    )
+    .await;
+    let (recs, answer) = tokio::join!(
+        drive_channel(
+            agent_socket(),
+            vec![conn],
+            account_gate("hobi-svc", home.to_path_buf(), false),
+            Arc::clone(&pdp),
+            euid_hobi(&[(own, me)]),
+        ),
+        async {
+            let got = first_answer(&mut client).await;
+            drop(client);
+            got
+        }
+    );
+    let asked = pdp.asked("fs.read");
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert_eq!(
+        asked[0].subject.0.get(maknae_security::SUBJECT_CHANNEL),
+        Some(&maknae_security::AttrValue::Str(
+            maknae_security::CHANNEL_AGENT.into()
+        ))
+    );
+    let read = recs
+        .iter()
+        .find(|r| r.action == "fs.read")
+        .expect("the fs.read record");
+    assert_eq!(
+        (
+            read.outcome.result.as_str(),
+            read.outcome.reason.clone(),
+            read.subject.agent.as_deref()
+        ),
+        (
+            "deny",
+            format!("sensitive: host {}", file.display()),
+            Some("hobi")
+        ),
+        "{read:?}"
+    );
+    match answer {
+        Some(maknae_proto::RespResult::Err(e)) => {
+            assert_eq!(e.code, maknae_proto::ProtoErrCode::Unauthorized)
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn an_agent_request_citing_its_task_is_stamped_and_audited() {
     let (_root, pdp) = agent_pdp("whoami-own-task");
     let pdp = Seen::new(pdp);

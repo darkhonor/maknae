@@ -2256,11 +2256,12 @@ fi
 # purpose is "the baseline cannot be removed" must be SEEN rejecting each way of
 # removing it. One minimal fixture, at least one corruption per `fail(` CALL
 # SITE the gate has, and two clean accepts. DERIVED, not counted by hand (round
-# 4 found the hand count wrong twice): the gate has 21 `fail(` sites; the
-# 31 probes below map onto every one of them by their `why` substring
+# 4 found the hand count wrong twice): the gate has 27 `fail(` sites; the
+# 39 probes below map onto every one of them by their `why` substring
 # (a probe's `why` is a literal substring of exactly the message it targets),
-# and the two parameterized sites -- `missing <file>` and `missing <base>/` --
-# are probed once per parameter value (3 files, 2 bases). A probe whose `why`
+# and the three parameterized sites -- `missing <file>`, `missing <base>/` and
+# the constructor class of check 6 -- are probed once per parameter value
+# (4 files, 2 bases, 3 constructors). A probe whose `why`
 # matches no site, or a site no probe matches, is the failure this note is
 # guarding against; re-derive after any edit to either file.
 composition_fixture() { # -> prints the fixture root; a MINIMAL tree the gate accepts
@@ -2278,7 +2279,7 @@ fn boot() {
         "authz",
         None,
         "permit",
-        &format!("authorization composition: {name}; system: {sys}; ceiling: {lvl}"),
+        &format!("authorization composition: {name}; system: {sys}; ceiling: {lvl}; sensitive: {} host entries", n),
         "authorized",
     );
     if let Err(e) = sink.emit_within(&composition_rec, AUDIT_APPEND_TIMEOUT).await { eprintln!("{e}"); }
@@ -2290,10 +2291,19 @@ RS
 pub struct Composition<B: Baseline> {
     baseline: B,
     ceiling: CeilingAuthorizer,
+    sensitive: SensitiveOperand,
+}
+fn operands(&self) -> [&dyn Authorizer; 3] {
+    [&self.baseline, &self.ceiling, &self.sensitive]
+}
+fn operands_with(&self) -> [&dyn Authorizer; 3] {
+    let sensitive = SensitiveAuthorizer::new(snap.sensitive());
+    [base, &self.ceiling, sensitive]
 }
 #[cfg(test)]
 mod tests {}
 RS
+  printf 'pub const SENSITIVE_BACKEND_NAME: &str = "maknae-sensitive";\npub struct SensitiveAuthorizer;\nimpl SensitiveAuthorizer { pub fn new() -> Self { SensitiveAuthorizer } }\nfn own() { let _ = SensitiveAuthorizer::new(); }\n#[cfg(test)]\nmod tests {}\n' > "$f/crates/maknae-kernel/src/sensitive_authz.rs"
   printf 'const LAKE_SECTION: &str = "lake";\n' > "$f/crates/maknae-kernel/src/boot.rs"
   # The defining file for the ceiling operand: its own `new` is exempt BY PATH (check 6).
   printf 'pub struct CeilingAuthorizer;\nimpl CeilingAuthorizer { pub fn new() -> Self { CeilingAuthorizer } }\nfn own() { let _ = CeilingAuthorizer::new(); }\n#[cfg(test)]\nmod tests {}\n' > "$f/crates/maknae-kernel/src/ceiling_authz.rs"
@@ -2382,11 +2392,27 @@ composition_reject "bins-dir-missing" "missing bins/" \
   'import shutil; shutil.rmtree(root/"bins")'
 composition_reject "evidence-reason-lacks-system-and-ceiling" "must carry '; system:" \
   'p=root/"crates/maknae-kernel/src/run.rs"; p.write_text(p.read_text().replace("; system: {sys}; ceiling: {lvl}", ""))'
+composition_reject "evidence-reason-lacks-the-sensitive-count" "must carry '; sensitive: {} host entries'" \
+  'p=root/"crates/maknae-kernel/src/run.rs"; p.write_text(p.read_text().replace("; sensitive: {} host entries", ""))'
+composition_reject "sensitive-field-removed" "no named \`sensitive\` field" \
+  'p=root/"crates/maknae-kernel/src/composition.rs"; p.write_text(p.read_text().replace("    sensitive: SensitiveOperand,\n", ""))'
+composition_reject "optional-sensitive-field" "must be the bare \`SensitiveOperand\`" \
+  'p=root/"crates/maknae-kernel/src/composition.rs"; p.write_text(p.read_text().replace("sensitive: SensitiveOperand,", "sensitive: Option<SensitiveOperand>,"))'
+composition_reject "sensitive-missing-from-the-named-operands" "\`operands()\` must list" \
+  'p=root/"crates/maknae-kernel/src/composition.rs"; p.write_text(p.read_text().replace(", &self.sensitive]", "]"))'
+composition_reject "sensitive-missing-from-the-decision-fold" "\`operands_with\` must fold" \
+  'p=root/"crates/maknae-kernel/src/composition.rs"; p.write_text(p.read_text().replace("[base, &self.ceiling, sensitive]", "[base, &self.ceiling]"))'
+composition_reject "sensitive-operand-renamed" "must name itself \`maknae-sensitive\`" \
+  'p=root/"crates/maknae-kernel/src/sensitive_authz.rs"; p.write_text(p.read_text().replace("\"maknae-sensitive\"", "\"vendor\""))'
+composition_reject "sensitive-file-missing" "missing crates/maknae-kernel/src/sensitive_authz.rs" \
+  '(root/"crates/maknae-kernel/src/sensitive_authz.rs").unlink()'
 # check 6 -- constructor call sites outside the defining files
 composition_reject "composition-new-in-another-kernel-module" "calls \`Composition::new(\` outside its defining file" \
   'p=root/"crates/maknae-kernel/src/boot.rs"; p.write_text(p.read_text()+"fn shadow() { let _ = crate::composition::Composition::new(a, b); }\n")'
 composition_reject "ceiling-new-in-a-bin" "calls \`CeilingAuthorizer::new(\` outside its defining file" \
   'p=root/"bins/maknaed/src/main.rs"; p.write_text(p.read_text()+"fn shadow() { let _ = maknae_kernel::CeilingAuthorizer::new(c, p); }\n")'
+composition_reject "sensitive-new-in-another-kernel-module" "calls \`SensitiveAuthorizer::new(\` outside its defining file" \
+  'p=root/"crates/maknae-kernel/src/boot.rs"; p.write_text(p.read_text()+"fn shadow() { let _ = crate::sensitive_authz::SensitiveAuthorizer::new(&list); }\n")'
 composition_reject "evidence-record-removed" "boot composition evidence record" \
   'p=root/"crates/maknae-kernel/src/run.rs"; p.write_text(re.sub(r"    let composition_rec = make_record\(.*?\n    \);\n", "", p.read_text(), flags=re.S))'
 f="$(composition_fixture)"; expect_accept "authz-composition-drift/clean-fixture" "authz-composition-drift: ok" "$f/ci/gates/authz-composition-drift.sh" "$f"
@@ -6218,8 +6244,16 @@ open(p, "w").write(s.replace(old, new))' "$f" "$2" "$3"; then
     '    if holds("session.prompt") && !holds("session.new") {' \
     '    if false && holds("session.prompt") && !holds("session.new") {' \
     maknae-authz-basic prompt_but_not_new
+  expect_accept "sensitive/kernel-sensitive-suite-is-green" "conversation-suite: maknae-kernel" \
+    cv_suite maknae-kernel sensitive_authz
+  expect_reject_because "sensitive/removing-the-operand-goes-red" \
+    "a_host_match_denies_with_the_entry" cv_mutant crates/maknae-kernel/src/sensitive_authz.rs \
+    '        decide_sensitive(self.host, req, maknae_config::native_fold())
+' '        let _ = (self.host, req, decide_sensitive);
+        Verdict::NotApplicable { note: None }
+' maknae-kernel sensitive_authz
 else
-  skipped=$((skipped+6))
+  skipped=$((skipped+8))
 fi
 
 # The skip count is REPORTED, because `$total` is environment-dependent: probes

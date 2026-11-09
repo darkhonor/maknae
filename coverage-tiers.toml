@@ -56,6 +56,8 @@ files = [
   # maknae-security/compose.rs (T1).
   "crates/maknae-kernel/src/ceiling_authz.rs",
   "crates/maknae-kernel/src/composition.rs",
+  # #617: the sensitive.yaml operand; a wrong arm serves a protected path.
+  "crates/maknae-kernel/src/sensitive_authz.rs",
   # The reload's ordering, plan choice, turn and stop, and the vocabulary given to
   # the store and compiler: a wrong arm installs a snapshot the store never
   # recorded, or keeps serving a refused one. Unit-tested and coverage-gated.

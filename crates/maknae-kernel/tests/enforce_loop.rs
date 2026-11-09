@@ -2799,7 +2799,10 @@ async fn under_a_secret_ceiling_status_still_answers_and_names_both_operands() {
     .expect("a frame");
     match maknae_proto::decode_response(&frame).unwrap().result {
         RespResult::Ok(maknae_proto::Payload::Status(s)) => {
-            assert_eq!(s.authz_backend, "maknae-authz-basic+maknae-ceiling");
+            assert_eq!(
+                s.authz_backend,
+                "maknae-authz-basic+maknae-ceiling+maknae-sensitive"
+            );
         }
         other => panic!("expected a Status payload, got {other:?}"),
     }

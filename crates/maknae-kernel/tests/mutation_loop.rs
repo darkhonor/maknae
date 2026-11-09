@@ -1912,3 +1912,307 @@ async fn a_home_lookup_failure_refuses_an_absolute_path_request() {
         "requester home unavailable: unresolvable"
     );
 }
+
+const SENSITIVE_SENTINEL: &[u8] = b"maknae-617-sensitive-sentinel";
+
+fn host_list(fx: &Fixture, entries: &[&str]) {
+    let body: String = entries.iter().map(|e| format!("  - \"{e}\"\n")).collect();
+    common::write_0640(
+        &fx.paths().sensitive,
+        &format!("schema_version: 1\nsensitive:\n{body}"),
+    );
+}
+
+fn site_allows(fx: &Fixture, allows: &[&str]) {
+    let body: String = allows.iter().map(|a| format!("    - \"{a}\"\n")).collect();
+    common::write_0640(
+        &fx.paths().authz,
+        &format!("schema_version: 1\npermissions:\n  allow:\n{body}  deny: []\n"),
+    );
+}
+
+fn admin_of_everything(tag: &str) -> Fixture {
+    let fx = Fixture::with_policy_bound_to(tag, "Read", "admin", "");
+    site_allows(&fx, &["Read(/**)", "Write(/**)"]);
+    fx
+}
+
+fn assert_read_refused(run: &common::ReadRun, records: &[AuditRecord], reason: &str) {
+    assert!(run.content.is_none(), "{:?}", records.last());
+    let frame = run.first.as_ref().expect("a deny frame");
+    assert!(!frame
+        .windows(SENSITIVE_SENTINEL.len())
+        .any(|w| w == SENSITIVE_SENTINEL));
+    match maknae_proto::decode_response(frame).unwrap().result {
+        RespResult::Err(e) => assert_eq!(e.code, maknae_proto::ProtoErrCode::Unauthorized),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    let last = records.last().expect("a request record");
+    assert_eq!(last.outcome.result, "deny");
+    assert_eq!(last.outcome.reason, reason);
+}
+
+fn assert_read_served(run: &common::ReadRun, records: &[AuditRecord]) {
+    assert_eq!(
+        run.content.as_deref().map(Vec::as_slice),
+        Some(SENSITIVE_SENTINEL),
+        "{:?}",
+        records.last()
+    );
+}
+
+#[tokio::test]
+async fn an_admin_grant_of_everything_cannot_read_a_protected_file() {
+    let fx = admin_of_everything("sensitive_admin_read");
+    let outside = outside_the_home(&fx, "sensitive_admin_read");
+    let (secret, open) = (outside.join("secret"), outside.join("open"));
+    for f in [&secret, &open] {
+        std::fs::write(f, SENSITIVE_SENTINEL).unwrap();
+    }
+    host_list(&fx, &[secret.to_str().unwrap()]);
+    let (run, records) = read_outside(&fx, &open).await;
+    assert_read_served(&run, &records);
+    let (run, records) = read_outside(&fx, &secret).await;
+    assert_read_refused(
+        &run,
+        &records,
+        &format!("sensitive: host {}", secret.display()),
+    );
+}
+
+#[tokio::test]
+async fn a_protected_file_cannot_be_written_deleted_or_created_under() {
+    let fx = admin_of_everything("sensitive_mutations");
+    let outside = outside_the_home(&fx, "sensitive_mutations");
+    let vault = outside.join("vault");
+    let open = outside.join("open");
+    for d in [&vault, &open] {
+        std::fs::create_dir(d).unwrap();
+    }
+    let kept = vault.join("kept");
+    std::fs::write(&kept, SENSITIVE_SENTINEL).unwrap();
+    let entry = format!("{}/**", vault.display());
+    host_list(&fx, &[&entry]);
+    let reason = format!("sensitive: host {entry}");
+
+    let (result, record) = second_subject_attempt(&fx, create_in(&open.join("new")), &open).await;
+    assert_granted(
+        &result,
+        &record,
+        maknae_proto::MutationScope::Exact {
+            path: open.join("new").to_str().unwrap().into(),
+            effect: maknae_proto::ReportedEffect::CreatedFile,
+        },
+    );
+
+    let records = Records::new(0);
+    let (mut client, task, _held) =
+        replace_start(&fx, &kept, b"overwritten", records.clone(), None).await;
+    let result = next_response(&mut client).await.unwrap().result;
+    drop(client);
+    task.await.unwrap();
+    assert_refused(&result, &records.snapshot()[1], &reason);
+
+    for verb in [
+        Verb::FsDelete {
+            path: kept.to_str().unwrap().into(),
+            recursive: false,
+        },
+        create_in(&vault.join("new")),
+        mkdir_in(&vault.join("sub")),
+    ] {
+        let (result, record) = second_subject_attempt(&fx, verb, &vault).await;
+        assert_refused(&result, &record, &reason);
+    }
+    let (result, record) = second_subject_attempt(
+        &fx,
+        Verb::FsDelete {
+            path: vault.to_str().unwrap().into(),
+            recursive: true,
+        },
+        &outside,
+    )
+    .await;
+    assert_refused(&result, &record, &reason);
+    assert_eq!(std::fs::read(&kept).unwrap(), SENSITIVE_SENTINEL);
+    assert!(!vault.join("new").exists() && !vault.join("sub").exists());
+}
+
+#[tokio::test]
+async fn a_hard_link_to_a_protected_file_is_refused() {
+    let fx = admin_of_everything("sensitive_hard_link");
+    let outside = outside_the_home(&fx, "sensitive_hard_link");
+    let secret = outside.join("secret");
+    std::fs::write(&secret, SENSITIVE_SENTINEL).unwrap();
+    std::fs::create_dir(outside.join("other")).unwrap();
+    let alias = outside.join("other/alias");
+    std::fs::hard_link(&secret, &alias).unwrap();
+    host_list(&fx, &[secret.to_str().unwrap()]);
+    let (run, records) = read_outside(&fx, &alias).await;
+    assert!(run.content.is_none());
+    let frame = run.first.expect("a deny frame");
+    assert!(!frame
+        .windows(SENSITIVE_SENTINEL.len())
+        .any(|w| w == SENSITIVE_SENTINEL));
+    let last = records.last().expect("a request record");
+    assert_eq!(last.outcome.result, "deny", "{last:?}");
+}
+
+#[tokio::test]
+async fn a_symlinked_directory_into_a_protected_region_is_refused() {
+    let fx = Fixture::new("sensitive_symlinked_dir", "Read");
+    std::fs::create_dir(fx.root.join(".ssh")).unwrap();
+    std::fs::write(fx.root.join(".ssh/id_rsa"), SENSITIVE_SENTINEL).unwrap();
+    std::fs::create_dir(fx.root.join("proj")).unwrap();
+    std::os::unix::fs::symlink(fx.root.join(".ssh"), fx.root.join("proj/keys")).unwrap();
+    let asked = fx.root.join("proj/keys/id_rsa");
+    let (run, records) = read_outside(&fx, &asked).await;
+    assert_read_served(&run, &records);
+    host_list(&fx, &["~/.ssh/**"]);
+    let (run, records) = read_outside(&fx, &asked).await;
+    assert_read_refused(&run, &records, "sensitive: host ~/.ssh/**");
+}
+
+#[tokio::test]
+async fn home_entries_bind_under_a_symlinked_home_parent() {
+    let base = common::second_home("sensitive_symlinked_parent");
+    let real = base.join("var/home/u");
+    std::fs::create_dir_all(real.join(".ssh")).unwrap();
+    std::os::unix::fs::symlink(base.join("var/home"), base.join("home")).unwrap();
+    let home = base.join("home/u").canonicalize().unwrap();
+    assert_eq!(home, real, "premise: the home is canonical");
+    std::fs::write(real.join(".ssh/id_rsa"), SENSITIVE_SENTINEL).unwrap();
+    std::fs::write(real.join("notes"), SENSITIVE_SENTINEL).unwrap();
+    let fx = Fixture::new("sensitive_symlinked_parent", "Read").with_requester_home(Some(home));
+    host_list(&fx, &["~/.ssh/**"]);
+    let (run, records) = read_outside(&fx, &base.join("home/u/notes")).await;
+    assert_read_served(&run, &records);
+    let (run, records) = read_outside(&fx, &base.join("home/u/.ssh/id_rsa")).await;
+    assert_read_refused(&run, &records, "sensitive: host ~/.ssh/**");
+}
+
+const SHIPPED_HOME_ENTRIES: &[&str] = &[
+    "~/.maknae/**",
+    "~/.ssh/**",
+    "~/.gnupg/**",
+    "~/.aws/**",
+    "~/.azure/**",
+    "~/.config/gcloud/**",
+    "~/.kube/**",
+    "~/.docker/config.json",
+    "~/.config/containers/auth.json",
+    "~/.netrc",
+    "~/.git-credentials",
+    "~/.config/gh/hosts.yml",
+    "~/.vault-token",
+    "~/.vault-*-token",
+    "~/.terraform.d/credentials.tfrc.json",
+    "~/.npmrc",
+    "~/.pypirc",
+    "~/.cargo/credentials",
+    "~/.cargo/credentials.toml",
+    "~/.gem/credentials",
+    "~/.m2/settings.xml",
+    "~/.gradle/gradle.properties",
+    "~/.pgpass",
+    "~/.my.cnf",
+    "~/.password-store/**",
+    "~/.local/share/keyrings/**",
+    "~/.config/op/**",
+    "~/.config/rclone/rclone.conf",
+    "~/.claude.json",
+    "~/.claude/.credentials.json",
+    "~/.codex/**",
+    "~/.gemini/**",
+    "~/.mozilla/**",
+    "~/.config/google-chrome/**",
+    "~/.config/chromium/**",
+    "~/.thunderbird/**",
+    "~/.*_history",
+    "~/.lesshst",
+    "~/.viminfo",
+    "~/Library/Keychains/**",
+    "~/Library/Cookies/**",
+    "~/Library/Mail/**",
+    "~/Library/Messages/**",
+    "~/Library/Application Support/com.apple.TCC/**",
+    "~/Library/Application Support/Google/Chrome/**",
+    "~/Library/Application Support/Firefox/**",
+];
+
+#[tokio::test]
+async fn the_shipped_list_permits_an_unrelated_recursive_delete() {
+    let fx = Fixture::with_rules("sensitive_shipped_delete", &["Read", "Write"], &[], "");
+    host_list(&fx, SHIPPED_HOME_ENTRIES);
+    let projects = fx.root.join("projects");
+    let target = projects.join("x");
+    std::fs::create_dir_all(target.join("child")).unwrap();
+    let (result, record) = second_subject_attempt(
+        &fx,
+        Verb::FsDelete {
+            path: target.to_str().unwrap().into(),
+            recursive: true,
+        },
+        &projects,
+    )
+    .await;
+    assert_granted(
+        &result,
+        &record,
+        maknae_proto::MutationScope::RecursiveDelete {
+            root: target.to_str().unwrap().into(),
+        },
+    );
+    let (result, record) = second_subject_attempt(
+        &fx,
+        Verb::FsDelete {
+            path: fx.root.join(".ssh").to_str().unwrap().into(),
+            recursive: true,
+        },
+        &fx.root,
+    )
+    .await;
+    assert_refused(&result, &record, "sensitive: host ~/.ssh/**");
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn an_admin_etc_entry_refuses_a_read_asked_as_private_etc() {
+    let fx = admin_of_everything("sensitive_private_tmp");
+    let dir = std::path::PathBuf::from(format!("/tmp/maknae617_private_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir(&dir).unwrap();
+    let _guard = common::DirGuard(dir.clone());
+    let secret = dir.join("secret");
+    std::fs::write(&secret, SENSITIVE_SENTINEL).unwrap();
+    let entry = secret.to_str().unwrap().to_owned();
+    assert!(
+        entry.starts_with("/tmp/"),
+        "premise: the entry is the /tmp form"
+    );
+    host_list(&fx, &[&entry]);
+    let asked = std::path::Path::new("/private").join(secret.strip_prefix("/").unwrap());
+    let (run, records) = read_outside(&fx, &asked).await;
+    assert_read_refused(&run, &records, &format!("sensitive: host {entry}"));
+    assert!(
+        records
+            .last()
+            .unwrap()
+            .object
+            .as_deref()
+            .is_some_and(|o| o.starts_with("/private/tmp/")),
+        "premise: the kernel reports the /private form: {:?}",
+        records.last()
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_case_variant_of_a_protected_path_is_refused_on_macos() {
+    let fx = Fixture::new("sensitive_case_variant", "Read");
+    std::fs::create_dir(fx.root.join(".ssh")).unwrap();
+    std::fs::write(fx.root.join(".ssh/id"), SENSITIVE_SENTINEL).unwrap();
+    host_list(&fx, &["~/.ssh/**"]);
+    let (run, records) = read_outside(&fx, &fx.root.join(".SSH/id")).await;
+    assert_read_refused(&run, &records, "sensitive: host ~/.ssh/**");
+}

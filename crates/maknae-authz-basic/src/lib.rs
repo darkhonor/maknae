@@ -1537,10 +1537,7 @@ impl maknae_security::Authorizer for BasicAuthorizer {
     }
 
     fn decide_cited_all(&self, reqs: &[maknae_security::Request]) -> Vec<maknae_security::Decided> {
-        let (snap, principal) = (self.snapshot(), self.current_principal());
-        reqs.iter()
-            .map(|r| self.decide_on(&snap, &principal, r))
-            .collect()
+        Baseline::decide_cited_all_on(self, &self.snapshot(), reqs)
     }
 
     fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
@@ -1574,6 +1571,13 @@ pub trait Baseline: maknae_security::Authorizer + sealed::Sealed + Send + Sync +
     fn install(&self, snapshot: Arc<Snapshot>);
     fn principal(&self) -> maknae_config::Principal;
     fn live_turn(&self) -> &LiveTurnLock;
+    /// Decides `reqs` on `snap` with the installed principal, as `decide_cited_all` does
+    /// on the installed snapshot.
+    fn decide_cited_all_on(
+        &self,
+        snap: &Snapshot,
+        reqs: &[maknae_security::Request],
+    ) -> Vec<maknae_security::Decided>;
     /// The next decision resolves the enrolled principal to `principal`; refused
     /// unless `turn` is this baseline's own.
     fn install_principal(
@@ -1615,6 +1619,17 @@ impl Baseline for BasicAuthorizer {
         &self.live_turn
     }
 
+    fn decide_cited_all_on(
+        &self,
+        snap: &Snapshot,
+        reqs: &[maknae_security::Request],
+    ) -> Vec<maknae_security::Decided> {
+        let principal = self.current_principal();
+        reqs.iter()
+            .map(|r| self.decide_on(snap, &principal, r))
+            .collect()
+    }
+
     fn install_principal(
         &self,
         turn: &LiveTurn<'_>,
@@ -1654,6 +1669,14 @@ impl Baseline for HermeticAuthorizer {
 
     fn live_turn(&self) -> &LiveTurnLock {
         Baseline::live_turn(&self.inner)
+    }
+
+    fn decide_cited_all_on(
+        &self,
+        snap: &Snapshot,
+        reqs: &[maknae_security::Request],
+    ) -> Vec<maknae_security::Decided> {
+        Baseline::decide_cited_all_on(&self.inner, snap, reqs)
     }
 
     fn install_principal(
@@ -3580,6 +3603,27 @@ mod tests {
         assert!(arrives(&gate), "the probe never reached evaluation");
         gate.release.wait();
         assert_eq!(probe.join().unwrap(), contained());
+    }
+
+    #[test]
+    fn decide_cited_all_on_decides_on_the_snapshot_it_is_given() {
+        let auth = authorizer_over(EMPTY, Some(ADMIN_ROOT), &[("root", 0)]);
+        auth.set_decision_log(Some(Vec::new()));
+        let held = auth.snapshot();
+        auth.install(compiled(&source_with(
+            EMPTY,
+            Some(ADVERSARY_ROOT),
+            &[("root", 0)],
+        )));
+        let on = |snap: &Snapshot| -> Vec<_> {
+            Baseline::decide_cited_all_on(&auth, snap, &[whoami(0), whoami(0)])
+                .into_iter()
+                .map(|d| d.verdict)
+                .collect()
+        };
+        assert_eq!(on(&held), vec![audit_permit(), audit_permit()]);
+        assert_eq!(on(&auth.snapshot()), vec![contained(), contained()]);
+        assert_eq!(auth.read_decision_log().len(), 4);
     }
 
     #[test]

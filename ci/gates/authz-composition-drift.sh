@@ -19,7 +19,11 @@
 #      where the wiring `boot.ceiling()` -> operand is held by a test.
 #   2. (type-level) `Composition`'s baseline is a NAMED FIELD bounded by the
 #      sealed `Baseline` trait -- not `Option<..>`, `Vec<..>` or `Box<dyn ..>` --
-#      and `ceiling` is a named `CeilingAuthorizer` field.
+#      `ceiling` is a named `CeilingAuthorizer` field, and `sensitive` is a named
+#      `SensitiveOperand` field (#617). Both operand arrays -- `operands()` (names,
+#      subjects) and `operands_with` (every decision) -- list the three in order,
+#      and the sensitive operand names itself `maknae-sensitive`, so the composed
+#      name is `maknae-authz-basic+maknae-ceiling+maknae-sensitive`.
 #   3. (type-level) `Baseline` is SEALED and implemented for exactly the two
 #      permitted types, only in the owning crate.
 #   4. (config vocabulary) None of the six spellings a PDP-selection key would
@@ -36,15 +40,17 @@
 #      false pass.
 #   5. (boot-time evidence) run.rs CONSTRUCTS the boot composition record --
 #      one `make_record(` call carrying "boot", "authz", "permit" and a reason
-#      that starts "authorization composition: " and carries the SYSTEM and
-#      the ceiling LEVEL (`; system: {..}; ceiling: {..}`) -- AND EMITS it
+#      that starts "authorization composition: " and carries the SYSTEM, the
+#      ceiling LEVEL and the host sensitive list's size
+#      (`; system: {..}; ceiling: {..}; sensitive: {..} host entries`) -- AND EMITS it
 #      within a bound (`sink.emit_within(&composition_rec, <bound>)`, #497), both
 #      in the production half. Its VALUE is
 #      asserted by the root-only boot test on a test host.
-#   6. (type-level, whole tree) `Composition::new(` and `CeilingAuthorizer::new(`
-#      are called NOWHERE in production code except the two files that define
-#      them (`composition.rs` -- where `build_pdp` is the one production
-#      caller -- and `ceiling_authz.rs`). The constructors stay `pub` for the
+#   6. (type-level, whole tree) `Composition::new(`, `CeilingAuthorizer::new(`
+#      and `SensitiveAuthorizer::new(` are called NOWHERE in production code
+#      except the files that define them (`composition.rs` -- where `build_pdp`
+#      is the one production caller, and where each decision batch builds the
+#      sensitive operand -- `ceiling_authz.rs` and `sensitive_authz.rs`). The constructors stay `pub` for the
 #      integration harness; this check is what keeps a second, hand-built
 #      composition from being routed to the serve loop from any other module
 #      (operator ruling 2026-09-06 on PR #231: keep them public, gate the
@@ -141,6 +147,19 @@ if comp:
             fail("composition.rs: `Composition` has no named `ceiling` field (a mandatory operand is ALWAYS composed, ADR-0020 §3)")
         elif c.group(1).strip() != "CeilingAuthorizer":
             fail(f"composition.rs: `ceiling` must be the bare `CeilingAuthorizer`, found `{c.group(1).strip()}`")
+        z = re.search(r"\n\s*sensitive\s*:\s*([^,\n]+)\s*,", body)
+        if not z:
+            fail("composition.rs: `Composition` has no named `sensitive` field (the sensitive.yaml operand is ALWAYS composed, ADR-0034)")
+        elif z.group(1).strip() != "SensitiveOperand":
+            fail(f"composition.rs: `sensitive` must be the bare `SensitiveOperand`, found `{z.group(1).strip()}`")
+    code2 = re.sub(r"//[^\n]*", "", re.sub(r"/\*.*?\*/", "", comp, flags=re.S))
+    if not re.search(r"\[\s*&self\.baseline\s*,\s*&self\.ceiling\s*,\s*&self\.sensitive\s*\]", code2):
+        fail("composition.rs: `operands()` must list `[&self.baseline, &self.ceiling, &self.sensitive]` -- the composed name and subjects come from it")
+    if not re.search(r"\[\s*base\s*,\s*&self\.ceiling\s*,\s*sensitive\s*\]", code2):
+        fail("composition.rs: `operands_with` must fold `[base, &self.ceiling, sensitive]` -- every decision goes through it")
+sens = production_half(must_read("crates/maknae-kernel/src/sensitive_authz.rs"))
+if sens and not re.search(r'pub const SENSITIVE_BACKEND_NAME\s*:\s*&str\s*=\s*"maknae-sensitive"\s*;', sens):
+    fail("sensitive_authz.rs: the operand must name itself `maknae-sensitive` (SENSITIVE_BACKEND_NAME)")
 
 # 3. Sealed trait, exactly the permitted impls, all in the owning crate.
 basic = must_read("crates/maknae-authz-basic/src/lib.rs")
@@ -189,6 +208,8 @@ if run:
     for c in evidence:
         if '; system: {' not in c.group(1) or '; ceiling: {' not in c.group(1):
             fail("run.rs: the boot composition evidence record's reason must carry '; system: {..}; ceiling: {..}' -- the values the operand enforces")
+        if '; sensitive: {} host entries' not in c.group(1):
+            fail("run.rs: the boot composition evidence record's reason must carry '; sensitive: {} host entries' -- the size of the host list the operand enforces")
     if len(evidence) != 1:
         fail(f"run.rs: expected exactly ONE boot composition evidence record (make_record with \"boot\", \"authz\", \"permit\" and an 'authorization composition: ' reason), found {len(evidence)}")
     emit_code = re.sub(r"//[^\n]*", "", re.sub(r"/\*.*?\*/", "", run, flags=re.S))
@@ -203,8 +224,8 @@ def strip_comments(src: str) -> str:
         return "".join("\n" if c == "\n" else " " for c in m.group(0))
     out = re.sub(r"/\*.*?\*/", blank, src, flags=re.S)
     return re.sub(r"//[^\n]*", blank, out)
-DEFINING = {"crates/maknae-kernel/src/composition.rs", "crates/maknae-kernel/src/ceiling_authz.rs"}
-ctor = re.compile(r"\b(Composition|CeilingAuthorizer)\s*::\s*new\s*\(")
+DEFINING = {"crates/maknae-kernel/src/composition.rs", "crates/maknae-kernel/src/ceiling_authz.rs", "crates/maknae-kernel/src/sensitive_authz.rs"}
+ctor = re.compile(r"\b(Composition|CeilingAuthorizer|SensitiveAuthorizer)\s*::\s*new\s*\(")
 for p in all_rs:
     rel = str(p.relative_to(root))
     if rel in DEFINING:

@@ -559,7 +559,8 @@ Case variants such as `secret` are accepted.
 > `releasable_to`, the CUI fields and `accreditation_ref` have **no bearing** on this
 > operand (an ATO is a US-government artifact; most deployments will never have one).
 > The boot trail records what will be enforced: the `authz` boot record's reason reads
-> `authorization composition: maknae-authz-basic+maknae-ceiling; system: US; ceiling: SECRET`.
+> `authorization composition: maknae-authz-basic+maknae-ceiling+maknae-sensitive; system: US; ceiling: SECRET; sensitive: <n> host entries`,
+> where `<n>` is the number of entries in `/etc/maknae/sensitive.yaml`.
 
 ---
 

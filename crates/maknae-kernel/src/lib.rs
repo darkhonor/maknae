@@ -31,6 +31,7 @@ mod posture;
 mod provider_choice;
 pub mod reload;
 mod run;
+mod sensitive_authz;
 mod session;
 pub mod session_facts;
 pub mod sync;
@@ -90,6 +91,7 @@ pub use run::{
     ContainmentStatus, Corrective, KernelGraphStatus, PlaneAccept, ReleaseRequest, WhereCtx,
     MAX_SUBJECT_USER_BYTES,
 };
+pub use sensitive_authz::{sensitive_match, SensitiveMatch};
 #[cfg(any(test, feature = "hermetic-test-seam"))]
 pub use session::AllowFacts;
 pub use session::{Facts, FactsGate, SessionChannel, SessionFacts, SessionRecord};
