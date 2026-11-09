@@ -136,14 +136,15 @@ pub(crate) const DEPLOYMENT: &str = if cfg!(target_os = "macos") {
 } else {
     r#"{"mode":"linux-host"}"#
 };
-pub(crate) const EMPTY_SENSITIVE: &str = "schema_version: 1\nsensitive: []\n";
-
-/// The host `sensitive.yaml` every policy directory needs, at the policy files' mode.
-pub(crate) fn write_empty_sensitive(dir: &Path) {
+pub(crate) fn write_sensitive(dir: &Path, body: &str) {
     use std::os::unix::fs::PermissionsExt;
     let p = dir.join(maknae_config::SENSITIVE_FILE);
-    std::fs::write(&p, EMPTY_SENSITIVE).unwrap();
+    std::fs::write(&p, body).unwrap();
     std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
+}
+
+pub(crate) fn write_empty_sensitive(dir: &Path) {
+    write_sensitive(dir, "schema_version: 1\nsensitive: []\n");
 }
 
 pub(crate) const DEPLOYMENT_YAML: &str = if cfg!(target_os = "macos") {

@@ -360,6 +360,7 @@ mod tests {
     }
 
     use super::*;
+    use crate::test_fixtures::{write_empty_sensitive, write_sensitive};
     use std::os::unix::fs::PermissionsExt;
 
     fn principal() -> Principal {
@@ -402,14 +403,8 @@ mod tests {
             std::fs::write(d.join(name), body).unwrap();
             std::fs::set_permissions(d.join(name), std::fs::Permissions::from_mode(0o640)).unwrap();
         }
-        write_sensitive(&d, crate::test_fixtures::EMPTY_SENSITIVE);
+        write_empty_sensitive(&d);
         d
-    }
-
-    fn write_sensitive(d: &std::path::Path, body: &str) {
-        let p = d.join(maknae_config::SENSITIVE_FILE);
-        std::fs::write(&p, body).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
     }
 
     const EMPTY_POLICY: &str = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n";

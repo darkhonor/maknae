@@ -14912,7 +14912,7 @@ mod reload_fixture {
         }
 
         pub(super) fn write_sensitive(&self, body: &str) {
-            write_0640(&self.dir.join(maknae_config::SENSITIVE_FILE), body);
+            crate::test_fixtures::write_sensitive(&self.dir, body);
         }
 
         pub(super) fn mirror(&self) -> String {

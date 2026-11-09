@@ -140,7 +140,6 @@ impl Snapshot {
         self.loaded.agents.0.get(&uid).map(String::as_str)
     }
 
-    /// The host `sensitive.yaml` this snapshot was compiled with.
     pub fn sensitive(&self) -> &Arc<maknae_config::SensitiveList> {
         &self.loaded.sensitive
     }

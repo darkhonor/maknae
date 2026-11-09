@@ -629,6 +629,7 @@ impl PolicySource {
     }
 
     /// Reads no file: the host list is empty until [`PolicySource::with_sensitive`].
+    #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
     pub fn from_parts(
         policy: maknae_config::AuthzPolicy,
         bindings: maknae_config::Bindings,
@@ -661,6 +662,7 @@ impl PolicySource {
         Self::parts_with(policy, bindings, uid_map, agents, hosts, principal, paths)
     }
 
+    #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
     fn parts_with(
         policy: maknae_config::AuthzPolicy,
         bindings: maknae_config::Bindings,
@@ -684,6 +686,7 @@ impl PolicySource {
         })
     }
 
+    #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
     pub fn with_sensitive(mut self, sensitive: maknae_config::SensitiveList) -> Self {
         self.sensitive = Arc::new(sensitive);
         self
@@ -961,8 +964,9 @@ impl PolicySource {
     }
 
     /// `authz.yaml`'s top-level sections, `"bindings"` from `bindings.yaml` when it has
-    /// the key, `"sensitive"` from `sensitive.yaml`, and `"agents.<id>"` for each enrolled agent's `policy.yaml`, each
-    /// canonical JSON through the caller's digest, by key.
+    /// the key, `"sensitive"` from `sensitive.yaml`, and `"agents.<id>"` for each
+    /// enrolled agent's `policy.yaml`, each canonical JSON through the caller's digest,
+    /// by key.
     pub fn section_digests(
         &self,
         digest: fn(&[u8]) -> [u8; 32],
@@ -2447,7 +2451,7 @@ mod tests {
     const DIR: &str = "/etc/maknae";
     const PATH: &str = "/etc/maknae/authz.yaml";
     const EMPTY: &str = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n";
-    const EMPTY_SENSITIVE: &str = "schema_version: 1\nsensitive: []\n";
+    const SSH_SENSITIVE: &str = "schema_version: 1\nsensitive: [\"~/.ssh/**\"]\n";
     const ADMIN_ROOT: &str = "schema_version: 1\nbindings:\n  admin: [\"root\"]\n";
     const ADVERSARY_ROOT: &str = "schema_version: 1\nbindings:\n  adversary: [\"root\"]\n";
     const CONTAINED: &str = "subject contained: role=adversary";
@@ -3355,7 +3359,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        for (name, body) in [("authz.yaml", EMPTY), ("bindings.yaml", ADMIN_ROOT)] {
+        for (name, body) in [
+            ("authz.yaml", EMPTY),
+            ("bindings.yaml", ADMIN_ROOT),
+            (maknae_config::SENSITIVE_FILE, SSH_SENSITIVE),
+        ] {
             let p = dir.join(name);
             std::fs::write(&p, body).unwrap();
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
@@ -3371,6 +3379,7 @@ mod tests {
         if nix::unistd::geteuid().is_root() {
             let src = got.expect("as root the fixture IS root-owned");
             assert_eq!(src.uid_map().get("root"), Some(&0));
+            assert_eq!(src.sensitive().entries().collect::<Vec<_>>(), ["~/.ssh/**"]);
         } else {
             assert!(
                 matches!(got, Err(AuthzBasicError::Load(ref m)) if m.contains("root")),
@@ -5347,15 +5356,20 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("mab_src_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        for name in ["authz.yaml", "bindings.yaml"] {
+        for (name, body) in [
+            ("authz.yaml", "schema_version: 1\n"),
+            ("bindings.yaml", "schema_version: 1\n"),
+            (maknae_config::SENSITIVE_FILE, SSH_SENSITIVE),
+        ] {
             let p = dir.join(name);
-            std::fs::write(&p, "schema_version: 1\n").unwrap();
+            std::fs::write(&p, body).unwrap();
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
         }
         let got = PolicySource::load(PolicyPaths::in_dir(&dir), principal());
         let _ = std::fs::remove_dir_all(&dir);
         if nix::unistd::geteuid().is_root() {
-            assert!(got.is_ok(), "{got:?}");
+            let src = got.expect("as root the fixture IS root-owned");
+            assert_eq!(src.sensitive().entries().collect::<Vec<_>>(), ["~/.ssh/**"]);
         } else {
             assert!(
                 matches!(got, Err(AuthzBasicError::Load(ref m)) if m.contains("root")),
@@ -5453,6 +5467,8 @@ mod tests {
             assert_eq!(auth.snapshot().agent_uid("hobi"), Some(2001));
         }
 
+        const EMPTY_SENSITIVE: &str = "schema_version: 1\nsensitive: []\n";
+
         fn fixture_req() -> maknae_config::TargetRequired {
             maknae_config::TargetRequired {
                 owner: None,
@@ -5482,10 +5498,7 @@ mod tests {
                 let _ = std::fs::remove_dir_all(&d);
                 std::fs::create_dir_all(&d).unwrap();
                 std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
-                write(
-                    &d.join(maknae_config::SENSITIVE_FILE),
-                    super::EMPTY_SENSITIVE,
-                );
+                write(&d.join(maknae_config::SENSITIVE_FILE), EMPTY_SENSITIVE);
                 Fixture(d)
             }
 
