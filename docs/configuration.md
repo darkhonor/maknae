@@ -297,7 +297,7 @@ The kernel records each conversation a loop opens: an owner, the working directo
 
 The shipped file grants all five to `admin` and to `user`. It has no `destinations:` key, so a prompt is refused at the destination check until you add one ([first provider](first-provider.md#4-allow-the-prompt)). Agents are refused `session.new` unless an agent `policy.yaml` grants it.
 
-**The working directory is recorded, not decided.** `session.new` is decided by the grant alone; only once the grant permits does the kernel check the client's descriptor. It records the directory the descriptor resolves to, as the kernel reports it, and neither decides it as a read nor confines the conversation to it. A symlinked directory is recorded as its target. The only file system restrictions are those the OS imposes and the `permissions:` entries of `authz.yaml` on each `fs.*` request. Home confinement for `fs.*` is tracked in #617.
+**The working directory is recorded, not decided.** `session.new` is decided by the grant alone; only once the grant permits does the kernel check the client's descriptor. It records the directory the descriptor resolves to, as the kernel reports it, and neither decides it as a read nor confines the conversation to it. A symlinked directory is recorded as its target. The only file system restrictions are those the OS imposes and the `permissions:` entries of `authz.yaml` on each `fs.*` request; `fs.*` is not confined to the home (ADR-0034).
 
 **The pairing rule.** In `authz.yaml`, a role or a `subjects:` entry whose effective grant (allow minus deny, after family expansion) holds `session.prompt` without `session.new` refuses the whole file at load. An agent's `policy.yaml` is exempt.
 

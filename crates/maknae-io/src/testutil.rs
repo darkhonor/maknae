@@ -43,10 +43,37 @@ pub(crate) fn skip_or_fail(what: &str, why: &str) {
     }
 }
 
-pub(crate) use tests::{isolated, unprivileged};
+pub(crate) use tests::{isolated, outside_any_home, unprivileged};
 
 #[cfg(test)]
 mod tests {
+    /// A directory at mode `0755` (pinned against the host umask) that no home contains.
+    pub(crate) fn outside_any_home() -> (tempfile::TempDir, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::Builder::new()
+            .prefix("maknae-io-outside-home-")
+            .tempdir_in(std::env::temp_dir())
+            .expect("tempdir");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("pin the fixture's mode");
+        let path = dir.path().canonicalize().expect("canonicalize");
+        let homes = [
+            crate::session_home(),
+            std::env::var_os("HOME").and_then(|h| std::path::Path::new(&h).canonicalize().ok()),
+        ];
+        for home in homes
+            .into_iter()
+            .flatten()
+            .filter(|h| h.as_path() != std::path::Path::new("/"))
+        {
+            assert!(
+                !path.starts_with(&home),
+                "premise: {path:?} must not lie beneath the home {home:?}"
+            );
+        }
+        (dir, path)
+    }
+
     /// Runs `case` as an unprivileged uid. Non-root runs it inline; root re-execs a copy
     /// of this test binary as `nobody` and fails unless the child ran `case` to the end.
     pub(crate) fn unprivileged(name: &str, case: impl FnOnce()) {

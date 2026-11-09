@@ -79,8 +79,9 @@ pub use audit_append::{open_audit_append, open_existing_audit_append};
 pub use checks::{AnchorRequired, DescendantRequired, TargetRequired};
 pub use delegated::{
     open_directory_for_delegation, open_path_for_delegation, recv_delegated, refuse_access_bearing,
-    send_delegated, sender_admitted, verify_delegated, Delegated, DelegatedFds, DelegatedRequired,
-    ExpectedSender, Received, SenderCreds, DELEGATED_FDS_PER_CONNECTION,
+    send_delegated, sender_admitted, verify_delegated, Delegated, DelegatedFds, DelegatedMeta,
+    DelegatedRequired, ExpectedSender, FileKind, Received, SenderCreds,
+    DELEGATED_FDS_PER_CONNECTION,
 };
 pub use error::{IoError, IoKind};
 pub use home::{canonical_home, session_home};
@@ -88,7 +89,7 @@ pub use host_facts::presence;
 pub use mutation::{
     read_held_file, read_held_page, replace_held_file, verify_mutation_directory,
     verify_unconfined_directory, DirectoryCursor, EffectState, FileVersion, MutationDirectory,
-    MutationEffect, MutationEffectKind, MutationFailure, MutationRequired, WriteBase,
+    MutationEffect, MutationEffectKind, MutationFailure, WriteBase,
 };
 pub use normalize::normalize;
 pub use page::{read_page, Page, PageNext, PageWindow};

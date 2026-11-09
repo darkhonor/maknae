@@ -16,25 +16,17 @@
 
 use crate::checks::map_errno_no_disambiguation as io_error;
 use crate::syscall;
-use crate::{AnchorRequired, DelegatedRequired, Entry, IoError, TargetRequired};
+use crate::{Entry, IoError, TargetRequired};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-
-/// Location and confinement-root requirements; no child mutation permission claim.
-#[derive(Clone, Debug)]
-pub struct MutationRequired {
-    pub confined_beneath: PathBuf,
-    pub root_required: AnchorRequired,
-}
 
 /// A held directory whose kernel path was verified. Fields cannot be forged.
 #[derive(Debug)]
 pub struct MutationDirectory {
     fd: OwnedFd,
     path: PathBuf,
-    required: MutationRequired,
     device: nix::libc::dev_t,
     deadline: Option<Instant>,
 }
@@ -93,20 +85,6 @@ fn no_effect(path: &Path) -> impl FnOnce(IoError) -> MutationFailure + '_ {
     move |error| failure(path, EffectState::NoEffect, error)
 }
 
-fn directory_requirements(req: &MutationRequired) -> DelegatedRequired {
-    DelegatedRequired {
-        confined_beneath: req.confined_beneath.clone(),
-        root_required: req.root_required.clone(),
-        target: TargetRequired {
-            owner: None,
-            mode_mask: None,
-            nlink_exactly_one: false,
-            regular_file: false,
-            max_bytes: None,
-        },
-    }
-}
-
 // Bound the leaf before allocating its joined path; the complete path has its
 // own independent encoding budget. Neither validator normalizes away traversal.
 fn valid_leaf(leaf: &str) -> bool {
@@ -118,7 +96,7 @@ fn valid_leaf(leaf: &str) -> bool {
         && leaf.len() <= 4096
 }
 
-fn checked_path(path: &Path) -> Result<(), IoError> {
+pub(crate) fn checked_path(path: &Path) -> Result<(), IoError> {
     let text = path.to_str().ok_or_else(|| IoError::NonUtf8Component {
         path: path.to_path_buf(),
     })?;
@@ -126,15 +104,6 @@ fn checked_path(path: &Path) -> Result<(), IoError> {
         return Err(IoError::InvalidMutationPath {
             path: path.to_path_buf(),
         });
-    }
-    Ok(())
-}
-
-fn check_root(path: &Path) -> Result<(), IoError> {
-    checked_path(path)?;
-    let st = syscall::stat_path(path).map_err(at(path))?;
-    if st.st_mode & nix::libc::S_IFMT != nix::libc::S_IFDIR {
-        return Err(io_error(nix::errno::Errno::ENOTDIR, path));
     }
     Ok(())
 }
@@ -152,28 +121,25 @@ fn ensure_directory(fd: &impl AsFd, path: &Path) -> Result<nix::sys::stat::FileS
     Ok(st)
 }
 
-pub fn verify_mutation_directory(
-    fd: OwnedFd,
-    required: MutationRequired,
-) -> Result<MutationDirectory, IoError> {
-    check_root(&required.confined_beneath)?;
-    let verified = crate::verify_delegated(fd.as_fd(), directory_requirements(&required))?;
-    checked_path(&verified.path)?;
-    let st = ensure_directory(&fd, &verified.path)?;
+fn directory_path(fd: BorrowedFd<'_>) -> Result<(PathBuf, nix::sys::stat::FileStat), IoError> {
+    let path = crate::delegated::delegated_path(fd)?;
+    checked_path(&path)?;
+    let st = ensure_directory(&fd, &path)?;
+    Ok((path, st))
+}
+
+pub fn verify_mutation_directory(fd: OwnedFd) -> Result<MutationDirectory, IoError> {
+    let (path, st) = directory_path(fd.as_fd())?;
     Ok(MutationDirectory {
         fd,
-        path: verified.path,
-        required,
+        path,
         device: st.st_dev,
         deadline: None,
     })
 }
 
 pub fn verify_unconfined_directory(fd: BorrowedFd<'_>) -> Result<PathBuf, IoError> {
-    let path = crate::delegated::delegated_path(fd)?;
-    checked_path(&path)?;
-    ensure_directory(&fd, &path)?;
-    Ok(path)
+    Ok(directory_path(fd)?.0)
 }
 
 fn same_path(actual: &Path, expected: &Path) -> Result<(), IoError> {
@@ -503,9 +469,7 @@ impl MutationDirectory {
     /// Compare with both the immutable verified path and the grant's expected path.
     pub fn reverify(&self, expected: &Path) -> Result<(), IoError> {
         same_path(&self.path, expected)?;
-        check_root(&self.required.confined_beneath)?;
-        let actual =
-            crate::verify_delegated(self.fd.as_fd(), directory_requirements(&self.required))?.path;
+        let actual = crate::delegated::delegated_path(self.fd.as_fd())?;
         same_path(&actual, expected)?;
         ensure_directory(&self.fd, expected)?;
         Ok(())
@@ -608,7 +572,7 @@ impl MutationDirectory {
         let fd = syscall::open_mutation_directory_at(&self.fd, leaf).map_err(|e| {
             crate::checks::map_errno(e, &path, || syscall::fstatat_nofollow(&self.fd, leaf))
         })?;
-        let mut child = verify_mutation_directory(fd, self.required.clone())?;
+        let mut child = verify_mutation_directory(fd)?;
         child.deadline = self.deadline;
         same_path(child.path(), &path)?;
         if child.device != self.device {
@@ -620,7 +584,7 @@ impl MutationDirectory {
     pub fn cursor(&self) -> Result<DirectoryCursor, IoError> {
         self.reverify(&self.path)?;
         let fd = syscall::open_dir_at(&self.fd, ".").map_err(at(&self.path))?;
-        let directory = verify_mutation_directory(fd, self.required.clone())?;
+        let directory = verify_mutation_directory(fd)?;
         same_path(directory.path(), self.path())?;
         let entries = syscall::open_dir_handle(&directory.fd)
             .map_err(at(&self.path))?
@@ -687,12 +651,12 @@ mod tests {
                 std::fs::write(&p, b"original long bytes").unwrap();
                 let mut shared = OpenOptions::new().write(true).open(&p).unwrap();
                 shared.seek(SeekFrom::Start(9)).unwrap();
-                let before = syscall::stat_path(&p).unwrap();
+                let before = nix::sys::stat::stat(&p).unwrap();
                 let fd = held(&p);
                 replace_held_file(fd.as_fd(), &p, b"new", WriteBase::Any).unwrap();
                 assert_eq!(std::fs::read(&p).unwrap(), b"new");
                 assert_eq!(shared.stream_position().unwrap(), 9);
-                assert!(same_object(&before, &syscall::stat_path(&p).unwrap()));
+                assert!(same_object(&before, &nix::sys::stat::stat(&p).unwrap()));
                 replace_held_file(fd.as_fd(), &p, b"", WriteBase::Any).unwrap();
                 assert!(std::fs::read(&p).unwrap().is_empty());
             },
@@ -726,7 +690,7 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("moved")).unwrap(), b"untouched");
     }
     fn version(p: &Path) -> FileVersion {
-        FileVersion::of(&syscall::stat_path(p).unwrap())
+        FileVersion::of(&nix::sys::stat::stat(p).unwrap())
     }
     #[test]
     fn a_matching_base_replaces_and_returns_the_written_version() {
@@ -926,12 +890,12 @@ mod tests {
         let (a, b) = (root(&d).join("a"), root(&d).join("b"));
         std::fs::write(&a, b"a").unwrap();
         std::fs::write(&b, b"b").unwrap();
-        let sa = syscall::stat_path(&a).unwrap();
+        let sa = nix::sys::stat::stat(&a).unwrap();
         assert!(same_object(
             &sa,
             &syscall::fstat(&File::open(&a).unwrap()).unwrap()
         ));
-        assert!(!same_object(&sa, &syscall::stat_path(&b).unwrap()));
+        assert!(!same_object(&sa, &nix::sys::stat::stat(&b).unwrap()));
         let mut elsewhere = sa;
         elsewhere.st_dev = sa.st_dev.wrapping_add(1);
         assert!(!same_object(&sa, &elsewhere));
@@ -1264,19 +1228,10 @@ mod tests {
         d.path().canonicalize().unwrap()
     }
     fn directory(d: &tempfile::TempDir) -> MutationDirectory {
-        verify_mutation_directory(
-            File::open(d.path()).unwrap().into(),
-            MutationRequired {
-                confined_beneath: root(d),
-                root_required: AnchorRequired::OS_DAC,
-            },
-        )
-        .unwrap()
+        verify_mutation_directory(File::open(d.path()).unwrap().into()).unwrap()
     }
-    fn req(d: &tempfile::TempDir) -> DelegatedRequired {
-        DelegatedRequired {
-            confined_beneath: root(d),
-            root_required: AnchorRequired::OS_DAC,
+    fn req() -> crate::DelegatedRequired {
+        crate::DelegatedRequired {
             target: crate::TargetRequired::OS_DAC_REGULAR,
         }
     }
@@ -1284,21 +1239,13 @@ mod tests {
         OpenOptions::new().write(true).open(p).unwrap().into()
     }
     #[test]
-    fn real_descriptor_accessors_and_disappearing_root_preserve_identity() {
+    fn real_descriptor_accessors_and_a_disappearing_directory_preserve_identity() {
         let d = tempfile::tempdir().unwrap();
         let dir = directory(&d);
         assert_eq!(
             syscall::fstat(&dir).unwrap().st_ino,
             syscall::fstat(&dir.fd).unwrap().st_ino
         );
-        let missing = root(&d).join("missing-root");
-        assert!(matches!(
-            check_root(&missing),
-            Err(IoError::Io {
-                kind: crate::IoKind::NotFound,
-                ..
-            })
-        ));
         let raw = PathBuf::from(std::ffi::OsStr::from_bytes(b"/nonutf8-\xff"));
         assert_eq!(
             checked_path(&raw),
@@ -1317,14 +1264,7 @@ mod tests {
         ));
         #[cfg(target_os = "macos")]
         {
-            let held = verify_mutation_directory(
-                fd,
-                MutationRequired {
-                    confined_beneath: root(&d),
-                    root_required: AnchorRequired::OS_DAC,
-                },
-            )
-            .unwrap();
+            let held = verify_mutation_directory(fd).unwrap();
             assert_eq!(
                 held.mkdir_one("detached-sentinel").unwrap_err().state,
                 EffectState::NoEffect
@@ -1388,39 +1328,20 @@ mod tests {
     }
 
     #[test]
-    fn cursor_and_reverify_refuse_a_renamed_or_missing_root() {
+    fn cursor_and_reverify_refuse_a_renamed_directory() {
         let d = tempfile::tempdir().unwrap();
         let parent = root(&d);
         std::fs::create_dir(parent.join("original")).unwrap();
         let original = parent.join("original");
-        let dir = verify_mutation_directory(
-            File::open(&original).unwrap().into(),
-            MutationRequired {
-                confined_beneath: original.clone(),
-                root_required: AnchorRequired::OS_DAC,
-            },
-        )
-        .unwrap();
+        let dir = verify_mutation_directory(File::open(&original).unwrap().into()).unwrap();
         let mut cursor = dir.cursor().unwrap();
         std::fs::rename(&original, parent.join("moved")).unwrap();
-        assert!(matches!(
+        assert_eq!(
             dir.reverify(&original),
-            Err(IoError::Io {
-                kind: crate::IoKind::NotFound,
-                ..
-            })
-        ));
+            Err(IoError::MutationPathChanged { path: original })
+        );
         assert!(cursor.next_entry().is_err());
         assert!(dir.cursor().is_err());
-        assert!(verify_mutation_directory(
-            File::open(parent.join("moved")).unwrap().into(),
-            MutationRequired {
-                confined_beneath: original,
-                root_required: AnchorRequired::OS_DAC
-            }
-        )
-        .is_err());
-        assert!(check_root(Path::new("relative-root")).is_err());
     }
 
     #[test]
@@ -1630,23 +1551,7 @@ mod tests {
         assert_eq!(directory(&d).path(), root(&d));
         let p = d.path().join("not-directory");
         std::fs::write(&p, b"sentinel").unwrap();
-        assert!(verify_mutation_directory(
-            File::open(&p).unwrap().into(),
-            MutationRequired {
-                confined_beneath: root(&d),
-                root_required: AnchorRequired::OS_DAC
-            }
-        )
-        .is_err());
-        let outside = tempfile::tempdir().unwrap();
-        assert!(verify_mutation_directory(
-            File::open(outside.path()).unwrap().into(),
-            MutationRequired {
-                confined_beneath: root(&d),
-                root_required: AnchorRequired::OS_DAC
-            }
-        )
-        .is_err());
+        assert!(verify_mutation_directory(File::open(&p).unwrap().into()).is_err());
     }
     #[test]
     fn exclusive_collision_preserves_intervening_sentinel() {
@@ -1658,6 +1563,78 @@ mod tests {
         assert_eq!(std::fs::read(&p).unwrap(), b"intervening");
         assert_eq!(result.unwrap_err().state, EffectState::NoEffect);
     }
+    #[test]
+    fn a_directory_outside_any_home_verifies_for_mutation() {
+        let (_dir, base) = crate::testutil::outside_any_home();
+        let fd = crate::open_directory_for_delegation(&base).unwrap();
+        assert_eq!(verify_mutation_directory(fd).unwrap().path(), base);
+    }
+
+    fn walk_delete(parent: &MutationDirectory, leaf: &str, depth: usize) -> Result<(), IoError> {
+        assert!(depth < 8, "the walk must terminate");
+        match parent.remove_entry(leaf) {
+            Ok(_) => return Ok(()),
+            Err(MutationFailure {
+                source:
+                    IoError::Io {
+                        kind: crate::IoKind::DirectoryNotEmpty,
+                        ..
+                    },
+                ..
+            }) => {}
+            Err(e) => return Err(e.source),
+        }
+        let child = parent.open_child_directory(leaf)?;
+        let mut cursor = child.cursor()?;
+        let mut names = Vec::new();
+        while let Some(entry) = cursor.next_entry()? {
+            names.push(entry.name.into_string().unwrap());
+        }
+        for name in names {
+            walk_delete(&child, &name, depth + 1)?;
+        }
+        parent.remove_entry(leaf).map(|_| ()).map_err(|e| e.source)
+    }
+
+    #[test]
+    fn the_recursive_delete_walk_cannot_leave_its_root() {
+        let (_tree, base) = crate::testutil::outside_any_home();
+        let (_outside, elsewhere) = crate::testutil::outside_any_home();
+        std::fs::create_dir(elsewhere.join("victim")).unwrap();
+        let sentinel = elsewhere.join("victim").join("outside-sentinel");
+        std::fs::write(&sentinel, b"safe").unwrap();
+        std::fs::create_dir_all(base.join("tree").join("sub")).unwrap();
+        std::fs::write(base.join("tree").join("sub").join("inside"), b"x").unwrap();
+        symlink(elsewhere.join("victim"), base.join("tree").join("link")).unwrap();
+        symlink(
+            elsewhere.join("victim"),
+            base.join("tree").join("sub").join("deeper-link"),
+        )
+        .unwrap();
+
+        let parent =
+            verify_mutation_directory(crate::open_directory_for_delegation(&base).unwrap())
+                .unwrap();
+        let tree = parent.open_child_directory("tree").unwrap();
+        assert!(tree.open_child_directory("link").is_err());
+        assert!(tree
+            .open_child_directory("sub")
+            .unwrap()
+            .open_child_directory("deeper-link")
+            .is_err());
+        drop(tree);
+        let walked = walk_delete(&parent, "tree", 0);
+        assert!(walked.is_ok(), "{walked:?}");
+        assert!(!base.join("tree").exists());
+
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"safe", "{walked:?}");
+        assert_eq!(
+            std::fs::read_dir(elsewhere.join("victim")).unwrap().count(),
+            1,
+            "nothing outside the tree was removed: {walked:?}"
+        );
+    }
+
     #[test]
     fn symlink_child_is_not_followed_and_outside_sentinel_survives() {
         let d = tempfile::tempdir().unwrap();
@@ -1799,13 +1776,7 @@ mod tests {
                 std::fs::remove_dir(path.join("os-dir")).unwrap();
                 let fd = crate::open_directory_for_delegation(&path)
                     .expect("wx-only directory must be delegatable");
-                let directory = verify_mutation_directory(
-                    fd,
-                    MutationRequired {
-                        confined_beneath: path.clone(),
-                        root_required: AnchorRequired::OS_DAC,
-                    },
-                )
+                let directory = verify_mutation_directory(fd)
                 .unwrap();
                 directory
                     .create_exclusive("wx-sentinel", b"written")
@@ -1844,14 +1815,7 @@ mod tests {
             syscall::fstat(&root_fd).unwrap().st_dev,
             syscall::fstat(&dev_fd).unwrap().st_dev
         );
-        let directory = verify_mutation_directory(
-            root_fd.into(),
-            MutationRequired {
-                confined_beneath: PathBuf::from("/"),
-                root_required: AnchorRequired::OS_DAC,
-            },
-        )
-        .unwrap();
+        let directory = verify_mutation_directory(root_fd.into()).unwrap();
         assert!(matches!(
             directory.open_child_directory("dev"),
             Err(IoError::DifferentFilesystem { .. })
@@ -1947,19 +1911,12 @@ mod tests {
         let p = d.path().join("prepare-sentinel");
         std::fs::write(&p, b"original").unwrap();
         let fd = crate::open_path_for_delegation(&p).unwrap();
-        crate::verify_delegated(fd.as_fd(), req(&d)).unwrap();
+        crate::verify_delegated(fd.as_fd(), req()).unwrap();
         assert_eq!(std::fs::read(&p).unwrap(), b"original");
         assert!(crate::open_path_for_delegation(&d.path().join("absent")).is_err());
         assert!(!d.path().join("absent").exists());
         let fd = crate::open_directory_for_delegation(d.path()).unwrap();
-        assert!(verify_mutation_directory(
-            fd,
-            MutationRequired {
-                confined_beneath: root(&d),
-                root_required: AnchorRequired::OS_DAC
-            }
-        )
-        .is_ok());
+        assert!(verify_mutation_directory(fd).is_ok());
         assert!(crate::open_directory_for_delegation(&p).is_err());
     }
 

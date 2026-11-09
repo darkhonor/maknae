@@ -554,25 +554,16 @@ pub const FRAME_ENVELOPE_MARGIN: u64 = 512;
 
 pub const READ_PAGE_MAX_BYTES: u64 = 65_536;
 
-/// The named requirements for a SUBJECT-DELEGATED object descriptor (ADR-0009).
-///
-/// Three proofs, all required (decision 3): the descriptor proves where the object
-/// is — the kernel-reported path — `confined_beneath` proves the object lies under
-/// the requester's home, and `root_required` proves the home itself is not a place where
-/// aliases can be planted (decision 7). The descriptor confers no access; the OS
-/// answers at the subject's own re-open.
+/// The named requirements for a SUBJECT-DELEGATED object descriptor (ADR-0009,
+/// ADR-0034). The descriptor proves where the object is (the kernel-reported path) and
+/// confers no access; the OS answers at the subject's own re-open.
 ///
 /// `owner`/`mode_mask` on the TARGET stay `None` deliberately and are NOT a gap:
 /// evaluating them daemon-side is the mode-algebra reimplementation that ACLs,
 /// supplementary groups, SELinux and AppArmor make non-equivalent to the kernel's own
-/// answer. `nlink_exactly_one` is load-bearing three ways (decision 5).
-pub fn delegated_plan(home: &std::path::Path, owner_uid: u32) -> maknae_io::DelegatedRequired {
+/// answer. `nlink_exactly_one` makes deciding on the reported path sound.
+pub fn delegated_plan() -> maknae_io::DelegatedRequired {
     maknae_io::DelegatedRequired {
-        confined_beneath: home.to_path_buf(),
-        root_required: maknae_io::AnchorRequired {
-            owner: Some(owner_uid),
-            mode_mask: Some(0o022),
-        },
         target: maknae_io::TargetRequired {
             owner: None,
             mode_mask: None,
@@ -1683,26 +1674,11 @@ mod tests {
     }
 
     #[test]
-    fn delegated_plan_names_all_three_proofs() {
-        let req = delegated_plan(std::path::Path::new("/home/op"), 501);
-        assert_eq!(
-            req.confined_beneath,
-            std::path::Path::new("/home/op"),
-            "confinement is the requester's home, and it is not optional"
-        );
-        assert_eq!(
-            req.root_required.owner,
-            Some(501),
-            "the alias-planting boundary survives the anchor open (ADR-0009 D7)"
-        );
-        assert_eq!(
-            req.root_required.mode_mask,
-            Some(0o022),
-            "no group/other write on home"
-        );
+    fn delegated_plan_names_the_target_proofs() {
+        let req = delegated_plan();
         assert!(
             req.target.nlink_exactly_one,
-            "load-bearing three ways (ADR-0009 D5)"
+            "path matching is sound only for a single-named object (ADR-0034)"
         );
         assert!(req.target.regular_file, "no fifo/device");
         assert_eq!(req.target.max_bytes, None);

@@ -3,8 +3,7 @@
 //! outlive a timeout; its worker can finish that step but cannot start another.
 use maknae_config::TransportConfig;
 use maknae_io::{
-    AnchorRequired, DirectoryCursor, EffectState, IoError, IoKind, MutationDirectory,
-    MutationFailure, MutationRequired,
+    DirectoryCursor, EffectState, IoError, IoKind, MutationDirectory, MutationFailure,
 };
 use maknae_proto::{
     self as proto, EffectEntry, MutationGrant, MutationReport, MutationScope, ReportedEffect,
@@ -972,15 +971,9 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
                 _ => return Err("unexpected mutation operation".into()),
             },
             Granted::Parent(parent_path) => {
-                let parent = maknae_io::verify_mutation_directory(
-                    evidence,
-                    MutationRequired {
-                        confined_beneath: parent_path.clone(),
-                        root_required: AnchorRequired::OS_DAC,
-                    },
-                )
-                .map_err(|e| e.to_string())?
-                .with_deadline(deadline);
+                let parent = maknae_io::verify_mutation_directory(evidence)
+                    .map_err(|e| e.to_string())?
+                    .with_deadline(deadline);
                 if parent.path() != parent_path {
                     return Err("held mutation directory differs from grant parent".into());
                 }

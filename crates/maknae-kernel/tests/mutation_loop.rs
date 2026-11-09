@@ -1677,7 +1677,7 @@ async fn a_second_user_cannot_create_in_the_enrolled_home() {
     assert_refused(
         &result,
         &record,
-        "namespace location evidence refused: escapes the anchor",
+        "role user: no capability entry for fs.write",
     );
     assert!(!fx.root.join("new").exists());
 }
@@ -1707,7 +1707,7 @@ async fn a_second_user_cannot_make_a_directory_in_the_enrolled_home() {
     assert_refused(
         &result,
         &record,
-        "namespace location evidence refused: escapes the anchor",
+        "role user: no capability entry for fs.mkdir",
     );
     assert!(!fx.root.join("newdir").exists());
 }
@@ -1754,7 +1754,7 @@ async fn a_second_user_cannot_delete_in_the_enrolled_home() {
     assert_refused(
         &result,
         &record,
-        "namespace location evidence refused: escapes the anchor",
+        "role user: no capability entry for fs.delete",
     );
     assert!(target.join("child").exists());
 }
@@ -1762,27 +1762,27 @@ async fn a_second_user_cannot_delete_in_the_enrolled_home() {
 #[tokio::test]
 async fn a_requester_cannot_delete_their_own_home() {
     let b = common::second_home("mutation_delete_home");
-    let fx = Fixture::new("delete_home", "Write").with_requester_home(Some(b.0.clone()));
+    let home = b.join("home");
+    std::fs::create_dir(&home).unwrap();
+    let fx = Fixture::new("delete_home", "Write").with_requester_home(Some(home.clone()));
     std::fs::write(
         fx.paths().authz,
         "schema_version: 1\npermissions:\n  allow:\n    - \"Write(/**)\"\n  deny: []\n",
     )
     .unwrap();
-    let (result, record) = second_subject_attempt(
-        &fx,
-        Verb::FsDelete {
-            path: b.to_str().unwrap().into(),
-            recursive: true,
-        },
-        b.parent().unwrap(),
-    )
-    .await;
-    assert_refused(
-        &result,
-        &record,
-        "namespace location evidence refused: escapes the anchor",
-    );
-    assert!(b.exists());
+    for (target, parent) in [(home.as_path(), &*b), (&*b, b.parent().unwrap())] {
+        let (result, record) = second_subject_attempt(
+            &fx,
+            Verb::FsDelete {
+                path: target.to_str().unwrap().into(),
+                recursive: true,
+            },
+            parent,
+        )
+        .await;
+        assert_refused(&result, &record, "cannot delete the requester's home");
+    }
+    assert!(home.exists());
 }
 
 #[tokio::test]
@@ -1797,4 +1797,116 @@ async fn no_requester_home_means_no_mutation() {
         "requester home unavailable: unresolvable"
     );
     assert!(!fx.root.join("new").exists());
+}
+
+const OUTSIDE_SENTINEL: &[u8] = b"maknae-617-outside-home-sentinel";
+
+fn outside_the_home(fx: &Fixture, tag: &str) -> common::DirGuard {
+    let dir = common::second_home(&format!("outside_{tag}"));
+    assert!(
+        !dir.starts_with(&fx.root),
+        "premise: {:?} is outside the home",
+        dir.0
+    );
+    dir
+}
+
+fn site_allow(fx: &Fixture, allow: &str) {
+    common::write_0640(
+        &fx.paths().authz,
+        &format!("schema_version: 1\npermissions:\n  allow:\n    - \"{allow}\"\n  deny: []\n"),
+    );
+}
+
+async fn read_outside(
+    fx: &Fixture,
+    target: &std::path::Path,
+) -> (common::ReadRun, Vec<AuditRecord>) {
+    let records = Records::new(0);
+    let held = maknae_io::open_path_for_delegation(target).unwrap();
+    let verb = Verb::Read {
+        path: target.to_str().unwrap().into(),
+        conversation: None,
+        page: None,
+    };
+    let (mut client, task, body) = fx.start(verb, Some(held.try_clone().unwrap()), records.clone());
+    common::write_frame(&mut client, &body).await.unwrap();
+    let run = common::read_as_subject(&mut client, Some(&held)).await;
+    drop(client);
+    task.await.unwrap();
+    (run, records.snapshot())
+}
+
+#[tokio::test]
+async fn a_granted_read_outside_the_home_is_served() {
+    let fx = Fixture::new("outside_read", "Read");
+    let outside = outside_the_home(&fx, "read");
+    let target = outside.join("notes");
+    std::fs::write(&target, OUTSIDE_SENTINEL).unwrap();
+    site_allow(&fx, &format!("Read({}/**)", outside.display()));
+    let (run, records) = read_outside(&fx, &target).await;
+    assert_eq!(
+        run.content.as_deref().map(Vec::as_slice),
+        Some(OUTSIDE_SENTINEL),
+        "{:?}",
+        records[1].outcome
+    );
+    assert_eq!(records[1].outcome.result, "permit");
+}
+
+#[tokio::test]
+async fn the_same_read_without_the_grant_is_refused() {
+    let fx = Fixture::new("outside_read_ungranted", "Read");
+    let outside = outside_the_home(&fx, "read_ungranted");
+    let target = outside.join("notes");
+    std::fs::write(&target, OUTSIDE_SENTINEL).unwrap();
+    let (run, records) = read_outside(&fx, &target).await;
+    assert!(run.content.is_none());
+    let frame = run.first.expect("a deny frame");
+    assert!(!frame
+        .windows(OUTSIDE_SENTINEL.len())
+        .any(|w| w == OUTSIDE_SENTINEL));
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Err(e) => assert_eq!(e.code, maknae_proto::ProtoErrCode::Unauthorized),
+        other => panic!("an ungranted read outside the home must be refused: {other:?}"),
+    }
+    assert_eq!(records[1].outcome.result, "deny");
+    assert_eq!(
+        records[1].outcome.reason,
+        "role user: no capability entry for fs.read"
+    );
+}
+
+#[tokio::test]
+async fn a_granted_write_outside_the_home_lands() {
+    let fx = Fixture::new("outside_write", "Write");
+    let outside = outside_the_home(&fx, "write");
+    let target = outside.join("notes");
+    std::fs::write(&target, b"before").unwrap();
+    site_allow(&fx, &format!("Write({}/**)", outside.display()));
+    let records = Records::new(0);
+    let (mut client, task, held) =
+        replace_start(&fx, &target, OUTSIDE_SENTINEL, records.clone(), None).await;
+    let grant = granted(&mut client).await;
+    replace_as_subject(&mut client, &grant, &held, OUTSIDE_SENTINEL).await;
+    drop(client);
+    task.await.unwrap();
+    assert_eq!(std::fs::read(&target).unwrap(), OUTSIDE_SENTINEL);
+}
+
+#[tokio::test]
+async fn a_home_lookup_failure_refuses_an_absolute_path_request() {
+    let fx = Fixture::new("outside_no_home", "Read").with_requester_home(None);
+    let outside = outside_the_home(&fx, "no_home");
+    let target = outside.join("notes");
+    std::fs::write(&target, OUTSIDE_SENTINEL).unwrap();
+    site_allow(&fx, &format!("Read({}/**)", outside.display()));
+    let (run, records) = read_outside(&fx, &target).await;
+    assert!(run.content.is_none());
+    let last = records.last().expect("a request record");
+    assert_eq!(last.outcome.result, "deny");
+    assert_eq!(
+        last.outcome.reason,
+        "requester home unavailable: unresolvable"
+    );
 }

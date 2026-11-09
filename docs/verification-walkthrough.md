@@ -34,7 +34,7 @@ Controls are cited two ways. A pair such as `cli_b × key_a` is a cell of the is
 
 Below, `<A>` and `<B>` are their account names. `<kv>` is the KV v2 mount and `<prefix>` the user prefix (enroll's defaults: `maknae-kv` and `maknae/users`).
 
-**B's tools work in B's home.** The kernel confines B's file actions to B's own home, so B's reads and writes are decided against B's `~`, not A's.
+**B's tools work in B's home.** `~` in B's requests is B's own home, so B's reads and writes are decided against B's `~`, not A's.
 
 **B's prompt is visible to other local users.** On a multi-user host, other local users can read a running `maknae agent`'s prompt and `--provider` from its command line (#436, undecided).
 

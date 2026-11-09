@@ -805,7 +805,7 @@ Plane leaves now carry `spiffe://<deployment_id>/plane/{kernel,cli}` URI-SANs, a
 
 ### 3d. More than one user
 
-Enroll writes `~/.maknae` only for the account that ran it. To give another local account the agent, follow [first-provider step 4a](first-provider.md#4a-add-another-local-user): it adds the account to the `maknae` group, copies your CLI configuration to it, binds it in `bindings.yaml` and creates its Vault user. The consequence for you: once `bindings.yaml` has a `bindings:` block, only the names it lists have a role, so the enrolled administrator must be listed under `admin` too, and step 7's grant then belongs under each bound role; [reload](#reload-the-policy) `maknaed` after adding a name. A second user's file actions are confined to their own home, resolved per request.
+Enroll writes `~/.maknae` only for the account that ran it. To give another local account the agent, follow [first-provider step 4a](first-provider.md#4a-add-another-local-user): it adds the account to the `maknae` group, copies your CLI configuration to it, binds it in `bindings.yaml` and creates its Vault user. The consequence for you: once `bindings.yaml` has a `bindings:` block, only the names it lists have a role, so the enrolled administrator must be listed under `admin` too, and step 7's grant then belongs under each bound role; [reload](#reload-the-policy) `maknaed` after adding a name. A second user's `~` is their own home, resolved per request.
 
 ### 4. Check the deputy's bounds
 

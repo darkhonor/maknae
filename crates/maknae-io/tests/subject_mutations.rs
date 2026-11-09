@@ -88,7 +88,6 @@ fn distinct_credentials_preserve_os_authority() {
             .args(["-n", "-u", account, "--", "env"])
             .arg(format!("MAKNAE_CREDENTIAL_ROLE={role}"))
             .arg(format!("MAKNAE_CREDENTIAL_BASE={}", base.display()))
-            .arg(format!("MAKNAE_CREDENTIAL_UID={}", user.uid.as_raw()))
             .arg(&executable)
             .args(["--ignored", "--exact", "credential_helper", "--nocapture"])
             .spawn()
@@ -141,24 +140,11 @@ fn credential_helper() {
         return;
     };
     let base = PathBuf::from(std::env::var_os("MAKNAE_CREDENTIAL_BASE").unwrap());
-    let home = base.join("home");
-    let project = home.join("projects");
+    let project = base.join("home").join("projects");
     let mut stream = UnixStream::connect(base.join("socket")).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
-    let required = maknae_io::MutationRequired {
-        confined_beneath: home.clone(),
-        root_required: maknae_io::AnchorRequired {
-            owner: Some(
-                std::env::var("MAKNAE_CREDENTIAL_UID")
-                    .unwrap()
-                    .parse()
-                    .unwrap(),
-            ),
-            mode_mask: Some(0o022),
-        },
-    };
     if role == "subject" {
         let file = maknae_io::open_path_for_delegation(&project.join("existing")).unwrap();
         let directory = maknae_io::open_directory_for_delegation(&project).unwrap();
@@ -186,7 +172,7 @@ fn credential_helper() {
         )
         .unwrap_err();
         assert_eq!(e.state, maknae_io::EffectState::NoEffect);
-        let directory = maknae_io::verify_mutation_directory(directory, required).unwrap();
+        let directory = maknae_io::verify_mutation_directory(directory).unwrap();
         directory.create_exclusive("created", b"new").unwrap();
         directory.remove_entry("created").unwrap();
         directory.mkdir_one("directory").unwrap();
@@ -214,7 +200,7 @@ fn credential_helper() {
                 ..
             }
         ));
-        let directory = maknae_io::verify_mutation_directory(directory, required).unwrap();
+        let directory = maknae_io::verify_mutation_directory(directory).unwrap();
         for failure in [
             directory
                 .create_exclusive("service-create", b"forbidden")
