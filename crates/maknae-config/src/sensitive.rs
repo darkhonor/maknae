@@ -30,9 +30,15 @@ struct Entry {
     text: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SensitiveList {
     entries: Vec<Entry>,
+}
+
+impl Default for SensitiveList {
+    fn default() -> Self {
+        Self::empty()
+    }
 }
 
 fn invalid(reason: impl Into<String>) -> ConfigError {
@@ -76,7 +82,9 @@ impl SensitiveList {
     }
 
     pub fn empty() -> Self {
-        Self::default()
+        SensitiveList {
+            entries: Vec::new(),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -809,6 +817,7 @@ mod tests {
     #[cfg(unix)]
     mod host_file {
         use super::super::*;
+        #[cfg(feature = "hermetic-test-seam")]
         use super::LIST;
         use std::os::unix::fs::PermissionsExt;
 

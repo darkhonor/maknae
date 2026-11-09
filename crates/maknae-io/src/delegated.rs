@@ -1025,4 +1025,29 @@ mod tests {
         assert_eq!(got.bytes, 3);
         assert_eq!(got.creds, Some(own_creds()));
     }
+
+    #[test]
+    fn a_symlink_reports_its_kind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let obj = a_file(dir.path(), "obj", b"x");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&obj, &link).expect("symlink");
+        let st = nix::sys::stat::lstat(&link).expect("lstat the link itself");
+        assert_eq!(DelegatedMeta::of(&st).kind, FileKind::Symlink);
+    }
+
+    #[test]
+    fn a_message_carrying_exactly_the_cap_is_accepted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let obj = a_file(dir.path(), "obj", b"x");
+        let (tx, rx) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+        let files: Vec<std::fs::File> = (0..MAX_DELEGATED_FDS_PER_MESSAGE)
+            .map(|_| std::fs::File::open(&obj).expect("open"))
+            .collect();
+        let fds: Vec<BorrowedFd<'_>> = files.iter().map(|f| f.as_fd()).collect();
+        send_fds(tx.as_fd(), &fds);
+        let mut buf = [0u8; 64];
+        let got = recv_delegated(rx.as_fd(), &mut buf).expect("a message at the cap is accepted");
+        assert_eq!(got.fds.len(), MAX_DELEGATED_FDS_PER_MESSAGE);
+    }
 }
