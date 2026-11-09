@@ -21,8 +21,8 @@ use crate::error::IoError;
 ///
 /// There is no confinement root (ADR-0034). The path the kernel reports for the open
 /// object is the decided path, and `target.nlink_exactly_one` is what makes deciding
-/// on it sound: an object with a second name could be reached under a path no grant,
-/// deny or `sensitive.yaml` entry names.
+/// on it sound: an object with a second name could be reached under a path no grant
+/// or deny names.
 #[derive(Debug)]
 pub struct DelegatedRequired {
     /// The target checks, applied to this descriptor by `fstat`.
@@ -454,7 +454,7 @@ mod tests {
     }
 
     /// `nlink_exactly_one` makes path matching sound (ADR-0034): a second name is a
-    /// path no grant or `sensitive.yaml` entry was decided on.
+    /// path no grant or deny was decided on.
     #[test]
     fn a_multiply_linked_file_is_still_refused() {
         let (_dir, base) = crate::testutil::outside_any_home();

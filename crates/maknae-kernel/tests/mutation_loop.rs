@@ -1770,17 +1770,19 @@ async fn a_requester_cannot_delete_their_own_home() {
         "schema_version: 1\npermissions:\n  allow:\n    - \"Write(/**)\"\n  deny: []\n",
     )
     .unwrap();
-    for (target, parent) in [(home.as_path(), &*b), (&*b, b.parent().unwrap())] {
-        let (result, record) = second_subject_attempt(
-            &fx,
-            Verb::FsDelete {
-                path: target.to_str().unwrap().into(),
-                recursive: true,
-            },
-            parent,
-        )
-        .await;
-        assert_refused(&result, &record, "cannot delete the requester's home");
+    for recursive in [true, false] {
+        for (target, parent) in [(home.as_path(), &*b), (&*b, b.parent().unwrap())] {
+            let (result, record) = second_subject_attempt(
+                &fx,
+                Verb::FsDelete {
+                    path: target.to_str().unwrap().into(),
+                    recursive,
+                },
+                parent,
+            )
+            .await;
+            assert_refused(&result, &record, "cannot delete the requester's home");
+        }
     }
     assert!(home.exists());
 }

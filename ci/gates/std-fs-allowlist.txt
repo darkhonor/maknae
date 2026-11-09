@@ -87,9 +87,9 @@ crates/maknae-vault/src/stream.rs|let _ = std::fs::remove_file(&self.path);
 # only and the OS answers at the subject's own re-open. Populating owner/mode_mask here
 # would mean recomputing the mode algebra daemon-side, which ACLs, supplementary
 # groups, SELinux and AppArmor make non-equivalent to what the kernel decides — and
-# which the operator explicitly forbade. The boundary requirement lives on the ANCHOR
-# (owner + 0o022); the target names nlink_exactly_one + regular_file, and nlink is
-# load-bearing three ways (ADR-0009 decision 5). Do not "complete" these fields.
+# which the operator explicitly forbade. The target names nlink_exactly_one +
+# regular_file; nlink makes path matching sound (ADR-0034). Do not "complete" these
+# fields.
 crates/maknae-kernel/src/handler.rs|owner: None,
 crates/maknae-kernel/src/handler.rs|mode_mask: None,
 

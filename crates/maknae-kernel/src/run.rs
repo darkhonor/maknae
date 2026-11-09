@@ -13865,7 +13865,7 @@ mod home_resolution_tests {
         assert_ne!(
             records.last().expect("a request record").outcome.reason,
             unresolvable,
-            "the home this request resolved is the one confined to"
+            "the home this request resolved is the one it is decided on"
         );
     }
 }

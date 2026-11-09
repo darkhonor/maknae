@@ -845,7 +845,7 @@ mod tests {
     // --- #216: resolve_dir ---------------------------------------------------
     /// A directory reached THROUGH a symlink resolves to the same form the
     /// kernel reports for a descriptor on the real directory. This is the
-    /// property the whole fix rests on: one resolver, so the confinement root
+    /// property the whole fix rests on: one resolver, so the home `~` binds to
     /// and the kernel-reported path cannot disagree in FORM.
     #[test]
     fn resolve_dir_returns_the_kernel_form_through_a_symlink() {

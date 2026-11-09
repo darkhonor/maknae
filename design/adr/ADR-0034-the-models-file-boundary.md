@@ -53,7 +53,7 @@ The one case left is a rename by someone who can write the directory. That is AD
 
 `prepare()`'s own `home == "/"` refusal is removed. It existed only because `/` as a root confines nothing. A `/` home is still refused upstream: `maknae_io::canonical_home` returns no home for `/`, which is `requester home unavailable: unresolvable` (ADR-0009 decision 4's 2026-10-04 cause list). A `/` home would also make `~/**` mean `/**`.
 
-**Deleting the requester's home, or a directory that contains it, is refused** (`cannot delete the requester's home`), whatever the grants say. Before this ADR the root made that impossible by construction. The refusal now names the home and every ancestor of it, so `fs.delete -r` of the home's parent does not remove the home.
+**Deleting the requester's home, or a directory that contains it, is refused** (`cannot delete the requester's home`), whatever the grants say. Before this ADR the root made that impossible by construction. The refusal now names the home and every ancestor of it, so `fs.delete -r` of the home's parent does not remove the home. The check compares the kernel-reported path with the canonical home byte-wise, which leaves two **named residuals**: on macOS a case variant of the home's leaf (`/Users/ALICE` for `/Users/alice`) on a case-insensitive volume, and on Linux a same-device bind-mount alias of the home, each pass it. Either needs write permission on the home's parent and a grant broad enough to cover the alias. The OS's DAC still applies to the subject's own namespace syscalls, and the recursive walk's `same_path` check still confines it to the tree it was granted.
 
 ### 5. `sensitive.yaml`: a mandatory operand that never permits
 
@@ -107,7 +107,7 @@ Decision 7 hides *existence*. Whether a *path* is protected is a different fact:
 
 ### 9. Shipped grants do not widen
 
-The shipped `authz.yaml` allows `Read(~/**)` and `Write(~/projects/**)` site-wide, and no shipped role grants any `fs.*` term. With no root, each of those still matches only beneath the requester's home. A symlink in the home that resolves outside it is decided on the target's path, which `~/**` does not match. Nothing a fresh install permitted before this ADR is permitted more widely after it. Only an operator-written grant beyond `~` reaches outside the home.
+The shipped `authz.yaml` allows `Read(~/**)` and `Write(~/projects/**)` site-wide, and no shipped role grants any `fs.*` term. With no root, each of those still matches only beneath the requester's home. A symlink in the home that resolves outside it is decided on the target's path, which `~/**` does not match. No shipped grant matches a wider set of paths after this ADR than before it, and only an operator-written grant beyond `~` reaches outside the home. What does widen is decision 3's removal: a request beneath a home that any non-owner can write is no longer refused for that reason, so a read the shipped `Read(~/**)` matches in a group-writable home is now served.
 
 ### 10. Obligation on any future command verb
 

@@ -202,9 +202,9 @@ pub(crate) fn open_dir_handle<F: AsFd>(dirfd: &F) -> nix::Result<nix::dir::Dir> 
 /// spec:160 build requirement greps for exactly this.
 /// The path the KERNEL reports for an open descriptor (ADR-0009 decision 4).
 ///
-/// This is the path every decision is made on (ADR-0034), and it is deliberately NOT a resolution of
-/// any caller-supplied name: it reads the daemon's OWN fd table, so it needs no
-/// permission on the object's directories at all. That is what lets a subject's
+/// This is the path every decision is made on (ADR-0034), and it is deliberately
+/// NOT a resolution of any caller-supplied name: it reads the daemon's OWN fd table,
+/// so it needs no permission on the object's directories at all. That is what lets a subject's
 /// `0700` home be served without granting the daemon `+x` or `+r` on it (#194).
 #[cfg(target_os = "linux")]
 pub(crate) fn linux_fd_path<F: AsFd>(fd: &F) -> nix::Result<std::path::PathBuf> {
@@ -220,8 +220,7 @@ pub(crate) fn linux_fd_path<F: AsFd>(fd: &F) -> nix::Result<std::path::PathBuf> 
 /// **`F_GETPATH`, deliberately, not `F_GETPATH_NOFIRMLINK`.** On APFS `/Users` is a
 /// firmlink to `/System/Volumes/Data/Users`, and the two calls return the two forms.
 /// The user-visible form is the one `getpwuid` returns for a home and the one
-/// `realpath` reports, so it is the form `~` grants and `sensitive.yaml` entries
-/// are matched against.
+/// `realpath` reports, so it is the form `~` grants and denies are matched against.
 ///
 /// Corrected 2026-09-06 (#126): this lane runs on native macOS CI and the
 /// operator's Apple Silicon host. The delegated suite exercises F_GETPATH.

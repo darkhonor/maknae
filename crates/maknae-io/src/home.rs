@@ -4,7 +4,7 @@
 //! passwd value (`bins/maknae/src/enroll`) on purpose.
 use std::path::{Path, PathBuf};
 
-fn confinable_home(resolved: PathBuf) -> Option<PathBuf> {
+fn usable_home(resolved: PathBuf) -> Option<PathBuf> {
     (resolved != Path::new("/") && resolved.to_str().is_some()).then_some(resolved)
 }
 
@@ -14,7 +14,7 @@ pub fn canonical_home(dir: &Path) -> Option<PathBuf> {
     if !dir.is_absolute() {
         return None;
     }
-    confinable_home(crate::resolve_dir(dir).ok()?)
+    usable_home(crate::resolve_dir(dir).ok()?)
 }
 
 /// The calling process's own home: the passwd record for its effective uid,
@@ -39,12 +39,12 @@ mod tests {
     }
 
     #[test]
-    fn only_a_utf8_home_below_the_root_is_confinable() {
+    fn only_an_absolute_utf8_home_other_than_the_root_is_usable() {
         use std::os::unix::ffi::OsStrExt;
-        assert_eq!(confinable_home("/home/b".into()), Some("/home/b".into()));
-        assert_eq!(confinable_home("/".into()), None);
+        assert_eq!(usable_home("/home/b".into()), Some("/home/b".into()));
+        assert_eq!(usable_home("/".into()), None);
         let odd = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&[0x2f, 0x68, 0xff]));
-        assert_eq!(confinable_home(odd), None);
+        assert_eq!(usable_home(odd), None);
     }
 
     #[test]
