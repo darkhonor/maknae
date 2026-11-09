@@ -413,6 +413,31 @@ mod tests {
     }
 
     #[test]
+    fn the_snapshot_operand_answers_alike_on_every_entry_point() {
+        use maknae_authz_basic::Baseline;
+        let (g, basic) = fixture("on-snapshot", READ_POLICY, None);
+        let snap = basic.snapshot();
+        let on = OnSnapshot {
+            baseline: &basic,
+            snap: &snap,
+        };
+        for (req, permits) in [
+            (permitted_read(&g.0), true),
+            (request("admin.status"), false),
+        ] {
+            let cited = on.decide_cited(&req);
+            assert_eq!(matches!(cited.verdict, Verdict::Permit { .. }), permits);
+            assert_eq!(
+                format!("{:?}", on.decide(&req)),
+                format!("{:?}", cited.verdict)
+            );
+            let (verdict, role) = on.decide_reporting_role(&req);
+            assert_eq!(format!("{verdict:?}"), format!("{:?}", cited.verdict));
+            assert_eq!(role, cited.role);
+        }
+    }
+
+    #[test]
     fn a_mandatory_deny_is_not_waivable_by_a_baseline_permit() {
         // ADR-0020 decision 4, asserted rather than assumed: the baseline
         // GRANTS this read (proved alone first), the content is marked ABOVE
