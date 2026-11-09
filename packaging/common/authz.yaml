@@ -3,30 +3,13 @@ permissions:
   allow:
     - "Read(~/**)"
     - "Write(~/projects/**)"
-  deny:
-    - "Read(~/.ssh/**)"
-    - "Read(~/.gnupg/**)"
-    - "Read(~/.aws/**)"
-    - "Read(~/.vault-token)"
-    - "Read(~/.netrc)"
-    - "Read(~/.git-credentials)"
-    - "Read(~/.kube/**)"
-    - "Read(~/.docker/config.json)"
-    - "Read(~/.maknae/**)"
-    - "Write(~/.ssh/**)"
-    - "Write(~/.gnupg/**)"
-    - "Write(~/.aws/**)"
-    - "Write(~/.vault-token)"
-    - "Write(~/.netrc)"
-    - "Write(~/.git-credentials)"
-    - "Write(~/.kube/**)"
-    - "Write(~/.docker/config.json)"
-    - "Write(~/.maknae/**)"
+  # The credential and system paths no role may reach are in sensitive.yaml.
+  deny: []
 
 # Per-account limits (#608, ADR-0032). An entry's actions and models only narrow
 # what the account's role holds. Its permissions allow replaces the allow list
 # above for that account and may reach paths that list does not cover; the deny
-# list above always applies. Uncomment and edit to use:
+# list above and sensitive.yaml always apply. Uncomment and edit to use:
 #
 # subjects:
 #   notes-agent:

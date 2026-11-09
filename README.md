@@ -64,7 +64,7 @@ Test-driven development applies to every container in every language; because se
 
 ## Status & roadmap
 
-Maknae is pre-MVP but no longer paper: the trust-plane crates, the `maknaed` daemon (with STIG-baselined packaging and SELinux/AppArmor profiles), per-request RBAC authorization with an enforced deny list (#77) and a non-removable classification-ceiling operand (#148/#154), and the local-plane enrollment model ([ADR-0018](design/adr/ADR-0018-local-plane-authorization-deployment-model.md)) are landing. The phased plan:
+Maknae is pre-MVP but no longer paper: the trust-plane crates, the `maknaed` daemon (with STIG-baselined packaging and SELinux/AppArmor profiles), per-request RBAC authorization (#77) composed with two non-removable mandatory operands, the classification ceiling (#148/#154) and the `sensitive.yaml` list of paths no file verb reaches (#617), and the local-plane enrollment model ([ADR-0018](design/adr/ADR-0018-local-plane-authorization-deployment-model.md)) are landing. The phased plan:
 
 1. **Governance baseline** — Knowledge Lifecycle Contract review; authority basis aligned to the Knowledge Lake's authority-line model; the open questions resolved with rationale.
 2. **Authorization seam & default backend** — build the bundled RBAC default (`maknae-authz-basic`) behind the versioned, policy-agnostic `maknae-security` seam and wire per-request evaluation ([ADR-0004](design/adr/ADR-0004-modular-authorization-architecture.md)). Optional `maknae-authz-*` backends — classification via the external DCS library, or Cedar — are scoped as follow-on, not the core engine decision.

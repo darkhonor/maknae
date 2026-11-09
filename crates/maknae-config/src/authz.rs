@@ -1432,35 +1432,44 @@ mod tests {
     // when the file operators install loses a deny (#158).
     const SHIPPED_DEFAULT: &str = include_str!("../../../packaging/common/authz.yaml");
 
+    const SSH_DENYING: &str = "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\n  deny:\n    - \"Read(~/.ssh/**)\"\n";
+
     fn home() -> std::path::PathBuf {
         std::path::PathBuf::from("/home/operator")
     }
 
     // ---- grammar / contract-as-tests (pure, via parse_policy) ----
 
+    const FORMER_SHIPPED_DENIES: [&str; 9] = [
+        "~/.ssh/**",
+        "~/.gnupg/**",
+        "~/.aws/**",
+        "~/.vault-token",
+        "~/.netrc",
+        "~/.git-credentials",
+        "~/.kube/**",
+        "~/.docker/config.json",
+        "~/.maknae/**",
+    ];
+
     #[test]
     fn shipped_default_validates_clean() {
         let policy = parse_policy(SHIPPED_DEFAULT).unwrap();
         assert_eq!(policy.allow.len(), 2);
-        assert_eq!(policy.deny.len(), 18);
+        assert!(policy.deny.is_empty());
         assert!(matches!(policy.allow[0], Pattern::Read(_)));
         assert!(matches!(policy.allow[1], Pattern::Write(_)));
-        assert_eq!(
-            policy
-                .deny
-                .iter()
-                .filter(|p| matches!(p, Pattern::Read(_)))
-                .count(),
-            9
-        );
-        assert_eq!(
-            policy
-                .deny
-                .iter()
-                .filter(|p| matches!(p, Pattern::Write(_)))
-                .count(),
-            9
-        );
+    }
+
+    #[test]
+    fn the_former_shipped_denies_are_sensitive_entries() {
+        let sensitive =
+            crate::SensitiveList::parse(include_str!("../../../packaging/common/sensitive.yaml"))
+                .unwrap();
+        let entries: Vec<&str> = sensitive.entries().collect();
+        for e in FORMER_SHIPPED_DENIES {
+            assert!(entries.contains(&e), "{e} is missing from sensitive.yaml");
+        }
     }
 
     #[test]
@@ -1577,22 +1586,6 @@ mod tests {
             Match3::NoMatch,
             "write authority must never imply read authority",
         );
-    }
-
-    #[test]
-    fn shipped_read_denies_have_write_pairs() {
-        let policy = parse_policy(SHIPPED_DEFAULT).unwrap();
-        let mut reads = 0;
-        for (pattern, source) in policy.deny.iter().zip(&policy.deny_sources) {
-            if let Pattern::Read(glob) = pattern {
-                reads += 1;
-                assert!(
-                    policy.deny.contains(&Pattern::Write(glob.clone())),
-                    "shipped deny {source} is missing its Write counterpart",
-                );
-            }
-        }
-        assert!(reads > 0, "the shipped deny inventory must not disappear");
     }
 
     #[test]
@@ -2560,7 +2553,7 @@ mod tests {
 
     #[test]
     fn evaluate3_deny_match_carries_full_source_text() {
-        let p = parse_authz(SHIPPED_DEFAULT).unwrap();
+        let p = parse_authz(SSH_DENYING).unwrap();
         match p
             .evaluate3(
                 &Request::Read(Path::new("/home/operator/.ssh/id_rsa")),
@@ -2597,7 +2590,7 @@ mod tests {
     fn evaluate3_deny_overrides_allow() {
         // ~/.ssh/** is inside ~/** — both lists match; deny must win and
         // report ITS source.
-        let p = parse_authz(SHIPPED_DEFAULT).unwrap();
+        let p = parse_authz(SSH_DENYING).unwrap();
         let r = Request::Read(Path::new("/home/operator/.ssh/config"));
         assert_eq!(
             p.evaluate3(&r, Some(&home())),

@@ -1,3 +1,4 @@
+# The shipped authz.yaml through the baseline operand alone; sensitive.yaml is not applied.
 1000 liveness.ping None -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") None
 1001 liveness.ping None -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") None
 1002 liveness.ping None -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("guest") None
@@ -180,12 +181,12 @@
 4242 session.task None -> NotApplicable { note: Some("subject resolves to no role") } None None
 1000 fs.read Some("/home/operator/notes") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:0 in /etc/maknae/authz.yaml#permissions")
 1000 fs.read Some("/home/operator/projects/x") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:0 in /etc/maknae/authz.yaml#permissions")
-1000 fs.read Some("/home/operator/.ssh/id") -> Deny { reason: "denied by policy entry Read(~/.ssh/**)" } Some("admin") Some("rule:permissions:deny:0 in /etc/maknae/authz.yaml#permissions")
-1000 fs.read Some("/home/operator/.maknae/k") -> Deny { reason: "denied by policy entry Read(~/.maknae/**)" } Some("admin") Some("rule:permissions:deny:8 in /etc/maknae/authz.yaml#permissions")
+1000 fs.read Some("/home/operator/.ssh/id") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:0 in /etc/maknae/authz.yaml#permissions")
+1000 fs.read Some("/home/operator/.maknae/k") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:0 in /etc/maknae/authz.yaml#permissions")
 1001 fs.read Some("/home/operator/notes") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:permissions:allow:0 in /etc/maknae/authz.yaml#permissions")
 1001 fs.read Some("/home/operator/projects/x") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:permissions:allow:0 in /etc/maknae/authz.yaml#permissions")
-1001 fs.read Some("/home/operator/.ssh/id") -> Deny { reason: "denied by policy entry Read(~/.ssh/**)" } Some("user") Some("rule:permissions:deny:0 in /etc/maknae/authz.yaml#permissions")
-1001 fs.read Some("/home/operator/.maknae/k") -> Deny { reason: "denied by policy entry Read(~/.maknae/**)" } Some("user") Some("rule:permissions:deny:8 in /etc/maknae/authz.yaml#permissions")
+1001 fs.read Some("/home/operator/.ssh/id") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:permissions:allow:0 in /etc/maknae/authz.yaml#permissions")
+1001 fs.read Some("/home/operator/.maknae/k") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:permissions:allow:0 in /etc/maknae/authz.yaml#permissions")
 1002 fs.read Some("/home/operator/notes") -> NotApplicable { note: Some("role guest: no rule for fs.read") } Some("guest") None
 1002 fs.read Some("/home/operator/projects/x") -> NotApplicable { note: Some("role guest: no rule for fs.read") } Some("guest") None
 1002 fs.read Some("/home/operator/.ssh/id") -> NotApplicable { note: Some("role guest: no rule for fs.read") } Some("guest") None
@@ -200,12 +201,12 @@
 4242 fs.read Some("/home/operator/.maknae/k") -> NotApplicable { note: Some("subject resolves to no role") } None None
 1000 fs.write Some("/home/operator/notes") -> NotApplicable { note: Some("role admin: no capability entry for fs.write") } Some("admin") None
 1000 fs.write Some("/home/operator/projects/x") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:1 in /etc/maknae/authz.yaml#permissions")
-1000 fs.write Some("/home/operator/.ssh/id") -> Deny { reason: "denied by policy entry Write(~/.ssh/**)" } Some("admin") Some("rule:permissions:deny:9 in /etc/maknae/authz.yaml#permissions")
-1000 fs.write Some("/home/operator/.maknae/k") -> Deny { reason: "denied by policy entry Write(~/.maknae/**)" } Some("admin") Some("rule:permissions:deny:17 in /etc/maknae/authz.yaml#permissions")
+1000 fs.write Some("/home/operator/.ssh/id") -> NotApplicable { note: Some("role admin: no capability entry for fs.write") } Some("admin") None
+1000 fs.write Some("/home/operator/.maknae/k") -> NotApplicable { note: Some("role admin: no capability entry for fs.write") } Some("admin") None
 1001 fs.write Some("/home/operator/notes") -> NotApplicable { note: Some("role user: no capability entry for fs.write") } Some("user") None
 1001 fs.write Some("/home/operator/projects/x") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:permissions:allow:1 in /etc/maknae/authz.yaml#permissions")
-1001 fs.write Some("/home/operator/.ssh/id") -> Deny { reason: "denied by policy entry Write(~/.ssh/**)" } Some("user") Some("rule:permissions:deny:9 in /etc/maknae/authz.yaml#permissions")
-1001 fs.write Some("/home/operator/.maknae/k") -> Deny { reason: "denied by policy entry Write(~/.maknae/**)" } Some("user") Some("rule:permissions:deny:17 in /etc/maknae/authz.yaml#permissions")
+1001 fs.write Some("/home/operator/.ssh/id") -> NotApplicable { note: Some("role user: no capability entry for fs.write") } Some("user") None
+1001 fs.write Some("/home/operator/.maknae/k") -> NotApplicable { note: Some("role user: no capability entry for fs.write") } Some("user") None
 1002 fs.write Some("/home/operator/notes") -> NotApplicable { note: Some("role guest: no rule for fs.write") } Some("guest") None
 1002 fs.write Some("/home/operator/projects/x") -> NotApplicable { note: Some("role guest: no rule for fs.write") } Some("guest") None
 1002 fs.write Some("/home/operator/.ssh/id") -> NotApplicable { note: Some("role guest: no rule for fs.write") } Some("guest") None
@@ -220,12 +221,12 @@
 4242 fs.write Some("/home/operator/.maknae/k") -> NotApplicable { note: Some("subject resolves to no role") } None None
 1000 fs.delete Some("/home/operator/notes") -> NotApplicable { note: Some("role admin: no capability entry for fs.delete") } Some("admin") None
 1000 fs.delete Some("/home/operator/projects/x") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:1 in /etc/maknae/authz.yaml#permissions")
-1000 fs.delete Some("/home/operator/.ssh/id") -> Deny { reason: "denied by policy entry Write(~/.ssh/**)" } Some("admin") Some("rule:permissions:deny:9 in /etc/maknae/authz.yaml#permissions")
-1000 fs.delete Some("/home/operator/.maknae/k") -> Deny { reason: "denied by policy entry Write(~/.maknae/**)" } Some("admin") Some("rule:permissions:deny:17 in /etc/maknae/authz.yaml#permissions")
+1000 fs.delete Some("/home/operator/.ssh/id") -> NotApplicable { note: Some("role admin: no capability entry for fs.delete") } Some("admin") None
+1000 fs.delete Some("/home/operator/.maknae/k") -> NotApplicable { note: Some("role admin: no capability entry for fs.delete") } Some("admin") None
 1001 fs.delete Some("/home/operator/notes") -> NotApplicable { note: Some("role user: no capability entry for fs.delete") } Some("user") None
 1001 fs.delete Some("/home/operator/projects/x") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:permissions:allow:1 in /etc/maknae/authz.yaml#permissions")
-1001 fs.delete Some("/home/operator/.ssh/id") -> Deny { reason: "denied by policy entry Write(~/.ssh/**)" } Some("user") Some("rule:permissions:deny:9 in /etc/maknae/authz.yaml#permissions")
-1001 fs.delete Some("/home/operator/.maknae/k") -> Deny { reason: "denied by policy entry Write(~/.maknae/**)" } Some("user") Some("rule:permissions:deny:17 in /etc/maknae/authz.yaml#permissions")
+1001 fs.delete Some("/home/operator/.ssh/id") -> NotApplicable { note: Some("role user: no capability entry for fs.delete") } Some("user") None
+1001 fs.delete Some("/home/operator/.maknae/k") -> NotApplicable { note: Some("role user: no capability entry for fs.delete") } Some("user") None
 1002 fs.delete Some("/home/operator/notes") -> NotApplicable { note: Some("role guest: no rule for fs.delete") } Some("guest") None
 1002 fs.delete Some("/home/operator/projects/x") -> NotApplicable { note: Some("role guest: no rule for fs.delete") } Some("guest") None
 1002 fs.delete Some("/home/operator/.ssh/id") -> NotApplicable { note: Some("role guest: no rule for fs.delete") } Some("guest") None
@@ -255,12 +256,12 @@
 4242 fs.stat None -> NotApplicable { note: Some("subject resolves to no role") } None None
 1000 fs.mkdir Some("/home/operator/notes") -> NotApplicable { note: Some("role admin: no capability entry for fs.mkdir") } Some("admin") None
 1000 fs.mkdir Some("/home/operator/projects/x") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:1 in /etc/maknae/authz.yaml#permissions")
-1000 fs.mkdir Some("/home/operator/.ssh/id") -> Deny { reason: "denied by policy entry Write(~/.ssh/**)" } Some("admin") Some("rule:permissions:deny:9 in /etc/maknae/authz.yaml#permissions")
-1000 fs.mkdir Some("/home/operator/.maknae/k") -> Deny { reason: "denied by policy entry Write(~/.maknae/**)" } Some("admin") Some("rule:permissions:deny:17 in /etc/maknae/authz.yaml#permissions")
+1000 fs.mkdir Some("/home/operator/.ssh/id") -> NotApplicable { note: Some("role admin: no capability entry for fs.mkdir") } Some("admin") None
+1000 fs.mkdir Some("/home/operator/.maknae/k") -> NotApplicable { note: Some("role admin: no capability entry for fs.mkdir") } Some("admin") None
 1001 fs.mkdir Some("/home/operator/notes") -> NotApplicable { note: Some("role user: no capability entry for fs.mkdir") } Some("user") None
 1001 fs.mkdir Some("/home/operator/projects/x") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:permissions:allow:1 in /etc/maknae/authz.yaml#permissions")
-1001 fs.mkdir Some("/home/operator/.ssh/id") -> Deny { reason: "denied by policy entry Write(~/.ssh/**)" } Some("user") Some("rule:permissions:deny:9 in /etc/maknae/authz.yaml#permissions")
-1001 fs.mkdir Some("/home/operator/.maknae/k") -> Deny { reason: "denied by policy entry Write(~/.maknae/**)" } Some("user") Some("rule:permissions:deny:17 in /etc/maknae/authz.yaml#permissions")
+1001 fs.mkdir Some("/home/operator/.ssh/id") -> NotApplicable { note: Some("role user: no capability entry for fs.mkdir") } Some("user") None
+1001 fs.mkdir Some("/home/operator/.maknae/k") -> NotApplicable { note: Some("role user: no capability entry for fs.mkdir") } Some("user") None
 1002 fs.mkdir Some("/home/operator/notes") -> NotApplicable { note: Some("role guest: no rule for fs.mkdir") } Some("guest") None
 1002 fs.mkdir Some("/home/operator/projects/x") -> NotApplicable { note: Some("role guest: no rule for fs.mkdir") } Some("guest") None
 1002 fs.mkdir Some("/home/operator/.ssh/id") -> NotApplicable { note: Some("role guest: no rule for fs.mkdir") } Some("guest") None

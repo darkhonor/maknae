@@ -11,7 +11,7 @@ id = "basic"
 name = "maknae-authz-basic"
 stereo = "«baseline · non-removable»"
 status = "in-repo"
-model = "RBAC — role-keyed, plus the shipped deny list and the OS-DAC gate"
+model = "RBAC — role-keyed, plus the OS-DAC gate; the ceiling and sensitive.yaml as mandatory operands"
 evidence = "crates/maknae-authz-basic/src/decide.rs"
 
 [[operand]]

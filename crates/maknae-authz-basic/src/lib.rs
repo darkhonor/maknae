@@ -2820,12 +2820,41 @@ mod tests {
 
     const SHIPPED: &str = include_str!("../../../packaging/common/authz.yaml");
 
-    /// The shipped file with its `roles:` block cut, for tests that write their own.
+    /// The shipped file with the credential denies it carried before they moved to
+    /// `sensitive.yaml`, for tests of the deny path.
+    pub(crate) fn shipped_denying() -> &'static str {
+        static DENYING: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+            let denies: String = ["Read", "Write"]
+                .iter()
+                .flat_map(|verb| {
+                    [
+                        "~/.ssh/**",
+                        "~/.gnupg/**",
+                        "~/.aws/**",
+                        "~/.vault-token",
+                        "~/.netrc",
+                        "~/.git-credentials",
+                        "~/.kube/**",
+                        "~/.docker/config.json",
+                        "~/.maknae/**",
+                    ]
+                    .map(move |p| format!("    - \"{verb}({p})\"\n"))
+                })
+                .collect();
+            let d = SHIPPED.replacen("  deny: []\n", &format!("  deny:\n{denies}"), 1);
+            assert_ne!(d, SHIPPED, "the shipped file has an empty deny list");
+            d
+        });
+        DENYING.as_str()
+    }
+
+    /// [`shipped_denying`] with its `roles:` block cut, for tests that write their own.
     pub(crate) fn shipped_without_roles() -> &'static str {
-        let cut = SHIPPED
+        let d = shipped_denying();
+        let cut = d
             .find("\nroles:")
             .expect("the shipped file has a roles block");
-        &SHIPPED[..=cut]
+        &d[..=cut]
     }
 
     /// Proof (a): the REAL shipped authz.yaml (byte-identical, via
@@ -2884,7 +2913,7 @@ mod tests {
         assert!(matches!(admin_whoami, Verdict::Permit { .. }));
         assert!(matches!(
             decide::decide_loaded(&lp, &principal(), &ssh_read(501)),
-            Verdict::Deny { ref reason } if reason.contains("Read(~/.ssh/**)")
+            Verdict::Permit { .. }
         ));
         // An UNBOUND uid gets no role under the shipped defaults -- the half
         // that used to be asserted through the reserved `agent` name (#276).
@@ -2977,7 +3006,7 @@ mod tests {
             principal(),
             paths(),
             test_digest,
-            compiled(&source_with(SHIPPED, None, &[])),
+            compiled(&source_with(shipped_denying(), None, &[])),
         );
         let d = auth.decide_cited(&ssh_read(501));
         assert!(
@@ -3009,7 +3038,7 @@ mod tests {
     #[test]
     fn the_oracle_and_the_snapshot_agree() {
         let src = source_with(
-            SHIPPED,
+            shipped_denying(),
             Some(
                 "schema_version: 1\nbindings:\n  user: [\"ursula\"]\n  adversary: [\"mallory\"]\n",
             ),
@@ -3035,7 +3064,7 @@ mod tests {
             );
         }
         let subjects = source_with(
-            &format!("{SHIPPED}subjects:\n  ursula:\n    permissions:\n      allow: [\"Read(~/docs/**)\"]\n      deny: [\"Read(~/docs/secret/**)\"]\n    actions:\n      allow: [\"fs.*\", \"session.prompt\", \"session.new\"]\n    models:\n      allow: [\"openai/gpt-5\"]\n"),
+            &format!("{}subjects:\n  ursula:\n    permissions:\n      allow: [\"Read(~/docs/**)\"]\n      deny: [\"Read(~/docs/secret/**)\"]\n    actions:\n      allow: [\"fs.*\", \"session.prompt\", \"session.new\"]\n    models:\n      allow: [\"openai/gpt-5\"]\n", shipped_denying()),
             Some(
                 "schema_version: 1\nbindings:\n  user: [\"ursula\"]\n  adversary: [\"mallory\"]\n",
             ),
@@ -3103,7 +3132,9 @@ mod tests {
         );
         let auth =
             BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, compiled(&src));
-        let mut out = String::new();
+        let mut out = String::from(
+            "# The shipped authz.yaml through the baseline operand alone; sensitive.yaml is not applied.\n",
+        );
         for term in ACTION_TERMS.iter().chain(KERNEL_TERMS.iter()) {
             let op = match *term {
                 "fs.read" => Some("read"),
@@ -3519,7 +3550,7 @@ mod tests {
             principal(),
             paths(),
             test_digest,
-            compiled(&source_with(SHIPPED, None, &[])),
+            compiled(&source_with(shipped_denying(), None, &[])),
         );
         let before = auth.decide_cited(&ssh_read(501));
         assert_eq!(
@@ -3527,7 +3558,7 @@ mod tests {
             "rule:permissions:deny:0"
         );
         let next = compiled(&source_with(
-            &SHIPPED.replacen("  deny:\n", "  deny:\n    - \"Read(~/.cache/**)\"\n", 1),
+            &shipped_denying().replacen("  deny:\n", "  deny:\n    - \"Read(~/.cache/**)\"\n", 1),
             None,
             &[],
         ));
@@ -6223,16 +6254,23 @@ mod tests {
             let alias_uids: &[(&str, u32)] = &[BASE_UIDS, &[("gustav", 1002)]].concat();
             let same = |v: &'static str, src: PolicySource| (v, src.clone(), src);
             vec![
-                same("absent", source_with(SHIPPED, None, &[])),
+                same("absent", source_with(super::shipped_denying(), None, &[])),
                 same(
                     "absent-key",
-                    source_with(SHIPPED, Some("schema_version: 1\n"), &[]),
+                    source_with(super::shipped_denying(), Some("schema_version: 1\n"), &[]),
                 ),
                 same(
                     "empty",
-                    source_with(SHIPPED, Some("schema_version: 1\nbindings: {}\n"), &[]),
+                    source_with(
+                        super::shipped_denying(),
+                        Some("schema_version: 1\nbindings: {}\n"),
+                        &[],
+                    ),
                 ),
-                same("explicit", source_with(SHIPPED, Some(EXPLICIT), uids)),
+                same(
+                    "explicit",
+                    source_with(super::shipped_denying(), Some(EXPLICIT), uids),
+                ),
                 same(
                     "explicit+grants",
                     source_with(
@@ -6243,12 +6281,16 @@ mod tests {
                 ),
                 same(
                     "explicit+subjects",
-                    source_with(&format!("{SHIPPED}{SUBJECTS}"), Some(EXPLICIT), uids),
+                    source_with(
+                        &format!("{}{SUBJECTS}", super::shipped_denying()),
+                        Some(EXPLICIT),
+                        uids,
+                    ),
                 ),
                 same(
                     "explicit-no-match",
                     source_with(
-                        SHIPPED,
+                        super::shipped_denying(),
                         Some("schema_version: 1\nbindings: { admin: [alex] }\n"),
                         uids,
                     ),
@@ -6256,7 +6298,7 @@ mod tests {
                 same(
                     "adversary-by-uid",
                     source_with(
-                        SHIPPED,
+                        super::shipped_denying(),
                         Some(&explicit_with("alex", "ursula", "gus", "{uid: 666}")),
                         uids,
                     ),
@@ -6264,30 +6306,30 @@ mod tests {
                 (
                     "unresolved-name",
                     source_with(
-                        SHIPPED,
+                        super::shipped_denying(),
                         Some(&explicit_with("alex", "ursula, ghost", "gus", "mallory")),
                         uids,
                     ),
-                    source_with(SHIPPED, Some(EXPLICIT), uids),
+                    source_with(super::shipped_denying(), Some(EXPLICIT), uids),
                 ),
                 (
                     "overlap",
                     source_with(
-                        SHIPPED,
+                        super::shipped_denying(),
                         Some(&explicit_with("alex, mallory", "ursula", "gus", "mallory")),
                         uids,
                     ),
-                    source_with(SHIPPED, Some(EXPLICIT), uids),
+                    source_with(super::shipped_denying(), Some(EXPLICIT), uids),
                 ),
                 (
                     "conflict",
                     source_with(
-                        SHIPPED,
+                        super::shipped_denying(),
                         Some(&explicit_with("alex", "ursula, gus", "gus", "mallory")),
                         uids,
                     ),
                     source_with(
-                        SHIPPED,
+                        super::shipped_denying(),
                         Some(&explicit_with("alex", "ursula", "", "mallory")),
                         uids,
                     ),
@@ -6295,12 +6337,12 @@ mod tests {
                 (
                     "alias",
                     source_with(
-                        SHIPPED,
+                        super::shipped_denying(),
                         Some(&explicit_with("alex", "ursula, gustav", "gus", "mallory")),
                         alias_uids,
                     ),
                     source_with(
-                        SHIPPED,
+                        super::shipped_denying(),
                         Some(&explicit_with("alex", "ursula", "", "mallory")),
                         alias_uids,
                     ),
@@ -6918,7 +6960,7 @@ mod tests {
             uids: &[(&str, u32)],
             agents: AgentsLoad,
         ) -> PolicySource {
-            try_source(SHIPPED, bindings, uids, agents).unwrap()
+            try_source(super::shipped_denying(), bindings, uids, agents).unwrap()
         }
 
         fn auth(src: &PolicySource, principal_uid: u32) -> BasicAuthorizer {

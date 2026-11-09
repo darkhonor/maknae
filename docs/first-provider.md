@@ -204,25 +204,8 @@ Enroll writes `~/.maknae` only for the account that ran it. Each further local u
      allow:
        - "Read(~/**)"
        - "Write(~/projects/**)"
-     deny:
-       - "Read(~/.ssh/**)"
-       - "Read(~/.gnupg/**)"
-       - "Read(~/.aws/**)"
-       - "Read(~/.vault-token)"
-       - "Read(~/.netrc)"
-       - "Read(~/.git-credentials)"
-       - "Read(~/.kube/**)"
-       - "Read(~/.docker/config.json)"
-       - "Read(~/.maknae/**)"
-       - "Write(~/.ssh/**)"
-       - "Write(~/.gnupg/**)"
-       - "Write(~/.aws/**)"
-       - "Write(~/.vault-token)"
-       - "Write(~/.netrc)"
-       - "Write(~/.git-credentials)"
-       - "Write(~/.kube/**)"
-       - "Write(~/.docker/config.json)"
-       - "Write(~/.maknae/**)"
+     # The credential and system paths no role may reach are in sensitive.yaml.
+     deny: []
    roles:
      admin:
        allow:
@@ -257,6 +240,27 @@ Enroll writes `~/.maknae` only for the account that ran it. Each further local u
 4. **Create the user's Vault userpass user and entity** and set their password (step 1).
 
 The user then follows [You (the user)](#you-the-user).
+
+### 4b. Let the model work outside your home
+
+The shipped grants cover your home only: `Read(~/**)` reads anywhere beneath it, and `Write(~/projects/**)` writes beneath `~/projects`. A tree elsewhere, such as a source tree in `/opt/Development`, needs a grant of its own. Add it to `permissions: allow:` in `/etc/maknae/authz.yaml` (`sudoedit`, editing in place):
+
+```yaml
+permissions:
+  allow:
+    - "Read(~/**)"
+    - "Write(~/projects/**)"
+    - "Read(/opt/Development/**)"
+    - "Write(/opt/Development/**)"
+  deny: []
+```
+
+Then reload (`sudo systemctl reload maknaed`; on macOS, `sudo launchctl kill SIGHUP system/io.maknae.maknaed`).
+
+- **A write needs both lines.** Every write is permitted only when `Read` and `Write` both cover the path, so `Write(/opt/Development/**)` alone permits no write there.
+- **Every role gets it.** A `permissions:` entry applies to every role; to give it to one account only, put it under that account's `subjects:` entry ([runbook](runbook.md#7-grants-destinations-and-subjects-authzyaml)).
+- **The other bounds still apply.** The OS still decides what you can open, since the request runs under your own account, and a path in `/etc/maknae/sensitive.yaml` or your `~/.maknae/sensitive.yaml` stays refused whatever the grant says ([configuration §2.5](configuration.md#25-sensitiveyaml-617)).
+- **Without the grant** a request there is refused, and the trail says why (`role user: no capability entry for fs.read`).
 
 ## 5. Start
 
@@ -587,6 +591,6 @@ The CLI's rows. `maknae login` keeps your Vault token in your default keychain, 
 - **Your own processes can read your own key.** Your Vault login can read it, so any process running as you can, outside any turn. This is a named residual (ADR-0028); detecting such reads is #429.
 - **Another user cannot read your key.** Vault's policy limits each login to its own `<user_prefix>/<username>/`, and the kernel derives the key path from the uid that connected, never from a file.
 - **Every action is decided before it happens and recorded.** That covers each prompt, read and write, and it holds for refusals too.
-- **The deny list holds.** Reads under `~/.ssh`, `~/.aws` and similar are refused by policy, and nothing from them reaches the model.
+- **The protected paths hold.** Every path in `/etc/maknae/sensitive.yaml`, such as `~/.ssh`, `~/.aws`, `/etc/shadow` and `/proc/*/environ`, is refused to every file verb whatever `authz.yaml` grants, and nothing from it reaches the model, which is told only that the path is protected by policy.
 - **On macOS the daemon's Vault SecretID and the deputy's sealing key are System-keychain items that only their own signed binaries can read.** The signed daemon read its item on a real install (measured); the deputy's read is inferred from the successful provider turns. They are bound to code identity under a root-held key, not to hardware. An administrator can approve a read in a console session (measured), and root can copy the keychain and its key and decrypt them off the host (inferred). See ADR-0018 decision 6.
 - **What you did not ask for does not leave.** Only the conversation leaves the host, including file contents the agent was allowed to read.

@@ -640,6 +640,60 @@ mod tests {
     }
 
     #[test]
+    fn the_shipped_sensitive_yaml_parses_and_protects_the_named_defaults() {
+        let l = SensitiveList::parse(include_str!("../../../packaging/common/sensitive.yaml"))
+            .expect("the shipped sensitive.yaml parses");
+        let h = Some("/home/u");
+        for fold in [Fold::None, Fold::Case] {
+            for path in [
+                "/etc/shadow",
+                "/etc/passwd",
+                "/etc/group",
+                "/home/u/.ssh",
+                "/home/u/.ssh/id_ed25519",
+                "/home/u/.aws/credentials",
+                "/home/u/.maknae/providers.yaml",
+                "/etc/maknae/authz.yaml",
+                "/proc/1/environ",
+                "/proc/1/task/2/environ",
+                "/proc/thread-self/environ",
+                "/run/user/1000/keyring/control",
+                "/tmp/krb5cc_1000",
+            ] {
+                assert!(
+                    matches!(at(&l, path, h, fold), Ok(Some(_))),
+                    "{path} under {fold:?}"
+                );
+            }
+            for path in [
+                "/home/u/notes.txt",
+                "/home/u/projects/x/src/main.rs",
+                "/usr/bin/env",
+            ] {
+                assert_eq!(at(&l, path, h, fold), Ok(None), "{path} under {fold:?}");
+            }
+        }
+        for path in [
+            "/private/etc/master.passwd",
+            "/private/etc/shadow",
+            "/private/var/db/dslocal/nodes/Default/users/u.plist",
+            "/private/tmp/krb5cc_501",
+            "/Users/u/Library/Keychains/login.keychain-db",
+        ] {
+            assert!(
+                matches!(at(&l, path, Some("/Users/u"), Fold::Case), Ok(Some(_))),
+                "{path}"
+            );
+        }
+        for e in l.entries() {
+            assert!(
+                !e.starts_with("/private/") && !e.starts_with("/System/Volumes/Data"),
+                "{e}: the macOS fold maps these spellings, so an entry is written once"
+            );
+        }
+    }
+
+    #[test]
     fn the_canonical_form_is_the_entries_in_order() {
         assert_eq!(SensitiveList::empty().canonical(), "[]");
         let a = SensitiveList::parse(LIST).unwrap();

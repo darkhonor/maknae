@@ -586,6 +586,90 @@ mod tests {
         assert_eq!(c.decide_reporting_role(&req).0, refused.verdict);
     }
 
+    fn shipped_effective_decisions() -> String {
+        let (g, basic) = fixture(
+            "shipped-effective",
+            include_str!("../../../packaging/common/authz.yaml"),
+            None,
+        );
+        crate::test_fixtures::write_sensitive(
+            &g.0,
+            include_str!("../../../packaging/common/sensitive.yaml"),
+        );
+        basic.install(basic.compile_from_file().unwrap());
+        let c = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
+        let principal = i64::from(nix::unistd::geteuid().as_raw());
+        let mut out = String::from(
+            "# The shipped authz.yaml and sensitive.yaml, decided through the Composition.\n",
+        );
+        let cases: &[(&str, Option<&str>, &[&str])] = &[
+            ("liveness.ping", None, &[""]),
+            ("session.new", None, &[""]),
+            ("fs.read", Some("read"), FS_TARGETS),
+            ("fs.write", Some("write-existing"), FS_TARGETS),
+            ("fs.write", Some("write-create"), FS_TARGETS),
+            ("fs.delete", Some("delete-entry"), FS_TARGETS),
+            (
+                "fs.delete",
+                Some("delete-tree"),
+                &["/home/operator", "/home/operator/projects"],
+            ),
+            ("fs.mkdir", Some("mkdir"), FS_TARGETS),
+        ];
+        for (who, uid) in [("principal", principal), ("unbound", 4242)] {
+            for (term, op, targets) in cases {
+                for path in *targets {
+                    let mut r = request(term);
+                    r.subject.0.insert("uid", AttrValue::Int(uid));
+                    r.subject.0.insert(
+                        maknae_security::SUBJECT_HOME,
+                        AttrValue::Str("/home/operator".into()),
+                    );
+                    if !path.is_empty() {
+                        r.resource.0.insert("path", AttrValue::Str((*path).into()));
+                    }
+                    if let Some(o) = op {
+                        r.context.0.insert(
+                            maknae_security::CONTEXT_FS_OPERATION,
+                            AttrValue::Str((*o).into()),
+                        );
+                    }
+                    let d = c.decide_cited(&r);
+                    let rule = d.rule.map(|c| {
+                        let section = c.section.rsplit('#').next().unwrap_or_default().to_owned();
+                        format!("{} in authz.yaml#{section}", c.key)
+                    });
+                    out.push_str(&format!(
+                        "{who} {term} {op:?} {path:?} -> {:?} {:?} {rule:?}\n",
+                        d.verdict, d.role
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    const FS_TARGETS: &[&str] = &[
+        "/home/operator/notes",
+        "/home/operator/projects/x",
+        "/home/operator/.ssh/id",
+        "/home/operator/.aws/credentials",
+        "/home/operator/.maknae/providers.yaml",
+        "/etc/shadow",
+        "/etc/maknae/authz.yaml",
+        "/proc/1/environ",
+    ];
+
+    #[test]
+    fn the_shipped_files_decide_identically_through_the_composition() {
+        let got = shipped_effective_decisions();
+        let want = include_str!("testdata/shipped-effective-decisions.txt");
+        for (i, (g, w)) in got.lines().zip(want.lines()).enumerate() {
+            assert_eq!(g, w, "first difference at line {i}");
+        }
+        assert_eq!(got.lines().count(), want.lines().count(), "line count");
+    }
+
     #[test]
     fn a_candidate_is_decided_with_its_own_sensitive_list() {
         let (g, basic) = fixture("cand-sensitive", READ_POLICY, None);

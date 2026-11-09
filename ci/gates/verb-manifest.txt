@@ -77,7 +77,7 @@ grantable	session.close	grantable-shipped-granted-admin-and-user	operator MAY gr
 grantable	session.list	grantable-shipped-granted-admin-and-user	operator MAY grant per-role via roles:; the shipped authz.yaml grants it to admin and user (#170, #609)
 grantable	session.delete	grantable-shipped-granted-admin-and-user	operator MAY grant per-role via roles:; the shipped authz.yaml grants it to admin and user (#170, #609)
 grantable	session.task	grantable-shipped-granted-admin-and-user	operator MAY grant per-role via roles:; the shipped authz.yaml grants it to admin and user (#609)
-capability	Write	granted	grammar capability; shipped Write(~/projects/**) allow, independent of Read; paired sensitive-path denies (#158)
+capability	Write	granted	grammar capability; shipped Write(~/projects/**) allow; an fs.write also needs Read on the same path, and sensitive.yaml refuses its paths whatever is granted (#617)
 action-vocab	admin.status	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608)
 action-vocab	admin.config.show	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608)
 action-vocab	admin.subject.list	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608)

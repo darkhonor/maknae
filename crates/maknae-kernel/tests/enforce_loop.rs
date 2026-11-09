@@ -96,6 +96,10 @@ impl Fixture {
         common::write_0640(&self.paths().authz, body);
     }
 
+    fn write_sensitive(&self, body: &str) {
+        common::write_0640(&self.dir.join(maknae_config::SENSITIVE_FILE), body);
+    }
+
     fn write_bindings(&self, body: &str) {
         common::write_0640(&self.paths().bindings, body);
     }
@@ -760,14 +764,16 @@ async fn defaults_branch_enrolled_uid_is_admin_with_zero_nss() {
 // 6-7. THE DENY LIST DENIES (ruling 1); a permitted read returns content.
 // ---------------------------------------------------------------------------
 
-/// The shipped policy, byte-identical (the same include the #85 defaults
-/// proof uses): `Read(~/**)` allow, `Read(~/.ssh/**)`-class denies.
+/// The shipped files, byte-identical: `Read(~/**)` allow, and the credential paths in
+/// `sensitive.yaml`.
 const SHIPPED_POLICY: &str = include_str!("../../../packaging/common/authz.yaml");
+const SHIPPED_SENSITIVE: &str = include_str!("../../../packaging/common/sensitive.yaml");
 
 #[tokio::test]
-async fn the_shipped_deny_list_actually_denies_a_read_of_ssh_keys() {
+async fn the_shipped_sensitive_yaml_refuses_a_read_of_ssh_keys() {
     let fx = Fixture::new("denylist");
     fx.write_policy(SHIPPED_POLICY);
+    fx.write_sensitive(SHIPPED_SENSITIVE);
     std::fs::create_dir_all(fx.dir.join(".ssh")).unwrap();
     std::fs::write(fx.dir.join(".ssh/id_rsa"), b"SECRETKEYMATERIAL").unwrap();
     let target = fx.dir.join(".ssh/id_rsa").to_string_lossy().into_owned();
@@ -776,7 +782,7 @@ async fn the_shipped_deny_list_actually_denies_a_read_of_ssh_keys() {
     let me = nix::unistd::geteuid().as_raw();
     let run = read_attempt(
         &fx.dir,
-        fx.authorizer(),
+        composed(&fx, "UNCLASSIFIED"),
         emit.clone(),
         me,
         maknae_proto::Verb::Read {
@@ -792,12 +798,14 @@ async fn the_shipped_deny_list_actually_denies_a_read_of_ssh_keys() {
     let frame = run.first.expect("deny frame");
     match maknae_proto::decode_response(&frame).unwrap().result {
         RespResult::Err(e) => {
-            assert_eq!(e.code, ProtoErrCode::Unauthorized);
-            assert_eq!(e.message, "not authorized");
+            assert_eq!(e.code, ProtoErrCode::Protected);
+            assert_eq!(
+                e.message,
+                maknae_proto::protected_message(maknae_proto::HOST_SENSITIVE_LIST, "~/.ssh/**")
+            );
         }
-        other => panic!("the deny list MUST deny: {other:?}"),
+        other => panic!("the shipped list MUST refuse: {other:?}"),
     }
-    // Content must never cross the wire.
     let needle = b"SECRETKEYMATERIAL";
     assert!(!frame.windows(needle.len()).any(|w| w == needle));
 
@@ -805,19 +813,8 @@ async fn the_shipped_deny_list_actually_denies_a_read_of_ssh_keys() {
     assert_eq!(req.action, "fs.read");
     assert_eq!(req.outcome.result, "deny");
     assert_eq!(req.object.as_deref(), Some(target.as_str()), "AU-3 object");
-    assert!(
-        req.outcome
-            .reason
-            .contains("denied by policy entry Read(~/.ssh/**)"),
-        "only a real DenyMatch renders the policy-entry source (and proves the ~ expansion round-trip): {}",
-        req.outcome.reason
-    );
-    let rule = req.rule.as_ref().expect("the deny cites its rule node");
-    assert!(rule.section.ends_with("authz.yaml#permissions"), "{rule:?}");
-    assert!(rule.key.starts_with("rule:permissions:deny:"), "{rule:?}");
-    // And the pattern source never leaks onto the wire either.
-    let pat = b".ssh";
-    assert!(!frame.windows(pat.len()).any(|w| w == pat));
+    assert_eq!(req.outcome.reason, "sensitive: host ~/.ssh/**");
+    assert_eq!(req.rule, None, "no authz.yaml rule decided it");
 }
 
 #[tokio::test]
@@ -1183,6 +1180,7 @@ async fn a_permitted_read_returns_the_file_bytes() {
 async fn a_symlink_alias_of_a_denied_file_is_refused() {
     let fx = Fixture::new("symlink");
     fx.write_policy(SHIPPED_POLICY);
+    fx.write_sensitive(SHIPPED_SENSITIVE);
     std::fs::create_dir_all(fx.dir.join(".ssh")).unwrap();
     std::fs::write(fx.dir.join(".ssh/id_rsa"), b"SECRET").unwrap();
     std::os::unix::fs::symlink(fx.dir.join(".ssh/id_rsa"), fx.dir.join("innocent")).unwrap();
@@ -1192,7 +1190,7 @@ async fn a_symlink_alias_of_a_denied_file_is_refused() {
     let me = nix::unistd::geteuid().as_raw();
     let frame = read_attempt(
         &fx.dir,
-        fx.authorizer(),
+        composed(&fx, "UNCLASSIFIED"),
         emit.clone(),
         me,
         maknae_proto::Verb::Read {
@@ -3221,9 +3219,10 @@ async fn a_zero_page_request_is_bad_request_before_the_pdp() {
 }
 
 #[tokio::test]
-async fn the_shipped_deny_list_denies_a_paged_read_of_ssh_keys() {
+async fn the_shipped_sensitive_yaml_refuses_a_paged_read_of_ssh_keys() {
     let fx = Fixture::new("denylist-paged");
     fx.write_policy(SHIPPED_POLICY);
+    fx.write_sensitive(SHIPPED_SENSITIVE);
     std::fs::create_dir_all(fx.dir.join(".ssh")).unwrap();
     std::fs::write(fx.dir.join(".ssh/id_rsa"), b"SECRETKEYMATERIAL").unwrap();
     let target = fx.dir.join(".ssh/id_rsa").to_string_lossy().into_owned();
@@ -3231,7 +3230,7 @@ async fn the_shipped_deny_list_denies_a_paged_read_of_ssh_keys() {
     let me = nix::unistd::geteuid().as_raw();
     let run = read_page_attempt(
         &fx.dir,
-        fx.authorizer(),
+        composed(&fx, "UNCLASSIFIED"),
         emit.clone(),
         me,
         maknae_proto::Verb::Read {
@@ -3255,23 +3254,14 @@ async fn the_shipped_deny_list_denies_a_paged_read_of_ssh_keys() {
     assert_eq!(run.finish, None);
     let frame = run.first.expect("deny frame");
     match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => {
-            assert_eq!(e.code, ProtoErrCode::Unauthorized);
-            assert_eq!(e.message, "not authorized");
-        }
-        other => panic!("the deny list MUST deny a paged read: {other:?}"),
+        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Protected),
+        other => panic!("the shipped list MUST refuse a paged read: {other:?}"),
     }
     assert!(!frame
         .windows(b"SECRETKEYMATERIAL".len())
         .any(|w| w == b"SECRETKEYMATERIAL"));
     let req = request_record(&emit.records()).clone();
-    assert!(
-        req.outcome
-            .reason
-            .contains("denied by policy entry Read(~/.ssh/**)"),
-        "{}",
-        req.outcome.reason
-    );
+    assert_eq!(req.outcome.reason, "sensitive: host ~/.ssh/**");
 }
 
 #[tokio::test]
@@ -3407,7 +3397,7 @@ async fn an_absolute_grant_reaches_beyond_the_requesters_home() {
 }
 
 #[tokio::test]
-async fn the_shipped_maknae_deny_protects_the_requesters_own_token() {
+async fn a_maknae_deny_protects_the_requesters_own_token() {
     let fx = Fixture::new("own_token");
     let b = common::second_home("enforce_own_token");
     std::fs::create_dir(b.join(".maknae")).unwrap();

@@ -1,0 +1,157 @@
+# Paths Maknae's file verbs never reach (#617, ADR-0034).
+#
+# An entry refuses every file verb on the path, for every role, whatever
+# authz.yaml grants. The model is told only that a path is protected by
+# policy, never which entries exist. `~` is the requesting user's home; `*`
+# matches within one component, `**` across any number of them, and `X/**`
+# matches X itself. On macOS matching ignores case, and /etc, /tmp and /var
+# match their /private spellings, so write each entry once. An entry for a
+# path this host does not have is harmless: one file serves every platform.
+#
+# Never write `/**`, or on macOS `/System/Volumes/Data/**`: either protects
+# every path. A user adds their own entries in ~/.maknae/sensitive.yaml.
+# Entries that would help every installation are welcome upstream.
+schema_version: 1
+sensitive:
+  # Accounts and password hashes.
+  - "/etc/passwd*"
+  - "/etc/shadow*"
+  - "/etc/group*"
+  - "/etc/gshadow*"
+  - "/etc/security/opasswd"
+
+  # Who may become root, and how.
+  - "/etc/sudoers"
+  - "/etc/sudoers.d/**"
+  - "/etc/sudo.conf"
+  - "/etc/sudo-ldap.conf"
+  - "/etc/polkit-1/rules.d/**"
+  - "/etc/polkit-1/localauthority/**"
+
+  # Host identity and the secrets of system services.
+  - "/etc/ssh/ssh_host_*_key"
+  - "/etc/ssh/sshd_config"
+  - "/etc/ssh/sshd_config.d/**"
+  - "/etc/krb5.keytab"
+  - "/etc/ipsec.secrets"
+  - "/etc/ipsec.d/**"
+  - "/etc/crypttab"
+  - "/etc/credstore/**"
+  - "/etc/credstore.encrypted/**"
+  - "/etc/NetworkManager/system-connections/**"
+  - "/etc/wpa_supplicant/**"
+  - "/etc/sssd/**"
+  - "/var/lib/sss/**"
+  - "/etc/samba/**"
+  # CIFS mounts can carry credentials= here.
+  - "/etc/fstab"
+  - "/etc/trusted-key.key"
+
+  # Private keys.
+  - "/etc/pki/**/private/**"
+  - "/etc/ssl/private/**"
+  - "/etc/pki/tls/private/**"
+
+  # Defensive configuration: what is audited, allowed and scheduled. Locked
+  # down on a STIG'd host, readable on others; the model has no need of it.
+  - "/etc/audit/**"
+  - "/etc/libaudit.conf"
+  - "/etc/aide.conf*"
+  - "/etc/fapolicyd/**"
+  - "/etc/usbguard/**"
+  - "/etc/firewalld/**"
+  - "/etc/nftables/**"
+  - "/etc/sysconfig/nftables.conf"
+  - "/etc/crontab"
+  - "/etc/cron.*/**"
+  - "/etc/grub.d/**"
+  - "/boot/grub*/**"
+  - "/boot/loader/**"
+  - "/etc/sysctl.d/**"
+
+  # Root's home and the system's own secret state (cloud-init user-data,
+  # the systemd credential key).
+  - "/root/**"
+  - "/var/lib/cloud/**"
+  - "/var/lib/systemd/credential.secret"
+
+  # Maknae's own configuration, host and personal.
+  - "/etc/maknae/**"
+  - "~/.maknae/**"
+
+  # Process and runtime secrets, readable by the user on any host: another
+  # process's environment, arguments and memory; agent sockets, keyrings and
+  # registry logins under /run/user; Kerberos caches; mounted secrets.
+  - "/proc/*/environ"
+  - "/proc/*/cmdline"
+  - "/proc/*/mem"
+  - "/proc/*/task/*/environ"
+  - "/proc/*/task/*/cmdline"
+  - "/proc/*/task/*/mem"
+  - "/proc/thread-self/environ"
+  - "/proc/thread-self/cmdline"
+  - "/proc/thread-self/mem"
+  - "/run/user/*/**"
+  - "/tmp/krb5cc_*"
+  - "/var/run/secrets/**"
+  - "/run/secrets/**"
+
+  # macOS: the account database, sudo's timestamps, root's home and the
+  # system keychains.
+  - "/etc/master.passwd"
+  - "/var/db/dslocal/**"
+  - "/var/db/sudo/**"
+  - "/var/root/**"
+  - "/Library/Keychains/**"
+
+  # Each user's credentials: keys, cloud and cluster logins, registry and
+  # package-index tokens, password stores, AI-tool logins, browser and mail
+  # profiles, and shell and editor history.
+  - "~/.ssh/**"
+  - "~/.gnupg/**"
+  - "~/.aws/**"
+  - "~/.azure/**"
+  - "~/.config/gcloud/**"
+  - "~/.kube/**"
+  - "~/.docker/config.json"
+  - "~/.config/containers/auth.json"
+  - "~/.netrc"
+  - "~/.git-credentials"
+  - "~/.config/gh/hosts.yml"
+  - "~/.vault-token"
+  - "~/.vault-*-token"
+  - "~/.terraform.d/credentials.tfrc.json"
+  - "~/.npmrc"
+  - "~/.pypirc"
+  - "~/.cargo/credentials"
+  - "~/.cargo/credentials.toml"
+  - "~/.gem/credentials"
+  - "~/.m2/settings.xml"
+  - "~/.gradle/gradle.properties"
+  - "~/.pgpass"
+  - "~/.my.cnf"
+  - "~/.password-store/**"
+  - "~/.local/share/keyrings/**"
+  - "~/.config/op/**"
+  - "~/.config/rclone/rclone.conf"
+  - "~/.claude.json"
+  - "~/.claude/.credentials.json"
+  - "~/.codex/**"
+  - "~/.gemini/**"
+  - "~/.mozilla/**"
+  - "~/.config/google-chrome/**"
+  - "~/.config/chromium/**"
+  - "~/.thunderbird/**"
+  - "~/.*_history"
+  - "~/.lesshst"
+  - "~/.viminfo"
+
+  # Each user's credentials on macOS: keychains, cookies, mail, messages,
+  # privacy grants and browser profiles.
+  - "~/Library/Keychains/**"
+  - "~/Library/Cookies/**"
+  - "~/Library/Mail/**"
+  - "~/Library/Messages/**"
+  - "~/Library/Application Support/com.apple.TCC/**"
+  - "~/Library/Application Support/Google/Chrome/**"
+  - "~/Library/Application Support/Firefox/**"
