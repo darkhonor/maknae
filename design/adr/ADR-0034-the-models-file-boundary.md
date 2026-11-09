@@ -73,7 +73,7 @@ The list is decided by a third named, non-removable field of `Composition`, besi
 
 The host list and the baseline's grants are taken from one snapshot per decision batch, so a reload can never pair one snapshot's grants with another snapshot's list.
 
-A file request the operand cannot evaluate is `Indeterminate`, which `finalize` denies: no path, a path that is not canonical, a personal entry that does not parse, or a `~` entry with no home when no other entry matches. An `fs.delete` that names no operation is decided as a tree.
+A file request the operand cannot evaluate is `Indeterminate`, which `finalize` denies. That is the whole list: no path, or a path that is not a string; a path that is not canonical; a home that is not a string; a personal value that is not a set, or a personal entry that does not parse; an `fs_operation` that is not a string or names no known operation; or a `~` entry with no home when no other entry matches. An `fs.delete` that names no operation is decided as a tree.
 
 **Path forms.** A deny that misses because the same file has a different spelling is a permit, so matching folds every form the kernel can report for one object:
 

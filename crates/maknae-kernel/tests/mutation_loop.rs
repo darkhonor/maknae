@@ -2039,7 +2039,7 @@ async fn a_protected_file_cannot_be_written_deleted_or_created_under() {
 }
 
 #[tokio::test]
-async fn a_hard_link_to_a_protected_file_is_refused() {
+async fn a_hard_link_to_a_protected_file_is_refused_by_the_one_link_check() {
     let fx = admin_of_everything("sensitive_hard_link");
     let outside = outside_the_home(&fx, "sensitive_hard_link");
     let secret = outside.join("secret");
@@ -2056,6 +2056,13 @@ async fn a_hard_link_to_a_protected_file_is_refused() {
         .any(|w| w == SENSITIVE_SENTINEL));
     let last = records.last().expect("a request record");
     assert_eq!(last.outcome.result, "deny", "{last:?}");
+    assert_eq!(
+        last.outcome.reason,
+        format!(
+            "read evidence refused: hard-linked (nlink=2): {}",
+            alias.display()
+        )
+    );
 }
 
 #[tokio::test]
@@ -2212,7 +2219,32 @@ async fn a_case_variant_of_a_protected_path_is_refused_on_macos() {
     let fx = Fixture::new("sensitive_case_variant", "Read");
     std::fs::create_dir(fx.root.join(".ssh")).unwrap();
     std::fs::write(fx.root.join(".ssh/id"), SENSITIVE_SENTINEL).unwrap();
-    host_list(&fx, &["~/.ssh/**"]);
-    let (run, records) = read_outside(&fx, &fx.root.join(".SSH/id")).await;
-    assert_read_refused(&run, &records, "sensitive: host ~/.ssh/**");
+    let asked = fx.root.join(".ssh/id");
+    let (run, records) = read_outside(&fx, &asked).await;
+    assert_read_served(&run, &records);
+    assert_eq!(
+        records.last().unwrap().object.as_deref(),
+        asked.to_str(),
+        "premise: the kernel reports the on-disk case"
+    );
+    host_list(&fx, &["~/.SSH/**"]);
+    let (run, records) = read_outside(&fx, &asked).await;
+    assert_read_refused(&run, &records, "sensitive: host ~/.SSH/**");
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn an_entry_spelling_the_homes_leaf_in_another_case_is_refused_on_macos() {
+    let fx = Fixture::new("sensitive_home_case", "Read");
+    std::fs::create_dir(fx.root.join(".ssh")).unwrap();
+    std::fs::write(fx.root.join(".ssh/id"), SENSITIVE_SENTINEL).unwrap();
+    let leaf = fx.root.file_name().unwrap().to_str().unwrap();
+    assert_ne!(leaf, leaf.to_uppercase(), "premise: the leaf has a case");
+    let entry = format!(
+        "{}/.ssh/**",
+        fx.root.with_file_name(leaf.to_uppercase()).display()
+    );
+    host_list(&fx, &[&entry]);
+    let (run, records) = read_outside(&fx, &fx.root.join(".ssh/id")).await;
+    assert_read_refused(&run, &records, &format!("sensitive: host {entry}"));
 }
