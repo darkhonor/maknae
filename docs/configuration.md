@@ -364,7 +364,7 @@ sensitive:
 **How a path matches.** An entry is matched against the path the kernel reports for the object the request opened, so a symlink is decided as its target and a file with a second hard link is refused before any match (ADR-0034 decision 2).
 
 - **Linux:** byte for byte, case-sensitively.
-- **macOS:** case-insensitively and normalization-insensitively (the entry, the path and the home are each compared in NFC and Unicode lowercase, so a composed `é` and a decomposed `é` match). A leading `/System/Volumes/Data` is removed, and a leading `/private/etc`, `/private/tmp` or `/private/var` is read as `/etc`, `/tmp` or `/var`, on the entry and on the path. Write each entry once, in either spelling.
+- **macOS:** case-insensitively and normalization-insensitively (the entry, the path and the home are each compared in NFC under full Unicode case folding, so a composed `é` and a decomposed `é` match, and so do `ß` and `ss`, `ſ` and `s`, or the Kelvin sign and `k`). A leading `/System/Volumes/Data` is removed, and a leading `/private/etc`, `/private/tmp` or `/private/var` is read as `/etc`, `/tmp` or `/var`, on the entry and on the path. Write each entry once, in either spelling.
 - **A directory delete** (`fs.delete`, recursive or not) is refused when any entry could match the path or anything beneath it, whether or not the directory is empty, so a protected file cannot be removed by removing its parent and the answer does not say whether a protected child exists.
 - An entry for a path the host does not have is harmless.
 

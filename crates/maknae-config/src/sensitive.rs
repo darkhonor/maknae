@@ -230,17 +230,18 @@ fn entry(text: &str) -> Result<Entry, ConfigError> {
     })
 }
 
-/// One spelling for names APFS treats as the same: NFC, lowercase, NFC again,
-/// so neither the input's form nor a lowercase mapping leaves a decomposed form.
+/// One spelling for names APFS treats as the same: NFC, full Unicode case
+/// folding, NFC again, so a fold that decomposes cannot leave a second form.
 fn case_folded(text: &str) -> String {
     let nfc = icu_normalizer::ComposingNormalizerBorrowed::new_nfc();
-    nfc.normalize(&nfc.normalize(text).to_lowercase())
+    let fold = icu_casemap::CaseMapperBorrowed::new();
+    nfc.normalize(&fold.fold_string(&nfc.normalize(text)))
         .into_owned()
 }
 
 /// The one spelling macOS gives a path the kernel may report under another:
 /// the Data volume's firmlink prefix removed, then `/private/{etc,tmp,var}`
-/// as `/{etc,tmp,var}`. Expects lowercase; a relative text is returned as is.
+/// as `/{etc,tmp,var}`. Expects case-folded text; a relative text is returned as is.
 fn mapped(text: &str) -> String {
     if !text.starts_with('/') {
         return text.to_string();
@@ -518,6 +519,46 @@ mod tests {
         assert_eq!(
             at(&l, &format!("/srv/{nfc}/key"), None, Fold::None),
             Ok(Some(format!("/srv/{nfc}/**").as_str()))
+        );
+    }
+
+    #[test]
+    fn case_fold_is_full_unicode_case_folding() {
+        let h = Some("/Users/u");
+        let l = list(&["~/.ssh/**"]);
+        assert_eq!(
+            at(&l, "/Users/u/.\u{17f}\u{17f}h/id_rsa", h, Fold::Case),
+            Ok(Some("~/.ssh/**"))
+        );
+        assert_eq!(
+            at(&l, "/Users/u/.\u{17f}\u{17f}h/id_rsa", h, Fold::None),
+            Ok(None)
+        );
+        for (entry, path) in [
+            ("/srv/\u{3c3}/**", "/srv/\u{3c2}/f"),
+            ("/srv/\u{3c2}/**", "/srv/\u{3c3}/f"),
+            ("/srv/k/**", "/srv/\u{212a}/f"),
+            ("/srv/\u{212a}/**", "/srv/k/f"),
+            ("/srv/stra\u{df}e/**", "/srv/strasse/f"),
+            ("/srv/strasse/**", "/srv/STRA\u{df}E/f"),
+        ] {
+            let l = list(&[entry]);
+            assert_eq!(
+                at(&l, path, h, Fold::Case),
+                Ok(Some(entry)),
+                "{entry} {path}"
+            );
+            assert_eq!(at(&l, path, h, Fold::None), Ok(None), "{entry} {path}");
+        }
+        let home = list(&["~/.ssh/**"]);
+        assert_eq!(
+            at(
+                &home,
+                "/Users/stra\u{df}e/.ssh/id",
+                Some("/Users/strasse"),
+                Fold::Case
+            ),
+            Ok(Some("~/.ssh/**"))
         );
     }
 
