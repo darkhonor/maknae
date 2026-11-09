@@ -200,9 +200,19 @@ impl Rig {
         fd: Option<std::os::fd::OwnedFd>,
         records: &Arc<Records>,
     ) -> Option<Response> {
+        self.new_listing(cwd, fd, vec![], records).await
+    }
+    async fn new_listing(
+        &self,
+        cwd: &std::path::Path,
+        fd: Option<std::os::fd::OwnedFd>,
+        sensitive: Vec<String>,
+        records: &Arc<Records>,
+    ) -> Option<Response> {
         self.send(
             Verb::SessionNew {
                 cwd: cwd.to_str().unwrap().into(),
+                sensitive,
             },
             fd,
             records,
@@ -211,10 +221,13 @@ impl Rig {
         .await
     }
     async fn open(&self) -> String {
+        self.open_listing(vec![]).await
+    }
+    async fn open_listing(&self, sensitive: Vec<String>) -> String {
         let cwd = self.cwd();
         let fd = maknae_io::open_directory_for_delegation(&cwd).unwrap();
         match self
-            .new_at(&cwd, Some(fd), &Records::new(0))
+            .new_listing(&cwd, Some(fd), sensitive, &Records::new(0))
             .await
             .unwrap()
             .result
@@ -222,6 +235,61 @@ impl Rig {
             RespResult::Ok(Payload::ConversationOpened(v)) => v.conversation.as_str().to_owned(),
             other => panic!("session.new refused: {other:?}"),
         }
+    }
+    async fn read_runs(
+        &self,
+        target: &std::path::Path,
+        conversation: Option<&str>,
+    ) -> Option<maknae_proto::ReportedFinish> {
+        let held = maknae_io::open_path_for_delegation(target).unwrap();
+        let (mut client, task, body) = self.fx.start(
+            Verb::Read {
+                path: target.to_str().unwrap().into(),
+                conversation: conversation.map(str::to_owned),
+                page: None,
+            },
+            Some(held.try_clone().unwrap()),
+            Records::new(0),
+        );
+        common::write_frame(&mut client, &body).await.unwrap();
+        let run = common::read_as_subject(&mut client, Some(&held)).await;
+        drop(client);
+        task.await.unwrap();
+        run.finish
+    }
+    async fn read_refused(
+        &self,
+        target: &std::path::Path,
+        conversation: &str,
+    ) -> (Response, maknae_audit_append::AuditRecord) {
+        let (resp, rec) = self.read_answer(target, Some(conversation)).await;
+        refused_with(&resp, ProtoErrCode::Unauthorized);
+        (resp, rec)
+    }
+    /// Armed when the subject can open `target`, unarmed otherwise.
+    async fn read_answer(
+        &self,
+        target: &std::path::Path,
+        conversation: Option<&str>,
+    ) -> (Response, maknae_audit_append::AuditRecord) {
+        let records = Records::new(0);
+        let fd = maknae_io::open_path_for_delegation(target).ok();
+        let resp = self
+            .send(
+                Verb::Read {
+                    path: target.to_str().unwrap().into(),
+                    conversation: conversation.map(str::to_owned),
+                    page: None,
+                },
+                fd,
+                &records,
+                maknae_kernel::unavailable_egress(),
+            )
+            .await
+            .unwrap();
+        let rec = last_of(&records, "fs.read");
+        assert!(rec.mutation.is_none(), "{rec:?}");
+        (resp, rec)
     }
     async fn ask(&self, id: &str, turns: Vec<Turn>, egress: &Arc<Script>) -> Response {
         self.send(prompt(id, turns), None, &Records::new(0), egress.clone())
@@ -1090,6 +1158,7 @@ async fn a_non_local_lane_session_new_is_denied() {
         Arc::new(session),
         Verb::SessionNew {
             cwd: cwd.to_str().unwrap().into(),
+            sensitive: vec![],
         },
         Some(maknae_io::open_directory_for_delegation(&cwd).unwrap()),
         Arc::clone(&records),
@@ -1320,4 +1389,213 @@ async fn a_close_that_was_not_flushed_is_refused_as_outcome_unknown() {
     let rec = last_of(&records, "session.close");
     assert_eq!(rec.outcome.reason, UNFLUSHED);
     assert_eq!(rec.outcome.posture, "unavailable");
+}
+
+fn kernel_path(p: &std::path::Path) -> String {
+    std::fs::canonicalize(p)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn protected_by(resp: &Response, list: &str, entry: &str) {
+    refused_with(resp, ProtoErrCode::Protected);
+    let RespResult::Err(e) = &resp.result else {
+        unreachable!()
+    };
+    assert_eq!(e.message, maknae_proto::protected_message(list, entry));
+}
+
+#[tokio::test]
+async fn a_personal_entry_refuses_in_its_conversation() {
+    let rig = Rig::new("personal-own", Kind::Mem);
+    let a_key = rig.fx.root.join("a-key");
+    std::fs::write(&a_key, b"sentinel-617-a").unwrap();
+    std::os::unix::fs::symlink(&rig.fx.root, rig.fx.root.join("via")).unwrap();
+    let alias = rig.fx.root.join("via/a-key");
+    let entry = kernel_path(&a_key);
+    let own = rig.open_listing(vec![entry.clone()]).await;
+    let plain = rig.open().await;
+
+    let (resp, rec) = rig.read_answer(&a_key, Some(&own)).await;
+    protected_by(&resp, maknae_proto::PERSONAL_SENSITIVE_LIST, &entry);
+    assert_eq!(rec.outcome.reason, format!("sensitive: personal {entry}"));
+
+    let (resp, rec) = rig.read_refused(&alias, &own).await;
+    assert_eq!(rec.outcome.reason, format!("sensitive: personal {entry}"));
+    let RespResult::Err(e) = &resp.result else {
+        unreachable!()
+    };
+    assert!(!e.message.contains(&entry), "{e:?}");
+
+    let ran = Some(maknae_proto::ReportedFinish::Success);
+    assert_eq!(rig.read_runs(&a_key, Some(&plain)).await, ran);
+    assert_eq!(rig.read_runs(&a_key, None).await, ran);
+}
+
+#[tokio::test]
+async fn a_personal_entry_matching_nothing_on_disk_answers_protected_only_in_its_conversation() {
+    let rig = Rig::new("personal-ghost", Kind::Mem);
+    let ghost = rig.fx.root.join("ghost-617");
+    let entry = format!("{}/ghost-617", kernel_path(&rig.fx.root));
+    let own = rig.open_listing(vec![entry.clone()]).await;
+    let plain = rig.open().await;
+    let mut foreign = common::open_record(FOREIGN_ID, FOREIGN_UID, "/home/other");
+    foreign.sensitive = vec![entry.clone()];
+    rig.seed(foreign);
+    assert!(
+        !ghost.exists(),
+        "premise: the entry matches nothing on disk"
+    );
+
+    let (resp, rec) = rig.read_answer(&ghost, Some(&own)).await;
+    protected_by(&resp, maknae_proto::PERSONAL_SENSITIVE_LIST, &entry);
+    assert_eq!(rec.outcome.reason, format!("sensitive: personal {entry}"));
+
+    for cited in [Some(plain.as_str()), None, Some(FOREIGN_ID)] {
+        let (resp, rec) = rig.read_answer(&ghost, cited).await;
+        refused_with(&resp, ProtoErrCode::Unauthorized);
+        assert!(!rec.outcome.reason.contains("sensitive"), "{rec:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_foreign_conversations_personal_entry_never_answers_protected() {
+    let rig = Rig::new("personal-foreign-protected", Kind::Mem);
+    let a_key = rig.fx.root.join("a-key");
+    std::fs::write(&a_key, b"sentinel-617-a").unwrap();
+    let entry = kernel_path(&a_key);
+    let mut foreign = common::open_record(FOREIGN_ID, FOREIGN_UID, "/home/other");
+    foreign.sensitive = vec![entry.clone()];
+    rig.seed(foreign);
+
+    let records = Records::new(0);
+    let (client, task, body) = rig.fx.start_egress(
+        Verb::Read {
+            path: a_key.to_str().unwrap().into(),
+            conversation: Some(FOREIGN_ID.into()),
+            page: None,
+        },
+        Some(maknae_io::open_path_for_delegation(&a_key).unwrap()),
+        Arc::clone(&records),
+        maknae_config::transport_from_section(None).unwrap(),
+        Some("openai"),
+        maknae_kernel::unavailable_egress(),
+    );
+    let received = Fixture::exchange_raw(client, task, &body).await;
+    assert!(
+        !received.windows(entry.len()).any(|w| w == entry.as_bytes()),
+        "A's entry never reaches B's wire"
+    );
+    let resp = Fixture::decode_received(&received).await.expect("a frame");
+    refused_with(&resp, ProtoErrCode::Unauthorized);
+    let rec = last_of(&records, "fs.read");
+    assert_eq!(
+        rec.outcome.reason,
+        "conversation belongs to another subject"
+    );
+}
+
+#[tokio::test]
+async fn another_subjects_personal_entry_never_reaches_the_requester() {
+    let rig = Rig::new("personal-foreign", Kind::Mem);
+    let b_key = rig.fx.root.join("b-key");
+    std::fs::write(&b_key, b"sentinel-617-b").unwrap();
+    let entry = kernel_path(&b_key);
+    let mut foreign = common::open_record(FOREIGN_ID, FOREIGN_UID, "/home/other");
+    foreign.sensitive = vec![entry.clone()];
+    rig.seed(foreign);
+    let own = rig.open().await;
+
+    assert_eq!(
+        rig.read_runs(&b_key, Some(&own)).await,
+        Some(maknae_proto::ReportedFinish::Success)
+    );
+    let (resp, rec) = rig.read_refused(&b_key, FOREIGN_ID).await;
+    assert_eq!(
+        rec.outcome.reason,
+        "conversation belongs to another subject"
+    );
+    let RespResult::Err(e) = &resp.result else {
+        unreachable!()
+    };
+    assert!(!e.message.contains(&entry), "{e:?}");
+}
+
+#[tokio::test]
+async fn a_malformed_personal_entry_refuses_session_new_unauthorized() {
+    let rig = Rig::new("personal-malformed", Kind::Mem);
+    let cwd = rig.cwd();
+    let records = Records::new(0);
+    let resp = rig
+        .new_listing(
+            &cwd,
+            Some(maknae_io::open_directory_for_delegation(&cwd).unwrap()),
+            vec!["/srv/sentinel-617".into(), "~bob/x".into()],
+            &records,
+        )
+        .await
+        .unwrap();
+    refused_with(&resp, ProtoErrCode::Unauthorized);
+    let rec = last_of(&records, "session.new");
+    assert_eq!(rec.outcome.result, "deny");
+    assert!(rec.outcome.reason.contains("'~bob/x'"), "{rec:?}");
+    assert!(rig.held().is_empty());
+}
+
+#[tokio::test]
+async fn the_personal_list_is_a_snapshot() {
+    let mut rig = Rig::new("personal-snapshot", Kind::Dir);
+    let entries = vec!["~/sentinel-617/**".to_string(), "/srv/sentinel-617".into()];
+    let conv = rig.open_listing(entries.clone()).await;
+    rig.reopen();
+    assert_eq!(rig.store().get(&id(&conv)).unwrap().sensitive, entries);
+}
+
+#[tokio::test]
+async fn the_largest_personal_list_one_frame_carries_is_stored_and_read_back() {
+    let mut rig = Rig::new("personal-largest", Kind::Dir);
+    let cwd = rig.cwd();
+    let entry = |n: usize| {
+        format!(
+            "/s{n:02}/{}",
+            "a".repeat(maknae_proto::MAX_MUTATION_PATH_BYTES - 5)
+        )
+    };
+    let size = |entries: &[String]| {
+        maknae_proto::encode_request(&maknae_proto::Request {
+            protocol_version: maknae_proto::PROTOCOL_VERSION,
+            task: None,
+            verb: Verb::SessionNew {
+                cwd: cwd.to_str().unwrap().into(),
+                sensitive: entries.to_vec(),
+            },
+        })
+        .unwrap()
+        .len()
+    };
+    let mut entries: Vec<String> = Vec::new();
+    while size(&[entries.clone(), vec![entry(entries.len())]].concat())
+        <= maknae_proto::ATTEMPT_REQUEST_MAX
+    {
+        entries.push(entry(entries.len()));
+    }
+    let room = maknae_proto::ATTEMPT_REQUEST_MAX - size(&entries);
+    let pad = room.saturating_sub(16);
+    if pad > 8 {
+        entries.push(format!("/t/{}", "b".repeat(pad - 3)));
+        while size(&entries) > maknae_proto::ATTEMPT_REQUEST_MAX {
+            let last = entries.last_mut().unwrap();
+            last.pop();
+        }
+    }
+    assert!(
+        size(&entries) > maknae_proto::ATTEMPT_REQUEST_MAX - 32,
+        "{}",
+        size(&entries)
+    );
+    let conv = rig.open_listing(entries.clone()).await;
+    rig.reopen();
+    assert_eq!(rig.store().get(&id(&conv)).unwrap().sensitive, entries);
 }

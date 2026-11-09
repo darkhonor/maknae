@@ -1,48 +1,31 @@
-//! Verification of a file descriptor delegated by a subject (ADR-0009).
+//! Verification of a file descriptor delegated by a subject (ADR-0009, ADR-0034).
 //!
-//! The subject's descriptor proves where the object is; the subject's own re-open is
-//! where the OS answers. That is why nothing here recomputes the mode algebra and
-//! why `TargetRequired { owner, mode_mask }` stay `None` on this path.
-//!
-//! What the descriptor does NOT prove is *where* the object is. Confinement is a
-//! separate, Maknae-owned proof, and it is taken from the daemon's OWN fd table --
-//! never by resolving a client-supplied name, which would need traversal permission
-//! on the subject's home that a `0700` home does not grant (#194).
+//! The subject's own open is where the OS answers; nothing here recomputes the mode
+//! algebra, which is why `TargetRequired { owner, mode_mask }` stay `None` on this path.
+//! Where the object is comes from the daemon's OWN fd table, never by resolving a
+//! client-supplied name, which would need traversal permission on a directory that a
+//! `0700` home does not grant (#194).
 
 use std::collections::VecDeque;
 use std::mem::MaybeUninit;
 use std::os::fd::{BorrowedFd, OwnedFd};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::checks::TargetRequired;
 use crate::error::IoError;
 
 /// What a caller requires of a delegated descriptor. Callers **name** what they
 /// require; `None` is a named, greppable absence, never a silent one.
+///
+/// There is no confinement root (ADR-0034). The path the kernel reports for the open
+/// object is the decided path, and `target.nlink_exactly_one` is what makes deciding
+/// on it sound: an object with a second name could be reached under a path no grant
+/// or deny names.
 #[derive(Debug)]
 pub struct DelegatedRequired {
-    /// The object must resolve beneath this **absolute, canonical** directory.
-    /// Canonical because the kernel reports a resolved path; a root behind a
-    /// symlink would never match.
-    ///
-    /// **Not an `Option`, deliberately.** Elsewhere in this crate `None` is a
-    /// named "this caller requires no such check". Here there is no such caller:
-    /// ADR-0009 decision 3 makes confinement a proof every delegated descriptor
-    /// needs. Making the unconfined state inexpressible is stronger than
-    /// documenting that nobody should ask for it — the same reasoning ADR-0008
-    /// decision 1 applies to the baseline authorizer.
-    pub confined_beneath: PathBuf,
-    /// What the confinement root itself must satisfy (ADR-0009 decision 7).
-    ///
-    /// **The anchor REQUIREMENT survives even though the anchor OPEN does not.** A
-    /// home any non-principal can write is where aliases get planted, and the
-    /// descriptor proves nothing about that — it proves the subject could open the
-    /// object, not that the tree it sits in is sound. Enforced by `stat` on the root
-    /// PATH, which needs only search on its parent and no permission on the root
-    /// itself, which is exactly why a STIG `0700` home stays servable (#194).
-    pub root_required: crate::AnchorRequired,
-    /// The usual target checks, applied to this descriptor by `fstat`.
+    /// The target checks, applied to this descriptor by `fstat`.
     pub target: TargetRequired,
 }
 
@@ -52,6 +35,50 @@ pub struct Delegated {
     /// The path the kernel reports -- **ground truth**, and what the PDP decides
     /// on (ADR-0009 decision 6), never the client-supplied string.
     pub path: PathBuf,
+    /// Taken from the same `fstat` the target checks ran on.
+    pub meta: DelegatedMeta,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DelegatedMeta {
+    pub size: u64,
+    pub mtime: SystemTime,
+    pub kind: FileKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileKind {
+    File,
+    Directory,
+    Symlink,
+    /// A fifo, socket or device.
+    Other,
+}
+
+impl DelegatedMeta {
+    fn of(st: &nix::sys::stat::FileStat) -> Self {
+        let kind = match st.st_mode & nix::libc::S_IFMT {
+            nix::libc::S_IFREG => FileKind::File,
+            nix::libc::S_IFDIR => FileKind::Directory,
+            nix::libc::S_IFLNK => FileKind::Symlink,
+            _ => FileKind::Other,
+        };
+        Self {
+            size: u64::try_from(st.st_size).unwrap_or(0),
+            mtime: mtime(st.st_mtime, st.st_mtime_nsec),
+            kind,
+        }
+    }
+}
+
+fn mtime(secs: i64, nsec: i64) -> SystemTime {
+    let whole = Duration::from_secs(secs.unsigned_abs());
+    let base = if secs < 0 {
+        UNIX_EPOCH - whole
+    } else {
+        UNIX_EPOCH + whole
+    };
+    base + Duration::from_nanos(u64::try_from(nsec.clamp(0, 999_999_999)).unwrap_or(0))
 }
 
 /// How many delegated descriptors one connection may hold at once.
@@ -334,32 +361,14 @@ pub(crate) fn delegated_path(fd: BorrowedFd<'_>) -> Result<std::path::PathBuf, I
 /// Verify a subject-delegated descriptor's location and kind. Does not consume the fd.
 pub fn verify_delegated(fd: BorrowedFd<'_>, req: DelegatedRequired) -> Result<Delegated, IoError> {
     let path = delegated_path(fd)?;
-    // The confinement root's OWN soundness, before it is used as a boundary: a root
-    // that any non-principal can write is not a boundary at all. `stat` by path, not
-    // an open — the open is what a `0700` home refuses (ADR-0009 decision 7).
-    let root_st = nix::sys::stat::stat(&req.confined_beneath)
-        .map_err(|e| crate::checks::map_errno_no_disambiguation(e, &req.confined_beneath))?;
-    crate::checks::check_owner_mode(
-        &root_st,
-        &req.confined_beneath,
-        req.root_required.owner,
-        req.root_required.mode_mask,
-    )?;
-    // Component-wise. NEVER `str::strip_prefix`: `/home/opx` is a string prefix
-    // of `/home/op` and must not match. Confinement is checked FIRST: for an
-    // object outside the confinement root, "not beneath your home" is the truthful
-    // reason, whatever kind of object it turns out to be.
-    if path.strip_prefix(&req.confined_beneath).is_err() {
-        return Err(IoError::EscapesAnchor { path });
-    }
-    // The named requirements, taken from the SAME descriptor. `owner`/`mode_mask`
-    // stay `None` on this path by design (ADR-0009 decision 1): the OS answers at
-    // the subject's own re-open, and recomputing the mode algebra here is what the
-    // operator forbade.
+    crate::mutation::checked_path(&path)?;
     let st = crate::syscall::fstat(&fd)
         .map_err(|e| crate::checks::map_errno_no_disambiguation(e, &path))?;
     crate::checks::check_target(&st, &path, &req.target)?;
-    Ok(Delegated { path })
+    Ok(Delegated {
+        path,
+        meta: DelegatedMeta::of(&st),
+    })
 }
 
 #[cfg(test)]
@@ -405,27 +414,17 @@ mod tests {
         }
     }
 
-    /// The diagnostic surface is what an operator reads when a read was refused
-    /// and they need to know WHICH object and WHICH root disagreed. A `Debug`
-    /// that omitted either would make a denial unreconstructable, which is the
-    /// same failure ADR-0019 names for the audit trail.
     #[test]
-    fn the_diagnostic_surface_names_the_object_and_the_confinement_root() {
-        let req = DelegatedRequired {
-            confined_beneath: PathBuf::from("/home/operator"),
-            root_required: maknae_io_root_req(),
-            target: target(),
-        };
-        let rendered = format!("{req:?}");
-        assert!(
-            rendered.contains("/home/operator"),
-            "the requirement must name its confinement root: {rendered}"
-        );
-
+    fn the_diagnostic_surface_names_the_kernel_reported_path() {
         let rendered = format!(
             "{:?}",
             Delegated {
                 path: PathBuf::from("/home/operator/notes"),
+                meta: DelegatedMeta {
+                    size: 0,
+                    mtime: std::time::UNIX_EPOCH,
+                    kind: FileKind::File,
+                },
             }
         );
         assert!(
@@ -434,40 +433,68 @@ mod tests {
         );
     }
 
-    /// Confinement is COMPONENT-wise, and this is the assertion that says so.
-    ///
-    /// Found by mutation, not by design review: swapping `Path::strip_prefix` for
-    /// a string `starts_with` survived every other test in this module. `/home/opx`
-    /// IS a string prefix of `/home/op`, so the string form hands a subject every
-    /// object in a sibling home whose name merely extends their own -- silently,
-    /// and only for unlucky username pairs.
     #[test]
-    fn a_sibling_root_whose_name_extends_the_confinement_root_does_not_match() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let base = confinement_root(root.path());
-        let confined = base.join("op");
-        let sibling = base.join("opx");
-        std::fs::create_dir_all(&confined).expect("mkdir op");
-        std::fs::create_dir_all(&sibling).expect("mkdir opx");
-        let confined = confinement_root(&confined);
-        let secret = sibling.join("secret");
-        std::fs::write(&secret, b"another subject's file").expect("write");
-        let f = std::fs::File::open(&secret).expect("open");
+    fn a_descriptor_outside_any_home_verifies_with_its_kernel_path() {
+        let (_dir, base) = crate::testutil::outside_any_home();
+        let body = b"maknae-617-outside-home-sentinel";
+        let file = a_file(&base, "notes", body);
+        let fd = open_path_for_delegation(&file).expect("delegation open");
+        let verified = verify_delegated(fd.as_fd(), DelegatedRequired { target: target() })
+            .expect("no confinement root refuses it");
+        assert_eq!(verified.path, file);
+        assert_eq!(verified.meta.size, body.len() as u64);
+        assert_eq!(verified.meta.kind, FileKind::File);
+        assert_eq!(
+            verified.meta.mtime,
+            std::fs::metadata(&file)
+                .expect("stat")
+                .modified()
+                .expect("mtime")
+        );
+    }
 
-        match verify_delegated(
-            f.as_fd(),
-            DelegatedRequired {
-                confined_beneath: confined,
-                root_required: maknae_io_root_req(),
-                target: target(),
-            },
-        ) {
-            Err(IoError::EscapesAnchor { path }) => assert_eq!(path, secret),
-            other => panic!(
-                "`opx` is a STRING prefix of `op` but not a COMPONENT prefix; \
-                 it must be refused: {other:?}"
-            ),
+    /// `nlink_exactly_one` makes path matching sound (ADR-0034): a second name is a
+    /// path no grant or deny was decided on.
+    #[test]
+    fn a_multiply_linked_file_is_still_refused() {
+        let (_dir, base) = crate::testutil::outside_any_home();
+        let real = a_file(&base, "notes", b"one object, two names");
+        std::fs::hard_link(&real, base.join("alias")).expect("hard link");
+        let fd = open_path_for_delegation(&real).expect("delegation open");
+        match verify_delegated(fd.as_fd(), DelegatedRequired { target: target() }) {
+            Err(IoError::MultiplyLinked { path, nlink }) => assert_eq!((path, nlink), (real, 2)),
+            other => panic!("a multiply-linked object must be refused: {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_directory_descriptor_reports_its_kind() {
+        let (_dir, base) = crate::testutil::outside_any_home();
+        let fd = open_directory_for_delegation(&base).expect("directory open");
+        let verified = verify_delegated(
+            fd.as_fd(),
+            DelegatedRequired {
+                target: TargetRequired {
+                    nlink_exactly_one: false,
+                    regular_file: false,
+                    max_bytes: None,
+                    ..target()
+                },
+            },
+        )
+        .expect("a directory verifies when no regular file is required");
+        assert_eq!(verified.meta.kind, FileKind::Directory);
+    }
+
+    #[test]
+    fn mtime_keeps_the_sign_and_the_nanoseconds() {
+        use std::time::{Duration, UNIX_EPOCH};
+        assert_eq!(mtime(5, 7), UNIX_EPOCH + Duration::new(5, 7));
+        assert_eq!(
+            mtime(-5, 7),
+            UNIX_EPOCH - Duration::from_secs(5) + Duration::from_nanos(7)
+        );
+        assert_eq!(mtime(0, 0), UNIX_EPOCH);
     }
 
     /// MEASURED on RHEL 10.2 before this was written: a plain `read(2)` on a socket
@@ -510,30 +537,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_unconfined_delegated_fd_is_refused() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let base = confinement_root(root.path());
-        let home = base.join("home");
-        std::fs::create_dir_all(&home).expect("mkdir");
-        let home = confinement_root(&home);
-        let outside = base.join("secret");
-        std::fs::write(&outside, b"NOT YOURS").expect("write");
-        let f = std::fs::File::open(&outside).expect("open");
-
-        match verify_delegated(
-            f.as_fd(),
-            DelegatedRequired {
-                confined_beneath: home,
-                root_required: maknae_io_root_req(),
-                target: target(),
-            },
-        ) {
-            Err(IoError::EscapesAnchor { .. }) => {}
-            other => panic!("an unconfined fd must be refused: {other:?}"),
-        }
-    }
-
     /// The queue recovers from a poisoned mutex rather than propagating, and `lock`'s
     /// doc claims exactly that. A panic in one request must not take a whole
     /// connection's descriptors down with it -- they are still valid handles.
@@ -553,54 +556,11 @@ mod tests {
         );
     }
 
-    /// ADR-0009 decision 7, and the removed-behavior obligation ADR-0021 imposes:
-    /// dropping the anchor OPEN must not drop the anchor REQUIREMENT. A home any
-    /// non-principal can write is where aliases get planted, and the descriptor says
-    /// nothing about that -- it proves the subject could open the object, not that
-    /// the tree it sits in is sound.
-    ///
-    /// Re-established by `stat` on the home PATH, which needs only search on its
-    /// parent (`/home`, universally `0755`) and NO permission on the home itself --
-    /// which is why a `0700` home stays servable (#194).
-    #[test]
-    fn a_group_writable_confinement_root_is_refused() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let home = confinement_root(root.path());
-        let notes = home.join("notes");
-        std::fs::write(&notes, b"planted?").expect("write");
-        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o770))
-            .expect("group-writable home");
-        let f = std::fs::File::open(&notes).expect("open");
-
-        let got = verify_delegated(
-            f.as_fd(),
-            DelegatedRequired {
-                confined_beneath: home.clone(),
-                root_required: maknae_io_root_req(),
-                target: target(),
-            },
-        );
-        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).expect("restore");
-        match got {
-            Err(IoError::InsecurePermissions { path, .. }) => assert_eq!(path, home),
-            other => panic!("a group-writable root must be refused: {other:?}"),
-        }
-    }
-
-    /// A tempdir that is a VALID confinement root **regardless of the host umask**.
-    ///
-    /// `tempfile` inherits the umask, so on a user-private-group host the directory is
-    /// `0775` — group-writable — and `root_required`'s `0o022` mask correctly refuses
-    /// it. A fixture that only works under one umask is testing the host, not the code.
-    ///
-    /// MEASURED 2026-08-30 across the standing test hosts, which is how this was
-    /// found: umask `0022` on RHEL 10 and Rocky 9, **`0002` on Debian 13**, `0077` on
-    /// the STIG'd el10 box. Eight tests passed locally and failed on Debian. CI runs
-    /// `ubuntu-latest`, whose umask is `0022`, so CI would have stayed green while any
-    /// Debian/Ubuntu developer hit it on the first run.
-    fn confinement_root(dir: &std::path::Path) -> std::path::PathBuf {
+    /// Pins a fixture directory's mode against the host umask, which differs across
+    /// the test hosts (`0002` on Debian, `0077` on a STIG'd host).
+    fn pinned(dir: &std::path::Path) -> std::path::PathBuf {
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-            .expect("pin the confinement root's mode against the host umask");
+            .expect("pin the fixture's mode against the host umask");
         dir.canonicalize().expect("canonicalize")
     }
 
@@ -614,13 +574,6 @@ mod tests {
         let p = dir.join(name);
         std::fs::write(&p, body).expect("write fixture");
         p
-    }
-
-    fn maknae_io_root_req() -> crate::AnchorRequired {
-        crate::AnchorRequired {
-            owner: Some(nix::unistd::geteuid().as_raw()),
-            mode_mask: Some(0o022),
-        }
     }
 
     /// The queue's own bound, asserted where the queue lives. Received descriptors
@@ -642,29 +595,6 @@ mod tests {
             fds.take().is_none(),
             "everything past the cap must have been dropped, not queued"
         );
-    }
-
-    /// A confinement root that cannot be stat'd is not a boundary, and refusing is the
-    /// only safe reading: "the root is missing" must never mean "nothing to confine to".
-    #[test]
-    fn a_confinement_root_that_cannot_be_stat_is_refused() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let home = confinement_root(root.path());
-        let notes = home.join("notes");
-        std::fs::write(&notes, b"x").expect("write");
-        let f = std::fs::File::open(&notes).expect("open");
-
-        match verify_delegated(
-            f.as_fd(),
-            DelegatedRequired {
-                confined_beneath: home.join("does-not-exist"),
-                root_required: maknae_io_root_req(),
-                target: target(),
-            },
-        ) {
-            Err(IoError::Io { kind, .. }) => assert_eq!(kind, crate::IoKind::NotFound),
-            other => panic!("an unstattable confinement root must be refused: {other:?}"),
-        }
     }
 
     /// The two primitives are each other's inverse, and asserting them as a ROUND
@@ -808,15 +738,13 @@ mod tests {
     #[test]
     fn a_no_access_descriptor_is_enough_to_verify_location_and_kind() {
         let root = tempfile::tempdir().expect("tempdir");
-        let home = confinement_root(root.path());
+        let home = pinned(root.path());
         let p = home.join("held");
         std::fs::write(&p, b"x").expect("write");
         let fd = open_path_for_delegation(&p).expect("no-access open");
         let verified = verify_delegated(
             fd.as_fd(),
             DelegatedRequired {
-                confined_beneath: home,
-                root_required: maknae_io_root_req(),
                 target: TargetRequired {
                     max_bytes: None,
                     ..target()
@@ -834,7 +762,7 @@ mod tests {
     #[test]
     fn a_delegated_fd_to_a_non_regular_file_is_refused() {
         let root = tempfile::tempdir().expect("tempdir");
-        let home = confinement_root(root.path());
+        let home = pinned(root.path());
         let pipe = home.join("pipe");
         nix::unistd::mkfifo(
             &pipe,
@@ -850,42 +778,9 @@ mod tests {
         )
         .expect("open fifo");
 
-        match verify_delegated(
-            f.as_fd(),
-            DelegatedRequired {
-                confined_beneath: home,
-                root_required: maknae_io_root_req(),
-                target: target(),
-            },
-        ) {
+        match verify_delegated(f.as_fd(), DelegatedRequired { target: target() }) {
             Err(IoError::NotRegularFile { path }) => assert_eq!(path, pipe),
             other => panic!("a fifo must be refused: {other:?}"),
-        }
-    }
-
-    /// `nlink_exactly_one` is load-bearing for CONFINEMENT under ADR-0009 D5, not
-    /// merely for alias refusal: with a second link the kernel reports *a* path
-    /// rather than *the* path, and prefix-checking one of several names proves
-    /// nothing about the others.
-    #[test]
-    fn a_delegated_fd_with_a_second_link_is_refused() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let home = confinement_root(root.path());
-        let real = home.join("notes");
-        std::fs::write(&real, b"one object, two names").expect("write");
-        std::fs::hard_link(&real, home.join("alias")).expect("hard link");
-        let f = std::fs::File::open(&real).expect("open");
-
-        match verify_delegated(
-            f.as_fd(),
-            DelegatedRequired {
-                confined_beneath: home,
-                root_required: maknae_io_root_req(),
-                target: target(),
-            },
-        ) {
-            Err(IoError::MultiplyLinked { nlink, .. }) => assert_eq!(nlink, 2),
-            other => panic!("a multiply-linked object must be refused: {other:?}"),
         }
     }
 
@@ -894,7 +789,7 @@ mod tests {
     #[test]
     fn a_delegated_fd_over_the_named_budget_is_refused() {
         let root = tempfile::tempdir().expect("tempdir");
-        let home = confinement_root(root.path());
+        let home = pinned(root.path());
         let big = home.join("big");
         std::fs::write(&big, b"more than four bytes").expect("write");
         let f = std::fs::File::open(&big).expect("open");
@@ -902,8 +797,6 @@ mod tests {
         match verify_delegated(
             f.as_fd(),
             DelegatedRequired {
-                confined_beneath: home,
-                root_required: maknae_io_root_req(),
                 target: TargetRequired {
                     max_bytes: Some(4),
                     ..target()
@@ -917,7 +810,7 @@ mod tests {
         }
     }
 
-    /// The ENVIRONMENT PROPERTY the whole confinement design rests on, measured
+    /// The ENVIRONMENT PROPERTY the decided path rests on, measured
     /// rather than assumed: the kernel-reported path is read from the daemon's OWN
     /// fd table, so it survives a directory that grants the reader nothing at all.
     ///
@@ -934,7 +827,7 @@ mod tests {
         std::fs::create_dir_all(&home).expect("mkdir home");
         let secret = home.join("notes");
         std::fs::write(&secret, b"beneath the home").expect("write");
-        let home_c = confinement_root(&home);
+        pinned(&home);
         let secret_c = secret.canonicalize().expect("canonicalize target");
 
         let f = std::fs::File::open(&secret).expect("the subject opens it while it still can");
@@ -946,8 +839,6 @@ mod tests {
         let got = verify_delegated(
             f.as_fd(),
             DelegatedRequired {
-                confined_beneath: home_c,
-                root_required: maknae_io_root_req(),
                 target: target(),
             },
         );
@@ -965,45 +856,6 @@ mod tests {
         );
             },
         );
-    }
-
-    /// Confinement is a MAKNAE control, independent of what OS DAC permits: the
-    /// subject here legitimately opens a file it owns and can read, so the
-    /// delegated fd is honest authority -- and it is still refused, because the
-    /// object does not lie beneath the confinement root (ADR-0009 decision 3).
-    #[test]
-    fn a_delegated_fd_outside_the_confinement_root_is_refused() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let home = root.path().join("home");
-        let elsewhere = root.path().join("elsewhere");
-        std::fs::create_dir_all(&home).expect("mkdir home");
-        std::fs::create_dir_all(&elsewhere).expect("mkdir elsewhere");
-        let home = confinement_root(&home);
-        let secret = elsewhere.join("secret");
-        std::fs::write(&secret, b"NOT BENEATH THE HOME").expect("write");
-
-        // Canonical, because the kernel reports the resolved path and a
-        // tempdir root may itself sit behind a symlink.
-        let secret = secret.canonicalize().expect("canonicalize target");
-
-        let f = std::fs::File::open(&secret).expect("the subject opens its own file");
-
-        let got = verify_delegated(
-            f.as_fd(),
-            DelegatedRequired {
-                confined_beneath: home,
-                root_required: maknae_io_root_req(),
-                target: target(),
-            },
-        );
-
-        match got {
-            Err(IoError::EscapesAnchor { path }) => assert_eq!(
-                path, secret,
-                "the refusal names the object's REAL path, not a client-supplied string"
-            ),
-            other => panic!("an fd outside the confinement root must be refused: {other:?}"),
-        }
     }
 
     #[test]
@@ -1172,5 +1024,30 @@ mod tests {
         let got = recv_delegated(rx.as_fd(), &mut buf).expect("recvmsg");
         assert_eq!(got.bytes, 3);
         assert_eq!(got.creds, Some(own_creds()));
+    }
+
+    #[test]
+    fn a_symlink_reports_its_kind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let obj = a_file(dir.path(), "obj", b"x");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&obj, &link).expect("symlink");
+        let st = nix::sys::stat::lstat(&link).expect("lstat the link itself");
+        assert_eq!(DelegatedMeta::of(&st).kind, FileKind::Symlink);
+    }
+
+    #[test]
+    fn a_message_carrying_exactly_the_cap_is_accepted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let obj = a_file(dir.path(), "obj", b"x");
+        let (tx, rx) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+        let files: Vec<std::fs::File> = (0..MAX_DELEGATED_FDS_PER_MESSAGE)
+            .map(|_| std::fs::File::open(&obj).expect("open"))
+            .collect();
+        let fds: Vec<BorrowedFd<'_>> = files.iter().map(|f| f.as_fd()).collect();
+        send_fds(tx.as_fd(), &fds);
+        let mut buf = [0u8; 64];
+        let got = recv_delegated(rx.as_fd(), &mut buf).expect("a message at the cap is accepted");
+        assert_eq!(got.fds.len(), MAX_DELEGATED_FDS_PER_MESSAGE);
     }
 }

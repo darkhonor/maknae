@@ -87,14 +87,21 @@ impl<K: KeySupply> LoopPlane<K> {
 }
 
 impl<K: KeySupply> Plane for LoopPlane<K> {
-    async fn open(&mut self, cwd: &std::path::Path) -> Result<ConversationId, PlaneError> {
+    async fn open(
+        &mut self,
+        cwd: &std::path::Path,
+        sensitive: &[String],
+    ) -> Result<ConversationId, PlaneError> {
         let cwd = cwd.to_str().ok_or_else(|| {
             PlaneError::Transport("the working directory is not valid UTF-8".into())
         })?;
         let diagnostics = &mut self.diagnostics;
         open_outcome(
             send_verb(
-                Verb::SessionNew { cwd: cwd.into() },
+                Verb::SessionNew {
+                    cwd: cwd.into(),
+                    sensitive: sensitive.to_vec(),
+                },
                 None,
                 crate::mutation::WriteCheck::Unchecked,
                 &self.transport,
@@ -230,19 +237,20 @@ impl<K: KeySupply> Plane for LoopPlane<K> {
             return WriteOutcome::NotSent;
         };
         let diagnostics = &mut self.diagnostics;
-        write_outcome(
-            send_verb(
-                verb,
-                Some(content),
-                check_for(basis),
-                &self.transport,
-                &self.client,
-                &self.trust,
-                &mut |l| diagnostics.push(l),
-            )
-            .await
-            .map(WireOutcome::from),
+        let sent = send_verb(
+            verb,
+            Some(content),
+            check_for(basis),
+            &self.transport,
+            &self.client,
+            &self.trust,
+            &mut |l| diagnostics.push(l),
         )
+        .await;
+        if let Ok(crate::outcome::SentOutcome::NotAttempted { why }) = &sent {
+            diagnostics.push(format!("write not performed: {why}; nothing was written"));
+        }
+        write_outcome(sent.map(WireOutcome::from))
     }
     fn take_diagnostics(&mut self) -> Vec<String> {
         std::mem::take(&mut self.diagnostics)

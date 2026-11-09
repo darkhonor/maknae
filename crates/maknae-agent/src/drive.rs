@@ -96,6 +96,11 @@ pub type Seen = std::collections::HashMap<String, [i64; 7]>;
 pub enum LoopEvent {
     Notice(Notice),
     Diagnostic(String),
+    /// A tool call the kernel answered `Protected`: for the user's terminal only.
+    Protected {
+        path: String,
+        by: crate::plane::ProtectedBy,
+    },
     /// The text is in the run's `Outcome`; the event carries none of it.
     Answered,
     Stopped(StopReason),
@@ -311,6 +316,10 @@ pub async fn drive_session<P: Plane>(
                             }
                             ReadOutcome::Refused => ToolOutcome::ReadRefused,
                             ReadOutcome::Unavailable => ToolOutcome::ReadUnavailable,
+                            ReadOutcome::Protected(by) => {
+                                emit(LoopEvent::Protected { path: path.clone(), by });
+                                ToolOutcome::Protected
+                            }
                             }
                         }
                         Ok(ToolRequest::Write { path, content, .. }) => {
@@ -335,8 +344,13 @@ pub async fn drive_session<P: Plane>(
                                         ReadBasis::Unread => ToolOutcome::WriteUnread,
                                     }
                                 }
+                                WriteOutcome::Unavailable => ToolOutcome::WriteUnavailable,
                                 WriteOutcome::Unknown => ToolOutcome::WriteUnknown,
                                 WriteOutcome::NotSent => ToolOutcome::WriteNotSent,
+                                WriteOutcome::Protected(by) => {
+                                    emit(LoopEvent::Protected { path: path.clone(), by });
+                                    ToolOutcome::Protected
+                                }
                             }
                         }
                     };
@@ -457,6 +471,7 @@ mod tests {
         async fn open(
             &mut self,
             _: &std::path::Path,
+            _: &[String],
         ) -> Result<maknae_proto::ConversationId, PlaneError> {
             Err(PlaneError::Unavailable)
         }
@@ -855,7 +870,7 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn a_refused_read_reaches_the_model_as_not_authorized_and_the_loop_continues() {
+    async fn a_refused_read_reaches_the_model_as_unavailable_and_the_loop_continues() {
         let mut p = scripted(vec![
             PromptReply {
                 reasoning: None,
@@ -874,13 +889,106 @@ mod tests {
         let mut t = Transcript::new("conv", "q");
         let out = drive_unmetered(&mut p, &mut t, &budget()).await;
         assert_eq!(out.answer.as_deref(), Some("I could not read that"));
-        assert!(tool_text(&t.turns()[2]).starts_with("Not authorized"));
+        assert!(tool_text(&t.turns()[2]).starts_with("unavailable — do not retry"));
+    }
+    #[tokio::test]
+    async fn a_protected_call_tells_the_user_the_entry_and_the_model_only_that_it_is_protected() {
+        let by = ProtectedBy {
+            list: maknae_proto::HOST_SENSITIVE_LIST.into(),
+            entry: "/x/.ssh/**".into(),
+        };
+        let mut p = scripted(vec![
+            PromptReply {
+                reasoning: None,
+                blocks: vec![],
+                tool_calls: vec![
+                    call("c1", "read_file", r#"{"path":"/x/.ssh/id_rsa"}"#),
+                    call(
+                        "c2",
+                        "write_file",
+                        r#"{"path":"/x/.ssh/config","content":"y"}"#,
+                    ),
+                ],
+                usage: None,
+            },
+            PromptReply {
+                reasoning: None,
+                blocks: vec![text("ok")],
+                tool_calls: vec![],
+                usage: None,
+            },
+        ]);
+        p.read_outcome = ReadOutcome::Protected(by.clone());
+        p.write_outcome = WriteOutcome::Protected(by.clone());
+        let mut t = Transcript::new("conv", "q");
+        let mut events = vec![];
+        drive_session(
+            &mut p,
+            &mut t,
+            &mut Seen::new(),
+            &budget(),
+            &mut Meter::new(ContextBudget::new(1_000_000, None).unwrap()),
+            &AtomicBool::new(false),
+            &mut |e| events.push(e),
+            None,
+        )
+        .await;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, LoopEvent::Protected { .. }))
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![
+                LoopEvent::Protected {
+                    path: "/x/.ssh/id_rsa".into(),
+                    by: by.clone(),
+                },
+                LoopEvent::Protected {
+                    path: "/x/.ssh/config".into(),
+                    by,
+                },
+            ]
+        );
+        for i in [2, 3] {
+            let said = tool_text(&t.turns()[i]);
+            assert!(said.starts_with(crate::render::PROTECTED), "{said}");
+            assert!(!said.contains(".ssh"), "{said}");
+        }
+    }
+    #[tokio::test]
+    async fn a_protected_write_renders_protected() {
+        let mut p = scripted(vec![
+            PromptReply {
+                reasoning: None,
+                blocks: vec![],
+                tool_calls: vec![call("c1", "write_file", r#"{"path":"/w/a","content":"x"}"#)],
+                usage: None,
+            },
+            PromptReply {
+                reasoning: None,
+                blocks: vec![text("ok")],
+                tool_calls: vec![],
+                usage: None,
+            },
+        ]);
+        p.write_outcome = WriteOutcome::Protected(ProtectedBy {
+            list: maknae_proto::PERSONAL_SENSITIVE_LIST.into(),
+            entry: "/w/a".into(),
+        });
+        let mut t = Transcript::new("conv", "q");
+        drive_unmetered(&mut p, &mut t, &budget()).await;
+        assert_eq!(
+            tool_text(&t.turns()[2]),
+            format!("{}\n\nsteps remaining: 3", crate::render::PROTECTED)
+        );
     }
     #[tokio::test]
     async fn an_uncertain_write_is_attempted_exactly_once_and_an_unsent_one_is_a_tool_error() {
         for (outcome, want) in [
             (WriteOutcome::Unknown, "outcome unknown"),
             (WriteOutcome::NotSent, "tool error: write not sent"),
+            (WriteOutcome::Unavailable, "unavailable — do not retry"),
         ] {
             let mut p = scripted(vec![
                 PromptReply {
@@ -1038,7 +1146,7 @@ mod tests {
             ("read_file", r#"{"path":"relative.txt"}"#),
             ("read_file", r#"{"path":""}"#),
             // Non-canonical: the kernel would answer this `BadRequest` before
-            // the PDP, which renders as an unappealable `read unavailable`.
+            // the PDP, which renders as an unappealable `unavailable`.
             // The router refuses it as a fixable tool error instead.
             ("read_file", r#"{"path":"/home/u/p/../q/f.txt"}"#),
             ("nope", r#"{"path":"/a"}"#),
@@ -1157,7 +1265,7 @@ mod tests {
         assert_eq!(p.prompts, 0);
     }
     #[tokio::test]
-    async fn an_unavailable_read_is_rendered_as_unavailable_not_refused() {
+    async fn an_unavailable_read_is_rendered_as_unavailable() {
         let mut p = scripted(vec![
             PromptReply {
                 reasoning: None,
@@ -1175,7 +1283,7 @@ mod tests {
         p.read_outcome = ReadOutcome::Unavailable;
         let mut t = Transcript::new("conv", "q");
         drive_unmetered(&mut p, &mut t, &budget()).await;
-        assert!(tool_text(&t.turns()[2]).starts_with("read unavailable"));
+        assert!(tool_text(&t.turns()[2]).starts_with("unavailable — do not retry"));
     }
     #[tokio::test]
     async fn every_prompt_failure_stops_with_its_own_reason() {
@@ -1444,6 +1552,7 @@ mod tests {
         async fn open(
             &mut self,
             _: &std::path::Path,
+            _: &[String],
         ) -> Result<maknae_proto::ConversationId, PlaneError> {
             Err(PlaneError::Unavailable)
         }
@@ -1492,6 +1601,7 @@ mod tests {
         async fn open(
             &mut self,
             _: &std::path::Path,
+            _: &[String],
         ) -> Result<maknae_proto::ConversationId, PlaneError> {
             Err(PlaneError::Unavailable)
         }
@@ -1640,6 +1750,7 @@ mod tests {
         async fn open(
             &mut self,
             _: &std::path::Path,
+            _: &[String],
         ) -> Result<maknae_proto::ConversationId, PlaneError> {
             Err(PlaneError::Unavailable)
         }

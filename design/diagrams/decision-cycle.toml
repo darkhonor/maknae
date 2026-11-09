@@ -11,8 +11,24 @@ id = "basic"
 name = "maknae-authz-basic"
 stereo = "«baseline · non-removable»"
 status = "in-repo"
-model = "RBAC — role-keyed, plus the shipped deny list and the OS-DAC gate"
+model = "RBAC — role-keyed, plus the OS-DAC gate"
 evidence = "crates/maknae-authz-basic/src/decide.rs"
+
+[[operand]]
+id = "ceiling"
+name = "maknae-ceiling"
+stereo = "«mandatory · non-removable»"
+status = "in-repo"
+model = "MAC — refuses content marked above the declared level; never Permits"
+evidence = "crates/maknae-kernel/src/ceiling_authz.rs, a named field of Composition"
+
+[[operand]]
+id = "sensitive"
+name = "maknae-sensitive"
+stereo = "«mandatory · non-removable»"
+status = "in-repo"
+model = "MAC — refuses every file verb on a sensitive.yaml path; never Permits"
+evidence = "crates/maknae-kernel/src/sensitive_authz.rs, a named field of Composition"
 
 [[operand]]
 id = "dcs"

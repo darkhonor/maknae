@@ -140,6 +140,10 @@ impl Snapshot {
         self.loaded.agents.0.get(&uid).map(String::as_str)
     }
 
+    pub fn sensitive(&self) -> &Arc<maknae_config::SensitiveList> {
+        &self.loaded.sensitive
+    }
+
     pub(crate) fn loaded(&self) -> &LoadedPolicy {
         &self.loaded
     }
@@ -550,6 +554,7 @@ pub fn compile(
         subjects: source.subject_grants().clone(),
         agents: source.agent_uids(),
         taskers: source.agent_taskers().clone(),
+        sensitive: Arc::clone(source.sensitive()),
     };
     Ok(Snapshot {
         graph,
@@ -707,7 +712,7 @@ mod tests {
     }
 
     fn shipped_with_bindings() -> PolicySource {
-        source_with(SHIPPED, Some(BINDINGS))
+        source_with(crate::tests::shipped_denying(), Some(BINDINGS))
     }
 
     fn str_attr<'a>(n: &'a NodeRecord, k: &str) -> Option<&'a str> {
@@ -730,7 +735,10 @@ mod tests {
             snap(&s).policy_sha256(test_digest),
             hex(&test_digest(lines.as_bytes()))
         );
-        let edited = source_with(&SHIPPED.replacen("Read(", "Write(", 1), Some(BINDINGS));
+        let edited = source_with(
+            &crate::tests::shipped_denying().replacen("Read(", "Write(", 1),
+            Some(BINDINGS),
+        );
         assert_ne!(
             snap(&edited).policy_sha256(test_digest),
             snap(&s).policy_sha256(test_digest)

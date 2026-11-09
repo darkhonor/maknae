@@ -376,7 +376,8 @@ phase1() {
                 "./usr/local/share/maknae/defaults" \
                 "./usr/local/share/maknae/defaults/authz.yaml" \
                 "./usr/local/share/maknae/defaults/bindings.yaml" \
-                "./usr/local/share/maknae/defaults/maknae.yaml" | sort > "$x/want"
+                "./usr/local/share/maknae/defaults/maknae.yaml" \
+                "./usr/local/share/maknae/defaults/sensitive.yaml" | sort > "$x/want"
             lsbom -s "$bom" \
               | sed -e 's|^\.$||' -e 's|libaws_lc_fips_.*_crypto\.dylib|FIPSDYLIB|' \
               | grep -v '^$' | sort > "$x/got"
@@ -561,6 +562,7 @@ REFUSE
     }
     check_mode "drwxr-x--- root _maknae"    /etc/maknae
     check_mode "-rw-r----- root _maknae"    /etc/maknae/bindings.yaml
+    check_mode "-rw-r----- root _maknae"    /etc/maknae/sensitive.yaml
     check_mode "drwx------ _maknae _maknae" /var/log/maknae
     [ "$(ls -led /var/log/maknae | wc -l)" -eq 1 ] \
         && ok "a reader-free install leaves no ACE on /var/log/maknae" \

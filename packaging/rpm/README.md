@@ -3,7 +3,7 @@
 Native `rpmbuild` package (`maknae.spec` + `build-rpm.sh`) for RHEL / Rocky. It
 installs the `maknaed` daemon and `maknae` CLI, the hardened `maknaed.service`
 system unit, the sysusers.d definition (`_maknae` service account + `maknae`
-operator group), the shipped default YAMLs (`authz.yaml` / `maknae.yaml`; `bindings.yaml` ships as
+operator group), the shipped default YAMLs (`authz.yaml` / `maknae.yaml` / `sensitive.yaml`; `bindings.yaml` ships as
 `/usr/share/maknae/bindings.yaml`, and `%post` copies it to `/etc/maknae` only
 when neither that file nor `/var/lib/maknae/kernel.graph` exists), the
 SELinux module (compiled at build time, shipped as `/usr/share/selinux/packages/targeted/maknae.pp.bz2`, and installed and removed at priority 200 by the `selinux-policy` RPM macros), the fapolicyd trust

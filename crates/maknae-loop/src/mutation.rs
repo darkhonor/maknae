@@ -3,8 +3,7 @@
 //! outlive a timeout; its worker can finish that step but cannot start another.
 use maknae_config::TransportConfig;
 use maknae_io::{
-    AnchorRequired, DirectoryCursor, EffectState, IoError, IoKind, MutationDirectory,
-    MutationFailure, MutationRequired,
+    DirectoryCursor, EffectState, IoError, IoKind, MutationDirectory, MutationFailure,
 };
 use maknae_proto::{
     self as proto, EffectEntry, MutationGrant, MutationReport, MutationScope, ReportedEffect,
@@ -142,7 +141,9 @@ pub fn prepare_checked(
             result
         }
         proto::Verb::Read { path, .. } => maknae_io::open_path_for_delegation(Path::new(path)),
-        proto::Verb::SessionNew { cwd } => maknae_io::open_directory_for_delegation(Path::new(cwd)),
+        proto::Verb::SessionNew { cwd, .. } => {
+            maknae_io::open_directory_for_delegation(Path::new(cwd))
+        }
         _ => return None,
     };
     let (fd, error) = match opened {
@@ -348,6 +349,10 @@ enum Work {
         components: std::collections::VecDeque<String>,
         parents: bool,
     },
+    /// Refused before any effect: the held directory is not the granted parent.
+    Withheld {
+        path: PathBuf,
+    },
     Done,
 }
 struct Worker {
@@ -360,6 +365,9 @@ struct Worker {
     content: Option<maknae_io::Zeroizing<Vec<u8>>>,
     page: Option<PageMeta>,
     stale: bool,
+    withheld: bool,
+    attempted: bool,
+    diverted: bool,
     version: Option<maknae_io::FileVersion>,
 }
 struct Step {
@@ -383,6 +391,15 @@ fn io_finish(error: &IoError) -> ReportedFinish {
         IoError::TargetTooLarge { .. } => ReportedFinish::LimitReached,
         IoError::SizeChanged { .. } => ReportedFinish::PathChanged,
         _ => ReportedFinish::OsRefused,
+    }
+}
+/// `(stale, withheld)` for a replace that failed (ADR-0034 decision 7). A stale base
+/// is `stale` only when the subject can read the file. Any other failure decided
+/// before a write syscall is `withheld`; one that may have reached the file is neither.
+fn refused_replace(e: &MutationFailure, readable: impl FnOnce() -> bool) -> (bool, bool) {
+    match &e.source {
+        IoError::StaleBase { .. } if readable() => (true, false),
+        _ => (false, e.before_write),
     }
 }
 fn error_step(e: MutationFailure, effect: ReportedEffect, path: String) -> Step {
@@ -428,7 +445,21 @@ fn fits(report: &MutationReport, cap: usize) -> bool {
 }
 impl Worker {
     /// Reserve both effect and every terminal form before entering the syscall.
+    /// A stop here precedes the effect it reserves for, so it is certified pre-effect
+    /// when no earlier effect syscall was attempted.
     fn reserve(
+        &mut self,
+        path: &Path,
+        effect: ReportedEffect,
+        depth: usize,
+    ) -> Result<String, Box<Step>> {
+        let reserved = self.reservation(path, effect, depth);
+        if reserved.is_err() {
+            self.withheld = !self.attempted;
+        }
+        reserved
+    }
+    fn reservation(
         &self,
         path: &Path,
         effect: ReportedEffect,
@@ -494,6 +525,14 @@ impl Worker {
         let work = std::mem::replace(&mut self.work, Work::Done);
         match work {
             Work::Done => Step::stop(ReportedFinish::Success, None),
+            Work::Withheld { path } => {
+                self.withheld = true;
+                self.diverted = true;
+                Step::stop(
+                    ReportedFinish::PathChanged,
+                    path.to_str().map(str::to_string),
+                )
+            }
             Work::Read { held, path, page } => {
                 let path = match self.reserve(&path, ReportedEffect::ReadFile, 1) {
                     Ok(p) => p,
@@ -575,7 +614,10 @@ impl Worker {
                         }
                     }
                     Err(e) => {
-                        self.stale = matches!(e.source, IoError::StaleBase { .. });
+                        self.attempted = !e.before_write;
+                        (self.stale, self.withheld) = refused_replace(&e, || {
+                            maknae_io::held_file_is_readable(held.as_fd(), Path::new(&path))
+                        });
                         error_step(e, ReportedEffect::ReplacedFile, path)
                     }
                 }
@@ -607,7 +649,11 @@ impl Worker {
                             finish: Some((ReportedFinish::Success, None)),
                         }
                     }
-                    Err(e) => error_step(e, ReportedEffect::CreatedFile, path),
+                    Err(e) => {
+                        self.attempted = !e.before_write;
+                        self.withheld = e.before_write;
+                        error_step(e, ReportedEffect::CreatedFile, path)
+                    }
                 }
             }
             Work::Mkdir {
@@ -630,6 +676,7 @@ impl Worker {
                     Ok(p) => p,
                     Err(s) => return *s,
                 };
+                self.attempted = true;
                 match parent.mkdir_one(&leaf) {
                     Ok(_) => {
                         let effect = Some(EffectEntry {
@@ -730,6 +777,7 @@ impl Worker {
                         Ok(p) => p,
                         Err(s) => return *s,
                     };
+                    self.attempted = true;
                     match target_parent.remove_entry(&target_leaf) {
                         Ok(_) => {
                             if closing {
@@ -848,6 +896,7 @@ pub async fn execute<S: AsyncRead + AsyncWrite + Unpin + Send>(
     .map(|a| WriteEnd {
         applied: a.success,
         stale: a.stale,
+        withheld: a.withheld,
         version: a.version.map(|v| v.key()),
     })
 }
@@ -881,11 +930,24 @@ pub async fn execute_read<S: AsyncRead + AsyncWrite + Unpin + Send>(
 }
 /// The stderr line for an attempt that did not succeed. A stale refusal gets
 /// none: the model is told, and it is not a failure of the agent's user (#388).
-fn stop_line(outcome: ReportedFinish, reading: bool, stale: bool, effects: u32) -> Option<String> {
+fn stop_line(
+    outcome: ReportedFinish,
+    reading: bool,
+    writing: bool,
+    stale: bool,
+    withheld: bool,
+    effects: u32,
+) -> Option<String> {
     match outcome {
         ReportedFinish::Success => None,
         _ if reading => Some(format!("read not performed: {outcome:?}")),
         _ if stale => None,
+        _ if withheld && writing => Some(format!(
+            "write not performed: {outcome:?}; nothing was written"
+        )),
+        _ if withheld => Some(format!(
+            "mutation not performed: {outcome:?}; nothing was changed"
+        )),
         _ => Some(format!(
             "mutation stopped: {outcome:?}; {effects} effect(s) reported"
         )),
@@ -897,27 +959,29 @@ struct Attempted {
     content: Option<maknae_io::Zeroizing<Vec<u8>>>,
     page: Option<PageMeta>,
     stale: bool,
+    withheld: bool,
     version: Option<maknae_io::FileVersion>,
 }
 
 /// A write attempt's end: `stale` is true only when the #388 check refused it,
-/// before any write syscall; `version` is the written file's, when known.
+/// before any write syscall, and the file is readable; `withheld` only when the client
+/// certified that no effect syscall was attempted (ADR-0034 decision 7). `version` is
+/// the written file's, when known.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WriteEnd {
     pub applied: bool,
     pub stale: bool,
+    pub withheld: bool,
     pub version: Option<[i64; 7]>,
 }
-async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
+/// Everything an attempt does before its first effect; an `Err` is certain to have had none.
+async fn start_attempt(
     prepared: PreparedMutation,
     grant: MutationGrant,
-    stream: &mut S,
     cfg: &TransportConfig,
     cap: usize,
     written_at: Instant,
-    diag: &mut (dyn FnMut(String) + Send),
-) -> Result<Attempted, String> {
-    let reading = matches!(prepared.request, proto::Verb::Read { .. });
+) -> Result<(Worker, proto::MutationId, Instant), String> {
     let granted = match &prepared.request {
         proto::Verb::FsWrite {
             mode: WriteMode::Existing,
@@ -972,20 +1036,14 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
                 _ => return Err("unexpected mutation operation".into()),
             },
             Granted::Parent(parent_path) => {
-                let parent = maknae_io::verify_mutation_directory(
-                    evidence,
-                    MutationRequired {
-                        confined_beneath: parent_path.clone(),
-                        root_required: AnchorRequired::OS_DAC,
-                    },
-                )
-                .map_err(|e| e.to_string())?
-                .with_deadline(deadline);
-                if parent.path() != parent_path {
-                    return Err("held mutation directory differs from grant parent".into());
-                }
+                let parent = maknae_io::verify_mutation_directory(evidence)
+                    .map_err(|e| e.to_string())?
+                    .with_deadline(deadline);
                 let leaf = prepared.components[0].clone();
                 match prepared.request {
+                    _ if parent.path() != parent_path => Work::Withheld {
+                        path: parent_path.join(&leaf),
+                    },
                     proto::Verb::FsWrite {
                         mode: WriteMode::CreateExclusive,
                         ..
@@ -1022,15 +1080,75 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
             content: None,
             page: None,
             stale: false,
+            withheld: false,
+            attempted: false,
+            diverted: false,
             version: None,
         })
     });
-    let mut worker = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), initialize)
+    let worker = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), initialize)
         .await
         .map_err(|_| {
             "mutation directory verification timed out; no namespace effect started".to_string()
         })?
         .map_err(|e| e.to_string())??;
+    Ok((worker, id, deadline))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum LostFinish {
+    NoEffect,
+    Stale,
+    Unknown,
+}
+
+/// What an attempt whose finish report went unacknowledged may claim.
+fn lost_finish(certified: bool, stale: bool) -> LostFinish {
+    match (certified, stale) {
+        (true, _) => LostFinish::NoEffect,
+        (false, true) => LostFinish::Stale,
+        (false, false) => LostFinish::Unknown,
+    }
+}
+
+/// An attempt that ended before its first effect (ADR-0034 decision 7).
+fn no_effect(
+    reading: bool,
+    writing: bool,
+    why: &str,
+    diag: &mut (dyn FnMut(String) + Send),
+) -> Attempted {
+    diag(match (reading, writing) {
+        (true, _) => format!("read not performed: {why}"),
+        (_, true) => format!("write not performed: {why}; nothing was written"),
+        _ => format!("mutation not performed: {why}; nothing was changed"),
+    });
+    Attempted {
+        success: false,
+        content: None,
+        page: None,
+        stale: false,
+        withheld: !reading,
+        version: None,
+    }
+}
+
+async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
+    prepared: PreparedMutation,
+    grant: MutationGrant,
+    stream: &mut S,
+    cfg: &TransportConfig,
+    cap: usize,
+    written_at: Instant,
+    diag: &mut (dyn FnMut(String) + Send),
+) -> Result<Attempted, String> {
+    let reading = matches!(prepared.request, proto::Verb::Read { .. });
+    let writing = matches!(prepared.request, proto::Verb::FsWrite { .. });
+    let (mut worker, id, deadline) =
+        match start_attempt(prepared, grant, cfg, cap, written_at).await {
+            Ok(started) => started,
+            Err(why) => return Ok(no_effect(reading, writing, &why, diag)),
+        };
     loop {
         // The worker performs at most one effect. Dropping this waiter never
         // releases a worker to start a second effect without the durable ack.
@@ -1051,7 +1169,7 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
             } else {
                 outcome
             };
-            report(
+            let reported = report(
                 stream,
                 cap,
                 deadline,
@@ -1059,8 +1177,31 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
                 id,
                 next.next_index,
             )
-            .await?;
-            if let Some(line) = stop_line(outcome, reading, next.stale, next.next_index) {
+            .await;
+            if let Err(why) = reported {
+                return match lost_finish(next.withheld, next.stale) {
+                    LostFinish::NoEffect => {
+                        Ok(no_effect(reading, writing && !next.diverted, &why, diag))
+                    }
+                    LostFinish::Stale => Ok(Attempted {
+                        success: false,
+                        content: None,
+                        page: None,
+                        stale: true,
+                        withheld: false,
+                        version: None,
+                    }),
+                    LostFinish::Unknown => Err(why),
+                };
+            }
+            if let Some(line) = stop_line(
+                outcome,
+                reading,
+                writing && !next.diverted,
+                next.stale,
+                next.withheld,
+                next.next_index,
+            ) {
                 diag(line);
             }
             return Ok(Attempted {
@@ -1068,6 +1209,7 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
                 content: next.content.take(),
                 page: next.page.take(),
                 stale: next.stale,
+                withheld: next.withheld,
                 version: next.version,
             });
         }
@@ -1080,21 +1222,68 @@ mod tests {
     #[test]
     fn a_stale_refusal_prints_nothing_and_other_stops_still_do() {
         use ReportedFinish::*;
-        assert_eq!(stop_line(Success, false, false, 1), None);
-        assert_eq!(stop_line(Success, true, false, 1), None);
-        assert_eq!(stop_line(PathChanged, false, true, 0), None);
+        assert_eq!(stop_line(Success, false, true, false, false, 1), None);
+        assert_eq!(stop_line(Success, true, false, false, false, 1), None);
+        assert_eq!(stop_line(PathChanged, false, true, true, false, 0), None);
         assert_eq!(
-            stop_line(PathChanged, false, false, 0).as_deref(),
+            stop_line(PathChanged, false, true, false, false, 0).as_deref(),
             Some("mutation stopped: PathChanged; 0 effect(s) reported")
         );
         assert_eq!(
-            stop_line(OsRefused, true, false, 0).as_deref(),
+            stop_line(OsRefused, true, false, false, false, 0).as_deref(),
             Some("read not performed: OsRefused")
         );
         assert_eq!(
-            stop_line(Partial, false, false, 2).as_deref(),
+            stop_line(Partial, false, true, false, false, 2).as_deref(),
             Some("mutation stopped: Partial; 2 effect(s) reported")
         );
+        assert_eq!(
+            stop_line(OsRefused, false, true, false, true, 0).as_deref(),
+            Some("write not performed: OsRefused; nothing was written")
+        );
+        assert_eq!(
+            stop_line(PathChanged, false, false, false, true, 0).as_deref(),
+            Some("mutation not performed: PathChanged; nothing was changed")
+        );
+    }
+    #[test]
+    fn a_replace_is_withheld_only_when_refused_before_any_write() {
+        let failed = |state, source, before_write| MutationFailure {
+            state,
+            at: "/sentinel-617".into(),
+            source,
+            before_write,
+        };
+        let denied = || IoError::Io {
+            path: "/sentinel-617".into(),
+            kind: IoKind::PermissionDenied,
+        };
+        let stale = || IoError::StaleBase {
+            path: "/sentinel-617".into(),
+        };
+        assert_eq!(
+            refused_replace(&failed(EffectState::NoEffect, stale(), true), || true),
+            (true, false)
+        );
+        assert_eq!(
+            refused_replace(&failed(EffectState::NoEffect, stale(), true), || false),
+            (false, true)
+        );
+        assert_eq!(
+            refused_replace(&failed(EffectState::NoEffect, denied(), true), || true),
+            (false, true)
+        );
+        for state in [
+            EffectState::NoEffect,
+            EffectState::Partial,
+            EffectState::DurabilityUnknown,
+        ] {
+            assert_eq!(
+                refused_replace(&failed(state, denied(), false), || true),
+                (false, false),
+                "{state:?}: a write syscall may have reached the file"
+            );
+        }
     }
     fn prepare(request: proto::Verb, content: Option<proto::Bytes>) -> Option<PreparedMutation> {
         prepare_checked(request, content, WriteCheck::Unchecked)
@@ -1930,6 +2119,625 @@ mod tests {
             "{reports:?}"
         );
     }
+    fn the_model_is_told(end: WriteEnd) -> maknae_agent::plane::WriteOutcome {
+        maknae_agent::wire::write_outcome(Ok(maknae_agent::wire::WireOutcome::WriteDone {
+            applied: end.applied,
+            stale: end.stale,
+            withheld: end.withheld,
+            version: end.version,
+        }))
+    }
+    #[tokio::test]
+    async fn a_write_to_a_readable_unread_file_still_says_unread() {
+        let d = Fixture::new();
+        for (name, check) in [
+            ("readable-unread-sentinel", WriteCheck::Unread),
+            ("readable-stale-sentinel", WriteCheck::Read([9; 7])),
+        ] {
+            let path = d.path(name);
+            std::fs::write(&path, b"readable").unwrap();
+            let (end, _) =
+                acknowledged_end(checked_write(path.clone(), check), replace_grant(&path)).await;
+            let end = end.unwrap();
+            assert!(
+                !end.applied && end.stale && !end.withheld,
+                "{name}: {end:?}"
+            );
+            assert_eq!(
+                the_model_is_told(end),
+                maknae_agent::plane::WriteOutcome::Stale
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), b"readable");
+        }
+    }
+    #[tokio::test]
+    async fn a_write_to_a_file_the_os_will_not_let_the_loop_read_answers_unavailable() {
+        if nix::unistd::geteuid().is_root() {
+            panic!("a_write_to_a_file_the_os_will_not_let_the_loop_read_answers_unavailable: running as root, which reads a 0200 file and voids the premise; run as an unprivileged user");
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let d = Fixture::new();
+        for (name, check) in [
+            ("write-only-unread-sentinel", WriteCheck::Unread),
+            ("write-only-stale-sentinel", WriteCheck::Read([9; 7])),
+        ] {
+            let path = d.path(name);
+            std::fs::write(&path, b"write only").unwrap();
+            let armed_while_readable = checked_write(path.clone(), check);
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o200)).unwrap();
+            #[cfg(target_os = "macos")]
+            assert!(
+                checked_write(path.clone(), check)
+                    .descriptor()
+                    .unwrap()
+                    .is_none(),
+                "{name}: macOS arms with O_RDONLY, so the request goes out unarmed"
+            );
+            let (end, _) = acknowledged_end(armed_while_readable, replace_grant(&path)).await;
+            let end = end.unwrap();
+            assert!(
+                !end.applied && !end.stale && end.withheld,
+                "{name}: {end:?}"
+            );
+            assert_eq!(
+                the_model_is_told(end),
+                maknae_agent::plane::WriteOutcome::Unavailable
+            );
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"write only", "{name}");
+        }
+    }
+    #[tokio::test]
+    async fn a_write_to_an_existing_mode_0000_file_answers_unavailable() {
+        if nix::unistd::geteuid().is_root() {
+            panic!("a_write_to_an_existing_mode_0000_file_answers_unavailable: running as root, which opens a 0000 file and voids the premise; run as an unprivileged user");
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let d = Fixture::new();
+        let path = d.path("mode-0000-sentinel");
+        std::fs::write(&path, b"no access").unwrap();
+        let fresh = key_of(&path);
+        for check in [
+            WriteCheck::Read(fresh),
+            WriteCheck::Unread,
+            WriteCheck::Unchecked,
+        ] {
+            let armed_while_readable = checked_write(path.clone(), check);
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let (end, reports) = acknowledged_end(armed_while_readable, replace_grant(&path)).await;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let end = end.unwrap();
+            assert!(
+                !end.applied && !end.stale && end.withheld,
+                "{check:?}: {end:?}"
+            );
+            assert!(
+                matches!(
+                    &reports[..],
+                    [MutationReport::Finished {
+                        next_index: 0,
+                        outcome: ReportedFinish::OsRefused,
+                        ..
+                    }]
+                ),
+                "{reports:?}"
+            );
+            assert_eq!(
+                the_model_is_told(end),
+                maknae_agent::plane::WriteOutcome::Unavailable
+            );
+            use maknae_agent::render::{render, ToolOutcome};
+            assert_eq!(
+                render(&ToolOutcome::WriteUnavailable, 1).as_str(),
+                render(&ToolOutcome::ReadUnavailable, 1).as_str()
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), b"no access");
+        }
+    }
+    #[tokio::test]
+    async fn a_create_refused_before_any_inode_answers_unavailable_and_a_denied_one_unknown() {
+        if nix::unistd::geteuid().is_root() {
+            panic!("a_create_refused_before_any_inode_answers_unavailable_and_a_denied_one_unknown: running as root, which writes a 0500 directory and voids the premise; run as an unprivileged user");
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let d = Fixture::new();
+        let link = d.path("dangling-link-sentinel");
+        std::os::unix::fs::symlink(d.path("listed-target-sentinel"), &link).unwrap();
+        let locked = d.path("locked-parent");
+        std::fs::create_dir(&locked).unwrap();
+        let in_locked = format!("{locked}/created-sentinel");
+        let mut told = Vec::new();
+        for path in [link.clone(), in_locked.clone()] {
+            let prepared = checked_write(path.clone(), WriteCheck::Unread);
+            assert!(
+                matches!(
+                    prepared.request(),
+                    proto::Verb::FsWrite {
+                        mode: WriteMode::CreateExclusive,
+                        ..
+                    }
+                ),
+                "{path}: premise: the create lane"
+            );
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+            let (end, reports) = acknowledged_end(prepared, create_grant(&path)).await;
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let end = end.unwrap();
+            assert!(!end.applied, "{path}: {end:?}");
+            assert!(
+                matches!(
+                    &reports[..],
+                    [MutationReport::Finished { next_index: 0, .. }]
+                ),
+                "{path}: {reports:?}"
+            );
+            told.push(the_model_is_told(end));
+        }
+        assert_eq!(
+            told,
+            vec![
+                maknae_agent::plane::WriteOutcome::Unavailable,
+                maknae_agent::plane::WriteOutcome::Unknown
+            ]
+        );
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!Path::new(&d.path("listed-target-sentinel")).exists());
+        assert!(!Path::new(&in_locked).exists());
+    }
+    #[tokio::test]
+    async fn a_parent_that_differs_from_the_grant_answers_unavailable() {
+        let d = Fixture::new();
+        std::fs::create_dir(d.path("nested-parent")).unwrap();
+        let path = d.path("nested-parent/grant-sentinel");
+        let (end, reports) = acknowledged_end(
+            checked_write(path.clone(), WriteCheck::Unread),
+            create_grant(&d.path("grant-sentinel")),
+        )
+        .await;
+        let end = end.unwrap();
+        assert!(!end.applied && end.withheld, "{end:?}");
+        assert!(
+            matches!(
+                &reports[..],
+                [MutationReport::Finished {
+                    next_index: 0,
+                    outcome: ReportedFinish::PathChanged,
+                    ..
+                }]
+            ),
+            "{reports:?}"
+        );
+        assert_eq!(
+            the_model_is_told(end),
+            maknae_agent::plane::WriteOutcome::Unavailable
+        );
+        assert!(!Path::new(&path).exists());
+    }
+    async fn end_with(
+        prepared: PreparedMutation,
+        grant: MutationGrant,
+        cap: usize,
+        written_at: Instant,
+        acknowledged: bool,
+    ) -> (Result<WriteEnd, String>, Vec<String>) {
+        end_acked(
+            prepared,
+            grant,
+            cap,
+            written_at,
+            if acknowledged { Acks::All } else { Acks::None },
+        )
+        .await
+    }
+    #[derive(Clone, Copy)]
+    enum Acks {
+        All,
+        None,
+        BatchesOnly,
+    }
+    fn acknowledge_batches(mut server: tokio::io::DuplexStream) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            while let Ok(bytes) = read_frame(&mut server, proto::ATTEMPT_RESPONSE_MAX).await {
+                let MutationReport::Batch {
+                    id,
+                    first_index,
+                    effects,
+                } = proto::decode_mutation_report(&bytes).unwrap()
+                else {
+                    return;
+                };
+                let ack = proto::MutationAck {
+                    id,
+                    next_index: first_index + effects.len() as u32,
+                };
+                write_frame(&mut server, &proto::encode_mutation_ack(&ack).unwrap())
+                    .await
+                    .unwrap();
+            }
+        })
+    }
+    async fn end_acked(
+        prepared: PreparedMutation,
+        grant: MutationGrant,
+        cap: usize,
+        written_at: Instant,
+        acks: Acks,
+    ) -> (Result<WriteEnd, String>, Vec<String>) {
+        let cfg = TransportConfig::default();
+        let (mut client, server) = tokio::io::duplex(65536);
+        let receiver = match acks {
+            Acks::All => Some(acknowledge_all(server, proto::ATTEMPT_RESPONSE_MAX)),
+            Acks::BatchesOnly => {
+                drop(acknowledge_batches(server));
+                None
+            }
+            Acks::None => {
+                drop(server);
+                None
+            }
+        };
+        let mut lines = vec![];
+        let result = run_attempt(
+            prepared,
+            grant,
+            &mut client,
+            &cfg,
+            cap,
+            written_at,
+            &mut |l| lines.push(l),
+        )
+        .await
+        .map(|a| WriteEnd {
+            applied: a.success,
+            stale: a.stale,
+            withheld: a.withheld,
+            version: a.version.map(|v| v.key()),
+        });
+        drop(client);
+        if let Some(r) = receiver {
+            r.await.unwrap();
+        }
+        (result, lines)
+    }
+    fn assert_withheld(site: &str, got: (Result<WriteEnd, String>, Vec<String>), path: &str) {
+        let (end, lines) = got;
+        let end =
+            end.unwrap_or_else(|e| panic!("{site}: a pre-effect failure came back Err({e:?})"));
+        assert!(
+            !end.applied && !end.stale && end.withheld,
+            "{site}: {end:?}"
+        );
+        assert_eq!(
+            the_model_is_told(end),
+            maknae_agent::plane::WriteOutcome::Unavailable,
+            "{site}"
+        );
+        assert!(
+            lines.iter().any(|l| l.ends_with("; nothing was written")),
+            "{site}: {lines:?}"
+        );
+        assert!(!Path::new(path).exists(), "{site}");
+    }
+    async fn pre_effect(site: &str) {
+        let d = Fixture::new();
+        let path = d.path("pre-effect-sentinel");
+        let prep = || checked_write(path.clone(), WriteCheck::Unread);
+        let full = proto::ATTEMPT_REQUEST_MAX;
+        let (prepared, grant, cap, written_at, acknowledged) = match site {
+            "grant mismatch" => (
+                prep(),
+                create_grant(&d.path("other-leaf")),
+                full,
+                Instant::now(),
+                true,
+            ),
+            "grant limits" => {
+                let mut g = create_grant(&path);
+                g.limits.max_effects = 0;
+                (prep(), g, full, Instant::now(), true)
+            }
+            "expired before receipt" => (
+                prep(),
+                create_grant(&path),
+                full,
+                Instant::now() - Duration::from_secs(60),
+                true,
+            ),
+            "frame limit" => (prep(), create_grant(&path), 1, Instant::now(), true),
+            "content missing" => (
+                prepare_checked(write(path.clone()), None, WriteCheck::Unread).unwrap(),
+                create_grant(&path),
+                full,
+                Instant::now(),
+                true,
+            ),
+            "directory verification" => {
+                let file = d.path("a-file-not-a-directory");
+                std::fs::write(&file, b"x").unwrap();
+                let mut p = prep();
+                p.fd = Some(std::fs::File::open(&file).unwrap().into());
+                (p, create_grant(&path), full, Instant::now(), true)
+            }
+            "unacknowledged no-effect finish" => {
+                let p = prep();
+                std::fs::write(&path, b"collision").unwrap();
+                (p, create_grant(&path), full, Instant::now(), false)
+            }
+            other => panic!("{other}"),
+        };
+        let got = end_with(prepared, grant, cap, written_at, acknowledged).await;
+        if site == "unacknowledged no-effect finish" {
+            assert_eq!(std::fs::read(&path).unwrap(), b"collision");
+            std::fs::remove_file(&path).unwrap();
+        }
+        assert_withheld(site, got, &path);
+    }
+    #[tokio::test]
+    async fn a_mkdir_refused_before_any_effect_says_nothing_was_changed() {
+        let d = Fixture::new();
+        let path = d.path("mkdir-pre-effect");
+        let mut g = grant(MutationScope::Exact {
+            path: path.clone(),
+            effect: ReportedEffect::CreatedDirectory,
+        });
+        g.limits.max_depth = 0;
+        let (end, lines) = end_with(
+            prepare(mkdir(path.clone(), false), None).unwrap(),
+            g,
+            proto::ATTEMPT_REQUEST_MAX,
+            Instant::now(),
+            true,
+        )
+        .await;
+        let end = end.unwrap();
+        assert!(!end.applied, "{end:?}");
+        assert_eq!(
+            lines,
+            vec!["mutation not performed: invalid mutation grant limits; nothing was changed"]
+        );
+        assert!(!Path::new(&path).exists());
+    }
+    #[test]
+    fn a_write_that_may_have_reached_the_file_stays_unknown_when_its_finish_ack_is_lost() {
+        let write_at_failed = MutationFailure {
+            state: EffectState::NoEffect,
+            at: "/sentinel-617".into(),
+            source: IoError::Io {
+                path: "/sentinel-617".into(),
+                kind: IoKind::PermissionDenied,
+            },
+            before_write: false,
+        };
+        let (stale, certified) = refused_replace(&write_at_failed, || true);
+        assert_eq!((stale, certified), (false, false));
+        assert_eq!(
+            lost_finish(certified, stale),
+            LostFinish::Unknown,
+            "nothing reported is not nothing done"
+        );
+        assert_eq!(lost_finish(true, false), LostFinish::NoEffect);
+        assert_eq!(lost_finish(false, true), LostFinish::Stale);
+    }
+    async fn reservation_stop(existing: bool) {
+        let d = Fixture::new();
+        let path = d.path("reservation-sentinel");
+        if existing {
+            std::fs::write(&path, b"kept").unwrap();
+        }
+        let prepared = checked_write(path.clone(), WriteCheck::Unchecked);
+        let g = if existing {
+            replace_grant(&path)
+        } else {
+            create_grant(&path)
+        };
+        let base_size =
+            proto::encode_mutation_report(&finished(g.id, 0, ReportedFinish::LimitReached, None))
+                .unwrap()
+                .len();
+        let (end, lines) = end_with(prepared, g, base_size, Instant::now(), true).await;
+        let end = end.unwrap();
+        assert!(!end.applied && end.withheld, "{end:?}");
+        assert_eq!(
+            the_model_is_told(end),
+            maknae_agent::plane::WriteOutcome::Unavailable
+        );
+        assert!(
+            lines.iter().any(|l| l.ends_with("; nothing was written")),
+            "{lines:?}"
+        );
+        if existing {
+            assert_eq!(std::fs::read(&path).unwrap(), b"kept");
+        } else {
+            assert!(!Path::new(&path).exists());
+        }
+    }
+    #[tokio::test]
+    async fn a_create_stopped_by_its_reservation_answers_unavailable() {
+        reservation_stop(false).await;
+    }
+    #[tokio::test]
+    async fn a_replace_stopped_by_its_reservation_answers_unavailable() {
+        reservation_stop(true).await;
+    }
+    #[tokio::test]
+    async fn an_effect_whose_finish_ack_is_lost_stays_unknown() {
+        let d = Fixture::new();
+        let paths = vec![d.path("lost-parent"), d.path("lost-parent/child")];
+        let mut g = grant(MutationScope::Directories {
+            paths: paths.clone(),
+        });
+        g.limits.max_effects = 1;
+        let (end, _) = end_acked(
+            prepare(mkdir(paths[1].clone(), true), None).unwrap(),
+            g,
+            proto::ATTEMPT_REQUEST_MAX,
+            Instant::now(),
+            Acks::BatchesOnly,
+        )
+        .await;
+        assert!(end.is_err(), "{end:?}");
+        assert!(Path::new(&paths[0]).is_dir(), "the first effect landed");
+    }
+    #[tokio::test]
+    async fn a_held_parent_that_is_not_the_granted_one_says_nothing_was_changed() {
+        let d = Fixture::new();
+        std::fs::create_dir(d.path("nested-parent")).unwrap();
+        let path = d.path("nested-parent/grant-sentinel");
+        let (end, lines) = end_with(
+            checked_write(path.clone(), WriteCheck::Unread),
+            create_grant(&d.path("grant-sentinel")),
+            proto::ATTEMPT_REQUEST_MAX,
+            Instant::now(),
+            true,
+        )
+        .await;
+        assert!(end.unwrap().withheld);
+        assert_eq!(
+            lines,
+            vec!["mutation not performed: PathChanged; nothing was changed"]
+        );
+    }
+    #[tokio::test]
+    async fn a_grant_that_does_not_match_answers_unavailable() {
+        pre_effect("grant mismatch").await;
+    }
+    #[tokio::test]
+    async fn invalid_grant_limits_answer_unavailable() {
+        pre_effect("grant limits").await;
+    }
+    #[tokio::test]
+    async fn a_grant_expired_on_receipt_answers_unavailable() {
+        pre_effect("expired before receipt").await;
+    }
+    #[tokio::test]
+    async fn a_frame_too_small_for_the_completion_answers_unavailable() {
+        pre_effect("frame limit").await;
+    }
+    #[tokio::test]
+    async fn a_write_without_content_answers_unavailable() {
+        pre_effect("content missing").await;
+    }
+    #[tokio::test]
+    async fn a_parent_that_fails_verification_answers_unavailable() {
+        pre_effect("directory verification").await;
+    }
+    #[tokio::test]
+    async fn an_unacknowledged_no_effect_finish_answers_unavailable() {
+        pre_effect("unacknowledged no-effect finish").await;
+    }
+    #[tokio::test]
+    async fn a_failure_after_the_first_effect_is_never_withheld() {
+        let d = Fixture::new();
+        let paths = vec![d.path("effect-parent"), d.path("effect-parent/child")];
+        let (result, _) = end_with(
+            prepare(mkdir(d.path("effect-parent/child"), true), None).unwrap(),
+            grant(MutationScope::Directories { paths }),
+            proto::ATTEMPT_REQUEST_MAX,
+            Instant::now(),
+            false,
+        )
+        .await;
+        assert!(result.is_err(), "{result:?}");
+        assert!(
+            Path::new(&d.path("effect-parent")).exists(),
+            "the first effect landed"
+        );
+    }
+    #[tokio::test]
+    async fn a_refused_unlink_whose_finish_ack_is_lost_stays_unknown() {
+        let d = Fixture::new();
+        let path = d.path("unlink-attempted-sentinel");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(d.path("unlink-attempted-sentinel/kept"), b"x").unwrap();
+        let g = grant(MutationScope::Exact {
+            path: path.clone(),
+            effect: ReportedEffect::DeletedEntry,
+        });
+        let (end, _) = end_with(
+            prepare(delete(path.clone(), false), None).unwrap(),
+            g,
+            proto::ATTEMPT_REQUEST_MAX,
+            Instant::now(),
+            false,
+        )
+        .await;
+        assert!(
+            end.is_err(),
+            "an attempted unlink is not certified: {end:?}"
+        );
+        assert!(Path::new(&d.path("unlink-attempted-sentinel/kept")).exists());
+    }
+    #[tokio::test]
+    async fn a_held_parent_whose_finish_ack_is_lost_says_nothing_was_changed() {
+        let d = Fixture::new();
+        std::fs::create_dir(d.path("lost-nested-parent")).unwrap();
+        let path = d.path("lost-nested-parent/grant-sentinel");
+        let (end, lines) = end_with(
+            checked_write(path.clone(), WriteCheck::Unread),
+            create_grant(&d.path("grant-sentinel")),
+            proto::ATTEMPT_REQUEST_MAX,
+            Instant::now(),
+            false,
+        )
+        .await;
+        assert!(end.unwrap().withheld);
+        assert!(
+            lines.len() == 1
+                && lines[0].starts_with("mutation not performed: ")
+                && lines[0].ends_with("; nothing was changed"),
+            "{lines:?}"
+        );
+    }
+    #[tokio::test]
+    async fn a_stale_refusal_whose_finish_ack_is_lost_stays_stale() {
+        let d = Fixture::new();
+        let path = d.path("lost-stale-sentinel");
+        std::fs::write(&path, b"readable").unwrap();
+        let (end, _) = end_with(
+            checked_write(path.clone(), WriteCheck::Read([9; 7])),
+            replace_grant(&path),
+            proto::ATTEMPT_REQUEST_MAX,
+            Instant::now(),
+            false,
+        )
+        .await;
+        let end = end.unwrap();
+        assert!(!end.applied && end.stale && !end.withheld, "{end:?}");
+        assert_eq!(
+            the_model_is_told(end),
+            maknae_agent::plane::WriteOutcome::Stale
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"readable");
+    }
+    async fn delete_stopped_after_an_attempt(acks: Acks) -> Result<WriteEnd, String> {
+        let d = Fixture::new();
+        let root = d.path("delete-attempted-root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(d.path("delete-attempted-root/only"), b"x").unwrap();
+        let mut g = grant(MutationScope::RecursiveDelete { root: root.clone() });
+        g.limits.max_effects = 1;
+        let (end, _) = end_acked(
+            prepare(delete(root.clone(), true), None).unwrap(),
+            g,
+            proto::ATTEMPT_REQUEST_MAX,
+            Instant::now(),
+            acks,
+        )
+        .await;
+        assert!(!Path::new(&d.path("delete-attempted-root/only")).exists());
+        assert!(Path::new(&root).is_dir());
+        end
+    }
+    #[tokio::test]
+    async fn a_delete_stopped_after_an_attempted_unlink_is_never_withheld() {
+        let end = delete_stopped_after_an_attempt(Acks::All).await.unwrap();
+        assert!(!end.applied && !end.withheld, "{end:?}");
+        let lost = delete_stopped_after_an_attempt(Acks::BatchesOnly).await;
+        assert!(lost.is_err(), "{lost:?}");
+    }
     #[test]
     fn prepare_checked_carries_the_check_into_the_prepared_mutation() {
         let d = Fixture::new();
@@ -1949,7 +2757,10 @@ mod tests {
         let cwd = d.path("work");
         std::fs::create_dir(&cwd).unwrap();
         let prepared = prepare_checked(
-            proto::Verb::SessionNew { cwd: cwd.clone() },
+            proto::Verb::SessionNew {
+                cwd: cwd.clone(),
+                sensitive: vec![],
+            },
             None,
             WriteCheck::Unchecked,
         )
@@ -1963,13 +2774,19 @@ mod tests {
         assert_eq!(prepared.preparation_error(), None);
         assert_eq!(
             prepared.request(),
-            &proto::Verb::SessionNew { cwd: cwd.clone() }
+            &proto::Verb::SessionNew {
+                cwd: cwd.clone(),
+                sensitive: vec![]
+            }
         );
 
         let file = d.path("not-a-dir");
         std::fs::write(&file, b"x").unwrap();
         let unarmed = prepare_checked(
-            proto::Verb::SessionNew { cwd: file },
+            proto::Verb::SessionNew {
+                cwd: file,
+                sensitive: vec![],
+            },
             None,
             WriteCheck::Unchecked,
         )
@@ -2020,8 +2837,8 @@ mod tests {
         receiver.await.unwrap();
         assert_eq!(result, Ok(false));
         assert_eq!(lines.len(), 1, "{lines:?}");
-        assert!(lines[0].starts_with("mutation stopped: "), "{lines:?}");
-        assert!(lines[0].ends_with("; 0 effect(s) reported"), "{lines:?}");
+        assert!(lines[0].starts_with("write not performed: "), "{lines:?}");
+        assert!(lines[0].ends_with("; nothing was written"), "{lines:?}");
     }
     #[tokio::test]
     async fn exclusive_collision_preserves_intervening_sentinel() {
@@ -2172,7 +2989,7 @@ mod tests {
             1,
         )
         .await;
-        assert!(result.is_err());
+        assert_eq!(result, Ok(false), "refused before any effect");
         assert!(!Path::new(&path).exists());
         let outside = Fixture::new();
         let (result, _) = acknowledged(
@@ -2184,7 +3001,7 @@ mod tests {
             TransportConfig::default(),
         )
         .await;
-        assert!(result.is_err());
+        assert_eq!(result, Ok(false), "refused before any effect");
         assert!(!Path::new(&path).exists());
         assert!(!outside.0.join("no-effect-sentinel").exists());
     }
@@ -2414,7 +3231,7 @@ mod tests {
             TransportConfig::default(),
         )
         .await;
-        assert!(result.is_err());
+        assert_eq!(result, Ok(false), "refused before any effect");
         assert_eq!(std::fs::read(path).unwrap(), b"retained bytes");
         let path = d.path("wrong-action-sentinel");
         let (result, _) = acknowledged(
@@ -2426,7 +3243,7 @@ mod tests {
             TransportConfig::default(),
         )
         .await;
-        assert!(result.is_err());
+        assert_eq!(result, Ok(false), "refused before any effect");
         assert!(!Path::new(&path).exists());
     }
     #[tokio::test]
@@ -2681,7 +3498,7 @@ mod tests {
                 TransportConfig::default(),
             )
             .await;
-            assert!(result.is_err());
+            assert_eq!(result, Ok(false), "refused before any effect");
             assert!(reports.is_empty());
             assert!(!Path::new(&path).exists());
         }
@@ -2692,7 +3509,7 @@ mod tests {
             TransportConfig::default(),
         )
         .await;
-        assert!(result.unwrap_err().contains("differs from grant parent"));
+        assert_eq!(result, Ok(false), "refused before any effect");
         assert!(!d.0.join("nested-parent/grant-sentinel").exists());
         let paths = vec![d.path("new-prefix"), d.path("wrong-prefix/last")];
         let (result, _) = acknowledged(
@@ -2701,7 +3518,7 @@ mod tests {
             TransportConfig::default(),
         )
         .await;
-        assert!(result.is_err());
+        assert_eq!(result, Ok(false), "refused before any effect");
         assert!(!d.0.join("new-prefix").exists());
     }
     #[tokio::test]
@@ -2773,6 +3590,7 @@ mod tests {
             let step = error_step(
                 MutationFailure {
                     state,
+                    before_write: false,
                     at: path.clone().into(),
                     source: IoError::Io {
                         path: path.clone().into(),
@@ -2948,6 +3766,9 @@ mod tests {
             content: None,
             page: None,
             stale: false,
+            withheld: false,
+            attempted: false,
+            diverted: false,
             version: None,
         }
     }
@@ -3170,6 +3991,7 @@ mod tests {
         let step = error_step(
             MutationFailure {
                 state: EffectState::NoEffect,
+                before_write: false,
                 at: path.clone().into(),
                 source: IoError::DeadlineElapsed {
                     path: path.clone().into(),

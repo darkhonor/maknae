@@ -56,6 +56,8 @@ files = [
   # maknae-security/compose.rs (T1).
   "crates/maknae-kernel/src/ceiling_authz.rs",
   "crates/maknae-kernel/src/composition.rs",
+  # #617: the sensitive.yaml operand; a wrong arm serves a protected path.
+  "crates/maknae-kernel/src/sensitive_authz.rs",
   # The reload's ordering, plan choice, turn and stop, and the vocabulary given to
   # the store and compiler: a wrong arm installs a snapshot the store never
   # recorded, or keeps serving a refused one. Unit-tested and coverage-gated.
@@ -268,6 +270,8 @@ files = [
   "crates/maknae-config/src/value.rs",
   # #490: the persisted baseline's form; a mis-decoded section runs a configuration nobody accepted.
   "crates/maknae-config/src/baseline_doc.rs",
+  # #617: the sensitive.yaml grammar and matcher the mandatory deny decides by; a missed match permits a protected path.
+  "crates/maknae-config/src/sensitive.rs",
   "crates/maknae-audit-append/src/record.rs",
   # #172: the Egress seam — the DurableEgressIntent type gate, the reply admission, the
   # outcome record derivation. The write-ahead order is a type here, so this file is T1.
@@ -501,7 +505,7 @@ why = "opens a ROOT-owned artifact through maknae-io; no unit test can create on
 
 [[t3]]
 path = "crates/maknae-config/src/user_providers_io.rs"
-why = "#153: reads ~/.maknae/providers.yaml through maknae-config's existing maknae-io read (CONFIG_ARTIFACT) and maps an absent file to no providers; the parser and the selection it feeds are pure and T1 in user_providers.rs (the bounds/bounds_io split)"
+why = "#153: reads ~/.maknae/providers.yaml through maknae-config's existing maknae-io read (CONFIG_ARTIFACT) and maps an absent file to no providers; the parser and the selection it feeds are pure and T1 in user_providers.rs (the bounds/bounds_io split). #617: reads ~/.maknae/sensitive.yaml the same way, an absent file meaning no entries; its parser is T1 in sensitive.rs"
 
 [[t3]]
 path = "bins/maknae-egress/src/main.rs"
@@ -861,7 +865,7 @@ why = "serde_json writes only UTF-8, so from_utf8 on its output cannot fail; the
 
 [[exception]]
 path = "crates/maknae-agent/src/render.rs"
-anchor = "None => Zeroizing::new(READ_UNAVAILABLE.to_string()),"
+anchor = "None => Zeroizing::new(UNAVAILABLE.to_string()),"
 why = "json_exact returns None only if serde fails on a plain struct of strings, integers and booleans, which it cannot; json_exact's None paths are tested directly"
 
 # #240: the egress socket's budget, both legs (egress_socket.rs). Errno

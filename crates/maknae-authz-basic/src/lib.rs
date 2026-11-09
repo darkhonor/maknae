@@ -424,11 +424,13 @@ impl maknae_security::Authorizer for Candidate<'_> {
 }
 
 /// Where the policy files live: `authz.yaml` (grants, denies, roles), `bindings.yaml`
-/// (identity) and the `agents/` directory under `config_dir`.
+/// (identity), `sensitive.yaml` (the host list) and the `agents/` directory under
+/// `config_dir`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyPaths {
     pub authz: PathBuf,
     pub bindings: PathBuf,
+    pub sensitive: PathBuf,
     pub config_dir: PathBuf,
 }
 
@@ -437,6 +439,7 @@ impl PolicyPaths {
         Self {
             authz: dir.join("authz.yaml"),
             bindings: dir.join(maknae_config::BINDINGS_FILE),
+            sensitive: dir.join(maknae_config::SENSITIVE_FILE),
             config_dir: dir.to_path_buf(),
         }
     }
@@ -500,6 +503,7 @@ struct AgentOutcome {
 struct Parts {
     policy: maknae_config::AuthzPolicy,
     bindings: maknae_config::Bindings,
+    sensitive: Arc<maknae_config::SensitiveList>,
     lookups: Lookups,
     lookup: NssLookup,
     hosts: HostLookups,
@@ -519,6 +523,7 @@ enum Agents {
 pub struct PolicySource {
     policy: maknae_config::AuthzPolicy,
     bindings: maknae_config::Bindings,
+    sensitive: Arc<maknae_config::SensitiveList>,
     lookups: Lookups,
     lookup: NssLookup,
     hosts: HostLookups,
@@ -549,9 +554,12 @@ impl PolicySource {
             .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
         let agents = maknae_config::load_agents(&paths.config_dir)
             .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
+        let sensitive = maknae_config::load_host_sensitive(&paths.sensitive)
+            .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
         Self::resolved_from(
             policy,
             bindings,
+            sensitive,
             agents,
             lookup_uid,
             HostLookups::HOST,
@@ -584,16 +592,21 @@ impl PolicySource {
             owner: req.owner,
             mode_mask: req.mode_mask,
         };
-        let agents = maknae_config::load_agents_with_requirement(&paths.config_dir, dir, req)
+        let agents =
+            maknae_config::load_agents_with_requirement(&paths.config_dir, dir, req.clone())
+                .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
+        let sensitive = maknae_config::load_host_sensitive_with_requirement(&paths.sensitive, req)
             .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
         Self::resolved_from(
-            policy, bindings, agents, lookup_uid, hosts, principal, paths,
+            policy, bindings, sensitive, agents, lookup_uid, hosts, principal, paths,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn resolved_from(
         policy: maknae_config::AuthzPolicy,
         bindings: maknae_config::Bindings,
+        sensitive: maknae_config::SensitiveList,
         agents: maknae_config::AgentsLoad,
         lookup: NssLookup,
         hosts: HostLookups,
@@ -605,6 +618,7 @@ impl PolicySource {
         Self::from_lookups(Parts {
             policy,
             bindings,
+            sensitive: Arc::new(sensitive),
             lookups,
             lookup,
             hosts,
@@ -614,6 +628,8 @@ impl PolicySource {
         })
     }
 
+    /// Reads no file: the host list is empty until [`PolicySource::with_sensitive`].
+    #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
     pub fn from_parts(
         policy: maknae_config::AuthzPolicy,
         bindings: maknae_config::Bindings,
@@ -646,6 +662,7 @@ impl PolicySource {
         Self::parts_with(policy, bindings, uid_map, agents, hosts, principal, paths)
     }
 
+    #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
     fn parts_with(
         policy: maknae_config::AuthzPolicy,
         bindings: maknae_config::Bindings,
@@ -659,6 +676,7 @@ impl PolicySource {
         Self::from_lookups(Parts {
             policy,
             bindings,
+            sensitive: Arc::new(maknae_config::SensitiveList::empty()),
             lookups,
             lookup: lookup_uid,
             hosts,
@@ -668,10 +686,17 @@ impl PolicySource {
         })
     }
 
+    #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
+    pub fn with_sensitive(mut self, sensitive: maknae_config::SensitiveList) -> Self {
+        self.sensitive = Arc::new(sensitive);
+        self
+    }
+
     fn from_lookups(parts: Parts) -> Result<Self, AuthzBasicError> {
         let Parts {
             policy,
             bindings,
+            sensitive,
             lookups,
             lookup,
             hosts,
@@ -705,6 +730,7 @@ impl PolicySource {
         Ok(Self {
             policy,
             bindings,
+            sensitive,
             lookups,
             lookup,
             hosts,
@@ -733,6 +759,7 @@ impl PolicySource {
         Self::from_lookups(Parts {
             policy: self.policy.clone(),
             bindings,
+            sensitive: Arc::clone(&self.sensitive),
             lookups,
             lookup: self.lookup,
             hosts: self.hosts,
@@ -772,6 +799,7 @@ impl PolicySource {
         Self::from_lookups(Parts {
             policy: self.policy.clone(),
             bindings,
+            sensitive: Arc::clone(&self.sensitive),
             lookups,
             lookup: self.lookup,
             hosts: self.hosts,
@@ -803,6 +831,10 @@ impl PolicySource {
 
     pub fn bindings(&self) -> &maknae_config::Bindings {
         &self.bindings
+    }
+
+    pub fn sensitive(&self) -> &Arc<maknae_config::SensitiveList> {
+        &self.sensitive
     }
 
     pub fn principal(&self) -> &maknae_config::Principal {
@@ -932,8 +964,9 @@ impl PolicySource {
     }
 
     /// `authz.yaml`'s top-level sections, `"bindings"` from `bindings.yaml` when it has
-    /// the key, and `"agents.<id>"` for each enrolled agent's `policy.yaml`, each
-    /// canonical JSON through the caller's digest, by key.
+    /// the key, `"sensitive"` from `sensitive.yaml`, and `"agents.<id>"` for each
+    /// enrolled agent's `policy.yaml`, each canonical JSON through the caller's digest,
+    /// by key.
     pub fn section_digests(
         &self,
         digest: fn(&[u8]) -> [u8; 32],
@@ -946,6 +979,10 @@ impl PolicySource {
         if let Some(b) = self.bindings.section_canonical() {
             out.insert("bindings".into(), digest(b.as_bytes()));
         }
+        out.insert(
+            "sensitive".into(),
+            digest(self.sensitive.canonical().as_bytes()),
+        );
         for (id, _, p) in self.agent_policies() {
             out.insert(format!("agents.{id}"), digest(p.canonical.as_bytes()));
         }
@@ -1500,10 +1537,7 @@ impl maknae_security::Authorizer for BasicAuthorizer {
     }
 
     fn decide_cited_all(&self, reqs: &[maknae_security::Request]) -> Vec<maknae_security::Decided> {
-        let (snap, principal) = (self.snapshot(), self.current_principal());
-        reqs.iter()
-            .map(|r| self.decide_on(&snap, &principal, r))
-            .collect()
+        Baseline::decide_cited_all_on(self, &self.snapshot(), reqs)
     }
 
     fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
@@ -1537,6 +1571,13 @@ pub trait Baseline: maknae_security::Authorizer + sealed::Sealed + Send + Sync +
     fn install(&self, snapshot: Arc<Snapshot>);
     fn principal(&self) -> maknae_config::Principal;
     fn live_turn(&self) -> &LiveTurnLock;
+    /// Decides `reqs` on `snap` with the installed principal, as `decide_cited_all` does
+    /// on the installed snapshot.
+    fn decide_cited_all_on(
+        &self,
+        snap: &Snapshot,
+        reqs: &[maknae_security::Request],
+    ) -> Vec<maknae_security::Decided>;
     /// The next decision resolves the enrolled principal to `principal`; refused
     /// unless `turn` is this baseline's own.
     fn install_principal(
@@ -1578,6 +1619,17 @@ impl Baseline for BasicAuthorizer {
         &self.live_turn
     }
 
+    fn decide_cited_all_on(
+        &self,
+        snap: &Snapshot,
+        reqs: &[maknae_security::Request],
+    ) -> Vec<maknae_security::Decided> {
+        let principal = self.current_principal();
+        reqs.iter()
+            .map(|r| self.decide_on(snap, &principal, r))
+            .collect()
+    }
+
     fn install_principal(
         &self,
         turn: &LiveTurn<'_>,
@@ -1617,6 +1669,14 @@ impl Baseline for HermeticAuthorizer {
 
     fn live_turn(&self) -> &LiveTurnLock {
         Baseline::live_turn(&self.inner)
+    }
+
+    fn decide_cited_all_on(
+        &self,
+        snap: &Snapshot,
+        reqs: &[maknae_security::Request],
+    ) -> Vec<maknae_security::Decided> {
+        Baseline::decide_cited_all_on(&self.inner, snap, reqs)
     }
 
     fn install_principal(
@@ -2169,6 +2229,7 @@ mod tests {
                 subjects: subjects(src).map_err(Refused::Other)?,
                 agents: src.agent_uids(),
                 taskers: src.agent_taskers().clone(),
+                sensitive: std::sync::Arc::clone(src.sensitive()),
             })
         }
 
@@ -2413,6 +2474,7 @@ mod tests {
     const DIR: &str = "/etc/maknae";
     const PATH: &str = "/etc/maknae/authz.yaml";
     const EMPTY: &str = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n";
+    const SSH_SENSITIVE: &str = "schema_version: 1\nsensitive: [\"~/.ssh/**\"]\n";
     const ADMIN_ROOT: &str = "schema_version: 1\nbindings:\n  admin: [\"root\"]\n";
     const ADVERSARY_ROOT: &str = "schema_version: 1\nbindings:\n  adversary: [\"root\"]\n";
     const CONTAINED: &str = "subject contained: role=adversary";
@@ -2440,6 +2502,7 @@ mod tests {
     ) -> Result<PolicySource, AuthzBasicError> {
         let lookups = resolve_uid_map_with(&policy, &bindings, &[], classify(lookup_uid))?;
         PolicySource::from_lookups(Parts {
+            sensitive: Default::default(),
             policy,
             bindings,
             lookups,
@@ -2541,6 +2604,7 @@ mod tests {
 
     fn source_with_lookups(lookups: &[(&str, Option<u32>)]) -> PolicySource {
         PolicySource::from_lookups(Parts {
+            sensitive: Default::default(),
             policy: parse(EMPTY),
             bindings: bound(
                 "schema_version: 1\nbindings:\n  admin: [\"alice\"]\n  user: [\"ghost\"]\n",
@@ -2756,12 +2820,40 @@ mod tests {
 
     const SHIPPED: &str = include_str!("../../../packaging/common/authz.yaml");
 
-    /// The shipped file with its `roles:` block cut, for tests that write their own.
+    /// The shipped file with the nine credential denies restored, for deny-path tests.
+    pub(crate) fn shipped_denying() -> &'static str {
+        static DENYING: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+            let denies: String = ["Read", "Write"]
+                .iter()
+                .flat_map(|verb| {
+                    [
+                        "~/.ssh/**",
+                        "~/.gnupg/**",
+                        "~/.aws/**",
+                        "~/.vault-token",
+                        "~/.netrc",
+                        "~/.git-credentials",
+                        "~/.kube/**",
+                        "~/.docker/config.json",
+                        "~/.maknae/**",
+                    ]
+                    .map(move |p| format!("    - \"{verb}({p})\"\n"))
+                })
+                .collect();
+            let d = SHIPPED.replacen("  deny: []\n", &format!("  deny:\n{denies}"), 1);
+            assert_ne!(d, SHIPPED, "the shipped file no longer carries `deny: []`");
+            d
+        });
+        DENYING.as_str()
+    }
+
+    /// [`shipped_denying`] with its `roles:` block cut, for tests that write their own.
     pub(crate) fn shipped_without_roles() -> &'static str {
-        let cut = SHIPPED
+        let d = shipped_denying();
+        let cut = d
             .find("\nroles:")
             .expect("the shipped file has a roles block");
-        &SHIPPED[..=cut]
+        &d[..=cut]
     }
 
     /// Proof (a): the REAL shipped authz.yaml (byte-identical, via
@@ -2779,6 +2871,7 @@ mod tests {
             subjects: decide::SubjectGrants::default(),
             agents: Default::default(),
             taskers: Default::default(),
+            sensitive: Default::default(),
         };
         let ask = |uid: i64, action: &str| {
             let mut r = liveness_req(Some(uid));
@@ -2819,7 +2912,7 @@ mod tests {
         assert!(matches!(admin_whoami, Verdict::Permit { .. }));
         assert!(matches!(
             decide::decide_loaded(&lp, &principal(), &ssh_read(501)),
-            Verdict::Deny { ref reason } if reason.contains("Read(~/.ssh/**)")
+            Verdict::Permit { .. }
         ));
         // An UNBOUND uid gets no role under the shipped defaults -- the half
         // that used to be asserted through the reserved `agent` name (#276).
@@ -2912,7 +3005,7 @@ mod tests {
             principal(),
             paths(),
             test_digest,
-            compiled(&source_with(SHIPPED, None, &[])),
+            compiled(&source_with(shipped_denying(), None, &[])),
         );
         let d = auth.decide_cited(&ssh_read(501));
         assert!(
@@ -2944,7 +3037,7 @@ mod tests {
     #[test]
     fn the_oracle_and_the_snapshot_agree() {
         let src = source_with(
-            SHIPPED,
+            shipped_denying(),
             Some(
                 "schema_version: 1\nbindings:\n  user: [\"ursula\"]\n  adversary: [\"mallory\"]\n",
             ),
@@ -2970,7 +3063,7 @@ mod tests {
             );
         }
         let subjects = source_with(
-            &format!("{SHIPPED}subjects:\n  ursula:\n    permissions:\n      allow: [\"Read(~/docs/**)\"]\n      deny: [\"Read(~/docs/secret/**)\"]\n    actions:\n      allow: [\"fs.*\", \"session.prompt\", \"session.new\"]\n    models:\n      allow: [\"openai/gpt-5\"]\n"),
+            &format!("{}subjects:\n  ursula:\n    permissions:\n      allow: [\"Read(~/docs/**)\"]\n      deny: [\"Read(~/docs/secret/**)\"]\n    actions:\n      allow: [\"fs.*\", \"session.prompt\", \"session.new\"]\n    models:\n      allow: [\"openai/gpt-5\"]\n", shipped_denying()),
             Some(
                 "schema_version: 1\nbindings:\n  user: [\"ursula\"]\n  adversary: [\"mallory\"]\n",
             ),
@@ -3038,7 +3131,9 @@ mod tests {
         );
         let auth =
             BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, compiled(&src));
-        let mut out = String::new();
+        let mut out = String::from(
+            "# The shipped authz.yaml through the baseline operand alone; sensitive.yaml is not applied.\n",
+        );
         for term in ACTION_TERMS.iter().chain(KERNEL_TERMS.iter()) {
             let op = match *term {
                 "fs.read" => Some("read"),
@@ -3317,7 +3412,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        for (name, body) in [("authz.yaml", EMPTY), ("bindings.yaml", ADMIN_ROOT)] {
+        for (name, body) in [
+            ("authz.yaml", EMPTY),
+            ("bindings.yaml", ADMIN_ROOT),
+            (maknae_config::SENSITIVE_FILE, SSH_SENSITIVE),
+        ] {
             let p = dir.join(name);
             std::fs::write(&p, body).unwrap();
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
@@ -3333,6 +3432,7 @@ mod tests {
         if nix::unistd::geteuid().is_root() {
             let src = got.expect("as root the fixture IS root-owned");
             assert_eq!(src.uid_map().get("root"), Some(&0));
+            assert_eq!(src.sensitive().entries().collect::<Vec<_>>(), ["~/.ssh/**"]);
         } else {
             assert!(
                 matches!(got, Err(AuthzBasicError::Load(ref m)) if m.contains("root")),
@@ -3449,7 +3549,7 @@ mod tests {
             principal(),
             paths(),
             test_digest,
-            compiled(&source_with(SHIPPED, None, &[])),
+            compiled(&source_with(shipped_denying(), None, &[])),
         );
         let before = auth.decide_cited(&ssh_read(501));
         assert_eq!(
@@ -3457,7 +3557,7 @@ mod tests {
             "rule:permissions:deny:0"
         );
         let next = compiled(&source_with(
-            &SHIPPED.replacen("  deny:\n", "  deny:\n    - \"Read(~/.cache/**)\"\n", 1),
+            &shipped_denying().replacen("  deny:\n", "  deny:\n    - \"Read(~/.cache/**)\"\n", 1),
             None,
             &[],
         ));
@@ -3533,6 +3633,27 @@ mod tests {
         assert!(arrives(&gate), "the probe never reached evaluation");
         gate.release.wait();
         assert_eq!(probe.join().unwrap(), contained());
+    }
+
+    #[test]
+    fn decide_cited_all_on_decides_on_the_snapshot_it_is_given() {
+        let auth = authorizer_over(EMPTY, Some(ADMIN_ROOT), &[("root", 0)]);
+        auth.set_decision_log(Some(Vec::new()));
+        let held = auth.snapshot();
+        auth.install(compiled(&source_with(
+            EMPTY,
+            Some(ADVERSARY_ROOT),
+            &[("root", 0)],
+        )));
+        let on = |snap: &Snapshot| -> Vec<_> {
+            Baseline::decide_cited_all_on(&auth, snap, &[whoami(0), whoami(0)])
+                .into_iter()
+                .map(|d| d.verdict)
+                .collect()
+        };
+        assert_eq!(on(&held), vec![audit_permit(), audit_permit()]);
+        assert_eq!(on(&auth.snapshot()), vec![contained(), contained()]);
+        assert_eq!(auth.read_decision_log().len(), 4);
     }
 
     #[test]
@@ -4379,6 +4500,7 @@ mod tests {
         let bindings = bound(ADMIN_ROOT);
         let lookups = resolve_uid_map_with(&policy, &bindings, &[], lookup)?;
         PolicySource::from_lookups(Parts {
+            sensitive: Default::default(),
             policy,
             bindings,
             lookups,
@@ -4899,6 +5021,31 @@ mod tests {
     }
 
     #[test]
+    fn the_sensitive_digest_is_the_canonical_list_and_moves_the_policy_digest() {
+        let empty = source_with(SHIPPED, None, &[]);
+        let listed = source_with(SHIPPED, None, &[]).with_sensitive(
+            maknae_config::SensitiveList::from_entries(&["~/.ssh/**".to_string()]).unwrap(),
+        );
+        assert_eq!(
+            empty.section_digests(stand_in_digest)["sensitive"],
+            stand_in_digest(b"[]")
+        );
+        assert_eq!(
+            listed.section_digests(stand_in_digest)["sensitive"],
+            stand_in_digest(br#"["~/.ssh/**"]"#)
+        );
+        assert_ne!(
+            compiled(&empty).policy_sha256(test_digest),
+            compiled(&listed).policy_sha256(test_digest)
+        );
+        assert!(compiled(&empty).sensitive().is_empty());
+        assert_eq!(
+            compiled(&listed).sensitive().entries().collect::<Vec<_>>(),
+            ["~/.ssh/**"]
+        );
+    }
+
+    #[test]
     fn the_bindings_digest_is_the_section_of_bindings_yaml_under_the_same_key() {
         let s = source_with(
             SHIPPED,
@@ -4917,7 +5064,16 @@ mod tests {
             )
         );
         let keys: Vec<&str> = d.keys().map(String::as_str).collect();
-        assert_eq!(keys, ["bindings", "permissions", "roles", "schema_version"]);
+        assert_eq!(
+            keys,
+            [
+                "bindings",
+                "permissions",
+                "roles",
+                "schema_version",
+                "sensitive"
+            ]
+        );
         let empty = source_with(SHIPPED, Some("schema_version: 1\nbindings: {}\n"), &[])
             .section_digests(stand_in_digest);
         assert_eq!(empty["bindings"], stand_in_digest(b"{}"));
@@ -4936,6 +5092,7 @@ mod tests {
             PolicyPaths {
                 authz: "/x/authz.yaml".into(),
                 bindings: "/x/bindings.yaml".into(),
+                sensitive: "/x/sensitive.yaml".into(),
                 config_dir: "/x".into(),
             }
         );
@@ -5273,15 +5430,20 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("mab_src_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        for name in ["authz.yaml", "bindings.yaml"] {
+        for (name, body) in [
+            ("authz.yaml", "schema_version: 1\n"),
+            ("bindings.yaml", "schema_version: 1\n"),
+            (maknae_config::SENSITIVE_FILE, SSH_SENSITIVE),
+        ] {
             let p = dir.join(name);
-            std::fs::write(&p, "schema_version: 1\n").unwrap();
+            std::fs::write(&p, body).unwrap();
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
         }
         let got = PolicySource::load(PolicyPaths::in_dir(&dir), principal());
         let _ = std::fs::remove_dir_all(&dir);
         if nix::unistd::geteuid().is_root() {
-            assert!(got.is_ok(), "{got:?}");
+            let src = got.expect("as root the fixture IS root-owned");
+            assert_eq!(src.sensitive().entries().collect::<Vec<_>>(), ["~/.ssh/**"]);
         } else {
             assert!(
                 matches!(got, Err(AuthzBasicError::Load(ref m)) if m.contains("root")),
@@ -5379,6 +5541,8 @@ mod tests {
             assert_eq!(auth.snapshot().agent_uid("hobi"), Some(2001));
         }
 
+        const EMPTY_SENSITIVE: &str = "schema_version: 1\nsensitive: []\n";
+
         fn fixture_req() -> maknae_config::TargetRequired {
             maknae_config::TargetRequired {
                 owner: None,
@@ -5408,6 +5572,7 @@ mod tests {
                 let _ = std::fs::remove_dir_all(&d);
                 std::fs::create_dir_all(&d).unwrap();
                 std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+                write(&d.join(maknae_config::SENSITIVE_FILE), EMPTY_SENSITIVE);
                 Fixture(d)
             }
 
@@ -5466,6 +5631,22 @@ mod tests {
                 [(4, here)],
                 "still armed after a clear"
             );
+        }
+
+        #[test]
+        fn a_batch_on_a_snapshot_answers_each_request_as_a_single_decision_does() {
+            let fx = Fixture::new("batch-on-snapshot");
+            let auth = fx.authorizer("admin");
+            let reqs = [whoami(0), admin_request(0, "admin.status")];
+            let snap = auth.snapshot();
+            let all = Baseline::decide_cited_all_on(&auth, &snap, &reqs);
+            assert_eq!(all.len(), reqs.len());
+            for (got, req) in all.iter().zip(&reqs) {
+                assert_eq!(
+                    format!("{:?}", got.verdict),
+                    format!("{:?}", auth.decide_cited(req).verdict)
+                );
+            }
         }
 
         #[test]
@@ -6088,16 +6269,23 @@ mod tests {
             let alias_uids: &[(&str, u32)] = &[BASE_UIDS, &[("gustav", 1002)]].concat();
             let same = |v: &'static str, src: PolicySource| (v, src.clone(), src);
             vec![
-                same("absent", source_with(SHIPPED, None, &[])),
+                same("absent", source_with(super::shipped_denying(), None, &[])),
                 same(
                     "absent-key",
-                    source_with(SHIPPED, Some("schema_version: 1\n"), &[]),
+                    source_with(super::shipped_denying(), Some("schema_version: 1\n"), &[]),
                 ),
                 same(
                     "empty",
-                    source_with(SHIPPED, Some("schema_version: 1\nbindings: {}\n"), &[]),
+                    source_with(
+                        super::shipped_denying(),
+                        Some("schema_version: 1\nbindings: {}\n"),
+                        &[],
+                    ),
                 ),
-                same("explicit", source_with(SHIPPED, Some(EXPLICIT), uids)),
+                same(
+                    "explicit",
+                    source_with(super::shipped_denying(), Some(EXPLICIT), uids),
+                ),
                 same(
                     "explicit+grants",
                     source_with(
@@ -6108,12 +6296,16 @@ mod tests {
                 ),
                 same(
                     "explicit+subjects",
-                    source_with(&format!("{SHIPPED}{SUBJECTS}"), Some(EXPLICIT), uids),
+                    source_with(
+                        &format!("{}{SUBJECTS}", super::shipped_denying()),
+                        Some(EXPLICIT),
+                        uids,
+                    ),
                 ),
                 same(
                     "explicit-no-match",
                     source_with(
-                        SHIPPED,
+                        super::shipped_denying(),
                         Some("schema_version: 1\nbindings: { admin: [alex] }\n"),
                         uids,
                     ),
@@ -6121,7 +6313,7 @@ mod tests {
                 same(
                     "adversary-by-uid",
                     source_with(
-                        SHIPPED,
+                        super::shipped_denying(),
                         Some(&explicit_with("alex", "ursula", "gus", "{uid: 666}")),
                         uids,
                     ),
@@ -6129,30 +6321,30 @@ mod tests {
                 (
                     "unresolved-name",
                     source_with(
-                        SHIPPED,
+                        super::shipped_denying(),
                         Some(&explicit_with("alex", "ursula, ghost", "gus", "mallory")),
                         uids,
                     ),
-                    source_with(SHIPPED, Some(EXPLICIT), uids),
+                    source_with(super::shipped_denying(), Some(EXPLICIT), uids),
                 ),
                 (
                     "overlap",
                     source_with(
-                        SHIPPED,
+                        super::shipped_denying(),
                         Some(&explicit_with("alex, mallory", "ursula", "gus", "mallory")),
                         uids,
                     ),
-                    source_with(SHIPPED, Some(EXPLICIT), uids),
+                    source_with(super::shipped_denying(), Some(EXPLICIT), uids),
                 ),
                 (
                     "conflict",
                     source_with(
-                        SHIPPED,
+                        super::shipped_denying(),
                         Some(&explicit_with("alex", "ursula, gus", "gus", "mallory")),
                         uids,
                     ),
                     source_with(
-                        SHIPPED,
+                        super::shipped_denying(),
                         Some(&explicit_with("alex", "ursula", "", "mallory")),
                         uids,
                     ),
@@ -6160,12 +6352,12 @@ mod tests {
                 (
                     "alias",
                     source_with(
-                        SHIPPED,
+                        super::shipped_denying(),
                         Some(&explicit_with("alex", "ursula, gustav", "gus", "mallory")),
                         alias_uids,
                     ),
                     source_with(
-                        SHIPPED,
+                        super::shipped_denying(),
                         Some(&explicit_with("alex", "ursula", "", "mallory")),
                         alias_uids,
                     ),
@@ -6783,7 +6975,7 @@ mod tests {
             uids: &[(&str, u32)],
             agents: AgentsLoad,
         ) -> PolicySource {
-            try_source(SHIPPED, bindings, uids, agents).unwrap()
+            try_source(super::shipped_denying(), bindings, uids, agents).unwrap()
         }
 
         fn auth(src: &PolicySource, principal_uid: u32) -> BasicAuthorizer {

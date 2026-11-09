@@ -1332,6 +1332,33 @@ mod tests {
     }
 
     #[test]
+    fn the_core_prompt_states_the_withheld_rule() {
+        let prose = CORE_PROMPT.split_whitespace().collect::<Vec<_>>().join(" ");
+        for rule in [
+            "\"unavailable — do not retry\"",
+            "look exactly like missing ones",
+            "Do not infer",
+            "logged in, configured or installed",
+            "with the tool that owns it",
+            "Never ask the user to paste a credential, key or token.",
+            "outside Maknae",
+        ] {
+            assert!(prose.contains(rule), "{rule:?}");
+        }
+        for gone in [
+            "Not authorized",
+            "sensitive.yaml",
+            "authz",
+            "id_rsa",
+            ".aws",
+            ".netrc",
+        ] {
+            assert!(!CORE_PROMPT.contains(gone), "{gone:?}");
+        }
+        assert!(BASELINE_TOOLS_JSON.contains("unavailable — do not retry"));
+    }
+
+    #[test]
     fn the_reply_cap_is_sent_under_exactly_one_chosen_name() {
         let base = |mc: Option<u64>, mt: Option<u64>| {
             serde_json::to_value(ChatRequest {

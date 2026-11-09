@@ -4,8 +4,8 @@
 //! stubbed, the loader differs from production by exactly the declared
 //! requirement). Fixture identities are host-independent: the reserved
 //! `root` (uid 0) plus the defaults branch keyed on the fixture principal's
-//! own euid. THE point of this file: the shipped deny list actually denying,
-//! on the wire and in the trail (operator ruling 1, 2026-08-28).
+//! own euid. THE point of this file: the shipped policy actually refusing, on
+//! the wire and in the trail (operator ruling 1, 2026-08-28; ADR-0034).
 #![cfg(unix)]
 
 use std::os::unix::fs::PermissionsExt;
@@ -75,33 +75,12 @@ impl Fixture {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        // CANONICAL, or the delegated lane never matches (#216). `verify_delegated`
-        // prefix-checks the KERNEL-reported path of the subject's descriptor against
-        // this directory as `confined_beneath`, and the kernel reports the resolved
-        // form: on macOS `temp_dir()` is `$TMPDIR` under `/var`, a symlink to
-        // `/private/var`, so an unresolved home here fails `strip_prefix`, the OS
-        // answer is never established, and every delegated read denies with
-        // `os accessibility unknown` -- four tests red on darwin since PR #199,
-        // five as of #215, unseen because `maknae-kernel` is outside the macOS CI lane.
-        // The blast radius was larger than the reds. Two deny-asserting tests that
-        // delegate a descriptor were passing VACUOUSLY on darwin:
-        // `a_hardlink_alias_of_a_denied_file_is_refused` was denied at confinement
-        // before the nlink check it exists to prove -- `verify_delegated` runs
-        // `strip_prefix` BEFORE `check_target`, where nlink lives, and the test's
-        // `contains("os dac")` could not tell the two apart. (ADR-0009 §5 said the
-        // reverse, "refused before confinement is even consulted"; corrected in
-        // place, dated, in this same change.)
-        // `a_permit_outside_the_anchored_root_is_refused_distinctly`
-        // was doubly masked -- the `/var` mismatch AND its
-        // unresolved absolute allow glob -- so deleting the confinement check
-        // outright would have left it green under its then `result == deny`-only
-        // assertion. NOT vacuous, for the record: the symlink-alias case was
-        // outright red (it asserts the resolved `.ssh` path), and the
-        // group-writable-home case fails at root soundness, which precedes
-        // confinement -- it reached its own check unaffected. Same remedy as `maknae-io`'s own
-        // `confinement_root()` fixture. A fixture that only works where the temp dir
-        // is a real directory is testing the host, not the code.
+        // Canonical: the kernel reports the resolved path, and `~` grants anchor here (#216).
         let dir = dir.canonicalize().expect("canonicalize the fixture home");
+        common::write_0640(
+            &dir.join(maknae_config::SENSITIVE_FILE),
+            common::EMPTY_SENSITIVE,
+        );
         let principal = maknae_config::Principal {
             name: "operator".into(),
             uid: nix::unistd::geteuid().as_raw(),
@@ -115,6 +94,10 @@ impl Fixture {
 
     fn write_policy(&self, body: &str) {
         common::write_0640(&self.paths().authz, body);
+    }
+
+    fn write_sensitive(&self, body: &str) {
+        common::write_0640(&self.dir.join(maknae_config::SENSITIVE_FILE), body);
     }
 
     fn write_bindings(&self, body: &str) {
@@ -187,7 +170,7 @@ async fn read_attempt<P>(
     delegate: &std::path::Path,
 ) -> common::ReadRun
 where
-    P: maknae_security::Authorizer + Send + Sync + 'static,
+    P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
 {
     read_attempt_as(
         Some(fx_home),
@@ -212,7 +195,7 @@ async fn read_attempt_as<P>(
     delegate: &std::path::Path,
 ) -> common::ReadRun
 where
-    P: maknae_security::Authorizer + Send + Sync + 'static,
+    P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
 {
     read_attempt_with(
         peer_home,
@@ -240,7 +223,7 @@ async fn read_page_attempt<P>(
     window: maknae_io::PageWindow,
 ) -> common::ReadRun
 where
-    P: maknae_security::Authorizer + Send + Sync + 'static,
+    P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
 {
     read_attempt_with(
         Some(fx_home),
@@ -271,7 +254,7 @@ async fn read_attempt_with<P>(
     before_read: impl FnOnce(),
 ) -> common::ReadRun
 where
-    P: maknae_security::Authorizer + Send + Sync + 'static,
+    P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
 {
     let _turn = common::fs_turn(&verb).await;
     let held = maknae_io::open_path_for_delegation(delegate).ok();
@@ -329,7 +312,7 @@ async fn drive<P>(
     timeout: Duration,
 ) -> Option<Vec<u8>>
 where
-    P: maknae_security::Authorizer + Send + Sync + 'static,
+    P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
 {
     drive_with(
         Some(fx_home),
@@ -356,7 +339,7 @@ async fn drive_with_ops<P>(
     ops: Arc<impl maknae_kernel::AdminOps + 'static>,
 ) -> Option<Vec<u8>>
 where
-    P: maknae_security::Authorizer + Send + Sync + 'static,
+    P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
 {
     drive_admin(
         Some(fx_home),
@@ -390,7 +373,7 @@ async fn drive_with<P>(
     kernel_graph: Arc<Option<maknae_kernel::KernelGraphStatus>>,
 ) -> Option<Vec<u8>>
 where
-    P: maknae_security::Authorizer + Send + Sync + 'static,
+    P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
 {
     drive_admin(
         peer_home,
@@ -432,7 +415,7 @@ async fn drive_admin<P>(
     ops: Arc<dyn maknae_kernel::AdminOps>,
 ) -> Option<Vec<u8>>
 where
-    P: maknae_security::Authorizer + Send + Sync + 'static,
+    P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
 {
     let _turn = common::fs_turn(&verb).await;
     let (mut client, server) = tokio::io::duplex(256 * 1024);
@@ -778,17 +761,19 @@ async fn defaults_branch_enrolled_uid_is_admin_with_zero_nss() {
 }
 
 // ---------------------------------------------------------------------------
-// 6-7. THE DENY LIST DENIES (ruling 1); a permitted read returns content.
+// 6-7. THE SHIPPED SENSITIVE.YAML REFUSES (ruling 1); a permitted read returns content.
 // ---------------------------------------------------------------------------
 
-/// The shipped policy, byte-identical (the same include the #85 defaults
-/// proof uses): `Read(~/**)` allow, `Read(~/.ssh/**)`-class denies.
+/// The shipped files, byte-identical: `Read(~/**)` allow, and the credential paths in
+/// `sensitive.yaml`.
 const SHIPPED_POLICY: &str = include_str!("../../../packaging/common/authz.yaml");
+const SHIPPED_SENSITIVE: &str = include_str!("../../../packaging/common/sensitive.yaml");
 
 #[tokio::test]
-async fn the_shipped_deny_list_actually_denies_a_read_of_ssh_keys() {
+async fn the_shipped_sensitive_yaml_refuses_a_read_of_ssh_keys() {
     let fx = Fixture::new("denylist");
     fx.write_policy(SHIPPED_POLICY);
+    fx.write_sensitive(SHIPPED_SENSITIVE);
     std::fs::create_dir_all(fx.dir.join(".ssh")).unwrap();
     std::fs::write(fx.dir.join(".ssh/id_rsa"), b"SECRETKEYMATERIAL").unwrap();
     let target = fx.dir.join(".ssh/id_rsa").to_string_lossy().into_owned();
@@ -797,7 +782,7 @@ async fn the_shipped_deny_list_actually_denies_a_read_of_ssh_keys() {
     let me = nix::unistd::geteuid().as_raw();
     let run = read_attempt(
         &fx.dir,
-        fx.authorizer(),
+        composed(&fx, "UNCLASSIFIED"),
         emit.clone(),
         me,
         maknae_proto::Verb::Read {
@@ -813,12 +798,14 @@ async fn the_shipped_deny_list_actually_denies_a_read_of_ssh_keys() {
     let frame = run.first.expect("deny frame");
     match maknae_proto::decode_response(&frame).unwrap().result {
         RespResult::Err(e) => {
-            assert_eq!(e.code, ProtoErrCode::Unauthorized);
-            assert_eq!(e.message, "not authorized");
+            assert_eq!(e.code, ProtoErrCode::Protected);
+            assert_eq!(
+                e.message,
+                maknae_proto::protected_message(maknae_proto::HOST_SENSITIVE_LIST, "~/.ssh/**")
+            );
         }
-        other => panic!("the deny list MUST deny: {other:?}"),
+        other => panic!("the shipped list MUST refuse: {other:?}"),
     }
-    // Content must never cross the wire.
     let needle = b"SECRETKEYMATERIAL";
     assert!(!frame.windows(needle.len()).any(|w| w == needle));
 
@@ -826,19 +813,8 @@ async fn the_shipped_deny_list_actually_denies_a_read_of_ssh_keys() {
     assert_eq!(req.action, "fs.read");
     assert_eq!(req.outcome.result, "deny");
     assert_eq!(req.object.as_deref(), Some(target.as_str()), "AU-3 object");
-    assert!(
-        req.outcome
-            .reason
-            .contains("denied by policy entry Read(~/.ssh/**)"),
-        "only a real DenyMatch renders the policy-entry source (and proves the ~ expansion round-trip): {}",
-        req.outcome.reason
-    );
-    let rule = req.rule.as_ref().expect("the deny cites its rule node");
-    assert!(rule.section.ends_with("authz.yaml#permissions"), "{rule:?}");
-    assert!(rule.key.starts_with("rule:permissions:deny:"), "{rule:?}");
-    // And the pattern source never leaks onto the wire either.
-    let pat = b".ssh";
-    assert!(!frame.windows(pat.len()).any(|w| w == pat));
+    assert_eq!(req.outcome.reason, "sensitive: host ~/.ssh/**");
+    assert_eq!(req.rule, None, "no authz.yaml rule decided it");
 }
 
 #[tokio::test]
@@ -1204,6 +1180,7 @@ async fn a_permitted_read_returns_the_file_bytes() {
 async fn a_symlink_alias_of_a_denied_file_is_refused() {
     let fx = Fixture::new("symlink");
     fx.write_policy(SHIPPED_POLICY);
+    fx.write_sensitive(SHIPPED_SENSITIVE);
     std::fs::create_dir_all(fx.dir.join(".ssh")).unwrap();
     std::fs::write(fx.dir.join(".ssh/id_rsa"), b"SECRET").unwrap();
     std::os::unix::fs::symlink(fx.dir.join(".ssh/id_rsa"), fx.dir.join("innocent")).unwrap();
@@ -1213,7 +1190,7 @@ async fn a_symlink_alias_of_a_denied_file_is_refused() {
     let me = nix::unistd::geteuid().as_raw();
     let frame = read_attempt(
         &fx.dir,
-        fx.authorizer(),
+        composed(&fx, "UNCLASSIFIED"),
         emit.clone(),
         me,
         maknae_proto::Verb::Read {
@@ -1241,12 +1218,12 @@ async fn a_symlink_alias_of_a_denied_file_is_refused() {
     // CHANGED BY ADR-0009 decision 6, and this is the improvement: the refusal is no
     // longer a blanket structural "symlink refused" that never consulted policy. The
     // subject's descriptor resolves to the real object, the kernel reports THAT path,
-    // and the shipped deny list matches it by name. The alias is defeated by the rule
+    // and the shipped sensitive.yaml matches it by name. The alias is defeated by the rule
     // it was trying to dodge — which also means a LEGITIMATE in-home symlink now
     // works, the deliberate loosening ADR-0009 D6 records.
     assert!(
         req.outcome.reason.contains(".ssh"),
-        "the deny list must match the RESOLVED path, not the alias: {}",
+        "the shipped list must match the RESOLVED path, not the alias: {}",
         req.outcome.reason
     );
 
@@ -1269,7 +1246,7 @@ async fn a_symlink_alias_of_a_denied_file_is_refused() {
 }
 
 #[tokio::test]
-async fn a_hardlink_alias_of_a_denied_file_is_refused() {
+async fn a_second_hard_link_is_refused_before_the_decision() {
     let fx = Fixture::new("hardlink");
     fx.write_policy(SHIPPED_POLICY);
     std::fs::create_dir_all(fx.dir.join(".ssh")).unwrap();
@@ -1286,10 +1263,7 @@ async fn a_hardlink_alias_of_a_denied_file_is_refused() {
     std::fs::hard_link(fx.dir.join(".ssh/id_rsa"), fx.dir.join("innocent")).unwrap();
     let target = fx.dir.join("innocent").to_string_lossy().into_owned();
     // The subject CAN open the alias, so a descriptor IS delegated below and the
-    // `read evidence` refusal that follows is not "no descriptor arrived". That rules
-    // out ONE of the two ways this pass goes vacuous; the other -- a confinement
-    // refusal upstream of the nlink check (#216) -- is held only by
-    // `Fixture::new`'s canonicalize, and this assertion cannot see it.
+    // `read evidence` refusal that follows is not "no descriptor arrived".
     assert_eq!(
         std::fs::read(&target).expect("the subject can open the hard-link alias"),
         b"SECRET"
@@ -1331,56 +1305,33 @@ async fn a_hardlink_alias_of_a_denied_file_is_refused() {
     );
 }
 
+/// ADR-0034: the home's own mode is no longer a proof the read needs. The object's
+/// single link and its kernel-reported path are.
 #[tokio::test]
-async fn a_group_writable_home_disables_reads_at_the_anchor_boundary() {
+async fn a_group_writable_home_does_not_refuse_a_read() {
     let fx = Fixture::new("grpwrite");
     fx.write_policy(SHIPPED_POLICY);
     std::fs::write(fx.dir.join("notes.txt"), b"x").unwrap();
-    let target = fx.dir.join("notes.txt").to_string_lossy().into_owned();
+    let target = fx.dir.join("notes.txt");
     let authorizer = fx.authorizer();
-    // 2770-style home: a maknae-group member could plant aliases — refused.
     std::fs::set_permissions(&fx.dir, std::fs::Permissions::from_mode(0o770)).unwrap();
-
     let emit = RecEmit::new();
-    let me = nix::unistd::geteuid().as_raw();
-    let frame = read_attempt(
+    let run = read_attempt(
         &fx.dir,
         authorizer,
         emit.clone(),
-        me,
-        maknae_proto::Verb::Read {
-            path: target.clone(),
-            conversation: None,
-            page: None,
-        },
+        nix::unistd::geteuid().as_raw(),
+        read_verb(&target),
         Duration::from_secs(5),
-        std::path::Path::new(&target),
+        &target,
     )
-    .await
-    .first
-    .expect("unavailable frame");
-    // Restore so Drop can clean up.
+    .await;
     std::fs::set_permissions(&fx.dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-    // CHANGED BY ADR-0009 decision 7 — and this is the removed-behavior obligation
-    // (ADR-0021) DISCHARGED, not waived. The anchor OPEN is gone from the read path,
-    // but the anchor REQUIREMENT survives: `root_required` is checked by `stat` on the
-    // home, which needs only search on its parent and no permission on the home
-    // itself. A home any non-principal can write is still refused.
-    //
-    // It is refused at attempt preparation: the trail records a deny, not an outage.
-    match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => {
-            assert_eq!(e.code, ProtoErrCode::Unauthorized);
-            assert_eq!(e.message, "not authorized", "no note may reach the wire");
-        }
-        other => panic!("group-writable home must still be refused: {other:?}"),
-    }
-    let req = request_record(&emit.records()).clone();
-    assert_eq!(req.outcome.result, "deny");
-    assert!(
-        req.outcome.reason.starts_with("read evidence refused"),
-        "{}",
-        req.outcome.reason
+    assert_eq!(
+        read_content(&run),
+        Some(&b"x"[..]),
+        "{:?}",
+        request_record(&emit.records()).outcome
     );
 }
 
@@ -1593,27 +1544,12 @@ async fn four_concurrent_healthy_decisions_do_not_trip_the_breaker() {
 }
 
 #[tokio::test]
-async fn a_permit_outside_the_anchored_root_is_refused_distinctly() {
+async fn a_permit_outside_the_home_is_served() {
     let fx = Fixture::new("outside");
-    // An operator-added absolute grant for a tree OUTSIDE the requester's home. The
-    // object is CREATED rather than borrowed from `/etc`: the old fixture granted
-    // `Read(/etc/**)` and delegated `/etc/hostname`, neither of which exists on
-    // macOS — caught by the darwin-native CI job in `maknae-io`'s PARALLEL fixture
-    // (`delegated.rs`, the `a_file` helper) and fixed here by inspection. Corrected
-    // 2026-09-04 (#216): this suite is outside `DARWIN_CRATES` and has never run on
-    // that job; the sentence as first written attributed the sibling's catch to it.
-    // (Corrected 2026-09-11, #198: `DARWIN_CRATES` is gone and `darwin-native` now
-    // runs `cargo test --locked --workspace` on macos-26, so this suite DOES run
-    // there on every Rust change. The sentence above is kept as history.)
     let outside_dir =
         std::env::temp_dir().join(format!("enforce_offhome_obj_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&outside_dir);
     std::fs::create_dir_all(&outside_dir).unwrap();
-    // Canonical for fixture hygiene, matching `Fixture::new` (#216); it does not
-    // change this test's outcome. The grant below is never consulted: the object
-    // is outside the requester's home, so `verify_delegated` fails confinement at
-    // attempt preparation, BEFORE `decide_fs` (the only caller of the glob
-    // matcher) ever runs. The reason assertion below pins that ordering.
     let outside_dir = outside_dir
         .canonicalize()
         .expect("canonicalize the outside dir");
@@ -1623,56 +1559,26 @@ async fn a_permit_outside_the_anchored_root_is_refused_distinctly() {
         "schema_version: 1\npermissions:\n  allow:\n    - \"Read({}/**)\"\n  deny: []\n",
         outside_dir.display()
     ));
-    // The subject CAN open the object, so a descriptor IS delegated and the
-    // refusal below is confinement's, not "no descriptor arrived".
-    assert_eq!(
-        std::fs::read(&outside).expect("the subject can open the outside object"),
-        b"outside the requester's home"
-    );
     let emit = RecEmit::new();
-    let me = nix::unistd::geteuid().as_raw();
-    let frame = read_attempt(
+    let run = read_attempt(
         &fx.dir,
         fx.authorizer(),
         emit.clone(),
-        me,
-        maknae_proto::Verb::Read {
-            path: outside.to_string_lossy().into_owned(),
-            conversation: None,
-            page: None,
-        },
+        nix::unistd::geteuid().as_raw(),
+        read_verb(&outside),
         Duration::from_secs(5),
         &outside,
     )
-    .await
-    .first
-    .expect("outside-root frame");
-    // Confinement is one of the proofs the attempt requires (ADR-0009 decision 3).
-    //
-    // The property this test exists for is unchanged and better served: a grant the
-    // operator wrote for a path outside the home does NOT yield the bytes, and the
-    // trail says so as a decision rather than as a delivery failure.
-    match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => {
-            assert_eq!(e.code, ProtoErrCode::Unauthorized);
-            assert_eq!(e.message, "not authorized", "no note may reach the wire");
-        }
-        other => panic!("a grant outside the requester's home must not deliver: {other:?}"),
-    }
-    let req = request_record(&emit.records()).clone();
-    assert_eq!(req.outcome.result, "deny");
-    // "Distinctly": neither a matcher permit nor a `no capability entry` abstain
-    // renders this reason. "No descriptor arrived" is ruled out by the
-    // `std::fs::read` above.
-    assert!(
-        req.outcome.reason.starts_with("read evidence refused: "),
-        "an object outside the requester's home is refused at preparation: {}",
-        req.outcome.reason
+    .await;
+    assert_eq!(
+        read_content(&run),
+        Some(&b"outside the requester's home"[..]),
+        "{:?}",
+        request_record(&emit.records()).outcome
     );
-    let leak = b"outside the requester's home";
-    assert!(
-        !frame.windows(leak.len()).any(|w| w == leak),
-        "no content from outside the home may ride the frame"
+    assert_eq!(
+        request_record(&emit.records()).outcome.reason,
+        READ_PERMIT_REASON
     );
     let _ = std::fs::remove_dir_all(&outside_dir);
 }
@@ -1763,6 +1669,7 @@ async fn an_unentitled_caller_gets_unauthorized_never_notimplemented() {
         maknae_proto::Verb::AdminStatus,
         maknae_proto::Verb::SessionNew {
             cwd: "/work".into(),
+            sensitive: vec![],
         },
         maknae_proto::Verb::SessionList { cursor: None },
         maknae_proto::Verb::SessionClose {
@@ -2790,8 +2697,8 @@ async fn a_grantable_term_with_no_grant_names_the_absent_rule() {
 
 /// Case 5: a delegated object that no capability entry matches.
 /// Preconditions per the plan: a REAL delegated fd (without one, preparation
-/// refuses first: `read descriptor missing`); the file inside the fixture home
-/// (confinement); and a NARROW allow list -- under the shipped `Read(~/**)`
+/// refuses first: `read descriptor missing`); the file inside the fixture home;
+/// and a NARROW allow list -- under the shipped `Read(~/**)`
 /// every in-home path AllowMatches and this test would Permit instead.
 #[tokio::test]
 async fn an_unmatched_read_names_the_missing_capability_entry() {
@@ -2891,7 +2798,10 @@ async fn under_a_secret_ceiling_status_still_answers_and_names_both_operands() {
     .expect("a frame");
     match maknae_proto::decode_response(&frame).unwrap().result {
         RespResult::Ok(maknae_proto::Payload::Status(s)) => {
-            assert_eq!(s.authz_backend, "maknae-authz-basic+maknae-ceiling");
+            assert_eq!(
+                s.authz_backend,
+                "maknae-authz-basic+maknae-ceiling+maknae-sensitive"
+            );
         }
         other => panic!("expected a Status payload, got {other:?}"),
     }
@@ -3309,9 +3219,10 @@ async fn a_zero_page_request_is_bad_request_before_the_pdp() {
 }
 
 #[tokio::test]
-async fn the_shipped_deny_list_denies_a_paged_read_of_ssh_keys() {
+async fn the_shipped_sensitive_yaml_refuses_a_paged_read_of_ssh_keys() {
     let fx = Fixture::new("denylist-paged");
     fx.write_policy(SHIPPED_POLICY);
+    fx.write_sensitive(SHIPPED_SENSITIVE);
     std::fs::create_dir_all(fx.dir.join(".ssh")).unwrap();
     std::fs::write(fx.dir.join(".ssh/id_rsa"), b"SECRETKEYMATERIAL").unwrap();
     let target = fx.dir.join(".ssh/id_rsa").to_string_lossy().into_owned();
@@ -3319,7 +3230,7 @@ async fn the_shipped_deny_list_denies_a_paged_read_of_ssh_keys() {
     let me = nix::unistd::geteuid().as_raw();
     let run = read_page_attempt(
         &fx.dir,
-        fx.authorizer(),
+        composed(&fx, "UNCLASSIFIED"),
         emit.clone(),
         me,
         maknae_proto::Verb::Read {
@@ -3343,23 +3254,14 @@ async fn the_shipped_deny_list_denies_a_paged_read_of_ssh_keys() {
     assert_eq!(run.finish, None);
     let frame = run.first.expect("deny frame");
     match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => {
-            assert_eq!(e.code, ProtoErrCode::Unauthorized);
-            assert_eq!(e.message, "not authorized");
-        }
-        other => panic!("the deny list MUST deny a paged read: {other:?}"),
+        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Protected),
+        other => panic!("the shipped list MUST refuse a paged read: {other:?}"),
     }
     assert!(!frame
         .windows(b"SECRETKEYMATERIAL".len())
         .any(|w| w == b"SECRETKEYMATERIAL"));
     let req = request_record(&emit.records()).clone();
-    assert!(
-        req.outcome
-            .reason
-            .contains("denied by policy entry Read(~/.ssh/**)"),
-        "{}",
-        req.outcome.reason
-    );
+    assert_eq!(req.outcome.reason, "sensitive: host ~/.ssh/**");
 }
 
 #[tokio::test]
@@ -3392,7 +3294,7 @@ async fn a_second_users_tilde_grant_does_not_reach_the_enrolled_home() {
     let emit = RecEmit::new();
     let run = read_as_requester(&fx, Some(&b), &target, emit.clone()).await;
     assert_unauthorized(&run);
-    assert_denied_with_prefix(&emit, "read evidence refused: escapes the anchor");
+    assert_denied_with_prefix(&emit, "role admin: no capability entry for fs.read");
 }
 
 /// The real router's `~` expansion (#596), fed to the real decision path: a
@@ -3437,7 +3339,7 @@ async fn an_expanded_home_path_is_decided_against_the_requesters_home() {
     let emit = RecEmit::new();
     let run = read_as_requester(&fx, Some(&other), &routed, emit.clone()).await;
     assert_unauthorized(&run);
-    assert_denied_with_prefix(&emit, "read evidence refused: escapes the anchor");
+    assert_denied_with_prefix(&emit, "role admin: no capability entry for fs.read");
 }
 
 #[tokio::test]
@@ -3474,7 +3376,7 @@ async fn a_symlinked_home_routes_to_its_target_and_is_served() {
 }
 
 #[tokio::test]
-async fn an_absolute_grant_cannot_reach_beyond_the_requesters_home() {
+async fn an_absolute_grant_reaches_beyond_the_requesters_home() {
     let fx = Fixture::new("absolute_enrolled");
     let b = common::second_home("enforce_absolute_enrolled");
     let target = fx.dir.join("x");
@@ -3482,12 +3384,20 @@ async fn an_absolute_grant_cannot_reach_beyond_the_requesters_home() {
     fx.write_policy(&allow_policy(&format!("Read({}/**)", fx.dir.display()), ""));
     let emit = RecEmit::new();
     let run = read_as_requester(&fx, Some(&b), &target, emit.clone()).await;
-    assert_unauthorized(&run);
-    assert_denied_with_prefix(&emit, "read evidence refused: escapes the anchor");
+    assert_eq!(
+        read_content(&run),
+        Some(&b"the enrolled user's file"[..]),
+        "{:?}",
+        request_record(&emit.records()).outcome
+    );
+    assert_eq!(
+        request_record(&emit.records()).outcome.reason,
+        READ_PERMIT_REASON
+    );
 }
 
 #[tokio::test]
-async fn the_shipped_maknae_deny_protects_the_requesters_own_token() {
+async fn a_maknae_deny_protects_the_requesters_own_token() {
     let fx = Fixture::new("own_token");
     let b = common::second_home("enforce_own_token");
     std::fs::create_dir(b.join(".maknae")).unwrap();

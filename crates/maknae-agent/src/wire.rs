@@ -1,7 +1,7 @@
 //! The wire's answers, as the loop reads them. Pure: the client that produced a
 //! [`WireOutcome`] converts into it, so the decisions below stay in this crate,
 //! where they are mutation-tested.
-use crate::plane::{PlaneError, ReadBasis, ReadOutcome, ReadPage, WriteOutcome};
+use crate::plane::{PlaneError, ProtectedBy, ReadBasis, ReadOutcome, ReadPage, WriteOutcome};
 use maknae_proto::{ConversationId, ConversationView, Payload};
 
 /// What an existing file must be before a replace writes it (#388). The
@@ -40,12 +40,15 @@ impl std::fmt::Debug for WireRead {
 /// What one sent verb came back as. `Refused` carries the wire's own code and
 /// message (ADR-0019); `armed` is false, on a filesystem verb, iff the client
 /// delegated no descriptor, so no decision was made about the object.
+/// `withheld` is set when the attempt failed before any write syscall and no
+/// stale result may be released.
 #[derive(Debug)]
 pub enum WireOutcome {
     Payload(Payload),
     WriteDone {
         applied: bool,
         stale: bool,
+        withheld: bool,
         version: Option<[i64; 7]>,
     },
     ReadDone {
@@ -58,16 +61,15 @@ pub enum WireOutcome {
     },
 }
 
-/// A CONTROL, and a pure function so it is testable: only an AUTHORIZATION
-/// refusal of an ARMED request is `Refused` — the one outcome the model may
-/// not appeal. An armed `Unauthorized` is the kernel's refusal before any
-/// grant; the wire carries no reason (ADR-0019), so it also covers evidence and
-/// capacity refusals (#344, #370). An unarmed refusal, any other
-/// code (a `BadRequest` for `/a/../b` is a client-shape fault), any protocol
-/// surprise and any transport error is `Unavailable`. So is a grant that ends
-/// without an acknowledged `Success` (OS refusal, limit, changed object, lost
-/// ack): a fact about the attempt, not a verdict.
+/// A CONTROL, and a pure function so it is testable. An armed `Unauthorized` is
+/// `Refused`; every other refusal, any protocol surprise, any transport error and
+/// a grant that ends without an acknowledged `Success` is `Unavailable`. The model
+/// is told both in the same words (ADR-0034 decision 7); only `Protected`, decided
+/// first, reads differently.
 pub fn read_outcome(sent: Result<WireOutcome, String>) -> ReadOutcome {
+    if let Some(by) = protected(&sent) {
+        return ReadOutcome::Protected(by);
+    }
     match sent {
         Ok(WireOutcome::ReadDone { read: Some(r) }) => ReadOutcome::Content(ReadPage {
             content: r.content,
@@ -88,23 +90,16 @@ pub fn read_outcome(sent: Result<WireOutcome, String>) -> ReadOutcome {
     }
 }
 
-/// The write half of the same treatment, and pure for the same reason: ONLY a
-/// clean `WriteDone { applied: true }` is `Applied`.
-///
-/// Everything else is `Unknown` — a non-applied completion, a refusal, a
-/// payload for some other verb, and every transport error. ADR-0023 d4: a
-/// `String` error cannot tell a pre-send connect failure from a post-send read
-/// timeout, and guessing would manufacture certainty. `NotSent` is NOT decided
-/// here: it is the one LOCAL refusal, judged from `write_request`'s `Err`
-/// before `send_verb` is ever called. `armed` does not enter the write
-/// decision: every non-`Applied` write is already `Unknown`.
-///
-/// **Amended 2026-09-28 (#388):** one non-applied completion is certain, not
-/// guessed — `stale`, set only when the client's read-before-write check refused
-/// the attempt before any write syscall and the no-effect completion was
-/// acknowledged. It is `Stale`; every other non-applied completion stays
-/// `Unknown`.
+/// The write half, pure for the same reason. Only a clean `WriteDone { applied:
+/// true }` is `Applied`. A `Refused` frame is `Unavailable`: the kernel refuses
+/// only in place of the grant, before any effect. A `withheld` completion (ADR-0034
+/// decision 7) is `Unavailable`; a `stale` one is `Stale`. Every `Err` and every
+/// other completion is `Unknown` (ADR-0023 d4). `NotSent` is decided from
+/// `write_request`'s `Err`, before `send_verb`.
 pub fn write_outcome(sent: Result<WireOutcome, String>) -> WriteOutcome {
+    if let Some(by) = protected(&sent) {
+        return WriteOutcome::Protected(by);
+    }
     match sent {
         Ok(WireOutcome::WriteDone {
             applied: true,
@@ -116,7 +111,29 @@ pub fn write_outcome(sent: Result<WireOutcome, String>) -> WriteOutcome {
             stale: true,
             ..
         }) => WriteOutcome::Stale,
+        Ok(WireOutcome::WriteDone {
+            applied: false,
+            withheld: true,
+            ..
+        })
+        | Ok(WireOutcome::Refused { .. }) => WriteOutcome::Unavailable,
         _ => WriteOutcome::Unknown,
+    }
+}
+
+/// A `Protected` refusal, decided before `armed` is looked at: the kernel answers it on
+/// the asked path alone, so an unarmed request renders exactly as an armed one.
+fn protected(sent: &Result<WireOutcome, String>) -> Option<ProtectedBy> {
+    match sent {
+        Ok(WireOutcome::Refused {
+            code: maknae_proto::ProtoErrCode::Protected,
+            message,
+            ..
+        }) => maknae_proto::protected_parts(message).map(|(list, entry)| ProtectedBy {
+            list: list.into(),
+            entry: entry.into(),
+        }),
+        _ => None,
     }
 }
 
@@ -228,17 +245,13 @@ mod tests {
     }
 
     #[test]
-    fn a_write_is_applied_only_for_a_clean_completion_and_unknown_for_everything_else() {
-        // ADR-0023 d4: the wire cannot distinguish uncertain from refused
-        // on the write lane, so only a clean `applied: true` — and, since #388,
-        // a client-decided `stale` refusal — may claim certainty. `NotSent` is
-        // absent by construction: it is decided from `write_request`'s `Err`,
-        // before `send_verb` is called.
-        use maknae_proto::{Payload, ProtoErrCode};
+    fn a_write_is_applied_only_for_a_clean_completion() {
+        use maknae_proto::Payload;
         assert_eq!(
             write_outcome(Ok(WireOutcome::WriteDone {
                 applied: true,
                 stale: false,
+                withheld: false,
                 version: None
             })),
             WriteOutcome::Applied(None)
@@ -247,6 +260,7 @@ mod tests {
             write_outcome(Ok(WireOutcome::WriteDone {
                 applied: true,
                 stale: false,
+                withheld: false,
                 version: Some([2; 7])
             })),
             WriteOutcome::Applied(Some([2; 7]))
@@ -255,6 +269,7 @@ mod tests {
             write_outcome(Ok(WireOutcome::WriteDone {
                 applied: false,
                 stale: true,
+                withheld: false,
                 version: None
             })),
             WriteOutcome::Stale
@@ -263,18 +278,10 @@ mod tests {
             write_outcome(Ok(WireOutcome::WriteDone {
                 applied: false,
                 stale: false,
+                withheld: false,
                 version: None
             })),
             WriteOutcome::Unknown
-        );
-        assert_eq!(
-            write_outcome(Ok(WireOutcome::Refused {
-                code: ProtoErrCode::Unauthorized,
-                message: "not authorized".into(),
-                armed: true
-            })),
-            WriteOutcome::Unknown,
-            "a refusal is not a certainty on the write lane"
         );
         assert_eq!(
             write_outcome(Ok(WireOutcome::Payload(Payload::Pong))),
@@ -282,6 +289,76 @@ mod tests {
         );
         assert_eq!(
             write_outcome(Err("no response from daemon within 5000ms".into())),
+            WriteOutcome::Unknown
+        );
+    }
+
+    fn every_code_but_protected() -> Vec<maknae_proto::ProtoErrCode> {
+        use maknae_proto::ProtoErrCode;
+        let mut codes = vec![
+            ProtoErrCode::Unauthorized,
+            ProtoErrCode::BadRequest,
+            ProtoErrCode::Internal,
+            ProtoErrCode::TooLarge,
+            ProtoErrCode::UnknownVerb,
+            ProtoErrCode::NotImplemented,
+            ProtoErrCode::EgressUnavailable,
+        ];
+        codes.extend(maknae_proto::ReplyDefect::ALL.map(ProtoErrCode::ReplyUnusable));
+        codes
+    }
+
+    #[test]
+    fn a_write_refused_before_the_grant_is_unavailable() {
+        for code in every_code_but_protected() {
+            for armed in [true, false] {
+                assert_eq!(
+                    write_outcome(Ok(WireOutcome::Refused {
+                        code: code.clone(),
+                        message: "not authorized".into(),
+                        armed,
+                    })),
+                    WriteOutcome::Unavailable,
+                    "{code:?} {armed}"
+                );
+            }
+        }
+        assert_eq!(
+            write_outcome(Ok(WireOutcome::WriteDone {
+                applied: false,
+                stale: false,
+                withheld: true,
+                version: None
+            })),
+            WriteOutcome::Unavailable,
+            "a stale or unread result the loop could not read back is withheld"
+        );
+    }
+
+    #[test]
+    fn a_failure_after_the_grant_stays_outcome_unknown() {
+        use maknae_proto::Payload;
+        assert_eq!(
+            write_outcome(Ok(WireOutcome::WriteDone {
+                applied: false,
+                stale: false,
+                withheld: false,
+                version: None
+            })),
+            WriteOutcome::Unknown
+        );
+        assert_eq!(
+            write_outcome(Ok(WireOutcome::Payload(Payload::Pong))),
+            WriteOutcome::Unknown
+        );
+        assert_eq!(
+            write_outcome(Ok(WireOutcome::ReadDone { read: None })),
+            WriteOutcome::Unknown
+        );
+        assert_eq!(
+            write_outcome(Err(
+                "mutation acknowledgment timed out; effects may already have occurred".into()
+            )),
             WriteOutcome::Unknown
         );
     }
@@ -376,10 +453,6 @@ mod tests {
 
     #[test]
     fn a_read_is_refused_only_for_unauthorized_and_unavailable_for_every_other_outcome() {
-        // This mapper is a CONTROL, so it is tested: only the authorization
-        // code is a refusal the model may not appeal; a BadRequest
-        // (`/a/../b`), a protocol error, or a transport error is
-        // "unavailable".
         use maknae_proto::{Payload, ProtoErrCode};
         assert_eq!(
             read_outcome(Ok(WireOutcome::ReadDone {
@@ -420,13 +493,6 @@ mod tests {
             })),
             ReadOutcome::Unavailable
         );
-        // #241: an UNARMED refusal is not a PDP verdict on the content. The
-        // subject's own `open_path_for_delegation` failed (ENOENT), the
-        // request went out without a descriptor, and the kernel denied it for
-        // want of one (ADR-0009 d2) — which arrives as the same generic
-        // `Unauthorized`. Telling the model "Not authorized" for a typo'd path
-        // asserts a decision nobody made, and the compiled prompt forbids the
-        // model to diagnose or retry it.
         assert_eq!(
             read_outcome(Ok(WireOutcome::Refused {
                 code: ProtoErrCode::Unauthorized,
@@ -448,6 +514,7 @@ mod tests {
             read_outcome(Ok(WireOutcome::WriteDone {
                 applied: true,
                 stale: false,
+                withheld: false,
                 version: None
             })),
             ReadOutcome::Unavailable
@@ -456,6 +523,77 @@ mod tests {
             read_outcome(Err("handshake timed out".into())),
             ReadOutcome::Unavailable
         );
+    }
+
+    #[test]
+    fn an_armed_and_an_unarmed_read_refusal_render_the_same_bytes() {
+        use crate::render::{render, ToolOutcome};
+        let rendered = |armed| {
+            let outcome = match read_outcome(Ok(WireOutcome::Refused {
+                code: maknae_proto::ProtoErrCode::Unauthorized,
+                message: "not authorized".into(),
+                armed,
+            })) {
+                ReadOutcome::Refused => ToolOutcome::ReadRefused,
+                ReadOutcome::Unavailable => ToolOutcome::ReadUnavailable,
+                other => panic!("{other:?}"),
+            };
+            render(&outcome, 1)
+        };
+        assert_eq!(rendered(true).as_str(), rendered(false).as_str());
+        assert_eq!(
+            rendered(true).as_str(),
+            "unavailable — do not retry\n\nsteps remaining: 1"
+        );
+    }
+
+    fn protected_frame(armed: bool) -> Result<WireOutcome, String> {
+        Ok(WireOutcome::Refused {
+            code: maknae_proto::ProtoErrCode::Protected,
+            message: maknae_proto::protected_message(
+                maknae_proto::HOST_SENSITIVE_LIST,
+                "~/.ssh/**",
+            ),
+            armed,
+        })
+    }
+
+    fn by() -> ProtectedBy {
+        ProtectedBy {
+            list: maknae_proto::HOST_SENSITIVE_LIST.into(),
+            entry: "~/.ssh/**".into(),
+        }
+    }
+
+    #[test]
+    fn a_protected_refusal_is_protected_whether_or_not_it_was_armed() {
+        for armed in [true, false] {
+            assert_eq!(
+                read_outcome(protected_frame(armed)),
+                ReadOutcome::Protected(by()),
+                "{armed}"
+            );
+            assert_eq!(
+                write_outcome(protected_frame(armed)),
+                WriteOutcome::Protected(by()),
+                "{armed}"
+            );
+        }
+        let malformed = Ok(WireOutcome::Refused {
+            code: maknae_proto::ProtoErrCode::Protected,
+            message: "not authorized".into(),
+            armed: true,
+        });
+        assert_eq!(read_outcome(malformed), ReadOutcome::Unavailable);
+        let unauthorized = Ok(WireOutcome::Refused {
+            code: maknae_proto::ProtoErrCode::Unauthorized,
+            message: maknae_proto::protected_message(
+                maknae_proto::HOST_SENSITIVE_LIST,
+                "~/.ssh/**",
+            ),
+            armed: true,
+        });
+        assert_eq!(read_outcome(unauthorized), ReadOutcome::Refused);
     }
 
     #[test]

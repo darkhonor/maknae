@@ -112,6 +112,8 @@ pub enum ConfigError {
     BaselineValue(String),
     /// An `agents/<id>/` enrollment or policy was refused.
     InvalidAgent(String),
+    /// A `sensitive.yaml` document or one of its entries was refused (#617).
+    InvalidSensitive(String),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -217,6 +219,7 @@ impl std::fmt::Display for ConfigError {
             ConfigError::InvalidAgent(reason) => {
                 write!(f, "agent configuration refused: {reason}")
             }
+            ConfigError::InvalidSensitive(reason) => write!(f, "sensitive.yaml: {reason}"),
         }
     }
 }

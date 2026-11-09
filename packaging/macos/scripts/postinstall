@@ -118,14 +118,14 @@ fi
 [ "$DISABLE_SYNC" = false ] || verify "launchctl disable $SYNC_LABEL" disabled "$(disabled_state "$SYNC_LABEL")"
 
 install -d -m 0750 -o 0 -g "$MGID" "$ETC"
-for f in authz.yaml maknae.yaml; do
+for f in authz.yaml maknae.yaml sensitive.yaml; do
     if [ ! -e "$ETC/$f" ]; then
         install -m 0640 -o 0 -g "$MGID" "$DEFAULTS/$f" "$ETC/$f"
     fi
 done
 # Fresh install only (no store yet): a bindings.yaml root removed stays removed;
 # maknaed keeps enforcing the bindings it holds and `maknae policy sync` restores the file.
-CONFIGS=("$ETC/authz.yaml" "$ETC/maknae.yaml")
+CONFIGS=("$ETC/authz.yaml" "$ETC/maknae.yaml" "$ETC/sensitive.yaml")
 if [ -e "$ETC/bindings.yaml" ] || [ -h "$ETC/bindings.yaml" ]; then
     CONFIGS+=("$ETC/bindings.yaml")
 elif [ ! -e "/usr/local/var/db/maknae/state/kernel.graph" ]; then

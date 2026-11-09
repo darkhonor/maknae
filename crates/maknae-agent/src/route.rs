@@ -237,11 +237,9 @@ fn expand_home(p: String, home: Option<&str>) -> Result<String, RouteError> {
 ///
 /// Why it is refused HERE and not left to the kernel: the pre-gate fails as
 /// the malformed-request class, before the PDP and before anything is opened.
-/// A read then comes back `BadRequest` and renders as `read unavailable — do
-/// not retry`; a write comes back `Unauthorized` and renders as "the write may
-/// have happened". Both are false, and both are outcomes the compiled prompt
-/// forbids the model to appeal — for a typo the model could fix from a tool
-/// error.
+/// Either leg then renders as `unavailable — do not retry`, an outcome the
+/// compiled prompt forbids the model to appeal — for a typo the model could fix
+/// from a tool error.
 ///
 /// The length and NUL rules are applied to READS as well, although the read
 /// leg states neither, and that is not the router outrunning the kernel:
@@ -255,8 +253,8 @@ fn expand_home(p: String, home: Option<&str>) -> Result<String, RouteError> {
 /// for want of one (ADR-0009 decision 2); one that also carries an empty, `.`
 /// or `..` segment is answered `BadRequest` for its shape before that. Both
 /// render the same way, which is the point here: the model was told
-/// `read unavailable — do not retry`, just as unappealable as the write lane's
-/// "may have happened", for a path it could have corrected.
+/// `unavailable — do not retry`, unappealable, for a path it could have
+/// corrected.
 fn checked_path(p: String, home: Option<&str>) -> Result<String, RouteError> {
     if p.is_empty() {
         return Err(RouteError::EmptyPath);
@@ -513,12 +511,10 @@ mod tests {
             Err(RouteError::EmptyPath)
         ));
         // The kernel's `lexical_pregate` (maknae-kernel/src/handler.rs) refuses
-        // these LEXICALLY, before the PDP and before anything is opened: a read
-        // comes back `BadRequest` and renders as `read unavailable - do not
-        // retry`; a write comes back `Unauthorized` and renders as "the write
-        // may have happened". Both are false, and both are unappealable, for a
-        // typo the model could have fixed from a tool error. Mirrored here rule
-        // for rule (never imported - the brain links no kernel).
+        // these LEXICALLY, before the PDP and before anything is opened; either
+        // leg renders as `unavailable — do not retry`, unappealable, for a typo
+        // the model could have fixed from a tool error. Mirrored here rule for
+        // rule (never imported - the brain links no kernel).
         for bad in [
             "/home/u/p/../q/f.txt",
             "/home/u//f.txt",
@@ -574,7 +570,7 @@ mod tests {
         // if the path is otherwise lexically canonical, the kernel denies it
         // for want of a descriptor; if it also carries an empty, `.` or `..`
         // segment, the lexical pre-gate answers `BadRequest` for the shape
-        // first. Both render as `read unavailable — do not retry`, equally
+        // first. Both render as `unavailable — do not retry`, equally
         // unappealable, which is the point. Refused here, on both legs, as a
         // tool error the model can fix.
         //

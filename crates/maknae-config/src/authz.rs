@@ -16,8 +16,9 @@
 //! *(Corrected 2026-08-31: the header previously said a "FUTURE per-request
 //! PDP" evaluates this and that evaluation "does not wire into any request path
 //! yet". Superseded by #77 — every request is decided through the
-//! `maknae-security` seam, and the shipped deny list is enforced on the `Read`
-//! verb's PEP.)*
+//! `maknae-security` seam, and `permissions:` denies are enforced on every
+//! file verb's PEP; the shipped file's credential denies moved to `sensitive.yaml`
+//! (#617).)*
 //!
 //! `authz.yaml` carries three independent surfaces: `permissions:` decides
 //! PATHS by capability pattern; `roles:` decides ACTIONS per role, per term
@@ -491,7 +492,7 @@ enum GlobSeg {
 impl PathGlob {
     /// `~` is kept symbolic and bound at match time to the home the request carries (#435);
     /// `~name` is refused (#438).
-    fn parse(spec: &str) -> Result<PathGlob, AuthzError> {
+    pub(crate) fn parse(spec: &str) -> Result<PathGlob, AuthzError> {
         let bad = || AuthzError::BadPattern(spec.to_string());
         let (anchor, rest) = if let Some(rest) = spec.strip_prefix('~') {
             if !rest.is_empty() && !rest.starts_with('/') {
@@ -560,19 +561,27 @@ impl PathGlob {
             }))
     }
 
-    fn may_intersect_subtree(&self, root: &str, home: Option<&Path>) -> Result<bool, HomeUnbound> {
+    pub(crate) fn may_intersect_subtree(
+        &self,
+        root: &str,
+        home: Option<&Path>,
+    ) -> Result<bool, HomeUnbound> {
         let base = self.base(home)?;
-        let fixed = self.segments.iter().map_while(|seg| match seg {
-            GlobSeg::Comp(literal) if !literal.contains('*') => Some(literal.as_str()),
-            _ => None,
-        });
-        // Either prefix may end first. Only a conflicting fixed component proves
-        // disjointness; a wildcard could reach anywhere after its fixed prefix.
-        Ok(base
-            .into_iter()
-            .chain(fixed)
-            .zip(root.split('/').filter(|c| !c.is_empty()))
-            .all(|(a, b)| a == b))
+        let root: Vec<&str> = root.split('/').filter(|c| !c.is_empty()).collect();
+        let shared = base.len().min(root.len());
+        Ok(base[..shared] == root[..shared] && reaches_beneath(&self.segments, &root[shared..]))
+    }
+}
+
+/// Whether some path at or beneath `root` can match `pat`: a `*` segment
+/// consumes exactly one root component, and only `**` reaches any depth.
+fn reaches_beneath(pat: &[GlobSeg], root: &[&str]) -> bool {
+    match (pat.split_first(), root.split_first()) {
+        (_, None) | (Some((GlobSeg::DoubleStar, _)), Some(_)) => true,
+        (Some((GlobSeg::Comp(p), rest)), Some((c, tail))) => {
+            component_matches(p, c) && reaches_beneath(rest, tail)
+        }
+        (None, Some(_)) => false,
     }
 }
 
@@ -1424,35 +1433,44 @@ mod tests {
     // when the file operators install loses a deny (#158).
     const SHIPPED_DEFAULT: &str = include_str!("../../../packaging/common/authz.yaml");
 
+    const SSH_DENYING: &str = "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\n  deny:\n    - \"Read(~/.ssh/**)\"\n";
+
     fn home() -> std::path::PathBuf {
         std::path::PathBuf::from("/home/operator")
     }
 
     // ---- grammar / contract-as-tests (pure, via parse_policy) ----
 
+    const FORMER_SHIPPED_DENIES: [&str; 9] = [
+        "~/.ssh/**",
+        "~/.gnupg/**",
+        "~/.aws/**",
+        "~/.vault-token",
+        "~/.netrc",
+        "~/.git-credentials",
+        "~/.kube/**",
+        "~/.docker/config.json",
+        "~/.maknae/**",
+    ];
+
     #[test]
     fn shipped_default_validates_clean() {
         let policy = parse_policy(SHIPPED_DEFAULT).unwrap();
         assert_eq!(policy.allow.len(), 2);
-        assert_eq!(policy.deny.len(), 18);
+        assert!(policy.deny.is_empty());
         assert!(matches!(policy.allow[0], Pattern::Read(_)));
         assert!(matches!(policy.allow[1], Pattern::Write(_)));
-        assert_eq!(
-            policy
-                .deny
-                .iter()
-                .filter(|p| matches!(p, Pattern::Read(_)))
-                .count(),
-            9
-        );
-        assert_eq!(
-            policy
-                .deny
-                .iter()
-                .filter(|p| matches!(p, Pattern::Write(_)))
-                .count(),
-            9
-        );
+    }
+
+    #[test]
+    fn the_former_shipped_denies_are_sensitive_entries() {
+        let sensitive =
+            crate::SensitiveList::parse(include_str!("../../../packaging/common/sensitive.yaml"))
+                .unwrap();
+        let entries: Vec<&str> = sensitive.entries().collect();
+        for e in FORMER_SHIPPED_DENIES {
+            assert!(entries.contains(&e), "{e} is missing from sensitive.yaml");
+        }
     }
 
     #[test]
@@ -1572,22 +1590,6 @@ mod tests {
     }
 
     #[test]
-    fn shipped_read_denies_have_write_pairs() {
-        let policy = parse_policy(SHIPPED_DEFAULT).unwrap();
-        let mut reads = 0;
-        for (pattern, source) in policy.deny.iter().zip(&policy.deny_sources) {
-            if let Pattern::Read(glob) = pattern {
-                reads += 1;
-                assert!(
-                    policy.deny.contains(&Pattern::Write(glob.clone())),
-                    "shipped deny {source} is missing its Write counterpart",
-                );
-            }
-        }
-        assert!(reads > 0, "the shipped deny inventory must not disappear");
-    }
-
-    #[test]
     fn recursive_write_requires_whole_subtree_authority() {
         for (allow, root, expected) in [
             (
@@ -1656,7 +1658,8 @@ mod tests {
             ("Write(/h/u/projects/**)", true),
             ("Write(/h/u/**/.aws/**)", true),
             ("Write(/**/secret)", true),
-            ("Write(/h/u/proj*/secret)", true),
+            ("Write(/h/u/proj*/p/secret)", true),
+            ("Write(/h/u/proj*/secret)", false),
             ("Write(/h/u/.ssh/**)", false),
             ("Write(/h/u/projects/private/**)", false),
             ("Write(/h/u/projects/p-other/**)", false),
@@ -1750,6 +1753,57 @@ mod tests {
                 source: "<unknown deny entry>".into()
             }
         );
+    }
+
+    #[test]
+    fn a_star_deny_does_not_refuse_an_unrelated_recursive_delete() {
+        let policy = parse_policy(
+            "schema_version: 1\npermissions:\n  allow: [\"Write(~/**)\"]\n  deny: [\"Write(~/.*_history)\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            policy
+                .evaluate_write_subtree(&home().join("projects/build"), Some(&home()))
+                .unwrap(),
+            Match3::AllowMatch {
+                source: "Write(~/**)".into()
+            }
+        );
+        assert_eq!(
+            policy
+                .evaluate_write_subtree(&home(), Some(&home()))
+                .unwrap(),
+            Match3::DenyMatch {
+                source: "Write(~/.*_history)".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_subtree_deny_reaches_through_one_star_component_only() {
+        for (deny, root, intersects) in [
+            ("Write(/h/a/*/c)", "/h/a/b", true),
+            ("Write(/h/a/*/c)", "/h/x/b", false),
+            ("Write(/h/a/*/c)", "/h/a/b/c/d", false),
+            ("Write(/h/a/*/c/**)", "/h/a/b/c/d", true),
+            ("Write(/h/.ssh)", "/h/.ssh/x", false),
+            ("Write(/h/.ssh/**)", "/h/.ssh/x", true),
+            ("Write(/h/**/c)", "/h/x/y", true),
+            ("Write(/h/a)", "/h", true),
+        ] {
+            let yaml = format!(
+                "schema_version: 1\npermissions:\n  allow: [\"Write(/**)\"]\n  deny: [\"{deny}\"]\n"
+            );
+            let got = parse_policy(&yaml)
+                .unwrap()
+                .evaluate_write_subtree(Path::new(root), None)
+                .unwrap();
+            assert_eq!(
+                matches!(got, Match3::DenyMatch { .. }),
+                intersects,
+                "{deny} on {root}"
+            );
+        }
     }
 
     #[test]
@@ -2500,7 +2554,7 @@ mod tests {
 
     #[test]
     fn evaluate3_deny_match_carries_full_source_text() {
-        let p = parse_authz(SHIPPED_DEFAULT).unwrap();
+        let p = parse_authz(SSH_DENYING).unwrap();
         match p
             .evaluate3(
                 &Request::Read(Path::new("/home/operator/.ssh/id_rsa")),
@@ -2537,7 +2591,7 @@ mod tests {
     fn evaluate3_deny_overrides_allow() {
         // ~/.ssh/** is inside ~/** — both lists match; deny must win and
         // report ITS source.
-        let p = parse_authz(SHIPPED_DEFAULT).unwrap();
+        let p = parse_authz(SSH_DENYING).unwrap();
         let r = Request::Read(Path::new("/home/operator/.ssh/config"));
         assert_eq!(
             p.evaluate3(&r, Some(&home())),

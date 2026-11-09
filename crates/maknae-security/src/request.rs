@@ -59,6 +59,9 @@ pub const RESOURCE_OS_ACCESSIBLE: &str = "os_accessible";
 /// under subject credentials, not OS preapproval from a directory descriptor.
 pub const CONTEXT_FS_OPERATION: &str = "fs_operation";
 
+/// The conversation's personal `sensitive.yaml` entries, as an `AttrValue::Set`; kernel-stamped.
+pub const CONTEXT_SENSITIVE_PERSONAL: &str = "sensitive.personal";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FsOperation {
     WriteExisting,

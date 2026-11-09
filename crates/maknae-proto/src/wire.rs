@@ -297,6 +297,22 @@ pub const REPLY_UNUSABLE_MESSAGE: &str = "the provider's reply was unusable";
 pub const EGRESS_UNAVAILABLE_MESSAGE: &str =
     "the model service is at capacity or restarting; nothing was sent";
 
+pub const HOST_SENSITIVE_LIST: &str = "/etc/maknae/sensitive.yaml";
+pub const PERSONAL_SENSITIVE_LIST: &str = "~/.maknae/sensitive.yaml";
+
+/// A `Protected` refusal's message: the list and the entry, for the user's client only.
+pub fn protected_message(list: &str, entry: &str) -> String {
+    format!("{list}: {entry}")
+}
+
+/// The list and entry of a `Protected` message, `None` for any other shape.
+pub fn protected_parts(message: &str) -> Option<(&str, &str)> {
+    let (list, entry) = message.split_once(": ")?;
+    [HOST_SENSITIVE_LIST, PERSONAL_SENSITIVE_LIST]
+        .contains(&list)
+        .then_some((list, entry))
+}
+
 impl ReplyDefect {
     pub const ALL: [ReplyDefect; 11] = [
         ReplyDefect::Malformed,
@@ -454,7 +470,13 @@ pub enum Verb {
     /// one.
     AdminSessionTerminate,
     /// Open a conversation the kernel records; `cwd` is recorded, never decided on or confined.
-    SessionNew { cwd: String },
+    /// `sensitive` is the user's personal `sensitive.yaml` entries, applied to the
+    /// conversation's file requests.
+    SessionNew {
+        cwd: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        sensitive: Vec<String>,
+    },
     /// Reattach to an existing conversation. The caller obtains its content and
     /// history — a disclosure, and for a conversation the caller may not have
     /// started, that is the authorization-relevant fact. Inherits the provenance
@@ -1070,6 +1092,9 @@ pub enum ProtoErrCode {
     /// budget was spent. Nothing left the host. Availability is not
     /// confidential, so it is named (#321).
     EgressUnavailable,
+    /// The asked path is on a `sensitive.yaml` list, whether or not it exists.
+    /// The message is [`protected_message`]; a client never shows it to the model.
+    Protected,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1399,6 +1424,34 @@ mod tests {
         ciborium::into_writer(&resp, &mut buf).unwrap();
         let back: Response = ciborium::from_reader(&buf[..]).unwrap();
         assert_eq!(back, resp);
+    }
+
+    #[test]
+    fn protected_round_trips_with_its_list_and_entry() {
+        let resp = Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Err(ProtoError {
+                code: ProtoErrCode::Protected,
+                message: protected_message(HOST_SENSITIVE_LIST, "~/.ssh/**"),
+            }),
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&resp, &mut buf).unwrap();
+        let back: Response = ciborium::from_reader(&buf[..]).unwrap();
+        assert_eq!(back, resp);
+        let RespResult::Err(e) = back.result else {
+            unreachable!()
+        };
+        assert_eq!(
+            protected_parts(&e.message),
+            Some((HOST_SENSITIVE_LIST, "~/.ssh/**"))
+        );
+        assert_eq!(
+            protected_parts(&protected_message(PERSONAL_SENSITIVE_LIST, "/a: b")),
+            Some((PERSONAL_SENSITIVE_LIST, "/a: b"))
+        );
+        assert_eq!(protected_parts("not authorized"), None);
+        assert_eq!(protected_parts("/elsewhere.yaml: ~/.ssh/**"), None);
     }
 
     #[test]
@@ -3140,6 +3193,7 @@ mod tests {
                 (
                     Verb::SessionNew {
                         cwd: "/work".into(),
+                        sensitive: vec![],
                     },
                     FrameClass::Attempt,
                 ),
@@ -3167,6 +3221,50 @@ mod tests {
                 assert_eq!(class_of(&verb), class, "{verb:?}");
                 assert_eq!(round_trip(verb.clone()), verb);
             }
+        }
+
+        #[test]
+        fn the_personal_list_is_an_additive_field_of_session_new() {
+            let listed = Verb::SessionNew {
+                cwd: "/work".into(),
+                sensitive: vec!["~/sentinel-617/**".into()],
+            };
+            assert_eq!(round_trip(listed.clone()), listed);
+            let encode = |v: &ciborium::Value| {
+                let mut b = Vec::new();
+                ciborium::into_writer(v, &mut b).unwrap();
+                b
+            };
+            let before = ciborium::Value::Map(vec![
+                (
+                    ciborium::Value::Text("protocol_version".into()),
+                    ciborium::Value::Integer(PROTOCOL_VERSION.into()),
+                ),
+                (
+                    ciborium::Value::Text("verb".into()),
+                    ciborium::Value::Map(vec![(
+                        ciborium::Value::Text("SessionNew".into()),
+                        ciborium::Value::Map(vec![(
+                            ciborium::Value::Text("cwd".into()),
+                            ciborium::Value::Text("/work".into()),
+                        )]),
+                    )]),
+                ),
+            ]);
+            let unlisted = Verb::SessionNew {
+                cwd: "/work".into(),
+                sensitive: vec![],
+            };
+            assert_eq!(decode_request(&encode(&before)).unwrap().verb, unlisted);
+            assert_eq!(
+                encode_request(&Request {
+                    protocol_version: PROTOCOL_VERSION,
+                    task: None,
+                    verb: unlisted,
+                })
+                .unwrap(),
+                encode(&before)
+            );
         }
 
         #[test]
@@ -3231,6 +3329,7 @@ mod tests {
                 task: None,
                 verb: Verb::SessionNew {
                     cwd: "a".repeat(MAX_MUTATION_PATH_BYTES),
+                    sensitive: vec![],
                 },
             })
             .unwrap();
@@ -3299,7 +3398,13 @@ mod tests {
                 (Verb::AdminProviderDisable, FrameClass::Control),
                 (Verb::AdminSessionList, FrameClass::Control),
                 (Verb::AdminSessionTerminate, FrameClass::Control),
-                (Verb::SessionNew { cwd: "/p".into() }, FrameClass::Attempt),
+                (
+                    Verb::SessionNew {
+                        cwd: "/p".into(),
+                        sensitive: vec![],
+                    },
+                    FrameClass::Attempt,
+                ),
                 (Verb::SessionResume, FrameClass::Control),
                 (
                     Verb::SessionClose {

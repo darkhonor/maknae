@@ -16,25 +16,17 @@
 
 use crate::checks::map_errno_no_disambiguation as io_error;
 use crate::syscall;
-use crate::{AnchorRequired, DelegatedRequired, Entry, IoError, TargetRequired};
+use crate::{Entry, IoError, TargetRequired};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-
-/// Location and confinement-root requirements; no child mutation permission claim.
-#[derive(Clone, Debug)]
-pub struct MutationRequired {
-    pub confined_beneath: PathBuf,
-    pub root_required: AnchorRequired,
-}
 
 /// A held directory whose kernel path was verified. Fields cannot be forged.
 #[derive(Debug)]
 pub struct MutationDirectory {
     fd: OwnedFd,
     path: PathBuf,
-    required: MutationRequired,
     device: nix::libc::dev_t,
     deadline: Option<Instant>,
 }
@@ -52,6 +44,8 @@ pub struct MutationFailure {
     pub state: EffectState,
     pub at: PathBuf,
     pub source: IoError,
+    /// Set only when the failure was decided before any write syscall was attempted.
+    pub before_write: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,6 +75,7 @@ fn failure(at: &Path, state: EffectState, source: IoError) -> MutationFailure {
         state,
         at: at.to_path_buf(),
         source,
+        before_write: false,
     }
 }
 
@@ -91,20 +86,6 @@ fn at(path: &Path) -> impl FnOnce(nix::errno::Errno) -> IoError + '_ {
 
 fn no_effect(path: &Path) -> impl FnOnce(IoError) -> MutationFailure + '_ {
     move |error| failure(path, EffectState::NoEffect, error)
-}
-
-fn directory_requirements(req: &MutationRequired) -> DelegatedRequired {
-    DelegatedRequired {
-        confined_beneath: req.confined_beneath.clone(),
-        root_required: req.root_required.clone(),
-        target: TargetRequired {
-            owner: None,
-            mode_mask: None,
-            nlink_exactly_one: false,
-            regular_file: false,
-            max_bytes: None,
-        },
-    }
 }
 
 // Bound the leaf before allocating its joined path; the complete path has its
@@ -118,7 +99,7 @@ fn valid_leaf(leaf: &str) -> bool {
         && leaf.len() <= 4096
 }
 
-fn checked_path(path: &Path) -> Result<(), IoError> {
+pub(crate) fn checked_path(path: &Path) -> Result<(), IoError> {
     let text = path.to_str().ok_or_else(|| IoError::NonUtf8Component {
         path: path.to_path_buf(),
     })?;
@@ -126,15 +107,6 @@ fn checked_path(path: &Path) -> Result<(), IoError> {
         return Err(IoError::InvalidMutationPath {
             path: path.to_path_buf(),
         });
-    }
-    Ok(())
-}
-
-fn check_root(path: &Path) -> Result<(), IoError> {
-    checked_path(path)?;
-    let st = syscall::stat_path(path).map_err(at(path))?;
-    if st.st_mode & nix::libc::S_IFMT != nix::libc::S_IFDIR {
-        return Err(io_error(nix::errno::Errno::ENOTDIR, path));
     }
     Ok(())
 }
@@ -152,28 +124,25 @@ fn ensure_directory(fd: &impl AsFd, path: &Path) -> Result<nix::sys::stat::FileS
     Ok(st)
 }
 
-pub fn verify_mutation_directory(
-    fd: OwnedFd,
-    required: MutationRequired,
-) -> Result<MutationDirectory, IoError> {
-    check_root(&required.confined_beneath)?;
-    let verified = crate::verify_delegated(fd.as_fd(), directory_requirements(&required))?;
-    checked_path(&verified.path)?;
-    let st = ensure_directory(&fd, &verified.path)?;
+fn directory_path(fd: BorrowedFd<'_>) -> Result<(PathBuf, nix::sys::stat::FileStat), IoError> {
+    let path = crate::delegated::delegated_path(fd)?;
+    checked_path(&path)?;
+    let st = ensure_directory(&fd, &path)?;
+    Ok((path, st))
+}
+
+pub fn verify_mutation_directory(fd: OwnedFd) -> Result<MutationDirectory, IoError> {
+    let (path, st) = directory_path(fd.as_fd())?;
     Ok(MutationDirectory {
         fd,
-        path: verified.path,
-        required,
+        path,
         device: st.st_dev,
         deadline: None,
     })
 }
 
 pub fn verify_unconfined_directory(fd: BorrowedFd<'_>) -> Result<PathBuf, IoError> {
-    let path = crate::delegated::delegated_path(fd)?;
-    checked_path(&path)?;
-    ensure_directory(&fd, &path)?;
-    Ok(path)
+    Ok(directory_path(fd)?.0)
 }
 
 fn same_path(actual: &Path, expected: &Path) -> Result<(), IoError> {
@@ -185,6 +154,28 @@ fn same_path(actual: &Path, expected: &Path) -> Result<(), IoError> {
     Ok(())
 }
 
+/// An `O_CREAT|O_EXCL` open certifies no entry only for the errnos the kernel
+/// returns before an inode can exist for it.
+fn refused_create_open(e: nix::errno::Errno, path: &Path) -> MutationFailure {
+    use nix::errno::Errno;
+    let mut f = failure(path, EffectState::NoEffect, io_error(e, path));
+    f.before_write = matches!(
+        e,
+        Errno::EEXIST
+            | Errno::ENOENT
+            | Errno::ENOTDIR
+            | Errno::ELOOP
+            | Errno::ENAMETOOLONG
+            | Errno::EROFS
+    );
+    f
+}
+
+fn unwritten(mut e: MutationFailure, tried: bool) -> MutationFailure {
+    e.before_write = !tried;
+    e
+}
+
 fn replace_bytes(
     fd: &OwnedFd,
     path: &Path,
@@ -194,13 +185,15 @@ fn replace_bytes(
     sync: impl Fn(&OwnedFd) -> nix::Result<()>,
 ) -> Result<(), MutationFailure> {
     let mut offset = 0;
+    let mut tried = false;
     while offset < bytes.len() {
         let state = if offset == 0 {
             EffectState::NoEffect
         } else {
             EffectState::Partial
         };
-        check().map_err(|e| failure(path, state, e))?;
+        check().map_err(|e| unwritten(failure(path, state, e), tried))?;
+        tried = true;
         let count = match write(fd, &bytes[offset..], offset as i64) {
             Err(nix::errno::Errno::EINTR) => continue,
             result => result.map_err(|e| failure(path, state, io_error(e, path)))?,
@@ -215,7 +208,7 @@ fn replace_bytes(
     } else {
         EffectState::Partial
     };
-    check().map_err(|e| failure(path, state, e))?;
+    check().map_err(|e| unwritten(failure(path, state, e), tried))?;
     // A valid slice is bounded by isize::MAX; both supported targets have 64-bit
     // pointers, so its length is always representable by the syscall offset.
     let length = bytes.len() as i64;
@@ -299,6 +292,28 @@ fn replace_held_file_with(
     base: WriteBase,
     mut fstat: impl FnMut(&OwnedFd) -> nix::Result<nix::sys::stat::FileStat>,
 ) -> Result<Option<FileVersion>, MutationFailure> {
+    let (fd, pinned) = open_for_replace(held, expected, base, &mut fstat).map_err(|mut e| {
+        e.before_write = true;
+        e
+    })?;
+    let check = || bound_to(&fd, &pinned, expected, &SINGLE_LINK_REGULAR);
+    replace_bytes(
+        &fd,
+        expected,
+        bytes,
+        check,
+        syscall::write_at,
+        syscall::fsync_fd,
+    )?;
+    Ok(fstat(&fd).ok().map(|st| FileVersion::of(&st)))
+}
+
+fn open_for_replace(
+    held: BorrowedFd<'_>,
+    expected: &Path,
+    base: WriteBase,
+    fstat: &mut impl FnMut(&OwnedFd) -> nix::Result<nix::sys::stat::FileStat>,
+) -> Result<(OwnedFd, nix::sys::stat::FileStat), MutationFailure> {
     let pinned = pin(held, expected, &SINGLE_LINK_REGULAR)?;
     let fd = syscall::reopen_writable(&held, expected).map_err(|e| reopen_failure(e, expected))?;
     let check = || bound_to(&fd, &pinned, expected, &SINGLE_LINK_REGULAR);
@@ -327,15 +342,17 @@ fn replace_held_file_with(
             }
         }
     }
-    replace_bytes(
-        &fd,
-        expected,
-        bytes,
-        check,
-        syscall::write_at,
-        syscall::fsync_fd,
-    )?;
-    Ok(fstat(&fd).ok().map(|st| FileVersion::of(&st)))
+    Ok((fd, pinned))
+}
+
+/// Whether the subject can open a held file for reading: the same pin, reopen and
+/// binding checks a read makes, without reading.
+pub fn held_file_is_readable(held: BorrowedFd<'_>, expected: &Path) -> bool {
+    let Ok(pinned) = pin(held, expected, &SINGLE_LINK_REGULAR) else {
+        return false;
+    };
+    syscall::reopen_readable(&held, expected)
+        .is_ok_and(|fd| bound_to(&fd, &pinned, expected, &SINGLE_LINK_REGULAR).is_ok())
 }
 
 pub fn read_held_file(
@@ -503,9 +520,7 @@ impl MutationDirectory {
     /// Compare with both the immutable verified path and the grant's expected path.
     pub fn reverify(&self, expected: &Path) -> Result<(), IoError> {
         same_path(&self.path, expected)?;
-        check_root(&self.required.confined_beneath)?;
-        let actual =
-            crate::verify_delegated(self.fd.as_fd(), directory_requirements(&self.required))?.path;
+        let actual = crate::delegated::delegated_path(self.fd.as_fd())?;
         same_path(&actual, expected)?;
         ensure_directory(&self.fd, expected)?;
         Ok(())
@@ -554,16 +569,24 @@ impl MutationDirectory {
         write: impl FnOnce(&OwnedFd, &Path) -> Result<(), MutationFailure>,
         fstat: impl FnOnce(&OwnedFd) -> nix::Result<nix::sys::stat::FileStat>,
     ) -> Result<MutationEffect, MutationFailure> {
-        let path = self.child_path(leaf).map_err(no_effect(&self.path))?;
-        self.check_deadline(&path)?;
+        let certified = |mut e: MutationFailure| {
+            e.before_write = true;
+            e
+        };
+        let path = self
+            .child_path(leaf)
+            .map_err(no_effect(&self.path))
+            .map_err(certified)?;
+        self.check_deadline(&path).map_err(certified)?;
         let fd = syscall::open_temp_excl(&self.fd, leaf, crate::Mode(0o600))
-            .map_err(|e| failure(&path, EffectState::NoEffect, io_error(e, &path)))?;
+            .map_err(|e| refused_create_open(e, &path))?;
         // A fresh entry already exists, even when the first content write fails.
         let result = write(&fd, &path);
         result.map_err(|mut e| {
             if e.state == EffectState::NoEffect {
                 e.state = EffectState::Partial;
             }
+            e.before_write = false;
             e
         })?;
         Ok(MutationEffect {
@@ -608,7 +631,7 @@ impl MutationDirectory {
         let fd = syscall::open_mutation_directory_at(&self.fd, leaf).map_err(|e| {
             crate::checks::map_errno(e, &path, || syscall::fstatat_nofollow(&self.fd, leaf))
         })?;
-        let mut child = verify_mutation_directory(fd, self.required.clone())?;
+        let mut child = verify_mutation_directory(fd)?;
         child.deadline = self.deadline;
         same_path(child.path(), &path)?;
         if child.device != self.device {
@@ -620,7 +643,7 @@ impl MutationDirectory {
     pub fn cursor(&self) -> Result<DirectoryCursor, IoError> {
         self.reverify(&self.path)?;
         let fd = syscall::open_dir_at(&self.fd, ".").map_err(at(&self.path))?;
-        let directory = verify_mutation_directory(fd, self.required.clone())?;
+        let directory = verify_mutation_directory(fd)?;
         same_path(directory.path(), self.path())?;
         let entries = syscall::open_dir_handle(&directory.fd)
             .map_err(at(&self.path))?
@@ -687,12 +710,12 @@ mod tests {
                 std::fs::write(&p, b"original long bytes").unwrap();
                 let mut shared = OpenOptions::new().write(true).open(&p).unwrap();
                 shared.seek(SeekFrom::Start(9)).unwrap();
-                let before = syscall::stat_path(&p).unwrap();
+                let before = nix::sys::stat::stat(&p).unwrap();
                 let fd = held(&p);
                 replace_held_file(fd.as_fd(), &p, b"new", WriteBase::Any).unwrap();
                 assert_eq!(std::fs::read(&p).unwrap(), b"new");
                 assert_eq!(shared.stream_position().unwrap(), 9);
-                assert!(same_object(&before, &syscall::stat_path(&p).unwrap()));
+                assert!(same_object(&before, &nix::sys::stat::stat(&p).unwrap()));
                 replace_held_file(fd.as_fd(), &p, b"", WriteBase::Any).unwrap();
                 assert!(std::fs::read(&p).unwrap().is_empty());
             },
@@ -726,7 +749,29 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("moved")).unwrap(), b"untouched");
     }
     fn version(p: &Path) -> FileVersion {
-        FileVersion::of(&syscall::stat_path(p).unwrap())
+        FileVersion::of(&nix::sys::stat::stat(p).unwrap())
+    }
+    #[test]
+    fn a_held_file_is_readable_only_when_a_read_could_open_it() {
+        use std::os::unix::fs::PermissionsExt;
+        assert!(
+            !nix::unistd::geteuid().is_root(),
+            "running as root, which opens a 0200 file and voids the premise"
+        );
+        let d = tempfile::tempdir().unwrap();
+        let p = root(&d).join("readable-sentinel");
+        std::fs::write(&p, b"x").unwrap();
+        let fd = held(&p);
+        assert!(held_file_is_readable(fd.as_fd(), &p));
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o200)).unwrap();
+        assert!(!held_file_is_readable(fd.as_fd(), &p));
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(!held_file_is_readable(
+            fd.as_fd(),
+            &root(&d).join("other-name")
+        ));
+        std::fs::hard_link(&p, root(&d).join("second-link")).unwrap();
+        assert!(!held_file_is_readable(fd.as_fd(), &p));
     }
     #[test]
     fn a_matching_base_replaces_and_returns_the_written_version() {
@@ -866,6 +911,75 @@ mod tests {
         assert_eq!(std::fs::read(&p).unwrap(), b"written");
     }
     #[test]
+    fn a_create_refused_at_the_open_is_decided_before_any_write() {
+        let d = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(d.path().join("listed"), d.path().join("dangling")).unwrap();
+        let e = directory(&d)
+            .create_exclusive("dangling", b"x")
+            .unwrap_err();
+        assert_eq!(e.state, EffectState::NoEffect);
+        assert!(e.before_write, "{e:?}");
+        assert!(!d.path().join("listed").exists());
+        let e = directory(&d)
+            .create_exclusive_with(
+                "opened",
+                |_, path| {
+                    Err(failure(
+                        path,
+                        EffectState::NoEffect,
+                        io_error(nix::errno::Errno::EIO, path),
+                    ))
+                },
+                syscall::fstat,
+            )
+            .unwrap_err();
+        assert_eq!(e.state, EffectState::Partial);
+        assert!(!e.before_write, "the entry exists once the open succeeds");
+    }
+    #[test]
+    fn a_create_open_refused_by_permission_is_not_certified_before_any_effect() {
+        use std::os::unix::fs::PermissionsExt;
+        assert!(
+            !nix::unistd::geteuid().is_root(),
+            "running as root, which creates in a 0500 directory and voids the premise"
+        );
+        let d = tempfile::tempdir().unwrap();
+        let dir = directory(&d);
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let e = dir.create_exclusive("locked-sentinel", b"x").unwrap_err();
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(!e.before_write, "{e:?}");
+        assert!(!d.path().join("locked-sentinel").exists());
+    }
+    #[test]
+    fn only_errnos_returned_before_an_inode_can_exist_certify_a_create_open() {
+        use nix::errno::Errno;
+        let path = Path::new("/create-open-sentinel");
+        for errno in [
+            Errno::EEXIST,
+            Errno::ENOENT,
+            Errno::ENOTDIR,
+            Errno::ELOOP,
+            Errno::ENAMETOOLONG,
+            Errno::EROFS,
+        ] {
+            assert!(refused_create_open(errno, path).before_write, "{errno}");
+        }
+        for errno in [
+            Errno::EACCES,
+            Errno::EPERM,
+            Errno::ENOSPC,
+            Errno::EDQUOT,
+            Errno::EIO,
+            Errno::EINTR,
+            Errno::EISDIR,
+        ] {
+            let e = refused_create_open(errno, path);
+            assert!(!e.before_write, "{errno}");
+            assert_eq!(e.state, EffectState::NoEffect);
+        }
+    }
+    #[test]
     fn a_failed_post_create_fstat_is_a_created_file_with_no_version() {
         let d = tempfile::tempdir().unwrap();
         let effect = directory(&d)
@@ -890,6 +1004,98 @@ mod tests {
             std::fs::read(d.path().join("post-fstat-created")).unwrap(),
             b"kept"
         );
+    }
+    #[test]
+    fn a_replace_refused_at_the_write_open_is_decided_before_any_write() {
+        use std::os::unix::fs::PermissionsExt;
+        assert!(
+            !nix::unistd::geteuid().is_root(),
+            "running as root, which opens a 0000 file and voids the premise"
+        );
+        let d = tempfile::tempdir().unwrap();
+        let p = root(&d).join("mode-0000-sentinel");
+        std::fs::write(&p, b"kept").unwrap();
+        let fd = held(&p);
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let e = replace_held_file(fd.as_fd(), &p, b"not written", WriteBase::Any).unwrap_err();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(e.state, EffectState::NoEffect);
+        assert!(e.before_write, "{e:?}");
+        assert_eq!(std::fs::read(&p).unwrap(), b"kept");
+        let e = replace_held_file(fd.as_fd(), &p, b"blind", WriteBase::Unread).unwrap_err();
+        assert!(e.before_write, "a stale base is decided before any write");
+    }
+    #[test]
+    fn a_replace_whose_check_fails_before_any_syscall_is_decided_before_any_write() {
+        let d = tempfile::tempdir().unwrap();
+        let p = root(&d).join("check-first-sentinel");
+        std::fs::write(&p, b"kept").unwrap();
+        let changed = || {
+            Err(IoError::MutationPathChanged {
+                path: "/moved".into(),
+            })
+        };
+        for bytes in [&b"x"[..], &b""[..]] {
+            let fd = std::fs::OpenOptions::new().write(true).open(&p).unwrap();
+            let e = replace_bytes(
+                &fd.into(),
+                &p,
+                bytes,
+                changed,
+                |_, _, _| panic!("no write syscall may follow a failed check"),
+                |_| panic!("no sync may follow a failed check"),
+            )
+            .unwrap_err();
+            assert_eq!(e.state, EffectState::NoEffect);
+            assert!(e.before_write, "{} bytes: {e:?}", bytes.len());
+        }
+        assert_eq!(std::fs::read(&p).unwrap(), b"kept");
+    }
+    #[test]
+    fn a_check_that_fails_after_an_interrupted_write_is_not_before_any_write() {
+        let d = tempfile::tempdir().unwrap();
+        let p = root(&d).join("eintr-sentinel");
+        std::fs::write(&p, b"kept").unwrap();
+        let checks = std::cell::Cell::new(0);
+        let fd = std::fs::OpenOptions::new().write(true).open(&p).unwrap();
+        let e = replace_bytes(
+            &fd.into(),
+            &p,
+            b"x",
+            || {
+                checks.set(checks.get() + 1);
+                if checks.get() == 1 {
+                    Ok(())
+                } else {
+                    Err(IoError::MutationPathChanged {
+                        path: "/moved".into(),
+                    })
+                }
+            },
+            |_, _, _| Err(nix::errno::Errno::EINTR),
+            |_| panic!("no sync may follow a failed check"),
+        )
+        .unwrap_err();
+        assert_eq!(checks.get(), 2);
+        assert!(!e.before_write, "a write syscall was attempted: {e:?}");
+    }
+    #[test]
+    fn a_replace_whose_first_write_fails_may_have_reached_the_file() {
+        let d = tempfile::tempdir().unwrap();
+        let p = root(&d).join("first-write-sentinel");
+        std::fs::write(&p, b"kept").unwrap();
+        let fd = std::fs::OpenOptions::new().write(true).open(&p).unwrap();
+        let e = replace_bytes(
+            &fd.into(),
+            &p,
+            b"x",
+            || Ok(()),
+            |_, _, _| Err(nix::errno::Errno::EIO),
+            syscall::fsync_fd,
+        )
+        .unwrap_err();
+        assert_eq!(e.state, EffectState::NoEffect);
+        assert!(!e.before_write, "a write syscall was attempted");
     }
     #[test]
     fn a_failed_pre_write_fstat_is_an_ordinary_refusal_never_stale() {
@@ -926,12 +1132,12 @@ mod tests {
         let (a, b) = (root(&d).join("a"), root(&d).join("b"));
         std::fs::write(&a, b"a").unwrap();
         std::fs::write(&b, b"b").unwrap();
-        let sa = syscall::stat_path(&a).unwrap();
+        let sa = nix::sys::stat::stat(&a).unwrap();
         assert!(same_object(
             &sa,
             &syscall::fstat(&File::open(&a).unwrap()).unwrap()
         ));
-        assert!(!same_object(&sa, &syscall::stat_path(&b).unwrap()));
+        assert!(!same_object(&sa, &nix::sys::stat::stat(&b).unwrap()));
         let mut elsewhere = sa;
         elsewhere.st_dev = sa.st_dev.wrapping_add(1);
         assert!(!same_object(&sa, &elsewhere));
@@ -1264,19 +1470,10 @@ mod tests {
         d.path().canonicalize().unwrap()
     }
     fn directory(d: &tempfile::TempDir) -> MutationDirectory {
-        verify_mutation_directory(
-            File::open(d.path()).unwrap().into(),
-            MutationRequired {
-                confined_beneath: root(d),
-                root_required: AnchorRequired::OS_DAC,
-            },
-        )
-        .unwrap()
+        verify_mutation_directory(File::open(d.path()).unwrap().into()).unwrap()
     }
-    fn req(d: &tempfile::TempDir) -> DelegatedRequired {
-        DelegatedRequired {
-            confined_beneath: root(d),
-            root_required: AnchorRequired::OS_DAC,
+    fn req() -> crate::DelegatedRequired {
+        crate::DelegatedRequired {
             target: crate::TargetRequired::OS_DAC_REGULAR,
         }
     }
@@ -1284,21 +1481,13 @@ mod tests {
         OpenOptions::new().write(true).open(p).unwrap().into()
     }
     #[test]
-    fn real_descriptor_accessors_and_disappearing_root_preserve_identity() {
+    fn real_descriptor_accessors_and_a_disappearing_directory_preserve_identity() {
         let d = tempfile::tempdir().unwrap();
         let dir = directory(&d);
         assert_eq!(
             syscall::fstat(&dir).unwrap().st_ino,
             syscall::fstat(&dir.fd).unwrap().st_ino
         );
-        let missing = root(&d).join("missing-root");
-        assert!(matches!(
-            check_root(&missing),
-            Err(IoError::Io {
-                kind: crate::IoKind::NotFound,
-                ..
-            })
-        ));
         let raw = PathBuf::from(std::ffi::OsStr::from_bytes(b"/nonutf8-\xff"));
         assert_eq!(
             checked_path(&raw),
@@ -1317,14 +1506,7 @@ mod tests {
         ));
         #[cfg(target_os = "macos")]
         {
-            let held = verify_mutation_directory(
-                fd,
-                MutationRequired {
-                    confined_beneath: root(&d),
-                    root_required: AnchorRequired::OS_DAC,
-                },
-            )
-            .unwrap();
+            let held = verify_mutation_directory(fd).unwrap();
             assert_eq!(
                 held.mkdir_one("detached-sentinel").unwrap_err().state,
                 EffectState::NoEffect
@@ -1388,39 +1570,20 @@ mod tests {
     }
 
     #[test]
-    fn cursor_and_reverify_refuse_a_renamed_or_missing_root() {
+    fn cursor_and_reverify_refuse_a_renamed_directory() {
         let d = tempfile::tempdir().unwrap();
         let parent = root(&d);
         std::fs::create_dir(parent.join("original")).unwrap();
         let original = parent.join("original");
-        let dir = verify_mutation_directory(
-            File::open(&original).unwrap().into(),
-            MutationRequired {
-                confined_beneath: original.clone(),
-                root_required: AnchorRequired::OS_DAC,
-            },
-        )
-        .unwrap();
+        let dir = verify_mutation_directory(File::open(&original).unwrap().into()).unwrap();
         let mut cursor = dir.cursor().unwrap();
         std::fs::rename(&original, parent.join("moved")).unwrap();
-        assert!(matches!(
+        assert_eq!(
             dir.reverify(&original),
-            Err(IoError::Io {
-                kind: crate::IoKind::NotFound,
-                ..
-            })
-        ));
+            Err(IoError::MutationPathChanged { path: original })
+        );
         assert!(cursor.next_entry().is_err());
         assert!(dir.cursor().is_err());
-        assert!(verify_mutation_directory(
-            File::open(parent.join("moved")).unwrap().into(),
-            MutationRequired {
-                confined_beneath: original,
-                root_required: AnchorRequired::OS_DAC
-            }
-        )
-        .is_err());
-        assert!(check_root(Path::new("relative-root")).is_err());
     }
 
     #[test]
@@ -1630,23 +1793,7 @@ mod tests {
         assert_eq!(directory(&d).path(), root(&d));
         let p = d.path().join("not-directory");
         std::fs::write(&p, b"sentinel").unwrap();
-        assert!(verify_mutation_directory(
-            File::open(&p).unwrap().into(),
-            MutationRequired {
-                confined_beneath: root(&d),
-                root_required: AnchorRequired::OS_DAC
-            }
-        )
-        .is_err());
-        let outside = tempfile::tempdir().unwrap();
-        assert!(verify_mutation_directory(
-            File::open(outside.path()).unwrap().into(),
-            MutationRequired {
-                confined_beneath: root(&d),
-                root_required: AnchorRequired::OS_DAC
-            }
-        )
-        .is_err());
+        assert!(verify_mutation_directory(File::open(&p).unwrap().into()).is_err());
     }
     #[test]
     fn exclusive_collision_preserves_intervening_sentinel() {
@@ -1658,6 +1805,78 @@ mod tests {
         assert_eq!(std::fs::read(&p).unwrap(), b"intervening");
         assert_eq!(result.unwrap_err().state, EffectState::NoEffect);
     }
+    #[test]
+    fn a_directory_outside_any_home_verifies_for_mutation() {
+        let (_dir, base) = crate::testutil::outside_any_home();
+        let fd = crate::open_directory_for_delegation(&base).unwrap();
+        assert_eq!(verify_mutation_directory(fd).unwrap().path(), base);
+    }
+
+    fn walk_delete(parent: &MutationDirectory, leaf: &str, depth: usize) -> Result<(), IoError> {
+        assert!(depth < 8, "the walk must terminate");
+        match parent.remove_entry(leaf) {
+            Ok(_) => return Ok(()),
+            Err(MutationFailure {
+                source:
+                    IoError::Io {
+                        kind: crate::IoKind::DirectoryNotEmpty,
+                        ..
+                    },
+                ..
+            }) => {}
+            Err(e) => return Err(e.source),
+        }
+        let child = parent.open_child_directory(leaf)?;
+        let mut cursor = child.cursor()?;
+        let mut names = Vec::new();
+        while let Some(entry) = cursor.next_entry()? {
+            names.push(entry.name.into_string().unwrap());
+        }
+        for name in names {
+            walk_delete(&child, &name, depth + 1)?;
+        }
+        parent.remove_entry(leaf).map(|_| ()).map_err(|e| e.source)
+    }
+
+    #[test]
+    fn the_recursive_delete_walk_cannot_leave_its_root() {
+        let (_tree, base) = crate::testutil::outside_any_home();
+        let (_outside, elsewhere) = crate::testutil::outside_any_home();
+        std::fs::create_dir(elsewhere.join("victim")).unwrap();
+        let sentinel = elsewhere.join("victim").join("outside-sentinel");
+        std::fs::write(&sentinel, b"safe").unwrap();
+        std::fs::create_dir_all(base.join("tree").join("sub")).unwrap();
+        std::fs::write(base.join("tree").join("sub").join("inside"), b"x").unwrap();
+        symlink(elsewhere.join("victim"), base.join("tree").join("link")).unwrap();
+        symlink(
+            elsewhere.join("victim"),
+            base.join("tree").join("sub").join("deeper-link"),
+        )
+        .unwrap();
+
+        let parent =
+            verify_mutation_directory(crate::open_directory_for_delegation(&base).unwrap())
+                .unwrap();
+        let tree = parent.open_child_directory("tree").unwrap();
+        assert!(tree.open_child_directory("link").is_err());
+        assert!(tree
+            .open_child_directory("sub")
+            .unwrap()
+            .open_child_directory("deeper-link")
+            .is_err());
+        drop(tree);
+        let walked = walk_delete(&parent, "tree", 0);
+        assert!(walked.is_ok(), "{walked:?}");
+        assert!(!base.join("tree").exists());
+
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"safe", "{walked:?}");
+        assert_eq!(
+            std::fs::read_dir(elsewhere.join("victim")).unwrap().count(),
+            1,
+            "nothing outside the tree was removed: {walked:?}"
+        );
+    }
+
     #[test]
     fn symlink_child_is_not_followed_and_outside_sentinel_survives() {
         let d = tempfile::tempdir().unwrap();
@@ -1799,13 +2018,7 @@ mod tests {
                 std::fs::remove_dir(path.join("os-dir")).unwrap();
                 let fd = crate::open_directory_for_delegation(&path)
                     .expect("wx-only directory must be delegatable");
-                let directory = verify_mutation_directory(
-                    fd,
-                    MutationRequired {
-                        confined_beneath: path.clone(),
-                        root_required: AnchorRequired::OS_DAC,
-                    },
-                )
+                let directory = verify_mutation_directory(fd)
                 .unwrap();
                 directory
                     .create_exclusive("wx-sentinel", b"written")
@@ -1844,14 +2057,7 @@ mod tests {
             syscall::fstat(&root_fd).unwrap().st_dev,
             syscall::fstat(&dev_fd).unwrap().st_dev
         );
-        let directory = verify_mutation_directory(
-            root_fd.into(),
-            MutationRequired {
-                confined_beneath: PathBuf::from("/"),
-                root_required: AnchorRequired::OS_DAC,
-            },
-        )
-        .unwrap();
+        let directory = verify_mutation_directory(root_fd.into()).unwrap();
         assert!(matches!(
             directory.open_child_directory("dev"),
             Err(IoError::DifferentFilesystem { .. })
@@ -1947,19 +2153,12 @@ mod tests {
         let p = d.path().join("prepare-sentinel");
         std::fs::write(&p, b"original").unwrap();
         let fd = crate::open_path_for_delegation(&p).unwrap();
-        crate::verify_delegated(fd.as_fd(), req(&d)).unwrap();
+        crate::verify_delegated(fd.as_fd(), req()).unwrap();
         assert_eq!(std::fs::read(&p).unwrap(), b"original");
         assert!(crate::open_path_for_delegation(&d.path().join("absent")).is_err());
         assert!(!d.path().join("absent").exists());
         let fd = crate::open_directory_for_delegation(d.path()).unwrap();
-        assert!(verify_mutation_directory(
-            fd,
-            MutationRequired {
-                confined_beneath: root(&d),
-                root_required: AnchorRequired::OS_DAC
-            }
-        )
-        .is_ok());
+        assert!(verify_mutation_directory(fd).is_ok());
         assert!(crate::open_directory_for_delegation(&p).is_err());
     }
 

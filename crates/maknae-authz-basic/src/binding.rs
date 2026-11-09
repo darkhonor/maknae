@@ -1465,6 +1465,7 @@ mod tests {
             agents: Default::default(),
             taskers: Default::default(),
             policy,
+            sensitive: Default::default(),
         }
     }
 

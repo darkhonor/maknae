@@ -143,6 +143,7 @@ The host side, `<config-dir>` (`/etc/maknae` when packaged):
 ├── maknae.yaml           # the base file (required)
 ├── authz.yaml            # the authorization policy — a SEPARATE document, not a section
 ├── bindings.yaml         # who holds which role, and who is contained — a SEPARATE document (§2.3)
+├── sensitive.yaml        # paths no file verb may reach, whatever is granted — a SEPARATE document (§2.5)
 ├── egress-bounds.yaml    # required WHEN any provider is authorized (§6.1.3); written by `maknae enroll`, 0644 root:root
 ├── egress/               # 0750 root:_maknae-egress, created by the package; files written by `maknae enroll`
 │   ├── vault-ca.crt      # 0640 root:_maknae-egress — the deputy's Vault TLS anchor
@@ -172,13 +173,14 @@ The user side, `~/.maknae` (or `$MAKNAE_CONFIG_DIR`):
 ~/.maknae/
 ├── maknae.yaml                 # written by `maknae enroll`: core.deployment_id, the user `vault` block (§6.1.2), and on macOS transport.socket_path
 ├── providers.yaml              # written by the user: the providers they use (§6.1.1)
+├── sensitive.yaml              # optional, written by the user: paths of their own to protect (§2.5)
 ├── maknae-vault-token.cred     # Linux, systemd 256 or later: the `maknae login` token, a `systemd-creds --user` file
 └── maknae-vault-token          # Linux, older systemd: the same token in a 0600 file
 ```
 
 On macOS `maknae login` keeps the token in the default keychain instead (service `maknae-cli`, account `maknae-vault-token`), and neither token file exists (`crates/maknae-vault/src/token_record.rs`, `keychain_policy.rs`).
 
-**Sections versus standalone documents.** `maknae.yaml` and `config.d/*.yaml` contribute **registered sections** and are merged section-by-section by this loader. `authz.yaml`, `bindings.yaml` and `egress-bounds.yaml` are **standalone documents with their own readers**: each is opened by path (`<config-dir>/authz.yaml`, `<config-dir>/bindings.yaml`, `<config-dir>/egress-bounds.yaml`), never merged, never shadowed, and putting any of them inside `config.d/` does not work. `providers.yaml` is likewise a standalone document, read by the CLI from its own directory.
+**Sections versus standalone documents.** `maknae.yaml` and `config.d/*.yaml` contribute **registered sections** and are merged section-by-section by this loader. `authz.yaml`, `bindings.yaml`, `sensitive.yaml` and `egress-bounds.yaml` are **standalone documents with their own readers**: each is opened by path (`<config-dir>/authz.yaml`, `<config-dir>/bindings.yaml`, `<config-dir>/sensitive.yaml`, `<config-dir>/egress-bounds.yaml`), never merged, never shadowed, and putting any of them inside `config.d/` does not work. `providers.yaml` and the personal `sensitive.yaml` are likewise standalone documents, read by the CLI from its own directory.
 
 - **`maknae.yaml`** — the **base** file. Required: it is the deployment's anchor, the
   one file that must exist even if empty. A missing base is an error. An empty base is
@@ -208,7 +210,7 @@ path involved is checked: **no world/other permission bits at all** (`mode & 0o0
 | Path | Recommended modes | Rejected |
 |---|---|---|
 | `maknae.yaml`, `config.d/*.yaml` | `640`, `600`, root-owned | not owned by root, or group- or other-writable (e.g. `660`), or any world/other bit (e.g. `644`) |
-| `~/.maknae/providers.yaml` | `600`, `640`, the user's own | anything with a world/other bit — **`egress-bounds.yaml` is a root artifact that is `0644` by design (§6.1.3)** |
+| `~/.maknae/providers.yaml`, `~/.maknae/sensitive.yaml` | `600`, `640`, the user's own | anything with a world/other bit — **`egress-bounds.yaml` is a root artifact that is `0644` by design (§6.1.3)** |
 | `<config-dir>` | `750`, owned by root (`root:_maknae 0750` as packaged) | not owned by root, or group- or other-writable (e.g. `770`, `775`) |
 | `config.d/` | `750`, `700`, owned by root | not owned by root, or group- or other-writable (e.g. `770`, `775`) |
 
@@ -297,7 +299,7 @@ The kernel records each conversation a loop opens: an owner, the working directo
 
 The shipped file grants all five to `admin` and to `user`. It has no `destinations:` key, so a prompt is refused at the destination check until you add one ([first provider](first-provider.md#4-allow-the-prompt)). Agents are refused `session.new` unless an agent `policy.yaml` grants it.
 
-**The working directory is recorded, not decided.** `session.new` is decided by the grant alone; only once the grant permits does the kernel check the client's descriptor. It records the directory the descriptor resolves to, as the kernel reports it, and neither decides it as a read nor confines the conversation to it. A symlinked directory is recorded as its target. The only file system restrictions are those the OS imposes and the `permissions:` entries of `authz.yaml` on each `fs.*` request. Home confinement for `fs.*` is tracked in #617.
+**The working directory is recorded, not decided.** `session.new` is decided by the grant alone; only once the grant permits does the kernel check the client's descriptor. It records the directory the descriptor resolves to, as the kernel reports it, and neither decides it as a read nor confines the conversation to it. A symlinked directory is recorded as its target. What bounds each `fs.*` request is the OS's own permissions, the `permissions:` entries of `authz.yaml`, the classification ceiling, and `sensitive.yaml` (the host list and the conversation's personal list); `fs.*` is not confined to the home (ADR-0034).
 
 **The pairing rule.** In `authz.yaml`, a role or a `subjects:` entry whose effective grant (allow minus deny, after family expansion) holds `session.prompt` without `session.new` refuses the whole file at load. An agent's `policy.yaml` is exempt.
 
@@ -324,6 +326,82 @@ The shipped file grants all five to `admin` and to `user`. It has no `destinatio
 **Single host.** The store admits one `maknaed` per state directory: the directory is locked exclusively while the daemon runs. Sharing it between hosts is not supported (#616).
 
 **From the CLI.** `maknae session list [--cwd <dir>]` lists the caller's conversations, optionally those opened in one directory. `maknae session close <id>` closes one by its 32-character id. The loop opens a conversation at start and closes it on exit and on Ctrl-C.
+
+### 2.5 `sensitive.yaml` (#617)
+
+`sensitive.yaml` lists paths that no file verb may reach (`fs.read`, `fs.write`, `fs.delete`, `fs.mkdir`). An entry refuses every one of them on that path, for every role, `admin` included, whatever `authz.yaml` grants. It is a mandatory operand of the authorization composition, beside the `authz.yaml` baseline and the classification ceiling (ADR-0034), so no grant can waive it. It never grants anything.
+
+There are two lists, and a request is refused when either one matches.
+
+| | Host list | Personal list |
+|---|---|---|
+| Path | `/etc/maknae/sensitive.yaml` | `~/.maknae/sensitive.yaml` (`$MAKNAE_CONFIG_DIR/sensitive.yaml` when that is set) |
+| Read by | `maknaed`, at start and at each reload | the CLI, when it opens a conversation |
+| Ownership and mode | as `authz.yaml`: a regular file owned by root, `mode & 0o027 == 0` (`0640` as shipped, `root:_maknae`), in a root-owned directory no group or other can write | as `providers.yaml`: the user's own, no world bits (`0600` or `0640`) |
+| Absent | `maknaed` refuses to start | no personal entries |
+| Malformed | `maknaed` refuses to start (exit 3); a reload is refused and the enforced list stands | the CLI refuses to open the conversation, naming the file and the cause |
+| Applies to | every file request: the loop's, an agent's, and your own `maknae read`, `write`, `delete` and `mkdir` | only requests that cite a conversation you own (below) |
+| Shipped | yes, by every package, with the defaults below | no |
+
+The packages install the host file `root:_maknae 0640`. An upgrade keeps an edited file: it is a deb conffile and an rpm `%config(noreplace)` file, and the macOS package installs it only when it is absent.
+
+```yaml
+schema_version: 1
+sensitive:
+  - "~/.ssh/**"
+  - "/etc/shadow*"
+  - "/opt/vendor/license.key"
+```
+
+**Grammar.**
+
+- The document holds `schema_version`, which must be `1`, and `sensitive`, and nothing else. An unknown key refuses: `sensitive.yaml: unknown key '<key>' in 'sensitive.yaml'`.
+- `sensitive:` is required. A file with no `sensitive:` key refuses (`` `sensitive` is required (write `sensitive: []` for none) ``), so an empty list is written `sensitive: []`.
+- Each entry is a quoted string (``every `sensitive` entry must be a quoted string``) in the path language of `authz.yaml`'s `permissions:`, without the `Read(...)`/`Write(...)` wrapper: an absolute path or one that starts with `~/`. `*` matches within one path component, `**` matches any number of components, and `X/**` also matches `X` itself. `*` and `**` match names that start with a dot.
+- `~` is the requesting user's home, the same home `~` means in a grant. Another account's files are bounded by the OS's permissions, exactly as they are outside Maknae. To cover every account's files, list them by absolute pattern in `/etc/maknae/sensitive.yaml`, for example `/home/*/.ssh/**` on Linux or `/Users/*/.ssh/**` on macOS. `~name` is refused, as are a relative path and a `.` or `..` component: ``entry '<entry>' must be an absolute path or start with `~/`, without `.` or `..` components (`~name` is refused)``.
+- **Never write `/**`, and on macOS never write `/System/Volumes/Data/**`.** Matching strips a leading `/System/Volumes/Data` on macOS (below), so that entry becomes `/**`, and either one refuses every file request on the host.
+
+**How a path matches.** An entry is matched against the path the kernel reports for the object the request opened, so a symlink is decided as its target and a file with a second hard link is refused before any match (ADR-0034 decision 2).
+
+- **Linux:** byte for byte, case-sensitively.
+- **macOS:** case-insensitively and normalization-insensitively (the entry, the path and the home are each compared in NFC under full Unicode case folding, so a composed `é` and a decomposed `é` match, and so do `ß` and `ss`, `ſ` and `s`, or the Kelvin sign and `k`). A leading `/System/Volumes/Data` is removed, and a leading `/private/etc`, `/private/tmp` or `/private/var` is read as `/etc`, `/tmp` or `/var`, on the entry and on the path. Write each entry once, in either spelling.
+- **A directory delete** (`fs.delete`, recursive or not) is refused when any entry could match the path or anything beneath it, whether or not the directory is empty, so a protected file cannot be removed by removing its parent and the answer does not say whether a protected child exists.
+- An entry for a path the host does not have is harmless.
+
+**What the model and the user are told.**
+
+- **A protected path answers `Protected`.** The kernel matches the path the request asks for against both lists before it opens anything, so the answer is the same whether or not the file exists. The CLI prints `maknae: <path> is protected by <list> (<entry>). Maknae will not touch it; run this outside Maknae.`, where `<list>` is `/etc/maknae/sensitive.yaml` or `~/.maknae/sensitive.yaml`. When the model's tool call is refused this way, `maknae agent` prints the same notice on stderr. The model sees only `protected by policy — ask the user to do this outside Maknae`, which names no list and no entry.
+- **Every other refusal of a file verb reads the same to the model:** `unavailable — do not retry`. That covers a missing file, a path no grant covers, a refusal by the OS or the ceiling, a descriptor check (a second hard link, the wrong kind), a request whose asked path is not listed but whose target is (a symlink into `~/.ssh`), and transport and capacity faults. The model cannot tell from the answer whether the file exists. The standing prompt tells it that some files are withheld this way and that it must not infer state from them or ask you to paste a credential.
+- **The trail says which.** A refusal by either list is audited with the reason `sensitive: host <entry>` or `sensitive: personal <entry>`; every other cause keeps its own reason.
+
+**The personal list.**
+
+- **A snapshot.** The CLI reads `~/.maknae/sensitive.yaml` when it opens a conversation and sends the entries with `session.new`. The kernel checks each entry with the same parser, refuses the whole `session.new` if one fails, and stores them on the conversation. An edit takes effect in the next conversation, not the open one.
+- **It binds only requests that cite the conversation.** The loop's tool calls cite it. Your own direct commands (`maknae read`, `write`, `delete`, `mkdir`) cite none, and get the host list only. It is not a control against a loop that declines to cite: an altered client can leave the citation off, and such a client can already read anything as you. Put a path that must hold against every request in the host list.
+- **Owned conversations only.** A request that cites a conversation someone else owns gets nothing from that conversation's list.
+- **Refusals.** A malformed file stops the CLI before the conversation opens, naming the file: `maknae: ~/.maknae/sensitive.yaml: <cause>`. So does an entry longer than 4096 bytes, and a list too large to send in one request (`~/.maknae/sensitive.yaml is too large to send (<n> bytes; the limit is 65536)`).
+- An entry can only refuse. The worst a wrong entry does is hide one of your own files from your own model.
+
+**Two rules for every file request.**
+
+- **When your home cannot be looked up**, every `fs.*` request is refused before any list is consulted, with the trail reason `requester home unavailable: <cause>`, where the cause is `unresolvable`, `timed out`, `at capacity for this requester` or `at capacity`. A listed path then reads `unavailable — do not retry` to the model, not `Protected`. Other verbs are unaffected.
+- **A write needs `Read` as well as `Write`.** Every `fs.write`, creating a file or replacing one, is permitted only when `authz.yaml` permits both `Read` and `Write` on the path, so a `Write`-only grant permits no write, for your own `maknae write` as for the model. The trail reason of a write refused for want of `Read` is `fs.write needs fs.read: <the read's reason>`.
+
+**The shipped host list.** The defaults were built from the paths that hold credentials and system secrets on Debian 13, Rocky 9, a STIG'd Rocky 10 and macOS 26. Each group in the file carries a comment saying why it is there:
+
+- accounts and password hashes (`/etc/passwd*`, `/etc/shadow*`, `/etc/group*`, `/etc/gshadow*`, `/etc/security/opasswd`);
+- who may become root (`/etc/sudoers`, `/etc/sudoers.d/**`, sudo's own configuration, polkit rules);
+- host identity and service secrets (SSH host keys and `sshd_config`, `krb5.keytab`, IPsec, `crypttab`, systemd credentials, NetworkManager and wpa_supplicant connections, sssd, Samba, `/etc/fstab` for CIFS `credentials=`);
+- private keys (`/etc/pki/**/private/**`, `/etc/ssl/private/**`);
+- defensive configuration: audit, AIDE, fapolicyd, USBGuard, the firewall, cron, the boot loader and `sysctl.d`;
+- root's home, cloud-init user-data and the systemd credential key;
+- Maknae's own configuration (`/etc/maknae/**`, `~/.maknae/**`);
+- process and runtime secrets: `/proc/*/environ`, `cmdline` and `mem` (and their `task/*` and `thread-self` forms), `/run/user/*/**`, `/tmp/krb5cc_*`, `/run/secrets/**`, `/var/run/secrets/**`;
+- macOS: `/etc/master.passwd`, `/var/db/dslocal/**`, `/var/db/sudo/**`, `/var/root/**`, `/Library/Keychains/**`;
+- each user's credentials: SSH and GnuPG keys, cloud and cluster logins (AWS, Azure, gcloud, kube), registry and package-index tokens (Docker, containers, npm, PyPI, Cargo, RubyGems, Maven, Gradle), `.netrc` and git credentials, the GitHub CLI, Vault and Terraform tokens, database passwords, password stores and keyrings, 1Password and rclone, AI-tool logins (Claude, Codex, Gemini), browser and mail profiles, and shell and editor history;
+- each user's credentials on macOS: keychains, cookies, Mail, Messages, the privacy (TCC) database, and Chrome and Firefox profiles.
+
+The shipped `authz.yaml` carries no denies of its own: its `deny:` list is empty, and the credential paths it once denied are in this file. Edit the host file to add or remove entries, then [reload](runbook.md#edit-and-reload-the-host-sensitive-list). Entries that would help every installation are welcome upstream.
 
 ---
 
@@ -559,7 +637,8 @@ Case variants such as `secret` are accepted.
 > `releasable_to`, the CUI fields and `accreditation_ref` have **no bearing** on this
 > operand (an ATO is a US-government artifact; most deployments will never have one).
 > The boot trail records what will be enforced: the `authz` boot record's reason reads
-> `authorization composition: maknae-authz-basic+maknae-ceiling; system: US; ceiling: SECRET`.
+> `authorization composition: maknae-authz-basic+maknae-ceiling+maknae-sensitive; system: US; ceiling: SECRET; sensitive: <n> host entries`,
+> where `<n>` is the number of entries in `/etc/maknae/sensitive.yaml`.
 
 ---
 
@@ -1046,6 +1125,7 @@ boot gate (`crates/maknae-kernel/src/boot_gate.rs`).
 | `maknae.yaml`, any `config.d/` member, `<config-dir>` or `config.d/` not root-owned, or group/other-writable: `<path> must be owned by root and not group- or world-writable, as must every maknae.yaml and config.d source and the directories that hold them` | `SourceNotRootOwned` |
 | `core.handling.policy` names a system the build does not carry: `core.handling.policy names a classification system this build does not carry: '<name>'` | `UnknownClassificationPolicy` |
 | `providers.yaml` (§6.1.1) malformed, or no entry selectable: `providers.yaml: <reason>` | `UserProviders` |
+| `sensitive.yaml` (§2.5), host or personal: a missing `sensitive:` key, a `schema_version` other than `1`, an entry that is not a quoted string, or an entry that is relative, uses `~name`, or has a `.` or `..` component. An unknown key reads `sensitive.yaml: unknown key '<key>' in 'sensitive.yaml'`, and every other cause `sensitive.yaml: <reason>`. A missing host file is `NotFound` and refuses start | `InvalidSensitive` |
 | `vault.kv_mount` or `vault.user_prefix` in the root `maknae.yaml`, shadowed `config.d/` blocks included: `vault.kv_mount in the root maknae.yaml is not read by maknaed: set kv_mount in egress-bounds.yaml` | `RootVaultKeyRefused` (kernel) |
 | `audit.readers` not a list of strings, an entry outside `^[a-z_][a-z0-9_-]{0,30}[$]?$`, or a name listed twice (§6.3) | `InvalidAudit` |
 | The `deployment` section (§6.5) absent or not a map, `mode` missing, not a string or not one of the three: `invalid deployment config: deployment.mode: <what was found>; it must be one of linux-host, macos-host, container`. An `account_source` other than `userdb` or `none`, `userdb` on `macos-host`, or any `account_source` on `container`: `invalid deployment config: deployment.account_source: <reason>` | `InvalidDeployment` |

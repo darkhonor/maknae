@@ -21,12 +21,13 @@
 //! at all. Third, the egress backend here is a scripted in-process `Egress`;
 //! the full chain — brain to kernel to `maknae-egress` to a provider in one
 //! process — is #242's evidence, not this file's. Fourth, and the widest:
-//! `FixturePlane` re-implements the CLI's `read_outcome`, `write_outcome` and
-//! `prompt_outcome` mappings BY HAND, because `bins/maknae` is a binary crate
-//! and unreachable from a kernel integration test. Nothing here can go red if
-//! one of those mappers changes; their faithfulness to this fixture is by
-//! inspection, and the mappers' own discriminating tests live beside them in
-//! `bins/maknae`'s `agent` module.
+//! `FixturePlane` re-implements the CLI's `prompt_outcome` mapping and the
+//! post-grant half of `write_outcome` BY HAND (a refused read and a write
+//! refused in place of its grant go through the real `maknae_agent::wire`
+//! mappers), because the loop's client is unreachable from a kernel
+//! integration test. Nothing here can go red if the hand-mapped halves
+//! change; their faithfulness to this fixture is by inspection, and the
+//! mappers' own discriminating tests live beside them in `maknae_agent::wire`.
 mod common;
 use common::{Fixture, Records};
 use maknae_agent::budget::{ContextBudget, Meter, Notice};
@@ -151,10 +152,12 @@ impl Plane for FixturePlane {
     async fn open(
         &mut self,
         cwd: &std::path::Path,
+        sensitive: &[String],
     ) -> Result<maknae_proto::ConversationId, PlaneError> {
         let fd = maknae_io::open_directory_for_delegation(cwd).ok();
         let verb = Verb::SessionNew {
             cwd: cwd.to_str().unwrap().into(),
+            sensitive: sensitive.to_vec(),
         };
         match self.verb(verb, fd).await.result {
             RespResult::Ok(Payload::ConversationOpened(v)) => Ok(v.conversation),
@@ -265,10 +268,12 @@ impl Plane for FixturePlane {
                     changed: false,
                 })
             }
-            (None, Some(RespResult::Err(e)), true)
-                if e.code == maknae_proto::ProtoErrCode::Unauthorized =>
-            {
-                ReadOutcome::Refused
+            (None, Some(RespResult::Err(e)), armed) => {
+                maknae_agent::wire::read_outcome(Ok(maknae_agent::wire::WireOutcome::Refused {
+                    code: e.code,
+                    message: e.message,
+                    armed,
+                }))
             }
             _ => ReadOutcome::Unavailable,
         }
@@ -284,12 +289,20 @@ impl Plane for FixturePlane {
             EffectEntry, MutationReport, MutationScope, ReportedEffect, ReportedFinish,
         };
         use std::os::fd::AsFd;
-        let held = maknae_io::open_path_for_delegation(std::path::Path::new(path)).ok();
+        let target = std::path::Path::new(path);
+        let (held, mode) = match maknae_io::open_path_for_delegation(target) {
+            Ok(fd) => (Some(fd), maknae_proto::WriteMode::Existing),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
+                maknae_io::open_directory_for_delegation(target.parent().unwrap()).ok(),
+                maknae_proto::WriteMode::CreateExclusive,
+            ),
+            Err(_) => (None, maknae_proto::WriteMode::Existing),
+        };
         let verb = Verb::FsWrite {
             conversation: Some(conversation.into()),
             path: path.into(),
             content_length: content.len() as u64,
-            mode: maknae_proto::WriteMode::Existing,
+            mode,
         };
         let (mut client, task, body) = self.fx.start_egress(
             verb,
@@ -304,6 +317,17 @@ impl Plane for FixturePlane {
             .await
             .ok()
             .and_then(|b| maknae_proto::decode_response(&b).ok());
+        if let Some(RespResult::Err(e)) = response.as_ref().map(|r| &r.result) {
+            let refused =
+                maknae_agent::wire::write_outcome(Ok(maknae_agent::wire::WireOutcome::Refused {
+                    code: e.code.clone(),
+                    message: e.message.clone(),
+                    armed: held.is_some(),
+                }));
+            drop(client);
+            task.await.unwrap();
+            return refused;
+        }
         let applied = match (response.map(|r| r.result), held.as_ref()) {
             (Some(RespResult::Ok(Payload::MutationAttempt(grant))), Some(held)) => {
                 match &grant.scope {
@@ -536,8 +560,8 @@ async fn read_then_write_then_answer_leaves_the_sequence_the_issue_names_in_the_
 }
 
 #[tokio::test]
-async fn a_denied_read_reaches_the_model_as_not_authorized_and_is_a_deny_in_the_trail() {
-    // The shipped deny, written into the fixture policy: the default
+async fn a_denied_read_reaches_the_model_as_unavailable_and_is_a_deny_in_the_trail() {
+    // An authz.yaml deny, written into the fixture policy: the default
     // fixture has an EMPTY deny list, so this must be explicit.
     let fx = Fixture::with_rules("agent-deny", &["Read"], &["Read(~/.ssh/**)"], GRANTED);
     let secret = fx.root.join(".ssh").join("id_rsa");
@@ -590,7 +614,7 @@ async fn a_denied_read_reaches_the_model_as_not_authorized_and_is_a_deny_in_the_
     // render.rs's own literal-text test states.
     assert_eq!(
         tool_text(&transcript.turns()[2]),
-        "Not authorized\n\nsteps remaining: 2"
+        "unavailable — do not retry\n\nsteps remaining: 2"
     );
     assert!(
         !tool_text(&transcript.turns()[2]).contains("PRIVATE"),
@@ -607,6 +631,339 @@ async fn a_denied_read_reaches_the_model_as_not_authorized_and_is_a_deny_in_the_
         0,
         "the loop asked for every scripted reply"
     );
+}
+
+#[tokio::test]
+async fn a_protected_read_renders_the_same_bytes_whether_or_not_the_file_exists() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = Fixture::with_rules("agent-protected", &["Read"], &[], GRANTED);
+    let here = fx.root.join("secret-here");
+    let gone = fx.root.join("secret-gone");
+    let locked = fx.root.join("secret-locked");
+    for f in [&here, &locked] {
+        std::fs::write(f, "PRIVATE-617").unwrap();
+    }
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    common::write_0640(
+        &fx.paths().sensitive,
+        "schema_version: 1\nsensitive:\n  - \"~/secret*\"\n",
+    );
+    let armed: Vec<bool> = [&here, &gone, &locked]
+        .iter()
+        .map(|p| maknae_io::open_path_for_delegation(p).is_ok())
+        .collect();
+    assert!(
+        armed[0] && !armed[1],
+        "premise: one armed, one unarmed: {armed:?}"
+    );
+    let egress = Arc::new(Scripted::default());
+    let read = |id: &str, p: &std::path::Path| {
+        call(id, "read_file", &format!(r#"{{"path":"{}"}}"#, p.display()))
+    };
+    script(
+        &egress,
+        [
+            PromptReply {
+                reasoning: None,
+                blocks: vec![],
+                tool_calls: vec![read("c1", &here), read("c2", &gone), read("c3", &locked)],
+                usage: None,
+            },
+            PromptReply {
+                reasoning: None,
+                blocks: vec![text("done")],
+                tool_calls: vec![],
+                usage: None,
+            },
+        ],
+    );
+    let records = Records::new(0);
+    let mut plane = FixturePlane {
+        fx,
+        records: Arc::clone(&records),
+        egress: egress.clone(),
+    };
+    let conv = plane.fx.open_conversation().await;
+    let mut transcript = Transcript::new(conv.as_str(), "read my secrets");
+    drive(
+        &mut plane,
+        &mut transcript,
+        &Budget {
+            max_steps: 3,
+            max_tool_calls_per_step: 3,
+        },
+        &mut unmetered(),
+        &mut |_: &Notice| {},
+    )
+    .await;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let rendered: Vec<String> = transcript.turns()[2..5].iter().map(tool_text).collect();
+    assert_eq!(
+        rendered,
+        vec![format!("{}\n\nsteps remaining: 2", maknae_agent::render::PROTECTED); 3]
+    );
+    let reads: Vec<_> = records
+        .snapshot()
+        .into_iter()
+        .filter(|r| r.action == "fs.read")
+        .collect();
+    assert_eq!(reads.len(), 3, "{reads:?}");
+    for r in reads {
+        assert_eq!(r.outcome.reason, "sensitive: host ~/secret*");
+    }
+}
+
+struct Refusals {
+    rendered: Vec<(&'static str, String)>,
+    trail: Vec<(&'static str, Vec<(String, String)>)>,
+}
+
+/// One step of file calls, each refused for a different cause, through the real kernel.
+/// The ceiling has no file of its own here: nothing stamps a marking yet (#229), and its
+/// deny leaves through the same `refuse` as every PDP deny.
+async fn refused_for_every_cause(tag: &str) -> Refusals {
+    use std::os::unix::fs::PermissionsExt;
+    if nix::unistd::geteuid().is_root() {
+        panic!("{tag}: running as root, which reads a 0000 file and voids the premise; run as an unprivileged user");
+    }
+    let fx = Fixture::with_rules(
+        tag,
+        &["Read", "Write"],
+        &["Read(~/denied/**)", "Write(~/write-denied/**)"],
+        GRANTED,
+    );
+    let missing = fx.root.join("missing-617");
+    let denied = fx.root.join("denied").join("file-617");
+    let locked = fx.root.join("locked-617");
+    let linked = fx.root.join("linked-617");
+    let write_denied = fx.root.join("write-denied").join("file-617");
+    for (f, body) in [
+        (&denied, "SENTINEL-617-DENIED"),
+        (&locked, "SENTINEL-617-LOCKED"),
+        (&write_denied, "SENTINEL-617-WRITE"),
+    ] {
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(f, body).unwrap();
+    }
+    std::fs::write(fx.root.join("original-617"), "SENTINEL-617-LINKED").unwrap();
+    std::fs::hard_link(fx.root.join("original-617"), &linked).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let causes: [(&'static str, &std::path::Path, &str); 5] = [
+        ("missing", &missing, "read_file"),
+        ("grant-denied", &denied, "read_file"),
+        ("os-refused", &locked, "read_file"),
+        ("descriptor-refused", &linked, "read_file"),
+        ("write-before-effect", &write_denied, "write_file"),
+    ];
+    let calls = causes
+        .iter()
+        .enumerate()
+        .map(|(i, (_, p, tool))| {
+            let args = match *tool {
+                "write_file" => format!(r#"{{"path":"{}","content":"evil"}}"#, p.display()),
+                _ => format!(r#"{{"path":"{}"}}"#, p.display()),
+            };
+            call(&format!("c{i}"), tool, &args)
+        })
+        .collect();
+    let egress = Arc::new(Scripted::default());
+    script(
+        &egress,
+        [
+            PromptReply {
+                reasoning: None,
+                blocks: vec![],
+                tool_calls: calls,
+                usage: None,
+            },
+            PromptReply {
+                reasoning: None,
+                blocks: vec![text("done")],
+                tool_calls: vec![],
+                usage: None,
+            },
+        ],
+    );
+    let records = Records::new(0);
+    let mut plane = FixturePlane {
+        fx,
+        records: Arc::clone(&records),
+        egress: egress.clone(),
+    };
+    let conv = plane.fx.open_conversation().await;
+    let mut transcript = Transcript::new(conv.as_str(), "try every file");
+    drive(
+        &mut plane,
+        &mut transcript,
+        &Budget {
+            max_steps: 3,
+            max_tool_calls_per_step: 5,
+        },
+        &mut unmetered(),
+        &mut |_: &Notice| {},
+    )
+    .await;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&write_denied).unwrap(),
+        "SENTINEL-617-WRITE"
+    );
+    assert!(!missing.exists());
+    let rendered = causes
+        .iter()
+        .zip(&transcript.turns()[2..7])
+        .map(|((cause, _, _), t)| (*cause, tool_text(t)))
+        .collect();
+    let all = records.snapshot();
+    let trail = causes
+        .iter()
+        .map(|(cause, p, _)| {
+            let p = p.to_str().unwrap();
+            let of: Vec<(String, String)> = all
+                .iter()
+                .filter(|r| r.action.starts_with("fs."))
+                .filter(|r| {
+                    r.object.as_deref() == Some(p) || r.object_requested.as_deref() == Some(p)
+                })
+                .map(|r| (r.outcome.result.clone(), r.outcome.reason.clone()))
+                .collect();
+            assert!(!of.is_empty(), "{cause}: no record");
+            (*cause, of)
+        })
+        .collect();
+    Refusals { rendered, trail }
+}
+
+#[tokio::test]
+async fn every_file_refusal_renders_the_same_bytes() {
+    let out = refused_for_every_cause("agent-uniform").await;
+    for (cause, said) in &out.rendered {
+        assert_eq!(
+            said, "unavailable — do not retry\n\nsteps remaining: 2",
+            "{cause}"
+        );
+        assert!(!said.contains("SENTINEL"), "{cause}");
+    }
+    assert_eq!(out.rendered.len(), 5);
+}
+
+#[tokio::test]
+async fn the_trail_distinguishes_every_cause() {
+    let out = refused_for_every_cause("agent-trail").await;
+    let compared: Vec<_> = out
+        .trail
+        .iter()
+        .filter(|(cause, _)| cfg!(target_os = "linux") || *cause != "os-refused")
+        .collect();
+    for (i, (a, ta)) in compared.iter().enumerate() {
+        for (b, tb) in &compared[i + 1..] {
+            assert_ne!(ta, tb, "{a} and {b} leave the same trail");
+        }
+    }
+    assert!(compared.len() >= 4);
+    let of = |cause: &str| {
+        out.trail
+            .iter()
+            .find(|(c, _)| *c == cause)
+            .map(|(_, t)| t.clone())
+            .unwrap()
+    };
+    let deny = |reason: &str| vec![("deny".to_string(), reason.to_string())];
+    assert_eq!(of("missing"), deny("read descriptor missing"));
+    assert_eq!(
+        of("grant-denied"),
+        deny("denied by policy entry Read(~/denied/**)")
+    );
+    assert_eq!(
+        of("write-before-effect"),
+        deny("denied by policy entry Write(~/write-denied/**)")
+    );
+    let linked = of("descriptor-refused");
+    assert_eq!(linked.len(), 1, "{linked:?}");
+    assert_eq!(linked[0].0, "deny");
+    assert!(
+        linked[0]
+            .1
+            .starts_with("read evidence refused: hard-linked (nlink=2): "),
+        "{linked:?}"
+    );
+    let locked = of("os-refused");
+    if cfg!(target_os = "linux") {
+        assert!(
+            locked.iter().any(|(result, _)| result == "permit"),
+            "Linux arms a 0000 file and the OS refuses the subject's read: {locked:?}"
+        );
+    } else {
+        assert_eq!(locked, deny("read descriptor missing"));
+    }
+}
+
+#[tokio::test]
+async fn a_write_without_read_is_refused_alike_whether_or_not_the_file_exists() {
+    let fx = Fixture::with_rules("agent-write-only", &["Write"], &[], GRANTED);
+    let here = fx.root.join("write-only-here");
+    let gone = fx.root.join("write-only-gone");
+    std::fs::write(&here, "SENTINEL-617-HERE").unwrap();
+    let egress = Arc::new(Scripted::default());
+    let write = |id: &str, p: &std::path::Path| {
+        call(
+            id,
+            "write_file",
+            &format!(r#"{{"path":"{}","content":"new"}}"#, p.display()),
+        )
+    };
+    script(
+        &egress,
+        [
+            PromptReply {
+                reasoning: None,
+                blocks: vec![],
+                tool_calls: vec![write("c1", &here), write("c2", &gone)],
+                usage: None,
+            },
+            PromptReply {
+                reasoning: None,
+                blocks: vec![text("done")],
+                tool_calls: vec![],
+                usage: None,
+            },
+        ],
+    );
+    let records = Records::new(0);
+    let mut plane = FixturePlane {
+        fx,
+        records: Arc::clone(&records),
+        egress: egress.clone(),
+    };
+    let conv = plane.fx.open_conversation().await;
+    let mut transcript = Transcript::new(conv.as_str(), "write both");
+    drive(
+        &mut plane,
+        &mut transcript,
+        &Budget {
+            max_steps: 3,
+            max_tool_calls_per_step: 2,
+        },
+        &mut unmetered(),
+        &mut |_: &Notice| {},
+    )
+    .await;
+    let rendered: Vec<String> = transcript.turns()[2..4].iter().map(tool_text).collect();
+    assert_eq!(
+        rendered,
+        vec!["unavailable — do not retry\n\nsteps remaining: 2".to_string(); 2]
+    );
+    assert_eq!(std::fs::read_to_string(&here).unwrap(), "SENTINEL-617-HERE");
+    assert!(!gone.exists(), "nothing is created");
+    let writes: Vec<_> = records
+        .snapshot()
+        .into_iter()
+        .filter(|r| r.action == "fs.write")
+        .collect();
+    assert_eq!(writes.len(), 2, "{writes:?}");
+    for w in writes {
+        assert_eq!(w.outcome.result, "deny", "{w:?}");
+    }
 }
 
 #[tokio::test]
@@ -721,7 +1078,7 @@ async fn an_over_bound_write_is_a_tool_error_its_sibling_read_runs_and_the_trail
 }
 
 #[tokio::test]
-async fn a_write_outside_the_allow_is_unknown_to_the_model_and_a_deny_in_the_trail() {
+async fn a_write_outside_the_allow_is_unavailable_to_the_model_and_a_deny_in_the_trail() {
     let fx = Fixture::with_rules("agent-write-deny", &["Read"], &[], GRANTED); // no Write grant at all
     let target = fx.root.join("notes.txt");
     std::fs::write(&target, "old body").unwrap();
@@ -766,11 +1123,10 @@ async fn a_write_outside_the_allow_is_unknown_to_the_model_and_a_deny_in_the_tra
         &mut |_: &Notice| {},
     )
     .await;
-    // The WHOLE string, literal — same reason as the denied-read test.
     assert_eq!(
         tool_text(&transcript.turns()[2]),
-        "outcome unknown — the write may have happened: do not retry it, do not assume the previous contents survived, and do not touch that file again\n\nsteps remaining: 2",
-        "a refused write is unknown, never 'not authorized'"
+        "unavailable — do not retry\n\nsteps remaining: 2",
+        "a write refused in place of its grant had no effect"
     );
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "old body");
     let w = records
@@ -828,12 +1184,6 @@ async fn the_step_budget_trips_and_no_further_prompt_reaches_the_kernel() {
     // fail HERE, by name, rather than as a missing frame from the panic inside
     // the kernel task that the old `expect` would have raised.
     assert_eq!(egress.remaining(), 1, "the third reply was never asked for");
-    // #241: `/nonexistent` is a path the SUBJECT could not open, so the
-    // request went out unarmed and the kernel refused it for want of a
-    // descriptor (ADR-0009 d2) — an `Unauthorized` that is not a verdict on
-    // any content. The model must be told the read was unavailable, never
-    // "Not authorized": the compiled prompt forbids it to diagnose or retry a
-    // refusal, and there was no decision to accept.
     let tool_turns: Vec<String> = transcript
         .turns()
         .iter()
@@ -842,8 +1192,7 @@ async fn the_step_budget_trips_and_no_further_prompt_reaches_the_kernel() {
         .collect();
     assert_eq!(
         tool_turns,
-        vec!["read unavailable — do not retry\n\nsteps remaining: 1".to_string()],
-        "an unarmable read is reported as unavailable, not as a refusal"
+        vec!["unavailable — do not retry\n\nsteps remaining: 1".to_string()]
     );
 }
 
@@ -876,6 +1225,7 @@ async fn a_session_opens_converses_and_closes_one_kernel_conversation() {
     let mut session = maknae_agent::session::Session::open(
         &mut plane,
         &cwd,
+        &[],
         "hi",
         Budget {
             max_steps: 2,

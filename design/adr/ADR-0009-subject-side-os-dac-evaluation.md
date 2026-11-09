@@ -89,6 +89,8 @@ The daemon cannot distinguish *"the client could not open it"* from *"the client
 
 ### 3. Access and confinement are separate proofs. Both are required.
 
+**Amended 2026-11-09 (#617, [ADR-0034](ADR-0034-the-models-file-boundary.md)): this decision was wrong to make the home a boundary.** The table's first row ("beneath the requester's home") and the sentence "a subject reading its own world-readable file outside the home is still refused" no longer hold. The descriptor proves where the object is, and the PDP decides on that path; there is no home root. A path outside the home is decided by the grants, so a subject reading its own world-readable file outside the home is permitted when a grant covers it and refused by the PDP when none does. The two proofs below stay separate and both required; what "where" licenses is now the grants, the ceiling and `sensitive.yaml`, not a prefix of the home.
+
 **Amended 2026-09-26 (#365):** the table and the sentence following it. **Amended 2026-10-04 (#435):** the table's first row says the requester's home, not the enrolled one.
 
 | Proof | Established by | Guarantees |
@@ -99,6 +101,8 @@ The daemon cannot distinguish *"the client could not open it"* from *"the client
 Neither substitutes for the other. The re-open says nothing about *where*; the descriptor's location says nothing about *who*. Confinement remains a **Maknae** control — the `~/**` grant — independent of what OS DAC permits, so a subject reading its own world-readable file outside the home is still refused.
 
 ### 4. Confinement is established from the daemon's own fd table, never by daemon-side path resolution
+
+**Amended 2026-11-09 (#617, [ADR-0034](ADR-0034-the-models-file-boundary.md)):** the kernel-reported path from the daemon's own fd table stays the path every decision is made on, but it is no longer prefix-checked against a confinement root. Read "the confinement root" below as gone, and "the confinement prefix-check" and `strip_prefix` as no longer performed; `EscapesAnchor` is not produced for a delegated descriptor. The requester's canonical home remains the PDP's `~` through `SUBJECT_HOME`, and an unresolvable home still refuses every filesystem verb before the PDP. The sentence "it is the only reason a `0700` home is servable" was about the confinement root; the `0700` property survives because matching never opens the home.
 
 The daemon asks the kernel where the received fd points, using its **own** `/proc` entry:
 
@@ -126,6 +130,8 @@ This decision is what removes `open_anchor_resolved` from the read path, and it 
 
 ### 5. `nlink_exactly_one` is load-bearing for confinement and may not be relaxed without superseding this ADR
 
+**Amended 2026-11-09 (#617, [ADR-0034](ADR-0034-the-models-file-boundary.md)):** item 2 below is superseded. With no confinement root there is no prefix check for a single link to make sound; `nlink_exactly_one` now makes path *matching* sound: with one link the kernel reports *the* path, so a grant, a deny and a `sensitive.yaml` entry see every name the object has. That keeps the requirement load-bearing, and it still may not be relaxed without superseding ADR-0034. Items 1 and 3 are unchanged.
+
 The existing requirement now does **triple duty**:
 
 1. it refuses hard-link aliases (its original purpose);
@@ -149,6 +155,8 @@ Without it, an object could be linked both inside and outside the home and conta
 The existing suite's `a_symlink_alias_of_a_denied_file_is_refused` stays green, for a better reason.
 
 ### 7. The home's owner and mode requirement is retained — enforced by `stat`, not by opening
+
+**Amended 2026-11-09 (#617, [ADR-0034](ADR-0034-the-models-file-boundary.md)): the requirement this decision retained is removed.** With no confinement root there is nothing for it to check, and a group-writable home no longer refuses a request. What it guarded is covered by decision 6 (a planted symlink is decided on its target's path) and by `nlink_exactly_one` (a planted hard link is refused); the rename residual in Consequences is unchanged. ADR-0034 decision 3 says why nothing replaces it one-for-one.
 
 **Amended 2026-09-26 (#365):** this decision's first paragraph, its last sentence. **Amended 2026-10-04 (#435):** the anchor owner is the requester's uid, not `principal.uid`.
 

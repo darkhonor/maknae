@@ -1,7 +1,7 @@
 //! The authorization composition root (ADR-0008 decision 1; #154, #148).
 //!
 //! T1 — this is where "a vendor cannot relax our baselines" stops being a hope
-//! and becomes an invariant. Two non-removable floors are NAMED FIELDS, never
+//! and becomes an invariant. Three non-removable floors are NAMED FIELDS, never
 //! elements of an operand vector:
 //!
 //! - `baseline` — the discretionary (RBAC) floor, [`Baseline`]-bounded. The
@@ -13,6 +13,10 @@
 //! - `ceiling` — the mandatory (MAC) floor: the booted ceiling in the booted
 //!   classification SYSTEM (ADR-0022). ADR-0020 §3: mandatory operands are
 //!   ALWAYS composed, never silently absent.
+//! - `sensitive` — the second mandatory (MAC) floor: `sensitive.yaml` (#617,
+//!   ADR-0034). The field names it; each decision batch builds the operand from
+//!   the same snapshot the baseline decides on, so a reload never pairs one
+//!   snapshot's grants with another's list.
 //!
 //! **No `extensions` vector yet.** ADR-0008's struct shows one; the property
 //! it names — baseline as a named field — holds with or without it, and an
@@ -35,13 +39,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::ceiling_authz::CeilingAuthorizer;
+use crate::sensitive_authz::{SensitiveAuthorizer, SensitiveOperand};
+use maknae_authz_basic::snapshot::Snapshot;
 use maknae_authz_basic::Baseline;
 use maknae_security::{
     compose_backend_name, compose_decide_cited, compose_decide_cited_all, compose_subjects,
     Authorizer, Decided, Request, SubjectBinding, Verdict,
 };
 
-/// The daemon's PDP: baseline ∧ ceiling, deny-overrides.
+/// The daemon's PDP: baseline ∧ ceiling ∧ sensitive, deny-overrides.
 pub struct Composition<B: Baseline> {
     /// The non-removable discretionary floor. A named field, not a vector
     /// element: there is no way to build this type without one.
@@ -49,6 +55,8 @@ pub struct Composition<B: Baseline> {
     /// The non-removable mandatory floor: the booted classification ceiling,
     /// evaluated on every request.
     ceiling: CeilingAuthorizer,
+    /// The non-removable `sensitive.yaml` floor, decided over each batch's snapshot.
+    sensitive: SensitiveOperand,
     /// The view and providers the request path serves; installed only in the live turn.
     live: Arc<crate::live::LiveConfig>,
     #[cfg(test)]
@@ -66,6 +74,7 @@ impl<B: Baseline> Composition<B> {
         Self {
             baseline,
             ceiling,
+            sensitive: SensitiveOperand,
             live: Arc::new(crate::live::LiveConfig::new(Default::default(), None)),
             #[cfg(test)]
             panic_on_install: std::sync::atomic::AtomicBool::new(false),
@@ -96,6 +105,11 @@ impl<B: Baseline> Composition<B> {
 
     pub fn ceiling(&self) -> &CeilingAuthorizer {
         &self.ceiling
+    }
+
+    /// The installed snapshot's host `sensitive.yaml` list.
+    pub fn sensitive_now(&self) -> Arc<maknae_config::SensitiveList> {
+        Arc::clone(self.baseline.snapshot().sensitive())
     }
 
     #[cfg(any(test, feature = "hermetic-test-seam"))]
@@ -177,16 +191,65 @@ impl<B: Baseline> Composition<B> {
             .unwrap()
             .extend(reqs.iter().cloned());
         let base = maknae_authz_basic::Candidate::new(candidate, self.baseline.principal());
-        compose_decide_cited_all(&self.operands_with(&base), reqs)
+        let sensitive = SensitiveAuthorizer::new(candidate.sensitive());
+        compose_decide_cited_all(&self.operands_with(&base, &sensitive), reqs)
     }
 
-    /// Baseline FIRST — see the module doc.
-    fn operands(&self) -> [&dyn Authorizer; 2] {
-        self.operands_with(&self.baseline)
+    /// Baseline FIRST — see the module doc. Names and subjects only: a decision
+    /// goes through [`Composition::operands_with`] over one snapshot.
+    fn operands(&self) -> [&dyn Authorizer; 3] {
+        [&self.baseline, &self.ceiling, &self.sensitive]
     }
 
-    fn operands_with<'a>(&'a self, base: &'a dyn Authorizer) -> [&'a dyn Authorizer; 2] {
-        [base, &self.ceiling]
+    fn operands_with<'a>(
+        &'a self,
+        base: &'a dyn Authorizer,
+        sensitive: &'a SensitiveAuthorizer<'a>,
+    ) -> [&'a dyn Authorizer; 3] {
+        [base, &self.ceiling, sensitive]
+    }
+
+    /// The live operands, all over the one snapshot installed when the batch starts.
+    fn on_live<R>(&self, decide: impl FnOnce(&[&dyn Authorizer; 3]) -> R) -> R {
+        let _turn = self.baseline.live_turn().share();
+        let snap = self.baseline.snapshot();
+        let base = OnSnapshot {
+            baseline: &self.baseline,
+            snap: &snap,
+        };
+        let sensitive = SensitiveAuthorizer::new(snap.sensitive());
+        decide(&self.operands_with(&base, &sensitive))
+    }
+}
+
+impl<B: Baseline> crate::sensitive_authz::SensitiveNow for Composition<B> {
+    fn sensitive_now(&self) -> Arc<maknae_config::SensitiveList> {
+        Composition::sensitive_now(self)
+    }
+}
+
+/// The baseline, deciding on a snapshot it was handed rather than the one installed now.
+struct OnSnapshot<'a, B: Baseline> {
+    baseline: &'a B,
+    snap: &'a Snapshot,
+}
+
+impl<B: Baseline> Authorizer for OnSnapshot<'_, B> {
+    fn decide(&self, req: &Request) -> Verdict {
+        self.decide_cited(req).verdict
+    }
+
+    fn decide_reporting_role(&self, req: &Request) -> (Verdict, Option<&'static str>) {
+        self.decide_cited(req).into()
+    }
+
+    fn decide_cited(&self, req: &Request) -> Decided {
+        self.decide_cited_all(std::slice::from_ref(req))
+            .swap_remove(0)
+    }
+
+    fn decide_cited_all(&self, reqs: &[Request]) -> Vec<Decided> {
+        self.baseline.decide_cited_all_on(self.snap, reqs)
     }
 }
 
@@ -260,13 +323,11 @@ impl<B: Baseline> Authorizer for Composition<B> {
     /// projections, so every existing composition test covers what production
     /// runs.
     fn decide_cited(&self, req: &Request) -> Decided {
-        let _turn = self.baseline.live_turn().share();
-        compose_decide_cited(&self.operands(), req)
+        self.on_live(|ops| compose_decide_cited(ops, req))
     }
 
     fn decide_cited_all(&self, reqs: &[Request]) -> Vec<Decided> {
-        let _turn = self.baseline.live_turn().share();
-        compose_decide_cited_all(&self.operands(), reqs)
+        self.on_live(|ops| compose_decide_cited_all(ops, reqs))
     }
 
     fn subjects(&self) -> Option<Vec<SubjectBinding>> {
@@ -282,6 +343,7 @@ impl<B: Baseline> Authorizer for Composition<B> {
 mod tests {
     use super::*;
     use crate::test_fixtures::{fixture, permitted_read_marked, secret, READ_POLICY};
+    use maknae_authz_basic::HermeticAuthorizer;
     use maknae_config::{BasicPolicy, Ceiling, ClassificationPolicy, Principal};
     use maknae_security::{Action, AttrValue, Attributes, Context, Resource, Subject};
 
@@ -318,14 +380,17 @@ mod tests {
     }
 
     #[test]
-    fn the_composed_name_lists_baseline_then_ceiling() {
+    fn the_composed_name_lists_baseline_then_ceiling_then_sensitive() {
         let (_g, basic) = fixture("name", &status_policy(), Some(ADMIN_ROOT));
         let c = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
-        assert_eq!(c.backend_name(), "maknae-authz-basic+maknae-ceiling");
+        assert_eq!(
+            c.backend_name(),
+            "maknae-authz-basic+maknae-ceiling+maknae-sensitive"
+        );
         // And through the kernel's choke point, sanitized once.
         assert_eq!(
             maknae_security::guarded_backend_name(&c),
-            "maknae-authz-basic+maknae-ceiling"
+            "maknae-authz-basic+maknae-ceiling+maknae-sensitive"
         );
     }
 
@@ -345,6 +410,31 @@ mod tests {
     /// requester's home, prepared as a local read attempt.
     fn permitted_read(home: &std::path::Path) -> Request {
         permitted_read_marked(home, None)
+    }
+
+    #[test]
+    fn the_snapshot_operand_answers_alike_on_every_entry_point() {
+        use maknae_authz_basic::Baseline;
+        let (g, basic) = fixture("on-snapshot", READ_POLICY, None);
+        let snap = basic.snapshot();
+        let on = OnSnapshot {
+            baseline: &basic,
+            snap: &snap,
+        };
+        for (req, permits) in [
+            (permitted_read(&g.0), true),
+            (request("admin.status"), false),
+        ] {
+            let cited = on.decide_cited(&req);
+            assert_eq!(matches!(cited.verdict, Verdict::Permit { .. }), permits);
+            assert_eq!(
+                format!("{:?}", on.decide(&req)),
+                format!("{:?}", cited.verdict)
+            );
+            let (verdict, role) = on.decide_reporting_role(&req);
+            assert_eq!(format!("{verdict:?}"), format!("{:?}", cited.verdict));
+            assert_eq!(role, cited.role);
+        }
     }
 
     #[test]
@@ -477,6 +567,253 @@ mod tests {
     }
 
     #[test]
+    fn the_composition_has_a_named_sensitive_operand() {
+        let (_g, basic) = fixture("named-sensitive", READ_POLICY, None);
+        let c = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
+        let names: Vec<_> = c.operands().iter().map(|o| o.backend_name()).collect();
+        assert_eq!(
+            names,
+            ["maknae-authz-basic", "maknae-ceiling", "maknae-sensitive"]
+        );
+    }
+
+    fn protecting(g: &crate::test_fixtures::DirGuard, basic: &HermeticAuthorizer, entry: &str) {
+        crate::test_fixtures::write_sensitive(
+            &g.0,
+            &format!("schema_version: 1\nsensitive:\n  - \"{entry}\"\n"),
+        );
+        basic.install(basic.compile_from_file().unwrap());
+    }
+
+    #[test]
+    fn a_host_entry_is_not_waivable_by_a_baseline_permit() {
+        let (g, basic) = fixture("sensitive-wins", READ_POLICY, None);
+        let req = permitted_read(&g.0);
+        let c = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
+        assert!(matches!(c.decide(&req), Verdict::Permit { .. }), "premise");
+        protecting(&g, c.baseline(), "~/notes.txt");
+        assert!(
+            matches!(c.baseline().decide(&req), Verdict::Permit { .. }),
+            "premise: the baseline alone still permits"
+        );
+        let refused = c.decide_cited(&req);
+        assert_eq!(
+            refused.verdict,
+            Verdict::Deny {
+                reason: "sensitive: host ~/notes.txt".into()
+            }
+        );
+        assert_eq!(refused.rule, None, "a sensitive Deny never cites the allow");
+        assert_eq!(
+            c.decide_cited_all(std::slice::from_ref(&req)),
+            vec![refused.clone()]
+        );
+        assert_eq!(c.decide_reporting_role(&req).0, refused.verdict);
+    }
+
+    fn shipped_effective_decisions() -> String {
+        let (g, basic) = fixture(
+            "shipped-effective",
+            include_str!("../../../packaging/common/authz.yaml"),
+            None,
+        );
+        crate::test_fixtures::write_sensitive(
+            &g.0,
+            include_str!("../../../packaging/common/sensitive.yaml"),
+        );
+        basic.set_hosts(crate::test_fixtures::HOBI_HOSTS);
+        crate::test_fixtures::write_agent(&g.0, "hobi", "hobi-svc", 2001, "user");
+        crate::test_fixtures::write_agent_policy(
+            &g.0,
+            "hobi",
+            "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Write(~/**)\"]\n",
+        );
+        basic.install(basic.compile_from_file().unwrap());
+        let c = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
+        let principal = i64::from(nix::unistd::geteuid().as_raw());
+        let mut out = String::from(
+            "# The shipped authz.yaml and sensitive.yaml, decided through the Composition.\n",
+        );
+        let cases: &[(&str, Option<&str>, &[&str])] = &[
+            ("liveness.ping", None, &[""]),
+            ("session.new", None, &[""]),
+            ("fs.read", Some("read"), FS_TARGETS),
+            ("fs.write", Some("write-existing"), FS_TARGETS),
+            ("fs.write", Some("write-create"), FS_TARGETS),
+            ("fs.delete", Some("delete-entry"), FS_TARGETS),
+            (
+                "fs.delete",
+                Some("delete-tree"),
+                &[
+                    "/home/operator",
+                    "/home/operator/projects",
+                    "/home/operator/.ssh",
+                ],
+            ),
+            ("fs.mkdir", Some("mkdir"), FS_TARGETS),
+        ];
+        for (who, uid) in [("principal", principal), ("unbound", 4242), ("agent", 2001)] {
+            for (term, op, targets) in cases {
+                for path in *targets {
+                    let mut r = request(term);
+                    r.subject.0.insert("uid", AttrValue::Int(uid));
+                    if who == "agent" {
+                        r.subject.0.insert(
+                            maknae_security::SUBJECT_CHANNEL,
+                            AttrValue::Str(maknae_security::CHANNEL_AGENT.into()),
+                        );
+                        r.subject.0.insert(
+                            maknae_security::SUBJECT_AGENT,
+                            AttrValue::Str("hobi".into()),
+                        );
+                    }
+                    r.subject.0.insert(
+                        maknae_security::SUBJECT_HOME,
+                        AttrValue::Str("/home/operator".into()),
+                    );
+                    if !path.is_empty() {
+                        r.resource.0.insert("path", AttrValue::Str((*path).into()));
+                    }
+                    if let Some(o) = op {
+                        r.context.0.insert(
+                            maknae_security::CONTEXT_FS_OPERATION,
+                            AttrValue::Str((*o).into()),
+                        );
+                    }
+                    let twin = (*term == "fs.write").then(|| crate::mutation::read_of(&r));
+                    for (half, op, r) in [("", *op, Some(r)), (" read-twin", Some("read"), twin)] {
+                        let Some(r) = r else { continue };
+                        let d = c.decide_cited(&r);
+                        let rule = d.rule.map(|c| {
+                            let section =
+                                c.section.rsplit('#').next().unwrap_or_default().to_owned();
+                            format!("{} in #{section}", c.key)
+                        });
+                        out.push_str(&format!(
+                            "{who} {term}{half} {op:?} {path:?} -> {:?} {:?} {rule:?}\n",
+                            d.verdict, d.role
+                        ));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    const FS_TARGETS: &[&str] = &[
+        "/home/operator/notes",
+        "/home/operator/projects/x",
+        "/home/operator/.ssh/id",
+        "/home/operator/.aws/credentials",
+        "/home/operator/.maknae/providers.yaml",
+        "/etc/shadow",
+        "/etc/maknae/authz.yaml",
+        "/proc/1/environ",
+    ];
+
+    #[test]
+    fn the_shipped_files_decide_identically_through_the_composition() {
+        let got = shipped_effective_decisions();
+        let want = include_str!("testdata/shipped-effective-decisions.txt");
+        for (i, (g, w)) in got.lines().zip(want.lines()).enumerate() {
+            assert_eq!(g, w, "first difference at line {i}");
+        }
+        assert_eq!(got.lines().count(), want.lines().count(), "line count");
+    }
+
+    #[test]
+    fn a_candidate_is_decided_with_its_own_sensitive_list() {
+        let (g, basic) = fixture("cand-sensitive", READ_POLICY, None);
+        let c = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
+        let installed = c.baseline().snapshot();
+        crate::test_fixtures::write_sensitive(
+            &g.0,
+            "schema_version: 1\nsensitive:\n  - \"~/notes.txt\"\n",
+        );
+        let candidate = c.baseline().compile_from_file().unwrap();
+        let read = [permitted_read(&g.0)];
+        assert!(matches!(
+            c.decide_candidate_all(&installed, &read)[0].verdict,
+            Verdict::Permit { .. }
+        ));
+        assert!(matches!(
+            c.decide_candidate_all(&candidate, &read)[0].verdict,
+            Verdict::Deny { ref reason } if reason == "sensitive: host ~/notes.txt"
+        ));
+        assert!(matches!(c.decide(&read[0]), Verdict::Permit { .. }));
+    }
+
+    /// The batch's baseline decisions and its sensitive list come from the snapshot
+    /// installed when it started, though a reload lands between two evaluations.
+    #[test]
+    fn a_reload_mid_batch_never_pairs_old_grants_with_a_new_list() {
+        use maknae_authz_basic::{Baseline, EvaluationGate};
+        let (g, mut basic) = fixture("pairing", READ_POLICY, None);
+        let gate = std::sync::Arc::new(EvaluationGate {
+            arrived: std::sync::Barrier::new(2),
+            release: std::sync::Barrier::new(2),
+        });
+        basic.park_evaluations(gate.clone());
+        crate::test_fixtures::write_sensitive(
+            &g.0,
+            "schema_version: 1\nsensitive:\n  - \"~/notes.txt\"\n",
+        );
+        let next = basic.compile_from_file().unwrap();
+        let c = std::sync::Arc::new(Composition::new(basic, ceiling(Ceiling::baseline_for(US))));
+        let wait = |which: fn(&EvaluationGate) -> &std::sync::Barrier| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let gate = gate.clone();
+            std::thread::spawn(move || {
+                which(&gate).wait();
+                let _ = tx.send(());
+            });
+            assert!(
+                rx.recv_timeout(std::time::Duration::from_secs(30)).is_ok(),
+                "an evaluation never reached its barrier"
+            );
+        };
+        let batch = {
+            let (c, home) = (c.clone(), g.0.clone());
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ =
+                    tx.send(c.decide_cited_all(&[permitted_read(&home), permitted_read(&home)]));
+            });
+            rx
+        };
+        wait(|g| &g.arrived);
+        c.baseline().install(next.clone());
+        wait(|g| &g.release);
+        wait(|g| &g.arrived);
+        wait(|g| &g.release);
+        let all = batch
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the batch never finished");
+        assert_eq!(all.len(), 2);
+        for d in all {
+            assert!(matches!(d.verdict, Verdict::Permit { .. }), "{d:?}");
+        }
+        let probe = {
+            let (c, home) = (c.clone(), g.0.clone());
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(c.decide(&permitted_read(&home)));
+            });
+            rx
+        };
+        wait(|g| &g.arrived);
+        wait(|g| &g.release);
+        assert_eq!(
+            probe
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the probe never finished"),
+            Verdict::Deny {
+                reason: "sensitive: host ~/notes.txt".into()
+            }
+        );
+    }
+
+    #[test]
     fn unmarked_content_flows_under_a_secret_ceiling_exactly_as_the_baseline_decides() {
         // The operator's ruling, at the composition: unmarked is the system's lowest level,
         // so a SECRET deployment serves it -- the composed verdict is the
@@ -589,7 +926,10 @@ mod tests {
         const AUS_PROTECTED_CORE: &str = "core:\n  handling:\n    ceiling:\n      classification: PROTECTED\n      sci: false\n      releasable_to: []\n      cui_permitted: false\n      cui_categories_permitted: []\n      dissemination_permitted: [\"Distribution Statement A\"]\n    accreditation_ref: null\n    policy: AUS\n";
         let (g3, basic3) = fixture("build-pdp-aus", READ_POLICY, None);
         let pdp3 = build_pdp(&booted("aus", AUS_PROTECTED_CORE), basic3);
-        assert_eq!(pdp3.backend_name(), "maknae-authz-basic+maknae-ceiling");
+        assert_eq!(
+            pdp3.backend_name(),
+            "maknae-authz-basic+maknae-ceiling+maknae-sensitive"
+        );
         assert!(
             matches!(
                 pdp3.decide(&permitted_read_marked(
@@ -906,9 +1246,10 @@ mod tests {
         assert!(!matches!(c.decide(&claimed), Verdict::Permit { .. }));
         let snap = c.baseline().snapshot();
         let base = maknae_authz_basic::Candidate::new(&snap, c.baseline().principal());
-        let ops = c.operands_with(&base);
+        let sensitive = SensitiveAuthorizer::new(snap.sensitive());
+        let ops = c.operands_with(&base, &sensitive);
         assert!(matches!(
-            compose_decide_cited(&[ops[0], ops[1], &Refuses], &marked).verdict,
+            compose_decide_cited(&[ops[0], ops[1], ops[2], &Refuses], &marked).verdict,
             Verdict::Deny { ref reason } if reason == "refuses"
         ));
     }

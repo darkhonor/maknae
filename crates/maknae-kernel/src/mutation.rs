@@ -2,8 +2,10 @@
 //! attempt; its progress and completion are client reported.
 use crate::conversation::{
     facts::{gather, ConversationFacts},
+    record::ConversationRecord,
     store::ConversationStore,
 };
+use crate::sensitive_authz::{sensitive_match, sensitive_subtree_match, SensitiveMatch};
 use crate::{
     blocking_guard::AUDIT_APPEND_TIMEOUT,
     handler::{build_authz_request, delegated_plan, discharge_plan, lexical_pregate, Stamp},
@@ -14,8 +16,8 @@ use maknae_audit_append::{
     AuditEmit, AuditRecord, MutationAudit, MutationEffectKind, MutationEffectRecord,
     MutationOperation, MutationOrigin, MutationPhase, MutationStatus, Seq,
 };
-use maknae_config::TransportConfig;
-use maknae_io::{MutationDirectory, MutationRequired};
+use maknae_config::{SensitiveList, TransportConfig};
+use maknae_io::MutationDirectory;
 use maknae_proto::{
     MutationGrant, MutationId, MutationLimits, MutationReport, MutationScope, Payload,
     ProtoErrCode, ProtoError, ReportedEffect, ReportedFinish, RespResult, Response, Verb,
@@ -172,16 +174,12 @@ fn prepare(
     verb: Verb,
     fd: Option<OwnedFd>,
     home: &Path,
-    uid: u32,
     lane: Lane,
 ) -> Result<PreparedMutation, String> {
     let asked = path(&verb).ok_or("not a mutation")?;
     checked(asked)?;
     if lane != Lane::Local {
         return Err("mutation requires local subject execution".into());
-    }
-    if home == Path::new("/") {
-        return Err(crate::authz::HomeUnavailable::Unresolvable.reason());
     }
     let read = matches!(verb, Verb::Read { .. });
     let fd = fd.ok_or(if read {
@@ -206,7 +204,7 @@ fn prepare(
         _ => None,
     };
     if let Some((refused, kind, effect)) = object {
-        let verified = maknae_io::verify_delegated(fd.as_fd(), delegated_plan(home, uid))
+        let verified = maknae_io::verify_delegated(fd.as_fd(), delegated_plan())
             .map_err(|e| format!("{refused}: {e}"))?;
         maknae_io::refuse_access_bearing(fd.as_fd(), &verified.path)
             .map_err(|e| format!("{refused}: {e}"))?;
@@ -226,14 +224,8 @@ fn prepare(
             kind,
         });
     }
-    let directory = maknae_io::verify_mutation_directory(
-        fd,
-        MutationRequired {
-            confined_beneath: home.to_path_buf(),
-            root_required: delegated_plan(home, uid).root_required,
-        },
-    )
-    .map_err(|e| format!("namespace location evidence refused: {e}"))?;
+    let directory = maknae_io::verify_mutation_directory(fd)
+        .map_err(|e| format!("namespace location evidence refused: {e}"))?;
     let mut current = directory.path().to_path_buf();
     let components = match &verb {
         Verb::FsMkdir {
@@ -286,8 +278,8 @@ fn prepare(
             },
         ),
         Verb::FsDelete { recursive, .. } => {
-            if Path::new(&root) == home {
-                return Err("cannot delete confinement root".into());
+            if home.starts_with(&root) {
+                return Err("cannot delete the requester's home".into());
             }
             if recursive {
                 (
@@ -332,10 +324,25 @@ fn prepare(
 type DecidedBy = (Option<&'static str>, Option<maknae_security::RuleCitation>);
 type AuthorizeErr = (String, String, DecidedBy);
 
-/// Decides every path from one snapshot. Returns the role of the last path
-/// decided, in both arms (on a deny, the path that refused, #275), and that
-/// path's rule, except on a deny written in place of a permit that was never
-/// acted on.
+const WRITE_NEEDS_READ: &str = "fs.write needs fs.read: ";
+
+/// The `fs.read` twin of a write's request (ADR-0034 decision 7): a write is permitted
+/// only when a read of the same path would be.
+pub(crate) fn read_of(write: &maknae_security::Request) -> maknae_security::Request {
+    let mut read = write.clone();
+    read.action = maknae_security::Action("fs.read".into());
+    read.context.0.insert(
+        maknae_security::CONTEXT_FS_OPERATION,
+        AttrValue::Str(FsOperation::Read.as_str().into()),
+    );
+    read
+}
+
+/// Decides every path from one snapshot, and for an `fs.write` the `fs.read` twin
+/// of each path too. Returns the role of the last path decided, in both arms (on a
+/// deny, the path that refused, #275), and that path's rule, except on a deny
+/// written in place of a permit that was never acted on. A permit cites the
+/// write's rule; a deny cites the request that refused.
 #[allow(clippy::too_many_arguments)]
 fn authorize<P: Authorizer>(
     prepared: &PreparedMutation,
@@ -345,33 +352,40 @@ fn authorize<P: Authorizer>(
     authorizer: &P,
     policy_name: &str,
     facts: Option<&ConversationFacts>,
+    personal: Option<&AttrValue>,
     stamp: &Stamp<'_>,
 ) -> Result<(DecidedBy, maknae_proto::ObjectLabel), AuthorizeErr> {
-    let requests: Vec<_> = prepared
-        .paths
-        .iter()
-        .map(|path| {
-            let mut request = build_authz_request(verb, uid, home, Lane::Local, None, facts, stamp);
-            request
-                .resource
-                .0
-                .insert("path", AttrValue::Str(path.clone()));
+    let with_read = matches!(verb, Verb::FsWrite { .. });
+    let mut requests = Vec::new();
+    for path in &prepared.paths {
+        let mut request = build_authz_request(verb, uid, home, Lane::Local, None, facts, stamp);
+        request
+            .resource
+            .0
+            .insert("path", AttrValue::Str(path.clone()));
+        request.context.0.insert(
+            maknae_security::CONTEXT_FS_OPERATION,
+            AttrValue::Str(prepared.kind.as_str().into()),
+        );
+        if let Some(personal) = personal {
             request.context.0.insert(
-                maknae_security::CONTEXT_FS_OPERATION,
-                AttrValue::Str(prepared.kind.as_str().into()),
+                maknae_security::CONTEXT_SENSITIVE_PERSONAL,
+                personal.clone(),
             );
-            request
-        })
-        .collect();
+        }
+        let read = with_read.then(|| read_of(&request));
+        requests.push(request);
+        requests.extend(read);
+    }
+    let stride = if with_read { 2 } else { 1 };
+    let verdicts = maknae_security::guarded_decide_cited_all(authorizer, &requests);
     let mut decided: DecidedBy = (None, None);
-    for (path, d) in prepared
-        .paths
-        .iter()
-        .zip(maknae_security::guarded_decide_cited_all(
-            authorizer, &requests,
-        ))
-    {
-        decided = (d.role, d.rule);
+    for (i, d) in verdicts.into_iter().enumerate() {
+        let path = &prepared.paths[i / stride];
+        let read = i % stride == 1;
+        if !read {
+            decided = (d.role, d.rule.clone());
+        }
         // `combine(vec![..])` preserved: it is what produces the
         // "indeterminate operand blocks (fail-closed)" trail string.
         match maknae_security::finalize(maknae_security::combine(vec![d.verdict])) {
@@ -382,6 +396,13 @@ fn authorize<P: Authorizer>(
                     (decided.0, None),
                 )
             })?,
+            Decision::Deny { reason } if read => {
+                return Err((
+                    format!("{WRITE_NEEDS_READ}{reason}"),
+                    path.clone(),
+                    (d.role, d.rule),
+                ))
+            }
             Decision::Deny { reason } => return Err((reason, path.clone(), decided)),
         }
     }
@@ -395,6 +416,63 @@ fn authorize<P: Authorizer>(
         )
     })?;
     Ok((decided, label))
+}
+
+fn owned_personal(record: Option<&ConversationRecord>, uid: u32) -> Option<AttrValue> {
+    record
+        .filter(|rec| rec.owner == uid)
+        .map(|rec| AttrValue::Set(rec.sensitive.iter().cloned().collect()))
+}
+
+/// The answer for an asked path on either list, decided before any descriptor, so it
+/// depends only on the path.
+struct Protection {
+    list: &'static str,
+    reason: String,
+    entry: String,
+}
+
+/// The conversation's personal list for the `Protected` answer; `None` when it does not
+/// parse, which leaves the refusal to the operand.
+fn personal_list(personal: Option<&AttrValue>) -> Option<SensitiveList> {
+    match personal {
+        None => Some(SensitiveList::empty()),
+        Some(AttrValue::Set(entries)) => {
+            SensitiveList::from_entries(&entries.iter().cloned().collect::<Vec<_>>()).ok()
+        }
+        Some(_) => None,
+    }
+}
+
+fn protection(
+    verb: &Verb,
+    asked: &str,
+    home: &Path,
+    host: &SensitiveList,
+    personal: &SensitiveList,
+) -> Option<Protection> {
+    let decide = match verb {
+        Verb::FsDelete { .. } => sensitive_subtree_match,
+        _ => sensitive_match,
+    };
+    let (list, tag, entry) = match decide(
+        Path::new(asked),
+        Some(home),
+        host,
+        personal,
+        maknae_config::native_fold(),
+    ) {
+        SensitiveMatch::Host(entry) => (maknae_proto::HOST_SENSITIVE_LIST, "host", entry),
+        SensitiveMatch::Personal(entry) => {
+            (maknae_proto::PERSONAL_SENSITIVE_LIST, "personal", entry)
+        }
+        SensitiveMatch::None | SensitiveMatch::Unbound => return None,
+    };
+    Some(Protection {
+        list,
+        reason: format!("sensitive: {tag} {entry}"),
+        entry,
+    })
 }
 fn mutation_meta(
     seq: u64,
@@ -504,8 +582,22 @@ async fn refuse<S: AsyncWrite + Unpin, E: AuditEmit>(
     stream: &mut S,
     cfg: &TransportConfig,
     emit: &E,
+    record: AuditRecord,
+    reason: String,
+) {
+    let answer = ProtoError {
+        code: ProtoErrCode::Unauthorized,
+        message: "not authorized".into(),
+    };
+    refuse_with(stream, cfg, emit, record, reason, answer).await;
+}
+async fn refuse_with<S: AsyncWrite + Unpin, E: AuditEmit>(
+    stream: &mut S,
+    cfg: &TransportConfig,
+    emit: &E,
     mut record: AuditRecord,
     reason: String,
+    answer: ProtoError,
 ) {
     record.outcome.result = "deny".into();
     record.outcome.reason = reason;
@@ -520,10 +612,7 @@ async fn refuse<S: AsyncWrite + Unpin, E: AuditEmit>(
             cfg,
             Response {
                 protocol_version: PROTOCOL_VERSION,
-                result: RespResult::Err(ProtoError {
-                    code: ProtoErrCode::Unauthorized,
-                    message: "not authorized".into(),
-                }),
+                result: RespResult::Err(answer),
             },
         )
         .await;
@@ -564,6 +653,7 @@ pub(crate) async fn handle<S, E, P>(
     policy_name: &str,
     conversations: Arc<dyn ConversationStore>,
     stamp: &Stamp<'_>,
+    sensitive: Arc<SensitiveList>,
 ) -> bool
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -599,8 +689,16 @@ where
         authz_timeout,
         tokio::task::spawn_blocking(move || {
             let _claim = claim;
-            let prepared = prepare(original.clone(), fd, &home, uid, lane)?;
+            let asked = path(&original).ok_or("not a mutation")?;
+            checked(asked)?;
             let gathered = gather(&*conversations, uid, cited(&original), None);
+            let personal = owned_personal(gathered.as_ref().and_then(|(_, rec)| rec.as_ref()), uid);
+            if let Some(p) = personal_list(personal.as_ref())
+                .and_then(|listed| protection(&original, asked, &home, &sensitive, &listed))
+            {
+                return Ok(Err(p));
+            }
+            let prepared = prepare(original.clone(), fd, &home, lane)?;
             let stamp = match &stamped {
                 None => Stamp::Client,
                 Some((agent, task)) => Stamp::Agent {
@@ -616,6 +714,7 @@ where
                 &*authorizer,
                 &policy_name,
                 gathered.as_ref().map(|(facts, _)| facts),
+                personal.as_ref(),
                 &stamp,
             );
             let mut touch_failure = None;
@@ -627,12 +726,20 @@ where
                     touch_failure = Some(e.to_string());
                 }
             }
-            Ok::<_, String>((prepared, permit, decision, touch_failure))
+            Ok::<_, String>(Ok((prepared, permit, decision, touch_failure)))
         }),
     )
     .await;
     let (prepared, permit, decision, touch_failure) = match prepared {
-        Ok(Ok(Ok(p))) => p,
+        Ok(Ok(Ok(Ok(p)))) => p,
+        Ok(Ok(Ok(Err(p)))) => {
+            let answer = ProtoError {
+                code: ProtoErrCode::Protected,
+                message: maknae_proto::protected_message(p.list, &p.entry),
+            };
+            refuse_with(stream, cfg, &*emit, record, p.reason, answer).await;
+            return true;
+        }
         Ok(Ok(Err(reason))) => {
             refuse(stream, cfg, &*emit, record, reason).await;
             return true;
@@ -1120,7 +1227,7 @@ mod tests {
             page: None,
         };
         let held = || Some(maknae_io::open_path_for_delegation(&target).unwrap());
-        let prepared = prepare(read(), held(), &fx.root, fx.principal.uid, Lane::Local).unwrap();
+        let prepared = prepare(read(), held(), &fx.root, Lane::Local).unwrap();
         assert_eq!(prepared.kind, FsOperation::Read);
         assert_eq!(prepared.paths, vec![target.to_str().unwrap().to_string()]);
         assert_eq!(
@@ -1131,47 +1238,28 @@ mod tests {
             }
         );
         assert_eq!(
-            prepare(read(), None, &fx.root, fx.principal.uid, Lane::Local)
+            prepare(read(), None, &fx.root, Lane::Local)
                 .err()
                 .as_deref(),
             Some("read descriptor missing")
         );
-        assert_eq!(
-            prepare(
-                read(),
-                held(),
-                Path::new("/"),
-                fx.principal.uid,
-                Lane::Local
-            )
+        assert!(prepare(read(), held(), &fx.root, Lane::Remote).is_err());
+        assert!(prepare(read(), Some(fx.fd()), &fx.root, Lane::Local)
             .err()
-            .as_deref(),
-            Some("requester home unavailable: unresolvable")
-        );
-        assert!(prepare(read(), held(), &fx.root, fx.principal.uid, Lane::Remote).is_err());
-        assert!(prepare(
-            read(),
-            Some(fx.fd()),
-            &fx.root,
-            fx.principal.uid,
-            Lane::Local
-        )
-        .err()
-        .unwrap()
-        .starts_with("read evidence refused"));
+            .unwrap()
+            .starts_with("read evidence refused"));
         #[cfg(target_os = "linux")]
         assert!(prepare(
             read(),
             Some(std::fs::File::open(&target).unwrap().into()),
             &fx.root,
-            fx.principal.uid,
             Lane::Local
         )
         .err()
         .unwrap()
         .contains("confers access beyond location"));
         std::fs::hard_link(&target, fx.root.join("second-read-link")).unwrap();
-        assert!(prepare(read(), held(), &fx.root, fx.principal.uid, Lane::Local).is_err());
+        assert!(prepare(read(), held(), &fx.root, Lane::Local).is_err());
         assert_eq!(std::fs::read(target).unwrap(), b"sentinel");
     }
     fn fixture_pdp(fx: &Fixture) -> crate::Composition<maknae_authz_basic::HermeticAuthorizer> {
@@ -1183,7 +1271,7 @@ mod tests {
         let files = [
             (
                 &paths.authz,
-                "schema_version: 1\npermissions:\n  allow:\n    - \"Write(~/**)\"\n  deny: []\n"
+                "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\n    - \"Write(~/**)\"\n  deny: []\n"
                     .to_string(),
             ),
             (
@@ -1195,6 +1283,7 @@ mod tests {
             std::fs::write(path, body).unwrap();
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640)).unwrap();
         }
+        crate::test_fixtures::write_empty_sensitive(&fx.root);
         let baseline = maknae_authz_basic::HermeticAuthorizer::new(
             paths,
             fx.principal.clone(),
@@ -1385,6 +1474,7 @@ mod tests {
             "US",
             Arc::new(crate::conversation::mem_store::MemStore::default()),
             &Stamp::Client,
+            Arc::new(SensitiveList::empty()),
         );
         let second_emit = Arc::new(Recorder::default());
         let second = async {
@@ -1426,6 +1516,7 @@ mod tests {
                     "US",
                     Arc::new(crate::conversation::mem_store::MemStore::default()),
                     &Stamp::Client,
+                    Arc::new(SensitiveList::empty()),
                 )
                 .await
             );
@@ -1486,6 +1577,7 @@ mod tests {
                     "US",
                     Arc::new(crate::conversation::mem_store::MemStore::default()),
                     &Stamp::Client,
+                    Arc::new(SensitiveList::empty()),
                 )
                 .await
             );
@@ -1523,6 +1615,7 @@ mod tests {
                 "US",
                 Arc::new(crate::conversation::mem_store::MemStore::default()),
                 &Stamp::Client,
+                Arc::new(SensitiveList::empty()),
             )
             .await
         );
@@ -1560,6 +1653,7 @@ mod tests {
                 "US",
                 Arc::new(crate::conversation::mem_store::MemStore::default()),
                 &Stamp::Client,
+                Arc::new(SensitiveList::empty()),
             )
             .await
         );
@@ -1597,6 +1691,7 @@ mod tests {
             "US",
             Arc::new(crate::conversation::mem_store::MemStore::default()),
             &Stamp::Client,
+            Arc::new(SensitiveList::empty()),
         )
         .await;
         assert!(emit
@@ -1633,6 +1728,7 @@ mod tests {
                 "US",
                 Arc::new(crate::conversation::mem_store::MemStore::default()),
                 &Stamp::Client,
+                Arc::new(SensitiveList::empty()),
             )
             .await
         );
@@ -1655,7 +1751,7 @@ mod tests {
                 &fds,
                 authorizer_for_second,
                 other.clone(),
-                Ok(PathBuf::from("/")),
+                Ok(fx.root.clone()),
                 &cfg,
                 &seq,
                 record(),
@@ -1664,12 +1760,13 @@ mod tests {
                 "US",
                 Arc::new(crate::conversation::mem_store::MemStore::default()),
                 &Stamp::Client,
+                Arc::new(SensitiveList::empty()),
             )
             .await
         );
         assert_eq!(
             other.0.lock().unwrap().last().unwrap().outcome.reason,
-            "requester home unavailable: unresolvable",
+            "mutation descriptor missing",
             "another uid still reaches its own worker"
         );
         drop(release);
@@ -1705,12 +1802,11 @@ mod tests {
     #[test]
     fn preparation_requires_local_real_descriptor_and_valid_mkdir_suffix() {
         let fx = Fixture::new();
-        assert!(prepare(Verb::Ping, None, &fx.root, fx.principal.uid, Lane::Local).is_err());
+        assert!(prepare(Verb::Ping, None, &fx.root, Lane::Local).is_err());
         assert!(prepare(
             fx.mkdir(true, vec!["one".into(), "two".into()]),
             Some(fx.fd()),
             &fx.root,
-            fx.principal.uid,
             Lane::Remote
         )
         .is_err());
@@ -1718,7 +1814,6 @@ mod tests {
             fx.mkdir(true, vec!["one".into(), "two".into()]),
             None,
             &fx.root,
-            fx.principal.uid,
             Lane::Local
         )
         .is_err());
@@ -1734,7 +1829,6 @@ mod tests {
                 fx.mkdir(parents, components),
                 Some(fx.fd()),
                 &fx.root,
-                fx.principal.uid,
                 Lane::Local
             )
             .is_err());
@@ -1746,7 +1840,6 @@ mod tests {
             },
             Some(fx.fd()),
             &fx.root,
-            fx.principal.uid,
             Lane::Local
         )
         .is_err());
@@ -1757,7 +1850,6 @@ mod tests {
             },
             Some(fx.fd()),
             &fx.root,
-            fx.principal.uid,
             Lane::Local
         )
         .is_err());
@@ -1767,7 +1859,6 @@ mod tests {
             fx.mkdir(true, vec!["two".into()]),
             Some(std::fs::File::open(&target).unwrap().into()),
             &fx.root,
-            fx.principal.uid,
             Lane::Local
         )
         .is_err());
@@ -1778,7 +1869,7 @@ mod tests {
             conversation: None,
         };
         let held = || Some(maknae_io::open_path_for_delegation(&target).unwrap());
-        let prepared = prepare(write(), held(), &fx.root, fx.principal.uid, Lane::Local).unwrap();
+        let prepared = prepare(write(), held(), &fx.root, Lane::Local).unwrap();
         assert_eq!(prepared.kind, FsOperation::WriteExisting);
         assert_eq!(prepared.paths, vec![target.to_str().unwrap().to_string()]);
         assert_eq!(
@@ -1788,16 +1879,9 @@ mod tests {
                 effect: ReportedEffect::ReplacedFile
             }
         );
-        assert!(prepare(
-            write(),
-            Some(fx.fd()),
-            &fx.root,
-            fx.principal.uid,
-            Lane::Local
-        )
-        .is_err());
+        assert!(prepare(write(), Some(fx.fd()), &fx.root, Lane::Local).is_err());
         std::fs::hard_link(&target, fx.root.join("second-link")).unwrap();
-        assert!(prepare(write(), held(), &fx.root, fx.principal.uid, Lane::Local).is_err());
+        assert!(prepare(write(), held(), &fx.root, Lane::Local).is_err());
         assert_eq!(std::fs::read(target).unwrap(), b"sentinel");
     }
     struct ReloadsAfterEachDecision {
@@ -1840,14 +1924,7 @@ mod tests {
             .replace("deny: []", "deny:\n    - \"Write(~/one/two)\"");
         let pdp = ReloadsAfterEachDecision { pdp, policy, next };
         let verb = fx.mkdir(true, vec!["one".into(), "two".into()]);
-        let prepared = prepare(
-            verb.clone(),
-            Some(fx.fd()),
-            &fx.root,
-            fx.principal.uid,
-            Lane::Local,
-        )
-        .unwrap();
+        let prepared = prepare(verb.clone(), Some(fx.fd()), &fx.root, Lane::Local).unwrap();
         assert_eq!(prepared.paths.len(), 2);
         let (by, _) = authorize(
             &prepared,
@@ -1856,6 +1933,7 @@ mod tests {
             Some(&fx.root),
             &pdp,
             "US",
+            None,
             None,
             &Stamp::Client,
         )
@@ -1870,6 +1948,7 @@ mod tests {
             &pdp,
             "US",
             None,
+            None,
             &Stamp::Client,
         )
         .unwrap_err();
@@ -1877,19 +1956,162 @@ mod tests {
         assert_eq!(path, prepared.paths[1]);
     }
     #[tokio::test]
+    async fn a_write_is_permitted_only_when_a_read_of_the_same_path_is() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let pdp = fixture_pdp(&fx);
+        let policy = fx.root.join("authz.yaml");
+        let existing = fx.root.join("write-needs-read-existing");
+        std::fs::write(&existing, b"x").unwrap();
+        let created = fx.root.join("write-needs-read-created");
+        let write = |p: &Path, mode| Verb::FsWrite {
+            path: p.to_str().unwrap().into(),
+            content_length: 1,
+            mode,
+            conversation: None,
+        };
+        let cases = [
+            (
+                write(&existing, maknae_proto::WriteMode::Existing),
+                maknae_io::open_path_for_delegation(&existing).unwrap(),
+            ),
+            (
+                write(&created, maknae_proto::WriteMode::CreateExclusive),
+                fx.fd(),
+            ),
+        ];
+        let decide = |verb: &Verb, fd: &OwnedFd| {
+            let prepared = prepare(
+                verb.clone(),
+                Some(fd.try_clone().unwrap()),
+                &fx.root,
+                Lane::Local,
+            )
+            .unwrap();
+            authorize(
+                &prepared,
+                verb,
+                fx.principal.uid,
+                Some(&fx.root),
+                &pdp,
+                "US",
+                None,
+                None,
+                &Stamp::Client,
+            )
+        };
+        let reload = |allow: &str, deny: &str| {
+            std::fs::write(
+                &policy,
+                format!("schema_version: 1\npermissions:\n  allow:\n{allow}  deny:{deny}\n"),
+            )
+            .unwrap();
+            pdp.baseline().reload_from_file().unwrap();
+        };
+        reload("    - \"Write(~/**)\"\n", " []");
+        for (verb, fd) in &cases {
+            let (reason, path, _) = decide(verb, fd).unwrap_err();
+            assert!(reason.starts_with(WRITE_NEEDS_READ), "{reason}");
+            assert!(reason.contains("fs.read"), "{reason}");
+            assert_eq!(Some(path.as_str()), super::path(verb));
+        }
+        reload("    - \"Read(~/**)\"\n    - \"Write(~/**)\"\n", " []");
+        for (verb, fd) in &cases {
+            let (by, _) = decide(verb, fd).expect("Read and Write both permit");
+            let rule = by.1.expect("the permit cites a rule");
+            assert_eq!(rule.key, "rule:permissions:allow:1", "the Write allow");
+        }
+        reload(
+            "    - \"Read(~/**)\"\n    - \"Write(~/**)\"\n",
+            "\n    - \"Read(~/write-needs-read-*)\"",
+        );
+        for (verb, fd) in &cases {
+            let (reason, _, by) = decide(verb, fd).unwrap_err();
+            assert!(reason.starts_with(WRITE_NEEDS_READ), "{reason}");
+            assert!(reason.contains("Read(~/write-needs-read-*)"), "{reason}");
+            let rule = by.1.expect("the deny cites the read's rule");
+            assert_eq!(rule.key, "rule:permissions:deny:0", "the Read deny");
+        }
+        assert!(!created.exists());
+    }
+    #[test]
+    fn a_personal_list_that_does_not_parse_answers_no_protection() {
+        let set = |e: &[&str]| AttrValue::Set(e.iter().map(|s| s.to_string()).collect());
+        assert_eq!(personal_list(None), Some(SensitiveList::empty()));
+        assert_eq!(personal_list(Some(&set(&["~bob/x"]))), None);
+        assert_eq!(personal_list(Some(&AttrValue::Str("/k".into()))), None);
+        let listed = personal_list(Some(&set(&["/srv/k"]))).unwrap();
+        let p = protection(
+            &Verb::Read {
+                path: "/srv/k".into(),
+                conversation: None,
+                page: None,
+            },
+            "/srv/k",
+            Path::new("/home/u"),
+            &SensitiveList::empty(),
+            &listed,
+        )
+        .unwrap();
+        assert_eq!(
+            (p.list, p.reason.as_str(), p.entry.as_str()),
+            (
+                maknae_proto::PERSONAL_SENSITIVE_LIST,
+                "sensitive: personal /srv/k",
+                "/srv/k"
+            )
+        );
+    }
+
+    #[test]
+    fn only_the_requesters_own_conversation_contributes_its_personal_list() {
+        let id = maknae_proto::ConversationId::parse(&"6".repeat(32)).unwrap();
+        let mut rec = crate::conversation::record::opened(id, 1001, "/w".into(), 1, "UNCLASSIFIED");
+        rec.sensitive = vec!["~/sentinel-617-a".into(), "/srv/sentinel-617".into()];
+        assert_eq!(
+            owned_personal(Some(&rec), 1001),
+            Some(AttrValue::Set(
+                ["/srv/sentinel-617".to_string(), "~/sentinel-617-a".into()].into()
+            ))
+        );
+        assert_eq!(owned_personal(Some(&rec), 1002), None);
+        assert_eq!(owned_personal(None, 1001), None);
+    }
+    #[tokio::test]
+    async fn the_personal_list_is_decided_on_every_path_of_the_request() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let pdp = fixture_pdp(&fx);
+        let verb = fx.mkdir(true, vec!["one".into(), "two".into()]);
+        let prepared = prepare(verb.clone(), Some(fx.fd()), &fx.root, Lane::Local).unwrap();
+        let first = prepared.paths[0].clone();
+        let decide = |personal: Option<&AttrValue>| {
+            authorize(
+                &prepared,
+                &verb,
+                fx.principal.uid,
+                Some(&fx.root),
+                &pdp,
+                "US",
+                None,
+                personal,
+                &Stamp::Client,
+            )
+        };
+        assert!(decide(None).is_ok());
+        assert!(decide(Some(&AttrValue::Set(Default::default()))).is_ok());
+        let personal = AttrValue::Set([first.clone()].into());
+        let (reason, path, _) = decide(Some(&personal)).unwrap_err();
+        assert_eq!(reason, format!("sensitive: personal {first}"));
+        assert_eq!(path, first);
+    }
+    #[tokio::test]
     async fn a_deny_in_place_of_an_unacted_permit_cites_no_rule() {
         let _turn = EUID_TURN.lock().await;
         let fx = Fixture::new();
         let pdp = fixture_pdp(&fx);
         let verb = fx.mkdir(false, vec!["two".into()]);
-        let prepared = prepare(
-            verb.clone(),
-            Some(fx.fd()),
-            &fx.root,
-            fx.principal.uid,
-            Lane::Local,
-        )
-        .unwrap();
+        let prepared = prepare(verb.clone(), Some(fx.fd()), &fx.root, Lane::Local).unwrap();
         let (by, _) = authorize(
             &prepared,
             &verb,
@@ -1897,6 +2119,7 @@ mod tests {
             Some(&fx.root),
             &pdp,
             "US",
+            None,
             None,
             &Stamp::Client,
         )
@@ -1909,6 +2132,7 @@ mod tests {
             Some(&fx.root),
             &pdp,
             "NO-SUCH-SYSTEM",
+            None,
             None,
             &Stamp::Client,
         )

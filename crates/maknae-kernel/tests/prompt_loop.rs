@@ -1656,6 +1656,14 @@ impl<B: maknae_authz_basic::Baseline + Send + Sync> maknae_security::Authorizer
     }
 }
 
+impl<B: maknae_authz_basic::Baseline> maknae_kernel::SensitiveNow
+    for InstallsAtTheFirstDecision<B>
+{
+    fn sensitive_now(&self) -> std::sync::Arc<maknae_config::SensitiveList> {
+        self.pdp.sensitive_now()
+    }
+}
+
 fn providers_named(names: &[&str]) -> Option<maknae_kernel::ProviderAuthority> {
     use maknae_config::Value;
     let entries = names

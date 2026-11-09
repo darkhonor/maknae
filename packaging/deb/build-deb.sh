@@ -66,6 +66,7 @@ cat > "$PKG_ROOT/DEBIAN/conffiles" <<'CONF'
 /etc/maknae/authz.yaml
 /etc/maknae/bindings.yaml
 /etc/maknae/maknae.yaml
+/etc/maknae/sensitive.yaml
 /etc/apparmor.d/usr.bin.maknaed
 /etc/apparmor.d/usr.bin.maknae-egress
 CONF
@@ -117,6 +118,7 @@ install -D -m 0750 "$COMMON/maknae-selinux-ports.sh" \
 install -D -m 0640 "$COMMON/authz.yaml"  "$PKG_ROOT/etc/maknae/authz.yaml"
 install -D -m 0640 "$COMMON/bindings.yaml" "$PKG_ROOT/etc/maknae/bindings.yaml"
 install -D -m 0640 "$COMMON/maknae.yaml" "$PKG_ROOT/etc/maknae/maknae.yaml"
+install -D -m 0640 "$COMMON/sensitive.yaml" "$PKG_ROOT/etc/maknae/sensitive.yaml"
 
 # NOTE: /var/log/maknae/audit.jsonl is NOT a payload file — postinst creates it
 # when absent, then chattr +a.

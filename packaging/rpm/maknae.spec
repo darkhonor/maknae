@@ -30,6 +30,7 @@ Source13:       bindings.yaml
 Source14:       maknae-policy-sync.path
 Source15:       maknae-policy-sync.service
 Source16:       80-maknae.preset
+Source17:       sensitive.yaml
 
 ExclusiveArch:  x86_64
 
@@ -107,6 +108,7 @@ install -D -m 0644 %{SOURCE6} %{buildroot}%{_sysconfdir}/fapolicyd/trust.d/makna
 # Config tree (final ownership set via %attr in %files)
 install -D -m 0640 %{SOURCE8} %{buildroot}%{_sysconfdir}/maknae/authz.yaml
 install -D -m 0640 %{SOURCE9} %{buildroot}%{_sysconfdir}/maknae/maknae.yaml
+install -D -m 0640 %{SOURCE17} %{buildroot}%{_sysconfdir}/maknae/sensitive.yaml
 install -D -m 0644 %{SOURCE13} %{buildroot}%{_datadir}/maknae/bindings.yaml
 install -d -m 0750 %{buildroot}%{_sysconfdir}/maknae/private
 # #240b: the deputy's credential set dir (files written by `maknae enroll`).
@@ -247,6 +249,7 @@ fi
 %dir %attr(0750,root,_maknae) %{_sysconfdir}/maknae
 %config(noreplace) %attr(0640,root,_maknae) %{_sysconfdir}/maknae/authz.yaml
 %config(noreplace) %attr(0640,root,_maknae) %{_sysconfdir}/maknae/maknae.yaml
+%config(noreplace) %attr(0640,root,_maknae) %{_sysconfdir}/maknae/sensitive.yaml
 %dir %attr(0750,root,_maknae) %{_sysconfdir}/maknae/private
 %dir %attr(0750,root,_maknae-egress) %{_sysconfdir}/maknae/egress
 %dir %attr(0755,root,root) %{_sysconfdir}/pki/maknae

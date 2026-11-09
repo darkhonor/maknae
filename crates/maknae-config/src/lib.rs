@@ -51,6 +51,7 @@ mod policy;
 mod principal;
 mod providers;
 mod scalar;
+mod sensitive;
 pub mod state;
 mod transport;
 mod user_providers;
@@ -133,6 +134,9 @@ pub use providers::{
     MAX_MODEL_BYTES, MAX_PROVIDERS, MAX_PROVIDER_NAME_BYTES, MAX_REASONING_EFFORT_BYTES,
     PROVIDERS_SECTION,
 };
+#[cfg(all(unix, feature = "hermetic-test-seam"))]
+pub use sensitive::load_host_sensitive_with_requirement;
+pub use sensitive::{load_host_sensitive, native_fold, Fold, SensitiveList, SENSITIVE_FILE};
 pub use state::{MARKER_FILE, MIRROR_FILE, STATE_DIR, STORE_FILE};
 pub use transport::{
     content_write_bound, transport_from_section, TransportConfig, ADMIN_REPLY_MARGIN_MS,
@@ -144,7 +148,7 @@ pub use transport::{
 pub use user_providers::{
     user_providers_from_document, UserProviderEntry, UserProviders, USER_PROVIDERS_FILE,
 };
-pub use user_providers_io::load_user_providers;
+pub use user_providers_io::{load_user_providers, load_user_sensitive};
 pub use value::{canonical_json, Value};
 
 use builder::Builder;

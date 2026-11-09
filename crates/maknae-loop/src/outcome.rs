@@ -16,17 +16,22 @@ pub enum SentOutcome {
     /// `Ok(true)` — a CLAIM (ADR-0023 decision 4), never a kernel assertion.
     ///
     /// `stale` (#388): the client's own read-before-write check refused it before
-    /// any write syscall, so it is certain nothing was written. `version` is the
-    /// written file's, when known.
+    /// any write syscall, so it is certain nothing was written. `withheld` is set
+    /// for any other failure decided before a write syscall. `version` is the written
+    /// file's, when known.
     WriteDone {
         applied: bool,
         stale: bool,
+        withheld: bool,
         version: Option<[i64; 7]>,
     },
     /// A read attempt ended; `read` is `Some` only after an acknowledged client-reported `Success`.
     ReadDone {
         read: Option<crate::mutation::ReadResult>,
     },
+    /// A mutation that failed before its grant arrived, so it had no effect; `why` is
+    /// for the user, never the model.
+    NotAttempted { why: String },
     /// The daemon refused, with the wire's own code and message (ADR-0019). `armed` is false, on a filesystem verb, iff the CLI delegated no descriptor, so no decision was made about the object.
     Refused {
         code: maknae_proto::ProtoErrCode,
@@ -40,13 +45,21 @@ impl From<SentOutcome> for maknae_agent::wire::WireOutcome {
         use maknae_agent::wire::{WireOutcome, WireRead};
         match sent {
             SentOutcome::Payload(p) => WireOutcome::Payload(p),
+            SentOutcome::NotAttempted { .. } => WireOutcome::WriteDone {
+                applied: false,
+                stale: false,
+                withheld: true,
+                version: None,
+            },
             SentOutcome::WriteDone {
                 applied,
                 stale,
+                withheld,
                 version,
             } => WireOutcome::WriteDone {
                 applied,
                 stale,
+                withheld,
                 version,
             },
             SentOutcome::ReadDone { read } => WireOutcome::ReadDone {
@@ -121,17 +134,23 @@ mod tests {
             WireOutcome::from(SentOutcome::ReadDone { read: None }),
             WireOutcome::ReadDone { read: None }
         ));
-        for (applied, stale, version) in [(true, false, Some([9; 7])), (false, true, None)] {
+        for (applied, stale, withheld, version) in [
+            (true, false, false, Some([9; 7])),
+            (false, true, false, None),
+            (false, false, true, None),
+        ] {
             match WireOutcome::from(SentOutcome::WriteDone {
                 applied,
                 stale,
+                withheld,
                 version,
             }) {
                 WireOutcome::WriteDone {
                     applied: a,
                     stale: s,
+                    withheld: w,
                     version: v,
-                } => assert_eq!((a, s, v), (applied, stale, version)),
+                } => assert_eq!((a, s, w, v), (applied, stale, withheld, version)),
                 other => panic!("{other:?}"),
             }
         }
@@ -155,6 +174,17 @@ mod tests {
         assert!(matches!(
             WireOutcome::from(SentOutcome::Payload(Payload::Pong)),
             WireOutcome::Payload(Payload::Pong)
+        ));
+        assert!(matches!(
+            WireOutcome::from(SentOutcome::NotAttempted {
+                why: "connection reset".into()
+            }),
+            WireOutcome::WriteDone {
+                applied: false,
+                stale: false,
+                withheld: true,
+                version: None
+            }
         ));
     }
 }

@@ -279,6 +279,7 @@ pub fn open_record(id: &str, owner: u32, cwd: &str) -> maknae_kernel::Conversati
         last_reply: None,
         fence: 0,
         provenance: maknae_kernel::Provenance::new("UNCLASSIFIED"),
+        sensitive: Vec::new(),
     }
 }
 
@@ -303,6 +304,8 @@ pub fn euid_name() -> String {
         .expect("the test euid has a passwd entry")
         .name
 }
+
+pub const EMPTY_SENSITIVE: &str = "schema_version: 1\nsensitive: []\n";
 
 pub fn write_0640(path: &std::path::Path, body: &str) {
     std::fs::write(path, body).unwrap();
@@ -365,8 +368,8 @@ impl Fixture {
         Self::with_rules(tag, &[allow], &[], policy_tail)
     }
     /// `allows` are capability names granted over `~/**` (the shape every
-    /// existing caller used); `denies` are FULL rule strings as the shipped
-    /// policy writes them (`packaging/common/authz.yaml`), e.g. `Read(~/.ssh/**)`.
+    /// existing caller used); `denies` are FULL rule strings in the `permissions:`
+    /// grammar, e.g. `Read(~/.ssh/**)`.
     /// The asymmetry is deliberate: it keeps `with_policy`'s generated YAML
     /// byte-identical to what it produced before, for every existing caller.
     pub fn with_rules(tag: &str, allows: &[&str], denies: &[&str], policy_tail: &str) -> Self {
@@ -405,6 +408,7 @@ impl Fixture {
             &paths.bindings,
             &format!("schema_version: 1\nbindings:\n  user: [\"{name}\"]\n"),
         );
+        write_0640(&paths.sensitive, EMPTY_SENSITIVE);
         Self {
             peer_uid: nix::unistd::geteuid().as_raw(),
             peer_user: Some(name),
@@ -529,7 +533,7 @@ impl Fixture {
         Vec<u8>,
     )
     where
-        P: maknae_security::Authorizer + Send + Sync + 'static,
+        P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
     {
         self.start_with_authorizer_and_caps(
             authz,
@@ -583,7 +587,7 @@ impl Fixture {
         Vec<u8>,
     )
     where
-        P: maknae_security::Authorizer + Send + Sync + 'static,
+        P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
     {
         self.start_with_live(
             authz,
@@ -617,7 +621,7 @@ impl Fixture {
         Vec<u8>,
     )
     where
-        P: maknae_security::Authorizer + Send + Sync + 'static,
+        P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
     {
         self.start_in(
             Arc::new(self.session()),
@@ -680,7 +684,7 @@ impl Fixture {
         Vec<u8>,
     )
     where
-        P: maknae_security::Authorizer + Send + Sync + 'static,
+        P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
     {
         let (client, server) = tokio::io::duplex(65536);
         let fds = maknae_io::DelegatedFds::new(4);
@@ -734,6 +738,7 @@ impl Fixture {
         let (client, task, body) = self.start(
             Verb::SessionNew {
                 cwd: cwd.to_str().unwrap().into(),
+                sensitive: vec![],
             },
             Some(fd),
             Arc::clone(&records),
@@ -795,7 +800,7 @@ impl Fixture {
         egress: Arc<dyn maknae_kernel::Egress>,
     ) -> Option<Response>
     where
-        P: maknae_security::Authorizer + Send + Sync + 'static,
+        P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
     {
         let (client, task, body) = self.start_with_authorizer(
             authz,
@@ -833,10 +838,19 @@ impl Fixture {
     /// asserts `is_none()` proves frameless closure and not merely "no
     /// complete frame arrived".
     pub async fn exchange(
-        mut client: tokio::io::DuplexStream,
+        client: tokio::io::DuplexStream,
         task: tokio::task::JoinHandle<()>,
         body: &[u8],
     ) -> Option<Response> {
+        Self::decode_received(&Self::exchange_raw(client, task, body).await).await
+    }
+
+    /// Every byte the daemon wrote before it closed.
+    pub async fn exchange_raw(
+        mut client: tokio::io::DuplexStream,
+        task: tokio::task::JoinHandle<()>,
+        body: &[u8],
+    ) -> Vec<u8> {
         use tokio::io::AsyncReadExt;
         write_frame(&mut client, body).await.unwrap();
         let mut received = Vec::new();
@@ -848,10 +862,14 @@ impl Fixture {
             .await
             .expect("the handler must finish within 3s")
             .unwrap();
+        received
+    }
+
+    pub async fn decode_received(received: &[u8]) -> Option<Response> {
         if received.is_empty() {
             return None;
         }
-        let mut cursor = &received[..];
+        let mut cursor = received;
         let frame = read_frame(&mut cursor, 65536)
             .await
             .expect("bytes on the wire must be one complete frame, never a partial one");
@@ -1405,4 +1423,40 @@ pub fn non_member() -> maknae_kernel::Facts {
         m.in_group = false;
     }
     f
+}
+
+impl maknae_kernel::SensitiveNow for AlwaysPermit {
+    fn sensitive_now(&self) -> std::sync::Arc<maknae_config::SensitiveList> {
+        std::sync::Arc::new(maknae_config::SensitiveList::empty())
+    }
+}
+
+impl maknae_kernel::SensitiveNow for SleepAuthorizer {
+    fn sensitive_now(&self) -> std::sync::Arc<maknae_config::SensitiveList> {
+        std::sync::Arc::new(maknae_config::SensitiveList::empty())
+    }
+}
+
+impl maknae_kernel::SensitiveNow for HostileObligation {
+    fn sensitive_now(&self) -> std::sync::Arc<maknae_config::SensitiveList> {
+        std::sync::Arc::new(maknae_config::SensitiveList::empty())
+    }
+}
+
+impl maknae_kernel::SensitiveNow for CitingPermit {
+    fn sensitive_now(&self) -> std::sync::Arc<maknae_config::SensitiveList> {
+        std::sync::Arc::new(maknae_config::SensitiveList::empty())
+    }
+}
+
+impl maknae_kernel::SensitiveNow for PanickingName {
+    fn sensitive_now(&self) -> std::sync::Arc<maknae_config::SensitiveList> {
+        std::sync::Arc::new(maknae_config::SensitiveList::empty())
+    }
+}
+
+impl<A: maknae_kernel::SensitiveNow> maknae_kernel::SensitiveNow for Counting<A> {
+    fn sensitive_now(&self) -> std::sync::Arc<maknae_config::SensitiveList> {
+        self.inner.sensitive_now()
+    }
 }

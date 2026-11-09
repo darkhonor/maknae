@@ -471,11 +471,13 @@ count of degraded emissions is the signal your enclave should alert on.
 ```
 
 A **deny** record (a non-enrolled in-group uid running any verb, or a read of a
-deny-listed path) looks like this — the REASON and the OBJECT live only here, never
-on the wire (the client sees the generic `not authorized`):
+path in `sensitive.yaml`) looks like this. The REASON lives only here. A request for
+a listed path is answered `Protected`, and the list and entry reach the client, which
+shows them to you and never to the model; any other refusal is the generic
+`not authorized`:
 
 ```json
-{"action":"fs.read","au3_1":{},"event":"request","object":"/home/<user>/.ssh/id_rsa","outcome":{"posture":"unauthorized","reason":"denied by policy entry Read(~/.ssh/**)","result":"deny"},...}
+{"action":"fs.read","au3_1":{},"event":"request","object":"/home/<user>/.ssh/id_rsa","outcome":{"posture":"unauthorized","reason":"sensitive: host ~/.ssh/**","result":"deny"},...}
 ```
 
 (seq 1 is the connection-admission record emitted by `handle` on cert-verified
@@ -651,9 +653,9 @@ enrolled agent's account refuses the reload ([Enroll an Agent Daemon](#enroll-an
   from a snapshot of `authz.yaml` compiled at start and at each reload (#489).
   `maknae read ~/some-file` returns bytes under `Read(~/**)`
   (the kernel decides; the CLI reads under your credentials);
-  `maknae read ~/.ssh/id_rsa` is DENIED by the shipped deny list — wire says
-  `not authorized`, the trail says which pattern and which object, and the record's
-  `rule` block names the policy section that decided it. A policy edit — re-roling or
+  `maknae read ~/.ssh/id_rsa` is refused by the shipped `sensitive.yaml` — the CLI
+  says the path is protected by `/etc/maknae/sensitive.yaml (~/.ssh/**)`, and the trail
+  records `sensitive: host ~/.ssh/**` and the object. A policy edit — re-roling or
   removing an identity, or adding a new username — applies at the next
   [reload](#reload-the-policy) or restart, never on the next request. A reload resolves
   every username on the host the way a start does, and refuses (keeping the running
@@ -805,7 +807,7 @@ Plane leaves now carry `spiffe://<deployment_id>/plane/{kernel,cli}` URI-SANs, a
 
 ### 3d. More than one user
 
-Enroll writes `~/.maknae` only for the account that ran it. To give another local account the agent, follow [first-provider step 4a](first-provider.md#4a-add-another-local-user): it adds the account to the `maknae` group, copies your CLI configuration to it, binds it in `bindings.yaml` and creates its Vault user. The consequence for you: once `bindings.yaml` has a `bindings:` block, only the names it lists have a role, so the enrolled administrator must be listed under `admin` too, and step 7's grant then belongs under each bound role; [reload](#reload-the-policy) `maknaed` after adding a name. A second user's file actions are confined to their own home, resolved per request.
+Enroll writes `~/.maknae` only for the account that ran it. To give another local account the agent, follow [first-provider step 4a](first-provider.md#4a-add-another-local-user): it adds the account to the `maknae` group, copies your CLI configuration to it, binds it in `bindings.yaml` and creates its Vault user. The consequence for you: once `bindings.yaml` has a `bindings:` block, only the names it lists have a role, so the enrolled administrator must be listed under `admin` too, and step 7's grant then belongs under each bound role; [reload](#reload-the-policy) `maknaed` after adding a name. A second user's `~` is their own home, resolved per request.
 
 ### 4. Check the deputy's bounds
 
@@ -892,7 +894,7 @@ An `authz.yaml` kept from before #490 has no `roles:` key ([upgrading](upgrading
 
 **Grant `admin`, not `user`.** Enroll writes `bindings.yaml` with a `bindings:` key that lists you under **`admin`** (step 3), so the grants belong under `admin`. Only a keyless host that has not been re-enrolled falls back to resolving the enrolled principal to `admin` (`crates/maknae-authz-basic/src/binding.rs`); if you edit `bindings:` there, that fallback stops applying and the grants belong under whichever role you bind ([Bind a user, contain a subject](#bind-a-user-contain-a-subject)).
 
-The shipped path rules already allow `Read(~/**)` and `Write(~/projects/**)`, so the write target must be under `~/projects/`.
+The shipped path rules already allow `Read(~/**)` and `Write(~/projects/**)`, so the write target must be under `~/projects/`. A write needs `Read` on its path as well as `Write`: a `Write(...)` rule with no `Read(...)` rule covering the same path permits no write, from the agent or from `maknae write`.
 
 ### 8. Prepare the files
 
@@ -1003,13 +1005,13 @@ Every read is paged: each page is its own decided, recorded `fs.read` attempt of
 
 Since #388 the agent replaces an existing file only if it has read that file in this conversation and the file has not changed since — Claude Code's rule. A new file needs no read.
 
-- **What the model is told.** `not written — the file exists and you have not read it; read it first, then write`, or `not written — the file changed since you read it; read it again, then write`. Nothing was written in either case; the model reads, then writes again. A path the policy refuses is still answered `outcome unknown` and never "read it first": the check runs only after the kernel grants the attempt.
+- **What the model is told.** `not written — the file exists and you have not read it; read it first, then write`, or `not written — the file changed since you read it; read it again, then write`. Nothing was written in either case; the model reads, then writes again. Either answer is given only when the agent's own read-open of the file succeeds; a file it cannot read (mode `0200`) answers `unavailable — do not retry`. A path the policy refuses answers `unavailable — do not retry` too, never "read it first": the kernel refuses in place of the grant, before the check runs.
 - **What changes count.** The device, inode, size and modification time. A change to permissions or extended attributes alone (`chmod`, `restorecon`) does not refuse a write. A same-size edit within one timestamp tick is not seen, as for paged reads (§12a).
 - **The agent's own writes.** An applied write records the written file's version, so the agent may write the same file again without reading it.
 - **The trail.** A refused replacement has its `fs.write` intent, as every write does, and a completion with `ReportedPathChanged` and no effect. Since #388 that completion can mean "the agent had not read the file, or it changed since", not only a race. The agent's user sees it only in the model's answer and the trail; nothing is printed to the terminal.
 - **Try it.** `printf 'keep me\n' > ~/projects/maknae-242/existing.txt`, then `maknae agent "Replace $HOME/projects/maknae-242/existing.txt with the word hello."` It exits `0` either way, and what the trail shows depends on the model. A model that follows the `write_file` description reads first: an `fs.read`, then one applied `fs.write`. A model that writes blind is refused: an `fs.write` ending `ReportedPathChanged`, then the `fs.read`, then the applied `fs.write`. To see the refusal regardless of the model, edit the file between the agent's read and its write (the "changed since you read it" case).
 - **`maknae write` is not checked.** A human may replace a file without reading it, as before.
-- **Write-permitted, read-denied paths.** If your policy — or the file's own mode, such as `0200` — lets the subject write a path but not read it, the agent cannot replace an existing file there: it is told to read first, and the read is refused. That answer also tells the model a file exists at that path. The shipped policy keeps its read and write denies symmetric; a file mode can still do it.
+- **Write-only paths and unreadable files.** A policy that grants `Write` on a path without `Read` permits no write there, from the agent or from `maknae write`. A file the OS will not let the agent read (mode `0200`) or open for writing (mode `0000`, `0400`) answers `unavailable — do not retry`, as a missing or refused file does, and nothing is written; the agent's terminal shows `write not performed: …; nothing was written`, or `mutation not performed: …; nothing was changed` when the directory the agent holds is not the one the daemon granted. The same answer and line follow any write the agent stopped before attempting it, including one that could not reach the daemon. A write whose finish was not acknowledged after the agent had attempted it still answers `outcome unknown`, and so does a new file the OS refuses for any reason other than a name that exists, a missing or non-directory parent, a symlink loop, an overlong name or a read-only filesystem (a directory the agent cannot write, for example): Linux can create the file before such a refusal.
 - **A refused write still opens the file for writing.** The check runs after the ordinary refusals, which need the file opened for writing, so a tool watching for write-closes (an IDE, a build watcher) sees one, although the bytes, size and modification time are unchanged.
 
 ### 13. Custody check (manual)
@@ -1102,7 +1104,7 @@ With enroll's defaults and the subpath `openai`, the path is `maknae-kv/metadata
 
 ## Reload the policy
 
-`maknaed` decides every request from a snapshot of `/etc/maknae/authz.yaml`, `/etc/maknae/bindings.yaml` and `/etc/maknae/agents/` compiled when it starts. An edit to any of them changes nothing until you reload the daemon or restart it:
+`maknaed` decides every request from a snapshot of `/etc/maknae/authz.yaml`, `/etc/maknae/bindings.yaml`, `/etc/maknae/sensitive.yaml` and `/etc/maknae/agents/` compiled when it starts. An edit to any of them changes nothing until you reload the daemon or restart it:
 
 ```bash
 sudo systemctl reload maknaed                          # Linux
@@ -1111,9 +1113,9 @@ sudo launchctl kill SIGHUP system/io.maknae.maknaed    # macOS
 
 Both send `SIGHUP`, as does `kill -HUP <pid>` for a daemon started by hand. The command returns before the reload finishes, so read the result in the trail.
 
-- **What a reload reads.** `authz.yaml`, `bindings.yaml` and each enrolled agent's `agents/<id>/enrollment.yaml` and `policy.yaml`, together, as one policy ([Enroll an Agent Daemon](#enroll-an-agent-daemon)). It also reads `maknae.yaml` and `config.d/`, only to refresh the pending baseline change that `maknae status` reports; a reload never applies a baseline change, and a `maknae.yaml` that does not validate never refuses a reload. A baseline change applies only through `maknae baseline-accept` ([Change the configuration](#change-the-configuration)).
+- **What a reload reads.** `authz.yaml`, `bindings.yaml`, `sensitive.yaml` and each enrolled agent's `agents/<id>/enrollment.yaml` and `policy.yaml`, together, as one policy ([Enroll an Agent Daemon](#enroll-an-agent-daemon)). It also reads `maknae.yaml` and `config.d/`, only to refresh the pending baseline change that `maknae status` reports; a reload never applies a baseline change, and a `maknae.yaml` that does not validate never refuses a reload. A baseline change applies only through `maknae baseline-accept` ([Change the configuration](#change-the-configuration)).
 - **The bindings are merged, not replaced.** A reload merges `bindings.yaml` with the bindings `maknaed` enforces, entry by entry, against the file it last loaded ([How bindings.yaml and live state merge](#how-bindingsyaml-and-live-state-merge)). An entry root changed takes the file's value; an entry only a live edit changed keeps the live value; an entry both changed fails closed and is counted as a conflict. A file that now holds what `maknaed` already enforces, as after `sudo maknae policy sync`, is adopted with no root edit recorded. A `bindings.yaml` that is missing, or has lost its `bindings:` key, changes nothing once the store holds explicit bindings: the reload is applied, every binding stands, and the loss is recorded.
-- **All or nothing.** A reload loads and validates all of them and resolves every username in `bindings.yaml` on the host, as a start does, so a new username needs only a reload. If any file fails (it does not parse or validate, `authz.yaml` still carries `bindings:`, an agent's `enrollment.yaml` or `policy.yaml` does not parse, `bindings.yaml` binds an agent's service account under `admin`, or an account lookup fails rather than finding no such user), the reload is refused before it touches the store, and the running policy stands; an `authz.yaml` edit made at the same time as a refused `bindings.yaml` edit does not apply either. A name with no account on the host does not refuse the reload: that name alone is affected, and a `graph.identity` record reports it ([Bind a user, contain a subject](#bind-a-user-contain-a-subject); configuration §2.3 lists what refuses the whole file and what is decided per subject). A reload refused while writing the store also keeps the running policy; see the first case under "Records that look out of order" below. The journal (`journalctl -u maknaed`; on macOS `/usr/local/var/log/maknae/maknaed.err`) says `maknaed: reload refused: <cause>; the previous policy stands`. An invalid `authz.yaml` or `bindings.yaml` at start refuses to start, with exit 3.
+- **All or nothing.** A reload loads and validates all of them and resolves every username in `bindings.yaml` on the host, as a start does, so a new username needs only a reload. If any file fails (it does not parse or validate, `sensitive.yaml` is missing, `authz.yaml` still carries `bindings:`, an agent's `enrollment.yaml` or `policy.yaml` does not parse, `bindings.yaml` binds an agent's service account under `admin`, or an account lookup fails rather than finding no such user), the reload is refused before it touches the store, and the running policy stands; an `authz.yaml` edit made at the same time as a refused `bindings.yaml` edit does not apply either. A name with no account on the host does not refuse the reload: that name alone is affected, and a `graph.identity` record reports it ([Bind a user, contain a subject](#bind-a-user-contain-a-subject); configuration §2.3 lists what refuses the whole file and what is decided per subject). A reload refused while writing the store also keeps the running policy; see the first case under "Records that look out of order" below. The journal (`journalctl -u maknaed`; on macOS `/usr/local/var/log/maknae/maknaed.err`) says `maknaed: reload refused: <cause>; the previous policy stands`. An invalid `authz.yaml`, `bindings.yaml` or `sensitive.yaml`, or a missing `sensitive.yaml`, at start refuses to start, with exit 3.
 - **One at a time.** Reloads run in turn. Signals that arrive while one runs produce one more reload, and a `SIGHUP` sent while the daemon is starting is applied once it serves. One that lands in the first milliseconds of the process, before its handler exists, ends it; systemd (`RestartForceExitStatus=SIGHUP`) and launchd (`KeepAlive`) start it again, after `RestartSec` (5 seconds) on Linux.
 - **Restarting into an accepted baseline.** Once an accept that applies by restart has begun, a reload is refused (`reload refused: shutdown`).
 - **Stopping.** A graceful stop abandons a reload that is still loading the file, recorded as `reload refused: shutdown`. It waits up to 5 seconds for a reload that already holds its turn (writing the store or its audit records), then stops without it, so the stop record and the token revoke never wait on a reload for longer than that.
@@ -1155,6 +1157,19 @@ If the intent itself cannot be appended, nothing is loaded and no outcome is wri
 - **A `graph.identity` release record or a `graph.sync` merge record (`graph.anchor:"releasing"` or `"syncing"`) with no `transitioned` checkpoint at its revision.** These records are written ahead of the store write, at boot, at reload and for a live edit. A failure after they are appended (the transition intent, the store write, an abort) leaves them with nothing after them, and what they name did not happen: the store and the running policy still hold the containment, the bindings and the merge state they held before. Only a record followed by a `transitioned` checkpoint at the same revision happened.
 - **An applied reload with no `graph.identity` record for a problem it reports.** An identity problem record that cannot be appended after an applied reload goes to the journal only (`maknaed: AUDIT WRITE FAILED on an identity record (<reason>): <cause>`) and is not retried; the policy is applied, and `maknae status` and `maknae subject-list` show the problem.
 - **A `shutdown` record between an accept's `graph.transition` and its outcome.** An accept that applies by restart starts the drain once the store holds the accepted baseline, before its `graph.checkpoint` is appended, and the listener then writes the stop record while the accept is still writing its own. The trail shows the `graph.transition`, then the `shutdown` record and the `graph.checkpoint` in either order, then the `graph.baseline` outcome. A live change that could not be installed and restarts instead has the same shape after its checkpoint: the `shutdown` record can precede the outcome. The accept stands in each case; the next start reports what it found.
+
+### Edit and reload the host sensitive list
+
+`/etc/maknae/sensitive.yaml` names the paths no file verb reaches, for any role and whatever `authz.yaml` grants ([configuration §2.5](configuration.md#25-sensitiveyaml-617)). The packages ship it with the defaults; add a path the host keeps a secret in, or remove one a workflow needs.
+
+1. **Edit as root**, keeping the owner and mode: `sudoedit /etc/maknae/sensitive.yaml`. The file must stay `root:_maknae 0640` in a root-owned `/etc/maknae` no group or other can write.
+2. **Reload**, as above: `sudo systemctl reload maknaed`, or on macOS `sudo launchctl kill SIGHUP system/io.maknae.maknaed`.
+3. **Read the result.** An applied reload is `reload applied: …` in the trail, and the new list holds from the next request. A refused one is `reload refused: policy load: …`, naming `sensitive.yaml` and the cause (for example ``sensitive.yaml: `sensitive` is required (write `sensitive: []` for none)``); the list in force before the edit stands, and so does every `authz.yaml` or `bindings.yaml` edit made with it.
+4. **Check it.** `maknae read <path>` for a path you added prints `maknae: <path> is protected by /etc/maknae/sensitive.yaml (<entry>). Maknae will not touch it; run this outside Maknae.`, whether or not the file exists, and the trail records `sensitive: host <entry>`.
+
+A deleted file is not an empty list: a reload is refused while `sensitive.yaml` is missing, and a start refuses (exit 3). To protect nothing, which is not recommended, write `schema_version: 1` and `sensitive: []`. Never write `/**`, or on macOS `/System/Volumes/Data/**`: either refuses every file request.
+
+A user's own entries go in `~/.maknae/sensitive.yaml`, which needs no reload: it is read when a conversation opens, and an edit takes effect in the next conversation.
 
 ---
 

@@ -148,7 +148,7 @@ The enrolled administrator resolves to the `admin` role while `/etc/maknae/bindi
 
 Enroll writes `~/.maknae` only for the account that ran it. Each further local user needs four things from you.
 
-**A second user works in their own home.** For each request the kernel resolves the requesting user's home from the kernel-verified peer ID, confines file actions to it, and `~` in `authz.yaml` means that home for every role. The shipped `Read(~/.maknae/**)` deny therefore protects each user's own `~/.maknae`. A grant for a folder that does not exist yet permits once the folder is created, with no restart. The home is resolved only for a file action, after the request arrives. If it cannot be used, conversation turns, `whoami`, liveness and admin commands still work, and file actions are refused. The user sees only `not authorized`; the cause is in the audit record's reason, `requester home unavailable: <cause>`, which the administrator reads with the `jq` query in [runbook step 11](runbook.md#11-quote-the-audit-trail). The cause is `unresolvable` when the home does not exist, is not a directory, is `/` or is not valid UTF-8; `timed out` when it does not resolve within the time limit, as on a hung network mount; `at capacity for this requester` when that user already has a resolution in progress; and `at capacity` when every resolution slot is busy. Each user can have at most one home resolution and one file-action preparation running at a time, so a stalled home delays only that user's file actions, and a file action from a user whose previous one is still being prepared or decided is refused with `mutation worker budget exhausted for this requester`. A granted file action then keeps one of 16 shared workers until its client reports it finished or the read timeout passes, so 16 granted file actions in flight, from one user or several, refuse every user's next file action with `mutation worker budget exhausted`. Conversation bookkeeping (`session.new`, `close`, `list`, `delete`, and each prompt's conversation check and reply) does not use those workers: each user has one store slot beside a separate pool of 16 store workers, so a stalled store request delays only that user's next one, and other users only when 16 users' store requests are stalled at once. What a second user's file actions do was read from the code, not yet measured.
+**A second user works in their own home.** For each request the kernel resolves the requesting user's home from the kernel-verified peer ID, and `~` in `authz.yaml` and `sensitive.yaml` means that home for every role. The shipped `~/.maknae/**` entry in `/etc/maknae/sensitive.yaml` therefore protects each user's own `~/.maknae`. File actions are not confined to the home: a path outside it is decided by the grants, and a request to delete the home itself, or a directory containing it, is refused. A grant for a folder that does not exist yet permits once the folder is created, with no restart. The home is resolved only for a file action, after the request arrives. If it cannot be used, conversation turns, `whoami`, liveness and admin commands still work, and file actions are refused. The user sees only `not authorized`; the cause is in the audit record's reason, `requester home unavailable: <cause>`, which the administrator reads with the `jq` query in [runbook step 11](runbook.md#11-quote-the-audit-trail). The cause is `unresolvable` when the home does not exist, is not a directory, is `/` or is not valid UTF-8; `timed out` when it does not resolve within the time limit, as on a hung network mount; `at capacity for this requester` when that user already has a resolution in progress; and `at capacity` when every resolution slot is busy. Each user can have at most one home resolution and one file-action preparation running at a time, so a stalled home delays only that user's file actions, and a file action from a user whose previous one is still being prepared or decided is refused with `mutation worker budget exhausted for this requester`. A granted file action then keeps one of 16 shared workers until its client reports it finished or the read timeout passes, so 16 granted file actions in flight, from one user or several, refuse every user's next file action with `mutation worker budget exhausted`. Conversation bookkeeping (`session.new`, `close`, `list`, `delete`, and each prompt's conversation check and reply) does not use those workers: each user has one store slot beside a separate pool of 16 store workers, so a stalled store request delays only that user's next one, and other users only when 16 users' store requests are stalled at once. What a second user's file actions do was read from the code, not yet measured.
 
 **On a multi-user host, other local users can read a running `maknae agent`'s prompt and `--provider` from its command line** (#436, undecided).
 
@@ -204,25 +204,8 @@ Enroll writes `~/.maknae` only for the account that ran it. Each further local u
      allow:
        - "Read(~/**)"
        - "Write(~/projects/**)"
-     deny:
-       - "Read(~/.ssh/**)"
-       - "Read(~/.gnupg/**)"
-       - "Read(~/.aws/**)"
-       - "Read(~/.vault-token)"
-       - "Read(~/.netrc)"
-       - "Read(~/.git-credentials)"
-       - "Read(~/.kube/**)"
-       - "Read(~/.docker/config.json)"
-       - "Read(~/.maknae/**)"
-       - "Write(~/.ssh/**)"
-       - "Write(~/.gnupg/**)"
-       - "Write(~/.aws/**)"
-       - "Write(~/.vault-token)"
-       - "Write(~/.netrc)"
-       - "Write(~/.git-credentials)"
-       - "Write(~/.kube/**)"
-       - "Write(~/.docker/config.json)"
-       - "Write(~/.maknae/**)"
+     # The credential and system paths no role may reach are in sensitive.yaml.
+     deny: []
    roles:
      admin:
        allow:
@@ -257,6 +240,27 @@ Enroll writes `~/.maknae` only for the account that ran it. Each further local u
 4. **Create the user's Vault userpass user and entity** and set their password (step 1).
 
 The user then follows [You (the user)](#you-the-user).
+
+### 4b. Let the model work outside your home
+
+The shipped grants cover your home only: `Read(~/**)` reads anywhere beneath it, and `Write(~/projects/**)` writes beneath `~/projects`. A tree elsewhere, such as a source tree in `/opt/Development`, needs a grant of its own. Add it to `permissions: allow:` in `/etc/maknae/authz.yaml` (`sudoedit`, editing in place):
+
+```yaml
+permissions:
+  allow:
+    - "Read(~/**)"
+    - "Write(~/projects/**)"
+    - "Read(/opt/Development/**)"
+    - "Write(/opt/Development/**)"
+  deny: []
+```
+
+Then reload (`sudo systemctl reload maknaed`; on macOS, `sudo launchctl kill SIGHUP system/io.maknae.maknaed`).
+
+- **A write needs both lines.** Every write is permitted only when `Read` and `Write` both cover the path, so `Write(/opt/Development/**)` alone permits no write there.
+- **Every role gets it.** A `permissions:` entry applies to every role. To give it to one account only, put it under that account's `subjects:` entry ([runbook](runbook.md#7-grants-destinations-and-subjects-authzyaml)). A subject's `permissions.allow` replaces the site list for that account, so repeat `Read(~/**)` and `Write(~/projects/**)` there if the account should keep them.
+- **The other bounds still apply.** The OS still decides what you can open, since the request runs under your own account, and a path in `/etc/maknae/sensitive.yaml` or your `~/.maknae/sensitive.yaml` stays refused whatever the grant says ([configuration §2.5](configuration.md#25-sensitiveyaml-617)).
+- **Without the grant** a request there is refused, and the trail says why (`role user: no capability entry for fs.read`).
 
 ## 5. Start
 
@@ -587,6 +591,6 @@ The CLI's rows. `maknae login` keeps your Vault token in your default keychain, 
 - **Your own processes can read your own key.** Your Vault login can read it, so any process running as you can, outside any turn. This is a named residual (ADR-0028); detecting such reads is #429.
 - **Another user cannot read your key.** Vault's policy limits each login to its own `<user_prefix>/<username>/`, and the kernel derives the key path from the uid that connected, never from a file.
 - **Every action is decided before it happens and recorded.** That covers each prompt, read and write, and it holds for refusals too.
-- **The deny list holds.** Reads under `~/.ssh`, `~/.aws` and similar are refused by policy, and nothing from them reaches the model.
+- **The protected paths hold.** Every path in `/etc/maknae/sensitive.yaml`, such as `~/.ssh`, `~/.aws`, `/etc/shadow` and `/proc/*/environ`, is refused to every file verb whatever `authz.yaml` grants, and nothing from it reaches the model, which is told only that the path is protected by policy.
 - **On macOS the daemon's Vault SecretID and the deputy's sealing key are System-keychain items that only their own signed binaries can read.** The signed daemon read its item on a real install (measured); the deputy's read is inferred from the successful provider turns. They are bound to code identity under a root-held key, not to hardware. An administrator can approve a read in a console session (measured), and root can copy the keychain and its key and decrypt them off the host (inferred). See ADR-0018 decision 6.
 - **What you did not ask for does not leave.** Only the conversation leaves the host, including file contents the agent was allowed to read.

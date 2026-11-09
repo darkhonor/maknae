@@ -7,7 +7,7 @@ use maknae_state::envelope::{open, seal, WrappingKey};
 use std::path::{Path, PathBuf};
 
 pub const RECORD_SUFFIX: &str = ".conv";
-pub const RECORD_MAX_BYTES: u64 = 64 << 10;
+pub const RECORD_MAX_BYTES: u64 = 128 << 10;
 
 pub struct DirBlobs {
     anchor: Anchor,

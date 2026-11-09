@@ -21,6 +21,8 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 # itself (`BasicPolicy`) lives HERE because it is the config's default
 # vocabulary; the seam is policy-agnostic and depends on nothing of ours.
 maknae-security = { path = "../maknae-security" }
+icu_normalizer = { version = "2.4.0", default-features = false, features = ["compiled_data"] }
+icu_casemap = { version = "2.4.0", default-features = false, features = ["compiled_data"] }
 
 [target.'cfg(unix)'.dependencies]
 maknae-io = { path = "../maknae-io" }

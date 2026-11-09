@@ -743,7 +743,7 @@ pub async fn handle<S, E, P>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     E: AuditEmit + Send + Sync + 'static,
-    P: Authorizer + Send + Sync + 'static,
+    P: Authorizer + crate::SensitiveNow + Send + Sync + 'static,
 {
     handle_with_attempt_caps(
         stream,
@@ -826,7 +826,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     E: AuditEmit + Send + Sync + 'static,
-    P: Authorizer + Send + Sync + 'static,
+    P: Authorizer + crate::SensitiveNow + Send + Sync + 'static,
 {
     let emit = Arc::new(SessionEmit {
         inner: emit,
@@ -1285,6 +1285,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             &classification_policy_name,
             Arc::clone(&conversations),
             &stamp,
+            authorizer.sensitive_now(),
         )
         .await;
         close_bounded(&mut stream).await;
@@ -2811,7 +2812,7 @@ async fn serve_conversation_verb<S, E, P>(
         _ => None,
     };
     let asked = match verb {
-        Verb::SessionNew { cwd } => Some(cwd.clone()),
+        Verb::SessionNew { cwd, .. } => Some(cwd.clone()),
         _ => None,
     };
     let early = |reason: &str| {
@@ -2894,7 +2895,10 @@ async fn serve_conversation_verb<S, E, P>(
         )
     };
     match verb {
-        Verb::SessionNew { cwd: requested } => {
+        Verb::SessionNew {
+            cwd: requested,
+            sensitive,
+        } => {
             let refuse_cwd = |why: &str| decided("deny", why, "unauthorized");
             if let Err(why) = crate::mutation::checked(requested) {
                 trail
@@ -2903,6 +2907,10 @@ async fn serve_conversation_verb<S, E, P>(
                         &refuse_cwd(&format!("cwd fails operand pre-gate: {why}")),
                     )
                     .await;
+                return;
+            }
+            if let Err(why) = record::personal_sensitive(sensitive) {
+                trail.unauthorized(stream, &refuse_cwd(&why)).await;
                 return;
             }
             let Some(fd) = delegated.take() else {
@@ -2955,7 +2963,10 @@ async fn serve_conversation_verb<S, E, P>(
                     return;
                 }
             };
-            let rec = record::opened(id.clone(), uid, cwd.clone(), now, &lowest);
+            let rec = record::ConversationRecord {
+                sensitive: sensitive.clone(),
+                ..record::opened(id.clone(), uid, cwd.clone(), now, &lowest)
+            };
             let mut intent = at(decided("permit", "intent recorded", "authorized"), &cwd);
             intent.conversation = Some(id.as_str().to_owned());
             if !trail.record_bounded(&intent).await {
@@ -4001,7 +4012,7 @@ pub async fn accept_loop<A, E, P>(
 where
     A: PlaneAccept + Send + Sync + 'static,
     E: AuditEmit + Send + Sync + 'static,
-    P: Authorizer + Send + Sync + 'static,
+    P: Authorizer + crate::SensitiveNow + Send + Sync + 'static,
 {
     let channel_mismatch = acceptor.peer_auth() != &class.peer_auth;
     if channel_mismatch {
@@ -7953,10 +7964,11 @@ async fn boot_after_sink(
         Ok(authorizer) => authorizer,
         Err(e) => return Err(refuse(e.to_string()).await),
     };
-    // ADR-0008 decision 1 (#154) + #148: the PDP is the COMPOSITION, and both
-    // floors are named fields of it -- the sealed `Baseline` (-basic, from the
-    // gate above) and the booted classification ceiling, evaluated through the
-    // classification SYSTEM boot selected (ADR-0022). Neither can be absent:
+    // ADR-0008 decision 1 (#154) + #148 + #617: the PDP is the COMPOSITION, and its
+    // three floors are named fields of it -- the sealed `Baseline` (-basic, from the
+    // gate above), the booted classification ceiling, evaluated through the
+    // classification SYSTEM boot selected (ADR-0022), and the `sensitive.yaml`
+    // operand (ADR-0034). None can be absent:
     // the type has no constructor without them. Built HERE, unconditionally,
     // from the gate's own return value; `ci/gates/authz-composition-drift.sh`
     // pins this call site so a future selection key fails CI.
@@ -7985,9 +7997,13 @@ async fn boot_after_sink(
         // trail says what this process will refuse (content marked above
         // that level, in that system), not only which operands it composes.
         &format!(
-            "authorization composition: {composition_name}; system: {}; ceiling: {}",
+            "authorization composition: {composition_name}; system: {}; ceiling: {}; sensitive: {} host entries",
             boot.classification_policy_name(),
-            boot.ceiling().classification.name
+            boot.ceiling().classification.name,
+            maknae_authz_basic::Baseline::snapshot(authorizer.baseline())
+                .sensitive()
+                .entries()
+                .count()
         ),
         "authorized",
         &audit_cfg.au3_1,
@@ -9256,6 +9272,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             put(&d.0, f, SELF_SIGNED_PEM, 0o640);
         }
         put(&d.0, "maknaed-approle-id", "maknaed-role-id\n", 0o640);
+        crate::test_fixtures::write_empty_sensitive(&d.0);
     }
 
     /// Run `run_inner` to completion on a FRESH single-threaded runtime, entirely
@@ -9654,7 +9671,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             assert_eq!(comp_rec.event, "boot");
             assert_eq!(
                 comp_rec.outcome.reason,
-                "authorization composition: maknae-authz-basic+maknae-ceiling; system: US; ceiling: UNCLASSIFIED"
+                "authorization composition: maknae-authz-basic+maknae-ceiling+maknae-sensitive; system: US; ceiling: UNCLASSIFIED; sensitive: 0 host entries"
             );
             assert_eq!(comp_rec.outcome.posture, "authorized");
             assert_eq!(comp_rec.policy_sha256.as_ref().map(String::len), Some(64));
@@ -13559,6 +13576,50 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         assert_eq!(trail_of(&d, "audit.jsonl").last().unwrap().action, "authz");
     }
 
+    fn refused_naming_sensitive_yaml(d: &Dir) -> String {
+        let r = boot(d);
+        let Err(e @ RunError::Authz(m)) = &r else {
+            panic!("expected the authz refusal, got {r:?}");
+        };
+        assert_eq!(refusal_exit_code(e), 3);
+        assert!(m.contains(maknae_config::SENSITIVE_FILE), "{m}");
+        let last = trail_of(d, "audit.jsonl").pop().unwrap();
+        assert_eq!(
+            (last.action.as_str(), last.outcome.result.as_str()),
+            ("authz", "deny")
+        );
+        assert!(
+            last.outcome.reason.contains(maknae_config::SENSITIVE_FILE),
+            "{}",
+            last.outcome.reason
+        );
+        m.clone()
+    }
+
+    #[test]
+    fn a_missing_sensitive_yaml_refuses_boot_with_the_authz_record() {
+        let _g = env_lock();
+        let d = fixture("no-sensitive");
+        let path = d.0.join(maknae_config::SENSITIVE_FILE);
+        std::fs::remove_file(&path).unwrap();
+        let m = refused_naming_sensitive_yaml(&d);
+        assert!(m.contains(&path.display().to_string()), "{m}");
+    }
+
+    #[test]
+    fn a_malformed_sensitive_yaml_refuses_boot_with_the_authz_record() {
+        let _g = env_lock();
+        let d = fixture("bad-sensitive");
+        put(
+            &d.0,
+            maknae_config::SENSITIVE_FILE,
+            "schema_version: 1\nsensitive: [\"relative/path\"]\n",
+            0o640,
+        );
+        let m = refused_naming_sensitive_yaml(&d);
+        assert!(m.contains("relative/path"), "{m}");
+    }
+
     #[test]
     fn a_first_start_offload_or_principal_refusal_is_audited_as_today() {
         let _g = env_lock();
@@ -13717,6 +13778,7 @@ mod home_resolution_tests {
         )
         .unwrap();
         std::fs::set_permissions(&policy, std::fs::Permissions::from_mode(0o640)).unwrap();
+        crate::test_fixtures::write_empty_sensitive(&dir.0);
         let us = &maknae_config::BasicPolicy;
         let authorizer = Arc::new(crate::Composition::new(
             maknae_authz_basic::HermeticAuthorizer::new(
@@ -13793,6 +13855,7 @@ mod home_resolution_tests {
             std::fs::Permissions::from_mode(0o640),
         )
         .unwrap();
+        crate::test_fixtures::write_empty_sensitive(&dir.0);
         let us = &maknae_config::BasicPolicy;
         let authorizer = Arc::new(crate::Composition::new(
             maknae_authz_basic::HermeticAuthorizer::new(
@@ -13865,7 +13928,7 @@ mod home_resolution_tests {
         assert_ne!(
             records.last().expect("a request record").outcome.reason,
             unresolvable,
-            "the home this request resolved is the one confined to"
+            "the home this request resolved is the one it is decided on"
         );
     }
 }
@@ -13933,6 +13996,7 @@ mod admission_bound_tests {
         )
         .unwrap();
         std::fs::set_permissions(&policy, std::fs::Permissions::from_mode(0o640)).unwrap();
+        crate::test_fixtures::write_empty_sensitive(&root);
         let uid = nix::unistd::geteuid().as_raw();
         let us = &maknae_config::BasicPolicy;
         let authorizer = Arc::new(crate::Composition::new(
@@ -14863,6 +14927,10 @@ mod reload_fixture {
             write_0640(&self.bindings(), body);
         }
 
+        pub(super) fn write_sensitive(&self, body: &str) {
+            crate::test_fixtures::write_sensitive(&self.dir, body);
+        }
+
         pub(super) fn mirror(&self) -> String {
             std::fs::read_to_string(self.state_dir().join(maknae_config::MIRROR_FILE)).unwrap()
         }
@@ -15386,6 +15454,7 @@ mod reload_fixture {
         let layer = files_baseline(&dir, &opts.env);
         let paths = maknae_authz_basic::PolicyPaths::in_dir(&dir);
         write_0640(&paths.authz, opts.authz);
+        crate::test_fixtures::write_empty_sensitive(&dir);
         if let Some(b) = opts.bindings {
             write_0640(&paths.bindings, b);
         }
@@ -18122,6 +18191,71 @@ mod reload_tests {
             Some(vec![])
         );
         assert_eq!(fx.sync_lines(), ["unsynced=0", "conflict=0", "file=lost"]);
+    }
+
+    fn host_list(fx: &Fx) -> Vec<String> {
+        fx.baseline()
+            .snapshot()
+            .sensitive()
+            .entries()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_reload_with_a_malformed_sensitive_yaml_keeps_the_enforced_list() {
+        let fx = fixture("sens_bad", AUTHZ, Some(ROOT_ADMIN)).await;
+        fx.write_sensitive("schema_version: 1\nsensitive: [\"~/.ssh/**\"]\n");
+        bounded(fx.reloader.run()).await.unwrap();
+        assert_eq!(host_list(&fx), ["~/.ssh/**"]);
+        let before = fx.baseline().snapshot();
+        let store = fx.store_bytes();
+        for body in ["schema_version: 1\nsensitive: [\n", "schema_version: 1\n"] {
+            fx.write_sensitive(body);
+            let got = bounded(fx.reloader.run()).await;
+            assert!(
+                matches!(&got, Err(crate::reload::Refusal::Load(m)) if m.contains(maknae_config::SENSITIVE_FILE)),
+                "{body:?}: {got:?}"
+            );
+            assert!(Arc::ptr_eq(&before, &fx.baseline().snapshot()));
+            assert_eq!(host_list(&fx), ["~/.ssh/**"]);
+            assert_eq!(fx.store_bytes(), store);
+            let last = outcomes(&fx.reload_records()).pop().unwrap();
+            assert_eq!((last.0.as_str(), last.1.as_str()), ("graph.reload", "deny"));
+            assert!(
+                last.2.starts_with("reload refused: policy load:")
+                    && last.2.contains(maknae_config::SENSITIVE_FILE),
+                "{}",
+                last.2
+            );
+        }
+        std::fs::remove_file(fx.dir.join(maknae_config::SENSITIVE_FILE)).unwrap();
+        let got = bounded(fx.reloader.run()).await;
+        assert!(
+            matches!(&got, Err(crate::reload::Refusal::Load(m)) if m.contains(maknae_config::SENSITIVE_FILE)),
+            "{got:?}"
+        );
+        assert_eq!(host_list(&fx), ["~/.ssh/**"]);
+    }
+
+    #[tokio::test]
+    async fn a_reload_that_removes_an_entry_takes_effect() {
+        let fx = fixture("sens_drop", AUTHZ, Some(ROOT_ADMIN)).await;
+        assert!(host_list(&fx).is_empty());
+        fx.write_sensitive("schema_version: 1\nsensitive: [\"~/.ssh/**\", \"/etc/shadow\"]\n");
+        bounded(fx.reloader.run()).await.unwrap();
+        assert_eq!(host_list(&fx), ["~/.ssh/**", "/etc/shadow"]);
+        let listed = fx.baseline().policy_sha256();
+        fx.write_sensitive("schema_version: 1\nsensitive: [\"/etc/shadow\"]\n");
+        bounded(fx.reloader.run()).await.unwrap();
+        assert_eq!(host_list(&fx), ["/etc/shadow"]);
+        let last = fx.reload_records().pop().unwrap();
+        assert_eq!(last.outcome.result, "permit");
+        assert_eq!(
+            last.policy_sha256.as_deref(),
+            Some(fx.baseline().policy_sha256().as_str())
+        );
+        assert_ne!(fx.baseline().policy_sha256(), listed);
     }
 
     #[tokio::test]

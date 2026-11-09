@@ -33,6 +33,10 @@ async fn drive_in(
     task.await.unwrap();
     response
 }
+/// `fs.write` needs `Read` as well as `Write` on its path (ADR-0034 decision 7).
+fn writer(tag: &str) -> Fixture {
+    Fixture::with_rules(tag, &["Read", "Write"], &[], "")
+}
 fn write_verb(target: &std::path::Path, bytes: &[u8], conversation: Option<&str>) -> Verb {
     Verb::FsWrite {
         path: target.to_str().unwrap().into(),
@@ -139,7 +143,7 @@ async fn granted(client: &mut tokio::io::DuplexStream) -> maknae_proto::Mutation
 }
 #[tokio::test]
 async fn a_foreign_writer_during_the_report_read_ends_the_session_as_a_sender_mismatch() {
-    let fx = Fixture::new("report_sender_mismatch", "Write");
+    let fx = writer("report_sender_mismatch");
     let target = fx.root.join("unique-existing-write-sentinel");
     std::fs::write(&target, b"original").unwrap();
     let (writer, reader) = tokio::net::UnixStream::pair().unwrap();
@@ -192,7 +196,7 @@ async fn a_foreign_writer_during_the_report_read_ends_the_session_as_a_sender_mi
 }
 #[tokio::test]
 async fn a_loop_write_records_its_conversation_on_intent_progress_and_completion() {
-    let fx = Fixture::new("conversation_success", "Write");
+    let fx = writer("conversation_success");
     let target = fx.root.join("unique-existing-write-sentinel");
     std::fs::write(&target, b"old").unwrap();
     let records = Records::new(0);
@@ -290,7 +294,7 @@ async fn failed_intent_preserves_existing_bytes_and_length() {
 #[tokio::test]
 async fn failed_progress_append_withholds_the_ack_and_claims_no_rollback() {
     use maknae_proto::{EffectEntry, MutationReport, ReportedEffect};
-    let fx = Fixture::new("completion_fail", "Write");
+    let fx = writer("completion_fail");
     let target = fx.root.join("unique-existing-write-sentinel");
     std::fs::write(&target, b"old").unwrap();
     let records = Records::new(3);
@@ -426,7 +430,7 @@ async fn a_replacement_delegating_a_writable_descriptor_is_refused_before_intent
 
 #[tokio::test]
 async fn permitted_alias_write_audits_requested_and_verified_objects() {
-    let fx = Fixture::new("permitted_alias_audit", "Write");
+    let fx = writer("permitted_alias_audit");
     let target = fx.root.join("unique-verified-alias-write-sentinel");
     let alias = fx.root.join("unique-requested-write-alias");
     std::fs::write(&target, b"original-alias-target").unwrap();
@@ -555,7 +559,7 @@ async fn ack(client: &mut tokio::io::DuplexStream) -> Option<maknae_proto::Mutat
 }
 #[tokio::test]
 async fn namespace_grant_requires_durable_intent_and_never_creates_as_daemon() {
-    let fx = Fixture::new("grant_order", "Write");
+    let fx = writer("grant_order");
     let records = GateRecords::new(2);
     let (mut client, task) = namespace_start(&fx, records.clone(), create_verb(&fx)).await;
     records.entered.notified().await;
@@ -578,7 +582,7 @@ async fn namespace_grant_requires_durable_intent_and_never_creates_as_daemon() {
 #[tokio::test]
 async fn false_namespace_success_is_only_client_reported_and_ack_waits_for_audit() {
     use maknae_proto::{EffectEntry, MutationReport, ReportedEffect, ReportedFinish};
-    let fx = Fixture::new("false_client_success", "Write");
+    let fx = writer("false_client_success");
     let records = GateRecords::new(3);
     let (mut client, task) = namespace_start(&fx, records.clone(), create_verb(&fx)).await;
     let RespResult::Ok(Payload::MutationAttempt(grant)) =
@@ -642,7 +646,7 @@ async fn false_namespace_success_is_only_client_reported_and_ack_waits_for_audit
 #[tokio::test]
 async fn mismatched_report_and_failed_report_audit_send_no_ack() {
     for (tag, fail, wrong) in [("wrong_id", 0, true), ("report_audit_failure", 3, false)] {
-        let fx = Fixture::new(tag, "Write");
+        let fx = writer(tag);
         let records = Records::new(fail);
         let (mut client, task) = namespace_start(&fx, records.clone(), create_verb(&fx)).await;
         let RespResult::Ok(Payload::MutationAttempt(grant)) =
@@ -690,7 +694,7 @@ async fn mismatched_report_and_failed_report_audit_send_no_ack() {
 }
 #[tokio::test]
 async fn a_replacement_grant_waits_for_durable_intent_and_the_daemon_never_writes() {
-    let fx = Fixture::new("cancel_waiter", "Write");
+    let fx = writer("cancel_waiter");
     let target = fx.root.join("unique-existing-write-sentinel");
     std::fs::write(&target, b"original").unwrap();
     let records = GateRecords::new(2);
@@ -782,7 +786,7 @@ async fn mkdir_every_prefix_is_decided_and_alias_deny_uses_verified_path() {
 #[tokio::test]
 async fn user_and_admin_share_write_policy_and_bad_mkdir_suffix_cannot_grant() {
     for role in ["user", "admin"] {
-        let fx = Fixture::new(&format!("same_policy_{role}"), "Write");
+        let fx = writer(&format!("same_policy_{role}"));
         let bindings = std::fs::read_to_string(fx.paths().bindings)
             .unwrap()
             .replace("  user:", &format!("  {role}:"));
@@ -1014,7 +1018,7 @@ async fn namespace_progress_does_not_extend_configured_absolute_deadline() {
 #[tokio::test]
 async fn a_replacement_grant_accepts_only_replaced_file_reports() {
     use maknae_proto::{EffectEntry, MutationReport, ReportedEffect};
-    let fx = Fixture::new("late_rename", "Write");
+    let fx = writer("late_rename");
     let target = fx.root.join("unique-existing-write-sentinel");
     std::fs::write(&target, b"unmodified-after-wrong-report").unwrap();
     let records = Records::new(0);
@@ -1057,7 +1061,7 @@ async fn a_replacement_grant_accepts_only_replaced_file_reports() {
 }
 #[tokio::test]
 async fn a_replacement_refused_by_the_os_is_client_reported_os_refused() {
-    let fx = Fixture::new("replace_os_refused", "Write");
+    let fx = writer("replace_os_refused");
     let target = fx.root.join("unique-existing-write-sentinel");
     std::fs::write(&target, b"os-refused-sentinel").unwrap();
     let records = Records::new(0);
@@ -1178,7 +1182,7 @@ async fn oversized_grant_is_withheld_even_when_the_prepare_frame_fits() {
 
 #[tokio::test]
 async fn exact_grant_frame_budget_allows_reported_effect_but_one_byte_less_does_not() {
-    let fx = Fixture::new("exact_grant_frame", "Write");
+    let fx = writer("exact_grant_frame");
     let target = fx.root.join("unique-created-client-sentinel");
     // Measure an actual composed-policy grant. The next connection uses the
     // same request, correlation and timeout, so only its frame budget changes.
@@ -1363,7 +1367,7 @@ impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for FailWrites<S> {
 #[tokio::test]
 async fn failed_grant_or_ack_write_stops_before_accepting_more_client_reports() {
     for (tag, fail_grant) in [("grant_write_failed", true), ("ack_write_failed", false)] {
-        let fx = Fixture::new(tag, "Write");
+        let fx = writer(tag);
         let records = Records::new(0);
         let fail = Arc::new(std::sync::atomic::AtomicBool::new(fail_grant));
         let (mut client, server) = tokio::io::duplex(65536);
@@ -1564,7 +1568,7 @@ async fn single_mkdir_grants_exact_created_directory_and_success_requires_one_ef
 async fn a_replacement_is_a_client_reported_attempt_and_the_daemon_never_writes() {
     use maknae_audit_append::{MutationOperation, MutationOrigin, MutationPhase, MutationStatus};
     use maknae_proto::{MutationScope, ReportedEffect};
-    let fx = Fixture::new("replace_client_reported", "Write");
+    let fx = writer("replace_client_reported");
     let target = fx.root.join("unique-replace-attempt-sentinel");
     std::fs::write(&target, b"original-longer-sentinel").unwrap();
     let held = maknae_io::open_path_for_delegation(&target).unwrap();
@@ -1655,7 +1659,7 @@ fn assert_refused(result: &RespResult, record: &AuditRecord, reason_prefix: &str
 #[tokio::test]
 async fn a_second_user_creates_beneath_their_own_home() {
     let b = common::second_home("mutation_create_own");
-    let fx = Fixture::new("create_own", "Write").with_requester_home(Some(b.0.clone()));
+    let fx = writer("create_own").with_requester_home(Some(b.0.clone()));
     let target = b.join("new");
     let (result, record) = second_subject_attempt(&fx, create_in(&target), &b).await;
     assert_granted(
@@ -1677,7 +1681,7 @@ async fn a_second_user_cannot_create_in_the_enrolled_home() {
     assert_refused(
         &result,
         &record,
-        "namespace location evidence refused: escapes the anchor",
+        "role user: no capability entry for fs.write",
     );
     assert!(!fx.root.join("new").exists());
 }
@@ -1707,7 +1711,7 @@ async fn a_second_user_cannot_make_a_directory_in_the_enrolled_home() {
     assert_refused(
         &result,
         &record,
-        "namespace location evidence refused: escapes the anchor",
+        "role user: no capability entry for fs.mkdir",
     );
     assert!(!fx.root.join("newdir").exists());
 }
@@ -1754,7 +1758,7 @@ async fn a_second_user_cannot_delete_in_the_enrolled_home() {
     assert_refused(
         &result,
         &record,
-        "namespace location evidence refused: escapes the anchor",
+        "role user: no capability entry for fs.delete",
     );
     assert!(target.join("child").exists());
 }
@@ -1762,27 +1766,29 @@ async fn a_second_user_cannot_delete_in_the_enrolled_home() {
 #[tokio::test]
 async fn a_requester_cannot_delete_their_own_home() {
     let b = common::second_home("mutation_delete_home");
-    let fx = Fixture::new("delete_home", "Write").with_requester_home(Some(b.0.clone()));
+    let home = b.join("home");
+    std::fs::create_dir(&home).unwrap();
+    let fx = Fixture::new("delete_home", "Write").with_requester_home(Some(home.clone()));
     std::fs::write(
         fx.paths().authz,
         "schema_version: 1\npermissions:\n  allow:\n    - \"Write(/**)\"\n  deny: []\n",
     )
     .unwrap();
-    let (result, record) = second_subject_attempt(
-        &fx,
-        Verb::FsDelete {
-            path: b.to_str().unwrap().into(),
-            recursive: true,
-        },
-        b.parent().unwrap(),
-    )
-    .await;
-    assert_refused(
-        &result,
-        &record,
-        "namespace location evidence refused: escapes the anchor",
-    );
-    assert!(b.exists());
+    for recursive in [true, false] {
+        for (target, parent) in [(home.as_path(), &*b), (&*b, b.parent().unwrap())] {
+            let (result, record) = second_subject_attempt(
+                &fx,
+                Verb::FsDelete {
+                    path: target.to_str().unwrap().into(),
+                    recursive,
+                },
+                parent,
+            )
+            .await;
+            assert_refused(&result, &record, "cannot delete the requester's home");
+        }
+    }
+    assert!(home.exists());
 }
 
 #[tokio::test]
@@ -1797,4 +1803,645 @@ async fn no_requester_home_means_no_mutation() {
         "requester home unavailable: unresolvable"
     );
     assert!(!fx.root.join("new").exists());
+}
+
+const OUTSIDE_SENTINEL: &[u8] = b"maknae-617-outside-home-sentinel";
+
+fn outside_the_home(fx: &Fixture, tag: &str) -> common::DirGuard {
+    let dir = common::second_home(&format!("outside_{tag}"));
+    assert!(
+        !dir.starts_with(&fx.root),
+        "premise: {:?} is outside the home",
+        dir.0
+    );
+    dir
+}
+
+fn site_allow(fx: &Fixture, allow: &str) {
+    common::write_0640(
+        &fx.paths().authz,
+        &format!("schema_version: 1\npermissions:\n  allow:\n    - \"{allow}\"\n  deny: []\n"),
+    );
+}
+
+async fn read_outside(
+    fx: &Fixture,
+    target: &std::path::Path,
+) -> (common::ReadRun, Vec<AuditRecord>) {
+    let records = Records::new(0);
+    let held = maknae_io::open_path_for_delegation(target).ok();
+    let verb = Verb::Read {
+        path: target.to_str().unwrap().into(),
+        conversation: None,
+        page: None,
+    };
+    let (mut client, task, body) = fx.start(
+        verb,
+        held.as_ref().map(|fd| fd.try_clone().unwrap()),
+        records.clone(),
+    );
+    common::write_frame(&mut client, &body).await.unwrap();
+    let run = common::read_as_subject(&mut client, held.as_ref()).await;
+    drop(client);
+    task.await.unwrap();
+    (run, records.snapshot())
+}
+
+#[tokio::test]
+async fn a_granted_read_outside_the_home_is_served() {
+    let fx = Fixture::new("outside_read", "Read");
+    let outside = outside_the_home(&fx, "read");
+    let target = outside.join("notes");
+    std::fs::write(&target, OUTSIDE_SENTINEL).unwrap();
+    site_allow(&fx, &format!("Read({}/**)", outside.display()));
+    let (run, records) = read_outside(&fx, &target).await;
+    assert_eq!(
+        run.content.as_deref().map(Vec::as_slice),
+        Some(OUTSIDE_SENTINEL),
+        "{:?}",
+        records[1].outcome
+    );
+    assert_eq!(records[1].outcome.result, "permit");
+}
+
+#[tokio::test]
+async fn the_same_read_without_the_grant_is_refused() {
+    let fx = Fixture::new("outside_read_ungranted", "Read");
+    let outside = outside_the_home(&fx, "read_ungranted");
+    let target = outside.join("notes");
+    std::fs::write(&target, OUTSIDE_SENTINEL).unwrap();
+    let (run, records) = read_outside(&fx, &target).await;
+    assert!(run.content.is_none());
+    let frame = run.first.expect("a deny frame");
+    assert!(!frame
+        .windows(OUTSIDE_SENTINEL.len())
+        .any(|w| w == OUTSIDE_SENTINEL));
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Err(e) => assert_eq!(e.code, maknae_proto::ProtoErrCode::Unauthorized),
+        other => panic!("an ungranted read outside the home must be refused: {other:?}"),
+    }
+    assert_eq!(records[1].outcome.result, "deny");
+    assert_eq!(
+        records[1].outcome.reason,
+        "role user: no capability entry for fs.read"
+    );
+}
+
+#[tokio::test]
+async fn a_granted_write_outside_the_home_lands() {
+    let fx = Fixture::new("outside_write", "Write");
+    let outside = outside_the_home(&fx, "write");
+    let target = outside.join("notes");
+    std::fs::write(&target, b"before").unwrap();
+    site_allows(
+        &fx,
+        &[
+            &format!("Read({}/**)", outside.display()),
+            &format!("Write({}/**)", outside.display()),
+        ],
+    );
+    let records = Records::new(0);
+    let (mut client, task, held) =
+        replace_start(&fx, &target, OUTSIDE_SENTINEL, records.clone(), None).await;
+    let grant = granted(&mut client).await;
+    replace_as_subject(&mut client, &grant, &held, OUTSIDE_SENTINEL).await;
+    drop(client);
+    task.await.unwrap();
+    assert_eq!(std::fs::read(&target).unwrap(), OUTSIDE_SENTINEL);
+}
+
+#[tokio::test]
+async fn a_home_lookup_failure_refuses_an_absolute_path_request() {
+    let fx = Fixture::new("outside_no_home", "Read").with_requester_home(None);
+    let outside = outside_the_home(&fx, "no_home");
+    let target = outside.join("notes");
+    std::fs::write(&target, OUTSIDE_SENTINEL).unwrap();
+    site_allow(&fx, &format!("Read({}/**)", outside.display()));
+    let (run, records) = read_outside(&fx, &target).await;
+    assert!(run.content.is_none());
+    let last = records.last().expect("a request record");
+    assert_eq!(last.outcome.result, "deny");
+    assert_eq!(
+        last.outcome.reason,
+        "requester home unavailable: unresolvable"
+    );
+}
+
+const SENSITIVE_SENTINEL: &[u8] = b"maknae-617-sensitive-sentinel";
+
+fn host_list(fx: &Fixture, entries: &[&str]) {
+    let body: String = entries.iter().map(|e| format!("  - \"{e}\"\n")).collect();
+    common::write_0640(
+        &fx.paths().sensitive,
+        &format!("schema_version: 1\nsensitive:\n{body}"),
+    );
+}
+
+fn site_allows(fx: &Fixture, allows: &[&str]) {
+    let body: String = allows.iter().map(|a| format!("    - \"{a}\"\n")).collect();
+    common::write_0640(
+        &fx.paths().authz,
+        &format!("schema_version: 1\npermissions:\n  allow:\n{body}  deny: []\n"),
+    );
+}
+
+fn admin_of_everything(tag: &str) -> Fixture {
+    let fx = Fixture::with_policy_bound_to(tag, "Read", "admin", "");
+    site_allows(&fx, &["Read(/**)", "Write(/**)"]);
+    fx
+}
+
+fn assert_read_refused(run: &common::ReadRun, records: &[AuditRecord], reason: &str) {
+    assert!(run.content.is_none(), "{:?}", records.last());
+    let frame = run.first.as_ref().expect("a deny frame");
+    assert!(!frame
+        .windows(SENSITIVE_SENTINEL.len())
+        .any(|w| w == SENSITIVE_SENTINEL));
+    match maknae_proto::decode_response(frame).unwrap().result {
+        RespResult::Err(e) => assert_eq!(e.code, maknae_proto::ProtoErrCode::Unauthorized),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    let last = records.last().expect("a request record");
+    assert_eq!(last.outcome.result, "deny");
+    assert_eq!(last.outcome.reason, reason);
+}
+
+fn assert_protected_by(result: &RespResult, entry: &str) {
+    match result {
+        RespResult::Err(e) => {
+            assert_eq!(e.code, maknae_proto::ProtoErrCode::Protected, "{e:?}");
+            assert_eq!(
+                e.message,
+                maknae_proto::protected_message(maknae_proto::HOST_SENSITIVE_LIST, entry)
+            );
+        }
+        other => panic!("expected Protected, got {other:?}"),
+    }
+}
+
+fn assert_read_protected(run: &common::ReadRun, records: &[AuditRecord], entry: &str) {
+    assert!(run.content.is_none(), "{:?}", records.last());
+    let frame = run.first.as_ref().expect("a refusal frame");
+    assert!(!frame
+        .windows(SENSITIVE_SENTINEL.len())
+        .any(|w| w == SENSITIVE_SENTINEL));
+    match maknae_proto::decode_response(frame).unwrap().result {
+        RespResult::Err(e) => {
+            assert_eq!(e.code, maknae_proto::ProtoErrCode::Protected);
+            assert_eq!(
+                e.message,
+                maknae_proto::protected_message(maknae_proto::HOST_SENSITIVE_LIST, entry)
+            );
+        }
+        other => panic!("expected Protected, got {other:?}"),
+    }
+    let last = records.last().expect("a request record");
+    assert_eq!(last.outcome.result, "deny");
+    assert_eq!(last.outcome.reason, format!("sensitive: host {entry}"));
+    assert!(last.mutation.is_none(), "{last:?}");
+}
+
+/// A directory symlink onto `dir`, so a path asked through it is not the path the kernel reports.
+fn via(dir: &std::path::Path) -> std::path::PathBuf {
+    let link = dir.join("via-617");
+    std::os::unix::fs::symlink(dir, &link).unwrap();
+    link
+}
+
+fn assert_read_served(run: &common::ReadRun, records: &[AuditRecord]) {
+    assert_eq!(
+        run.content.as_deref().map(Vec::as_slice),
+        Some(SENSITIVE_SENTINEL),
+        "{:?}",
+        records.last()
+    );
+}
+
+#[tokio::test]
+async fn an_admin_grant_of_everything_cannot_read_a_protected_file() {
+    let fx = admin_of_everything("sensitive_admin_read");
+    let outside = outside_the_home(&fx, "sensitive_admin_read");
+    let (secret, open) = (outside.join("secret"), outside.join("open"));
+    for f in [&secret, &open] {
+        std::fs::write(f, SENSITIVE_SENTINEL).unwrap();
+    }
+    host_list(&fx, &[secret.to_str().unwrap()]);
+    let (run, records) = read_outside(&fx, &open).await;
+    assert_read_served(&run, &records);
+    let (run, records) = read_outside(&fx, &secret).await;
+    assert_read_protected(&run, &records, secret.to_str().unwrap());
+    let (run, records) = read_outside(&fx, &via(&outside).join("secret")).await;
+    assert_read_refused(
+        &run,
+        &records,
+        &format!("sensitive: host {}", secret.display()),
+    );
+}
+
+#[tokio::test]
+async fn a_protected_path_answers_protected_whether_or_not_it_exists() {
+    let fx = admin_of_everything("sensitive_existence");
+    let outside = outside_the_home(&fx, "sensitive_existence");
+    let here = outside.join("secret-here");
+    let gone = outside.join("secret-gone");
+    std::fs::write(&here, SENSITIVE_SENTINEL).unwrap();
+    let entry = format!("{}/secret*", outside.display());
+    host_list(&fx, &[&entry]);
+    let (here_run, records) = read_outside(&fx, &here).await;
+    assert_read_protected(&here_run, &records, &entry);
+    let (gone_run, records) = read_outside(&fx, &gone).await;
+    assert_read_protected(&gone_run, &records, &entry);
+    assert_eq!(
+        here_run.first, gone_run.first,
+        "the answer depends only on the path"
+    );
+    assert!(!gone.exists());
+}
+
+#[tokio::test]
+async fn a_symlink_to_a_protected_file_answers_uniformly_not_protected() {
+    let fx = admin_of_everything("sensitive_symlink_file");
+    let outside = outside_the_home(&fx, "sensitive_symlink_file");
+    let secret = outside.join("secret");
+    std::fs::write(&secret, SENSITIVE_SENTINEL).unwrap();
+    let link = outside.join("innocent");
+    std::os::unix::fs::symlink(&secret, &link).unwrap();
+    host_list(&fx, &[secret.to_str().unwrap()]);
+    let (run, records) = read_outside(&fx, &link).await;
+    assert_read_refused(
+        &run,
+        &records,
+        &format!("sensitive: host {}", secret.display()),
+    );
+}
+
+#[tokio::test]
+async fn a_protected_file_cannot_be_written_deleted_or_created_under() {
+    let fx = admin_of_everything("sensitive_mutations");
+    let outside = outside_the_home(&fx, "sensitive_mutations");
+    let vault = outside.join("vault");
+    let open = outside.join("open");
+    for d in [&vault, &open] {
+        std::fs::create_dir(d).unwrap();
+    }
+    let kept = vault.join("kept");
+    std::fs::write(&kept, SENSITIVE_SENTINEL).unwrap();
+    let entry = format!("{}/**", vault.display());
+    host_list(&fx, &[&entry]);
+    let reason = format!("sensitive: host {entry}");
+
+    let (result, record) = second_subject_attempt(&fx, create_in(&open.join("new")), &open).await;
+    assert_granted(
+        &result,
+        &record,
+        maknae_proto::MutationScope::Exact {
+            path: open.join("new").to_str().unwrap().into(),
+            effect: maknae_proto::ReportedEffect::CreatedFile,
+        },
+    );
+
+    let records = Records::new(0);
+    let (mut client, task, _held) =
+        replace_start(&fx, &kept, b"overwritten", records.clone(), None).await;
+    let result = next_response(&mut client).await.unwrap().result;
+    drop(client);
+    task.await.unwrap();
+    assert_refused(&result, &records.snapshot()[1], &reason);
+    assert_protected_by(&result, &entry);
+
+    for verb in [
+        Verb::FsDelete {
+            path: kept.to_str().unwrap().into(),
+            recursive: false,
+        },
+        create_in(&vault.join("new")),
+        mkdir_in(&vault.join("sub")),
+    ] {
+        let (result, record) = second_subject_attempt(&fx, verb, &vault).await;
+        assert_refused(&result, &record, &reason);
+        assert_protected_by(&result, &entry);
+    }
+    let (result, record) = second_subject_attempt(
+        &fx,
+        Verb::FsDelete {
+            path: vault.to_str().unwrap().into(),
+            recursive: true,
+        },
+        &outside,
+    )
+    .await;
+    assert_refused(&result, &record, &reason);
+    assert_eq!(std::fs::read(&kept).unwrap(), SENSITIVE_SENTINEL);
+    assert!(!vault.join("new").exists() && !vault.join("sub").exists());
+}
+
+#[tokio::test]
+async fn a_hard_link_to_a_protected_file_is_refused_by_the_one_link_check() {
+    let fx = admin_of_everything("sensitive_hard_link");
+    let outside = outside_the_home(&fx, "sensitive_hard_link");
+    let secret = outside.join("secret");
+    std::fs::write(&secret, SENSITIVE_SENTINEL).unwrap();
+    std::fs::create_dir(outside.join("other")).unwrap();
+    let alias = outside.join("other/alias");
+    std::fs::hard_link(&secret, &alias).unwrap();
+    host_list(&fx, &[secret.to_str().unwrap()]);
+    let (run, records) = read_outside(&fx, &alias).await;
+    assert!(run.content.is_none());
+    let frame = run.first.expect("a deny frame");
+    assert!(!frame
+        .windows(SENSITIVE_SENTINEL.len())
+        .any(|w| w == SENSITIVE_SENTINEL));
+    let last = records.last().expect("a request record");
+    assert_eq!(last.outcome.result, "deny", "{last:?}");
+    let named = |p: &std::path::Path| {
+        format!(
+            "read evidence refused: hard-linked (nlink=2): {}",
+            p.display()
+        )
+    };
+    assert!(
+        [named(&alias), named(&secret)].contains(&last.outcome.reason),
+        "{}",
+        last.outcome.reason
+    );
+}
+
+#[tokio::test]
+async fn a_symlinked_directory_into_a_protected_region_is_refused() {
+    let fx = Fixture::new("sensitive_symlinked_dir", "Read");
+    std::fs::create_dir(fx.root.join(".ssh")).unwrap();
+    std::fs::write(fx.root.join(".ssh/id_rsa"), SENSITIVE_SENTINEL).unwrap();
+    std::fs::create_dir(fx.root.join("proj")).unwrap();
+    std::os::unix::fs::symlink(fx.root.join(".ssh"), fx.root.join("proj/keys")).unwrap();
+    let asked = fx.root.join("proj/keys/id_rsa");
+    let (run, records) = read_outside(&fx, &asked).await;
+    assert_read_served(&run, &records);
+    host_list(&fx, &["~/.ssh/**"]);
+    let (run, records) = read_outside(&fx, &asked).await;
+    assert_read_refused(&run, &records, "sensitive: host ~/.ssh/**");
+}
+
+#[tokio::test]
+async fn home_entries_bind_under_a_symlinked_home_parent() {
+    let base = common::second_home("sensitive_symlinked_parent");
+    let real = base.join("var/home/u");
+    std::fs::create_dir_all(real.join(".ssh")).unwrap();
+    std::os::unix::fs::symlink(base.join("var/home"), base.join("home")).unwrap();
+    let home = base.join("home/u").canonicalize().unwrap();
+    assert_eq!(home, real, "premise: the home is canonical");
+    std::fs::write(real.join(".ssh/id_rsa"), SENSITIVE_SENTINEL).unwrap();
+    std::fs::write(real.join("notes"), SENSITIVE_SENTINEL).unwrap();
+    let fx = Fixture::new("sensitive_symlinked_parent", "Read").with_requester_home(Some(home));
+    host_list(&fx, &["~/.ssh/**"]);
+    let (run, records) = read_outside(&fx, &base.join("home/u/notes")).await;
+    assert_read_served(&run, &records);
+    let (run, records) = read_outside(&fx, &base.join("home/u/.ssh/id_rsa")).await;
+    assert_read_refused(&run, &records, "sensitive: host ~/.ssh/**");
+}
+
+const SHIPPED_HOME_ENTRIES: &[&str] = &[
+    "~/.maknae/**",
+    "~/.ssh/**",
+    "~/.gnupg/**",
+    "~/.aws/**",
+    "~/.azure/**",
+    "~/.config/gcloud/**",
+    "~/.kube/**",
+    "~/.docker/config.json",
+    "~/.config/containers/auth.json",
+    "~/.netrc",
+    "~/.git-credentials",
+    "~/.config/gh/hosts.yml",
+    "~/.vault-token",
+    "~/.vault-*-token",
+    "~/.terraform.d/credentials.tfrc.json",
+    "~/.npmrc",
+    "~/.pypirc",
+    "~/.cargo/credentials",
+    "~/.cargo/credentials.toml",
+    "~/.gem/credentials",
+    "~/.m2/settings.xml",
+    "~/.gradle/gradle.properties",
+    "~/.pgpass",
+    "~/.my.cnf",
+    "~/.password-store/**",
+    "~/.local/share/keyrings/**",
+    "~/.config/op/**",
+    "~/.config/rclone/rclone.conf",
+    "~/.claude.json",
+    "~/.claude/.credentials.json",
+    "~/.codex/**",
+    "~/.gemini/**",
+    "~/.mozilla/**",
+    "~/.config/google-chrome/**",
+    "~/.config/chromium/**",
+    "~/.thunderbird/**",
+    "~/.*_history",
+    "~/.zsh_sessions/**",
+    "~/.lesshst",
+    "~/.viminfo",
+    "~/Library/Keychains/**",
+    "~/Library/Cookies/**",
+    "~/Library/Mail/**",
+    "~/Library/Messages/**",
+    "~/Library/Application Support/com.apple.TCC/**",
+    "~/Library/Application Support/Google/Chrome/**",
+    "~/Library/Application Support/Firefox/**",
+];
+
+#[tokio::test]
+async fn the_shipped_list_permits_an_unrelated_recursive_delete() {
+    let fx = Fixture::with_rules("sensitive_shipped_delete", &["Read", "Write"], &[], "");
+    host_list(&fx, SHIPPED_HOME_ENTRIES);
+    let projects = fx.root.join("projects");
+    let target = projects.join("x");
+    std::fs::create_dir_all(target.join("child")).unwrap();
+    let (result, record) = second_subject_attempt(
+        &fx,
+        Verb::FsDelete {
+            path: target.to_str().unwrap().into(),
+            recursive: true,
+        },
+        &projects,
+    )
+    .await;
+    assert_granted(
+        &result,
+        &record,
+        maknae_proto::MutationScope::RecursiveDelete {
+            root: target.to_str().unwrap().into(),
+        },
+    );
+    let (result, record) = second_subject_attempt(
+        &fx,
+        Verb::FsDelete {
+            path: fx.root.join(".ssh").to_str().unwrap().into(),
+            recursive: true,
+        },
+        &fx.root,
+    )
+    .await;
+    assert_refused(&result, &record, "sensitive: host ~/.ssh/**");
+}
+
+async fn unarmed_attempt(fx: &Fixture, verb: Verb) -> (RespResult, AuditRecord) {
+    let records = Records::new(0);
+    let (client, task, body) = fx.start(verb, None, records.clone());
+    let result = Fixture::exchange(client, task, &body)
+        .await
+        .expect("a refusal frame")
+        .result;
+    (result, records.snapshot().last().unwrap().clone())
+}
+
+fn recursive_delete(target: &std::path::Path) -> Verb {
+    Verb::FsDelete {
+        path: target.to_str().unwrap().into(),
+        recursive: true,
+    }
+}
+
+#[tokio::test]
+async fn an_unarmed_write_delete_or_mkdir_of_a_protected_path_answers_protected() {
+    let fx = admin_of_everything("sensitive_unarmed_mutations");
+    let outside = outside_the_home(&fx, "sensitive_unarmed_mutations");
+    let gone = outside.join("secret-gone");
+    let entry = format!("{}/secret*", outside.display());
+    host_list(&fx, &[&entry]);
+    let write = Verb::FsWrite {
+        path: gone.to_str().unwrap().into(),
+        content_length: 1,
+        mode: WriteMode::Existing,
+        conversation: None,
+    };
+    for verb in [
+        write,
+        create_in(&gone),
+        Verb::FsDelete {
+            path: gone.to_str().unwrap().into(),
+            recursive: false,
+        },
+        mkdir_in(&gone),
+    ] {
+        let (result, record) = unarmed_attempt(&fx, verb.clone()).await;
+        assert_protected_by(&result, &entry);
+        assert_eq!(
+            record.outcome.reason,
+            format!("sensitive: host {entry}"),
+            "{verb:?}"
+        );
+    }
+    assert!(!gone.exists());
+}
+
+#[tokio::test]
+async fn a_delete_of_a_directory_that_could_hold_an_entry_answers_protected() {
+    let fx = Fixture::with_rules("sensitive_tree_delete", &["Read", "Write"], &[], "");
+    host_list(&fx, &["~/.ssh/**", "~/proj/secrets/**", "~/keys/id"]);
+    let parent = fx.root.parent().unwrap().to_path_buf();
+
+    let (result, record) = unarmed_attempt(&fx, recursive_delete(&fx.root)).await;
+    assert_protected_by(&result, "~/.ssh/**");
+    assert_eq!(record.outcome.reason, "sensitive: host ~/.ssh/**");
+
+    std::fs::create_dir(fx.root.join(".ssh")).unwrap();
+    let (result, _) = second_subject_attempt(&fx, recursive_delete(&fx.root), &parent).await;
+    assert_protected_by(&result, "~/.ssh/**");
+
+    let missing = fx.root.join("proj");
+    assert!(!missing.exists());
+    let (result, _) = unarmed_attempt(&fx, recursive_delete(&missing)).await;
+    assert_protected_by(&result, "~/proj/secrets/**");
+
+    let keys = fx.root.join("keys");
+    std::fs::create_dir(&keys).unwrap();
+    let entry_delete = Verb::FsDelete {
+        path: keys.to_str().unwrap().into(),
+        recursive: false,
+    };
+    let (empty, empty_record) = second_subject_attempt(&fx, entry_delete.clone(), &fx.root).await;
+    assert_protected_by(&empty, "~/keys/id");
+    assert_eq!(empty_record.outcome.reason, "sensitive: host ~/keys/id");
+    assert!(keys.exists());
+    std::fs::write(keys.join("id"), SENSITIVE_SENTINEL).unwrap();
+    let (full, full_record) = second_subject_attempt(&fx, entry_delete, &fx.root).await;
+    assert_eq!(format!("{full:?}"), format!("{empty:?}"));
+    assert_eq!(full_record.outcome.reason, empty_record.outcome.reason);
+    assert_eq!(std::fs::read(keys.join("id")).unwrap(), SENSITIVE_SENTINEL);
+    let (result, _) = unarmed_attempt(&fx, recursive_delete(&keys)).await;
+    assert_protected_by(&result, "~/keys/id");
+    assert!(fx.root.join(".ssh").exists());
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn an_admin_etc_entry_refuses_a_read_asked_as_private_etc() {
+    let fx = admin_of_everything("sensitive_private_tmp");
+    let dir = std::path::PathBuf::from(format!("/tmp/maknae617_private_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir(&dir).unwrap();
+    let _guard = common::DirGuard(dir.clone());
+    let secret = dir.join("secret");
+    std::fs::write(&secret, SENSITIVE_SENTINEL).unwrap();
+    let entry = secret.to_str().unwrap().to_owned();
+    assert!(
+        entry.starts_with("/tmp/"),
+        "premise: the entry is the /tmp form"
+    );
+    host_list(&fx, &[&entry]);
+    let asked = std::path::Path::new("/private").join(secret.strip_prefix("/").unwrap());
+    let (run, records) = read_outside(&fx, &asked).await;
+    assert_read_protected(&run, &records, &entry);
+    let (run, records) = read_outside(&fx, &via(&dir).join("secret")).await;
+    assert_read_refused(&run, &records, &format!("sensitive: host {entry}"));
+    assert!(
+        records
+            .last()
+            .unwrap()
+            .object
+            .as_deref()
+            .is_some_and(|o| o.starts_with("/private/tmp/")),
+        "premise: the kernel reports the /private form: {:?}",
+        records.last()
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_case_variant_of_a_protected_path_is_refused_on_macos() {
+    let fx = Fixture::new("sensitive_case_variant", "Read");
+    std::fs::create_dir(fx.root.join(".ssh")).unwrap();
+    std::fs::write(fx.root.join(".ssh/id"), SENSITIVE_SENTINEL).unwrap();
+    let asked = fx.root.join(".ssh/id");
+    let (run, records) = read_outside(&fx, &asked).await;
+    assert_read_served(&run, &records);
+    assert_eq!(
+        records.last().unwrap().object.as_deref(),
+        asked.to_str(),
+        "premise: the kernel reports the on-disk case"
+    );
+    host_list(&fx, &["~/.SSH/**"]);
+    let (run, records) = read_outside(&fx, &asked).await;
+    assert_read_protected(&run, &records, "~/.SSH/**");
+    let (run, records) = read_outside(&fx, &via(&fx.root).join(".ssh/id")).await;
+    assert_read_refused(&run, &records, "sensitive: host ~/.SSH/**");
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn an_entry_spelling_the_homes_leaf_in_another_case_is_refused_on_macos() {
+    let fx = Fixture::new("sensitive_home_case", "Read");
+    std::fs::create_dir(fx.root.join(".ssh")).unwrap();
+    std::fs::write(fx.root.join(".ssh/id"), SENSITIVE_SENTINEL).unwrap();
+    let leaf = fx.root.file_name().unwrap().to_str().unwrap();
+    assert_ne!(leaf, leaf.to_uppercase(), "premise: the leaf has a case");
+    let entry = format!(
+        "{}/.ssh/**",
+        fx.root.with_file_name(leaf.to_uppercase()).display()
+    );
+    host_list(&fx, &[&entry]);
+    let (run, records) = read_outside(&fx, &fx.root.join(".ssh/id")).await;
+    assert_read_protected(&run, &records, &entry);
+    let (run, records) = read_outside(&fx, &via(&fx.root).join(".ssh/id")).await;
+    assert_read_refused(&run, &records, &format!("sensitive: host {entry}"));
 }
