@@ -87,6 +87,15 @@ impl SensitiveList {
         self.entries.iter().map(|e| e.text.as_str())
     }
 
+    pub fn canonical(&self) -> String {
+        crate::canonical_json(&Value::Seq(
+            self.entries
+                .iter()
+                .map(|e| Value::Str(e.text.clone()))
+                .collect(),
+        ))
+    }
+
     /// The first entry that matches `path`. `HomeUnbound` only when no entry
     /// matches and a `~` entry could not be evaluated.
     pub fn matching(
@@ -156,6 +165,50 @@ impl SensitiveList {
             Ok(None)
         }
     }
+}
+
+/// Read the host list through the `authz.yaml` door: root-owned, `mode & 0o027 == 0`,
+/// in a root-owned directory no group or other can write. Absent is an error.
+pub fn load_host_sensitive(path: &Path) -> Result<SensitiveList, ConfigError> {
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        return Err(ConfigError::PermissionsUnsupported);
+    }
+    #[cfg(unix)]
+    {
+        load_host_required(path, crate::authz::root_policy_file_required())
+    }
+}
+
+#[cfg(all(unix, feature = "hermetic-test-seam"))]
+pub fn load_host_sensitive_with_requirement(
+    path: &Path,
+    target: maknae_io::TargetRequired,
+) -> Result<SensitiveList, ConfigError> {
+    load_host_required(path, target)
+}
+
+#[cfg(unix)]
+fn load_host_required(
+    path: &Path,
+    target: maknae_io::TargetRequired,
+) -> Result<SensitiveList, ConfigError> {
+    use crate::authz::RootReadError;
+    let absolute = std::path::absolute(path).map_err(|e| ConfigError::Io(e.to_string()))?;
+    let bytes = crate::authz::read_in_root_dir(&absolute, target).map_err(|e| match e {
+        RootReadError::Directory(d) => ConfigError::Io(crate::authz::insecure_directory(
+            &d.display().to_string(),
+            SENSITIVE_FILE,
+        )),
+        RootReadError::Io(e) => crate::loader::map_io(e),
+    })?;
+    let body = std::str::from_utf8(&bytes)
+        .map_err(|e| ConfigError::Io(format!("{}: invalid UTF-8: {e}", absolute.display())))?;
+    SensitiveList::parse(body).map_err(|e| match e {
+        ConfigError::InvalidSensitive(_) => e,
+        other => invalid(other.to_string()),
+    })
 }
 
 fn entry(text: &str) -> Result<Entry, ConfigError> {
@@ -584,5 +637,165 @@ mod tests {
     #[test]
     fn the_file_name_is_sensitive_yaml() {
         assert_eq!(SENSITIVE_FILE, "sensitive.yaml");
+    }
+
+    #[test]
+    fn the_canonical_form_is_the_entries_in_order() {
+        assert_eq!(SensitiveList::empty().canonical(), "[]");
+        let a = SensitiveList::parse(LIST).unwrap();
+        let b = SensitiveList::parse(
+            "# c\nsensitive: [\"/etc/shadow\",   \"~/.ssh/**\"]\nschema_version: 1\n",
+        )
+        .unwrap();
+        assert_eq!(a.canonical(), r#"["/etc/shadow","~/.ssh/**"]"#);
+        assert_eq!(a.canonical(), b.canonical());
+        assert_ne!(
+            a.canonical(),
+            list(&["~/.ssh/**", "/etc/shadow"]).canonical()
+        );
+    }
+
+    #[cfg(unix)]
+    mod host_file {
+        use super::super::*;
+        use super::LIST;
+        use std::os::unix::fs::PermissionsExt;
+
+        fn dir(tag: &str) -> std::path::PathBuf {
+            let d = std::env::temp_dir().join(format!("sensitive_{tag}_{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+            d.canonicalize().unwrap()
+        }
+
+        fn write(d: &Path, body: &[u8], mode: u32) -> std::path::PathBuf {
+            let p = d.join(SENSITIVE_FILE);
+            std::fs::write(&p, body).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+            p
+        }
+
+        fn runs_as_root(d: &Path) -> bool {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(d).map(|m| m.uid() == 0).unwrap_or(false)
+        }
+
+        #[test]
+        fn the_production_door_requires_root_ownership() {
+            let d = dir("prod");
+            let p = write(&d, b"schema_version: 1\nsensitive: []\n", 0o640);
+            let got = load_host_sensitive(&p);
+            let root = runs_as_root(&d);
+            let _ = std::fs::remove_dir_all(&d);
+            if root {
+                assert_eq!(got, Ok(SensitiveList::empty()));
+            } else {
+                assert!(
+                    matches!(&got, Err(ConfigError::Io(m)) if m.contains(SENSITIVE_FILE) && m.contains("root")),
+                    "{got:?}"
+                );
+            }
+        }
+
+        #[cfg(feature = "hermetic-test-seam")]
+        mod seam {
+            use super::*;
+
+            fn own() -> maknae_io::TargetRequired {
+                maknae_io::TargetRequired {
+                    owner: None,
+                    ..crate::authz::root_policy_file_required()
+                }
+            }
+
+            #[test]
+            fn a_sound_file_loads_its_entries() {
+                let d = dir("ok");
+                let p = write(&d, LIST.as_bytes(), 0o640);
+                let got = load_host_sensitive_with_requirement(&p, own());
+                let _ = std::fs::remove_dir_all(&d);
+                assert_eq!(got, SensitiveList::parse(LIST));
+            }
+
+            #[test]
+            fn an_absent_file_is_refused_naming_it() {
+                let d = dir("absent");
+                let p = d.join(SENSITIVE_FILE);
+                let got = load_host_sensitive_with_requirement(&p, own());
+                let _ = std::fs::remove_dir_all(&d);
+                assert_eq!(
+                    got,
+                    Err(ConfigError::NotFound {
+                        path: p.display().to_string()
+                    })
+                );
+            }
+
+            #[test]
+            fn every_malformed_file_is_refused_naming_the_file() {
+                let d = dir("bad");
+                for body in [
+                    &b"schema_version: 1\nsensitive: [\n"[..],
+                    b"schema_version: 1\n",
+                    b"schema_version: 2\nsensitive: []\n",
+                    b"schema_version: 1\nsensitive: [\"relative\"]\n",
+                    b"schema_version: 1\nsensitive: []\nextra: 1\n",
+                    b"",
+                ] {
+                    let p = write(&d, body, 0o640);
+                    let got = load_host_sensitive_with_requirement(&p, own());
+                    let shown = got.as_ref().map_err(ToString::to_string);
+                    assert!(
+                        matches!(&shown, Err(m) if m.contains(SENSITIVE_FILE)),
+                        "{:?}: {shown:?}",
+                        String::from_utf8_lossy(body)
+                    );
+                }
+                let p = write(&d, &[0xff, 0xfe], 0o640);
+                let got = load_host_sensitive_with_requirement(&p, own());
+                assert!(
+                    matches!(&got, Err(ConfigError::Io(m)) if m.contains("UTF-8") && m.contains(SENSITIVE_FILE)),
+                    "{got:?}"
+                );
+                let _ = std::fs::remove_dir_all(&d);
+            }
+
+            #[test]
+            fn the_mode_mask_is_the_authz_yaml_one() {
+                let d = dir("mode");
+                for (mode, ok) in [
+                    (0o600, true),
+                    (0o640, true),
+                    (0o660, false),
+                    (0o644, false),
+                    (0o604, false),
+                ] {
+                    let p = write(&d, b"schema_version: 1\nsensitive: []\n", mode);
+                    let got = load_host_sensitive_with_requirement(&p, own());
+                    assert_eq!(got.is_ok(), ok, "mode {mode:o}: {got:?}");
+                    if !ok {
+                        assert!(
+                            matches!(&got, Err(ConfigError::InsecurePermissions { path, .. }) if path.ends_with(SENSITIVE_FILE)),
+                            "{got:?}"
+                        );
+                    }
+                }
+                let p = write(&d, b"schema_version: 1\nsensitive: []\n", 0o640);
+                let link = d.join("link.yaml");
+                std::os::unix::fs::symlink(&p, &link).unwrap();
+                assert!(matches!(
+                    load_host_sensitive_with_requirement(&link, own()),
+                    Err(ConfigError::Symlink { .. })
+                ));
+                std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o770)).unwrap();
+                let got = load_host_sensitive_with_requirement(&p, own());
+                let _ = std::fs::remove_dir_all(&d);
+                assert!(
+                    matches!(&got, Err(ConfigError::Io(m)) if m.contains("must be owned by root") && m.contains(SENSITIVE_FILE)),
+                    "{got:?}"
+                );
+            }
+        }
     }
 }

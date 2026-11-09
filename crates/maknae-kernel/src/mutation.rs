@@ -1166,6 +1166,7 @@ mod tests {
             std::fs::write(path, body).unwrap();
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640)).unwrap();
         }
+        crate::test_fixtures::write_empty_sensitive(&fx.root);
         let baseline = maknae_authz_basic::HermeticAuthorizer::new(
             paths,
             fx.principal.clone(),

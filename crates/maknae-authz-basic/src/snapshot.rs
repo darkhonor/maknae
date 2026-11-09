@@ -140,6 +140,11 @@ impl Snapshot {
         self.loaded.agents.0.get(&uid).map(String::as_str)
     }
 
+    /// The host `sensitive.yaml` this snapshot was compiled with.
+    pub fn sensitive(&self) -> &Arc<maknae_config::SensitiveList> {
+        &self.loaded.sensitive
+    }
+
     pub(crate) fn loaded(&self) -> &LoadedPolicy {
         &self.loaded
     }
@@ -550,6 +555,7 @@ pub fn compile(
         subjects: source.subject_grants().clone(),
         agents: source.agent_uids(),
         taskers: source.agent_taskers().clone(),
+        sensitive: Arc::clone(source.sensitive()),
     };
     Ok(Snapshot {
         graph,

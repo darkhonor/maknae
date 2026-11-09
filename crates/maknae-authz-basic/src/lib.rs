@@ -424,11 +424,13 @@ impl maknae_security::Authorizer for Candidate<'_> {
 }
 
 /// Where the policy files live: `authz.yaml` (grants, denies, roles), `bindings.yaml`
-/// (identity) and the `agents/` directory under `config_dir`.
+/// (identity), `sensitive.yaml` (the host list) and the `agents/` directory under
+/// `config_dir`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyPaths {
     pub authz: PathBuf,
     pub bindings: PathBuf,
+    pub sensitive: PathBuf,
     pub config_dir: PathBuf,
 }
 
@@ -437,6 +439,7 @@ impl PolicyPaths {
         Self {
             authz: dir.join("authz.yaml"),
             bindings: dir.join(maknae_config::BINDINGS_FILE),
+            sensitive: dir.join(maknae_config::SENSITIVE_FILE),
             config_dir: dir.to_path_buf(),
         }
     }
@@ -500,6 +503,7 @@ struct AgentOutcome {
 struct Parts {
     policy: maknae_config::AuthzPolicy,
     bindings: maknae_config::Bindings,
+    sensitive: Arc<maknae_config::SensitiveList>,
     lookups: Lookups,
     lookup: NssLookup,
     hosts: HostLookups,
@@ -519,6 +523,7 @@ enum Agents {
 pub struct PolicySource {
     policy: maknae_config::AuthzPolicy,
     bindings: maknae_config::Bindings,
+    sensitive: Arc<maknae_config::SensitiveList>,
     lookups: Lookups,
     lookup: NssLookup,
     hosts: HostLookups,
@@ -549,9 +554,12 @@ impl PolicySource {
             .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
         let agents = maknae_config::load_agents(&paths.config_dir)
             .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
+        let sensitive = maknae_config::load_host_sensitive(&paths.sensitive)
+            .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
         Self::resolved_from(
             policy,
             bindings,
+            sensitive,
             agents,
             lookup_uid,
             HostLookups::HOST,
@@ -584,16 +592,21 @@ impl PolicySource {
             owner: req.owner,
             mode_mask: req.mode_mask,
         };
-        let agents = maknae_config::load_agents_with_requirement(&paths.config_dir, dir, req)
+        let agents =
+            maknae_config::load_agents_with_requirement(&paths.config_dir, dir, req.clone())
+                .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
+        let sensitive = maknae_config::load_host_sensitive_with_requirement(&paths.sensitive, req)
             .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
         Self::resolved_from(
-            policy, bindings, agents, lookup_uid, hosts, principal, paths,
+            policy, bindings, sensitive, agents, lookup_uid, hosts, principal, paths,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn resolved_from(
         policy: maknae_config::AuthzPolicy,
         bindings: maknae_config::Bindings,
+        sensitive: maknae_config::SensitiveList,
         agents: maknae_config::AgentsLoad,
         lookup: NssLookup,
         hosts: HostLookups,
@@ -605,6 +618,7 @@ impl PolicySource {
         Self::from_lookups(Parts {
             policy,
             bindings,
+            sensitive: Arc::new(sensitive),
             lookups,
             lookup,
             hosts,
@@ -614,6 +628,7 @@ impl PolicySource {
         })
     }
 
+    /// Reads no file: the host list is empty until [`PolicySource::with_sensitive`].
     pub fn from_parts(
         policy: maknae_config::AuthzPolicy,
         bindings: maknae_config::Bindings,
@@ -659,6 +674,7 @@ impl PolicySource {
         Self::from_lookups(Parts {
             policy,
             bindings,
+            sensitive: Arc::new(maknae_config::SensitiveList::empty()),
             lookups,
             lookup: lookup_uid,
             hosts,
@@ -668,10 +684,16 @@ impl PolicySource {
         })
     }
 
+    pub fn with_sensitive(mut self, sensitive: maknae_config::SensitiveList) -> Self {
+        self.sensitive = Arc::new(sensitive);
+        self
+    }
+
     fn from_lookups(parts: Parts) -> Result<Self, AuthzBasicError> {
         let Parts {
             policy,
             bindings,
+            sensitive,
             lookups,
             lookup,
             hosts,
@@ -705,6 +727,7 @@ impl PolicySource {
         Ok(Self {
             policy,
             bindings,
+            sensitive,
             lookups,
             lookup,
             hosts,
@@ -733,6 +756,7 @@ impl PolicySource {
         Self::from_lookups(Parts {
             policy: self.policy.clone(),
             bindings,
+            sensitive: Arc::clone(&self.sensitive),
             lookups,
             lookup: self.lookup,
             hosts: self.hosts,
@@ -772,6 +796,7 @@ impl PolicySource {
         Self::from_lookups(Parts {
             policy: self.policy.clone(),
             bindings,
+            sensitive: Arc::clone(&self.sensitive),
             lookups,
             lookup: self.lookup,
             hosts: self.hosts,
@@ -803,6 +828,10 @@ impl PolicySource {
 
     pub fn bindings(&self) -> &maknae_config::Bindings {
         &self.bindings
+    }
+
+    pub fn sensitive(&self) -> &Arc<maknae_config::SensitiveList> {
+        &self.sensitive
     }
 
     pub fn principal(&self) -> &maknae_config::Principal {
@@ -932,7 +961,7 @@ impl PolicySource {
     }
 
     /// `authz.yaml`'s top-level sections, `"bindings"` from `bindings.yaml` when it has
-    /// the key, and `"agents.<id>"` for each enrolled agent's `policy.yaml`, each
+    /// the key, `"sensitive"` from `sensitive.yaml`, and `"agents.<id>"` for each enrolled agent's `policy.yaml`, each
     /// canonical JSON through the caller's digest, by key.
     pub fn section_digests(
         &self,
@@ -946,6 +975,10 @@ impl PolicySource {
         if let Some(b) = self.bindings.section_canonical() {
             out.insert("bindings".into(), digest(b.as_bytes()));
         }
+        out.insert(
+            "sensitive".into(),
+            digest(self.sensitive.canonical().as_bytes()),
+        );
         for (id, _, p) in self.agent_policies() {
             out.insert(format!("agents.{id}"), digest(p.canonical.as_bytes()));
         }
@@ -2169,6 +2202,7 @@ mod tests {
                 subjects: subjects(src).map_err(Refused::Other)?,
                 agents: src.agent_uids(),
                 taskers: src.agent_taskers().clone(),
+                sensitive: std::sync::Arc::clone(src.sensitive()),
             })
         }
 
@@ -2413,6 +2447,7 @@ mod tests {
     const DIR: &str = "/etc/maknae";
     const PATH: &str = "/etc/maknae/authz.yaml";
     const EMPTY: &str = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n";
+    const EMPTY_SENSITIVE: &str = "schema_version: 1\nsensitive: []\n";
     const ADMIN_ROOT: &str = "schema_version: 1\nbindings:\n  admin: [\"root\"]\n";
     const ADVERSARY_ROOT: &str = "schema_version: 1\nbindings:\n  adversary: [\"root\"]\n";
     const CONTAINED: &str = "subject contained: role=adversary";
@@ -2440,6 +2475,7 @@ mod tests {
     ) -> Result<PolicySource, AuthzBasicError> {
         let lookups = resolve_uid_map_with(&policy, &bindings, &[], classify(lookup_uid))?;
         PolicySource::from_lookups(Parts {
+            sensitive: Default::default(),
             policy,
             bindings,
             lookups,
@@ -2541,6 +2577,7 @@ mod tests {
 
     fn source_with_lookups(lookups: &[(&str, Option<u32>)]) -> PolicySource {
         PolicySource::from_lookups(Parts {
+            sensitive: Default::default(),
             policy: parse(EMPTY),
             bindings: bound(
                 "schema_version: 1\nbindings:\n  admin: [\"alice\"]\n  user: [\"ghost\"]\n",
@@ -2779,6 +2816,7 @@ mod tests {
             subjects: decide::SubjectGrants::default(),
             agents: Default::default(),
             taskers: Default::default(),
+            sensitive: Default::default(),
         };
         let ask = |uid: i64, action: &str| {
             let mut r = liveness_req(Some(uid));
@@ -4379,6 +4417,7 @@ mod tests {
         let bindings = bound(ADMIN_ROOT);
         let lookups = resolve_uid_map_with(&policy, &bindings, &[], lookup)?;
         PolicySource::from_lookups(Parts {
+            sensitive: Default::default(),
             policy,
             bindings,
             lookups,
@@ -4899,6 +4938,31 @@ mod tests {
     }
 
     #[test]
+    fn the_sensitive_digest_is_the_canonical_list_and_moves_the_policy_digest() {
+        let empty = source_with(SHIPPED, None, &[]);
+        let listed = source_with(SHIPPED, None, &[]).with_sensitive(
+            maknae_config::SensitiveList::from_entries(&["~/.ssh/**".to_string()]).unwrap(),
+        );
+        assert_eq!(
+            empty.section_digests(stand_in_digest)["sensitive"],
+            stand_in_digest(b"[]")
+        );
+        assert_eq!(
+            listed.section_digests(stand_in_digest)["sensitive"],
+            stand_in_digest(br#"["~/.ssh/**"]"#)
+        );
+        assert_ne!(
+            compiled(&empty).policy_sha256(test_digest),
+            compiled(&listed).policy_sha256(test_digest)
+        );
+        assert!(compiled(&empty).sensitive().is_empty());
+        assert_eq!(
+            compiled(&listed).sensitive().entries().collect::<Vec<_>>(),
+            ["~/.ssh/**"]
+        );
+    }
+
+    #[test]
     fn the_bindings_digest_is_the_section_of_bindings_yaml_under_the_same_key() {
         let s = source_with(
             SHIPPED,
@@ -4917,7 +4981,16 @@ mod tests {
             )
         );
         let keys: Vec<&str> = d.keys().map(String::as_str).collect();
-        assert_eq!(keys, ["bindings", "permissions", "roles", "schema_version"]);
+        assert_eq!(
+            keys,
+            [
+                "bindings",
+                "permissions",
+                "roles",
+                "schema_version",
+                "sensitive"
+            ]
+        );
         let empty = source_with(SHIPPED, Some("schema_version: 1\nbindings: {}\n"), &[])
             .section_digests(stand_in_digest);
         assert_eq!(empty["bindings"], stand_in_digest(b"{}"));
@@ -4936,6 +5009,7 @@ mod tests {
             PolicyPaths {
                 authz: "/x/authz.yaml".into(),
                 bindings: "/x/bindings.yaml".into(),
+                sensitive: "/x/sensitive.yaml".into(),
                 config_dir: "/x".into(),
             }
         );
@@ -5408,6 +5482,10 @@ mod tests {
                 let _ = std::fs::remove_dir_all(&d);
                 std::fs::create_dir_all(&d).unwrap();
                 std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+                write(
+                    &d.join(maknae_config::SENSITIVE_FILE),
+                    super::EMPTY_SENSITIVE,
+                );
                 Fixture(d)
             }
 

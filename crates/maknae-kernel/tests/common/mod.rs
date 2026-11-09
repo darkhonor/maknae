@@ -304,6 +304,8 @@ pub fn euid_name() -> String {
         .name
 }
 
+pub const EMPTY_SENSITIVE: &str = "schema_version: 1\nsensitive: []\n";
+
 pub fn write_0640(path: &std::path::Path, body: &str) {
     std::fs::write(path, body).unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640)).unwrap();
@@ -405,6 +407,7 @@ impl Fixture {
             &paths.bindings,
             &format!("schema_version: 1\nbindings:\n  user: [\"{name}\"]\n"),
         );
+        write_0640(&paths.sensitive, EMPTY_SENSITIVE);
         Self {
             peer_uid: nix::unistd::geteuid().as_raw(),
             peer_user: Some(name),

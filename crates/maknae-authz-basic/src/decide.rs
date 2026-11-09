@@ -44,6 +44,7 @@ pub(crate) struct LoadedPolicy {
     pub(crate) subjects: SubjectGrants,
     pub(crate) agents: AgentUids,
     pub(crate) taskers: AgentTaskers,
+    pub(crate) sensitive: std::sync::Arc<maknae_config::SensitiveList>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -1186,6 +1187,7 @@ mod tests {
             subjects: SubjectGrants::default(),
             agents: Default::default(),
             taskers: Default::default(),
+            sensitive: Default::default(),
         }
     }
 
@@ -2331,6 +2333,7 @@ mod tests {
             agents: Default::default(),
             taskers: Default::default(),
             policy,
+            sensitive: Default::default(),
         }
     }
 
@@ -3113,6 +3116,7 @@ mod tests {
             agents: Default::default(),
             taskers: Default::default(),
             policy,
+            sensitive: Default::default(),
         }
     }
 
@@ -3630,6 +3634,7 @@ mod tests {
             agents: AgentUids::default(),
             taskers: AgentTaskers::default(),
             policy,
+            sensitive: Default::default(),
         }
     }
 
@@ -4168,6 +4173,7 @@ mod tests {
             agents: AgentUids::default(),
             taskers: AgentTaskers::default(),
             policy,
+            sensitive: Default::default(),
         };
         let at = |path: &str| request(Some(UID.into()), "session.new", Some(path));
         for path in ["/home/operator/projects/x", "/home/operator/docs/x"] {
@@ -4235,6 +4241,7 @@ mod tests {
             agents,
             taskers: Default::default(),
             policy,
+            sensitive: Default::default(),
         }
     }
 
@@ -4782,6 +4789,7 @@ mod tests {
             agents,
             taskers,
             policy,
+            sensitive: Default::default(),
         }
     }
 

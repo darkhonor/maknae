@@ -9256,6 +9256,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             put(&d.0, f, SELF_SIGNED_PEM, 0o640);
         }
         put(&d.0, "maknaed-approle-id", "maknaed-role-id\n", 0o640);
+        crate::test_fixtures::write_empty_sensitive(&d.0);
     }
 
     /// Run `run_inner` to completion on a FRESH single-threaded runtime, entirely
@@ -13559,6 +13560,50 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         assert_eq!(trail_of(&d, "audit.jsonl").last().unwrap().action, "authz");
     }
 
+    fn refused_naming_sensitive_yaml(d: &Dir) -> String {
+        let r = boot(d);
+        let Err(e @ RunError::Authz(m)) = &r else {
+            panic!("expected the authz refusal, got {r:?}");
+        };
+        assert_eq!(refusal_exit_code(e), 3);
+        assert!(m.contains(maknae_config::SENSITIVE_FILE), "{m}");
+        let last = trail_of(d, "audit.jsonl").pop().unwrap();
+        assert_eq!(
+            (last.action.as_str(), last.outcome.result.as_str()),
+            ("authz", "deny")
+        );
+        assert!(
+            last.outcome.reason.contains(maknae_config::SENSITIVE_FILE),
+            "{}",
+            last.outcome.reason
+        );
+        m.clone()
+    }
+
+    #[test]
+    fn a_missing_sensitive_yaml_refuses_boot_with_the_authz_record() {
+        let _g = env_lock();
+        let d = fixture("no-sensitive");
+        let path = d.0.join(maknae_config::SENSITIVE_FILE);
+        std::fs::remove_file(&path).unwrap();
+        let m = refused_naming_sensitive_yaml(&d);
+        assert!(m.contains(&path.display().to_string()), "{m}");
+    }
+
+    #[test]
+    fn a_malformed_sensitive_yaml_refuses_boot_with_the_authz_record() {
+        let _g = env_lock();
+        let d = fixture("bad-sensitive");
+        put(
+            &d.0,
+            maknae_config::SENSITIVE_FILE,
+            "schema_version: 1\nsensitive: [\"relative/path\"]\n",
+            0o640,
+        );
+        let m = refused_naming_sensitive_yaml(&d);
+        assert!(m.contains("relative/path"), "{m}");
+    }
+
     #[test]
     fn a_first_start_offload_or_principal_refusal_is_audited_as_today() {
         let _g = env_lock();
@@ -13717,6 +13762,7 @@ mod home_resolution_tests {
         )
         .unwrap();
         std::fs::set_permissions(&policy, std::fs::Permissions::from_mode(0o640)).unwrap();
+        crate::test_fixtures::write_empty_sensitive(&dir.0);
         let us = &maknae_config::BasicPolicy;
         let authorizer = Arc::new(crate::Composition::new(
             maknae_authz_basic::HermeticAuthorizer::new(
@@ -13793,6 +13839,7 @@ mod home_resolution_tests {
             std::fs::Permissions::from_mode(0o640),
         )
         .unwrap();
+        crate::test_fixtures::write_empty_sensitive(&dir.0);
         let us = &maknae_config::BasicPolicy;
         let authorizer = Arc::new(crate::Composition::new(
             maknae_authz_basic::HermeticAuthorizer::new(
@@ -13933,6 +13980,7 @@ mod admission_bound_tests {
         )
         .unwrap();
         std::fs::set_permissions(&policy, std::fs::Permissions::from_mode(0o640)).unwrap();
+        crate::test_fixtures::write_empty_sensitive(&root);
         let uid = nix::unistd::geteuid().as_raw();
         let us = &maknae_config::BasicPolicy;
         let authorizer = Arc::new(crate::Composition::new(
@@ -14863,6 +14911,10 @@ mod reload_fixture {
             write_0640(&self.bindings(), body);
         }
 
+        pub(super) fn write_sensitive(&self, body: &str) {
+            write_0640(&self.dir.join(maknae_config::SENSITIVE_FILE), body);
+        }
+
         pub(super) fn mirror(&self) -> String {
             std::fs::read_to_string(self.state_dir().join(maknae_config::MIRROR_FILE)).unwrap()
         }
@@ -15386,6 +15438,7 @@ mod reload_fixture {
         let layer = files_baseline(&dir, &opts.env);
         let paths = maknae_authz_basic::PolicyPaths::in_dir(&dir);
         write_0640(&paths.authz, opts.authz);
+        crate::test_fixtures::write_empty_sensitive(&dir);
         if let Some(b) = opts.bindings {
             write_0640(&paths.bindings, b);
         }
@@ -18122,6 +18175,71 @@ mod reload_tests {
             Some(vec![])
         );
         assert_eq!(fx.sync_lines(), ["unsynced=0", "conflict=0", "file=lost"]);
+    }
+
+    fn host_list(fx: &Fx) -> Vec<String> {
+        fx.baseline()
+            .snapshot()
+            .sensitive()
+            .entries()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_reload_with_a_malformed_sensitive_yaml_keeps_the_enforced_list() {
+        let fx = fixture("sens_bad", AUTHZ, Some(ROOT_ADMIN)).await;
+        fx.write_sensitive("schema_version: 1\nsensitive: [\"~/.ssh/**\"]\n");
+        bounded(fx.reloader.run()).await.unwrap();
+        assert_eq!(host_list(&fx), ["~/.ssh/**"]);
+        let before = fx.baseline().snapshot();
+        let store = fx.store_bytes();
+        for body in ["schema_version: 1\nsensitive: [\n", "schema_version: 1\n"] {
+            fx.write_sensitive(body);
+            let got = bounded(fx.reloader.run()).await;
+            assert!(
+                matches!(&got, Err(crate::reload::Refusal::Load(m)) if m.contains(maknae_config::SENSITIVE_FILE)),
+                "{body:?}: {got:?}"
+            );
+            assert!(Arc::ptr_eq(&before, &fx.baseline().snapshot()));
+            assert_eq!(host_list(&fx), ["~/.ssh/**"]);
+            assert_eq!(fx.store_bytes(), store);
+            let last = outcomes(&fx.reload_records()).pop().unwrap();
+            assert_eq!((last.0.as_str(), last.1.as_str()), ("graph.reload", "deny"));
+            assert!(
+                last.2.starts_with("reload refused: policy load:")
+                    && last.2.contains(maknae_config::SENSITIVE_FILE),
+                "{}",
+                last.2
+            );
+        }
+        std::fs::remove_file(fx.dir.join(maknae_config::SENSITIVE_FILE)).unwrap();
+        let got = bounded(fx.reloader.run()).await;
+        assert!(
+            matches!(&got, Err(crate::reload::Refusal::Load(m)) if m.contains(maknae_config::SENSITIVE_FILE)),
+            "{got:?}"
+        );
+        assert_eq!(host_list(&fx), ["~/.ssh/**"]);
+    }
+
+    #[tokio::test]
+    async fn a_reload_that_removes_an_entry_takes_effect() {
+        let fx = fixture("sens_drop", AUTHZ, Some(ROOT_ADMIN)).await;
+        assert!(host_list(&fx).is_empty());
+        fx.write_sensitive("schema_version: 1\nsensitive: [\"~/.ssh/**\", \"/etc/shadow\"]\n");
+        bounded(fx.reloader.run()).await.unwrap();
+        assert_eq!(host_list(&fx), ["~/.ssh/**", "/etc/shadow"]);
+        let listed = fx.baseline().policy_sha256();
+        fx.write_sensitive("schema_version: 1\nsensitive: [\"/etc/shadow\"]\n");
+        bounded(fx.reloader.run()).await.unwrap();
+        assert_eq!(host_list(&fx), ["/etc/shadow"]);
+        let last = fx.reload_records().pop().unwrap();
+        assert_eq!(last.outcome.result, "permit");
+        assert_eq!(
+            last.policy_sha256.as_deref(),
+            Some(fx.baseline().policy_sha256().as_str())
+        );
+        assert_ne!(fx.baseline().policy_sha256(), listed);
     }
 
     #[tokio::test]

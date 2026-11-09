@@ -77,6 +77,10 @@ impl Fixture {
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         // Canonical: the kernel reports the resolved path, and `~` grants anchor here (#216).
         let dir = dir.canonicalize().expect("canonicalize the fixture home");
+        common::write_0640(
+            &dir.join(maknae_config::SENSITIVE_FILE),
+            common::EMPTY_SENSITIVE,
+        );
         let principal = maknae_config::Principal {
             name: "operator".into(),
             uid: nix::unistd::geteuid().as_raw(),

@@ -1981,6 +1981,7 @@ fn agent_pdp_over(
     let root = common::DirGuard(root.canonicalize().unwrap());
     let paths = maknae_authz_basic::PolicyPaths::in_dir(&root);
     common::write_0640(&paths.authz, authz);
+    common::write_0640(&paths.sensitive, common::EMPTY_SENSITIVE);
     common::write_0640(
         &paths.bindings,
         "schema_version: 1\nbindings:\n  admin: [\"root\"]\n",
