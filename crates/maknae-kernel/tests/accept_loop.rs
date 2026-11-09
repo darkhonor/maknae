@@ -2251,11 +2251,19 @@ async fn a_read_citing_the_agents_own_task_carries_subject_task() {
     );
 }
 
-#[tokio::test]
-async fn an_agent_channel_request_meets_the_host_list() {
+/// An agent-channel read of a host-listed file, asked directly or through a directory symlink.
+async fn agent_read_of_a_listed_file(
+    tag: &str,
+    through_link: bool,
+) -> (
+    Vec<maknae_security::Request>,
+    AuditRecord,
+    Option<maknae_proto::RespResult>,
+    std::path::PathBuf,
+) {
     let _turn = FS_TURN.lock().await;
-    let (root, pdp) = agent_pdp("read-sensitive");
-    let home = common::second_home("agent617-sensitive");
+    let (root, pdp) = agent_pdp(tag);
+    let home = common::second_home(&format!("agent617-{tag}"));
     let file = home.join("notes");
     common::write_0640(&file, "maknae-617-sensitive-sentinel");
     common::write_0640(
@@ -2269,9 +2277,13 @@ async fn an_agent_channel_request_meets_the_host_list() {
     let pdp = Seen::new(pdp);
     let me = nix::unistd::geteuid().as_raw();
     let own = signed_for("hobi");
-    let via = home.join("via");
-    std::os::unix::fs::symlink(&*home, &via).unwrap();
-    let asked_path = via.join("notes");
+    let asked_path = if through_link {
+        let via = home.join("via");
+        std::os::unix::fs::symlink(&*home, &via).unwrap();
+        via.join("notes")
+    } else {
+        file.clone()
+    };
     let fds = maknae_io::DelegatedFds::new(4);
     fds.push(maknae_io::open_path_for_delegation(&asked_path).unwrap());
     let (conn, mut client) = asking(
@@ -2300,7 +2312,17 @@ async fn an_agent_channel_request_meets_the_host_list() {
             got
         }
     );
-    let asked = pdp.asked("fs.read");
+    let read = recs
+        .iter()
+        .find(|r| r.action == "fs.read")
+        .expect("the fs.read record")
+        .clone();
+    (pdp.asked("fs.read"), read, answer, file.to_path_buf())
+}
+
+#[tokio::test]
+async fn an_agent_channel_request_meets_the_host_list() {
+    let (asked, read, answer, file) = agent_read_of_a_listed_file("read-sensitive", true).await;
     assert_eq!(asked.len(), 1, "{asked:?}");
     assert_eq!(
         asked[0].subject.0.get(maknae_security::SUBJECT_CHANNEL),
@@ -2308,10 +2330,6 @@ async fn an_agent_channel_request_meets_the_host_list() {
             maknae_security::CHANNEL_AGENT.into()
         ))
     );
-    let read = recs
-        .iter()
-        .find(|r| r.action == "fs.read")
-        .expect("the fs.read record");
     assert_eq!(
         (
             read.outcome.result.as_str(),
@@ -2330,6 +2348,30 @@ async fn an_agent_channel_request_meets_the_host_list() {
             assert_eq!(e.code, maknae_proto::ProtoErrCode::Unauthorized)
         }
         other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn an_agent_channel_request_for_a_listed_path_answers_protected() {
+    let (asked, read, answer, file) = agent_read_of_a_listed_file("read-protected", false).await;
+    assert!(asked.is_empty(), "decided before the PDP: {asked:?}");
+    assert_eq!(
+        (read.outcome.reason.clone(), read.subject.agent.as_deref()),
+        (format!("sensitive: host {}", file.display()), Some("hobi")),
+        "{read:?}"
+    );
+    match answer {
+        Some(maknae_proto::RespResult::Err(e)) => {
+            assert_eq!(e.code, maknae_proto::ProtoErrCode::Protected);
+            assert_eq!(
+                e.message,
+                maknae_proto::protected_message(
+                    maknae_proto::HOST_SENSITIVE_LIST,
+                    file.to_str().unwrap()
+                )
+            );
+        }
+        other => panic!("expected Protected, got {other:?}"),
     }
 }
 

@@ -40,6 +40,17 @@ pub fn sensitive_match(
     first_match(asked, home, host, personal, fold, false)
 }
 
+/// As [`sensitive_match`], for any entry that could match `dir` or a path beneath it.
+pub fn sensitive_subtree_match(
+    dir: &Path,
+    home: Option<&Path>,
+    host: &SensitiveList,
+    personal: &SensitiveList,
+    fold: Fold,
+) -> SensitiveMatch {
+    first_match(dir, home, host, personal, fold, true)
+}
+
 fn first_match(
     asked: &Path,
     home: Option<&Path>,
@@ -72,8 +83,7 @@ fn first_match(
     }
 }
 
-/// The host list a request path matches its asked path against for the `Protected`
-/// answer. Enforcement never reads it: the operand decides on each batch's snapshot.
+/// The installed host `sensitive.yaml` list.
 pub trait SensitiveNow {
     fn sensitive_now(&self) -> std::sync::Arc<SensitiveList>;
 }

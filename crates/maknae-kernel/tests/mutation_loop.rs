@@ -2269,6 +2269,99 @@ async fn the_shipped_list_permits_an_unrelated_recursive_delete() {
     assert_refused(&result, &record, "sensitive: host ~/.ssh/**");
 }
 
+async fn unarmed_attempt(fx: &Fixture, verb: Verb) -> (RespResult, AuditRecord) {
+    let records = Records::new(0);
+    let (client, task, body) = fx.start(verb, None, records.clone());
+    let result = Fixture::exchange(client, task, &body)
+        .await
+        .expect("a refusal frame")
+        .result;
+    (result, records.snapshot().last().unwrap().clone())
+}
+
+fn recursive_delete(target: &std::path::Path) -> Verb {
+    Verb::FsDelete {
+        path: target.to_str().unwrap().into(),
+        recursive: true,
+    }
+}
+
+#[tokio::test]
+async fn an_unarmed_write_delete_or_mkdir_of_a_protected_path_answers_protected() {
+    let fx = admin_of_everything("sensitive_unarmed_mutations");
+    let outside = outside_the_home(&fx, "sensitive_unarmed_mutations");
+    let gone = outside.join("secret-gone");
+    let entry = format!("{}/secret*", outside.display());
+    host_list(&fx, &[&entry]);
+    let write = Verb::FsWrite {
+        path: gone.to_str().unwrap().into(),
+        content_length: 1,
+        mode: WriteMode::Existing,
+        conversation: None,
+    };
+    for verb in [
+        write,
+        create_in(&gone),
+        Verb::FsDelete {
+            path: gone.to_str().unwrap().into(),
+            recursive: false,
+        },
+        mkdir_in(&gone),
+    ] {
+        let (result, record) = unarmed_attempt(&fx, verb.clone()).await;
+        assert_protected_by(&result, &entry);
+        assert_eq!(
+            record.outcome.reason,
+            format!("sensitive: host {entry}"),
+            "{verb:?}"
+        );
+    }
+    assert!(!gone.exists());
+}
+
+#[tokio::test]
+async fn a_recursive_delete_of_a_tree_that_could_hold_an_entry_answers_protected() {
+    let fx = Fixture::with_rules("sensitive_tree_delete", &["Read", "Write"], &[], "");
+    host_list(&fx, &["~/.ssh/**", "~/proj/secrets/**", "~/keys/id"]);
+    let parent = fx.root.parent().unwrap().to_path_buf();
+
+    let (result, record) = unarmed_attempt(&fx, recursive_delete(&fx.root)).await;
+    assert_protected_by(&result, "~/.ssh/**");
+    assert_eq!(record.outcome.reason, "sensitive: host ~/.ssh/**");
+
+    std::fs::create_dir(fx.root.join(".ssh")).unwrap();
+    let (result, _) = second_subject_attempt(&fx, recursive_delete(&fx.root), &parent).await;
+    assert_protected_by(&result, "~/.ssh/**");
+
+    let missing = fx.root.join("proj");
+    assert!(!missing.exists());
+    let (result, _) = unarmed_attempt(&fx, recursive_delete(&missing)).await;
+    assert_protected_by(&result, "~/proj/secrets/**");
+
+    let keys = fx.root.join("keys");
+    std::fs::create_dir(&keys).unwrap();
+    let (result, record) = second_subject_attempt(
+        &fx,
+        Verb::FsDelete {
+            path: keys.to_str().unwrap().into(),
+            recursive: false,
+        },
+        &fx.root,
+    )
+    .await;
+    assert!(
+        !matches!(&result, RespResult::Err(e) if e.code == maknae_proto::ProtoErrCode::Protected),
+        "{result:?}"
+    );
+    assert!(
+        !record.outcome.reason.starts_with("sensitive"),
+        "{record:?}"
+    );
+    let (result, _) = unarmed_attempt(&fx, recursive_delete(&keys)).await;
+    assert_protected_by(&result, "~/keys/id");
+    assert!(fx.root.join(".ssh").exists());
+}
+
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn an_admin_etc_entry_refuses_a_read_asked_as_private_etc() {

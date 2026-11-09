@@ -5,7 +5,7 @@ use crate::conversation::{
     record::ConversationRecord,
     store::ConversationStore,
 };
-use crate::sensitive_authz::{sensitive_match, SensitiveMatch};
+use crate::sensitive_authz::{sensitive_match, sensitive_subtree_match, SensitiveMatch};
 use crate::{
     blocking_guard::AUDIT_APPEND_TIMEOUT,
     handler::{build_authz_request, delegated_plan, discharge_plan, lexical_pregate, Stamp},
@@ -410,24 +410,36 @@ struct Protection {
     entry: String,
 }
 
+/// The conversation's personal list for the `Protected` answer; `None` when it does not
+/// parse, which leaves the refusal to the operand.
+fn personal_list(personal: Option<&AttrValue>) -> Option<SensitiveList> {
+    match personal {
+        None => Some(SensitiveList::empty()),
+        Some(AttrValue::Set(entries)) => {
+            SensitiveList::from_entries(&entries.iter().cloned().collect::<Vec<_>>()).ok()
+        }
+        Some(_) => None,
+    }
+}
+
 fn protection(
+    verb: &Verb,
     asked: &str,
     home: &Path,
     host: &SensitiveList,
-    personal: Option<&AttrValue>,
+    personal: &SensitiveList,
 ) -> Option<Protection> {
-    let personal = match personal {
-        Some(AttrValue::Set(entries)) => {
-            SensitiveList::from_entries(&entries.iter().cloned().collect::<Vec<_>>())
-                .unwrap_or_default()
-        }
-        _ => SensitiveList::empty(),
+    let decide = match verb {
+        Verb::FsDelete {
+            recursive: true, ..
+        } => sensitive_subtree_match,
+        _ => sensitive_match,
     };
-    let (list, tag, entry) = match sensitive_match(
+    let (list, tag, entry) = match decide(
         Path::new(asked),
         Some(home),
         host,
-        &personal,
+        personal,
         maknae_config::native_fold(),
     ) {
         SensitiveMatch::Host(entry) => (maknae_proto::HOST_SENSITIVE_LIST, "host", entry),
@@ -661,7 +673,9 @@ where
             checked(asked)?;
             let gathered = gather(&*conversations, uid, cited(&original), None);
             let personal = owned_personal(gathered.as_ref().and_then(|(_, rec)| rec.as_ref()), uid);
-            if let Some(p) = protection(asked, &home, &sensitive, personal.as_ref()) {
+            if let Some(p) = personal_list(personal.as_ref())
+                .and_then(|listed| protection(&original, asked, &home, &sensitive, &listed))
+            {
                 return Ok(Err(p));
             }
             let prepared = prepare(original.clone(), fd, &home, lane)?;
@@ -1921,6 +1935,35 @@ mod tests {
         assert!(reason.contains("Write(~/one/two)"), "{reason}");
         assert_eq!(path, prepared.paths[1]);
     }
+    #[test]
+    fn a_personal_list_that_does_not_parse_answers_no_protection() {
+        let set = |e: &[&str]| AttrValue::Set(e.iter().map(|s| s.to_string()).collect());
+        assert_eq!(personal_list(None), Some(SensitiveList::empty()));
+        assert_eq!(personal_list(Some(&set(&["~bob/x"]))), None);
+        assert_eq!(personal_list(Some(&AttrValue::Str("/k".into()))), None);
+        let listed = personal_list(Some(&set(&["/srv/k"]))).unwrap();
+        let p = protection(
+            &Verb::Read {
+                path: "/srv/k".into(),
+                conversation: None,
+                page: None,
+            },
+            "/srv/k",
+            Path::new("/home/u"),
+            &SensitiveList::empty(),
+            &listed,
+        )
+        .unwrap();
+        assert_eq!(
+            (p.list, p.reason.as_str(), p.entry.as_str()),
+            (
+                maknae_proto::PERSONAL_SENSITIVE_LIST,
+                "sensitive: personal /srv/k",
+                "/srv/k"
+            )
+        );
+    }
+
     #[test]
     fn only_the_requesters_own_conversation_contributes_its_personal_list() {
         let id = maknae_proto::ConversationId::parse(&"6".repeat(32)).unwrap();
