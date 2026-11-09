@@ -491,7 +491,7 @@ enum GlobSeg {
 impl PathGlob {
     /// `~` is kept symbolic and bound at match time to the home the request carries (#435);
     /// `~name` is refused (#438).
-    fn parse(spec: &str) -> Result<PathGlob, AuthzError> {
+    pub(crate) fn parse(spec: &str) -> Result<PathGlob, AuthzError> {
         let bad = || AuthzError::BadPattern(spec.to_string());
         let (anchor, rest) = if let Some(rest) = spec.strip_prefix('~') {
             if !rest.is_empty() && !rest.starts_with('/') {
@@ -560,19 +560,27 @@ impl PathGlob {
             }))
     }
 
-    fn may_intersect_subtree(&self, root: &str, home: Option<&Path>) -> Result<bool, HomeUnbound> {
+    pub(crate) fn may_intersect_subtree(
+        &self,
+        root: &str,
+        home: Option<&Path>,
+    ) -> Result<bool, HomeUnbound> {
         let base = self.base(home)?;
-        let fixed = self.segments.iter().map_while(|seg| match seg {
-            GlobSeg::Comp(literal) if !literal.contains('*') => Some(literal.as_str()),
-            _ => None,
-        });
-        // Either prefix may end first. Only a conflicting fixed component proves
-        // disjointness; a wildcard could reach anywhere after its fixed prefix.
-        Ok(base
-            .into_iter()
-            .chain(fixed)
-            .zip(root.split('/').filter(|c| !c.is_empty()))
-            .all(|(a, b)| a == b))
+        let root: Vec<&str> = root.split('/').filter(|c| !c.is_empty()).collect();
+        let shared = base.len().min(root.len());
+        Ok(base[..shared] == root[..shared] && reaches_beneath(&self.segments, &root[shared..]))
+    }
+}
+
+/// Whether some path at or beneath `root` can match `pat`: a `*` segment
+/// consumes exactly one root component, and only `**` reaches any depth.
+fn reaches_beneath(pat: &[GlobSeg], root: &[&str]) -> bool {
+    match (pat.split_first(), root.split_first()) {
+        (_, None) | (Some((GlobSeg::DoubleStar, _)), Some(_)) => true,
+        (Some((GlobSeg::Comp(p), rest)), Some((c, tail))) => {
+            component_matches(p, c) && reaches_beneath(rest, tail)
+        }
+        (None, Some(_)) => false,
     }
 }
 
@@ -1656,7 +1664,8 @@ mod tests {
             ("Write(/h/u/projects/**)", true),
             ("Write(/h/u/**/.aws/**)", true),
             ("Write(/**/secret)", true),
-            ("Write(/h/u/proj*/secret)", true),
+            ("Write(/h/u/proj*/p/secret)", true),
+            ("Write(/h/u/proj*/secret)", false),
             ("Write(/h/u/.ssh/**)", false),
             ("Write(/h/u/projects/private/**)", false),
             ("Write(/h/u/projects/p-other/**)", false),
@@ -1750,6 +1759,57 @@ mod tests {
                 source: "<unknown deny entry>".into()
             }
         );
+    }
+
+    #[test]
+    fn a_star_deny_does_not_refuse_an_unrelated_recursive_delete() {
+        let policy = parse_policy(
+            "schema_version: 1\npermissions:\n  allow: [\"Write(~/**)\"]\n  deny: [\"Write(~/.*_history)\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            policy
+                .evaluate_write_subtree(&home().join("projects/build"), Some(&home()))
+                .unwrap(),
+            Match3::AllowMatch {
+                source: "Write(~/**)".into()
+            }
+        );
+        assert_eq!(
+            policy
+                .evaluate_write_subtree(&home(), Some(&home()))
+                .unwrap(),
+            Match3::DenyMatch {
+                source: "Write(~/.*_history)".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_subtree_deny_reaches_through_one_star_component_only() {
+        for (deny, root, intersects) in [
+            ("Write(/h/a/*/c)", "/h/a/b", true),
+            ("Write(/h/a/*/c)", "/h/x/b", false),
+            ("Write(/h/a/*/c)", "/h/a/b/c/d", false),
+            ("Write(/h/a/*/c/**)", "/h/a/b/c/d", true),
+            ("Write(/h/.ssh)", "/h/.ssh/x", false),
+            ("Write(/h/.ssh/**)", "/h/.ssh/x", true),
+            ("Write(/h/**/c)", "/h/x/y", true),
+            ("Write(/h/a)", "/h", true),
+        ] {
+            let yaml = format!(
+                "schema_version: 1\npermissions:\n  allow: [\"Write(/**)\"]\n  deny: [\"{deny}\"]\n"
+            );
+            let got = parse_policy(&yaml)
+                .unwrap()
+                .evaluate_write_subtree(Path::new(root), None)
+                .unwrap();
+            assert_eq!(
+                matches!(got, Match3::DenyMatch { .. }),
+                intersects,
+                "{deny} on {root}"
+            );
+        }
     }
 
     #[test]

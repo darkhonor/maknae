@@ -51,6 +51,7 @@ mod policy;
 mod principal;
 mod providers;
 mod scalar;
+mod sensitive;
 pub mod state;
 mod transport;
 mod user_providers;
@@ -133,6 +134,7 @@ pub use providers::{
     MAX_MODEL_BYTES, MAX_PROVIDERS, MAX_PROVIDER_NAME_BYTES, MAX_REASONING_EFFORT_BYTES,
     PROVIDERS_SECTION,
 };
+pub use sensitive::{native_fold, Fold, SensitiveList, SENSITIVE_FILE};
 pub use state::{MARKER_FILE, MIRROR_FILE, STATE_DIR, STORE_FILE};
 pub use transport::{
     content_write_bound, transport_from_section, TransportConfig, ADMIN_REPLY_MARGIN_MS,
