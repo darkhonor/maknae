@@ -387,6 +387,15 @@ fn io_finish(error: &IoError) -> ReportedFinish {
         _ => ReportedFinish::OsRefused,
     }
 }
+/// `(stale, withheld)` for a replace that failed (ADR-0034 decision 7). A stale base
+/// is `stale` only when the subject can read the file. Any other failure decided
+/// before a write syscall is `withheld`; one that may have reached the file is neither.
+fn refused_replace(e: &MutationFailure, readable: impl FnOnce() -> bool) -> (bool, bool) {
+    match &e.source {
+        IoError::StaleBase { .. } if readable() => (true, false),
+        _ => (false, e.before_write),
+    }
+}
 fn error_step(e: MutationFailure, effect: ReportedEffect, path: String) -> Step {
     let changed = e.state != EffectState::NoEffect;
     let outcome = match e.state {
@@ -577,12 +586,9 @@ impl Worker {
                         }
                     }
                     Err(e) => {
-                        if matches!(e.source, IoError::StaleBase { .. }) {
-                            let readable =
-                                maknae_io::held_file_is_readable(held.as_fd(), Path::new(&path));
-                            self.stale = readable;
-                            self.withheld = !readable;
-                        }
+                        (self.stale, self.withheld) = refused_replace(&e, || {
+                            maknae_io::held_file_is_readable(held.as_fd(), Path::new(&path))
+                        });
                         error_step(e, ReportedEffect::ReplacedFile, path)
                     }
                 }
@@ -889,11 +895,20 @@ pub async fn execute_read<S: AsyncRead + AsyncWrite + Unpin + Send>(
 }
 /// The stderr line for an attempt that did not succeed. A stale refusal gets
 /// none: the model is told, and it is not a failure of the agent's user (#388).
-fn stop_line(outcome: ReportedFinish, reading: bool, stale: bool, effects: u32) -> Option<String> {
+fn stop_line(
+    outcome: ReportedFinish,
+    reading: bool,
+    stale: bool,
+    withheld: bool,
+    effects: u32,
+) -> Option<String> {
     match outcome {
         ReportedFinish::Success => None,
         _ if reading => Some(format!("read not performed: {outcome:?}")),
         _ if stale => None,
+        _ if withheld => Some(format!(
+            "write not performed: {outcome:?}; you cannot read the file or open it for writing; nothing was written"
+        )),
         _ => Some(format!(
             "mutation stopped: {outcome:?}; {effects} effect(s) reported"
         )),
@@ -910,8 +925,8 @@ struct Attempted {
 }
 
 /// A write attempt's end: `stale` is true only when the #388 check refused it,
-/// before any write syscall, and the file is readable; `withheld` replaces it when
-/// the subject cannot read the file (ADR-0034 decision 7). `version` is the
+/// before any write syscall, and the file is readable; `withheld` is set for any
+/// other failure decided before a write syscall (ADR-0034 decision 7). `version` is the
 /// written file's, when known.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WriteEnd {
@@ -1067,12 +1082,9 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
                 next.next_index,
             )
             .await?;
-            if let Some(line) = stop_line(
-                outcome,
-                reading,
-                next.stale || next.withheld,
-                next.next_index,
-            ) {
+            if let Some(line) =
+                stop_line(outcome, reading, next.stale, next.withheld, next.next_index)
+            {
                 diag(line);
             }
             return Ok(Attempted {
@@ -1093,21 +1105,64 @@ mod tests {
     #[test]
     fn a_stale_refusal_prints_nothing_and_other_stops_still_do() {
         use ReportedFinish::*;
-        assert_eq!(stop_line(Success, false, false, 1), None);
-        assert_eq!(stop_line(Success, true, false, 1), None);
-        assert_eq!(stop_line(PathChanged, false, true, 0), None);
+        assert_eq!(stop_line(Success, false, false, false, 1), None);
+        assert_eq!(stop_line(Success, true, false, false, 1), None);
+        assert_eq!(stop_line(PathChanged, false, true, false, 0), None);
         assert_eq!(
-            stop_line(PathChanged, false, false, 0).as_deref(),
+            stop_line(PathChanged, false, false, false, 0).as_deref(),
             Some("mutation stopped: PathChanged; 0 effect(s) reported")
         );
         assert_eq!(
-            stop_line(OsRefused, true, false, 0).as_deref(),
+            stop_line(OsRefused, true, false, false, 0).as_deref(),
             Some("read not performed: OsRefused")
         );
         assert_eq!(
-            stop_line(Partial, false, false, 2).as_deref(),
+            stop_line(Partial, false, false, false, 2).as_deref(),
             Some("mutation stopped: Partial; 2 effect(s) reported")
         );
+        assert_eq!(
+            stop_line(OsRefused, false, false, true, 0).as_deref(),
+            Some("write not performed: OsRefused; you cannot read the file or open it for writing; nothing was written")
+        );
+    }
+    #[test]
+    fn a_replace_is_withheld_only_when_refused_before_any_write() {
+        let failed = |state, source, before_write| MutationFailure {
+            state,
+            at: "/sentinel-617".into(),
+            source,
+            before_write,
+        };
+        let denied = || IoError::Io {
+            path: "/sentinel-617".into(),
+            kind: IoKind::PermissionDenied,
+        };
+        let stale = || IoError::StaleBase {
+            path: "/sentinel-617".into(),
+        };
+        assert_eq!(
+            refused_replace(&failed(EffectState::NoEffect, stale(), true), || true),
+            (true, false)
+        );
+        assert_eq!(
+            refused_replace(&failed(EffectState::NoEffect, stale(), true), || false),
+            (false, true)
+        );
+        assert_eq!(
+            refused_replace(&failed(EffectState::NoEffect, denied(), true), || true),
+            (false, true)
+        );
+        for state in [
+            EffectState::NoEffect,
+            EffectState::Partial,
+            EffectState::DurabilityUnknown,
+        ] {
+            assert_eq!(
+                refused_replace(&failed(state, denied(), false), || true),
+                (false, false),
+                "{state:?}: a write syscall may have reached the file"
+            );
+        }
     }
     fn prepare(request: proto::Verb, content: Option<proto::Bytes>) -> Option<PreparedMutation> {
         prepare_checked(request, content, WriteCheck::Unchecked)
@@ -2011,6 +2066,53 @@ mod tests {
             assert_eq!(std::fs::read(&path).unwrap(), b"write only", "{name}");
         }
     }
+    #[tokio::test]
+    async fn a_write_to_an_existing_mode_0000_file_answers_unavailable() {
+        if nix::unistd::geteuid().is_root() {
+            panic!("a_write_to_an_existing_mode_0000_file_answers_unavailable: running as root, which opens a 0000 file and voids the premise; run as an unprivileged user");
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let d = Fixture::new();
+        let path = d.path("mode-0000-sentinel");
+        std::fs::write(&path, b"no access").unwrap();
+        let fresh = key_of(&path);
+        for check in [
+            WriteCheck::Read(fresh),
+            WriteCheck::Unread,
+            WriteCheck::Unchecked,
+        ] {
+            let armed_while_readable = checked_write(path.clone(), check);
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let (end, reports) = acknowledged_end(armed_while_readable, replace_grant(&path)).await;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let end = end.unwrap();
+            assert!(
+                !end.applied && !end.stale && end.withheld,
+                "{check:?}: {end:?}"
+            );
+            assert!(
+                matches!(
+                    &reports[..],
+                    [MutationReport::Finished {
+                        next_index: 0,
+                        outcome: ReportedFinish::OsRefused,
+                        ..
+                    }]
+                ),
+                "{reports:?}"
+            );
+            assert_eq!(
+                the_model_is_told(end),
+                maknae_agent::plane::WriteOutcome::Unavailable
+            );
+            use maknae_agent::render::{render, ToolOutcome};
+            assert_eq!(
+                render(&ToolOutcome::WriteUnavailable, 1).as_str(),
+                render(&ToolOutcome::ReadUnavailable, 1).as_str()
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), b"no access");
+        }
+    }
     #[test]
     fn prepare_checked_carries_the_check_into_the_prepared_mutation() {
         let d = Fixture::new();
@@ -2863,6 +2965,7 @@ mod tests {
             let step = error_step(
                 MutationFailure {
                     state,
+                    before_write: false,
                     at: path.clone().into(),
                     source: IoError::Io {
                         path: path.clone().into(),
@@ -3261,6 +3364,7 @@ mod tests {
         let step = error_step(
             MutationFailure {
                 state: EffectState::NoEffect,
+                before_write: false,
                 at: path.clone().into(),
                 source: IoError::DeadlineElapsed {
                     path: path.clone().into(),

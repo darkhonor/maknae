@@ -44,6 +44,8 @@ pub struct MutationFailure {
     pub state: EffectState,
     pub at: PathBuf,
     pub source: IoError,
+    /// Set only when the failure was decided before any write syscall was attempted.
+    pub before_write: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +75,7 @@ fn failure(at: &Path, state: EffectState, source: IoError) -> MutationFailure {
         state,
         at: at.to_path_buf(),
         source,
+        before_write: false,
     }
 }
 
@@ -265,6 +268,28 @@ fn replace_held_file_with(
     base: WriteBase,
     mut fstat: impl FnMut(&OwnedFd) -> nix::Result<nix::sys::stat::FileStat>,
 ) -> Result<Option<FileVersion>, MutationFailure> {
+    let (fd, pinned) = open_for_replace(held, expected, base, &mut fstat).map_err(|mut e| {
+        e.before_write = true;
+        e
+    })?;
+    let check = || bound_to(&fd, &pinned, expected, &SINGLE_LINK_REGULAR);
+    replace_bytes(
+        &fd,
+        expected,
+        bytes,
+        check,
+        syscall::write_at,
+        syscall::fsync_fd,
+    )?;
+    Ok(fstat(&fd).ok().map(|st| FileVersion::of(&st)))
+}
+
+fn open_for_replace(
+    held: BorrowedFd<'_>,
+    expected: &Path,
+    base: WriteBase,
+    fstat: &mut impl FnMut(&OwnedFd) -> nix::Result<nix::sys::stat::FileStat>,
+) -> Result<(OwnedFd, nix::sys::stat::FileStat), MutationFailure> {
     let pinned = pin(held, expected, &SINGLE_LINK_REGULAR)?;
     let fd = syscall::reopen_writable(&held, expected).map_err(|e| reopen_failure(e, expected))?;
     let check = || bound_to(&fd, &pinned, expected, &SINGLE_LINK_REGULAR);
@@ -293,15 +318,7 @@ fn replace_held_file_with(
             }
         }
     }
-    replace_bytes(
-        &fd,
-        expected,
-        bytes,
-        check,
-        syscall::write_at,
-        syscall::fsync_fd,
-    )?;
-    Ok(fstat(&fd).ok().map(|st| FileVersion::of(&st)))
+    Ok((fd, pinned))
 }
 
 /// Whether the subject can open a held file for reading: the same pin, reopen and
@@ -886,6 +903,44 @@ mod tests {
             std::fs::read(d.path().join("post-fstat-created")).unwrap(),
             b"kept"
         );
+    }
+    #[test]
+    fn a_replace_refused_at_the_write_open_is_decided_before_any_write() {
+        use std::os::unix::fs::PermissionsExt;
+        assert!(
+            !nix::unistd::geteuid().is_root(),
+            "running as root, which opens a 0000 file and voids the premise"
+        );
+        let d = tempfile::tempdir().unwrap();
+        let p = root(&d).join("mode-0000-sentinel");
+        std::fs::write(&p, b"kept").unwrap();
+        let fd = held(&p);
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let e = replace_held_file(fd.as_fd(), &p, b"not written", WriteBase::Any).unwrap_err();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(e.state, EffectState::NoEffect);
+        assert!(e.before_write, "{e:?}");
+        assert_eq!(std::fs::read(&p).unwrap(), b"kept");
+        let e = replace_held_file(fd.as_fd(), &p, b"blind", WriteBase::Unread).unwrap_err();
+        assert!(e.before_write, "a stale base is decided before any write");
+    }
+    #[test]
+    fn a_replace_whose_first_write_fails_may_have_reached_the_file() {
+        let d = tempfile::tempdir().unwrap();
+        let p = root(&d).join("first-write-sentinel");
+        std::fs::write(&p, b"kept").unwrap();
+        let fd = std::fs::OpenOptions::new().write(true).open(&p).unwrap();
+        let e = replace_bytes(
+            &fd.into(),
+            &p,
+            b"x",
+            || Ok(()),
+            |_, _, _| Err(nix::errno::Errno::EIO),
+            syscall::fsync_fd,
+        )
+        .unwrap_err();
+        assert_eq!(e.state, EffectState::NoEffect);
+        assert!(!e.before_write, "a write syscall was attempted");
     }
     #[test]
     fn a_failed_pre_write_fstat_is_an_ordinary_refusal_never_stale() {

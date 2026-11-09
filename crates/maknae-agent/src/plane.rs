@@ -90,8 +90,8 @@ impl std::fmt::Debug for ReadOutcome {
 /// `Unavailable` are certain no-effect outcomes: `Stale` when the client's
 /// read-before-write check refused the attempt before any write syscall (#388);
 /// `Unavailable` for a refusal in place of the grant, which the kernel sends only
-/// before any effect, or a stale result the client withheld because its own
-/// read-open of the file failed (ADR-0034 decision 7). Anything else after the
+/// before any effect, or a granted attempt the client refused before any write
+/// syscall without a releasable stale result (ADR-0034 decision 7). Anything else after the
 /// grant is `Unknown`: there the loop cannot tell uncertain from refused and must
 /// not manufacture certainty (ADR-0023 d4). `NotSent` is the one LOCAL refusal
 /// (the encoded request exceeds the frame bound, judged before a byte leaves the

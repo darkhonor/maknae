@@ -40,8 +40,8 @@ impl std::fmt::Debug for WireRead {
 /// What one sent verb came back as. `Refused` carries the wire's own code and
 /// message (ADR-0019); `armed` is false, on a filesystem verb, iff the client
 /// delegated no descriptor, so no decision was made about the object.
-/// `withheld` is set in place of `stale` when the client's own read-open of the
-/// file failed.
+/// `withheld` is set when the attempt failed before any write syscall and no
+/// stale result may be released.
 #[derive(Debug)]
 pub enum WireOutcome {
     Payload(Payload),

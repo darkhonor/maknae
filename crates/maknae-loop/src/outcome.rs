@@ -17,7 +17,7 @@ pub enum SentOutcome {
     ///
     /// `stale` (#388): the client's own read-before-write check refused it before
     /// any write syscall, so it is certain nothing was written. `withheld` is set
-    /// instead when the client could not read the file. `version` is the written
+    /// for any other failure decided before a write syscall. `version` is the written
     /// file's, when known.
     WriteDone {
         applied: bool,
