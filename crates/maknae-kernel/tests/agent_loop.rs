@@ -861,6 +861,41 @@ async fn the_trail_distinguishes_every_cause() {
         }
     }
     assert!(compared.len() >= 4);
+    let of = |cause: &str| {
+        out.trail
+            .iter()
+            .find(|(c, _)| *c == cause)
+            .map(|(_, t)| t.clone())
+            .unwrap()
+    };
+    let deny = |reason: &str| vec![("deny".to_string(), reason.to_string())];
+    assert_eq!(of("missing"), deny("read descriptor missing"));
+    assert_eq!(
+        of("grant-denied"),
+        deny("denied by policy entry Read(~/denied/**)")
+    );
+    assert_eq!(
+        of("write-before-effect"),
+        deny("denied by policy entry Write(~/write-denied/**)")
+    );
+    let linked = of("descriptor-refused");
+    assert_eq!(linked.len(), 1, "{linked:?}");
+    assert_eq!(linked[0].0, "deny");
+    assert!(
+        linked[0]
+            .1
+            .starts_with("read evidence refused: hard-linked (nlink=2): "),
+        "{linked:?}"
+    );
+    let locked = of("os-refused");
+    if cfg!(target_os = "linux") {
+        assert!(
+            locked.iter().any(|(result, _)| result == "permit"),
+            "Linux arms a 0000 file and the OS refuses the subject's read: {locked:?}"
+        );
+    } else {
+        assert_eq!(locked, deny("read descriptor missing"));
+    }
 }
 
 #[tokio::test]

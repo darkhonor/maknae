@@ -6270,8 +6270,15 @@ open(p, "w").write(s.replace(old, new))' "$f" "$2" "$3"; then
     '    let with_read = matches!(verb, Verb::FsWrite { .. });' \
     '    let with_read = matches!(verb, Verb::FsMkdir { .. }) && false;' \
     maknae-kernel mutation::tests::a_write_is_permitted
+  expect_reject_because "uniform/a-create-refused-at-the-open-told-unknown-goes-red" \
+    "a_create_refused_at_the_open_is_decided_before_any_write" cv_mutant crates/maknae-io/src/mutation.rs \
+    '        let (path, fd) = opened.map_err(|mut e| {
+            e.before_write = true;' \
+    '        let (path, fd) = opened.map_err(|mut e| {
+            e.before_write = false;' \
+    maknae-io mutation::tests::a_create_refused
 else
-  skipped=$((skipped+12))
+  skipped=$((skipped+13))
 fi
 
 # The skip count is REPORTED, because `$total` is environment-dependent: probes

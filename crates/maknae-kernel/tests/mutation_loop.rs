@@ -2233,6 +2233,7 @@ const SHIPPED_HOME_ENTRIES: &[&str] = &[
     "~/.config/chromium/**",
     "~/.thunderbird/**",
     "~/.*_history",
+    "~/.zsh_sessions/**",
     "~/.lesshst",
     "~/.viminfo",
     "~/Library/Keychains/**",

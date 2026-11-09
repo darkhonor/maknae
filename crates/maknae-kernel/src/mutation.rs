@@ -328,7 +328,7 @@ const WRITE_NEEDS_READ: &str = "fs.write needs fs.read: ";
 
 /// The `fs.read` twin of a write's request (ADR-0034 decision 7): a write is permitted
 /// only when a read of the same path would be.
-fn read_of(write: &maknae_security::Request) -> maknae_security::Request {
+pub(crate) fn read_of(write: &maknae_security::Request) -> maknae_security::Request {
     let mut read = write.clone();
     read.action = maknae_security::Action("fs.read".into());
     read.context.0.insert(
@@ -417,13 +417,13 @@ fn authorize<P: Authorizer>(
     })?;
     Ok((decided, label))
 }
-/// The cited conversation's personal list, only when the requester owns it: a foreign
-/// record is returned by `gather` and refused by the PDP, and contributes nothing here.
+
 fn owned_personal(record: Option<&ConversationRecord>, uid: u32) -> Option<AttrValue> {
     record
         .filter(|rec| rec.owner == uid)
         .map(|rec| AttrValue::Set(rec.sensitive.iter().cloned().collect()))
 }
+
 /// The answer for an asked path on either list, decided before any descriptor, so it
 /// depends only on the path.
 struct Protection {

@@ -349,6 +349,10 @@ enum Work {
         components: std::collections::VecDeque<String>,
         parents: bool,
     },
+    /// Refused before any effect: the held directory is not the granted parent.
+    Withheld {
+        path: PathBuf,
+    },
     Done,
 }
 struct Worker {
@@ -505,6 +509,13 @@ impl Worker {
         let work = std::mem::replace(&mut self.work, Work::Done);
         match work {
             Work::Done => Step::stop(ReportedFinish::Success, None),
+            Work::Withheld { path } => {
+                self.withheld = true;
+                Step::stop(
+                    ReportedFinish::PathChanged,
+                    path.to_str().map(str::to_string),
+                )
+            }
             Work::Read { held, path, page } => {
                 let path = match self.reserve(&path, ReportedEffect::ReadFile, 1) {
                     Ok(p) => p,
@@ -620,7 +631,10 @@ impl Worker {
                             finish: Some((ReportedFinish::Success, None)),
                         }
                     }
-                    Err(e) => error_step(e, ReportedEffect::CreatedFile, path),
+                    Err(e) => {
+                        self.withheld = e.before_write;
+                        error_step(e, ReportedEffect::CreatedFile, path)
+                    }
                 }
             }
             Work::Mkdir {
@@ -1002,11 +1016,11 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
                 let parent = maknae_io::verify_mutation_directory(evidence)
                     .map_err(|e| e.to_string())?
                     .with_deadline(deadline);
-                if parent.path() != parent_path {
-                    return Err("held mutation directory differs from grant parent".into());
-                }
                 let leaf = prepared.components[0].clone();
                 match prepared.request {
+                    _ if parent.path() != parent_path => Work::Withheld {
+                        path: parent_path.join(&leaf),
+                    },
                     proto::Verb::FsWrite {
                         mode: WriteMode::CreateExclusive,
                         ..
@@ -2113,6 +2127,85 @@ mod tests {
             assert_eq!(std::fs::read(&path).unwrap(), b"no access");
         }
     }
+    #[tokio::test]
+    async fn a_create_refused_before_any_byte_answers_unavailable() {
+        if nix::unistd::geteuid().is_root() {
+            panic!("a_create_refused_before_any_byte_answers_unavailable: running as root, which writes a 0500 directory and voids the premise; run as an unprivileged user");
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let d = Fixture::new();
+        let link = d.path("dangling-link-sentinel");
+        std::os::unix::fs::symlink(d.path("listed-target-sentinel"), &link).unwrap();
+        let locked = d.path("locked-parent");
+        std::fs::create_dir(&locked).unwrap();
+        let in_locked = format!("{locked}/created-sentinel");
+        let mut told = Vec::new();
+        for path in [link.clone(), in_locked.clone()] {
+            let prepared = checked_write(path.clone(), WriteCheck::Unread);
+            assert!(
+                matches!(
+                    prepared.request(),
+                    proto::Verb::FsWrite {
+                        mode: WriteMode::CreateExclusive,
+                        ..
+                    }
+                ),
+                "{path}: premise: the create lane"
+            );
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+            let (end, reports) = acknowledged_end(prepared, create_grant(&path)).await;
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let end = end.unwrap();
+            assert!(!end.applied && end.withheld, "{path}: {end:?}");
+            assert!(
+                matches!(
+                    &reports[..],
+                    [MutationReport::Finished { next_index: 0, .. }]
+                ),
+                "{path}: {reports:?}"
+            );
+            told.push(the_model_is_told(end));
+        }
+        assert_eq!(
+            told,
+            vec![maknae_agent::plane::WriteOutcome::Unavailable; 2]
+        );
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!Path::new(&d.path("listed-target-sentinel")).exists());
+        assert!(!Path::new(&in_locked).exists());
+    }
+    #[tokio::test]
+    async fn a_parent_that_differs_from_the_grant_answers_unavailable() {
+        let d = Fixture::new();
+        std::fs::create_dir(d.path("nested-parent")).unwrap();
+        let path = d.path("nested-parent/grant-sentinel");
+        let (end, reports) = acknowledged_end(
+            checked_write(path.clone(), WriteCheck::Unread),
+            create_grant(&d.path("grant-sentinel")),
+        )
+        .await;
+        let end = end.unwrap();
+        assert!(!end.applied && end.withheld, "{end:?}");
+        assert!(
+            matches!(
+                &reports[..],
+                [MutationReport::Finished {
+                    next_index: 0,
+                    outcome: ReportedFinish::PathChanged,
+                    ..
+                }]
+            ),
+            "{reports:?}"
+        );
+        assert_eq!(
+            the_model_is_told(end),
+            maknae_agent::plane::WriteOutcome::Unavailable
+        );
+        assert!(!Path::new(&path).exists());
+    }
     #[test]
     fn prepare_checked_carries_the_check_into_the_prepared_mutation() {
         let d = Fixture::new();
@@ -2212,8 +2305,8 @@ mod tests {
         receiver.await.unwrap();
         assert_eq!(result, Ok(false));
         assert_eq!(lines.len(), 1, "{lines:?}");
-        assert!(lines[0].starts_with("mutation stopped: "), "{lines:?}");
-        assert!(lines[0].ends_with("; 0 effect(s) reported"), "{lines:?}");
+        assert!(lines[0].starts_with("write not performed: "), "{lines:?}");
+        assert!(lines[0].ends_with("; nothing was written"), "{lines:?}");
     }
     #[tokio::test]
     async fn exclusive_collision_preserves_intervening_sentinel() {
@@ -2376,7 +2469,7 @@ mod tests {
             TransportConfig::default(),
         )
         .await;
-        assert!(result.is_err());
+        assert_eq!(result, Ok(false), "refused before any effect");
         assert!(!Path::new(&path).exists());
         assert!(!outside.0.join("no-effect-sentinel").exists());
     }
@@ -2884,7 +2977,7 @@ mod tests {
             TransportConfig::default(),
         )
         .await;
-        assert!(result.unwrap_err().contains("differs from grant parent"));
+        assert_eq!(result, Ok(false), "refused before any effect");
         assert!(!d.0.join("nested-parent/grant-sentinel").exists());
         let paths = vec![d.path("new-prefix"), d.path("wrong-prefix/last")];
         let (result, _) = acknowledged(

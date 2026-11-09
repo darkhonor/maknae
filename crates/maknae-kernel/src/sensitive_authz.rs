@@ -1,5 +1,6 @@
 //! The `sensitive.yaml` operand (#617, ADR-0034): a mandatory deny, over the host list
-//! and the conversation's personal list, on every file verb. It never permits.
+//! and the conversation's personal list, on every file verb. It never permits, and an
+//! `fs.*` action it does not decide is `Indeterminate`.
 
 use std::path::Path;
 
@@ -139,8 +140,13 @@ impl Authorizer for SensitiveOperand {
 }
 
 fn decide_sensitive(host: &SensitiveList, req: &Request, fold: Fold) -> Verdict {
-    if !FILE_VERBS.contains(&req.action.0.as_str()) {
-        return Verdict::NotApplicable { note: None };
+    let action = req.action.0.as_str();
+    if !FILE_VERBS.contains(&action) {
+        return if action.starts_with("fs.") {
+            Verdict::Indeterminate
+        } else {
+            Verdict::NotApplicable { note: None }
+        };
     }
     let Some(AttrValue::Str(path)) = req.resource.0.get(maknae_authz_basic::RESOURCE_PATH_KEY)
     else {
@@ -269,12 +275,27 @@ mod tests {
     fn it_abstains_off_the_file_verbs() {
         let host = list(&["/etc/shadow"]);
         let op = SensitiveAuthorizer::new(&host);
-        for action in ["session.prompt", "admin.status", "fs", "fs.reads"] {
+        for action in ["session.prompt", "admin.status", "fs", "fsx.read"] {
             assert_eq!(
                 op.decide(&req(action, Some("/etc/shadow"), None)),
                 NA,
                 "{action}"
             );
+        }
+    }
+
+    #[test]
+    fn a_file_action_it_does_not_decide_fails_closed() {
+        let host = list(&["/etc/shadow"]);
+        let op = SensitiveAuthorizer::new(&host);
+        for action in ["fs.move", "fs.link", "fs.chmod", "fs.chown", "fs.reads"] {
+            for path in ["/etc/shadow", "/etc/hosts"] {
+                assert_eq!(
+                    op.decide(&req(action, Some(path), Some("/home/u"))),
+                    Verdict::Indeterminate,
+                    "{action} {path}"
+                );
+            }
         }
     }
 

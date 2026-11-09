@@ -2,7 +2,9 @@
 #
 # An entry refuses every file verb on the path, for every role, whatever
 # authz.yaml grants. The model is told only that a path is protected by
-# policy, never which entries exist. `~` is the requesting user's home; `*`
+# policy, never which entries exist. `~` is the requesting user's home, and
+# another account's files are bounded by the OS's permissions; to cover every
+# account, list e.g. "/home/*/.ssh/**" or "/Users/*/.ssh/**" here. `*`
 # matches within one component, `**` across any number of them, and `X/**`
 # matches X itself. On macOS matching ignores case, and /etc, /tmp and /var
 # match their /private spellings, so write each entry once. An entry for a
@@ -143,6 +145,7 @@ sensitive:
   - "~/.config/chromium/**"
   - "~/.thunderbird/**"
   - "~/.*_history"
+  - "~/.zsh_sessions/**"
   - "~/.lesshst"
   - "~/.viminfo"
 

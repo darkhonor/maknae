@@ -545,10 +545,19 @@ impl MutationDirectory {
         write: impl FnOnce(&OwnedFd, &Path) -> Result<(), MutationFailure>,
         fstat: impl FnOnce(&OwnedFd) -> nix::Result<nix::sys::stat::FileStat>,
     ) -> Result<MutationEffect, MutationFailure> {
-        let path = self.child_path(leaf).map_err(no_effect(&self.path))?;
-        self.check_deadline(&path)?;
-        let fd = syscall::open_temp_excl(&self.fd, leaf, crate::Mode(0o600))
-            .map_err(|e| failure(&path, EffectState::NoEffect, io_error(e, &path)))?;
+        let opened = self
+            .child_path(leaf)
+            .map_err(no_effect(&self.path))
+            .and_then(|path| {
+                self.check_deadline(&path)?;
+                syscall::open_temp_excl(&self.fd, leaf, crate::Mode(0o600))
+                    .map(|fd| (path.clone(), fd))
+                    .map_err(|e| failure(&path, EffectState::NoEffect, io_error(e, &path)))
+            });
+        let (path, fd) = opened.map_err(|mut e| {
+            e.before_write = true;
+            e
+        })?;
         // A fresh entry already exists, even when the first content write fails.
         let result = write(&fd, &path);
         result.map_err(|mut e| {
@@ -877,6 +886,32 @@ mod tests {
         .unwrap();
         assert_eq!(got, None);
         assert_eq!(std::fs::read(&p).unwrap(), b"written");
+    }
+    #[test]
+    fn a_create_refused_at_the_open_is_decided_before_any_write() {
+        let d = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(d.path().join("listed"), d.path().join("dangling")).unwrap();
+        let e = directory(&d)
+            .create_exclusive("dangling", b"x")
+            .unwrap_err();
+        assert_eq!(e.state, EffectState::NoEffect);
+        assert!(e.before_write, "{e:?}");
+        assert!(!d.path().join("listed").exists());
+        let e = directory(&d)
+            .create_exclusive_with(
+                "opened",
+                |_, path| {
+                    Err(failure(
+                        path,
+                        EffectState::NoEffect,
+                        io_error(nix::errno::Errno::EIO, path),
+                    ))
+                },
+                syscall::fstat,
+            )
+            .unwrap_err();
+        assert_eq!(e.state, EffectState::Partial);
+        assert!(!e.before_write, "the entry exists once the open succeeds");
     }
     #[test]
     fn a_failed_post_create_fstat_is_a_created_file_with_no_version() {

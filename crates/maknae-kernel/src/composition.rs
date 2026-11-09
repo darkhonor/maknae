@@ -655,15 +655,20 @@ mod tests {
                             AttrValue::Str((*o).into()),
                         );
                     }
-                    let d = c.decide_cited(&r);
-                    let rule = d.rule.map(|c| {
-                        let section = c.section.rsplit('#').next().unwrap_or_default().to_owned();
-                        format!("{} in #{section}", c.key)
-                    });
-                    out.push_str(&format!(
-                        "{who} {term} {op:?} {path:?} -> {:?} {:?} {rule:?}\n",
-                        d.verdict, d.role
-                    ));
+                    let twin = (*term == "fs.write").then(|| crate::mutation::read_of(&r));
+                    for (half, op, r) in [("", *op, Some(r)), (" read-twin", Some("read"), twin)] {
+                        let Some(r) = r else { continue };
+                        let d = c.decide_cited(&r);
+                        let rule = d.rule.map(|c| {
+                            let section =
+                                c.section.rsplit('#').next().unwrap_or_default().to_owned();
+                            format!("{} in #{section}", c.key)
+                        });
+                        out.push_str(&format!(
+                            "{who} {term}{half} {op:?} {path:?} -> {:?} {:?} {rule:?}\n",
+                            d.verdict, d.role
+                        ));
+                    }
                 }
             }
         }
