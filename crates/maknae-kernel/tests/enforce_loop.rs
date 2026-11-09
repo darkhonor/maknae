@@ -4,8 +4,8 @@
 //! stubbed, the loader differs from production by exactly the declared
 //! requirement). Fixture identities are host-independent: the reserved
 //! `root` (uid 0) plus the defaults branch keyed on the fixture principal's
-//! own euid. THE point of this file: the shipped deny list actually denying,
-//! on the wire and in the trail (operator ruling 1, 2026-08-28).
+//! own euid. THE point of this file: the shipped policy actually refusing, on
+//! the wire and in the trail (operator ruling 1, 2026-08-28; ADR-0034).
 #![cfg(unix)]
 
 use std::os::unix::fs::PermissionsExt;
@@ -761,7 +761,7 @@ async fn defaults_branch_enrolled_uid_is_admin_with_zero_nss() {
 }
 
 // ---------------------------------------------------------------------------
-// 6-7. THE DENY LIST DENIES (ruling 1); a permitted read returns content.
+// 6-7. THE SHIPPED SENSITIVE.YAML REFUSES (ruling 1); a permitted read returns content.
 // ---------------------------------------------------------------------------
 
 /// The shipped files, byte-identical: `Read(~/**)` allow, and the credential paths in
@@ -1218,12 +1218,12 @@ async fn a_symlink_alias_of_a_denied_file_is_refused() {
     // CHANGED BY ADR-0009 decision 6, and this is the improvement: the refusal is no
     // longer a blanket structural "symlink refused" that never consulted policy. The
     // subject's descriptor resolves to the real object, the kernel reports THAT path,
-    // and the shipped deny list matches it by name. The alias is defeated by the rule
+    // and the shipped sensitive.yaml matches it by name. The alias is defeated by the rule
     // it was trying to dodge — which also means a LEGITIMATE in-home symlink now
     // works, the deliberate loosening ADR-0009 D6 records.
     assert!(
         req.outcome.reason.contains(".ssh"),
-        "the deny list must match the RESOLVED path, not the alias: {}",
+        "the shipped list must match the RESOLVED path, not the alias: {}",
         req.outcome.reason
     );
 
@@ -1246,7 +1246,7 @@ async fn a_symlink_alias_of_a_denied_file_is_refused() {
 }
 
 #[tokio::test]
-async fn a_hardlink_alias_of_a_denied_file_is_refused() {
+async fn a_second_hard_link_is_refused_before_the_decision() {
     let fx = Fixture::new("hardlink");
     fx.write_policy(SHIPPED_POLICY);
     std::fs::create_dir_all(fx.dir.join(".ssh")).unwrap();

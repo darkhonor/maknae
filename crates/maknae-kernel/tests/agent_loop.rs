@@ -561,7 +561,7 @@ async fn read_then_write_then_answer_leaves_the_sequence_the_issue_names_in_the_
 
 #[tokio::test]
 async fn a_denied_read_reaches_the_model_as_unavailable_and_is_a_deny_in_the_trail() {
-    // The shipped deny, written into the fixture policy: the default
+    // An authz.yaml deny, written into the fixture policy: the default
     // fixture has an EMPTY deny list, so this must be explicit.
     let fx = Fixture::with_rules("agent-deny", &["Read"], &["Read(~/.ssh/**)"], GRANTED);
     let secret = fx.root.join(".ssh").join("id_rsa");

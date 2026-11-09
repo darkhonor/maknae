@@ -16,8 +16,9 @@
 //! *(Corrected 2026-08-31: the header previously said a "FUTURE per-request
 //! PDP" evaluates this and that evaluation "does not wire into any request path
 //! yet". Superseded by #77 — every request is decided through the
-//! `maknae-security` seam, and the shipped deny list is enforced on the `Read`
-//! verb's PEP.)*
+//! `maknae-security` seam, and `permissions:` denies are enforced on every
+//! file verb's PEP; the shipped file's credential denies moved to `sensitive.yaml`
+//! (#617).)*
 //!
 //! `authz.yaml` carries three independent surfaces: `permissions:` decides
 //! PATHS by capability pattern; `roles:` decides ACTIONS per role, per term

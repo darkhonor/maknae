@@ -596,6 +596,13 @@ mod tests {
             &g.0,
             include_str!("../../../packaging/common/sensitive.yaml"),
         );
+        basic.set_hosts(crate::test_fixtures::HOBI_HOSTS);
+        crate::test_fixtures::write_agent(&g.0, "hobi", "hobi-svc", 2001, "user");
+        crate::test_fixtures::write_agent_policy(
+            &g.0,
+            "hobi",
+            "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Write(~/**)\"]\n",
+        );
         basic.install(basic.compile_from_file().unwrap());
         let c = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
         let principal = i64::from(nix::unistd::geteuid().as_raw());
@@ -612,15 +619,29 @@ mod tests {
             (
                 "fs.delete",
                 Some("delete-tree"),
-                &["/home/operator", "/home/operator/projects"],
+                &[
+                    "/home/operator",
+                    "/home/operator/projects",
+                    "/home/operator/.ssh",
+                ],
             ),
             ("fs.mkdir", Some("mkdir"), FS_TARGETS),
         ];
-        for (who, uid) in [("principal", principal), ("unbound", 4242)] {
+        for (who, uid) in [("principal", principal), ("unbound", 4242), ("agent", 2001)] {
             for (term, op, targets) in cases {
                 for path in *targets {
                     let mut r = request(term);
                     r.subject.0.insert("uid", AttrValue::Int(uid));
+                    if who == "agent" {
+                        r.subject.0.insert(
+                            maknae_security::SUBJECT_CHANNEL,
+                            AttrValue::Str(maknae_security::CHANNEL_AGENT.into()),
+                        );
+                        r.subject.0.insert(
+                            maknae_security::SUBJECT_AGENT,
+                            AttrValue::Str("hobi".into()),
+                        );
+                    }
                     r.subject.0.insert(
                         maknae_security::SUBJECT_HOME,
                         AttrValue::Str("/home/operator".into()),
@@ -637,7 +658,7 @@ mod tests {
                     let d = c.decide_cited(&r);
                     let rule = d.rule.map(|c| {
                         let section = c.section.rsplit('#').next().unwrap_or_default().to_owned();
-                        format!("{} in authz.yaml#{section}", c.key)
+                        format!("{} in #{section}", c.key)
                     });
                     out.push_str(&format!(
                         "{who} {term} {op:?} {path:?} -> {:?} {:?} {rule:?}\n",

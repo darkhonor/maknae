@@ -2820,8 +2820,7 @@ mod tests {
 
     const SHIPPED: &str = include_str!("../../../packaging/common/authz.yaml");
 
-    /// The shipped file with the credential denies it carried before they moved to
-    /// `sensitive.yaml`, for tests of the deny path.
+    /// The shipped file with the nine credential denies restored, for deny-path tests.
     pub(crate) fn shipped_denying() -> &'static str {
         static DENYING: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
             let denies: String = ["Read", "Write"]
@@ -2842,7 +2841,7 @@ mod tests {
                 })
                 .collect();
             let d = SHIPPED.replacen("  deny: []\n", &format!("  deny:\n{denies}"), 1);
-            assert_ne!(d, SHIPPED, "the shipped file has an empty deny list");
+            assert_ne!(d, SHIPPED, "the shipped file no longer carries `deny: []`");
             d
         });
         DENYING.as_str()

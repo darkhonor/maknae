@@ -471,9 +471,10 @@ count of degraded emissions is the signal your enclave should alert on.
 ```
 
 A **deny** record (a non-enrolled in-group uid running any verb, or a read of a
-path in `sensitive.yaml`) looks like this — the REASON lives only here, never on the
-wire (a request for a listed path is answered `Protected`, naming the list and the
-entry; any other refusal is the generic `not authorized`):
+path in `sensitive.yaml`) looks like this. The REASON lives only here. A request for
+a listed path is answered `Protected`, and the list and entry reach the client, which
+shows them to you and never to the model; any other refusal is the generic
+`not authorized`:
 
 ```json
 {"action":"fs.read","au3_1":{},"event":"request","object":"/home/<user>/.ssh/id_rsa","outcome":{"posture":"unauthorized","reason":"sensitive: host ~/.ssh/**","result":"deny"},...}

@@ -1,8 +1,8 @@
 # The shipped authz.yaml and sensitive.yaml, decided through the Composition.
 principal liveness.ping None "" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") None
-principal session.new None "" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:roles.admin:allow:6 in authz.yaml#roles.admin")
-principal fs.read Some("read") "/home/operator/notes" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:0 in authz.yaml#permissions")
-principal fs.read Some("read") "/home/operator/projects/x" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:0 in authz.yaml#permissions")
+principal session.new None "" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:roles.admin:allow:6 in #roles.admin")
+principal fs.read Some("read") "/home/operator/notes" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:0 in #permissions")
+principal fs.read Some("read") "/home/operator/projects/x" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:0 in #permissions")
 principal fs.read Some("read") "/home/operator/.ssh/id" -> Deny { reason: "sensitive: host ~/.ssh/**" } Some("admin") None
 principal fs.read Some("read") "/home/operator/.aws/credentials" -> Deny { reason: "sensitive: host ~/.aws/**" } Some("admin") None
 principal fs.read Some("read") "/home/operator/.maknae/providers.yaml" -> Deny { reason: "sensitive: host ~/.maknae/**" } Some("admin") None
@@ -10,7 +10,7 @@ principal fs.read Some("read") "/etc/shadow" -> Deny { reason: "sensitive: host 
 principal fs.read Some("read") "/etc/maknae/authz.yaml" -> Deny { reason: "sensitive: host /etc/maknae/**" } Some("admin") None
 principal fs.read Some("read") "/proc/1/environ" -> Deny { reason: "sensitive: host /proc/*/environ" } Some("admin") None
 principal fs.write Some("write-existing") "/home/operator/notes" -> NotApplicable { note: Some("role admin: no capability entry for fs.write") } Some("admin") None
-principal fs.write Some("write-existing") "/home/operator/projects/x" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:1 in authz.yaml#permissions")
+principal fs.write Some("write-existing") "/home/operator/projects/x" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:1 in #permissions")
 principal fs.write Some("write-existing") "/home/operator/.ssh/id" -> Deny { reason: "sensitive: host ~/.ssh/**" } Some("admin") None
 principal fs.write Some("write-existing") "/home/operator/.aws/credentials" -> Deny { reason: "sensitive: host ~/.aws/**" } Some("admin") None
 principal fs.write Some("write-existing") "/home/operator/.maknae/providers.yaml" -> Deny { reason: "sensitive: host ~/.maknae/**" } Some("admin") None
@@ -18,7 +18,7 @@ principal fs.write Some("write-existing") "/etc/shadow" -> Deny { reason: "sensi
 principal fs.write Some("write-existing") "/etc/maknae/authz.yaml" -> Deny { reason: "sensitive: host /etc/maknae/**" } Some("admin") None
 principal fs.write Some("write-existing") "/proc/1/environ" -> Deny { reason: "sensitive: host /proc/*/environ" } Some("admin") None
 principal fs.write Some("write-create") "/home/operator/notes" -> NotApplicable { note: Some("role admin: no capability entry for fs.write") } Some("admin") None
-principal fs.write Some("write-create") "/home/operator/projects/x" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:1 in authz.yaml#permissions")
+principal fs.write Some("write-create") "/home/operator/projects/x" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:1 in #permissions")
 principal fs.write Some("write-create") "/home/operator/.ssh/id" -> Deny { reason: "sensitive: host ~/.ssh/**" } Some("admin") None
 principal fs.write Some("write-create") "/home/operator/.aws/credentials" -> Deny { reason: "sensitive: host ~/.aws/**" } Some("admin") None
 principal fs.write Some("write-create") "/home/operator/.maknae/providers.yaml" -> Deny { reason: "sensitive: host ~/.maknae/**" } Some("admin") None
@@ -26,7 +26,7 @@ principal fs.write Some("write-create") "/etc/shadow" -> Deny { reason: "sensiti
 principal fs.write Some("write-create") "/etc/maknae/authz.yaml" -> Deny { reason: "sensitive: host /etc/maknae/**" } Some("admin") None
 principal fs.write Some("write-create") "/proc/1/environ" -> Deny { reason: "sensitive: host /proc/*/environ" } Some("admin") None
 principal fs.delete Some("delete-entry") "/home/operator/notes" -> NotApplicable { note: Some("role admin: no capability entry for fs.delete") } Some("admin") None
-principal fs.delete Some("delete-entry") "/home/operator/projects/x" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:1 in authz.yaml#permissions")
+principal fs.delete Some("delete-entry") "/home/operator/projects/x" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:1 in #permissions")
 principal fs.delete Some("delete-entry") "/home/operator/.ssh/id" -> Deny { reason: "sensitive: host ~/.ssh/**" } Some("admin") None
 principal fs.delete Some("delete-entry") "/home/operator/.aws/credentials" -> Deny { reason: "sensitive: host ~/.aws/**" } Some("admin") None
 principal fs.delete Some("delete-entry") "/home/operator/.maknae/providers.yaml" -> Deny { reason: "sensitive: host ~/.maknae/**" } Some("admin") None
@@ -34,9 +34,10 @@ principal fs.delete Some("delete-entry") "/etc/shadow" -> Deny { reason: "sensit
 principal fs.delete Some("delete-entry") "/etc/maknae/authz.yaml" -> Deny { reason: "sensitive: host /etc/maknae/**" } Some("admin") None
 principal fs.delete Some("delete-entry") "/proc/1/environ" -> Deny { reason: "sensitive: host /proc/*/environ" } Some("admin") None
 principal fs.delete Some("delete-tree") "/home/operator" -> Deny { reason: "sensitive: host ~/.maknae/**" } Some("admin") None
-principal fs.delete Some("delete-tree") "/home/operator/projects" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:1 in authz.yaml#permissions")
+principal fs.delete Some("delete-tree") "/home/operator/projects" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:1 in #permissions")
+principal fs.delete Some("delete-tree") "/home/operator/.ssh" -> Deny { reason: "sensitive: host ~/.ssh/**" } Some("admin") None
 principal fs.mkdir Some("mkdir") "/home/operator/notes" -> NotApplicable { note: Some("role admin: no capability entry for fs.mkdir") } Some("admin") None
-principal fs.mkdir Some("mkdir") "/home/operator/projects/x" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:1 in authz.yaml#permissions")
+principal fs.mkdir Some("mkdir") "/home/operator/projects/x" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:1 in #permissions")
 principal fs.mkdir Some("mkdir") "/home/operator/.ssh/id" -> Deny { reason: "sensitive: host ~/.ssh/**" } Some("admin") None
 principal fs.mkdir Some("mkdir") "/home/operator/.aws/credentials" -> Deny { reason: "sensitive: host ~/.aws/**" } Some("admin") None
 principal fs.mkdir Some("mkdir") "/home/operator/.maknae/providers.yaml" -> Deny { reason: "sensitive: host ~/.maknae/**" } Some("admin") None
@@ -79,6 +80,7 @@ unbound fs.delete Some("delete-entry") "/etc/maknae/authz.yaml" -> Deny { reason
 unbound fs.delete Some("delete-entry") "/proc/1/environ" -> Deny { reason: "sensitive: host /proc/*/environ" } None None
 unbound fs.delete Some("delete-tree") "/home/operator" -> Deny { reason: "sensitive: host ~/.maknae/**" } None None
 unbound fs.delete Some("delete-tree") "/home/operator/projects" -> NotApplicable { note: Some("subject resolves to no role") } None None
+unbound fs.delete Some("delete-tree") "/home/operator/.ssh" -> Deny { reason: "sensitive: host ~/.ssh/**" } None None
 unbound fs.mkdir Some("mkdir") "/home/operator/notes" -> NotApplicable { note: Some("subject resolves to no role") } None None
 unbound fs.mkdir Some("mkdir") "/home/operator/projects/x" -> NotApplicable { note: Some("subject resolves to no role") } None None
 unbound fs.mkdir Some("mkdir") "/home/operator/.ssh/id" -> Deny { reason: "sensitive: host ~/.ssh/**" } None None
@@ -87,3 +89,48 @@ unbound fs.mkdir Some("mkdir") "/home/operator/.maknae/providers.yaml" -> Deny {
 unbound fs.mkdir Some("mkdir") "/etc/shadow" -> Deny { reason: "sensitive: host /etc/shadow*" } None None
 unbound fs.mkdir Some("mkdir") "/etc/maknae/authz.yaml" -> Deny { reason: "sensitive: host /etc/maknae/**" } None None
 unbound fs.mkdir Some("mkdir") "/proc/1/environ" -> Deny { reason: "sensitive: host /proc/*/environ" } None None
+agent liveness.ping None "" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") None
+agent session.new None "" -> Deny { reason: "agent hobi: session.new needs a grant in its policy.yaml" } Some("user") None
+agent fs.read Some("read") "/home/operator/notes" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.hobi.permissions:allow:0 in #agents.hobi")
+agent fs.read Some("read") "/home/operator/projects/x" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.hobi.permissions:allow:0 in #agents.hobi")
+agent fs.read Some("read") "/home/operator/.ssh/id" -> Deny { reason: "sensitive: host ~/.ssh/**" } Some("user") None
+agent fs.read Some("read") "/home/operator/.aws/credentials" -> Deny { reason: "sensitive: host ~/.aws/**" } Some("user") None
+agent fs.read Some("read") "/home/operator/.maknae/providers.yaml" -> Deny { reason: "sensitive: host ~/.maknae/**" } Some("user") None
+agent fs.read Some("read") "/etc/shadow" -> Deny { reason: "sensitive: host /etc/shadow*" } Some("user") None
+agent fs.read Some("read") "/etc/maknae/authz.yaml" -> Deny { reason: "sensitive: host /etc/maknae/**" } Some("user") None
+agent fs.read Some("read") "/proc/1/environ" -> Deny { reason: "sensitive: host /proc/*/environ" } Some("user") None
+agent fs.write Some("write-existing") "/home/operator/notes" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.hobi.permissions:allow:1 in #agents.hobi")
+agent fs.write Some("write-existing") "/home/operator/projects/x" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.hobi.permissions:allow:1 in #agents.hobi")
+agent fs.write Some("write-existing") "/home/operator/.ssh/id" -> Deny { reason: "sensitive: host ~/.ssh/**" } Some("user") None
+agent fs.write Some("write-existing") "/home/operator/.aws/credentials" -> Deny { reason: "sensitive: host ~/.aws/**" } Some("user") None
+agent fs.write Some("write-existing") "/home/operator/.maknae/providers.yaml" -> Deny { reason: "sensitive: host ~/.maknae/**" } Some("user") None
+agent fs.write Some("write-existing") "/etc/shadow" -> Deny { reason: "sensitive: host /etc/shadow*" } Some("user") None
+agent fs.write Some("write-existing") "/etc/maknae/authz.yaml" -> Deny { reason: "sensitive: host /etc/maknae/**" } Some("user") None
+agent fs.write Some("write-existing") "/proc/1/environ" -> Deny { reason: "sensitive: host /proc/*/environ" } Some("user") None
+agent fs.write Some("write-create") "/home/operator/notes" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.hobi.permissions:allow:1 in #agents.hobi")
+agent fs.write Some("write-create") "/home/operator/projects/x" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.hobi.permissions:allow:1 in #agents.hobi")
+agent fs.write Some("write-create") "/home/operator/.ssh/id" -> Deny { reason: "sensitive: host ~/.ssh/**" } Some("user") None
+agent fs.write Some("write-create") "/home/operator/.aws/credentials" -> Deny { reason: "sensitive: host ~/.aws/**" } Some("user") None
+agent fs.write Some("write-create") "/home/operator/.maknae/providers.yaml" -> Deny { reason: "sensitive: host ~/.maknae/**" } Some("user") None
+agent fs.write Some("write-create") "/etc/shadow" -> Deny { reason: "sensitive: host /etc/shadow*" } Some("user") None
+agent fs.write Some("write-create") "/etc/maknae/authz.yaml" -> Deny { reason: "sensitive: host /etc/maknae/**" } Some("user") None
+agent fs.write Some("write-create") "/proc/1/environ" -> Deny { reason: "sensitive: host /proc/*/environ" } Some("user") None
+agent fs.delete Some("delete-entry") "/home/operator/notes" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.hobi.permissions:allow:1 in #agents.hobi")
+agent fs.delete Some("delete-entry") "/home/operator/projects/x" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.hobi.permissions:allow:1 in #agents.hobi")
+agent fs.delete Some("delete-entry") "/home/operator/.ssh/id" -> Deny { reason: "sensitive: host ~/.ssh/**" } Some("user") None
+agent fs.delete Some("delete-entry") "/home/operator/.aws/credentials" -> Deny { reason: "sensitive: host ~/.aws/**" } Some("user") None
+agent fs.delete Some("delete-entry") "/home/operator/.maknae/providers.yaml" -> Deny { reason: "sensitive: host ~/.maknae/**" } Some("user") None
+agent fs.delete Some("delete-entry") "/etc/shadow" -> Deny { reason: "sensitive: host /etc/shadow*" } Some("user") None
+agent fs.delete Some("delete-entry") "/etc/maknae/authz.yaml" -> Deny { reason: "sensitive: host /etc/maknae/**" } Some("user") None
+agent fs.delete Some("delete-entry") "/proc/1/environ" -> Deny { reason: "sensitive: host /proc/*/environ" } Some("user") None
+agent fs.delete Some("delete-tree") "/home/operator" -> Deny { reason: "sensitive: host ~/.maknae/**" } Some("user") None
+agent fs.delete Some("delete-tree") "/home/operator/projects" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.hobi.permissions:allow:1 in #agents.hobi")
+agent fs.delete Some("delete-tree") "/home/operator/.ssh" -> Deny { reason: "sensitive: host ~/.ssh/**" } Some("user") None
+agent fs.mkdir Some("mkdir") "/home/operator/notes" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.hobi.permissions:allow:1 in #agents.hobi")
+agent fs.mkdir Some("mkdir") "/home/operator/projects/x" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.hobi.permissions:allow:1 in #agents.hobi")
+agent fs.mkdir Some("mkdir") "/home/operator/.ssh/id" -> Deny { reason: "sensitive: host ~/.ssh/**" } Some("user") None
+agent fs.mkdir Some("mkdir") "/home/operator/.aws/credentials" -> Deny { reason: "sensitive: host ~/.aws/**" } Some("user") None
+agent fs.mkdir Some("mkdir") "/home/operator/.maknae/providers.yaml" -> Deny { reason: "sensitive: host ~/.maknae/**" } Some("user") None
+agent fs.mkdir Some("mkdir") "/etc/shadow" -> Deny { reason: "sensitive: host /etc/shadow*" } Some("user") None
+agent fs.mkdir Some("mkdir") "/etc/maknae/authz.yaml" -> Deny { reason: "sensitive: host /etc/maknae/**" } Some("user") None
+agent fs.mkdir Some("mkdir") "/proc/1/environ" -> Deny { reason: "sensitive: host /proc/*/environ" } Some("user") None

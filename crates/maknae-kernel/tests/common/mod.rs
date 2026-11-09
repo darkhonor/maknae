@@ -368,8 +368,8 @@ impl Fixture {
         Self::with_rules(tag, &[allow], &[], policy_tail)
     }
     /// `allows` are capability names granted over `~/**` (the shape every
-    /// existing caller used); `denies` are FULL rule strings as the shipped
-    /// policy writes them (`packaging/common/authz.yaml`), e.g. `Read(~/.ssh/**)`.
+    /// existing caller used); `denies` are FULL rule strings in the `permissions:`
+    /// grammar, e.g. `Read(~/.ssh/**)`.
     /// The asymmetry is deliberate: it keeps `with_policy`'s generated YAML
     /// byte-identical to what it produced before, for every existing caller.
     pub fn with_rules(tag: &str, allows: &[&str], denies: &[&str], policy_tail: &str) -> Self {
