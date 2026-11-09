@@ -6272,10 +6272,9 @@ open(p, "w").write(s.replace(old, new))' "$f" "$2" "$3"; then
     maknae-kernel mutation::tests::a_write_is_permitted
   expect_reject_because "uniform/a-create-refused-at-the-open-told-unknown-goes-red" \
     "a_create_refused_at_the_open_is_decided_before_any_write" cv_mutant crates/maknae-io/src/mutation.rs \
-    '        let (path, fd) = opened.map_err(|mut e| {
-            e.before_write = true;' \
-    '        let (path, fd) = opened.map_err(|mut e| {
-            e.before_write = false;' \
+    '        Errno::EEXIST
+            | Errno::ENOENT' \
+    '        Errno::ENOENT' \
     maknae-io mutation::tests::a_create_refused
   expect_reject_because "uniform/a-pre-effect-attempt-failure-told-unknown-goes-red" \
     "a_parent_that_fails_verification_answers_unavailable" cv_mutant crates/maknae-loop/src/mutation.rs \
