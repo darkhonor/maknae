@@ -95,7 +95,9 @@ impl SensitiveList {
         home: Option<&Path>,
         fold: Fold,
     ) -> Result<Option<&str>, HomeUnbound> {
-        self.first(path, home, fold, |glob, p, h| glob.matches(Path::new(p), h))
+        self.first(path, home, fold, false, |glob, p, h| {
+            glob.matches(Path::new(p), h)
+        })
     }
 
     /// The first entry that could match `dir` or a path beneath it.
@@ -105,7 +107,7 @@ impl SensitiveList {
         home: Option<&Path>,
         fold: Fold,
     ) -> Result<Option<&str>, HomeUnbound> {
-        self.first(dir, home, fold, |glob, p, h| {
+        self.first(dir, home, fold, true, |glob, p, h| {
             glob.may_intersect_subtree(p, h)
         })
     }
@@ -115,10 +117,11 @@ impl SensitiveList {
         path: &Path,
         home: Option<&Path>,
         fold: Fold,
+        subtree: bool,
         test: impl Fn(&PathGlob, &str, Option<&Path>) -> Result<bool, HomeUnbound>,
     ) -> Result<Option<&str>, HomeUnbound> {
         let path = path.to_string_lossy();
-        let folded = (fold == Fold::Case).then(|| Folded::new(&path, home));
+        let folded = (fold == Fold::Case).then(|| Folded::new(&path, home, subtree));
         let mut unbound = false;
         for e in &self.entries {
             let hit = match &folded {
@@ -129,12 +132,16 @@ impl SensitiveList {
                     f.home_lowered.as_deref().map(Path::new),
                 )
                 .and_then(|hit| {
-                    Ok(hit
-                        || test(
-                            &e.mapped,
-                            &f.mapped,
-                            f.home_mapped.as_deref().map(Path::new),
-                        )?)
+                    let home = f.home_mapped.as_deref().map(Path::new);
+                    if hit {
+                        return Ok(true);
+                    }
+                    for root in &f.mapped {
+                        if test(&e.mapped, root, home)? {
+                            return Ok(true);
+                        }
+                    }
+                    Ok(false)
                 }),
             };
             match hit {
@@ -187,19 +194,40 @@ fn mapped(text: &str) -> String {
     format!("/{}", comps.join("/"))
 }
 
+/// The mapped roots a subtree at `lowered` spans: an ancestor of the Data
+/// volume prefix holds the whole mapped namespace, and `/private` holds
+/// `/etc`, `/tmp` and `/var`.
+fn mapped_roots(lowered: &str) -> Vec<String> {
+    let comps: Vec<&str> = lowered.split('/').filter(|c| !c.is_empty()).collect();
+    if lowered.starts_with('/') && ["system", "volumes", "data"].starts_with(&comps) {
+        return vec!["/".to_string()];
+    }
+    let root = mapped(lowered);
+    if root == "/private" {
+        return ["/private", "/etc", "/tmp", "/var"]
+            .map(String::from)
+            .to_vec();
+    }
+    vec![root]
+}
+
 struct Folded {
     lowered: String,
-    mapped: String,
+    mapped: Vec<String>,
     home_lowered: Option<String>,
     home_mapped: Option<String>,
 }
 
 impl Folded {
-    fn new(path: &str, home: Option<&Path>) -> Self {
+    fn new(path: &str, home: Option<&Path>, subtree: bool) -> Self {
         let lowered = path.to_lowercase();
         let home_lowered = home.and_then(Path::to_str).map(str::to_lowercase);
         Folded {
-            mapped: mapped(&lowered),
+            mapped: if subtree {
+                mapped_roots(&lowered)
+            } else {
+                vec![mapped(&lowered)]
+            },
             lowered,
             home_mapped: home_lowered.as_deref().map(mapped),
             home_lowered,
@@ -344,8 +372,7 @@ mod tests {
         );
         assert_eq!(below(&l, "/home/u", None, Fold::None), Err(HomeUnbound));
         assert_eq!(below(&l, "/etc", None, Fold::None), Ok(Some("/etc/shadow")));
-        let absolute_only = list(&["/etc/shadow"]);
-        assert_eq!(at(&absolute_only, "/home/u/x", None, Fold::None), Ok(None));
+        assert_eq!(at(&absolute, "/home/u/x", None, Fold::None), Ok(None));
     }
 
     #[test]
@@ -455,6 +482,44 @@ mod tests {
         );
         assert_eq!(below(&l, "/private/etc", h, Fold::None), Ok(None));
         assert_eq!(below(&l, "/Home/U", h, Fold::Case), Ok(Some("~/.ssh/**")));
+    }
+
+    #[test]
+    fn an_ancestor_of_a_rewritten_prefix_holds_what_the_rewrite_reaches() {
+        let h = Some("/Users/u");
+        let var = list(&["/var/db/x/**"]);
+        let home = list(&["~/.ssh/**"]);
+        let literal = list(&["/private/**"]);
+        for (l, root, entry) in [
+            (&var, "/private", "/var/db/x/**"),
+            (&var, "/Private", "/var/db/x/**"),
+            (&var, "/System/Volumes/Data/private", "/var/db/x/**"),
+            (&var, "/System", "/var/db/x/**"),
+            (&home, "/System/Volumes", "~/.ssh/**"),
+            (&home, "/System", "~/.ssh/**"),
+            (&home, "/System/Volumes/Data", "~/.ssh/**"),
+            (&home, "/", "~/.ssh/**"),
+            (&literal, "/System/Volumes/Data/private", "/private/**"),
+        ] {
+            assert_eq!(below(l, root, h, Fold::Case), Ok(Some(entry)), "{root}");
+        }
+        for (l, root) in [
+            (&var, "/private"),
+            (&var, "/System/Volumes/Data/private"),
+            (&home, "/System/Volumes"),
+            (&home, "/System"),
+            (&home, "/System/Volumes/Data"),
+        ] {
+            assert_eq!(below(l, root, h, Fold::None), Ok(None), "{root}");
+        }
+        assert_eq!(
+            below(&var, "/private/var", h, Fold::Case),
+            Ok(Some("/var/db/x/**"))
+        );
+        assert_eq!(below(&var, "/private/etc", h, Fold::Case), Ok(None));
+        assert_eq!(below(&var, "/System/Library", h, Fold::Case), Ok(None));
+        assert_eq!(below(&home, "/private", h, Fold::Case), Ok(None));
+        assert_eq!(at(&var, "/private", h, Fold::Case), Ok(None));
     }
 
     #[test]
