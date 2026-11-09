@@ -296,8 +296,8 @@ jobs:
     # variable MUTATION_IN_CI is 'true'; otherwise it shows as SKIPPED in every
     # run, and the gates job prints the pause. The zero-missed obligation is
     # met locally (dev host + Rocky lane) and reported in the PR body.
-    # The label's in-diff run passes every mutation crate, never --partial; the gate mutates
-    # only the PR's changed lines, so it runs even when affected.py selects none.
+    # The label's in-diff run passes every mutation crate; the gate mutates only the
+    # PR's changed lines, so it runs even when affected.py selects none.
     if: >-
       ${{ always()
           && ((github.event_name == 'pull_request' && vars.MUTATION_IN_CI != 'true'

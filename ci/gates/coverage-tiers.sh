@@ -281,6 +281,10 @@ if not isinstance(mc, list) or not all(isinstance(x, str) for x in mc):
     print("mutants_crates missing or not a list of strings", file=sys.stderr)
     sys.exit(1)
 for name in mc:
+    if name.startswith("-"):
+        print(f"mutants_crates names {name}, which starts with '-'", file=sys.stderr)
+        sys.exit(1)
+for name in mc:
     print(name)
 PYEOF
 }
@@ -626,6 +630,7 @@ if [ "$mutants_mode" != "" ]; then
     fi
   fi
   in_diff_file=""
+  partial_n=0
   mut_dir="$root"
   if [ -n "$in_diff" ]; then
     in_git() { env "${in_diff_git_env[@]}" git -C "$root" "$@"; }
@@ -694,21 +699,25 @@ if [ "$mutants_mode" != "" ]; then
     if ! problem="$(python3 "$here/mutation-diff.py" unmappable "$root" "$head_oid" "$snap" 2>&1)"; then
       printf '%s\n' "${problem:-FAIL: --in-diff: the unmappable-shape check printed nothing}"; exit 1
     fi
+    narrower=0
+    for c in "${!contract[@]}"; do [ -n "${selected[$c]+x}" ] || narrower=1; done
+    owned_lines=""
     compiled_file="$mut_tmp/compiled.json"
-    if ! python3 "$here/mutation-diff.py" compiled "$root" "$base" "$head_oid" "$snap" "$mut_tmp/depinfo" \
+    if [ "$narrower" -eq 1 ] && { ! python3 "$here/mutation-diff.py" compiled "$root" "$base" "$head_oid" "$snap" "$mut_tmp/depinfo" \
          >"$compiled_file" 2>"$mut_tmp/compiled.err" ||
        ! owned_lines="$(python3 -c '
 import json, sys
 crates = json.load(open(sys.argv[1]))
 if not (isinstance(crates, dict) and all(isinstance(c, str) for c in crates)):
     sys.exit(1)
-print("\n".join(sorted(crates)))' "$compiled_file" 2>/dev/null)"; then
+print("\n".join(sorted(crates)))' "$compiled_file" 2>/dev/null)"; }; then
       printf 'FAIL: --in-diff: compiled inputs cannot be computed: %s\n' "$(cat "$mut_tmp/compiled.err")"; exit 1
     fi
     while IFS= read -r c; do
       if [ -z "$c" ] || [ -n "${selected[$c]+x}" ]; then continue; fi
       if [ "$partial" -eq 1 ]; then
         printf 'PARTIAL: %s owns changed lines and is not selected; its in-diff mutants are not run here\n' "$c"
+        partial_n=$((partial_n + 1))
       else
         printf 'FAIL: --in-diff: changed crate %s not selected by --mutants\n' "$c"; exit 1
       fi
@@ -761,6 +770,11 @@ print("\n".join(sorted(crates)))' "$compiled_file" 2>/dev/null)"; then
         fail "cargo mutants --list --package $cname failed"
         continue
       fi
+      if ! problem="$(python3 "$here/mutation-diff.py" tracked "$cname" "$mut_tmp/whole.json" "$root" "$head_oid" 2>&1)"; then
+        printf '%s\n' "${problem:-FAIL: $cname: mutation-diff.py tracked printed nothing}"
+        fail_n=$((fail_n + 1))
+        continue
+      fi
       if ! verdict="$(python3 "$here/mutation-diff.py" classify "$cname" "$in_diff_file" "$mut_tmp/whole.json" "$mut_tmp/indiff.json")"; then
         printf '%s\n' "${verdict:-FAIL: $cname: mutation-diff.py classify printed nothing}"
         fail_n=$((fail_n + 1))
@@ -805,4 +819,8 @@ if [ "$fail_n" -gt 0 ]; then
   printf '%d violation(s).\n' "$fail_n"
   exit 1
 fi
-echo "PASS: coverage-tiers gate"
+if [ "${partial_n:-0}" -gt 0 ]; then
+  echo "PASS (partial: $partial_n crates not run): coverage-tiers gate"
+else
+  echo "PASS: coverage-tiers gate"
+fi

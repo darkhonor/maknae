@@ -529,12 +529,20 @@ class Unmappable(unittest.TestCase):
                 finally:
                     self.git("reset", "-q", "--hard", "HEAD~1")
 
-    def test_unmappable_a_non_rs_path_attribute_is_refused(self):
-        self.put("crates/beta/src/lib.rs", '#[path = "gen.inc"]\nmod generated;\n')
-        self.put("crates/beta/src/gen.inc", "pub fn g() {}\n")
-        self.commit("path")
-        self.assertRefused('crates/beta/src/lib.rs declares #[path = "gen.inc"], which does not end in .rs',
-                           "rename it to .rs")
+    def test_unmappable_a_case_variant_rs_suffix_is_refused(self):
+        for name in ("crates/beta/src/foo.RS", "crates/beta/src/foo.Rs"):
+            with self.subTest(name=name):
+                self.put(name, "pub fn f() {}\n")
+                self.commit("variant")
+                try:
+                    self.assertRefused(f"FAIL: --in-diff: {name} ends in a case variant of .rs", "rename it to .rs")
+                finally:
+                    self.git("reset", "-q", "--hard", "HEAD~1")
+
+    def test_unmappable_a_case_variant_rs_suffix_outside_every_mutation_crate_is_accepted(self):
+        self.put("crates/gamma/src/foo.RS", "pub fn f() {}\n")
+        self.commit("variant")
+        self.assertAccepted()
 
     def test_unmappable_an_rs_target_path_is_accepted(self):
         self.put("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra='\n[lib]\npath = "src/x.rs"\n'))
@@ -712,6 +720,34 @@ class Compiled(unittest.TestCase):
                 "crates/a/src/lib.rs:\n# env-dep:X=1\n")
         self.assertEqual(md.dep_tokens(text), ["/t/deps/a-1.d", "crates/a/src/lib.rs",
                                                "crates/a/src/my data.txt", "crates/a/src/lib.rs"])
+
+
+class Tracked(unittest.TestCase):
+    setUp, git, put, commit = Workspace.setUp, Workspace.git, Workspace.put, Workspace.commit
+
+    def tracked(self, files):
+        listing = self.root / "whole.json"
+        listing.write_text(json.dumps([mutant(f"{f}:1:1: m", f, 1, package="beta") for f in files]))
+        return run_cli("tracked", "beta", str(listing), str(self.root), "HEAD")
+
+    def test_tracked_exact_paths_pass(self):
+        result = self.tracked(["crates/beta/src/lib.rs"])
+        self.assertEqual((result.returncode, result.stdout), (0, ""), result.stderr)
+
+    def test_tracked_a_listed_file_that_is_not_a_tracked_path_fails(self):
+        for listed in ("crates/beta/src/LIB.rs", "crates/beta/src/Lib.rs", "./crates/beta/src/lib.rs",
+                       "crates/beta/src/caf\u0065\u0301.rs"):
+            with self.subTest(listed=listed):
+                result = self.tracked(["crates/beta/src/lib.rs", listed])
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(result.stdout, f"FAIL: beta: cargo-mutants lists {listed}, which is not a tracked "
+                                 "path at HEAD; the in-diff mapping cannot read it — rename it to match\n")
+
+    def test_tracked_an_empty_listing_passes(self):
+        listing = self.root / "whole.json"
+        listing.write_text("")
+        result = run_cli("tracked", "beta", str(listing), str(self.root), "HEAD")
+        self.assertEqual((result.returncode, result.stdout), (0, ""), result.stderr)
 
 
 class Cli(unittest.TestCase):

@@ -25,7 +25,7 @@ class DiffError(Exception):
     pass
 
 
-class ScopeError(Exception):
+class InputError(Exception):
     pass
 
 
@@ -227,7 +227,7 @@ def git(root, *args):
 def resolve(root, rev):
     done = git(root, "rev-parse", "--verify", "--end-of-options", rev + "^{commit}")
     if done.returncode != 0:
-        raise ScopeError(f"FAIL: revision does not resolve to a commit: {rev}")
+        raise InputError(f"FAIL: revision does not resolve to a commit: {rev}")
     return done.stdout.decode().strip()
 
 
@@ -237,7 +237,7 @@ def show(root, sha, path):
         return done.stdout.decode()
     if ABSENT.search(done.stderr.decode()):
         return None
-    raise ScopeError(f"FAIL: cannot read {path} at {sha}: {done.stderr.decode().strip()}")
+    raise InputError(f"FAIL: cannot read {path} at {sha}: {done.stderr.decode().strip()}")
 
 
 def parse_toml(text):
@@ -257,7 +257,7 @@ def packages(root):
          "--manifest-path", str(Path(root) / "Cargo.toml")],
         capture_output=True, env=cargo_env(), check=False)
     if done.returncode != 0:
-        raise ScopeError("FAIL: cargo metadata failed: " + done.stderr.decode().strip())
+        raise InputError("FAIL: cargo metadata failed: " + done.stderr.decode().strip())
     return {package["name"]: package for package in json.loads(done.stdout)["packages"]}
 
 
@@ -274,7 +274,7 @@ def check_paths(root, base, diff_text, head="HEAD"):
     done = git(root, "-c", "core.quotePath=true", "diff", "--name-only", "-z", "--no-renames",
                "--diff-filter=d", "--no-ext-diff", base, head)
     if done.returncode != 0:
-        raise ScopeError(f"FAIL: git diff --name-only {base} {head} failed: {done.stderr.decode().strip()}")
+        raise InputError(f"FAIL: git diff --name-only {base} {head} failed: {done.stderr.decode().strip()}")
     listed = {p for p in done.stdout.decode().split("\0") if p.endswith(".rs")}
     if named != listed:
         raise DiffError(f"FAIL: the diff names {sorted(named - listed)} that git diff --name-only "
@@ -306,12 +306,12 @@ def affected():
 def changed_names(root, base_sha, head_sha):
     done = git(root, "diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", base_sha, head_sha)
     if done.returncode != 0:
-        raise ScopeError(f"FAIL: git diff --name-only {base_sha} {head_sha} failed: "
+        raise InputError(f"FAIL: git diff --name-only {base_sha} {head_sha} failed: "
                          f"{done.stderr.decode().strip()}")
     try:
         return [p for p in done.stdout.decode().split("\0") if p]
     except UnicodeError:
-        raise ScopeError("FAIL: a changed path is not UTF-8") from None
+        raise InputError("FAIL: a changed path is not UTF-8") from None
 
 
 def within(path, directory):
@@ -354,7 +354,7 @@ def features_of(text, crate):
     except (KeyError, TypeError):
         return []
     if not isinstance(found, list) or not all(isinstance(f, str) for f in found):
-        raise ScopeError(f"FAIL: [t1].mutants_features.{crate} is not a list of strings")
+        raise InputError(f"FAIL: [t1].mutants_features.{crate} is not a list of strings")
     return found
 
 
@@ -374,7 +374,7 @@ def selectors(package):
     kinds = {k for t in package["targets"] for k in t["kind"]}
     found = (["--lib"] if kinds & PRODUCTION_LIB else []) + (["--bins"] if "bin" in kinds else [])
     if not found:
-        raise ScopeError(f"FAIL: {package['name']}: no library or binary target to check")
+        raise InputError(f"FAIL: {package['name']}: no library or binary target to check")
     return found
 
 
@@ -387,7 +387,7 @@ def check_inputs(tree, label, args, features, target, members):
     done = subprocess.run(argv, cwd=tree, capture_output=True, env=cargo_env(), check=False)
     if done.returncode != 0:
         tail = done.stderr.decode(errors="replace").strip().splitlines()[-5:]
-        raise ScopeError(f"FAIL: {label}: cargo check of its production targets failed: " + " | ".join(tail))
+        raise InputError(f"FAIL: {label}: cargo check of its production targets failed: " + " | ".join(tail))
     found, read = {}, 0
     for line in done.stdout.decode(errors="replace").splitlines():
         try:
@@ -408,7 +408,7 @@ def check_inputs(tree, label, args, features, target, members):
                 candidates.append(artifact.with_name(artifact.stem[3:] + ".d"))
             infos.update(c for c in candidates if c.is_file())
         if len(infos) != 1:
-            raise ScopeError(f"FAIL: {name}: cannot locate exactly one dep-info file for its "
+            raise InputError(f"FAIL: {name}: cannot locate exactly one dep-info file for its "
                              f"{message['target'].get('name')} target (found {len(infos)})")
         for info in infos:
             read += 1
@@ -417,11 +417,11 @@ def check_inputs(tree, label, args, features, target, members):
                 try:
                     stat = os.stat(path)
                 except OSError:
-                    raise ScopeError(f"FAIL: {name}: dep-info entry {json.dumps(token)} in "
+                    raise InputError(f"FAIL: {name}: dep-info entry {json.dumps(token)} in "
                                      f"{info.name} does not resolve to a file") from None
                 found.setdefault(name, {})[(stat.st_dev, stat.st_ino)] = path
     if read == 0:
-        raise ScopeError(f"FAIL: {label}: cargo check wrote no dep-info for its production targets")
+        raise InputError(f"FAIL: {label}: cargo check wrote no dep-info for its production targets")
     return found
 
 
@@ -500,7 +500,7 @@ def config_guard(root, head):
     sha = resolve(root, head)
     listing = git(root, "ls-tree", "-r", "-z", "--full-tree", sha)
     if listing.returncode != 0:
-        raise ScopeError(f"FAIL: git ls-tree {sha} failed: {listing.stderr.decode().strip()}")
+        raise InputError(f"FAIL: git ls-tree {sha} failed: {listing.stderr.decode().strip()}")
     entries = []
     for record in listing.stdout.split(b"\0"):
         if record:
@@ -551,7 +551,7 @@ def unmappable(root, head, workspace):
     mutants = sorted(contract(root, sha, dirs) & set(dirs))
     listing = git(root, "ls-tree", "-r", "-z", "--full-tree", sha)
     if listing.returncode != 0:
-        raise ScopeError(f"FAIL: git ls-tree {sha} failed: {listing.stderr.decode().strip()}")
+        raise InputError(f"FAIL: git ls-tree {sha} failed: {listing.stderr.decode().strip()}")
     paths, links = set(), []
     for record in listing.stdout.split(b"\0"):
         if not record:
@@ -593,9 +593,6 @@ def unmappable(root, head, workspace):
     return None
 
 
-PATH_ATTRIBUTE = re.compile(r'#\s*\[\s*path\s*=\s*"([^"]*)"')
-
-
 def target_paths(manifest):
     if not isinstance(manifest, dict):
         return []
@@ -608,35 +605,29 @@ def target_paths(manifest):
     return [p for p in found if isinstance(p, str)]
 
 
-def blobs(root, sha, paths):
-    done = subprocess.run(["git", "-C", str(root), "cat-file", "--batch"], capture_output=True,
-                          env=git_env(), check=False, input="".join(f"{sha}:{p}\n" for p in paths).encode())
-    if done.returncode != 0:
-        raise ScopeError(f"FAIL: git cat-file --batch failed: {done.stderr.decode().strip()}")
-    out, at, found = done.stdout, 0, []
-    for path in paths:
-        end = out.index(b"\n", at)
-        header = out[at:end].decode().split(" ")
-        if len(header) != 3 or header[1] != "blob":
-            raise ScopeError(f"FAIL: cannot read {path} at {sha}")
-        size = int(header[2])
-        found.append(out[end + 1:end + 1 + size])
-        at = end + 1 + size + 1
-    return found
-
-
 def non_rs_source(root, sha, crate, directory, paths):
     for target in target_paths(parse_toml(show(root, sha, join(directory, "Cargo.toml")))):
         if not target.endswith(".rs"):
             shown = script_path(directory, target) or target
             return (f"FAIL: --in-diff: {shown} is compiled into mutation crate {crate} but does not end in .rs; "
                     "the in-diff mapping cannot read it — rename it to .rs")
-    sources = sorted(p for p in paths if p.endswith(".rs") and within(p, directory))
-    for path, blob in zip(sources, blobs(root, sha, sources)):
-        for value in PATH_ATTRIBUTE.findall(blob.decode(errors="replace")):
-            if not value.endswith(".rs"):
-                return (f'FAIL: --in-diff: {path} declares #[path = "{value}"], which does not end in .rs; '
-                        "the in-diff mapping cannot read it — rename it to .rs")
+    for path in sorted(p for p in paths if within(p, directory)):
+        if path.casefold().endswith(".rs") and not path.endswith(".rs"):
+            return (f"FAIL: --in-diff: {path} ends in a case variant of .rs; the in-diff mapping cannot read it "
+                    "— rename it to .rs")
+    return None
+
+
+def untracked(root, head, pkg, whole):
+    sha = resolve(root, head)
+    listing = git(root, "ls-tree", "-r", "-z", "--full-tree", "--name-only", sha)
+    if listing.returncode != 0:
+        raise InputError(f"FAIL: git ls-tree {sha} failed: {listing.stderr.decode().strip()}")
+    paths = set(listing.stdout.decode().split("\0"))
+    for mutant in whole:
+        if mutant["file"] not in paths:
+            return (f"FAIL: {pkg}: cargo-mutants lists {mutant['file']}, which is not a tracked path at HEAD; "
+                    "the in-diff mapping cannot read it — rename it to match")
     return None
 
 
@@ -648,7 +639,7 @@ def snapshot(root, rev, dest):
     sha = resolve(root, rev)
     listing = git(root, "ls-tree", "-r", "-z", "--full-tree", sha)
     if listing.returncode != 0:
-        raise ScopeError(f"FAIL: git ls-tree {sha} failed: {listing.stderr.decode().strip()}")
+        raise InputError(f"FAIL: git ls-tree {sha} failed: {listing.stderr.decode().strip()}")
     entries = []
     for record in listing.stdout.split(b"\0"):
         if not record:
@@ -658,21 +649,21 @@ def snapshot(root, rev, dest):
         path = raw.decode()
         parts = path.split("/")
         if any(p in ("", ".", "..") or p.lower() == ".git" for p in parts):
-            raise ScopeError(f"FAIL: HEAD names an unsafe path: {path!r}")
+            raise InputError(f"FAIL: HEAD names an unsafe path: {path!r}")
         if kind != "blob" or mode not in ("100644", "100755", "120000"):
-            raise ScopeError(f"FAIL: HEAD has a {kind} at {path} (mode {mode}) that a snapshot cannot hold")
+            raise InputError(f"FAIL: HEAD has a {kind} at {path} (mode {mode}) that a snapshot cannot hold")
         entries.append((mode, oid, path))
     done = subprocess.run(["git", "-C", str(root), "cat-file", "--batch"], capture_output=True,
                           env=git_env(), check=False,
                           input="".join(oid + "\n" for _, oid, _ in entries).encode())
     if done.returncode != 0:
-        raise ScopeError(f"FAIL: git cat-file --batch failed: {done.stderr.decode().strip()}")
+        raise InputError(f"FAIL: git cat-file --batch failed: {done.stderr.decode().strip()}")
     out, at, blobs = done.stdout, 0, []
     for _, oid, path in entries:
         end = out.index(b"\n", at)
         header = out[at:end].decode().split(" ")
         if len(header) != 3 or header[0] != oid or header[1] != "blob":
-            raise ScopeError(f"FAIL: cannot read {path} ({oid}) from the object store")
+            raise InputError(f"FAIL: cannot read {path} ({oid}) from the object store")
         size = int(header[2])
         blobs.append(out[end + 1:end + 1 + size])
         at = end + 1 + size + 1
@@ -682,7 +673,7 @@ def snapshot(root, rev, dest):
     def place(path):
         for parent in Path(path).parents:
             if (target / parent).is_symlink():
-                raise ScopeError(f"FAIL: HEAD places {path} beneath the symlink {parent}")
+                raise InputError(f"FAIL: HEAD places {path} beneath the symlink {parent}")
         file = target / path
         file.parent.mkdir(parents=True, exist_ok=True)
         return file
@@ -730,6 +721,11 @@ def main(argv):
             if problem:
                 print(problem)
                 return 1
+        elif len(argv) == 5 and command == "tracked":
+            problem = untracked(argv[3], argv[4], argv[1], read_list(argv[1], argv[2]))
+            if problem:
+                print(problem)
+                return 1
         elif len(argv) == 4 and command == "unmappable":
             problem = unmappable(*argv[1:])
             if problem:
@@ -739,10 +735,10 @@ def main(argv):
             print("FAIL: usage: mutation-diff.py changed-lines <diff> | classify <pkg> <diff> "
                   "<whole> <indiff> | paths <root> <base> <diff> [<head>] | history <root> | "
                   "snapshot <root> <rev> <dest> | compiled <root> <base> <head> <workspace> <target> | "
-                  "unmappable <root> <head> <workspace> | config-guard <root> <head>",
+                  "tracked <pkg> <whole> <root> <head> | unmappable <root> <head> <workspace> | config-guard <root> <head>",
                   file=sys.stderr)
             return 1
-    except (DiffError, ScopeError) as exc:
+    except (DiffError, InputError) as exc:
         print(exc, file=sys.stdout if command == "classify" else sys.stderr)
         return 1
     except (OSError, ValueError) as exc:

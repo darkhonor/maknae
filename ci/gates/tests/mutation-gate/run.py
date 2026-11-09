@@ -308,8 +308,7 @@ class MutationGate(unittest.TestCase):
 
     def test_neither_ci_nor_the_hook_passes_partial(self):
         for path in (".github/workflows/ci.yml", "ci/hooks/pre-push"):
-            code = [line for line in (ROOT / path).read_text().splitlines() if not line.lstrip().startswith("#")]
-            self.assertNotIn("--partial", "\n".join(code), path)
+            self.assertNotIn("--partial", (ROOT / path).read_text(), path)
 
 
 class InDiff(unittest.TestCase):
@@ -674,12 +673,14 @@ class InDiff(unittest.TestCase):
         self.assertIn("RUN a: 2 in-diff mutants", out)
         self.assertIn(PARTIAL_B, out)
         self.assertEqual([r[2] for r in self.runs()], ["a"])
-        self.assertIn("PASS: coverage-tiers gate", out)
+        self.assertIn("PASS (partial: 1 crates not run): coverage-tiers gate", out)
+        self.assertNotIn("PASS: coverage-tiers gate", out)
 
     def test_in_diff_partial_still_fails_a_survivor_in_a_selected_crate(self):
         repo = self.in_diff_repo({**EDIT_A, **B_EDIT})
         result, out = self.gate(repo, *PART, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2], missed=1, fake_exit=2)
         self.assertFails(result, out, "cargo mutants --package a reported missed/timeout mutants", PARTIAL_B)
+        self.assertNotIn("PASS", out)
 
     def test_in_diff_partial_with_only_unselected_changes_runs_nothing(self):
         repo = self.in_diff_repo(B_EDIT)
@@ -688,6 +689,8 @@ class InDiff(unittest.TestCase):
         self.assertIn(PARTIAL_B, out)
         self.assertIn("SKIP: a: no mutant on a changed line", out)
         self.assertEqual(self.runs(), [])
+        self.assertIn("PASS (partial: 1 crates not run): coverage-tiers gate", out)
+        self.assertNotIn("PASS: coverage-tiers gate", out)
 
     def test_in_diff_partial_prints_nothing_when_every_changed_crate_is_selected(self):
         repo = self.in_diff_repo(EDIT_A)
@@ -695,6 +698,7 @@ class InDiff(unittest.TestCase):
                                 whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
         self.assertEqual(result.returncode, 0, out)
         self.assertNotIn("PARTIAL:", out)
+        self.assertIn("PASS: coverage-tiers gate", out)
 
     def test_in_diff_partial_keeps_the_unknown_crate_refusal(self):
         repo = self.in_diff_repo(EDIT_A)
@@ -1242,6 +1246,30 @@ class InDiff(unittest.TestCase):
         self.assertEqual(result.returncode, 0, out)
         self.assertNotIn("PARTIAL:", out)
         self.assertEqual(self.runs(), [])
+        self.assertIn("PASS: coverage-tiers gate", out)
+
+    def test_in_diff_a_listed_file_that_is_not_a_tracked_path_fails(self):
+        repo = self.in_diff_repo(EDIT_A)
+        spelled = [dict(m, file="./" + m["file"]) for m in WHOLE_EDIT]
+        result, out = self.gate(repo, whole=spelled, indiff=spelled[:2])
+        self.assertFails(result, out, "FAIL: a: cargo-mutants lists ./crates/a/src/lib.rs, which is not a tracked "
+                         "path at HEAD")
+        self.assertEqual(self.runs(), [])
+
+    def test_in_diff_a_case_variant_rs_suffix_is_refused(self):
+        variant = "crates/a/src/foo.RS"
+        repo = self.in_diff_repo({variant: "pub fn f() -> u8 {\n    2\n}\n"},
+                                 base_files={A_RS: "#[path = \"foo.RS\"]\nmod foo;\n" + LIB_A,
+                                             variant: "pub fn f() -> u8 {\n    1\n}\n"})
+        result, out = self.gate(repo, whole=WHOLE_EDIT)
+        self.assertFails(result, out, f"FAIL: --in-diff: {variant} ends in a case variant of .rs")
+        self.assertEqual(self.invocations(), [])
+
+    def test_in_diff_a_mutants_crate_name_starting_with_a_dash_is_refused(self):
+        repo = self.in_diff_repo(EDIT_A, base_crates=["a", "-b"])
+        result, out = self.gate(repo, "--mutants", "a", "--in-diff", "base", whole=WHOLE_EDIT)
+        self.assertFails(result, out, "mutants_crates names -b, which starts with '-'")
+        self.assertEqual(self.invocations(), [])
 
     def test_in_diff_a_test_only_file_runs_nothing(self):
         cases = {"crates/a/tests/it.rs": ("#[test]\nfn it() {}\n", "#[test]\nfn it() {\n    assert!(true);\n}\n", {}),
@@ -1258,9 +1286,26 @@ class InDiff(unittest.TestCase):
                 self.assertNotIn("whole:", out)
                 self.assertEqual(self.runs(), [])
 
+    def cargo_checks(self):
+        log = Path(str(self.args) + ".cargo")
+        return [line for line in log.read_text().splitlines() if line.startswith("check ")] if log.exists() else []
+
+    def test_in_diff_every_selected_crate_needs_no_compiled_check(self):
+        repo = self.in_diff_repo(EDIT_A)
+        result, out = self.gate(repo, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn("RUN a: 2 in-diff mutants", out)
+        self.assertEqual(self.cargo_checks(), [])
+
+    def test_in_diff_a_narrower_selection_runs_the_compiled_check(self):
+        repo = self.in_diff_repo(EDIT_A)
+        result, out = self.gate(repo, crates=("a",), whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
+        self.assertEqual(result.returncode, 0, out)
+        self.assertTrue(self.cargo_checks())
+
     def test_in_diff_a_failed_production_check_fails(self):
         repo = self.in_diff_repo({A_RS: LIB_A.replace("y * 2", "y *")})
-        result, out = self.gate(repo, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
+        result, out = self.gate(repo, crates=("a",), whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
         self.assertFails(result, out, "FAIL: --in-diff: compiled inputs cannot be computed: FAIL: a: cargo "
                          "check of its production targets failed")
         self.assertEqual(self.invocations(), [])
