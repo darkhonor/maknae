@@ -154,6 +154,11 @@ fn same_path(actual: &Path, expected: &Path) -> Result<(), IoError> {
     Ok(())
 }
 
+fn unwritten(mut e: MutationFailure, offset: usize) -> MutationFailure {
+    e.before_write = offset == 0;
+    e
+}
+
 fn replace_bytes(
     fd: &OwnedFd,
     path: &Path,
@@ -169,7 +174,7 @@ fn replace_bytes(
         } else {
             EffectState::Partial
         };
-        check().map_err(|e| failure(path, state, e))?;
+        check().map_err(|e| unwritten(failure(path, state, e), offset))?;
         let count = match write(fd, &bytes[offset..], offset as i64) {
             Err(nix::errno::Errno::EINTR) => continue,
             result => result.map_err(|e| failure(path, state, io_error(e, path)))?,
@@ -184,7 +189,7 @@ fn replace_bytes(
     } else {
         EffectState::Partial
     };
-    check().map_err(|e| failure(path, state, e))?;
+    check().map_err(|e| unwritten(failure(path, state, e), offset))?;
     // A valid slice is bounded by isize::MAX; both supported targets have 64-bit
     // pointers, so its length is always representable by the syscall offset.
     let length = bytes.len() as i64;
@@ -564,6 +569,7 @@ impl MutationDirectory {
             if e.state == EffectState::NoEffect {
                 e.state = EffectState::Partial;
             }
+            e.before_write = false;
             e
         })?;
         Ok(MutationEffect {
@@ -958,6 +964,32 @@ mod tests {
         assert_eq!(std::fs::read(&p).unwrap(), b"kept");
         let e = replace_held_file(fd.as_fd(), &p, b"blind", WriteBase::Unread).unwrap_err();
         assert!(e.before_write, "a stale base is decided before any write");
+    }
+    #[test]
+    fn a_replace_whose_check_fails_before_any_syscall_is_decided_before_any_write() {
+        let d = tempfile::tempdir().unwrap();
+        let p = root(&d).join("check-first-sentinel");
+        std::fs::write(&p, b"kept").unwrap();
+        let changed = || {
+            Err(IoError::MutationPathChanged {
+                path: "/moved".into(),
+            })
+        };
+        for bytes in [&b"x"[..], &b""[..]] {
+            let fd = std::fs::OpenOptions::new().write(true).open(&p).unwrap();
+            let e = replace_bytes(
+                &fd.into(),
+                &p,
+                bytes,
+                changed,
+                |_, _, _| panic!("no write syscall may follow a failed check"),
+                |_| panic!("no sync may follow a failed check"),
+            )
+            .unwrap_err();
+            assert_eq!(e.state, EffectState::NoEffect);
+            assert!(e.before_write, "{} bytes: {e:?}", bytes.len());
+        }
+        assert_eq!(std::fs::read(&p).unwrap(), b"kept");
     }
     #[test]
     fn a_replace_whose_first_write_fails_may_have_reached_the_file() {

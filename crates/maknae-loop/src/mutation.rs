@@ -366,6 +366,8 @@ struct Worker {
     page: Option<PageMeta>,
     stale: bool,
     withheld: bool,
+    attempted: bool,
+    diverted: bool,
     version: Option<maknae_io::FileVersion>,
 }
 struct Step {
@@ -443,7 +445,21 @@ fn fits(report: &MutationReport, cap: usize) -> bool {
 }
 impl Worker {
     /// Reserve both effect and every terminal form before entering the syscall.
+    /// A stop here precedes the effect it reserves for, so it is certified pre-effect
+    /// when no earlier effect syscall was attempted.
     fn reserve(
+        &mut self,
+        path: &Path,
+        effect: ReportedEffect,
+        depth: usize,
+    ) -> Result<String, Box<Step>> {
+        let reserved = self.reservation(path, effect, depth);
+        if reserved.is_err() {
+            self.withheld = !self.attempted;
+        }
+        reserved
+    }
+    fn reservation(
         &self,
         path: &Path,
         effect: ReportedEffect,
@@ -511,6 +527,7 @@ impl Worker {
             Work::Done => Step::stop(ReportedFinish::Success, None),
             Work::Withheld { path } => {
                 self.withheld = true;
+                self.diverted = true;
                 Step::stop(
                     ReportedFinish::PathChanged,
                     path.to_str().map(str::to_string),
@@ -597,6 +614,7 @@ impl Worker {
                         }
                     }
                     Err(e) => {
+                        self.attempted = !e.before_write;
                         (self.stale, self.withheld) = refused_replace(&e, || {
                             maknae_io::held_file_is_readable(held.as_fd(), Path::new(&path))
                         });
@@ -632,6 +650,7 @@ impl Worker {
                         }
                     }
                     Err(e) => {
+                        self.attempted = !e.before_write;
                         self.withheld = e.before_write;
                         error_step(e, ReportedEffect::CreatedFile, path)
                     }
@@ -657,6 +676,7 @@ impl Worker {
                     Ok(p) => p,
                     Err(s) => return *s,
                 };
+                self.attempted = true;
                 match parent.mkdir_one(&leaf) {
                     Ok(_) => {
                         let effect = Some(EffectEntry {
@@ -757,6 +777,7 @@ impl Worker {
                         Ok(p) => p,
                         Err(s) => return *s,
                     };
+                    self.attempted = true;
                     match target_parent.remove_entry(&target_leaf) {
                         Ok(_) => {
                             if closing {
@@ -912,6 +933,7 @@ pub async fn execute_read<S: AsyncRead + AsyncWrite + Unpin + Send>(
 fn stop_line(
     outcome: ReportedFinish,
     reading: bool,
+    writing: bool,
     stale: bool,
     withheld: bool,
     effects: u32,
@@ -920,8 +942,11 @@ fn stop_line(
         ReportedFinish::Success => None,
         _ if reading => Some(format!("read not performed: {outcome:?}")),
         _ if stale => None,
+        _ if withheld && writing => Some(format!(
+            "write not performed: {outcome:?}; nothing was written"
+        )),
         _ if withheld => Some(format!(
-            "write not performed: {outcome:?}; you cannot read the file or open it for writing; nothing was written"
+            "mutation not performed: {outcome:?}; nothing was changed"
         )),
         _ => Some(format!(
             "mutation stopped: {outcome:?}; {effects} effect(s) reported"
@@ -1056,6 +1081,8 @@ async fn start_attempt(
             page: None,
             stale: false,
             withheld: false,
+            attempted: false,
+            diverted: false,
             version: None,
         })
     });
@@ -1066,6 +1093,22 @@ async fn start_attempt(
         })?
         .map_err(|e| e.to_string())??;
     Ok((worker, id, deadline))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum LostFinish {
+    NoEffect,
+    Stale,
+    Unknown,
+}
+
+/// What an attempt whose finish report went unacknowledged may claim.
+fn lost_finish(certified: bool, stale: bool) -> LostFinish {
+    match (certified, stale) {
+        (true, _) => LostFinish::NoEffect,
+        (false, true) => LostFinish::Stale,
+        (false, false) => LostFinish::Unknown,
+    }
 }
 
 /// An attempt that ended before its first effect (ADR-0034 decision 7).
@@ -1135,15 +1178,28 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
                 next.next_index,
             )
             .await;
-            match reported {
-                Err(why) if next.next_index == 0 && outcome != ReportedFinish::Success => {
-                    return Ok(no_effect(reading, writing, &why, diag));
-                }
-                r => r?,
+            if let Err(why) = reported {
+                return match lost_finish(next.withheld, next.stale) {
+                    LostFinish::NoEffect => Ok(no_effect(reading, writing, &why, diag)),
+                    LostFinish::Stale => Ok(Attempted {
+                        success: false,
+                        content: None,
+                        page: None,
+                        stale: true,
+                        withheld: false,
+                        version: None,
+                    }),
+                    LostFinish::Unknown => Err(why),
+                };
             }
-            if let Some(line) =
-                stop_line(outcome, reading, next.stale, next.withheld, next.next_index)
-            {
+            if let Some(line) = stop_line(
+                outcome,
+                reading,
+                writing && !next.diverted,
+                next.stale,
+                next.withheld,
+                next.next_index,
+            ) {
                 diag(line);
             }
             return Ok(Attempted {
@@ -1164,24 +1220,28 @@ mod tests {
     #[test]
     fn a_stale_refusal_prints_nothing_and_other_stops_still_do() {
         use ReportedFinish::*;
-        assert_eq!(stop_line(Success, false, false, false, 1), None);
-        assert_eq!(stop_line(Success, true, false, false, 1), None);
-        assert_eq!(stop_line(PathChanged, false, true, false, 0), None);
+        assert_eq!(stop_line(Success, false, true, false, false, 1), None);
+        assert_eq!(stop_line(Success, true, false, false, false, 1), None);
+        assert_eq!(stop_line(PathChanged, false, true, true, false, 0), None);
         assert_eq!(
-            stop_line(PathChanged, false, false, false, 0).as_deref(),
+            stop_line(PathChanged, false, true, false, false, 0).as_deref(),
             Some("mutation stopped: PathChanged; 0 effect(s) reported")
         );
         assert_eq!(
-            stop_line(OsRefused, true, false, false, 0).as_deref(),
+            stop_line(OsRefused, true, false, false, false, 0).as_deref(),
             Some("read not performed: OsRefused")
         );
         assert_eq!(
-            stop_line(Partial, false, false, false, 2).as_deref(),
+            stop_line(Partial, false, true, false, false, 2).as_deref(),
             Some("mutation stopped: Partial; 2 effect(s) reported")
         );
         assert_eq!(
-            stop_line(OsRefused, false, false, true, 0).as_deref(),
-            Some("write not performed: OsRefused; you cannot read the file or open it for writing; nothing was written")
+            stop_line(OsRefused, false, true, false, true, 0).as_deref(),
+            Some("write not performed: OsRefused; nothing was written")
+        );
+        assert_eq!(
+            stop_line(PathChanged, false, false, false, true, 0).as_deref(),
+            Some("mutation not performed: PathChanged; nothing was changed")
         );
     }
     #[test]
@@ -2258,9 +2318,62 @@ mod tests {
         written_at: Instant,
         acknowledged: bool,
     ) -> (Result<WriteEnd, String>, Vec<String>) {
+        end_acked(
+            prepared,
+            grant,
+            cap,
+            written_at,
+            if acknowledged { Acks::All } else { Acks::None },
+        )
+        .await
+    }
+    #[derive(Clone, Copy)]
+    enum Acks {
+        All,
+        None,
+        BatchesOnly,
+    }
+    fn acknowledge_batches(mut server: tokio::io::DuplexStream) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            while let Ok(bytes) = read_frame(&mut server, proto::ATTEMPT_RESPONSE_MAX).await {
+                let MutationReport::Batch {
+                    id,
+                    first_index,
+                    effects,
+                } = proto::decode_mutation_report(&bytes).unwrap()
+                else {
+                    return;
+                };
+                let ack = proto::MutationAck {
+                    id,
+                    next_index: first_index + effects.len() as u32,
+                };
+                write_frame(&mut server, &proto::encode_mutation_ack(&ack).unwrap())
+                    .await
+                    .unwrap();
+            }
+        })
+    }
+    async fn end_acked(
+        prepared: PreparedMutation,
+        grant: MutationGrant,
+        cap: usize,
+        written_at: Instant,
+        acks: Acks,
+    ) -> (Result<WriteEnd, String>, Vec<String>) {
         let cfg = TransportConfig::default();
         let (mut client, server) = tokio::io::duplex(65536);
-        let receiver = acknowledged.then(|| acknowledge_all(server, proto::ATTEMPT_RESPONSE_MAX));
+        let receiver = match acks {
+            Acks::All => Some(acknowledge_all(server, proto::ATTEMPT_RESPONSE_MAX)),
+            Acks::BatchesOnly => {
+                drop(acknowledge_batches(server));
+                None
+            }
+            Acks::None => {
+                drop(server);
+                None
+            }
+        };
         let mut lines = vec![];
         let result = run_attempt(
             prepared,
@@ -2381,6 +2494,106 @@ mod tests {
             vec!["mutation not performed: invalid mutation grant limits; nothing was changed"]
         );
         assert!(!Path::new(&path).exists());
+    }
+    #[test]
+    fn a_write_that_may_have_reached_the_file_stays_unknown_when_its_finish_ack_is_lost() {
+        let write_at_failed = MutationFailure {
+            state: EffectState::NoEffect,
+            at: "/sentinel-617".into(),
+            source: IoError::Io {
+                path: "/sentinel-617".into(),
+                kind: IoKind::PermissionDenied,
+            },
+            before_write: false,
+        };
+        let (stale, certified) = refused_replace(&write_at_failed, || true);
+        assert_eq!((stale, certified), (false, false));
+        assert_eq!(
+            lost_finish(certified, stale),
+            LostFinish::Unknown,
+            "nothing reported is not nothing done"
+        );
+        assert_eq!(lost_finish(true, false), LostFinish::NoEffect);
+        assert_eq!(lost_finish(false, true), LostFinish::Stale);
+    }
+    async fn reservation_stop(existing: bool) {
+        let d = Fixture::new();
+        let path = d.path("reservation-sentinel");
+        if existing {
+            std::fs::write(&path, b"kept").unwrap();
+        }
+        let prepared = checked_write(path.clone(), WriteCheck::Unchecked);
+        let g = if existing {
+            replace_grant(&path)
+        } else {
+            create_grant(&path)
+        };
+        let base_size =
+            proto::encode_mutation_report(&finished(g.id, 0, ReportedFinish::LimitReached, None))
+                .unwrap()
+                .len();
+        let (end, lines) = end_with(prepared, g, base_size, Instant::now(), true).await;
+        let end = end.unwrap();
+        assert!(!end.applied && end.withheld, "{end:?}");
+        assert_eq!(
+            the_model_is_told(end),
+            maknae_agent::plane::WriteOutcome::Unavailable
+        );
+        assert!(
+            lines.iter().any(|l| l.ends_with("; nothing was written")),
+            "{lines:?}"
+        );
+        if existing {
+            assert_eq!(std::fs::read(&path).unwrap(), b"kept");
+        } else {
+            assert!(!Path::new(&path).exists());
+        }
+    }
+    #[tokio::test]
+    async fn a_create_stopped_by_its_reservation_answers_unavailable() {
+        reservation_stop(false).await;
+    }
+    #[tokio::test]
+    async fn a_replace_stopped_by_its_reservation_answers_unavailable() {
+        reservation_stop(true).await;
+    }
+    #[tokio::test]
+    async fn an_effect_whose_finish_ack_is_lost_stays_unknown() {
+        let d = Fixture::new();
+        let paths = vec![d.path("lost-parent"), d.path("lost-parent/child")];
+        let mut g = grant(MutationScope::Directories {
+            paths: paths.clone(),
+        });
+        g.limits.max_effects = 1;
+        let (end, _) = end_acked(
+            prepare(mkdir(paths[1].clone(), true), None).unwrap(),
+            g,
+            proto::ATTEMPT_REQUEST_MAX,
+            Instant::now(),
+            Acks::BatchesOnly,
+        )
+        .await;
+        assert!(end.is_err(), "{end:?}");
+        assert!(Path::new(&paths[0]).is_dir(), "the first effect landed");
+    }
+    #[tokio::test]
+    async fn a_held_parent_that_is_not_the_granted_one_says_nothing_was_changed() {
+        let d = Fixture::new();
+        std::fs::create_dir(d.path("nested-parent")).unwrap();
+        let path = d.path("nested-parent/grant-sentinel");
+        let (end, lines) = end_with(
+            checked_write(path.clone(), WriteCheck::Unread),
+            create_grant(&d.path("grant-sentinel")),
+            proto::ATTEMPT_REQUEST_MAX,
+            Instant::now(),
+            true,
+        )
+        .await;
+        assert!(end.unwrap().withheld);
+        assert_eq!(
+            lines,
+            vec!["mutation not performed: PathChanged; nothing was changed"]
+        );
     }
     #[tokio::test]
     async fn a_grant_that_does_not_match_answers_unavailable() {
@@ -3457,6 +3670,8 @@ mod tests {
             page: None,
             stale: false,
             withheld: false,
+            attempted: false,
+            diverted: false,
             version: None,
         }
     }

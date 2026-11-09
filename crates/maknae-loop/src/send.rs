@@ -165,7 +165,15 @@ pub async fn send_verb(
     diag: &mut (dyn FnMut(String) + Send),
 ) -> Result<SentOutcome, String> {
     let mutating = mutates(&request_verb);
-    match exchange(request_verb, content, check, transport, client, trust, diag).await {
+    let connect = PlaneConnector::connect(&transport.socket_path, client, trust);
+    settle(
+        mutating,
+        exchange(connect, request_verb, content, check, transport, diag).await,
+    )
+}
+
+fn settle(mutating: bool, sent: Result<SentOutcome, Failed>) -> Result<SentOutcome, String> {
+    match sent {
         Ok(sent) => Ok(sent),
         Err(Failed::BeforeGrant(why)) => before_grant(mutating, why),
         Err(Failed::After(why)) => Err(why),
@@ -186,8 +194,7 @@ fn mutates(verb: &maknae_proto::Verb) -> bool {
     )
 }
 
-/// A mutation that failed before its grant arrived had no effect: the daemon never
-/// mutates, and the subject acts only on a grant (ADR-0009, ADR-0034 decision 7).
+/// A mutation that failed before its grant arrived had no effect (ADR-0034 decision 7).
 fn before_grant(mutating: bool, why: String) -> Result<SentOutcome, String> {
     if mutating {
         Ok(SentOutcome::NotAttempted { why })
@@ -197,21 +204,23 @@ fn before_grant(mutating: bool, why: String) -> Result<SentOutcome, String> {
 }
 
 async fn exchange(
+    connect: impl std::future::Future<
+        Output = Result<maknae_vault::AuthenticatedStream, maknae_vault::VaultError>,
+    >,
     request_verb: maknae_proto::Verb,
     content: Option<maknae_proto::Bytes>,
     check: crate::mutation::WriteCheck,
     transport: &maknae_config::TransportConfig,
-    client: &PlaneClient,
-    trust: &Arc<TrustBundle>,
     diag: &mut (dyn FnMut(String) + Send),
 ) -> Result<SentOutcome, Failed> {
+    let mutating = mutates(&request_verb);
     let before = Failed::BeforeGrant;
     // Bound the client-side TLS handshake by the configured `handshake_timeout_ms`: a
     // process that accepts the Unix socket but never completes TLS must not hang the CLI
     // forever (it still fails non-zero).
     let connect = tokio::time::timeout(
         std::time::Duration::from_millis(transport.handshake_timeout_ms),
-        PlaneConnector::connect(&transport.socket_path, client, trust),
+        connect,
     )
     .await;
     let mut stream = match connect {
@@ -277,41 +286,58 @@ async fn exchange(
     .map_err(before)?;
     let response = decode_response(&resp_body).map_err(|e| before(e.to_string()))?;
 
-    match response.result {
-        RespResult::Ok(Payload::MutationAttempt(grant)) => {
-            let prepared = prepared.ok_or_else(|| {
-                Failed::After("protocol error: mutation grant for an ordinary request".into())
-            })?;
-            if matches!(prepared.request(), maknae_proto::Verb::Read { .. }) {
-                let read = crate::mutation::execute_read(
-                    prepared,
-                    grant,
-                    &mut stream,
-                    transport,
-                    written,
-                    diag,
-                )
+    let (prepared, grant) = match first_answer(mutating, prepared, response.result, armed)? {
+        FirstAnswer::Done(sent) => return Ok(sent),
+        FirstAnswer::Grant(prepared, grant) => (prepared, grant),
+    };
+    if matches!(prepared.request(), maknae_proto::Verb::Read { .. }) {
+        let read =
+            crate::mutation::execute_read(prepared, grant, &mut stream, transport, written, diag)
                 .await
                 .map_err(Failed::After)?;
-                return Ok(SentOutcome::ReadDone { read });
-            }
-            let end =
-                crate::mutation::execute(prepared, grant, &mut stream, transport, written, diag)
-                    .await
-                    .map_err(Failed::After)?;
-            Ok(SentOutcome::WriteDone {
-                applied: end.applied,
-                stale: end.stale,
-                withheld: end.withheld,
-                version: end.version,
-            })
+        return Ok(SentOutcome::ReadDone { read });
+    }
+    let end = crate::mutation::execute(prepared, grant, &mut stream, transport, written, diag)
+        .await
+        .map_err(Failed::After)?;
+    Ok(SentOutcome::WriteDone {
+        applied: end.applied,
+        stale: end.stale,
+        withheld: end.withheld,
+        version: end.version,
+    })
+}
+
+enum FirstAnswer {
+    Grant(
+        crate::mutation::PreparedMutation,
+        maknae_proto::MutationGrant,
+    ),
+    Done(SentOutcome),
+}
+
+fn first_answer(
+    mutating: bool,
+    prepared: Option<crate::mutation::PreparedMutation>,
+    result: RespResult,
+    armed: bool,
+) -> Result<FirstAnswer, Failed> {
+    match (result, prepared) {
+        (RespResult::Ok(Payload::MutationAttempt(grant)), Some(prepared)) => {
+            Ok(FirstAnswer::Grant(prepared, grant))
         }
-        RespResult::Ok(payload) => Ok(SentOutcome::Payload(payload)),
-        RespResult::Err(e) => Ok(SentOutcome::Refused {
+        (RespResult::Ok(Payload::MutationAttempt(_)), None) => Err(Failed::BeforeGrant(
+            "protocol error: mutation grant for an ordinary request".into(),
+        )),
+        (RespResult::Ok(payload), _) if mutating => Err(Failed::BeforeGrant(format!(
+            "protocol error: unexpected reply to a mutation: {payload:?}"
+        ))),
+        (RespResult::Ok(payload), _) => Ok(FirstAnswer::Done(SentOutcome::Payload(payload))),
+        (RespResult::Err(e), _) => Ok(FirstAnswer::Done(SentOutcome::Refused {
             code: e.code,
             message: e.message,
             armed,
-        }),
+        })),
     }
 }
 
@@ -665,6 +691,95 @@ mod tests {
             before_grant(mutates(&read), "connection reset".into()).unwrap_err(),
             "connection reset"
         );
+    }
+
+    fn fs_write() -> maknae_proto::Verb {
+        maknae_proto::Verb::FsWrite {
+            path: "/sentinel-617".into(),
+            content_length: 1,
+            mode: maknae_proto::WriteMode::Existing,
+            conversation: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_write_that_cannot_reach_the_daemon_answers_unavailable() {
+        use maknae_agent::plane::WriteOutcome;
+        use maknae_agent::wire::{write_outcome, WireOutcome};
+        let unreachable = async {
+            Err::<maknae_vault::AuthenticatedStream, _>(maknae_vault::VaultError::Handshake(
+                "connection refused".into(),
+            ))
+        };
+        let sent = exchange(
+            unreachable,
+            fs_write(),
+            Some(maknae_proto::Bytes::new(zeroize::Zeroizing::new(
+                b"x".to_vec(),
+            ))),
+            crate::mutation::WriteCheck::Unread,
+            &maknae_config::TransportConfig::default(),
+            &mut |_| {},
+        )
+        .await;
+        let settled = settle(true, sent);
+        assert!(
+            matches!(&settled, Ok(SentOutcome::NotAttempted { why }) if why.contains("connection refused")),
+            "{settled:?}"
+        );
+        assert_eq!(
+            write_outcome(settled.map(WireOutcome::from)),
+            WriteOutcome::Unavailable
+        );
+    }
+
+    #[test]
+    fn a_grant_time_fault_on_a_mutation_answers_unavailable() {
+        let grant = || {
+            RespResult::Ok(Payload::MutationAttempt(maknae_proto::MutationGrant {
+                id: maknae_proto::MutationId {
+                    session_id: 1,
+                    intent_seq: 1,
+                },
+                scope: maknae_proto::MutationScope::Exact {
+                    path: "/sentinel-617".into(),
+                    effect: maknae_proto::ReportedEffect::ReplacedFile,
+                },
+                limits: maknae_proto::MutationLimits {
+                    max_effects: 1,
+                    max_depth: 1,
+                    deadline_ms: 1,
+                    max_bytes: 0,
+                },
+                label: maknae_proto::ObjectLabel {
+                    level: "UNCLASSIFIED".into(),
+                    categories: vec![],
+                },
+            }))
+        };
+        for (what, result) in [
+            ("a grant for an unprepared request", grant()),
+            (
+                "a payload in place of the grant",
+                RespResult::Ok(Payload::Pong),
+            ),
+        ] {
+            let settled = settle(
+                true,
+                first_answer(true, None, result, true).map(|a| match a {
+                    FirstAnswer::Done(sent) => sent,
+                    FirstAnswer::Grant(..) => panic!("{what}: granted"),
+                }),
+            );
+            assert!(
+                matches!(settled, Ok(SentOutcome::NotAttempted { .. })),
+                "{what}: {settled:?}"
+            );
+        }
+        assert!(matches!(
+            first_answer(false, None, RespResult::Ok(Payload::Pong), true),
+            Ok(FirstAnswer::Done(SentOutcome::Payload(Payload::Pong)))
+        ));
     }
 
     #[test]
