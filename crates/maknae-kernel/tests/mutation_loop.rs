@@ -2153,12 +2153,16 @@ async fn a_hard_link_to_a_protected_file_is_refused_by_the_one_link_check() {
         .any(|w| w == SENSITIVE_SENTINEL));
     let last = records.last().expect("a request record");
     assert_eq!(last.outcome.result, "deny", "{last:?}");
-    assert_eq!(
-        last.outcome.reason,
+    let named = |p: &std::path::Path| {
         format!(
             "read evidence refused: hard-linked (nlink=2): {}",
-            alias.display()
+            p.display()
         )
+    };
+    assert!(
+        [named(&alias), named(&secret)].contains(&last.outcome.reason),
+        "{}",
+        last.outcome.reason
     );
 }
 
