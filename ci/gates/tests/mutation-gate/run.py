@@ -1273,6 +1273,43 @@ class InDiff(unittest.TestCase):
         self.assertFails(result, out, f"FAIL: --in-diff: {variant} ends in a case variant of .rs")
         self.assertEqual(self.invocations(), [])
 
+    def assertOutsideRefused(self, changes, base, crate, target, resolved):
+        for crates in (("a", "b"), ("a",)):
+            with self.subTest(crates=crates):
+                shutil.rmtree(self.tmp / "repo", ignore_errors=True)
+                links = base.pop("__links__", None)
+                repo = self.in_diff_repo(changes, base_files=base, links=links)
+                if links is not None:
+                    base["__links__"] = links
+                result, out = self.gate(repo, crates=crates, whole=WHOLE_EDIT)
+                self.assertFails(result, out, f"FAIL: --in-diff: [lib] path {target} of mutation crate {crate} "
+                                 f"resolves to {resolved}, outside crates/{crate}")
+                self.assertEqual(self.invocations(), [])
+
+    def test_in_diff_a_lib_symlinked_outside_the_crate_is_refused(self):
+        real = "shared/real.rs"
+        self.assertOutsideRefused(
+            {real: LIB_A.replace("y * 2", "y * 4")},
+            {"crates/a/Cargo.toml": package_toml("a") + '\n[lib]\npath = "../../shared/alias.rs"\n',
+             real: LIB_A, "__links__": {"shared/alias.rs": "real.rs"}},
+            "a", "../../shared/alias.rs", "shared/alias.rs")
+
+    def test_in_diff_an_external_lib_with_a_case_variant_module_is_refused(self):
+        module = "shared/foo.RS"
+        self.assertOutsideRefused(
+            {module: "pub fn f() -> u8 {\n    2\n}\n"},
+            {"crates/a/Cargo.toml": package_toml("a") + '\n[lib]\npath = "../../shared/lib.rs"\n',
+             "shared/lib.rs": "mod foo;\n" + LIB_A, module: "pub fn f() -> u8 {\n    1\n}\n"},
+            "a", "../../shared/lib.rs", "shared/lib.rs")
+
+    def test_in_diff_another_crates_external_lib_is_refused_on_a_narrow_run(self):
+        shared = "shared/b.rs"
+        self.assertOutsideRefused(
+            {shared: "pub fn b(x: u32) -> u32 {\n    x + 3\n}\n"},
+            {"crates/b/Cargo.toml": package_toml("b") + '\n[lib]\npath = "../../shared/b.rs"\n',
+             shared: "pub fn b(x: u32) -> u32 {\n    x + 2\n}\n"},
+            "b", "../../shared/b.rs", "shared/b.rs")
+
     def test_in_diff_a_mutants_crate_name_starting_with_a_dash_is_refused(self):
         repo = self.in_diff_repo(EDIT_A, base_crates=["a", "-b"])
         result, out = self.gate(repo, "--mutants", "a", "--in-diff", "base", whole=WHOLE_EDIT)

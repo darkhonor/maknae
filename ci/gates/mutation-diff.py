@@ -597,16 +597,22 @@ def target_paths(manifest):
     if not isinstance(manifest, dict):
         return []
     lib = manifest.get("lib")
-    found = [lib.get("path")] if isinstance(lib, dict) else []
+    found = [("[lib]", lib.get("path"))] if isinstance(lib, dict) else []
     for kind in ("bin", "test"):
         tables = manifest.get(kind)
         if isinstance(tables, list):
-            found += [t.get("path") for t in tables if isinstance(t, dict)]
-    return [p for p in found if isinstance(p, str)]
+            found += [(f"[[{kind}]]", t.get("path")) for t in tables if isinstance(t, dict)]
+    return [(kind, p) for kind, p in found if isinstance(p, str)]
 
 
 def non_rs_source(root, sha, crate, directory, paths):
-    for target in target_paths(parse_toml(show(root, sha, join(directory, "Cargo.toml")))):
+    targets = target_paths(parse_toml(show(root, sha, join(directory, "Cargo.toml"))))
+    for kind, target in targets:
+        resolved = script_path(directory, target) or target
+        if kind != "[[test]]" and not within(resolved, directory):
+            return (f"FAIL: --in-diff: {kind} path {target} of mutation crate {crate} resolves to {resolved}, "
+                    f"outside {directory}; a mutation crate's targets must live inside its directory")
+    for kind, target in targets:
         if not target.endswith(".rs"):
             shown = script_path(directory, target) or target
             return (f"FAIL: --in-diff: {shown} is compiled into mutation crate {crate} but does not end in .rs; "

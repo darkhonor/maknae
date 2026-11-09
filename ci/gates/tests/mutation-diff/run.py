@@ -544,6 +544,28 @@ class Unmappable(unittest.TestCase):
         self.commit("variant")
         self.assertAccepted()
 
+    def test_unmappable_a_target_outside_the_crate_directory_is_refused(self):
+        for kind, table in (("[lib]", '[lib]\npath = "../../shared/lib.rs"\n'),
+                            ("[[bin]]", '[[bin]]\nname = "beta"\npath = "../../shared/lib.rs"\n'),
+                            ("[lib]", '[lib]\npath = "../alpha/src/lib.rs"\n')):
+            with self.subTest(table=table):
+                self.put("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra="\n" + table))
+                self.put("shared/lib.rs", "pub fn s() {}\n")
+                self.commit("outside")
+                try:
+                    target = table.split('path = "')[1].split('"')[0]
+                    resolved = "shared/lib.rs" if "shared" in target else "crates/alpha/src/lib.rs"
+                    self.assertRefused(f"FAIL: --in-diff: {kind} path {target} of mutation crate beta resolves to "
+                                       f"{resolved}, outside crates/beta;", "must live inside its directory")
+                finally:
+                    self.git("reset", "-q", "--hard", "HEAD~1")
+
+    def test_unmappable_a_target_outside_a_non_mutation_crate_is_accepted(self):
+        self.put("crates/gamma/Cargo.toml", MANIFEST.format(n="gamma", extra='\n[lib]\npath = "../../shared/lib.rs"\n'))
+        self.put("shared/lib.rs", "")
+        self.commit("outside")
+        self.assertAccepted()
+
     def test_unmappable_an_rs_target_path_is_accepted(self):
         self.put("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra='\n[lib]\npath = "src/x.rs"\n'))
         self.put("crates/beta/src/x.rs", "pub fn x() {}\n")
