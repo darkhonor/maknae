@@ -142,7 +142,7 @@ jobs:
         run: python3 ci/gates/platform-gated.py check . && python3 ci/gates/tests/platform-gated/run.py
       - name: Gate — mutation gate wiring fixtures (#443)
         run: python3 ci/gates/tests/mutation-gate/run.py
-      - name: Gate — mutation-diff changed lines, classification and scope (#593)
+      - name: Gate — mutation-diff changed lines, classification and refusals (#593)
         run: python3 ci/gates/tests/mutation-diff/run.py
 
   gates:
@@ -296,8 +296,8 @@ jobs:
     # variable MUTATION_IN_CI is 'true'; otherwise it shows as SKIPPED in every
     # run, and the gates job prints the pause. The zero-missed obligation is
     # met locally (dev host + Rocky lane) and reported in the PR body.
-    # The label's in-diff run passes every mutation crate and the gate decides,
-    # so it runs even when affected.py selects none.
+    # The label's in-diff run passes every mutation crate, never --partial; the gate mutates
+    # only the PR's changed lines, so it runs even when affected.py selects none.
     if: >-
       ${{ always()
           && ((github.event_name == 'pull_request' && vars.MUTATION_IN_CI != 'true'
