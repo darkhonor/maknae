@@ -237,19 +237,20 @@ impl<K: KeySupply> Plane for LoopPlane<K> {
             return WriteOutcome::NotSent;
         };
         let diagnostics = &mut self.diagnostics;
-        write_outcome(
-            send_verb(
-                verb,
-                Some(content),
-                check_for(basis),
-                &self.transport,
-                &self.client,
-                &self.trust,
-                &mut |l| diagnostics.push(l),
-            )
-            .await
-            .map(WireOutcome::from),
+        let sent = send_verb(
+            verb,
+            Some(content),
+            check_for(basis),
+            &self.transport,
+            &self.client,
+            &self.trust,
+            &mut |l| diagnostics.push(l),
         )
+        .await;
+        if let Ok(crate::outcome::SentOutcome::NotAttempted { why }) = &sent {
+            diagnostics.push(format!("write not performed: {why}; nothing was written"));
+        }
+        write_outcome(sent.map(WireOutcome::from))
     }
     fn take_diagnostics(&mut self) -> Vec<String> {
         std::mem::take(&mut self.diagnostics)

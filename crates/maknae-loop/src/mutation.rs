@@ -949,16 +949,14 @@ pub struct WriteEnd {
     pub withheld: bool,
     pub version: Option<[i64; 7]>,
 }
-async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
+/// Everything an attempt does before its first effect; an `Err` is certain to have had none.
+async fn start_attempt(
     prepared: PreparedMutation,
     grant: MutationGrant,
-    stream: &mut S,
     cfg: &TransportConfig,
     cap: usize,
     written_at: Instant,
-    diag: &mut (dyn FnMut(String) + Send),
-) -> Result<Attempted, String> {
-    let reading = matches!(prepared.request, proto::Verb::Read { .. });
+) -> Result<(Worker, proto::MutationId, Instant), String> {
     let granted = match &prepared.request {
         proto::Verb::FsWrite {
             mode: WriteMode::Existing,
@@ -1061,12 +1059,53 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
             version: None,
         })
     });
-    let mut worker = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), initialize)
+    let worker = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), initialize)
         .await
         .map_err(|_| {
             "mutation directory verification timed out; no namespace effect started".to_string()
         })?
         .map_err(|e| e.to_string())??;
+    Ok((worker, id, deadline))
+}
+
+/// An attempt that ended before its first effect (ADR-0034 decision 7).
+fn no_effect(
+    reading: bool,
+    writing: bool,
+    why: &str,
+    diag: &mut (dyn FnMut(String) + Send),
+) -> Attempted {
+    diag(match (reading, writing) {
+        (true, _) => format!("read not performed: {why}"),
+        (_, true) => format!("write not performed: {why}; nothing was written"),
+        _ => format!("mutation not performed: {why}; nothing was changed"),
+    });
+    Attempted {
+        success: false,
+        content: None,
+        page: None,
+        stale: false,
+        withheld: !reading,
+        version: None,
+    }
+}
+
+async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
+    prepared: PreparedMutation,
+    grant: MutationGrant,
+    stream: &mut S,
+    cfg: &TransportConfig,
+    cap: usize,
+    written_at: Instant,
+    diag: &mut (dyn FnMut(String) + Send),
+) -> Result<Attempted, String> {
+    let reading = matches!(prepared.request, proto::Verb::Read { .. });
+    let writing = matches!(prepared.request, proto::Verb::FsWrite { .. });
+    let (mut worker, id, deadline) =
+        match start_attempt(prepared, grant, cfg, cap, written_at).await {
+            Ok(started) => started,
+            Err(why) => return Ok(no_effect(reading, writing, &why, diag)),
+        };
     loop {
         // The worker performs at most one effect. Dropping this waiter never
         // releases a worker to start a second effect without the durable ack.
@@ -1087,7 +1126,7 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
             } else {
                 outcome
             };
-            report(
+            let reported = report(
                 stream,
                 cap,
                 deadline,
@@ -1095,7 +1134,13 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
                 id,
                 next.next_index,
             )
-            .await?;
+            .await;
+            match reported {
+                Err(why) if next.next_index == 0 && outcome != ReportedFinish::Success => {
+                    return Ok(no_effect(reading, writing, &why, diag));
+                }
+                r => r?,
+            }
             if let Some(line) =
                 stop_line(outcome, reading, next.stale, next.withheld, next.next_index)
             {
@@ -2206,6 +2251,183 @@ mod tests {
         );
         assert!(!Path::new(&path).exists());
     }
+    async fn end_with(
+        prepared: PreparedMutation,
+        grant: MutationGrant,
+        cap: usize,
+        written_at: Instant,
+        acknowledged: bool,
+    ) -> (Result<WriteEnd, String>, Vec<String>) {
+        let cfg = TransportConfig::default();
+        let (mut client, server) = tokio::io::duplex(65536);
+        let receiver = acknowledged.then(|| acknowledge_all(server, proto::ATTEMPT_RESPONSE_MAX));
+        let mut lines = vec![];
+        let result = run_attempt(
+            prepared,
+            grant,
+            &mut client,
+            &cfg,
+            cap,
+            written_at,
+            &mut |l| lines.push(l),
+        )
+        .await
+        .map(|a| WriteEnd {
+            applied: a.success,
+            stale: a.stale,
+            withheld: a.withheld,
+            version: a.version.map(|v| v.key()),
+        });
+        drop(client);
+        if let Some(r) = receiver {
+            r.await.unwrap();
+        }
+        (result, lines)
+    }
+    fn assert_withheld(site: &str, got: (Result<WriteEnd, String>, Vec<String>), path: &str) {
+        let (end, lines) = got;
+        let end =
+            end.unwrap_or_else(|e| panic!("{site}: a pre-effect failure came back Err({e:?})"));
+        assert!(
+            !end.applied && !end.stale && end.withheld,
+            "{site}: {end:?}"
+        );
+        assert_eq!(
+            the_model_is_told(end),
+            maknae_agent::plane::WriteOutcome::Unavailable,
+            "{site}"
+        );
+        assert!(
+            lines.iter().any(|l| l.ends_with("; nothing was written")),
+            "{site}: {lines:?}"
+        );
+        assert!(!Path::new(path).exists(), "{site}");
+    }
+    async fn pre_effect(site: &str) {
+        let d = Fixture::new();
+        let path = d.path("pre-effect-sentinel");
+        let prep = || checked_write(path.clone(), WriteCheck::Unread);
+        let full = proto::ATTEMPT_REQUEST_MAX;
+        let (prepared, grant, cap, written_at, acknowledged) = match site {
+            "grant mismatch" => (
+                prep(),
+                create_grant(&d.path("other-leaf")),
+                full,
+                Instant::now(),
+                true,
+            ),
+            "grant limits" => {
+                let mut g = create_grant(&path);
+                g.limits.max_effects = 0;
+                (prep(), g, full, Instant::now(), true)
+            }
+            "expired before receipt" => (
+                prep(),
+                create_grant(&path),
+                full,
+                Instant::now() - Duration::from_secs(60),
+                true,
+            ),
+            "frame limit" => (prep(), create_grant(&path), 1, Instant::now(), true),
+            "content missing" => (
+                prepare_checked(write(path.clone()), None, WriteCheck::Unread).unwrap(),
+                create_grant(&path),
+                full,
+                Instant::now(),
+                true,
+            ),
+            "directory verification" => {
+                let file = d.path("a-file-not-a-directory");
+                std::fs::write(&file, b"x").unwrap();
+                let mut p = prep();
+                p.fd = Some(std::fs::File::open(&file).unwrap().into());
+                (p, create_grant(&path), full, Instant::now(), true)
+            }
+            "unacknowledged no-effect finish" => {
+                let p = prep();
+                std::fs::write(&path, b"collision").unwrap();
+                (p, create_grant(&path), full, Instant::now(), false)
+            }
+            other => panic!("{other}"),
+        };
+        let got = end_with(prepared, grant, cap, written_at, acknowledged).await;
+        if site == "unacknowledged no-effect finish" {
+            assert_eq!(std::fs::read(&path).unwrap(), b"collision");
+            std::fs::remove_file(&path).unwrap();
+        }
+        assert_withheld(site, got, &path);
+    }
+    #[tokio::test]
+    async fn a_mkdir_refused_before_any_effect_says_nothing_was_changed() {
+        let d = Fixture::new();
+        let path = d.path("mkdir-pre-effect");
+        let mut g = grant(MutationScope::Exact {
+            path: path.clone(),
+            effect: ReportedEffect::CreatedDirectory,
+        });
+        g.limits.max_depth = 0;
+        let (end, lines) = end_with(
+            prepare(mkdir(path.clone(), false), None).unwrap(),
+            g,
+            proto::ATTEMPT_REQUEST_MAX,
+            Instant::now(),
+            true,
+        )
+        .await;
+        let end = end.unwrap();
+        assert!(!end.applied, "{end:?}");
+        assert_eq!(
+            lines,
+            vec!["mutation not performed: invalid mutation grant limits; nothing was changed"]
+        );
+        assert!(!Path::new(&path).exists());
+    }
+    #[tokio::test]
+    async fn a_grant_that_does_not_match_answers_unavailable() {
+        pre_effect("grant mismatch").await;
+    }
+    #[tokio::test]
+    async fn invalid_grant_limits_answer_unavailable() {
+        pre_effect("grant limits").await;
+    }
+    #[tokio::test]
+    async fn a_grant_expired_on_receipt_answers_unavailable() {
+        pre_effect("expired before receipt").await;
+    }
+    #[tokio::test]
+    async fn a_frame_too_small_for_the_completion_answers_unavailable() {
+        pre_effect("frame limit").await;
+    }
+    #[tokio::test]
+    async fn a_write_without_content_answers_unavailable() {
+        pre_effect("content missing").await;
+    }
+    #[tokio::test]
+    async fn a_parent_that_fails_verification_answers_unavailable() {
+        pre_effect("directory verification").await;
+    }
+    #[tokio::test]
+    async fn an_unacknowledged_no_effect_finish_answers_unavailable() {
+        pre_effect("unacknowledged no-effect finish").await;
+    }
+    #[tokio::test]
+    async fn a_failure_after_the_first_effect_is_never_withheld() {
+        let d = Fixture::new();
+        let paths = vec![d.path("effect-parent"), d.path("effect-parent/child")];
+        let (result, _) = end_with(
+            prepare(mkdir(d.path("effect-parent/child"), true), None).unwrap(),
+            grant(MutationScope::Directories { paths }),
+            proto::ATTEMPT_REQUEST_MAX,
+            Instant::now(),
+            false,
+        )
+        .await;
+        assert!(result.is_err(), "{result:?}");
+        assert!(
+            Path::new(&d.path("effect-parent")).exists(),
+            "the first effect landed"
+        );
+    }
     #[test]
     fn prepare_checked_carries_the_check_into_the_prepared_mutation() {
         let d = Fixture::new();
@@ -2457,7 +2679,7 @@ mod tests {
             1,
         )
         .await;
-        assert!(result.is_err());
+        assert_eq!(result, Ok(false), "refused before any effect");
         assert!(!Path::new(&path).exists());
         let outside = Fixture::new();
         let (result, _) = acknowledged(
@@ -2699,7 +2921,7 @@ mod tests {
             TransportConfig::default(),
         )
         .await;
-        assert!(result.is_err());
+        assert_eq!(result, Ok(false), "refused before any effect");
         assert_eq!(std::fs::read(path).unwrap(), b"retained bytes");
         let path = d.path("wrong-action-sentinel");
         let (result, _) = acknowledged(
@@ -2711,7 +2933,7 @@ mod tests {
             TransportConfig::default(),
         )
         .await;
-        assert!(result.is_err());
+        assert_eq!(result, Ok(false), "refused before any effect");
         assert!(!Path::new(&path).exists());
     }
     #[tokio::test]
@@ -2966,7 +3188,7 @@ mod tests {
                 TransportConfig::default(),
             )
             .await;
-            assert!(result.is_err());
+            assert_eq!(result, Ok(false), "refused before any effect");
             assert!(reports.is_empty());
             assert!(!Path::new(&path).exists());
         }
@@ -2986,7 +3208,7 @@ mod tests {
             TransportConfig::default(),
         )
         .await;
-        assert!(result.is_err());
+        assert_eq!(result, Ok(false), "refused before any effect");
         assert!(!d.0.join("new-prefix").exists());
     }
     #[tokio::test]

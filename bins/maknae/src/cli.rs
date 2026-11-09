@@ -581,6 +581,7 @@ async fn round_trip(
             Ok(true)
         }
         SentOutcome::WriteDone { applied, .. } => Ok(applied),
+        SentOutcome::NotAttempted { why } => Err(why),
         SentOutcome::ReadDone { read: Some(r) } => {
             // Raw bytes, no trailing newline, no lossy conversion — a
             // non-UTF-8 file is legal content.

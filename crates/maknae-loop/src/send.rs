@@ -164,6 +164,48 @@ pub async fn send_verb(
     trust: &Arc<TrustBundle>,
     diag: &mut (dyn FnMut(String) + Send),
 ) -> Result<SentOutcome, String> {
+    let mutating = mutates(&request_verb);
+    match exchange(request_verb, content, check, transport, client, trust, diag).await {
+        Ok(sent) => Ok(sent),
+        Err(Failed::BeforeGrant(why)) => before_grant(mutating, why),
+        Err(Failed::After(why)) => Err(why),
+    }
+}
+
+enum Failed {
+    BeforeGrant(String),
+    After(String),
+}
+
+fn mutates(verb: &maknae_proto::Verb) -> bool {
+    matches!(
+        verb,
+        maknae_proto::Verb::FsWrite { .. }
+            | maknae_proto::Verb::FsDelete { .. }
+            | maknae_proto::Verb::FsMkdir { .. }
+    )
+}
+
+/// A mutation that failed before its grant arrived had no effect: the daemon never
+/// mutates, and the subject acts only on a grant (ADR-0009, ADR-0034 decision 7).
+fn before_grant(mutating: bool, why: String) -> Result<SentOutcome, String> {
+    if mutating {
+        Ok(SentOutcome::NotAttempted { why })
+    } else {
+        Err(why)
+    }
+}
+
+async fn exchange(
+    request_verb: maknae_proto::Verb,
+    content: Option<maknae_proto::Bytes>,
+    check: crate::mutation::WriteCheck,
+    transport: &maknae_config::TransportConfig,
+    client: &PlaneClient,
+    trust: &Arc<TrustBundle>,
+    diag: &mut (dyn FnMut(String) + Send),
+) -> Result<SentOutcome, Failed> {
+    let before = Failed::BeforeGrant;
     // Bound the client-side TLS handshake by the configured `handshake_timeout_ms`: a
     // process that accepts the Unix socket but never completes TLS must not hang the CLI
     // forever (it still fails non-zero).
@@ -174,12 +216,12 @@ pub async fn send_verb(
     .await;
     let mut stream = match connect {
         Err(_elapsed) => {
-            return Err(format!(
+            return Err(before(format!(
                 "TLS handshake to the daemon timed out after {}ms",
                 transport.handshake_timeout_ms
-            ))
+            )))
         }
-        Ok(r) => r.map_err(|e| e.to_string())?,
+        Ok(r) => r.map_err(|e| before(e.to_string()))?,
     };
 
     // ADR-0009: for a term that names an object, WE open it — as the subject, for
@@ -195,7 +237,7 @@ pub async fn send_verb(
             diag(line);
         }
         match (
-            prepared.descriptor().map_err(|e| e.to_string())?,
+            prepared.descriptor().map_err(|e| before(e.to_string()))?,
             stream.armer(),
         ) {
             (Some(fd), Some(armer)) => {
@@ -219,9 +261,11 @@ pub async fn send_verb(
         attempt: ATTEMPT_REQUEST_MAX,
         prompt: transport.prompt_max_bytes,
     };
-    let body =
-        encode_request_zeroizing(&request, request_caps.cap(class)).map_err(|e| e.to_string())?;
-    let written = send_request_frame(&mut stream, class, &body, transport).await?;
+    let body = encode_request_zeroizing(&request, request_caps.cap(class))
+        .map_err(|e| before(e.to_string()))?;
+    let written = send_request_frame(&mut stream, class, &body, transport)
+        .await
+        .map_err(before)?;
 
     let resp_body = await_reply(
         &mut stream,
@@ -229,13 +273,15 @@ pub async fn send_verb(
         reply_wait(&request.verb, transport),
         transport,
     )
-    .await?;
-    let response = decode_response(&resp_body).map_err(|e| e.to_string())?;
+    .await
+    .map_err(before)?;
+    let response = decode_response(&resp_body).map_err(|e| before(e.to_string()))?;
 
     match response.result {
         RespResult::Ok(Payload::MutationAttempt(grant)) => {
-            let prepared =
-                prepared.ok_or("protocol error: mutation grant for an ordinary request")?;
+            let prepared = prepared.ok_or_else(|| {
+                Failed::After("protocol error: mutation grant for an ordinary request".into())
+            })?;
             if matches!(prepared.request(), maknae_proto::Verb::Read { .. }) {
                 let read = crate::mutation::execute_read(
                     prepared,
@@ -245,12 +291,14 @@ pub async fn send_verb(
                     written,
                     diag,
                 )
-                .await?;
+                .await
+                .map_err(Failed::After)?;
                 return Ok(SentOutcome::ReadDone { read });
             }
             let end =
                 crate::mutation::execute(prepared, grant, &mut stream, transport, written, diag)
-                    .await?;
+                    .await
+                    .map_err(Failed::After)?;
             Ok(SentOutcome::WriteDone {
                 applied: end.applied,
                 stale: end.stale,
@@ -573,6 +621,49 @@ mod tests {
         assert_eq!(
             err,
             "request write to the daemon stalled for 5000ms (daemon not reading?)"
+        );
+    }
+
+    #[test]
+    fn a_mutation_that_fails_before_its_grant_answers_unavailable() {
+        use maknae_agent::plane::WriteOutcome;
+        use maknae_agent::wire::{write_outcome, WireOutcome};
+        let p = || "/sentinel-617".to_string();
+        for verb in [
+            maknae_proto::Verb::FsWrite {
+                path: p(),
+                content_length: 1,
+                mode: maknae_proto::WriteMode::Existing,
+                conversation: None,
+            },
+            maknae_proto::Verb::FsDelete {
+                path: p(),
+                recursive: false,
+            },
+            maknae_proto::Verb::FsMkdir {
+                path: p(),
+                parents: false,
+                components: vec![],
+            },
+        ] {
+            let sent = before_grant(
+                mutates(&verb),
+                "TLS handshake to the daemon timed out".into(),
+            );
+            assert_eq!(
+                write_outcome(sent.map(WireOutcome::from)),
+                WriteOutcome::Unavailable,
+                "{verb:?}"
+            );
+        }
+        let read = maknae_proto::Verb::Read {
+            path: p(),
+            conversation: None,
+            page: None,
+        };
+        assert_eq!(
+            before_grant(mutates(&read), "connection reset".into()).unwrap_err(),
+            "connection reset"
         );
     }
 

@@ -29,6 +29,9 @@ pub enum SentOutcome {
     ReadDone {
         read: Option<crate::mutation::ReadResult>,
     },
+    /// A mutation that failed before its grant arrived, so it had no effect; `why` is
+    /// for the user, never the model.
+    NotAttempted { why: String },
     /// The daemon refused, with the wire's own code and message (ADR-0019). `armed` is false, on a filesystem verb, iff the CLI delegated no descriptor, so no decision was made about the object.
     Refused {
         code: maknae_proto::ProtoErrCode,
@@ -42,6 +45,12 @@ impl From<SentOutcome> for maknae_agent::wire::WireOutcome {
         use maknae_agent::wire::{WireOutcome, WireRead};
         match sent {
             SentOutcome::Payload(p) => WireOutcome::Payload(p),
+            SentOutcome::NotAttempted { .. } => WireOutcome::WriteDone {
+                applied: false,
+                stale: false,
+                withheld: true,
+                version: None,
+            },
             SentOutcome::WriteDone {
                 applied,
                 stale,
@@ -165,6 +174,17 @@ mod tests {
         assert!(matches!(
             WireOutcome::from(SentOutcome::Payload(Payload::Pong)),
             WireOutcome::Payload(Payload::Pong)
+        ));
+        assert!(matches!(
+            WireOutcome::from(SentOutcome::NotAttempted {
+                why: "connection reset".into()
+            }),
+            WireOutcome::WriteDone {
+                applied: false,
+                stale: false,
+                withheld: true,
+                version: None
+            }
         ));
     }
 }

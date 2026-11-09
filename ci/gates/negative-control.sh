@@ -6277,8 +6277,18 @@ open(p, "w").write(s.replace(old, new))' "$f" "$2" "$3"; then
     '        let (path, fd) = opened.map_err(|mut e| {
             e.before_write = false;' \
     maknae-io mutation::tests::a_create_refused
+  expect_reject_because "uniform/a-pre-effect-attempt-failure-told-unknown-goes-red" \
+    "a_parent_that_fails_verification_answers_unavailable" cv_mutant crates/maknae-loop/src/mutation.rs \
+    '            Err(why) => return Ok(no_effect(reading, writing, &why, diag)),' \
+    '            Err(why) => return Err(why),' \
+    maknae-loop mutation::tests::a_parent_that_fails_verification
+  expect_reject_because "uniform/a-mutation-failing-before-its-grant-told-unknown-goes-red" \
+    "a_mutation_that_fails_before_its_grant_answers_unavailable" cv_mutant crates/maknae-loop/src/send.rs \
+    '        Ok(SentOutcome::NotAttempted { why })' \
+    '        Err(why)' \
+    maknae-loop send::tests::a_mutation_that_fails_before
 else
-  skipped=$((skipped+13))
+  skipped=$((skipped+15))
 fi
 
 # The skip count is REPORTED, because `$total` is environment-dependent: probes
