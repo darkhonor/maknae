@@ -36,6 +36,15 @@ pub struct Subject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     pub plane_uri_san: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_task_id: Option<String>,
+    /// `uid:<n>`, `agent:<id>` or `remote:<id>` (`maknae_proto::tasker_text`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tasker: Option<String>,
 }
 
 /// AU-3c: where the event occurred.
@@ -448,6 +457,10 @@ mod tests {
                 user: Some("alice".into()),
                 role: None,
                 plane_uri_san: Some("spiffe://d/plane/cli".into()),
+                agent: None,
+                task_id: None,
+                parent_task_id: None,
+                tasker: None,
             },
             action: "connect".into(),
             object: None,
@@ -691,6 +704,37 @@ mod tests {
     }
 
     #[test]
+    fn the_task_fields_are_canonical_and_omitted_when_absent() {
+        let s = canonical_json(&sample()).unwrap();
+        for key in ["agent", "task_id", "parent_task_id", "tasker"] {
+            assert!(!s.contains(&format!("\"{key}\"")), "{key}: {s}");
+        }
+        let mut rec = sample();
+        rec.subject.agent = Some("hobi".into());
+        rec.subject.task_id = Some("0f".repeat(16));
+        rec.subject.parent_task_id = Some("a0".repeat(16));
+        rec.subject.tasker = Some("uid:1000".into());
+        let s = canonical_json(&rec).unwrap();
+        let want = format!(
+            "\"subject\":{{\"agent\":\"hobi\",\"parent_task_id\":\"{}\",\"plane_uri_san\":\"spiffe://d/plane/cli\",\"task_id\":\"{}\",\"tasker\":\"uid:1000\",\"user\":\"alice\"}}",
+            "a0".repeat(16),
+            "0f".repeat(16)
+        );
+        assert!(s.contains(&want), "{s}");
+        let back: AuditRecord = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.subject.agent.as_deref(), Some("hobi"));
+        assert_eq!(back.subject.task_id, rec.subject.task_id);
+        assert_eq!(back.subject.parent_task_id, rec.subject.parent_task_id);
+        assert_eq!(back.subject.tasker.as_deref(), Some("uid:1000"));
+        let old = r#"{"user":"alice","plane_uri_san":null}"#;
+        let old: Subject = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            (old.agent, old.task_id, old.parent_task_id, old.tasker),
+            (None, None, None, None)
+        );
+    }
+
+    #[test]
     fn integrity_round_trips_empty() {
         let s = canonical_json(&sample()).unwrap();
         assert!(s.contains("\"integrity\""));
@@ -829,6 +873,10 @@ mod tests {
                     user: None,
                     role: None,
                     plane_uri_san: None,
+                    agent: None,
+                    task_id: None,
+                    parent_task_id: None,
+                    tasker: None,
                 },
                 action: "fs.read".into(),
                 object,

@@ -31,6 +31,7 @@ fn take_spare(spare: &mut Option<Spare>, conversation: &str, now: u64) -> Option
 fn frame_fits(verb: &Verb, cap: usize) -> bool {
     maknae_proto::encode_request_zeroizing(
         &maknae_proto::Request {
+            task: None,
             protocol_version: maknae_proto::PROTOCOL_VERSION,
             verb: verb.clone(),
         },

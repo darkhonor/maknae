@@ -37,6 +37,7 @@ enum Event {
     Migrate(u64, Option<[u8; 32]>, [u8; 32], Vec<u32>),
     Transition(u64, String),
     Released(u64, Vec<Released>),
+    Agents(u64, Vec<maknae_graph::identity::AgentChange>),
     Baseline(u64, Vec<String>),
     Sync(u64, Vec<String>),
 }
@@ -50,6 +51,7 @@ struct Recorder {
     fail_migrate: bool,
     fail_transition: bool,
     fail_released: bool,
+    fail_agents: bool,
     fail_baseline: bool,
     fail_sync: bool,
     store_at_released: Option<PathBuf>,
@@ -123,6 +125,15 @@ impl BootAudit for Recorder {
             self.store_bytes_at_released = Some(fs::read(p).unwrap());
         }
         ready(refuse(self.fail_released, "released"))
+    }
+
+    fn agents(
+        &mut self,
+        revision: u64,
+        changes: &[maknae_graph::identity::AgentChange],
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        self.events.push(Event::Agents(revision, changes.to_vec()));
+        ready(refuse(self.fail_agents, "agents"))
     }
 
     fn baseline(
@@ -229,6 +240,7 @@ impl Inputs {
 fn layer_at(label: &str, bindings: Option<&[u8]>, subjects: &[(u32, &str, &str)]) -> IdentityLayer {
     IdentityLayer {
         aliases: Default::default(),
+        agents: Default::default(),
         source: SOURCE.into(),
         label: label.into(),
         bindings_sha256: bindings.map(maknae_crypto::sha256),
@@ -2658,6 +2670,14 @@ impl BootAudit for Racer<'_> {
         self.inner.released(revision, released)
     }
 
+    fn agents(
+        &mut self,
+        revision: u64,
+        changes: &[maknae_graph::identity::AgentChange],
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        self.inner.agents(revision, changes)
+    }
+
     fn sync(
         &mut self,
         revision: u64,
@@ -4599,4 +4619,147 @@ async fn a_commit_whose_sync_base_contradicts_its_bindings_is_refused() {
     assert!(matches!(r, Err(StoreError::Identity(_))), "{r:?}");
     assert!(audit.events.is_empty());
     assert_eq!(fx.store(), before);
+}
+
+fn with_hobi(bindings: &[u8], subjects: &[(u32, &str, &str)]) -> IdentityLayer {
+    IdentityLayer {
+        agents: [("hobi".to_string(), 2001)].into(),
+        ..layer(Some(bindings), subjects)
+    }
+}
+
+fn hobi_enrolled() -> Vec<maknae_graph::identity::AgentChange> {
+    vec![maknae_graph::identity::AgentChange::Enrolled {
+        agent: "hobi".into(),
+        uid: 2001,
+    }]
+}
+
+const HOBI_BLOCK: &[u8] = br#"{"user":["op"]}"#;
+const HOBI_SUBJECTS: &[(u32, &str, &str)] = &[(501, "op", "user"), (2001, "hobi-svc", "user")];
+
+#[tokio::test]
+async fn a_boot_writes_its_agent_records_before_the_intent_and_a_failed_append_refuses() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let first = seeded_with(&fx, &k, layer(Some(HOBI_BLOCK), HOBI_SUBJECTS)).await;
+    let before = fx.store();
+    let edit = inputs_with(with_hobi(HOBI_BLOCK, HOBI_SUBJECTS));
+
+    let mut failing = Recorder {
+        fail_agents: true,
+        ..Recorder::default()
+    };
+    let (seen, sync_seen) = (peeked(&fx, &k), peeked_sync(&fx, &k));
+    let r = boot(
+        &fx.dir(),
+        &k,
+        checkpoint_of(&first),
+        &mut failing,
+        NOW,
+        &edit.boot(seen, sync_seen.as_ref()),
+    )
+    .await;
+    assert_eq!(r.unwrap_err(), StoreError::Audit("agents refused".into()));
+    assert_eq!(fx.store(), before);
+    assert_eq!(
+        failing.events,
+        vec![
+            Event::Checkpoint(1, first.digest, "verified".into()),
+            Event::Agents(2, hobi_enrolled()),
+        ]
+    );
+
+    let mut audit = Recorder::default();
+    let (seen, sync_seen) = (peeked(&fx, &k), peeked_sync(&fx, &k));
+    let r = boot(
+        &fx.dir(),
+        &k,
+        checkpoint_of(&first),
+        &mut audit,
+        NOW,
+        &edit.boot(seen, sync_seen.as_ref()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        audit.events,
+        vec![
+            Event::Checkpoint(1, first.digest, "verified".into()),
+            Event::Agents(2, hobi_enrolled()),
+            Event::Transition(2, "root-file".into()),
+            Event::Checkpoint(2, r.digest, "transitioned".into()),
+        ]
+    );
+    assert_ne!(fx.store(), before);
+}
+
+#[tokio::test]
+async fn a_commit_writes_its_agent_records_before_the_intent_and_a_failed_append_refuses() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let dir = fx.dir();
+    run(&dir, &k, None).await.0.unwrap();
+    let before = fx.store();
+    let next = next_graph(
+        2,
+        &inputs_with(with_hobi(
+            br#"{"user":["root"]}"#,
+            &[(0, "root", "user"), (2001, "hobi-svc", "user")],
+        )),
+    );
+
+    let mut failing = Recorder {
+        fail_agents: true,
+        ..Recorder::default()
+    };
+    let r = commit(&dir, &k, &next, &[], &[], &mut failing, INITIATOR_ROOT_FILE).await;
+    assert_eq!(r.unwrap_err(), StoreError::Audit("agents refused".into()));
+    assert_eq!(fx.store(), before);
+    assert_eq!(dir.store_revision(), 1);
+    assert_eq!(failing.events, vec![Event::Agents(2, hobi_enrolled())]);
+
+    let mut audit = Recorder::default();
+    let c = commit(&dir, &k, &next, &[], &[], &mut audit, INITIATOR_ROOT_FILE)
+        .await
+        .unwrap();
+    assert_eq!(
+        audit.events,
+        vec![
+            Event::Agents(2, hobi_enrolled()),
+            Event::Transition(2, "root-file".into()),
+            Event::Checkpoint(2, c.digest, "transitioned".into()),
+        ]
+    );
+    assert_ne!(fx.store(), before);
+}
+
+#[tokio::test]
+async fn a_seed_writes_its_agent_records_before_the_intent_and_a_failed_append_refuses() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let i = inputs_with(with_hobi(HOBI_BLOCK, HOBI_SUBJECTS));
+
+    let mut failing = Recorder {
+        fail_agents: true,
+        ..Recorder::default()
+    };
+    let dir = fx.dir();
+    let r = boot(
+        &dir,
+        &k,
+        None,
+        &mut failing,
+        NOW,
+        &i.boot(seen(&dir, &k, &i), sync_seen(&dir, &k, &i).as_ref()),
+    )
+    .await;
+    assert_eq!(r.unwrap_err(), StoreError::Audit("agents refused".into()));
+    assert!(!fx.file(STORE_FILE).exists());
+    assert_eq!(failing.events, vec![Event::Agents(1, hobi_enrolled())]);
+
+    let (r, events) = run_with(&dir, &k, None, &i).await;
+    r.unwrap();
+    assert_eq!(events[0], Event::Agents(1, hobi_enrolled()));
+    assert!(matches!(events[1], Event::Intent(1, _)), "{events:?}");
 }

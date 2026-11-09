@@ -4,7 +4,7 @@ use maknae_graph::record::{AttrValue, Attrs};
 use maknae_graph::schema::{CompiledNode, CompiledSet};
 
 #[rustfmt::skip]
-pub const ACTION_TERMS: [&str; 58] = [
+pub const ACTION_TERMS: [&str; 59] = [
     "liveness.ping",
     "admin.whoami", "admin.status", "admin.config.show", "admin.audit.tail", "admin.policy.reload",
     "admin.subject.list", "admin.subject.bind", "admin.subject.unbind", "admin.contain", "admin.release",
@@ -14,7 +14,7 @@ pub const ACTION_TERMS: [&str; 58] = [
     "session.new", "session.resume", "session.close", "session.delete", "session.list", "session.fork",
     "session.prompt", "session.cancel", "session.set_config_option", "session.set_mode", "session.load",
     "session.update", "session.request_permission", "session.elicit.create", "session.elicit.complete",
-    "session.compact",
+    "session.compact", "session.task",
     "fs.read", "fs.write", "fs.delete", "fs.move", "fs.list", "fs.stat", "fs.mkdir", "fs.link", "fs.chmod", "fs.chown",
     "terminal.create", "terminal.output", "terminal.wait_for_exit", "terminal.kill", "terminal.release", "terminal.input",
     "mcp.connect", "mcp.disconnect", "mcp.message", "mcp.tool.call", "mcp.resource.read", "mcp.prompt.get", "mcp.sampling.create",
@@ -156,7 +156,7 @@ mod tests {
             set.iter()
                 .filter(|c| c.kind == maknae_graph::kernel::TERM)
                 .count(),
-            60
+            61
         );
         assert_eq!(
             set.iter()

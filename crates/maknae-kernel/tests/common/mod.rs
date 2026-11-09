@@ -708,6 +708,7 @@ impl Fixture {
             no_baseline(),
             attempt_caps,
             Arc::clone(&self.conversations),
+            maknae_kernel::AgentAdmission::none(),
         );
         let task = tokio::spawn(async move {
             let _turn = match &turn {
@@ -717,6 +718,7 @@ impl Fixture {
             served.await
         });
         let body = maknae_proto::encode_request(&maknae_proto::Request {
+            task: None,
             protocol_version: maknae_proto::PROTOCOL_VERSION,
             verb,
         })

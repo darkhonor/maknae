@@ -19,21 +19,13 @@ impl NssAccounts {
     };
 }
 
-/// getpwnam(3)'s "not found" spellings are `Ok(None)`, `ENOENT`, `ESRCH`, `EBADF`
-/// and `EPERM`; every other errno, `ERANGE` and errno 0 included, is a failed lookup.
 fn found<T>(r: Result<Option<T>, Errno>) -> Result<Option<T>, String> {
-    match r {
-        Ok(found) => Ok(found),
-        Err(Errno::ENOENT | Errno::ESRCH | Errno::EBADF | Errno::EPERM) => Ok(None),
-        Err(e) => Err(format!("account lookup failed (errno {})", e as i32)),
-    }
+    maknae_io::not_found_is_none(r)
+        .map_err(|e| format!("account lookup failed (errno {})", e as i32))
 }
 
-// nix reads errno on a non-zero return; macOS getpwnam_r returns ERANGE without
-// setting it, so a stale not-found errno must not survive to the classification.
 fn user(name: &str) -> Result<Option<User>, String> {
-    Errno::clear();
-    found(User::from_name(name))
+    found(maknae_io::user_by_name(name))
 }
 
 /// An account's uid, `Ok(None)` when it does not exist, classified as every lookup here is.
@@ -42,8 +34,7 @@ pub fn account_uid(name: &str) -> Result<Option<u32>, String> {
 }
 
 fn group(gid: nix::unistd::Gid) -> Result<Option<Group>, String> {
-    Errno::clear();
-    found(Group::from_gid(gid))
+    found(maknae_io::group_by_gid(gid.as_raw()))
 }
 
 fn daemon_members(daemon: &str, g: Option<Group>) -> Result<Vec<String>, String> {

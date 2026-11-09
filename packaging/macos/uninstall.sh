@@ -46,6 +46,7 @@ done
 rm -f /usr/local/bin/maknaed /usr/local/bin/maknae /usr/local/bin/maknae-egress
 rm -rf /usr/local/var/run/maknae /usr/local/var/log/maknae /usr/local/share/maknae
 rm -rf /usr/local/var/run/maknae-egress /usr/local/var/log/maknae-egress
+rm -rf /usr/local/var/run/maknae-agent
 rm -f /Library/Logs/maknae-policy-sync.log
 rm -rf /usr/local/lib/maknae
 
@@ -116,6 +117,16 @@ if [ -f "$RECEIPT" ]; then
             echo "KEEP: /Groups/$name has gid $have_g, receipt says $want_g — re-numbered, leaving it" >&2
         fi
     done
+    want_g="$(receipt_val MaknaeAgentsGID || true)"
+    mine_g="$(receipt_val MaknaeAgentsGIDCreatedByUs || echo false)"
+    have_g="$(dscl . -read /Groups/maknae-agents PrimaryGroupID 2>/dev/null | awk '{print $2}')" || true
+    if [ "$mine_g" != "true" ]; then
+        echo "KEEP: /Groups/maknae-agents pre-existed this install — not ours to delete" >&2
+    elif [ -n "${have_g:-}" ] && [ "$have_g" = "$want_g" ]; then
+        dscl . -delete /Groups/maknae-agents || :
+    elif [ -n "${have_g:-}" ]; then
+        echo "KEEP: /Groups/maknae-agents has gid $have_g, receipt says $want_g — re-numbered, leaving it" >&2
+    fi
     # The `maknae` OPERATOR group is deliberately left alone: an operator may have
     # been added to it by hand and other tooling may rely on it.
     rm -f "$RECEIPT"; rmdir /usr/local/var/db/maknae 2>/dev/null || :

@@ -142,6 +142,53 @@ pub(crate) async fn gather(gate: &FactsGate, admission: Admission, uid: u32) -> 
     }
 }
 
+/// The channel a session was admitted on; an agent's session ends with its leaf.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionChannel {
+    Client,
+    Agent {
+        agent: maknae_config::AgentId,
+        leaf_expires: Instant,
+    },
+}
+
+impl SessionChannel {
+    /// The channel a connection admitted under `admission` opens; a leaf already past its
+    /// `not_after` opens none.
+    pub fn of(
+        admission: Admission,
+        peer: &maknae_vault::ChannelPeer,
+    ) -> Result<SessionChannel, Ending> {
+        use maknae_vault::ChannelPeer;
+        match (admission, peer) {
+            (Admission::MaknaeGroupMember, ChannelPeer::Certless | ChannelPeer::Certified(_)) => {
+                Ok(SessionChannel::Client)
+            }
+            (Admission::MaknaeGroupMember, ChannelPeer::Agent { .. }) => {
+                Err(Ending::Denied(crate::authz::DenyCause::NotEnrolled))
+            }
+            (
+                Admission::EnrolledAgent,
+                ChannelPeer::Agent {
+                    agent, not_after, ..
+                },
+            ) => not_after
+                .duration_since(std::time::SystemTime::now())
+                .ok()
+                .filter(|left| !left.is_zero())
+                .and_then(|left| Instant::now().checked_add(left))
+                .map(|leaf_expires| SessionChannel::Agent {
+                    agent: agent.clone(),
+                    leaf_expires,
+                })
+                .ok_or(Ending::LeafExpired),
+            (Admission::EnrolledAgent, ChannelPeer::Certless | ChannelPeer::Certified(_)) => {
+                Err(Ending::Denied(crate::authz::DenyCause::NotEnrolled))
+            }
+        }
+    }
+}
+
 /// One admitted client connection, held only daemon-side and dropped with it.
 /// `user` is the name admitted at connect; every request decides on its own gather.
 pub struct SessionRecord {
@@ -150,6 +197,7 @@ pub struct SessionRecord {
     pub session_id: u64,
     pub lane: maknae_security::Lane,
     pub admission: Admission,
+    pub channel: SessionChannel,
     pub sender: SenderVerdict,
     pub account: AccountFact,
     pub seq: Seq,
@@ -157,6 +205,8 @@ pub struct SessionRecord {
     pub lifetime: Duration,
     pub platform: Platform,
     pub(crate) ending: OnceLock<Ending>,
+    /// The `task_id` and `tasker` of the task the session's request cited, once resolved.
+    pub(crate) task: OnceLock<(String, String)>,
 }
 
 impl SessionRecord {
@@ -164,7 +214,7 @@ impl SessionRecord {
     pub fn end(&self, e: Ending) {
         match e {
             Ending::Disconnect => {}
-            Ending::Idle | Ending::Lifetime | Ending::Denied(_) => {
+            Ending::Idle | Ending::Lifetime | Ending::LeafExpired | Ending::Denied(_) => {
                 let _ = self.ending.set(e);
             }
         }
@@ -174,8 +224,46 @@ impl SessionRecord {
         self.ending.get().cloned().unwrap_or(Ending::Disconnect)
     }
 
-    pub fn expired(&self) -> bool {
-        self.opened_at.elapsed() > self.lifetime
+    /// Why the session may serve no more: the visit clock or the leaf, whichever ran out first.
+    pub fn expiry(&self) -> Option<Ending> {
+        let now = Instant::now();
+        let visit = self
+            .opened_at
+            .checked_add(self.lifetime)
+            .filter(|end| now > *end)
+            .map(|end| (end, Ending::Lifetime));
+        let leaf = match &self.channel {
+            SessionChannel::Client => None,
+            SessionChannel::Agent { leaf_expires, .. } => {
+                (now > *leaf_expires).then_some((*leaf_expires, Ending::LeafExpired))
+            }
+        };
+        match (visit, leaf) {
+            (Some((v, visit)), Some((l, leaf))) => Some(if l < v { leaf } else { visit }),
+            (one, other) => one.or(other).map(|(_, ending)| ending),
+        }
+    }
+
+    pub(crate) fn cite(&self, task: &crate::handler::TaskStamp) {
+        let _ = self.task.set((task.id.to_string(), task.tasker.clone()));
+    }
+
+    /// Stamps the session's agent and, once resolved, its cited task on `rec`.
+    pub(crate) fn stamp(&self, rec: &mut maknae_audit_append::AuditRecord) {
+        if let Some(agent) = self.agent() {
+            rec.subject.agent = Some(agent.as_str().to_string());
+        }
+        if let Some((id, tasker)) = self.task.get() {
+            rec.subject.task_id = Some(id.clone());
+            rec.subject.tasker = Some(tasker.clone());
+        }
+    }
+
+    pub fn agent(&self) -> Option<&maknae_config::AgentId> {
+        match &self.channel {
+            SessionChannel::Client => None,
+            SessionChannel::Agent { agent, .. } => Some(agent),
+        }
     }
 
     #[cfg(any(test, feature = "hermetic-test-seam"))]
@@ -186,6 +274,7 @@ impl SessionRecord {
             session_id: 1,
             lane: maknae_security::Lane::Local,
             admission: Admission::MaknaeGroupMember,
+            channel: SessionChannel::Client,
             sender: SenderVerdict::default(),
             account: AccountFact::NotChecked(crate::session_facts::NotCheckedWhy::Platform),
             seq: Seq::new(),
@@ -193,6 +282,7 @@ impl SessionRecord {
             lifetime: Duration::MAX,
             platform: Platform::of_build(),
             ending: OnceLock::new(),
+            task: OnceLock::new(),
         }
     }
 
@@ -282,7 +372,7 @@ mod tests {
             let got = ask(&g).await;
             assert_eq!(got, Facts::unanswered("session fact lookup timed out"));
             assert_eq!(
-                crate::authz::revalidate(4242, 4242, &got),
+                crate::authz::revalidate(Admission::MaknaeGroupMember, 4242, 4242, &got),
                 crate::authz::Revalidation::Deny(DenyCause::Infrastructure(
                     crate::authz::FactSource::SessionFacts
                 ))
@@ -354,12 +444,12 @@ mod tests {
     fn a_session_expires_only_after_its_lifetime() {
         let mut s = SessionRecord::for_test(1, None).with_session_id(9);
         assert_eq!(s.session_id, 9);
-        assert!(!s.expired());
+        assert_eq!(s.expiry(), None);
         s.lifetime = Duration::ZERO;
         std::thread::sleep(Duration::from_millis(2));
-        assert!(s.expired());
+        assert_eq!(s.expiry(), Some(Ending::Lifetime));
         s.lifetime = Duration::from_secs(3600);
-        assert!(!s.expired());
+        assert_eq!(s.expiry(), None);
     }
 
     #[test]

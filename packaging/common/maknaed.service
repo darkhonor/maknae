@@ -17,7 +17,8 @@ User=_maknae
 # it can chgrp its own UDS to `maknae` WITHOUT CAP_CHOWN (the daemon drops all
 # caps). This is the SOLE membership mechanism (no on-disk membership, §5.3).
 # Superseded by systemd socket activation, #92.
-SupplementaryGroups=maknae
+# #609: `maknae-agents` likewise lets it chgrp the agent UDS.
+SupplementaryGroups=maknae maknae-agents
 ExecStart=/usr/bin/maknaed
 ExecReload=/usr/bin/kill -HUP $MAINPID
 # #240: a permitted session.prompt holds its handler for up to egress.deadline_ms
@@ -57,7 +58,7 @@ LoadCredentialEncrypted=maknaed-graph-key:/etc/maknae/private/maknaed-graph-key.
 # enforces prose. The nearest one to this unit is CREDENTIALS_DIRECTORY, where
 # systemd places the credentials loaded immediately above.
 UnsetEnvironment=HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy VAULT_ADDR VAULT_TOKEN VAULT_SKIP_VERIFY VAULT_CACERT VAULT_CAPATH VAULT_CLIENT_CERT VAULT_CLIENT_KEY VAULT_NAMESPACE SSL_CERT_FILE SSL_CERT_DIR
-RuntimeDirectory=maknae
+RuntimeDirectory=maknae maknae-agent
 RuntimeDirectoryMode=0751
 StateDirectory=maknae maknae/conversations
 StateDirectoryMode=0700

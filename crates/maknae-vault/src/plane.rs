@@ -1,5 +1,7 @@
 //! The two planes. Never hardcode a bare `maknae`/`maknaed` string; derive from here (spec §3 tri-naming).
 
+use crate::agent_enroll::AgentId;
+
 /// Which plane a client acts as.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Plane {
@@ -34,6 +36,10 @@ impl Plane {
         };
         format!("spiffe://{trust_domain}/plane/{plane}")
     }
+}
+
+pub fn agent_uri_san(trust_domain: &str, agent: &AgentId) -> String {
+    format!("spiffe://{trust_domain}/plane/agent/{}", agent.as_str())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -147,7 +147,7 @@ if [ -n "$lib_lexed" ]; then
         }
       }
       rest = text; off = 0
-      split("decide_loaded_cited decide_loaded_with_role GRANTABLE_ACTIONS SUBJECT_UID RESOURCE_PATH Decided ActionGrants Grant DestinationGrants SubjectGrants SubjectEntry SubjectActionSet expand RESOURCE_CONVERSATION_OWNER RESOURCE_CONVERSATION_STATE RESOURCE_CONVERSATION_EXTENDS CONVERSATION_ACTIVE CONVERSATION_UNKNOWN CONVERSATION_ERROR EXTENDS_RETRY EXTENDS_ADVANCE EXTENDS_REWRITE", names, " ")
+      split("decide_loaded_cited decide_loaded_with_role GRANTABLE_ACTIONS SUBJECT_UID RESOURCE_PATH Decided ActionGrants Grant DestinationGrants SubjectGrants SubjectEntry SubjectActionSet AgentUids AgentTaskers SubjectOrigin expand RESOURCE_CONVERSATION_OWNER RESOURCE_CONVERSATION_STATE RESOURCE_CONVERSATION_EXTENDS CONVERSATION_ACTIVE CONVERSATION_UNKNOWN CONVERSATION_ERROR EXTENDS_RETRY EXTENDS_ADVANCE EXTENDS_REWRITE", names, " ")
       for (k in names) allowed[tolower(names[k])] = 1
       while (match(rest, /(^|[^A-Za-z0-9_])decide::[A-Za-z_][A-Za-z0-9_]*/)) {
         name = substr(rest, RSTART, RLENGTH); sub(/^.*decide::/, "", name)
@@ -250,7 +250,7 @@ if [ -n "$decide_lexed" ] && extract decide_loaded_cited "$decide_lexed"; then
         if (advl >= mcl) out("Role::Adversary must precede every class arm in decide_loaded_cited")
         if (tx[advl] ~ /^[[:space:]]*Role::Adversary[[:space:]]*if[[:space:]]/) out("the Role::Adversary arm in decide_loaded_cited must not carry a guard")
 
-        want = "pub(crate)fndecide_loaded_cited(lp:&LoadedPolicy,principal:&maknae_config::Principal,req:&SecRequest,)->Decided{letundecided=|verdict|Decided{verdict,role:None,cited:None,};letuid:Option<u32>=matchreq.subject.0.get(SUBJECT_UID){None=>None,Some(AttrValue::Int(i))=>matchu32::try_from(*i){Ok(u)=>Some(u),Err(_)=>returnundecided(Verdict::Indeterminate),},Some(_)=>returnundecided(Verdict::Indeterminate),};letSome(uid)=uidelse{returnundecided(Verdict::Indeterminate);};ifclass_of(&req.action.0)==Some(Class::Kernel){returnundecided(kernel_decided(req));}"
+        want = "pub(crate)fndecide_loaded_cited(lp:&LoadedPolicy,principal:&maknae_config::Principal,req:&SecRequest,)->Decided{letundecided=|verdict|Decided{verdict,role:None,cited:None,};letuid:Option<u32>=matchreq.subject.0.get(SUBJECT_UID){None=>None,Some(AttrValue::Int(i))=>matchu32::try_from(*i){Ok(u)=>Some(u),Err(_)=>returnundecided(Verdict::Indeterminate),},Some(_)=>returnundecided(Verdict::Indeterminate),};letSome(uid)=uidelse{returnundecided(Verdict::Indeterminate);};ifclass_of(&req.action.0)==Some(Class::Kernel){returnundecided(kernel_decided(req));}ifletSome(reason)=channel_refusal(&lp.agents,uid,req){returnundecided(Verdict::Deny{reason});}"
         got = ""
         for (i = 1; i < rfl; i++) { t = tx[i]; gsub(/[[:space:]]/, "", t); got = got t }
         if (got != want) {

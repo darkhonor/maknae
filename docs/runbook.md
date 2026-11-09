@@ -13,7 +13,7 @@ the daemon + CLI round-trip arrives in later stages.
 
 ### Prerequisites
 
-- The Vault PKI is applied (`deploy/vault-pki/`) and your Vault is reachable.
+- Your Vault holds the Maknae PKI (root and intermediate mounts, the `maknae-kernel` role and the `maknaed` AppRole) and is reachable. `deploy/vault-pki/` is one way to create them; Maknae does not require it.
 - `aws-lc-rs` FIPS builds on the host (verified on macOS/aarch64 and Linux).
 
 ### 1. Lay out the config dir
@@ -37,7 +37,7 @@ vault:
   addr: https://vault.example.internal:8200
   insecure_plaintext_secret_path: <your home>/.maknae/maknaed-secret-id   # absolute
 core:
-  deployment_id: <the SAME value you passed to `terraform apply -var deployment_id=…`>
+  deployment_id: <the trust domain your PKI roles admit in spiffe://<deployment_id>/plane/…; with deploy/vault-pki, its deployment_id>
 ```
 
 ```bash
@@ -207,9 +207,11 @@ Certificates and signatures follow `vault.plane_key`: ML-DSA-87 by default.
 ### Switching the plane key algorithm
 
 `vault.plane_key` (in `/etc/maknae/maknae.yaml` and each user's `maknae.yaml`) must equal
-`deploy/vault-pki`'s `plane_key_algorithm`. To switch a deployment:
+the key type of your Vault's PKI roles (with `deploy/vault-pki`, its `plane_key_algorithm`).
+To switch a deployment:
 
-1. Re-apply the PKI with the new `plane_key_algorithm`. The root and intermediate carry
+1. Rebuild the PKI hierarchy and its roles with the new key type. With `deploy/vault-pki`,
+   re-apply it with the new `plane_key_algorithm`; the root and intermediate carry
    `prevent_destroy`, so moving an existing hierarchy is a deliberate rebuild (see
    `deploy/vault-pki/README.md`, "Upgrading an existing PKI").
 2. Re-run `maknae enroll --plane-key <value>` on each host: it refreshes the CA pins and writes
@@ -218,7 +220,7 @@ Certificates and signatures follow `vault.plane_key`: ML-DSA-87 by default.
 
 A mismatch fails closed at the first mint: Vault refuses the CSR, for example `pki/sign
 rejected: Vault returned 400: role requires keys of type ec (check that vault.plane_key ml-dsa-87
-matches deploy/vault-pki's plane_key_algorithm, and that Vault is 2.2.0 or later for ml-dsa-87)`. A plane chained to a
+matches the key type of the Vault PKI role (key_type/key_bits), and that Vault is 2.2.0 or later for ml-dsa-87)`. A plane chained to a
 different CA fails the pinned chain at the handshake.
 
 ### Teardown
@@ -303,6 +305,8 @@ sudo mkdir -p /usr/local/var/run/maknae
 sudo chown "$(whoami)":maknae /usr/local/var/run/maknae
 sudo chmod 0750 /usr/local/var/run/maknae
 ```
+
+On a host mode `maknaed` also binds the agent socket, `transport.agent_socket_path`, group-owned by `maknae-agents`, and refuses to start when that group does not exist. For a manual run, create the group (`sudo groupadd --system maknae-agents`, or `sudo dseditgroup -o create maknae-agents` on macOS), add your account to it so the daemon can group-own the socket, and create the directory the same way with group `maknae-agents`: `/run/maknae-agent` on Linux, `/usr/local/var/run/maknae-agent` on macOS.
 
 Point `maknae.yaml`'s `transport.socket_path` at whichever of these you created (or leave
 the default and use `/run/maknae/maknaed.sock` on Linux).
@@ -481,15 +485,15 @@ canonical-sorted — `maknae-audit-append/src/record.rs` — not declaration ord
 ### 7. Grants, destinations and subjects (`authz.yaml`)
 
 Three additive keys govern what a role, and with `subjects:` an individual account, may DO beyond the built-in rules. The packaged
-`authz.yaml` grants `admin` five administrative terms and the five session terms, and allowlists nothing: no prompt is permitted
+`authz.yaml` grants `admin` five administrative terms, and both `admin` and `user` the five conversation terms and `session.task`; it allowlists nothing: no prompt is permitted
 until you write a `destinations:` entry.
 
 ```yaml
 roles:                       # #162: per-role action grants; deny beats allow inside a role
   admin:
-    allow: ["admin.status", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.release", "session.prompt", "session.new", "session.close", "session.list", "session.delete"]   # as packaged
+    allow: ["admin.status", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.release", "session.prompt", "session.new", "session.close", "session.list", "session.delete", "session.task"]   # as packaged
   user:
-    allow: ["session.prompt", "session.new", "session.close", "session.list", "session.delete"]
+    allow: ["session.prompt", "session.new", "session.close", "session.list", "session.delete", "session.task"]   # as packaged
 destinations:                # #172: per-role egress allowlist for session.prompt
   user:
     allow: ["provider:openai"]   # provider:<name>, an authorized provider's name (configuration §6.1)
@@ -498,7 +502,7 @@ destinations:                # #172: per-role egress allowlist for session.promp
 - **Which terms a role may hold.** `admin`: `admin.status`, `admin.config.show`,
   `admin.subject.list`, `admin.baseline.show`, `admin.baseline.accept`,
   `admin.contain`, `admin.release`, `session.prompt`, `session.new`, `session.close`,
-  `session.list` and `session.delete`. `user`: the five `session.*` terms — writing an `admin.*` term under `user` refuses at boot, naming both the role and
+  `session.list`, `session.delete` and `session.task`. `user`: the six `session.*` terms — writing an `admin.*` term under `user` refuses at boot, naming both the role and
   the term. `guest` and `adversary` are structural and take no grants; a `roles:` or
   `destinations:` key naming them refuses at boot too.
 - **`destinations:` grammar.** Allow-only (a `deny:` key refuses at load, so it cannot be
@@ -620,6 +624,10 @@ is in its role's `destinations:`. An `actions:` entry is a complete list: an act
 limited family that its `allow` does not name is refused, so an entry with only `deny`
 refuses every limited action.
 
+An enrolled Agent Daemon's limits never go here: they live in its own
+`/etc/maknae/agents/<id>/policy.yaml`, in the same grammar, and a `subjects:` entry naming an
+enrolled agent's account refuses the reload ([Enroll an Agent Daemon](#enroll-an-agent-daemon)).
+
 ### What it proves
 
 - **Server-authenticated TLS** — the daemon's `spiffe://<deployment_id>/plane/kernel`
@@ -693,7 +701,7 @@ Prove Maknae works as an agent on a **packaged** Linux install. An operator enro
 ### Prerequisites
 
 - **RHEL / Rocky 10**, SELinux enforcing, **with a TPM2** (a vTPM on a VM). Enroll refuses without a working `systemd-creds --with-key=tpm2` round-trip; the TPM2 seals both the daemon's credential and the Egress Daemon's sealing key. fapolicyd may be active. On RHEL 9, enroll is expected to work but has not been run live there, nor has enroll → serve (`packaging/rpm/README.md`).
-- **Vault with `deploy/vault-pki` applied** (`terraform apply -var 'deployment_id=<id>'`). This creates the AppRole mount `maknae-approle` with the one AppRole `maknaed` and its policy, the PKI mounts, the **KV v2** mount `maknae-kv`, the userpass mount `maknae-userpass`, the `maknae-user` policy, one userpass user per entry in `maknae_users`, an identity entity `maknae-<user>` for each, and the group `maknae-users` that grants them the policy. Each user's keys live under `user_prefix` (default `maknae/users`), at `maknae-kv/data/maknae/users/<user>/…`, which only that user's login may read or write (`deploy/vault-pki/main.tf`). Enroll creates none of these; it expects them.
+- **Vault holding Maknae's objects:** the AppRole mount `maknae-approle` with the one AppRole `maknaed` and its policy, the PKI mounts, the **KV v2** mount `maknae-kv`, the userpass mount `maknae-userpass`, the `maknae-user` policy, one userpass user per local user, an identity entity `maknae-<user>` for each, and the group `maknae-users` that grants them the policy. Each user's keys live under `user_prefix` (default `maknae/users`), at `maknae-kv/data/maknae/users/<user>/…`, which only that user's login may read or write. Enroll creates none of these; it expects them. `deploy/vault-pki` is one way to create them (`terraform apply -var 'deployment_id=<id>'`, `deploy/vault-pki/main.tf`); a deployment that manages Vault its own way creates the same objects.
 - **You are a Vault user with a password set** ([first-provider step 1](first-provider.md#1-create-the-user-in-vault)): the operator who enrolls is also the user who holds the conversation.
 - **An operator Vault token carrying the `maknae-enroll` policy** (`vault token create -policy=maknae-enroll`). Without it, every enroll call returns 403.
 - **The Vault CA** as a PEM file on the host.
@@ -732,7 +740,7 @@ sudo maknae enroll \
 - **Operator token:** you are prompted for it; `--token-file <path>` reads it from a file instead. `VAULT_TOKEN` is scrubbed from the environment and ignored.
 - **Run it through `sudo`.** Bare root is refused, because enroll takes the operator's identity from `SUDO_UID`/`SUDO_USER`.
 - **Run it from an unconfined session.** On SELinux, `sudo su -l <operator>` from an account mapped to `staff_u` lands in `sysadm_r:sysadm_t`, which is denied `/dev/tpmrm0`, and enroll's seal check fails with `no hardware root of trust available`. Run enroll from a session whose `id -Z` shows `unconfined_u`, such as a direct login as an operator on the default `unconfined_u` mapping. An operator mapped to a confined SELinux user is not supported for enrollment.
-- **The Vault layout flags.** `--userpass-mount` (default `maknae-userpass`), `--kv-mount` (default `maknae-kv`), `--user-prefix` (default `maknae/users`) and `--plane-key` (default `ml-dsa-87`) must equal Terraform's `userpass_mount`, `kv_mount_path`, `user_prefix` and `plane_key_algorithm` (step 4). Enroll writes `--plane-key` into `vault.plane_key` in both `maknae.yaml` files; `ml-dsa-87` needs a Vault 2.2.0+ PKI.
+- **The Vault layout flags.** `--userpass-mount` (default `maknae-userpass`), `--kv-mount` (default `maknae-kv`), `--user-prefix` (default `maknae/users`) and `--plane-key` (default `ml-dsa-87`) must equal your Vault's userpass mount, KV mount, user prefix and PKI key type (with `deploy/vault-pki`: `userpass_mount`, `kv_mount_path`, `user_prefix` and `plane_key_algorithm`) (step 4). Enroll writes `--plane-key` into `vault.plane_key` in both `maknae.yaml` files; `ml-dsa-87` needs a Vault 2.2.0+ PKI.
 - **What enroll does:**
   - Mints `maknaed`'s SecretID (the only AppRole) and seals it to the TPM2 (`/etc/maknae/private/maknaed-secret-id.cred`, `root:root 0400`). A re-enroll rotates it.
   - Generates the Egress Daemon's sealing key pair when none is in place: the private key is sealed to the TPM2 at `/etc/maknae/private/maknae-egress-seal-key.cred` (`root:root 0400`), and the public key is published as `seal.pub` (`/etc/pki/maknae/seal.pub` on the Red Hat family, `/etc/ssl/maknae/seal.pub` on the Debian family), where every user's CLI reads it. On a first enroll it prints `` Generated the Egress Daemon's sealing key and published its public key at {path}. An Egress Daemon that is already running still holds the previous key: restart it with `sudo {restart}` ``, with `{restart}` = `systemctl try-restart maknae-egress.service`; on a re-enroll it prints `Kept the Egress Daemon's sealing key and its published public key; pass --rotate-seal-key to replace them`.
@@ -757,7 +765,7 @@ It closes with `` Log out and back in (or run `newgrp maknae`), then run `maknae
 
 A host enrolled before per-user providers (#153) carries the removed AppRoles' credentials. In this order:
 
-1. **Apply the current `deploy/vault-pki` Terraform first.** It deletes the `maknae` and `maknae-egress` AppRoles, and creates the userpass mount, the `maknae-user` policy and the users. Every SecretID minted for the deleted roles dies with them.
+1. **Bring Vault to the current layout first.** Delete the `maknae` and `maknae-egress` AppRoles, and create the userpass mount, the `maknae-user` policy and the users; with `deploy/vault-pki`, applying the current Terraform does both. Every SecretID minted for the deleted roles dies with them.
 2. **Re-enroll** with step 3's command. Enroll mints only `maknaed`'s SecretID now, rotating it, and generates the sealing key pair.
 3. **Delete the leftovers by hand.** Enroll does not remove them, and nothing reads them:
 
@@ -792,7 +800,7 @@ It refuses while any file carries the key, whether `maknae.yaml` or a `config.d/
 
 Plane leaves now carry `spiffe://<deployment_id>/plane/{kernel,cli}` URI-SANs, and `deployment_id` must be a valid SPIFFE trust domain: at most 255 bytes of `[a-z0-9._-]`, at least one of `[a-z0-9]`. Enroll and the daemon refuse any other value. In this order:
 
-1. **Apply the current `deploy/vault-pki` Terraform.** The `maknae-kernel` and `maknae-cli` roles accept only the `spiffe://` SAN and issue leaves with `DigitalSignature` key usage. If `deployment_id` has uppercase letters or other characters outside the grammar, change it in Terraform and in `maknae.yaml` together.
+1. **Bring the PKI roles to the current layout.** The `maknae-kernel` and `maknae-cli` roles must accept only the `spiffe://` SAN and issue leaves with `DigitalSignature` key usage; with `deploy/vault-pki`, applying the current Terraform does this. If `deployment_id` has uppercase letters or other characters outside the grammar, change it in the roles and in `maknae.yaml` together.
 2. **Re-enroll** with step 3's command, then restart `maknaed`. Leaves are minted at run time, so none needs replacing by hand.
 
 ### 3d. More than one user
@@ -812,7 +820,7 @@ The file is `0644`, but `/etc/maknae` is `root:_maknae 0750`, enroll adds you to
 
 It holds `vault.addr`, `kv_mount` and `user_prefix`, and optionally `call_timeout_ms` (`docs/configuration.md` §6.1.3). Do not edit the first three by hand: the next enroll rewrites the file, and drops `call_timeout_ms` (#525).
 
-**What must match.** Each Vault layout flag of step 3 must **equal** its Terraform input: `--userpass-mount` ↔ `userpass_mount`, `--kv-mount` ↔ `kv_mount_path`, `--user-prefix` ↔ `user_prefix` (`deploy/vault-pki/variables.tf`). Enroll checks the flags' grammar, not that they equal the Terraform values. Enroll writes the same `kv_mount` and `user_prefix` into this file and into your `~/.maknae/maknae.yaml`, and a user whose copy differs from this file seals a key the Egress Daemon cannot open (`docs/configuration.md` §6.1.2).
+**What must match.** Each Vault layout flag of step 3 must **equal** what your Vault holds: `--userpass-mount` the userpass mount, `--kv-mount` the KV v2 mount, `--user-prefix` the prefix of the users' key paths (with `deploy/vault-pki`: `userpass_mount`, `kv_mount_path`, `user_prefix`, `deploy/vault-pki/variables.tf`). Enroll checks the flags' grammar, not that they equal your Vault's layout. Enroll writes the same `kv_mount` and `user_prefix` into this file and into your `~/.maknae/maknae.yaml`, and a user whose copy differs from this file seals a key the Egress Daemon cannot open (`docs/configuration.md` §6.1.2).
 
 ### 5. Authorize the provider
 
@@ -848,7 +856,7 @@ As yourself, not root, store your own API key in Vault under your own login: [fi
 
 ### 7. Grant the prompt
 
-Edit `/etc/maknae/authz.yaml` in place. The packaged file already has a `roles:` key granting `admin` its five administrative terms, and a second `roles:` key refuses the whole file, so append a `destinations:` key; the packaged list already holds `session.prompt` and the four conversation terms beside it. `sudoedit` and `tee -a` keep the file's owner, mode and label. Step 9's restart applies it; a daemon that is already serving applies it at the next reload, `sudo systemctl reload maknaed` ([Reload the policy](#reload-the-policy)):
+Edit `/etc/maknae/authz.yaml` in place. The packaged file already has a `roles:` key granting `admin` and `user` their terms, and a second `roles:` key refuses the whole file, so append a `destinations:` key; the packaged list already holds `session.prompt` and the four conversation terms beside it. `sudoedit` and `tee -a` keep the file's owner, mode and label. Step 9's restart applies it; a daemon that is already serving applies it at the next reload, `sudo systemctl reload maknaed` ([Reload the policy](#reload-the-policy)):
 
 ```bash
 sudo tee -a /etc/maknae/authz.yaml >/dev/null <<'EOF'
@@ -1094,7 +1102,7 @@ With enroll's defaults and the subpath `openai`, the path is `maknae-kv/metadata
 
 ## Reload the policy
 
-`maknaed` decides every request from a snapshot of `/etc/maknae/authz.yaml` and `/etc/maknae/bindings.yaml` compiled when it starts. An edit to either file changes nothing until you reload the daemon or restart it:
+`maknaed` decides every request from a snapshot of `/etc/maknae/authz.yaml`, `/etc/maknae/bindings.yaml` and `/etc/maknae/agents/` compiled when it starts. An edit to any of them changes nothing until you reload the daemon or restart it:
 
 ```bash
 sudo systemctl reload maknaed                          # Linux
@@ -1103,9 +1111,9 @@ sudo launchctl kill SIGHUP system/io.maknae.maknaed    # macOS
 
 Both send `SIGHUP`, as does `kill -HUP <pid>` for a daemon started by hand. The command returns before the reload finishes, so read the result in the trail.
 
-- **What a reload reads.** `authz.yaml` and `bindings.yaml`, together, as one policy. It also reads `maknae.yaml` and `config.d/`, only to refresh the pending baseline change that `maknae status` reports; a reload never applies a baseline change, and a `maknae.yaml` that does not validate never refuses a reload. A baseline change applies only through `maknae baseline-accept` ([Change the configuration](#change-the-configuration)).
+- **What a reload reads.** `authz.yaml`, `bindings.yaml` and each enrolled agent's `agents/<id>/enrollment.yaml` and `policy.yaml`, together, as one policy ([Enroll an Agent Daemon](#enroll-an-agent-daemon)). It also reads `maknae.yaml` and `config.d/`, only to refresh the pending baseline change that `maknae status` reports; a reload never applies a baseline change, and a `maknae.yaml` that does not validate never refuses a reload. A baseline change applies only through `maknae baseline-accept` ([Change the configuration](#change-the-configuration)).
 - **The bindings are merged, not replaced.** A reload merges `bindings.yaml` with the bindings `maknaed` enforces, entry by entry, against the file it last loaded ([How bindings.yaml and live state merge](#how-bindingsyaml-and-live-state-merge)). An entry root changed takes the file's value; an entry only a live edit changed keeps the live value; an entry both changed fails closed and is counted as a conflict. A file that now holds what `maknaed` already enforces, as after `sudo maknae policy sync`, is adopted with no root edit recorded. A `bindings.yaml` that is missing, or has lost its `bindings:` key, changes nothing once the store holds explicit bindings: the reload is applied, every binding stands, and the loss is recorded.
-- **All or nothing.** A reload loads and validates both files and resolves every username in `bindings.yaml` on the host, as a start does, so a new username needs only a reload. If either file fails (it does not parse or validate, `authz.yaml` still carries `bindings:`, or an account lookup fails rather than finding no such user), the reload is refused before it touches the store, and the running policy stands; an `authz.yaml` edit made at the same time as a refused `bindings.yaml` edit does not apply either. A name with no account on the host does not refuse the reload: that name alone is affected, and a `graph.identity` record reports it ([Bind a user, contain a subject](#bind-a-user-contain-a-subject); configuration §2.3 lists what refuses the whole file and what is decided per subject). A reload refused while writing the store also keeps the running policy; see the first case under "Records that look out of order" below. The journal (`journalctl -u maknaed`; on macOS `/usr/local/var/log/maknae/maknaed.err`) says `maknaed: reload refused: <cause>; the previous policy stands`. An invalid `authz.yaml` or `bindings.yaml` at start refuses to start, with exit 3.
+- **All or nothing.** A reload loads and validates all of them and resolves every username in `bindings.yaml` on the host, as a start does, so a new username needs only a reload. If any file fails (it does not parse or validate, `authz.yaml` still carries `bindings:`, an agent's `enrollment.yaml` or `policy.yaml` does not parse, `bindings.yaml` binds an agent's service account under `admin`, or an account lookup fails rather than finding no such user), the reload is refused before it touches the store, and the running policy stands; an `authz.yaml` edit made at the same time as a refused `bindings.yaml` edit does not apply either. A name with no account on the host does not refuse the reload: that name alone is affected, and a `graph.identity` record reports it ([Bind a user, contain a subject](#bind-a-user-contain-a-subject); configuration §2.3 lists what refuses the whole file and what is decided per subject). A reload refused while writing the store also keeps the running policy; see the first case under "Records that look out of order" below. The journal (`journalctl -u maknaed`; on macOS `/usr/local/var/log/maknae/maknaed.err`) says `maknaed: reload refused: <cause>; the previous policy stands`. An invalid `authz.yaml` or `bindings.yaml` at start refuses to start, with exit 3.
 - **One at a time.** Reloads run in turn. Signals that arrive while one runs produce one more reload, and a `SIGHUP` sent while the daemon is starting is applied once it serves. One that lands in the first milliseconds of the process, before its handler exists, ends it; systemd (`RestartForceExitStatus=SIGHUP`) and launchd (`KeepAlive`) start it again, after `RestartSec` (5 seconds) on Linux.
 - **Restarting into an accepted baseline.** Once an accept that applies by restart has begun, a reload is refused (`reload refused: shutdown`).
 - **Stopping.** A graceful stop abandons a reload that is still loading the file, recorded as `reload refused: shutdown`. It waits up to 5 seconds for a reload that already holds its turn (writing the store or its audit records), then stops without it, so the stop record and the token revoke never wait on a reload for longer than that.
@@ -1465,6 +1473,69 @@ The `syncing` records are written ahead of the store transition at their revisio
 **`maknae status`** prints `identity sync: <n> unsynced, <m> conflicts`, followed by `, bindings.yaml lost` and `, mirror stale` when they apply. It never prints a name, a uid or a hash.
 
 ---
+
+## Enroll an Agent Daemon
+
+An Agent Daemon runs under its own service account, one per agent, and reaches `maknaed` only on the agent socket. Its configuration is the directory `/etc/maknae/agents/<id>/`: `enrollment.yaml`, which `maknae enroll agent` writes, and `policy.yaml`, which you write ([configuration §6.4](configuration.md#64-enrolling-an-agent-daemon) has every rule and refusal). The steps below use the agent id `hobi`. They are not yet measured on a live host.
+
+1. **Create the account with a non-login shell.** It must not be root, the principal, a Maknae daemon account or a member of `maknae`, `_maknae` or `_maknae-egress`.
+
+   ```bash
+   sudo useradd --system --create-home --shell /usr/sbin/nologin hobi        # Linux
+   sudo sysadminctl -addUser hobi -shell /usr/bin/false                        # macOS
+   ```
+
+2. **Add it to `maknae-agents`.** The package creates the group; the agent socket is group-owned by it, and no person belongs in it.
+
+   ```bash
+   sudo usermod -aG maknae-agents hobi                                         # Linux
+   sudo dseditgroup -o edit -a hobi -t user maknae-agents                      # macOS
+   ```
+
+   Do not name the account in `bindings.yaml`, except under `adversary` to contain it.
+
+3. **Create the agent's Vault objects.** On the agent AppRole mount (default `maknae-agent-approle`, never `maknaed`'s): the role `agent-hobi` with the policy `maknae-agent-hobi`; on the intermediate PKI mount the role `maknae-agent-hobi`; and the entity `maknae-agent-hobi` with an alias on the agent mount named by the role's RoleID. Configuration §6.4 lists what each must allow. `deploy/vault-pki` is one way to create them (`maknae_agents = { hobi = {} }`); manage them however you manage Vault. The operator token you enroll with needs the `maknae-enroll-agent` policy.
+
+4. **Enroll it.**
+
+   ```bash
+   sudo maknae enroll agent hobi --account hobi --bind-cidr <this host's address>/32
+   ```
+
+   `--role guest` binds it to `guest` instead of the default `user`; `admin` is not offered. Enroll seals the SecretID on this host and writes `/etc/maknae/agents/hobi/enrollment.yaml`.
+
+5. **Write its policy.** Write it as `policy.yaml`, then install it as `root:_maknae 0640`, as the other configuration files are: `sudo install -o root -g _maknae -m 0640 policy.yaml /etc/maknae/agents/hobi/policy.yaml`. Without it the agent holds no file access through Maknae's tools, and only people may task it.
+
+   ```yaml
+   schema_version: 1
+   permissions:
+     allow:
+       - "Read(~/notes/**)"
+       - "Write(~/notes/**)"
+   actions:
+     allow:
+       - "fs.*"
+       - "session.prompt"
+   ```
+
+   Add `taskers:` to say who may task it, for example `taskers: ["alice", "agent:jin"]`; another agent may task it only when listed here. Tasking is refused on the wire until task delivery is built (#610); `taskers:` takes effect then.
+
+6. **Reload `maknaed`** ([Reload the policy](#reload-the-policy)), then confirm:
+
+   ```bash
+   sudo jq -c 'select(.action=="graph.identity") | {ts, result: .outcome.result, reason: .outcome.reason}' /var/log/maknae/audit.jsonl | tail -n 5
+   maknae subject-list
+   ```
+
+   An accepted agent reads `agent 'hobi' (uid <n>) is enrolled`, and `maknae subject-list` shows it with its agent id. `agent 'hobi' (uid <n>) is not enrolled: <why>` means the account failed a check: the account keeps its ordinary standing and the agent is not admitted until you fix the cause and reload. A reload refused with ``the service account hobi of agent `hobi` is bound to admin`` means `bindings.yaml` binds the account under `admin`; remove that binding.
+
+7. **Remove it.**
+
+   ```bash
+   sudo maknae enroll remove-agent hobi
+   ```
+
+   It removes `enrollment.yaml`, disables the Vault entity, destroys the SecretIDs and removes the sealed SecretID. Then reload: until a reload succeeds, the agent stays admitted. After it, the agent's next request is refused, its tasks are dropped, and the account is an ordinary account again. `policy.yaml` and the directory stay; delete them by hand if you will not re-enroll. When the command fails, run it again before deleting the directory; it still completes once the directory is gone. A login token the agent already holds stays valid until `agent_token_max_ttl`, refused only while the entity stays disabled. When the role and the entity were both already absent, nothing is disabled, and a held token lives until `agent_token_max_ttl`. Re-enrolling re-enables the entity, and such a token works again until `agent_token_max_ttl`.
 
 ## Session checks
 

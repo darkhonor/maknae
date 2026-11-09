@@ -44,6 +44,17 @@ variable "leaf_ttl_seconds" {
   default     = 259200
 }
 
+variable "agent_leaf_ttl_seconds" {
+  type        = number
+  description = "Agent plane leaf cert ttl/max_ttl, in seconds. Default 1h. Must not exceed leaf_ttl_seconds."
+  default     = 3600
+
+  validation {
+    condition     = var.agent_leaf_ttl_seconds > 0 && var.agent_leaf_ttl_seconds <= var.leaf_ttl_seconds
+    error_message = "agent_leaf_ttl_seconds must be > 0 and <= leaf_ttl_seconds: the intermediate mount caps leaf TTLs and an agent leaf never outlives a plane leaf."
+  }
+}
+
 variable "token_period" {
   type        = number
   description = "Period for the `maknaed` daemon's PERIODIC token (ADR-0018): the token renews indefinitely as long as it is renewed within each period and is never force-expired by a max-TTL ceiling — only genuine Vault failure or revocation fails it closed. A shorter period tightens custody (a leaked/orphaned token dies sooner after the last renewal) at the cost of transient-outage tolerance; longer favors availability. Mirrors the retired 24h operational cadence as a renewable floor. Seconds. Default 24h."
@@ -113,8 +124,8 @@ variable "maknae_users" {
   default = {}
 
   validation {
-    condition     = alltrue([for name in keys(var.maknae_users) : can(regex("^[a-z0-9_]([a-z0-9._-]{0,30}[a-z0-9_])?$", name)) && name != "data"])
-    error_message = "Each maknae_users key must be 1-32 bytes of [a-z0-9._-], starting and ending with [a-z0-9_], and not 'data': Vault userpass lower-cases usernames, and maknaed derives the key path from the local username and refuses a 'data' segment in it."
+    condition     = alltrue([for name in keys(var.maknae_users) : can(regex("^[a-z0-9_]([a-z0-9._-]{0,30}[a-z0-9_])?$", name)) && name != "data" && !startswith(name, "agent-")])
+    error_message = "Each maknae_users key must be 1-32 bytes of [a-z0-9._-], starting and ending with [a-z0-9_], not 'data', and must not start with 'agent-' (the entity maknae-agent-<id> belongs to an agent, and the maknae-enroll-agent policy may write any entity named maknae-agent-*): Vault userpass lower-cases usernames, and maknaed derives the key path from the local username and refuses a 'data' segment in it."
   }
 }
 

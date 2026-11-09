@@ -35,7 +35,8 @@ SELinux. The rpm's SELinux `.pp` and fapolicyd trust fragment are **not** shippe
 in the deb — both are SELinux-N/A here. The path-attached profile
 (`apparmor/usr.bin.maknaed`) mirrors the `.te`: read-only `/etc/maknae/**`,
 `rwk` on every `/var/log/maknae/*.jsonl` trail, `rw` on the
-`/run/maknae` UDS, read of the systemd-decrypted credential under
+`/run/maknae` and `/run/maknae-agent` UDS directories and on the deputy's
+`/run/maknae-egress/egress.sock`, read of the systemd-decrypted credential under
 `/run/credentials/maknaed.service/`, TCP for Vault egress, and the account facts
 read per request (`/etc/passwd` and the `systemd-userdbd` Multiplexer socket). A
 discrete

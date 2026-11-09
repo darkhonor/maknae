@@ -152,7 +152,7 @@ pub fn mount_path_is_acceptable(s: &str) -> Result<(), String> {
     // than this.
     if segs[0] == "auth" {
         return Err(
-            "starts with 'auth' — the auth/ prefix is composed by the client; write the bare mount name as Terraform declares it"
+            "starts with 'auth' — the auth/ prefix is composed by the client; write the bare mount name"
                 .into(),
         );
     }

@@ -42,6 +42,7 @@ ciborium = { workspace = true }
 
 [dev-dependencies]
 maknae-kernel = { path = ".", features = ["hermetic-test-seam"] }
+maknae-vault = { path = "../maknae-vault", features = ["test-support"] }
 maknae-plane = { path = "../maknae-plane" }
 # #240a: the egress-socket tests bind a real UDS under a temp dir.
 tempfile = "3"

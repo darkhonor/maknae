@@ -77,19 +77,67 @@ impl Snapshot {
         self.persisted.revision()
     }
 
-    pub fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
-        self.loaded.roles.as_subject_bindings()
+    pub fn has_explicit_bindings(&self) -> bool {
+        self.loaded.roles.explicit()
+    }
+
+    fn principal_listed(&self, principal_uid: u32) -> bool {
+        !self.has_explicit_bindings() && !self.loaded.agents.0.contains_key(&principal_uid)
+    }
+
+    /// Without explicit bindings, the principal's admin beside the enrolled agents.
+    pub fn subjects(&self, principal_uid: u32) -> Option<Vec<maknae_security::SubjectBinding>> {
+        let mut out = self.loaded.roles.as_subject_bindings()?;
+        if self.principal_listed(principal_uid) {
+            out.push(maknae_security::SubjectBinding {
+                role: crate::role::Role::Admin.key().into(),
+                members: vec![format!("uid:{principal_uid}")],
+            });
+            out.sort_by(|a, b| a.role.cmp(&b.role));
+        }
+        Some(out)
     }
 
     /// Every subject the load named, with what that load made of it; `None` when
-    /// bindings are absent.
-    pub fn subject_entries(&self) -> Option<Vec<crate::ListedSubject>> {
-        self.loaded.roles.entries(&self.problems)
+    /// bindings are absent and no agent is enrolled.
+    pub fn subject_entries(&self, principal_uid: u32) -> Option<Vec<crate::ListedSubject>> {
+        let mut out = self.loaded.roles.entries(&self.problems)?;
+        if self.principal_listed(principal_uid) {
+            out.push(crate::ListedSubject {
+                uid: Some(principal_uid),
+                names: Vec::new(),
+                state: crate::SubjectState::Principal,
+            });
+            out.sort_by_key(|s| (s.uid.is_none(), s.uid));
+        }
+        Some(out)
     }
 
     /// The subjects the load this snapshot was compiled from could not bind as written.
     pub fn identity_problems(&self) -> &Arc<[IdentityProblem]> {
         &self.problems
+    }
+
+    pub fn agent_uid(&self, id: &str) -> Option<u32> {
+        self.loaded
+            .agents
+            .0
+            .iter()
+            .find(|(_, a)| a.as_str() == id)
+            .map(|(uid, _)| *uid)
+    }
+
+    /// The uids an enrolled agent's `taskers:` names; `Some(None)` where it lists none.
+    pub fn taskers(&self, agent: &str) -> Option<Option<&std::collections::BTreeSet<u32>>> {
+        self.loaded.taskers.0.get(agent).map(Option::as_ref)
+    }
+
+    pub fn agents(&self) -> BTreeMap<u32, String> {
+        self.loaded.agents.0.clone()
+    }
+
+    pub fn agent_of(&self, uid: u32) -> Option<&str> {
+        self.loaded.agents.0.get(&uid).map(String::as_str)
     }
 
     pub(crate) fn loaded(&self) -> &LoadedPolicy {
@@ -179,14 +227,26 @@ impl Compiler {
         digests: &BTreeMap<String, [u8; 32]>,
         parent: &str,
     ) -> Result<(NodeId, String), CompileError> {
+        let (source_id, source) = (self.source_id, self.source.clone());
+        self.section_of(source_id, &source, name, digests, parent)
+    }
+
+    fn section_of(
+        &mut self,
+        source_id: NodeId,
+        source: &str,
+        name: &str,
+        digests: &BTreeMap<String, [u8; 32]>,
+        parent: &str,
+    ) -> Result<(NodeId, String), CompileError> {
         let d = digests
             .get(parent)
             .ok_or_else(|| CompileError::Policy(format!("no digest for section `{parent}`")))?;
-        let key = format!("{}#{name}", self.source);
+        let key = format!("{source}#{name}");
         let mut attrs = Attrs::new();
         attrs.insert(ATTR_SHA256.into(), AttrValue::Str(hex(d)));
         let id = self.add_node(SECTION, key.clone(), attrs);
-        self.add_edge(id, PART_OF, self.source_id);
+        self.add_edge(id, PART_OF, source_id);
         Ok((id, key))
     }
 
@@ -439,6 +499,39 @@ pub fn compile(
         }
     }
 
+    for (id, path, p) in source.agent_policies() {
+        let path = path.to_str().map(str::to_string).ok_or_else(|| {
+            CompileError::Policy(format!("agent {id}'s policy path is not UTF-8"))
+        })?;
+        let source_id = c.add_node(CONFIG_SOURCE, path.clone(), Attrs::new());
+        let name = format!("agents.{id}");
+        let sec = c.section_of(source_id, &path, &name, section_sha256, &name)?;
+        let Some(permissions) = p.entry.permissions.as_ref() else {
+            continue;
+        };
+        for (effect, entries) in [
+            (Effect::Deny, permissions.deny_sources()),
+            (Effect::Allow, permissions.allow_sources()),
+        ] {
+            let word = effect_attrs(effect).1;
+            for (i, entry) in entries.iter().enumerate() {
+                let mut attrs = Attrs::new();
+                attrs.insert(ATTR_ENTRY.into(), AttrValue::Str(entry.clone()));
+                attrs.insert(ATTR_EFFECT.into(), AttrValue::Str(word.into()));
+                c.rule(
+                    format!("rule:agents.{id}.permissions:{word}:{i}"),
+                    attrs,
+                    &sec,
+                    Cited::AgentPath {
+                        agent: id.to_string(),
+                        effect,
+                        source: entry.clone(),
+                    },
+                );
+            }
+        }
+    }
+
     let builder = c.nodes.into_iter().fold(
         GraphBuilder::new(GraphSpace::Kernel, revision),
         GraphBuilder::node,
@@ -455,6 +548,8 @@ pub fn compile(
         action_grants,
         destinations,
         subjects: source.subject_grants().clone(),
+        agents: source.agent_uids(),
+        taskers: source.agent_taskers().clone(),
     };
     Ok(Snapshot {
         graph,
@@ -577,6 +672,7 @@ mod tests {
                 ("mallory", 666),
                 ("root", 0),
             ]),
+            maknae_config::AgentsLoad::default(),
             principal(),
             crate::PolicyPaths::in_dir(std::path::Path::new(DIR)),
         )
@@ -646,20 +742,24 @@ mod tests {
         let s = shipped_with_bindings();
         let snap = snap(&s);
         let g = snap.graph();
-        assert_eq!(g.nodes().iter().filter(|n| n.kind == TERM).count(), 60);
+        assert_eq!(g.nodes().iter().filter(|n| n.kind == TERM).count(), 61);
         assert_eq!(g.nodes().iter().filter(|n| n.kind == CLASS).count(), 7);
         let rules: Vec<_> = g.nodes().iter().filter(|n| n.kind == RULE).collect();
-        assert_eq!(rules.len(), 30);
+        assert_eq!(rules.len(), 37);
         let admin = g.lookup(ROLE, "admin").unwrap();
         assert_eq!(g.out_edges(admin.id, DENIES).count(), 18);
-        assert_eq!(g.out_edges(admin.id, PERMITS).count(), 12);
+        assert_eq!(g.out_edges(admin.id, PERMITS).count(), 13);
         let grants = g
             .lookup(SECTION, "/etc/maknae/authz.yaml#roles.admin")
             .unwrap();
-        assert_eq!(g.in_edges(grants.id, DECLARED_BY).count(), 10);
+        assert_eq!(g.in_edges(grants.id, DECLARED_BY).count(), 11);
         let user = g.lookup(ROLE, "user").unwrap();
         assert_eq!(g.out_edges(user.id, DENIES).count(), 18);
-        assert_eq!(g.out_edges(user.id, PERMITS).count(), 2);
+        assert_eq!(g.out_edges(user.id, PERMITS).count(), 8);
+        let user_grants = g
+            .lookup(SECTION, "/etc/maknae/authz.yaml#roles.user")
+            .unwrap();
+        assert_eq!(g.in_edges(user_grants.id, DECLARED_BY).count(), 6);
         let sec = g
             .lookup(SECTION, "/etc/maknae/authz.yaml#permissions")
             .unwrap();
@@ -690,7 +790,7 @@ mod tests {
         }
         assert_eq!(
             g.edges().len() - snap.persisted().edges().len(),
-            60 + 1 + 20 * 3 + 1 + 10 * 3
+            61 + 1 + 20 * 3 + 2 + 17 * 3
         );
 
         let deny0 = g.lookup(RULE, "rule:permissions:deny:0").unwrap();
@@ -1075,6 +1175,7 @@ mod tests {
             maknae_config::parse_bindings(&format!("schema_version: 1\nbindings:\n{body}"))
                 .unwrap(),
             uids(&[("root", 0), ("toor", 0), ("alex", 1000)]),
+            maknae_config::AgentsLoad::default(),
             principal(),
             crate::PolicyPaths::in_dir(std::path::Path::new(DIR)),
         )
@@ -1192,10 +1293,10 @@ mod tests {
         let snap = snap(&s);
         assert!(matches!(snap.loaded.roles, Roles::Graph(_)));
         let file = crate::tests::oracle::assemble(&s).unwrap();
-        assert_eq!(snap.subjects(), file.roles.as_subject_bindings());
-        assert!(snap.subjects().is_some());
+        assert_eq!(snap.subjects(0), file.roles.as_subject_bindings());
+        assert!(snap.subjects(0).is_some());
         let none = source(SHIPPED);
-        assert_eq!(super::tests::snap(&none).subjects(), None);
+        assert_eq!(super::tests::snap(&none).subjects(0), None);
         assert_eq!(snap.loaded.policy, *s.policy());
         assert_eq!(snap.loaded.action_grants, file.action_grants);
         assert_eq!(snap.loaded.destinations, file.destinations);
@@ -1229,7 +1330,7 @@ mod tests {
             shown.starts_with("Snapshot { revision: 5, nodes: "),
             "{shown}"
         );
-        assert!(shown.ends_with(", rules: 30 }"), "{shown}");
+        assert!(shown.ends_with(", rules: 37 }"), "{shown}");
     }
 
     #[test]

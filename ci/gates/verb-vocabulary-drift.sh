@@ -121,6 +121,7 @@ bad_clause=$(awk -F'	' '
     clause["grantable|grantable-not-granted"]   = "operator MAY grant per-role via `roles:`"
     clause["action|granted-in-shipped-file"]      = "granted to admin by the shipped authz.yaml; an install'\''s own authz.yaml decides"
     clause["grantable|grantable-shipped-granted"] = "operator MAY grant per-role via `roles:`; the shipped authz.yaml grants it to admin"
+    clause["grantable|grantable-shipped-granted-admin-and-user"] = "operator MAY grant per-role via roles:; the shipped authz.yaml grants it to admin and user"
     clause["action-vocab|subject-limitable"]      = "a `subjects:` actions list may limit it; it never grants"
   }
   /^#/ || !NF { next }
@@ -140,8 +141,9 @@ if [ -n "$bad_clause" ]; then
 fi
 
 # The shipped grants (#490): the terms the shipped authz.yaml grants must be
-# exactly the manifest's shipped-file dispositions, both directions, and only
-# `roles.admin.allow` may carry them.
+# exactly the manifest's shipped-file dispositions, both directions. Only
+# `roles.admin.allow` may carry them, and `roles.user.allow` exactly the terms
+# whose grantable row is `grantable-shipped-granted-admin-and-user` (#609).
 SHIPPED_AUTHZ=packaging/common/authz.yaml
 [ -f "$SHIPPED_AUTHZ" ] || { echo "FAIL: missing $SHIPPED_AUTHZ"; exit 1; }
 other_roles_key=$(grep -nEv '^[[:space:]]*(#.*)?$' "$SHIPPED_AUTHZ" | grep -Ev '^[0-9]+:roles:' \
@@ -163,12 +165,25 @@ roles_block | awk '
      /^    [a-z_]+:/{ list=$1; sub(/:$/, "", list) }
      /^      - "/{ if (match($0, /"[a-z0-9_.]+"/)) print role "\t" list "\t" substr($0, RSTART+1, RLENGTH-2) }' \
   | sort -u > "$tmp/shipped"
-if awk -F'\t' '$1 != "admin" || $2 != "allow"' "$tmp/shipped" | grep -q .; then
-  echo "FAIL: $SHIPPED_AUTHZ may grant only roles.admin.allow:"; awk -F'\t' '$1 != "admin" || $2 != "allow"' "$tmp/shipped" | sed 's/^/  /'; exit 1
+grep -v '^#' "$MANIFEST" | awk -F'\t' '$1 == "grantable" && $3 == "grantable-shipped-granted-admin-and-user" { print $2 }' | sort -u > "$tmp/m_user"
+bad_role=$(awk -F'\t' 'FILENAME == ARGV[1] { user[$1] = 1; next }
+  !($2 == "allow" && ($1 == "admin" || ($1 == "user" && ($3 in user))))' "$tmp/m_user" "$tmp/shipped")
+if [ -n "$bad_role" ]; then
+  echo "FAIL: $SHIPPED_AUTHZ may grant only roles.admin.allow, and roles.user.allow only a term whose grantable row is grantable-shipped-granted-admin-and-user:"
+  printf '%s\n' "$bad_role" | sed 's/^/  /'; exit 1
+fi
+one_sided=$(while IFS= read -r term; do
+  for role in admin user; do
+    grep -qxF "$role	allow	$term" "$tmp/shipped" || printf '%s\t%s\n' "$role" "$term"
+  done
+done < "$tmp/m_user")
+if [ -n "$one_sided" ]; then
+  echo "FAIL: $SHIPPED_AUTHZ must grant each grantable-shipped-granted-admin-and-user term to both admin and user; missing:"
+  printf '%s\n' "$one_sided" | sed 's/^/  /'; exit 1
 fi
 cut -f3 "$tmp/shipped" | sort -u > "$tmp/shipped_terms"
 grep -v '^#' "$MANIFEST" | awk -F'\t' '$1 == "action" && $3 == "granted-in-shipped-file" { print $2 }' | sort -u > "$tmp/m_action"
-grep -v '^#' "$MANIFEST" | awk -F'\t' '$1 == "grantable" && $3 == "grantable-shipped-granted" { print $2 }' | sort -u > "$tmp/m_grantable"
+grep -v '^#' "$MANIFEST" | awk -F'\t' '$1 == "grantable" && ($3 == "grantable-shipped-granted" || $3 == "grantable-shipped-granted-admin-and-user") { print $2 }' | sort -u > "$tmp/m_grantable"
 for m in m_action m_grantable; do
   if ! diff -u "$tmp/$m" "$tmp/shipped_terms" > "$tmp/d_$m"; then
     echo "FAIL: the shipped authz.yaml grants and the manifest's shipped-file dispositions disagree ($m):"; sed -n '3,$p' "$tmp/d_$m" | sed 's/^/  /'; exit 1

@@ -641,6 +641,9 @@ pub enum Verb {
     /// EGRESS — content leaving toward a model endpoint on a server's initiative
     /// rather than a subject's.
     McpSamplingCreate,
+    /// Give a task to an enrolled agent (#609): decided as `session.task`. Its
+    /// behaviour and delivery are #610's; a prompt frame because it carries the ask.
+    TaskSubmit { task: crate::TaskSubmission },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1029,6 +1032,12 @@ pub struct RoleBindingView {
     /// `unresolved adversary (no account, not contained)`.
     #[serde(default)]
     pub state: String,
+    /// The enrolled agent's id, for a subject an agent runs as.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// The enrolled principal, admin because `bindings.yaml` has no `bindings:` key.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub principal: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1082,7 +1091,7 @@ pub fn admits(declared: FrameClass, verb: &Verb) -> bool {
 
 pub fn class_of(verb: &Verb) -> FrameClass {
     match verb {
-        Verb::SessionPrompt { .. } => FrameClass::Prompt,
+        Verb::SessionPrompt { .. } | Verb::TaskSubmit { .. } => FrameClass::Prompt,
         Verb::SessionNew { .. }
         | Verb::Read { .. }
         | Verb::FsWrite { .. }
@@ -1147,6 +1156,8 @@ pub fn class_of(verb: &Verb) -> FrameClass {
 pub struct Request {
     pub protocol_version: u16,
     pub verb: Verb,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<crate::TaskId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1470,6 +1481,8 @@ mod tests {
                 uid: None,
                 label: String::new(),
                 state: String::new(),
+                agent: None,
+                principal: false,
             }
         );
         let entry = RoleBindingView {
@@ -1478,6 +1491,8 @@ mod tests {
             uid: Some(666),
             label: "uid 666 (mallory)".into(),
             state: "contained (carried forward)".into(),
+            agent: None,
+            principal: false,
         };
         let mut new_bytes = Vec::new();
         ciborium::into_writer(&entry, &mut new_bytes).unwrap();
@@ -1486,9 +1501,28 @@ mod tests {
             (old.role.as_str(), old.members),
             ("adversary", vec!["uid:666".to_string()])
         );
+        let mut plain = Vec::new();
+        ciborium::into_writer(&entry, &mut plain).unwrap();
+        let fields: ciborium::Value = ciborium::from_reader(plain.as_slice()).unwrap();
+        assert!(
+            !format!("{fields:?}").contains("agent"),
+            "an absent agent is not written"
+        );
+        assert!(
+            !format!("{fields:?}").contains("principal"),
+            "a non-principal is not marked"
+        );
+        let agent = RoleBindingView {
+            agent: Some("hobi".into()),
+            ..entry.clone()
+        };
+        let principal = RoleBindingView {
+            principal: true,
+            ..entry.clone()
+        };
         let r = Response {
             protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(Payload::SubjectList(vec![entry])),
+            result: RespResult::Ok(Payload::SubjectList(vec![entry, agent, principal])),
         };
         assert_eq!(decode_response(&encode_response(&r).unwrap()).unwrap(), r);
     }
@@ -1603,6 +1637,7 @@ mod tests {
     #[test]
     fn a_prompt_carries_its_reply_cap_only_when_set_and_the_cap_is_bounded() {
         let with = Request {
+            task: None,
             protocol_version: PROTOCOL_VERSION,
             verb: Verb::SessionPrompt {
                 conversation: "c".into(),
@@ -1614,6 +1649,7 @@ mod tests {
         let bytes = encode_request(&with).unwrap();
         assert_eq!(decode_request(&bytes).unwrap().verb, with.verb);
         let without = Request {
+            task: None,
             protocol_version: PROTOCOL_VERSION,
             verb: Verb::SessionPrompt {
                 conversation: "c".into(),
@@ -1675,6 +1711,7 @@ mod tests {
             column: 65_536,
         };
         let paged = Request {
+            task: None,
             protocol_version: PROTOCOL_VERSION,
             verb: Verb::Read {
                 path: "/h/f".into(),
@@ -1685,6 +1722,7 @@ mod tests {
         let bytes = encode_request(&paged).unwrap();
         assert_eq!(decode_request(&bytes).unwrap().verb, paged.verb);
         let plain = Request {
+            task: None,
             protocol_version: PROTOCOL_VERSION,
             verb: Verb::Read {
                 path: "/h/f".into(),
@@ -1727,6 +1765,7 @@ mod tests {
     #[test]
     fn request_secret_encoding_enforces_actual_frame_limit() {
         let request = Request {
+            task: None,
             protocol_version: PROTOCOL_VERSION,
             verb: Verb::SessionPrompt {
                 conversation: "frame-limit".into(),
@@ -1749,6 +1788,7 @@ mod tests {
     #[test]
     fn a_write_request_carries_its_length_and_never_its_content() {
         let request = Request {
+            task: None,
             protocol_version: PROTOCOL_VERSION,
             verb: Verb::FsWrite {
                 path: "/p".into(),
@@ -1768,6 +1808,7 @@ mod tests {
     #[test]
     fn a_writes_conversation_is_omitted_when_none_and_round_trips_when_set() {
         let write = |conversation: Option<&str>| Request {
+            task: None,
             protocol_version: PROTOCOL_VERSION,
             verb: Verb::FsWrite {
                 path: "/p".into(),
@@ -1792,6 +1833,7 @@ mod tests {
     #[test]
     fn session_prompt_round_trips_and_debug_redacts_content() {
         let req = Request {
+            task: None,
             protocol_version: PROTOCOL_VERSION,
             verb: Verb::SessionPrompt {
                 conversation: "conv-1".into(),
@@ -1828,6 +1870,7 @@ mod tests {
     #[test]
     fn a_prompt_carries_its_provider_choice_only_when_set() {
         let with = Request {
+            task: None,
             protocol_version: PROTOCOL_VERSION,
             verb: Verb::SessionPrompt {
                 conversation: "c".into(),
@@ -1840,6 +1883,7 @@ mod tests {
         assert!(bytes.windows(6).any(|w| w == b"choice"));
         assert_eq!(decode_request(&bytes).unwrap(), with);
         let without = Request {
+            task: None,
             protocol_version: PROTOCOL_VERSION,
             verb: Verb::SessionPrompt {
                 conversation: "c".into(),
@@ -1911,6 +1955,7 @@ mod tests {
             ["text", "image", "audio", "resource", "resource_link"]
         );
         let req = Request {
+            task: None,
             protocol_version: PROTOCOL_VERSION,
             verb: Verb::SessionPrompt {
                 conversation: "c".into(),
@@ -1961,6 +2006,7 @@ mod tests {
             (Verb::SessionUpdate, &b"SessionUpdate"[..]),
         ] {
             let bytes = encode_request(&Request {
+                task: None,
                 protocol_version: PROTOCOL_VERSION,
                 verb: v,
             })
@@ -2051,6 +2097,7 @@ mod tests {
         for verb in verbs {
             assert!(!format!("{verb:?}").contains("private-mutation-158"));
             let req = Request {
+                task: None,
                 protocol_version: PROTOCOL_VERSION,
                 verb,
             };
@@ -2112,6 +2159,7 @@ mod tests {
     #[test]
     fn request_round_trips() {
         let r = Request {
+            task: None,
             protocol_version: PROTOCOL_VERSION,
             verb: Verb::Whoami,
         };
@@ -2140,6 +2188,7 @@ mod tests {
     #[test]
     fn decode_rejects_wrong_version() {
         let mut r = Request {
+            task: None,
             protocol_version: 999,
             verb: Verb::Ping,
         };
@@ -2209,6 +2258,7 @@ mod tests {
         fn read_verb_round_trips_with_path() {
             for conversation in [Some("c1".to_string()), None] {
                 let r = Request {
+                    task: None,
                     protocol_version: PROTOCOL_VERSION,
                     verb: Verb::Read {
                         path: "/home/op/notes.txt".into(),
@@ -2259,6 +2309,7 @@ mod tests {
             // the SAME version.
             assert_eq!(PROTOCOL_VERSION, 1, "no unauthorized wire bump");
             let ping = Request {
+                task: None,
                 protocol_version: 1,
                 verb: Verb::Ping,
             };
@@ -2267,6 +2318,7 @@ mod tests {
             assert_eq!(decode_request(&b).unwrap().verb, Verb::Ping);
 
             let read = Request {
+                task: None,
                 protocol_version: 1,
                 verb: Verb::Read {
                     path: "/home/op/x".into(),
@@ -2293,6 +2345,7 @@ mod tests {
                 let mut b = Vec::new();
                 ciborium::into_writer(
                     &Request {
+                        task: None,
                         protocol_version: 1,
                         verb: verb.clone(),
                     },
@@ -2308,6 +2361,7 @@ mod tests {
                 },
             ] {
                 let b = encode_request(&Request {
+                    task: None,
                     protocol_version: 1,
                     verb: verb.clone(),
                 })
@@ -2322,6 +2376,7 @@ mod tests {
             // The version guard still exists for a real mismatch (a future
             // deliberate bump, or garbage) — typed, never a panic.
             let req = Request {
+                task: None,
                 protocol_version: 999,
                 verb: Verb::Ping,
             };
@@ -2627,6 +2682,7 @@ mod tests {
         ] {
             assert_eq!(class_of(&verb), FrameClass::Control);
             let b = encode_request(&Request {
+                task: None,
                 protocol_version: 1,
                 verb: verb.clone(),
             })
@@ -2647,6 +2703,7 @@ mod tests {
         let target = contain_target(&ContainTarget::Name(name)).unwrap();
         let reason = contain_reason(&reason).unwrap();
         let b = encode_request(&Request {
+            task: None,
             protocol_version: 1,
             verb: Verb::AdminContain {
                 target,
@@ -2781,6 +2838,7 @@ mod tests {
         assert!(!dbg.contains("sentinel"), "{dbg}");
         assert!(dbg.contains("<20 bytes>"), "{dbg}");
         let b = encode_request(&Request {
+            task: None,
             protocol_version: 1,
             verb: verb.clone(),
         })
@@ -3069,6 +3127,7 @@ mod tests {
         fn round_trip(verb: Verb) -> Verb {
             let bytes = encode_request(&Request {
                 protocol_version: PROTOCOL_VERSION,
+                task: None,
                 verb,
             })
             .unwrap();
@@ -3169,6 +3228,7 @@ mod tests {
             assert_eq!(PROTOCOL_VERSION, 1);
             let new = encode_request(&Request {
                 protocol_version: PROTOCOL_VERSION,
+                task: None,
                 verb: Verb::SessionNew {
                     cwd: "a".repeat(MAX_MUTATION_PATH_BYTES),
                 },
@@ -3177,6 +3237,7 @@ mod tests {
             assert!(new.len() <= ATTEMPT_REQUEST_MAX);
             let list = encode_request(&Request {
                 protocol_version: PROTOCOL_VERSION,
+                task: None,
                 verb: Verb::SessionList {
                     cursor: Some(cid()),
                 },
@@ -3340,6 +3401,7 @@ mod tests {
             for (verb, class) in every_verb() {
                 if class == FrameClass::Control {
                     let bytes = encode_request(&Request {
+                        task: None,
                         protocol_version: PROTOCOL_VERSION,
                         verb,
                     })
@@ -3385,6 +3447,7 @@ mod tests {
                 },
             ] {
                 let bytes = encode_request(&Request {
+                    task: None,
                     protocol_version: PROTOCOL_VERSION,
                     verb,
                 })
@@ -3509,5 +3572,96 @@ mod tests {
             reasoning: reasoning("SENTINEL-REASONING"),
         };
         assert!(!format!("{t:?}").contains("SENTINEL-REASONING"));
+    }
+
+    const PROMPT_MAX_BYTES_FLOOR: usize = 65_536;
+
+    fn task_submit(prompt_bytes: usize) -> Verb {
+        Verb::TaskSubmit {
+            task: crate::TaskSubmission {
+                schema: crate::TASK_SCHEMA.into(),
+                version: crate::TASK_VERSION,
+                agent: "hobi".into(),
+                ask: crate::Ask::Prompt {
+                    prompt: SecretText(zeroize::Zeroizing::new("p".repeat(prompt_bytes))),
+                },
+                labels: crate::Labels {},
+            },
+        }
+    }
+
+    #[test]
+    fn a_request_without_a_task_still_decodes() {
+        let bytes: [u8; 29] = [
+            0xa2, 0x70, b'p', b'r', b'o', b't', b'o', b'c', b'o', b'l', b'_', b'v', b'e', b'r',
+            b's', b'i', b'o', b'n', 0x01, 0x64, b'v', b'e', b'r', b'b', 0x64, b'P', b'i', b'n',
+            b'g',
+        ];
+        let request = Request {
+            protocol_version: PROTOCOL_VERSION,
+            verb: Verb::Ping,
+            task: None,
+        };
+        assert_eq!(decode_request(&bytes).unwrap(), request);
+        assert_eq!(encode_request(&request).unwrap(), bytes.to_vec());
+    }
+
+    #[test]
+    fn a_request_with_a_task_round_trips() {
+        let request = Request {
+            protocol_version: PROTOCOL_VERSION,
+            verb: Verb::Read {
+                path: "/home/u/notes".into(),
+                conversation: None,
+                page: None,
+            },
+            task: Some(crate::TaskId([0xa5; 16])),
+        };
+        let bytes = encode_request(&request).unwrap();
+        assert_eq!(decode_request(&bytes).unwrap(), request);
+        let value: ciborium::Value = ciborium::from_reader(bytes.as_slice()).unwrap();
+        let task = value
+            .as_map()
+            .unwrap()
+            .iter()
+            .find(|(k, _)| k.as_text() == Some("task"))
+            .map(|(_, v)| v.clone());
+        assert_eq!(task, Some(ciborium::Value::Bytes(vec![0xa5; 16])));
+    }
+
+    #[test]
+    fn a_task_id_fits_the_frame_budget() {
+        let without = Request {
+            protocol_version: PROTOCOL_VERSION,
+            verb: task_submit(16),
+            task: None,
+        };
+        let with = Request {
+            task: Some(crate::TaskId([7; 16])),
+            ..without.clone()
+        };
+        let plain = encode_request(&without).unwrap().len();
+        let cited = encode_request(&with).unwrap().len();
+        assert_eq!(cited - plain, 1 + 4 + 1 + 16);
+        let encoded = encode_request_zeroizing(&with, PROMPT_MAX_BYTES_FLOOR).unwrap();
+        assert_eq!(encoded.len(), cited);
+        assert_eq!(decode_request(&encoded).unwrap(), with);
+        assert!(encode_request_zeroizing(&with, cited - 1).is_err());
+    }
+
+    #[test]
+    fn a_task_submission_over_1_kib_is_a_prompt_frame() {
+        let verb = task_submit(2048);
+        assert_eq!(class_of(&verb), FrameClass::Prompt);
+        assert!(admits(FrameClass::Prompt, &verb));
+        assert!(!admits(FrameClass::Control, &verb));
+        let request = Request {
+            protocol_version: PROTOCOL_VERSION,
+            verb,
+            task: None,
+        };
+        let encoded = encode_request_zeroizing(&request, PROMPT_MAX_BYTES_FLOOR).unwrap();
+        assert!(encoded.len() > crate::CONTROL_REQUEST_MAX);
+        assert_eq!(decode_request(&encoded).unwrap(), request);
     }
 }

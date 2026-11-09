@@ -160,7 +160,10 @@ resource "vault_pki_secret_backend_role" "maknae_cli" {
 resource "vault_policy" "maknae_kernel" {
   name   = "maknae-kernel"
   policy = <<-EOT
-    path "${vault_mount.maknae_int.path}/sign/maknae-kernel"  { capabilities = ["update"] }
+    path "${vault_mount.maknae_int.path}/sign/maknae-kernel" {
+      capabilities      = ["update"]
+      denied_parameters = { "not_after" = [] }
+    }
     path "${vault_mount.maknae_int.path}/revoke"              { capabilities = ["update"] }
     path "${vault_mount.maknae_int.path}/issuer/default/json" { capabilities = ["read"] }
     path "auth/token/renew-self"  { capabilities = ["update"] }
@@ -233,7 +236,10 @@ resource "vault_policy" "maknae_user" {
     path "${vault_mount.maknae_kv.path}/metadata/${var.user_prefix}/{{identity.entity.aliases.${vault_auth_backend.userpass.accessor}.name}}/*" {
       capabilities = ["read", "list", "delete"]
     }
-    path "${vault_mount.maknae_int.path}/sign/${vault_pki_secret_backend_role.maknae_cli.name}" { capabilities = ["update"] }
+    path "${vault_mount.maknae_int.path}/sign/${vault_pki_secret_backend_role.maknae_cli.name}" {
+      capabilities      = ["update"]
+      denied_parameters = { "not_after" = [] }
+    }
     path "auth/token/lookup-self" { capabilities = ["read"] }
     path "auth/token/revoke-self" { capabilities = ["update"] }
   EOT

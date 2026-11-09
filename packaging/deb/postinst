@@ -37,9 +37,9 @@ grant_reader_traverse() {
 case "$1" in
     configure)
         # --- Users/groups (Jackrabbit §4.6 / §9.1) ------------------------------
-        # THREE identities by construction (#240a added the third): the
-        # `_maknae` daemon account (primary group `_maknae`), the separate
-        # `maknae` OPERATOR group, and the `_maknae-egress` deputy. Prefer
+        # FOUR identities by construction: the `_maknae` daemon account
+        # (primary group `_maknae`), the separate `maknae` OPERATOR group, the
+        # `_maknae-egress` deputy, and the `maknae-agents` agent group. Prefer
         # systemd-sysusers (reads /usr/lib/sysusers.d/maknae.conf); fall back to
         # groupadd/useradd on hosts without it.
         #
@@ -53,6 +53,9 @@ case "$1" in
         fi
         if ! getent group maknae >/dev/null 2>&1; then
             groupadd --system maknae
+        fi
+        if ! getent group maknae-agents >/dev/null 2>&1; then
+            groupadd --system maknae-agents
         fi
         if ! getent group _maknae >/dev/null 2>&1; then
             groupadd --system _maknae

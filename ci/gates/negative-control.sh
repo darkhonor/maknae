@@ -612,48 +612,57 @@ git -C "$tmpF4" init -q
 git -C "$tmpF4" add ci/gates/std-fs-drift.sh ci/gates/std-fs-allowlist.txt crates/x/src/transport_tests.rs
 expect_reject "std-fs-drift/external-test-lost-cfg" "$tmpF4/ci/gates/std-fs-drift.sh" "$tmpF4"
 
-# --- Fixture G: feature-resolution-pin (#77) — a production binary whose
-# NORMAL dependency enables hermetic-test-seam must be rejected. Synthetic
+# --- Fixture G: feature-resolution-pin (#77, #609) — a production binary whose
+# NORMAL dependency enables a test-only feature must be rejected: maknae-config's
+# hermetic-test-seam, maknae-vault's or maknae-crypto's test-support. Synthetic
 # path-deps-only workspace (the pin needs a full cargo resolve, unlike p1's
-# --no-deps metadata): "maknaed" normally-depends on a "maknae-config" that
-# declares the feature, WITH the feature enabled.
-tmpG="$(mktemp -d -p "$NC_TMP")"
-mkdir -p "$tmpG/crates/maknae-config/src" "$tmpG/bins/maknaed/src" "$tmpG/bins/maknae/src" "$tmpG/bins/maknae-spifc/src"
-cat > "$tmpG/Cargo.toml" <<'EOF_G'
+# --no-deps metadata). frp_fixture <bin> <crate> <feature> enables <crate>/<feature>
+# in <bin>'s normal dependency; an empty <bin> builds the clean control.
+frp_fixture() {
+  local root bin crate
+  root="$(mktemp -d -p "$NC_TMP")"
+  cat > "$root/Cargo.toml" <<'EOF_G'
 [workspace]
 resolver = "3"
-members = ["crates/maknae-config", "bins/maknaed", "bins/maknae", "bins/maknae-spifc"]
+members = ["crates/maknae-config", "crates/maknae-vault", "crates/maknae-crypto", "bins/maknaed", "bins/maknae", "bins/maknae-egress", "bins/maknae-spifc"]
 EOF_G
-cat > "$tmpG/crates/maknae-config/Cargo.toml" <<'EOF_G'
+  for crate in maknae-config maknae-vault maknae-crypto; do
+    mkdir -p "$root/crates/$crate/src"
+    echo '' > "$root/crates/$crate/src/lib.rs"
+    cat > "$root/crates/$crate/Cargo.toml" <<EOF_G
 [package]
-name = "maknae-config"
+name = "$crate"
 version = "0.0.0"
 edition = "2021"
 [features]
 hermetic-test-seam = []
+test-support = []
 EOF_G
-echo '' > "$tmpG/crates/maknae-config/src/lib.rs"
-for b in maknaed maknae maknae-spifc; do
-  cat > "$tmpG/bins/$b/Cargo.toml" <<EOF_G
-[package]
-name = "$b"
-version = "0.0.0"
-edition = "2021"
-[dependencies]
-maknae-config = { path = "../../crates/maknae-config" }
-EOF_G
-  echo 'fn main() {}' > "$tmpG/bins/$b/src/main.rs"
-done
-# The violation: maknaed's NORMAL dep enables the seam feature.
-cat > "$tmpG/bins/maknaed/Cargo.toml" <<'EOF_G'
-[package]
-name = "maknaed"
-version = "0.0.0"
-edition = "2021"
-[dependencies]
-maknae-config = { path = "../../crates/maknae-config", features = ["hermetic-test-seam"] }
-EOF_G
-expect_reject "feature-resolution-pin/normal-dep-enables-seam" "$here/feature-resolution-pin.sh" "$tmpG"
+  done
+  for bin in maknaed maknae maknae-egress maknae-spifc; do
+    mkdir -p "$root/bins/$bin/src"
+    echo 'fn main() {}' > "$root/bins/$bin/src/main.rs"
+    {
+      printf '[package]\nname = "%s"\nversion = "0.0.0"\nedition = "2021"\n[dependencies]\n' "$bin"
+      for crate in maknae-config maknae-vault maknae-crypto; do
+        if [ "$bin" = "$1" ] && [ "$crate" = "$2" ]; then
+          printf '%s = { path = "../../crates/%s", features = ["%s"] }\n' "$crate" "$crate" "$3"
+        else
+          printf '%s = { path = "../../crates/%s" }\n' "$crate" "$crate"
+        fi
+      done
+    } > "$root/bins/$bin/Cargo.toml"
+  done
+  echo "$root"
+}
+expect_reject_because "feature-resolution-pin/normal-dep-enables-seam" "enables hermetic-test-seam" \
+  "$here/feature-resolution-pin.sh" "$(frp_fixture maknaed maknae-config hermetic-test-seam)"
+expect_reject_because "feature-resolution-pin/normal-dep-enables-vault-test-support" "enables maknae-vault/test-support" \
+  "$here/feature-resolution-pin.sh" "$(frp_fixture maknaed maknae-vault test-support)"
+expect_reject_because "feature-resolution-pin/egress-enables-crypto-test-support" "enables maknae-crypto/test-support" \
+  "$here/feature-resolution-pin.sh" "$(frp_fixture maknae-egress maknae-crypto test-support)"
+expect_accept "feature-resolution-pin/clean" "feature-resolution-pin: ok" \
+  "$here/feature-resolution-pin.sh" "$(frp_fixture "" "" "")"
 
 
 # ---- verb-vocabulary-drift (#67): the action vocabulary vs its manifest ----
@@ -903,6 +912,47 @@ fx="$(vocab_fixture "$SHIPPED_VOCAB" "$SHIPPED_CONST" "" "${SHIPPED_FILE}  user:
 expect_reject_because "verb-vocab/shipped-grant-to-another-role" \
   "may grant only roles.admin.allow" "$fx/ci/gates/verb-vocabulary-drift.sh"
 
+# #609: roles.user.allow may carry exactly the terms whose grantable row has the
+# admin-and-user disposition, and such a term is granted to both roles.
+USER_VOCAB="${SHIPPED_VOCAB}action	session.task	granted-in-shipped-file	granted to admin by the shipped authz.yaml; an install's own authz.yaml decides
+grantable	session.task	grantable-shipped-granted-admin-and-user	operator MAY grant per-role via roles:; the shipped authz.yaml grants it to admin and user
+"
+USER_CONST='pub(crate) const GRANTABLE_ACTIONS: [&str; 2] = ["admin.status", "session.task"];'
+USER_ARM='        Verb::TaskSubmit { .. } => "session.task",'
+USER_FILE="${SHIPPED_FILE}      - \"session.task\"
+  user:
+    allow:
+      - \"session.task\"
+"
+fx="$(vocab_fixture "$USER_VOCAB" "$USER_CONST" "$USER_ARM" "$USER_FILE")"
+expect_accept "verb-vocab/user-grant-with-the-admin-and-user-disposition" \
+  ": 8 terms, manifest exact, 2 shipped grants" "$fx/ci/gates/verb-vocabulary-drift.sh"
+
+fx="$(vocab_fixture "$USER_VOCAB" "$USER_CONST" "$USER_ARM" "${USER_FILE}      - \"admin.status\"
+")"
+expect_reject_because "verb-vocab/user-grant-of-a-term-without-the-disposition" \
+  "roles.user.allow only a term whose grantable row is grantable-shipped-granted-admin-and-user" \
+  "$fx/ci/gates/verb-vocabulary-drift.sh"
+
+fx="$(vocab_fixture "$USER_VOCAB" "$USER_CONST" "$USER_ARM" "${USER_FILE}  guest:
+    allow:
+      - \"session.task\"
+")"
+expect_reject_because "verb-vocab/guest-grant-of-an-admin-and-user-term" \
+  "may grant only roles.admin.allow" "$fx/ci/gates/verb-vocabulary-drift.sh"
+
+fx="$(vocab_fixture "$USER_VOCAB" "$USER_CONST" "$USER_ARM" "${SHIPPED_FILE}      - \"session.task\"
+")"
+expect_reject_because "verb-vocab/admin-and-user-term-granted-to-admin-only" \
+  "to both admin and user" "$fx/ci/gates/verb-vocabulary-drift.sh"
+
+fx="$(vocab_fixture "$USER_VOCAB" "$USER_CONST" "$USER_ARM" "${SHIPPED_FILE}  user:
+    allow:
+      - \"session.task\"
+")"
+expect_reject_because "verb-vocab/admin-and-user-term-granted-to-user-only" \
+  "to both admin and user" "$fx/ci/gates/verb-vocabulary-drift.sh"
+
 fx="$(vocab_fixture "$SHIPPED_VOCAB" "$SHIPPED_CONST" "" 'schema_version: 1
 roles:
   admin:
@@ -1009,6 +1059,8 @@ pub struct RoleBindingView {
     pub uid: Option<u32>,
     pub label: String,
     pub state: String,
+    pub agent: Option<String>,
+    pub principal: bool,
     ${4:-}
 }
 
@@ -1115,6 +1167,7 @@ FIX
   cat > "$fixture/crates/maknae-config/src/transport.rs" <<FIX
 pub struct TransportConfig {
     pub socket_path: PathBuf,
+    pub agent_socket_path: PathBuf,
     pub max_connections: u32,
     pub prompt_max_bytes: usize,
     pub handshake_timeout_ms: u64,
@@ -1260,6 +1313,8 @@ always	binding.members	ships by construction
 always	binding.uid	ships by construction
 always	binding.label	ships by construction
 always	binding.state	ships by construction
+always	binding.agent	ships by construction
+always	binding.principal	ships by construction
 always	whoami.peer_plane_uri_san	ships by construction
 always	whoami.peer_uid	ships by construction
 always	conversation.conversation	ships by construction
@@ -1284,7 +1339,7 @@ mask	lake	the Knowledge Lake schema, not ours
 # the whole loop kept finding, and the shape the regex extraction could not see.
 fx="$(cfg_fixture "$CFG_OK" 'pub debug_core_dump_path: PathBuf,')"
 expect_reject_because "config-disclosure-drift/config-struct-field-changes-the-count" \
-  "yielded 6 field(s), expected 5" "$fx/ci/gates/config-disclosure-drift.sh"
+  "yielded 7 field(s), expected 6" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: check 4b -- a counted field with no manifest decision. Named
 # `struct-field-with-no-decision` and probed by APPENDING a field, this fired on
@@ -1295,16 +1350,16 @@ expect_reject_because "config-disclosure-drift/config-struct-field-changes-the-c
 # config surface, while the harness printed neg-ok. Bump the SURFACE count so
 # the field is legitimately counted, and decide the transport fields
 # INDIVIDUALLY (as the real manifest does) so the new one is genuinely undecided.
-fx="$(cfg_fixture "$(printf '%s' "$CFG_OK" | sed "s|^disclose${TABCH}transport${TABCH}.*|disclose${TABCH}transport.socket_path${TABCH}shape\ndisclose${TABCH}transport.max_connections${TABCH}shape\ndisclose${TABCH}transport.prompt_max_bytes${TABCH}shape\ndisclose${TABCH}transport.handshake_timeout_ms${TABCH}shape\ndisclose${TABCH}transport.read_timeout_ms${TABCH}shape|")" \
+fx="$(cfg_fixture "$(printf '%s' "$CFG_OK" | sed "s|^disclose${TABCH}transport${TABCH}.*|disclose${TABCH}transport.socket_path${TABCH}shape\ndisclose${TABCH}transport.agent_socket_path${TABCH}shape\ndisclose${TABCH}transport.max_connections${TABCH}shape\ndisclose${TABCH}transport.prompt_max_bytes${TABCH}shape\ndisclose${TABCH}transport.handshake_timeout_ms${TABCH}shape\ndisclose${TABCH}transport.read_timeout_ms${TABCH}shape|")" \
   'pub debug_core_dump_path: PathBuf,')"
 python3 - "$fx" <<'PY'
 import pathlib, sys
 root = pathlib.Path(sys.argv[1])
 g = root / "ci/gates/config-disclosure-drift.sh"
 s = g.read_text()
-old = "TransportConfig|transport|5|config"
+old = "TransportConfig|transport|6|config"
 assert s.count(old) == 1, "fixture count anchor moved"
-g.write_text(s.replace(old, "TransportConfig|transport|6|config"))
+g.write_text(s.replace(old, "TransportConfig|transport|7|config"))
 # The CODE side must itemize too, or check 3 (DISCLOSABLE-vs-manifest
 # agreement) fires first and 4b is again never reached.
 d = root / "crates/maknae-config/src/document.rs"
@@ -1312,7 +1367,7 @@ t = d.read_text()
 assert t.count('    "transport",\n') == 1, "fixture DISCLOSABLE anchor moved"
 d.write_text(t.replace('    "transport",\n', "".join(
     '    "transport.%s",\n' % f for f in
-    ("socket_path", "max_connections", "prompt_max_bytes",
+    ("socket_path", "agent_socket_path", "max_connections", "prompt_max_bytes",
      "handshake_timeout_ms", "read_timeout_ms"))))
 PY
 expect_reject_because "config-disclosure-drift/struct-field-with-no-decision" \
@@ -1356,7 +1411,7 @@ cat > "$fx/crates/maknae-config/src/document.rs" <<'FIX'
 const DISCLOSABLE: &[&str] = &["transport", "providers[].name", "providers[].endpoint", "providers[].models", "providers[].models[]", "providers[].reasoning_effort", "providers[].output_tokens_field", "vault.addr", "vault.approle_mount", "vault.pki_int_mount", "vault.deployment_id", "vault.user_auth", "vault.user_auth.type", "vault.user_auth.mount", "vault.kv_mount", "vault.user_prefix", "vault.plane_key", "audit.jsonl_path", "principal", "egress.socket_path", "egress.deadline_ms", "deployment.mode", "deployment.account_source"];
 const SUPPRESSED: &[&str] = &["vault.insecure_plaintext_secret_path", "core.handling", "audit.au3_1"];
 FIX
-expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" ": 71 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" ": 73 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a section registered in boot.rs with no SURFACE entry. THE THIRD
 # fail-open, and the one that closes the PROPERTY rather than an instance: the
@@ -1378,13 +1433,13 @@ expect_reject "config-disclosure-drift/registered-section-with-no-surface-entry"
 # while the count stayed put.
 fx="$(cfg_fixture "$CFG_OK" 'pub(crate) session_token_path: PathBuf,')"
 expect_reject_because "config-disclosure-drift/pub-crate-field-not-counted" \
-  "yielded 6 field(s), expected 5" "$fx/ci/gates/config-disclosure-drift.sh"
+  "yielded 7 field(s), expected 6" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a raw-identifier field. `type` is a Rust keyword and an entirely
 # ordinary YAML key.
 fx="$(cfg_fixture "$CFG_OK" 'pub r#type: String,')"
 expect_reject_because "config-disclosure-drift/raw-identifier-field-not-counted" \
-  "yielded 6 field(s), expected 5" "$fx/ci/gates/config-disclosure-drift.sh"
+  "yielded 7 field(s), expected 6" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a SectionSpec registered with a STRING LITERAL name. boot.rs's own
 # grammar accepts it, and keying the cross-check on `[A-Z_]+_SECTION` const
@@ -1405,7 +1460,7 @@ expect_reject "config-disclosure-drift/string-literal-section-registration" "$fx
 # the two are the same property, one keyword apart.
 fx="$(cfg_fixture "$CFG_OK" 'session_token_path: PathBuf,')"
 expect_reject_because "config-disclosure-drift/private-field-not-counted" \
-  "yielded 6 field(s), expected 5" "$fx/ci/gates/config-disclosure-drift.sh"
+  "yielded 7 field(s), expected 6" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a scalar field turned into a config STRUCT. The silent variant of
 # the depth-blind tally: the field count does not change, so nothing else in
@@ -1927,7 +1982,7 @@ fi
 # go check a sed flag. This probe pins the corrected order.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'std::sync::Arc<String>')"
 expect_accept "config-disclosure-drift/qualified-wrapper-is-a-leaf" \
-  ": 71 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 73 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the config-surface `Vec` exemption holds for the QUALIFIED spelling
 # too. Under the old post-loop `s/.*:://`, `Vec<crate::Principal>` reduced to
@@ -1936,7 +1991,7 @@ expect_accept "config-disclosure-drift/qualified-wrapper-is-a-leaf" \
 # the unqualified `config-vec-of-struct-is-a-leaf` probe below cannot see.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'Vec<crate::Principal>')"
 expect_accept "config-disclosure-drift/qualified-config-vec-is-still-a-leaf" \
-  ": 71 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 73 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the mirror image. `Vec<WorkspaceStruct>` on a CONFIG surface is a
 # LEAF -- only a sequence whose element paths are declared is walked;
@@ -1945,12 +2000,12 @@ expect_accept "config-disclosure-drift/qualified-config-vec-is-still-a-leaf" \
 # did not, and every config row was silently held to the wire rule.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'Vec<Principal>')"
 expect_accept "config-disclosure-drift/config-vec-of-struct-is-a-leaf" \
-  ": 71 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 73 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the clean fixture passes and reports both counts. Without this every
 # rejection above would stay green against a gate that refuses everything.
 fx="$(cfg_fixture "$CFG_OK")"
-expect_accept "config-disclosure-drift/clean-fixture-passes" ": 71 paths decided, 81 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/clean-fixture-passes" ": 73 paths decided, 84 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
 
 fx="$(cfg_fixture "$CFG_OK")"
 python3 - "$fx" <<'PYFIX'
@@ -2066,7 +2121,7 @@ expect_reported_count "p1-manifest/packages-match-the-workspace" "ok (" "$exp_p1
 # control; asserting it here means any future silent shrink is a red build.
 
 expect_accept "config-disclosure-drift/real-repo-counts-pinned" \
-  ": 82 paths decided, 81 struct fields covered" "$here/config-disclosure-drift.sh"
+  ": 85 paths decided, 84 struct fields covered" "$here/config-disclosure-drift.sh"
 
 
 # #158: a grant's own disclosure inventory must reject new data and type changes.
@@ -2371,6 +2426,10 @@ SIG='pub(crate) fn decide_loaded_cited(
     req: &SecRequest,
 ) -> Decided {
 '
+CHANNEL_REFUSAL='    if let Some(reason) = channel_refusal(&lp.agents, uid, req) {
+        return undecided(Verdict::Deny { reason });
+    }
+'
 PRELUDE='    let undecided = |verdict| Decided {
         verdict,
         role: None,
@@ -2390,7 +2449,7 @@ PRELUDE='    let undecided = |verdict| Decided {
     if class_of(&req.action.0) == Some(Class::Kernel) {
         return undecided(kernel_decided(req));
     }
-'
+'"$CHANNEL_REFUSAL"
 CITED_HEAD="${SIG}${PRELUDE}"
 ROLE_MATCH='    let role = match lp.roles.role_for(uid, principal.uid) {
         Resolution::Role(r) => r,
@@ -2513,6 +2572,12 @@ ordering_probe a-second-class-return-before-roles "differs from its skeleton at 
         return undecided(permit());
     }
 ")"
+ordering_probe a-statement-after-the-channel-refusal "differs from its skeleton at \`ifreq.action.0==\"\"{returnundecided(permi" "$(with_prelude '    if req.action.0 == "admin.whoami" {
+        return undecided(permit());
+    }
+')"
+NO_REFUSAL="${CLEAN_DECIDE/"$CHANNEL_REFUSAL"/}"
+ordering_probe the-channel-refusal-after-role-resolution "differs from its skeleton at \`<end>\`" "${NO_REFUSAL/"$MATCH_LINE"/"$CHANNEL_REFUSAL$MATCH_LINE"}"
 ordering_probe a-permit-before-roles "differs from its skeleton at \`ifprincipal.uid==0{" "$(with_prelude '    if principal.uid == 0 {
         return undecided(permit());
     }
@@ -2537,19 +2602,19 @@ nested='        Role::Guest => match x {
 ordering_probe a-nested-adversary-arm "is not an arm of \`match role {\`" "${CLEAN_DECIDE/"$ADV_ARM"/"$nested"}"
 ordering_probe the-adversary-arm-reads-the-request "the Role::Adversary arm must decide without reading the request" "${CLEAN_DECIDE/"$ADV_ARM"/        Role::Adversary => if req.action.0 == \"liveness.ping\" { (Verdict::Deny { reason: \"\".into() }, None) } else { (Verdict::Deny { reason: \"\".into() }, None) },}"
 ordering_probe the-adversary-arm-permits "the Role::Adversary arm must be a Verdict::Deny and never a permit" "${CLEAN_DECIDE/"$ADV_ARM"/        Role::Adversary => (Verdict::Permit { obligations: vec![] }, None),}"
-ordering_probe a-class-return-between-roles-and-the-match "(line 40: \`if class == Some(Class::Liveness) {\`)" "$(between '    if class == Some(Class::Liveness) {
+ordering_probe a-class-return-between-roles-and-the-match "(line 43: \`if class == Some(Class::Liveness) {\`)" "$(between '    if class == Some(Class::Liveness) {
         return undecided(permit());
     }
 ')"
-ordering_probe a-role-key-match-between-roles-and-the-match "(line 40: \`match role.key() {\`)" "$(between '    match role.key() {
+ordering_probe a-role-key-match-between-roles-and-the-match "(line 43: \`match role.key() {\`)" "$(between '    match role.key() {
         "adversary" => return undecided(permit()),
         _ => {}
     }
 ')"
-ordering_probe the-resolved-role-is-rewritten "(line 32: \`Resolution::Role(_) => Role::Admin,\`)" "${CLEAN_DECIDE/Resolution::Role(r) => r,/Resolution::Role(_) => Role::Admin,}"
+ordering_probe the-resolved-role-is-rewritten "(line 35: \`Resolution::Role(_) => Role::Admin,\`)" "${CLEAN_DECIDE/Resolution::Role(r) => r,/Resolution::Role(_) => Role::Admin,}"
 ordering_probe the-role-is-rebound "the role is rebound outside its role_for(" "$(between '    let role = Role::Admin;
 ')"
-ordering_probe the-role-is-rebound-by-a-tuple "(line 40: \`let (role, _) = (lp.default(), 0);\`)" "$(between '    let (role, _) = (lp.default(), 0);
+ordering_probe the-role-is-rebound-by-a-tuple "(line 43: \`let (role, _) = (lp.default(), 0);\`)" "$(between '    let (role, _) = (lp.default(), 0);
 ')"
 ordering_probe the-role-is-shadowed-by-an-at-pattern "role is bound by a closure, a pattern or an arm" "$(before_adversary '        role @ Role::Admin => permit(),')"
 ordering_probe the-role-is-a-closure-parameter "role is bound by a closure, a pattern or an arm" "$(with_prelude '    let f = |role: Role| role;
@@ -2645,7 +2710,7 @@ for prefix in 'r' 'br' 'cr' 'br#'; do
 ${HIDDEN_ARM}
         Role::User if t == \"\" => ok(),")"
 done
-ordering_probe an-escaped-quote-char-cannot-hide-an-arm "(line 42: \`_\`)" "$(before_adversary "        Role::Admin if [c] == ['\\'','\"'] => ok(),
+ordering_probe an-escaped-quote-char-cannot-hide-an-arm "(line 45: \`_\`)" "$(before_adversary "        Role::Admin if [c] == ['\\'','\"'] => ok(),
 ${HIDDEN_ARM}
         Role::User if t == \"\" => ok(),")"
 f="$(ordering_fixture "$CLEAN_DECIDE" "$CLEAN_BINDING")"

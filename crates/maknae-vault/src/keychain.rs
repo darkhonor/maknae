@@ -10,7 +10,7 @@ pub(crate) fn read_plane_secret(
     pointer: &Path,
     plane: KeychainPlane,
 ) -> Result<Zeroizing<String>, VaultError> {
-    let expected_uid = nix::unistd::User::from_name(plane.account_name())
+    let expected_uid = maknae_io::user_by_name(plane.account_name())
         .ok()
         .flatten()
         .map(|u| u.uid.as_raw());

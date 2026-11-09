@@ -580,6 +580,7 @@ mod tests {
         let g = build(
             &IdentityLayer {
                 aliases: Default::default(),
+                agents: Default::default(),
                 source: "p".into(),
                 label: "UNCLASSIFIED".into(),
                 bindings_sha256: None,
@@ -616,6 +617,7 @@ mod tests {
         let roles = persisted_compiled_set("UNCLASSIFIED");
         let layer = IdentityLayer {
             aliases: Default::default(),
+            agents: Default::default(),
             source: "p".into(),
             label: "UNCLASSIFIED".into(),
             bindings_sha256: None,
@@ -649,6 +651,7 @@ mod tests {
         let g = build(
             &IdentityLayer {
                 aliases: Default::default(),
+                agents: Default::default(),
                 source: "p".into(),
                 label: "UNCLASSIFIED".into(),
                 bindings_sha256: Some([3; 32]),

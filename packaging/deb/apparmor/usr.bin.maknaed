@@ -56,6 +56,8 @@ profile maknaed /usr/bin/maknaed {
   # the 0660 _maknae:maknae socket file that gates operator access.
   /run/maknae/                           rw,
   /run/maknae/**                         rw,
+  /run/maknae-agent/                     rw,
+  /run/maknae-agent/**                   rw,
   # #240: the deputy's activation socket (maknae-egress.socket). A connect to
   # a PATHNAME AF_UNIX socket is mediated as a file access on the socket
   # inode in addition to the `unix` rule below, so the path must be granted

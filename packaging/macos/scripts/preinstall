@@ -32,6 +32,7 @@ user_exists()  { dscl . -read "/Users/$1"  >/dev/null 2>&1; }
 # would record an id we merely OBSERVED and the guard would match.
 CREATED_MAKNAE_U=false; CREATED_MAKNAE_G=false
 CREATED_EGRESS_U=false; CREATED_EGRESS_G=false
+CREATED_AGENTS_G=false
 CREATED_GROUP=false;    CREATED_USER=false
 
 # FIRST INSTALL or UPGRADE? macOS gives pkg scripts no equivalent of the deb's
@@ -138,7 +139,8 @@ refuse_unsafe_ancestors() {
 for d in /usr/local /usr/local/var /usr/local/var/db /usr/local/var/run /usr/local/var/log /usr/local/lib \
          /etc/maknae /etc/maknae/private /var/log/maknae /usr/local/var/log/maknae \
          /usr/local/lib/maknae /usr/local/var/run/maknae "$RECEIPT_DIR" /usr/local/var/db/maknae/state /usr/local/var/db/maknae/state/conversations \
-         /usr/local/var/run/maknae-egress /usr/local/var/log/maknae-egress; do
+         /usr/local/var/run/maknae-egress /usr/local/var/log/maknae-egress \
+         /usr/local/var/run/maknae-agent; do
     [ ! -L "$d" ] || { echo "maknae: $d is a symlink — refusing to install through it" >&2; exit 1; }
 done
 refuse_unsafe_ancestors
@@ -155,6 +157,7 @@ run_capture() { CREATED_GROUP=false; CREATED_USER=false; "$@" > "$ID_TMP"; }
 run_capture ensure_group maknae "Maknae operator group";        OPERATOR_GID="$(cat "$ID_TMP")"
 run_capture ensure_group _maknae "Maknae trust-plane daemon";   MAKNAE_GID="$(cat "$ID_TMP")";  CREATED_MAKNAE_G=$CREATED_GROUP
 run_capture ensure_group _maknae-egress "Maknae egress daemon"; EGRESS_GID="$(cat "$ID_TMP")";  CREATED_EGRESS_G=$CREATED_GROUP
+run_capture ensure_group maknae-agents "Maknae enrolled agents"; AGENTS_GID="$(cat "$ID_TMP")";  CREATED_AGENTS_G=$CREATED_GROUP
 run_capture ensure_service_user _maknae "Maknae trust-plane daemon" "$MAKNAE_GID";   MAKNAE_UID="$(cat "$ID_TMP")"; CREATED_MAKNAE_U=$CREATED_USER
 run_capture ensure_service_user _maknae-egress "Maknae egress daemon" "$EGRESS_GID"; EGRESS_UID="$(cat "$ID_TMP")"; CREATED_EGRESS_U=$CREATED_USER
 
@@ -192,6 +195,9 @@ check_distinct() {   # $1=name $2=value $3=name $4=value
 check_distinct OPERATOR_GID "$OPERATOR_GID" MAKNAE_GID "$MAKNAE_GID"
 check_distinct OPERATOR_GID "$OPERATOR_GID" EGRESS_GID "$EGRESS_GID"
 check_distinct MAKNAE_GID   "$MAKNAE_GID"   EGRESS_GID "$EGRESS_GID"
+check_distinct AGENTS_GID   "$AGENTS_GID"   OPERATOR_GID "$OPERATOR_GID"
+check_distinct AGENTS_GID   "$AGENTS_GID"   MAKNAE_GID "$MAKNAE_GID"
+check_distinct AGENTS_GID   "$AGENTS_GID"   EGRESS_GID "$EGRESS_GID"
 
 mkdir -p "${ANCESTORS[@]}"
 refuse_unsafe_ancestors
@@ -227,7 +233,10 @@ rt_want="$MAKNAE_UID $OPERATOR_GID 750"
 
 install -d -m 0750 -o "$EGRESS_UID" -g "$MAKNAE_GID" /usr/local/var/run/maknae-egress
 install -d -m 0750 -o "$EGRESS_UID" -g "$EGRESS_GID" /usr/local/var/log/maknae-egress
+# The D1 row for the agent socket: born group `maknae-agents`, so the chown is a no-op.
+install -d -m 0750 -o "$MAKNAE_UID" -g "$AGENTS_GID" /usr/local/var/run/maknae-agent
 for pair in "/usr/local/var/run/maknae-egress:$EGRESS_UID $MAKNAE_GID 750" \
+            "/usr/local/var/run/maknae-agent:$MAKNAE_UID $AGENTS_GID 750" \
             "/usr/local/var/log/maknae:$MAKNAE_UID $MAKNAE_GID 750" \
             "/usr/local/var/log/maknae-egress:$EGRESS_UID $EGRESS_GID 750"; do
     d="${pair%%:*}"; want="${pair#*:}"; got="$(stat -f '%u %g %Lp' "$d")"
@@ -280,6 +289,7 @@ CREATED_MAKNAE_U="$(sticky "$CREATED_MAKNAE_U" MaknaeUIDCreatedByUs       Maknae
 CREATED_MAKNAE_G="$(sticky "$CREATED_MAKNAE_G" MaknaeGIDCreatedByUs       MaknaeGID       "$MAKNAE_GID")"
 CREATED_EGRESS_U="$(sticky "$CREATED_EGRESS_U" MaknaeEgressUIDCreatedByUs MaknaeEgressUID "$EGRESS_UID")"
 CREATED_EGRESS_G="$(sticky "$CREATED_EGRESS_G" MaknaeEgressGIDCreatedByUs MaknaeEgressGID "$EGRESS_GID")"
+CREATED_AGENTS_G="$(sticky "$CREATED_AGENTS_G" MaknaeAgentsGIDCreatedByUs MaknaeAgentsGID "$AGENTS_GID")"
 
 cat > "$RECEIPT" <<RECEIPT_EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -291,10 +301,12 @@ cat > "$RECEIPT" <<RECEIPT_EOF
   <key>MaknaeEgressUID</key>            <integer>${EGRESS_UID}</integer>
   <key>MaknaeEgressGID</key>            <integer>${EGRESS_GID}</integer>
   <key>MaknaeOperatorGID</key>          <integer>${OPERATOR_GID}</integer>
+  <key>MaknaeAgentsGID</key>            <integer>${AGENTS_GID}</integer>
   <key>MaknaeUIDCreatedByUs</key>       <${CREATED_MAKNAE_U}/>
   <key>MaknaeGIDCreatedByUs</key>       <${CREATED_MAKNAE_G}/>
   <key>MaknaeEgressUIDCreatedByUs</key> <${CREATED_EGRESS_U}/>
   <key>MaknaeEgressGIDCreatedByUs</key> <${CREATED_EGRESS_G}/>
+  <key>MaknaeAgentsGIDCreatedByUs</key> <${CREATED_AGENTS_G}/>
 </dict>
 </plist>
 RECEIPT_EOF

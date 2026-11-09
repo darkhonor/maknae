@@ -414,6 +414,37 @@ async fn rejects_extra_san_client() {
     assert!(e.contains(crate::peer_auth::PLANE_URI_SAN_PREFIX), "{e}");
 }
 
+fn agent_leaf_auth() -> PeerAuth {
+    PeerAuth::PlaneLeaf {
+        accept: SanRule::Agent {
+            trust_domain: "d".to_string(),
+        },
+    }
+}
+
+#[tokio::test]
+async fn agent_class_accepts_an_enrolled_agent_leaf() {
+    provider();
+    let ca = mk_ca();
+    let (kchain, kkey) = mk_leaf(&ca, "spiffe://d/plane/kernel", false);
+    let (achain, akey) = mk_leaf(&ca, "spiffe://d/plane/agent/hobi", false);
+    let s = server_cfg(kchain, kkey, &cab(&ca), &agent_leaf_auth());
+    let c = client_cfg(achain, akey, &cab(&ca), Plane::Kernel, true);
+    handshake(s, c).await.expect("agent leaf admitted");
+}
+
+#[tokio::test]
+async fn agent_class_refuses_a_plane_cli_leaf() {
+    provider();
+    let ca = mk_ca();
+    let (kchain, kkey) = mk_leaf(&ca, "spiffe://d/plane/kernel", false);
+    let (cchain, ckey) = mk_leaf(&ca, "spiffe://d/plane/cli", false);
+    let s = server_cfg(kchain, kkey, &cab(&ca), &agent_leaf_auth());
+    let c = client_cfg(cchain, ckey, &cab(&ca), Plane::Kernel, true);
+    let e = handshake(s, c).await.unwrap_err();
+    assert!(e.contains(crate::peer_auth::PLANE_URI_SAN_PREFIX), "{e}");
+}
+
 // ---- accept() rejection surfacing (Task 5): needs a REAL UnixStream socketpair, since the
 // in-process `tokio::io::duplex` used above cannot carry `SO_PEERCRED` — peer-creds are the
 // whole point of `AcceptRejection`. Unix-only, like `socket.rs`/`peercred.rs`/`stream.rs`.

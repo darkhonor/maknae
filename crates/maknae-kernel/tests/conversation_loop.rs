@@ -1104,18 +1104,6 @@ async fn a_non_local_lane_session_new_is_denied() {
 }
 
 #[tokio::test]
-#[ignore = "#609: AGENT_DEFAULT_DENIED"]
-async fn agents_are_denied_session_new_by_default() {
-    let rig = Rig::new("agent-default", Kind::Mem);
-    let cwd = rig.cwd();
-    let records = Records::new(0);
-    let fd = maknae_io::open_directory_for_delegation(&cwd).unwrap();
-    let resp = rig.new_at(&cwd, Some(fd), &records).await.unwrap();
-    refused_with(&resp, ProtoErrCode::Unauthorized);
-    assert!(rig.held().is_empty());
-}
-
-#[tokio::test]
 async fn a_racing_update_after_the_send_withholds_the_reply() {
     let mut rig = Rig::new("race-reply", Kind::Mem);
     let conv = rig.open().await;
@@ -1233,7 +1221,6 @@ async fn the_shipped_policy_lets_admin_run_the_session_verbs_and_stops_a_prompt_
 }
 
 #[tokio::test]
-#[ignore = "#609: user-side session grants ship at the rebase"]
 async fn the_shipped_policy_lets_a_user_run_the_session_verbs_and_stops_a_prompt_at_the_destination_check(
 ) {
     shipped_session_lifecycle("user").await;

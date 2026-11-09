@@ -159,8 +159,8 @@ pub fn vault_error_text(e: &vaultrs::error::ClientError) -> String {
 pub fn sign_refusal_detail(vault_message: &str, plane_key: PlaneKey) -> String {
     if vault_message.to_ascii_lowercase().contains("key") {
         format!(
-            "{vault_message} (check that vault.plane_key {} matches deploy/vault-pki's \
-             plane_key_algorithm, and that Vault is 2.2.0 or later for ml-dsa-87)",
+            "{vault_message} (check that vault.plane_key {} matches the key type of the Vault PKI \
+             role (key_type/key_bits), and that Vault is 2.2.0 or later for ml-dsa-87)",
             plane_key.as_str()
         )
     } else {
@@ -465,7 +465,7 @@ mod tests {
             let m = sign_refusal_detail(msg, PlaneKey::MlDsa87);
             assert!(m.starts_with(&format!("{msg} (")), "{m}");
             assert!(
-                m.contains("vault.plane_key ml-dsa-87") && m.contains("plane_key_algorithm"),
+                m.contains("vault.plane_key ml-dsa-87") && m.contains("key_type"),
                 "{m}"
             );
         }

@@ -438,7 +438,7 @@ fn exit_code(r: &Result<Outcome, String>) -> u8 {
 }
 
 pub(crate) fn kernel_gid() -> Result<u32, String> {
-    nix::unistd::Group::from_name("_maknae")
+    maknae_io::group_by_name("_maknae")
         .map_err(|e| format!("group _maknae: {e}"))?
         .map(|g| g.gid.as_raw())
         .ok_or_else(|| "no such group: _maknae; is maknae installed?".to_string())
@@ -2029,5 +2029,16 @@ mod tests {
         assert!(te
             .lines()
             .any(|l| l == "neverallow maknae_egress_t maknae_state_t:{ dir file } *;"));
+    }
+
+    #[test]
+    fn kernel_gid_is_the_maknae_daemon_group_or_a_refusal() {
+        match nix::unistd::Group::from_name("_maknae").unwrap() {
+            Some(g) => assert_eq!(kernel_gid(), Ok(g.gid.as_raw())),
+            None => assert_eq!(
+                kernel_gid(),
+                Err("no such group: _maknae; is maknae installed?".to_string())
+            ),
+        }
     }
 }

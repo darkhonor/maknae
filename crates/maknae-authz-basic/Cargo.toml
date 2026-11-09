@@ -15,6 +15,7 @@ workspace = true
 maknae-security = { path = "../maknae-security" }
 maknae-config = { path = "../maknae-config" }
 maknae-graph = { path = "../maknae-graph" }
+maknae-io = { path = "../maknae-io" }
 
 [target.'cfg(unix)'.dependencies]
 # getpwnam at policy load ONLY (boot and reload) — zero per-request NSS (spec §3:
@@ -32,4 +33,3 @@ hermetic-test-seam = ["maknae-config/hermetic-test-seam"]
 
 [dev-dependencies]
 maknae-config = { path = "../maknae-config", features = ["hermetic-test-seam"] }
-maknae-io = { path = "../maknae-io" }

@@ -1,13 +1,16 @@
+use crate::agent_enroll::AgentId;
 use crate::plane::Plane;
-use crate::verify::{verify_uri_san, VerifyError};
+use crate::verify::{leaf_not_after, verify_san, verify_uri_san, VerifiedSan, VerifyError};
 use maknae_crypto::rustls::pki_types::CertificateDer;
 use maknae_crypto::tls::{PeerIdentity, PeerLeaf};
+use std::time::SystemTime;
 
 pub(crate) const PLANE_URI_SAN_PREFIX: &str = "plane URI-SAN";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SanRule {
     Exact(String),
+    Agent { trust_domain: String },
 }
 
 impl SanRule {
@@ -53,6 +56,11 @@ pub enum PeerAuth {
 pub enum ChannelPeer {
     Certless,
     Certified(String),
+    Agent {
+        san: String,
+        agent: AgentId,
+        not_after: SystemTime,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -71,9 +79,20 @@ pub(crate) fn decide(
         (PeerAuth::Certless, None) => Ok(ChannelPeer::Certless),
         (PeerAuth::Certless, Some(_)) => Err(PeerAuthRefusal::UnexpectedClientCert),
         (PeerAuth::PlaneLeaf { .. }, None) => Err(PeerAuthRefusal::NoClientCert),
-        (PeerAuth::PlaneLeaf { accept }, Some(leaf)) => verify_uri_san(leaf.as_ref(), accept)
-            .map(ChannelPeer::Certified)
-            .map_err(PeerAuthRefusal::San),
+        (PeerAuth::PlaneLeaf { accept }, Some(leaf)) => {
+            let verified = verify_san(leaf.as_ref(), accept).map_err(PeerAuthRefusal::San)?;
+            match verified {
+                VerifiedSan::Plane(san) => Ok(ChannelPeer::Certified(san)),
+                VerifiedSan::Agent { san, agent } => {
+                    let not_after = leaf_not_after(leaf.as_ref()).map_err(PeerAuthRefusal::San)?;
+                    Ok(ChannelPeer::Agent {
+                        san,
+                        agent,
+                        not_after,
+                    })
+                }
+            }
+        }
     }
 }
 
@@ -181,6 +200,30 @@ mod tests {
         );
         assert!(matches!(
             decide(&plane_leaf(), Some(&[kernel, good])),
+            Err(PeerAuthRefusal::San(VerifyError::WrongSan { .. }))
+        ));
+    }
+
+    #[test]
+    fn an_agent_leaf_decides_to_an_agent_peer() {
+        let san = "spiffe://d/plane/agent/hobi";
+        let rule = PeerAuth::PlaneLeaf {
+            accept: SanRule::Agent {
+                trust_domain: "d".to_string(),
+            },
+        };
+        let der = leaf(vec![uri(san)]);
+        let want = crate::leaf_not_after(&der).unwrap();
+        assert_eq!(
+            decide(&rule, Some(std::slice::from_ref(&der))),
+            Ok(ChannelPeer::Agent {
+                san: san.to_string(),
+                agent: AgentId::parse("hobi").unwrap(),
+                not_after: want,
+            })
+        );
+        assert!(matches!(
+            decide(&rule, Some(&[leaf(vec![uri(CLI)])])),
             Err(PeerAuthRefusal::San(VerifyError::WrongSan { .. }))
         ));
     }
