@@ -843,6 +843,23 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn an_agent_seal_refuses_a_malformed_secret_before_the_keychain() {
+        let id = maknae_vault::agent_enroll::AgentId::parse("hobi").unwrap();
+        assert!(matches!(
+            seal_agent_secret_macos("not-a-secret-id", &id, "TEAM123456").await,
+            Err(EnrollError::SecretIdShape)
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn an_agent_never_sealed_is_absent_from_the_system_keychain() {
+        let id = maknae_vault::agent_enroll::AgentId::parse("neversealedprobe").unwrap();
+        assert!(!agent_secret_present_macos(&id).await.unwrap());
+    }
+
     #[test]
     fn the_agent_item_is_keyed_by_id_and_trusts_only_the_agent_binary() {
         let id = maknae_vault::agent_enroll::AgentId::parse("hobi").unwrap();

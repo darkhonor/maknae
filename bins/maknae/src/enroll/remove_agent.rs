@@ -637,6 +637,23 @@ mod tests {
         d
     }
 
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn an_agent_never_sealed_leaves_no_sealed_secret_behind() {
+        let d = scratch("never-sealed");
+        let private = maknae_io::open_anchor(
+            &d,
+            maknae_io::AnchorRequired {
+                owner: None,
+                mode_mask: None,
+            },
+            maknae_io::StrategyPref::Auto,
+        )
+        .unwrap();
+        let id = AgentId::parse("neversealedprobe").unwrap();
+        assert!(!sealed_secret_present(&private, &id).await.unwrap());
+    }
+
     #[test]
     fn remove_leaves_policy_yaml() {
         let d = scratch("policy");
