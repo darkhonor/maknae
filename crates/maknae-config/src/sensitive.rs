@@ -221,13 +221,21 @@ fn entry(text: &str) -> Result<Entry, ConfigError> {
         return Err(bad());
     }
     let glob = |spec: &str| PathGlob::parse(spec).map_err(|_| bad());
-    let lowered = text.to_lowercase();
+    let lowered = case_folded(text);
     Ok(Entry {
         glob: glob(text)?,
         mapped: glob(&mapped(&lowered))?,
         lowered: glob(&lowered)?,
         text: text.to_string(),
     })
+}
+
+/// One spelling for names APFS treats as the same: NFC, lowercase, NFC again,
+/// so neither the input's form nor a lowercase mapping leaves a decomposed form.
+fn case_folded(text: &str) -> String {
+    let nfc = icu_normalizer::ComposingNormalizerBorrowed::new_nfc();
+    nfc.normalize(&nfc.normalize(text).to_lowercase())
+        .into_owned()
 }
 
 /// The one spelling macOS gives a path the kernel may report under another:
@@ -273,8 +281,8 @@ struct Folded {
 
 impl Folded {
     fn new(path: &str, home: Option<&Path>, subtree: bool) -> Self {
-        let lowered = path.to_lowercase();
-        let home_lowered = home.and_then(Path::to_str).map(str::to_lowercase);
+        let lowered = case_folded(path);
+        let home_lowered = home.and_then(Path::to_str).map(case_folded);
         Folded {
             mapped: if subtree {
                 mapped_roots(&lowered)
@@ -462,6 +470,54 @@ mod tests {
         assert_eq!(
             at(&l, "/System/Volumes/Datax/Users/u/.ssh/id", h, Fold::Case),
             Ok(None)
+        );
+    }
+
+    #[test]
+    fn case_fold_matches_either_normalization_form() {
+        let nfc = "Caf\u{e9}";
+        let nfd = "Cafe\u{301}";
+        for (entry, path, home) in [
+            (nfc, nfd, "/Users/u"),
+            (nfd, nfc, "/Users/u"),
+            (nfc, nfc, "/Users/J\u{f6}"),
+            (nfd, nfd, "/Users/J\u{f6}"),
+        ] {
+            let l = list(&[&format!("/srv/{entry}/**"), &format!("~/{entry}/**")]);
+            let base = if home == "/Users/u" {
+                "/Users/u".to_string()
+            } else {
+                "/Users/Jo\u{308}".to_string()
+            };
+            let h = Some(home);
+            let under_srv = format!("/srv/{path}/key");
+            let under_home = format!("{base}/{path}/key");
+            let srv_entry = format!("/srv/{entry}/**");
+            let home_entry = format!("~/{entry}/**");
+            assert_eq!(
+                at(&l, &under_srv, h, Fold::Case),
+                Ok(Some(srv_entry.as_str())),
+                "{entry:?} {path:?}"
+            );
+            assert_eq!(
+                at(&l, &under_home, h, Fold::Case),
+                Ok(Some(home_entry.as_str())),
+                "{entry:?} {path:?} {home:?}"
+            );
+            assert_eq!(
+                below(&l, &format!("/srv/{path}"), h, Fold::Case),
+                Ok(Some(srv_entry.as_str())),
+                "{entry:?} {path:?}"
+            );
+        }
+        let l = list(&[&format!("/srv/{nfc}/**")]);
+        assert_eq!(
+            at(&l, &format!("/srv/{nfd}/key"), None, Fold::None),
+            Ok(None)
+        );
+        assert_eq!(
+            at(&l, &format!("/srv/{nfc}/key"), None, Fold::None),
+            Ok(Some(format!("/srv/{nfc}/**").as_str()))
         );
     }
 

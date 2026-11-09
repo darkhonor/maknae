@@ -2331,7 +2331,7 @@ async fn an_unarmed_write_delete_or_mkdir_of_a_protected_path_answers_protected(
 }
 
 #[tokio::test]
-async fn a_recursive_delete_of_a_tree_that_could_hold_an_entry_answers_protected() {
+async fn a_delete_of_a_directory_that_could_hold_an_entry_answers_protected() {
     let fx = Fixture::with_rules("sensitive_tree_delete", &["Read", "Write"], &[], "");
     host_list(&fx, &["~/.ssh/**", "~/proj/secrets/**", "~/keys/id"]);
     let parent = fx.root.parent().unwrap().to_path_buf();
@@ -2351,23 +2351,19 @@ async fn a_recursive_delete_of_a_tree_that_could_hold_an_entry_answers_protected
 
     let keys = fx.root.join("keys");
     std::fs::create_dir(&keys).unwrap();
-    let (result, record) = second_subject_attempt(
-        &fx,
-        Verb::FsDelete {
-            path: keys.to_str().unwrap().into(),
-            recursive: false,
-        },
-        &fx.root,
-    )
-    .await;
-    assert!(
-        !matches!(&result, RespResult::Err(e) if e.code == maknae_proto::ProtoErrCode::Protected),
-        "{result:?}"
-    );
-    assert!(
-        !record.outcome.reason.starts_with("sensitive"),
-        "{record:?}"
-    );
+    let entry_delete = Verb::FsDelete {
+        path: keys.to_str().unwrap().into(),
+        recursive: false,
+    };
+    let (empty, empty_record) = second_subject_attempt(&fx, entry_delete.clone(), &fx.root).await;
+    assert_protected_by(&empty, "~/keys/id");
+    assert_eq!(empty_record.outcome.reason, "sensitive: host ~/keys/id");
+    assert!(keys.exists());
+    std::fs::write(keys.join("id"), SENSITIVE_SENTINEL).unwrap();
+    let (full, full_record) = second_subject_attempt(&fx, entry_delete, &fx.root).await;
+    assert_eq!(format!("{full:?}"), format!("{empty:?}"));
+    assert_eq!(full_record.outcome.reason, empty_record.outcome.reason);
+    assert_eq!(std::fs::read(keys.join("id")).unwrap(), SENSITIVE_SENTINEL);
     let (result, _) = unarmed_attempt(&fx, recursive_delete(&keys)).await;
     assert_protected_by(&result, "~/keys/id");
     assert!(fx.root.join(".ssh").exists());

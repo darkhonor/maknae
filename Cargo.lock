@@ -1117,6 +1117,7 @@ dependencies = [
 name = "maknae-config"
 version = "0.0.0"
 dependencies = [
+ "icu_normalizer",
  "maknae-io",
  "maknae-security",
  "serde_json",

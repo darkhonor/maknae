@@ -154,6 +154,23 @@ fn same_path(actual: &Path, expected: &Path) -> Result<(), IoError> {
     Ok(())
 }
 
+/// An `O_CREAT|O_EXCL` open certifies no entry only for the errnos the kernel
+/// returns before an inode can exist for it.
+fn refused_create_open(e: nix::errno::Errno, path: &Path) -> MutationFailure {
+    use nix::errno::Errno;
+    let mut f = failure(path, EffectState::NoEffect, io_error(e, path));
+    f.before_write = matches!(
+        e,
+        Errno::EEXIST
+            | Errno::ENOENT
+            | Errno::ENOTDIR
+            | Errno::ELOOP
+            | Errno::ENAMETOOLONG
+            | Errno::EROFS
+    );
+    f
+}
+
 fn unwritten(mut e: MutationFailure, tried: bool) -> MutationFailure {
     e.before_write = !tried;
     e
@@ -552,19 +569,17 @@ impl MutationDirectory {
         write: impl FnOnce(&OwnedFd, &Path) -> Result<(), MutationFailure>,
         fstat: impl FnOnce(&OwnedFd) -> nix::Result<nix::sys::stat::FileStat>,
     ) -> Result<MutationEffect, MutationFailure> {
-        let opened = self
-            .child_path(leaf)
-            .map_err(no_effect(&self.path))
-            .and_then(|path| {
-                self.check_deadline(&path)?;
-                syscall::open_temp_excl(&self.fd, leaf, crate::Mode(0o600))
-                    .map(|fd| (path.clone(), fd))
-                    .map_err(|e| failure(&path, EffectState::NoEffect, io_error(e, &path)))
-            });
-        let (path, fd) = opened.map_err(|mut e| {
+        let certified = |mut e: MutationFailure| {
             e.before_write = true;
             e
-        })?;
+        };
+        let path = self
+            .child_path(leaf)
+            .map_err(no_effect(&self.path))
+            .map_err(certified)?;
+        self.check_deadline(&path).map_err(certified)?;
+        let fd = syscall::open_temp_excl(&self.fd, leaf, crate::Mode(0o600))
+            .map_err(|e| refused_create_open(e, &path))?;
         // A fresh entry already exists, even when the first content write fails.
         let result = write(&fd, &path);
         result.map_err(|mut e| {
@@ -920,6 +935,49 @@ mod tests {
             .unwrap_err();
         assert_eq!(e.state, EffectState::Partial);
         assert!(!e.before_write, "the entry exists once the open succeeds");
+    }
+    #[test]
+    fn a_create_open_refused_by_permission_is_not_certified_before_any_effect() {
+        use std::os::unix::fs::PermissionsExt;
+        assert!(
+            !nix::unistd::geteuid().is_root(),
+            "running as root, which creates in a 0500 directory and voids the premise"
+        );
+        let d = tempfile::tempdir().unwrap();
+        let dir = directory(&d);
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let e = dir.create_exclusive("locked-sentinel", b"x").unwrap_err();
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(!e.before_write, "{e:?}");
+        assert!(!d.path().join("locked-sentinel").exists());
+    }
+    #[test]
+    fn only_errnos_returned_before_an_inode_can_exist_certify_a_create_open() {
+        use nix::errno::Errno;
+        let path = Path::new("/create-open-sentinel");
+        for errno in [
+            Errno::EEXIST,
+            Errno::ENOENT,
+            Errno::ENOTDIR,
+            Errno::ELOOP,
+            Errno::ENAMETOOLONG,
+            Errno::EROFS,
+        ] {
+            assert!(refused_create_open(errno, path).before_write, "{errno}");
+        }
+        for errno in [
+            Errno::EACCES,
+            Errno::EPERM,
+            Errno::ENOSPC,
+            Errno::EDQUOT,
+            Errno::EIO,
+            Errno::EINTR,
+            Errno::EISDIR,
+        ] {
+            let e = refused_create_open(errno, path);
+            assert!(!e.before_write, "{errno}");
+            assert_eq!(e.state, EffectState::NoEffect);
+        }
     }
     #[test]
     fn a_failed_post_create_fstat_is_a_created_file_with_no_version() {

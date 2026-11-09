@@ -452,9 +452,7 @@ fn protection(
     personal: &SensitiveList,
 ) -> Option<Protection> {
     let decide = match verb {
-        Verb::FsDelete {
-            recursive: true, ..
-        } => sensitive_subtree_match,
+        Verb::FsDelete { .. } => sensitive_subtree_match,
         _ => sensitive_match,
     };
     let (list, tag, entry) = match decide(

@@ -2235,9 +2235,9 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn a_create_refused_before_any_byte_answers_unavailable() {
+    async fn a_create_refused_before_any_inode_answers_unavailable_and_a_denied_one_unknown() {
         if nix::unistd::geteuid().is_root() {
-            panic!("a_create_refused_before_any_byte_answers_unavailable: running as root, which writes a 0500 directory and voids the premise; run as an unprivileged user");
+            panic!("a_create_refused_before_any_inode_answers_unavailable_and_a_denied_one_unknown: running as root, which writes a 0500 directory and voids the premise; run as an unprivileged user");
         }
         use std::os::unix::fs::PermissionsExt;
         let d = Fixture::new();
@@ -2263,7 +2263,7 @@ mod tests {
             let (end, reports) = acknowledged_end(prepared, create_grant(&path)).await;
             std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
             let end = end.unwrap();
-            assert!(!end.applied && end.withheld, "{path}: {end:?}");
+            assert!(!end.applied, "{path}: {end:?}");
             assert!(
                 matches!(
                     &reports[..],
@@ -2275,7 +2275,10 @@ mod tests {
         }
         assert_eq!(
             told,
-            vec![maknae_agent::plane::WriteOutcome::Unavailable; 2]
+            vec![
+                maknae_agent::plane::WriteOutcome::Unavailable,
+                maknae_agent::plane::WriteOutcome::Unknown
+            ]
         );
         assert!(std::fs::symlink_metadata(&link)
             .unwrap()

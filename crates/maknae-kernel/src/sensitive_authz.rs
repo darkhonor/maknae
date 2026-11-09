@@ -173,7 +173,10 @@ fn decide_sensitive(host: &SensitiveList, req: &Request, fold: Fold) -> Verdict 
     let subtree = match req.context.0.get(CONTEXT_FS_OPERATION) {
         None => req.action.0 == "fs.delete",
         Some(AttrValue::Str(op)) => match FsOperation::parse(op) {
-            Some(op) => op == FsOperation::DeleteTree,
+            Some(op) => {
+                matches!(op, FsOperation::DeleteEntry | FsOperation::DeleteTree)
+                    || req.action.0 == "fs.delete"
+            }
             None => return Verdict::Indeterminate,
         },
         Some(_) => return Verdict::Indeterminate,
@@ -383,7 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_tree_of_a_protected_parent_denies() {
+    fn every_delete_of_a_protected_parent_denies() {
         let host = list(&["~/.ssh/**"]);
         let op = SensitiveAuthorizer::new(&host);
         let home = Some("/home/u");
@@ -399,7 +402,8 @@ mod tests {
                 req("fs.delete", Some("/home/u"), home),
                 FsOperation::DeleteEntry
             )),
-            NA
+            deny("sensitive: host ~/.ssh/**"),
+            "an entry delete answers by path, not by whether the directory is empty"
         );
         assert_eq!(
             op.decide(&req("fs.delete", Some("/home/u"), home)),

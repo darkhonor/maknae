@@ -6298,7 +6298,7 @@ open(p, "w").write(s.replace(old, new))' "$f" "$2" "$3"; then
     '                return match lost_finish(true, next.stale) {' \
     maknae-loop mutation::tests::an_effect_whose_finish
   expect_reject_because "uniform/a-create-refused-before-any-byte-told-unknown-goes-red" \
-    "a_create_refused_before_any_byte_answers_unavailable" cv_mutant crates/maknae-loop/src/mutation.rs \
+    "a_create_refused_before_any_inode_answers_unavailable_and_a_denied_one_unknown" cv_mutant crates/maknae-loop/src/mutation.rs \
     '                        self.withheld = e.before_write;' \
     '                        self.withheld = false;' \
     maknae-loop mutation::tests::a_create_refused_before
