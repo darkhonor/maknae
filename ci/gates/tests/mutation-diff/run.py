@@ -407,7 +407,7 @@ class Unmappable(unittest.TestCase):
         self.put("crates/beta/src/real.rs", "")
         self.link("crates/beta/src/alias.rs", "real.rs")
         self.assertRefused("FAIL: --in-diff: symlink crates/beta/src/alias.rs in mutation crate beta; "
-                           "in-diff mapping cannot follow aliases — use the whole-package run")
+                           "in-diff mapping cannot follow aliases — remove the symlink")
 
     def test_unmappable_symlink_aliasing_a_mutation_crate_is_refused(self):
         for target in ("crates/alpha/src", "crates", "."):
@@ -435,7 +435,8 @@ class Unmappable(unittest.TestCase):
                     result = self.check()
                     self.assertEqual(result.returncode, 1, result.stderr)
                     self.assertEqual(result.stdout, f"FAIL: --in-diff: build script {script} of mutation "
-                                     "crate beta lies outside the repository — use the whole-package run\n")
+                                     "crate beta lies outside the repository — move the build script "
+                                     "into the crate\n")
                 finally:
                     self.git("reset", "-q", "--hard", "HEAD~1")
 
@@ -459,7 +460,7 @@ class Unmappable(unittest.TestCase):
     def test_unmappable_symlink_with_an_absolute_target_is_refused(self):
         self.link("docs-link", "/etc")
         self.assertRefused("FAIL: --in-diff: symlink docs-link points outside the repository; in-diff "
-                           "mapping cannot follow aliases — use the whole-package run")
+                           "mapping cannot follow aliases — remove the symlink")
 
     def test_unmappable_symlink_escaping_the_repository_is_refused(self):
         (self.root / "tools").mkdir()
@@ -484,8 +485,8 @@ class Unmappable(unittest.TestCase):
                     result = self.check()
                     self.assertEqual(result.returncode, 1, result.stderr)
                     self.assertEqual(result.stdout, f"FAIL: --in-diff: tracked path {shown} contains a newline "
-                                     "or control character; in-diff mapping cannot name it — use the "
-                                     "whole-package run\n")
+                                     "or control character; in-diff mapping cannot name it — rename "
+                                     "the file\n")
                 finally:
                     self.git("reset", "-q", "--hard", "HEAD~1")
 
@@ -498,15 +499,15 @@ class Unmappable(unittest.TestCase):
                 try:
                     key = line.split(" ", 1)[0]
                     self.assertRefused(f"FAIL: --in-diff: .cargo/mutants.toml sets {key}, which changes what "
-                                       "cargo-mutants builds and the in-diff checks do not model — use the "
-                                       "whole-package run")
+                                       "cargo-mutants builds and the in-diff checks do not model — remove "
+                                       f"{key} from .cargo/mutants.toml")
                 finally:
                     self.git("reset", "-q", "--hard", "HEAD~1")
 
     def test_unmappable_an_unparseable_mutants_config_is_refused(self):
         self.put(".cargo/mutants.toml", "exclude_globs = [\n")
         self.commit("config")
-        self.assertRefused("FAIL: --in-diff: .cargo/mutants.toml does not parse")
+        self.assertRefused("FAIL: --in-diff: .cargo/mutants.toml does not parse — fix .cargo/mutants.toml")
 
     def test_unmappable_exclusions_only_or_no_mutants_config_is_accepted(self):
         self.put(".cargo/mutants.toml", 'exclude_globs = ["x.rs"]\nexclude_re = ["y"]\n')

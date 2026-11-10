@@ -3,7 +3,7 @@
 # 2026-08-04-coverage-tiers-design.md (out-of-repo design spec) (v18).
 #
 # Usage: coverage-tiers.sh [--root <path>] [--injection]
-#                          [--mutants <crate>... [--in-diff <rev> [--partial]] | --mutants-all | --readiness-check]
+#                          [--mutants <crate>... --in-diff <rev> | --mutants-all | --readiness-check]
 #
 # Injection contract (named, not a backdoor — CI never sets these):
 #   COVERAGE_TIERS_JSON      coverage JSON (replaces the cargo llvm-cov run)
@@ -43,7 +43,6 @@ mutants_mode=""      # "", "all", "list"
 mutant_crates=()
 in_diff=""
 preflight=0
-partial=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --root)
@@ -63,7 +62,6 @@ while [ $# -gt 0 ]; do
       done
       continue;;
     --in-diff-preflight) preflight=1;;
-    --partial) partial=1;;
     --in-diff)
       shift
       if [ $# -eq 0 ] || [ -z "$1" ] || [ "${1#-}" != "$1" ]; then fail "--in-diff needs a revision"; exit 1; fi
@@ -72,10 +70,12 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
-if [ "$preflight" -eq 1 ] && { [ -n "$in_diff" ] || [ -n "$mutants_mode" ] || [ "$injection" -eq 1 ] || [ "$readiness_only" -eq 1 ] || [ "$partial" -eq 1 ]; }; then
+if [ "$preflight" -eq 1 ] && { [ -n "$in_diff" ] || [ -n "$mutants_mode" ] || [ "$injection" -eq 1 ] || [ "$readiness_only" -eq 1 ]; }; then
   fail "--in-diff-preflight takes only --root"; exit 1
 fi
-if [ "$partial" -eq 1 ] && [ -z "$in_diff" ]; then fail "--partial needs --in-diff"; exit 1; fi
+if [ "$mutants_mode" = "list" ] && [ -z "$in_diff" ]; then
+  fail "--mutants is in-diff only and needs --in-diff <rev>; --mutants-all is the explicit whole-crate run"; exit 1
+fi
 if [ -n "$in_diff" ]; then
   if [ "$mutants_mode" = "all" ]; then fail "--in-diff cannot be combined with --mutants-all"; exit 1; fi
   if [ "$mutants_mode" != "list" ]; then fail "--in-diff needs --mutants"; exit 1; fi
@@ -630,7 +630,6 @@ if [ "$mutants_mode" != "" ]; then
     fi
   fi
   in_diff_file=""
-  partial_n=0
   mut_dir="$root"
   if [ -n "$in_diff" ]; then
     in_git() { env "${in_diff_git_env[@]}" git -C "$root" "$@"; }
@@ -715,12 +714,7 @@ print("\n".join(sorted(crates)))' "$compiled_file" 2>/dev/null)"; }; then
     fi
     while IFS= read -r c; do
       if [ -z "$c" ] || [ -n "${selected[$c]+x}" ]; then continue; fi
-      if [ "$partial" -eq 1 ]; then
-        printf 'PARTIAL: %s owns changed lines and is not selected; its in-diff mutants are not run here\n' "$c"
-        partial_n=$((partial_n + 1))
-      else
-        printf 'FAIL: --in-diff: changed crate %s not selected by --mutants\n' "$c"; exit 1
-      fi
+      printf 'FAIL: --in-diff: changed crate %s not selected by --mutants\n' "$c"; exit 1
     done <<<"$owned_lines"
     if [ ! -s "$in_diff_file" ]; then
       printf 'SKIP: in-diff: no Rust change between %s and HEAD\n' "$base"
@@ -819,9 +813,4 @@ if [ "$fail_n" -gt 0 ]; then
   printf '%d violation(s).\n' "$fail_n"
   exit 1
 fi
-if [ "${partial_n:-0}" -gt 0 ]; then
-  noun=crates; [ "$partial_n" -eq 1 ] && noun=crate
-  echo "PASS (partial: $partial_n $noun not run): coverage-tiers gate"
-else
-  echo "PASS: coverage-tiers gate"
-fi
+echo "PASS: coverage-tiers gate"

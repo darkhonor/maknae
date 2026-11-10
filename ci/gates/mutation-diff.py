@@ -535,10 +535,10 @@ def unmodelled_config(root, sha):
         return None
     data = parse_toml(text)
     if data is None:
-        return "FAIL: --in-diff: .cargo/mutants.toml does not parse — use the whole-package run"
+        return "FAIL: --in-diff: .cargo/mutants.toml does not parse — fix .cargo/mutants.toml"
     for key in sorted(set(data) - MUTANTS_CONFIG_KEYS):
         return (f"FAIL: --in-diff: .cargo/mutants.toml sets {key}, which changes what cargo-mutants builds "
-                "and the in-diff checks do not model — use the whole-package run")
+                f"and the in-diff checks do not model — remove {key} from .cargo/mutants.toml")
     return None
 
 
@@ -561,8 +561,7 @@ def unmappable(root, head, workspace):
         if any(unicodedata.category(ch) == "Cc" for ch in name):
             shown = json.dumps(name, ensure_ascii=False).translate({c: f"\\u{c:04x}" for c in range(0x7f, 0xa0)})
             return (f"FAIL: --in-diff: tracked path {shown} contains a "
-                    "newline or control character; in-diff mapping cannot name it — use the "
-                    "whole-package run")
+                    "newline or control character; in-diff mapping cannot name it — rename the file")
         paths.add(name)
         if meta.split(b" ")[0] == b"120000":
             links.append(raw.decode())
@@ -573,7 +572,7 @@ def unmappable(root, head, workspace):
         target = Path(os.path.realpath(place))
         if os.path.isabs(os.readlink(place)) or not contains(tree, target):
             return (f"FAIL: --in-diff: symlink {link} points outside the repository; in-diff "
-                    "mapping cannot follow aliases — use the whole-package run")
+                    "mapping cannot follow aliases — remove the symlink")
         resolved[link] = (Path(os.path.realpath(place.parent)), target)
     for crate in mutants:
         directory = dirs[crate]
@@ -582,11 +581,11 @@ def unmappable(root, head, workspace):
             if (within(link, directory) or contains(home, parent) or contains(home, target)
                     or contains(target, home)):
                 return (f"FAIL: --in-diff: symlink {link} in mutation crate {crate}; in-diff mapping "
-                        "cannot follow aliases — use the whole-package run")
+                        "cannot follow aliases — remove the symlink")
         for script in build_scripts(root, sha, directory, paths.__contains__):
             if script_path(directory, script) is None:
                 return (f"FAIL: --in-diff: build script {script} of mutation crate {crate} "
-                        "lies outside the repository — use the whole-package run")
+                        "lies outside the repository — move the build script into the crate")
         problem = non_rs_source(root, sha, crate, directory, paths)
         if problem:
             return problem

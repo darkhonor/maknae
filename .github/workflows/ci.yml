@@ -252,7 +252,7 @@ jobs:
       - name: Gate — verb-vocabulary drift (#67)
         run: ci/gates/verb-vocabulary-drift.sh
       - name: Mutation lane status (paused by default — operator ruling 2026-09-07)
-        run: echo "mutation lane paused in hosted CI; opt in with the run-mutants label (in-diff) or vars.MUTATION_IN_CI=true (whole crates); the evidence is in the PR body"
+        run: echo "mutation lane paused in hosted CI; opt in with the run-mutants label (in-diff) or vars.MUTATION_IN_CI=true (whole crates, --mutants-all); the evidence is in the PR body"
       - name: Gate — config-disclosure drift (#162)
         run: ci/gates/config-disclosure-drift.sh
       - name: Gate — authz composition drift (ADR-0008 decision 1; #154/#148)
@@ -321,7 +321,7 @@ jobs:
         env:
           SELECTOR_RESULT: ${{ needs.affected.result }}
         run: test "$SELECTOR_RESULT" = success
-      - name: Select mutation packages (in-diff on a PR passes every mutation crate; the gate decides)
+      - name: Select mutation packages (every mutation crate; in-diff on a PR, the gate decides which run)
         id: packages
         env:
           PACKAGES: ${{ needs.affected.outputs.mutants }}
@@ -330,13 +330,15 @@ jobs:
         run: |
           if [ "$EVENT_NAME" = pull_request ] && [ "$MUTATION_IN_CI" != true ]; then
             bash ci/gates/coverage-tiers.sh --root . --in-diff-preflight
-            PACKAGES="$(python3 -c '
+          else
+            test -n "$PACKAGES"
+          fi
+          PACKAGES="$(python3 -c '
           import sys, tomllib
           crates = tomllib.load(open(sys.argv[1], "rb"))["t1"]["mutants_crates"]
           if not (isinstance(crates, list) and crates and all(isinstance(c, str) and c for c in crates)):
               sys.exit("FAIL: [t1].mutants_crates is not a non-empty list of crate names")
           print(" ".join(crates))' coverage-tiers.toml)"
-          fi
           test -n "$PACKAGES"
           echo "mutants=$PACKAGES" >> "$GITHUB_OUTPUT"
       - name: Install toolchain (pinned)
@@ -364,7 +366,7 @@ jobs:
       - name: Native syscall mutation filter fixtures
         if: contains(format(' {0} ', steps.packages.outputs.mutants), ' maknae-io ') || contains(format(' {0} ', steps.packages.outputs.mutants), ' maknae-sys ')
         run: python3 ci/gates/tests/mutation-platform/run.py
-      - name: Mutation gate (in-diff on a PR, whole crates otherwise; zero missed; TIMEOUT = investigate)
+      - name: Mutation gate (in-diff; whole crates only when MUTATION_IN_CI asks; zero missed; TIMEOUT = investigate)
         env:
           PACKAGES: ${{ steps.packages.outputs.mutants }}
           EVENT_NAME: ${{ github.event_name }}
@@ -377,16 +379,16 @@ jobs:
         run: |
           test -n "$PACKAGES"
           read -r -a packages <<< "$PACKAGES"
-          in_diff=()
           if [ "$EVENT_NAME" = pull_request ] && [ "$MUTATION_IN_CI" != true ]; then
             # The checkout is the PR merge commit; its first parent is the base tip as merged.
             read -r -a parents <<< "$(git rev-list --parents -n1 HEAD)"
             if [ "${#parents[@]}" -ne 3 ]; then
               echo "FAIL: expected the PR merge commit"; exit 1
             fi
-            in_diff=(--in-diff HEAD^1)
+            bash ci/gates/coverage-tiers.sh --root . --mutants "${packages[@]}" --in-diff HEAD^1
+          else
+            bash ci/gates/coverage-tiers.sh --root . --mutants-all
           fi
-          bash ci/gates/coverage-tiers.sh --root . --mutants "${packages[@]}" "${in_diff[@]}"
 
   # macOS is a DEPLOYMENT TARGET (packaging/isolation-contract.md). These two jobs
   # are the only automated macOS coverage that exists; neither substitutes for the

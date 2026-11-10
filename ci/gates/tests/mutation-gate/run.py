@@ -22,7 +22,7 @@ REAL_CARGO = shutil.which("cargo")
 
 class MutationGate(unittest.TestCase):
     def run_gate(self, crate, *, nextest="0.9.146", logs=None, total=None, reviewed=None,
-                 path=None, mode="list", fake_exit=0, litter=False, extra_env=None,
+                 path=None, fake_exit=0, litter=False, extra_env=None,
                  failing_chmod=False, term=False, planned_extra=0, phase="Test", plan=True,
                  home_nextest=None, baseline=None):
         # The real gate, with its documented injection fixture interface. This
@@ -30,13 +30,13 @@ class MutationGate(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             try:
-                return self._run_gate(root, crate, nextest, logs, total, reviewed, path, mode,
+                return self._run_gate(root, crate, nextest, logs, total, reviewed, path,
                                       fake_exit, litter, extra_env or {}, failing_chmod, term,
                                       planned_extra, phase, plan, home_nextest, baseline)
             finally:
                 subprocess.run(["chmod", "-R", "u+rwx", str(root)])
 
-    def _run_gate(self, root, crate, nextest, logs, total, reviewed, path, mode, fake_exit,
+    def _run_gate(self, root, crate, nextest, logs, total, reviewed, path, fake_exit,
                   litter, extra_env, failing_chmod, term, planned_extra, phase, plan,
                   home_nextest, baseline):
         tools = root / "tools"
@@ -77,8 +77,7 @@ class MutationGate(unittest.TestCase):
                    TMPDIR=str(outer_tmp), COVERAGE_TIERS_JSON=str(root / "unused"),
                    COVERAGE_TIERS_FILELIST=str(root / "unused"),
                    COVERAGE_TIERS_CRATE_DIRS=f"{crate}=crates/{crate}", **extra_env)
-        selection = ["--mutants-all"] if mode == "all" else ["--mutants", crate]
-        argv = [BASH, str(gate), "--root", str(root), "--injection", *selection]
+        argv = [BASH, str(gate), "--root", str(root), "--injection", "--mutants-all"]
         if term:
             result = self.terminate_during_run(argv, env, Path(str(arguments) + ".pid"))
         else:
@@ -163,9 +162,9 @@ class MutationGate(unittest.TestCase):
     def test_gate_fails_closed_without_cargo_nextest(self):
         system_path = "/usr/bin:/bin"
         self.assertIsNone(shutil.which("cargo-nextest", path=system_path))
-        for crate, mode in (("maknae-io", "list"), ("maknae-sys", "all")):
-            run = self.run_gate(crate, nextest=None, path=system_path, mode=mode)
-            self.assertNotEqual(run.result.returncode, 0, mode)
+        for crate in ("maknae-io", "maknae-sys"):
+            run = self.run_gate(crate, nextest=None, path=system_path)
+            self.assertNotEqual(run.result.returncode, 0, crate)
             self.assertIn("cargo-nextest missing", run.result.stdout)
             self.assertIsNone(run.argv)
 
@@ -306,9 +305,61 @@ class MutationGate(unittest.TestCase):
     def test_unreadable_reviewed_list_fails(self):
         self.assertGate(False, [TIMEOUT_AND_FAIL], MISSING, contains=("reviewed terminated-mutant list",))
 
-    def test_neither_ci_nor_the_hook_passes_partial(self):
-        for path in (".github/workflows/ci.yml", "ci/hooks/pre-push"):
-            self.assertNotIn("--partial", (ROOT / path).read_text(), path)
+    def test_mutants_without_in_diff_is_refused_before_any_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            argv = [BASH, str(ROOT / "ci/gates/coverage-tiers.sh"), "--root", directory, "--injection",
+                    "--mutants", "maknae-io"]
+            result = subprocess.run(argv, text=True, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "FAIL: " + MUTANTS_NEEDS_IN_DIFF + "\n")
+
+
+class Workflow(unittest.TestCase):
+    """The ci.yml mutation step, run against a stub gate that records its arguments."""
+
+    def setUp(self):
+        self.repo = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.repo, ignore_errors=True)
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        self.name, step = workflow.split("      - name: Mutation gate", 1)[1].split("\n", 1)
+        body = step.split("\n      - name:", 1)[0].split("\n\n", 1)[0].split("        run: |\n", 1)[1]
+        self.script = "".join(line[10:] + "\n" for line in body.splitlines())
+        write_tree(self.repo, {"ci/gates/coverage-tiers.sh": 'printf "%s\\n" "$*" > "$RECORD"\n',
+                               "f": "base\n"})
+        git(self.repo, "init", "-q", "-b", "main")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "base")
+        git(self.repo, "checkout", "-qb", "topic")
+        write_tree(self.repo, {"g": "topic\n"})
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "topic")
+        git(self.repo, "checkout", "-q", "main")
+        git(self.repo, "merge", "-q", "--no-ff", "-m", "merge", "topic")
+
+    def step(self, event, mutation_in_ci):
+        record = self.repo / "record"
+        env = {**os.environ, "RECORD": str(record), "PACKAGES": "a b", "EVENT_NAME": event,
+               "MUTATION_IN_CI": mutation_in_ci}
+        result = subprocess.run([BASH, "-e", "-c", self.script], cwd=self.repo, env=env, text=True,
+                                capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return record.read_text()
+
+    def test_a_pull_request_mutates_its_diff_over_every_listed_crate(self):
+        self.assertEqual(self.step("pull_request", ""), "--root . --mutants a b --in-diff HEAD^1\n")
+
+    def test_mutation_in_ci_asks_for_the_whole_crates_explicitly(self):
+        for event in ("pull_request", "push"):
+            with self.subTest(event):
+                self.assertEqual(self.step(event, "true"), "--root . --mutants-all\n")
+
+    def test_the_step_name_says_in_diff_and_names_the_whole_run_condition(self):
+        self.assertIn("in-diff", self.name)
+        self.assertIn("whole crates only when MUTATION_IN_CI asks", self.name)
+
+    def test_neither_ci_nor_the_hook_runs_mutants_without_in_diff(self):
+        hook = (ROOT / "ci/hooks/pre-push").read_text()
+        self.assertIn('--mutants "${mutation_crates[@]}" \\\n    --in-diff ', hook)
 
 
 class InDiff(unittest.TestCase):
@@ -582,9 +633,9 @@ class InDiff(unittest.TestCase):
             ("--in-diff", "base"): "--in-diff needs --mutants",
             ("--injection", "--mutants", "a", "--in-diff", "base"):
                 "--in-diff cannot be combined with --injection",
-            ("--mutants", "a", "--partial"): "--partial needs --in-diff",
-            ("--mutants-all", "--partial"): "--partial needs --in-diff",
-            ("--in-diff-preflight", "--partial"): "--in-diff-preflight takes only --root",
+            ("--mutants", "a"): MUTANTS_NEEDS_IN_DIFF,
+            ("--mutants",): MUTANTS_NEEDS_IN_DIFF,
+            ("--injection", "--mutants", "a"): MUTANTS_NEEDS_IN_DIFF,
         }
         for args, text in cases.items():
             with self.subTest(args):
@@ -663,56 +714,13 @@ class InDiff(unittest.TestCase):
         repo = self.in_diff_repo({"crates/b/src/lib.rs": "pub fn b(x: u32) -> u32 {\n    x + 3\n}\n"})
         result, out = self.gate(repo, crates=("a",), whole=WHOLE_EDIT)
         self.assertFails(result, out, "FAIL: --in-diff: changed crate b not selected by --mutants")
-        self.assertNotIn("PARTIAL:", out)
         self.assertEqual(self.invocations(), [])
 
-    def test_in_diff_partial_reports_an_unselected_changed_crate(self):
+    def test_in_diff_an_unselected_changed_crate_fails_beside_a_selected_one(self):
         repo = self.in_diff_repo({**EDIT_A, **B_EDIT})
-        result, out = self.gate(repo, *PART, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
-        self.assertEqual(result.returncode, 0, out)
-        self.assertIn("RUN a: 2 in-diff mutants", out)
-        self.assertIn(PARTIAL_B, out)
-        self.assertEqual([r[2] for r in self.runs()], ["a"])
-        self.assertIn("PASS (partial: 1 crate not run): coverage-tiers gate", out)
-        self.assertNotIn("PASS: coverage-tiers gate", out)
-
-    def test_in_diff_partial_still_fails_a_survivor_in_a_selected_crate(self):
-        repo = self.in_diff_repo({**EDIT_A, **B_EDIT})
-        result, out = self.gate(repo, *PART, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2], missed=1, fake_exit=2)
-        self.assertFails(result, out, "cargo mutants --package a reported missed/timeout mutants", PARTIAL_B)
-        self.assertNotIn("PASS", out)
-
-    def test_in_diff_partial_with_only_unselected_changes_runs_nothing(self):
-        repo = self.in_diff_repo(B_EDIT)
-        result, out = self.gate(repo, *PART, whole=WHOLE_EDIT)
-        self.assertEqual(result.returncode, 0, out)
-        self.assertIn(PARTIAL_B, out)
-        self.assertIn("SKIP: a: no mutant on a changed line", out)
+        result, out = self.gate(repo, crates=("a",), whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
+        self.assertFails(result, out, "FAIL: --in-diff: changed crate b not selected by --mutants")
         self.assertEqual(self.runs(), [])
-        self.assertIn("PASS (partial: 1 crate not run): coverage-tiers gate", out)
-        self.assertNotIn("PASS: coverage-tiers gate", out)
-
-    def test_in_diff_partial_prints_nothing_when_every_changed_crate_is_selected(self):
-        repo = self.in_diff_repo(EDIT_A)
-        result, out = self.gate(repo, "--mutants", "a", "b", "--in-diff", "base", "--partial",
-                                whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
-        self.assertEqual(result.returncode, 0, out)
-        self.assertNotIn("PARTIAL:", out)
-        self.assertIn("PASS: coverage-tiers gate", out)
-
-    def test_in_diff_partial_counts_every_crate_not_run(self):
-        repo = self.in_diff_repo({**EDIT_A, **B_EDIT})
-        result, out = self.gate(repo, "--mutants", "--in-diff", "base", "--partial", whole=WHOLE_EDIT)
-        self.assertEqual(result.returncode, 0, out)
-        self.assertIn(PARTIAL_B, out)
-        self.assertIn("PASS (partial: 2 crates not run): coverage-tiers gate", out)
-        self.assertEqual(self.runs(), [])
-
-    def test_in_diff_partial_keeps_the_unknown_crate_refusal(self):
-        repo = self.in_diff_repo(EDIT_A)
-        result, out = self.gate(repo, "--mutants", "a", "zz", "--in-diff", "base", "--partial",
-                                whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
-        self.assertFails(result, out, "--mutants names zz, which is not in [t1].mutants_crates")
 
     def test_in_diff_run_count_must_match_the_listing(self):
         repo = self.in_diff_repo(EDIT_A)
@@ -913,7 +921,7 @@ class InDiff(unittest.TestCase):
         result, out = self.gate(repo, whole=[listed(f"{alias}:2:7: replace > with == in allowed",
                                                     "a", alias, 2)])
         self.assertFails(result, out, "FAIL: --in-diff: symlink crates/a/src/alias.rs in mutation "
-                         "crate a; in-diff mapping cannot follow aliases — use the whole-package run")
+                         "crate a; in-diff mapping cannot follow aliases — remove the symlink")
         self.assertEqual(self.invocations(), [])
 
     def test_in_diff_symlink_into_a_mutation_crate_fails(self):
@@ -1182,8 +1190,8 @@ class InDiff(unittest.TestCase):
                                              A_RS: lib, policy: 'pub const RULE: &str = "ALLOW";\n'})
         result, out = self.gate(repo, whole=WHOLE_EDIT)
         self.assertFails(result, out, "FAIL: --in-diff: .cargo/mutants.toml sets all_features, which changes "
-                         "what cargo-mutants builds and the in-diff checks do not model — use the "
-                         "whole-package run")
+                         "what cargo-mutants builds and the in-diff checks do not model — remove "
+                         "all_features from .cargo/mutants.toml")
         self.assertEqual(self.invocations(), [])
 
     def test_in_diff_a_build_script_crate_mutates_nothing_on_a_documentation_change(self):
@@ -1215,7 +1223,7 @@ class InDiff(unittest.TestCase):
         result, out = self.gate(repo, whole=WHOLE_EDIT)
         self.assertFails(result, out, 'FAIL: --in-diff: tracked path "crates/a/src/policy\\nname.txt" '
                          "contains a newline or control character; in-diff mapping cannot name it — "
-                         "use the whole-package run")
+                         "rename the file")
         self.assertEqual(self.runs(), [])
 
     def cross_crate_repo(self):
@@ -1245,16 +1253,7 @@ class InDiff(unittest.TestCase):
         self.assertEqual(result.returncode, 0, out)
         self.assertIn("SKIP: a: no mutant on a changed line", out)
         self.assertNotIn("not selected", out)
-        self.assertNotIn("PARTIAL:", out)
         self.assertDiffOnly(out)
-
-    def test_in_diff_partial_ignores_a_data_only_embedding_crate(self):
-        repo = self.cross_crate_repo()
-        result, out = self.gate(repo, "--mutants", "a", "--in-diff", "base", "--partial", whole=WHOLE_EDIT)
-        self.assertEqual(result.returncode, 0, out)
-        self.assertNotIn("PARTIAL:", out)
-        self.assertEqual(self.runs(), [])
-        self.assertIn("PASS: coverage-tiers gate", out)
 
     def test_in_diff_a_listed_file_that_is_not_a_tracked_path_fails(self):
         repo = self.in_diff_repo(EDIT_A)
@@ -1395,7 +1394,7 @@ class InDiff(unittest.TestCase):
             self.skipTest("SKIP: case-insensitive symlink alias: this filesystem is case-sensitive")
         result, out = self.gate(repo, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
         self.assertFails(result, out, "FAIL: --in-diff: symlink alias in mutation crate a; in-diff "
-                         "mapping cannot follow aliases — use the whole-package run")
+                         "mapping cannot follow aliases — remove the symlink")
         self.assertEqual(self.invocations(), [])
 
     def test_in_diff_symlink_leaving_the_repository_fails(self):
@@ -1405,7 +1404,7 @@ class InDiff(unittest.TestCase):
                 repo = self.in_diff_repo(EDIT_A, base_files={"tools/keep": ""}, links={link: target})
                 result, out = self.gate(repo, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
                 self.assertFails(result, out, f"FAIL: --in-diff: symlink {link} points outside the "
-                                 "repository; in-diff mapping cannot follow aliases — use the whole-package run")
+                                 "repository; in-diff mapping cannot follow aliases — remove the symlink")
                 self.assertEqual(self.invocations(), [])
 
     def test_in_diff_a_symlinked_config_input_fails_before_it_is_read(self):
@@ -1506,8 +1505,8 @@ WHOLE_DECISION = [listed(f"{DECISION}:2:7: replace > with == in decide", "a", DE
 WHOLE_DELETE = [listed(f"{A_RS}:2:5: replace a -> u32 with 0", "a", A_RS, 2, 3),
                 listed(f"{A_RS}:7:5: replace d -> u32 with 0", "a", A_RS, 7)]
 B_EDIT = {"crates/b/src/lib.rs": "pub fn b(x: u32) -> u32 {\n    x + 3\n}\n"}
-PART = ("--mutants", "a", "--in-diff", "base", "--partial")
-PARTIAL_B = "PARTIAL: b owns changed lines and is not selected; its in-diff mutants are not run here"
+MUTANTS_NEEDS_IN_DIFF = ("--mutants is in-diff only and needs --in-diff <rev>; "
+                         "--mutants-all is the explicit whole-crate run")
 NON_RS_LIB = ("FAIL: --in-diff: crates/a/src/lib.rust is compiled into mutation crate a but does not end in "
               ".rs; the in-diff mapping cannot read it — rename it to .rs")
 
