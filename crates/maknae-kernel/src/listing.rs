@@ -576,6 +576,75 @@ mod tests {
     }
 
     #[test]
+    fn an_entry_that_exactly_fills_the_page_budget_is_released() {
+        let names: Vec<String> = (0..3).map(|i| format!("{i}{}", "f".repeat(29))).collect();
+        assert_eq!(entry_bytes(&names[0]), 43);
+        let mut lister = Lister::new("/d".into(), None, PAGE_HEADROOM + 2 * 43);
+        assert_eq!(
+            lister.take(&chunk_of(&names, true), |_| true),
+            Some(End::Truncated)
+        );
+        assert_eq!(
+            lister.page().entries.len(),
+            2,
+            "two entries fill the budget exactly"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_answer_is_written_only_before_its_deadline_and_within_its_frame() {
+        let caps = crate::mutation::AttemptCaps::default();
+        let exact = maknae_proto::encode_response(&Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(Payload::ListContinue),
+        })
+        .unwrap()
+        .len();
+        let later = tokio::time::Instant::now() + Duration::from_secs(1);
+        let mut stream: Vec<u8> = Vec::new();
+        assert!(
+            !answer(
+                &mut stream,
+                tokio::time::Instant::now(),
+                caps,
+                RespResult::Ok(Payload::ListContinue)
+            )
+            .await,
+            "a deadline reached writes nothing"
+        );
+        assert!(stream.is_empty());
+        let tight = crate::mutation::AttemptCaps {
+            request: caps.request,
+            response: exact,
+        };
+        assert!(
+            answer(
+                &mut stream,
+                later,
+                tight,
+                RespResult::Ok(Payload::ListContinue)
+            )
+            .await
+        );
+        assert!(!stream.is_empty());
+        let mut over: Vec<u8> = Vec::new();
+        let short = crate::mutation::AttemptCaps {
+            request: caps.request,
+            response: exact - 1,
+        };
+        assert!(
+            !answer(
+                &mut over,
+                later,
+                short,
+                RespResult::Ok(Payload::ListContinue)
+            )
+            .await
+        );
+        assert!(over.is_empty());
+    }
+
+    #[test]
     fn a_page_always_holds_its_first_permitted_entry() {
         let long = "y".repeat(400);
         let names: Vec<String> = (0..2).map(|i| format!("{i}{long}")).collect();

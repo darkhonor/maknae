@@ -562,7 +562,9 @@ async fn namespace_grant_requires_durable_intent_and_never_creates_as_daemon() {
     let fx = writer("grant_order");
     let records = GateRecords::new(2);
     let (mut client, task) = namespace_start(&fx, records.clone(), create_verb(&fx)).await;
-    records.entered.notified().await;
+    tokio::time::timeout(Duration::from_secs(30), records.entered.notified())
+        .await
+        .expect("the intent record is offered");
     assert!(tokio::time::timeout(
         Duration::from_millis(20),
         common::read_frame(&mut client, 65536)
@@ -606,7 +608,9 @@ async fn false_namespace_success_is_only_client_reported_and_ack_waits_for_audit
         },
     )
     .await;
-    records.entered.notified().await;
+    tokio::time::timeout(Duration::from_secs(30), records.entered.notified())
+        .await
+        .expect("the intent record is offered");
     assert!(tokio::time::timeout(
         Duration::from_millis(20),
         common::read_frame(&mut client, 65536)
@@ -706,7 +710,9 @@ async fn a_replacement_grant_waits_for_durable_intent_and_the_daemon_never_write
         None,
     )
     .await;
-    records.entered.notified().await;
+    tokio::time::timeout(Duration::from_secs(30), records.entered.notified())
+        .await
+        .expect("the intent record is offered");
     assert!(tokio::time::timeout(
         Duration::from_millis(20),
         common::read_frame(&mut client, 65536)

@@ -134,9 +134,10 @@ class PlatformSelection(unittest.TestCase):
         reviewed = {"open_parent_by_path", "open_dir_at", "open_read_target",
                     "openat2_resolve", "open_temp_excl", "open_append",
                     "macos_mutation_directory_flags", "linux_mutation_directory_flags", "open_mutation_directory_at",
-                    "open_existing", "linux_path_delegation_flags", "macos_path_delegation_flags"}
+                    "open_existing", "linux_path_delegation_flags", "macos_path_delegation_flags",
+                    "linux_path_stat_flags", "macos_path_stat_flags"}
         equivalent = {m for m in xor_mutants if m.rsplit(" in ", 1)[1] in reviewed}
-        self.assertEqual(len(equivalent), 32, "review the disjoint-union inventory when it changes")
+        self.assertEqual(len(equivalent), 37, "review the disjoint-union inventory when it changes")
         # Both production platforms have native evidence plus executable bit proofs.
         self.assertEqual(xor_mutants - equivalent, set())
         self.assertEqual(set(configured), set(INVENTORY) - equivalent)

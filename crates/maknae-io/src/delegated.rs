@@ -266,6 +266,7 @@ struct Kept {
     keep: usize,
     dropped: u32,
     vanished: u32,
+    stat_classified: u32,
 }
 
 impl Kept {
@@ -275,10 +276,17 @@ impl Kept {
             keep,
             dropped: 0,
             vanished: 0,
+            stat_classified: 0,
         }
     }
 
-    fn offer(&mut self, raw: &[u8], dir: impl FnOnce() -> nix::Result<bool>) -> nix::Result<()> {
+    /// `by_stat` says the entry's kind needs an `fstatat`, the filesystem having given none.
+    fn offer(
+        &mut self,
+        raw: &[u8],
+        by_stat: bool,
+        dir: impl FnOnce() -> nix::Result<bool>,
+    ) -> nix::Result<()> {
         if raw == b"." || raw == b".." {
             return Ok(());
         }
@@ -293,6 +301,9 @@ impl Kept {
                 .is_none_or(|(largest, _)| name >= largest.as_str())
         {
             return Ok(());
+        }
+        if by_stat {
+            self.stat_classified = self.stat_classified.saturating_add(1);
         }
         let dir = match dir() {
             Ok(dir) => dir,
@@ -354,20 +365,16 @@ fn list_reopened(
     }
     let mut kept = Kept::new(keep);
     let mut handle = crate::syscall::open_dir_handle(&fd).map_err(at)?;
-    let mut stat_classified = 0;
     for entry in handle.iter() {
         let entry = entry.map_err(at)?;
         let raw = entry.file_name();
-        kept.offer(raw.to_bytes(), || {
-            if entry.file_type().is_none() {
-                stat_classified += 1;
-            }
+        kept.offer(raw.to_bytes(), entry.file_type().is_none(), || {
             crate::dir::classify_entry(entry.file_type(), &fd, raw, entry.ino())
                 .map(|kind| kind == crate::anchor::Kind::Dir)
         })
         .map_err(at)?;
     }
-    listed_or_stale(kept, stat_classified, granted)
+    listed_or_stale(kept, granted)
 }
 
 /// Every entry that needed a stat to classify vanished: the handle is stale, not the
@@ -376,12 +383,8 @@ fn stale_handle(stat_classified: u32, vanished: u32) -> bool {
     stat_classified > 0 && vanished == stat_classified
 }
 
-fn listed_or_stale(
-    kept: Kept,
-    stat_classified: u32,
-    granted: &std::path::Path,
-) -> Result<Listing, IoError> {
-    if stale_handle(stat_classified, kept.vanished) {
+fn listed_or_stale(kept: Kept, granted: &std::path::Path) -> Result<Listing, IoError> {
+    if stale_handle(kept.stat_classified, kept.vanished) {
         return Err(IoError::MutationPathChanged {
             path: granted.into(),
         });
@@ -813,7 +816,7 @@ mod tests {
             (b"\xfe\xfd", false),
             (b"b-161", false),
         ] {
-            kept.offer(raw, || Ok(dir)).unwrap();
+            kept.offer(raw, false, || Ok(dir)).unwrap();
         }
         let got = kept.finish();
         assert_eq!(names(&got), [("a-161", true), ("b-161", false)]);
@@ -835,14 +838,14 @@ mod tests {
     #[test]
     fn an_entry_that_vanishes_during_the_listing_is_skipped_and_counted() {
         let mut kept = Kept::new(10);
-        kept.offer(b"a-161", || Ok(false)).unwrap();
-        kept.offer(b"gone-161", || Err(nix::errno::Errno::ENOENT))
+        kept.offer(b"a-161", false, || Ok(false)).unwrap();
+        kept.offer(b"gone-161", true, || Err(nix::errno::Errno::ENOENT))
             .unwrap();
-        kept.offer(b"repointed-161", || Err(nix::errno::Errno::ESTALE))
+        kept.offer(b"repointed-161", true, || Err(nix::errno::Errno::ESTALE))
             .unwrap();
-        kept.offer(b"z-161", || Ok(true)).unwrap();
+        kept.offer(b"z-161", false, || Ok(true)).unwrap();
         assert_eq!(
-            kept.offer(b"broken-161", || Err(nix::errno::Errno::EIO)),
+            kept.offer(b"broken-161", true, || Err(nix::errno::Errno::EIO)),
             Err(nix::errno::Errno::EIO),
             "any other fault still ends the listing"
         );
@@ -858,19 +861,28 @@ mod tests {
         assert!(stale_handle(3, 3));
         assert!(!stale_handle(3, 2), "one entry survived its stat");
         let mut kept = Kept::new(10);
-        kept.offer(b"gone-161", || Err(nix::errno::Errno::ENOENT))
+        kept.offer(b"gone-161", true, || Err(nix::errno::Errno::ENOENT))
             .unwrap();
         assert_eq!(
-            listed_or_stale(kept, 1, std::path::Path::new("/d-161")),
+            listed_or_stale(kept, std::path::Path::new("/d-161")),
             Err(IoError::MutationPathChanged {
                 path: "/d-161".into()
             })
         );
         let mut kept = Kept::new(10);
-        kept.offer(b"kept-161", || Ok(false)).unwrap();
-        kept.offer(b"gone-161", || Err(nix::errno::Errno::ENOENT))
+        kept.offer(b"kept-161", true, || Ok(false)).unwrap();
+        kept.offer(b"gone-161", true, || Err(nix::errno::Errno::ENOENT))
             .unwrap();
-        let listed = listed_or_stale(kept, 2, std::path::Path::new("/d-161")).unwrap();
+        let listed = listed_or_stale(kept, std::path::Path::new("/d-161")).unwrap();
+        let mut known = Kept::new(10);
+        known
+            .offer(b"typed-161", false, || Err(nix::errno::Errno::ENOENT))
+            .unwrap();
+        assert_eq!(
+            known.stat_classified, 0,
+            "only a stat-classified entry counts"
+        );
+        assert!(listed_or_stale(known, std::path::Path::new("/d-161")).is_ok());
         assert_eq!(
             (names(&listed), listed.vanished),
             (vec![("kept-161", false)], 1)

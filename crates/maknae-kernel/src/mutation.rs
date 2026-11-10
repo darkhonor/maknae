@@ -2874,6 +2874,11 @@ mod tests {
             Some("stat descriptor missing")
         );
     }
+    async fn bounded<T>(exchange: impl std::future::Future<Output = T>) -> T {
+        tokio::time::timeout(Duration::from_secs(30), exchange)
+            .await
+            .expect("the exchange ends within its bound")
+    }
     fn list_verb(path: &Path, after: Option<&str>) -> Verb {
         Verb::FsList {
             path: path.to_str().unwrap().into(),
@@ -3027,7 +3032,7 @@ mod tests {
             }
             frames
         };
-        tokio::join!(kernel, subject).1
+        bounded(async { tokio::join!(kernel, subject) }).await.1
     }
     fn granted_page(frames: &[Vec<u8>]) -> maknae_proto::ListGrant {
         match maknae_proto::decode_response(frames.last().expect("a frame"))
@@ -3801,7 +3806,7 @@ mod tests {
             )
             .await;
         };
-        tokio::join!(kernel, subject);
+        bounded(async { tokio::join!(kernel, subject) }).await;
         assert_eq!(
             capacity().available_permits(),
             free - 1,
@@ -3905,26 +3910,30 @@ mod tests {
         let (mut client, mut server) = tokio::io::duplex(1 << 16);
         let verb = list_verb(dir, None);
         let seq = Seq::new();
-        let kernel = handle(
-            &mut server,
-            &verb,
-            fx.principal.uid,
-            Lane::Local,
-            &fds,
-            Arc::new(fixture_pdp(fx)),
-            emit.clone(),
-            Ok(fx.root.clone()),
-            &cfg,
-            &seq,
-            record(),
-            Duration::from_secs(10),
-            AttemptCaps::default(),
-            "US",
-            Arc::new(crate::conversation::mem_store::MemStore::default()),
-            &Stamp::Client,
-            Arc::new(SensitiveList::empty()),
-            tokio::time::Instant::now(),
-        );
+        let kernel = async {
+            handle(
+                &mut server,
+                &verb,
+                fx.principal.uid,
+                Lane::Local,
+                &fds,
+                Arc::new(fixture_pdp(fx)),
+                emit.clone(),
+                Ok(fx.root.clone()),
+                &cfg,
+                &seq,
+                record(),
+                Duration::from_secs(10),
+                AttemptCaps::default(),
+                "US",
+                Arc::new(crate::conversation::mem_store::MemStore::default()),
+                &Stamp::Client,
+                Arc::new(SensitiveList::empty()),
+                tokio::time::Instant::now(),
+            )
+            .await;
+            drop(server);
+        };
         let subject = async move {
             maknae_proto::read_frame_of_class(
                 &mut client,
@@ -3942,7 +3951,7 @@ mod tests {
             .await
             .unwrap();
         };
-        tokio::join!(kernel, subject);
+        bounded(async { tokio::join!(kernel, subject) }).await;
         let trail = emit.0.lock().unwrap().clone();
         trail
     }
@@ -4124,26 +4133,30 @@ mod tests {
         let seq = Seq::new();
         let (mut client, mut server) = tokio::io::duplex(1 << 16);
         let verb = list_verb(&dir, None);
-        let kernel = handle(
-            &mut server,
-            &verb,
-            fx.principal.uid,
-            Lane::Local,
-            &fds,
-            Arc::new(fixture_pdp(&fx)),
-            emit.clone(),
-            Ok(fx.root.clone()),
-            &cfg,
-            &seq,
-            record(),
-            Duration::from_secs(10),
-            AttemptCaps::default(),
-            "US",
-            Arc::new(crate::conversation::mem_store::MemStore::default()),
-            &Stamp::Client,
-            Arc::new(SensitiveList::empty()),
-            tokio::time::Instant::now(),
-        );
+        let kernel = async {
+            handle(
+                &mut server,
+                &verb,
+                fx.principal.uid,
+                Lane::Local,
+                &fds,
+                Arc::new(fixture_pdp(&fx)),
+                emit.clone(),
+                Ok(fx.root.clone()),
+                &cfg,
+                &seq,
+                record(),
+                Duration::from_secs(10),
+                AttemptCaps::default(),
+                "US",
+                Arc::new(crate::conversation::mem_store::MemStore::default()),
+                &Stamp::Client,
+                Arc::new(SensitiveList::empty()),
+                tokio::time::Instant::now(),
+            )
+            .await;
+            drop(server);
+        };
         let subject = async move {
             maknae_proto::read_frame_of_class(
                 &mut client,
@@ -4162,7 +4175,7 @@ mod tests {
             .await
             .unwrap();
         };
-        tokio::join!(kernel, subject);
+        bounded(async { tokio::join!(kernel, subject) }).await;
         let (_, done) = intent_and_completion(&emit.0.lock().unwrap());
         assert_eq!(
             done.outcome.reason,
@@ -4352,6 +4365,92 @@ mod tests {
                 Ok(())
             }
         }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn an_answer_whose_progress_lands_exactly_at_its_deadline_is_not_written() {
+        let emit = SlowAppend(std::sync::Mutex::default());
+        let mut stream: Vec<u8> = Vec::new();
+        let sent = disclose(
+            &mut stream,
+            &TransportConfig::default(),
+            &emit,
+            &Seq::new(),
+            &test_intent(),
+            &stat_account,
+            true,
+            stat161(),
+            maknae_proto::ATTEMPT_RESPONSE_MAX,
+            tokio::time::Instant::now() + Duration::from_millis(300),
+        )
+        .await;
+        assert!(!sent);
+        assert!(stream.is_empty(), "a deadline reached is a deadline passed");
+    }
+    #[tokio::test(start_paused = true)]
+    async fn an_answer_exactly_the_size_of_its_frame_is_sent() {
+        let exact = maknae_proto::encode_response(&Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(stat161()),
+        })
+        .unwrap()
+        .len();
+        let mut stream: Vec<u8> = Vec::new();
+        assert!(
+            disclose(
+                &mut stream,
+                &TransportConfig::default(),
+                &Recorder::default(),
+                &Seq::new(),
+                &test_intent(),
+                &stat_account,
+                false,
+                stat161(),
+                exact,
+                far_deadline(),
+            )
+            .await
+        );
+        assert!(!stream.is_empty());
+    }
+    #[tokio::test(start_paused = true)]
+    async fn an_attempt_whose_deadline_is_reached_before_its_grant_grants_nothing() {
+        let cfg = TransportConfig::default();
+        let emit = Recorder::default();
+        let (mut client, mut server) = tokio::io::duplex(1 << 16);
+        attempt(
+            &mut server,
+            &cfg,
+            AttemptCaps::default(),
+            &emit,
+            test_intent(),
+            MutationScope::Exact {
+                path: "/attempt-161".into(),
+                effect: ReportedEffect::ReadFile,
+            },
+            maknae_proto::ObjectLabel {
+                level: "UNCLASSIFIED".into(),
+                categories: Vec::new(),
+            },
+            None,
+            &Seq::new(),
+            tokio::time::Instant::now() - Duration::from_millis(cfg.read_timeout_ms),
+        )
+        .await;
+        drop(server);
+        assert!(
+            maknae_proto::read_frame_of_class(
+                &mut client,
+                maknae_proto::FrameClass::Attempt,
+                &caps()
+            )
+            .await
+            .is_err(),
+            "no grant once the deadline is reached"
+        );
+        assert_eq!(
+            last_reason(&emit),
+            "attempt grant not delivered; no effect authorized"
+        );
     }
     #[tokio::test(start_paused = true)]
     async fn an_answer_whose_progress_lands_after_its_deadline_is_not_written() {

@@ -665,6 +665,23 @@ mod tests {
     }
 
     #[test]
+    fn the_stat_open_flags_are_exactly_the_unfollowed_no_access_set() {
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            linux_path_stat_flags().bits(),
+            (OFlag::O_PATH | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC).bits()
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            macos_path_stat_flags().bits(),
+            nix::libc::O_SYMLINK
+                | nix::libc::O_RDONLY
+                | nix::libc::O_NONBLOCK
+                | nix::libc::O_CLOEXEC
+        );
+    }
+
+    #[test]
     fn mutation_xor_equivalence_requires_disjoint_platform_flag_bits() {
         // This is the executable algebra supporting the narrowly named XOR
         // exemptions; the descriptor tests separately hold actual behavior.
