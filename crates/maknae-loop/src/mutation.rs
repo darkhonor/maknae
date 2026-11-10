@@ -1005,6 +1005,28 @@ fn withheld_count(
         .saturating_sub(page.entries.len())
 }
 
+fn entries(n: u32) -> String {
+    format!("{n} entr{}", if n == 1 { "y" } else { "ies" })
+}
+
+/// The user's lines for names this subject could not send.
+fn unlisted_lines(dropped: u32, vanished: u32) -> Vec<String> {
+    let mut lines = Vec::new();
+    if dropped > 0 {
+        lines.push(format!(
+            "maknae: {} with a non-UTF-8 name not listed",
+            entries(dropped)
+        ));
+    }
+    if vanished > 0 {
+        lines.push(format!(
+            "maknae: {} changed while being listed and not listed",
+            entries(vanished)
+        ));
+    }
+    lines
+}
+
 /// Tells the kernel this subject could not list the directory, so its trail says so; the
 /// kernel's answer changes nothing here.
 async fn unlisted<S: AsyncRead + AsyncWrite + Unpin>(
@@ -1088,7 +1110,7 @@ pub async fn execute_list<S: AsyncRead + AsyncWrite + Unpin + Send>(
             return Err(format!("list not performed: {why}"));
         }
     };
-    let dropped = listing.dropped;
+    let (dropped, vanished) = (listing.dropped, listing.vanished);
     let chunks = list_chunks(listing.entries, dropped, proto::ATTEMPT_REQUEST_MAX);
     let sent: Vec<proto::ListEntry> = chunks.iter().flat_map(|c| c.entries.clone()).collect();
     let after = after.as_deref();
@@ -1137,11 +1159,8 @@ pub async fn execute_list<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let answer = tokio::time::timeout_at(deadline, exchange)
         .await
         .map_err(|_| "list not performed: the listing exchange timed out".to_string())??;
-    if dropped > 0 {
-        diag(format!(
-            "maknae: {dropped} entr{} with a non-UTF-8 name not listed",
-            if dropped == 1 { "y" } else { "ies" }
-        ));
+    for line in unlisted_lines(dropped, vanished) {
+        diag(line);
     }
     if let Ok(page) = &answer {
         let withheld = withheld_count(page, &sent, after);
@@ -1837,6 +1856,21 @@ mod tests {
                 .then(|| "maknae: 1 entry with a non-UTF-8 name not listed".to_string())
                 .into_iter()
                 .collect::<Vec<_>>()
+        );
+    }
+    #[test]
+    fn the_user_is_told_what_the_subject_could_not_list() {
+        assert!(unlisted_lines(0, 0).is_empty());
+        assert_eq!(
+            unlisted_lines(1, 2),
+            [
+                "maknae: 1 entry with a non-UTF-8 name not listed",
+                "maknae: 2 entries changed while being listed and not listed",
+            ]
+        );
+        assert_eq!(
+            unlisted_lines(0, 1),
+            ["maknae: 1 entry changed while being listed and not listed"]
         );
     }
     #[test]

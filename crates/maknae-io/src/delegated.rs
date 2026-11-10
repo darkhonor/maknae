@@ -256,11 +256,13 @@ pub struct ListedEntry {
     pub dir: bool,
 }
 
-/// The names of one directory in byte order; `dropped` counts names that are not UTF-8.
+/// The names of one directory in byte order; `dropped` counts names that are not UTF-8,
+/// `vanished` entries removed or repointed while they were being classified.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Listing {
     pub entries: Vec<ListedEntry>,
     pub dropped: u32,
+    pub vanished: u32,
 }
 
 /// The `keep` smallest names offered, in byte order.
@@ -268,6 +270,7 @@ struct Kept {
     heap: std::collections::BinaryHeap<(String, bool)>,
     keep: usize,
     dropped: u32,
+    vanished: u32,
 }
 
 impl Kept {
@@ -276,6 +279,7 @@ impl Kept {
             heap: std::collections::BinaryHeap::new(),
             keep,
             dropped: 0,
+            vanished: 0,
         }
     }
 
@@ -295,7 +299,15 @@ impl Kept {
         {
             return Ok(());
         }
-        self.heap.push((name.to_owned(), dir()?));
+        let dir = match dir() {
+            Ok(dir) => dir,
+            Err(nix::errno::Errno::ENOENT | nix::errno::Errno::ESTALE) => {
+                self.vanished = self.vanished.saturating_add(1);
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
+        self.heap.push((name.to_owned(), dir));
         if self.heap.len() > self.keep {
             self.heap.pop();
         }
@@ -311,6 +323,7 @@ impl Kept {
                 .map(|(name, dir)| ListedEntry { name, dir })
                 .collect(),
             dropped: self.dropped,
+            vanished: self.vanished,
         }
     }
 }
@@ -787,6 +800,25 @@ mod tests {
             let got = list_delegated_directory(held.as_fd(), &listed, 10).unwrap();
             assert_eq!((names(&got), got.dropped), (vec![("plain-161", false)], 1));
         }
+    }
+
+    #[test]
+    fn an_entry_that_vanishes_during_the_listing_is_skipped_and_counted() {
+        let mut kept = Kept::new(10);
+        kept.offer(b"a-161", || Ok(false)).unwrap();
+        kept.offer(b"gone-161", || Err(nix::errno::Errno::ENOENT))
+            .unwrap();
+        kept.offer(b"repointed-161", || Err(nix::errno::Errno::ESTALE))
+            .unwrap();
+        kept.offer(b"z-161", || Ok(true)).unwrap();
+        assert_eq!(
+            kept.offer(b"broken-161", || Err(nix::errno::Errno::EIO)),
+            Err(nix::errno::Errno::EIO),
+            "any other fault still ends the listing"
+        );
+        let got = kept.finish();
+        assert_eq!(names(&got), [("a-161", false), ("z-161", true)]);
+        assert_eq!((got.dropped, got.vanished), (0, 2));
     }
 
     #[test]

@@ -2807,7 +2807,7 @@ mod tests {
         assert_eq!(unarmed, want, "the answer depends only on the path");
     }
     #[tokio::test]
-    async fn the_kernel_never_opens_the_stat_target_for_read() {
+    async fn a_stat_descriptor_that_confers_write_is_refused_and_linux_requires_o_path() {
         let fx = Fixture::new();
         let file = fx.root.join("stat-161-held");
         std::fs::write(&file, b"x").unwrap();
