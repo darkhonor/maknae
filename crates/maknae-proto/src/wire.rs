@@ -590,9 +590,18 @@ pub enum Verb {
     /// permitted destination is never a route around a denied source. Applies
     /// equally to `fs.link` and to any future copy term.
     FsMove,
-    /// Enumerate directory contents. A disclosure of names, which is a disclosure
-    /// even when contents are refused.
-    FsList,
+    /// Enumerate a directory, decided as `fs.read` on the kernel-reported path of the
+    /// subject's delegated, search-only descriptor and again on every entry the subject
+    /// reports (#161). After the grant the subject sends [`crate::ListChunk`]s; the
+    /// kernel answers [`Payload::ListContinue`] or, once its record lands, the permitted
+    /// names after `after` as [`Payload::ListGrant`]. A withheld entry is absent.
+    FsList {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conversation: Option<String>,
+    },
     /// File metadata without content, decided as `fs.read` on the kernel-reported path
     /// of the subject's delegated, unfollowed descriptor (#161). A permit discloses size,
     /// mtime and kind only; every refusal but `Protected` is the one uniform answer, so a
@@ -724,6 +733,10 @@ pub enum Payload {
         mtime_secs: i64,
         kind: StatKind,
     },
+    /// The permitted page of an `fs.list`, after its record landed (#161).
+    ListGrant(crate::ListGrant),
+    /// The kernel decided a non-final [`crate::ListChunk`] and wants the next.
+    ListContinue,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1143,7 +1156,7 @@ pub fn class_of(verb: &Verb) -> FrameClass {
         | Verb::FsWrite { .. }
         | Verb::FsDelete { .. }
         | Verb::FsMove
-        | Verb::FsList
+        | Verb::FsList { .. }
         | Verb::FsStat { .. }
         | Verb::FsMkdir { .. }
         | Verb::FsLink
@@ -1257,6 +1270,12 @@ pub fn decode_mutation_report(bytes: &[u8]) -> Result<crate::MutationReport, Pro
     decode_followup(bytes)
 }
 pub fn decode_mutation_ack(bytes: &[u8]) -> Result<crate::MutationAck, ProtoCodecError> {
+    decode_followup(bytes)
+}
+pub fn encode_list_chunk(c: &crate::ListChunk) -> Result<Vec<u8>, ProtoCodecError> {
+    enc(c)
+}
+pub fn decode_list_chunk(bytes: &[u8]) -> Result<crate::ListChunk, ProtoCodecError> {
     decode_followup(bytes)
 }
 /// Encode into a pre-sized zeroizing buffer (the prompt reply's encode). Pre-sizing
@@ -1947,6 +1966,79 @@ mod tests {
                 reply
             );
         }
+    }
+
+    #[test]
+    fn a_listings_cursor_and_conversation_are_omitted_when_none_and_round_trip_when_set() {
+        let list = |after: Option<&str>, conversation: Option<&str>| Request {
+            task: None,
+            protocol_version: PROTOCOL_VERSION,
+            verb: Verb::FsList {
+                path: "/p".into(),
+                after: after.map(str::to_string),
+                conversation: conversation.map(str::to_string),
+            },
+        };
+        let none = encode_request(&list(None, None)).unwrap();
+        assert!(!none.windows(5).any(|w| w == b"after"));
+        assert!(!none.windows(12).any(|w| w == b"conversation"));
+        assert_eq!(decode_request(&none).unwrap(), list(None, None));
+        let some = encode_request(&list(Some("b-161"), Some("conv-161"))).unwrap();
+        assert_eq!(
+            decode_request(&some).unwrap(),
+            list(Some("b-161"), Some("conv-161"))
+        );
+        assert_eq!(class_of(&list(None, None).verb), FrameClass::Attempt);
+    }
+
+    #[test]
+    fn a_list_chunk_and_a_list_grant_round_trip_and_the_grant_has_no_total() {
+        let entry = |name: &str, dir: bool| crate::ListEntry {
+            name: name.into(),
+            dir,
+        };
+        let chunk = crate::ListChunk {
+            entries: vec![entry("a-161", false), entry("b-161", true)],
+            last: true,
+            dropped: 2,
+        };
+        let bytes = encode_list_chunk(&chunk).unwrap();
+        assert_eq!(decode_list_chunk(&bytes).unwrap(), chunk);
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(decode_list_chunk(&trailing).is_err());
+        let grant = Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(Payload::ListGrant(crate::ListGrant {
+                entries: vec![entry("b-161", true)],
+                truncated: true,
+            })),
+        };
+        let encoded = encode_response(&grant).unwrap();
+        assert_eq!(decode_response(&encoded).unwrap(), grant);
+        let value: ciborium::Value = ciborium::from_reader(encoded.as_slice()).unwrap();
+        let ok = value.as_map().unwrap()[1].1.as_map().unwrap()[0].1.clone();
+        let listed = ok.as_map().unwrap()[0].1.clone();
+        let mut keys: Vec<_> = listed
+            .as_map()
+            .unwrap()
+            .iter()
+            .map(|(k, _)| k.as_text().unwrap().to_string())
+            .collect();
+        keys.sort();
+        assert_eq!(keys, ["entries", "truncated"]);
+        let more = Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(Payload::ListContinue),
+        };
+        assert_eq!(
+            decode_response(&encode_response(&more).unwrap()).unwrap(),
+            more
+        );
+        assert_eq!(
+            (crate::LIST_RELEASE_MAX, crate::LIST_RECEIVE_MAX),
+            (1024, 65_536)
+        );
     }
 
     #[test]
@@ -3553,7 +3645,14 @@ mod tests {
                     FrameClass::Attempt,
                 ),
                 (Verb::FsMove, FrameClass::Attempt),
-                (Verb::FsList, FrameClass::Attempt),
+                (
+                    Verb::FsList {
+                        path: "/p".into(),
+                        after: None,
+                        conversation: None,
+                    },
+                    FrameClass::Attempt,
+                ),
                 (
                     Verb::FsStat {
                         path: "/p".into(),

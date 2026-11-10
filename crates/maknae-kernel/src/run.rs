@@ -1172,6 +1172,15 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         } if !maknae_proto::conversation_id_is_acceptable(conversation) => {
             Some(("stat", "conversation identifier not acceptable".to_string()))
         }
+        Verb::FsList {
+            conversation: Some(conversation),
+            ..
+        } if !maknae_proto::conversation_id_is_acceptable(conversation) => {
+            Some(("list", "conversation identifier not acceptable".to_string()))
+        }
+        Verb::FsList {
+            after: Some(after), ..
+        } if !crate::mutation::normal(after) => Some(("list", "cursor not acceptable".to_string())),
         Verb::Read { page: Some(p), .. } if !maknae_proto::page_request_is_acceptable(p) => {
             Some(("read", "page request not acceptable".to_string()))
         }
@@ -1272,7 +1281,8 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         record.subject.user = admitted_user(peer_user.as_deref());
         if let Verb::FsWrite { conversation, .. }
         | Verb::Read { conversation, .. }
-        | Verb::FsStat { conversation, .. } = &request.verb
+        | Verb::FsStat { conversation, .. }
+        | Verb::FsList { conversation, .. } = &request.verb
         {
             record.conversation.clone_from(conversation);
         }

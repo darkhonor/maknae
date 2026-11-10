@@ -133,6 +133,7 @@ enum Evidence {
 enum Granted {
     Attempt(MutationScope),
     Stat(maknae_io::DelegatedMeta),
+    List,
 }
 struct PreparedMutation {
     _evidence: Evidence,
@@ -140,8 +141,8 @@ struct PreparedMutation {
     paths: Vec<String>,
     kind: FsOperation,
 }
-struct DurableIntent {
-    record: AuditRecord,
+pub(crate) struct DurableIntent {
+    pub(crate) record: AuditRecord,
 }
 
 fn path(verb: &Verb) -> Option<&str> {
@@ -150,7 +151,8 @@ fn path(verb: &Verb) -> Option<&str> {
         | Verb::FsDelete { path, .. }
         | Verb::FsMkdir { path, .. }
         | Verb::Read { path, .. }
-        | Verb::FsStat { path, .. } => Some(path),
+        | Verb::FsStat { path, .. }
+        | Verb::FsList { path, .. } => Some(path),
         _ => None,
     }
 }
@@ -176,11 +178,12 @@ fn cited(verb: &Verb) -> Option<&str> {
     match verb {
         Verb::FsWrite { conversation, .. }
         | Verb::Read { conversation, .. }
-        | Verb::FsStat { conversation, .. } => conversation.as_deref(),
+        | Verb::FsStat { conversation, .. }
+        | Verb::FsList { conversation, .. } => conversation.as_deref(),
         _ => None,
     }
 }
-fn normal(component: &str) -> bool {
+pub(crate) fn normal(component: &str) -> bool {
     !component.is_empty()
         && component != "."
         && component != ".."
@@ -207,8 +210,28 @@ fn prepare(
     let fd = fd.ok_or(match verb {
         Verb::Read { .. } => "read descriptor missing",
         Verb::FsStat { .. } => "stat descriptor missing",
+        Verb::FsList { .. } => "list descriptor missing",
         _ => "mutation descriptor missing",
     })?;
+    if let Verb::FsList { .. } = verb {
+        let refused = |e: maknae_io::IoError| format!("list evidence refused: {e}");
+        let directory = maknae_io::verify_mutation_directory(fd).map_err(refused)?;
+        maknae_io::refuse_enumerable(directory.as_fd(), directory.path()).map_err(refused)?;
+        let path = directory
+            .path()
+            .to_str()
+            .ok_or("non-UTF-8 directory path")?
+            .to_owned();
+        checked(&path)?;
+        return Ok(PreparedMutation {
+            _evidence: Evidence::Directory {
+                _directory: directory,
+            },
+            granted: Granted::List,
+            paths: vec![path],
+            kind: FsOperation::Read,
+        });
+    }
     if let Verb::FsStat { .. } = verb {
         let refused = |e: maknae_io::IoError| format!("stat evidence refused: {e}");
         let verified = maknae_io::verify_stat_delegated(fd.as_fd()).map_err(refused)?;
@@ -377,6 +400,36 @@ pub(crate) fn read_of(write: &maknae_security::Request) -> maknae_security::Requ
     read
 }
 
+/// One file verb's request for one path, as the PDP decides it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn path_request(
+    verb: &Verb,
+    uid: u32,
+    home: Option<&Path>,
+    facts: Option<&ConversationFacts>,
+    personal: Option<&AttrValue>,
+    stamp: &Stamp<'_>,
+    path: &str,
+    kind: FsOperation,
+) -> maknae_security::Request {
+    let mut request = build_authz_request(verb, uid, home, Lane::Local, None, facts, stamp);
+    request
+        .resource
+        .0
+        .insert("path", AttrValue::Str(path.to_owned()));
+    request.context.0.insert(
+        maknae_security::CONTEXT_FS_OPERATION,
+        AttrValue::Str(kind.as_str().into()),
+    );
+    if let Some(personal) = personal {
+        request.context.0.insert(
+            maknae_security::CONTEXT_SENSITIVE_PERSONAL,
+            personal.clone(),
+        );
+    }
+    request
+}
+
 /// Decides every path from one snapshot, and for an `fs.write` the `fs.read` twin
 /// of each path too. Returns the role of the last path decided, in both arms (on a
 /// deny, the path that refused, #275), and that path's rule, except on a deny
@@ -397,21 +450,7 @@ fn authorize<P: Authorizer>(
     let with_read = matches!(verb, Verb::FsWrite { .. });
     let mut requests = Vec::new();
     for path in &prepared.paths {
-        let mut request = build_authz_request(verb, uid, home, Lane::Local, None, facts, stamp);
-        request
-            .resource
-            .0
-            .insert("path", AttrValue::Str(path.clone()));
-        request.context.0.insert(
-            maknae_security::CONTEXT_FS_OPERATION,
-            AttrValue::Str(prepared.kind.as_str().into()),
-        );
-        if let Some(personal) = personal {
-            request.context.0.insert(
-                maknae_security::CONTEXT_SENSITIVE_PERSONAL,
-                personal.clone(),
-            );
-        }
+        let request = path_request(verb, uid, home, facts, personal, stamp, path, prepared.kind);
         let read = with_read.then(|| read_of(&request));
         requests.push(request);
         requests.extend(read);
@@ -592,7 +631,7 @@ async fn commit_intent<E: AuditEmit>(
         .map_err(|_| ())?;
     Ok(DurableIntent { record })
 }
-fn completion(intent: &DurableIntent, seq: u64, status: MutationStatus) -> AuditRecord {
+pub(crate) fn completion(intent: &DurableIntent, seq: u64, status: MutationStatus) -> AuditRecord {
     let mut record = intent.record.clone();
     record.seq = seq;
     record.ts = crate::run::rfc3339_now();
@@ -606,7 +645,11 @@ fn completion(intent: &DurableIntent, seq: u64, status: MutationStatus) -> Audit
         "kernel-observed mutation outcome; authorization is separate from effect".into();
     record
 }
-async fn send<S: AsyncWrite + Unpin>(stream: &mut S, cfg: &TransportConfig, response: Response) {
+pub(crate) async fn send<S: AsyncWrite + Unpin>(
+    stream: &mut S,
+    cfg: &TransportConfig,
+    response: Response,
+) {
     if let Ok(bytes) = maknae_proto::encode_response(&response) {
         if bytes.len() <= maknae_proto::ATTEMPT_RESPONSE_MAX {
             let _ = tokio::time::timeout(
@@ -630,7 +673,7 @@ async fn refuse<S: AsyncWrite + Unpin, E: AuditEmit>(
     };
     refuse_with(stream, cfg, emit, record, reason, answer).await;
 }
-async fn refuse_with<S: AsyncWrite + Unpin, E: AuditEmit>(
+pub(crate) async fn refuse_with<S: AsyncWrite + Unpin, E: AuditEmit>(
     stream: &mut S,
     cfg: &TransportConfig,
     emit: &E,
@@ -769,6 +812,9 @@ where
         Stamp::Client => None,
         Stamp::Agent { agent, task } => Some(((*agent).clone(), task.cloned())),
     };
+    let listed_by = stamped.clone();
+    let listed_home = home.clone();
+    let listed_authorizer = Arc::clone(&authorizer);
     let prepared = tokio::time::timeout(
         authz_timeout,
         tokio::task::spawn_blocking(move || {
@@ -810,11 +856,18 @@ where
                     touch_failure = Some(e.to_string());
                 }
             }
-            Ok::<_, String>(Ok((prepared, permit, decision, touch_failure)))
+            let facts = gathered.as_ref().map(|(facts, _)| *facts);
+            Ok::<_, String>(Ok((
+                prepared,
+                permit,
+                decision,
+                touch_failure,
+                (facts, personal),
+            )))
         }),
     )
     .await;
-    let (prepared, permit, decision, touch_failure) = match prepared {
+    let (prepared, permit, decision, touch_failure, (facts, personal)) = match prepared {
         Ok(Ok(Ok(Ok(p)))) => p,
         Ok(Ok(Ok(Err(p)))) => {
             let answer = ProtoError {
@@ -870,6 +923,63 @@ where
     };
     let scope = match prepared.granted {
         Granted::Attempt(scope) => scope,
+        Granted::List => {
+            let after = match verb {
+                Verb::FsList { after, .. } => after.clone(),
+                _ => None,
+            };
+            if let Ok(Ok(intent)) = tokio::time::timeout(
+                Duration::from_millis(cfg.read_timeout_ms),
+                commit_intent(
+                    &*emit,
+                    record,
+                    None,
+                    prepared.kind,
+                    prepared.paths.clone(),
+                    &label,
+                    None,
+                ),
+            )
+            .await
+            {
+                if let Some(why) = touch_failure {
+                    untouched(&*emit, seq, &intent.record, &why).await;
+                }
+                let decider = crate::listing::Decider {
+                    authorizer: listed_authorizer,
+                    verb: verb.clone(),
+                    uid,
+                    home: listed_home,
+                    facts,
+                    personal,
+                    stamped: listed_by,
+                };
+                let lister = crate::listing::Lister::new(
+                    prepared
+                        .paths
+                        .last()
+                        .expect("prepared nonempty paths")
+                        .clone(),
+                    after,
+                );
+                crate::listing::run(
+                    stream,
+                    cfg,
+                    caps,
+                    &*emit,
+                    intent,
+                    label,
+                    seq,
+                    lister,
+                    Arc::new(decider),
+                    authz_timeout,
+                )
+                .await;
+            }
+            drop(prepared._evidence);
+            drop(permit);
+            return true;
+        }
         Granted::Stat(meta) => {
             let answer = Payload::Stat {
                 size: meta.size,
@@ -1142,7 +1252,7 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
 }
 const ACK_UNDELIVERED: &str = "mutation acknowledgment not delivered; effects unknown";
 
-async fn incomplete<E: AuditEmit>(
+pub(crate) async fn incomplete<E: AuditEmit>(
     cfg: &TransportConfig,
     emit: &E,
     intent: &DurableIntent,
@@ -2302,7 +2412,7 @@ mod tests {
     fn scope_of(p: &PreparedMutation) -> &MutationScope {
         match &p.granted {
             Granted::Attempt(scope) => scope,
-            Granted::Stat(_) => panic!("a stat grants no attempt"),
+            Granted::Stat(_) | Granted::List => panic!("a stat or a listing grants no attempt"),
         }
     }
     fn stat(path: &Path) -> Verb {
@@ -2589,7 +2699,7 @@ mod tests {
             ),
             &aliased,
             maknae_io::open_path_for_stat(&aliased).ok(),
-            SensitiveList::from_entries(&["~/.ssh/**".to_string()]).unwrap(),
+            SensitiveList::empty(),
         )
         .await;
         assert_eq!(ceiling_frame, missing_frame);
@@ -2683,6 +2793,604 @@ mod tests {
                 .as_deref(),
             Some("stat descriptor missing")
         );
+    }
+    fn list_verb(path: &Path, after: Option<&str>) -> Verb {
+        Verb::FsList {
+            path: path.to_str().unwrap().into(),
+            after: after.map(str::to_string),
+            conversation: None,
+        }
+    }
+    fn caps() -> maknae_proto::FrameCaps {
+        maknae_proto::FrameCaps {
+            control: 0,
+            attempt: maknae_proto::ATTEMPT_RESPONSE_MAX,
+            prompt: 0,
+        }
+    }
+    fn whole_listing(granted: &str) -> Vec<maknae_proto::ListChunk> {
+        let held = maknae_io::open_directory_for_delegation(Path::new(granted)).unwrap();
+        let listing = maknae_io::list_delegated_directory(
+            held.as_fd(),
+            Path::new(granted),
+            maknae_proto::LIST_RECEIVE_MAX,
+        )
+        .unwrap();
+        vec![maknae_proto::ListChunk {
+            entries: listing
+                .entries
+                .into_iter()
+                .map(|e| maknae_proto::ListEntry {
+                    name: e.name,
+                    dir: e.dir,
+                })
+                .collect(),
+            last: true,
+            dropped: listing.dropped,
+        }]
+    }
+    /// Drives `handle` for an `fs.list`, playing the subject with `chunks`; returns every
+    /// frame the kernel sent.
+    #[allow(clippy::too_many_arguments)]
+    async fn list_on<A, E>(
+        fx: &Fixture,
+        pdp: A,
+        verb: Verb,
+        fd: Option<OwnedFd>,
+        sensitive: SensitiveList,
+        emit: Arc<E>,
+        chunks: impl FnOnce(&maknae_proto::MutationGrant) -> Vec<maknae_proto::ListChunk>,
+    ) -> Vec<Vec<u8>>
+    where
+        A: Authorizer + Send + Sync + 'static,
+        E: AuditEmit + Send + Sync + 'static,
+    {
+        let cfg = maknae_config::transport_from_section(None).unwrap();
+        let fds = maknae_io::DelegatedFds::new(1);
+        if let Some(fd) = fd {
+            fds.push(fd);
+        }
+        let (mut client, mut server) = tokio::io::duplex(1 << 20);
+        let kernel = async {
+            assert!(
+                handle(
+                    &mut server,
+                    &verb,
+                    fx.principal.uid,
+                    Lane::Local,
+                    &fds,
+                    Arc::new(pdp),
+                    emit,
+                    Ok(fx.root.clone()),
+                    &cfg,
+                    &Seq::new(),
+                    record(),
+                    Duration::from_secs(10),
+                    AttemptCaps::default(),
+                    "US",
+                    Arc::new(crate::conversation::mem_store::MemStore::default()),
+                    &Stamp::Client,
+                    Arc::new(sensitive),
+                )
+                .await
+            );
+            drop(server);
+        };
+        let subject = async {
+            let mut frames = Vec::new();
+            let Ok(first) = maknae_proto::read_frame_of_class(
+                &mut client,
+                maknae_proto::FrameClass::Attempt,
+                &caps(),
+            )
+            .await
+            else {
+                return frames;
+            };
+            frames.push(first.to_vec());
+            let RespResult::Ok(Payload::MutationAttempt(grant)) =
+                maknae_proto::decode_response(&first).unwrap().result
+            else {
+                return frames;
+            };
+            for chunk in chunks(&grant) {
+                let body = maknae_proto::encode_list_chunk(&chunk).unwrap();
+                maknae_proto::write_frame(&mut client, maknae_proto::FrameClass::Attempt, &body)
+                    .await
+                    .unwrap();
+                let Ok(reply) = maknae_proto::read_frame_of_class(
+                    &mut client,
+                    maknae_proto::FrameClass::Attempt,
+                    &caps(),
+                )
+                .await
+                else {
+                    break;
+                };
+                frames.push(reply.to_vec());
+                if maknae_proto::decode_response(&reply).unwrap().result
+                    != RespResult::Ok(Payload::ListContinue)
+                {
+                    break;
+                }
+            }
+            frames
+        };
+        tokio::join!(kernel, subject).1
+    }
+    fn granted_page(frames: &[Vec<u8>]) -> maknae_proto::ListGrant {
+        match maknae_proto::decode_response(frames.last().expect("a frame"))
+            .unwrap()
+            .result
+        {
+            RespResult::Ok(Payload::ListGrant(page)) => page,
+            other => panic!("no page: {other:?}"),
+        }
+    }
+    fn names_of(page: &maknae_proto::ListGrant) -> Vec<&str> {
+        page.entries.iter().map(|e| e.name.as_str()).collect()
+    }
+    fn grant_path(grant: &maknae_proto::MutationGrant) -> String {
+        match &grant.scope {
+            MutationScope::Exact {
+                path,
+                effect: ReportedEffect::ReadFile,
+            } => path.clone(),
+            other => panic!("a listing grant names its directory: {other:?}"),
+        }
+    }
+    fn us_ceiling() -> crate::CeilingAuthorizer {
+        crate::CeilingAuthorizer::new(
+            maknae_config::Ceiling::baseline_for(&maknae_config::BasicPolicy),
+            &maknae_config::BasicPolicy,
+        )
+    }
+    const LIST_HOST: &str =
+        "schema_version: 1\nsensitive:\n  - \"~/.ssh/**\"\n  - \"~/.docker/config.json\"\n";
+    fn deny_read(
+        fx: &Fixture,
+        pdp: &crate::Composition<maknae_authz_basic::HermeticAuthorizer>,
+        rule: &str,
+    ) {
+        std::fs::write(
+            fx.root.join("authz.yaml"),
+            format!("schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\n  deny:\n    - \"{rule}\"\n"),
+        )
+        .unwrap();
+        pdp.baseline().reload_from_file().unwrap();
+    }
+    #[tokio::test]
+    async fn a_listing_withholds_protected_and_denied_entries_silently() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        std::fs::create_dir_all(fx.root.join(".ssh")).unwrap();
+        std::fs::write(fx.root.join(".ssh/id_rsa"), b"k").unwrap();
+        std::fs::create_dir_all(fx.root.join(".docker")).unwrap();
+        std::fs::write(fx.root.join(".docker/config.json"), b"t").unwrap();
+        std::fs::write(fx.root.join(".docker/daemon-161.json"), b"d").unwrap();
+        std::fs::write(fx.root.join("notes-161.txt"), b"n").unwrap();
+        std::fs::write(fx.root.join("denied-161.txt"), b"x").unwrap();
+        let fx = &fx;
+        let listed = |pdp, dir: &Path| {
+            let fd = maknae_io::open_directory_for_delegation(dir).ok();
+            let emit = Arc::new(Recorder::default());
+            let verb = list_verb(dir, None);
+            async move {
+                let frames = list_on(
+                    fx,
+                    pdp,
+                    verb,
+                    fd,
+                    SensitiveList::empty(),
+                    emit.clone(),
+                    |g| whole_listing(&grant_path(g)),
+                )
+                .await;
+                let trail = emit.0.lock().unwrap().clone();
+                (granted_page(&frames), trail)
+            }
+        };
+        let pdp = fixture_pdp_with(fx, LIST_HOST, us_ceiling());
+        deny_read(fx, &pdp, "Read(~/denied-161.txt)");
+        let (home, trail) = listed(pdp, &fx.root).await;
+        let names = names_of(&home);
+        assert!(names.contains(&"notes-161.txt"), "{names:?}");
+        assert!(names.contains(&".docker"), "{names:?}");
+        assert!(
+            !names.contains(&".ssh"),
+            "a protected entry is absent: {names:?}"
+        );
+        assert!(
+            !names.contains(&"denied-161.txt"),
+            "a denied entry is absent: {names:?}"
+        );
+        assert!(home.entries.iter().any(|e| e.name == ".docker" && e.dir));
+        assert!(!home.truncated);
+        let last = trail.last().unwrap();
+        assert_eq!(last.outcome.result, "permit");
+        assert!(
+            last.outcome.reason.contains(" 2 withheld"),
+            "{}",
+            last.outcome.reason
+        );
+
+        let pdp = fixture_pdp_with(fx, LIST_HOST, us_ceiling());
+        let (docker, _) = listed(pdp, &fx.root.join(".docker")).await;
+        assert_eq!(names_of(&docker), ["daemon-161.json"]);
+    }
+    #[tokio::test]
+    async fn the_released_result_has_no_total_and_follows_its_record() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let dir = fx.root.join("paged-161");
+        std::fs::create_dir(&dir).unwrap();
+        for n in ["a", "b", "c"] {
+            std::fs::write(dir.join(n), b"x").unwrap();
+        }
+        let emit = Arc::new(Recorder::default());
+        let frames = list_on(
+            &fx,
+            fixture_pdp(&fx),
+            list_verb(&dir, Some("a")),
+            maknae_io::open_directory_for_delegation(&dir).ok(),
+            SensitiveList::empty(),
+            emit.clone(),
+            |g| whole_listing(&grant_path(g)),
+        )
+        .await;
+        assert_eq!(names_of(&granted_page(&frames)), ["b", "c"]);
+        let value: ciborium::Value =
+            ciborium::from_reader(frames.last().unwrap().as_slice()).unwrap();
+        let rendered = format!("{value:?}");
+        assert!(
+            !rendered.contains("total") && !rendered.contains("withheld"),
+            "{rendered}"
+        );
+        let trail = emit.0.lock().unwrap().clone();
+        let intent = &trail[trail.len() - 2];
+        let done = trail.last().unwrap();
+        assert_eq!(
+            intent.mutation.as_ref().unwrap().operation,
+            Some(MutationOperation::Read)
+        );
+        assert_eq!(intent.object.as_deref(), dir.to_str());
+        assert_eq!(
+            done.mutation.as_ref().unwrap().intent_seq,
+            intent.seq,
+            "the page's record completes its intent"
+        );
+        assert!(
+            done.outcome.reason.contains("1 skipped by the cursor"),
+            "{}",
+            done.outcome.reason
+        );
+    }
+    #[tokio::test]
+    async fn every_reported_name_is_decided_by_the_composition() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let dir = fx.root.join("counted-161");
+        std::fs::create_dir(&dir).unwrap();
+        let counted = Counting {
+            pdp: fixture_pdp(&fx),
+            calls: Arc::default(),
+        };
+        let calls = Arc::clone(&counted.calls);
+        let names: Vec<String> = (0..5).map(|i| format!("e{i}")).collect();
+        let chunk = maknae_proto::ListChunk {
+            entries: names
+                .iter()
+                .map(|n| maknae_proto::ListEntry {
+                    name: n.clone(),
+                    dir: false,
+                })
+                .collect(),
+            last: true,
+            dropped: 0,
+        };
+        let frames = list_on(
+            &fx,
+            counted,
+            list_verb(&dir, None),
+            maknae_io::open_directory_for_delegation(&dir).ok(),
+            SensitiveList::empty(),
+            Arc::new(Recorder::default()),
+            |_| vec![chunk],
+        )
+        .await;
+        assert_eq!(names_of(&granted_page(&frames)), names);
+        let asked = calls.lock().unwrap().clone();
+        let want: Vec<String> = std::iter::once(dir.to_str().unwrap().to_string())
+            .chain(
+                names
+                    .iter()
+                    .map(|n| dir.join(n).to_str().unwrap().to_string()),
+            )
+            .collect();
+        assert_eq!(asked, want, "the directory, then each reported name once");
+    }
+    struct Counting<P> {
+        pdp: P,
+        calls: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+    impl<P: Authorizer> Authorizer for Counting<P> {
+        fn decide(&self, request: &maknae_security::Request) -> maknae_security::Verdict {
+            self.decide_cited(request).verdict
+        }
+        fn decide_reporting_role(
+            &self,
+            request: &maknae_security::Request,
+        ) -> (maknae_security::Verdict, Option<&'static str>) {
+            self.decide_cited(request).into()
+        }
+        fn decide_cited(&self, request: &maknae_security::Request) -> maknae_security::Decided {
+            self.decide_cited_all(std::slice::from_ref(request))
+                .pop()
+                .unwrap()
+        }
+        fn decide_cited_all(
+            &self,
+            requests: &[maknae_security::Request],
+        ) -> Vec<maknae_security::Decided> {
+            for r in requests {
+                if let Some(AttrValue::Str(p)) = r.resource.0.get("path") {
+                    self.calls.lock().unwrap().push(p.clone());
+                }
+            }
+            self.pdp.decide_cited_all(requests)
+        }
+    }
+    #[tokio::test]
+    async fn a_denied_directory_and_a_missing_one_render_alike() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let once = |pdp, dir: &Path| {
+            let fd = maknae_io::open_directory_for_delegation(dir).ok();
+            let emit = Arc::new(Recorder::default());
+            let verb = list_verb(dir, None);
+            let fx = &fx;
+            async move {
+                let frames = list_on(
+                    fx,
+                    pdp,
+                    verb,
+                    fd,
+                    SensitiveList::empty(),
+                    emit.clone(),
+                    |_| panic!("a refused listing grants nothing"),
+                )
+                .await;
+                assert_eq!(frames.len(), 1);
+                (frames[0].clone(), last_reason(&emit))
+            }
+        };
+        let (missing, missing_why) = once(fixture_pdp(&fx), &fx.root.join("missing-161")).await;
+        let denied = fx.root.join("denied-dir-161");
+        std::fs::create_dir(&denied).unwrap();
+        let pdp = fixture_pdp(&fx);
+        deny_read(&fx, &pdp, "Read(~/denied-dir-161)");
+        let (refused, denied_why) = once(pdp, &denied).await;
+        assert_eq!(missing, uniform_refusal());
+        assert_eq!(refused, missing);
+        assert_eq!(missing_why, "list descriptor missing");
+        assert!(
+            denied_why.contains("Read(~/denied-dir-161)"),
+            "{denied_why}"
+        );
+        if nix::unistd::geteuid().is_root() {
+            eprintln!(
+                "SKIP a_denied_directory_and_a_missing_one_render_alike: the os-refused case needs a non-root euid"
+            );
+            return;
+        }
+        let shut = fx.root.join("shut-161");
+        std::fs::create_dir_all(shut.join("inner")).unwrap();
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let (os_refused, _) = once(fixture_pdp(&fx), &shut.join("inner")).await;
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(os_refused, missing);
+    }
+    #[tokio::test]
+    async fn a_listing_through_a_symlinked_directory_into_a_protected_region_releases_nothing() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        std::fs::create_dir(fx.root.join(".ssh")).unwrap();
+        std::fs::write(fx.root.join(".ssh/id_rsa"), b"k").unwrap();
+        std::fs::create_dir(fx.root.join("proj")).unwrap();
+        std::os::unix::fs::symlink(fx.root.join(".ssh"), fx.root.join("proj/keys")).unwrap();
+        let keys = fx.root.join("proj/keys");
+        let emit = Arc::new(Recorder::default());
+        let frames = list_on(
+            &fx,
+            fixture_pdp_with(&fx, LIST_HOST, us_ceiling()),
+            list_verb(&keys, None),
+            maknae_io::open_directory_for_delegation(&keys).ok(),
+            SensitiveList::empty(),
+            emit.clone(),
+            |_| panic!("nothing is granted through the link"),
+        )
+        .await;
+        assert_eq!(frames, [uniform_refusal()]);
+        let last = emit.0.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(last.outcome.reason, "sensitive: host ~/.ssh/**");
+        assert_eq!(last.object.as_deref(), fx.root.join(".ssh").to_str());
+    }
+    #[tokio::test]
+    async fn a_listing_of_a_protected_directory_answers_protected() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let ssh = fx.root.join(".ssh");
+        std::fs::create_dir(&ssh).unwrap();
+        let host = || SensitiveList::from_entries(&["~/.ssh/**".to_string()]).unwrap();
+        let want = maknae_proto::encode_response(&Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Err(ProtoError {
+                code: ProtoErrCode::Protected,
+                message: maknae_proto::protected_message(
+                    maknae_proto::HOST_SENSITIVE_LIST,
+                    "~/.ssh/**",
+                ),
+            }),
+        })
+        .unwrap();
+        for fd in [maknae_io::open_directory_for_delegation(&ssh).ok(), None] {
+            let frames = list_on(
+                &fx,
+                fixture_pdp(&fx),
+                list_verb(&ssh, None),
+                fd,
+                host(),
+                Arc::new(Recorder::default()),
+                |_| panic!("a protected directory is never granted"),
+            )
+            .await;
+            assert_eq!(
+                frames,
+                std::slice::from_ref(&want),
+                "armed or not, the answer is the path's"
+            );
+        }
+    }
+    #[test]
+    fn the_daemon_never_opens_the_listed_directory() {
+        let fx = Fixture::new();
+        let held = maknae_io::open_directory_for_delegation(&fx.root).unwrap();
+        #[cfg(target_os = "linux")]
+        {
+            let flags = nix::fcntl::fcntl(held.as_fd(), nix::fcntl::FcntlArg::F_GETFL).unwrap();
+            assert!(nix::fcntl::OFlag::from_bits_retain(flags).contains(nix::fcntl::OFlag::O_PATH));
+        }
+        let verb = list_verb(&fx.root, None);
+        let prepared = prepare(verb.clone(), Some(held), &fx.root, Lane::Local).unwrap();
+        assert!(matches!(prepared.granted, Granted::List));
+        assert_eq!(prepared.paths, [fx.root.to_str().unwrap()]);
+        assert_eq!(prepared.kind, FsOperation::Read);
+        let readable: OwnedFd = std::fs::File::open(&fx.root).unwrap().into();
+        let refused = prepare(verb.clone(), Some(readable), &fx.root, Lane::Local)
+            .err()
+            .unwrap();
+        assert!(
+            refused.starts_with("list evidence refused")
+                && refused.contains("confers access beyond location"),
+            "{refused}"
+        );
+        let file = fx.root.join("not-a-dir-161");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(prepare(
+            verb.clone(),
+            Some(maknae_io::open_path_for_delegation(&file).unwrap()),
+            &fx.root,
+            Lane::Local
+        )
+        .err()
+        .unwrap()
+        .starts_with("list evidence refused"));
+        assert_eq!(
+            prepare(verb, None, &fx.root, Lane::Local).err().as_deref(),
+            Some("list descriptor missing")
+        );
+    }
+    struct FailFrom(std::sync::Mutex<Vec<AuditRecord>>, usize);
+    impl AuditEmit for FailFrom {
+        fn emit(
+            &self,
+            record: &AuditRecord,
+        ) -> impl std::future::Future<Output = Result<(), maknae_audit_append::AuditError>> + Send
+        {
+            let mut held = self.0.lock().unwrap();
+            let ok = held.len() < self.1;
+            if ok {
+                held.push(record.clone());
+            }
+            async move {
+                if ok {
+                    Ok(())
+                } else {
+                    Err(maknae_audit_append::AuditError::WritePrimary("full".into()))
+                }
+            }
+        }
+    }
+    #[tokio::test]
+    async fn nothing_is_released_before_its_record_lands() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let dir = fx.root.join("unrecorded-161");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("listed-161"), b"x").unwrap();
+        let emit = Arc::new(FailFrom(std::sync::Mutex::default(), 1));
+        let frames = list_on(
+            &fx,
+            fixture_pdp(&fx),
+            list_verb(&dir, None),
+            maknae_io::open_directory_for_delegation(&dir).ok(),
+            SensitiveList::empty(),
+            emit.clone(),
+            |g| whole_listing(&grant_path(g)),
+        )
+        .await;
+        assert_eq!(frames.len(), 1, "the grant, and no page");
+        assert!(!frames
+            .iter()
+            .any(|f| f.windows(10).any(|w| w == b"listed-161")));
+    }
+    #[tokio::test]
+    async fn an_unsorted_chunk_is_refused_with_its_cause_and_releases_nothing() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let dir = fx.root.join("unsorted-161");
+        std::fs::create_dir(&dir).unwrap();
+        let emit = Arc::new(Recorder::default());
+        let entry = |name: &str| maknae_proto::ListEntry {
+            name: name.into(),
+            dir: false,
+        };
+        let frames = list_on(
+            &fx,
+            fixture_pdp(&fx),
+            list_verb(&dir, None),
+            maknae_io::open_directory_for_delegation(&dir).ok(),
+            SensitiveList::empty(),
+            emit.clone(),
+            |_| {
+                vec![
+                    maknae_proto::ListChunk {
+                        entries: vec![entry("b"), entry("c")],
+                        last: false,
+                        dropped: 0,
+                    },
+                    maknae_proto::ListChunk {
+                        entries: vec![entry("a")],
+                        last: true,
+                        dropped: 0,
+                    },
+                ]
+            },
+        )
+        .await;
+        assert_eq!(frames.len(), 3);
+        assert_eq!(
+            maknae_proto::decode_response(&frames[1]).unwrap().result,
+            RespResult::Ok(Payload::ListContinue)
+        );
+        assert_eq!(
+            maknae_proto::decode_response(&frames[2]).unwrap().result,
+            RespResult::Err(ProtoError {
+                code: ProtoErrCode::Unauthorized,
+                message: crate::listing::ORDER_VIOLATED.into(),
+            }),
+            "the user is told the cause; the model renders the code"
+        );
+        let last = emit.0.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(last.outcome.result, "deny");
+        assert!(
+            last.outcome
+                .reason
+                .starts_with("listing order violated; listing: 2 received"),
+            "{}",
+            last.outcome.reason
+        );
+        assert_eq!(last.mutation.unwrap().status, MutationStatus::Incomplete);
     }
     #[test]
     fn mtime_seconds_keep_the_sign_and_floor() {

@@ -3146,7 +3146,7 @@ mod tests {
                 "fs.write" => Some("write-existing"),
                 "fs.delete" => Some("delete-entry"),
                 "fs.mkdir" => Some("mkdir"),
-                "fs.stat" => Some("read"),
+                "fs.stat" | "fs.list" => Some("read"),
                 _ => None,
             };
             let targets: &[Option<&str>] = if op.is_some() {
@@ -4421,6 +4421,8 @@ mod tests {
             ("admin", "fs.read"),
             ("admin", "fs.stat"),
             ("user", "fs.stat"),
+            ("admin", "fs.list"),
+            ("user", "fs.list"),
             ("admin", "kernel.contain"),
             ("admin", "fs.*"),
             ("admin", "kernel.*"),
@@ -4717,22 +4719,24 @@ mod tests {
     }
 
     #[test]
-    fn a_subjects_list_naming_fs_stat_is_refused_as_decided_by_fs_read() {
-        let want = Some(AuthzBasicError::DecidedAsRead("fs.stat".into()));
-        for list in ["allow", "deny"] {
-            let got = finish_looking_up(
-                with_subjects(&format!(
-                    "  zed:\n    actions:\n      {list}: [\"fs.stat\"]\n"
-                )),
-                |n| {
-                    if n == "zed" {
-                        Lookup::Found(7001)
-                    } else {
-                        Lookup::Found(0)
-                    }
-                },
-            );
-            assert_eq!(got.err(), want, "subjects {list}");
+    fn a_subjects_list_naming_fs_stat_or_fs_list_is_refused_as_decided_by_fs_read() {
+        for action in ["fs.stat", "fs.list"] {
+            let want = Some(AuthzBasicError::DecidedAsRead(action.into()));
+            for list in ["allow", "deny"] {
+                let got = finish_looking_up(
+                    with_subjects(&format!(
+                        "  zed:\n    actions:\n      {list}: [\"{action}\"]\n"
+                    )),
+                    |n| {
+                        if n == "zed" {
+                            Lookup::Found(7001)
+                        } else {
+                            Lookup::Found(0)
+                        }
+                    },
+                );
+                assert_eq!(got.err(), want, "subjects {list} {action}");
+            }
         }
         let shown = AuthzBasicError::DecidedAsRead("fs.stat".into()).to_string();
         assert!(shown.contains("decided as `fs.read`"), "{shown}");
@@ -6473,7 +6477,14 @@ mod tests {
             v
         }
 
-        const FS_TERMS: [&str; 5] = ["fs.read", "fs.write", "fs.delete", "fs.mkdir", "fs.stat"];
+        const FS_TERMS: [&str; 6] = [
+            "fs.read",
+            "fs.write",
+            "fs.delete",
+            "fs.mkdir",
+            "fs.stat",
+            "fs.list",
+        ];
 
         fn request(
             action: &str,
@@ -6706,8 +6717,8 @@ mod tests {
                 mismatches.len(),
                 &mismatches[..mismatches.len().min(10)]
             );
-            let fs_cells = 5 * 7 * 22 * 5 + 7 * 22 * 5;
-            let other_cells = 55 + 4;
+            let fs_cells = 6 * 7 * 22 * 5 + 7 * 22 * 5;
+            let other_cells = 54 + 4;
             assert_eq!(cells, 12 * 9 * (fs_cells + other_cells));
             assert_eq!(subject_entries, 1);
             assert_eq!(
@@ -7859,28 +7870,38 @@ mod tests {
         }
 
         #[test]
-        fn an_agent_policy_naming_fs_stat_is_refused_and_its_fs_read_entry_permits_stat() {
+        fn an_agent_policy_naming_fs_stat_or_fs_list_is_refused_and_its_fs_read_entry_permits_both()
+        {
+            for action in ["fs.stat", "fs.list"] {
+                agent_policy_decides_as_read(action);
+            }
+        }
+
+        fn agent_policy_decides_as_read(action: &str) {
             let policy = |list: &str| {
                 format!(
                     "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\nactions:\n  {list}\n"
                 )
             };
-            for list in ["allow: [\"fs.stat\"]", "deny: [\"fs.stat\"]"] {
+            for list in [
+                format!("allow: [\"{action}\"]"),
+                format!("deny: [\"{action}\"]"),
+            ] {
                 let got = try_source(
                     super::shipped_denying(),
                     None,
                     &[],
-                    load(vec![hobi()], &[("hobi", &policy(list))]),
+                    load(vec![hobi()], &[("hobi", &policy(&list))]),
                 );
                 assert_eq!(
                     got.err(),
-                    Some(AuthzBasicError::DecidedAsRead("fs.stat".into())),
+                    Some(AuthzBasicError::DecidedAsRead(action.into())),
                     "{list}"
                 );
             }
             let stat = |src: &PolicySource| {
                 let mut r = read(HOBI, "/home/operator/stat-161");
-                r.action = Action("fs.stat".into());
+                r.action = Action(action.into());
                 auth(src, 501).decide(&agent_channel(r, "hobi"))
             };
             let read_only = source(

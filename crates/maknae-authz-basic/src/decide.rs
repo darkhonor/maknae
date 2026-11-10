@@ -187,7 +187,7 @@ pub(crate) const GRANTABLE_ACTIONS: [&str; 13] = ["admin.status", "admin.config.
 pub(crate) const ACTION_VOCABULARY: [&str; 17] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt", "session.new", "session.close", "session.list", "session.delete", "session.task", "fs.read", "fs.write", "fs.delete", "fs.mkdir"];
 
 /// Decided as `fs.read` wherever an action is limited, and never named by a list (#161 M15).
-pub(crate) const DECIDED_AS_READ: &str = "fs.stat";
+pub(crate) const DECIDED_AS_READ: [&str; 2] = ["fs.stat", "fs.list"];
 
 /// An action entry as compiled against [`ACTION_VOCABULARY`]: `(term, entry as written)`.
 pub(crate) fn expand(
@@ -195,7 +195,8 @@ pub(crate) fn expand(
 ) -> Result<Vec<(&'static str, String)>, crate::AuthzBasicError> {
     use crate::AuthzBasicError::{DecidedAsRead, UngrantableAction, UnknownAction};
     let source = p.source();
-    if matches!(p, maknae_config::ActionPattern::Exact(name) if name == DECIDED_AS_READ) {
+    if matches!(p, maknae_config::ActionPattern::Exact(name) if DECIDED_AS_READ.contains(&name.as_str()))
+    {
         return Err(DecidedAsRead(source));
     }
     let (maknae_config::ActionPattern::Exact(name) | maknae_config::ActionPattern::Family(name)) =
@@ -765,7 +766,7 @@ pub(crate) fn decide_loaded_cited(
         Role::Admin | Role::User
             if matches!(
                 req.action.0.as_str(),
-                "fs.read" | "fs.write" | "fs.delete" | "fs.mkdir" | "fs.stat"
+                "fs.read" | "fs.write" | "fs.delete" | "fs.mkdir" | "fs.stat" | "fs.list"
             ) =>
         {
             match attempt_scope(req) {
@@ -967,7 +968,7 @@ fn agent_arm(
 
 fn action_limit(entry: Option<&SubjectEntry>, action: &str) -> Option<Verdict> {
     let entry = entry?;
-    let action = if action == DECIDED_AS_READ {
+    let action = if DECIDED_AS_READ.contains(&action) {
         "fs.read"
     } else {
         action
@@ -1036,7 +1037,7 @@ fn attempt_scope(req: &SecRequest) -> Result<FsScope, Verdict> {
         .and_then(FsOperation::parse)
         .ok_or_else(|| refuse("filesystem attempt preparation absent or invalid"))?;
     let scope = match (req.action.0.as_str(), operation) {
-        ("fs.read" | "fs.stat", FsOperation::Read) => FsScope::Read,
+        ("fs.read" | "fs.stat" | "fs.list", FsOperation::Read) => FsScope::Read,
         ("fs.write", FsOperation::WriteExisting | FsOperation::WriteCreate)
         | ("fs.delete", FsOperation::DeleteEntry)
         | ("fs.mkdir", FsOperation::Mkdir) => FsScope::Write,
@@ -1292,44 +1293,47 @@ mod tests {
     }
 
     #[test]
-    fn fs_stat_is_decided_by_the_read_grant() {
-        for role in ["admin", "user"] {
-            let lp = lp_with(
-                Some(&[(role, &["operator"])]),
-                &[("operator", OPERATOR_UID)],
-            );
-            let stat = |path: &str, op: &str| {
-                let mut req = request(Some(i64::from(OPERATOR_UID)), "fs.stat", Some(path));
-                req.context.0.insert(
-                    maknae_security::CONTEXT_FS_OPERATION,
-                    AttrValue::Str(op.into()),
+    fn fs_stat_and_fs_list_are_decided_by_the_read_grant() {
+        for action in ["fs.stat", "fs.list"] {
+            for role in ["admin", "user"] {
+                let lp = lp_with(
+                    Some(&[(role, &["operator"])]),
+                    &[("operator", OPERATOR_UID)],
                 );
-                decide_loaded(&lp, &principal(), &req)
-            };
-            assert!(
-                matches!(
-                    stat("/home/operator/stat-161", "read"),
-                    Verdict::Permit { .. }
-                ),
-                "{role}: Read(~/**) permits fs.stat"
-            );
-            assert!(
-                matches!(stat("/home/operator/.ssh/id", "read"), Verdict::Deny { ref reason } if reason.contains("Read(~/.ssh/**)")),
-                "{role}: a Read deny refuses fs.stat"
-            );
-            assert_eq!(
-                stat("/srv/stat-161", "read"),
-                Verdict::NotApplicable {
-                    note: Some(format!("role {role}: no capability entry for fs.stat")),
-                }
-            );
-            assert!(
-                matches!(stat("/home/operator/stat-161", "write-existing"), Verdict::Deny { ref reason } if reason == "filesystem attempt preparation does not match action"),
-                "{role}: fs.stat is prepared as a read only"
-            );
+                let decide = |path: &str, op: &str| {
+                    let mut req = request(Some(i64::from(OPERATOR_UID)), action, Some(path));
+                    req.context.0.insert(
+                        maknae_security::CONTEXT_FS_OPERATION,
+                        AttrValue::Str(op.into()),
+                    );
+                    decide_loaded(&lp, &principal(), &req)
+                };
+                assert!(
+                    matches!(
+                        decide("/home/operator/stat-161", "read"),
+                        Verdict::Permit { .. }
+                    ),
+                    "{role}: Read(~/**) permits {action}"
+                );
+                assert!(
+                    matches!(decide("/home/operator/.ssh/id", "read"), Verdict::Deny { ref reason } if reason.contains("Read(~/.ssh/**)")),
+                    "{role}: a Read deny refuses {action}"
+                );
+                assert_eq!(
+                    decide("/srv/stat-161", "read"),
+                    Verdict::NotApplicable {
+                        note: Some(format!("role {role}: no capability entry for {action}")),
+                    }
+                );
+                assert!(
+                    matches!(decide("/home/operator/stat-161", "write-existing"), Verdict::Deny { ref reason } if reason == "filesystem attempt preparation does not match action"),
+                    "{role}: {action} is prepared as a read only"
+                );
+            }
+            assert!(!ACTION_VOCABULARY.contains(&action));
+            assert!(!GRANTABLE_ACTIONS.contains(&action));
+            assert!(DECIDED_AS_READ.contains(&action));
         }
-        assert!(!ACTION_VOCABULARY.contains(&"fs.stat"));
-        assert!(!GRANTABLE_ACTIONS.contains(&"fs.stat"));
     }
 
     #[test]
@@ -2079,7 +2083,7 @@ mod tests {
             let keyed = decide_loaded(&lp, &principal(), &req) != unbuilt(t);
             assert_eq!(
                 keyed,
-                ACTION_VOCABULARY.contains(&t) || t == DECIDED_AS_READ,
+                ACTION_VOCABULARY.contains(&t) || DECIDED_AS_READ.contains(&t),
                 "{t}"
             );
         }
@@ -3433,10 +3437,16 @@ mod tests {
     }
 
     #[test]
-    fn fs_stat_follows_the_fs_read_entry_of_an_actions_limit() {
+    fn fs_stat_and_fs_list_follow_the_fs_read_entry_of_an_actions_limit() {
+        for action in ["fs.stat", "fs.list"] {
+            fs_read_entry_limits(action);
+        }
+    }
+
+    fn fs_read_entry_limits(action: &str) {
         let stat = |lp: &LoadedPolicy| {
             let mut r = fs_op(SENTINEL_UID, "fs.read", "stat-161");
-            r.action.0 = "fs.stat".into();
+            r.action.0 = action.into();
             decide_loaded_cited(lp, &principal(), &r)
         };
         let read_only = lp_subject(

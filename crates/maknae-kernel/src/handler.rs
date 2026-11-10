@@ -109,7 +109,8 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         | Verb::FsWrite { .. }
         | Verb::FsDelete { .. }
         | Verb::FsMkdir { .. }
-        | Verb::FsStat { .. } => Dispatch::MutationRequested,
+        | Verb::FsStat { .. }
+        | Verb::FsList { .. } => Dispatch::MutationRequested,
         // Every enumerated-but-unbuilt term. NO wildcard: a new variant is a
         // compile error until someone decides what it dispatches to.
         Verb::AdminConfigShow => Dispatch::ConfigShowRequested,
@@ -146,7 +147,6 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         | Verb::SessionElicitComplete
         | Verb::SessionCompact
         | Verb::FsMove
-        | Verb::FsList
         | Verb::FsLink
         | Verb::FsChmod
         | Verb::FsChown
@@ -317,7 +317,7 @@ pub fn verb_to_action(verb: &Verb) -> &'static str {
         Verb::FsWrite { .. } => "fs.write",
         Verb::FsDelete { .. } => "fs.delete",
         Verb::FsMove => "fs.move",
-        Verb::FsList => "fs.list",
+        Verb::FsList { .. } => "fs.list",
         Verb::FsStat { .. } => "fs.stat",
         Verb::FsMkdir { .. } => "fs.mkdir",
         Verb::FsLink => "fs.link",
@@ -664,8 +664,15 @@ mod tests {
     }
 
     #[test]
-    fn exactly_the_five_file_actions_are_filesystem_verbs() {
-        let file_actions = ["fs.read", "fs.write", "fs.delete", "fs.mkdir", "fs.stat"];
+    fn exactly_the_six_file_actions_are_filesystem_verbs() {
+        let file_actions = [
+            "fs.read",
+            "fs.write",
+            "fs.delete",
+            "fs.mkdir",
+            "fs.stat",
+            "fs.list",
+        ];
         let verbs = all_verbs();
         assert_eq!(
             verbs.iter().filter(|v| is_filesystem_verb(v)).count(),
@@ -1774,7 +1781,11 @@ mod tests {
                 recursive: false,
             },
             Verb::FsMove,
-            Verb::FsList,
+            Verb::FsList {
+                path: "/x".into(),
+                after: None,
+                conversation: None,
+            },
             Verb::FsStat {
                 path: "/x".into(),
                 conversation: None,

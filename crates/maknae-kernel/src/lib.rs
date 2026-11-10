@@ -23,6 +23,7 @@ mod groupres;
 mod handler;
 mod host_env;
 pub mod identity_report;
+mod listing;
 pub mod live;
 mod membership;
 mod mutation;

@@ -514,6 +514,21 @@ pub(crate) fn macos_confers_no_write<F: AsFd>(fd: &F) -> nix::Result<bool> {
     Ok(OFlag::from_bits_retain(flags) & OFlag::O_ACCMODE == OFlag::O_RDONLY)
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) use linux_confers_no_write as confers_search_only;
+#[cfg(target_os = "macos")]
+pub(crate) use macos_confers_search_only as confers_search_only;
+
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_confers_search_only<F: AsFd>(fd: &F) -> nix::Result<bool> {
+    let flags = OFlag::from_bits_retain(nix::fcntl::fcntl(
+        fd.as_fd(),
+        nix::fcntl::FcntlArg::F_GETFL,
+    )?);
+    Ok(flags.contains(OFlag::from_bits_retain(nix::libc::O_EXEC))
+        && flags & OFlag::O_ACCMODE == OFlag::O_RDONLY)
+}
+
 pub(crate) fn write_at<F: AsFd>(fd: &F, bytes: &[u8], offset: i64) -> nix::Result<usize> {
     nix::sys::uio::pwrite(fd, bytes, offset)
 }

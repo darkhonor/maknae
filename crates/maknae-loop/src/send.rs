@@ -290,6 +290,28 @@ async fn exchange(
         FirstAnswer::Done(sent) => return Ok(sent),
         FirstAnswer::Grant(prepared, grant) => (prepared, grant),
     };
+    if matches!(prepared.request(), maknae_proto::Verb::FsList { .. }) {
+        return Ok(
+            match crate::mutation::execute_list(
+                prepared,
+                grant,
+                &mut stream,
+                transport,
+                written,
+                diag,
+            )
+            .await
+            .map_err(Failed::After)?
+            {
+                Ok(page) => SentOutcome::Payload(Payload::ListGrant(page)),
+                Err(refused) => SentOutcome::Refused {
+                    code: refused.code,
+                    message: refused.message,
+                    armed: true,
+                },
+            },
+        );
+    }
     if matches!(prepared.request(), maknae_proto::Verb::Read { .. }) {
         let read =
             crate::mutation::execute_read(prepared, grant, &mut stream, transport, written, diag)
@@ -804,6 +826,27 @@ mod tests {
             ),
             "a grant never reaches an executor for fs.stat"
         );
+        let listing = crate::mutation::prepare_checked(
+            maknae_proto::Verb::FsList {
+                path: "/sentinel-161".into(),
+                after: None,
+                conversation: None,
+            },
+            None,
+            crate::mutation::WriteCheck::Unchecked,
+        );
+        assert!(
+            matches!(
+                first_answer(false, listing, grant(), false),
+                Ok(FirstAnswer::Grant(p, _)) if matches!(p.request(), maknae_proto::Verb::FsList { .. })
+            ),
+            "a listing grant reaches the listing executor"
+        );
+        assert!(!mutates(&maknae_proto::Verb::FsList {
+            path: "/sentinel-161".into(),
+            after: None,
+            conversation: None,
+        }));
         let answer = Payload::Stat {
             size: 1,
             mtime_secs: 1,

@@ -8,7 +8,7 @@
 
 use std::collections::VecDeque;
 use std::mem::MaybeUninit;
-use std::os::fd::{BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -216,7 +216,8 @@ pub fn open_path_for_stat(path: &std::path::Path) -> std::io::Result<OwnedFd> {
     crate::syscall::open_path_stat(path).map_err(Into::into)
 }
 
-/// Verify a delegated `fs.stat` descriptor: any kind, one link unless a directory.
+/// Verify a delegated `fs.stat` descriptor: any kind, still linked (`nlink` 0 is a changed
+/// path), and one link unless a directory.
 pub fn verify_stat_delegated(fd: BorrowedFd<'_>) -> Result<Delegated, IoError> {
     let path = delegated_path(fd)?;
     crate::mutation::checked_path(&path)?;
@@ -235,6 +236,126 @@ pub fn verify_stat_delegated(fd: BorrowedFd<'_>) -> Result<Delegated, IoError> {
     };
     crate::checks::check_target(&st, &path, &target)?;
     Ok(Delegated { path, meta })
+}
+
+/// The kernel's check on a delegated `fs.list` directory: it can search, never enumerate
+/// (Linux `O_PATH`, macOS `O_SEARCH`), so the daemon never reads the names itself.
+pub fn refuse_enumerable(fd: BorrowedFd<'_>, path: &std::path::Path) -> Result<(), IoError> {
+    if crate::syscall::confers_search_only(&fd)
+        .map_err(|e| crate::checks::map_errno_no_disambiguation(e, path))?
+    {
+        Ok(())
+    } else {
+        Err(IoError::AccessBearingDescriptor { path: path.into() })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedEntry {
+    pub name: String,
+    pub dir: bool,
+}
+
+/// The names of one directory in byte order; `dropped` counts names that are not UTF-8.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Listing {
+    pub entries: Vec<ListedEntry>,
+    pub dropped: u32,
+}
+
+/// The `keep` smallest names offered, in byte order.
+struct Kept {
+    heap: std::collections::BinaryHeap<(String, bool)>,
+    keep: usize,
+    dropped: u32,
+}
+
+impl Kept {
+    fn new(keep: usize) -> Self {
+        Self {
+            heap: std::collections::BinaryHeap::new(),
+            keep,
+            dropped: 0,
+        }
+    }
+
+    fn offer(&mut self, raw: &[u8], dir: impl FnOnce() -> nix::Result<bool>) -> nix::Result<()> {
+        if raw == b"." || raw == b".." {
+            return Ok(());
+        }
+        let Ok(name) = std::str::from_utf8(raw) else {
+            self.dropped = self.dropped.saturating_add(1);
+            return Ok(());
+        };
+        if self.heap.len() == self.keep
+            && self
+                .heap
+                .peek()
+                .is_none_or(|(largest, _)| name >= largest.as_str())
+        {
+            return Ok(());
+        }
+        self.heap.push((name.to_owned(), dir()?));
+        if self.heap.len() > self.keep {
+            self.heap.pop();
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Listing {
+        Listing {
+            entries: self
+                .heap
+                .into_sorted_vec()
+                .into_iter()
+                .map(|(name, dir)| ListedEntry { name, dir })
+                .collect(),
+            dropped: self.dropped,
+        }
+    }
+}
+
+/// The subject's enumeration of the directory it delegated for `fs.list`. The reopened
+/// descriptor must be the delegated object, still at the kernel-reported `granted` path.
+pub fn list_delegated_directory(
+    held: BorrowedFd<'_>,
+    granted: &std::path::Path,
+    keep: usize,
+) -> Result<Listing, IoError> {
+    list_reopened(held, granted, keep, |fd| {
+        crate::syscall::open_dir_at(&fd, ".")
+    })
+}
+
+fn list_reopened(
+    held: BorrowedFd<'_>,
+    granted: &std::path::Path,
+    keep: usize,
+    reopen: impl FnOnce(BorrowedFd<'_>) -> nix::Result<OwnedFd>,
+) -> Result<Listing, IoError> {
+    let at = |e| crate::checks::map_errno_no_disambiguation(e, granted);
+    let delegated = crate::syscall::fstat(&held).map_err(at)?;
+    let fd = reopen(held).map_err(at)?;
+    let reopened = crate::syscall::fstat(&fd).map_err(at)?;
+    if (reopened.st_dev, reopened.st_ino) != (delegated.st_dev, delegated.st_ino)
+        || delegated_path(fd.as_fd())? != granted
+    {
+        return Err(IoError::MutationPathChanged {
+            path: granted.into(),
+        });
+    }
+    let mut kept = Kept::new(keep);
+    let mut handle = crate::syscall::open_dir_handle(&fd).map_err(at)?;
+    for entry in handle.iter() {
+        let entry = entry.map_err(at)?;
+        let raw = entry.file_name();
+        kept.offer(raw.to_bytes(), || {
+            crate::dir::classify_entry(entry.file_type(), &fd, raw, entry.ino())
+                .map(|kind| kind == crate::anchor::Kind::Dir)
+        })
+        .map_err(at)?;
+    }
+    Ok(kept.finish())
 }
 
 /// Subject-side directory open. Proves no permission to mutate its children.
@@ -539,10 +660,14 @@ mod tests {
         let verified = verify_stat_delegated(fd.as_fd()).expect("a directory is stat-able");
         assert_eq!(verified.meta.kind, FileKind::Directory);
         let real = a_file(&base, "real-161", b"x");
-        std::fs::hard_link(&real, base.join("alias-161")).expect("hard link");
+        let alias = base.join("alias-161");
+        std::fs::hard_link(&real, &alias).expect("hard link");
         let fd = open_path_for_stat(&real).expect("stat open");
         match verify_stat_delegated(fd.as_fd()) {
-            Err(IoError::MultiplyLinked { path, nlink }) => assert_eq!((path, nlink), (real, 2)),
+            Err(IoError::MultiplyLinked { path, nlink }) => {
+                assert_eq!(nlink, 2);
+                assert!(path == real || path == alias, "{path:?}");
+            }
             other => panic!("a multiply-linked file must be refused: {other:?}"),
         }
     }
@@ -566,6 +691,113 @@ mod tests {
                 Err(IoError::MutationPathChanged { .. }) => {}
                 other => panic!("an unlinked object must be refused as changed: {other:?}"),
             }
+        }
+    }
+
+    fn names(listing: &Listing) -> Vec<(&str, bool)> {
+        listing
+            .entries
+            .iter()
+            .map(|e| (e.name.as_str(), e.dir))
+            .collect()
+    }
+
+    #[test]
+    fn a_listing_is_the_delegated_directory_in_byte_order_with_its_kinds() {
+        let (_dir, base) = crate::testutil::outside_any_home();
+        let listed = base.join("listed-161");
+        std::fs::create_dir(&listed).unwrap();
+        a_file(&listed, "b-161", b"x");
+        a_file(&listed, "a-161", b"x");
+        a_file(&listed, "Z-161", b"x");
+        std::fs::create_dir(listed.join("d-161")).unwrap();
+        std::os::unix::fs::symlink(listed.join("d-161"), listed.join("s-161")).unwrap();
+        let held = open_directory_for_delegation(&listed).unwrap();
+        let got = list_delegated_directory(held.as_fd(), &listed, 10).unwrap();
+        assert_eq!(
+            names(&got),
+            [
+                ("Z-161", false),
+                ("a-161", false),
+                ("b-161", false),
+                ("d-161", true),
+                ("s-161", false)
+            ]
+        );
+        assert_eq!(got.dropped, 0);
+        let kept = list_delegated_directory(held.as_fd(), &listed, 2).unwrap();
+        assert_eq!(names(&kept), [("Z-161", false), ("a-161", false)]);
+    }
+
+    #[test]
+    fn a_directory_swapped_after_delegation_is_refused() {
+        let (_dir, base) = crate::testutil::outside_any_home();
+        let listed = base.join("swapped-161");
+        std::fs::create_dir(&listed).unwrap();
+        a_file(&listed, "original-161", b"x");
+        let held = open_directory_for_delegation(&listed).unwrap();
+        std::fs::rename(&listed, base.join("moved-161")).unwrap();
+        std::fs::create_dir(&listed).unwrap();
+        a_file(&listed, "planted-161", b"x");
+        match list_delegated_directory(held.as_fd(), &listed, 10) {
+            Err(IoError::MutationPathChanged { path }) => assert_eq!(path, listed),
+            other => panic!("a swapped directory must be refused: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_reopen_that_lands_on_another_directory_is_refused() {
+        let (_dir, base) = crate::testutil::outside_any_home();
+        let listed = base.join("held-161");
+        let other = base.join("other-161");
+        std::fs::create_dir(&listed).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        let held = open_directory_for_delegation(&listed).unwrap();
+        let elsewhere = |_: BorrowedFd<'_>| crate::syscall::open_parent_by_path(&other);
+        match list_reopened(held.as_fd(), &other, 10, elsewhere) {
+            Err(IoError::MutationPathChanged { path }) => assert_eq!(path, other),
+            other => panic!("another object must be refused: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_utf8_entry_names_are_dropped_and_counted() {
+        let mut kept = Kept::new(2);
+        for (raw, dir) in [
+            (&b"c-161"[..], false),
+            (b"\xff-161", true),
+            (b"a-161", true),
+            (b"\xfe\xfd", false),
+            (b"b-161", false),
+        ] {
+            kept.offer(raw, || Ok(dir)).unwrap();
+        }
+        let got = kept.finish();
+        assert_eq!(names(&got), [("a-161", true), ("b-161", false)]);
+        assert_eq!(got.dropped, 2);
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let (_dir, base) = crate::testutil::outside_any_home();
+            let listed = base.join("bytes-161");
+            std::fs::create_dir(&listed).unwrap();
+            a_file(&listed, "plain-161", b"x");
+            std::fs::write(listed.join(std::ffi::OsStr::from_bytes(b"\xff-161")), b"x").unwrap();
+            let held = open_directory_for_delegation(&listed).unwrap();
+            let got = list_delegated_directory(held.as_fd(), &listed, 10).unwrap();
+            assert_eq!((names(&got), got.dropped), (vec![("plain-161", false)], 1));
+        }
+    }
+
+    #[test]
+    fn only_a_search_only_directory_descriptor_is_admitted_for_a_listing() {
+        let (_dir, base) = crate::testutil::outside_any_home();
+        let held = open_directory_for_delegation(&base).unwrap();
+        refuse_enumerable(held.as_fd(), &base).expect("the delegation open cannot enumerate");
+        let readable: OwnedFd = std::fs::File::open(&base).unwrap().into();
+        match refuse_enumerable(readable.as_fd(), &base) {
+            Err(IoError::AccessBearingDescriptor { path }) => assert_eq!(path, base),
+            other => panic!("a readable directory descriptor must be refused: {other:?}"),
         }
     }
 
