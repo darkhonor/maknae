@@ -200,7 +200,9 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plane::{PlaneError, ReadBasis, ReadOutcome, ReadPage, WriteOutcome};
+    use crate::plane::{
+        ListOutcome, PlaneError, ReadBasis, ReadOutcome, ReadPage, StatOutcome, WriteOutcome,
+    };
     use maknae_proto::{ContentBlock, PromptReply, ProposedToolCall, SecretText, Turn};
     use std::collections::VecDeque;
     use zeroize::Zeroizing;
@@ -352,6 +354,14 @@ mod tests {
             self.bases.push(basis);
             WriteOutcome::Applied(None)
         }
+        async fn list(&mut self, _c: &str, p: &str, _a: Option<&str>) -> ListOutcome {
+            self.paths.push(p.into());
+            ListOutcome::Unavailable
+        }
+        async fn stat(&mut self, _c: &str, p: &str) -> StatOutcome {
+            self.paths.push(p.into());
+            StatOutcome::Unavailable
+        }
     }
     fn fake(replies: Vec<PromptReply>) -> Fake {
         Fake {
@@ -459,7 +469,7 @@ mod tests {
             "c",
             &"q".repeat(1_700),
             budget(),
-            ContextBudget::new(2_000, None).unwrap(),
+            ContextBudget::new(3_000, None).unwrap(),
             None,
         );
         let mut p = fake(vec![answer("one"), answer("two")]);

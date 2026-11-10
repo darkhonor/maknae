@@ -85,6 +85,30 @@ impl std::fmt::Debug for ReadOutcome {
     }
 }
 
+/// A listing page, or one answer for every refusal. Only `Protected` reads
+/// differently, for the user's terminal; the model text of every other refusal is
+/// the same constant (ADR-0034 decision 7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListOutcome {
+    Page(maknae_proto::ListGrant),
+    Unavailable,
+    Protected(ProtectedBy),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatView {
+    pub size: u64,
+    pub mtime_secs: i64,
+    pub kind: maknae_proto::StatKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StatOutcome {
+    Stat(StatView),
+    Unavailable,
+    Protected(ProtectedBy),
+}
+
 /// `Applied` only for a clean client-reported completion, with the written
 /// file's version key when the client could read it back. `Stale` and
 /// `Unavailable` are certain no-effect outcomes: `Stale` when the client's
@@ -168,6 +192,13 @@ pub trait Plane {
         content: &[u8],
         basis: ReadBasis,
     ) -> impl Future<Output = WriteOutcome> + Send;
+    fn list(
+        &mut self,
+        conversation: &str,
+        path: &str,
+        after: Option<&str>,
+    ) -> impl Future<Output = ListOutcome> + Send;
+    fn stat(&mut self, conversation: &str, path: &str) -> impl Future<Output = StatOutcome> + Send;
     /// Lines the plane would have printed during its last call, for the host
     /// to show. Drained after every call, so order is preserved.
     fn take_diagnostics(&mut self) -> Vec<String> {

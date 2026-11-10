@@ -329,7 +329,7 @@ The shipped file grants all five to `admin` and to `user`. It has no `destinatio
 
 ### 2.5 `sensitive.yaml` (#617)
 
-`sensitive.yaml` lists paths that no file verb may reach (`fs.read`, `fs.write`, `fs.delete`, `fs.mkdir`). An entry refuses every one of them on that path, for every role, `admin` included, whatever `authz.yaml` grants. It is a mandatory operand of the authorization composition, beside the `authz.yaml` baseline and the classification ceiling (ADR-0034), so no grant can waive it. It never grants anything.
+`sensitive.yaml` lists paths that no file verb may reach (`fs.read`, `fs.write`, `fs.delete`, `fs.mkdir`, `fs.stat`, `fs.list`). An entry refuses every one of them on that path, for every role, `admin` included, whatever `authz.yaml` grants. It is a mandatory operand of the authorization composition, beside the `authz.yaml` baseline and the classification ceiling (ADR-0034), so no grant can waive it. It never grants anything.
 
 There are two lists, and a request is refused when either one matches.
 
@@ -372,6 +372,7 @@ sensitive:
 
 - **A protected path answers `Protected`.** The kernel matches the path the request asks for against both lists before it opens anything, so the answer is the same whether or not the file exists. The CLI prints `maknae: <path> is protected by <list> (<entry>). Maknae will not touch it; run this outside Maknae.`, where `<list>` is `/etc/maknae/sensitive.yaml` or `~/.maknae/sensitive.yaml`. When the model's tool call is refused this way, `maknae agent` prints the same notice on stderr. The model sees only `protected by policy — ask the user to do this outside Maknae`, which names no list and no entry.
 - **Every other refusal of a file verb reads the same to the model:** `unavailable — do not retry`. That covers a missing file, a path no grant covers, a refusal by the OS or the ceiling, a descriptor check (a second hard link, the wrong kind), a request whose asked path is not listed but whose target is (a symlink into `~/.ssh`), and transport and capacity faults. The model cannot tell from the answer whether the file exists. The standing prompt tells it that some files are withheld this way and that it must not infer state from them or ask you to paste a credential.
+- **A listing shows only what may be seen.** The model's `list_directory` releases only the entries whose own `Read` is permitted: an entry a list, a grant or the ceiling withholds is absent, exactly as a name that does not exist, and the listing carries no count or total. `maknae agent` prints `maknae: <n> entries not released`, and `maknae: <n> entries with a non-UTF-8 name not listed`, on stderr for you; the model never sees either line. `stat_path` returns a path's kind, size and modification time and nothing else.
 - **The trail says which.** A refusal by either list is audited with the reason `sensitive: host <entry>` or `sensitive: personal <entry>`; every other cause keeps its own reason.
 
 **The personal list.**
@@ -382,10 +383,11 @@ sensitive:
 - **Refusals.** A malformed file stops the CLI before the conversation opens, naming the file: `maknae: ~/.maknae/sensitive.yaml: <cause>`. So does an entry longer than 4096 bytes, and a list too large to send in one request (`~/.maknae/sensitive.yaml is too large to send (<n> bytes; the limit is 65536)`).
 - An entry can only refuse. The worst a wrong entry does is hide one of your own files from your own model.
 
-**Two rules for every file request.**
+**Three rules for every file request.**
 
 - **When your home cannot be looked up**, every `fs.*` request is refused before any list is consulted, with the trail reason `requester home unavailable: <cause>`, where the cause is `unresolvable`, `timed out`, `at capacity for this requester` or `at capacity`. A listed path then reads `unavailable — do not retry` to the model, not `Protected`. Other verbs are unaffected.
 - **A write needs `Read` as well as `Write`.** Every `fs.write`, creating a file or replacing one, is permitted only when `authz.yaml` permits both `Read` and `Write` on the path, so a `Write`-only grant permits no write, for your own `maknae write` as for the model. The trail reason of a write refused for want of `Read` is `fs.write needs fs.read: <the read's reason>`.
+- **`fs.stat` and `fs.list` are decided by the `fs.read` grant.** They are not separate grants: the `Read` entry of `authz.yaml`'s `permissions:` that decides a read of a path decides a stat of it and a listing of it, and each listed entry is decided as a read of that entry. An `actions:` limit, in an `authz.yaml` `subjects:` entry or an agent's `policy.yaml`, limits them by its `fs.read` entry. Naming `fs.stat` or `fs.list` in either list is refused at load: ``authz: `fs.stat` is decided as `fs.read` (#161 M15) and no list may name it; name `fs.read` `` (`fs.list` likewise).
 
 **The shipped host list.** The defaults were built from the paths that hold credentials and system secrets on Debian 13, Rocky 9, a STIG'd Rocky 10 and macOS 26. Each group in the file carries a comment saying why it is there:
 
@@ -762,7 +764,7 @@ The top-level key is `providers` only, a list of at most **32** entries. Each en
 | `model` | yes | 1 to 128 printable ASCII characters with no whitespace; it must be on that provider's `models` list. |
 | `key` | yes | a map of exactly `subpath` and `field` — where your API key is in Vault, never the key itself. `subpath`: at most 256 bytes, `/`-separated segments of `[A-Za-z0-9._-]`, with no empty, `.`, `..` or `data` segment and no leading or trailing `/`. `field`: 1 to 64 printable ASCII characters with no whitespace — the field name inside your Vault secret. |
 | `context_tokens` | yes | the model's context window in tokens, at most 16,777,216. |
-| `output_tokens` | no | the reply cap sent with every request: at least 1, and `context_tokens` less `output_tokens` must exceed the 1,536-token preamble allowance. |
+| `output_tokens` | no | the reply cap sent with every request: at least 1, and `context_tokens` less `output_tokens` must exceed the 2,304-token preamble allowance. |
 | `default` | no | `true` or `false` (default `false`). |
 
 **How the CLI prints these.** `maknae agent` prints every setup refusal after `maknae: ` and exits 1 (`bins/maknae/src/cli.rs`); `maknae login` prints its own after `maknae login: ` (`bins/maknae/src/login.rs`). The texts below are quoted without the prefix.
@@ -770,7 +772,7 @@ The top-level key is `providers` only, a list of at most **32** entries. Each en
 Every refusal of this file reads `providers.yaml: <reason>` (`UserProviders`), for example `providers.yaml: providers[0].context_tokens is required: declare the model's context window in tokens`. Two worth knowing:
 
 - Writing `key:` as a string refuses with `providers.yaml: providers[<i>].key must be a map of subpath and field; the API key itself is stored only in Vault, never in this file`. Another spelling, such as `api_key:`, refuses as an unknown key.
-- `maknae agent` checks the budget before it sends anything, prefixed by the entry's label: `provider entry <label>: context_tokens <N> is above the 16777216 ceiling`, `provider entry <label>: output_tokens must be at least 1`, or `provider entry <label>: context_tokens less output_tokens must exceed the 1536-token preamble allowance` (`crates/maknae-agent/src/budget.rs`). The smallest window accepted is therefore 1,537.
+- `maknae agent` checks the budget before it sends anything, prefixed by the entry's label: `provider entry <label>: context_tokens <N> is above the 16777216 ceiling`, `provider entry <label>: output_tokens must be at least 1`, or `provider entry <label>: context_tokens less output_tokens must exceed the 2304-token preamble allowance` (`crates/maknae-agent/src/budget.rs`). The smallest window accepted is therefore 2,305.
 
 **Which entry a turn uses.**
 
@@ -1013,6 +1015,7 @@ taskers:
 ```
 
 - An agent with no `policy.yaml`, or one without `permissions`, holds no file access through Maknae's tools.
+- `actions` limits `fs.stat` and `fs.list` by its `fs.read` entry; naming either refuses the reload (§2.5).
 - `admin.*` is always refused to an agent, except `admin.whoami`; no file can grant it.
 - `session.new` is refused to an agent unless its `actions.allow` holds it (`session.new` or `session.*`) and its `actions.deny` does not. It still needs the role's grant, which no role holds yet.
 - `taskers` names who may task this agent with `session.task`: account names, `uid:<n>` entries and `agent:<id>` entries. Without the key, only people may task it; another agent may task it only when listed. `taskers: []` admits nobody. Each tasker also needs `session.task` from its own role; the shipped `authz.yaml` grants it to `admin` and `user`. Tasking an agent is refused on the wire until task delivery is built (#610).

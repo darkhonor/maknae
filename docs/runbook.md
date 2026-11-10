@@ -533,6 +533,10 @@ destinations:                # #172: per-role egress allowlist for session.promp
   reads "everything in fs except delete"). A wildcard also covers members a later release
   adds to its family; list exact terms to avoid that growth. `kernel`, `liveness` and
   `admin.whoami` cannot be named or limited.
+- **`fs.stat` and `fs.list` follow `fs.read`.** They are decided by the `Read` grant and
+  limited by an `actions:` list's `fs.read` entry; a `subjects:` or agent `policy.yaml`
+  list that names either refuses at load (``authz: `fs.stat` is decided as `fs.read` (#161
+  M15) and no list may name it; name `fs.read` ``).
 - **Separation of duties (recommended).** Bind the loop's account to `user`. An
   admin-bound loop also holds the disclosure verbs, and a loop that has been injected can
   quote `admin.config.show` into its next prompt; a `user`-bound loop cannot ask. The
@@ -999,7 +1003,7 @@ Every read is paged: each page is its own decided, recorded `fs.read` attempt of
 - **One page.** `maknae read --offset 2 --limit 1 <file>` prints that page and names the next position on stderr (`next: line L column C`, or `eof`). `--column` continues a long line.
 - **A file that changes.** Maknae does not lock the file: Unix locks are advisory and a held lock would hang your own tools. A file written while a page is read refuses that page (`PathChanged`, nothing released). A file that changes between pages, edited in place or replaced, stops `maknae read` with `file changed during the read`, and the agent sees `"changed": true` and reads again. Detection rests on size and timestamps, so a same-size edit within one timestamp tick is not seen.
 - **Practical ceiling.** Each page rescans the file from the start, and each page is its own connection with about four audit records, so a very large file is slow; past roughly 6 GB, one page exceeds the default 5 s `read_timeout_ms`.
-- **The agent.** `read_file` takes `offset`, `limit` (default 2000 lines) and `column`, and returns the page as JSON with the file's text only in `content`. The loop's prompt cap follows `provider.context_tokens` (about 768 KB for a 128,000-token window), so a full 64 KiB page fits alongside the rest of the conversation.
+- **The agent.** `read_file` takes `offset`, `limit` (default 2000 lines) and `column`, and returns the page as JSON with the file's text only in `content`. `list_directory` returns at most 1024 names a page, and its `after` argument continues from the last name of the page before; `stat_path` returns a path's kind, size and modification time. The loop's prompt cap follows `provider.context_tokens` (about 768 KB for a 128,000-token window), so a full 64 KiB page fits alongside the rest of the conversation.
 
 ### 12b. Read before write
 

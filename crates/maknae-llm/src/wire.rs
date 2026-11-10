@@ -1079,10 +1079,13 @@ mod tests {
     }
 
     #[test]
-    fn baseline_catalog_is_exactly_the_two_maknae_tools() {
+    fn baseline_catalog_is_exactly_the_four_maknae_tools() {
         let catalog = baseline_catalog();
         let names: Vec<&str> = catalog.iter().map(|t| t.function.name.as_str()).collect();
-        assert_eq!(names, vec!["read_file", "write_file"]);
+        assert_eq!(
+            names,
+            vec!["read_file", "write_file", "list_directory", "stat_path"]
+        );
         assert!(
             catalog[1]
                 .function
@@ -1102,7 +1105,10 @@ mod tests {
                 &["path"],
             ),
             ("write_file", &["content", "path"], &["path", "content"]),
+            ("list_directory", &["after", "path"], &["path"]),
+            ("stat_path", &["path"], &["path"]),
         ];
+        assert_eq!(catalog.len(), want.len());
         for (t, (name, props, required)) in catalog.iter().zip(want) {
             assert_eq!(t.kind, "function");
             assert_eq!(&t.function.name, name);
@@ -1135,7 +1141,51 @@ mod tests {
     }
 
     #[test]
-    fn advertise_is_a_function_and_returns_the_whole_catalog_at_n_of_two() {
+    fn the_tool_list_offers_list_directory_and_stat_path() {
+        let catalog = baseline_catalog();
+        let described = |name: &str| {
+            let t = catalog
+                .iter()
+                .find(|t| t.function.name == name)
+                .unwrap_or_else(|| panic!("{name} is not offered"));
+            t.function
+                .description
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let list = described("list_directory");
+        for promise in [
+            "At most 1024 names per call",
+            "truncated — continue with after:",
+            "`after`",
+            "simply absent",
+            "no count",
+            "unavailable — do not retry",
+        ] {
+            assert!(list.contains(promise), "list_directory: {promise:?}");
+        }
+        let stat = described("stat_path");
+        for promise in [
+            "kind",
+            "size",
+            "mtime_secs",
+            "not followed",
+            "unavailable — do not retry",
+        ] {
+            assert!(stat.contains(promise), "stat_path: {promise:?}");
+        }
+        let after = &catalog
+            .iter()
+            .find(|t| t.function.name == "list_directory")
+            .unwrap()
+            .function
+            .parameters["properties"]["after"];
+        assert_eq!(after["type"], "string");
+    }
+
+    #[test]
+    fn advertise_is_a_function_and_returns_the_whole_catalog_at_n_of_four() {
         // Cooky advertises everything; the SEAM is what matters. Progressive
         // disclosure later returns a subset plus a discovery tool at this same
         // call site, and selection is gated on measured savings versus
@@ -1172,8 +1222,12 @@ mod tests {
         assert_eq!(v["messages"][1]["content"], "sentinel");
 
         let tools = v["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 2);
-        for (t, name) in tools.iter().zip(["read_file", "write_file"]) {
+        assert_eq!(tools.len(), 4);
+        for (t, name) in
+            tools
+                .iter()
+                .zip(["read_file", "write_file", "list_directory", "stat_path"])
+        {
             // `type`, not `kind` -- the rename must survive the round trip.
             assert_eq!(t["type"], "function");
             assert_eq!(t["function"]["name"], name);

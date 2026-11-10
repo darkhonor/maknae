@@ -280,7 +280,7 @@ The base build will decide a site by role and tier. For model frames, ADR-0022 d
 - **#478 and #479:** #478 serves the container tier option; #479's `gh` tool is a host tool by default.
 - **#481:** if §10 item 4 settles on a trusted systemd launcher, a launched tool runs in a unit that a per-task stop can kill without the agent's cooperation.
 - **#175 and #176 (`terminal.*`):** the exec verb of §10 item 3 is proposed to be `terminal.create` and its siblings, not a new term. #175's ruling that execution isolation is undecided is answered in part by §3 decisions 9 and 14 and §7, and the rest is §10 item 4.
-- **ADR-0023 decision 6** ("exactly two tools"): amended to any tool that fits the contract of §3 decision 5.
+- **ADR-0023 decision 6** (the model's tools: `read_file`, `write_file`, `list_directory`, `stat_path`): amended to any tool that fits the contract of §3 decision 5.
 - **#263** (the outbound-destination drift gate) gains `maknae-proxy`'s and `maknae-ssh`'s outbound connections; **#116** (the CLI's Vault path) feeds §10 item 1; **#177** (`mcp.connect`) shares the site grammar of §10 item 6.
 - **`container-architecture.md` §3.2:** the egress role is two processes, `maknae-egress` for model calls and `maknae-proxy` for subjects' connections.
 

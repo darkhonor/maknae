@@ -1,4 +1,4 @@
-//! Tool name → kernel verb. A ROUTING TABLE, closed and exact: the two names
+//! Tool name → kernel verb. A ROUTING TABLE, closed and exact: the four names
 //! the compiled baseline-tools.json publishes, and nothing else. Never a
 //! decision — the kernel decides the verb this produces.
 use maknae_proto::ProposedToolCall;
@@ -15,6 +15,15 @@ pub enum ToolRequest {
         call_id: String,
         path: String,
         content: Zeroizing<Vec<u8>>,
+    },
+    List {
+        call_id: String,
+        path: String,
+        after: Option<String>,
+    },
+    Stat {
+        call_id: String,
+        path: String,
     },
 }
 
@@ -44,6 +53,21 @@ impl std::fmt::Debug for ToolRequest {
                 .field("call_id", call_id)
                 .field("path", path)
                 .field("content", &format_args!("<{} bytes>", content.len()))
+                .finish(),
+            ToolRequest::List {
+                call_id,
+                path,
+                after,
+            } => f
+                .debug_struct("List")
+                .field("call_id", call_id)
+                .field("path", path)
+                .field("after", after)
+                .finish(),
+            ToolRequest::Stat { call_id, path } => f
+                .debug_struct("Stat")
+                .field("call_id", call_id)
+                .field("path", path)
                 .finish(),
         }
     }
@@ -157,6 +181,29 @@ impl<'de> serde::de::Visitor<'de> for ZeroizingStringVisitor {
 impl<'de> Deserialize<'de> for ZeroizingString {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         d.deserialize_string(ZeroizingStringVisitor)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListArgs {
+    path: String,
+    after: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StatArgs {
+    path: String,
+}
+
+/// Mirrors the kernel's cursor pre-gate (`maknae-kernel`'s `mutation::normal`).
+fn checked_cursor(after: Option<String>) -> Result<Option<String>, RouteError> {
+    match after {
+        Some(a) if a.is_empty() || a == "." || a == ".." || a.contains(['/', '\0']) => Err(
+            RouteError::BadArguments("after must be one entry name from a previous page".into()),
+        ),
+        other => Ok(other),
     }
 }
 
@@ -324,6 +371,25 @@ pub fn route(call: &ProposedToolCall, home: Option<&str>) -> Result<ToolRequest,
                 call_id: call.call_id.clone(),
                 path,
                 content,
+            })
+        }
+        "list_directory" => {
+            require_object(args)?;
+            let a: ListArgs =
+                serde_json::from_str(args).map_err(|e| RouteError::BadArguments(e.to_string()))?;
+            Ok(ToolRequest::List {
+                call_id: call.call_id.clone(),
+                path: checked_path(a.path, home)?,
+                after: checked_cursor(a.after)?,
+            })
+        }
+        "stat_path" => {
+            require_object(args)?;
+            let a: StatArgs =
+                serde_json::from_str(args).map_err(|e| RouteError::BadArguments(e.to_string()))?;
+            Ok(ToolRequest::Stat {
+                call_id: call.call_id.clone(),
+                path: checked_path(a.path, home)?,
             })
         }
         other => Err(RouteError::UnknownTool(other.to_string())),
@@ -637,6 +703,109 @@ mod tests {
         ));
     }
     #[test]
+    fn list_directory_and_stat_path_route_to_a_listing_and_a_stat() {
+        match route(
+            &call("list_directory", r#"{"path":"~/proj","after":"b-161"}"#),
+            Some("/home/u"),
+        ) {
+            Ok(ToolRequest::List {
+                call_id,
+                path,
+                after,
+            }) => {
+                assert_eq!(call_id, "c1");
+                assert_eq!(path, "/home/u/proj");
+                assert_eq!(after.as_deref(), Some("b-161"));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            route(&call("list_directory", r#"{"path":"/"}"#), None),
+            Ok(ToolRequest::List { after: None, .. })
+        ));
+        match route(&call("stat_path", r#"{"path":"/w/link"}"#), None) {
+            Ok(ToolRequest::Stat { call_id, path }) => {
+                assert_eq!(call_id, "c1");
+                assert_eq!(path, "/w/link");
+            }
+            other => panic!("{other:?}"),
+        }
+        let shown = format!(
+            "{:?} {:?}",
+            route(
+                &call("list_directory", r#"{"path":"/a","after":"z"}"#),
+                None
+            )
+            .unwrap(),
+            route(&call("stat_path", r#"{"path":"/b"}"#), None).unwrap()
+        );
+        assert!(shown.contains("List") && shown.contains("\"z\""), "{shown}");
+        assert!(shown.contains("Stat") && shown.contains("/b"), "{shown}");
+    }
+
+    #[test]
+    fn a_listing_or_stat_call_is_checked_as_a_read_is() {
+        for name in ["list_directory", "stat_path"] {
+            for (args, want) in [
+                (r#"{"path":"rel"}"#, RouteError::RelativePath),
+                (r#"{"path":""}"#, RouteError::EmptyPath),
+                (r#"{"path":"/a/../b"}"#, RouteError::MalformedPath),
+                (r#"{"path":"/a/"}"#, RouteError::MalformedPath),
+                (r#"{"path":"~/a"}"#, RouteError::HomeUnavailable),
+            ] {
+                assert_eq!(
+                    route(&call(name, args), None).err(),
+                    Some(want),
+                    "{name} {args}"
+                );
+            }
+            for args in [
+                r#"{"path":"/a","extra":1}"#,
+                r#"["/a"]"#,
+                r#"{}"#,
+                r#"{"path":7}"#,
+            ] {
+                assert!(
+                    matches!(
+                        route(&call(name, args), None),
+                        Err(RouteError::BadArguments(_))
+                    ),
+                    "{name} {args}"
+                );
+            }
+        }
+        assert!(matches!(
+            route(&call("stat_path", r#"{"path":"/a","after":"b"}"#), None),
+            Err(RouteError::BadArguments(_))
+        ));
+    }
+
+    #[test]
+    fn a_cursor_is_one_entry_name_as_the_kernel_requires() {
+        let after = |a: &str| {
+            route(
+                &call(
+                    "list_directory",
+                    &serde_json::json!({"path": "/w", "after": a}).to_string(),
+                ),
+                None,
+            )
+        };
+        for bad in ["", ".", "..", "a/b", "/", "a\u{0}b"] {
+            assert!(
+                matches!(after(bad), Err(RouteError::BadArguments(m)) if m == "after must be one entry name from a previous page"),
+                "{bad:?}"
+            );
+        }
+        for good in ["a", "...", ".hidden", "name with spaces", "\"q"] {
+            assert!(
+                matches!(after(good), Ok(ToolRequest::List { .. })),
+                "{good:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_write_requests_debug_never_prints_the_models_bytes() {
         let r = route(
             &call("write_file", r#"{"path":"/a","content":"SECRET-BYTES"}"#),
@@ -713,7 +882,7 @@ mod tests {
     }
     #[test]
     fn a_refused_call_is_refused_by_its_marker_before_any_argument_parse() {
-        for name in ["write_file", "read_file"] {
+        for name in ["write_file", "read_file", "list_directory", "stat_path"] {
             let c = ProposedToolCall {
                 refused: Some(maknae_proto::CallRefusal::ArgumentsOverBound { bytes: 70_000 }),
                 ..call(name, "")

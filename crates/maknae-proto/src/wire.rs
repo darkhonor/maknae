@@ -56,7 +56,7 @@ pub fn page_request_is_acceptable(p: &PageRequest) -> bool {
 
 pub const MAX_CONTEXT_TOKENS: u64 = 16_777_216;
 pub const DEFAULT_BYTES_PER_TOKEN: u64 = 4;
-pub const PREAMBLE_ALLOWANCE_TOKENS: u64 = 1_536;
+pub const PREAMBLE_ALLOWANCE_TOKENS: u64 = 2_304;
 
 pub fn output_tokens_is_acceptable(n: u64) -> bool {
     (1..=MAX_CONTEXT_TOKENS).contains(&n)
