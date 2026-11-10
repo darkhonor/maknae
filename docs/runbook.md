@@ -951,7 +951,7 @@ The trail is `/var/log/maknae/audit.jsonl`. Its directory is `0700 _maknae`, so 
 
 ```bash
 : "${START:?run step 10 in this shell}"
-sudo jq -c --arg t "$START" 'select(.ts >= $t) | select(.action=="session.prompt" or .action=="fs.read" or .action=="fs.write") | {seq, ts, action, object, result: .outcome.result, reason: .outcome.reason, posture: .outcome.posture, egress, mutation, conversation}' /var/log/maknae/audit.jsonl
+sudo jq -c --arg t "$START" 'select(.ts >= $t) | select(.action=="session.prompt" or .action=="fs.read" or .action=="fs.write" or .action=="fs.list" or .action=="fs.stat") | {seq, ts, action, object, result: .outcome.result, reason: .outcome.reason, posture: .outcome.posture, egress, mutation, conversation}' /var/log/maknae/audit.jsonl
 sudo jq -c 'select(.event=="boot" and .action=="authz") | {ts, reason: .outcome.reason}' /var/log/maknae/audit.jsonl | tail -n 1
 ```
 
@@ -974,6 +974,13 @@ What to find:
 | `fs.read` progress | `mutation.phase:"Progress"`, `origin:"ClientReported"`, `status:"ReportedProgress"`, `effects:[{…,"effect":"ReadFile","length":N,"range":{"start":S,"end":S+N},"lines":{"first":F,"last":L,"complete_last":…}}]` |
 | `fs.read` completion | `mutation.phase:"Completion"`, `origin:"ClientReported"`, `status:"ReportedSuccess"` (or another `Reported*` status), `intent_seq` pointing at the intent |
 | `fs.read` refused | `result:"deny"` with the reason, and no `mutation` block (e.g. `read descriptor missing` or `read evidence refused: …`) |
+| `fs.list` intent | the directory's canonical path in `object`, `mutation.phase:"Intent"`, `mutation.operation:"Read"`, `mutation.label`, `origin:"KernelObserved"`, `status:"IntentOnly"`; the request is decided as `fs.read` of the directory |
+| `fs.list` completion | `result:"permit"`, reason `authorized; listing: N received, S skipped by the cursor, I invalid, W withheld, P permitted; the subject reports D non-UTF-8 names dropped (unverified) released`, `mutation.phase:"Completion"`, `origin:"ClientReported"`, `status:"ReportedSuccess"`. Each received name was decided as `fs.read` of that entry; the counts are here and never in what the model sees |
+| `fs.list` refused after the grant | `result:"deny"`, `status:"Incomplete"`, reason `<why>; listing: …` with the counts, where `<why>` is `listing order violated`, `listing bound reached before a full page was permitted` (65,536 names received without a full page), `listing chunk empty before the last`, `the subject reports it could not list the directory (unverified)`, `listing deadline passed before its page was recorded`, or `listing: …; answer exceeds the response frame; withheld` |
+| `fs.list` incomplete | `status:"Incomplete"`, reason `listing grant not delivered`, `listing chunk missing or malformed; nothing released`, `listing decision timed out/failed; nothing released` or `listing continuation not delivered; nothing released` |
+| `fs.list` or `fs.stat` not delivered | after the permit record, a second record with `status:"Incomplete"`, posture `unavailable`, reason `<the permit's detail>: answer not delivered`: the record landed but the answer did not reach the client in time |
+| `fs.stat` permit | `result:"permit"`, reason `authorized; metadata released`, `mutation.operation:"Read"`, `mutation.label`, `origin:"KernelObserved"`, `status:"IntentOnly"`, the path the kernel reports for the unfollowed object in `object`; decided as `fs.read` of that path |
+| `fs.stat` refused | `result:"deny"` with the reason, e.g. `stat descriptor missing`, `stat evidence refused: …` (a second hard link, an unlinked object), `denied by policy entry Read(…)` or `sensitive: host <entry>` |
 | `fs.write` intent | reason `authorized; intent alone does not establish execution`, `mutation.phase:"Intent"`, `mutation.label`, `mutation.operation:"WriteCreate"` (`"WriteExisting"` when replacing), `origin:"KernelObserved"`, `status:"IntentOnly"`, `content_length` (the length the request declared; the kernel never sees the bytes) |
 | `fs.write` progress | `mutation.phase:"Progress"`, `origin:"ClientReported"`, `status:"ReportedProgress"`, with the created (`CreatedFile`) or replaced (`ReplacedFile`) file in `effects` |
 | `fs.write` completion | `mutation.phase:"Completion"`, `origin:"ClientReported"`, `status:"ReportedSuccess"` (or another `Reported*` status), `intent_seq` pointing at the intent |
@@ -987,7 +994,7 @@ Every refusal reaches the user the same way: `maknae agent: stopped: ` followed 
 
 **Correlation:**
 - `session_id` is per connection and each turn is a connection, so it does **not** group the conversation.
-- `conversation` does. It is in `egress.conversation` on prompt records and top-level on `fs.write` and `fs.read`.
+- `conversation` does. It is in `egress.conversation` on prompt records and top-level on `fs.write`, `fs.read`, `fs.list` and `fs.stat`.
 
 ### 12. The refused turns
 

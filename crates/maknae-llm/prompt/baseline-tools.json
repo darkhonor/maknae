@@ -58,7 +58,7 @@
     "type": "function",
     "function": {
       "name": "list_directory",
-      "description": "Lists one directory: one name per line, in byte order, a directory's name ending in `/`. A name holding a control character or starting with a quote is shown as a JSON string. At most 1024 names per call; if there are more, the last line is `truncated — continue with after: \"<name>\"`, and calling again with that name as `after` returns the next page. Entries you may not see are simply absent, exactly as if they did not exist, and the result has no count or total of anything. An empty result means there is nothing here you may see. Not recursive. May be refused: unavailable — do not retry.",
+      "description": "Lists one directory: one name per line, in byte order, each name a JSON string, with `/` after a directory's closing quote. At most 1024 names per call; if there are more, the last line is `truncated — continue with after: \"<name>\"`, and calling again with that name as `after` returns the next page. Entries you may not see are simply absent, exactly as if they did not exist, and the result has no count or total of anything. An empty result means there is nothing here you may see. Not recursive. May be refused: unavailable — do not retry.",
       "parameters": {
         "type": "object",
         "properties": {

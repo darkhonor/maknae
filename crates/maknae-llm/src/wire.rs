@@ -1157,6 +1157,7 @@ mod tests {
         let list = described("list_directory");
         for promise in [
             "At most 1024 names per call",
+            "each name a JSON string",
             "truncated — continue with after:",
             "`after`",
             "simply absent",

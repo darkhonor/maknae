@@ -938,9 +938,18 @@ async fn refused_for_every_cause(tag: &str) -> Refusals {
     Refusals { rendered, trail }
 }
 
+struct Unlock(std::path::PathBuf);
+impl Drop for Unlock {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+    }
+}
+
 async fn drive_one_step(
     fx: Fixture,
     calls: Vec<ProposedToolCall>,
+    unlocks: Vec<Unlock>,
 ) -> (Vec<String>, Vec<maknae_audit_append::AuditRecord>) {
     let n = calls.len();
     let egress = Arc::new(Scripted::default());
@@ -967,6 +976,7 @@ async fn drive_one_step(
         records: Arc::clone(&records),
         egress: egress.clone(),
     };
+    let _unlocks = unlocks;
     let conv = plane.fx.open_conversation().await;
     let mut transcript = Transcript::new(conv.as_str(), "look around");
     drive(
@@ -1019,9 +1029,10 @@ async fn the_model_lists_and_stats_through_the_real_kernel() {
             path_call("c1", "list_directory", &dir),
             path_call("c2", "stat_path", &dir.join("seen-161")),
         ],
+        vec![],
     )
     .await;
-    assert_eq!(said[0], "seen-161\nsub-161/\n\nsteps remaining: 2");
+    assert_eq!(said[0], "\"seen-161\"\n\"sub-161\"/\n\nsteps remaining: 2");
     let stat: serde_json::Value =
         serde_json::from_str(said[1].split_once("\n\n").unwrap().0).unwrap();
     assert_eq!(
@@ -1074,6 +1085,7 @@ async fn every_listing_and_stat_refusal_renders_the_same_bytes() {
     std::fs::hard_link(r.join("file-161"), r.join("linked-161")).unwrap();
     std::os::unix::fs::symlink(r.join("hidden-161"), r.join("via-161")).unwrap();
     std::fs::set_permissions(r.join("locked-161"), std::fs::Permissions::from_mode(0o000)).unwrap();
+    let unlock = Unlock(r.join("locked-161"));
     common::write_0640(
         &fx.paths().sensitive,
         "schema_version: 1\nsensitive:\n  - \"~/hidden-161\"\n  - \"~/hidden-161/**\"\n",
@@ -1115,8 +1127,7 @@ async fn every_listing_and_stat_refusal_renders_the_same_bytes() {
         .collect();
     calls.push(path_call("p1", "stat_path", &r.join("linked-161")));
     calls.push(path_call("p2", "list_directory", &r.join("hidden-161")));
-    let (said, trail) = drive_one_step(fx, calls).await;
-    std::fs::set_permissions(r.join("locked-161"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let (said, trail) = drive_one_step(fx, calls, vec![unlock]).await;
     for ((cause, _, _), s) in uniform.iter().zip(&said) {
         assert_eq!(
             s, "unavailable — do not retry\n\nsteps remaining: 2",

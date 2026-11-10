@@ -1169,7 +1169,7 @@ mod tests {
             vec![("/w/box-161".to_string(), Some("a".to_string()))]
         );
         let said = tool_text(&t.turns()[2]);
-        assert_eq!(said, "seen-161\nsub-161/\n\nsteps remaining: 3");
+        assert_eq!(said, "\"seen-161\"\n\"sub-161\"/\n\nsteps remaining: 3");
         assert_eq!(
             events
                 .iter()
