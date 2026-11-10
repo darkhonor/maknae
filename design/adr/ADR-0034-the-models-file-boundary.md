@@ -130,6 +130,7 @@ Maknae has no command verb (`Bash` was retired). When it gives the model a way t
 - **A hard-linked entry appears in a listing but is refused by stat and read.** A listing decides names, not objects, so an entry with a second link is listed when its `Read` is permitted, while `fs.stat` and `fs.read` of it are refused by the link-count check.
 - **A policy reload during a listing decides later entries on the live composition.** Each chunk's names are decided when they arrive, so entries decided after a reload are decided under the reloaded policy.
 - **One aggregate record discharges the per-entry audit obligations.** Each entry's `Permit` carries the `audit` obligation; the listing's single completion record, with its counts and the intent's recorded cursor, discharges them, and entry names are not recorded.
+- **The model is never told that entries vanished or were dropped.** Names the subject could not send as UTF-8, entries removed while it listed them and names longer than 1,024 bytes reach only the user's stderr and the trail; the model's page simply lacks them.
 - **The KLC has no home-confinement text**, so there is nothing to amend there.
 
 ## References
