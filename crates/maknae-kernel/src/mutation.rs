@@ -130,9 +130,13 @@ enum Evidence {
     Object { _fd: OwnedFd },
     Directory { _directory: MutationDirectory },
 }
+enum Granted {
+    Attempt(MutationScope),
+    Stat(maknae_io::DelegatedMeta),
+}
 struct PreparedMutation {
     _evidence: Evidence,
-    scope: MutationScope,
+    granted: Granted,
     paths: Vec<String>,
     kind: FsOperation,
 }
@@ -145,15 +149,34 @@ fn path(verb: &Verb) -> Option<&str> {
         Verb::FsWrite { path, .. }
         | Verb::FsDelete { path, .. }
         | Verb::FsMkdir { path, .. }
-        | Verb::Read { path, .. } => Some(path),
+        | Verb::Read { path, .. }
+        | Verb::FsStat { path, .. } => Some(path),
         _ => None,
+    }
+}
+fn mtime_secs(t: std::time::SystemTime) -> i64 {
+    match t.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
+        Err(e) => {
+            let before = e.duration();
+            let whole = i64::try_from(before.as_secs()).unwrap_or(i64::MAX);
+            -whole - i64::from(before.subsec_nanos() > 0)
+        }
+    }
+}
+fn stat_kind(kind: maknae_io::FileKind) -> maknae_proto::StatKind {
+    match kind {
+        maknae_io::FileKind::File => maknae_proto::StatKind::File,
+        maknae_io::FileKind::Directory => maknae_proto::StatKind::Directory,
+        maknae_io::FileKind::Symlink => maknae_proto::StatKind::Symlink,
+        maknae_io::FileKind::Other => maknae_proto::StatKind::Other,
     }
 }
 fn cited(verb: &Verb) -> Option<&str> {
     match verb {
-        Verb::FsWrite { conversation, .. } | Verb::Read { conversation, .. } => {
-            conversation.as_deref()
-        }
+        Verb::FsWrite { conversation, .. }
+        | Verb::Read { conversation, .. }
+        | Verb::FsStat { conversation, .. } => conversation.as_deref(),
         _ => None,
     }
 }
@@ -181,12 +204,28 @@ fn prepare(
     if lane != Lane::Local {
         return Err("mutation requires local subject execution".into());
     }
-    let read = matches!(verb, Verb::Read { .. });
-    let fd = fd.ok_or(if read {
-        "read descriptor missing"
-    } else {
-        "mutation descriptor missing"
+    let fd = fd.ok_or(match verb {
+        Verb::Read { .. } => "read descriptor missing",
+        Verb::FsStat { .. } => "stat descriptor missing",
+        _ => "mutation descriptor missing",
     })?;
+    if let Verb::FsStat { .. } = verb {
+        let refused = |e: maknae_io::IoError| format!("stat evidence refused: {e}");
+        let verified = maknae_io::verify_stat_delegated(fd.as_fd()).map_err(refused)?;
+        maknae_io::refuse_access_bearing(fd.as_fd(), &verified.path).map_err(refused)?;
+        let path = verified
+            .path
+            .to_str()
+            .ok_or("non-UTF-8 object path")?
+            .to_owned();
+        checked(&path)?;
+        return Ok(PreparedMutation {
+            _evidence: Evidence::Object { _fd: fd },
+            granted: Granted::Stat(verified.meta),
+            paths: vec![path],
+            kind: FsOperation::Read,
+        });
+    }
     let object = match &verb {
         Verb::Read { .. } => Some((
             "read evidence refused",
@@ -216,10 +255,10 @@ fn prepare(
         checked(&path)?;
         return Ok(PreparedMutation {
             _evidence: Evidence::Object { _fd: fd },
-            scope: MutationScope::Exact {
+            granted: Granted::Attempt(MutationScope::Exact {
                 path: path.clone(),
                 effect,
-            },
+            }),
             paths: vec![path],
             kind,
         });
@@ -315,7 +354,7 @@ fn prepare(
         _evidence: Evidence::Directory {
             _directory: directory,
         },
-        scope,
+        granted: Granted::Attempt(scope),
         paths,
         kind,
     })
@@ -619,6 +658,40 @@ async fn refuse_with<S: AsyncWrite + Unpin, E: AuditEmit>(
     }
 }
 
+/// Records the permit, then answers: nothing is disclosed when the record does not land.
+async fn disclose<S: AsyncWrite + Unpin, E: AuditEmit>(
+    stream: &mut S,
+    cfg: &TransportConfig,
+    emit: &E,
+    mut record: AuditRecord,
+    answer: Payload,
+) -> Option<AuditRecord> {
+    record.outcome.result = "permit".into();
+    record.outcome.reason = "authorized; metadata released".into();
+    record.outcome.posture = "authorized".into();
+    emit.emit_within(&record, AUDIT_APPEND_TIMEOUT).await.ok()?;
+    send(
+        stream,
+        cfg,
+        Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(answer),
+        },
+    )
+    .await;
+    Some(record)
+}
+async fn untouched<E: AuditEmit>(emit: &E, seq: &Seq, base: &AuditRecord, why: &str) {
+    let mut note = base.clone();
+    note.seq = seq.next();
+    note.mutation = None;
+    note.outcome.reason = format!("conversation activity not recorded: {why}");
+    note.outcome.posture = "unavailable".into();
+    if let Err(e) = emit.emit_within(&note, AUDIT_APPEND_TIMEOUT).await {
+        eprintln!("maknaed: AUDIT WRITE FAILED on conversation record: {e}");
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AttemptCaps {
     pub request: usize,
@@ -784,6 +857,25 @@ where
             return true;
         }
     };
+    let scope = match prepared.granted {
+        Granted::Attempt(scope) => scope,
+        Granted::Stat(meta) => {
+            let answer = Payload::Stat {
+                size: meta.size,
+                mtime_secs: mtime_secs(meta.mtime),
+                kind: stat_kind(meta.kind),
+            };
+            if let (Some(recorded), Some(why)) = (
+                disclose(stream, cfg, &*emit, record, answer).await,
+                touch_failure,
+            ) {
+                untouched(&*emit, seq, &recorded, &why).await;
+            }
+            drop(prepared._evidence);
+            drop(permit);
+            return true;
+        }
+    };
     let requested = match verb {
         Verb::Read { page, .. } => *page,
         _ => None,
@@ -812,25 +904,10 @@ where
     .await
     {
         if let Some(why) = touch_failure {
-            let mut note = intent.record.clone();
-            note.seq = seq.next();
-            note.mutation = None;
-            note.outcome.reason = format!("conversation activity not recorded: {why}");
-            note.outcome.posture = "unavailable".into();
-            if let Err(e) = emit.emit_within(&note, AUDIT_APPEND_TIMEOUT).await {
-                eprintln!("maknaed: AUDIT WRITE FAILED on conversation record: {e}");
-            }
+            untouched(&*emit, seq, &intent.record, &why).await;
         }
         attempt(
-            stream,
-            cfg,
-            caps,
-            &*emit,
-            intent,
-            prepared.scope,
-            label,
-            read_page,
-            seq,
+            stream, cfg, caps, &*emit, intent, scope, label, read_page, seq,
         )
         .await;
     }
@@ -1231,8 +1308,8 @@ mod tests {
         assert_eq!(prepared.kind, FsOperation::Read);
         assert_eq!(prepared.paths, vec![target.to_str().unwrap().to_string()]);
         assert_eq!(
-            prepared.scope,
-            MutationScope::Exact {
+            scope_of(&prepared),
+            &MutationScope::Exact {
                 path: target.to_str().unwrap().into(),
                 effect: ReportedEffect::ReadFile
             }
@@ -1379,6 +1456,60 @@ mod tests {
             stream.is_empty(),
             "a refusal without its record answers nothing"
         );
+    }
+    #[tokio::test(start_paused = true)]
+    async fn metadata_whose_permit_is_not_recorded_is_never_disclosed() {
+        let answer = Payload::Stat {
+            size: 1,
+            mtime_secs: 1,
+            kind: maknae_proto::StatKind::File,
+        };
+        let mut stream: Vec<u8> = Vec::new();
+        let got = tokio::time::timeout(
+            Duration::from_secs(60),
+            disclose(
+                &mut stream,
+                &TransportConfig::default(),
+                &Stall,
+                record(),
+                answer.clone(),
+            ),
+        )
+        .await;
+        assert!(
+            got.is_ok(),
+            "the permit append must give up within its bound"
+        );
+        assert!(stream.is_empty(), "no record, no metadata");
+        let emit = Recorder::default();
+        disclose(
+            &mut stream,
+            &TransportConfig::default(),
+            &emit,
+            record(),
+            answer.clone(),
+        )
+        .await;
+        let recorded = emit.0.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(
+            (
+                recorded.outcome.result.as_str(),
+                recorded.outcome.posture.as_str()
+            ),
+            ("permit", "authorized")
+        );
+        let frame = maknae_proto::read_frame_of_class(
+            &mut stream.as_slice(),
+            maknae_proto::FrameClass::Attempt,
+            &maknae_proto::FrameCaps {
+                control: 0,
+                attempt: maknae_proto::ATTEMPT_RESPONSE_MAX,
+                prompt: 0,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(stat_payload(&frame), answer);
     }
     struct Delayed<P> {
         pdp: P,
@@ -1873,8 +2004,8 @@ mod tests {
         assert_eq!(prepared.kind, FsOperation::WriteExisting);
         assert_eq!(prepared.paths, vec![target.to_str().unwrap().to_string()]);
         assert_eq!(
-            prepared.scope,
-            MutationScope::Exact {
+            scope_of(&prepared),
+            &MutationScope::Exact {
                 path: target.to_str().unwrap().into(),
                 effect: ReportedEffect::ReplacedFile
             }
@@ -2139,5 +2270,313 @@ mod tests {
         .unwrap_err();
         assert_eq!(reason, "object label unresolved");
         assert_eq!(by, (Some("user"), None));
+    }
+
+    fn scope_of(p: &PreparedMutation) -> &MutationScope {
+        match &p.granted {
+            Granted::Attempt(scope) => scope,
+            Granted::Stat(_) => panic!("a stat grants no attempt"),
+        }
+    }
+    fn stat(path: &Path) -> Verb {
+        Verb::FsStat {
+            path: path.to_str().unwrap().into(),
+            conversation: None,
+        }
+    }
+    async fn stat_answer_on(
+        fx: &Fixture,
+        pdp: crate::Composition<maknae_authz_basic::HermeticAuthorizer>,
+        asked: &Path,
+        fd: Option<OwnedFd>,
+        sensitive: SensitiveList,
+    ) -> (Vec<u8>, Vec<AuditRecord>) {
+        let cfg = maknae_config::transport_from_section(None).unwrap();
+        let fds = maknae_io::DelegatedFds::new(1);
+        if let Some(fd) = fd {
+            fds.push(fd);
+        }
+        let emit = Arc::new(Recorder::default());
+        let (mut client, mut server) = tokio::io::duplex(65536);
+        assert!(
+            handle(
+                &mut server,
+                &stat(asked),
+                fx.principal.uid,
+                Lane::Local,
+                &fds,
+                Arc::new(pdp),
+                emit.clone(),
+                Ok(fx.root.clone()),
+                &cfg,
+                &Seq::new(),
+                record(),
+                Duration::from_secs(10),
+                AttemptCaps::default(),
+                "US",
+                Arc::new(crate::conversation::mem_store::MemStore::default()),
+                &Stamp::Client,
+                Arc::new(sensitive),
+            )
+            .await
+        );
+        drop(server);
+        let frame = maknae_proto::read_frame_of_class(
+            &mut client,
+            maknae_proto::FrameClass::Attempt,
+            &maknae_proto::FrameCaps {
+                control: 0,
+                attempt: maknae_proto::ATTEMPT_RESPONSE_MAX,
+                prompt: 0,
+            },
+        )
+        .await
+        .expect("one answer frame");
+        let records = emit.0.lock().unwrap().clone();
+        (frame.to_vec(), records)
+    }
+    async fn stat_answer(fx: &Fixture, asked: &Path) -> (Vec<u8>, Vec<AuditRecord>) {
+        let fd = maknae_io::open_path_for_stat(asked).ok();
+        stat_answer_on(fx, fixture_pdp(fx), asked, fd, SensitiveList::empty()).await
+    }
+    fn stat_payload(frame: &[u8]) -> Payload {
+        match maknae_proto::decode_response(frame).unwrap().result {
+            RespResult::Ok(p) => p,
+            RespResult::Err(e) => panic!("refused: {e:?}"),
+        }
+    }
+    fn uniform_refusal() -> Vec<u8> {
+        maknae_proto::encode_response(&Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Err(ProtoError {
+                code: ProtoErrCode::Unauthorized,
+                message: "not authorized".into(),
+            }),
+        })
+        .unwrap()
+    }
+    #[tokio::test]
+    async fn stat_of_a_regular_file_is_served_after_its_permit_is_recorded() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let file = fx.root.join("stat-161-file");
+        std::fs::write(&file, b"maknae-161-stat").unwrap();
+        let when = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_161);
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+        let (frame, records) = stat_answer(&fx, &file).await;
+        assert_eq!(
+            stat_payload(&frame),
+            Payload::Stat {
+                size: 15,
+                mtime_secs: 1_700_000_161,
+                kind: maknae_proto::StatKind::File,
+            }
+        );
+        let last = records.last().expect("the permit is recorded");
+        assert_eq!(last.outcome.result, "permit");
+        assert_eq!(last.object.as_deref(), file.to_str());
+    }
+    #[tokio::test]
+    async fn stat_of_a_symlink_reports_the_link() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let target = fx.root.join("stat-161-target");
+        std::fs::write(&target, b"never-followed").unwrap();
+        let link = fx.root.join("stat-161-link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let (frame, records) = stat_answer(&fx, &link).await;
+        match stat_payload(&frame) {
+            Payload::Stat { size, kind, .. } => {
+                assert_eq!(kind, maknae_proto::StatKind::Symlink);
+                assert_eq!(size, target.as_os_str().len() as u64);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(records.last().unwrap().object.as_deref(), link.to_str());
+    }
+    #[tokio::test]
+    async fn stat_of_a_directory_is_served() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let dir = fx.root.join("stat-161-dir");
+        std::fs::create_dir_all(dir.join("child")).unwrap();
+        let (frame, _) = stat_answer(&fx, &dir).await;
+        assert!(matches!(
+            stat_payload(&frame),
+            Payload::Stat {
+                kind: maknae_proto::StatKind::Directory,
+                ..
+            }
+        ));
+    }
+    #[tokio::test]
+    async fn stat_of_a_fifo_reports_other() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let fifo = fx.root.join("stat-161-fifo");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+        let (frame, _) = stat_answer(&fx, &fifo).await;
+        assert!(matches!(
+            stat_payload(&frame),
+            Payload::Stat {
+                kind: maknae_proto::StatKind::Other,
+                ..
+            }
+        ));
+    }
+    #[tokio::test]
+    async fn stat_of_a_hard_linked_file_is_refused_uniformly() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let file = fx.root.join("stat-161-linked");
+        std::fs::write(&file, b"two names").unwrap();
+        std::fs::hard_link(&file, fx.root.join("stat-161-alias")).unwrap();
+        let (frame, records) = stat_answer(&fx, &file).await;
+        assert_eq!(frame, uniform_refusal());
+        assert!(
+            records
+                .last()
+                .unwrap()
+                .outcome
+                .reason
+                .contains("stat evidence refused"),
+            "{:?}",
+            records.last().unwrap().outcome.reason
+        );
+    }
+    #[tokio::test]
+    async fn stat_of_missing_denied_and_os_refused_render_alike() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let missing = fx.root.join("stat-161-missing");
+        let (missing_frame, missing_trail) = stat_answer(&fx, &missing).await;
+        let shut = fx.root.join("stat-161-shut");
+        std::fs::create_dir(&shut).unwrap();
+        let inside = shut.join("inside");
+        std::fs::write(&inside, b"x").unwrap();
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let os_refused = if nix::unistd::geteuid().is_root() {
+            None
+        } else {
+            assert!(maknae_io::open_path_for_stat(&inside).is_err());
+            Some(stat_answer(&fx, &inside).await)
+        };
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let denied = fx.root.join("stat-161-denied");
+        std::fs::write(&denied, b"x").unwrap();
+        let pdp = fixture_pdp(&fx);
+        std::fs::write(
+            fx.root.join("authz.yaml"),
+            "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\n  deny:\n    - \"Read(~/stat-161-denied)\"\n",
+        )
+        .unwrap();
+        pdp.baseline().reload_from_file().unwrap();
+        let fd = maknae_io::open_path_for_stat(&denied).ok();
+        assert!(
+            fd.is_some(),
+            "the denied file exists and the subject opens it"
+        );
+        let (denied_frame, denied_trail) =
+            stat_answer_on(&fx, pdp, &denied, fd, SensitiveList::empty()).await;
+        assert_eq!(missing_frame, uniform_refusal());
+        assert_eq!(denied_frame, missing_frame);
+        if let Some((frame, _)) = &os_refused {
+            assert_eq!(frame, &missing_frame);
+        }
+        let reason = |t: &[AuditRecord]| t.last().unwrap().outcome.reason.clone();
+        assert_eq!(reason(&missing_trail), "stat descriptor missing");
+        assert!(
+            reason(&denied_trail).contains("Read(~/stat-161-denied)"),
+            "{}",
+            reason(&denied_trail)
+        );
+    }
+    #[tokio::test]
+    async fn stat_of_a_protected_path_answers_protected() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let file = fx.root.join("stat-161-protected");
+        std::fs::write(&file, b"x").unwrap();
+        let entry = file.to_str().unwrap().to_string();
+        let host = || SensitiveList::from_entries(std::slice::from_ref(&entry)).unwrap();
+        let want = maknae_proto::encode_response(&Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Err(ProtoError {
+                code: ProtoErrCode::Protected,
+                message: maknae_proto::protected_message(maknae_proto::HOST_SENSITIVE_LIST, &entry),
+            }),
+        })
+        .unwrap();
+        let armed = maknae_io::open_path_for_stat(&file).ok();
+        assert!(armed.is_some());
+        let (frame, trail) = stat_answer_on(&fx, fixture_pdp(&fx), &file, armed, host()).await;
+        assert_eq!(frame, want);
+        assert_eq!(
+            trail.last().unwrap().outcome.reason,
+            format!("sensitive: host {entry}")
+        );
+        let (unarmed, _) = stat_answer_on(&fx, fixture_pdp(&fx), &file, None, host()).await;
+        assert_eq!(unarmed, want, "the answer depends only on the path");
+    }
+    #[tokio::test]
+    async fn the_kernel_never_opens_the_stat_target_for_read() {
+        let fx = Fixture::new();
+        let file = fx.root.join("stat-161-held");
+        std::fs::write(&file, b"x").unwrap();
+        let held = maknae_io::open_path_for_stat(&file).unwrap();
+        maknae_io::refuse_access_bearing(held.as_fd(), &file)
+            .expect("the subject's stat descriptor confers no write");
+        #[cfg(target_os = "linux")]
+        {
+            let flags = nix::fcntl::fcntl(held.as_fd(), nix::fcntl::FcntlArg::F_GETFL).unwrap();
+            assert!(nix::fcntl::OFlag::from_bits_retain(flags).contains(nix::fcntl::OFlag::O_PATH));
+        }
+        assert!(prepare(stat(&file), Some(held), &fx.root, Lane::Local).is_ok());
+        let writable: OwnedFd = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .into();
+        let refused = prepare(stat(&file), Some(writable), &fx.root, Lane::Local)
+            .err()
+            .unwrap();
+        assert!(
+            refused.contains("confers access beyond location"),
+            "{refused}"
+        );
+        #[cfg(target_os = "linux")]
+        assert!(prepare(
+            stat(&file),
+            Some(std::fs::File::open(&file).unwrap().into()),
+            &fx.root,
+            Lane::Local
+        )
+        .err()
+        .unwrap()
+        .contains("confers access beyond location"));
+        assert_eq!(
+            prepare(stat(&file), None, &fx.root, Lane::Local)
+                .err()
+                .as_deref(),
+            Some("stat descriptor missing")
+        );
+    }
+    #[test]
+    fn mtime_seconds_keep_the_sign_and_floor() {
+        use std::time::UNIX_EPOCH;
+        assert_eq!(mtime_secs(UNIX_EPOCH), 0);
+        assert_eq!(mtime_secs(UNIX_EPOCH + Duration::new(5, 999_999_999)), 5);
+        assert_eq!(mtime_secs(UNIX_EPOCH - Duration::from_secs(5)), -5);
+        assert_eq!(
+            mtime_secs(UNIX_EPOCH - Duration::from_secs(5) + Duration::from_nanos(7)),
+            -5
+        );
+        assert_eq!(mtime_secs(UNIX_EPOCH - Duration::new(0, 1)), -1);
     }
 }

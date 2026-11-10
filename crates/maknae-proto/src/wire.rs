@@ -595,7 +595,11 @@ pub enum Verb {
     FsList,
     /// File metadata without content. Discloses existence, size and timestamps —
     /// enough to confirm a denied object exists.
-    FsStat,
+    FsStat {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conversation: Option<String>,
+    },
     /// Create a directory. It also creates a destination later terms are decided
     /// against.
     FsMkdir {
@@ -712,6 +716,21 @@ pub enum Payload {
     ConversationDeleted {
         conversation: crate::ConversationId,
     },
+    /// A permitted `fs.stat`, from the kernel's own descriptor (#161).
+    Stat {
+        size: u64,
+        mtime_secs: i64,
+        kind: StatKind,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StatKind {
+    File,
+    Directory,
+    Symlink,
+    /// A fifo, socket or device.
+    Other,
 }
 
 /// The reason's byte limit, measured after normalisation.
@@ -1123,7 +1142,7 @@ pub fn class_of(verb: &Verb) -> FrameClass {
         | Verb::FsDelete { .. }
         | Verb::FsMove
         | Verb::FsList
-        | Verb::FsStat
+        | Verb::FsStat { .. }
         | Verb::FsMkdir { .. }
         | Verb::FsLink
         | Verb::FsChmod
@@ -1875,6 +1894,75 @@ mod tests {
         assert_eq!(decode_request(&none).unwrap(), write(None));
         let some = encode_request(&write(Some("conv-265"))).unwrap();
         assert_eq!(decode_request(&some).unwrap(), write(Some("conv-265")));
+    }
+
+    #[test]
+    fn stat_returns_size_mtime_and_kind_only() {
+        let reply = Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(Payload::Stat {
+                size: 161,
+                mtime_secs: -2,
+                kind: StatKind::Symlink,
+            }),
+        };
+        let encoded = encode_response(&reply).unwrap();
+        assert_eq!(decode_response(&encoded).unwrap(), reply);
+        let value: ciborium::Value = ciborium::from_reader(encoded.as_slice()).unwrap();
+        let field = |m: &ciborium::Value, k: &str| -> ciborium::Value {
+            m.as_map()
+                .unwrap()
+                .iter()
+                .find(|(key, _)| key.as_text() == Some(k))
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| panic!("no {k} in {m:?}"))
+        };
+        let stat = field(&field(&field(&value, "result"), "Ok"), "Stat");
+        let mut keys: Vec<_> = stat
+            .as_map()
+            .unwrap()
+            .iter()
+            .map(|(k, _)| k.as_text().unwrap().to_string())
+            .collect();
+        keys.sort();
+        assert_eq!(keys, ["kind", "mtime_secs", "size"]);
+        for kind in [
+            StatKind::File,
+            StatKind::Directory,
+            StatKind::Symlink,
+            StatKind::Other,
+        ] {
+            let reply = Response {
+                protocol_version: PROTOCOL_VERSION,
+                result: RespResult::Ok(Payload::Stat {
+                    size: 0,
+                    mtime_secs: 0,
+                    kind,
+                }),
+            };
+            assert_eq!(
+                decode_response(&encode_response(&reply).unwrap()).unwrap(),
+                reply
+            );
+        }
+    }
+
+    #[test]
+    fn a_stats_conversation_is_omitted_when_none_and_round_trips_when_set() {
+        let stat = |conversation: Option<&str>| Request {
+            task: None,
+            protocol_version: PROTOCOL_VERSION,
+            verb: Verb::FsStat {
+                path: "/p".into(),
+                conversation: conversation.map(str::to_string),
+            },
+        };
+        let none = encode_request(&stat(None)).unwrap();
+        assert!(!none.windows(12).any(|w| w == b"conversation"));
+        assert_eq!(decode_request(&none).unwrap(), stat(None));
+        let some = encode_request(&stat(Some("conv-161"))).unwrap();
+        assert_eq!(decode_request(&some).unwrap(), stat(Some("conv-161")));
+        assert_eq!(class_of(&stat(None).verb), FrameClass::Attempt);
     }
 
     fn text(s: &str) -> ContentBlock {
@@ -3464,7 +3552,13 @@ mod tests {
                 ),
                 (Verb::FsMove, FrameClass::Attempt),
                 (Verb::FsList, FrameClass::Attempt),
-                (Verb::FsStat, FrameClass::Attempt),
+                (
+                    Verb::FsStat {
+                        path: "/p".into(),
+                        conversation: None,
+                    },
+                    FrameClass::Attempt,
+                ),
                 (
                     Verb::FsMkdir {
                         path: "/p".into(),

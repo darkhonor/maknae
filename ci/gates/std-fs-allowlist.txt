@@ -93,6 +93,11 @@ crates/maknae-vault/src/stream.rs|let _ = std::fs::remove_file(&self.path);
 crates/maknae-kernel/src/handler.rs|owner: None,
 crates/maknae-kernel/src/handler.rs|mode_mask: None,
 
+# The fs.stat target requirement (delegated.rs::verify_stat_delegated, #161): location
+# only, for the same reason as delegated_plan above; nlink is required unless a directory.
+crates/maknae-io/src/delegated.rs|owner: None,
+crates/maknae-io/src/delegated.rs|mode_mask: None,
+
 # #158 audit admission retains OS DAC on its configured parent; the leaf has artifact checks.
 crates/maknae-audit-append/src/sink.rs|&maknae_io::AnchorRequired::OS_DAC,
 

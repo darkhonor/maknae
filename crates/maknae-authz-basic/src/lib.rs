@@ -2247,7 +2247,7 @@ mod tests {
                 .collect()
         }
 
-        const TERMS: [&str; 17] = [
+        const TERMS: [&str; 18] = [
             "admin.status",
             "admin.config.show",
             "admin.subject.list",
@@ -2265,6 +2265,7 @@ mod tests {
             "fs.write",
             "fs.delete",
             "fs.mkdir",
+            "fs.stat",
         ];
 
         /// `subjects:` read from the raw file, without `validate_subjects` or `decide::expand`.
@@ -3140,6 +3141,7 @@ mod tests {
                 "fs.write" => Some("write-existing"),
                 "fs.delete" => Some("delete-entry"),
                 "fs.mkdir" => Some("mkdir"),
+                "fs.stat" => Some("read"),
                 _ => None,
             };
             let targets: &[Option<&str>] = if op.is_some() {
@@ -4546,6 +4548,7 @@ mod tests {
                 ("fs.delete", "fs.*".to_string()),
                 ("fs.mkdir", "fs.*".to_string()),
                 ("fs.read", "fs.*".to_string()),
+                ("fs.stat", "fs.*".to_string()),
                 ("fs.write", "fs.*".to_string()),
                 ("session.new", "session.new".to_string()),
                 ("session.prompt", "session.prompt".to_string()),
@@ -4667,7 +4670,7 @@ mod tests {
             .actions
             .clone()
             .unwrap();
-        assert_eq!(actions.allow.len(), 4);
+        assert_eq!(actions.allow.len(), 5);
         assert_eq!(
             actions.deny,
             [
@@ -4675,6 +4678,7 @@ mod tests {
                 ("fs.delete", "fs.*".to_string()),
                 ("fs.mkdir", "fs.*".to_string()),
                 ("fs.read", "fs.*".to_string()),
+                ("fs.stat", "fs.*".to_string()),
                 ("fs.write", "fs.*".to_string()),
             ]
             .into_iter()
@@ -6442,7 +6446,7 @@ mod tests {
             v
         }
 
-        const FS_TERMS: [&str; 4] = ["fs.read", "fs.write", "fs.delete", "fs.mkdir"];
+        const FS_TERMS: [&str; 5] = ["fs.read", "fs.write", "fs.delete", "fs.mkdir", "fs.stat"];
 
         fn request(
             action: &str,
@@ -6675,8 +6679,8 @@ mod tests {
                 mismatches.len(),
                 &mismatches[..mismatches.len().min(10)]
             );
-            let fs_cells = 4 * 7 * 22 * 5 + 7 * 22 * 5;
-            let other_cells = 56 + 4;
+            let fs_cells = 5 * 7 * 22 * 5 + 7 * 22 * 5;
+            let other_cells = 55 + 4;
             assert_eq!(cells, 12 * 9 * (fs_cells + other_cells));
             assert_eq!(subject_entries, 1);
             assert_eq!(

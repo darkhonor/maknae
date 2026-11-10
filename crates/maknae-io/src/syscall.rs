@@ -149,6 +149,28 @@ pub(crate) fn open_path_delegation(path: &Path) -> nix::Result<OwnedFd> {
     nix::fcntl::open(path, path_delegation_flags(), NixMode::empty())
 }
 
+#[cfg(target_os = "linux")]
+use linux_path_stat_flags as path_stat_flags;
+#[cfg(target_os = "macos")]
+use macos_path_stat_flags as path_stat_flags;
+
+#[cfg(target_os = "linux")]
+fn linux_path_stat_flags() -> OFlag {
+    OFlag::O_PATH | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC
+}
+
+#[cfg(target_os = "macos")]
+fn macos_path_stat_flags() -> OFlag {
+    OFlag::from_bits_retain(nix::libc::O_SYMLINK)
+        | OFlag::O_RDONLY
+        | OFlag::O_NONBLOCK
+        | OFlag::O_CLOEXEC
+}
+
+pub(crate) fn open_path_stat(path: &Path) -> nix::Result<OwnedFd> {
+    nix::fcntl::open(path, path_stat_flags(), NixMode::empty())
+}
+
 /// Mutation descent needs search/path access; only directory enumeration needs read.
 pub(crate) fn open_mutation_directory_at<F: AsFd>(fd: &F, leaf: &str) -> nix::Result<OwnedFd> {
     nix::fcntl::openat(
@@ -644,6 +666,15 @@ mod tests {
         groups.push(vec![OFlag::O_RDONLY, OFlag::O_NONBLOCK, OFlag::O_CLOEXEC]);
         #[cfg(target_os = "linux")]
         groups.push(vec![OFlag::O_PATH, OFlag::O_CLOEXEC]);
+        #[cfg(target_os = "linux")]
+        groups.push(vec![OFlag::O_PATH, OFlag::O_NOFOLLOW, OFlag::O_CLOEXEC]);
+        #[cfg(target_os = "macos")]
+        groups.push(vec![
+            OFlag::from_bits_retain(nix::libc::O_SYMLINK),
+            OFlag::O_RDONLY,
+            OFlag::O_NONBLOCK,
+            OFlag::O_CLOEXEC,
+        ]);
         #[cfg(target_os = "macos")]
         groups.push(vec![
             OFlag::O_WRONLY,

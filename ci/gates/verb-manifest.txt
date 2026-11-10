@@ -43,7 +43,7 @@ action	fs.write	granted	shipped; Write path policy shared by user/admin, or the 
 action	fs.delete	granted	shipped; Write path policy shared by user/admin, or the subject's own `subjects:` permissions under the site deny floor, within its actions limit (#608); audited subject-side delete attempt, recursive scopes require whole-subtree authority (#158)
 action	fs.move	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
 action	fs.list	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
-action	fs.stat	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
+action	fs.stat	granted	shipped; decided by the Read grant, no capability of its own (#161 M15); the daemon holds only the subject's no-access descriptor of the object itself, never followed, and returns size, mtime and kind from it (#161 M13)
 action	fs.mkdir	granted	shipped; Write path policy shared by user/admin, or the subject's own `subjects:` permissions under the site deny floor, within its actions limit (#608); audited subject-side mkdir attempt, every parents prefix decided (#158)
 action	fs.link	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
 action	fs.chmod	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
@@ -95,3 +95,4 @@ action-vocab	fs.read	subject-limitable	a `subjects:` actions list may limit it; 
 action-vocab	fs.write	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608)
 action-vocab	fs.delete	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608)
 action-vocab	fs.mkdir	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608)
+action-vocab	fs.stat	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608, #161)

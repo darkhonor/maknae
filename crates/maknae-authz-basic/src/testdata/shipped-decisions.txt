@@ -249,11 +249,26 @@
 1002 fs.list None -> NotApplicable { note: Some("role guest: no rule for fs.list") } Some("guest") None
 666 fs.list None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
 4242 fs.list None -> NotApplicable { note: Some("subject resolves to no role") } None None
-1000 fs.stat None -> NotApplicable { note: Some("term enumerated, not implemented: fs.stat") } Some("admin") None
-1001 fs.stat None -> NotApplicable { note: Some("role user: no rule for fs.stat") } Some("user") None
-1002 fs.stat None -> NotApplicable { note: Some("role guest: no rule for fs.stat") } Some("guest") None
-666 fs.stat None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
-4242 fs.stat None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 fs.stat Some("/home/operator/notes") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:0 in /etc/maknae/authz.yaml#permissions")
+1000 fs.stat Some("/home/operator/projects/x") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:0 in /etc/maknae/authz.yaml#permissions")
+1000 fs.stat Some("/home/operator/.ssh/id") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:0 in /etc/maknae/authz.yaml#permissions")
+1000 fs.stat Some("/home/operator/.maknae/k") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:0 in /etc/maknae/authz.yaml#permissions")
+1001 fs.stat Some("/home/operator/notes") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:permissions:allow:0 in /etc/maknae/authz.yaml#permissions")
+1001 fs.stat Some("/home/operator/projects/x") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:permissions:allow:0 in /etc/maknae/authz.yaml#permissions")
+1001 fs.stat Some("/home/operator/.ssh/id") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:permissions:allow:0 in /etc/maknae/authz.yaml#permissions")
+1001 fs.stat Some("/home/operator/.maknae/k") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:permissions:allow:0 in /etc/maknae/authz.yaml#permissions")
+1002 fs.stat Some("/home/operator/notes") -> NotApplicable { note: Some("role guest: no rule for fs.stat") } Some("guest") None
+1002 fs.stat Some("/home/operator/projects/x") -> NotApplicable { note: Some("role guest: no rule for fs.stat") } Some("guest") None
+1002 fs.stat Some("/home/operator/.ssh/id") -> NotApplicable { note: Some("role guest: no rule for fs.stat") } Some("guest") None
+1002 fs.stat Some("/home/operator/.maknae/k") -> NotApplicable { note: Some("role guest: no rule for fs.stat") } Some("guest") None
+666 fs.stat Some("/home/operator/notes") -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+666 fs.stat Some("/home/operator/projects/x") -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+666 fs.stat Some("/home/operator/.ssh/id") -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+666 fs.stat Some("/home/operator/.maknae/k") -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 fs.stat Some("/home/operator/notes") -> NotApplicable { note: Some("subject resolves to no role") } None None
+4242 fs.stat Some("/home/operator/projects/x") -> NotApplicable { note: Some("subject resolves to no role") } None None
+4242 fs.stat Some("/home/operator/.ssh/id") -> NotApplicable { note: Some("subject resolves to no role") } None None
+4242 fs.stat Some("/home/operator/.maknae/k") -> NotApplicable { note: Some("subject resolves to no role") } None None
 1000 fs.mkdir Some("/home/operator/notes") -> NotApplicable { note: Some("role admin: no capability entry for fs.mkdir") } Some("admin") None
 1000 fs.mkdir Some("/home/operator/projects/x") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:1 in /etc/maknae/authz.yaml#permissions")
 1000 fs.mkdir Some("/home/operator/.ssh/id") -> NotApplicable { note: Some("role admin: no capability entry for fs.mkdir") } Some("admin") None

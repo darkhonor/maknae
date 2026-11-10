@@ -141,6 +141,7 @@ pub fn prepare_checked(
             result
         }
         proto::Verb::Read { path, .. } => maknae_io::open_path_for_delegation(Path::new(path)),
+        proto::Verb::FsStat { path, .. } => maknae_io::open_path_for_stat(Path::new(path)),
         proto::Verb::SessionNew { cwd, .. } => {
             maknae_io::open_directory_for_delegation(Path::new(cwd))
         }
@@ -1326,6 +1327,26 @@ mod tests {
                 b"new bytes".to_vec(),
             ))),
         )
+    }
+    #[test]
+    fn a_stat_is_prepared_on_the_link_itself_and_a_missing_path_goes_unarmed() {
+        let d = Fixture::new();
+        let target = d.path("stat-161-target");
+        std::fs::write(&target, b"never followed").unwrap();
+        let link = d.path("stat-161-link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let stat = |path: String| proto::Verb::FsStat {
+            path,
+            conversation: None,
+        };
+        let prepared = prepare(stat(link.clone()), None).expect("fs.stat is prepared");
+        let fd = prepared.descriptor().unwrap().expect("armed");
+        let verified = maknae_io::verify_stat_delegated(fd.as_fd()).unwrap();
+        assert_eq!(verified.path, Path::new(&link));
+        assert_eq!(verified.meta.kind, maknae_io::FileKind::Symlink);
+        let missing = prepare(stat(d.path("stat-161-missing")), None).expect("still sent");
+        assert!(missing.descriptor().unwrap().is_none());
+        assert!(missing.preparation_error().is_some());
     }
     #[test]
     fn preparation_preserves_existing_sentinel_and_missing_entries() {

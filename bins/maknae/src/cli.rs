@@ -343,6 +343,7 @@ fn payload_kind(p: &Payload) -> &'static str {
         Payload::ConversationClosed(_) => "conversation closed",
         Payload::ConversationList(_) => "conversation list",
         Payload::ConversationDeleted { .. } => "conversation deleted",
+        Payload::Stat { .. } => "stat",
     }
 }
 
@@ -975,7 +976,8 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
         | (v, p @ Payload::ConversationOpened(_))
         | (v, p @ Payload::ConversationClosed(_))
         | (v, p @ Payload::ConversationList(_))
-        | (v, p @ Payload::ConversationDeleted { .. }) => Err(format!(
+        | (v, p @ Payload::ConversationDeleted { .. })
+        | (v, p @ Payload::Stat { .. }) => Err(format!(
             "protocol error: daemon returned a {} payload for a {} request",
             payload_kind(&p),
             v.kind()
@@ -2009,6 +2011,19 @@ mod tests {
         assert_eq!(
             e,
             "protocol error: daemon returned a whoami payload for a release request"
+        );
+        let e = print_payload_for_verb(
+            Verb::Ping,
+            Payload::Stat {
+                size: 161,
+                mtime_secs: 0,
+                kind: maknae_proto::StatKind::File,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            e,
+            "protocol error: daemon returned a stat payload for a ping request"
         );
         let e = containment_line(
             &Verb::AdminBaselineAccept {

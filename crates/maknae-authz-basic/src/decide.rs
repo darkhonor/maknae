@@ -184,7 +184,7 @@ pub(crate) const GRANTABLE_ACTIONS: [&str; 13] = ["admin.status", "admin.config.
 
 /// The terms a `subjects:` action list or a family wildcard can name.
 #[rustfmt::skip]
-pub(crate) const ACTION_VOCABULARY: [&str; 17] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt", "session.new", "session.close", "session.list", "session.delete", "session.task", "fs.read", "fs.write", "fs.delete", "fs.mkdir"];
+pub(crate) const ACTION_VOCABULARY: [&str; 18] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt", "session.new", "session.close", "session.list", "session.delete", "session.task", "fs.read", "fs.write", "fs.delete", "fs.mkdir", "fs.stat"];
 
 /// An action entry as compiled against [`ACTION_VOCABULARY`]: `(term, entry as written)`.
 pub(crate) fn expand(
@@ -759,7 +759,7 @@ pub(crate) fn decide_loaded_cited(
         Role::Admin | Role::User
             if matches!(
                 req.action.0.as_str(),
-                "fs.read" | "fs.write" | "fs.delete" | "fs.mkdir"
+                "fs.read" | "fs.write" | "fs.delete" | "fs.mkdir" | "fs.stat"
             ) =>
         {
             match attempt_scope(req) {
@@ -1025,7 +1025,7 @@ fn attempt_scope(req: &SecRequest) -> Result<FsScope, Verdict> {
         .and_then(FsOperation::parse)
         .ok_or_else(|| refuse("filesystem attempt preparation absent or invalid"))?;
     let scope = match (req.action.0.as_str(), operation) {
-        ("fs.read", FsOperation::Read) => FsScope::Read,
+        ("fs.read" | "fs.stat", FsOperation::Read) => FsScope::Read,
         ("fs.write", FsOperation::WriteExisting | FsOperation::WriteCreate)
         | ("fs.delete", FsOperation::DeleteEntry)
         | ("fs.mkdir", FsOperation::Mkdir) => FsScope::Write,
@@ -1278,6 +1278,47 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn fs_stat_is_decided_by_the_read_grant() {
+        for role in ["admin", "user"] {
+            let lp = lp_with(
+                Some(&[(role, &["operator"])]),
+                &[("operator", OPERATOR_UID)],
+            );
+            let stat = |path: &str, op: &str| {
+                let mut req = request(Some(i64::from(OPERATOR_UID)), "fs.stat", Some(path));
+                req.context.0.insert(
+                    maknae_security::CONTEXT_FS_OPERATION,
+                    AttrValue::Str(op.into()),
+                );
+                decide_loaded(&lp, &principal(), &req)
+            };
+            assert!(
+                matches!(
+                    stat("/home/operator/stat-161", "read"),
+                    Verdict::Permit { .. }
+                ),
+                "{role}: Read(~/**) permits fs.stat"
+            );
+            assert!(
+                matches!(stat("/home/operator/.ssh/id", "read"), Verdict::Deny { ref reason } if reason.contains("Read(~/.ssh/**)")),
+                "{role}: a Read deny refuses fs.stat"
+            );
+            assert_eq!(
+                stat("/srv/stat-161", "read"),
+                Verdict::NotApplicable {
+                    note: Some(format!("role {role}: no capability entry for fs.stat")),
+                }
+            );
+            assert!(
+                matches!(stat("/home/operator/stat-161", "write-existing"), Verdict::Deny { ref reason } if reason == "filesystem attempt preparation does not match action"),
+                "{role}: fs.stat is prepared as a read only"
+            );
+        }
+        assert!(ACTION_VOCABULARY.contains(&"fs.stat"));
+        assert!(!GRANTABLE_ACTIONS.contains(&"fs.stat"));
     }
 
     #[test]
@@ -1948,7 +1989,7 @@ mod tests {
         };
         assert_eq!(
             terms("fs.*"),
-            ["fs.read", "fs.write", "fs.delete", "fs.mkdir"]
+            ["fs.read", "fs.write", "fs.delete", "fs.mkdir", "fs.stat"]
         );
         assert_eq!(
             terms("admin.*"),
@@ -1998,11 +2039,11 @@ mod tests {
     }
 
     #[test]
-    fn the_vocabulary_is_the_grantable_terms_and_the_four_fs_terms() {
+    fn the_vocabulary_is_the_grantable_terms_and_the_five_fs_terms() {
         assert_eq!(ACTION_VOCABULARY[..13], GRANTABLE_ACTIONS);
         assert_eq!(
             ACTION_VOCABULARY[13..],
-            ["fs.read", "fs.write", "fs.delete", "fs.mkdir"]
+            ["fs.read", "fs.write", "fs.delete", "fs.mkdir", "fs.stat"]
         );
     }
 

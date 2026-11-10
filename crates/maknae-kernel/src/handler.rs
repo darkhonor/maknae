@@ -105,9 +105,11 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
     match verb {
         Verb::Ping => Dispatch::Pong,
         Verb::Whoami => Dispatch::WhoamiRequested,
-        Verb::Read { .. } | Verb::FsWrite { .. } | Verb::FsDelete { .. } | Verb::FsMkdir { .. } => {
-            Dispatch::MutationRequested
-        }
+        Verb::Read { .. }
+        | Verb::FsWrite { .. }
+        | Verb::FsDelete { .. }
+        | Verb::FsMkdir { .. }
+        | Verb::FsStat { .. } => Dispatch::MutationRequested,
         // Every enumerated-but-unbuilt term. NO wildcard: a new variant is a
         // compile error until someone decides what it dispatches to.
         Verb::AdminConfigShow => Dispatch::ConfigShowRequested,
@@ -145,7 +147,6 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         | Verb::SessionCompact
         | Verb::FsMove
         | Verb::FsList
-        | Verb::FsStat
         | Verb::FsLink
         | Verb::FsChmod
         | Verb::FsChown
@@ -317,7 +318,7 @@ pub fn verb_to_action(verb: &Verb) -> &'static str {
         Verb::FsDelete { .. } => "fs.delete",
         Verb::FsMove => "fs.move",
         Verb::FsList => "fs.list",
-        Verb::FsStat => "fs.stat",
+        Verb::FsStat { .. } => "fs.stat",
         Verb::FsMkdir { .. } => "fs.mkdir",
         Verb::FsLink => "fs.link",
         Verb::FsChmod => "fs.chmod",
@@ -663,8 +664,8 @@ mod tests {
     }
 
     #[test]
-    fn exactly_the_four_file_actions_are_filesystem_verbs() {
-        let file_actions = ["fs.read", "fs.write", "fs.delete", "fs.mkdir"];
+    fn exactly_the_five_file_actions_are_filesystem_verbs() {
+        let file_actions = ["fs.read", "fs.write", "fs.delete", "fs.mkdir", "fs.stat"];
         let verbs = all_verbs();
         assert_eq!(
             verbs.iter().filter(|v| is_filesystem_verb(v)).count(),
@@ -1774,7 +1775,10 @@ mod tests {
             },
             Verb::FsMove,
             Verb::FsList,
-            Verb::FsStat,
+            Verb::FsStat {
+                path: "/x".into(),
+                conversation: None,
+            },
             Verb::FsMkdir {
                 path: "/x".into(),
                 parents: false,

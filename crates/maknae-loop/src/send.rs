@@ -323,6 +323,13 @@ fn first_answer(
     armed: bool,
 ) -> Result<FirstAnswer, Failed> {
     match (result, prepared) {
+        (RespResult::Ok(Payload::MutationAttempt(_)), Some(prepared))
+            if matches!(prepared.request(), maknae_proto::Verb::FsStat { .. }) =>
+        {
+            Err(Failed::BeforeGrant(
+                "protocol error: an attempt grant for fs.stat".into(),
+            ))
+        }
         (RespResult::Ok(Payload::MutationAttempt(grant)), Some(prepared)) => {
             Ok(FirstAnswer::Grant(prepared, grant))
         }
@@ -779,6 +786,32 @@ mod tests {
         assert!(matches!(
             first_answer(false, None, RespResult::Ok(Payload::Pong), true),
             Ok(FirstAnswer::Done(SentOutcome::Payload(Payload::Pong)))
+        ));
+        let stat = || {
+            crate::mutation::prepare_checked(
+                maknae_proto::Verb::FsStat {
+                    path: "/sentinel-161".into(),
+                    conversation: None,
+                },
+                None,
+                crate::mutation::WriteCheck::Unchecked,
+            )
+        };
+        assert!(
+            matches!(
+                first_answer(false, stat(), grant(), false),
+                Err(Failed::BeforeGrant(why)) if why.contains("fs.stat")
+            ),
+            "a grant never reaches an executor for fs.stat"
+        );
+        let answer = Payload::Stat {
+            size: 1,
+            mtime_secs: 1,
+            kind: maknae_proto::StatKind::File,
+        };
+        assert!(matches!(
+            first_answer(false, stat(), RespResult::Ok(answer.clone()), true),
+            Ok(FirstAnswer::Done(SentOutcome::Payload(p))) if p == answer
         ));
     }
 

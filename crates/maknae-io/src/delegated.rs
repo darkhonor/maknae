@@ -210,6 +210,30 @@ pub fn open_path_for_delegation(path: &std::path::Path) -> std::io::Result<Owned
     crate::syscall::open_path_delegation(path).map_err(Into::into)
 }
 
+/// The subject's own open for `fs.stat`: the final component is never followed, so a
+/// symlink is stat'ed as itself (Linux `O_PATH`; macOS `O_SYMLINK|O_RDONLY` pending #368).
+pub fn open_path_for_stat(path: &std::path::Path) -> std::io::Result<OwnedFd> {
+    crate::syscall::open_path_stat(path).map_err(Into::into)
+}
+
+/// Verify a delegated `fs.stat` descriptor: any kind, one link unless a directory.
+pub fn verify_stat_delegated(fd: BorrowedFd<'_>) -> Result<Delegated, IoError> {
+    let path = delegated_path(fd)?;
+    crate::mutation::checked_path(&path)?;
+    let st = crate::syscall::fstat(&fd)
+        .map_err(|e| crate::checks::map_errno_no_disambiguation(e, &path))?;
+    let meta = DelegatedMeta::of(&st);
+    let target = TargetRequired {
+        owner: None,
+        mode_mask: None,
+        nlink_exactly_one: meta.kind != FileKind::Directory,
+        regular_file: false,
+        max_bytes: None,
+    };
+    crate::checks::check_target(&st, &path, &target)?;
+    Ok(Delegated { path, meta })
+}
+
 /// Subject-side directory open. Proves no permission to mutate its children.
 pub fn open_directory_for_delegation(path: &std::path::Path) -> std::io::Result<OwnedFd> {
     crate::syscall::open_mutation_directory(path).map_err(Into::into)
@@ -484,6 +508,51 @@ mod tests {
         )
         .expect("a directory verifies when no regular file is required");
         assert_eq!(verified.meta.kind, FileKind::Directory);
+    }
+
+    #[test]
+    fn a_stat_open_takes_the_link_itself_and_verifies_it_as_a_symlink() {
+        let (_dir, base) = crate::testutil::outside_any_home();
+        let target = a_file(&base, "target-161", b"followed-161");
+        let link = base.join("link-161");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        let fd = open_path_for_stat(&link).expect("stat open");
+        let verified = verify_stat_delegated(fd.as_fd()).expect("a symlink is stat-able");
+        assert_eq!(verified.path, link);
+        assert_eq!(verified.meta.kind, FileKind::Symlink);
+        assert_eq!(
+            verified.meta.size,
+            target.as_os_str().len() as u64,
+            "a link's size is its target's name, not the target's bytes"
+        );
+        refuse_access_bearing(fd.as_fd(), &link).expect("a stat descriptor confers no write");
+    }
+
+    #[test]
+    fn a_stat_verification_admits_any_directory_link_count_and_one_link_otherwise() {
+        let (_dir, base) = crate::testutil::outside_any_home();
+        std::fs::create_dir(base.join("child-161")).expect("child");
+        let fd = open_path_for_stat(&base).expect("stat open");
+        let verified = verify_stat_delegated(fd.as_fd()).expect("a directory is stat-able");
+        assert_eq!(verified.meta.kind, FileKind::Directory);
+        let real = a_file(&base, "real-161", b"x");
+        std::fs::hard_link(&real, base.join("alias-161")).expect("hard link");
+        let fd = open_path_for_stat(&real).expect("stat open");
+        match verify_stat_delegated(fd.as_fd()) {
+            Err(IoError::MultiplyLinked { path, nlink }) => assert_eq!((path, nlink), (real, 2)),
+            other => panic!("a multiply-linked file must be refused: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_stat_open_of_a_fifo_does_not_block_and_reports_other() {
+        let (_dir, base) = crate::testutil::outside_any_home();
+        let fifo = base.join("fifo-161");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600))
+            .expect("mkfifo");
+        let fd = open_path_for_stat(&fifo).expect("a stat open of a fifo returns at once");
+        let verified = verify_stat_delegated(fd.as_fd()).expect("a fifo is stat-able");
+        assert_eq!(verified.meta.kind, FileKind::Other);
     }
 
     #[test]
