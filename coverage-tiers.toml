@@ -381,7 +381,7 @@ files = [
   "crates/maknae-state/src/vocabulary.rs",
 ]
 # maknae-security request.rs is pure declarations (no executable production
-# regions) → T3, not T1. The mutation set is the whole crate regardless of tier,
+# regions) → T3, not T1. Mutation crates are listed by crate, not by tier,
 # so it stays mutation-covered.
 # Risk-based mutation set (operator decision 2026-08-04): MLS/DCS/security-
 # critical crates whose fail-closed behavior must be provable to external
