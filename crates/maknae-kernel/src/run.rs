@@ -947,6 +947,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         Ok(Ok(frame)) => frame,
     };
     let (class, body) = body;
+    let arrived = tokio::time::Instant::now();
 
     let mut request = match decode_request(&body) {
         Ok(r) => r,
@@ -1304,6 +1305,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             Arc::clone(&conversations),
             &stamp,
             authorizer.sensitive_now(),
+            arrived,
         )
         .await;
         close_bounded(&mut stream).await;

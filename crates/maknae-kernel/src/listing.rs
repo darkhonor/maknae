@@ -197,6 +197,7 @@ async fn answer<S: AsyncWrite + Unpin>(
         return false;
     };
     bytes.len() <= caps.response
+        && tokio::time::Instant::now() < deadline
         && matches!(
             tokio::time::timeout_at(
                 deadline,
@@ -221,12 +222,12 @@ pub(crate) async fn run<S, E, P>(
     mut lister: Lister,
     decider: Arc<Decider<P>>,
     authz_timeout: Duration,
+    deadline: tokio::time::Instant,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
     E: AuditEmit,
     P: Authorizer + Send + Sync + 'static,
 {
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(cfg.read_timeout_ms);
     let grant = MutationGrant {
         id: MutationId {
             session_id: intent.record.session_id,

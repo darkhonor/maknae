@@ -825,6 +825,7 @@ pub(crate) async fn handle<S, E, P>(
     conversations: Arc<dyn ConversationStore>,
     stamp: &Stamp<'_>,
     sensitive: Arc<SensitiveList>,
+    arrived: tokio::time::Instant,
 ) -> bool
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -987,7 +988,7 @@ where
                     "metadata",
                     answer,
                     caps.response,
-                    tokio::time::Instant::now() + Duration::from_millis(cfg.read_timeout_ms),
+                    arrived + Duration::from_millis(cfg.read_timeout_ms),
                 )
                 .await,
                 touch_failure,
@@ -1031,7 +1032,7 @@ where
         match (next, listing, directory) {
             (Next::Attempt(scope), _, _) => {
                 attempt(
-                    stream, cfg, caps, &*emit, intent, scope, label, read_page, seq,
+                    stream, cfg, caps, &*emit, intent, scope, label, read_page, seq, arrived,
                 )
                 .await;
             }
@@ -1056,6 +1057,7 @@ where
                     crate::listing::Lister::new(directory, after),
                     Arc::new(decider),
                     authz_timeout,
+                    arrived + Duration::from_millis(cfg.read_timeout_ms),
                 )
                 .await;
             }
@@ -1080,6 +1082,7 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
     label: maknae_proto::ObjectLabel,
     read_page: Option<maknae_proto::PageRequest>,
     seq: &Seq,
+    arrived: tokio::time::Instant,
 ) {
     let id = MutationId {
         session_id: intent.record.session_id,
@@ -1101,7 +1104,7 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
             0
         },
     };
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(limits.deadline_ms);
+    let deadline = arrived + Duration::from_millis(limits.deadline_ms);
     let exchange = match read_page {
         Some(page) => MutationExchange::begin_paged(id, scope.clone(), limits, page),
         None => MutationExchange::begin(id, scope.clone(), limits),
@@ -1119,7 +1122,7 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
     .ok()
     .filter(|bytes| bytes.len() <= caps.response);
     let delivered = match (exchange, bytes) {
-        (Some(exchange), Some(bytes)) => matches!(
+        (Some(exchange), Some(bytes)) if tokio::time::Instant::now() < deadline => matches!(
             tokio::time::timeout_at(
                 deadline,
                 maknae_proto::write_frame(stream, maknae_proto::FrameClass::Attempt, &bytes)
@@ -1781,6 +1784,7 @@ mod tests {
             Arc::new(crate::conversation::mem_store::MemStore::default()),
             &Stamp::Client,
             Arc::new(SensitiveList::empty()),
+            tokio::time::Instant::now(),
         );
         let second_emit = Arc::new(Recorder::default());
         let second = async {
@@ -1823,6 +1827,7 @@ mod tests {
                     Arc::new(crate::conversation::mem_store::MemStore::default()),
                     &Stamp::Client,
                     Arc::new(SensitiveList::empty()),
+                    tokio::time::Instant::now(),
                 )
                 .await
             );
@@ -1884,6 +1889,7 @@ mod tests {
                     Arc::new(crate::conversation::mem_store::MemStore::default()),
                     &Stamp::Client,
                     Arc::new(SensitiveList::empty()),
+                    tokio::time::Instant::now(),
                 )
                 .await
             );
@@ -1922,6 +1928,7 @@ mod tests {
                 Arc::new(crate::conversation::mem_store::MemStore::default()),
                 &Stamp::Client,
                 Arc::new(SensitiveList::empty()),
+                tokio::time::Instant::now(),
             )
             .await
         );
@@ -1960,6 +1967,7 @@ mod tests {
                 Arc::new(crate::conversation::mem_store::MemStore::default()),
                 &Stamp::Client,
                 Arc::new(SensitiveList::empty()),
+                tokio::time::Instant::now(),
             )
             .await
         );
@@ -1998,6 +2006,7 @@ mod tests {
             Arc::new(crate::conversation::mem_store::MemStore::default()),
             &Stamp::Client,
             Arc::new(SensitiveList::empty()),
+            tokio::time::Instant::now(),
         )
         .await;
         assert!(emit
@@ -2035,6 +2044,7 @@ mod tests {
                 Arc::new(crate::conversation::mem_store::MemStore::default()),
                 &Stamp::Client,
                 Arc::new(SensitiveList::empty()),
+                tokio::time::Instant::now(),
             )
             .await
         );
@@ -2067,6 +2077,7 @@ mod tests {
                 Arc::new(crate::conversation::mem_store::MemStore::default()),
                 &Stamp::Client,
                 Arc::new(SensitiveList::empty()),
+                tokio::time::Instant::now(),
             )
             .await
         );
@@ -2492,6 +2503,7 @@ mod tests {
                 Arc::new(crate::conversation::mem_store::MemStore::default()),
                 &Stamp::Client,
                 Arc::new(sensitive),
+                tokio::time::Instant::now(),
             )
             .await
         );
@@ -2938,6 +2950,7 @@ mod tests {
                     Arc::new(crate::conversation::mem_store::MemStore::default()),
                     &Stamp::Client,
                     Arc::new(sensitive),
+                    tokio::time::Instant::now(),
                 )
                 .await
             );
@@ -3496,6 +3509,141 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(400));
             }
             self.pdp.decide_cited_all(requests)
+        }
+    }
+    struct SlowDirectory<P> {
+        pdp: P,
+        directory: String,
+    }
+    impl<P: Authorizer> Authorizer for SlowDirectory<P> {
+        fn decide(&self, request: &maknae_security::Request) -> maknae_security::Verdict {
+            self.decide_cited(request).verdict
+        }
+        fn decide_reporting_role(
+            &self,
+            request: &maknae_security::Request,
+        ) -> (maknae_security::Verdict, Option<&'static str>) {
+            self.decide_cited(request).into()
+        }
+        fn decide_cited(&self, request: &maknae_security::Request) -> maknae_security::Decided {
+            self.decide_cited_all(std::slice::from_ref(request))
+                .pop()
+                .unwrap()
+        }
+        fn decide_cited_all(
+            &self,
+            requests: &[maknae_security::Request],
+        ) -> Vec<maknae_security::Decided> {
+            if requests
+                .iter()
+                .any(|r| r.resource.0.get("path") == Some(&AttrValue::Str(self.directory.clone())))
+            {
+                std::thread::sleep(Duration::from_millis(400));
+            }
+            self.pdp.decide_cited_all(requests)
+        }
+    }
+    #[tokio::test]
+    async fn a_listing_whose_deadline_passes_before_its_grant_releases_nothing() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let dir = fx.root.join("slow-dir-161");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("arrival-161"), b"x").unwrap();
+        let emit = Arc::new(Recorder::default());
+        let frames = list_on_with(
+            &fx,
+            SlowDirectory {
+                pdp: fixture_pdp(&fx),
+                directory: dir.to_str().unwrap().into(),
+            },
+            list_verb(&dir, None),
+            maknae_io::open_directory_for_delegation(&dir).ok(),
+            SensitiveList::empty(),
+            emit.clone(),
+            AttemptCaps::default(),
+            TransportConfig {
+                read_timeout_ms: 300,
+                ..maknae_config::transport_from_section(None).unwrap()
+            },
+            |g| whole_listing(&grant_path(g)),
+        )
+        .await;
+        assert!(
+            !frames
+                .iter()
+                .any(|f| f.windows(11).any(|w| w == b"arrival-161")),
+            "the deadline runs from the request's arrival"
+        );
+        let trail = emit.0.lock().unwrap().clone();
+        assert!(trail
+            .iter()
+            .all(|r| !(r.outcome.result == "permit" && r.outcome.reason.contains("released"))));
+    }
+    #[tokio::test]
+    async fn a_stat_or_read_decided_after_the_arrival_deadline_is_never_answered_or_granted() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let file = fx.root.join("arrival-161.txt");
+        std::fs::write(&file, b"arrival-content-161").unwrap();
+        let cfg = TransportConfig {
+            read_timeout_ms: 300,
+            ..maknae_config::transport_from_section(None).unwrap()
+        };
+        for (verb, fd) in [
+            (stat(&file), maknae_io::open_path_for_stat(&file).unwrap()),
+            (
+                Verb::Read {
+                    path: file.to_str().unwrap().into(),
+                    conversation: None,
+                    page: None,
+                },
+                maknae_io::open_path_for_delegation(&file).unwrap(),
+            ),
+        ] {
+            let fds = maknae_io::DelegatedFds::new(1);
+            fds.push(fd);
+            let emit = Arc::new(Recorder::default());
+            let (mut client, mut server) = tokio::io::duplex(1 << 16);
+            handle(
+                &mut server,
+                &verb,
+                fx.principal.uid,
+                Lane::Local,
+                &fds,
+                Arc::new(SlowDirectory {
+                    pdp: fixture_pdp(&fx),
+                    directory: file.to_str().unwrap().into(),
+                }),
+                emit.clone(),
+                Ok(fx.root.clone()),
+                &cfg,
+                &Seq::new(),
+                record(),
+                Duration::from_secs(10),
+                AttemptCaps::default(),
+                "US",
+                Arc::new(crate::conversation::mem_store::MemStore::default()),
+                &Stamp::Client,
+                Arc::new(SensitiveList::empty()),
+                tokio::time::Instant::now(),
+            )
+            .await;
+            drop(server);
+            let frame = maknae_proto::read_frame_of_class(
+                &mut client,
+                maknae_proto::FrameClass::Attempt,
+                &caps(),
+            )
+            .await;
+            assert!(frame.is_err(), "{verb:?}: nothing after the deadline");
+            let last = emit.0.lock().unwrap().last().cloned().unwrap();
+            assert_eq!(
+                last.mutation.map(|m| m.status),
+                Some(MutationStatus::Incomplete),
+                "{verb:?}: {}",
+                last.outcome.reason
+            );
         }
     }
     #[tokio::test]
