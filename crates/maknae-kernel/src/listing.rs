@@ -264,6 +264,7 @@ pub(crate) async fn run<S, E, P>(
     decider: Arc<Decider<P>>,
     authz_timeout: Duration,
     deadline: tokio::time::Instant,
+    mut permit: tokio::sync::OwnedSemaphorePermit,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
     E: AuditEmit,
@@ -326,16 +327,28 @@ pub(crate) async fn run<S, E, P>(
             .await;
             return;
         };
+        let Some(claim) = crate::mutation::mutating().try_claim(decider.uid) else {
+            incomplete(
+                cfg,
+                emit,
+                &intent,
+                seq,
+                crate::mutation::busy_reason(crate::uid_gate::Busy::Requester),
+            )
+            .await;
+            return;
+        };
         let deciding = Arc::clone(&decider);
         let decided = tokio::time::timeout(
             authz_timeout,
             tokio::task::spawn_blocking(move || {
+                let _claim = claim;
                 let end = lister.take(&chunk, |path| deciding.permits(path));
-                (lister, end)
+                (lister, end, permit)
             }),
         )
         .await;
-        let Ok(Ok((back, end))) = decided else {
+        let Ok(Ok((back, end, held))) = decided else {
             incomplete(
                 cfg,
                 emit,
@@ -347,6 +360,7 @@ pub(crate) async fn run<S, E, P>(
             return;
         };
         lister = back;
+        permit = held;
         match end {
             Some(end) => break end,
             None => {

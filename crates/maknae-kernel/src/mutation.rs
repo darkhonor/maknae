@@ -44,11 +44,11 @@ const MAX_WORKERS: usize = 16;
 fn capacity() -> Arc<Semaphore> {
     Arc::clone(CAPACITY.get_or_init(|| Arc::new(Semaphore::new(MAX_WORKERS))))
 }
-fn mutating() -> &'static UidGate {
+pub(crate) fn mutating() -> &'static UidGate {
     MUTATING.get_or_init(UidGate::default)
 }
 
-fn busy_reason(busy: Busy) -> &'static str {
+pub(crate) fn busy_reason(busy: Busy) -> &'static str {
     match busy {
         Busy::Requester => "mutation worker budget exhausted for this requester",
         Busy::Global => "mutation worker budget exhausted",
@@ -1066,6 +1066,7 @@ where
                     Arc::new(decider),
                     authz_timeout,
                     arrived + Duration::from_millis(cfg.read_timeout_ms),
+                    permit,
                 )
                 .await;
             }
@@ -1075,7 +1076,6 @@ where
         }
     }
     drop(prepared._evidence);
-    drop(permit);
     true
 }
 
@@ -3677,6 +3677,131 @@ mod tests {
                 last.outcome.reason
             );
         }
+    }
+    struct GatedEntries<P> {
+        pdp: P,
+        directory: String,
+        gate: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    }
+    impl<P: Authorizer> Authorizer for GatedEntries<P> {
+        fn decide(&self, request: &maknae_security::Request) -> maknae_security::Verdict {
+            self.decide_cited(request).verdict
+        }
+        fn decide_reporting_role(
+            &self,
+            request: &maknae_security::Request,
+        ) -> (maknae_security::Verdict, Option<&'static str>) {
+            self.decide_cited(request).into()
+        }
+        fn decide_cited(&self, request: &maknae_security::Request) -> maknae_security::Decided {
+            self.decide_cited_all(std::slice::from_ref(request))
+                .pop()
+                .unwrap()
+        }
+        fn decide_cited_all(
+            &self,
+            requests: &[maknae_security::Request],
+        ) -> Vec<maknae_security::Decided> {
+            if requests
+                .iter()
+                .any(|r| r.resource.0.get("path") != Some(&AttrValue::Str(self.directory.clone())))
+            {
+                let (lock, wake) = &*self.gate;
+                let mut released = lock.lock().unwrap();
+                while !*released {
+                    released = wake.wait(released).unwrap();
+                }
+            }
+            self.pdp.decide_cited_all(requests)
+        }
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_listing_decision_that_outlives_its_timeout_holds_its_permit_and_claim_until_it_exits(
+    ) {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let dir = fx.root.join("outlived-161");
+        std::fs::create_dir(&dir).unwrap();
+        let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let release = Release(Arc::clone(&gate));
+        let free = capacity().available_permits();
+        let cfg = maknae_config::transport_from_section(None).unwrap();
+        let fds = maknae_io::DelegatedFds::new(1);
+        fds.push(maknae_io::open_directory_for_delegation(&dir).unwrap());
+        let (mut client, mut server) = tokio::io::duplex(1 << 16);
+        let verb = list_verb(&dir, None);
+        let kernel = async {
+            handle(
+                &mut server,
+                &verb,
+                fx.principal.uid,
+                Lane::Local,
+                &fds,
+                Arc::new(GatedEntries {
+                    pdp: fixture_pdp(&fx),
+                    directory: dir.to_str().unwrap().into(),
+                    gate: Arc::clone(&gate),
+                }),
+                Arc::new(Recorder::default()),
+                Ok(fx.root.clone()),
+                &cfg,
+                &Seq::new(),
+                record(),
+                Duration::from_millis(300),
+                AttemptCaps::default(),
+                "US",
+                Arc::new(crate::conversation::mem_store::MemStore::default()),
+                &Stamp::Client,
+                Arc::new(SensitiveList::empty()),
+                tokio::time::Instant::now(),
+            )
+            .await;
+            drop(server);
+        };
+        let subject = async {
+            maknae_proto::read_frame_of_class(
+                &mut client,
+                maknae_proto::FrameClass::Attempt,
+                &caps(),
+            )
+            .await
+            .expect("the grant");
+            let chunk = named_chunks(&["held-161".to_string()], 1).remove(0);
+            maknae_proto::write_frame(
+                &mut client,
+                maknae_proto::FrameClass::Attempt,
+                &maknae_proto::encode_list_chunk(&chunk).unwrap(),
+            )
+            .await
+            .unwrap();
+            let _ = maknae_proto::read_frame_of_class(
+                &mut client,
+                maknae_proto::FrameClass::Attempt,
+                &caps(),
+            )
+            .await;
+        };
+        tokio::join!(kernel, subject);
+        assert_eq!(
+            capacity().available_permits(),
+            free - 1,
+            "the timed-out worker still holds its capacity permit"
+        );
+        assert!(
+            mutating().try_claim(fx.principal.uid).is_none(),
+            "and its requester's claim"
+        );
+        drop(release);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while capacity().available_permits() < free && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            capacity().available_permits(),
+            free,
+            "returned once it exits"
+        );
+        assert!(mutating().try_claim(fx.principal.uid).is_some());
     }
     #[tokio::test]
     async fn a_page_decided_after_its_deadline_is_refused_and_never_recorded_as_released() {
