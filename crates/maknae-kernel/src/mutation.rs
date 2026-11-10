@@ -571,6 +571,7 @@ fn mutation_meta(
         stopped_at: None,
         label: None,
         requested_page: None,
+        requested_after: None,
     }
 }
 pub(crate) fn object_label(
@@ -591,6 +592,7 @@ fn label_audit(label: &maknae_proto::ObjectLabel) -> maknae_audit_append::LabelA
         categories: Vec::new(),
     }
 }
+#[allow(clippy::too_many_arguments)]
 async fn commit_intent<E: AuditEmit>(
     emit: &E,
     mut record: AuditRecord,
@@ -599,6 +601,7 @@ async fn commit_intent<E: AuditEmit>(
     paths: Vec<String>,
     label: &maknae_proto::ObjectLabel,
     requested: Option<maknae_proto::PageRequest>,
+    requested_after: Option<String>,
 ) -> Result<DurableIntent, ()> {
     record.outcome.result = "permit".into();
     record.outcome.reason = "authorized; intent alone does not establish execution".into();
@@ -625,6 +628,7 @@ async fn commit_intent<E: AuditEmit>(
         limit_lines: p.limit_lines,
         column: p.column,
     });
+    meta.requested_after = requested_after;
     record.mutation = Some(meta);
     emit.emit_within(&record, AUDIT_APPEND_TIMEOUT)
         .await
@@ -1022,6 +1026,7 @@ where
             prepared.paths,
             &label,
             requested,
+            after.clone(),
         ),
     )
     .await
@@ -1589,6 +1594,7 @@ mod tests {
                 FsOperation::Mkdir,
                 Vec::new(),
                 &label,
+                None,
                 None,
             ),
         )
@@ -3134,6 +3140,11 @@ mod tests {
             Some(MutationOperation::Read)
         );
         assert_eq!(intent.object.as_deref(), dir.to_str());
+        assert_eq!(
+            intent.mutation.as_ref().unwrap().requested_after.as_deref(),
+            Some("a"),
+            "the cursor is recorded on the intent"
+        );
         assert_eq!(
             done.mutation.as_ref().unwrap().intent_seq,
             intent.seq,

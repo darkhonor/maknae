@@ -10,6 +10,8 @@ pub const MAX_MUTATION_PATH_BYTES: usize = 4096;
 pub const LIST_RELEASE_MAX: usize = 1024;
 /// Names one `fs.list` call receives, those skipped by its cursor included (#161 M14).
 pub const LIST_RECEIVE_MAX: usize = 65_536;
+/// The longest `fs.list` cursor, in bytes.
+pub const LIST_CURSOR_MAX_BYTES: usize = 1024;
 
 /// One directory entry by its bare name, never a path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

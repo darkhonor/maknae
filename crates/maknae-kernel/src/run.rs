@@ -1181,7 +1181,11 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         }
         Verb::FsList {
             after: Some(after), ..
-        } if !crate::mutation::normal(after) => Some(("list", "cursor not acceptable".to_string())),
+        } if !crate::mutation::normal(after)
+            || after.len() > maknae_proto::LIST_CURSOR_MAX_BYTES =>
+        {
+            Some(("list", "cursor not acceptable".to_string()))
+        }
         Verb::Read { page: Some(p), .. } if !maknae_proto::page_request_is_acceptable(p) => {
             Some(("read", "page request not acceptable".to_string()))
         }

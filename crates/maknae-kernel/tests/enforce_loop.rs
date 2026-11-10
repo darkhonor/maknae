@@ -878,6 +878,13 @@ async fn a_listing_is_granted_on_the_delegated_directory_and_its_operands_are_pr
             list(Some(".."), None),
             "list fails operand pre-gate: cursor not acceptable",
         ),
+        (
+            list(
+                Some(&"c".repeat(maknae_proto::LIST_CURSOR_MAX_BYTES + 1)),
+                None,
+            ),
+            "list fails operand pre-gate: cursor not acceptable",
+        ),
     ] {
         let emit = RecEmit::new();
         let frame = drive(

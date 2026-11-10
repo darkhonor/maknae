@@ -203,6 +203,9 @@ fn checked_cursor(after: Option<String>) -> Result<Option<String>, RouteError> {
         Some(a) if a.is_empty() || a == "." || a == ".." || a.contains(['/', '\0']) => Err(
             RouteError::BadArguments("after must be one entry name from a previous page".into()),
         ),
+        Some(a) if a.len() > maknae_proto::LIST_CURSOR_MAX_BYTES => Err(RouteError::BadArguments(
+            "after must be at most 1024 bytes; use a name from a previous page".into(),
+        )),
         other => Ok(other),
     }
 }
@@ -803,6 +806,12 @@ mod tests {
                 "{good:?}"
             );
         }
+        let longest = "c".repeat(maknae_proto::LIST_CURSOR_MAX_BYTES);
+        assert!(matches!(after(&longest), Ok(ToolRequest::List { .. })));
+        assert!(
+            matches!(after(&format!("{longest}c")), Err(RouteError::BadArguments(m)) if m == "after must be at most 1024 bytes; use a name from a previous page"),
+            "an over-long cursor is a fixable tool error"
+        );
     }
 
     #[test]
