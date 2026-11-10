@@ -664,11 +664,22 @@ async fn disclose<S: AsyncWrite + Unpin, E: AuditEmit>(
     cfg: &TransportConfig,
     emit: &E,
     mut record: AuditRecord,
+    label: &maknae_proto::ObjectLabel,
     answer: Payload,
 ) -> Option<AuditRecord> {
     record.outcome.result = "permit".into();
     record.outcome.reason = "authorized; metadata released".into();
     record.outcome.posture = "authorized".into();
+    let mut meta = mutation_meta(
+        record.seq,
+        MutationPhase::Intent,
+        MutationOrigin::KernelObserved,
+        MutationStatus::IntentOnly,
+    );
+    meta.operation = Some(MutationOperation::Read);
+    meta.authorized_paths = record.object.iter().cloned().collect();
+    meta.label = Some(label_audit(label));
+    record.mutation = Some(meta);
     emit.emit_within(&record, AUDIT_APPEND_TIMEOUT).await.ok()?;
     send(
         stream,
@@ -866,7 +877,7 @@ where
                 kind: stat_kind(meta.kind),
             };
             if let (Some(recorded), Some(why)) = (
-                disclose(stream, cfg, &*emit, record, answer).await,
+                disclose(stream, cfg, &*emit, record, &label, answer).await,
                 touch_failure,
             ) {
                 untouched(&*emit, seq, &recorded, &why).await;
@@ -1340,6 +1351,18 @@ mod tests {
         assert_eq!(std::fs::read(target).unwrap(), b"sentinel");
     }
     fn fixture_pdp(fx: &Fixture) -> crate::Composition<maknae_authz_basic::HermeticAuthorizer> {
+        let us = &maknae_config::BasicPolicy;
+        fixture_pdp_with(
+            fx,
+            "schema_version: 1\nsensitive: []\n",
+            crate::CeilingAuthorizer::new(maknae_config::Ceiling::baseline_for(us), us),
+        )
+    }
+    fn fixture_pdp_with(
+        fx: &Fixture,
+        sensitive: &str,
+        ceiling: crate::CeilingAuthorizer,
+    ) -> crate::Composition<maknae_authz_basic::HermeticAuthorizer> {
         let paths = maknae_authz_basic::PolicyPaths::in_dir(&fx.root);
         let name = nix::unistd::User::from_uid(nix::unistd::geteuid())
             .expect("NSS")
@@ -1360,7 +1383,7 @@ mod tests {
             std::fs::write(path, body).unwrap();
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640)).unwrap();
         }
-        crate::test_fixtures::write_empty_sensitive(&fx.root);
+        crate::test_fixtures::write_sensitive(&fx.root, sensitive);
         let baseline = maknae_authz_basic::HermeticAuthorizer::new(
             paths,
             fx.principal.clone(),
@@ -1374,11 +1397,7 @@ mod tests {
             maknae_crypto::sha256,
         )
         .unwrap();
-        let us = &maknae_config::BasicPolicy;
-        crate::Composition::new(
-            baseline,
-            crate::CeilingAuthorizer::new(maknae_config::Ceiling::baseline_for(us), us),
-        )
+        crate::Composition::new(baseline, ceiling)
     }
     fn record() -> AuditRecord {
         serde_json::from_value(serde_json::json!({
@@ -1457,6 +1476,12 @@ mod tests {
             "a refusal without its record answers nothing"
         );
     }
+    fn label161() -> maknae_proto::ObjectLabel {
+        maknae_proto::ObjectLabel {
+            level: "UNCLASSIFIED".into(),
+            categories: Vec::new(),
+        }
+    }
     #[tokio::test(start_paused = true)]
     async fn metadata_whose_permit_is_not_recorded_is_never_disclosed() {
         let answer = Payload::Stat {
@@ -1472,6 +1497,7 @@ mod tests {
                 &TransportConfig::default(),
                 &Stall,
                 record(),
+                &label161(),
                 answer.clone(),
             ),
         )
@@ -1487,6 +1513,7 @@ mod tests {
             &TransportConfig::default(),
             &emit,
             record(),
+            &label161(),
             answer.clone(),
         )
         .await;
@@ -2380,6 +2407,22 @@ mod tests {
         let last = records.last().expect("the permit is recorded");
         assert_eq!(last.outcome.result, "permit");
         assert_eq!(last.object.as_deref(), file.to_str());
+        let meta = last
+            .mutation
+            .as_ref()
+            .expect("the permit carries its label");
+        assert_eq!(
+            meta.label,
+            Some(maknae_audit_append::LabelAudit {
+                level: "UNCLASSIFIED".into(),
+                categories: Vec::new(),
+            })
+        );
+        assert_eq!(meta.operation, Some(MutationOperation::Read));
+        assert_eq!(
+            meta.authorized_paths,
+            vec![file.to_str().unwrap().to_string()]
+        );
     }
     #[tokio::test]
     async fn stat_of_a_symlink_reports_the_link() {
@@ -2450,6 +2493,26 @@ mod tests {
         );
     }
     #[tokio::test]
+    async fn stat_of_an_unlinked_object_is_refused_uniformly_as_a_changed_path() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let file = fx.root.join("stat-161-unlinked");
+        std::fs::write(&file, b"x").unwrap();
+        let held = maknae_io::open_path_for_stat(&file).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        let (frame, trail) = stat_answer_on(
+            &fx,
+            fixture_pdp(&fx),
+            &file,
+            Some(held),
+            SensitiveList::empty(),
+        )
+        .await;
+        assert_eq!(frame, uniform_refusal());
+        let reason = &trail.last().unwrap().outcome.reason;
+        assert!(reason.contains("mutation path changed"), "{reason}");
+    }
+    #[tokio::test]
     async fn stat_of_missing_denied_and_os_refused_render_alike() {
         let _turn = EUID_TURN.lock().await;
         let fx = Fixture::new();
@@ -2461,6 +2524,9 @@ mod tests {
         std::fs::write(&inside, b"x").unwrap();
         std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
         let os_refused = if nix::unistd::geteuid().is_root() {
+            eprintln!(
+                "SKIP stat_of_missing_denied_and_os_refused_render_alike: the os-refused case needs a non-root euid"
+            );
             None
         } else {
             assert!(maknae_io::open_path_for_stat(&inside).is_err());
@@ -2488,7 +2554,58 @@ mod tests {
         if let Some((frame, _)) = &os_refused {
             assert_eq!(frame, &missing_frame);
         }
+        use maknae_config::ClassificationPolicy;
+        let aus = &maknae_classification_aus::AusPspf;
+        let mut foreign = maknae_config::Ceiling::baseline_for(aus);
+        foreign.classification = aus.level_of("TOP SECRET").unwrap();
+        let ceilinged = fx.root.join("stat-161-ceilinged");
+        std::fs::write(&ceilinged, b"x").unwrap();
+        let (ceiling_frame, ceiling_trail) = stat_answer_on(
+            &fx,
+            fixture_pdp_with(
+                &fx,
+                "schema_version: 1\nsensitive: []\n",
+                crate::CeilingAuthorizer::new(foreign, &maknae_config::BasicPolicy),
+            ),
+            &ceilinged,
+            maknae_io::open_path_for_stat(&ceilinged).ok(),
+            SensitiveList::empty(),
+        )
+        .await;
+        std::fs::create_dir(fx.root.join(".ssh")).unwrap();
+        std::fs::write(fx.root.join(".ssh/id_rsa"), b"x").unwrap();
+        std::os::unix::fs::symlink(fx.root.join(".ssh"), fx.root.join("proj")).unwrap();
+        let aliased = fx.root.join("proj/id_rsa");
+        let host = "schema_version: 1\nsensitive:\n  - \"~/.ssh/**\"\n";
+        let (alias_frame, alias_trail) = stat_answer_on(
+            &fx,
+            fixture_pdp_with(
+                &fx,
+                host,
+                crate::CeilingAuthorizer::new(
+                    maknae_config::Ceiling::baseline_for(&maknae_config::BasicPolicy),
+                    &maknae_config::BasicPolicy,
+                ),
+            ),
+            &aliased,
+            maknae_io::open_path_for_stat(&aliased).ok(),
+            SensitiveList::from_entries(&["~/.ssh/**".to_string()]).unwrap(),
+        )
+        .await;
+        assert_eq!(ceiling_frame, missing_frame);
+        assert_eq!(alias_frame, missing_frame);
         let reason = |t: &[AuditRecord]| t.last().unwrap().outcome.reason.clone();
+        assert!(
+            reason(&ceiling_trail).contains("not a level of the US system"),
+            "{}",
+            reason(&ceiling_trail)
+        );
+        assert_eq!(reason(&alias_trail), "sensitive: host ~/.ssh/**");
+        assert_eq!(
+            alias_trail.last().unwrap().object.as_deref(),
+            fx.root.join(".ssh/id_rsa").to_str(),
+            "refused on the kernel-reported path"
+        );
         assert_eq!(reason(&missing_trail), "stat descriptor missing");
         assert!(
             reason(&denied_trail).contains("Read(~/stat-161-denied)"),

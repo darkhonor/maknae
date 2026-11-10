@@ -222,6 +222,9 @@ pub fn verify_stat_delegated(fd: BorrowedFd<'_>) -> Result<Delegated, IoError> {
     crate::mutation::checked_path(&path)?;
     let st = crate::syscall::fstat(&fd)
         .map_err(|e| crate::checks::map_errno_no_disambiguation(e, &path))?;
+    if crate::syscall::nlink_count(st.st_nlink) == 0 {
+        return Err(IoError::MutationPathChanged { path });
+    }
     let meta = DelegatedMeta::of(&st);
     let target = TargetRequired {
         owner: None,
@@ -541,6 +544,28 @@ mod tests {
         match verify_stat_delegated(fd.as_fd()) {
             Err(IoError::MultiplyLinked { path, nlink }) => assert_eq!((path, nlink), (real, 2)),
             other => panic!("a multiply-linked file must be refused: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_stat_of_an_unlinked_object_is_refused_as_a_changed_path() {
+        let (_dir, base) = crate::testutil::outside_any_home();
+        let file = a_file(&base, "gone-file-161", b"x");
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+        let mut held = vec![open_path_for_stat(&file).expect("stat open")];
+        std::fs::remove_file(&file).expect("unlink");
+        #[cfg(target_os = "linux")]
+        {
+            let dir = base.join("gone-dir-161");
+            std::fs::create_dir(&dir).expect("dir");
+            held.push(open_path_for_stat(&dir).expect("stat open"));
+            std::fs::remove_dir(&dir).expect("rmdir");
+        }
+        for fd in &held {
+            match verify_stat_delegated(fd.as_fd()) {
+                Err(IoError::MutationPathChanged { .. }) => {}
+                other => panic!("an unlinked object must be refused as changed: {other:?}"),
+            }
         }
     }
 

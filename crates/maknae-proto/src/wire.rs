@@ -593,8 +593,10 @@ pub enum Verb {
     /// Enumerate directory contents. A disclosure of names, which is a disclosure
     /// even when contents are refused.
     FsList,
-    /// File metadata without content. Discloses existence, size and timestamps —
-    /// enough to confirm a denied object exists.
+    /// File metadata without content, decided as `fs.read` on the kernel-reported path
+    /// of the subject's delegated, unfollowed descriptor (#161). A permit discloses size,
+    /// mtime and kind only; every refusal but `Protected` is the one uniform answer, so a
+    /// denied object reads as a missing one.
     FsStat {
         path: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]

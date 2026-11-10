@@ -1354,10 +1354,7 @@ pub(crate) fn role_terms(
     let unknown = || AuthzBasicError::UnknownActionTerm(p.source());
     let holds = |t: &str| role != role::Role::User || USER_GRANTABLE.contains(&t);
     let terms: Vec<&'static str> = decide::expand(p)
-        .map_err(|e| match e {
-            AuthzBasicError::DecidedAsRead(_) => e,
-            _ => unknown(),
-        })?
+        .map_err(|_| unknown())?
         .into_iter()
         .map(|(t, _)| t)
         .filter(|t| decide::GRANTABLE_ACTIONS.contains(t))
@@ -4422,6 +4419,8 @@ mod tests {
         for (role, entry) in [
             ("admin", "admin.credential.rotate"),
             ("admin", "fs.read"),
+            ("admin", "fs.stat"),
+            ("user", "fs.stat"),
             ("admin", "kernel.contain"),
             ("admin", "fs.*"),
             ("admin", "kernel.*"),
@@ -4718,7 +4717,7 @@ mod tests {
     }
 
     #[test]
-    fn an_authz_yaml_naming_fs_stat_is_refused_as_decided_by_fs_read() {
+    fn a_subjects_list_naming_fs_stat_is_refused_as_decided_by_fs_read() {
         let want = Some(AuthzBasicError::DecidedAsRead("fs.stat".into()));
         for list in ["allow", "deny"] {
             let got = finish_looking_up(
@@ -4734,10 +4733,6 @@ mod tests {
                 },
             );
             assert_eq!(got.err(), want, "subjects {list}");
-            let got = finish(parse_with_roles(&format!(
-                "roles:\n  admin:\n    {list}: [\"fs.stat\"]\n"
-            )));
-            assert_eq!(got.err(), want, "roles {list}");
         }
         let shown = AuthzBasicError::DecidedAsRead("fs.stat".into()).to_string();
         assert!(shown.contains("decided as `fs.read`"), "{shown}");
@@ -7859,6 +7854,55 @@ mod tests {
                     reason:
                         "subject hobi-svc: session.prompt is not in agents.hobi.policy.actions allow"
                             .into()
+                }
+            );
+        }
+
+        #[test]
+        fn an_agent_policy_naming_fs_stat_is_refused_and_its_fs_read_entry_permits_stat() {
+            let policy = |list: &str| {
+                format!(
+                    "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\nactions:\n  {list}\n"
+                )
+            };
+            for list in ["allow: [\"fs.stat\"]", "deny: [\"fs.stat\"]"] {
+                let got = try_source(
+                    super::shipped_denying(),
+                    None,
+                    &[],
+                    load(vec![hobi()], &[("hobi", &policy(list))]),
+                );
+                assert_eq!(
+                    got.err(),
+                    Some(AuthzBasicError::DecidedAsRead("fs.stat".into())),
+                    "{list}"
+                );
+            }
+            let stat = |src: &PolicySource| {
+                let mut r = read(HOBI, "/home/operator/stat-161");
+                r.action = Action("fs.stat".into());
+                auth(src, 501).decide(&agent_channel(r, "hobi"))
+            };
+            let read_only = source(
+                None,
+                &[],
+                load(vec![hobi()], &[("hobi", &policy("allow: [\"fs.read\"]"))]),
+            );
+            assert!(
+                matches!(stat(&read_only), Verdict::Permit { .. }),
+                "{:?}",
+                stat(&read_only)
+            );
+            let no_read = source(
+                None,
+                &[],
+                load(vec![hobi()], &[("hobi", &policy("allow: [\"fs.write\"]"))]),
+            );
+            assert_eq!(
+                stat(&no_read),
+                Verdict::Deny {
+                    reason: "subject hobi-svc: fs.read is not in agents.hobi.policy.actions allow"
+                        .into()
                 }
             );
         }
