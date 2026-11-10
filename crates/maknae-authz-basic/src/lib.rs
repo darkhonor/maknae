@@ -97,6 +97,8 @@ pub enum AuthzBasicError {
     UnknownAction(String),
     /// A `subjects:` list names a `kernel` or `liveness` family or term.
     UngrantableAction(String),
+    /// A list names `fs.stat`, which is decided as `fs.read` (#161 M15).
+    DecidedAsRead(String),
     /// An account lookup for a `subjects:` name failed.
     SubjectLookup(String),
     /// Two `subjects:` names resolve to one account.
@@ -152,6 +154,10 @@ impl std::fmt::Display for AuthzBasicError {
             AuthzBasicError::UnknownAction(a) => {
                 write!(f, "authz subjects: `{a}` names no action family or term")
             }
+            AuthzBasicError::DecidedAsRead(a) => write!(
+                f,
+                "authz: `{a}` is decided as `fs.read` (#161 M15) and no list may name it; name `fs.read`"
+            ),
             AuthzBasicError::UngrantableAction(a) => write!(
                 f,
                 "authz subjects: `{a}` is a kernel or liveness action and no list may name it"
@@ -1348,7 +1354,10 @@ pub(crate) fn role_terms(
     let unknown = || AuthzBasicError::UnknownActionTerm(p.source());
     let holds = |t: &str| role != role::Role::User || USER_GRANTABLE.contains(&t);
     let terms: Vec<&'static str> = decide::expand(p)
-        .map_err(|_| unknown())?
+        .map_err(|e| match e {
+            AuthzBasicError::DecidedAsRead(_) => e,
+            _ => unknown(),
+        })?
         .into_iter()
         .map(|(t, _)| t)
         .filter(|t| decide::GRANTABLE_ACTIONS.contains(t))
@@ -2247,7 +2256,7 @@ mod tests {
                 .collect()
         }
 
-        const TERMS: [&str; 18] = [
+        const TERMS: [&str; 17] = [
             "admin.status",
             "admin.config.show",
             "admin.subject.list",
@@ -2265,7 +2274,6 @@ mod tests {
             "fs.write",
             "fs.delete",
             "fs.mkdir",
-            "fs.stat",
         ];
 
         /// `subjects:` read from the raw file, without `validate_subjects` or `decide::expand`.
@@ -4548,7 +4556,6 @@ mod tests {
                 ("fs.delete", "fs.*".to_string()),
                 ("fs.mkdir", "fs.*".to_string()),
                 ("fs.read", "fs.*".to_string()),
-                ("fs.stat", "fs.*".to_string()),
                 ("fs.write", "fs.*".to_string()),
                 ("session.new", "session.new".to_string()),
                 ("session.prompt", "session.prompt".to_string()),
@@ -4670,7 +4677,7 @@ mod tests {
             .actions
             .clone()
             .unwrap();
-        assert_eq!(actions.allow.len(), 5);
+        assert_eq!(actions.allow.len(), 4);
         assert_eq!(
             actions.deny,
             [
@@ -4678,7 +4685,6 @@ mod tests {
                 ("fs.delete", "fs.*".to_string()),
                 ("fs.mkdir", "fs.*".to_string()),
                 ("fs.read", "fs.*".to_string()),
-                ("fs.stat", "fs.*".to_string()),
                 ("fs.write", "fs.*".to_string()),
             ]
             .into_iter()
@@ -4709,6 +4715,32 @@ mod tests {
                 assert_eq!(got.err(), Some(want.clone()), "{entry} {lookup:?}");
             }
         }
+    }
+
+    #[test]
+    fn an_authz_yaml_naming_fs_stat_is_refused_as_decided_by_fs_read() {
+        let want = Some(AuthzBasicError::DecidedAsRead("fs.stat".into()));
+        for list in ["allow", "deny"] {
+            let got = finish_looking_up(
+                with_subjects(&format!(
+                    "  zed:\n    actions:\n      {list}: [\"fs.stat\"]\n"
+                )),
+                |n| {
+                    if n == "zed" {
+                        Lookup::Found(7001)
+                    } else {
+                        Lookup::Found(0)
+                    }
+                },
+            );
+            assert_eq!(got.err(), want, "subjects {list}");
+            let got = finish(parse_with_roles(&format!(
+                "roles:\n  admin:\n    {list}: [\"fs.stat\"]\n"
+            )));
+            assert_eq!(got.err(), want, "roles {list}");
+        }
+        let shown = AuthzBasicError::DecidedAsRead("fs.stat".into()).to_string();
+        assert!(shown.contains("decided as `fs.read`"), "{shown}");
     }
 
     #[test]
