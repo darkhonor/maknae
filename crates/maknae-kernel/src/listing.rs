@@ -80,10 +80,30 @@ pub(crate) struct Lister {
     withheld: usize,
     dropped: u64,
     permitted: Vec<ListEntry>,
+    budget: usize,
+    bytes: usize,
+    full: bool,
+}
+
+/// Room left in a page's response for its envelope, beyond its entries.
+const PAGE_HEADROOM: usize = 256;
+
+/// One entry's CBOR size as a `ListGrant` element: a two-key map, the keys, the name
+/// with its text header, and the bool.
+fn entry_bytes(name: &str) -> usize {
+    let header = match name.len() {
+        0..=23 => 1,
+        24..=255 => 2,
+        256..=65_535 => 3,
+        _ => 5,
+    };
+    11 + header + name.len()
 }
 
 impl Lister {
-    pub(crate) fn new(directory: String, after: Option<String>) -> Self {
+    /// `response_cap` bounds the page's encoded answer: the page closes, truncated, before
+    /// a permitted entry that would not fit.
+    pub(crate) fn new(directory: String, after: Option<String>, response_cap: usize) -> Self {
         Self {
             directory,
             after,
@@ -94,6 +114,9 @@ impl Lister {
             withheld: 0,
             dropped: 0,
             permitted: Vec::new(),
+            budget: response_cap.saturating_sub(PAGE_HEADROOM),
+            bytes: 0,
+            full: false,
         }
     }
 
@@ -129,7 +152,7 @@ impl Lister {
             self.previous = Some(entry.name.clone());
             self.received += 1;
             self.decide(entry, &mut permits);
-            if self.permitted.len() > LIST_RELEASE_MAX {
+            if self.full || self.permitted.len() > LIST_RELEASE_MAX {
                 return Some(End::Truncated);
             }
             if self.received == LIST_RECEIVE_MAX {
@@ -156,7 +179,13 @@ impl Lister {
         if crate::mutation::checked(&path).is_err() {
             self.invalid += 1;
         } else if permits(&path) {
-            self.permitted.push(entry.clone());
+            let size = entry_bytes(&entry.name);
+            if self.bytes + size > self.budget {
+                self.full = true;
+            } else {
+                self.bytes += size;
+                self.permitted.push(entry.clone());
+            }
         } else {
             self.withheld += 1;
         }
@@ -175,7 +204,7 @@ impl Lister {
     }
 
     pub(crate) fn grant(mut self) -> ListGrant {
-        let truncated = self.permitted.len() > LIST_RELEASE_MAX;
+        let truncated = self.full || self.permitted.len() > LIST_RELEASE_MAX;
         self.permitted.truncate(LIST_RELEASE_MAX);
         ListGrant {
             entries: self.permitted,
@@ -411,7 +440,7 @@ mod tests {
 
     #[test]
     fn n_reported_names_produce_n_decisions_up_to_the_stop() {
-        let mut lister = Lister::new("/d161".into(), None);
+        let mut lister = Lister::new("/d161".into(), None, maknae_proto::ATTEMPT_RESPONSE_MAX);
         let mut asked = Vec::new();
         let end = lister.take(&chunk(&["a", "b", "c", "d", "e"], true), |p| {
             asked.push(p.to_owned());
@@ -428,7 +457,7 @@ mod tests {
             "only the permitted subset, in order"
         );
 
-        let mut lister = Lister::new("/".into(), None);
+        let mut lister = Lister::new("/".into(), None, maknae_proto::ATTEMPT_RESPONSE_MAX);
         let mut calls = 0;
         let names = numbered(0, LIST_RELEASE_MAX + 10);
         let end = lister.take(&chunk_of(&names, true), |_| {
@@ -442,7 +471,7 @@ mod tests {
     #[test]
     fn a_1025th_permitted_entry_sets_truncated_and_releases_1024() {
         let names = numbered(0, LIST_RELEASE_MAX + 1);
-        let mut lister = Lister::new("/d".into(), None);
+        let mut lister = Lister::new("/d".into(), None, maknae_proto::ATTEMPT_RESPONSE_MAX);
         assert_eq!(
             lister.take(&chunk_of(&names, true), |_| true),
             Some(End::Truncated)
@@ -456,7 +485,7 @@ mod tests {
         );
 
         let names = numbered(0, LIST_RELEASE_MAX);
-        let mut lister = Lister::new("/d".into(), None);
+        let mut lister = Lister::new("/d".into(), None, maknae_proto::ATTEMPT_RESPONSE_MAX);
         assert_eq!(
             lister.take(&chunk_of(&names, true), |_| true),
             Some(End::Complete)
@@ -467,7 +496,7 @@ mod tests {
 
         let mut names = numbered(0, LIST_RELEASE_MAX);
         names.push("z-denied".into());
-        let mut lister = Lister::new("/d".into(), None);
+        let mut lister = Lister::new("/d".into(), None, maknae_proto::ATTEMPT_RESPONSE_MAX);
         lister.take(&chunk_of(&names, true), |p| !p.ends_with("z-denied"));
         assert!(
             !lister.grant().truncated,
@@ -476,8 +505,87 @@ mod tests {
     }
 
     #[test]
+    fn a_page_of_long_names_closes_under_the_response_cap_and_the_cursor_continues_it() {
+        let long = "x".repeat(700);
+        let names: Vec<String> = (0..1000).map(|i| format!("{i:04}{long}")).collect();
+        let cap = maknae_proto::ATTEMPT_RESPONSE_MAX;
+        let mut lister = Lister::new("/d".into(), None, cap);
+        assert_eq!(
+            lister.take(&chunk_of(&names, true), |_| true),
+            Some(End::Truncated)
+        );
+        let page = lister.grant();
+        assert!(page.truncated, "the next permitted entry exists");
+        assert!(page.entries.len() < LIST_RELEASE_MAX);
+        let encoded = maknae_proto::encode_response(&Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(Payload::ListGrant(page.clone())),
+        })
+        .unwrap();
+        assert!(encoded.len() <= cap, "{} bytes", encoded.len());
+        let last = page.entries.last().unwrap().name.clone();
+        let mut next = Lister::new("/d".into(), Some(last), cap);
+        next.take(&chunk_of(&names, true), |_| true);
+        assert_eq!(
+            next.grant().entries[0].name,
+            names[page.entries.len()],
+            "the cursor resumes at the entry that did not fit"
+        );
+    }
+
+    #[test]
+    fn an_entrys_size_is_its_exact_cbor_size() {
+        for len in [1, 23, 24, 255, 256, 765, 65_535, 65_536] {
+            let entry = ListEntry {
+                name: "n".repeat(len),
+                dir: true,
+            };
+            let page = |entries: Vec<ListEntry>| {
+                maknae_proto::encode_response(&Response {
+                    protocol_version: PROTOCOL_VERSION,
+                    result: RespResult::Ok(Payload::ListGrant(ListGrant {
+                        entries,
+                        truncated: false,
+                    })),
+                })
+                .unwrap()
+                .len()
+            };
+            assert_eq!(
+                page(vec![entry.clone(), entry.clone()]) - page(vec![entry.clone()]),
+                entry_bytes(&entry.name),
+                "{len}"
+            );
+        }
+        assert!(page_envelope() <= PAGE_HEADROOM);
+    }
+
+    fn page_envelope() -> usize {
+        let entries: Vec<ListEntry> = (0..LIST_RELEASE_MAX + 1)
+            .map(|_| ListEntry {
+                name: "e".into(),
+                dir: false,
+            })
+            .collect();
+        let size = maknae_proto::encode_response(&Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(Payload::ListGrant(ListGrant {
+                entries,
+                truncated: true,
+            })),
+        })
+        .unwrap()
+        .len();
+        size - (LIST_RELEASE_MAX + 1) * entry_bytes("e")
+    }
+
+    #[test]
     fn the_after_cursor_returns_the_next_page() {
-        let mut lister = Lister::new("/d".into(), Some("b".into()));
+        let mut lister = Lister::new(
+            "/d".into(),
+            Some("b".into()),
+            maknae_proto::ATTEMPT_RESPONSE_MAX,
+        );
         let mut asked = Vec::new();
         let end = lister.take(&chunk(&["a", "b", "ba", "c"], true), |p| {
             asked.push(p.to_owned());
@@ -492,7 +600,7 @@ mod tests {
     #[test]
     fn a_65536th_name_received_without_1025_permitted_refuses() {
         let names = numbered(0, LIST_RECEIVE_MAX);
-        let mut lister = Lister::new("/d".into(), None);
+        let mut lister = Lister::new("/d".into(), None, maknae_proto::ATTEMPT_RESPONSE_MAX);
         let mut calls = 0;
         let end = lister.take(&chunk_of(&names[..LIST_RECEIVE_MAX - 1], false), |_| {
             calls += 1;
@@ -511,7 +619,7 @@ mod tests {
             lister.trail()
         );
 
-        let mut lister = Lister::new("/d".into(), None);
+        let mut lister = Lister::new("/d".into(), None, maknae_proto::ATTEMPT_RESPONSE_MAX);
         let mut permitted = names[..LIST_RECEIVE_MAX - LIST_RELEASE_MAX - 1].to_vec();
         permitted.extend(numbered(LIST_RECEIVE_MAX, LIST_RELEASE_MAX + 1));
         let end = lister.take(&chunk_of(&permitted, true), |p| {
@@ -527,7 +635,11 @@ mod tests {
     #[test]
     fn names_skipped_by_after_count_toward_the_bound() {
         let names = numbered(0, LIST_RECEIVE_MAX);
-        let mut lister = Lister::new("/d".into(), Some("z".into()));
+        let mut lister = Lister::new(
+            "/d".into(),
+            Some("z".into()),
+            maknae_proto::ATTEMPT_RESPONSE_MAX,
+        );
         let mut calls = 0;
         let end = lister.take(&chunk_of(&names, true), |_| {
             calls += 1;
@@ -546,7 +658,7 @@ mod tests {
             (chunk(&["a", "c"], false), Some(chunk(&["c"], true))),
             (chunk(&["a"], false), Some(chunk(&["B"], true))),
         ] {
-            let mut lister = Lister::new("/d".into(), None);
+            let mut lister = Lister::new("/d".into(), None, maknae_proto::ATTEMPT_RESPONSE_MAX);
             let end = match lister.take(&first, |_| true) {
                 None => lister.take(&second.clone().unwrap(), |_| true),
                 end => end,
@@ -557,7 +669,7 @@ mod tests {
                 "{first:?} {second:?}"
             );
         }
-        let mut lister = Lister::new("/d".into(), None);
+        let mut lister = Lister::new("/d".into(), None, maknae_proto::ATTEMPT_RESPONSE_MAX);
         assert_eq!(
             lister.take(&chunk(&["B", "a", "b"], true), |_| true),
             Some(End::Complete)
@@ -567,7 +679,7 @@ mod tests {
     #[test]
     fn invalid_names_are_withheld_and_counted_and_an_empty_chunk_before_the_last_refuses() {
         let long = "x".repeat(maknae_proto::MAX_MUTATION_PATH_BYTES);
-        let mut lister = Lister::new("/d".into(), None);
+        let mut lister = Lister::new("/d".into(), None, maknae_proto::ATTEMPT_RESPONSE_MAX);
         let mut asked = Vec::new();
         let end = lister.take(
             &chunk(&["", ".", "..", "a\0", "a/b", "ok", &long], true),
@@ -581,12 +693,12 @@ mod tests {
         assert_eq!(lister.invalid, 6);
         assert_eq!(lister.grant().entries, entries(&["ok"]));
 
-        let mut lister = Lister::new("/d".into(), None);
+        let mut lister = Lister::new("/d".into(), None, maknae_proto::ATTEMPT_RESPONSE_MAX);
         assert_eq!(
             lister.take(&chunk(&[], false), |_| true),
             Some(End::Refused(EMPTY_CHUNK))
         );
-        let mut lister = Lister::new("/d".into(), None);
+        let mut lister = Lister::new("/d".into(), None, maknae_proto::ATTEMPT_RESPONSE_MAX);
         assert_eq!(
             lister.take(&chunk(&[], true), |_| true),
             Some(End::Complete)
@@ -595,7 +707,7 @@ mod tests {
 
     #[test]
     fn a_subject_that_cannot_list_ends_the_listing_as_its_own_refusal() {
-        let mut lister = Lister::new("/d".into(), None);
+        let mut lister = Lister::new("/d".into(), None, maknae_proto::ATTEMPT_RESPONSE_MAX);
         let mut unlisted = chunk(&[], true);
         unlisted.unlisted = true;
         assert_eq!(
@@ -607,7 +719,11 @@ mod tests {
 
     #[test]
     fn the_trail_records_every_count_and_the_subjects_dropped_claim() {
-        let mut lister = Lister::new("/d".into(), Some("a".into()));
+        let mut lister = Lister::new(
+            "/d".into(),
+            Some("a".into()),
+            maknae_proto::ATTEMPT_RESPONSE_MAX,
+        );
         let mut first = chunk(&["a", "b", "c"], false);
         first.dropped = 2;
         assert_eq!(lister.take(&first, |p| p != "/d/c"), None);

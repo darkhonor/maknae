@@ -1156,7 +1156,8 @@ mod tests {
         };
         let list = described("list_directory");
         for promise in [
-            "At most 1024 names per call",
+            "Up to 1024 names per page, fewer when names are long",
+            "up to the 65,536-name bound; a larger directory answers unavailable",
             "each name a JSON string",
             "truncated — continue with after:",
             "`after`",

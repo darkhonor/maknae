@@ -1059,7 +1059,7 @@ where
                     intent,
                     label,
                     seq,
-                    crate::listing::Lister::new(directory, after),
+                    crate::listing::Lister::new(directory, after, caps.response),
                     Arc::new(decider),
                     authz_timeout,
                     arrived + Duration::from_millis(cfg.read_timeout_ms),
