@@ -705,34 +705,31 @@ pub(crate) async fn refuse_with<S: AsyncWrite + Unpin, E: AuditEmit>(
     }
 }
 
-fn stat_record(mut record: AuditRecord, label: &maknae_proto::ObjectLabel) -> AuditRecord {
-    let mut meta = mutation_meta(
-        record.seq,
-        MutationPhase::Intent,
-        MutationOrigin::KernelObserved,
-        MutationStatus::IntentOnly,
-    );
-    meta.operation = Some(MutationOperation::Read);
-    meta.authorized_paths = record.object.iter().cloned().collect();
-    meta.label = Some(label_audit(label));
-    record.mutation = Some(meta);
-    record
+/// How a disclosed answer ended, for its records.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Delivery {
+    Pending,
+    Released,
+    Withheld,
+    Unknown,
 }
 
-/// Records the permit, then answers. An answer too large for `cap` is refused instead, and
-/// one whose write fails is noted, so no permit record stands for an answer never sent.
+/// Answers a permitted request whose intent is durable, and ends that intent with exactly one
+/// Completion. A late or unframeable answer is refused before any write. With `progress`,
+/// what is about to be released is recorded first, and nothing is sent unless it lands.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn disclose<S: AsyncWrite + Unpin, E: AuditEmit>(
     stream: &mut S,
     cfg: &TransportConfig,
     emit: &E,
     seq: &Seq,
-    mut record: AuditRecord,
-    detail: &str,
+    intent: &DurableIntent,
+    account: &(dyn Fn(Delivery) -> String + Sync),
+    progress: bool,
     answer: Payload,
     cap: usize,
     deadline: tokio::time::Instant,
-) -> Option<AuditRecord> {
+) -> bool {
     let encoded = match maknae_proto::encode_response(&Response {
         protocol_version: PROTOCOL_VERSION,
         result: RespResult::Ok(answer),
@@ -747,22 +744,32 @@ pub(crate) async fn disclose<S: AsyncWrite + Unpin, E: AuditEmit>(
     let bytes = match encoded {
         Ok(bytes) => bytes,
         Err(why) => {
-            if let Some(meta) = record.mutation.as_mut() {
-                meta.status = MutationStatus::Incomplete;
-            }
             let refusal = ProtoError {
                 code: ProtoErrCode::Unauthorized,
                 message: why.into(),
             };
-            let reason = format!("{detail}; {why}; withheld");
+            let record = completion(intent, seq.next(), MutationStatus::Incomplete);
+            let reason = format!("{}; {why}", account(Delivery::Withheld));
             refuse_with(stream, cfg, emit, record, reason, refusal).await;
-            return None;
+            return false;
         }
     };
-    record.outcome.result = "permit".into();
-    record.outcome.reason = format!("authorized; {detail} released");
-    record.outcome.posture = "authorized".into();
-    emit.emit_within(&record, AUDIT_APPEND_TIMEOUT).await.ok()?;
+    if progress {
+        let mut record = completion(intent, seq.next(), MutationStatus::ReportedProgress);
+        if let Some(meta) = record.mutation.as_mut() {
+            meta.phase = MutationPhase::Progress;
+            meta.origin = MutationOrigin::ClientReported;
+        }
+        record.outcome.reason = account(Delivery::Pending);
+        if emit
+            .emit_within(&record, AUDIT_APPEND_TIMEOUT)
+            .await
+            .is_err()
+        {
+            incomplete(cfg, emit, intent, seq, &account(Delivery::Withheld)).await;
+            return false;
+        }
+    }
     let written = tokio::time::Instant::now() < deadline
         && matches!(
             tokio::time::timeout_at(
@@ -772,19 +779,28 @@ pub(crate) async fn disclose<S: AsyncWrite + Unpin, E: AuditEmit>(
             .await,
             Ok(Ok(()))
         );
-    if !written {
-        let mut note = record.clone();
-        note.seq = seq.next();
-        if let Some(meta) = note.mutation.as_mut() {
-            meta.status = MutationStatus::Incomplete;
-        }
-        note.outcome.reason = format!("{detail}: answer not delivered");
-        note.outcome.posture = "unavailable".into();
-        if let Err(e) = emit.emit_within(&note, AUDIT_APPEND_TIMEOUT).await {
-            eprintln!("maknaed: AUDIT WRITE FAILED on an undelivered answer: {e}");
-        }
+    let (status, delivery, posture) = if written {
+        (MutationStatus::Applied, Delivery::Released, "authorized")
+    } else {
+        (MutationStatus::Incomplete, Delivery::Unknown, "unavailable")
+    };
+    let mut done = completion(intent, seq.next(), status);
+    done.outcome.reason = account(delivery);
+    done.outcome.posture = posture.into();
+    if let Err(e) = emit.emit_within(&done, AUDIT_APPEND_TIMEOUT).await {
+        eprintln!("maknaed: AUDIT WRITE FAILED on a disclosure's completion: {e}");
     }
-    Some(record)
+    written
+}
+
+fn stat_account(delivery: Delivery) -> String {
+    match delivery {
+        Delivery::Pending => "metadata",
+        Delivery::Released => "metadata released",
+        Delivery::Withheld => "metadata withheld",
+        Delivery::Unknown => "metadata: delivery unknown",
+    }
+    .into()
 }
 async fn untouched<E: AuditEmit>(emit: &E, seq: &Seq, base: &AuditRecord, why: &str) {
     let mut note = base.clone();
@@ -975,37 +991,16 @@ where
     enum Next {
         Attempt(MutationScope),
         List,
+        Stat(Payload),
     }
     let next = match prepared.granted {
         Granted::Attempt(scope) => Next::Attempt(scope),
         Granted::List => Next::List,
-        Granted::Stat(meta) => {
-            let answer = Payload::Stat {
-                size: meta.size,
-                mtime_secs: mtime_secs(meta.mtime),
-                kind: stat_kind(meta.kind),
-            };
-            if let (Some(recorded), Some(why)) = (
-                disclose(
-                    stream,
-                    cfg,
-                    &*emit,
-                    seq,
-                    stat_record(record, &label),
-                    "metadata",
-                    answer,
-                    caps.response,
-                    arrived + Duration::from_millis(cfg.read_timeout_ms),
-                )
-                .await,
-                touch_failure,
-            ) {
-                untouched(&*emit, seq, &recorded, &why).await;
-            }
-            drop(prepared._evidence);
-            drop(permit);
-            return true;
-        }
+        Granted::Stat(meta) => Next::Stat(Payload::Stat {
+            size: meta.size,
+            mtime_secs: mtime_secs(meta.mtime),
+            kind: stat_kind(meta.kind),
+        }),
     };
     let (requested, read_page, length, after) = match verb {
         Verb::Read { page, .. } => (
@@ -1067,6 +1062,21 @@ where
                     authz_timeout,
                     arrived + Duration::from_millis(cfg.read_timeout_ms),
                     permit,
+                )
+                .await;
+            }
+            (Next::Stat(answer), _, _) => {
+                disclose(
+                    stream,
+                    cfg,
+                    &*emit,
+                    seq,
+                    &intent,
+                    &stat_account,
+                    false,
+                    answer,
+                    caps.response,
+                    arrived + Duration::from_millis(cfg.read_timeout_ms),
                 )
                 .await;
             }
@@ -1630,14 +1640,19 @@ mod tests {
             "a refusal without its record answers nothing"
         );
     }
-    fn label161() -> maknae_proto::ObjectLabel {
-        maknae_proto::ObjectLabel {
-            level: "UNCLASSIFIED".into(),
-            categories: Vec::new(),
-        }
+    fn test_intent() -> DurableIntent {
+        let mut record = record();
+        record.outcome.result = "permit".into();
+        record.mutation = Some(mutation_meta(
+            record.seq,
+            MutationPhase::Intent,
+            MutationOrigin::KernelObserved,
+            MutationStatus::IntentOnly,
+        ));
+        DurableIntent { record }
     }
     #[tokio::test(start_paused = true)]
-    async fn metadata_whose_permit_is_not_recorded_is_never_disclosed() {
+    async fn an_answer_whose_progress_is_not_recorded_is_never_disclosed() {
         let answer = Payload::Stat {
             size: 1,
             mtime_secs: 1,
@@ -1651,48 +1666,53 @@ mod tests {
                 &TransportConfig::default(),
                 &Stall,
                 &Seq::new(),
-                stat_record(record(), &label161()),
-                "metadata",
+                &test_intent(),
+                &stat_account,
+                true,
                 answer.clone(),
                 maknae_proto::ATTEMPT_RESPONSE_MAX,
                 far_deadline(),
             ),
         )
         .await;
-        assert!(
-            got.is_ok(),
-            "the permit append must give up within its bound"
-        );
-        assert!(stream.is_empty(), "no record, no metadata");
-        let emit = Recorder::default();
-        disclose(
-            &mut stream,
-            &TransportConfig::default(),
-            &emit,
-            &Seq::new(),
-            stat_record(record(), &label161()),
-            "metadata",
-            answer.clone(),
-            maknae_proto::ATTEMPT_RESPONSE_MAX,
-            far_deadline(),
-        )
-        .await;
-        let recorded = emit.0.lock().unwrap().last().cloned().unwrap();
         assert_eq!(
-            (
-                recorded.outcome.result.as_str(),
-                recorded.outcome.posture.as_str()
-            ),
-            ("permit", "authorized")
+            got,
+            Ok(false),
+            "the progress append gives up within its bound"
+        );
+        assert!(stream.is_empty(), "no record, no answer");
+        let emit = Recorder::default();
+        assert!(
+            disclose(
+                &mut stream,
+                &TransportConfig::default(),
+                &emit,
+                &Seq::new(),
+                &test_intent(),
+                &stat_account,
+                true,
+                answer.clone(),
+                maknae_proto::ATTEMPT_RESPONSE_MAX,
+                far_deadline(),
+            )
+            .await
+        );
+        let trail = emit.0.lock().unwrap().clone();
+        let phases: Vec<_> = trail
+            .iter()
+            .map(|r| r.mutation.as_ref().map(|m| (m.phase, m.status)))
+            .collect();
+        assert_eq!(
+            phases,
+            [
+                Some((MutationPhase::Progress, MutationStatus::ReportedProgress)),
+                Some((MutationPhase::Completion, MutationStatus::Applied))
+            ]
         );
         let frame = maknae_proto::read_frame_of_class(
             &mut stream.as_slice(),
             maknae_proto::FrameClass::Attempt,
-            &maknae_proto::FrameCaps {
-                control: 0,
-                attempt: maknae_proto::ATTEMPT_RESPONSE_MAX,
-                prompt: 0,
-            },
+            &caps(),
         )
         .await
         .unwrap();
@@ -2573,7 +2593,7 @@ mod tests {
                 kind: maknae_proto::StatKind::File,
             }
         );
-        let last = records.last().expect("the permit is recorded");
+        let (last, _) = intent_and_completion(&records);
         assert_eq!(last.outcome.result, "permit");
         assert_eq!(last.object.as_deref(), file.to_str());
         let meta = last
@@ -3137,8 +3157,7 @@ mod tests {
             "{rendered}"
         );
         let trail = emit.0.lock().unwrap().clone();
-        let intent = &trail[trail.len() - 2];
-        let done = trail.last().unwrap();
+        let (intent, done) = intent_and_completion(&trail);
         assert_eq!(
             intent.mutation.as_ref().unwrap().operation,
             Some(MutationOperation::Read)
@@ -3803,6 +3822,192 @@ mod tests {
         );
         assert!(mutating().try_claim(fx.principal.uid).is_some());
     }
+    /// The trail's one intent and its one terminal completion, the completion last.
+    fn intent_and_completion(trail: &[AuditRecord]) -> (AuditRecord, AuditRecord) {
+        let phased: Vec<&AuditRecord> = trail.iter().filter(|r| r.mutation.is_some()).collect();
+        let of = |phase: MutationPhase| {
+            phased
+                .iter()
+                .filter(|r| r.mutation.as_ref().unwrap().phase == phase)
+                .map(|r| (*r).clone())
+                .collect::<Vec<_>>()
+        };
+        let (intents, completions) = (of(MutationPhase::Intent), of(MutationPhase::Completion));
+        let reasons: Vec<_> = trail.iter().map(|r| &r.outcome.reason).collect();
+        assert_eq!(intents.len(), 1, "one intent: {reasons:?}");
+        assert_eq!(completions.len(), 1, "one terminal completion: {reasons:?}");
+        let (intent, done) = (intents[0].clone(), completions[0].clone());
+        assert_eq!(
+            phased.last().unwrap().seq,
+            done.seq,
+            "the completion ends the trail: {reasons:?}"
+        );
+        assert_eq!(done.mutation.as_ref().unwrap().intent_seq, intent.seq);
+        (intent, done)
+    }
+    async fn stat_to_a_gone_client(fx: &Fixture, file: &Path) -> Vec<AuditRecord> {
+        let cfg = maknae_config::transport_from_section(None).unwrap();
+        let fds = maknae_io::DelegatedFds::new(1);
+        fds.push(maknae_io::open_path_for_stat(file).unwrap());
+        let emit = Arc::new(Recorder::default());
+        let (client, mut server) = tokio::io::duplex(65536);
+        drop(client);
+        handle(
+            &mut server,
+            &stat(file),
+            fx.principal.uid,
+            Lane::Local,
+            &fds,
+            Arc::new(fixture_pdp(fx)),
+            emit.clone(),
+            Ok(fx.root.clone()),
+            &cfg,
+            &Seq::new(),
+            record(),
+            Duration::from_secs(10),
+            AttemptCaps::default(),
+            "US",
+            Arc::new(crate::conversation::mem_store::MemStore::default()),
+            &Stamp::Client,
+            Arc::new(SensitiveList::empty()),
+            tokio::time::Instant::now(),
+        )
+        .await;
+        let trail = emit.0.lock().unwrap().clone();
+        trail
+    }
+    #[tokio::test]
+    async fn every_stat_outcome_ends_in_one_completion_correlated_to_its_intent() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let file = fx.root.join("completed-161");
+        std::fs::write(&file, b"x").unwrap();
+        let (_, trail) = stat_answer(&fx, &file).await;
+        let (intent, done) = intent_and_completion(&trail);
+        assert_eq!(intent.outcome.result, "permit");
+        assert_eq!(
+            (done.outcome.result.as_str(), done.mutation.unwrap().status),
+            ("permit", MutationStatus::Applied)
+        );
+        assert_eq!(done.outcome.reason, "metadata released");
+
+        let trail = stat_to_a_gone_client(&fx, &file).await;
+        let (_, done) = intent_and_completion(&trail);
+        assert_eq!(done.mutation.unwrap().status, MutationStatus::Incomplete);
+        assert_eq!(done.outcome.reason, "metadata: delivery unknown");
+    }
+    async fn list_to_a_gone_subject(fx: &Fixture, dir: &Path) -> Vec<AuditRecord> {
+        let cfg = maknae_config::transport_from_section(None).unwrap();
+        let fds = maknae_io::DelegatedFds::new(1);
+        fds.push(maknae_io::open_directory_for_delegation(dir).unwrap());
+        let emit = Arc::new(Recorder::default());
+        let (mut client, mut server) = tokio::io::duplex(1 << 16);
+        let verb = list_verb(dir, None);
+        let seq = Seq::new();
+        let kernel = handle(
+            &mut server,
+            &verb,
+            fx.principal.uid,
+            Lane::Local,
+            &fds,
+            Arc::new(fixture_pdp(fx)),
+            emit.clone(),
+            Ok(fx.root.clone()),
+            &cfg,
+            &seq,
+            record(),
+            Duration::from_secs(10),
+            AttemptCaps::default(),
+            "US",
+            Arc::new(crate::conversation::mem_store::MemStore::default()),
+            &Stamp::Client,
+            Arc::new(SensitiveList::empty()),
+            tokio::time::Instant::now(),
+        );
+        let subject = async move {
+            maknae_proto::read_frame_of_class(
+                &mut client,
+                maknae_proto::FrameClass::Attempt,
+                &caps(),
+            )
+            .await
+            .unwrap();
+            let chunk = named_chunks(&["gone-subject-161".to_string()], 1).remove(0);
+            maknae_proto::write_frame(
+                &mut client,
+                maknae_proto::FrameClass::Attempt,
+                &maknae_proto::encode_list_chunk(&chunk).unwrap(),
+            )
+            .await
+            .unwrap();
+        };
+        tokio::join!(kernel, subject);
+        let trail = emit.0.lock().unwrap().clone();
+        trail
+    }
+    #[tokio::test]
+    async fn every_listing_outcome_ends_in_one_completion_correlated_to_its_intent() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let dir = fx.root.join("completed-dir-161");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("one-161"), b"x").unwrap();
+        let emit = Arc::new(Recorder::default());
+        list_on(
+            &fx,
+            fixture_pdp(&fx),
+            list_verb(&dir, None),
+            maknae_io::open_directory_for_delegation(&dir).ok(),
+            SensitiveList::empty(),
+            emit.clone(),
+            |g| whole_listing(&grant_path(g)),
+        )
+        .await;
+        let trail = emit.0.lock().unwrap().clone();
+        let (_, done) = intent_and_completion(&trail);
+        assert_eq!(done.mutation.unwrap().status, MutationStatus::Applied);
+        assert!(
+            done.outcome.reason.contains("1 permitted, 1 released"),
+            "{}",
+            done.outcome.reason
+        );
+
+        let emit = Arc::new(Recorder::default());
+        list_on_with(
+            &fx,
+            fixture_pdp(&fx),
+            list_verb(&dir, None),
+            maknae_io::open_directory_for_delegation(&dir).ok(),
+            SensitiveList::empty(),
+            emit.clone(),
+            AttemptCaps {
+                request: maknae_proto::ATTEMPT_REQUEST_MAX,
+                response: 600,
+            },
+            maknae_config::transport_from_section(None).unwrap(),
+            |_| named_chunks(&["w".repeat(1000)], 1),
+        )
+        .await;
+        let trail = emit.0.lock().unwrap().clone();
+        let (_, done) = intent_and_completion(&trail);
+        assert_eq!(done.outcome.result, "deny");
+        assert!(
+            done.outcome.reason.contains("1 permitted, 0 released"),
+            "a withheld page released nothing: {}",
+            done.outcome.reason
+        );
+
+        let trail = list_to_a_gone_subject(&fx, &dir).await;
+        let (_, done) = intent_and_completion(&trail);
+        assert_eq!(done.mutation.unwrap().status, MutationStatus::Incomplete);
+        assert!(
+            done.outcome
+                .reason
+                .contains("1 permitted, 1 in the page, delivery unknown"),
+            "{}",
+            done.outcome.reason
+        );
+    }
     #[tokio::test]
     async fn a_page_decided_after_its_deadline_is_refused_and_never_recorded_as_released() {
         let _turn = EUID_TURN.lock().await;
@@ -3881,34 +4086,49 @@ mod tests {
         assert_eq!(page.entries.len(), maknae_proto::LIST_RELEASE_MAX);
         assert_eq!(page.entries.last().unwrap().name, names[1023]);
     }
-    #[tokio::test(start_paused = true)]
-    async fn a_disclosure_over_its_cap_is_refused_and_one_not_delivered_is_noted() {
-        let answer = Payload::Stat {
+    fn stat161() -> Payload {
+        Payload::Stat {
             size: 1,
             mtime_secs: 1,
             kind: maknae_proto::StatKind::File,
-        };
+        }
+    }
+    fn completion_of(trail: &[AuditRecord]) -> (MutationPhase, MutationStatus, String, String) {
+        let last = trail.last().unwrap();
+        let meta = last.mutation.as_ref().unwrap();
+        (
+            meta.phase,
+            meta.status,
+            last.outcome.result.clone(),
+            last.outcome.reason.clone(),
+        )
+    }
+    #[tokio::test(start_paused = true)]
+    async fn a_disclosure_over_its_cap_is_refused_and_one_not_delivered_is_unknown() {
         let emit = Recorder::default();
         let mut stream: Vec<u8> = Vec::new();
-        let got = disclose(
+        let sent = disclose(
             &mut stream,
             &TransportConfig::default(),
             &emit,
             &Seq::new(),
-            record(),
-            "metadata",
-            answer.clone(),
+            &test_intent(),
+            &stat_account,
+            false,
+            stat161(),
             8,
             far_deadline(),
         )
         .await;
-        assert!(got.is_none());
-        let refused = emit.0.lock().unwrap().last().cloned().unwrap();
-        assert_eq!(refused.outcome.result, "deny");
-        assert!(
-            !refused.outcome.reason.contains("released"),
-            "{}",
-            refused.outcome.reason
+        assert!(!sent);
+        assert_eq!(
+            completion_of(&emit.0.lock().unwrap()),
+            (
+                MutationPhase::Completion,
+                MutationStatus::Incomplete,
+                "deny".to_string(),
+                "metadata withheld; answer exceeds the response frame".to_string()
+            )
         );
         let frame = maknae_proto::read_frame_of_class(
             &mut stream.as_slice(),
@@ -3928,43 +4148,35 @@ mod tests {
         let emit = Recorder::default();
         let (client, mut server) = tokio::io::duplex(64);
         drop(client);
-        disclose(
-            &mut server,
-            &TransportConfig::default(),
-            &emit,
-            &Seq::new(),
-            released_record(),
-            "metadata",
-            answer,
-            maknae_proto::ATTEMPT_RESPONSE_MAX,
-            far_deadline(),
-        )
-        .await;
-        let trail = emit.0.lock().unwrap().clone();
-        assert_eq!(trail.len(), 2, "the permit, then that it was not delivered");
         assert!(
-            trail[1].outcome.reason.contains("not delivered"),
-            "{}",
-            trail[1].outcome.reason
+            !disclose(
+                &mut server,
+                &TransportConfig::default(),
+                &emit,
+                &Seq::new(),
+                &test_intent(),
+                &stat_account,
+                false,
+                stat161(),
+                maknae_proto::ATTEMPT_RESPONSE_MAX,
+                far_deadline(),
+            )
+            .await
         );
+        let trail = emit.0.lock().unwrap().clone();
+        assert_eq!(trail.len(), 1, "one terminal completion, no second success");
         assert_eq!(
-            trail[1].mutation.as_ref().map(|m| m.status),
-            Some(MutationStatus::Incomplete),
-            "an undelivered answer is never a second success"
+            completion_of(&trail),
+            (
+                MutationPhase::Completion,
+                MutationStatus::Incomplete,
+                "permit".to_string(),
+                "metadata: delivery unknown".to_string()
+            )
         );
     }
     fn far_deadline() -> tokio::time::Instant {
         tokio::time::Instant::now() + Duration::from_secs(60)
-    }
-    fn released_record() -> AuditRecord {
-        let mut r = record();
-        r.mutation = Some(mutation_meta(
-            r.seq,
-            MutationPhase::Completion,
-            MutationOrigin::ClientReported,
-            MutationStatus::ReportedSuccess,
-        ));
-        r
     }
     struct SlowAppend(std::sync::Mutex<Vec<AuditRecord>>);
     impl AuditEmit for SlowAppend {
@@ -3981,7 +4193,7 @@ mod tests {
         }
     }
     #[tokio::test(start_paused = true)]
-    async fn an_answer_whose_permit_lands_after_its_deadline_is_not_written() {
+    async fn an_answer_whose_progress_lands_after_its_deadline_is_not_written() {
         let emit = SlowAppend(std::sync::Mutex::default());
         let mut stream: Vec<u8> = Vec::new();
         disclose(
@@ -3989,24 +4201,25 @@ mod tests {
             &TransportConfig::default(),
             &emit,
             &Seq::new(),
-            released_record(),
-            "metadata",
-            Payload::Stat {
-                size: 1,
-                mtime_secs: 1,
-                kind: maknae_proto::StatKind::File,
-            },
+            &test_intent(),
+            &stat_account,
+            true,
+            stat161(),
             maknae_proto::ATTEMPT_RESPONSE_MAX,
             tokio::time::Instant::now() + Duration::from_millis(100),
         )
         .await;
         assert!(stream.is_empty(), "nothing is written after the deadline");
         let trail = emit.0.lock().unwrap().clone();
-        assert_eq!(trail.len(), 2);
-        assert!(trail[1].outcome.reason.contains("not delivered"));
+        assert_eq!(trail.len(), 2, "progress, then the one completion");
         assert_eq!(
-            trail[1].mutation.as_ref().map(|m| m.status),
-            Some(MutationStatus::Incomplete)
+            completion_of(&trail),
+            (
+                MutationPhase::Completion,
+                MutationStatus::Incomplete,
+                "permit".to_string(),
+                "metadata: delivery unknown".to_string()
+            )
         );
     }
     #[tokio::test]

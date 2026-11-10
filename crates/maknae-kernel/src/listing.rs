@@ -2,8 +2,8 @@
 //! as `fs.read` on the kernel-reported directory, and only the permitted page is released.
 use crate::conversation::facts::ConversationFacts;
 use crate::handler::{discharge_plan, Stamp, TaskStamp};
-use crate::mutation::{completion, incomplete, normal, path_request, DurableIntent};
-use maknae_audit_append::{AuditEmit, MutationOrigin, MutationStatus, Seq};
+use crate::mutation::{completion, incomplete, normal, path_request, Delivery, DurableIntent};
+use maknae_audit_append::{AuditEmit, MutationStatus, Seq};
 use maknae_config::TransportConfig;
 use maknae_proto::{
     ListChunk, ListEntry, ListGrant, MutationGrant, MutationId, MutationLimits, MutationScope,
@@ -196,15 +196,18 @@ impl Lister {
         }
     }
 
-    /// `permitted` counts every `Permit`, the one that closed a page included; `released`
-    /// counts the page's entries, none when the listing ends refused.
-    pub(crate) fn trail(&self, end: &End) -> String {
-        let released = match end {
-            End::Refused(_) => 0,
-            End::Complete | End::Truncated => self.permitted.len().min(LIST_RELEASE_MAX),
+    /// `permitted` counts every `Permit`, the one that closed a page included; the
+    /// released figure follows the page's delivery, and is 0 when nothing was sent.
+    pub(crate) fn trail(&self, end: &End, delivery: Delivery) -> String {
+        let page = self.permitted.len().min(LIST_RELEASE_MAX);
+        let released = match (end, delivery) {
+            (End::Refused(_), _) | (_, Delivery::Withheld) => "0 released".to_string(),
+            (_, Delivery::Pending) => format!("{page} in the page"),
+            (_, Delivery::Released) => format!("{page} released"),
+            (_, Delivery::Unknown) => format!("{page} in the page, delivery unknown"),
         };
         format!(
-            "listing: {} received, {} skipped by the cursor, {} invalid, {} withheld, {} permitted, {released} released; the subject reports {} non-UTF-8 names dropped and {} vanished (unverified)",
+            "listing: {} received, {} skipped by the cursor, {} invalid, {} withheld, {} permitted, {released}; the subject reports {} non-UTF-8 names dropped and {} vanished (unverified)",
             self.received,
             self.skipped,
             self.invalid,
@@ -215,12 +218,15 @@ impl Lister {
         )
     }
 
-    pub(crate) fn grant(mut self) -> ListGrant {
-        let truncated = self.full || self.permitted.len() > LIST_RELEASE_MAX;
-        self.permitted.truncate(LIST_RELEASE_MAX);
+    pub(crate) fn page(&self) -> ListGrant {
         ListGrant {
-            entries: self.permitted,
-            truncated,
+            entries: self
+                .permitted
+                .iter()
+                .take(LIST_RELEASE_MAX)
+                .cloned()
+                .collect(),
+            truncated: self.full || self.permitted.len() > LIST_RELEASE_MAX,
         }
     }
 }
@@ -385,31 +391,26 @@ pub(crate) async fn run<S, E, P>(
             }
         }
     };
-    let mut record = completion(&intent, seq.next(), MutationStatus::ReportedSuccess);
-    if let Some(meta) = record.mutation.as_mut() {
-        meta.origin = MutationOrigin::ClientReported;
-    }
-    let tally = lister.trail(&end);
     if let End::Refused(why) = end {
-        if let Some(meta) = record.mutation.as_mut() {
-            meta.status = MutationStatus::Incomplete;
-        }
+        let record = completion(&intent, seq.next(), MutationStatus::Incomplete);
         let answer = ProtoError {
             code: ProtoErrCode::Unauthorized,
             message: why.into(),
         };
-        crate::mutation::refuse_with(stream, cfg, emit, record, format!("{why}; {tally}"), answer)
-            .await;
+        let reason = format!("{why}; {}", lister.trail(&end, Delivery::Withheld));
+        crate::mutation::refuse_with(stream, cfg, emit, record, reason, answer).await;
         return;
     }
+    let page = lister.page();
     crate::mutation::disclose(
         stream,
         cfg,
         emit,
         seq,
-        record,
-        &tally,
-        Payload::ListGrant(lister.grant()),
+        &intent,
+        &|delivery| lister.trail(&end, delivery),
+        true,
+        Payload::ListGrant(page),
         caps.response,
         deadline,
     )
@@ -460,7 +461,7 @@ mod tests {
             ["/d161/a", "/d161/b", "/d161/c", "/d161/d", "/d161/e"]
         );
         assert_eq!(
-            lister.grant().entries,
+            lister.page().entries,
             entries(&["a", "c", "e"]),
             "only the permitted subset, in order"
         );
@@ -484,7 +485,7 @@ mod tests {
             lister.take(&chunk_of(&names, true), |_| true),
             Some(End::Truncated)
         );
-        let grant = lister.grant();
+        let grant = lister.page();
         assert!(grant.truncated);
         assert_eq!(grant.entries.len(), LIST_RELEASE_MAX);
         assert_eq!(
@@ -498,7 +499,7 @@ mod tests {
             lister.take(&chunk_of(&names, true), |_| true),
             Some(End::Complete)
         );
-        let grant = lister.grant();
+        let grant = lister.page();
         assert!(!grant.truncated, "exactly 1024 permitted is a whole page");
         assert_eq!(grant.entries.len(), LIST_RELEASE_MAX);
 
@@ -507,7 +508,7 @@ mod tests {
         let mut lister = Lister::new("/d".into(), None, maknae_proto::ATTEMPT_RESPONSE_MAX);
         lister.take(&chunk_of(&names, true), |p| !p.ends_with("z-denied"));
         assert!(
-            !lister.grant().truncated,
+            !lister.page().truncated,
             "a denied 1025th name does not set truncated"
         );
     }
@@ -522,7 +523,7 @@ mod tests {
             lister.take(&chunk_of(&names, true), |_| true),
             Some(End::Truncated)
         );
-        let page = lister.grant();
+        let page = lister.page();
         assert!(page.truncated, "the next permitted entry exists");
         assert!(page.entries.len() < LIST_RELEASE_MAX);
         let encoded = maknae_proto::encode_response(&Response {
@@ -535,7 +536,7 @@ mod tests {
         let mut next = Lister::new("/d".into(), Some(last), cap);
         next.take(&chunk_of(&names, true), |_| true);
         assert_eq!(
-            next.grant().entries[0].name,
+            next.page().entries[0].name,
             names[page.entries.len()],
             "the cursor resumes at the entry that did not fit"
         );
@@ -568,14 +569,14 @@ mod tests {
             lister.take(&chunk_of(&names[..1], true), |_| true),
             Some(End::Complete)
         );
-        let page = lister.grant();
+        let page = lister.page();
         assert_eq!((page.entries.len(), page.truncated), (1, false));
         let mut lister = Lister::new("/d".into(), None, 300);
         assert_eq!(
             lister.take(&chunk_of(&names, true), |_| true),
             Some(End::Truncated)
         );
-        let page = lister.grant();
+        let page = lister.page();
         assert_eq!(
             (page.entries.len(), page.truncated),
             (1, true),
@@ -644,7 +645,7 @@ mod tests {
         assert_eq!(end, Some(End::Complete));
         assert_eq!(asked, ["/d/ba", "/d/c"]);
         assert_eq!(lister.skipped, 2);
-        assert_eq!(lister.grant().entries, entries(&["ba", "c"]));
+        assert_eq!(lister.page().entries, entries(&["ba", "c"]));
     }
 
     #[test]
@@ -665,10 +666,10 @@ mod tests {
         assert_eq!(calls, LIST_RECEIVE_MAX);
         assert!(
             lister
-                .trail(&End::Refused(BOUND_REACHED))
+                .trail(&End::Refused(BOUND_REACHED), Delivery::Withheld)
                 .contains("65536 received"),
             "{}",
-            lister.trail(&End::Refused(BOUND_REACHED))
+            lister.trail(&End::Refused(BOUND_REACHED), Delivery::Withheld)
         );
 
         let mut lister = Lister::new("/d".into(), None, maknae_proto::ATTEMPT_RESPONSE_MAX);
@@ -743,7 +744,7 @@ mod tests {
         assert_eq!(end, Some(End::Complete));
         assert_eq!(asked, ["/d/ok"]);
         assert_eq!(lister.invalid, 6);
-        assert_eq!(lister.grant().entries, entries(&["ok"]));
+        assert_eq!(lister.page().entries, entries(&["ok"]));
 
         let mut lister = Lister::new("/d".into(), None, maknae_proto::ATTEMPT_RESPONSE_MAX);
         assert_eq!(
@@ -784,11 +785,11 @@ mod tests {
         second.vanished = 4;
         assert_eq!(lister.take(&second, |_| false), Some(End::Complete));
         assert_eq!(
-            lister.trail(&End::Complete),
+            lister.trail(&End::Complete, Delivery::Released),
             "listing: 5 received, 1 skipped by the cursor, 1 invalid, 2 withheld, 1 permitted, 1 released; the subject reports 3 non-UTF-8 names dropped and 4 vanished (unverified)"
         );
         assert!(lister
-            .trail(&End::Refused(ORDER_VIOLATED))
+            .trail(&End::Refused(ORDER_VIOLATED), Delivery::Withheld)
             .contains("1 permitted, 0 released"));
     }
 
@@ -802,16 +803,16 @@ mod tests {
         );
         assert!(
             lister
-                .trail(&End::Truncated)
+                .trail(&End::Truncated, Delivery::Released)
                 .contains("3 permitted, 2 released"),
             "{}",
-            lister.trail(&End::Truncated)
+            lister.trail(&End::Truncated, Delivery::Released)
         );
         let names = numbered(0, LIST_RELEASE_MAX + 1);
         let mut lister = Lister::new("/d".into(), None, maknae_proto::ATTEMPT_RESPONSE_MAX);
         lister.take(&chunk_of(&names, true), |_| true);
         assert!(lister
-            .trail(&End::Truncated)
+            .trail(&End::Truncated, Delivery::Released)
             .contains("1025 permitted, 1024 released"));
     }
 }
