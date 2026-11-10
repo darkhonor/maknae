@@ -946,6 +946,10 @@ env_bound = "target_os:linux"
 why = "the FS_IOC_GETFLAGS ioctl (ADR-0027) compiles only on Linux, so a macOS coverage run has no regions for it. The Linux CI lane enforces its floor; the flag parsers it feeds, flags.rs, are plain T1 on both platforms"
 
 [[t3]]
+path = "crates/maknae-agent/src/testutil.rs"
+why = "test-only helper shared between the wire and drive test suites (the gate requires `#[cfg(test)]` to be followed by a line beginning `mod `, which rules out `pub(crate) mod tests`); it builds fixtures and decides nothing"
+
+[[t3]]
 path = "crates/maknae-io/src/testutil.rs"
 why = "test-only helper shared between module test suites (it exists because the gate requires `#[cfg(test)]` to be followed by a line beginning `mod `, which rules out `pub(crate) mod tests`). Report-only rather than [t1] because its production split — skip_or_fail and opted_out — measures 63.64%, below the 95% floor: the opt-out branch is only reachable by mutating MAKNAE_IO_ALLOW_SKIPPED_LANES for the whole process, which is not safe under the parallel harness. The FAIL-CLOSED branch, which is the one that matters, IS controlled by skip_or_fail_panics_when_the_opt_out_is_absent"
 
@@ -1006,7 +1010,7 @@ why = "fstat on an fd the kernel just returned cannot fail on a healthy FS; the 
 [[exception]]
 path = "crates/maknae-io/src/delegated.rs"
 anchor = ".map_err(|e| crate::checks::map_errno_no_disambiguation(e, path))"
-why = "refuse_access_bearing's F_GETFL runs on a descriptor verify_delegated resolved and fstat'ed immediately before, so it is valid and open; an invalid BorrowedFd cannot be constructed without unsafe (forbidden). A pure errno passthrough, and it fails closed: the error is a refusal (#365)."
+why = "descriptor_flag's F_GETFL (refuse_access_bearing, refuse_enumerable) runs on a descriptor the kernel already resolved and fstat'ed, so it is valid and open; an invalid BorrowedFd cannot be constructed without unsafe (forbidden). A pure errno passthrough, and it fails closed: the error is a refusal (#365)."
 
 [[exception]]
 path = "crates/maknae-io/src/delegated.rs"

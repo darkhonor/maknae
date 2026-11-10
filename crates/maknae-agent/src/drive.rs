@@ -1040,8 +1040,8 @@ mod tests {
 
     #[tokio::test]
     async fn every_listing_and_stat_refusal_renders_the_same_model_text() {
-        let for_list = crate::wire::tests::every_refusal_after_a_list_or_stat();
-        let for_stat = crate::wire::tests::every_refusal_after_a_list_or_stat();
+        let for_list = crate::testutil::every_refusal_after_a_list_or_stat();
+        let for_stat = crate::testutil::every_refusal_after_a_list_or_stat();
         let n = for_list.len();
         let mut p = scripted(vec![]);
         let mut calls = vec![];

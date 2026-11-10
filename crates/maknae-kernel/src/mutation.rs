@@ -4009,6 +4009,166 @@ mod tests {
             done.outcome.reason
         );
     }
+    #[test]
+    fn an_agents_listing_decides_each_entry_under_the_agents_stamp() {
+        let fx = Fixture::new();
+        let counted = Counting {
+            pdp: fixture_pdp(&fx),
+            calls: Arc::default(),
+        };
+        struct Stamped<P> {
+            inner: P,
+            agents: Arc<std::sync::Mutex<Vec<Option<AttrValue>>>>,
+        }
+        impl<P: Authorizer> Authorizer for Stamped<P> {
+            fn decide(&self, r: &maknae_security::Request) -> maknae_security::Verdict {
+                self.decide_cited(r).verdict
+            }
+            fn decide_reporting_role(
+                &self,
+                r: &maknae_security::Request,
+            ) -> (maknae_security::Verdict, Option<&'static str>) {
+                self.decide_cited(r).into()
+            }
+            fn decide_cited(&self, r: &maknae_security::Request) -> maknae_security::Decided {
+                self.decide_cited_all(std::slice::from_ref(r))
+                    .pop()
+                    .unwrap()
+            }
+            fn decide_cited_all(
+                &self,
+                rs: &[maknae_security::Request],
+            ) -> Vec<maknae_security::Decided> {
+                for r in rs {
+                    self.agents
+                        .lock()
+                        .unwrap()
+                        .push(r.subject.0.get(maknae_security::SUBJECT_AGENT).cloned());
+                }
+                self.inner.decide_cited_all(rs)
+            }
+        }
+        let agents = Arc::default();
+        let decider = crate::listing::Decider {
+            authorizer: Arc::new(Stamped {
+                inner: counted,
+                agents: Arc::clone(&agents),
+            }),
+            verb: list_verb(&fx.root, None),
+            uid: fx.principal.uid,
+            home: fx.root.clone(),
+            facts: None,
+            personal: None,
+            stamped: Some((maknae_config::AgentId::parse("hobi").unwrap(), None)),
+        };
+        let mut lister = crate::listing::Lister::new(
+            fx.root.to_str().unwrap().into(),
+            None,
+            maknae_proto::ATTEMPT_RESPONSE_MAX,
+        );
+        lister.take(&named_chunks(&["agent-161".into()], 1)[0], |p| {
+            decider.permits(p)
+        });
+        assert_eq!(
+            *agents.lock().unwrap(),
+            [Some(AttrValue::Str("hobi".into()))],
+            "each entry carries the agent's stamp"
+        );
+    }
+    #[tokio::test]
+    async fn a_listing_chunk_while_the_requester_is_busy_ends_incomplete() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let dir = fx.root.join("busy-161");
+        std::fs::create_dir(&dir).unwrap();
+        let held = Arc::new(std::sync::Mutex::new(None));
+        let holding = Arc::clone(&held);
+        let uid = fx.principal.uid;
+        let emit = Arc::new(Recorder::default());
+        let frames = list_on(
+            &fx,
+            fixture_pdp(&fx),
+            list_verb(&dir, None),
+            maknae_io::open_directory_for_delegation(&dir).ok(),
+            SensitiveList::empty(),
+            emit.clone(),
+            move |_| {
+                *holding.lock().unwrap() = mutating().try_claim(uid);
+                named_chunks(&["busy-entry-161".into()], 1)
+            },
+        )
+        .await;
+        assert!(
+            held.lock().unwrap().take().is_some(),
+            "the test held the claim"
+        );
+        assert!(!frames
+            .iter()
+            .any(|f| f.windows(14).any(|w| w == b"busy-entry-161")));
+        let (_, done) = intent_and_completion(&emit.0.lock().unwrap());
+        assert_eq!(
+            done.outcome.reason,
+            busy_reason(crate::uid_gate::Busy::Requester)
+        );
+    }
+    #[tokio::test]
+    async fn a_continuation_that_cannot_be_written_ends_the_listing_incomplete() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let dir = fx.root.join("continued-161");
+        std::fs::create_dir(&dir).unwrap();
+        let cfg = maknae_config::transport_from_section(None).unwrap();
+        let fds = maknae_io::DelegatedFds::new(1);
+        fds.push(maknae_io::open_directory_for_delegation(&dir).unwrap());
+        let emit = Arc::new(Recorder::default());
+        let seq = Seq::new();
+        let (mut client, mut server) = tokio::io::duplex(1 << 16);
+        let verb = list_verb(&dir, None);
+        let kernel = handle(
+            &mut server,
+            &verb,
+            fx.principal.uid,
+            Lane::Local,
+            &fds,
+            Arc::new(fixture_pdp(&fx)),
+            emit.clone(),
+            Ok(fx.root.clone()),
+            &cfg,
+            &seq,
+            record(),
+            Duration::from_secs(10),
+            AttemptCaps::default(),
+            "US",
+            Arc::new(crate::conversation::mem_store::MemStore::default()),
+            &Stamp::Client,
+            Arc::new(SensitiveList::empty()),
+            tokio::time::Instant::now(),
+        );
+        let subject = async move {
+            maknae_proto::read_frame_of_class(
+                &mut client,
+                maknae_proto::FrameClass::Attempt,
+                &caps(),
+            )
+            .await
+            .unwrap();
+            let mut chunk = named_chunks(&["first-161".to_string()], 1).remove(0);
+            chunk.last = false;
+            maknae_proto::write_frame(
+                &mut client,
+                maknae_proto::FrameClass::Attempt,
+                &maknae_proto::encode_list_chunk(&chunk).unwrap(),
+            )
+            .await
+            .unwrap();
+        };
+        tokio::join!(kernel, subject);
+        let (_, done) = intent_and_completion(&emit.0.lock().unwrap());
+        assert_eq!(
+            done.outcome.reason,
+            "listing continuation not delivered; nothing released"
+        );
+    }
     #[tokio::test]
     async fn a_page_decided_after_its_deadline_is_refused_and_never_recorded_as_released() {
         let _turn = EUID_TURN.lock().await;

@@ -32,7 +32,7 @@ pub(crate) struct Decider<P> {
 }
 
 impl<P: Authorizer> Decider<P> {
-    fn permits(&self, path: &str) -> bool {
+    pub(crate) fn permits(&self, path: &str) -> bool {
         let stamp = match &self.stamped {
             None => Stamp::Client,
             Some((agent, task)) => Stamp::Agent {
@@ -237,22 +237,22 @@ async fn answer<S: AsyncWrite + Unpin>(
     caps: crate::mutation::AttemptCaps,
     result: RespResult,
 ) -> bool {
-    let Ok(bytes) = maknae_proto::encode_response(&Response {
+    match maknae_proto::encode_response(&Response {
         protocol_version: PROTOCOL_VERSION,
         result,
-    }) else {
-        return false;
-    };
-    bytes.len() <= caps.response
-        && tokio::time::Instant::now() < deadline
-        && matches!(
-            tokio::time::timeout_at(
-                deadline,
-                maknae_proto::write_frame(stream, maknae_proto::FrameClass::Attempt, &bytes)
+    }) {
+        Ok(bytes) if bytes.len() <= caps.response && tokio::time::Instant::now() < deadline => {
+            matches!(
+                tokio::time::timeout_at(
+                    deadline,
+                    maknae_proto::write_frame(stream, maknae_proto::FrameClass::Attempt, &bytes)
+                )
+                .await,
+                Ok(Ok(()))
             )
-            .await,
-            Ok(Ok(()))
-        )
+        }
+        _ => false,
+    }
 }
 
 /// The listing exchange: the grant, then chunk by chunk until the listing ends. The page
@@ -540,6 +540,21 @@ mod tests {
             names[page.entries.len()],
             "the cursor resumes at the entry that did not fit"
         );
+    }
+
+    #[test]
+    fn a_name_whose_child_path_is_too_long_is_withheld_as_invalid() {
+        let directory = format!(
+            "/{}",
+            "d".repeat(maknae_proto::MAX_MUTATION_PATH_BYTES - 10)
+        );
+        let mut lister = Lister::new(directory, None, maknae_proto::ATTEMPT_RESPONSE_MAX);
+        let mut asked = 0;
+        lister.take(&chunk(&["a", "long-name-161"], true), |_| {
+            asked += 1;
+            true
+        });
+        assert_eq!((asked, lister.invalid), (1, 1));
     }
 
     #[test]

@@ -219,10 +219,7 @@ pub fn open_path_for_stat(path: &std::path::Path) -> std::io::Result<OwnedFd> {
 /// Verify a delegated `fs.stat` descriptor: any kind, still linked (`nlink` 0 is a changed
 /// path), and one link unless a directory.
 pub fn verify_stat_delegated(fd: BorrowedFd<'_>) -> Result<Delegated, IoError> {
-    let path = delegated_path(fd)?;
-    crate::mutation::checked_path(&path)?;
-    let st = crate::syscall::fstat(&fd)
-        .map_err(|e| crate::checks::map_errno_no_disambiguation(e, &path))?;
+    let (path, st) = located(fd)?;
     if crate::syscall::nlink_count(st.st_nlink) == 0 {
         return Err(IoError::MutationPathChanged { path });
     }
@@ -241,9 +238,7 @@ pub fn verify_stat_delegated(fd: BorrowedFd<'_>) -> Result<Delegated, IoError> {
 /// The kernel's check on a delegated `fs.list` directory: it can search, never enumerate
 /// (Linux `O_PATH`, macOS `O_SEARCH`), so the daemon never reads the names itself.
 pub fn refuse_enumerable(fd: BorrowedFd<'_>, path: &std::path::Path) -> Result<(), IoError> {
-    if crate::syscall::confers_search_only(&fd)
-        .map_err(|e| crate::checks::map_errno_no_disambiguation(e, path))?
-    {
+    if descriptor_flag(fd, path, |fd| crate::syscall::confers_search_only(fd))? {
         Ok(())
     } else {
         Err(IoError::AccessBearingDescriptor { path: path.into() })
@@ -527,9 +522,7 @@ pub fn recv_delegated(sock: BorrowedFd<'_>, buf: &mut [u8]) -> std::io::Result<R
 }
 
 pub fn refuse_access_bearing(fd: BorrowedFd<'_>, path: &std::path::Path) -> Result<(), IoError> {
-    if crate::syscall::confers_no_write(&fd)
-        .map_err(|e| crate::checks::map_errno_no_disambiguation(e, path))?
-    {
+    if descriptor_flag(fd, path, |fd| crate::syscall::confers_no_write(fd))? {
         Ok(())
     } else {
         Err(IoError::AccessBearingDescriptor { path: path.into() })
@@ -543,11 +536,25 @@ pub(crate) fn delegated_path(fd: BorrowedFd<'_>) -> Result<std::path::PathBuf, I
 }
 
 /// Verify a subject-delegated descriptor's location and kind. Does not consume the fd.
-pub fn verify_delegated(fd: BorrowedFd<'_>, req: DelegatedRequired) -> Result<Delegated, IoError> {
+fn descriptor_flag(
+    fd: BorrowedFd<'_>,
+    path: &std::path::Path,
+    flag: impl FnOnce(&BorrowedFd<'_>) -> nix::Result<bool>,
+) -> Result<bool, IoError> {
+    flag(&fd).map_err(|e| crate::checks::map_errno_no_disambiguation(e, path))
+}
+
+/// A delegated descriptor's kernel-reported path, admitted by the path checks, and its stat.
+fn located(fd: BorrowedFd<'_>) -> Result<(std::path::PathBuf, nix::sys::stat::FileStat), IoError> {
     let path = delegated_path(fd)?;
     crate::mutation::checked_path(&path)?;
     let st = crate::syscall::fstat(&fd)
         .map_err(|e| crate::checks::map_errno_no_disambiguation(e, &path))?;
+    Ok((path, st))
+}
+
+pub fn verify_delegated(fd: BorrowedFd<'_>, req: DelegatedRequired) -> Result<Delegated, IoError> {
+    let (path, st) = located(fd)?;
     crate::checks::check_target(&st, &path, &req.target)?;
     Ok(Delegated {
         path,
@@ -867,6 +874,20 @@ mod tests {
         assert_eq!(
             (names(&listed), listed.vanished),
             (vec![("kept-161", false)], 1)
+        );
+    }
+
+    #[test]
+    fn a_reopen_the_os_refuses_ends_the_listing_with_its_errno() {
+        let (_dir, base) = crate::testutil::outside_any_home();
+        let held = open_directory_for_delegation(&base).unwrap();
+        let refused = |_: BorrowedFd<'_>| Err(nix::errno::Errno::EACCES);
+        assert_eq!(
+            list_reopened(held.as_fd(), &base, 10, refused),
+            Err(crate::checks::map_errno_no_disambiguation(
+                nix::errno::Errno::EACCES,
+                &base
+            ))
         );
     }
 
