@@ -991,16 +991,12 @@ where
     enum Next {
         Attempt(MutationScope),
         List,
-        Stat(Payload),
+        Stat(maknae_io::DelegatedMeta),
     }
     let next = match prepared.granted {
         Granted::Attempt(scope) => Next::Attempt(scope),
         Granted::List => Next::List,
-        Granted::Stat(meta) => Next::Stat(Payload::Stat {
-            size: meta.size,
-            mtime_secs: mtime_secs(meta.mtime),
-            kind: stat_kind(meta.kind),
-        }),
+        Granted::Stat(meta) => Next::Stat(meta),
     };
     let (requested, read_page, length, after) = match verb {
         Verb::Read { page, .. } => (
@@ -1065,7 +1061,12 @@ where
                 )
                 .await;
             }
-            (Next::Stat(answer), _, _) => {
+            (Next::Stat(meta), _, _) => {
+                let answer = Payload::Stat {
+                    size: meta.size,
+                    mtime_secs: mtime_secs(meta.mtime),
+                    kind: stat_kind(meta.kind),
+                };
                 disclose(
                     stream,
                     cfg,
