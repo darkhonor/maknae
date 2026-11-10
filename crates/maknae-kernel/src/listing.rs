@@ -180,7 +180,7 @@ impl Lister {
             self.invalid += 1;
         } else if permits(&path) {
             let size = entry_bytes(&entry.name);
-            if self.bytes + size > self.budget {
+            if !self.permitted.is_empty() && self.bytes + size > self.budget {
                 self.full = true;
             } else {
                 self.bytes += size;
@@ -530,6 +530,30 @@ mod tests {
             next.grant().entries[0].name,
             names[page.entries.len()],
             "the cursor resumes at the entry that did not fit"
+        );
+    }
+
+    #[test]
+    fn a_page_always_holds_its_first_permitted_entry() {
+        let long = "y".repeat(400);
+        let names: Vec<String> = (0..2).map(|i| format!("{i}{long}")).collect();
+        let mut lister = Lister::new("/d".into(), None, 300);
+        assert_eq!(
+            lister.take(&chunk_of(&names[..1], true), |_| true),
+            Some(End::Complete)
+        );
+        let page = lister.grant();
+        assert_eq!((page.entries.len(), page.truncated), (1, false));
+        let mut lister = Lister::new("/d".into(), None, 300);
+        assert_eq!(
+            lister.take(&chunk_of(&names, true), |_| true),
+            Some(End::Truncated)
+        );
+        let page = lister.grant();
+        assert_eq!(
+            (page.entries.len(), page.truncated),
+            (1, true),
+            "never an empty truncated page the cursor cannot move past"
         );
     }
 

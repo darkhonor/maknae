@@ -3452,7 +3452,7 @@ mod tests {
         let fx = Fixture::new();
         let dir = fx.root.join("overcap-161");
         std::fs::create_dir(&dir).unwrap();
-        let names: Vec<String> = (0..3).map(|i| format!("{i}{}", "n".repeat(200))).collect();
+        let names = vec!["n".repeat(1000)];
         let emit = Arc::new(Recorder::default());
         let frames = list_on_with(
             &fx,
@@ -3463,10 +3463,10 @@ mod tests {
             emit.clone(),
             AttemptCaps {
                 request: maknae_proto::ATTEMPT_REQUEST_MAX,
-                response: 512,
+                response: 600,
             },
             maknae_config::transport_from_section(None).unwrap(),
-            |_| named_chunks(&names, 3),
+            |_| named_chunks(&names, 1),
         )
         .await;
         let trail = emit.0.lock().unwrap().clone();
