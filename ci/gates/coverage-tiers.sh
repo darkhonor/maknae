@@ -3,7 +3,7 @@
 # 2026-08-04-coverage-tiers-design.md (out-of-repo design spec) (v18).
 #
 # Usage: coverage-tiers.sh [--root <path>] [--injection]
-#                          [--mutants <crate>... [--in-diff <rev>] | --mutants-all | --readiness-check]
+#                          [--mutants <crate>... --in-diff <rev> | --mutants-all | --readiness-check]
 #
 # Injection contract (named, not a backdoor — CI never sets these):
 #   COVERAGE_TIERS_JSON      coverage JSON (replaces the cargo llvm-cov run)
@@ -72,6 +72,9 @@ while [ $# -gt 0 ]; do
 done
 if [ "$preflight" -eq 1 ] && { [ -n "$in_diff" ] || [ -n "$mutants_mode" ] || [ "$injection" -eq 1 ] || [ "$readiness_only" -eq 1 ]; }; then
   fail "--in-diff-preflight takes only --root"; exit 1
+fi
+if [ "$mutants_mode" = "list" ] && [ -z "$in_diff" ]; then
+  fail "--mutants is in-diff only and needs --in-diff <rev>; --mutants-all is the explicit whole-crate run"; exit 1
 fi
 if [ -n "$in_diff" ]; then
   if [ "$mutants_mode" = "all" ]; then fail "--in-diff cannot be combined with --mutants-all"; exit 1; fi
@@ -277,6 +280,10 @@ mc = c.get("t1", {}).get("mutants_crates")
 if not isinstance(mc, list) or not all(isinstance(x, str) for x in mc):
     print("mutants_crates missing or not a list of strings", file=sys.stderr)
     sys.exit(1)
+for name in mc:
+    if name.startswith("-"):
+        print(f"mutants_crates names {name}, which starts with '-'", file=sys.stderr)
+        sys.exit(1)
 for name in mc:
     print(name)
 PYEOF
@@ -622,7 +629,6 @@ if [ "$mutants_mode" != "" ]; then
       printf '%d violation(s).\n' "$fail_n"; exit 1
     fi
   fi
-  declare -A in_scope=()
   in_diff_file=""
   mut_dir="$root"
   if [ -n "$in_diff" ]; then
@@ -675,16 +681,6 @@ if [ "$mutants_mode" != "" ]; then
     if ! changed_paths="$(python3 "$here/mutation-diff.py" paths "$root" "$base" "$in_diff_file" "$head_oid" 2>&1)"; then
       printf 'FAIL: --in-diff: the diff does not name the changed Rust files: %s\n' "$changed_paths"; exit 1
     fi
-    if ! scope="$(python3 "$here/mutation-diff.py" scope "$root" "$base" "$head_oid" "$snap" 2>"$mut_tmp/scope.err")" ||
-       ! scope_lines="$(printf '%s' "$scope" | python3 -c '
-import json, sys
-crates = json.load(sys.stdin)
-if not (isinstance(crates, list) and all(isinstance(c, str) for c in crates)):
-    sys.exit(1)
-print("\n".join(crates))' 2>/dev/null)"; then
-      printf 'FAIL: --in-diff: mutation scope cannot be computed: %s %s\n' "$scope" "$(cat "$mut_tmp/scope.err")"; exit 1
-    fi
-    while IFS= read -r c; do [ -n "$c" ] && in_scope["$c"]=1; done <<<"$scope_lines"
     if ! crates_out="$(toml_mutants_crates)"; then
       printf 'FAIL: --in-diff: cannot read mutants_crates from %s\n' "$toml"; exit 1
     fi
@@ -696,50 +692,31 @@ print("\n".join(crates))' 2>/dev/null)"; then
       fi
       selected["$c"]=1
     done
-    for c in "${!in_scope[@]}"; do
-      if [ -z "${selected[$c]+x}" ]; then
-        printf 'FAIL: --in-diff: scope crate %s not selected by --mutants\n' "$c"; exit 1
-      fi
-    done
     if [ "$oracle_ok" -ne 1 ]; then
       printf 'FAIL: --in-diff: changed files cannot be mapped to crates without cargo metadata\n'; exit 1
     fi
     if ! problem="$(python3 "$here/mutation-diff.py" unmappable "$root" "$head_oid" "$snap" 2>&1)"; then
       printf '%s\n' "${problem:-FAIL: --in-diff: the unmappable-shape check printed nothing}"; exit 1
     fi
+    narrower=0
+    for c in "${!contract[@]}"; do [ -n "${selected[$c]+x}" ] || narrower=1; done
+    owned_lines=""
     compiled_file="$mut_tmp/compiled.json"
-    if ! python3 "$here/mutation-diff.py" compiled "$root" "$base" "$head_oid" "$snap" "$mut_tmp/depinfo" \
+    if [ "$narrower" -eq 1 ] && { ! python3 "$here/mutation-diff.py" compiled "$root" "$base" "$head_oid" "$snap" "$mut_tmp/depinfo" \
          >"$compiled_file" 2>"$mut_tmp/compiled.err" ||
        ! owned_lines="$(python3 -c '
 import json, sys
 crates = json.load(open(sys.argv[1]))
 if not (isinstance(crates, dict) and all(isinstance(c, str) for c in crates)):
     sys.exit(1)
-print("\n".join(sorted(crates)))' "$compiled_file" 2>/dev/null)"; then
+print("\n".join(sorted(crates)))' "$compiled_file" 2>/dev/null)"; }; then
       printf 'FAIL: --in-diff: compiled inputs cannot be computed: %s\n' "$(cat "$mut_tmp/compiled.err")"; exit 1
     fi
-    embeds_file="$mut_tmp/embeds.json"
-    if ! python3 "$here/mutation-diff.py" embeds "$root" "$base" "$head_oid" "$snap" "$mut_tmp/depinfo" \
-         >"$embeds_file" 2>"$mut_tmp/embeds.err"; then
-      printf 'FAIL: --in-diff: include sites cannot be scanned: %s\n' "$(cat "$mut_tmp/embeds.err")"; exit 1
-    fi
-    if ! indirect="$(python3 -c '
-import json, sys
-data = json.load(open(sys.argv[1]))
-if not (isinstance(data, dict) and (data.get("indirect") is None or isinstance(data["indirect"], str))):
-    sys.exit(1)
-print(data["indirect"] or "")' "$embeds_file" 2>/dev/null)"; then
-      printf 'FAIL: --in-diff: unreadable include-site list %s\n' "$embeds_file"; exit 1
-    fi
-    declare -A touched=()
     while IFS= read -r c; do
-      [ -z "$c" ] && continue
-      if [ -z "${selected[$c]+x}" ]; then
-        printf 'FAIL: --in-diff: changed crate %s not selected by --mutants\n' "$c"; exit 1
-      fi
-      touched["$c"]=1
+      if [ -z "$c" ] || [ -n "${selected[$c]+x}" ]; then continue; fi
+      printf 'FAIL: --in-diff: changed crate %s not selected by --mutants\n' "$c"; exit 1
     done <<<"$owned_lines"
-    if [ ! -s "$in_diff_file" ] && [ "${#in_scope[@]}" -eq 0 ] && [ "${#touched[@]}" -eq 0 ] && [ -z "$indirect" ]; then
+    if [ ! -s "$in_diff_file" ]; then
       printf 'SKIP: in-diff: no Rust change between %s and HEAD\n' "$base"
       mutant_crates=()
     fi
@@ -782,57 +759,30 @@ print(data["indirect"] or "")' "$embeds_file" 2>/dev/null)"; then
     diff_flags=()
     judge_flags=()
     if [ -n "$in_diff" ]; then
-      whole=0
-      if [ -n "$indirect" ]; then
-        printf 'whole: %s: include_str/include_bytes used indirectly in %s\n' "$cname" "$indirect"
-        whole=1
-      elif [ -n "${in_scope[$cname]+x}" ]; then
-        printf 'whole: %s: mutation scope changed\n' "$cname"
-        whole=1
-      elif [ -n "${touched[$cname]+x}" ]; then
-        if ! (cd "$mut_dir" && exec env "${run_env[@]}" cargo mutants --package "$cname" --list-files --json "${extra_mutants_flags[@]}") >"$mut_tmp/files.json"; then
-          fail "cargo mutants --list-files --package $cname failed"
-          continue
-        fi
-        if ! walked="$(python3 "$here/mutation-diff.py" unlisted "$cname" "$mut_tmp/files.json" "$compiled_file" "$mut_dir" "$embeds_file" 2>&1)"; then
-          printf '%s\n' "${walked:-FAIL: $cname: mutation-diff.py unlisted printed nothing}"
-          fail_n=$((fail_n + 1))
-          continue
-        fi
-        case "$walked" in
-          "") ;;
-          "whole: $cname: changed "* | "whole: $cname: include_str/include_bytes used indirectly in "* | \
-          "whole: $cname: walked source "*)
-            printf '%s\n' "$walked"; whole=1;;
-          *) fail "$cname: mutation-diff.py unlisted printed no verdict: $walked"; continue;;
-        esac
-      fi
-      if [ "$whole" -eq 1 ]; then
-        :
-      elif [ ! -s "$in_diff_file" ]; then
-        printf 'SKIP: %s: no Rust change between %s and HEAD\n' "$cname" "$base"
+      if ! (cd "$mut_dir" && exec env "${run_env[@]}" cargo mutants --package "$cname" --list --json "${extra_mutants_flags[@]}") >"$mut_tmp/whole.json" ||
+         ! (cd "$mut_dir" && exec env "${run_env[@]}" cargo mutants --package "$cname" --in-diff "$in_diff_file" --list --json "${extra_mutants_flags[@]}") >"$mut_tmp/indiff.json"; then
+        fail "cargo mutants --list --package $cname failed"
         continue
-      else
-        if ! (cd "$mut_dir" && exec env "${run_env[@]}" cargo mutants --package "$cname" --list --json "${extra_mutants_flags[@]}") >"$mut_tmp/whole.json" ||
-           ! (cd "$mut_dir" && exec env "${run_env[@]}" cargo mutants --package "$cname" --in-diff "$in_diff_file" --list --json "${extra_mutants_flags[@]}") >"$mut_tmp/indiff.json"; then
-          fail "cargo mutants --list --package $cname failed"
-          continue
-        fi
-        if ! verdict="$(python3 "$here/mutation-diff.py" classify "$cname" "$in_diff_file" "$mut_tmp/whole.json" "$mut_tmp/indiff.json")"; then
-          printf '%s\n' "${verdict:-FAIL: $cname: mutation-diff.py classify printed nothing}"
-          fail_n=$((fail_n + 1))
-          continue
-        fi
-        case "$verdict" in
-          "RUN $cname: "*) printf '%s\n' "$verdict";;
-          "SKIP: $cname: "*) printf '%s\n' "$verdict"; continue;;
-          *) fail "$cname: mutation-diff.py classify printed no verdict: $verdict"; continue;;
-        esac
-        listed_n="${verdict#"RUN $cname: "}"
-        listed_n="${listed_n%% *}"
-        diff_flags=(--in-diff "$in_diff_file")
-        judge_flags=(--in-diff --expect "$listed_n")
       fi
+      if ! problem="$(python3 "$here/mutation-diff.py" tracked "$cname" "$mut_tmp/whole.json" "$root" "$head_oid" 2>&1)"; then
+        printf '%s\n' "${problem:-FAIL: $cname: mutation-diff.py tracked printed nothing}"
+        fail_n=$((fail_n + 1))
+        continue
+      fi
+      if ! verdict="$(python3 "$here/mutation-diff.py" classify "$cname" "$in_diff_file" "$mut_tmp/whole.json" "$mut_tmp/indiff.json")"; then
+        printf '%s\n' "${verdict:-FAIL: $cname: mutation-diff.py classify printed nothing}"
+        fail_n=$((fail_n + 1))
+        continue
+      fi
+      case "$verdict" in
+        "RUN $cname: "*) printf '%s\n' "$verdict";;
+        "SKIP: $cname: "*) printf '%s\n' "$verdict"; continue;;
+        *) fail "$cname: mutation-diff.py classify printed no verdict: $verdict"; continue;;
+      esac
+      listed_n="${verdict#"RUN $cname: "}"
+      listed_n="${listed_n%% *}"
+      diff_flags=(--in-diff "$in_diff_file")
+      judge_flags=(--in-diff --expect "$listed_n")
     fi
     # A per-crate output dir, so each crate's outcomes.json and per-mutant logs
     # survive for the two checks below instead of being overwritten by the next

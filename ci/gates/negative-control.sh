@@ -4835,22 +4835,12 @@ mid_channel="$(sed -n 's/^channel *= *"\(.*\)".*/\1/p' "$here/../../rust-toolcha
 cat > "$mid_aux/tools/cargo" <<'EOF'
 #!/bin/sh
 [ "$1" = mutants ] || exec "$MID_REAL_CARGO" "$@"
-list=0 files=0 pkg= indiff= out= prev=
+list=0 pkg= indiff= out= prev=
 for a in "$@"; do
   case "$prev" in --package) pkg="$a";; --in-diff) indiff="$a";; --output) out="$a";; esac
   [ "$a" = --list ] && list=1
-  [ "$a" = --list-files ] && files=1
   prev="$a"
 done
-if [ "$files" = 1 ]; then
-  python3 -c 'import json, os, re, sys
-lib = os.path.join("crates", sys.argv[1], "src/lib.rs")
-with open(lib) as f:
-    names = re.findall(r"^(?:pub )?mod (\w+)\s*;", f.read(), re.M)
-walked = [lib] + [os.path.join(os.path.dirname(lib), n + ".rs") for n in names]
-print(json.dumps([{"package": sys.argv[1], "path": w} for w in walked if os.path.isfile(w)]))' "$pkg"
-  exit 0
-fi
 if [ "$list" = 1 ]; then
   if [ -n "$indiff" ]; then json="$MID_INDIFF"; else json="$MID_WHOLE"; fi
   [ -z "$json" ] && exit 0
@@ -4975,16 +4965,6 @@ mid_git "$mid_r" replace base "$mid_fake"
 expect_reject_because "mutation-in-diff/replace-refs-fail" "the repository has replace refs" \
   mid_gate "$mid_r" "$mid_whole_edit" "[$mid_a,$mid_star]" 0
 mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
-printf 'be brief\n' > "$mid_r/crates/a/src/prompt.txt"
-printf 'pub fn prompt() -> &'"'"'static str {\n    include_str!("prompt.txt")\n}\n' >> "$mid_r/crates/a/src/lib.rs"
-mid_git "$mid_r" add -A
-mid_git "$mid_r" commit -qm data
-mid_git "$mid_r" tag -f base
-printf 'be terse\n' > "$mid_r/crates/a/src/prompt.txt"
-mid_git "$mid_r" commit -qam prompt
-expect_reject_because "mutation-in-diff/include-str-data-survivor-fails" "reported missed/timeout mutants" \
-  mid_gate "$mid_r" "$mid_whole_edit" "" 2
-mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
 printf 'pub mod decision;\n' >> "$mid_r/crates/a/src/lib.rs"
 printf 'pub fn decide(x: u32) -> bool {\n    x > 3\n}\n' > "$mid_r/crates/a/src/decision.rs"
 mid_git "$mid_r" add -A
@@ -5017,57 +4997,6 @@ mid_alias='[{"name":"allowed gt","package":"a","file":"crates/a/src/alias.rs","s
 expect_reject_because "mutation-in-diff/symlinked-source-fails" "symlink crates/a/src/alias.rs in mutation crate a" \
   mid_gate "$mid_r" "$mid_alias" "" 0
 mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
-printf '[package]\nname = "a"\nversion = "0.1.0"\nedition = "2021"\nbuild = "src/build.rs"\n' > "$mid_r/crates/a/Cargo.toml"
-printf 'mod helper;\nfn main() {\n    helper::emit();\n}\n' > "$mid_r/crates/a/src/build.rs"
-printf 'pub fn emit() {\n    println!("cargo:rustc-cfg=fast");\n}\n' > "$mid_r/crates/a/src/helper.rs"
-mid_git "$mid_r" add -A
-mid_git "$mid_r" commit -qm build
-mid_git "$mid_r" tag -f base
-printf 'pub fn emit() {\n    println!("cargo:rustc-cfg=slow");\n}\n' > "$mid_r/crates/a/src/helper.rs"
-mid_git "$mid_r" commit -qam helper
-expect_reject_because "mutation-in-diff/build-script-crate-survivor-fails" "reported missed/timeout mutants" \
-  mid_gate "$mid_r" "$mid_whole_edit" "" 2
-mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
-printf 'pub fn check() -> bool {\n    include_str!("policy.rs").trim() == "ALLOW"\n}\n' >> "$mid_r/crates/a/src/lib.rs"
-printf 'ALLOW\n' > "$mid_r/crates/a/src/policy.rs"
-mid_git "$mid_r" add -A
-mid_git "$mid_r" commit -qm policy
-mid_git "$mid_r" tag -f base
-printf 'DENY\n' > "$mid_r/crates/a/src/policy.rs"
-mid_git "$mid_r" commit -qam deny
-expect_reject_because "mutation-in-diff/include-str-rs-survivor-fails" "reported missed/timeout mutants" \
-  mid_gate "$mid_r" "$mid_whole_edit" "" 2
-mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
-printf 'pub fn check() -> bool {\n    include_str!("../../a/src/policy.rs").trim() == "ALLOW"\n}\n' > "$mid_r/crates/b/src/lib.rs"
-printf 'ALLOW\n' > "$mid_r/crates/a/src/policy.rs"
-mid_git "$mid_r" add -A
-mid_git "$mid_r" commit -qm policy
-mid_git "$mid_r" tag -f base
-printf 'DENY\n' > "$mid_r/crates/a/src/policy.rs"
-mid_git "$mid_r" commit -qam deny
-expect_reject_because "mutation-in-diff/cross-crate-include-str-survivor-fails" "cargo mutants --package b reported missed/timeout mutants" \
-  mid_gate "$mid_r" "$mid_whole_edit" "" 2
-mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
-printf 'pub fn check() -> bool {\n    include_str!("../../../README.md").trim() == "ALLOW"\n}\n' >> "$mid_r/crates/a/src/lib.rs"
-printf 'ALLOW\n' > "$mid_r/README.md"
-mid_git "$mid_r" add -A
-mid_git "$mid_r" commit -qm readme
-mid_git "$mid_r" tag -f base
-printf 'DENY\n' > "$mid_r/README.md"
-mid_git "$mid_r" commit -qam deny
-expect_reject_because "mutation-in-diff/readme-include-survivor-fails" "cargo mutants --package a reported missed/timeout mutants" \
-  mid_gate "$mid_r" "$mid_whole_edit" "" 2
-mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
-printf 'pub mod policy;\npub fn check() -> bool {\n    include_str!("policy.rs").contains("ALLOW")\n}\n' >> "$mid_r/crates/a/src/lib.rs"
-printf 'pub const RULE: &str = "ALLOW";\n' > "$mid_r/crates/a/src/policy.rs"
-mid_git "$mid_r" add -A
-mid_git "$mid_r" commit -qm policy
-mid_git "$mid_r" tag -f base
-printf 'pub const RULE: &str = "DENY";\n' > "$mid_r/crates/a/src/policy.rs"
-mid_git "$mid_r" commit -qam deny
-expect_reject_because "mutation-in-diff/module-include-survivor-fails" "cargo mutants --package a reported missed/timeout mutants" \
-  mid_gate "$mid_r" "$mid_whole_edit" "" 2
-mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
 printf 'pub fn check() -> bool {\n    include_str!("policy\\nname.txt") == "ALLOW"\n}\n' >> "$mid_r/crates/a/src/lib.rs"
 printf 'ALLOW' > "$mid_r/crates/a/src/policy"$'\n'"name.txt"
 mid_git "$mid_r" add -A
@@ -5076,28 +5005,6 @@ mid_git "$mid_r" tag -f base
 printf 'DENY' > "$mid_r/crates/a/src/policy"$'\n'"name.txt"
 mid_git "$mid_r" commit -qam deny
 expect_reject_because "mutation-in-diff/newline-path-fails" "contains a newline or control character" \
-  mid_gate "$mid_r" "$mid_whole_edit" "" 2
-mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
-printf 'pub mod policy;\nuse std::include_str as embed;\npub fn allowed() -> bool {\n    embed!("policy.rs").contains("ALLOW")\n}\n' >> "$mid_r/crates/a/src/lib.rs"
-printf '// ALLOW\npub fn rule() {}\n' > "$mid_r/crates/a/src/policy.rs"
-mid_git "$mid_r" add -A
-mid_git "$mid_r" commit -qm policy
-mid_git "$mid_r" tag -f base
-printf '// DENY\npub fn rule() {}\n' > "$mid_r/crates/a/src/policy.rs"
-mid_git "$mid_r" commit -qam deny
-expect_reject_because "mutation-in-diff/include-alias-survivor-fails" "cargo mutants --package a reported missed/timeout mutants" \
-  mid_gate "$mid_r" "$mid_whole_edit" "" 2
-mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
-printf 'pub use std::include_str as embed;\n' >> "$mid_r/crates/a/src/lib.rs"
-printf '\n[dependencies]\na = { path = "../a" }\n' >> "$mid_r/crates/b/Cargo.toml"
-printf 'pub mod policy;\npub fn allowed() -> bool {\n    a::embed!("policy.rs").contains("ALLOW")\n}\n' > "$mid_r/crates/b/src/lib.rs"
-printf 'pub const RULE: &str = "ALLOW";\n' > "$mid_r/crates/b/src/policy.rs"
-mid_git "$mid_r" add -A
-mid_git "$mid_r" commit -qm alias
-mid_git "$mid_r" tag -f base
-printf 'pub const RULE: &str = "DENY";\n' > "$mid_r/crates/b/src/policy.rs"
-mid_git "$mid_r" commit -qam deny
-expect_reject_because "mutation-in-diff/cross-crate-include-alias-survivor-fails" "cargo mutants --package b reported missed/timeout mutants" \
   mid_gate "$mid_r" "$mid_whole_edit" "" 2
 mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
 mkdir -p "$mid_r/.cargo"
@@ -5114,18 +5021,6 @@ mid_git "$mid_r" add -A
 mid_git "$mid_r" commit -qm config
 expect_reject_because "mutation-in-diff/symlinked-config-input-fails" ".cargo is a symlink; config inputs must be regular files" \
   mid_gate "$mid_r" "$mid_whole_edit" "[$mid_a,$mid_star]" 0
-mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
-printf '\n[profile.test]\ndebug-assertions = false\n' >> "$mid_r/Cargo.toml"
-mkdir -p "$mid_r/crates/a/src/release"
-printf '#[cfg(not(debug_assertions))]\npub mod release {\n    pub mod policy;\n    pub fn allowed() -> bool {\n        include_str!("release/policy.rs").contains("ALLOW")\n    }\n}\n' >> "$mid_r/crates/a/src/lib.rs"
-printf '// ALLOW\n' > "$mid_r/crates/a/src/release/policy.rs"
-mid_git "$mid_r" add -A
-mid_git "$mid_r" commit -qm profile
-mid_git "$mid_r" tag -f base
-printf '// DENY\n' > "$mid_r/crates/a/src/release/policy.rs"
-mid_git "$mid_r" commit -qam deny
-expect_reject_because "mutation-in-diff/test-profile-cfg-survivor-fails" "cargo mutants --package a reported missed/timeout mutants" \
-  mid_gate "$mid_r" "$mid_whole_edit" "" 2
 mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
 printf 'all_features = true\n' > "$NC_TMP/variant-mutants.toml"
 mid_blob="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY \
@@ -5135,18 +5030,6 @@ mid_git "$mid_r" commit -qm variant
 expect_reject_because "mutation-in-diff/case-variant-config-path-fails" \
   ".CARGO/mutants.toml is a case variant of the config path .cargo/mutants.toml" \
   mid_gate "$mid_r" "$mid_whole_edit" "[$mid_a,$mid_star]" 0
-mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
-printf '\n[features]\nextra = []\n\n[dev-dependencies]\na = { path = ".", features = ["extra"] }\n' >> "$mid_r/crates/a/Cargo.toml"
-mkdir -p "$mid_r/crates/a/src/enabled"
-printf '#[cfg(feature = "extra")]\npub mod enabled {\n    pub mod policy;\n    pub fn allowed() -> bool {\n        include_str!("enabled/policy.rs").contains("ALLOW")\n    }\n}\n' >> "$mid_r/crates/a/src/lib.rs"
-printf 'pub const RULE: &str = "ALLOW";\n' > "$mid_r/crates/a/src/enabled/policy.rs"
-mid_git "$mid_r" add -A
-mid_git "$mid_r" commit -qm devdep
-mid_git "$mid_r" tag -f base
-printf 'pub const RULE: &str = "DENY";\n' > "$mid_r/crates/a/src/enabled/policy.rs"
-mid_git "$mid_r" commit -qam deny
-expect_reject_because "mutation-in-diff/dev-dependency-feature-survivor-fails" "cargo mutants --package a reported missed/timeout mutants" \
-  mid_gate "$mid_r" "$mid_whole_edit" "" 2
 mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
 if [ -e "$mid_r/CRATES" ]; then
   mid_git "$mid_r" reset -q --hard base

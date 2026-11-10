@@ -928,14 +928,19 @@ sys.exit(int(os.environ.get('FIXTURE_MUTANT_EXIT', '0')))
 EOF
 printf '#!/bin/sh\necho "cargo-nextest 0.9.146 (fixture)"\n' >"$shim/cargo-nextest"
 chmod +x "$shim/cargo" "$shim/cargo-mutants" "$shim/cargo-nextest"
+mutants_crates_only() {
+  sed -i.bak "s/^mutants_crates = .*/mutants_crates = [\"$2\"]/" "$1/coverage-tiers.toml" && rm "$1/coverage-tiers.toml.bak"
+}
 for package in maknae-io xcore; do
+  mutants_crates_only "$r" "$package"
   expect "mutation watchdog budget: $package" "verified mutant budget for $package" 0 -- \
     env PATH="$shim:$PATH" COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
-      COVERAGE_TIERS_CRATE_DIRS="$package=crates/x" "$gate" --root "$r" --injection --mutants "$package"
+      COVERAGE_TIERS_CRATE_DIRS="$package=crates/x" "$gate" --root "$r" --injection --mutants-all
 done
+mutants_crates_only "$r" maknae-io
 expect "mutation watchdog budget still propagates failure" "cargo mutants --package maknae-io reported missed/timeout mutants" nonzero -- \
   env PATH="$shim:$PATH" FIXTURE_MUTANT_EXIT=3 COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
-    COVERAGE_TIERS_CRATE_DIRS="maknae-io=crates/x" "$gate" --root "$r" --injection --mutants maknae-io
+    COVERAGE_TIERS_CRATE_DIRS="maknae-io=crates/x" "$gate" --root "$r" --injection --mutants-all
 
 # THE MUTATION RUN'S EXIT STATUS IS NOT A SUFFICIENT ORACLE (#301). Real
 # cargo-mutants exits 0 when every mutant failed to BUILD and was therefore
@@ -944,15 +949,16 @@ expect "mutation watchdog budget still propagates failure" "cargo mutants --pack
 # NOTHING. The three fixtures below drive the failure THROUGH THE GATE, with the
 # stub exiting 0 exactly as the real tool does; negative-control.sh probes the
 # same decisions at mutation-oracle.sh's own boundary.
+mutants_crates_only "$r" xcore
 expect "mutation oracle: all-unviable run is refused despite exit 0" "ZERO viable" nonzero -- \
   env PATH="$shim:$PATH" FIXTURE_MUTANT_OUTCOMES=all-unviable \
     COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
-    COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r" --injection --mutants xcore
+    COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r" --injection --mutants-all
 
 expect "mutation oracle: a run with no outcomes cannot be judged" "wrote no outcomes.json" nonzero -- \
   env PATH="$shim:$PATH" FIXTURE_MUTANT_OUTCOMES=none \
     COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
-    COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r" --injection --mutants xcore
+    COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r" --injection --mutants-all
 
 # THE PREFLIGHT MUST PREEMPT, not merely record. The floor is declared for this
 # fixture via MUTATION_ORACLE_MIN_KIB so the probe does not depend on the host's
@@ -960,12 +966,13 @@ expect "mutation oracle: a run with no outcomes cannot be judged" "wrote no outc
 # assertion is that `cargo mutants` NEVER RAN, which a nonzero exit alone would
 # not show.
 r_pf="$(newroot)"; mk_base "$r_pf"
+mutants_crates_only "$r_pf" xcore
 marker_pf="$r_pf/cargo-was-invoked"
 expect "mutation oracle: an unusable scratch volume stops the run BEFORE it starts" "scratch volume unusable" nonzero -- \
   env PATH="$shim:$PATH" MUTATION_ORACLE_MIN_KIB=999999999999 \
     FIXTURE_MUTANT_MARKER="$marker_pf" \
     COVERAGE_TIERS_JSON="$r_pf/cov.json" COVERAGE_TIERS_FILELIST="$r_pf/files.list" \
-    COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r_pf" --injection --mutants xcore
+    COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r_pf" --injection --mutants-all
 if [ -e "$marker_pf" ]; then
   bad "mutation oracle: cargo mutants RAN after the scratch volume was refused ($(tr '\n' ' ' < "$marker_pf"))"
 else
@@ -976,12 +983,13 @@ fi
 # fixture reaches the stub and the marker appears. Without this, the assertion
 # above is equally satisfied by a gate that never runs mutants at all.
 r_pf2="$(newroot)"; mk_base "$r_pf2"
+mutants_crates_only "$r_pf2" xcore
 marker_pf2="$r_pf2/cargo-was-invoked"
 expect "mutation oracle: a usable scratch volume does not block the run" "verified mutant budget for xcore" 0 -- \
   env PATH="$shim:$PATH" MUTATION_ORACLE_MIN_KIB=1 \
     FIXTURE_MUTANT_MARKER="$marker_pf2" \
     COVERAGE_TIERS_JSON="$r_pf2/cov.json" COVERAGE_TIERS_FILELIST="$r_pf2/files.list" \
-    COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r_pf2" --injection --mutants xcore
+    COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r_pf2" --injection --mutants-all
 if [ -e "$marker_pf2" ]; then
   ok "mutation oracle: the marker proves the stub IS reached when space is sufficient"
 else
@@ -991,17 +999,17 @@ fi
 expect "mutation oracle: outcomes with no counts is refused, not read as 0 of 0" "has no 'total_mutants'" nonzero -- \
   env PATH="$shim:$PATH" FIXTURE_MUTANT_OUTCOMES=empty-counts \
     COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
-    COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r" --injection --mutants xcore
+    COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r" --injection --mutants-all
 
 expect "mutation oracle: counts that do not balance are refused" "do not balance" nonzero -- \
   env PATH="$shim:$PATH" FIXTURE_MUTANT_OUTCOMES=unbalanced \
     COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
-    COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r" --injection --mutants xcore
+    COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r" --injection --mutants-all
 
 expect "mutation oracle: an ENOSPC build failure is not unviability" "ENVIRONMENT failure" nonzero -- \
   env PATH="$shim:$PATH" FIXTURE_MUTANT_OUTCOMES=enospc \
     COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
-    COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r" --injection --mutants xcore
+    COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r" --injection --mutants-all
 
 mo_oracle="$here/../../mutation-oracle.sh"
 mk_indiff() { # <dir> <baseline-summary|none> [enospc]

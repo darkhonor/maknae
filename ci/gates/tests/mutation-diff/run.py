@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""mutation-diff.py: changed-line parsing, per-package classification, scope attribution."""
+"""mutation-diff.py: changed-line parsing, per-package classification, compiled-input ownership and refusals."""
 import importlib.util
 import json
 import os
@@ -340,10 +340,9 @@ class Paths(unittest.TestCase):
 
 MANIFEST = '[package]\nname = "{n}"\nversion = "0.1.0"\nedition = "2021"\n{extra}'
 TIERS = '[t1]\nmutants_crates = ["alpha", "beta"]\n'
-ALL = ["alpha", "beta"]
 
 
-class Scope(unittest.TestCase):
+class Workspace(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -379,197 +378,9 @@ class Scope(unittest.TestCase):
         self.git("add", "-A")
         self.git("commit", "-q", "-m", message)
 
-    def scope(self, env=None, workspace=None):
-        base = self.git("rev-parse", "HEAD~1")
-        full = dict(os.environ, **(env or {}))
-        result = run_cli("scope", str(self.root), base, "HEAD", *([str(workspace)] if workspace else []),
-                         env=full)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        return json.loads(result.stdout)
-
-    def change(self, path, text):
-        self.put(path, text)
-        self.commit("head")
-
-    def assertScope(self, cases):
-        for path, text, expected in cases:
-            with self.subTest(path=path, text=text):
-                self.change(path, text)
-                try:
-                    self.assertEqual(self.scope(), expected)
-                finally:
-                    self.git("reset", "-q", "--hard", "HEAD~1")
-
-    def test_scope_documentation_is_empty(self):
-        self.assertScope([("README.md", "x", []), ("packaging/README.md", "x", []),
-                          ("design/notes.md", "x", [])])
-
-    def test_scope_a_path_in_a_crate_is_left_to_dep_info(self):
-        self.assertScope([(f"crates/beta/{d}/x.rs", "fn x() {}\n", []) for d in ("src", "tests", "benches", "examples")]
-                         + [("crates/beta/src/prompt.txt", "data\n", []),
-                            ("crates/beta/src/policy.rs", "ALLOW\n", []),
-                            ("crates/beta/build_rule.rs", "pub fn emit() {}\n", []),
-                            ("crates/beta/README.md", "could be include_str data\n", []),
-                            ("crates/beta/tests/data/case.json", "{}\n", [])])
-
-    def test_scope_a_crate_manifest_change_is_that_crate(self):
-        self.assertScope([("crates/beta/Cargo.toml",
-                           MANIFEST.format(n="beta", extra='\n[lib]\npath = "src/x.rs"\n'), ["beta"])])
-
-    def test_scope_an_added_build_script_is_that_crate(self):
-        self.assertScope([("crates/beta/build.rs", "fn main() {}\n", ["beta"])])
-
-    def test_scope_a_scope_file_is_all(self):
-        root = (self.root / "Cargo.toml").read_text()
-        self.assertScope([("Cargo.toml", root + "\n[profile.release]\nopt-level = 1\n", ALL)]
-                         + [(path, "x = 1\n", ALL) for path in (
-            ".cargo/config", ".cargo/config.toml", ".cargo/mutants.toml", "rust-toolchain",
-            "rust-toolchain.toml", ".config/nextest.toml", ".github/workflows/ci.yml",
-            "ci/gates/mutation-terminated.txt", "ci/gates/coverage-tiers.sh", "ci/gates/mutation-diff.py",
-            "ci/gates/mutation-oracle.sh", "ci/gates/mutation-platform.sh", "ci/affected.py")])
-
-    def test_scope_a_case_variant_of_a_scope_file_is_attributed_like_it(self):
-        for path, expected in ((".CARGO/mutants.toml", ALL), ("Coverage-Tiers.toml", ALL),
-                               ("crates/beta/Cargo.TOML", ["beta"])):
-            with self.subTest(path=path):
-                blob = subprocess.run(["git", "-C", str(self.root), "hash-object", "-w", "--stdin"],
-                                      input="x = 1\n", capture_output=True, text=True, check=True).stdout.strip()
-                self.git("update-index", "--add", "--cacheinfo", f"100644,{blob},{path}")
-                self.git("commit", "-q", "-m", "variant")
-                try:
-                    self.assertEqual(self.scope(), expected)
-                finally:
-                    self.git("reset", "-q", "--hard", "HEAD~1")
-
-    def test_scope_an_unowned_input_that_is_not_a_scope_file_is_empty(self):
-        self.assertScope([(path, "x = 1\n", []) for path in (
-            "tools/gen.rs", ".gitattributes", "ci/gates/other.sh", "fixtures/policy.rs")])
-
-    def test_scope_lockfile_is_empty(self):
-        self.assertScope([("Cargo.lock", "version = 4\n", [])])
-
-    def test_scope_dependency_tables_only_are_empty(self):
-        deps = ('\n[dependencies]\ngamma = { path = "../gamma" }\n'
-                '\n[dev-dependencies]\nx = "1"\n\n[build-dependencies]\ny = "1"\n'
-                '\n[target.\'cfg(unix)\'.dependencies]\nz = "1"\n'
-                '\n[target.\'cfg(unix)\'.dev-dependencies]\nw = "1"\n'
-                '\n[target.\'cfg(unix)\'.build-dependencies]\nv = "1"\n')
-        root = (self.root / "Cargo.toml").read_text()
-        self.assertScope([("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra=deps), []),
-                          ("Cargo.toml", root + '\n[workspace.dependencies]\nx = "1"\n', [])])
-
-    def test_scope_manifest_comment_or_format_is_empty(self):
-        root = (self.root / "Cargo.toml").read_text()
-        self.assertScope([("crates/beta/Cargo.toml",
-                           '# note\n[package]\nname    = "beta"\nversion = "0.1.0"\nedition = "2021"\n', []),
-                          ("Cargo.toml", "# note\n" + root.replace(" = ", "   =   "), [])])
-
-    def test_scope_dependency_and_other_table_still_widens(self):
-        root = (self.root / "Cargo.toml").read_text()
-        self.assertScope([("crates/beta/Cargo.toml",
-                           MANIFEST.format(n="beta", extra='\n[dependencies]\nx = "1"\n\n[features]\nf = []\n'),
-                           ["beta"]),
-                          ("Cargo.toml", root + '\n[workspace.dependencies]\nx = "1"\n\n[profile.dev]\nopt-level = 1\n',
-                           ALL)])
-
-    def test_scope_an_added_or_once_unparseable_manifest_still_widens(self):
-        self.assertScope([("crates/alpha/sub/Cargo.toml", MANIFEST.format(n="sub", extra=""), ["alpha"]),
-                          ("tools/Cargo.toml", MANIFEST.format(n="tools", extra=""), ALL)])
-        self.put("crates/beta/Cargo.toml", "[package\n")
-        self.commit("break")
-        self.change("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra=""))
-        self.assertEqual(self.scope(), ["beta"])
-
-    def test_scope_a_crate_outside_the_mutation_contract_is_empty(self):
-        self.assertScope([("crates/gamma/Cargo.toml", MANIFEST.format(n="gamma", extra="\n[features]\nf = []\n"), [])])
-
-    def test_scope_a_nested_crate_owns_its_own_manifest(self):
-        self.put("Cargo.toml", '[workspace]\nmembers = ["crates/*", "crates/beta/inner"]\nresolver = "2"\n')
-        self.put("crates/beta/inner/Cargo.toml", MANIFEST.format(n="inner", extra=""))
-        self.put("crates/beta/inner/src/lib.rs", "")
-        self.commit("nest")
-        self.assertScope([("crates/beta/inner/Cargo.toml", MANIFEST.format(n="inner", extra="\n[features]\nf = []\n"), [])])
-
-    def test_scope_a_deleted_scope_file_is_still_all(self):
-        (self.root / ".cargo/mutants.toml").unlink()
-        self.commit("remove")
-        self.assertEqual(self.scope(), ALL)
-
-    def test_scope_tiers_contract_change_is_all_of_head(self):
-        self.change("coverage-tiers.toml", '[t1]\nmutants_crates = ["alpha", "beta", "gamma"]\n')
-        self.assertEqual(self.scope(), ["alpha", "beta", "gamma"])
-        self.git("reset", "-q", "--hard", "HEAD~1")
-        self.change("coverage-tiers.toml", '[t1]\nmutants_crates = ["alpha"]\n')
-        self.assertEqual(self.scope(), ["alpha"])
-
-    def test_scope_unparseable_tiers_is_every_workspace_crate(self):
-        self.change("coverage-tiers.toml", "[t1\n")
-        self.assertEqual(self.scope(), ["alpha", "beta", "gamma"])
-
-    def test_scope_build_script_inside_src_is_that_crate(self):
-        self.change("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra='build = "src/build.rs"\n'))
-        self.change("crates/beta/src/build.rs", "fn main() {}\n")
-        self.assertEqual(self.scope(), ["beta"])
-
-    def test_scope_any_change_makes_a_build_script_crate_whole(self):
-        self.change("crates/beta/build.rs", "mod src {\n    mod helper;\n}\nfn main() {}\n")
-        self.assertScope([("crates/beta/src/helper.rs", "pub fn x() {}\n", ["beta"]),
-                          ("crates/beta/src/lib.rs", "pub fn y() {}\n", ["beta"]),
-                          ("crates/beta/tests/t.rs", "fn t() {}\n", ["beta"]),
-                          ("crates/alpha/src/x.rs", "fn x() {}\n", ["beta"]),
-                          ("shared/input.txt", "x\n", ["beta"]),
-                          ("README.md", "x\n", ["beta"]),
-                          ("Cargo.lock", "# lock\n", ["beta"]),
-                          ("crates/alpha/Cargo.toml", MANIFEST.format(n="alpha", extra="")
-                           + '\n[dependencies]\nserde = "1"\n', ["beta"])])
-
-    def test_scope_a_named_build_script_crate_is_that_crate(self):
-        self.change("crates/beta/Cargo.toml",
-                    MANIFEST.format(n="beta", extra='build = "../gamma/gen/build.rs"\n'))
-        self.assertScope([("crates/gamma/gen/rule.rs", "fn r() {}\n", ["beta"]),
-                          ("crates/beta/src/x.rs", "fn x() {}\n", ["beta"])])
-
-    def test_scope_a_disabled_build_script_does_not_widen(self):
-        self.change("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra="build = false\n"))
-        self.change("crates/beta/build.rs", "fn main() {}\n")
-        self.assertScope([("crates/beta/src/x.rs", "fn x() {}\n", [])])
-
-    def test_scope_reads_crate_directories_from_the_workspace_given(self):
-        self.change("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra="\n[features]\nf = []\n"))
-        snapshot = Path(tempfile.mkdtemp()) / "snap"
-        self.addCleanup(shutil.rmtree, snapshot.parent)
-        md.snapshot(self.root, "HEAD", snapshot)
-        self.put("Cargo.toml", '[workspace]\nmembers = ["crates/alpha"]\nresolver = "2"\n')
-        self.assertEqual(self.scope(), ALL)
-        self.assertEqual(self.scope(workspace=snapshot), ["beta"])
-
-    def test_scope_git_env_is_ignored(self):
-        self.change(".cargo/mutants.toml", "exclude_globs = []\n")
-        bogus = tempfile.mkdtemp()
-        self.addCleanup(os.rmdir, bogus)
-        self.assertEqual(self.scope({"GIT_DIR": bogus, "GIT_INDEX_FILE": bogus + "/idx",
-                                     "GIT_LITERAL_PATHSPECS": "1"}), ALL)
-
-    def test_scope_ignores_replace_refs(self):
-        self.change(".cargo/mutants.toml", "exclude_globs = []\n")
-        fake = self.git("commit-tree", "HEAD^{tree}", "-m", "fake")
-        self.git("replace", self.git("rev-parse", "HEAD~1"), fake)
-        self.assertEqual(self.git("diff", "HEAD~1", "HEAD"), "")
-        self.assertEqual(self.scope(), ALL)
-
-    def test_scope_unresolvable_revision_exits_one(self):
-        result = run_cli("scope", str(self.root), "no-such-rev", "HEAD")
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("FAIL:", result.stderr)
-
-    def test_scope_option_like_revision_is_data(self):
-        result = run_cli("scope", str(self.root), "--help", "HEAD")
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("FAIL:", result.stderr)
-
 
 class Unmappable(unittest.TestCase):
-    setUp, git, put, commit = Scope.setUp, Scope.git, Scope.put, Scope.commit
+    setUp, git, put, commit = Workspace.setUp, Workspace.git, Workspace.put, Workspace.commit
 
     def check(self, env=None):
         return run_cli("unmappable", str(self.root), "HEAD", str(self.root),
@@ -596,7 +407,7 @@ class Unmappable(unittest.TestCase):
         self.put("crates/beta/src/real.rs", "")
         self.link("crates/beta/src/alias.rs", "real.rs")
         self.assertRefused("FAIL: --in-diff: symlink crates/beta/src/alias.rs in mutation crate beta; "
-                           "in-diff mapping cannot follow aliases — use the whole-package run")
+                           "in-diff mapping cannot follow aliases — remove the symlink")
 
     def test_unmappable_symlink_aliasing_a_mutation_crate_is_refused(self):
         for target in ("crates/alpha/src", "crates", "."):
@@ -624,7 +435,8 @@ class Unmappable(unittest.TestCase):
                     result = self.check()
                     self.assertEqual(result.returncode, 1, result.stderr)
                     self.assertEqual(result.stdout, f"FAIL: --in-diff: build script {script} of mutation "
-                                     "crate beta lies outside the repository — use the whole-package run\n")
+                                     "crate beta lies outside the repository — move the build script "
+                                     "into the crate\n")
                 finally:
                     self.git("reset", "-q", "--hard", "HEAD~1")
 
@@ -648,7 +460,7 @@ class Unmappable(unittest.TestCase):
     def test_unmappable_symlink_with_an_absolute_target_is_refused(self):
         self.link("docs-link", "/etc")
         self.assertRefused("FAIL: --in-diff: symlink docs-link points outside the repository; in-diff "
-                           "mapping cannot follow aliases — use the whole-package run")
+                           "mapping cannot follow aliases — remove the symlink")
 
     def test_unmappable_symlink_escaping_the_repository_is_refused(self):
         (self.root / "tools").mkdir()
@@ -673,8 +485,8 @@ class Unmappable(unittest.TestCase):
                     result = self.check()
                     self.assertEqual(result.returncode, 1, result.stderr)
                     self.assertEqual(result.stdout, f"FAIL: --in-diff: tracked path {shown} contains a newline "
-                                     "or control character; in-diff mapping cannot name it — use the "
-                                     "whole-package run\n")
+                                     "or control character; in-diff mapping cannot name it — rename "
+                                     "the file\n")
                 finally:
                     self.git("reset", "-q", "--hard", "HEAD~1")
 
@@ -687,15 +499,15 @@ class Unmappable(unittest.TestCase):
                 try:
                     key = line.split(" ", 1)[0]
                     self.assertRefused(f"FAIL: --in-diff: .cargo/mutants.toml sets {key}, which changes what "
-                                       "cargo-mutants builds and the in-diff checks do not model — use the "
-                                       "whole-package run")
+                                       "cargo-mutants builds and the in-diff checks do not model — remove "
+                                       f"{key} from .cargo/mutants.toml")
                 finally:
                     self.git("reset", "-q", "--hard", "HEAD~1")
 
     def test_unmappable_an_unparseable_mutants_config_is_refused(self):
         self.put(".cargo/mutants.toml", "exclude_globs = [\n")
         self.commit("config")
-        self.assertRefused("FAIL: --in-diff: .cargo/mutants.toml does not parse")
+        self.assertRefused("FAIL: --in-diff: .cargo/mutants.toml does not parse — fix .cargo/mutants.toml")
 
     def test_unmappable_exclusions_only_or_no_mutants_config_is_accepted(self):
         self.put(".cargo/mutants.toml", 'exclude_globs = ["x.rs"]\nexclude_re = ["y"]\n')
@@ -703,6 +515,62 @@ class Unmappable(unittest.TestCase):
         self.assertAccepted()
         (self.root / ".cargo/mutants.toml").unlink()
         self.commit("drop")
+        self.assertAccepted()
+
+    def test_unmappable_a_non_rs_target_path_is_refused(self):
+        for table in ('[lib]\npath = "src/main.rust"\n', '[[bin]]\nname = "beta"\npath = "src/main.rust"\n',
+                      '[[test]]\nname = "t"\npath = "src/main.rust"\n'):
+            with self.subTest(table=table):
+                self.put("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra="\n" + table))
+                self.put("crates/beta/src/main.rust", "fn main() {}\n")
+                self.commit("target")
+                try:
+                    self.assertRefused("FAIL: --in-diff: crates/beta/src/main.rust is compiled into mutation crate "
+                                       "beta but does not end in .rs", "rename it to .rs")
+                finally:
+                    self.git("reset", "-q", "--hard", "HEAD~1")
+
+    def test_unmappable_a_case_variant_rs_suffix_is_refused(self):
+        for name in ("crates/beta/src/foo.RS", "crates/beta/src/foo.Rs"):
+            with self.subTest(name=name):
+                self.put(name, "pub fn f() {}\n")
+                self.commit("variant")
+                try:
+                    self.assertRefused(f"FAIL: --in-diff: {name} ends in a case variant of .rs", "rename it to .rs")
+                finally:
+                    self.git("reset", "-q", "--hard", "HEAD~1")
+
+    def test_unmappable_a_case_variant_rs_suffix_outside_every_mutation_crate_is_accepted(self):
+        self.put("crates/gamma/src/foo.RS", "pub fn f() {}\n")
+        self.commit("variant")
+        self.assertAccepted()
+
+    def test_unmappable_a_target_outside_the_crate_directory_is_refused(self):
+        for kind, table in (("[lib]", '[lib]\npath = "../../shared/lib.rs"\n'),
+                            ("[[bin]]", '[[bin]]\nname = "beta"\npath = "../../shared/lib.rs"\n'),
+                            ("[lib]", '[lib]\npath = "../alpha/src/lib.rs"\n')):
+            with self.subTest(table=table):
+                self.put("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra="\n" + table))
+                self.put("shared/lib.rs", "pub fn s() {}\n")
+                self.commit("outside")
+                try:
+                    target = table.split('path = "')[1].split('"')[0]
+                    resolved = "shared/lib.rs" if "shared" in target else "crates/alpha/src/lib.rs"
+                    self.assertRefused(f"FAIL: --in-diff: {kind} path {target} of mutation crate beta resolves to "
+                                       f"{resolved}, outside crates/beta;", "must live inside its directory")
+                finally:
+                    self.git("reset", "-q", "--hard", "HEAD~1")
+
+    def test_unmappable_a_target_outside_a_non_mutation_crate_is_accepted(self):
+        self.put("crates/gamma/Cargo.toml", MANIFEST.format(n="gamma", extra='\n[lib]\npath = "../../shared/lib.rs"\n'))
+        self.put("shared/lib.rs", "")
+        self.commit("outside")
+        self.assertAccepted()
+
+    def test_unmappable_an_rs_target_path_is_accepted(self):
+        self.put("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra='\n[lib]\npath = "src/x.rs"\n'))
+        self.put("crates/beta/src/x.rs", "pub fn x() {}\n")
+        self.commit("target")
         self.assertAccepted()
 
     def test_unmappable_build_script_in_a_non_mutation_crate_is_ignored(self):
@@ -726,7 +594,7 @@ class Unmappable(unittest.TestCase):
 
 
 class Compiled(unittest.TestCase):
-    setUp, git, put, commit = Scope.setUp, Scope.git, Scope.put, Scope.commit
+    setUp, git, put, commit = Workspace.setUp, Workspace.git, Workspace.put, Workspace.commit
 
     def compiled(self, env=None):
         target = Path(tempfile.mkdtemp())
@@ -751,29 +619,38 @@ class Compiled(unittest.TestCase):
         self.commit("edit")
         self.assertCompiled({"beta": ["crates/beta/src/policy.rs"]})
 
-    def test_compiled_dep_info_comes_before_the_documentation_exemption(self):
+    def test_compiled_a_non_rust_input_is_not_an_owned_change(self):
         self.base({"crates/beta/src/lib.rs": 'pub fn check() -> bool {\n    include_str!("../../../README.md").trim() == "ALLOW"\n}\n',
                    "README.md": "ALLOW\n"})
         self.put("README.md", "DENY\n")
         self.commit("edit")
-        self.assertCompiled({"beta": ["README.md"]})
+        self.assertCompiled({})
 
     def test_compiled_a_dep_info_entry_that_does_not_resolve_fails(self):
-        self.base({"crates/beta/src/lib.rs": 'pub fn check() -> bool {\n    include_str!("policy\\nname.txt") == "ALLOW"\n}\n',
-                   "crates/beta/src/policy\nname.txt": "ALLOW"})
+        lib = 'pub fn check() -> bool {\n    include_str!("policy\\nname.txt") == "ALLOW"\n}\n'
+        self.base({"crates/beta/src/lib.rs": lib, "crates/beta/src/policy\nname.txt": "ALLOW"})
         self.put("crates/beta/src/policy\nname.txt", "DENY")
+        self.put("crates/beta/src/lib.rs", lib + "// edited\n")
         self.commit("edit")
         result = self.compiled()
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertRegex(result.stderr, r'FAIL: beta: dep-info entry "[^"]*" in beta-\w+\.d does not '
                                         r"resolve to a file")
 
-    def test_compiled_another_crates_file_is_compiled_into_the_embedding_crate(self):
+    def test_compiled_another_crates_embedded_file_is_owned_by_no_one(self):
         self.base({"crates/alpha/src/lib.rs": 'pub fn check() -> bool {\n    include_str!("../../beta/src/policy.rs") == "x"\n}\n',
                    "crates/beta/src/policy.rs": "ALLOW\n"})
         self.put("crates/beta/src/policy.rs", "DENY\n")
         self.commit("edit")
-        self.assertCompiled({"alpha": ["crates/beta/src/policy.rs"]})
+        self.assertCompiled({})
+
+    def test_compiled_only_rust_files_are_owned(self):
+        self.base({"crates/beta/src/lib.rs": "pub mod x;\npub fn p() -> &'static str {\n    include_str!(\"prompt.txt\")\n}\n",
+                   "crates/beta/src/x.rs": "pub fn x() {}\n", "crates/beta/src/prompt.txt": "be brief\n"})
+        self.put("crates/beta/src/prompt.txt", "be terse\n")
+        self.put("crates/beta/src/x.rs", "pub fn x() -> u8 {\n    1\n}\n")
+        self.commit("edit")
+        self.assertCompiled({"beta": ["crates/beta/src/x.rs"]})
 
     def test_compiled_a_module_file_is_compiled_into_its_crate(self):
         self.base({"crates/beta/src/lib.rs": "pub mod x;\n", "crates/beta/src/x.rs": "pub fn x() {}\n"})
@@ -844,11 +721,13 @@ class Compiled(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("FAIL: beta: cargo check of its production targets failed", result.stderr)
 
-    def test_compiled_a_scope_crate_is_not_checked(self):
+    def test_compiled_a_scope_file_change_does_not_exempt_a_crate(self):
         self.put("crates/beta/src/lib.rs", "pub fn broken( {\n")
         self.put(".cargo/mutants.toml", "exclude_globs = []\n")
         self.commit("edit")
-        self.assertCompiled({})
+        result = self.compiled()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("FAIL: beta: cargo check of its production targets failed", result.stderr)
 
     def test_compiled_git_env_is_ignored(self):
         self.put("crates/beta/src/lib.rs", "pub fn x() {}\n")
@@ -866,303 +745,58 @@ class Compiled(unittest.TestCase):
                                                "crates/a/src/my data.txt", "crates/a/src/lib.rs"])
 
 
-class Includes(unittest.TestCase):
-    def test_includes_decodes_literal_arguments(self):
-        self.assertEqual(md.includes('const A: &str = include_str!("a\\x41\\u{42}\\\n   .txt");\n'
-                                     'const B: &[u8] = include_bytes!(r##"b"#.bin"##);\n'),
-                         (["aAB.txt", 'b"#.bin'], False))
-
-    def test_includes_lexes_lifetimes_and_character_literals(self):
-        self.assertEqual(md.includes("fn f<'a>(x: &'a str) -> char { let _ = b'\"'; '\\'' }\n"
-                                     'const A: &str = include_str!("ok");\n'), (["ok"], False))
-
-    def test_includes_byte_or_c_string_arguments_are_non_literal(self):
-        for arg in ('b"x"', 'c"x"', 'br"x"', '"a" "b"'):
-            with self.subTest(arg=arg):
-                self.assertEqual(md.includes(f"const A: &str = include_str!({arg});\n"), ([], True))
-
-    def test_includes_only_test_only_cfg_modules_are_skipped(self):
-        self.assertEqual(md.includes('#[cfg(any(test, unix))]\nmod m {\n    const A: &str = include_str!("kept");\n}\n'
-                                     '#[cfg(test)]\nfn helper() -> &\'static str {\n    include_str!("also")\n}\n'),
-                         (["kept", "also"], False))
+def untracked_message(listed, hint):
+    return (f"FAIL: beta: cargo-mutants walks {listed} under a spelling the tracked tree at HEAD does not have; "
+            "the in-diff mapping cannot read it" + (" — rename the tracked file to that spelling" if hint else "") + "\n")
 
 
-class Unlisted(unittest.TestCase):
-    def unlisted(self, files, compiled, crate="beta", sources=None):
-        directory = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, directory)
-        tree = directory / "ws"
-        names = [] if isinstance(files, str) else list(files)
-        if isinstance(compiled, dict):
-            names += [p for paths in compiled.values() if isinstance(paths, list) for p in paths
-                      if isinstance(p, str)]
-        for name, text in {**dict.fromkeys(names, ""), **(sources or {})}.items():
-            (tree / name).parent.mkdir(parents=True, exist_ok=True)
-            (tree / name).write_text(text)
-        tree.mkdir(exist_ok=True)
-        (directory / "files.json").write_text(files if isinstance(files, str) else
-                                              json.dumps([{"package": crate, "path": f} for f in files]))
-        (directory / "compiled.json").write_text(compiled if isinstance(compiled, str) else json.dumps(compiled))
-        found = {"indirect": None, "targets": {}}
-        for name in sorted(n for n in names + list(sources or {}) if n.endswith(".rs")):
-            literal, dynamic = md.includes((tree / name).read_text())
-            if dynamic and found["indirect"] is None:
-                found["indirect"] = name
-            for value in literal:
-                target = os.path.normpath(os.path.join(os.path.dirname(name), value))
-                if (tree / target).is_file():
-                    found["targets"][target] = [crate]
-        (directory / "embeds.json").write_text(json.dumps(found))
-        return run_cli("unlisted", crate, str(directory / "files.json"), str(directory / "compiled.json"),
-                       str(tree), str(directory / "embeds.json"))
+class Tracked(unittest.TestCase):
+    setUp, git, put, commit = Workspace.setUp, Workspace.git, Workspace.put, Workspace.commit
 
-    def assertVerdict(self, files, compiled, expected, sources=None):
-        result = self.unlisted(files, compiled, sources=sources)
-        self.assertEqual((result.returncode, result.stdout), (0, expected), result.stderr)
+    def tracked(self, files):
+        listing = self.root / "whole.json"
+        listing.write_text(json.dumps([mutant(f"{f}:1:1: m", f, 1, package="beta") for f in files]))
+        return run_cli("tracked", "beta", str(listing), str(self.root), "HEAD")
 
-    def test_unlisted_a_module_that_is_also_embedded_runs_the_crate_whole(self):
-        lib = 'pub mod policy;\npub fn check() -> bool {\n    include_str!("policy.rs").contains("ALLOW")\n}\n'
-        self.assertVerdict(["crates/beta/src/lib.rs", "crates/beta/src/policy.rs"],
-                           {"beta": ["crates/beta/src/policy.rs"]},
-                           "whole: beta: changed crates/beta/src/policy.rs is embedded by "
-                           "include_str!/include_bytes!\n", sources={"crates/beta/src/lib.rs": lib})
+    def test_tracked_exact_paths_pass(self):
+        result = self.tracked(["crates/beta/src/lib.rs"])
+        self.assertEqual((result.returncode, result.stdout), (0, ""), result.stderr)
 
-    def test_unlisted_every_include_spelling_is_an_include(self):
-        for call in ('include_str!("policy.rs")', 'include_bytes! ( "policy.rs" , )',
-                     '::core::include_str!["policy.rs"]', 'std::include_bytes!{r#"policy.rs"#}',
-                     'core :: include_str !\n("./policy.rs")', 'include_str!("../src/policy.rs")'):
-            with self.subTest(call=call):
-                lib = f"pub mod policy;\npub fn f() -> usize {{\n    {call}.len()\n}}\n"
-                self.assertVerdict(["crates/beta/src/lib.rs", "crates/beta/src/policy.rs"],
-                                   {"beta": ["crates/beta/src/policy.rs"]},
-                                   "whole: beta: changed crates/beta/src/policy.rs is embedded by "
-                                   "include_str!/include_bytes!\n", sources={"crates/beta/src/lib.rs": lib})
+    def test_tracked_a_listed_file_that_is_not_a_tracked_path_fails(self):
+        for listed, hint in (("crates/beta/src/LIB.rs", True), ("crates/beta/src/Lib.rs", True),
+                             ("./crates/beta/src/lib.rs", False)):
+            with self.subTest(listed=listed):
+                result = self.tracked(["crates/beta/src/lib.rs", listed])
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(result.stdout, untracked_message(listed, hint))
 
-    def test_unlisted_an_include_in_a_comment_string_or_test_module_does_not_count(self):
-        for text in ('// include_str!("policy.rs")\n', '/* a /* include_str!("policy.rs") */ */\n',
-                     '/// include_str!("policy.rs")\n', 'const S: &str = "include_str!(\\"policy.rs\\")";\n',
-                     'const R: &str = r#"include_str!("policy.rs")"#;\n',
-                     '#[cfg(test)]\n#[allow(dead_code)]\nmod tests {\n    const P: &str = include_str!("policy.rs");\n}\n',
-                     '#[cfg(all(test, unix))]\npub(crate) mod tests {\n    const P: &str = include_str!("policy.rs");\n}\n'):
-            with self.subTest(text=text):
-                lib = "pub mod policy;\nfn q(c: char) -> bool { c == '\"' }\n" + text
-                self.assertVerdict(["crates/beta/src/lib.rs", "crates/beta/src/policy.rs"],
-                                   {"beta": ["crates/beta/src/policy.rs"]}, "",
-                                   sources={"crates/beta/src/lib.rs": lib})
+    def test_tracked_a_listing_that_differs_only_in_normalisation_fails(self):
+        nfc, nfd = "crates/beta/src/caf\u00e9.rs", "crates/beta/src/cafe\u0301.rs"
+        self.put(nfc, "pub fn f() {}\n")
+        self.commit("nfc")
+        self.assertEqual(self.git("-c", "core.quotePath=false", "ls-files", "crates/beta/src").splitlines(),
+                         [nfc, "crates/beta/src/lib.rs"])
+        result = self.tracked([nfc])
+        self.assertEqual((result.returncode, result.stdout), (0, ""), result.stderr)
+        result = self.tracked([nfd])
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.stdout, untracked_message(nfd, True))
 
-    def test_unlisted_an_indirect_include_runs_the_crate_whole_on_any_compiled_change(self):
-        indirect = [f"pub fn f() -> usize {{\n    include_str!({arg}).len()\n}}\n"
-                    for arg in ('concat!("pol", "icy.rs")', 'env!("POLICY")', 'PATH')]
-        indirect += ['use std::include_str as embed;\npub fn f() -> bool {\n    embed!("x.rs").contains("A")\n}\n',
-                     'pub use core::include_bytes;\n',
-                     'use std::{include_str};\n',
-                     'macro_rules! embed {\n    () => { include_str!("x.rs") };\n}\n',
-                     'macro_rules! embed {\n    ($p:expr) => { include_str!($p) };\n}\n',
-                     'pub fn f() -> &\'static str {\n    my::include_str!("x.rs")\n}\n',
-                     'pub fn f() -> &\'static str {\n    a::std::include_str!("x.rs")\n}\n',
-                     'pub fn f() -> usize {\n    include_str("x.rs")\n}\n']
-        for text in indirect:
-            with self.subTest(text=text):
-                self.assertVerdict(["crates/beta/src/lib.rs", "crates/beta/src/x.rs"],
-                                   {"beta": ["crates/beta/src/x.rs"]},
-                                   "whole: beta: include_str/include_bytes used indirectly in "
-                                   "crates/beta/src/lib.rs\n",
-                                   sources={"crates/beta/src/lib.rs": "pub mod x;\n" + text})
-
-    def test_unlisted_a_direct_call_or_a_mere_mention_is_not_indirect(self):
-        for text in ('// use std::include_str as embed;\n',
-                     '/* macro_rules! m { () => { include_str!($p) } } */\n',
-                     'const S: &str = "use std::include_str as embed;";\n',
-                     'const A: &str = ::std::include_str!("lib.rs");\n'
-                     'const B: &[u8] = ::core::include_bytes!("lib.rs");\n'
-                     'const C: &str = core::include_str!("lib.rs");\n',
-                     '#[cfg(test)]\nmod tests {\n    use std::include_str as embed;\n}\n'):
-            with self.subTest(text=text):
-                self.assertVerdict(["crates/beta/src/lib.rs", "crates/beta/src/x.rs"],
-                                   {"beta": ["crates/beta/src/x.rs"]}, "",
-                                   sources={"crates/beta/src/lib.rs": "pub mod x;\n" + text})
-        self.assertVerdict(["crates/beta/src/lib.rs"], {"alpha": ["crates/alpha/src/lib.rs"]}, "",
-                           sources={"crates/beta/src/lib.rs": "const S: &str = include_str!(env!(\"X\"));\n"})
-
-    def test_unlisted_a_walked_source_without_the_rs_suffix_runs_the_crate_whole(self):
-        self.assertVerdict(["crates/beta/src/lib.rust"], {"beta": ["crates/beta/src/lib.rust"]},
-                           "whole: beta: walked source crates/beta/src/lib.rust is not a .rs file the "
-                           "in-diff mapping reads\n")
-
-    def test_unlisted_an_include_site_widens_its_own_crate_only(self):
-        directory = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, directory)
-        tree = directory / "ws"
-        (tree / "crates/beta/src").mkdir(parents=True)
-        (tree / "crates/beta/src/policy.rs").write_text("")
-        (directory / "files.json").write_text(json.dumps([{"package": "beta", "path": "crates/beta/src/policy.rs"}]))
-        (directory / "compiled.json").write_text(json.dumps({"beta": ["crates/beta/src/policy.rs"]}))
-        embedded = "whole: beta: changed crates/beta/src/policy.rs is embedded by include_str!/include_bytes!\n"
-
-        def run(text):
-            (directory / "embeds.json").write_text(text)
-            return run_cli("unlisted", "beta", str(directory / "files.json"), str(directory / "compiled.json"),
-                           str(tree), str(directory / "embeds.json"))
-
-        for owners, expected in ((["gamma"], ""), (["beta"], embedded), (["alpha", "beta"], embedded)):
-            with self.subTest(owners=owners):
-                result = run(json.dumps({"indirect": None, "targets": {"crates/beta/src/policy.rs": owners}}))
-                self.assertEqual((result.returncode, result.stdout), (0, expected), result.stderr)
-        for text in ("", "[]", '{"targets": []}', '{"indirect": 1, "targets": {}}'):
-            with self.subTest(text=text):
-                result = run(text)
-                self.assertEqual(result.returncode, 1, result.stdout)
-                self.assertIn("FAIL: beta: unreadable include-site list", result.stderr)
-
-    def test_unlisted_a_walked_compiled_file_is_left_to_the_diff(self):
-        self.assertVerdict(["crates/beta/src/lib.rs"], {"beta": ["crates/beta/src/lib.rs"]}, "")
-
-    def test_unlisted_a_compiled_file_cargo_mutants_does_not_walk_runs_the_crate_whole(self):
-        for path in ("crates/beta/src/policy.rs", "crates/alpha/src/data.txt", "crates/beta/src/skip.rs"):
-            with self.subTest(path=path):
-                self.assertVerdict(["crates/beta/src/lib.rs"], {"beta": [path]},
-                                   f"whole: beta: changed {path} is compiled into beta but not walked "
-                                   "by cargo-mutants\n")
-
-    def test_unlisted_another_crates_inputs_are_not_this_crates(self):
-        self.assertVerdict(["crates/beta/src/lib.rs"], {"alpha": ["crates/beta/src/policy.rs"]}, "")
-
-    def test_unlisted_an_unreadable_file_list_fails(self):
-        for text in ("", "  \n", "not json", "{}", '[{"path": "crates/beta/src/lib.rs"}]',
-                     '[{"package": "alpha", "path": "crates/beta/src/lib.rs"}]', '[{"package": "beta"}]'):
-            with self.subTest(text=text):
-                result = self.unlisted(text, {})
-                self.assertEqual(result.returncode, 1, result.stdout)
-                self.assertEqual(result.stdout, "")
-                self.assertRegex(result.stderr, r"^FAIL: beta: cargo mutants --list-files printed")
-
-    def test_unlisted_an_unreadable_compiled_list_fails(self):
-        for text in ("", "[]", '{"beta": "crates/beta/src/lib.rs"}', '{"beta": [1]}'):
-            with self.subTest(text=text):
-                result = self.unlisted(["crates/beta/src/lib.rs"], text)
-                self.assertEqual(result.returncode, 1, result.stdout)
-                self.assertIn("FAIL: beta: unreadable compiled-input list", result.stderr)
+    def test_tracked_an_empty_listing_passes(self):
+        listing = self.root / "whole.json"
+        listing.write_text("")
+        result = run_cli("tracked", "beta", str(listing), str(self.root), "HEAD")
+        self.assertEqual((result.returncode, result.stdout), (0, ""), result.stderr)
 
 
-class Embeds(unittest.TestCase):
-    setUp, git, put, commit = Scope.setUp, Scope.git, Scope.put, Scope.commit
-
-    def run_embeds(self, base="HEAD~1"):
-        target = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, target, True)
-        return run_cli("embeds", str(self.root), self.git("rev-parse", base), "HEAD", str(self.root),
-                       str(target / "t"))
-
-    def embeds(self, base="HEAD~1"):
-        result = self.run_embeds(base)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        return json.loads(result.stdout)
-
-    def change(self, files):
-        for path, text in files.items():
-            self.put(path, text)
-        self.commit("edit")
-
-    def test_embeds_scans_every_production_input_of_every_package(self):
-        self.change({"crates/alpha/src/lib.rs": "mod embedder;\n",
-                     "crates/alpha/src/embedder.rs": 'const P: &str = include_str!("policy.rs");\n',
-                     "crates/alpha/src/policy.rs": "",
-                     "crates/alpha/src/unused.rs": 'const P: &str = include_str!("lib.rs");\n',
-                     "crates/gamma/src/lib.rs": 'const P: &str = include_str!("../../beta/src/lib.rs");\n',
-                     "crates/gamma/src/main.rs": 'const P: &str = include_str!("../../alpha/src/policy.rs");\n'
-                                                 "fn main() {}\n"})
-        self.assertEqual(self.embeds(), {"indirect": None, "targets": {
-            "crates/alpha/src/policy.rs": ["alpha", "gamma"], "crates/beta/src/lib.rs": ["gamma"]}})
-
-    def test_embeds_a_production_source_of_any_suffix_or_directory_is_scanned(self):
-        examples = 'autoexamples = false\n\n[lib]\npath = "examples/lib.rs"\n'
-        cases = [({"crates/gamma/Cargo.toml": MANIFEST.format(n="gamma", extra='\n[lib]\npath = "src/lib.rust"\n'),
-                   "crates/gamma/src/lib.rust": "pub use std::include_str as embed;\n"},
-                  {"indirect": "crates/gamma/src/lib.rust", "targets": {}}),
-                 ({"crates/beta/Cargo.toml": MANIFEST.format(n="beta", extra=examples),
-                   "crates/beta/examples/lib.rs": 'pub mod policy;\npub const P: &str = include_str!("policy.rs");\n',
-                   "crates/beta/examples/policy.rs": ""},
-                  {"indirect": None, "targets": {"crates/beta/examples/policy.rs": ["beta"]}}),
-                 ({"crates/gamma/src/lib.rs": 'pub const D: &str = include_str!("data.txt");\n',
-                   "crates/gamma/src/data.txt": "pub use std::include_str as embed;\n"},
-                  {"indirect": "crates/gamma/src/data.txt", "targets": {"crates/gamma/src/data.txt": ["gamma"]}})]
-        for files, expected in cases:
-            with self.subTest(files=sorted(files)):
-                self.change(files)
-                try:
-                    self.assertEqual(self.embeds(), expected)
-                finally:
-                    self.git("reset", "-q", "--hard", "HEAD~1")
-
-    def test_embeds_an_indirect_mention_in_any_crate_is_reported(self):
-        for text in ("pub use std::include_str as embed;\n",
-                     'macro_rules! m {\n    () => { include_str!("x") };\n}\n',
-                     'const S: &str = include_str!(concat!("lib", ".rs"));\n'):
-            with self.subTest(text=text):
-                self.change({"crates/gamma/src/lib.rs": text})
-                try:
-                    self.assertEqual(self.embeds()["indirect"], "crates/gamma/src/lib.rs")
-                finally:
-                    self.git("reset", "-q", "--hard", "HEAD~1")
-
-    def test_embeds_a_feature_gated_source_follows_the_declared_features(self):
-        files = {"coverage-tiers.toml": TIERS + 'mutants_features = { beta = ["seam"] }\n'}
-        for crate in ("beta", "gamma"):
-            files[f"crates/{crate}/Cargo.toml"] = MANIFEST.format(n=crate, extra="\n[features]\nseam = []\n")
-            files[f"crates/{crate}/src/lib.rs"] = '#[cfg(feature = "seam")]\nmod x;\n'
-            files[f"crates/{crate}/src/x.rs"] = "pub use std::include_str as embed;\n"
-        self.change(files)
-        self.assertEqual(self.embeds()["indirect"], "crates/beta/src/x.rs")
-
-    def test_embeds_a_feature_a_dev_dependency_enables_is_scanned(self):
-        extra = '\n[features]\nextra = []\n\n[dev-dependencies]\ngamma = { path = ".", features = ["extra"] }\n'
-        self.change({"crates/gamma/Cargo.toml": MANIFEST.format(n="gamma", extra=extra),
-                     "crates/gamma/src/lib.rs": '#[cfg(feature = "extra")]\nmod x;\n',
-                     "crates/gamma/src/x.rs": "pub use std::include_str as embed;\n"})
-        self.assertEqual(self.embeds()["indirect"], "crates/gamma/src/x.rs")
-
-    def test_embeds_a_source_another_members_features_remove_is_scanned(self):
-        self.change({"crates/beta/Cargo.toml": MANIFEST.format(n="beta", extra="\n[features]\nextra = []\n"),
-                     "crates/beta/src/lib.rs": '#[cfg(not(feature = "extra"))]\nmod active;\n',
-                     "crates/beta/src/active.rs": 'pub mod policy;\npub const P: &str = include_str!("active/policy.rs");\n',
-                     "crates/beta/src/active/policy.rs": "",
-                     "crates/gamma/Cargo.toml": MANIFEST.format(
-                         n="gamma", extra='\n[dependencies]\nbeta = { path = "../beta", features = ["extra"] }\n')})
-        self.assertEqual(self.embeds()["targets"], {"crates/beta/src/active/policy.rs": ["beta"]})
-
-    def test_embeds_follow_the_test_profile(self):
-        root = (self.root / "Cargo.toml").read_text()
-        self.change({"Cargo.toml": root + "\n[profile.test]\ndebug-assertions = false\n",
-                     "crates/gamma/src/lib.rs": "#[cfg(not(debug_assertions))]\nmod x;\n",
-                     "crates/gamma/src/x.rs": "pub use std::include_str as embed;\n"})
-        self.assertEqual(self.embeds()["indirect"], "crates/gamma/src/x.rs")
-
-    def test_embeds_test_only_code_is_not_scanned(self):
-        files = {f"crates/gamma/{d}/x.rs": "use std::include_str as embed;\nfn main() {}\n"
-                 for d in ("tests", "benches", "examples")}
-        files["crates/gamma/src/fixtures.rs"] = "use std::include_str as embed;\n"
-        files["crates/gamma/src/lib.rs"] = ("#[cfg(test)]\nmod fixtures;\n"
-                                            "#[cfg(test)]\nmod tests {\n    use std::include_str as embed;\n}\n"
-                                            "// pub use std::include_str as embed;\n")
-        self.change(files)
-        self.assertEqual(self.embeds(), {"indirect": None, "targets": {}})
-
-    def test_embeds_an_unscannable_input_fails(self):
-        self.change({"crates/gamma/src/lib.rs": 'pub const D: &str = include_str!("data.txt");\n',
-                     "crates/gamma/src/data.txt": 'include_str!("open\n'})
-        result = self.run_embeds()
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("FAIL: cannot scan crates/gamma/src/data.txt for include_str!/include_bytes!", result.stderr)
-
-    def test_embeds_a_failed_check_fails(self):
-        self.change({"crates/gamma/src/lib.rs": "pub fn broken( {\n"})
-        result = self.run_embeds()
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("FAIL: workspace: cargo check of its production targets failed", result.stderr)
-
-    def test_embeds_an_empty_range_reports_nothing_and_builds_nothing(self):
-        self.change({"crates/gamma/src/lib.rs": "pub use std::include_str as embed;\npub fn broken( {\n"})
-        self.assertEqual(self.embeds(base="HEAD"), {"indirect": None, "targets": {}})
+class Cli(unittest.TestCase):
+    def test_removed_commands_are_usage_errors(self):
+        for argv in (("scope", "r", "b", "h"), ("embeds", "r", "b", "h", "w", "t"),
+                     ("unlisted", "c", "f", "i", "w", "e")):
+            result = run_cli(*argv)
+            self.assertEqual(result.returncode, 1)
+            self.assertTrue(result.stderr.startswith("FAIL: usage: mutation-diff.py"), result.stderr)
+            self.assertNotIn("scope <root>", result.stderr)
 
 
 class Snapshot(unittest.TestCase):
@@ -1247,7 +881,7 @@ FILES = {"src/lib.rs": "pub fn a() -> u32 {\n    1\n}\n", "notes.txt": "$Format:
 
 
 class ConfigLinks(unittest.TestCase):
-    setUp, git, put, commit = Scope.setUp, Scope.git, Scope.put, Scope.commit
+    setUp, git, put, commit = Workspace.setUp, Workspace.git, Workspace.put, Workspace.commit
 
     def check(self):
         return run_cli("config-guard", str(self.root), "HEAD")

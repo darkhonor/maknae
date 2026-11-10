@@ -232,7 +232,7 @@ def main():
         with tempfile.TemporaryDirectory() as directory:
             try:
                 result = check(name, head, config, env, Path(directory), *base_tree)
-            except (RuntimeError, subprocess.CalledProcessError, md.DiffError, md.ScopeError) as exc:
+            except (RuntimeError, subprocess.CalledProcessError, md.DiffError, md.InputError) as exc:
                 result = ([str(exc)], 0)
         problems, count = result
         if problems:
