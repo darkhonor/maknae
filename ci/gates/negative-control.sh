@@ -6139,9 +6139,10 @@ open(p, "w").write(s.replace(old, new))' "$f" "$2" "$3"; then
     cv_suite maknae-agent render::tests
   expect_reject_because "uniform/a-distinct-denied-text-goes-red" \
     "every_file_refusal_renders_the_same_bytes" cv_mutant crates/maknae-agent/src/render.rs \
-    '        ToolOutcome::ReadRefused | ToolOutcome::ReadUnavailable | ToolOutcome::WriteUnavailable => {' \
+    '        ToolOutcome::ReadRefused
+        | ToolOutcome::ReadUnavailable' \
     '        ToolOutcome::ReadRefused => Zeroizing::new("Not authorized".to_string()),
-        ToolOutcome::ReadUnavailable | ToolOutcome::WriteUnavailable => {' \
+        ToolOutcome::ReadUnavailable' \
     maknae-agent render::tests
   expect_reject_because "uniform/a-refused-write-told-unknown-goes-red" \
     "a_write_refused_before_the_grant_is_unavailable" cv_mutant crates/maknae-agent/src/wire.rs \

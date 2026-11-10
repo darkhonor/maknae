@@ -143,11 +143,11 @@ pub fn stat_outcome(sent: Result<WireOutcome, String>) -> StatOutcome {
         return StatOutcome::Protected(by);
     }
     match sent {
-        Ok(WireOutcome::Payload(Payload::Stat {
+        Ok(WireOutcome::Payload(Payload::Stat(maknae_proto::StatView {
             size,
             mtime_secs,
             kind,
-        })) => StatOutcome::Stat(StatView {
+        }))) => StatOutcome::Stat(StatView {
             size,
             mtime_secs,
             kind,
@@ -645,11 +645,13 @@ mod tests {
             ListOutcome::Page(page)
         );
         assert_eq!(
-            list_outcome(Ok(WireOutcome::Payload(Payload::Stat {
-                size: 1,
-                mtime_secs: 1,
-                kind: maknae_proto::StatKind::File,
-            }))),
+            list_outcome(Ok(WireOutcome::Payload(Payload::Stat(
+                maknae_proto::StatView {
+                    size: 1,
+                    mtime_secs: 1,
+                    kind: maknae_proto::StatKind::File,
+                }
+            )))),
             ListOutcome::Unavailable
         );
         for sent in crate::testutil::every_refusal_after_a_list_or_stat() {
@@ -667,11 +669,13 @@ mod tests {
     #[test]
     fn a_stat_is_metadata_only_for_the_kernels_stat_payload() {
         assert_eq!(
-            stat_outcome(Ok(WireOutcome::Payload(Payload::Stat {
-                size: 161,
-                mtime_secs: -2,
-                kind: maknae_proto::StatKind::Symlink,
-            }))),
+            stat_outcome(Ok(WireOutcome::Payload(Payload::Stat(
+                maknae_proto::StatView {
+                    size: 161,
+                    mtime_secs: -2,
+                    kind: maknae_proto::StatKind::Symlink,
+                }
+            )))),
             StatOutcome::Stat(StatView {
                 size: 161,
                 mtime_secs: -2,

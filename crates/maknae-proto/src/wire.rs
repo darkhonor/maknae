@@ -728,15 +728,19 @@ pub enum Payload {
         conversation: crate::ConversationId,
     },
     /// A permitted `fs.stat`, from the kernel's own descriptor (#161).
-    Stat {
-        size: u64,
-        mtime_secs: i64,
-        kind: StatKind,
-    },
+    Stat(StatView),
     /// The permitted page of an `fs.list`, after its record landed (#161).
     ListGrant(crate::ListGrant),
     /// The kernel decided a non-final [`crate::ListChunk`] and wants the next.
     ListContinue,
+}
+
+/// What a permitted `fs.stat` discloses: never uid, gid, mode, inode or link count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatView {
+    pub size: u64,
+    pub mtime_secs: i64,
+    pub kind: StatKind,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1921,11 +1925,11 @@ mod tests {
     fn stat_returns_size_mtime_and_kind_only() {
         let reply = Response {
             protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(Payload::Stat {
+            result: RespResult::Ok(Payload::Stat(StatView {
                 size: 161,
                 mtime_secs: -2,
                 kind: StatKind::Symlink,
-            }),
+            })),
         };
         let encoded = encode_response(&reply).unwrap();
         assert_eq!(decode_response(&encoded).unwrap(), reply);
@@ -1955,11 +1959,11 @@ mod tests {
         ] {
             let reply = Response {
                 protocol_version: PROTOCOL_VERSION,
-                result: RespResult::Ok(Payload::Stat {
+                result: RespResult::Ok(Payload::Stat(StatView {
                     size: 0,
                     mtime_secs: 0,
                     kind,
-                }),
+                })),
             };
             assert_eq!(
                 decode_response(&encode_response(&reply).unwrap()).unwrap(),

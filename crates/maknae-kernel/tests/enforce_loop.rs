@@ -936,7 +936,9 @@ async fn a_stat_is_decided_by_the_read_grant_and_answered_from_the_delegated_des
     .await
     .expect("an answer");
     match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Ok(maknae_proto::Payload::Stat { size, kind, .. }) => {
+        RespResult::Ok(maknae_proto::Payload::Stat(maknae_proto::StatView {
+            size, kind, ..
+        })) => {
             assert_eq!((size, kind), (10, maknae_proto::StatKind::File));
         }
         other => panic!("a Read(~/**) grant permits fs.stat: {other:?}"),

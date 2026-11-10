@@ -90,6 +90,10 @@ SURFACE=(
   "crates/maknae-proto/src/conversation.rs|ConversationView|conversation|7|wire"
   "crates/maknae-proto/src/conversation.rs|ConversationPage|conversation_list|2|wire"
   "crates/maknae-proto/src/conversation.rs|ConversationView|conversation_list.entries|7|wire"
+  # fs.stat and fs.list (#161): ADR-0034 releases size, mtime and kind, and a page of bare names.
+  "crates/maknae-proto/src/wire.rs|StatView|stat|3|wire"
+  "crates/maknae-proto/src/mutation.rs|ListGrant|list|2|wire"
+  "crates/maknae-proto/src/mutation.rs|ListEntry|list.entries|2|wire"
   "crates/maknae-vault/src/config.rs|VaultConfig|vault|9|config"
   "crates/maknae-vault/src/config.rs|UserAuthConfig|vault.user_auth|2|config"
 )
@@ -109,6 +113,7 @@ LEAF_ENUMS=(
   "vault.plane_key|crates/maknae-crypto/src/plane_key.rs|PlaneKey"
   "deployment.mode|crates/maknae-config/src/deployment.rs|DeploymentMode"
   "deployment.account_source|crates/maknae-config/src/deployment.rs|AccountSource"
+  "stat.kind|crates/maknae-proto/src/wire.rs|StatKind"
 )
 
 # Fields whose type is a `pub struct <Type>(String);` newtype in the named file: one string on the wire, so a leaf.
@@ -277,6 +282,9 @@ PAYLOAD_DISPOSITIONS=(
   "ConversationClosed|struct:ConversationView"
   "ConversationList|struct:ConversationPage"
   "ConversationDeleted|leaf:ConversationId"   # #170: the id the caller named on session.delete
+  "Stat|struct:StatView"   # #161: a permitted fs.stat
+  "ListGrant|struct:ListGrant"   # #161: a permitted fs.list page
+  "ListContinue|unit"   # #161: the kernel asks for the next chunk
 )
 payload_variants="$(awk '
   /^pub enum Payload \{/ { inenum=1; next }

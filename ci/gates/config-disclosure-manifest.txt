@@ -101,3 +101,9 @@ always	conversation_list.entries.turns	session.list (#170): one of the caller's 
 always	conversation_list.entries.bytes	session.list (#170): one of the caller's own conversations: the bytes counted against its cap; a count, never content
 always	conversation_list.entries.chain_head	session.list (#170): one of the caller's own conversations: the chain digest over turns the caller sent; derived from the caller's own content, discloses none of it
 always	conversation_list.next	session.list (#170): the cursor for the next page, the id of one of the caller's own conversations
+always	stat.size	fs.stat (#161): the byte size of an object whose Read the caller is permitted (ADR-0034 releases size, mtime and kind only)
+always	stat.mtime_secs	fs.stat (#161): the modification time, epoch seconds, of an object whose Read the caller is permitted
+always	stat.kind	fs.stat (#161): one fixed token, file, directory, symlink or other; never uid, gid, mode, inode or link count
+always	list.truncated	fs.list (#161): whether a further permitted entry exists past this page; carries no total and no count of withheld entries
+always	list.entries.name	fs.list (#161): the bare name of an entry whose own Read the caller is permitted; withheld entries are absent
+always	list.entries.dir	fs.list (#161): whether that permitted entry is a directory, from the subject's own enumeration

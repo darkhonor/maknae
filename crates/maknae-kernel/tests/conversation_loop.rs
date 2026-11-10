@@ -1174,7 +1174,10 @@ async fn an_fs_stat_citing_the_callers_conversation_touches_it_and_a_failed_touc
     assert!(
         matches!(
             resp.result,
-            RespResult::Ok(maknae_proto::Payload::Stat { size: 7, .. })
+            RespResult::Ok(maknae_proto::Payload::Stat(maknae_proto::StatView {
+                size: 7,
+                ..
+            }))
         ),
         "{resp:?}"
     );

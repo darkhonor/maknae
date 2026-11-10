@@ -1062,11 +1062,11 @@ where
                 .await;
             }
             (Next::Stat(meta), _, _) => {
-                let answer = Payload::Stat {
+                let answer = Payload::Stat(maknae_proto::StatView {
                     size: meta.size,
                     mtime_secs: mtime_secs(meta.mtime),
                     kind: stat_kind(meta.kind),
-                };
+                });
                 disclose(
                     stream,
                     cfg,
@@ -1654,11 +1654,11 @@ mod tests {
     }
     #[tokio::test(start_paused = true)]
     async fn an_answer_whose_progress_is_not_recorded_is_never_disclosed() {
-        let answer = Payload::Stat {
+        let answer = Payload::Stat(maknae_proto::StatView {
             size: 1,
             mtime_secs: 1,
             kind: maknae_proto::StatKind::File,
-        };
+        });
         let mut stream: Vec<u8> = Vec::new();
         let got = tokio::time::timeout(
             Duration::from_secs(60),
@@ -2588,11 +2588,11 @@ mod tests {
         let (frame, records) = stat_answer(&fx, &file).await;
         assert_eq!(
             stat_payload(&frame),
-            Payload::Stat {
+            Payload::Stat(maknae_proto::StatView {
                 size: 15,
                 mtime_secs: 1_700_000_161,
                 kind: maknae_proto::StatKind::File,
-            }
+            })
         );
         let (last, _) = intent_and_completion(&records);
         assert_eq!(last.outcome.result, "permit");
@@ -2624,7 +2624,7 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).unwrap();
         let (frame, records) = stat_answer(&fx, &link).await;
         match stat_payload(&frame) {
-            Payload::Stat { size, kind, .. } => {
+            Payload::Stat(maknae_proto::StatView { size, kind, .. }) => {
                 assert_eq!(kind, maknae_proto::StatKind::Symlink);
                 assert_eq!(size, target.as_os_str().len() as u64);
             }
@@ -2641,10 +2641,10 @@ mod tests {
         let (frame, _) = stat_answer(&fx, &dir).await;
         assert!(matches!(
             stat_payload(&frame),
-            Payload::Stat {
+            Payload::Stat(maknae_proto::StatView {
                 kind: maknae_proto::StatKind::Directory,
                 ..
-            }
+            })
         ));
     }
     #[tokio::test]
@@ -2656,10 +2656,10 @@ mod tests {
         let (frame, _) = stat_answer(&fx, &fifo).await;
         assert!(matches!(
             stat_payload(&frame),
-            Payload::Stat {
+            Payload::Stat(maknae_proto::StatView {
                 kind: maknae_proto::StatKind::Other,
                 ..
-            }
+            })
         ));
     }
     #[tokio::test]
@@ -4261,11 +4261,11 @@ mod tests {
         assert_eq!(page.entries.last().unwrap().name, names[1023]);
     }
     fn stat161() -> Payload {
-        Payload::Stat {
+        Payload::Stat(maknae_proto::StatView {
             size: 1,
             mtime_secs: 1,
             kind: maknae_proto::StatKind::File,
-        }
+        })
     }
     fn completion_of(trail: &[AuditRecord]) -> (MutationPhase, MutationStatus, String, String) {
         let last = trail.last().unwrap();

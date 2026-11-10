@@ -847,11 +847,11 @@ mod tests {
             after: None,
             conversation: None,
         }));
-        let answer = Payload::Stat {
+        let answer = Payload::Stat(maknae_proto::StatView {
             size: 1,
             mtime_secs: 1,
             kind: maknae_proto::StatKind::File,
-        };
+        });
         assert!(matches!(
             first_answer(false, stat(), RespResult::Ok(answer.clone()), true),
             Ok(FirstAnswer::Done(SentOutcome::Payload(p))) if p == answer
