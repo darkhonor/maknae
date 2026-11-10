@@ -99,7 +99,7 @@ to `ci/gates/`. A stereotype is readable by anyone who knows UML; a bespoke glyp
 | `knowledge-position-cards.svg` | bespoke, self-describing | *For a given document and subject: can the agent use it, who must follow it, how much should we believe it — and so what is it good for?* | maintainer, reviewer | authored — **exploratory, not a decision** |
 | `egress-and-tool-execution.svg` | UML component | *Under the egress design concept, which process would decide, enforce or carry each hop from a subject's tool, and which hops are built?* | security assessor, contributor | authored, a design concept and not authoritative — solid is built, dashed is proposed ([`../egress-and-tool-execution.md`](../egress-and-tool-execution.md)); the regions are partitions, and dashing marks status, not UML's dependency, as in the service architecture |
 | `tier-state-machine.svg` | UML state machine | *How does an object enter, move between tiers and review hold, and leave?* | reviewer | authored |
-| `action-vocabulary-map.svg` | bespoke, self-describing | *What are the supported verbs, which component serves each, and what depends on what?* | contributor, reviewer | authored |
+| `action-vocabulary-map.svg` | bespoke, self-describing | *Which verbs are built, which are planned, and what blocks each planned one?* | contributor, reviewer | authored |
 
 ### The Service Architecture: built and vision
 
@@ -128,8 +128,8 @@ identity** is a design decision, not a derivable fact.
 **Bespoke, self-describing** — permitted **only when the diagram carries its own legend
 and its subject is enumerable rather than structural**. The test: *can a reader who has
 never seen this project understand it without leaving the image?*
-`action-vocabulary-map.svg` passes — it names every verb, groups them by the component
-they serve, and shows their dependencies. A trust-boundary diagram with private colour
+`action-vocabulary-map.svg` passes — it names every verb, groups them by the issue
+that builds them, and shows their dependencies. A trust-boundary diagram with private colour
 semantics would fail, which is why the TCB view is UML and this one need not be.
 
 ## What the generated diagrams derive from
