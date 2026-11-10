@@ -645,8 +645,6 @@ async fn unread_response_does_not_hang_the_handler() {
         done.is_ok(),
         "handle must return within the write bound even though the peer never reads"
     );
-    // Both records (admission + request) were still durably offered before the write,
-    // and the unwritten response is corrected after it.
     let recs = emit.records();
     assert_eq!(
         recs.len(),

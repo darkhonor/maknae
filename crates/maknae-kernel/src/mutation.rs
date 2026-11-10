@@ -727,37 +727,50 @@ pub(crate) async fn disclose<S: AsyncWrite + Unpin, E: AuditEmit>(
     detail: &str,
     answer: Payload,
     cap: usize,
+    deadline: tokio::time::Instant,
 ) -> Option<AuditRecord> {
-    let bytes = maknae_proto::encode_response(&Response {
+    let encoded = match maknae_proto::encode_response(&Response {
         protocol_version: PROTOCOL_VERSION,
         result: RespResult::Ok(answer),
-    })
-    .ok()
-    .filter(|bytes| bytes.len() <= cap);
-    let Some(bytes) = bytes else {
-        if let Some(meta) = record.mutation.as_mut() {
-            meta.status = MutationStatus::Incomplete;
+    }) {
+        Err(_) => Err("answer could not be encoded"),
+        Ok(bytes) if bytes.len() > cap => Err("answer exceeds the response frame"),
+        Ok(bytes) => Ok(bytes),
+    };
+    let bytes = match encoded {
+        Ok(bytes) => bytes,
+        Err(why) => {
+            if let Some(meta) = record.mutation.as_mut() {
+                meta.status = MutationStatus::Incomplete;
+            }
+            let refusal = ProtoError {
+                code: ProtoErrCode::Unauthorized,
+                message: why.into(),
+            };
+            let reason = format!("{detail}; {why}; withheld");
+            refuse_with(stream, cfg, emit, record, reason, refusal).await;
+            return None;
         }
-        let refusal = ProtoError {
-            code: ProtoErrCode::Unauthorized,
-            message: "answer exceeds the response frame".into(),
-        };
-        let reason = format!("{detail}; answer exceeds the response frame; withheld");
-        refuse_with(stream, cfg, emit, record, reason, refusal).await;
-        return None;
     };
     record.outcome.result = "permit".into();
     record.outcome.reason = format!("authorized; {detail} released");
     record.outcome.posture = "authorized".into();
     emit.emit_within(&record, AUDIT_APPEND_TIMEOUT).await.ok()?;
-    let written = tokio::time::timeout(
-        Duration::from_millis(cfg.read_timeout_ms),
-        maknae_proto::write_frame(stream, maknae_proto::FrameClass::Attempt, &bytes),
-    )
-    .await;
-    if !matches!(written, Ok(Ok(()))) {
+    let written = tokio::time::Instant::now() < deadline
+        && matches!(
+            tokio::time::timeout_at(
+                deadline,
+                maknae_proto::write_frame(stream, maknae_proto::FrameClass::Attempt, &bytes),
+            )
+            .await,
+            Ok(Ok(()))
+        );
+    if !written {
         let mut note = record.clone();
         note.seq = seq.next();
+        if let Some(meta) = note.mutation.as_mut() {
+            meta.status = MutationStatus::Incomplete;
+        }
         note.outcome.reason = format!("{detail}: answer not delivered");
         note.outcome.posture = "unavailable".into();
         if let Err(e) = emit.emit_within(&note, AUDIT_APPEND_TIMEOUT).await {
@@ -974,6 +987,7 @@ where
                     "metadata",
                     answer,
                     caps.response,
+                    tokio::time::Instant::now() + Duration::from_millis(cfg.read_timeout_ms),
                 )
                 .await,
                 touch_failure,
@@ -1629,6 +1643,7 @@ mod tests {
                 "metadata",
                 answer.clone(),
                 maknae_proto::ATTEMPT_RESPONSE_MAX,
+                far_deadline(),
             ),
         )
         .await;
@@ -1647,6 +1662,7 @@ mod tests {
             "metadata",
             answer.clone(),
             maknae_proto::ATTEMPT_RESPONSE_MAX,
+            far_deadline(),
         )
         .await;
         let recorded = emit.0.lock().unwrap().last().cloned().unwrap();
@@ -3429,19 +3445,19 @@ mod tests {
             |_| named_chunks(&names, 3),
         )
         .await;
+        let trail = emit.0.lock().unwrap().clone();
+        assert!(
+            trail
+                .iter()
+                .all(|r| !(r.outcome.result == "permit" && r.outcome.reason.contains("released"))),
+            "no record says the page was released: {:?}",
+            trail.iter().map(|r| &r.outcome.reason).collect::<Vec<_>>()
+        );
         assert_eq!(frames.len(), 2, "the grant, then one answer");
         match maknae_proto::decode_response(&frames[1]).unwrap().result {
             RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
             other => panic!("an over-cap page is refused: {other:?}"),
         }
-        let trail = emit.0.lock().unwrap().clone();
-        assert!(
-            trail
-                .iter()
-                .all(|r| !r.outcome.reason.contains("released after")),
-            "{:?}",
-            trail.iter().map(|r| &r.outcome.reason).collect::<Vec<_>>()
-        );
         let last = trail.last().unwrap();
         assert_eq!(last.outcome.result, "deny");
         assert!(
@@ -3576,6 +3592,7 @@ mod tests {
             "metadata",
             answer.clone(),
             8,
+            far_deadline(),
         )
         .await;
         assert!(got.is_none());
@@ -3609,10 +3626,11 @@ mod tests {
             &TransportConfig::default(),
             &emit,
             &Seq::new(),
-            record(),
+            released_record(),
             "metadata",
             answer,
             maknae_proto::ATTEMPT_RESPONSE_MAX,
+            far_deadline(),
         )
         .await;
         let trail = emit.0.lock().unwrap().clone();
@@ -3621,6 +3639,67 @@ mod tests {
             trail[1].outcome.reason.contains("not delivered"),
             "{}",
             trail[1].outcome.reason
+        );
+        assert_eq!(
+            trail[1].mutation.as_ref().map(|m| m.status),
+            Some(MutationStatus::Incomplete),
+            "an undelivered answer is never a second success"
+        );
+    }
+    fn far_deadline() -> tokio::time::Instant {
+        tokio::time::Instant::now() + Duration::from_secs(60)
+    }
+    fn released_record() -> AuditRecord {
+        let mut r = record();
+        r.mutation = Some(mutation_meta(
+            r.seq,
+            MutationPhase::Completion,
+            MutationOrigin::ClientReported,
+            MutationStatus::ReportedSuccess,
+        ));
+        r
+    }
+    struct SlowAppend(std::sync::Mutex<Vec<AuditRecord>>);
+    impl AuditEmit for SlowAppend {
+        fn emit(
+            &self,
+            record: &AuditRecord,
+        ) -> impl std::future::Future<Output = Result<(), maknae_audit_append::AuditError>> + Send
+        {
+            self.0.lock().unwrap().push(record.clone());
+            async {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                Ok(())
+            }
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn an_answer_whose_permit_lands_after_its_deadline_is_not_written() {
+        let emit = SlowAppend(std::sync::Mutex::default());
+        let mut stream: Vec<u8> = Vec::new();
+        disclose(
+            &mut stream,
+            &TransportConfig::default(),
+            &emit,
+            &Seq::new(),
+            released_record(),
+            "metadata",
+            Payload::Stat {
+                size: 1,
+                mtime_secs: 1,
+                kind: maknae_proto::StatKind::File,
+            },
+            maknae_proto::ATTEMPT_RESPONSE_MAX,
+            tokio::time::Instant::now() + Duration::from_millis(100),
+        )
+        .await;
+        assert!(stream.is_empty(), "nothing is written after the deadline");
+        let trail = emit.0.lock().unwrap().clone();
+        assert_eq!(trail.len(), 2);
+        assert!(trail[1].outcome.reason.contains("not delivered"));
+        assert_eq!(
+            trail[1].mutation.as_ref().map(|m| m.status),
+            Some(MutationStatus::Incomplete)
         );
     }
     #[tokio::test]
