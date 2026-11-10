@@ -939,6 +939,7 @@ const LIST_CHUNK_OVERHEAD: usize = 64;
 fn list_chunks(
     entries: Vec<maknae_io::ListedEntry>,
     dropped: u32,
+    vanished: u32,
     cap: usize,
 ) -> Vec<proto::ListChunk> {
     let budget = cap.saturating_sub(LIST_CHUNK_OVERHEAD);
@@ -967,6 +968,7 @@ fn list_chunks(
             last: i == last,
             dropped: if i == last { dropped } else { 0 },
             unlisted: false,
+            vanished: if i == last { vanished } else { 0 },
         })
         .collect()
 }
@@ -1038,6 +1040,7 @@ async fn unlisted<S: AsyncRead + AsyncWrite + Unpin>(
         last: true,
         dropped: 0,
         unlisted: true,
+        vanished: 0,
     };
     let Ok(body) = proto::encode_list_chunk(&chunk) else {
         return;
@@ -1111,7 +1114,12 @@ pub async fn execute_list<S: AsyncRead + AsyncWrite + Unpin + Send>(
         }
     };
     let (dropped, vanished) = (listing.dropped, listing.vanished);
-    let chunks = list_chunks(listing.entries, dropped, proto::ATTEMPT_REQUEST_MAX);
+    let chunks = list_chunks(
+        listing.entries,
+        dropped,
+        vanished,
+        proto::ATTEMPT_REQUEST_MAX,
+    );
     let sent: Vec<proto::ListEntry> = chunks.iter().flat_map(|c| c.entries.clone()).collect();
     let after = after.as_deref();
     let exchange = async {
@@ -1654,13 +1662,16 @@ mod tests {
                 dir: i % 2 == 0,
             })
             .collect();
-        let chunks = list_chunks(entries.clone(), 3, proto::ATTEMPT_REQUEST_MAX);
+        let chunks = list_chunks(entries.clone(), 3, 5, proto::ATTEMPT_REQUEST_MAX);
         assert!(chunks.len() > 1);
         for (i, c) in chunks.iter().enumerate() {
             let last = i == chunks.len() - 1;
             assert!(proto::encode_list_chunk(c).unwrap().len() <= proto::ATTEMPT_REQUEST_MAX);
             assert!(!c.entries.is_empty());
-            assert_eq!((c.last, c.dropped), (last, if last { 3 } else { 0 }));
+            assert_eq!(
+                (c.last, c.dropped, c.vanished),
+                (last, if last { 3 } else { 0 }, if last { 5 } else { 0 })
+            );
         }
         let sent: Vec<(String, bool)> = chunks
             .into_iter()
@@ -1669,7 +1680,7 @@ mod tests {
             .collect();
         let want: Vec<(String, bool)> = entries.into_iter().map(|e| (e.name, e.dir)).collect();
         assert_eq!(sent, want);
-        let empty = list_chunks(Vec::new(), 0, proto::ATTEMPT_REQUEST_MAX);
+        let empty = list_chunks(Vec::new(), 0, 0, proto::ATTEMPT_REQUEST_MAX);
         assert_eq!(
             empty,
             [proto::ListChunk {
@@ -1677,6 +1688,7 @@ mod tests {
                 last: true,
                 dropped: 0,
                 unlisted: false,
+                vanished: 0,
             }]
         );
     }
@@ -1821,6 +1833,7 @@ mod tests {
                 last: true,
                 dropped: 0,
                 unlisted: true,
+                vanished: 0,
             }],
             "the kernel is told the subject could not list, and nothing else"
         );

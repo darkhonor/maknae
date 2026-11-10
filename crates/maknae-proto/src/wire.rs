@@ -2002,15 +2002,38 @@ mod tests {
             last: true,
             dropped: 2,
             unlisted: false,
+            vanished: 0,
         };
         let bytes = encode_list_chunk(&chunk).unwrap();
         assert_eq!(decode_list_chunk(&bytes).unwrap(), chunk);
         assert!(!bytes.windows(8).any(|w| w == b"unlisted"));
+        let without: ciborium::Value = ciborium::Value::Map(vec![
+            (
+                ciborium::Value::Text("entries".into()),
+                ciborium::Value::Array(vec![]),
+            ),
+            (
+                ciborium::Value::Text("last".into()),
+                ciborium::Value::Bool(true),
+            ),
+            (
+                ciborium::Value::Text("dropped".into()),
+                ciborium::Value::Integer(0.into()),
+            ),
+        ]);
+        let mut older = Vec::new();
+        ciborium::into_writer(&without, &mut older).unwrap();
+        assert_eq!(
+            decode_list_chunk(&older).unwrap().vanished,
+            0,
+            "a chunk without vanished decodes as none"
+        );
         let unlisted = crate::ListChunk {
             entries: Vec::new(),
             last: true,
             dropped: 0,
             unlisted: true,
+            vanished: 0,
         };
         assert_eq!(
             decode_list_chunk(&encode_list_chunk(&unlisted).unwrap()).unwrap(),

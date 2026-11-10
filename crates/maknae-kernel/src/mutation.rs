@@ -737,6 +737,9 @@ pub(crate) async fn disclose<S: AsyncWrite + Unpin, E: AuditEmit>(
         protocol_version: PROTOCOL_VERSION,
         result: RespResult::Ok(answer),
     }) {
+        _ if tokio::time::Instant::now() >= deadline => {
+            Err("deadline passed before the answer was recorded")
+        }
         Err(_) => Err("answer could not be encoded"),
         Ok(bytes) if bytes.len() > cap => Err("answer exceeds the response frame"),
         Ok(bytes) => Ok(bytes),
@@ -2884,6 +2887,7 @@ mod tests {
             last: true,
             dropped: listing.dropped,
             unlisted: false,
+            vanished: 0,
         }]
     }
     /// Drives `handle` for an `fs.list`, playing the subject with `chunks`; returns every
@@ -3179,6 +3183,7 @@ mod tests {
             last: true,
             dropped: 0,
             unlisted: false,
+            vanished: 0,
         };
         let frames = list_on(
             &fx,
@@ -3443,6 +3448,7 @@ mod tests {
                 last: i == last,
                 dropped: 0,
                 unlisted: false,
+                vanished: 0,
             })
             .collect()
     }
@@ -3647,8 +3653,23 @@ mod tests {
                 &caps(),
             )
             .await;
-            assert!(frame.is_err(), "{verb:?}: nothing after the deadline");
-            let last = emit.0.lock().unwrap().last().cloned().unwrap();
+            assert!(
+                frame.map_or(true, |f| matches!(
+                    maknae_proto::decode_response(&f).unwrap().result,
+                    RespResult::Err(_)
+                )),
+                "{verb:?}: no answer or grant after the deadline"
+            );
+            let trail = emit.0.lock().unwrap().clone();
+            assert!(
+                trail
+                    .iter()
+                    .all(|r| !(r.outcome.result == "permit"
+                        && r.outcome.reason.contains("released"))),
+                "{verb:?}: no record says the answer was released: {:?}",
+                trail.iter().map(|r| &r.outcome.reason).collect::<Vec<_>>()
+            );
+            let last = trail.last().cloned().unwrap();
             assert_eq!(
                 last.mutation.map(|m| m.status),
                 Some(MutationStatus::Incomplete),
@@ -3690,14 +3711,16 @@ mod tests {
             "a late page is never sent"
         );
         let trail = emit.0.lock().unwrap().clone();
-        assert!(trail.iter().all(|r| !r.outcome.reason.contains("released")));
+        assert!(trail
+            .iter()
+            .all(|r| !(r.outcome.result == "permit" && r.outcome.reason.contains("released"))));
         assert!(
             trail
                 .last()
                 .unwrap()
                 .outcome
                 .reason
-                .starts_with("listing deadline passed"),
+                .contains("deadline passed before the answer was recorded"),
             "{:?}",
             trail.last().unwrap().outcome.reason
         );
@@ -3881,6 +3904,7 @@ mod tests {
                     last: true,
                     dropped: 0,
                     unlisted: true,
+                    vanished: 0,
                 }]
             },
         )
@@ -3917,12 +3941,14 @@ mod tests {
                         last: false,
                         dropped: 0,
                         unlisted: false,
+                        vanished: 0,
                     },
                     maknae_proto::ListChunk {
                         entries: vec![entry("a")],
                         last: true,
                         dropped: 0,
                         unlisted: false,
+                        vanished: 0,
                     },
                 ]
             },

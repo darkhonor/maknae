@@ -438,12 +438,14 @@ impl Plane for FixturePlane {
                         last: true,
                         dropped: l.dropped,
                         unlisted: false,
+                        vanished: 0,
                     },
                     Err(_) => maknae_proto::ListChunk {
                         entries: vec![],
                         last: true,
                         dropped: 0,
                         unlisted: true,
+                        vanished: 0,
                     },
                 };
                 common::write_frame(

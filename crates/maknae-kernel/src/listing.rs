@@ -19,7 +19,6 @@ pub(crate) const BOUND_REACHED: &str = "listing bound reached before a full page
 const EMPTY_CHUNK: &str = "listing chunk empty before the last";
 pub(crate) const SUBJECT_UNLISTED: &str =
     "the subject reports it could not list the directory (unverified)";
-const DEADLINE_PASSED: &str = "listing deadline passed before its page was recorded";
 
 /// What one entry is decided by: the request's own facts, owned for a blocking worker.
 pub(crate) struct Decider<P> {
@@ -79,6 +78,8 @@ pub(crate) struct Lister {
     invalid: usize,
     withheld: usize,
     dropped: u64,
+    vanished: u64,
+    decided_permits: usize,
     permitted: Vec<ListEntry>,
     budget: usize,
     bytes: usize,
@@ -113,6 +114,8 @@ impl Lister {
             invalid: 0,
             withheld: 0,
             dropped: 0,
+            vanished: 0,
+            decided_permits: 0,
             permitted: Vec::new(),
             budget: response_cap.saturating_sub(PAGE_HEADROOM),
             bytes: 0,
@@ -141,6 +144,7 @@ impl Lister {
             return Some(End::Refused(EMPTY_CHUNK));
         }
         self.dropped = self.dropped.saturating_add(u64::from(chunk.dropped));
+        self.vanished = self.vanished.saturating_add(u64::from(chunk.vanished));
         for entry in &chunk.entries {
             if self
                 .previous
@@ -179,6 +183,7 @@ impl Lister {
         if crate::mutation::checked(&path).is_err() {
             self.invalid += 1;
         } else if permits(&path) {
+            self.decided_permits += 1;
             let size = entry_bytes(&entry.name);
             if !self.permitted.is_empty() && self.bytes + size > self.budget {
                 self.full = true;
@@ -191,15 +196,22 @@ impl Lister {
         }
     }
 
-    pub(crate) fn trail(&self) -> String {
+    /// `permitted` counts every `Permit`, the one that closed a page included; `released`
+    /// counts the page's entries, none when the listing ends refused.
+    pub(crate) fn trail(&self, end: &End) -> String {
+        let released = match end {
+            End::Refused(_) => 0,
+            End::Complete | End::Truncated => self.permitted.len().min(LIST_RELEASE_MAX),
+        };
         format!(
-            "listing: {} received, {} skipped by the cursor, {} invalid, {} withheld, {} permitted; the subject reports {} non-UTF-8 names dropped (unverified)",
+            "listing: {} received, {} skipped by the cursor, {} invalid, {} withheld, {} permitted, {released} released; the subject reports {} non-UTF-8 names dropped and {} vanished (unverified)",
             self.received,
             self.skipped,
             self.invalid,
             self.withheld,
-            self.permitted.len(),
-            self.dropped
+            self.decided_permits,
+            self.dropped,
+            self.vanished
         )
     }
 
@@ -363,7 +375,7 @@ pub(crate) async fn run<S, E, P>(
     if let Some(meta) = record.mutation.as_mut() {
         meta.origin = MutationOrigin::ClientReported;
     }
-    let tally = lister.trail();
+    let tally = lister.trail(&end);
     if let End::Refused(why) = end {
         if let Some(meta) = record.mutation.as_mut() {
             meta.status = MutationStatus::Incomplete;
@@ -374,25 +386,6 @@ pub(crate) async fn run<S, E, P>(
         };
         crate::mutation::refuse_with(stream, cfg, emit, record, format!("{why}; {tally}"), answer)
             .await;
-        return;
-    }
-    if tokio::time::Instant::now() >= deadline {
-        if let Some(meta) = record.mutation.as_mut() {
-            meta.status = MutationStatus::Incomplete;
-        }
-        let answer = ProtoError {
-            code: ProtoErrCode::Unauthorized,
-            message: DEADLINE_PASSED.into(),
-        };
-        crate::mutation::refuse_with(
-            stream,
-            cfg,
-            emit,
-            record,
-            format!("{DEADLINE_PASSED}; {tally}"),
-            answer,
-        )
-        .await;
         return;
     }
     crate::mutation::disclose(
@@ -428,6 +421,7 @@ mod tests {
             last,
             dropped: 0,
             unlisted: false,
+            vanished: 0,
         }
     }
     fn numbered(from: usize, count: usize) -> Vec<String> {
@@ -638,9 +632,11 @@ mod tests {
         assert_eq!(end, Some(End::Refused(BOUND_REACHED)));
         assert_eq!(calls, LIST_RECEIVE_MAX);
         assert!(
-            lister.trail().contains("65536 received"),
+            lister
+                .trail(&End::Refused(BOUND_REACHED))
+                .contains("65536 received"),
             "{}",
-            lister.trail()
+            lister.trail(&End::Refused(BOUND_REACHED))
         );
 
         let mut lister = Lister::new("/d".into(), None, maknae_proto::ATTEMPT_RESPONSE_MAX);
@@ -753,10 +749,37 @@ mod tests {
         assert_eq!(lister.take(&first, |p| p != "/d/c"), None);
         let mut second = chunk(&["d", "e/"], true);
         second.dropped = 1;
+        second.vanished = 4;
         assert_eq!(lister.take(&second, |_| false), Some(End::Complete));
         assert_eq!(
-            lister.trail(),
-            "listing: 5 received, 1 skipped by the cursor, 1 invalid, 2 withheld, 1 permitted; the subject reports 3 non-UTF-8 names dropped (unverified)"
+            lister.trail(&End::Complete),
+            "listing: 5 received, 1 skipped by the cursor, 1 invalid, 2 withheld, 1 permitted, 1 released; the subject reports 3 non-UTF-8 names dropped and 4 vanished (unverified)"
         );
+        assert!(lister
+            .trail(&End::Refused(ORDER_VIOLATED))
+            .contains("1 permitted, 0 released"));
+    }
+
+    #[test]
+    fn the_trail_counts_the_entry_that_closed_a_page_as_permitted_but_not_released() {
+        let names: Vec<String> = (0..3).map(|i| format!("{i}{}", "z".repeat(300))).collect();
+        let mut lister = Lister::new("/d".into(), None, 900);
+        assert_eq!(
+            lister.take(&chunk_of(&names, true), |_| true),
+            Some(End::Truncated)
+        );
+        assert!(
+            lister
+                .trail(&End::Truncated)
+                .contains("3 permitted, 2 released"),
+            "{}",
+            lister.trail(&End::Truncated)
+        );
+        let names = numbered(0, LIST_RELEASE_MAX + 1);
+        let mut lister = Lister::new("/d".into(), None, maknae_proto::ATTEMPT_RESPONSE_MAX);
+        lister.take(&chunk_of(&names, true), |_| true);
+        assert!(lister
+            .trail(&End::Truncated)
+            .contains("1025 permitted, 1024 released"));
     }
 }
