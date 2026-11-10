@@ -167,7 +167,7 @@ impl Lister {
     }
 
     fn decide(&mut self, entry: &ListEntry, permits: &mut impl FnMut(&str) -> bool) {
-        if !normal(&entry.name) {
+        if !normal(&entry.name) || entry.name.len() > maknae_proto::LIST_CURSOR_MAX_BYTES {
             self.invalid += 1;
             return;
         }
@@ -525,6 +525,24 @@ mod tests {
             names[page.entries.len()],
             "the cursor resumes at the entry that did not fit"
         );
+    }
+
+    #[test]
+    fn a_name_longer_than_a_cursor_is_withheld_as_invalid() {
+        let usable = "u".repeat(maknae_proto::LIST_CURSOR_MAX_BYTES);
+        let too_long = "v".repeat(maknae_proto::LIST_CURSOR_MAX_BYTES + 1);
+        let mut lister = Lister::new("/d".into(), None, maknae_proto::ATTEMPT_RESPONSE_MAX);
+        let mut asked = Vec::new();
+        lister.take(&chunk(&[&usable, &too_long], true), |p| {
+            asked.push(p.to_owned());
+            true
+        });
+        assert_eq!(
+            asked,
+            [format!("/d/{usable}")],
+            "every released name is a usable cursor"
+        );
+        assert_eq!(lister.invalid, 1);
     }
 
     #[test]

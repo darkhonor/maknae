@@ -359,14 +359,37 @@ fn list_reopened(
     }
     let mut kept = Kept::new(keep);
     let mut handle = crate::syscall::open_dir_handle(&fd).map_err(at)?;
+    let mut stat_classified = 0;
     for entry in handle.iter() {
         let entry = entry.map_err(at)?;
         let raw = entry.file_name();
         kept.offer(raw.to_bytes(), || {
+            if entry.file_type().is_none() {
+                stat_classified += 1;
+            }
             crate::dir::classify_entry(entry.file_type(), &fd, raw, entry.ino())
                 .map(|kind| kind == crate::anchor::Kind::Dir)
         })
         .map_err(at)?;
+    }
+    listed_or_stale(kept, stat_classified, granted)
+}
+
+/// Every entry that needed a stat to classify vanished: the handle is stale, not the
+/// directory empty.
+fn stale_handle(stat_classified: u32, vanished: u32) -> bool {
+    stat_classified > 0 && vanished == stat_classified
+}
+
+fn listed_or_stale(
+    kept: Kept,
+    stat_classified: u32,
+    granted: &std::path::Path,
+) -> Result<Listing, IoError> {
+    if stale_handle(stat_classified, kept.vanished) {
+        return Err(IoError::MutationPathChanged {
+            path: granted.into(),
+        });
     }
     Ok(kept.finish())
 }
@@ -819,6 +842,32 @@ mod tests {
         let got = kept.finish();
         assert_eq!(names(&got), [("a-161", false), ("z-161", true)]);
         assert_eq!((got.dropped, got.vanished), (0, 2));
+    }
+
+    #[test]
+    fn a_listing_whose_every_stat_classified_entry_vanished_is_a_stale_handle() {
+        assert!(!stale_handle(0, 0), "nothing needed a stat");
+        assert!(stale_handle(1, 1));
+        assert!(stale_handle(3, 3));
+        assert!(!stale_handle(3, 2), "one entry survived its stat");
+        let mut kept = Kept::new(10);
+        kept.offer(b"gone-161", || Err(nix::errno::Errno::ENOENT))
+            .unwrap();
+        assert_eq!(
+            listed_or_stale(kept, 1, std::path::Path::new("/d-161")),
+            Err(IoError::MutationPathChanged {
+                path: "/d-161".into()
+            })
+        );
+        let mut kept = Kept::new(10);
+        kept.offer(b"kept-161", || Ok(false)).unwrap();
+        kept.offer(b"gone-161", || Err(nix::errno::Errno::ENOENT))
+            .unwrap();
+        let listed = listed_or_stale(kept, 2, std::path::Path::new("/d-161")).unwrap();
+        assert_eq!(
+            (names(&listed), listed.vanished),
+            (vec![("kept-161", false)], 1)
+        );
     }
 
     #[test]
