@@ -701,18 +701,7 @@ pub(crate) async fn refuse_with<S: AsyncWrite + Unpin, E: AuditEmit>(
     }
 }
 
-/// Records the permit, then answers: nothing is disclosed when the record does not land.
-async fn disclose<S: AsyncWrite + Unpin, E: AuditEmit>(
-    stream: &mut S,
-    cfg: &TransportConfig,
-    emit: &E,
-    mut record: AuditRecord,
-    label: &maknae_proto::ObjectLabel,
-    answer: Payload,
-) -> Option<AuditRecord> {
-    record.outcome.result = "permit".into();
-    record.outcome.reason = "authorized; metadata released".into();
-    record.outcome.posture = "authorized".into();
+fn stat_record(mut record: AuditRecord, label: &maknae_proto::ObjectLabel) -> AuditRecord {
     let mut meta = mutation_meta(
         record.seq,
         MutationPhase::Intent,
@@ -723,16 +712,58 @@ async fn disclose<S: AsyncWrite + Unpin, E: AuditEmit>(
     meta.authorized_paths = record.object.iter().cloned().collect();
     meta.label = Some(label_audit(label));
     record.mutation = Some(meta);
+    record
+}
+
+/// Records the permit, then answers. An answer too large for `cap` is refused instead, and
+/// one whose write fails is noted, so no permit record stands for an answer never sent.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn disclose<S: AsyncWrite + Unpin, E: AuditEmit>(
+    stream: &mut S,
+    cfg: &TransportConfig,
+    emit: &E,
+    seq: &Seq,
+    mut record: AuditRecord,
+    detail: &str,
+    answer: Payload,
+    cap: usize,
+) -> Option<AuditRecord> {
+    let bytes = maknae_proto::encode_response(&Response {
+        protocol_version: PROTOCOL_VERSION,
+        result: RespResult::Ok(answer),
+    })
+    .ok()
+    .filter(|bytes| bytes.len() <= cap);
+    let Some(bytes) = bytes else {
+        if let Some(meta) = record.mutation.as_mut() {
+            meta.status = MutationStatus::Incomplete;
+        }
+        let refusal = ProtoError {
+            code: ProtoErrCode::Unauthorized,
+            message: "answer exceeds the response frame".into(),
+        };
+        let reason = format!("{detail}; answer exceeds the response frame; withheld");
+        refuse_with(stream, cfg, emit, record, reason, refusal).await;
+        return None;
+    };
+    record.outcome.result = "permit".into();
+    record.outcome.reason = format!("authorized; {detail} released");
+    record.outcome.posture = "authorized".into();
     emit.emit_within(&record, AUDIT_APPEND_TIMEOUT).await.ok()?;
-    send(
-        stream,
-        cfg,
-        Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(answer),
-        },
+    let written = tokio::time::timeout(
+        Duration::from_millis(cfg.read_timeout_ms),
+        maknae_proto::write_frame(stream, maknae_proto::FrameClass::Attempt, &bytes),
     )
     .await;
+    if !matches!(written, Ok(Ok(()))) {
+        let mut note = record.clone();
+        note.seq = seq.next();
+        note.outcome.reason = format!("{detail}: answer not delivered");
+        note.outcome.posture = "unavailable".into();
+        if let Err(e) = emit.emit_within(&note, AUDIT_APPEND_TIMEOUT).await {
+            eprintln!("maknaed: AUDIT WRITE FAILED on an undelivered answer: {e}");
+        }
+    }
     Some(record)
 }
 async fn untouched<E: AuditEmit>(emit: &E, seq: &Seq, base: &AuditRecord, why: &str) {
@@ -812,9 +843,8 @@ where
         Stamp::Client => None,
         Stamp::Agent { agent, task } => Some(((*agent).clone(), task.cloned())),
     };
-    let listed_by = stamped.clone();
-    let listed_home = home.clone();
-    let listed_authorizer = Arc::clone(&authorizer);
+    let listing = matches!(verb, Verb::FsList { .. })
+        .then(|| (stamped.clone(), home.clone(), Arc::clone(&authorizer)));
     let prepared = tokio::time::timeout(
         authz_timeout,
         tokio::task::spawn_blocking(move || {
@@ -921,65 +951,13 @@ where
             return true;
         }
     };
-    let scope = match prepared.granted {
-        Granted::Attempt(scope) => scope,
-        Granted::List => {
-            let after = match verb {
-                Verb::FsList { after, .. } => after.clone(),
-                _ => None,
-            };
-            if let Ok(Ok(intent)) = tokio::time::timeout(
-                Duration::from_millis(cfg.read_timeout_ms),
-                commit_intent(
-                    &*emit,
-                    record,
-                    None,
-                    prepared.kind,
-                    prepared.paths.clone(),
-                    &label,
-                    None,
-                ),
-            )
-            .await
-            {
-                if let Some(why) = touch_failure {
-                    untouched(&*emit, seq, &intent.record, &why).await;
-                }
-                let decider = crate::listing::Decider {
-                    authorizer: listed_authorizer,
-                    verb: verb.clone(),
-                    uid,
-                    home: listed_home,
-                    facts,
-                    personal,
-                    stamped: listed_by,
-                };
-                let lister = crate::listing::Lister::new(
-                    prepared
-                        .paths
-                        .last()
-                        .expect("prepared nonempty paths")
-                        .clone(),
-                    after,
-                );
-                crate::listing::run(
-                    stream,
-                    cfg,
-                    caps,
-                    &*emit,
-                    intent,
-                    label,
-                    seq,
-                    lister,
-                    Arc::new(decider),
-                    authz_timeout,
-                )
-                .await;
-            }
-            drop(prepared._evidence);
-            drop(permit);
-            return true;
-        }
+    enum Next {
+        Attempt(MutationScope),
+        List,
+    }
+    let next = match prepared.granted {
+        Granted::Attempt(scope) => Next::Attempt(scope),
+        Granted::List => Next::List,
         Granted::Stat(meta) => {
             let answer = Payload::Stat {
                 size: meta.size,
@@ -987,7 +965,17 @@ where
                 kind: stat_kind(meta.kind),
             };
             if let (Some(recorded), Some(why)) = (
-                disclose(stream, cfg, &*emit, record, &label, answer).await,
+                disclose(
+                    stream,
+                    cfg,
+                    &*emit,
+                    seq,
+                    stat_record(record, &label),
+                    "metadata",
+                    answer,
+                    caps.response,
+                )
+                .await,
                 touch_failure,
             ) {
                 untouched(&*emit, seq, &recorded, &why).await;
@@ -997,19 +985,18 @@ where
             return true;
         }
     };
-    let requested = match verb {
-        Verb::Read { page, .. } => *page,
-        _ => None,
+    let (requested, read_page, length, after) = match verb {
+        Verb::Read { page, .. } => (
+            *page,
+            Some(page.unwrap_or(maknae_proto::WHOLE_FILE)),
+            None,
+            None,
+        ),
+        Verb::FsWrite { content_length, .. } => (None, None, Some(*content_length), None),
+        Verb::FsList { after, .. } => (None, None, None, after.clone()),
+        _ => (None, None, None, None),
     };
-    let read_page = match verb {
-        Verb::Read { page, .. } => Some(page.unwrap_or(maknae_proto::WHOLE_FILE)),
-        _ => None,
-    };
-    let length = if let Verb::FsWrite { content_length, .. } = verb {
-        Some(*content_length)
-    } else {
-        None
-    };
+    let directory = prepared.paths.last().cloned();
     if let Ok(Ok(intent)) = tokio::time::timeout(
         Duration::from_millis(cfg.read_timeout_ms),
         commit_intent(
@@ -1027,10 +1014,41 @@ where
         if let Some(why) = touch_failure {
             untouched(&*emit, seq, &intent.record, &why).await;
         }
-        attempt(
-            stream, cfg, caps, &*emit, intent, scope, label, read_page, seq,
-        )
-        .await;
+        match (next, listing, directory) {
+            (Next::Attempt(scope), _, _) => {
+                attempt(
+                    stream, cfg, caps, &*emit, intent, scope, label, read_page, seq,
+                )
+                .await;
+            }
+            (Next::List, Some((stamped, home, authorizer)), Some(directory)) => {
+                let decider = crate::listing::Decider {
+                    authorizer,
+                    verb: verb.clone(),
+                    uid,
+                    home,
+                    facts,
+                    personal,
+                    stamped,
+                };
+                crate::listing::run(
+                    stream,
+                    cfg,
+                    caps,
+                    &*emit,
+                    intent,
+                    label,
+                    seq,
+                    crate::listing::Lister::new(directory, after),
+                    Arc::new(decider),
+                    authz_timeout,
+                )
+                .await;
+            }
+            (Next::List, _, _) => {
+                incomplete(cfg, &*emit, &intent, seq, "listing context missing").await;
+            }
+        }
     }
     drop(prepared._evidence);
     drop(permit);
@@ -1606,9 +1624,11 @@ mod tests {
                 &mut stream,
                 &TransportConfig::default(),
                 &Stall,
-                record(),
-                &label161(),
+                &Seq::new(),
+                stat_record(record(), &label161()),
+                "metadata",
                 answer.clone(),
+                maknae_proto::ATTEMPT_RESPONSE_MAX,
             ),
         )
         .await;
@@ -1622,9 +1642,11 @@ mod tests {
             &mut stream,
             &TransportConfig::default(),
             &emit,
-            record(),
-            &label161(),
+            &Seq::new(),
+            stat_record(record(), &label161()),
+            "metadata",
             answer.clone(),
+            maknae_proto::ATTEMPT_RESPONSE_MAX,
         )
         .await;
         let recorded = emit.0.lock().unwrap().last().cloned().unwrap();
@@ -2827,6 +2849,7 @@ mod tests {
                 .collect(),
             last: true,
             dropped: listing.dropped,
+            unlisted: false,
         }]
     }
     /// Drives `handle` for an `fs.list`, playing the subject with `chunks`; returns every
@@ -2845,7 +2868,35 @@ mod tests {
         A: Authorizer + Send + Sync + 'static,
         E: AuditEmit + Send + Sync + 'static,
     {
-        let cfg = maknae_config::transport_from_section(None).unwrap();
+        list_on_with(
+            fx,
+            pdp,
+            verb,
+            fd,
+            sensitive,
+            emit,
+            AttemptCaps::default(),
+            maknae_config::transport_from_section(None).unwrap(),
+            chunks,
+        )
+        .await
+    }
+    #[allow(clippy::too_many_arguments)]
+    async fn list_on_with<A, E>(
+        fx: &Fixture,
+        pdp: A,
+        verb: Verb,
+        fd: Option<OwnedFd>,
+        sensitive: SensitiveList,
+        emit: Arc<E>,
+        attempt_caps: AttemptCaps,
+        cfg: TransportConfig,
+        chunks: impl FnOnce(&maknae_proto::MutationGrant) -> Vec<maknae_proto::ListChunk>,
+    ) -> Vec<Vec<u8>>
+    where
+        A: Authorizer + Send + Sync + 'static,
+        E: AuditEmit + Send + Sync + 'static,
+    {
         let fds = maknae_io::DelegatedFds::new(1);
         if let Some(fd) = fd {
             fds.push(fd);
@@ -2866,7 +2917,7 @@ mod tests {
                     &Seq::new(),
                     record(),
                     Duration::from_secs(10),
-                    AttemptCaps::default(),
+                    attempt_caps,
                     "US",
                     Arc::new(crate::conversation::mem_store::MemStore::default()),
                     &Stamp::Client,
@@ -3087,6 +3138,7 @@ mod tests {
                 .collect(),
             last: true,
             dropped: 0,
+            unlisted: false,
         };
         let frames = list_on(
             &fx,
@@ -3334,6 +3386,274 @@ mod tests {
             .iter()
             .any(|f| f.windows(10).any(|w| w == b"listed-161")));
     }
+    fn named_chunks(names: &[String], per: usize) -> Vec<maknae_proto::ListChunk> {
+        let chunks: Vec<_> = names.chunks(per).collect();
+        let last = chunks.len() - 1;
+        chunks
+            .into_iter()
+            .enumerate()
+            .map(|(i, part)| maknae_proto::ListChunk {
+                entries: part
+                    .iter()
+                    .map(|n| maknae_proto::ListEntry {
+                        name: n.clone(),
+                        dir: false,
+                    })
+                    .collect(),
+                last: i == last,
+                dropped: 0,
+                unlisted: false,
+            })
+            .collect()
+    }
+    #[tokio::test]
+    async fn a_page_over_the_response_cap_is_refused_and_never_recorded_as_released() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let dir = fx.root.join("overcap-161");
+        std::fs::create_dir(&dir).unwrap();
+        let names: Vec<String> = (0..3).map(|i| format!("{i}{}", "n".repeat(200))).collect();
+        let emit = Arc::new(Recorder::default());
+        let frames = list_on_with(
+            &fx,
+            fixture_pdp(&fx),
+            list_verb(&dir, None),
+            maknae_io::open_directory_for_delegation(&dir).ok(),
+            SensitiveList::empty(),
+            emit.clone(),
+            AttemptCaps {
+                request: maknae_proto::ATTEMPT_REQUEST_MAX,
+                response: 512,
+            },
+            maknae_config::transport_from_section(None).unwrap(),
+            |_| named_chunks(&names, 3),
+        )
+        .await;
+        assert_eq!(frames.len(), 2, "the grant, then one answer");
+        match maknae_proto::decode_response(&frames[1]).unwrap().result {
+            RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
+            other => panic!("an over-cap page is refused: {other:?}"),
+        }
+        let trail = emit.0.lock().unwrap().clone();
+        assert!(
+            trail
+                .iter()
+                .all(|r| !r.outcome.reason.contains("released after")),
+            "{:?}",
+            trail.iter().map(|r| &r.outcome.reason).collect::<Vec<_>>()
+        );
+        let last = trail.last().unwrap();
+        assert_eq!(last.outcome.result, "deny");
+        assert!(
+            last.outcome.reason.contains("exceeds the response frame"),
+            "{}",
+            last.outcome.reason
+        );
+    }
+    struct SlowEntries<P> {
+        pdp: P,
+        directory: String,
+    }
+    impl<P: Authorizer> Authorizer for SlowEntries<P> {
+        fn decide(&self, request: &maknae_security::Request) -> maknae_security::Verdict {
+            self.decide_cited(request).verdict
+        }
+        fn decide_reporting_role(
+            &self,
+            request: &maknae_security::Request,
+        ) -> (maknae_security::Verdict, Option<&'static str>) {
+            self.decide_cited(request).into()
+        }
+        fn decide_cited(&self, request: &maknae_security::Request) -> maknae_security::Decided {
+            self.decide_cited_all(std::slice::from_ref(request))
+                .pop()
+                .unwrap()
+        }
+        fn decide_cited_all(
+            &self,
+            requests: &[maknae_security::Request],
+        ) -> Vec<maknae_security::Decided> {
+            if requests
+                .iter()
+                .any(|r| r.resource.0.get("path") != Some(&AttrValue::Str(self.directory.clone())))
+            {
+                std::thread::sleep(Duration::from_millis(400));
+            }
+            self.pdp.decide_cited_all(requests)
+        }
+    }
+    #[tokio::test]
+    async fn a_page_decided_after_its_deadline_is_refused_and_never_recorded_as_released() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let dir = fx.root.join("late-161");
+        std::fs::create_dir(&dir).unwrap();
+        let emit = Arc::new(Recorder::default());
+        let names = vec!["late-entry-161".to_string()];
+        let frames = list_on_with(
+            &fx,
+            SlowEntries {
+                pdp: fixture_pdp(&fx),
+                directory: dir.to_str().unwrap().into(),
+            },
+            list_verb(&dir, None),
+            maknae_io::open_directory_for_delegation(&dir).ok(),
+            SensitiveList::empty(),
+            emit.clone(),
+            AttemptCaps::default(),
+            TransportConfig {
+                read_timeout_ms: 200,
+                ..maknae_config::transport_from_section(None).unwrap()
+            },
+            |_| named_chunks(&names, 1),
+        )
+        .await;
+        assert!(
+            !frames
+                .iter()
+                .any(|f| f.windows(14).any(|w| w == b"late-entry-161")),
+            "a late page is never sent"
+        );
+        let trail = emit.0.lock().unwrap().clone();
+        assert!(trail.iter().all(|r| !r.outcome.reason.contains("released")));
+        assert!(
+            trail
+                .last()
+                .unwrap()
+                .outcome
+                .reason
+                .starts_with("listing deadline passed"),
+            "{:?}",
+            trail.last().unwrap().outcome.reason
+        );
+    }
+    #[tokio::test]
+    async fn a_page_filled_mid_stream_is_truncated_and_ends_the_exchange() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let dir = fx.root.join("midstream-161");
+        std::fs::create_dir(&dir).unwrap();
+        let names: Vec<String> = (0..1800).map(|i| format!("m{i:05}")).collect();
+        let frames = list_on(
+            &fx,
+            fixture_pdp(&fx),
+            list_verb(&dir, None),
+            maknae_io::open_directory_for_delegation(&dir).ok(),
+            SensitiveList::empty(),
+            Arc::new(Recorder::default()),
+            |_| named_chunks(&names, 600),
+        )
+        .await;
+        assert_eq!(
+            frames.len(),
+            3,
+            "grant, continue, page: the third chunk is never asked for"
+        );
+        assert_eq!(
+            maknae_proto::decode_response(&frames[1]).unwrap().result,
+            RespResult::Ok(Payload::ListContinue)
+        );
+        let page = granted_page(&frames);
+        assert!(page.truncated);
+        assert_eq!(page.entries.len(), maknae_proto::LIST_RELEASE_MAX);
+        assert_eq!(page.entries.last().unwrap().name, names[1023]);
+    }
+    #[tokio::test(start_paused = true)]
+    async fn a_disclosure_over_its_cap_is_refused_and_one_not_delivered_is_noted() {
+        let answer = Payload::Stat {
+            size: 1,
+            mtime_secs: 1,
+            kind: maknae_proto::StatKind::File,
+        };
+        let emit = Recorder::default();
+        let mut stream: Vec<u8> = Vec::new();
+        let got = disclose(
+            &mut stream,
+            &TransportConfig::default(),
+            &emit,
+            &Seq::new(),
+            record(),
+            "metadata",
+            answer.clone(),
+            8,
+        )
+        .await;
+        assert!(got.is_none());
+        let refused = emit.0.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(refused.outcome.result, "deny");
+        assert!(
+            !refused.outcome.reason.contains("released"),
+            "{}",
+            refused.outcome.reason
+        );
+        let frame = maknae_proto::read_frame_of_class(
+            &mut stream.as_slice(),
+            maknae_proto::FrameClass::Attempt,
+            &caps(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            maknae_proto::decode_response(&frame).unwrap().result,
+            RespResult::Err(ProtoError {
+                code: ProtoErrCode::Unauthorized,
+                ..
+            })
+        ));
+
+        let emit = Recorder::default();
+        let (client, mut server) = tokio::io::duplex(64);
+        drop(client);
+        disclose(
+            &mut server,
+            &TransportConfig::default(),
+            &emit,
+            &Seq::new(),
+            record(),
+            "metadata",
+            answer,
+            maknae_proto::ATTEMPT_RESPONSE_MAX,
+        )
+        .await;
+        let trail = emit.0.lock().unwrap().clone();
+        assert_eq!(trail.len(), 2, "the permit, then that it was not delivered");
+        assert!(
+            trail[1].outcome.reason.contains("not delivered"),
+            "{}",
+            trail[1].outcome.reason
+        );
+    }
+    #[tokio::test]
+    async fn a_subject_that_cannot_list_is_trailed_as_its_own_refusal() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let dir = fx.root.join("unlistable-161");
+        std::fs::create_dir(&dir).unwrap();
+        let emit = Arc::new(Recorder::default());
+        list_on(
+            &fx,
+            fixture_pdp(&fx),
+            list_verb(&dir, None),
+            maknae_io::open_directory_for_delegation(&dir).ok(),
+            SensitiveList::empty(),
+            emit.clone(),
+            |_| {
+                vec![maknae_proto::ListChunk {
+                    entries: Vec::new(),
+                    last: true,
+                    dropped: 0,
+                    unlisted: true,
+                }]
+            },
+        )
+        .await;
+        let reason = last_reason(&emit);
+        assert!(
+            reason.starts_with(crate::listing::SUBJECT_UNLISTED),
+            "{reason}"
+        );
+        assert!(!reason.contains("missing or malformed"), "{reason}");
+    }
     #[tokio::test]
     async fn an_unsorted_chunk_is_refused_with_its_cause_and_releases_nothing() {
         let _turn = EUID_TURN.lock().await;
@@ -3358,11 +3678,13 @@ mod tests {
                         entries: vec![entry("b"), entry("c")],
                         last: false,
                         dropped: 0,
+                        unlisted: false,
                     },
                     maknae_proto::ListChunk {
                         entries: vec![entry("a")],
                         last: true,
                         dropped: 0,
+                        unlisted: false,
                     },
                 ]
             },

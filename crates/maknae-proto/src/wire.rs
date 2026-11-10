@@ -2001,9 +2001,21 @@ mod tests {
             entries: vec![entry("a-161", false), entry("b-161", true)],
             last: true,
             dropped: 2,
+            unlisted: false,
         };
         let bytes = encode_list_chunk(&chunk).unwrap();
         assert_eq!(decode_list_chunk(&bytes).unwrap(), chunk);
+        assert!(!bytes.windows(8).any(|w| w == b"unlisted"));
+        let unlisted = crate::ListChunk {
+            entries: Vec::new(),
+            last: true,
+            dropped: 0,
+            unlisted: true,
+        };
+        assert_eq!(
+            decode_list_chunk(&encode_list_chunk(&unlisted).unwrap()).unwrap(),
+            unlisted
+        );
         let mut trailing = bytes.clone();
         trailing.push(0);
         assert!(decode_list_chunk(&trailing).is_err());

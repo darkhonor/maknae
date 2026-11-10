@@ -3420,9 +3420,9 @@ async fn refuse_unencodable_bounded<S, E: AuditEmit + Send + Sync>(
 /// PERMIT whose delivery is refused is refused EXPLICITLY (`TooLarge` with a
 /// corrective record), never truncated and never silently oversized. The write
 /// is bounded by `read_timeout_ms`, which doubles as the write bound (both cap
-/// how long one peer may hold this permit). `seq` is consumed ONLY on the
-/// corrective branch; a successful write burns no sequence number. Never
-/// closes the stream.
+/// how long one peer may hold this permit); a write that fails or times out is
+/// corrected in the trail too. `seq` is consumed ONLY on a corrective branch; a
+/// successful write burns no sequence number. Never closes the stream.
 #[allow(clippy::too_many_arguments)]
 async fn write_frame_bounded<S, E: AuditEmit + Send + Sync>(
     stream: &mut S,
@@ -3452,11 +3452,33 @@ async fn write_frame_bounded<S, E: AuditEmit + Send + Sync>(
         .await;
         return;
     }
-    let _ = tokio::time::timeout(
+    let written = tokio::time::timeout(
         Duration::from_millis(cfg.read_timeout_ms),
         write_frame(stream, class, bytes),
     )
     .await;
+    if !matches!(written, Ok(Ok(()))) {
+        emit_request_outcome(
+            emit,
+            host,
+            socket,
+            peer_uid,
+            peer_uri,
+            peer_user,
+            role,
+            rule,
+            session_id,
+            seq.next(),
+            action,
+            None,
+            None,
+            "permit",
+            "delivery failed: response not written",
+            "undelivered",
+            au3_1,
+        )
+        .await;
+    }
 }
 
 /// Write one generic error frame, bounded like every response write. The
@@ -21159,6 +21181,50 @@ mod unencodable_tests {
             maknae_proto::decode_response(&reply).unwrap().result,
             RespResult::Err(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn a_permitted_response_that_is_not_written_is_corrected_in_the_trail() {
+        let (client, mut server) = tokio::io::duplex(64);
+        drop(client);
+        let emit = Arc::new(Recorder::default());
+        let rule = RuleCitation {
+            node: 7,
+            key: "sentinel-undelivered-rule".into(),
+            section: "authz.yaml#permissions".into(),
+        };
+        write_frame_bounded(
+            &mut server,
+            &maknae_config::transport_from_section(None).unwrap(),
+            maknae_proto::FrameClass::Control,
+            b"sentinel-undelivered-bytes",
+            &emit,
+            "h",
+            "s",
+            1000,
+            Some("spiffe://d/plane/cli"),
+            Some("alice"),
+            Some("user"),
+            Some(&rule),
+            1,
+            &Seq::new(),
+            "admin.status",
+            &serde_json::json!({}),
+        )
+        .await;
+        let records = emit.0.lock().unwrap().clone();
+        assert_eq!(
+            records.len(),
+            1,
+            "a permit that never reached its caller is corrected"
+        );
+        assert_eq!(records[0].outcome.result, "permit");
+        assert_eq!(
+            records[0].outcome.reason,
+            "delivery failed: response not written"
+        );
+        assert_eq!(records[0].outcome.posture, "undelivered");
+        assert_eq!(records[0].rule, Some(rule_audit(&rule)));
     }
 }
 

@@ -20,12 +20,15 @@ pub struct ListEntry {
 
 /// Subject to kernel, after an `fs.list` grant: names in strictly increasing byte order,
 /// continuing the previous chunk's. `dropped` counts names the subject could not send
-/// as UTF-8, a claim the kernel records without verifying.
+/// as UTF-8, and `unlisted` says the subject could not list the directory at all; the
+/// kernel records both as claims it does not verify.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListChunk {
     pub entries: Vec<ListEntry>,
     pub last: bool,
     pub dropped: u32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unlisted: bool,
 }
 
 /// Kernel to subject: the permitted entries, at most [`LIST_RELEASE_MAX`]. `truncated`

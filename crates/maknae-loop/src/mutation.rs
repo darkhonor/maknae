@@ -966,6 +966,7 @@ fn list_chunks(
             entries,
             last: i == last,
             dropped: if i == last { dropped } else { 0 },
+            unlisted: false,
         })
         .collect()
 }
@@ -1004,6 +1005,38 @@ fn withheld_count(
         .saturating_sub(page.entries.len())
 }
 
+/// Tells the kernel this subject could not list the directory, so its trail says so; the
+/// kernel's answer changes nothing here.
+async fn unlisted<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    deadline: tokio::time::Instant,
+) {
+    let chunk = proto::ListChunk {
+        entries: Vec::new(),
+        last: true,
+        dropped: 0,
+        unlisted: true,
+    };
+    let Ok(body) = proto::encode_list_chunk(&chunk) else {
+        return;
+    };
+    let _ = tokio::time::timeout_at(deadline, async {
+        proto::write_frame(stream, proto::FrameClass::Attempt, &body).await?;
+        proto::read_frame_of_class(
+            stream,
+            proto::FrameClass::Attempt,
+            &proto::FrameCaps {
+                control: 0,
+                attempt: proto::ATTEMPT_RESPONSE_MAX,
+                prompt: 0,
+            },
+        )
+        .await
+        .map(drop)
+    })
+    .await;
+}
+
 /// An `fs.list` after its grant: enumerate the delegated directory, send it in chunks,
 /// and release the page only once the kernel answers it, which it does after recording it.
 /// `Ok(Err(_))` is the kernel's refusal; `Err` is this side's own failure.
@@ -1036,16 +1069,25 @@ pub async fn execute_list<S: AsyncRead + AsyncWrite + Unpin + Send>(
         .ok_or_else(|| "listing deadline exceeds monotonic clock range".to_string())?;
     let deadline = tokio::time::Instant::from_std(deadline);
     let held = held.try_clone().map_err(|e| e.to_string())?;
-    let listing = tokio::time::timeout_at(
+    let listing = match tokio::time::timeout_at(
         deadline,
         tokio::task::spawn_blocking(move || {
             maknae_io::list_delegated_directory(held.as_fd(), &granted, proto::LIST_RECEIVE_MAX)
         }),
     )
     .await
-    .map_err(|_| "list not performed: enumeration timed out".to_string())?
-    .map_err(|e| format!("list not performed: {e}"))?
-    .map_err(|e| format!("list not performed: {e}"))?;
+    {
+        Ok(Ok(Ok(listing))) => listing,
+        failed => {
+            let why = match failed {
+                Ok(Ok(Err(e))) => e.to_string(),
+                Ok(Err(e)) => e.to_string(),
+                _ => "enumeration timed out".to_string(),
+            };
+            unlisted(stream, deadline).await;
+            return Err(format!("list not performed: {why}"));
+        }
+    };
     let dropped = listing.dropped;
     let chunks = list_chunks(listing.entries, dropped, proto::ATTEMPT_REQUEST_MAX);
     let sent: Vec<proto::ListEntry> = chunks.iter().flat_map(|c| c.entries.clone()).collect();
@@ -1105,7 +1147,7 @@ pub async fn execute_list<S: AsyncRead + AsyncWrite + Unpin + Send>(
         let withheld = withheld_count(page, &sent, after);
         if withheld > 0 {
             diag(format!(
-                "maknae: {withheld} entr{} withheld by policy",
+                "maknae: {withheld} entr{} not released",
                 if withheld == 1 { "y" } else { "ies" }
             ));
         }
@@ -1614,7 +1656,8 @@ mod tests {
             [proto::ListChunk {
                 entries: Vec::new(),
                 last: true,
-                dropped: 0
+                dropped: 0,
+                unlisted: false,
             }]
         );
     }
@@ -1636,7 +1679,49 @@ mod tests {
         assert_eq!(result.unwrap().unwrap(), page(&["b", "d"], false));
         let names: Vec<&str> = chunks[0].entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["a", "b", "c", "d"], "every name, in byte order");
-        assert_eq!(lines, ["maknae: 1 entry withheld by policy"]);
+        assert_eq!(lines, ["maknae: 1 entry not released"]);
+    }
+    #[tokio::test]
+    async fn a_page_the_kernel_fills_mid_stream_is_released_truncated_and_ends_the_sending() {
+        let d = Fixture::new();
+        let long = "x".repeat(120);
+        for i in 0..1500 {
+            std::fs::write(d.0.join(format!("{i:05}{long}")), b"x").unwrap();
+        }
+        let dir = d.0.to_str().unwrap().to_string();
+        let mut seen: Vec<proto::ListEntry> = Vec::new();
+        let (result, chunks, lines) = listed(
+            prepare(list(dir.clone(), None), None).unwrap(),
+            &dir,
+            move |c| {
+                seen.extend(c.entries.iter().cloned());
+                Some(reply(proto::RespResult::Ok(
+                    if seen.len() > proto::LIST_RELEASE_MAX {
+                        proto::Payload::ListGrant(proto::ListGrant {
+                            entries: seen[..proto::LIST_RELEASE_MAX].to_vec(),
+                            truncated: true,
+                        })
+                    } else {
+                        proto::Payload::ListContinue
+                    },
+                )))
+            },
+        )
+        .await;
+        let page = result.unwrap().unwrap();
+        assert!(page.truncated);
+        assert_eq!(page.entries.len(), proto::LIST_RELEASE_MAX);
+        assert_eq!(page.entries[0].name, format!("00000{long}"));
+        let sent: usize = chunks.iter().map(|c| c.entries.len()).sum();
+        assert!(
+            sent > proto::LIST_RELEASE_MAX && sent < 1500,
+            "sending stopped at the page: {sent}"
+        );
+        assert!(
+            chunks.iter().all(|c| !c.last),
+            "the last chunk was never sent"
+        );
+        assert!(lines.is_empty(), "{lines:?}");
     }
     #[tokio::test]
     async fn nothing_is_released_before_the_acknowledgement() {
@@ -1703,8 +1788,23 @@ mod tests {
         std::fs::rename(&dir, d.path("moved-161")).unwrap();
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(Path::new(&dir).join("planted-161"), b"x").unwrap();
-        let (result, chunks, _) = listed(prepared, &dir, |_| panic!("nothing is sent")).await;
-        assert!(chunks.is_empty());
+        let (result, chunks, _) = listed(prepared, &dir, |_| {
+            Some(reply(proto::RespResult::Err(proto::ProtoError {
+                code: proto::ProtoErrCode::Unauthorized,
+                message: "unlisted".into(),
+            })))
+        })
+        .await;
+        assert_eq!(
+            chunks,
+            [proto::ListChunk {
+                entries: Vec::new(),
+                last: true,
+                dropped: 0,
+                unlisted: true,
+            }],
+            "the kernel is told the subject could not list, and nothing else"
+        );
         let why = result.unwrap_err();
         assert!(why.starts_with("list not performed:"), "{why}");
     }

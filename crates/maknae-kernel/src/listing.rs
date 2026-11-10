@@ -17,6 +17,9 @@ use tokio::io::{AsyncRead, AsyncWrite};
 pub(crate) const ORDER_VIOLATED: &str = "listing order violated";
 pub(crate) const BOUND_REACHED: &str = "listing bound reached before a full page was permitted";
 const EMPTY_CHUNK: &str = "listing chunk empty before the last";
+pub(crate) const SUBJECT_UNLISTED: &str =
+    "the subject reports it could not list the directory (unverified)";
+const DEADLINE_PASSED: &str = "listing deadline passed before its page was recorded";
 
 /// What one entry is decided by: the request's own facts, owned for a blocking worker.
 pub(crate) struct Decider<P> {
@@ -108,6 +111,9 @@ impl Lister {
         chunk: &ListChunk,
         mut permits: impl FnMut(&str) -> bool,
     ) -> Option<End> {
+        if chunk.unlisted {
+            return Some(End::Refused(SUBJECT_UNLISTED));
+        }
         if chunk.entries.is_empty() && !chunk.last {
             return Some(End::Refused(EMPTY_CHUNK));
         }
@@ -340,21 +346,34 @@ pub(crate) async fn run<S, E, P>(
             .await;
         return;
     }
-    record.outcome.result = "permit".into();
-    record.outcome.reason = format!("{tally}; released after this record");
-    record.outcome.posture = "authorized".into();
-    if emit
-        .emit_within(&record, crate::blocking_guard::AUDIT_APPEND_TIMEOUT)
-        .await
-        .is_err()
-    {
+    if tokio::time::Instant::now() >= deadline {
+        if let Some(meta) = record.mutation.as_mut() {
+            meta.status = MutationStatus::Incomplete;
+        }
+        let answer = ProtoError {
+            code: ProtoErrCode::Unauthorized,
+            message: DEADLINE_PASSED.into(),
+        };
+        crate::mutation::refuse_with(
+            stream,
+            cfg,
+            emit,
+            record,
+            format!("{DEADLINE_PASSED}; {tally}"),
+            answer,
+        )
+        .await;
         return;
     }
-    answer(
+    crate::mutation::disclose(
         stream,
-        deadline,
-        caps,
-        RespResult::Ok(Payload::ListGrant(lister.grant())),
+        cfg,
+        emit,
+        seq,
+        record,
+        &tally,
+        Payload::ListGrant(lister.grant()),
+        caps.response,
     )
     .await;
 }
@@ -377,6 +396,7 @@ mod tests {
             entries: entries(names),
             last,
             dropped: 0,
+            unlisted: false,
         }
     }
     fn numbered(from: usize, count: usize) -> Vec<String> {
@@ -569,6 +589,18 @@ mod tests {
             lister.take(&chunk(&[], true), |_| true),
             Some(End::Complete)
         );
+    }
+
+    #[test]
+    fn a_subject_that_cannot_list_ends_the_listing_as_its_own_refusal() {
+        let mut lister = Lister::new("/d".into(), None);
+        let mut unlisted = chunk(&[], true);
+        unlisted.unlisted = true;
+        assert_eq!(
+            lister.take(&unlisted, |_| panic!("nothing to decide")),
+            Some(End::Refused(SUBJECT_UNLISTED))
+        );
+        assert!(SUBJECT_UNLISTED.contains("(unverified)"));
     }
 
     #[test]
