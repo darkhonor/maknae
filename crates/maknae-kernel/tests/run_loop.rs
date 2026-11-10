@@ -645,10 +645,20 @@ async fn unread_response_does_not_hang_the_handler() {
         done.is_ok(),
         "handle must return within the write bound even though the peer never reads"
     );
-    // Both records (admission + request) were still durably offered before the write.
     let recs = emit.records();
-    assert_eq!(recs.len(), 2, "admission + request records expected");
+    assert_eq!(
+        recs.len(),
+        3,
+        "admission + request + undelivered records expected"
+    );
     assert_eq!(recs[1].outcome.reason, "authorized");
+    assert_eq!(
+        (
+            recs[2].outcome.reason.as_str(),
+            recs[2].outcome.posture.as_str()
+        ),
+        ("delivery failed: response not written", "undelivered")
+    );
     writer.abort();
 }
 

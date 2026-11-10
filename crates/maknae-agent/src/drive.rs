@@ -4,7 +4,9 @@
 //! nothing here fails closed against a hostile loop, and nothing here claims
 //! to. The kernel decides every verb this asks for.
 use crate::budget::{Gate, Meter, Notice};
-use crate::plane::{same_content, Plane, PlaneError, ReadBasis, ReadOutcome, WriteOutcome};
+use crate::plane::{
+    same_content, ListOutcome, Plane, PlaneError, ReadBasis, ReadOutcome, StatOutcome, WriteOutcome,
+};
 use crate::render::{render, ToolOutcome};
 use crate::route::{route, RouteError, ToolRequest};
 use crate::transcript::Transcript;
@@ -353,6 +355,36 @@ pub async fn drive_session<P: Plane>(
                                 }
                             }
                         }
+                        Ok(ToolRequest::List { path, after, .. }) => {
+                            let listed = plane
+                                .list(transcript.conversation(), &path, after.as_deref())
+                                .await;
+                            for d in plane.take_diagnostics() {
+                                emit(LoopEvent::Diagnostic(d));
+                            }
+                            match listed {
+                                ListOutcome::Page(page) => ToolOutcome::Listing(page),
+                                ListOutcome::Unavailable => ToolOutcome::ListUnavailable,
+                                ListOutcome::Protected(by) => {
+                                    emit(LoopEvent::Protected { path, by });
+                                    ToolOutcome::Protected
+                                }
+                            }
+                        }
+                        Ok(ToolRequest::Stat { path, .. }) => {
+                            let stat = plane.stat(transcript.conversation(), &path).await;
+                            for d in plane.take_diagnostics() {
+                                emit(LoopEvent::Diagnostic(d));
+                            }
+                            match stat {
+                                StatOutcome::Stat(view) => ToolOutcome::Stat(view),
+                                StatOutcome::Unavailable => ToolOutcome::StatUnavailable,
+                                StatOutcome::Protected(by) => {
+                                    emit(LoopEvent::Protected { path, by });
+                                    ToolOutcome::Protected
+                                }
+                            }
+                        }
                     };
                     transcript.push_tool_result(&call.call_id, &render(&outcome, steps_remaining));
                 }
@@ -466,6 +498,10 @@ mod tests {
         read_outcome: ReadOutcome,
         read_versions: VecDeque<[i64; 7]>,
         write_outcome: WriteOutcome,
+        lists: Vec<(String, Option<String>)>,
+        list_outcomes: VecDeque<ListOutcome>,
+        stats: Vec<String>,
+        stat_outcomes: VecDeque<StatOutcome>,
     }
     impl Plane for Scripted {
         async fn open(
@@ -506,6 +542,18 @@ mod tests {
             self.bases.push(basis);
             self.write_outcome.clone()
         }
+        async fn list(&mut self, _c: &str, p: &str, after: Option<&str>) -> ListOutcome {
+            self.lists.push((p.into(), after.map(str::to_string)));
+            self.list_outcomes
+                .pop_front()
+                .unwrap_or(ListOutcome::Unavailable)
+        }
+        async fn stat(&mut self, _c: &str, p: &str) -> StatOutcome {
+            self.stats.push(p.into());
+            self.stat_outcomes
+                .pop_front()
+                .unwrap_or(StatOutcome::Unavailable)
+        }
     }
     fn scripted(replies: Vec<PromptReply>) -> Scripted {
         Scripted {
@@ -527,6 +575,10 @@ mod tests {
             }),
             read_versions: VecDeque::new(),
             write_outcome: WriteOutcome::Applied(None),
+            lists: vec![],
+            list_outcomes: VecDeque::new(),
+            stats: vec![],
+            stat_outcomes: VecDeque::new(),
         }
     }
 
@@ -956,6 +1008,212 @@ mod tests {
             assert!(!said.contains(".ssh"), "{said}");
         }
     }
+    fn calls_reply(calls: Vec<ProposedToolCall>) -> PromptReply {
+        PromptReply {
+            reasoning: None,
+            blocks: vec![],
+            tool_calls: calls,
+            usage: None,
+        }
+    }
+
+    async fn drive_wide(p: &mut Scripted, t: &mut Transcript) -> Vec<LoopEvent> {
+        let mut events = vec![];
+        drive_session(
+            p,
+            t,
+            &mut Seen::new(),
+            &Budget {
+                max_steps: 4,
+                max_tool_calls_per_step: 1_000,
+            },
+            &mut Meter::new(ContextBudget::new(MAX_CONTEXT_FOR_TESTS, None).unwrap()),
+            &AtomicBool::new(false),
+            &mut |e| events.push(e),
+            None,
+        )
+        .await;
+        events
+    }
+
+    const MAX_CONTEXT_FOR_TESTS: u64 = 1_000_000;
+
+    #[tokio::test]
+    async fn every_listing_and_stat_refusal_renders_the_same_model_text() {
+        let for_list = crate::testutil::every_refusal_after_a_list_or_stat();
+        let for_stat = crate::testutil::every_refusal_after_a_list_or_stat();
+        let n = for_list.len();
+        let mut p = scripted(vec![]);
+        let mut calls = vec![];
+        for (i, (l, st)) in for_list.into_iter().zip(for_stat).enumerate() {
+            p.list_outcomes.push_back(crate::wire::list_outcome(l));
+            p.stat_outcomes.push_back(crate::wire::stat_outcome(st));
+            calls.push(call(
+                &format!("l{i}"),
+                "list_directory",
+                r#"{"path":"/w/d"}"#,
+            ));
+            calls.push(call(&format!("s{i}"), "stat_path", r#"{"path":"/w/f"}"#));
+        }
+        p.replies = vec![Ok(calls_reply(calls)), Ok(done())].into();
+        let mut t = Transcript::new("conv", "q");
+        let events = drive_wide(&mut p, &mut t).await;
+        let said: Vec<String> = t.turns()[2..2 + 2 * n].iter().map(tool_text).collect();
+        assert_eq!(said.len(), 2 * n);
+        for s in &said {
+            assert_eq!(s, "unavailable — do not retry\n\nsteps remaining: 3");
+        }
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, LoopEvent::Protected { .. })),
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_protected_listing_or_stat_tells_the_user_and_the_model_only_that_it_is_protected() {
+        let by = ProtectedBy {
+            list: maknae_proto::HOST_SENSITIVE_LIST.into(),
+            entry: "/x/.ssh".into(),
+        };
+        let mut p = scripted(vec![
+            calls_reply(vec![
+                call("c1", "list_directory", r#"{"path":"/x/.ssh"}"#),
+                call("c2", "stat_path", r#"{"path":"/x/.ssh"}"#),
+            ]),
+            done(),
+        ]);
+        p.list_outcomes
+            .push_back(ListOutcome::Protected(by.clone()));
+        p.stat_outcomes
+            .push_back(StatOutcome::Protected(by.clone()));
+        let mut t = Transcript::new("conv", "q");
+        let events = drive_wide(&mut p, &mut t).await;
+        let protected: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, LoopEvent::Protected { .. }))
+            .cloned()
+            .collect();
+        assert_eq!(
+            protected,
+            vec![
+                LoopEvent::Protected {
+                    path: "/x/.ssh".into(),
+                    by: by.clone()
+                },
+                LoopEvent::Protected {
+                    path: "/x/.ssh".into(),
+                    by
+                },
+            ]
+        );
+        for i in [2, 3] {
+            assert_eq!(
+                tool_text(&t.turns()[i]),
+                format!("{}\n\nsteps remaining: 3", crate::render::PROTECTED)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_listings_user_lines_never_reach_the_model() {
+        let mut p = Diagnosing {
+            inner: scripted(vec![
+                calls_reply(vec![call(
+                    "c1",
+                    "list_directory",
+                    r#"{"path":"/w/box-161","after":"a"}"#,
+                )]),
+                done(),
+            ]),
+            on_prompt: VecDeque::new(),
+            on_write: "unused",
+            on_read: "unused",
+            on_list: vec![
+                "maknae: 3 entries not released",
+                "maknae: 1 entry with a non-UTF-8 name not listed",
+            ],
+            queued: vec![],
+        };
+        p.inner
+            .list_outcomes
+            .push_back(ListOutcome::Page(maknae_proto::ListGrant {
+                entries: vec![
+                    maknae_proto::ListEntry {
+                        name: "seen-161".into(),
+                        dir: false,
+                    },
+                    maknae_proto::ListEntry {
+                        name: "sub-161".into(),
+                        dir: true,
+                    },
+                ],
+                truncated: false,
+            }));
+        let mut t = Transcript::new("conv", "q");
+        let mut events = vec![];
+        drive_session(
+            &mut p,
+            &mut t,
+            &mut Seen::new(),
+            &budget(),
+            &mut Meter::new(ContextBudget::new(MAX_CONTEXT_FOR_TESTS, None).unwrap()),
+            &AtomicBool::new(false),
+            &mut |e| events.push(e),
+            None,
+        )
+        .await;
+        assert_eq!(
+            p.inner.lists,
+            vec![("/w/box-161".to_string(), Some("a".to_string()))]
+        );
+        let said = tool_text(&t.turns()[2]);
+        assert_eq!(said, "\"seen-161\"\n\"sub-161\"/\n\nsteps remaining: 3");
+        assert_eq!(
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    LoopEvent::Diagnostic(d) => Some(d.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            [
+                "maknae: 3 entries not released",
+                "maknae: 1 entry with a non-UTF-8 name not listed"
+            ]
+        );
+        for leak in ["not released", "non-UTF-8", "maknae:", "3", "1 entry"] {
+            assert!(
+                !said
+                    .replace("161", "")
+                    .replace("steps remaining: 3", "")
+                    .contains(leak),
+                "{leak}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stat_reaches_the_model_as_kind_size_and_mtime() {
+        let mut p = scripted(vec![
+            calls_reply(vec![call("c1", "stat_path", r#"{"path":"/w/link"}"#)]),
+            done(),
+        ]);
+        p.stat_outcomes.push_back(StatOutcome::Stat(StatView {
+            size: 161,
+            mtime_secs: 1_700_000_000,
+            kind: maknae_proto::StatKind::Symlink,
+        }));
+        let mut t = Transcript::new("conv", "q");
+        drive_wide(&mut p, &mut t).await;
+        assert_eq!(p.stats, vec!["/w/link".to_string()]);
+        assert_eq!(
+            tool_text(&t.turns()[2]),
+            "{\"kind\":\"symlink\",\"size\":161,\"mtime_secs\":1700000000}\n\nsteps remaining: 3"
+        );
+    }
+
     #[tokio::test]
     async fn a_protected_write_renders_protected() {
         let mut p = scripted(vec![
@@ -1333,7 +1591,7 @@ mod tests {
     async fn the_loop_stops_before_sending_a_turn_past_the_budget() {
         let mut notices = vec![];
         let mut p = scripted(vec![answer()]);
-        let mut m = Meter::new(ContextBudget::new(2_000, None).unwrap());
+        let mut m = Meter::new(ContextBudget::new(3_000, None).unwrap());
         let mut t = Transcript::new("c", &"q".repeat(100));
         let out = drive(&mut p, &mut t, &budget(), &mut m, &mut |n: &Notice| {
             notices.push(*n)
@@ -1342,7 +1600,7 @@ mod tests {
         assert_eq!((out.answer.as_deref(), p.prompts), (Some("done"), 1));
 
         let mut p = scripted(vec![answer()]);
-        let mut m = Meter::new(ContextBudget::new(2_000, None).unwrap());
+        let mut m = Meter::new(ContextBudget::new(3_000, None).unwrap());
         let mut t = Transcript::new("c", &"q".repeat(5_000));
         let out = drive(&mut p, &mut t, &budget(), &mut m, &mut |n: &Notice| {
             notices.push(*n)
@@ -1357,8 +1615,8 @@ mod tests {
     async fn a_turn_near_the_budget_is_sent_with_a_notice() {
         let mut notices = vec![];
         let mut p = scripted(vec![answer()]);
-        let mut m = Meter::new(ContextBudget::new(2_000, None).unwrap());
-        let mut t = Transcript::new("c", &"q".repeat(1_800));
+        let mut m = Meter::new(ContextBudget::new(3_000, None).unwrap());
+        let mut t = Transcript::new("c", &"q".repeat(2_700));
         let out = drive(&mut p, &mut t, &budget(), &mut m, &mut |n: &Notice| {
             notices.push(*n)
         })
@@ -1368,8 +1626,8 @@ mod tests {
             notices,
             vec![Notice {
                 percent: 99,
-                tokens: 1_986,
-                budget: 2_000,
+                tokens: 2_979,
+                budget: 3_000,
                 estimated: true
             }]
         );
@@ -1383,13 +1641,13 @@ mod tests {
                 blocks: vec![],
                 tool_calls: vec![call("c1", "read_file", r#"{"path":"/w/a.txt"}"#)],
                 usage: Some(maknae_proto::Usage {
-                    prompt_tokens: 1_990,
+                    prompt_tokens: 2_990,
                     completion_tokens: None,
                 }),
             },
             answer(),
         ]);
-        let mut m = Meter::new(ContextBudget::new(2_000, None).unwrap());
+        let mut m = Meter::new(ContextBudget::new(3_000, None).unwrap());
         let mut t = Transcript::new("c", "q");
         let out = drive(&mut p, &mut t, &budget(), &mut m, &mut |_: &Notice| {}).await;
         assert_eq!(out.stopped, Some(StopReason::ContextBudget));
@@ -1572,6 +1830,12 @@ mod tests {
             self.stop.store(true, Ordering::Release);
             self.inner.write(c, p, b, basis).await
         }
+        async fn list(&mut self, c: &str, p: &str, after: Option<&str>) -> ListOutcome {
+            self.inner.list(c, p, after).await
+        }
+        async fn stat(&mut self, c: &str, p: &str) -> StatOutcome {
+            self.inner.stat(c, p).await
+        }
     }
 
     #[tokio::test]
@@ -1621,6 +1885,12 @@ mod tests {
         async fn write(&mut self, c: &str, p: &str, b: &[u8], basis: ReadBasis) -> WriteOutcome {
             self.inner.write(c, p, b, basis).await
         }
+        async fn list(&mut self, c: &str, p: &str, after: Option<&str>) -> ListOutcome {
+            self.inner.list(c, p, after).await
+        }
+        async fn stat(&mut self, c: &str, p: &str) -> StatOutcome {
+            self.inner.stat(c, p).await
+        }
     }
 
     #[tokio::test]
@@ -1647,7 +1917,7 @@ mod tests {
             &mut Transcript::new("c", &"q".repeat(1_800)),
             &mut Seen::new(),
             &budget(),
-            &mut Meter::new(ContextBudget::new(2_000, None).unwrap()),
+            &mut Meter::new(ContextBudget::new(3_000, None).unwrap()),
             &AtomicBool::new(true),
             &mut |e| events.push(e),
             None,
@@ -1667,7 +1937,7 @@ mod tests {
             &mut Transcript::new("c", &"q".repeat(1_800)),
             &mut Seen::new(),
             &budget(),
-            &mut Meter::new(ContextBudget::new(2_000, None).unwrap()),
+            &mut Meter::new(ContextBudget::new(3_000, None).unwrap()),
             &stop,
             &mut |e| {
                 if matches!(e, LoopEvent::Notice(_)) {
@@ -1744,6 +2014,7 @@ mod tests {
         on_prompt: VecDeque<&'static str>,
         on_write: &'static str,
         on_read: &'static str,
+        on_list: Vec<&'static str>,
         queued: Vec<String>,
     }
     impl Plane for Diagnosing {
@@ -1774,6 +2045,14 @@ mod tests {
             self.queued.push(self.on_write.into());
             self.inner.write(c, p, b, basis).await
         }
+        async fn list(&mut self, c: &str, p: &str, after: Option<&str>) -> ListOutcome {
+            self.queued
+                .extend(self.on_list.iter().map(|l| l.to_string()));
+            self.inner.list(c, p, after).await
+        }
+        async fn stat(&mut self, c: &str, p: &str) -> StatOutcome {
+            self.inner.stat(c, p).await
+        }
         fn take_diagnostics(&mut self) -> Vec<String> {
             std::mem::take(&mut self.queued)
         }
@@ -1790,6 +2069,7 @@ mod tests {
             on_prompt: VecDeque::from(["diag-p1", "diag-p2", "diag-p3"]),
             on_write: "diag-w",
             on_read: "diag-r",
+            on_list: vec![],
             queued: vec![],
         };
         // The read's result pushes the meter past 80%, so the notice is
@@ -1805,7 +2085,7 @@ mod tests {
             &mut Transcript::new("c", "q"),
             &mut Seen::new(),
             &budget(),
-            &mut Meter::new(ContextBudget::new(2_000, None).unwrap()),
+            &mut Meter::new(ContextBudget::new(3_000, None).unwrap()),
             &stop,
             &mut |e| events.push(e),
             None,
@@ -1825,6 +2105,7 @@ mod tests {
             on_prompt: VecDeque::from(["diag-p1", "diag-p2"]),
             on_write: "diag-w",
             on_read: "unused",
+            on_list: vec![],
             queued: vec![],
         };
         let mut events = vec![];
@@ -1833,7 +2114,7 @@ mod tests {
             &mut Transcript::new("c", "q"),
             &mut Seen::new(),
             &budget(),
-            &mut Meter::new(ContextBudget::new(2_000, None).unwrap()),
+            &mut Meter::new(ContextBudget::new(3_000, None).unwrap()),
             &stop,
             &mut |e| events.push(e),
             None,
@@ -1850,6 +2131,7 @@ mod tests {
             on_prompt: VecDeque::from(["diag-p1"]),
             on_write: "unused",
             on_read: "unused",
+            on_list: vec![],
             queued: vec![],
         };
         let mut events = vec![];
@@ -1858,7 +2140,7 @@ mod tests {
             &mut Transcript::new("c", &"q".repeat(1_800)),
             &mut Seen::new(),
             &budget(),
-            &mut Meter::new(ContextBudget::new(2_000, None).unwrap()),
+            &mut Meter::new(ContextBudget::new(3_000, None).unwrap()),
             &stop,
             &mut |e| events.push(e),
             None,
@@ -1879,7 +2161,7 @@ mod tests {
             &mut Transcript::new("c", &"q".repeat(1_700)),
             &mut Seen::new(),
             &budget(),
-            &mut Meter::new(ContextBudget::new(2_000, None).unwrap()),
+            &mut Meter::new(ContextBudget::new(3_000, None).unwrap()),
             &AtomicBool::new(false),
             &mut |e| events.push(e),
             None,

@@ -3,10 +3,12 @@
 //! is T1 in `maknae_agent::wire`.
 use crate::keys::KeySupply;
 use crate::send::{send_verb, write_request};
-use maknae_agent::plane::{Plane, PlaneError, ReadBasis, ReadOutcome, WriteOutcome};
+use maknae_agent::plane::{
+    ListOutcome, Plane, PlaneError, ReadBasis, ReadOutcome, StatOutcome, WriteOutcome,
+};
 use maknae_agent::wire::{
-    check_for, close_outcome, open_outcome, prompt_outcome, read_outcome, write_outcome,
-    WireOutcome,
+    check_for, close_outcome, list_outcome, open_outcome, prompt_outcome, read_outcome,
+    stat_outcome, write_outcome, WireOutcome,
 };
 use maknae_config::TransportConfig;
 use maknae_proto::{ConversationId, ConversationView, ProviderChoice, Turn, Verb};
@@ -252,6 +254,45 @@ impl<K: KeySupply> Plane for LoopPlane<K> {
         }
         write_outcome(sent.map(WireOutcome::from))
     }
+    async fn list(&mut self, conversation: &str, path: &str, after: Option<&str>) -> ListOutcome {
+        let diagnostics = &mut self.diagnostics;
+        list_outcome(
+            send_verb(
+                Verb::FsList {
+                    path: path.to_string(),
+                    after: after.map(str::to_string),
+                    conversation: Some(conversation.to_string()),
+                },
+                None,
+                crate::mutation::WriteCheck::Unchecked,
+                &self.transport,
+                &self.client,
+                &self.trust,
+                &mut |l| diagnostics.push(l),
+            )
+            .await
+            .map(WireOutcome::from),
+        )
+    }
+    async fn stat(&mut self, conversation: &str, path: &str) -> StatOutcome {
+        let diagnostics = &mut self.diagnostics;
+        stat_outcome(
+            send_verb(
+                Verb::FsStat {
+                    path: path.to_string(),
+                    conversation: Some(conversation.to_string()),
+                },
+                None,
+                crate::mutation::WriteCheck::Unchecked,
+                &self.transport,
+                &self.client,
+                &self.trust,
+                &mut |l| diagnostics.push(l),
+            )
+            .await
+            .map(WireOutcome::from),
+        )
+    }
     fn take_diagnostics(&mut self) -> Vec<String> {
         std::mem::take(&mut self.diagnostics)
     }
@@ -342,7 +383,7 @@ mod tests {
         let body = &src[src
             .find(concat!("impl<K: KeySupply> Plane ", "for LoopPlane"))
             .unwrap()..];
-        assert_eq!(body.matches(concat!("diagnostics", ".push(l)")).count(), 5);
+        assert_eq!(body.matches(concat!("diagnostics", ".push(l)")).count(), 7);
         assert!(body.contains(concat!(
             "fn take_diagnostics(&mut self) -> Vec<String> {\n",
             "        std::mem::take(&mut self.diagnostics)"

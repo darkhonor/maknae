@@ -97,6 +97,8 @@ pub enum AuthzBasicError {
     UnknownAction(String),
     /// A `subjects:` list names a `kernel` or `liveness` family or term.
     UngrantableAction(String),
+    /// A list names `fs.stat`, which is decided as `fs.read` (#161 M15).
+    DecidedAsRead(String),
     /// An account lookup for a `subjects:` name failed.
     SubjectLookup(String),
     /// Two `subjects:` names resolve to one account.
@@ -152,6 +154,10 @@ impl std::fmt::Display for AuthzBasicError {
             AuthzBasicError::UnknownAction(a) => {
                 write!(f, "authz subjects: `{a}` names no action family or term")
             }
+            AuthzBasicError::DecidedAsRead(a) => write!(
+                f,
+                "authz: `{a}` is decided as `fs.read` (#161 M15) and no list may name it; name `fs.read`"
+            ),
             AuthzBasicError::UngrantableAction(a) => write!(
                 f,
                 "authz subjects: `{a}` is a kernel or liveness action and no list may name it"
@@ -3140,6 +3146,7 @@ mod tests {
                 "fs.write" => Some("write-existing"),
                 "fs.delete" => Some("delete-entry"),
                 "fs.mkdir" => Some("mkdir"),
+                "fs.stat" | "fs.list" => Some("read"),
                 _ => None,
             };
             let targets: &[Option<&str>] = if op.is_some() {
@@ -4412,6 +4419,10 @@ mod tests {
         for (role, entry) in [
             ("admin", "admin.credential.rotate"),
             ("admin", "fs.read"),
+            ("admin", "fs.stat"),
+            ("user", "fs.stat"),
+            ("admin", "fs.list"),
+            ("user", "fs.list"),
             ("admin", "kernel.contain"),
             ("admin", "fs.*"),
             ("admin", "kernel.*"),
@@ -4705,6 +4716,30 @@ mod tests {
                 assert_eq!(got.err(), Some(want.clone()), "{entry} {lookup:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_subjects_list_naming_fs_stat_or_fs_list_is_refused_as_decided_by_fs_read() {
+        for action in ["fs.stat", "fs.list"] {
+            let want = Some(AuthzBasicError::DecidedAsRead(action.into()));
+            for list in ["allow", "deny"] {
+                let got = finish_looking_up(
+                    with_subjects(&format!(
+                        "  zed:\n    actions:\n      {list}: [\"{action}\"]\n"
+                    )),
+                    |n| {
+                        if n == "zed" {
+                            Lookup::Found(7001)
+                        } else {
+                            Lookup::Found(0)
+                        }
+                    },
+                );
+                assert_eq!(got.err(), want, "subjects {list} {action}");
+            }
+        }
+        let shown = AuthzBasicError::DecidedAsRead("fs.stat".into()).to_string();
+        assert!(shown.contains("decided as `fs.read`"), "{shown}");
     }
 
     #[test]
@@ -6442,7 +6477,14 @@ mod tests {
             v
         }
 
-        const FS_TERMS: [&str; 4] = ["fs.read", "fs.write", "fs.delete", "fs.mkdir"];
+        const FS_TERMS: [&str; 6] = [
+            "fs.read",
+            "fs.write",
+            "fs.delete",
+            "fs.mkdir",
+            "fs.stat",
+            "fs.list",
+        ];
 
         fn request(
             action: &str,
@@ -6675,8 +6717,8 @@ mod tests {
                 mismatches.len(),
                 &mismatches[..mismatches.len().min(10)]
             );
-            let fs_cells = 4 * 7 * 22 * 5 + 7 * 22 * 5;
-            let other_cells = 56 + 4;
+            let fs_cells = 6 * 7 * 22 * 5 + 7 * 22 * 5;
+            let other_cells = 54 + 4;
             assert_eq!(cells, 12 * 9 * (fs_cells + other_cells));
             assert_eq!(subject_entries, 1);
             assert_eq!(
@@ -7823,6 +7865,65 @@ mod tests {
                     reason:
                         "subject hobi-svc: session.prompt is not in agents.hobi.policy.actions allow"
                             .into()
+                }
+            );
+        }
+
+        #[test]
+        fn an_agent_policy_naming_fs_stat_or_fs_list_is_refused_and_its_fs_read_entry_permits_both()
+        {
+            for action in ["fs.stat", "fs.list"] {
+                agent_policy_decides_as_read(action);
+            }
+        }
+
+        fn agent_policy_decides_as_read(action: &str) {
+            let policy = |list: &str| {
+                format!(
+                    "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\nactions:\n  {list}\n"
+                )
+            };
+            for list in [
+                format!("allow: [\"{action}\"]"),
+                format!("deny: [\"{action}\"]"),
+            ] {
+                let got = try_source(
+                    super::shipped_denying(),
+                    None,
+                    &[],
+                    load(vec![hobi()], &[("hobi", &policy(&list))]),
+                );
+                assert_eq!(
+                    got.err(),
+                    Some(AuthzBasicError::DecidedAsRead(action.into())),
+                    "{list}"
+                );
+            }
+            let stat = |src: &PolicySource| {
+                let mut r = read(HOBI, "/home/operator/stat-161");
+                r.action = Action(action.into());
+                auth(src, 501).decide(&agent_channel(r, "hobi"))
+            };
+            let read_only = source(
+                None,
+                &[],
+                load(vec![hobi()], &[("hobi", &policy("allow: [\"fs.read\"]"))]),
+            );
+            assert!(
+                matches!(stat(&read_only), Verdict::Permit { .. }),
+                "{:?}",
+                stat(&read_only)
+            );
+            let no_read = source(
+                None,
+                &[],
+                load(vec![hobi()], &[("hobi", &policy("allow: [\"fs.write\"]"))]),
+            );
+            assert_eq!(
+                stat(&no_read),
+                Verdict::Deny {
+                    reason: "subject hobi-svc: fs.read is not in agents.hobi.policy.actions allow"
+                        .into()
                 }
             );
         }

@@ -141,6 +141,10 @@ pub fn prepare_checked(
             result
         }
         proto::Verb::Read { path, .. } => maknae_io::open_path_for_delegation(Path::new(path)),
+        proto::Verb::FsStat { path, .. } => maknae_io::open_path_for_stat(Path::new(path)),
+        proto::Verb::FsList { path, .. } => {
+            maknae_io::open_directory_for_delegation(Path::new(path))
+        }
         proto::Verb::SessionNew { cwd, .. } => {
             maknae_io::open_directory_for_delegation(Path::new(cwd))
         }
@@ -928,6 +932,256 @@ pub async fn execute_read<S: AsyncRead + AsyncWrite + Unpin + Send>(
         _ => None,
     })
 }
+const LIST_ENTRY_OVERHEAD: usize = 16;
+const LIST_CHUNK_OVERHEAD: usize = 64;
+
+/// The subject's names, in order, as chunks that each encode within `cap`.
+fn list_chunks(
+    entries: Vec<maknae_io::ListedEntry>,
+    dropped: u32,
+    vanished: u32,
+    cap: usize,
+) -> Vec<proto::ListChunk> {
+    let budget = cap.saturating_sub(LIST_CHUNK_OVERHEAD);
+    let mut chunks = Vec::new();
+    let mut current = Vec::new();
+    let mut used = 0;
+    for entry in entries {
+        let size = entry.name.len() + LIST_ENTRY_OVERHEAD;
+        if !current.is_empty() && used + size > budget {
+            chunks.push(std::mem::take(&mut current));
+            used = 0;
+        }
+        used += size;
+        current.push(proto::ListEntry {
+            name: entry.name,
+            dir: entry.dir,
+        });
+    }
+    chunks.push(current);
+    let last = chunks.len() - 1;
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(i, entries)| proto::ListChunk {
+            entries,
+            last: i == last,
+            dropped: if i == last { dropped } else { 0 },
+            unlisted: false,
+            vanished: if i == last { vanished } else { 0 },
+        })
+        .collect()
+}
+
+/// The page's entries are names this subject reported, after the cursor, in order.
+fn page_is_reported(
+    page: &proto::ListGrant,
+    sent: &[proto::ListEntry],
+    after: Option<&str>,
+) -> bool {
+    page.entries.len() <= proto::LIST_RELEASE_MAX
+        && page.entries.windows(2).all(|w| w[0].name < w[1].name)
+        && page.entries.iter().all(|e| {
+            after.is_none_or(|a| e.name.as_str() > a)
+                && sent
+                    .binary_search_by(|s| s.name.cmp(&e.name))
+                    .is_ok_and(|i| sent[i].dir == e.dir)
+        })
+}
+
+/// What the kernel decided and withheld, as far as this subject can count it: the names it
+/// sent after the cursor, up to the last released when the page is truncated.
+fn withheld_count(
+    page: &proto::ListGrant,
+    sent: &[proto::ListEntry],
+    after: Option<&str>,
+) -> usize {
+    let through = page
+        .truncated
+        .then(|| page.entries.last().map(|e| e.name.as_str()))
+        .flatten();
+    sent.iter()
+        .filter(|s| after.is_none_or(|a| s.name.as_str() > a))
+        .filter(|s| through.is_none_or(|t| s.name.as_str() <= t))
+        .count()
+        .saturating_sub(page.entries.len())
+}
+
+fn entries(n: u32) -> String {
+    format!("{n} entr{}", if n == 1 { "y" } else { "ies" })
+}
+
+/// The user's lines for names this subject could not send.
+fn unlisted_lines(dropped: u32, vanished: u32) -> Vec<String> {
+    let mut lines = Vec::new();
+    if dropped > 0 {
+        lines.push(format!(
+            "maknae: {} with a non-UTF-8 name not listed",
+            entries(dropped)
+        ));
+    }
+    if vanished > 0 {
+        lines.push(format!(
+            "maknae: {} changed while being listed and not listed",
+            entries(vanished)
+        ));
+    }
+    lines
+}
+
+/// Tells the kernel this subject could not list the directory, so its trail says so; the
+/// kernel's answer changes nothing here.
+async fn unlisted<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    deadline: tokio::time::Instant,
+) {
+    let chunk = proto::ListChunk {
+        entries: Vec::new(),
+        last: true,
+        dropped: 0,
+        unlisted: true,
+        vanished: 0,
+    };
+    let Ok(body) = proto::encode_list_chunk(&chunk) else {
+        return;
+    };
+    let _ = tokio::time::timeout_at(deadline, async {
+        proto::write_frame(stream, proto::FrameClass::Attempt, &body).await?;
+        proto::read_frame_of_class(
+            stream,
+            proto::FrameClass::Attempt,
+            &proto::FrameCaps {
+                control: 0,
+                attempt: proto::ATTEMPT_RESPONSE_MAX,
+                prompt: 0,
+            },
+        )
+        .await
+        .map(drop)
+    })
+    .await;
+}
+
+/// An `fs.list` after its grant: enumerate the delegated directory, send it in chunks,
+/// and release the page only once the kernel answers it, which it does after recording it.
+/// `Ok(Err(_))` is the kernel's refusal; `Err` is this side's own failure.
+pub async fn execute_list<S: AsyncRead + AsyncWrite + Unpin + Send>(
+    prepared: PreparedMutation,
+    grant: MutationGrant,
+    stream: &mut S,
+    cfg: &TransportConfig,
+    written: crate::send::WriteCompleted,
+    diag: &mut (dyn FnMut(String) + Send),
+) -> Result<Result<proto::ListGrant, proto::ProtoError>, String> {
+    let (proto::Verb::FsList { after, .. }, Some(held)) = (&prepared.request, &prepared.fd) else {
+        return Err("listing grant without prepared directory evidence".into());
+    };
+    let granted = match &grant.scope {
+        MutationScope::Exact {
+            path,
+            effect: ReportedEffect::ReadFile,
+        } if Path::new(path).is_absolute() => PathBuf::from(path),
+        _ => return Err("listing grant does not match prepared operation".into()),
+    };
+    if grant.limits.deadline_ms == 0 {
+        return Err("invalid listing grant limits".into());
+    }
+    let deadline = written
+        .at()
+        .checked_add(Duration::from_millis(
+            grant.limits.deadline_ms.min(cfg.read_timeout_ms),
+        ))
+        .ok_or_else(|| "listing deadline exceeds monotonic clock range".to_string())?;
+    let deadline = tokio::time::Instant::from_std(deadline);
+    let held = held.try_clone().map_err(|e| e.to_string())?;
+    let listing = match tokio::time::timeout_at(
+        deadline,
+        tokio::task::spawn_blocking(move || {
+            maknae_io::list_delegated_directory(held.as_fd(), &granted, proto::LIST_RECEIVE_MAX)
+        }),
+    )
+    .await
+    {
+        Ok(Ok(Ok(listing))) => listing,
+        failed => {
+            let why = match failed {
+                Ok(Ok(Err(e))) => e.to_string(),
+                Ok(Err(e)) => e.to_string(),
+                _ => "enumeration timed out".to_string(),
+            };
+            unlisted(stream, deadline).await;
+            return Err(format!("list not performed: {why}"));
+        }
+    };
+    let (dropped, vanished) = (listing.dropped, listing.vanished);
+    let chunks = list_chunks(
+        listing.entries,
+        dropped,
+        vanished,
+        proto::ATTEMPT_REQUEST_MAX,
+    );
+    let sent: Vec<proto::ListEntry> = chunks.iter().flat_map(|c| c.entries.clone()).collect();
+    let after = after.as_deref();
+    let exchange = async {
+        for chunk in &chunks {
+            let body = proto::encode_list_chunk(chunk).map_err(|e| e.to_string())?;
+            if body.len() > proto::ATTEMPT_REQUEST_MAX {
+                return Err("listing chunk exceeds frame limit".to_string());
+            }
+            proto::write_frame(stream, proto::FrameClass::Attempt, &body)
+                .await
+                .map_err(|e| e.to_string())?;
+            let bytes = proto::read_frame_of_class(
+                stream,
+                proto::FrameClass::Attempt,
+                &proto::FrameCaps {
+                    control: 0,
+                    attempt: proto::ATTEMPT_RESPONSE_MAX,
+                    prompt: 0,
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            match proto::decode_response(&bytes)
+                .map_err(|e| e.to_string())?
+                .result
+            {
+                proto::RespResult::Ok(proto::Payload::ListContinue) => {}
+                proto::RespResult::Ok(proto::Payload::ListGrant(page)) => {
+                    return if page_is_reported(&page, &sent, after) {
+                        Ok(Ok(page))
+                    } else {
+                        Err("protocol error: listing page names an entry the subject did not report".into())
+                    };
+                }
+                proto::RespResult::Err(refused) => return Ok(Err(refused)),
+                other => {
+                    return Err(format!(
+                        "protocol error: unexpected listing reply: {other:?}"
+                    ))
+                }
+            }
+        }
+        Err("protocol error: listing ended without a page".to_string())
+    };
+    let answer = tokio::time::timeout_at(deadline, exchange)
+        .await
+        .map_err(|_| "list not performed: the listing exchange timed out".to_string())??;
+    for line in unlisted_lines(dropped, vanished) {
+        diag(line);
+    }
+    if let Ok(page) = &answer {
+        let withheld = withheld_count(page, &sent, after);
+        if withheld > 0 {
+            diag(format!(
+                "maknae: {withheld} entr{} not released",
+                if withheld == 1 { "y" } else { "ies" }
+            ));
+        }
+    }
+    Ok(answer)
+}
+
 /// The stderr line for an attempt that did not succeed. A stale refusal gets
 /// none: the model is told, and it is not a failure of the agent's user (#388).
 fn stop_line(
@@ -1326,6 +1580,355 @@ mod tests {
                 b"new bytes".to_vec(),
             ))),
         )
+    }
+    fn list(path: String, after: Option<&str>) -> proto::Verb {
+        proto::Verb::FsList {
+            path,
+            after: after.map(str::to_string),
+            conversation: None,
+        }
+    }
+    fn page(names: &[&str], truncated: bool) -> proto::ListGrant {
+        proto::ListGrant {
+            entries: names
+                .iter()
+                .map(|n| proto::ListEntry {
+                    name: (*n).into(),
+                    dir: false,
+                })
+                .collect(),
+            truncated,
+        }
+    }
+    fn reply(result: proto::RespResult) -> Vec<u8> {
+        proto::encode_response(&proto::Response {
+            protocol_version: proto::PROTOCOL_VERSION,
+            result,
+        })
+        .unwrap()
+    }
+    /// Plays the kernel: answers each chunk with `answer`, or stops when it says nothing.
+    async fn listed(
+        prepared: PreparedMutation,
+        dir: &str,
+        mut answer: impl FnMut(&proto::ListChunk) -> Option<Vec<u8>> + Send + 'static,
+    ) -> (
+        Result<Result<proto::ListGrant, proto::ProtoError>, String>,
+        Vec<proto::ListChunk>,
+        Vec<String>,
+    ) {
+        let (mut client, mut server) = tokio::io::duplex(1 << 20);
+        let kernel = tokio::spawn(async move {
+            let mut chunks = Vec::new();
+            while let Ok(bytes) = read_frame(&mut server, proto::ATTEMPT_REQUEST_MAX).await {
+                let chunk = proto::decode_list_chunk(&bytes).unwrap();
+                let said = answer(&chunk);
+                chunks.push(chunk);
+                match said {
+                    Some(frame) => write_frame(&mut server, &frame).await.unwrap(),
+                    None => break,
+                }
+            }
+            chunks
+        });
+        let mut lines = Vec::new();
+        let result = execute_list(
+            prepared,
+            read_grant(dir, 0),
+            &mut client,
+            &TransportConfig::default(),
+            crate::send::WriteCompleted::for_test(Instant::now()),
+            &mut |l| lines.push(l),
+        )
+        .await;
+        drop(client);
+        (result, kernel.await.unwrap(), lines)
+    }
+    #[test]
+    fn a_listing_is_prepared_on_a_search_only_directory_and_a_missing_one_goes_unarmed() {
+        let d = Fixture::new();
+        let prepared = prepare(list(d.0.to_str().unwrap().into(), None), None).unwrap();
+        let fd = prepared.descriptor().unwrap().expect("armed");
+        maknae_io::refuse_enumerable(fd.as_fd(), &d.0).expect("search only");
+        let missing = prepare(list(d.path("list-161-missing"), None), None).unwrap();
+        assert!(missing.descriptor().unwrap().is_none());
+        assert!(missing.preparation_error().is_some());
+    }
+    #[test]
+    fn listing_chunks_fit_the_frame_cap_and_keep_the_order() {
+        let entries: Vec<maknae_io::ListedEntry> = (0..2000)
+            .map(|i| maknae_io::ListedEntry {
+                name: format!("{i:05}{}", "x".repeat(200)),
+                dir: i % 2 == 0,
+            })
+            .collect();
+        let chunks = list_chunks(entries.clone(), 3, 5, proto::ATTEMPT_REQUEST_MAX);
+        assert!(chunks.len() > 1);
+        for (i, c) in chunks.iter().enumerate() {
+            let last = i == chunks.len() - 1;
+            assert!(proto::encode_list_chunk(c).unwrap().len() <= proto::ATTEMPT_REQUEST_MAX);
+            assert!(!c.entries.is_empty());
+            assert_eq!(
+                (c.last, c.dropped, c.vanished),
+                (last, if last { 3 } else { 0 }, if last { 5 } else { 0 })
+            );
+        }
+        let sent: Vec<(String, bool)> = chunks
+            .into_iter()
+            .flat_map(|c| c.entries)
+            .map(|e| (e.name, e.dir))
+            .collect();
+        let want: Vec<(String, bool)> = entries.into_iter().map(|e| (e.name, e.dir)).collect();
+        assert_eq!(sent, want);
+        let empty = list_chunks(Vec::new(), 0, 0, proto::ATTEMPT_REQUEST_MAX);
+        assert_eq!(
+            empty,
+            [proto::ListChunk {
+                entries: Vec::new(),
+                last: true,
+                dropped: 0,
+                unlisted: false,
+                vanished: 0,
+            }]
+        );
+    }
+    #[tokio::test]
+    async fn a_listing_releases_the_acknowledged_page_and_tells_the_user_what_was_withheld() {
+        let d = Fixture::new();
+        for n in ["a", "b", "c", "d"] {
+            std::fs::write(d.path(n), b"x").unwrap();
+        }
+        let dir = d.0.to_str().unwrap().to_string();
+        let prepared = prepare(list(dir.clone(), Some("a")), None).unwrap();
+        let (result, chunks, lines) = listed(prepared, &dir, |chunk| {
+            assert!(chunk.last);
+            Some(reply(proto::RespResult::Ok(proto::Payload::ListGrant(
+                page(&["b", "d"], false),
+            ))))
+        })
+        .await;
+        assert_eq!(result.unwrap().unwrap(), page(&["b", "d"], false));
+        let names: Vec<&str> = chunks[0].entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["a", "b", "c", "d"], "every name, in byte order");
+        assert_eq!(lines, ["maknae: 1 entry not released"]);
+    }
+    #[tokio::test]
+    async fn a_page_the_kernel_fills_mid_stream_is_released_truncated_and_ends_the_sending() {
+        let d = Fixture::new();
+        let long = "x".repeat(120);
+        for i in 0..1500 {
+            std::fs::write(d.0.join(format!("{i:05}{long}")), b"x").unwrap();
+        }
+        let dir = d.0.to_str().unwrap().to_string();
+        let mut seen: Vec<proto::ListEntry> = Vec::new();
+        let (result, chunks, lines) = listed(
+            prepare(list(dir.clone(), None), None).unwrap(),
+            &dir,
+            move |c| {
+                seen.extend(c.entries.iter().cloned());
+                Some(reply(proto::RespResult::Ok(
+                    if seen.len() > proto::LIST_RELEASE_MAX {
+                        proto::Payload::ListGrant(proto::ListGrant {
+                            entries: seen[..proto::LIST_RELEASE_MAX].to_vec(),
+                            truncated: true,
+                        })
+                    } else {
+                        proto::Payload::ListContinue
+                    },
+                )))
+            },
+        )
+        .await;
+        let page = result.unwrap().unwrap();
+        assert!(page.truncated);
+        assert_eq!(page.entries.len(), proto::LIST_RELEASE_MAX);
+        assert_eq!(page.entries[0].name, format!("00000{long}"));
+        let sent: usize = chunks.iter().map(|c| c.entries.len()).sum();
+        assert!(
+            sent > proto::LIST_RELEASE_MAX && sent < 1500,
+            "sending stopped at the page: {sent}"
+        );
+        assert!(
+            chunks.iter().all(|c| !c.last),
+            "the last chunk was never sent"
+        );
+        assert!(lines.is_empty(), "{lines:?}");
+    }
+    #[tokio::test]
+    async fn nothing_is_released_before_the_acknowledgement() {
+        let d = Fixture::new();
+        std::fs::write(d.path("unreleased-161"), b"x").unwrap();
+        let dir = d.0.to_str().unwrap().to_string();
+        let (result, chunks, _) = listed(
+            prepare(list(dir.clone(), None), None).unwrap(),
+            &dir,
+            |_| None,
+        )
+        .await;
+        assert_eq!(chunks.len(), 1);
+        assert!(
+            result.is_err(),
+            "no page without the kernel's answer: {result:?}"
+        );
+
+        let (result, _, _) = listed(
+            prepare(list(dir.clone(), None), None).unwrap(),
+            &dir,
+            |_| {
+                Some(reply(proto::RespResult::Ok(proto::Payload::ListGrant(
+                    page(&["never-reported"], false),
+                ))))
+            },
+        )
+        .await;
+        assert!(
+            result.as_ref().is_err_and(|e| e.contains("did not report")),
+            "{result:?}"
+        );
+
+        let (result, _, _) = listed(
+            prepare(list(dir.clone(), None), None).unwrap(),
+            &dir,
+            |_| Some(reply(proto::RespResult::Ok(proto::Payload::ListContinue))),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "a continuation after the last chunk releases nothing"
+        );
+
+        let refused = proto::ProtoError {
+            code: proto::ProtoErrCode::Unauthorized,
+            message: "listing order violated".into(),
+        };
+        let answer = refused.clone();
+        let (result, _, _) = listed(
+            prepare(list(dir.clone(), None), None).unwrap(),
+            &dir,
+            move |_| Some(reply(proto::RespResult::Err(answer.clone()))),
+        )
+        .await;
+        assert_eq!(result.unwrap(), Err(refused));
+    }
+    #[tokio::test]
+    async fn a_directory_swapped_after_delegation_is_refused_and_nothing_is_sent() {
+        let d = Fixture::new();
+        let dir = d.path("swapped-161");
+        std::fs::create_dir(&dir).unwrap();
+        let prepared = prepare(list(dir.clone(), None), None).unwrap();
+        std::fs::rename(&dir, d.path("moved-161")).unwrap();
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(Path::new(&dir).join("planted-161"), b"x").unwrap();
+        let (result, chunks, _) = listed(prepared, &dir, |_| {
+            Some(reply(proto::RespResult::Err(proto::ProtoError {
+                code: proto::ProtoErrCode::Unauthorized,
+                message: "unlisted".into(),
+            })))
+        })
+        .await;
+        assert_eq!(
+            chunks,
+            [proto::ListChunk {
+                entries: Vec::new(),
+                last: true,
+                dropped: 0,
+                unlisted: true,
+                vanished: 0,
+            }],
+            "the kernel is told the subject could not list, and nothing else"
+        );
+        let why = result.unwrap_err();
+        assert!(why.starts_with("list not performed:"), "{why}");
+    }
+    #[tokio::test]
+    async fn non_utf8_entry_names_are_dropped_by_the_subject_and_counted() {
+        let d = Fixture::new();
+        std::fs::write(d.path("plain-161"), b"x").unwrap();
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            std::fs::write(d.0.join(std::ffi::OsStr::from_bytes(b"\xff-161")), b"x").unwrap();
+        }
+        let dir = d.0.to_str().unwrap().to_string();
+        let (result, chunks, lines) =
+            listed(prepare(list(dir.clone(), None), None).unwrap(), &dir, |c| {
+                Some(reply(proto::RespResult::Ok(proto::Payload::ListGrant(
+                    proto::ListGrant {
+                        entries: c.entries.clone(),
+                        truncated: false,
+                    },
+                ))))
+            })
+            .await;
+        assert_eq!(result.unwrap().unwrap(), page(&["plain-161"], false));
+        let dropped = u32::from(cfg!(target_os = "linux"));
+        assert_eq!(chunks[0].dropped, dropped);
+        assert_eq!(
+            lines,
+            (dropped == 1)
+                .then(|| "maknae: 1 entry with a non-UTF-8 name not listed".to_string())
+                .into_iter()
+                .collect::<Vec<_>>()
+        );
+    }
+    #[test]
+    fn the_user_is_told_what_the_subject_could_not_list() {
+        assert!(unlisted_lines(0, 0).is_empty());
+        assert_eq!(
+            unlisted_lines(1, 2),
+            [
+                "maknae: 1 entry with a non-UTF-8 name not listed",
+                "maknae: 2 entries changed while being listed and not listed",
+            ]
+        );
+        assert_eq!(
+            unlisted_lines(0, 1),
+            ["maknae: 1 entry changed while being listed and not listed"]
+        );
+    }
+    #[test]
+    fn the_user_is_told_only_what_the_subject_can_count() {
+        let sent: Vec<proto::ListEntry> = page(&["a", "b", "c", "d", "e"], false).entries;
+        assert_eq!(withheld_count(&page(&["b", "e"], false), &sent, None), 3);
+        assert_eq!(
+            withheld_count(&page(&["b", "e"], false), &sent, Some("a")),
+            2
+        );
+        assert_eq!(
+            withheld_count(&page(&["b"], true), &sent, None),
+            1,
+            "a truncated page counts only through its last name"
+        );
+        assert!(page_is_reported(
+            &page(&["b", "e"], false),
+            &sent,
+            Some("a")
+        ));
+        assert!(!page_is_reported(&page(&["a"], false), &sent, Some("a")));
+        assert!(!page_is_reported(&page(&["e", "b"], false), &sent, None));
+        let mut dir = page(&["b"], false);
+        dir.entries[0].dir = true;
+        assert!(!page_is_reported(&dir, &sent, None));
+    }
+    #[test]
+    fn a_stat_is_prepared_on_the_link_itself_and_a_missing_path_goes_unarmed() {
+        let d = Fixture::new();
+        let target = d.path("stat-161-target");
+        std::fs::write(&target, b"never followed").unwrap();
+        let link = d.path("stat-161-link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let stat = |path: String| proto::Verb::FsStat {
+            path,
+            conversation: None,
+        };
+        let prepared = prepare(stat(link.clone()), None).expect("fs.stat is prepared");
+        let fd = prepared.descriptor().unwrap().expect("armed");
+        let verified = maknae_io::verify_stat_delegated(fd.as_fd()).unwrap();
+        assert_eq!(verified.path, Path::new(&link));
+        assert_eq!(verified.meta.kind, maknae_io::FileKind::Symlink);
+        let missing = prepare(stat(d.path("stat-161-missing")), None).expect("still sent");
+        assert!(missing.descriptor().unwrap().is_none());
+        assert!(missing.preparation_error().is_some());
     }
     #[test]
     fn preparation_preserves_existing_sentinel_and_missing_entries() {

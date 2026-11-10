@@ -8,7 +8,7 @@
 
 use std::collections::VecDeque;
 use std::mem::MaybeUninit;
-use std::os::fd::{BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -210,6 +210,188 @@ pub fn open_path_for_delegation(path: &std::path::Path) -> std::io::Result<Owned
     crate::syscall::open_path_delegation(path).map_err(Into::into)
 }
 
+/// The subject's own open for `fs.stat`: the final component is never followed, so a
+/// symlink is stat'ed as itself (Linux `O_PATH`; macOS `O_SYMLINK|O_RDONLY` pending #368).
+pub fn open_path_for_stat(path: &std::path::Path) -> std::io::Result<OwnedFd> {
+    crate::syscall::open_path_stat(path).map_err(Into::into)
+}
+
+/// Verify a delegated `fs.stat` descriptor: any kind, still linked (`nlink` 0 is a changed
+/// path), and one link unless a directory.
+pub fn verify_stat_delegated(fd: BorrowedFd<'_>) -> Result<Delegated, IoError> {
+    let (path, st) = located(fd)?;
+    if crate::syscall::nlink_count(st.st_nlink) == 0 {
+        return Err(IoError::MutationPathChanged { path });
+    }
+    let meta = DelegatedMeta::of(&st);
+    let target = TargetRequired {
+        owner: None,
+        mode_mask: None,
+        nlink_exactly_one: meta.kind != FileKind::Directory,
+        regular_file: false,
+        max_bytes: None,
+    };
+    crate::checks::check_target(&st, &path, &target)?;
+    Ok(Delegated { path, meta })
+}
+
+/// The kernel's check on a delegated `fs.list` directory: it can search, never enumerate
+/// (Linux `O_PATH`, macOS `O_SEARCH`), so the daemon never reads the names itself.
+pub fn refuse_enumerable(fd: BorrowedFd<'_>, path: &std::path::Path) -> Result<(), IoError> {
+    if descriptor_flag(fd, path, |fd| crate::syscall::confers_search_only(fd))? {
+        Ok(())
+    } else {
+        Err(IoError::AccessBearingDescriptor { path: path.into() })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedEntry {
+    pub name: String,
+    pub dir: bool,
+}
+
+/// The names of one directory in byte order; `dropped` counts names that are not UTF-8,
+/// `vanished` entries removed or repointed while they were being classified.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Listing {
+    pub entries: Vec<ListedEntry>,
+    pub dropped: u32,
+    pub vanished: u32,
+}
+
+/// The `keep` smallest names offered, in byte order.
+struct Kept {
+    heap: std::collections::BinaryHeap<(String, bool)>,
+    keep: usize,
+    dropped: u32,
+    vanished: u32,
+    stat_classified: u32,
+}
+
+impl Kept {
+    fn new(keep: usize) -> Self {
+        Self {
+            heap: std::collections::BinaryHeap::new(),
+            keep,
+            dropped: 0,
+            vanished: 0,
+            stat_classified: 0,
+        }
+    }
+
+    /// `by_stat` says the entry's kind needs an `fstatat`, the filesystem having given none.
+    fn offer(
+        &mut self,
+        raw: &[u8],
+        by_stat: bool,
+        dir: impl FnOnce() -> nix::Result<bool>,
+    ) -> nix::Result<()> {
+        if raw == b"." || raw == b".." {
+            return Ok(());
+        }
+        let Ok(name) = std::str::from_utf8(raw) else {
+            self.dropped = self.dropped.saturating_add(1);
+            return Ok(());
+        };
+        if self.heap.len() == self.keep
+            && self
+                .heap
+                .peek()
+                .is_none_or(|(largest, _)| name >= largest.as_str())
+        {
+            return Ok(());
+        }
+        if by_stat {
+            self.stat_classified = self.stat_classified.saturating_add(1);
+        }
+        let dir = match dir() {
+            Ok(dir) => dir,
+            Err(nix::errno::Errno::ENOENT | nix::errno::Errno::ESTALE) => {
+                self.vanished = self.vanished.saturating_add(1);
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
+        self.heap.push((name.to_owned(), dir));
+        if self.heap.len() > self.keep {
+            self.heap.pop();
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Listing {
+        Listing {
+            entries: self
+                .heap
+                .into_sorted_vec()
+                .into_iter()
+                .map(|(name, dir)| ListedEntry { name, dir })
+                .collect(),
+            dropped: self.dropped,
+            vanished: self.vanished,
+        }
+    }
+}
+
+/// The subject's enumeration of the directory it delegated for `fs.list`. The reopened
+/// descriptor must be the delegated object, still at the kernel-reported `granted` path.
+pub fn list_delegated_directory(
+    held: BorrowedFd<'_>,
+    granted: &std::path::Path,
+    keep: usize,
+) -> Result<Listing, IoError> {
+    list_reopened(held, granted, keep, |fd| {
+        crate::syscall::open_dir_at(&fd, ".")
+    })
+}
+
+fn list_reopened(
+    held: BorrowedFd<'_>,
+    granted: &std::path::Path,
+    keep: usize,
+    reopen: impl FnOnce(BorrowedFd<'_>) -> nix::Result<OwnedFd>,
+) -> Result<Listing, IoError> {
+    let at = |e| crate::checks::map_errno_no_disambiguation(e, granted);
+    let delegated = crate::syscall::fstat(&held).map_err(at)?;
+    let fd = reopen(held).map_err(at)?;
+    let reopened = crate::syscall::fstat(&fd).map_err(at)?;
+    if (reopened.st_dev, reopened.st_ino) != (delegated.st_dev, delegated.st_ino)
+        || delegated_path(fd.as_fd())? != granted
+    {
+        return Err(IoError::MutationPathChanged {
+            path: granted.into(),
+        });
+    }
+    let mut kept = Kept::new(keep);
+    let mut handle = crate::syscall::open_dir_handle(&fd).map_err(at)?;
+    for entry in handle.iter() {
+        let entry = entry.map_err(at)?;
+        let raw = entry.file_name();
+        kept.offer(raw.to_bytes(), entry.file_type().is_none(), || {
+            crate::dir::classify_entry(entry.file_type(), &fd, raw, entry.ino())
+                .map(|kind| kind == crate::anchor::Kind::Dir)
+        })
+        .map_err(at)?;
+    }
+    listed_or_stale(kept, granted)
+}
+
+/// Every entry that needed a stat to classify vanished: the handle is stale, not the
+/// directory empty.
+fn stale_handle(stat_classified: u32, vanished: u32) -> bool {
+    stat_classified > 0 && vanished == stat_classified
+}
+
+fn listed_or_stale(kept: Kept, granted: &std::path::Path) -> Result<Listing, IoError> {
+    if stale_handle(kept.stat_classified, kept.vanished) {
+        return Err(IoError::MutationPathChanged {
+            path: granted.into(),
+        });
+    }
+    Ok(kept.finish())
+}
+
 /// Subject-side directory open. Proves no permission to mutate its children.
 pub fn open_directory_for_delegation(path: &std::path::Path) -> std::io::Result<OwnedFd> {
     crate::syscall::open_mutation_directory(path).map_err(Into::into)
@@ -343,9 +525,7 @@ pub fn recv_delegated(sock: BorrowedFd<'_>, buf: &mut [u8]) -> std::io::Result<R
 }
 
 pub fn refuse_access_bearing(fd: BorrowedFd<'_>, path: &std::path::Path) -> Result<(), IoError> {
-    if crate::syscall::confers_no_write(&fd)
-        .map_err(|e| crate::checks::map_errno_no_disambiguation(e, path))?
-    {
+    if descriptor_flag(fd, path, |fd| crate::syscall::confers_no_write(fd))? {
         Ok(())
     } else {
         Err(IoError::AccessBearingDescriptor { path: path.into() })
@@ -359,11 +539,25 @@ pub(crate) fn delegated_path(fd: BorrowedFd<'_>) -> Result<std::path::PathBuf, I
 }
 
 /// Verify a subject-delegated descriptor's location and kind. Does not consume the fd.
-pub fn verify_delegated(fd: BorrowedFd<'_>, req: DelegatedRequired) -> Result<Delegated, IoError> {
+fn descriptor_flag(
+    fd: BorrowedFd<'_>,
+    path: &std::path::Path,
+    flag: impl FnOnce(&BorrowedFd<'_>) -> nix::Result<bool>,
+) -> Result<bool, IoError> {
+    flag(&fd).map_err(|e| crate::checks::map_errno_no_disambiguation(e, path))
+}
+
+/// A delegated descriptor's kernel-reported path, admitted by the path checks, and its stat.
+fn located(fd: BorrowedFd<'_>) -> Result<(std::path::PathBuf, nix::sys::stat::FileStat), IoError> {
     let path = delegated_path(fd)?;
     crate::mutation::checked_path(&path)?;
     let st = crate::syscall::fstat(&fd)
         .map_err(|e| crate::checks::map_errno_no_disambiguation(e, &path))?;
+    Ok((path, st))
+}
+
+pub fn verify_delegated(fd: BorrowedFd<'_>, req: DelegatedRequired) -> Result<Delegated, IoError> {
+    let (path, st) = located(fd)?;
     crate::checks::check_target(&st, &path, &req.target)?;
     Ok(Delegated {
         path,
@@ -484,6 +678,252 @@ mod tests {
         )
         .expect("a directory verifies when no regular file is required");
         assert_eq!(verified.meta.kind, FileKind::Directory);
+    }
+
+    #[test]
+    fn a_stat_open_takes_the_link_itself_and_verifies_it_as_a_symlink() {
+        let (_dir, base) = crate::testutil::outside_any_home();
+        let target = a_file(&base, "target-161", b"followed-161");
+        let link = base.join("link-161");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        let fd = open_path_for_stat(&link).expect("stat open");
+        let verified = verify_stat_delegated(fd.as_fd()).expect("a symlink is stat-able");
+        assert_eq!(verified.path, link);
+        assert_eq!(verified.meta.kind, FileKind::Symlink);
+        assert_eq!(
+            verified.meta.size,
+            target.as_os_str().len() as u64,
+            "a link's size is its target's name, not the target's bytes"
+        );
+        refuse_access_bearing(fd.as_fd(), &link).expect("a stat descriptor confers no write");
+    }
+
+    #[test]
+    fn a_stat_verification_admits_any_directory_link_count_and_one_link_otherwise() {
+        let (_dir, base) = crate::testutil::outside_any_home();
+        std::fs::create_dir(base.join("child-161")).expect("child");
+        let fd = open_path_for_stat(&base).expect("stat open");
+        let verified = verify_stat_delegated(fd.as_fd()).expect("a directory is stat-able");
+        assert_eq!(verified.meta.kind, FileKind::Directory);
+        let real = a_file(&base, "real-161", b"x");
+        let alias = base.join("alias-161");
+        std::fs::hard_link(&real, &alias).expect("hard link");
+        let fd = open_path_for_stat(&real).expect("stat open");
+        match verify_stat_delegated(fd.as_fd()) {
+            Err(IoError::MultiplyLinked { path, nlink }) => {
+                assert_eq!(nlink, 2);
+                assert!(path == real || path == alias, "{path:?}");
+            }
+            other => panic!("a multiply-linked file must be refused: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_stat_of_an_unlinked_object_is_refused_as_a_changed_path() {
+        let (_dir, base) = crate::testutil::outside_any_home();
+        let file = a_file(&base, "gone-file-161", b"x");
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+        let mut held = vec![open_path_for_stat(&file).expect("stat open")];
+        std::fs::remove_file(&file).expect("unlink");
+        #[cfg(target_os = "linux")]
+        {
+            let dir = base.join("gone-dir-161");
+            std::fs::create_dir(&dir).expect("dir");
+            held.push(open_path_for_stat(&dir).expect("stat open"));
+            std::fs::remove_dir(&dir).expect("rmdir");
+        }
+        for fd in &held {
+            match verify_stat_delegated(fd.as_fd()) {
+                Err(IoError::MutationPathChanged { .. }) => {}
+                other => panic!("an unlinked object must be refused as changed: {other:?}"),
+            }
+        }
+    }
+
+    fn names(listing: &Listing) -> Vec<(&str, bool)> {
+        listing
+            .entries
+            .iter()
+            .map(|e| (e.name.as_str(), e.dir))
+            .collect()
+    }
+
+    #[test]
+    fn a_listing_is_the_delegated_directory_in_byte_order_with_its_kinds() {
+        let (_dir, base) = crate::testutil::outside_any_home();
+        let listed = base.join("listed-161");
+        std::fs::create_dir(&listed).unwrap();
+        a_file(&listed, "b-161", b"x");
+        a_file(&listed, "a-161", b"x");
+        a_file(&listed, "Z-161", b"x");
+        std::fs::create_dir(listed.join("d-161")).unwrap();
+        std::os::unix::fs::symlink(listed.join("d-161"), listed.join("s-161")).unwrap();
+        let held = open_directory_for_delegation(&listed).unwrap();
+        let got = list_delegated_directory(held.as_fd(), &listed, 10).unwrap();
+        assert_eq!(
+            names(&got),
+            [
+                ("Z-161", false),
+                ("a-161", false),
+                ("b-161", false),
+                ("d-161", true),
+                ("s-161", false)
+            ]
+        );
+        assert_eq!(got.dropped, 0);
+        let kept = list_delegated_directory(held.as_fd(), &listed, 2).unwrap();
+        assert_eq!(names(&kept), [("Z-161", false), ("a-161", false)]);
+    }
+
+    #[test]
+    fn a_directory_swapped_after_delegation_is_refused() {
+        let (_dir, base) = crate::testutil::outside_any_home();
+        let listed = base.join("swapped-161");
+        std::fs::create_dir(&listed).unwrap();
+        a_file(&listed, "original-161", b"x");
+        let held = open_directory_for_delegation(&listed).unwrap();
+        std::fs::rename(&listed, base.join("moved-161")).unwrap();
+        std::fs::create_dir(&listed).unwrap();
+        a_file(&listed, "planted-161", b"x");
+        match list_delegated_directory(held.as_fd(), &listed, 10) {
+            Err(IoError::MutationPathChanged { path }) => assert_eq!(path, listed),
+            other => panic!("a swapped directory must be refused: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_reopen_that_lands_on_another_directory_is_refused() {
+        let (_dir, base) = crate::testutil::outside_any_home();
+        let listed = base.join("held-161");
+        let other = base.join("other-161");
+        std::fs::create_dir(&listed).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        let held = open_directory_for_delegation(&listed).unwrap();
+        let elsewhere = |_: BorrowedFd<'_>| crate::syscall::open_parent_by_path(&other);
+        match list_reopened(held.as_fd(), &other, 10, elsewhere) {
+            Err(IoError::MutationPathChanged { path }) => assert_eq!(path, other),
+            other => panic!("another object must be refused: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_utf8_entry_names_are_dropped_and_counted() {
+        let mut kept = Kept::new(2);
+        for (raw, dir) in [
+            (&b"c-161"[..], false),
+            (b"\xff-161", true),
+            (b"a-161", true),
+            (b"\xfe\xfd", false),
+            (b"b-161", false),
+        ] {
+            kept.offer(raw, false, || Ok(dir)).unwrap();
+        }
+        let got = kept.finish();
+        assert_eq!(names(&got), [("a-161", true), ("b-161", false)]);
+        assert_eq!(got.dropped, 2);
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let (_dir, base) = crate::testutil::outside_any_home();
+            let listed = base.join("bytes-161");
+            std::fs::create_dir(&listed).unwrap();
+            a_file(&listed, "plain-161", b"x");
+            std::fs::write(listed.join(std::ffi::OsStr::from_bytes(b"\xff-161")), b"x").unwrap();
+            let held = open_directory_for_delegation(&listed).unwrap();
+            let got = list_delegated_directory(held.as_fd(), &listed, 10).unwrap();
+            assert_eq!((names(&got), got.dropped), (vec![("plain-161", false)], 1));
+        }
+    }
+
+    #[test]
+    fn an_entry_that_vanishes_during_the_listing_is_skipped_and_counted() {
+        let mut kept = Kept::new(10);
+        kept.offer(b"a-161", false, || Ok(false)).unwrap();
+        kept.offer(b"gone-161", true, || Err(nix::errno::Errno::ENOENT))
+            .unwrap();
+        kept.offer(b"repointed-161", true, || Err(nix::errno::Errno::ESTALE))
+            .unwrap();
+        kept.offer(b"z-161", false, || Ok(true)).unwrap();
+        assert_eq!(
+            kept.offer(b"broken-161", true, || Err(nix::errno::Errno::EIO)),
+            Err(nix::errno::Errno::EIO),
+            "any other fault still ends the listing"
+        );
+        let got = kept.finish();
+        assert_eq!(names(&got), [("a-161", false), ("z-161", true)]);
+        assert_eq!((got.dropped, got.vanished), (0, 2));
+    }
+
+    #[test]
+    fn a_listing_whose_every_stat_classified_entry_vanished_is_a_stale_handle() {
+        assert!(!stale_handle(0, 0), "nothing needed a stat");
+        assert!(stale_handle(1, 1));
+        assert!(stale_handle(3, 3));
+        assert!(!stale_handle(3, 2), "one entry survived its stat");
+        let mut kept = Kept::new(10);
+        kept.offer(b"gone-161", true, || Err(nix::errno::Errno::ENOENT))
+            .unwrap();
+        assert_eq!(
+            listed_or_stale(kept, std::path::Path::new("/d-161")),
+            Err(IoError::MutationPathChanged {
+                path: "/d-161".into()
+            })
+        );
+        let mut kept = Kept::new(10);
+        kept.offer(b"kept-161", true, || Ok(false)).unwrap();
+        kept.offer(b"gone-161", true, || Err(nix::errno::Errno::ENOENT))
+            .unwrap();
+        let listed = listed_or_stale(kept, std::path::Path::new("/d-161")).unwrap();
+        let mut known = Kept::new(10);
+        known
+            .offer(b"typed-161", false, || Err(nix::errno::Errno::ENOENT))
+            .unwrap();
+        assert_eq!(
+            known.stat_classified, 0,
+            "only a stat-classified entry counts"
+        );
+        assert!(listed_or_stale(known, std::path::Path::new("/d-161")).is_ok());
+        assert_eq!(
+            (names(&listed), listed.vanished),
+            (vec![("kept-161", false)], 1)
+        );
+    }
+
+    #[test]
+    fn a_reopen_the_os_refuses_ends_the_listing_with_its_errno() {
+        let (_dir, base) = crate::testutil::outside_any_home();
+        let held = open_directory_for_delegation(&base).unwrap();
+        let refused = |_: BorrowedFd<'_>| Err(nix::errno::Errno::EACCES);
+        assert_eq!(
+            list_reopened(held.as_fd(), &base, 10, refused),
+            Err(crate::checks::map_errno_no_disambiguation(
+                nix::errno::Errno::EACCES,
+                &base
+            ))
+        );
+    }
+
+    #[test]
+    fn only_a_search_only_directory_descriptor_is_admitted_for_a_listing() {
+        let (_dir, base) = crate::testutil::outside_any_home();
+        let held = open_directory_for_delegation(&base).unwrap();
+        refuse_enumerable(held.as_fd(), &base).expect("the delegation open cannot enumerate");
+        let readable: OwnedFd = std::fs::File::open(&base).unwrap().into();
+        match refuse_enumerable(readable.as_fd(), &base) {
+            Err(IoError::AccessBearingDescriptor { path }) => assert_eq!(path, base),
+            other => panic!("a readable directory descriptor must be refused: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_stat_open_of_a_fifo_does_not_block_and_reports_other() {
+        let (_dir, base) = crate::testutil::outside_any_home();
+        let fifo = base.join("fifo-161");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600))
+            .expect("mkfifo");
+        let fd = open_path_for_stat(&fifo).expect("a stat open of a fifo returns at once");
+        let verified = verify_stat_delegated(fd.as_fd()).expect("a fifo is stat-able");
+        assert_eq!(verified.meta.kind, FileKind::Other);
     }
 
     #[test]

@@ -6,6 +6,43 @@ pub const MAX_MUTATION_EFFECTS: u32 = 4096;
 pub const MAX_MUTATION_DEPTH: u16 = 128;
 pub const MAX_MUTATION_BATCH: usize = 32;
 pub const MAX_MUTATION_PATH_BYTES: usize = 4096;
+/// Permitted entries one `fs.list` page releases; the kernel stops at one more (#161 M14).
+pub const LIST_RELEASE_MAX: usize = 1024;
+/// Names one `fs.list` call receives, those skipped by its cursor included (#161 M14).
+pub const LIST_RECEIVE_MAX: usize = 65_536;
+/// The longest `fs.list` cursor, in bytes.
+pub const LIST_CURSOR_MAX_BYTES: usize = 1024;
+
+/// One directory entry by its bare name, never a path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListEntry {
+    pub name: String,
+    pub dir: bool,
+}
+
+/// Subject to kernel, after an `fs.list` grant: names in strictly increasing byte order,
+/// continuing the previous chunk's. `dropped` counts names the subject could not send
+/// as UTF-8, `vanished` entries removed while it listed them, and `unlisted` says it
+/// could not list the directory at all; the kernel records each as a claim it does not
+/// verify.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListChunk {
+    pub entries: Vec<ListEntry>,
+    pub last: bool,
+    pub dropped: u32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unlisted: bool,
+    #[serde(default)]
+    pub vanished: u32,
+}
+
+/// Kernel to subject: the permitted entries, at most [`LIST_RELEASE_MAX`]. `truncated`
+/// says a further permitted entry exists; the grant carries no total.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListGrant {
+    pub entries: Vec<ListEntry>,
+    pub truncated: bool,
+}
 
 /// Correlation within a live authenticated connection, never a bearer capability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

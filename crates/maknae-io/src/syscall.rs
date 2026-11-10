@@ -149,6 +149,28 @@ pub(crate) fn open_path_delegation(path: &Path) -> nix::Result<OwnedFd> {
     nix::fcntl::open(path, path_delegation_flags(), NixMode::empty())
 }
 
+#[cfg(target_os = "linux")]
+use linux_path_stat_flags as path_stat_flags;
+#[cfg(target_os = "macos")]
+use macos_path_stat_flags as path_stat_flags;
+
+#[cfg(target_os = "linux")]
+fn linux_path_stat_flags() -> OFlag {
+    OFlag::O_PATH | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC
+}
+
+#[cfg(target_os = "macos")]
+fn macos_path_stat_flags() -> OFlag {
+    OFlag::from_bits_retain(nix::libc::O_SYMLINK)
+        | OFlag::O_RDONLY
+        | OFlag::O_NONBLOCK
+        | OFlag::O_CLOEXEC
+}
+
+pub(crate) fn open_path_stat(path: &Path) -> nix::Result<OwnedFd> {
+    nix::fcntl::open(path, path_stat_flags(), NixMode::empty())
+}
+
 /// Mutation descent needs search/path access; only directory enumeration needs read.
 pub(crate) fn open_mutation_directory_at<F: AsFd>(fd: &F, leaf: &str) -> nix::Result<OwnedFd> {
     nix::fcntl::openat(
@@ -492,6 +514,21 @@ pub(crate) fn macos_confers_no_write<F: AsFd>(fd: &F) -> nix::Result<bool> {
     Ok(OFlag::from_bits_retain(flags) & OFlag::O_ACCMODE == OFlag::O_RDONLY)
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) use linux_confers_no_write as confers_search_only;
+#[cfg(target_os = "macos")]
+pub(crate) use macos_confers_search_only as confers_search_only;
+
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_confers_search_only<F: AsFd>(fd: &F) -> nix::Result<bool> {
+    let flags = OFlag::from_bits_retain(nix::fcntl::fcntl(
+        fd.as_fd(),
+        nix::fcntl::FcntlArg::F_GETFL,
+    )?);
+    Ok(flags.contains(OFlag::from_bits_retain(nix::libc::O_EXEC))
+        && flags & OFlag::O_ACCMODE == OFlag::O_RDONLY)
+}
+
 pub(crate) fn write_at<F: AsFd>(fd: &F, bytes: &[u8], offset: i64) -> nix::Result<usize> {
     nix::sys::uio::pwrite(fd, bytes, offset)
 }
@@ -628,6 +665,23 @@ mod tests {
     }
 
     #[test]
+    fn the_stat_open_flags_are_exactly_the_unfollowed_no_access_set() {
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            linux_path_stat_flags().bits(),
+            (OFlag::O_PATH | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC).bits()
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            macos_path_stat_flags().bits(),
+            nix::libc::O_SYMLINK
+                | nix::libc::O_RDONLY
+                | nix::libc::O_NONBLOCK
+                | nix::libc::O_CLOEXEC
+        );
+    }
+
+    #[test]
     fn mutation_xor_equivalence_requires_disjoint_platform_flag_bits() {
         // This is the executable algebra supporting the narrowly named XOR
         // exemptions; the descriptor tests separately hold actual behavior.
@@ -644,6 +698,15 @@ mod tests {
         groups.push(vec![OFlag::O_RDONLY, OFlag::O_NONBLOCK, OFlag::O_CLOEXEC]);
         #[cfg(target_os = "linux")]
         groups.push(vec![OFlag::O_PATH, OFlag::O_CLOEXEC]);
+        #[cfg(target_os = "linux")]
+        groups.push(vec![OFlag::O_PATH, OFlag::O_NOFOLLOW, OFlag::O_CLOEXEC]);
+        #[cfg(target_os = "macos")]
+        groups.push(vec![
+            OFlag::from_bits_retain(nix::libc::O_SYMLINK),
+            OFlag::O_RDONLY,
+            OFlag::O_NONBLOCK,
+            OFlag::O_CLOEXEC,
+        ]);
         #[cfg(target_os = "macos")]
         groups.push(vec![
             OFlag::O_WRONLY,

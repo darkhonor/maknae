@@ -74,6 +74,8 @@
 # the two disjoint O_PATH|O_DIRECTORY|O_CLOEXEC XOR replacements survive as
 # algebraically identical. The executable bit proof passes natively on Rocky9.
 # Only | -> ^ in these named functions is exempt: & mutations remain tested.
+# Added 2026-11-10 (#161): linux_path_stat_flags and macos_path_stat_flags unite
+# disjoint flags too (five | -> ^); the stat-flags test pins each exact set.
 exclude_re = [
   # #240: `Unavailable::deadline` returns `Duration::ZERO`, and the mutant
   # replacing its body with `Default::default()` returns the SAME value —
@@ -81,7 +83,7 @@ exclude_re = [
   # `unavailable_is_the_no_provider_backend_and_neither_readies_nor_sends`;
   # every other mutant of the file stays tested.
   "maknae-kernel/src/egress\\.rs:[0-9]+:[0-9]+: replace <impl Egress for Unavailable>::deadline -> std::time::Duration with Default::default\\(\\)$",
-  "^crates/maknae-io/src/syscall\\.rs:[0-9]+:[0-9]+: replace \\| with \\^ in (open_parent_by_path|open_dir_at|open_read_target|openat2_resolve|open_temp_excl|open_append|macos_mutation_directory_flags|linux_mutation_directory_flags|open_mutation_directory_at|open_existing|linux_path_delegation_flags|macos_path_delegation_flags)$",
+  "^crates/maknae-io/src/syscall\\.rs:[0-9]+:[0-9]+: replace \\| with \\^ in (open_parent_by_path|open_dir_at|open_read_target|openat2_resolve|open_temp_excl|open_append|macos_mutation_directory_flags|linux_mutation_directory_flags|open_mutation_directory_at|open_existing|linux_path_delegation_flags|macos_path_delegation_flags|linux_path_stat_flags|macos_path_stat_flags)$",
   "^crates/maknae-io/src/audit_append\\.rs:[0-9]+:[0-9]+: replace \\| with \\^ in flags$",
   "maknae-plane.*::poll_flush",
   # `SyslogMirror::mirror` (#222) -- the macOS unified-log send. NARROW BY

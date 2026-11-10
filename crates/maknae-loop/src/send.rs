@@ -290,6 +290,28 @@ async fn exchange(
         FirstAnswer::Done(sent) => return Ok(sent),
         FirstAnswer::Grant(prepared, grant) => (prepared, grant),
     };
+    if matches!(prepared.request(), maknae_proto::Verb::FsList { .. }) {
+        return Ok(
+            match crate::mutation::execute_list(
+                prepared,
+                grant,
+                &mut stream,
+                transport,
+                written,
+                diag,
+            )
+            .await
+            .map_err(Failed::After)?
+            {
+                Ok(page) => SentOutcome::Payload(Payload::ListGrant(page)),
+                Err(refused) => SentOutcome::Refused {
+                    code: refused.code,
+                    message: refused.message,
+                    armed: true,
+                },
+            },
+        );
+    }
     if matches!(prepared.request(), maknae_proto::Verb::Read { .. }) {
         let read =
             crate::mutation::execute_read(prepared, grant, &mut stream, transport, written, diag)
@@ -323,6 +345,13 @@ fn first_answer(
     armed: bool,
 ) -> Result<FirstAnswer, Failed> {
     match (result, prepared) {
+        (RespResult::Ok(Payload::MutationAttempt(_)), Some(prepared))
+            if matches!(prepared.request(), maknae_proto::Verb::FsStat { .. }) =>
+        {
+            Err(Failed::BeforeGrant(
+                "protocol error: an attempt grant for fs.stat".into(),
+            ))
+        }
         (RespResult::Ok(Payload::MutationAttempt(grant)), Some(prepared)) => {
             Ok(FirstAnswer::Grant(prepared, grant))
         }
@@ -779,6 +808,53 @@ mod tests {
         assert!(matches!(
             first_answer(false, None, RespResult::Ok(Payload::Pong), true),
             Ok(FirstAnswer::Done(SentOutcome::Payload(Payload::Pong)))
+        ));
+        let stat = || {
+            crate::mutation::prepare_checked(
+                maknae_proto::Verb::FsStat {
+                    path: "/sentinel-161".into(),
+                    conversation: None,
+                },
+                None,
+                crate::mutation::WriteCheck::Unchecked,
+            )
+        };
+        assert!(
+            matches!(
+                first_answer(false, stat(), grant(), false),
+                Err(Failed::BeforeGrant(why)) if why.contains("fs.stat")
+            ),
+            "a grant never reaches an executor for fs.stat"
+        );
+        let listing = crate::mutation::prepare_checked(
+            maknae_proto::Verb::FsList {
+                path: "/sentinel-161".into(),
+                after: None,
+                conversation: None,
+            },
+            None,
+            crate::mutation::WriteCheck::Unchecked,
+        );
+        assert!(
+            matches!(
+                first_answer(false, listing, grant(), false),
+                Ok(FirstAnswer::Grant(p, _)) if matches!(p.request(), maknae_proto::Verb::FsList { .. })
+            ),
+            "a listing grant reaches the listing executor"
+        );
+        assert!(!mutates(&maknae_proto::Verb::FsList {
+            path: "/sentinel-161".into(),
+            after: None,
+            conversation: None,
+        }));
+        let answer = Payload::Stat(maknae_proto::StatView {
+            size: 1,
+            mtime_secs: 1,
+            kind: maknae_proto::StatKind::File,
+        });
+        assert!(matches!(
+            first_answer(false, stat(), RespResult::Ok(answer.clone()), true),
+            Ok(FirstAnswer::Done(SentOutcome::Payload(p))) if p == answer
         ));
     }
 

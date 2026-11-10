@@ -1069,6 +1069,19 @@ pub struct WhoamiView {
     pub peer_uid: u32,
 }
 
+pub struct StatView {
+    pub size: u64,
+    pub mtime_secs: i64,
+    pub kind: StatKind,
+}
+
+pub enum StatKind {
+    File,
+    Directory,
+    Symlink,
+    Other,
+}
+
 pub enum Payload {
     Pong,
     Whoami(WhoamiView),
@@ -1085,6 +1098,9 @@ pub enum Payload {
     ConversationDeleted {
         conversation: crate::ConversationId,
     },
+    Stat(StatView),
+    ListGrant(crate::ListGrant),
+    ListContinue,
 }
 FIX
   cat > "$fixture/crates/maknae-proto/src/conversation.rs" <<'FIX'
@@ -1332,6 +1348,12 @@ always	conversation_list.entries.turns	ships by construction
 always	conversation_list.entries.bytes	ships by construction
 always	conversation_list.entries.chain_head	ships by construction
 always	conversation_list.next	ships by construction
+always	stat.size	ships by construction
+always	stat.mtime_secs	ships by construction
+always	stat.kind	ships by construction
+always	list.truncated	ships by construction
+always	list.entries.name	ships by construction
+always	list.entries.dir	ships by construction
 mask	lake	the Knowledge Lake schema, not ours
 '
 
@@ -1411,7 +1433,7 @@ cat > "$fx/crates/maknae-config/src/document.rs" <<'FIX'
 const DISCLOSABLE: &[&str] = &["transport", "providers[].name", "providers[].endpoint", "providers[].models", "providers[].models[]", "providers[].reasoning_effort", "providers[].output_tokens_field", "vault.addr", "vault.approle_mount", "vault.pki_int_mount", "vault.deployment_id", "vault.user_auth", "vault.user_auth.type", "vault.user_auth.mount", "vault.kv_mount", "vault.user_prefix", "vault.plane_key", "audit.jsonl_path", "principal", "egress.socket_path", "egress.deadline_ms", "deployment.mode", "deployment.account_source"];
 const SUPPRESSED: &[&str] = &["vault.insecure_plaintext_secret_path", "core.handling", "audit.au3_1"];
 FIX
-expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" ": 73 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" ": 79 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a section registered in boot.rs with no SURFACE entry. THE THIRD
 # fail-open, and the one that closes the PROPERTY rather than an instance: the
@@ -1982,7 +2004,7 @@ fi
 # go check a sed flag. This probe pins the corrected order.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'std::sync::Arc<String>')"
 expect_accept "config-disclosure-drift/qualified-wrapper-is-a-leaf" \
-  ": 73 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 79 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the config-surface `Vec` exemption holds for the QUALIFIED spelling
 # too. Under the old post-loop `s/.*:://`, `Vec<crate::Principal>` reduced to
@@ -1991,7 +2013,7 @@ expect_accept "config-disclosure-drift/qualified-wrapper-is-a-leaf" \
 # the unqualified `config-vec-of-struct-is-a-leaf` probe below cannot see.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'Vec<crate::Principal>')"
 expect_accept "config-disclosure-drift/qualified-config-vec-is-still-a-leaf" \
-  ": 73 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 79 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the mirror image. `Vec<WorkspaceStruct>` on a CONFIG surface is a
 # LEAF -- only a sequence whose element paths are declared is walked;
@@ -2000,12 +2022,12 @@ expect_accept "config-disclosure-drift/qualified-config-vec-is-still-a-leaf" \
 # did not, and every config row was silently held to the wire rule.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'Vec<Principal>')"
 expect_accept "config-disclosure-drift/config-vec-of-struct-is-a-leaf" \
-  ": 73 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 79 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the clean fixture passes and reports both counts. Without this every
 # rejection above would stay green against a gate that refuses everything.
 fx="$(cfg_fixture "$CFG_OK")"
-expect_accept "config-disclosure-drift/clean-fixture-passes" ": 73 paths decided, 84 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/clean-fixture-passes" ": 79 paths decided, 91 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
 
 fx="$(cfg_fixture "$CFG_OK")"
 python3 - "$fx" <<'PYFIX'
@@ -2121,7 +2143,7 @@ expect_reported_count "p1-manifest/packages-match-the-workspace" "ok (" "$exp_p1
 # control; asserting it here means any future silent shrink is a red build.
 
 expect_accept "config-disclosure-drift/real-repo-counts-pinned" \
-  ": 85 paths decided, 84 struct fields covered" "$here/config-disclosure-drift.sh"
+  ": 91 paths decided, 91 struct fields covered" "$here/config-disclosure-drift.sh"
 
 
 # #158: a grant's own disclosure inventory must reject new data and type changes.
@@ -6139,9 +6161,10 @@ open(p, "w").write(s.replace(old, new))' "$f" "$2" "$3"; then
     cv_suite maknae-agent render::tests
   expect_reject_because "uniform/a-distinct-denied-text-goes-red" \
     "every_file_refusal_renders_the_same_bytes" cv_mutant crates/maknae-agent/src/render.rs \
-    '        ToolOutcome::ReadRefused | ToolOutcome::ReadUnavailable | ToolOutcome::WriteUnavailable => {' \
+    '        ToolOutcome::ReadRefused
+        | ToolOutcome::ReadUnavailable' \
     '        ToolOutcome::ReadRefused => Zeroizing::new("Not authorized".to_string()),
-        ToolOutcome::ReadUnavailable | ToolOutcome::WriteUnavailable => {' \
+        ToolOutcome::ReadUnavailable' \
     maknae-agent render::tests
   expect_reject_because "uniform/a-refused-write-told-unknown-goes-red" \
     "a_write_refused_before_the_grant_is_unavailable" cv_mutant crates/maknae-agent/src/wire.rs \

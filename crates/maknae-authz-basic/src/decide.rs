@@ -186,12 +186,19 @@ pub(crate) const GRANTABLE_ACTIONS: [&str; 13] = ["admin.status", "admin.config.
 #[rustfmt::skip]
 pub(crate) const ACTION_VOCABULARY: [&str; 17] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt", "session.new", "session.close", "session.list", "session.delete", "session.task", "fs.read", "fs.write", "fs.delete", "fs.mkdir"];
 
+/// Decided as `fs.read` wherever an action is limited, and never named by a list (#161 M15).
+pub(crate) const DECIDED_AS_READ: [&str; 2] = ["fs.stat", "fs.list"];
+
 /// An action entry as compiled against [`ACTION_VOCABULARY`]: `(term, entry as written)`.
 pub(crate) fn expand(
     p: &maknae_config::ActionPattern,
 ) -> Result<Vec<(&'static str, String)>, crate::AuthzBasicError> {
-    use crate::AuthzBasicError::{UngrantableAction, UnknownAction};
+    use crate::AuthzBasicError::{DecidedAsRead, UngrantableAction, UnknownAction};
     let source = p.source();
+    if matches!(p, maknae_config::ActionPattern::Exact(name) if DECIDED_AS_READ.contains(&name.as_str()))
+    {
+        return Err(DecidedAsRead(source));
+    }
     let (maknae_config::ActionPattern::Exact(name) | maknae_config::ActionPattern::Family(name)) =
         p;
     let class = match class_of(name) {
@@ -759,7 +766,7 @@ pub(crate) fn decide_loaded_cited(
         Role::Admin | Role::User
             if matches!(
                 req.action.0.as_str(),
-                "fs.read" | "fs.write" | "fs.delete" | "fs.mkdir"
+                "fs.read" | "fs.write" | "fs.delete" | "fs.mkdir" | "fs.stat" | "fs.list"
             ) =>
         {
             match attempt_scope(req) {
@@ -961,6 +968,11 @@ fn agent_arm(
 
 fn action_limit(entry: Option<&SubjectEntry>, action: &str) -> Option<Verdict> {
     let entry = entry?;
+    let action = if DECIDED_AS_READ.contains(&action) {
+        "fs.read"
+    } else {
+        action
+    };
     let set = entry.actions.as_ref()?;
     match class_of(action) {
         Some(Class::Liveness | Class::Kernel) | None => return None,
@@ -1025,7 +1037,7 @@ fn attempt_scope(req: &SecRequest) -> Result<FsScope, Verdict> {
         .and_then(FsOperation::parse)
         .ok_or_else(|| refuse("filesystem attempt preparation absent or invalid"))?;
     let scope = match (req.action.0.as_str(), operation) {
-        ("fs.read", FsOperation::Read) => FsScope::Read,
+        ("fs.read" | "fs.stat" | "fs.list", FsOperation::Read) => FsScope::Read,
         ("fs.write", FsOperation::WriteExisting | FsOperation::WriteCreate)
         | ("fs.delete", FsOperation::DeleteEntry)
         | ("fs.mkdir", FsOperation::Mkdir) => FsScope::Write,
@@ -1277,6 +1289,50 @@ mod tests {
                     "Read authority must not imply Write"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn fs_stat_and_fs_list_are_decided_by_the_read_grant() {
+        for action in ["fs.stat", "fs.list"] {
+            for role in ["admin", "user"] {
+                let lp = lp_with(
+                    Some(&[(role, &["operator"])]),
+                    &[("operator", OPERATOR_UID)],
+                );
+                let decide = |path: &str, op: &str| {
+                    let mut req = request(Some(i64::from(OPERATOR_UID)), action, Some(path));
+                    req.context.0.insert(
+                        maknae_security::CONTEXT_FS_OPERATION,
+                        AttrValue::Str(op.into()),
+                    );
+                    decide_loaded(&lp, &principal(), &req)
+                };
+                assert!(
+                    matches!(
+                        decide("/home/operator/stat-161", "read"),
+                        Verdict::Permit { .. }
+                    ),
+                    "{role}: Read(~/**) permits {action}"
+                );
+                assert!(
+                    matches!(decide("/home/operator/.ssh/id", "read"), Verdict::Deny { ref reason } if reason.contains("Read(~/.ssh/**)")),
+                    "{role}: a Read deny refuses {action}"
+                );
+                assert_eq!(
+                    decide("/srv/stat-161", "read"),
+                    Verdict::NotApplicable {
+                        note: Some(format!("role {role}: no capability entry for {action}")),
+                    }
+                );
+                assert!(
+                    matches!(decide("/home/operator/stat-161", "write-existing"), Verdict::Deny { ref reason } if reason == "filesystem attempt preparation does not match action"),
+                    "{role}: {action} is prepared as a read only"
+                );
+            }
+            assert!(!ACTION_VOCABULARY.contains(&action));
+            assert!(!GRANTABLE_ACTIONS.contains(&action));
+            assert!(DECIDED_AS_READ.contains(&action));
         }
     }
 
@@ -2025,7 +2081,11 @@ mod tests {
                 AttrValue::Str("mkdir".into()),
             );
             let keyed = decide_loaded(&lp, &principal(), &req) != unbuilt(t);
-            assert_eq!(keyed, ACTION_VOCABULARY.contains(&t), "{t}");
+            assert_eq!(
+                keyed,
+                ACTION_VOCABULARY.contains(&t) || DECIDED_AS_READ.contains(&t),
+                "{t}"
+            );
         }
     }
 
@@ -3374,6 +3434,39 @@ mod tests {
         );
         let ssh = decide_loaded_cited(&lp, &principal(), &fs_op(SENTINEL_UID, "fs.read", ".ssh/k"));
         assert_eq!(ssh.cited, site(Effect::Deny, "Read(~/.ssh/**)"));
+    }
+
+    #[test]
+    fn fs_stat_and_fs_list_follow_the_fs_read_entry_of_an_actions_limit() {
+        for action in ["fs.stat", "fs.list"] {
+            fs_read_entry_limits(action);
+        }
+    }
+
+    fn fs_read_entry_limits(action: &str) {
+        let stat = |lp: &LoadedPolicy| {
+            let mut r = fs_op(SENTINEL_UID, "fs.read", "stat-161");
+            r.action.0 = action.into();
+            decide_loaded_cited(lp, &principal(), &r)
+        };
+        let read_only = lp_subject(
+            "user",
+            &sentinel_entry("    actions:\n      allow: [\"fs.read\"]\n"),
+        );
+        assert_eq!(
+            (stat(&read_only).verdict, stat(&read_only).cited),
+            (permit_with_audit(), site(Effect::Allow, "Read(~/**)"))
+        );
+        let no_read = lp_subject(
+            "user",
+            &sentinel_entry("    actions:\n      allow: [\"fs.write\"]\n"),
+        );
+        assert_limited(&stat(&no_read), "fs.read");
+        let read_denied = lp_subject(
+            "user",
+            &sentinel_entry("    actions:\n      allow: [\"fs.*\"]\n      deny: [\"fs.read\"]\n"),
+        );
+        assert_limited(&stat(&read_denied), "fs.read");
     }
 
     fn model_req(uid: u32, model: Option<AttrValue>) -> SecRequest {

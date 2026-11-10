@@ -1148,6 +1148,68 @@ async fn a_failed_activity_touch_is_recorded_and_the_read_still_runs() {
 }
 
 #[tokio::test]
+async fn an_fs_stat_citing_the_callers_conversation_touches_it_and_a_failed_touch_is_noted() {
+    let mut rig = Rig::new("fs-stat-touch", Kind::Mem);
+    let conv = rig.open().await;
+    let before = rig.store().get(&id(&conv)).unwrap();
+    rig.store()
+        .update(&before.id, before.fence, &mut |r| r.last_active = 7)
+        .unwrap();
+    let target = rig.fx.root.join("stat-161");
+    std::fs::write(&target, b"content").unwrap();
+    let stat = || Verb::FsStat {
+        path: target.to_str().unwrap().into(),
+        conversation: Some(conv.clone()),
+    };
+    let records = Records::new(0);
+    let resp = rig
+        .send(
+            stat(),
+            Some(maknae_io::open_path_for_stat(&target).unwrap()),
+            &records,
+            maknae_kernel::unavailable_egress(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            resp.result,
+            RespResult::Ok(maknae_proto::Payload::Stat(maknae_proto::StatView {
+                size: 7,
+                ..
+            }))
+        ),
+        "{resp:?}"
+    );
+    assert!(rig.store().get(&id(&conv)).unwrap().last_active > 7);
+    let rec = last_of(&records, "fs.stat");
+    assert_eq!(rec.conversation.as_deref(), Some(conv.as_str()));
+
+    rig.fx.conversations = Racing::over(&rig.fx.conversations, 1);
+    let records = Records::new(0);
+    let resp = rig
+        .send(
+            stat(),
+            Some(maknae_io::open_path_for_stat(&target).unwrap()),
+            &records,
+            maknae_kernel::unavailable_egress(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(resp.result, RespResult::Ok(_)), "{resp:?}");
+    let noted: Vec<_> = of_action(&records, "fs.stat")
+        .into_iter()
+        .filter(|r| {
+            r.outcome
+                .reason
+                .starts_with("conversation activity not recorded: ")
+        })
+        .collect();
+    assert_eq!(noted.len(), 1, "{:?}", records.snapshot());
+    assert_eq!(noted[0].outcome.result, "permit");
+}
+
+#[tokio::test]
 async fn a_non_local_lane_session_new_is_denied() {
     let rig = Rig::new("remote-lane", Kind::Mem);
     let mut session = rig.fx.session();

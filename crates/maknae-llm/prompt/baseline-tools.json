@@ -53,5 +53,45 @@
         "additionalProperties": false
       }
     }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "list_directory",
+      "description": "Lists one directory: one name per line, in byte order, each name a JSON string, with `/` after a directory's closing quote. Up to 1024 names per page, fewer when names are long; if there are more, the last line is `truncated — continue with after: \"<name>\"`, and calling again with that name as `after` returns the next page. Entries you may not see are simply absent, exactly as if they did not exist, up to the 65,536-name bound; a larger directory answers unavailable. The result has no count or total of anything. An empty result means there is nothing here you may see. Not recursive. May be refused: unavailable — do not retry.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute path to the directory to list."
+          },
+          "after": {
+            "type": "string",
+            "description": "Return only names after this one: the name from the previous page's truncated line."
+          }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "stat_path",
+      "description": "Returns what is at one path as JSON: `kind` (file, directory, symlink or other), `size` in bytes, and `mtime_secs`, the last modification in seconds since the Unix epoch. A symlink is reported as itself and is not followed. Nothing else about the path is returned. May be refused: unavailable — do not retry.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute path to inspect."
+          }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      }
+    }
   }
 ]

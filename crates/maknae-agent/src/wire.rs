@@ -1,7 +1,10 @@
 //! The wire's answers, as the loop reads them. Pure: the client that produced a
 //! [`WireOutcome`] converts into it, so the decisions below stay in this crate,
 //! where they are mutation-tested.
-use crate::plane::{PlaneError, ProtectedBy, ReadBasis, ReadOutcome, ReadPage, WriteOutcome};
+use crate::plane::{
+    ListOutcome, PlaneError, ProtectedBy, ReadBasis, ReadOutcome, ReadPage, StatOutcome, StatView,
+    WriteOutcome,
+};
 use maknae_proto::{ConversationId, ConversationView, Payload};
 
 /// What an existing file must be before a replace writes it (#388). The
@@ -118,6 +121,38 @@ pub fn write_outcome(sent: Result<WireOutcome, String>) -> WriteOutcome {
         })
         | Ok(WireOutcome::Refused { .. }) => WriteOutcome::Unavailable,
         _ => WriteOutcome::Unknown,
+    }
+}
+
+/// The listing half: a page only for the kernel's `ListGrant`. Every other answer,
+/// armed or not and whatever its code or message, is `Unavailable`, so a missing
+/// directory and a denied one cannot be told apart (ADR-0034 decision 7).
+pub fn list_outcome(sent: Result<WireOutcome, String>) -> ListOutcome {
+    if let Some(by) = protected(&sent) {
+        return ListOutcome::Protected(by);
+    }
+    match sent {
+        Ok(WireOutcome::Payload(Payload::ListGrant(page))) => ListOutcome::Page(page),
+        _ => ListOutcome::Unavailable,
+    }
+}
+
+/// The stat half, on the same rule as [`list_outcome`].
+pub fn stat_outcome(sent: Result<WireOutcome, String>) -> StatOutcome {
+    if let Some(by) = protected(&sent) {
+        return StatOutcome::Protected(by);
+    }
+    match sent {
+        Ok(WireOutcome::Payload(Payload::Stat(maknae_proto::StatView {
+            size,
+            mtime_secs,
+            kind,
+        }))) => StatOutcome::Stat(StatView {
+            size,
+            mtime_secs,
+            kind,
+        }),
+        _ => StatOutcome::Unavailable,
     }
 }
 
@@ -594,6 +629,78 @@ mod tests {
             armed: true,
         });
         assert_eq!(read_outcome(unauthorized), ReadOutcome::Refused);
+    }
+
+    #[test]
+    fn a_listing_is_a_page_only_for_the_kernels_grant() {
+        let page = maknae_proto::ListGrant {
+            entries: vec![maknae_proto::ListEntry {
+                name: "seen-161".into(),
+                dir: true,
+            }],
+            truncated: true,
+        };
+        assert_eq!(
+            list_outcome(Ok(WireOutcome::Payload(Payload::ListGrant(page.clone())))),
+            ListOutcome::Page(page)
+        );
+        assert_eq!(
+            list_outcome(Ok(WireOutcome::Payload(Payload::Stat(
+                maknae_proto::StatView {
+                    size: 1,
+                    mtime_secs: 1,
+                    kind: maknae_proto::StatKind::File,
+                }
+            )))),
+            ListOutcome::Unavailable
+        );
+        for sent in crate::testutil::every_refusal_after_a_list_or_stat() {
+            let shown = format!("{sent:?}");
+            assert_eq!(list_outcome(sent), ListOutcome::Unavailable, "{shown}");
+        }
+        for armed in [true, false] {
+            assert_eq!(
+                list_outcome(protected_frame(armed)),
+                ListOutcome::Protected(by())
+            );
+        }
+    }
+
+    #[test]
+    fn a_stat_is_metadata_only_for_the_kernels_stat_payload() {
+        assert_eq!(
+            stat_outcome(Ok(WireOutcome::Payload(Payload::Stat(
+                maknae_proto::StatView {
+                    size: 161,
+                    mtime_secs: -2,
+                    kind: maknae_proto::StatKind::Symlink,
+                }
+            )))),
+            StatOutcome::Stat(StatView {
+                size: 161,
+                mtime_secs: -2,
+                kind: maknae_proto::StatKind::Symlink,
+            })
+        );
+        assert_eq!(
+            stat_outcome(Ok(WireOutcome::Payload(Payload::ListGrant(
+                maknae_proto::ListGrant {
+                    entries: vec![],
+                    truncated: false,
+                }
+            )))),
+            StatOutcome::Unavailable
+        );
+        for sent in crate::testutil::every_refusal_after_a_list_or_stat() {
+            let shown = format!("{sent:?}");
+            assert_eq!(stat_outcome(sent), StatOutcome::Unavailable, "{shown}");
+        }
+        for armed in [true, false] {
+            assert_eq!(
+                stat_outcome(protected_frame(armed)),
+                StatOutcome::Protected(by())
+            );
+        }
     }
 
     #[test]

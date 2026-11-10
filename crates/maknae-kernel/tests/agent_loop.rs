@@ -32,7 +32,7 @@ mod common;
 use common::{Fixture, Records};
 use maknae_agent::budget::{ContextBudget, Meter, Notice};
 use maknae_agent::drive::{drive, Budget, StopReason};
-use maknae_agent::plane::{Plane, PlaneError, ReadOutcome, WriteOutcome};
+use maknae_agent::plane::{ListOutcome, Plane, PlaneError, ReadOutcome, StatOutcome, WriteOutcome};
 use maknae_agent::transcript::Transcript;
 use maknae_io::Zeroizing;
 use maknae_proto::{
@@ -381,6 +381,112 @@ impl Plane for FixturePlane {
             WriteOutcome::Applied(None)
         } else {
             WriteOutcome::Unknown
+        }
+    }
+    async fn list(&mut self, conversation: &str, path: &str, after: Option<&str>) -> ListOutcome {
+        use maknae_agent::wire::{list_outcome, WireOutcome};
+        use maknae_proto::{MutationScope, ReportedEffect};
+        use std::os::fd::AsFd;
+        let held = maknae_io::open_directory_for_delegation(std::path::Path::new(path)).ok();
+        let (mut client, task, body) = self.fx.start_egress(
+            Verb::FsList {
+                path: path.into(),
+                after: after.map(str::to_string),
+                conversation: Some(conversation.into()),
+            },
+            held.as_ref().map(|fd| fd.try_clone().unwrap()),
+            Arc::clone(&self.records),
+            maknae_config::transport_from_section(None).unwrap(),
+            Some("openai"),
+            self.egress.clone(),
+        );
+        common::write_frame(&mut client, &body).await.unwrap();
+        let answer = |b: Option<Vec<u8>>| {
+            b.and_then(|b| maknae_proto::decode_response(&b).ok())
+                .map(|r| r.result)
+        };
+        let first = answer(common::read_frame(&mut client, 1 << 20).await.ok());
+        let out = match (first, held.as_ref()) {
+            (Some(RespResult::Err(e)), _) => list_outcome(Ok(WireOutcome::Refused {
+                code: e.code,
+                message: e.message,
+                armed: held.is_some(),
+            })),
+            (Some(RespResult::Ok(Payload::MutationAttempt(grant))), Some(held)) => {
+                let MutationScope::Exact {
+                    path: granted,
+                    effect: ReportedEffect::ReadFile,
+                } = &grant.scope
+                else {
+                    panic!("a listing is granted Exact ReadFile: {:?}", grant.scope)
+                };
+                let listed = maknae_io::list_delegated_directory(
+                    held.as_fd(),
+                    std::path::Path::new(granted),
+                    maknae_proto::LIST_RECEIVE_MAX,
+                );
+                let chunk = match &listed {
+                    Ok(l) => maknae_proto::ListChunk {
+                        entries: l
+                            .entries
+                            .iter()
+                            .map(|e| maknae_proto::ListEntry {
+                                name: e.name.clone(),
+                                dir: e.dir,
+                            })
+                            .collect(),
+                        last: true,
+                        dropped: l.dropped,
+                        unlisted: false,
+                        vanished: 0,
+                    },
+                    Err(_) => maknae_proto::ListChunk {
+                        entries: vec![],
+                        last: true,
+                        dropped: 0,
+                        unlisted: true,
+                        vanished: 0,
+                    },
+                };
+                common::write_frame(
+                    &mut client,
+                    &maknae_proto::encode_list_chunk(&chunk).unwrap(),
+                )
+                .await
+                .unwrap();
+                let page = answer(common::read_frame(&mut client, 1 << 20).await.ok());
+                match (listed, page) {
+                    (Err(e), _) => list_outcome(Err(format!("list not performed: {e}"))),
+                    (Ok(_), Some(RespResult::Ok(p))) => list_outcome(Ok(WireOutcome::Payload(p))),
+                    (Ok(_), Some(RespResult::Err(e))) => list_outcome(Ok(WireOutcome::Refused {
+                        code: e.code,
+                        message: e.message,
+                        armed: true,
+                    })),
+                    (Ok(_), None) => list_outcome(Err("no page".into())),
+                }
+            }
+            (other, _) => list_outcome(Err(format!("{other:?}"))),
+        };
+        drop(client);
+        task.await.unwrap();
+        out
+    }
+    async fn stat(&mut self, conversation: &str, path: &str) -> StatOutcome {
+        use maknae_agent::wire::{stat_outcome, WireOutcome};
+        let held = maknae_io::open_path_for_stat(std::path::Path::new(path)).ok();
+        let armed = held.is_some();
+        let verb = Verb::FsStat {
+            path: path.into(),
+            conversation: Some(conversation.into()),
+        };
+        match self.verb(verb, held).await.result {
+            RespResult::Ok(p) => stat_outcome(Ok(WireOutcome::Payload(p))),
+            RespResult::Err(e) => stat_outcome(Ok(WireOutcome::Refused {
+                code: e.code,
+                message: e.message,
+                armed,
+            })),
         }
     }
 }
@@ -832,6 +938,224 @@ async fn refused_for_every_cause(tag: &str) -> Refusals {
         })
         .collect();
     Refusals { rendered, trail }
+}
+
+struct Unlock(std::path::PathBuf);
+impl Drop for Unlock {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+    }
+}
+
+async fn drive_one_step(
+    fx: Fixture,
+    calls: Vec<ProposedToolCall>,
+    unlocks: Vec<Unlock>,
+) -> (Vec<String>, Vec<maknae_audit_append::AuditRecord>) {
+    let n = calls.len();
+    let egress = Arc::new(Scripted::default());
+    script(
+        &egress,
+        [
+            PromptReply {
+                reasoning: None,
+                blocks: vec![],
+                tool_calls: calls,
+                usage: None,
+            },
+            PromptReply {
+                reasoning: None,
+                blocks: vec![text("done")],
+                tool_calls: vec![],
+                usage: None,
+            },
+        ],
+    );
+    let records = Records::new(0);
+    let mut plane = FixturePlane {
+        fx,
+        records: Arc::clone(&records),
+        egress: egress.clone(),
+    };
+    let _unlocks = unlocks;
+    let conv = plane.fx.open_conversation().await;
+    let mut transcript = Transcript::new(conv.as_str(), "look around");
+    drive(
+        &mut plane,
+        &mut transcript,
+        &Budget {
+            max_steps: 3,
+            max_tool_calls_per_step: 16,
+        },
+        &mut unmetered(),
+        &mut |_: &Notice| {},
+    )
+    .await;
+    assert_eq!(egress.remaining(), 0);
+    let said = transcript.turns()[2..2 + n].iter().map(tool_text).collect();
+    (said, records.snapshot())
+}
+
+fn path_call(id: &str, tool: &str, p: &std::path::Path) -> ProposedToolCall {
+    call(id, tool, &format!(r#"{{"path":"{}"}}"#, p.display()))
+}
+
+#[tokio::test]
+async fn the_model_lists_and_stats_through_the_real_kernel() {
+    let fx = Fixture::with_rules(
+        "agent-161-look",
+        &["Read", "Write"],
+        &["Read(~/box-161/denied-161)"],
+        GRANTED,
+    );
+    let dir = fx.root.join("box-161");
+    std::fs::create_dir_all(dir.join("sub-161")).unwrap();
+    for f in ["seen-161", "denied-161", "hidden-161"] {
+        std::fs::write(dir.join(f), "SENTINEL-161").unwrap();
+    }
+    common::write_0640(
+        &fx.paths().sensitive,
+        "schema_version: 1\nsensitive:\n  - \"~/box-161/hidden-161\"\n",
+    );
+    let mtime = std::fs::symlink_metadata(dir.join("seen-161"))
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let (said, trail) = drive_one_step(
+        fx,
+        vec![
+            path_call("c1", "list_directory", &dir),
+            path_call("c2", "stat_path", &dir.join("seen-161")),
+        ],
+        vec![],
+    )
+    .await;
+    assert_eq!(said[0], "\"seen-161\"\n\"sub-161\"/\n\nsteps remaining: 2");
+    let stat: serde_json::Value =
+        serde_json::from_str(said[1].split_once("\n\n").unwrap().0).unwrap();
+    assert_eq!(
+        stat,
+        serde_json::json!({"kind": "file", "size": 12, "mtime_secs": mtime})
+    );
+    let listed: Vec<_> = trail.iter().filter(|r| r.action == "fs.list").collect();
+    assert!(!listed.is_empty(), "{trail:?}");
+    for r in &listed {
+        assert!(
+            !said[0].contains(r.outcome.reason.as_str()),
+            "{}",
+            r.outcome.reason
+        );
+    }
+    let reasons: String = listed.iter().map(|r| r.outcome.reason.as_str()).collect();
+    assert!(reasons.chars().any(|c| c.is_ascii_digit()), "{reasons}");
+    let body = said[0].split_once("\n\n").unwrap().0;
+    for word in [
+        "denied-161",
+        "hidden-161",
+        "withheld",
+        "released",
+        "permitted",
+        "2",
+        "4",
+    ] {
+        assert!(!body.contains(word), "{word}");
+    }
+}
+
+#[tokio::test]
+async fn every_listing_and_stat_refusal_renders_the_same_bytes() {
+    use std::os::unix::fs::PermissionsExt;
+    if nix::unistd::geteuid().is_root() {
+        panic!("running as root voids the os-refused premise; run as an unprivileged user");
+    }
+    let fx = Fixture::with_rules(
+        "agent-161-uniform",
+        &["Read", "Write"],
+        &["Read(~/denied-161)", "Read(~/denied-161/**)"],
+        GRANTED,
+    );
+    let r = fx.root.clone();
+    for d in ["denied-161", "locked-161", "hidden-161"] {
+        std::fs::create_dir_all(r.join(d)).unwrap();
+        std::fs::write(r.join(d).join("f"), "SENTINEL-161").unwrap();
+    }
+    std::fs::write(r.join("file-161"), "SENTINEL-161").unwrap();
+    std::fs::hard_link(r.join("file-161"), r.join("linked-161")).unwrap();
+    std::os::unix::fs::symlink(r.join("hidden-161"), r.join("via-161")).unwrap();
+    std::fs::set_permissions(r.join("locked-161"), std::fs::Permissions::from_mode(0o000)).unwrap();
+    let unlock = Unlock(r.join("locked-161"));
+    common::write_0640(
+        &fx.paths().sensitive,
+        "schema_version: 1\nsensitive:\n  - \"~/hidden-161\"\n  - \"~/hidden-161/**\"\n",
+    );
+    let uniform: [(&str, &str, std::path::PathBuf); 9] = [
+        ("list missing", "list_directory", r.join("missing-161")),
+        ("list grant-denied", "list_directory", r.join("denied-161")),
+        ("list os-refused", "list_directory", r.join("locked-161")),
+        ("list sensitive", "list_directory", r.join("via-161")),
+        ("list not a directory", "list_directory", r.join("file-161")),
+        ("stat missing", "stat_path", r.join("missing-161")),
+        (
+            "stat grant-denied",
+            "stat_path",
+            r.join("denied-161").join("f"),
+        ),
+        (
+            "stat os-refused",
+            "stat_path",
+            r.join("locked-161").join("f"),
+        ),
+        ("stat sensitive", "stat_path", r.join("via-161").join("f")),
+    ];
+    let armed: Vec<bool> = uniform
+        .iter()
+        .map(|(_, tool, p)| match *tool {
+            "list_directory" => maknae_io::open_directory_for_delegation(p).is_ok(),
+            _ => maknae_io::open_path_for_stat(p).is_ok(),
+        })
+        .collect();
+    assert!(
+        armed.contains(&true) && armed.contains(&false),
+        "premise: armed and unarmed refusals both: {armed:?}"
+    );
+    let mut calls: Vec<_> = uniform
+        .iter()
+        .enumerate()
+        .map(|(i, (_, tool, p))| path_call(&format!("c{i}"), tool, p))
+        .collect();
+    calls.push(path_call("p1", "stat_path", &r.join("linked-161")));
+    calls.push(path_call("p2", "list_directory", &r.join("hidden-161")));
+    let (said, trail) = drive_one_step(fx, calls, vec![unlock]).await;
+    for ((cause, _, _), s) in uniform.iter().zip(&said) {
+        assert_eq!(
+            s, "unavailable — do not retry\n\nsteps remaining: 2",
+            "{cause}"
+        );
+    }
+    assert_eq!(
+        said[9], "unavailable — do not retry\n\nsteps remaining: 2",
+        "hard-linked"
+    );
+    assert_eq!(
+        said[10],
+        format!("{}\n\nsteps remaining: 2", maknae_agent::render::PROTECTED)
+    );
+    let reasons: Vec<&str> = trail
+        .iter()
+        .filter(|r| r.action == "fs.list" || r.action == "fs.stat")
+        .map(|r| r.outcome.reason.as_str())
+        .collect();
+    for want in [
+        "sensitive: host ~/hidden-161",
+        "sensitive: host ~/hidden-161/**",
+        "denied by policy entry Read(~/denied-161)",
+    ] {
+        assert!(reasons.contains(&want), "{want}: {reasons:?}");
+    }
 }
 
 #[tokio::test]

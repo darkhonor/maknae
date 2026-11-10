@@ -533,6 +533,10 @@ destinations:                # #172: per-role egress allowlist for session.promp
   reads "everything in fs except delete"). A wildcard also covers members a later release
   adds to its family; list exact terms to avoid that growth. `kernel`, `liveness` and
   `admin.whoami` cannot be named or limited.
+- **`fs.stat` and `fs.list` follow `fs.read`.** They are decided by the `Read` grant and
+  limited by an `actions:` list's `fs.read` entry; a `subjects:` or agent `policy.yaml`
+  list that names either refuses at load (``authz: `fs.stat` is decided as `fs.read` (#161
+  M15) and no list may name it; name `fs.read` ``).
 - **Separation of duties (recommended).** Bind the loop's account to `user`. An
   admin-bound loop also holds the disclosure verbs, and a loop that has been injected can
   quote `admin.config.show` into its next prompt; a `user`-bound loop cannot ask. The
@@ -947,7 +951,7 @@ The trail is `/var/log/maknae/audit.jsonl`. Its directory is `0700 _maknae`, so 
 
 ```bash
 : "${START:?run step 10 in this shell}"
-sudo jq -c --arg t "$START" 'select(.ts >= $t) | select(.action=="session.prompt" or .action=="fs.read" or .action=="fs.write") | {seq, ts, action, object, result: .outcome.result, reason: .outcome.reason, posture: .outcome.posture, egress, mutation, conversation}' /var/log/maknae/audit.jsonl
+sudo jq -c --arg t "$START" 'select(.ts >= $t) | select(.action=="session.prompt" or .action=="fs.read" or .action=="fs.write" or .action=="fs.list" or .action=="fs.stat") | {seq, ts, action, object, result: .outcome.result, reason: .outcome.reason, posture: .outcome.posture, egress, mutation, conversation}' /var/log/maknae/audit.jsonl
 sudo jq -c 'select(.event=="boot" and .action=="authz") | {ts, reason: .outcome.reason}' /var/log/maknae/audit.jsonl | tail -n 1
 ```
 
@@ -970,6 +974,14 @@ What to find:
 | `fs.read` progress | `mutation.phase:"Progress"`, `origin:"ClientReported"`, `status:"ReportedProgress"`, `effects:[{…,"effect":"ReadFile","length":N,"range":{"start":S,"end":S+N},"lines":{"first":F,"last":L,"complete_last":…}}]` |
 | `fs.read` completion | `mutation.phase:"Completion"`, `origin:"ClientReported"`, `status:"ReportedSuccess"` (or another `Reported*` status), `intent_seq` pointing at the intent |
 | `fs.read` refused | `result:"deny"` with the reason, and no `mutation` block (e.g. `read descriptor missing` or `read evidence refused: …`) |
+| `fs.list` intent | the directory's canonical path in `object`, `mutation.phase:"Intent"`, `mutation.operation:"Read"`, `mutation.label`, `mutation.requested_after` (the cursor, at most 1,024 bytes) when the request carried one, `origin:"KernelObserved"`, `status:"IntentOnly"`; the request is decided as `fs.read` of the directory |
+| `fs.list` page decided | before the page is written, `mutation.phase:"Progress"`, `origin:"ClientReported"`, `status:"ReportedProgress"`, `intent_seq` pointing at the intent, reason `listing: N received, S skipped by the cursor, I invalid, W withheld, P permitted, R in the page; the subject reports D non-UTF-8 names dropped and V vanished (unverified)`. Nothing is written unless this record lands |
+| `fs.list` completion | exactly one per intent, `mutation.phase:"Completion"`, `origin:"KernelObserved"`, `intent_seq` pointing at the intent. Delivered: `result:"permit"`, `status:"Applied"`, reason `listing: … P permitted, R released; …`. Not delivered (the write failed, or the deadline passed while the progress record was appended): `status:"Incomplete"`, posture `unavailable`, reason `listing: … P permitted, R in the page, delivery unknown; …`. A write that lands in the socket buffer after the client stopped reading is not detectable. Each received name was decided as `fs.read` of that entry. `I` counts names the kernel withholds unread: empty, `.`, `..`, containing `/` or NUL, longer than 1,024 bytes, or whose child path is refused. `P` counts every entry decided `Permit`, including the one that closed the page at 1024 entries or at the response's byte bound; `R` counts the entries in the page, so `P` exceeds `R` exactly when the page is truncated, and a page never sent records `0 released`. `D` and `V` are the subject's claims. The counts are here and never in what the model sees |
+| `fs.list` refused after the grant | the completion with `result:"deny"`, `status:"Incomplete"`, reason `<why>; listing: … P permitted, 0 released; …`, where `<why>` is `listing order violated`, `listing bound reached before a full page was permitted` (65,536 names received without a full page), `listing chunk empty before the last` or `the subject reports it could not list the directory (unverified)`, the last when the subject could not open, enumerate or keep the directory (a stale handle: every entry that needed a stat to classify vanished). A page decided but not sendable: `listing: … 0 released; …; deadline passed before the answer was recorded`, `…; answer exceeds the response frame`, or `…; answer could not be encoded` |
+| `fs.list` incomplete | the completion with `status:"Incomplete"`, reason `listing grant not delivered`, `listing chunk missing or malformed; nothing released`, `listing decision timed out/failed; nothing released`, `listing continuation not delivered; nothing released`, or the `0 released` tally when the page's progress record did not land |
+| `fs.stat` intent | `result:"permit"`, reason `authorized; intent alone does not establish execution`, `mutation.phase:"Intent"`, `mutation.operation:"Read"`, `mutation.label`, `origin:"KernelObserved"`, `status:"IntentOnly"`, the path the kernel reports for the unfollowed object in `object`; decided as `fs.read` of that path |
+| `fs.stat` completion | exactly one per intent, `mutation.phase:"Completion"`, `origin:"KernelObserved"`, `intent_seq` pointing at the intent: `status:"Applied"`, reason `metadata released`; or, not delivered, `status:"Incomplete"`, posture `unavailable`, reason `metadata: delivery unknown`; or, decided after its deadline or not sendable, `result:"deny"`, `status:"Incomplete"`, reason `metadata withheld; deadline passed before the answer was recorded` (or `…; answer exceeds the response frame`, `…; answer could not be encoded`) |
+| `fs.stat` refused | `result:"deny"` with the reason, e.g. `stat descriptor missing`, `stat evidence refused: …` (a second hard link, an unlinked object), `denied by policy entry Read(…)` or `sensitive: host <entry>`. |
 | `fs.write` intent | reason `authorized; intent alone does not establish execution`, `mutation.phase:"Intent"`, `mutation.label`, `mutation.operation:"WriteCreate"` (`"WriteExisting"` when replacing), `origin:"KernelObserved"`, `status:"IntentOnly"`, `content_length` (the length the request declared; the kernel never sees the bytes) |
 | `fs.write` progress | `mutation.phase:"Progress"`, `origin:"ClientReported"`, `status:"ReportedProgress"`, with the created (`CreatedFile`) or replaced (`ReplacedFile`) file in `effects` |
 | `fs.write` completion | `mutation.phase:"Completion"`, `origin:"ClientReported"`, `status:"ReportedSuccess"` (or another `Reported*` status), `intent_seq` pointing at the intent |
@@ -983,7 +995,7 @@ Every refusal reaches the user the same way: `maknae agent: stopped: ` followed 
 
 **Correlation:**
 - `session_id` is per connection and each turn is a connection, so it does **not** group the conversation.
-- `conversation` does. It is in `egress.conversation` on prompt records and top-level on `fs.write` and `fs.read`.
+- `conversation` does. It is in `egress.conversation` on prompt records and top-level on `fs.write`, `fs.read`, `fs.list` and `fs.stat`.
 
 ### 12. The refused turns
 
@@ -999,7 +1011,7 @@ Every read is paged: each page is its own decided, recorded `fs.read` attempt of
 - **One page.** `maknae read --offset 2 --limit 1 <file>` prints that page and names the next position on stderr (`next: line L column C`, or `eof`). `--column` continues a long line.
 - **A file that changes.** Maknae does not lock the file: Unix locks are advisory and a held lock would hang your own tools. A file written while a page is read refuses that page (`PathChanged`, nothing released). A file that changes between pages, edited in place or replaced, stops `maknae read` with `file changed during the read`, and the agent sees `"changed": true` and reads again. Detection rests on size and timestamps, so a same-size edit within one timestamp tick is not seen.
 - **Practical ceiling.** Each page rescans the file from the start, and each page is its own connection with about four audit records, so a very large file is slow; past roughly 6 GB, one page exceeds the default 5 s `read_timeout_ms`.
-- **The agent.** `read_file` takes `offset`, `limit` (default 2000 lines) and `column`, and returns the page as JSON with the file's text only in `content`. The loop's prompt cap follows `provider.context_tokens` (about 768 KB for a 128,000-token window), so a full 64 KiB page fits alongside the rest of the conversation.
+- **The agent.** `read_file` takes `offset`, `limit` (default 2000 lines) and `column`, and returns the page as JSON with the file's text only in `content`. `list_directory` returns at most 1024 names a page, and its `after` argument continues from the last name of the page before; `stat_path` returns a path's kind, size and modification time. The loop's prompt cap follows `provider.context_tokens` (about 768 KB for a 128,000-token window), so a full 64 KiB page fits alongside the rest of the conversation.
 
 ### 12b. Read before write
 

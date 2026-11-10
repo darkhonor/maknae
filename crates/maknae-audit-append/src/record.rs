@@ -282,6 +282,9 @@ pub struct MutationAudit {
     pub label: Option<LabelAudit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_page: Option<PageAudit>,
+    /// An `fs.list` cursor: names at or before it were skipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_after: Option<String>,
     pub intent_seq: u64,
     pub phase: MutationPhase,
     pub origin: MutationOrigin,
@@ -510,6 +513,7 @@ mod tests {
             stopped_at: None,
             label: None,
             requested_page: None,
+            requested_after: None,
         });
         let encoded = canonical_json(&rec).unwrap();
         let decoded: AuditRecord = serde_json::from_str(&encoded).unwrap();
@@ -537,6 +541,7 @@ mod tests {
             effects: vec![],
             stopped_at: None,
             requested_page: None,
+            requested_after: None,
         };
         m.label = Some(LabelAudit {
             level: "UNCLASSIFIED".into(),
@@ -581,6 +586,7 @@ mod tests {
             stopped_at: None,
             label: None,
             requested_page: None,
+            requested_after: None,
         };
         let json = serde_json::to_string(&audit).unwrap();
         assert!(

@@ -818,6 +818,158 @@ async fn the_shipped_sensitive_yaml_refuses_a_read_of_ssh_keys() {
 }
 
 #[tokio::test]
+async fn a_listing_is_granted_on_the_delegated_directory_and_its_operands_are_pre_gated() {
+    let fx = Fixture::new("list161");
+    fx.write_policy(SHIPPED_POLICY);
+    fx.write_sensitive(SHIPPED_SENSITIVE);
+    let listed = fx.dir.join("listed-161");
+    std::fs::create_dir(&listed).unwrap();
+    let me = nix::unistd::geteuid().as_raw();
+    let list = |after: Option<&str>, conversation: Option<&str>| maknae_proto::Verb::FsList {
+        path: listed.to_string_lossy().into_owned(),
+        after: after.map(str::to_string),
+        conversation: conversation.map(str::to_string),
+    };
+    let fds = maknae_io::DelegatedFds::new(1);
+    fds.push(maknae_io::open_directory_for_delegation(&listed).unwrap());
+    let emit = RecEmit::new();
+    let frame = drive_with(
+        Some(&fx.dir),
+        composed(&fx, "UNCLASSIFIED"),
+        emit.clone(),
+        me,
+        list(None, None),
+        Duration::from_secs(5),
+        fds,
+        Arc::new(Default::default()),
+        maknae_config::TransportConfig {
+            read_timeout_ms: 300,
+            ..maknae_config::transport_from_section(None).unwrap()
+        },
+        Arc::new("US".to_string()),
+        std::sync::Arc::new(None),
+    )
+    .await
+    .expect("an answer");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Ok(maknae_proto::Payload::MutationAttempt(grant)) => assert_eq!(
+            grant.scope,
+            maknae_proto::MutationScope::Exact {
+                path: listed.to_string_lossy().into_owned(),
+                effect: maknae_proto::ReportedEffect::ReadFile,
+            }
+        ),
+        other => panic!("a Read(~/**) grant permits fs.list: {other:?}"),
+    }
+    let req = request_record(&emit.records()).clone();
+    assert_eq!(req.action, "fs.list");
+    assert_eq!(req.outcome.result, "permit");
+
+    for (verb, why) in [
+        (
+            list(None, Some("not a conversation")),
+            "list fails operand pre-gate: conversation identifier not acceptable",
+        ),
+        (
+            list(Some("a/b"), None),
+            "list fails operand pre-gate: cursor not acceptable",
+        ),
+        (
+            list(Some(".."), None),
+            "list fails operand pre-gate: cursor not acceptable",
+        ),
+        (
+            list(
+                Some(&"c".repeat(maknae_proto::LIST_CURSOR_MAX_BYTES + 1)),
+                None,
+            ),
+            "list fails operand pre-gate: cursor not acceptable",
+        ),
+    ] {
+        let emit = RecEmit::new();
+        let frame = drive(
+            &fx.dir,
+            composed(&fx, "UNCLASSIFIED"),
+            emit.clone(),
+            me,
+            verb,
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("an answer");
+        match maknae_proto::decode_response(&frame).unwrap().result {
+            RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::BadRequest),
+            other => panic!("refused before the PDP: {other:?}"),
+        }
+        assert_eq!(request_record(&emit.records()).outcome.reason, why);
+    }
+}
+
+#[tokio::test]
+async fn a_stat_is_decided_by_the_read_grant_and_answered_from_the_delegated_descriptor() {
+    let fx = Fixture::new("stat161");
+    fx.write_policy(SHIPPED_POLICY);
+    fx.write_sensitive(SHIPPED_SENSITIVE);
+    let target = fx.dir.join("stat-161.txt");
+    std::fs::write(&target, b"maknae-161").unwrap();
+    let me = nix::unistd::geteuid().as_raw();
+    let stat = |conversation: Option<String>| maknae_proto::Verb::FsStat {
+        path: target.to_string_lossy().into_owned(),
+        conversation,
+    };
+    let fds = maknae_io::DelegatedFds::new(1);
+    fds.push(maknae_io::open_path_for_stat(&target).unwrap());
+    let emit = RecEmit::new();
+    let frame = drive_with(
+        Some(&fx.dir),
+        composed(&fx, "UNCLASSIFIED"),
+        emit.clone(),
+        me,
+        stat(None),
+        Duration::from_secs(5),
+        fds,
+        Arc::new(Default::default()),
+        maknae_config::transport_from_section(None).unwrap(),
+        Arc::new("US".to_string()),
+        std::sync::Arc::new(None),
+    )
+    .await
+    .expect("an answer");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Ok(maknae_proto::Payload::Stat(maknae_proto::StatView {
+            size, kind, ..
+        })) => {
+            assert_eq!((size, kind), (10, maknae_proto::StatKind::File));
+        }
+        other => panic!("a Read(~/**) grant permits fs.stat: {other:?}"),
+    }
+    let req = request_record(&emit.records()).clone();
+    assert_eq!(req.action, "fs.stat");
+    assert_eq!(req.outcome.result, "permit");
+    assert_eq!(req.object.as_deref(), target.to_str());
+
+    let emit = RecEmit::new();
+    let frame = drive(
+        &fx.dir,
+        composed(&fx, "UNCLASSIFIED"),
+        emit.clone(),
+        me,
+        stat(Some("not a conversation".into())),
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("an answer");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::BadRequest),
+        other => panic!("a malformed conversation is refused before the PDP: {other:?}"),
+    }
+    assert_eq!(
+        request_record(&emit.records()).outcome.reason,
+        "stat fails operand pre-gate: conversation identifier not acceptable"
+    );
+}
+
+#[tokio::test]
 async fn a_symlinked_requester_home_serves_a_read_beneath_its_target() {
     let fx = Fixture::new("symroot");
     fx.write_policy(SHIPPED_POLICY);

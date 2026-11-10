@@ -343,6 +343,9 @@ fn payload_kind(p: &Payload) -> &'static str {
         Payload::ConversationClosed(_) => "conversation closed",
         Payload::ConversationList(_) => "conversation list",
         Payload::ConversationDeleted { .. } => "conversation deleted",
+        Payload::Stat(_) => "stat",
+        Payload::ListGrant(_) => "listing",
+        Payload::ListContinue => "listing continuation",
     }
 }
 
@@ -975,7 +978,10 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
         | (v, p @ Payload::ConversationOpened(_))
         | (v, p @ Payload::ConversationClosed(_))
         | (v, p @ Payload::ConversationList(_))
-        | (v, p @ Payload::ConversationDeleted { .. }) => Err(format!(
+        | (v, p @ Payload::ConversationDeleted { .. })
+        | (v, p @ Payload::Stat(_))
+        | (v, p @ Payload::ListGrant(_))
+        | (v, p @ Payload::ListContinue) => Err(format!(
             "protocol error: daemon returned a {} payload for a {} request",
             payload_kind(&p),
             v.kind()
@@ -2010,6 +2016,34 @@ mod tests {
             e,
             "protocol error: daemon returned a whoami payload for a release request"
         );
+        let e = print_payload_for_verb(
+            Verb::Ping,
+            Payload::Stat(maknae_proto::StatView {
+                size: 161,
+                mtime_secs: 0,
+                kind: maknae_proto::StatKind::File,
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(
+            e,
+            "protocol error: daemon returned a stat payload for a ping request"
+        );
+        for (payload, kind) in [
+            (
+                Payload::ListGrant(maknae_proto::ListGrant {
+                    entries: Vec::new(),
+                    truncated: false,
+                }),
+                "listing",
+            ),
+            (Payload::ListContinue, "listing continuation"),
+        ] {
+            assert_eq!(
+                print_payload_for_verb(Verb::Ping, payload).unwrap_err(),
+                format!("protocol error: daemon returned a {kind} payload for a ping request")
+            );
+        }
         let e = containment_line(
             &Verb::AdminBaselineAccept {
                 hash: "sentinel-hash-6d0f".to_string().into(),

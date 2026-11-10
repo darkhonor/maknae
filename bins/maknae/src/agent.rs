@@ -1404,6 +1404,17 @@ mod tests {
                 }
                 WriteOutcome::Applied(None)
             }
+            async fn list(
+                &mut self,
+                _c: &str,
+                _p: &str,
+                _a: Option<&str>,
+            ) -> maknae_agent::plane::ListOutcome {
+                maknae_agent::plane::ListOutcome::Unavailable
+            }
+            async fn stat(&mut self, _c: &str, _p: &str) -> maknae_agent::plane::StatOutcome {
+                maknae_agent::plane::StatOutcome::Unavailable
+            }
             fn take_diagnostics(&mut self) -> Vec<String> {
                 std::mem::take(&mut self.queued)
             }
@@ -1452,9 +1463,9 @@ mod tests {
             let (out, err, code) = host(
                 Session::new(
                     "c",
-                    &"q".repeat(1_800),
+                    &"q".repeat(2_700),
                     budget(),
-                    ContextBudget::new(2_000, None).unwrap(),
+                    ContextBudget::new(3_000, None).unwrap(),
                     None,
                 ),
                 &mut fake(vec![reply(Some("ok"), &[])]),
@@ -1462,8 +1473,8 @@ mod tests {
             .await;
             let notice = Notice {
                 percent: 99,
-                tokens: 1_986,
-                budget: 2_000,
+                tokens: 2_979,
+                budget: 3_000,
                 estimated: true,
             };
             assert_eq!(out, b"ok\n");
@@ -1577,7 +1588,7 @@ mod tests {
                     "c",
                     &"q".repeat(1_700),
                     b,
-                    ContextBudget::new(2_000, None).unwrap(),
+                    ContextBudget::new(3_000, None).unwrap(),
                     None,
                 ),
                 &mut p,
@@ -1643,7 +1654,7 @@ mod tests {
                 "c",
                 &"q".repeat(1_800),
                 budget(),
-                ContextBudget::new(2_000, None).unwrap(),
+                ContextBudget::new(3_000, None).unwrap(),
                 None,
             );
             match drive_to(&mut session, &mut p, &mut Broken).await {
@@ -1847,6 +1858,17 @@ mod tests {
             _: &[u8],
             _: maknae_agent::plane::ReadBasis,
         ) -> maknae_agent::plane::WriteOutcome {
+            std::future::pending().await
+        }
+        async fn list(
+            &mut self,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+        ) -> maknae_agent::plane::ListOutcome {
+            std::future::pending().await
+        }
+        async fn stat(&mut self, _: &str, _: &str) -> maknae_agent::plane::StatOutcome {
             std::future::pending().await
         }
     }

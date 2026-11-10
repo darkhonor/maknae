@@ -44,11 +44,11 @@ const MAX_WORKERS: usize = 16;
 fn capacity() -> Arc<Semaphore> {
     Arc::clone(CAPACITY.get_or_init(|| Arc::new(Semaphore::new(MAX_WORKERS))))
 }
-fn mutating() -> &'static UidGate {
+pub(crate) fn mutating() -> &'static UidGate {
     MUTATING.get_or_init(UidGate::default)
 }
 
-fn busy_reason(busy: Busy) -> &'static str {
+pub(crate) fn busy_reason(busy: Busy) -> &'static str {
     match busy {
         Busy::Requester => "mutation worker budget exhausted for this requester",
         Busy::Global => "mutation worker budget exhausted",
@@ -130,14 +130,19 @@ enum Evidence {
     Object { _fd: OwnedFd },
     Directory { _directory: MutationDirectory },
 }
+enum Granted {
+    Attempt(MutationScope),
+    Stat(maknae_io::DelegatedMeta),
+    List,
+}
 struct PreparedMutation {
     _evidence: Evidence,
-    scope: MutationScope,
+    granted: Granted,
     paths: Vec<String>,
     kind: FsOperation,
 }
-struct DurableIntent {
-    record: AuditRecord,
+pub(crate) struct DurableIntent {
+    pub(crate) record: AuditRecord,
 }
 
 fn path(verb: &Verb) -> Option<&str> {
@@ -145,19 +150,40 @@ fn path(verb: &Verb) -> Option<&str> {
         Verb::FsWrite { path, .. }
         | Verb::FsDelete { path, .. }
         | Verb::FsMkdir { path, .. }
-        | Verb::Read { path, .. } => Some(path),
+        | Verb::Read { path, .. }
+        | Verb::FsStat { path, .. }
+        | Verb::FsList { path, .. } => Some(path),
         _ => None,
+    }
+}
+fn mtime_secs(t: std::time::SystemTime) -> i64 {
+    match t.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
+        Err(e) => {
+            let before = e.duration();
+            let whole = i64::try_from(before.as_secs()).unwrap_or(i64::MAX);
+            -whole - i64::from(before.subsec_nanos() > 0)
+        }
+    }
+}
+fn stat_kind(kind: maknae_io::FileKind) -> maknae_proto::StatKind {
+    match kind {
+        maknae_io::FileKind::File => maknae_proto::StatKind::File,
+        maknae_io::FileKind::Directory => maknae_proto::StatKind::Directory,
+        maknae_io::FileKind::Symlink => maknae_proto::StatKind::Symlink,
+        maknae_io::FileKind::Other => maknae_proto::StatKind::Other,
     }
 }
 fn cited(verb: &Verb) -> Option<&str> {
     match verb {
-        Verb::FsWrite { conversation, .. } | Verb::Read { conversation, .. } => {
-            conversation.as_deref()
-        }
+        Verb::FsWrite { conversation, .. }
+        | Verb::Read { conversation, .. }
+        | Verb::FsStat { conversation, .. }
+        | Verb::FsList { conversation, .. } => conversation.as_deref(),
         _ => None,
     }
 }
-fn normal(component: &str) -> bool {
+pub(crate) fn normal(component: &str) -> bool {
     !component.is_empty()
         && component != "."
         && component != ".."
@@ -181,12 +207,48 @@ fn prepare(
     if lane != Lane::Local {
         return Err("mutation requires local subject execution".into());
     }
-    let read = matches!(verb, Verb::Read { .. });
-    let fd = fd.ok_or(if read {
-        "read descriptor missing"
-    } else {
-        "mutation descriptor missing"
+    let fd = fd.ok_or(match verb {
+        Verb::Read { .. } => "read descriptor missing",
+        Verb::FsStat { .. } => "stat descriptor missing",
+        Verb::FsList { .. } => "list descriptor missing",
+        _ => "mutation descriptor missing",
     })?;
+    if let Verb::FsList { .. } = verb {
+        let refused = |e: maknae_io::IoError| format!("list evidence refused: {e}");
+        let directory = maknae_io::verify_mutation_directory(fd).map_err(refused)?;
+        maknae_io::refuse_enumerable(directory.as_fd(), directory.path()).map_err(refused)?;
+        let path = directory
+            .path()
+            .to_str()
+            .ok_or("non-UTF-8 directory path")?
+            .to_owned();
+        checked(&path)?;
+        return Ok(PreparedMutation {
+            _evidence: Evidence::Directory {
+                _directory: directory,
+            },
+            granted: Granted::List,
+            paths: vec![path],
+            kind: FsOperation::Read,
+        });
+    }
+    if let Verb::FsStat { .. } = verb {
+        let refused = |e: maknae_io::IoError| format!("stat evidence refused: {e}");
+        let verified = maknae_io::verify_stat_delegated(fd.as_fd()).map_err(refused)?;
+        maknae_io::refuse_access_bearing(fd.as_fd(), &verified.path).map_err(refused)?;
+        let path = verified
+            .path
+            .to_str()
+            .ok_or("non-UTF-8 object path")?
+            .to_owned();
+        checked(&path)?;
+        return Ok(PreparedMutation {
+            _evidence: Evidence::Object { _fd: fd },
+            granted: Granted::Stat(verified.meta),
+            paths: vec![path],
+            kind: FsOperation::Read,
+        });
+    }
     let object = match &verb {
         Verb::Read { .. } => Some((
             "read evidence refused",
@@ -216,10 +278,10 @@ fn prepare(
         checked(&path)?;
         return Ok(PreparedMutation {
             _evidence: Evidence::Object { _fd: fd },
-            scope: MutationScope::Exact {
+            granted: Granted::Attempt(MutationScope::Exact {
                 path: path.clone(),
                 effect,
-            },
+            }),
             paths: vec![path],
             kind,
         });
@@ -315,7 +377,7 @@ fn prepare(
         _evidence: Evidence::Directory {
             _directory: directory,
         },
-        scope,
+        granted: Granted::Attempt(scope),
         paths,
         kind,
     })
@@ -338,6 +400,36 @@ pub(crate) fn read_of(write: &maknae_security::Request) -> maknae_security::Requ
     read
 }
 
+/// One file verb's request for one path, as the PDP decides it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn path_request(
+    verb: &Verb,
+    uid: u32,
+    home: Option<&Path>,
+    facts: Option<&ConversationFacts>,
+    personal: Option<&AttrValue>,
+    stamp: &Stamp<'_>,
+    path: &str,
+    kind: FsOperation,
+) -> maknae_security::Request {
+    let mut request = build_authz_request(verb, uid, home, Lane::Local, None, facts, stamp);
+    request
+        .resource
+        .0
+        .insert("path", AttrValue::Str(path.to_owned()));
+    request.context.0.insert(
+        maknae_security::CONTEXT_FS_OPERATION,
+        AttrValue::Str(kind.as_str().into()),
+    );
+    if let Some(personal) = personal {
+        request.context.0.insert(
+            maknae_security::CONTEXT_SENSITIVE_PERSONAL,
+            personal.clone(),
+        );
+    }
+    request
+}
+
 /// Decides every path from one snapshot, and for an `fs.write` the `fs.read` twin
 /// of each path too. Returns the role of the last path decided, in both arms (on a
 /// deny, the path that refused, #275), and that path's rule, except on a deny
@@ -358,21 +450,7 @@ fn authorize<P: Authorizer>(
     let with_read = matches!(verb, Verb::FsWrite { .. });
     let mut requests = Vec::new();
     for path in &prepared.paths {
-        let mut request = build_authz_request(verb, uid, home, Lane::Local, None, facts, stamp);
-        request
-            .resource
-            .0
-            .insert("path", AttrValue::Str(path.clone()));
-        request.context.0.insert(
-            maknae_security::CONTEXT_FS_OPERATION,
-            AttrValue::Str(prepared.kind.as_str().into()),
-        );
-        if let Some(personal) = personal {
-            request.context.0.insert(
-                maknae_security::CONTEXT_SENSITIVE_PERSONAL,
-                personal.clone(),
-            );
-        }
+        let request = path_request(verb, uid, home, facts, personal, stamp, path, prepared.kind);
         let read = with_read.then(|| read_of(&request));
         requests.push(request);
         requests.extend(read);
@@ -493,6 +571,7 @@ fn mutation_meta(
         stopped_at: None,
         label: None,
         requested_page: None,
+        requested_after: None,
     }
 }
 pub(crate) fn object_label(
@@ -513,6 +592,7 @@ fn label_audit(label: &maknae_proto::ObjectLabel) -> maknae_audit_append::LabelA
         categories: Vec::new(),
     }
 }
+#[allow(clippy::too_many_arguments)]
 async fn commit_intent<E: AuditEmit>(
     emit: &E,
     mut record: AuditRecord,
@@ -521,6 +601,7 @@ async fn commit_intent<E: AuditEmit>(
     paths: Vec<String>,
     label: &maknae_proto::ObjectLabel,
     requested: Option<maknae_proto::PageRequest>,
+    requested_after: Option<String>,
 ) -> Result<DurableIntent, ()> {
     record.outcome.result = "permit".into();
     record.outcome.reason = "authorized; intent alone does not establish execution".into();
@@ -547,13 +628,14 @@ async fn commit_intent<E: AuditEmit>(
         limit_lines: p.limit_lines,
         column: p.column,
     });
+    meta.requested_after = requested_after;
     record.mutation = Some(meta);
     emit.emit_within(&record, AUDIT_APPEND_TIMEOUT)
         .await
         .map_err(|_| ())?;
     Ok(DurableIntent { record })
 }
-fn completion(intent: &DurableIntent, seq: u64, status: MutationStatus) -> AuditRecord {
+pub(crate) fn completion(intent: &DurableIntent, seq: u64, status: MutationStatus) -> AuditRecord {
     let mut record = intent.record.clone();
     record.seq = seq;
     record.ts = crate::run::rfc3339_now();
@@ -567,7 +649,11 @@ fn completion(intent: &DurableIntent, seq: u64, status: MutationStatus) -> Audit
         "kernel-observed mutation outcome; authorization is separate from effect".into();
     record
 }
-async fn send<S: AsyncWrite + Unpin>(stream: &mut S, cfg: &TransportConfig, response: Response) {
+pub(crate) async fn send<S: AsyncWrite + Unpin>(
+    stream: &mut S,
+    cfg: &TransportConfig,
+    response: Response,
+) {
     if let Ok(bytes) = maknae_proto::encode_response(&response) {
         if bytes.len() <= maknae_proto::ATTEMPT_RESPONSE_MAX {
             let _ = tokio::time::timeout(
@@ -591,7 +677,7 @@ async fn refuse<S: AsyncWrite + Unpin, E: AuditEmit>(
     };
     refuse_with(stream, cfg, emit, record, reason, answer).await;
 }
-async fn refuse_with<S: AsyncWrite + Unpin, E: AuditEmit>(
+pub(crate) async fn refuse_with<S: AsyncWrite + Unpin, E: AuditEmit>(
     stream: &mut S,
     cfg: &TransportConfig,
     emit: &E,
@@ -616,6 +702,114 @@ async fn refuse_with<S: AsyncWrite + Unpin, E: AuditEmit>(
             },
         )
         .await;
+    }
+}
+
+/// How a disclosed answer ended, for its records.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Delivery {
+    Pending,
+    Released,
+    Withheld,
+    Unknown,
+}
+
+/// Answers a permitted request whose intent is durable, and ends that intent with exactly one
+/// Completion. A late or unframeable answer is refused before any write. With `progress`,
+/// what is about to be released is recorded first, and nothing is sent unless it lands.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn disclose<S: AsyncWrite + Unpin, E: AuditEmit>(
+    stream: &mut S,
+    cfg: &TransportConfig,
+    emit: &E,
+    seq: &Seq,
+    intent: &DurableIntent,
+    account: &(dyn Fn(Delivery) -> String + Sync),
+    progress: bool,
+    answer: Payload,
+    cap: usize,
+    deadline: tokio::time::Instant,
+) -> bool {
+    let encoded = match maknae_proto::encode_response(&Response {
+        protocol_version: PROTOCOL_VERSION,
+        result: RespResult::Ok(answer),
+    }) {
+        _ if tokio::time::Instant::now() >= deadline => {
+            Err("deadline passed before the answer was recorded")
+        }
+        Err(_) => Err("answer could not be encoded"),
+        Ok(bytes) if bytes.len() > cap => Err("answer exceeds the response frame"),
+        Ok(bytes) => Ok(bytes),
+    };
+    let bytes = match encoded {
+        Ok(bytes) => bytes,
+        Err(why) => {
+            let refusal = ProtoError {
+                code: ProtoErrCode::Unauthorized,
+                message: why.into(),
+            };
+            let record = completion(intent, seq.next(), MutationStatus::Incomplete);
+            let reason = format!("{}; {why}", account(Delivery::Withheld));
+            refuse_with(stream, cfg, emit, record, reason, refusal).await;
+            return false;
+        }
+    };
+    if progress {
+        let mut record = completion(intent, seq.next(), MutationStatus::ReportedProgress);
+        if let Some(meta) = record.mutation.as_mut() {
+            meta.phase = MutationPhase::Progress;
+            meta.origin = MutationOrigin::ClientReported;
+        }
+        record.outcome.reason = account(Delivery::Pending);
+        if emit
+            .emit_within(&record, AUDIT_APPEND_TIMEOUT)
+            .await
+            .is_err()
+        {
+            incomplete(cfg, emit, intent, seq, &account(Delivery::Withheld)).await;
+            return false;
+        }
+    }
+    let written = tokio::time::Instant::now() < deadline
+        && matches!(
+            tokio::time::timeout_at(
+                deadline,
+                maknae_proto::write_frame(stream, maknae_proto::FrameClass::Attempt, &bytes),
+            )
+            .await,
+            Ok(Ok(()))
+        );
+    let (status, delivery, posture) = if written {
+        (MutationStatus::Applied, Delivery::Released, "authorized")
+    } else {
+        (MutationStatus::Incomplete, Delivery::Unknown, "unavailable")
+    };
+    let mut done = completion(intent, seq.next(), status);
+    done.outcome.reason = account(delivery);
+    done.outcome.posture = posture.into();
+    if let Err(e) = emit.emit_within(&done, AUDIT_APPEND_TIMEOUT).await {
+        eprintln!("maknaed: AUDIT WRITE FAILED on a disclosure's completion: {e}");
+    }
+    written
+}
+
+fn stat_account(delivery: Delivery) -> String {
+    match delivery {
+        Delivery::Pending => "metadata",
+        Delivery::Released => "metadata released",
+        Delivery::Withheld => "metadata withheld",
+        Delivery::Unknown => "metadata: delivery unknown",
+    }
+    .into()
+}
+async fn untouched<E: AuditEmit>(emit: &E, seq: &Seq, base: &AuditRecord, why: &str) {
+    let mut note = base.clone();
+    note.seq = seq.next();
+    note.mutation = None;
+    note.outcome.reason = format!("conversation activity not recorded: {why}");
+    note.outcome.posture = "unavailable".into();
+    if let Err(e) = emit.emit_within(&note, AUDIT_APPEND_TIMEOUT).await {
+        eprintln!("maknaed: AUDIT WRITE FAILED on conversation record: {e}");
     }
 }
 
@@ -654,6 +848,7 @@ pub(crate) async fn handle<S, E, P>(
     conversations: Arc<dyn ConversationStore>,
     stamp: &Stamp<'_>,
     sensitive: Arc<SensitiveList>,
+    arrived: tokio::time::Instant,
 ) -> bool
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -685,6 +880,8 @@ where
         Stamp::Client => None,
         Stamp::Agent { agent, task } => Some(((*agent).clone(), task.cloned())),
     };
+    let listing = matches!(verb, Verb::FsList { .. })
+        .then(|| (stamped.clone(), home.clone(), Arc::clone(&authorizer)));
     let prepared = tokio::time::timeout(
         authz_timeout,
         tokio::task::spawn_blocking(move || {
@@ -726,11 +923,18 @@ where
                     touch_failure = Some(e.to_string());
                 }
             }
-            Ok::<_, String>(Ok((prepared, permit, decision, touch_failure)))
+            let facts = gathered.as_ref().map(|(facts, _)| *facts);
+            Ok::<_, String>(Ok((
+                prepared,
+                permit,
+                decision,
+                touch_failure,
+                (facts, personal),
+            )))
         }),
     )
     .await;
-    let (prepared, permit, decision, touch_failure) = match prepared {
+    let (prepared, permit, decision, touch_failure, (facts, personal)) = match prepared {
         Ok(Ok(Ok(Ok(p)))) => p,
         Ok(Ok(Ok(Err(p)))) => {
             let answer = ProtoError {
@@ -784,19 +988,28 @@ where
             return true;
         }
     };
-    let requested = match verb {
-        Verb::Read { page, .. } => *page,
-        _ => None,
+    enum Next {
+        Attempt(MutationScope),
+        List,
+        Stat(maknae_io::DelegatedMeta),
+    }
+    let next = match prepared.granted {
+        Granted::Attempt(scope) => Next::Attempt(scope),
+        Granted::List => Next::List,
+        Granted::Stat(meta) => Next::Stat(meta),
     };
-    let read_page = match verb {
-        Verb::Read { page, .. } => Some(page.unwrap_or(maknae_proto::WHOLE_FILE)),
-        _ => None,
+    let (requested, read_page, length, after) = match verb {
+        Verb::Read { page, .. } => (
+            *page,
+            Some(page.unwrap_or(maknae_proto::WHOLE_FILE)),
+            None,
+            None,
+        ),
+        Verb::FsWrite { content_length, .. } => (None, None, Some(*content_length), None),
+        Verb::FsList { after, .. } => (None, None, None, after.clone()),
+        _ => (None, None, None, None),
     };
-    let length = if let Verb::FsWrite { content_length, .. } = verb {
-        Some(*content_length)
-    } else {
-        None
-    };
+    let directory = prepared.paths.last().cloned();
     if let Ok(Ok(intent)) = tokio::time::timeout(
         Duration::from_millis(cfg.read_timeout_ms),
         commit_intent(
@@ -807,35 +1020,73 @@ where
             prepared.paths,
             &label,
             requested,
+            after.clone(),
         ),
     )
     .await
     {
         if let Some(why) = touch_failure {
-            let mut note = intent.record.clone();
-            note.seq = seq.next();
-            note.mutation = None;
-            note.outcome.reason = format!("conversation activity not recorded: {why}");
-            note.outcome.posture = "unavailable".into();
-            if let Err(e) = emit.emit_within(&note, AUDIT_APPEND_TIMEOUT).await {
-                eprintln!("maknaed: AUDIT WRITE FAILED on conversation record: {e}");
+            untouched(&*emit, seq, &intent.record, &why).await;
+        }
+        match (next, listing, directory) {
+            (Next::Attempt(scope), _, _) => {
+                attempt(
+                    stream, cfg, caps, &*emit, intent, scope, label, read_page, seq, arrived,
+                )
+                .await;
+            }
+            (Next::List, Some((stamped, home, authorizer)), Some(directory)) => {
+                let decider = crate::listing::Decider {
+                    authorizer,
+                    verb: verb.clone(),
+                    uid,
+                    home,
+                    facts,
+                    personal,
+                    stamped,
+                };
+                crate::listing::run(
+                    stream,
+                    cfg,
+                    caps,
+                    &*emit,
+                    intent,
+                    label,
+                    seq,
+                    crate::listing::Lister::new(directory, after, caps.response),
+                    Arc::new(decider),
+                    authz_timeout,
+                    arrived + Duration::from_millis(cfg.read_timeout_ms),
+                    permit,
+                )
+                .await;
+            }
+            (Next::Stat(meta), _, _) => {
+                let answer = Payload::Stat(maknae_proto::StatView {
+                    size: meta.size,
+                    mtime_secs: mtime_secs(meta.mtime),
+                    kind: stat_kind(meta.kind),
+                });
+                disclose(
+                    stream,
+                    cfg,
+                    &*emit,
+                    seq,
+                    &intent,
+                    &stat_account,
+                    false,
+                    answer,
+                    caps.response,
+                    arrived + Duration::from_millis(cfg.read_timeout_ms),
+                )
+                .await;
+            }
+            (Next::List, _, _) => {
+                incomplete(cfg, &*emit, &intent, seq, "listing context missing").await;
             }
         }
-        attempt(
-            stream,
-            cfg,
-            caps,
-            &*emit,
-            intent,
-            prepared.scope,
-            label,
-            read_page,
-            seq,
-        )
-        .await;
     }
     drop(prepared._evidence);
-    drop(permit);
     true
 }
 
@@ -850,6 +1101,7 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
     label: maknae_proto::ObjectLabel,
     read_page: Option<maknae_proto::PageRequest>,
     seq: &Seq,
+    arrived: tokio::time::Instant,
 ) {
     let id = MutationId {
         session_id: intent.record.session_id,
@@ -871,7 +1123,7 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
             0
         },
     };
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(limits.deadline_ms);
+    let deadline = arrived + Duration::from_millis(limits.deadline_ms);
     let exchange = match read_page {
         Some(page) => MutationExchange::begin_paged(id, scope.clone(), limits, page),
         None => MutationExchange::begin(id, scope.clone(), limits),
@@ -889,7 +1141,7 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
     .ok()
     .filter(|bytes| bytes.len() <= caps.response);
     let delivered = match (exchange, bytes) {
-        (Some(exchange), Some(bytes)) => matches!(
+        (Some(exchange), Some(bytes)) if tokio::time::Instant::now() < deadline => matches!(
             tokio::time::timeout_at(
                 deadline,
                 maknae_proto::write_frame(stream, maknae_proto::FrameClass::Attempt, &bytes)
@@ -1054,7 +1306,7 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
 }
 const ACK_UNDELIVERED: &str = "mutation acknowledgment not delivered; effects unknown";
 
-async fn incomplete<E: AuditEmit>(
+pub(crate) async fn incomplete<E: AuditEmit>(
     cfg: &TransportConfig,
     emit: &E,
     intent: &DurableIntent,
@@ -1231,8 +1483,8 @@ mod tests {
         assert_eq!(prepared.kind, FsOperation::Read);
         assert_eq!(prepared.paths, vec![target.to_str().unwrap().to_string()]);
         assert_eq!(
-            prepared.scope,
-            MutationScope::Exact {
+            scope_of(&prepared),
+            &MutationScope::Exact {
                 path: target.to_str().unwrap().into(),
                 effect: ReportedEffect::ReadFile
             }
@@ -1263,6 +1515,18 @@ mod tests {
         assert_eq!(std::fs::read(target).unwrap(), b"sentinel");
     }
     fn fixture_pdp(fx: &Fixture) -> crate::Composition<maknae_authz_basic::HermeticAuthorizer> {
+        let us = &maknae_config::BasicPolicy;
+        fixture_pdp_with(
+            fx,
+            "schema_version: 1\nsensitive: []\n",
+            crate::CeilingAuthorizer::new(maknae_config::Ceiling::baseline_for(us), us),
+        )
+    }
+    fn fixture_pdp_with(
+        fx: &Fixture,
+        sensitive: &str,
+        ceiling: crate::CeilingAuthorizer,
+    ) -> crate::Composition<maknae_authz_basic::HermeticAuthorizer> {
         let paths = maknae_authz_basic::PolicyPaths::in_dir(&fx.root);
         let name = nix::unistd::User::from_uid(nix::unistd::geteuid())
             .expect("NSS")
@@ -1283,7 +1547,7 @@ mod tests {
             std::fs::write(path, body).unwrap();
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640)).unwrap();
         }
-        crate::test_fixtures::write_empty_sensitive(&fx.root);
+        crate::test_fixtures::write_sensitive(&fx.root, sensitive);
         let baseline = maknae_authz_basic::HermeticAuthorizer::new(
             paths,
             fx.principal.clone(),
@@ -1297,11 +1561,7 @@ mod tests {
             maknae_crypto::sha256,
         )
         .unwrap();
-        let us = &maknae_config::BasicPolicy;
-        crate::Composition::new(
-            baseline,
-            crate::CeilingAuthorizer::new(maknae_config::Ceiling::baseline_for(us), us),
-        )
+        crate::Composition::new(baseline, ceiling)
     }
     fn record() -> AuditRecord {
         serde_json::from_value(serde_json::json!({
@@ -1349,6 +1609,7 @@ mod tests {
                 Vec::new(),
                 &label,
                 None,
+                None,
             ),
         )
         .await;
@@ -1379,6 +1640,84 @@ mod tests {
             stream.is_empty(),
             "a refusal without its record answers nothing"
         );
+    }
+    fn test_intent() -> DurableIntent {
+        let mut record = record();
+        record.outcome.result = "permit".into();
+        record.mutation = Some(mutation_meta(
+            record.seq,
+            MutationPhase::Intent,
+            MutationOrigin::KernelObserved,
+            MutationStatus::IntentOnly,
+        ));
+        DurableIntent { record }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn an_answer_whose_progress_is_not_recorded_is_never_disclosed() {
+        let answer = Payload::Stat(maknae_proto::StatView {
+            size: 1,
+            mtime_secs: 1,
+            kind: maknae_proto::StatKind::File,
+        });
+        let mut stream: Vec<u8> = Vec::new();
+        let got = tokio::time::timeout(
+            Duration::from_secs(60),
+            disclose(
+                &mut stream,
+                &TransportConfig::default(),
+                &Stall,
+                &Seq::new(),
+                &test_intent(),
+                &stat_account,
+                true,
+                answer.clone(),
+                maknae_proto::ATTEMPT_RESPONSE_MAX,
+                far_deadline(),
+            ),
+        )
+        .await;
+        assert_eq!(
+            got,
+            Ok(false),
+            "the progress append gives up within its bound"
+        );
+        assert!(stream.is_empty(), "no record, no answer");
+        let emit = Recorder::default();
+        assert!(
+            disclose(
+                &mut stream,
+                &TransportConfig::default(),
+                &emit,
+                &Seq::new(),
+                &test_intent(),
+                &stat_account,
+                true,
+                answer.clone(),
+                maknae_proto::ATTEMPT_RESPONSE_MAX,
+                far_deadline(),
+            )
+            .await
+        );
+        let trail = emit.0.lock().unwrap().clone();
+        let phases: Vec<_> = trail
+            .iter()
+            .map(|r| r.mutation.as_ref().map(|m| (m.phase, m.status)))
+            .collect();
+        assert_eq!(
+            phases,
+            [
+                Some((MutationPhase::Progress, MutationStatus::ReportedProgress)),
+                Some((MutationPhase::Completion, MutationStatus::Applied))
+            ]
+        );
+        let frame = maknae_proto::read_frame_of_class(
+            &mut stream.as_slice(),
+            maknae_proto::FrameClass::Attempt,
+            &caps(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(stat_payload(&frame), answer);
     }
     struct Delayed<P> {
         pdp: P,
@@ -1475,6 +1814,7 @@ mod tests {
             Arc::new(crate::conversation::mem_store::MemStore::default()),
             &Stamp::Client,
             Arc::new(SensitiveList::empty()),
+            tokio::time::Instant::now(),
         );
         let second_emit = Arc::new(Recorder::default());
         let second = async {
@@ -1517,6 +1857,7 @@ mod tests {
                     Arc::new(crate::conversation::mem_store::MemStore::default()),
                     &Stamp::Client,
                     Arc::new(SensitiveList::empty()),
+                    tokio::time::Instant::now(),
                 )
                 .await
             );
@@ -1578,6 +1919,7 @@ mod tests {
                     Arc::new(crate::conversation::mem_store::MemStore::default()),
                     &Stamp::Client,
                     Arc::new(SensitiveList::empty()),
+                    tokio::time::Instant::now(),
                 )
                 .await
             );
@@ -1616,6 +1958,7 @@ mod tests {
                 Arc::new(crate::conversation::mem_store::MemStore::default()),
                 &Stamp::Client,
                 Arc::new(SensitiveList::empty()),
+                tokio::time::Instant::now(),
             )
             .await
         );
@@ -1654,6 +1997,7 @@ mod tests {
                 Arc::new(crate::conversation::mem_store::MemStore::default()),
                 &Stamp::Client,
                 Arc::new(SensitiveList::empty()),
+                tokio::time::Instant::now(),
             )
             .await
         );
@@ -1692,6 +2036,7 @@ mod tests {
             Arc::new(crate::conversation::mem_store::MemStore::default()),
             &Stamp::Client,
             Arc::new(SensitiveList::empty()),
+            tokio::time::Instant::now(),
         )
         .await;
         assert!(emit
@@ -1729,6 +2074,7 @@ mod tests {
                 Arc::new(crate::conversation::mem_store::MemStore::default()),
                 &Stamp::Client,
                 Arc::new(SensitiveList::empty()),
+                tokio::time::Instant::now(),
             )
             .await
         );
@@ -1761,6 +2107,7 @@ mod tests {
                 Arc::new(crate::conversation::mem_store::MemStore::default()),
                 &Stamp::Client,
                 Arc::new(SensitiveList::empty()),
+                tokio::time::Instant::now(),
             )
             .await
         );
@@ -1873,8 +2220,8 @@ mod tests {
         assert_eq!(prepared.kind, FsOperation::WriteExisting);
         assert_eq!(prepared.paths, vec![target.to_str().unwrap().to_string()]);
         assert_eq!(
-            prepared.scope,
-            MutationScope::Exact {
+            scope_of(&prepared),
+            &MutationScope::Exact {
                 path: target.to_str().unwrap().into(),
                 effect: ReportedEffect::ReplacedFile
             }
@@ -2139,5 +2486,2106 @@ mod tests {
         .unwrap_err();
         assert_eq!(reason, "object label unresolved");
         assert_eq!(by, (Some("user"), None));
+    }
+
+    fn scope_of(p: &PreparedMutation) -> &MutationScope {
+        match &p.granted {
+            Granted::Attempt(scope) => scope,
+            Granted::Stat(_) | Granted::List => panic!("a stat or a listing grants no attempt"),
+        }
+    }
+    fn stat(path: &Path) -> Verb {
+        Verb::FsStat {
+            path: path.to_str().unwrap().into(),
+            conversation: None,
+        }
+    }
+    async fn stat_answer_on(
+        fx: &Fixture,
+        pdp: crate::Composition<maknae_authz_basic::HermeticAuthorizer>,
+        asked: &Path,
+        fd: Option<OwnedFd>,
+        sensitive: SensitiveList,
+    ) -> (Vec<u8>, Vec<AuditRecord>) {
+        let cfg = maknae_config::transport_from_section(None).unwrap();
+        let fds = maknae_io::DelegatedFds::new(1);
+        if let Some(fd) = fd {
+            fds.push(fd);
+        }
+        let emit = Arc::new(Recorder::default());
+        let (mut client, mut server) = tokio::io::duplex(65536);
+        assert!(
+            handle(
+                &mut server,
+                &stat(asked),
+                fx.principal.uid,
+                Lane::Local,
+                &fds,
+                Arc::new(pdp),
+                emit.clone(),
+                Ok(fx.root.clone()),
+                &cfg,
+                &Seq::new(),
+                record(),
+                Duration::from_secs(10),
+                AttemptCaps::default(),
+                "US",
+                Arc::new(crate::conversation::mem_store::MemStore::default()),
+                &Stamp::Client,
+                Arc::new(sensitive),
+                tokio::time::Instant::now(),
+            )
+            .await
+        );
+        drop(server);
+        let frame = maknae_proto::read_frame_of_class(
+            &mut client,
+            maknae_proto::FrameClass::Attempt,
+            &maknae_proto::FrameCaps {
+                control: 0,
+                attempt: maknae_proto::ATTEMPT_RESPONSE_MAX,
+                prompt: 0,
+            },
+        )
+        .await
+        .expect("one answer frame");
+        let records = emit.0.lock().unwrap().clone();
+        (frame.to_vec(), records)
+    }
+    async fn stat_answer(fx: &Fixture, asked: &Path) -> (Vec<u8>, Vec<AuditRecord>) {
+        let fd = maknae_io::open_path_for_stat(asked).ok();
+        stat_answer_on(fx, fixture_pdp(fx), asked, fd, SensitiveList::empty()).await
+    }
+    fn stat_payload(frame: &[u8]) -> Payload {
+        match maknae_proto::decode_response(frame).unwrap().result {
+            RespResult::Ok(p) => p,
+            RespResult::Err(e) => panic!("refused: {e:?}"),
+        }
+    }
+    fn uniform_refusal() -> Vec<u8> {
+        maknae_proto::encode_response(&Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Err(ProtoError {
+                code: ProtoErrCode::Unauthorized,
+                message: "not authorized".into(),
+            }),
+        })
+        .unwrap()
+    }
+    #[tokio::test]
+    async fn stat_of_a_regular_file_is_served_after_its_permit_is_recorded() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let file = fx.root.join("stat-161-file");
+        std::fs::write(&file, b"maknae-161-stat").unwrap();
+        let when = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_161);
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+        let (frame, records) = stat_answer(&fx, &file).await;
+        assert_eq!(
+            stat_payload(&frame),
+            Payload::Stat(maknae_proto::StatView {
+                size: 15,
+                mtime_secs: 1_700_000_161,
+                kind: maknae_proto::StatKind::File,
+            })
+        );
+        let (last, _) = intent_and_completion(&records);
+        assert_eq!(last.outcome.result, "permit");
+        assert_eq!(last.object.as_deref(), file.to_str());
+        let meta = last
+            .mutation
+            .as_ref()
+            .expect("the permit carries its label");
+        assert_eq!(
+            meta.label,
+            Some(maknae_audit_append::LabelAudit {
+                level: "UNCLASSIFIED".into(),
+                categories: Vec::new(),
+            })
+        );
+        assert_eq!(meta.operation, Some(MutationOperation::Read));
+        assert_eq!(
+            meta.authorized_paths,
+            vec![file.to_str().unwrap().to_string()]
+        );
+    }
+    #[tokio::test]
+    async fn stat_of_a_symlink_reports_the_link() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let target = fx.root.join("stat-161-target");
+        std::fs::write(&target, b"never-followed").unwrap();
+        let link = fx.root.join("stat-161-link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let (frame, records) = stat_answer(&fx, &link).await;
+        match stat_payload(&frame) {
+            Payload::Stat(maknae_proto::StatView { size, kind, .. }) => {
+                assert_eq!(kind, maknae_proto::StatKind::Symlink);
+                assert_eq!(size, target.as_os_str().len() as u64);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(records.last().unwrap().object.as_deref(), link.to_str());
+    }
+    #[tokio::test]
+    async fn stat_of_a_directory_is_served() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let dir = fx.root.join("stat-161-dir");
+        std::fs::create_dir_all(dir.join("child")).unwrap();
+        let (frame, _) = stat_answer(&fx, &dir).await;
+        assert!(matches!(
+            stat_payload(&frame),
+            Payload::Stat(maknae_proto::StatView {
+                kind: maknae_proto::StatKind::Directory,
+                ..
+            })
+        ));
+    }
+    #[tokio::test]
+    async fn stat_of_a_fifo_reports_other() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let fifo = fx.root.join("stat-161-fifo");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+        let (frame, _) = stat_answer(&fx, &fifo).await;
+        assert!(matches!(
+            stat_payload(&frame),
+            Payload::Stat(maknae_proto::StatView {
+                kind: maknae_proto::StatKind::Other,
+                ..
+            })
+        ));
+    }
+    #[tokio::test]
+    async fn stat_of_a_hard_linked_file_is_refused_uniformly() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let file = fx.root.join("stat-161-linked");
+        std::fs::write(&file, b"two names").unwrap();
+        std::fs::hard_link(&file, fx.root.join("stat-161-alias")).unwrap();
+        let (frame, records) = stat_answer(&fx, &file).await;
+        assert_eq!(frame, uniform_refusal());
+        assert!(
+            records
+                .last()
+                .unwrap()
+                .outcome
+                .reason
+                .contains("stat evidence refused"),
+            "{:?}",
+            records.last().unwrap().outcome.reason
+        );
+    }
+    #[tokio::test]
+    async fn stat_of_an_unlinked_object_is_refused_uniformly_as_a_changed_path() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let file = fx.root.join("stat-161-unlinked");
+        std::fs::write(&file, b"x").unwrap();
+        let held = maknae_io::open_path_for_stat(&file).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        let (frame, trail) = stat_answer_on(
+            &fx,
+            fixture_pdp(&fx),
+            &file,
+            Some(held),
+            SensitiveList::empty(),
+        )
+        .await;
+        assert_eq!(frame, uniform_refusal());
+        let reason = &trail.last().unwrap().outcome.reason;
+        assert!(reason.contains("mutation path changed"), "{reason}");
+    }
+    #[tokio::test]
+    async fn stat_of_missing_denied_and_os_refused_render_alike() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let missing = fx.root.join("stat-161-missing");
+        let (missing_frame, missing_trail) = stat_answer(&fx, &missing).await;
+        let shut = fx.root.join("stat-161-shut");
+        std::fs::create_dir(&shut).unwrap();
+        let inside = shut.join("inside");
+        std::fs::write(&inside, b"x").unwrap();
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let os_refused = if nix::unistd::geteuid().is_root() {
+            eprintln!(
+                "SKIP stat_of_missing_denied_and_os_refused_render_alike: the os-refused case needs a non-root euid"
+            );
+            None
+        } else {
+            assert!(maknae_io::open_path_for_stat(&inside).is_err());
+            Some(stat_answer(&fx, &inside).await)
+        };
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let denied = fx.root.join("stat-161-denied");
+        std::fs::write(&denied, b"x").unwrap();
+        let pdp = fixture_pdp(&fx);
+        std::fs::write(
+            fx.root.join("authz.yaml"),
+            "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\n  deny:\n    - \"Read(~/stat-161-denied)\"\n",
+        )
+        .unwrap();
+        pdp.baseline().reload_from_file().unwrap();
+        let fd = maknae_io::open_path_for_stat(&denied).ok();
+        assert!(
+            fd.is_some(),
+            "the denied file exists and the subject opens it"
+        );
+        let (denied_frame, denied_trail) =
+            stat_answer_on(&fx, pdp, &denied, fd, SensitiveList::empty()).await;
+        assert_eq!(missing_frame, uniform_refusal());
+        assert_eq!(denied_frame, missing_frame);
+        if let Some((frame, _)) = &os_refused {
+            assert_eq!(frame, &missing_frame);
+        }
+        use maknae_config::ClassificationPolicy;
+        let aus = &maknae_classification_aus::AusPspf;
+        let mut foreign = maknae_config::Ceiling::baseline_for(aus);
+        foreign.classification = aus.level_of("TOP SECRET").unwrap();
+        let ceilinged = fx.root.join("stat-161-ceilinged");
+        std::fs::write(&ceilinged, b"x").unwrap();
+        let (ceiling_frame, ceiling_trail) = stat_answer_on(
+            &fx,
+            fixture_pdp_with(
+                &fx,
+                "schema_version: 1\nsensitive: []\n",
+                crate::CeilingAuthorizer::new(foreign, &maknae_config::BasicPolicy),
+            ),
+            &ceilinged,
+            maknae_io::open_path_for_stat(&ceilinged).ok(),
+            SensitiveList::empty(),
+        )
+        .await;
+        std::fs::create_dir(fx.root.join(".ssh")).unwrap();
+        std::fs::write(fx.root.join(".ssh/id_rsa"), b"x").unwrap();
+        std::os::unix::fs::symlink(fx.root.join(".ssh"), fx.root.join("proj")).unwrap();
+        let aliased = fx.root.join("proj/id_rsa");
+        let host = "schema_version: 1\nsensitive:\n  - \"~/.ssh/**\"\n";
+        let (alias_frame, alias_trail) = stat_answer_on(
+            &fx,
+            fixture_pdp_with(
+                &fx,
+                host,
+                crate::CeilingAuthorizer::new(
+                    maknae_config::Ceiling::baseline_for(&maknae_config::BasicPolicy),
+                    &maknae_config::BasicPolicy,
+                ),
+            ),
+            &aliased,
+            maknae_io::open_path_for_stat(&aliased).ok(),
+            SensitiveList::empty(),
+        )
+        .await;
+        assert_eq!(ceiling_frame, missing_frame);
+        assert_eq!(alias_frame, missing_frame);
+        let reason = |t: &[AuditRecord]| t.last().unwrap().outcome.reason.clone();
+        assert!(
+            reason(&ceiling_trail).contains("not a level of the US system"),
+            "{}",
+            reason(&ceiling_trail)
+        );
+        assert_eq!(reason(&alias_trail), "sensitive: host ~/.ssh/**");
+        assert_eq!(
+            alias_trail.last().unwrap().object.as_deref(),
+            fx.root.join(".ssh/id_rsa").to_str(),
+            "refused on the kernel-reported path"
+        );
+        assert_eq!(reason(&missing_trail), "stat descriptor missing");
+        assert!(
+            reason(&denied_trail).contains("Read(~/stat-161-denied)"),
+            "{}",
+            reason(&denied_trail)
+        );
+    }
+    #[tokio::test]
+    async fn stat_of_a_protected_path_answers_protected() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let file = fx.root.join("stat-161-protected");
+        std::fs::write(&file, b"x").unwrap();
+        let entry = file.to_str().unwrap().to_string();
+        let host = || SensitiveList::from_entries(std::slice::from_ref(&entry)).unwrap();
+        let want = maknae_proto::encode_response(&Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Err(ProtoError {
+                code: ProtoErrCode::Protected,
+                message: maknae_proto::protected_message(maknae_proto::HOST_SENSITIVE_LIST, &entry),
+            }),
+        })
+        .unwrap();
+        let armed = maknae_io::open_path_for_stat(&file).ok();
+        assert!(armed.is_some());
+        let (frame, trail) = stat_answer_on(&fx, fixture_pdp(&fx), &file, armed, host()).await;
+        assert_eq!(frame, want);
+        assert_eq!(
+            trail.last().unwrap().outcome.reason,
+            format!("sensitive: host {entry}")
+        );
+        let (unarmed, _) = stat_answer_on(&fx, fixture_pdp(&fx), &file, None, host()).await;
+        assert_eq!(unarmed, want, "the answer depends only on the path");
+    }
+    #[tokio::test]
+    async fn a_stat_descriptor_that_confers_write_is_refused_and_linux_requires_o_path() {
+        let fx = Fixture::new();
+        let file = fx.root.join("stat-161-held");
+        std::fs::write(&file, b"x").unwrap();
+        let held = maknae_io::open_path_for_stat(&file).unwrap();
+        maknae_io::refuse_access_bearing(held.as_fd(), &file)
+            .expect("the subject's stat descriptor confers no write");
+        #[cfg(target_os = "linux")]
+        {
+            let flags = nix::fcntl::fcntl(held.as_fd(), nix::fcntl::FcntlArg::F_GETFL).unwrap();
+            assert!(nix::fcntl::OFlag::from_bits_retain(flags).contains(nix::fcntl::OFlag::O_PATH));
+        }
+        assert!(prepare(stat(&file), Some(held), &fx.root, Lane::Local).is_ok());
+        let writable: OwnedFd = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .into();
+        let refused = prepare(stat(&file), Some(writable), &fx.root, Lane::Local)
+            .err()
+            .unwrap();
+        assert!(
+            refused.contains("confers access beyond location"),
+            "{refused}"
+        );
+        #[cfg(target_os = "linux")]
+        assert!(prepare(
+            stat(&file),
+            Some(std::fs::File::open(&file).unwrap().into()),
+            &fx.root,
+            Lane::Local
+        )
+        .err()
+        .unwrap()
+        .contains("confers access beyond location"));
+        assert_eq!(
+            prepare(stat(&file), None, &fx.root, Lane::Local)
+                .err()
+                .as_deref(),
+            Some("stat descriptor missing")
+        );
+    }
+    async fn bounded<T>(exchange: impl std::future::Future<Output = T>) -> T {
+        tokio::time::timeout(Duration::from_secs(30), exchange)
+            .await
+            .expect("the exchange ends within its bound")
+    }
+    fn list_verb(path: &Path, after: Option<&str>) -> Verb {
+        Verb::FsList {
+            path: path.to_str().unwrap().into(),
+            after: after.map(str::to_string),
+            conversation: None,
+        }
+    }
+    fn caps() -> maknae_proto::FrameCaps {
+        maknae_proto::FrameCaps {
+            control: 0,
+            attempt: maknae_proto::ATTEMPT_RESPONSE_MAX,
+            prompt: 0,
+        }
+    }
+    fn whole_listing(granted: &str) -> Vec<maknae_proto::ListChunk> {
+        let held = maknae_io::open_directory_for_delegation(Path::new(granted)).unwrap();
+        let listing = maknae_io::list_delegated_directory(
+            held.as_fd(),
+            Path::new(granted),
+            maknae_proto::LIST_RECEIVE_MAX,
+        )
+        .unwrap();
+        vec![maknae_proto::ListChunk {
+            entries: listing
+                .entries
+                .into_iter()
+                .map(|e| maknae_proto::ListEntry {
+                    name: e.name,
+                    dir: e.dir,
+                })
+                .collect(),
+            last: true,
+            dropped: listing.dropped,
+            unlisted: false,
+            vanished: 0,
+        }]
+    }
+    /// Drives `handle` for an `fs.list`, playing the subject with `chunks`; returns every
+    /// frame the kernel sent.
+    #[allow(clippy::too_many_arguments)]
+    async fn list_on<A, E>(
+        fx: &Fixture,
+        pdp: A,
+        verb: Verb,
+        fd: Option<OwnedFd>,
+        sensitive: SensitiveList,
+        emit: Arc<E>,
+        chunks: impl FnOnce(&maknae_proto::MutationGrant) -> Vec<maknae_proto::ListChunk>,
+    ) -> Vec<Vec<u8>>
+    where
+        A: Authorizer + Send + Sync + 'static,
+        E: AuditEmit + Send + Sync + 'static,
+    {
+        list_on_with(
+            fx,
+            pdp,
+            verb,
+            fd,
+            sensitive,
+            emit,
+            AttemptCaps::default(),
+            maknae_config::transport_from_section(None).unwrap(),
+            chunks,
+        )
+        .await
+    }
+    #[allow(clippy::too_many_arguments)]
+    async fn list_on_with<A, E>(
+        fx: &Fixture,
+        pdp: A,
+        verb: Verb,
+        fd: Option<OwnedFd>,
+        sensitive: SensitiveList,
+        emit: Arc<E>,
+        attempt_caps: AttemptCaps,
+        cfg: TransportConfig,
+        chunks: impl FnOnce(&maknae_proto::MutationGrant) -> Vec<maknae_proto::ListChunk>,
+    ) -> Vec<Vec<u8>>
+    where
+        A: Authorizer + Send + Sync + 'static,
+        E: AuditEmit + Send + Sync + 'static,
+    {
+        let fds = maknae_io::DelegatedFds::new(1);
+        if let Some(fd) = fd {
+            fds.push(fd);
+        }
+        let (mut client, mut server) = tokio::io::duplex(1 << 20);
+        let kernel = async {
+            assert!(
+                handle(
+                    &mut server,
+                    &verb,
+                    fx.principal.uid,
+                    Lane::Local,
+                    &fds,
+                    Arc::new(pdp),
+                    emit,
+                    Ok(fx.root.clone()),
+                    &cfg,
+                    &Seq::new(),
+                    record(),
+                    Duration::from_secs(10),
+                    attempt_caps,
+                    "US",
+                    Arc::new(crate::conversation::mem_store::MemStore::default()),
+                    &Stamp::Client,
+                    Arc::new(sensitive),
+                    tokio::time::Instant::now(),
+                )
+                .await
+            );
+            drop(server);
+        };
+        let subject = async {
+            let mut frames = Vec::new();
+            let Ok(first) = maknae_proto::read_frame_of_class(
+                &mut client,
+                maknae_proto::FrameClass::Attempt,
+                &caps(),
+            )
+            .await
+            else {
+                return frames;
+            };
+            frames.push(first.to_vec());
+            let RespResult::Ok(Payload::MutationAttempt(grant)) =
+                maknae_proto::decode_response(&first).unwrap().result
+            else {
+                return frames;
+            };
+            for chunk in chunks(&grant) {
+                let body = maknae_proto::encode_list_chunk(&chunk).unwrap();
+                maknae_proto::write_frame(&mut client, maknae_proto::FrameClass::Attempt, &body)
+                    .await
+                    .unwrap();
+                let Ok(reply) = maknae_proto::read_frame_of_class(
+                    &mut client,
+                    maknae_proto::FrameClass::Attempt,
+                    &caps(),
+                )
+                .await
+                else {
+                    break;
+                };
+                frames.push(reply.to_vec());
+                if maknae_proto::decode_response(&reply).unwrap().result
+                    != RespResult::Ok(Payload::ListContinue)
+                {
+                    break;
+                }
+            }
+            frames
+        };
+        bounded(async { tokio::join!(kernel, subject) }).await.1
+    }
+    fn granted_page(frames: &[Vec<u8>]) -> maknae_proto::ListGrant {
+        match maknae_proto::decode_response(frames.last().expect("a frame"))
+            .unwrap()
+            .result
+        {
+            RespResult::Ok(Payload::ListGrant(page)) => page,
+            other => panic!("no page: {other:?}"),
+        }
+    }
+    fn names_of(page: &maknae_proto::ListGrant) -> Vec<&str> {
+        page.entries.iter().map(|e| e.name.as_str()).collect()
+    }
+    fn grant_path(grant: &maknae_proto::MutationGrant) -> String {
+        match &grant.scope {
+            MutationScope::Exact {
+                path,
+                effect: ReportedEffect::ReadFile,
+            } => path.clone(),
+            other => panic!("a listing grant names its directory: {other:?}"),
+        }
+    }
+    fn us_ceiling() -> crate::CeilingAuthorizer {
+        crate::CeilingAuthorizer::new(
+            maknae_config::Ceiling::baseline_for(&maknae_config::BasicPolicy),
+            &maknae_config::BasicPolicy,
+        )
+    }
+    const LIST_HOST: &str =
+        "schema_version: 1\nsensitive:\n  - \"~/.ssh/**\"\n  - \"~/.docker/config.json\"\n";
+    fn deny_read(
+        fx: &Fixture,
+        pdp: &crate::Composition<maknae_authz_basic::HermeticAuthorizer>,
+        rule: &str,
+    ) {
+        std::fs::write(
+            fx.root.join("authz.yaml"),
+            format!("schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\n  deny:\n    - \"{rule}\"\n"),
+        )
+        .unwrap();
+        pdp.baseline().reload_from_file().unwrap();
+    }
+    #[tokio::test]
+    async fn a_listing_withholds_protected_and_denied_entries_silently() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        std::fs::create_dir_all(fx.root.join(".ssh")).unwrap();
+        std::fs::write(fx.root.join(".ssh/id_rsa"), b"k").unwrap();
+        std::fs::create_dir_all(fx.root.join(".docker")).unwrap();
+        std::fs::write(fx.root.join(".docker/config.json"), b"t").unwrap();
+        std::fs::write(fx.root.join(".docker/daemon-161.json"), b"d").unwrap();
+        std::fs::write(fx.root.join("notes-161.txt"), b"n").unwrap();
+        std::fs::write(fx.root.join("denied-161.txt"), b"x").unwrap();
+        let fx = &fx;
+        let listed = |pdp, dir: &Path| {
+            let fd = maknae_io::open_directory_for_delegation(dir).ok();
+            let emit = Arc::new(Recorder::default());
+            let verb = list_verb(dir, None);
+            async move {
+                let frames = list_on(
+                    fx,
+                    pdp,
+                    verb,
+                    fd,
+                    SensitiveList::empty(),
+                    emit.clone(),
+                    |g| whole_listing(&grant_path(g)),
+                )
+                .await;
+                let trail = emit.0.lock().unwrap().clone();
+                (granted_page(&frames), trail)
+            }
+        };
+        let pdp = fixture_pdp_with(fx, LIST_HOST, us_ceiling());
+        deny_read(fx, &pdp, "Read(~/denied-161.txt)");
+        let (home, trail) = listed(pdp, &fx.root).await;
+        let names = names_of(&home);
+        assert!(names.contains(&"notes-161.txt"), "{names:?}");
+        assert!(names.contains(&".docker"), "{names:?}");
+        assert!(
+            !names.contains(&".ssh"),
+            "a protected entry is absent: {names:?}"
+        );
+        assert!(
+            !names.contains(&"denied-161.txt"),
+            "a denied entry is absent: {names:?}"
+        );
+        assert!(home.entries.iter().any(|e| e.name == ".docker" && e.dir));
+        assert!(!home.truncated);
+        let last = trail.last().unwrap();
+        assert_eq!(last.outcome.result, "permit");
+        assert!(
+            last.outcome.reason.contains(" 2 withheld"),
+            "{}",
+            last.outcome.reason
+        );
+
+        let pdp = fixture_pdp_with(fx, LIST_HOST, us_ceiling());
+        let (docker, _) = listed(pdp, &fx.root.join(".docker")).await;
+        assert_eq!(names_of(&docker), ["daemon-161.json"]);
+    }
+    #[tokio::test]
+    async fn the_released_result_has_no_total_and_follows_its_record() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let dir = fx.root.join("paged-161");
+        std::fs::create_dir(&dir).unwrap();
+        for n in ["a", "b", "c"] {
+            std::fs::write(dir.join(n), b"x").unwrap();
+        }
+        let emit = Arc::new(Recorder::default());
+        let frames = list_on(
+            &fx,
+            fixture_pdp(&fx),
+            list_verb(&dir, Some("a")),
+            maknae_io::open_directory_for_delegation(&dir).ok(),
+            SensitiveList::empty(),
+            emit.clone(),
+            |g| whole_listing(&grant_path(g)),
+        )
+        .await;
+        assert_eq!(names_of(&granted_page(&frames)), ["b", "c"]);
+        let value: ciborium::Value =
+            ciborium::from_reader(frames.last().unwrap().as_slice()).unwrap();
+        let rendered = format!("{value:?}");
+        assert!(
+            !rendered.contains("total") && !rendered.contains("withheld"),
+            "{rendered}"
+        );
+        let trail = emit.0.lock().unwrap().clone();
+        let (intent, done) = intent_and_completion(&trail);
+        assert_eq!(
+            intent.mutation.as_ref().unwrap().operation,
+            Some(MutationOperation::Read)
+        );
+        assert_eq!(intent.object.as_deref(), dir.to_str());
+        assert_eq!(
+            intent.mutation.as_ref().unwrap().requested_after.as_deref(),
+            Some("a"),
+            "the cursor is recorded on the intent"
+        );
+        assert_eq!(
+            done.mutation.as_ref().unwrap().intent_seq,
+            intent.seq,
+            "the page's record completes its intent"
+        );
+        assert!(
+            done.outcome.reason.contains("1 skipped by the cursor"),
+            "{}",
+            done.outcome.reason
+        );
+    }
+    #[tokio::test]
+    async fn every_reported_name_is_decided_by_the_composition() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let dir = fx.root.join("counted-161");
+        std::fs::create_dir(&dir).unwrap();
+        let counted = Counting {
+            pdp: fixture_pdp(&fx),
+            calls: Arc::default(),
+        };
+        let calls = Arc::clone(&counted.calls);
+        let names: Vec<String> = (0..5).map(|i| format!("e{i}")).collect();
+        let chunk = maknae_proto::ListChunk {
+            entries: names
+                .iter()
+                .map(|n| maknae_proto::ListEntry {
+                    name: n.clone(),
+                    dir: false,
+                })
+                .collect(),
+            last: true,
+            dropped: 0,
+            unlisted: false,
+            vanished: 0,
+        };
+        let frames = list_on(
+            &fx,
+            counted,
+            list_verb(&dir, None),
+            maknae_io::open_directory_for_delegation(&dir).ok(),
+            SensitiveList::empty(),
+            Arc::new(Recorder::default()),
+            |_| vec![chunk],
+        )
+        .await;
+        assert_eq!(names_of(&granted_page(&frames)), names);
+        let asked = calls.lock().unwrap().clone();
+        let want: Vec<String> = std::iter::once(dir.to_str().unwrap().to_string())
+            .chain(
+                names
+                    .iter()
+                    .map(|n| dir.join(n).to_str().unwrap().to_string()),
+            )
+            .collect();
+        assert_eq!(asked, want, "the directory, then each reported name once");
+    }
+    struct Counting<P> {
+        pdp: P,
+        calls: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+    impl<P: Authorizer> Authorizer for Counting<P> {
+        fn decide(&self, request: &maknae_security::Request) -> maknae_security::Verdict {
+            self.decide_cited(request).verdict
+        }
+        fn decide_reporting_role(
+            &self,
+            request: &maknae_security::Request,
+        ) -> (maknae_security::Verdict, Option<&'static str>) {
+            self.decide_cited(request).into()
+        }
+        fn decide_cited(&self, request: &maknae_security::Request) -> maknae_security::Decided {
+            self.decide_cited_all(std::slice::from_ref(request))
+                .pop()
+                .unwrap()
+        }
+        fn decide_cited_all(
+            &self,
+            requests: &[maknae_security::Request],
+        ) -> Vec<maknae_security::Decided> {
+            for r in requests {
+                if let Some(AttrValue::Str(p)) = r.resource.0.get("path") {
+                    self.calls.lock().unwrap().push(p.clone());
+                }
+            }
+            self.pdp.decide_cited_all(requests)
+        }
+    }
+    #[tokio::test]
+    async fn a_denied_directory_and_a_missing_one_render_alike() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let once = |pdp, dir: &Path| {
+            let fd = maknae_io::open_directory_for_delegation(dir).ok();
+            let emit = Arc::new(Recorder::default());
+            let verb = list_verb(dir, None);
+            let fx = &fx;
+            async move {
+                let frames = list_on(
+                    fx,
+                    pdp,
+                    verb,
+                    fd,
+                    SensitiveList::empty(),
+                    emit.clone(),
+                    |_| panic!("a refused listing grants nothing"),
+                )
+                .await;
+                assert_eq!(frames.len(), 1);
+                (frames[0].clone(), last_reason(&emit))
+            }
+        };
+        let (missing, missing_why) = once(fixture_pdp(&fx), &fx.root.join("missing-161")).await;
+        let denied = fx.root.join("denied-dir-161");
+        std::fs::create_dir(&denied).unwrap();
+        let pdp = fixture_pdp(&fx);
+        deny_read(&fx, &pdp, "Read(~/denied-dir-161)");
+        let (refused, denied_why) = once(pdp, &denied).await;
+        assert_eq!(missing, uniform_refusal());
+        assert_eq!(refused, missing);
+        assert_eq!(missing_why, "list descriptor missing");
+        assert!(
+            denied_why.contains("Read(~/denied-dir-161)"),
+            "{denied_why}"
+        );
+        if nix::unistd::geteuid().is_root() {
+            eprintln!(
+                "SKIP a_denied_directory_and_a_missing_one_render_alike: the os-refused case needs a non-root euid"
+            );
+            return;
+        }
+        let shut = fx.root.join("shut-161");
+        std::fs::create_dir_all(shut.join("inner")).unwrap();
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let (os_refused, _) = once(fixture_pdp(&fx), &shut.join("inner")).await;
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(os_refused, missing);
+    }
+    #[tokio::test]
+    async fn a_listing_through_a_symlinked_directory_into_a_protected_region_releases_nothing() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        std::fs::create_dir(fx.root.join(".ssh")).unwrap();
+        std::fs::write(fx.root.join(".ssh/id_rsa"), b"k").unwrap();
+        std::fs::create_dir(fx.root.join("proj")).unwrap();
+        std::os::unix::fs::symlink(fx.root.join(".ssh"), fx.root.join("proj/keys")).unwrap();
+        let keys = fx.root.join("proj/keys");
+        let emit = Arc::new(Recorder::default());
+        let frames = list_on(
+            &fx,
+            fixture_pdp_with(&fx, LIST_HOST, us_ceiling()),
+            list_verb(&keys, None),
+            maknae_io::open_directory_for_delegation(&keys).ok(),
+            SensitiveList::empty(),
+            emit.clone(),
+            |_| panic!("nothing is granted through the link"),
+        )
+        .await;
+        assert_eq!(frames, [uniform_refusal()]);
+        let last = emit.0.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(last.outcome.reason, "sensitive: host ~/.ssh/**");
+        assert_eq!(last.object.as_deref(), fx.root.join(".ssh").to_str());
+    }
+    #[tokio::test]
+    async fn a_listing_of_a_protected_directory_answers_protected() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let ssh = fx.root.join(".ssh");
+        std::fs::create_dir(&ssh).unwrap();
+        let host = || SensitiveList::from_entries(&["~/.ssh/**".to_string()]).unwrap();
+        let want = maknae_proto::encode_response(&Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Err(ProtoError {
+                code: ProtoErrCode::Protected,
+                message: maknae_proto::protected_message(
+                    maknae_proto::HOST_SENSITIVE_LIST,
+                    "~/.ssh/**",
+                ),
+            }),
+        })
+        .unwrap();
+        for fd in [maknae_io::open_directory_for_delegation(&ssh).ok(), None] {
+            let frames = list_on(
+                &fx,
+                fixture_pdp(&fx),
+                list_verb(&ssh, None),
+                fd,
+                host(),
+                Arc::new(Recorder::default()),
+                |_| panic!("a protected directory is never granted"),
+            )
+            .await;
+            assert_eq!(
+                frames,
+                std::slice::from_ref(&want),
+                "armed or not, the answer is the path's"
+            );
+        }
+    }
+    #[test]
+    fn the_daemon_never_opens_the_listed_directory() {
+        let fx = Fixture::new();
+        let held = maknae_io::open_directory_for_delegation(&fx.root).unwrap();
+        #[cfg(target_os = "linux")]
+        {
+            let flags = nix::fcntl::fcntl(held.as_fd(), nix::fcntl::FcntlArg::F_GETFL).unwrap();
+            assert!(nix::fcntl::OFlag::from_bits_retain(flags).contains(nix::fcntl::OFlag::O_PATH));
+        }
+        let verb = list_verb(&fx.root, None);
+        let prepared = prepare(verb.clone(), Some(held), &fx.root, Lane::Local).unwrap();
+        assert!(matches!(prepared.granted, Granted::List));
+        assert_eq!(prepared.paths, [fx.root.to_str().unwrap()]);
+        assert_eq!(prepared.kind, FsOperation::Read);
+        let readable: OwnedFd = std::fs::File::open(&fx.root).unwrap().into();
+        let refused = prepare(verb.clone(), Some(readable), &fx.root, Lane::Local)
+            .err()
+            .unwrap();
+        assert!(
+            refused.starts_with("list evidence refused")
+                && refused.contains("confers access beyond location"),
+            "{refused}"
+        );
+        let file = fx.root.join("not-a-dir-161");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(prepare(
+            verb.clone(),
+            Some(maknae_io::open_path_for_delegation(&file).unwrap()),
+            &fx.root,
+            Lane::Local
+        )
+        .err()
+        .unwrap()
+        .starts_with("list evidence refused"));
+        assert_eq!(
+            prepare(verb, None, &fx.root, Lane::Local).err().as_deref(),
+            Some("list descriptor missing")
+        );
+    }
+    struct FailFrom(std::sync::Mutex<Vec<AuditRecord>>, usize);
+    impl AuditEmit for FailFrom {
+        fn emit(
+            &self,
+            record: &AuditRecord,
+        ) -> impl std::future::Future<Output = Result<(), maknae_audit_append::AuditError>> + Send
+        {
+            let mut held = self.0.lock().unwrap();
+            let ok = held.len() < self.1;
+            if ok {
+                held.push(record.clone());
+            }
+            async move {
+                if ok {
+                    Ok(())
+                } else {
+                    Err(maknae_audit_append::AuditError::WritePrimary("full".into()))
+                }
+            }
+        }
+    }
+    #[tokio::test]
+    async fn nothing_is_released_before_its_record_lands() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let dir = fx.root.join("unrecorded-161");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("listed-161"), b"x").unwrap();
+        let emit = Arc::new(FailFrom(std::sync::Mutex::default(), 1));
+        let frames = list_on(
+            &fx,
+            fixture_pdp(&fx),
+            list_verb(&dir, None),
+            maknae_io::open_directory_for_delegation(&dir).ok(),
+            SensitiveList::empty(),
+            emit.clone(),
+            |g| whole_listing(&grant_path(g)),
+        )
+        .await;
+        assert_eq!(frames.len(), 1, "the grant, and no page");
+        assert!(!frames
+            .iter()
+            .any(|f| f.windows(10).any(|w| w == b"listed-161")));
+    }
+    fn named_chunks(names: &[String], per: usize) -> Vec<maknae_proto::ListChunk> {
+        let chunks: Vec<_> = names.chunks(per).collect();
+        let last = chunks.len() - 1;
+        chunks
+            .into_iter()
+            .enumerate()
+            .map(|(i, part)| maknae_proto::ListChunk {
+                entries: part
+                    .iter()
+                    .map(|n| maknae_proto::ListEntry {
+                        name: n.clone(),
+                        dir: false,
+                    })
+                    .collect(),
+                last: i == last,
+                dropped: 0,
+                unlisted: false,
+                vanished: 0,
+            })
+            .collect()
+    }
+    #[tokio::test]
+    async fn a_page_over_the_response_cap_is_refused_and_never_recorded_as_released() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let dir = fx.root.join("overcap-161");
+        std::fs::create_dir(&dir).unwrap();
+        let names = vec!["n".repeat(1000)];
+        let emit = Arc::new(Recorder::default());
+        let frames = list_on_with(
+            &fx,
+            fixture_pdp(&fx),
+            list_verb(&dir, None),
+            maknae_io::open_directory_for_delegation(&dir).ok(),
+            SensitiveList::empty(),
+            emit.clone(),
+            AttemptCaps {
+                request: maknae_proto::ATTEMPT_REQUEST_MAX,
+                response: 600,
+            },
+            maknae_config::transport_from_section(None).unwrap(),
+            |_| named_chunks(&names, 1),
+        )
+        .await;
+        let trail = emit.0.lock().unwrap().clone();
+        assert!(
+            trail
+                .iter()
+                .all(|r| !(r.outcome.result == "permit" && r.outcome.reason.contains("released"))),
+            "no record says the page was released: {:?}",
+            trail.iter().map(|r| &r.outcome.reason).collect::<Vec<_>>()
+        );
+        assert_eq!(frames.len(), 2, "the grant, then one answer");
+        match maknae_proto::decode_response(&frames[1]).unwrap().result {
+            RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
+            other => panic!("an over-cap page is refused: {other:?}"),
+        }
+        let last = trail.last().unwrap();
+        assert_eq!(last.outcome.result, "deny");
+        assert!(
+            last.outcome.reason.contains("exceeds the response frame"),
+            "{}",
+            last.outcome.reason
+        );
+    }
+    struct SlowEntries<P> {
+        pdp: P,
+        directory: String,
+    }
+    impl<P: Authorizer> Authorizer for SlowEntries<P> {
+        fn decide(&self, request: &maknae_security::Request) -> maknae_security::Verdict {
+            self.decide_cited(request).verdict
+        }
+        fn decide_reporting_role(
+            &self,
+            request: &maknae_security::Request,
+        ) -> (maknae_security::Verdict, Option<&'static str>) {
+            self.decide_cited(request).into()
+        }
+        fn decide_cited(&self, request: &maknae_security::Request) -> maknae_security::Decided {
+            self.decide_cited_all(std::slice::from_ref(request))
+                .pop()
+                .unwrap()
+        }
+        fn decide_cited_all(
+            &self,
+            requests: &[maknae_security::Request],
+        ) -> Vec<maknae_security::Decided> {
+            if requests
+                .iter()
+                .any(|r| r.resource.0.get("path") != Some(&AttrValue::Str(self.directory.clone())))
+            {
+                std::thread::sleep(Duration::from_millis(400));
+            }
+            self.pdp.decide_cited_all(requests)
+        }
+    }
+    struct SlowDirectory<P> {
+        pdp: P,
+        directory: String,
+    }
+    impl<P: Authorizer> Authorizer for SlowDirectory<P> {
+        fn decide(&self, request: &maknae_security::Request) -> maknae_security::Verdict {
+            self.decide_cited(request).verdict
+        }
+        fn decide_reporting_role(
+            &self,
+            request: &maknae_security::Request,
+        ) -> (maknae_security::Verdict, Option<&'static str>) {
+            self.decide_cited(request).into()
+        }
+        fn decide_cited(&self, request: &maknae_security::Request) -> maknae_security::Decided {
+            self.decide_cited_all(std::slice::from_ref(request))
+                .pop()
+                .unwrap()
+        }
+        fn decide_cited_all(
+            &self,
+            requests: &[maknae_security::Request],
+        ) -> Vec<maknae_security::Decided> {
+            if requests
+                .iter()
+                .any(|r| r.resource.0.get("path") == Some(&AttrValue::Str(self.directory.clone())))
+            {
+                std::thread::sleep(Duration::from_millis(400));
+            }
+            self.pdp.decide_cited_all(requests)
+        }
+    }
+    #[tokio::test]
+    async fn a_listing_whose_deadline_passes_before_its_grant_releases_nothing() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let dir = fx.root.join("slow-dir-161");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("arrival-161"), b"x").unwrap();
+        let emit = Arc::new(Recorder::default());
+        let frames = list_on_with(
+            &fx,
+            SlowDirectory {
+                pdp: fixture_pdp(&fx),
+                directory: dir.to_str().unwrap().into(),
+            },
+            list_verb(&dir, None),
+            maknae_io::open_directory_for_delegation(&dir).ok(),
+            SensitiveList::empty(),
+            emit.clone(),
+            AttemptCaps::default(),
+            TransportConfig {
+                read_timeout_ms: 300,
+                ..maknae_config::transport_from_section(None).unwrap()
+            },
+            |g| whole_listing(&grant_path(g)),
+        )
+        .await;
+        assert!(
+            !frames
+                .iter()
+                .any(|f| f.windows(11).any(|w| w == b"arrival-161")),
+            "the deadline runs from the request's arrival"
+        );
+        let trail = emit.0.lock().unwrap().clone();
+        assert!(trail
+            .iter()
+            .all(|r| !(r.outcome.result == "permit" && r.outcome.reason.contains("released"))));
+    }
+    #[tokio::test]
+    async fn a_stat_or_read_decided_after_the_arrival_deadline_is_never_answered_or_granted() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let file = fx.root.join("arrival-161.txt");
+        std::fs::write(&file, b"arrival-content-161").unwrap();
+        let cfg = TransportConfig {
+            read_timeout_ms: 300,
+            ..maknae_config::transport_from_section(None).unwrap()
+        };
+        for (verb, fd) in [
+            (stat(&file), maknae_io::open_path_for_stat(&file).unwrap()),
+            (
+                Verb::Read {
+                    path: file.to_str().unwrap().into(),
+                    conversation: None,
+                    page: None,
+                },
+                maknae_io::open_path_for_delegation(&file).unwrap(),
+            ),
+        ] {
+            let fds = maknae_io::DelegatedFds::new(1);
+            fds.push(fd);
+            let emit = Arc::new(Recorder::default());
+            let (mut client, mut server) = tokio::io::duplex(1 << 16);
+            handle(
+                &mut server,
+                &verb,
+                fx.principal.uid,
+                Lane::Local,
+                &fds,
+                Arc::new(SlowDirectory {
+                    pdp: fixture_pdp(&fx),
+                    directory: file.to_str().unwrap().into(),
+                }),
+                emit.clone(),
+                Ok(fx.root.clone()),
+                &cfg,
+                &Seq::new(),
+                record(),
+                Duration::from_secs(10),
+                AttemptCaps::default(),
+                "US",
+                Arc::new(crate::conversation::mem_store::MemStore::default()),
+                &Stamp::Client,
+                Arc::new(SensitiveList::empty()),
+                tokio::time::Instant::now(),
+            )
+            .await;
+            drop(server);
+            let frame = maknae_proto::read_frame_of_class(
+                &mut client,
+                maknae_proto::FrameClass::Attempt,
+                &caps(),
+            )
+            .await;
+            assert!(
+                frame.map_or(true, |f| matches!(
+                    maknae_proto::decode_response(&f).unwrap().result,
+                    RespResult::Err(_)
+                )),
+                "{verb:?}: no answer or grant after the deadline"
+            );
+            let trail = emit.0.lock().unwrap().clone();
+            assert!(
+                trail
+                    .iter()
+                    .all(|r| !(r.outcome.result == "permit"
+                        && r.outcome.reason.contains("released"))),
+                "{verb:?}: no record says the answer was released: {:?}",
+                trail.iter().map(|r| &r.outcome.reason).collect::<Vec<_>>()
+            );
+            let last = trail.last().cloned().unwrap();
+            assert_eq!(
+                last.mutation.map(|m| m.status),
+                Some(MutationStatus::Incomplete),
+                "{verb:?}: {}",
+                last.outcome.reason
+            );
+        }
+    }
+    struct GatedEntries<P> {
+        pdp: P,
+        directory: String,
+        gate: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    }
+    impl<P: Authorizer> Authorizer for GatedEntries<P> {
+        fn decide(&self, request: &maknae_security::Request) -> maknae_security::Verdict {
+            self.decide_cited(request).verdict
+        }
+        fn decide_reporting_role(
+            &self,
+            request: &maknae_security::Request,
+        ) -> (maknae_security::Verdict, Option<&'static str>) {
+            self.decide_cited(request).into()
+        }
+        fn decide_cited(&self, request: &maknae_security::Request) -> maknae_security::Decided {
+            self.decide_cited_all(std::slice::from_ref(request))
+                .pop()
+                .unwrap()
+        }
+        fn decide_cited_all(
+            &self,
+            requests: &[maknae_security::Request],
+        ) -> Vec<maknae_security::Decided> {
+            if requests
+                .iter()
+                .any(|r| r.resource.0.get("path") != Some(&AttrValue::Str(self.directory.clone())))
+            {
+                let (lock, wake) = &*self.gate;
+                let mut released = lock.lock().unwrap();
+                while !*released {
+                    released = wake.wait(released).unwrap();
+                }
+            }
+            self.pdp.decide_cited_all(requests)
+        }
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_listing_decision_that_outlives_its_timeout_holds_its_permit_and_claim_until_it_exits(
+    ) {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let dir = fx.root.join("outlived-161");
+        std::fs::create_dir(&dir).unwrap();
+        let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let release = Release(Arc::clone(&gate));
+        let free = capacity().available_permits();
+        let cfg = maknae_config::transport_from_section(None).unwrap();
+        let fds = maknae_io::DelegatedFds::new(1);
+        fds.push(maknae_io::open_directory_for_delegation(&dir).unwrap());
+        let (mut client, mut server) = tokio::io::duplex(1 << 16);
+        let verb = list_verb(&dir, None);
+        let kernel = async {
+            handle(
+                &mut server,
+                &verb,
+                fx.principal.uid,
+                Lane::Local,
+                &fds,
+                Arc::new(GatedEntries {
+                    pdp: fixture_pdp(&fx),
+                    directory: dir.to_str().unwrap().into(),
+                    gate: Arc::clone(&gate),
+                }),
+                Arc::new(Recorder::default()),
+                Ok(fx.root.clone()),
+                &cfg,
+                &Seq::new(),
+                record(),
+                Duration::from_millis(300),
+                AttemptCaps::default(),
+                "US",
+                Arc::new(crate::conversation::mem_store::MemStore::default()),
+                &Stamp::Client,
+                Arc::new(SensitiveList::empty()),
+                tokio::time::Instant::now(),
+            )
+            .await;
+            drop(server);
+        };
+        let subject = async {
+            maknae_proto::read_frame_of_class(
+                &mut client,
+                maknae_proto::FrameClass::Attempt,
+                &caps(),
+            )
+            .await
+            .expect("the grant");
+            let chunk = named_chunks(&["held-161".to_string()], 1).remove(0);
+            maknae_proto::write_frame(
+                &mut client,
+                maknae_proto::FrameClass::Attempt,
+                &maknae_proto::encode_list_chunk(&chunk).unwrap(),
+            )
+            .await
+            .unwrap();
+            let _ = maknae_proto::read_frame_of_class(
+                &mut client,
+                maknae_proto::FrameClass::Attempt,
+                &caps(),
+            )
+            .await;
+        };
+        bounded(async { tokio::join!(kernel, subject) }).await;
+        assert_eq!(
+            capacity().available_permits(),
+            free - 1,
+            "the timed-out worker still holds its capacity permit"
+        );
+        assert!(
+            mutating().try_claim(fx.principal.uid).is_none(),
+            "and its requester's claim"
+        );
+        drop(release);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while capacity().available_permits() < free && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            capacity().available_permits(),
+            free,
+            "returned once it exits"
+        );
+        assert!(mutating().try_claim(fx.principal.uid).is_some());
+    }
+    /// The trail's one intent and its one terminal completion, the completion last.
+    fn intent_and_completion(trail: &[AuditRecord]) -> (AuditRecord, AuditRecord) {
+        let phased: Vec<&AuditRecord> = trail.iter().filter(|r| r.mutation.is_some()).collect();
+        let of = |phase: MutationPhase| {
+            phased
+                .iter()
+                .filter(|r| r.mutation.as_ref().unwrap().phase == phase)
+                .map(|r| (*r).clone())
+                .collect::<Vec<_>>()
+        };
+        let (intents, completions) = (of(MutationPhase::Intent), of(MutationPhase::Completion));
+        let reasons: Vec<_> = trail.iter().map(|r| &r.outcome.reason).collect();
+        assert_eq!(intents.len(), 1, "one intent: {reasons:?}");
+        assert_eq!(completions.len(), 1, "one terminal completion: {reasons:?}");
+        let (intent, done) = (intents[0].clone(), completions[0].clone());
+        assert_eq!(
+            phased.last().unwrap().seq,
+            done.seq,
+            "the completion ends the trail: {reasons:?}"
+        );
+        assert_eq!(done.mutation.as_ref().unwrap().intent_seq, intent.seq);
+        (intent, done)
+    }
+    async fn stat_to_a_gone_client(fx: &Fixture, file: &Path) -> Vec<AuditRecord> {
+        let cfg = maknae_config::transport_from_section(None).unwrap();
+        let fds = maknae_io::DelegatedFds::new(1);
+        fds.push(maknae_io::open_path_for_stat(file).unwrap());
+        let emit = Arc::new(Recorder::default());
+        let (client, mut server) = tokio::io::duplex(65536);
+        drop(client);
+        handle(
+            &mut server,
+            &stat(file),
+            fx.principal.uid,
+            Lane::Local,
+            &fds,
+            Arc::new(fixture_pdp(fx)),
+            emit.clone(),
+            Ok(fx.root.clone()),
+            &cfg,
+            &Seq::new(),
+            record(),
+            Duration::from_secs(10),
+            AttemptCaps::default(),
+            "US",
+            Arc::new(crate::conversation::mem_store::MemStore::default()),
+            &Stamp::Client,
+            Arc::new(SensitiveList::empty()),
+            tokio::time::Instant::now(),
+        )
+        .await;
+        let trail = emit.0.lock().unwrap().clone();
+        trail
+    }
+    #[tokio::test]
+    async fn every_stat_outcome_ends_in_one_completion_correlated_to_its_intent() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let file = fx.root.join("completed-161");
+        std::fs::write(&file, b"x").unwrap();
+        let (_, trail) = stat_answer(&fx, &file).await;
+        let (intent, done) = intent_and_completion(&trail);
+        assert_eq!(intent.outcome.result, "permit");
+        assert_eq!(
+            (done.outcome.result.as_str(), done.mutation.unwrap().status),
+            ("permit", MutationStatus::Applied)
+        );
+        assert_eq!(done.outcome.reason, "metadata released");
+
+        let trail = stat_to_a_gone_client(&fx, &file).await;
+        let (_, done) = intent_and_completion(&trail);
+        assert_eq!(done.mutation.unwrap().status, MutationStatus::Incomplete);
+        assert_eq!(done.outcome.reason, "metadata: delivery unknown");
+    }
+    async fn list_to_a_gone_subject(fx: &Fixture, dir: &Path) -> Vec<AuditRecord> {
+        let cfg = maknae_config::transport_from_section(None).unwrap();
+        let fds = maknae_io::DelegatedFds::new(1);
+        fds.push(maknae_io::open_directory_for_delegation(dir).unwrap());
+        let emit = Arc::new(Recorder::default());
+        let (mut client, mut server) = tokio::io::duplex(1 << 16);
+        let verb = list_verb(dir, None);
+        let seq = Seq::new();
+        let kernel = async {
+            handle(
+                &mut server,
+                &verb,
+                fx.principal.uid,
+                Lane::Local,
+                &fds,
+                Arc::new(fixture_pdp(fx)),
+                emit.clone(),
+                Ok(fx.root.clone()),
+                &cfg,
+                &seq,
+                record(),
+                Duration::from_secs(10),
+                AttemptCaps::default(),
+                "US",
+                Arc::new(crate::conversation::mem_store::MemStore::default()),
+                &Stamp::Client,
+                Arc::new(SensitiveList::empty()),
+                tokio::time::Instant::now(),
+            )
+            .await;
+            drop(server);
+        };
+        let subject = async move {
+            maknae_proto::read_frame_of_class(
+                &mut client,
+                maknae_proto::FrameClass::Attempt,
+                &caps(),
+            )
+            .await
+            .unwrap();
+            let chunk = named_chunks(&["gone-subject-161".to_string()], 1).remove(0);
+            maknae_proto::write_frame(
+                &mut client,
+                maknae_proto::FrameClass::Attempt,
+                &maknae_proto::encode_list_chunk(&chunk).unwrap(),
+            )
+            .await
+            .unwrap();
+        };
+        bounded(async { tokio::join!(kernel, subject) }).await;
+        let trail = emit.0.lock().unwrap().clone();
+        trail
+    }
+    #[tokio::test]
+    async fn every_listing_outcome_ends_in_one_completion_correlated_to_its_intent() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let dir = fx.root.join("completed-dir-161");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("one-161"), b"x").unwrap();
+        let emit = Arc::new(Recorder::default());
+        list_on(
+            &fx,
+            fixture_pdp(&fx),
+            list_verb(&dir, None),
+            maknae_io::open_directory_for_delegation(&dir).ok(),
+            SensitiveList::empty(),
+            emit.clone(),
+            |g| whole_listing(&grant_path(g)),
+        )
+        .await;
+        let trail = emit.0.lock().unwrap().clone();
+        let (_, done) = intent_and_completion(&trail);
+        assert_eq!(done.mutation.unwrap().status, MutationStatus::Applied);
+        assert!(
+            done.outcome.reason.contains("1 permitted, 1 released"),
+            "{}",
+            done.outcome.reason
+        );
+
+        let emit = Arc::new(Recorder::default());
+        list_on_with(
+            &fx,
+            fixture_pdp(&fx),
+            list_verb(&dir, None),
+            maknae_io::open_directory_for_delegation(&dir).ok(),
+            SensitiveList::empty(),
+            emit.clone(),
+            AttemptCaps {
+                request: maknae_proto::ATTEMPT_REQUEST_MAX,
+                response: 600,
+            },
+            maknae_config::transport_from_section(None).unwrap(),
+            |_| named_chunks(&["w".repeat(1000)], 1),
+        )
+        .await;
+        let trail = emit.0.lock().unwrap().clone();
+        let (_, done) = intent_and_completion(&trail);
+        assert_eq!(done.outcome.result, "deny");
+        assert!(
+            done.outcome.reason.contains("1 permitted, 0 released"),
+            "a withheld page released nothing: {}",
+            done.outcome.reason
+        );
+
+        let trail = list_to_a_gone_subject(&fx, &dir).await;
+        let (_, done) = intent_and_completion(&trail);
+        assert_eq!(done.mutation.unwrap().status, MutationStatus::Incomplete);
+        assert!(
+            done.outcome
+                .reason
+                .contains("1 permitted, 1 in the page, delivery unknown"),
+            "{}",
+            done.outcome.reason
+        );
+    }
+    #[test]
+    fn an_agents_listing_decides_each_entry_under_the_agents_stamp() {
+        let fx = Fixture::new();
+        let counted = Counting {
+            pdp: fixture_pdp(&fx),
+            calls: Arc::default(),
+        };
+        struct Stamped<P> {
+            inner: P,
+            agents: Arc<std::sync::Mutex<Vec<Option<AttrValue>>>>,
+        }
+        impl<P: Authorizer> Authorizer for Stamped<P> {
+            fn decide(&self, r: &maknae_security::Request) -> maknae_security::Verdict {
+                self.decide_cited(r).verdict
+            }
+            fn decide_reporting_role(
+                &self,
+                r: &maknae_security::Request,
+            ) -> (maknae_security::Verdict, Option<&'static str>) {
+                self.decide_cited(r).into()
+            }
+            fn decide_cited(&self, r: &maknae_security::Request) -> maknae_security::Decided {
+                self.decide_cited_all(std::slice::from_ref(r))
+                    .pop()
+                    .unwrap()
+            }
+            fn decide_cited_all(
+                &self,
+                rs: &[maknae_security::Request],
+            ) -> Vec<maknae_security::Decided> {
+                for r in rs {
+                    self.agents
+                        .lock()
+                        .unwrap()
+                        .push(r.subject.0.get(maknae_security::SUBJECT_AGENT).cloned());
+                }
+                self.inner.decide_cited_all(rs)
+            }
+        }
+        let agents = Arc::default();
+        let decider = crate::listing::Decider {
+            authorizer: Arc::new(Stamped {
+                inner: counted,
+                agents: Arc::clone(&agents),
+            }),
+            verb: list_verb(&fx.root, None),
+            uid: fx.principal.uid,
+            home: fx.root.clone(),
+            facts: None,
+            personal: None,
+            stamped: Some((maknae_config::AgentId::parse("hobi").unwrap(), None)),
+        };
+        let mut lister = crate::listing::Lister::new(
+            fx.root.to_str().unwrap().into(),
+            None,
+            maknae_proto::ATTEMPT_RESPONSE_MAX,
+        );
+        lister.take(&named_chunks(&["agent-161".into()], 1)[0], |p| {
+            decider.permits(p)
+        });
+        assert_eq!(
+            *agents.lock().unwrap(),
+            [Some(AttrValue::Str("hobi".into()))],
+            "each entry carries the agent's stamp"
+        );
+    }
+    #[tokio::test]
+    async fn a_listing_chunk_while_the_requester_is_busy_ends_incomplete() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let dir = fx.root.join("busy-161");
+        std::fs::create_dir(&dir).unwrap();
+        let held = Arc::new(std::sync::Mutex::new(None));
+        let holding = Arc::clone(&held);
+        let uid = fx.principal.uid;
+        let emit = Arc::new(Recorder::default());
+        let frames = list_on(
+            &fx,
+            fixture_pdp(&fx),
+            list_verb(&dir, None),
+            maknae_io::open_directory_for_delegation(&dir).ok(),
+            SensitiveList::empty(),
+            emit.clone(),
+            move |_| {
+                *holding.lock().unwrap() = mutating().try_claim(uid);
+                named_chunks(&["busy-entry-161".into()], 1)
+            },
+        )
+        .await;
+        assert!(
+            held.lock().unwrap().take().is_some(),
+            "the test held the claim"
+        );
+        assert!(!frames
+            .iter()
+            .any(|f| f.windows(14).any(|w| w == b"busy-entry-161")));
+        let (_, done) = intent_and_completion(&emit.0.lock().unwrap());
+        assert_eq!(
+            done.outcome.reason,
+            busy_reason(crate::uid_gate::Busy::Requester)
+        );
+    }
+    #[tokio::test]
+    async fn a_continuation_that_cannot_be_written_ends_the_listing_incomplete() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let dir = fx.root.join("continued-161");
+        std::fs::create_dir(&dir).unwrap();
+        let cfg = maknae_config::transport_from_section(None).unwrap();
+        let fds = maknae_io::DelegatedFds::new(1);
+        fds.push(maknae_io::open_directory_for_delegation(&dir).unwrap());
+        let emit = Arc::new(Recorder::default());
+        let seq = Seq::new();
+        let (mut client, mut server) = tokio::io::duplex(1 << 16);
+        let verb = list_verb(&dir, None);
+        let kernel = async {
+            handle(
+                &mut server,
+                &verb,
+                fx.principal.uid,
+                Lane::Local,
+                &fds,
+                Arc::new(fixture_pdp(&fx)),
+                emit.clone(),
+                Ok(fx.root.clone()),
+                &cfg,
+                &seq,
+                record(),
+                Duration::from_secs(10),
+                AttemptCaps::default(),
+                "US",
+                Arc::new(crate::conversation::mem_store::MemStore::default()),
+                &Stamp::Client,
+                Arc::new(SensitiveList::empty()),
+                tokio::time::Instant::now(),
+            )
+            .await;
+            drop(server);
+        };
+        let subject = async move {
+            maknae_proto::read_frame_of_class(
+                &mut client,
+                maknae_proto::FrameClass::Attempt,
+                &caps(),
+            )
+            .await
+            .unwrap();
+            let mut chunk = named_chunks(&["first-161".to_string()], 1).remove(0);
+            chunk.last = false;
+            maknae_proto::write_frame(
+                &mut client,
+                maknae_proto::FrameClass::Attempt,
+                &maknae_proto::encode_list_chunk(&chunk).unwrap(),
+            )
+            .await
+            .unwrap();
+        };
+        bounded(async { tokio::join!(kernel, subject) }).await;
+        let (_, done) = intent_and_completion(&emit.0.lock().unwrap());
+        assert_eq!(
+            done.outcome.reason,
+            "listing continuation not delivered; nothing released"
+        );
+    }
+    #[tokio::test]
+    async fn a_page_decided_after_its_deadline_is_refused_and_never_recorded_as_released() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let dir = fx.root.join("late-161");
+        std::fs::create_dir(&dir).unwrap();
+        let emit = Arc::new(Recorder::default());
+        let names = vec!["late-entry-161".to_string()];
+        let frames = list_on_with(
+            &fx,
+            SlowEntries {
+                pdp: fixture_pdp(&fx),
+                directory: dir.to_str().unwrap().into(),
+            },
+            list_verb(&dir, None),
+            maknae_io::open_directory_for_delegation(&dir).ok(),
+            SensitiveList::empty(),
+            emit.clone(),
+            AttemptCaps::default(),
+            TransportConfig {
+                read_timeout_ms: 200,
+                ..maknae_config::transport_from_section(None).unwrap()
+            },
+            |_| named_chunks(&names, 1),
+        )
+        .await;
+        assert!(
+            !frames
+                .iter()
+                .any(|f| f.windows(14).any(|w| w == b"late-entry-161")),
+            "a late page is never sent"
+        );
+        let trail = emit.0.lock().unwrap().clone();
+        assert!(trail
+            .iter()
+            .all(|r| !(r.outcome.result == "permit" && r.outcome.reason.contains("released"))));
+        assert!(
+            trail
+                .last()
+                .unwrap()
+                .outcome
+                .reason
+                .contains("deadline passed before the answer was recorded"),
+            "{:?}",
+            trail.last().unwrap().outcome.reason
+        );
+    }
+    #[tokio::test]
+    async fn a_page_filled_mid_stream_is_truncated_and_ends_the_exchange() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let dir = fx.root.join("midstream-161");
+        std::fs::create_dir(&dir).unwrap();
+        let names: Vec<String> = (0..1800).map(|i| format!("m{i:05}")).collect();
+        let frames = list_on(
+            &fx,
+            fixture_pdp(&fx),
+            list_verb(&dir, None),
+            maknae_io::open_directory_for_delegation(&dir).ok(),
+            SensitiveList::empty(),
+            Arc::new(Recorder::default()),
+            |_| named_chunks(&names, 600),
+        )
+        .await;
+        assert_eq!(
+            frames.len(),
+            3,
+            "grant, continue, page: the third chunk is never asked for"
+        );
+        assert_eq!(
+            maknae_proto::decode_response(&frames[1]).unwrap().result,
+            RespResult::Ok(Payload::ListContinue)
+        );
+        let page = granted_page(&frames);
+        assert!(page.truncated);
+        assert_eq!(page.entries.len(), maknae_proto::LIST_RELEASE_MAX);
+        assert_eq!(page.entries.last().unwrap().name, names[1023]);
+    }
+    fn stat161() -> Payload {
+        Payload::Stat(maknae_proto::StatView {
+            size: 1,
+            mtime_secs: 1,
+            kind: maknae_proto::StatKind::File,
+        })
+    }
+    fn completion_of(trail: &[AuditRecord]) -> (MutationPhase, MutationStatus, String, String) {
+        let last = trail.last().unwrap();
+        let meta = last.mutation.as_ref().unwrap();
+        (
+            meta.phase,
+            meta.status,
+            last.outcome.result.clone(),
+            last.outcome.reason.clone(),
+        )
+    }
+    #[tokio::test(start_paused = true)]
+    async fn a_disclosure_over_its_cap_is_refused_and_one_not_delivered_is_unknown() {
+        let emit = Recorder::default();
+        let mut stream: Vec<u8> = Vec::new();
+        let sent = disclose(
+            &mut stream,
+            &TransportConfig::default(),
+            &emit,
+            &Seq::new(),
+            &test_intent(),
+            &stat_account,
+            false,
+            stat161(),
+            8,
+            far_deadline(),
+        )
+        .await;
+        assert!(!sent);
+        assert_eq!(
+            completion_of(&emit.0.lock().unwrap()),
+            (
+                MutationPhase::Completion,
+                MutationStatus::Incomplete,
+                "deny".to_string(),
+                "metadata withheld; answer exceeds the response frame".to_string()
+            )
+        );
+        let frame = maknae_proto::read_frame_of_class(
+            &mut stream.as_slice(),
+            maknae_proto::FrameClass::Attempt,
+            &caps(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            maknae_proto::decode_response(&frame).unwrap().result,
+            RespResult::Err(ProtoError {
+                code: ProtoErrCode::Unauthorized,
+                ..
+            })
+        ));
+
+        let emit = Recorder::default();
+        let (client, mut server) = tokio::io::duplex(64);
+        drop(client);
+        assert!(
+            !disclose(
+                &mut server,
+                &TransportConfig::default(),
+                &emit,
+                &Seq::new(),
+                &test_intent(),
+                &stat_account,
+                false,
+                stat161(),
+                maknae_proto::ATTEMPT_RESPONSE_MAX,
+                far_deadline(),
+            )
+            .await
+        );
+        let trail = emit.0.lock().unwrap().clone();
+        assert_eq!(trail.len(), 1, "one terminal completion, no second success");
+        assert_eq!(
+            completion_of(&trail),
+            (
+                MutationPhase::Completion,
+                MutationStatus::Incomplete,
+                "permit".to_string(),
+                "metadata: delivery unknown".to_string()
+            )
+        );
+    }
+    fn far_deadline() -> tokio::time::Instant {
+        tokio::time::Instant::now() + Duration::from_secs(60)
+    }
+    struct SlowAppend(std::sync::Mutex<Vec<AuditRecord>>);
+    impl AuditEmit for SlowAppend {
+        fn emit(
+            &self,
+            record: &AuditRecord,
+        ) -> impl std::future::Future<Output = Result<(), maknae_audit_append::AuditError>> + Send
+        {
+            self.0.lock().unwrap().push(record.clone());
+            async {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                Ok(())
+            }
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn an_answer_whose_progress_lands_exactly_at_its_deadline_is_not_written() {
+        let emit = SlowAppend(std::sync::Mutex::default());
+        let mut stream: Vec<u8> = Vec::new();
+        let sent = disclose(
+            &mut stream,
+            &TransportConfig::default(),
+            &emit,
+            &Seq::new(),
+            &test_intent(),
+            &stat_account,
+            true,
+            stat161(),
+            maknae_proto::ATTEMPT_RESPONSE_MAX,
+            tokio::time::Instant::now() + Duration::from_millis(300),
+        )
+        .await;
+        assert!(!sent);
+        assert!(stream.is_empty(), "a deadline reached is a deadline passed");
+    }
+    #[tokio::test(start_paused = true)]
+    async fn an_answer_exactly_the_size_of_its_frame_is_sent() {
+        let exact = maknae_proto::encode_response(&Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(stat161()),
+        })
+        .unwrap()
+        .len();
+        let mut stream: Vec<u8> = Vec::new();
+        assert!(
+            disclose(
+                &mut stream,
+                &TransportConfig::default(),
+                &Recorder::default(),
+                &Seq::new(),
+                &test_intent(),
+                &stat_account,
+                false,
+                stat161(),
+                exact,
+                far_deadline(),
+            )
+            .await
+        );
+        assert!(!stream.is_empty());
+    }
+    #[tokio::test(start_paused = true)]
+    async fn an_attempt_whose_deadline_is_reached_before_its_grant_grants_nothing() {
+        let cfg = TransportConfig::default();
+        let emit = Recorder::default();
+        let (mut client, mut server) = tokio::io::duplex(1 << 16);
+        attempt(
+            &mut server,
+            &cfg,
+            AttemptCaps::default(),
+            &emit,
+            test_intent(),
+            MutationScope::Exact {
+                path: "/attempt-161".into(),
+                effect: ReportedEffect::ReadFile,
+            },
+            maknae_proto::ObjectLabel {
+                level: "UNCLASSIFIED".into(),
+                categories: Vec::new(),
+            },
+            None,
+            &Seq::new(),
+            tokio::time::Instant::now() - Duration::from_millis(cfg.read_timeout_ms),
+        )
+        .await;
+        drop(server);
+        assert!(
+            maknae_proto::read_frame_of_class(
+                &mut client,
+                maknae_proto::FrameClass::Attempt,
+                &caps()
+            )
+            .await
+            .is_err(),
+            "no grant once the deadline is reached"
+        );
+        assert_eq!(
+            last_reason(&emit),
+            "attempt grant not delivered; no effect authorized"
+        );
+    }
+    #[tokio::test(start_paused = true)]
+    async fn an_answer_whose_progress_lands_after_its_deadline_is_not_written() {
+        let emit = SlowAppend(std::sync::Mutex::default());
+        let mut stream: Vec<u8> = Vec::new();
+        disclose(
+            &mut stream,
+            &TransportConfig::default(),
+            &emit,
+            &Seq::new(),
+            &test_intent(),
+            &stat_account,
+            true,
+            stat161(),
+            maknae_proto::ATTEMPT_RESPONSE_MAX,
+            tokio::time::Instant::now() + Duration::from_millis(100),
+        )
+        .await;
+        assert!(stream.is_empty(), "nothing is written after the deadline");
+        let trail = emit.0.lock().unwrap().clone();
+        assert_eq!(trail.len(), 2, "progress, then the one completion");
+        assert_eq!(
+            completion_of(&trail),
+            (
+                MutationPhase::Completion,
+                MutationStatus::Incomplete,
+                "permit".to_string(),
+                "metadata: delivery unknown".to_string()
+            )
+        );
+    }
+    #[tokio::test]
+    async fn a_subject_that_cannot_list_is_trailed_as_its_own_refusal() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let dir = fx.root.join("unlistable-161");
+        std::fs::create_dir(&dir).unwrap();
+        let emit = Arc::new(Recorder::default());
+        list_on(
+            &fx,
+            fixture_pdp(&fx),
+            list_verb(&dir, None),
+            maknae_io::open_directory_for_delegation(&dir).ok(),
+            SensitiveList::empty(),
+            emit.clone(),
+            |_| {
+                vec![maknae_proto::ListChunk {
+                    entries: Vec::new(),
+                    last: true,
+                    dropped: 0,
+                    unlisted: true,
+                    vanished: 0,
+                }]
+            },
+        )
+        .await;
+        let reason = last_reason(&emit);
+        assert!(
+            reason.starts_with(crate::listing::SUBJECT_UNLISTED),
+            "{reason}"
+        );
+        assert!(!reason.contains("missing or malformed"), "{reason}");
+    }
+    #[tokio::test]
+    async fn an_unsorted_chunk_is_refused_with_its_cause_and_releases_nothing() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let dir = fx.root.join("unsorted-161");
+        std::fs::create_dir(&dir).unwrap();
+        let emit = Arc::new(Recorder::default());
+        let entry = |name: &str| maknae_proto::ListEntry {
+            name: name.into(),
+            dir: false,
+        };
+        let frames = list_on(
+            &fx,
+            fixture_pdp(&fx),
+            list_verb(&dir, None),
+            maknae_io::open_directory_for_delegation(&dir).ok(),
+            SensitiveList::empty(),
+            emit.clone(),
+            |_| {
+                vec![
+                    maknae_proto::ListChunk {
+                        entries: vec![entry("b"), entry("c")],
+                        last: false,
+                        dropped: 0,
+                        unlisted: false,
+                        vanished: 0,
+                    },
+                    maknae_proto::ListChunk {
+                        entries: vec![entry("a")],
+                        last: true,
+                        dropped: 0,
+                        unlisted: false,
+                        vanished: 0,
+                    },
+                ]
+            },
+        )
+        .await;
+        assert_eq!(frames.len(), 3);
+        assert_eq!(
+            maknae_proto::decode_response(&frames[1]).unwrap().result,
+            RespResult::Ok(Payload::ListContinue)
+        );
+        assert_eq!(
+            maknae_proto::decode_response(&frames[2]).unwrap().result,
+            RespResult::Err(ProtoError {
+                code: ProtoErrCode::Unauthorized,
+                message: crate::listing::ORDER_VIOLATED.into(),
+            }),
+            "the user is told the cause; the model renders the code"
+        );
+        let last = emit.0.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(last.outcome.result, "deny");
+        assert!(
+            last.outcome
+                .reason
+                .starts_with("listing order violated; listing: 2 received"),
+            "{}",
+            last.outcome.reason
+        );
+        assert_eq!(last.mutation.unwrap().status, MutationStatus::Incomplete);
+    }
+    #[test]
+    fn mtime_seconds_keep_the_sign_and_floor() {
+        use std::time::UNIX_EPOCH;
+        assert_eq!(mtime_secs(UNIX_EPOCH), 0);
+        assert_eq!(mtime_secs(UNIX_EPOCH + Duration::new(5, 999_999_999)), 5);
+        assert_eq!(mtime_secs(UNIX_EPOCH - Duration::from_secs(5)), -5);
+        assert_eq!(
+            mtime_secs(UNIX_EPOCH - Duration::from_secs(5) + Duration::from_nanos(7)),
+            -5
+        );
+        assert_eq!(mtime_secs(UNIX_EPOCH - Duration::new(0, 1)), -1);
     }
 }

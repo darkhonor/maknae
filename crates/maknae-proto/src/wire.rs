@@ -56,7 +56,7 @@ pub fn page_request_is_acceptable(p: &PageRequest) -> bool {
 
 pub const MAX_CONTEXT_TOKENS: u64 = 16_777_216;
 pub const DEFAULT_BYTES_PER_TOKEN: u64 = 4;
-pub const PREAMBLE_ALLOWANCE_TOKENS: u64 = 1_536;
+pub const PREAMBLE_ALLOWANCE_TOKENS: u64 = 2_304;
 
 pub fn output_tokens_is_acceptable(n: u64) -> bool {
     (1..=MAX_CONTEXT_TOKENS).contains(&n)
@@ -590,12 +590,27 @@ pub enum Verb {
     /// permitted destination is never a route around a denied source. Applies
     /// equally to `fs.link` and to any future copy term.
     FsMove,
-    /// Enumerate directory contents. A disclosure of names, which is a disclosure
-    /// even when contents are refused.
-    FsList,
-    /// File metadata without content. Discloses existence, size and timestamps —
-    /// enough to confirm a denied object exists.
-    FsStat,
+    /// Enumerate a directory, decided as `fs.read` on the kernel-reported path of the
+    /// subject's delegated, search-only descriptor and again on every entry the subject
+    /// reports (#161). After the grant the subject sends [`crate::ListChunk`]s; the
+    /// kernel answers [`Payload::ListContinue`] or, once its record lands, the permitted
+    /// names after `after` as [`Payload::ListGrant`]. A withheld entry is absent.
+    FsList {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conversation: Option<String>,
+    },
+    /// File metadata without content, decided as `fs.read` on the kernel-reported path
+    /// of the subject's delegated, unfollowed descriptor (#161). A permit discloses size,
+    /// mtime and kind only; every refusal but `Protected` is the one uniform answer, so a
+    /// denied object reads as a missing one.
+    FsStat {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conversation: Option<String>,
+    },
     /// Create a directory. It also creates a destination later terms are decided
     /// against.
     FsMkdir {
@@ -712,6 +727,29 @@ pub enum Payload {
     ConversationDeleted {
         conversation: crate::ConversationId,
     },
+    /// A permitted `fs.stat`, from the kernel's own descriptor (#161).
+    Stat(StatView),
+    /// The permitted page of an `fs.list`, after its record landed (#161).
+    ListGrant(crate::ListGrant),
+    /// The kernel decided a non-final [`crate::ListChunk`] and wants the next.
+    ListContinue,
+}
+
+/// What a permitted `fs.stat` discloses: never uid, gid, mode, inode or link count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatView {
+    pub size: u64,
+    pub mtime_secs: i64,
+    pub kind: StatKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StatKind {
+    File,
+    Directory,
+    Symlink,
+    /// A fifo, socket or device.
+    Other,
 }
 
 /// The reason's byte limit, measured after normalisation.
@@ -1122,8 +1160,8 @@ pub fn class_of(verb: &Verb) -> FrameClass {
         | Verb::FsWrite { .. }
         | Verb::FsDelete { .. }
         | Verb::FsMove
-        | Verb::FsList
-        | Verb::FsStat
+        | Verb::FsList { .. }
+        | Verb::FsStat { .. }
         | Verb::FsMkdir { .. }
         | Verb::FsLink
         | Verb::FsChmod
@@ -1236,6 +1274,12 @@ pub fn decode_mutation_report(bytes: &[u8]) -> Result<crate::MutationReport, Pro
     decode_followup(bytes)
 }
 pub fn decode_mutation_ack(bytes: &[u8]) -> Result<crate::MutationAck, ProtoCodecError> {
+    decode_followup(bytes)
+}
+pub fn encode_list_chunk(c: &crate::ListChunk) -> Result<Vec<u8>, ProtoCodecError> {
+    enc(c)
+}
+pub fn decode_list_chunk(bytes: &[u8]) -> Result<crate::ListChunk, ProtoCodecError> {
     decode_followup(bytes)
 }
 /// Encode into a pre-sized zeroizing buffer (the prompt reply's encode). Pre-sizing
@@ -1875,6 +1919,183 @@ mod tests {
         assert_eq!(decode_request(&none).unwrap(), write(None));
         let some = encode_request(&write(Some("conv-265"))).unwrap();
         assert_eq!(decode_request(&some).unwrap(), write(Some("conv-265")));
+    }
+
+    #[test]
+    fn stat_returns_size_mtime_and_kind_only() {
+        let reply = Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(Payload::Stat(StatView {
+                size: 161,
+                mtime_secs: -2,
+                kind: StatKind::Symlink,
+            })),
+        };
+        let encoded = encode_response(&reply).unwrap();
+        assert_eq!(decode_response(&encoded).unwrap(), reply);
+        let value: ciborium::Value = ciborium::from_reader(encoded.as_slice()).unwrap();
+        let field = |m: &ciborium::Value, k: &str| -> ciborium::Value {
+            m.as_map()
+                .unwrap()
+                .iter()
+                .find(|(key, _)| key.as_text() == Some(k))
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| panic!("no {k} in {m:?}"))
+        };
+        let stat = field(&field(&field(&value, "result"), "Ok"), "Stat");
+        let mut keys: Vec<_> = stat
+            .as_map()
+            .unwrap()
+            .iter()
+            .map(|(k, _)| k.as_text().unwrap().to_string())
+            .collect();
+        keys.sort();
+        assert_eq!(keys, ["kind", "mtime_secs", "size"]);
+        for kind in [
+            StatKind::File,
+            StatKind::Directory,
+            StatKind::Symlink,
+            StatKind::Other,
+        ] {
+            let reply = Response {
+                protocol_version: PROTOCOL_VERSION,
+                result: RespResult::Ok(Payload::Stat(StatView {
+                    size: 0,
+                    mtime_secs: 0,
+                    kind,
+                })),
+            };
+            assert_eq!(
+                decode_response(&encode_response(&reply).unwrap()).unwrap(),
+                reply
+            );
+        }
+    }
+
+    #[test]
+    fn a_listings_cursor_and_conversation_are_omitted_when_none_and_round_trip_when_set() {
+        let list = |after: Option<&str>, conversation: Option<&str>| Request {
+            task: None,
+            protocol_version: PROTOCOL_VERSION,
+            verb: Verb::FsList {
+                path: "/p".into(),
+                after: after.map(str::to_string),
+                conversation: conversation.map(str::to_string),
+            },
+        };
+        let none = encode_request(&list(None, None)).unwrap();
+        assert!(!none.windows(5).any(|w| w == b"after"));
+        assert!(!none.windows(12).any(|w| w == b"conversation"));
+        assert_eq!(decode_request(&none).unwrap(), list(None, None));
+        let some = encode_request(&list(Some("b-161"), Some("conv-161"))).unwrap();
+        assert_eq!(
+            decode_request(&some).unwrap(),
+            list(Some("b-161"), Some("conv-161"))
+        );
+        assert_eq!(class_of(&list(None, None).verb), FrameClass::Attempt);
+    }
+
+    #[test]
+    fn a_list_chunk_and_a_list_grant_round_trip_and_the_grant_has_no_total() {
+        let entry = |name: &str, dir: bool| crate::ListEntry {
+            name: name.into(),
+            dir,
+        };
+        let chunk = crate::ListChunk {
+            entries: vec![entry("a-161", false), entry("b-161", true)],
+            last: true,
+            dropped: 2,
+            unlisted: false,
+            vanished: 0,
+        };
+        let bytes = encode_list_chunk(&chunk).unwrap();
+        assert_eq!(decode_list_chunk(&bytes).unwrap(), chunk);
+        assert!(!bytes.windows(8).any(|w| w == b"unlisted"));
+        let without: ciborium::Value = ciborium::Value::Map(vec![
+            (
+                ciborium::Value::Text("entries".into()),
+                ciborium::Value::Array(vec![]),
+            ),
+            (
+                ciborium::Value::Text("last".into()),
+                ciborium::Value::Bool(true),
+            ),
+            (
+                ciborium::Value::Text("dropped".into()),
+                ciborium::Value::Integer(0.into()),
+            ),
+        ]);
+        let mut older = Vec::new();
+        ciborium::into_writer(&without, &mut older).unwrap();
+        assert_eq!(
+            decode_list_chunk(&older).unwrap().vanished,
+            0,
+            "a chunk without vanished decodes as none"
+        );
+        let unlisted = crate::ListChunk {
+            entries: Vec::new(),
+            last: true,
+            dropped: 0,
+            unlisted: true,
+            vanished: 0,
+        };
+        assert_eq!(
+            decode_list_chunk(&encode_list_chunk(&unlisted).unwrap()).unwrap(),
+            unlisted
+        );
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(decode_list_chunk(&trailing).is_err());
+        let grant = Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(Payload::ListGrant(crate::ListGrant {
+                entries: vec![entry("b-161", true)],
+                truncated: true,
+            })),
+        };
+        let encoded = encode_response(&grant).unwrap();
+        assert_eq!(decode_response(&encoded).unwrap(), grant);
+        let value: ciborium::Value = ciborium::from_reader(encoded.as_slice()).unwrap();
+        let ok = value.as_map().unwrap()[1].1.as_map().unwrap()[0].1.clone();
+        let listed = ok.as_map().unwrap()[0].1.clone();
+        let mut keys: Vec<_> = listed
+            .as_map()
+            .unwrap()
+            .iter()
+            .map(|(k, _)| k.as_text().unwrap().to_string())
+            .collect();
+        keys.sort();
+        assert_eq!(keys, ["entries", "truncated"]);
+        let more = Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(Payload::ListContinue),
+        };
+        assert_eq!(
+            decode_response(&encode_response(&more).unwrap()).unwrap(),
+            more
+        );
+        assert_eq!(
+            (crate::LIST_RELEASE_MAX, crate::LIST_RECEIVE_MAX),
+            (1024, 65_536)
+        );
+    }
+
+    #[test]
+    fn a_stats_conversation_is_omitted_when_none_and_round_trips_when_set() {
+        let stat = |conversation: Option<&str>| Request {
+            task: None,
+            protocol_version: PROTOCOL_VERSION,
+            verb: Verb::FsStat {
+                path: "/p".into(),
+                conversation: conversation.map(str::to_string),
+            },
+        };
+        let none = encode_request(&stat(None)).unwrap();
+        assert!(!none.windows(12).any(|w| w == b"conversation"));
+        assert_eq!(decode_request(&none).unwrap(), stat(None));
+        let some = encode_request(&stat(Some("conv-161"))).unwrap();
+        assert_eq!(decode_request(&some).unwrap(), stat(Some("conv-161")));
+        assert_eq!(class_of(&stat(None).verb), FrameClass::Attempt);
     }
 
     fn text(s: &str) -> ContentBlock {
@@ -3463,8 +3684,21 @@ mod tests {
                     FrameClass::Attempt,
                 ),
                 (Verb::FsMove, FrameClass::Attempt),
-                (Verb::FsList, FrameClass::Attempt),
-                (Verb::FsStat, FrameClass::Attempt),
+                (
+                    Verb::FsList {
+                        path: "/p".into(),
+                        after: None,
+                        conversation: None,
+                    },
+                    FrameClass::Attempt,
+                ),
+                (
+                    Verb::FsStat {
+                        path: "/p".into(),
+                        conversation: None,
+                    },
+                    FrameClass::Attempt,
+                ),
                 (
                     Verb::FsMkdir {
                         path: "/p".into(),

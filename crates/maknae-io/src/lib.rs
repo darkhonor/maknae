@@ -78,10 +78,11 @@ pub use anchor::{
 pub use audit_append::{open_audit_append, open_existing_audit_append};
 pub use checks::{AnchorRequired, DescendantRequired, TargetRequired};
 pub use delegated::{
-    open_directory_for_delegation, open_path_for_delegation, recv_delegated, refuse_access_bearing,
-    send_delegated, sender_admitted, verify_delegated, Delegated, DelegatedFds, DelegatedMeta,
-    DelegatedRequired, ExpectedSender, FileKind, Received, SenderCreds,
-    DELEGATED_FDS_PER_CONNECTION,
+    list_delegated_directory, open_directory_for_delegation, open_path_for_delegation,
+    open_path_for_stat, recv_delegated, refuse_access_bearing, refuse_enumerable, send_delegated,
+    sender_admitted, verify_delegated, verify_stat_delegated, Delegated, DelegatedFds,
+    DelegatedMeta, DelegatedRequired, ExpectedSender, FileKind, ListedEntry, Listing, Received,
+    SenderCreds, DELEGATED_FDS_PER_CONNECTION,
 };
 pub use error::{IoError, IoKind};
 pub use home::{canonical_home, session_home};
