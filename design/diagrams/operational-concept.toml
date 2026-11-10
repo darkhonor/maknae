@@ -15,9 +15,9 @@ mission = "An AI agent that does real work on your systems, learns from doing it
 # is the differentiator; ACTING is the product.
 
 [capability]
-headline = "60 action terms enumerated and decided. 3 granted. 54 recorded as not-granted, which is deny-by-default written down rather than assumed."
+headline = "61 action terms enumerated and decided. 19 granted as shipped. 42 recorded as not-granted (2 of them grantable per role), which is deny-by-default written down rather than assumed."
 closed_set = "No wildcard arm: a new verb is a COMPILE ERROR until someone decides what it dispatches to. The vocabulary cannot grow by accident."
-evidence = "ci/gates/verb-manifest.txt · crates/maknae-kernel/src/handler.rs:27 · design/diagrams/action-vocabulary-map.svg"
+evidence = "ci/gates/verb-manifest.txt · crates/maknae-kernel/src/handler.rs:279 · design/diagrams/action-vocabulary-map.svg"
 
 [[surface]]
 name = "Act on real systems"
@@ -27,13 +27,13 @@ status = "partial"
 
 [[surface]]
 name = "Hold a conversation, keep a task"
-terms = "session 16"
+terms = "session 17"
 detail = "Prompts, context, long-horizon work. The surface OpenClaw and Hermes users expect."
-status = "unbuilt"
+status = "partial"
 
 [[surface]]
 name = "Operator control"
-terms = "admin 17"
+terms = "admin 18"
 detail = "Audit tail, policy reload, credential rotation, session termination, and CONTAIN — pull a running agent back under control."
 status = "partial"
 

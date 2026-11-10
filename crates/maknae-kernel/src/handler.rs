@@ -272,7 +272,7 @@ use std::time::Duration;
 /// The actions the KERNEL initiates on its own behalf, which have no client
 /// request and therefore no `Verb` variant (#67 D2). They are still PDP-decided
 /// and audited, so they need action strings — and the drift gate needs a source
-/// to diff the manifest against, or two of the vocabulary's 60 terms would carry
+/// to diff the manifest against, or two of the vocabulary's 61 terms would carry
 /// no recorded disposition (spec R7).
 pub const KERNEL_ACTIONS: [&str; 2] = ["kernel.contain", "kernel.session.terminate"];
 
