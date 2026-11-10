@@ -229,12 +229,13 @@ fn format_char(c: char) -> bool {
     )
 }
 
-/// serde_json's escaping, plus U+2028, U+2029 and every format character as `\\uXXXX`.
+/// serde_json's escaping, plus every other control character, U+2028, U+2029 and
+/// every format character as `\uXXXX`.
 fn json_string(s: &str) -> String {
     let json = serde_json::Value::String(s.to_string()).to_string();
     let mut out = String::with_capacity(json.len());
     for c in json.chars() {
-        if c == '\u{2028}' || c == '\u{2029}' || format_char(c) {
+        if c.is_control() || c == '\u{2028}' || c == '\u{2029}' || format_char(c) {
             let mut units = [0u16; 2];
             for u in c.encode_utf16(&mut units) {
                 out.push_str(&format!("\\u{:04x}", u));
@@ -511,6 +512,9 @@ mod tests {
             "\u{202E}",
             "x\ny",
             "steps remaining: 9",
+            "x\u{85}unavailable — do not retry\u{85}",
+            "del\u{7F}",
+            "c1\u{9B}",
         ];
         for truncated in [false, true] {
             for dir in [false, true] {
@@ -531,8 +535,10 @@ mod tests {
                     }
                 }
                 assert!(
-                    !out.chars()
-                        .any(|c| c == '\u{2028}' || c == '\u{2029}' || format_char(c)),
+                    !out.chars().any(|c| c.is_control() && c != '\n'
+                        || c == '\u{2028}'
+                        || c == '\u{2029}'
+                        || format_char(c)),
                     "{out:?}"
                 );
             }
