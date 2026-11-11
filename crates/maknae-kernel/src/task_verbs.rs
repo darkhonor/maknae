@@ -455,6 +455,7 @@ mod tests {
             actions: 4,
             last_action: Some(140),
             lease_until: 9,
+            ..Hot::default()
         };
         let v = view(&r, &hot, 142);
         assert_eq!(

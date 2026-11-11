@@ -21,22 +21,30 @@ pub const MAX_LIVE_TASKS_PER_AGENT: usize = 256;
 pub const MAX_LIVE_TASKS_PER_TASKER_PER_AGENT: usize = 32;
 pub const MAX_HELD_REPORTS_PER_TASKER: usize = 256;
 pub const MAX_FOLLOW_UPS_PER_TASK: usize = 32;
-const NOTICES_MAX: usize = 1024;
+const RETRY_FIRST_SECS: u32 = 1;
+const RETRY_MAX_SECS: u32 = 60;
+
+/// Why a task is due an act of the kernel's own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DueFor {
+    Close(TaskClose),
+    Expiry,
+}
+
+/// A close or an expiry the kernel records before it asks the store to perform it.
+/// `recorded` is true once this process has performed it in memory, so recorded it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Due {
+    pub task: TaskId,
+    pub tasker: Tasker,
+    pub parent: Option<TaskId>,
+    pub why: DueFor,
+    pub recorded: bool,
+}
 
 /// What the store did, or could not do, outside any request; the kernel records each.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Notice {
-    Closed {
-        task: TaskId,
-        tasker: Tasker,
-        parent: Option<TaskId>,
-        close: TaskClose,
-    },
-    Expired {
-        task: TaskId,
-        tasker: Tasker,
-        parent: Option<TaskId>,
-    },
     /// The disk may not hold `task` as memory does; every later store write retries it.
     Owed {
         task: TaskId,
@@ -56,7 +64,6 @@ pub enum Notice {
         tasker: Tasker,
         failed: Option<String>,
     },
-    Dropped(usize),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -211,12 +218,15 @@ struct Held {
     stale: BTreeSet<TaskId>,
     /// The owed id that last failed; the next drain starts after it.
     stuck: Option<TaskId>,
-    /// Closes decided without the writer; the next writer performs each before anything else.
+    /// Open tasks no agent may be handed or act on any more, each with the close it is due.
     closing: BTreeMap<TaskId, TaskClose>,
+    /// Marked tasks whose close this process has already been told is recorded.
+    recorded: BTreeSet<TaskId>,
+    /// The report ordinal issued for a close whose record is not yet durable.
+    ordinals: BTreeMap<TaskId, u64>,
     /// Agents whose exposed records the next writer retries whatever the drain's order.
     purged: BTreeSet<AgentId>,
     notices: Vec<Notice>,
-    unsaid: usize,
     /// Ids a notice has called owed, until one calls them settled.
     owed_said: BTreeSet<TaskId>,
 }
@@ -231,10 +241,13 @@ impl Held {
     }
 
     fn note(&mut self, notice: Notice) {
-        match self.notices.len() < NOTICES_MAX {
-            true => self.notices.push(notice),
-            false => self.unsaid += 1,
-        }
+        self.notices.push(notice);
+    }
+
+    fn unmark(&mut self, id: &TaskId) {
+        self.closing.remove(id);
+        self.recorded.remove(id);
+        self.ordinals.remove(id);
     }
 
     fn owe(&mut self, id: &TaskId, why: String) {
@@ -271,28 +284,6 @@ impl Held {
             self.closing.insert(id, TaskClose::AgentGone);
         }
         self.purged.insert(agent.clone());
-    }
-
-    /// Closes an open task in memory and marks its record owed to the disk; a task
-    /// already finished is left as it is.
-    fn close(&mut self, id: &TaskId, close: TaskClose) -> bool {
-        let hot = self.hot.get(id).copied().unwrap_or_default();
-        let Some(rec) = self.tasks.get_mut(id).filter(|r| !r.pending && open(r)) else {
-            return false;
-        };
-        rec.state = TaskState::Closed;
-        rec.close = Some(close);
-        rec.actions = hot.actions;
-        rec.last_action = hot.last_action;
-        let notice = Notice::Closed {
-            task: *id,
-            tasker: rec.tasker.clone(),
-            parent: rec.parent,
-            close,
-        };
-        self.stale.insert(*id);
-        self.note(notice);
-        true
     }
 
     fn expose(&mut self, mut rec: TaskRecord) {
@@ -367,6 +358,7 @@ impl TaskStore {
                     actions: rec.actions,
                     last_action: rec.last_action,
                     lease_until,
+                    ..Hot::default()
                 },
             );
             held.tasks.insert(id, rec);
@@ -506,7 +498,7 @@ impl TaskStore {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
         };
-        self.close_owed();
+        self.drop_marks();
         let taken_back = self.settle_owed();
         self.settle_purged();
         let rounds = queue().len();
@@ -525,34 +517,27 @@ impl TaskStore {
         }
     }
 
-    /// Performs each owed close in memory, oldest submission first, then writes them until
-    /// the disk first refuses; an unconfirmed record of a gone agent is withdrawn.
-    fn close_owed(&self) {
-        let mut disk = true;
-        loop {
-            let (id, unconfirmed) = {
-                let mut held = self.held();
-                let oldest = held
-                    .closing
+    /// Withdraws each marked record that was never confirmed, and forgets each mark whose
+    /// task is no longer open.
+    fn drop_marks(&self) {
+        let (unconfirmed, finished): (Vec<TaskId>, Vec<TaskId>) = {
+            let held = self.held();
+            let pending = |id: &&TaskId| held.tasks.get(id).is_some_and(|r| r.pending);
+            (
+                held.closing.keys().filter(pending).copied().collect(),
+                held.closing
                     .keys()
-                    .min_by_key(|id| held.tasks.get(id).map(|r| r.seq))
-                    .copied();
-                let Some((id, close)) = oldest.and_then(|id| held.closing.remove_entry(&id)) else {
-                    break;
-                };
-                let unconfirmed = held.tasks.get(&id).is_some_and(|r| r.pending);
-                if !unconfirmed && !held.close(&id, close) {
-                    continue;
-                }
-                (id, unconfirmed)
-            };
-            match (unconfirmed, disk) {
-                (true, _) => {
-                    self.withdraw_locked(&id);
-                }
-                (false, true) => disk = self.settle_one(&id),
-                (false, false) => {}
-            }
+                    .filter(|id| !held.tasks.get(id).is_some_and(open))
+                    .copied()
+                    .collect(),
+            )
+        };
+        for id in &finished {
+            self.held().unmark(id);
+        }
+        for id in &unconfirmed {
+            self.held().unmark(id);
+            self.withdraw_locked(id);
         }
     }
 
@@ -605,19 +590,15 @@ impl TaskStore {
         taken_back
     }
 
-    /// An exposed record is taken back; a stale task is written as memory holds it, a
-    /// kernel close first given its report ordinal.
+    /// An exposed record is taken back; a stale task is written as memory holds it.
     fn settle_one(&self, id: &TaskId) -> bool {
         if self.held().exposed.contains_key(id) {
             return self.withdraw_locked(id);
         }
-        let written = match self.numbered(id) {
-            Ok(None) => Ok(()),
-            Ok(Some(rec)) => encode(&rec)
-                .and_then(|plain| self.blobs.save(&name_of(id), &plain))
-                .map_err(|e| e.to_string()),
-            Err(e) => Err(e.to_string()),
-        };
+        let rec = self.held().tasks.get(id).cloned();
+        let written = rec.map_or(Ok(()), |rec| {
+            encode(&rec).and_then(|plain| self.blobs.save(&name_of(id), &plain))
+        });
         let mut held = self.held();
         match written {
             Ok(()) => {
@@ -630,20 +611,6 @@ impl TaskStore {
                 false
             }
         }
-    }
-
-    /// The stored task as memory holds it; a close with no report ordinal is issued one
-    /// first, with its empty notice. The caller holds the writer.
-    fn numbered(&self, id: &TaskId) -> Result<Option<TaskRecord>, TaskRefusal> {
-        let Some(mut rec) = self.held().tasks.get(id).cloned() else {
-            return Ok(None);
-        };
-        if rec.state == TaskState::Closed && rec.rseq.is_none() {
-            rec.rseq = Some(self.issue_report(&rec.tasker)?);
-            rec.report = Some((SecretText(String::new().into()), self.clock.now_secs()));
-            self.held().tasks.insert(*id, rec.clone());
-        }
-        Ok(Some(rec))
     }
 
     /// Queues a submission's record for withdrawal by the next writer; never waits.
@@ -661,9 +628,200 @@ impl TaskStore {
         self.held().generation(agent)
     }
 
-    pub fn purge_agent(&self, agent: &AgentId) {
+    /// Marks every open task of `agent`, then closes what is due with no record made.
+    #[cfg(any(test, feature = "hermetic-test-seam"))]
+    pub fn purge_agent(&self, agent: &AgentId) -> Vec<Due> {
         self.held().unenroll(agent, |_| true);
+        self.close_all_due()
+    }
+
+    /// Every due close and expiry, performed as the kernel would after recording each;
+    /// what it returns is what the kernel would have recorded.
+    #[cfg(any(test, feature = "hermetic-test-seam"))]
+    pub fn close_all_due(&self) -> Vec<Due> {
+        let mut said = Vec::new();
+        loop {
+            let batch = self.due(64);
+            said.extend(batch.iter().filter(|d| !d.recorded).cloned());
+            if batch.is_empty() || self.perform(&batch) == 0 {
+                break;
+            }
+        }
         self.pass();
+        said
+    }
+
+    /// [`TaskStore::close_all_due`], then the counters.
+    #[cfg(any(test, feature = "hermetic-test-seam"))]
+    pub fn sweep(&self) -> Vec<Due> {
+        let said = self.close_all_due();
+        self.store_counters();
+        said
+    }
+
+    /// The closes and expiries now due, oldest submission first, at most `limit`. Reads
+    /// memory only: a marked open task, a working task whose lease has lapsed, and a
+    /// report held past `REPORT_HOLD`.
+    pub fn due(&self, limit: usize) -> Vec<Due> {
+        let now = self.clock.now_secs();
+        let hold = REPORT_HOLD.as_secs() as i64;
+        let held = self.held();
+        let why = |id: &TaskId, r: &TaskRecord| {
+            let lapsed = || held.hot.get(id).is_none_or(|h| h.lease_until < now);
+            match (held.closing.get(id), r.state, &r.report) {
+                _ if r.pending => None,
+                (Some(close), TaskState::Queued | TaskState::Working, _) => {
+                    Some(DueFor::Close(*close))
+                }
+                (None, TaskState::Working, _) if lapsed() => {
+                    Some(DueFor::Close(TaskClose::AgentLost))
+                }
+                (_, _, Some((_, at))) if now.saturating_sub(*at) >= hold => Some(DueFor::Expiry),
+                (_, _, _) => None,
+            }
+        };
+        let mut due: Vec<(u64, Due)> = held
+            .tasks
+            .iter()
+            .filter_map(|(id, r)| {
+                let due = Due {
+                    task: *id,
+                    tasker: r.tasker.clone(),
+                    parent: r.parent,
+                    why: why(id, r)?,
+                    recorded: held.recorded.contains(id),
+                };
+                Some((r.seq, due))
+            })
+            .collect();
+        due.sort_by_key(|(seq, _)| *seq);
+        due.into_iter().take(limit).map(|(_, d)| d).collect()
+    }
+
+    /// Performs what the kernel has recorded: each task still due is marked, so no agent
+    /// is handed it or acts on it again, then closed or removed on disk until the disk
+    /// first refuses. A task is `Closed` in memory only once its record is synced. The
+    /// count is of those done.
+    pub fn perform(&self, due: &[Due]) -> usize {
+        let _w = self.writing();
+        let now = self.clock.now_secs();
+        let hold = REPORT_HOLD.as_secs() as i64;
+        let (mut done, mut disk) = (0, true);
+        for d in due {
+            let still = {
+                let mut held = self.held();
+                let lapsed = held.hot.get(&d.task).is_none_or(|h| h.lease_until < now);
+                let rec = held.live(&d.task);
+                let still = match (d.why, held.closing.get(&d.task)) {
+                    (DueFor::Close(_), Some(_)) => rec.is_some_and(open),
+                    (DueFor::Close(TaskClose::AgentLost), None) => {
+                        rec.is_some_and(|r| r.state == TaskState::Working) && lapsed
+                    }
+                    (
+                        DueFor::Close(
+                            TaskClose::AgentGone | TaskClose::Stopped | TaskClose::Dropped,
+                        ),
+                        None,
+                    ) => false,
+                    (DueFor::Expiry, _) => rec
+                        .and_then(|r| r.report.as_ref())
+                        .is_some_and(|(_, at)| now.saturating_sub(*at) >= hold),
+                };
+                if let (true, DueFor::Close(close)) = (still, d.why) {
+                    held.closing.entry(d.task).or_insert(close);
+                    held.recorded.insert(d.task);
+                }
+                still
+            };
+            match (still, d.why, disk) {
+                (false, _, _) => {}
+                (true, DueFor::Close(_), true) => {
+                    disk = self.close_durably(&d.task);
+                    done += usize::from(disk);
+                }
+                (true, DueFor::Close(_), false) => {}
+                (true, DueFor::Expiry, true) => {
+                    disk = self.withdraw_locked(&d.task);
+                    done += 1;
+                }
+                (true, DueFor::Expiry, false) => {
+                    self.held().take_back(&d.task);
+                    done += 1;
+                }
+            }
+        }
+        done
+    }
+
+    /// Writes the marked task `id` closed, under one report ordinal however often it is
+    /// retried; memory follows only a synced write. The caller holds the writer.
+    fn close_durably(&self, id: &TaskId) -> bool {
+        let (prior, close, issued, hot) = {
+            let held = self.held();
+            let (Some(prior), Some(close)) = (held.live(id).cloned(), held.closing.get(id)) else {
+                return true;
+            };
+            let hot = held.hot.get(id).copied().unwrap_or_default();
+            (prior, *close, held.ordinals.get(id).copied(), hot)
+        };
+        let written = issued
+            .map_or_else(|| self.issue_report(&prior.tasker), Ok)
+            .and_then(|rseq| {
+                self.held().ordinals.insert(*id, rseq);
+                let mut next = prior.clone();
+                next.state = TaskState::Closed;
+                next.close = Some(close);
+                next.rseq = Some(rseq);
+                next.report = Some((SecretText(String::new().into()), self.clock.now_secs()));
+                next.actions = hot.actions;
+                next.last_action = hot.last_action;
+                self.write(&next, Some(&prior)).map(|()| next)
+            });
+        let mut held = self.held();
+        match written {
+            Ok(next) => {
+                held.tasks.insert(*id, next);
+                held.unmark(id);
+                held.proven(id);
+                true
+            }
+            Err(why) => {
+                held.owe(id, format!("the close is not stored: {why}"));
+                false
+            }
+        }
+    }
+
+    /// Stores each working task's action counters that changed, until the disk first
+    /// refuses.
+    pub fn store_counters(&self) {
+        let _w = self.writing();
+        let counted: Vec<TaskId> = {
+            let held = self.held();
+            held.tasks
+                .iter()
+                .filter(|(id, r)| {
+                    r.state == TaskState::Working
+                        && !r.pending
+                        && held.hot.get(id).is_some_and(|h| {
+                            (h.actions, h.last_action) != (r.actions, r.last_action)
+                        })
+                })
+                .map(|(id, _)| *id)
+                .collect()
+        };
+        for id in &counted {
+            let (Some(prior), Some(hot)) = (self.record(id), self.hot(id)) else {
+                continue;
+            };
+            let mut next = prior.clone();
+            next.actions = hot.actions;
+            next.last_action = hot.last_action;
+            if self.write(&next, Some(&prior)).is_err() {
+                break;
+            }
+            self.held().tasks.insert(*id, next);
+        }
     }
 
     /// One writer's pass: every owed close, removal and rewrite is tried.
@@ -673,7 +831,8 @@ impl TaskStore {
 
     /// Without the writer and without I/O: every agent whose (id, uid) the view no longer
     /// holds as last seen has its generation bumped, and each of its open tasks bound to
-    /// another uid is owed a close as `AgentGone`. Staleness is read from open tasks only.
+    /// another uid is marked, due a close as `AgentGone`. Staleness is read from open tasks
+    /// only.
     pub fn mark_unenrolled(&self, view: &dyn EnrollmentView) {
         let mut held = self.held();
         let known: BTreeSet<AgentId> = held
@@ -701,9 +860,10 @@ impl TaskStore {
         }
     }
 
-    pub fn retain_enrolled(&self, view: &dyn EnrollmentView) {
+    #[cfg(any(test, feature = "hermetic-test-seam"))]
+    pub fn retain_enrolled(&self, view: &dyn EnrollmentView) -> Vec<Due> {
         self.mark_unenrolled(view);
-        self.pass();
+        self.close_all_due()
     }
 
     /// The agent's generation and enrolled uid, read together before a decision.
@@ -799,8 +959,8 @@ impl TaskStore {
             if held.generation(agent) != generation {
                 return Err(TaskRefusal::AgentGone);
             }
-            if held.tasks.values().filter(|t| t.agent == *agent).count() >= MAX_LIVE_TASKS_PER_AGENT
-            {
+            let live = |t: &&TaskRecord| t.agent == *agent && open(t);
+            if held.tasks.values().filter(live).count() >= MAX_LIVE_TASKS_PER_AGENT {
                 return Err(TaskRefusal::AtCapacity {
                     agent: agent.as_str().to_string(),
                 });
@@ -957,11 +1117,16 @@ impl TaskStore {
                 .min_by_key(|(_, r)| r.seq)
                 .map(|(id, _)| (*id, state))
         };
-        mine(TaskState::Working).or_else(|| mine(TaskState::Queued))
+        let now = self.clock.now_secs();
+        mine(TaskState::Working)
+            .or_else(|| mine(TaskState::Queued))
+            .filter(|(id, _)| held.hot.get(id).is_none_or(|h| h.retry_after <= now))
     }
 
     /// Hands `agent` its working task again, or starts its oldest queued one, under the
-    /// signer's current leaf. Any refusal leaves the task as it was, for the next poll.
+    /// signer's current leaf. Any refusal leaves the task as it was. One the store gave
+    /// (refused, or outcome unknown) holds the task back from the next claims, for 1 s
+    /// doubling to 60 s; a hand-out ends that.
     pub fn claim(
         &self,
         agent: &AgentId,
@@ -971,6 +1136,31 @@ impl TaskStore {
         let Some((id, state)) = self.next_for(agent, uid) else {
             return Ok(Claimed::Idle);
         };
+        let handed = self.hand_out(&id, state, agent, uid, signer);
+        let mut held = self.held();
+        let now = self.clock.now_secs();
+        if let Some(hot) = held.hot.get_mut(&id) {
+            match &handed {
+                Ok(_) => (hot.retry_after, hot.retry_secs) = (0, 0),
+                Err(TaskRefusal::Store(_) | TaskRefusal::Unavailable(_)) => {
+                    hot.retry_secs = (hot.retry_secs * 2).clamp(RETRY_FIRST_SECS, RETRY_MAX_SECS);
+                    hot.retry_after = now + i64::from(hot.retry_secs);
+                }
+                Err(_) => {}
+            }
+        }
+        handed
+    }
+
+    fn hand_out(
+        &self,
+        id: &TaskId,
+        state: TaskState,
+        agent: &AgentId,
+        uid: u32,
+        signer: &dyn TaskSigner,
+    ) -> Result<Claimed, TaskRefusal> {
+        let id = *id;
         self.resign_if_stale(&id, agent, uid, signer)?;
         let moved =
             || TaskRefusal::Unavailable("not done: the queue changed during the claim".into());
@@ -1004,7 +1194,10 @@ impl TaskStore {
                 let mut held = self.held();
                 held.hot.entry(id).or_default().lease_until = lease;
                 held.tasks.insert(id, next);
-                Ok(handed)
+                match held.closing.contains_key(&id) {
+                    true => Err(TaskRefusal::AgentGone),
+                    false => Ok(handed),
+                }
             }
             TaskState::Reported | TaskState::Closed => Err(moved()),
         }
@@ -1067,6 +1260,9 @@ impl TaskStore {
         text: SecretText,
     ) -> Result<TaskView, TaskRefusal> {
         let _w = self.writing();
+        if self.held().closing.contains_key(id) {
+            return Err(TaskRefusal::AgentGone);
+        }
         let next = self.publish(id, text, None, |rec| {
             match (rec.agent == *agent && rec.agent_uid == uid, rec.state) {
                 (false, _) => Err(TaskRefusal::OtherAgent),
@@ -1091,107 +1287,15 @@ impl TaskStore {
         }
     }
 
-    /// Closes each working task whose lease has lapsed as `AgentLost`, removes each
-    /// report held past `REPORT_HOLD`, and stores the action counters that changed. Each
-    /// kind of disk work stops at the first the disk refuses.
-    pub fn sweep(&self) {
-        let _w = self.writing();
-        let now = self.clock.now_secs();
-        let (lapsed, expired, counted) = {
-            let mut held = self.held();
-            let lapsed: Vec<TaskId> = held
-                .tasks
-                .iter()
-                .filter(|(id, r)| {
-                    r.state == TaskState::Working
-                        && !r.pending
-                        && held.hot.get(id).is_none_or(|h| h.lease_until < now)
-                })
-                .map(|(id, _)| *id)
-                .collect();
-            for id in &lapsed {
-                held.close(id, TaskClose::AgentLost);
-            }
-            let hold = REPORT_HOLD.as_secs() as i64;
-            let expired: Vec<TaskId> = held
-                .tasks
-                .iter()
-                .filter(|(_, r)| {
-                    !r.pending
-                        && r.report
-                            .as_ref()
-                            .is_some_and(|(_, at)| now.saturating_sub(*at) >= hold)
-                })
-                .map(|(id, _)| *id)
-                .collect();
-            for id in &expired {
-                if let Some(rec) = held.tasks.get(id) {
-                    let notice = Notice::Expired {
-                        task: *id,
-                        tasker: rec.tasker.clone(),
-                        parent: rec.parent,
-                    };
-                    held.note(notice);
-                }
-            }
-            let counted: Vec<TaskId> = held
-                .tasks
-                .iter()
-                .filter(|(id, r)| {
-                    r.state == TaskState::Working
-                        && !r.pending
-                        && held.hot.get(id).is_some_and(|h| {
-                            (h.actions, h.last_action) != (r.actions, r.last_action)
-                        })
-                })
-                .map(|(id, _)| *id)
-                .collect();
-            (lapsed, expired, counted)
-        };
-        for id in &lapsed {
-            if !self.settle_one(id) {
-                break;
-            }
-        }
-        let mut proven = true;
-        for id in &expired {
-            match proven {
-                true => proven = self.withdraw_locked(id),
-                false => self.held().take_back(id),
-            }
-        }
-        for id in &counted {
-            let (Some(prior), Some(hot)) = (self.record(id), self.hot(id)) else {
-                continue;
-            };
-            let mut next = prior.clone();
-            next.actions = hot.actions;
-            next.last_action = hot.last_action;
-            if self.write(&next, Some(&prior)).is_err() {
-                break;
-            }
-            self.held().tasks.insert(*id, next);
-        }
-    }
-
     /// What the kernel has yet to record, oldest first.
     pub fn take_notices(&self) -> Vec<Notice> {
-        let mut held = self.held();
-        let mut out = Vec::new();
-        if held.unsaid > 0 {
-            out.push(Notice::Dropped(std::mem::take(&mut held.unsaid)));
-        }
-        out.extend(std::mem::take(&mut held.notices));
-        out
+        std::mem::take(&mut self.held().notices)
     }
 
     /// Puts back, ahead of any newer ones, the notices the trail did not take.
     pub fn return_notices(&self, mut unsaid: Vec<Notice>) {
         let mut held = self.held();
         unsaid.extend(std::mem::take(&mut held.notices));
-        let over = unsaid.len().saturating_sub(NOTICES_MAX);
-        held.unsaid += over;
-        unsaid.drain(..over);
         held.notices = unsaid;
     }
 
@@ -2589,7 +2693,7 @@ mod tests {
 
         let withdrawing = DuringSign {
             inner: &signing,
-            during: Box::new(|| store.purge_agent(&hobi)),
+            during: Box::new(|| drop(store.purge_agent(&hobi))),
         };
         assert_eq!(
             store
@@ -3959,36 +4063,60 @@ mod tests {
             .and_then(|r| r.close)
     }
 
-    /// The disk fails as `fail` while a purge closes a task; memory is closed at once,
-    /// and the record is owed until a writer passes on a recovered disk.
-    fn a_kernel_close_is_owed_through(fail: crate::task_store::Fail) {
+    fn gone(task: TaskId, recorded: bool) -> Due {
+        Due {
+            task,
+            tasker: Tasker::Uid(1000),
+            parent: None,
+            why: DueFor::Close(TaskClose::AgentGone),
+            recorded,
+        }
+    }
+
+    /// The disk fails as `fail` while a recorded close is performed: the task stays as
+    /// it was, marked, and nothing of the close is shown until a synced write.
+    fn a_close_is_not_shown_until_stored_through(fail: crate::task_store::Fail, issued: bool) {
         let (blobs, store) = mem();
         let me = Tasker::Uid(1000);
         let task = held_by(&store, me.clone());
         blobs.fail(Some(fail));
-        store.purge_agent(&id("hobi"));
-        assert_eq!(closed(&store, &task), Some(TaskClose::AgentGone));
-        assert!(store.queue(&id("hobi")).is_empty());
+        assert_eq!(store.purge_agent(&id("hobi")), vec![gone(task, false)]);
+        assert_eq!(closed(&store, &task), None);
+        assert_eq!(store.state_for(&task, &me), Some(TaskState::Queued));
+        assert!(store
+            .reports(&me, &id("hobi"), usize::MAX)
+            .entries
+            .is_empty());
+        assert_eq!(store.list(&me, &id("hobi"), None, 8).0[0].close, None);
         assert_eq!(
             store.claim(&id("hobi"), HOBI, signer()),
             Ok(Claimed::Idle),
-            "an agent enrolled again under the same uid is handed nothing"
+            "marked: an agent enrolled again under the same uid is handed nothing"
         );
+        assert_eq!(
+            store.due(8),
+            vec![gone(task, true)],
+            "still due, already recorded"
+        );
+        let ordinal = store.held().ordinals.get(&task).copied();
+        assert_eq!(ordinal, issued.then_some(1));
         let said = store.take_notices();
         assert!(
-            matches!(
-                &said[..],
-                [Notice::Closed { task: t, close: TaskClose::AgentGone, .. }, Notice::Owed { task: o, .. }]
-                    if *t == task && *o == task
-            ),
+            matches!(&said[..], [Notice::Owed { task: t, .. }] if *t == task),
             "{said:?}"
         );
-        store.purge_agent(&id("hobi"));
-        store.pass();
-        assert!(store.take_notices().is_empty(), "closed once, owed once");
+        assert!(store.purge_agent(&id("hobi")).is_empty(), "recorded once");
+        assert!(store.take_notices().is_empty(), "owed once");
+        assert_eq!(store.held().ordinals.get(&task).copied(), ordinal);
         blobs.fail(None);
-        store.pass();
+        assert!(store.close_all_due().is_empty());
+        assert_eq!(closed(&store, &task), Some(TaskClose::AgentGone));
+        assert_eq!(store.record(&task).unwrap().rseq, Some(1), "one ordinal");
         assert_eq!(store.take_notices(), vec![Notice::Settled { task }]);
+        assert!(store.due(8).is_empty());
+        let held = store.held();
+        assert!(held.closing.is_empty() && held.recorded.is_empty() && held.ordinals.is_empty());
+        drop(held);
         blobs.crash(0);
         let reopened = reopen(&blobs);
         assert_eq!(closed(&reopened, &task), Some(TaskClose::AgentGone));
@@ -3999,54 +4127,50 @@ mod tests {
     }
 
     #[test]
-    fn a_kernel_close_whose_record_is_refused_is_closed_in_memory_and_owed() {
-        a_kernel_close_is_owed_through(crate::task_store::Fail::Records);
+    fn a_close_whose_record_is_refused_is_not_shown_until_it_is_stored() {
+        a_close_is_not_shown_until_stored_through(crate::task_store::Fail::Records, true);
     }
 
     #[test]
-    fn a_kernel_close_whose_record_lands_unsynced_is_closed_in_memory_and_owed() {
-        a_kernel_close_is_owed_through(crate::task_store::Fail::Unsynced);
+    fn a_close_whose_record_lands_unsynced_is_not_shown_until_it_is_stored() {
+        a_close_is_not_shown_until_stored_through(crate::task_store::Fail::Unsynced, true);
     }
 
     #[test]
-    fn a_kernel_close_with_no_ordinal_yet_is_numbered_by_a_later_writer() {
+    fn a_close_whose_ordinal_cannot_be_issued_is_not_shown_until_it_is_stored() {
+        a_close_is_not_shown_until_stored_through(crate::task_store::Fail::Every, false);
+    }
+
+    #[test]
+    fn a_close_lost_in_a_crash_is_due_again_and_the_tasker_sees_it_once() {
         let (blobs, store) = mem();
         let me = Tasker::Uid(1000);
         let task = held_by(&store, me.clone());
-        blobs.fail(Some(crate::task_store::Fail::Every));
+        blobs.fail(Some(crate::task_store::Fail::Unsynced));
         store.purge_agent(&id("hobi"));
-        let rec = store.record(&task).unwrap();
-        assert_eq!((rec.state, rec.rseq), (TaskState::Closed, None));
-        assert!(rec.report.is_none());
         assert!(store
             .reports(&me, &id("hobi"), usize::MAX)
             .entries
             .is_empty());
-        assert_eq!(store.state_for(&task, &me), Some(TaskState::Closed));
         blobs.fail(None);
-        store.pass();
-        let rec = store.record(&task).unwrap();
-        assert_eq!(rec.rseq, Some(1));
-        assert_eq!(store.reports(&me, &id("hobi"), usize::MAX).entries.len(), 1);
-        assert_eq!(reopen(&blobs).record(&task).unwrap().rseq, Some(1));
-    }
-
-    #[test]
-    fn a_kernel_close_lost_in_a_crash_is_made_again_by_the_boot_reconcile() {
-        let (blobs, store) = mem();
-        let task = held_by(&store, Tasker::Uid(1000));
-        blobs.fail(Some(crate::task_store::Fail::Unsynced));
-        store.purge_agent(&id("hobi"));
         blobs.crash(0);
         let reopened = reopen(&blobs);
         assert_eq!(reopened.record(&task).unwrap().state, TaskState::Queued);
-        reopened.retain_enrolled(&view(&[]));
+        assert_eq!(
+            reopened.retain_enrolled(&view(&[])),
+            vec![gone(task, false)],
+            "recorded again"
+        );
         assert_eq!(closed(&reopened, &task), Some(TaskClose::AgentGone));
+        assert_eq!(
+            reopened.reports(&me, &id("hobi"), usize::MAX).entries.len(),
+            1
+        );
         assert_eq!(closed(&reopen(&blobs), &task), Some(TaskClose::AgentGone));
     }
 
     #[test]
-    fn a_kernel_close_that_panics_in_its_write_is_still_closed_and_rewritten() {
+    fn a_close_that_panics_in_its_write_stays_marked_and_is_stored_later() {
         let (blobs, store) = mem();
         let task = held_by(&store, Tasker::Uid(1000));
         blobs.fail(Some(crate::task_store::Fail::Panics));
@@ -4054,18 +4178,85 @@ mod tests {
             store.purge_agent(&id("hobi"));
         }));
         assert!(unwound.is_err());
-        assert_eq!(closed(&store, &task), Some(TaskClose::AgentGone));
+        assert_eq!(closed(&store, &task), None);
+        assert_eq!(store.due(8), vec![gone(task, true)]);
         blobs.fail(None);
-        store.pass();
+        store.close_all_due();
         assert_eq!(closed(&reopen(&blobs), &task), Some(TaskClose::AgentGone));
     }
 
     #[test]
-    fn marking_the_unenrolled_does_no_io_and_the_next_writer_closes_first() {
+    fn a_close_is_performed_only_while_it_is_still_due() {
+        let (_blobs, clock, store) = clocked();
+        let me = Tasker::Uid(1000);
+        let lease = CLAIM_LEASE.as_secs() as i64;
+        let task = held_by(&store, me.clone());
+        store.start_for_test(&task);
+        clock.set(1_001 + lease);
+        let due = store.due(8);
+        assert_eq!(due[0].why, DueFor::Close(TaskClose::AgentLost));
+        store.heartbeat(&id("hobi"), HOBI, 0, 0);
+        assert_eq!(
+            store.perform(&due),
+            0,
+            "the lease was renewed before the close"
+        );
+        assert_eq!(closed(&store, &task), None);
+        assert!(store.due(8).is_empty());
+        assert_eq!(store.perform(&[gone(task, false)]), 0, "never marked");
+        clock.set(1_002 + 2 * lease);
+        let due = store.due(8);
+        store.stop(&task, &me).unwrap();
+        assert_eq!(store.perform(&due), 0, "its tasker stopped it first");
+        assert_eq!(closed(&store, &task), Some(TaskClose::Stopped));
+        let reported = held_by(&store, me.clone());
+        store.publish_report(&reported, text("r"), None).unwrap();
+        let early = Due {
+            task: reported,
+            tasker: me,
+            parent: None,
+            why: DueFor::Expiry,
+            recorded: false,
+        };
+        assert_eq!(store.perform(&[early]), 0, "its hold has not run out");
+        assert!(store.record(&reported).is_some());
+    }
+
+    #[test]
+    fn a_lapsed_task_the_disk_does_not_close_is_marked_and_never_recorded_twice() {
+        let (blobs, clock, store) = clocked();
+        let task = held_by(&store, Tasker::Uid(1000));
+        store.start_for_test(&task);
+        clock.set(1_001 + CLAIM_LEASE.as_secs() as i64);
+        blobs.fail(Some(crate::task_store::Fail::Records));
+        assert_eq!(store.sweep().len(), 1);
+        assert_eq!(closed(&store, &task), None);
+        assert_eq!(
+            store.heartbeat(&id("hobi"), HOBI, 0, 0),
+            Heartbeat::Idle,
+            "marked: the agent no longer holds it, and is not yet told it closed"
+        );
+        assert_eq!(
+            store.report(&task, &id("hobi"), HOBI, text("late")),
+            Err(TaskRefusal::AgentGone)
+        );
+        assert!(store.sweep().is_empty(), "recorded once");
+        blobs.fail(None);
+        assert!(store.sweep().is_empty());
+        assert_eq!(closed(&store, &task), Some(TaskClose::AgentLost));
+        assert!(matches!(
+            store.heartbeat(&id("hobi"), HOBI, 0, 0),
+            Heartbeat::Closed(v) if v.close == Some(TaskClose::AgentLost)
+        ));
+    }
+
+    #[test]
+    fn marking_the_unenrolled_does_no_io_and_no_agent_acts_on_a_marked_task() {
         let (blobs, store) = mem();
         let v = view(&[("hobi", HOBI)]);
         store.retain_enrolled(&v);
         let task = held_by(&store, Tasker::Uid(1000));
+        let queued = held_by(&store, Tasker::Uid(1000));
         store.start_for_test(&task);
         let before = blobs.attempts();
         blobs.fail(Some(crate::task_store::Fail::Panics));
@@ -4086,12 +4277,31 @@ mod tests {
             store.heartbeat(&id("hobi"), HOBI, 0, usize::MAX),
             Heartbeat::Idle
         );
+        store.pass();
         assert_eq!(
             store.report(&task, &id("hobi"), HOBI, text("late")),
-            Err(TaskRefusal::NotWorking),
-            "the writer closed it before the report was read"
+            Err(TaskRefusal::AgentGone),
+            "a marked task is not reported, though a writer has passed"
         );
+        assert_eq!(store.claim(&id("hobi"), HOBI, signer()), Ok(Claimed::Idle));
+        assert_eq!(store.record(&task).unwrap().state, TaskState::Working);
+        assert_eq!(store.record(&queued).unwrap().state, TaskState::Queued);
+        assert_eq!(store.close_all_due().len(), 2);
         assert_eq!(closed(&store, &task), Some(TaskClose::AgentGone));
+    }
+
+    #[test]
+    fn a_task_marked_while_its_claim_is_written_is_not_handed_out() {
+        let (blobs, store) = mem();
+        let store = Arc::new(store);
+        let task = held_by(&store, Tasker::Uid(1000));
+        let marking = Arc::clone(&store);
+        blobs.after_save(move || marking.mark_unenrolled(&view(&[])));
+        assert_eq!(
+            store.claim(&id("hobi"), HOBI, signer()),
+            Err(TaskRefusal::AgentGone)
+        );
+        assert_eq!(store.due(8), vec![gone(task, false)], "due its close");
     }
 
     #[test]
@@ -4171,7 +4381,7 @@ mod tests {
 
     #[test]
     fn a_claim_the_disk_does_not_take_leaves_the_task_queued() {
-        let (blobs, store) = mem();
+        let (blobs, clock, store) = clocked();
         let hobi = id("hobi");
         let task = held_by(&store, Tasker::Uid(1000));
         blobs.fail(Some(crate::task_store::Fail::UnsyncedOnce));
@@ -4182,11 +4392,13 @@ mod tests {
             ),
             "landed unsynced, then undone: refused"
         );
+        clock.set(1_001);
         blobs.fail(Some(crate::task_store::Fail::Records));
         assert!(matches!(
             store.claim(&hobi, HOBI, signer()),
             Err(TaskRefusal::Store(_))
         ));
+        clock.set(1_003);
         blobs.fail(Some(crate::task_store::Fail::Unsynced));
         let said = store.claim(&hobi, HOBI, signer()).unwrap_err();
         assert!(
@@ -4203,6 +4415,7 @@ mod tests {
         blobs.fail(None);
         store.pass();
         blobs.crash(1);
+        clock.set(1_007);
         assert_eq!(
             reopen(&blobs).record(&task).unwrap().state,
             TaskState::Queued,
@@ -4216,7 +4429,7 @@ mod tests {
 
     #[test]
     fn a_claim_under_a_rotated_leaf_is_signed_again_or_hands_out_nothing() {
-        let (blobs, store) = mem();
+        let (blobs, clock, store) = clocked();
         let hobi = id("hobi");
         let signing = LeafSigner::new(PlaneKey::EcdsaP384Sha384);
         let mut task = TaskObject::for_test("hobi", 1000);
@@ -4235,6 +4448,7 @@ mod tests {
         assert_eq!(store.record(&task).unwrap().state, TaskState::Queued);
         assert_eq!(closed(&store, &task), None, "never closed for it");
         blobs.fail(None);
+        clock.set(1_001);
         match store.claim(&hobi, HOBI, &signing).unwrap() {
             Claimed::Delivered { signed, .. } => assert_eq!(signing.verify(&signed), Ok(())),
             Claimed::Idle => panic!("idle"),
@@ -4331,27 +4545,27 @@ mod tests {
         let (one, two) = (held_by(&store, me.clone()), held_by(&store, me.clone()));
         store.publish_report(&one, text("r"), None).unwrap();
         store.publish_report(&two, text("r"), None).unwrap();
+        clock.set(999 + REPORT_HOLD.as_secs() as i64);
+        assert!(store.due(8).is_empty());
         clock.set(1_000 + REPORT_HOLD.as_secs() as i64);
+        let due = store.due(8);
+        assert_eq!(
+            due.iter().map(|d| (d.task, d.why)).collect::<Vec<_>>(),
+            [(one, DueFor::Expiry), (two, DueFor::Expiry)]
+        );
+        assert_eq!(store.due(1).len(), 1);
         blobs.fail(Some(crate::task_store::Fail::Unsynced));
         let before = blobs.attempts();
-        store.sweep();
+        assert_eq!(store.perform(&due), 2);
         assert_eq!(
             blobs.attempts() - before,
             2,
-            "one failure ends the sweep's removals"
+            "one failure ends the removals"
         );
         assert!(store.record(&one).is_none() && store.record(&two).is_none());
+        assert!(store.due(8).is_empty());
         let said = store.take_notices();
-        assert_eq!(
-            said.iter()
-                .filter(|n| matches!(n, Notice::Expired { .. }))
-                .count(),
-            2
-        );
-        assert!(
-            said.iter().any(|n| matches!(n, Notice::Owed { .. })),
-            "{said:?}"
-        );
+        assert!(matches!(&said[..], [Notice::Owed { .. }]), "{said:?}");
         blobs.fail(None);
         store.pass();
         store.pass();
@@ -4406,7 +4620,7 @@ mod tests {
     }
 
     #[test]
-    fn notices_are_kept_in_order_up_to_a_bound_and_the_overflow_is_counted() {
+    fn notices_the_trail_did_not_take_go_back_ahead_of_newer_ones() {
         let (_blobs, store) = mem();
         let note = |n: u8| Notice::Settled {
             task: TaskId([n; 16]),
@@ -4414,17 +4628,88 @@ mod tests {
         store.note(note(2));
         store.return_notices(vec![note(1)]);
         assert_eq!(store.take_notices(), vec![note(1), note(2)]);
-        for _ in 0..NOTICES_MAX + 3 {
-            store.note(note(0));
+        assert!(store.take_notices().is_empty());
+    }
+
+    struct CountsSigns<'a>(&'a LeafSigner, AtomicUsize);
+
+    impl TaskSigner for CountsSigns<'_> {
+        fn sign(&self, task: TaskObject) -> Result<SignedTask, TaskRefusal> {
+            self.1.fetch_add(1, Ordering::SeqCst);
+            self.0.sign(task)
         }
-        let said = store.take_notices();
-        assert_eq!(said.len(), NOTICES_MAX + 1);
-        assert_eq!(said[0], Notice::Dropped(3));
-        store.note(note(9));
-        store.return_notices(vec![note(7); NOTICES_MAX]);
-        let said = store.take_notices();
-        assert_eq!(said[0], Notice::Dropped(1));
-        assert_eq!(said.last(), Some(&note(9)), "the oldest is dropped");
+        fn current_leaf(&self) -> Option<[u8; 32]> {
+            self.0.current_leaf()
+        }
+    }
+
+    #[test]
+    fn a_hand_out_the_store_refuses_is_held_back_one_second_doubling_to_sixty() {
+        let (blobs, clock, store) = clocked();
+        let hobi = id("hobi");
+        let signing = LeafSigner::new(PlaneKey::EcdsaP384Sha384);
+        let mut task = TaskObject::for_test("hobi", 1000);
+        task.tasker = Tasker::Uid(1000);
+        let task = store
+            .insert_for_test(signing.sign(task).unwrap(), HOBI)
+            .task
+            .task_id;
+        let later = held_by(&store, Tasker::Uid(1000));
+        signing.rotate();
+        let counting = CountsSigns(&signing, AtomicUsize::new(0));
+        let signs = || counting.1.load(Ordering::SeqCst);
+        blobs.fail(Some(crate::task_store::Fail::Unsynced));
+        let mut now = 1_000;
+        for (n, wait) in [1, 2, 4, 8, 16, 32, 60, 60].into_iter().enumerate() {
+            assert!(
+                matches!(
+                    store.claim(&hobi, HOBI, &counting),
+                    Err(TaskRefusal::Unavailable(_))
+                ),
+                "attempt {n}"
+            );
+            assert_eq!(signs(), n + 1);
+            let hot = store.hot(&task).unwrap();
+            assert_eq!(
+                (hot.retry_secs, hot.retry_after),
+                (wait, now + i64::from(wait))
+            );
+            let attempts = blobs.attempts();
+            clock.set(now + i64::from(wait) - 1);
+            for _ in 0..3 {
+                assert_eq!(store.claim(&hobi, HOBI, &counting), Ok(Claimed::Idle));
+                assert_eq!(
+                    store.next_for(&hobi, HOBI),
+                    None,
+                    "nor is the next task taken"
+                );
+            }
+            assert_eq!(signs(), n + 1, "no signature inside the window");
+            assert_eq!(blobs.attempts(), attempts, "no write inside the window");
+            now += i64::from(wait);
+            clock.set(now);
+        }
+        blobs.fail(None);
+        assert!(matches!(
+            store.claim(&hobi, HOBI, &counting),
+            Ok(Claimed::Delivered { .. })
+        ));
+        let hot = store.hot(&task).unwrap();
+        assert_eq!(
+            (hot.retry_secs, hot.retry_after),
+            (0, 0),
+            "a hand-out ends it"
+        );
+        assert_eq!(store.record(&later).unwrap().state, TaskState::Queued);
+        assert_eq!(
+            store.claim(&hobi, HOBI, &NoIdentity),
+            Err(TaskRefusal::Unsigned)
+        );
+        assert_eq!(
+            store.hot(&task).unwrap().retry_after,
+            0,
+            "only the store's answers"
+        );
     }
 
     #[test]
@@ -5253,7 +5538,7 @@ mod tests {
         let store = Arc::new(TaskStore::new());
         let emit = Recorder::new();
         let purging = store.clone();
-        let racing = hooked(pdp.clone(), move || purging.purge_agent(&id("hobi")));
+        let racing = hooked(pdp.clone(), move || drop(purging.purge_agent(&id("hobi"))));
         let view = SnapshotEnrollment(pdp.clone());
         let refused = submit_via(
             racing,

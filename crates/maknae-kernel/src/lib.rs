@@ -100,9 +100,9 @@ pub use sensitive_authz::{sensitive_match, SensitiveMatch};
 pub use session::AllowFacts;
 pub use session::{Facts, FactsGate, SessionChannel, SessionFacts, SessionRecord};
 pub use task::{
-    Claimed, Enrolled, Heartbeat, Notice, PlaneSigner, Submitter, TaskRefusal, TaskSigner,
-    TaskStore, MAX_FOLLOW_UPS_PER_TASK, MAX_HELD_REPORTS_PER_TASKER, MAX_LIVE_TASKS_PER_AGENT,
-    MAX_LIVE_TASKS_PER_TASKER_PER_AGENT,
+    Claimed, Due, DueFor, Enrolled, Heartbeat, Notice, PlaneSigner, Submitter, TaskRefusal,
+    TaskSigner, TaskStore, MAX_FOLLOW_UPS_PER_TASK, MAX_HELD_REPORTS_PER_TASKER,
+    MAX_LIVE_TASKS_PER_AGENT, MAX_LIVE_TASKS_PER_TASKER_PER_AGENT,
 };
 #[cfg(any(test, feature = "hermetic-test-seam"))]
 pub use task::{TaskObjectForTest, UnverifiedSigner};

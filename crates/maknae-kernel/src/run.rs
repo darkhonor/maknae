@@ -6208,6 +6208,14 @@ where
     E: AuditEmit + Send + Sync + 'static,
 {
     async fn run(self: &Arc<Self>) -> Result<crate::reload::Applied, crate::reload::Refusal> {
+        let reloaded = self.reload_in_turn().await;
+        self.settle_tasks().await;
+        reloaded
+    }
+
+    async fn reload_in_turn(
+        self: &Arc<Self>,
+    ) -> Result<crate::reload::Applied, crate::reload::Refusal> {
         let _turn = self.lock.lock().await;
         let stopping = *self.stopping.borrow() || *self.drain.borrow() != Drain::Serving;
         crate::reload::turn(stopping, &self.revision, |store_revision| async move {
@@ -6234,10 +6242,7 @@ where
             let stopped = async move {
                 let _ = stopping.wait_for(|stop| *stop).await;
             };
-            let reloaded =
-                crate::reload::run_reload(store_revision, &io, &io, &io, &io, stopped).await;
-            self.settle_tasks(&ctx).await;
-            reloaded
+            crate::reload::run_reload(store_revision, &io, &io, &io, &io, stopped).await
         })
         .await
     }
@@ -6282,9 +6287,9 @@ where
     }
 
     /// Installs `snapshot`, or keeps the installed one when only the live values changed, then
-    /// owes a close to every open task whose agent it no longer enrolls, without I/O.
-    /// Called after the install's own locks are released: `mark_unenrolled` reads the
-    /// snapshot under the store lock. [`Reloader::settle_tasks`] follows it.
+    /// marks every open task whose agent it no longer enrolls, without I/O. Called after
+    /// the install's own locks are released: `mark_unenrolled` reads the snapshot under the
+    /// store lock. [`Reloader::settle_tasks`] follows once the turn is released.
     fn install_and_reconcile(&self, snapshot: Option<Arc<maknae_authz_basic::snapshot::Snapshot>>) {
         if let Some(snapshot) = snapshot {
             self.authorizer.baseline().install(snapshot);
@@ -6295,16 +6300,43 @@ where
             )));
     }
 
-    /// Writes and records the closes `install_and_reconcile` owed. One that does not land
-    /// in time is still performed by the next store write, before that write acts.
-    async fn settle_tasks(&self, ctx: &BootCtx<'_>) {
-        if let Err(e) = settle_tasks(&self.tasks, self.sink.as_ref(), ctx, false).await {
-            eprintln!("maknaed: task closes are left to the next store write: {e}");
-        }
+    /// Records and performs the closes `install_and_reconcile` marked, in a session of its
+    /// own. Called with no turn held; the sweep finishes what it leaves.
+    async fn settle_tasks(&self) {
+        let seq = Seq::new();
+        let ctx = BootCtx {
+            event: "task",
+            host: &self.host,
+            socket: &self.socket,
+            euid: self.euid,
+            session_id: self.session_ids.next_session(),
+            seq: &seq,
+            au3_1: &self.au3_1,
+        };
+        settle_tasks(
+            &self.tasks,
+            self.sink.as_ref(),
+            &ctx,
+            BLOCKING_OPERATION_TIMEOUT,
+            false,
+        )
+        .await;
     }
 
     /// A live edit; `released` is set to the uid a release acted on, resolved in the turn.
     async fn live_edit_resolving(
+        &self,
+        req: LiveRequest<'_>,
+        released: &mut Option<u32>,
+    ) -> Result<LiveApplied, crate::containment::LiveRefusal> {
+        let applied = self.live_edit_in_turn(req, released).await;
+        if applied.is_ok() {
+            self.settle_tasks().await;
+        }
+        applied
+    }
+
+    async fn live_edit_in_turn(
         &self,
         req: LiveRequest<'_>,
         released: &mut Option<u32>,
@@ -6487,7 +6519,6 @@ where
             crate::identity_report::transition_problems(&released),
         );
         self.install_and_reconcile(Some(snapshot));
-        self.settle_tasks(&ctx).await;
         self.identity.publish(published);
         *self
             .applied_source
@@ -6916,11 +6947,14 @@ where
         guard.live_unsettled = false;
         self.publish_mirror(&next, &ctx).await;
         drop(guard);
-        if applied.is_ok() && held_live {
+        let reconciled = applied.is_ok() && held_live;
+        if reconciled {
             self.install_and_reconcile(None);
-            self.settle_tasks(&ctx).await;
         }
         drop(turn);
+        if reconciled {
+            self.settle_tasks().await;
+        }
         let revision = committed.revision;
         let (result, reason, posture) = match &applied {
             Ok(how) => (
@@ -8008,87 +8042,113 @@ async fn open_tasks(
 }
 
 const TASK_SWEEP_EVERY: Duration = Duration::from_secs(60);
+const TASK_CLOSE_BATCH: usize = 64;
+/// The final sweep is joined, and an abort of it recorded, while the reloader stops:
+/// the two bounds together stay within `RELOAD_STOP_TIMEOUT`.
+const TASK_SWEEP_STOP_TIMEOUT: Duration = Duration::from_secs(3);
+const TASK_SWEEP_ABORT_RECORD_TIMEOUT: Duration = Duration::from_secs(2);
 
-fn task_notice_record(ctx: &BootCtx<'_>, notice: &crate::task::Notice) -> AuditRecord {
-    use crate::task::Notice;
-    use maknae_proto::{TaskClose, Tasker};
-    let (result, posture, reason) = match notice {
-        Notice::Closed { close, .. } => (
-            "deny",
-            "unavailable",
-            match close {
-                TaskClose::Stopped => "closed:stopped".to_string(),
-                TaskClose::Dropped => "closed:dropped".to_string(),
-                TaskClose::AgentGone => "closed:agent-gone".to_string(),
-                TaskClose::AgentLost => "closed:agent-lost".to_string(),
-            },
-        ),
-        Notice::Expired { .. } => ("deny", "unavailable", "expired".to_string()),
-        Notice::Owed { why, .. } => (
-            "deny",
-            "unavailable",
-            format!("store: owed to a later store write: {why}"),
-        ),
-        Notice::Settled { .. } => (
-            "permit",
-            "authorized",
-            "store: the owed write landed".to_string(),
-        ),
-        Notice::Left { why, .. } => (
-            "deny",
-            "unavailable",
-            format!("store: an unconfirmed record stays on disk until the next start: {why}"),
-        ),
-        Notice::Late { failed: None, .. } => (
-            "permit",
-            "authorized",
-            "task stored after the submission was answered".to_string(),
-        ),
-        Notice::Late {
-            failed: Some(why), ..
-        } => (
-            "deny",
-            "unavailable",
-            format!("not stored after the submission was answered: {why}"),
-        ),
-        Notice::Dropped(n) => (
-            "deny",
-            "unavailable",
-            format!("store: {n} task notices were not recorded"),
-        ),
-    };
-    let mut rec = ctx.record("session.task", result, &reason, posture, None);
-    let (task, tasker, parent) = match notice {
-        Notice::Closed {
-            task,
-            tasker,
-            parent,
-            ..
-        }
-        | Notice::Expired {
-            task,
-            tasker,
-            parent,
-        } => (Some(task), Some(tasker), *parent),
-        Notice::Late { task, tasker, .. } => (Some(task), Some(tasker), None),
-        Notice::Owed { task, .. } | Notice::Settled { task } | Notice::Left { task, .. } => {
-            (Some(task), None, None)
-        }
-        Notice::Dropped(_) => (None, None, None),
-    };
+fn task_record(
+    ctx: &BootCtx<'_>,
+    (result, posture, reason): (&str, &str, &str),
+    task: Option<&maknae_proto::TaskId>,
+    tasker: Option<&maknae_proto::Tasker>,
+    parent: Option<&maknae_proto::TaskId>,
+) -> AuditRecord {
+    use maknae_proto::Tasker;
+    let mut rec = ctx.record("session.task", result, reason, posture, None);
     rec.object = task.map(|t| format!("task:{t}"));
     rec.subject.task_id = task.map(ToString::to_string);
-    rec.subject.parent_task_id = parent.map(|p| p.to_string());
+    rec.subject.parent_task_id = parent.map(ToString::to_string);
     rec.subject.tasker = tasker.map(maknae_proto::tasker_text);
-    if let Notice::Late { .. } = notice {
-        rec.subject.task_op = Some("submit".into());
-    }
     rec.source.uid = match tasker {
         Some(Tasker::Uid(uid) | Tasker::Agent { uid, .. }) => *uid,
         Some(Tasker::Remote(_)) => maknae_audit_append::NO_PEER_UID,
         None => ctx.euid,
     };
     rec
+}
+
+/// The record of a close or an expiry, appended before the store performs it.
+fn task_due_record(ctx: &BootCtx<'_>, due: &crate::task::Due) -> AuditRecord {
+    use crate::task::DueFor;
+    use maknae_proto::TaskClose;
+    let reason = match due.why {
+        DueFor::Close(TaskClose::Stopped) => "closed:stopped",
+        DueFor::Close(TaskClose::Dropped) => "closed:dropped",
+        DueFor::Close(TaskClose::AgentGone) => "closed:agent-gone",
+        DueFor::Close(TaskClose::AgentLost) => "closed:agent-lost",
+        DueFor::Expiry => "expired",
+    };
+    task_record(
+        ctx,
+        ("deny", "unavailable", reason),
+        Some(&due.task),
+        Some(&due.tasker),
+        due.parent.as_ref(),
+    )
+}
+
+fn task_notice_record(ctx: &BootCtx<'_>, notice: &crate::task::Notice) -> AuditRecord {
+    use crate::task::Notice;
+    match notice {
+        Notice::Owed { task, why } => task_record(
+            ctx,
+            (
+                "deny",
+                "unavailable",
+                &format!("store: owed to a later store write: {why}"),
+            ),
+            Some(task),
+            None,
+            None,
+        ),
+        Notice::Settled { task } => task_record(
+            ctx,
+            ("permit", "authorized", "store: the owed write landed"),
+            Some(task),
+            None,
+            None,
+        ),
+        Notice::Left { task, why } => task_record(
+            ctx,
+            (
+                "deny",
+                "unavailable",
+                &format!("store: an unconfirmed record stays on disk until the next start: {why}"),
+            ),
+            Some(task),
+            None,
+            None,
+        ),
+        Notice::Late {
+            task,
+            tasker,
+            failed,
+        } => {
+            let said = match failed {
+                None => (
+                    "permit",
+                    "authorized",
+                    "task stored after the submission was answered".to_string(),
+                ),
+                Some(why) => (
+                    "deny",
+                    "unavailable",
+                    format!("not stored after the submission was answered: {why}"),
+                ),
+            };
+            let mut rec = task_record(
+                ctx,
+                (said.0, said.1, &said.2),
+                Some(task),
+                Some(tasker),
+                None,
+            );
+            rec.subject.task_op = Some("submit".into());
+            rec
+        }
+    }
 }
 
 /// `ctx`'s session and sequence, under the `task` event.
@@ -8114,10 +8174,7 @@ async fn record_task_notices<E: AuditEmit>(
     let mut notices = std::collections::VecDeque::from(tasks.take_notices());
     while let Some(notice) = notices.pop_front() {
         let rec = task_notice_record(ctx, &notice);
-        if let Err(e) = emit.emit_within(&rec, AUDIT_APPEND_TIMEOUT).await {
-            eprintln!(
-                "maknaed: AUDIT WRITE FAILED on a task store record; kept for the next sweep: {e}"
-            );
+        if emit.emit_within(&rec, AUDIT_APPEND_TIMEOUT).await.is_err() {
             notices.push_front(notice);
             tasks.return_notices(notices.into());
             return false;
@@ -8126,51 +8183,145 @@ async fn record_task_notices<E: AuditEmit>(
     true
 }
 
-/// One writer's pass over the task store, off the async worker, then its records; false
-/// when the trail refused one.
+/// What a pass over the due closes left undone, and why it stopped.
+struct Swept {
+    remaining: usize,
+    stopped: Option<String>,
+}
+
+/// Appends one record for each due close and expiry, then has the store perform that
+/// batch, until none is due, the trail refuses a record, the store makes no progress, or
+/// `deadline`. A task whose record the trail refused is left as it is, still due.
+async fn close_due<E: AuditEmit>(
+    tasks: &Arc<crate::task::TaskStore>,
+    emit: &E,
+    ctx: &BootCtx<'_>,
+    deadline: tokio::time::Instant,
+) -> Swept {
+    let mut stopped = None;
+    while stopped.is_none() {
+        let mut recorded = Vec::new();
+        for due in tasks.due(TASK_CLOSE_BATCH) {
+            let rec = task_due_record(ctx, &due);
+            match due.recorded {
+                true => {}
+                false => match emit.emit_within(&rec, AUDIT_APPEND_TIMEOUT).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        stopped = Some(format!("the trail refused a close record: {e}"));
+                        break;
+                    }
+                },
+            }
+            recorded.push(due);
+        }
+        if recorded.is_empty() {
+            break;
+        }
+        let s = Arc::clone(tasks);
+        match crate::task::offload(ctx.euid, deadline, move || Ok(s.perform(&recorded))).await {
+            Ok(0) => stopped = stopped.or(Some("the task store stored no close".into())),
+            Ok(_) => {}
+            Err(e) => stopped = Some(e.to_string()),
+        }
+    }
+    Swept {
+        remaining: tasks.due(usize::MAX).len(),
+        stopped,
+    }
+}
+
+/// One pass: the due closes and expiries, the counters when `counters`, then the store's
+/// notices. Whatever it leaves undone is itself recorded.
 async fn settle_tasks<E: AuditEmit>(
     tasks: &Arc<crate::task::TaskStore>,
     emit: &E,
     ctx: &BootCtx<'_>,
-    sweep: bool,
-) -> Result<bool, crate::task::TaskRefusal> {
-    let s = Arc::clone(tasks);
-    let deadline = tokio::time::Instant::now() + BLOCKING_OPERATION_TIMEOUT;
-    let passed = crate::task::offload(ctx.euid, deadline, move || {
-        match sweep {
-            true => s.sweep(),
-            false => s.pass(),
+    budget: Duration,
+    counters: bool,
+) {
+    let deadline = tokio::time::Instant::now() + budget;
+    let swept = close_due(tasks, emit, ctx, deadline).await;
+    let counted = match counters {
+        false => Ok(()),
+        true => {
+            let s = Arc::clone(tasks);
+            crate::task::offload(ctx.euid, deadline, move || {
+                s.store_counters();
+                Ok(())
+            })
+            .await
         }
-        Ok(())
-    })
-    .await;
-    let recorded = record_task_notices(tasks, emit, &task_ctx(ctx)).await;
-    passed.map(|()| recorded)
-}
-
-/// Closes the tasks of every agent the booted snapshot does not enroll, and records each
-/// close, before any listener accepts.
-async fn reconcile_tasks_at_boot<B: maknae_authz_basic::Baseline>(
-    tasks: &Arc<crate::task::TaskStore>,
-    authorizer: &Arc<crate::composition::Composition<B>>,
-    sink: &maknae_audit_append::AuditSink,
-    ctx: &BootCtx<'_>,
-) -> Result<(), RunError> {
-    tasks.mark_unenrolled(&crate::enrollment::SnapshotEnrollment(Arc::clone(
-        authorizer,
-    )));
-    match settle_tasks(tasks, sink, ctx, false).await {
-        Ok(true) => Ok(()),
-        Ok(false) => Err(RunError::Other(
-            "the trail refused a task record at boot".into(),
+    };
+    let said = record_task_notices(tasks, emit, ctx).await;
+    let left = match (swept.remaining, swept.stopped) {
+        (0, _) => None,
+        (n, why) => Some(format!(
+            "{n} task closes remain due: {}",
+            why.unwrap_or_else(|| "the pass ended".into())
         )),
-        Err(e) => Err(RunError::Other(format!(
-            "the task store did not reconcile: {e}"
-        ))),
+    };
+    let unstored = counted
+        .err()
+        .map(|e| format!("the action counters were not stored: {e}"));
+    let unsaid = (!said).then(|| "the trail refused a task store record".to_string());
+    for why in [left, unstored, unsaid].into_iter().flatten() {
+        record_task_failure(emit, ctx, &why, AUDIT_APPEND_TIMEOUT).await;
     }
 }
 
-/// Sweeps the task store every `TASK_SWEEP_EVERY` and once more when `stop` is notified.
+/// A task-store failure goes to the trail; stderr only when the trail itself refuses it.
+async fn record_task_failure<E: AuditEmit>(
+    emit: &E,
+    ctx: &BootCtx<'_>,
+    why: &str,
+    bound: Duration,
+) -> bool {
+    let rec = task_record(
+        ctx,
+        ("deny", "unavailable", &format!("store: {why}")),
+        None,
+        None,
+        None,
+    );
+    let appended = emit.emit_within(&rec, bound).await;
+    if let Err(e) = &appended {
+        eprintln!("maknaed: AUDIT WRITE FAILED on a task store record ({why}): {e}");
+    }
+    appended.is_ok()
+}
+
+/// Marks the open tasks of every agent `view` does not enroll, so none is handed out or
+/// acted on once a listener accepts, then closes as many as `budget` allows. What remains
+/// is recorded and left to the sweep; only a trail that refuses that record refuses boot.
+async fn reconcile_tasks_at_boot<E: AuditEmit>(
+    tasks: &Arc<crate::task::TaskStore>,
+    view: &dyn crate::enrollment::EnrollmentView,
+    emit: &E,
+    ctx: &BootCtx<'_>,
+    budget: Duration,
+) -> Result<(), RunError> {
+    tasks.mark_unenrolled(view);
+    let ctx = task_ctx(ctx);
+    let swept = close_due(tasks, emit, &ctx, tokio::time::Instant::now() + budget).await;
+    if swept.remaining == 0 {
+        return Ok(());
+    }
+    let why = format!(
+        "{} task closes remain for the sweep; no agent is handed those tasks: {}",
+        swept.remaining,
+        swept.stopped.unwrap_or_else(|| "the pass ended".into())
+    );
+    match record_task_failure(emit, &ctx, &why, AUDIT_APPEND_TIMEOUT).await {
+        true => Ok(()),
+        false => Err(RunError::Other(
+            "the trail refused a task record at boot".into(),
+        )),
+    }
+}
+
+/// Sweeps the task store every `TASK_SWEEP_EVERY` and once more, within
+/// `TASK_SWEEP_STOP_TIMEOUT`, when `stop` is notified.
 async fn sweep_tasks<E: AuditEmit>(
     tasks: Arc<crate::task::TaskStore>,
     emit: Arc<E>,
@@ -8192,16 +8343,34 @@ async fn sweep_tasks<E: AuditEmit>(
     let mut tick = tokio::time::interval(TASK_SWEEP_EVERY);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        let stopping = tokio::select! {
-            _ = tick.tick() => false,
-            _ = stop.notified() => true,
+        let (stopping, budget) = tokio::select! {
+            _ = tick.tick() => (false, BLOCKING_OPERATION_TIMEOUT),
+            _ = stop.notified() => (true, TASK_SWEEP_STOP_TIMEOUT),
         };
-        if let Err(e) = settle_tasks(&tasks, &*emit, &ctx, true).await {
-            eprintln!("maknaed: task sweep: {e}");
-        }
+        settle_tasks(&tasks, &*emit, &ctx, budget, true).await;
         if stopping {
             return;
         }
+    }
+}
+
+/// Stops the sweeper after its final sweep; one that overruns is aborted and that is
+/// recorded.
+async fn stop_task_sweep<E: AuditEmit>(
+    sweeper: &mut tokio::task::JoinHandle<()>,
+    stop: &tokio::sync::Notify,
+    emit: &E,
+    ctx: &BootCtx<'_>,
+) {
+    stop.notify_one();
+    if await_drain_with_timeout(sweeper, TASK_SWEEP_STOP_TIMEOUT).await == DrainOutcome::Aborted {
+        record_task_failure(
+            emit,
+            ctx,
+            "the final task sweep was aborted at shutdown",
+            TASK_SWEEP_ABORT_RECORD_TIMEOUT,
+        )
+        .await;
     }
 }
 
@@ -8993,7 +9162,14 @@ async fn boot_after_sink(
         .await;
     }
     let authorizer = Arc::new(authorizer);
-    reconcile_tasks_at_boot(&tasks, &authorizer, sink.as_ref(), &graph_ctx).await?;
+    reconcile_tasks_at_boot(
+        &tasks,
+        &crate::enrollment::SnapshotEnrollment(Arc::clone(&authorizer)),
+        sink.as_ref(),
+        &graph_ctx,
+        BLOCKING_OPERATION_TIMEOUT,
+    )
+    .await?;
     let identity = booted.status.identity.clone();
     let graph_revision = Arc::clone(&booted.status.revision);
     let baseline_status = booted.status.baseline.clone();
@@ -9373,13 +9549,20 @@ where
         agent_listener.map(|(listener, class)| serve(listener, class)),
     )
     .await;
-    sweep_stop.notify_one();
-    if await_drain_with_timeout(&mut sweeper, AUDIT_DRAIN_SHUTDOWN_TIMEOUT).await
-        == DrainOutcome::Aborted
-    {
-        eprintln!("maknaed: the task sweep did not finish within its shutdown bound");
-    }
-    reloader.stop(&reloads).await;
+    let stop_seq = Seq::new();
+    let stop_ctx = BootCtx {
+        event: "task",
+        host: &wctx.host,
+        socket: &wctx.socket,
+        euid: reloader.euid,
+        session_id: session_ids.next_session(),
+        seq: &stop_seq,
+        au3_1: &wctx.au3_1,
+    };
+    tokio::join!(
+        reloader.stop(&reloads),
+        stop_task_sweep(&mut sweeper, &sweep_stop, sink.as_ref(), &stop_ctx),
+    );
     let drained = *drain.borrow();
     Ok(crate::handler::after_drain(outcome, drained))
 }
@@ -22626,7 +22809,13 @@ mod agent_listener_tests {
         );
         assert_eq!(
             fx.reloader.tasks.record(&id).unwrap().close,
-            Some(maknae_proto::TaskClose::AgentGone)
+            Some(maknae_proto::TaskClose::AgentGone),
+            "{:?}",
+            fx.records()
+                .into_iter()
+                .filter(|r| r.action == "session.task")
+                .map(|r| r.outcome.reason)
+                .collect::<Vec<_>>()
         );
         let closes: Vec<AuditRecord> = fx
             .records()
@@ -23078,25 +23267,40 @@ mod agent_listener_tests {
 #[cfg(test)]
 mod task_sweep_tests {
     use super::*;
-    use crate::task::{Notice, TaskObjectForTest, TaskStore};
-    use maknae_proto::{TaskClose, TaskId, Tasker};
+    use crate::enrollment::FixedEnrollment;
+    use crate::task::{Due, DueFor, Notice, TaskObjectForTest, TaskStore};
+    use crate::task_store::{Fail, ManualClock, MemTaskBlobs, CLAIM_LEASE};
+    use maknae_proto::{TaskClose, TaskId, TaskState, Tasker};
 
-    /// Records every append, and refuses the `fail`th and every one after it.
+    /// Records every append, and refuses the `fail`th and every one after it. With a
+    /// store, it notes whether each close it records finds its task still open.
     struct Trail {
         recs: std::sync::Mutex<Vec<AuditRecord>>,
         fail: usize,
+        store: Option<Arc<TaskStore>>,
+        open: std::sync::Mutex<Vec<bool>>,
     }
 
     impl Trail {
         fn new(fail: usize) -> Arc<Self> {
+            Self::watching(fail, None)
+        }
+
+        fn watching(fail: usize, store: Option<Arc<TaskStore>>) -> Arc<Self> {
             Arc::new(Trail {
                 recs: std::sync::Mutex::default(),
                 fail,
+                store,
+                open: std::sync::Mutex::default(),
             })
         }
 
         fn recs(&self) -> Vec<AuditRecord> {
             self.recs.lock().unwrap().clone()
+        }
+
+        fn reasons(&self) -> Vec<String> {
+            self.recs().into_iter().map(|r| r.outcome.reason).collect()
         }
     }
 
@@ -23110,6 +23314,21 @@ mod task_sweep_tests {
             let refused = self.fail != 0 && recs.len() + 1 >= self.fail;
             if !refused {
                 recs.push(record.clone());
+            }
+            let task = record
+                .subject
+                .task_id
+                .as_deref()
+                .and_then(|t| t.parse::<TaskId>().ok());
+            if let (Some(store), Some(task), true) = (
+                &self.store,
+                task,
+                record.outcome.reason.starts_with("closed:"),
+            ) {
+                let open = store
+                    .record(&task)
+                    .is_some_and(|r| matches!(r.state, TaskState::Queued | TaskState::Working));
+                self.open.lock().unwrap().push(open);
             }
             async move {
                 match refused {
@@ -23134,7 +23353,7 @@ mod task_sweep_tests {
         }
     }
 
-    fn working(store: &TaskStore, agent: &str, tasker: Tasker) -> TaskId {
+    fn queued(store: &TaskStore, agent: &str, tasker: Tasker) -> TaskId {
         let mut task = maknae_proto::TaskObject::for_test(agent, 0);
         task.tasker = tasker;
         let signed = maknae_proto::SignedTask {
@@ -23146,13 +23365,40 @@ mod task_sweep_tests {
                 sig: maknae_proto::Bytes(maknae_io::Zeroizing::new(vec![2])),
             },
         };
-        let id = store.insert_for_test(signed, 2001).task.task_id;
+        store.insert_for_test(signed, 2001).task.task_id
+    }
+
+    fn working(store: &TaskStore, agent: &str, tasker: Tasker) -> TaskId {
+        let id = queued(store, agent, tasker);
         store.start_for_test(&id);
         id
     }
 
+    fn nobody() -> FixedEnrollment {
+        FixedEnrollment(Default::default())
+    }
+
+    fn soon() -> tokio::time::Instant {
+        tokio::time::Instant::now() + Duration::from_secs(30)
+    }
+
+    fn close_of(r: &AuditRecord) -> Option<TaskClose> {
+        r.subject.task_id.as_ref()?;
+        match r.outcome.reason.as_str() {
+            "closed:agent-gone" => Some(TaskClose::AgentGone),
+            "closed:agent-lost" => Some(TaskClose::AgentLost),
+            _ => None,
+        }
+    }
+
+    fn mem(clock: i64) -> (MemTaskBlobs, Arc<ManualClock>, Arc<TaskStore>) {
+        let (blobs, clock) = (MemTaskBlobs::default(), Arc::new(ManualClock::at(clock)));
+        let store = Arc::new(TaskStore::open(Box::new(blobs.clone()), clock.clone()).unwrap());
+        (blobs, clock, store)
+    }
+
     #[test]
-    fn each_notice_has_its_record() {
+    fn each_due_act_and_each_notice_has_its_record() {
         let (seq, au) = (Seq::new(), serde_json::json!({}));
         let ctx = ctx(&seq, &au);
         let (task, parent) = (TaskId([7; 16]), TaskId([8; 16]));
@@ -23160,8 +23406,7 @@ mod task_sweep_tests {
             agent: "hobi".into(),
             uid: 2001,
         };
-        let shape = |n: Notice| {
-            let r = task_notice_record(&ctx, &n);
+        let shape = |r: AuditRecord| {
             assert_eq!(
                 (r.event.as_str(), r.action.as_str()),
                 ("task", "session.task")
@@ -23176,6 +23421,19 @@ mod task_sweep_tests {
                 r.object,
             )
         };
+        let due = |tasker: &Tasker, parent, why| {
+            shape(task_due_record(
+                &ctx,
+                &Due {
+                    task,
+                    tasker: tasker.clone(),
+                    parent,
+                    why,
+                    recorded: false,
+                },
+            ))
+        };
+        let note = |n: Notice| shape(task_notice_record(&ctx, &n));
         let s = |v: &str| v.to_string();
         let object = Some(format!("task:{task}"));
         for (close, reason) in [
@@ -23185,12 +23443,7 @@ mod task_sweep_tests {
             (TaskClose::Dropped, "closed:dropped"),
         ] {
             assert_eq!(
-                shape(Notice::Closed {
-                    task,
-                    tasker: agent.clone(),
-                    parent: Some(parent),
-                    close
-                }),
+                due(&agent, Some(parent), DueFor::Close(close)),
                 (
                     s("deny"),
                     s(reason),
@@ -23203,11 +23456,7 @@ mod task_sweep_tests {
             );
         }
         assert_eq!(
-            shape(Notice::Expired {
-                task,
-                tasker: Tasker::Uid(1000),
-                parent: None
-            }),
+            due(&Tasker::Uid(1000), None, DueFor::Expiry),
             (
                 s("deny"),
                 s("expired"),
@@ -23219,16 +23468,11 @@ mod task_sweep_tests {
             )
         );
         assert_eq!(
-            shape(Notice::Expired {
-                task,
-                tasker: Tasker::Remote("gw".into()),
-                parent: None
-            })
-            .3,
+            due(&Tasker::Remote("gw".into()), None, DueFor::Expiry).3,
             maknae_audit_append::NO_PEER_UID
         );
         assert_eq!(
-            shape(Notice::Owed {
+            note(Notice::Owed {
                 task,
                 why: s("disk")
             }),
@@ -23243,7 +23487,7 @@ mod task_sweep_tests {
             )
         );
         assert_eq!(
-            shape(Notice::Settled { task }),
+            note(Notice::Settled { task }),
             (
                 s("permit"),
                 s("store: the owed write landed"),
@@ -23255,7 +23499,7 @@ mod task_sweep_tests {
             )
         );
         assert_eq!(
-            shape(Notice::Left {
+            note(Notice::Left {
                 task,
                 why: s("disk")
             })
@@ -23284,7 +23528,7 @@ mod task_sweep_tests {
             )
         );
         assert_eq!(
-            shape(Notice::Late {
+            note(Notice::Late {
                 task,
                 tasker: Tasker::Uid(1000),
                 failed: Some(s("disk"))
@@ -23299,32 +23543,26 @@ mod task_sweep_tests {
                 object
             )
         );
-        assert_eq!(
-            shape(Notice::Dropped(3)),
-            (
-                s("deny"),
-                s("store: 3 task notices were not recorded"),
-                s("unavailable"),
-                77,
-                None,
-                None,
-                None
-            )
-        );
         let seqs: Vec<u64> = (0..2)
             .map(|_| task_notice_record(&ctx, &Notice::Settled { task }).seq)
             .collect();
         assert_eq!(seqs[1], seqs[0] + 1, "one sequence for every record");
+        assert!(
+            TASK_SWEEP_STOP_TIMEOUT + TASK_SWEEP_ABORT_RECORD_TIMEOUT <= RELOAD_STOP_TIMEOUT,
+            "the final sweep is joined inside the reloader's stop bound"
+        );
     }
 
     #[tokio::test]
     async fn a_notice_the_trail_refuses_is_kept_for_the_next_sweep() {
-        let store = Arc::new(TaskStore::new());
+        let (blobs, _clock, store) = mem(1_000);
         let (a, b) = (
-            working(&store, "hobi", Tasker::Uid(1000)),
-            working(&store, "hobi", Tasker::Uid(1001)),
+            queued(&store, "hobi", Tasker::Uid(1000)),
+            queued(&store, "hobi", Tasker::Uid(1001)),
         );
-        store.purge_agent(&maknae_config::AgentId::parse("hobi").unwrap());
+        blobs.fail(Some(Fail::Unlinks));
+        assert!(store.withdraw(&a) && store.withdraw(&b));
+        blobs.fail(None);
         let (seq, au) = (Seq::new(), serde_json::json!({}));
         let refusing = Trail::new(2);
         assert!(!record_task_notices(&store, &*refusing, &ctx(&seq, &au)).await);
@@ -23342,15 +23580,253 @@ mod task_sweep_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_sweep_closes_a_lapsed_lease_records_it_and_sweeps_once_more_at_stop() {
-        let clock = Arc::new(crate::task_store::ManualClock::at(1_000));
-        let store = Arc::new(
-            TaskStore::open(
-                Box::new(crate::task_store::MemTaskBlobs::default()),
-                clock.clone(),
-            )
-            .unwrap(),
+    async fn a_close_is_recorded_first_and_a_refused_record_leaves_the_task_open_and_due() {
+        let (_blobs, _clock, store) = mem(1_000);
+        let ids: Vec<TaskId> = (0..3)
+            .map(|_| working(&store, "hobi", Tasker::Uid(1000)))
+            .collect();
+        store.mark_unenrolled(&nobody());
+        let (seq, au) = (Seq::new(), serde_json::json!({}));
+        let refusing = Trail::watching(2, Some(Arc::clone(&store)));
+        let swept = close_due(&store, &*refusing, &ctx(&seq, &au), soon()).await;
+        assert_eq!(swept.remaining, 2);
+        assert!(
+            swept
+                .stopped
+                .as_deref()
+                .is_some_and(|w| w.contains("the trail refused a close record")),
+            "{:?}",
+            swept.stopped
         );
+        assert_eq!(refusing.recs().len(), 1);
+        let states: Vec<TaskState> = ids
+            .iter()
+            .map(|id| store.record(id).unwrap().state)
+            .collect();
+        assert_eq!(
+            states,
+            [TaskState::Closed, TaskState::Working, TaskState::Working],
+            "only the recorded close happened"
+        );
+        assert_eq!(
+            store
+                .due(8)
+                .into_iter()
+                .map(|d| (d.task, d.recorded))
+                .collect::<Vec<_>>(),
+            [(ids[1], false), (ids[2], false)]
+        );
+        let taking = Trail::watching(0, Some(Arc::clone(&store)));
+        let swept = close_due(&store, &*taking, &ctx(&seq, &au), soon()).await;
+        assert_eq!((swept.remaining, swept.stopped), (0, None));
+        let said: Vec<Option<String>> = refusing
+            .recs()
+            .into_iter()
+            .chain(taking.recs())
+            .map(|r| r.object)
+            .collect();
+        let want: Vec<Option<String>> = ids.iter().map(|id| Some(format!("task:{id}"))).collect();
+        assert_eq!(said, want, "one record for each close");
+        let open: Vec<bool> = [&refusing, &taking]
+            .iter()
+            .flat_map(|t| t.open.lock().unwrap().clone())
+            .collect();
+        assert_eq!(
+            open, [true; 4],
+            "each task was open when its close was recorded"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_crash_between_the_record_and_the_close_closes_again_with_a_second_record() {
+        let (blobs, clock, store) = mem(1_000);
+        let me = Tasker::Uid(1000);
+        let id = working(&store, "hobi", me.clone());
+        store.mark_unenrolled(&nobody());
+        let (seq, au) = (Seq::new(), serde_json::json!({}));
+        let trail = Trail::new(0);
+        blobs.fail(Some(Fail::Records));
+        for _ in 0..2 {
+            let swept = close_due(&store, &*trail, &ctx(&seq, &au), soon()).await;
+            assert_eq!(swept.remaining, 1);
+            assert_eq!(
+                swept.stopped.as_deref(),
+                Some("the task store stored no close")
+            );
+        }
+        assert_eq!(trail.recs().len(), 1, "one process records a close once");
+        assert_eq!(store.record(&id).unwrap().state, TaskState::Working);
+        let hobi = maknae_config::AgentId::parse("hobi").unwrap();
+        assert!(store.reports(&me, &hobi, usize::MAX).entries.is_empty());
+        blobs.fail(None);
+        blobs.crash(0);
+        let reopened = Arc::new(TaskStore::open(Box::new(blobs.clone()), clock).unwrap());
+        assert_eq!(reopened.record(&id).unwrap().state, TaskState::Working);
+        reopened.mark_unenrolled(&nobody());
+        let swept = close_due(&reopened, &*trail, &ctx(&seq, &au), soon()).await;
+        assert_eq!((swept.remaining, swept.stopped), (0, None));
+        let recs = trail.recs();
+        assert_eq!(recs.len(), 2, "the close is recorded again");
+        assert!(recs
+            .iter()
+            .all(|r| r.object == Some(format!("task:{id}"))
+                && close_of(r) == Some(TaskClose::AgentGone)));
+        assert_eq!(
+            reopened.record(&id).unwrap().close,
+            Some(TaskClose::AgentGone)
+        );
+        assert_eq!(
+            reopened.reports(&me, &hobi, usize::MAX).entries.len(),
+            1,
+            "the tasker is shown the close once"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn de_enrolling_five_agents_with_256_tasks_each_records_every_close() {
+        let (_blobs, _clock, store) = mem(1_000);
+        let mut ids = std::collections::BTreeSet::new();
+        for agent in ["hobi", "jin", "suga", "namjoon", "jimin"] {
+            for n in 0..256u32 {
+                ids.insert(queued(&store, agent, Tasker::Uid(1000 + n)));
+            }
+        }
+        store.mark_unenrolled(&nobody());
+        let (seq, au) = (Seq::new(), serde_json::json!({}));
+        let trail = Trail::watching(0, Some(Arc::clone(&store)));
+        let swept = close_due(&store, &*trail, &ctx(&seq, &au), soon()).await;
+        assert_eq!((swept.remaining, swept.stopped), (0, None));
+        let recs = trail.recs();
+        assert_eq!(recs.len(), 5 * 256);
+        let said: std::collections::BTreeSet<TaskId> = recs
+            .iter()
+            .filter(|r| close_of(r) == Some(TaskClose::AgentGone))
+            .filter_map(|r| r.subject.task_id.as_deref()?.parse().ok())
+            .collect();
+        assert_eq!(said, ids, "every close has its own record");
+        assert!(trail.open.lock().unwrap().iter().all(|open| *open));
+        assert!(ids
+            .iter()
+            .all(|id| store.record(id).unwrap().close == Some(TaskClose::AgentGone)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn what_a_pass_leaves_undone_is_recorded() {
+        let (blobs, _clock, store) = mem(1_000);
+        let id = working(&store, "hobi", Tasker::Uid(1000));
+        store.mark_unenrolled(&nobody());
+        let (seq, au) = (Seq::new(), serde_json::json!({}));
+        let trail = Trail::new(0);
+        blobs.fail(Some(Fail::Records));
+        settle_tasks(
+            &store,
+            &*trail,
+            &ctx(&seq, &au),
+            Duration::from_secs(30),
+            true,
+        )
+        .await;
+        let said = trail.reasons();
+        assert_eq!(said[0], "closed:agent-gone");
+        assert!(
+            said[1].starts_with("store: owed to a later store write: the close is not stored"),
+            "{said:?}"
+        );
+        assert_eq!(
+            said[2],
+            "store: 1 task closes remain due: the task store stored no close"
+        );
+        assert_eq!(said.len(), 3);
+        assert_eq!(trail.recs()[2].object, None);
+        blobs.fail(None);
+        settle_tasks(
+            &store,
+            &*trail,
+            &ctx(&seq, &au),
+            Duration::from_secs(30),
+            true,
+        )
+        .await;
+        assert_eq!(trail.reasons()[3..], ["store: the owed write landed"]);
+        assert_eq!(store.record(&id).unwrap().close, Some(TaskClose::AgentGone));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_slow_disk_at_boot_leaves_the_closes_marked_for_the_sweep_and_boot_goes_on() {
+        let (blobs, _clock, store) = mem(1_000);
+        let hobi = maknae_config::AgentId::parse("hobi").unwrap();
+        let id = working(&store, "hobi", Tasker::Uid(1000));
+        let (seq, au) = (Seq::new(), serde_json::json!({}));
+        let trail = Trail::new(0);
+        blobs.slow(Some(Duration::from_millis(400)));
+        let booted = reconcile_tasks_at_boot(
+            &store,
+            &nobody(),
+            &*trail,
+            &ctx(&seq, &au),
+            Duration::from_millis(50),
+        )
+        .await;
+        assert!(booted.is_ok(), "{booted:?}");
+        assert_eq!(
+            store.working(&id, &hobi, 2001),
+            Err(crate::task::TaskRefusal::Unknown),
+            "marked before any listener accepts"
+        );
+        assert_eq!(store.next_for(&hobi, 2001), None);
+        let said = trail.reasons();
+        assert_eq!(said[0], "closed:agent-gone");
+        assert!(
+            said[1].starts_with(
+                "store: 1 task closes remain for the sweep; no agent is handed those tasks: "
+            ),
+            "{said:?}"
+        );
+        assert_eq!(said.len(), 2);
+        blobs.slow(None);
+        let until = Instant::now() + Duration::from_secs(10);
+        while store.record(&id).unwrap().close.is_none() {
+            assert!(Instant::now() < until, "the pass that outlived boot lands");
+            settle_tasks(
+                &store,
+                &*trail,
+                &ctx(&seq, &au),
+                Duration::from_secs(5),
+                true,
+            )
+            .await;
+        }
+        assert_eq!(
+            trail
+                .recs()
+                .iter()
+                .filter(|r| close_of(r).is_some())
+                .count(),
+            1,
+            "recorded once"
+        );
+
+        let (_blobs, _clock, store) = mem(1_000);
+        working(&store, "hobi", Tasker::Uid(1000));
+        let refusing = Trail::new(1);
+        let refused = reconcile_tasks_at_boot(
+            &store,
+            &nobody(),
+            &*refusing,
+            &ctx(&seq, &au),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            matches!(&refused, Err(RunError::Other(why)) if why.contains("the trail refused")),
+            "{refused:?}"
+        );
+        assert_eq!(store.next_for(&hobi, 2001), None, "still marked");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_sweep_records_and_closes_a_lapsed_lease_and_sweeps_once_more_at_stop() {
+        let (_blobs, clock, store) = mem(1_000);
         let lost = working(&store, "hobi", Tasker::Uid(1000));
         store.acted(&lost);
         let trail = Trail::new(0);
@@ -23360,7 +23836,7 @@ mod task_sweep_tests {
             socket: "s".into(),
             au3_1: serde_json::json!({}),
         };
-        let sweeping = tokio::spawn(sweep_tasks(
+        let mut sweeping = tokio::spawn(sweep_tasks(
             Arc::clone(&store),
             Arc::clone(&trail),
             where_,
@@ -23376,12 +23852,9 @@ mod task_sweep_tests {
             );
             tokio::task::yield_now().await;
         }
-        clock.set(1_001 + crate::task_store::CLAIM_LEASE.as_secs() as i64);
-        stop.notify_one();
-        tokio::time::timeout(Duration::from_secs(10), sweeping)
-            .await
-            .expect("the sweep ends at stop")
-            .unwrap();
+        clock.set(1_001 + CLAIM_LEASE.as_secs() as i64);
+        let (seq, au) = (Seq::new(), serde_json::json!({}));
+        stop_task_sweep(&mut sweeping, &stop, &*trail, &ctx(&seq, &au)).await;
         let recs = trail.recs();
         assert_eq!(recs.len(), 1, "{recs:?}");
         assert_eq!(recs[0].outcome.reason, "closed:agent-lost");
@@ -23389,6 +23862,22 @@ mod task_sweep_tests {
         assert_eq!(
             store.record(&lost).unwrap().close,
             Some(TaskClose::AgentLost)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_final_sweep_that_overruns_is_aborted_and_that_is_recorded() {
+        let trail = Trail::new(0);
+        let stop = tokio::sync::Notify::new();
+        let mut stuck = tokio::spawn(std::future::pending::<()>());
+        let (seq, au) = (Seq::new(), serde_json::json!({}));
+        let began = tokio::time::Instant::now();
+        stop_task_sweep(&mut stuck, &stop, &*trail, &ctx(&seq, &au)).await;
+        assert_eq!(began.elapsed(), TASK_SWEEP_STOP_TIMEOUT);
+        assert!(stuck.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            trail.reasons(),
+            ["store: the final task sweep was aborted at shutdown"]
         );
     }
 }

@@ -4,7 +4,7 @@ mod common;
 use common::Records;
 use maknae_io::Zeroizing;
 use maknae_kernel::{
-    AgentAdmission, Claimed, FixedEnrollment, ManualClock, MemTaskBlobs, Notice, RootTasker,
+    AgentAdmission, Claimed, Due, DueFor, FixedEnrollment, ManualClock, MemTaskBlobs, RootTasker,
     TaskRefusal, TaskStore, CLAIM_LEASE, REPORT_HOLD,
 };
 use maknae_proto::{
@@ -225,7 +225,7 @@ impl World {
             Some(self.user.clone()),
             Some(PathBuf::from(&*self.root)),
         );
-        self.serve(session, gate, verb, None, records).await
+        self.serve(session, gate, verb, None, records, None).await
     }
 
     /// One request on the agent channel as `agent`, citing `task`.
@@ -235,6 +235,18 @@ impl World {
         verb: Verb,
         task: Option<TaskId>,
         records: &Arc<Records>,
+    ) -> Vec<u8> {
+        self.agent_raw_delegating(agent, verb, task, records, None)
+            .await
+    }
+
+    async fn agent_raw_delegating(
+        &self,
+        agent: &str,
+        verb: Verb,
+        task: Option<TaskId>,
+        records: &Arc<Records>,
+        dir: Option<&std::path::Path>,
     ) -> Vec<u8> {
         let _shared = STORE.read().await;
         let uid = if agent == "hobi" { HOBI_UID } else { SUGA_UID };
@@ -252,7 +264,7 @@ impl World {
             }),
             Duration::from_secs(5),
         );
-        self.serve(session, gate, verb, task, records).await
+        self.serve(session, gate, verb, task, records, dir).await
     }
 
     async fn agent_with(
@@ -348,8 +360,13 @@ impl World {
         verb: Verb,
         task: Option<TaskId>,
         records: &Arc<Records>,
+        dir: Option<&std::path::Path>,
     ) -> Vec<u8> {
         use tokio::io::AsyncReadExt;
+        let delegated = maknae_io::DelegatedFds::new(4);
+        if let Some(dir) = dir {
+            delegated.push(std::fs::File::open(dir).unwrap().into());
+        }
         let (mut client, server) = tokio::io::duplex(1 << 20);
         let served = maknae_kernel::handle_with_attempt_caps(
             server,
@@ -367,7 +384,7 @@ impl World {
             Arc::new(None),
             maknae_kernel::unavailable_egress(),
             Duration::from_secs(2),
-            maknae_io::DelegatedFds::new(1),
+            delegated,
             common::no_baseline(),
             maknae_kernel::AttemptCaps::default(),
             common::conversations(),
@@ -494,12 +511,11 @@ fn follow_ups(r: RespResult) -> (u32, Vec<String>) {
     }
 }
 
-fn closes(notices: &[Notice]) -> Vec<(TaskId, TaskClose)> {
-    notices
-        .iter()
-        .filter_map(|n| match n {
-            Notice::Closed { task, close, .. } => Some((*task, *close)),
-            _ => None,
+fn closes(due: &[Due]) -> Vec<(TaskId, TaskClose)> {
+    due.iter()
+        .filter_map(|d| match d.why {
+            DueFor::Close(close) => Some((d.task, close)),
+            DueFor::Expiry => None,
         })
         .collect()
 }
@@ -1422,11 +1438,10 @@ async fn a_lapsed_lease_closes_the_task_with_agent_lost() {
     assert_eq!(w.claimed("hobi").await, id);
     let lease = CLAIM_LEASE.as_secs() as i64;
     w.clock.set(T0 + lease);
-    w.store().sweep();
+    assert!(w.store().sweep().is_empty());
     assert_eq!(w.store().record(&id).unwrap().state, TaskState::Working);
-    assert!(closes(&w.store().take_notices()).is_empty());
     w.clock.set(T0 + lease + 1);
-    w.store().sweep();
+    let said = w.store().sweep();
     let rec = w.store().record(&id).unwrap();
     assert_eq!(
         (rec.state, rec.close),
@@ -1437,12 +1452,8 @@ async fn a_lapsed_lease_closes_the_task_with_agent_lost() {
         TaskState::Queued,
         "a queued task holds no lease"
     );
-    assert_eq!(
-        closes(&w.store().take_notices()),
-        vec![(id, TaskClose::AgentLost)]
-    );
-    w.store().sweep();
-    assert!(w.store().take_notices().is_empty(), "closed once");
+    assert_eq!(closes(&said), vec![(id, TaskClose::AgentLost)]);
+    assert!(w.store().sweep().is_empty(), "closed once");
     let page = reports(w.ask(collect("hobi", None)).await);
     assert_eq!(report_ids(&page), vec![id]);
     assert_eq!(page.entries[0].close, Some(TaskClose::AgentLost));
@@ -1497,11 +1508,11 @@ async fn deenrolling_an_agent_closes_its_tasks_once() {
     w.working(&working);
     let queued = w.theirs("hobi");
     let sugas = w.mine("suga");
-    w.store()
-        .retain_enrolled(&only(&[("hobi", HOBI_UID), ("suga", SUGA_UID)]));
-    assert!(w.store().take_notices().is_empty());
-    w.store().retain_enrolled(&only(&[("suga", SUGA_UID)]));
-    let mut closed = closes(&w.store().take_notices());
+    assert!(w
+        .store()
+        .retain_enrolled(&only(&[("hobi", HOBI_UID), ("suga", SUGA_UID)]))
+        .is_empty());
+    let mut closed = closes(&w.store().retain_enrolled(&only(&[("suga", SUGA_UID)])));
     closed.sort_by_key(|c| c.0);
     let mut want = vec![
         (working, TaskClose::AgentGone),
@@ -1523,11 +1534,13 @@ async fn deenrolling_an_agent_closes_its_tasks_once() {
         TaskState::Reported
     );
     assert_eq!(w.store().record(&sugas).unwrap().state, TaskState::Queued);
-    w.store().retain_enrolled(&only(&[("suga", SUGA_UID)]));
-    w.store().purge_agent(&hobi());
-    w.store().retain_enrolled(&only(&[]));
+    assert!(w
+        .store()
+        .retain_enrolled(&only(&[("suga", SUGA_UID)]))
+        .is_empty());
+    assert!(w.store().purge_agent(&hobi()).is_empty());
     assert_eq!(
-        closes(&w.store().take_notices()),
+        closes(&w.store().retain_enrolled(&only(&[]))),
         vec![(sugas, TaskClose::AgentGone)],
         "hobi's tasks are closed once"
     );
@@ -1553,15 +1566,14 @@ async fn reenrolling_under_a_new_uid_never_closes_the_new_tasks() {
     let new = w.insert("hobi", AGAIN, Tasker::Uid(w.me));
     w.store().mark_unenrolled(&renamed);
     let later = w.insert("hobi", AGAIN, Tasker::Uid(w.me));
-    w.store().retain_enrolled(&renamed);
+    let mut closed = closes(&w.store().retain_enrolled(&renamed));
     let generation = w.store().generation(&hobi());
-    w.store().retain_enrolled(&renamed);
+    assert!(w.store().retain_enrolled(&renamed).is_empty());
     assert_eq!(
         w.store().generation(&hobi()),
         generation,
         "the closed tasks of the old uid make nothing stale"
     );
-    let mut closed = closes(&w.store().take_notices());
     closed.sort_by_key(|c| c.0);
     let mut want = vec![
         (old, TaskClose::AgentGone),
@@ -1581,9 +1593,8 @@ async fn reenrolling_under_a_new_uid_never_closes_the_new_tasks() {
         Ok(Claimed::Delivered { signed, .. }) => assert_eq!(signed.task.task_id, new),
         other => panic!("{other:?}"),
     }
-    w.store().retain_enrolled(&renamed);
+    assert!(w.store().retain_enrolled(&renamed).is_empty());
     assert_eq!(w.store().record(&new).unwrap().state, TaskState::Working);
-    assert!(w.store().take_notices().is_empty());
 }
 
 #[tokio::test]
@@ -1597,8 +1608,7 @@ async fn an_agent_deenrolled_while_down_is_closed_before_it_can_claim() {
         w.store().record(&working).unwrap().state,
         TaskState::Working
     );
-    w.store().retain_enrolled(&only(&[("suga", SUGA_UID)]));
-    let mut closed = closes(&w.store().take_notices());
+    let mut closed = closes(&w.store().retain_enrolled(&only(&[("suga", SUGA_UID)])));
     closed.sort_by_key(|c| c.0);
     let mut want = vec![
         (working, TaskClose::AgentGone),
@@ -1627,7 +1637,7 @@ async fn a_close_owed_by_deenrollment_is_refused_to_the_agent_before_any_writer_
     assert_eq!(
         w.store().record(&id).unwrap().state,
         TaskState::Working,
-        "no writer has run"
+        "nothing is recorded yet, so nothing is closed"
     );
     assert!(w.cannot_cite("hobi", Verb::Ping, id).await, "not citable");
     assert!(matches!(
@@ -1636,6 +1646,16 @@ async fn a_close_owed_by_deenrollment_is_refused_to_the_agent_before_any_writer_
     ));
     assert!(w.claim("hobi").await.is_none());
     w.store().pass();
+    assert_eq!(
+        w.store().record(&id).unwrap().state,
+        TaskState::Working,
+        "a writer passing closes nothing: no record has been made"
+    );
+    assert!(w.claim("hobi").await.is_none());
+    assert_eq!(
+        closes(&w.store().close_all_due()),
+        vec![(id, TaskClose::AgentGone)]
+    );
     assert_eq!(
         w.store().record(&id).unwrap().close,
         Some(TaskClose::AgentGone)
@@ -1777,15 +1797,15 @@ async fn pending_records_are_invisible_to_claim_list_and_status() {
         .entries
         .is_empty());
     w.clock.set(T0 + 100 * REPORT_HOLD.as_secs() as i64);
-    w.store().sweep();
-    assert!(w.store().take_notices().is_empty());
+    assert!(w.store().sweep().is_empty());
     assert_eq!(w.store().count_for_test(), 1, "still awaiting its confirm");
-    w.store().retain_enrolled(&only(&[("suga", SUGA_UID)]));
-    assert_eq!(w.store().count_for_test(), 0, "withdrawn with its agent");
     assert!(
-        closes(&w.store().take_notices()).is_empty(),
+        w.store()
+            .retain_enrolled(&only(&[("suga", SUGA_UID)]))
+            .is_empty(),
         "never a task, so never closed"
     );
+    assert_eq!(w.store().count_for_test(), 0, "withdrawn with its agent");
 }
 
 #[tokio::test]
@@ -1934,11 +1954,10 @@ async fn an_uncollected_report_expires_after_the_hold() {
     let hold = REPORT_HOLD.as_secs() as i64;
     assert_eq!(hold, 30 * 24 * 60 * 60);
     w.clock.set(T0 + hold - 1);
-    w.store().sweep();
+    assert!(w.store().sweep().is_empty());
     assert!(w.store().record(&id).is_some());
-    assert!(w.store().take_notices().is_empty());
     w.clock.set(T0 + hold);
-    w.store().sweep();
+    let said = w.store().sweep();
     assert!(w.store().record(&id).is_none());
     assert!(!w.blobs.has(&id.to_string()));
     assert!(
@@ -1946,11 +1965,13 @@ async fn an_uncollected_report_expires_after_the_hold() {
         "its hold began ten seconds later"
     );
     assert_eq!(
-        w.store().take_notices(),
-        vec![Notice::Expired {
+        said,
+        vec![Due {
             task: id,
             tasker: Tasker::Uid(w.me),
-            parent: None
+            parent: None,
+            why: DueFor::Expiry,
+            recorded: false
         }]
     );
     assert_eq!(
@@ -2044,14 +2065,9 @@ async fn a_claim_or_report_whose_record_fails_is_refused_and_recorded() {
 }
 
 #[tokio::test]
-async fn a_claim_the_store_cannot_write_hands_out_nothing_and_leaves_the_task_queued() {
+async fn a_claim_the_store_cannot_write_hands_out_nothing_and_is_held_back() {
     let w = world("claim-disk", "user", true);
     let id = w.submit("hobi", "a").await;
-    w.blobs.fail(Some(maknae_kernel::Fail::Records));
-    let records = Records::new(0);
-    let got = w.agent_with("hobi", CLAIM, None, &records).await.unwrap();
-    assert!(unauthorized(&got), "{got:?}");
-    assert_eq!(w.store().record(&id).unwrap().state, TaskState::Queued);
     w.blobs.fail(Some(maknae_kernel::Fail::Unsynced));
     let records = Records::new(0);
     let got = w.agent_with("hobi", CLAIM, None, &records).await.unwrap();
@@ -2064,7 +2080,114 @@ async fn a_claim_the_store_cannot_write_hands_out_nothing_and_leaves_the_task_qu
         last.outcome.reason
     );
     assert_eq!(w.store().record(&id).unwrap().state, TaskState::Queued);
-    assert_eq!(w.store().hot(&id).unwrap().lease_until, 0);
+    let hot = w.store().hot(&id).unwrap();
+    assert_eq!((hot.lease_until, hot.retry_after), (0, T0 + 1));
     w.blobs.fail(None);
-    assert_eq!(w.claimed("hobi").await, id, "the next poll is handed it");
+    for _ in 0..3 {
+        let held_back = Records::new(0);
+        let got = w.agent_with("hobi", CLAIM, None, &held_back).await;
+        assert!(
+            matches!(got, Some(RespResult::Ok(Payload::TaskIdle))),
+            "{got:?}"
+        );
+        assert_eq!(
+            reasons(&held_back),
+            vec!["permit idle"],
+            "inside the window: no intent and no outcome, only the idle answer's record"
+        );
+    }
+    assert_eq!(w.store().record(&id).unwrap().state, TaskState::Queued);
+    w.clock.set(T0 + 1);
+    assert_eq!(
+        w.claimed("hobi").await,
+        id,
+        "after the window it is handed out"
+    );
+    assert_eq!(w.store().hot(&id).unwrap().retry_after, 0);
+}
+
+#[tokio::test]
+async fn a_cited_fs_list_counts_one_action() {
+    let w = world("counted-list", "user", true);
+    let id = w.submit("hobi", "a").await;
+    assert_eq!(w.claimed("hobi").await, id);
+    std::fs::write(w.root.join("one"), b"1").unwrap();
+    std::fs::write(w.root.join("two"), b"2").unwrap();
+    let verb = Verb::FsList {
+        path: w.root.to_str().unwrap().into(),
+        after: None,
+        conversation: None,
+    };
+    let _turn = common::fs_turn(&verb).await;
+    let records = Records::new(0);
+    w.agent_raw_delegating("hobi", verb, Some(id), &records, Some(&w.root))
+        .await;
+    assert!(
+        records.snapshot().iter().any(|r| r.action == "fs.list"),
+        "the list was served as a filesystem request"
+    );
+    assert_eq!(
+        w.store().hot(&id).unwrap().actions,
+        1,
+        "one request, one action, however many entries it decides"
+    );
+}
+
+#[tokio::test]
+async fn a_close_the_disk_has_not_taken_is_shown_to_nobody() {
+    let w = world("unstored-close", "user", true);
+    let id = w.submit("hobi", "a").await;
+    assert_eq!(w.claimed("hobi").await, id);
+    w.blobs.fail(Some(maknae_kernel::Fail::Records));
+    assert_eq!(
+        closes(&w.store().retain_enrolled(&only(&[("suga", SUGA_UID)]))),
+        vec![(id, TaskClose::AgentGone)]
+    );
+    assert!(reports(w.ask(collect("hobi", None)).await)
+        .entries
+        .is_empty());
+    let shown = match w.ask(Verb::TaskStatus { task: r(&id) }).await {
+        RespResult::Ok(Payload::TaskState(v)) => v,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!((shown.state, shown.close), (TaskState::Working, None));
+    assert_eq!(page(w.ask(list("hobi", None)).await).entries[0].close, None);
+    assert!(matches!(
+        w.beat("hobi", 0).await,
+        RespResult::Ok(Payload::TaskIdle)
+    ));
+    assert!(
+        w.claim("hobi").await.is_none(),
+        "the agent is refused it all the same"
+    );
+    w.blobs.fail(None);
+    assert!(w.store().close_all_due().is_empty(), "recorded once");
+    let page = reports(w.ask(collect("hobi", None)).await);
+    assert_eq!(report_ids(&page), vec![id]);
+    assert_eq!(
+        page.entries[0].cursor,
+        TaskCursor::from_seq(1),
+        "one ordinal"
+    );
+    assert!(matches!(
+        w.beat("hobi", 0).await,
+        RespResult::Ok(Payload::TaskState(v)) if v.close == Some(TaskClose::AgentGone)
+    ));
+}
+
+#[tokio::test]
+async fn tombstones_do_not_count_against_a_re_enrolled_agents_queue() {
+    let w = world("tombstones", "user", true);
+    for _ in 0..maknae_kernel::MAX_LIVE_TASKS_PER_AGENT {
+        w.theirs("hobi");
+    }
+    assert!(
+        unauthorized(&w.ask(submit("hobi", "full")).await),
+        "256 open tasks fill the queue"
+    );
+    w.store().retain_enrolled(&only(&[("suga", SUGA_UID)]));
+    w.store()
+        .retain_enrolled(&only(&[("hobi", HOBI_UID), ("suga", SUGA_UID)]));
+    let id = w.submit("hobi", "new work").await;
+    assert_eq!(w.claimed("hobi").await, id);
 }

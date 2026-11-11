@@ -176,6 +176,9 @@ pub struct Hot {
     pub actions: u32,
     pub last_action: Option<i64>,
     pub lease_until: i64,
+    /// No claim is handed this task before this time; `retry_secs` is the last wait.
+    pub retry_after: i64,
+    pub retry_secs: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
