@@ -78,6 +78,38 @@ pub fn command(program: Program) -> std::process::Command {
 mod tests {
     use super::*;
 
+    fn position(p: Program) -> usize {
+        match p {
+            Program::SystemdCreds => 0,
+            Program::Setfacl => 1,
+            Program::Getfacl => 2,
+            Program::Restorecon => 3,
+            Program::ApparmorParser => 4,
+            Program::Usermod => 5,
+            Program::Dseditgroup => 6,
+            Program::Sudo => 7,
+            Program::Env => 8,
+            Program::Id => 9,
+            Program::Security => 10,
+            Program::Codesign => 11,
+            Program::Chmod => 12,
+            Program::Ls => 13,
+        }
+    }
+
+    /// A new variant does not compile until `position` names it, and then this
+    /// fails until `ALL` lists it.
+    #[test]
+    fn all_lists_every_variant_once() {
+        let mut seen = [false; Program::ALL.len()];
+        for p in Program::ALL {
+            assert_eq!(Program::ALL.get(position(p)), Some(&p), "{p:?}");
+            seen[position(p)] = true;
+        }
+        assert!(seen.iter().all(|s| *s));
+        assert_eq!(position(Program::Ls), Program::ALL.len() - 1);
+    }
+
     #[test]
     fn a_program_displays_as_its_path() {
         for p in Program::ALL {

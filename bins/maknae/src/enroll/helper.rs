@@ -68,12 +68,12 @@ fn supplementary_groups() -> Result<Vec<u32>, EnrollError> {
         .arg("-G")
         .output()
         .map_err(|e| EnrollError::Command {
-            program: "id".to_string(),
+            program: maknae_io::program::Program::Id.to_string(),
             detail: e.to_string(),
         })?;
     if !out.status.success() {
         return Err(EnrollError::Command {
-            program: "id".to_string(),
+            program: maknae_io::program::Program::Id.to_string(),
             detail: String::from_utf8_lossy(&out.stderr).to_string(),
         });
     }
@@ -88,7 +88,7 @@ fn parse_id_dash_g(text: &str) -> Result<Vec<u32>, EnrollError> {
     text.split_whitespace()
         .map(|s| {
             s.parse::<u32>().map_err(|e| EnrollError::Command {
-                program: "id".to_string(),
+                program: maknae_io::program::Program::Id.to_string(),
                 detail: e.to_string(),
             })
         })

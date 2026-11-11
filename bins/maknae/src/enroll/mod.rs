@@ -1146,7 +1146,10 @@ fn tpm2_seal_roundtrip(verbose: bool) -> bool {
 fn detect_hrot_capability(verbose: bool) -> bool {
     let ok = tpm2_seal_roundtrip(verbose);
     if verbose {
-        errln!("exec: systemd-creds encrypt/decrypt --with-key=tpm2 round-trip -> {ok}");
+        errln!(
+            "exec: {} encrypt/decrypt --with-key=tpm2 round-trip -> {ok}",
+            Program::SystemdCreds
+        );
     }
     ok
 }
@@ -1195,7 +1198,7 @@ async fn run_helper(
     }
 
     let mut child = cmd.spawn().map_err(|e| EnrollError::Command {
-        program: "sudo".to_string(),
+        program: Program::Sudo.to_string(),
         detail: e.to_string(),
     })?;
 
@@ -1206,7 +1209,7 @@ async fn run_helper(
             .write_all(payload.as_bytes())
             .await
             .map_err(|e| EnrollError::Command {
-                program: "sudo".to_string(),
+                program: Program::Sudo.to_string(),
                 detail: e.to_string(),
             })?;
         drop(stdin);
@@ -1216,7 +1219,7 @@ async fn run_helper(
         .wait_with_output()
         .await
         .map_err(|e| EnrollError::Command {
-            program: "sudo".to_string(),
+            program: Program::Sudo.to_string(),
             detail: e.to_string(),
         })?;
 
@@ -1848,7 +1851,7 @@ async fn seal_linux(
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| EnrollError::Command {
-            program: "systemd-creds".to_string(),
+            program: Program::SystemdCreds.to_string(),
             detail: e.to_string(),
         })?;
     {
@@ -1857,7 +1860,7 @@ async fn seal_linux(
             .write_all(plaintext)
             .await
             .map_err(|e| EnrollError::Command {
-                program: "systemd-creds".to_string(),
+                program: Program::SystemdCreds.to_string(),
                 detail: e.to_string(),
             })?;
     }
@@ -1865,7 +1868,7 @@ async fn seal_linux(
         .wait_with_output()
         .await
         .map_err(|e| EnrollError::Command {
-            program: "systemd-creds".to_string(),
+            program: Program::SystemdCreds.to_string(),
             detail: e.to_string(),
         })?;
     if !output.status.success() {

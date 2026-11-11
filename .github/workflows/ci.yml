@@ -417,8 +417,8 @@ jobs:
         run: |
           set -o pipefail
           cargo clippy --locked -p maknae -p maknae-vault -p maknae-io --all-targets -- -D warnings 2>&1 | tee "$RUNNER_TEMP/clippy-spawn.log"
-          # A clippy.toml path that resolves to nothing refuses nothing (#564).
-          ! grep -q 'does not refer to a reachable function' "$RUNNER_TEMP/clippy-spawn.log"
+          # A diagnostic on clippy.toml means an entry refuses nothing (#564).
+          ! grep -qE -- '--> .*clippy\.toml:[0-9]+' "$RUNNER_TEMP/clippy-spawn.log"
       - name: Confirm the maknae-sys macOS suite actually ran
         run: |
           set -euo pipefail

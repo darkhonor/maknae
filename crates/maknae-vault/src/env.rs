@@ -180,8 +180,7 @@ pub const NEVER_SCRUB_ENV: &[&str] = &[
     // silently force en-US on an operator who chose ko-KR.
     "LC_MESSAGES",
     "LANG",
-    // Selects no Maknae program (each is spawned by absolute path through
-    // `maknae_io::program`, #327); kept because the helpers inherit it.
+    // Kept because spawned helpers inherit it; it selects none of them (#327).
     "PATH",
     // Read for the AU-3c host label (`maknae-kernel`'s `run.rs`), which is
     // documented non-security-load-bearing and falls back to "maknaed".

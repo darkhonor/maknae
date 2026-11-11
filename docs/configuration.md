@@ -116,7 +116,7 @@ An exported `VAULT_ADDR` or `VAULT_TOKEN` is for **your** `vault` CLI, as `docs/
 | `HOME` | `maknae` | the config-directory fallback. Note it degrades to `.` when unset |
 | `SUDO_UID` `SUDO_USER` | `maknae enroll` | the operator identity enroll provisions **for**, cross-checked against `passwd` and refused on mismatch. Without them every enroll fails preflight |
 | `LC_MESSAGES` `LANG` | `maknae`, `maknaed` | message locale (en-US / ko-KR) |
-| `PATH` | `maknae`, `maknae enroll` | selects which `systemd-creds`, `setfacl`, `apparmor_parser` … actually runs, including on the CLI's credential-read path. **That dependency is a defect, tracked as #327** — the fix is to stop relying on `PATH`, not to scrub it |
+| `PATH` | the helpers `maknae` and `maknae enroll` spawn | selects no program Maknae runs: each one is named by absolute path (`maknae_io::program`). It is kept because the helpers inherit it |
 | `HOSTNAME` | `maknaed` | the AU-3c host label, which is correlation only and falls back to `maknaed`. Listed so inheriting it is a decision rather than an oversight |
 | `KUBERNETES_SERVICE_HOST` `container` | `maknaed` | corroborating container markers for the boot check of `deployment.mode` (§6.5). They can let `container` start; they never refuse `linux-host` |
 
