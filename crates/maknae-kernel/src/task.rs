@@ -146,8 +146,8 @@ struct Held {
     enrolled: BTreeMap<AgentId, u32>,
     issued: Counters,
     boot: Vec<BootFinding>,
-    /// Not live, yet the disk may read them confirmed: each is held marked pending until
-    /// a synced write of it, or a synced unlink.
+    /// Gone from `tasks`, yet the disk may read them confirmed: each is held marked
+    /// pending until a synced write of it, or a synced unlink.
     exposed: BTreeMap<TaskId, TaskRecord>,
 }
 
@@ -158,6 +158,11 @@ impl Held {
 
     fn live(&self, id: &TaskId) -> Option<&TaskRecord> {
         self.tasks.get(id).filter(|r| !r.pending)
+    }
+
+    fn expose(&mut self, mut rec: TaskRecord) {
+        rec.pending = true;
+        self.exposed.insert(rec.signed.task.task_id, rec);
     }
 }
 
@@ -301,23 +306,24 @@ impl TaskStore {
         })
     }
 
-    /// An unlink that landed unsynced is taken, so memory matches the visible disk
-    /// record by record, and a repeated acknowledgement finds nothing left to remove.
+    /// An unlink that landed unsynced is taken, and stays owed until one is synced.
     /// The caller holds the writer.
     fn erase(&self, id: &TaskId) -> Result<(), TaskRefusal> {
-        match self.blobs.delete(&name_of(id)) {
-            Ok(()) | Err(StoreError::NotDurable(_)) => {}
+        let unsynced = match self.blobs.delete(&name_of(id)) {
+            Ok(()) => false,
+            Err(StoreError::NotDurable(_)) => true,
             Err(e @ (StoreError::Io(_) | StoreError::Counters(_))) => return Err(store(e)),
-        }
+        };
         let mut held = self.held();
-        held.tasks.remove(id);
         held.hot.remove(id);
+        if let (Some(rec), true) = (held.tasks.remove(id), unsynced) {
+            held.expose(rec);
+        }
         Ok(())
     }
 
     /// Bumps the generation and drops the agent's tasks from memory in one step, so a mint
-    /// racing it is refused; the records are removed after, and one that cannot be is
-    /// purged again by the next boot's reconcile.
+    /// racing it is refused. Each stored record is owed an unlink from here on.
     fn forget(held: &mut Held, agent: &AgentId) -> Vec<TaskId> {
         let g = held.generations.entry(agent.clone()).or_insert(0);
         *g = g.wrapping_add(1);
@@ -328,16 +334,24 @@ impl TaskStore {
             .map(|(id, _)| *id)
             .collect();
         for id in &gone {
-            held.tasks.remove(id);
             held.hot.remove(id);
+            if let Some(rec) = held.tasks.remove(id).filter(|r| !r.pending) {
+                held.expose(rec);
+            }
         }
         gone
     }
 
     fn unlink_all(&self, gone: Vec<TaskId>) {
         for id in gone {
-            if let Err(e) = self.blobs.delete(&name_of(&id)) {
-                eprintln!("maknaed: purged task {id} stays on disk: {e}");
+            match self.blobs.delete(&name_of(&id)) {
+                Ok(()) => {
+                    self.held().exposed.remove(&id);
+                }
+                Err(e) => eprintln!(
+                    "maknaed: purged task {id} stays on disk until a later store write \
+                     retries it: {e}"
+                ),
             }
         }
     }
@@ -741,14 +755,12 @@ impl TaskStore {
         self.clock.now_secs()
     }
 
-    /// Makes a minted task visible, once its submission is audited.
-    /// With a `ticket`, a submission that gave up first wins. A confirm that does not end
-    /// with the task visible takes the record back.
+    /// Makes a minted task visible, once its submission is audited. The `ticket` is
+    /// kept before anything is written: a submission that gave up first leaves the record
+    /// pending, and one that gives up later can only call the outcome unknown. A write
+    /// that fails once kept is taken back.
     pub(crate) fn confirm(&self, id: &TaskId, ticket: Option<&Ticket>) -> Result<(), TaskRefusal> {
         let _w = self.writing();
-        if ticket.is_some_and(Ticket::abandoned) {
-            return Err(abandoned());
-        }
         let mut next = {
             let mut held = self.held();
             let prior = held
@@ -757,24 +769,25 @@ impl TaskStore {
                 .filter(|r| r.pending)
                 .cloned()
                 .ok_or(TaskRefusal::Unknown)?;
-            held.exposed.insert(*id, prior.clone());
+            if ticket.is_some_and(|t| !t.keep(*id)) {
+                return Err(abandoned());
+            }
+            held.expose(prior.clone());
             prior
         };
         next.pending = false;
-        let refusal = match encode(&next).and_then(|plain| self.blobs.save(&name_of(id), &plain)) {
+        match encode(&next).and_then(|plain| self.blobs.save(&name_of(id), &plain)) {
             Ok(()) => {
                 let mut held = self.held();
-                if !ticket.is_some_and(|t| !t.keep(*id)) {
-                    held.exposed.remove(id);
-                    held.tasks.insert(*id, next);
-                    return Ok(());
-                }
-                abandoned()
+                held.exposed.remove(id);
+                held.tasks.insert(*id, next);
+                Ok(())
             }
-            Err(e) => store(e),
-        };
-        self.withdraw_locked(id);
-        Err(refusal)
+            Err(e) => {
+                self.withdraw_locked(id);
+                Err(store(e))
+            }
+        }
     }
 
     /// The agent's own task `id`, only while it is `Working`.
@@ -940,9 +953,8 @@ impl TaskStore {
         let rewrite = {
             let mut held = self.held();
             held.hot.remove(id);
-            if let Some(mut rec) = held.tasks.remove(id).filter(|r| !r.pending) {
-                rec.pending = true;
-                held.exposed.insert(*id, rec);
+            if let Some(rec) = held.tasks.remove(id).filter(|r| !r.pending) {
+                held.expose(rec);
             }
             held.exposed.get(id).cloned()
         };
@@ -1358,9 +1370,48 @@ where
         Err(crate::mutation::Blocked::NotStarted) => Err(TaskRefusal::Unavailable(
             "not done: the task store was busy".into(),
         )),
-        Err(crate::mutation::Blocked::Unknown) => Err(TaskRefusal::Unavailable(
-            "outcome unknown: the task store did not answer in time".into(),
-        )),
+        Err(crate::mutation::Blocked::Unknown) => {
+            Err(TaskRefusal::Unavailable(format!("outcome unknown: {LATE}")))
+        }
+    }
+}
+
+const LATE: &str = "the task store did not answer in time";
+
+/// What a submission says of a confirm that did not answer `Ok`. Once the confirm kept
+/// the ticket the record may be stored, so the outcome is unknown and nothing is taken
+/// back here; before that nothing was written, and the pending record is withdrawn.
+async fn unconfirmed(
+    store: &Arc<TaskStore>,
+    uid: u32,
+    deadline: tokio::time::Instant,
+    id: TaskId,
+    kept: bool,
+    refusal: TaskRefusal,
+) -> (TaskRefusal, String) {
+    let late = format!("outcome unknown: {LATE}");
+    match (kept, refusal) {
+        (true, TaskRefusal::Unavailable(why)) if why == late => {
+            (TaskRefusal::Unavailable(late.clone()), late)
+        }
+        (true, other) => {
+            let said = format!("outcome unknown: {other}");
+            (TaskRefusal::Unavailable(said.clone()), said)
+        }
+        (false, refusal) => {
+            let withdrawal = withdraw_within(store, uid, deadline, id).await;
+            let refusal = match refusal {
+                TaskRefusal::Unavailable(why) if why == late => {
+                    TaskRefusal::Unavailable(format!("not done: {LATE}"))
+                }
+                other => other,
+            };
+            let said = match &refusal {
+                TaskRefusal::Unavailable(why) => format!("{why}; {}", withdrawal.said()),
+                other => format!("not stored: {other}; {}", withdrawal.said()),
+            };
+            (refusal, said)
+        }
     }
 }
 
@@ -1495,14 +1546,12 @@ async fn submit_under<P: Authorizer + Send + Sync + 'static>(
             let t = Arc::clone(&ticket);
             match offload(uid, deadline, move || s.confirm(&id, Some(&t))).await {
                 Ok(()) => Ok(task),
-                Err(_) if ticket.abandon().is_some() => Ok(task),
                 Err(refusal) => {
-                    let withdrawal = withdraw_within(store, uid, deadline, id).await;
+                    let kept = ticket.abandon().is_some();
+                    let (refusal, said) =
+                        unconfirmed(store, uid, deadline, id, kept, refusal).await;
                     let mut corrective = attempt.record(ctx, Some(&task.task), Some(&refusal));
-                    corrective.outcome.reason = match &refusal {
-                        TaskRefusal::Unavailable(why) => format!("{why}; {}", withdrawal.said()),
-                        other => format!("not stored: {other}; {}", withdrawal.said()),
-                    };
+                    corrective.outcome.reason = said;
                     corrective.outcome.posture = "unavailable".into();
                     emit.emit_within(&corrective, crate::blocking_guard::AUDIT_APPEND_TIMEOUT)
                         .await
@@ -2741,7 +2790,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_task_whose_pending_mark_cannot_clear_is_refused_and_corrected() {
+    async fn a_kept_task_whose_pending_mark_cannot_clear_is_outcome_unknown() {
         let (_g, pdp) = pdp("unconfirmed");
         let blobs = crate::task_store::MemTaskBlobs::default();
         let store = Arc::new(
@@ -2763,7 +2812,7 @@ mod tests {
             (BOUND, None),
         )
         .await;
-        assert!(matches!(got, Err(TaskRefusal::Store(_))), "{got:?}");
+        assert!(matches!(got, Err(TaskRefusal::Unavailable(_))), "{got:?}");
         let trail: Vec<(String, String, String)> = emit
             .0
             .records()
@@ -2779,7 +2828,8 @@ mod tests {
         assert_eq!(trail.len(), 2, "{trail:?}");
         assert_eq!(trail[0].1, "task stored");
         assert_eq!(trail[1].0, "deny");
-        assert!(trail[1].1.starts_with("not stored: "), "{trail:?}");
+        assert!(trail[1].1.starts_with("outcome unknown: "), "{trail:?}");
+        assert!(!trail[1].1.contains("withdraw"), "{trail:?}");
         assert_eq!(trail[1].2, "unavailable");
         assert_eq!(store.len(), 0);
         blobs.fail(None);
@@ -2853,7 +2903,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_confirm_that_times_out_never_reloads_as_a_live_task() {
+    async fn a_confirm_that_times_out_once_kept_is_outcome_unknown_and_may_reload_live() {
         let _alone = STALLS.lock().await;
         let (_g, pdp) = pdp("confirm-timeout");
         let blobs = crate::task_store::MemTaskBlobs::default();
@@ -2876,23 +2926,155 @@ mod tests {
             (std::time::Duration::from_millis(400), None),
         )
         .await;
-        assert!(matches!(got, Err(TaskRefusal::Unavailable(_))), "{got:?}");
+        let Err(TaskRefusal::Unavailable(said)) = got else {
+            panic!("{got:?}");
+        };
+        assert!(said.starts_with("outcome unknown: "), "{said}");
         let corrective = emit.0.records().pop().unwrap();
-        assert!(
-            corrective.outcome.reason.starts_with("outcome unknown: "),
-            "{}",
-            corrective.outcome.reason
-        );
+        assert_eq!(corrective.outcome.reason, said);
         blobs.await_stalls(1);
         blobs.slow(None);
         store.quiesce();
+        assert_eq!(store.len(), 1);
+        assert!(store.abandoned.lock().unwrap().is_empty());
         let reopened =
             TaskStore::open(Box::new(blobs), Arc::new(crate::task_store::SystemClock)).unwrap();
-        assert_eq!(reopened.len(), 0, "no live task reloads");
-        assert!(reopened
-            .take_boot_findings()
-            .iter()
-            .all(|f| matches!(f, crate::task_store::BootFinding::Discarded { .. })));
+        assert_eq!(reopened.len(), 1, "what was kept reloads");
+        assert!(reopened.take_boot_findings().is_empty());
+    }
+
+    struct HoldsWriterOnAudit {
+        trail: Recorder,
+        store: Arc<TaskStore>,
+        release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    }
+
+    impl AuditEmit for HoldsWriterOnAudit {
+        fn emit(
+            &self,
+            rec: &AuditRecord,
+        ) -> impl std::future::Future<Output = Result<(), AuditError>> + Send {
+            if let Some(release) = self.release.lock().unwrap().take() {
+                let (store, (held, holding)) =
+                    (Arc::clone(&self.store), std::sync::mpsc::channel());
+                std::thread::spawn(move || {
+                    let _w = store.writer.lock().unwrap();
+                    held.send(()).unwrap();
+                    let _ = release.recv();
+                });
+                holding.recv().unwrap();
+            }
+            self.trail.emit(rec)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_confirm_given_up_before_it_is_kept_writes_nothing_and_is_not_done() {
+        let _alone = STALLS.lock().await;
+        let (_g, pdp) = pdp("confirm-not-started");
+        let blobs = crate::task_store::MemTaskBlobs::default();
+        let store = Arc::new(
+            TaskStore::open(
+                Box::new(blobs.clone()),
+                Arc::new(crate::task_store::SystemClock),
+            )
+            .unwrap(),
+        );
+        let (release, gate) = std::sync::mpsc::channel();
+        let emit = HoldsWriterOnAudit {
+            trail: Recorder::new(),
+            store: Arc::clone(&store),
+            release: Mutex::new(Some(gate)),
+        };
+        let view = SnapshotEnrollment(pdp.clone());
+        let got = submit_via(
+            pdp.clone(),
+            &store,
+            &view,
+            user(),
+            sub("hobi"),
+            &emit,
+            (std::time::Duration::from_millis(400), None),
+        )
+        .await;
+        assert!(matches!(got, Err(TaskRefusal::Unavailable(_))), "{got:?}");
+        let corrective = emit.trail.records().pop().unwrap();
+        assert!(
+            corrective.outcome.reason.starts_with("not done: "),
+            "{}",
+            corrective.outcome.reason
+        );
+        release.send(()).unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while store.len() != 0 || !store.abandoned.lock().unwrap().is_empty() {
+            assert!(std::time::Instant::now() < until, "the task is withdrawn");
+            store.purge_agent(&id("nobody"));
+            tokio::task::yield_now().await;
+        }
+        store.quiesce();
+        let reopened =
+            TaskStore::open(Box::new(blobs), Arc::new(crate::task_store::SystemClock)).unwrap();
+        assert_eq!(reopened.len(), 0);
+        assert!(
+            reopened.take_boot_findings().is_empty(),
+            "never confirmed, and unlinked"
+        );
+    }
+
+    #[test]
+    fn a_confirm_whose_ticket_was_abandoned_leaves_the_record_pending() {
+        let blobs = crate::task_store::MemTaskBlobs::default();
+        let store = TaskStore::open(
+            Box::new(blobs.clone()),
+            Arc::new(crate::task_store::SystemClock),
+        )
+        .unwrap();
+        let v = view(&[("hobi", HOBI)]);
+        let enrolled = at(store.generation(&id("hobi")), HOBI);
+        let task = store
+            .mint(signer(), &v, enrolled, Tasker::Uid(1000), None, sub("hobi"))
+            .unwrap()
+            .task
+            .task_id;
+        let ticket = Ticket::default();
+        assert_eq!(ticket.abandon(), None);
+        blobs.after_save(|| panic!("an abandoned confirm writes nothing"));
+        assert!(store.confirm(&task, Some(&ticket)).is_err());
+        let reopened =
+            TaskStore::open(Box::new(blobs), Arc::new(crate::task_store::SystemClock)).unwrap();
+        assert_eq!(reopened.len(), 0);
+        assert!(matches!(
+            reopened.take_boot_findings()[..],
+            [crate::task_store::BootFinding::Discarded { .. }]
+        ));
+    }
+
+    #[test]
+    fn a_ticket_is_kept_before_the_confirm_writes() {
+        let blobs = crate::task_store::MemTaskBlobs::default();
+        let store = TaskStore::open(
+            Box::new(blobs.clone()),
+            Arc::new(crate::task_store::SystemClock),
+        )
+        .unwrap();
+        let v = view(&[("hobi", HOBI)]);
+        let enrolled = at(store.generation(&id("hobi")), HOBI);
+        let task = store
+            .mint(signer(), &v, enrolled, Tasker::Uid(1000), None, sub("hobi"))
+            .unwrap()
+            .task
+            .task_id;
+        let ticket = Arc::new(Ticket::default());
+        let seen = Arc::new(Mutex::new(None));
+        let (t, s) = (Arc::clone(&ticket), Arc::clone(&seen));
+        blobs.after_save(move || *s.lock().unwrap() = Some(t.abandon()));
+        assert_eq!(store.confirm(&task, Some(&ticket)), Ok(()));
+        assert_eq!(
+            *seen.lock().unwrap(),
+            Some(Some(task)),
+            "kept before the write"
+        );
+        assert!(store.record(&task).is_some());
     }
 
     #[test]
@@ -3034,7 +3216,6 @@ mod tests {
     enum Via {
         Withdraw,
         Queue,
-        Confirm,
     }
 
     /// The disk fails as `fail` while a confirmed record is taken back by `via`, and
@@ -3059,23 +3240,6 @@ mod tests {
                 store.abandon(task);
                 blobs.fail(Some(fail));
                 store.purge_agent(&nobody);
-                task
-            }
-            Via::Confirm => {
-                let v = view(&[("hobi", HOBI)]);
-                let enrolled = at(store.generation(&id("hobi")), HOBI);
-                let task = store
-                    .mint(signer(), &v, enrolled, Tasker::Uid(1000), None, sub("hobi"))
-                    .unwrap()
-                    .task
-                    .task_id;
-                let ticket = Arc::new(Ticket::default());
-                let (gave_up, disk) = (Arc::clone(&ticket), blobs.clone());
-                blobs.after_save(move || {
-                    gave_up.abandon();
-                    disk.fail(Some(fail));
-                });
-                assert!(store.confirm(&task, Some(&ticket)).is_err());
                 task
             }
         };
@@ -3109,19 +3273,66 @@ mod tests {
         nothing_reloads_after(crate::task_store::Fail::UnsyncedNoUnlink, Via::Queue);
     }
 
-    #[test]
-    fn an_abandoned_confirm_whose_retry_fails_too_is_still_owed() {
-        nothing_reloads_after(crate::task_store::Fail::Records, Via::Confirm);
+    enum Gone {
+        Purged,
+        Dropped,
+        Acknowledged,
+    }
+
+    /// The disk fails as `fail` while a stored record is removed; then it recovers, one
+    /// writer passes, and the host crashes.
+    fn nothing_removed_reloads_after(fail: crate::task_store::Fail, gone: Gone) {
+        let blobs = crate::task_store::MemTaskBlobs::default();
+        let store = TaskStore::open(
+            Box::new(blobs.clone()),
+            Arc::new(crate::task_store::SystemClock),
+        )
+        .unwrap();
+        let me = Tasker::Uid(1000);
+        let task = held_by(&store, me.clone());
+        match gone {
+            Gone::Purged => {
+                blobs.fail(Some(fail));
+                store.purge_agent(&id("hobi"));
+            }
+            Gone::Dropped => {
+                blobs.fail(Some(fail));
+                store.drop_queued(&task, &me).unwrap();
+            }
+            Gone::Acknowledged => {
+                let rseq = store.publish_report(&task, text("r"), None).unwrap();
+                blobs.fail(Some(fail));
+                assert_eq!(store.acknowledge(&me, &id("hobi"), rseq), Ok(1));
+            }
+        }
+        assert!(store.record(&task).is_none());
+        blobs.fail(None);
+        store.purge_agent(&id("nobody"));
+        assert!(!blobs.has(&name_of(&task)));
+        blobs.crash(0);
+        let reopened =
+            TaskStore::open(Box::new(blobs), Arc::new(crate::task_store::SystemClock)).unwrap();
+        assert_eq!(reopened.len(), 0, "no removed task reloads");
     }
 
     #[test]
-    fn an_abandoned_confirm_marked_pending_unsynced_and_not_unlinked_is_still_owed() {
-        nothing_reloads_after(crate::task_store::Fail::UnsyncedNoUnlink, Via::Confirm);
+    fn a_purge_whose_unlink_is_refused_is_still_owed() {
+        nothing_removed_reloads_after(crate::task_store::Fail::Records, Gone::Purged);
     }
 
     #[test]
-    fn an_abandoned_confirm_unlinked_unsynced_is_still_owed() {
-        nothing_reloads_after(crate::task_store::Fail::Unsynced, Via::Confirm);
+    fn a_purge_whose_unlink_lands_unsynced_is_still_owed() {
+        nothing_removed_reloads_after(crate::task_store::Fail::Unsynced, Gone::Purged);
+    }
+
+    #[test]
+    fn a_drop_whose_unlink_lands_unsynced_is_still_owed() {
+        nothing_removed_reloads_after(crate::task_store::Fail::Unsynced, Gone::Dropped);
+    }
+
+    #[test]
+    fn an_acknowledgement_whose_unlink_lands_unsynced_is_still_owed() {
+        nothing_removed_reloads_after(crate::task_store::Fail::Unsynced, Gone::Acknowledged);
     }
 
     #[test]

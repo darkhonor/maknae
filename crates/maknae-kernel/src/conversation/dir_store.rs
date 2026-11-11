@@ -78,6 +78,14 @@ impl DirBlobs {
     }
 
     /// Moves the record `name` aside, unread, under a name `names` never lists.
+    /// Done once the name is durably absent, whether or not it was there.
+    pub fn delete_settled(&self, name: &str) -> Result<(), StoreError> {
+        self.anchor
+            .remove_settled(&self.file(name), None)
+            .map(drop)
+            .map_err(io)
+    }
+
     pub fn quarantine(&self, name: &str) -> Result<(), StoreError> {
         let from = self.file(name).into_os_string();
         let mut to = OsString::from(&from);

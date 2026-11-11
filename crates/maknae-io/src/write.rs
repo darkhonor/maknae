@@ -93,6 +93,33 @@ fn remove_synced<F: AsFd>(
     Ok(true)
 }
 
+pub(crate) fn remove_at_settled<F: AsFd>(
+    dirfd: &F,
+    name: &str,
+    at: &Path,
+) -> Result<bool, IoError> {
+    absent_synced(dirfd, name, at, syscall::fsync_fd)
+}
+
+/// Syncs the directory whether or not the name was there, so `Ok` proves it absent.
+fn absent_synced<F: AsFd>(
+    dirfd: &F,
+    name: &str,
+    at: &Path,
+    sync_dir: impl FnOnce(&F) -> nix::Result<()>,
+) -> Result<bool, IoError> {
+    let removed = match syscall::remove_at(dirfd, name, false) {
+        Ok(()) => true,
+        Err(nix::errno::Errno::ENOENT) => false,
+        Err(e) => return Err(crate::checks::map_errno_no_disambiguation(e, at)),
+    };
+    sync_dir(dirfd).map_err(|e| IoError::RemovedNotDurable {
+        path: at.to_path_buf(),
+        kind: crate::checks::kind_of_errno(e),
+    })?;
+    Ok(removed)
+}
+
 pub(crate) fn move_aside_durable<F: AsFd>(
     dirfd: &F,
     from: &std::ffi::OsStr,
@@ -380,6 +407,44 @@ mod tests {
         let busy = d.path().join("busy");
         let e =
             remove_synced(&dirfd, "busy", &busy, |_| panic!("nothing was unlinked")).unwrap_err();
+        assert!(matches!(e, IoError::Io { .. }), "{e:?}");
+        assert!(busy.is_dir());
+    }
+
+    #[test]
+    fn a_settled_removal_syncs_the_directory_whether_or_not_the_name_was_there() {
+        let d = tempfile::tempdir().unwrap();
+        let dirfd = std::fs::File::open(d.path()).unwrap();
+        std::fs::write(d.path().join("f"), b"old").unwrap();
+        let at = d.path().join("f");
+        for was_there in [true, false] {
+            let mut synced = false;
+            let removed = absent_synced(&dirfd, "f", &at, |_| {
+                synced = true;
+                Ok(())
+            });
+            assert_eq!(removed, Ok(was_there));
+            assert!(synced);
+            assert!(std::fs::symlink_metadata(&at).is_err());
+        }
+    }
+
+    #[test]
+    fn a_settled_removal_whose_sync_fails_is_not_durable_and_a_failed_unlink_never_syncs() {
+        let d = tempfile::tempdir().unwrap();
+        let dirfd = std::fs::File::open(d.path()).unwrap();
+        let absent = d.path().join("absent");
+        assert_eq!(
+            absent_synced(&dirfd, "absent", &absent, |_| Err(nix::errno::Errno::EIO)),
+            Err(IoError::RemovedNotDurable {
+                path: absent.clone(),
+                kind: crate::checks::kind_of_errno(nix::errno::Errno::EIO),
+            })
+        );
+        std::fs::create_dir(d.path().join("busy")).unwrap();
+        let busy = d.path().join("busy");
+        let e =
+            absent_synced(&dirfd, "busy", &busy, |_| panic!("nothing was unlinked")).unwrap_err();
         assert!(matches!(e, IoError::Io { .. }), "{e:?}");
         assert!(busy.is_dir());
     }

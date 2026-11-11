@@ -235,7 +235,7 @@ impl TaskBlobs for DirBlobs {
     }
 
     fn delete(&self, name: &str) -> Result<(), StoreError> {
-        Blobs::delete(self, name).map_err(lift)
+        self.delete_settled(name).map_err(lift)
     }
 
     fn quarantine(&self, name: &str) -> Result<(), StoreError> {
@@ -1131,6 +1131,17 @@ mod tests {
                 why: "the record does not decode".into(),
             }]
         );
+    }
+
+    #[test]
+    fn removing_an_absent_record_from_the_directory_is_done() {
+        let t = tmp();
+        let uid = nix::unistd::geteuid().as_raw();
+        let blobs = DirBlobs::open(t.path(), uid, key(), TASKS).unwrap();
+        assert_eq!(TaskBlobs::delete(&blobs, "absent"), Ok(()));
+        TaskBlobs::save(&blobs, "there", b"x").unwrap();
+        assert_eq!(TaskBlobs::delete(&blobs, "there"), Ok(()));
+        assert!(TaskBlobs::load(&blobs, "there").is_err());
     }
 
     #[test]
