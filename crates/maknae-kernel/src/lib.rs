@@ -71,7 +71,7 @@ pub use egress::{
 };
 pub use egress_socket::SocketEgress;
 #[cfg(any(test, feature = "hermetic-test-seam"))]
-pub use enrollment::FixedEnrollment;
+pub use enrollment::{Containing, FixedEnrollment};
 pub use enrollment::{EnrollmentView, SnapshotEnrollment};
 pub use groupres::*;
 pub use handler::{

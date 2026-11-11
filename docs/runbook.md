@@ -1572,6 +1572,8 @@ A person or another agent gives an enrolled agent a task with `session.task`; `m
 
 A task is `queued` until the agent claims it, then `working`. The agent's report makes it `reported`; a stop, or a close by the kernel, makes it `closed`. The tasker collects reports and closes, and a collected one is removed. A report or close nobody collects expires after 30 days.
 
+**A contained subject's tasks are held.** When a person is contained, every task they gave, and every sub-task under one, becomes `held`, whatever state it was in; when an agent is contained, every open task it holds does. A held task is never handed out, reported on, added to, stopped, dropped, collected, expired or closed, and its lease no longer runs: it stays exactly as it was, with the state it was held from recorded, as possible evidence. The agent's next heartbeat answers `held`, which tells it to stop and leave the partition untouched. Releasing the subject from containment does not release its tasks; they stay held until an admin releases them (#632).
+
 The kernel closes a task itself in two cases, and keeps the closed record for the tasker:
 
 - **`agent-gone`:** the agent was de-enrolled, or its account's uid changed. The tasks are marked at the reload that installs the change, so the agent is refused them from then on, and are closed by the reload's own pass or the next sweep.
@@ -1600,6 +1602,7 @@ The kernel's own records are `event: task`, written by the boot, a reload or the
 |---|---|---|---|
 | `closed:agent-gone` | `deny` | The task is about to be closed because its agent is gone. | Nothing; the tasker collects the close. |
 | `closed:agent-lost` | `deny` | The task is about to be closed because its lease lapsed. | Check the agent process; it stopped claiming or citing. |
+| `task held: contained` | `deny` | The task is about to be put on hold because its tasker or its agent is contained. | Treat the task, its report and the agent's partition as evidence; leave them as they are. An admin releases held tasks (#632). |
 | `expired` | `deny` | A report or close nobody collected in 30 days is about to be removed. | Nothing. |
 | `store: owed to a later store write: <why>` | `deny` | The disk did not prove a removal, rewrite or close. Every later store write retries it. | See below. |
 | `store: the owed write landed` | `permit` | That retry succeeded. | Nothing. |

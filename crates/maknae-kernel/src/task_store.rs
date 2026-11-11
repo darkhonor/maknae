@@ -93,6 +93,9 @@ pub struct TaskRecord {
     pub parent: Option<TaskId>,
     pub state: TaskState,
     pub close: Option<TaskClose>,
+    /// The state a held task was in when it was held.
+    #[serde(default)]
+    pub held_from: Option<TaskState>,
     pub pending: bool,
     /// Set with `pending` when the record is being taken back, not awaiting its confirm.
     #[serde(default)]

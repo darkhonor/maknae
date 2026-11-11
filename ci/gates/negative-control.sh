@@ -1126,6 +1126,7 @@ pub enum TaskState {
     Working,
     Reported,
     Closed,
+    Held,
 }
 
 pub enum TaskClose {

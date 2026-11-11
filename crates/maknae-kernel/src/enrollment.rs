@@ -9,6 +9,8 @@ use crate::Composition;
 pub trait EnrollmentView: Send + Sync {
     fn agent_uid(&self, id: &AgentId) -> Option<u32>;
     fn is_enrolled(&self, uid: u32) -> bool;
+    /// Whether the person or agent `uid` is contained.
+    fn contained(&self, uid: u32) -> bool;
 }
 
 pub struct SnapshotEnrollment<B: Baseline>(pub Arc<Composition<B>>);
@@ -27,6 +29,11 @@ impl<B: Baseline> EnrollmentView for SnapshotEnrollment<B> {
     fn is_enrolled(&self, uid: u32) -> bool {
         self.0.baseline().snapshot().agent_of(uid).is_some()
     }
+
+    fn contained(&self, uid: u32) -> bool {
+        let baseline = self.0.baseline();
+        baseline.snapshot().contained(uid, baseline.principal().uid)
+    }
 }
 
 #[cfg(any(test, feature = "hermetic-test-seam"))]
@@ -41,6 +48,29 @@ impl EnrollmentView for FixedEnrollment {
 
     fn is_enrolled(&self, uid: u32) -> bool {
         self.0.values().any(|u| *u == uid)
+    }
+
+    fn contained(&self, _uid: u32) -> bool {
+        false
+    }
+}
+
+/// `view`, with `contained` contained.
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+pub struct Containing<V>(pub V, pub std::collections::BTreeSet<u32>);
+
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+impl<V: EnrollmentView> EnrollmentView for Containing<V> {
+    fn agent_uid(&self, id: &AgentId) -> Option<u32> {
+        self.0.agent_uid(id)
+    }
+
+    fn is_enrolled(&self, uid: u32) -> bool {
+        self.0.is_enrolled(uid)
+    }
+
+    fn contained(&self, uid: u32) -> bool {
+        self.1.contains(&uid)
     }
 }
 

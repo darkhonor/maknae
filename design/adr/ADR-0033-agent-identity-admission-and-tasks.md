@@ -108,7 +108,7 @@ One residual is stated, not closed. **Disabling does not revoke:** `remove-agent
 
 ## Amendment 2026-11-11 (#628): tasks persist, and the kernel closes what cannot finish
 
-Dated as-built amendment; rides the #628 PR. It replaces decision 7's in-memory store and settles decision 8's sealing at rest. Eight statements.
+Dated as-built amendment; rides the #628 PR. It replaces decision 7's in-memory store and settles decision 8's sealing at rest. Nine statements.
 
 1. **Tasks persist, sealed, and survive a restart.** Each task is one `.task` record in `STATE_DIR/tasks` (`/var/lib/maknae/tasks` on Linux, `/usr/local/var/db/maknae/state/tasks` on macOS), beside one `counters.task` file. Each is sealed under a fresh data key wrapped by the graph key, as the conversation store is. A record holds the signed task, the agent and its uid at mint, the tasker, the root tasker of the task's chain, the parent, the state and close, the follow-ups, the report and the last stored action counts. A change is written before memory shows it. A submission is written pending, then confirmed after its decision record lands; at boot a pending record is discarded, and an unreadable or oversized one is moved aside as `.task.quarantine`, each after its trail record. The counters file holds the store's submission sequence and each tasker's own submission and report ordinals. A value is written there before it is issued and never goes back, and a missing, unreadable or lagging counters file beside stored tasks refuses boot. *Failure it prevents:* a restart that forgot every task would drop queued work and every held report without a word to the taskers.
 
@@ -137,6 +137,13 @@ Dated as-built amendment; rides the #628 PR. It replaces decision 7's in-memory 
    - **An acknowledged report may be delivered at least once.** An acknowledgement whose removal is not proven is answered "outcome unknown", and the report can be collected again after a crash.
    - **The counters file keeps tasker ids.** It holds one entry per tasker that ever submitted, and never forgets one. Today that grows with distinct local uids and agents, because a remote tasker is refused at submission.
    - **The runtime's own uid.** The partition operand bounds what the kernel releases to the model. It does not bound the agent process, whose account owns its whole home, every partition included; bounding the process is #629's confinement.
+
+9. **Containment holds tasks** (maintainer, 2026-11-11: "If a person or agent is moved to a contained state, all work ceases and all tasks placed on hold. They become potential evidence of a breach or malicious behavior." and "they need an admin to release the tasks from hold status"). `TaskState::Held` is an additive state; the record keeps the state it was held from.
+   - **Who.** A contained person (role `adversary`) has every task they gave, and every task rooted at them, held, whether open, reported or closed. A contained agent has every open task it holds held.
+   - **When.** At the points a de-enrollment is handled: boot, a reload, a live edit and `admin.contain`. The tasks are marked without I/O when the snapshot is installed, and from that moment none is handed out, cited, reported on or added to. The hold is then recorded (`task held: contained`) and written, record first and at least once, exactly as a close is; a crash between the two holds again at the next boot while the subject is still contained.
+   - **While held.** A held task is never handed out; a heartbeat answers `Held`, so the agent stops; it is never closed, expired or lapsed; drop, stop, add, report, collect and acknowledge leave it as it is. `status` and `list` show `Held` to the tasker.
+   - **Release.** `admin.release` lifts the containment only. A held task stays held until an admin releases it, which is #632 and is not built here.
+   *Failure it prevents:* a contained subject's work kept running, and its queued tasks, partitions and reports kept changing or expiring, after the moment they became evidence.
 
 ## Related
 

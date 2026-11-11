@@ -335,6 +335,8 @@ pub enum TaskState {
     Working,
     Reported,
     Closed,
+    /// Set aside, as it stood, because its tasker or its agent was contained.
+    Held,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]

@@ -30,6 +30,8 @@ const MOVED: &str = "not done: the queue changed during the claim";
 pub enum DueFor {
     Close(TaskClose),
     Expiry,
+    /// Its tasker or its agent is contained.
+    Hold,
 }
 
 /// A close or an expiry the kernel records before it asks the store to perform it.
@@ -223,6 +225,11 @@ struct Held {
     closing: BTreeMap<TaskId, TaskClose>,
     /// Marked tasks whose close the kernel has recorded, each with the variant recorded.
     recorded: BTreeMap<TaskId, TaskClose>,
+    /// Tasks of a contained tasker or agent, due a hold: none is handed out, acted on,
+    /// closed, expired or removed any more.
+    holding: BTreeSet<TaskId>,
+    /// Marked tasks whose hold the kernel has recorded.
+    hold_said: BTreeSet<TaskId>,
     /// The submission sequence of the close the disk last refused; `due` starts after it.
     refused_close: Option<u64>,
     /// Agents whose exposed records the next writer retries whatever the drain's order.
@@ -256,9 +263,10 @@ impl Held {
         }
     }
 
-    /// A recorded close stays owed until the close itself is stored.
+    /// A recorded close or hold stays owed until it is itself stored.
     fn proven(&mut self, id: &TaskId) {
-        if !self.recorded.contains_key(id) && self.owed_said.remove(id) {
+        let recorded = self.recorded.contains_key(id) || self.hold_said.contains(id);
+        if !recorded && self.owed_said.remove(id) {
             self.note(Notice::Settled { task: *id });
         }
     }
@@ -266,8 +274,37 @@ impl Held {
     /// A task `agent` may still be handed or act on: its own, under this uid, with no
     /// close owed.
     fn held_by(&self, id: &TaskId, agent: &AgentId, uid: u32) -> Option<&TaskRecord> {
-        self.live(id)
-            .filter(|r| r.agent == *agent && r.agent_uid == uid && !self.closing.contains_key(id))
+        self.live(id).filter(|r| {
+            r.agent == *agent
+                && r.agent_uid == uid
+                && !self.closing.contains_key(id)
+                && !self.holding.contains(id)
+        })
+    }
+
+    /// Marks, for a hold, every task whose tasker or root person `contained` names
+    /// (open, reported or closed) and every open task of an agent it names.
+    fn hold_contained(&mut self, contained: impl Fn(u32) -> bool) {
+        let of = |t: &Tasker| match t {
+            Tasker::Uid(uid) | Tasker::Agent { uid, .. } => Some(*uid),
+            Tasker::Remote(_) => None,
+        };
+        let due: Vec<TaskId> = self
+            .tasks
+            .iter()
+            .filter(|(_, r)| !r.pending && r.state != TaskState::Held)
+            .filter(|(_, r)| {
+                let root = match &r.root {
+                    RootTasker::Person { uid } => Some(*uid),
+                    RootTasker::Agent { .. } => None,
+                };
+                of(&r.tasker).is_some_and(&contained)
+                    || root.is_some_and(&contained)
+                    || (open(r) && contained(r.agent_uid))
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        self.holding.extend(due);
     }
 
     /// Bumps the agent's generation, so a mint racing it is refused, and owes a close to
@@ -351,7 +388,7 @@ impl TaskStore {
         for rec in loaded.records {
             let lease_until = match rec.state {
                 TaskState::Working => lease,
-                TaskState::Queued | TaskState::Reported | TaskState::Closed => 0,
+                TaskState::Queued | TaskState::Reported | TaskState::Closed | TaskState::Held => 0,
             };
             let id = rec.signed.task.task_id;
             held.hot.insert(
@@ -537,6 +574,18 @@ impl TaskStore {
         for id in &finished {
             self.held().unmark(id);
         }
+        let mut held = self.held();
+        let settled: Vec<TaskId> = held
+            .holding
+            .iter()
+            .filter(|id| held.live(id).is_none_or(|r| r.state == TaskState::Held))
+            .copied()
+            .collect();
+        for id in &settled {
+            held.holding.remove(id);
+            held.hold_said.remove(id);
+        }
+        drop(held);
         for id in &unconfirmed {
             self.held().unmark(id);
             self.withdraw_locked(id);
@@ -675,7 +724,8 @@ impl TaskStore {
                 r.state,
                 &r.report,
             ) {
-                _ if r.pending => None,
+                _ if r.pending || r.state == TaskState::Held => None,
+                _ if held.holding.contains(id) => Some(DueFor::Hold),
                 (Some(close), TaskState::Queued | TaskState::Working, _) => {
                     Some(DueFor::Close(*close))
                 }
@@ -695,7 +745,7 @@ impl TaskStore {
                     tasker: r.tasker.clone(),
                     parent: r.parent,
                     why: why(id, r)?,
-                    recorded: held.recorded.contains_key(id),
+                    recorded: held.recorded.contains_key(id) || held.hold_said.contains(id),
                 };
                 Some((r.seq, due))
             })
@@ -720,7 +770,10 @@ impl TaskStore {
                 let mut held = self.held();
                 let lapsed = held.hot.get(&d.task).is_none_or(|h| h.lease_until < now);
                 let rec = held.live(&d.task);
+                let holding = held.holding.contains(&d.task);
                 let still = match (d.why, held.closing.get(&d.task)) {
+                    (DueFor::Hold, _) => holding && rec.is_some_and(|r| r.state != TaskState::Held),
+                    (DueFor::Close(_) | DueFor::Expiry, _) if holding => false,
                     (DueFor::Close(_), Some(_)) => rec.is_some_and(open),
                     (DueFor::Close(TaskClose::AgentLost), None) => {
                         rec.is_some_and(|r| r.state == TaskState::Working) && lapsed
@@ -735,9 +788,15 @@ impl TaskStore {
                         .and_then(|r| r.report.as_ref())
                         .is_some_and(|(_, at)| now.saturating_sub(*at) >= hold),
                 };
-                if let (true, DueFor::Close(close)) = (still, d.why) {
-                    held.closing.insert(d.task, close);
-                    held.recorded.insert(d.task, close);
+                match (still, d.why) {
+                    (true, DueFor::Close(close)) => {
+                        held.closing.insert(d.task, close);
+                        held.recorded.insert(d.task, close);
+                    }
+                    (true, DueFor::Hold) => {
+                        held.hold_said.insert(d.task);
+                    }
+                    (true, DueFor::Expiry) | (false, _) => {}
                 }
                 still
             };
@@ -747,7 +806,11 @@ impl TaskStore {
                     disk = self.close_durably(&d.task);
                     done += usize::from(disk);
                 }
-                (true, DueFor::Close(_), false) => {}
+                (true, DueFor::Close(_) | DueFor::Hold, false) => {}
+                (true, DueFor::Hold, true) => {
+                    disk = self.hold_durably(&d.task);
+                    done += usize::from(disk);
+                }
                 (true, DueFor::Expiry, true) => {
                     disk = self.withdraw_locked(&d.task);
                     done += 1;
@@ -802,6 +865,39 @@ impl TaskStore {
         }
     }
 
+    /// Writes the marked task `id` held, keeping the state it was in; memory follows only
+    /// a synced write. The caller holds the writer.
+    fn hold_durably(&self, id: &TaskId) -> bool {
+        let (prior, hot) = {
+            let held = self.held();
+            let Some(prior) = held.live(id).cloned() else {
+                return true;
+            };
+            (prior, held.hot.get(id).copied().unwrap_or_default())
+        };
+        let mut next = prior.clone();
+        next.held_from = Some(prior.state);
+        next.state = TaskState::Held;
+        next.actions = hot.actions;
+        next.last_action = hot.last_action;
+        let written = self.write(&next, Some(&prior));
+        let mut held = self.held();
+        match written {
+            Ok(()) => {
+                held.tasks.insert(*id, next);
+                held.holding.remove(id);
+                held.hold_said.remove(id);
+                held.unmark(id);
+                held.proven(id);
+                true
+            }
+            Err(why) => {
+                held.owe(id, format!("the hold is not stored: {why}"));
+                false
+            }
+        }
+    }
+
     /// Stores each working task's action counters that changed, until the disk first
     /// refuses.
     pub fn store_counters(&self) {
@@ -842,7 +938,8 @@ impl TaskStore {
     /// Without the writer and without I/O: every agent whose (id, uid) the view no longer
     /// holds as last seen has its generation bumped, and each of its open tasks bound to
     /// another uid is marked, due a close as `AgentGone`. Staleness is read from open tasks
-    /// only.
+    /// only. Every task of a contained tasker, and every open task of a contained agent, is
+    /// marked for a hold.
     pub fn mark_unenrolled(&self, view: &dyn EnrollmentView) {
         let mut held = self.held();
         let known: BTreeSet<AgentId> = held
@@ -868,6 +965,7 @@ impl TaskStore {
                 None => held.enrolled.remove(&agent),
             };
         }
+        held.hold_contained(|uid| view.contained(uid));
     }
 
     #[cfg(any(test, feature = "hermetic-test-seam"))]
@@ -991,6 +1089,7 @@ impl TaskStore {
             parent: task.task.parent,
             state: TaskState::Queued,
             close: None,
+            held_from: None,
             pending: true,
             withdrawn: false,
             seq,
@@ -1095,8 +1194,12 @@ impl TaskStore {
             let rec = held.live(id).ok_or(TaskRefusal::Unknown)?;
             check(rec)?;
             match rec.state {
-                TaskState::Queued | TaskState::Working => {}
-                TaskState::Reported | TaskState::Closed => return Err(TaskRefusal::Finished),
+                TaskState::Queued | TaskState::Working if !held.holding.contains(id) => {}
+                TaskState::Queued
+                | TaskState::Working
+                | TaskState::Reported
+                | TaskState::Closed
+                | TaskState::Held => return Err(TaskRefusal::Finished),
             }
             rec.clone()
         };
@@ -1223,7 +1326,7 @@ impl TaskStore {
                     false => Ok(handed),
                 }
             }
-            TaskState::Reported | TaskState::Closed => Err(moved()),
+            TaskState::Reported | TaskState::Closed | TaskState::Held => Err(moved()),
         }
     }
 
@@ -1269,7 +1372,7 @@ impl TaskStore {
             })
             .max_by_key(|r| r.seq);
         match last {
-            Some(rec) if rec.state == TaskState::Closed => {
+            Some(rec) if matches!(rec.state, TaskState::Closed | TaskState::Held) => {
                 Heartbeat::Closed(self.view_of(&held, rec))
             }
             Some(_) | None => Heartbeat::Idle,
@@ -1284,16 +1387,19 @@ impl TaskStore {
         text: SecretText,
     ) -> Result<TaskView, TaskRefusal> {
         let _w = self.writing();
-        if self.held().closing.contains_key(id) {
+        let held = self.held();
+        if held.closing.contains_key(id) || held.holding.contains(id) {
             return Err(TaskRefusal::AgentGone);
         }
+        drop(held);
         let next = self.publish(id, text, None, |rec| {
             match (rec.agent == *agent && rec.agent_uid == uid, rec.state) {
                 (false, _) => Err(TaskRefusal::OtherAgent),
                 (true, TaskState::Working) => Ok(()),
-                (true, TaskState::Queued | TaskState::Reported | TaskState::Closed) => {
-                    Err(TaskRefusal::NotWorking)
-                }
+                (
+                    true,
+                    TaskState::Queued | TaskState::Reported | TaskState::Closed | TaskState::Held,
+                ) => Err(TaskRefusal::NotWorking),
             }
         })?;
         Ok(self.view_of(&self.held(), &next))
@@ -1355,6 +1461,7 @@ impl TaskStore {
             held.tasks
                 .iter()
                 .filter(|(_, r)| !r.pending && acked(r))
+                .filter(|(id, r)| r.state != TaskState::Held && !held.holding.contains(id))
                 .map(|(id, _)| *id)
                 .collect()
         };
@@ -1461,9 +1568,11 @@ impl TaskStore {
                 signed,
                 root: root.clone(),
             }),
-            Some((TaskState::Queued | TaskState::Reported | TaskState::Closed, _)) | None => {
-                Err(TaskRefusal::NotWorking)
-            }
+            Some((
+                TaskState::Queued | TaskState::Reported | TaskState::Closed | TaskState::Held,
+                _,
+            ))
+            | None => Err(TaskRefusal::NotWorking),
         }
     }
 
@@ -1501,7 +1610,7 @@ impl TaskStore {
         let prior = {
             let held = self.held();
             let rec = tasker_record(&held, id, tasker).ok_or(TaskRefusal::Unknown)?;
-            if rec.state != TaskState::Working {
+            if rec.state != TaskState::Working || held.holding.contains(id) {
                 return Err(TaskRefusal::NotWorking);
             }
             let total = rec.follow_ups.iter().map(|f| f.0.len()).sum::<usize>();
@@ -1531,9 +1640,10 @@ impl TaskStore {
             |rec| match (rec.tasker == *tasker, rec.state) {
                 (false, _) => Err(TaskRefusal::Unknown),
                 (true, TaskState::Working) => Ok(()),
-                (true, TaskState::Queued | TaskState::Reported | TaskState::Closed) => {
-                    Err(TaskRefusal::NotWorking)
-                }
+                (
+                    true,
+                    TaskState::Queued | TaskState::Reported | TaskState::Closed | TaskState::Held,
+                ) => Err(TaskRefusal::NotWorking),
             },
         )?;
         Ok(self.view_of(&self.held(), &next))
@@ -1549,7 +1659,7 @@ impl TaskStore {
                 return Err(drop_owed());
             }
             let rec = tasker_record(&held, id, tasker).ok_or(TaskRefusal::Unknown)?;
-            if rec.state != TaskState::Queued {
+            if rec.state != TaskState::Queued || held.holding.contains(id) {
                 return Err(TaskRefusal::Finished);
             }
             self.view_of(&held, rec)
@@ -1598,6 +1708,9 @@ impl TaskStore {
             .tasks
             .values()
             .filter(|r| !r.pending && r.tasker == *tasker && r.agent == *agent && r.rseq.is_some())
+            .filter(|r| {
+                r.state != TaskState::Held && !held.holding.contains(&r.signed.task.task_id)
+            })
             .collect();
         mine.sort_by_key(|r| r.rseq);
         crate::task_verbs::report_page(mine.into_iter(), budget)
@@ -1679,6 +1792,7 @@ impl TaskStore {
             parent: task.task.parent,
             state: TaskState::Queued,
             close: None,
+            held_from: None,
             pending: false,
             withdrawn: false,
             seq,
@@ -1933,7 +2047,7 @@ fn owned(
     if stored.agent != *agent || stored.agent_uid != uid {
         return Err(TaskRefusal::OtherAgent);
     }
-    if held.closing.contains_key(id) {
+    if held.closing.contains_key(id) || held.holding.contains(id) {
         return Err(TaskRefusal::Unknown);
     }
     Ok(stored.signed.clone())
@@ -1956,7 +2070,7 @@ fn handable(
 fn open(rec: &TaskRecord) -> bool {
     match rec.state {
         TaskState::Queued | TaskState::Working => true,
-        TaskState::Reported | TaskState::Closed => false,
+        TaskState::Reported | TaskState::Closed | TaskState::Held => false,
     }
 }
 
@@ -4251,6 +4365,76 @@ mod tests {
     }
 
     #[test]
+    fn a_task_marked_for_a_hold_is_refused_everything_before_the_hold_is_stored() {
+        let (blobs, store) = mem();
+        let me = Tasker::Uid(1000);
+        let hobi = id("hobi");
+        let working = held_by(&store, me.clone());
+        let queued = held_by(&store, me.clone());
+        let reported = held_by(&store, me.clone());
+        store.start_for_test(&working);
+        let rseq = store.publish_report(&reported, text("r"), None).unwrap();
+        store.held().closing.insert(queued, TaskClose::AgentGone);
+        store.held().hold_contained(|uid| uid == 1000);
+        blobs.fail(Some(crate::task_store::Fail::Records));
+        let due = store.due(8);
+        assert!(due.iter().all(|d| d.why == DueFor::Hold), "{due:?}");
+        assert_eq!(due.len(), 3, "a hold outranks a close and an expiry");
+        assert_eq!(store.perform(&due), 0);
+        assert!(store.due(8).iter().all(|d| d.recorded));
+        assert_eq!(store.record(&working).unwrap().state, TaskState::Working);
+        assert_eq!(store.claim(&hobi, HOBI, signer()), Ok(Claimed::Idle));
+        assert_eq!(store.heartbeat(&hobi, HOBI, 0, 0), Heartbeat::Idle);
+        assert_eq!(
+            store.working(&working, &hobi, HOBI),
+            Err(TaskRefusal::Unknown)
+        );
+        assert_eq!(
+            store.report(&working, &hobi, HOBI, text("late")),
+            Err(TaskRefusal::AgentGone)
+        );
+        assert_eq!(
+            store
+                .follow_up(&working, &me, text("more"), 100)
+                .unwrap_err(),
+            TaskRefusal::NotWorking
+        );
+        assert_eq!(
+            store.stop(&working, &me).unwrap_err(),
+            TaskRefusal::Finished
+        );
+        assert_eq!(
+            store.drop_queued(&queued, &me).unwrap_err(),
+            TaskRefusal::Finished
+        );
+        assert_eq!(store.acknowledge(&me, &hobi, rseq), Ok(0));
+        assert!(store.reports(&me, &hobi, usize::MAX).entries.is_empty());
+        let said = store.take_notices();
+        assert!(matches!(&said[..], [Notice::Owed { .. }]), "{said:?}");
+        blobs.fail(None);
+        store.pass();
+        assert!(store.take_notices().is_empty(), "the hold is still owed");
+        assert_eq!(store.perform(&store.due(8)), 3);
+        for (task, from) in [
+            (working, TaskState::Working),
+            (queued, TaskState::Queued),
+            (reported, TaskState::Reported),
+        ] {
+            let rec = reopen(&blobs).record(&task).unwrap();
+            assert_eq!((rec.state, rec.held_from), (TaskState::Held, Some(from)));
+        }
+        let held = store.held();
+        assert!(held.holding.is_empty() && held.hold_said.is_empty() && held.closing.is_empty());
+        drop(held);
+        assert!(matches!(
+            store.heartbeat(&hobi, HOBI, 0, 0),
+            Heartbeat::Closed(v) if v.state == TaskState::Held
+        ));
+        store.held().hold_contained(|_| true);
+        assert!(store.due(8).is_empty(), "a held task is held once");
+    }
+
+    #[test]
     fn a_rewrite_of_a_task_whose_close_is_not_stored_is_not_said_to_have_landed() {
         let (blobs, store) = mem();
         let task = held_by(&store, Tasker::Uid(1000));
@@ -4385,7 +4569,7 @@ mod tests {
         due.iter()
             .filter_map(|d| match d.why {
                 DueFor::Close(close) => Some(close),
-                DueFor::Expiry => None,
+                DueFor::Expiry | DueFor::Hold => None,
             })
             .collect()
     }

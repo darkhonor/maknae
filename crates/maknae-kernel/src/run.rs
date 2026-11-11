@@ -8096,6 +8096,7 @@ fn task_due_record(ctx: &BootCtx<'_>, due: &crate::task::Due) -> AuditRecord {
         DueFor::Close(TaskClose::AgentGone) => "closed:agent-gone",
         DueFor::Close(TaskClose::AgentLost) => "closed:agent-lost",
         DueFor::Expiry => "expired",
+        DueFor::Hold => "task held: contained",
     };
     task_record(
         ctx,
@@ -23343,7 +23344,8 @@ mod task_sweep_tests {
             if let (Some(store), Some(task), true) = (
                 &self.store,
                 task,
-                record.outcome.reason.starts_with("closed:"),
+                record.outcome.reason.starts_with("closed:")
+                    || record.outcome.reason == "task held: contained",
             ) {
                 let open = store
                     .record(&task)
@@ -23392,6 +23394,14 @@ mod task_sweep_tests {
         let id = queued(store, agent, tasker);
         store.start_for_test(&id);
         id
+    }
+
+    fn hobi_enrolled() -> FixedEnrollment {
+        FixedEnrollment(
+            [(maknae_config::AgentId::parse("hobi").unwrap(), 2001)]
+                .into_iter()
+                .collect(),
+        )
     }
 
     fn nobody() -> FixedEnrollment {
@@ -23684,6 +23694,54 @@ mod task_sweep_tests {
             open, [true; 4],
             "each task was open when its close was recorded"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_hold_is_recorded_before_it_is_written_and_a_crash_between_holds_again() {
+        let (blobs, clock, store) = mem(1_000);
+        let id = working(&store, "hobi", Tasker::Uid(1000));
+        let contained =
+            || crate::enrollment::Containing(hobi_enrolled(), [1000].into_iter().collect());
+        store.mark_unenrolled(&contained());
+        let (seq, au) = (Seq::new(), serde_json::json!({}));
+        let trail = Trail::watching(0, Some(Arc::clone(&store)));
+        blobs.fail(Some(Fail::Records));
+        for _ in 0..2 {
+            let swept = close_due(&store, &*trail, &ctx(&seq, &au), soon()).await;
+            assert_eq!(swept.remaining, 1);
+        }
+        let recs = trail.recs();
+        assert_eq!(recs.len(), 1, "one process records a hold once");
+        assert_eq!(
+            (
+                recs[0].outcome.result.as_str(),
+                recs[0].outcome.reason.as_str(),
+                recs[0].outcome.posture.as_str(),
+                recs[0].source.uid
+            ),
+            ("deny", "task held: contained", "unavailable", 1000)
+        );
+        assert_eq!(recs[0].object, Some(format!("task:{id}")));
+        assert_eq!(*trail.open.lock().unwrap(), [true], "open when recorded");
+        assert_eq!(store.record(&id).unwrap().state, TaskState::Working);
+        let hobi = maknae_config::AgentId::parse("hobi").unwrap();
+        assert_eq!(store.next_for(&hobi, 2001), None, "marked at once");
+        blobs.fail(None);
+        blobs.crash(0);
+        let reopened = Arc::new(TaskStore::open(Box::new(blobs.clone()), clock).unwrap());
+        reopened.mark_unenrolled(&contained());
+        let swept = close_due(&reopened, &*trail, &ctx(&seq, &au), soon()).await;
+        assert_eq!((swept.remaining, swept.stopped), (0, None));
+        assert_eq!(trail.recs().len(), 2, "held again, recorded again");
+        let rec = reopened.record(&id).unwrap();
+        assert_eq!(
+            (rec.state, rec.held_from),
+            (TaskState::Held, Some(TaskState::Working))
+        );
+        reopened.mark_unenrolled(&contained());
+        let swept = close_due(&reopened, &*trail, &ctx(&seq, &au), soon()).await;
+        assert_eq!(swept.remaining, 0);
+        assert_eq!(trail.recs().len(), 2, "a held task is not held twice");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

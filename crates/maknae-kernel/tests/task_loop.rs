@@ -511,11 +511,26 @@ fn follow_ups(r: RespResult) -> (u32, Vec<String>) {
     }
 }
 
+fn holds(due: &[Due]) -> Vec<TaskId> {
+    due.iter()
+        .filter(|d| d.why == DueFor::Hold)
+        .map(|d| d.task)
+        .collect()
+}
+
+fn containing(w: &World, uids: &[u32]) -> maknae_kernel::Containing<FixedEnrollment> {
+    let _ = w;
+    maknae_kernel::Containing(
+        only(&[("hobi", HOBI_UID), ("suga", SUGA_UID)]),
+        uids.iter().copied().collect(),
+    )
+}
+
 fn closes(due: &[Due]) -> Vec<(TaskId, TaskClose)> {
     due.iter()
         .filter_map(|d| match d.why {
             DueFor::Close(close) => Some((d.task, close)),
-            DueFor::Expiry => None,
+            DueFor::Expiry | DueFor::Hold => None,
         })
         .collect()
 }
@@ -2379,4 +2394,158 @@ async fn a_hand_out_the_signer_refuses_is_recorded_unavailable_and_held_back() {
     w.agents.signer = Arc::new(FixedSigner);
     w.clock.set(T0 + 1);
     assert_eq!(w.claimed("hobi").await, id);
+}
+
+#[tokio::test]
+async fn a_contained_taskers_tasks_are_held_and_stay_held_after_release() {
+    let w = world("hold-tasker", "user", true);
+    let working = w.submit("hobi", "a").await;
+    let queued = w.submit("hobi", "b").await;
+    let reported = w.submit("suga", "c").await;
+    let theirs = w.theirs("hobi");
+    assert_eq!(w.claimed("hobi").await, working);
+    assert_eq!(w.claimed("suga").await, reported);
+    w.agent_reports("suga", &reported, "evidence").await;
+    let bindings = maknae_authz_basic::PolicyPaths::in_dir(&w.root).bindings;
+    let bound = std::fs::read_to_string(&bindings).unwrap();
+    common::write_0640(
+        &bindings,
+        &format!(
+            "schema_version: 1\nbindings:\n  adversary: [\"{}\"]\n",
+            w.user
+        ),
+    );
+    w.pdp.baseline().reload_from_file().unwrap();
+    let mut held = holds(&w.store().retain_enrolled(&*w.agents.view));
+    held.sort();
+    let mut want = vec![working, queued, reported];
+    want.sort();
+    assert_eq!(
+        held, want,
+        "every task the contained person gave, open or reported"
+    );
+    let me = Tasker::Uid(w.me);
+    for (id, from) in [
+        (working, TaskState::Working),
+        (queued, TaskState::Queued),
+        (reported, TaskState::Reported),
+    ] {
+        let rec = w.store().record(&id).unwrap();
+        assert_eq!((rec.state, rec.held_from), (TaskState::Held, Some(from)));
+        assert_eq!(w.store().state_for(&id, &me), Some(TaskState::Held));
+    }
+    assert_eq!(w.store().record(&theirs).unwrap().state, TaskState::Queued);
+    match w.beat("hobi", 0).await {
+        RespResult::Ok(Payload::TaskState(v)) => {
+            assert_eq!((v.task, v.state), (r(&working), TaskState::Held));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(w.cannot_cite("hobi", Verb::Ping, working).await);
+    assert_eq!(
+        w.claimed("hobi").await,
+        theirs,
+        "another person's task is still handed out; the held ones never are"
+    );
+    assert!(unauthorized(
+        &w.ask(Verb::TaskStatus { task: r(&queued) }).await
+    ));
+    common::write_0640(&bindings, &bound);
+    w.pdp.baseline().reload_from_file().unwrap();
+    assert!(w.store().retain_enrolled(&*w.agents.view).is_empty());
+    let shown = match w.ask(Verb::TaskStatus { task: r(&queued) }).await {
+        RespResult::Ok(Payload::TaskState(v)) => v,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(shown.state, TaskState::Held, "a release lifts no hold");
+    assert!(page(w.ask(list("hobi", None)).await)
+        .entries
+        .iter()
+        .all(|v| v.state == TaskState::Held));
+    assert!(
+        reports(w.ask(collect("suga", None)).await)
+            .entries
+            .is_empty(),
+        "a held report is not released"
+    );
+    for verb in [
+        Verb::TaskDrop { task: r(&queued) },
+        Verb::TaskStop { task: r(&working) },
+        Verb::TaskAdd {
+            task: r(&working),
+            text: secret("more"),
+        },
+    ] {
+        assert!(unauthorized(&w.ask(verb.clone()).await), "{verb:?}");
+    }
+    assert_eq!(w.store().record(&queued).unwrap().state, TaskState::Held);
+}
+
+#[tokio::test]
+async fn a_contained_agents_open_tasks_are_held() {
+    let w = world("hold-agent", "user", true);
+    let done = w.submit("hobi", "a").await;
+    assert_eq!(w.claimed("hobi").await, done);
+    w.agent_reports("hobi", &done, "finished before").await;
+    let working = w.submit("hobi", "b").await;
+    let queued = w.submit("hobi", "c").await;
+    let sugas = w.submit("suga", "d").await;
+    assert_eq!(w.claimed("hobi").await, working);
+    let mut held = holds(&w.store().retain_enrolled(&containing(&w, &[HOBI_UID])));
+    held.sort();
+    let mut want = vec![working, queued];
+    want.sort();
+    assert_eq!(held, want);
+    assert_eq!(w.store().record(&sugas).unwrap().state, TaskState::Queued);
+    assert_eq!(
+        report_ids(&reports(w.ask(collect("hobi", None)).await)),
+        vec![done],
+        "a report it had already made is still its tasker's to collect"
+    );
+    assert!(w
+        .store()
+        .retain_enrolled(&containing(&w, &[HOBI_UID]))
+        .is_empty());
+    assert!(w.store().retain_enrolled(&containing(&w, &[])).is_empty());
+    assert_eq!(w.store().record(&working).unwrap().state, TaskState::Held);
+}
+
+#[tokio::test]
+async fn a_held_task_never_lapses_expires_or_leaves_and_survives_a_restart() {
+    let w = world("hold-clock", "user", true);
+    let working = w.submit("hobi", "a").await;
+    let reported = w.submit("suga", "b").await;
+    assert_eq!(w.claimed("hobi").await, working);
+    assert_eq!(w.claimed("suga").await, reported);
+    w.agent_reports("suga", &reported, "r").await;
+    let cursor = reports(w.ask(collect("suga", None)).await).entries[0]
+        .cursor
+        .seq();
+    w.store().mark_unenrolled(&containing(&w, &[w.me]));
+    w.clock.set(T0 + 100 * REPORT_HOLD.as_secs() as i64);
+    assert_eq!(
+        holds(&w.store().sweep()).len(),
+        2,
+        "marked: due a hold, and nothing else, however late"
+    );
+    w.clock.set(T0 + 200 * REPORT_HOLD.as_secs() as i64);
+    assert!(w.store().sweep().is_empty(), "no lapse and no expiry");
+    let me = Tasker::Uid(w.me);
+    let suga = maknae_config::AgentId::parse("suga").unwrap();
+    assert_eq!(w.store().acknowledge(&me, &suga, cursor), Ok(0));
+    assert!(w.store().drop_queued(&working, &me).is_err());
+    let w = w.restarted();
+    for (id, from) in [
+        (working, TaskState::Working),
+        (reported, TaskState::Reported),
+    ] {
+        let rec = w.store().record(&id).unwrap();
+        assert_eq!((rec.state, rec.held_from), (TaskState::Held, Some(from)));
+    }
+    assert!(w.store().sweep().is_empty());
+    assert!(w.claim("hobi").await.is_none());
+    assert!(matches!(
+        w.beat("hobi", 0).await,
+        RespResult::Ok(Payload::TaskState(v)) if v.state == TaskState::Held
+    ));
 }

@@ -664,7 +664,13 @@ fn decide_task(
         Some(TaskOp::Drop) => on_own_task(req, &[TASK_QUEUED]),
         Some(TaskOp::Status) => on_own_task(
             req,
-            &[TASK_QUEUED, TASK_WORKING, TASK_REPORTED, TASK_CLOSED],
+            &[
+                TASK_QUEUED,
+                TASK_WORKING,
+                TASK_REPORTED,
+                TASK_CLOSED,
+                TASK_HELD,
+            ],
         ),
         Some(TaskOp::List | TaskOp::Collect) => named_agent(req),
         Some(TaskOp::Claim | TaskOp::Report) => Err((Verdict::Indeterminate, None)),
@@ -686,6 +692,7 @@ const TASK_QUEUED: &str = "queued";
 const TASK_WORKING: &str = "working";
 const TASK_REPORTED: &str = "reported";
 const TASK_CLOSED: &str = "closed";
+const TASK_HELD: &str = "held";
 
 type Refused = (Verdict, Option<Cited>);
 
@@ -726,7 +733,15 @@ fn on_own_task(req: &SecRequest, states: &[&str]) -> Result<(), Refused> {
         Some(AttrValue::Str(s)) => s.as_str(),
         Some(_) | None => return Err((Verdict::Indeterminate, None)),
     };
-    if ![TASK_QUEUED, TASK_WORKING, TASK_REPORTED, TASK_CLOSED].contains(&state) {
+    if ![
+        TASK_QUEUED,
+        TASK_WORKING,
+        TASK_REPORTED,
+        TASK_CLOSED,
+        TASK_HELD,
+    ]
+    .contains(&state)
+    {
         return Err((Verdict::Indeterminate, None));
     }
     if !states.contains(&state) {

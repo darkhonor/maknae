@@ -20,6 +20,7 @@ pub(crate) fn state_attr(state: Option<TaskState>) -> &'static str {
         Some(TaskState::Working) => "working",
         Some(TaskState::Reported) => "reported",
         Some(TaskState::Closed) => "closed",
+        Some(TaskState::Held) => "held",
     }
 }
 
@@ -294,6 +295,7 @@ mod tests {
             parent: None,
             state: TaskState::Reported,
             close: None,
+            held_from: None,
             pending: false,
             withdrawn: false,
             seq,

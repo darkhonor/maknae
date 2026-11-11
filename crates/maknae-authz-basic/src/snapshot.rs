@@ -118,6 +118,12 @@ impl Snapshot {
         &self.problems
     }
 
+    /// Whether `uid` is contained: bound to no role but `adversary`.
+    pub fn contained(&self, uid: u32, principal_uid: u32) -> bool {
+        self.loaded.roles.role_for(uid, principal_uid)
+            == crate::binding::Resolution::Role(crate::role::Role::Adversary)
+    }
+
     pub fn agent_uid(&self, id: &str) -> Option<u32> {
         self.loaded
             .agents
