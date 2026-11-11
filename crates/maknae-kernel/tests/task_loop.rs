@@ -2164,11 +2164,6 @@ async fn a_close_the_disk_has_not_taken_is_shown_to_nobody() {
     assert!(w.store().close_all_due().is_empty(), "recorded once");
     let page = reports(w.ask(collect("hobi", None)).await);
     assert_eq!(report_ids(&page), vec![id]);
-    assert_eq!(
-        page.entries[0].cursor,
-        TaskCursor::from_seq(1),
-        "one ordinal"
-    );
     assert!(matches!(
         w.beat("hobi", 0).await,
         RespResult::Ok(Payload::TaskState(v)) if v.close == Some(TaskClose::AgentGone)
@@ -2189,5 +2184,199 @@ async fn tombstones_do_not_count_against_a_re_enrolled_agents_queue() {
     w.store()
         .retain_enrolled(&only(&[("hobi", HOBI_UID), ("suga", SUGA_UID)]));
     let id = w.submit("hobi", "new work").await;
+    assert_eq!(w.claimed("hobi").await, id);
+}
+
+#[tokio::test]
+async fn a_sub_tasks_records_name_the_sub_task_and_the_submitting_agent() {
+    let w = world_with("sub-records", "user", true, GRANTED, TASKED_BY_HOBI);
+    let parent = w.submit("hobi", "parent").await;
+    assert_eq!(w.claimed("hobi").await, parent);
+    let records = Records::new(0);
+    let sub = match w
+        .agent_with("hobi", submit("suga", "sub"), Some(parent), &records)
+        .await
+    {
+        Some(RespResult::Ok(Payload::TaskAccepted(v))) => v.task.to_id(),
+        other => panic!("{other:?}"),
+    };
+    let named = |reason: &str| {
+        let rec = task_records(&records)
+            .into_iter()
+            .find(|r| r.outcome.reason == reason)
+            .unwrap_or_else(|| panic!("no {reason:?} record"));
+        (
+            rec.subject.task_id,
+            rec.subject.tasker,
+            rec.subject.parent_task_id,
+        )
+    };
+    let want = (
+        Some(sub.to_string()),
+        Some("agent:hobi".to_string()),
+        Some(parent.to_string()),
+    );
+    assert_eq!(named("task stored"), want);
+    assert_eq!(named("task queued"), want);
+    assert_eq!(w.claimed("suga").await, sub);
+    for verb in [
+        Verb::TaskStatus { task: r(&sub) },
+        Verb::TaskAdd {
+            task: r(&sub),
+            text: secret("more"),
+        },
+        Verb::TaskStop { task: r(&sub) },
+    ] {
+        let records = Records::new(0);
+        w.agent_with("hobi", verb.clone(), Some(parent), &records)
+            .await;
+        let recs = task_records(&records);
+        assert!(!recs.is_empty());
+        for rec in recs {
+            assert_eq!(rec.subject.task_id, Some(sub.to_string()), "{verb:?}");
+            assert_eq!(rec.subject.tasker.as_deref(), Some("agent:hobi"));
+        }
+    }
+    let records = Records::new(0);
+    let first = reports(
+        w.agent_with("hobi", collect("suga", None), Some(parent), &records)
+            .await
+            .unwrap(),
+    );
+    let upto = first.entries[0].cursor.seq();
+    w.agent_with("hobi", collect("suga", Some(upto)), Some(parent), &records)
+        .await;
+    let said = reasons(&records);
+    assert!(
+        said.iter()
+            .any(|t| t == &format!("permit collected 1 reports: {sub}")),
+        "{said:?}"
+    );
+    assert!(
+        said.iter()
+            .any(|t| t == &format!("permit acknowledged 1: {sub}; collected 0 reports")),
+        "{said:?}"
+    );
+    let uncited = Records::new(0);
+    w.agent_with("hobi", Verb::Ping, Some(parent), &uncited)
+        .await;
+    assert!(
+        uncited
+            .snapshot()
+            .iter()
+            .filter(|r| r.event == "request")
+            .any(|r| r.subject.task_id == Some(parent.to_string())
+                && r.subject.tasker == Some(format!("uid:{}", w.me))),
+        "a record that names no task of its own carries the cited one"
+    );
+    let later = match w.agent("hobi", submit("suga", "later"), Some(parent)).await {
+        RespResult::Ok(Payload::TaskAccepted(v)) => v.task.to_id(),
+        other => panic!("{other:?}"),
+    };
+    let due = w.store().retain_enrolled(&only(&[("hobi", HOBI_UID)]));
+    assert_eq!(due.len(), 1);
+    assert_eq!(
+        (due[0].task, due[0].parent, due[0].tasker.clone()),
+        (
+            later,
+            Some(parent),
+            Tasker::Agent {
+                agent: "hobi".into(),
+                uid: HOBI_UID
+            }
+        ),
+        "the close joins to the submission by the sub-task's id"
+    );
+}
+
+#[tokio::test]
+async fn an_agent_holding_a_task_submits_only_under_it() {
+    let w = world_with("under", "user", true, GRANTED, TASKED_BY_HOBI);
+    let parent = w.submit("hobi", "parent").await;
+    assert_eq!(w.claimed("hobi").await, parent);
+    let records = Records::new(0);
+    let got = w
+        .agent_with("hobi", submit("suga", "loose"), None, &records)
+        .await
+        .unwrap();
+    assert!(unauthorized(&got), "{got:?}");
+    assert!(
+        reasons(&records)
+            .iter()
+            .any(|t| t.starts_with("deny") && t.contains("submits under the task it holds")),
+        "{:?}",
+        reasons(&records)
+    );
+    assert!(w
+        .store()
+        .queue(&maknae_config::AgentId::parse("suga").unwrap())
+        .is_empty());
+    w.agent_reports("hobi", &parent, "done").await;
+    let own = match w
+        .agent("hobi", submit("suga", "own initiative"), None)
+        .await
+    {
+        RespResult::Ok(Payload::TaskAccepted(v)) => v.task.to_id(),
+        other => panic!("{other:?}"),
+    };
+    let rec = w.store().record(&own).unwrap();
+    assert_eq!(rec.parent, None);
+    assert_eq!(
+        rec.root,
+        RootTasker::Agent {
+            agent: "hobi".into()
+        }
+    );
+}
+
+#[tokio::test]
+async fn a_lowered_prompt_cap_strands_no_stored_report_and_no_queued_prompt() {
+    let mut w = world("lowered-cap", "user", true);
+    let floor = w.cfg.prompt_max_bytes;
+    w.cfg.prompt_max_bytes = 2 * floor;
+    let big = w.submit("hobi", &"p".repeat(2 * floor)).await;
+    let done = w.submit("hobi", "small").await;
+    w.cfg.prompt_max_bytes = floor;
+    let (task, _) = w
+        .claim("hobi")
+        .await
+        .expect("the oversize prompt is still handed out");
+    let maknae_proto::Ask::Prompt { prompt } = &task.task.ask;
+    assert_eq!((task.task.task_id, prompt.0.len()), (big, 2 * floor));
+    w.cfg.prompt_max_bytes = 2 * floor;
+    w.agent_reports("hobi", &big, &"r".repeat(2 * floor)).await;
+    w.cfg.prompt_max_bytes = floor;
+    assert_eq!(w.claimed("hobi").await, done);
+    w.agent_reports("hobi", &done, "ok").await;
+    let page = reports(w.ask(collect("hobi", None)).await);
+    assert_eq!(report_ids(&page), vec![big]);
+    assert_eq!(page.entries[0].text.0.len(), 2 * floor);
+    let rest = reports(
+        w.ask(collect("hobi", Some(page.entries[0].cursor.seq())))
+            .await,
+    );
+    assert_eq!(report_ids(&rest), vec![done]);
+}
+
+#[tokio::test]
+async fn a_hand_out_the_signer_refuses_is_recorded_unavailable_and_held_back() {
+    let mut w = world("unsigned", "user", true);
+    let id = w.submit("hobi", "a").await;
+    w.agents.signer = Arc::new(maknae_kernel::UnverifiedSigner);
+    let records = Records::new(0);
+    let got = w.agent_with("hobi", CLAIM, None, &records).await.unwrap();
+    assert!(unauthorized(&got), "{got:?}");
+    let last = task_records(&records).pop().unwrap();
+    assert_eq!(
+        (last.outcome.reason.as_str(), last.outcome.posture.as_str()),
+        ("the task could not be signed", "unavailable")
+    );
+    assert!(matches!(
+        w.agent("hobi", CLAIM, None).await,
+        RespResult::Ok(Payload::TaskIdle)
+    ));
+    assert_eq!(w.store().record(&id).unwrap().state, TaskState::Queued);
+    w.agents.signer = Arc::new(FixedSigner);
+    w.clock.set(T0 + 1);
     assert_eq!(w.claimed("hobi").await, id);
 }

@@ -3273,7 +3273,7 @@ async fn serve_task_verb<S, E, P>(
         let ctx = crate::task::SubmitCtx {
             where_: &where_,
             session_id: trail.session_id,
-            seq: trail.seq.next(),
+            seq: trail.seq,
             user: trail.peer_user,
             peer_uri: trail.peer_uri,
             lane,
@@ -3298,6 +3298,7 @@ async fn serve_task_verb<S, E, P>(
                     stamped(trail.record(action, "permit", "task queued", "authorized"));
                 outcome.object = Some(format!("task:{id}"));
                 outcome.subject.task_id = Some(id.to_string());
+                outcome.subject.parent_task_id = signed.task.parent.map(|p| p.to_string());
                 match store.status(&id, caller) {
                     Some(view) => {
                         trail
@@ -3370,7 +3371,7 @@ async fn serve_task_verb<S, E, P>(
     }
     let deadline = tokio::time::Instant::now() + timeout;
     let refused = |intent: &AuditRecord, r: &TaskRefusal| {
-        let posture = if matches!(r, TaskRefusal::Unavailable(_)) {
+        let posture = if matches!(r, TaskRefusal::Unavailable(_) | TaskRefusal::Unsigned) {
             "unavailable"
         } else {
             "unauthorized"
@@ -3507,23 +3508,35 @@ async fn serve_task_verb<S, E, P>(
                 }
                 let (s, who, a) = (Arc::clone(store), caller.clone(), agent.clone());
                 let acked = crate::task::offload(trail.uid, deadline, move || {
-                    s.acknowledge(&who, &a, upto)
+                    s.acknowledged(&who, &a, upto)
                 })
                 .await;
-                if let Err(r) = acked {
-                    trail.unauthorized(stream, &refused(&rec, &r)).await;
-                    return;
+                match acked {
+                    Ok(gone) => intent = Some((rec, gone)),
+                    Err(r) => {
+                        trail.unauthorized(stream, &refused(&rec, &r)).await;
+                        return;
+                    }
                 }
-                intent = Some(rec);
             }
             let page = store.reports(
                 caller,
                 &agent,
                 maknae_proto::prompt_request_cap(tasks.text_max),
             );
-            let reason = format!("collected {} reports", page.entries.len());
+            let released: Vec<maknae_proto::TaskId> =
+                page.entries.iter().map(|e| e.task.to_id()).collect();
+            let reason = format!(
+                "collected {} reports{}",
+                released.len(),
+                tv::named(&released)
+            );
             let outcome = match &intent {
-                Some(i) => trail.outcome(i, &reason, "authorized"),
+                Some((i, gone)) => trail.outcome(
+                    i,
+                    &format!("acknowledged {}{}; {reason}", gone.len(), tv::named(gone)),
+                    "authorized",
+                ),
                 None => decided("permit", &reason, "authorized"),
             };
             trail
@@ -4038,8 +4051,12 @@ async fn write_frame_bounded<S, E: AuditEmit + Send + Sync>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    if bytes.len()
-        > FrameCaps::responses(maknae_proto::prompt_response_cap(cfg.prompt_max_bytes)).cap(class)
+    // A task verb answers with what was stored under any cap the range allows (#628).
+    let prompt_max = match action {
+        "session.task" => maknae_config::PROMPT_MAX_CEILING,
+        _ => cfg.prompt_max_bytes,
+    };
+    if bytes.len() > FrameCaps::responses(maknae_proto::prompt_response_cap(prompt_max)).cap(class)
     {
         refuse_oversize_bounded(
             stream, cfg, class, emit, host, socket, peer_uid, peer_uri, peer_user, role, rule,
@@ -8386,15 +8403,14 @@ fn task_finding_record(ctx: &BootCtx<'_>, finding: &crate::task_store::BootFindi
             agent,
             tasker,
             parent,
+            withdrawn,
             ..
         } => {
-            let mut rec = ctx.record(
-                "session.task",
-                "deny",
-                "task discarded at boot: its submission was never audited",
-                "unauthorized",
-                None,
-            );
+            let why = match withdrawn {
+                false => "task discarded at boot: its submission was never audited",
+                true => "task record discarded at boot: its removal was left unfinished",
+            };
+            let mut rec = ctx.record("session.task", "deny", why, "unauthorized", None);
             rec.object = Some(format!("agent:{agent}"));
             rec.subject.task_id = Some(task.to_string());
             rec.subject.parent_task_id = parent.map(|p| p.to_string());
@@ -23554,6 +23570,35 @@ mod task_sweep_tests {
         assert!(
             TASK_SWEEP_STOP_TIMEOUT + TASK_SWEEP_ABORT_RECORD_TIMEOUT <= RELOAD_STOP_TIMEOUT,
             "the final sweep is joined inside the reloader's stop bound"
+        );
+    }
+
+    #[test]
+    fn a_boot_discard_says_which_kind_of_pending_record_it_found() {
+        let (seq, au) = (Seq::new(), serde_json::json!({}));
+        let ctx = ctx(&seq, &au);
+        let reason = |withdrawn| {
+            task_finding_record(
+                &ctx,
+                &crate::task_store::BootFinding::Discarded {
+                    name: "n".into(),
+                    task: TaskId([7; 16]),
+                    agent: "hobi".into(),
+                    tasker: Tasker::Uid(1000),
+                    parent: None,
+                    withdrawn,
+                },
+            )
+            .outcome
+            .reason
+        };
+        assert_eq!(
+            reason(false),
+            "task discarded at boot: its submission was never audited"
+        );
+        assert_eq!(
+            reason(true),
+            "task record discarded at boot: its removal was left unfinished"
         );
     }
 

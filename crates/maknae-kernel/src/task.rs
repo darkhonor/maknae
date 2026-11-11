@@ -225,8 +225,6 @@ struct Held {
     recorded: BTreeMap<TaskId, TaskClose>,
     /// The submission sequence of the close the disk last refused; `due` starts after it.
     refused_close: Option<u64>,
-    /// The report ordinal issued for a close whose record is not yet durable.
-    ordinals: BTreeMap<TaskId, u64>,
     /// Agents whose exposed records the next writer retries whatever the drain's order.
     purged: BTreeSet<AgentId>,
     notices: Vec<Notice>,
@@ -250,7 +248,6 @@ impl Held {
     fn unmark(&mut self, id: &TaskId) {
         self.closing.remove(id);
         self.recorded.remove(id);
-        self.ordinals.remove(id);
     }
 
     fn owe(&mut self, id: &TaskId, why: String) {
@@ -259,8 +256,9 @@ impl Held {
         }
     }
 
+    /// A recorded close stays owed until the close itself is stored.
     fn proven(&mut self, id: &TaskId) {
-        if self.owed_said.remove(id) {
+        if !self.recorded.contains_key(id) && self.owed_said.remove(id) {
             self.note(Notice::Settled { task: *id });
         }
     }
@@ -291,6 +289,7 @@ impl Held {
 
     fn expose(&mut self, mut rec: TaskRecord) {
         rec.pending = true;
+        rec.withdrawn = true;
         self.exposed.insert(rec.signed.task.task_id, rec);
     }
 
@@ -762,30 +761,28 @@ impl TaskStore {
         done
     }
 
-    /// Writes the marked task `id` closed, under one report ordinal however often it is
-    /// retried; memory follows only a synced write. The caller holds the writer.
+    /// Writes the marked task `id` closed, under a report ordinal issued for this attempt,
+    /// so no close lands below a cursor its tasker has already acknowledged; memory
+    /// follows only a synced write. The caller holds the writer.
     fn close_durably(&self, id: &TaskId) -> bool {
-        let (prior, close, issued, hot) = {
+        let (prior, close, hot) = {
             let held = self.held();
             let (Some(prior), Some(close)) = (held.live(id).cloned(), held.recorded.get(id)) else {
                 return true;
             };
             let hot = held.hot.get(id).copied().unwrap_or_default();
-            (prior, *close, held.ordinals.get(id).copied(), hot)
+            (prior, *close, hot)
         };
-        let written = issued
-            .map_or_else(|| self.issue_report(&prior.tasker), Ok)
-            .and_then(|rseq| {
-                self.held().ordinals.insert(*id, rseq);
-                let mut next = prior.clone();
-                next.state = TaskState::Closed;
-                next.close = Some(close);
-                next.rseq = Some(rseq);
-                next.report = Some((SecretText(String::new().into()), self.clock.now_secs()));
-                next.actions = hot.actions;
-                next.last_action = hot.last_action;
-                self.write(&next, Some(&prior)).map(|()| next)
-            });
+        let written = self.issue_report(&prior.tasker).and_then(|rseq| {
+            let mut next = prior.clone();
+            next.state = TaskState::Closed;
+            next.close = Some(close);
+            next.rseq = Some(rseq);
+            next.report = Some((SecretText(String::new().into()), self.clock.now_secs()));
+            next.actions = hot.actions;
+            next.last_action = hot.last_action;
+            self.write(&next, Some(&prior)).map(|()| next)
+        });
         let mut held = self.held();
         match written {
             Ok(next) => {
@@ -995,6 +992,7 @@ impl TaskStore {
             state: TaskState::Queued,
             close: None,
             pending: true,
+            withdrawn: false,
             seq,
             tseq,
             rseq: None,
@@ -1119,6 +1117,13 @@ impl TaskStore {
         Ok(next)
     }
 
+    /// Whether `agent` holds a working task under `uid`, marked or not.
+    pub fn holds_working(&self, agent: &AgentId, uid: u32) -> bool {
+        self.held().tasks.values().any(|r| {
+            !r.pending && r.state == TaskState::Working && r.agent == *agent && r.agent_uid == uid
+        })
+    }
+
     /// The task a claim would hand `agent`: its working task, else its oldest queued one.
     pub fn next_for(&self, agent: &AgentId, uid: u32) -> Option<(TaskId, TaskState)> {
         let guard = self.held();
@@ -1137,9 +1142,9 @@ impl TaskStore {
     }
 
     /// Hands `agent` its working task again, or starts its oldest queued one, under the
-    /// signer's current leaf. Any refusal leaves the task as it was. One the store gave
-    /// (refused, or outcome unknown) holds the task back from the next claims, for 1 s
-    /// doubling to 60 s; a hand-out ends that.
+    /// signer's current leaf. Any refusal leaves the task as it was. One the store or the
+    /// signer gave holds the task back from the next claims, for 1 s doubling to 60 s; a
+    /// hand-out ends that.
     pub fn claim(
         &self,
         agent: &AgentId,
@@ -1156,7 +1161,9 @@ impl TaskStore {
             match &handed {
                 Ok(_) => (hot.retry_after, hot.retry_secs) = (0, 0),
                 Err(TaskRefusal::Unavailable(why)) if why == MOVED => {}
-                Err(TaskRefusal::Store(_) | TaskRefusal::Unavailable(_)) => {
+                Err(
+                    TaskRefusal::Store(_) | TaskRefusal::Unavailable(_) | TaskRefusal::Unsigned,
+                ) => {
                     hot.retry_secs = (hot.retry_secs * 2).clamp(RETRY_FIRST_SECS, RETRY_MAX_SECS);
                     hot.retry_after = now + i64::from(hot.retry_secs);
                 }
@@ -1325,6 +1332,17 @@ impl TaskStore {
         agent: &AgentId,
         upto: u64,
     ) -> Result<usize, TaskRefusal> {
+        self.acknowledged(tasker, agent, upto)
+            .map(|gone| gone.len())
+    }
+
+    /// [`TaskStore::acknowledge`], naming the tasks whose reports it removed.
+    pub fn acknowledged(
+        &self,
+        tasker: &Tasker,
+        agent: &AgentId,
+        upto: u64,
+    ) -> Result<Vec<TaskId>, TaskRefusal> {
         let _w = self.writing();
         let acked = |r: &TaskRecord| {
             r.tasker == *tasker && r.agent == *agent && r.rseq.is_some_and(|s| s <= upto)
@@ -1348,7 +1366,7 @@ impl TaskStore {
             }
         }
         match self.held().exposed.values().any(acked) {
-            false => Ok(gone.len()),
+            false => Ok(gone),
             true => Err(TaskRefusal::Unavailable(
                 "outcome unknown: the acknowledgement is left to a later store write".into(),
             )),
@@ -1662,6 +1680,7 @@ impl TaskStore {
             state: TaskState::Queued,
             close: None,
             pending: false,
+            withdrawn: false,
             seq,
             tseq,
             rseq: None,
@@ -2021,7 +2040,7 @@ fn task_request(
 pub(crate) struct SubmitCtx<'a> {
     pub where_: &'a crate::run::WhereCtx,
     pub session_id: u64,
-    pub seq: u64,
+    pub seq: &'a maknae_audit_append::Seq,
     pub user: Option<&'a str>,
     pub peer_uri: Option<&'a str>,
     pub lane: maknae_security::Lane,
@@ -2060,7 +2079,7 @@ impl Attempt {
             None,
             ctx.peer_uri,
             ctx.session_id,
-            ctx.seq,
+            ctx.seq.next(),
             "session.task",
             Some(&format!("agent:{}", self.target)),
             result,
@@ -2332,7 +2351,20 @@ async fn decide<P: Authorizer + Send + Sync + 'static>(
     }
     let target = target(&sub)?;
     let parent = match by {
-        Submitter::User { .. } | Submitter::Agent { under: None, .. } => None,
+        Submitter::User { .. } => None,
+        Submitter::Agent {
+            agent,
+            uid,
+            under: None,
+            ..
+        } => match store.holds_working(agent, *uid) {
+            true => {
+                return Err(TaskRefusal::Denied(
+                    "an agent submits under the task it holds".into(),
+                ))
+            }
+            false => None,
+        },
         Submitter::Agent {
             agent,
             uid,
@@ -3489,10 +3521,11 @@ mod tests {
         (bound, breaker): (std::time::Duration, Option<Breaker>),
     ) -> Result<Arc<SignedTask>, TaskRefusal> {
         let w = wctx();
+        let seq = maknae_audit_append::Seq::new();
         let ctx = SubmitCtx {
             where_: &w,
             session_id: SESSION,
-            seq: 5,
+            seq: &seq,
             user: Some("alice"),
             peer_uri: None,
             lane: maknae_security::Lane::Local,
@@ -3569,6 +3602,12 @@ mod tests {
         assert_eq!(trail.len(), 2, "{trail:?}");
         assert_eq!(trail[0].1, "task stored");
         assert_eq!(trail[1].0, "deny");
+        let seqs: Vec<u64> = emit.0.records().iter().map(|r| r.seq).collect();
+        assert_eq!(
+            seqs[1],
+            seqs[0] + 1,
+            "the corrective record has its own seq"
+        );
         assert!(trail[1].1.starts_with("outcome unknown: "), "{trail:?}");
         assert!(!trail[1].1.contains("withdraw"), "{trail:?}");
         assert_eq!(trail[1].2, "unavailable");
@@ -4106,7 +4145,7 @@ mod tests {
 
     /// The disk fails as `fail` while a recorded close is performed: the task stays as
     /// it was, marked, and nothing of the close is shown until a synced write.
-    fn a_close_is_not_shown_until_stored_through(fail: crate::task_store::Fail, issued: bool) {
+    fn a_close_is_not_shown_until_stored_through(fail: crate::task_store::Fail) {
         let (blobs, store) = mem();
         let me = Tasker::Uid(1000);
         let task = held_by(&store, me.clone());
@@ -4129,8 +4168,6 @@ mod tests {
             vec![gone(task, true)],
             "still due, already recorded"
         );
-        let ordinal = store.held().ordinals.get(&task).copied();
-        assert_eq!(ordinal, issued.then_some(1));
         let said = store.take_notices();
         assert!(
             matches!(&said[..], [Notice::Owed { task: t, .. }] if *t == task),
@@ -4138,15 +4175,14 @@ mod tests {
         );
         assert!(store.purge_agent(&id("hobi")).is_empty(), "recorded once");
         assert!(store.take_notices().is_empty(), "owed once");
-        assert_eq!(store.held().ordinals.get(&task).copied(), ordinal);
         blobs.fail(None);
         assert!(store.close_all_due().is_empty());
         assert_eq!(closed(&store, &task), Some(TaskClose::AgentGone));
-        assert_eq!(store.record(&task).unwrap().rseq, Some(1), "one ordinal");
+        assert!(store.record(&task).unwrap().rseq.is_some());
         assert_eq!(store.take_notices(), vec![Notice::Settled { task }]);
         assert!(store.due(8).is_empty());
         let held = store.held();
-        assert!(held.closing.is_empty() && held.recorded.is_empty() && held.ordinals.is_empty());
+        assert!(held.closing.is_empty() && held.recorded.is_empty());
         drop(held);
         blobs.crash(0);
         let reopened = reopen(&blobs);
@@ -4159,17 +4195,80 @@ mod tests {
 
     #[test]
     fn a_close_whose_record_is_refused_is_not_shown_until_it_is_stored() {
-        a_close_is_not_shown_until_stored_through(crate::task_store::Fail::Records, true);
+        a_close_is_not_shown_until_stored_through(crate::task_store::Fail::Records);
     }
 
     #[test]
     fn a_close_whose_record_lands_unsynced_is_not_shown_until_it_is_stored() {
-        a_close_is_not_shown_until_stored_through(crate::task_store::Fail::Unsynced, true);
+        a_close_is_not_shown_until_stored_through(crate::task_store::Fail::Unsynced);
     }
 
     #[test]
     fn a_close_whose_ordinal_cannot_be_issued_is_not_shown_until_it_is_stored() {
-        a_close_is_not_shown_until_stored_through(crate::task_store::Fail::Every, false);
+        a_close_is_not_shown_until_stored_through(crate::task_store::Fail::Every);
+    }
+
+    #[test]
+    fn a_close_that_lands_after_a_later_report_was_acknowledged_is_still_collected() {
+        let (blobs, store) = mem();
+        let me = Tasker::Uid(1000);
+        let hobi = id("hobi");
+        let closing = held_by(&store, me.clone());
+        let reporting = held_by(&store, me.clone());
+        store.start_for_test(&closing);
+        blobs.stick(Some(name_of(&closing)));
+        store.held().closing.insert(closing, TaskClose::AgentLost);
+        assert_eq!(store.perform(&store.due(8)), 0, "the close is refused");
+        let reported = store.publish_report(&reporting, text("r"), None).unwrap();
+        let page = store.reports(&me, &hobi, usize::MAX);
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.entries[0].cursor.seq(), reported);
+        blobs.stick(None);
+        assert_eq!(store.perform(&store.due(8)), 1, "the close lands");
+        assert_eq!(store.acknowledge(&me, &hobi, reported), Ok(1));
+        let page = store.reports(&me, &hobi, usize::MAX);
+        assert_eq!(page.entries.len(), 1, "the close was not removed unseen");
+        assert_eq!(page.entries[0].close, Some(TaskClose::AgentLost));
+        assert!(page.entries[0].cursor.seq() > reported);
+    }
+
+    #[test]
+    fn a_record_left_pending_by_a_removal_is_found_at_boot_as_withdrawn() {
+        let (blobs, store) = mem();
+        let task = held_by(&store, Tasker::Uid(1000));
+        blobs.fail(Some(crate::task_store::Fail::Unlinks));
+        assert!(store.withdraw(&task));
+        blobs.fail(None);
+        let found = reopen(&blobs).take_boot_findings();
+        assert!(
+            matches!(
+                &found[..],
+                [crate::task_store::BootFinding::Discarded { task: t, withdrawn: true, .. }]
+                    if *t == task
+            ),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn a_rewrite_of_a_task_whose_close_is_not_stored_is_not_said_to_have_landed() {
+        let (blobs, store) = mem();
+        let task = held_by(&store, Tasker::Uid(1000));
+        blobs.fail(Some(crate::task_store::Fail::Unsynced));
+        store.purge_agent(&id("hobi"));
+        assert!(matches!(&store.take_notices()[..], [Notice::Owed { .. }]));
+        assert!(store.held().stale.contains(&task));
+        blobs.fail(None);
+        store.pass();
+        assert!(!store.held().stale.contains(&task), "rewritten as it was");
+        assert_eq!(closed(&store, &task), None);
+        assert!(
+            store.take_notices().is_empty(),
+            "the close is still owed, so nothing has landed"
+        );
+        store.close_all_due();
+        assert_eq!(closed(&store, &task), Some(TaskClose::AgentGone));
+        assert_eq!(store.take_notices(), vec![Notice::Settled { task }]);
     }
 
     #[test]
@@ -4826,10 +4925,11 @@ mod tests {
             Err(TaskRefusal::Unsigned)
         );
         assert_eq!(
-            store.hot(&task).unwrap().retry_after,
-            0,
-            "only the store's answers"
+            store.hot(&task).unwrap().retry_secs,
+            1,
+            "a signer's refusal holds it back too"
         );
+        assert_eq!(store.claim(&hobi, HOBI, &NoIdentity), Ok(Claimed::Idle));
     }
 
     #[test]
@@ -5428,7 +5528,7 @@ mod tests {
                 (r.where_.host.as_str(), r.where_.socket.as_str()),
                 ("task-host", "/run/maknae/task-11.sock")
             );
-            assert_eq!((r.session_id, r.seq), (SESSION, 5));
+            assert_eq!((r.session_id, r.seq), (SESSION, 1));
             assert_eq!(r.subject.user.as_deref(), Some("alice"));
             assert_eq!(r.au3_1, serde_json::json!({ "site": "task-11" }));
         }
@@ -5929,10 +6029,11 @@ mod tests {
             seen: Mutex::default(),
         });
         let w = wctx();
+        let seq = maknae_audit_append::Seq::new();
         let ctx = SubmitCtx {
             where_: &w,
             session_id: SESSION,
-            seq: 6,
+            seq: &seq,
             user: None,
             peer_uri: Some("spiffe://d/plane/agent/hobi"),
             lane: maknae_security::Lane::Remote,
@@ -5973,10 +6074,11 @@ mod tests {
         let store = Arc::new(TaskStore::new());
         let emit = Recorder::new();
         let w = wctx();
+        let seq = maknae_audit_append::Seq::new();
         let ctx = SubmitCtx {
             where_: &w,
             session_id: SESSION,
-            seq: 5,
+            seq: &seq,
             user: Some(ACCOUNT),
             peer_uri: None,
             lane: maknae_security::Lane::Local,

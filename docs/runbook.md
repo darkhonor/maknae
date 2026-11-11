@@ -1575,7 +1575,7 @@ A task is `queued` until the agent claims it, then `working`. The agent's report
 The kernel closes a task itself in two cases, and keeps the closed record for the tasker:
 
 - **`agent-gone`:** the agent was de-enrolled, or its account's uid changed. The tasks are marked at the reload that installs the change, so the agent is refused them from then on, and are closed by the reload's own pass or the next sweep.
-- **`agent-lost`:** a working task's lease lapsed. The lease is 15 minutes, renewed by each request that cites the task and each heartbeat. At start every working task's lease begins again.
+- **`agent-lost`:** a working task's lease lapsed. The lease is 15 minutes, renewed by each request that cites the task, permitted or denied, and by each heartbeat. At start every working task's lease begins again.
 
 ### What the trail shows
 
@@ -1586,7 +1586,7 @@ Every task verb is `action: session.task`. A request record names its operation 
 | `submit` | `task stored` (the decision, `object: agent:<id>`), then `task queued` (`object: task:<hex>`) | a refusal names its cause, for example `the tasker holds 32 live tasks with agent hobi` |
 | `add`, `stop`, `drop` | `intent recorded`, then `done` or the refusal | |
 | `status`, `list` | one | `listed <n> tasks` for a list |
-| `collect` | with a cursor, `acknowledge through <n>; intent recorded`, then `collected <n> reports`; without one, only the second | |
+| `collect` | with a cursor, `acknowledge through <n>; intent recorded`, then `acknowledged <n>: <ids>; collected <n> reports: <ids>`; without one, `collected <n> reports: <ids>`. Each list names at most 32 task ids, then `and <n> more` | |
 | `claim` with nothing to hand out | one | `idle` |
 | `claim` that hands out a task | `intent recorded`, then `delivered` | |
 | heartbeat (`claim` with `seen_follow_ups`) | one | `heartbeat: <n> follow-ups after <m>`, `heartbeat: the task is closed` or `idle` |
@@ -1610,7 +1610,7 @@ The kernel's own records are `event: task`, written by the boot, a reload or the
 | `store: the action counters were not stored: <why>` | `deny` | The sweep could not store the per-task action counts; a crash loses at most a minute of them. | See below. |
 | `store: the final task sweep was aborted at shutdown` | `deny` | The last sweep did not finish within 3 seconds. | Nothing; the next start sweeps. |
 
-A close or an expiry is recorded before it happens. After a crash between the two, the next start records it again, so a task can have two close records. A task whose lease was renewed, or which its tasker stopped, between the record and the close keeps its record and stays open. Boot's own findings are `event: boot`: `task discarded at boot: its submission was never audited` and `task record quarantined at boot: <why>`. A quarantined record is left in `STATE_DIR/tasks` as `<id>.task.quarantine`; it is never read again.
+A close or an expiry is recorded before it happens. After a crash between the two, the next start records it again, so a task can have two close records. A task whose lease was renewed, or which its tasker stopped, between the record and the close keeps its record and stays open. Boot's own findings are `event: boot`: `task discarded at boot: its submission was never audited` for a submission that was never confirmed, `task record discarded at boot: its removal was left unfinished` for a dropped, acknowledged, expired or withdrawn record whose file outlived its removal, and `task record quarantined at boot: <why>`. A quarantined record is left in `STATE_DIR/tasks` as `<id>.task.quarantine`; it is never read again.
 
 ```bash
 sudo jq -c 'select(.action=="session.task") | {ts, event, op: .subject.task_op, tasker: .subject.tasker, agent: .subject.agent, task: .subject.task_id, result: .outcome.result, reason: .outcome.reason}' /var/log/maknae/audit.jsonl | tail -n 20
@@ -1622,7 +1622,7 @@ An agent polls `maknaed` (#629): with `TaskClaim` every 5 seconds while it has n
 
 ### When the store refuses a hand-out
 
-When the store refuses the write that hands a task out, or cannot prove it, the agent is told "not authorized" and the task stays queued. That task is then held back from the agent's claims for 1 second, doubling at each further failure to 60 seconds; meanwhile the agent's claims are answered `idle`, with no signature and no write, and the next queued task is not handed out in its place. A hand-out that succeeds ends the hold.
+When the store refuses the write that hands a task out, or cannot prove it, the agent is told "not authorized" and the task stays queued. That task is then held back from the agent's claims for 1 second, doubling at each further failure to 60 seconds; meanwhile the agent's claims are answered `idle`, with no signature and no write, and the next queued task is not handed out in its place. A hand-out that succeeds ends the hold. The same hold applies when the kernel cannot sign the task because it has no current signing leaf; that refusal is recorded `the task could not be signed`, posture `unavailable`.
 
 ### When the disk misbehaves
 

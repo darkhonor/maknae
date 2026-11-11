@@ -200,6 +200,23 @@ impl TaskVerb<'_> {
     }
 }
 
+/// `: id, id` for an audit reason, at most a page of ids, then how many more.
+pub(crate) fn named(ids: &[TaskId]) -> String {
+    if ids.is_empty() {
+        return String::new();
+    }
+    let shown: Vec<String> = ids
+        .iter()
+        .take(TASK_PAGE_MAX)
+        .map(TaskId::to_string)
+        .collect();
+    let more = match ids.len().saturating_sub(TASK_PAGE_MAX) {
+        0 => String::new(),
+        n => format!(" and {n} more"),
+    };
+    format!(": {}{more}", shown.join(","))
+}
+
 pub(crate) fn view(rec: &TaskRecord, hot: &Hot, now: i64) -> TaskView {
     TaskView {
         task: TaskRef::from_id(&rec.signed.task.task_id),
@@ -278,6 +295,7 @@ mod tests {
             state: TaskState::Reported,
             close: None,
             pending: false,
+            withdrawn: false,
             seq,
             tseq: seq,
             rseq,
@@ -292,6 +310,16 @@ mod tests {
 
     fn blank() -> maknae_security::Request {
         crate::handler::build_kernel_request("session.task", 0)
+    }
+
+    #[test]
+    fn named_ids_are_listed_up_to_a_page_and_the_rest_counted() {
+        assert_eq!(named(&[]), "");
+        let ids: Vec<TaskId> = (0..34u8).map(|n| TaskId([n; 16])).collect();
+        assert_eq!(named(&ids[..2]), format!(": {},{}", ids[0], ids[1]));
+        let all = named(&ids);
+        assert_eq!(all.matches(',').count(), TASK_PAGE_MAX - 1);
+        assert!(all.ends_with(&format!("{} and 2 more", ids[31])), "{all}");
     }
 
     #[test]

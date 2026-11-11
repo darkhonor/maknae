@@ -419,7 +419,7 @@ The kernel stores each task given to an enrolled agent in the `tasks/` directory
 - A report or close not collected in 30 days expires and is removed.
 - A `list` page holds at most 32 tasks. A `collect` page holds at most 32 reports, as many as fit one frame, and always at least one.
 
-**The frame margin.** `transport.prompt_max_bytes` bounds the text; the frames carry more. A prompt-class request frame may be `prompt_max_bytes + 4096` bytes, so a submission, follow-up or report of the full size fits its envelope. A prompt-class response frame may be 32 KiB more again, so a full task delivered with its kernel signature fits. A client that reads task answers must accept the response size at the largest `prompt_max_bytes` a daemon may set, 16 MiB, whatever its own `prompt_max_bytes`; otherwise one large report would stop it collecting.
+**The frame margin.** `transport.prompt_max_bytes` bounds the text; the frames carry more. A prompt-class request frame may be `prompt_max_bytes + 4096` bytes, so a submission, follow-up or report of the full size fits its envelope. A prompt-class response frame may be 32 KiB more again, so a full task delivered with its kernel signature fits. The daemon bounds its own task answers by the largest `prompt_max_bytes` it may be set to, 16 MiB, not by the current value, so lowering `prompt_max_bytes` never strands a stored report or a queued prompt. A client that reads task answers must accept the same size, whatever its own `prompt_max_bytes`; otherwise one large report would stop it collecting.
 
 **Partitions.** An agent works each task in a directory of its home chosen by the tasker at the root of the task's chain:
 
