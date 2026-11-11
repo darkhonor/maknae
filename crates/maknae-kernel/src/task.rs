@@ -5537,6 +5537,11 @@ mod tests {
             }
         );
         assert_eq!(child.task.agent, "jin");
+        assert_eq!(
+            store.record(&child.task.task_id).unwrap().root.partition(),
+            format!("users/{}", me()),
+            "a sub-task is rooted at the person who started the chain"
+        );
     }
 
     #[tokio::test]

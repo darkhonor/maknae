@@ -2,7 +2,7 @@
 //! keeps an agent's file verbs inside the partition of the task it cites. It abstains
 //! for every subject off the agent channel, and it never permits.
 
-use maknae_config::{fold_path, Fold};
+use maknae_config::{fold_path, Fold, Reach};
 use maknae_security::{
     AttrValue, Authorizer, Decided, FsOperation, Request, Verdict, CHANNEL_AGENT, CHANNEL_CLIENT,
     CONTEXT_FS_OPERATION, SUBJECT_CHANNEL, SUBJECT_HOME, SUBJECT_ROOT_TASKER,
@@ -37,13 +37,14 @@ impl Authorizer for PartitionOperand {
 
 fn decide_partition(req: &Request, fold: Fold) -> Verdict {
     const ABSTAIN: Verdict = Verdict::NotApplicable { note: None };
+    let action = req.action.0.as_str();
     match req.subject.0.get(SUBJECT_CHANNEL) {
+        None if action.starts_with("fs.") => return Verdict::Indeterminate,
         None => return ABSTAIN,
         Some(AttrValue::Str(c)) if c == CHANNEL_CLIENT => return ABSTAIN,
         Some(AttrValue::Str(c)) if c == CHANNEL_AGENT => {}
         Some(_) => return Verdict::Indeterminate,
     }
-    let action = req.action.0.as_str();
     if !FILE_VERBS.contains(&action) {
         return if action.starts_with("fs.") {
             Verdict::Indeterminate
@@ -69,14 +70,20 @@ fn decide_partition(req: &Request, fold: Fold) -> Verdict {
         Some(AttrValue::Str(key)) if is_partition_key(key) => Some(key.as_str()),
         Some(_) => return Verdict::Indeterminate,
     };
-    match req.context.0.get(CONTEXT_FS_OPERATION) {
-        None => {}
-        Some(AttrValue::Str(op)) if FsOperation::parse(op).is_some() => {}
+    let delete = match req.context.0.get(CONTEXT_FS_OPERATION) {
+        None => action == "fs.delete",
+        Some(AttrValue::Str(op)) => match FsOperation::parse(op) {
+            Some(op) => {
+                matches!(op, FsOperation::DeleteEntry | FsOperation::DeleteTree)
+                    || action == "fs.delete"
+            }
+            None => return Verdict::Indeterminate,
+        },
         Some(_) => return Verdict::Indeterminate,
-    }
+    };
     let under = |tail: &str| {
         let joined = format!("{}/{TASKS_DIR}{tail}", home.trim_end_matches('/'));
-        fold_path(&joined, fold, false).mapped().concat()
+        fold_path(&joined, fold, Reach::Path).into_one()
     };
     let tasks = under("");
     let own = own.map(|key| under(&format!("/{key}")));
@@ -85,8 +92,8 @@ fn decide_partition(req: &Request, fold: Fold) -> Verdict {
     let deny = |why: &str| Verdict::Deny {
         reason: format!("partition: {why}"),
     };
-    let delete = action == "fs.delete";
-    let asked = fold_path(path, fold, delete);
+    let reach = if delete { Reach::Subtree } else { Reach::Path };
+    let asked = fold_path(path, fold, reach);
     if delete && asked.mapped().iter().any(|p| within(&tasks, p)) {
         return deny("the delete would remove the tasks directory");
     }
@@ -297,6 +304,18 @@ mod tests {
                 .insert(CONTEXT_FS_OPERATION, AttrValue::Str(op.as_str().into()));
             assert!(denied(&r), "{op:?}");
         }
+        for op in [FsOperation::DeleteEntry, FsOperation::DeleteTree] {
+            for action in ["fs.write", "fs.mkdir", "fs.list"] {
+                let mut r = agent(action, Some("/home/hobi-svc"), MINE);
+                r.context
+                    .0
+                    .insert(CONTEXT_FS_OPERATION, AttrValue::Str(op.as_str().into()));
+                assert!(
+                    denied(&r),
+                    "{action} carrying {op:?} is decided as a delete"
+                );
+            }
+        }
         assert_eq!(
             decide(&agent(
                 "fs.delete",
@@ -454,7 +473,12 @@ mod tests {
                     );
                     assert_eq!(decide(&person(on_agent)), NA, "{action} {path:?}");
                     let unstamped = asked(None, Some(HOME), action, path, root);
-                    assert_eq!(decide(&unstamped), NA, "{action} {path:?}");
+                    let want = if action.starts_with("fs.") {
+                        Verdict::Indeterminate
+                    } else {
+                        NA
+                    };
+                    assert_eq!(decide(&unstamped), want, "{action} {path:?}");
                 }
             }
         }

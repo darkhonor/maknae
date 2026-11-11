@@ -215,7 +215,7 @@ Dated as-built amendment; rides the #628 PR. Seven statements:
      - an `fs.delete` whose subtree holds `<home>/tasks` is denied, so a partition cannot be removed by removing a directory above it;
      - anything else under `<home>/tasks` is denied. That is another tasker's partition, or any partition at all when the request cites no task.
    - A listing of a parent directory decides each entry (#161), so it shows the caller's own partition and no other tasker's.
-   - A file request it cannot evaluate is `Indeterminate`: no home, a home or path that is not a canonical string, a `root_tasker` that is not a partition key, or an `fs_operation` that names no known operation.
+   - A file request it cannot evaluate is `Indeterminate`: no channel stamp, no home, a home or path that is not a canonical string, a `root_tasker` that is not a partition key, or an `fs_operation` that names no known operation.
 5. **One path fold for both mandatory file operands.** The partition operand and the `sensitive.yaml` operand compare paths through one function, `maknae_config::fold_path`, so the two cannot disagree about a macOS spelling (case, NFC against NFD, the `/System/Volumes/Data` prefix, `/private/{etc,tmp,var}`).
 6. **A partition denial is the model's uniform refusal** ([ADR-0034](ADR-0034-the-models-file-boundary.md) decision 7), never `Protected`. The audit reason names the operand: `partition: …`.
 7. **Fold order is baseline, ceiling, sensitive, partition, and the evidence follows it.** `admin.status` and the boot record report `maknae-authz-basic+maknae-ceiling+maknae-sensitive+maknae-partition`. The field holds no state and reads no snapshot, so unlike `sensitive` the field itself decides.

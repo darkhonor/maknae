@@ -62,7 +62,7 @@
 #
 # WHAT THIS GATE DOES NOT HOLD, stated so it is not over-read: checks 1-3 pin
 # the composition's SHAPE. That the ceiling is actually CONSULTED -- that
-# `Composition::operands()` returns both fields -- is held by
+# `Composition::operands()` returns all four fields -- is held by
 # `composition::tests` and `tests/enforce_loop.rs` (the red-proof, MEASURED:
 # swapping the ceiling for a second baseline turns 1 enforce_loop test (the
 # composed-name status test) + 5 composition tests red -- the name test, the
@@ -225,7 +225,7 @@ def strip_comments(src: str) -> str:
         return "".join("\n" if c == "\n" else " " for c in m.group(0))
     out = re.sub(r"/\*.*?\*/", blank, src, flags=re.S)
     return re.sub(r"//[^\n]*", blank, out)
-DEFINING = {"crates/maknae-kernel/src/composition.rs", "crates/maknae-kernel/src/ceiling_authz.rs", "crates/maknae-kernel/src/sensitive_authz.rs"}
+DEFINING = {"crates/maknae-kernel/src/composition.rs", "crates/maknae-kernel/src/ceiling_authz.rs", "crates/maknae-kernel/src/sensitive_authz.rs", "crates/maknae-kernel/src/partition_authz.rs"}
 ctor = re.compile(r"\b(Composition|CeilingAuthorizer|SensitiveAuthorizer)\s*::\s*new\s*\(")
 for p in all_rs:
     rel = str(p.relative_to(root))

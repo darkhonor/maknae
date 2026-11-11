@@ -294,10 +294,22 @@ impl FoldedPath {
     pub fn mapped(&self) -> &[String] {
         &self.mapped
     }
+
+    /// The first mapped spelling: the only one for [`Reach::Path`].
+    pub fn into_one(self) -> String {
+        self.mapped.into_iter().next().unwrap_or_default()
+    }
+}
+
+/// Whether a path is matched as itself, or as the directory tree beneath it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reach {
+    Path,
+    Subtree,
 }
 
 /// The one fold every path-matching operand compares through.
-pub fn fold_path(path: &str, fold: Fold, subtree: bool) -> FoldedPath {
+pub fn fold_path(path: &str, fold: Fold, reach: Reach) -> FoldedPath {
     match fold {
         Fold::None => FoldedPath {
             lowered: path.to_string(),
@@ -306,10 +318,9 @@ pub fn fold_path(path: &str, fold: Fold, subtree: bool) -> FoldedPath {
         Fold::Case => {
             let lowered = case_folded(path);
             FoldedPath {
-                mapped: if subtree {
-                    mapped_roots(&lowered)
-                } else {
-                    vec![mapped(&lowered)]
+                mapped: match reach {
+                    Reach::Subtree => mapped_roots(&lowered),
+                    Reach::Path => vec![mapped(&lowered)],
                 },
                 lowered,
             }
@@ -326,10 +337,11 @@ struct Folded {
 
 impl Folded {
     fn new(path: &str, home: Option<&Path>, subtree: bool) -> Self {
-        let FoldedPath { lowered, mapped } = fold_path(path, Fold::Case, subtree);
+        let reach = if subtree { Reach::Subtree } else { Reach::Path };
+        let FoldedPath { lowered, mapped } = fold_path(path, Fold::Case, reach);
         let home = home
             .and_then(Path::to_str)
-            .map(|h| fold_path(h, Fold::Case, false));
+            .map(|h| fold_path(h, Fold::Case, Reach::Path));
         Folded {
             lowered,
             mapped,
@@ -765,7 +777,7 @@ mod tests {
 
     #[test]
     fn fold_path_gives_one_spelling_for_case_nfd_and_the_data_volume() {
-        let one = |p: &str| fold_path(p, Fold::Case, false).mapped().to_vec();
+        let one = |p: &str| fold_path(p, Fold::Case, Reach::Path).mapped().to_vec();
         let want = vec!["/users/hobi/tasks/users/caf\u{e9}".to_string()];
         for spelling in [
             "/Users/hobi/tasks/users/caf\u{e9}",
@@ -777,13 +789,13 @@ mod tests {
         }
         assert_eq!(one("/private/var/hobi/tasks"), ["/var/hobi/tasks"]);
         assert_eq!(one("/private/home/x"), ["/private/home/x"]);
-        let roots = |p: &str| fold_path(p, Fold::Case, true).mapped().to_vec();
+        let roots = |p: &str| fold_path(p, Fold::Case, Reach::Subtree).mapped().to_vec();
         assert_eq!(roots("/System/Volumes"), ["/"]);
         assert_eq!(roots("/private"), ["/private", "/etc", "/tmp", "/var"]);
         assert_eq!(roots("/Users/Hobi"), ["/users/hobi"]);
-        for subtree in [false, true] {
+        for reach in [Reach::Path, Reach::Subtree] {
             assert_eq!(
-                fold_path("/Users/Hobi/x", Fold::None, subtree).mapped(),
+                fold_path("/Users/Hobi/x", Fold::None, reach).mapped(),
                 ["/Users/Hobi/x"]
             );
         }

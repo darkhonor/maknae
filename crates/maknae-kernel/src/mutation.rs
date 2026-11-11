@@ -2507,12 +2507,12 @@ mod tests {
         fd: Option<OwnedFd>,
         sensitive: SensitiveList,
     ) -> (Vec<u8>, Vec<AuditRecord>) {
-        stat_answer_stamped(fx, pdp, asked, fd, sensitive, &Stamp::Client).await
+        answer_stamped(fx, pdp, &stat(asked), fd, sensitive, &Stamp::Client).await
     }
-    async fn stat_answer_stamped(
+    async fn answer_stamped(
         fx: &Fixture,
         pdp: crate::Composition<maknae_authz_basic::HermeticAuthorizer>,
-        asked: &Path,
+        verb: &Verb,
         fd: Option<OwnedFd>,
         sensitive: SensitiveList,
         stamp: &Stamp<'_>,
@@ -2527,7 +2527,7 @@ mod tests {
         assert!(
             handle(
                 &mut server,
-                &stat(asked),
+                verb,
                 fx.principal.uid,
                 Lane::Local,
                 &fds,
@@ -2892,13 +2892,12 @@ mod tests {
             agent: &hobi,
             task: None,
         };
-        let ask = |path: &Path, stamp| {
-            let fd = maknae_io::open_path_for_stat(path).ok();
-            assert!(fd.is_some());
-            let (path, pdp) = (path.to_path_buf(), hobi_pdp(&fx));
-            let fx = &fx;
-            async move { stat_answer_stamped(fx, pdp, &path, fd, SensitiveList::empty(), stamp).await }
+        let ask_with = |verb: Verb, fd: std::io::Result<OwnedFd>, stamp| {
+            let (fd, pdp, fx) = (Some(fd.unwrap()), hobi_pdp(&fx), &fx);
+            async move { answer_stamped(fx, pdp, &verb, fd, SensitiveList::empty(), stamp).await }
         };
+        let ask =
+            |path: &Path, stamp| ask_with(stat(path), maknae_io::open_path_for_stat(path), stamp);
         let (own, _) = ask(&mine, &cited).await;
         assert!(
             matches!(stat_payload(&own), Payload::Stat(_)),
@@ -2914,6 +2913,25 @@ mod tests {
         let (bare, trail) = ask(&mine, &uncited).await;
         assert_eq!(bare, uniform_refusal());
         assert_eq!(reason(&trail), "partition: the request cites no task");
+        let other = "partition: the path is in another tasker's partition";
+        let read = Verb::Read {
+            path: theirs.to_str().unwrap().into(),
+            conversation: None,
+            page: None,
+        };
+        let (read, trail) =
+            ask_with(read, maknae_io::open_path_for_delegation(&theirs), &cited).await;
+        assert_eq!(read, uniform_refusal());
+        assert_eq!(reason(&trail), other);
+        let dir = theirs.parent().unwrap();
+        let (list, trail) = ask_with(
+            list_verb(dir, None),
+            maknae_io::open_directory_for_delegation(dir),
+            &cited,
+        )
+        .await;
+        assert_eq!(list, uniform_refusal());
+        assert_eq!(reason(&trail), other);
     }
     #[test]
     fn listing_the_partitions_root_shows_only_the_current_partition() {

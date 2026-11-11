@@ -378,6 +378,10 @@ mod tests {
         // status test drives as peer_uid 0. A CLAIMED attribute here -- this is
         // a unit test of the fold, not of the daemon door that stamps uids.
         subject.insert("uid", AttrValue::Int(0));
+        subject.insert(
+            maknae_security::SUBJECT_CHANNEL,
+            AttrValue::Str(maknae_security::CHANNEL_CLIENT.into()),
+        );
         let mut context = Attributes::new();
         context.insert(
             maknae_security::CONTEXT_DAC_LANE,
