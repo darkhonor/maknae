@@ -206,6 +206,7 @@ pub enum BootFinding {
     },
 }
 
+/// `Io` from `save` or `delete` means nothing changed; `NotDurable` means it did, unsynced.
 pub trait TaskBlobs: Send + Sync {
     fn names(&self) -> Result<Vec<String>, StoreError>;
     fn load(&self, name: &str) -> Result<Zeroizing<Vec<u8>>, StoreError>;
@@ -379,6 +380,7 @@ pub struct MemInner {
     synced: std::sync::Mutex<std::collections::BTreeMap<String, Zeroizing<Vec<u8>>>>,
     unsynced: std::sync::Mutex<Vec<Unsynced>>,
     after_save: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    attempts: std::sync::atomic::AtomicUsize,
 }
 
 #[cfg(any(test, feature = "hermetic-test-seam"))]
@@ -390,6 +392,10 @@ pub enum Fail {
     Unlinks,
     /// A save lands unsynced and an unlink is refused.
     UnsyncedNoUnlink,
+    /// A save is synced and an unlink lands unsynced.
+    UnsyncedUnlinks,
+    /// The next record save lands unsynced; everything after is synced.
+    UnsyncedOnce,
     Panics,
 }
 
@@ -523,7 +529,17 @@ impl MemTaskBlobs {
             .clone()
     }
 
+    /// Record saves and unlinks asked for so far, refused ones included.
+    pub fn attempts(&self) -> usize {
+        self.0.attempts.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     fn refuse(&self, name: &str) -> Result<(), StoreError> {
+        if name != COUNTERS {
+            self.0
+                .attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         let fail = *self
             .0
             .fail
@@ -539,28 +555,31 @@ impl MemTaskBlobs {
             | Some(Fail::Unsynced)
             | Some(Fail::Unlinks)
             | Some(Fail::UnsyncedNoUnlink)
+            | Some(Fail::UnsyncedUnlinks)
+            | Some(Fail::UnsyncedOnce)
             | Some(Fail::Panics)
             | None => Ok(()),
         }
     }
 
-    fn landed(&self, name: &str) -> Result<(), StoreError> {
-        let fail = *self
+    fn landed(&self, name: &str, unlink: bool) -> Result<(), StoreError> {
+        let mut mode = self
             .0
             .fail
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match fail {
-            Some(Fail::Unsynced | Fail::UnsyncedNoUnlink) if name != COUNTERS => {
+        let fail = *mode;
+        if let (Some(Fail::UnsyncedOnce), false, false) = (fail, unlink, name == COUNTERS) {
+            *mode = None;
+        }
+        match (fail, unlink) {
+            (Some(Fail::Unsynced | Fail::UnsyncedNoUnlink | Fail::UnsyncedOnce), false)
+            | (Some(Fail::Unsynced | Fail::UnsyncedUnlinks), true)
+                if name != COUNTERS =>
+            {
                 Err(StoreError::NotDurable("sentinel-628-unsynced".into()))
             }
-            Some(Fail::Every)
-            | Some(Fail::Records)
-            | Some(Fail::Unsynced)
-            | Some(Fail::Unlinks)
-            | Some(Fail::UnsyncedNoUnlink)
-            | Some(Fail::Panics)
-            | None => Ok(()),
+            _ => Ok(()),
         }
     }
 }
@@ -584,7 +603,7 @@ impl TaskBlobs for MemTaskBlobs {
         self.stall(name);
         self.map()
             .insert(name.to_owned(), Zeroizing::new(plain.to_vec()));
-        let landed = self.settle(name, self.landed(name), Some(plain));
+        let landed = self.settle(name, self.landed(name, false), Some(plain));
         let then = match name == COUNTERS {
             true => None,
             false => self
@@ -612,7 +631,7 @@ impl TaskBlobs for MemTaskBlobs {
         }
         self.stall(name);
         self.map().remove(name);
-        self.settle(name, self.landed(name), None)
+        self.settle(name, self.landed(name, true), None)
     }
 
     fn quarantine(&self, name: &str) -> Result<(), StoreError> {
@@ -962,7 +981,7 @@ mod tests {
     }
 
     #[test]
-    fn a_write_that_lands_unsynced_is_undone_before_it_is_refused() {
+    fn a_write_that_lands_unsynced_is_undone() {
         let b = MemTaskBlobs::default();
         let store = open_mem(&b);
         let id = by_uid(&store, "one");
@@ -973,7 +992,7 @@ mod tests {
         ));
         assert!(matches!(
             store.publish_report(&id, secret("r"), None),
-            Err(TaskRefusal::Store(_))
+            Err(TaskRefusal::Unavailable(why)) if why.starts_with("outcome unknown: ")
         ));
         b.fail(None);
         for s in [&store, &open_mem(&b)] {

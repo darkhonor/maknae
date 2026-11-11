@@ -149,6 +149,8 @@ struct Held {
     /// Gone from `tasks`, yet the disk may read them confirmed: each is held marked
     /// pending until a synced write of it, or a synced unlink.
     exposed: BTreeMap<TaskId, TaskRecord>,
+    /// Stored tasks whose disk copy may differ from memory, until a synced write.
+    stale: std::collections::BTreeSet<TaskId>,
 }
 
 impl Held {
@@ -251,26 +253,34 @@ impl TaskStore {
         }
     }
 
-    /// A write that landed unsynced is undone to `prior` before it is refused, so a
-    /// restart never reloads what was refused.
+    /// A write that landed unsynced is undone to `prior`. It is refused only when the
+    /// undo is synced; otherwise the outcome is unknown and the record is owed a rewrite.
     fn write(&self, rec: &TaskRecord, prior: Option<&TaskRecord>) -> Result<(), TaskRefusal> {
-        let name = name_of(&rec.signed.task.task_id);
+        let id = rec.signed.task.task_id;
+        let name = name_of(&id);
         let plain = encode(rec).map_err(store)?;
-        match self.blobs.save(&name, &plain) {
-            Err(StoreError::NotDurable(why)) => {
-                let undone = match prior {
-                    None => self.blobs.delete(&name),
-                    Some(p) => encode(p).and_then(|b| self.blobs.save(&name, &b)),
-                };
-                match undone {
-                    Ok(()) | Err(StoreError::NotDurable(_)) => {}
-                    Err(e @ (StoreError::Io(_) | StoreError::Counters(_))) => {
-                        eprintln!("maknaed: refused task write to {name} was not undone: {e}");
-                    }
-                }
+        let why = match self.blobs.save(&name, &plain) {
+            Ok(()) => {
+                self.held().stale.remove(&id);
+                return Ok(());
+            }
+            Err(StoreError::NotDurable(why)) => why,
+            Err(e @ (StoreError::Io(_) | StoreError::Counters(_))) => return Err(store(e)),
+        };
+        let undone = match prior {
+            None => self.blobs.delete(&name),
+            Some(p) => encode(p).and_then(|b| self.blobs.save(&name, &b)),
+        };
+        match (undone, prior) {
+            (Ok(()), _) => Err(TaskRefusal::Store(why)),
+            (Err(e), None) => {
+                eprintln!("maknaed: refused task write to {name} was not undone: {e}");
                 Err(TaskRefusal::Store(why))
             }
-            other => other.map_err(store),
+            (Err(_), Some(_)) => {
+                self.held().stale.insert(id);
+                Err(TaskRefusal::Unavailable(format!("outcome unknown: {why}")))
+            }
         }
     }
 
@@ -384,8 +394,8 @@ impl TaskStore {
         w
     }
 
-    /// Retries every exposed record, then takes each queued id in hand; one in hand
-    /// when the drain unwinds is put back.
+    /// Retries what is owed until the first record the disk refuses, then takes each
+    /// queued id in hand; one in hand when the drain unwinds is put back.
     fn drain_abandoned(&self) {
         let queue = || {
             self.abandoned
@@ -393,8 +403,9 @@ impl TaskStore {
                 .unwrap_or_else(PoisonError::into_inner)
         };
         let owed: Vec<TaskId> = self.held().exposed.keys().copied().collect();
-        for id in &owed {
-            self.withdraw_locked(id);
+        let settled = owed.iter().all(|id| self.withdraw_locked(id));
+        if settled {
+            self.rewrite_stale();
         }
         let rounds = queue().len();
         for _ in 0..rounds {
@@ -409,6 +420,21 @@ impl TaskStore {
                 self.withdraw_locked(&id);
             }
             hand.id = None;
+        }
+    }
+
+    /// Writes each stale task as memory holds it, stopping at the first failure.
+    fn rewrite_stale(&self) {
+        let stale: Vec<TaskId> = self.held().stale.iter().copied().collect();
+        for id in stale {
+            let rec = self.held().tasks.get(&id).cloned();
+            let written = rec.map_or(Ok(()), |rec| {
+                encode(&rec).and_then(|plain| self.blobs.save(&name_of(&id), &plain))
+            });
+            match written {
+                Ok(()) => self.held().stale.remove(&id),
+                Err(_) => break,
+            };
         }
     }
 
@@ -879,7 +905,8 @@ impl TaskStore {
         Ok(self.view_of(&self.held(), &next))
     }
 
-    /// Withdraws `tasker`'s queued task; its record is removed before the answer.
+    /// Withdraws `tasker`'s queued task. Answered once the record is durably pending or
+    /// gone; otherwise the task leaves memory and the outcome is unknown.
     pub fn drop_queued(&self, id: &TaskId, tasker: &Tasker) -> Result<TaskView, TaskRefusal> {
         let _w = self.writing();
         let mut view = {
@@ -890,7 +917,11 @@ impl TaskStore {
             }
             self.view_of(&held, rec)
         };
-        self.erase(id)?;
+        if !self.withdraw_locked(id) {
+            return Err(TaskRefusal::Unavailable(
+                "outcome unknown: the drop is left to a later store write".into(),
+            ));
+        }
         view.state = TaskState::Closed;
         view.close = Some(TaskClose::Dropped);
         Ok(view)
@@ -1553,10 +1584,13 @@ async fn submit_under<P: Authorizer + Send + Sync + 'static>(
                     let mut corrective = attempt.record(ctx, Some(&task.task), Some(&refusal));
                     corrective.outcome.reason = said;
                     corrective.outcome.posture = "unavailable".into();
-                    emit.emit_within(&corrective, crate::blocking_guard::AUDIT_APPEND_TIMEOUT)
+                    match emit
+                        .emit_within(&corrective, crate::blocking_guard::AUDIT_APPEND_TIMEOUT)
                         .await
-                        .map_err(|e| TaskRefusal::Audit(e.to_string()))?;
-                    Err(refusal)
+                    {
+                        Err(e) if !kept => Err(TaskRefusal::Audit(e.to_string())),
+                        Ok(()) | Err(_) => Err(refusal),
+                    }
                 }
             }
         }
@@ -3297,7 +3331,11 @@ mod tests {
             }
             Gone::Dropped => {
                 blobs.fail(Some(fail));
-                store.drop_queued(&task, &me).unwrap();
+                let said = store.drop_queued(&task, &me).unwrap_err();
+                assert!(
+                    matches!(&said, TaskRefusal::Unavailable(why) if why.starts_with("outcome unknown: ")),
+                    "{said:?}"
+                );
             }
             Gone::Acknowledged => {
                 let rseq = store.publish_report(&task, text("r"), None).unwrap();
@@ -3326,13 +3364,164 @@ mod tests {
     }
 
     #[test]
-    fn a_drop_whose_unlink_lands_unsynced_is_still_owed() {
+    fn a_drop_proven_by_neither_step_is_outcome_unknown_and_still_owed() {
         nothing_removed_reloads_after(crate::task_store::Fail::Unsynced, Gone::Dropped);
     }
 
     #[test]
     fn an_acknowledgement_whose_unlink_lands_unsynced_is_still_owed() {
         nothing_removed_reloads_after(crate::task_store::Fail::Unsynced, Gone::Acknowledged);
+    }
+
+    #[test]
+    fn a_drop_is_done_once_its_pending_mark_is_synced() {
+        let blobs = crate::task_store::MemTaskBlobs::default();
+        let store = TaskStore::open(
+            Box::new(blobs.clone()),
+            Arc::new(crate::task_store::SystemClock),
+        )
+        .unwrap();
+        let me = Tasker::Uid(1000);
+        let task = held_by(&store, me.clone());
+        blobs.fail(Some(crate::task_store::Fail::UnsyncedUnlinks));
+        let view = store.drop_queued(&task, &me).unwrap();
+        assert_eq!(view.close, Some(TaskClose::Dropped));
+        blobs.crash(0);
+        let reopened =
+            TaskStore::open(Box::new(blobs), Arc::new(crate::task_store::SystemClock)).unwrap();
+        assert_eq!(reopened.len(), 0, "a dropped task is not stored again");
+        assert!(reopened.queue(&id("hobi")).is_empty(), "nothing to claim");
+    }
+
+    fn working(store: &TaskStore, tasker: &Tasker) -> TaskId {
+        let task = held_by(store, tasker.clone());
+        store.start_for_test(&task);
+        task
+    }
+
+    #[test]
+    fn a_stop_or_follow_up_left_unsynced_and_not_undone_is_outcome_unknown() {
+        let blobs = crate::task_store::MemTaskBlobs::default();
+        let store = TaskStore::open(
+            Box::new(blobs.clone()),
+            Arc::new(crate::task_store::SystemClock),
+        )
+        .unwrap();
+        let me = Tasker::Uid(1000);
+        let (stopped, added) = (working(&store, &me), working(&store, &me));
+        blobs.fail(Some(crate::task_store::Fail::Unsynced));
+        for said in [
+            store.stop(&stopped, &me).unwrap_err(),
+            store.follow_up(&added, &me, text("more"), 64).unwrap_err(),
+        ] {
+            assert!(
+                matches!(&said, TaskRefusal::Unavailable(why) if why.starts_with("outcome unknown: ")),
+                "{said:?}"
+            );
+        }
+        blobs.fail(None);
+        store.purge_agent(&id("nobody"));
+        blobs.crash(1);
+        let reopened =
+            TaskStore::open(Box::new(blobs), Arc::new(crate::task_store::SystemClock)).unwrap();
+        for task in [stopped, added] {
+            let (now, then) = (
+                store.record(&task).unwrap(),
+                reopened.record(&task).unwrap(),
+            );
+            assert_eq!(then.state, TaskState::Working);
+            assert_eq!(then.follow_ups.len(), 0);
+            assert_eq!((now.state, now.follow_ups.len()), (then.state, 0));
+        }
+    }
+
+    #[test]
+    fn a_stop_left_unsynced_and_undone_is_refused() {
+        let blobs = crate::task_store::MemTaskBlobs::default();
+        let store = TaskStore::open(
+            Box::new(blobs.clone()),
+            Arc::new(crate::task_store::SystemClock),
+        )
+        .unwrap();
+        let me = Tasker::Uid(1000);
+        let task = working(&store, &me);
+        blobs.fail(Some(crate::task_store::Fail::UnsyncedOnce));
+        assert!(matches!(store.stop(&task, &me), Err(TaskRefusal::Store(_))));
+        blobs.crash(1);
+        let reopened =
+            TaskStore::open(Box::new(blobs), Arc::new(crate::task_store::SystemClock)).unwrap();
+        assert_eq!(reopened.record(&task).unwrap().state, TaskState::Working);
+    }
+
+    #[test]
+    fn a_drain_stops_at_the_first_record_the_disk_refuses() {
+        let blobs = crate::task_store::MemTaskBlobs::default();
+        let store = TaskStore::open(
+            Box::new(blobs.clone()),
+            Arc::new(crate::task_store::SystemClock),
+        )
+        .unwrap();
+        let me = Tasker::Uid(1000);
+        let (one, two) = (held_by(&store, me.clone()), held_by(&store, me));
+        blobs.fail(Some(crate::task_store::Fail::Records));
+        assert!(!store.withdraw(&one));
+        assert!(!store.withdraw(&two));
+        let before = blobs.attempts();
+        store.purge_agent(&id("nobody"));
+        assert_eq!(blobs.attempts() - before, 2, "one write and one unlink");
+        blobs.fail(None);
+        store.purge_agent(&id("nobody"));
+        assert!(!blobs.has(&name_of(&one)) && !blobs.has(&name_of(&two)));
+    }
+
+    struct BreaksStoreThenFails(Recorder, crate::task_store::MemTaskBlobs);
+
+    impl AuditEmit for BreaksStoreThenFails {
+        fn emit(
+            &self,
+            rec: &AuditRecord,
+        ) -> impl std::future::Future<Output = Result<(), AuditError>> + Send {
+            let first = self.0.records().is_empty();
+            self.1.fail(Some(crate::task_store::Fail::Records));
+            let emitted = self.0.emit(rec);
+            async move {
+                emitted.await?;
+                match first {
+                    true => Ok(()),
+                    false => Err(AuditError::Serialize("sink refused".into())),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_kept_task_whose_corrective_record_fails_is_still_outcome_unknown() {
+        let (_g, pdp) = pdp("kept-unaudited");
+        let blobs = crate::task_store::MemTaskBlobs::default();
+        let store = Arc::new(
+            TaskStore::open(
+                Box::new(blobs.clone()),
+                Arc::new(crate::task_store::SystemClock),
+            )
+            .unwrap(),
+        );
+        let emit = BreaksStoreThenFails(Recorder::new(), blobs.clone());
+        let view = SnapshotEnrollment(pdp.clone());
+        let got = submit_via(
+            pdp.clone(),
+            &store,
+            &view,
+            user(),
+            sub("hobi"),
+            &emit,
+            (BOUND, None),
+        )
+        .await;
+        assert_eq!(emit.0.records().len(), 2);
+        assert!(
+            matches!(&got, Err(TaskRefusal::Unavailable(why)) if why.starts_with("outcome unknown: ")),
+            "{got:?}"
+        );
     }
 
     #[test]

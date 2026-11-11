@@ -751,8 +751,8 @@ impl Anchor {
         };
 
         let removed = match sync {
-            DirSync::IfRemoved => crate::write::remove_at_durable(&base, &name, &full)?,
-            DirSync::Always => crate::write::remove_at_settled(&base, &name, &full)?,
+            DirSync::IfRemoved => crate::write::remove_at_durable(&base, &name, &full, false)?,
+            DirSync::Always => crate::write::remove_at_durable(&base, &name, &full, true)?,
             DirSync::Never => match crate::syscall::remove_at(&base, &name, false) {
                 Ok(()) => true,
                 Err(nix::errno::Errno::ENOENT) => false,
