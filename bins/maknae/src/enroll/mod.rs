@@ -3169,7 +3169,7 @@ mod tests {
         std::fs::create_dir_all(&d).unwrap();
         let uid = nix::unistd::getuid().as_raw();
         let set = |spec: &str| {
-            std::process::Command::new("setfacl")
+            command(Program::Setfacl)
                 .args(["-m", spec])
                 .arg(&d)
                 .status()
@@ -3179,7 +3179,7 @@ mod tests {
         assert!(set(&format!("u:{uid}:rx")));
         assert!(set("g:0:x"));
         revoke_home_acl(&d, uid, false);
-        let out = std::process::Command::new("getfacl")
+        let out = command(Program::Getfacl)
             .args(["-p", "-n", "--omit-header"])
             .arg(&d)
             .output()
@@ -3231,14 +3231,14 @@ mod tests {
             .uid
             .as_raw();
         let acl = || {
-            let out = std::process::Command::new("getfacl")
+            let out = command(Program::Getfacl)
                 .args(["-p", "-n", "--omit-header"])
                 .arg(&home)
                 .output()
                 .unwrap();
             names_acl_entry(&String::from_utf8_lossy(&out.stdout), &uid.to_string())
         };
-        assert!(std::process::Command::new("setfacl")
+        assert!(command(Program::Setfacl)
             .args(["-m", &format!("u:{uid}:rx")])
             .arg(&home)
             .status()
