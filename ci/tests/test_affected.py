@@ -544,9 +544,9 @@ class AffectedTests(unittest.TestCase):
                               capture_output=True, text=True)
         self.assertGuardFailedFirst(proc, record)
 
-    def test_ci_mutation_selection_preflight_refuses_a_symlinked_contract_before_reading_it(self):
+    def test_mutation_workflow_selection_preflight_refuses_a_symlinked_contract_before_reading_it(self):
         record = self.symlinked_contract()
-        workflow = (SELECTOR.parent.parent / '.github/workflows/ci.yml').read_text()
+        workflow = (SELECTOR.parent.parent / '.github/workflows/mutation.yml').read_text()
         step = workflow.split('      - name: Select mutation packages', 1)[1].split('\n      - name:', 1)[0]
         body = step.split('        run: |\n', 1)[1]
         script = ''.join(line[10:] + '\n' for line in body.splitlines())

@@ -26,7 +26,7 @@ bash ci/gates/external-authority-lint.sh
 bash ci/gates/isolation-contract-lint.sh
 ```
 
-Local coverage prerequisites (derive current versions from `.github/workflows/ci.yml`; the gate's readiness step prints install guidance if missing):
+Local coverage prerequisites (derive current versions from `.github/workflows/ci.yml` and `.github/workflows/mutation.yml`; the gate's readiness step prints install guidance if missing):
 
 ```sh
 cargo install cargo-llvm-cov --locked --version 0.8.7
