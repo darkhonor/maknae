@@ -18,11 +18,16 @@ const SUGA_UID: u32 = 12_102;
 const OTHER: u32 = 31_337;
 const T0: i64 = 1_800_000_000;
 
+/// Every test is the same euid, so they share its store slots; a test that stalls the
+/// store takes them all.
+static STORE: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
+
 struct World {
     root: common::DirGuard,
     pdp: Arc<maknae_kernel::Composition<maknae_authz_basic::HermeticAuthorizer>>,
     agents: AgentAdmission,
     clock: Arc<ManualClock>,
+    blobs: MemTaskBlobs,
     me: u32,
     user: String,
     cfg: maknae_config::TransportConfig,
@@ -118,9 +123,9 @@ fn world(tag: &str, role: &str, grant: bool) -> World {
         maknae_kernel::CeilingAuthorizer::new(maknae_config::Ceiling::baseline_for(us), us),
     ));
     let clock = Arc::new(ManualClock::at(T0));
-    let tasks = Arc::new(
-        TaskStore::open(Box::new(MemTaskBlobs::default()), clock.clone()).expect("an empty store"),
-    );
+    let blobs = MemTaskBlobs::default();
+    let tasks =
+        Arc::new(TaskStore::open(Box::new(blobs.clone()), clock.clone()).expect("an empty store"));
     let agents = AgentAdmission {
         view: Arc::new(maknae_kernel::SnapshotEnrollment(Arc::clone(&pdp))),
         tasks,
@@ -133,6 +138,7 @@ fn world(tag: &str, role: &str, grant: bool) -> World {
         pdp,
         agents,
         clock,
+        blobs,
         me,
         user,
         cfg,
@@ -145,6 +151,11 @@ impl World {
     }
 
     async fn raw(&self, verb: Verb, records: &Arc<Records>) -> Vec<u8> {
+        let _shared = STORE.read().await;
+        self.raw_alone(verb, records).await
+    }
+
+    async fn raw_alone(&self, verb: Verb, records: &Arc<Records>) -> Vec<u8> {
         use tokio::io::AsyncReadExt;
         let (mut client, server) = tokio::io::duplex(1 << 20);
         let session = maknae_kernel::SessionRecord::for_test(self.me, Some(self.user.clone()))
@@ -727,4 +738,132 @@ async fn a_full_size_report_is_collected_whole_and_alone() {
         .expect("the small report waits for the next page");
     let second = reports(w.ask(collect("hobi", Some(upto.seq()))).await);
     assert_eq!(report_ids(&second), vec![b]);
+}
+
+fn task_records(records: &Records) -> Vec<maknae_audit_append::AuditRecord> {
+    records
+        .snapshot()
+        .into_iter()
+        .filter(|r| r.action == "session.task")
+        .collect()
+}
+
+#[tokio::test]
+async fn every_task_record_names_its_op_and_its_tasker() {
+    let w = world("records", "user", true);
+    let id = w.submit("hobi", "a").await;
+    w.working(&id);
+    let me = format!("uid:{}", w.me);
+    for (verb, op) in [
+        (submit("hobi", "b"), "submit"),
+        (Verb::TaskStatus { task: r(&id) }, "status"),
+        (
+            Verb::TaskAdd {
+                task: r(&id),
+                text: secret("more"),
+            },
+            "add",
+        ),
+        (list("hobi", None), "list"),
+        (Verb::TaskStop { task: r(&id) }, "stop"),
+        (Verb::TaskDrop { task: r(&id) }, "drop"),
+        (collect("hobi", Some(1)), "collect"),
+    ] {
+        let records = Records::new(0);
+        w.ask_with(verb, &records).await;
+        let recs = task_records(&records);
+        assert!(!recs.is_empty(), "{op}");
+        for rec in recs {
+            assert_eq!(rec.subject.task_op.as_deref(), Some(op), "{op}: {rec:?}");
+            assert_eq!(rec.subject.tasker.as_deref(), Some(me.as_str()), "{op}");
+            assert_eq!(rec.subject.agent, None, "{op}");
+            assert!(
+                !rec.outcome.reason.starts_with(&format!("{op}:")),
+                "{op}: {}",
+                rec.outcome.reason
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_callers_cursors_do_not_count_another_taskers_tasks() {
+    let cursors = |busy: bool| async move {
+        let w = world(
+            if busy {
+                "cursors-busy"
+            } else {
+                "cursors-quiet"
+            },
+            "user",
+            true,
+        );
+        let mut mine = Vec::new();
+        for _ in 0..33 {
+            if busy {
+                let t = w.theirs("hobi");
+                w.report(&t, "theirs");
+            }
+            mine.push(w.mine("hobi"));
+        }
+        for id in &mine {
+            if busy {
+                let t = w.theirs("hobi");
+                w.report(&t, "theirs");
+            }
+            w.report(id, "mine");
+        }
+        let listed = page(w.ask(list("hobi", None)).await).next;
+        let first = reports(w.ask(collect("hobi", None)).await);
+        let seen: Vec<TaskCursor> = first.entries.iter().map(|e| e.cursor.clone()).collect();
+        let ahead = unauthorized(&w.ask(collect("hobi", Some(34))).await);
+        (listed, seen, first.next, ahead)
+    };
+    let quiet = cursors(false).await;
+    let busy = cursors(true).await;
+    assert_eq!(quiet, busy);
+    assert!(quiet.3, "a cursor past the caller's own reports is refused");
+    assert_eq!(quiet.0, Some(TaskCursor::from_seq(32)));
+}
+
+#[tokio::test]
+async fn a_store_that_does_not_answer_in_time_is_refused_as_unavailable() {
+    let w = world("store-slow", "user", true);
+    let id = w.submit("hobi", "a").await;
+    w.working(&id);
+    let _alone = STORE.write().await;
+    w.blobs.slow(Some(Duration::from_millis(2500)));
+    let records = Records::new(0);
+    let raw = w
+        .raw_alone(
+            Verb::TaskAdd {
+                task: r(&id),
+                text: secret("more"),
+            },
+            &records,
+        )
+        .await;
+    let mut cursor = &raw[..];
+    let frame = common::read_frame(&mut cursor, 1 << 20).await.unwrap();
+    let got = maknae_proto::decode_response(&frame).unwrap().result;
+    assert!(unauthorized(&got), "{got:?}");
+    let last = task_records(&records).pop().unwrap();
+    assert_eq!(
+        (last.outcome.result.as_str(), last.outcome.posture.as_str()),
+        ("permit", "unavailable")
+    );
+    assert!(
+        last.outcome.reason.contains("did not answer in time"),
+        "{}",
+        last.outcome.reason
+    );
+    w.blobs.slow(None);
+    let landed = tokio::time::Instant::now() + Duration::from_secs(3);
+    while w.store().record(&id).unwrap().follow_ups.is_empty() {
+        assert!(
+            tokio::time::Instant::now() < landed,
+            "the late write never lands"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }

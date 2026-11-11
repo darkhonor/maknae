@@ -123,7 +123,8 @@ pub fn task_for(
                     | TaskRefusal::TooLong
                     | TaskRefusal::TaskerLive { .. }
                     | TaskRefusal::TaskerHeld
-                    | TaskRefusal::FollowUps => DenyCause::TaskNotWorking { cited: *id },
+                    | TaskRefusal::FollowUps
+                    | TaskRefusal::Unavailable(_) => DenyCause::TaskNotWorking { cited: *id },
                 })
         }
     }
@@ -217,6 +218,7 @@ fn task_reason(r: &TaskRefusal) -> &'static str {
         TaskRefusal::TaskerHeld => "task-tasker-held",
         TaskRefusal::FollowUps => "task-follow-ups",
         TaskRefusal::NotWorking => "task-not-working",
+        TaskRefusal::Unavailable(_) => "task-unavailable",
     }
 }
 
@@ -1429,6 +1431,7 @@ mod tests {
             (TaskRefusal::TaskerHeld, "task-tasker-held"),
             (TaskRefusal::FollowUps, "task-follow-ups"),
             (TaskRefusal::NotWorking, "task-not-working"),
+            (TaskRefusal::Unavailable("u".into()), "task-unavailable"),
         ] {
             assert_eq!(
                 cause_reason(&DenyCause::Task { refusal, cited }),

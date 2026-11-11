@@ -93,6 +93,9 @@ pub struct TaskRecord {
     pub close: Option<TaskClose>,
     pub pending: bool,
     pub seq: u64,
+    /// The tasker's own submission ordinal, the list cursor.
+    pub tseq: u64,
+    /// The tasker's own report ordinal, assigned when the report or the close lands.
     pub rseq: Option<u64>,
     pub submitted: i64,
     pub claimed: Option<i64>,
@@ -126,12 +129,38 @@ mod agent_id {
     }
 }
 
-/// The highest submission and report sequence ever issued.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// The highest values ever issued: the store-wide submission sequence, and each tasker's
+/// own submission and report ordinals, so no cursor a tasker sees counts another's tasks.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Counters {
     pub seq: u64,
+    pub taskers: std::collections::BTreeMap<String, Ordinals>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Ordinals {
+    pub seq: u64,
     pub rseq: u64,
+}
+
+impl Counters {
+    pub fn of(&self, tasker: &Tasker) -> Ordinals {
+        self.taskers
+            .get(&ordinal_key(tasker))
+            .copied()
+            .unwrap_or_default()
+    }
+}
+
+/// A tasker's key in [`Counters`]; an agent's includes its uid, as [`Tasker`] equality does.
+pub fn ordinal_key(tasker: &Tasker) -> String {
+    match tasker {
+        Tasker::Uid(uid) => format!("uid:{uid}"),
+        Tasker::Agent { agent, uid } => format!("agent:{agent}@{uid}"),
+        Tasker::Remote(id) => format!("remote:{id}"),
+    }
 }
 
 /// In memory only; `lease_until` is never persisted.
@@ -269,6 +298,7 @@ pub fn load(blobs: &dyn TaskBlobs) -> Result<Loaded, StoreError> {
     let mut records = Vec::new();
     let mut findings = Vec::new();
     let mut top = Counters::default();
+    let mut behind = false;
     for name in names {
         if name == COUNTERS {
             counters = Some(
@@ -287,7 +317,9 @@ pub fn load(blobs: &dyn TaskBlobs) -> Result<Loaded, StoreError> {
             }
         };
         top.seq = top.seq.max(rec.seq);
-        top.rseq = top.rseq.max(rec.rseq.unwrap_or(0));
+        let o = top.taskers.entry(ordinal_key(&rec.tasker)).or_default();
+        o.seq = o.seq.max(rec.tseq);
+        o.rseq = o.rseq.max(rec.rseq.unwrap_or(0));
         if rec.pending {
             findings.push(BootFinding::Discarded {
                 name,
@@ -311,7 +343,11 @@ pub fn load(blobs: &dyn TaskBlobs) -> Result<Loaded, StoreError> {
         }
         Some(None) => return Err(StoreError::Counters("cannot be read".into())),
     };
-    if counters.seq < top.seq || counters.rseq < top.rseq {
+    for (key, o) in &top.taskers {
+        let have = counters.taskers.get(key).copied().unwrap_or_default();
+        behind |= have.seq < o.seq || have.rseq < o.rseq;
+    }
+    if counters.seq < top.seq || behind {
         return Err(StoreError::Counters(
             "are behind a stored task's sequence".into(),
         ));
@@ -334,6 +370,7 @@ pub struct MemInner {
     map: std::sync::Mutex<std::collections::BTreeMap<String, Zeroizing<Vec<u8>>>>,
     aside: std::sync::Mutex<Vec<String>>,
     fail: std::sync::Mutex<Option<Fail>>,
+    slow: std::sync::Mutex<Option<Duration>>,
 }
 
 #[cfg(any(test, feature = "hermetic-test-seam"))]
@@ -361,6 +398,26 @@ impl MemTaskBlobs {
             .fail
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = fail;
+    }
+
+    /// Every record save and delete takes `by` first, as a stalled fsync would.
+    pub fn slow(&self, by: Option<Duration>) {
+        *self
+            .0
+            .slow
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = by;
+    }
+
+    fn stall(&self, name: &str) {
+        let by = *self
+            .0
+            .slow
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let (Some(by), false) = (by, name == COUNTERS) {
+            std::thread::sleep(by);
+        }
     }
 
     pub fn put(&self, name: &str, plain: &[u8]) {
@@ -426,12 +483,14 @@ impl TaskBlobs for MemTaskBlobs {
 
     fn save(&self, name: &str, plain: &[u8]) -> Result<(), StoreError> {
         self.refuse(name)?;
+        self.stall(name);
         self.put(name, plain);
         self.landed(name)
     }
 
     fn delete(&self, name: &str) -> Result<(), StoreError> {
         self.refuse(name)?;
+        self.stall(name);
         self.map().remove(name);
         self.landed(name)
     }

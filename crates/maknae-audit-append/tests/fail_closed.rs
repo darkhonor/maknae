@@ -26,6 +26,7 @@ fn sample_record() -> AuditRecord {
             agent: None,
             task_id: None,
             parent_task_id: None,
+            task_op: None,
             tasker: None,
         },
         action: "connect".into(),

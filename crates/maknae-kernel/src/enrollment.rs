@@ -13,6 +13,12 @@ pub trait EnrollmentView: Send + Sync {
 
 pub struct SnapshotEnrollment<B: Baseline>(pub Arc<Composition<B>>);
 
+impl<B: Baseline> Clone for SnapshotEnrollment<B> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
 impl<B: Baseline> EnrollmentView for SnapshotEnrollment<B> {
     fn agent_uid(&self, id: &AgentId) -> Option<u32> {
         self.0.baseline().snapshot().agent_uid(id.as_str())
@@ -24,6 +30,7 @@ impl<B: Baseline> EnrollmentView for SnapshotEnrollment<B> {
 }
 
 #[cfg(any(test, feature = "hermetic-test-seam"))]
+#[derive(Clone)]
 pub struct FixedEnrollment(pub std::collections::BTreeMap<AgentId, u32>);
 
 #[cfg(any(test, feature = "hermetic-test-seam"))]

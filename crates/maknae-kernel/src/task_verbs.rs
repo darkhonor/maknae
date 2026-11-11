@@ -1,6 +1,7 @@
 //! The tasker verbs' decision facts, views and pages (#628).
 use maknae_proto::{
-    TaskCursor, TaskId, TaskRef, TaskReportPage, TaskReportView, TaskState, TaskView, Tasker, Verb,
+    SecretText, TaskCursor, TaskId, TaskRef, TaskReportPage, TaskReportView, TaskState,
+    TaskSubmission, TaskView, Tasker, Verb,
 };
 use maknae_security::{AttrValue, Request};
 
@@ -52,32 +53,137 @@ pub(crate) fn caller(stamp: &Stamp<'_>, uid: u32) -> Tasker {
     }
 }
 
-/// The task a tasker verb names.
-pub(crate) fn cited(verb: &Verb) -> Option<TaskId> {
+/// A task verb's operands, read once from the wire verb.
+pub(crate) enum TaskVerb<'a> {
+    Submit(&'a TaskSubmission),
+    Add { task: TaskId, text: &'a SecretText },
+    Status(TaskId),
+    List { agent: &'a str, after: Option<u64> },
+    Stop(TaskId),
+    Drop(TaskId),
+    Collect { agent: &'a str, after: Option<u64> },
+    Claim,
+    Report,
+}
+
+pub(crate) fn task_verb(verb: &Verb) -> Option<TaskVerb<'_>> {
     match verb {
-        Verb::TaskAdd { task, .. }
-        | Verb::TaskStatus { task }
-        | Verb::TaskStop { task }
-        | Verb::TaskDrop { task } => Some(task.to_id()),
-        _ => None,
+        Verb::TaskSubmit { task } => Some(TaskVerb::Submit(task)),
+        Verb::TaskAdd { task, text } => Some(TaskVerb::Add {
+            task: task.to_id(),
+            text,
+        }),
+        Verb::TaskStatus { task } => Some(TaskVerb::Status(task.to_id())),
+        Verb::TaskList { agent, after } => Some(TaskVerb::List {
+            agent,
+            after: after.as_ref().map(TaskCursor::seq),
+        }),
+        Verb::TaskStop { task } => Some(TaskVerb::Stop(task.to_id())),
+        Verb::TaskDrop { task } => Some(TaskVerb::Drop(task.to_id())),
+        Verb::TaskCollect { agent, after } => Some(TaskVerb::Collect {
+            agent,
+            after: after.as_ref().map(TaskCursor::seq),
+        }),
+        Verb::TaskClaim { .. } => Some(TaskVerb::Claim),
+        Verb::TaskReport { .. } => Some(TaskVerb::Report),
+        Verb::Ping
+        | Verb::Whoami
+        | Verb::AdminStatus
+        | Verb::AdminConfigShow
+        | Verb::AdminAuditTail
+        | Verb::AdminPolicyReload
+        | Verb::AdminSubjectList
+        | Verb::AdminBaselineShow
+        | Verb::AdminBaselineAccept { .. }
+        | Verb::AdminSubjectBind
+        | Verb::AdminSubjectUnbind
+        | Verb::AdminContain { .. }
+        | Verb::AdminRelease { .. }
+        | Verb::AdminCredentialRotate
+        | Verb::AdminProviderList
+        | Verb::AdminProviderSet
+        | Verb::AdminProviderDisable
+        | Verb::AdminSessionList
+        | Verb::AdminSessionTerminate
+        | Verb::SessionNew { .. }
+        | Verb::SessionResume
+        | Verb::SessionClose { .. }
+        | Verb::SessionDelete { .. }
+        | Verb::SessionList { .. }
+        | Verb::SessionFork
+        | Verb::SessionPrompt { .. }
+        | Verb::SessionCancel
+        | Verb::SessionSetconfigoption
+        | Verb::SessionSetmode
+        | Verb::SessionLoad
+        | Verb::SessionUpdate
+        | Verb::SessionRequestpermission
+        | Verb::SessionElicitCreate
+        | Verb::SessionElicitComplete
+        | Verb::SessionCompact
+        | Verb::Read { .. }
+        | Verb::FsWrite { .. }
+        | Verb::FsDelete { .. }
+        | Verb::FsMove
+        | Verb::FsList { .. }
+        | Verb::FsStat { .. }
+        | Verb::FsMkdir { .. }
+        | Verb::FsLink
+        | Verb::FsChmod
+        | Verb::FsChown
+        | Verb::TerminalCreate
+        | Verb::TerminalOutput
+        | Verb::TerminalWaitforexit
+        | Verb::TerminalKill
+        | Verb::TerminalRelease
+        | Verb::TerminalInput
+        | Verb::McpConnect
+        | Verb::McpDisconnect
+        | Verb::McpMessage
+        | Verb::McpToolCall
+        | Verb::McpResourceRead
+        | Verb::McpPromptGet
+        | Verb::McpSamplingCreate => None,
     }
 }
 
-/// The agent a list or collect names.
-pub(crate) fn named_agent(verb: &Verb) -> Option<&str> {
-    match verb {
-        Verb::TaskList { agent, .. } | Verb::TaskCollect { agent, .. } => Some(agent),
-        _ => None,
+impl TaskVerb<'_> {
+    /// The task a tasker verb names.
+    pub(crate) fn cited(&self) -> Option<TaskId> {
+        match self {
+            TaskVerb::Add { task, .. }
+            | TaskVerb::Status(task)
+            | TaskVerb::Stop(task)
+            | TaskVerb::Drop(task) => Some(*task),
+            TaskVerb::Submit(_)
+            | TaskVerb::List { .. }
+            | TaskVerb::Collect { .. }
+            | TaskVerb::Claim
+            | TaskVerb::Report => None,
+        }
     }
-}
 
-/// The trail's object: the named task, or the agent a submission, list or collect names.
-pub(crate) fn object(verb: &Verb) -> Option<String> {
-    match (cited(verb), named_agent(verb), verb) {
-        (Some(id), _, _) => Some(format!("task:{id}")),
-        (None, Some(agent), _) => Some(format!("agent:{agent}")),
-        (None, None, Verb::TaskSubmit { task }) => Some(format!("agent:{}", task.agent)),
-        (None, None, _) => None,
+    /// The agent a submission, list or collect names.
+    pub(crate) fn named_agent(&self) -> Option<&str> {
+        match self {
+            TaskVerb::Submit(sub) => Some(&sub.agent),
+            TaskVerb::List { agent, .. } | TaskVerb::Collect { agent, .. } => Some(agent),
+            TaskVerb::Add { .. }
+            | TaskVerb::Status(_)
+            | TaskVerb::Stop(_)
+            | TaskVerb::Drop(_)
+            | TaskVerb::Claim
+            | TaskVerb::Report => None,
+        }
+    }
+
+    /// The trail's object: the named task, or the named agent.
+    pub(crate) fn object(&self) -> Option<String> {
+        match (self.cited(), self.named_agent()) {
+            (Some(id), _) => Some(format!("task:{id}")),
+            (None, Some(agent)) => Some(format!("agent:{agent}")),
+            (None, None) => None,
+        }
     }
 }
 
@@ -94,29 +200,21 @@ pub(crate) fn view(rec: &TaskRecord, hot: &Hot, now: i64) -> TaskView {
     }
 }
 
-fn report_view(rec: &TaskRecord) -> Option<TaskReportView> {
-    let (text, at) = rec.report.as_ref()?;
-    Some(TaskReportView {
-        task: TaskRef::from_id(&rec.signed.task.task_id),
-        agent: rec.agent.as_str().to_owned(),
-        close: rec.close,
-        text: text.clone(),
-        at_secs: *at,
-        cursor: TaskCursor::from_seq(rec.rseq?),
-    })
-}
-
 /// Reports in arrival order, as many as fit `budget` text bytes and the page count, and
-/// always the first; `next` is the last entry's cursor when more remain.
-pub(crate) fn report_page(records: &[TaskRecord], budget: usize) -> TaskReportPage {
-    let mut entries = Vec::new();
+/// always the first; only the entries that fit are copied. `next` is the last entry's
+/// cursor when more remain.
+pub(crate) fn report_page<'a>(
+    records: impl Iterator<Item = &'a TaskRecord>,
+    budget: usize,
+) -> TaskReportPage {
+    let mut entries: Vec<TaskReportView> = Vec::new();
     let mut used = 0usize;
     let mut more = false;
     for rec in records {
-        let Some(v) = report_view(rec) else {
+        let (Some((text, at)), Some(rseq)) = (rec.report.as_ref(), rec.rseq) else {
             continue;
         };
-        let size = v.text.0.len().saturating_add(REPORT_ENTRY_OVERHEAD);
+        let size = text.0.len().saturating_add(REPORT_ENTRY_OVERHEAD);
         if !entries.is_empty()
             && (entries.len() >= TASK_PAGE_MAX || used.saturating_add(size) > budget)
         {
@@ -124,10 +222,17 @@ pub(crate) fn report_page(records: &[TaskRecord], budget: usize) -> TaskReportPa
             break;
         }
         used = used.saturating_add(size);
-        entries.push(v);
+        entries.push(TaskReportView {
+            task: TaskRef::from_id(&rec.signed.task.task_id),
+            agent: rec.agent.as_str().to_owned(),
+            close: rec.close,
+            text: text.clone(),
+            at_secs: *at,
+            cursor: TaskCursor::from_seq(rseq),
+        });
     }
     let next = more
-        .then(|| entries.last().map(|e: &TaskReportView| e.cursor.clone()))
+        .then(|| entries.last().map(|e| e.cursor.clone()))
         .flatten();
     TaskReportPage { entries, next }
 }
@@ -161,6 +266,7 @@ mod tests {
             close: None,
             pending: false,
             seq,
+            tseq: seq,
             rseq,
             submitted: 100,
             claimed: None,
@@ -235,9 +341,10 @@ mod tests {
             Verb::TaskStop { task: r.clone() },
             Verb::TaskDrop { task: r.clone() },
         ] {
-            assert_eq!(cited(&verb), Some(id));
-            assert_eq!(named_agent(&verb), None);
-            assert_eq!(object(&verb), Some(format!("task:{id}")));
+            let tv = task_verb(&verb).unwrap();
+            assert_eq!(tv.cited(), Some(id));
+            assert_eq!(tv.named_agent(), None);
+            assert_eq!(tv.object(), Some(format!("task:{id}")));
         }
         for verb in [
             Verb::TaskList {
@@ -249,9 +356,10 @@ mod tests {
                 after: None,
             },
         ] {
-            assert_eq!(cited(&verb), None);
-            assert_eq!(named_agent(&verb), Some("suga"));
-            assert_eq!(object(&verb), Some("agent:suga".into()));
+            let tv = task_verb(&verb).unwrap();
+            assert_eq!(tv.cited(), None);
+            assert_eq!(tv.named_agent(), Some("suga"));
+            assert_eq!(tv.object(), Some("agent:suga".into()));
         }
         let sub = Verb::TaskSubmit {
             task: maknae_proto::TaskSubmission {
@@ -264,10 +372,60 @@ mod tests {
                 labels: maknae_proto::Labels {},
             },
         };
-        assert_eq!(object(&sub), Some("agent:jin".into()));
-        assert_eq!(cited(&Verb::Ping), None);
-        assert_eq!(named_agent(&Verb::Ping), None);
-        assert_eq!(object(&Verb::Ping), None);
+        assert_eq!(task_verb(&sub).unwrap().object(), Some("agent:jin".into()));
+        assert!(task_verb(&Verb::Ping).is_none());
+        for verb in [
+            Verb::TaskClaim {
+                seen_follow_ups: None,
+            },
+            Verb::TaskReport {
+                text: SecretText(Zeroizing::new("r".into())),
+            },
+        ] {
+            let tv = task_verb(&verb).unwrap();
+            assert!(matches!(tv, TaskVerb::Claim | TaskVerb::Report));
+            assert_eq!(
+                (tv.cited(), tv.named_agent(), tv.object()),
+                (None, None, None)
+            );
+        }
+        let listed = Verb::TaskList {
+            agent: "a".into(),
+            after: Some(TaskCursor::from_seq(4)),
+        };
+        assert!(matches!(
+            task_verb(&listed),
+            Some(TaskVerb::List { after: Some(4), .. })
+        ));
+    }
+
+    #[test]
+    fn a_maximal_report_entry_beyond_its_text_fits_the_overhead() {
+        let entry = TaskReportView {
+            task: TaskRef::from_id(&TaskId([0xff; 16])),
+            agent: "a".repeat(32),
+            close: Some(TaskClose::AgentLost),
+            text: SecretText(Zeroizing::new(String::new())),
+            at_secs: i64::MIN,
+            cursor: TaskCursor::from_seq(u64::MAX),
+        };
+        let page = |entries: Vec<TaskReportView>| {
+            maknae_proto::encode_response(&maknae_proto::Response {
+                protocol_version: maknae_proto::PROTOCOL_VERSION,
+                result: maknae_proto::RespResult::Ok(maknae_proto::Payload::TaskReports(
+                    TaskReportPage {
+                        entries,
+                        next: Some(TaskCursor::from_seq(u64::MAX)),
+                    },
+                )),
+            })
+            .unwrap()
+            .len()
+        };
+        let one = page(vec![entry.clone()]) - page(Vec::new());
+        let two = page(vec![entry.clone(), entry]) - page(Vec::new());
+        assert!(one <= REPORT_ENTRY_OVERHEAD, "{one}");
+        assert!(two <= 2 * REPORT_ENTRY_OVERHEAD, "{two}");
     }
 
     #[test]
@@ -304,20 +462,20 @@ mod tests {
             rec(2, None, ""),
             rec(3, Some(6), "bb"),
         ];
-        let p = report_page(&recs, 0);
+        let p = report_page(recs.iter(), 0);
         assert_eq!(p.entries.len(), 1);
         assert_eq!(p.entries[0].cursor, TaskCursor::from_seq(5));
         assert_eq!(p.next, Some(TaskCursor::from_seq(5)));
         let fits = 4 + 2 + 2 * REPORT_ENTRY_OVERHEAD;
-        let p = report_page(&recs, fits);
+        let p = report_page(recs.iter(), fits);
         assert_eq!(p.entries.len(), 2);
         assert_eq!(p.next, None);
         assert_eq!(p.entries[1].at_secs, 150);
-        let p = report_page(&recs, fits - 1);
+        let p = report_page(recs.iter(), fits - 1);
         assert_eq!(p.entries.len(), 1);
-        assert!(report_page(&[], 10).entries.is_empty());
+        assert!(report_page([].iter(), 10).entries.is_empty());
         let many: Vec<TaskRecord> = (1..=40).map(|i| rec(i, Some(i), "")).collect();
-        let p = report_page(&many, usize::MAX);
+        let p = report_page(many.iter(), usize::MAX);
         assert_eq!(p.entries.len(), TASK_PAGE_MAX);
         assert_eq!(p.next, Some(TaskCursor::from_seq(TASK_PAGE_MAX as u64)));
     }

@@ -673,6 +673,7 @@ pub(crate) fn make_record(
             agent: None,
             task_id: None,
             parent_task_id: None,
+            task_op: None,
             tasker: None,
         },
         action: action.to_string(),
@@ -1278,22 +1279,11 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             seq,
             au3_1: &au3_1,
         };
-        let home = crate::authz::admitted_home(peer_uid, peer_dir).await.ok();
-        let by = match &session.channel {
-            SessionChannel::Client => crate::task::Submitter::User {
-                uid: peer_uid,
-                home,
-            },
-            SessionChannel::Agent { agent, .. } => crate::task::Submitter::Agent {
-                agent: agent.clone(),
-                uid: peer_uid,
-                home,
-                under: request.task,
-            },
-        };
         let tasks = TaskCtx {
             agents: &agents,
-            by,
+            channel_agent: session.agent().cloned(),
+            under: request.task,
+            peer_dir,
             caller: crate::task_verbs::caller(&stamp, peer_uid),
             text_max: cfg.prompt_max_bytes,
         };
@@ -3202,10 +3192,17 @@ async fn serve_conversation_verb<S, E, P>(
     }
 }
 
-/// Who submits on this channel, and how the tasker verbs reach the store and the signer.
+type StoreChange = Box<
+    dyn FnOnce(&crate::task::TaskStore) -> Result<maknae_proto::TaskView, crate::task::TaskRefusal>
+        + Send,
+>;
+
+/// Who calls on this channel, and how the tasker verbs reach the store and the signer.
 struct TaskCtx<'a> {
     agents: &'a AgentAdmission,
-    by: crate::task::Submitter,
+    channel_agent: Option<maknae_config::AgentId>,
+    under: Option<maknae_proto::TaskId>,
+    peer_dir: Option<std::path::PathBuf>,
     caller: maknae_proto::Tasker,
     text_max: usize,
 }
@@ -3227,15 +3224,43 @@ async fn serve_task_verb<S, E, P>(
     P: Authorizer + Send + Sync + 'static,
 {
     use crate::task::TaskRefusal;
-    use crate::task_verbs as tv;
+    use crate::task_verbs::{self as tv, TaskVerb};
     let action = verb_to_action(verb);
-    let op = crate::handler::task_op(verb).unwrap_or("none");
+    let op = crate::handler::task_op(verb);
     let store = &tasks.agents.tasks;
     let caller = &tasks.caller;
-    let object = tv::object(verb);
-    let cited = tv::cited(verb);
+    let Some(asked) = tv::task_verb(verb) else {
+        let rec = trail.record(action, "deny", "not a task verb", "unauthorized");
+        trail.unauthorized(stream, &rec).await;
+        return;
+    };
+    let object = asked.object();
+    let cited = asked.cited();
+    let stamped = |mut rec: AuditRecord| {
+        rec.object.clone_from(&object);
+        rec.subject.task_id = cited.map(|id| id.to_string());
+        rec.subject.task_op = op.map(str::to_owned);
+        rec.subject.tasker = Some(maknae_proto::tasker_text(caller));
+        rec.subject.agent = tasks.channel_agent.as_ref().map(|a| a.as_str().to_owned());
+        rec
+    };
 
-    if let Verb::TaskSubmit { task } = verb {
+    if let TaskVerb::Submit(task) = asked {
+        let home = crate::authz::admitted_home(trail.uid, tasks.peer_dir.clone())
+            .await
+            .ok();
+        let by = match &tasks.channel_agent {
+            None => crate::task::Submitter::User {
+                uid: trail.uid,
+                home,
+            },
+            Some(agent) => crate::task::Submitter::Agent {
+                agent: agent.clone(),
+                uid: trail.uid,
+                home,
+                under: tasks.under,
+            },
+        };
         let where_ = WhereCtx {
             host: trail.host.to_owned(),
             socket: trail.socket.to_owned(),
@@ -3254,10 +3279,10 @@ async fn serve_task_verb<S, E, P>(
         let submitted = crate::task::submit_task(
             Arc::clone(authorizer),
             store,
-            &*tasks.agents.signer,
-            &*tasks.agents.view,
+            &tasks.agents.signer,
+            &tasks.agents.view,
             &ctx,
-            tasks.by,
+            by,
             task.clone(),
             &**trail.emit,
         )
@@ -3266,18 +3291,24 @@ async fn serve_task_verb<S, E, P>(
             Ok(signed) => {
                 let id = signed.task.task_id;
                 let mut outcome =
-                    trail.record(action, "permit", "submit: task queued", "authorized");
+                    stamped(trail.record(action, "permit", "task queued", "authorized"));
                 outcome.object = Some(format!("task:{id}"));
                 outcome.subject.task_id = Some(id.to_string());
-                match store.view_for(&id, caller) {
-                    Some((rec, hot)) => {
-                        let payload = Payload::TaskAccepted(tv::view(&rec, &hot, store.now()));
+                match store.status(&id, caller) {
+                    Some(view) => {
                         trail
-                            .deliver(stream, &outcome, payload, None, None, action)
+                            .deliver(
+                                stream,
+                                &outcome,
+                                Payload::TaskAccepted(view),
+                                None,
+                                None,
+                                action,
+                            )
                             .await;
                     }
                     None => {
-                        outcome.outcome.reason = "submit: task gone before the answer".into();
+                        outcome.outcome.reason = "task gone before the answer".into();
                         trail.unauthorized(stream, &outcome).await;
                     }
                 }
@@ -3302,17 +3333,15 @@ async fn serve_task_verb<S, E, P>(
     if let Some(id) = &cited {
         tv::stamp_task(&mut sec_req, store.state_for(id, caller));
     }
-    if let Some(agent) = tv::named_agent(verb) {
+    if let Some(agent) = asked.named_agent() {
         tv::stamp_agent(&mut sec_req, agent);
     }
     let (verdict, role, rule) =
         decide_bounded(authorizer, live, sec_req, generation, timeout).await;
     let decided = |result: &str, reason: &str, posture: &str| {
-        let mut rec = trail.record(action, result, &format!("{op}: {reason}"), posture);
+        let mut rec = stamped(trail.record(action, result, reason, posture));
         rec.subject.role = role.map(str::to_string);
         rec.rule = rule.as_ref().map(rule_audit);
-        rec.object.clone_from(&object);
-        rec.subject.task_id = cited.map(|id| id.to_string());
         rec
     };
     match finalize(verdict) {
@@ -3332,28 +3361,33 @@ async fn serve_task_verb<S, E, P>(
             }
         }
     }
-    let agent = tv::named_agent(verb).map(maknae_config::AgentId::parse);
+    let deadline = tokio::time::Instant::now() + timeout;
     let refused = |intent: &AuditRecord, r: &TaskRefusal| {
-        trail.outcome(intent, &format!("{op}: {r}"), "unauthorized")
+        let posture = if matches!(r, TaskRefusal::Unavailable(_)) {
+            "unavailable"
+        } else {
+            "unauthorized"
+        };
+        trail.outcome(intent, &r.to_string(), posture)
     };
-    let acknowledged = |intent: &AuditRecord,
-                        done: Result<
-        (crate::task_store::TaskRecord, crate::task_store::Hot),
-        TaskRefusal,
-    >| match done {
-        Ok((rec, hot)) => (
-            trail.outcome(intent, &format!("{op}: done"), "authorized"),
-            Some(Payload::TaskAcknowledged(tv::view(&rec, &hot, store.now()))),
-        ),
-        Err(r) => (refused(intent, &r), None),
+    let named = asked.named_agent().map(maknae_config::AgentId::parse);
+    let mutate = |change: StoreChange| {
+        let s = Arc::clone(store);
+        crate::task::offload(trail.uid, deadline, move || change(&s))
     };
-    match (verb, cited, agent) {
-        (Verb::TaskStatus { .. }, Some(id), _) => match store.view_for(&id, caller) {
-            Some((rec, hot)) => {
+    match asked {
+        TaskVerb::Status(id) => match store.status(&id, caller) {
+            Some(view) => {
                 let outcome = decided("permit", "status", "authorized");
-                let payload = Payload::TaskState(tv::view(&rec, &hot, store.now()));
                 trail
-                    .deliver(stream, &outcome, payload, role, rule.as_ref(), action)
+                    .deliver(
+                        stream,
+                        &outcome,
+                        Payload::TaskState(view),
+                        role,
+                        rule.as_ref(),
+                        action,
+                    )
                     .await;
             }
             None => {
@@ -3362,28 +3396,7 @@ async fn serve_task_verb<S, E, P>(
                     .await;
             }
         },
-        (Verb::TaskList { after, .. }, _, Some(Ok(agent))) => {
-            let (entries, next) = store.list(
-                caller,
-                &agent,
-                after.as_ref().map(maknae_proto::TaskCursor::seq),
-                tv::TASK_PAGE_MAX,
-            );
-            let now = store.now();
-            let outcome = decided(
-                "permit",
-                &format!("listed {} tasks", entries.len()),
-                "authorized",
-            );
-            let payload = Payload::TaskList(maknae_proto::TaskPage {
-                entries: entries.iter().map(|(r, h)| tv::view(r, h, now)).collect(),
-                next: next.map(maknae_proto::TaskCursor::from_seq),
-            });
-            trail
-                .deliver(stream, &outcome, payload, role, rule.as_ref(), action)
-                .await;
-        }
-        (Verb::TaskAdd { text, .. }, Some(id), _) => {
+        TaskVerb::Add { task, text } => {
             if text.0.len() > tasks.text_max {
                 let r = TaskRefusal::TooLong;
                 trail
@@ -3395,58 +3408,115 @@ async fn serve_task_verb<S, E, P>(
             if !trail.record_bounded(&intent).await {
                 return;
             }
-            let done = store.follow_up(&id, caller, text.clone(), tasks.text_max);
-            match acknowledged(&intent, done) {
-                (outcome, Some(payload)) => {
-                    trail
-                        .deliver(stream, &outcome, payload, role, rule.as_ref(), action)
-                        .await
-                }
-                (outcome, None) => trail.unauthorized(stream, &outcome).await,
-            }
+            let (who, text, max) = (caller.clone(), text.clone(), tasks.text_max);
+            let done = mutate(Box::new(move |s| s.follow_up(&task, &who, text, max))).await;
+            acknowledge_task(
+                stream,
+                trail,
+                &intent,
+                done,
+                refused,
+                (role, rule.as_ref(), action),
+            )
+            .await;
         }
-        (Verb::TaskStop { .. } | Verb::TaskDrop { .. }, Some(id), _) => {
+        TaskVerb::Stop(task) => {
             let intent = decided("permit", "intent recorded", "authorized");
             if !trail.record_bounded(&intent).await {
                 return;
             }
-            let done = match verb {
-                Verb::TaskStop { .. } => store.stop(&id, caller),
-                _ => store.drop_queued(&id, caller),
-            };
-            match acknowledged(&intent, done) {
-                (outcome, Some(payload)) => {
-                    trail
-                        .deliver(stream, &outcome, payload, role, rule.as_ref(), action)
-                        .await
-                }
-                (outcome, None) => trail.unauthorized(stream, &outcome).await,
-            }
+            let who = caller.clone();
+            let done = mutate(Box::new(move |s| s.stop(&task, &who))).await;
+            acknowledge_task(
+                stream,
+                trail,
+                &intent,
+                done,
+                refused,
+                (role, rule.as_ref(), action),
+            )
+            .await;
         }
-        (Verb::TaskCollect { after, .. }, _, Some(Ok(agent))) => {
+        TaskVerb::Drop(task) => {
+            let intent = decided("permit", "intent recorded", "authorized");
+            if !trail.record_bounded(&intent).await {
+                return;
+            }
+            let who = caller.clone();
+            let done = mutate(Box::new(move |s| s.drop_queued(&task, &who))).await;
+            acknowledge_task(
+                stream,
+                trail,
+                &intent,
+                done,
+                refused,
+                (role, rule.as_ref(), action),
+            )
+            .await;
+        }
+        TaskVerb::List { after, .. } => {
+            let Some(Ok(agent)) = named else {
+                trail
+                    .unauthorized(
+                        stream,
+                        &decided("deny", "agent name not an agent id", "unauthorized"),
+                    )
+                    .await;
+                return;
+            };
+            let (entries, next) = store.list(caller, &agent, after, tv::TASK_PAGE_MAX);
+            let outcome = decided(
+                "permit",
+                &format!("listed {} tasks", entries.len()),
+                "authorized",
+            );
+            let payload = Payload::TaskList(maknae_proto::TaskPage {
+                entries,
+                next: next.map(maknae_proto::TaskCursor::from_seq),
+            });
+            trail
+                .deliver(stream, &outcome, payload, role, rule.as_ref(), action)
+                .await;
+        }
+        TaskVerb::Collect { after, .. } => {
+            let Some(Ok(agent)) = named else {
+                trail
+                    .unauthorized(
+                        stream,
+                        &decided("deny", "agent name not an agent id", "unauthorized"),
+                    )
+                    .await;
+                return;
+            };
             let mut intent = None;
             if let Some(upto) = after {
                 let rec = decided(
                     "permit",
-                    &format!("acknowledge through {}; intent recorded", upto.seq()),
+                    &format!("acknowledge through {upto}; intent recorded"),
                     "authorized",
                 );
                 if !trail.record_bounded(&rec).await {
                     return;
                 }
-                if let Err(r) = store.acknowledge(caller, &agent, upto.seq()) {
+                let (s, who, a) = (Arc::clone(store), caller.clone(), agent.clone());
+                let acked = crate::task::offload(trail.uid, deadline, move || {
+                    s.acknowledge(&who, &a, upto)
+                })
+                .await;
+                if let Err(r) = acked {
                     trail.unauthorized(stream, &refused(&rec, &r)).await;
                     return;
                 }
                 intent = Some(rec);
             }
-            let page = tv::report_page(
-                &store.reports(caller, &agent),
+            let page = store.reports(
+                caller,
+                &agent,
                 maknae_proto::prompt_request_cap(tasks.text_max),
             );
             let reason = format!("collected {} reports", page.entries.len());
             let outcome = match &intent {
-                Some(i) => trail.outcome(i, &format!("{op}: {reason}"), "authorized"),
+                Some(i) => trail.outcome(i, &reason, "authorized"),
                 None => decided("permit", &reason, "authorized"),
             };
             trail
@@ -3460,7 +3530,7 @@ async fn serve_task_verb<S, E, P>(
                 )
                 .await;
         }
-        _ => {
+        TaskVerb::Submit(_) | TaskVerb::Claim | TaskVerb::Report => {
             trail
                 .unauthorized(
                     stream,
@@ -3468,6 +3538,36 @@ async fn serve_task_verb<S, E, P>(
                 )
                 .await;
         }
+    }
+}
+
+/// The outcome of a tasker verb that changes the store, then the answer.
+async fn acknowledge_task<S, E>(
+    stream: &mut S,
+    trail: &Trail<'_, E>,
+    intent: &AuditRecord,
+    done: Result<maknae_proto::TaskView, crate::task::TaskRefusal>,
+    refused: impl Fn(&AuditRecord, &crate::task::TaskRefusal) -> AuditRecord,
+    (role, rule, action): (Option<&'static str>, Option<&RuleCitation>, &str),
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    E: AuditEmit + Send + Sync,
+{
+    match done {
+        Ok(view) => {
+            let outcome = trail.outcome(intent, "done", "authorized");
+            trail
+                .deliver(
+                    stream,
+                    &outcome,
+                    Payload::TaskAcknowledged(view),
+                    role,
+                    rule,
+                    action,
+                )
+                .await;
+        }
+        Err(r) => trail.unauthorized(stream, &refused(intent, &r)).await,
     }
 }
 

@@ -129,7 +129,7 @@ fn macos_summary(
     outcome: Scrubbed<'_>,
     subject: Scrubbed<'_>,
     role: Scrubbed<'_>,
-    task: [(&str, Option<Scrubbed<'_>>); 4],
+    task: [(&str, Option<Scrubbed<'_>>); 5],
     session_id: u64,
     seq: u64,
 ) -> String {
@@ -179,6 +179,7 @@ pub(crate) fn format_line_unchecked(
         ("task", rec.subject.task_id.as_deref().map(scrub)),
         ("parent", rec.subject.parent_task_id.as_deref().map(scrub)),
         ("tasker", rec.subject.tasker.as_deref().map(scrub)),
+        ("op", rec.subject.task_op.as_deref().map(scrub)),
     ];
     line.push_str(&macos_summary(
         action,
@@ -666,6 +667,9 @@ mod tests {
     /// `host`, `socket`, `object` and `au3_1` are unbounded by design, so no
     /// sample is "the widest legal width" — the pathological case is here so
     /// the degraded arm is always exercised.
+    const MEASURED_TASKER_LINE: usize = 858;
+    const MEASURED_WIDEST_TASK_LINE: usize = 1229;
+
     fn widest_shapes() -> Vec<(String, crate::record::AuditRecord)> {
         let mut out = Vec::new();
         for (label, status, reply, result, reason, posture) in [
@@ -776,7 +780,50 @@ mod tests {
             })
             .collect();
         out.push(("sent with 17 refused tool calls".into(), refused));
+        out.push(("widest session.task".into(), widest_task()));
         out
+    }
+
+    /// The widest `session.task` record the kernel writes (#628): every task field at
+    /// its bound, the longest op, an agent-channel tasker.
+    fn widest_task() -> crate::record::AuditRecord {
+        let mut r = rec("acknowledge through 18446744073709551615; intent recorded");
+        r.action = "session.task".into();
+        r.object = Some(format!("task:{}", "0f".repeat(16)));
+        r.subject.user = Some("u".repeat(32));
+        r.subject.role = Some("adversary".into());
+        r.subject.agent = Some("a".repeat(32));
+        r.subject.task_id = Some("0f".repeat(16));
+        r.subject.parent_task_id = Some("a0".repeat(16));
+        r.subject.tasker = Some(format!("agent:{}", "b".repeat(32)));
+        r.subject.task_op = Some("collect".into());
+        r
+    }
+
+    /// MEASURED 2026-11-11 (#628, with `task_op`): a person's tasker-verb record
+    /// (`aackerman`, `user`, task, `uid:1000`, `status`) is 858 bytes and mirrors in
+    /// full; the widest task record is 1229 bytes and degrades.
+    #[test]
+    fn a_tasker_record_mirrors_in_full_and_the_widest_degrades() {
+        let mut r = rec("permit");
+        r.action = "session.task".into();
+        r.object = Some(format!("task:{}", "0f".repeat(16)));
+        r.subject.user = Some("aackerman".into());
+        r.subject.role = Some("user".into());
+        r.subject.task_id = Some("0f".repeat(16));
+        r.subject.tasker = Some("uid:1000".into());
+        r.subject.task_op = Some("status".into());
+        let full = format_line_unchecked(&r, PrimaryOutcome::Ok).unwrap();
+        assert_eq!(full.len(), MEASURED_TASKER_LINE, "{full}");
+        assert!(format_record(&r, PrimaryOutcome::Ok)
+            .unwrap()
+            .into_full()
+            .is_some());
+        let wide = format_line_unchecked(&widest_task(), PrimaryOutcome::Ok).unwrap();
+        assert_eq!(wide.len(), MEASURED_WIDEST_TASK_LINE);
+        assert!(format_record(&widest_task(), PrimaryOutcome::Ok)
+            .unwrap()
+            .is_degraded());
     }
 
     /// Built LITERALLY. It CANNOT be shared: `journal.rs`'s and
@@ -807,6 +854,7 @@ mod tests {
                 agent: None,
                 task_id: None,
                 parent_task_id: None,
+                task_op: None,
                 tasker: None,
             },
             action: "fs.read".into(),
@@ -894,12 +942,13 @@ mod tests {
         r.subject.task_id = Some("0f".repeat(16));
         r.subject.tasker = Some("agent:jin".into());
         r.subject.parent_task_id = Some("a0".repeat(16));
+        r.subject.task_op = Some("collect".into());
         let s = format_record(&r, PrimaryOutcome::Ok)
             .unwrap()
             .into_full()
             .unwrap();
         let want = format!(
-            "maknae audit: fs.read deny subject=alice role=none agent=hobi task={} parent={} tasker=agent:jin session=7 seq=3 ",
+            "maknae audit: fs.read deny subject=alice role=none agent=hobi task={} parent={} tasker=agent:jin op=collect session=7 seq=3 ",
             "0f".repeat(16),
             "a0".repeat(16)
         );
@@ -909,7 +958,7 @@ mod tests {
             .unwrap()
             .into_full()
             .unwrap();
-        assert!(s.contains(" tasker=invalid session=7"), "{s}");
+        assert!(s.contains(" tasker=invalid op=collect session=7"), "{s}");
         assert!(!s[..s.find("MAKNAE_RECORD=").unwrap()].contains("MAKNAE_OUTCOME=permit"));
     }
 
