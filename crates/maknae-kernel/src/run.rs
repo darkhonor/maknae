@@ -8202,6 +8202,10 @@ async fn close_due<E: AuditEmit>(
     while stopped.is_none() {
         let mut recorded = Vec::new();
         for due in tasks.due(TASK_CLOSE_BATCH) {
+            if tokio::time::Instant::now() >= deadline {
+                stopped = Some("the pass ran out of time".into());
+                break;
+            }
             let rec = task_due_record(ctx, &due);
             match due.recorded {
                 true => {}
@@ -23635,6 +23639,30 @@ mod task_sweep_tests {
             open, [true; 4],
             "each task was open when its close was recorded"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pass_past_its_deadline_records_nothing_more_and_closes_nothing_more() {
+        let (_blobs, _clock, store) = mem(1_000);
+        let id = working(&store, "hobi", Tasker::Uid(1000));
+        store.mark_unenrolled(&nobody());
+        let (seq, au) = (Seq::new(), serde_json::json!({}));
+        let trail = Trail::new(0);
+        let swept = close_due(
+            &store,
+            &*trail,
+            &ctx(&seq, &au),
+            tokio::time::Instant::now(),
+        )
+        .await;
+        assert_eq!(swept.remaining, 1);
+        assert_eq!(swept.stopped.as_deref(), Some("the pass ran out of time"));
+        assert!(
+            trail.recs().is_empty(),
+            "no record once the deadline has passed"
+        );
+        assert_eq!(store.record(&id).unwrap().state, TaskState::Working);
+        assert!(!store.due(8)[0].recorded);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

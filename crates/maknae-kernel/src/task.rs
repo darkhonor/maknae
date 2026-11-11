@@ -23,6 +23,7 @@ pub const MAX_HELD_REPORTS_PER_TASKER: usize = 256;
 pub const MAX_FOLLOW_UPS_PER_TASK: usize = 32;
 const RETRY_FIRST_SECS: u32 = 1;
 const RETRY_MAX_SECS: u32 = 60;
+const MOVED: &str = "not done: the queue changed during the claim";
 
 /// Why a task is due an act of the kernel's own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -220,8 +221,10 @@ struct Held {
     stuck: Option<TaskId>,
     /// Open tasks no agent may be handed or act on any more, each with the close it is due.
     closing: BTreeMap<TaskId, TaskClose>,
-    /// Marked tasks whose close this process has already been told is recorded.
-    recorded: BTreeSet<TaskId>,
+    /// Marked tasks whose close the kernel has recorded, each with the variant recorded.
+    recorded: BTreeMap<TaskId, TaskClose>,
+    /// The submission sequence of the close the disk last refused; `due` starts after it.
+    refused_close: Option<u64>,
     /// The report ordinal issued for a close whose record is not yet durable.
     ordinals: BTreeMap<TaskId, u64>,
     /// Agents whose exposed records the next writer retries whatever the drain's order.
@@ -668,7 +671,11 @@ impl TaskStore {
         let held = self.held();
         let why = |id: &TaskId, r: &TaskRecord| {
             let lapsed = || held.hot.get(id).is_none_or(|h| h.lease_until < now);
-            match (held.closing.get(id), r.state, &r.report) {
+            match (
+                held.recorded.get(id).or(held.closing.get(id)),
+                r.state,
+                &r.report,
+            ) {
                 _ if r.pending => None,
                 (Some(close), TaskState::Queued | TaskState::Working, _) => {
                     Some(DueFor::Close(*close))
@@ -689,12 +696,14 @@ impl TaskStore {
                     tasker: r.tasker.clone(),
                     parent: r.parent,
                     why: why(id, r)?,
-                    recorded: held.recorded.contains(id),
+                    recorded: held.recorded.contains_key(id),
                 };
                 Some((r.seq, due))
             })
             .collect();
         due.sort_by_key(|(seq, _)| *seq);
+        let first = due.partition_point(|(seq, _)| Some(*seq) <= held.refused_close);
+        due.rotate_left(first);
         due.into_iter().take(limit).map(|(_, d)| d).collect()
     }
 
@@ -728,8 +737,8 @@ impl TaskStore {
                         .is_some_and(|(_, at)| now.saturating_sub(*at) >= hold),
                 };
                 if let (true, DueFor::Close(close)) = (still, d.why) {
-                    held.closing.entry(d.task).or_insert(close);
-                    held.recorded.insert(d.task);
+                    held.closing.insert(d.task, close);
+                    held.recorded.insert(d.task, close);
                 }
                 still
             };
@@ -758,7 +767,7 @@ impl TaskStore {
     fn close_durably(&self, id: &TaskId) -> bool {
         let (prior, close, issued, hot) = {
             let held = self.held();
-            let (Some(prior), Some(close)) = (held.live(id).cloned(), held.closing.get(id)) else {
+            let (Some(prior), Some(close)) = (held.live(id).cloned(), held.recorded.get(id)) else {
                 return true;
             };
             let hot = held.hot.get(id).copied().unwrap_or_default();
@@ -780,12 +789,16 @@ impl TaskStore {
         let mut held = self.held();
         match written {
             Ok(next) => {
+                if held.refused_close == Some(next.seq) {
+                    held.refused_close = None;
+                }
                 held.tasks.insert(*id, next);
                 held.unmark(id);
                 held.proven(id);
                 true
             }
             Err(why) => {
+                held.refused_close = Some(prior.seq);
                 held.owe(id, format!("the close is not stored: {why}"));
                 false
             }
@@ -1142,6 +1155,7 @@ impl TaskStore {
         if let Some(hot) = held.hot.get_mut(&id) {
             match &handed {
                 Ok(_) => (hot.retry_after, hot.retry_secs) = (0, 0),
+                Err(TaskRefusal::Unavailable(why)) if why == MOVED => {}
                 Err(TaskRefusal::Store(_) | TaskRefusal::Unavailable(_)) => {
                     hot.retry_secs = (hot.retry_secs * 2).clamp(RETRY_FIRST_SECS, RETRY_MAX_SECS);
                     hot.retry_after = now + i64::from(hot.retry_secs);
@@ -1162,8 +1176,7 @@ impl TaskStore {
     ) -> Result<Claimed, TaskRefusal> {
         let id = *id;
         self.resign_if_stale(&id, agent, uid, signer)?;
-        let moved =
-            || TaskRefusal::Unavailable("not done: the queue changed during the claim".into());
+        let moved = || TaskRefusal::Unavailable(MOVED.into());
         let lease = self.clock.now_secs() + CLAIM_LEASE.as_secs() as i64;
         let delivered = |rec: &TaskRecord| Claimed::Delivered {
             signed: rec.signed.clone(),
@@ -4220,6 +4233,95 @@ mod tests {
         };
         assert_eq!(store.perform(&[early]), 0, "its hold has not run out");
         assert!(store.record(&reported).is_some());
+    }
+
+    #[test]
+    fn the_close_stored_is_the_one_recorded_though_the_mark_changed_since() {
+        let (blobs, clock, store) = clocked();
+        let task = held_by(&store, Tasker::Uid(1000));
+        store.start_for_test(&task);
+        clock.set(1_001 + CLAIM_LEASE.as_secs() as i64);
+        let recorded = store.due(8);
+        assert_eq!(recorded[0].why, DueFor::Close(TaskClose::AgentLost));
+        store.held().unenroll(&id("hobi"), |_| true);
+        assert_eq!(store.perform(&recorded), 1);
+        assert_eq!(closed(&store, &task), Some(TaskClose::AgentLost));
+
+        let again = held_by(&store, Tasker::Uid(1000));
+        store.start_for_test(&again);
+        clock.set(2_002 + 2 * CLAIM_LEASE.as_secs() as i64);
+        blobs.fail(Some(crate::task_store::Fail::Records));
+        assert_eq!(closes_of(&store.sweep()), [TaskClose::AgentLost]);
+        store.held().unenroll(&id("hobi"), |_| true);
+        assert_eq!(
+            closes_of(&store.due(8)),
+            [TaskClose::AgentLost],
+            "still due as it was recorded"
+        );
+        blobs.fail(None);
+        assert!(store.sweep().is_empty(), "and not recorded again");
+        assert_eq!(closed(&store, &again), Some(TaskClose::AgentLost));
+        assert_eq!(closed(&reopen(&blobs), &again), Some(TaskClose::AgentLost));
+    }
+
+    fn closes_of(due: &[Due]) -> Vec<TaskClose> {
+        due.iter()
+            .filter_map(|d| match d.why {
+                DueFor::Close(close) => Some(close),
+                DueFor::Expiry => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_close_the_disk_keeps_refusing_does_not_hold_back_a_newer_one() {
+        let (blobs, store) = mem();
+        let stuck = held_by(&store, Tasker::Uid(1000));
+        let newer = held_by(&store, Tasker::Uid(1000));
+        store.held().unenroll(&id("hobi"), |_| true);
+        blobs.stick(Some(name_of(&stuck)));
+        let due = store.due(8);
+        assert_eq!([due[0].task, due[1].task], [stuck, newer]);
+        assert_eq!(store.perform(&due), 0, "one refusal ends the pass");
+        let due = store.due(8);
+        assert_eq!(
+            [due[0].task, due[1].task],
+            [newer, stuck],
+            "the next pass starts after the refused close"
+        );
+        assert_eq!(store.due(1)[0].task, newer);
+        assert_eq!(store.perform(&due), 1);
+        assert_eq!(closed(&store, &newer), Some(TaskClose::AgentGone));
+        assert_eq!(closed(&store, &stuck), None);
+        blobs.stick(None);
+        assert_eq!(store.perform(&store.due(8)), 1);
+        assert_eq!(closed(&store, &stuck), Some(TaskClose::AgentGone));
+        assert_eq!(store.held().refused_close, None);
+    }
+
+    #[test]
+    fn a_queue_that_changes_during_a_claim_sets_no_back_off() {
+        let (_blobs, store) = mem();
+        let hobi = id("hobi");
+        let signing = LeafSigner::new(PlaneKey::EcdsaP384Sha384);
+        let mut task = TaskObject::for_test("hobi", 1000);
+        task.tasker = Tasker::Uid(1000);
+        let task = store
+            .insert_for_test(signing.sign(task).unwrap(), HOBI)
+            .task
+            .task_id;
+        let other = held_by(&store, Tasker::Uid(1000));
+        signing.rotate();
+        let racing = DuringSign {
+            inner: &signing,
+            during: Box::new(|| store.start_for_test(&other)),
+        };
+        assert_eq!(
+            store.claim(&hobi, HOBI, &racing),
+            Err(TaskRefusal::Unavailable(MOVED.into()))
+        );
+        let hot = store.hot(&task).unwrap();
+        assert_eq!((hot.retry_after, hot.retry_secs), (0, 0));
     }
 
     #[test]
