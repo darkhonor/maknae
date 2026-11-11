@@ -1547,7 +1547,7 @@ An Agent Daemon runs under its own service account, one per agent, and reaches `
        - "session.prompt"
    ```
 
-   Add `taskers:` to say who may task it, for example `taskers: ["alice", "agent:jin"]`; another agent may task it only when listed here. Tasking is refused on the wire until task delivery is built (#610); `taskers:` takes effect then.
+   Add `taskers:` to say who may task it, for example `taskers: ["alice", "agent:jin"]`; another agent may task it only when listed here. `maknaed` decides and serves tasking; the CLI that sends a task is #630 and the agent process that works one is #629 ([Tasks](#tasks)).
 
 6. **Reload `maknaed`** ([Reload the policy](#reload-the-policy)), then confirm:
 
@@ -1564,7 +1564,71 @@ An Agent Daemon runs under its own service account, one per agent, and reaches `
    sudo maknae enroll remove-agent hobi
    ```
 
-   It removes `enrollment.yaml`, disables the Vault entity, destroys the SecretIDs and removes the sealed SecretID. Then reload: until a reload succeeds, the agent stays admitted. After it, the agent's next request is refused, its tasks are dropped, and the account is an ordinary account again. `policy.yaml` and the directory stay; delete them by hand if you will not re-enroll. When the command fails, run it again before deleting the directory; it still completes once the directory is gone. A login token the agent already holds stays valid until `agent_token_max_ttl`, refused only while the entity stays disabled. When the role and the entity were both already absent, nothing is disabled, and a held token lives until `agent_token_max_ttl`. Re-enrolling re-enables the entity, and such a token works again until `agent_token_max_ttl`.
+   It removes `enrollment.yaml`, disables the Vault entity, destroys the SecretIDs and removes the sealed SecretID. Then reload: until a reload succeeds, the agent stays admitted. After it, the agent's next request is refused, each of its open tasks is closed `agent-gone` for its tasker to collect, and the account is an ordinary account again. `policy.yaml` and the directory stay; delete them by hand if you will not re-enroll. When the command fails, run it again before deleting the directory; it still completes once the directory is gone. A login token the agent already holds stays valid until `agent_token_max_ttl`, refused only while the entity stays disabled. When the role and the entity were both already absent, nothing is disabled, and a held token lives until `agent_token_max_ttl`. Re-enrolling re-enables the entity, and such a token works again until `agent_token_max_ttl`.
+
+## Tasks
+
+A person or another agent gives an enrolled agent a task with `session.task`; `maknaed` decides it, signs it, stores it and hands it to the agent when the agent claims. Tasks are kept on disk, sealed, in `STATE_DIR/tasks` ([configuration §2.6](configuration.md#26-tasks-628)), so a restart keeps every queued, working and reported task. The CLI that sends tasks is #630 and the agent process that claims them is #629; until they land, nothing on a host sends these verbs.
+
+A task is `queued` until the agent claims it, then `working`. The agent's report makes it `reported`; a stop, or a close by the kernel, makes it `closed`. The tasker collects reports and closes, and a collected one is removed. A report or close nobody collects expires after 30 days.
+
+The kernel closes a task itself in two cases, and keeps the closed record for the tasker:
+
+- **`agent-gone`:** the agent was de-enrolled, or its account's uid changed. The tasks are marked at the reload that installs the change, so the agent is refused them from then on, and are closed by the reload's own pass or the next sweep.
+- **`agent-lost`:** a working task's lease lapsed. The lease is 15 minutes, renewed by each request that cites the task and each heartbeat. At start every working task's lease begins again.
+
+### What the trail shows
+
+Every task verb is `action: session.task`. A request record names its operation in `subject.task_op` and its tasker in `subject.tasker`; an agent's also carries `subject.agent`, and a record about one task carries `subject.task_id` and `object: task:<hex>`.
+
+| Operation | Records | Reasons |
+|---|---|---|
+| `submit` | `task stored` (the decision, `object: agent:<id>`), then `task queued` (`object: task:<hex>`) | a refusal names its cause, for example `the tasker holds 32 live tasks with agent hobi` |
+| `add`, `stop`, `drop` | `intent recorded`, then `done` or the refusal | |
+| `status`, `list` | one | `listed <n> tasks` for a list |
+| `collect` | with a cursor, `acknowledge through <n>; intent recorded`, then `collected <n> reports`; without one, only the second | |
+| `claim` with nothing to hand out | one | `idle` |
+| `claim` that hands out a task | `intent recorded`, then `delivered` | |
+| heartbeat (`claim` with `seen_follow_ups`) | one | `heartbeat: <n> follow-ups after <m>`, `heartbeat: the task is closed` or `idle` |
+| `report` | `intent recorded`, then `done` or the refusal | |
+
+A refused store step after a permit keeps `result: permit`, the decision, and carries the cause with posture `unavailable` or `unauthorized`. The client is told only `not authorized`.
+
+The kernel's own records are `event: task`, written by the boot, a reload or the sweeper, which runs at start, every 60 seconds and once more at stop:
+
+| Reason | `result` | Meaning | What to do |
+|---|---|---|---|
+| `closed:agent-gone` | `deny` | The task is about to be closed because its agent is gone. | Nothing; the tasker collects the close. |
+| `closed:agent-lost` | `deny` | The task is about to be closed because its lease lapsed. | Check the agent process; it stopped claiming or citing. |
+| `expired` | `deny` | A report or close nobody collected in 30 days is about to be removed. | Nothing. |
+| `store: owed to a later store write: <why>` | `deny` | The disk did not prove a removal, rewrite or close. Every later store write retries it. | See below. |
+| `store: the owed write landed` | `permit` | That retry succeeded. | Nothing. |
+| `store: an unconfirmed record stays on disk until the next start: <why>` | `deny` | An unconfirmed record could not be unlinked. The next start discards it. | Nothing, unless the disk is failing. |
+| `task stored after the submission was answered`, `not stored after the submission was answered: <why>` | `permit`, `deny` | A submission that timed out was settled later. The tasker was told "not authorized"; this says what happened. | Tell the tasker, if they asked. |
+| `store: <n> task closes remain due: <why>` | `deny` | A pass ran out of time or the disk refused; the next sweep carries on. | See below. |
+| `store: <n> task closes remain for the sweep; no agent is handed those tasks: <why>` | `deny` | Boot's bounded pass did not finish its closes. Start goes on; the sweep finishes them. | Nothing, unless it repeats. |
+| `store: the action counters were not stored: <why>` | `deny` | The sweep could not store the per-task action counts; a crash loses at most a minute of them. | See below. |
+| `store: the final task sweep was aborted at shutdown` | `deny` | The last sweep did not finish within 3 seconds. | Nothing; the next start sweeps. |
+
+A close or an expiry is recorded before it happens. After a crash between the two, the next start records it again, so a task can have two close records. A task whose lease was renewed, or which its tasker stopped, between the record and the close keeps its record and stays open. Boot's own findings are `event: boot`: `task discarded at boot: its submission was never audited` and `task record quarantined at boot: <why>`. A quarantined record is left in `STATE_DIR/tasks` as `<id>.task.quarantine`; it is never read again.
+
+```bash
+sudo jq -c 'select(.action=="session.task") | {ts, event, op: .subject.task_op, tasker: .subject.tasker, agent: .subject.agent, task: .subject.task_id, result: .outcome.result, reason: .outcome.reason}' /var/log/maknae/audit.jsonl | tail -n 20
+```
+
+### Poll cadence and trail volume
+
+An agent polls `maknaed` (#629): with `TaskClaim` every 5 seconds while it has nothing, and with a heartbeat at least every 5 minutes (a third of the lease) while it works. Each idle poll is one `idle` record, so an idle agent writes 17,280 records a day; at about 1 KB a record that is some 17 MB a day per agent. A working agent adds one heartbeat record each poll, beside the records of the requests it makes. A task costs two records to submit, two to hand out, two to report and one or two to collect. Size the trail's rotation ([Rotate, restore or recreate the trail](#rotate-restore-or-recreate-the-trail)) for the number of agents you enroll.
+
+### When the store refuses a hand-out
+
+When the store refuses the write that hands a task out, or cannot prove it, the agent is told "not authorized" and the task stays queued. That task is then held back from the agent's claims for 1 second, doubling at each further failure to 60 seconds; meanwhile the agent's claims are answered `idle`, with no signature and no write, and the next queued task is not handed out in its place. A hand-out that succeeds ends the hold.
+
+### When the disk misbehaves
+
+The kernel gives a definite answer only when the disk durably agrees. When a write lands but its sync fails, or a removal cannot be proven, the request is answered `not authorized` and recorded `outcome unknown: <cause>`: the change may stand or not. The store keeps the step owed and retries it before every later store write, recording `store: owed…` when it is left and `store: the owed write landed` when it settles. A `not done: <cause>` record means nothing was written. A tasker who sees a refusal should check `status` or `list` before submitting again, because an "outcome unknown" submission may have been stored.
+
+If owed records accumulate, check the state directory's filesystem (space, read-only remount, I/O errors in the kernel log). They settle on their own once writes succeed. A restart while records are owed can bring back a record whose removal was owed: a dropped task, or a report already collected, which the tasker then sees again.
 
 ## Session checks
 

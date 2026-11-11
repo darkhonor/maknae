@@ -238,3 +238,33 @@ Dated as-built amendment; rides the #275 PR. Four statements.
 ## Amendment (2026-11-06, #114) — `plane_uri_san` is `null` on the certless client channel
 
 The `source` and `subject` rows of decision 1 ("peer plane URI-SAN") read: present for a certified channel, `null` on the certless client channel, whose class is identified by `where.socket` (each channel class has its own socket). The client channel presents no client certificate (ADR-0006 decision 10), so the field is `null` on every record from that channel, connection denies included. *(Corrected 2026-11-06: this said "including connection denies that never reached the peer-certificate check"; the certless client channel has no peer-certificate check.)* The field was already optional and was already `null` on records for a rejection before the certificate was read; no schema change.
+
+## Amendment (2026-11-11, #628) — task records
+
+Dated as-built amendment; rides the #628 PR. Five statements.
+
+**1. The task verbs' request records name the operation and the tasker.** Every task verb is decided and recorded as `action: session.task`, `event: request`. Its records carry `subject.task_op` (`submit`, `add`, `status`, `list`, `stop`, `drop`, `collect`, `claim` or `report`) and `subject.tasker`, and on the agent channel `subject.agent`. A record about one task carries `subject.task_id` and `object: task:<hex>`. A submission's decision record names its target, `object: agent:<id>`, with `subject.parent_task_id` for a sub-task; its outcome, `task queued`, names the new task. `list` and `collect` name `object: agent:<id>`. A verb that changes the store writes an intent (`intent recorded`) before the change and an outcome after it; `status`, `list`, an idle claim and a heartbeat write one record. The operation is a structured field, not a reason prefix, so a query on it needs no parsing.
+
+**2. The kernel's own task records are `event: task`.** They are written outside any request, by the boot, a reload or the 60-second sweeper, each in its own session and sequence, under `action: session.task`:
+
+| Reason | `result` / `posture` | When |
+|---|---|---|
+| `closed:agent-gone` | `deny` / `unavailable` | an open task of an agent that is no longer enrolled, or whose uid changed, is about to be closed |
+| `closed:agent-lost` | `deny` / `unavailable` | a working task whose lease lapsed is about to be closed |
+| `expired` | `deny` / `unavailable` | a held report or close past its 30 days is about to be removed |
+| `store: owed to a later store write: <why>` | `deny` / `unavailable` | a removal, rewrite or close the disk did not prove is left for later store writes |
+| `store: the owed write landed` | `permit` / `authorized` | that write later landed |
+| `store: an unconfirmed record stays on disk until the next start: <why>` | `deny` / `unavailable` | a pending record could not be unlinked; the next boot discards it |
+| `task stored after the submission was answered` | `permit` / `authorized` | a confirm the submission stopped waiting for landed; `subject.task_op: submit` |
+| `not stored after the submission was answered: <why>` | `deny` / `unavailable` | that confirm failed; `subject.task_op: submit` |
+| `store: <n> task closes remain due: <why>` | `deny` / `unavailable` | a pass ended with closes still due |
+| `store: <n> task closes remain for the sweep; no agent is handed those tasks: <why>` | `deny` / `unavailable` | boot's bounded pass ended with closes still due |
+| `store: the action counters were not stored: <why>`, `store: the trail refused a task store record`, `store: the final task sweep was aborted at shutdown` | `deny` / `unavailable` | as they say |
+
+A close or expiry record carries `object: task:<hex>`, `subject.task_id`, `subject.parent_task_id` and `subject.tasker`, and its `source.uid` is the tasker's uid (`NO_PEER_UID` for a remote tasker); it does not name the agent, and joins to the submission by `task_id`. A `store:` record's `source.uid` is the kernel's. Boot's own findings are `event: boot`: `task discarded at boot: its submission was never audited` (object `agent:<id>`) and `task record quarantined at boot: <why>` (object `task-record:<name>`), both `deny` / `unauthorized`. Notices the trail refuses are kept and recorded at the next sweep. Stderr carries only a task-store failure whose own record the trail refused.
+
+**3. The close record is at least once.** A kernel close and an expiry are recorded before the store performs them, and a refused record leaves the task open ([ADR-0033](ADR-0033-agent-identity-admission-and-tasks.md), amendment 2026-11-11). A crash between the record and the close records the close again at the next boot, and a task that stops being due after its record (its lease renewed, or its tasker stopped it) keeps a close record for a close that never happened. Within one process a close is recorded once. No close happens without a record.
+
+**4. "Outcome unknown" and "not done" are distinct.** A task-store step the kernel cannot prove is recorded `outcome unknown: <cause>`, posture `unavailable`: the change may stand or not, and a later store write settles it. `not done: <cause>` means nothing was written and nothing will be, for example `not done: the task store was busy`. A submission the store definitely refused before it was kept is `not stored: <cause>`, followed by whether its record was withdrawn. The wire answer for all three is `Unauthorized`; only the trail tells them apart.
+
+**5. macOS sizes.** A person's task-verb record mirrors in full at 858 bytes. The widest task record (a 32-byte user, agent and agent tasker, task and parent ids, `collect`) is 1229 bytes and mirrors as the degraded marker of the 2026-09-10 amendment, as the widest `session.prompt` records already do. The summary line adds `op=<op>` after `tasker=`. The JSONL has the whole record on both platforms.
