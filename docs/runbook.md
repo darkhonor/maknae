@@ -1588,7 +1588,7 @@ Every task verb is `action: session.task`. A request record names its operation 
 
 | Operation | Records | Reasons |
 |---|---|---|
-| `submit` | `task stored` (the decision, `object: agent:<id>`), then `task queued` (`object: task:<hex>`) | a refusal names its cause, for example `the tasker holds 32 live tasks with agent hobi` |
+| `submit` | `task stored` (the decision, `object: agent:<id>`), then `task queued` (`object: task:<hex>`). When the tasker, the root of the chain or the agent was contained while the task was being stored: `task stored`, then `task held: …` (`deny`, written by the submission as `event: request`), then `task held` | a refusal names its cause, for example `the tasker holds 32 live tasks with agent hobi` |
 | `add`, `stop`, `drop` | `intent recorded`, then `done` or the refusal | |
 | `status`, `list` | one | `listed <n> tasks` for a list |
 | `collect` | with a cursor, `acknowledge through <n>; intent recorded`, then `acknowledged <n>: <ids>; collected <n> reports: <ids>`; without one, `collected <n> reports: <ids>`. Each list names at most 32 task ids, then `and <n> more` | |

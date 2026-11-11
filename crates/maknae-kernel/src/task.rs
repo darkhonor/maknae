@@ -372,6 +372,20 @@ impl Held {
     }
 
     /// Out of memory; a record the disk may read confirmed becomes exposed.
+    /// [`Held::take_back`], unless the task is held or due a hold: read and taken in one
+    /// section, so a hold marked a moment earlier is never missed. False when it is left.
+    fn take_back_unless_held(&mut self, id: &TaskId) -> bool {
+        let held = self.holding.contains_key(id)
+            || self
+                .tasks
+                .get(id)
+                .is_some_and(|r| r.state == TaskState::Held);
+        if !held {
+            self.take_back(id);
+        }
+        !held
+    }
+
     fn take_back(&mut self, id: &TaskId) {
         self.hot.remove(id);
         if let Some(rec) = self.tasks.remove(id).filter(|r| !r.pending) {
@@ -870,13 +884,13 @@ impl TaskStore {
                     disk = self.hold_durably(&d.task);
                     done += usize::from(disk);
                 }
-                (true, DueFor::Expiry, true) => {
-                    disk = self.withdraw_locked(&d.task);
-                    done += 1;
-                }
-                (true, DueFor::Expiry, false) => {
-                    self.held().take_back(&d.task);
-                    done += 1;
+                (true, DueFor::Expiry, on_disk) => {
+                    if self.held().take_back_unless_held(&d.task) {
+                        done += 1;
+                        if on_disk {
+                            disk = self.withdraw_locked(&d.task);
+                        }
+                    }
                 }
             }
         }
@@ -1564,12 +1578,17 @@ impl TaskStore {
                 .collect()
         };
         let mut proven = true;
-        for id in &gone {
-            match proven {
-                true => proven = self.withdraw_locked(id),
-                false => self.held().take_back(id),
+        let mut taken = Vec::with_capacity(gone.len());
+        for id in gone {
+            if !self.held().take_back_unless_held(&id) {
+                continue;
+            }
+            taken.push(id);
+            if proven {
+                proven = self.withdraw_locked(&id);
             }
         }
+        let gone = taken;
         match self.held().exposed.values().any(acked) {
             false => Ok(gone),
             true => Err(TaskRefusal::Unavailable(
@@ -1785,6 +1804,9 @@ impl TaskStore {
             }
             self.view_of(&held, rec)
         };
+        if !self.held().take_back_unless_held(id) {
+            return Err(TaskRefusal::Finished);
+        }
         if !self.withdraw_locked(id) {
             return Err(drop_owed());
         }

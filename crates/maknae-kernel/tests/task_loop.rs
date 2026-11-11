@@ -369,13 +369,13 @@ impl World {
         }
     }
 
-    async fn serve(
+    async fn serve<E: maknae_audit_append::AuditEmit + Send + Sync + 'static>(
         &self,
         session: maknae_kernel::SessionRecord,
         gate: Arc<maknae_kernel::FactsGate>,
         verb: Verb,
         task: Option<TaskId>,
-        records: &Arc<Records>,
+        records: &Arc<E>,
         dir: Option<&std::path::Path>,
     ) -> Vec<u8> {
         use tokio::io::AsyncReadExt;
@@ -2805,4 +2805,109 @@ async fn a_tasker_whose_name_did_not_resolve_keeps_the_queued_task_until_it_reso
         vec![(queued, TaskClose::Withdrawn)],
         "every bound name resolved, and the tasker holds no role: withdrawn"
     );
+}
+
+#[tokio::test]
+async fn an_acknowledgement_leaves_a_report_that_is_held_while_it_runs() {
+    let w = world("ack-held", "user", true);
+    let first = w.mine("hobi");
+    let second = w.mine("hobi");
+    w.report(&first, "r1");
+    w.report(&second, "r2");
+    let me = Tasker::Uid(w.me);
+    let (store, view) = (Arc::clone(&w.agents.tasks), containing(&w, &[w.me]));
+    w.blobs.after_save(move || store.mark_unenrolled(&view));
+    let gone = w.store().acknowledged(&me, &hobi(), 2).unwrap();
+    assert_eq!(gone.len(), 1, "only the report taken before the hold");
+    let left = if gone[0] == first { second } else { first };
+    assert!(w.store().record(&gone[0]).is_none());
+    assert_eq!(
+        w.store().record(&left).unwrap().state,
+        TaskState::Reported,
+        "held mid-way: left in place"
+    );
+    assert_eq!(holds(&w.store().close_all_due()), vec![left]);
+    assert_eq!(w.store().record(&left).unwrap().state, TaskState::Held);
+}
+
+#[tokio::test]
+async fn an_expiry_pass_leaves_a_report_that_is_held_while_it_runs() {
+    let w = world("expiry-held", "user", true);
+    let first = w.mine("hobi");
+    let second = w.mine("hobi");
+    w.report(&first, "r1");
+    w.report(&second, "r2");
+    w.clock.set(T0 + REPORT_HOLD.as_secs() as i64);
+    let due = w.store().due(8);
+    assert_eq!(due.len(), 2);
+    let (store, view) = (Arc::clone(&w.agents.tasks), containing(&w, &[w.me]));
+    w.blobs.after_save(move || store.mark_unenrolled(&view));
+    assert_eq!(w.store().perform(&due), 1);
+    assert!(w.store().record(&first).is_none());
+    assert_eq!(
+        w.store().record(&second).unwrap().state,
+        TaskState::Reported
+    );
+    assert_eq!(holds(&w.store().close_all_due()), vec![second]);
+}
+
+/// Contains the tasker while the submission's `task stored` record is appended.
+struct ContainsOnStored {
+    inner: Arc<Records>,
+    store: Arc<TaskStore>,
+    view: maknae_kernel::Containing<FixedEnrollment>,
+}
+
+impl maknae_audit_append::AuditEmit for ContainsOnStored {
+    fn emit(
+        &self,
+        record: &maknae_audit_append::AuditRecord,
+    ) -> impl std::future::Future<Output = Result<(), maknae_audit_append::AuditError>> + Send {
+        if record.outcome.reason == "task stored" {
+            self.store.mark_unenrolled(&self.view);
+        }
+        self.inner.emit(record)
+    }
+}
+
+#[tokio::test]
+async fn a_submission_held_at_its_confirm_is_recorded_and_answered_as_held() {
+    let w = world("submit-held", "user", true);
+    let records = Records::new(0);
+    let emit = Arc::new(ContainsOnStored {
+        inner: Arc::clone(&records),
+        store: Arc::clone(&w.agents.tasks),
+        view: containing(&w, &[w.me]),
+    });
+    let session =
+        maknae_kernel::SessionRecord::for_test(w.me, Some(w.user.clone())).with_session_id(628);
+    let gate =
+        maknae_kernel::FactsGate::allow_as(Some(w.user.clone()), Some(PathBuf::from(&*w.root)));
+    let raw = {
+        let _shared = STORE.read().await;
+        w.serve(session, gate, submit("hobi", "a"), None, &emit, None)
+            .await
+    };
+    let mut cursor = &raw[..];
+    let frame = common::read_frame(&mut cursor, 1 << 20).await.unwrap();
+    let view = match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Ok(Payload::TaskAccepted(v)) => v,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(view.state, TaskState::Held);
+    assert_eq!(
+        reasons(&records),
+        vec![
+            "permit task stored",
+            "deny task held: tasker contained",
+            "permit task held"
+        ],
+        "the trail never calls a held submission queued"
+    );
+    let id = view.task.to_id();
+    assert!(task_records(&records)
+        .iter()
+        .all(|r| r.subject.task_id == Some(id.to_string())));
+    assert!(w.claim("hobi").await.is_none());
+    assert_eq!(w.store().record(&id).unwrap().state, TaskState::Held);
 }

@@ -3294,12 +3294,22 @@ async fn serve_task_verb<S, E, P>(
         match submitted {
             Ok(signed) => {
                 let id = signed.task.task_id;
-                let mut outcome =
-                    stamped(trail.record(action, "permit", "task queued", "authorized"));
+                let shown = store.status(&id, caller);
+                let said = match shown.as_ref().map(|v| v.state) {
+                    Some(maknae_proto::TaskState::Held) => "task held",
+                    Some(
+                        maknae_proto::TaskState::Queued
+                        | maknae_proto::TaskState::Working
+                        | maknae_proto::TaskState::Reported
+                        | maknae_proto::TaskState::Closed,
+                    )
+                    | None => "task queued",
+                };
+                let mut outcome = stamped(trail.record(action, "permit", said, "authorized"));
                 outcome.object = Some(format!("task:{id}"));
                 outcome.subject.task_id = Some(id.to_string());
                 outcome.subject.parent_task_id = signed.task.parent.map(|p| p.to_string());
-                match store.status(&id, caller) {
+                match shown {
                     Some(view) => {
                         trail
                             .deliver(
