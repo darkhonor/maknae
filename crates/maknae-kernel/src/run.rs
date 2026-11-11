@@ -3617,6 +3617,34 @@ async fn serve_task_verb<S, E, P>(
                     .await;
                 return;
             }
+            if let Some((id, maknae_proto::TaskState::Queued)) = store.next_for(&agent, trail.uid) {
+                let standing =
+                    tasker_standing(store, &tasks.agents.view, authorizer, &id, lane, timeout)
+                        .await;
+                let said = match standing {
+                    Standing::Stands => None,
+                    Standing::Undecided => Some((None, "idle".to_string())),
+                    Standing::Withdrawn { tasker, why } => {
+                        store.withdraw_authority(&id);
+                        Some((
+                            Some(tasker),
+                            format!("idle: the tasker's authority was withdrawn: {why}"),
+                        ))
+                    }
+                };
+                if let Some((tasker, reason)) = said {
+                    let mut rec = decided("permit", &reason, "authorized");
+                    rec.subject.tasker = None;
+                    let rec = match &tasker {
+                        Some(t) => of(rec, &id, t),
+                        None => rec,
+                    };
+                    trail
+                        .deliver(stream, &rec, Payload::TaskIdle, role, rule.as_ref(), action)
+                        .await;
+                    return;
+                }
+            }
             let mut intent = decided("permit", "intent recorded", "authorized");
             intent.subject.tasker = None;
             if !trail.record_bounded(&intent).await {
@@ -3719,6 +3747,79 @@ async fn serve_task_verb<S, E, P>(
                 )
                 .await;
         }
+    }
+}
+
+/// Whether a queued task's tasker may still task its agent, under the policy in force.
+enum Standing {
+    Stands,
+    /// No decision was reached, or the tasker is contained and its tasks are held.
+    Undecided,
+    Withdrawn {
+        tasker: maknae_proto::Tasker,
+        why: String,
+    },
+}
+
+/// Decides the tasker's submission again, on the submit arm, before a queued task is
+/// handed out. Only a decided refusal withdraws; a decision that could not be made does not.
+async fn tasker_standing<P: Authorizer + Send + Sync + 'static>(
+    store: &crate::task::TaskStore,
+    view: &Arc<dyn crate::enrollment::EnrollmentView>,
+    authorizer: &Arc<P>,
+    id: &maknae_proto::TaskId,
+    lane: maknae_security::Lane,
+    timeout: Duration,
+) -> Standing {
+    use maknae_proto::Tasker;
+    let Some((tasker, target)) = store.tasker_of(id) else {
+        return Standing::Undecided;
+    };
+    let (uid, by) = match &tasker {
+        Tasker::Uid(uid) => (*uid, None),
+        Tasker::Agent { agent, uid } => match maknae_config::AgentId::parse(agent) {
+            Ok(agent) => (*uid, Some(agent)),
+            Err(_) => return Standing::Undecided,
+        },
+        Tasker::Remote(_) => return Standing::Undecided,
+    };
+    if view.contained(uid) {
+        return Standing::Undecided;
+    }
+    let stamp = match &by {
+        None => Stamp::Client,
+        Some(agent) => Stamp::Agent { agent, task: None },
+    };
+    let verb = Verb::TaskSubmit {
+        task: maknae_proto::TaskSubmission {
+            schema: maknae_proto::TASK_SCHEMA.into(),
+            version: maknae_proto::TASK_VERSION,
+            agent: target.as_str().to_owned(),
+            ask: maknae_proto::Ask::Prompt {
+                prompt: maknae_proto::SecretText(String::new().into()),
+            },
+            labels: maknae_proto::Labels {},
+        },
+    };
+    let mut req = build_authz_request(&verb, uid, None, lane, None, None, &stamp);
+    crate::task_verbs::stamp_agent(&mut req, target.as_str());
+    let pdp = Arc::clone(authorizer);
+    let decided = admit_blocking(
+        &authz_decide_breaker(),
+        timeout,
+        "authorization decision",
+        move || guarded_decide_cited(&*pdp, &req).verdict,
+    )
+    .await;
+    match decided {
+        Err(_) | Ok(maknae_security::Verdict::Indeterminate) => Standing::Undecided,
+        Ok(verdict) => match finalize(combine(vec![verdict])) {
+            Decision::Permit { .. } => Standing::Stands,
+            Decision::Deny { reason } => Standing::Withdrawn {
+                tasker,
+                why: reason,
+            },
+        },
     }
 }
 
@@ -8095,6 +8196,7 @@ fn task_due_record(ctx: &BootCtx<'_>, due: &crate::task::Due) -> AuditRecord {
         DueFor::Close(TaskClose::Dropped) => "closed:dropped",
         DueFor::Close(TaskClose::AgentGone) => "closed:agent-gone",
         DueFor::Close(TaskClose::AgentLost) => "closed:agent-lost",
+        DueFor::Close(TaskClose::Withdrawn) => "closed:withdrawn",
         DueFor::Expiry => "expired",
         DueFor::Hold => "task held: contained",
     };
@@ -23469,6 +23571,7 @@ mod task_sweep_tests {
         for (close, reason) in [
             (TaskClose::AgentGone, "closed:agent-gone"),
             (TaskClose::AgentLost, "closed:agent-lost"),
+            (TaskClose::Withdrawn, "closed:withdrawn"),
             (TaskClose::Stopped, "closed:stopped"),
             (TaskClose::Dropped, "closed:dropped"),
         ] {

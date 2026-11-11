@@ -89,6 +89,15 @@ mod tests {
         assert_eq!(view.agent_uid(&id("jin")), None);
         assert!(view.is_enrolled(2001));
         assert!(!view.is_enrolled(2002));
+        assert!(!view.contained(2001));
+    }
+
+    #[test]
+    fn the_containing_view_adds_only_who_is_contained() {
+        let view = Containing(FixedEnrollment([(id("hobi"), 2001)].into()), [1000].into());
+        assert_eq!(view.agent_uid(&id("hobi")), Some(2001));
+        assert!(view.is_enrolled(2001) && !view.is_enrolled(1000));
+        assert!(view.contained(1000) && !view.contained(2001));
     }
 
     #[test]
@@ -108,6 +117,7 @@ mod tests {
         let view = SnapshotEnrollment(pdp);
         assert_eq!(view.agent_uid(&id("hobi")), None);
         assert!(!view.is_enrolled(nix::unistd::geteuid().as_raw()));
+        assert!(!view.contained(nix::unistd::geteuid().as_raw()));
     }
 
     #[test]

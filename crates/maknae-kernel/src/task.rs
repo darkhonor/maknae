@@ -780,7 +780,10 @@ impl TaskStore {
                     }
                     (
                         DueFor::Close(
-                            TaskClose::AgentGone | TaskClose::Stopped | TaskClose::Dropped,
+                            TaskClose::AgentGone
+                            | TaskClose::Stopped
+                            | TaskClose::Dropped
+                            | TaskClose::Withdrawn,
                         ),
                         None,
                     ) => false,
@@ -1218,6 +1221,23 @@ impl TaskStore {
         self.write(&next, Some(&prior))?;
         self.held().tasks.insert(*id, next.clone());
         Ok(next)
+    }
+
+    /// Who gave the stored task `id`, and to which agent.
+    pub fn tasker_of(&self, id: &TaskId) -> Option<(Tasker, AgentId)> {
+        self.held()
+            .live(id)
+            .map(|r| (r.tasker.clone(), r.agent.clone()))
+    }
+
+    /// Marks the queued task `id` due a close as `Withdrawn`: its tasker may no longer
+    /// task the agent. It is not handed out from here on.
+    pub fn withdraw_authority(&self, id: &TaskId) {
+        let mut held = self.held();
+        let queued = held.live(id).is_some_and(|r| r.state == TaskState::Queued);
+        if queued && !held.holding.contains(id) {
+            held.closing.entry(*id).or_insert(TaskClose::Withdrawn);
+        }
     }
 
     /// Whether `agent` holds a working task under `uid`, marked or not.
@@ -4432,6 +4452,38 @@ mod tests {
         ));
         store.held().hold_contained(|_| true);
         assert!(store.due(8).is_empty(), "a held task is held once");
+    }
+
+    #[test]
+    fn only_a_queued_task_not_due_a_hold_is_marked_withdrawn() {
+        let (_blobs, store) = mem();
+        let me = Tasker::Uid(1000);
+        let queued = held_by(&store, me.clone());
+        let working = held_by(&store, me.clone());
+        let holding = held_by(&store, Tasker::Uid(1001));
+        store.start_for_test(&working);
+        store.held().hold_contained(|uid| uid == 1001);
+        assert_eq!(store.tasker_of(&queued), Some((me, id("hobi"))));
+        assert_eq!(store.tasker_of(&TaskId([9; 16])), None);
+        for task in [queued, working, holding, TaskId([9; 16])] {
+            store.withdraw_authority(&task);
+        }
+        assert_eq!(
+            store
+                .held()
+                .closing
+                .iter()
+                .map(|(t, c)| (*t, *c))
+                .collect::<Vec<_>>(),
+            [(queued, TaskClose::Withdrawn)]
+        );
+        assert_eq!(
+            store.next_for(&id("hobi"), HOBI),
+            Some((working, TaskState::Working))
+        );
+        store.close_all_due();
+        assert_eq!(closed(&store, &queued), Some(TaskClose::Withdrawn));
+        assert_eq!(store.record(&holding).unwrap().state, TaskState::Held);
     }
 
     #[test]

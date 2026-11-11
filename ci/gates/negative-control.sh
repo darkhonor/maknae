@@ -1134,6 +1134,7 @@ pub enum TaskClose {
     Dropped,
     AgentGone,
     AgentLost,
+    Withdrawn,
 }
 
 pub struct TaskView {

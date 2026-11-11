@@ -345,6 +345,8 @@ pub enum TaskClose {
     Dropped,
     AgentGone,
     AgentLost,
+    /// Its tasker lost the authority to task the agent before it was handed out.
+    Withdrawn,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]

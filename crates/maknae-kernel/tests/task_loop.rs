@@ -36,6 +36,15 @@ struct World {
     cfg: maknae_config::TransportConfig,
 }
 
+/// The uid of `nobody`, whom every test world binds to `user`.
+fn another() -> u32 {
+    nix::unistd::User::from_name("nobody")
+        .expect("NSS")
+        .expect("the host has a nobody account")
+        .uid
+        .as_raw()
+}
+
 fn secret(s: &str) -> SecretText {
     SecretText(Zeroizing::new(s.into()))
 }
@@ -123,7 +132,14 @@ fn world_with(tag: &str, role: &str, grant: bool, hobi: &str, suga: &str) -> Wor
     let user = common::euid_name();
     common::write_0640(
         &paths.bindings,
-        &format!("schema_version: 1\nbindings:\n  {role}: [\"{user}\"]\n"),
+        &match role {
+            "user" => {
+                format!("schema_version: 1\nbindings:\n  user: [\"{user}\", \"nobody\"]\n")
+            }
+            _ => format!(
+                "schema_version: 1\nbindings:\n  {role}: [\"{user}\"]\n  user: [\"nobody\"]\n"
+            ),
+        },
     );
     let agents_dir = root.join(maknae_config::AGENTS_DIR);
     std::fs::create_dir_all(&agents_dir).unwrap();
@@ -455,6 +471,12 @@ impl World {
     fn mine(&self, agent: &str) -> TaskId {
         let uid = if agent == "hobi" { HOBI_UID } else { SUGA_UID };
         self.insert(agent, uid, Tasker::Uid(self.me))
+    }
+
+    /// A task from another person who holds the `user` role, as a hand-out requires.
+    fn anothers(&self, agent: &str) -> TaskId {
+        let uid = if agent == "hobi" { HOBI_UID } else { SUGA_UID };
+        self.insert(agent, uid, Tasker::Uid(another()))
     }
 
     fn theirs(&self, agent: &str) -> TaskId {
@@ -1126,13 +1148,13 @@ async fn a_store_that_does_not_answer_in_time_is_refused_as_unavailable() {
 #[tokio::test]
 async fn an_agent_claims_in_fifo_order_across_taskers() {
     let w = world("claim-fifo", "user", true);
-    let a = w.theirs("hobi");
+    let a = w.anothers("hobi");
     let b = w.submit("hobi", "sentinel-628-b").await;
-    let c = w.theirs("hobi");
+    let c = w.anothers("hobi");
     w.mine("suga");
     let (first, partition) = w.claim("hobi").await.expect("the oldest task");
     assert_eq!(first.task.task_id, a);
-    assert_eq!(partition, format!("tasks/users/{OTHER}"));
+    assert_eq!(partition, format!("tasks/users/{}", another()));
     let rec = w.store().record(&a).unwrap();
     assert_eq!((rec.state, rec.claimed), (TaskState::Working, Some(T0)));
     assert_eq!(w.store().record(&b).unwrap().state, TaskState::Queued);
@@ -1191,7 +1213,7 @@ async fn claim_with_none_redelivers_the_working_task_and_some_returns_only_new_f
 #[tokio::test]
 async fn a_report_reaches_only_the_tasks_own_tasker() {
     let w = world("report-owner", "user", true);
-    let theirs = w.theirs("hobi");
+    let theirs = w.anothers("hobi");
     let mine = w.mine("hobi");
     assert_eq!(w.claimed("hobi").await, theirs);
     w.clock.set(T0 + 7);
@@ -2402,7 +2424,7 @@ async fn a_contained_taskers_tasks_are_held_and_stay_held_after_release() {
     let working = w.submit("hobi", "a").await;
     let queued = w.submit("hobi", "b").await;
     let reported = w.submit("suga", "c").await;
-    let theirs = w.theirs("hobi");
+    let theirs = w.anothers("hobi");
     assert_eq!(w.claimed("hobi").await, working);
     assert_eq!(w.claimed("suga").await, reported);
     w.agent_reports("suga", &reported, "evidence").await;
@@ -2411,7 +2433,7 @@ async fn a_contained_taskers_tasks_are_held_and_stay_held_after_release() {
     common::write_0640(
         &bindings,
         &format!(
-            "schema_version: 1\nbindings:\n  adversary: [\"{}\"]\n",
+            "schema_version: 1\nbindings:\n  adversary: [\"{}\"]\n  user: [\"nobody\"]\n",
             w.user
         ),
     );
@@ -2548,4 +2570,127 @@ async fn a_held_task_never_lapses_expires_or_leaves_and_survives_a_restart() {
         w.beat("hobi", 0).await,
         RespResult::Ok(Payload::TaskState(v)) if v.state == TaskState::Held
     ));
+}
+
+impl World {
+    fn agent_policy(&self, agent: &str, policy: &str) {
+        let file = self
+            .root
+            .join(maknae_config::AGENTS_DIR)
+            .join(agent)
+            .join(maknae_config::POLICY_FILE);
+        common::write_0640(&file, policy);
+        self.pdp.baseline().reload_from_file().unwrap();
+    }
+
+    /// The tasker's working task finishes; its queued one is closed `Withdrawn` at the
+    /// next claim, after the claim's own record.
+    async fn withdrawn_at_the_next_claim(&self, working: TaskId, queued: TaskId, cause: &str) {
+        assert_eq!(
+            self.claimed("hobi").await,
+            working,
+            "a running task is not re-decided"
+        );
+        assert!(matches!(
+            self.agent_reports("hobi", &working, "finished").await,
+            RespResult::Ok(Payload::TaskAcknowledged(_))
+        ));
+        let records = Records::new(0);
+        let got = self.agent_with("hobi", CLAIM, None, &records).await;
+        assert!(
+            matches!(got, Some(RespResult::Ok(Payload::TaskIdle))),
+            "{got:?}"
+        );
+        let said = task_records(&records);
+        let rec = said.last().unwrap();
+        assert_eq!(rec.outcome.result, "permit");
+        assert!(
+            rec.outcome
+                .reason
+                .starts_with("idle: the tasker's authority was withdrawn: ")
+                && rec.outcome.reason.contains(cause),
+            "{}",
+            rec.outcome.reason
+        );
+        assert_eq!(rec.subject.task_id, Some(queued.to_string()));
+        assert_eq!(rec.subject.tasker, Some(format!("uid:{}", self.me)));
+        assert_eq!(
+            self.store().record(&queued).unwrap().state,
+            TaskState::Queued,
+            "recorded before it is closed"
+        );
+        assert!(self.claim("hobi").await.is_none(), "and never handed out");
+        assert_eq!(
+            closes(&self.store().close_all_due()),
+            vec![(queued, TaskClose::Withdrawn)]
+        );
+        let rec = self.store().record(&queued).unwrap();
+        assert_eq!(
+            (rec.state, rec.close),
+            (TaskState::Closed, Some(TaskClose::Withdrawn))
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_person_removed_from_taskers_has_queued_tasks_withdrawn_and_the_running_one_finishes() {
+    let w = world("withdrawn-taskers", "user", true);
+    let working = w.submit("hobi", "a").await;
+    let queued = w.submit("hobi", "b").await;
+    assert_eq!(w.claimed("hobi").await, working);
+    w.agent_policy("hobi", "schema_version: 1\ntaskers: []\n");
+    w.withdrawn_at_the_next_claim(working, queued, "is not a tasker")
+        .await;
+    let page = reports(w.ask(collect("hobi", None)).await);
+    assert_eq!(report_ids(&page), vec![working, queued]);
+    assert_eq!(page.entries[0].close, None);
+    assert_eq!(page.entries[1].close, Some(TaskClose::Withdrawn));
+    assert!(page.entries[1].text.0.is_empty());
+}
+
+#[tokio::test]
+async fn a_tasker_whose_role_loses_the_grant_has_queued_tasks_withdrawn() {
+    let w = world("withdrawn-grant", "user", true);
+    let working = w.submit("hobi", "a").await;
+    let queued = w.submit("hobi", "b").await;
+    let theirs_later = w.submit("suga", "c").await;
+    assert_eq!(w.claimed("hobi").await, working);
+    common::write_0640(
+        &maknae_authz_basic::PolicyPaths::in_dir(&w.root).authz,
+        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n",
+    );
+    w.pdp.baseline().reload_from_file().unwrap();
+    w.withdrawn_at_the_next_claim(working, queued, "no rule for session.task")
+        .await;
+    assert!(w.claim("suga").await.is_none(), "every agent re-decides");
+    assert_eq!(
+        closes(&w.store().close_all_due()),
+        vec![(theirs_later, TaskClose::Withdrawn)]
+    );
+}
+
+#[tokio::test]
+async fn a_contained_taskers_queued_task_is_held_never_withdrawn() {
+    let w = world("held-not-withdrawn", "user", true);
+    let queued = w.submit("hobi", "a").await;
+    let bindings = maknae_authz_basic::PolicyPaths::in_dir(&w.root).bindings;
+    common::write_0640(
+        &bindings,
+        &format!(
+            "schema_version: 1\nbindings:\n  adversary: [\"{}\"]\n",
+            w.user
+        ),
+    );
+    w.pdp.baseline().reload_from_file().unwrap();
+    assert!(w.claim("hobi").await.is_none(), "not handed out");
+    assert!(
+        w.store().due(8).is_empty(),
+        "and not marked withdrawn: containment holds, it does not close"
+    );
+    assert_eq!(
+        holds(&w.store().retain_enrolled(&*w.agents.view)),
+        vec![queued]
+    );
+    assert_eq!(w.store().record(&queued).unwrap().state, TaskState::Held);
+    assert!(w.store().close_all_due().is_empty());
 }

@@ -108,7 +108,7 @@ One residual is stated, not closed. **Disabling does not revoke:** `remove-agent
 
 ## Amendment 2026-11-11 (#628): tasks persist, and the kernel closes what cannot finish
 
-Dated as-built amendment; rides the #628 PR. It replaces decision 7's in-memory store and settles decision 8's sealing at rest. Nine statements.
+Dated as-built amendment; rides the #628 PR. It replaces decision 7's in-memory store and settles decision 8's sealing at rest. Ten statements.
 
 1. **Tasks persist, sealed, and survive a restart.** Each task is one `.task` record in `STATE_DIR/tasks` (`/var/lib/maknae/tasks` on Linux, `/usr/local/var/db/maknae/state/tasks` on macOS), beside one `counters.task` file. Each is sealed under a fresh data key wrapped by the graph key, as the conversation store is. A record holds the signed task, the agent and its uid at mint, the tasker, the root tasker of the task's chain, the parent, the state and close, the follow-ups, the report and the last stored action counts. A change is written before memory shows it. A submission is written pending, then confirmed after its decision record lands; at boot a pending record is discarded, and an unreadable or oversized one is moved aside as `.task.quarantine`, each after its trail record. The counters file holds the store's submission sequence and each tasker's own submission and report ordinals. A value is written there before it is issued and never goes back, and a missing, unreadable or lagging counters file beside stored tasks refuses boot. *Failure it prevents:* a restart that forgot every task would drop queued work and every held report without a word to the taskers.
 
@@ -144,6 +144,8 @@ Dated as-built amendment; rides the #628 PR. It replaces decision 7's in-memory 
    - **While held.** A held task is never handed out; a heartbeat answers `Held`, so the agent stops; it is never closed, expired or lapsed; drop, stop, add, report, collect and acknowledge leave it as it is. `status` and `list` show `Held` to the tasker.
    - **Release.** `admin.release` lifts the containment only. A held task stays held until an admin releases it, which is #632 and is not built here.
    *Failure it prevents:* a contained subject's work kept running, and its queued tasks, partitions and reports kept changing or expiring, after the moment they became evidence.
+
+10. **Withdrawn authority closes queued tasks at hand-out** (maintainer, 2026-11-11). Before a claim hands out a queued task, the kernel decides its tasker's submission again, on the submit arm, under the policy in force: the role's grant, the target's `taskers:` and its enrollment. A decided refusal answers the claim idle, with the reason in that claim's record, marks the task so it is never handed out, and closes it `TaskClose::Withdrawn` by the same record-first tombstone as the other kernel closes; the tasker collects the close. A working task is not decided again and finishes. A decision that could not be reached, or came back indeterminate, withdraws nothing. A contained tasker's tasks are held (statement 9), never withdrawn. *Failure it prevents:* a task queued by someone who has since lost the right to task the agent being handed out and run on that stale authority.
 
 ## Related
 

@@ -251,6 +251,7 @@ Dated as-built amendment; rides the #628 PR. Five statements.
 |---|---|---|
 | `closed:agent-gone` | `deny` / `unavailable` | an open task of an agent that is no longer enrolled, or whose uid changed, is about to be closed |
 | `closed:agent-lost` | `deny` / `unavailable` | a working task whose lease lapsed is about to be closed |
+| `closed:withdrawn` | `deny` / `unavailable` | a queued task whose tasker may no longer task the agent is about to be closed; the claim that found it is recorded first, `idle: the tasker's authority was withdrawn: <reason>` |
 | `expired` | `deny` / `unavailable` | a held report or close past its 30 days is about to be removed |
 | `task held: contained` | `deny` / `unavailable` | a task whose tasker or agent is contained is about to be put on hold; recorded first and at least once, as a close is |
 | `store: owed to a later store write: <why>` | `deny` / `unavailable` | a removal, rewrite or close the disk did not prove is left for later store writes |
