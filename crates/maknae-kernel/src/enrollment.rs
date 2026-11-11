@@ -13,22 +13,51 @@ pub trait EnrollmentView: Send + Sync {
     fn contained(&self, uid: u32) -> bool;
     /// Whether `uid`'s lack of a role may only be a name the load could not resolve.
     fn unresolved(&self, uid: u32) -> bool;
-    /// The load these answers are read from, held so that two readings can be compared
-    /// with [`same_load`]; `None` for a view that never changes.
-    fn load(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
-        None
+    /// The load these answers are read from.
+    fn load(&self) -> Load {
+        Load::fixed()
     }
 }
 
-/// Whether two readings of [`EnrollmentView::load`] are of one load.
-pub fn same_load(
-    a: &Option<Arc<dyn std::any::Any + Send + Sync>>,
-    b: &Option<Arc<dyn std::any::Any + Send + Sync>>,
-) -> bool {
-    match (a, b) {
-        (None, None) => true,
-        (Some(a), Some(b)) => std::ptr::addr_eq(Arc::as_ptr(a), Arc::as_ptr(b)),
-        (Some(_), None) | (None, Some(_)) => false,
+/// One installed policy load, held so that a later reading can be compared with it. A
+/// view that never changes has none, and every reading of it is the same.
+#[derive(Clone)]
+pub struct Load(Option<Arc<dyn std::any::Any + Send + Sync>>);
+
+impl Load {
+    /// The load of a view that never changes.
+    pub fn fixed() -> Load {
+        Load(None)
+    }
+
+    /// A load identified by `of`, which it keeps alive.
+    pub fn installed(of: Arc<dyn std::any::Any + Send + Sync>) -> Load {
+        Load(Some(of))
+    }
+
+    pub fn same(&self, other: &Load) -> bool {
+        match (&self.0, &other.0) {
+            (None, None) => true,
+            (Some(a), Some(b)) => std::ptr::addr_eq(Arc::as_ptr(a), Arc::as_ptr(b)),
+            (Some(_), None) | (None, Some(_)) => false,
+        }
+    }
+}
+
+impl PartialEq for Load {
+    fn eq(&self, other: &Load) -> bool {
+        self.same(other)
+    }
+}
+
+impl Eq for Load {}
+
+impl std::fmt::Debug for Load {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self.0 {
+            None => "Load(fixed)",
+            Some(_) => "Load(installed)",
+        })
     }
 }
 
@@ -61,8 +90,8 @@ impl<B: Baseline> EnrollmentView for SnapshotEnrollment<B> {
             .unresolved(uid, baseline.principal().uid)
     }
 
-    fn load(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
-        Some(self.0.baseline().snapshot())
+    fn load(&self) -> Load {
+        Load::installed(self.0.baseline().snapshot())
     }
 }
 
@@ -186,12 +215,16 @@ mod tests {
         assert!(!view.contained(nix::unistd::geteuid().as_raw()));
         assert!(!view.unresolved(nix::unistd::geteuid().as_raw()));
         let (first, again) = (view.load(), view.load());
-        assert!(same_load(&first, &again), "one installed snapshot");
+        assert!(first.same(&again), "one installed snapshot");
         view.0.baseline().reload_from_file().unwrap();
-        assert!(!same_load(&first, &view.load()), "another was installed");
-        assert!(!same_load(&first, &None) && !same_load(&None, &first));
+        assert_ne!(first, view.load(), "another was installed");
         let fixed = FixedEnrollment(Default::default());
-        assert!(same_load(&fixed.load(), &fixed.load()));
+        assert!(!first.same(&fixed.load()) && !fixed.load().same(&first));
+        assert_eq!(fixed.load(), fixed.load());
+        assert_eq!(
+            (format!("{first:?}"), format!("{:?}", fixed.load())),
+            ("Load(installed)".to_string(), "Load(fixed)".to_string())
+        );
     }
 
     #[test]

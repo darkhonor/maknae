@@ -548,6 +548,16 @@ fn containing(w: &World, uids: &[u32]) -> maknae_kernel::Containing<FixedEnrollm
     )
 }
 
+/// The head of hobi's queue under `uid`, as a standing found good on an unchanging load.
+fn standing(w: &World, uid: u32) -> Option<maknae_kernel::GoodStanding> {
+    w.store()
+        .next_for(&hobi(), uid)
+        .map(|(task, _)| maknae_kernel::GoodStanding {
+            task,
+            load: maknae_kernel::Load::fixed(),
+        })
+}
+
 fn closes(due: &[Due]) -> Vec<(TaskId, TaskClose)> {
     due.iter()
         .filter_map(|d| match d.why {
@@ -1626,7 +1636,8 @@ async fn reenrolling_under_a_new_uid_never_closes_the_new_tasks() {
             &hobi(),
             HOBI_UID,
             &FixedSigner,
-            w.store().next_for(&hobi(), HOBI_UID).map(|(id, _)| id)
+            &only(&[]),
+            standing(&w, HOBI_UID).as_ref(),
         ),
         Ok(Claimed::Idle),
         "the old uid is handed nothing"
@@ -1635,7 +1646,8 @@ async fn reenrolling_under_a_new_uid_never_closes_the_new_tasks() {
         &hobi(),
         AGAIN,
         &FixedSigner,
-        w.store().next_for(&hobi(), AGAIN).map(|(id, _)| id),
+        &only(&[]),
+        standing(&w, AGAIN).as_ref(),
     ) {
         Ok(Claimed::Delivered { signed, .. }) => assert_eq!(signed.task.task_id, new),
         other => panic!("{other:?}"),

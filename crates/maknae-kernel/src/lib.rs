@@ -72,7 +72,7 @@ pub use egress::{
 pub use egress_socket::SocketEgress;
 #[cfg(any(test, feature = "hermetic-test-seam"))]
 pub use enrollment::{Containing, FixedEnrollment, Unresolving};
-pub use enrollment::{EnrollmentView, SnapshotEnrollment};
+pub use enrollment::{EnrollmentView, Load, SnapshotEnrollment};
 pub use groupres::*;
 pub use handler::{
     admits, admitted_user_for_test, after_drain, agent_class, build_authz_request, build_whoami,
@@ -101,9 +101,9 @@ pub use sensitive_authz::{sensitive_match, SensitiveMatch};
 pub use session::AllowFacts;
 pub use session::{Facts, FactsGate, SessionChannel, SessionFacts, SessionRecord};
 pub use task::{
-    Claimed, Due, DueFor, Enrolled, Heartbeat, Notice, PlaneSigner, Submitter, TaskRefusal,
-    TaskSigner, TaskStore, MAX_FOLLOW_UPS_PER_TASK, MAX_HELD_REPORTS_PER_TASKER,
-    MAX_LIVE_TASKS_PER_AGENT, MAX_LIVE_TASKS_PER_TASKER_PER_AGENT,
+    Claimed, Contained, Due, DueFor, Enrolled, GoodStanding, Heartbeat, Notice, PlaneSigner,
+    Submitter, TaskRefusal, TaskSigner, TaskStore, MAX_FOLLOW_UPS_PER_TASK,
+    MAX_HELD_REPORTS_PER_TASKER, MAX_LIVE_TASKS_PER_AGENT, MAX_LIVE_TASKS_PER_TASKER_PER_AGENT,
 };
 #[cfg(any(test, feature = "hermetic-test-seam"))]
 pub use task::{TaskObjectForTest, UnverifiedSigner};

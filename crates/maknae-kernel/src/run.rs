@@ -3610,7 +3610,7 @@ async fn serve_task_verb<S, E, P>(
                     .await;
                 return;
             }
-            let decided_id = match store.next_for(&agent, trail.uid) {
+            let decided_on = match store.next_for(&agent, trail.uid) {
                 None => {
                     trail
                         .deliver(
@@ -3629,8 +3629,12 @@ async fn serve_task_verb<S, E, P>(
                     let standing =
                         tasker_standing(store, &tasks.agents.view, authorizer, &id, lane, timeout)
                             .await;
+                    let mut load = None;
                     let (tasker, reason, posture) = match standing {
-                        Standing::Stands => (None, None, ""),
+                        Standing::Stands(on) => {
+                            load = Some(on);
+                            (None, None, "")
+                        }
                         Standing::Undecided { tasker, why } => (
                             tasker,
                             Some(format!(
@@ -3657,7 +3661,7 @@ async fn serve_task_verb<S, E, P>(
                             .await;
                         return;
                     }
-                    Some(id)
+                    load.map(|load| crate::task::GoodStanding { task: id, load })
                 }
             };
             let mut intent = decided("permit", "intent recorded", "authorized");
@@ -3665,13 +3669,14 @@ async fn serve_task_verb<S, E, P>(
             if !trail.record_bounded(&intent).await {
                 return;
             }
-            let (s, signer, uid) = (
+            let (s, signer, view, uid) = (
                 Arc::clone(store),
                 Arc::clone(&tasks.agents.signer),
+                Arc::clone(&tasks.agents.view),
                 trail.uid,
             );
             let claimed = crate::task::offload(uid, deadline, move || {
-                match s.claim(&agent, uid, &*signer, decided_id)? {
+                match s.claim(&agent, uid, &*signer, &*view, decided_on.as_ref())? {
                     crate::task::Claimed::Idle => Ok(None),
                     crate::task::Claimed::Delivered { signed, partition } => {
                         let wire = crate::task_store::encode(&*signed)
@@ -3768,7 +3773,8 @@ async fn serve_task_verb<S, E, P>(
 /// Whether a queued task's tasker may still task its agent, under the policy in force.
 #[derive(Debug, PartialEq, Eq)]
 enum Standing {
-    Stands,
+    /// Good, on this policy load.
+    Stands(crate::enrollment::Load),
     /// No decision was reached, or the tasker is contained and its tasks are to be held.
     Undecided {
         tasker: Option<maknae_proto::Tasker>,
@@ -3806,7 +3812,7 @@ async fn tasker_standing<P: Authorizer + Send + Sync + 'static>(
         },
         Tasker::Remote(_) => return undecided(Some(&tasker), "a remote tasker is not decided"),
     };
-    // Read before the decision and again after a refusal: a refusal stands only when
+    // Read before the decision and again after it: a permit or a refusal stands only when
     // both readings and the decision between them were of one load.
     let load = view.load();
     let not_decidable = || {
@@ -3858,19 +3864,22 @@ async fn tasker_standing<P: Authorizer + Send + Sync + 'static>(
         Ok(maknae_security::Verdict::Indeterminate) => {
             undecided(Some(&tasker), "the decision was indeterminate")
         }
-        Ok(verdict) => match finalize(combine(vec![verdict])) {
-            Decision::Permit { .. } => Standing::Stands,
-            Decision::Deny { reason } => match not_decidable() {
-                Some(why) => undecided(Some(&tasker), why),
-                None if !crate::enrollment::same_load(&load, &view.load()) => {
-                    undecided(Some(&tasker), "the policy changed during the decision")
-                }
-                None => Standing::Withdrawn {
+        Ok(verdict) => {
+            let decision = finalize(combine(vec![verdict]));
+            if let Some(why) = not_decidable() {
+                return undecided(Some(&tasker), why);
+            }
+            if !load.same(&view.load()) {
+                return undecided(Some(&tasker), "the policy changed during the decision");
+            }
+            match decision {
+                Decision::Permit { .. } => Standing::Stands(load),
+                Decision::Deny { reason } => Standing::Withdrawn {
                     tasker,
                     why: reason,
                 },
-            },
-        },
+            }
+        }
     }
 }
 
@@ -8249,15 +8258,13 @@ fn task_due_record(ctx: &BootCtx<'_>, due: &crate::task::Due) -> AuditRecord {
         DueFor::Close(TaskClose::AgentLost) => "closed:agent-lost",
         DueFor::Close(TaskClose::Withdrawn) => "closed:withdrawn",
         DueFor::Expiry => "expired",
-        DueFor::Hold(crate::task::Contained::Tasker) => "task held: tasker contained",
-        DueFor::Hold(crate::task::Contained::Root) => "task held: root contained",
-        DueFor::Hold(crate::task::Contained::Agent) => {
+        DueFor::Hold(who) => {
             return task_record(
                 ctx,
                 (
                     "deny",
                     "unavailable",
-                    &format!("task held: agent {} contained", due.agent.as_str()),
+                    &crate::task::held_reason(who, &due.agent),
                 ),
                 Some(&due.task),
                 Some(&due.tasker),
@@ -24055,7 +24062,7 @@ mod task_sweep_tests {
         );
         assert!(store.due(8).is_empty(), "neither withdraws");
         assert_eq!(
-            store.claim(&hobi, 2001, &crate::task::UnverifiedSigner, None),
+            store.claim(&hobi, 2001, &crate::task::UnverifiedSigner, &*view, None),
             Ok(crate::task::Claimed::Idle),
             "an undecided task is not handed out"
         );
@@ -24138,7 +24145,10 @@ mod task_sweep_tests {
         let permit = Verdict::Permit {
             obligations: Vec::new(),
         };
-        assert_eq!(standing(permit, fast, bound).await, Standing::Stands);
+        assert_eq!(
+            standing(permit, fast, bound).await,
+            Standing::Stands(crate::enrollment::Load::fixed())
+        );
         assert_eq!(store.record(&id).unwrap().state, TaskState::Queued);
     }
 
@@ -24179,13 +24189,13 @@ mod task_sweep_tests {
         fn unresolved(&self, _uid: u32) -> bool {
             self.unresolves && self.swapped()
         }
-        fn load(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
-            Some(self.loads[usize::from(self.swapped())].clone())
+        fn load(&self) -> crate::enrollment::Load {
+            crate::enrollment::Load::installed(self.loads[usize::from(self.swapped())].clone())
         }
     }
 
     /// Decides "no role", as the load installed while it was deciding would.
-    struct InstallsThenSays(Arc<std::sync::atomic::AtomicBool>);
+    struct InstallsThenSays(Arc<std::sync::atomic::AtomicBool>, bool);
 
     impl Authorizer for InstallsThenSays {
         fn decide_cited_all(
@@ -24197,8 +24207,13 @@ mod task_sweep_tests {
 
         fn decide(&self, _req: &maknae_security::Request) -> maknae_security::Verdict {
             self.0.store(true, std::sync::atomic::Ordering::SeqCst);
-            maknae_security::Verdict::NotApplicable {
-                note: Some("subject resolves to no role".into()),
+            match self.1 {
+                true => maknae_security::Verdict::Permit {
+                    obligations: Vec::new(),
+                },
+                false => maknae_security::Verdict::NotApplicable {
+                    note: Some("subject resolves to no role".into()),
+                },
             }
         }
     }
@@ -24208,7 +24223,7 @@ mod task_sweep_tests {
         let (_blobs, _clock, store) = mem(1_000);
         let me = Tasker::Uid(1000);
         let id = queued(&store, "hobi", me.clone());
-        let decided_across = |unresolves: bool| {
+        let decided_across = |unresolves: bool, permits: bool| {
             let store = Arc::clone(&store);
             async move {
                 let swapped = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -24217,7 +24232,7 @@ mod task_sweep_tests {
                 tasker_standing(
                     &store,
                     &view,
-                    &Arc::new(InstallsThenSays(swapped)),
+                    &Arc::new(InstallsThenSays(swapped, permits)),
                     &id,
                     maknae_security::Lane::Local,
                     Duration::from_secs(5),
@@ -24226,21 +24241,23 @@ mod task_sweep_tests {
             }
         };
         assert_eq!(
-            decided_across(true).await,
+            decided_across(true, false).await,
             Standing::Undecided {
                 tasker: Some(me.clone()),
                 why: "the tasker's identity could not be resolved".into()
             },
             "the refusal was decided on a load that could not resolve the name"
         );
-        assert_eq!(
-            decided_across(false).await,
-            Standing::Undecided {
-                tasker: Some(me.clone()),
-                why: "the policy changed during the decision".into()
-            },
-            "a refusal decided across two loads is not a decided refusal"
-        );
+        for permits in [false, true] {
+            assert_eq!(
+                decided_across(false, permits).await,
+                Standing::Undecided {
+                    tasker: Some(me.clone()),
+                    why: "the policy changed during the decision".into()
+                },
+                "neither a refusal nor a permit decided across two loads stands"
+            );
+        }
         let agent_contained: Arc<dyn crate::enrollment::EnrollmentView> = Arc::new(
             crate::enrollment::Containing(hobi_enrolled(), [2001].into_iter().collect()),
         );

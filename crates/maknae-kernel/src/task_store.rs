@@ -792,7 +792,7 @@ mod tests {
             agent_uid: HOBI,
         };
         let t = store.mint(&Unverified, &v, enrolled, Tasker::Uid(1000), None, sub)?;
-        store.confirm(&t.task.task_id, None)?;
+        store.confirm(&t.task.task_id, None, None)?;
         Ok(t)
     }
 
