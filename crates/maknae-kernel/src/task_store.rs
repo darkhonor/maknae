@@ -379,6 +379,7 @@ pub enum Fail {
     Every,
     Records,
     Unsynced,
+    Unlinks,
 }
 
 #[cfg(any(test, feature = "hermetic-test-seam"))]
@@ -448,7 +449,7 @@ impl MemTaskBlobs {
             Some(Fail::Records) if name != COUNTERS => {
                 Err(StoreError::Io("sentinel-628-write-refused".into()))
             }
-            Some(Fail::Records) | Some(Fail::Unsynced) | None => Ok(()),
+            Some(Fail::Records) | Some(Fail::Unsynced) | Some(Fail::Unlinks) | None => Ok(()),
         }
     }
 
@@ -462,7 +463,8 @@ impl MemTaskBlobs {
             Some(Fail::Unsynced) if name != COUNTERS => {
                 Err(StoreError::NotDurable("sentinel-628-unsynced".into()))
             }
-            Some(Fail::Every) | Some(Fail::Records) | Some(Fail::Unsynced) | None => Ok(()),
+            Some(Fail::Every) | Some(Fail::Records) | Some(Fail::Unsynced)
+            | Some(Fail::Unlinks) | None => Ok(()),
         }
     }
 }
@@ -490,6 +492,15 @@ impl TaskBlobs for MemTaskBlobs {
 
     fn delete(&self, name: &str) -> Result<(), StoreError> {
         self.refuse(name)?;
+        if *self
+            .0
+            .fail
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            == Some(Fail::Unlinks)
+        {
+            return Err(StoreError::Io("sentinel-628-unlink-refused".into()));
+        }
         self.stall(name);
         self.map().remove(name);
         self.landed(name)

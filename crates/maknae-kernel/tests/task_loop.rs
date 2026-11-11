@@ -853,7 +853,7 @@ async fn a_store_that_does_not_answer_in_time_is_refused_as_unavailable() {
         ("permit", "unavailable")
     );
     assert!(
-        last.outcome.reason.contains("did not answer in time"),
+        last.outcome.reason == "outcome unknown: the task store did not answer in time",
         "{}",
         last.outcome.reason
     );

@@ -454,7 +454,9 @@ the requested directory; on a deny, the one refused.
 unified log delivers one line and drops anything past 1015 bytes. With identity
 on the record the widest `session.prompt` records exceed that — measured at
 1027–1123 bytes — so **on macOS those records mirror as a degraded marker as a
-matter of course, not as an exception**. The marker carries `MAKNAE_SESSION`,
+matter of course, not as an exception**. A `session.task` record from a person is
+about 858 bytes and mirrors in full; the widest (an agent tasker, with agent, task
+and parent ids at their bounds) is 1229 bytes and degrades. The marker carries `MAKNAE_SESSION`,
 `MAKNAE_SEQ` and `MAKNAE_PRIMARY`; use the session and seq to find the complete
 record in the append-only JSONL, which has no size cap on either platform. `MAKNAE_PRIMARY=ok`
 means the record is durable in the JSONL. `write-unconfirmed` means the write
