@@ -1101,6 +1101,78 @@ pub enum Payload {
     Stat(StatView),
     ListGrant(crate::ListGrant),
     ListContinue,
+    TaskAccepted(crate::TaskView),
+    TaskState(crate::TaskView),
+    TaskAcknowledged(crate::TaskView),
+    TaskList(crate::TaskPage),
+    TaskReports(crate::TaskReportPage),
+    TaskDelivered(crate::TaskDelivery),
+    TaskFollowUps(crate::TaskFollowUps),
+    TaskIdle,
+}
+
+pub struct SecretText(pub zeroize::Zeroizing<String>);
+FIX
+  printf 'pub struct Bytes(pub Zeroizing<Vec<u8>>);\n' > "$fixture/crates/maknae-proto/src/bytes.rs"
+  cat > "$fixture/crates/maknae-proto/src/task.rs" <<'FIX'
+use crate::{Bytes, SecretText};
+
+pub struct TaskRef(String);
+
+pub struct TaskCursor(String);
+
+pub enum TaskState {
+    Queued,
+    Working,
+    Reported,
+    Closed,
+}
+
+pub enum TaskClose {
+    Stopped,
+    Dropped,
+    AgentGone,
+    AgentLost,
+}
+
+pub struct TaskView {
+    pub task: TaskRef,
+    pub agent: String,
+    pub state: TaskState,
+    pub close: Option<TaskClose>,
+    pub submitted_secs: i64,
+    pub elapsed_secs: u64,
+    pub actions: u32,
+    pub last_action_secs: Option<i64>,
+}
+
+pub struct TaskPage {
+    pub entries: Vec<TaskView>,
+    pub next: Option<TaskCursor>,
+}
+
+pub struct TaskReportView {
+    pub task: TaskRef,
+    pub agent: String,
+    pub close: Option<TaskClose>,
+    pub text: SecretText,
+    pub at_secs: i64,
+    pub cursor: TaskCursor,
+}
+
+pub struct TaskReportPage {
+    pub entries: Vec<TaskReportView>,
+    pub next: Option<TaskCursor>,
+}
+
+pub struct TaskDelivery {
+    pub signed: Bytes,
+    pub partition: String,
+}
+
+pub struct TaskFollowUps {
+    pub from: u32,
+    pub items: Vec<SecretText>,
 }
 FIX
   cat > "$fixture/crates/maknae-proto/src/conversation.rs" <<'FIX'
@@ -1354,6 +1426,40 @@ always	stat.kind	ships by construction
 always	list.truncated	ships by construction
 always	list.entries.name	ships by construction
 always	list.entries.dir	ships by construction
+always	task.task	ships by construction
+always	task.agent	ships by construction
+always	task.state	ships by construction
+always	task.close	ships by construction
+always	task.submitted_secs	ships by construction
+always	task.elapsed_secs	ships by construction
+always	task.actions	ships by construction
+always	task.last_action_secs	ships by construction
+always	task_list.entries.task	ships by construction
+always	task_list.entries.agent	ships by construction
+always	task_list.entries.state	ships by construction
+always	task_list.entries.close	ships by construction
+always	task_list.entries.submitted_secs	ships by construction
+always	task_list.entries.elapsed_secs	ships by construction
+always	task_list.entries.actions	ships by construction
+always	task_list.entries.last_action_secs	ships by construction
+always	task_list.next	ships by construction
+always	task_report.task	ships by construction
+always	task_report.agent	ships by construction
+always	task_report.close	ships by construction
+always	task_report.text	ships by construction
+always	task_report.at_secs	ships by construction
+always	task_report.cursor	ships by construction
+always	task_reports.entries.task	ships by construction
+always	task_reports.entries.agent	ships by construction
+always	task_reports.entries.close	ships by construction
+always	task_reports.entries.text	ships by construction
+always	task_reports.entries.at_secs	ships by construction
+always	task_reports.entries.cursor	ships by construction
+always	task_reports.next	ships by construction
+always	task_delivery.signed	ships by construction
+always	task_delivery.partition	ships by construction
+always	task_follow_ups.from	ships by construction
+always	task_follow_ups.items	ships by construction
 mask	lake	the Knowledge Lake schema, not ours
 '
 
@@ -1433,7 +1539,7 @@ cat > "$fx/crates/maknae-config/src/document.rs" <<'FIX'
 const DISCLOSABLE: &[&str] = &["transport", "providers[].name", "providers[].endpoint", "providers[].models", "providers[].models[]", "providers[].reasoning_effort", "providers[].output_tokens_field", "vault.addr", "vault.approle_mount", "vault.pki_int_mount", "vault.deployment_id", "vault.user_auth", "vault.user_auth.type", "vault.user_auth.mount", "vault.kv_mount", "vault.user_prefix", "vault.plane_key", "audit.jsonl_path", "principal", "egress.socket_path", "egress.deadline_ms", "deployment.mode", "deployment.account_source"];
 const SUPPRESSED: &[&str] = &["vault.insecure_plaintext_secret_path", "core.handling", "audit.au3_1"];
 FIX
-expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" ": 79 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" ": 113 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a section registered in boot.rs with no SURFACE entry. THE THIRD
 # fail-open, and the one that closes the PROPERTY rather than an instance: the
@@ -2004,7 +2110,7 @@ fi
 # go check a sed flag. This probe pins the corrected order.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'std::sync::Arc<String>')"
 expect_accept "config-disclosure-drift/qualified-wrapper-is-a-leaf" \
-  ": 79 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 113 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the config-surface `Vec` exemption holds for the QUALIFIED spelling
 # too. Under the old post-loop `s/.*:://`, `Vec<crate::Principal>` reduced to
@@ -2013,7 +2119,7 @@ expect_accept "config-disclosure-drift/qualified-wrapper-is-a-leaf" \
 # the unqualified `config-vec-of-struct-is-a-leaf` probe below cannot see.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'Vec<crate::Principal>')"
 expect_accept "config-disclosure-drift/qualified-config-vec-is-still-a-leaf" \
-  ": 79 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 113 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the mirror image. `Vec<WorkspaceStruct>` on a CONFIG surface is a
 # LEAF -- only a sequence whose element paths are declared is walked;
@@ -2022,12 +2128,12 @@ expect_accept "config-disclosure-drift/qualified-config-vec-is-still-a-leaf" \
 # did not, and every config row was silently held to the wire rule.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'Vec<Principal>')"
 expect_accept "config-disclosure-drift/config-vec-of-struct-is-a-leaf" \
-  ": 79 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 113 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the clean fixture passes and reports both counts. Without this every
 # rejection above would stay green against a gate that refuses everything.
 fx="$(cfg_fixture "$CFG_OK")"
-expect_accept "config-disclosure-drift/clean-fixture-passes" ": 79 paths decided, 91 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/clean-fixture-passes" ": 113 paths decided, 127 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
 
 fx="$(cfg_fixture "$CFG_OK")"
 python3 - "$fx" <<'PYFIX'
@@ -2143,7 +2249,7 @@ expect_reported_count "p1-manifest/packages-match-the-workspace" "ok (" "$exp_p1
 # control; asserting it here means any future silent shrink is a red build.
 
 expect_accept "config-disclosure-drift/real-repo-counts-pinned" \
-  ": 91 paths decided, 91 struct fields covered" "$here/config-disclosure-drift.sh"
+  ": 125 paths decided, 127 struct fields covered" "$here/config-disclosure-drift.sh"
 
 
 # #158: a grant's own disclosure inventory must reject new data and type changes.

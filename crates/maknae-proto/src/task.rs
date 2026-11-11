@@ -231,6 +231,7 @@ pub enum TaskSchemaError {
     Schema(String),
     Version(u16),
     TaskIdText,
+    TaskCursorText,
 }
 
 impl std::fmt::Display for TaskSchemaError {
@@ -239,11 +240,149 @@ impl std::fmt::Display for TaskSchemaError {
             TaskSchemaError::Schema(s) => write!(f, "task schema {s:?} is not {TASK_SCHEMA}"),
             TaskSchemaError::Version(v) => write!(f, "task version {v} is not {TASK_VERSION}"),
             TaskSchemaError::TaskIdText => f.write_str("a task id is 32 lowercase hex digits"),
+            TaskSchemaError::TaskCursorText => {
+                f.write_str("a task cursor is a decimal sequence number")
+            }
         }
     }
 }
 
 impl std::error::Error for TaskSchemaError {}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct TaskRef(String);
+
+impl TaskRef {
+    pub fn from_id(id: &TaskId) -> Self {
+        Self(id.to_string())
+    }
+
+    pub fn parse(s: &str) -> Result<Self, TaskSchemaError> {
+        s.parse::<TaskId>().map(|id| Self::from_id(&id))
+    }
+
+    pub fn to_id(&self) -> TaskId {
+        self.0
+            .parse()
+            .expect("a TaskRef holds only 32 lowercase hex digits")
+    }
+}
+
+impl TryFrom<String> for TaskRef {
+    type Error = TaskSchemaError;
+    fn try_from(s: String) -> Result<Self, TaskSchemaError> {
+        Self::parse(&s)
+    }
+}
+
+impl From<TaskRef> for String {
+    fn from(r: TaskRef) -> String {
+        r.0
+    }
+}
+
+/// A canonical decimal `u64`, so one sequence number has one spelling.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct TaskCursor(String);
+
+impl TaskCursor {
+    pub fn from_seq(seq: u64) -> Self {
+        Self(seq.to_string())
+    }
+
+    pub fn parse(s: &str) -> Result<Self, TaskSchemaError> {
+        match s.parse::<u64>() {
+            Ok(seq) if seq.to_string() == s => Ok(Self(s.to_owned())),
+            _ => Err(TaskSchemaError::TaskCursorText),
+        }
+    }
+
+    pub fn seq(&self) -> u64 {
+        self.0
+            .parse()
+            .expect("a TaskCursor holds only a canonical decimal u64")
+    }
+}
+
+impl TryFrom<String> for TaskCursor {
+    type Error = TaskSchemaError;
+    fn try_from(s: String) -> Result<Self, TaskSchemaError> {
+        Self::parse(&s)
+    }
+}
+
+impl From<TaskCursor> for String {
+    fn from(c: TaskCursor) -> String {
+        c.0
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum TaskState {
+    Queued,
+    Working,
+    Reported,
+    Closed,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum TaskClose {
+    Stopped,
+    Dropped,
+    AgentGone,
+    AgentLost,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct TaskView {
+    pub task: TaskRef,
+    pub agent: String,
+    pub state: TaskState,
+    pub close: Option<TaskClose>,
+    pub submitted_secs: i64,
+    pub elapsed_secs: u64,
+    pub actions: u32,
+    pub last_action_secs: Option<i64>,
+}
+
+/// `next` is the submission sequence to resume after.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct TaskPage {
+    pub entries: Vec<TaskView>,
+    pub next: Option<TaskCursor>,
+}
+
+/// `cursor` is the report-arrival sequence, assigned when the report or the close lands.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct TaskReportView {
+    pub task: TaskRef,
+    pub agent: String,
+    pub close: Option<TaskClose>,
+    pub text: SecretText,
+    pub at_secs: i64,
+    pub cursor: TaskCursor,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct TaskReportPage {
+    pub entries: Vec<TaskReportView>,
+    pub next: Option<TaskCursor>,
+}
+
+/// `signed` is the CBOR of a [`SignedTask`]; `partition` is relative to the agent's home.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct TaskDelivery {
+    pub signed: Bytes,
+    pub partition: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct TaskFollowUps {
+    pub from: u32,
+    pub items: Vec<SecretText>,
+}
 
 /// The one formatter for the audit field and the `tasker` subject attribute.
 pub fn tasker_text(t: &Tasker) -> String {
@@ -636,6 +775,237 @@ mod tests {
         );
         let shown = format!("{:#?}", prompt(SENTINEL));
         assert!(!shown.contains(SENTINEL), "{shown}");
+    }
+
+    fn secret(s: &str) -> SecretText {
+        SecretText(zeroize::Zeroizing::new(s.into()))
+    }
+
+    fn task_ref() -> TaskRef {
+        TaskRef::from_id(&id(0xa0))
+    }
+
+    fn task_view() -> TaskView {
+        TaskView {
+            task: task_ref(),
+            agent: "hobi".into(),
+            state: TaskState::Working,
+            close: None,
+            submitted_secs: 1_700_000_000,
+            elapsed_secs: 42,
+            actions: 3,
+            last_action_secs: Some(1_700_000_040),
+        }
+    }
+
+    fn report_view(text: &str) -> TaskReportView {
+        TaskReportView {
+            task: task_ref(),
+            agent: "hobi".into(),
+            close: Some(TaskClose::AgentLost),
+            text: secret(text),
+            at_secs: 1_700_000_100,
+            cursor: TaskCursor::from_seq(7),
+        }
+    }
+
+    fn task_verbs(text: &str) -> Vec<crate::Verb> {
+        use crate::Verb;
+        vec![
+            Verb::TaskAdd {
+                task: task_ref(),
+                text: secret(text),
+            },
+            Verb::TaskStatus { task: task_ref() },
+            Verb::TaskList {
+                agent: "hobi".into(),
+                after: Some(TaskCursor::from_seq(9)),
+            },
+            Verb::TaskList {
+                agent: "hobi".into(),
+                after: None,
+            },
+            Verb::TaskStop { task: task_ref() },
+            Verb::TaskDrop { task: task_ref() },
+            Verb::TaskCollect {
+                agent: "hobi".into(),
+                after: Some(TaskCursor::from_seq(0)),
+            },
+            Verb::TaskClaim {
+                seen_follow_ups: Some(2),
+            },
+            Verb::TaskClaim {
+                seen_follow_ups: None,
+            },
+            Verb::TaskReport { text: secret(text) },
+        ]
+    }
+
+    fn task_payloads(text: &str) -> Vec<crate::Payload> {
+        use crate::Payload;
+        let mut closed = task_view();
+        closed.state = TaskState::Closed;
+        closed.close = Some(TaskClose::Stopped);
+        closed.last_action_secs = None;
+        vec![
+            Payload::TaskAccepted(task_view()),
+            Payload::TaskState(closed),
+            Payload::TaskAcknowledged(task_view()),
+            Payload::TaskList(TaskPage {
+                entries: vec![task_view()],
+                next: Some(TaskCursor::from_seq(1)),
+            }),
+            Payload::TaskReports(TaskReportPage {
+                entries: vec![report_view(text)],
+                next: None,
+            }),
+            Payload::TaskDelivered(TaskDelivery {
+                signed: Bytes::new(text.as_bytes().to_vec().into()),
+                partition: "tasks/users/alex".into(),
+            }),
+            Payload::TaskFollowUps(TaskFollowUps {
+                from: 1,
+                items: vec![secret(text), secret("second")],
+            }),
+            Payload::TaskIdle,
+        ]
+    }
+
+    #[test]
+    fn every_task_verb_round_trips_through_cbor() {
+        for verb in task_verbs("round-trip") {
+            let req = crate::Request {
+                protocol_version: crate::PROTOCOL_VERSION,
+                verb,
+                task: None,
+            };
+            let back = crate::decode_request(&crate::encode_request(&req).unwrap()).unwrap();
+            assert_eq!(back, req);
+        }
+        for payload in task_payloads("round-trip") {
+            let resp = crate::Response {
+                protocol_version: crate::PROTOCOL_VERSION,
+                result: crate::RespResult::Ok(payload),
+            };
+            let back = crate::decode_response(&crate::encode_response(&resp).unwrap()).unwrap();
+            assert_eq!(back, resp);
+        }
+        let wire: ciborium::Value = dec(&enc(&task_ref())).unwrap();
+        assert_eq!(wire.as_text(), Some("a0a1a2a3a4a5a6a7a8a9aaabacadaeaf"));
+        let wire: ciborium::Value = dec(&enc(&TaskCursor::from_seq(12))).unwrap();
+        assert_eq!(wire.as_text(), Some("12"));
+    }
+
+    #[test]
+    fn task_classes_are_pinned() {
+        use crate::{class_of, FrameClass, Verb};
+        for verb in task_verbs("c") {
+            let want = match &verb {
+                Verb::TaskAdd { .. }
+                | Verb::TaskReport { .. }
+                | Verb::TaskClaim { .. }
+                | Verb::TaskCollect { .. } => FrameClass::Prompt,
+                Verb::TaskStatus { .. }
+                | Verb::TaskList { .. }
+                | Verb::TaskStop { .. }
+                | Verb::TaskDrop { .. } => FrameClass::Control,
+                other => panic!("not a task verb: {other:?}"),
+            };
+            assert_eq!(class_of(&verb), want, "{verb:?}");
+        }
+    }
+
+    #[test]
+    fn task_ref_refuses_anything_but_32_lowercase_hex_at_decode() {
+        let good = "0123456789abcdef0a1b2c3d4e5f6978";
+        let r: TaskRef = dec(&enc(&good.to_string())).unwrap();
+        assert_eq!(r, TaskRef::parse(good).unwrap());
+        assert_eq!(r.to_id(), good.parse::<TaskId>().unwrap());
+        assert_eq!(TaskRef::from_id(&r.to_id()), r);
+        for bad in [
+            &good[..31],
+            &format!("{good}0")[..],
+            "0123456789ABCDEF0A1B2C3D4E5F6978",
+            "0123456789abcdeg0a1b2c3d4e5f6978",
+            "",
+        ] {
+            assert!(dec::<TaskRef>(&enc(&bad.to_string())).is_err(), "{bad}");
+            assert!(TaskRef::parse(bad).is_err(), "{bad}");
+        }
+        assert!(dec::<TaskRef>(&enc(&id(1))).is_err());
+        let mut bad_verb =
+            ciborium::Value::serialized(&crate::Verb::TaskStop { task: task_ref() }).unwrap();
+        if let ciborium::Value::Map(m) = &mut bad_verb {
+            m[0].1 = ciborium::Value::Map(vec![(
+                ciborium::Value::Text("task".into()),
+                ciborium::Value::Text("A0A1A2A3A4A5A6A7A8A9AAABACADAEAF".into()),
+            )]);
+        }
+        assert!(dec::<crate::Verb>(&enc(&bad_verb)).is_err());
+    }
+
+    #[test]
+    fn task_cursor_refuses_non_decimal_at_decode() {
+        for (text, seq) in [("0", 0u64), ("7", 7), ("18446744073709551615", u64::MAX)] {
+            let c: TaskCursor = dec(&enc(&text.to_string())).unwrap();
+            assert_eq!(c.seq(), seq);
+            assert_eq!(c, TaskCursor::from_seq(seq));
+            assert_eq!(TaskCursor::parse(text), Ok(c));
+        }
+        for bad in [
+            "",
+            "-1",
+            "+1",
+            "1a",
+            "0x10",
+            " 1",
+            "01",
+            "18446744073709551616",
+            "１",
+        ] {
+            assert!(dec::<TaskCursor>(&enc(&bad.to_string())).is_err(), "{bad}");
+            assert_eq!(
+                TaskCursor::parse(bad),
+                Err(TaskSchemaError::TaskCursorText),
+                "{bad}"
+            );
+        }
+        assert!(dec::<TaskCursor>(&enc(&7u64)).is_err());
+        assert_eq!(
+            TaskSchemaError::TaskCursorText.to_string(),
+            "a task cursor is a decimal sequence number"
+        );
+    }
+
+    #[test]
+    fn secret_fields_never_print() {
+        let sentinel = "task-628-secret-sentinel";
+        let fragments: Vec<&str> = (0..sentinel.len() - 5)
+            .map(|i| &sentinel[i..i + 6])
+            .collect();
+        let shown: Vec<String> = task_verbs(sentinel)
+            .iter()
+            .map(|v| format!("{v:?}"))
+            .chain(task_payloads(sentinel).iter().map(|p| format!("{p:#?}")))
+            .chain([
+                format!("{:?}", report_view(sentinel)),
+                format!(
+                    "{:?}",
+                    TaskFollowUps {
+                        from: 0,
+                        items: vec![secret(sentinel)],
+                    }
+                ),
+            ])
+            .collect();
+        for s in &shown {
+            for frag in &fragments {
+                assert!(!s.contains(frag), "{frag} leaked into {s}");
+            }
+        }
+        assert!(shown
+            .iter()
+            .any(|s| s.contains(&format!("{} bytes", sentinel.len()))));
     }
 
     #[test]

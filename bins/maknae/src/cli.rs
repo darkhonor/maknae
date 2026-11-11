@@ -346,6 +346,14 @@ fn payload_kind(p: &Payload) -> &'static str {
         Payload::Stat(_) => "stat",
         Payload::ListGrant(_) => "listing",
         Payload::ListContinue => "listing continuation",
+        Payload::TaskAccepted(_) => "task accepted",
+        Payload::TaskState(_) => "task state",
+        Payload::TaskAcknowledged(_) => "task acknowledged",
+        Payload::TaskList(_) => "task list",
+        Payload::TaskReports(_) => "task reports",
+        Payload::TaskDelivered(_) => "task delivery",
+        Payload::TaskFollowUps(_) => "task follow-ups",
+        Payload::TaskIdle => "task idle",
     }
 }
 
@@ -981,7 +989,15 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
         | (v, p @ Payload::ConversationDeleted { .. })
         | (v, p @ Payload::Stat(_))
         | (v, p @ Payload::ListGrant(_))
-        | (v, p @ Payload::ListContinue) => Err(format!(
+        | (v, p @ Payload::ListContinue)
+        | (v, p @ Payload::TaskAccepted(_))
+        | (v, p @ Payload::TaskState(_))
+        | (v, p @ Payload::TaskAcknowledged(_))
+        | (v, p @ Payload::TaskList(_))
+        | (v, p @ Payload::TaskReports(_))
+        | (v, p @ Payload::TaskDelivered(_))
+        | (v, p @ Payload::TaskFollowUps(_))
+        | (v, p @ Payload::TaskIdle) => Err(format!(
             "protocol error: daemon returned a {} payload for a {} request",
             payload_kind(&p),
             v.kind()
@@ -1988,6 +2004,19 @@ mod tests {
         assert!(print_payload_for_verb(Verb::Whoami, Payload::Whoami(w)).is_ok());
     }
 
+    fn task_view() -> maknae_proto::TaskView {
+        maknae_proto::TaskView {
+            task: maknae_proto::TaskRef::from_id(&maknae_proto::TaskId([0; 16])),
+            agent: "hobi".into(),
+            state: maknae_proto::TaskState::Queued,
+            close: None,
+            submitted_secs: 0,
+            elapsed_secs: 0,
+            actions: 0,
+            last_action_secs: None,
+        }
+    }
+
     #[test]
     fn a_mismatched_payload_error_names_the_kinds_and_never_the_operands() {
         let sentinel = "sentinel-name-6d0f";
@@ -2038,6 +2067,38 @@ mod tests {
                 "listing",
             ),
             (Payload::ListContinue, "listing continuation"),
+            (Payload::TaskAccepted(task_view()), "task accepted"),
+            (Payload::TaskState(task_view()), "task state"),
+            (Payload::TaskAcknowledged(task_view()), "task acknowledged"),
+            (
+                Payload::TaskList(maknae_proto::TaskPage {
+                    entries: vec![task_view()],
+                    next: None,
+                }),
+                "task list",
+            ),
+            (
+                Payload::TaskReports(maknae_proto::TaskReportPage {
+                    entries: Vec::new(),
+                    next: None,
+                }),
+                "task reports",
+            ),
+            (
+                Payload::TaskDelivered(maknae_proto::TaskDelivery {
+                    signed: maknae_proto::Bytes::new(Vec::new().into()),
+                    partition: "tasks/users/alex".into(),
+                }),
+                "task delivery",
+            ),
+            (
+                Payload::TaskFollowUps(maknae_proto::TaskFollowUps {
+                    from: 0,
+                    items: Vec::new(),
+                }),
+                "task follow-ups",
+            ),
+            (Payload::TaskIdle, "task idle"),
         ] {
             assert_eq!(
                 print_payload_for_verb(Verb::Ping, payload).unwrap_err(),

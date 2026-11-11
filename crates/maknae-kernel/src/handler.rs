@@ -163,7 +163,15 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         | Verb::McpResourceRead
         | Verb::McpPromptGet
         | Verb::McpSamplingCreate
-        | Verb::TaskSubmit { .. } => Dispatch::NoBehaviour,
+        | Verb::TaskSubmit { .. }
+        | Verb::TaskAdd { .. }
+        | Verb::TaskStatus { .. }
+        | Verb::TaskList { .. }
+        | Verb::TaskStop { .. }
+        | Verb::TaskDrop { .. }
+        | Verb::TaskCollect { .. }
+        | Verb::TaskClaim { .. }
+        | Verb::TaskReport { .. } => Dispatch::NoBehaviour,
     }
 }
 
@@ -337,6 +345,14 @@ pub fn verb_to_action(verb: &Verb) -> &'static str {
         Verb::McpPromptGet => "mcp.prompt.get",
         Verb::McpSamplingCreate => "mcp.sampling.create",
         Verb::TaskSubmit { .. } => "session.task",
+        Verb::TaskAdd { .. } => "session.task",
+        Verb::TaskStatus { .. } => "session.task",
+        Verb::TaskList { .. } => "session.task",
+        Verb::TaskStop { .. } => "session.task",
+        Verb::TaskDrop { .. } => "session.task",
+        Verb::TaskCollect { .. } => "session.task",
+        Verb::TaskClaim { .. } => "session.task",
+        Verb::TaskReport { .. } => "session.task",
     }
 }
 
@@ -1822,7 +1838,32 @@ mod tests {
                     labels: maknae_proto::Labels {},
                 },
             },
+            Verb::TaskAdd {
+                task: task_ref(),
+                text: maknae_proto::SecretText(maknae_io::Zeroizing::new("p".into())),
+            },
+            Verb::TaskStatus { task: task_ref() },
+            Verb::TaskList {
+                agent: "hobi".into(),
+                after: None,
+            },
+            Verb::TaskStop { task: task_ref() },
+            Verb::TaskDrop { task: task_ref() },
+            Verb::TaskCollect {
+                agent: "hobi".into(),
+                after: None,
+            },
+            Verb::TaskClaim {
+                seen_follow_ups: None,
+            },
+            Verb::TaskReport {
+                text: maknae_proto::SecretText(maknae_io::Zeroizing::new("r".into())),
+            },
         ]
+    }
+
+    fn task_ref() -> maknae_proto::TaskRef {
+        maknae_proto::TaskRef::from_id(&maknae_proto::TaskId([0; 16]))
     }
 
     /// #148: every term is EXACTLY one of control plane or content-bearing, and
@@ -1851,6 +1892,7 @@ mod tests {
         manifest_actions.sort_unstable();
         let mut ours: Vec<&str> = all_verbs().iter().map(|v| verb_to_action(v)).collect();
         ours.sort_unstable();
+        ours.dedup();
         assert_eq!(
             ours, manifest_actions,
             "all_verbs() and verb-manifest.txt disagree -- a verb landed in one and not the other"
@@ -1978,14 +2020,45 @@ mod tests {
     /// #67 D4: the vocabulary is the size the spec says.
     #[test]
     fn the_vocabulary_is_fifty_nine_client_reachable_terms() {
-        assert_eq!(all_verbs().len(), 59);
+        let terms: std::collections::BTreeSet<&str> =
+            all_verbs().iter().map(verb_to_action).collect();
+        assert_eq!(terms.len(), 59);
+        assert_eq!(all_verbs().len(), 67);
     }
 
     /// Two terms sharing an action string would be decided as one another —
     /// a typo'd class prefix in any arm is invisible without this.
     #[test]
     fn every_action_string_is_distinct() {
-        let actions: Vec<&str> = all_verbs().iter().map(verb_to_action).collect();
+        let (task, rest): (Vec<Verb>, Vec<Verb>) = all_verbs()
+            .into_iter()
+            .partition(|v| verb_to_action(v) == "session.task");
+        let task: Vec<String> = task
+            .iter()
+            .map(|v| {
+                format!("{v:?}")
+                    .split([' ', '('])
+                    .next()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(
+            task,
+            [
+                "TaskSubmit",
+                "TaskAdd",
+                "TaskStatus",
+                "TaskList",
+                "TaskStop",
+                "TaskDrop",
+                "TaskCollect",
+                "TaskClaim",
+                "TaskReport"
+            ],
+            "only the task verbs share session.task"
+        );
+        let actions: Vec<&str> = rest.iter().map(verb_to_action).collect();
         let uniq: std::collections::BTreeSet<&&str> = actions.iter().collect();
         assert_eq!(
             uniq.len(),
