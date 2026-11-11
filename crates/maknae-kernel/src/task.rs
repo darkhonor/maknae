@@ -1,14 +1,20 @@
 //! The in-kernel task store and the `session.task` submission path (#609).
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use maknae_audit_append::AuditEmit;
 use maknae_config::AgentId;
-use maknae_proto::{SignedTask, TaskId, TaskObject, TaskSubmission, Tasker};
+use maknae_proto::{
+    SecretText, SignedTask, TaskClose, TaskId, TaskObject, TaskState, TaskSubmission, Tasker,
+};
 use maknae_security::Authorizer;
 
 use crate::enrollment::EnrollmentView;
+use crate::task_store::{
+    encode, name_of, BootFinding, Clock, Counters, Hot, RootTasker, StoreError, TaskBlobs,
+    TaskRecord, CLAIM_LEASE, COUNTERS,
+};
 
 pub const MAX_LIVE_TASKS_PER_AGENT: usize = 256;
 
@@ -24,6 +30,10 @@ pub enum TaskRefusal {
     Random,
     Audit(String),
     Unsigned,
+    Store(String),
+    NoAccount,
+    CursorAhead,
+    Finished,
 }
 
 impl std::fmt::Display for TaskRefusal {
@@ -44,6 +54,10 @@ impl std::fmt::Display for TaskRefusal {
             TaskRefusal::Random => f.write_str("no task id could be drawn"),
             TaskRefusal::Audit(why) => write!(f, "the task was not audited: {why}"),
             TaskRefusal::Unsigned => f.write_str("the task could not be signed"),
+            TaskRefusal::Store(why) => write!(f, "the task store did not write: {why}"),
+            TaskRefusal::NoAccount => f.write_str("the submitting session names no account"),
+            TaskRefusal::CursorAhead => f.write_str("cursor_ahead"),
+            TaskRefusal::Finished => f.write_str("the task has already reported or closed"),
         }
     }
 }
@@ -79,18 +93,14 @@ fn leaf_of(identity: Option<&maknae_vault::PlaneIdentity>) -> Option<[u8; 32]> {
     maknae_vault::task_sig::identity_fingerprint(identity?).ok()
 }
 
-/// A task bound to the agent id and the uid enrolled when it was minted.
-pub struct StoredTask {
-    pub task: Arc<SignedTask>,
-    pub agent: AgentId,
-    pub agent_uid: u32,
-}
-
 #[derive(Default)]
 struct Held {
-    tasks: BTreeMap<TaskId, StoredTask>,
+    tasks: BTreeMap<TaskId, TaskRecord>,
+    hot: HashMap<TaskId, Hot>,
     generations: BTreeMap<AgentId, u64>,
     enrolled: BTreeMap<AgentId, u32>,
+    issued: Counters,
+    boot: Vec<BootFinding>,
 }
 
 impl Held {
@@ -98,10 +108,8 @@ impl Held {
         self.generations.get(agent).copied().unwrap_or(0)
     }
 
-    fn purge(&mut self, agent: &AgentId) {
-        let g = self.generations.entry(agent.clone()).or_insert(0);
-        *g = g.wrapping_add(1);
-        self.tasks.retain(|_, t| t.agent != *agent);
+    fn live(&self, id: &TaskId) -> Option<&TaskRecord> {
+        self.tasks.get(id).filter(|r| !r.pending)
     }
 }
 
@@ -112,10 +120,16 @@ pub struct Enrolled {
     pub agent_uid: u32,
 }
 
-/// Live tasks, in memory for `maknaed`'s life.
-#[derive(Default)]
+/// Tasks, written through to `blobs` before any change is visible in memory.
 pub struct TaskStore {
     held: Mutex<Held>,
+    blobs: Box<dyn TaskBlobs>,
+    clock: Arc<dyn Clock>,
+}
+
+enum Sequence {
+    Submission,
+    Report,
 }
 
 enum Placed {
@@ -124,8 +138,111 @@ enum Placed {
 }
 
 impl TaskStore {
+    #[cfg(any(test, feature = "hermetic-test-seam"))]
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
-        Self::default()
+        Self::open(
+            Box::new(crate::task_store::MemTaskBlobs::default()),
+            Arc::new(crate::task_store::SystemClock),
+        )
+        .expect("an empty store opens")
+    }
+
+    /// Loads every record; a pending or unreadable one is left out of memory and named in
+    /// [`TaskStore::take_boot_findings`], and every `Working` lease runs from now.
+    pub fn open(blobs: Box<dyn TaskBlobs>, clock: Arc<dyn Clock>) -> Result<Self, StoreError> {
+        let loaded = crate::task_store::load(&*blobs)?;
+        let lease = clock.now_secs() + CLAIM_LEASE.as_secs() as i64;
+        let mut held = Held {
+            issued: loaded.counters,
+            boot: loaded.findings,
+            ..Held::default()
+        };
+        for rec in loaded.records {
+            let lease_until = match rec.state {
+                TaskState::Working => lease,
+                TaskState::Queued | TaskState::Reported | TaskState::Closed => 0,
+            };
+            let id = rec.signed.task.task_id;
+            held.hot.insert(
+                id,
+                Hot {
+                    lease_until,
+                    ..Hot::default()
+                },
+            );
+            held.tasks.insert(id, rec);
+        }
+        Ok(Self {
+            held: Mutex::new(held),
+            blobs,
+            clock,
+        })
+    }
+
+    /// What boot must record before it calls [`TaskStore::settle`] on each.
+    pub fn take_boot_findings(&self) -> Vec<BootFinding> {
+        std::mem::take(&mut self.held().boot)
+    }
+
+    /// Removes a discarded record, or moves an unreadable one aside.
+    pub fn settle(&self, finding: &BootFinding) -> Result<(), StoreError> {
+        match finding {
+            BootFinding::Discarded { name, .. } => self.blobs.delete(name),
+            BootFinding::Quarantined { name, .. } => self.blobs.quarantine(name),
+        }
+    }
+
+    fn write(&self, rec: &TaskRecord) -> Result<(), TaskRefusal> {
+        let plain = encode(rec).map_err(store)?;
+        self.blobs
+            .save(&name_of(&rec.signed.task.task_id), &plain)
+            .map_err(store)
+    }
+
+    /// The high-water mark is durable before the value is used.
+    fn issue(&self, held: &mut Held, which: Sequence) -> Result<u64, TaskRefusal> {
+        let mut next = held.issued;
+        let slot = match which {
+            Sequence::Submission => &mut next.seq,
+            Sequence::Report => &mut next.rseq,
+        };
+        *slot = slot
+            .checked_add(1)
+            .ok_or(TaskRefusal::Store("the sequence is exhausted".into()))?;
+        let issued = *slot;
+        let plain = encode(&next).map_err(store)?;
+        self.blobs.save(COUNTERS, &plain).map_err(store)?;
+        held.issued = next;
+        Ok(issued)
+    }
+
+    fn erase(&self, held: &mut Held, id: &TaskId) -> Result<(), TaskRefusal> {
+        self.blobs.delete(&name_of(id)).map_err(store)?;
+        held.tasks.remove(id);
+        held.hot.remove(id);
+        Ok(())
+    }
+
+    /// Bumps the generation first, so a mint racing it is refused; a task whose record
+    /// cannot be removed is still dropped from memory, and the next boot's reconcile
+    /// purges it again.
+    fn purge(&self, held: &mut Held, agent: &AgentId) {
+        let g = held.generations.entry(agent.clone()).or_insert(0);
+        *g = g.wrapping_add(1);
+        let gone: Vec<TaskId> = held
+            .tasks
+            .iter()
+            .filter(|(_, t)| t.agent == *agent)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in gone {
+            held.tasks.remove(&id);
+            held.hot.remove(&id);
+            if let Err(e) = self.blobs.delete(&name_of(&id)) {
+                eprintln!("maknaed: purged task {id} stays on disk: {e}");
+            }
+        }
     }
 
     /// A purge bumps the generation before it removes anything, so a panic inside
@@ -139,7 +256,8 @@ impl TaskStore {
     }
 
     pub fn purge_agent(&self, agent: &AgentId) {
-        self.held().purge(agent);
+        let mut held = self.held();
+        self.purge(&mut held, agent);
     }
 
     /// Purges every agent whose (id, uid) the view no longer holds as last seen,
@@ -160,7 +278,7 @@ impl TaskStore {
                     .values()
                     .any(|t| t.agent == agent && now != Some(t.agent_uid));
             if stale {
-                held.purge(&agent);
+                self.purge(&mut held, &agent);
             }
             match now {
                 Some(uid) => held.enrolled.insert(agent, uid),
@@ -180,6 +298,8 @@ impl TaskStore {
     }
 
     /// Signs before storing, outside the store lock; an unsigned task is never stored.
+    /// `account` is the submitting session's, the root of a person's own task.
+    #[allow(clippy::too_many_arguments)]
     pub fn mint(
         &self,
         signer: &dyn TaskSigner,
@@ -187,6 +307,7 @@ impl TaskStore {
         enrolled: Enrolled,
         tasker: Tasker,
         parent: Option<TaskId>,
+        account: Option<&str>,
         sub: TaskSubmission,
     ) -> Result<Arc<SignedTask>, TaskRefusal> {
         let mut draw = || {
@@ -194,7 +315,9 @@ impl TaskStore {
             maknae_crypto::random::fill(&mut id[..]).map_err(|_| TaskRefusal::Random)?;
             Ok(id)
         };
-        self.mint_with(&mut draw, signer, view, enrolled, tasker, parent, sub)
+        self.mint_with(
+            &mut draw, signer, view, enrolled, tasker, parent, account, sub,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -206,12 +329,9 @@ impl TaskStore {
         enrolled: Enrolled,
         tasker: Tasker,
         parent: Option<TaskId>,
+        account: Option<&str>,
         sub: TaskSubmission,
     ) -> Result<Arc<SignedTask>, TaskRefusal> {
-        let Enrolled {
-            generation,
-            agent_uid,
-        } = enrolled;
         let agent = target(&sub)?;
         let mut task = TaskObject {
             schema: maknae_proto::TASK_SCHEMA.into(),
@@ -225,7 +345,7 @@ impl TaskStore {
         };
         loop {
             let signed = Arc::new(signer.sign(task)?);
-            match self.place(view, &agent, generation, agent_uid, &signed)? {
+            match self.place(view, &agent, enrolled, account, &signed)? {
                 Placed::Stored => return Ok(signed),
                 Placed::Collided => {
                     task = signed.task.clone();
@@ -239,10 +359,14 @@ impl TaskStore {
         &self,
         view: &dyn EnrollmentView,
         agent: &AgentId,
-        generation: u64,
-        agent_uid: u32,
+        enrolled: Enrolled,
+        account: Option<&str>,
         task: &Arc<SignedTask>,
     ) -> Result<Placed, TaskRefusal> {
+        let Enrolled {
+            generation,
+            agent_uid,
+        } = enrolled;
         let mut held = self.held();
         if view.agent_uid(agent) != Some(agent_uid) || held.generation(agent) != generation {
             return Err(TaskRefusal::AgentGone);
@@ -252,17 +376,32 @@ impl TaskStore {
                 agent: agent.as_str().to_string(),
             });
         }
-        match held.tasks.entry(task.task.task_id) {
-            std::collections::btree_map::Entry::Occupied(_) => Ok(Placed::Collided),
-            std::collections::btree_map::Entry::Vacant(slot) => {
-                slot.insert(StoredTask {
-                    task: task.clone(),
-                    agent: agent.clone(),
-                    agent_uid,
-                });
-                Ok(Placed::Stored)
-            }
+        if held.tasks.contains_key(&task.task.task_id) {
+            return Ok(Placed::Collided);
         }
+        let root = root_of(&held, &task.task, account)?;
+        let seq = self.issue(&mut held, Sequence::Submission)?;
+        let rec = TaskRecord {
+            signed: task.clone(),
+            agent: agent.clone(),
+            agent_uid,
+            tasker: task.task.tasker.clone(),
+            root,
+            parent: task.task.parent,
+            state: TaskState::Queued,
+            close: None,
+            pending: false,
+            seq,
+            rseq: None,
+            submitted: self.clock.now_secs(),
+            claimed: None,
+            follow_ups: Vec::new(),
+            report: None,
+        };
+        self.write(&rec)?;
+        held.hot.insert(task.task.task_id, Hot::default());
+        held.tasks.insert(task.task.task_id, rec);
+        Ok(Placed::Stored)
     }
 
     pub fn resolve(
@@ -299,35 +438,175 @@ impl TaskStore {
                 continue;
             }
             if let Some(slot) = store.tasks.get_mut(id) {
-                slot.task = fresh.clone();
+                let mut next = slot.clone();
+                next.signed = fresh.clone();
+                self.write(&next)?;
+                *slot = next;
             }
             return Ok(fresh);
         }
         Err(TaskRefusal::Unsigned)
     }
 
+    /// Records the report or the close and issues its `rseq`, all under the store lock, so
+    /// no reader sees one `rseq` before a smaller one.
+    pub fn publish_report(
+        &self,
+        id: &TaskId,
+        text: SecretText,
+        close: Option<TaskClose>,
+    ) -> Result<u64, TaskRefusal> {
+        let mut held = self.held();
+        let rec = held.live(id).ok_or(TaskRefusal::Unknown)?;
+        match rec.state {
+            TaskState::Queued | TaskState::Working => {}
+            TaskState::Reported | TaskState::Closed => return Err(TaskRefusal::Finished),
+        }
+        let mut next = rec.clone();
+        let rseq = self.issue(&mut held, Sequence::Report)?;
+        next.state = match close {
+            None => TaskState::Reported,
+            Some(_) => TaskState::Closed,
+        };
+        next.close = close;
+        next.rseq = Some(rseq);
+        next.report = Some((text, self.clock.now_secs()));
+        self.write(&next)?;
+        held.tasks.insert(*id, next);
+        Ok(rseq)
+    }
+
+    /// Removes, durably, `tasker`'s reports from `agent` up to `upto`; a cursor above every
+    /// `rseq` ever issued is refused.
+    pub fn acknowledge(
+        &self,
+        tasker: &Tasker,
+        agent: &AgentId,
+        upto: u64,
+    ) -> Result<usize, TaskRefusal> {
+        let mut held = self.held();
+        if upto > held.issued.rseq {
+            return Err(TaskRefusal::CursorAhead);
+        }
+        let gone: Vec<TaskId> = held
+            .tasks
+            .iter()
+            .filter(|(_, r)| {
+                !r.pending
+                    && r.tasker == *tasker
+                    && r.agent == *agent
+                    && r.rseq.is_some_and(|s| s <= upto)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &gone {
+            self.erase(&mut held, id)?;
+        }
+        Ok(gone.len())
+    }
+
+    /// The agent's queued tasks, oldest submission first.
+    pub fn queue(&self, agent: &AgentId) -> Vec<TaskId> {
+        let held = self.held();
+        let mut queued: Vec<&TaskRecord> = held
+            .tasks
+            .values()
+            .filter(|r| !r.pending && r.agent == *agent && r.state == TaskState::Queued)
+            .collect();
+        queued.sort_by_key(|r| r.seq);
+        queued.iter().map(|r| r.signed.task.task_id).collect()
+    }
+
+    pub fn hot(&self, id: &TaskId) -> Option<Hot> {
+        self.held().hot.get(id).copied()
+    }
+
+    pub fn record(&self, id: &TaskId) -> Option<TaskRecord> {
+        self.held().live(id).cloned()
+    }
+
     fn withdraw(&self, id: &TaskId) {
-        self.held().tasks.remove(id);
+        let mut held = self.held();
+        held.tasks.remove(id);
+        held.hot.remove(id);
+        if let Err(e) = self.blobs.delete(&name_of(id)) {
+            eprintln!("maknaed: withdrawn task {id} stays on disk: {e}");
+        }
     }
 
     #[cfg(any(test, feature = "hermetic-test-seam"))]
     pub fn insert_for_test(&self, signed: SignedTask, agent_uid: u32) -> Arc<SignedTask> {
         let agent = AgentId::parse(&signed.task.agent).expect("a test task names a valid agent id");
-        let task = Arc::new(signed);
-        self.held().tasks.insert(
-            task.task.task_id,
-            StoredTask {
-                task: task.clone(),
-                agent,
-                agent_uid,
+        let root = match &signed.task.tasker {
+            Tasker::Uid(uid) => RootTasker::Person {
+                uid: *uid,
+                account: format!("uid{uid}"),
             },
-        );
+            Tasker::Agent { agent, .. } | Tasker::Remote(agent) => RootTasker::Agent {
+                agent: agent.clone(),
+            },
+        };
+        let task = Arc::new(signed);
+        let mut held = self.held();
+        let seq = self
+            .issue(&mut held, Sequence::Submission)
+            .expect("the test store issues a sequence");
+        let rec = TaskRecord {
+            signed: task.clone(),
+            agent,
+            agent_uid,
+            tasker: task.task.tasker.clone(),
+            root,
+            parent: task.task.parent,
+            state: TaskState::Queued,
+            close: None,
+            pending: false,
+            seq,
+            rseq: None,
+            submitted: self.clock.now_secs(),
+            claimed: None,
+            follow_ups: Vec::new(),
+            report: None,
+        };
+        self.write(&rec).expect("the test store writes the task");
+        held.hot.insert(task.task.task_id, Hot::default());
+        held.tasks.insert(task.task.task_id, rec);
         task
     }
 
     #[cfg(test)]
     fn len(&self) -> usize {
         self.held().tasks.len()
+    }
+}
+
+fn store(e: StoreError) -> TaskRefusal {
+    TaskRefusal::Store(e.to_string())
+}
+
+/// A sub-task works in its parent's partition; a person's own task, in the account's.
+fn root_of(
+    held: &Held,
+    task: &TaskObject,
+    account: Option<&str>,
+) -> Result<RootTasker, TaskRefusal> {
+    if let Some(parent) = task.parent {
+        return held
+            .live(&parent)
+            .map(|p| p.root.clone())
+            .ok_or(TaskRefusal::ParentNotHeld);
+    }
+    match &task.tasker {
+        Tasker::Uid(uid) => account
+            .map(|a| RootTasker::Person {
+                uid: *uid,
+                account: a.to_owned(),
+            })
+            .ok_or(TaskRefusal::NoAccount),
+        Tasker::Agent { agent, .. } => Ok(RootTasker::Agent {
+            agent: agent.clone(),
+        }),
+        Tasker::Remote(_) => Err(TaskRefusal::Schema("a remote tasker is not taken".into())),
     }
 }
 
@@ -338,11 +617,11 @@ fn owned(
     agent: &AgentId,
     uid: u32,
 ) -> Result<Arc<SignedTask>, TaskRefusal> {
-    let stored = held.tasks.get(id).ok_or(TaskRefusal::Unknown)?;
+    let stored = held.live(id).ok_or(TaskRefusal::Unknown)?;
     if stored.agent != *agent || stored.agent_uid != uid {
         return Err(TaskRefusal::OtherAgent);
     }
-    Ok(stored.task.clone())
+    Ok(stored.signed.clone())
 }
 
 fn target(sub: &TaskSubmission) -> Result<AgentId, TaskRefusal> {
@@ -607,6 +886,7 @@ async fn decide<P: Authorizer + Send + Sync + 'static>(
         },
         attempt.tasker.clone(),
         attempt.parent,
+        ctx.user,
         sub,
     )
 }
@@ -657,6 +937,7 @@ mod tests {
     const BOUND: std::time::Duration = std::time::Duration::from_secs(5);
     type Breaker = Arc<tokio::sync::Mutex<BlockingBreaker>>;
     const PROMPT: &str = "task-11-prompt-sentinel";
+    const ACCOUNT: &str = "jimin";
     const AUTHZ: &str = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nroles:\n  user:\n    allow: [\"session.task\"]\n";
 
     fn id(s: &str) -> AgentId {
@@ -734,6 +1015,7 @@ mod tests {
                     at(0, HOBI),
                     Tasker::Uid(1000),
                     None,
+                    Some(ACCOUNT),
                     sub("hobi")
                 )
                 .unwrap_err(),
@@ -749,6 +1031,7 @@ mod tests {
                     at(0, HOBI),
                     Tasker::Uid(1000),
                     None,
+                    Some(ACCOUNT),
                     sub("hobi"),
                 )
                 .unwrap();
@@ -772,6 +1055,7 @@ mod tests {
                     at(0, HOBI),
                     Tasker::Uid(1),
                     None,
+                    Some(ACCOUNT),
                     sub("hobi"),
                 )
                 .unwrap();
@@ -825,6 +1109,7 @@ mod tests {
                 at(0, HOBI),
                 Tasker::Uid(1000),
                 None,
+                Some(ACCOUNT),
                 sub("hobi"),
             )
             .unwrap();
@@ -870,6 +1155,7 @@ mod tests {
                 at(0, HOBI),
                 Tasker::Uid(1000),
                 None,
+                Some(ACCOUNT),
                 sub("hobi"),
             )
             .unwrap();
@@ -956,7 +1242,15 @@ mod tests {
             let v = view(&[("hobi", HOBI), ("jin", JIN)]);
             let mint_by = |s: &LeafSigner, to: &str| {
                 store
-                    .mint(s, &v, at(0, v.0[&id(to)]), Tasker::Uid(1000), None, sub(to))
+                    .mint(
+                        s,
+                        &v,
+                        at(0, v.0[&id(to)]),
+                        Tasker::Uid(1000),
+                        None,
+                        Some(ACCOUNT),
+                        sub(to),
+                    )
                     .unwrap()
             };
             let before = mint_by(&signing, "hobi");
@@ -1030,6 +1324,7 @@ mod tests {
                 at(store.generation(&id(agent)), v.0[&id(agent)]),
                 Tasker::Uid(1000),
                 None,
+                Some(ACCOUNT),
                 sub(agent),
             )
             .unwrap()
@@ -1043,7 +1338,13 @@ mod tests {
             agent: "jin".into(),
             uid: JIN,
         };
-        let parent = TaskId([7; 16]);
+        let parent = store
+            .insert_for_test(
+                signer().sign(TaskObject::for_test("jin", 1000)).unwrap(),
+                JIN,
+            )
+            .task
+            .task_id;
         let a = store
             .mint(
                 signer(),
@@ -1051,6 +1352,7 @@ mod tests {
                 at(0, HOBI),
                 tasker.clone(),
                 Some(parent),
+                Some(ACCOUNT),
                 sub("hobi"),
             )
             .unwrap();
@@ -1066,7 +1368,7 @@ mod tests {
         assert_eq!(a.task.ask, sub("hobi").ask);
         assert_eq!(b.task.tasker, Tasker::Uid(1000));
         assert_eq!(b.task.parent, None);
-        assert_eq!(store.len(), 2);
+        assert_eq!(store.len(), 3);
         let got = store.resolve(&a.task.task_id, &id("hobi"), HOBI).unwrap();
         assert!(Arc::ptr_eq(&got, &a));
     }
@@ -1085,6 +1387,7 @@ mod tests {
                 at(0, HOBI),
                 Tasker::Uid(1),
                 None,
+                Some(ACCOUNT),
                 sub("hobi"),
             )
             .unwrap();
@@ -1096,6 +1399,7 @@ mod tests {
                 at(0, HOBI),
                 Tasker::Uid(1),
                 None,
+                Some(ACCOUNT),
                 sub("hobi"),
             )
             .unwrap();
@@ -1112,6 +1416,7 @@ mod tests {
                     at(0, HOBI),
                     Tasker::Uid(1),
                     None,
+                    Some(ACCOUNT),
                     sub("hobi")
                 )
                 .unwrap_err(),
@@ -1213,6 +1518,7 @@ mod tests {
                     at(0, HOBI),
                     Tasker::Uid(1000),
                     None,
+                    Some(ACCOUNT),
                     sub("hobi")
                 )
                 .unwrap_err(),
@@ -1238,6 +1544,7 @@ mod tests {
                     at(0, HOBI),
                     Tasker::Uid(1000),
                     None,
+                    Some(ACCOUNT),
                     sub("hobi")
                 )
                 .unwrap_err(),
@@ -1251,6 +1558,7 @@ mod tests {
                 at(0, 0),
                 Tasker::Uid(1000),
                 None,
+                Some(ACCOUNT),
                 sub("Not An Id")
             ),
             Err(TaskRefusal::Schema(_))
@@ -1271,6 +1579,7 @@ mod tests {
                     at(read, HOBI),
                     Tasker::Uid(1000),
                     None,
+                    Some(ACCOUNT),
                     sub("hobi")
                 )
                 .unwrap_err(),
@@ -1325,6 +1634,19 @@ mod tests {
                 "the task was not audited: sink",
             ),
             (TaskRefusal::Unsigned, "the task could not be signed"),
+            (
+                TaskRefusal::Store("disk".into()),
+                "the task store did not write: disk",
+            ),
+            (
+                TaskRefusal::NoAccount,
+                "the submitting session names no account",
+            ),
+            (TaskRefusal::CursorAhead, "cursor_ahead"),
+            (
+                TaskRefusal::Finished,
+                "the task has already reported or closed",
+            ),
         ];
         for (refusal, text) in cases {
             assert_eq!(refusal.to_string(), text);
@@ -2188,7 +2510,7 @@ mod tests {
             where_: &w,
             session_id: SESSION,
             seq: 5,
-            user: None,
+            user: Some(ACCOUNT),
             peer_uri: None,
             lane: maknae_security::Lane::Local,
             decide_timeout: BOUND,

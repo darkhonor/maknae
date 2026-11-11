@@ -411,7 +411,11 @@ pub(crate) fn set_owner_and_mode<F: AsFd>(
     nix::sys::stat::fchmod(fd.as_fd(), NixMode::from_bits_truncate(mode.0 as _))
 }
 
-pub(crate) fn rename_at<F: AsFd>(dirfd: &F, from: &str, to: &str) -> nix::Result<()> {
+pub(crate) fn rename_at<F: AsFd, P: ?Sized + nix::NixPath>(
+    dirfd: &F,
+    from: &P,
+    to: &P,
+) -> nix::Result<()> {
     nix::fcntl::renameat(dirfd, from, dirfd, to)
 }
 

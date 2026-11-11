@@ -38,8 +38,9 @@ const MAX_CONNECTIONS_RANGE: std::ops::RangeInclusive<i64> = 1..=4096;
 /// The smallest `prompt_max_bytes` an operator can set. Exported because the
 /// tool-call argument bound is derived from it (`maknae-kernel` pins the fit).
 pub const PROMPT_MAX_BYTES_FLOOR: usize = 65_536;
+pub const PROMPT_MAX_CEILING: usize = 16_777_216;
 const PROMPT_MAX_BYTES_RANGE: std::ops::RangeInclusive<i64> =
-    PROMPT_MAX_BYTES_FLOOR as i64..=16_777_216;
+    PROMPT_MAX_BYTES_FLOOR as i64..=PROMPT_MAX_CEILING as i64;
 /// The ceiling on both transport timeouts. Named and exported because the
 /// shipped units' stop timeouts are derived from it (`maknae-kernel`'s
 /// shutdown-chain test evaluates the handler drain at this ceiling too).

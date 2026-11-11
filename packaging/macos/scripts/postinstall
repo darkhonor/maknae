@@ -204,6 +204,7 @@ verify "/var/log/maknae ownership/mode" "$MUID $MGID 700" "$(stat -f '%u %g %Lp'
 # daemon account cannot swap a name for a link to a root file between check and chown.
 STATE="/usr/local/var/db/maknae/state"
 CONV="$STATE/conversations"
+TASKS="$STATE/tasks"
 install -d -m 0700 -o "$MUID" -g "$MGID" "$STATE"
 hold_dir "$STATE" || { echo "maknae: cannot hold $STATE as root 0700 with no ACL; it is left root-owned" >&2; exit 1; }
 find "$STATE" -xdev -mindepth 1 -maxdepth 1 -type f -links 1 -nouser \
@@ -218,6 +219,16 @@ find "$CONV" -xdev -mindepth 1 -maxdepth 1 -type f -links 1 -nouser \
     -exec chown -h "$MUID:$MGID" {} +
 chown -h "$MUID:$MGID" "$CONV"
 verify "$CONV ownership/mode" "$MUID $MGID 700" "$(stat -f '%u %g %Lp' "$CONV")"
+if [ -L "$TASKS" ] || { [ -e "$TASKS" ] && [ ! -d "$TASKS" ]; }; then
+    echo "maknae: $TASKS is not a directory; $STATE is left root-owned" >&2
+    exit 1
+fi
+[ -d "$TASKS" ] || mkdir -m 0700 "$TASKS"
+hold_dir "$TASKS" || { echo "maknae: cannot hold $TASKS as root 0700 with no ACL; it is left root-owned" >&2; exit 1; }
+find "$TASKS" -xdev -mindepth 1 -maxdepth 1 -type f -links 1 -nouser \
+    -exec chown -h "$MUID:$MGID" {} +
+chown -h "$MUID:$MGID" "$TASKS"
+verify "$TASKS ownership/mode" "$MUID $MGID 700" "$(stat -f '%u %g %Lp' "$TASKS")"
 chown -h "$MUID:$MGID" "$STATE"
 verify "$STATE ownership/mode" "$MUID $MGID 700" "$(stat -f '%u %g %Lp' "$STATE")"
 

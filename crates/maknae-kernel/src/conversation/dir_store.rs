@@ -4,22 +4,50 @@ use maknae_io::{
     TargetRequired, Zeroizing,
 };
 use maknae_state::envelope::{open, seal, WrappingKey};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 pub const RECORD_SUFFIX: &str = ".conv";
 pub const RECORD_MAX_BYTES: u64 = 128 << 10;
+pub const QUARANTINE_SUFFIX: &str = ".quarantine";
+
+/// What a directory of sealed records is called, and the bound and suffix of each record.
+#[derive(Clone, Copy, Debug)]
+pub struct Layout {
+    pub what: &'static str,
+    pub suffix: &'static str,
+    pub max_bytes: u64,
+}
+
+pub const CONVERSATIONS: Layout = Layout {
+    what: "conversation",
+    suffix: RECORD_SUFFIX,
+    max_bytes: RECORD_MAX_BYTES,
+};
 
 pub struct DirBlobs {
     anchor: Anchor,
     _lock: AnchorLock,
     owner: u32,
     key: WrappingKey,
+    layout: Layout,
 }
 
 pub type DirStore = BlobStore<DirBlobs>;
 
 impl BlobStore<DirBlobs> {
     pub fn open(dir: &Path, dir_owner: u32, key: WrappingKey) -> Result<DirStore, StoreError> {
+        DirBlobs::open(dir, dir_owner, key, CONVERSATIONS).map(BlobStore::with)
+    }
+}
+
+impl DirBlobs {
+    pub fn open(
+        dir: &Path,
+        dir_owner: u32,
+        key: WrappingKey,
+        layout: Layout,
+    ) -> Result<DirBlobs, StoreError> {
         let anchor = open_anchor(
             dir,
             AnchorRequired {
@@ -30,22 +58,32 @@ impl BlobStore<DirBlobs> {
         )
         .map_err(io)?;
         let lock = anchor.try_lock_exclusive().map_err(|e| match e {
-            IoError::Locked { .. } => {
-                StoreError::Io("another maknaed holds the conversation directory".into())
-            }
+            IoError::Locked { .. } => StoreError::Io(format!(
+                "another maknaed holds the {} directory",
+                layout.what
+            )),
             e => io(e),
         })?;
-        Ok(BlobStore::with(DirBlobs {
+        Ok(DirBlobs {
             anchor,
             _lock: lock,
             owner: dir_owner,
             key,
-        }))
+            layout,
+        })
     }
-}
 
-fn file(name: &str) -> PathBuf {
-    PathBuf::from(format!("{name}{RECORD_SUFFIX}"))
+    fn file(&self, name: &str) -> PathBuf {
+        PathBuf::from(format!("{name}{}", self.layout.suffix))
+    }
+
+    /// Moves the record `name` aside, unread, under a name `names` never lists.
+    pub fn quarantine(&self, name: &str) -> Result<(), StoreError> {
+        let from = self.file(name).into_os_string();
+        let mut to = OsString::from(&from);
+        to.push(QUARANTINE_SUFFIX);
+        self.anchor.rename_durable(&from, &to).map(drop).map_err(io)
+    }
 }
 
 fn io(e: IoError) -> StoreError {
@@ -69,7 +107,7 @@ impl Blobs for DirBlobs {
             .into_iter()
             .filter_map(|e| {
                 let name = e.name.into_string().ok()?;
-                name.strip_suffix(RECORD_SUFFIX).map(str::to_owned)
+                name.strip_suffix(self.layout.suffix).map(str::to_owned)
             })
             .collect())
     }
@@ -80,16 +118,19 @@ impl Blobs for DirBlobs {
             mode_mask: Some(0o077),
             nlink_exactly_one: true,
             regular_file: true,
-            max_bytes: Some(RECORD_MAX_BYTES),
+            max_bytes: Some(self.layout.max_bytes),
         };
-        let sealed = self.anchor.read(&file(name), None, target).map_err(io)?;
+        let sealed = self
+            .anchor
+            .read(&self.file(name), None, target)
+            .map_err(io)?;
         open(&sealed.value, &self.key).map_err(|_| StoreError::Corrupt)
     }
 
     fn save(&self, name: &str, plain: &[u8]) -> Result<(), StoreError> {
         let sealed = seal(plain, &self.key).map_err(|e| StoreError::Io(e.to_string()))?;
         self.anchor
-            .publish(&file(name), None, &sealed, Mode(0o600))
+            .publish(&self.file(name), None, &sealed, Mode(0o600))
             .map(|_| ())
             .map_err(io)
     }
@@ -97,7 +138,7 @@ impl Blobs for DirBlobs {
     fn delete(&self, name: &str) -> Result<(), StoreError> {
         match self
             .anchor
-            .remove_durable(&file(name), None)
+            .remove_durable(&self.file(name), None)
             .map_err(io)?
             .value
         {
@@ -119,7 +160,7 @@ mod tests {
         let unit = include_str!("../../../../packaging/common/maknaed.service");
         let lines: Vec<&str> = unit.lines().map(str::trim).collect();
         for want in [
-            "StateDirectory=maknae maknae/conversations",
+            "StateDirectory=maknae maknae/conversations maknae/tasks",
             "StateDirectoryMode=0700",
         ] {
             assert_eq!(lines.iter().filter(|l| **l == want).count(), 1, "{want}");

@@ -147,6 +147,15 @@ phase1() {
     grep -qF 'verify "$CONV ownership/mode" "$MUID $MGID 700"' "$HERE/scripts/postinstall" \
         && ok "postinstall verifies the conversation store dir" \
         || fail "postinstall does not verify the conversation store dir"
+    grep -qE '^install -d .*/usr/local/var/db/maknae/state/tasks$' "$HERE/scripts/preinstall" \
+        && fail "preinstall creates the task store beneath a daemon-owned state dir" \
+        || ok "preinstall leaves the task store to postinstall"
+    grep -qF 'hold_dir "$TASKS"' "$HERE/scripts/postinstall" \
+        && ok "postinstall holds the task store while root works on it" \
+        || fail "postinstall does not hold the task store"
+    grep -qF 'verify "$TASKS ownership/mode" "$MUID $MGID 700"' "$HERE/scripts/postinstall" \
+        && ok "postinstall verifies the task store dir" \
+        || fail "postinstall does not verify the task store dir"
     grep -qF 'verify "$STATE ownership/mode" "$MUID $MGID 700"' "$HERE/scripts/postinstall" \
         && ok "postinstall verifies the kernel graph state dir" \
         || fail "postinstall does not verify the kernel graph state dir"

@@ -37,6 +37,7 @@ mod session;
 pub mod session_facts;
 pub mod sync;
 mod task;
+pub mod task_store;
 mod uid_gate;
 pub mod vocabulary;
 pub use authz::*;
@@ -100,9 +101,9 @@ pub use session::{Facts, FactsGate, SessionChannel, SessionFacts, SessionRecord}
 #[cfg(any(test, feature = "hermetic-test-seam"))]
 pub use task::TaskObjectForTest;
 pub use task::{
-    Enrolled, PlaneSigner, StoredTask, Submitter, TaskRefusal, TaskSigner, TaskStore,
-    MAX_LIVE_TASKS_PER_AGENT,
+    Enrolled, PlaneSigner, Submitter, TaskRefusal, TaskSigner, TaskStore, MAX_LIVE_TASKS_PER_AGENT,
 };
+pub use task_store::{Clock, RootTasker, SystemClock, TaskRecord, CLAIM_LEASE};
 
 #[used]
 pub static PRIVILEGED_MARKER: &[u8] = b"PRIVILEGED_MAKNAE_KERNEL";

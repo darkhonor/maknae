@@ -4529,6 +4529,7 @@ pub fn run(config_dir: &Path) -> ExitCode {
         scan: production_scan,
         policy_load: maknae_authz_basic::PolicySource::load,
         conversations_open: production_conversations,
+        tasks_open: production_tasks,
     };
     let code = runtime.block_on(async move {
         match run_inner(
@@ -7336,6 +7337,7 @@ struct BootSeams {
     scan: TrailScanner,
     policy_load: PolicyLoader,
     conversations_open: ConversationsOpener,
+    tasks_open: TasksOpener,
 }
 
 type ConversationsOpener =
@@ -7349,6 +7351,90 @@ fn production_conversations(
     Ok(Arc::new(crate::conversation::dir_store::DirStore::open(
         dir, owner, key,
     )?))
+}
+
+type TasksOpener = fn(
+    &Path,
+    u32,
+    WrappingKey,
+) -> Result<Arc<crate::task::TaskStore>, crate::task_store::StoreError>;
+
+fn production_tasks(
+    dir: &Path,
+    owner: u32,
+    key: WrappingKey,
+) -> Result<Arc<crate::task::TaskStore>, crate::task_store::StoreError> {
+    let blobs =
+        crate::conversation::dir_store::DirBlobs::open(dir, owner, key, crate::task_store::TASKS)
+            .map_err(|e| crate::task_store::StoreError::Io(e.to_string()))?;
+    crate::task::TaskStore::open(Box::new(blobs), Arc::new(crate::task_store::SystemClock))
+        .map(Arc::new)
+}
+
+/// Opens the task store with the graph key, records each pending or unreadable record in
+/// the trail, then discards or quarantines it.
+async fn open_tasks(
+    config_dir: &Path,
+    state_dir: &Path,
+    seams: &BootSeams,
+    owner: u32,
+    sink: &maknae_audit_append::AuditSink,
+    ctx: &BootCtx<'_>,
+) -> Result<Arc<crate::task::TaskStore>, RunError> {
+    let dir = state_dir.join(maknae_config::state::TASKS_DIR);
+    let refused = |e: String| {
+        RunError::Other(format!(
+            "task store {} cannot be opened: {e}",
+            dir.display()
+        ))
+    };
+    let key = (seams.graph_key)(config_dir).map_err(|e| refused(e.to_string()))?;
+    let store = (seams.tasks_open)(&dir, owner, WrappingKey::new(key.into_bytes()))
+        .map_err(|e| refused(e.to_string()))?;
+    for finding in store.take_boot_findings() {
+        sink.emit_within(&task_finding_record(ctx, &finding), AUDIT_APPEND_TIMEOUT)
+            .await
+            .map_err(|e| refused(format!("the trail refused a task record: {e}")))?;
+        store.settle(&finding).map_err(|e| refused(e.to_string()))?;
+    }
+    Ok(store)
+}
+
+fn task_finding_record(ctx: &BootCtx<'_>, finding: &crate::task_store::BootFinding) -> AuditRecord {
+    use crate::task_store::BootFinding;
+    match finding {
+        BootFinding::Discarded {
+            task,
+            agent,
+            tasker,
+            parent,
+            ..
+        } => {
+            let mut rec = ctx.record(
+                "session.task",
+                "deny",
+                "task discarded at boot: its submission was never audited",
+                "unauthorized",
+                None,
+            );
+            rec.object = Some(format!("agent:{agent}"));
+            rec.subject.task_id = Some(task.to_string());
+            rec.subject.parent_task_id = parent.map(|p| p.to_string());
+            rec.subject.tasker = Some(maknae_proto::tasker_text(tasker));
+            rec
+        }
+        BootFinding::Quarantined { name, why } => {
+            let mut rec = ctx.record(
+                "session.task",
+                "deny",
+                &format!("task record quarantined at boot: {why}"),
+                "unauthorized",
+                None,
+            );
+            rec.object = Some(format!("task-record:{name}"));
+            rec
+        }
+    }
 }
 
 fn open_conversations(
@@ -7996,6 +8082,15 @@ async fn boot_after_sink(
         lost,
     } = merged;
     let conversations = open_conversations(config_dir, state_dir, seams, euid)?;
+    let tasks = open_tasks(
+        config_dir,
+        state_dir,
+        seams,
+        euid,
+        sink.as_ref(),
+        &graph_ctx,
+    )
+    .await?;
     booted.status.baseline = crate::baseline::BaselineStatus::new(crate::baseline::BaselineState {
         accepted: run,
         pending: pending.clone(),
@@ -8237,7 +8332,7 @@ async fn boot_after_sink(
         lookup_bound: BLOCKING_OPERATION_TIMEOUT,
         lookup_breaker: account_lookup_breaker(),
         containment: containment_status,
-        tasks: Arc::new(crate::task::TaskStore::new()),
+        tasks,
         #[cfg(test)]
         load_gate: None,
         #[cfg(test)]
@@ -12259,7 +12354,16 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             scan: production_scan,
             policy_load: maknae_authz_basic::PolicySource::load,
             conversations_open: memory_conversations,
+            tasks_open: memory_tasks,
         }
+    }
+
+    fn memory_tasks(
+        _: &Path,
+        _: u32,
+        _: WrappingKey,
+    ) -> Result<Arc<crate::task::TaskStore>, crate::task_store::StoreError> {
+        Ok(Arc::new(crate::task::TaskStore::new()))
     }
 
     fn memory_conversations(
@@ -12408,6 +12512,112 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             "{r:?}"
         );
         assert_eq!(refusal_exit_code(&r.unwrap_err()), 1);
+    }
+
+    fn refusing_tasks(
+        _: &Path,
+        _: u32,
+        _: WrappingKey,
+    ) -> Result<Arc<crate::task::TaskStore>, crate::task_store::StoreError> {
+        Err(crate::task_store::StoreError::Io(
+            "sentinel-628-store-refused".into(),
+        ))
+    }
+
+    #[test]
+    fn a_task_store_that_does_not_open_refuses_boot_naming_its_path() {
+        let _g = env_lock();
+        let d = fixture("tasks-refused");
+        let r = block_on_run_inner_with(
+            &d.0,
+            BootSeams {
+                tasks_open: refusing_tasks,
+                ..seams_with(TestEnv::default())
+            },
+        );
+        let path = state_dir(&d.0).join(maknae_config::state::TASKS_DIR);
+        assert!(
+            matches!(&r, Err(RunError::Other(m)) if m.contains(&path.display().to_string())
+                && m.contains("sentinel-628-store-refused")),
+            "{r:?}"
+        );
+    }
+
+    static FOUND_AT_BOOT: std::sync::OnceLock<(crate::task_store::MemTaskBlobs, String)> =
+        std::sync::OnceLock::new();
+
+    fn found_at_boot() -> &'static (crate::task_store::MemTaskBlobs, String) {
+        FOUND_AT_BOOT.get_or_init(|| {
+            let b = crate::task_store::MemTaskBlobs::default();
+            let store = crate::task::TaskStore::open(
+                Box::new(b.clone()),
+                Arc::new(crate::task_store::SystemClock),
+            )
+            .unwrap();
+            let signed = maknae_proto::SignedTask {
+                task: <maknae_proto::TaskObject as crate::task::TaskObjectForTest>::for_test(
+                    "hobi", 1000,
+                ),
+                signature: maknae_proto::TaskSignature {
+                    alg: "test".into(),
+                    leaf: maknae_proto::Bytes(maknae_io::Zeroizing::new(vec![1])),
+                    chain: Vec::new(),
+                    sig: maknae_proto::Bytes(maknae_io::Zeroizing::new(vec![2])),
+                },
+            };
+            let id = store.insert_for_test(signed, 2001).task.task_id;
+            let mut rec = store.record(&id).unwrap();
+            rec.pending = true;
+            let name = crate::task_store::name_of(&id);
+            b.put(&name, &crate::task_store::encode(&rec).unwrap());
+            b.put("sentinel-628-unreadable", b"x");
+            (b, name)
+        })
+    }
+
+    fn tasks_with_findings(
+        _: &Path,
+        _: u32,
+        _: WrappingKey,
+    ) -> Result<Arc<crate::task::TaskStore>, crate::task_store::StoreError> {
+        crate::task::TaskStore::open(
+            Box::new(found_at_boot().0.clone()),
+            Arc::new(crate::task_store::SystemClock),
+        )
+        .map(Arc::new)
+    }
+
+    #[test]
+    fn boot_records_each_pending_or_unreadable_task_before_it_settles_it() {
+        let _g = env_lock();
+        let d = fixture("tasks-found");
+        let (blobs, pending) = found_at_boot();
+        let _ = block_on_run_inner_with(
+            &d.0,
+            BootSeams {
+                tasks_open: tasks_with_findings,
+                ..seams_with(TestEnv::default())
+            },
+        );
+        let recs: Vec<AuditRecord> = trail_of(&d, "audit.jsonl")
+            .into_iter()
+            .filter(|r| r.action == "session.task")
+            .collect();
+        assert_eq!(recs.len(), 2, "{recs:?}");
+        assert_eq!(recs[0].subject.task_id.as_deref(), Some(pending.as_str()));
+        assert_eq!(recs[0].subject.tasker.as_deref(), Some("uid:1000"));
+        assert_eq!(recs[0].object.as_deref(), Some("agent:hobi"));
+        assert!(recs[0].outcome.reason.contains("never audited"));
+        assert_eq!(
+            recs[1].object.as_deref(),
+            Some("task-record:sentinel-628-unreadable")
+        );
+        assert!(recs[1].outcome.reason.contains("quarantined"));
+        assert!(recs
+            .iter()
+            .all(|r| r.event == "boot" && r.outcome.result == "deny"));
+        assert!(!blobs.has(pending));
+        assert_eq!(blobs.aside(), vec!["sentinel-628-unreadable".to_string()]);
     }
 
     fn store_graph(d: &Dir) -> maknae_graph::graph::Graph {

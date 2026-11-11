@@ -750,6 +750,22 @@ impl Anchor {
         })
     }
 
+    /// Renames the entry `from` to `to`, both in this directory itself, replacing `to`,
+    /// then syncs the directory; a failed sync is `PublishedNotDurable`.
+    pub fn rename_durable(
+        &self,
+        from: &std::ffi::OsStr,
+        to: &std::ffi::OsStr,
+    ) -> Result<Outcome<()>, IoError> {
+        let from = self.one_component(from)?;
+        let to = self.one_component(to)?;
+        crate::write::rename_at_durable(&self.fd, from, to, &self.path.join(to))?;
+        Ok(Outcome {
+            value: (),
+            effective_strategy: Strategy::Portable,
+        })
+    }
+
     /// The identity of the entry `name` names in this directory, never following
     /// a symlink; `None` when there is no such entry.
     // The stat field types differ on macOS, where these casts are not no-ops.
@@ -3015,6 +3031,45 @@ mod tests {
             a.remove_durable(Path::new("../x"), None).unwrap_err(),
             IoError::EscapesAnchor { .. }
         ));
+    }
+
+    #[test]
+    fn rename_durable_moves_an_entry_and_replaces_the_target() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        std::fs::write(a.path.join("rec"), b"new").unwrap();
+        std::fs::write(a.path.join("aside"), b"old").unwrap();
+        a.rename_durable(std::ffi::OsStr::new("rec"), std::ffi::OsStr::new("aside"))
+            .unwrap();
+        assert!(std::fs::symlink_metadata(a.path.join("rec")).is_err());
+        assert_eq!(std::fs::read(a.path.join("aside")).unwrap(), b"new");
+    }
+
+    #[test]
+    fn rename_durable_refuses_an_absent_name_and_any_name_beyond_the_anchor() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        assert!(matches!(
+            a.rename_durable(
+                std::ffi::OsStr::new("absent"),
+                std::ffi::OsStr::new("aside")
+            ),
+            Err(IoError::Io {
+                kind: crate::IoKind::NotFound,
+                ..
+            })
+        ));
+        std::fs::write(a.path.join("rec"), b"x").unwrap();
+        for (from, to) in [("../rec", "aside"), ("rec", "sub/aside"), ("rec", "..")] {
+            assert!(
+                matches!(
+                    a.rename_durable(std::ffi::OsStr::new(from), std::ffi::OsStr::new(to)),
+                    Err(IoError::EscapesAnchor { .. })
+                ),
+                "{from} -> {to}"
+            );
+        }
+        assert!(a.path.join("rec").is_file());
     }
 
     #[test]

@@ -185,6 +185,10 @@ fn task_reason(r: &TaskRefusal) -> &'static str {
         TaskRefusal::Random => "task-random",
         TaskRefusal::Audit(_) => "task-audit",
         TaskRefusal::Unsigned => "task-unsigned",
+        TaskRefusal::Store(_) => "task-store",
+        TaskRefusal::NoAccount => "task-no-account",
+        TaskRefusal::CursorAhead => "cursor_ahead",
+        TaskRefusal::Finished => "task-finished",
     }
 }
 

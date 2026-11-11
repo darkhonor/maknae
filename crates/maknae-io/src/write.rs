@@ -93,6 +93,30 @@ fn remove_synced<F: AsFd>(
     Ok(true)
 }
 
+pub(crate) fn rename_at_durable<F: AsFd>(
+    dirfd: &F,
+    from: &std::ffi::OsStr,
+    to: &std::ffi::OsStr,
+    at: &Path,
+) -> Result<(), IoError> {
+    rename_synced(dirfd, from, to, at, syscall::fsync_fd)
+}
+
+fn rename_synced<F: AsFd>(
+    dirfd: &F,
+    from: &std::ffi::OsStr,
+    to: &std::ffi::OsStr,
+    at: &Path,
+    sync_dir: impl FnOnce(&F) -> nix::Result<()>,
+) -> Result<(), IoError> {
+    syscall::rename_at(dirfd, from, to)
+        .map_err(|e| crate::checks::map_errno_no_disambiguation(e, at))?;
+    sync_dir(dirfd).map_err(|e| IoError::PublishedNotDurable {
+        path: at.to_path_buf(),
+        kind: crate::checks::kind_of_errno(e),
+    })
+}
+
 fn publish_raw<F: AsFd>(
     dirfd: &F,
     final_name: &str,
@@ -126,7 +150,7 @@ fn publish_raw<F: AsFd>(
     }
     drop(fd);
 
-    if let Err(e) = syscall::rename_at(dirfd, &tmp, final_name) {
+    if let Err(e) = syscall::rename_at(dirfd, tmp.as_str(), final_name) {
         let _ = syscall::unlink_at(dirfd, &tmp);
         return Err(e);
     }
@@ -288,6 +312,28 @@ mod tests {
             }
         );
         assert!(std::fs::symlink_metadata(&at).is_err());
+    }
+
+    #[test]
+    fn a_failed_directory_sync_after_a_rename_is_published_not_durable() {
+        let d = tempfile::tempdir().unwrap();
+        let dirfd = std::fs::File::open(d.path()).unwrap();
+        std::fs::write(d.path().join("f"), b"old").unwrap();
+        let at = d.path().join("g");
+        use nix::errno::Errno;
+        let from = std::ffi::OsStr::new("f");
+        let to = std::ffi::OsStr::new("g");
+        let e = rename_synced(&dirfd, from, to, &at, |_| Err(Errno::EIO)).unwrap_err();
+        assert_eq!(
+            e,
+            IoError::PublishedNotDurable {
+                path: at.clone(),
+                kind: crate::IoKind::Other {
+                    raw: Errno::EIO as i32
+                },
+            }
+        );
+        assert_eq!(std::fs::read(&at).unwrap(), b"old");
     }
 
     #[test]
