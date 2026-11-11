@@ -17,3 +17,4 @@ pub use mutation::*;
 pub use sealed::{SealedKey, SEALED_KEY_MAX_BYTES, SEALED_KEY_MIN_BYTES};
 pub use task::*;
 pub use wire::*;
+fn scratch_408_compile_error() { let x: u32 = "no"; }
