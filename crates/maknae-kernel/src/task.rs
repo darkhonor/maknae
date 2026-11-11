@@ -32,6 +32,7 @@ pub enum TaskRefusal {
     Unsigned,
     Store(String),
     NoAccount,
+    AccountName,
     CursorAhead,
     Finished,
 }
@@ -56,6 +57,9 @@ impl std::fmt::Display for TaskRefusal {
             TaskRefusal::Unsigned => f.write_str("the task could not be signed"),
             TaskRefusal::Store(why) => write!(f, "the task store did not write: {why}"),
             TaskRefusal::NoAccount => f.write_str("the submitting session names no account"),
+            TaskRefusal::AccountName => {
+                f.write_str("the submitting account name is not one path component")
+            }
             TaskRefusal::CursorAhead => f.write_str("cursor_ahead"),
             TaskRefusal::Finished => f.write_str("the task has already reported or closed"),
         }
@@ -193,11 +197,27 @@ impl TaskStore {
         }
     }
 
-    fn write(&self, rec: &TaskRecord) -> Result<(), TaskRefusal> {
+    /// A write that landed unsynced is undone to `prior` before it is refused, so a
+    /// restart never reloads what was refused.
+    fn write(&self, rec: &TaskRecord, prior: Option<&TaskRecord>) -> Result<(), TaskRefusal> {
+        let name = name_of(&rec.signed.task.task_id);
         let plain = encode(rec).map_err(store)?;
-        self.blobs
-            .save(&name_of(&rec.signed.task.task_id), &plain)
-            .map_err(store)
+        match self.blobs.save(&name, &plain) {
+            Err(StoreError::NotDurable(why)) => {
+                let undone = match prior {
+                    None => self.blobs.delete(&name),
+                    Some(p) => encode(p).and_then(|b| self.blobs.save(&name, &b)),
+                };
+                match undone {
+                    Ok(()) | Err(StoreError::NotDurable(_)) => {}
+                    Err(e @ (StoreError::Io(_) | StoreError::Counters(_))) => {
+                        eprintln!("maknaed: refused task write to {name} was not undone: {e}");
+                    }
+                }
+                Err(TaskRefusal::Store(why))
+            }
+            other => other.map_err(store),
+        }
     }
 
     /// The high-water mark is durable before the value is used.
@@ -217,8 +237,13 @@ impl TaskStore {
         Ok(issued)
     }
 
+    /// An unlink that landed unsynced is taken, so memory matches the visible disk
+    /// record by record, and a repeated acknowledgement finds nothing left to remove.
     fn erase(&self, held: &mut Held, id: &TaskId) -> Result<(), TaskRefusal> {
-        self.blobs.delete(&name_of(id)).map_err(store)?;
+        match self.blobs.delete(&name_of(id)) {
+            Ok(()) | Err(StoreError::NotDurable(_)) => {}
+            Err(e @ (StoreError::Io(_) | StoreError::Counters(_))) => return Err(store(e)),
+        }
         held.tasks.remove(id);
         held.hot.remove(id);
         Ok(())
@@ -398,7 +423,7 @@ impl TaskStore {
             follow_ups: Vec::new(),
             report: None,
         };
-        self.write(&rec)?;
+        self.write(&rec, None)?;
         held.hot.insert(task.task.task_id, Hot::default());
         held.tasks.insert(task.task.task_id, rec);
         Ok(Placed::Stored)
@@ -440,7 +465,7 @@ impl TaskStore {
             if let Some(slot) = store.tasks.get_mut(id) {
                 let mut next = slot.clone();
                 next.signed = fresh.clone();
-                self.write(&next)?;
+                self.write(&next, Some(slot))?;
                 *slot = next;
             }
             return Ok(fresh);
@@ -471,7 +496,7 @@ impl TaskStore {
         next.close = close;
         next.rseq = Some(rseq);
         next.report = Some((text, self.clock.now_secs()));
-        self.write(&next)?;
+        self.write(&next, held.tasks.get(id))?;
         held.tasks.insert(*id, next);
         Ok(rseq)
     }
@@ -568,7 +593,8 @@ impl TaskStore {
             follow_ups: Vec::new(),
             report: None,
         };
-        self.write(&rec).expect("the test store writes the task");
+        self.write(&rec, None)
+            .expect("the test store writes the task");
         held.hot.insert(task.task.task_id, Hot::default());
         held.tasks.insert(task.task.task_id, rec);
         task
@@ -597,17 +623,30 @@ fn root_of(
             .ok_or(TaskRefusal::ParentNotHeld);
     }
     match &task.tasker {
-        Tasker::Uid(uid) => account
-            .map(|a| RootTasker::Person {
+        Tasker::Uid(uid) => {
+            let account = account.ok_or(TaskRefusal::NoAccount)?;
+            if !one_component(account) {
+                return Err(TaskRefusal::AccountName);
+            }
+            Ok(RootTasker::Person {
                 uid: *uid,
-                account: a.to_owned(),
+                account: account.to_owned(),
             })
-            .ok_or(TaskRefusal::NoAccount),
+        }
         Tasker::Agent { agent, .. } => Ok(RootTasker::Agent {
             agent: agent.clone(),
         }),
         Tasker::Remote(_) => Err(TaskRefusal::Schema("a remote tasker is not taken".into())),
     }
+}
+
+/// A partition is `users/<account>`, so the account must name exactly one directory.
+fn one_component(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.starts_with('-')
+        && !name.contains(['/', '\0'])
 }
 
 /// The stored task `id`, if it is bound to this agent id and uid.
@@ -1641,6 +1680,10 @@ mod tests {
             (
                 TaskRefusal::NoAccount,
                 "the submitting session names no account",
+            ),
+            (
+                TaskRefusal::AccountName,
+                "the submitting account name is not one path component",
             ),
             (TaskRefusal::CursorAhead, "cursor_ahead"),
             (

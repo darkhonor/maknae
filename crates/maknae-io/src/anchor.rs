@@ -750,16 +750,16 @@ impl Anchor {
         })
     }
 
-    /// Renames the entry `from` to `to`, both in this directory itself, replacing `to`,
-    /// then syncs the directory; a failed sync is `PublishedNotDurable`.
-    pub fn rename_durable(
+    /// Moves the entry `from` to `to`, both in this directory itself, then syncs the
+    /// directory. An existing `to` is refused (`AlreadyExists`) and both entries are kept.
+    pub fn move_aside_durable(
         &self,
         from: &std::ffi::OsStr,
         to: &std::ffi::OsStr,
     ) -> Result<Outcome<()>, IoError> {
         let from = self.one_component(from)?;
         let to = self.one_component(to)?;
-        crate::write::rename_at_durable(&self.fd, from, to, &self.path.join(to))?;
+        crate::write::move_aside_durable(&self.fd, from, to, &self.path)?;
         Ok(Outcome {
             value: (),
             effective_strategy: Strategy::Portable,
@@ -3034,36 +3034,44 @@ mod tests {
     }
 
     #[test]
-    fn rename_durable_moves_an_entry_and_replaces_the_target() {
+    fn move_aside_durable_moves_an_entry_and_never_replaces_one() {
         let d = dir(0o750);
         let a = anchor_at(d.path(), "cfg");
-        std::fs::write(a.path.join("rec"), b"new").unwrap();
-        std::fs::write(a.path.join("aside"), b"old").unwrap();
-        a.rename_durable(std::ffi::OsStr::new("rec"), std::ffi::OsStr::new("aside"))
-            .unwrap();
+        let os = std::ffi::OsStr::new;
+        std::fs::write(a.path.join("rec"), b"first").unwrap();
+        a.move_aside_durable(os("rec"), os("aside")).unwrap();
         assert!(std::fs::symlink_metadata(a.path.join("rec")).is_err());
-        assert_eq!(std::fs::read(a.path.join("aside")).unwrap(), b"new");
+        assert_eq!(std::fs::read(a.path.join("aside")).unwrap(), b"first");
+        std::fs::write(a.path.join("rec"), b"second").unwrap();
+        let e = a.move_aside_durable(os("rec"), os("aside")).unwrap_err();
+        assert_eq!(
+            e,
+            IoError::Io {
+                path: a.path.join("aside"),
+                kind: crate::IoKind::AlreadyExists,
+            }
+        );
+        assert_eq!(std::fs::read(a.path.join("rec")).unwrap(), b"second");
+        assert_eq!(std::fs::read(a.path.join("aside")).unwrap(), b"first");
     }
 
     #[test]
-    fn rename_durable_refuses_an_absent_name_and_any_name_beyond_the_anchor() {
+    fn move_aside_durable_refuses_an_absent_name_and_any_name_beyond_the_anchor() {
         let d = dir(0o750);
         let a = anchor_at(d.path(), "cfg");
-        assert!(matches!(
-            a.rename_durable(
-                std::ffi::OsStr::new("absent"),
-                std::ffi::OsStr::new("aside")
-            ),
-            Err(IoError::Io {
+        let os = std::ffi::OsStr::new;
+        assert_eq!(
+            a.move_aside_durable(os("absent"), os("aside")).unwrap_err(),
+            IoError::Io {
+                path: a.path.join("absent"),
                 kind: crate::IoKind::NotFound,
-                ..
-            })
-        ));
+            }
+        );
         std::fs::write(a.path.join("rec"), b"x").unwrap();
         for (from, to) in [("../rec", "aside"), ("rec", "sub/aside"), ("rec", "..")] {
             assert!(
                 matches!(
-                    a.rename_durable(std::ffi::OsStr::new(from), std::ffi::OsStr::new(to)),
+                    a.move_aside_durable(os(from), os(to)),
                     Err(IoError::EscapesAnchor { .. })
                 ),
                 "{from} -> {to}"

@@ -411,15 +411,19 @@ pub(crate) fn set_owner_and_mode<F: AsFd>(
     nix::sys::stat::fchmod(fd.as_fd(), NixMode::from_bits_truncate(mode.0 as _))
 }
 
-pub(crate) fn rename_at<F: AsFd, P: ?Sized + nix::NixPath>(
-    dirfd: &F,
-    from: &P,
-    to: &P,
-) -> nix::Result<()> {
+pub(crate) fn rename_at<F: AsFd>(dirfd: &F, from: &str, to: &str) -> nix::Result<()> {
     nix::fcntl::renameat(dirfd, from, dirfd, to)
 }
 
-pub(crate) fn unlink_at<F: AsFd>(dirfd: &F, name: &str) -> nix::Result<()> {
+pub(crate) fn link_at<F: AsFd>(
+    dirfd: &F,
+    from: &std::ffi::OsStr,
+    to: &std::ffi::OsStr,
+) -> nix::Result<()> {
+    nix::unistd::linkat(dirfd, from, dirfd, to, nix::fcntl::AtFlags::empty())
+}
+
+pub(crate) fn unlink_at<F: AsFd, P: ?Sized + nix::NixPath>(dirfd: &F, name: &P) -> nix::Result<()> {
     nix::unistd::unlinkat(dirfd, name, nix::unistd::UnlinkatFlags::NoRemoveDir)
 }
 

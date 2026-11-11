@@ -82,7 +82,10 @@ impl DirBlobs {
         let from = self.file(name).into_os_string();
         let mut to = OsString::from(&from);
         to.push(QUARANTINE_SUFFIX);
-        self.anchor.rename_durable(&from, &to).map(drop).map_err(io)
+        self.anchor
+            .move_aside_durable(&from, &to)
+            .map(drop)
+            .map_err(io)
     }
 }
 

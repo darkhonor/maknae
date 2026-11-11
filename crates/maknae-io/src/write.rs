@@ -93,26 +93,40 @@ fn remove_synced<F: AsFd>(
     Ok(true)
 }
 
-pub(crate) fn rename_at_durable<F: AsFd>(
+pub(crate) fn move_aside_durable<F: AsFd>(
     dirfd: &F,
     from: &std::ffi::OsStr,
     to: &std::ffi::OsStr,
-    at: &Path,
+    dir: &Path,
 ) -> Result<(), IoError> {
-    rename_synced(dirfd, from, to, at, syscall::fsync_fd)
+    move_aside_synced(dirfd, from, to, dir, syscall::fsync_fd)
 }
 
-fn rename_synced<F: AsFd>(
+/// `linkat` then `unlinkat`, so an existing `to` is refused with `EEXIST`, never replaced.
+fn move_aside_synced<F: AsFd>(
     dirfd: &F,
     from: &std::ffi::OsStr,
     to: &std::ffi::OsStr,
-    at: &Path,
+    dir: &Path,
     sync_dir: impl FnOnce(&F) -> nix::Result<()>,
 ) -> Result<(), IoError> {
-    syscall::rename_at(dirfd, from, to)
-        .map_err(|e| crate::checks::map_errno_no_disambiguation(e, at))?;
+    syscall::link_at(dirfd, from, to).map_err(|e| {
+        let named = if e == nix::errno::Errno::EEXIST {
+            to
+        } else {
+            from
+        };
+        crate::checks::map_errno_no_disambiguation(e, &dir.join(named))
+    })?;
+    if let Err(e) = syscall::unlink_at(dirfd, from) {
+        let _ = syscall::unlink_at(dirfd, to);
+        return Err(crate::checks::map_errno_no_disambiguation(
+            e,
+            &dir.join(from),
+        ));
+    }
     sync_dir(dirfd).map_err(|e| IoError::PublishedNotDurable {
-        path: at.to_path_buf(),
+        path: dir.join(to),
         kind: crate::checks::kind_of_errno(e),
     })
 }
@@ -137,7 +151,7 @@ fn publish_raw<F: AsFd>(
     let fd = syscall::open_temp_excl(dirfd, &tmp, mode)?;
     if let Some(owner) = owner {
         if let Err(e) = syscall::set_owner_and_mode(&fd, owner, mode) {
-            let _ = syscall::unlink_at(dirfd, &tmp);
+            let _ = syscall::unlink_at(dirfd, tmp.as_str());
             return Err(e);
         }
     }
@@ -145,13 +159,13 @@ fn publish_raw<F: AsFd>(
     // Cleanup is best-effort and deliberately `let _ =`: the caller must keep the
     // ORIGINAL error, never a masking unlink error.
     if let Err(write_err) = write_all_sync(&fd, bytes) {
-        let _ = syscall::unlink_at(dirfd, &tmp);
+        let _ = syscall::unlink_at(dirfd, tmp.as_str());
         return Err(write_err);
     }
     drop(fd);
 
-    if let Err(e) = syscall::rename_at(dirfd, tmp.as_str(), final_name) {
-        let _ = syscall::unlink_at(dirfd, &tmp);
+    if let Err(e) = syscall::rename_at(dirfd, &tmp, final_name) {
+        let _ = syscall::unlink_at(dirfd, tmp.as_str());
         return Err(e);
     }
     Ok(())
@@ -315,25 +329,25 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_directory_sync_after_a_rename_is_published_not_durable() {
+    fn a_failed_directory_sync_after_a_move_aside_is_published_not_durable() {
         let d = tempfile::tempdir().unwrap();
         let dirfd = std::fs::File::open(d.path()).unwrap();
         std::fs::write(d.path().join("f"), b"old").unwrap();
-        let at = d.path().join("g");
         use nix::errno::Errno;
         let from = std::ffi::OsStr::new("f");
         let to = std::ffi::OsStr::new("g");
-        let e = rename_synced(&dirfd, from, to, &at, |_| Err(Errno::EIO)).unwrap_err();
+        let e = move_aside_synced(&dirfd, from, to, d.path(), |_| Err(Errno::EIO)).unwrap_err();
         assert_eq!(
             e,
             IoError::PublishedNotDurable {
-                path: at.clone(),
+                path: d.path().join("g"),
                 kind: crate::IoKind::Other {
                     raw: Errno::EIO as i32
                 },
             }
         );
-        assert_eq!(std::fs::read(&at).unwrap(), b"old");
+        assert_eq!(std::fs::read(d.path().join("g")).unwrap(), b"old");
+        assert!(std::fs::symlink_metadata(d.path().join("f")).is_err());
     }
 
     #[test]

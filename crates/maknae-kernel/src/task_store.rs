@@ -134,8 +134,7 @@ pub struct Counters {
     pub rseq: u64,
 }
 
-/// In memory only: `actions` and `last_action` reach disk on the sweep's cadence and
-/// `lease_until` never does.
+/// In memory only; `lease_until` is never persisted.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Hot {
     pub actions: u32,
@@ -146,13 +145,15 @@ pub struct Hot {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StoreError {
     Io(String),
+    /// The write or unlink happened and is visible, but the directory was not synced.
+    NotDurable(String),
     Counters(String),
 }
 
 impl std::fmt::Display for StoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            StoreError::Io(why) => f.write_str(why),
+            StoreError::Io(why) | StoreError::NotDurable(why) => f.write_str(why),
             StoreError::Counters(why) => write!(f, "task counters {why}"),
         }
     }
@@ -185,7 +186,10 @@ pub trait TaskBlobs: Send + Sync {
 }
 
 fn lift(e: BlobError) -> StoreError {
-    StoreError::Io(e.to_string())
+    match e {
+        BlobError::NotDurable(why) => StoreError::NotDurable(why),
+        other => StoreError::Io(other.to_string()),
+    }
 }
 
 impl TaskBlobs for DirBlobs {
@@ -337,6 +341,7 @@ pub struct MemInner {
 pub enum Fail {
     Every,
     Records,
+    Unsynced,
 }
 
 #[cfg(any(test, feature = "hermetic-test-seam"))]
@@ -386,7 +391,21 @@ impl MemTaskBlobs {
             Some(Fail::Records) if name != COUNTERS => {
                 Err(StoreError::Io("sentinel-628-write-refused".into()))
             }
-            Some(Fail::Records) | None => Ok(()),
+            Some(Fail::Records) | Some(Fail::Unsynced) | None => Ok(()),
+        }
+    }
+
+    fn landed(&self, name: &str) -> Result<(), StoreError> {
+        let fail = *self
+            .0
+            .fail
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match fail {
+            Some(Fail::Unsynced) if name != COUNTERS => {
+                Err(StoreError::NotDurable("sentinel-628-unsynced".into()))
+            }
+            Some(Fail::Every) | Some(Fail::Records) | Some(Fail::Unsynced) | None => Ok(()),
         }
     }
 }
@@ -408,13 +427,13 @@ impl TaskBlobs for MemTaskBlobs {
     fn save(&self, name: &str, plain: &[u8]) -> Result<(), StoreError> {
         self.refuse(name)?;
         self.put(name, plain);
-        Ok(())
+        self.landed(name)
     }
 
     fn delete(&self, name: &str) -> Result<(), StoreError> {
         self.refuse(name)?;
         self.map().remove(name);
-        Ok(())
+        self.landed(name)
     }
 
     fn quarantine(&self, name: &str) -> Result<(), StoreError> {
@@ -769,6 +788,43 @@ mod tests {
     }
 
     #[test]
+    fn a_write_that_lands_unsynced_is_undone_before_it_is_refused() {
+        let b = MemTaskBlobs::default();
+        let store = open_mem(&b);
+        let id = by_uid(&store, "one");
+        b.fail(Some(Fail::Unsynced));
+        assert!(matches!(
+            mint(&store, Some("jimin")),
+            Err(TaskRefusal::Store(why)) if why == "sentinel-628-unsynced"
+        ));
+        assert!(matches!(
+            store.publish_report(&id, secret("r"), None),
+            Err(TaskRefusal::Store(_))
+        ));
+        b.fail(None);
+        for s in [&store, &open_mem(&b)] {
+            let rec = s.record(&id).unwrap();
+            assert_eq!((rec.state, rec.rseq), (TaskState::Queued, None));
+            assert_eq!(s.queue(&hobi()), vec![id]);
+        }
+        assert_eq!(b.names().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn an_acknowledgement_whose_delete_lands_unsynced_is_taken() {
+        let b = MemTaskBlobs::default();
+        let store = open_mem(&b);
+        let id = by_uid(&store, "one");
+        let rseq = store.publish_report(&id, secret("r"), None).unwrap();
+        b.fail(Some(Fail::Unsynced));
+        assert_eq!(store.acknowledge(&Tasker::Uid(1000), &hobi(), rseq), Ok(1));
+        assert!(store.record(&id).is_none());
+        b.fail(None);
+        assert!(open_mem(&b).record(&id).is_none());
+        assert_eq!(store.acknowledge(&Tasker::Uid(1000), &hobi(), rseq), Ok(0));
+    }
+
+    #[test]
     fn a_withdrawn_or_purged_task_leaves_memory_even_when_its_record_cannot_be_removed() {
         let b = MemTaskBlobs::default();
         let store = open_mem(&b);
@@ -802,6 +858,14 @@ mod tests {
     fn a_persons_task_needs_an_account_and_a_sub_task_inherits_its_root() {
         let store = TaskStore::new();
         assert_eq!(mint(&store, None).unwrap_err(), TaskRefusal::NoAccount);
+        for bad in ["", ".", "..", "-x", "a/b", "a\0b"] {
+            assert_eq!(
+                mint(&store, Some(bad)).unwrap_err(),
+                TaskRefusal::AccountName,
+                "{bad:?}"
+            );
+        }
+        assert!(mint(&store, Some("a.b-c")).is_ok());
         let own = mint(&store, Some("jimin")).unwrap().task.task_id;
         let root = store.record(&own).unwrap().root;
         assert_eq!(
