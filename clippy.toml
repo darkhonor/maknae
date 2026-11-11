@@ -21,6 +21,9 @@ disallowed-methods = [
   { path = "nix::unistd::execv", reason = "spawn through maknae_io::program::command (#327)" },
   { path = "nix::unistd::execve", reason = "spawn through maknae_io::program::command (#327)" },
   { path = "nix::unistd::execvp", reason = "spawn through maknae_io::program::command (#327)" },
+  { path = "nix::unistd::execvpe", reason = "spawn through maknae_io::program::command (#327)" },
+  { path = "nix::unistd::fexecve", reason = "spawn through maknae_io::program::command (#327)" },
+  { path = "nix::unistd::execveat", reason = "spawn through maknae_io::program::command (#327)" },
   { path = "nix::spawn::posix_spawn", reason = "spawn through maknae_io::program::command (#327)" },
   { path = "nix::spawn::posix_spawnp", reason = "spawn through maknae_io::program::command (#327)" },
 ]
