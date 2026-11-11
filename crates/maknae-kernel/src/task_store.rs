@@ -964,7 +964,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_write_leaves_memory_unchanged() {
+    fn a_refused_write_changes_nothing_and_an_unproven_removal_leaves_memory() {
         let b = MemTaskBlobs::default();
         let store = open_mem(&b);
         let id = by_uid(&store, "one");

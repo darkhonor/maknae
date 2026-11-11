@@ -398,7 +398,7 @@ impl TaskStore {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
         };
-        let tried = self.settle_owed();
+        let taken_back = self.settle_owed();
         let rounds = queue().len();
         for _ in 0..rounds {
             let Some(id) = queue().pop() else {
@@ -408,13 +408,14 @@ impl TaskStore {
                 store: self,
                 id: Some(id),
             };
-            if !tried.contains(&id) {
+            if !taken_back.contains(&id) {
                 self.withdraw_locked(&id);
             }
             hand.id = None;
         }
     }
 
+    /// The exposed ids it tried to take back.
     fn settle_owed(&self) -> Vec<TaskId> {
         let (mut owed, after) = {
             let held = self.held();
@@ -428,15 +429,23 @@ impl TaskStore {
         };
         let first = owed.partition_point(|id| Some(*id) <= after);
         owed.rotate_left(first);
-        let mut tried = Vec::new();
+        let mut taken_back = Vec::new();
         for id in owed {
-            tried.push(id);
-            if !self.settle_one(&id) {
-                self.held().stuck = Some(id);
-                break;
+            if self.held().exposed.contains_key(&id) {
+                taken_back.push(id);
+            }
+            let settled = self.settle_one(&id);
+            let mut held = self.held();
+            match (settled, held.stuck == Some(id)) {
+                (true, true) => held.stuck = None,
+                (true, false) => {}
+                (false, _) => {
+                    held.stuck = Some(id);
+                    break;
+                }
             }
         }
-        tried
+        taken_back
     }
 
     /// An exposed record is taken back; a stale task is written as memory holds it.
@@ -744,7 +753,7 @@ impl TaskStore {
 
     /// Removes `tasker`'s reports from `agent` up to its own report ordinal `upto`; a
     /// cursor above every ordinal this tasker was ever issued is refused. Answered done
-    /// only when every removal is proven; otherwise they all leave memory, owed.
+    /// only when no such report is still owed its removal, from this call or an earlier one.
     pub fn acknowledge(
         &self,
         tasker: &Tasker,
@@ -752,6 +761,9 @@ impl TaskStore {
         upto: u64,
     ) -> Result<usize, TaskRefusal> {
         let _w = self.writing();
+        let acked = |r: &TaskRecord| {
+            r.tasker == *tasker && r.agent == *agent && r.rseq.is_some_and(|s| s <= upto)
+        };
         let gone: Vec<TaskId> = {
             let held = self.held();
             if upto > held.issued.of(tasker).rseq {
@@ -759,12 +771,7 @@ impl TaskStore {
             }
             held.tasks
                 .iter()
-                .filter(|(_, r)| {
-                    !r.pending
-                        && r.tasker == *tasker
-                        && r.agent == *agent
-                        && r.rseq.is_some_and(|s| s <= upto)
-                })
+                .filter(|(_, r)| !r.pending && acked(r))
                 .map(|(id, _)| *id)
                 .collect()
         };
@@ -775,9 +782,9 @@ impl TaskStore {
                 false => self.held().take_back(id),
             }
         }
-        match proven {
-            true => Ok(gone.len()),
-            false => Err(TaskRefusal::Unavailable(
+        match self.held().exposed.values().any(acked) {
+            false => Ok(gone.len()),
+            true => Err(TaskRefusal::Unavailable(
                 "outcome unknown: the acknowledgement is left to a later store write".into(),
             )),
         }
@@ -937,6 +944,9 @@ impl TaskStore {
         let _w = self.writing();
         let mut view = {
             let held = self.held();
+            if held.exposed.get(id).is_some_and(|r| r.tasker == *tasker) {
+                return Err(drop_owed());
+            }
             let rec = tasker_record(&held, id, tasker).ok_or(TaskRefusal::Unknown)?;
             if rec.state != TaskState::Queued {
                 return Err(TaskRefusal::Finished);
@@ -944,9 +954,7 @@ impl TaskStore {
             self.view_of(&held, rec)
         };
         if !self.withdraw_locked(id) {
-            return Err(TaskRefusal::Unavailable(
-                "outcome unknown: the drop is left to a later store write".into(),
-            ));
+            return Err(drop_owed());
         }
         view.state = TaskState::Closed;
         view.close = Some(TaskClose::Dropped);
@@ -1074,10 +1082,11 @@ impl TaskStore {
     #[cfg(any(test, feature = "hermetic-test-seam"))]
     pub fn start_for_test(&self, id: &TaskId) {
         let _w = self.writing();
-        let mut next = self.held().live(id).expect("a held task").clone();
+        let prior = self.held().live(id).expect("a held task").clone();
+        let mut next = prior.clone();
         next.state = TaskState::Working;
         next.claimed = Some(self.clock.now_secs());
-        self.write(&next, None)
+        self.write(&next, Some(&prior))
             .expect("the test store writes the task");
         self.held().tasks.insert(*id, next);
     }
@@ -1196,6 +1205,10 @@ impl Drop for PutBack<'_> {
             self.store.abandon(id);
         }
     }
+}
+
+fn drop_owed() -> TaskRefusal {
+    TaskRefusal::Unavailable("outcome unknown: the drop is left to a later store write".into())
 }
 
 fn abandoned() -> TaskRefusal {
@@ -3494,6 +3507,64 @@ mod tests {
         }
         assert!(blobs.has(&name_of(&tasks[0])));
         assert!(!blobs.has(&name_of(&tasks[1])), "the other one settled");
+        assert_eq!(store.held().stuck, Some(tasks[0]));
+        blobs.stick(None);
+        store.purge_agent(&id("nobody"));
+        assert!(!blobs.has(&name_of(&tasks[0])));
+        assert_eq!(store.held().stuck, None);
+    }
+
+    #[test]
+    fn a_retry_while_the_removal_is_still_owed_is_outcome_unknown() {
+        let blobs = crate::task_store::MemTaskBlobs::default();
+        let store = TaskStore::open(
+            Box::new(blobs.clone()),
+            Arc::new(crate::task_store::SystemClock),
+        )
+        .unwrap();
+        let me = Tasker::Uid(1000);
+        let dropped = held_by(&store, me.clone());
+        let reported = held_by(&store, me.clone());
+        let rseq = store.publish_report(&reported, text("r"), None).unwrap();
+        blobs.fail(Some(crate::task_store::Fail::Unsynced));
+        for _ in 0..2 {
+            for said in [
+                store.drop_queued(&dropped, &me).map(drop),
+                store.acknowledge(&me, &id("hobi"), rseq).map(drop),
+            ] {
+                assert!(
+                    matches!(&said, Err(TaskRefusal::Unavailable(why)) if why.starts_with("outcome unknown: ")),
+                    "{said:?}"
+                );
+            }
+        }
+        assert_eq!(
+            store.drop_queued(&dropped, &Tasker::Uid(1001)),
+            Err(TaskRefusal::Unknown),
+            "another tasker learns nothing"
+        );
+        blobs.fail(None);
+        assert_eq!(store.drop_queued(&dropped, &me), Err(TaskRefusal::Unknown));
+        assert_eq!(store.acknowledge(&me, &id("hobi"), rseq), Ok(0));
+    }
+
+    #[test]
+    fn a_queued_withdrawal_of_a_stale_task_is_not_skipped() {
+        let blobs = crate::task_store::MemTaskBlobs::default();
+        let store = TaskStore::open(
+            Box::new(blobs.clone()),
+            Arc::new(crate::task_store::SystemClock),
+        )
+        .unwrap();
+        let me = Tasker::Uid(1000);
+        let task = working(&store, &me);
+        blobs.fail(Some(crate::task_store::Fail::Unsynced));
+        assert!(store.stop(&task, &me).is_err());
+        blobs.fail(None);
+        store.abandon(task);
+        store.purge_agent(&id("nobody"));
+        assert!(store.record(&task).is_none());
+        assert!(!blobs.has(&name_of(&task)));
     }
 
     #[test]
