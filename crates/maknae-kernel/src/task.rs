@@ -363,16 +363,33 @@ impl TaskStore {
     /// first withdraws every submission abandoned since.
     fn writing(&self) -> std::sync::MutexGuard<'_, ()> {
         let w = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
-        let abandoned = std::mem::take(
-            &mut *self
-                .abandoned
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
-        );
-        for id in abandoned {
-            self.withdraw_locked(&id);
-        }
+        self.drain_abandoned();
         w
+    }
+
+    /// One at a time, so a panic loses nothing queued: the item in hand is put back on
+    /// unwind, and one whose disk step failed is put back for the next writer.
+    fn drain_abandoned(&self) {
+        let queue = || {
+            self.abandoned
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+        };
+        let rounds = queue().len();
+        for _ in 0..rounds {
+            let Some(id) = queue().pop() else {
+                break;
+            };
+            let mut hand = PutBack {
+                store: self,
+                id: Some(id),
+            };
+            if self.withdraw_locked(&id, false) {
+                hand.id = None;
+            } else if let Some(id) = hand.id.take() {
+                queue().insert(0, id);
+            }
+        }
     }
 
     /// Queues a submission's record for withdrawal by the next writer; never waits.
@@ -469,7 +486,7 @@ impl TaskStore {
         tasker: Tasker,
         parent: Option<TaskId>,
         sub: TaskSubmission,
-        ticket: Option<&MintTicket>,
+        ticket: Option<&Ticket>,
     ) -> Result<Arc<SignedTask>, TaskRefusal> {
         let agent = target(&sub)?;
         let mut task = TaskObject {
@@ -500,14 +517,14 @@ impl TaskStore {
         agent: &AgentId,
         enrolled: Enrolled,
         task: &Arc<SignedTask>,
-        ticket: Option<&MintTicket>,
+        ticket: Option<&Ticket>,
     ) -> Result<Placed, TaskRefusal> {
         let Enrolled {
             generation,
             agent_uid,
         } = enrolled;
         let _w = self.writing();
-        if ticket.is_some_and(MintTicket::abandoned) {
+        if ticket.is_some_and(Ticket::abandoned) {
             return Err(abandoned());
         }
         if view.agent_uid(agent) != Some(agent_uid) {
@@ -716,8 +733,13 @@ impl TaskStore {
     }
 
     /// Makes a minted task visible, once its submission is audited.
-    pub fn confirm(&self, id: &TaskId) -> Result<(), TaskRefusal> {
+    /// With a `ticket`, a submission that gave up first wins: the record is not made
+    /// visible, and one already written confirmed is withdrawn again.
+    pub(crate) fn confirm(&self, id: &TaskId, ticket: Option<&Ticket>) -> Result<(), TaskRefusal> {
         let _w = self.writing();
+        if ticket.is_some_and(Ticket::abandoned) {
+            return Err(abandoned());
+        }
         let prior = self
             .held()
             .tasks
@@ -728,6 +750,12 @@ impl TaskStore {
         let mut next = prior.clone();
         next.pending = false;
         self.write(&next, Some(&prior))?;
+        if ticket.is_some_and(|t| !t.keep(*id)) {
+            if !self.withdraw_locked(id, true) {
+                self.abandon(*id);
+            }
+            return Err(abandoned());
+        }
         self.held().tasks.insert(*id, next);
         Ok(())
     }
@@ -879,27 +907,50 @@ impl TaskStore {
         crate::task_verbs::report_page(mine.into_iter(), budget)
     }
 
-    pub(crate) fn withdraw(&self, id: &TaskId) {
+    /// True when the record is off the disk or left pending there; otherwise it is queued
+    /// for the next writer.
+    pub(crate) fn withdraw(&self, id: &TaskId) -> bool {
         let _w = self.writing();
-        self.withdraw_locked(id);
+        let done = self.withdraw_locked(id, false);
+        if !done {
+            self.abandon(*id);
+        }
+        done
     }
 
-    /// Takes a submission back: out of memory, marked pending on disk if it was confirmed,
-    /// then unlinked. A record that cannot be unlinked is pending, and boot discards it.
-    /// The caller holds the writer.
-    fn withdraw_locked(&self, id: &TaskId) {
-        let (removed, _) = {
+    /// Takes a submission back: out of memory, marked pending on disk if the disk may hold
+    /// it confirmed, then unlinked. True when the disk no longer holds it confirmed: gone, or
+    /// pending for boot to discard. When false the record is kept in memory, pending, for a
+    /// retry. The caller holds the writer.
+    fn withdraw_locked(&self, id: &TaskId, disk_confirmed: bool) -> bool {
+        let removed = {
             let mut held = self.held();
-            (held.tasks.remove(id), held.hot.remove(id))
+            held.hot.remove(id);
+            held.tasks.remove(id)
         };
-        if let Some(mut rec) = removed.filter(|r| !r.pending) {
+        let confirmed = disk_confirmed || removed.as_ref().is_some_and(|r| !r.pending);
+        let mut pending_on_disk = !confirmed;
+        if let (true, Some(rec)) = (confirmed, &removed) {
+            let mut rec = rec.clone();
             rec.pending = true;
-            if let Err(e) = self.write(&rec, None) {
-                eprintln!("maknaed: withdrawn task {id} was not marked pending: {e}");
+            match encode(&rec).and_then(|plain| self.blobs.save(&name_of(id), &plain)) {
+                Ok(()) | Err(StoreError::NotDurable(_)) => pending_on_disk = true,
+                Err(e @ (StoreError::Io(_) | StoreError::Counters(_))) => {
+                    eprintln!("maknaed: withdrawn task {id} was not marked pending: {e}");
+                }
             }
         }
-        if let Err(e) = self.blobs.delete(&name_of(id)) {
-            eprintln!("maknaed: withdrawn task {id} stays on disk: {e}");
+        match self.blobs.delete(&name_of(id)) {
+            Ok(()) | Err(StoreError::NotDurable(_)) => true,
+            Err(StoreError::Io(_) | StoreError::Counters(_)) if pending_on_disk => true,
+            Err(e @ (StoreError::Io(_) | StoreError::Counters(_))) => {
+                eprintln!("maknaed: withdrawn task {id} stays on disk confirmed: {e}");
+                if let Some(mut rec) = removed {
+                    rec.pending = true;
+                    self.held().tasks.insert(*id, rec);
+                }
+                false
+            }
         }
     }
 
@@ -979,7 +1030,7 @@ impl TaskStore {
         sub: TaskSubmission,
     ) -> Result<Arc<SignedTask>, TaskRefusal> {
         let t = self.mint(signer, view, enrolled, tasker, parent, sub)?;
-        self.confirm(&t.task.task_id)?;
+        self.confirm(&t.task.task_id, None)?;
         Ok(t)
     }
 
@@ -996,8 +1047,14 @@ impl TaskStore {
         sub: TaskSubmission,
     ) -> Result<Arc<SignedTask>, TaskRefusal> {
         let t = self.mint_with(draw, signer, view, enrolled, tasker, parent, sub, None)?;
-        self.confirm(&t.task.task_id)?;
+        self.confirm(&t.task.task_id, None)?;
         Ok(t)
+    }
+
+    /// Waits out any write in flight without draining the queue, so it counts as no write.
+    #[cfg(test)]
+    fn quiesce(&self) {
+        drop(self.writer.lock().unwrap_or_else(PoisonError::into_inner));
     }
 
     #[cfg(test)]
@@ -1009,7 +1066,7 @@ impl TaskStore {
 /// Shared by a submission and the mint it offloaded: whichever moves first decides
 /// whether the minted record is kept, so a mint that outlives its submission never stays.
 #[derive(Default)]
-pub(crate) struct MintTicket {
+pub(crate) struct Ticket {
     state: std::sync::atomic::AtomicU8,
     stored: Mutex<Option<TaskId>>,
 }
@@ -1018,7 +1075,7 @@ const MINT_RUNNING: u8 = 0;
 const MINT_KEPT: u8 = 1;
 const MINT_ABANDONED: u8 = 2;
 
-impl MintTicket {
+impl Ticket {
     fn abandoned(&self) -> bool {
         self.state.load(std::sync::atomic::Ordering::SeqCst) == MINT_ABANDONED
     }
@@ -1046,6 +1103,20 @@ impl MintTicket {
         ) {
             Ok(_) => None,
             Err(_) => *self.stored.lock().unwrap_or_else(PoisonError::into_inner),
+        }
+    }
+}
+
+/// Puts the withdrawal in hand back on the queue if the drain unwinds.
+struct PutBack<'a> {
+    store: &'a TaskStore,
+    id: Option<TaskId>,
+}
+
+impl Drop for PutBack<'_> {
+    fn drop(&mut self) {
+        if let Some(id) = self.id.take() {
+            self.store.abandon(id);
         }
     }
 }
@@ -1216,7 +1287,7 @@ struct Attempt {
     target: String,
     parent: Option<TaskId>,
     role: Option<&'static str>,
-    ticket: Arc<MintTicket>,
+    ticket: Arc<Ticket>,
 }
 
 impl Attempt {
@@ -1282,24 +1353,46 @@ where
     }
 }
 
-/// Takes a submission back within what is left of `deadline`; when that cannot run, the
-/// next store writer does it. True when it was done here.
+/// What became of a submission's withdrawal, as the trail says it.
+enum Withdrawal {
+    Done,
+    Queued,
+    Running,
+}
+
+impl Withdrawal {
+    fn said(&self) -> &'static str {
+        match self {
+            Withdrawal::Done => "withdrawn",
+            Withdrawal::Queued => "withdrawal left to the next store write",
+            Withdrawal::Running => "withdrawal outcome unknown",
+        }
+    }
+}
+
+/// Takes a submission back within what is left of `deadline`, at most once: when the step
+/// never started, the next store writer does it instead.
 async fn withdraw_within(
     store: &Arc<TaskStore>,
     uid: u32,
     deadline: tokio::time::Instant,
     id: TaskId,
-) -> bool {
-    let s = Arc::clone(store);
+) -> Withdrawal {
+    let claimed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (s, c) = (Arc::clone(store), Arc::clone(&claimed));
     let done = offload(uid, deadline, move || {
-        s.withdraw(&id);
-        Ok(())
+        Ok(!c.swap(true, std::sync::atomic::Ordering::SeqCst) && s.withdraw(&id))
     })
     .await;
-    if done.is_err() {
-        store.abandon(id);
+    match done {
+        Ok(true) => Withdrawal::Done,
+        Ok(false) => Withdrawal::Queued,
+        Err(_) if !claimed.swap(true, std::sync::atomic::Ordering::SeqCst) => {
+            store.abandon(id);
+            Withdrawal::Queued
+        }
+        Err(_) => Withdrawal::Running,
     }
-    done.is_ok()
 }
 
 /// Decides one `session.task` submission and stores it only on `Permit`: the record is
@@ -1387,20 +1480,17 @@ async fn submit_under<P: Authorizer + Send + Sync + 'static>(
     match (decided, audited) {
         (Ok(task), Ok(())) => {
             let (s, id) = (Arc::clone(store), task.task.task_id);
-            match offload(uid, deadline, move || s.confirm(&id)).await {
+            let ticket = Arc::new(Ticket::default());
+            let t = Arc::clone(&ticket);
+            match offload(uid, deadline, move || s.confirm(&id, Some(&t))).await {
                 Ok(()) => Ok(task),
+                Err(_) if ticket.abandon().is_some() => Ok(task),
                 Err(refusal) => {
-                    let withdrawn = withdraw_within(store, uid, deadline, id).await;
+                    let withdrawal = withdraw_within(store, uid, deadline, id).await;
                     let mut corrective = attempt.record(ctx, Some(&task.task), Some(&refusal));
-                    corrective.outcome.reason = match (&refusal, withdrawn) {
-                        (TaskRefusal::Unavailable(why), true) => format!("{why}; withdrawn"),
-                        (TaskRefusal::Unavailable(why), false) => {
-                            format!("{why}; withdrawal left to the next store write")
-                        }
-                        (other, true) => format!("not stored: {other}"),
-                        (other, false) => {
-                            format!("not stored: {other}; withdrawal left to the next store write")
-                        }
+                    corrective.outcome.reason = match &refusal {
+                        TaskRefusal::Unavailable(why) => format!("{why}; {}", withdrawal.said()),
+                        other => format!("not stored: {other}; {}", withdrawal.said()),
                     };
                     corrective.outcome.posture = "unavailable".into();
                     emit.emit_within(&corrective, crate::blocking_guard::AUDIT_APPEND_TIMEOUT)
@@ -2131,7 +2221,7 @@ mod tests {
         assert_eq!(store.state_for(&mine, &me), Some(TaskState::Queued));
         assert_eq!(store.state_for(&theirs, &me), None);
         assert!(store.status(&theirs, &me).is_none());
-        assert_eq!(store.confirm(&mine), Err(TaskRefusal::Unknown));
+        assert_eq!(store.confirm(&mine, None), Err(TaskRefusal::Unknown));
         assert_eq!(
             store.follow_up(&theirs, &me, text("x"), 10).unwrap_err(),
             TaskRefusal::Unknown
@@ -2249,7 +2339,7 @@ mod tests {
                 agent: "hobi".into()
             }
         );
-        store.confirm(&pending).unwrap();
+        store.confirm(&pending, None).unwrap();
         assert_eq!(store.state_for(&pending, &me), Some(TaskState::Queued));
         let (page, next) = store.list(&me, &id("hobi"), None, 10);
         assert_eq!(page.len(), 10);
@@ -2693,6 +2783,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_mint_that_collides_then_times_out_leaves_nothing_behind() {
+        let _alone = STALLS.lock().await;
         let (_g, pdp) = pdp("abandoned-mint");
         let blobs = crate::task_store::MemTaskBlobs::default();
         let store = Arc::new(
@@ -2707,7 +2798,7 @@ mod tests {
         taken.tasker = Tasker::Uid(999);
         store.insert_for_test(signer().sign(taken).unwrap(), HOBI);
         *store.scripted.lock().unwrap() = vec![[8; 16], [7; 16]];
-        blobs.slow(Some(std::time::Duration::from_millis(600)));
+        blobs.slow(Some(std::time::Duration::from_millis(2000)));
         let view = SnapshotEnrollment(pdp.clone());
         let emit = Recorder::new();
         let got = submit_via(
@@ -2717,12 +2808,13 @@ mod tests {
             user(),
             sub("hobi"),
             &emit,
-            (std::time::Duration::from_millis(150), None),
+            (std::time::Duration::from_millis(400), None),
         )
         .await;
         assert!(matches!(got, Err(TaskRefusal::Unavailable(_))), "{got:?}");
-        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        blobs.await_stalls(1);
         blobs.slow(None);
+        store.quiesce();
         assert!(
             store.record(&TaskId([7; 16])).is_some(),
             "the colliding task is kept"
@@ -2734,12 +2826,152 @@ mod tests {
         assert!(reopened.take_boot_findings().is_empty());
     }
 
+    /// The tests that stall the store share the euid's store slots; they take turns.
+    static STALLS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    struct SlowsStoreOnAudit(Recorder, crate::task_store::MemTaskBlobs);
+
+    impl AuditEmit for SlowsStoreOnAudit {
+        fn emit(
+            &self,
+            rec: &AuditRecord,
+        ) -> impl std::future::Future<Output = Result<(), AuditError>> + Send {
+            self.1.slow(Some(std::time::Duration::from_millis(2000)));
+            self.0.emit(rec)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_confirm_that_times_out_never_reloads_as_a_live_task() {
+        let _alone = STALLS.lock().await;
+        let (_g, pdp) = pdp("confirm-timeout");
+        let blobs = crate::task_store::MemTaskBlobs::default();
+        let store = Arc::new(
+            TaskStore::open(
+                Box::new(blobs.clone()),
+                Arc::new(crate::task_store::SystemClock),
+            )
+            .unwrap(),
+        );
+        let emit = SlowsStoreOnAudit(Recorder::new(), blobs.clone());
+        let view = SnapshotEnrollment(pdp.clone());
+        let got = submit_via(
+            pdp.clone(),
+            &store,
+            &view,
+            user(),
+            sub("hobi"),
+            &emit,
+            (std::time::Duration::from_millis(400), None),
+        )
+        .await;
+        assert!(matches!(got, Err(TaskRefusal::Unavailable(_))), "{got:?}");
+        let corrective = emit.0.records().pop().unwrap();
+        assert!(
+            corrective.outcome.reason.starts_with("outcome unknown: "),
+            "{}",
+            corrective.outcome.reason
+        );
+        blobs.await_stalls(1);
+        blobs.slow(None);
+        store.quiesce();
+        let reopened =
+            TaskStore::open(Box::new(blobs), Arc::new(crate::task_store::SystemClock)).unwrap();
+        assert_eq!(reopened.len(), 0, "no live task reloads");
+        assert!(reopened
+            .take_boot_findings()
+            .iter()
+            .all(|f| matches!(f, crate::task_store::BootFinding::Discarded { .. })));
+    }
+
+    #[test]
+    fn a_withdrawal_whose_disk_step_fails_is_kept_for_the_next_writer() {
+        let blobs = crate::task_store::MemTaskBlobs::default();
+        let store = TaskStore::open(
+            Box::new(blobs.clone()),
+            Arc::new(crate::task_store::SystemClock),
+        )
+        .unwrap();
+        let me = Tasker::Uid(1000);
+        let kept = held_by(&store, me.clone());
+        blobs.fail(Some(crate::task_store::Fail::Records));
+        assert!(!store.withdraw(&kept));
+        blobs.fail(None);
+        assert!(
+            store.record(&kept).is_none(),
+            "held back pending, so invisible"
+        );
+        assert!(blobs.has(&name_of(&kept)));
+        held_by(&store, me);
+        assert!(!blobs.has(&name_of(&kept)), "the next writer finished it");
+        assert_eq!(store.len(), 1);
+        let unwound = TaskId([3; 16]);
+        drop(PutBack {
+            store: &store,
+            id: Some(unwound),
+        });
+        assert_eq!(*store.abandoned.lock().unwrap(), vec![unwound]);
+    }
+
+    #[tokio::test]
+    async fn a_withdrawal_runs_or_is_queued_never_both_and_is_said_so() {
+        let store = Arc::new(TaskStore::new());
+        let id = held_by(&store, Tasker::Uid(1000));
+        let w = withdraw_within(&store, 1000, tokio::time::Instant::now(), id).await;
+        let queued = store.abandoned.lock().unwrap().clone();
+        match w {
+            Withdrawal::Done => {
+                assert!(queued.is_empty(), "done here is never also queued");
+                assert!(store.record(&id).is_none());
+            }
+            Withdrawal::Queued => assert_eq!(queued, vec![id]),
+            Withdrawal::Running => panic!("an expired bound either ran it or queued it"),
+        }
+        let again = held_by(&store, Tasker::Uid(1000));
+        let w = withdraw_within(&store, 1000, tokio::time::Instant::now() + BOUND, again).await;
+        assert_eq!(w.said(), "withdrawn");
+        assert!(store.abandoned.lock().unwrap().is_empty());
+        assert_eq!(
+            Withdrawal::Queued.said(),
+            "withdrawal left to the next store write"
+        );
+        assert_eq!(Withdrawal::Running.said(), "withdrawal outcome unknown");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_withdrawal_still_running_at_the_bound_is_not_also_queued() {
+        let _alone = STALLS.lock().await;
+        let blobs = crate::task_store::MemTaskBlobs::default();
+        let store = Arc::new(
+            TaskStore::open(
+                Box::new(blobs.clone()),
+                Arc::new(crate::task_store::SystemClock),
+            )
+            .unwrap(),
+        );
+        let id = held_by(&store, Tasker::Uid(1000));
+        blobs.slow(Some(std::time::Duration::from_millis(400)));
+        let w = withdraw_within(
+            &store,
+            1000,
+            tokio::time::Instant::now() + std::time::Duration::from_millis(100),
+            id,
+        )
+        .await;
+        assert_eq!(w.said(), "withdrawal outcome unknown");
+        assert!(store.abandoned.lock().unwrap().is_empty());
+        blobs.await_stalls(1);
+        blobs.slow(None);
+        store.quiesce();
+        assert!(!blobs.has(&name_of(&id)));
+    }
+
     #[test]
     fn whichever_of_mint_and_submission_moves_first_decides_the_record() {
-        let kept = MintTicket::default();
+        let kept = Ticket::default();
         assert!(kept.keep(TaskId([1; 16])));
         assert_eq!(kept.abandon(), Some(TaskId([1; 16])));
-        let given_up = MintTicket::default();
+        let given_up = Ticket::default();
         assert_eq!(given_up.abandon(), None);
         assert!(given_up.abandoned());
         assert!(!given_up.keep(TaskId([2; 16])));

@@ -371,6 +371,7 @@ pub struct MemInner {
     aside: std::sync::Mutex<Vec<String>>,
     fail: std::sync::Mutex<Option<Fail>>,
     slow: std::sync::Mutex<Option<Duration>>,
+    stalls: std::sync::atomic::AtomicUsize,
 }
 
 #[cfg(any(test, feature = "hermetic-test-seam"))]
@@ -417,7 +418,20 @@ impl MemTaskBlobs {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let (Some(by), false) = (by, name == COUNTERS) {
+            self.0
+                .stalls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             std::thread::sleep(by);
+        }
+    }
+
+    /// Returns once `n` stalled operations have begun, so a test waits on the store,
+    /// never on a clock.
+    pub fn await_stalls(&self, n: usize) {
+        let until = std::time::Instant::now() + Duration::from_secs(10);
+        while self.0.stalls.load(std::sync::atomic::Ordering::SeqCst) < n {
+            assert!(std::time::Instant::now() < until, "no stall began");
+            std::thread::yield_now();
         }
     }
 
@@ -625,7 +639,7 @@ mod tests {
             agent_uid: HOBI,
         };
         let t = store.mint(&Unverified, &v, enrolled, Tasker::Uid(1000), None, sub)?;
-        store.confirm(&t.task.task_id)?;
+        store.confirm(&t.task.task_id, None)?;
         Ok(t)
     }
 
