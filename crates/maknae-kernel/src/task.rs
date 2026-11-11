@@ -1,5 +1,5 @@
 //! The in-kernel task store and the `session.task` submission path (#609).
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -150,7 +150,9 @@ struct Held {
     /// pending until a synced write of it, or a synced unlink.
     exposed: BTreeMap<TaskId, TaskRecord>,
     /// Stored tasks whose disk copy may differ from memory, until a synced write.
-    stale: std::collections::BTreeSet<TaskId>,
+    stale: BTreeSet<TaskId>,
+    /// The owed id that last failed; the next drain starts after it.
+    stuck: Option<TaskId>,
 }
 
 impl Held {
@@ -165,6 +167,14 @@ impl Held {
     fn expose(&mut self, mut rec: TaskRecord) {
         rec.pending = true;
         self.exposed.insert(rec.signed.task.task_id, rec);
+    }
+
+    /// Out of memory; a record the disk may read confirmed becomes exposed.
+    fn take_back(&mut self, id: &TaskId) {
+        self.hot.remove(id);
+        if let Some(rec) = self.tasks.remove(id).filter(|r| !r.pending) {
+            self.expose(rec);
+        }
     }
 }
 
@@ -254,11 +264,15 @@ impl TaskStore {
     }
 
     /// A write that landed unsynced is undone to `prior`. It is refused only when the
-    /// undo is synced; otherwise the outcome is unknown and the record is owed a rewrite.
+    /// undo is synced; otherwise the outcome is unknown. A replaced record is stale from
+    /// before the write until a synced one, so a write that unwinds is still rewritten.
     fn write(&self, rec: &TaskRecord, prior: Option<&TaskRecord>) -> Result<(), TaskRefusal> {
         let id = rec.signed.task.task_id;
         let name = name_of(&id);
         let plain = encode(rec).map_err(store)?;
+        if prior.is_some() {
+            self.held().stale.insert(id);
+        }
         let why = match self.blobs.save(&name, &plain) {
             Ok(()) => {
                 self.held().stale.remove(&id);
@@ -272,15 +286,12 @@ impl TaskStore {
             Some(p) => encode(p).and_then(|b| self.blobs.save(&name, &b)),
         };
         match (undone, prior) {
-            (Ok(()), _) => Err(TaskRefusal::Store(why)),
-            (Err(e), None) => {
-                eprintln!("maknaed: refused task write to {name} was not undone: {e}");
+            (Ok(()), _) => {
+                self.held().stale.remove(&id);
                 Err(TaskRefusal::Store(why))
             }
-            (Err(_), Some(_)) => {
-                self.held().stale.insert(id);
-                Err(TaskRefusal::Unavailable(format!("outcome unknown: {why}")))
-            }
+            (Err(_), None) => Err(TaskRefusal::Store(why)),
+            (Err(_), Some(_)) => Err(TaskRefusal::Unavailable(format!("outcome unknown: {why}"))),
         }
     }
 
@@ -314,22 +325,6 @@ impl TaskStore {
             o.rseq = o.rseq.checked_add(1)?;
             Some(o.rseq)
         })
-    }
-
-    /// An unlink that landed unsynced is taken, and stays owed until one is synced.
-    /// The caller holds the writer.
-    fn erase(&self, id: &TaskId) -> Result<(), TaskRefusal> {
-        let unsynced = match self.blobs.delete(&name_of(id)) {
-            Ok(()) => false,
-            Err(StoreError::NotDurable(_)) => true,
-            Err(e @ (StoreError::Io(_) | StoreError::Counters(_))) => return Err(store(e)),
-        };
-        let mut held = self.held();
-        held.hot.remove(id);
-        if let (Some(rec), true) = (held.tasks.remove(id), unsynced) {
-            held.expose(rec);
-        }
-        Ok(())
     }
 
     /// Bumps the generation and drops the agent's tasks from memory in one step, so a mint
@@ -394,19 +389,16 @@ impl TaskStore {
         w
     }
 
-    /// Retries what is owed until the first record the disk refuses, then takes each
-    /// queued id in hand; one in hand when the drain unwinds is put back.
+    /// Retries what is owed, starting after the id that failed last and stopping at the
+    /// first that fails now, then takes each queued id in hand; one in hand when the drain
+    /// unwinds is put back.
     fn drain_abandoned(&self) {
         let queue = || {
             self.abandoned
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
         };
-        let owed: Vec<TaskId> = self.held().exposed.keys().copied().collect();
-        let settled = owed.iter().all(|id| self.withdraw_locked(id));
-        if settled {
-            self.rewrite_stale();
-        }
+        let tried = self.settle_owed();
         let rounds = queue().len();
         for _ in 0..rounds {
             let Some(id) = queue().pop() else {
@@ -416,26 +408,50 @@ impl TaskStore {
                 store: self,
                 id: Some(id),
             };
-            if !owed.contains(&id) {
+            if !tried.contains(&id) {
                 self.withdraw_locked(&id);
             }
             hand.id = None;
         }
     }
 
-    /// Writes each stale task as memory holds it, stopping at the first failure.
-    fn rewrite_stale(&self) {
-        let stale: Vec<TaskId> = self.held().stale.iter().copied().collect();
-        for id in stale {
-            let rec = self.held().tasks.get(&id).cloned();
-            let written = rec.map_or(Ok(()), |rec| {
-                encode(&rec).and_then(|plain| self.blobs.save(&name_of(&id), &plain))
-            });
-            match written {
-                Ok(()) => self.held().stale.remove(&id),
-                Err(_) => break,
-            };
+    fn settle_owed(&self) -> Vec<TaskId> {
+        let (mut owed, after) = {
+            let held = self.held();
+            let owed: BTreeSet<TaskId> = held
+                .exposed
+                .keys()
+                .chain(held.stale.iter())
+                .copied()
+                .collect();
+            (owed.into_iter().collect::<Vec<_>>(), held.stuck)
+        };
+        let first = owed.partition_point(|id| Some(*id) <= after);
+        owed.rotate_left(first);
+        let mut tried = Vec::new();
+        for id in owed {
+            tried.push(id);
+            if !self.settle_one(&id) {
+                self.held().stuck = Some(id);
+                break;
+            }
         }
+        tried
+    }
+
+    /// An exposed record is taken back; a stale task is written as memory holds it.
+    fn settle_one(&self, id: &TaskId) -> bool {
+        if self.held().exposed.contains_key(id) {
+            return self.withdraw_locked(id);
+        }
+        let rec = self.held().tasks.get(id).cloned();
+        let written = rec.map_or(Ok(()), |rec| {
+            encode(&rec).and_then(|plain| self.blobs.save(&name_of(id), &plain))
+        });
+        if written.is_ok() {
+            self.held().stale.remove(id);
+        }
+        written.is_ok()
     }
 
     /// Queues a submission's record for withdrawal by the next writer; never waits.
@@ -466,7 +482,7 @@ impl TaskStore {
         let mut gone = Vec::new();
         {
             let mut held = self.held();
-            let known: std::collections::BTreeSet<AgentId> = held
+            let known: BTreeSet<AgentId> = held
                 .enrolled
                 .keys()
                 .chain(held.tasks.values().map(|t| &t.agent))
@@ -726,8 +742,9 @@ impl TaskStore {
         Ok(next)
     }
 
-    /// Removes, durably, `tasker`'s reports from `agent` up to its own report ordinal
-    /// `upto`; a cursor above every ordinal this tasker was ever issued is refused.
+    /// Removes `tasker`'s reports from `agent` up to its own report ordinal `upto`; a
+    /// cursor above every ordinal this tasker was ever issued is refused. Answered done
+    /// only when every removal is proven; otherwise they all leave memory, owed.
     pub fn acknowledge(
         &self,
         tasker: &Tasker,
@@ -751,10 +768,19 @@ impl TaskStore {
                 .map(|(id, _)| *id)
                 .collect()
         };
+        let mut proven = true;
         for id in &gone {
-            self.erase(id)?;
+            match proven {
+                true => proven = self.withdraw_locked(id),
+                false => self.held().take_back(id),
+            }
         }
-        Ok(gone.len())
+        match proven {
+            true => Ok(gone.len()),
+            false => Err(TaskRefusal::Unavailable(
+                "outcome unknown: the acknowledgement is left to a later store write".into(),
+            )),
+        }
     }
 
     /// The agent's queued tasks, oldest submission first.
@@ -983,10 +1009,7 @@ impl TaskStore {
     fn withdraw_locked(&self, id: &TaskId) -> bool {
         let rewrite = {
             let mut held = self.held();
-            held.hot.remove(id);
-            if let Some(rec) = held.tasks.remove(id).filter(|r| !r.pending) {
-                held.expose(rec);
-            }
+            held.take_back(id);
             held.exposed.get(id).cloned()
         };
         let name = name_of(id);
@@ -3340,7 +3363,11 @@ mod tests {
             Gone::Acknowledged => {
                 let rseq = store.publish_report(&task, text("r"), None).unwrap();
                 blobs.fail(Some(fail));
-                assert_eq!(store.acknowledge(&me, &id("hobi"), rseq), Ok(1));
+                let said = store.acknowledge(&me, &id("hobi"), rseq).unwrap_err();
+                assert!(
+                    matches!(&said, TaskRefusal::Unavailable(why) if why.starts_with("outcome unknown: ")),
+                    "{said:?}"
+                );
             }
         }
         assert!(store.record(&task).is_none());
@@ -3369,7 +3396,7 @@ mod tests {
     }
 
     #[test]
-    fn an_acknowledgement_whose_unlink_lands_unsynced_is_still_owed() {
+    fn an_acknowledgement_proven_by_neither_step_is_outcome_unknown_and_still_owed() {
         nothing_removed_reloads_after(crate::task_store::Fail::Unsynced, Gone::Acknowledged);
     }
 
@@ -3391,6 +3418,145 @@ mod tests {
             TaskStore::open(Box::new(blobs), Arc::new(crate::task_store::SystemClock)).unwrap();
         assert_eq!(reopened.len(), 0, "a dropped task is not stored again");
         assert!(reopened.queue(&id("hobi")).is_empty(), "nothing to claim");
+    }
+
+    #[test]
+    fn an_acknowledgement_is_done_once_each_pending_mark_is_synced() {
+        let blobs = crate::task_store::MemTaskBlobs::default();
+        let store = TaskStore::open(
+            Box::new(blobs.clone()),
+            Arc::new(crate::task_store::SystemClock),
+        )
+        .unwrap();
+        let me = Tasker::Uid(1000);
+        let task = held_by(&store, me.clone());
+        let rseq = store.publish_report(&task, text("r"), None).unwrap();
+        blobs.fail(Some(crate::task_store::Fail::UnsyncedUnlinks));
+        assert_eq!(store.acknowledge(&me, &id("hobi"), rseq), Ok(1));
+        blobs.crash(0);
+        let reopened =
+            TaskStore::open(Box::new(blobs), Arc::new(crate::task_store::SystemClock)).unwrap();
+        assert_eq!(
+            reopened.len(),
+            0,
+            "an acknowledged report is not stored again"
+        );
+    }
+
+    #[test]
+    fn an_acknowledgement_that_removes_only_some_is_outcome_unknown_and_owes_the_rest() {
+        let blobs = crate::task_store::MemTaskBlobs::default();
+        let store = TaskStore::open(
+            Box::new(blobs.clone()),
+            Arc::new(crate::task_store::SystemClock),
+        )
+        .unwrap();
+        let me = Tasker::Uid(1000);
+        let mut tasks = [held_by(&store, me.clone()), held_by(&store, me.clone())];
+        tasks.sort();
+        let mut upto = 0;
+        for task in &tasks {
+            upto = store.publish_report(task, text("r"), None).unwrap();
+        }
+        blobs.stick(Some(name_of(&tasks[1])));
+        let said = store.acknowledge(&me, &id("hobi"), upto).unwrap_err();
+        assert!(
+            matches!(&said, TaskRefusal::Unavailable(why) if why.starts_with("outcome unknown: ")),
+            "{said:?}"
+        );
+        assert_eq!(store.len(), 0, "neither is collected again");
+        assert!(!blobs.has(&name_of(&tasks[0])));
+        blobs.stick(None);
+        store.purge_agent(&id("nobody"));
+        assert!(!blobs.has(&name_of(&tasks[1])), "the rest was owed");
+    }
+
+    #[test]
+    fn one_record_the_disk_keeps_refusing_does_not_hold_back_another() {
+        let blobs = crate::task_store::MemTaskBlobs::default();
+        let store = TaskStore::open(
+            Box::new(blobs.clone()),
+            Arc::new(crate::task_store::SystemClock),
+        )
+        .unwrap();
+        let me = Tasker::Uid(1000);
+        let mut tasks = [held_by(&store, me.clone()), held_by(&store, me)];
+        tasks.sort();
+        blobs.fail(Some(crate::task_store::Fail::Records));
+        assert!(!store.withdraw(&tasks[0]));
+        assert!(!store.withdraw(&tasks[1]));
+        blobs.fail(None);
+        blobs.stick(Some(name_of(&tasks[0])));
+        for _ in 0..2 {
+            let before = blobs.attempts();
+            store.purge_agent(&id("nobody"));
+            assert!(blobs.attempts() - before <= 4, "one failure ends a drain");
+        }
+        assert!(blobs.has(&name_of(&tasks[0])));
+        assert!(!blobs.has(&name_of(&tasks[1])), "the other one settled");
+    }
+
+    #[test]
+    fn a_replacing_write_that_panics_after_it_landed_is_rewritten_as_memory_has_it() {
+        let blobs = crate::task_store::MemTaskBlobs::default();
+        let store = TaskStore::open(
+            Box::new(blobs.clone()),
+            Arc::new(crate::task_store::SystemClock),
+        )
+        .unwrap();
+        let me = Tasker::Uid(1000);
+        let task = working(&store, &me);
+        blobs.after_save(|| panic!("sentinel-628-write-panic"));
+        let unwound =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| store.stop(&task, &me)));
+        assert!(unwound.is_err());
+        assert_eq!(store.record(&task).unwrap().state, TaskState::Working);
+        store.purge_agent(&id("nobody"));
+        let reopened =
+            TaskStore::open(Box::new(blobs), Arc::new(crate::task_store::SystemClock)).unwrap();
+        assert_eq!(reopened.record(&task).unwrap().state, TaskState::Working);
+    }
+
+    struct PurgesThenFails(Recorder, Arc<TaskStore>);
+
+    impl AuditEmit for PurgesThenFails {
+        fn emit(
+            &self,
+            rec: &AuditRecord,
+        ) -> impl std::future::Future<Output = Result<(), AuditError>> + Send {
+            let first = self.0.records().is_empty();
+            if first {
+                self.1.purge_agent(&id("hobi"));
+            }
+            let emitted = self.0.emit(rec);
+            async move {
+                emitted.await?;
+                match first {
+                    true => Ok(()),
+                    false => Err(AuditError::Serialize("sink refused".into())),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unkept_task_whose_corrective_record_fails_is_not_audited() {
+        let (_g, pdp) = pdp("unkept-unaudited");
+        let store = Arc::new(TaskStore::new());
+        let emit = PurgesThenFails(Recorder::new(), Arc::clone(&store));
+        let view = SnapshotEnrollment(pdp.clone());
+        let got = submit_via(
+            pdp.clone(),
+            &store,
+            &view,
+            user(),
+            sub("hobi"),
+            &emit,
+            (BOUND, None),
+        )
+        .await;
+        assert_eq!(emit.0.records().len(), 2);
+        assert!(matches!(got, Err(TaskRefusal::Audit(_))), "{got:?}");
     }
 
     fn working(store: &TaskStore, tasker: &Tasker) -> TaskId {

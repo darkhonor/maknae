@@ -381,6 +381,7 @@ pub struct MemInner {
     unsynced: std::sync::Mutex<Vec<Unsynced>>,
     after_save: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     attempts: std::sync::atomic::AtomicUsize,
+    stuck: std::sync::Mutex<Option<String>>,
 }
 
 #[cfg(any(test, feature = "hermetic-test-seam"))]
@@ -529,6 +530,15 @@ impl MemTaskBlobs {
             .clone()
     }
 
+    /// Every save and unlink of `name` is refused until this is called with `None`.
+    pub fn stick(&self, name: Option<String>) {
+        *self
+            .0
+            .stuck
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = name;
+    }
+
     /// Record saves and unlinks asked for so far, refused ones included.
     pub fn attempts(&self) -> usize {
         self.0.attempts.load(std::sync::atomic::Ordering::SeqCst)
@@ -540,6 +550,15 @@ impl MemTaskBlobs {
                 .attempts
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
+        let stuck = self
+            .0
+            .stuck
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if stuck.as_deref() == Some(name) {
+            return Err(StoreError::Io("sentinel-628-stuck".into()));
+        }
+        drop(stuck);
         let fail = *self
             .0
             .fail
@@ -971,9 +990,9 @@ mod tests {
         b.fail(Some(Fail::Every));
         assert!(matches!(
             store.acknowledge(&Tasker::Uid(1000), &hobi(), rseq),
-            Err(TaskRefusal::Store(_))
+            Err(TaskRefusal::Unavailable(_))
         ));
-        assert!(store.record(&id).is_some());
+        assert!(store.record(&id).is_none());
         b.fail(None);
         let next = mint(&store).unwrap().task.task_id;
         assert!(store.record(&next).unwrap().seq > 1);
@@ -1004,17 +1023,21 @@ mod tests {
     }
 
     #[test]
-    fn an_acknowledgement_whose_delete_lands_unsynced_is_taken() {
+    fn an_acknowledgement_whose_removal_is_unproven_is_outcome_unknown_and_owed() {
         let b = MemTaskBlobs::default();
         let store = open_mem(&b);
         let id = by_uid(&store, "one");
         let rseq = store.publish_report(&id, secret("r"), None).unwrap();
         b.fail(Some(Fail::Unsynced));
-        assert_eq!(store.acknowledge(&Tasker::Uid(1000), &hobi(), rseq), Ok(1));
+        assert!(matches!(
+            store.acknowledge(&Tasker::Uid(1000), &hobi(), rseq),
+            Err(TaskRefusal::Unavailable(why)) if why.starts_with("outcome unknown: ")
+        ));
         assert!(store.record(&id).is_none());
         b.fail(None);
-        assert!(open_mem(&b).record(&id).is_none());
         assert_eq!(store.acknowledge(&Tasker::Uid(1000), &hobi(), rseq), Ok(0));
+        assert!(!b.has(&name_of(&id)));
+        assert!(open_mem(&b).record(&id).is_none());
     }
 
     #[test]
