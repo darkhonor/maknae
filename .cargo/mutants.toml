@@ -96,7 +96,7 @@ exclude_re = [
   # and this one MISSED. It is unkillable here for a structural reason.
   # `mirror` returns `()`, so the mutant and the original are indistinguishable
   # to any caller; the only observable difference is a line in the system log,
-  # and the mutation lane is `ubuntu-latest` (ci.yml:124), which has no unified
+  # and the mutation lane is `ubuntu-latest` (`.github/workflows/mutation.yml`), which has no unified
   # log to read back. Inventing an assertion would only be testing `nix`.
   #
   # COMPENSATING CONTROLS, both real:

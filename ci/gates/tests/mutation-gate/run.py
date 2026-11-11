@@ -315,12 +315,12 @@ class MutationGate(unittest.TestCase):
 
 
 class Workflow(unittest.TestCase):
-    """The ci.yml mutation step, run against a stub gate that records its arguments."""
+    """The mutation.yml mutation step, run against a stub gate that records its arguments."""
 
     def setUp(self):
         self.repo = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.repo, ignore_errors=True)
-        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        workflow = (ROOT / ".github/workflows/mutation.yml").read_text()
         self.name, step = workflow.split("      - name: Mutation gate", 1)[1].split("\n", 1)
         body = step.split("\n      - name:", 1)[0].split("\n\n", 1)[0].split("        run: |\n", 1)[1]
         self.script = "".join(line[10:] + "\n" for line in body.splitlines())

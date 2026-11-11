@@ -1,0 +1,124 @@
+name: mutation
+permissions:
+  contents: read
+
+# Its own workflow so the `labeled` trigger never runs ci.yml, whose skipped
+# required jobs would report success under their names (#408).
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  push:
+    branches: [main]
+
+concurrency:
+  group: mutation-${{ github.event_name == 'pull_request' && github.event.action != 'labeled' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'labeled' }}
+
+jobs:
+  mutation-select:
+    if: >-
+      ${{ (github.event.action == 'labeled' && github.event.label.name == 'run-mutants')
+          || (github.event.action != 'labeled'
+              && (contains(github.event.pull_request.labels.*.name, 'run-mutants') || vars.MUTATION_IN_CI == 'true')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      mutants: ${{ steps.select.outputs.mutants }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Select affected packages
+        id: select
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          EVENT: ${{ github.event_name }}
+        run: python3 ci/affected.py --base="$BASE" --head="$HEAD" --event="$EVENT" --github-output "$GITHUB_OUTPUT"
+
+  mutation:
+    needs: mutation-select
+    if: >-
+      ${{ always()
+          && ((github.event_name == 'pull_request' && vars.MUTATION_IN_CI != 'true'
+               && ((github.event.action == 'labeled' && github.event.label.name == 'run-mutants')
+                   || (github.event.action != 'labeled' && contains(github.event.pull_request.labels.*.name, 'run-mutants'))))
+              || ((needs.mutation-select.result != 'success' || needs.mutation-select.outputs.mutants != '')
+                  && ((github.event.action == 'labeled' && github.event.label.name == 'run-mutants')
+                      || (github.event.action != 'labeled' && (contains(github.event.pull_request.labels.*.name, 'run-mutants') || vars.MUTATION_IN_CI == 'true'))))) }}
+    runs-on: ubuntu-latest
+    # A cold hosted whole-crate run needs the headroom (#238).
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Require a trustworthy selection
+        env:
+          SELECTOR_RESULT: ${{ needs.mutation-select.result }}
+        run: test "$SELECTOR_RESULT" = success
+      - name: Select mutation packages (every mutation crate; in-diff on a PR, the gate decides which run)
+        id: packages
+        env:
+          PACKAGES: ${{ needs.mutation-select.outputs.mutants }}
+          EVENT_NAME: ${{ github.event_name }}
+          MUTATION_IN_CI: ${{ vars.MUTATION_IN_CI }}
+        run: |
+          if [ "$EVENT_NAME" = pull_request ] && [ "$MUTATION_IN_CI" != true ]; then
+            bash ci/gates/coverage-tiers.sh --root . --in-diff-preflight
+          else
+            test -n "$PACKAGES"
+          fi
+          PACKAGES="$(python3 -c '
+          import sys, tomllib
+          crates = tomllib.load(open(sys.argv[1], "rb"))["t1"]["mutants_crates"]
+          if not (isinstance(crates, list) and crates and all(isinstance(c, str) and c for c in crates)):
+              sys.exit("FAIL: [t1].mutants_crates is not a non-empty list of crate names")
+          print(" ".join(crates))' coverage-tiers.toml)"
+          test -n "$PACKAGES"
+          echo "mutants=$PACKAGES" >> "$GITHUB_OUTPUT"
+      - name: Install toolchain (pinned)
+        run: rustup show
+      - name: Cache cargo-mutants executable
+        id: mutants-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-mutants
+          key: cargo-mutants-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml') }}-27.1.0
+      - name: Install cargo-mutants 27.1.0
+        if: steps.mutants-cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-mutants --version 27.1.0 --locked
+      - name: Install cargo-nextest 0.9.146 (prebuilt, checksum-pinned)
+        if: contains(format(' {0} ', steps.packages.outputs.mutants), ' maknae-io ')
+        env:
+          NEXTEST_TARBALL: cargo-nextest-0.9.146-x86_64-unknown-linux-gnu.tar.gz
+          NEXTEST_SHA256: 682c21b777c333e96fd532e114d3a5a894e0729ab88d94c0a9f20f8419695428
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$NEXTEST_TARBALL" \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.146/$NEXTEST_TARBALL"
+          (cd "$RUNNER_TEMP" && printf '%s  %s\n' "$NEXTEST_SHA256" "$NEXTEST_TARBALL" | sha256sum -c -)
+          tar -xzf "$RUNNER_TEMP/$NEXTEST_TARBALL" -C ~/.cargo/bin cargo-nextest
+          cargo nextest --version
+      - name: Native syscall mutation filter fixtures
+        if: contains(format(' {0} ', steps.packages.outputs.mutants), ' maknae-io ') || contains(format(' {0} ', steps.packages.outputs.mutants), ' maknae-sys ')
+        run: python3 ci/gates/tests/mutation-platform/run.py
+      - name: Mutation gate (in-diff; whole crates only when MUTATION_IN_CI asks; zero missed; TIMEOUT = investigate)
+        env:
+          PACKAGES: ${{ steps.packages.outputs.mutants }}
+          EVENT_NAME: ${{ github.event_name }}
+          MUTATION_IN_CI: ${{ vars.MUTATION_IN_CI }}
+          # Assertions stay; debug symbols cost mutant rebuild time (#238).
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: |
+          test -n "$PACKAGES"
+          read -r -a packages <<< "$PACKAGES"
+          if [ "$EVENT_NAME" = pull_request ] && [ "$MUTATION_IN_CI" != true ]; then
+            # The checkout is the PR merge commit; its first parent is the base tip as merged.
+            read -r -a parents <<< "$(git rev-list --parents -n1 HEAD)"
+            if [ "${#parents[@]}" -ne 3 ]; then
+              echo "FAIL: expected the PR merge commit"; exit 1
+            fi
+            bash ci/gates/coverage-tiers.sh --root . --mutants "${packages[@]}" --in-diff HEAD^1
+          else
+            bash ci/gates/coverage-tiers.sh --root . --mutants-all
+          fi
