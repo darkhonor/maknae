@@ -193,6 +193,12 @@ mod tests {
         assert_eq!(view.agent_uid(&id("hobi")), Some(2001));
         assert!(view.is_enrolled(2001) && view.contained(1000));
         assert!(view.unresolved(1000) && !view.unresolved(2001));
+        assert!(!view.is_enrolled(1000), "enrollment is the inner view's");
+        let outer = Containing(view, [2001].into());
+        assert!(
+            outer.unresolved(1000) && !outer.unresolved(2001),
+            "resolution is the inner view's"
+        );
     }
 
     #[test]

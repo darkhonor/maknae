@@ -1257,6 +1257,44 @@ mod tests {
     }
 
     #[test]
+    fn contained_is_the_adversary_role_and_nothing_else() {
+        let snap = alias_snap(&alias_source(
+            "  admin: [\"root\"]\n  adversary: [\"alex\"]\n",
+        ));
+        let principal = principal().uid;
+        assert!(snap.contained(1000, principal), "bound to adversary");
+        assert!(!snap.contained(0, principal), "bound to admin");
+        assert!(!snap.contained(4242, principal), "bound to nothing");
+    }
+
+    #[test]
+    fn unresolved_needs_both_no_role_and_a_name_the_load_could_not_resolve() {
+        let principal = principal().uid;
+        let resolved = alias_snap(&alias_source("  admin: [\"root\"]\n"));
+        assert!(resolved.identity_problems().is_empty());
+        assert!(
+            !resolved.unresolved(4242, principal),
+            "no role, and every bound name resolved: a decided fact"
+        );
+        assert!(!resolved.unresolved(0, principal));
+        let partial = alias_snap(&alias_source(
+            "  admin: [\"root\"]\n  user: [\"sentinel-628-ghost\"]\n",
+        ));
+        assert!(matches!(
+            partial.identity_problems().as_ref(),
+            [IdentityProblem::Unresolved { .. }]
+        ));
+        assert!(
+            partial.unresolved(4242, principal),
+            "no role, and a bound name did not resolve: the uid may be that name's"
+        );
+        assert!(
+            !partial.unresolved(0, principal),
+            "a uid that holds a role is resolved, whatever else did not"
+        );
+    }
+
+    #[test]
     fn an_alias_uid_under_a_role_and_adversary_is_contained() {
         let s = alias_source("  admin: [\"root\"]\n  adversary: [\"toor\"]\n");
         assert_eq!(

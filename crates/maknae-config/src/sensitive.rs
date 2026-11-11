@@ -776,6 +776,18 @@ mod tests {
     }
 
     #[test]
+    fn into_one_is_the_first_mapped_spelling() {
+        assert_eq!(
+            fold_path("/Users/Hobi/x", Fold::None, Reach::Path).into_one(),
+            "/Users/Hobi/x"
+        );
+        assert_eq!(
+            fold_path("/Users/Hobi/x", Fold::Case, Reach::Path).into_one(),
+            "/users/hobi/x"
+        );
+    }
+
+    #[test]
     fn fold_path_gives_one_spelling_for_case_nfd_and_the_data_volume() {
         let one = |p: &str| fold_path(p, Fold::Case, Reach::Path).mapped().to_vec();
         let want = vec!["/users/hobi/tasks/users/caf\u{e9}".to_string()];
