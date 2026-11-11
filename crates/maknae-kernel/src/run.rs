@@ -3806,11 +3806,22 @@ async fn tasker_standing<P: Authorizer + Send + Sync + 'static>(
         },
         Tasker::Remote(_) => return undecided(Some(&tasker), "a remote tasker is not decided"),
     };
-    if view.contained(uid) {
-        return undecided(Some(&tasker), "the tasker is contained");
-    }
-    if view.unresolved(uid) {
-        return undecided(Some(&tasker), "the tasker's identity could not be resolved");
+    // Read before the decision and again after a refusal: a refusal stands only when
+    // both readings and the decision between them were of one load.
+    let load = view.load();
+    let not_decidable = || {
+        if view.contained(uid) {
+            Some("the tasker is contained")
+        } else if view.agent_uid(&target).is_some_and(|u| view.contained(u)) {
+            Some("the agent is contained")
+        } else if view.unresolved(uid) {
+            Some("the tasker's identity could not be resolved")
+        } else {
+            None
+        }
+    };
+    if let Some(why) = not_decidable() {
+        return undecided(Some(&tasker), why);
     }
     let stamp = match &by {
         None => Stamp::Client,
@@ -3849,9 +3860,15 @@ async fn tasker_standing<P: Authorizer + Send + Sync + 'static>(
         }
         Ok(verdict) => match finalize(combine(vec![verdict])) {
             Decision::Permit { .. } => Standing::Stands,
-            Decision::Deny { reason } => Standing::Withdrawn {
-                tasker,
-                why: reason,
+            Decision::Deny { reason } => match not_decidable() {
+                Some(why) => undecided(Some(&tasker), why),
+                None if !crate::enrollment::same_load(&load, &view.load()) => {
+                    undecided(Some(&tasker), "the policy changed during the decision")
+                }
+                None => Standing::Withdrawn {
+                    tasker,
+                    why: reason,
+                },
             },
         },
     }
@@ -24122,6 +24139,131 @@ mod task_sweep_tests {
             obligations: Vec::new(),
         };
         assert_eq!(standing(permit, fast, bound).await, Standing::Stands);
+        assert_eq!(store.record(&id).unwrap().state, TaskState::Queued);
+    }
+
+    /// A view whose load is replaced once `swapped` is set; the new load does not resolve
+    /// the tasker's name when `unresolves`.
+    struct Reloading {
+        view: FixedEnrollment,
+        swapped: Arc<std::sync::atomic::AtomicBool>,
+        unresolves: bool,
+        loads: [Arc<u8>; 2],
+    }
+
+    impl Reloading {
+        fn new(swapped: &Arc<std::sync::atomic::AtomicBool>, unresolves: bool) -> Self {
+            Reloading {
+                view: hobi_enrolled(),
+                swapped: Arc::clone(swapped),
+                unresolves,
+                loads: [Arc::new(0), Arc::new(1)],
+            }
+        }
+
+        fn swapped(&self) -> bool {
+            self.swapped.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl crate::enrollment::EnrollmentView for Reloading {
+        fn agent_uid(&self, id: &maknae_config::AgentId) -> Option<u32> {
+            self.view.agent_uid(id)
+        }
+        fn is_enrolled(&self, uid: u32) -> bool {
+            self.view.is_enrolled(uid)
+        }
+        fn contained(&self, _uid: u32) -> bool {
+            false
+        }
+        fn unresolved(&self, _uid: u32) -> bool {
+            self.unresolves && self.swapped()
+        }
+        fn load(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+            Some(self.loads[usize::from(self.swapped())].clone())
+        }
+    }
+
+    /// Decides "no role", as the load installed while it was deciding would.
+    struct InstallsThenSays(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Authorizer for InstallsThenSays {
+        fn decide_cited_all(
+            &self,
+            reqs: &[maknae_security::Request],
+        ) -> Vec<maknae_security::Decided> {
+            maknae_security::decide_each_cited(self, reqs)
+        }
+
+        fn decide(&self, _req: &maknae_security::Request) -> maknae_security::Verdict {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            maknae_security::Verdict::NotApplicable {
+                note: Some("subject resolves to no role".into()),
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_load_that_stops_resolving_the_tasker_mid_decision_withdraws_nothing() {
+        let (_blobs, _clock, store) = mem(1_000);
+        let me = Tasker::Uid(1000);
+        let id = queued(&store, "hobi", me.clone());
+        let decided_across = |unresolves: bool| {
+            let store = Arc::clone(&store);
+            async move {
+                let swapped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let view: Arc<dyn crate::enrollment::EnrollmentView> =
+                    Arc::new(Reloading::new(&swapped, unresolves));
+                tasker_standing(
+                    &store,
+                    &view,
+                    &Arc::new(InstallsThenSays(swapped)),
+                    &id,
+                    maknae_security::Lane::Local,
+                    Duration::from_secs(5),
+                )
+                .await
+            }
+        };
+        assert_eq!(
+            decided_across(true).await,
+            Standing::Undecided {
+                tasker: Some(me.clone()),
+                why: "the tasker's identity could not be resolved".into()
+            },
+            "the refusal was decided on a load that could not resolve the name"
+        );
+        assert_eq!(
+            decided_across(false).await,
+            Standing::Undecided {
+                tasker: Some(me.clone()),
+                why: "the policy changed during the decision".into()
+            },
+            "a refusal decided across two loads is not a decided refusal"
+        );
+        let agent_contained: Arc<dyn crate::enrollment::EnrollmentView> = Arc::new(
+            crate::enrollment::Containing(hobi_enrolled(), [2001].into_iter().collect()),
+        );
+        let deny = maknae_security::Verdict::Deny {
+            reason: "session.task: agent hobi is contained".into(),
+        };
+        assert_eq!(
+            tasker_standing(
+                &store,
+                &agent_contained,
+                &Arc::new(Says(deny, Duration::ZERO)),
+                &id,
+                maknae_security::Lane::Local,
+                Duration::from_secs(5),
+            )
+            .await,
+            Standing::Undecided {
+                tasker: Some(me),
+                why: "the agent is contained".into()
+            },
+            "a contained agent's task is to be held, not withdrawn"
+        );
+        assert!(store.due(8).is_empty());
         assert_eq!(store.record(&id).unwrap().state, TaskState::Queued);
     }
 

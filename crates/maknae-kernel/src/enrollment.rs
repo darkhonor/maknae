@@ -13,6 +13,23 @@ pub trait EnrollmentView: Send + Sync {
     fn contained(&self, uid: u32) -> bool;
     /// Whether `uid`'s lack of a role may only be a name the load could not resolve.
     fn unresolved(&self, uid: u32) -> bool;
+    /// The load these answers are read from, held so that two readings can be compared
+    /// with [`same_load`]; `None` for a view that never changes.
+    fn load(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        None
+    }
+}
+
+/// Whether two readings of [`EnrollmentView::load`] are of one load.
+pub fn same_load(
+    a: &Option<Arc<dyn std::any::Any + Send + Sync>>,
+    b: &Option<Arc<dyn std::any::Any + Send + Sync>>,
+) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => std::ptr::addr_eq(Arc::as_ptr(a), Arc::as_ptr(b)),
+        (Some(_), None) | (None, Some(_)) => false,
+    }
 }
 
 pub struct SnapshotEnrollment<B: Baseline>(pub Arc<Composition<B>>);
@@ -42,6 +59,10 @@ impl<B: Baseline> EnrollmentView for SnapshotEnrollment<B> {
         baseline
             .snapshot()
             .unresolved(uid, baseline.principal().uid)
+    }
+
+    fn load(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        Some(self.0.baseline().snapshot())
     }
 }
 
@@ -164,6 +185,13 @@ mod tests {
         assert!(!view.is_enrolled(nix::unistd::geteuid().as_raw()));
         assert!(!view.contained(nix::unistd::geteuid().as_raw()));
         assert!(!view.unresolved(nix::unistd::geteuid().as_raw()));
+        let (first, again) = (view.load(), view.load());
+        assert!(same_load(&first, &again), "one installed snapshot");
+        view.0.baseline().reload_from_file().unwrap();
+        assert!(!same_load(&first, &view.load()), "another was installed");
+        assert!(!same_load(&first, &None) && !same_load(&None, &first));
+        let fixed = FixedEnrollment(Default::default());
+        assert!(same_load(&fixed.load(), &fixed.load()));
     }
 
     #[test]
