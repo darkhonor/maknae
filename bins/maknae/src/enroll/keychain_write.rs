@@ -969,9 +969,3 @@ mod darwin_tests {
         assert!(!matches!(err, EnrollError::NotInstalled { .. }), "{err:?}");
     }
 }
-
-#[cfg(target_os = "macos")]
-#[allow(dead_code)]
-fn nc_327_macos_plant() {
-    let _ = std::process::Command::new("security");
-}
