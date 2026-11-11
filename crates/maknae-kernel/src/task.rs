@@ -146,6 +146,9 @@ struct Held {
     enrolled: BTreeMap<AgentId, u32>,
     issued: Counters,
     boot: Vec<BootFinding>,
+    /// Not live, yet the disk may read them confirmed: each is held marked pending until
+    /// a synced write of it, or a synced unlink.
+    exposed: BTreeMap<TaskId, TaskRecord>,
 }
 
 impl Held {
@@ -367,14 +370,18 @@ impl TaskStore {
         w
     }
 
-    /// One at a time, so a panic loses nothing queued: the item in hand is put back on
-    /// unwind, and one whose disk step failed is put back for the next writer.
+    /// Retries every exposed record, then takes each queued id in hand; one in hand
+    /// when the drain unwinds is put back.
     fn drain_abandoned(&self) {
         let queue = || {
             self.abandoned
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
         };
+        let owed: Vec<TaskId> = self.held().exposed.keys().copied().collect();
+        for id in &owed {
+            self.withdraw_locked(id);
+        }
         let rounds = queue().len();
         for _ in 0..rounds {
             let Some(id) = queue().pop() else {
@@ -384,20 +391,22 @@ impl TaskStore {
                 store: self,
                 id: Some(id),
             };
-            if self.withdraw_locked(&id, false) {
-                hand.id = None;
-            } else if let Some(id) = hand.id.take() {
-                queue().insert(0, id);
+            if !owed.contains(&id) {
+                self.withdraw_locked(&id);
             }
+            hand.id = None;
         }
     }
 
     /// Queues a submission's record for withdrawal by the next writer; never waits.
     pub(crate) fn abandon(&self, id: TaskId) {
-        self.abandoned
+        let mut queue = self
+            .abandoned
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(id);
+            .unwrap_or_else(PoisonError::into_inner);
+        if !queue.contains(&id) {
+            queue.push(id);
+        }
     }
 
     pub fn generation(&self, agent: &AgentId) -> u64 {
@@ -733,31 +742,39 @@ impl TaskStore {
     }
 
     /// Makes a minted task visible, once its submission is audited.
-    /// With a `ticket`, a submission that gave up first wins: the record is not made
-    /// visible, and one already written confirmed is withdrawn again.
+    /// With a `ticket`, a submission that gave up first wins. A confirm that does not end
+    /// with the task visible takes the record back.
     pub(crate) fn confirm(&self, id: &TaskId, ticket: Option<&Ticket>) -> Result<(), TaskRefusal> {
         let _w = self.writing();
         if ticket.is_some_and(Ticket::abandoned) {
             return Err(abandoned());
         }
-        let prior = self
-            .held()
-            .tasks
-            .get(id)
-            .filter(|r| r.pending)
-            .cloned()
-            .ok_or(TaskRefusal::Unknown)?;
-        let mut next = prior.clone();
+        let mut next = {
+            let mut held = self.held();
+            let prior = held
+                .tasks
+                .get(id)
+                .filter(|r| r.pending)
+                .cloned()
+                .ok_or(TaskRefusal::Unknown)?;
+            held.exposed.insert(*id, prior.clone());
+            prior
+        };
         next.pending = false;
-        self.write(&next, Some(&prior))?;
-        if ticket.is_some_and(|t| !t.keep(*id)) {
-            if !self.withdraw_locked(id, true) {
-                self.abandon(*id);
+        let refusal = match encode(&next).and_then(|plain| self.blobs.save(&name_of(id), &plain)) {
+            Ok(()) => {
+                let mut held = self.held();
+                if !ticket.is_some_and(|t| !t.keep(*id)) {
+                    held.exposed.remove(id);
+                    held.tasks.insert(*id, next);
+                    return Ok(());
+                }
+                abandoned()
             }
-            return Err(abandoned());
-        }
-        self.held().tasks.insert(*id, next);
-        Ok(())
+            Err(e) => store(e),
+        };
+        self.withdraw_locked(id);
+        Err(refusal)
     }
 
     /// The agent's own task `id`, only while it is `Working`.
@@ -907,49 +924,43 @@ impl TaskStore {
         crate::task_verbs::report_page(mine.into_iter(), budget)
     }
 
-    /// True when the record is off the disk or left pending there; otherwise it is queued
-    /// for the next writer.
+    /// True when the disk no longer holds the record confirmed; otherwise the record
+    /// stays exposed, for every later writer to retry. Queued first, so a withdrawal that
+    /// unwinds is still owed.
     pub(crate) fn withdraw(&self, id: &TaskId) -> bool {
+        self.abandon(*id);
         let _w = self.writing();
-        let done = self.withdraw_locked(id, false);
-        if !done {
-            self.abandon(*id);
-        }
-        done
+        !self.held().exposed.contains_key(id)
     }
 
-    /// Takes a submission back: out of memory, marked pending on disk if the disk may hold
-    /// it confirmed, then unlinked. True when the disk no longer holds it confirmed: gone, or
-    /// pending for boot to discard. When false the record is kept in memory, pending, for a
-    /// retry. The caller holds the writer.
-    fn withdraw_locked(&self, id: &TaskId, disk_confirmed: bool) -> bool {
-        let removed = {
+    /// Takes a submission back: out of memory, written pending again if the disk may hold
+    /// it confirmed, then unlinked. Only a synced pending write or a synced unlink ends the
+    /// exposure. True when the record is not exposed. The caller holds the writer.
+    fn withdraw_locked(&self, id: &TaskId) -> bool {
+        let rewrite = {
             let mut held = self.held();
             held.hot.remove(id);
-            held.tasks.remove(id)
-        };
-        let confirmed = disk_confirmed || removed.as_ref().is_some_and(|r| !r.pending);
-        let mut pending_on_disk = !confirmed;
-        if let (true, Some(rec)) = (confirmed, &removed) {
-            let mut rec = rec.clone();
-            rec.pending = true;
-            match encode(&rec).and_then(|plain| self.blobs.save(&name_of(id), &plain)) {
-                Ok(()) | Err(StoreError::NotDurable(_)) => pending_on_disk = true,
-                Err(e @ (StoreError::Io(_) | StoreError::Counters(_))) => {
-                    eprintln!("maknaed: withdrawn task {id} was not marked pending: {e}");
-                }
+            if let Some(mut rec) = held.tasks.remove(id).filter(|r| !r.pending) {
+                rec.pending = true;
+                held.exposed.insert(*id, rec);
             }
-        }
-        match self.blobs.delete(&name_of(id)) {
-            Ok(()) | Err(StoreError::NotDurable(_)) => true,
-            Err(StoreError::Io(_) | StoreError::Counters(_)) if pending_on_disk => true,
-            Err(e @ (StoreError::Io(_) | StoreError::Counters(_))) => {
-                eprintln!("maknaed: withdrawn task {id} stays on disk confirmed: {e}");
-                if let Some(mut rec) = removed {
-                    rec.pending = true;
-                    self.held().tasks.insert(*id, rec);
-                }
+            held.exposed.get(id).cloned()
+        };
+        let name = name_of(id);
+        let marked = rewrite
+            .map(|rec| encode(&rec).and_then(|plain| self.blobs.save(&name, &plain)))
+            .unwrap_or(Ok(()));
+        match (marked, self.blobs.delete(&name)) {
+            (Err(mark), Err(unlink)) => {
+                eprintln!(
+                    "maknaed: withdrawn task {id} may read confirmed on disk until a later \
+                     store write retries it: not marked pending ({mark}), not unlinked ({unlink})"
+                );
                 false
+            }
+            (Ok(()), _) | (_, Ok(())) => {
+                self.held().exposed.remove(id);
+                true
             }
         }
     }
@@ -2918,14 +2929,23 @@ mod tests {
         let store = Arc::new(TaskStore::new());
         let id = held_by(&store, Tasker::Uid(1000));
         let w = withdraw_within(&store, 1000, tokio::time::Instant::now(), id).await;
-        let queued = store.abandoned.lock().unwrap().clone();
+        let queued = || store.abandoned.lock().unwrap().clone();
         match w {
             Withdrawal::Done => {
-                assert!(queued.is_empty(), "done here is never also queued");
+                assert!(queued().is_empty(), "done here is never also queued");
                 assert!(store.record(&id).is_none());
             }
-            Withdrawal::Queued => assert_eq!(queued, vec![id]),
-            Withdrawal::Running => panic!("an expired bound either ran it or queued it"),
+            Withdrawal::Queued => assert_eq!(queued(), vec![id]),
+            Withdrawal::Running => {
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while store.record(&id).is_some() || !queued().is_empty() {
+                    assert!(
+                        std::time::Instant::now() < until,
+                        "the one running finishes"
+                    );
+                    tokio::task::yield_now().await;
+                }
+            }
         }
         let again = held_by(&store, Tasker::Uid(1000));
         let w = withdraw_within(&store, 1000, tokio::time::Instant::now() + BOUND, again).await;
@@ -3009,6 +3029,187 @@ mod tests {
             reopened.take_boot_findings()[..],
             [crate::task_store::BootFinding::Discarded { task, .. }] if task == kept
         ));
+    }
+
+    enum Via {
+        Withdraw,
+        Queue,
+        Confirm,
+    }
+
+    /// The disk fails as `fail` while a confirmed record is taken back by `via`, and
+    /// through one retry; then it recovers, one writer passes, and the host crashes.
+    fn nothing_reloads_after(fail: crate::task_store::Fail, via: Via) {
+        let blobs = crate::task_store::MemTaskBlobs::default();
+        let store = TaskStore::open(
+            Box::new(blobs.clone()),
+            Arc::new(crate::task_store::SystemClock),
+        )
+        .unwrap();
+        let nobody = id("nobody");
+        let task = match via {
+            Via::Withdraw => {
+                let task = held_by(&store, Tasker::Uid(1000));
+                blobs.fail(Some(fail));
+                assert!(!store.withdraw(&task), "not proven off the disk");
+                task
+            }
+            Via::Queue => {
+                let task = held_by(&store, Tasker::Uid(1000));
+                store.abandon(task);
+                blobs.fail(Some(fail));
+                store.purge_agent(&nobody);
+                task
+            }
+            Via::Confirm => {
+                let v = view(&[("hobi", HOBI)]);
+                let enrolled = at(store.generation(&id("hobi")), HOBI);
+                let task = store
+                    .mint(signer(), &v, enrolled, Tasker::Uid(1000), None, sub("hobi"))
+                    .unwrap()
+                    .task
+                    .task_id;
+                let ticket = Arc::new(Ticket::default());
+                let (gave_up, disk) = (Arc::clone(&ticket), blobs.clone());
+                blobs.after_save(move || {
+                    gave_up.abandon();
+                    disk.fail(Some(fail));
+                });
+                assert!(store.confirm(&task, Some(&ticket)).is_err());
+                task
+            }
+        };
+        store.purge_agent(&nobody);
+        assert!(store.record(&task).is_none());
+        blobs.fail(None);
+        store.purge_agent(&nobody);
+        blobs.crash(0);
+        let reopened =
+            TaskStore::open(Box::new(blobs), Arc::new(crate::task_store::SystemClock)).unwrap();
+        assert_eq!(reopened.len(), 0, "no live task reloads");
+    }
+
+    #[test]
+    fn a_withdrawal_whose_retry_fails_too_is_still_owed() {
+        nothing_reloads_after(crate::task_store::Fail::Records, Via::Withdraw);
+    }
+
+    #[test]
+    fn a_withdrawal_marked_pending_unsynced_and_not_unlinked_is_still_owed() {
+        nothing_reloads_after(crate::task_store::Fail::UnsyncedNoUnlink, Via::Withdraw);
+    }
+
+    #[test]
+    fn a_queued_withdrawal_whose_retry_fails_too_is_still_owed() {
+        nothing_reloads_after(crate::task_store::Fail::Records, Via::Queue);
+    }
+
+    #[test]
+    fn a_queued_withdrawal_marked_pending_unsynced_and_not_unlinked_is_still_owed() {
+        nothing_reloads_after(crate::task_store::Fail::UnsyncedNoUnlink, Via::Queue);
+    }
+
+    #[test]
+    fn an_abandoned_confirm_whose_retry_fails_too_is_still_owed() {
+        nothing_reloads_after(crate::task_store::Fail::Records, Via::Confirm);
+    }
+
+    #[test]
+    fn an_abandoned_confirm_marked_pending_unsynced_and_not_unlinked_is_still_owed() {
+        nothing_reloads_after(crate::task_store::Fail::UnsyncedNoUnlink, Via::Confirm);
+    }
+
+    #[test]
+    fn an_abandoned_confirm_unlinked_unsynced_is_still_owed() {
+        nothing_reloads_after(crate::task_store::Fail::Unsynced, Via::Confirm);
+    }
+
+    #[test]
+    fn a_confirm_that_lands_unsynced_is_taken_back_durably_before_it_is_done() {
+        let blobs = crate::task_store::MemTaskBlobs::default();
+        let store = TaskStore::open(
+            Box::new(blobs.clone()),
+            Arc::new(crate::task_store::SystemClock),
+        )
+        .unwrap();
+        let v = view(&[("hobi", HOBI)]);
+        let enrolled = at(store.generation(&id("hobi")), HOBI);
+        let task = store
+            .mint(signer(), &v, enrolled, Tasker::Uid(1000), None, sub("hobi"))
+            .unwrap()
+            .task
+            .task_id;
+        blobs.fail(Some(crate::task_store::Fail::Unsynced));
+        assert!(matches!(
+            store.confirm(&task, None),
+            Err(TaskRefusal::Store(_))
+        ));
+        assert!(!store.withdraw(&task), "the unlink is not proven either");
+        assert_eq!(store.len(), 0);
+        blobs.fail(None);
+        store.purge_agent(&id("nobody"));
+        blobs.crash(1);
+        let reopened =
+            TaskStore::open(Box::new(blobs), Arc::new(crate::task_store::SystemClock)).unwrap();
+        assert_eq!(reopened.len(), 0, "no live task reloads");
+    }
+
+    #[test]
+    fn a_confirm_that_panics_after_its_write_is_still_taken_back() {
+        let blobs = crate::task_store::MemTaskBlobs::default();
+        let store = TaskStore::open(
+            Box::new(blobs.clone()),
+            Arc::new(crate::task_store::SystemClock),
+        )
+        .unwrap();
+        let v = view(&[("hobi", HOBI)]);
+        let enrolled = at(store.generation(&id("hobi")), HOBI);
+        let task = store
+            .mint(signer(), &v, enrolled, Tasker::Uid(1000), None, sub("hobi"))
+            .unwrap()
+            .task
+            .task_id;
+        blobs.after_save(|| panic!("sentinel-628-confirm-panic"));
+        let unwound =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| store.confirm(&task, None)));
+        assert!(unwound.is_err());
+        blobs.fail(Some(crate::task_store::Fail::Unlinks));
+        assert!(store.withdraw(&task), "marked pending again, so done");
+        blobs.fail(None);
+        let reopened =
+            TaskStore::open(Box::new(blobs), Arc::new(crate::task_store::SystemClock)).unwrap();
+        assert_eq!(reopened.len(), 0, "no live task reloads");
+    }
+
+    #[test]
+    fn a_withdrawal_that_panics_is_left_to_the_next_writer() {
+        let blobs = crate::task_store::MemTaskBlobs::default();
+        let store = TaskStore::open(
+            Box::new(blobs.clone()),
+            Arc::new(crate::task_store::SystemClock),
+        )
+        .unwrap();
+        let v = view(&[("hobi", HOBI)]);
+        let enrolled = at(store.generation(&id("hobi")), HOBI);
+        let unconfirmed = store
+            .mint(signer(), &v, enrolled, Tasker::Uid(1000), None, sub("hobi"))
+            .unwrap()
+            .task
+            .task_id;
+        let live = held_by(&store, Tasker::Uid(1000));
+        blobs.fail(Some(crate::task_store::Fail::Panics));
+        for task in [unconfirmed, live] {
+            let unwound =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| store.withdraw(&task)));
+            assert!(unwound.is_err());
+        }
+        blobs.fail(None);
+        assert!(store.record(&live).is_none());
+        store.purge_agent(&id("nobody"));
+        assert!(!blobs.has(&name_of(&unconfirmed)));
+        assert!(!blobs.has(&name_of(&live)));
+        assert_eq!(store.len(), 0);
+        assert!(store.abandoned.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -364,6 +364,10 @@ pub fn load(blobs: &dyn TaskBlobs) -> Result<Loaded, StoreError> {
 #[derive(Clone, Default)]
 pub struct MemTaskBlobs(Arc<MemInner>);
 
+/// A name and the bytes saved under it, or `None` for its unlink.
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+type Unsynced = (String, Option<Zeroizing<Vec<u8>>>);
+
 #[cfg(any(test, feature = "hermetic-test-seam"))]
 #[derive(Default)]
 pub struct MemInner {
@@ -372,6 +376,9 @@ pub struct MemInner {
     fail: std::sync::Mutex<Option<Fail>>,
     slow: std::sync::Mutex<Option<Duration>>,
     stalls: std::sync::atomic::AtomicUsize,
+    synced: std::sync::Mutex<std::collections::BTreeMap<String, Zeroizing<Vec<u8>>>>,
+    unsynced: std::sync::Mutex<Vec<Unsynced>>,
+    after_save: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 #[cfg(any(test, feature = "hermetic-test-seam"))]
@@ -381,6 +388,9 @@ pub enum Fail {
     Records,
     Unsynced,
     Unlinks,
+    /// A save lands unsynced and an unlink is refused.
+    UnsyncedNoUnlink,
+    Panics,
 }
 
 #[cfg(any(test, feature = "hermetic-test-seam"))]
@@ -438,6 +448,67 @@ impl MemTaskBlobs {
     pub fn put(&self, name: &str, plain: &[u8]) {
         self.map()
             .insert(name.to_owned(), Zeroizing::new(plain.to_vec()));
+        self.settle(name, Ok(()), Some(plain))
+            .expect("a planted blob is synced");
+    }
+
+    /// Runs once, after the next record save has landed.
+    pub fn after_save(&self, then: impl FnOnce() + Send + 'static) {
+        *self
+            .0
+            .after_save
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::new(then));
+    }
+
+    /// The directory as a crash would leave it: what was last synced, then the first
+    /// `kept` of the changes that landed unsynced since.
+    pub fn crash(&self, kept: usize) {
+        let mut disk = self
+            .0
+            .synced
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let lost = std::mem::take(
+            &mut *self
+                .0
+                .unsynced
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        for (name, bytes) in lost.into_iter().take(kept) {
+            match bytes {
+                Some(b) => disk.insert(name, b),
+                None => disk.remove(&name),
+            };
+        }
+        *self.map() = disk;
+    }
+
+    fn settle(
+        &self,
+        name: &str,
+        landed: Result<(), StoreError>,
+        bytes: Option<&[u8]>,
+    ) -> Result<(), StoreError> {
+        let mut unsynced = self
+            .0
+            .unsynced
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &landed {
+            Ok(()) => {
+                unsynced.clear();
+                *self
+                    .0
+                    .synced
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = self.map().clone();
+            }
+            Err(_) => unsynced.push((name.to_owned(), bytes.map(|b| Zeroizing::new(b.to_vec())))),
+        }
+        landed
     }
 
     pub fn has(&self, name: &str) -> bool {
@@ -463,7 +534,13 @@ impl MemTaskBlobs {
             Some(Fail::Records) if name != COUNTERS => {
                 Err(StoreError::Io("sentinel-628-write-refused".into()))
             }
-            Some(Fail::Records) | Some(Fail::Unsynced) | Some(Fail::Unlinks) | None => Ok(()),
+            Some(Fail::Panics) if name != COUNTERS => panic!("sentinel-628-store-panic"),
+            Some(Fail::Records)
+            | Some(Fail::Unsynced)
+            | Some(Fail::Unlinks)
+            | Some(Fail::UnsyncedNoUnlink)
+            | Some(Fail::Panics)
+            | None => Ok(()),
         }
     }
 
@@ -474,11 +551,16 @@ impl MemTaskBlobs {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match fail {
-            Some(Fail::Unsynced) if name != COUNTERS => {
+            Some(Fail::Unsynced | Fail::UnsyncedNoUnlink) if name != COUNTERS => {
                 Err(StoreError::NotDurable("sentinel-628-unsynced".into()))
             }
-            Some(Fail::Every) | Some(Fail::Records) | Some(Fail::Unsynced)
-            | Some(Fail::Unlinks) | None => Ok(()),
+            Some(Fail::Every)
+            | Some(Fail::Records)
+            | Some(Fail::Unsynced)
+            | Some(Fail::Unlinks)
+            | Some(Fail::UnsyncedNoUnlink)
+            | Some(Fail::Panics)
+            | None => Ok(()),
         }
     }
 }
@@ -500,29 +582,43 @@ impl TaskBlobs for MemTaskBlobs {
     fn save(&self, name: &str, plain: &[u8]) -> Result<(), StoreError> {
         self.refuse(name)?;
         self.stall(name);
-        self.put(name, plain);
-        self.landed(name)
+        self.map()
+            .insert(name.to_owned(), Zeroizing::new(plain.to_vec()));
+        let landed = self.settle(name, self.landed(name), Some(plain));
+        let then = match name == COUNTERS {
+            true => None,
+            false => self
+                .0
+                .after_save
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take(),
+        };
+        if let Some(then) = then {
+            then();
+        }
+        landed
     }
 
     fn delete(&self, name: &str) -> Result<(), StoreError> {
         self.refuse(name)?;
-        if *self
+        let fail = *self
             .0
             .fail
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            == Some(Fail::Unlinks)
-        {
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(fail, Some(Fail::Unlinks | Fail::UnsyncedNoUnlink)) {
             return Err(StoreError::Io("sentinel-628-unlink-refused".into()));
         }
         self.stall(name);
         self.map().remove(name);
-        self.landed(name)
+        self.settle(name, self.landed(name), None)
     }
 
     fn quarantine(&self, name: &str) -> Result<(), StoreError> {
         self.refuse(name)?;
         self.map().remove(name);
+        self.settle(name, Ok(()), None)?;
         self.0
             .aside
             .lock()
