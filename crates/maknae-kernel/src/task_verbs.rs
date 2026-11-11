@@ -35,6 +35,17 @@ pub(crate) fn stamp_task(req: &mut Request, state: Option<TaskState>) {
     );
 }
 
+/// Whether the request cites the agent's own working task, which the kernel resolved.
+pub(crate) fn stamp_held(req: &mut Request, stamp: &Stamp<'_>) {
+    let held = match stamp {
+        Stamp::Client | Stamp::Agent { task: None, .. } => false,
+        Stamp::Agent { task: Some(_), .. } => true,
+    };
+    req.resource
+        .0
+        .insert(maknae_security::RESOURCE_TASK_HELD, AttrValue::Bool(held));
+}
+
 pub(crate) fn stamp_agent(req: &mut Request, agent: &str) {
     req.resource.0.insert(
         maknae_security::RESOURCE_AGENT,
@@ -62,8 +73,8 @@ pub(crate) enum TaskVerb<'a> {
     Stop(TaskId),
     Drop(TaskId),
     Collect { agent: &'a str, after: Option<u64> },
-    Claim,
-    Report,
+    Claim { seen: Option<u32> },
+    Report { text: &'a SecretText },
 }
 
 pub(crate) fn task_verb(verb: &Verb) -> Option<TaskVerb<'_>> {
@@ -84,8 +95,10 @@ pub(crate) fn task_verb(verb: &Verb) -> Option<TaskVerb<'_>> {
             agent,
             after: after.as_ref().map(TaskCursor::seq),
         }),
-        Verb::TaskClaim { .. } => Some(TaskVerb::Claim),
-        Verb::TaskReport { .. } => Some(TaskVerb::Report),
+        Verb::TaskClaim { seen_follow_ups } => Some(TaskVerb::Claim {
+            seen: *seen_follow_ups,
+        }),
+        Verb::TaskReport { text } => Some(TaskVerb::Report { text }),
         Verb::Ping
         | Verb::Whoami
         | Verb::AdminStatus
@@ -158,8 +171,8 @@ impl TaskVerb<'_> {
             TaskVerb::Submit(_)
             | TaskVerb::List { .. }
             | TaskVerb::Collect { .. }
-            | TaskVerb::Claim
-            | TaskVerb::Report => None,
+            | TaskVerb::Claim { .. }
+            | TaskVerb::Report { .. } => None,
         }
     }
 
@@ -172,8 +185,8 @@ impl TaskVerb<'_> {
             | TaskVerb::Status(_)
             | TaskVerb::Stop(_)
             | TaskVerb::Drop(_)
-            | TaskVerb::Claim
-            | TaskVerb::Report => None,
+            | TaskVerb::Claim { .. }
+            | TaskVerb::Report { .. } => None,
         }
     }
 
@@ -272,6 +285,8 @@ mod tests {
             claimed: None,
             follow_ups: Vec::new(),
             report: rseq.map(|_| (SecretText(Zeroizing::new(text.into())), 150)),
+            actions: 0,
+            last_action: None,
         }
     }
 
@@ -383,7 +398,10 @@ mod tests {
             },
         ] {
             let tv = task_verb(&verb).unwrap();
-            assert!(matches!(tv, TaskVerb::Claim | TaskVerb::Report));
+            assert!(matches!(
+                tv,
+                TaskVerb::Claim { .. } | TaskVerb::Report { .. }
+            ));
             assert_eq!(
                 (tv.cited(), tv.named_agent(), tv.object()),
                 (None, None, None)

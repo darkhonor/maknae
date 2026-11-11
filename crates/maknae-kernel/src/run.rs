@@ -1227,6 +1227,10 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         return;
     }
 
+    if let Some(t) = &task {
+        agents.tasks.acted(&t.id);
+    }
+
     if matches!(
         dispatch_verb(&request.verb),
         Dispatch::ConversationNewRequested
@@ -3330,6 +3334,9 @@ async fn serve_task_verb<S, E, P>(
 
     let (_, _, generation) = live.admission();
     let mut sec_req = build_authz_request(verb, trail.uid, None, lane, None, None, stamp);
+    if let TaskVerb::Report { .. } = asked {
+        tv::stamp_held(&mut sec_req, stamp);
+    }
     if let Some(id) = &cited {
         tv::stamp_task(&mut sec_req, store.state_for(id, caller));
     }
@@ -3530,7 +3537,168 @@ async fn serve_task_verb<S, E, P>(
                 )
                 .await;
         }
-        TaskVerb::Submit(_) | TaskVerb::Claim | TaskVerb::Report => {
+        TaskVerb::Claim { seen } => {
+            let Some(agent) = tasks.channel_agent.clone() else {
+                trail
+                    .unauthorized(stream, &decided("deny", "not an agent", "unauthorized"))
+                    .await;
+                return;
+            };
+            let of =
+                |mut rec: AuditRecord, id: &maknae_proto::TaskId, tasker: &maknae_proto::Tasker| {
+                    rec.object = Some(format!("task:{id}"));
+                    rec.subject.task_id = Some(id.to_string());
+                    rec.subject.tasker = Some(maknae_proto::tasker_text(tasker));
+                    rec
+                };
+            let idle = || {
+                let mut rec = decided("permit", "idle", "authorized");
+                rec.subject.tasker = None;
+                rec
+            };
+            if let Some(seen) = seen {
+                let budget = maknae_proto::prompt_request_cap(tasks.text_max);
+                let (outcome, payload) = match store.heartbeat(&agent, trail.uid, seen, budget) {
+                    crate::task::Heartbeat::FollowUps {
+                        task,
+                        tasker,
+                        from,
+                        items,
+                    } => (
+                        of(
+                            decided(
+                                "permit",
+                                &format!("heartbeat: {} follow-ups after {from}", items.len()),
+                                "authorized",
+                            ),
+                            &task,
+                            &tasker,
+                        ),
+                        Payload::TaskFollowUps(maknae_proto::TaskFollowUps { from, items }),
+                    ),
+                    crate::task::Heartbeat::Closed(view) => {
+                        let mut rec =
+                            decided("permit", "heartbeat: the task is closed", "authorized");
+                        rec.object = Some(format!("task:{}", view.task.to_id()));
+                        rec.subject.task_id = Some(view.task.to_id().to_string());
+                        rec.subject.tasker = None;
+                        (rec, Payload::TaskState(view))
+                    }
+                    crate::task::Heartbeat::Idle => (idle(), Payload::TaskIdle),
+                };
+                trail
+                    .deliver(stream, &outcome, payload, role, rule.as_ref(), action)
+                    .await;
+                return;
+            }
+            if store.next_for(&agent, trail.uid).is_none() {
+                trail
+                    .deliver(
+                        stream,
+                        &idle(),
+                        Payload::TaskIdle,
+                        role,
+                        rule.as_ref(),
+                        action,
+                    )
+                    .await;
+                return;
+            }
+            let mut intent = decided("permit", "intent recorded", "authorized");
+            intent.subject.tasker = None;
+            if !trail.record_bounded(&intent).await {
+                return;
+            }
+            let (s, signer, uid) = (
+                Arc::clone(store),
+                Arc::clone(&tasks.agents.signer),
+                trail.uid,
+            );
+            let claimed = crate::task::offload(uid, deadline, move || {
+                match s.claim(&agent, uid, &*signer)? {
+                    crate::task::Claimed::Idle => Ok(None),
+                    crate::task::Claimed::Delivered { signed, partition } => {
+                        let wire = crate::task_store::encode(&*signed)
+                            .map_err(|e| crate::task::TaskRefusal::Store(e.to_string()))?;
+                        Ok(Some((signed, maknae_proto::Bytes::new(wire), partition)))
+                    }
+                }
+            })
+            .await;
+            match claimed {
+                Ok(None) => {
+                    let outcome = trail.outcome(&intent, "idle", "authorized");
+                    trail
+                        .deliver(
+                            stream,
+                            &outcome,
+                            Payload::TaskIdle,
+                            role,
+                            rule.as_ref(),
+                            action,
+                        )
+                        .await;
+                }
+                Ok(Some((task, signed, partition))) => {
+                    let outcome = of(
+                        trail.outcome(&intent, "delivered", "authorized"),
+                        &task.task.task_id,
+                        &task.task.tasker,
+                    );
+                    let payload =
+                        Payload::TaskDelivered(maknae_proto::TaskDelivery { signed, partition });
+                    trail
+                        .deliver(stream, &outcome, payload, role, rule.as_ref(), action)
+                        .await;
+                }
+                Err(r) => trail.unauthorized(stream, &refused(&intent, &r)).await,
+            }
+        }
+        TaskVerb::Report { text } => {
+            let held = match (stamp, &tasks.channel_agent) {
+                (Stamp::Agent { task: Some(t), .. }, Some(agent)) => Some((t, agent.clone())),
+                (Stamp::Client | Stamp::Agent { task: None, .. }, _) | (_, None) => None,
+            };
+            let Some((held, agent)) = held else {
+                trail
+                    .unauthorized(
+                        stream,
+                        &decided("deny", "no working task cited", "unauthorized"),
+                    )
+                    .await;
+                return;
+            };
+            let mut intent = decided("permit", "intent recorded", "authorized");
+            intent.object = Some(format!("task:{}", held.id));
+            intent.subject.task_id = Some(held.id.to_string());
+            intent.subject.tasker = Some(held.tasker.clone());
+            if text.0.len() > tasks.text_max {
+                let r = TaskRefusal::TooLong;
+                intent.outcome.result = "deny".into();
+                trail
+                    .unauthorized(
+                        stream,
+                        &trail.outcome(&intent, &r.to_string(), "unauthorized"),
+                    )
+                    .await;
+                return;
+            }
+            if !trail.record_bounded(&intent).await {
+                return;
+            }
+            let (id, uid, text) = (held.id, trail.uid, text.clone());
+            let done = mutate(Box::new(move |s| s.report(&id, &agent, uid, text))).await;
+            acknowledge_task(
+                stream,
+                trail,
+                &intent,
+                done,
+                refused,
+                (role, rule.as_ref(), action),
+            )
+            .await;
+        }
+        TaskVerb::Submit(_) => {
             trail
                 .unauthorized(
                     stream,
@@ -6066,7 +6234,10 @@ where
             let stopped = async move {
                 let _ = stopping.wait_for(|stop| *stop).await;
             };
-            crate::reload::run_reload(store_revision, &io, &io, &io, &io, stopped).await
+            let reloaded =
+                crate::reload::run_reload(store_revision, &io, &io, &io, &io, stopped).await;
+            self.settle_tasks(&ctx).await;
+            reloaded
         })
         .await
     }
@@ -6111,16 +6282,25 @@ where
     }
 
     /// Installs `snapshot`, or keeps the installed one when only the live values changed, then
-    /// purges every task whose agent it no longer enrolls. Called after the install's own locks
-    /// are released: `retain_enrolled` reads the snapshot under the store lock.
+    /// owes a close to every open task whose agent it no longer enrolls, without I/O.
+    /// Called after the install's own locks are released: `mark_unenrolled` reads the
+    /// snapshot under the store lock. [`Reloader::settle_tasks`] follows it.
     fn install_and_reconcile(&self, snapshot: Option<Arc<maknae_authz_basic::snapshot::Snapshot>>) {
         if let Some(snapshot) = snapshot {
             self.authorizer.baseline().install(snapshot);
         }
         self.tasks
-            .retain_enrolled(&crate::enrollment::SnapshotEnrollment(Arc::clone(
+            .mark_unenrolled(&crate::enrollment::SnapshotEnrollment(Arc::clone(
                 &self.authorizer,
             )));
+    }
+
+    /// Writes and records the closes `install_and_reconcile` owed. One that does not land
+    /// in time is still performed by the next store write, before that write acts.
+    async fn settle_tasks(&self, ctx: &BootCtx<'_>) {
+        if let Err(e) = settle_tasks(&self.tasks, self.sink.as_ref(), ctx, false).await {
+            eprintln!("maknaed: task closes are left to the next store write: {e}");
+        }
     }
 
     /// A live edit; `released` is set to the uid a release acted on, resolved in the turn.
@@ -6307,6 +6487,7 @@ where
             crate::identity_report::transition_problems(&released),
         );
         self.install_and_reconcile(Some(snapshot));
+        self.settle_tasks(&ctx).await;
         self.identity.publish(published);
         *self
             .applied_source
@@ -6737,6 +6918,7 @@ where
         drop(guard);
         if applied.is_ok() && held_live {
             self.install_and_reconcile(None);
+            self.settle_tasks(&ctx).await;
         }
         drop(turn);
         let revision = committed.revision;
@@ -7825,6 +8007,204 @@ async fn open_tasks(
     Ok(store)
 }
 
+const TASK_SWEEP_EVERY: Duration = Duration::from_secs(60);
+
+fn task_notice_record(ctx: &BootCtx<'_>, notice: &crate::task::Notice) -> AuditRecord {
+    use crate::task::Notice;
+    use maknae_proto::{TaskClose, Tasker};
+    let (result, posture, reason) = match notice {
+        Notice::Closed { close, .. } => (
+            "deny",
+            "unavailable",
+            match close {
+                TaskClose::Stopped => "closed:stopped".to_string(),
+                TaskClose::Dropped => "closed:dropped".to_string(),
+                TaskClose::AgentGone => "closed:agent-gone".to_string(),
+                TaskClose::AgentLost => "closed:agent-lost".to_string(),
+            },
+        ),
+        Notice::Expired { .. } => ("deny", "unavailable", "expired".to_string()),
+        Notice::Owed { why, .. } => (
+            "deny",
+            "unavailable",
+            format!("store: owed to a later store write: {why}"),
+        ),
+        Notice::Settled { .. } => (
+            "permit",
+            "authorized",
+            "store: the owed write landed".to_string(),
+        ),
+        Notice::Left { why, .. } => (
+            "deny",
+            "unavailable",
+            format!("store: an unconfirmed record stays on disk until the next start: {why}"),
+        ),
+        Notice::Late { failed: None, .. } => (
+            "permit",
+            "authorized",
+            "task stored after the submission was answered".to_string(),
+        ),
+        Notice::Late {
+            failed: Some(why), ..
+        } => (
+            "deny",
+            "unavailable",
+            format!("not stored after the submission was answered: {why}"),
+        ),
+        Notice::Dropped(n) => (
+            "deny",
+            "unavailable",
+            format!("store: {n} task notices were not recorded"),
+        ),
+    };
+    let mut rec = ctx.record("session.task", result, &reason, posture, None);
+    let (task, tasker, parent) = match notice {
+        Notice::Closed {
+            task,
+            tasker,
+            parent,
+            ..
+        }
+        | Notice::Expired {
+            task,
+            tasker,
+            parent,
+        } => (Some(task), Some(tasker), *parent),
+        Notice::Late { task, tasker, .. } => (Some(task), Some(tasker), None),
+        Notice::Owed { task, .. } | Notice::Settled { task } | Notice::Left { task, .. } => {
+            (Some(task), None, None)
+        }
+        Notice::Dropped(_) => (None, None, None),
+    };
+    rec.object = task.map(|t| format!("task:{t}"));
+    rec.subject.task_id = task.map(ToString::to_string);
+    rec.subject.parent_task_id = parent.map(|p| p.to_string());
+    rec.subject.tasker = tasker.map(maknae_proto::tasker_text);
+    if let Notice::Late { .. } = notice {
+        rec.subject.task_op = Some("submit".into());
+    }
+    rec.source.uid = match tasker {
+        Some(Tasker::Uid(uid) | Tasker::Agent { uid, .. }) => *uid,
+        Some(Tasker::Remote(_)) => maknae_audit_append::NO_PEER_UID,
+        None => ctx.euid,
+    };
+    rec
+}
+
+/// `ctx`'s session and sequence, under the `task` event.
+fn task_ctx<'a>(ctx: &BootCtx<'a>) -> BootCtx<'a> {
+    BootCtx {
+        event: "task",
+        host: ctx.host,
+        socket: ctx.socket,
+        euid: ctx.euid,
+        session_id: ctx.session_id,
+        seq: ctx.seq,
+        au3_1: ctx.au3_1,
+    }
+}
+
+/// Records what the task store did outside any request. What the trail refuses goes
+/// back to the store for the next call; false when it refused any.
+async fn record_task_notices<E: AuditEmit>(
+    tasks: &crate::task::TaskStore,
+    emit: &E,
+    ctx: &BootCtx<'_>,
+) -> bool {
+    let mut notices = std::collections::VecDeque::from(tasks.take_notices());
+    while let Some(notice) = notices.pop_front() {
+        let rec = task_notice_record(ctx, &notice);
+        if let Err(e) = emit.emit_within(&rec, AUDIT_APPEND_TIMEOUT).await {
+            eprintln!(
+                "maknaed: AUDIT WRITE FAILED on a task store record; kept for the next sweep: {e}"
+            );
+            notices.push_front(notice);
+            tasks.return_notices(notices.into());
+            return false;
+        }
+    }
+    true
+}
+
+/// One writer's pass over the task store, off the async worker, then its records; false
+/// when the trail refused one.
+async fn settle_tasks<E: AuditEmit>(
+    tasks: &Arc<crate::task::TaskStore>,
+    emit: &E,
+    ctx: &BootCtx<'_>,
+    sweep: bool,
+) -> Result<bool, crate::task::TaskRefusal> {
+    let s = Arc::clone(tasks);
+    let deadline = tokio::time::Instant::now() + BLOCKING_OPERATION_TIMEOUT;
+    let passed = crate::task::offload(ctx.euid, deadline, move || {
+        match sweep {
+            true => s.sweep(),
+            false => s.pass(),
+        }
+        Ok(())
+    })
+    .await;
+    let recorded = record_task_notices(tasks, emit, &task_ctx(ctx)).await;
+    passed.map(|()| recorded)
+}
+
+/// Closes the tasks of every agent the booted snapshot does not enroll, and records each
+/// close, before any listener accepts.
+async fn reconcile_tasks_at_boot<B: maknae_authz_basic::Baseline>(
+    tasks: &Arc<crate::task::TaskStore>,
+    authorizer: &Arc<crate::composition::Composition<B>>,
+    sink: &maknae_audit_append::AuditSink,
+    ctx: &BootCtx<'_>,
+) -> Result<(), RunError> {
+    tasks.mark_unenrolled(&crate::enrollment::SnapshotEnrollment(Arc::clone(
+        authorizer,
+    )));
+    match settle_tasks(tasks, sink, ctx, false).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(RunError::Other(
+            "the trail refused a task record at boot".into(),
+        )),
+        Err(e) => Err(RunError::Other(format!(
+            "the task store did not reconcile: {e}"
+        ))),
+    }
+}
+
+/// Sweeps the task store every `TASK_SWEEP_EVERY` and once more when `stop` is notified.
+async fn sweep_tasks<E: AuditEmit>(
+    tasks: Arc<crate::task::TaskStore>,
+    emit: Arc<E>,
+    where_: WhereCtx,
+    euid: u32,
+    session_id: u64,
+    stop: Arc<tokio::sync::Notify>,
+) {
+    let seq = Seq::new();
+    let ctx = BootCtx {
+        event: "task",
+        host: &where_.host,
+        socket: &where_.socket,
+        euid,
+        session_id,
+        seq: &seq,
+        au3_1: &where_.au3_1,
+    };
+    let mut tick = tokio::time::interval(TASK_SWEEP_EVERY);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        let stopping = tokio::select! {
+            _ = tick.tick() => false,
+            _ = stop.notified() => true,
+        };
+        if let Err(e) = settle_tasks(&tasks, &*emit, &ctx, true).await {
+            eprintln!("maknaed: task sweep: {e}");
+        }
+        if stopping {
+            return;
+        }
+    }
+}
+
 fn task_finding_record(ctx: &BootCtx<'_>, finding: &crate::task_store::BootFinding) -> AuditRecord {
     use crate::task_store::BootFinding;
     match finding {
@@ -8613,6 +8993,7 @@ async fn boot_after_sink(
         .await;
     }
     let authorizer = Arc::new(authorizer);
+    reconcile_tasks_at_boot(&tasks, &authorizer, sink.as_ref(), &graph_ctx).await?;
     let identity = booted.status.identity.clone();
     let graph_revision = Arc::clone(&booted.status.revision);
     let baseline_status = booted.status.baseline.clone();
@@ -8930,6 +9311,15 @@ where
     });
     let lifetime = handler_drain_bound(&transport, egress.deadline());
     let agents = reloader.agent_admission(Arc::new(crate::task::PlaneSigner(Arc::clone(client))));
+    let sweep_stop = Arc::new(tokio::sync::Notify::new());
+    let mut sweeper = tokio::spawn(sweep_tasks(
+        Arc::clone(&reloader.tasks),
+        Arc::clone(sink),
+        wctx.clone(),
+        reloader.euid,
+        session_ids.next_session(),
+        Arc::clone(&sweep_stop),
+    ));
     let max_connections = transport.max_connections;
     let serve = |listener: PlaneListener, class: ChannelClass| {
         let sink = Arc::clone(sink);
@@ -8983,6 +9373,12 @@ where
         agent_listener.map(|(listener, class)| serve(listener, class)),
     )
     .await;
+    sweep_stop.notify_one();
+    if await_drain_with_timeout(&mut sweeper, AUDIT_DRAIN_SHUTDOWN_TIMEOUT).await
+        == DrainOutcome::Aborted
+    {
+        eprintln!("maknaed: the task sweep did not finish within its shutdown bound");
+    }
     reloader.stop(&reloads).await;
     let drained = *drain.borrow();
     Ok(crate::handler::after_drain(outcome, drained))
@@ -13014,6 +13410,86 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         .map(Arc::new)
     }
 
+    static HELD_AT_BOOT: std::sync::OnceLock<(crate::task_store::MemTaskBlobs, String)> =
+        std::sync::OnceLock::new();
+
+    fn held_at_boot() -> &'static (crate::task_store::MemTaskBlobs, String) {
+        HELD_AT_BOOT.get_or_init(|| {
+            let b = crate::task_store::MemTaskBlobs::default();
+            let store = crate::task::TaskStore::open(
+                Box::new(b.clone()),
+                Arc::new(crate::task_store::SystemClock),
+            )
+            .unwrap();
+            let signed = maknae_proto::SignedTask {
+                task: <maknae_proto::TaskObject as crate::task::TaskObjectForTest>::for_test(
+                    "hobi", 1000,
+                ),
+                signature: maknae_proto::TaskSignature {
+                    alg: "test".into(),
+                    leaf: maknae_proto::Bytes(maknae_io::Zeroizing::new(vec![1])),
+                    chain: Vec::new(),
+                    sig: maknae_proto::Bytes(maknae_io::Zeroizing::new(vec![2])),
+                },
+            };
+            let id = store.insert_for_test(signed, 2001).task.task_id;
+            store.start_for_test(&id);
+            (b, id.to_string())
+        })
+    }
+
+    fn tasks_held_for_no_agent(
+        _: &Path,
+        _: u32,
+        _: WrappingKey,
+    ) -> Result<Arc<crate::task::TaskStore>, crate::task_store::StoreError> {
+        crate::task::TaskStore::open(
+            Box::new(held_at_boot().0.clone()),
+            Arc::new(crate::task_store::SystemClock),
+        )
+        .map(Arc::new)
+    }
+
+    #[test]
+    fn boot_closes_and_records_the_tasks_of_an_agent_it_does_not_enroll() {
+        let _g = env_lock();
+        let d = fixture("tasks-unenrolled");
+        let (blobs, id) = held_at_boot();
+        let _ = block_on_run_inner_with(
+            &d.0,
+            BootSeams {
+                tasks_open: tasks_held_for_no_agent,
+                ..seams_with(TestEnv::default())
+            },
+        );
+        let recs: Vec<AuditRecord> = trail_of(&d, "audit.jsonl")
+            .into_iter()
+            .filter(|r| r.action == "session.task")
+            .collect();
+        assert_eq!(recs.len(), 1, "{recs:?}");
+        let rec = &recs[0];
+        assert_eq!(rec.event, "task");
+        assert_eq!(rec.object, Some(format!("task:{id}")));
+        assert_eq!(rec.subject.task_id.as_deref(), Some(id.as_str()));
+        assert_eq!(rec.subject.tasker.as_deref(), Some("uid:1000"));
+        assert_eq!(rec.source.uid, 1000);
+        assert_eq!(
+            (
+                rec.outcome.result.as_str(),
+                rec.outcome.reason.as_str(),
+                rec.outcome.posture.as_str()
+            ),
+            ("deny", "closed:agent-gone", "unavailable")
+        );
+        let reopened = crate::task::TaskStore::open(
+            Box::new(blobs.clone()),
+            Arc::new(crate::task_store::SystemClock),
+        )
+        .unwrap();
+        let stored = reopened.record(&id.parse().unwrap()).unwrap();
+        assert_eq!(stored.close, Some(maknae_proto::TaskClose::AgentGone));
+    }
+
     #[test]
     fn boot_records_each_pending_or_unreadable_task_before_it_settles_it() {
         let _g = env_lock();
@@ -15670,11 +16146,17 @@ mod reload_fixture {
             crate::test_fixtures::remove_enrollment(&self.dir, id);
         }
 
-        pub(super) fn reload_records(&self) -> Vec<AuditRecord> {
+        pub(super) fn records(&self) -> Vec<AuditRecord> {
             std::fs::read_to_string(self.dir.join("audit.jsonl"))
                 .unwrap()
                 .lines()
                 .map(|l| serde_json::from_str::<AuditRecord>(l).unwrap())
+                .collect()
+        }
+
+        pub(super) fn reload_records(&self) -> Vec<AuditRecord> {
+            self.records()
+                .into_iter()
                 .filter(|r| r.event == "reload")
                 .collect()
         }
@@ -22143,6 +22625,19 @@ mod agent_listener_tests {
             Some(crate::task::TaskRefusal::Unknown)
         );
         assert_eq!(
+            fx.reloader.tasks.record(&id).unwrap().close,
+            Some(maknae_proto::TaskClose::AgentGone)
+        );
+        let closes: Vec<AuditRecord> = fx
+            .records()
+            .into_iter()
+            .filter(|r| r.event == "task")
+            .collect();
+        assert_eq!(closes.len(), 1, "{closes:?}");
+        assert_eq!(closes[0].outcome.reason, "closed:agent-gone");
+        assert_eq!(closes[0].object, Some(format!("task:{id}")));
+        assert_eq!(closes[0].source.uid, 1002);
+        assert_eq!(
             connect(&fx).err(),
             Some(crate::authz::DenyCause::NotEnrolled)
         );
@@ -22577,5 +23072,323 @@ mod agent_listener_tests {
         assert!(matches!(got, GracefulShutdown), "{got:?}");
         let got = combine_outcomes(None, GracefulShutdown, None);
         assert!(matches!(got, GracefulShutdown), "{got:?}");
+    }
+}
+
+#[cfg(test)]
+mod task_sweep_tests {
+    use super::*;
+    use crate::task::{Notice, TaskObjectForTest, TaskStore};
+    use maknae_proto::{TaskClose, TaskId, Tasker};
+
+    /// Records every append, and refuses the `fail`th and every one after it.
+    struct Trail {
+        recs: std::sync::Mutex<Vec<AuditRecord>>,
+        fail: usize,
+    }
+
+    impl Trail {
+        fn new(fail: usize) -> Arc<Self> {
+            Arc::new(Trail {
+                recs: std::sync::Mutex::default(),
+                fail,
+            })
+        }
+
+        fn recs(&self) -> Vec<AuditRecord> {
+            self.recs.lock().unwrap().clone()
+        }
+    }
+
+    impl AuditEmit for Trail {
+        fn emit(
+            &self,
+            record: &AuditRecord,
+        ) -> impl std::future::Future<Output = Result<(), maknae_audit_append::AuditError>> + Send
+        {
+            let mut recs = self.recs.lock().unwrap();
+            let refused = self.fail != 0 && recs.len() + 1 >= self.fail;
+            if !refused {
+                recs.push(record.clone());
+            }
+            async move {
+                match refused {
+                    true => Err(maknae_audit_append::AuditError::WritePrimary(
+                        "sentinel-628-trail-refused".into(),
+                    )),
+                    false => Ok(()),
+                }
+            }
+        }
+    }
+
+    fn ctx<'a>(seq: &'a Seq, au3_1: &'a serde_json::Value) -> BootCtx<'a> {
+        BootCtx {
+            event: "task",
+            host: "h",
+            socket: "s",
+            euid: 77,
+            session_id: 9,
+            seq,
+            au3_1,
+        }
+    }
+
+    fn working(store: &TaskStore, agent: &str, tasker: Tasker) -> TaskId {
+        let mut task = maknae_proto::TaskObject::for_test(agent, 0);
+        task.tasker = tasker;
+        let signed = maknae_proto::SignedTask {
+            task,
+            signature: maknae_proto::TaskSignature {
+                alg: "test".into(),
+                leaf: maknae_proto::Bytes(maknae_io::Zeroizing::new(vec![1])),
+                chain: Vec::new(),
+                sig: maknae_proto::Bytes(maknae_io::Zeroizing::new(vec![2])),
+            },
+        };
+        let id = store.insert_for_test(signed, 2001).task.task_id;
+        store.start_for_test(&id);
+        id
+    }
+
+    #[test]
+    fn each_notice_has_its_record() {
+        let (seq, au) = (Seq::new(), serde_json::json!({}));
+        let ctx = ctx(&seq, &au);
+        let (task, parent) = (TaskId([7; 16]), TaskId([8; 16]));
+        let agent = Tasker::Agent {
+            agent: "hobi".into(),
+            uid: 2001,
+        };
+        let shape = |n: Notice| {
+            let r = task_notice_record(&ctx, &n);
+            assert_eq!(
+                (r.event.as_str(), r.action.as_str()),
+                ("task", "session.task")
+            );
+            (
+                r.outcome.result,
+                r.outcome.reason,
+                r.outcome.posture,
+                r.source.uid,
+                r.subject.tasker,
+                r.subject.parent_task_id,
+                r.object,
+            )
+        };
+        let s = |v: &str| v.to_string();
+        let object = Some(format!("task:{task}"));
+        for (close, reason) in [
+            (TaskClose::AgentGone, "closed:agent-gone"),
+            (TaskClose::AgentLost, "closed:agent-lost"),
+            (TaskClose::Stopped, "closed:stopped"),
+            (TaskClose::Dropped, "closed:dropped"),
+        ] {
+            assert_eq!(
+                shape(Notice::Closed {
+                    task,
+                    tasker: agent.clone(),
+                    parent: Some(parent),
+                    close
+                }),
+                (
+                    s("deny"),
+                    s(reason),
+                    s("unavailable"),
+                    2001,
+                    Some(s("agent:hobi")),
+                    Some(parent.to_string()),
+                    object.clone()
+                )
+            );
+        }
+        assert_eq!(
+            shape(Notice::Expired {
+                task,
+                tasker: Tasker::Uid(1000),
+                parent: None
+            }),
+            (
+                s("deny"),
+                s("expired"),
+                s("unavailable"),
+                1000,
+                Some(s("uid:1000")),
+                None,
+                object.clone()
+            )
+        );
+        assert_eq!(
+            shape(Notice::Expired {
+                task,
+                tasker: Tasker::Remote("gw".into()),
+                parent: None
+            })
+            .3,
+            maknae_audit_append::NO_PEER_UID
+        );
+        assert_eq!(
+            shape(Notice::Owed {
+                task,
+                why: s("disk")
+            }),
+            (
+                s("deny"),
+                s("store: owed to a later store write: disk"),
+                s("unavailable"),
+                77,
+                None,
+                None,
+                object.clone()
+            )
+        );
+        assert_eq!(
+            shape(Notice::Settled { task }),
+            (
+                s("permit"),
+                s("store: the owed write landed"),
+                s("authorized"),
+                77,
+                None,
+                None,
+                object.clone()
+            )
+        );
+        assert_eq!(
+            shape(Notice::Left {
+                task,
+                why: s("disk")
+            })
+            .1,
+            "store: an unconfirmed record stays on disk until the next start: disk"
+        );
+        let late = task_notice_record(
+            &ctx,
+            &Notice::Late {
+                task,
+                tasker: Tasker::Uid(1000),
+                failed: None,
+            },
+        );
+        assert_eq!(late.subject.task_op.as_deref(), Some("submit"));
+        assert_eq!(
+            (
+                late.outcome.result.as_str(),
+                late.outcome.reason.as_str(),
+                late.source.uid
+            ),
+            (
+                "permit",
+                "task stored after the submission was answered",
+                1000
+            )
+        );
+        assert_eq!(
+            shape(Notice::Late {
+                task,
+                tasker: Tasker::Uid(1000),
+                failed: Some(s("disk"))
+            }),
+            (
+                s("deny"),
+                s("not stored after the submission was answered: disk"),
+                s("unavailable"),
+                1000,
+                Some(s("uid:1000")),
+                None,
+                object
+            )
+        );
+        assert_eq!(
+            shape(Notice::Dropped(3)),
+            (
+                s("deny"),
+                s("store: 3 task notices were not recorded"),
+                s("unavailable"),
+                77,
+                None,
+                None,
+                None
+            )
+        );
+        let seqs: Vec<u64> = (0..2)
+            .map(|_| task_notice_record(&ctx, &Notice::Settled { task }).seq)
+            .collect();
+        assert_eq!(seqs[1], seqs[0] + 1, "one sequence for every record");
+    }
+
+    #[tokio::test]
+    async fn a_notice_the_trail_refuses_is_kept_for_the_next_sweep() {
+        let store = Arc::new(TaskStore::new());
+        let (a, b) = (
+            working(&store, "hobi", Tasker::Uid(1000)),
+            working(&store, "hobi", Tasker::Uid(1001)),
+        );
+        store.purge_agent(&maknae_config::AgentId::parse("hobi").unwrap());
+        let (seq, au) = (Seq::new(), serde_json::json!({}));
+        let refusing = Trail::new(2);
+        assert!(!record_task_notices(&store, &*refusing, &ctx(&seq, &au)).await);
+        assert_eq!(refusing.recs().len(), 1);
+        let taking = Trail::new(0);
+        assert!(record_task_notices(&store, &*taking, &ctx(&seq, &au)).await);
+        let said: Vec<Option<String>> = refusing
+            .recs()
+            .into_iter()
+            .chain(taking.recs())
+            .map(|r| r.object)
+            .collect();
+        assert_eq!(said, [Some(format!("task:{a}")), Some(format!("task:{b}"))]);
+        assert!(store.take_notices().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_sweep_closes_a_lapsed_lease_records_it_and_sweeps_once_more_at_stop() {
+        let clock = Arc::new(crate::task_store::ManualClock::at(1_000));
+        let store = Arc::new(
+            TaskStore::open(
+                Box::new(crate::task_store::MemTaskBlobs::default()),
+                clock.clone(),
+            )
+            .unwrap(),
+        );
+        let lost = working(&store, "hobi", Tasker::Uid(1000));
+        store.acted(&lost);
+        let trail = Trail::new(0);
+        let stop = Arc::new(tokio::sync::Notify::new());
+        let where_ = WhereCtx {
+            host: "h".into(),
+            socket: "s".into(),
+            au3_1: serde_json::json!({}),
+        };
+        let sweeping = tokio::spawn(sweep_tasks(
+            Arc::clone(&store),
+            Arc::clone(&trail),
+            where_,
+            77,
+            41,
+            Arc::clone(&stop),
+        ));
+        let until = Instant::now() + Duration::from_secs(10);
+        while store.record(&lost).unwrap().actions == 0 {
+            assert!(
+                Instant::now() < until,
+                "the first sweep stores the counters"
+            );
+            tokio::task::yield_now().await;
+        }
+        clock.set(1_001 + crate::task_store::CLAIM_LEASE.as_secs() as i64);
+        stop.notify_one();
+        tokio::time::timeout(Duration::from_secs(10), sweeping)
+            .await
+            .expect("the sweep ends at stop")
+            .unwrap();
+        let recs = trail.recs();
+        assert_eq!(recs.len(), 1, "{recs:?}");
+        assert_eq!(recs[0].outcome.reason, "closed:agent-lost");
+        assert_eq!((recs[0].session_id, recs[0].event.as_str()), (41, "task"));
+        assert_eq!(
+            store.record(&lost).unwrap().close,
+            Some(TaskClose::AgentLost)
+        );
     }
 }

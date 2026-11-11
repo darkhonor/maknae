@@ -164,16 +164,16 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         | Verb::McpToolCall
         | Verb::McpResourceRead
         | Verb::McpPromptGet
-        | Verb::McpSamplingCreate
-        | Verb::TaskClaim { .. }
-        | Verb::TaskReport { .. } => Dispatch::NoBehaviour,
+        | Verb::McpSamplingCreate => Dispatch::NoBehaviour,
         Verb::TaskSubmit { .. }
         | Verb::TaskAdd { .. }
         | Verb::TaskStatus { .. }
         | Verb::TaskList { .. }
         | Verb::TaskStop { .. }
         | Verb::TaskDrop { .. }
-        | Verb::TaskCollect { .. } => Dispatch::TaskRequested,
+        | Verb::TaskCollect { .. }
+        | Verb::TaskClaim { .. }
+        | Verb::TaskReport { .. } => Dispatch::TaskRequested,
     }
 }
 
@@ -1072,7 +1072,7 @@ mod tests {
         terms.iter().all(|t| {
             let verbs: Vec<Verb> = all_verbs()
                 .into_iter()
-                .filter(|v| verb_to_action(v) == *t && !unbuilt_task_verb(v))
+                .filter(|v| verb_to_action(v) == *t)
                 .collect();
             !verbs.is_empty()
                 && verbs
@@ -1103,19 +1103,13 @@ mod tests {
             );
             if let Some(op) = stamped {
                 ops.push(op.to_owned());
-                let built = !unbuilt_task_verb(&v);
-                assert_eq!(dispatch_verb(&v) == Dispatch::TaskRequested, built, "{v:?}");
+                assert_eq!(dispatch_verb(&v), Dispatch::TaskRequested, "{v:?}");
             }
         }
         assert_eq!(
             ops,
             ["submit", "add", "status", "list", "stop", "drop", "collect", "claim", "report"]
         );
-    }
-
-    /// The agent-side task verbs, built by #628 Task 4, which deletes this list.
-    fn unbuilt_task_verb(v: &Verb) -> bool {
-        matches!(v, Verb::TaskClaim { .. } | Verb::TaskReport { .. })
     }
 
     /// The grantable-side tripwire (#181), replacing what the retired
@@ -1150,16 +1144,6 @@ mod tests {
         assert!(
             all_dispatch(real),
             "every grantable term must dispatch to a real arm"
-        );
-        assert_eq!(
-            all_verbs()
-                .iter()
-                .filter(|v| verb_to_action(v) == "session.task")
-                .filter(|v| dispatch_verb(v) == Dispatch::NoBehaviour)
-                .map(unbuilt_task_verb)
-                .collect::<Vec<_>>(),
-            [true, true],
-            "only claim and report wait for #628 Task 4"
         );
         // The discriminator discriminates: a known ungrantable term has no
         // real arm, so the helper must say false — otherwise the assert above

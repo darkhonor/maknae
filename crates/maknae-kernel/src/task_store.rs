@@ -13,6 +13,8 @@ use crate::conversation::store::{Blobs, StoreError as BlobError};
 
 pub const CLAIM_LEASE: Duration = Duration::from_secs(15 * 60);
 
+pub const REPORT_HOLD: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
 pub const RECORD_MAX: u64 = (3 * maknae_config::PROMPT_MAX_CEILING
     + maknae_proto::TASK_ENVELOPE_MARGIN
     + maknae_proto::TASK_SIGNATURE_MAX_BYTES
@@ -101,6 +103,11 @@ pub struct TaskRecord {
     pub claimed: Option<i64>,
     pub follow_ups: Vec<SecretText>,
     pub report: Option<(SecretText, i64)>,
+    /// As last stored; the running values are in [`Hot`].
+    #[serde(default)]
+    pub actions: u32,
+    #[serde(default)]
+    pub last_action: Option<i64>,
 }
 
 mod arc_signed {
@@ -1046,13 +1053,14 @@ mod tests {
         let store = open_mem(&b);
         let id = by_uid(&store, "one");
         b.fail(Some(Fail::Every));
-        store.purge_agent(&hobi());
+        assert!(!store.withdraw(&id));
         assert!(store.record(&id).is_none());
         assert!(b.has(&name_of(&id)));
         b.fail(None);
         let id = by_uid(&store, "two");
         store.purge_agent(&hobi());
-        assert!(!b.has(&name_of(&id)));
+        assert_eq!(store.record(&id).unwrap().close, Some(TaskClose::AgentGone));
+        assert!(b.has(&name_of(&id)), "a purge closes; it removes nothing");
     }
 
     #[test]
@@ -1187,14 +1195,20 @@ mod tests {
     }
 
     #[test]
-    fn a_purged_task_leaves_the_directory() {
+    fn a_purged_task_stays_in_the_directory_closed() {
         let t = tmp();
         let store = open_dir(t.path()).unwrap();
         let id = mint(&store).unwrap().task.task_id;
         let file = t.path().join(format!("{id}.task"));
         assert!(file.is_file());
         store.purge_agent(&hobi());
-        assert!(!file.exists());
+        assert!(file.is_file());
+        drop(store);
+        let rec = open_dir(t.path()).unwrap().record(&id).unwrap();
+        assert_eq!(
+            (rec.state, rec.close),
+            (TaskState::Closed, Some(TaskClose::AgentGone))
+        );
     }
 
     #[test]
