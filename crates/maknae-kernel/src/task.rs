@@ -31,8 +31,6 @@ pub enum TaskRefusal {
     Audit(String),
     Unsigned,
     Store(String),
-    NoAccount,
-    AccountName,
     CursorAhead,
     Finished,
 }
@@ -56,10 +54,6 @@ impl std::fmt::Display for TaskRefusal {
             TaskRefusal::Audit(why) => write!(f, "the task was not audited: {why}"),
             TaskRefusal::Unsigned => f.write_str("the task could not be signed"),
             TaskRefusal::Store(why) => write!(f, "the task store did not write: {why}"),
-            TaskRefusal::NoAccount => f.write_str("the submitting session names no account"),
-            TaskRefusal::AccountName => {
-                f.write_str("the submitting account name is not one path component")
-            }
             TaskRefusal::CursorAhead => f.write_str("cursor_ahead"),
             TaskRefusal::Finished => f.write_str("the task has already reported or closed"),
         }
@@ -323,7 +317,6 @@ impl TaskStore {
     }
 
     /// Signs before storing, outside the store lock; an unsigned task is never stored.
-    /// `account` is the submitting session's, the root of a person's own task.
     #[allow(clippy::too_many_arguments)]
     pub fn mint(
         &self,
@@ -332,7 +325,6 @@ impl TaskStore {
         enrolled: Enrolled,
         tasker: Tasker,
         parent: Option<TaskId>,
-        account: Option<&str>,
         sub: TaskSubmission,
     ) -> Result<Arc<SignedTask>, TaskRefusal> {
         let mut draw = || {
@@ -340,9 +332,7 @@ impl TaskStore {
             maknae_crypto::random::fill(&mut id[..]).map_err(|_| TaskRefusal::Random)?;
             Ok(id)
         };
-        self.mint_with(
-            &mut draw, signer, view, enrolled, tasker, parent, account, sub,
-        )
+        self.mint_with(&mut draw, signer, view, enrolled, tasker, parent, sub)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -354,7 +344,6 @@ impl TaskStore {
         enrolled: Enrolled,
         tasker: Tasker,
         parent: Option<TaskId>,
-        account: Option<&str>,
         sub: TaskSubmission,
     ) -> Result<Arc<SignedTask>, TaskRefusal> {
         let agent = target(&sub)?;
@@ -370,7 +359,7 @@ impl TaskStore {
         };
         loop {
             let signed = Arc::new(signer.sign(task)?);
-            match self.place(view, &agent, enrolled, account, &signed)? {
+            match self.place(view, &agent, enrolled, &signed)? {
                 Placed::Stored => return Ok(signed),
                 Placed::Collided => {
                     task = signed.task.clone();
@@ -385,7 +374,6 @@ impl TaskStore {
         view: &dyn EnrollmentView,
         agent: &AgentId,
         enrolled: Enrolled,
-        account: Option<&str>,
         task: &Arc<SignedTask>,
     ) -> Result<Placed, TaskRefusal> {
         let Enrolled {
@@ -404,7 +392,7 @@ impl TaskStore {
         if held.tasks.contains_key(&task.task.task_id) {
             return Ok(Placed::Collided);
         }
-        let root = root_of(&held, &task.task, account)?;
+        let root = root_of(&held, &task.task)?;
         let seq = self.issue(&mut held, Sequence::Submission)?;
         let rec = TaskRecord {
             signed: task.clone(),
@@ -563,10 +551,7 @@ impl TaskStore {
     pub fn insert_for_test(&self, signed: SignedTask, agent_uid: u32) -> Arc<SignedTask> {
         let agent = AgentId::parse(&signed.task.agent).expect("a test task names a valid agent id");
         let root = match &signed.task.tasker {
-            Tasker::Uid(uid) => RootTasker::Person {
-                uid: *uid,
-                account: format!("uid{uid}"),
-            },
+            Tasker::Uid(uid) => RootTasker::Person { uid: *uid },
             Tasker::Agent { agent, .. } | Tasker::Remote(agent) => RootTasker::Agent {
                 agent: agent.clone(),
             },
@@ -610,12 +595,8 @@ fn store(e: StoreError) -> TaskRefusal {
     TaskRefusal::Store(e.to_string())
 }
 
-/// A sub-task works in its parent's partition; a person's own task, in the account's.
-fn root_of(
-    held: &Held,
-    task: &TaskObject,
-    account: Option<&str>,
-) -> Result<RootTasker, TaskRefusal> {
+/// A sub-task works in its parent's partition; a person's own task, in the uid's.
+fn root_of(held: &Held, task: &TaskObject) -> Result<RootTasker, TaskRefusal> {
     if let Some(parent) = task.parent {
         return held
             .live(&parent)
@@ -623,30 +604,12 @@ fn root_of(
             .ok_or(TaskRefusal::ParentNotHeld);
     }
     match &task.tasker {
-        Tasker::Uid(uid) => {
-            let account = account.ok_or(TaskRefusal::NoAccount)?;
-            if !one_component(account) {
-                return Err(TaskRefusal::AccountName);
-            }
-            Ok(RootTasker::Person {
-                uid: *uid,
-                account: account.to_owned(),
-            })
-        }
+        Tasker::Uid(uid) => Ok(RootTasker::Person { uid: *uid }),
         Tasker::Agent { agent, .. } => Ok(RootTasker::Agent {
             agent: agent.clone(),
         }),
         Tasker::Remote(_) => Err(TaskRefusal::Schema("a remote tasker is not taken".into())),
     }
-}
-
-/// A partition is `users/<account>`, so the account must name exactly one directory.
-fn one_component(name: &str) -> bool {
-    !name.is_empty()
-        && name != "."
-        && name != ".."
-        && !name.starts_with('-')
-        && !name.contains(['/', '\0'])
 }
 
 /// The stored task `id`, if it is bound to this agent id and uid.
@@ -925,7 +888,6 @@ async fn decide<P: Authorizer + Send + Sync + 'static>(
         },
         attempt.tasker.clone(),
         attempt.parent,
-        ctx.user,
         sub,
     )
 }
@@ -1054,7 +1016,6 @@ mod tests {
                     at(0, HOBI),
                     Tasker::Uid(1000),
                     None,
-                    Some(ACCOUNT),
                     sub("hobi")
                 )
                 .unwrap_err(),
@@ -1070,7 +1031,6 @@ mod tests {
                     at(0, HOBI),
                     Tasker::Uid(1000),
                     None,
-                    Some(ACCOUNT),
                     sub("hobi"),
                 )
                 .unwrap();
@@ -1094,7 +1054,6 @@ mod tests {
                     at(0, HOBI),
                     Tasker::Uid(1),
                     None,
-                    Some(ACCOUNT),
                     sub("hobi"),
                 )
                 .unwrap();
@@ -1148,7 +1107,6 @@ mod tests {
                 at(0, HOBI),
                 Tasker::Uid(1000),
                 None,
-                Some(ACCOUNT),
                 sub("hobi"),
             )
             .unwrap();
@@ -1194,7 +1152,6 @@ mod tests {
                 at(0, HOBI),
                 Tasker::Uid(1000),
                 None,
-                Some(ACCOUNT),
                 sub("hobi"),
             )
             .unwrap();
@@ -1281,15 +1238,7 @@ mod tests {
             let v = view(&[("hobi", HOBI), ("jin", JIN)]);
             let mint_by = |s: &LeafSigner, to: &str| {
                 store
-                    .mint(
-                        s,
-                        &v,
-                        at(0, v.0[&id(to)]),
-                        Tasker::Uid(1000),
-                        None,
-                        Some(ACCOUNT),
-                        sub(to),
-                    )
+                    .mint(s, &v, at(0, v.0[&id(to)]), Tasker::Uid(1000), None, sub(to))
                     .unwrap()
             };
             let before = mint_by(&signing, "hobi");
@@ -1363,7 +1312,6 @@ mod tests {
                 at(store.generation(&id(agent)), v.0[&id(agent)]),
                 Tasker::Uid(1000),
                 None,
-                Some(ACCOUNT),
                 sub(agent),
             )
             .unwrap()
@@ -1391,7 +1339,6 @@ mod tests {
                 at(0, HOBI),
                 tasker.clone(),
                 Some(parent),
-                Some(ACCOUNT),
                 sub("hobi"),
             )
             .unwrap();
@@ -1426,7 +1373,6 @@ mod tests {
                 at(0, HOBI),
                 Tasker::Uid(1),
                 None,
-                Some(ACCOUNT),
                 sub("hobi"),
             )
             .unwrap();
@@ -1438,7 +1384,6 @@ mod tests {
                 at(0, HOBI),
                 Tasker::Uid(1),
                 None,
-                Some(ACCOUNT),
                 sub("hobi"),
             )
             .unwrap();
@@ -1455,7 +1400,6 @@ mod tests {
                     at(0, HOBI),
                     Tasker::Uid(1),
                     None,
-                    Some(ACCOUNT),
                     sub("hobi")
                 )
                 .unwrap_err(),
@@ -1557,7 +1501,6 @@ mod tests {
                     at(0, HOBI),
                     Tasker::Uid(1000),
                     None,
-                    Some(ACCOUNT),
                     sub("hobi")
                 )
                 .unwrap_err(),
@@ -1583,7 +1526,6 @@ mod tests {
                     at(0, HOBI),
                     Tasker::Uid(1000),
                     None,
-                    Some(ACCOUNT),
                     sub("hobi")
                 )
                 .unwrap_err(),
@@ -1597,7 +1539,6 @@ mod tests {
                 at(0, 0),
                 Tasker::Uid(1000),
                 None,
-                Some(ACCOUNT),
                 sub("Not An Id")
             ),
             Err(TaskRefusal::Schema(_))
@@ -1618,7 +1559,6 @@ mod tests {
                     at(read, HOBI),
                     Tasker::Uid(1000),
                     None,
-                    Some(ACCOUNT),
                     sub("hobi")
                 )
                 .unwrap_err(),
@@ -1676,14 +1616,6 @@ mod tests {
             (
                 TaskRefusal::Store("disk".into()),
                 "the task store did not write: disk",
-            ),
-            (
-                TaskRefusal::NoAccount,
-                "the submitting session names no account",
-            ),
-            (
-                TaskRefusal::AccountName,
-                "the submitting account name is not one path component",
             ),
             (TaskRefusal::CursorAhead, "cursor_ahead"),
             (

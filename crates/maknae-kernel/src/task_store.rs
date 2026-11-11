@@ -65,14 +65,14 @@ impl Clock for ManualClock {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum RootTasker {
-    Person { uid: u32, account: String },
+    Person { uid: u32 },
     Agent { agent: String },
 }
 
 impl RootTasker {
     pub fn partition(&self) -> String {
         match self {
-            RootTasker::Person { account, .. } => format!("users/{account}"),
+            RootTasker::Person { uid } => format!("users/{uid}"),
             RootTasker::Agent { agent } => format!("agents/{agent}"),
         }
     }
@@ -539,7 +539,7 @@ mod tests {
         t
     }
 
-    fn mint(store: &TaskStore, account: Option<&str>) -> Result<Arc<SignedTask>, TaskRefusal> {
+    fn mint(store: &TaskStore) -> Result<Arc<SignedTask>, TaskRefusal> {
         let v = FixedEnrollment([(hobi(), HOBI)].into_iter().collect());
         let sub = TaskSubmission {
             schema: maknae_proto::TASK_SCHEMA.into(),
@@ -554,22 +554,14 @@ mod tests {
             generation: store.generation(&hobi()),
             agent_uid: HOBI,
         };
-        store.mint(
-            &Unverified,
-            &v,
-            enrolled,
-            Tasker::Uid(1000),
-            None,
-            account,
-            sub,
-        )
+        store.mint(&Unverified, &v, enrolled, Tasker::Uid(1000), None, sub)
     }
 
     #[test]
     fn a_record_seals_and_reopens_byte_identical() {
         let t = tmp();
         let store = open_dir(t.path()).unwrap();
-        let id = mint(&store, Some("jimin")).unwrap().task.task_id;
+        let id = mint(&store).unwrap().task.task_id;
         let before = encode(&store.record(&id).unwrap()).unwrap();
         drop(store);
         let raw = std::fs::read(t.path().join(format!("{id}.task"))).unwrap();
@@ -684,7 +676,7 @@ mod tests {
     fn an_unreadable_or_oversized_record_is_quarantined_and_boot_continues() {
         let t = tmp();
         let store = open_dir(t.path()).unwrap();
-        let kept = mint(&store, Some("jimin")).unwrap().task.task_id;
+        let kept = mint(&store).unwrap().task.task_id;
         drop(store);
         let junk = TaskId([3; 16]);
         let big = TaskId([4; 16]);
@@ -759,7 +751,7 @@ mod tests {
         for fail in [Fail::Every, Fail::Records] {
             b.fail(Some(fail));
             assert!(matches!(
-                mint(&store, Some("jimin")),
+                mint(&store),
                 Err(TaskRefusal::Store(why)) if why == "sentinel-628-write-refused"
             ));
             assert!(matches!(
@@ -782,7 +774,7 @@ mod tests {
         ));
         assert!(store.record(&id).is_some());
         b.fail(None);
-        let next = mint(&store, Some("jimin")).unwrap().task.task_id;
+        let next = mint(&store).unwrap().task.task_id;
         assert!(store.record(&next).unwrap().seq > 1);
         assert_eq!(open_mem(&b).queue(&hobi()), vec![next]);
     }
@@ -794,7 +786,7 @@ mod tests {
         let id = by_uid(&store, "one");
         b.fail(Some(Fail::Unsynced));
         assert!(matches!(
-            mint(&store, Some("jimin")),
+            mint(&store),
             Err(TaskRefusal::Store(why)) if why == "sentinel-628-unsynced"
         ));
         assert!(matches!(
@@ -855,27 +847,12 @@ mod tests {
     }
 
     #[test]
-    fn a_persons_task_needs_an_account_and_a_sub_task_inherits_its_root() {
+    fn a_persons_task_is_rooted_at_the_uid_and_an_agents_at_the_agent() {
         let store = TaskStore::new();
-        assert_eq!(mint(&store, None).unwrap_err(), TaskRefusal::NoAccount);
-        for bad in ["", ".", "..", "-x", "a/b", "a\0b"] {
-            assert_eq!(
-                mint(&store, Some(bad)).unwrap_err(),
-                TaskRefusal::AccountName,
-                "{bad:?}"
-            );
-        }
-        assert!(mint(&store, Some("a.b-c")).is_ok());
-        let own = mint(&store, Some("jimin")).unwrap().task.task_id;
+        let own = mint(&store).unwrap().task.task_id;
         let root = store.record(&own).unwrap().root;
-        assert_eq!(
-            root,
-            RootTasker::Person {
-                uid: 1000,
-                account: "jimin".into()
-            }
-        );
-        assert_eq!(root.partition(), "users/jimin");
+        assert_eq!(root, RootTasker::Person { uid: 1000 });
+        assert_eq!(root.partition(), "users/1000");
         let agents = store
             .insert_for_test(
                 signed(
@@ -978,7 +955,7 @@ mod tests {
     fn a_purged_task_leaves_the_directory() {
         let t = tmp();
         let store = open_dir(t.path()).unwrap();
-        let id = mint(&store, Some("jimin")).unwrap().task.task_id;
+        let id = mint(&store).unwrap().task.task_id;
         let file = t.path().join(format!("{id}.task"));
         assert!(file.is_file());
         store.purge_agent(&hobi());
