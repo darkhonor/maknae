@@ -173,8 +173,8 @@ newtype_check() { # <label> <file> <type>
   fi
 }
 
-secret_check() { # <label> <file> <type> <struct-file>
-  local label="$1" file="$2" ty="$3" structfile="$4" want wantfile decl nexact nany nshadow
+secret_check() { # <label> <file> <type> <struct-file> <struct> <field> <field-type>
+  local label="$1" file="$2" ty="$3" structfile="$4" sname="$5" field="$6" fty="$7" want wantfile decl nexact nany tcrate scrate root assert
   want="$(secret_decl "$ty")" || { echo "FAIL: leaf-secret row '$label': '$ty' is not a zeroizing secret type this gate knows."; return 1; }
   wantfile="${want%%|*}"; decl="${want#*|}"
   if [ "$file" != "$wantfile" ]; then
@@ -188,12 +188,18 @@ secret_check() { # <label> <file> <type> <struct-file>
     echo "FAIL: leaf-secret row '$label': '$file' must declare '$ty' exactly once, as '$decl', and name it nowhere else as an item; it is not the zeroizing secret type."
     return 1
   fi
-  if [ "$structfile" != "$file" ]; then
-    nshadow="$(grep -cE "(^|[^A-Za-z0-9_])(struct|enum|union|type|trait|mod|as)[[:space:]]+$ty([^A-Za-z0-9_]|$)" "$structfile" || true)"
-    if [ "$nshadow" != "0" ]; then
-      echo "FAIL: leaf-secret row '$label': '$structfile' names its own item '$ty', so the field may not resolve to the zeroizing secret type."
-      return 1
-    fi
+  tcrate="$(printf '%s' "$file" | sed -nE 's#^crates/([a-z0-9-]+)/src/[a-z0-9_]+\.rs$#\1#p' | tr '-' '_')"
+  scrate="$(printf '%s' "$structfile" | sed -nE 's#^crates/([a-z0-9-]+)/src/[a-z0-9_]+\.rs$#\1#p' | tr '-' '_')"
+  root="$(printf '%s' "$file" | sed -nE 's#^crates/[a-z0-9-]+/src/([a-z0-9_]+)\.rs$#\1#p')"
+  if [ -z "$tcrate" ] || [ -z "$scrate" ] || [ -z "$root" ]; then
+    echo "FAIL: leaf-secret row '$label': '$file' or '$structfile' is not a crates/<crate>/src/<module>.rs file."
+    return 1
+  fi
+  if [ "$tcrate" = "$scrate" ]; then root="crate::$root::$ty"; else root="::$tcrate::$root::$ty"; fi
+  assert="const _: fn(&$sname) -> &$(printf '%s' "$fty" | sed -E "s/(^|[^A-Za-z0-9_:])$ty([^A-Za-z0-9_]|$)/\1$root\2/") = |c| &c.$field;"
+  if ! grep -qxF "$assert" "$structfile"; then
+    echo "FAIL: leaf-secret row '$label': '$structfile' does not hold '$assert', so '$ty' may not resolve to the zeroizing secret type."
+    return 1
   fi
 }
 
@@ -949,7 +955,12 @@ while IFS=$'\t' read -r fpath fty fkind; do
         [ "$ep" = "${lp%.*}" ] && structfile="$ef"
       done
       [ -n "$structfile" ] || { echo "FAIL: leaf-secret row '$lp': no SURFACE entry holds it."; exit 1; }
-      secret_check "$lp" "$lf" "$lt" "$structfile" || exit 1
+      sname=""
+      for entry in "${SURFACE[@]}"; do
+        IFS='|' read -r _ sn ep _ <<< "$entry"
+        [ "$ep" = "${lp%.*}" ] && sname="$sn"
+      done
+      secret_check "$lp" "$lf" "$lt" "$structfile" "$sname" "${lp##*.}" "$fty" || exit 1
       echo "$lp" >> "$tmp/leaf-used"
       leaf_row=1
     fi

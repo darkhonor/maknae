@@ -1174,6 +1174,10 @@ pub struct TaskFollowUps {
     pub from: u32,
     pub items: Vec<SecretText>,
 }
+
+const _: fn(&TaskReportView) -> &crate::wire::SecretText = |c| &c.text;
+const _: fn(&TaskDelivery) -> &crate::bytes::Bytes = |c| &c.signed;
+const _: fn(&TaskFollowUps) -> &Vec<crate::wire::SecretText> = |c| &c.items;
 FIX
   cat > "$fixture/crates/maknae-proto/src/conversation.rs" <<'FIX'
 pub struct ConversationId(String);

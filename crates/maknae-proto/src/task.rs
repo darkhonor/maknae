@@ -384,6 +384,10 @@ pub struct TaskFollowUps {
     pub items: Vec<SecretText>,
 }
 
+const _: fn(&TaskReportView) -> &crate::wire::SecretText = |c| &c.text;
+const _: fn(&TaskDelivery) -> &crate::bytes::Bytes = |c| &c.signed;
+const _: fn(&TaskFollowUps) -> &Vec<crate::wire::SecretText> = |c| &c.items;
+
 /// The one formatter for the audit field and the `tasker` subject attribute.
 pub fn tasker_text(t: &Tasker) -> String {
     match t {

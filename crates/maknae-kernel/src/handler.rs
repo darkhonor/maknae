@@ -992,10 +992,14 @@ mod tests {
     /// vacuously if this helper always returned true.
     fn all_dispatch(terms: &[&str]) -> bool {
         terms.iter().all(|t| {
-            all_verbs()
+            let verbs: Vec<Verb> = all_verbs()
                 .into_iter()
-                .find(|v| verb_to_action(v) == *t)
-                .is_some_and(|v| dispatch_verb(&v) != Dispatch::NoBehaviour)
+                .filter(|v| verb_to_action(v) == *t)
+                .collect();
+            !verbs.is_empty()
+                && verbs
+                    .iter()
+                    .all(|v| dispatch_verb(v) != Dispatch::NoBehaviour)
         })
     }
 
