@@ -30,8 +30,16 @@ const MOVED: &str = "not done: the queue changed during the claim";
 pub enum DueFor {
     Close(TaskClose),
     Expiry,
-    /// Its tasker or its agent is contained.
-    Hold,
+    Hold(Contained),
+}
+
+/// Who is contained, for a task that is held: its agent, the tasker who gave it, or the
+/// person or agent at the root of its chain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Contained {
+    Tasker,
+    Root,
+    Agent,
 }
 
 /// A close or an expiry the kernel records before it asks the store to perform it.
@@ -39,6 +47,8 @@ pub enum DueFor {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Due {
     pub task: TaskId,
+    /// The agent the task was given to.
+    pub agent: AgentId,
     pub tasker: Tasker,
     pub parent: Option<TaskId>,
     pub why: DueFor,
@@ -227,7 +237,7 @@ struct Held {
     recorded: BTreeMap<TaskId, TaskClose>,
     /// Tasks of a contained tasker or agent, due a hold: none is handed out, acted on,
     /// closed, expired or removed any more.
-    holding: BTreeSet<TaskId>,
+    holding: BTreeMap<TaskId, Contained>,
     /// Marked tasks whose hold the kernel has recorded.
     hold_said: BTreeSet<TaskId>,
     /// The submission sequence of the close the disk last refused; `due` starts after it.
@@ -278,31 +288,42 @@ impl Held {
             r.agent == *agent
                 && r.agent_uid == uid
                 && !self.closing.contains_key(id)
-                && !self.holding.contains(id)
+                && !self.holding.contains_key(id)
         })
     }
 
-    /// Marks, for a hold, every task whose tasker or root person `contained` names
-    /// (open, reported or closed) and every open task of an agent it names.
-    fn hold_contained(&mut self, contained: impl Fn(u32) -> bool) {
+    /// Marks for a hold every task the view's contained subjects gave or are the root of,
+    /// whatever its state, and every open task a contained agent holds.
+    fn hold_contained(&mut self, view: &dyn EnrollmentView) {
         let of = |t: &Tasker| match t {
             Tasker::Uid(uid) | Tasker::Agent { uid, .. } => Some(*uid),
             Tasker::Remote(_) => None,
         };
-        let due: Vec<TaskId> = self
+        let root_of = |root: &RootTasker| match root {
+            RootTasker::Person { uid } => Some(*uid),
+            RootTasker::Agent { agent } => AgentId::parse(agent)
+                .ok()
+                .and_then(|agent| view.agent_uid(&agent)),
+        };
+        let contained = |uid: u32| view.contained(uid);
+        let due: Vec<(TaskId, Contained)> = self
             .tasks
             .iter()
-            .filter(|(_, r)| !r.pending && r.state != TaskState::Held)
-            .filter(|(_, r)| {
-                let root = match &r.root {
-                    RootTasker::Person { uid } => Some(*uid),
-                    RootTasker::Agent { .. } => None,
-                };
-                of(&r.tasker).is_some_and(&contained)
-                    || root.is_some_and(&contained)
-                    || (open(r) && contained(r.agent_uid))
+            .filter(|(id, r)| {
+                !r.pending && r.state != TaskState::Held && !self.holding.contains_key(id)
             })
-            .map(|(id, _)| *id)
+            .filter_map(|(id, r)| {
+                let who = if of(&r.tasker).is_some_and(contained) {
+                    Contained::Tasker
+                } else if root_of(&r.root).is_some_and(contained) {
+                    Contained::Root
+                } else if open(r) && contained(r.agent_uid) {
+                    Contained::Agent
+                } else {
+                    return None;
+                };
+                Some((*id, who))
+            })
             .collect();
         self.holding.extend(due);
     }
@@ -326,7 +347,7 @@ impl Held {
 
     fn expose(&mut self, mut rec: TaskRecord) {
         rec.pending = true;
-        rec.withdrawn = true;
+        rec.removing = true;
         self.exposed.insert(rec.signed.task.task_id, rec);
     }
 
@@ -577,7 +598,7 @@ impl TaskStore {
         let mut held = self.held();
         let settled: Vec<TaskId> = held
             .holding
-            .iter()
+            .keys()
             .filter(|id| held.live(id).is_none_or(|r| r.state == TaskState::Held))
             .copied()
             .collect();
@@ -725,7 +746,9 @@ impl TaskStore {
                 &r.report,
             ) {
                 _ if r.pending || r.state == TaskState::Held => None,
-                _ if held.holding.contains(id) => Some(DueFor::Hold),
+                _ if held.holding.contains_key(id) => {
+                    held.holding.get(id).copied().map(DueFor::Hold)
+                }
                 (Some(close), TaskState::Queued | TaskState::Working, _) => {
                     Some(DueFor::Close(*close))
                 }
@@ -740,12 +763,18 @@ impl TaskStore {
             .tasks
             .iter()
             .filter_map(|(id, r)| {
+                let why = why(id, r)?;
                 let due = Due {
                     task: *id,
+                    agent: r.agent.clone(),
                     tasker: r.tasker.clone(),
                     parent: r.parent,
-                    why: why(id, r)?,
-                    recorded: held.recorded.contains_key(id) || held.hold_said.contains(id),
+                    why,
+                    recorded: match why {
+                        DueFor::Hold(_) => held.hold_said.contains(id),
+                        DueFor::Close(_) => held.recorded.contains_key(id),
+                        DueFor::Expiry => false,
+                    },
                 };
                 Some((r.seq, due))
             })
@@ -770,9 +799,11 @@ impl TaskStore {
                 let mut held = self.held();
                 let lapsed = held.hot.get(&d.task).is_none_or(|h| h.lease_until < now);
                 let rec = held.live(&d.task);
-                let holding = held.holding.contains(&d.task);
+                let holding = held.holding.contains_key(&d.task);
                 let still = match (d.why, held.closing.get(&d.task)) {
-                    (DueFor::Hold, _) => holding && rec.is_some_and(|r| r.state != TaskState::Held),
+                    (DueFor::Hold(_), _) => {
+                        holding && rec.is_some_and(|r| r.state != TaskState::Held)
+                    }
                     (DueFor::Close(_) | DueFor::Expiry, _) if holding => false,
                     (DueFor::Close(_), Some(_)) => rec.is_some_and(open),
                     (DueFor::Close(TaskClose::AgentLost), None) => {
@@ -796,7 +827,7 @@ impl TaskStore {
                         held.closing.insert(d.task, close);
                         held.recorded.insert(d.task, close);
                     }
-                    (true, DueFor::Hold) => {
+                    (true, DueFor::Hold(_)) => {
                         held.hold_said.insert(d.task);
                     }
                     (true, DueFor::Expiry) | (false, _) => {}
@@ -809,8 +840,8 @@ impl TaskStore {
                     disk = self.close_durably(&d.task);
                     done += usize::from(disk);
                 }
-                (true, DueFor::Close(_) | DueFor::Hold, false) => {}
-                (true, DueFor::Hold, true) => {
+                (true, DueFor::Close(_) | DueFor::Hold(_), false) => {}
+                (true, DueFor::Hold(_), true) => {
                     disk = self.hold_durably(&d.task);
                     done += usize::from(disk);
                 }
@@ -968,7 +999,7 @@ impl TaskStore {
                 None => held.enrolled.remove(&agent),
             };
         }
-        held.hold_contained(|uid| view.contained(uid));
+        held.hold_contained(view);
     }
 
     #[cfg(any(test, feature = "hermetic-test-seam"))]
@@ -1094,7 +1125,7 @@ impl TaskStore {
             close: None,
             held_from: None,
             pending: true,
-            withdrawn: false,
+            removing: false,
             seq,
             tseq,
             rseq: None,
@@ -1197,7 +1228,7 @@ impl TaskStore {
             let rec = held.live(id).ok_or(TaskRefusal::Unknown)?;
             check(rec)?;
             match rec.state {
-                TaskState::Queued | TaskState::Working if !held.holding.contains(id) => {}
+                TaskState::Queued | TaskState::Working if !held.holding.contains_key(id) => {}
                 TaskState::Queued
                 | TaskState::Working
                 | TaskState::Reported
@@ -1235,7 +1266,7 @@ impl TaskStore {
     pub fn withdraw_authority(&self, id: &TaskId) {
         let mut held = self.held();
         let queued = held.live(id).is_some_and(|r| r.state == TaskState::Queued);
-        if queued && !held.holding.contains(id) {
+        if queued && !held.holding.contains_key(id) {
             held.closing.entry(*id).or_insert(TaskClose::Withdrawn);
         }
     }
@@ -1265,18 +1296,23 @@ impl TaskStore {
     }
 
     /// Hands `agent` its working task again, or starts its oldest queued one, under the
-    /// signer's current leaf. Any refusal leaves the task as it was. One the store or the
-    /// signer gave holds the task back from the next claims, for 1 s doubling to 60 s; a
-    /// hand-out ends that.
+    /// signer's current leaf. A queued task is started only when it is `decided`, the one
+    /// whose tasker's standing the caller has just decided; any other answers idle. Any
+    /// refusal leaves the task as it was. One the store or the signer gave holds the task
+    /// back from the next claims, for 1 s doubling to 60 s; a hand-out ends that.
     pub fn claim(
         &self,
         agent: &AgentId,
         uid: u32,
         signer: &dyn TaskSigner,
+        decided: Option<TaskId>,
     ) -> Result<Claimed, TaskRefusal> {
         let Some((id, state)) = self.next_for(agent, uid) else {
             return Ok(Claimed::Idle);
         };
+        if state == TaskState::Queued && decided != Some(id) {
+            return Ok(Claimed::Idle);
+        }
         let handed = self.hand_out(&id, state, agent, uid, signer);
         let mut held = self.held();
         let now = self.clock.now_secs();
@@ -1341,7 +1377,7 @@ impl TaskStore {
                 let mut held = self.held();
                 held.hot.entry(id).or_default().lease_until = lease;
                 held.tasks.insert(id, next);
-                match held.closing.contains_key(&id) {
+                match held.closing.contains_key(&id) || held.holding.contains_key(&id) {
                     true => Err(TaskRefusal::AgentGone),
                     false => Ok(handed),
                 }
@@ -1408,7 +1444,7 @@ impl TaskStore {
     ) -> Result<TaskView, TaskRefusal> {
         let _w = self.writing();
         let held = self.held();
-        if held.closing.contains_key(id) || held.holding.contains(id) {
+        if held.closing.contains_key(id) || held.holding.contains_key(id) {
             return Err(TaskRefusal::AgentGone);
         }
         drop(held);
@@ -1481,7 +1517,7 @@ impl TaskStore {
             held.tasks
                 .iter()
                 .filter(|(_, r)| !r.pending && acked(r))
-                .filter(|(id, r)| r.state != TaskState::Held && !held.holding.contains(id))
+                .filter(|(id, r)| r.state != TaskState::Held && !held.holding.contains_key(id))
                 .map(|(id, _)| *id)
                 .collect()
         };
@@ -1630,7 +1666,7 @@ impl TaskStore {
         let prior = {
             let held = self.held();
             let rec = tasker_record(&held, id, tasker).ok_or(TaskRefusal::Unknown)?;
-            if rec.state != TaskState::Working || held.holding.contains(id) {
+            if rec.state != TaskState::Working || held.holding.contains_key(id) {
                 return Err(TaskRefusal::NotWorking);
             }
             let total = rec.follow_ups.iter().map(|f| f.0.len()).sum::<usize>();
@@ -1679,7 +1715,7 @@ impl TaskStore {
                 return Err(drop_owed());
             }
             let rec = tasker_record(&held, id, tasker).ok_or(TaskRefusal::Unknown)?;
-            if rec.state != TaskState::Queued || held.holding.contains(id) {
+            if rec.state != TaskState::Queued || held.holding.contains_key(id) {
                 return Err(TaskRefusal::Finished);
             }
             self.view_of(&held, rec)
@@ -1729,7 +1765,7 @@ impl TaskStore {
             .values()
             .filter(|r| !r.pending && r.tasker == *tasker && r.agent == *agent && r.rseq.is_some())
             .filter(|r| {
-                r.state != TaskState::Held && !held.holding.contains(&r.signed.task.task_id)
+                r.state != TaskState::Held && !held.holding.contains_key(&r.signed.task.task_id)
             })
             .collect();
         mine.sort_by_key(|r| r.rseq);
@@ -1814,7 +1850,7 @@ impl TaskStore {
             close: None,
             held_from: None,
             pending: false,
-            withdrawn: false,
+            removing: false,
             seq,
             tseq,
             rseq: None,
@@ -2067,7 +2103,7 @@ fn owned(
     if stored.agent != *agent || stored.agent_uid != uid {
         return Err(TaskRefusal::OtherAgent);
     }
-    if held.closing.contains_key(id) || held.holding.contains(id) {
+    if held.closing.contains_key(id) || held.holding.contains_key(id) {
         return Err(TaskRefusal::Unknown);
     }
     Ok(stored.signed.clone())
@@ -3170,6 +3206,17 @@ mod tests {
             .task_id
     }
 
+    /// A claim whose queued head, if any, has just been decided to stand.
+    fn claim_head(
+        store: &TaskStore,
+        agent: &AgentId,
+        uid: u32,
+        signer: &dyn TaskSigner,
+    ) -> Result<Claimed, TaskRefusal> {
+        let decided = store.next_for(agent, uid).map(|(id, _)| id);
+        store.claim(agent, uid, signer, decided)
+    }
+
     fn text(s: &str) -> SecretText {
         SecretText(String::from(s).into())
     }
@@ -4267,9 +4314,17 @@ mod tests {
             .and_then(|r| r.close)
     }
 
+    fn containing(uids: &[u32]) -> crate::enrollment::Containing<FixedEnrollment> {
+        crate::enrollment::Containing(
+            view(&[("hobi", HOBI), ("jin", JIN)]),
+            uids.iter().copied().collect(),
+        )
+    }
+
     fn gone(task: TaskId, recorded: bool) -> Due {
         Due {
             task,
+            agent: id("hobi"),
             tasker: Tasker::Uid(1000),
             parent: None,
             why: DueFor::Close(TaskClose::AgentGone),
@@ -4293,7 +4348,7 @@ mod tests {
             .is_empty());
         assert_eq!(store.list(&me, &id("hobi"), None, 8).0[0].close, None);
         assert_eq!(
-            store.claim(&id("hobi"), HOBI, signer()),
+            claim_head(&store, &id("hobi"), HOBI, signer()),
             Ok(Claimed::Idle),
             "marked: an agent enrolled again under the same uid is handed nothing"
         );
@@ -4377,7 +4432,7 @@ mod tests {
         assert!(
             matches!(
                 &found[..],
-                [crate::task_store::BootFinding::Discarded { task: t, withdrawn: true, .. }]
+                [crate::task_store::BootFinding::Discarded { task: t, removing: true, .. }]
                     if *t == task
             ),
             "{found:?}"
@@ -4395,15 +4450,18 @@ mod tests {
         store.start_for_test(&working);
         let rseq = store.publish_report(&reported, text("r"), None).unwrap();
         store.held().closing.insert(queued, TaskClose::AgentGone);
-        store.held().hold_contained(|uid| uid == 1000);
+        store.held().hold_contained(&containing(&[1000]));
         blobs.fail(Some(crate::task_store::Fail::Records));
         let due = store.due(8);
-        assert!(due.iter().all(|d| d.why == DueFor::Hold), "{due:?}");
+        assert!(
+            due.iter().all(|d| matches!(d.why, DueFor::Hold(_))),
+            "{due:?}"
+        );
         assert_eq!(due.len(), 3, "a hold outranks a close and an expiry");
         assert_eq!(store.perform(&due), 0);
         assert!(store.due(8).iter().all(|d| d.recorded));
         assert_eq!(store.record(&working).unwrap().state, TaskState::Working);
-        assert_eq!(store.claim(&hobi, HOBI, signer()), Ok(Claimed::Idle));
+        assert_eq!(claim_head(&store, &hobi, HOBI, signer()), Ok(Claimed::Idle));
         assert_eq!(store.heartbeat(&hobi, HOBI, 0, 0), Heartbeat::Idle);
         assert_eq!(
             store.working(&working, &hobi, HOBI),
@@ -4450,8 +4508,164 @@ mod tests {
             store.heartbeat(&hobi, HOBI, 0, 0),
             Heartbeat::Closed(v) if v.state == TaskState::Held
         ));
-        store.held().hold_contained(|_| true);
+        store
+            .held()
+            .hold_contained(&containing(&[1000, 1001, HOBI]));
         assert!(store.due(8).is_empty(), "a held task is held once");
+    }
+
+    #[test]
+    fn a_queued_task_is_started_only_when_it_is_the_one_just_decided() {
+        let (_blobs, store) = mem();
+        let me = Tasker::Uid(1000);
+        let hobi = id("hobi");
+        let first = held_by(&store, me.clone());
+        let second = held_by(&store, me.clone());
+        assert_eq!(store.claim(&hobi, HOBI, signer(), None), Ok(Claimed::Idle));
+        assert_eq!(
+            store.claim(&hobi, HOBI, signer(), Some(second)),
+            Ok(Claimed::Idle),
+            "the decided task is not the head"
+        );
+        store.drop_queued(&first, &me).unwrap();
+        assert_eq!(
+            store.claim(&hobi, HOBI, signer(), Some(first)),
+            Ok(Claimed::Idle),
+            "the head changed after the decision: the new head was never decided"
+        );
+        assert_eq!(store.record(&second).unwrap().state, TaskState::Queued);
+        assert_eq!(
+            store.hot(&second).unwrap().retry_after,
+            0,
+            "no back-off for it"
+        );
+        assert!(matches!(
+            store.claim(&hobi, HOBI, signer(), Some(second)),
+            Ok(Claimed::Delivered { .. })
+        ));
+    }
+
+    #[test]
+    fn a_claim_decided_on_a_working_head_starts_no_queued_task_once_that_head_finishes() {
+        let (_blobs, store) = mem();
+        let hobi = id("hobi");
+        let working = held_by(&store, Tasker::Uid(1000));
+        let queued = held_by(&store, Tasker::Uid(1000));
+        store.start_for_test(&working);
+        assert_eq!(
+            store.next_for(&hobi, HOBI),
+            Some((working, TaskState::Working)),
+            "nothing is decided for a working head"
+        );
+        store.report(&working, &hobi, HOBI, text("done")).unwrap();
+        assert_eq!(store.claim(&hobi, HOBI, signer(), None), Ok(Claimed::Idle));
+        assert_eq!(store.record(&queued).unwrap().state, TaskState::Queued);
+        store.start_for_test(&queued);
+        assert!(
+            matches!(
+                store.claim(&hobi, HOBI, signer(), None),
+                Ok(Claimed::Delivered { .. })
+            ),
+            "a working task is handed again with no decision"
+        );
+    }
+
+    #[test]
+    fn a_task_marked_for_a_hold_while_its_claim_is_written_is_not_handed_out() {
+        let (blobs, store) = mem();
+        let store = Arc::new(store);
+        let task = held_by(&store, Tasker::Uid(1000));
+        let marking = Arc::clone(&store);
+        blobs.after_save(move || marking.mark_unenrolled(&containing(&[1000])));
+        assert_eq!(
+            store.claim(&id("hobi"), HOBI, signer(), Some(task)),
+            Err(TaskRefusal::AgentGone)
+        );
+        assert!(matches!(
+            store.due(8)[..],
+            [Due {
+                why: DueFor::Hold(Contained::Tasker),
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn a_hold_is_due_its_own_record_though_a_close_of_the_task_was_recorded() {
+        let (blobs, store) = mem();
+        let task = held_by(&store, Tasker::Uid(1000));
+        blobs.fail(Some(crate::task_store::Fail::Records));
+        assert_eq!(store.purge_agent(&id("hobi")).len(), 1);
+        assert_eq!(
+            store.due(8),
+            vec![gone(task, true)],
+            "the close is recorded"
+        );
+        blobs.fail(None);
+        store.mark_unenrolled(&containing(&[1000]));
+        let due = store.due(8);
+        assert_eq!(due.len(), 1);
+        assert_eq!(
+            (due[0].why, due[0].recorded),
+            (DueFor::Hold(Contained::Tasker), false),
+            "the hold has not been recorded"
+        );
+        assert_eq!(store.perform(&due), 1);
+        assert_eq!(store.record(&task).unwrap().state, TaskState::Held);
+    }
+
+    #[test]
+    fn a_hold_names_who_is_contained_and_reaches_the_chain_rooted_at_a_contained_agent() {
+        let (_blobs, store) = mem();
+        let v = view(&[("hobi", HOBI), ("jin", JIN), ("suga", SUGA)]);
+        let hobis = Tasker::Agent {
+            agent: "hobi".into(),
+            uid: HOBI,
+        };
+        let jins = Tasker::Agent {
+            agent: "jin".into(),
+            uid: JIN,
+        };
+        let given = store
+            .mint_live(signer(), &v, at(0, JIN), hobis, None, sub("jin"))
+            .unwrap()
+            .task
+            .task_id;
+        store.start_for_test(&given);
+        let under = store
+            .mint_live(signer(), &v, at(0, SUGA), jins, Some(given), sub("suga"))
+            .unwrap()
+            .task
+            .task_id;
+        let held_open = held_by(&store, Tasker::Uid(1000));
+        let reported = held_by(&store, Tasker::Uid(1000));
+        store.publish_report(&reported, text("r"), None).unwrap();
+        let others = store
+            .mint_live(
+                signer(),
+                &v,
+                at(0, JIN),
+                Tasker::Uid(1000),
+                None,
+                sub("jin"),
+            )
+            .unwrap()
+            .task
+            .task_id;
+        store.mark_unenrolled(&crate::enrollment::Containing(v, [HOBI].into()));
+        let mut why: Vec<(TaskId, DueFor)> =
+            store.due(8).into_iter().map(|d| (d.task, d.why)).collect();
+        why.sort_by_key(|(t, _)| *t);
+        let mut want = vec![
+            (given, DueFor::Hold(Contained::Tasker)),
+            (under, DueFor::Hold(Contained::Root)),
+            (held_open, DueFor::Hold(Contained::Agent)),
+        ];
+        want.sort_by_key(|(t, _)| *t);
+        assert_eq!(why, want);
+        assert_eq!(store.close_all_due().len(), 3);
+        assert_eq!(store.record(&reported).unwrap().state, TaskState::Reported);
+        assert_eq!(store.record(&others).unwrap().state, TaskState::Queued);
     }
 
     #[test]
@@ -4462,7 +4676,7 @@ mod tests {
         let working = held_by(&store, me.clone());
         let holding = held_by(&store, Tasker::Uid(1001));
         store.start_for_test(&working);
-        store.held().hold_contained(|uid| uid == 1001);
+        store.held().hold_contained(&containing(&[1001]));
         assert_eq!(store.tasker_of(&queued), Some((me, id("hobi"))));
         assert_eq!(store.tasker_of(&TaskId([9; 16])), None);
         for task in [queued, working, holding, TaskId([9; 16])] {
@@ -4579,6 +4793,7 @@ mod tests {
         store.publish_report(&reported, text("r"), None).unwrap();
         let early = Due {
             task: reported,
+            agent: id("hobi"),
             tasker: me,
             parent: None,
             why: DueFor::Expiry,
@@ -4621,7 +4836,7 @@ mod tests {
         due.iter()
             .filter_map(|d| match d.why {
                 DueFor::Close(close) => Some(close),
-                DueFor::Expiry | DueFor::Hold => None,
+                DueFor::Expiry | DueFor::Hold(_) => None,
             })
             .collect()
     }
@@ -4670,7 +4885,7 @@ mod tests {
             during: Box::new(|| store.start_for_test(&other)),
         };
         assert_eq!(
-            store.claim(&hobi, HOBI, &racing),
+            claim_head(&store, &hobi, HOBI, &racing),
             Err(TaskRefusal::Unavailable(MOVED.into()))
         );
         let hot = store.hot(&task).unwrap();
@@ -4738,7 +4953,10 @@ mod tests {
             Err(TaskRefusal::AgentGone),
             "a marked task is not reported, though a writer has passed"
         );
-        assert_eq!(store.claim(&id("hobi"), HOBI, signer()), Ok(Claimed::Idle));
+        assert_eq!(
+            claim_head(&store, &id("hobi"), HOBI, signer()),
+            Ok(Claimed::Idle)
+        );
         assert_eq!(store.record(&task).unwrap().state, TaskState::Working);
         assert_eq!(store.record(&queued).unwrap().state, TaskState::Queued);
         assert_eq!(store.close_all_due().len(), 2);
@@ -4753,7 +4971,7 @@ mod tests {
         let marking = Arc::clone(&store);
         blobs.after_save(move || marking.mark_unenrolled(&view(&[])));
         assert_eq!(
-            store.claim(&id("hobi"), HOBI, signer()),
+            claim_head(&store, &id("hobi"), HOBI, signer()),
             Err(TaskRefusal::AgentGone)
         );
         assert_eq!(store.due(8), vec![gone(task, false)], "due its close");
@@ -4799,7 +5017,7 @@ mod tests {
     fn a_claim_starts_the_oldest_queued_task_and_hands_the_working_one_again() {
         let (blobs, store) = mem();
         let hobi = id("hobi");
-        assert_eq!(store.claim(&hobi, HOBI, signer()), Ok(Claimed::Idle));
+        assert_eq!(claim_head(&store, &hobi, HOBI, signer()), Ok(Claimed::Idle));
         let first = held_by(&store, Tasker::Uid(1000));
         let second = held_by(&store, Tasker::Uid(1001));
         assert_eq!(
@@ -4811,9 +5029,9 @@ mod tests {
             None,
             "another uid holds nothing"
         );
-        assert_eq!(store.claim(&hobi, JIN, signer()), Ok(Claimed::Idle));
+        assert_eq!(claim_head(&store, &hobi, JIN, signer()), Ok(Claimed::Idle));
         for _ in 0..2 {
-            match store.claim(&hobi, HOBI, signer()).unwrap() {
+            match claim_head(&store, &hobi, HOBI, signer()).unwrap() {
                 Claimed::Delivered { signed, partition } => {
                     assert_eq!(signed.task.task_id, first);
                     assert_eq!(partition, "tasks/users/1000");
@@ -4827,7 +5045,7 @@ mod tests {
             TaskState::Working
         );
         assert_eq!(
-            store.claim(&hobi, HOBI, &NoIdentity),
+            claim_head(&store, &hobi, HOBI, &NoIdentity),
             Err(TaskRefusal::Unsigned),
             "without a current leaf nothing is handed out"
         );
@@ -4842,7 +5060,7 @@ mod tests {
         blobs.fail(Some(crate::task_store::Fail::UnsyncedOnce));
         assert!(
             matches!(
-                store.claim(&hobi, HOBI, signer()),
+                claim_head(&store, &hobi, HOBI, signer()),
                 Err(TaskRefusal::Store(_))
             ),
             "landed unsynced, then undone: refused"
@@ -4850,12 +5068,12 @@ mod tests {
         clock.set(1_001);
         blobs.fail(Some(crate::task_store::Fail::Records));
         assert!(matches!(
-            store.claim(&hobi, HOBI, signer()),
+            claim_head(&store, &hobi, HOBI, signer()),
             Err(TaskRefusal::Store(_))
         ));
         clock.set(1_003);
         blobs.fail(Some(crate::task_store::Fail::Unsynced));
-        let said = store.claim(&hobi, HOBI, signer()).unwrap_err();
+        let said = claim_head(&store, &hobi, HOBI, signer()).unwrap_err();
         assert!(
             matches!(&said, TaskRefusal::Unavailable(why) if why.starts_with("outcome unknown: ")),
             "{said:?}"
@@ -4877,7 +5095,7 @@ mod tests {
             "the disk is rewritten as memory holds it"
         );
         assert!(matches!(
-            store.claim(&hobi, HOBI, signer()),
+            claim_head(&store, &hobi, HOBI, signer()),
             Ok(Claimed::Delivered { .. })
         ));
     }
@@ -4895,7 +5113,7 @@ mod tests {
             .task_id;
         signing.rotate();
         blobs.fail(Some(crate::task_store::Fail::Unsynced));
-        let said = store.claim(&hobi, HOBI, &signing).unwrap_err();
+        let said = claim_head(&store, &hobi, HOBI, &signing).unwrap_err();
         assert!(
             matches!(&said, TaskRefusal::Unavailable(why) if why.starts_with("outcome unknown: ")),
             "{said:?}"
@@ -4904,7 +5122,7 @@ mod tests {
         assert_eq!(closed(&store, &task), None, "never closed for it");
         blobs.fail(None);
         clock.set(1_001);
-        match store.claim(&hobi, HOBI, &signing).unwrap() {
+        match claim_head(&store, &hobi, HOBI, &signing).unwrap() {
             Claimed::Delivered { signed, .. } => assert_eq!(signing.verify(&signed), Ok(())),
             Claimed::Idle => panic!("idle"),
         }
@@ -5118,7 +5336,7 @@ mod tests {
         for (n, wait) in [1, 2, 4, 8, 16, 32, 60, 60].into_iter().enumerate() {
             assert!(
                 matches!(
-                    store.claim(&hobi, HOBI, &counting),
+                    claim_head(&store, &hobi, HOBI, &counting),
                     Err(TaskRefusal::Unavailable(_))
                 ),
                 "attempt {n}"
@@ -5132,7 +5350,10 @@ mod tests {
             let attempts = blobs.attempts();
             clock.set(now + i64::from(wait) - 1);
             for _ in 0..3 {
-                assert_eq!(store.claim(&hobi, HOBI, &counting), Ok(Claimed::Idle));
+                assert_eq!(
+                    claim_head(&store, &hobi, HOBI, &counting),
+                    Ok(Claimed::Idle)
+                );
                 assert_eq!(
                     store.next_for(&hobi, HOBI),
                     None,
@@ -5146,7 +5367,7 @@ mod tests {
         }
         blobs.fail(None);
         assert!(matches!(
-            store.claim(&hobi, HOBI, &counting),
+            claim_head(&store, &hobi, HOBI, &counting),
             Ok(Claimed::Delivered { .. })
         ));
         let hot = store.hot(&task).unwrap();
@@ -5157,7 +5378,7 @@ mod tests {
         );
         assert_eq!(store.record(&later).unwrap().state, TaskState::Queued);
         assert_eq!(
-            store.claim(&hobi, HOBI, &NoIdentity),
+            claim_head(&store, &hobi, HOBI, &NoIdentity),
             Err(TaskRefusal::Unsigned)
         );
         assert_eq!(
@@ -5165,7 +5386,10 @@ mod tests {
             1,
             "a signer's refusal holds it back too"
         );
-        assert_eq!(store.claim(&hobi, HOBI, &NoIdentity), Ok(Claimed::Idle));
+        assert_eq!(
+            claim_head(&store, &hobi, HOBI, &NoIdentity),
+            Ok(Claimed::Idle)
+        );
     }
 
     #[test]

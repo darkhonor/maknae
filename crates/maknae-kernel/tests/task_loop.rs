@@ -535,7 +535,7 @@ fn follow_ups(r: RespResult) -> (u32, Vec<String>) {
 
 fn holds(due: &[Due]) -> Vec<TaskId> {
     due.iter()
-        .filter(|d| d.why == DueFor::Hold)
+        .filter(|d| matches!(d.why, DueFor::Hold(_)))
         .map(|d| d.task)
         .collect()
 }
@@ -552,7 +552,7 @@ fn closes(due: &[Due]) -> Vec<(TaskId, TaskClose)> {
     due.iter()
         .filter_map(|d| match d.why {
             DueFor::Close(close) => Some((d.task, close)),
-            DueFor::Expiry | DueFor::Hold => None,
+            DueFor::Expiry | DueFor::Hold(_) => None,
         })
         .collect()
 }
@@ -1622,11 +1622,21 @@ async fn reenrolling_under_a_new_uid_never_closes_the_new_tasks() {
         assert_eq!(w.store().record(&id).unwrap().state, TaskState::Queued);
     }
     assert_eq!(
-        w.store().claim(&hobi(), HOBI_UID, &FixedSigner),
+        w.store().claim(
+            &hobi(),
+            HOBI_UID,
+            &FixedSigner,
+            w.store().next_for(&hobi(), HOBI_UID).map(|(id, _)| id)
+        ),
         Ok(Claimed::Idle),
         "the old uid is handed nothing"
     );
-    match w.store().claim(&hobi(), AGAIN, &FixedSigner) {
+    match w.store().claim(
+        &hobi(),
+        AGAIN,
+        &FixedSigner,
+        w.store().next_for(&hobi(), AGAIN).map(|(id, _)| id),
+    ) {
         Ok(Claimed::Delivered { signed, .. }) => assert_eq!(signed.task.task_id, new),
         other => panic!("{other:?}"),
     }
@@ -2005,6 +2015,7 @@ async fn an_uncollected_report_expires_after_the_hold() {
         said,
         vec![Due {
             task: id,
+            agent: hobi(),
             tasker: Tasker::Uid(w.me),
             parent: None,
             why: DueFor::Expiry,
@@ -2283,6 +2294,13 @@ async fn a_sub_tasks_records_name_the_sub_task_and_the_submitting_agent() {
     let upto = first.entries[0].cursor.seq();
     w.agent_with("hobi", collect("suga", Some(upto)), Some(parent), &records)
         .await;
+    assert!(
+        task_records(&records)
+            .iter()
+            .all(|r| r.subject.task_id.is_none()
+                && r.subject.tasker.as_deref() == Some("agent:hobi")),
+        "a collect names no task, so the cited one is not paired with the agent as tasker"
+    );
     let said = reasons(&records);
     assert!(
         said.iter()
@@ -2463,6 +2481,17 @@ async fn a_contained_taskers_tasks_are_held_and_stay_held_after_release() {
         }
         other => panic!("{other:?}"),
     }
+    let beat = Records::new(0);
+    w.agent_with(
+        "hobi",
+        Verb::TaskClaim {
+            seen_follow_ups: Some(0),
+        },
+        None,
+        &beat,
+    )
+    .await;
+    assert_eq!(reasons(&beat), vec!["permit heartbeat: the task is held"]);
     assert!(w.cannot_cite("hobi", Verb::Ping, working).await);
     assert_eq!(
         w.claimed("hobi").await,
@@ -2662,6 +2691,21 @@ async fn a_tasker_whose_role_loses_the_grant_has_queued_tasks_withdrawn() {
     w.pdp.baseline().reload_from_file().unwrap();
     w.withdrawn_at_the_next_claim(working, queued, "no rule for session.task")
         .await;
+    for verb in [
+        collect("hobi", None),
+        list("hobi", None),
+        Verb::TaskStatus { task: r(&queued) },
+    ] {
+        assert!(
+            unauthorized(&w.ask(verb.clone()).await),
+            "{verb:?}: without the grant the tasker cannot collect the close it is owed"
+        );
+    }
+    assert_eq!(
+        w.store().record(&queued).unwrap().close,
+        Some(TaskClose::Withdrawn),
+        "it waits out its hold"
+    );
     assert!(w.claim("suga").await.is_none(), "every agent re-decides");
     assert_eq!(
         closes(&w.store().close_all_due()),
@@ -2693,4 +2737,60 @@ async fn a_contained_taskers_queued_task_is_held_never_withdrawn() {
     );
     assert_eq!(w.store().record(&queued).unwrap().state, TaskState::Held);
     assert!(w.store().close_all_due().is_empty());
+}
+
+#[tokio::test]
+async fn a_tasker_whose_name_did_not_resolve_keeps_the_queued_task_until_it_resolves() {
+    let w = world("unresolved-tasker", "user", true);
+    let queued = w.anothers("hobi");
+    let bindings = maknae_authz_basic::PolicyPaths::in_dir(&w.root).bindings;
+    let bind = |names: &str| {
+        common::write_0640(
+            &bindings,
+            &format!(
+                "schema_version: 1\nbindings:\n  user: [\"{}\"{names}]\n",
+                w.user
+            ),
+        );
+        w.pdp.baseline().reload_from_file().unwrap();
+    };
+    bind(", \"sentinel-628-no-such-user\"");
+    for _ in 0..2 {
+        let records = Records::new(0);
+        let got = w.agent_with("hobi", CLAIM, None, &records).await;
+        assert!(
+            matches!(got, Some(RespResult::Ok(Payload::TaskIdle))),
+            "{got:?}"
+        );
+        let rec = task_records(&records).pop().unwrap();
+        assert_eq!(
+            rec.outcome.reason,
+            "idle: the tasker's standing could not be decided: the tasker's identity could not be resolved"
+        );
+        assert_eq!(rec.outcome.posture, "unavailable");
+        assert_eq!(rec.subject.task_id, Some(queued.to_string()));
+        assert_eq!(rec.subject.tasker, Some(format!("uid:{}", another())));
+    }
+    assert!(w.store().due(8).is_empty(), "nothing is withdrawn");
+    assert_eq!(w.store().record(&queued).unwrap().state, TaskState::Queued);
+    bind(", \"nobody\"");
+    assert_eq!(
+        w.claimed("hobi").await,
+        queued,
+        "delivered once the name resolves"
+    );
+
+    let w = world("resolved-no-role", "user", true);
+    let queued = w.anothers("hobi");
+    common::write_0640(
+        &maknae_authz_basic::PolicyPaths::in_dir(&w.root).bindings,
+        &format!("schema_version: 1\nbindings:\n  user: [\"{}\"]\n", w.user),
+    );
+    w.pdp.baseline().reload_from_file().unwrap();
+    assert!(w.claim("hobi").await.is_none());
+    assert_eq!(
+        closes(&w.store().close_all_due()),
+        vec![(queued, TaskClose::Withdrawn)],
+        "every bound name resolved, and the tasker holds no role: withdrawn"
+    );
 }

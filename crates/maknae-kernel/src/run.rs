@@ -3590,8 +3590,14 @@ async fn serve_task_verb<S, E, P>(
                         Payload::TaskFollowUps(maknae_proto::TaskFollowUps { from, items }),
                     ),
                     crate::task::Heartbeat::Closed(view) => {
-                        let mut rec =
-                            decided("permit", "heartbeat: the task is closed", "authorized");
+                        let said = match view.state {
+                            maknae_proto::TaskState::Held => "heartbeat: the task is held",
+                            maknae_proto::TaskState::Queued
+                            | maknae_proto::TaskState::Working
+                            | maknae_proto::TaskState::Reported
+                            | maknae_proto::TaskState::Closed => "heartbeat: the task is closed",
+                        };
+                        let mut rec = decided("permit", said, "authorized");
                         rec.object = Some(format!("task:{}", view.task.to_id()));
                         rec.subject.task_id = Some(view.task.to_id().to_string());
                         rec.subject.tasker = None;
@@ -3604,47 +3610,56 @@ async fn serve_task_verb<S, E, P>(
                     .await;
                 return;
             }
-            if store.next_for(&agent, trail.uid).is_none() {
-                trail
-                    .deliver(
-                        stream,
-                        &idle(),
-                        Payload::TaskIdle,
-                        role,
-                        rule.as_ref(),
-                        action,
-                    )
-                    .await;
-                return;
-            }
-            if let Some((id, maknae_proto::TaskState::Queued)) = store.next_for(&agent, trail.uid) {
-                let standing =
-                    tasker_standing(store, &tasks.agents.view, authorizer, &id, lane, timeout)
-                        .await;
-                let said = match standing {
-                    Standing::Stands => None,
-                    Standing::Undecided => Some((None, "idle".to_string())),
-                    Standing::Withdrawn { tasker, why } => {
-                        store.withdraw_authority(&id);
-                        Some((
-                            Some(tasker),
-                            format!("idle: the tasker's authority was withdrawn: {why}"),
-                        ))
-                    }
-                };
-                if let Some((tasker, reason)) = said {
-                    let mut rec = decided("permit", &reason, "authorized");
-                    rec.subject.tasker = None;
-                    let rec = match &tasker {
-                        Some(t) => of(rec, &id, t),
-                        None => rec,
-                    };
+            let decided_id = match store.next_for(&agent, trail.uid) {
+                None => {
                     trail
-                        .deliver(stream, &rec, Payload::TaskIdle, role, rule.as_ref(), action)
+                        .deliver(
+                            stream,
+                            &idle(),
+                            Payload::TaskIdle,
+                            role,
+                            rule.as_ref(),
+                            action,
+                        )
                         .await;
                     return;
                 }
-            }
+                Some((_, maknae_proto::TaskState::Working)) => None,
+                Some((id, _)) => {
+                    let standing =
+                        tasker_standing(store, &tasks.agents.view, authorizer, &id, lane, timeout)
+                            .await;
+                    let (tasker, reason, posture) = match standing {
+                        Standing::Stands => (None, None, ""),
+                        Standing::Undecided { tasker, why } => (
+                            tasker,
+                            Some(format!(
+                                "idle: the tasker's standing could not be decided: {why}"
+                            )),
+                            "unavailable",
+                        ),
+                        Standing::Withdrawn { tasker, why } => {
+                            store.withdraw_authority(&id);
+                            (
+                                Some(tasker),
+                                Some(format!("idle: the tasker's authority was withdrawn: {why}")),
+                                "authorized",
+                            )
+                        }
+                    };
+                    if let Some(reason) = reason {
+                        let mut rec = decided("permit", &reason, posture);
+                        rec.object = Some(format!("task:{id}"));
+                        rec.subject.task_id = Some(id.to_string());
+                        rec.subject.tasker = tasker.as_ref().map(maknae_proto::tasker_text);
+                        trail
+                            .deliver(stream, &rec, Payload::TaskIdle, role, rule.as_ref(), action)
+                            .await;
+                        return;
+                    }
+                    Some(id)
+                }
+            };
             let mut intent = decided("permit", "intent recorded", "authorized");
             intent.subject.tasker = None;
             if !trail.record_bounded(&intent).await {
@@ -3656,7 +3671,7 @@ async fn serve_task_verb<S, E, P>(
                 trail.uid,
             );
             let claimed = crate::task::offload(uid, deadline, move || {
-                match s.claim(&agent, uid, &*signer)? {
+                match s.claim(&agent, uid, &*signer, decided_id)? {
                     crate::task::Claimed::Idle => Ok(None),
                     crate::task::Claimed::Delivered { signed, partition } => {
                         let wire = crate::task_store::encode(&*signed)
@@ -3751,10 +3766,14 @@ async fn serve_task_verb<S, E, P>(
 }
 
 /// Whether a queued task's tasker may still task its agent, under the policy in force.
+#[derive(Debug, PartialEq, Eq)]
 enum Standing {
     Stands,
-    /// No decision was reached, or the tasker is contained and its tasks are held.
-    Undecided,
+    /// No decision was reached, or the tasker is contained and its tasks are to be held.
+    Undecided {
+        tasker: Option<maknae_proto::Tasker>,
+        why: String,
+    },
     Withdrawn {
         tasker: maknae_proto::Tasker,
         why: String,
@@ -3772,19 +3791,26 @@ async fn tasker_standing<P: Authorizer + Send + Sync + 'static>(
     timeout: Duration,
 ) -> Standing {
     use maknae_proto::Tasker;
+    let undecided = |tasker: Option<&Tasker>, why: &str| Standing::Undecided {
+        tasker: tasker.cloned(),
+        why: why.to_string(),
+    };
     let Some((tasker, target)) = store.tasker_of(id) else {
-        return Standing::Undecided;
+        return undecided(None, "the task is gone");
     };
     let (uid, by) = match &tasker {
         Tasker::Uid(uid) => (*uid, None),
         Tasker::Agent { agent, uid } => match maknae_config::AgentId::parse(agent) {
             Ok(agent) => (*uid, Some(agent)),
-            Err(_) => return Standing::Undecided,
+            Err(_) => return undecided(Some(&tasker), "the tasker names no agent id"),
         },
-        Tasker::Remote(_) => return Standing::Undecided,
+        Tasker::Remote(_) => return undecided(Some(&tasker), "a remote tasker is not decided"),
     };
     if view.contained(uid) {
-        return Standing::Undecided;
+        return undecided(Some(&tasker), "the tasker is contained");
+    }
+    if view.unresolved(uid) {
+        return undecided(Some(&tasker), "the tasker's identity could not be resolved");
     }
     let stamp = match &by {
         None => Stamp::Client,
@@ -3812,7 +3838,15 @@ async fn tasker_standing<P: Authorizer + Send + Sync + 'static>(
     )
     .await;
     match decided {
-        Err(_) | Ok(maknae_security::Verdict::Indeterminate) => Standing::Undecided,
+        Err(Offload::Open) => undecided(Some(&tasker), "the decision circuit breaker is open"),
+        Err(Offload::AtCapacity) => {
+            undecided(Some(&tasker), "the decision worker budget is exhausted")
+        }
+        Err(Offload::Join) => undecided(Some(&tasker), "the decision failed (join)"),
+        Err(Offload::TimedOut) => undecided(Some(&tasker), "the decision timed out"),
+        Ok(maknae_security::Verdict::Indeterminate) => {
+            undecided(Some(&tasker), "the decision was indeterminate")
+        }
         Ok(verdict) => match finalize(combine(vec![verdict])) {
             Decision::Permit { .. } => Standing::Stands,
             Decision::Deny { reason } => Standing::Withdrawn {
@@ -8198,7 +8232,21 @@ fn task_due_record(ctx: &BootCtx<'_>, due: &crate::task::Due) -> AuditRecord {
         DueFor::Close(TaskClose::AgentLost) => "closed:agent-lost",
         DueFor::Close(TaskClose::Withdrawn) => "closed:withdrawn",
         DueFor::Expiry => "expired",
-        DueFor::Hold => "task held: contained",
+        DueFor::Hold(crate::task::Contained::Tasker) => "task held: tasker contained",
+        DueFor::Hold(crate::task::Contained::Root) => "task held: root contained",
+        DueFor::Hold(crate::task::Contained::Agent) => {
+            return task_record(
+                ctx,
+                (
+                    "deny",
+                    "unavailable",
+                    &format!("task held: agent {} contained", due.agent.as_str()),
+                ),
+                Some(&due.task),
+                Some(&due.tasker),
+                due.parent.as_ref(),
+            )
+        }
     };
     task_record(
         ctx,
@@ -8344,7 +8392,7 @@ async fn close_due<E: AuditEmit>(
         }
         let s = Arc::clone(tasks);
         match crate::task::offload(ctx.euid, deadline, move || Ok(s.perform(&recorded))).await {
-            Ok(0) => stopped = stopped.or(Some("the task store stored no close".into())),
+            Ok(0) => stopped = stopped.or(Some("the task store stored none".into())),
             Ok(_) => {}
             Err(e) => stopped = Some(e.to_string()),
         }
@@ -8381,7 +8429,7 @@ async fn settle_tasks<E: AuditEmit>(
     let left = match (swept.remaining, swept.stopped) {
         (0, _) => None,
         (n, why) => Some(format!(
-            "{n} task closes remain due: {}",
+            "{n} task closes or holds remain due: {}",
             why.unwrap_or_else(|| "the pass ended".into())
         )),
     };
@@ -8432,7 +8480,7 @@ async fn reconcile_tasks_at_boot<E: AuditEmit>(
         return Ok(());
     }
     let why = format!(
-        "{} task closes remain for the sweep; no agent is handed those tasks: {}",
+        "{} task closes or holds remain for the sweep; no agent is handed those tasks: {}",
         swept.remaining,
         swept.stopped.unwrap_or_else(|| "the pass ended".into())
     );
@@ -8506,10 +8554,10 @@ fn task_finding_record(ctx: &BootCtx<'_>, finding: &crate::task_store::BootFindi
             agent,
             tasker,
             parent,
-            withdrawn,
+            removing,
             ..
         } => {
-            let why = match withdrawn {
+            let why = match removing {
                 false => "task discarded at boot: its submission was never audited",
                 true => "task record discarded at boot: its removal was left unfinished",
             };
@@ -20980,6 +21028,64 @@ mod reload_tests {
         assert_ne!(whoami_as(&fx, 4242).1, Some("adversary"));
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn containing_a_person_or_an_agent_holds_its_tasks() {
+        use maknae_proto::{TaskState, Tasker};
+        const HOBI_UID: u32 = 2001;
+        let fx = fixture(
+            "contain-holds",
+            CONTAIN_AND_RELEASE_TO_ADMIN,
+            Some(ROOT_ADMIN),
+        )
+        .await;
+        fx.baseline().set_hosts(crate::test_fixtures::HOBI_HOSTS);
+        fx.write_agent("hobi", "hobi-svc", HOBI_UID, "user");
+        bounded(fx.reloader.run()).await.expect("hobi is enrolled");
+        let given = |uid: u32| {
+            let mut task =
+                <maknae_proto::TaskObject as crate::task::TaskObjectForTest>::for_test("hobi", 0);
+            task.tasker = Tasker::Uid(uid);
+            let signed = maknae_proto::SignedTask {
+                task,
+                signature: maknae_proto::TaskSignature {
+                    alg: "test".into(),
+                    leaf: maknae_proto::Bytes(maknae_io::Zeroizing::new(vec![1])),
+                    chain: Vec::new(),
+                    sig: maknae_proto::Bytes(maknae_io::Zeroizing::new(vec![2])),
+                },
+            };
+            fx.reloader
+                .tasks
+                .insert_for_test(signed, HOBI_UID)
+                .task
+                .task_id
+        };
+        let state = |id| fx.reloader.tasks.record(&id).unwrap().state;
+        let (persons, others) = (given(daemon_uid()), given(1002));
+        bounded(fx.contain_uid(daemon_uid(), 0))
+            .await
+            .expect("the person is contained");
+        assert_eq!(state(persons), TaskState::Held);
+        assert_eq!(state(others), TaskState::Queued);
+        bounded(fx.contain_uid(HOBI_UID, 0))
+            .await
+            .expect("the agent is contained");
+        assert_eq!(state(others), TaskState::Held);
+        let held: Vec<String> = fx
+            .records()
+            .into_iter()
+            .filter(|r| r.event == "task")
+            .map(|r| r.outcome.reason)
+            .collect();
+        assert_eq!(
+            held,
+            [
+                "task held: tasker contained",
+                "task held: agent hobi contained"
+            ]
+        );
+    }
+
     const CONTAIN_AND_RELEASE_TO_ADMIN: &str = "schema_version: 1\nroles:\n  admin:\n    allow:\n      - \"admin.contain\"\n      - \"admin.release\"\n";
     const TWO_ADMINS: &str = "schema_version: 1\nbindings:\n  admin: [\"root\", \"daemon\"]\n";
 
@@ -23447,7 +23553,7 @@ mod task_sweep_tests {
                 &self.store,
                 task,
                 record.outcome.reason.starts_with("closed:")
-                    || record.outcome.reason == "task held: contained",
+                    || record.outcome.reason.starts_with("task held: "),
             ) {
                 let open = store
                     .record(&task)
@@ -23558,6 +23664,7 @@ mod task_sweep_tests {
                 &ctx,
                 &Due {
                     task,
+                    agent: maknae_config::AgentId::parse("hobi").unwrap(),
                     tasker: tasker.clone(),
                     parent,
                     why,
@@ -23584,6 +23691,30 @@ mod task_sweep_tests {
                     2001,
                     Some(s("agent:hobi")),
                     Some(parent.to_string()),
+                    object.clone()
+                )
+            );
+        }
+        for (who, reason) in [
+            (
+                crate::task::Contained::Tasker,
+                "task held: tasker contained",
+            ),
+            (crate::task::Contained::Root, "task held: root contained"),
+            (
+                crate::task::Contained::Agent,
+                "task held: agent hobi contained",
+            ),
+        ] {
+            assert_eq!(
+                due(&Tasker::Uid(1000), None, DueFor::Hold(who)),
+                (
+                    s("deny"),
+                    s(reason),
+                    s("unavailable"),
+                    1000,
+                    Some(s("uid:1000")),
+                    None,
                     object.clone()
                 )
             );
@@ -23690,7 +23821,7 @@ mod task_sweep_tests {
     fn a_boot_discard_says_which_kind_of_pending_record_it_found() {
         let (seq, au) = (Seq::new(), serde_json::json!({}));
         let ctx = ctx(&seq, &au);
-        let reason = |withdrawn| {
+        let reason = |removing| {
             task_finding_record(
                 &ctx,
                 &crate::task_store::BootFinding::Discarded {
@@ -23699,7 +23830,7 @@ mod task_sweep_tests {
                     agent: "hobi".into(),
                     tasker: Tasker::Uid(1000),
                     parent: None,
-                    withdrawn,
+                    removing,
                 },
             )
             .outcome
@@ -23822,7 +23953,7 @@ mod task_sweep_tests {
                 recs[0].outcome.posture.as_str(),
                 recs[0].source.uid
             ),
-            ("deny", "task held: contained", "unavailable", 1000)
+            ("deny", "task held: tasker contained", "unavailable", 1000)
         );
         assert_eq!(recs[0].object, Some(format!("task:{id}")));
         assert_eq!(*trail.open.lock().unwrap(), [true], "open when recorded");
@@ -23845,6 +23976,180 @@ mod task_sweep_tests {
         let swept = close_due(&reopened, &*trail, &ctx(&seq, &au), soon()).await;
         assert_eq!(swept.remaining, 0);
         assert_eq!(trail.recs().len(), 2, "a held task is not held twice");
+    }
+
+    struct Says(maknae_security::Verdict, Duration);
+
+    impl Authorizer for Says {
+        fn decide_cited_all(
+            &self,
+            reqs: &[maknae_security::Request],
+        ) -> Vec<maknae_security::Decided> {
+            maknae_security::decide_each_cited(self, reqs)
+        }
+
+        fn decide(&self, _req: &maknae_security::Request) -> maknae_security::Verdict {
+            std::thread::sleep(self.1);
+            self.0.clone()
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_standing_that_cannot_be_decided_says_why_and_never_withdraws() {
+        use maknae_security::Verdict;
+        let (_blobs, _clock, store) = mem(1_000);
+        let me = Tasker::Uid(1000);
+        let id = queued(&store, "hobi", me.clone());
+        let hobi = maknae_config::AgentId::parse("hobi").unwrap();
+        let view: Arc<dyn crate::enrollment::EnrollmentView> = Arc::new(hobi_enrolled());
+        let standing = |verdict: Verdict, slow: Duration, bound: Duration| {
+            let (store, view) = (Arc::clone(&store), Arc::clone(&view));
+            async move {
+                tasker_standing(
+                    &store,
+                    &view,
+                    &Arc::new(Says(verdict, slow)),
+                    &id,
+                    maknae_security::Lane::Local,
+                    bound,
+                )
+                .await
+            }
+        };
+        let (fast, bound) = (Duration::ZERO, Duration::from_secs(5));
+        let undecided = |why: &str| Standing::Undecided {
+            tasker: Some(me.clone()),
+            why: why.into(),
+        };
+        assert_eq!(
+            standing(Verdict::Indeterminate, fast, bound).await,
+            undecided("the decision was indeterminate")
+        );
+        assert_eq!(
+            standing(
+                Verdict::Deny {
+                    reason: "late".into()
+                },
+                Duration::from_millis(300),
+                Duration::from_millis(20)
+            )
+            .await,
+            undecided("the decision timed out")
+        );
+        assert!(store.due(8).is_empty(), "neither withdraws");
+        assert_eq!(
+            store.claim(&hobi, 2001, &crate::task::UnverifiedSigner, None),
+            Ok(crate::task::Claimed::Idle),
+            "an undecided task is not handed out"
+        );
+        assert_eq!(store.record(&id).unwrap().state, TaskState::Queued);
+        assert_eq!(
+            standing(
+                Verdict::Deny {
+                    reason: "no".into()
+                },
+                fast,
+                bound
+            )
+            .await,
+            Standing::Withdrawn {
+                tasker: me.clone(),
+                why: "no".into()
+            }
+        );
+        let contained: Arc<dyn crate::enrollment::EnrollmentView> = Arc::new(
+            crate::enrollment::Containing(hobi_enrolled(), [1000].into_iter().collect()),
+        );
+        assert_eq!(
+            tasker_standing(
+                &store,
+                &contained,
+                &Arc::new(Says(
+                    Verdict::Deny {
+                        reason: "no".into()
+                    },
+                    fast
+                )),
+                &id,
+                maknae_security::Lane::Local,
+                bound
+            )
+            .await,
+            undecided("the tasker is contained")
+        );
+        assert_eq!(
+            tasker_standing(
+                &store,
+                &view,
+                &Arc::new(Says(Verdict::Indeterminate, fast)),
+                &TaskId([9; 16]),
+                maknae_security::Lane::Local,
+                bound
+            )
+            .await,
+            Standing::Undecided {
+                tasker: None,
+                why: "the task is gone".into()
+            }
+        );
+        let no_role = || Verdict::NotApplicable {
+            note: Some("subject resolves to no role".into()),
+        };
+        let unresolving: Arc<dyn crate::enrollment::EnrollmentView> = Arc::new(
+            crate::enrollment::Unresolving(hobi_enrolled(), [1000].into_iter().collect()),
+        );
+        assert_eq!(
+            tasker_standing(
+                &store,
+                &unresolving,
+                &Arc::new(Says(no_role(), fast)),
+                &id,
+                maknae_security::Lane::Local,
+                bound
+            )
+            .await,
+            undecided("the tasker's identity could not be resolved"),
+            "a name the load could not resolve is not a decided refusal"
+        );
+        assert!(
+            matches!(
+                standing(no_role(), fast, bound).await,
+                Standing::Withdrawn { .. }
+            ),
+            "a tasker that resolved and holds no role is refused"
+        );
+        let permit = Verdict::Permit {
+            obligations: Vec::new(),
+        };
+        assert_eq!(standing(permit, fast, bound).await, Standing::Stands);
+        assert_eq!(store.record(&id).unwrap().state, TaskState::Queued);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_hold_gets_its_own_record_after_a_close_of_the_task_was_recorded() {
+        let (blobs, _clock, store) = mem(1_000);
+        let id = working(&store, "hobi", Tasker::Uid(1000));
+        store.mark_unenrolled(&nobody());
+        let (seq, au) = (Seq::new(), serde_json::json!({}));
+        let trail = Trail::watching(0, Some(Arc::clone(&store)));
+        blobs.fail(Some(Fail::Records));
+        close_due(&store, &*trail, &ctx(&seq, &au), soon()).await;
+        blobs.fail(None);
+        store.mark_unenrolled(&crate::enrollment::Containing(
+            nobody(),
+            [1000].into_iter().collect(),
+        ));
+        let swept = close_due(&store, &*trail, &ctx(&seq, &au), soon()).await;
+        assert_eq!((swept.remaining, swept.stopped), (0, None));
+        let said = trail.reasons();
+        assert_eq!(
+            said.iter()
+                .filter(|r| !r.starts_with("store:"))
+                .collect::<Vec<_>>(),
+            ["closed:agent-gone", "task held: tasker contained"]
+        );
+        assert_eq!(*trail.open.lock().unwrap(), [true, true]);
+        assert_eq!(store.record(&id).unwrap().state, TaskState::Held);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -23883,10 +24188,7 @@ mod task_sweep_tests {
         for _ in 0..2 {
             let swept = close_due(&store, &*trail, &ctx(&seq, &au), soon()).await;
             assert_eq!(swept.remaining, 1);
-            assert_eq!(
-                swept.stopped.as_deref(),
-                Some("the task store stored no close")
-            );
+            assert_eq!(swept.stopped.as_deref(), Some("the task store stored none"));
         }
         assert_eq!(trail.recs().len(), 1, "one process records a close once");
         assert_eq!(store.record(&id).unwrap().state, TaskState::Working);
@@ -23968,7 +24270,7 @@ mod task_sweep_tests {
         );
         assert_eq!(
             said[2],
-            "store: 1 task closes remain due: the task store stored no close"
+            "store: 1 task closes or holds remain due: the task store stored none"
         );
         assert_eq!(said.len(), 3);
         assert_eq!(trail.recs()[2].object, None);
@@ -24012,7 +24314,7 @@ mod task_sweep_tests {
         assert_eq!(said[0], "closed:agent-gone");
         assert!(
             said[1].starts_with(
-                "store: 1 task closes remain for the sweep; no agent is handed those tasks: "
+                "store: 1 task closes or holds remain for the sweep; no agent is handed those tasks: "
             ),
             "{said:?}"
         );

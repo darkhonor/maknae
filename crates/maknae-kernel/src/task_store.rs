@@ -99,7 +99,7 @@ pub struct TaskRecord {
     pub pending: bool,
     /// Set with `pending` when the record is being taken back, not awaiting its confirm.
     #[serde(default)]
-    pub withdrawn: bool,
+    pub removing: bool,
     pub seq: u64,
     /// The tasker's own submission ordinal, the list cursor.
     pub tseq: u64,
@@ -216,7 +216,7 @@ pub enum BootFinding {
         tasker: Tasker,
         parent: Option<TaskId>,
         /// A removal left unfinished, not a submission that was never audited.
-        withdrawn: bool,
+        removing: bool,
     },
     Quarantined {
         name: String,
@@ -346,7 +346,7 @@ pub fn load(blobs: &dyn TaskBlobs) -> Result<Loaded, StoreError> {
                 agent: rec.agent.as_str().to_owned(),
                 tasker: rec.tasker,
                 parent: rec.parent,
-                withdrawn: rec.withdrawn,
+                removing: rec.removing,
             });
         } else {
             records.push(rec);
@@ -886,7 +886,7 @@ mod tests {
                 agent: "hobi".into(),
                 tasker: Tasker::Uid(1000),
                 parent: None,
-                withdrawn: false,
+                removing: false,
             }]
         );
         assert!(b.has(&name_of(&pending)));

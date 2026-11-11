@@ -11,6 +11,8 @@ pub trait EnrollmentView: Send + Sync {
     fn is_enrolled(&self, uid: u32) -> bool;
     /// Whether the person or agent `uid` is contained.
     fn contained(&self, uid: u32) -> bool;
+    /// Whether `uid`'s lack of a role may only be a name the load could not resolve.
+    fn unresolved(&self, uid: u32) -> bool;
 }
 
 pub struct SnapshotEnrollment<B: Baseline>(pub Arc<Composition<B>>);
@@ -34,6 +36,13 @@ impl<B: Baseline> EnrollmentView for SnapshotEnrollment<B> {
         let baseline = self.0.baseline();
         baseline.snapshot().contained(uid, baseline.principal().uid)
     }
+
+    fn unresolved(&self, uid: u32) -> bool {
+        let baseline = self.0.baseline();
+        baseline
+            .snapshot()
+            .unresolved(uid, baseline.principal().uid)
+    }
 }
 
 #[cfg(any(test, feature = "hermetic-test-seam"))]
@@ -53,6 +62,33 @@ impl EnrollmentView for FixedEnrollment {
     fn contained(&self, _uid: u32) -> bool {
         false
     }
+
+    fn unresolved(&self, _uid: u32) -> bool {
+        false
+    }
+}
+
+/// `view`, in which the uids named have no role only because a name did not resolve.
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+pub struct Unresolving<V>(pub V, pub std::collections::BTreeSet<u32>);
+
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+impl<V: EnrollmentView> EnrollmentView for Unresolving<V> {
+    fn agent_uid(&self, id: &AgentId) -> Option<u32> {
+        self.0.agent_uid(id)
+    }
+
+    fn is_enrolled(&self, uid: u32) -> bool {
+        self.0.is_enrolled(uid)
+    }
+
+    fn contained(&self, uid: u32) -> bool {
+        self.0.contained(uid)
+    }
+
+    fn unresolved(&self, uid: u32) -> bool {
+        self.1.contains(&uid)
+    }
 }
 
 /// `view`, with `contained` contained.
@@ -71,6 +107,10 @@ impl<V: EnrollmentView> EnrollmentView for Containing<V> {
 
     fn contained(&self, uid: u32) -> bool {
         self.1.contains(&uid)
+    }
+
+    fn unresolved(&self, uid: u32) -> bool {
+        self.0.unresolved(uid)
     }
 }
 
@@ -98,6 +138,11 @@ mod tests {
         assert_eq!(view.agent_uid(&id("hobi")), Some(2001));
         assert!(view.is_enrolled(2001) && !view.is_enrolled(1000));
         assert!(view.contained(1000) && !view.contained(2001));
+        assert!(!view.unresolved(1000));
+        let view = Unresolving(view, [1000].into());
+        assert_eq!(view.agent_uid(&id("hobi")), Some(2001));
+        assert!(view.is_enrolled(2001) && view.contained(1000));
+        assert!(view.unresolved(1000) && !view.unresolved(2001));
     }
 
     #[test]
@@ -118,6 +163,7 @@ mod tests {
         assert_eq!(view.agent_uid(&id("hobi")), None);
         assert!(!view.is_enrolled(nix::unistd::geteuid().as_raw()));
         assert!(!view.contained(nix::unistd::geteuid().as_raw()));
+        assert!(!view.unresolved(nix::unistd::geteuid().as_raw()));
     }
 
     #[test]

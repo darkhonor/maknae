@@ -1572,14 +1572,15 @@ A person or another agent gives an enrolled agent a task with `session.task`; `m
 
 A task is `queued` until the agent claims it, then `working`. The agent's report makes it `reported`; a stop, or a close by the kernel, makes it `closed`. The tasker collects reports and closes, and a collected one is removed. A report or close nobody collects expires after 30 days.
 
-**A tasker who loses the authority to task an agent.** Before a queued task is handed out, the kernel decides its tasker's submission again under the policy in force: the role's `session.task` grant, the agent's `taskers:` and its enrollment. If the tasker no longer qualifies, the agent's claim is answered `idle` and recorded `idle: the tasker's authority was withdrawn: <reason>`, the task is never handed out, and within a minute it is closed `withdrawn` (`closed:withdrawn`); the tasker collects that close like any other. A task already running is not decided again: it finishes and reports. A decision that could not be reached withdraws nothing; the task waits for the next claim.
+**A tasker who loses the authority to task an agent.** Before a queued task is handed out, the kernel decides its tasker's submission again under the policy in force: the role's `session.task` grant, the agent's `taskers:` and its enrollment. If the tasker no longer qualifies, the agent's claim is answered `idle` and recorded `idle: the tasker's authority was withdrawn: <reason>`, the task is never handed out, and within a minute it is closed `withdrawn` (`closed:withdrawn`). A tasker who was only removed from that agent's `taskers:` still holds the role's grant and collects the close like any other. A tasker whose role lost `session.task`, or who now has no role, cannot collect, list or ask the status of any task, this one included: the `withdrawn` close they were owed waits 30 days and then expires, unless the grant returns first. A task already running is not decided again: it finishes and reports. A decision that could not be reached withdraws nothing; the task waits for the next claim. That includes a tasker with no role in a load that could not resolve every name it binds (a directory or SSSD outage): the uid may belong to an unresolved name, so the claim is recorded `idle: the tasker's standing could not be decided: the tasker's identity could not be resolved` and the task is delivered once the name resolves at a later reload.
 
-**A contained subject's tasks are held.** When a person is contained, every task they gave, and every sub-task under one, becomes `held`, whatever state it was in; when an agent is contained, every open task it holds does. A held task is never handed out, reported on, added to, stopped, dropped, collected, expired or closed, and its lease no longer runs: it stays exactly as it was, with the state it was held from recorded, as possible evidence. The agent's next heartbeat answers `held`, which tells it to stop and leave the partition untouched. Releasing the subject from containment does not release its tasks; they stay held until an admin releases them (#632).
+**A contained subject's tasks are held.** When a person is contained, every task they gave, and every sub-task under one, becomes `held`, whatever state it was in. When an agent is contained, every open task it holds becomes `held`, and so does every task it gave and every task in a chain it started. A contained agent is given no new task: a submission that names it is refused, `session.task: agent <id> is contained`. A held task is never handed out, reported on, added to, stopped, dropped, collected, expired or closed, and its lease no longer runs: it stays exactly as it was, with the state it was held from recorded, as possible evidence. The agent's next heartbeat answers `held`, which tells it to stop and leave the partition untouched. Releasing the subject from containment does not release its tasks; they stay held until an admin releases them (#632).
 
-The kernel closes a task itself in two cases, and keeps the closed record for the tasker:
+The kernel closes a task itself in three cases, and keeps the closed record for the tasker:
 
 - **`agent-gone`:** the agent was de-enrolled, or its account's uid changed. The tasks are marked at the reload that installs the change, so the agent is refused them from then on, and are closed by the reload's own pass or the next sweep.
 - **`agent-lost`:** a working task's lease lapsed. The lease is 15 minutes, renewed by each request that cites the task, permitted or denied, and by each heartbeat. At start every working task's lease begins again.
+- **`withdrawn`:** a queued task's tasker may no longer task the agent, found when the task was about to be handed out.
 
 ### What the trail shows
 
@@ -1592,8 +1593,9 @@ Every task verb is `action: session.task`. A request record names its operation 
 | `status`, `list` | one | `listed <n> tasks` for a list |
 | `collect` | with a cursor, `acknowledge through <n>; intent recorded`, then `acknowledged <n>: <ids>; collected <n> reports: <ids>`; without one, `collected <n> reports: <ids>`. Each list names at most 32 task ids, then `and <n> more` | |
 | `claim` with nothing to hand out | one | `idle` |
+| `claim` whose queued task is not handed out | one | `idle: the tasker's authority was withdrawn: <reason>`, or `idle: the tasker's standing could not be decided: <cause>` (posture `unavailable`; the task stays queued and the next claim decides again). Both name the task and its tasker |
 | `claim` that hands out a task | `intent recorded`, then `delivered` | |
-| heartbeat (`claim` with `seen_follow_ups`) | one | `heartbeat: <n> follow-ups after <m>`, `heartbeat: the task is closed` or `idle` |
+| heartbeat (`claim` with `seen_follow_ups`) | one | `heartbeat: <n> follow-ups after <m>`, `heartbeat: the task is closed`, `heartbeat: the task is held` or `idle` |
 | `report` | `intent recorded`, then `done` or the refusal | |
 
 A refused store step after a permit keeps `result: permit`, the decision, and carries the cause with posture `unavailable` or `unauthorized`. The client is told only `not authorized`.
@@ -1605,14 +1607,14 @@ The kernel's own records are `event: task`, written by the boot, a reload or the
 | `closed:agent-gone` | `deny` | The task is about to be closed because its agent is gone. | Nothing; the tasker collects the close. |
 | `closed:agent-lost` | `deny` | The task is about to be closed because its lease lapsed. | Check the agent process; it stopped claiming or citing. |
 | `closed:withdrawn` | `deny` | A queued task is about to be closed because its tasker may no longer task the agent. | Nothing, if the change of role or `taskers:` was intended. The claim record just before it carries the reason. |
-| `task held: contained` | `deny` | The task is about to be put on hold because its tasker or its agent is contained. | Treat the task, its report and the agent's partition as evidence; leave them as they are. An admin releases held tasks (#632). |
+| `task held: tasker contained`, `task held: root contained`, `task held: agent <id> contained` | `deny` | The task is about to be put on hold because the tasker who gave it, the person or agent at the root of its chain, or the agent holding it is contained. | Treat the task, its report and the agent's partition as evidence; leave them as they are. An admin releases held tasks (#632). |
 | `expired` | `deny` | A report or close nobody collected in 30 days is about to be removed. | Nothing. |
 | `store: owed to a later store write: <why>` | `deny` | The disk did not prove a removal, rewrite or close. Every later store write retries it. | See below. |
 | `store: the owed write landed` | `permit` | That retry succeeded. | Nothing. |
 | `store: an unconfirmed record stays on disk until the next start: <why>` | `deny` | An unconfirmed record could not be unlinked. The next start discards it. | Nothing, unless the disk is failing. |
 | `task stored after the submission was answered`, `not stored after the submission was answered: <why>` | `permit`, `deny` | A submission that timed out was settled later. The tasker was told "not authorized"; this says what happened. | Tell the tasker, if they asked. |
-| `store: <n> task closes remain due: <why>` | `deny` | A pass ran out of time or the disk refused; the next sweep carries on. | See below. |
-| `store: <n> task closes remain for the sweep; no agent is handed those tasks: <why>` | `deny` | Boot's bounded pass did not finish its closes. Start goes on; the sweep finishes them. | Nothing, unless it repeats. |
+| `store: <n> task closes or holds remain due: <why>` | `deny` | A pass ran out of time or the disk refused; the next sweep carries on. | See below. |
+| `store: <n> task closes or holds remain for the sweep; no agent is handed those tasks: <why>` | `deny` | Boot's bounded pass did not finish its closes and holds. Start goes on; the sweep finishes them. | Nothing, unless it repeats. |
 | `store: the action counters were not stored: <why>` | `deny` | The sweep could not store the per-task action counts; a crash loses at most a minute of them. | See below. |
 | `store: the final task sweep was aborted at shutdown` | `deny` | The last sweep did not finish within 3 seconds. | Nothing; the next start sweeps. |
 

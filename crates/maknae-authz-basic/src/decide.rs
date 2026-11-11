@@ -633,6 +633,7 @@ fn decide_task(
     req: &SecRequest,
     role_key: &'static str,
     uid: u32,
+    principal_uid: u32,
 ) -> (Verdict, Option<Cited>) {
     let source = match lp.action_grants.evaluate3_action(role_key, "session.task") {
         maknae_config::Match3::DenyMatch { source } => {
@@ -659,7 +660,7 @@ fn decide_task(
     };
     let checked = match task_op(req) {
         None => return (Verdict::Indeterminate, None),
-        Some(TaskOp::Submit) => submission(lp, req, uid),
+        Some(TaskOp::Submit) => submission(lp, req, uid, principal_uid),
         Some(TaskOp::Add | TaskOp::Stop) => on_own_task(req, &[TASK_WORKING]),
         Some(TaskOp::Drop) => on_own_task(req, &[TASK_QUEUED]),
         Some(TaskOp::Status) => on_own_task(
@@ -700,15 +701,25 @@ fn task_deny(reason: String) -> Refused {
     (Verdict::Deny { reason }, None)
 }
 
-fn submission(lp: &LoadedPolicy, req: &SecRequest, uid: u32) -> Result<(), Refused> {
+fn submission(
+    lp: &LoadedPolicy,
+    req: &SecRequest,
+    uid: u32,
+    principal_uid: u32,
+) -> Result<(), Refused> {
     let target = match req.resource.0.get(maknae_security::RESOURCE_AGENT) {
         Some(AttrValue::Str(t)) => t.as_str(),
         Some(_) => return Err((Verdict::Indeterminate, None)),
         None => return Err(task_deny("no agent on session.task".into())),
     };
-    if !lp.agents.0.values().any(|id| id == target) {
+    let Some((target_uid, _)) = lp.agents.0.iter().find(|(_, id)| *id == target) else {
         return Err(task_deny(format!(
             "session.task: agent {target} is not enrolled"
+        )));
+    };
+    if lp.roles.role_for(*target_uid, principal_uid) == Resolution::Role(Role::Adversary) {
+        return Err(task_deny(format!(
+            "session.task: agent {target} is contained"
         )));
     }
     let Some(list) = lp.taskers.0.get(target) else {
@@ -906,7 +917,7 @@ pub(crate) fn decide_loaded_cited(
             decide_session(lp, req, role.key(), uid)
         }
         Role::Admin | Role::User if req.action.0 == "session.task" => {
-            decide_task(lp, req, role.key(), uid)
+            decide_task(lp, req, role.key(), uid, principal.uid)
         }
         Role::Guest | Role::User => match class {
             Some(Class::Liveness) => (permit_with_audit(), None),
@@ -5244,6 +5255,42 @@ mod tests {
     }
 
     #[test]
+    fn a_contained_agent_is_given_no_task() {
+        let mut lp = lp_task(TASK_ROLES, None);
+        assert_eq!(task_verdict(&lp, HUMAN_UID, "hobi"), permit_with_audit());
+        let lookups: crate::Lookups = [
+            ("operator", OPERATOR_UID),
+            ("ursula", HUMAN_UID),
+            ("hobi-svc", HOBI_UID),
+            ("jin-svc", JIN_UID),
+        ]
+        .into_iter()
+        .map(|(n, u)| (n.to_string(), Some(u)))
+        .collect();
+        let bindings: BTreeMap<String, Vec<String>> = [
+            ("admin", vec!["operator"]),
+            ("user", vec!["ursula", "jin-svc"]),
+            ("adversary", vec!["hobi-svc"]),
+        ]
+        .into_iter()
+        .map(|(r, n)| (r.to_string(), n.into_iter().map(String::from).collect()))
+        .collect();
+        lp.roles = Roles::File(resolve(&Some(bindings), &crate::found(&lookups)).unwrap());
+        for uid in [HUMAN_UID, OPERATOR_UID] {
+            assert_eq!(
+                task_verdict(&lp, uid, "hobi"),
+                deny("session.task: agent hobi is contained"),
+                "{uid}"
+            );
+        }
+        assert_eq!(
+            task_verdict(&lp, HUMAN_UID, "jin"),
+            permit_with_audit(),
+            "another agent is still tasked"
+        );
+    }
+
+    #[test]
     fn an_empty_taskers_list_refuses_everyone() {
         let lp = lp_task(TASK_ROLES, Some(&[]));
         for uid in [HUMAN_UID, OPERATOR_UID, JIN_UID] {
@@ -5471,7 +5518,8 @@ mod tests {
                 &lp_task(TASK_ROLES, None),
                 &on_task(Some("claim"), None, None),
                 "user",
-                HUMAN_UID
+                HUMAN_UID,
+                OPERATOR_UID
             )
             .0,
             Verdict::Indeterminate,

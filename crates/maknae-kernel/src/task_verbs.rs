@@ -297,7 +297,7 @@ mod tests {
             close: None,
             held_from: None,
             pending: false,
-            withdrawn: false,
+            removing: false,
             seq,
             tseq: seq,
             rseq,
