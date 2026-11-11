@@ -93,6 +93,8 @@ pub enum Dispatch {
     ConversationCloseRequested,
     ConversationListRequested,
     ConversationDeleteRequested,
+    /// A tasker verb or a submission; the arm reads the operands and gathers the task facts.
+    TaskRequested,
 }
 
 /// The verbs routed to `mutation::handle`; only these resolve the requester's home.
@@ -163,15 +165,88 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         | Verb::McpResourceRead
         | Verb::McpPromptGet
         | Verb::McpSamplingCreate
-        | Verb::TaskSubmit { .. }
+        | Verb::TaskClaim { .. }
+        | Verb::TaskReport { .. } => Dispatch::NoBehaviour,
+        Verb::TaskSubmit { .. }
         | Verb::TaskAdd { .. }
         | Verb::TaskStatus { .. }
         | Verb::TaskList { .. }
         | Verb::TaskStop { .. }
         | Verb::TaskDrop { .. }
-        | Verb::TaskCollect { .. }
-        | Verb::TaskClaim { .. }
-        | Verb::TaskReport { .. } => Dispatch::NoBehaviour,
+        | Verb::TaskCollect { .. } => Dispatch::TaskRequested,
+    }
+}
+
+/// The `session.task` operation a verb is, the value of `CONTEXT_TASK_OP`.
+pub fn task_op(verb: &Verb) -> Option<&'static str> {
+    match verb {
+        Verb::TaskSubmit { .. } => Some("submit"),
+        Verb::TaskAdd { .. } => Some("add"),
+        Verb::TaskStatus { .. } => Some("status"),
+        Verb::TaskList { .. } => Some("list"),
+        Verb::TaskStop { .. } => Some("stop"),
+        Verb::TaskDrop { .. } => Some("drop"),
+        Verb::TaskCollect { .. } => Some("collect"),
+        Verb::TaskClaim { .. } => Some("claim"),
+        Verb::TaskReport { .. } => Some("report"),
+        Verb::Ping
+        | Verb::Whoami
+        | Verb::AdminStatus
+        | Verb::AdminConfigShow
+        | Verb::AdminAuditTail
+        | Verb::AdminPolicyReload
+        | Verb::AdminSubjectList
+        | Verb::AdminBaselineShow
+        | Verb::AdminBaselineAccept { .. }
+        | Verb::AdminSubjectBind
+        | Verb::AdminSubjectUnbind
+        | Verb::AdminContain { .. }
+        | Verb::AdminRelease { .. }
+        | Verb::AdminCredentialRotate
+        | Verb::AdminProviderList
+        | Verb::AdminProviderSet
+        | Verb::AdminProviderDisable
+        | Verb::AdminSessionList
+        | Verb::AdminSessionTerminate
+        | Verb::SessionNew { .. }
+        | Verb::SessionResume
+        | Verb::SessionClose { .. }
+        | Verb::SessionDelete { .. }
+        | Verb::SessionList { .. }
+        | Verb::SessionFork
+        | Verb::SessionPrompt { .. }
+        | Verb::SessionCancel
+        | Verb::SessionSetconfigoption
+        | Verb::SessionSetmode
+        | Verb::SessionLoad
+        | Verb::SessionUpdate
+        | Verb::SessionRequestpermission
+        | Verb::SessionElicitCreate
+        | Verb::SessionElicitComplete
+        | Verb::SessionCompact
+        | Verb::Read { .. }
+        | Verb::FsWrite { .. }
+        | Verb::FsDelete { .. }
+        | Verb::FsMove
+        | Verb::FsList { .. }
+        | Verb::FsStat { .. }
+        | Verb::FsMkdir { .. }
+        | Verb::FsLink
+        | Verb::FsChmod
+        | Verb::FsChown
+        | Verb::TerminalCreate
+        | Verb::TerminalOutput
+        | Verb::TerminalWaitforexit
+        | Verb::TerminalKill
+        | Verb::TerminalRelease
+        | Verb::TerminalInput
+        | Verb::McpConnect
+        | Verb::McpDisconnect
+        | Verb::McpMessage
+        | Verb::McpToolCall
+        | Verb::McpResourceRead
+        | Verb::McpPromptGet
+        | Verb::McpSamplingCreate => None,
     }
 }
 
@@ -482,6 +557,9 @@ pub fn build_authz_request(
         maknae_security::CONTEXT_DAC_LANE,
         AttrValue::Str(lane.as_str().to_string()),
     );
+    if let Some(op) = task_op(verb) {
+        context.insert(maknae_security::CONTEXT_TASK_OP, AttrValue::Str(op.into()));
+    }
     maknae_security::Request {
         subject: Subject(subject),
         resource: Resource(resource),
@@ -994,13 +1072,50 @@ mod tests {
         terms.iter().all(|t| {
             let verbs: Vec<Verb> = all_verbs()
                 .into_iter()
-                .filter(|v| verb_to_action(v) == *t)
+                .filter(|v| verb_to_action(v) == *t && !unbuilt_task_verb(v))
                 .collect();
             !verbs.is_empty()
                 && verbs
                     .iter()
                     .all(|v| dispatch_verb(v) != Dispatch::NoBehaviour)
         })
+    }
+
+    #[test]
+    fn every_task_verb_carries_its_op_and_no_other_verb_does() {
+        let mut ops = Vec::new();
+        for v in all_verbs() {
+            let req = build_authz_request(
+                &v,
+                1000,
+                None,
+                maknae_security::Lane::Local,
+                None,
+                None,
+                &Stamp::Client,
+            );
+            let stamped = req.context.0.str(maknae_security::CONTEXT_TASK_OP);
+            assert_eq!(stamped, task_op(&v), "{v:?}");
+            assert_eq!(
+                stamped.is_some(),
+                verb_to_action(&v) == "session.task",
+                "{v:?}"
+            );
+            if let Some(op) = stamped {
+                ops.push(op.to_owned());
+                let built = !unbuilt_task_verb(&v);
+                assert_eq!(dispatch_verb(&v) == Dispatch::TaskRequested, built, "{v:?}");
+            }
+        }
+        assert_eq!(
+            ops,
+            ["submit", "add", "status", "list", "stop", "drop", "collect", "claim", "report"]
+        );
+    }
+
+    /// The agent-side task verbs, built by #628 Task 4, which deletes this list.
+    fn unbuilt_task_verb(v: &Verb) -> bool {
+        matches!(v, Verb::TaskClaim { .. } | Verb::TaskReport { .. })
     }
 
     /// The grantable-side tripwire (#181), replacing what the retired
@@ -1032,16 +1147,19 @@ mod tests {
             ],
             "the hand-copied list in the class test above must match the constant"
         );
-        let (unbuilt, built): (Vec<&str>, Vec<&str>) =
-            real.iter().partition(|t| **t == "session.task");
         assert!(
-            !all_dispatch(&unbuilt),
-            "session.task is decided in #609 and built by #610"
+            all_dispatch(real),
+            "every grantable term must dispatch to a real arm"
         );
-        assert!(
-            all_dispatch(&built),
-            "every grantable term other than session.task must dispatch to a \
-             real arm"
+        assert_eq!(
+            all_verbs()
+                .iter()
+                .filter(|v| verb_to_action(v) == "session.task")
+                .filter(|v| dispatch_verb(v) == Dispatch::NoBehaviour)
+                .map(unbuilt_task_verb)
+                .collect::<Vec<_>>(),
+            [true, true],
+            "only claim and report wait for #628 Task 4"
         );
         // The discriminator discriminates: a known ungrantable term has no
         // real arm, so the helper must say false — otherwise the assert above

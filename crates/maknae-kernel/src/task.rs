@@ -17,6 +17,9 @@ use crate::task_store::{
 };
 
 pub const MAX_LIVE_TASKS_PER_AGENT: usize = 256;
+pub const MAX_LIVE_TASKS_PER_TASKER_PER_AGENT: usize = 32;
+pub const MAX_HELD_REPORTS_PER_TASKER: usize = 256;
+pub const MAX_FOLLOW_UPS_PER_TASK: usize = 32;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TaskRefusal {
@@ -33,6 +36,11 @@ pub enum TaskRefusal {
     Store(String),
     CursorAhead,
     Finished,
+    TooLong,
+    TaskerLive { agent: String },
+    TaskerHeld,
+    FollowUps,
+    NotWorking,
 }
 
 impl std::fmt::Display for TaskRefusal {
@@ -56,6 +64,20 @@ impl std::fmt::Display for TaskRefusal {
             TaskRefusal::Store(why) => write!(f, "the task store did not write: {why}"),
             TaskRefusal::CursorAhead => f.write_str("cursor_ahead"),
             TaskRefusal::Finished => f.write_str("the task has already reported or closed"),
+            TaskRefusal::TooLong => f.write_str("the text exceeds prompt_max_bytes"),
+            TaskRefusal::TaskerLive { agent } => write!(
+                f,
+                "the tasker holds {MAX_LIVE_TASKS_PER_TASKER_PER_AGENT} live tasks with agent {agent}"
+            ),
+            TaskRefusal::TaskerHeld => write!(
+                f,
+                "the tasker's live tasks and held reports reach {MAX_HELD_REPORTS_PER_TASKER}"
+            ),
+            TaskRefusal::FollowUps => write!(
+                f,
+                "the task holds {MAX_FOLLOW_UPS_PER_TASK} follow-ups or prompt_max_bytes of them"
+            ),
+            TaskRefusal::NotWorking => f.write_str("the task is not working"),
         }
     }
 }
@@ -76,6 +98,28 @@ impl TaskSigner for PlaneSigner {
     }
     fn current_leaf(&self) -> Option<[u8; 32]> {
         leaf_of(self.0.current_identity().as_ref())
+    }
+}
+
+/// Signs nothing: a fixed placeholder signature, for stores no agent verifies.
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+pub struct UnverifiedSigner;
+
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+impl TaskSigner for UnverifiedSigner {
+    fn sign(&self, task: TaskObject) -> Result<SignedTask, TaskRefusal> {
+        Ok(SignedTask {
+            task,
+            signature: maknae_proto::TaskSignature {
+                alg: "unverified".into(),
+                leaf: maknae_proto::Bytes::new(vec![0].into()),
+                chain: Vec::new(),
+                sig: maknae_proto::Bytes::new(vec![0].into()),
+            },
+        })
+    }
+    fn current_leaf(&self) -> Option<[u8; 32]> {
+        None
     }
 }
 
@@ -392,6 +436,7 @@ impl TaskStore {
         if held.tasks.contains_key(&task.task.task_id) {
             return Ok(Placed::Collided);
         }
+        tasker_room(&held, &task.task.tasker, agent)?;
         let root = root_of(&held, &task.task)?;
         let seq = self.issue(&mut held, Sequence::Submission)?;
         let rec = TaskRecord {
@@ -403,7 +448,7 @@ impl TaskStore {
             parent: task.task.parent,
             state: TaskState::Queued,
             close: None,
-            pending: false,
+            pending: true,
             seq,
             rseq: None,
             submitted: self.clock.now_secs(),
@@ -470,13 +515,24 @@ impl TaskStore {
         close: Option<TaskClose>,
     ) -> Result<u64, TaskRefusal> {
         let mut held = self.held();
+        let rec = self.publish(&mut held, id, text, close)?;
+        Ok(rec.rseq.unwrap_or_default())
+    }
+
+    fn publish(
+        &self,
+        held: &mut Held,
+        id: &TaskId,
+        text: SecretText,
+        close: Option<TaskClose>,
+    ) -> Result<TaskRecord, TaskRefusal> {
         let rec = held.live(id).ok_or(TaskRefusal::Unknown)?;
         match rec.state {
             TaskState::Queued | TaskState::Working => {}
             TaskState::Reported | TaskState::Closed => return Err(TaskRefusal::Finished),
         }
         let mut next = rec.clone();
-        let rseq = self.issue(&mut held, Sequence::Report)?;
+        let rseq = self.issue(held, Sequence::Report)?;
         next.state = match close {
             None => TaskState::Reported,
             Some(_) => TaskState::Closed,
@@ -485,8 +541,8 @@ impl TaskStore {
         next.rseq = Some(rseq);
         next.report = Some((text, self.clock.now_secs()));
         self.write(&next, held.tasks.get(id))?;
-        held.tasks.insert(*id, next);
-        Ok(rseq)
+        held.tasks.insert(*id, next.clone());
+        Ok(next)
     }
 
     /// Removes, durably, `tasker`'s reports from `agent` up to `upto`; a cursor above every
@@ -538,6 +594,169 @@ impl TaskStore {
         self.held().live(id).cloned()
     }
 
+    pub fn now(&self) -> i64 {
+        self.clock.now_secs()
+    }
+
+    /// Makes a minted task visible, once its submission is audited.
+    pub fn confirm(&self, id: &TaskId) -> Result<(), TaskRefusal> {
+        let mut held = self.held();
+        let rec = held
+            .tasks
+            .get(id)
+            .filter(|r| r.pending)
+            .ok_or(TaskRefusal::Unknown)?;
+        let mut next = rec.clone();
+        next.pending = false;
+        self.write(&next, Some(rec))?;
+        held.tasks.insert(*id, next);
+        Ok(())
+    }
+
+    /// The agent's own task `id`, only while it is `Working`.
+    pub fn working(
+        &self,
+        id: &TaskId,
+        agent: &AgentId,
+        uid: u32,
+    ) -> Result<Arc<SignedTask>, TaskRefusal> {
+        let held = self.held();
+        let task = owned(&held, id, agent, uid)?;
+        match held.live(id).map(|r| r.state) {
+            Some(TaskState::Working) => Ok(task),
+            Some(TaskState::Queued | TaskState::Reported | TaskState::Closed) | None => {
+                Err(TaskRefusal::NotWorking)
+            }
+        }
+    }
+
+    /// The task's state when `tasker` submitted it; any other task, foreign or unknown,
+    /// reads as `None`.
+    pub fn state_for(&self, id: &TaskId, tasker: &Tasker) -> Option<TaskState> {
+        tasker_record(&self.held(), id, tasker).map(|r| r.state)
+    }
+
+    /// The record and its hot facts, for `tasker`'s own task only.
+    pub fn view_for(&self, id: &TaskId, tasker: &Tasker) -> Option<(TaskRecord, Hot)> {
+        let held = self.held();
+        let rec = tasker_record(&held, id, tasker)?.clone();
+        let hot = held.hot.get(id).copied().unwrap_or_default();
+        Some((rec, hot))
+    }
+
+    /// Appends `text` to `tasker`'s working task, within the count and the byte total.
+    pub fn follow_up(
+        &self,
+        id: &TaskId,
+        tasker: &Tasker,
+        text: SecretText,
+        total_max: usize,
+    ) -> Result<(TaskRecord, Hot), TaskRefusal> {
+        let mut held = self.held();
+        let rec = tasker_record(&held, id, tasker).ok_or(TaskRefusal::Unknown)?;
+        if rec.state != TaskState::Working {
+            return Err(TaskRefusal::NotWorking);
+        }
+        let total = rec.follow_ups.iter().map(|f| f.0.len()).sum::<usize>();
+        if rec.follow_ups.len() >= MAX_FOLLOW_UPS_PER_TASK
+            || total.saturating_add(text.0.len()) > total_max
+        {
+            return Err(TaskRefusal::FollowUps);
+        }
+        let mut next = rec.clone();
+        next.follow_ups.push(text);
+        self.write(&next, Some(rec))?;
+        held.tasks.insert(*id, next.clone());
+        let hot = held.hot.get(id).copied().unwrap_or_default();
+        Ok((next, hot))
+    }
+
+    /// Closes `tasker`'s working task as `Stopped`; the notice is collected like a report.
+    pub fn stop(&self, id: &TaskId, tasker: &Tasker) -> Result<(TaskRecord, Hot), TaskRefusal> {
+        let mut held = self.held();
+        let rec = tasker_record(&held, id, tasker).ok_or(TaskRefusal::Unknown)?;
+        if rec.state != TaskState::Working {
+            return Err(TaskRefusal::NotWorking);
+        }
+        let next = self.publish(
+            &mut held,
+            id,
+            SecretText(String::new().into()),
+            Some(TaskClose::Stopped),
+        )?;
+        let hot = held.hot.get(id).copied().unwrap_or_default();
+        Ok((next, hot))
+    }
+
+    /// Withdraws `tasker`'s queued task; its record is removed before the answer.
+    pub fn drop_queued(
+        &self,
+        id: &TaskId,
+        tasker: &Tasker,
+    ) -> Result<(TaskRecord, Hot), TaskRefusal> {
+        let mut held = self.held();
+        let rec = tasker_record(&held, id, tasker).ok_or(TaskRefusal::Unknown)?;
+        if rec.state != TaskState::Queued {
+            return Err(TaskRefusal::Finished);
+        }
+        let mut gone = rec.clone();
+        let hot = held.hot.get(id).copied().unwrap_or_default();
+        self.erase(&mut held, id)?;
+        gone.state = TaskState::Closed;
+        gone.close = Some(TaskClose::Dropped);
+        Ok((gone, hot))
+    }
+
+    /// `tasker`'s tasks with `agent` after submission `after`, oldest first, at most
+    /// `limit`, and the cursor to resume after when more remain.
+    pub fn list(
+        &self,
+        tasker: &Tasker,
+        agent: &AgentId,
+        after: Option<u64>,
+        limit: usize,
+    ) -> (Vec<(TaskRecord, Hot)>, Option<u64>) {
+        let held = self.held();
+        let mut mine: Vec<&TaskRecord> = held
+            .tasks
+            .values()
+            .filter(|r| {
+                !r.pending
+                    && r.tasker == *tasker
+                    && r.agent == *agent
+                    && after.is_none_or(|a| r.seq > a)
+            })
+            .collect();
+        mine.sort_by_key(|r| r.seq);
+        let more = mine.len() > limit;
+        mine.truncate(limit);
+        let next = more.then(|| mine.last().map(|r| r.seq)).flatten();
+        let page = mine
+            .into_iter()
+            .map(|r| {
+                let hot = held
+                    .hot
+                    .get(&r.signed.task.task_id)
+                    .copied()
+                    .unwrap_or_default();
+                (r.clone(), hot)
+            })
+            .collect();
+        (page, next)
+    }
+
+    /// `tasker`'s reports and close notices from `agent`, in arrival order.
+    pub fn reports(&self, tasker: &Tasker, agent: &AgentId) -> Vec<TaskRecord> {
+        let held = self.held();
+        let mut mine: Vec<&TaskRecord> = held
+            .tasks
+            .values()
+            .filter(|r| !r.pending && r.tasker == *tasker && r.agent == *agent && r.rseq.is_some())
+            .collect();
+        mine.sort_by_key(|r| r.rseq);
+        mine.into_iter().cloned().collect()
+    }
+
     fn withdraw(&self, id: &TaskId) {
         let mut held = self.held();
         held.tasks.remove(id);
@@ -585,6 +804,63 @@ impl TaskStore {
         task
     }
 
+    #[cfg(any(test, feature = "hermetic-test-seam"))]
+    pub fn start_for_test(&self, id: &TaskId) {
+        let mut held = self.held();
+        let mut next = held.live(id).expect("a held task").clone();
+        next.state = TaskState::Working;
+        next.claimed = Some(self.clock.now_secs());
+        self.write(&next, None)
+            .expect("the test store writes the task");
+        held.tasks.insert(*id, next);
+    }
+
+    #[cfg(any(test, feature = "hermetic-test-seam"))]
+    pub fn act_for_test(&self, id: &TaskId, at: i64) {
+        let mut held = self.held();
+        let hot = held.hot.entry(*id).or_default();
+        hot.actions += 1;
+        hot.last_action = Some(at);
+    }
+
+    #[cfg(any(test, feature = "hermetic-test-seam"))]
+    pub fn count_for_test(&self) -> usize {
+        self.held().tasks.len()
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    fn mint_live(
+        &self,
+        signer: &dyn TaskSigner,
+        view: &dyn EnrollmentView,
+        enrolled: Enrolled,
+        tasker: Tasker,
+        parent: Option<TaskId>,
+        sub: TaskSubmission,
+    ) -> Result<Arc<SignedTask>, TaskRefusal> {
+        let t = self.mint(signer, view, enrolled, tasker, parent, sub)?;
+        self.confirm(&t.task.task_id)?;
+        Ok(t)
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    fn mint_with_live(
+        &self,
+        draw: &mut dyn FnMut() -> Result<[u8; 16], TaskRefusal>,
+        signer: &dyn TaskSigner,
+        view: &dyn EnrollmentView,
+        enrolled: Enrolled,
+        tasker: Tasker,
+        parent: Option<TaskId>,
+        sub: TaskSubmission,
+    ) -> Result<Arc<SignedTask>, TaskRefusal> {
+        let t = self.mint_with(draw, signer, view, enrolled, tasker, parent, sub)?;
+        self.confirm(&t.task.task_id)?;
+        Ok(t)
+    }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.held().tasks.len()
@@ -593,6 +869,32 @@ impl TaskStore {
 
 fn store(e: StoreError) -> TaskRefusal {
     TaskRefusal::Store(e.to_string())
+}
+
+fn tasker_record<'h>(held: &'h Held, id: &TaskId, tasker: &Tasker) -> Option<&'h TaskRecord> {
+    held.live(id).filter(|r| r.tasker == *tasker)
+}
+
+/// A tasker's live tasks with one agent, and its live tasks plus held reports overall,
+/// are each capped; a close is never refused, so the cap applies here.
+fn tasker_room(held: &Held, tasker: &Tasker, agent: &AgentId) -> Result<(), TaskRefusal> {
+    let mut live_here = 0;
+    let mut kept = 0;
+    for r in held.tasks.values().filter(|r| r.tasker == *tasker) {
+        kept += 1;
+        if r.agent == *agent && matches!(r.state, TaskState::Queued | TaskState::Working) {
+            live_here += 1;
+        }
+    }
+    if live_here >= MAX_LIVE_TASKS_PER_TASKER_PER_AGENT {
+        return Err(TaskRefusal::TaskerLive {
+            agent: agent.as_str().to_owned(),
+        });
+    }
+    if kept >= MAX_HELD_REPORTS_PER_TASKER {
+        return Err(TaskRefusal::TaskerHeld);
+    }
+    Ok(())
 }
 
 /// A sub-task works in its parent's partition; a person's own task, in the uid's.
@@ -711,6 +1013,7 @@ pub(crate) struct SubmitCtx<'a> {
     pub peer_uri: Option<&'a str>,
     pub lane: maknae_security::Lane,
     pub decide_timeout: std::time::Duration,
+    pub text_max: usize,
 }
 
 struct Attempt {
@@ -760,11 +1063,8 @@ impl Attempt {
     }
 }
 
-/// Decides one `session.task` submission and stores it only on `Permit`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "#610's TaskSubmit arm is the caller")
-)]
+/// Decides one `session.task` submission and stores it only on `Permit`: the record is
+/// written pending, the decision audited, then the record made visible.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn submit_task<P: Authorizer + Send + Sync + 'static>(
     authorizer: Arc<P>,
@@ -831,12 +1131,25 @@ async fn submit_under<P: Authorizer + Send + Sync + 'static>(
         .emit_within(&rec, crate::blocking_guard::AUDIT_APPEND_TIMEOUT)
         .await;
     match (decided, audited) {
-        (Ok(task), Ok(())) => Ok(task),
+        (Ok(task), Ok(())) => match store.confirm(&task.task.task_id) {
+            Ok(()) => Ok(task),
+            Err(refusal) => {
+                store.withdraw(&task.task.task_id);
+                let mut corrective = attempt.record(ctx, Some(&task.task), Some(&refusal));
+                corrective.outcome.reason = format!("not stored: {refusal}");
+                corrective.outcome.posture = "unavailable".into();
+                let _ = emit
+                    .emit_within(&corrective, crate::blocking_guard::AUDIT_APPEND_TIMEOUT)
+                    .await;
+                Err(refusal)
+            }
+        },
         (Ok(signed), Err(e)) => {
             store.withdraw(&signed.task.task_id);
             Err(TaskRefusal::Audit(e.to_string()))
         }
-        (Err(refusal), _) => Err(refusal),
+        (Err(refusal), Ok(())) => Err(refusal),
+        (Err(_), Err(e)) => Err(TaskRefusal::Audit(e.to_string())),
     }
 }
 
@@ -852,6 +1165,10 @@ async fn decide<P: Authorizer + Send + Sync + 'static>(
     attempt: &mut Attempt,
 ) -> Result<Arc<SignedTask>, TaskRefusal> {
     maknae_proto::validate_submission(&sub).map_err(|e| TaskRefusal::Schema(e.to_string()))?;
+    let maknae_proto::Ask::Prompt { prompt } = &sub.ask;
+    if prompt.0.len() > ctx.text_max {
+        return Err(TaskRefusal::TooLong);
+    }
     let target = target(&sub)?;
     let parent = match by {
         Submitter::User { .. } | Submitter::Agent { under: None, .. } => None,
@@ -862,7 +1179,7 @@ async fn decide<P: Authorizer + Send + Sync + 'static>(
             ..
         } => Some(
             store
-                .resolve(t, agent, *uid)
+                .working(t, agent, *uid)
                 .map_err(|_| TaskRefusal::ParentNotHeld)?,
         ),
     };
@@ -1010,7 +1327,7 @@ mod tests {
         assert_eq!(NoIdentity.current_leaf(), None);
         assert_eq!(
             store
-                .mint(
+                .mint_live(
                     &NoIdentity,
                     &v,
                     at(0, HOBI),
@@ -1025,7 +1342,7 @@ mod tests {
         for k in PlaneKey::ALL {
             let signing = LeafSigner::new(k);
             let held = store
-                .mint(
+                .mint_live(
                     &signing,
                     &v,
                     at(0, HOBI),
@@ -1047,7 +1364,7 @@ mod tests {
         let mut draw = || Ok(draws.next().unwrap());
         for _ in 0..2 {
             let signed = store
-                .mint_with(
+                .mint_with_live(
                     &mut draw,
                     signer(),
                     &v,
@@ -1101,7 +1418,7 @@ mod tests {
         let store = TaskStore::new();
         let v = view(&[("hobi", HOBI), ("jin", JIN)]);
         let hobis = store
-            .mint(
+            .mint_live(
                 &signing,
                 &v,
                 at(0, HOBI),
@@ -1146,7 +1463,7 @@ mod tests {
         let store = TaskStore::new();
         let v = view(&[("hobi", HOBI)]);
         let old = store
-            .mint(
+            .mint_live(
                 &signing,
                 &v,
                 at(0, HOBI),
@@ -1238,7 +1555,7 @@ mod tests {
             let v = view(&[("hobi", HOBI), ("jin", JIN)]);
             let mint_by = |s: &LeafSigner, to: &str| {
                 store
-                    .mint(s, &v, at(0, v.0[&id(to)]), Tasker::Uid(1000), None, sub(to))
+                    .mint_live(s, &v, at(0, v.0[&id(to)]), Tasker::Uid(1000), None, sub(to))
                     .unwrap()
             };
             let before = mint_by(&signing, "hobi");
@@ -1306,7 +1623,7 @@ mod tests {
 
     fn mint(store: &TaskStore, v: &FixedEnrollment, agent: &str) -> Arc<SignedTask> {
         store
-            .mint(
+            .mint_live(
                 signer(),
                 v,
                 at(store.generation(&id(agent)), v.0[&id(agent)]),
@@ -1333,7 +1650,7 @@ mod tests {
             .task
             .task_id;
         let a = store
-            .mint(
+            .mint_live(
                 signer(),
                 &v,
                 at(0, HOBI),
@@ -1366,7 +1683,7 @@ mod tests {
         let mut draws = [[1u8; 16], [1; 16], [2; 16]].into_iter();
         let mut draw = || Ok(draws.next().unwrap());
         let first = store
-            .mint_with(
+            .mint_with_live(
                 &mut draw,
                 signer(),
                 &v,
@@ -1377,7 +1694,7 @@ mod tests {
             )
             .unwrap();
         let second = store
-            .mint_with(
+            .mint_with_live(
                 &mut draw,
                 signer(),
                 &v,
@@ -1393,7 +1710,7 @@ mod tests {
         let mut failing = || Err(TaskRefusal::Random);
         assert_eq!(
             store
-                .mint_with(
+                .mint_with_live(
                     &mut failing,
                     signer(),
                     &v,
@@ -1486,16 +1803,146 @@ mod tests {
         assert_eq!(store.generation(&id("hobi")), 2);
     }
 
+    fn held_by(store: &TaskStore, tasker: Tasker) -> TaskId {
+        let mut task = TaskObject::for_test("hobi", 0);
+        task.tasker = tasker;
+        store
+            .insert_for_test(signer().sign(task).unwrap(), HOBI)
+            .task
+            .task_id
+    }
+
+    fn text(s: &str) -> SecretText {
+        SecretText(String::from(s).into())
+    }
+
+    #[test]
+    fn the_tasker_verbs_act_only_on_the_callers_task_in_its_state() {
+        let blobs = crate::task_store::MemTaskBlobs::default();
+        let store = TaskStore::open(
+            Box::new(blobs.clone()),
+            Arc::new(crate::task_store::SystemClock),
+        )
+        .unwrap();
+        let me = Tasker::Uid(1000);
+        let mine = held_by(&store, me.clone());
+        let theirs = held_by(&store, Tasker::Uid(1001));
+        assert_eq!(store.state_for(&mine, &me), Some(TaskState::Queued));
+        assert_eq!(store.state_for(&theirs, &me), None);
+        assert!(store.view_for(&theirs, &me).is_none());
+        assert_eq!(store.confirm(&mine), Err(TaskRefusal::Unknown));
+        assert_eq!(
+            store.follow_up(&theirs, &me, text("x"), 10).unwrap_err(),
+            TaskRefusal::Unknown
+        );
+        assert_eq!(
+            store.follow_up(&mine, &me, text("x"), 10).unwrap_err(),
+            TaskRefusal::NotWorking
+        );
+        assert_eq!(store.stop(&theirs, &me).unwrap_err(), TaskRefusal::Unknown);
+        assert_eq!(store.stop(&mine, &me).unwrap_err(), TaskRefusal::NotWorking);
+        assert_eq!(
+            store.drop_queued(&theirs, &me).unwrap_err(),
+            TaskRefusal::Unknown
+        );
+        store.start_for_test(&mine);
+        assert_eq!(
+            store.drop_queued(&mine, &me).unwrap_err(),
+            TaskRefusal::Finished
+        );
+        blobs.fail(Some(crate::task_store::Fail::Records));
+        assert!(matches!(
+            store.follow_up(&mine, &me, text("x"), 10),
+            Err(TaskRefusal::Store(_))
+        ));
+        assert!(matches!(store.stop(&mine, &me), Err(TaskRefusal::Store(_))));
+        blobs.fail(None);
+        assert!(store.record(&mine).unwrap().follow_ups.is_empty());
+        assert_eq!(store.record(&mine).unwrap().state, TaskState::Working);
+        let (_, hot) = store.follow_up(&mine, &me, text("x"), 10).unwrap();
+        assert_eq!(hot, crate::task_store::Hot::default());
+        let (closed, _) = store.stop(&mine, &me).unwrap();
+        assert_eq!(closed.close, Some(TaskClose::Stopped));
+        assert_eq!(store.reports(&me, &id("hobi")).len(), 1);
+        assert!(store.reports(&me, &id("jin")).is_empty());
+    }
+
+    #[test]
+    fn working_resolves_only_the_agents_own_working_task() {
+        let store = TaskStore::new();
+        let t = held_by(&store, Tasker::Uid(1000));
+        assert_eq!(
+            store.working(&t, &id("hobi"), HOBI).unwrap_err(),
+            TaskRefusal::NotWorking
+        );
+        assert_eq!(
+            store.working(&t, &id("jin"), HOBI).unwrap_err(),
+            TaskRefusal::OtherAgent
+        );
+        assert_eq!(
+            store
+                .working(&TaskId([9; 16]), &id("hobi"), HOBI)
+                .unwrap_err(),
+            TaskRefusal::Unknown
+        );
+        store.start_for_test(&t);
+        assert!(store.working(&t, &id("hobi"), HOBI).is_ok());
+    }
+
+    #[test]
+    fn a_pending_task_is_seen_by_no_tasker_verb_and_is_counted_against_the_caps() {
+        let store = TaskStore::new();
+        let v = view(&[("hobi", HOBI)]);
+        let me = Tasker::Uid(1000);
+        let pending = store
+            .mint(signer(), &v, at(0, HOBI), me.clone(), None, sub("hobi"))
+            .unwrap()
+            .task
+            .task_id;
+        assert_eq!(store.state_for(&pending, &me), None);
+        assert!(store.list(&me, &id("hobi"), None, 10).0.is_empty());
+        for _ in 1..MAX_LIVE_TASKS_PER_TASKER_PER_AGENT {
+            mint(&store, &v, "hobi");
+        }
+        assert_eq!(
+            store
+                .mint(signer(), &v, at(0, HOBI), me.clone(), None, sub("hobi"))
+                .unwrap_err(),
+            TaskRefusal::TaskerLive {
+                agent: "hobi".into()
+            }
+        );
+        store.confirm(&pending).unwrap();
+        assert_eq!(store.state_for(&pending, &me), Some(TaskState::Queued));
+        let (page, next) = store.list(&me, &id("hobi"), None, 10);
+        assert_eq!(page.len(), 10);
+        assert_eq!(page[0].0.signed.task.task_id, pending);
+        let (rest, none) = store.list(&me, &id("hobi"), next, 100);
+        assert_eq!(rest.len(), MAX_LIVE_TASKS_PER_TASKER_PER_AGENT - 10);
+        assert_eq!(none, None);
+    }
+
     #[test]
     fn the_store_refuses_a_new_task_at_capacity_and_keeps_the_rest() {
         let store = TaskStore::new();
         let v = view(&[("hobi", HOBI), ("jin", JIN)]);
         let held: Vec<_> = (0..MAX_LIVE_TASKS_PER_AGENT)
-            .map(|_| mint(&store, &v, "hobi"))
+            .map(|i| {
+                store
+                    .mint_live(
+                        signer(),
+                        &v,
+                        at(0, HOBI),
+                        Tasker::Uid(i as u32),
+                        None,
+                        sub("hobi"),
+                    )
+                    .unwrap()
+            })
             .collect();
         assert_eq!(
             store
-                .mint(
+                .mint_live(
                     signer(),
                     &v,
                     at(0, HOBI),
@@ -1520,7 +1967,7 @@ mod tests {
         let store = TaskStore::new();
         assert_eq!(
             store
-                .mint(
+                .mint_live(
                     signer(),
                     &view(&[("jin", JIN)]),
                     at(0, HOBI),
@@ -1533,7 +1980,7 @@ mod tests {
         );
         assert_eq!(store.len(), 0);
         assert!(matches!(
-            store.mint(
+            store.mint_live(
                 signer(),
                 &view(&[]),
                 at(0, 0),
@@ -1553,7 +2000,7 @@ mod tests {
         store.purge_agent(&id("hobi"));
         assert_eq!(
             store
-                .mint(
+                .mint_live(
                     signer(),
                     &v,
                     at(read, HOBI),
@@ -1622,6 +2069,22 @@ mod tests {
                 TaskRefusal::Finished,
                 "the task has already reported or closed",
             ),
+            (TaskRefusal::TooLong, "the text exceeds prompt_max_bytes"),
+            (
+                TaskRefusal::TaskerLive {
+                    agent: "hobi".into(),
+                },
+                "the tasker holds 32 live tasks with agent hobi",
+            ),
+            (
+                TaskRefusal::TaskerHeld,
+                "the tasker's live tasks and held reports reach 256",
+            ),
+            (
+                TaskRefusal::FollowUps,
+                "the task holds 32 follow-ups or prompt_max_bytes of them",
+            ),
+            (TaskRefusal::NotWorking, "the task is not working"),
         ];
         for (refusal, text) in cases {
             assert_eq!(refusal.to_string(), text);
@@ -1787,7 +2250,7 @@ mod tests {
         v: &dyn EnrollmentView,
         by: Submitter,
         sub: TaskSubmission,
-        emit: &Recorder,
+        emit: &impl AuditEmit,
         (bound, breaker): (std::time::Duration, Option<Breaker>),
     ) -> Result<Arc<SignedTask>, TaskRefusal> {
         let w = wctx();
@@ -1799,6 +2262,7 @@ mod tests {
             peer_uri: None,
             lane: maknae_security::Lane::Local,
             decide_timeout: bound,
+            text_max: 1 << 20,
         };
         let pdp = Decider {
             authorizer: a,
@@ -1816,6 +2280,68 @@ mod tests {
     ) -> Result<Arc<SignedTask>, TaskRefusal> {
         let view = SnapshotEnrollment(pdp.clone());
         submit_via(pdp.clone(), store, &view, by, sub(to), emit, (BOUND, None)).await
+    }
+
+    struct BreaksStoreOnAudit(Recorder, crate::task_store::MemTaskBlobs);
+
+    impl AuditEmit for BreaksStoreOnAudit {
+        fn emit(
+            &self,
+            rec: &AuditRecord,
+        ) -> impl std::future::Future<Output = Result<(), AuditError>> + Send {
+            self.1.fail(Some(crate::task_store::Fail::Records));
+            self.0.emit(rec)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_task_whose_pending_mark_cannot_clear_is_refused_and_corrected() {
+        let (_g, pdp) = pdp("unconfirmed");
+        let blobs = crate::task_store::MemTaskBlobs::default();
+        let store = TaskStore::open(
+            Box::new(blobs.clone()),
+            Arc::new(crate::task_store::SystemClock),
+        )
+        .unwrap();
+        let emit = BreaksStoreOnAudit(Recorder::new(), blobs.clone());
+        let view = SnapshotEnrollment(pdp.clone());
+        let got = submit_via(
+            pdp.clone(),
+            &store,
+            &view,
+            user(),
+            sub("hobi"),
+            &emit,
+            (BOUND, None),
+        )
+        .await;
+        assert!(matches!(got, Err(TaskRefusal::Store(_))), "{got:?}");
+        let trail: Vec<(String, String, String)> = emit
+            .0
+            .records()
+            .iter()
+            .map(|r| {
+                (
+                    r.outcome.result.clone(),
+                    r.outcome.reason.clone(),
+                    r.outcome.posture.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(trail.len(), 2, "{trail:?}");
+        assert_eq!(trail[0].1, "task stored");
+        assert_eq!(trail[1].0, "deny");
+        assert!(trail[1].1.starts_with("not stored: "), "{trail:?}");
+        assert_eq!(trail[1].2, "unavailable");
+        assert_eq!(store.len(), 0);
+        blobs.fail(None);
+        let reopened =
+            TaskStore::open(Box::new(blobs), Arc::new(crate::task_store::SystemClock)).unwrap();
+        assert_eq!(reopened.len(), 0);
+        assert!(matches!(
+            reopened.take_boot_findings()[..],
+            [crate::task_store::BootFinding::Discarded { .. }]
+        ));
     }
 
     #[tokio::test]
@@ -1935,6 +2461,7 @@ mod tests {
         let store = TaskStore::new();
         let emit = Recorder::new();
         let first = submit(&pdp, &store, user(), "hobi", &emit).await.unwrap();
+        store.start_for_test(&first.task.task_id);
         let child = submit(
             &pdp,
             &store,
@@ -2007,6 +2534,13 @@ mod tests {
             .unwrap_err();
         assert!(matches!(refused, TaskRefusal::Audit(_)), "{refused:?}");
         assert_eq!(store.len(), 0);
+        let refused = submit(&pdp, &store, user(), "jin", &Recorder::failing())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(refused, TaskRefusal::Audit(_)),
+            "an unaudited refusal is not answered: {refused:?}"
+        );
     }
 
     #[tokio::test]
@@ -2037,6 +2571,7 @@ mod tests {
         let emit = Recorder::new();
         let parent = submit(&pdp, &store, user(), "hobi", &emit).await.unwrap();
         submit(&pdp, &store, user(), "hobi", &emit).await.unwrap();
+        store.start_for_test(&parent.task.task_id);
         let child = submit(
             &pdp,
             &store,
@@ -2433,6 +2968,7 @@ mod tests {
         let emit = Recorder::new();
         let view = SnapshotEnrollment(pdp.clone());
         let parent = submit(&pdp, &store, user(), "hobi", &emit).await.unwrap();
+        store.start_for_test(&parent.task.task_id);
         let capturing = Arc::new(Capturing {
             inner: pdp.clone(),
             seen: Mutex::default(),
@@ -2446,6 +2982,7 @@ mod tests {
             peer_uri: Some("spiffe://d/plane/agent/hobi"),
             lane: maknae_security::Lane::Remote,
             decide_timeout: BOUND,
+            text_max: 1 << 20,
         };
         let pdp_under = Decider {
             authorizer: capturing.clone(),
@@ -2489,6 +3026,7 @@ mod tests {
             peer_uri: None,
             lane: maknae_security::Lane::Local,
             decide_timeout: BOUND,
+            text_max: 1 << 20,
         };
         let view = SnapshotEnrollment(pdp.clone());
         submit_task(

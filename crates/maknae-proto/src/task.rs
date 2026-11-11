@@ -155,6 +155,16 @@ pub const TASK_ENVELOPE_MARGIN: usize = 4096;
 pub const TASK_SIGNATURE_MAX_BYTES: usize = 32 * 1024;
 pub const TASK_CHAIN_MAX: usize = 2;
 
+/// The prompt-class request frame cap: a full prompt and its envelope.
+pub fn prompt_request_cap(prompt_max_bytes: usize) -> usize {
+    prompt_max_bytes.saturating_add(TASK_ENVELOPE_MARGIN)
+}
+
+/// The prompt-class response frame cap: a full prompt delivered as a signed task.
+pub fn prompt_response_cap(prompt_max_bytes: usize) -> usize {
+    prompt_request_cap(prompt_max_bytes).saturating_add(TASK_SIGNATURE_MAX_BYTES)
+}
+
 /// `alg` is the `vault.plane_key` name; `chain` holds the intermediates after `leaf`.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, try_from = "TaskSignatureWire")]
@@ -873,6 +883,14 @@ mod tests {
             }),
             Payload::TaskIdle,
         ]
+    }
+
+    #[test]
+    fn the_prompt_caps_add_the_envelope_and_then_the_signature() {
+        assert_eq!(prompt_request_cap(65_536), 65_536 + 4096);
+        assert_eq!(prompt_response_cap(65_536), 65_536 + 4096 + 32 * 1024);
+        assert_eq!(prompt_request_cap(usize::MAX), usize::MAX);
+        assert_eq!(prompt_response_cap(usize::MAX - 1), usize::MAX);
     }
 
     #[test]

@@ -686,7 +686,7 @@ impl PlaneClient {
     }
 
     /// Best-effort revoke of a token this client minted; a user's stored token is never revoked.
-    pub async fn shutdown(self) {
+    pub async fn shutdown(&self) {
         // Retire the transport credential FIRST — clear the resolver slot (a live listener
         // stops presenting a leaf) and the identity — so shutdown actually retires the cert
         // regardless of whether the token revoke below succeeds. Same lock-step order as

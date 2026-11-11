@@ -1264,6 +1264,55 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         return;
     }
 
+    if dispatch_verb(&request.verb) == Dispatch::TaskRequested {
+        let trail = Trail {
+            emit: &emit,
+            cfg: &cfg,
+            class,
+            host: &host,
+            socket: &socket,
+            uid: peer_uid,
+            peer_uri: peer_uri.as_deref(),
+            peer_user: peer_user.as_deref(),
+            session_id,
+            seq,
+            au3_1: &au3_1,
+        };
+        let home = crate::authz::admitted_home(peer_uid, peer_dir).await.ok();
+        let by = match &session.channel {
+            SessionChannel::Client => crate::task::Submitter::User {
+                uid: peer_uid,
+                home,
+            },
+            SessionChannel::Agent { agent, .. } => crate::task::Submitter::Agent {
+                agent: agent.clone(),
+                uid: peer_uid,
+                home,
+                under: request.task,
+            },
+        };
+        let tasks = TaskCtx {
+            agents: &agents,
+            by,
+            caller: crate::task_verbs::caller(&stamp, peer_uid),
+            text_max: cfg.prompt_max_bytes,
+        };
+        serve_task_verb(
+            &mut stream,
+            &trail,
+            &request.verb,
+            lane,
+            &authorizer,
+            &live,
+            authz_decide_timeout,
+            &stamp,
+            tasks,
+        )
+        .await;
+        close_bounded(&mut stream).await;
+        return;
+    }
+
     if crate::handler::is_filesystem_verb(&request.verb) {
         let mut record = make_record(
             "request",
@@ -1537,7 +1586,8 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         | Dispatch::ConversationNewRequested
         | Dispatch::ConversationCloseRequested
         | Dispatch::ConversationListRequested
-        | Dispatch::ConversationDeleteRequested => {
+        | Dispatch::ConversationDeleteRequested
+        | Dispatch::TaskRequested => {
             let appended = emit_request_outcome(
                 &emit,
                 &host,
@@ -2045,7 +2095,8 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 | Dispatch::ConversationNewRequested
                 | Dispatch::ConversationCloseRequested
                 | Dispatch::ConversationListRequested
-                | Dispatch::ConversationDeleteRequested => {
+                | Dispatch::ConversationDeleteRequested
+                | Dispatch::TaskRequested => {
                     unreachable!("outer match routes unprepared operations")
                 }
             };
@@ -3151,6 +3202,275 @@ async fn serve_conversation_verb<S, E, P>(
     }
 }
 
+/// Who submits on this channel, and how the tasker verbs reach the store and the signer.
+struct TaskCtx<'a> {
+    agents: &'a AgentAdmission,
+    by: crate::task::Submitter,
+    caller: maknae_proto::Tasker,
+    text_max: usize,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn serve_task_verb<S, E, P>(
+    stream: &mut S,
+    trail: &Trail<'_, E>,
+    verb: &Verb,
+    lane: maknae_security::Lane,
+    authorizer: &Arc<P>,
+    live: &Arc<crate::live::LiveConfig>,
+    timeout: Duration,
+    stamp: &Stamp<'_>,
+    tasks: TaskCtx<'_>,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    E: AuditEmit + Send + Sync + 'static,
+    P: Authorizer + Send + Sync + 'static,
+{
+    use crate::task::TaskRefusal;
+    use crate::task_verbs as tv;
+    let action = verb_to_action(verb);
+    let op = crate::handler::task_op(verb).unwrap_or("none");
+    let store = &tasks.agents.tasks;
+    let caller = &tasks.caller;
+    let object = tv::object(verb);
+    let cited = tv::cited(verb);
+
+    if let Verb::TaskSubmit { task } = verb {
+        let where_ = WhereCtx {
+            host: trail.host.to_owned(),
+            socket: trail.socket.to_owned(),
+            au3_1: trail.au3_1.clone(),
+        };
+        let ctx = crate::task::SubmitCtx {
+            where_: &where_,
+            session_id: trail.session_id,
+            seq: trail.seq.next(),
+            user: trail.peer_user,
+            peer_uri: trail.peer_uri,
+            lane,
+            decide_timeout: timeout,
+            text_max: tasks.text_max,
+        };
+        let submitted = crate::task::submit_task(
+            Arc::clone(authorizer),
+            store,
+            &*tasks.agents.signer,
+            &*tasks.agents.view,
+            &ctx,
+            tasks.by,
+            task.clone(),
+            &**trail.emit,
+        )
+        .await;
+        match submitted {
+            Ok(signed) => {
+                let id = signed.task.task_id;
+                let mut outcome =
+                    trail.record(action, "permit", "submit: task queued", "authorized");
+                outcome.object = Some(format!("task:{id}"));
+                outcome.subject.task_id = Some(id.to_string());
+                match store.view_for(&id, caller) {
+                    Some((rec, hot)) => {
+                        let payload = Payload::TaskAccepted(tv::view(&rec, &hot, store.now()));
+                        trail
+                            .deliver(stream, &outcome, payload, None, None, action)
+                            .await;
+                    }
+                    None => {
+                        outcome.outcome.reason = "submit: task gone before the answer".into();
+                        trail.unauthorized(stream, &outcome).await;
+                    }
+                }
+            }
+            Err(TaskRefusal::Audit(_)) => {}
+            Err(_) => {
+                write_error_bounded(
+                    stream,
+                    trail.cfg,
+                    trail.class,
+                    ProtoErrCode::Unauthorized,
+                    "not authorized",
+                )
+                .await;
+            }
+        }
+        return;
+    }
+
+    let (_, _, generation) = live.admission();
+    let mut sec_req = build_authz_request(verb, trail.uid, None, lane, None, None, stamp);
+    if let Some(id) = &cited {
+        tv::stamp_task(&mut sec_req, store.state_for(id, caller));
+    }
+    if let Some(agent) = tv::named_agent(verb) {
+        tv::stamp_agent(&mut sec_req, agent);
+    }
+    let (verdict, role, rule) =
+        decide_bounded(authorizer, live, sec_req, generation, timeout).await;
+    let decided = |result: &str, reason: &str, posture: &str| {
+        let mut rec = trail.record(action, result, &format!("{op}: {reason}"), posture);
+        rec.subject.role = role.map(str::to_string);
+        rec.rule = rule.as_ref().map(rule_audit);
+        rec.object.clone_from(&object);
+        rec.subject.task_id = cited.map(|id| id.to_string());
+        rec
+    };
+    match finalize(verdict) {
+        Decision::Deny { reason } => {
+            trail
+                .unauthorized(stream, &decided("deny", &reason, "unauthorized"))
+                .await;
+            return;
+        }
+        Decision::Permit { obligations } => {
+            if let Err(unhonorable) = discharge_plan(&obligations) {
+                let reason = format!("unhonorable obligation: {}", unhonorable.0);
+                trail
+                    .unauthorized(stream, &decided("deny", &reason, "unauthorized"))
+                    .await;
+                return;
+            }
+        }
+    }
+    let agent = tv::named_agent(verb).map(maknae_config::AgentId::parse);
+    let refused = |intent: &AuditRecord, r: &TaskRefusal| {
+        trail.outcome(intent, &format!("{op}: {r}"), "unauthorized")
+    };
+    let acknowledged = |intent: &AuditRecord,
+                        done: Result<
+        (crate::task_store::TaskRecord, crate::task_store::Hot),
+        TaskRefusal,
+    >| match done {
+        Ok((rec, hot)) => (
+            trail.outcome(intent, &format!("{op}: done"), "authorized"),
+            Some(Payload::TaskAcknowledged(tv::view(&rec, &hot, store.now()))),
+        ),
+        Err(r) => (refused(intent, &r), None),
+    };
+    match (verb, cited, agent) {
+        (Verb::TaskStatus { .. }, Some(id), _) => match store.view_for(&id, caller) {
+            Some((rec, hot)) => {
+                let outcome = decided("permit", "status", "authorized");
+                let payload = Payload::TaskState(tv::view(&rec, &hot, store.now()));
+                trail
+                    .deliver(stream, &outcome, payload, role, rule.as_ref(), action)
+                    .await;
+            }
+            None => {
+                trail
+                    .unauthorized(stream, &decided("deny", "task gone", "unauthorized"))
+                    .await;
+            }
+        },
+        (Verb::TaskList { after, .. }, _, Some(Ok(agent))) => {
+            let (entries, next) = store.list(
+                caller,
+                &agent,
+                after.as_ref().map(maknae_proto::TaskCursor::seq),
+                tv::TASK_PAGE_MAX,
+            );
+            let now = store.now();
+            let outcome = decided(
+                "permit",
+                &format!("listed {} tasks", entries.len()),
+                "authorized",
+            );
+            let payload = Payload::TaskList(maknae_proto::TaskPage {
+                entries: entries.iter().map(|(r, h)| tv::view(r, h, now)).collect(),
+                next: next.map(maknae_proto::TaskCursor::from_seq),
+            });
+            trail
+                .deliver(stream, &outcome, payload, role, rule.as_ref(), action)
+                .await;
+        }
+        (Verb::TaskAdd { text, .. }, Some(id), _) => {
+            if text.0.len() > tasks.text_max {
+                let r = TaskRefusal::TooLong;
+                trail
+                    .unauthorized(stream, &decided("deny", &r.to_string(), "unauthorized"))
+                    .await;
+                return;
+            }
+            let intent = decided("permit", "intent recorded", "authorized");
+            if !trail.record_bounded(&intent).await {
+                return;
+            }
+            let done = store.follow_up(&id, caller, text.clone(), tasks.text_max);
+            match acknowledged(&intent, done) {
+                (outcome, Some(payload)) => {
+                    trail
+                        .deliver(stream, &outcome, payload, role, rule.as_ref(), action)
+                        .await
+                }
+                (outcome, None) => trail.unauthorized(stream, &outcome).await,
+            }
+        }
+        (Verb::TaskStop { .. } | Verb::TaskDrop { .. }, Some(id), _) => {
+            let intent = decided("permit", "intent recorded", "authorized");
+            if !trail.record_bounded(&intent).await {
+                return;
+            }
+            let done = match verb {
+                Verb::TaskStop { .. } => store.stop(&id, caller),
+                _ => store.drop_queued(&id, caller),
+            };
+            match acknowledged(&intent, done) {
+                (outcome, Some(payload)) => {
+                    trail
+                        .deliver(stream, &outcome, payload, role, rule.as_ref(), action)
+                        .await
+                }
+                (outcome, None) => trail.unauthorized(stream, &outcome).await,
+            }
+        }
+        (Verb::TaskCollect { after, .. }, _, Some(Ok(agent))) => {
+            let mut intent = None;
+            if let Some(upto) = after {
+                let rec = decided(
+                    "permit",
+                    &format!("acknowledge through {}; intent recorded", upto.seq()),
+                    "authorized",
+                );
+                if !trail.record_bounded(&rec).await {
+                    return;
+                }
+                if let Err(r) = store.acknowledge(caller, &agent, upto.seq()) {
+                    trail.unauthorized(stream, &refused(&rec, &r)).await;
+                    return;
+                }
+                intent = Some(rec);
+            }
+            let page = tv::report_page(
+                &store.reports(caller, &agent),
+                maknae_proto::prompt_request_cap(tasks.text_max),
+            );
+            let reason = format!("collected {} reports", page.entries.len());
+            let outcome = match &intent {
+                Some(i) => trail.outcome(i, &format!("{op}: {reason}"), "authorized"),
+                None => decided("permit", &reason, "authorized"),
+            };
+            trail
+                .deliver(
+                    stream,
+                    &outcome,
+                    Payload::TaskReports(page),
+                    role,
+                    rule.as_ref(),
+                    action,
+                )
+                .await;
+        }
+        _ => {
+            trail
+                .unauthorized(
+                    stream,
+                    &decided("deny", "not a tasker verb", "unauthorized"),
+                )
+                .await;
+        }
+    }
+}
+
 fn effect<T>(
     r: Result<Result<T, ConversationError>, crate::mutation::Blocked>,
 ) -> Result<T, EffectFailure> {
@@ -3450,7 +3770,9 @@ async fn write_frame_bounded<S, E: AuditEmit + Send + Sync>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    if bytes.len() > FrameCaps::responses(cfg.prompt_max_bytes).cap(class) {
+    if bytes.len()
+        > FrameCaps::responses(maknae_proto::prompt_response_cap(cfg.prompt_max_bytes)).cap(class)
+    {
         refuse_oversize_bounded(
             stream, cfg, class, emit, host, socket, peer_uid, peer_uri, peer_user, role, rule,
             session_id, seq, action, au3_1,
@@ -3518,7 +3840,7 @@ fn request_caps(cfg: &TransportConfig, attempt_caps: crate::mutation::AttemptCap
     FrameCaps {
         control: CONTROL_REQUEST_MAX,
         attempt: attempt_caps.request,
-        prompt: cfg.prompt_max_bytes,
+        prompt: maknae_proto::prompt_request_cap(cfg.prompt_max_bytes),
     }
 }
 
@@ -3781,6 +4103,7 @@ async fn emit_connect_deny<E: AuditEmit + Send + Sync>(
 pub struct AgentAdmission {
     pub view: Arc<dyn crate::enrollment::EnrollmentView>,
     pub tasks: Arc<crate::task::TaskStore>,
+    pub signer: Arc<dyn crate::task::TaskSigner>,
 }
 
 impl AgentAdmission {
@@ -3789,6 +4112,7 @@ impl AgentAdmission {
         AgentAdmission {
             view: Arc::new(crate::enrollment::FixedEnrollment(Default::default())),
             tasks: Arc::new(crate::task::TaskStore::new()),
+            signer: Arc::new(crate::task::UnverifiedSigner),
         }
     }
 }
@@ -5676,12 +6000,13 @@ where
     }
 
     /// What the agent listener admits against: this PDP's snapshot and the store it reconciles.
-    fn agent_admission(&self) -> AgentAdmission {
+    fn agent_admission(&self, signer: Arc<dyn crate::task::TaskSigner>) -> AgentAdmission {
         AgentAdmission {
             view: Arc::new(crate::enrollment::SnapshotEnrollment(Arc::clone(
                 &self.authorizer,
             ))),
             tasks: Arc::clone(&self.tasks),
+            signer,
         }
     }
 
@@ -8199,12 +8524,14 @@ async fn boot_after_sink(
     // authenticate, then mint a memory-only leaf below; the credential supervisor then
     // runs concurrently (renewal + leaf rotation; rotation cadence is checked once per
     // renewal cycle — Task-6 review note).
-    let client = maknae_vault::PlaneClient::from_document(
-        boot.document(),
-        config_dir,
-        maknae_vault::Plane::Kernel,
-    )
-    .map_err(|e| RunError::Other(e.to_string()))?;
+    let client = Arc::new(
+        maknae_vault::PlaneClient::from_document(
+            boot.document(),
+            config_dir,
+            maknae_vault::Plane::Kernel,
+        )
+        .map_err(|e| RunError::Other(e.to_string()))?,
+    );
     let trust_domain = maknae_vault::vault_config_from_document(boot.document())
         .map_err(|e| RunError::Other(e.to_string()))?
         .deployment_id;
@@ -8381,7 +8708,7 @@ async fn boot_after_sink(
 /// loop stopped on so [`run`] can map it to the process `ExitCode`.
 #[allow(clippy::too_many_arguments)]
 async fn serve_after_mint<B>(
-    client: &maknae_vault::PlaneClient,
+    client: &Arc<maknae_vault::PlaneClient>,
     trust: &Arc<maknae_vault::TrustBundle>,
     sink: &Arc<maknae_audit_append::AuditSink>,
     transport: maknae_config::TransportConfig,
@@ -8502,7 +8829,7 @@ where
         bound: Duration::from_millis(maknae_config::GROUP_LOOKUP_TIMEOUT_MS),
     });
     let lifetime = handler_drain_bound(&transport, egress.deadline());
-    let agents = reloader.agent_admission();
+    let agents = reloader.agent_admission(Arc::new(crate::task::PlaneSigner(Arc::clone(client))));
     let max_connections = transport.max_connections;
     let serve = |listener: PlaneListener, class: ChannelClass| {
         let sink = Arc::clone(sink);
@@ -21555,7 +21882,9 @@ mod agent_listener_tests {
 
     /// Admits hobi's leaf at connect against the agent listener's admission, then serves it.
     fn connect(fx: &Fx) -> Result<Session, crate::authz::DenyCause> {
-        let agents = fx.reloader.agent_admission();
+        let agents = fx
+            .reloader
+            .agent_admission(Arc::new(crate::task::UnverifiedSigner));
         let peer = hobi_leaf();
         crate::authz::admit(
             crate::handler::Admission::EnrolledAgent,
@@ -21730,7 +22059,7 @@ mod agent_listener_tests {
             ping_citing(&mut session, Some(unknown)).await,
             maknae_proto::RespResult::Err(_)
         ));
-        let want = format!("task-unknown:{unknown}");
+        let want = format!("task-not-working:{unknown}");
         assert_eq!(
             pings(&session).last().unwrap(),
             &("deny".to_string(), want.clone())
@@ -21886,7 +22215,9 @@ mod agent_listener_tests {
     ) -> impl FnOnce(LoopRun) -> std::pin::Pin<Box<dyn Future<Output = ServeOutcome> + Send>> {
         let authorizer = Arc::clone(&fx.reloader.authorizer);
         let emit = Arc::clone(emit);
-        let agents = fx.reloader.agent_admission();
+        let agents = fx
+            .reloader
+            .agent_admission(Arc::new(crate::task::UnverifiedSigner));
         move |run: LoopRun| {
             Box::pin(accept_loop(
                 acceptor,

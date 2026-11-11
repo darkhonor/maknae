@@ -554,7 +554,9 @@ mod tests {
             generation: store.generation(&hobi()),
             agent_uid: HOBI,
         };
-        store.mint(&Unverified, &v, enrolled, Tasker::Uid(1000), None, sub)
+        let t = store.mint(&Unverified, &v, enrolled, Tasker::Uid(1000), None, sub)?;
+        store.confirm(&t.task.task_id)?;
+        Ok(t)
     }
 
     #[test]

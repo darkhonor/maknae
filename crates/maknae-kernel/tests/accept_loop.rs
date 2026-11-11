@@ -1644,6 +1644,7 @@ fn agents(pairs: &[(&str, u32)]) -> maknae_kernel::AgentAdmission {
             pairs.iter().map(|(a, u)| (agent_id(a), *u)).collect(),
         )),
         tasks: Arc::new(maknae_kernel::TaskStore::new()),
+        signer: Arc::new(maknae_kernel::UnverifiedSigner),
     }
 }
 
@@ -2067,7 +2068,8 @@ fn signed_for(agent: &str) -> maknae_proto::SignedTask {
 fn euid_hobi(held: &[(maknae_proto::SignedTask, u32)]) -> maknae_kernel::AgentAdmission {
     let a = agents(&[("hobi", nix::unistd::geteuid().as_raw())]);
     for (task, uid) in held {
-        a.tasks.insert_for_test(task.clone(), *uid);
+        let id = a.tasks.insert_for_test(task.clone(), *uid).task.task_id;
+        a.tasks.start_for_test(&id);
     }
     a
 }

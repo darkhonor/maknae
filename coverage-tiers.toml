@@ -75,6 +75,8 @@ files = [
   "crates/maknae-kernel/src/task.rs",
   # #628: the task store at rest; a wrong arm resets a counter or loads an unaudited task.
   "crates/maknae-kernel/src/task_store.rs",
+  # #628: the task facts a tasker verb is decided on; a wrong arm stamps another's task as owned.
+  "crates/maknae-kernel/src/task_verbs.rs",
   "crates/maknae-kernel/src/enrollment.rs",
   # #115: the account state each request is re-decided on. A wrong arm reads a
   # locked, expired or not-yet-valid account as active. The Varlink transport is varlink.rs (T2).

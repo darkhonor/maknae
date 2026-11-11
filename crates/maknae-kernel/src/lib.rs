@@ -38,6 +38,7 @@ pub mod session_facts;
 pub mod sync;
 mod task;
 pub mod task_store;
+mod task_verbs;
 mod uid_gate;
 pub mod vocabulary;
 pub use authz::*;
@@ -98,12 +99,15 @@ pub use sensitive_authz::{sensitive_match, SensitiveMatch};
 #[cfg(any(test, feature = "hermetic-test-seam"))]
 pub use session::AllowFacts;
 pub use session::{Facts, FactsGate, SessionChannel, SessionFacts, SessionRecord};
-#[cfg(any(test, feature = "hermetic-test-seam"))]
-pub use task::TaskObjectForTest;
 pub use task::{
-    Enrolled, PlaneSigner, Submitter, TaskRefusal, TaskSigner, TaskStore, MAX_LIVE_TASKS_PER_AGENT,
+    Enrolled, PlaneSigner, Submitter, TaskRefusal, TaskSigner, TaskStore, MAX_FOLLOW_UPS_PER_TASK,
+    MAX_HELD_REPORTS_PER_TASKER, MAX_LIVE_TASKS_PER_AGENT, MAX_LIVE_TASKS_PER_TASKER_PER_AGENT,
 };
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+pub use task::{TaskObjectForTest, UnverifiedSigner};
 pub use task_store::{Clock, RootTasker, SystemClock, TaskRecord, CLAIM_LEASE};
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+pub use task_store::{ManualClock, MemTaskBlobs};
 
 #[used]
 pub static PRIVILEGED_MARKER: &[u8] = b"PRIVILEGED_MAKNAE_KERNEL";

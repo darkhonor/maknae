@@ -23,6 +23,7 @@ pub enum DenyCause {
     HumanAccount,
     TaskOnClientChannel,
     Task { refusal: TaskRefusal, cited: TaskId },
+    TaskNotWorking { cited: TaskId },
 }
 
 /// The fact source that could not answer, named in an infrastructure denial.
@@ -82,7 +83,8 @@ pub fn admit(
     }
 }
 
-/// The task a request cites, resolved for this channel.
+/// The task a request cites, resolved for this channel: only the agent's own `Working`
+/// task; another agent's is refused as such, and anything else as not working.
 pub fn task_for(
     admission: Admission,
     cited: Option<&TaskId>,
@@ -98,11 +100,30 @@ pub fn task_for(
         (Admission::EnrolledAgent, None) => Err(DenyCause::NotEnrolled),
         (Admission::EnrolledAgent, Some(agent)) => {
             store
-                .resolve(id, agent, uid)
+                .working(id, agent, uid)
                 .map(Some)
-                .map_err(|refusal| DenyCause::Task {
-                    refusal,
-                    cited: *id,
+                .map_err(|refusal| match refusal {
+                    TaskRefusal::OtherAgent => DenyCause::Task {
+                        refusal,
+                        cited: *id,
+                    },
+                    TaskRefusal::Unknown
+                    | TaskRefusal::NotWorking
+                    | TaskRefusal::Schema(_)
+                    | TaskRefusal::Denied(_)
+                    | TaskRefusal::AtCapacity { .. }
+                    | TaskRefusal::ParentNotHeld
+                    | TaskRefusal::AgentGone
+                    | TaskRefusal::Random
+                    | TaskRefusal::Audit(_)
+                    | TaskRefusal::Unsigned
+                    | TaskRefusal::Store(_)
+                    | TaskRefusal::CursorAhead
+                    | TaskRefusal::Finished
+                    | TaskRefusal::TooLong
+                    | TaskRefusal::TaskerLive { .. }
+                    | TaskRefusal::TaskerHeld
+                    | TaskRefusal::FollowUps => DenyCause::TaskNotWorking { cited: *id },
                 })
         }
     }
@@ -169,6 +190,9 @@ pub fn cause_reason(c: &DenyCause) -> std::borrow::Cow<'static, str> {
         DenyCause::Task { refusal, cited } => {
             return format!("{}:{cited}", task_reason(refusal)).into();
         }
+        DenyCause::TaskNotWorking { cited } => {
+            return format!("task-not-working:{cited}").into();
+        }
     };
     fixed.into()
 }
@@ -188,6 +212,11 @@ fn task_reason(r: &TaskRefusal) -> &'static str {
         TaskRefusal::Store(_) => "task-store",
         TaskRefusal::CursorAhead => "cursor_ahead",
         TaskRefusal::Finished => "task-finished",
+        TaskRefusal::TooLong => "task-too-long",
+        TaskRefusal::TaskerLive { .. } => "task-tasker-live",
+        TaskRefusal::TaskerHeld => "task-tasker-held",
+        TaskRefusal::FollowUps => "task-follow-ups",
+        TaskRefusal::NotWorking => "task-not-working",
     }
 }
 
@@ -201,7 +230,8 @@ pub fn cause_posture(c: &DenyCause) -> &'static str {
         | DenyCause::NotEnrolled
         | DenyCause::HumanAccount
         | DenyCause::TaskOnClientChannel
-        | DenyCause::Task { .. } => "unauthorized",
+        | DenyCause::Task { .. }
+        | DenyCause::TaskNotWorking { .. } => "unauthorized",
     }
 }
 
@@ -1193,11 +1223,31 @@ mod tests {
                 HOBI,
                 &store
             ),
-            Err(DenyCause::Task {
-                refusal: TaskRefusal::Unknown,
-                cited: unknown
-            })
+            Err(DenyCause::TaskNotWorking { cited: unknown })
         );
+    }
+
+    #[test]
+    fn a_request_citing_its_own_task_that_is_not_working_is_refused() {
+        let store = TaskStore::new();
+        let queued = store.insert_for_test(task_of("hobi", 1000), HOBI);
+        let cite = |id: &TaskId| {
+            task_for(
+                Admission::EnrolledAgent,
+                Some(id),
+                Some(&agent("hobi")),
+                HOBI,
+                &store,
+            )
+        };
+        let id = queued.task.task_id;
+        assert_eq!(cite(&id), Err(DenyCause::TaskNotWorking { cited: id }));
+        store.start_for_test(&id);
+        assert!(cite(&id).unwrap().is_some());
+        store
+            .publish_report(&id, maknae_proto::SecretText(String::new().into()), None)
+            .unwrap();
+        assert_eq!(cite(&id), Err(DenyCause::TaskNotWorking { cited: id }));
     }
 
     #[test]
@@ -1205,6 +1255,8 @@ mod tests {
         let store = TaskStore::new();
         let jins = store.insert_for_test(task_of("jin", 1000), JIN);
         let hobis = store.insert_for_test(task_of("hobi", 1000), HOBI);
+        store.start_for_test(&jins.task.task_id);
+        store.start_for_test(&hobis.task.task_id);
         assert_eq!(
             task_for(
                 Admission::EnrolledAgent,
@@ -1350,6 +1402,42 @@ mod tests {
     }
 
     #[test]
+    fn every_task_refusal_has_its_cited_reason() {
+        let cited = TaskId([0x0e; 16]);
+        for (refusal, reason) in [
+            (TaskRefusal::Unknown, "task-unknown"),
+            (TaskRefusal::OtherAgent, "task-other-agent"),
+            (TaskRefusal::Schema("s".into()), "task-schema"),
+            (TaskRefusal::Denied("d".into()), "task-denied"),
+            (
+                TaskRefusal::AtCapacity { agent: "a".into() },
+                "task-at-capacity",
+            ),
+            (TaskRefusal::ParentNotHeld, "task-parent-not-held"),
+            (TaskRefusal::AgentGone, "task-agent-gone"),
+            (TaskRefusal::Random, "task-random"),
+            (TaskRefusal::Audit("a".into()), "task-audit"),
+            (TaskRefusal::Unsigned, "task-unsigned"),
+            (TaskRefusal::Store("s".into()), "task-store"),
+            (TaskRefusal::CursorAhead, "cursor_ahead"),
+            (TaskRefusal::Finished, "task-finished"),
+            (TaskRefusal::TooLong, "task-too-long"),
+            (
+                TaskRefusal::TaskerLive { agent: "a".into() },
+                "task-tasker-live",
+            ),
+            (TaskRefusal::TaskerHeld, "task-tasker-held"),
+            (TaskRefusal::FollowUps, "task-follow-ups"),
+            (TaskRefusal::NotWorking, "task-not-working"),
+        ] {
+            assert_eq!(
+                cause_reason(&DenyCause::Task { refusal, cited }),
+                format!("{reason}:{cited}")
+            );
+        }
+    }
+
+    #[test]
     fn each_agent_and_task_cause_has_its_audit_reason_and_posture() {
         let cited = TaskId([0x0f; 16]);
         let hex = "0f".repeat(16);
@@ -1374,6 +1462,10 @@ mod tests {
                     cited,
                 },
                 format!("task-other-agent:{hex}"),
+            ),
+            (
+                DenyCause::TaskNotWorking { cited },
+                format!("task-not-working:{hex}"),
             ),
         ] {
             assert_eq!(
