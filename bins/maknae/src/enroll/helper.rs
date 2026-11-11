@@ -64,7 +64,7 @@ fn supplementary_groups() -> Result<Vec<u32>, EnrollError> {
 
 #[cfg(not(target_os = "linux"))]
 fn supplementary_groups() -> Result<Vec<u32>, EnrollError> {
-    let out = std::process::Command::new("id")
+    let out = maknae_io::program::command(maknae_io::program::Program::Id)
         .arg("-G")
         .output()
         .map_err(|e| EnrollError::Command {

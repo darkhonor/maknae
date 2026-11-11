@@ -175,6 +175,7 @@ pub(crate) fn observe_pointer(
 
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) mod tests {
+    #![allow(clippy::disallowed_methods)]
     use super::*;
     use std::process::Command;
     use std::sync::Mutex;

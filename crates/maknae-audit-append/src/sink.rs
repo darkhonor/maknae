@@ -470,6 +470,7 @@ fn _assert_append_and_emit_futures_are_send(sink: &AuditSink, rec: &AuditRecord)
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::disallowed_methods)]
     use super::*;
 
     fn sample_record() -> AuditRecord {

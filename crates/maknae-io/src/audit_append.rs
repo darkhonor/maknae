@@ -190,6 +190,7 @@ fn open_pinned_with(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::disallowed_methods)]
     use super::*;
     use std::os::unix::fs::MetadataExt;
 

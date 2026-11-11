@@ -101,6 +101,8 @@ files = [
   "crates/maknae-io/src/anchor.rs",
   # #596: the one "this user's home" translation, shared by the client and the kernel.
   "crates/maknae-io/src/home.rs",
+  # #327: the one table of programs a Maknae binary may execute, by absolute path.
+  "crates/maknae-io/src/program.rs",
   # #609: a host account assembled from passwd and group sources; a wrong arm reads a
   # non-member as a maknae member or a failed group source as an empty one.
   "crates/maknae-io/src/account_facts.rs",

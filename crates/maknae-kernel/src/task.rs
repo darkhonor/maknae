@@ -634,6 +634,7 @@ async fn decide_admitted<P: Authorizer + Send + Sync + 'static>(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::disallowed_methods)]
     use super::*;
     use crate::blocking_guard::BlockingBreaker;
     use crate::enrollment::{FixedEnrollment, SnapshotEnrollment};

@@ -842,6 +842,7 @@ impl Anchor {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::disallowed_methods)]
     // --- #216: resolve_dir ---------------------------------------------------
     /// A directory reached THROUGH a symlink resolves to the same form the
     /// kernel reports for a descriptor on the real directory. This is the

@@ -11,7 +11,6 @@ pub const USER_CREDS_MIN_SYSTEMD: u32 = 256;
 pub const TOKEN_CREDS_FILE: &str = "maknae-vault-token.cred";
 pub const TOKEN_RESIDUAL_FILE: &str = "maknae-vault-token";
 pub(crate) const TOKEN_CREDS_NAME: &str = "maknae-vault-token";
-pub(crate) const SYSTEMD_CREDS: &str = "/usr/bin/systemd-creds";
 pub(crate) const MAX_CREDS_FILE_BYTES: usize = 16 * 1024;
 pub(crate) const TOKEN_FILE_MODE: u32 = 0o600;
 const OWNER_ONLY: u32 = 0o077;
@@ -619,7 +618,6 @@ mod tests {
         assert_eq!(USER_CREDS_MIN_SYSTEMD, 256);
         assert_eq!(every_custody(d, true), vec![TokenCustody::Keychain]);
         assert_eq!(every_custody(d, false), vec![creds, residual]);
-        assert_eq!(SYSTEMD_CREDS, "/usr/bin/systemd-creds");
     }
 
     #[test]

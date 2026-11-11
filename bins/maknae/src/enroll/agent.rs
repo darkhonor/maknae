@@ -2084,7 +2084,7 @@ pub(crate) mod tests {
             maknae_vault::agent_enroll::AGENT_CREDENTIAL_NAME,
             p.to_str().unwrap(),
         );
-        assert_eq!(bin, "systemd-creds");
+        assert_eq!(bin, maknae_io::program::Program::SystemdCreds);
         assert_eq!(
             argv,
             [

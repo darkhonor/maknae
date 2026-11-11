@@ -28,6 +28,7 @@ pub fn session_home() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::disallowed_methods)]
     use super::*;
     use nix::unistd::{geteuid, User};
 
