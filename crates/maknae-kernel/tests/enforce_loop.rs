@@ -2898,7 +2898,7 @@ async fn an_unmatched_read_names_the_missing_capability_entry() {
 }
 
 // ---------------------------------------------------------------------------
-// #148 / #154. THE COMPOSITION: baseline ∧ ceiling, deny-overrides, per request.
+// #148 / #154. THE COMPOSITION, deny-overrides, per request.
 // ---------------------------------------------------------------------------
 
 /// The production PDP shape -- `Composition<Baseline>` -- built the way
@@ -2952,7 +2952,7 @@ async fn under_a_secret_ceiling_status_still_answers_and_names_both_operands() {
         RespResult::Ok(maknae_proto::Payload::Status(s)) => {
             assert_eq!(
                 s.authz_backend,
-                "maknae-authz-basic+maknae-ceiling+maknae-sensitive"
+                "maknae-authz-basic+maknae-ceiling+maknae-sensitive+maknae-partition"
             );
         }
         other => panic!("expected a Status payload, got {other:?}"),

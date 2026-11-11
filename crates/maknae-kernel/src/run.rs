@@ -1078,7 +1078,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             return;
         }
     };
-    let task = task.map(|t| crate::handler::TaskStamp::of(&t.task));
+    let task = task.as_ref().map(crate::handler::TaskStamp::of);
     let stamp = match &session.channel {
         SessionChannel::Client => Stamp::Client,
         SessionChannel::Agent { agent, .. } => Stamp::Agent {
@@ -9083,11 +9083,11 @@ async fn boot_after_sink(
         Ok(authorizer) => authorizer,
         Err(e) => return Err(refuse(e.to_string()).await),
     };
-    // ADR-0008 decision 1 (#154) + #148 + #617: the PDP is the COMPOSITION, and its
-    // three floors are named fields of it -- the sealed `Baseline` (-basic, from the
+    // ADR-0008 decision 1 (#154) + #148 + #617 + #628: the PDP is the COMPOSITION, and its
+    // four floors are named fields of it -- the sealed `Baseline` (-basic, from the
     // gate above), the booted classification ceiling, evaluated through the
-    // classification SYSTEM boot selected (ADR-0022), and the `sensitive.yaml`
-    // operand (ADR-0034). None can be absent:
+    // classification SYSTEM boot selected (ADR-0022), the `sensitive.yaml`
+    // operand (ADR-0034), and the partition operand. None can be absent:
     // the type has no constructor without them. Built HERE, unconditionally,
     // from the gate's own return value; `ci/gates/authz-composition-drift.sh`
     // pins this call site so a future selection key fails CI.
@@ -10822,7 +10822,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             assert_eq!(comp_rec.event, "boot");
             assert_eq!(
                 comp_rec.outcome.reason,
-                "authorization composition: maknae-authz-basic+maknae-ceiling+maknae-sensitive; system: US; ceiling: UNCLASSIFIED; sensitive: 0 host entries"
+                "authorization composition: maknae-authz-basic+maknae-ceiling+maknae-sensitive+maknae-partition; system: US; ceiling: UNCLASSIFIED; sensitive: 0 host entries"
             );
             assert_eq!(comp_rec.outcome.posture, "authorized");
             assert_eq!(comp_rec.policy_sha256.as_ref().map(String::len), Some(64));

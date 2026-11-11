@@ -454,18 +454,21 @@ pub enum Stamp<'a> {
     },
 }
 
-/// The cited task's id and tasker, the only task facts a request is stamped with.
+/// The cited task's id, tasker and root partition, the only task facts a request is
+/// stamped with.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TaskStamp {
     pub id: maknae_proto::TaskId,
     pub tasker: String,
+    pub root: String,
 }
 
 impl TaskStamp {
-    pub fn of(task: &maknae_proto::TaskObject) -> Self {
+    pub fn of(cited: &crate::task::CitedTask) -> Self {
         Self {
-            id: task.task_id,
-            tasker: maknae_proto::tasker_text(&task.tasker),
+            id: cited.signed.task.task_id,
+            tasker: maknae_proto::tasker_text(&cited.signed.task.tasker),
+            root: cited.root.partition(),
         }
     }
 }
@@ -504,6 +507,10 @@ pub fn build_authz_request(
                 subject.insert(
                     maknae_security::SUBJECT_TASKER,
                     AttrValue::Str(t.tasker.clone()),
+                );
+                subject.insert(
+                    maknae_security::SUBJECT_ROOT_TASKER,
+                    AttrValue::Str(t.root.clone()),
                 );
             }
             maknae_security::CHANNEL_AGENT
@@ -710,8 +717,8 @@ mod tests {
     fn the_stamp_names_the_channel_the_agent_and_the_cited_task() {
         use crate::task::TaskObjectForTest;
         use maknae_security::{
-            AttrValue, CHANNEL_AGENT, CHANNEL_CLIENT, SUBJECT_AGENT, SUBJECT_CHANNEL, SUBJECT_TASK,
-            SUBJECT_TASKER,
+            AttrValue, CHANNEL_AGENT, CHANNEL_CLIENT, SUBJECT_AGENT, SUBJECT_CHANNEL,
+            SUBJECT_ROOT_TASKER, SUBJECT_TASK, SUBJECT_TASKER,
         };
         let get = |r: &maknae_security::Request, k: &str| r.subject.0.get(k).cloned();
         let s = |v: &str| Some(AttrValue::Str(v.into()));
@@ -719,7 +726,12 @@ mod tests {
         let client =
             build_authz_request(&Verb::Whoami, 501, None, local, None, None, &Stamp::Client);
         assert_eq!(get(&client, SUBJECT_CHANNEL), s(CHANNEL_CLIENT));
-        for k in [SUBJECT_AGENT, SUBJECT_TASK, SUBJECT_TASKER] {
+        for k in [
+            SUBJECT_AGENT,
+            SUBJECT_TASK,
+            SUBJECT_TASKER,
+            SUBJECT_ROOT_TASKER,
+        ] {
             assert_eq!(get(&client, k), None, "{k}");
         }
         let hobi = maknae_config::AgentId::parse("hobi").unwrap();
@@ -739,7 +751,19 @@ mod tests {
         assert_eq!(get(&bare, SUBJECT_AGENT), s("hobi"));
         assert_eq!(get(&bare, SUBJECT_TASK), None);
         assert_eq!(get(&bare, SUBJECT_TASKER), None);
-        let task = TaskStamp::of(&maknae_proto::TaskObject::for_test("hobi", 1002));
+        assert_eq!(get(&bare, SUBJECT_ROOT_TASKER), None);
+        let task = TaskStamp::of(&crate::task::CitedTask {
+            signed: std::sync::Arc::new(maknae_proto::SignedTask {
+                task: maknae_proto::TaskObject::for_test("hobi", 1002),
+                signature: maknae_proto::TaskSignature {
+                    alg: "test".into(),
+                    leaf: maknae_proto::Bytes::new(vec![1].into()),
+                    chain: Vec::new(),
+                    sig: maknae_proto::Bytes::new(vec![2].into()),
+                },
+            }),
+            root: crate::task_store::RootTasker::Person { uid: 1000 },
+        });
         let tasked = build_authz_request(
             &Verb::Whoami,
             2001,
@@ -755,6 +779,7 @@ mod tests {
         assert_eq!(get(&tasked, SUBJECT_AGENT), s("hobi"));
         assert_eq!(get(&tasked, SUBJECT_TASK), s(&task.id.to_string()));
         assert_eq!(get(&tasked, SUBJECT_TASKER), s("uid:1002"));
+        assert_eq!(get(&tasked, SUBJECT_ROOT_TASKER), s("users/1000"));
     }
 
     #[test]

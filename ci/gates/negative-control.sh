@@ -2424,13 +2424,14 @@ pub struct Composition<B: Baseline> {
     baseline: B,
     ceiling: CeilingAuthorizer,
     sensitive: SensitiveOperand,
+    partition: PartitionOperand,
 }
-fn operands(&self) -> [&dyn Authorizer; 3] {
-    [&self.baseline, &self.ceiling, &self.sensitive]
+fn operands(&self) -> [&dyn Authorizer; 4] {
+    [&self.baseline, &self.ceiling, &self.sensitive, &self.partition]
 }
-fn operands_with(&self) -> [&dyn Authorizer; 3] {
+fn operands_with(&self) -> [&dyn Authorizer; 4] {
     let sensitive = SensitiveAuthorizer::new(snap.sensitive());
-    [base, &self.ceiling, sensitive]
+    [base, &self.ceiling, sensitive, &self.partition]
 }
 #[cfg(test)]
 mod tests {}
@@ -2531,9 +2532,9 @@ composition_reject "sensitive-field-removed" "no named \`sensitive\` field" \
 composition_reject "optional-sensitive-field" "must be the bare \`SensitiveOperand\`" \
   'p=root/"crates/maknae-kernel/src/composition.rs"; p.write_text(p.read_text().replace("sensitive: SensitiveOperand,", "sensitive: Option<SensitiveOperand>,"))'
 composition_reject "sensitive-missing-from-the-named-operands" "\`operands()\` must list" \
-  'p=root/"crates/maknae-kernel/src/composition.rs"; p.write_text(p.read_text().replace(", &self.sensitive]", "]"))'
+  'p=root/"crates/maknae-kernel/src/composition.rs"; p.write_text(p.read_text().replace(", &self.sensitive, &self.partition]", ", &self.partition]"))'
 composition_reject "sensitive-missing-from-the-decision-fold" "\`operands_with\` must fold" \
-  'p=root/"crates/maknae-kernel/src/composition.rs"; p.write_text(p.read_text().replace("[base, &self.ceiling, sensitive]", "[base, &self.ceiling]"))'
+  'p=root/"crates/maknae-kernel/src/composition.rs"; p.write_text(p.read_text().replace("[base, &self.ceiling, sensitive, &self.partition]", "[base, &self.ceiling, &self.partition]"))'
 composition_reject "sensitive-operand-renamed" "must name itself \`maknae-sensitive\`" \
   'p=root/"crates/maknae-kernel/src/sensitive_authz.rs"; p.write_text(p.read_text().replace("\"maknae-sensitive\"", "\"vendor\""))'
 composition_reject "sensitive-file-missing" "missing crates/maknae-kernel/src/sensitive_authz.rs" \

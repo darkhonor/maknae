@@ -1,8 +1,7 @@
 //! Connection-admission and per-request session decisions (spec §5, #115). Pure; T1/0-missed.
-use std::sync::Arc;
 
 use maknae_config::AgentId;
-use maknae_proto::{SignedTask, TaskId};
+use maknae_proto::TaskId;
 use maknae_vault::ChannelPeer;
 
 use crate::enrollment::EnrollmentView;
@@ -91,7 +90,7 @@ pub fn task_for(
     agent: Option<&AgentId>,
     uid: u32,
     store: &TaskStore,
-) -> Result<Option<Arc<SignedTask>>, DenyCause> {
+) -> Result<Option<crate::task::CitedTask>, DenyCause> {
     let Some(id) = cited else {
         return Ok(None);
     };
@@ -480,6 +479,8 @@ pub(crate) async fn admitted_home(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use maknae_proto::SignedTask;
+    use std::sync::Arc;
 
     fn membership(in_group: bool, user: &str) -> crate::groupres::Membership {
         crate::groupres::Membership {
@@ -1253,6 +1254,87 @@ mod tests {
     }
 
     #[test]
+    fn citing_a_non_working_task_is_refused() {
+        use maknae_proto::{SecretText, TaskClose, TaskState, Tasker};
+        let store = TaskStore::new();
+        let me = Tasker::Uid(1000);
+        let cite = |id: &TaskId| {
+            task_for(
+                Admission::EnrolledAgent,
+                Some(id),
+                Some(&agent("hobi")),
+                HOBI,
+                &store,
+            )
+        };
+        let held = || {
+            let id = store
+                .insert_for_test(task_of("hobi", 1000), HOBI)
+                .task
+                .task_id;
+            assert_eq!(cite(&id), Err(DenyCause::TaskNotWorking { cited: id }));
+            store.start_for_test(&id);
+            let cited = cite(&id).unwrap().expect("a working task is citable");
+            assert_eq!(cited.signed.task.task_id, id);
+            assert_eq!(cited.root.partition(), "users/1000");
+            id
+        };
+        let empty = || SecretText(String::new().into());
+        let queued = store
+            .insert_for_test(task_of("hobi", 1000), HOBI)
+            .task
+            .task_id;
+        let reported = held();
+        store.publish_report(&reported, empty(), None).unwrap();
+        let stopped = held();
+        store.stop(&stopped, &me).unwrap();
+        let closed = held();
+        store
+            .publish_report(&closed, empty(), Some(TaskClose::AgentGone))
+            .unwrap();
+        for (id, state) in [
+            (queued, TaskState::Queued),
+            (reported, TaskState::Reported),
+            (stopped, TaskState::Closed),
+            (closed, TaskState::Closed),
+        ] {
+            assert_eq!(store.state_for(&id, &me), Some(state));
+            assert_eq!(
+                cite(&id),
+                Err(DenyCause::TaskNotWorking { cited: id }),
+                "{state:?}"
+            );
+        }
+        assert!(cite(&held()).is_ok());
+    }
+
+    #[test]
+    fn a_sub_task_is_cited_with_the_root_persons_partition() {
+        let store = TaskStore::new();
+        let parent = store.insert_for_test(task_of("jin", 1000), JIN);
+        let mut sub = task_of("hobi", 0);
+        sub.task.tasker = maknae_proto::Tasker::Agent {
+            agent: "jin".into(),
+            uid: JIN,
+        };
+        sub.task.parent = Some(parent.task.task_id);
+        let sub = store.insert_for_test(sub, HOBI).task.task_id;
+        store.start_for_test(&sub);
+        let cited = task_for(
+            Admission::EnrolledAgent,
+            Some(&sub),
+            Some(&agent("hobi")),
+            HOBI,
+            &store,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(cited.root.partition(), "users/1000");
+        assert_eq!(crate::handler::TaskStamp::of(&cited).root, "users/1000");
+        assert_eq!(crate::handler::TaskStamp::of(&cited).tasker, "agent:jin");
+    }
+
+    #[test]
     fn a_request_citing_another_agents_task_is_refused() {
         let store = TaskStore::new();
         let jins = store.insert_for_test(task_of("jin", 1000), JIN);
@@ -1294,7 +1376,7 @@ mod tests {
         )
         .unwrap()
         .expect("its own task resolves");
-        assert!(Arc::ptr_eq(&own, &hobis));
+        assert!(Arc::ptr_eq(&own.signed, &hobis));
     }
 
     #[test]

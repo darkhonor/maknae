@@ -21,9 +21,10 @@
 #      sealed `Baseline` trait -- not `Option<..>`, `Vec<..>` or `Box<dyn ..>` --
 #      `ceiling` is a named `CeilingAuthorizer` field, and `sensitive` is a named
 #      `SensitiveOperand` field (#617). Both operand arrays -- `operands()` (names,
-#      subjects) and `operands_with` (every decision) -- list the three in order,
-#      and the sensitive operand names itself `maknae-sensitive`, so the composed
-#      name is `maknae-authz-basic+maknae-ceiling+maknae-sensitive`.
+#      subjects) and `operands_with` (every decision) -- list the four in order,
+#      ending in the `partition` field (#628; the arrays are `&dyn Authorizer`, so
+#      rustc holds that field non-optional, and `composition::tests` hold its name).
+#      The sensitive operand names itself `maknae-sensitive`.
 #   3. (type-level) `Baseline` is SEALED and implemented for exactly the two
 #      permitted types, only in the owning crate.
 #   4. (config vocabulary) None of the six spellings a PDP-selection key would
@@ -153,10 +154,10 @@ if comp:
         elif z.group(1).strip() != "SensitiveOperand":
             fail(f"composition.rs: `sensitive` must be the bare `SensitiveOperand`, found `{z.group(1).strip()}`")
     code2 = re.sub(r"//[^\n]*", "", re.sub(r"/\*.*?\*/", "", comp, flags=re.S))
-    if not re.search(r"\[\s*&self\.baseline\s*,\s*&self\.ceiling\s*,\s*&self\.sensitive\s*\]", code2):
-        fail("composition.rs: `operands()` must list `[&self.baseline, &self.ceiling, &self.sensitive]` -- the composed name and subjects come from it")
-    if not re.search(r"\[\s*base\s*,\s*&self\.ceiling\s*,\s*sensitive\s*\]", code2):
-        fail("composition.rs: `operands_with` must fold `[base, &self.ceiling, sensitive]` -- every decision goes through it")
+    if not re.search(r"\[\s*&self\.baseline\s*,\s*&self\.ceiling\s*,\s*&self\.sensitive\s*,\s*&self\.partition\s*,?\s*\]", code2):
+        fail("composition.rs: `operands()` must list `[&self.baseline, &self.ceiling, &self.sensitive, &self.partition]` -- the composed name and subjects come from it")
+    if not re.search(r"\[\s*base\s*,\s*&self\.ceiling\s*,\s*sensitive\s*,\s*&self\.partition\s*,?\s*\]", code2):
+        fail("composition.rs: `operands_with` must fold `[base, &self.ceiling, sensitive, &self.partition]` -- every decision goes through it")
 sens = production_half(must_read("crates/maknae-kernel/src/sensitive_authz.rs"))
 if sens and not re.search(r'pub const SENSITIVE_BACKEND_NAME\s*:\s*&str\s*=\s*"maknae-sensitive"\s*;', sens):
     fail("sensitive_authz.rs: the operand must name itself `maknae-sensitive` (SENSITIVE_BACKEND_NAME)")

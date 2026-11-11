@@ -136,7 +136,9 @@ pub use providers::{
 };
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
 pub use sensitive::load_host_sensitive_with_requirement;
-pub use sensitive::{load_host_sensitive, native_fold, Fold, SensitiveList, SENSITIVE_FILE};
+pub use sensitive::{
+    fold_path, load_host_sensitive, native_fold, Fold, FoldedPath, SensitiveList, SENSITIVE_FILE,
+};
 pub use state::{MARKER_FILE, MIRROR_FILE, STATE_DIR, STORE_FILE};
 pub use transport::{
     content_write_bound, transport_from_section, TransportConfig, ADMIN_REPLY_MARGIN_MS,

@@ -48,6 +48,9 @@ pub const SUBJECT_AGENT: &str = "agent";
 pub const SUBJECT_TASK: &str = "task";
 pub const SUBJECT_TASKER: &str = "tasker";
 
+/// The partition of the cited task's root tasker, from the stored record; kernel-stamped.
+pub const SUBJECT_ROOT_TASKER: &str = "root_tasker";
+
 /// The target agent of a `session.task` request.
 pub const RESOURCE_AGENT: &str = "agent";
 

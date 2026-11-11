@@ -31,6 +31,14 @@ model = "MAC — refuses every file verb on a sensitive.yaml path; never Permits
 evidence = "crates/maknae-kernel/src/sensitive_authz.rs, a named field of Composition"
 
 [[operand]]
+id = "partition"
+name = "maknae-partition"
+stereo = "«mandatory · non-removable»"
+status = "in-repo"
+model = "MAC — keeps an agent's file verbs in its cited task's partition; never Permits"
+evidence = "crates/maknae-kernel/src/partition_authz.rs, a named field of Composition"
+
+[[operand]]
 id = "dcs"
 name = "an ABAC backend"
 stereo = "«extension · optional»"

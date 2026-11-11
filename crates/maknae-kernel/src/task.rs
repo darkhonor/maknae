@@ -1180,7 +1180,11 @@ impl TaskStore {
         let lease = self.clock.now_secs() + CLAIM_LEASE.as_secs() as i64;
         let delivered = |rec: &TaskRecord| Claimed::Delivered {
             signed: rec.signed.clone(),
-            partition: format!("tasks/{}", rec.root.partition()),
+            partition: format!(
+                "{}/{}",
+                crate::partition_authz::TASKS_DIR,
+                rec.root.partition()
+            ),
         };
         match state {
             TaskState::Working => {
@@ -1431,12 +1435,15 @@ impl TaskStore {
         id: &TaskId,
         agent: &AgentId,
         uid: u32,
-    ) -> Result<Arc<SignedTask>, TaskRefusal> {
+    ) -> Result<CitedTask, TaskRefusal> {
         let held = self.held();
-        let task = owned(&held, id, agent, uid)?;
-        match held.live(id).map(|r| r.state) {
-            Some(TaskState::Working) => Ok(task),
-            Some(TaskState::Queued | TaskState::Reported | TaskState::Closed) | None => {
+        let signed = owned(&held, id, agent, uid)?;
+        match held.live(id).map(|r| (r.state, &r.root)) {
+            Some((TaskState::Working, root)) => Ok(CitedTask {
+                signed,
+                root: root.clone(),
+            }),
+            Some((TaskState::Queued | TaskState::Reported | TaskState::Closed, _)) | None => {
                 Err(TaskRefusal::NotWorking)
             }
         }
@@ -1630,12 +1637,16 @@ impl TaskStore {
     #[cfg(any(test, feature = "hermetic-test-seam"))]
     pub fn insert_for_test(&self, signed: SignedTask, agent_uid: u32) -> Arc<SignedTask> {
         let agent = AgentId::parse(&signed.task.agent).expect("a test task names a valid agent id");
-        let root = match &signed.task.tasker {
+        let inherited = signed
+            .task
+            .parent
+            .and_then(|p| self.held().live(&p).map(|r| r.root.clone()));
+        let root = inherited.unwrap_or_else(|| match &signed.task.tasker {
             Tasker::Uid(uid) => RootTasker::Person { uid: *uid },
             Tasker::Agent { agent, .. } | Tasker::Remote(agent) => RootTasker::Agent {
                 agent: agent.clone(),
             },
-        };
+        });
         let task = Arc::new(signed);
         let _w = self.writing();
         let (seq, tseq) = self
@@ -1868,6 +1879,13 @@ fn tasker_room(held: &Held, tasker: &Tasker, agent: &AgentId) -> Result<(), Task
     Ok(())
 }
 
+/// A citable task: the agent's own `Working` task and the stored root of its chain.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CitedTask {
+    pub signed: Arc<SignedTask>,
+    pub root: RootTasker,
+}
+
 /// A sub-task works in its parent's partition; a person's own task, in the uid's.
 fn root_of(held: &Held, task: &TaskObject) -> Result<RootTasker, TaskRefusal> {
     if let Some(parent) = task.parent {
@@ -1971,12 +1989,12 @@ pub enum Submitter {
 fn task_request(
     by: &Submitter,
     target: &str,
-    parent: Option<&SignedTask>,
+    parent: Option<&CitedTask>,
     sub: &TaskSubmission,
     lane: maknae_security::Lane,
 ) -> maknae_security::Request {
     use crate::handler::{build_authz_request, Stamp, TaskStamp};
-    let parent = parent.map(|p| TaskStamp::of(&p.task));
+    let parent = parent.map(TaskStamp::of);
     use maknae_security::{AttrValue, RESOURCE_AGENT};
     let (uid, home, stamp) = match by {
         Submitter::User { uid, home } => (*uid, home, Stamp::Client),
@@ -2326,9 +2344,9 @@ async fn decide<P: Authorizer + Send + Sync + 'static>(
                 .map_err(|_| TaskRefusal::ParentNotHeld)?,
         ),
     };
-    attempt.parent = parent.as_ref().map(|t| t.task.task_id);
+    attempt.parent = parent.as_ref().map(|t| t.signed.task.task_id);
     let (generation, enrolled) = store.observe(&**view, &target);
-    let req = task_request(by, target.as_str(), parent.as_deref(), &sub, ctx.lane);
+    let req = task_request(by, target.as_str(), parent.as_ref(), &sub, ctx.lane);
     let decided = decide_admitted(pdp, ctx.decide_timeout, req).await?;
     attempt.role = decided.role;
     match maknae_security::finalize(decided.verdict) {
