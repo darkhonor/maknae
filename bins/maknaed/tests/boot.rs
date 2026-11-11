@@ -6,6 +6,7 @@
 //!
 //! Unix-only: the boot path enforces Unix permissions (non-Unix → PermissionsUnsupported),
 //! so these assertions are meaningful only on Unix. On non-Unix this file is empty.
+#![allow(clippy::disallowed_methods)]
 #![cfg(unix)]
 
 use maknae_msgs::{msg, Locale, MsgId};

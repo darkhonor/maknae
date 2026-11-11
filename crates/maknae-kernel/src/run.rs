@@ -16792,6 +16792,7 @@ mod baseline_accept_tests {
 #[cfg(unix)]
 #[cfg(test)]
 mod reload_tests {
+    #![allow(clippy::disallowed_methods)]
     use super::boot_gate_tests::boot_graph_at;
     use super::reload_fixture::*;
     use super::*;

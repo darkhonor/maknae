@@ -3,9 +3,7 @@ use maknae_vault::{KeychainPlane, KEYCHAIN_ACCOUNT, SYSTEM_KEYCHAIN};
 use zeroize::Zeroizing;
 
 #[cfg(target_os = "macos")]
-pub(crate) const SECURITY: &str = "/usr/bin/security";
-#[cfg(target_os = "macos")]
-pub(crate) const CODESIGN: &str = "/usr/bin/codesign";
+use maknae_io::program::{command, Program};
 #[cfg(target_os = "macos")]
 pub(crate) const DAEMON_BINARY: &str = "/usr/local/bin/maknaed";
 pub(crate) const EGRESS_BINARY: &str = "/usr/local/bin/maknae-egress";
@@ -162,8 +160,11 @@ pub(crate) fn check_runtime_and_entitlements(
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) async fn run(program: &str, args: &[&str]) -> Result<std::process::Output, EnrollError> {
-    tokio::process::Command::new(program)
+pub(crate) async fn run(
+    program: Program,
+    args: &[&str],
+) -> Result<std::process::Output, EnrollError> {
+    tokio::process::Command::from(command(program))
         .args(args)
         .output()
         .await
@@ -187,7 +188,7 @@ pub(crate) async fn seal_secret_macos(
 
 #[cfg(target_os = "macos")]
 async fn delete_item(service: &str, account: &str) -> Result<(), EnrollError> {
-    let del = run(SECURITY, &delete_args(service, account)).await?;
+    let del = run(Program::Security, &delete_args(service, account)).await?;
     if matches!(del.status.code(), Some(0) | Some(44)) {
         Ok(())
     } else {
@@ -243,7 +244,7 @@ pub(crate) async fn agent_secret_present_macos(
     agent: &maknae_vault::agent_enroll::AgentId,
 ) -> Result<bool, EnrollError> {
     let (service, account) = agent_keychain_item(agent);
-    let out = run(SECURITY, &find_args(service, &account)).await?;
+    let out = run(Program::Security, &find_args(service, &account)).await?;
     classify_find(out.status.code(), &String::from_utf8_lossy(&out.stdout))
         .map_err(|detail| EnrollError::Keychain { op: "find", detail })
 }
@@ -281,13 +282,13 @@ async fn add_verified_item(
     use tokio::io::AsyncWriteExt;
     let stderr = |o: &std::process::Output| String::from_utf8_lossy(&o.stderr).trim().to_string();
     let io = |e: std::io::Error| EnrollError::Command {
-        program: SECURITY.to_string(),
+        program: Program::Security.to_string(),
         detail: e.to_string(),
     };
 
     check_install_path(std::path::Path::new(binary))?;
     verify_release(binary, identifier, team).await?;
-    let mut child = tokio::process::Command::new(SECURITY)
+    let mut child = tokio::process::Command::from(command(Program::Security))
         .arg("-i")
         .kill_on_drop(true)
         .stdin(std::process::Stdio::piped())
@@ -311,7 +312,7 @@ async fn add_verified_item(
         });
     }
 
-    let find = run(SECURITY, &find_args(service, account)).await?;
+    let find = run(Program::Security, &find_args(service, account)).await?;
     if !find.status.success() {
         return Err(EnrollError::Keychain {
             op: "verify",
@@ -321,7 +322,7 @@ async fn add_verified_item(
     match parse_keychain_line(&String::from_utf8_lossy(&find.stdout)) {
         Some(k) if k == SYSTEM_KEYCHAIN => Ok(()),
         other => {
-            let _ = run(SECURITY, &delete_args(service, account)).await;
+            let _ = run(Program::Security, &delete_args(service, account)).await;
             Err(EnrollError::Keychain {
                 op: "verify",
                 detail: format!("the item landed in {other:?}, not {SYSTEM_KEYCHAIN}"),
@@ -332,21 +333,33 @@ async fn add_verified_item(
 
 #[cfg(target_os = "macos")]
 pub(crate) async fn item_in_system_keychain(plane: KeychainPlane) -> Result<bool, EnrollError> {
-    let find = run(SECURITY, &find_args(plane.service(), KEYCHAIN_ACCOUNT)).await?;
+    let find = run(
+        Program::Security,
+        &find_args(plane.service(), KEYCHAIN_ACCOUNT),
+    )
+    .await?;
     Ok(find.status.success()
         && parse_keychain_line(&String::from_utf8_lossy(&find.stdout)) == Some(SYSTEM_KEYCHAIN))
 }
 
 #[cfg(target_os = "macos")]
 pub(crate) async fn item_presence(plane: KeychainPlane) -> Result<bool, EnrollError> {
-    let find = run(SECURITY, &find_args(plane.service(), KEYCHAIN_ACCOUNT)).await?;
+    let find = run(
+        Program::Security,
+        &find_args(plane.service(), KEYCHAIN_ACCOUNT),
+    )
+    .await?;
     classify_find(find.status.code(), &String::from_utf8_lossy(&find.stdout))
         .map_err(|detail| EnrollError::Keychain { op: "find", detail })
 }
 
 #[cfg(target_os = "macos")]
 async fn codesign_verify(path: &str, req: &str) -> Result<Option<String>, EnrollError> {
-    let o = run(CODESIGN, &["--verify", "--strict", "-R", req, path]).await?;
+    let o = run(
+        Program::Codesign,
+        &["--verify", "--strict", "-R", req, path],
+    )
+    .await?;
     Ok((!o.status.success()).then(|| {
         format!(
             "codesign --verify exited {:?}: {}",
@@ -365,15 +378,18 @@ struct Display {
 
 #[cfg(target_os = "macos")]
 async fn display(path: &str) -> Result<Display, String> {
-    let req = run(CODESIGN, &["-d", "-r-", path])
+    let req = run(Program::Codesign, &["-d", "-r-", path])
         .await
         .map_err(|e| e.to_string())?;
-    let dv = run(CODESIGN, &["-dv", path])
+    let dv = run(Program::Codesign, &["-dv", path])
         .await
         .map_err(|e| e.to_string())?;
-    let ents = run(CODESIGN, &["-d", "--entitlements", "-", "--xml", path])
-        .await
-        .map_err(|e| e.to_string())?;
+    let ents = run(
+        Program::Codesign,
+        &["-d", "--entitlements", "-", "--xml", path],
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     for (what, o) in [("-d -r-", &req), ("-dv", &dv), ("-d --entitlements", &ents)] {
         if !o.status.success() {
             return Err(format!(

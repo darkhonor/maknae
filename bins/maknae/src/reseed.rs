@@ -123,6 +123,7 @@ pub(crate) fn run_reseed() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::disallowed_methods)]
     use super::*;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::path::PathBuf;

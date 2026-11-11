@@ -58,6 +58,7 @@ mod host_facts;
 pub mod mutation;
 pub mod normalize;
 mod page;
+pub mod program;
 mod strategy;
 mod syscall;
 mod walk;

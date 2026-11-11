@@ -103,7 +103,9 @@ fn io_err(path: &Path, e: std::io::Error) -> EnrollError {
 /// scriptlets already accept for anything created after package install.
 pub fn maybe_restorecon(path: &Path) {
     if Path::new("/sys/fs/selinux/enforce").exists() {
-        let _ = std::process::Command::new("restorecon").arg(path).status();
+        let _ = maknae_io::program::command(maknae_io::program::Program::Restorecon)
+            .arg(path)
+            .status();
     }
 }
 

@@ -180,11 +180,7 @@ pub const NEVER_SCRUB_ENV: &[&str] = &[
     // silently force en-US on an operator who chose ko-KR.
     "LC_MESSAGES",
     "LANG",
-    // Chooses which binary the CLI plane's helpers actually are —
-    // `systemd-creds`, `setfacl`, `apparmor_parser` and the rest are spawned by
-    // BARE NAME, including on the CLI's credential-read path
-    // (`secret_io.rs`). That is a defect, tracked as #327; the fix is to stop
-    // depending on PATH, NOT to scrub it, which would break every helper.
+    // Kept because spawned helpers inherit it; it selects none of them (#327).
     "PATH",
     // Read for the AU-3c host label (`maknae-kernel`'s `run.rs`), which is
     // documented non-security-load-bearing and falls back to "maknaed".

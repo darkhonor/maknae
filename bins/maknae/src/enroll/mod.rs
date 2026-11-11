@@ -28,6 +28,7 @@ pub mod vault_ops;
 
 use crate::stderr::errln;
 use clap::{ArgGroup, Args, Subcommand};
+use maknae_io::program::{command, Program};
 use maknae_msgs::{detect_locale, msg, Locale, MsgId};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -1072,9 +1073,9 @@ fn check_vault_reachable(addr: &str) -> Result<(), EnrollError> {
 /// absent on RHEL 9's systemd 252). Uses a temp FILE for the encrypt output,
 /// exactly matching the command proven on Rocky 9 / systemd 252 (`… - <file>`);
 /// the `- -` stdout variant is NOT relied upon (unverified framing on 252).
-fn tpm2_probe_argv(out_path: &str) -> (&'static str, Vec<String>) {
+fn tpm2_probe_argv(out_path: &str) -> (Program, Vec<String>) {
     (
-        "systemd-creds",
+        Program::SystemdCreds,
         vec![
             "encrypt".into(),
             "--with-key=tpm2".into(),
@@ -1095,7 +1096,7 @@ fn tpm2_probe_argv(out_path: &str) -> (&'static str, Vec<String>) {
 /// undrained pipe. DO NOT grow the probe payload — a >64KiB stdin would hang.
 fn tpm2_seal_roundtrip(verbose: bool) -> bool {
     use std::io::Write;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     const PROBE: &[u8] = b"maknae-tpm-probe";
     let out_path = format!("/run/maknae-tpm-probe.{}.cred", std::process::id());
     // Unlink any stale same-name file first: `systemd-creds encrypt <file>` can
@@ -1104,7 +1105,7 @@ fn tpm2_seal_roundtrip(verbose: bool) -> bool {
     // not an untrusted-input path — the concern is robustness, not a symlink race.
     let _ = std::fs::remove_file(&out_path);
     let (bin, args) = tpm2_probe_argv(&out_path);
-    let enc = Command::new(bin)
+    let enc = command(bin)
         .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -1124,7 +1125,7 @@ fn tpm2_seal_roundtrip(verbose: bool) -> bool {
     }
     let enc_ok = matches!(enc.wait(), Ok(s) if s.success());
     let result = if enc_ok {
-        Command::new("systemd-creds")
+        command(Program::SystemdCreds)
             .args(["decrypt", "--name=maknae-tpm-probe", &out_path, "-"])
             .output()
             .map(|o| o.status.success() && o.stdout == PROBE)
@@ -1145,7 +1146,10 @@ fn tpm2_seal_roundtrip(verbose: bool) -> bool {
 fn detect_hrot_capability(verbose: bool) -> bool {
     let ok = tpm2_seal_roundtrip(verbose);
     if verbose {
-        errln!("exec: systemd-creds encrypt/decrypt --with-key=tpm2 round-trip -> {ok}");
+        errln!(
+            "exec: {} encrypt/decrypt --with-key=tpm2 round-trip -> {ok}",
+            Program::SystemdCreds
+        );
     }
     ok
 }
@@ -1164,9 +1168,9 @@ async fn run_helper(
         path: PathBuf::from("<self>"),
         source: e.to_string(),
     })?;
-    let mut cmd = tokio::process::Command::new("sudo");
+    let mut cmd = tokio::process::Command::from(command(Program::Sudo));
     cmd.arg("-u").arg(&operator.name);
-    cmd.arg("env")
+    cmd.arg(Program::Env.path())
         .arg(format!("XDG_RUNTIME_DIR=/run/user/{}", operator.uid));
     cmd.arg(&exe);
     cmd.arg("enroll-helper");
@@ -1194,7 +1198,7 @@ async fn run_helper(
     }
 
     let mut child = cmd.spawn().map_err(|e| EnrollError::Command {
-        program: "sudo".to_string(),
+        program: Program::Sudo.to_string(),
         detail: e.to_string(),
     })?;
 
@@ -1205,7 +1209,7 @@ async fn run_helper(
             .write_all(payload.as_bytes())
             .await
             .map_err(|e| EnrollError::Command {
-                program: "sudo".to_string(),
+                program: Program::Sudo.to_string(),
                 detail: e.to_string(),
             })?;
         drop(stdin);
@@ -1215,7 +1219,7 @@ async fn run_helper(
         .wait_with_output()
         .await
         .map_err(|e| EnrollError::Command {
-            program: "sudo".to_string(),
+            program: Program::Sudo.to_string(),
             detail: e.to_string(),
         })?;
 
@@ -1766,9 +1770,9 @@ async fn ensure_group_membership(operator: &Operator, verbose: bool) -> Result<b
     if is_already_maknae_group_member(&operator.name, operator.uid)? {
         return Ok(false);
     }
-    let (program, cmd_args): (&str, Vec<String>) = if cfg!(target_os = "macos") {
+    let (program, cmd_args): (Program, Vec<String>) = if cfg!(target_os = "macos") {
         (
-            "dseditgroup",
+            Program::Dseditgroup,
             vec![
                 "-o".into(),
                 "edit".into(),
@@ -1781,14 +1785,14 @@ async fn ensure_group_membership(operator: &Operator, verbose: bool) -> Result<b
         )
     } else {
         (
-            "usermod",
+            Program::Usermod,
             vec!["-aG".into(), "maknae".into(), operator.name.clone()],
         )
     };
     if verbose {
-        errln!("exec: {program} {}", cmd_args.join(" "));
+        errln!("exec: {} {}", program.path().display(), cmd_args.join(" "));
     }
-    let status = tokio::process::Command::new(program)
+    let status = tokio::process::Command::from(command(program))
         .args(&cmd_args)
         .status()
         .await
@@ -1813,9 +1817,9 @@ async fn ensure_group_membership(operator: &Operator, verbose: bool) -> Result<b
 /// `LoadCredentialEncrypted=` pins. Factored so a unit test holds each sealed
 /// name against the shipped unit: a mismatch is "Name in credential doesn't
 /// match expectations" at unit start, found once already on live hardware.
-fn seal_argv(cred_name: &str, out_str: &str) -> (&'static str, Vec<String>) {
+fn seal_argv(cred_name: &str, out_str: &str) -> (Program, Vec<String>) {
     (
-        "systemd-creds",
+        Program::SystemdCreds,
         vec![
             "encrypt".into(),
             "--with-key=tpm2".into(),
@@ -1838,16 +1842,16 @@ async fn seal_linux(
         .ok_or_else(|| EnrollError::Owner("non-UTF-8 seal output path".to_string()))?;
     let (bin, argv) = seal_argv(cred_name, out_str);
     if verbose {
-        errln!("exec: {bin} {}", argv.join(" "));
+        errln!("exec: {} {}", bin.path().display(), argv.join(" "));
     }
-    let mut child = tokio::process::Command::new(bin)
+    let mut child = tokio::process::Command::from(command(bin))
         .args(&argv)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| EnrollError::Command {
-            program: "systemd-creds".to_string(),
+            program: Program::SystemdCreds.to_string(),
             detail: e.to_string(),
         })?;
     {
@@ -1856,7 +1860,7 @@ async fn seal_linux(
             .write_all(plaintext)
             .await
             .map_err(|e| EnrollError::Command {
-                program: "systemd-creds".to_string(),
+                program: Program::SystemdCreds.to_string(),
                 detail: e.to_string(),
             })?;
     }
@@ -1864,7 +1868,7 @@ async fn seal_linux(
         .wait_with_output()
         .await
         .map_err(|e| EnrollError::Command {
-            program: "systemd-creds".to_string(),
+            program: Program::SystemdCreds.to_string(),
             detail: e.to_string(),
         })?;
     if !output.status.success() {
@@ -2039,7 +2043,7 @@ fn egress_traversal_acl_readback() -> String {
 /// file, until the operator grants it by hand. The package scriptlets set the
 /// same entry at install; this re-asserts it on every enroll.
 fn grant_egress_traversal(verbose: bool) {
-    let acl = std::process::Command::new("setfacl")
+    let acl = command(Program::Setfacl)
         .args(["-m", EGRESS_TRAVERSAL_ACL, "/etc/maknae"])
         .output();
     match acl {
@@ -2051,7 +2055,7 @@ fn grant_egress_traversal(verbose: bool) {
             // some configurations; read the entry back rather than trust the
             // exit status, since this entry is the only thing that makes the
             // deputy startable.
-            let back = std::process::Command::new("getfacl")
+            let back = command(Program::Getfacl)
                 .args(["-p", "/etc/maknae"])
                 .output();
             let want = egress_traversal_acl_readback();
@@ -2083,13 +2087,13 @@ fn grant_egress_traversal(verbose: bool) {
 const EGRESS_TRAVERSAL_ACE: &str = "user:_maknae-egress allow list,search";
 
 fn grant_egress_traversal_macos(verbose: bool) {
-    let set = std::process::Command::new("/bin/chmod")
+    let set = command(Program::Chmod)
         .args(["+a", EGRESS_TRAVERSAL_ACE, "/etc/maknae"])
         .output();
     if verbose {
         errln!("exec: /bin/chmod +a {EGRESS_TRAVERSAL_ACE:?} /etc/maknae");
     }
-    match std::process::Command::new("/bin/ls")
+    match command(Program::Ls)
         .args(["-led", "/etc/maknae"])
         .output()
     {
@@ -2136,7 +2140,7 @@ fn revoke_legacy_home_access(home: &Path, verbose: bool) {
             if verbose {
                 errln!("exec: rm {LEGACY_INCLUDE}");
             }
-            let reload = std::process::Command::new("apparmor_parser")
+            let reload = command(Program::ApparmorParser)
                 .args(["-r", "/etc/apparmor.d/usr.bin.maknaed"])
                 .output();
             match reload {
@@ -2172,7 +2176,7 @@ fn names_acl_entry(getfacl_output: &str, who: &str) -> bool {
 fn revoke_home_acl(home: &Path, uid: u32, verbose: bool) {
     let who = uid.to_string();
     let present = || {
-        std::process::Command::new("getfacl")
+        command(Program::Getfacl)
             .args(["-p", "-n", "--omit-header"])
             .arg(home)
             .output()
@@ -2182,7 +2186,7 @@ fn revoke_home_acl(home: &Path, uid: u32, verbose: bool) {
         return;
     }
     let spec = format!("u:{uid}");
-    match std::process::Command::new("setfacl")
+    match command(Program::Setfacl)
         .args(["-x", &spec])
         .arg(home)
         .output()
@@ -2858,6 +2862,7 @@ pub async fn run_enroll_helper(args: HelperArgs) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::disallowed_methods)]
     use super::*;
 
     // ---- #93 daemon TPM-detection mechanism (regression guard) -------------
@@ -2868,7 +2873,7 @@ mod tests {
     #[test]
     fn tpm2_probe_uses_systemd_creds_with_key_tpm2_not_has_tpm2_verb() {
         let (bin, args) = tpm2_probe_argv("/run/probe.cred");
-        assert_eq!(bin, "systemd-creds");
+        assert_eq!(bin, Program::SystemdCreds);
         assert!(
             args.iter().any(|a| a == "encrypt"),
             "must encrypt: {args:?}"
@@ -2891,7 +2896,7 @@ mod tests {
             maknae_vault::DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME,
             "/etc/maknae/private/maknaed-secret-id.cred",
         );
-        assert_eq!(bin, "systemd-creds");
+        assert_eq!(bin, Program::SystemdCreds);
         assert_eq!(
             args,
             vec![
@@ -3167,7 +3172,7 @@ mod tests {
         std::fs::create_dir_all(&d).unwrap();
         let uid = nix::unistd::getuid().as_raw();
         let set = |spec: &str| {
-            std::process::Command::new("setfacl")
+            command(Program::Setfacl)
                 .args(["-m", spec])
                 .arg(&d)
                 .status()
@@ -3177,7 +3182,7 @@ mod tests {
         assert!(set(&format!("u:{uid}:rx")));
         assert!(set("g:0:x"));
         revoke_home_acl(&d, uid, false);
-        let out = std::process::Command::new("getfacl")
+        let out = command(Program::Getfacl)
             .args(["-p", "-n", "--omit-header"])
             .arg(&d)
             .output()
@@ -3229,14 +3234,14 @@ mod tests {
             .uid
             .as_raw();
         let acl = || {
-            let out = std::process::Command::new("getfacl")
+            let out = command(Program::Getfacl)
                 .args(["-p", "-n", "--omit-header"])
                 .arg(&home)
                 .output()
                 .unwrap();
             names_acl_entry(&String::from_utf8_lossy(&out.stdout), &uid.to_string())
         };
-        assert!(std::process::Command::new("setfacl")
+        assert!(command(Program::Setfacl)
             .args(["-m", &format!("u:{uid}:rx")])
             .arg(&home)
             .status()

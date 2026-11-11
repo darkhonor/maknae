@@ -56,6 +56,7 @@ pub fn bind_gated(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::disallowed_methods)]
     use super::*;
 
     /// With no `LISTEN_FDS` in the environment there is no inherited socket,

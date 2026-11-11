@@ -2,9 +2,10 @@ use crate::token_record::{
     decrypt_refusal, encrypt_output_refusal, erase_every, every_custody, first_present,
     keychain_erase_outcome, read_record, systemd_major, token_dir_refusal, token_dir_required,
     token_file_refusal, token_file_required, StoredToken, SystemdCreds, TokenCustody,
-    MAX_CREDS_FILE_BYTES, MAX_TOKEN_RECORD_BYTES, SYSTEMD_CREDS, TOKEN_CREDS_NAME, TOKEN_FILE_MODE,
+    MAX_CREDS_FILE_BYTES, MAX_TOKEN_RECORD_BYTES, TOKEN_CREDS_NAME, TOKEN_FILE_MODE,
 };
 use crate::{UserToken, VaultError};
+use maknae_io::program::{command, Program};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -25,7 +26,7 @@ fn euid() -> u32 {
 }
 
 pub fn observe_systemd_creds() -> Result<SystemdCreds, VaultError> {
-    match Command::new(SYSTEMD_CREDS).arg("--version").output() {
+    match command(Program::SystemdCreds).arg("--version").output() {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(SystemdCreds::Absent),
         Err(e) => Err(store_failure("systemd-creds --version", e)),
         Ok(out) if !out.status.success() => {
@@ -147,7 +148,7 @@ fn stderr_text(bytes: &[u8]) -> String {
 }
 
 fn creds_command(verb: &str) -> Command {
-    let mut cmd = Command::new(SYSTEMD_CREDS);
+    let mut cmd = command(Program::SystemdCreds);
     cmd.arg(verb).arg("--user");
     if verb == "encrypt" {
         cmd.arg("--with-key=auto");
@@ -302,6 +303,7 @@ fn keychain_erase() -> Result<bool, VaultError> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::disallowed_methods)]
     use super::*;
     use crate::token_record::{TOKEN_CREDS_FILE, TOKEN_RESIDUAL_FILE};
     use std::fs::Permissions;

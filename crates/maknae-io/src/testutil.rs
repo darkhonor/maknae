@@ -4,6 +4,7 @@
 //! `dir.rs` and `syscall.rs` need it too and the coverage gate requires `#[cfg(test)]`
 //! to be followed by a line beginning `mod ` -- so `pub(crate) mod tests` is not
 //! available as a way to share it.
+#![allow(clippy::disallowed_methods)]
 
 /// Is the fail-closed skip explicitly opted out of on this host?
 ///

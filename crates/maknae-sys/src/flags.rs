@@ -37,6 +37,7 @@ fn system_append_bit(st_flags: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::disallowed_methods)]
     use super::*;
 
     fn temp(tag: &str) -> (std::path::PathBuf, File) {

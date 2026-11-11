@@ -413,6 +413,15 @@ jobs:
           echo "delegated suite present on macOS: $n tests"
       - name: clippy the one unsafe crate where its unsafe code compiles (ADR-0027)
         run: cargo clippy --locked -p maknae-sys --all-targets -- -D warnings
+      - name: clippy the crates that spawn helpers, where their macOS-only code compiles (#327)
+        run: |
+          set -o pipefail
+          cargo clippy --locked -p maknae -p maknae-vault -p maknae-io --all-targets -- -D warnings 2>&1 | tee "$RUNNER_TEMP/clippy-spawn.log"
+          # A diagnostic on clippy.toml means an entry refuses nothing (#564),
+          # except nix's Linux-only exec functions, which macOS does not have.
+          pointers=$(grep -cE -- '--> .*clippy\.toml:[0-9]+' "$RUNNER_TEMP/clippy-spawn.log" || true)
+          exempt=$(grep -cE '^warning: `nix::unistd::(execvpe|fexecve|execveat)` does not refer to a reachable function$' "$RUNNER_TEMP/clippy-spawn.log" || true)
+          test "$pointers" = "$exempt"
       - name: Confirm the maknae-sys macOS suite actually ran
         run: |
           set -euo pipefail

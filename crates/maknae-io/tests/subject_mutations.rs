@@ -1,6 +1,7 @@
 //! Opt-in developmental proof across real subject/service credentials.
 //! Run as root with MAKNAE_TEST_SUBJECT and MAKNAE_TEST_SERVICE naming existing
 //! non-root accounts. Ordinary CI does not provision accounts or run this test.
+#![allow(clippy::disallowed_methods)]
 use std::io::{Read, Write};
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::{
