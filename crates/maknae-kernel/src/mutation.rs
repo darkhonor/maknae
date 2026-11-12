@@ -2829,6 +2829,7 @@ mod tests {
     fn hobi_pdp(fx: &Fixture) -> crate::Composition<maknae_authz_basic::HermeticAuthorizer> {
         let config = fx.root.join("etc-628");
         std::fs::create_dir_all(&config).unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o750)).unwrap();
         let paths = maknae_authz_basic::PolicyPaths::in_dir(&config);
         crate::test_fixtures::write_0640(&paths.authz, crate::test_fixtures::READ_POLICY);
         crate::test_fixtures::write_empty_sensitive(&config);
