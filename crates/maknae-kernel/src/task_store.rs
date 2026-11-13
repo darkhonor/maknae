@@ -396,7 +396,6 @@ pub struct MemInner {
     fail: std::sync::Mutex<Option<Fail>>,
     slow: std::sync::Mutex<Option<Duration>>,
     stalls: std::sync::atomic::AtomicUsize,
-    synced: std::sync::Mutex<std::collections::BTreeMap<String, Zeroizing<Vec<u8>>>>,
     unsynced: std::sync::Mutex<Vec<Unsynced>>,
     after_save: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     attempts: std::sync::atomic::AtomicUsize,
@@ -474,7 +473,7 @@ impl MemTaskBlobs {
     pub fn put(&self, name: &str, plain: &[u8]) {
         self.map()
             .insert(name.to_owned(), Zeroizing::new(plain.to_vec()));
-        self.settle(name, Ok(()), Some(plain))
+        self.settle(name, Ok(()), None)
             .expect("a planted blob is synced");
     }
 
@@ -490,12 +489,6 @@ impl MemTaskBlobs {
     /// The directory as a crash would leave it: what was last synced, then the first
     /// `kept` of the changes that landed unsynced since.
     pub fn crash(&self, kept: usize) {
-        let mut disk = self
-            .0
-            .synced
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
         let lost = std::mem::take(
             &mut *self
                 .0
@@ -503,20 +496,20 @@ impl MemTaskBlobs {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
-        for (name, bytes) in lost.into_iter().take(kept) {
-            match bytes {
+        let mut disk = self.map();
+        for (name, prior) in lost.into_iter().skip(kept).rev() {
+            match prior {
                 Some(b) => disk.insert(name, b),
                 None => disk.remove(&name),
             };
         }
-        *self.map() = disk;
     }
 
     fn settle(
         &self,
         name: &str,
         landed: Result<(), StoreError>,
-        bytes: Option<&[u8]>,
+        prior: Option<Zeroizing<Vec<u8>>>,
     ) -> Result<(), StoreError> {
         let mut unsynced = self
             .0
@@ -524,15 +517,8 @@ impl MemTaskBlobs {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match &landed {
-            Ok(()) => {
-                unsynced.clear();
-                *self
-                    .0
-                    .synced
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = self.map().clone();
-            }
-            Err(_) => unsynced.push((name.to_owned(), bytes.map(|b| Zeroizing::new(b.to_vec())))),
+            Ok(()) => unsynced.clear(),
+            Err(_) => unsynced.push((name.to_owned(), prior)),
         }
         landed
     }
@@ -639,9 +625,10 @@ impl TaskBlobs for MemTaskBlobs {
     fn save(&self, name: &str, plain: &[u8]) -> Result<(), StoreError> {
         self.refuse(name)?;
         self.stall(name);
-        self.map()
+        let prior = self
+            .map()
             .insert(name.to_owned(), Zeroizing::new(plain.to_vec()));
-        let landed = self.settle(name, self.landed(name, false), Some(plain));
+        let landed = self.settle(name, self.landed(name, false), prior);
         let then = match name == COUNTERS {
             true => None,
             false => self
@@ -668,8 +655,8 @@ impl TaskBlobs for MemTaskBlobs {
             return Err(StoreError::Io("sentinel-628-unlink-refused".into()));
         }
         self.stall(name);
-        self.map().remove(name);
-        self.settle(name, self.landed(name, true), None)
+        let prior = self.map().remove(name);
+        self.settle(name, self.landed(name, true), prior)
     }
 
     fn quarantine(&self, name: &str) -> Result<(), StoreError> {
@@ -1273,20 +1260,30 @@ mod tests {
         let unsynced = || {
             let b = MemTaskBlobs::default();
             b.put("a", b"synced");
+            b.put("c", b"kept");
             b.fail(Some(Fail::Unsynced));
             assert!(b.save("a", b"one").is_err());
-            assert!(b.save("b", b"two").is_err());
+            assert!(b.save("a", b"two").is_err());
+            assert!(b.delete("c").is_err());
             b.fail(None);
             b
         };
+        for (kept, a, c) in [
+            (0, &b"synced"[..], true),
+            (1, b"one", true),
+            (2, b"two", true),
+            (3, b"two", false),
+        ] {
+            let b = unsynced();
+            b.crash(kept);
+            assert_eq!(b.load("a").unwrap().as_slice(), a, "kept {kept}");
+            assert_eq!(b.has("c"), c, "kept {kept}");
+        }
         let b = unsynced();
+        b.save("b", b"synced").unwrap();
         b.crash(0);
-        assert_eq!(b.load("a").unwrap().as_slice(), b"synced");
-        assert!(!b.has("b"));
-        let b = unsynced();
-        b.crash(1);
-        assert_eq!(b.load("a").unwrap().as_slice(), b"one");
-        assert!(!b.has("b"));
+        assert_eq!(b.load("a").unwrap().as_slice(), b"two");
+        assert!(!b.has("c"));
     }
 
     #[test]

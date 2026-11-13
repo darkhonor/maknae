@@ -25,6 +25,7 @@ const RETRY_FIRST_SECS: u32 = 1;
 const RETRY_MAX_SECS: u32 = 60;
 const MOVED: &str = "not done: the queue changed during the claim";
 const DUE_A_HOLD: &str = "not done: the task is due a hold";
+const ID_DRAWS: u32 = 4;
 const CONTAINED: &str = "the tasker, the root of its chain or the agent is contained";
 
 /// A queued task whose tasker's standing was found good, and the policy load it was
@@ -1102,14 +1103,15 @@ impl TaskStore {
             ask: sub.ask,
             labels: sub.labels,
         };
-        for _ in 0..4 {
+        for attempt in 1..=ID_DRAWS {
             let signed = Arc::new(signer.sign(task)?);
             match self.place(view, &agent, enrolled, &signed, ticket)? {
                 Placed::Stored => return Ok(signed),
-                Placed::Collided => {
+                Placed::Collided if attempt < ID_DRAWS => {
                     task = signed.task.clone();
                     task.task_id = TaskId(draw()?);
                 }
+                Placed::Collided => break,
             }
         }
         Err(TaskRefusal::Random)
@@ -7518,7 +7520,14 @@ mod tests {
     fn a_draw_that_keeps_colliding_is_refused_as_a_broken_random_source() {
         let store = Arc::new(TaskStore::new());
         let v = view(&[("hobi", HOBI)]);
-        let mut draw = || Ok([7u8; 16]);
+        let drawn = std::cell::Cell::new(0u32);
+        let mut draw = || {
+            drawn.set(drawn.get() + 1);
+            match drawn.get() {
+                1..=5 => Ok([7u8; 16]),
+                _ => Err(TaskRefusal::Unknown),
+            }
+        };
         let mint = |draw: &mut dyn FnMut() -> Result<[u8; 16], TaskRefusal>| {
             store.mint_with_live(
                 draw,
@@ -7532,6 +7541,11 @@ mod tests {
         };
         assert!(mint(&mut draw).is_ok());
         assert_eq!(mint(&mut draw).err(), Some(TaskRefusal::Random));
+        assert_eq!(
+            drawn.get(),
+            1 + ID_DRAWS,
+            "no id is drawn after the last attempt"
+        );
         assert_eq!(store.len(), 1);
     }
 
