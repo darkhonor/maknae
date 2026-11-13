@@ -19,6 +19,7 @@
 
 mod agent;
 mod agent_access;
+mod agent_launchd;
 mod agent_unit;
 pub mod artifact_table;
 pub mod artifact_write;

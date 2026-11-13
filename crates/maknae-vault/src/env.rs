@@ -366,21 +366,32 @@ mod tests {
         }
     }
 
-    /// launchd has no `UnsetEnvironment=`, so the daemon's plist cannot carry
+    /// launchd has no `UnsetEnvironment=`, so a daemon's plist cannot carry
     /// the list — and that delta must be RECORDED rather than left as a silent
-    /// platform gap on a production target. Pinned to the plist's own text so
-    /// deleting the note goes red.
+    /// platform gap on a production target. Pinned to each plist's own text so
+    /// deleting the note goes red. The agent's is the template `maknae enroll
+    /// agent` renders every per-agent job from.
     #[test]
-    fn the_daemon_plist_records_that_launchd_has_no_unset_equivalent() {
-        let plist = include_str!("../../../packaging/macos/io.maknae.maknaed.plist");
-        assert!(
-            plist.contains("launchd has NO UnsetEnvironment= equivalent"),
-            "the plist must record WHY the in-process scrub is the whole control \
-             on darwin, not merely mention the directive somewhere (#318)"
-        );
-        assert!(
-            !plist.contains("<key>EnvironmentVariables</key>"),
-            "an EnvironmentVariables dict would hand launchd the inheritance the scrub removes"
-        );
+    fn the_daemon_plists_record_that_launchd_has_no_unset_equivalent() {
+        for (name, plist) in [
+            (
+                "io.maknae.maknaed.plist",
+                include_str!("../../../packaging/macos/io.maknae.maknaed.plist"),
+            ),
+            (
+                "io.maknae.maknae-agentd.template.plist",
+                include_str!("../../../packaging/macos/io.maknae.maknae-agentd.template.plist"),
+            ),
+        ] {
+            assert!(
+                plist.contains("launchd has NO UnsetEnvironment= equivalent"),
+                "{name} must record WHY the in-process scrub is the whole control \
+                 on darwin, not merely mention the directive somewhere (#318)"
+            );
+            assert!(
+                !plist.contains("<key>EnvironmentVariables</key>"),
+                "{name}: an EnvironmentVariables dict would hand launchd the inheritance the scrub removes"
+            );
+        }
     }
 }

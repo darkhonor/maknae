@@ -248,4 +248,28 @@ if [ "$DISABLE_EGRESS" = false ] && [ "$EGRESS_WAS_LOADED" = "true" ]; then
     }
 fi
 
+# Per-agent jobs are written by `maknae enroll agent`, never by this payload, so
+# none is disabled here: each one loaded is restarted onto the new binary.
+restart_agents() {
+    local f label rc
+    for f in "$1"/io.maknae.maknae-agentd.*.plist; do
+        [ -e "$f" ] || continue
+        label="${f##*/}"
+        label="${label%.plist}"
+        rc=0
+        launchctl print "system/$label" >/dev/null 2>&1 || rc=$?
+        case "$rc" in
+            113) continue ;;
+            0) : ;;
+            *) echo "maknae: cannot tell whether $label is loaded (launchctl print exit $rc)" >&2
+               return 1 ;;
+        esac
+        launchctl kickstart -k "system/$label" || {
+            echo "maknae: could not restart $label onto the new binary — the old process may still be running" >&2
+            return 1
+        }
+    done
+}
+restart_agents /Library/LaunchDaemons || exit 1
+
 exit 0

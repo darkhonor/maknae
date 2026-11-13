@@ -101,6 +101,8 @@ pub(crate) fn account_name_ok(name: &str) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Ran {
     pub ok: bool,
+    /// `None` when a signal ended the program.
+    pub code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
 }
@@ -120,6 +122,7 @@ impl Run for Host {
             .output()
             .map(|o| Ran {
                 ok: o.status.success(),
+                code: o.status.code(),
                 stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
                 stderr: String::from_utf8_lossy(&o.stderr).trim().to_string(),
             })
@@ -461,6 +464,7 @@ pub(crate) mod tests {
             if self.refuse.borrow().contains(&call) {
                 return Ok(Ran {
                     ok: false,
+                    code: Some(1),
                     stdout: String::new(),
                     stderr: "Operation not supported".into(),
                 });
@@ -473,6 +477,7 @@ pub(crate) mod tests {
             let ok = |stdout: String| {
                 Ok(Ran {
                     ok: true,
+                    code: Some(0),
                     stdout,
                     stderr: String::new(),
                 })
@@ -905,6 +910,7 @@ pub(crate) mod tests {
                 };
                 Ok(Ran {
                     ok: true,
+                    code: Some(0),
                     stdout,
                     stderr: String::new(),
                 })

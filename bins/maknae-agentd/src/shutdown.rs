@@ -87,10 +87,20 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
+    fn only(text: &str, key: &str, value: impl Fn(&str) -> Option<u64>) -> Duration {
+        let found: Vec<u64> = text
+            .match_indices(key)
+            .filter_map(|(at, _)| value(&text[at + key.len()..]))
+            .collect();
+        assert_eq!(found.len(), 1, "{key}: {found:?}");
+        Duration::from_secs(found[0])
+    }
+
     /// A SIGTERM inside the first mint waits out its login and leaf signing, then
     /// the drain, the leaf supervisor's stop, the revoke and the runtime teardown.
     /// Two-sided, as the kernel's unit test is: a unit far above the chain means a
-    /// term was dropped from this expression.
+    /// term was dropped from this expression. The launchd job's `ExitTimeOut` is
+    /// the same bound.
     #[test]
     fn the_agent_units_stop_timeout_covers_its_shutdown_chain() {
         const SLACK: Duration = Duration::from_secs(10);
@@ -101,21 +111,28 @@ mod tests {
             + maknae_vault::PLANE_SHUTDOWN_BOUND
             + RUNTIME_SHUTDOWN_TIMEOUT;
         let unit = include_str!("../../../packaging/common/maknae-agent@.service");
-        let stops: Vec<u64> = unit
-            .lines()
-            .filter_map(|l| l.trim().strip_prefix("TimeoutStopSec="))
-            .map(|v| v.trim().parse().unwrap())
-            .collect();
-        assert_eq!(stops.len(), 1, "{stops:?}");
-        let stop = Duration::from_secs(stops[0]);
-        assert!(
-            stop >= chain,
-            "TimeoutStopSec={stop:?} is below the chain {chain:?}"
-        );
-        assert!(
-            stop <= chain + SLACK,
-            "TimeoutStopSec={stop:?} is more than {SLACK:?} above the chain {chain:?}"
-        );
+        let plist = include_str!("../../../packaging/macos/io.maknae.maknae-agentd.template.plist");
+        let systemd = only(unit, "\nTimeoutStopSec=", |v| {
+            v.lines().next()?.trim().parse().ok()
+        });
+        let launchd = only(plist, "<key>ExitTimeOut</key>", |v| {
+            v.trim_start()
+                .strip_prefix("<integer>")?
+                .split_once("</integer>")?
+                .0
+                .parse()
+                .ok()
+        });
+        for (name, stop) in [("TimeoutStopSec", systemd), ("ExitTimeOut", launchd)] {
+            assert!(
+                stop >= chain,
+                "{name}={stop:?} is below the chain {chain:?}"
+            );
+            assert!(
+                stop <= chain + SLACK,
+                "{name}={stop:?} is more than {SLACK:?} above the chain {chain:?}"
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]

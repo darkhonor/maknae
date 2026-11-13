@@ -14,6 +14,7 @@ pub(crate) const DROP_IN_FILE: &str = "account.conf";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ServiceAccount {
+    pub name: String,
     pub uid: u32,
     pub gid: u32,
     /// Only ever a value [`maknae_io::unit_safe_home`] returned.
@@ -117,6 +118,7 @@ mod tests {
             let ok = self.refuse != Some(args[0].as_str());
             Ok(Ran {
                 ok,
+                code: Some(if ok { 0 } else { 1 }),
                 stdout: String::new(),
                 stderr: if ok {
                     String::new()
@@ -274,6 +276,7 @@ mod tests {
 
     fn account() -> ServiceAccount {
         ServiceAccount {
+            name: "hobi-svc".into(),
             uid: 990,
             gid: 991,
             home: "/home/hobi-svc".into(),

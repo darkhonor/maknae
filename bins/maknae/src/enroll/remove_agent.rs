@@ -4,6 +4,8 @@ use super::agent::{
     RELOAD_COMMAND, VAULT_CA,
 };
 use super::agent_access;
+#[cfg(target_os = "macos")]
+use super::agent_launchd;
 #[cfg(not(target_os = "macos"))]
 use super::agent_unit;
 use super::EnrollError;
@@ -254,8 +256,10 @@ impl RemoveOps for RealRemoveOps {
     }
 
     #[cfg(target_os = "macos")]
-    fn stop_agent(&self, _agent: &AgentId) -> Result<(), EnrollError> {
-        Ok(())
+    fn stop_agent(&self, agent: &AgentId) -> Result<(), EnrollError> {
+        agent_launchd::stop(&*self.runner, agent, &mut std::thread::sleep, || {
+            agent_launchd::remove_plist(&open_dir(agent_launchd::DAEMON_DIR, 0o022)?, agent)
+        })
     }
 
     fn revoke_access(&self, agent: &AgentId) -> Result<(), EnrollError> {

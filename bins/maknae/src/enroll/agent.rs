@@ -1,4 +1,6 @@
 use super::agent_access;
+#[cfg(target_os = "macos")]
+use super::agent_launchd;
 use super::agent_unit;
 use super::artifact_table::{Artifact, ContentKind, Owner};
 use super::artifact_write::{self, emit_yaml, yaml_map, OwnerResolver};
@@ -679,6 +681,7 @@ pub(crate) async fn enroll_agent<O: AgentOps>(
     ops.start_agent(
         &plan.agent,
         &agent_unit::ServiceAccount {
+            name: plan.account.clone(),
             uid: plan.uid,
             gid: plan.gid,
             home: plan.home.clone(),
@@ -1018,11 +1021,18 @@ fn start_instance(
 
 #[cfg(target_os = "macos")]
 fn start_instance(
-    _r: &dyn agent_access::Run,
-    _agent: &AgentId,
-    _account: &agent_unit::ServiceAccount,
+    r: &dyn agent_access::Run,
+    agent: &AgentId,
+    account: &agent_unit::ServiceAccount,
 ) -> Result<(), EnrollError> {
-    Ok(())
+    agent_launchd::start(r, agent, &mut std::thread::sleep, || {
+        agent_launchd::write_plist(
+            &open_dir(agent_launchd::DAEMON_DIR, 0o022)?,
+            agent,
+            &account.name,
+            FileOwner { uid: 0, gid: 0 },
+        )
+    })
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1345,7 +1355,12 @@ fn check_account(
             "account {account}: its home {dir:?} {why}; the Agent Daemon's unit cannot name it"
         ))
     })?;
-    Ok(agent_unit::ServiceAccount { uid, gid, home })
+    Ok(agent_unit::ServiceAccount {
+        name: account.to_string(),
+        uid,
+        gid,
+        home,
+    })
 }
 
 fn binding_uids(bindings: &maknae_config::Bindings) -> Result<BTreeMap<String, u32>, EnrollError> {
@@ -3243,6 +3258,7 @@ pub(crate) mod tests {
                 || {
                     admit(account(&[990, AGENTS_GID]), Some(AGENTS_GID), &bound(role)).map(|uid| {
                         agent_unit::ServiceAccount {
+                            name: "hobi-svc".into(),
                             uid,
                             gid: 990,
                             home: "/home/hobi-svc".into(),

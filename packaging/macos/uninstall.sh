@@ -6,7 +6,8 @@
 # (/usr/local/var/db/maknae/state). The audit trail is not the installer's to
 # destroy — an uninstall that erases it erases the evidence of everything that ran.
 # The enrollment is NOT reusable: the plane System-keychain items and the published
-# seal.pub are deleted, so a reinstall needs `sudo maknae enroll`. The graph key's
+# seal.pub are deleted, so a reinstall needs `sudo maknae enroll`; so is every
+# agent's job and SecretID item, so each agent needs `sudo maknae enroll agent`. The graph key's
 # item (io.maknae.maknaed.graph) is RETAINED with the store: without it the store
 # cannot be decrypted, and enroll never replaces an existing graph key.
 set -euo pipefail
@@ -15,7 +16,29 @@ set -euo pipefail
 RECEIPT="/usr/local/var/db/maknae/install-receipt.plist"
 
 print_rc() { local rc=0; launchctl print "system/$1" >/dev/null 2>&1 || rc=$?; echo "$rc"; }
-for LABEL in io.maknae.policy-sync io.maknae.maknaed io.maknae.maknae-egress; do
+
+# Every per-agent job `maknae enroll agent` wrote, and any launchd still holds.
+agent_labels() {
+    local f l services
+    services="$(launchctl print system)" || return 1
+    {
+        for f in "$1"/io.maknae.maknae-agentd.*.plist; do
+            [ -e "$f" ] || continue
+            f="${f##*/}"
+            echo "${f%.plist}"
+        done
+        awk 'NF == 3 { print $3 }' <<<"$services"
+    } | while IFS= read -r l; do
+        if [[ $l =~ ^io\.maknae\.maknae-agentd\.[a-z0-9_][a-z0-9._-]*$ ]]; then echo "$l"; fi
+    done | sort -u
+}
+AGENT_LABELS="$(agent_labels /Library/LaunchDaemons)" || {
+    echo "maknae: cannot list launchd's system services — refusing to uninstall" >&2
+    exit 1
+}
+
+# Agents first: each revokes its login through a live kernel and Vault.
+for LABEL in $AGENT_LABELS io.maknae.policy-sync io.maknae.maknaed io.maknae.maknae-egress; do
     rc="$(print_rc "$LABEL")"
     case "$rc" in
         113) continue ;;
@@ -24,7 +47,9 @@ for LABEL in io.maknae.policy-sync io.maknae.maknaed io.maknae.maknae-egress; do
            exit 1 ;;
     esac
     launchctl bootout "system/${LABEL}" || :
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
+    polls=10
+    case "$LABEL" in io.maknae.maknae-agentd.*) polls=382 ;; esac
+    for _ in $(seq "$polls"); do
         sleep 0.5
         rc="$(print_rc "$LABEL")"
         [ "$rc" != 113 ] || break
@@ -38,7 +63,7 @@ done
 # Clear our own `launchctl disable` so the external disabled database is not left
 # holding an entry for a label we removed — it survives reboots and would silently
 # suppress a later reinstall.
-for LABEL in io.maknae.policy-sync io.maknae.maknaed io.maknae.maknae-egress; do
+for LABEL in $AGENT_LABELS io.maknae.policy-sync io.maknae.maknaed io.maknae.maknae-egress; do
     launchctl enable "system/${LABEL}" 2>/dev/null || :
     rm -f "/Library/LaunchDaemons/${LABEL}.plist"
 done
@@ -74,6 +99,15 @@ for s in io.maknae.maknaed io.maknae.maknae-egress; do
            kc_left="$kc_left $s" ;;
     esac
 done
+
+# One item per agent, all under one service; each delete removes the first match.
+rc=0
+for _ in $(seq 1000); do
+    rc=0
+    security delete-generic-password -s io.maknae.maknae-agentd /Library/Keychains/System.keychain >/dev/null 2>&1 || rc=$?
+    [ "$rc" -eq 0 ] || break
+done
+[ "$rc" -eq 44 ] || kc_left="$kc_left io.maknae.maknae-agentd"
 
 SEAL_PUB_DIR="/Library/Application Support/Maknae/pki"
 rm -f "$SEAL_PUB_DIR/seal.pub" 2>/dev/null || :
