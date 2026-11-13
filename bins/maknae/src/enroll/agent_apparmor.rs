@@ -20,24 +20,6 @@ pub(crate) fn file_name(agent: &AgentId) -> String {
     format!("{}.home", agent.as_str())
 }
 
-/// `None` when the kernel has no AppArmor module.
-pub(crate) fn read_enabled() -> Option<String> {
-    let out = maknae_io::read_absolute(
-        Path::new(ENABLED_PARAM),
-        maknae_io::TargetRequired {
-            owner: Some(0),
-            mode_mask: Some(0o022),
-            nlink_exactly_one: false,
-            regular_file: true,
-            // sysfs reports PAGE_SIZE as st_size; arm64 may run 64 KiB pages.
-            max_bytes: Some(64 * 1024),
-        },
-        StrategyPref::Auto,
-    )
-    .ok()?;
-    String::from_utf8(out.value.to_vec()).ok()
-}
-
 /// A host that ships the profile but whose kernel does not enforce AppArmor
 /// would run the agent unconfined.
 pub(crate) fn require_enabled(
@@ -417,9 +399,11 @@ mod tests {
             ("/run/credentials/maknae-agent@*.service/**", "r"),
             ("/run/maknae-agent/maknaed.sock", "rw"),
             ("owner @{MAKNAE_AGENT_HOMES}/**", "rwk"),
+            ("owner @{PROC}/@{pid}/cgroup", "r"),
         ] {
             assert!(has_rule(path, mode), "{path} {mode}");
         }
+        assert!(!rules().iter().any(|l| l.starts_with("@{PROC}/*/")));
         let etc: Vec<&str> = rules()
             .into_iter()
             .filter(|l| l.starts_with("/etc/maknae"))

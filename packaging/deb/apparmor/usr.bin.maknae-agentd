@@ -41,7 +41,7 @@ profile maknae-agentd /usr/bin/maknae-agentd {
   owner @{MAKNAE_AGENT_HOMES}/                 r,
   owner @{MAKNAE_AGENT_HOMES}/**               rwk,
 
-  @{PROC}/*/cgroup                             r,
+  owner @{PROC}/@{pid}/cgroup                   r,
   /sys/fs/cgroup/                              r,
   /sys/fs/cgroup/**                            r,
   /sys/devices/system/cpu/                     r,

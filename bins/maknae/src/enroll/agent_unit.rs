@@ -81,10 +81,39 @@ pub(crate) fn start(
     systemctl(r, &["restart", &unit])
 }
 
+pub(crate) const UNENROLLED_ACCOUNT: &str = "maknae-agent-unenrolled";
+
+/// The template's `User=`: an account of that name would let an instance with no
+/// drop-in start as it.
+pub(crate) fn require_no_unenrolled_account(exists: bool) -> Result<(), EnrollError> {
+    if !exists {
+        return Ok(());
+    }
+    Err(EnrollError::State(format!(
+        "an account named {UNENROLLED_ACCOUNT} exists, so an Agent Daemon instance without its drop-in would run as it; delete that account and enroll again"
+    )))
+}
+
 pub(crate) const SELINUX_ENFORCE: &str = "/sys/fs/selinux/enforce";
+pub(crate) const SELINUX_POLICY_PACKAGE: &str =
+    "/usr/share/selinux/packages/targeted/maknae.pp.bz2";
 pub(crate) const AGENT_HOME_TYPE: &str = "maknae_agent_home_t";
 
-/// `maknae_agentd_t` writes only `maknae_agent_home_t`; a home of another type
+/// A host that ships the Maknae policy but does not enforce it would run the
+/// agent unconfined.
+pub(crate) fn require_selinux_enforcing(
+    policy_host: bool,
+    enforce: Option<&str>,
+) -> Result<(), EnrollError> {
+    if !policy_host || enforce.map(str::trim) == Some("1") {
+        return Ok(());
+    }
+    Err(EnrollError::State(format!(
+        "SELinux is not enforcing ({SELINUX_ENFORCE} does not read 1), so the Agent Daemon would run unconfined; run setenforce 1, set SELINUX=enforcing in /etc/selinux/config, and enroll again"
+    )))
+}
+
+/// `maknae_agentd_t` writes files only in `maknae_agent_home_t`; a home of another type
 /// would leave an instance that starts and cannot write.
 pub(crate) fn selinux_home_check(
     r: &dyn Run,
@@ -195,7 +224,7 @@ mod tests {
         found[0]
     }
 
-    const UNENROLLED: &str = "maknae-agent-unenrolled";
+    const UNENROLLED: &str = UNENROLLED_ACCOUNT;
 
     #[test]
     fn the_unit_runs_the_agent_daemon_on_its_own_sealed_credential() {
@@ -214,6 +243,10 @@ mod tests {
             ("CapabilityBoundingSet", ""),
             ("Restart", "on-failure"),
             ("RestartPreventExitStatus", "2"),
+            (
+                "RestrictAddressFamilies",
+                "AF_UNIX AF_INET AF_INET6 AF_NETLINK",
+            ),
         ] {
             assert_eq!(the_one(&lines, key), want, "{key}");
         }
@@ -681,6 +714,52 @@ mod tests {
                     && detail == "stat: cannot stat"),
             "{e:?}"
         );
+    }
+
+    #[test]
+    fn the_unenrolled_sentinel_is_the_templates_user_and_must_not_exist() {
+        assert_eq!(UNENROLLED_ACCOUNT, "maknae-agent-unenrolled");
+        require_no_unenrolled_account(false).unwrap();
+        let e = require_no_unenrolled_account(true).unwrap_err();
+        assert!(
+            matches!(&e, EnrollError::State(m)
+                if m.contains("maknae-agent-unenrolled") && m.contains("delete")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn a_host_with_the_maknae_policy_enrolls_only_while_selinux_enforces() {
+        require_selinux_enforcing(false, None).unwrap();
+        require_selinux_enforcing(false, Some("0")).unwrap();
+        require_selinux_enforcing(true, Some("1")).unwrap();
+        require_selinux_enforcing(true, Some("1\n")).unwrap();
+        for enforce in [
+            None,
+            Some("0"),
+            Some("0\n"),
+            Some(""),
+            Some("10"),
+            Some("Y"),
+        ] {
+            let e = require_selinux_enforcing(true, enforce).unwrap_err();
+            assert!(
+                matches!(&e, EnrollError::State(m)
+                    if m.contains(SELINUX_ENFORCE) && m.contains("setenforce 1")),
+                "{enforce:?}: {e:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_policy_package_path_is_where_the_rpm_installs_the_module() {
+        let spec = include_str!("../../../../packaging/rpm/maknae.spec");
+        assert!(spec.contains("%global selinuxtype targeted\n"));
+        let rendered = "%{_datadir}/selinux/packages/%{selinuxtype}/maknae.pp.bz2"
+            .replace("%{_datadir}", "/usr/share")
+            .replace("%{selinuxtype}", "targeted");
+        assert_eq!(rendered, SELINUX_POLICY_PACKAGE);
+        assert!(spec.contains("\n%{_datadir}/selinux/packages/%{selinuxtype}/maknae.pp.bz2\n"));
     }
 
     #[test]

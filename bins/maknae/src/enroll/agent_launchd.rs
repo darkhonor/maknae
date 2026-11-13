@@ -281,7 +281,9 @@ pub(crate) fn start(
     launchctl(r, &["bootstrap", "system", &path.to_string_lossy()])
 }
 
-/// `remove` deletes the plist, once launchd no longer holds the job.
+/// `remove` deletes the plist, once launchd no longer holds the job. launchctl
+/// cannot delete an override entry; `enable` resets one to the default, as
+/// `uninstall.sh` does.
 pub(crate) fn stop(
     r: &dyn Run,
     agent: &AgentId,
@@ -289,7 +291,8 @@ pub(crate) fn stop(
     remove: impl FnOnce() -> Result<(), EnrollError>,
 ) -> Result<(), EnrollError> {
     unload(r, agent, pause)?;
-    remove()
+    remove()?;
+    launchctl(r, &["enable", &target(agent)])
 }
 
 #[cfg(test)]
@@ -585,6 +588,7 @@ mod tests {
                 "/bin/launchctl bootout system/io.maknae.maknae-agentd.hobi",
                 "/bin/launchctl print system/io.maknae.maknae-agentd.hobi",
                 "remove",
+                "/bin/launchctl enable system/io.maknae.maknae-agentd.hobi",
             ]
         );
     }
@@ -601,8 +605,37 @@ mod tests {
             *r.log.borrow(),
             [
                 "/bin/launchctl print system/io.maknae.maknae-agentd.hobi",
-                "remove"
+                "remove",
+                "/bin/launchctl enable system/io.maknae.maknae-agentd.hobi",
             ]
+        );
+    }
+
+    #[test]
+    fn a_plist_that_cannot_be_removed_leaves_the_override_alone() {
+        let r = Launchd::default();
+        let e = stop(&r, &hobi(), &mut no_pause(), || {
+            Err(EnrollError::State("remove failed".into()))
+        })
+        .unwrap_err();
+        assert!(matches!(&e, EnrollError::State(m) if m == "remove failed"));
+        assert_eq!(
+            *r.log.borrow(),
+            ["/bin/launchctl print system/io.maknae.maknae-agentd.hobi"]
+        );
+    }
+
+    #[test]
+    fn a_refused_enable_after_removal_fails_the_stop() {
+        let r = Launchd {
+            refuse: Some("enable"),
+            ..Launchd::default()
+        };
+        let e = stop(&r, &hobi(), &mut no_pause(), || Ok(())).unwrap_err();
+        assert!(
+            matches!(&e, EnrollError::Command { program, .. }
+                if program == "/bin/launchctl enable system/io.maknae.maknae-agentd.hobi"),
+            "{e:?}"
         );
     }
 

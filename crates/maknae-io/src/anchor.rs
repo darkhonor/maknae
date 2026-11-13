@@ -444,6 +444,11 @@ pub fn read_absolute(
     target: TargetRequired,
     pref: StrategyPref,
 ) -> Result<Outcome<Zeroizing<Vec<u8>>>, IoError> {
+    let (anchor, name) = parent_anchor(path, pref)?;
+    anchor.read(&name, None, target)
+}
+
+fn parent_anchor(path: &Path, pref: StrategyPref) -> Result<(Anchor, PathBuf), IoError> {
     // `std::path::absolute` fails only on an empty path or an unreadable cwd; neither
     // carries a raw errno on every platform, so the fallback keeps the error typed.
     let path = &std::path::absolute(path).map_err(|e| IoError::Io {
@@ -459,7 +464,58 @@ pub fn read_absolute(
             path: path.to_path_buf(),
         })?;
     let anchor = open_anchor_resolved(parent, AnchorRequired::OS_DAC, pref)?;
-    anchor.read(Path::new(name), None, target)
+    Ok((anchor, PathBuf::from(name)))
+}
+
+/// Reads a kernel attribute file (sysfs, selinuxfs) to EOF. Its `st_size` is the
+/// page size or 0, not its length, so [`read_absolute`] refuses it as a size change.
+/// `target` is checked against the `fstat`; content past `max_bytes` is refused.
+pub fn read_kernel_attribute(
+    path: &Path,
+    target: TargetRequired,
+    max_bytes: usize,
+) -> Result<Zeroizing<Vec<u8>>, IoError> {
+    let (anchor, name) = parent_anchor(path, StrategyPref::ForcePortable)?;
+    let full = anchor.path.join(&name);
+    let name = name
+        .to_str()
+        .ok_or_else(|| IoError::NonUtf8Component { path: full.clone() })?;
+    let fd = syscall::open_read_target(&anchor.fd, name)
+        .map_err(|e| crate::checks::map_errno_no_disambiguation(e, &full))?;
+    read_attribute(&full, &target, max_bytes, syscall::fstat(&fd), |buf| {
+        nix::unistd::read(&fd, buf)
+    })
+}
+
+fn read_attribute(
+    full: &Path,
+    target: &TargetRequired,
+    max_bytes: usize,
+    st: nix::Result<nix::sys::stat::FileStat>,
+    mut read: impl FnMut(&mut [u8]) -> nix::Result<usize>,
+) -> Result<Zeroizing<Vec<u8>>, IoError> {
+    let st = st.map_err(|errno| crate::checks::map_errno_no_disambiguation(errno, full))?;
+    crate::checks::check_target(&st, full, target)?;
+    let mut buf = Zeroizing::new(vec![0u8; max_bytes + 1]);
+    let mut n = 0;
+    loop {
+        // At the cap the slice is empty, and a read of 0 bytes ends the loop.
+        match read(&mut buf[n..]) {
+            Ok(0) => break,
+            Ok(k) => n += k,
+            Err(nix::errno::Errno::EINTR) => {}
+            Err(errno) => return Err(crate::checks::map_errno_no_disambiguation(errno, full)),
+        }
+    }
+    if n > max_bytes {
+        return Err(IoError::TargetTooLarge {
+            path: full.to_path_buf(),
+            limit: max_bytes as u64,
+            actual: n as u64,
+        });
+    }
+    buf.truncate(n);
+    Ok(buf)
 }
 
 impl Anchor {
@@ -3573,5 +3629,110 @@ mod tests {
             own("../escape"),
             Err(IoError::EscapesAnchor { .. })
         ));
+    }
+
+    // --- #629: kernel attribute files ----------------------------------------
+    fn attribute(d: &Path, body: &[u8], mode: u32) -> PathBuf {
+        let f = d.join("enforce");
+        std::fs::write(&f, body).unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(mode)).unwrap();
+        f
+    }
+
+    #[test]
+    fn a_kernel_attribute_reads_to_eof_up_to_its_limit() {
+        let d = dir(0o750);
+        let f = attribute(d.path(), b"1\n", 0o644);
+        let got = read_kernel_attribute(&f, t_req(), 2).unwrap();
+        assert_eq!(got.as_slice(), b"1\n");
+        let e = read_kernel_attribute(&f, t_req(), 1).unwrap_err();
+        assert!(
+            matches!(&e, IoError::TargetTooLarge { limit: 1, actual: 2, path } if path == &f),
+            "got {e:?}"
+        );
+        std::fs::write(&f, b"").unwrap();
+        assert!(read_kernel_attribute(&f, t_req(), 2).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_kernel_attribute_is_held_to_its_target_and_never_followed() {
+        let d = dir(0o750);
+        let f = attribute(d.path(), b"Y\n", 0o666);
+        let strict = TargetRequired {
+            mode_mask: Some(0o022),
+            ..t_req()
+        };
+        let e = read_kernel_attribute(&f, strict, 64).unwrap_err();
+        assert!(
+            !matches!(e, IoError::TargetTooLarge { .. } | IoError::Symlink { .. }),
+            "got {e:?}"
+        );
+        let link = d.path().join("link");
+        symlink(&f, &link).unwrap();
+        let e = read_kernel_attribute(&link, t_req(), 64).unwrap_err();
+        assert!(matches!(e, IoError::Symlink { .. }), "got {e:?}");
+        let e = read_kernel_attribute(&d.path().join("absent"), t_req(), 64).unwrap_err();
+        assert!(matches!(e, IoError::Io { .. }), "got {e:?}");
+        let e = read_kernel_attribute(&d.path().join("absent/enforce"), t_req(), 64).unwrap_err();
+        assert!(matches!(e, IoError::Io { .. }), "got {e:?}");
+        let e = read_kernel_attribute(Path::new("/"), t_req(), 64).unwrap_err();
+        assert!(matches!(e, IoError::RootAnchor), "got {e:?}");
+    }
+
+    #[test]
+    fn a_kernel_attribute_with_a_non_utf8_name_is_refused() {
+        use std::os::unix::ffi::OsStrExt;
+        let d = dir(0o750);
+        let f = d.path().join(std::ffi::OsStr::from_bytes(b"\xff"));
+        let e = read_kernel_attribute(&f, t_req(), 64).unwrap_err();
+        assert!(matches!(e, IoError::NonUtf8Component { .. }), "got {e:?}");
+    }
+
+    #[test]
+    fn a_kernel_attribute_read_retries_eintr_and_refuses_an_error() {
+        let d = dir(0o750);
+        let f = attribute(d.path(), b"", 0o644);
+        let st = || nix::sys::stat::stat(&f);
+        let mut script = vec![
+            Err(nix::errno::Errno::EINTR),
+            Ok(b"1".as_slice()),
+            Ok(b"\n".as_slice()),
+            Ok(b"".as_slice()),
+        ]
+        .into_iter();
+        let got = read_attribute(&f, &t_req(), 8, st(), |buf| {
+            let step = script.next().unwrap()?;
+            buf[..step.len()].copy_from_slice(step);
+            Ok(step.len())
+        })
+        .unwrap();
+        assert_eq!(got.as_slice(), b"1\n");
+        let e = read_attribute(&f, &t_req(), 8, st(), |_| Err(nix::errno::Errno::EIO)).unwrap_err();
+        assert!(matches!(e, IoError::Io { .. }), "got {e:?}");
+        let e =
+            read_attribute(&f, &t_req(), 8, Err(nix::errno::Errno::EIO), |_| Ok(0)).unwrap_err();
+        assert!(matches!(e, IoError::Io { .. }), "got {e:?}");
+    }
+
+    /// The fixtures `read_absolute` refuses: sysfs reports more than it holds,
+    /// procfs less.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_kernel_attribute_whose_st_size_is_not_its_length_reads_whole() {
+        let online = Path::new("/sys/devices/system/cpu/online");
+        if !online.exists() {
+            crate::testutil::skip_or_fail(
+                "a_kernel_attribute_whose_st_size_is_not_its_length_reads_whole",
+                "/sys is not mounted",
+            );
+            return;
+        }
+        let sz = std::fs::symlink_metadata(online).unwrap().len() as usize;
+        let got = read_kernel_attribute(online, t_req(), 64 * 1024).unwrap();
+        assert!(!got.is_empty() && got.len() < sz && got.ends_with(b"\n"));
+        let status = PathBuf::from(format!("/proc/{}/status", std::process::id()));
+        assert_eq!(std::fs::symlink_metadata(&status).unwrap().len(), 0);
+        let got = read_kernel_attribute(&status, t_req(), 64 * 1024).unwrap();
+        assert!(got.starts_with(b"Name:"));
     }
 }

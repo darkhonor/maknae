@@ -1379,15 +1379,24 @@ fn check_account(
     })?;
     #[cfg(not(target_os = "macos"))]
     {
+        agent_unit::require_no_unenrolled_account(
+            maknae_io::user_by_name(agent_unit::UNENROLLED_ACCOUNT)
+                .map_err(|e| owner_error(&format!("user {}", agent_unit::UNENROLLED_ACCOUNT), e))?
+                .is_some(),
+        )?;
         if !agent_apparmor::home_ok(&home) {
             return Err(agent_apparmor::home_refusal(account, &home));
         }
+        agent_unit::require_selinux_enforcing(
+            maknae_io::presence(Path::new(agent_unit::SELINUX_POLICY_PACKAGE)).unwrap_or(true),
+            agent_access::kernel_flag(agent_unit::SELINUX_ENFORCE).as_deref(),
+        )?;
         if Path::new(agent_unit::SELINUX_ENFORCE).exists() {
             agent_unit::selinux_home_check(&agent_access::Host, account, &home)?;
         }
         agent_apparmor::require_enabled(
             agent_apparmor::open_tunables(Path::new(agent_apparmor::TUNABLES_DIR))?.is_some(),
-            agent_apparmor::read_enabled().as_deref(),
+            agent_access::kernel_flag(agent_apparmor::ENABLED_PARAM).as_deref(),
         )?;
     }
     Ok(agent_unit::ServiceAccount {

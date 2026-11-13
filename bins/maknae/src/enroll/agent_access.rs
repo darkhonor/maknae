@@ -11,6 +11,25 @@ const OWN_FILES: [&str; 3] = [
     maknae_config::PERSONA_FILE,
 ];
 
+/// A sysfs or selinuxfs flag; `None` when the file is absent or unreadable.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn kernel_flag(path: &str) -> Option<String> {
+    let out = maknae_io::read_kernel_attribute(
+        Path::new(path),
+        maknae_io::TargetRequired {
+            owner: Some(0),
+            mode_mask: Some(0o022),
+            nlink_exactly_one: false,
+            regular_file: true,
+            // kernfs reports PAGE_SIZE as st_size; arm64 may run 64 KiB pages.
+            max_bytes: Some(64 * 1024),
+        },
+        16,
+    )
+    .ok()?;
+    String::from_utf8(out.to_vec()).ok()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Platform {
     Linux,
