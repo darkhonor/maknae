@@ -450,6 +450,7 @@ impl MemTaskBlobs {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Every holder of both locks takes `map` first.
     fn disk(&self) -> std::sync::MutexGuard<'_, Disk> {
         self.0
             .disk
@@ -457,13 +458,13 @@ impl MemTaskBlobs {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Changes the live map and records the change under the map's lock, so a sync that
-    /// follows covers it.
+    /// Changes the live map and records the change under the map's lock.
     fn change(&self, name: &str, bytes: Option<&[u8]>) {
         let mut map = self.map();
         let change = (name.to_owned(), bytes.map(|b| Zeroizing::new(b.to_vec())));
         apply(&mut map, change.clone());
         self.disk().pending.push(change);
+        drop(map);
     }
 
     pub fn fail(&self, fail: Option<Fail>) {
@@ -539,6 +540,7 @@ impl MemTaskBlobs {
 
     fn settle(&self, landed: Result<(), StoreError>) -> Result<(), StoreError> {
         if landed.is_ok() {
+            let _changing = self.map();
             let mut disk = self.disk();
             let pending = std::mem::take(&mut disk.pending);
             for change in pending {
@@ -1331,6 +1333,69 @@ mod tests {
         b.crash(0);
         assert_eq!(b.load("a").unwrap().as_slice(), b"two");
         assert!(!b.has("c"));
+    }
+
+    #[test]
+    fn a_sync_waits_for_a_change_in_progress_and_covers_it() {
+        let b = MemTaskBlobs::default();
+        b.put("a", b"synced");
+        let mut map = b.map();
+        let change = ("a".to_string(), Some(Zeroizing::new(b"changing".to_vec())));
+        apply(&mut map, change.clone());
+        let (done, synced) = std::sync::mpsc::channel();
+        let syncing = {
+            let b = b.clone();
+            std::thread::spawn(move || {
+                b.settle(Ok(())).unwrap();
+                done.send(()).unwrap();
+            })
+        };
+        assert!(
+            synced.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a sync landed between a change and its record"
+        );
+        b.disk().pending.push(change);
+        drop(map);
+        synced.recv().unwrap();
+        syncing.join().unwrap();
+        b.crash(0);
+        assert_eq!(b.load("a").unwrap().as_slice(), b"changing");
+    }
+
+    #[test]
+    fn a_change_holds_the_map_until_it_is_recorded() {
+        let b = MemTaskBlobs::default();
+        b.put("a", b"synced");
+        let disk = b.disk();
+        let changing = {
+            let b = b.clone();
+            std::thread::spawn(move || b.change("a", Some(b"changing")))
+        };
+        let begun = std::time::Instant::now() + Duration::from_secs(10);
+        let mut held = None;
+        loop {
+            match b.0.map.try_lock() {
+                Ok(map) => assert_ne!(
+                    map.get("a").map(|v| v.as_slice()),
+                    Some(&b"changing"[..]),
+                    "the map was released before the change was recorded"
+                ),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    held.get_or_insert_with(std::time::Instant::now);
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => panic!("the map is poisoned"),
+            }
+            if held.is_some_and(|at| at.elapsed() >= Duration::from_millis(200)) {
+                break;
+            }
+            assert!(std::time::Instant::now() < begun, "the change never began");
+            std::thread::yield_now();
+        }
+        drop(disk);
+        changing.join().unwrap();
+        assert_eq!(b.load("a").unwrap().as_slice(), b"changing");
+        b.crash(0);
+        assert_eq!(b.load("a").unwrap().as_slice(), b"synced");
     }
 
     #[test]
