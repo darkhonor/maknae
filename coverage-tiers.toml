@@ -1114,7 +1114,7 @@ why = "the one-byte size probe's EINTR retry and its read-error arm. EINTR needs
 
 [[exception]]
 path = "crates/maknae-io/src/anchor.rs"
-anchor = "            Ok(0) => break,"
+anchor = "            // cargo-mutants rewrites into a non-terminating loop."
 end_anchor = "Err(e) => return Err(crate::checks::map_errno_no_disambiguation(e, full)),"
 why = "the read loop's three non-progress arms, and ONLY those three — the covered progress arm below them is deliberately left in the denominator. Ok(0) requires the file to shrink between the fstat and the read; EINTR requires signal delivery mid-syscall; a mid-read Err is EIO on a healthy FS. None is provokable from a unit test without a seam, and all three are pure control flow — the decision on this path is the pre-size, covered by read_buffer_is_pre_sized_and_never_reallocates"
 
