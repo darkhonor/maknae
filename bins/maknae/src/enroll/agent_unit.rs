@@ -452,6 +452,45 @@ mod tests {
             .collect()
     }
 
+    /// Every interface or macro call whose first argument names the domain; a
+    /// call added or removed changes what the domain may do.
+    #[test]
+    fn the_agent_daemon_calls_exactly_these_interfaces() {
+        let mut calls: Vec<&str> = TE
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with('#'))
+            .filter(|l| {
+                let Some((name, rest)) = l.split_once('(') else {
+                    return false;
+                };
+                let first = rest.split([',', ')']).next().unwrap_or("");
+                !name.is_empty()
+                    && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    && first
+                        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                        .any(|w| w == "maknae_agentd_t")
+            })
+            .collect();
+        calls.sort_unstable();
+        let mut want = vec![
+            "auth_use_nsswitch(maknae_agentd_t)",
+            "corenet_tcp_sendrecv_generic_node(maknae_agentd_t)",
+            "dev_read_urand(maknae_agentd_t)",
+            "files_search_var_lib(maknae_agentd_t)",
+            "init_daemon_domain(maknae_agentd_t, maknae_agentd_exec_t)",
+            "kernel_read_system_state(maknae_agentd_t)",
+            "manage_dirs_pattern(maknae_agentd_t, maknae_agent_home_t, maknae_agent_home_t)",
+            "manage_files_pattern(maknae_agentd_t, maknae_agent_home_t, maknae_agent_home_t)",
+            "miscfiles_read_generic_certs(maknae_agentd_t)",
+            "miscfiles_read_localization(maknae_agentd_t)",
+            "read_lnk_files_pattern(maknae_agentd_t, maknae_agent_home_t, maknae_agent_home_t)",
+            "sysnet_dns_name_resolve(maknae_agentd_t)",
+        ];
+        want.sort_unstable();
+        assert_eq!(calls, want);
+    }
+
     #[test]
     fn the_agent_daemon_runs_in_its_own_domain_from_its_own_entrypoint() {
         for line in [

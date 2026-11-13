@@ -56,6 +56,8 @@ esac
 STUB
 printf '#!/bin/sh\nexit 0\n' >"$scratch/bin/selinuxenabled"
 printf '#!/bin/sh\nexit 0\n' >"$scratch/bin/fapolicyd-cli"
+# %postun 1 restarts agent instances; never the host's.
+printf '#!/bin/sh\nexit 0\n' >"$scratch/bin/systemctl"
 cp "$repo/packaging/common/maknae-selinux-ports.sh" "$scratch/ports.sh"
 chmod 0755 "$scratch/bin/"* "$scratch/ports.sh"
 

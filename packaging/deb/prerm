@@ -2,15 +2,24 @@
 # maknae prerm — mirrors the rpm %preun teardown, AppArmor edition.
 set -e
 
+# The profile is unloaded only once no instance runs, so none is left unconfined.
 stop_agent_instances() {
-    systemctl stop 'maknae-agent@*.service' 2>/dev/null || :
+    local rc=0 units left
+    units="$(systemctl list-units --plain --no-legend 'maknae-agent@*.service')" || rc=1
+    units="$(printf '%s\n' "$units" | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^maknae-agent@/) {printf "%s%s", s, $i; s=" "; break}}')"
+    printf '%s\n' "$units" | xargs -r systemctl stop || rc=1
+    left="$(systemctl list-units --plain --no-legend --state=active,activating,deactivating,reloading 'maknae-agent@*.service')" || rc=1
+    left="$(printf '%s\n' "$left" | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^maknae-agent@/) {printf "%s%s", s, $i; s=" "; break}}')"
+    [ "$rc" -eq 0 ] && [ -z "$left" ] && return 0
+    echo "maknae: the Agent Daemon did not stop (${left:-${units:-its instances could not be listed}}); removal is aborted and the maknae-agentd AppArmor profile stays loaded" >&2
+    return 1
 }
 
 case "$1" in
     remove)
         # Stop before unconfining. The audit trail and its append-only attribute
         # are kept until purge.
-        stop_agent_instances
+        stop_agent_instances || exit 1
         systemctl stop maknae-policy-sync.path maknae-policy-sync.service 2>/dev/null || :
         systemctl disable maknae-policy-sync.path maknae-policy-sync.service 2>/dev/null || :
         systemctl stop maknaed.service 2>/dev/null || :
