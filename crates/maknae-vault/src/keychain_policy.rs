@@ -370,6 +370,23 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_secret_over_the_cap_is_refused_from_the_keychain() {
+        let id = AgentId::parse("hobi").unwrap();
+        let of = |n: usize| move |_: &str, _: &str| Ok(Zeroizing::new("a".repeat(n)));
+        assert!(matches!(
+            read_agent_gated(990, 990, &id, of(1025)),
+            Err(SecretSourceError::TooLarge { max: 1024 })
+        ));
+        assert_eq!(
+            read_agent_gated(990, 990, &id, of(1024))
+                .unwrap()
+                .expose()
+                .len(),
+            1024
+        );
+    }
+
+    #[test]
     fn the_agent_item_is_the_one_enroll_writes() {
         let id = AgentId::parse("hobi").unwrap();
         assert_eq!(

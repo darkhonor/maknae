@@ -58,8 +58,30 @@ pub(crate) fn read_agent_secret_in(
     credentials_dir_env: Option<&str>,
 ) -> Result<AgentSecret, SecretSourceError> {
     let path = resolve_agent_secret_source(credentials_dir_env)?;
-    let bytes = crate::read_storage_within(&path, Some(MAX_AGENT_SECRET_BYTES))
-        .map_err(SecretSourceError::Read)?;
+    let target = maknae_io::TargetRequired {
+        owner: None,
+        mode_mask: None,
+        nlink_exactly_one: true,
+        regular_file: true,
+        max_bytes: Some(MAX_AGENT_SECRET_BYTES),
+    };
+    let bytes = maknae_io::read_absolute(&path, target, maknae_io::StrategyPref::Auto)
+        .map_err(|error| match error {
+            maknae_io::IoError::TargetTooLarge { .. } => SecretSourceError::TooLarge {
+                max: MAX_AGENT_SECRET_BYTES,
+            },
+            maknae_io::IoError::MultiplyLinked { nlink, .. } => {
+                SecretSourceError::Read(VaultError::InsecureCredential {
+                    path: path.clone(),
+                    detail: format!("has {nlink} hard links"),
+                })
+            }
+            other => SecretSourceError::Read(VaultError::Io {
+                path: path.clone(),
+                source: std::io::Error::other(other.to_string()),
+            }),
+        })?
+        .value;
     let text = std::str::from_utf8(&bytes).map_err(|e| {
         SecretSourceError::Read(VaultError::Io {
             path: path.clone(),
@@ -199,8 +221,34 @@ mod tests {
         .unwrap();
         assert!(matches!(
             read_agent_secret_in(Some(dir)),
-            Err(SecretSourceError::Read(VaultError::Io { .. }))
+            Err(SecretSourceError::TooLarge { max: 1024 })
         ));
+    }
+
+    #[test]
+    fn a_hard_linked_agent_credential_is_refused() {
+        let creds = tempfile::tempdir().unwrap();
+        let dir = creds.path().to_str().unwrap();
+        let elsewhere = creds.path().join("elsewhere");
+        std::fs::write(&elsewhere, "agent-sid").unwrap();
+        std::fs::hard_link(
+            &elsewhere,
+            creds
+                .path()
+                .join(crate::agent_enroll::AGENT_CREDENTIAL_NAME),
+        )
+        .unwrap();
+        assert!(matches!(
+            read_agent_secret_in(Some(dir)),
+            Err(SecretSourceError::Read(
+                VaultError::InsecureCredential { .. }
+            ))
+        ));
+        std::fs::remove_file(&elsewhere).unwrap();
+        assert_eq!(
+            read_agent_secret_in(Some(dir)).unwrap().expose(),
+            "agent-sid"
+        );
     }
 
     #[test]

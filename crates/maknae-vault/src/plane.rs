@@ -1,6 +1,6 @@
 //! The two planes. Never hardcode a bare `maknae`/`maknaed` string; derive from here (spec §3 tri-naming).
 
-use crate::agent_enroll::AgentId;
+use crate::agent_enroll::{AgentId, AGENT_ROLE_PREFIX};
 use std::borrow::Cow;
 
 /// Which plane a client acts as.
@@ -53,7 +53,7 @@ impl PlaneSubject {
     pub fn pki_sign_role(&self) -> Cow<'static, str> {
         match self {
             PlaneSubject::Fixed(plane) => Cow::Borrowed(plane.pki_sign_role()),
-            PlaneSubject::Agent(id) => Cow::Owned(format!("maknae-agent-{}", id.as_str())),
+            PlaneSubject::Agent(id) => Cow::Owned(format!("{AGENT_ROLE_PREFIX}{}", id.as_str())),
         }
     }
 

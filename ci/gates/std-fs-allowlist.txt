@@ -73,6 +73,11 @@ crates/maknae-config/src/loader.rs|owner: None,
 # owner requirement on the anchor, the descendant and the target alike (`requirement.owner`),
 # so it carries no requirement-free `owner: None` line and needs no entry here.
 crates/maknae-vault/src/client.rs|owner: None,
+# #629: the agent's systemd credential. systemd owns the credentials directory and
+# sets the file's owner and mode, so neither is the agent's to require; the read
+# names nlink == 1 and a 1 KiB cap instead.
+crates/maknae-vault/src/secret_io.rs|owner: None,
+crates/maknae-vault/src/secret_io.rs|mode_mask: None,
 
 # Unix-domain socket lifecycle belongs to transport (#66), not storage I/O.
 crates/maknae-vault/src/socket.rs|let meta = std::fs::metadata(dir).map_err(|e| VaultError::InsecureSocketDir {

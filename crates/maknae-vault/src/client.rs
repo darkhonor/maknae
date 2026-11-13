@@ -133,6 +133,18 @@ impl PlaneAuth {
     }
 }
 
+struct Signing {
+    subject: PlaneSubject,
+    deployment_id: String,
+    pki_int_mount: String,
+    plane_key: PlaneKey,
+}
+
+#[cfg(target_os = "macos")]
+const AGENT_SECRET_SOURCE: CredentialSourceKind = CredentialSourceKind::Keychain;
+#[cfg(not(target_os = "macos"))]
+const AGENT_SECRET_SOURCE: CredentialSourceKind = CredentialSourceKind::CredentialsDirectory;
+
 #[derive(Clone, Debug)]
 pub struct AgentLogin {
     /// Holds `tls/maknae-root-ca.crt`, `tls/maknae-int-ca.crt` and `tls/vault-ca.crt`.
@@ -476,6 +488,18 @@ impl PlaneClient {
             maknae_config::mount_path_is_acceptable(mount)
                 .map_err(|why| VaultError::InvalidMount(format!("agent {key} {why}")))?;
         }
+        if login.approle_mount == crate::DEFAULT_APPROLE_MOUNT {
+            return Err(VaultError::InvalidMount(format!(
+                "agent approle_mount {:?} is the kernel's mount",
+                login.approle_mount
+            )));
+        }
+        if login.role_id.trim().is_empty() {
+            return Err(VaultError::ConfigShape {
+                key: "role_id",
+                want: "a non-empty AppRole RoleID",
+            });
+        }
         let _ca = load_ca_pin(&login.config_dir)?;
         let auth = PlaneAuth::AgentAppRole(AppRoleAuth {
             role_id: login.role_id.clone(),
@@ -483,13 +507,16 @@ impl PlaneClient {
             approle_mount: login.approle_mount.clone(),
         });
         Self::assemble(
-            PlaneSubject::Agent(login.agent.clone()),
+            Signing {
+                subject: PlaneSubject::Agent(login.agent.clone()),
+                deployment_id: login.trust_domain.clone(),
+                pki_int_mount: login.pki_int_mount.clone(),
+                plane_key: login.plane_key,
+            },
             &login.addr,
-            login.trust_domain.clone(),
-            login.pki_int_mount.clone(),
-            login.plane_key,
             &login.config_dir,
             auth,
+            AGENT_SECRET_SOURCE,
         )
     }
 
@@ -505,24 +532,25 @@ impl PlaneClient {
         let _ca = load_ca_pin(dir)?;
         let auth = auth(&cfg)?;
         Self::assemble(
-            PlaneSubject::Fixed(plane),
+            Signing {
+                subject: PlaneSubject::Fixed(plane),
+                deployment_id: cfg.deployment_id,
+                pki_int_mount: cfg.pki_int_mount,
+                plane_key: cfg.plane_key,
+            },
             &cfg.addr,
-            cfg.deployment_id,
-            cfg.pki_int_mount,
-            cfg.plane_key,
             dir,
             auth,
+            CredentialSourceKind::PlaintextPath,
         )
     }
 
     fn assemble(
-        subject: PlaneSubject,
+        signing: Signing,
         addr: &str,
-        deployment_id: String,
-        pki_int_mount: String,
-        plane_key: PlaneKey,
         dir: &Path,
         auth: PlaneAuth,
+        secret_source_kind: CredentialSourceKind,
     ) -> Result<Self, VaultError> {
         let vault_ca = dir.join("tls").join("vault-ca.crt");
         let settings = plane_settings(addr, &vault_ca)?;
@@ -534,6 +562,12 @@ impl PlaneClient {
         // only, no proxy) is what actually sends.
         let address = client.settings.address.to_string();
         crate::http::harden(&mut client, &address, &vault_ca, PLANE_HTTP_TIMEOUT)?;
+        let Signing {
+            subject,
+            deployment_id,
+            pki_int_mount,
+            plane_key,
+        } = signing;
         Ok(Self {
             subject,
             deployment_id,
@@ -546,7 +580,7 @@ impl PlaneClient {
             cert_sink: Arc::new(RwLock::new(None)),
             leaf_issued_at: Arc::new(AtomicU64::new(0)),
             leaf_ttl_secs: Arc::new(AtomicU64::new(0)),
-            secret_source_kind: CredentialSourceKind::PlaintextPath,
+            secret_source_kind,
         })
     }
 
@@ -1589,6 +1623,7 @@ mod tests {
 
     #[test]
     fn agent_login_uses_the_agent_mount_and_role() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let fx = DispatchFixture::with_addr("agent-login", DEAD_VAULT, "");
         std::fs::remove_file(fx.0.join("maknaed-approle-id")).unwrap();
         let secret = AgentSecret::new(Zeroizing::new("agent-secret-sentinel".into()));
@@ -1608,6 +1643,12 @@ mod tests {
         );
         assert_eq!(client.deployment_id(), "dev-01");
         assert_eq!(client.auth.token_source(), PlaneTokenSource::AppRoleLogin);
+        let sealed = if cfg!(target_os = "macos") {
+            CredentialSourceKind::Keychain
+        } else {
+            CredentialSourceKind::CredentialsDirectory
+        };
+        assert_eq!(client.secret_source(), sealed);
         let rt = current_thread(false);
         assert!(matches!(
             rt.block_on(client.mint()),
@@ -1617,6 +1658,7 @@ mod tests {
 
     #[test]
     fn an_agent_login_refuses_a_plaintext_vault_or_a_bad_trust_domain() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let fx = DispatchFixture::with_addr("agent-login-bad", DEAD_VAULT, "");
         let secret = || AgentSecret::new(Zeroizing::new("s".into()));
         let plain = agent_login(&fx.0, "http://127.0.0.1:1");
@@ -1636,6 +1678,20 @@ mod tests {
             PlaneClient::for_agent(&bad_mount, secret()),
             Err(VaultError::InvalidMount(m)) if m.starts_with("agent approle_mount")
         ));
+        let mut kernel_mount = agent_login(&fx.0, DEAD_VAULT);
+        kernel_mount.approle_mount = crate::DEFAULT_APPROLE_MOUNT.into();
+        assert!(matches!(
+            PlaneClient::for_agent(&kernel_mount, secret()),
+            Err(VaultError::InvalidMount(m)) if m.contains("kernel")
+        ));
+        for role_id in ["", "  "] {
+            let mut no_role = agent_login(&fx.0, DEAD_VAULT);
+            no_role.role_id = role_id.into();
+            assert!(matches!(
+                PlaneClient::for_agent(&no_role, secret()),
+                Err(VaultError::ConfigShape { key: "role_id", .. })
+            ));
+        }
     }
 
     #[test]

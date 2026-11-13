@@ -307,6 +307,11 @@ impl AgentSecret {
         if text.is_empty() {
             return Err(SecretSourceError::Empty);
         }
+        if text.len() as u64 > MAX_AGENT_SECRET_BYTES {
+            return Err(SecretSourceError::TooLarge {
+                max: MAX_AGENT_SECRET_BYTES,
+            });
+        }
         let mut secret = Zeroizing::new(String::with_capacity(text.len()));
         secret.push_str(text);
         Ok(Self(secret))
@@ -325,6 +330,7 @@ pub enum SecretSourceError {
     CredentialsDirectoryEmpty,
     WrongUser { euid: u32, enrolled: u32 },
     Empty,
+    TooLarge { max: u64 },
     Read(VaultError),
 }
 
@@ -345,6 +351,9 @@ impl fmt::Display for SecretSourceError {
                 "refusing the agent's keychain read: running as uid {euid}, not as the enrolled uid {enrolled}"
             ),
             SecretSourceError::Empty => write!(f, "the agent's SecretID is empty"),
+            SecretSourceError::TooLarge { max } => {
+                write!(f, "the agent's SecretID is over {max} bytes")
+            }
             SecretSourceError::Read(e) => write!(f, "reading the agent's SecretID: {e}"),
         }
     }
