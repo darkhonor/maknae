@@ -469,6 +469,15 @@ files = [
   # agent_keys_read_only_under_the_agent_tree and, against admit_choice, by
   # maknae-kernel's an_agents_sealed_key_opens_only_on_the_path_the_kernel_admits_for_that_agent.
   "crates/maknae-loop/src/keys.rs",
+  # #629: the agent daemon's plane. T2: verify decodes a delivered task and hands it
+  # to maknae-vault's verify_task (T1), and a persona is read only when the agent's
+  # own account owns it and no one else can write it; both fail closed. Pinned by
+  # its unit tests and end to end by maknae-kernel's tests/agent_daemon.rs.
+  "crates/maknae-loop/src/agent.rs",
+  # #629: the agent daemon's SIGTERM drain and its interruptible clock. T2: a wrong
+  # arm overruns the stop bound or leaves a 990 s wait unstoppable (availability);
+  # it carries no verdict.
+  "bins/maknae-agentd/src/shutdown.rs",
 ]
 
 [project]
@@ -533,6 +542,14 @@ why = "#153: reads ~/.maknae/providers.yaml through maknae-config's existing mak
 [[t3]]
 path = "bins/maknae-egress/src/main.rs"
 why = "thin main: env scrub + FIPS install + arg parse + bounds load + uid resolve + seal-key load + Vault client + socket acquire + the runtime and accept-loop wiring (#321, its runtime proven able to drive concurrent block_on calls by a test here); every decision it makes is fail-closed exit-1, the behaviour lives in maknae-deputy's handle.rs/unseal.rs/call.rs (T1), serve.rs (T2), opener.rs and listen.rs (T3) and maknae-vault's env.rs (T1), and its load-bearing ORDERINGS (scrub first, keys loaded before the listener) are pinned by a source-order test in its OWN test module. Same treatment as bins/maknaed/src/main.rs"
+
+[[t3]]
+path = "bins/maknae-agentd/src/main.rs"
+why = "#629: thin main: arg parse + runtime + signal listener + config, enrollment and SecretID load + the euid check + mint + wiring into maknae-agent's TaskDriver; every refusal is exit 1, and needs a live Vault and kernel. The driver is T1 in maknae-agent::task_driver, the plane T2 in maknae-loop::agent, the drain T2 in shutdown.rs; the whole wiring short of Vault is exercised by maknae-kernel's tests/agent_daemon.rs"
+
+[[t3]]
+path = "bins/maknae-agentd/src/plane_impl.rs"
+why = "#629: the production assembly over a live Vault and kernel: the AgentLogin, the AgentPlane, the mint retry and the leaf supervisor loop. login, driver_config, persona_mode, describe, next_backoff and agent_id are pure and table-tested here; connect, mint_until_held and keep_leaf need Vault, as bins/maknae/src/agent.rs's run does"
 
 [[t3]]
 path = "bins/maknaed/src/main.rs"

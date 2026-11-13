@@ -157,7 +157,7 @@ merely describes it:
 > The refused cells come from `TRUST_CONSUMER_ALLOW` in [`ci/gates/lib.sh`](../../ci/gates/lib.sh),
 > and that allowlist is policed by [`p1-manifest-lint.sh`](../../ci/gates/p1-manifest-lint.sh) —
 > the sole consumer of it — on every run. The adjacent isolation claim, that no
-> `PRIVILEGED_CRATES` member is reachable from `UNTRUSTED_BIN`, is decided by
+> `PRIVILEGED_CRATES` member is reachable from any `UNTRUSTED_BINS` member, is decided by
 > [`p2-invert-tree.sh`](../../ci/gates/p2-invert-tree.sh).
 >
 > **Worth noting, because it settles the question rather than conceding it:** `p2-invert-tree.sh`
@@ -172,7 +172,7 @@ merely describes it:
 > reintroduced the equivalence the rest of this note disclaims.
 >
 > **Per-artifact evidence has its own path:** [`p2-artifact-witness.sh`](../../ci/gates/p2-artifact-witness.sh),
-> run in CI right after the auditable builds. It builds `UNTRUSTED_BIN` with
+> run in CI right after the auditable builds. It builds each `UNTRUSTED_BINS` member with
 > `CARGO_PROFILE_RELEASE_STRIP=false`, requires a non-empty `rust-audit-info` inventory
 > (fail-closed if absent), and asserts the inventory names no `PRIVILEGED_CRATES` member — plus a
 > symbol scan its own comment marks **best-effort and not load-bearing**, because release

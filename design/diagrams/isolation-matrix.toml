@@ -28,7 +28,7 @@ label = "CLI as user B"
 
 [[subject]]
 id = "agentd"
-label = "Agent Daemon (planned, not provisioned)"
+label = "Agent Daemon"
 
 [[subject]]
 id = "kernel"
@@ -189,49 +189,51 @@ right = "p"
 control = "part; no control while A's CLI runs (#436, undecided): argv is world-readable on a default host (Linux /proc without hidepid, macOS ps), so B sees --provider <label> and the process owner; the audit trail holding the rest is written by maknaed in a 0700 _maknae directory"
 evidence = "bins/maknae/src/cli.rs:147 · crates/maknae-audit-append/src/sink.rs:48 · packaging/rpm/maknae.spec:176 · packaging/deb/postinst:48 · packaging/macos/scripts/preinstall:203"
 
-# --- Agent Daemon (planned) -----------------------------------------------
+# --- Agent Daemon (#629) --------------------------------------------------
 
 [[cell]]
 subject = "agentd"
 object = "key_a"
 right = "none"
-control = "not built: no account, process or Vault identity exists yet (epic #420)"
-evidence = "ADR-0028"
+control = "the agent's AppRole login reads only under its own <kv>/data/<agent_prefix>/<id>/; the kernel builds every key path from the authenticated agent id, never from the request (ADR-0028)"
+evidence = "deploy/vault-pki/agents.tf · crates/maknae-kernel/src/provider_choice.rs:85 · crates/maknae-loop/src/keys.rs"
+test = "crates/maknae-kernel/tests/task_loop.rs::an_agents_sealed_key_opens_only_on_the_path_the_kernel_admits_for_that_agent · crates/maknae-kernel/tests/agent_daemon.rs::an_agent_carries_out_a_prompt_task_in_its_taskers_partition"
 
 [[cell]]
 subject = "agentd"
 object = "key_b"
 right = "none"
-control = "not built: no account, process or Vault identity exists yet (epic #420)"
-evidence = "ADR-0028"
+control = "the agent's AppRole login reads only under its own <kv>/data/<agent_prefix>/<id>/; the kernel builds every key path from the authenticated agent id, never from the request (ADR-0028)"
+evidence = "deploy/vault-pki/agents.tf · crates/maknae-kernel/src/provider_choice.rs:85 · crates/maknae-loop/src/keys.rs"
+test = "crates/maknae-kernel/tests/task_loop.rs::an_agents_sealed_key_opens_only_on_the_path_the_kernel_admits_for_that_agent · crates/maknae-kernel/tests/agent_daemon.rs::an_agent_carries_out_a_prompt_task_in_its_taskers_partition"
 
 [[cell]]
 subject = "agentd"
 object = "wrap"
 right = "none"
-control = "not built: no account, process or Vault identity exists yet (epic #420)"
-evidence = "ADR-0028"
+control = "A's turn is minted under A's Vault login in A's CLI process and crosses only A's connection to maknaed; the Agent Daemon runs as the agent's own uid and Vault identity, on the agent socket"
+evidence = "bins/maknae/src/agent.rs · bins/maknae-agentd/src/main.rs · crates/maknae-loop/src/plane.rs"
 
 [[cell]]
 subject = "agentd"
 object = "sealed"
 right = "none"
-control = "not built: no account, process or Vault identity exists yet (epic #420)"
-evidence = "ADR-0028"
+control = "A's turn is minted under A's Vault login in A's CLI process and crosses only A's connection to maknaed; the Agent Daemon runs as the agent's own uid and Vault identity, on the agent socket"
+evidence = "bins/maknae/src/agent.rs · bins/maknae-agentd/src/main.rs · crates/maknae-loop/src/plane.rs"
 
 [[cell]]
 subject = "agentd"
 object = "prompt"
 right = "none"
-control = "not built: no account, process or Vault identity exists yet (epic #420)"
-evidence = "ADR-0028"
+control = "a conversation is bound to the uid that opened it, and the agent channel addresses only the agent's own; a task's prompt reaches the agent only as the kernel-signed task the tasker submitted"
+evidence = "crates/maknae-kernel/src/run.rs · crates/maknae-loop/src/agent.rs"
 
 [[cell]]
 subject = "agentd"
 object = "meta"
 right = "none"
-control = "not built: no account, process or Vault identity exists yet (epic #420)"
-evidence = "ADR-0028"
+control = "a conversation is bound to the uid that opened it, and the agent channel addresses only the agent's own; a task's prompt reaches the agent only as the kernel-signed task the tasker submitted"
+evidence = "crates/maknae-kernel/src/run.rs · crates/maknae-loop/src/agent.rs"
 
 # --- maknaed --------------------------------------------------------------
 

@@ -27,6 +27,7 @@ members = [
   "crates/maknae-sys",
   "crates/maknae-crypto",
   "crates/maknae-vault",
+  "bins/maknae-agentd",
   "bins/maknae-egress",
   "bins/maknaed",
   "bins/maknae",

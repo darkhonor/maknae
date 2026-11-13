@@ -1105,6 +1105,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "maknae-agentd"
+version = "0.0.0"
+dependencies = [
+ "maknae-agent",
+ "maknae-config",
+ "maknae-crypto",
+ "maknae-io",
+ "maknae-loop",
+ "maknae-proto",
+ "maknae-seal",
+ "maknae-vault",
+ "nix",
+ "tokio",
+]
+
+[[package]]
 name = "maknae-audit"
 version = "0.0.0"
 
@@ -1252,6 +1268,7 @@ dependencies = [
 name = "maknae-loop"
 version = "0.0.0"
 dependencies = [
+ "ciborium",
  "maknae-agent",
  "maknae-config",
  "maknae-crypto",

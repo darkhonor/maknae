@@ -215,7 +215,7 @@ impl LoopPlane<AgentKeys, PlaneDial> {
 }
 
 impl<K: KeySupply, D: Dial> LoopPlane<K, D> {
-    pub(crate) fn with_dial(
+    pub fn with_dial(
         dial: D,
         transport: TransportConfig,
         output_tokens: Option<u64>,

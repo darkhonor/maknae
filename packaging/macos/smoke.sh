@@ -379,6 +379,7 @@ phase1() {
                 "./Library/LaunchDaemons/io.maknae.policy-sync.plist" \
                 "./usr" "./usr/local" "./usr/local/bin" "./usr/local/bin/maknaed" \
                 "./usr/local/bin/maknae-egress" \
+                "./usr/local/bin/maknae-agentd" \
                 "./usr/local/lib" "./usr/local/lib/maknae" \
                 "./usr/local/lib/maknae/FIPSDYLIB" \
                 "./usr/local/share" "./usr/local/share/maknae" \
@@ -748,7 +749,7 @@ PROBE
         esac
     fi
     local gone
-    for gone in /usr/local/bin/maknae-egress /Library/LaunchDaemons/io.maknae.maknae-egress.plist \
+    for gone in /usr/local/bin/maknae-egress /usr/local/bin/maknae-agentd /Library/LaunchDaemons/io.maknae.maknae-egress.plist \
                 /Library/LaunchDaemons/io.maknae.policy-sync.plist /Library/Logs/maknae-policy-sync.log \
                 /usr/local/var/run/maknae-egress /usr/local/var/log/maknae-egress \
                 /usr/local/var/run/maknae /usr/local/var/log/maknae /usr/local/var/run/maknae-agent \

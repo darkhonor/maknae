@@ -22,7 +22,7 @@ export GIT_NO_REPLACE_OBJECTS=1
 root="${1:-$(git rev-parse --show-toplevel)}"
 fail=0
 
-for bin in maknaed maknae maknae-egress maknae-spifc; do
+for bin in maknaed maknae maknae-agentd maknae-egress maknae-spifc; do
   out="$(cd "$root" && cargo tree -p "$bin" -e normal -f '{p} {f}' 2>/dev/null)" || {
     echo "FAIL: cargo tree -p $bin failed"
     fail=1

@@ -43,7 +43,7 @@ for LABEL in io.maknae.policy-sync io.maknae.maknaed io.maknae.maknae-egress; do
     rm -f "/Library/LaunchDaemons/${LABEL}.plist"
 done
 
-rm -f /usr/local/bin/maknaed /usr/local/bin/maknae /usr/local/bin/maknae-egress
+rm -f /usr/local/bin/maknaed /usr/local/bin/maknae /usr/local/bin/maknae-egress /usr/local/bin/maknae-agentd
 rm -rf /usr/local/var/run/maknae /usr/local/var/log/maknae /usr/local/share/maknae
 rm -rf /usr/local/var/run/maknae-egress /usr/local/var/log/maknae-egress
 rm -rf /usr/local/var/run/maknae-agent

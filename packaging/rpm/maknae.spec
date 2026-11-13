@@ -31,6 +31,7 @@ Source14:       maknae-policy-sync.path
 Source15:       maknae-policy-sync.service
 Source16:       80-maknae.preset
 Source17:       sensitive.yaml
+Source18:       maknae-agentd
 
 ExclusiveArch:  x86_64
 
@@ -84,6 +85,7 @@ bzip2 -9 maknae.pp
 install -D -m 0755 %{SOURCE0} %{buildroot}%{_bindir}/maknaed
 install -D -m 0755 %{SOURCE1} %{buildroot}%{_bindir}/maknae
 install -D -m 0755 %{SOURCE10} %{buildroot}%{_bindir}/maknae-egress
+install -D -m 0755 %{SOURCE18} %{buildroot}%{_bindir}/maknae-agentd
 
 # systemd unit
 install -D -m 0644 %{SOURCE2} %{buildroot}%{_unitdir}/maknaed.service
@@ -234,6 +236,7 @@ fi
 %{_bindir}/maknaed
 %{_bindir}/maknae
 %{_bindir}/maknae-egress
+%{_bindir}/maknae-agentd
 %{_unitdir}/maknaed.service
 %{_unitdir}/maknae-egress.service
 %{_unitdir}/maknae-egress.socket

@@ -65,12 +65,12 @@ def sh(*args: str) -> str:
 
 
 def gate_facts() -> dict:
-    """PRIVILEGED_CRATES / UNTRUSTED_BIN / TRUST_CONSUMER_ALLOW, parsed from the gate."""
+    """PRIVILEGED_CRATES / UNTRUSTED_BINS / TRUST_CONSUMER_ALLOW, parsed from the gate."""
     src = (ROOT / "ci" / "gates" / "lib.sh").read_text()
     priv = re.search(r"PRIVILEGED_CRATES=\(([^)]*)\)", src).group(1).split()
-    untrusted = re.search(r'UNTRUSTED_BIN="([^"]+)"', src).group(1)
+    untrusted = re.search(r"UNTRUSTED_BINS=\(([^)]*)\)", src).group(1).split()
     allow = re.findall(r'"([a-z0-9-]+)=([a-z0-9-]+)"', src)
-    return {"privileged": sorted(priv), "untrusted_bin": untrusted, "allow": sorted(allow)}
+    return {"privileged": sorted(priv), "untrusted_bins": untrusted, "allow": sorted(allow)}
 
 
 def workspace() -> dict:
@@ -461,7 +461,7 @@ def d2_matrix(gates, ws, links, prov) -> str:
     # column heads
     for i, b in enumerate(bins):
         cx = x0 + i * colw + colw / 2
-        untrusted = b == gates["untrusted_bin"]
+        untrusted = b in gates["untrusted_bins"]
         p.append(box(x0 + i * colw + 6, top - 44, colw - 12, 34,
                      PLAIN_FILL if untrusted else TRUST_FILL,
                      PLAIN_LINE if untrusted else TRUST_LINE,
@@ -526,7 +526,7 @@ def d1_tcb(gates, ws, links, prov) -> str:
     is styling and carries nothing a reader must decode.
     """
     daemon = "maknaed"
-    client = gates["untrusted_bin"]
+    client = gates["untrusted_bins"][0]
     priv = set(gates["privileged"])
 
     d_crates = sorted(set(links[daemon]) & set(ws["crates"]))
@@ -685,7 +685,7 @@ def d4_packages(gates, cg, prov) -> str:
     """
     deps, ext = cg["deps"], cg["ext"]
     priv = set(gates["privileged"])
-    bins = {"maknaed", gates["untrusted_bin"]}
+    bins = {"maknaed", *gates["untrusted_bins"]}
     lvl = layer_of(deps)
     rows = {}
     for n, l in lvl.items():

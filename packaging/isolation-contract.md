@@ -57,19 +57,20 @@ Profiles not yet enabled (K8s) carry `deferred` cells and are exempt from the li
 
 The P1/P2 gates (`ci/gates/`) enforce this. "forbidden" = the gates fail if the edge ever appears.
 "via X" = reached transitively through crate X. (The lint above skips this table by column count.)
-*(Scoped 2026-09-22, #344: "enforce this" claimed more than the gates do, and a first attempt
-at scoping it claimed less. What the gates enforce is the PRIVILEGED rows — the crates in
-`ci/gates/lib.sh`'s `PRIVILEGED_CRATES`. For those rows they enforce the FORBIDDEN cells of the
-`maknae` column three ways (`p1-manifest-lint.sh` on direct dependencies, `p2-invert-tree.sh` on
-transitive reachability, `p2-artifact-witness.sh` on the BUILT binary's `cargo auditable`
-inventory), and `p1_check.py` refuses a direct privileged dependency declared by ANY
-non-privileged package in the workspace — not only the three binaries in these columns — with
-`TRUST_CONSUMER_ALLOW` naming the only permitted edges, so `maknaed` → `maknae-spif-compile`
-fails P1 although its cell here reads `—`. The NON-PRIVILEGED rows are un-gated prose because
-all three gates iterate `PRIVILEGED_CRATES` and nothing else; that `isolation-contract-lint.sh`
-skips a 4-column table is a separate fact, and it is why no cell in this table carries a
-`✓<check>` token. The 2026-09-22 `maknae-mcp` correction below is what such a cell drifting
-looks like.)*
+What the gates enforce is the PRIVILEGED rows — the crates in `ci/gates/lib.sh`'s
+`PRIVILEGED_CRATES` — and the two loop rows. For the privileged rows they enforce the FORBIDDEN
+cells of each untrusted binary (`UNTRUSTED_BINS`: `maknae` and `maknae-agentd`, the agent daemon,
+which has no column here) three ways (`p1-manifest-lint.sh` on direct dependencies,
+`p2-invert-tree.sh` on transitive reachability, `p2-artifact-witness.sh` on each BUILT binary's
+`cargo auditable` inventory), and `p1_check.py` refuses a direct privileged dependency declared by
+ANY non-privileged package in the workspace, with `TRUST_CONSUMER_ALLOW` naming the only permitted
+edges, so `maknaed` → `maknae-spif-compile` fails P1 although its cell here reads `—`. For the
+`maknae-agent` and `maknae-loop` rows (`LOOP_CRATES`), `p2-invert-tree.sh` enforces the FORBIDDEN
+`maknaed` cell: neither crate may be reachable through normal or build dependencies from `maknaed`,
+`maknae-kernel` or any privileged crate. `maknae-kernel` takes both as **dev**-dependencies, for its
+integration tests (`agent_loop.rs`, `task_loop.rs`, `agent_daemon.rs`), which link into no shipped
+binary. The other NON-PRIVILEGED rows are un-gated prose; that `isolation-contract-lint.sh` skips a
+4-column table is a separate fact, and it is why no cell in this table carries a `✓<check>` token.
 
 | Crate | maknaed | maknae | maknae-spifc |
 |---|---|---|---|
@@ -92,6 +93,15 @@ looks like.)*
 | maknae-config | via kernel | linked | — |
 | maknae-llm | — *(2026-09-15, #240: linked by `maknae-egress` and nothing else (corrected 2026-09-25, #297: now through `maknae-deputy`, still into `maknae-egress` only; the column and its gated row are #359, #240 being closed); the deputy's fourth binary column, and the five-cell lint row it needs, are the deferred follow-up named in #240's closing body — until then this row says where the crate lives in prose)* | — | — |
 | maknae-deputy | — *(2026-09-25, #297: linked by `maknae-egress` and nothing else; same prose-until-a-column treatment as the `maknae-llm` row; gated by #359)* | — | — |
-| maknae-agent | — *(2026-09-22, #241: the `maknaed` dash is about the BINARY. `maknae-kernel` takes `maknae-agent` as a **dev**-dependency, for `crates/maknae-kernel/tests/agent_loop.rs` — the brain driven against the real kernel — so no shipped `maknaed` edge exists; same prose-until-a-column treatment as the `maknae-llm` row above)* | linked | — |
-| maknae-loop | — | linked | — |
+| maknae-agent | forbidden | linked (also linked by `maknae-agentd`) | — |
+| maknae-loop | forbidden | linked (also linked by `maknae-agentd`) | — |
 | maknae-mcp | linked | — *(Corrected 2026-09-22, #344: this cell said `linked`, which was never true. `bins/maknae/Cargo.toml` declares no `maknae-mcp` dependency, its closing enumeration of the closed direct-dep set says so explicitly — "no maknae-mcp either" — and no transitive edge exists: `bins/maknaed/Cargo.toml` is the only DEPENDENT manifest in the tree that names the crate (the workspace root lists it as a member and the crate's own manifest declares its name). Pre-existing, not introduced by #241 or #264. The `maknaed` cell is correct and unchanged.)* | — |
+
+`maknae-agentd` runs the loop for an enrolled agent, as the agent's own uid, and is untrusted as
+`maknae` is: the kernel decides every request it makes, and the partition operand bounds what a
+task may reach under the agent's `tasks/` directory. **Accepted residual (#629, spec Goal 9):**
+under `persona: self`, the daemon reads a persona from the task's partition, then the agent's
+home, then `/etc/maknae/agents/<id>/persona.md`. A home-level `persona.md` written while working
+one tasker's task is therefore read at the start of other taskers' tasks. A persona grants
+nothing: every request is still decided against the agent's role and policy, and every persona
+write is an `fs.write` the kernel decides and audits.

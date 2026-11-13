@@ -171,49 +171,66 @@ expect_reject_because "p1/optional-priv-dep-TABLE-form" "as OPTIONAL" "$here/p1-
 # left negative-control fully green; removing the linked crate from
 # PRIVILEGED_CRATES did too.
 source "$here/lib.sh"
-p2_fixture() { # <crate-to-link-from-the-CLI, or empty for the clean case>
-  local linked="${1:-}" fixture members c
+p2_fixture() { # [<member>:<crate>]... — each <member> takes a normal dependency on <crate>
+  local fixture members m edge dir kind
   fixture="$(mktemp -d -p "$NC_TMP")"
   members=''
-  for c in "${PRIVILEGED_CRATES[@]}"; do
-    mkdir -p "$fixture/crates/$c/src"
-    printf '[package]\nname = "%s"\nversion = "0.0.0"\nedition = "2021"\n' "$c" \
-      > "$fixture/crates/$c/Cargo.toml"
-    echo 'pub const M: &str = "x";' > "$fixture/crates/$c/src/lib.rs"
-    members="$members\"crates/$c\", "
+  for m in "${PRIVILEGED_CRATES[@]}" maknae-loop maknae-agent maknaed maknae maknae-agentd; do
+    case "$m" in maknaed|maknae|maknae-agentd) dir="bins/$m"; kind=bin ;; *) dir="crates/$m"; kind=lib ;; esac
+    mkdir -p "$fixture/$dir/src"
+    {
+      printf '[package]\nname = "%s"\nversion = "0.0.0"\nedition = "2021"\n[dependencies]\n' "$m"
+      for edge in "$@"; do
+        if [ "${edge%%:*}" = "$m" ]; then
+          printf '%s = { path = "../../crates/%s" }\n' "${edge#*:}" "${edge#*:}"
+        fi
+      done
+    } > "$fixture/$dir/Cargo.toml"
+    if [ "$kind" = bin ]; then
+      echo 'fn main(){}' > "$fixture/$dir/src/main.rs"
+    else
+      echo 'pub const M: &str = "x";' > "$fixture/$dir/src/lib.rs"
+    fi
+    members="$members\"$dir\", "
   done
-  mkdir -p "$fixture/bins/maknae/src"
-  printf '[workspace]\nresolver = "3"\nmembers = [%s"bins/maknae"]\n' "$members" \
-    > "$fixture/Cargo.toml"
-  {
-    printf '[package]\nname = "maknae"\nversion = "0.0.0"\nedition = "2021"\n'
-    printf '[[bin]]\nname = "maknae"\npath = "src/main.rs"\n[dependencies]\n'
-    [ -n "$linked" ] && printf '%s = { path = "../../crates/%s" }\n' "$linked" "$linked"
-  } > "$fixture/bins/maknae/Cargo.toml"
-  if [ -n "$linked" ]; then
-    echo "fn main(){ println!(\"{}\", ${linked//-/_}::M); }" > "$fixture/bins/maknae/src/main.rs"
-  else
-    echo 'fn main(){}' > "$fixture/bins/maknae/src/main.rs"
-  fi
+  printf '[workspace]\nresolver = "3"\nmembers = [%s]\n' "${members%, }" > "$fixture/Cargo.toml"
   echo "$fixture"
 }
-tmpB="$(p2_fixture maknae-kernel)"
+tmpB="$(p2_fixture maknae:maknae-kernel)"
 expect_reject_because "p2/cli-links-privileged" \
   "privileged 'maknae-kernel' is reachable from 'maknae' (P2a)" \
   "$here/p2-invert-tree.sh" "$tmpB"
 
 # Fixture B2 — #85: `maknae-authz-basic` is privileged; the untrusted client
 # must never carry the decision engine.
-tmpB2="$(p2_fixture maknae-authz-basic)"
+tmpB2="$(p2_fixture maknae:maknae-authz-basic)"
 expect_reject_because "p2/cli-links-authz-basic" \
   "privileged 'maknae-authz-basic' is reachable from 'maknae' (P2a)" \
   "$here/p2-invert-tree.sh" "$tmpB2"
 
-# ACCEPT: the same workspace with NOTHING linked. Without it, both rejections
-# above stay green against a gate that refuses every fixture -- which is very
-# nearly what was happening.
+# Fixture B3 — #629: the agent daemon is the second untrusted binary; a gate that
+# checks `maknae` alone passes this fixture.
+expect_reject_because "p2/agentd-links-privileged" \
+  "privileged 'maknae-kernel' is reachable from 'maknae-agentd' (P2a)" \
+  "$here/p2-invert-tree.sh" "$(p2_fixture maknae-agentd:maknae-loop maknae-loop:maknae-kernel)"
+
+# Fixture B4 — #629: the loop crates are untrusted, so the daemon, the kernel and
+# every privileged crate must not reach them through a normal dependency.
+expect_reject_because "p2/daemon-links-loop" \
+  "untrusted loop crate 'maknae-loop' is reachable from 'maknaed' (P2-loop)" \
+  "$here/p2-invert-tree.sh" "$(p2_fixture maknaed:maknae-loop)"
+expect_reject_because "p2/kernel-links-agent" \
+  "untrusted loop crate 'maknae-agent' is reachable from 'maknae-kernel' (P2-loop)" \
+  "$here/p2-invert-tree.sh" "$(p2_fixture maknae-kernel:maknae-agent)"
+expect_reject_because "p2/privileged-links-loop" \
+  "untrusted loop crate 'maknae-loop' is reachable from 'maknae-authz-basic' (P2-loop)" \
+  "$here/p2-invert-tree.sh" "$(p2_fixture maknae-authz-basic:maknae-loop)"
+
+# ACCEPT: both untrusted binaries link the loop and nothing privileged. Without it,
+# every rejection above stays green against a gate that refuses every fixture.
 expect_accept "p2/clean-workspace-passes" "p2-invert-tree: ok" \
-  "$here/p2-invert-tree.sh" "$(p2_fixture)"
+  "$here/p2-invert-tree.sh" \
+  "$(p2_fixture maknae:maknae-loop maknae-agentd:maknae-loop maknae-loop:maknae-agent)"
 
 # ---- isolation-contract-lint (#219): a PRESENT file is not a SCANNED file ----
 # This gate had no probe at all before #219, because it resolved its root from
@@ -370,36 +387,40 @@ expect_reject_because "build-invocation/prune-does-not-cover-all-of-ci" \
   "workspace/all build" \
   "$here/build-invocation-lint.sh" "$tmpC6"
 
-# Fixture D — artifact INVENTORY witness (the reliable P2b half): a CLI that links a privileged
+# Fixture D — artifact INVENTORY witness (the reliable P2b half): an untrusted binary that links a privileged
 # crate must be caught by p2-artifact-witness via the cargo-auditable inventory. CI-gated: the
 # inventory needs cargo-auditable + rust-audit-info; skipped locally (matches the witness itself).
 if command -v rust-audit-info >/dev/null 2>&1 && cargo auditable --version >/dev/null 2>&1; then
-  tmpD="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$tmpD/crates/maknae-kernel/src" "$tmpD/bins/maknae/src"
-  cat > "$tmpD/Cargo.toml" <<'EOF'
-[workspace]
-resolver = "3"
-members = ["crates/maknae-kernel", "bins/maknae"]
-EOF
-  cat > "$tmpD/crates/maknae-kernel/Cargo.toml" <<'EOF'
-[package]
-name = "maknae-kernel"
-version = "0.0.0"
-edition = "2021"
-EOF
-  echo 'pub const M: &str = "x";' > "$tmpD/crates/maknae-kernel/src/lib.rs"
-  cat > "$tmpD/bins/maknae/Cargo.toml" <<'EOF'
-[package]
-name = "maknae"
-version = "0.0.0"
-edition = "2021"
-[[bin]]
-name = "maknae"
-path = "src/main.rs"
-[dependencies]
-maknae-kernel = { path = "../../crates/maknae-kernel" }
-EOF
-  echo 'fn main(){ println!("{}", maknae_kernel::M); }' > "$tmpD/bins/maknae/src/main.rs"
-  expect_reject "p2/artifact-inventory-witness" "$here/p2-artifact-witness.sh" "$tmpD"
+  aw_fixture() { # <untrusted-bin-that-links-the-kernel>
+    local fx b
+    fx="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$fx/crates/maknae-kernel/src"
+    printf '[workspace]\nresolver = "3"\nmembers = ["crates/maknae-kernel", "bins/maknae", "bins/maknae-agentd"]\n' \
+      > "$fx/Cargo.toml"
+    printf '[package]\nname = "maknae-kernel"\nversion = "0.0.0"\nedition = "2021"\n' \
+      > "$fx/crates/maknae-kernel/Cargo.toml"
+    echo 'pub const M: &str = "x";' > "$fx/crates/maknae-kernel/src/lib.rs"
+    for b in maknae maknae-agentd; do
+      mkdir -p "$fx/bins/$b/src"
+      {
+        printf '[package]\nname = "%s"\nversion = "0.0.0"\nedition = "2021"\n' "$b"
+        printf '[[bin]]\nname = "%s"\npath = "src/main.rs"\n[dependencies]\n' "$b"
+        if [ "$b" = "$1" ]; then
+          printf 'maknae-kernel = { path = "../../crates/maknae-kernel" }\n'
+        fi
+      } > "$fx/bins/$b/Cargo.toml"
+      if [ "$b" = "$1" ]; then
+        echo 'fn main(){ println!("{}", maknae_kernel::M); }' > "$fx/bins/$b/src/main.rs"
+      else
+        echo 'fn main(){}' > "$fx/bins/$b/src/main.rs"
+      fi
+    done
+    echo "$fx"
+  }
+  expect_reject_because "p2/artifact-inventory-witness" "maknae's inventory lists privileged 'maknae-kernel'" \
+    "$here/p2-artifact-witness.sh" "$(aw_fixture maknae)"
+  expect_reject_because "p2/agentd-artifact-inventory-witness" \
+    "maknae-agentd's inventory lists privileged 'maknae-kernel'" \
+    "$here/p2-artifact-witness.sh" "$(aw_fixture maknae-agentd)"
 else
   echo "neg-skip: [p2/artifact-inventory-witness] deferred to CI (needs cargo-auditable + rust-audit-info)"
   skipped=$((skipped+1))
@@ -624,7 +645,7 @@ frp_fixture() {
   cat > "$root/Cargo.toml" <<'EOF_G'
 [workspace]
 resolver = "3"
-members = ["crates/maknae-config", "crates/maknae-vault", "crates/maknae-crypto", "bins/maknaed", "bins/maknae", "bins/maknae-egress", "bins/maknae-spifc"]
+members = ["crates/maknae-config", "crates/maknae-vault", "crates/maknae-crypto", "bins/maknaed", "bins/maknae", "bins/maknae-agentd", "bins/maknae-egress", "bins/maknae-spifc"]
 EOF_G
   for crate in maknae-config maknae-vault maknae-crypto; do
     mkdir -p "$root/crates/$crate/src"
@@ -639,7 +660,7 @@ hermetic-test-seam = []
 test-support = []
 EOF_G
   done
-  for bin in maknaed maknae maknae-egress maknae-spifc; do
+  for bin in maknaed maknae maknae-agentd maknae-egress maknae-spifc; do
     mkdir -p "$root/bins/$bin/src"
     echo 'fn main() {}' > "$root/bins/$bin/src/main.rs"
     {
@@ -661,6 +682,8 @@ expect_reject_because "feature-resolution-pin/normal-dep-enables-vault-test-supp
   "$here/feature-resolution-pin.sh" "$(frp_fixture maknaed maknae-vault test-support)"
 expect_reject_because "feature-resolution-pin/egress-enables-crypto-test-support" "enables maknae-crypto/test-support" \
   "$here/feature-resolution-pin.sh" "$(frp_fixture maknae-egress maknae-crypto test-support)"
+expect_reject_because "feature-resolution-pin/agentd-enables-vault-test-support" "maknae-agentd's normal resolution enables maknae-vault/test-support" \
+  "$here/feature-resolution-pin.sh" "$(frp_fixture maknae-agentd maknae-vault test-support)"
 expect_accept "feature-resolution-pin/clean" "feature-resolution-pin: ok" \
   "$here/feature-resolution-pin.sh" "$(frp_fixture "" "" "")"
 

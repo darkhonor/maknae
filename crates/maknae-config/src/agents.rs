@@ -783,6 +783,36 @@ fn load_agent_client_required(
     parse_agent_client(id, &utf8_text(config_dir, id, AGENT_CLIENT_FILE, bytes)?)
 }
 
+/// `agents/<id>/enrollment.yaml`, read as `maknae-agentd` reads it: the one record whose
+/// uid the agent's SecretID source is held to.
+pub fn load_agent_enrollment(
+    config_dir: &Path,
+    id: &AgentId,
+) -> Result<AgentEnrollment, ConfigError> {
+    load_agent_enrollment_required(config_dir, id, agents_dir_required(), agent_file_required())
+}
+
+fn load_agent_enrollment_required(
+    config_dir: &Path,
+    id: &AgentId,
+    dir: AnchorRequired,
+    target: TargetRequired,
+) -> Result<AgentEnrollment, ConfigError> {
+    let Some(bytes) = read_agent_file(config_dir, id, ENROLLMENT_FILE, dir, target)? else {
+        let path = std::path::absolute(
+            config_dir
+                .join(AGENTS_DIR)
+                .join(id.as_str())
+                .join(ENROLLMENT_FILE),
+        )
+        .map_err(|e| ConfigError::Io(e.to_string()))?;
+        return Err(ConfigError::NotFound {
+            path: path.display().to_string(),
+        });
+    };
+    parse_agent_enrollment(id, &utf8_text(config_dir, id, ENROLLMENT_FILE, bytes)?)
+}
+
 pub fn read_persona(
     config_dir: &Path,
     id: &AgentId,
@@ -1768,6 +1798,11 @@ mod tests {
             load_agent_client_required(&self.root, &AgentId::parse(id).unwrap(), dir, target)
         }
 
+        fn enrollment(&self, id: &str) -> Result<AgentEnrollment, ConfigError> {
+            let (dir, target) = self.requirements();
+            load_agent_enrollment_required(&self.root, &AgentId::parse(id).unwrap(), dir, target)
+        }
+
         fn persona(&self, id: &str) -> Result<Option<Zeroizing<String>>, ConfigError> {
             let (dir, target) = self.requirements();
             read_persona_required(&self.root, &AgentId::parse(id).unwrap(), dir, target)
@@ -2023,6 +2058,46 @@ mod tests {
             f.client("hobi"),
             Err(ConfigError::InsecurePermissions { .. })
         ));
+    }
+
+    #[test]
+    fn load_agent_enrollment_reads_the_record_and_refuses_missing_insecure_or_foreign() {
+        let f = Fixture::new("enrollment_load");
+        f.dir("hobi");
+        let path = f.agents().join("hobi").join(ENROLLMENT_FILE);
+        assert_eq!(
+            f.enrollment("hobi"),
+            Err(ConfigError::NotFound {
+                path: std::path::absolute(&path).unwrap().display().to_string()
+            })
+        );
+        let record = "agent_id: hobi\naccount: hobi-svc\nuid: 12101\nrole: user\n";
+        f.file(&format!("hobi/{ENROLLMENT_FILE}"), record, 0o640);
+        assert_eq!(
+            f.enrollment("hobi"),
+            Ok(AgentEnrollment {
+                id: hobi(),
+                account: "hobi-svc".into(),
+                uid: 12_101,
+                role: AgentRole::User,
+            })
+        );
+        f.file(&format!("hobi/{ENROLLMENT_FILE}"), record, 0o644);
+        assert!(
+            matches!(
+                f.enrollment("hobi"),
+                Err(ConfigError::InsecurePermissions { .. })
+            ),
+            "{:?}",
+            f.enrollment("hobi")
+        );
+        f.dir("suga");
+        f.file(&format!("suga/{ENROLLMENT_FILE}"), record, 0o640);
+        assert!(
+            matches!(f.enrollment("suga"), Err(ConfigError::InvalidAgent(ref m)) if m.contains("suga")),
+            "{:?}",
+            f.enrollment("suga")
+        );
     }
 
     #[test]
