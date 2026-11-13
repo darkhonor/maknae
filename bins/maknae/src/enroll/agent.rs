@@ -1,4 +1,6 @@
 use super::agent_access;
+#[cfg(not(target_os = "macos"))]
+use super::agent_apparmor;
 #[cfg(target_os = "macos")]
 use super::agent_launchd;
 use super::agent_unit;
@@ -1016,7 +1018,17 @@ fn start_instance(
     agent: &AgentId,
     account: &agent_unit::ServiceAccount,
 ) -> Result<(), EnrollError> {
-    agent_unit::start(r, agent, || write_drop_in(agent, account))
+    agent_unit::start(r, agent, || {
+        write_drop_in(agent, account)?;
+        agent_apparmor::place(
+            r,
+            agent_apparmor::open_tunables(Path::new(agent_apparmor::TUNABLES_DIR))?.as_ref(),
+            agent,
+            &account.name,
+            &account.home,
+            FileOwner { uid: 0, gid: 0 },
+        )
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -1365,6 +1377,10 @@ fn check_account(
             "account {account}: its home {dir:?} {why}; the Agent Daemon's unit cannot name it"
         ))
     })?;
+    #[cfg(not(target_os = "macos"))]
+    if !agent_apparmor::home_ok(&home) {
+        return Err(agent_apparmor::home_refusal(account, &home));
+    }
     Ok(agent_unit::ServiceAccount {
         name: account.to_string(),
         uid,

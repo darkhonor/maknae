@@ -2,10 +2,15 @@
 # maknae prerm — mirrors the rpm %preun teardown, AppArmor edition.
 set -e
 
+stop_agent_instances() {
+    systemctl stop 'maknae-agent@*.service' 2>/dev/null || :
+}
+
 case "$1" in
     remove)
         # Stop before unconfining. The audit trail and its append-only attribute
         # are kept until purge.
+        stop_agent_instances
         systemctl stop maknae-policy-sync.path maknae-policy-sync.service 2>/dev/null || :
         systemctl disable maknae-policy-sync.path maknae-policy-sync.service 2>/dev/null || :
         systemctl stop maknaed.service 2>/dev/null || :
@@ -15,6 +20,7 @@ case "$1" in
         if command -v apparmor_parser >/dev/null 2>&1; then
             apparmor_parser -R /etc/apparmor.d/usr.bin.maknaed 2>/dev/null || :
             apparmor_parser -R /etc/apparmor.d/usr.bin.maknae-egress 2>/dev/null || :
+            apparmor_parser -R /etc/apparmor.d/usr.bin.maknae-agentd 2>/dev/null || :
         fi
         ;;
     upgrade)

@@ -34,6 +34,10 @@ grant_reader_traverse() {
     for r in $readers; do setfacl -P -n -m "u:$r:x" "$d" || return 1; done
 }
 
+restart_agent_instances() {
+    systemctl try-restart 'maknae-agent@*.service' 2>/dev/null || :
+}
+
 case "$1" in
     configure)
         # --- Users/groups (Jackrabbit §4.6 / §9.1) ------------------------------
@@ -95,6 +99,7 @@ case "$1" in
             exit 1
         }
         install -d -m 0700 -o _maknae -g _maknae /var/lib/maknae
+        install -d -m 0755 -o root    -g root    /var/lib/maknae-agents
         # #240b: the deputy's Vault CA copy (written by `maknae enroll`), under
         # the deputy's OWN group.
         install -d -m 0750 -o root    -g _maknae-egress /etc/maknae/egress
@@ -141,6 +146,7 @@ case "$1" in
             # profiles load — which is exactly what a per-daemon literal here
             # invites. Add a line whenever a daemon is added.
             apparmor_parser -r /etc/apparmor.d/usr.bin.maknae-egress 2>/dev/null || :
+            apparmor_parser -r /etc/apparmor.d/usr.bin.maknae-agentd 2>/dev/null || :
         fi
 
         # --- systemd unit --------------------------------------------------------
@@ -163,6 +169,7 @@ case "$1" in
             [ -d /run/maknae-egress ] && chmod 0751 /run/maknae-egress 2>/dev/null || :
             systemctl try-restart maknae-egress.socket 2>/dev/null || :
             systemctl try-restart maknae-egress.service 2>/dev/null || :
+            restart_agent_instances
         fi
         ;;
 esac

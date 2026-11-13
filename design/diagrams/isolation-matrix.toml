@@ -211,15 +211,15 @@ test = "crates/maknae-kernel/tests/task_loop.rs::an_agents_sealed_key_opens_only
 subject = "agentd"
 object = "wrap"
 right = "none"
-control = "A's turn is minted under A's Vault login in A's CLI process and crosses only A's connection to maknaed; the Agent Daemon runs as the agent's own uid and Vault identity, on the agent socket"
-evidence = "bins/maknae/src/agent.rs · bins/maknae-agentd/src/main.rs · crates/maknae-loop/src/plane.rs"
+control = "A's turn is minted under A's Vault login in A's CLI process and crosses only A's connection to maknaed; the Agent Daemon runs as the agent's own uid and Vault identity, on the agent socket, confined by its SELinux domain or AppArmor profile, and its account is never in the maknae group that admits to the client socket"
+evidence = "bins/maknae/src/agent.rs · bins/maknae-agentd/src/main.rs · crates/maknae-loop/src/plane.rs · packaging/common/maknae.te · packaging/deb/apparmor/usr.bin.maknae-agentd · crates/maknae-config/src/agents.rs"
 
 [[cell]]
 subject = "agentd"
 object = "sealed"
 right = "none"
-control = "A's turn is minted under A's Vault login in A's CLI process and crosses only A's connection to maknaed; the Agent Daemon runs as the agent's own uid and Vault identity, on the agent socket"
-evidence = "bins/maknae/src/agent.rs · bins/maknae-agentd/src/main.rs · crates/maknae-loop/src/plane.rs"
+control = "A's turn is minted under A's Vault login in A's CLI process and crosses only A's connection to maknaed; the Agent Daemon runs as the agent's own uid and Vault identity, on the agent socket, confined by its SELinux domain or AppArmor profile, and its account is never in the maknae group that admits to the client socket"
+evidence = "bins/maknae/src/agent.rs · bins/maknae-agentd/src/main.rs · crates/maknae-loop/src/plane.rs · packaging/common/maknae.te · packaging/deb/apparmor/usr.bin.maknae-agentd · crates/maknae-config/src/agents.rs"
 
 [[cell]]
 subject = "agentd"

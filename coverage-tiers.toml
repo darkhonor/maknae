@@ -851,6 +851,10 @@ path = "bins/maknae/src/enroll/agent_unit.rs"
 why = "#629: the Agent Daemon's systemd instance; the unit text (each key that matters exactly once, the unenrolled-sentinel User= no package creates, the start limit), the exact drop-in text, the systemctl argv and order on start and stop, the stop-before-remove order and the drop-in removal against a real directory carry unit tests against a recording runner; the runner that executes systemctl is bin I/O"
 
 [[t3]]
+path = "bins/maknae/src/enroll/agent_apparmor.rs"
+why = "#629: the enrolled agent's home named to the shared maknae-agentd AppArmor profile; the tunable text, the refusal of a home AppArmor would read as a pattern, the per-agent file written and removed against a real directory, the apparmor_parser argv after each, the failed reload that fails the step, the skip on a host without the tunables directory, and the shipped profile's reads, owner rules and denials carry unit tests against a recording runner; the runner that executes apparmor_parser is bin I/O"
+
+[[t3]]
 path = "bins/maknae/src/enroll/agent_launchd.rs"
 why = "#629: the Agent Daemon's per-agent launchd job; the rendered plist (every string XML-escaped, plutil -lint and read back on darwin), its mode and owner against a real directory, the root-held log directory, the account-owned 0640 stderr file and its replacement of a planted link, directory, FIFO or hard link without following it, the refusal of a log root that is not root-held, the log directory's removal that follows nothing, the label filter both scripts share, the keychain sweep's failure when the keychain file is missing, the launchctl argv and order on start and stop, the wait for launchd to drop a booted-out job, the refused stop that removes nothing, and the uninstall and postinstall functions that find and restart agent jobs carry unit tests against a recording runner and a stubbed launchctl; the runner that executes launchctl is bin I/O"
 

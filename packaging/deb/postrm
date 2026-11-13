@@ -36,6 +36,7 @@ case "$1" in
         rm -rf /etc/ssl/maknae
         rm -rf /var/log/maknae || echo "maknae: /var/log/maknae was not fully removed; remove it by hand (runbook: Remove a kept trail)" >&2
         rm -rf /var/lib/maknae
+        rm -rf /etc/apparmor.d/tunables/maknae-agents.d
 
         systemctl daemon-reload 2>/dev/null || :
         ;;

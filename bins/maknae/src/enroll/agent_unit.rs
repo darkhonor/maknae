@@ -369,6 +369,149 @@ mod tests {
         assert!(d.join("operator.conf").exists());
     }
 
+    const TE: &str = include_str!("../../../../packaging/common/maknae.te");
+    const FC: &str = include_str!("../../../../packaging/common/maknae.fc");
+    const SPEC: &str = include_str!("../../../../packaging/rpm/maknae.spec");
+
+    /// The rules that start with `head`, or for a bare type, mention it.
+    fn te_rules(head: &str) -> Vec<&'static str> {
+        TE.lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with('#'))
+            .filter(|l| {
+                if head.contains(' ') {
+                    l.starts_with(head)
+                } else {
+                    l.contains(head)
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_agent_daemon_runs_in_its_own_domain_from_its_own_entrypoint() {
+        for line in [
+            "type maknae_agentd_t;",
+            "type maknae_agentd_exec_t;",
+            "init_daemon_domain(maknae_agentd_t, maknae_agentd_exec_t)",
+            "allow init_t maknae_agentd_t:process2 { nnp_transition nosuid_transition };",
+        ] {
+            assert!(TE.lines().any(|l| l == line), "{line}");
+        }
+        assert!(FC.lines().any(|l| l.split_whitespace().collect::<Vec<_>>()
+            == [
+                "/usr/bin/maknae-agentd",
+                "--",
+                "gen_context(system_u:object_r:maknae_agentd_exec_t,s0)"
+            ]));
+        assert!(FC.lines().any(|l| l.split_whitespace().collect::<Vec<_>>()
+            == [
+                "/var/lib/maknae-agents(/.*)?",
+                "gen_context(system_u:object_r:maknae_agent_home_t,s0)"
+            ]));
+        assert!(!TE.contains("policy_module(maknae, 1.0.3)"));
+    }
+
+    /// A connect is `write` on the socket file and `connectto` on the listener's domain.
+    #[test]
+    fn the_agent_daemon_reaches_maknaed_only_on_its_socket_and_vault_only_on_the_labeled_port() {
+        let rules = te_rules("allow maknae_agentd_t");
+        for want in [
+            "allow maknae_agentd_t maknae_runtime_t:sock_file write;",
+            "allow maknae_agentd_t maknaed_t:unix_stream_socket connectto;",
+            "allow maknae_agentd_t maknae_vault_port_t:tcp_socket name_connect;",
+        ] {
+            assert!(rules.contains(&want), "{want}");
+        }
+        let connectto: Vec<_> = rules.iter().filter(|l| l.contains("connectto")).collect();
+        assert_eq!(connectto.len(), 1, "{connectto:?}");
+        let ports: Vec<_> = rules
+            .iter()
+            .filter(|l| l.contains("name_connect"))
+            .collect();
+        assert_eq!(ports.len(), 1, "{ports:?}");
+        assert!(!TE.contains("corenet_tcp_connect_http_port(maknae_agentd_t)"));
+        assert!(TE
+            .lines()
+            .any(|l| l == "allow maknaed_t maknae_agentd_t:fd use;"));
+    }
+
+    #[test]
+    fn the_agent_daemon_is_granted_nothing_on_the_kernels_secrets_state_or_audit() {
+        let rules = te_rules("allow maknae_agentd_t");
+        for forbidden in [
+            "maknae_private_t",
+            "maknae_secret_t",
+            "maknae_state_t",
+            "maknae_audit_t",
+            "maknae_egress_etc_t",
+            "maknae_egress_bounds_t",
+            "mail_spool_t",
+            "tty_device_t",
+            "devpts_t",
+            "bin_t",
+            "shell_exec_t",
+        ] {
+            assert!(
+                !rules.iter().any(|l| l.contains(forbidden)),
+                "maknae_agentd_t is granted {forbidden}"
+            );
+        }
+        let exec: Vec<_> = rules.iter().filter(|l| l.contains("execute")).collect();
+        assert_eq!(
+            exec,
+            [&"allow maknae_agentd_t maknae_agentd_exec_t:file { read execute execute_no_trans open getattr };"]
+        );
+        for line in [
+            "neverallow maknae_agentd_t { maknae_private_t maknae_secret_t maknae_egress_etc_t maknae_egress_bounds_t }:file { read open };",
+            "neverallow maknae_agentd_t { maknae_state_t maknae_audit_t }:{ dir file } *;",
+            "neverallow maknae_agentd_t mail_spool_t:{ dir file } *;",
+            "neverallow maknae_agentd_t { tty_device_t devpts_t user_tty_device_t user_devpts_t }:chr_file { write append };",
+        ] {
+            assert!(TE.lines().any(|l| l == line), "{line}");
+        }
+    }
+
+    #[test]
+    fn the_agent_daemon_writes_only_agent_homes() {
+        let writes: Vec<_> = te_rules("maknae_agentd_t")
+            .into_iter()
+            .filter(|l| {
+                l.starts_with("manage_")
+                    || (l.starts_with("allow maknae_agentd_t")
+                        && [" write", " create", " add_name", " unlink", " rename"]
+                            .iter()
+                            .any(|p| l.contains(p))
+                        && !l.contains("_socket")
+                        && !l.contains("sock_file write;"))
+            })
+            .collect();
+        assert_eq!(
+            writes,
+            [
+                "manage_dirs_pattern(maknae_agentd_t, maknae_agent_home_t, maknae_agent_home_t)",
+                "manage_files_pattern(maknae_agentd_t, maknae_agent_home_t, maknae_agent_home_t)",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_rpm_labels_the_agent_daemon_and_the_agent_home_root() {
+        let restorecon = SPEC
+            .lines()
+            .find(|l| l.starts_with("restorecon -Rv "))
+            .unwrap();
+        for path in [
+            "%{_bindir}/maknae-agentd",
+            "%{_localstatedir}/lib/maknae-agents",
+        ] {
+            assert!(restorecon.split_whitespace().any(|w| w == path), "{path}");
+        }
+        assert!(SPEC
+            .lines()
+            .any(|l| l == "%dir %attr(0755,root,root) %{_localstatedir}/lib/maknae-agents"));
+    }
+
     #[test]
     fn a_refused_stop_leaves_the_drop_in() {
         let r = Recorder {

@@ -4,6 +4,8 @@ use super::agent::{
     RELOAD_COMMAND, VAULT_CA,
 };
 use super::agent_access;
+#[cfg(not(target_os = "macos"))]
+use super::agent_apparmor;
 #[cfg(target_os = "macos")]
 use super::agent_launchd;
 #[cfg(not(target_os = "macos"))]
@@ -251,7 +253,12 @@ impl RemoveOps for RealRemoveOps {
     #[cfg(not(target_os = "macos"))]
     fn stop_agent(&self, agent: &AgentId) -> Result<(), EnrollError> {
         agent_unit::stop(&*self.runner, agent, || {
-            agent_unit::remove_drop_in(&open_dir(agent_unit::UNIT_DIR, 0o022)?, agent)
+            agent_unit::remove_drop_in(&open_dir(agent_unit::UNIT_DIR, 0o022)?, agent)?;
+            agent_apparmor::withdraw(
+                &*self.runner,
+                agent_apparmor::open_tunables(Path::new(agent_apparmor::TUNABLES_DIR))?.as_ref(),
+                agent,
+            )
         })
     }
 

@@ -14,19 +14,27 @@ maintainer scripts (`postinst`/`prerm`/`postrm`).
 
 | Payload path | Source | Mode / owner |
 |---|---|---|
-| `/usr/bin/maknaed`, `/usr/bin/maknae` | built binaries | `0755 root:root` |
+| `/usr/bin/maknaed`, `/usr/bin/maknae`, `/usr/bin/maknae-egress`, `/usr/bin/maknae-agentd` | built binaries | `0755 root:root` |
 | `/usr/lib/systemd/system/maknaed.service` | `common/maknaed.service` | `0644` |
+| `/usr/lib/systemd/system/maknae-agent@.service` | `common/maknae-agent@.service` | `0644`; no instance enabled |
 | `/usr/lib/systemd/system/maknae-policy-sync.path`, `/usr/lib/systemd/system/maknae-policy-sync.service` | `common/` | `0644`, never enabled |
 | `/usr/lib/systemd/system-preset/80-maknae.preset` | `common/80-maknae.preset` | `0644` |
 | `/usr/lib/sysusers.d/maknae.conf` | `common/maknae.sysusers` | `0644` |
 | `/etc/apparmor.d/usr.bin.maknaed` | `deb/apparmor/usr.bin.maknaed` | `0644` |
+| `/etc/apparmor.d/usr.bin.maknae-agentd` | `deb/apparmor/usr.bin.maknae-agentd` | `0644` (conffile) |
+| `/etc/apparmor.d/tunables/maknae-agents` | `deb/apparmor/tunables.maknae-agents` | `0644` (conffile) |
+| `/etc/apparmor.d/tunables/maknae-agents.d/` | directory; `maknae enroll agent` writes one file per agent | `0755 root:root` |
 | `/usr/libexec/maknae/maknae-selinux-ports.sh` | `common/maknae-selinux-ports.sh` | `0750` |
 | `/etc/maknae/authz.yaml`, `/etc/maknae/bindings.yaml`, `/etc/maknae/maknae.yaml`, `/etc/maknae/sensitive.yaml` | `common/` (conffiles) | `root:_maknae 0640` (set in postinst) |
 | `/var/log/maknae/audit.jsonl` | created in postinst, not payload | `_maknae:_maknae 0640`, `chattr +a` |
 
 Directories created by `postinst` at their §4.6 modes: `/etc/maknae`
 (`root:_maknae 0750`), `/etc/maknae/private` (`root:_maknae 0750`),
-`/var/log/maknae` (`_maknae:_maknae 0700`).
+`/var/log/maknae` (`_maknae:_maknae 0700`), and `/var/lib/maknae-agents`
+(`root:root 0755`), the recommended root for agent homes.
+
+`prerm` stops every running `maknae-agent@<id>` instance on removal, before
+`maknaed`; on upgrade `postinst` restarts each running instance onto the new binary.
 
 ### AppArmor, not SELinux
 
@@ -43,6 +51,17 @@ discrete
 `maknae_tool` profile is declared (structure-now, near-empty) as the `px`
 transition target for the future tool-exec increment; it is inert today (the
 daemon spawns no subprocess).
+
+The Agent Daemon's profile (`apparmor/usr.bin.maknae-agentd`) is one profile for every
+enrolled agent. It reads its own configuration files under `/etc/maknae/agents/*/`, the
+three CA certificates in `/etc/maknae/tls/`, `/etc/ssl/maknae/seal.pub` and its decrypted
+credential, connects to `/run/maknae-agent/maknaed.sock` and over TCP to Vault, and writes
+only in the enrolled agents' homes, through `owner` rules. The homes come from
+`/etc/apparmor.d/tunables/maknae-agents`, whose placeholder names no directory, so the profile
+loads with no agent enrolled; `maknae enroll agent` writes the agent's home to
+`tunables/maknae-agents.d/<id>` and reloads the profile, and `remove-agent` removes that file
+and reloads. It denies `/var/mail` and `/var/spool/mail`, writes to `/dev/tty*` and
+`/dev/pts/*`, and executing `wall` and `write`.
 
 The audit trail is append-only by the inode's append-only attribute (`chattr +a`),
 not by AppArmor. AppArmor revalidates every `write()` on an `O_APPEND`

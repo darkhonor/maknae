@@ -69,6 +69,8 @@ cat > "$PKG_ROOT/DEBIAN/conffiles" <<'CONF'
 /etc/maknae/sensitive.yaml
 /etc/apparmor.d/usr.bin.maknaed
 /etc/apparmor.d/usr.bin.maknae-egress
+/etc/apparmor.d/usr.bin.maknae-agentd
+/etc/apparmor.d/tunables/maknae-agents
 CONF
 
 # --- Binaries -------------------------------------------------------------------
@@ -109,6 +111,11 @@ install -D -m 0644 "$HERE/apparmor/usr.bin.maknaed" \
     "$PKG_ROOT/etc/apparmor.d/usr.bin.maknaed"
 install -D -m 0644 "$HERE/apparmor/usr.bin.maknae-egress" \
     "$PKG_ROOT/etc/apparmor.d/usr.bin.maknae-egress"
+install -D -m 0644 "$HERE/apparmor/usr.bin.maknae-agentd" \
+    "$PKG_ROOT/etc/apparmor.d/usr.bin.maknae-agentd"
+install -D -m 0644 "$HERE/apparmor/tunables.maknae-agents" \
+    "$PKG_ROOT/etc/apparmor.d/tunables/maknae-agents"
+install -d -m 0755 "$PKG_ROOT/etc/apparmor.d/tunables/maknae-agents.d"
 
 # --- Vault-port label helper (layout parity; SELinux-only no-op on Debian) ------
 install -D -m 0750 "$COMMON/maknae-selinux-ports.sh" \
@@ -204,6 +211,17 @@ while IFS= read -r cf; do
 done < "$PKG_ROOT/DEBIAN/conffiles"
 [ "$checked" -gt 0 ] || { echo "ERROR: checked ZERO conffiles" >&2; exit 1; }
 echo "payload check: $checked declared conffile(s) present"
+
+profiles_shipped="$(cd "$HERE/apparmor" && ls usr.bin.* | sort)"
+for p in $profiles_shipped; do
+    grep -qx "/etc/apparmor.d/$p" "$PKG_ROOT/DEBIAN/conffiles" || {
+        echo "ERROR: AppArmor profile $p is not a declared conffile" >&2; exit 1; }
+    grep -q "apparmor_parser -r /etc/apparmor.d/$p " "$PKG_ROOT/DEBIAN/postinst" || {
+        echo "ERROR: postinst does not load the AppArmor profile $p" >&2; exit 1; }
+    grep -q "apparmor_parser -R /etc/apparmor.d/$p " "$PKG_ROOT/DEBIAN/prerm" || {
+        echo "ERROR: prerm does not unload the AppArmor profile $p" >&2; exit 1; }
+done
+echo "payload check: $(echo $profiles_shipped | wc -w) AppArmor profile(s) declared, loaded and unloaded"
 
 # --- Build the .deb -------------------------------------------------------------
 mkdir -p "$DIST"

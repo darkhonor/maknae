@@ -120,6 +120,7 @@ install -d -m 0750 %{buildroot}%{_sysconfdir}/maknae/egress
 install -d -m 0755 %{buildroot}%{_sysconfdir}/pki/maknae
 install -d -m 0700 %{buildroot}%{_localstatedir}/log/maknae
 install -d -m 0700 %{buildroot}%{_localstatedir}/lib/maknae
+install -d -m 0755 %{buildroot}%{_localstatedir}/lib/maknae-agents
 # audit.jsonl is not a payload file and not package-owned: %post creates it, so
 # erase keeps the trail and an upgrade never replaces the append-only inode.
 
@@ -152,7 +153,7 @@ if [ ! -e "$B" ] && [ ! -h "$B" ] && [ ! -e %{_localstatedir}/lib/maknae/kernel.
         exit 1
     fi
 fi
-restorecon -Rv %{_bindir}/maknaed %{_bindir}/maknae-egress %{_sysconfdir}/maknae %{_sysconfdir}/pki/maknae %{_localstatedir}/log/maknae %{_localstatedir}/lib/maknae 2>/dev/null || :
+restorecon -Rv %{_bindir}/maknaed %{_bindir}/maknae-egress %{_bindir}/maknae-agentd %{_sysconfdir}/maknae %{_sysconfdir}/pki/maknae %{_localstatedir}/log/maknae %{_localstatedir}/lib/maknae %{_localstatedir}/lib/maknae-agents 2>/dev/null || :
 # #240b (D3): the egress deputy is in neither root nor _maknae, and the config
 # loader refuses any world bit on /etc/maknae, so it reaches the dir by a user
 # ACL granting `rx` — `r` because maknae-io opens the directory
@@ -210,6 +211,10 @@ fi
 chown -h _maknae:_maknae %{_localstatedir}/log/maknae
 
 %preun
+# %%systemd_preun cannot name a template's instances.
+if [ $1 -eq 0 ]; then
+    systemctl stop 'maknae-agent@*.service' 2>/dev/null || :
+fi
 %systemd_preun maknaed.service maknae-egress.service maknae-egress.socket maknae-policy-sync.path maknae-policy-sync.service
 
 %postun
@@ -219,6 +224,9 @@ chown -h _maknae:_maknae %{_localstatedir}/log/maknae
 # from maknae-egress.service's Requires=/After=, not from this argv.
 %systemd_postun_with_restart maknaed.service maknae-egress.socket maknae-egress.service
 %systemd_postun maknae-policy-sync.path maknae-policy-sync.service
+if [ $1 -ge 1 ]; then
+    systemctl try-restart 'maknae-agent@*.service' 2>/dev/null || :
+fi
 if [ $1 -eq 0 ]; then
     fapolicyd-cli --update 2>/dev/null || :
     # A local maknae_vault_port_t label references the module's type and blocks its removal (#584).
@@ -261,6 +269,7 @@ fi
 %dir %attr(0755,root,root) %{_sysconfdir}/pki/maknae
 %dir %attr(0700,_maknae,_maknae) %{_localstatedir}/log/maknae
 %dir %attr(0700,_maknae,_maknae) %{_localstatedir}/lib/maknae
+%dir %attr(0755,root,root) %{_localstatedir}/lib/maknae-agents
 
 %changelog
 * Mon Aug 17 2026 Alex Ackerman <developer@maknae.io> - 0.1.0-1

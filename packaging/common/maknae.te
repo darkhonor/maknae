@@ -1,4 +1,4 @@
-policy_module(maknae, 1.0.3)
+policy_module(maknae, 1.0.4)
 
 ########################################
 # Type declarations
@@ -90,6 +90,15 @@ corenet_port(maknae_vault_port_t)
 # keeps the structure without the live risk (plan Task 5; reviewer-flagged).
 type maknae_tool_t;
 domain_type(maknae_tool_t)
+
+# #629: maknae-agentd, one instance per enrolled agent under that agent's uid.
+type maknae_agentd_t;
+type maknae_agentd_exec_t;
+init_daemon_domain(maknae_agentd_t, maknae_agentd_exec_t)
+allow init_t maknae_agentd_t:process2 { nnp_transition nosuid_transition };
+# Agent homes under /var/lib/maknae-agents (maknae.fc).
+type maknae_agent_home_t;
+files_type(maknae_agent_home_t)
 
 ########################################
 # Policy rules
@@ -310,3 +319,55 @@ miscfiles_read_localization(maknaed_t)
 auth_use_nsswitch(maknaed_t)
 kernel_read_system_state(maknaed_t)
 dev_read_urand(maknaed_t)
+
+########################################
+# #629: maknae-agentd
+########################################
+gen_require(`
+    type mail_spool_t;
+    type tty_device_t;
+    type devpts_t;
+    type user_tty_device_t;
+    type user_devpts_t;
+')
+allow maknae_agentd_t maknae_agentd_exec_t:file { read execute execute_no_trans open getattr };
+allow maknae_agentd_t maknae_etc_t:dir { open read search getattr };
+allow maknae_agentd_t maknae_etc_t:file { read open getattr };
+allow maknae_agentd_t var_run_t:dir { search getattr open read };
+allow maknae_agentd_t init_var_run_t:dir { search getattr open read };
+allow maknae_agentd_t init_var_run_t:file { read open getattr };
+allow maknae_agentd_t tmpfs_t:file { read open getattr };
+
+allow maknae_agentd_t maknae_runtime_t:dir { search getattr };
+allow maknae_agentd_t maknae_runtime_t:sock_file write;
+# el9 creates /run/maknae-agent, and so the socket in it, as var_run_t.
+allow maknae_agentd_t var_run_t:sock_file write;
+allow maknae_agentd_t maknaed_t:unix_stream_socket connectto;
+allow maknae_agentd_t self:unix_stream_socket { create connect read write getattr getopt setopt shutdown };
+allow maknaed_t maknae_agentd_t:fd use;
+
+allow maknae_agentd_t self:tcp_socket { create connect setopt getopt read write getattr shutdown };
+allow maknae_agentd_t maknae_vault_port_t:tcp_socket name_connect;
+corenet_tcp_sendrecv_generic_node(maknae_agentd_t)
+sysnet_dns_name_resolve(maknae_agentd_t)
+miscfiles_read_generic_certs(maknae_agentd_t)
+
+files_search_var_lib(maknae_agentd_t)
+manage_dirs_pattern(maknae_agentd_t, maknae_agent_home_t, maknae_agent_home_t)
+manage_files_pattern(maknae_agentd_t, maknae_agent_home_t, maknae_agent_home_t)
+read_lnk_files_pattern(maknae_agentd_t, maknae_agent_home_t, maknae_agent_home_t)
+allow maknaed_t maknae_agent_home_t:dir { getattr search ioctl };
+allow maknaed_t maknae_agent_home_t:file { getattr ioctl };
+allowxperm maknaed_t maknae_agent_home_t:dir ioctl 0x0000;
+allowxperm maknaed_t maknae_agent_home_t:file ioctl 0x0000;
+
+allow maknae_agentd_t self:process { signal sigchld };
+auth_use_nsswitch(maknae_agentd_t)
+dev_read_urand(maknae_agentd_t)
+miscfiles_read_localization(maknae_agentd_t)
+kernel_read_system_state(maknae_agentd_t)
+
+neverallow maknae_agentd_t { maknae_private_t maknae_secret_t maknae_egress_etc_t maknae_egress_bounds_t }:file { read open };
+neverallow maknae_agentd_t { maknae_state_t maknae_audit_t }:{ dir file } *;
+neverallow maknae_agentd_t mail_spool_t:{ dir file } *;
+neverallow maknae_agentd_t { tty_device_t devpts_t user_tty_device_t user_devpts_t }:chr_file { write append };

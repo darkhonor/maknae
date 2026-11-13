@@ -2,8 +2,10 @@
 
 This directory builds Linux packages (checksummed; optionally GPG-signed — the
 default build is UNSIGNED, see [Verifying artifacts](#verifying-artifacts)) that install the `maknaed` trust-plane
-daemon, the `maknae` operator CLI and the `maknae-egress` egress deputy, their hardened systemd
-units (`maknaed.service`, `maknae-egress.service`, `maknae-egress.socket`), the opt-in
+daemon, the `maknae` operator CLI, the `maknae-egress` egress deputy and the `maknae-agentd`
+Agent Daemon, their hardened systemd units (`maknaed.service`, `maknae-egress.service`,
+`maknae-egress.socket`, and the template `maknae-agent@.service`, of which the package enables
+no instance: `maknae enroll agent` starts one per enrolled agent), the opt-in
 sync-back units (`maknae-policy-sync.path`, `maknae-policy-sync.service`, shipped
 disabled, see [Sync back](#sync-back-opt-in)), the MAC policies
 (SELinux on RHEL/Rocky, AppArmor on Debian), the fapolicyd trust fragment, and the
