@@ -76,6 +76,7 @@ pub(crate) fn start(
     write()?;
     systemctl(r, &["daemon-reload"])?;
     systemctl(r, &["enable", &unit])?;
+    systemctl(r, &["reset-failed", &unit])?;
     systemctl(r, &["restart", &unit])
 }
 
@@ -303,6 +304,7 @@ mod tests {
                 "write",
                 "/usr/bin/systemctl daemon-reload",
                 "/usr/bin/systemctl enable maknae-agent@hobi.service",
+                "/usr/bin/systemctl reset-failed maknae-agent@hobi.service",
                 "/usr/bin/systemctl restart maknae-agent@hobi.service",
             ]
         );
