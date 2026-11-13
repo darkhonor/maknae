@@ -388,6 +388,27 @@ pub struct MemTaskBlobs(Arc<MemInner>);
 #[cfg(any(test, feature = "hermetic-test-seam"))]
 type Unsynced = (String, Option<Zeroizing<Vec<u8>>>);
 
+/// What a crash would leave: the map as last synced, the changes made since, and how many
+/// of those a crash already kept.
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+#[derive(Default)]
+struct Disk {
+    synced: std::collections::BTreeMap<String, Zeroizing<Vec<u8>>>,
+    pending: Vec<Unsynced>,
+    survived: usize,
+}
+
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+fn apply(
+    map: &mut std::collections::BTreeMap<String, Zeroizing<Vec<u8>>>,
+    (name, bytes): Unsynced,
+) {
+    match bytes {
+        Some(b) => map.insert(name, b),
+        None => map.remove(&name),
+    };
+}
+
 #[cfg(any(test, feature = "hermetic-test-seam"))]
 #[derive(Default)]
 pub struct MemInner {
@@ -396,8 +417,7 @@ pub struct MemInner {
     fail: std::sync::Mutex<Option<Fail>>,
     slow: std::sync::Mutex<Option<Duration>>,
     stalls: std::sync::atomic::AtomicUsize,
-    synced: std::sync::Mutex<std::collections::BTreeMap<String, Zeroizing<Vec<u8>>>>,
-    unsynced: std::sync::Mutex<Vec<Unsynced>>,
+    disk: std::sync::Mutex<Disk>,
     after_save: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     attempts: std::sync::atomic::AtomicUsize,
     stuck: std::sync::Mutex<Option<String>>,
@@ -428,6 +448,23 @@ impl MemTaskBlobs {
             .map
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Every holder of both locks takes `map` first.
+    fn disk(&self) -> std::sync::MutexGuard<'_, Disk> {
+        self.0
+            .disk
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Changes the live map and records the change under the map's lock.
+    fn change(&self, name: &str, bytes: Option<&[u8]>) {
+        let mut map = self.map();
+        let change = (name.to_owned(), bytes.map(|b| Zeroizing::new(b.to_vec())));
+        apply(&mut map, change.clone());
+        self.disk().pending.push(change);
+        drop(map);
     }
 
     pub fn fail(&self, fail: Option<Fail>) {
@@ -472,10 +509,8 @@ impl MemTaskBlobs {
     }
 
     pub fn put(&self, name: &str, plain: &[u8]) {
-        self.map()
-            .insert(name.to_owned(), Zeroizing::new(plain.to_vec()));
-        self.settle(name, Ok(()), Some(plain))
-            .expect("a planted blob is synced");
+        self.change(name, Some(plain));
+        self.settle(Ok(())).expect("a planted blob is synced");
     }
 
     /// Runs once, after the next record save has landed.
@@ -490,49 +525,28 @@ impl MemTaskBlobs {
     /// The directory as a crash would leave it: what was last synced, then the first
     /// `kept` of the changes that landed unsynced since.
     pub fn crash(&self, kept: usize) {
-        let mut disk = self
-            .0
-            .synced
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let lost = std::mem::take(
-            &mut *self
-                .0
-                .unsynced
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        );
-        for (name, bytes) in lost.into_iter().take(kept) {
-            match bytes {
-                Some(b) => disk.insert(name, b),
-                None => disk.remove(&name),
-            };
+        let mut map = self.map();
+        let mut disk = self.disk();
+        let from = disk.survived;
+        let survived: Vec<Unsynced> = disk.pending.drain(..).skip(from).take(kept).collect();
+        let mut now = disk.synced.clone();
+        for change in survived.iter().cloned() {
+            apply(&mut now, change);
         }
-        *self.map() = disk;
+        *map = now;
+        disk.survived = survived.len();
+        disk.pending = survived;
     }
 
-    fn settle(
-        &self,
-        name: &str,
-        landed: Result<(), StoreError>,
-        bytes: Option<&[u8]>,
-    ) -> Result<(), StoreError> {
-        let mut unsynced = self
-            .0
-            .unsynced
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match &landed {
-            Ok(()) => {
-                unsynced.clear();
-                *self
-                    .0
-                    .synced
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = self.map().clone();
+    fn settle(&self, landed: Result<(), StoreError>) -> Result<(), StoreError> {
+        if landed.is_ok() {
+            let _changing = self.map();
+            let mut disk = self.disk();
+            let pending = std::mem::take(&mut disk.pending);
+            for change in pending {
+                apply(&mut disk.synced, change);
             }
-            Err(_) => unsynced.push((name.to_owned(), bytes.map(|b| Zeroizing::new(b.to_vec())))),
+            disk.survived = 0;
         }
         landed
     }
@@ -639,9 +653,8 @@ impl TaskBlobs for MemTaskBlobs {
     fn save(&self, name: &str, plain: &[u8]) -> Result<(), StoreError> {
         self.refuse(name)?;
         self.stall(name);
-        self.map()
-            .insert(name.to_owned(), Zeroizing::new(plain.to_vec()));
-        let landed = self.settle(name, self.landed(name, false), Some(plain));
+        self.change(name, Some(plain));
+        let landed = self.settle(self.landed(name, false));
         let then = match name == COUNTERS {
             true => None,
             false => self
@@ -668,14 +681,14 @@ impl TaskBlobs for MemTaskBlobs {
             return Err(StoreError::Io("sentinel-628-unlink-refused".into()));
         }
         self.stall(name);
-        self.map().remove(name);
-        self.settle(name, self.landed(name, true), None)
+        self.change(name, None);
+        self.settle(self.landed(name, true))
     }
 
     fn quarantine(&self, name: &str) -> Result<(), StoreError> {
         self.refuse(name)?;
-        self.map().remove(name);
-        self.settle(name, Ok(()), None)?;
+        self.change(name, None);
+        self.settle(Ok(()))?;
         self.0
             .aside
             .lock()
@@ -1241,5 +1254,185 @@ mod tests {
         let want = "StateDirectory=maknae maknae/conversations maknae/tasks";
         assert_eq!(lines.iter().filter(|l| **l == want).count(), 1);
         assert_eq!(maknae_config::state::TASKS_DIR, "tasks");
+    }
+
+    #[test]
+    fn counters_behind_one_taskers_stored_ordinal_refuse_open() {
+        let b = MemTaskBlobs::default();
+        let store = open_mem(&b);
+        let id = by_uid(&store, "one");
+        store.publish_report(&id, secret("r"), None).unwrap();
+        drop(store);
+        let good: Counters = ciborium::from_reader(b.load(COUNTERS).unwrap().as_slice()).unwrap();
+        let lags: [fn(&mut Ordinals); 2] = [|o| o.seq -= 1, |o| o.rseq -= 1];
+        for lag in lags {
+            let mut behind = good.clone();
+            behind.taskers.values_mut().for_each(lag);
+            assert_eq!(behind.seq, good.seq);
+            b.put(COUNTERS, &encode(&behind).unwrap());
+            assert_eq!(
+                TaskStore::open(Box::new(b.clone()), Arc::new(SystemClock)).err(),
+                Some(StoreError::Counters(
+                    "are behind a stored task's sequence".into()
+                ))
+            );
+        }
+        b.put(COUNTERS, &encode(&good).unwrap());
+        assert!(TaskStore::open(Box::new(b.clone()), Arc::new(SystemClock)).is_ok());
+    }
+
+    #[test]
+    fn a_crash_keeps_the_synced_state_and_only_the_first_kept_unsynced_changes() {
+        let unsynced = || {
+            let b = MemTaskBlobs::default();
+            b.put("a", b"synced");
+            b.put("c", b"kept");
+            b.fail(Some(Fail::Unsynced));
+            assert!(b.save("a", b"one").is_err());
+            assert!(b.save("a", b"two").is_err());
+            assert!(b.delete("c").is_err());
+            assert!(b.save("b", b"new").is_err());
+            assert!(b.delete("e").is_err());
+            b.fail(None);
+            b
+        };
+        for (kept, a, c, new) in [
+            (0, &b"synced"[..], true, false),
+            (1, b"one", true, false),
+            (2, b"two", true, false),
+            (3, b"two", false, false),
+            (4, b"two", false, true),
+            (5, b"two", false, true),
+        ] {
+            let b = unsynced();
+            b.crash(kept);
+            assert_eq!(b.load("a").unwrap().as_slice(), a, "kept {kept}");
+            assert_eq!(b.has("c"), c, "kept {kept}");
+            assert_eq!(b.has("b"), new, "kept {kept}");
+            assert!(!b.has("e"), "kept {kept}");
+            b.crash(0);
+            assert!(!b.has("b"), "kept {kept}");
+            assert_eq!(b.load("a").unwrap().as_slice(), b"synced", "kept {kept}");
+            assert!(b.has("c"), "kept {kept}");
+        }
+        let b = unsynced();
+        b.crash(1);
+        b.fail(Some(Fail::Unsynced));
+        assert!(b.save("d", b"lost").is_err());
+        b.fail(None);
+        b.crash(0);
+        assert_eq!(b.load("a").unwrap().as_slice(), b"synced");
+        assert!(!b.has("d"));
+        let b = unsynced();
+        b.crash(1);
+        b.save("z", b"sync").unwrap();
+        b.crash(0);
+        assert_eq!(b.load("a").unwrap().as_slice(), b"one");
+        let b = unsynced();
+        b.save("b", b"synced").unwrap();
+        b.crash(0);
+        assert_eq!(b.load("a").unwrap().as_slice(), b"two");
+        assert!(!b.has("c"));
+    }
+
+    #[test]
+    fn a_sync_waits_for_a_change_in_progress_and_covers_it() {
+        let b = MemTaskBlobs::default();
+        b.put("a", b"synced");
+        let mut map = b.map();
+        let change = ("a".to_string(), Some(Zeroizing::new(b"changing".to_vec())));
+        apply(&mut map, change.clone());
+        let (done, synced) = std::sync::mpsc::channel();
+        let syncing = {
+            let b = b.clone();
+            std::thread::spawn(move || {
+                b.settle(Ok(())).unwrap();
+                done.send(()).unwrap();
+            })
+        };
+        assert!(
+            synced.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a sync landed between a change and its record"
+        );
+        b.disk().pending.push(change);
+        drop(map);
+        synced.recv().unwrap();
+        syncing.join().unwrap();
+        b.crash(0);
+        assert_eq!(b.load("a").unwrap().as_slice(), b"changing");
+    }
+
+    #[test]
+    fn a_change_holds_the_map_until_it_is_recorded() {
+        let b = MemTaskBlobs::default();
+        b.put("a", b"synced");
+        let disk = b.disk();
+        let changing = {
+            let b = b.clone();
+            std::thread::spawn(move || b.change("a", Some(b"changing")))
+        };
+        let begun = std::time::Instant::now() + Duration::from_secs(10);
+        let mut held = None;
+        loop {
+            match b.0.map.try_lock() {
+                Ok(map) => assert_ne!(
+                    map.get("a").map(|v| v.as_slice()),
+                    Some(&b"changing"[..]),
+                    "the map was released before the change was recorded"
+                ),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    held.get_or_insert_with(std::time::Instant::now);
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => panic!("the map is poisoned"),
+            }
+            if held.is_some_and(|at| at.elapsed() >= Duration::from_millis(200)) {
+                break;
+            }
+            assert!(std::time::Instant::now() < begun, "the change never began");
+            std::thread::yield_now();
+        }
+        drop(disk);
+        changing.join().unwrap();
+        assert_eq!(b.load("a").unwrap().as_slice(), b"changing");
+        b.crash(0);
+        assert_eq!(b.load("a").unwrap().as_slice(), b"synced");
+    }
+
+    #[test]
+    fn a_records_or_panics_failure_spares_the_counters() {
+        for fail in [Fail::Records, Fail::Panics] {
+            let b = MemTaskBlobs::default();
+            b.fail(Some(fail));
+            assert_eq!(b.save(COUNTERS, b"c"), Ok(()));
+            assert!(b.has(COUNTERS));
+        }
+    }
+
+    #[test]
+    fn awaiting_stalls_returns_only_once_that_many_have_begun() {
+        let b = MemTaskBlobs::default();
+        b.slow(Some(Duration::from_millis(500)));
+        let saving = {
+            let b = b.clone();
+            std::thread::spawn(move || {
+                b.save("one", b"x").unwrap();
+                b.save("two", b"x").unwrap();
+            })
+        };
+        b.await_stalls(2);
+        assert!(b.0.stalls.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+        saving.join().unwrap();
+    }
+
+    #[test]
+    fn the_lease_and_the_record_bound_are_the_specified_values() {
+        assert_eq!(CLAIM_LEASE, Duration::from_secs(900));
+        assert_eq!(
+            RECORD_MAX,
+            (3 * maknae_config::PROMPT_MAX_CEILING
+                + maknae_proto::TASK_ENVELOPE_MARGIN
+                + maknae_proto::TASK_SIGNATURE_MAX_BYTES
+                + 4096) as u64
+        );
     }
 }
