@@ -17,6 +17,8 @@ use std::time::Duration;
 use zeroize::Zeroizing;
 
 pub const POLL_EVERY: Duration = Duration::from_secs(5);
+/// The kernel's `CLAIM_LEASE`.
+pub const CLAIM_LEASE: Duration = Duration::from_secs(15 * 60);
 /// A third of the kernel's `CLAIM_LEASE`.
 pub const HEARTBEAT_EVERY: Duration = Duration::from_secs(5 * 60);
 /// The kernel's `CLAIM_LEASE + TASK_SWEEP_EVERY + 30 s`.
@@ -103,7 +105,7 @@ pub enum Ending {
     Gone,
     Restarted,
     Shutdown,
-    /// No report can be delivered: the fixed report is too large, or was refused or lost while the task is still `Working`. Left to lapse, as `Undecodable` is.
+    /// No report can be delivered: the fixed report is too large, or was refused or lost while the task is still `Working`, or the renewal budget ran out. Left to lapse, as `Undecodable` is.
     Unsendable,
 }
 
@@ -172,6 +174,26 @@ struct Held {
     resumes: u32,
 }
 
+/// The renewal budget: a run of lease-renewing requests (a claim, a heartbeat, a
+/// report) with no progress lasts at most `CLAIM_LEASE`. Progress is a claim or
+/// heartbeat answered, a report acknowledged, or a model step completed.
+#[derive(Debug, Default)]
+struct Renewal {
+    since: Option<Duration>,
+}
+
+impl Renewal {
+    fn progressed(&mut self) {
+        self.since = None;
+    }
+
+    /// `sent` is when the request went out; true once the run has lasted `CLAIM_LEASE`.
+    fn unanswered(&mut self, sent: Duration, now: Duration) -> bool {
+        let since = *self.since.get_or_insert(sent);
+        now.saturating_sub(since) >= CLAIM_LEASE
+    }
+}
+
 enum Beat {
     /// The task is still `Working`; the items not yet seen, possibly none.
     More(Vec<SecretText>),
@@ -211,11 +233,13 @@ struct TaskHook<'a, C> {
     shutdown: &'a AtomicBool,
     seen: &'a mut u32,
     last_beat: &'a mut Duration,
+    renewal: &'a mut Renewal,
     end: Option<HookEnd>,
 }
 
 impl<P: TaskPlane + Send, C: Clock + Sync> StepHook<P> for TaskHook<'_, C> {
     async fn after_step(&mut self, plane: &mut P, transcript: &mut Transcript) -> StepControl {
+        self.renewal.progressed();
         if self.shutdown.load(Ordering::Acquire) {
             return StepControl::Stop;
         }
@@ -223,7 +247,14 @@ impl<P: TaskPlane + Send, C: Clock + Sync> StepHook<P> for TaskHook<'_, C> {
         if now.saturating_sub(*self.last_beat) < HEARTBEAT_EVERY {
             return StepControl::Continue;
         }
-        match read_beat(plane.heartbeat(*self.seen).await, self.seen) {
+        let answer = plane.heartbeat(*self.seen).await;
+        match &answer {
+            Ok(_) => self.renewal.progressed(),
+            Err(_) => {
+                self.renewal.unanswered(now, self.clock.now());
+            }
+        }
+        match read_beat(answer, self.seen) {
             Beat::More(items) => {
                 *self.last_beat = now;
                 for item in &items {
@@ -253,6 +284,9 @@ enum Reported {
     Unsendable,
     Shutdown,
 }
+
+/// The renewal budget ran out: go quiet so the lease lapses.
+struct Lapsed;
 
 enum Reconnected {
     Resume(Vec<SecretText>),
@@ -311,6 +345,7 @@ pub struct TaskDriver<P, C> {
     /// The task found `Working` by the startup heartbeat, until a claim settles it.
     leftover: Option<TaskId>,
     backoff: Backoff,
+    renewal: Renewal,
 }
 
 impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
@@ -323,6 +358,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
             held: None,
             leftover: None,
             backoff: Backoff(BACKOFF_FIRST),
+            renewal: Renewal::default(),
         }
     }
 
@@ -347,21 +383,67 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
         self.clock.sleep(d).await;
     }
 
+    /// Every lease-renewing request's outcome passes here (see [`Renewal`]).
+    fn renewed(&mut self, sent: Duration, progress: Option<bool>) -> Result<(), Lapsed> {
+        match progress {
+            Some(true) => self.renewal.progressed(),
+            Some(false) => {}
+            None if self.renewal.unanswered(sent, self.clock.now()) => return Err(Lapsed),
+            None => {}
+        }
+        Ok(())
+    }
+
+    async fn claim(&mut self) -> Result<Result<ClaimAnswer, String>, Lapsed> {
+        let sent = self.clock.now();
+        let answer = self.plane.claim().await;
+        self.renewed(sent, answer.is_ok().then_some(true))?;
+        Ok(answer)
+    }
+
+    async fn heartbeat(&mut self, seen: u32) -> Result<Result<BeatAnswer, String>, Lapsed> {
+        let sent = self.clock.now();
+        let answer = self.plane.heartbeat(seen).await;
+        self.renewed(sent, answer.is_ok().then_some(true))?;
+        Ok(answer)
+    }
+
+    async fn send_report(
+        &mut self,
+        text: SecretText,
+        seen: Option<u32>,
+    ) -> Result<Result<ReportOutcome, String>, Lapsed> {
+        let sent = self.clock.now();
+        let answer = self.plane.report(text, seen).await;
+        let progress = match &answer {
+            Ok(ReportOutcome::Acknowledged) => Some(true),
+            Ok(ReportOutcome::Refused(_) | ReportOutcome::TooLarge) => Some(false),
+            Err(_) => None,
+        };
+        self.renewed(sent, progress)?;
+        Ok(answer)
+    }
+
+    /// No request for the lease, a sweep and a margin, so any lease lapses.
+    async fn quiet(&mut self) {
+        self.pause(UNDECODABLE_WAIT).await;
+        self.renewal.progressed();
+    }
+
     /// Returns when the shutdown handle is used.
     pub async fn run(&mut self) {
         self.startup().await;
         while !self.stopping() {
-            match self.plane.claim().await {
+            let Ok(answer) = self.claim().await else {
+                self.quiet().await;
+                continue;
+            };
+            match answer {
                 Ok(ClaimAnswer::Delivered(d)) => {
                     self.backoff = Backoff(BACKOFF_FIRST);
                     self.delivered(&d.signed, &d.partition).await;
                 }
-                Ok(ClaimAnswer::Idle) => {
-                    self.leftover = None;
-                    self.backoff = Backoff(BACKOFF_FIRST);
-                    self.pause(POLL_EVERY).await;
-                }
-                Ok(ClaimAnswer::Refused(_)) => {
+                Ok(ClaimAnswer::Idle | ClaimAnswer::Refused(_)) => {
                     self.backoff = Backoff(BACKOFF_FIRST);
                     self.pause(POLL_EVERY).await;
                 }
@@ -373,7 +455,10 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
 
     async fn startup(&mut self) {
         while !self.stopping() {
-            match self.plane.heartbeat(0).await {
+            let Ok(answer) = self.heartbeat(0).await else {
+                return self.quiet().await;
+            };
+            match answer {
                 Ok(BeatAnswer::FollowUps { task, .. }) => {
                     self.leftover = Some(task);
                     return;
@@ -390,15 +475,15 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
     }
 
     async fn delivered(&mut self, signed: &Bytes, partition: &str) {
-        let leftover = std::mem::take(&mut self.leftover);
         let task = match self.plane.verify(signed) {
             Ok(task) => task,
             Err(Unverified::Undecodable) => {
                 self.ended(None, Ending::Undecodable);
-                self.pause(UNDECODABLE_WAIT).await;
+                self.quiet().await;
                 return;
             }
             Err(Unverified::Failed { task, class }) => {
+                self.leftover = None;
                 if let Some(held) = self.held.take_if(|h| h.id == task) {
                     self.drop_held(held).await;
                 }
@@ -408,6 +493,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
             }
         };
         let id = task.task.task_id;
+        let leftover = self.leftover.take();
         if let Some(held) = self.held.take() {
             if held.id == id {
                 self.plane.cite(Some(id));
@@ -457,7 +543,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
             }
         }
         if ending == Ending::Unsendable {
-            self.pause(UNDECODABLE_WAIT).await;
+            self.quiet().await;
         }
     }
 
@@ -473,7 +559,10 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
                 return Reported::Shutdown;
             }
             let checked = content.then_some(*seen);
-            match self.plane.report(text, checked).await {
+            let Ok(answer) = self.send_report(text, checked).await else {
+                return Reported::Unsendable;
+            };
+            match answer {
                 Ok(ReportOutcome::Acknowledged) => {
                     self.backoff = Backoff(BACKOFF_FIRST);
                     return Reported::Done(fixed);
@@ -491,7 +580,10 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
                 if self.stopping() {
                     return Reported::Shutdown;
                 }
-                match read_beat(self.plane.heartbeat(*seen).await, seen) {
+                let Ok(answer) = self.heartbeat(*seen).await else {
+                    return Reported::Unsendable;
+                };
+                match read_beat(answer, seen) {
                     Beat::More(items) if content && !items.is_empty() => {
                         return Reported::FollowUps(items)
                     }
@@ -601,6 +693,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
                 shutdown: &self.shutdown,
                 seen: &mut held.seen,
                 last_beat: &mut held.last_beat,
+                renewal: &mut self.renewal,
                 end: None,
             };
             let outcome = match then {
@@ -687,7 +780,10 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
             if self.stopping() {
                 return Err(Ending::Shutdown);
             }
-            match read_beat(self.plane.heartbeat(held.seen).await, &mut held.seen) {
+            let Ok(answer) = self.heartbeat(held.seen).await else {
+                return Err(Ending::Unsendable);
+            };
+            match read_beat(answer, &mut held.seen) {
                 Beat::More(items) if !items.is_empty() => {
                     held.answer = None;
                     return Ok(items);
@@ -717,7 +813,10 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
             if self.stopping() {
                 return Reconnected::Ended(Ending::Shutdown);
             }
-            match read_beat(self.plane.heartbeat(held.seen).await, &mut held.seen) {
+            let Ok(answer) = self.heartbeat(held.seen).await else {
+                return Reconnected::Ended(Ending::Unsendable);
+            };
+            match read_beat(answer, &mut held.seen) {
                 Beat::More(items) => return Reconnected::Resume(items),
                 Beat::Held => return Reconnected::Ended(Ending::Held),
                 Beat::Gone => return Reconnected::Ended(Ending::Gone),
@@ -780,6 +879,9 @@ mod tests {
         shutdown: Option<ShutdownHandle>,
         sent: Vec<Vec<Turn>>,
         report_seen: Vec<Option<u32>>,
+        first_lost: Option<Duration>,
+        quiet_at: Option<Duration>,
+        stop_on_quiet: bool,
     }
     type Shared = Arc<Mutex<World>>;
 
@@ -790,6 +892,12 @@ mod tests {
         }
         fn sleep(&mut self, d: Duration) -> impl Future<Output = ()> + Send {
             let mut w = self.0.lock().unwrap();
+            if d == UNDECODABLE_WAIT && w.quiet_at.is_none() {
+                w.quiet_at = Some(w.now);
+                if w.stop_on_quiet {
+                    w.shutdown.as_ref().unwrap().shut_down();
+                }
+            }
             w.now += d;
             w.log.push(format!("sleep {}", d.as_secs()));
             std::future::ready(())
@@ -811,6 +919,9 @@ mod tests {
         shutdown_on_report: bool,
         open_error: Option<PlaneError>,
         close_error: Option<PlaneError>,
+        lose_beats: bool,
+        lose_claims: bool,
+        lose_reports: bool,
         calls: usize,
     }
 
@@ -819,6 +930,15 @@ mod tests {
             self.calls += 1;
             assert!(self.calls < 400, "the driver did not settle");
             self.w.lock().unwrap().log.push(line);
+        }
+
+        /// The request reached the kernel; its reply did not come back.
+        fn lost<T>(&mut self) -> Result<T, String> {
+            let mut w = self.w.lock().unwrap();
+            if w.first_lost.is_none() {
+                w.first_lost = Some(w.now);
+            }
+            Err("reply lost".into())
         }
     }
 
@@ -887,6 +1007,7 @@ mod tests {
             self.log("claim".into());
             match self.claims.pop_front() {
                 Some(a) => a,
+                None if self.lose_claims => self.lost(),
                 None => {
                     let w = self.w.lock().unwrap();
                     w.shutdown.as_ref().unwrap().shut_down();
@@ -896,6 +1017,9 @@ mod tests {
         }
         async fn heartbeat(&mut self, seen: u32) -> Result<BeatAnswer, String> {
             self.log(format!("beat {seen}"));
+            if self.beats.is_empty() && self.lose_beats {
+                return self.lost();
+            }
             self.beats.pop_front().unwrap_or(Ok(BeatAnswer::FollowUps {
                 task: id(1),
                 from: seen,
@@ -913,9 +1037,11 @@ mod tests {
                 let w = self.w.lock().unwrap();
                 w.shutdown.as_ref().unwrap().shut_down();
             }
-            self.reports
-                .pop_front()
-                .unwrap_or(Ok(ReportOutcome::Acknowledged))
+            match self.reports.pop_front() {
+                Some(r) => r,
+                None if self.lose_reports => self.lost(),
+                None => Ok(ReportOutcome::Acknowledged),
+            }
         }
         fn cite(&mut self, task: Option<TaskId>) {
             self.log(match task {
@@ -1860,23 +1986,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_idle_claim_clears_the_mark_left_by_the_startup_heartbeat() {
+    async fn an_idle_claim_keeps_the_restart_mark_so_the_marked_task_is_never_rerun() {
         let mut f = Fake::default();
         f.beats.push_back(follow_ups(0, &[]));
         f.tasks.insert(1, Ok(signed(1, "prompt-1")));
-        f.claims = VecDeque::from([Ok(ClaimAnswer::Idle), delivered(1, PART)]);
-        f.replies = VecDeque::from([answer("a1")]);
+        f.claims = VecDeque::from([
+            Ok(ClaimAnswer::Idle),
+            Ok(ClaimAnswer::Idle),
+            delivered(1, PART),
+        ]);
         let (log, events) = run(f).await;
-        assert_eq!(reports(&log), strs(&["report a1"]));
-        assert_eq!(events, vec![ended(1, Ending::Answered)]);
+        assert_eq!(reports(&log), strs(&["report stopped: agent restarted"]));
+        assert!(!log.iter().any(|l| l.starts_with("prompt")), "{log:?}");
+        assert_eq!(events, vec![ended(1, Ending::Restarted)]);
 
         let mut f = Fake::default();
         f.beats.push_back(follow_ups(0, &[]));
         f.tasks.insert(1, Ok(signed(1, "prompt-1")));
-        f.claims = VecDeque::from([Ok(ClaimAnswer::Refused(refused())), delivered(1, PART)]);
-        let (log, events) = run(f).await;
-        assert_eq!(reports(&log), strs(&["report stopped: agent restarted"]));
-        assert_eq!(events, vec![ended(1, Ending::Restarted)]);
+        f.tasks.insert(9, Err(Unverified::Undecodable));
+        f.claims = VecDeque::from([delivered(9, PART), delivered(1, PART)]);
+        let (_, events) = run(f).await;
+        assert_eq!(
+            events,
+            vec![
+                DriverEvent::Ended {
+                    task: None,
+                    ending: Ending::Undecodable
+                },
+                ended(1, Ending::Restarted)
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1905,6 +2044,130 @@ mod tests {
         f.claims = VecDeque::from([delivered(1, PART)]);
         let (_, events) = run(f).await;
         assert_eq!(events, vec![ended(1, Ending::Restarted)]);
+    }
+
+    fn lapsed(w: &Shared) -> Duration {
+        let w = w.lock().unwrap();
+        w.quiet_at.expect("went quiet") - w.first_lost.expect("a reply was lost")
+    }
+
+    fn after_quiet(log: &[String]) -> Vec<String> {
+        let at = log
+            .iter()
+            .position(|l| l == "sleep 990")
+            .expect("went quiet");
+        log[at + 1..].to_vec()
+    }
+
+    fn lapses_within_one_backoff(d: Duration) {
+        assert!(d >= CLAIM_LEASE && d < CLAIM_LEASE + BACKOFF_MAX, "{d:?}");
+    }
+
+    #[tokio::test]
+    async fn a_startup_heartbeat_whose_replies_are_lost_goes_quiet_after_the_lease() {
+        let f = Fake {
+            lose_beats: true,
+            ..Fake::default()
+        };
+        let (mut d, w) = driver(f, PersonaMode::Own);
+        w.lock().unwrap().stop_on_quiet = true;
+        d.run().await;
+        lapses_within_one_backoff(lapsed(&w));
+        let log = w.lock().unwrap().log.clone();
+        assert!(!log.iter().any(|l| l == "claim"), "{log:?}");
+        assert_eq!(after_quiet(&log), strs(&["uncite"]));
+    }
+
+    #[tokio::test]
+    async fn claims_whose_replies_are_lost_go_quiet_after_the_lease() {
+        let f = Fake {
+            lose_claims: true,
+            ..fake()
+        };
+        let (mut d, w) = driver(f, PersonaMode::Own);
+        w.lock().unwrap().stop_on_quiet = true;
+        d.run().await;
+        lapses_within_one_backoff(lapsed(&w));
+        assert_eq!(after_quiet(&w.lock().unwrap().log), strs(&["uncite"]));
+    }
+
+    async fn lapses_mid_task(f: Fake) -> (Vec<String>, Vec<DriverEvent>, Duration) {
+        let (mut d, w) = driver(f, PersonaMode::Own);
+        w.lock().unwrap().stop_on_quiet = true;
+        d.run().await;
+        let (log, events) = {
+            let g = w.lock().unwrap();
+            (g.log.clone(), g.events.clone())
+        };
+        (log, events, lapsed(&w))
+    }
+
+    #[tokio::test]
+    async fn every_in_task_loop_whose_replies_are_lost_uncites_and_goes_quiet_after_the_lease() {
+        let done = Fake {
+            claims: VecDeque::from([delivered(1, PART)]),
+            replies: VecDeque::from([answer("a1")]),
+            lose_beats: true,
+            ..fake()
+        };
+        let mut report = Fake {
+            claims: VecDeque::from([delivered(1, PART)]),
+            replies: VecDeque::from([answer("a1")]),
+            lose_beats: true,
+            lose_reports: true,
+            ..fake()
+        };
+        report.beats.push_back(follow_ups(0, &[]));
+        let reconnect = Fake {
+            claims: VecDeque::from([delivered(1, PART)]),
+            replies: VecDeque::from([Err(PlaneError::Transport("x".into()))]),
+            lose_beats: true,
+            ..fake()
+        };
+        for (f, sent) in [
+            (done, vec![]),
+            (report, strs(&["report a1"])),
+            (reconnect, vec![]),
+        ] {
+            let (log, events, lapsed) = lapses_mid_task(f).await;
+            lapses_within_one_backoff(lapsed);
+            assert_eq!(reports(&log), sent);
+            assert_eq!(events, vec![ended(1, Ending::Unsendable)]);
+            let at = log.iter().position(|l| l == "sleep 990").unwrap();
+            assert_eq!(log[at - 1], "uncite");
+            assert_eq!(after_quiet(&log), strs(&["uncite"]));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_completed_step_is_progress_so_lost_beats_between_steps_never_lapse() {
+        let f = Fake {
+            claims: VecDeque::from([delivered(1, PART)]),
+            replies: (0..7)
+                .map(|n| read(&format!("c{n}"), "/w/a"))
+                .chain([answer("a1")])
+                .collect(),
+            step_cost: HEARTBEAT_EVERY,
+            lose_beats: true,
+            ..fake()
+        };
+        let (log, events, _) = lapses_mid_task(f).await;
+        assert_eq!(log.iter().filter(|l| l.starts_with("prompt")).count(), 8);
+        let quiet = log.iter().position(|l| l == "sleep 990").unwrap();
+        let last = log.iter().rposition(|l| l.starts_with("prompt")).unwrap();
+        assert!(last < quiet);
+        assert_eq!(events, vec![ended(1, Ending::Unsendable)]);
+    }
+
+    #[test]
+    fn the_renewal_run_starts_at_its_first_unanswered_request_and_progress_ends_it() {
+        let mut r = Renewal::default();
+        let s = Duration::from_secs;
+        assert!(!r.unanswered(s(10), s(11)));
+        assert!(!r.unanswered(s(500), s(10) + CLAIM_LEASE - s(1)));
+        assert!(r.unanswered(s(600), s(10) + CLAIM_LEASE));
+        r.progressed();
+        assert!(!r.unanswered(s(2000), s(2000) + CLAIM_LEASE - s(1)));
     }
 
     #[tokio::test]

@@ -53,6 +53,8 @@ fn secret(s: &str) -> SecretText {
 /// Signs each hand-out with a kernel leaf of the test CA, as `PlaneSigner` does.
 struct CaSigner {
     identity: maknae_vault::PlaneIdentity,
+    /// This many more hand-outs find no current leaf.
+    unsigned: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl maknae_kernel::TaskSigner for CaSigner {
@@ -64,6 +66,13 @@ impl maknae_kernel::TaskSigner for CaSigner {
             .map_err(|e| TaskRefusal::Unavailable(e.to_string()))
     }
     fn current_leaf(&self) -> Option<[u8; 32]> {
+        let skip = self
+            .unsigned
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok();
+        if skip {
+            return None;
+        }
         maknae_vault::task_sig::identity_fingerprint(&self.identity).ok()
     }
 }
@@ -219,6 +228,7 @@ struct Kernel {
     restart_when_up: bool,
     /// The next delivery the agent sees is not a `SignedTask`.
     garble: Arc<AtomicBool>,
+    unsigned: Arc<std::sync::atomic::AtomicU32>,
     /// The next connection ends after the kernel's first answer, as when the kernel
     /// dies with a write granted and its outcome not yet reported.
     cut: bool,
@@ -344,9 +354,16 @@ fn world(tag: &str, hobi_policy: &str) -> World {
     let blobs = MemTaskBlobs::default();
     let mut cfg = maknae_config::transport_from_section(None).unwrap();
     cfg.prompt_max_bytes = maknae_config::PROMPT_MAX_BYTES_FLOOR;
+    let unsigned = Arc::new(std::sync::atomic::AtomicU32::new(0));
     let boot = {
-        let (blobs, clock, pdp, ca) = (blobs.clone(), clock.clone(), pdp.clone(), ca.clone());
-        Box::new(move || admission(&blobs, &clock, &pdp, &ca))
+        let (blobs, clock, pdp, ca, unsigned) = (
+            blobs.clone(),
+            clock.clone(),
+            pdp.clone(),
+            ca.clone(),
+            Arc::clone(&unsigned),
+        );
+        Box::new(move || admission(&blobs, &clock, &pdp, &ca, &unsigned))
     };
     World {
         root,
@@ -363,6 +380,7 @@ fn world(tag: &str, hobi_policy: &str) -> World {
             down: 0,
             restart_when_up: false,
             garble: Arc::new(AtomicBool::new(false)),
+            unsigned,
             cut: false,
         })),
         conversations: common::conversations(),
@@ -377,12 +395,14 @@ fn admission(
     clock: &Arc<ManualClock>,
     pdp: &Arc<maknae_kernel::Composition<maknae_authz_basic::HermeticAuthorizer>>,
     ca: &TestCa,
+    unsigned: &Arc<std::sync::atomic::AtomicU32>,
 ) -> AgentAdmission {
     AgentAdmission {
         view: Arc::new(maknae_kernel::SnapshotEnrollment(Arc::clone(pdp))),
         tasks: Arc::new(TaskStore::open(Box::new(blobs.clone()), clock.clone()).expect("opens")),
         signer: Arc::new(CaSigner {
             identity: ca.kernel(PlaneKey::MlDsa87, None),
+            unsigned: Arc::clone(unsigned),
         }),
     }
 }
@@ -1270,6 +1290,49 @@ async fn an_agent_restarted_mid_task_reports_it_stopped_and_does_not_rerun_it() 
         w.collected().await,
         vec![(id, None, maknae_agent::task_driver::RESTARTED.to_string())]
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restarted_agents_task_held_back_by_the_signers_backoff_is_still_never_rerun() {
+    let _one = ONE_DAEMON.lock().await;
+    let w = world("agent-restart-backoff", HOBI_POLICY);
+    let id = w.submit("sentinel-629-backoff-prompt").await;
+    let notes = w.partition().join("notes.md");
+    let model = Model::script(vec![read_file("r1", notes.to_str().unwrap())]);
+    let shutdown: Arc<Mutex<Option<ShutdownHandle>>> = Arc::new(Mutex::new(None));
+    let stopping = Arc::clone(&shutdown);
+    *model.on_prompt.lock().unwrap() = Some(Box::new(move |_| {
+        stopping.lock().unwrap().as_ref().unwrap().shut_down();
+    }));
+    let first = start(&w, &model);
+    *shutdown.lock().unwrap() = Some(first.shutdown.clone());
+    first
+        .until("the first daemon ends", |d| !d.endings().is_empty())
+        .await;
+    first.stop().await;
+    assert_eq!(w.state(&id), TaskState::Working);
+    let idle_before = records(&w, "session.task", "idle").len();
+
+    w.kernel.lock().unwrap().unsigned.store(1, Ordering::SeqCst);
+    let ticks = Ticks::new();
+    let clock = Arc::clone(&w.clock);
+    let mut sleeps = 0;
+    *ticks.on_sleep.lock().unwrap() = Some(Box::new(move |d| {
+        sleeps += 1;
+        if sleeps >= 2 {
+            clock.set(maknae_kernel::Clock::now_secs(&*clock) + d.as_secs() as i64);
+        }
+    }));
+    let second = start_with(&w, &model, ticks, BUDGET);
+    second.until("the report", |d| d.ended(&id)).await;
+    let after = second.endings();
+    second.stop().await;
+    assert!(
+        records(&w, "session.task", "idle").len() > idle_before,
+        "a claim was answered idle while the task was held back"
+    );
+    assert_eq!(after, vec![(Some(id), Ending::Restarted)]);
+    assert_eq!(model.prompts().len(), 1, "the task is never re-run");
 }
 
 #[tokio::test(flavor = "multi_thread")]

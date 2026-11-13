@@ -10084,6 +10084,7 @@ mod tests {
     fn the_drivers_waits_derive_from_the_lease_and_one_prompt_exchange_fits_inside_it() {
         use maknae_agent::task_driver::{HEARTBEAT_EVERY, UNDECODABLE_WAIT};
         let lease = crate::task_store::CLAIM_LEASE;
+        assert_eq!(maknae_agent::task_driver::CLAIM_LEASE, lease);
         assert_eq!(
             UNDECODABLE_WAIT,
             lease + TASK_SWEEP_EVERY + Duration::from_secs(30)

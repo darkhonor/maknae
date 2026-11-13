@@ -1608,7 +1608,7 @@ The kernel's own records are `event: task`, written by the boot, a reload or the
 | Reason | `result` | Meaning | What to do |
 |---|---|---|---|
 | `closed:agent-gone` | `deny` | The task is about to be closed because its agent is gone. | Nothing; the tasker collects the close. |
-| `closed:agent-lost` | `deny` | The task is about to be closed because its lease lapsed. | Check the agent process; it stopped claiming or citing. |
+| `closed:agent-lost` | `deny` | The task is about to be closed because its lease lapsed. | Check the agent process; it stopped claiming or citing. `maknae-agentd` also stops on its own when the kernel's replies to its claims, heartbeats or reports go missing for a whole lease: it logs `task <id> ended: Unsendable` and sends nothing for about 16 minutes, so the lease lapses here. |
 | `closed:withdrawn` | `deny` | A queued task is about to be closed because its tasker may no longer task the agent. | Nothing, if the change of role or `taskers:` was intended. The claim record just before it carries the reason. |
 | `task held: tasker contained`, `task held: root contained`, `task held: agent <id> contained` | `deny` | The task is about to be put on hold because the tasker who gave it, the person or agent at the root of its chain, or the agent holding it is contained. | Treat the task, its report and the agent's partition as evidence; leave them as they are. An admin releases held tasks (#632). |
 | `expired` | `deny` | A report or close nobody collected in 30 days is about to be removed. | Nothing. |
