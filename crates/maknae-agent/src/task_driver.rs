@@ -103,7 +103,7 @@ pub enum Ending {
     Gone,
     Restarted,
     Shutdown,
-    /// Not even the fixed report fits a request frame: left to lapse, as `Undecodable` is.
+    /// No report can be delivered: the fixed report is too large, or was refused or lost while the task is still `Working`. Left to lapse, as `Undecodable` is.
     Unsendable,
 }
 
