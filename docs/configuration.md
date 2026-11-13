@@ -1061,7 +1061,9 @@ actions:
     - "fs.read"
     - "fs.write"
     - "fs.mkdir"
+    - "session.new"
     - "session.prompt"
+    - "session.close"
 models:
   allow:
     - "local/llama"
@@ -1074,6 +1076,7 @@ taskers:
 - An agent with no `policy.yaml`, or one without `permissions`, holds no file access through Maknae's tools.
 - `actions` limits `fs.stat` and `fs.list` by its `fs.read` entry; naming either refuses the reload (§2.5).
 - `admin.*` is always refused to an agent, except `admin.whoami`; no file can grant it.
+- `maknae-agentd` closes each task's conversation when the task ends, so list `session.close` beside `session.new` and `session.prompt`; without it every close is refused, each refusal is in the trail, the task still ends, and the agent's kernel conversations accumulate until the idle close or its 32-conversation limit.
 - `session.new` is refused to an agent unless its `actions.allow` holds it (`session.new` or `session.*`) and its `actions.deny` does not. It still needs the role's grant, which no role holds yet.
 - `taskers` names who may task this agent with `session.task`: account names, `uid:<n>` entries and `agent:<id>` entries. Without the key, only people may task it; another agent may task it only when listed. `taskers: []` admits nobody. Each tasker also needs `session.task` from its own role; the shipped `authz.yaml` grants it to `admin` and `user`. How tasks are stored and bounded, and the partition each works in, are in §2.6.
 - Unknown keys, and any `schema_version` other than `1`, refuse the reload.

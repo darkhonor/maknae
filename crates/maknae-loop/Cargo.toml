@@ -11,6 +11,10 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+# LoopPlane::with_dial, for a test Dial in place of the TLS connector; never in a production graph.
+test-support = []
+
 [dependencies]
 # The loop's decision code; this crate is its hands.
 maknae-agent = { path = "../maknae-agent" }

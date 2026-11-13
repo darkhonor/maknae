@@ -165,7 +165,7 @@ impl<K: KeySupply> LoopPlane<K, PlaneDial> {
             client,
             trust,
         };
-        Self::with_dial(dial, transport, output_tokens, write_max, keys)
+        Self::dialled(dial, transport, output_tokens, write_max, keys)
     }
 
     pub fn into_client(self) -> Arc<PlaneClient> {
@@ -215,7 +215,18 @@ impl LoopPlane<AgentKeys, PlaneDial> {
 }
 
 impl<K: KeySupply, D: Dial> LoopPlane<K, D> {
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_dial(
+        dial: D,
+        transport: TransportConfig,
+        output_tokens: Option<u64>,
+        write_max: usize,
+        keys: K,
+    ) -> Self {
+        Self::dialled(dial, transport, output_tokens, write_max, keys)
+    }
+
+    fn dialled(
         dial: D,
         transport: TransportConfig,
         output_tokens: Option<u64>,

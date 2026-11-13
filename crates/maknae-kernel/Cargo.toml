@@ -64,5 +64,5 @@ maknae-state = { path = "../maknae-state", features = ["hermetic-test-seam"] }
 maknae-agent = { path = "../maknae-agent" }
 # #629: the agent's transport, key supply and plane, driven against the kernel
 # (tests/task_loop.rs, tests/agent_daemon.rs). DEV-ONLY, as maknae-agent above.
-maknae-loop = { path = "../maknae-loop" }
+maknae-loop = { path = "../maknae-loop", features = ["test-support"] }
 maknae-seal = { path = "../maknae-seal" }
