@@ -791,8 +791,8 @@ pub async fn handle<S, E, P>(
 pub async fn handle_with_attempt_caps<S, E, P>(
     mut stream: S,
     peer_uri: Option<String>,
-    // `session.user` also chooses the key path's `<username>` segment (ADR-0028 §3),
-    // so it stays kernel-resolved from the peer uid, never taken from the request.
+    // `session.user` (client channel) or `session.channel`'s agent id (agent channel) names
+    // the key path's owner segment (ADR-0028 §3), never the request.
     session: Arc<SessionRecord>,
     gate: Arc<FactsGate>,
     emit: Arc<E>,
@@ -1363,15 +1363,16 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     let (admitted_view, providers, admitted_generation) = live.admission();
     let admitted = match &request.verb {
         Verb::SessionPrompt { choice, .. } => {
-            let (set, user_prefix) = match &*providers {
-                Some(a) => (&a.set, a.user_prefix.as_str()),
-                None => (&no_providers, ""),
+            let (set, user_prefix, agent_prefix) = match &*providers {
+                Some(a) => (&a.set, a.user_prefix.as_str(), a.agent_prefix.as_deref()),
+                None => (&no_providers, "", None),
             };
             match crate::provider_choice::admit_choice(
                 set,
                 choice.as_ref(),
-                peer_user.as_deref(),
+                crate::provider_choice::KeyOwner::of(&session.channel, peer_user.as_deref()),
                 user_prefix,
+                agent_prefix,
             ) {
                 Ok(a) => Some(a),
                 Err(refusal) => {

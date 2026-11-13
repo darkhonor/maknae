@@ -101,8 +101,8 @@ pub use authz::{
 pub use baseline_doc::{document_sections, value_from_canonical_json, BaselineSections};
 pub use bounds::{
     bounds_from_document, kv_fragment_is_acceptable, mount_path_is_acceptable,
-    path_is_within_prefix, vault_path_is_safe, EgressBounds, DEFAULT_CALL_TIMEOUT_MS,
-    EGRESS_BOUNDS_FILE, MAX_USER_PREFIX_BYTES,
+    path_is_within_prefix, prefixes_overlap, vault_path_is_safe, EgressBounds,
+    DEFAULT_CALL_TIMEOUT_MS, EGRESS_BOUNDS_FILE, MAX_USER_PREFIX_BYTES,
 };
 pub use bounds_io::load_egress_bounds;
 pub use ceiling::{ceiling_from_core, policy_name_from_core, Ceiling, IngestPosture};
@@ -128,7 +128,7 @@ pub use mirror::{
 pub use policy::{BasicPolicy, LEVELS as US_LEVELS};
 pub use principal::{principal_from_section, principal_keys_known, Principal, PRINCIPAL_SECTION};
 pub use providers::{
-    endpoint_is_acceptable, key_field_is_acceptable, key_subpath_is_acceptable,
+    agent_key_path, endpoint_is_acceptable, key_field_is_acceptable, key_subpath_is_acceptable,
     model_is_acceptable, provider_name_is_acceptable, providers_from_section,
     reasoning_effort_is_acceptable, refuse_plaintext_keys, user_key_path, AuthorizedProvider,
     ProviderSet, MAX_KEY_FIELD_BYTES, MAX_KEY_SUBPATH_BYTES, MAX_MODELS_PER_PROVIDER,

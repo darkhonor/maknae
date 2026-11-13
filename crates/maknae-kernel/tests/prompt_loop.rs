@@ -1685,6 +1685,7 @@ fn providers_named(names: &[&str]) -> Option<maknae_kernel::ProviderAuthority> {
     Some(maknae_kernel::ProviderAuthority {
         set: maknae_config::providers_from_section(Some(&Value::Seq(entries))).unwrap(),
         user_prefix: common::TEST_USER_PREFIX.into(),
+        agent_prefix: None,
     })
 }
 

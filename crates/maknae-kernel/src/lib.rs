@@ -87,7 +87,7 @@ pub use posture::{
     determine, CredentialSource, Posture, PostureMarker, MECHANISM_KEYCHAIN, MECHANISM_TPM2,
 };
 pub use provider_choice::{
-    admit_choice, provider_authority, AdmittedChoice, ChoiceRefusal, ProviderAuthority,
+    admit_choice, provider_authority, AdmittedChoice, ChoiceRefusal, KeyOwner, ProviderAuthority,
 };
 pub use run::{
     accept_loop, handle, handle_with_attempt_caps, run, AcceptAnswer, AdminOps, AgentAdmission,

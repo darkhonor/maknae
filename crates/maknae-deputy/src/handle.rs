@@ -5,7 +5,7 @@
 //! crate convention — `peercred`/`peer_identity`, `secret_io`/`secret_source`.
 //!
 //! What is re-checked here and what is not: the key path is held inside
-//! `user_prefix`, defence in depth that names a kernel bug (the binding bound is
+//! `user_prefix` or `agent_prefix`, defence in depth that names a kernel bug (the binding bound is
 //! the unsealed wrapping token's creation-path check, which the seal's AAD also
 //! binds); the endpoint's
 //! scheme and host are NOT re-checked — that decision is the kernel's, the
@@ -23,8 +23,8 @@ use maknae_proto::EgressFrameRequest;
 /// The kernel sees only `RefusedBeforeSend`; the variant goes to the deputy's stderr.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
-    /// The frame named a Vault path outside `user_prefix`: defence in depth naming
-    /// a kernel bug; the binding bound is the wrapping token's creation-path check.
+    /// The frame named a Vault path outside both `user_prefix` and `agent_prefix`: defence in
+    /// depth naming a kernel bug; the binding bound is the wrapping token's creation-path check.
     KeyPathOutsideBounds,
     /// The frame's Vault path is not a well-formed KV fragment — a `.` or `..`
     /// segment, whitespace, an empty segment. The prefix test alone accepts
@@ -130,7 +130,8 @@ pub fn decide<'a>(
     {
         return Err(Refusal::MalformedFrame);
     }
-    if !maknae_config::path_is_within_prefix(&req.key_vault_path, &bounds.user_prefix) {
+    let within = |prefix: &str| maknae_config::path_is_within_prefix(&req.key_vault_path, prefix);
+    if !within(&bounds.user_prefix) && !bounds.agent_prefix.as_deref().is_some_and(within) {
         return Err(Refusal::KeyPathOutsideBounds);
     }
     // #264 review round 4: the CONTENT judgement belongs here, not in
@@ -280,6 +281,43 @@ mod tests {
                 Refusal::KeyPathOutsideBounds
             );
         }
+    }
+
+    fn with_agents() -> EgressBounds {
+        EgressBounds {
+            agent_prefix: Some("maknae/agents".into()),
+            ..bounds()
+        }
+    }
+
+    #[test]
+    fn a_key_path_within_either_prefix_is_accepted() {
+        let b = with_agents();
+        for ok in [ALICE, "maknae/agents/hobi/openai/hobi"] {
+            assert_eq!(decide(&req(ok), &b).map(|_| ()), Ok(()), "{ok}");
+        }
+    }
+
+    #[test]
+    fn the_deputy_refuses_a_path_outside_both_prefixes() {
+        let b = with_agents();
+        for bad in [
+            "maknae/agents-evil/hobi/key",
+            "maknae/agents",
+            "maknae/users",
+            "maknae/other/key",
+            "other/key",
+        ] {
+            assert_eq!(
+                decide(&req(bad), &b).map(|_| ()),
+                Err(Refusal::KeyPathOutsideBounds),
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            decide(&req("maknae/agents/hobi/openai/hobi"), &bounds()).map(|_| ()),
+            Err(Refusal::KeyPathOutsideBounds)
+        );
     }
 
     /// The key FIELD is held to the kernel's shape too: whitespace or an

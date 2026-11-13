@@ -145,6 +145,7 @@ mod tests {
         Some(ProviderAuthority {
             set: ProviderSet::empty(),
             user_prefix: prefix.into(),
+            agent_prefix: None,
         })
     }
 

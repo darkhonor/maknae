@@ -852,8 +852,9 @@ mod tests {
         let admitted = crate::provider_choice::admit_choice(
             &set,
             Some(&choice),
-            Some("alice"),
+            crate::provider_choice::KeyOwner::User(Some("alice")),
             "maknae/users",
+            None,
         )
         .unwrap();
         let v = Verb::SessionPrompt {
@@ -932,8 +933,9 @@ mod tests {
         let admitted = crate::provider_choice::admit_choice(
             &set,
             Some(&choice),
-            Some("alice"),
+            crate::provider_choice::KeyOwner::User(Some("alice")),
             "maknae/users",
+            None,
         )
         .unwrap();
         let v = Verb::SessionPrompt {

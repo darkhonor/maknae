@@ -111,12 +111,6 @@ fn world(tag: &str, role: &str, grant: bool) -> World {
 }
 
 fn world_with(tag: &str, role: &str, grant: bool, hobi: &str, suga: &str) -> World {
-    let dir = std::env::temp_dir().join(format!("task628_{tag}_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let root = common::DirGuard(dir.canonicalize().unwrap());
-    let paths = maknae_authz_basic::PolicyPaths::in_dir(&root);
     let roles = match (grant, role) {
         (false, _) => String::new(),
         (true, "user") => "roles:\n  user:\n    allow: [\"session.task\"]\n".to_string(),
@@ -124,6 +118,16 @@ fn world_with(tag: &str, role: &str, grant: bool, hobi: &str, suga: &str) -> Wor
             "roles:\n  {role}:\n    allow: [\"session.task\"]\n  user:\n    allow: [\"session.task\"]\n"
         ),
     };
+    world_in(tag, role, &roles, hobi, suga)
+}
+
+fn world_in(tag: &str, role: &str, roles: &str, hobi: &str, suga: &str) -> World {
+    let dir = std::env::temp_dir().join(format!("task628_{tag}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let root = common::DirGuard(dir.canonicalize().unwrap());
+    let paths = maknae_authz_basic::PolicyPaths::in_dir(&root);
     common::write_0640(
         &paths.authz,
         &format!("schema_version: 1\npermissions:\n  allow: []\n  deny: []\n{roles}"),
@@ -222,6 +226,12 @@ fn world_with(tag: &str, role: &str, grant: bool, hobi: &str, suga: &str) -> Wor
         user,
         cfg,
     }
+}
+
+struct Wiring {
+    live: Arc<maknae_kernel::LiveConfig>,
+    egress: Arc<dyn maknae_kernel::Egress>,
+    conversations: Arc<dyn maknae_kernel::ConversationStore>,
 }
 
 impl World {
@@ -378,6 +388,33 @@ impl World {
         records: &Arc<E>,
         dir: Option<&std::path::Path>,
     ) -> Vec<u8> {
+        self.serve_wired(
+            session,
+            gate,
+            verb,
+            task,
+            records,
+            dir,
+            Wiring {
+                live: Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
+                egress: maknae_kernel::unavailable_egress(),
+                conversations: common::conversations(),
+            },
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn serve_wired<E: maknae_audit_append::AuditEmit + Send + Sync + 'static>(
+        &self,
+        session: maknae_kernel::SessionRecord,
+        gate: Arc<maknae_kernel::FactsGate>,
+        verb: Verb,
+        task: Option<TaskId>,
+        records: &Arc<E>,
+        dir: Option<&std::path::Path>,
+        wiring: Wiring,
+    ) -> Vec<u8> {
         use tokio::io::AsyncReadExt;
         let delegated = maknae_io::DelegatedFds::new(4);
         if let Some(dir) = dir {
@@ -393,17 +430,17 @@ impl World {
             self.cfg.clone(),
             serde_json::json!({}),
             Arc::clone(&self.pdp),
-            Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
+            wiring.live,
             Arc::new("basic+ceiling".into()),
             Arc::new("US".into()),
             Arc::new("ml-dsa-87".to_string()),
             Arc::new(None),
-            maknae_kernel::unavailable_egress(),
+            wiring.egress,
             Duration::from_secs(2),
             delegated,
             common::no_baseline(),
             maknae_kernel::AttemptCaps::default(),
-            common::conversations(),
+            wiring.conversations,
             self.agents.clone(),
         );
         let serving = tokio::spawn(served);
@@ -2910,4 +2947,188 @@ async fn a_submission_held_at_its_confirm_is_recorded_and_answered_as_held() {
         .all(|r| r.subject.task_id == Some(id.to_string())));
     assert!(w.claim("hobi").await.is_none());
     assert_eq!(w.store().record(&id).unwrap().state, TaskState::Held);
+}
+
+const PROMPTING: &str = "roles:\n  user:\n    allow: [\"session.prompt\", \"session.new\"]\ndestinations:\n  user:\n    allow: [\"provider:openai\"]\n";
+const AGENT_PROMPTS: &str =
+    "schema_version: 1\nactions:\n  allow: [\"session.prompt\", \"session.new\"]\n";
+const AGENT_PREFIX: &str = "maknae/agents";
+
+#[derive(Default)]
+struct KeyPaths(std::sync::Mutex<Vec<String>>);
+
+impl KeyPaths {
+    fn seen(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+impl maknae_kernel::Egress for KeyPaths {
+    fn ready(&self) -> Result<(), maknae_kernel::EgressFailure> {
+        Ok(())
+    }
+    fn deadline(&self) -> Duration {
+        Duration::from_secs(5)
+    }
+    fn send(
+        &self,
+        _: &maknae_kernel::DurableEgressIntent,
+        r: maknae_kernel::EgressRequest,
+    ) -> Result<maknae_kernel::EgressReply, maknae_kernel::EgressFailure> {
+        self.0.lock().unwrap().push(r.key_vault_path);
+        Ok(maknae_kernel::EgressReply {
+            reply: maknae_proto::PromptReply {
+                reasoning: None,
+                tool_calls: vec![],
+                blocks: vec![maknae_proto::ContentBlock::Text { text: secret("ok") }],
+                usage: None,
+            },
+        })
+    }
+}
+
+fn prompt_wiring(owner: u32, agent_prefix: Option<&str>, egress: &Arc<KeyPaths>) -> Wiring {
+    let mut authority = common::authority(Some("openai")).unwrap();
+    authority.agent_prefix = agent_prefix.map(str::to_string);
+    Wiring {
+        live: Arc::new(maknae_kernel::LiveConfig::new(
+            Default::default(),
+            Some(authority),
+        )),
+        egress: egress.clone(),
+        conversations: common::seeded(owner, "/"),
+    }
+}
+
+fn prompt(subpath: &str) -> Verb {
+    Verb::SessionPrompt {
+        conversation: common::CONV.into(),
+        turns: vec![maknae_proto::Turn::User {
+            content: vec![maknae_proto::ContentBlock::Text {
+                text: secret("hello"),
+            }],
+        }],
+        output_tokens: None,
+        choice: Some(common::choice("openai", common::TEST_MODEL, subpath)),
+    }
+}
+
+impl World {
+    async fn prompt_as_hobi(&self, wiring: Wiring, records: &Arc<Records>) -> Option<RespResult> {
+        let _shared = STORE.read().await;
+        let mut session = maknae_kernel::SessionRecord::for_test(HOBI_UID, Some("hobi-svc".into()))
+            .with_session_id(473);
+        session.admission = maknae_kernel::Admission::EnrolledAgent;
+        session.channel = maknae_kernel::SessionChannel::Agent {
+            agent: hobi(),
+            leaf_expires: std::time::Instant::now() + Duration::from_secs(3600),
+        };
+        let gate = maknae_kernel::FactsGate::for_test(
+            Arc::new(AgentFacts {
+                user: "hobi-svc".into(),
+                dir: PathBuf::from(&*self.root),
+            }),
+            Duration::from_secs(5),
+        );
+        let raw = self
+            .serve_wired(
+                session,
+                gate,
+                prompt("openai/hobi"),
+                None,
+                records,
+                None,
+                wiring,
+            )
+            .await;
+        first(&raw).await
+    }
+
+    async fn prompt_as_me(&self, wiring: Wiring, records: &Arc<Records>) -> Option<RespResult> {
+        let _shared = STORE.read().await;
+        let session = maknae_kernel::SessionRecord::for_test(self.me, Some(self.user.clone()))
+            .with_session_id(474);
+        let gate = maknae_kernel::FactsGate::allow_as(
+            Some(self.user.clone()),
+            Some(PathBuf::from(&*self.root)),
+        );
+        let raw = self
+            .serve_wired(
+                session,
+                gate,
+                prompt("openai/hobi"),
+                None,
+                records,
+                None,
+                wiring,
+            )
+            .await;
+        first(&raw).await
+    }
+}
+
+async fn first(raw: &[u8]) -> Option<RespResult> {
+    let mut cursor = raw;
+    let frame = common::read_frame(&mut cursor, 1 << 20).await.ok()?;
+    Some(maknae_proto::decode_response(&frame).unwrap().result)
+}
+
+fn prompting(tag: &str) -> World {
+    world_in(tag, "user", PROMPTING, AGENT_PROMPTS, PLAIN)
+}
+
+#[tokio::test]
+async fn an_agent_prompt_reaches_egress_under_its_own_id_never_its_account_or_a_users_tree() {
+    let w = prompting("agentkey");
+    let egress = Arc::new(KeyPaths::default());
+    let records = Records::new(0);
+    let got = w
+        .prompt_as_hobi(
+            prompt_wiring(HOBI_UID, Some(AGENT_PREFIX), &egress),
+            &records,
+        )
+        .await;
+    assert!(
+        matches!(got, Some(RespResult::Ok(Payload::PromptReply(_)))),
+        "{got:?}: {:?}",
+        records.snapshot()
+    );
+    assert_eq!(egress.seen(), ["maknae/agents/hobi/openai/hobi"]);
+}
+
+#[tokio::test]
+async fn an_agent_prompt_with_no_agent_prefix_is_refused_before_egress() {
+    let w = prompting("agentnoprefix");
+    let egress = Arc::new(KeyPaths::default());
+    let records = Records::new(0);
+    let got = w
+        .prompt_as_hobi(prompt_wiring(HOBI_UID, None, &egress), &records)
+        .await;
+    assert!(got.as_ref().is_some_and(unauthorized), "{got:?}");
+    assert!(egress.seen().is_empty());
+    assert!(records.snapshot().iter().any(|r| r.outcome.result == "deny"
+        && r.outcome.reason == maknae_kernel::ChoiceRefusal::NoAgentPrefix.reason()));
+}
+
+#[tokio::test]
+async fn a_client_prompt_on_a_host_with_an_agent_prefix_stays_under_the_user_prefix() {
+    let w = prompting("userkey");
+    let egress = Arc::new(KeyPaths::default());
+    let records = Records::new(0);
+    let got = w
+        .prompt_as_me(prompt_wiring(w.me, Some(AGENT_PREFIX), &egress), &records)
+        .await;
+    assert!(
+        matches!(got, Some(RespResult::Ok(Payload::PromptReply(_)))),
+        "{got:?}: {:?}",
+        records.snapshot()
+    );
+    assert_eq!(
+        egress.seen(),
+        [format!(
+            "{}/{}/openai/hobi",
+            common::TEST_USER_PREFIX,
+            w.user
+        )]
+    );
 }

@@ -191,6 +191,11 @@ pub fn path_is_within_prefix(path: &str, prefix: &str) -> bool {
     }
 }
 
+/// Does either prefix equal or contain the other, on a segment boundary?
+pub fn prefixes_overlap(a: &str, b: &str) -> bool {
+    a == b || path_is_within_prefix(a, b) || path_is_within_prefix(b, a)
+}
+
 /// Parse the bounds document. Shape-only and fail-closed: an absent or empty
 /// prefix is a refusal, never a permissive default, and `None` is never a
 /// silent absence.
@@ -242,10 +247,7 @@ pub fn bounds_from_document(v: &Value) -> Result<EgressBounds, ConfigError> {
         Some(_) => return Err(err("'agent_prefix' must be a string")),
     };
     if let Some(a) = &agent_prefix {
-        if *a == user_prefix
-            || path_is_within_prefix(a, &user_prefix)
-            || path_is_within_prefix(&user_prefix, a)
-        {
+        if prefixes_overlap(a, &user_prefix) {
             return Err(err(
                 "'agent_prefix' overlaps 'user_prefix': neither may equal or contain the other",
             ));

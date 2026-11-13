@@ -614,6 +614,22 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_agent_prefix_refuses_the_baseline() {
+        let mut p = minimal();
+        p.push(("providers", PROVIDERS));
+        for bad in ["a b", "maknae/users"] {
+            let mut env = FakeEnv::with_bounds();
+            let b = env.bounds.as_mut().unwrap();
+            b.user_prefix = "maknae/users".into();
+            b.agent_prefix = Some(bad.into());
+            assert!(
+                matches!(validate(doc(&p), Mode::Boot, Path::new("/e"), &env), Err(Invalid::Environment(ref m)) if m.contains("agent_prefix")),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
     fn without_providers_neither_the_bounds_nor_the_account_is_asked() {
         let env = FakeEnv {
             egress_uid: Err("asked".into()),
