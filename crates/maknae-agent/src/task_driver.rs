@@ -397,14 +397,24 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
     async fn claim(&mut self) -> Result<Result<ClaimAnswer, String>, Lapsed> {
         let sent = self.clock.now();
         let answer = self.plane.claim().await;
-        self.renewed(sent, answer.is_ok().then_some(true))?;
+        let progress = match &answer {
+            Ok(ClaimAnswer::Delivered(_) | ClaimAnswer::Idle) => Some(true),
+            Ok(ClaimAnswer::Refused(_)) | Err(_) => None,
+        };
+        self.renewed(sent, progress)?;
         Ok(answer)
     }
 
     async fn heartbeat(&mut self, seen: u32) -> Result<Result<BeatAnswer, String>, Lapsed> {
         let sent = self.clock.now();
         let answer = self.plane.heartbeat(seen).await;
-        self.renewed(sent, answer.is_ok().then_some(true))?;
+        let progress = match &answer {
+            Ok(BeatAnswer::FollowUps { .. } | BeatAnswer::State(_) | BeatAnswer::Idle) => {
+                Some(true)
+            }
+            Ok(BeatAnswer::Refused(_)) | Err(_) => None,
+        };
+        self.renewed(sent, progress)?;
         Ok(answer)
     }
 
@@ -483,7 +493,9 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
                 return;
             }
             Err(Unverified::Failed { task, class }) => {
-                self.leftover = None;
+                if self.leftover == Some(task) {
+                    self.leftover = None;
+                }
                 if let Some(held) = self.held.take_if(|h| h.id == task) {
                     self.drop_held(held).await;
                 }
@@ -922,6 +934,8 @@ mod tests {
         lose_beats: bool,
         lose_claims: bool,
         lose_reports: bool,
+        refuse_beats: bool,
+        refuse_claims: bool,
         calls: usize,
     }
 
@@ -939,6 +953,14 @@ mod tests {
                 w.first_lost = Some(w.now);
             }
             Err("reply lost".into())
+        }
+
+        /// The kernel answered, but refused: a refusal can follow a renewal.
+        fn refusal(&mut self) {
+            let mut w = self.w.lock().unwrap();
+            if w.first_lost.is_none() {
+                w.first_lost = Some(w.now);
+            }
         }
     }
 
@@ -1008,6 +1030,10 @@ mod tests {
             match self.claims.pop_front() {
                 Some(a) => a,
                 None if self.lose_claims => self.lost(),
+                None if self.refuse_claims => {
+                    self.refusal();
+                    Ok(ClaimAnswer::Refused(refused()))
+                }
                 None => {
                     let w = self.w.lock().unwrap();
                     w.shutdown.as_ref().unwrap().shut_down();
@@ -1019,6 +1045,10 @@ mod tests {
             self.log(format!("beat {seen}"));
             if self.beats.is_empty() && self.lose_beats {
                 return self.lost();
+            }
+            if self.beats.is_empty() && self.refuse_beats {
+                self.refusal();
+                return Ok(BeatAnswer::Refused(refused()));
             }
             self.beats.pop_front().unwrap_or(Ok(BeatAnswer::FollowUps {
                 task: id(1),
@@ -2140,6 +2170,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn heartbeats_refused_mid_task_go_quiet_after_the_lease_as_lost_ones_do() {
+        let f = Fake {
+            claims: VecDeque::from([delivered(1, PART)]),
+            replies: VecDeque::from([answer("a1")]),
+            refuse_beats: true,
+            ..fake()
+        };
+        let (log, events, lapsed) = lapses_mid_task(f).await;
+        lapses_within_one_backoff(lapsed);
+        assert!(reports(&log).is_empty(), "{log:?}");
+        assert_eq!(events, vec![ended(1, Ending::Unsendable)]);
+        assert_eq!(after_quiet(&log), strs(&["uncite"]));
+    }
+
+    #[tokio::test]
+    async fn claims_refused_go_quiet_after_the_lease_as_lost_ones_do() {
+        let f = Fake {
+            refuse_claims: true,
+            ..fake()
+        };
+        let (mut d, w) = driver(f, PersonaMode::Own);
+        w.lock().unwrap().stop_on_quiet = true;
+        d.run().await;
+        lapses_within_one_backoff(lapsed(&w));
+        assert_eq!(after_quiet(&w.lock().unwrap().log), strs(&["uncite"]));
+    }
+
+    #[tokio::test]
     async fn a_completed_step_is_progress_so_lost_beats_between_steps_never_lapse() {
         let f = Fake {
             claims: VecDeque::from([delivered(1, PART)]),
@@ -2485,6 +2543,37 @@ mod tests {
             events,
             vec![ended(1, Ending::Restarted), ended(2, Ending::Answered)]
         );
+    }
+
+    #[tokio::test]
+    async fn another_task_failing_verification_keeps_the_leftover_marked() {
+        let mut f = Fake::default();
+        f.beats.push_back(follow_ups(0, &[]));
+        f.tasks.insert(
+            2,
+            Err(Unverified::Failed {
+                task: id(2),
+                class: VerifyClass::NotKernel,
+            }),
+        );
+        f.tasks.insert(1, Ok(signed(1, "prompt-1")));
+        f.claims = VecDeque::from([delivered(2, PART), delivered(1, PART)]);
+        let (log, events) = run(f).await;
+        assert_eq!(
+            reports(&log),
+            strs(&[
+                "report refused: this task's kernel signature did not verify (not-kernel)",
+                &format!("report {RESTARTED}"),
+            ])
+        );
+        assert_eq!(
+            events,
+            vec![
+                ended(2, Ending::Unverified(VerifyClass::NotKernel)),
+                ended(1, Ending::Restarted)
+            ]
+        );
+        assert!(!log.iter().any(|l| l.starts_with("open")), "{log:?}");
     }
 
     #[tokio::test]
