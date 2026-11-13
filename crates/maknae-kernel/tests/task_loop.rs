@@ -3140,3 +3140,111 @@ async fn a_client_prompt_on_a_host_with_an_agent_prefix_stays_under_the_user_pre
         )]
     );
 }
+
+fn openai() -> maknae_config::ProviderSet {
+    use maknae_config::Value;
+    maknae_config::providers_from_section(Some(&Value::Seq(vec![Value::Map(vec![
+        ("name".into(), Value::Str("openai".into())),
+        (
+            "endpoint".into(),
+            Value::Str("https://api.example.test/v1".into()),
+        ),
+        (
+            "models".into(),
+            Value::Seq(vec![Value::Str("gpt-5.6-luna".into())]),
+        ),
+    ])])))
+    .unwrap()
+}
+
+/// Opens `sealed` as the Egress Daemon does, at the path the kernel admitted.
+fn egress_opens(
+    recipient: &maknae_seal::SealPrivateKey,
+    admitted: &maknae_kernel::AdmittedChoice<'_>,
+    conversation: &str,
+) -> bool {
+    let expect = maknae_vault::WrapExpectation::new(
+        "maknae-kv",
+        &admitted.key_vault_path,
+        admitted.key_field,
+        maknae_vault::USER_KEY_WRAP_TTL,
+    )
+    .unwrap();
+    let p = maknae_vault::aad_parts(&expect, conversation, "openai", admitted.model);
+    let aad = maknae_seal::SealAad::new(&maknae_seal::SealContext {
+        conversation: p.conversation,
+        provider: p.provider,
+        model: p.model,
+        expected_path: p.expected_path,
+        key_field: p.key_field,
+    })
+    .unwrap();
+    maknae_seal::open(recipient, &aad, admitted.sealed_key.as_bytes()).is_ok()
+}
+
+#[tokio::test]
+async fn an_agents_sealed_key_opens_only_on_the_path_the_kernel_admits_for_that_agent() {
+    maknae_crypto::init().unwrap();
+    let recipient = maknae_seal::SealPrivateKey::generate().unwrap();
+    let hobi = maknae_config::AgentId::parse("hobi").unwrap();
+    let suga = maknae_config::AgentId::parse("suga").unwrap();
+    let provider = maknae_config::AgentProvider {
+        provider: "openai".into(),
+        model: "gpt-5.6-luna".into(),
+        key_subpath: "openai/main".into(),
+        key_field: "api_key".into(),
+        context_tokens: 128_000,
+        output_tokens: None,
+    };
+    let key = maknae_loop::keys::AgentKeyContext {
+        provider: &provider,
+        kv_mount: "maknae-kv",
+        agent_prefix: "maknae/agents",
+        agent: &hobi,
+        seal_key: recipient.public_key(),
+    };
+    let read = std::sync::Mutex::new(None);
+    let choice = maknae_loop::keys::agent_choice(&key, "c-629", |path| {
+        *read.lock().unwrap() = Some(path.clone());
+        async move {
+            Ok(maknae_vault::WrappedSecret {
+                token: maknae_vault::WrappingToken::new(Zeroizing::new(
+                    "hvs.wrap-sentinel-629".into(),
+                ))
+                .unwrap(),
+                ttl: Duration::from_secs(60),
+                creation_path: path,
+                creation_time: "2026-11-13T00:00:00Z".into(),
+            })
+        }
+    })
+    .await
+    .unwrap();
+    let set = openai();
+    let admit = |owner| {
+        maknae_kernel::admit_choice(
+            &set,
+            Some(&choice),
+            owner,
+            "maknae/users",
+            Some("maknae/agents"),
+        )
+        .unwrap()
+    };
+    let own = admit(maknae_kernel::KeyOwner::Agent(&hobi));
+    assert_eq!(
+        read.lock().unwrap().as_deref(),
+        Some(own.key_vault_path.as_str())
+    );
+    assert!(egress_opens(&recipient, &own, "c-629"));
+    assert!(!egress_opens(
+        &recipient,
+        &admit(maknae_kernel::KeyOwner::Agent(&suga)),
+        "c-629"
+    ));
+    assert!(!egress_opens(
+        &recipient,
+        &admit(maknae_kernel::KeyOwner::User(Some("hobi"))),
+        "c-629"
+    ));
+}

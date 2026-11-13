@@ -158,6 +158,23 @@ pub struct AgentLogin {
     pub agent: AgentId,
 }
 
+/// Reads this client's current Vault login token, so a read made as the same
+/// identity follows a renewal or a re-login.
+#[derive(Clone)]
+pub struct LoginToken {
+    client: Arc<Mutex<VaultClient>>,
+}
+
+impl LoginToken {
+    pub async fn current(&self) -> Result<UserToken, VaultError> {
+        let client = self.client.lock().await;
+        let held = client.settings.token.as_str();
+        let mut copy = Zeroizing::new(String::with_capacity(held.len()));
+        copy.push_str(held);
+        UserToken::new(copy)
+    }
+}
+
 /// The Stage-1 plane-cert client.
 pub struct PlaneClient {
     subject: PlaneSubject,
@@ -739,6 +756,12 @@ impl PlaneClient {
     /// The key algorithm this plane mints its identity with (`vault.plane_key`).
     pub fn plane_key(&self) -> PlaneKey {
         self.plane_key
+    }
+
+    pub fn login_token(&self) -> LoginToken {
+        LoginToken {
+            client: Arc::clone(&self.client),
+        }
     }
 
     /// Non-blocking snapshot of the current identity (for the Stage-2 transport).
@@ -1654,6 +1677,23 @@ mod tests {
             rt.block_on(client.mint()),
             Err(VaultError::Auth(_))
         ));
+    }
+
+    #[test]
+    fn the_login_token_follows_the_clients_current_token() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let fx = DispatchFixture::with_addr("agent-token", DEAD_VAULT, "");
+        let secret = AgentSecret::new(Zeroizing::new("s".into()));
+        let client = PlaneClient::for_agent(&agent_login(&fx.0, DEAD_VAULT), secret).unwrap();
+        let token = client.login_token();
+        let rt = current_thread(false);
+        assert!(rt.block_on(token.current()).is_err());
+        for held in ["hvs.sentinel-629-a", "hvs.sentinel-629-b"] {
+            rt.block_on(async { client.client.lock().await.set_token(held) });
+            let got = rt.block_on(token.current()).unwrap();
+            assert_eq!(got.expose(), held);
+            assert_eq!(got.expose().len(), held.len());
+        }
     }
 
     #[test]

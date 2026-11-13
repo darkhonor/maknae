@@ -61,3 +61,7 @@ maknae-state = { path = "../maknae-state", features = ["hermetic-test-seam"] }
 # production graph must never link the loop's decision code (the isolation
 # contract's matrix links `maknae-agent` into `maknae` alone).
 maknae-agent = { path = "../maknae-agent" }
+# #629: the agent's transport and key supply, checked against the kernel's own
+# admit path. DEV-ONLY, as maknae-agent above.
+maknae-loop = { path = "../maknae-loop" }
+maknae-seal = { path = "../maknae-seal" }

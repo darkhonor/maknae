@@ -16,6 +16,7 @@ pub mod plane;
 pub mod render;
 pub mod route;
 pub mod session;
+pub mod task;
 #[cfg(test)]
 mod testutil;
 pub mod transcript;

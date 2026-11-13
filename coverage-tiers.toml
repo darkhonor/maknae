@@ -351,6 +351,9 @@ files = [
   # control is executable logic and belongs under the T1 floor.
   "crates/maknae-agent/src/plane.rs",
   "crates/maknae-agent/src/wire.rs",
+  # #629: the agent's claim, heartbeat and report answers; a refusal read as a
+  # transport fault, or the reverse, closes or strands a task.
+  "crates/maknae-agent/src/task.rs",
   "crates/maknae-agent/src/session.rs",
   "crates/maknae-agent/src/route.rs",
   "crates/maknae-agent/src/render.rs",
@@ -457,6 +460,12 @@ files = [
   # #470: SentOutcome and its field-for-field conversion into maknae-agent's
   # WireOutcome, whose mappers are T1. Tested by sent_outcome_converts_field_for_field.
   "crates/maknae-loop/src/outcome.rs",
+  # #629: the provider key a turn reads and the path its seal binds. T2: the
+  # kernel builds the admitted path from the authenticated subject and the egress
+  # refuses any other, so a wrong path here fails the turn closed. Pinned by
+  # agent_keys_read_only_under_the_agent_tree and, against admit_choice, by
+  # maknae-kernel's an_agents_sealed_key_opens_only_on_the_path_the_kernel_admits_for_that_agent.
+  "crates/maknae-loop/src/keys.rs",
 ]
 
 [project]
@@ -576,11 +585,11 @@ why = "#470: the wire client moved from bins/maknae/src/cli.rs (T3 there for the
 
 [[t3]]
 path = "crates/maknae-loop/src/plane.rs"
-why = "#470: RealPlane moved from bins/maknae/src/agent.rs as LoopPlane, unchanged in what it needs: a live daemon, Vault and certificates. Every decision it feeds is T1 in maknae-agent::wire; frame_fits, take_spare and the frame-before-key ordering are unit-tested here Amended 2026-11-08 (#170): open and close send session.new (the cwd delegated as a directory descriptor by mutation.rs's prepare_checked, T2) and session.close; their answers are mapped by maknae-agent::wire's open_outcome and close_outcome (T1)."
+why = "#470: RealPlane moved from bins/maknae/src/agent.rs as LoopPlane, unchanged in what it needs: a live daemon, Vault and certificates. Every decision it feeds is T1 in maknae-agent::wire; frame_fits, take_spare and the frame-before-key ordering are unit-tested here Amended 2026-11-08 (#170): open and close send session.new (the cwd delegated as a directory descriptor by mutation.rs's prepare_checked, T2) and session.close; their answers are mapped by maknae-agent::wire's open_outcome and close_outcome (T1). Amended 2026-11-13 (#629): the connection is a Dial (PlaneDial in production, the client or agent socket), and the cited task rides every file, session and mkdir request; both are pinned against an in-process fake kernel by a_cited_task_is_stamped_on_every_request_until_uncited and each_verb_opens_its_own_connection."
 
 [[t3]]
-path = "crates/maknae-loop/src/keys.rs"
-why = "#470: the KeySupply trait declaration only; the user host's implementation is bins/maknae/src/agent.rs's UserLoginKeys over turn_choice, which is tested there"
+path = "crates/maknae-loop/src/task.rs"
+why = "#629: the agent's claim, heartbeat and report client: one connection per verb over plane.rs's Link, with no decision of its own. Its answers are mapped by maknae-agent::task (T1); which requests carry the cite, and the ceiling read cap, are pinned by claims_and_heartbeats_are_never_cited and task_answers_are_read_with_the_ceiling_cap against an in-process fake kernel"
 
 [[t3]]
 path = "crates/maknae-llm/src/lib.rs"

@@ -21,6 +21,8 @@ maknae-config = { path = "../maknae-config" }
 maknae-io = { path = "../maknae-io" }
 # The plane client and its TLS connector.
 maknae-vault = { path = "../maknae-vault" }
+# A turn's wrapped key is sealed to the Egress Daemon (ADR-0028).
+maknae-seal = { path = "../maknae-seal" }
 # Conversation IDs draw from the one random source the project uses.
 maknae-crypto = { path = "../maknae-crypto" }
 # Framing timeouts, frame I/O, and the attempt worker's spawn_blocking.
