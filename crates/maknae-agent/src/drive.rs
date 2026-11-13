@@ -58,8 +58,18 @@ pub enum Next {
 /// destination is the subject's own terminal, which already discloses it — but
 /// it is a statement about the direct path, not about every byte that can
 /// arrive in this string.)*
+///
+/// The task driver (#629) reports the answer instead of printing it: it is sized
+/// once, so it never grows, and the driver moves it into a zeroizing buffer.
 fn text_of(blocks: &[ContentBlock]) -> String {
-    let mut s = String::new();
+    let len = blocks
+        .iter()
+        .map(|b| match b {
+            ContentBlock::Text { text } => text.0.len(),
+            _ => 0,
+        })
+        .sum();
+    let mut s = String::with_capacity(len);
     for b in blocks {
         if let ContentBlock::Text { text } = b {
             s.push_str(&text.0);
@@ -445,6 +455,13 @@ mod tests {
             text: SecretText(Zeroizing::new(s.into())),
         }
     }
+    #[test]
+    fn the_answer_is_sized_once_and_never_grows() {
+        let a = text_of(&[text("12345"), text("678901")]);
+        assert_eq!(a, "12345678901");
+        assert_eq!(a.capacity(), 11);
+    }
+
     fn call(id: &str, name: &str, args: &str) -> ProposedToolCall {
         ProposedToolCall {
             name: name.into(),

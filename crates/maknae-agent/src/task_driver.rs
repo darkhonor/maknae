@@ -166,7 +166,7 @@ struct Held {
     session: Session,
     seen: u32,
     last_beat: Duration,
-    answer: Option<String>,
+    answer: Option<Zeroizing<String>>,
     resumes: u32,
 }
 
@@ -397,7 +397,9 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
                 return;
             }
             Err(Unverified::Failed { task, class }) => {
-                self.held.take_if(|h| h.id == task);
+                if let Some(held) = self.held.take_if(|h| h.id == task) {
+                    self.drop_held(held).await;
+                }
                 self.cite_and_report(task, refusal_report(class), Ending::Unverified(class))
                     .await;
                 return;
@@ -410,6 +412,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
                 self.work(held, Then::Resume(vec![])).await;
                 return;
             }
+            self.drop_held(held).await;
         }
         if leftover == Some(id) {
             self.cite_and_report(id, RESTARTED.into(), Ending::Restarted)
@@ -417,6 +420,13 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
             return;
         }
         self.start(task, partition).await;
+    }
+
+    /// Closes, uncited, the conversation of a held task the kernel no longer delivers.
+    async fn drop_held(&mut self, held: Held) {
+        if let Some(Err(e)) = held.session.close(&mut self.plane).await {
+            self.plane.note(DriverEvent::CloseFailed(e));
+        }
     }
 
     async fn cite_and_report(&mut self, id: TaskId, text: String, ending: Ending) {
@@ -460,7 +470,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
             if self.stopping() {
                 return Reported::Shutdown;
             }
-            match self.plane.report(text.clone()).await {
+            match self.plane.report(text).await {
                 Ok(ReportOutcome::Acknowledged) => {
                     self.backoff = Backoff(BACKOFF_FIRST);
                     return Reported::Done(fixed);
@@ -607,7 +617,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
                 self.plane.note(DriverEvent::Loop(e));
             }
             if let Some(answer) = outcome.answer {
-                held.answer = Some(answer);
+                held.answer = Some(Zeroizing::new(answer));
             }
             let stopped = match outcome.stopped {
                 None | Some(StopReason::NothingPending) if held.answer.is_some() => {
@@ -670,7 +680,6 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
 
     /// Ending 1. `Ok` carries follow-ups to continue the session with.
     async fn done(&mut self, held: &mut Held) -> Result<Vec<SecretText>, Ending> {
-        let answer = held.answer.clone().unwrap_or_default();
         loop {
             if self.stopping() {
                 return Err(Ending::Shutdown);
@@ -687,10 +696,8 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
                 Beat::Lost => self.back_off().await,
             }
         }
-        match self
-            .report(SecretText(Zeroizing::new(answer)), true, &mut held.seen)
-            .await
-        {
+        let answer = held.answer.take().unwrap_or_default();
+        match self.report(SecretText(answer), true, &mut held.seen).await {
             Reported::FollowUps(items) => {
                 held.answer = None;
                 Ok(items)
@@ -1106,6 +1113,8 @@ mod tests {
             .cloned()
             .collect()
     }
+
+    const _: fn(&Held) -> &Option<Zeroizing<String>> = |h| &h.answer;
 
     #[test]
     fn the_quiet_wait_and_heartbeat_period_are_the_rulings_values() {
@@ -2320,6 +2329,11 @@ mod tests {
         assert_eq!(log.iter().filter(|l| l.starts_with("open")).count(), 2);
         assert_eq!(reports(&log), strs(&["report a2"]));
         assert_eq!(events, vec![ended(2, Ending::Answered)]);
+        let at = log.iter().position(|l| l == "cite t2").unwrap();
+        assert_eq!(
+            log[at - 2..at],
+            strs(&["verify", &format!("close {CONV}")])[..]
+        );
     }
 
     #[tokio::test]
@@ -2343,6 +2357,11 @@ mod tests {
             reports(&log),
             strs(&["report refused: this task's kernel signature did not verify (key)"])
         );
+        let at = log.iter().rposition(|l| l == "verify").unwrap();
+        assert_eq!(
+            log[at + 1..at + 3],
+            strs(&[&format!("close {CONV}"), "cite t1"])[..]
+        );
     }
 
     #[tokio::test]
@@ -2360,7 +2379,7 @@ mod tests {
             session,
             seen: 0,
             last_beat: Duration::ZERO,
-            answer: first.answer,
+            answer: first.answer.map(Zeroizing::new),
             resumes: 0,
         };
         d.work(held, Then::Resume(vec![])).await;

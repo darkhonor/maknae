@@ -3,7 +3,7 @@
 use maknae_agent::budget::ContextBudget;
 use maknae_agent::drive::{Budget, LoopEvent};
 use maknae_agent::task_driver::{self, DriverConfig, DriverEvent};
-use maknae_config::{AgentClientConfig, AgentId};
+use maknae_config::{AgentClientConfig, AgentId, TransportConfig};
 use maknae_crypto::plane_key::PlaneKey;
 use maknae_loop::agent::{AgentPlane, PersonaFiles, TaskTrust};
 use maknae_loop::keys::AgentKeys;
@@ -98,10 +98,17 @@ pub struct Assembly<'a> {
     pub owner: u32,
 }
 
-pub fn connect(a: Assembly<'_>) -> Result<Connected, String> {
-    let cfg = a.cfg;
+/// The host's transport section is not read: its defaults, with what enrollment copied.
+pub fn agent_transport(cfg: &AgentClientConfig) -> Result<TransportConfig, String> {
     let mut transport = maknae_config::transport_from_section(None).map_err(|e| e.to_string())?;
     transport.agent_socket_path = cfg.agent_socket_path.clone();
+    transport.prompt_max_bytes = cfg.prompt_max_bytes;
+    Ok(transport)
+}
+
+pub fn connect(a: Assembly<'_>) -> Result<Connected, String> {
+    let cfg = a.cfg;
+    let transport = agent_transport(cfg)?;
     let write_max = transport.prompt_max_bytes;
     let keys = AgentKeys::new(
         Arc::clone(&a.client),
@@ -276,6 +283,7 @@ mod tests {
             agent_prefix: "maknae/agents".into(),
             trust_domain: "maknae.example".into(),
             agent_socket_path: PathBuf::from("/run/maknae-agent/maknaed.sock"),
+            prompt_max_bytes: 262_144,
             provider: maknae_config::AgentProvider {
                 provider: "openai".into(),
                 model: "gpt-5.6".into(),
@@ -304,6 +312,16 @@ mod tests {
         assert!(super::login(Path::new("/etc/maknae"), &bad)
             .unwrap_err()
             .contains("rsa-2048"));
+    }
+
+    #[test]
+    fn the_transport_takes_the_socket_and_prompt_bound_enrollment_copied() {
+        let t = agent_transport(&cfg()).unwrap();
+        assert_eq!(
+            t.agent_socket_path,
+            PathBuf::from("/run/maknae-agent/maknaed.sock")
+        );
+        assert_eq!(t.prompt_max_bytes, 262_144);
     }
 
     #[test]

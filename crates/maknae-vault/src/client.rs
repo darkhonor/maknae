@@ -750,19 +750,21 @@ impl PlaneClient {
         &self.subject
     }
 
-    /// A response-wrapped KV read as this client's own Vault login, under its
-    /// client lock, so the token cannot be renewed or replaced mid-read.
+    /// A response-wrapped KV read as this client's own Vault login. The token is
+    /// copied under the client lock, which is released before the read.
     pub async fn read_wrapped_as_self(
         &self,
         kv_mount: &str,
         secret_path: &str,
         wrap_ttl: std::time::Duration,
     ) -> Result<WrappedSecret, VaultError> {
-        let client = self.client.lock().await;
-        let held = client.settings.token.as_str();
-        let mut copy = Zeroizing::new(String::with_capacity(held.len()));
-        copy.push_str(held);
-        let token = UserToken::new(copy)?;
+        let token = {
+            let client = self.client.lock().await;
+            let held = client.settings.token.as_str();
+            let mut copy = Zeroizing::new(String::with_capacity(held.len()));
+            copy.push_str(held);
+            UserToken::new(copy)?
+        };
         VaultApi::new(&self.vault_addr, &self.vault_ca)?
             .read_wrapped(&token, kv_mount, secret_path, wrap_ttl)
             .await
@@ -1724,6 +1726,38 @@ mod tests {
             ),
             "a read after login goes to the client's own Vault: {after:?}"
         );
+    }
+
+    #[test]
+    fn a_wrapped_read_as_self_does_not_hold_the_client_lock_while_it_waits_on_vault() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let rt = current_thread(false);
+        let listener = rt
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let addr = format!("https://{}", listener.local_addr().unwrap());
+        let fx = DispatchFixture::with_addr("agent-wrapped-unlocked", &addr, "");
+        let secret = AgentSecret::new(Zeroizing::new("s".into()));
+        let client = Arc::new(PlaneClient::for_agent(&agent_login(&fx.0, &addr), secret).unwrap());
+        rt.block_on(async {
+            client.client.lock().await.set_token("hvs.sentinel-629");
+            let reader = Arc::clone(&client);
+            let read = tokio::spawn(async move {
+                reader
+                    .read_wrapped_as_self(
+                        "maknae-kv",
+                        "maknae/agents/hobi/openai",
+                        crate::USER_KEY_WRAP_TTL,
+                    )
+                    .await
+            });
+            let (_held_open, _) = listener.accept().await.unwrap();
+            assert!(
+                client.client.try_lock().is_ok(),
+                "the client lock is held across the Vault round trip"
+            );
+            read.abort();
+        });
     }
 
     #[test]

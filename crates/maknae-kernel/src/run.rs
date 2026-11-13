@@ -10081,7 +10081,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_agents_task_driver_waits_and_beats_on_the_kernels_lease() {
+    fn the_drivers_waits_derive_from_the_lease_and_one_prompt_exchange_fits_inside_it() {
         use maknae_agent::task_driver::{HEARTBEAT_EVERY, UNDECODABLE_WAIT};
         let lease = crate::task_store::CLAIM_LEASE;
         assert_eq!(
@@ -10089,10 +10089,13 @@ mod tests {
             lease + TASK_SWEEP_EVERY + Duration::from_secs(30)
         );
         assert_eq!(HEARTBEAT_EVERY, lease / 3);
-        let step = Duration::from_millis(
+        let exchange = Duration::from_millis(
             maknae_config::EGRESS_DEADLINE_MS_MAX + maknae_config::TRANSPORT_TIMEOUT_MS_MAX,
         );
-        assert!(step < lease, "one step can outlive the claim lease");
+        assert!(
+            exchange < lease,
+            "one cited prompt exchange, the longest gap between renewing requests, outlives the claim lease"
+        );
     }
 
     #[test]

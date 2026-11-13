@@ -532,15 +532,18 @@ pub struct AgentClientConfig {
     pub agent_prefix: String,
     pub trust_domain: String,
     pub agent_socket_path: PathBuf,
+    /// The host's `transport.prompt_max_bytes`, as enrollment copied it.
+    pub prompt_max_bytes: usize,
     pub provider: AgentProvider,
     pub persona: PersonaMode,
 }
 
-const CLIENT_KEYS: [&str; 6] = [
+const CLIENT_KEYS: [&str; 7] = [
     "agent_id",
     "vault",
     "trust_domain",
     "agent_socket_path",
+    "prompt_max_bytes",
     "provider",
     "persona",
 ];
@@ -654,6 +657,19 @@ pub fn parse_agent_client(dir: &AgentId, text: &str) -> Result<AgentClientConfig
     if !socket.is_absolute() {
         return Err(invalid("`agent_socket_path` must be an absolute path"));
     }
+    let prompt_max_bytes = match field(&map, "prompt_max_bytes") {
+        Some(Value::Int(n)) => usize::try_from(*n)
+            .ok()
+            .filter(|n| (crate::PROMPT_MAX_BYTES_FLOOR..=crate::PROMPT_MAX_CEILING).contains(n)),
+        _ => None,
+    }
+    .ok_or_else(|| {
+        invalid(&format!(
+            "`prompt_max_bytes` must be an integer from {} to {}",
+            crate::PROMPT_MAX_BYTES_FLOOR,
+            crate::PROMPT_MAX_CEILING
+        ))
+    })?;
     let provider_name = text_in(provider, "provider.", "provider")?;
     if !crate::provider_name_is_acceptable(&provider_name) {
         return Err(invalid(
@@ -695,6 +711,7 @@ pub fn parse_agent_client(dir: &AgentId, text: &str) -> Result<AgentClientConfig
         agent_prefix: kv("agent_prefix")?,
         trust_domain: text_in(&map, "", "trust_domain")?,
         agent_socket_path: socket,
+        prompt_max_bytes,
         provider: AgentProvider {
             provider: provider_name,
             model,
@@ -1751,7 +1768,7 @@ mod tests {
         );
     }
 
-    const CLIENT: &str = "agent_id: hobi\nvault:\n  addr: https://vault.example:8200\n  approle_mount: maknae-agent-approle\n  role_id: role-uuid-1\n  pki_int_mount: maknae-pki-int\n  plane_key: ml-dsa-87\n  kv_mount: maknae-kv\n  agent_prefix: maknae/agents\ntrust_domain: maknae.example\nagent_socket_path: /run/maknae-agent/maknaed.sock\nprovider:\n  provider: openai\n  model: gpt-5.6\n  key:\n    subpath: openai/hobi\n    field: api_key\n  context_tokens: 128000\n  output_tokens: 16000\npersona: self\n";
+    const CLIENT: &str = "agent_id: hobi\nvault:\n  addr: https://vault.example:8200\n  approle_mount: maknae-agent-approle\n  role_id: role-uuid-1\n  pki_int_mount: maknae-pki-int\n  plane_key: ml-dsa-87\n  kv_mount: maknae-kv\n  agent_prefix: maknae/agents\ntrust_domain: maknae.example\nagent_socket_path: /run/maknae-agent/maknaed.sock\nprompt_max_bytes: 262144\nprovider:\n  provider: openai\n  model: gpt-5.6\n  key:\n    subpath: openai/hobi\n    field: api_key\n  context_tokens: 128000\n  output_tokens: 16000\npersona: self\n";
 
     fn client() -> AgentClientConfig {
         AgentClientConfig {
@@ -1765,6 +1782,7 @@ mod tests {
             agent_prefix: "maknae/agents".into(),
             trust_domain: "maknae.example".into(),
             agent_socket_path: PathBuf::from("/run/maknae-agent/maknaed.sock"),
+            prompt_max_bytes: 262_144,
             provider: AgentProvider {
                 provider: "openai".into(),
                 model: "gpt-5.6".into(),
@@ -1827,6 +1845,20 @@ mod tests {
             parse_agent_client(&hobi(), &admin).unwrap().persona,
             PersonaMode::Admin
         );
+    }
+
+    #[test]
+    fn prompt_max_bytes_is_read_at_both_ends_of_the_hosts_range() {
+        for n in [crate::PROMPT_MAX_BYTES_FLOOR, crate::PROMPT_MAX_CEILING] {
+            let text = CLIENT.replace(
+                "prompt_max_bytes: 262144",
+                &format!("prompt_max_bytes: {n}"),
+            );
+            assert_eq!(
+                parse_agent_client(&hobi(), &text).unwrap().prompt_max_bytes,
+                n
+            );
+        }
     }
 
     #[test]
@@ -1943,6 +1975,16 @@ mod tests {
             ("  context_tokens: 128000\n", String::new()),
             ("output_tokens: 16000", "output_tokens: -1".into()),
             ("output_tokens: 16000", "output_tokens: x".into()),
+            ("prompt_max_bytes: 262144", "prompt_max_bytes: 65535".into()),
+            (
+                "prompt_max_bytes: 262144",
+                "prompt_max_bytes: 16777217".into(),
+            ),
+            (
+                "prompt_max_bytes: 262144",
+                "prompt_max_bytes: \"262144\"".into(),
+            ),
+            ("prompt_max_bytes: 262144\n", String::new()),
             ("persona: self", "persona: root".into()),
             ("persona: self", "persona: 7".into()),
             (

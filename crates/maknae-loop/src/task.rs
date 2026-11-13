@@ -1,7 +1,8 @@
 //! The agent's task verbs: claim, heartbeat and report, one connection each.
 //! Claims and heartbeats never cite: the kernel ends a connection whose cited
-//! task is not `Working`. A report carries the loop's cite. Answers are read at
-//! the ceiling cap, because the kernel's task text bound is not the agent's to know.
+//! task is not `Working`. A report carries the loop's cite and is bounded by the
+//! host's `prompt_max_bytes` as enrollment copied it; answers are read at the
+//! ceiling cap, so a bound raised on the host since then cannot cut one short.
 use crate::plane::{Dial, Link, PlaneDial};
 use maknae_agent::task::{
     beat_answer, claim_answer, report_answer, BeatAnswer, ClaimAnswer, ReportOutcome,

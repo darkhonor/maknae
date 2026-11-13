@@ -142,6 +142,7 @@ pub(crate) struct HostEnrollment {
     pub pki_int_mount: String,
     pub plane_key: String,
     pub agent_socket_path: PathBuf,
+    pub prompt_max_bytes: usize,
 }
 
 pub(crate) fn parse_host_enrollment(text: &str) -> Result<HostEnrollment, EnrollError> {
@@ -175,9 +176,8 @@ pub(crate) fn parse_host_enrollment(text: &str) -> Result<HostEnrollment, Enroll
     }
     .as_str()
     .to_string();
-    let agent_socket_path = maknae_config::transport_from_section(field(&doc, "transport"))
-        .map_err(|e| EnrollError::State(format!("maknae.yaml: {e}")))?
-        .agent_socket_path;
+    let transport = maknae_config::transport_from_section(field(&doc, "transport"))
+        .map_err(|e| EnrollError::State(format!("maknae.yaml: {e}")))?;
     Ok(HostEnrollment {
         vault_addr,
         approle_mount,
@@ -185,7 +185,8 @@ pub(crate) fn parse_host_enrollment(text: &str) -> Result<HostEnrollment, Enroll
         trust_domain,
         pki_int_mount,
         plane_key,
-        agent_socket_path,
+        agent_socket_path: transport.agent_socket_path,
+        prompt_max_bytes: transport.prompt_max_bytes,
     })
 }
 
@@ -264,6 +265,10 @@ pub(crate) fn agent_client_yaml(c: &AgentClientConfig) -> String {
         (
             "agent_socket_path",
             s(&c.agent_socket_path.to_string_lossy()),
+        ),
+        (
+            "prompt_max_bytes",
+            Yaml::Integer(i64::try_from(c.prompt_max_bytes).unwrap_or(i64::MAX)),
         ),
         ("provider", yaml_map(provider)),
         ("persona", s(c.persona.key())),
@@ -545,6 +550,7 @@ pub(crate) async fn enroll_agent<O: AgentOps>(
         agent_prefix: plan.client.agent_prefix.clone(),
         trust_domain: host.trust_domain.clone(),
         agent_socket_path: host.agent_socket_path.clone(),
+        prompt_max_bytes: host.prompt_max_bytes,
         provider: plan.client.provider.clone(),
         persona: plan.client.persona,
     })?;
@@ -1825,6 +1831,7 @@ pub(crate) mod tests {
             pki_int_mount: "maknae-pki-int".into(),
             plane_key: "ml-dsa-87".into(),
             agent_socket_path: PathBuf::from("/run/maknae-agent/maknaed.sock"),
+            prompt_max_bytes: 524_288,
         }
     }
 
@@ -1840,6 +1847,7 @@ pub(crate) mod tests {
             agent_prefix: "maknae/agents".into(),
             trust_domain: "dev-01".into(),
             agent_socket_path: PathBuf::from("/run/maknae-agent/maknaed.sock"),
+            prompt_max_bytes: 524_288,
             provider: provider(),
             persona: maknae_config::PersonaMode::Admin,
         }
@@ -2672,12 +2680,16 @@ pub(crate) mod tests {
                 } else {
                     "/run/maknae-agent/maknaed.sock"
                 }),
+                prompt_max_bytes: 1_048_576,
             }
         );
-        let moved = format!("{text}transport:\n  agent_socket_path: /run/agents/a.sock\n");
+        let moved = format!(
+            "{text}transport:\n  agent_socket_path: /run/agents/a.sock\n  prompt_max_bytes: 262144\n"
+        );
+        let got = parse_host_enrollment(&moved).unwrap();
         assert_eq!(
-            parse_host_enrollment(&moved).unwrap().agent_socket_path,
-            PathBuf::from("/run/agents/a.sock")
+            (got.agent_socket_path, got.prompt_max_bytes),
+            (PathBuf::from("/run/agents/a.sock"), 262_144)
         );
         let defaults = text
             .replace("  pki_int_mount: pki_int\n", "")

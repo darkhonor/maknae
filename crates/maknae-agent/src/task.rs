@@ -35,7 +35,8 @@ pub enum BeatAnswer {
 pub enum ReportOutcome {
     Acknowledged,
     Refused(Refused),
-    /// The report is longer than `prompt_max_bytes`, the kernel's bound; nothing was sent.
+    /// The report is longer than the host's `prompt_max_bytes`, the kernel's bound, as
+    /// enrollment copied it into `agent.yaml`; nothing was sent.
     TooLarge,
 }
 

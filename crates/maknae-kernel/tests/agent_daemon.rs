@@ -412,6 +412,16 @@ impl World {
         self.root.join(format!("tasks/users/{}", self.me))
     }
 
+    /// Made `0755` whatever the umask: the driver refuses a group-writable partition's persona.
+    fn make_under_root(&self, dir: &Path) {
+        let mut at = self.root.to_path_buf();
+        for part in dir.strip_prefix(&*self.root).unwrap() {
+            at.push(part);
+            let _ = std::fs::create_dir(&at);
+            std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
     async fn ask(&self, verb: Verb) -> RespResult {
         let session = maknae_kernel::SessionRecord::for_test(self.me, Some(self.user.clone()))
             .with_session_id(629);
@@ -1017,7 +1027,7 @@ async fn an_agent_request_outside_its_taskers_partition_is_refused() {
     let _one = ONE_DAEMON.lock().await;
     let w = world("out-of-partition", HOBI_POLICY);
     let theirs = w.root.join("tasks/users/31337");
-    std::fs::create_dir_all(&theirs).unwrap();
+    w.make_under_root(&theirs);
     let secret_file = theirs.join("notes.md");
     std::fs::write(&secret_file, "sentinel-629-another-taskers-notes").unwrap();
     let id = w.submit("sentinel-629-partition-prompt").await;
@@ -1065,7 +1075,7 @@ async fn an_agent_resumes_its_working_task_after_a_kernel_restart() {
             kernel.lock().unwrap().fail(1, 1, true);
         }
     }));
-    std::fs::create_dir_all(w.partition()).unwrap();
+    w.make_under_root(&w.partition());
     std::fs::write(&notes, "sentinel-629-notes").unwrap();
     let d = start(&w, &model);
     d.until("the report", |d| d.ended(&id)).await;

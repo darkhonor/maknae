@@ -16,7 +16,8 @@ fn response_caps(transport: &maknae_config::TransportConfig) -> FrameCaps {
     ))
 }
 
-/// A task's answer is sized by the kernel's task text bound, which the agent cannot see.
+/// A task's answer is sized by the kernel's current task text bound, which the agent
+/// knows only as enrollment copied it.
 fn reply_caps(verb: &maknae_proto::Verb, transport: &maknae_config::TransportConfig) -> FrameCaps {
     match verb {
         maknae_proto::Verb::TaskClaim { .. } | maknae_proto::Verb::TaskReport { .. } => {
