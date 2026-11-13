@@ -143,6 +143,9 @@ pub fn connect(a: Assembly<'_>) -> Result<Connected, String> {
     })
 }
 
+/// The supervisor holds the client across at most one Vault request.
+pub const LEAF_STOP_WAIT: Duration = maknae_vault::PLANE_HTTP_TIMEOUT;
+
 pub const MINT_BACKOFF_FIRST: Duration = Duration::from_secs(1);
 pub const MINT_BACKOFF_MAX: Duration = Duration::from_secs(60);
 
@@ -242,7 +245,7 @@ where
     let mut leaf = tokio::spawn(keep_leaf(Arc::clone(&cred), rx));
     let result = serve.await;
     let _ = done.send(true);
-    if tokio::time::timeout(maknae_vault::PLANE_HTTP_TIMEOUT, &mut leaf)
+    if tokio::time::timeout(LEAF_STOP_WAIT, &mut leaf)
         .await
         .is_err()
     {

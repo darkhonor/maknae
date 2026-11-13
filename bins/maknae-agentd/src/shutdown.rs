@@ -7,6 +7,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 
 pub const AGENTD_EXCHANGE_DRAIN: Duration = Duration::from_secs(30);
+pub const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub fn stop_signal() -> (watch::Sender<bool>, watch::Receiver<bool>) {
     watch::channel(false)
@@ -85,6 +86,37 @@ mod tests {
     use maknae_agent::task_driver::UNDECODABLE_WAIT;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+
+    /// A SIGTERM inside the first mint waits out its login and leaf signing, then
+    /// the drain, the leaf supervisor's stop, the revoke and the runtime teardown.
+    /// Two-sided, as the kernel's unit test is: a unit far above the chain means a
+    /// term was dropped from this expression.
+    #[test]
+    fn the_agent_units_stop_timeout_covers_its_shutdown_chain() {
+        const SLACK: Duration = Duration::from_secs(10);
+        const MINT_REQUESTS: u32 = 2;
+        let chain = maknae_vault::PLANE_HTTP_TIMEOUT * MINT_REQUESTS
+            + AGENTD_EXCHANGE_DRAIN
+            + crate::plane_impl::LEAF_STOP_WAIT
+            + maknae_vault::PLANE_SHUTDOWN_BOUND
+            + RUNTIME_SHUTDOWN_TIMEOUT;
+        let unit = include_str!("../../../packaging/common/maknae-agent@.service");
+        let stops: Vec<u64> = unit
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("TimeoutStopSec="))
+            .map(|v| v.trim().parse().unwrap())
+            .collect();
+        assert_eq!(stops.len(), 1, "{stops:?}");
+        let stop = Duration::from_secs(stops[0]);
+        assert!(
+            stop >= chain,
+            "TimeoutStopSec={stop:?} is below the chain {chain:?}"
+        );
+        assert!(
+            stop <= chain + SLACK,
+            "TimeoutStopSec={stop:?} is more than {SLACK:?} above the chain {chain:?}"
+        );
+    }
 
     #[tokio::test(start_paused = true)]
     async fn a_sleep_runs_its_length_when_nothing_stops_it() {

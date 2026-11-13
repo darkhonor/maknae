@@ -847,6 +847,10 @@ path = "bins/maknae/src/enroll/agent_access.rs"
 why = "#629: the agent account's read ACLs on its configuration — the exact entry list below the configured root (nothing under private/), the setfacl -P -n / getfacl -P -n and chmod -h / ls -led argv for both platforms, the mask-preserving and effective-rights read-back, the macOS account-name refusal, the unresolved-account skip and the revoke-by-uid order carry unit tests against a fake host whose ACL state, mask included, the calls change; the runner that executes the programs is bin I/O"
 
 [[t3]]
+path = "bins/maknae/src/enroll/agent_unit.rs"
+why = "#629: the Agent Daemon's systemd instance; the home refusal for each character a unit would expand, split or unquote and for a relative or non-canonical home, the exact drop-in text, the systemctl argv and order on start and stop, the stop-before-remove order and the drop-in removal against a real directory carry unit tests against a recording runner; the runner that executes systemctl is bin I/O"
+
+[[t3]]
 path = "bins/maknae/src/enroll/remove_agent.rs"
 why = "#609: maknae enroll remove-agent's orchestration behind the RemoveOps seam; the step order, the refusal that names what remains, the retained accessor after a failed destroy and the policy.yaml-untouched property carry real unit tests against the recording fake from agent.rs"
 

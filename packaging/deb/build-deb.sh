@@ -95,6 +95,8 @@ install -D -m 0644 "$COMMON/maknae-policy-sync.path" \
     "$PKG_ROOT/usr/lib/systemd/system/maknae-policy-sync.path"
 install -D -m 0644 "$COMMON/maknae-policy-sync.service" \
     "$PKG_ROOT/usr/lib/systemd/system/maknae-policy-sync.service"
+install -D -m 0644 "$COMMON/maknae-agent@.service" \
+    "$PKG_ROOT/usr/lib/systemd/system/maknae-agent@.service"
 install -D -m 0644 "$COMMON/80-maknae.preset" \
     "$PKG_ROOT/usr/lib/systemd/system-preset/80-maknae.preset"
 
@@ -154,6 +156,16 @@ declared="$(printf '%s\n' $BINS | sort)"
     exit 1
 }
 echo "payload check: $(echo $landed | wc -w) binary/binaries match the manifest"
+
+units_landed="$(cd "$PKG_ROOT/usr/lib/systemd/system" && ls | sort)"
+units_want="$(cd "$COMMON" && ls *.service *.socket *.path | sort)"
+[ -n "$units_want" ] && [ "$units_landed" = "$units_want" ] || {
+    echo "ERROR: payload usr/lib/systemd/system does not match the units in packaging/common" >&2
+    echo "  common:  $(echo $units_want)" >&2
+    echo "  payload: $(echo $units_landed)" >&2
+    exit 1
+}
+echo "payload check: $(echo $units_landed | wc -w) unit(s) match packaging/common"
 
 # --- Payload vs declaration: every conffile MUST be in the payload ------------
 # #240a. The failure this prevents, which shipped once and was caught in review:

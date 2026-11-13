@@ -32,6 +32,7 @@ Source15:       maknae-policy-sync.service
 Source16:       80-maknae.preset
 Source17:       sensitive.yaml
 Source18:       maknae-agentd
+Source19:       maknae-agent@.service
 
 ExclusiveArch:  x86_64
 
@@ -93,6 +94,7 @@ install -D -m 0644 %{SOURCE11} %{buildroot}%{_unitdir}/maknae-egress.service
 install -D -m 0644 %{SOURCE12} %{buildroot}%{_unitdir}/maknae-egress.socket
 install -D -m 0644 %{SOURCE14} %{buildroot}%{_unitdir}/maknae-policy-sync.path
 install -D -m 0644 %{SOURCE15} %{buildroot}%{_unitdir}/maknae-policy-sync.service
+install -D -m 0644 %{SOURCE19} %{buildroot}%{_unitdir}/maknae-agent@.service
 install -D -m 0644 %{SOURCE16} %{buildroot}%{_presetdir}/80-maknae.preset
 
 # sysusers.d
@@ -242,6 +244,7 @@ fi
 %{_unitdir}/maknae-egress.socket
 %{_unitdir}/maknae-policy-sync.path
 %{_unitdir}/maknae-policy-sync.service
+%{_unitdir}/maknae-agent@.service
 %{_presetdir}/80-maknae.preset
 %{_sysusersdir}/maknae.conf
 %{_datadir}/selinux/packages/%{selinuxtype}/maknae.pp.bz2

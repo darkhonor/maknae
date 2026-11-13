@@ -1,2 +1,3 @@
 disable maknae-policy-sync.path
 disable maknae-policy-sync.service
+disable maknae-agent@.service

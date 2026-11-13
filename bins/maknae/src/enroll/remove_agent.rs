@@ -4,6 +4,8 @@ use super::agent::{
     RELOAD_COMMAND, VAULT_CA,
 };
 use super::agent_access;
+#[cfg(not(target_os = "macos"))]
+use super::agent_unit;
 use super::EnrollError;
 use crate::stderr::errln;
 use clap::Args;
@@ -27,6 +29,7 @@ pub struct RemoveAgentArgs {
 }
 
 pub(crate) trait RemoveOps: AgentVaultOps {
+    fn stop_agent(&self, agent: &AgentId) -> Result<(), EnrollError>;
     fn revoke_access(&self, agent: &AgentId) -> Result<(), EnrollError>;
     fn remove_enrollment(&self, agent: &AgentId) -> Result<(), EnrollError>;
     async fn remove_sealed_secret(&self, agent: &AgentId) -> Result<(), EnrollError>;
@@ -73,6 +76,7 @@ pub(crate) async fn remove_agent<O: RemoveOps>(
     agent: &AgentId,
     state: AgentState,
 ) -> Result<RemoveOutcome, EnrollError> {
+    ops.stop_agent(agent)?;
     ops.revoke_access(agent)?;
     ops.remove_enrollment(agent)?;
 
@@ -242,6 +246,18 @@ impl HasVault for RealRemoveOps {
 }
 
 impl RemoveOps for RealRemoveOps {
+    #[cfg(not(target_os = "macos"))]
+    fn stop_agent(&self, agent: &AgentId) -> Result<(), EnrollError> {
+        agent_unit::stop(&*self.runner, agent, || {
+            agent_unit::remove_drop_in(&open_dir(agent_unit::UNIT_DIR, 0o022)?, agent)
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn stop_agent(&self, _agent: &AgentId) -> Result<(), EnrollError> {
+        Ok(())
+    }
+
     fn revoke_access(&self, agent: &AgentId) -> Result<(), EnrollError> {
         let Some(account) = &self.owner else {
             return Ok(());
@@ -368,6 +384,13 @@ mod tests {
     use clap::Parser;
 
     impl RemoveOps for Fake {
+        fn stop_agent(&self, agent: &AgentId) -> Result<(), EnrollError> {
+            self.log
+                .borrow_mut()
+                .push(format!("stop_agent {}", agent.as_str()));
+            self.check("stop_agent")
+        }
+
         fn revoke_access(&self, _agent: &AgentId) -> Result<(), EnrollError> {
             self.log.borrow_mut().push("revoke_access".into());
             self.check("revoke_access")
@@ -420,6 +443,7 @@ mod tests {
         assert_eq!(
             fake.log(),
             strings(&[
+                "stop_agent hobi",
                 "revoke_access",
                 "remove_enrollment",
                 "read_role_id",
@@ -446,6 +470,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failed_stop_removes_nothing() {
+        let fake = Fake::failing(&["stop_agent"]);
+        let e = remove_agent(&fake, &hobi(), state(&["a"], &[], &[]))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&e, EnrollError::State(m) if m == "stop_agent failed"),
+            "{e:?}"
+        );
+        assert_eq!(fake.log(), strings(&["stop_agent hobi"]));
+    }
+
+    #[tokio::test]
     async fn a_failed_revoke_removes_nothing() {
         let fake = Fake::failing(&["revoke_access"]);
         let e = remove_agent(&fake, &hobi(), state(&["a"], &[], &[]))
@@ -455,7 +492,7 @@ mod tests {
             matches!(&e, EnrollError::State(m) if m == "revoke_access failed"),
             "{e:?}"
         );
-        assert_eq!(fake.log(), strings(&["revoke_access"]));
+        assert_eq!(fake.log(), strings(&["stop_agent hobi", "revoke_access"]));
     }
 
     type Host = std::rc::Rc<agent_access::tests::FakeHost>;
@@ -612,6 +649,7 @@ mod tests {
             assert_eq!(
                 fake.log(),
                 strings(&[
+                    "stop_agent hobi",
                     "revoke_access",
                     "remove_enrollment",
                     "read_role_id",
@@ -655,7 +693,10 @@ mod tests {
         remove_agent(&fake, &hobi(), state(&["a"], &[], &[]))
             .await
             .unwrap_err();
-        assert_eq!(fake.log(), strings(&["revoke_access", "remove_enrollment"]));
+        assert_eq!(
+            fake.log(),
+            strings(&["stop_agent hobi", "revoke_access", "remove_enrollment"])
+        );
     }
 
     #[test]
@@ -682,6 +723,7 @@ mod tests {
         assert_eq!(
             fake.log(),
             strings(&[
+                "stop_agent hobi",
                 "revoke_access",
                 "remove_enrollment",
                 "read_role_id",
@@ -731,7 +773,12 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             fake.log(),
-            strings(&["revoke_access", "remove_enrollment", "read_role_id"])
+            strings(&[
+                "stop_agent hobi",
+                "revoke_access",
+                "remove_enrollment",
+                "read_role_id"
+            ])
         );
     }
 

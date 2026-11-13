@@ -64,6 +64,7 @@ install -m 0644 "$COMMON/bindings.yaml"           "$TOP/SOURCES/"
 install -m 0644 "$COMMON/maknae-policy-sync.path"    "$TOP/SOURCES/"
 install -m 0644 "$COMMON/maknae-policy-sync.service" "$TOP/SOURCES/"
 install -m 0644 "$COMMON/80-maknae.preset"        "$TOP/SOURCES/"
+install -m 0644 "$COMMON/maknae-agent@.service"   "$TOP/SOURCES/"
 
 # --- Spec %files vs manifest: what the rpm SHIPS is what was declared --------
 # The rpm's equivalent of the deb payload check. rpmbuild builds the payload
@@ -78,6 +79,16 @@ want_bins="$(printf '%s\n' $BINS | sort)"
     exit 1
 }
 echo "spec check: $(echo $spec_bins | wc -w) binary/binaries match the manifest"
+
+spec_units="$(grep -oE '^%\{_unitdir\}/\S+' "$HERE/maknae.spec" | sed 's|^%{_unitdir}/||' | sort)"
+want_units="$(cd "$COMMON" && ls *.service *.socket *.path | sort)"
+[ -n "$want_units" ] && [ "$spec_units" = "$want_units" ] || {
+    echo "ERROR: maknae.spec %files does not ship exactly the units in packaging/common" >&2
+    echo "  common: $(echo $want_units)" >&2
+    echo "  spec:   $(echo $spec_units)" >&2
+    exit 1
+}
+echo "spec check: $(echo $spec_units | wc -w) unit(s) match packaging/common"
 
 # --- Declaration vs staging: every Source in the spec MUST be staged --------
 # The rpm's equivalent of the deb payload check, and derived from the spec for

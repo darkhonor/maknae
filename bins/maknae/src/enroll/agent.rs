@@ -1,4 +1,5 @@
 use super::agent_access;
+use super::agent_unit;
 use super::artifact_table::{Artifact, ContentKind, Owner};
 use super::artifact_write::{self, emit_yaml, yaml_map, OwnerResolver};
 use super::EnrollError;
@@ -472,6 +473,11 @@ pub(crate) trait AgentOps: AgentVaultOps {
         agent: &AgentId,
         account: &agent_access::Account,
     ) -> Result<(), EnrollError>;
+    fn start_agent(
+        &self,
+        agent: &AgentId,
+        account: &agent_unit::ServiceAccount,
+    ) -> Result<(), EnrollError>;
 }
 
 pub(crate) fn has_alias_on(entity: &maknae_vault::EntityFacts, mount: &str, role_id: &str) -> bool {
@@ -486,6 +492,8 @@ pub(crate) struct AgentPlan {
     pub agent: AgentId,
     pub account: String,
     pub uid: u32,
+    pub gid: u32,
+    pub home: String,
     pub mount: String,
     pub cidrs: BindCidrs,
     pub role: AgentRole,
@@ -668,6 +676,14 @@ pub(crate) async fn enroll_agent<O: AgentOps>(
         });
     }
     granted?;
+    ops.start_agent(
+        &plan.agent,
+        &agent_unit::ServiceAccount {
+            uid: plan.uid,
+            gid: plan.gid,
+            home: plan.home.clone(),
+        },
+    )?;
     Ok(AgentOutcome { record, retired })
 }
 
@@ -981,6 +997,50 @@ impl AgentOps for RealAgentOps {
             account,
         )
     }
+
+    #[cfg(not(target_os = "macos"))]
+    fn start_agent(
+        &self,
+        agent: &AgentId,
+        account: &agent_unit::ServiceAccount,
+    ) -> Result<(), EnrollError> {
+        agent_unit::start(&*self.runner, agent, || write_drop_in(agent, account))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn start_agent(
+        &self,
+        _agent: &AgentId,
+        _account: &agent_unit::ServiceAccount,
+    ) -> Result<(), EnrollError> {
+        Ok(())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn write_drop_in(agent: &AgentId, account: &agent_unit::ServiceAccount) -> Result<(), EnrollError> {
+    let dir = Path::new(agent_unit::UNIT_DIR).join(agent_unit::drop_in_dir(agent));
+    artifact_write::ensure_dir(
+        &Artifact {
+            path: dir.clone(),
+            owner: Owner::RootRoot,
+            mode: 0o755,
+            content: ContentKind::Dir,
+        },
+        &RootOnly,
+    )?;
+    let text = dir.to_string_lossy().into_owned();
+    open_dir(&text, 0o022)?
+        .publish_owned(
+            Path::new(agent_unit::DROP_IN_FILE),
+            None,
+            agent_unit::drop_in(account).as_bytes(),
+            Mode(0o644),
+            FileOwner { uid: 0, gid: 0 },
+        )
+        .map_err(|e| io_error(&dir.join(agent_unit::DROP_IN_FILE), e))?;
+    artifact_write::maybe_restorecon(&dir.join(agent_unit::DROP_IN_FILE));
+    Ok(())
 }
 
 pub(crate) fn refresh_access(
@@ -1222,7 +1282,7 @@ fn check_account(
     agent: &AgentId,
     host: &HostEnrollment,
     other_agents: &[(String, u32)],
-) -> Result<u32, EnrollError> {
+) -> Result<agent_unit::ServiceAccount, EnrollError> {
     let acct = match maknae_io::user_by_name(account)
         .map_err(|e| owner_error(&format!("user {account}"), e))?
     {
@@ -1240,7 +1300,8 @@ fn check_account(
     let bindings =
         maknae_config::load_bindings(&Path::new(ETC_DIR).join(maknae_config::BINDINGS_FILE))
             .map_err(|e| EnrollError::Bindings(format!("bindings.yaml: {e}")))?;
-    admit_account(
+    let unit = acct.as_ref().map(|a| (a.primary_gid, a.dir.clone()));
+    let uid = admit_account(
         account,
         agent,
         acct,
@@ -1253,7 +1314,12 @@ fn check_account(
         agents_gid,
         &bindings,
         &binding_uids(&bindings)?,
-    )
+    )?;
+    let Some((gid, dir)) = unit else {
+        return Err(EnrollError::Owner(format!("no such user: {account}")));
+    };
+    let home = agent_unit::checked_home(account, &dir, maknae_io::canonical_home(&dir).as_deref())?;
+    Ok(agent_unit::ServiceAccount { uid, gid, home })
 }
 
 fn binding_uids(bindings: &maknae_config::Bindings) -> Result<BTreeMap<String, u32>, EnrollError> {
@@ -1369,7 +1435,7 @@ fn platform_gate(verbose: bool) -> Result<(), EnrollError> {
 }
 
 async fn admit_then_enroll<P, Fut>(
-    admit: impl FnOnce() -> Result<u32, EnrollError>,
+    admit: impl FnOnce() -> Result<agent_unit::ServiceAccount, EnrollError>,
     build: impl FnOnce() -> Fut,
     mut plan: AgentPlan,
     host: &HostEnrollment,
@@ -1381,7 +1447,10 @@ where
     P::Target: AgentOps + Sized,
     Fut: std::future::Future<Output = Result<P, EnrollError>>,
 {
-    plan.uid = admit()?;
+    let service = admit()?;
+    plan.uid = service.uid;
+    plan.gid = service.gid;
+    plan.home = service.home;
     let ops = build().await?;
     enroll_agent(&*ops, &plan, host, prior_record, prior_state).await
 }
@@ -1401,7 +1470,7 @@ fn run_refresh_access(agent: &AgentId, locale: Locale) -> Result<String, EnrollE
     let account = readmitted(
         agent,
         &enrolled,
-        check_account(&enrolled.name, agent, &host, &others),
+        check_account(&enrolled.name, agent, &host, &others).map(|s| s.uid),
     )?;
     refresh_access(
         &agent_access::Host,
@@ -1474,6 +1543,8 @@ pub(crate) async fn run_enroll_agent(
         agent: agent.clone(),
         account: account.clone(),
         uid: 0,
+        gid: 0,
+        home: String::new(),
         mount: args.approle_mount.clone(),
         cidrs,
         role: args.role.into(),
@@ -1762,6 +1833,21 @@ pub(crate) mod tests {
             ));
             self.check("grant")
         }
+
+        fn start_agent(
+            &self,
+            agent: &AgentId,
+            account: &agent_unit::ServiceAccount,
+        ) -> Result<(), EnrollError> {
+            self.log.borrow_mut().push(format!(
+                "start {} {}:{} {}",
+                agent.as_str(),
+                account.uid,
+                account.gid,
+                account.home
+            ));
+            self.check("start")
+        }
     }
 
     pub(crate) const MOUNT: &str = "maknae-agent-approle";
@@ -1814,6 +1900,8 @@ pub(crate) mod tests {
             agent: AgentId::parse("hobi").unwrap(),
             account: "hobi-svc".into(),
             uid: 990,
+            gid: 991,
+            home: "/home/hobi-svc".into(),
             mount: MOUNT.into(),
             cidrs: BindCidrs::parse(&["10.0.0.5".to_string()]).unwrap(),
             role: AgentRole::User,
@@ -1926,6 +2014,7 @@ pub(crate) mod tests {
                 "state",
                 "state",
                 "grant hobi hobi-svc:990",
+                "start hobi 990:991 /home/hobi-svc",
             ])
         );
         assert_eq!(*fake.clients.borrow(), vec![client_config()]);
@@ -2054,6 +2143,7 @@ pub(crate) mod tests {
                 "destroy:r",
                 "state",
                 "grant hobi hobi-svc:990",
+                "start hobi 990:991 /home/hobi-svc",
             ])
         );
         assert_eq!(
@@ -2090,7 +2180,8 @@ pub(crate) mod tests {
                 "destroy:acc-stale",
                 "destroy:gone",
                 "state",
-                "grant hobi hobi-svc:990"
+                "grant hobi hobi-svc:990",
+                "start hobi 990:991 /home/hobi-svc",
             ])[..]
         );
         assert_eq!(fake.states().last(), Some(&state(&["acc-new"], &[], &[])));
@@ -2274,6 +2365,34 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn neither_a_grant_nor_a_retire_failure_starts_the_instance() {
+        for failing in [&["grant"][..], &["destroy:a"][..]] {
+            let fake = Fake::failing(failing);
+            rotate(&fake, &["a"], &[], &[]).await.unwrap_err();
+            assert!(
+                !fake.log().iter().any(|l| l.starts_with("start")),
+                "{failing:?}: {:?}",
+                fake.log()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_start_failure_comes_last_and_keeps_the_enrollment() {
+        let fake = Fake::failing(&["start"]);
+        let e = rotate(&fake, &["a"], &[], &[]).await.unwrap_err();
+        assert!(
+            matches!(&e, EnrollError::State(m) if m == "start failed"),
+            "{e:?}"
+        );
+        assert_eq!(
+            fake.log().last().map(String::as_str),
+            Some("start hobi 990:991 /home/hobi-svc")
+        );
+        assert_eq!(fake.states().last(), Some(&state(&["acc-new"], &[], &[])));
+    }
+
+    #[tokio::test]
     async fn a_grant_failure_never_hides_a_retire_failure() {
         let fake = Fake::failing(&["destroy:b", "grant"]);
         let e = rotate(&fake, &["a", "b"], &[], &[]).await.unwrap_err();
@@ -2419,7 +2538,8 @@ pub(crate) mod tests {
                 "state",
                 "destroy:stray",
                 "state",
-                "grant hobi hobi-svc:990"
+                "grant hobi hobi-svc:990",
+                "start hobi 990:991 /home/hobi-svc",
             ])[..]
         );
         assert_eq!(
@@ -3091,7 +3211,15 @@ pub(crate) mod tests {
             let fake = Fake::default();
             let built = Cell::new(false);
             let got = admit_then_enroll(
-                || admit(account(&[990, AGENTS_GID]), Some(AGENTS_GID), &bound(role)),
+                || {
+                    admit(account(&[990, AGENTS_GID]), Some(AGENTS_GID), &bound(role)).map(|uid| {
+                        agent_unit::ServiceAccount {
+                            uid,
+                            gid: 990,
+                            home: "/home/hobi-svc".into(),
+                        }
+                    })
+                },
                 || async {
                     built.set(true);
                     Ok(&fake)
@@ -3146,10 +3274,11 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(
-            fake.log()[fake.log().len() - 2..],
+            fake.log()[fake.log().len() - 3..],
             strings(&[
                 "set_entity_disabled maknae-agent-hobi false",
-                "grant hobi hobi-svc:990"
+                "grant hobi hobi-svc:990",
+                "start hobi 990:991 /home/hobi-svc",
             ])[..]
         );
     }

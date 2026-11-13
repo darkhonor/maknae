@@ -1948,7 +1948,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 "disable maknae-policy-sync.path",
-                "disable maknae-policy-sync.service"
+                "disable maknae-policy-sync.service",
+                "disable maknae-agent@.service"
             ]
         );
         let plist = read("macos/io.maknae.policy-sync.plist");

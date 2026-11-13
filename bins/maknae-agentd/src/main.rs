@@ -32,7 +32,7 @@ fn main() -> ExitCode {
         }
     };
     let result = runtime.block_on(run(id));
-    runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+    runtime.shutdown_timeout(shutdown::RUNTIME_SHUTDOWN_TIMEOUT);
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

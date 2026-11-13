@@ -318,12 +318,12 @@ mod tests {
         }
     }
 
-    /// Both shipped units carry EXACTLY this list at the init-system layer, so
-    /// adding a name here and forgetting either unit goes red in ONE place.
+    /// Every shipped unit carries EXACTLY this list at the init-system layer, so
+    /// adding a name here and forgetting any unit goes red in ONE place.
     /// Read from the shipped files. Every `UnsetEnvironment=` line is taken,
     /// not the first: a second one would otherwise be silently unchecked.
     #[test]
-    fn both_shipped_units_unset_exactly_the_scrub_list() {
+    fn every_shipped_unit_unsets_exactly_the_scrub_list() {
         for (name, unit) in [
             (
                 "maknaed.service",
@@ -332,6 +332,10 @@ mod tests {
             (
                 "maknae-egress.service",
                 include_str!("../../../packaging/common/maknae-egress.service"),
+            ),
+            (
+                "maknae-agent@.service",
+                include_str!("../../../packaging/common/maknae-agent@.service"),
             ),
         ] {
             // Only lines inside [Service] count: systemd IGNORES
