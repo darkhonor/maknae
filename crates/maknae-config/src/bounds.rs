@@ -31,7 +31,7 @@ use crate::{ConfigError, Value};
 pub const EGRESS_BOUNDS_FILE: &str = "egress-bounds.yaml";
 
 /// Upper bound on the prefix. It reaches audit records and terminals.
-pub const MAX_USER_PREFIX_BYTES: usize = 256;
+pub const MAX_KEY_PREFIX_BYTES: usize = 256;
 
 /// The provider call timeout when `call_timeout_ms` is absent.
 pub const DEFAULT_CALL_TIMEOUT_MS: u64 = 120_000;
@@ -132,8 +132,8 @@ pub fn mount_path_is_acceptable(s: &str) -> Result<(), String> {
     if s.chars().any(char::is_whitespace) {
         return Err("contains whitespace".into());
     }
-    if s.len() > MAX_USER_PREFIX_BYTES {
-        return Err(format!("exceeds {MAX_USER_PREFIX_BYTES} bytes"));
+    if s.len() > MAX_KEY_PREFIX_BYTES {
+        return Err(format!("exceeds {MAX_KEY_PREFIX_BYTES} bytes"));
     }
     let segs: Vec<&str> = s.split('/').collect();
     let last = segs.len() - 1;
@@ -158,6 +158,19 @@ pub fn mount_path_is_acceptable(s: &str) -> Result<(), String> {
             "starts with 'auth' — the auth/ prefix is composed by the client; write the bare mount name"
                 .into(),
         );
+    }
+    Ok(())
+}
+
+/// Is this a usable key prefix (`kv_mount`, `user_prefix`, `agent_prefix`)? Bounded, a
+/// [`kv_fragment_is_acceptable`] fragment, and in [`vault_path_is_safe`]'s alphabet.
+pub fn key_prefix_is_acceptable(s: &str) -> Result<(), String> {
+    if s.len() > MAX_KEY_PREFIX_BYTES {
+        return Err(format!("exceeds {MAX_KEY_PREFIX_BYTES} bytes"));
+    }
+    kv_fragment_is_acceptable(s)?;
+    if !vault_path_is_safe(s) {
+        return Err("has a character outside [A-Za-z0-9._/-]".into());
     }
     Ok(())
 }
@@ -220,17 +233,7 @@ pub fn bounds_from_document(v: &Value) -> Result<EgressBounds, ConfigError> {
         ],
     )?;
     let prefix = |name: &str, v: &String| -> Result<String, ConfigError> {
-        if v.len() > MAX_USER_PREFIX_BYTES {
-            return Err(err(format!(
-                "'{name}' exceeds {MAX_USER_PREFIX_BYTES} bytes"
-            )));
-        }
-        kv_fragment_is_acceptable(v).map_err(|why| err(format!("'{name}' {why}")))?;
-        if !vault_path_is_safe(v) {
-            return Err(err(format!(
-                "'{name}' has a character outside [A-Za-z0-9._/-]"
-            )));
-        }
+        key_prefix_is_acceptable(v).map_err(|why| err(format!("'{name}' {why}")))?;
         Ok(v.clone())
     };
     let required = |name: &str| -> Result<String, ConfigError> {
@@ -273,9 +276,9 @@ pub fn bounds_from_document(v: &Value) -> Result<EgressBounds, ConfigError> {
             "'vault.addr' must be a non-empty URL without whitespace",
         ));
     }
-    if addr.len() > MAX_USER_PREFIX_BYTES {
+    if addr.len() > MAX_KEY_PREFIX_BYTES {
         return Err(err(format!(
-            "'vault.addr' exceeds {MAX_USER_PREFIX_BYTES} bytes"
+            "'vault.addr' exceeds {MAX_KEY_PREFIX_BYTES} bytes"
         )));
     }
     let call_timeout_ms = match m.iter().find(|(k, _)| k == "call_timeout_ms") {
@@ -345,7 +348,7 @@ mod tests {
                 .unwrap_err();
             assert!(e.to_string().contains("'vault.addr'"), "{bad:?}: {e}");
         }
-        let long_addr = format!("https://{}", "h".repeat(MAX_USER_PREFIX_BYTES - 8));
+        let long_addr = format!("https://{}", "h".repeat(MAX_KEY_PREFIX_BYTES - 8));
         assert!(
             bounds_from_document(&doc2_vault("maknae-kv", "maknae/users", Some(&long_addr)))
                 .is_ok()
@@ -418,7 +421,7 @@ mod tests {
         }
         assert_eq!(mount_path_is_acceptable("team/approle"), Ok(()));
         assert_eq!(mount_path_is_acceptable("data"), Ok(()));
-        let long = "a".repeat(MAX_USER_PREFIX_BYTES);
+        let long = "a".repeat(MAX_KEY_PREFIX_BYTES);
         assert_eq!(mount_path_is_acceptable(&long), Ok(()));
         assert!(mount_path_is_acceptable(&format!("{long}a")).is_err());
     }
@@ -581,7 +584,7 @@ mod tests {
                 .as_deref(),
             Some("maknae/agents")
         );
-        let longest = "a".repeat(MAX_USER_PREFIX_BYTES);
+        let longest = "a".repeat(MAX_KEY_PREFIX_BYTES);
         assert_eq!(
             bounds_from_document(&with_agent_prefix(Value::Str(longest.clone())))
                 .unwrap()
@@ -593,7 +596,7 @@ mod tests {
             Value::Str("maknae/data/agents".into()),
             Value::Str("maknae/a b".into()),
             Value::Str("maknae/a+b".into()),
-            Value::Str("a".repeat(MAX_USER_PREFIX_BYTES + 1)),
+            Value::Str("a".repeat(MAX_KEY_PREFIX_BYTES + 1)),
             Value::Int(3),
         ] {
             let e = bounds_from_document(&with_agent_prefix(bad.clone())).unwrap_err();
@@ -682,22 +685,21 @@ mod tests {
             );
         }
         assert!(
-            bounds_from_document(&doc2(OK_MOUNT, &"a".repeat(MAX_USER_PREFIX_BYTES + 1))).is_err()
+            bounds_from_document(&doc2(OK_MOUNT, &"a".repeat(MAX_KEY_PREFIX_BYTES + 1))).is_err()
         );
         // AT the bound, accepted. Measured gap: `>` → `>=` survived because the
         // only length ever tested was MAX+1, where both operators refuse alike.
-        assert!(bounds_from_document(&doc2(OK_MOUNT, &"a".repeat(MAX_USER_PREFIX_BYTES))).is_ok());
+        assert!(bounds_from_document(&doc2(OK_MOUNT, &"a".repeat(MAX_KEY_PREFIX_BYTES))).is_ok());
         // and the same bound applies to the mount, for the same reason
         assert!(bounds_from_document(&doc2(
-            &"m".repeat(MAX_USER_PREFIX_BYTES + 1),
+            &"m".repeat(MAX_KEY_PREFIX_BYTES + 1),
             "maknae/providers"
         ))
         .is_err());
-        assert!(bounds_from_document(&doc2(
-            &"m".repeat(MAX_USER_PREFIX_BYTES),
-            "maknae/providers"
-        ))
-        .is_ok());
+        assert!(
+            bounds_from_document(&doc2(&"m".repeat(MAX_KEY_PREFIX_BYTES), "maknae/providers"))
+                .is_ok()
+        );
         // a non-string value for either field
         assert!(bounds_from_document(&Value::Map(vec![
             ("kv_mount".into(), Value::Str(OK_MOUNT.into())),

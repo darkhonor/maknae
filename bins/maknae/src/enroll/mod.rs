@@ -1370,10 +1370,10 @@ fn check_vault_layout(args: &EnrollArgs) -> Result<(), EnrollError> {
         ("--kv-mount", &args.kv_mount),
         ("--user-prefix", &args.user_prefix),
     ] {
-        if value.len() > maknae_config::MAX_USER_PREFIX_BYTES {
+        if value.len() > maknae_config::MAX_KEY_PREFIX_BYTES {
             return Err(EnrollError::InvalidVaultLayout(format!(
                 "{flag} exceeds {} bytes",
-                maknae_config::MAX_USER_PREFIX_BYTES
+                maknae_config::MAX_KEY_PREFIX_BYTES
             )));
         }
         maknae_config::kv_fragment_is_acceptable(value)
@@ -3637,7 +3637,7 @@ mod tests {
         assert!(refused(|a| a.user_prefix = "/maknae/users".into()).starts_with("--user-prefix"));
         assert!(refused(|a| a.user_prefix = "maknae/../users".into()).starts_with("--user-prefix"));
         assert!(
-            refused(|a| a.user_prefix = "a".repeat(maknae_config::MAX_USER_PREFIX_BYTES + 1))
+            refused(|a| a.user_prefix = "a".repeat(maknae_config::MAX_KEY_PREFIX_BYTES + 1))
                 .starts_with("--user-prefix")
         );
         assert_eq!(

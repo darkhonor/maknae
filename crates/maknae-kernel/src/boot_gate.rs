@@ -166,21 +166,8 @@ pub fn classify_bounds_load_error(e: maknae_config::ConfigError) -> EgressBounds
 }
 
 fn key_prefix_gate(name: &str, prefix: &str) -> Result<(), EgressBoundsRefusal> {
-    if let Err(why) = maknae_config::kv_fragment_is_acceptable(prefix) {
-        return Err(EgressBoundsRefusal::Refused(format!("{name} {why}")));
-    }
-    if !maknae_config::vault_path_is_safe(prefix) {
-        return Err(EgressBoundsRefusal::Refused(format!(
-            "{name} has a character outside [A-Za-z0-9._/-]"
-        )));
-    }
-    if prefix.len() > maknae_config::MAX_USER_PREFIX_BYTES {
-        return Err(EgressBoundsRefusal::Refused(format!(
-            "{name} exceeds {} bytes",
-            maknae_config::MAX_USER_PREFIX_BYTES
-        )));
-    }
-    Ok(())
+    maknae_config::key_prefix_is_acceptable(prefix)
+        .map_err(|why| EgressBoundsRefusal::Refused(format!("{name} {why}")))
 }
 
 pub fn egress_bounds_boot_gate(
@@ -315,7 +302,7 @@ mod tests {
             super::egress_bounds_boot_gate(&set(), Some(&bounds("maknae/users")), 280_000),
             Ok(())
         );
-        let at = "u".repeat(maknae_config::MAX_USER_PREFIX_BYTES);
+        let at = "u".repeat(maknae_config::MAX_KEY_PREFIX_BYTES);
         assert_eq!(
             super::egress_bounds_boot_gate(&set(), Some(&bounds(&at)), 280_000),
             Ok(())
@@ -342,7 +329,7 @@ mod tests {
                 other => panic!("expected Refused for {bad:?}, got {other:?}"),
             }
         }
-        let over = "u".repeat(maknae_config::MAX_USER_PREFIX_BYTES + 1);
+        let over = "u".repeat(maknae_config::MAX_KEY_PREFIX_BYTES + 1);
         match super::egress_bounds_boot_gate(&set(), Some(&bounds(&over)), 280_000) {
             Err(super::EgressBoundsRefusal::Refused(m)) => assert!(m.contains("exceeds"), "{m}"),
             other => panic!("expected an over-length refusal, got {other:?}"),
@@ -358,7 +345,7 @@ mod tests {
 
     #[test]
     fn boot_accepts_a_sound_agent_prefix_and_its_absence() {
-        let at = "a".repeat(maknae_config::MAX_USER_PREFIX_BYTES);
+        let at = "a".repeat(maknae_config::MAX_KEY_PREFIX_BYTES);
         for good in ["maknae/agents", "agents", at.as_str()] {
             assert_eq!(
                 super::egress_bounds_boot_gate(&set(), Some(&with_agents(good)), 280_000),
@@ -370,7 +357,7 @@ mod tests {
 
     #[test]
     fn boot_refuses_a_malformed_agent_prefix() {
-        let over = "a".repeat(maknae_config::MAX_USER_PREFIX_BYTES + 1);
+        let over = "a".repeat(maknae_config::MAX_KEY_PREFIX_BYTES + 1);
         for bad in [
             "",
             "/maknae/agents",

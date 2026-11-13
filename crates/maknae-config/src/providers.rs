@@ -111,24 +111,8 @@ pub fn key_subpath_is_acceptable(s: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn key_prefix_is_acceptable(prefix: &str, name: &str) -> Result<(), String> {
-    if prefix.len() > crate::MAX_USER_PREFIX_BYTES {
-        return Err(format!(
-            "the {name} prefix exceeds {} bytes",
-            crate::MAX_USER_PREFIX_BYTES
-        ));
-    }
-    crate::kv_fragment_is_acceptable(prefix).map_err(|why| format!("the {name} prefix {why}"))?;
-    if !crate::vault_path_is_safe(prefix) {
-        return Err(format!(
-            "the {name} prefix has a character outside [A-Za-z0-9._/-]"
-        ));
-    }
-    Ok(())
-}
-
 pub fn user_key_path(user_prefix: &str, username: &str, subpath: &str) -> Result<String, String> {
-    key_prefix_is_acceptable(user_prefix, "user")?;
+    crate::key_prefix_is_acceptable(user_prefix).map_err(|why| format!("the user prefix {why}"))?;
     if username.contains('/') {
         return Err("the username is not one path segment".into());
     }
@@ -148,7 +132,8 @@ pub fn agent_key_path(
     agent: &crate::AgentId,
     subpath: &str,
 ) -> Result<String, String> {
-    key_prefix_is_acceptable(agent_prefix, "agent")?;
+    crate::key_prefix_is_acceptable(agent_prefix)
+        .map_err(|why| format!("the agent prefix {why}"))?;
     key_subpath_is_acceptable(subpath).map_err(|why| format!("the key subpath {why}"))?;
     Ok(format!("{agent_prefix}/{}/{subpath}", agent.as_str()))
 }
@@ -798,14 +783,14 @@ mod tests {
         }
         let e = user_key_path("maknae/users", "data", "x").unwrap_err();
         assert!(!e.contains("#308"), "{e}");
-        let at = "p".repeat(crate::MAX_USER_PREFIX_BYTES);
+        let at = "p".repeat(crate::MAX_KEY_PREFIX_BYTES);
         assert!(user_key_path(&at, "alice", "x").is_ok());
-        let over = "p".repeat(crate::MAX_USER_PREFIX_BYTES + 1);
+        let over = "p".repeat(crate::MAX_KEY_PREFIX_BYTES + 1);
         assert_eq!(
             user_key_path(&over, "alice", "x"),
             Err(format!(
                 "the user prefix exceeds {} bytes",
-                crate::MAX_USER_PREFIX_BYTES
+                crate::MAX_KEY_PREFIX_BYTES
             ))
         );
     }
@@ -820,13 +805,13 @@ mod tests {
             agent_key_path("maknae/agents", &hobi(), "openai/hobi"),
             Ok("maknae/agents/hobi/openai/hobi".to_string())
         );
-        let at = "p".repeat(crate::MAX_USER_PREFIX_BYTES);
+        let at = "p".repeat(crate::MAX_KEY_PREFIX_BYTES);
         assert!(agent_key_path(&at, &hobi(), "x").is_ok());
     }
 
     #[test]
     fn agent_key_path_says_which_part_is_wrong() {
-        let over = "p".repeat(crate::MAX_USER_PREFIX_BYTES + 1);
+        let over = "p".repeat(crate::MAX_KEY_PREFIX_BYTES + 1);
         for (prefix, sub, want) in [
             ("", "x", "the agent prefix is empty".to_string()),
             (
@@ -854,7 +839,7 @@ mod tests {
                 "x",
                 format!(
                     "the agent prefix exceeds {} bytes",
-                    crate::MAX_USER_PREFIX_BYTES
+                    crate::MAX_KEY_PREFIX_BYTES
                 ),
             ),
             ("maknae/agents", "", "the key subpath is empty".into()),

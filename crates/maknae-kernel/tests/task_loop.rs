@@ -3106,8 +3106,16 @@ async fn an_agent_prompt_with_no_agent_prefix_is_refused_before_egress() {
         .await;
     assert!(got.as_ref().is_some_and(unauthorized), "{got:?}");
     assert!(egress.seen().is_empty());
-    assert!(records.snapshot().iter().any(|r| r.outcome.result == "deny"
-        && r.outcome.reason == maknae_kernel::ChoiceRefusal::NoAgentPrefix.reason()));
+    let denied: Vec<_> = records
+        .snapshot()
+        .into_iter()
+        .filter(|r| {
+            r.outcome.result == "deny"
+                && r.outcome.reason == maknae_kernel::ChoiceRefusal::NoAgentPrefix.reason()
+        })
+        .collect();
+    assert_eq!(denied.len(), 1, "{:?}", records.snapshot());
+    assert_eq!(denied[0].subject.agent.as_deref(), Some("hobi"));
 }
 
 #[tokio::test]
