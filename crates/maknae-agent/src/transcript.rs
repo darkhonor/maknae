@@ -105,7 +105,7 @@ impl Transcript {
         let missing: Vec<String> = calls
             .iter()
             .filter(|c| {
-                !self.turns[at + 1..]
+                !self.turns[at..]
                     .iter()
                     .any(|t| matches!(t, Turn::Tool { call_id, .. } if *call_id == c.call_id))
             })
@@ -257,6 +257,30 @@ mod tests {
         assert!(t.shed_oldest_reasoning());
         assert_eq!(reasoning(&t, 3), None);
         assert!(!t.shed_oldest_reasoning());
+    }
+
+    #[test]
+    fn a_call_id_reused_from_an_earlier_step_is_still_closed() {
+        let mut t = Transcript::new("c", "q");
+        let calls = |ids: &[&str]| PromptReply {
+            reasoning: None,
+            blocks: vec![],
+            tool_calls: ids.iter().map(|id| call(id)).collect(),
+            usage: None,
+        };
+        t.push_assistant(&calls(&["call_0"]));
+        t.push_tool_result("call_0", "first");
+        t.push_assistant(&calls(&["call_0"]));
+        assert!(t.close_unanswered("lost"));
+        match t.turns().last() {
+            Some(Turn::Tool { call_id, content }) => {
+                assert_eq!(call_id, "call_0");
+                assert!(
+                    matches!(&content[0], ContentBlock::Text { text } if text.0.as_str() == "lost")
+                );
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

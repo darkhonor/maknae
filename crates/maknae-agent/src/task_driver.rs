@@ -473,11 +473,11 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
                     self.leftover = Some(task);
                     return;
                 }
-                Ok(BeatAnswer::State(view)) if view.state == TaskState::Working => {
+                Ok(BeatAnswer::State(view)) => {
                     self.leftover = Some(view.task.to_id());
                     return;
                 }
-                Ok(BeatAnswer::State(_) | BeatAnswer::Idle) => return,
+                Ok(BeatAnswer::Idle) => return,
                 Ok(BeatAnswer::Refused(_)) => self.pause(POLL_EVERY).await,
                 Err(_) => self.back_off().await,
             }
@@ -728,8 +728,8 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
                 held.answer = Some(answer.0);
             }
             let stopped = match outcome.stopped {
-                None | Some(StopReason::NothingPending) if held.answer.is_some() => {
-                    match self.done(&mut held).await {
+                None | Some(StopReason::NothingPending) => match held.answer.take() {
+                    Some(answer) => match self.done(&mut held, SecretText(answer)).await {
                         Ok(items) => {
                             then = Then::Resume(items);
                             continue;
@@ -737,9 +737,9 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
                         Err(ending) => {
                             return self.conclude(held.id, Some(&held.session), ending).await
                         }
-                    }
-                }
-                None => StopReason::NothingPending,
+                    },
+                    None => StopReason::NothingPending,
+                },
                 Some(reason) => reason,
             };
             let class = match stopped {
@@ -787,19 +787,20 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
     }
 
     /// Ending 1. `Ok` carries follow-ups to continue the session with.
-    async fn done(&mut self, held: &mut Held) -> Result<Vec<SecretText>, Ending> {
+    async fn done(
+        &mut self,
+        held: &mut Held,
+        answer: SecretText,
+    ) -> Result<Vec<SecretText>, Ending> {
         loop {
             if self.stopping() {
                 return Err(Ending::Shutdown);
             }
-            let Ok(answer) = self.heartbeat(held.seen).await else {
+            let Ok(beat) = self.heartbeat(held.seen).await else {
                 return Err(Ending::Unsendable);
             };
-            match read_beat(answer, &mut held.seen) {
-                Beat::More(items) if !items.is_empty() => {
-                    held.answer = None;
-                    return Ok(items);
-                }
+            match read_beat(beat, &mut held.seen) {
+                Beat::More(items) if !items.is_empty() => return Ok(items),
                 Beat::More(_) => break,
                 Beat::Held => return Err(Ending::Held),
                 Beat::Gone => return Err(Ending::Gone),
@@ -807,12 +808,8 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
                 Beat::Lost => self.back_off().await,
             }
         }
-        let answer = held.answer.take().unwrap_or_default();
-        match self.report(SecretText(answer), true, &mut held.seen).await {
-            Reported::FollowUps(items) => {
-                held.answer = None;
-                Ok(items)
-            }
+        match self.report(answer, true, &mut held.seen).await {
+            Reported::FollowUps(items) => Ok(items),
             done => Err(fixed_ending(done, Ending::Answered)),
         }
     }
@@ -2543,6 +2540,19 @@ mod tests {
             events,
             vec![ended(1, Ending::Restarted), ended(2, Ending::Answered)]
         );
+    }
+
+    #[tokio::test]
+    async fn a_task_held_when_the_agent_restarted_is_reported_restarted_not_rerun_on_release() {
+        let mut f = Fake::default();
+        f.beats
+            .push_back(Ok(BeatAnswer::State(view(TaskState::Held))));
+        f.tasks.insert(1, Ok(signed(1, "prompt-1")));
+        f.claims = VecDeque::from([delivered(1, PART)]);
+        let (log, events) = run(f).await;
+        assert_eq!(reports(&log), strs(&[&format!("report {RESTARTED}")]));
+        assert_eq!(events, vec![ended(1, Ending::Restarted)]);
+        assert!(!log.iter().any(|l| l.starts_with("open")), "{log:?}");
     }
 
     #[tokio::test]
