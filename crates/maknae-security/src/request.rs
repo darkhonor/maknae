@@ -48,8 +48,23 @@ pub const SUBJECT_AGENT: &str = "agent";
 pub const SUBJECT_TASK: &str = "task";
 pub const SUBJECT_TASKER: &str = "tasker";
 
+/// The partition of the cited task's root tasker, from the stored record; kernel-stamped.
+pub const SUBJECT_ROOT_TASKER: &str = "root_tasker";
+
 /// The target agent of a `session.task` request.
 pub const RESOURCE_AGENT: &str = "agent";
+
+/// Which `session.task` operation the verb is, stamped by the kernel from the verb.
+pub const CONTEXT_TASK_OP: &str = "task_op";
+
+/// True only when the caller is the cited task's tasker; a foreign or unknown task is false.
+pub const RESOURCE_TASK_OWNED: &str = "task_owned";
+
+/// True only when the caller is the agent holding the cited `Working` task.
+pub const RESOURCE_TASK_HELD: &str = "task_held";
+
+/// The cited task's state, or `none` when it is not the caller's.
+pub const RESOURCE_TASK_STATE: &str = "task_state";
 
 /// No PEP stamps this; a filesystem attempt carrying it is refused (ADR-0009 decision 8). Owner, mode and gid are never put on a request for a backend to recompute.
 pub const RESOURCE_OS_ACCESSIBLE: &str = "os_accessible";

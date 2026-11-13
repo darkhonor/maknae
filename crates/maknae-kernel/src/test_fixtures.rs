@@ -231,6 +231,10 @@ pub(crate) fn permitted_read_marked(home: &std::path::Path, marking: Option<&str
         maknae_security::SUBJECT_HOME,
         AttrValue::Str(home.display().to_string()),
     );
+    subject.insert(
+        maknae_security::SUBJECT_CHANNEL,
+        AttrValue::Str(maknae_security::CHANNEL_CLIENT.into()),
+    );
     let mut resource = Attributes::new();
     resource.insert(
         "path",

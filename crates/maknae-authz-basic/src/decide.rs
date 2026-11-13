@@ -596,15 +596,45 @@ pub(crate) fn taskers_admit(
     }
 }
 
-/// The `session.task` arm (#609): the role's grant, an enrolled target, and the
-/// target's `taskers:` admitting the requester, all from this snapshot.
+enum TaskOp {
+    Submit,
+    Add,
+    Status,
+    List,
+    Stop,
+    Drop,
+    Collect,
+    Claim,
+    Report,
+}
+
+fn task_op(req: &SecRequest) -> Option<TaskOp> {
+    Some(match req.context.0.str(maknae_security::CONTEXT_TASK_OP)? {
+        "submit" => TaskOp::Submit,
+        "add" => TaskOp::Add,
+        "status" => TaskOp::Status,
+        "list" => TaskOp::List,
+        "stop" => TaskOp::Stop,
+        "drop" => TaskOp::Drop,
+        "collect" => TaskOp::Collect,
+        "claim" => TaskOp::Claim,
+        "report" => TaskOp::Report,
+        _ => return None,
+    })
+}
+
+const NOT_THE_TASKER: &str = "session.task: the task is not the caller's";
+
+/// The `session.task` arm: the role's grant, then the operation's own rule. A submission
+/// needs an enrolled target whose `taskers:` admit the requester; an operation on a task
+/// needs the caller to be its tasker and the task in the state the operation acts on.
 fn decide_task(
     lp: &LoadedPolicy,
     req: &SecRequest,
     role_key: &'static str,
     uid: u32,
+    principal_uid: u32,
 ) -> (Verdict, Option<Cited>) {
-    let deny = |reason: String| (Verdict::Deny { reason }, None);
     let source = match lp.action_grants.evaluate3_action(role_key, "session.task") {
         maknae_config::Match3::DenyMatch { source } => {
             return (
@@ -628,19 +658,26 @@ fn decide_task(
         }
         maknae_config::Match3::AllowMatch { source } => source,
     };
-    let target = match req.resource.0.get(maknae_security::RESOURCE_AGENT) {
-        Some(AttrValue::Str(t)) => t.as_str(),
-        Some(_) => return (Verdict::Indeterminate, None),
-        None => return deny("no agent on session.task".into()),
+    let checked = match task_op(req) {
+        None => return (Verdict::Indeterminate, None),
+        Some(TaskOp::Submit) => submission(lp, req, uid, principal_uid),
+        Some(TaskOp::Add | TaskOp::Stop) => on_own_task(req, &[TASK_WORKING]),
+        Some(TaskOp::Drop) => on_own_task(req, &[TASK_QUEUED]),
+        Some(TaskOp::Status) => on_own_task(
+            req,
+            &[
+                TASK_QUEUED,
+                TASK_WORKING,
+                TASK_REPORTED,
+                TASK_CLOSED,
+                TASK_HELD,
+            ],
+        ),
+        Some(TaskOp::List | TaskOp::Collect) => named_agent(req),
+        Some(TaskOp::Claim | TaskOp::Report) => Err((Verdict::Indeterminate, None)),
     };
-    if !lp.agents.0.values().any(|id| id == target) {
-        return deny(format!("session.task: agent {target} is not enrolled"));
-    }
-    let Some(list) = lp.taskers.0.get(target) else {
-        return (Verdict::Indeterminate, None);
-    };
-    if !taskers_admit(list.as_ref(), uid, lp.agents.get(uid).is_some()) {
-        return deny(format!("agent {target}: uid {uid} is not a tasker"));
+    if let Err(refused) = checked {
+        return refused;
     }
     (
         permit_with_audit(),
@@ -650,6 +687,89 @@ fn decide_task(
             effect: Effect::Allow,
         }),
     )
+}
+
+const TASK_QUEUED: &str = "queued";
+const TASK_WORKING: &str = "working";
+const TASK_REPORTED: &str = "reported";
+const TASK_CLOSED: &str = "closed";
+const TASK_HELD: &str = "held";
+
+type Refused = (Verdict, Option<Cited>);
+
+fn task_deny(reason: String) -> Refused {
+    (Verdict::Deny { reason }, None)
+}
+
+fn submission(
+    lp: &LoadedPolicy,
+    req: &SecRequest,
+    uid: u32,
+    principal_uid: u32,
+) -> Result<(), Refused> {
+    let target = match req.resource.0.get(maknae_security::RESOURCE_AGENT) {
+        Some(AttrValue::Str(t)) => t.as_str(),
+        Some(_) => return Err((Verdict::Indeterminate, None)),
+        None => return Err(task_deny("no agent on session.task".into())),
+    };
+    let Some((target_uid, _)) = lp.agents.0.iter().find(|(_, id)| *id == target) else {
+        return Err(task_deny(format!(
+            "session.task: agent {target} is not enrolled"
+        )));
+    };
+    if lp.roles.role_for(*target_uid, principal_uid) == Resolution::Role(Role::Adversary) {
+        return Err(task_deny(format!(
+            "session.task: agent {target} is contained"
+        )));
+    }
+    let Some(list) = lp.taskers.0.get(target) else {
+        return Err((Verdict::Indeterminate, None));
+    };
+    if !taskers_admit(list.as_ref(), uid, lp.agents.get(uid).is_some()) {
+        return Err(task_deny(format!(
+            "agent {target}: uid {uid} is not a tasker"
+        )));
+    }
+    Ok(())
+}
+
+fn on_own_task(req: &SecRequest, states: &[&str]) -> Result<(), Refused> {
+    let attrs = &req.resource.0;
+    match attrs.get(maknae_security::RESOURCE_TASK_OWNED) {
+        Some(AttrValue::Bool(true)) => {}
+        Some(AttrValue::Bool(false)) => return Err(task_deny(NOT_THE_TASKER.into())),
+        Some(_) | None => return Err((Verdict::Indeterminate, None)),
+    }
+    let state = match attrs.get(maknae_security::RESOURCE_TASK_STATE) {
+        Some(AttrValue::Str(s)) => s.as_str(),
+        Some(_) | None => return Err((Verdict::Indeterminate, None)),
+    };
+    if ![
+        TASK_QUEUED,
+        TASK_WORKING,
+        TASK_REPORTED,
+        TASK_CLOSED,
+        TASK_HELD,
+    ]
+    .contains(&state)
+    {
+        return Err((Verdict::Indeterminate, None));
+    }
+    if !states.contains(&state) {
+        return Err(task_deny(format!("session.task: the task is {state}")));
+    }
+    Ok(())
+}
+
+fn named_agent(req: &SecRequest) -> Result<(), Refused> {
+    match req.resource.0.get(maknae_security::RESOURCE_AGENT) {
+        Some(AttrValue::Str(a)) if maknae_config::AgentId::parse(a).is_ok() => Ok(()),
+        Some(AttrValue::Str(_)) => Err(task_deny(
+            "session.task: the agent name is not an agent id".into(),
+        )),
+        Some(_) => Err((Verdict::Indeterminate, None)),
+        None => Err(task_deny("no agent on session.task".into())),
+    }
 }
 
 /// (loaded policy, principal, request) → verdict. Spec §4 steps 2–6.
@@ -745,6 +865,11 @@ pub(crate) fn decide_loaded_cited(
             None,
         ),
         Role::Admin | Role::User | Role::Guest
+            if let Some(decided) = holding_arm(&lp.agents, uid, role, req) =>
+        {
+            (decided, None)
+        }
+        Role::Admin | Role::User | Role::Guest
             if let Some(decided) = agent_arm(&lp.agents, lp.subjects.get(uid), uid, role, req) =>
         {
             (decided, None)
@@ -792,7 +917,7 @@ pub(crate) fn decide_loaded_cited(
             decide_session(lp, req, role.key(), uid)
         }
         Role::Admin | Role::User if req.action.0 == "session.task" => {
-            decide_task(lp, req, role.key(), uid)
+            decide_task(lp, req, role.key(), uid, principal.uid)
         }
         Role::Guest | Role::User => match class {
             Some(Class::Liveness) => (permit_with_audit(), None),
@@ -919,6 +1044,51 @@ fn channel_refusal(agents: &AgentUids, uid: u32, req: &SecRequest) -> Option<Str
             }
         }
         Some(_) => Some(format!("channel: uid {uid} arrived on no known channel")),
+    }
+}
+
+/// `claim` and `report` come with holding a task, whatever the agent's own action
+/// limits say of `session.task`: an enrolled agent on the agent channel may claim, and may
+/// report on the working task its request cites. Nobody else may do either.
+fn holding_arm(agents: &AgentUids, uid: u32, role: Role, req: &SecRequest) -> Option<Verdict> {
+    if req.action.0 != "session.task" {
+        return None;
+    }
+    let op = match task_op(req)? {
+        TaskOp::Claim => "claim",
+        TaskOp::Report => "report",
+        TaskOp::Submit
+        | TaskOp::Add
+        | TaskOp::Status
+        | TaskOp::List
+        | TaskOp::Stop
+        | TaskOp::Drop
+        | TaskOp::Collect => return None,
+    };
+    let deny = |reason: String| Some(Verdict::Deny { reason });
+    let on_agent_channel = matches!(
+        req.subject.0.get(maknae_security::SUBJECT_CHANNEL),
+        Some(AttrValue::Str(c)) if c == maknae_security::CHANNEL_AGENT
+    );
+    let Some(id) = agents.get(uid).filter(|_| on_agent_channel) else {
+        return deny(format!(
+            "session.task: {op} is an enrolled agent's, on the agent channel"
+        ));
+    };
+    match role {
+        Role::Admin => return deny(format!("agent {id}: an agent never holds admin")),
+        Role::Adversary => return deny("subject contained: role=adversary".into()),
+        Role::User | Role::Guest => {}
+    }
+    if op == "claim" {
+        return Some(permit_with_audit());
+    }
+    match req.resource.0.get(maknae_security::RESOURCE_TASK_HELD) {
+        Some(AttrValue::Bool(true)) => Some(permit_with_audit()),
+        Some(AttrValue::Bool(false)) => deny(format!(
+            "agent {id}: report cites no working task of its own"
+        )),
+        Some(_) | None => Some(Verdict::Indeterminate),
     }
 }
 
@@ -4888,6 +5058,10 @@ mod tests {
 
     fn task_req(uid: u32, target: Option<AttrValue>) -> SecRequest {
         let mut r = request(Some(i64::from(uid)), "session.task", None);
+        r.context.0.insert(
+            maknae_security::CONTEXT_TASK_OP,
+            AttrValue::Str("submit".into()),
+        );
         if let Some(t) = target {
             r.resource.0.insert(maknae_security::RESOURCE_AGENT, t);
         }
@@ -5081,10 +5255,306 @@ mod tests {
     }
 
     #[test]
+    fn a_contained_agent_is_given_no_task() {
+        let mut lp = lp_task(TASK_ROLES, None);
+        assert_eq!(task_verdict(&lp, HUMAN_UID, "hobi"), permit_with_audit());
+        let lookups: crate::Lookups = [
+            ("operator", OPERATOR_UID),
+            ("ursula", HUMAN_UID),
+            ("hobi-svc", HOBI_UID),
+            ("jin-svc", JIN_UID),
+        ]
+        .into_iter()
+        .map(|(n, u)| (n.to_string(), Some(u)))
+        .collect();
+        let bindings: BTreeMap<String, Vec<String>> = [
+            ("admin", vec!["operator"]),
+            ("user", vec!["ursula", "jin-svc"]),
+            ("adversary", vec!["hobi-svc"]),
+        ]
+        .into_iter()
+        .map(|(r, n)| (r.to_string(), n.into_iter().map(String::from).collect()))
+        .collect();
+        lp.roles = Roles::File(resolve(&Some(bindings), &crate::found(&lookups)).unwrap());
+        for uid in [HUMAN_UID, OPERATOR_UID] {
+            assert_eq!(
+                task_verdict(&lp, uid, "hobi"),
+                deny("session.task: agent hobi is contained"),
+                "{uid}"
+            );
+        }
+        assert_eq!(
+            task_verdict(&lp, HUMAN_UID, "jin"),
+            permit_with_audit(),
+            "another agent is still tasked"
+        );
+    }
+
+    #[test]
     fn an_empty_taskers_list_refuses_everyone() {
         let lp = lp_task(TASK_ROLES, Some(&[]));
         for uid in [HUMAN_UID, OPERATOR_UID, JIN_UID] {
             assert_eq!(task_verdict(&lp, uid, "hobi"), not_a_tasker(uid), "{uid}");
+        }
+    }
+
+    fn on_task(op: Option<&str>, owned: Option<AttrValue>, state: Option<&str>) -> SecRequest {
+        let mut r = request(Some(i64::from(HUMAN_UID)), "session.task", None);
+        if let Some(op) = op {
+            r.context
+                .0
+                .insert(maknae_security::CONTEXT_TASK_OP, AttrValue::Str(op.into()));
+        }
+        if let Some(o) = owned {
+            r.resource.0.insert(maknae_security::RESOURCE_TASK_OWNED, o);
+        }
+        if let Some(st) = state {
+            r.resource.0.insert(
+                maknae_security::RESOURCE_TASK_STATE,
+                AttrValue::Str(st.into()),
+            );
+        }
+        r
+    }
+
+    fn on_task_verdict(op: &str, owned: bool, state: &str) -> Verdict {
+        let lp = lp_task(TASK_ROLES, None);
+        decide_loaded_cited(
+            &lp,
+            &principal(),
+            &on_task(Some(op), Some(AttrValue::Bool(owned)), Some(state)),
+        )
+        .verdict
+    }
+
+    #[test]
+    fn each_task_op_acts_only_on_its_own_tasks_in_the_state_it_needs() {
+        let permits = |op: &str, state: &str| {
+            matches!(on_task_verdict(op, true, state), Verdict::Permit { .. })
+        };
+        for (op, allowed) in [
+            ("add", &["working"][..]),
+            ("stop", &["working"][..]),
+            ("drop", &["queued"][..]),
+            ("status", &["queued", "working", "reported", "closed"][..]),
+        ] {
+            for state in ["queued", "working", "reported", "closed"] {
+                assert_eq!(
+                    permits(op, state),
+                    allowed.contains(&state),
+                    "{op} on a {state} task"
+                );
+                if !allowed.contains(&state) {
+                    assert_eq!(
+                        on_task_verdict(op, true, state),
+                        deny(&format!("session.task: the task is {state}"))
+                    );
+                }
+                assert_eq!(
+                    on_task_verdict(op, false, "none"),
+                    deny("session.task: the task is not the caller's"),
+                    "{op}"
+                );
+            }
+            assert_eq!(on_task_verdict(op, true, "none"), Verdict::Indeterminate);
+            let lp = lp_task(TASK_ROLES, None);
+            for (owned, state) in [
+                (None, Some("working")),
+                (Some(AttrValue::Str("true".into())), Some("working")),
+                (Some(AttrValue::Bool(true)), None),
+                (Some(AttrValue::Bool(true)), Some("Working")),
+            ] {
+                assert_eq!(
+                    decide_loaded_cited(&lp, &principal(), &on_task(Some(op), owned, state))
+                        .verdict,
+                    Verdict::Indeterminate,
+                    "{op}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_missing_unknown_or_unbuilt_task_op_is_indeterminate() {
+        let lp = lp_task(TASK_ROLES, None);
+        for op in [None, Some("Submit"), Some("")] {
+            let mut r = on_task(op, Some(AttrValue::Bool(true)), Some("working"));
+            r.resource.0.insert(
+                maknae_security::RESOURCE_AGENT,
+                AttrValue::Str("hobi".into()),
+            );
+            assert_eq!(
+                decide_loaded_cited(&lp, &principal(), &r).verdict,
+                Verdict::Indeterminate,
+                "{op:?}"
+            );
+        }
+        let lp = lp_task("", None);
+        assert!(matches!(
+            decide_loaded_cited(&lp, &principal(), &on_task(None, None, None)).verdict,
+            Verdict::NotApplicable { .. }
+        ));
+    }
+
+    fn holding(op: &str, held: Option<AttrValue>) -> SecRequest {
+        let mut r = as_hobi("session.task");
+        r.context
+            .0
+            .insert(maknae_security::CONTEXT_TASK_OP, AttrValue::Str(op.into()));
+        if let Some(h) = held {
+            r.resource.0.insert(maknae_security::RESOURCE_TASK_HELD, h);
+        }
+        r
+    }
+
+    const TASK_DENIED: &str =
+        "schema_version: 1\nactions:\n  allow: [\"fs.read\"]\n  deny: [\"session.task\"]\n";
+
+    #[test]
+    fn claim_and_report_come_with_holding_whatever_the_agents_limits_say() {
+        for role in ["user", "guest"] {
+            let lp = lp_agent(role, Some(TASK_DENIED));
+            let decided = |r: &SecRequest| decide_loaded_cited(&lp, &principal(), r);
+            let d = decided(&holding("claim", None));
+            assert_eq!(d.verdict, permit_with_audit(), "{role}");
+            assert_eq!((d.role, d.cited), (Some(role), None));
+            assert_eq!(
+                decided(&holding("report", Some(AttrValue::Bool(true)))).verdict,
+                permit_with_audit(),
+                "{role}"
+            );
+            assert_eq!(
+                decided(&holding("report", Some(AttrValue::Bool(false)))).verdict,
+                deny("agent hobi: report cites no working task of its own")
+            );
+            for held in [None, Some(AttrValue::Str("true".into()))] {
+                assert_eq!(
+                    decided(&holding("report", held)).verdict,
+                    Verdict::Indeterminate
+                );
+            }
+            let mut submit = holding("submit", Some(AttrValue::Bool(true)));
+            submit.resource.0.insert(
+                maknae_security::RESOURCE_AGENT,
+                AttrValue::Str("hobi".into()),
+            );
+            assert_eq!(
+                decided(&submit).verdict,
+                deny("subject hobi-svc: session.task denied by agents.hobi.policy.actions entry session.task"),
+                "holding grants no submission"
+            );
+        }
+    }
+
+    #[test]
+    fn claim_and_report_are_denied_off_the_agent_channel_and_to_an_admin_agent() {
+        for op in ["claim", "report"] {
+            let held = Some(AttrValue::Bool(true));
+            let lp = lp_task(TASK_ROLES, None);
+            for uid in [HUMAN_UID, OPERATOR_UID, GWEN_UID] {
+                let mut r = on_task(Some(op), None, None);
+                r.subject
+                    .0
+                    .insert(SUBJECT_UID, AttrValue::Int(i64::from(uid)));
+                r.resource
+                    .0
+                    .insert(maknae_security::RESOURCE_TASK_HELD, AttrValue::Bool(true));
+                assert_eq!(
+                    decide_loaded_cited(&lp, &principal(), &r).verdict,
+                    deny(&format!(
+                        "session.task: {op} is an enrolled agent's, on the agent channel"
+                    )),
+                    "{op} by uid {uid}"
+                );
+            }
+            let lp = lp_agent("user", None);
+            let mut off = holding(op, held.clone());
+            off.subject.0.insert(
+                maknae_security::SUBJECT_CHANNEL,
+                AttrValue::Str(maknae_security::CHANNEL_CLIENT.into()),
+            );
+            assert_eq!(
+                decide_loaded_cited(&lp, &principal(), &off).verdict,
+                deny("agent hobi: not on the agent channel")
+            );
+            let lp = lp_agent("admin", None);
+            assert_eq!(
+                decide_loaded_cited(&lp, &principal(), &holding(op, held.clone())).verdict,
+                deny("agent hobi: an agent never holds admin")
+            );
+            let lp = lp_agent("adversary", None);
+            assert_eq!(
+                decide_loaded_cited(&lp, &principal(), &holding(op, held)).verdict,
+                deny("subject contained: role=adversary")
+            );
+        }
+        assert_eq!(
+            holding_arm(
+                &AgentUids::default(),
+                HUMAN_UID,
+                Role::Adversary,
+                &holding("claim", None)
+            ),
+            Some(deny(
+                "session.task: claim is an enrolled agent's, on the agent channel"
+            ))
+        );
+        let lp = lp_agent("user", None);
+        assert_eq!(
+            holding_arm(
+                &lp.agents,
+                HOBI_UID,
+                Role::Adversary,
+                &holding("claim", None)
+            ),
+            Some(deny("subject contained: role=adversary"))
+        );
+        assert_eq!(
+            holding_arm(&lp.agents, HOBI_UID, Role::User, &as_hobi("session.prompt")),
+            None
+        );
+        assert_eq!(
+            decide_task(
+                &lp_task(TASK_ROLES, None),
+                &on_task(Some("claim"), None, None),
+                "user",
+                HUMAN_UID,
+                OPERATOR_UID
+            )
+            .0,
+            Verdict::Indeterminate,
+            "the tasker arm never decides a holding verb"
+        );
+    }
+
+    #[test]
+    fn list_and_collect_need_only_a_well_formed_agent_name() {
+        let lp = lp_task(TASK_ROLES, None);
+        for op in ["list", "collect"] {
+            let with = |agent: Option<AttrValue>| {
+                let mut r = on_task(Some(op), None, None);
+                if let Some(a) = agent {
+                    r.resource.0.insert(maknae_security::RESOURCE_AGENT, a);
+                }
+                decide_loaded_cited(&lp, &principal(), &r).verdict
+            };
+            assert!(matches!(
+                with(Some(AttrValue::Str("hobi".into()))),
+                Verdict::Permit { .. }
+            ));
+            assert!(
+                matches!(
+                    with(Some(AttrValue::Str("gone-agent".into()))),
+                    Verdict::Permit { .. }
+                ),
+                "an agent no longer enrolled still lets its tasker collect"
+            );
+            assert_eq!(
+                with(Some(AttrValue::Str("Not An Agent".into()))),
+                deny("session.task: the agent name is not an agent id")
+            );
+            assert_eq!(with(None), deny("no agent on session.task"));
+            assert_eq!(with(Some(AttrValue::Int(1))), Verdict::Indeterminate);
         }
     }
 

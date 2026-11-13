@@ -93,6 +93,8 @@ pub enum Dispatch {
     ConversationCloseRequested,
     ConversationListRequested,
     ConversationDeleteRequested,
+    /// A tasker verb or a submission; the arm reads the operands and gathers the task facts.
+    TaskRequested,
 }
 
 /// The verbs routed to `mutation::handle`; only these resolve the requester's home.
@@ -162,8 +164,89 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         | Verb::McpToolCall
         | Verb::McpResourceRead
         | Verb::McpPromptGet
-        | Verb::McpSamplingCreate
-        | Verb::TaskSubmit { .. } => Dispatch::NoBehaviour,
+        | Verb::McpSamplingCreate => Dispatch::NoBehaviour,
+        Verb::TaskSubmit { .. }
+        | Verb::TaskAdd { .. }
+        | Verb::TaskStatus { .. }
+        | Verb::TaskList { .. }
+        | Verb::TaskStop { .. }
+        | Verb::TaskDrop { .. }
+        | Verb::TaskCollect { .. }
+        | Verb::TaskClaim { .. }
+        | Verb::TaskReport { .. } => Dispatch::TaskRequested,
+    }
+}
+
+/// The `session.task` operation a verb is, the value of `CONTEXT_TASK_OP`.
+pub fn task_op(verb: &Verb) -> Option<&'static str> {
+    match verb {
+        Verb::TaskSubmit { .. } => Some("submit"),
+        Verb::TaskAdd { .. } => Some("add"),
+        Verb::TaskStatus { .. } => Some("status"),
+        Verb::TaskList { .. } => Some("list"),
+        Verb::TaskStop { .. } => Some("stop"),
+        Verb::TaskDrop { .. } => Some("drop"),
+        Verb::TaskCollect { .. } => Some("collect"),
+        Verb::TaskClaim { .. } => Some("claim"),
+        Verb::TaskReport { .. } => Some("report"),
+        Verb::Ping
+        | Verb::Whoami
+        | Verb::AdminStatus
+        | Verb::AdminConfigShow
+        | Verb::AdminAuditTail
+        | Verb::AdminPolicyReload
+        | Verb::AdminSubjectList
+        | Verb::AdminBaselineShow
+        | Verb::AdminBaselineAccept { .. }
+        | Verb::AdminSubjectBind
+        | Verb::AdminSubjectUnbind
+        | Verb::AdminContain { .. }
+        | Verb::AdminRelease { .. }
+        | Verb::AdminCredentialRotate
+        | Verb::AdminProviderList
+        | Verb::AdminProviderSet
+        | Verb::AdminProviderDisable
+        | Verb::AdminSessionList
+        | Verb::AdminSessionTerminate
+        | Verb::SessionNew { .. }
+        | Verb::SessionResume
+        | Verb::SessionClose { .. }
+        | Verb::SessionDelete { .. }
+        | Verb::SessionList { .. }
+        | Verb::SessionFork
+        | Verb::SessionPrompt { .. }
+        | Verb::SessionCancel
+        | Verb::SessionSetconfigoption
+        | Verb::SessionSetmode
+        | Verb::SessionLoad
+        | Verb::SessionUpdate
+        | Verb::SessionRequestpermission
+        | Verb::SessionElicitCreate
+        | Verb::SessionElicitComplete
+        | Verb::SessionCompact
+        | Verb::Read { .. }
+        | Verb::FsWrite { .. }
+        | Verb::FsDelete { .. }
+        | Verb::FsMove
+        | Verb::FsList { .. }
+        | Verb::FsStat { .. }
+        | Verb::FsMkdir { .. }
+        | Verb::FsLink
+        | Verb::FsChmod
+        | Verb::FsChown
+        | Verb::TerminalCreate
+        | Verb::TerminalOutput
+        | Verb::TerminalWaitforexit
+        | Verb::TerminalKill
+        | Verb::TerminalRelease
+        | Verb::TerminalInput
+        | Verb::McpConnect
+        | Verb::McpDisconnect
+        | Verb::McpMessage
+        | Verb::McpToolCall
+        | Verb::McpResourceRead
+        | Verb::McpPromptGet
+        | Verb::McpSamplingCreate => None,
     }
 }
 
@@ -337,6 +420,14 @@ pub fn verb_to_action(verb: &Verb) -> &'static str {
         Verb::McpPromptGet => "mcp.prompt.get",
         Verb::McpSamplingCreate => "mcp.sampling.create",
         Verb::TaskSubmit { .. } => "session.task",
+        Verb::TaskAdd { .. } => "session.task",
+        Verb::TaskStatus { .. } => "session.task",
+        Verb::TaskList { .. } => "session.task",
+        Verb::TaskStop { .. } => "session.task",
+        Verb::TaskDrop { .. } => "session.task",
+        Verb::TaskCollect { .. } => "session.task",
+        Verb::TaskClaim { .. } => "session.task",
+        Verb::TaskReport { .. } => "session.task",
     }
 }
 
@@ -363,18 +454,21 @@ pub enum Stamp<'a> {
     },
 }
 
-/// The cited task's id and tasker, the only task facts a request is stamped with.
+/// The cited task's id, tasker and root partition, the only task facts a request is
+/// stamped with.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TaskStamp {
     pub id: maknae_proto::TaskId,
     pub tasker: String,
+    pub root: String,
 }
 
 impl TaskStamp {
-    pub fn of(task: &maknae_proto::TaskObject) -> Self {
+    pub fn of(cited: &crate::task::CitedTask) -> Self {
         Self {
-            id: task.task_id,
-            tasker: maknae_proto::tasker_text(&task.tasker),
+            id: cited.signed.task.task_id,
+            tasker: maknae_proto::tasker_text(&cited.signed.task.tasker),
+            root: cited.root.partition(),
         }
     }
 }
@@ -413,6 +507,10 @@ pub fn build_authz_request(
                 subject.insert(
                     maknae_security::SUBJECT_TASKER,
                     AttrValue::Str(t.tasker.clone()),
+                );
+                subject.insert(
+                    maknae_security::SUBJECT_ROOT_TASKER,
+                    AttrValue::Str(t.root.clone()),
                 );
             }
             maknae_security::CHANNEL_AGENT
@@ -466,6 +564,9 @@ pub fn build_authz_request(
         maknae_security::CONTEXT_DAC_LANE,
         AttrValue::Str(lane.as_str().to_string()),
     );
+    if let Some(op) = task_op(verb) {
+        context.insert(maknae_security::CONTEXT_TASK_OP, AttrValue::Str(op.into()));
+    }
     maknae_security::Request {
         subject: Subject(subject),
         resource: Resource(resource),
@@ -616,8 +717,8 @@ mod tests {
     fn the_stamp_names_the_channel_the_agent_and_the_cited_task() {
         use crate::task::TaskObjectForTest;
         use maknae_security::{
-            AttrValue, CHANNEL_AGENT, CHANNEL_CLIENT, SUBJECT_AGENT, SUBJECT_CHANNEL, SUBJECT_TASK,
-            SUBJECT_TASKER,
+            AttrValue, CHANNEL_AGENT, CHANNEL_CLIENT, SUBJECT_AGENT, SUBJECT_CHANNEL,
+            SUBJECT_ROOT_TASKER, SUBJECT_TASK, SUBJECT_TASKER,
         };
         let get = |r: &maknae_security::Request, k: &str| r.subject.0.get(k).cloned();
         let s = |v: &str| Some(AttrValue::Str(v.into()));
@@ -625,7 +726,12 @@ mod tests {
         let client =
             build_authz_request(&Verb::Whoami, 501, None, local, None, None, &Stamp::Client);
         assert_eq!(get(&client, SUBJECT_CHANNEL), s(CHANNEL_CLIENT));
-        for k in [SUBJECT_AGENT, SUBJECT_TASK, SUBJECT_TASKER] {
+        for k in [
+            SUBJECT_AGENT,
+            SUBJECT_TASK,
+            SUBJECT_TASKER,
+            SUBJECT_ROOT_TASKER,
+        ] {
             assert_eq!(get(&client, k), None, "{k}");
         }
         let hobi = maknae_config::AgentId::parse("hobi").unwrap();
@@ -645,7 +751,19 @@ mod tests {
         assert_eq!(get(&bare, SUBJECT_AGENT), s("hobi"));
         assert_eq!(get(&bare, SUBJECT_TASK), None);
         assert_eq!(get(&bare, SUBJECT_TASKER), None);
-        let task = TaskStamp::of(&maknae_proto::TaskObject::for_test("hobi", 1002));
+        assert_eq!(get(&bare, SUBJECT_ROOT_TASKER), None);
+        let task = TaskStamp::of(&crate::task::CitedTask {
+            signed: std::sync::Arc::new(maknae_proto::SignedTask {
+                task: maknae_proto::TaskObject::for_test("hobi", 1002),
+                signature: maknae_proto::TaskSignature {
+                    alg: "test".into(),
+                    leaf: maknae_proto::Bytes::new(vec![1].into()),
+                    chain: Vec::new(),
+                    sig: maknae_proto::Bytes::new(vec![2].into()),
+                },
+            }),
+            root: crate::task_store::RootTasker::Person { uid: 1000 },
+        });
         let tasked = build_authz_request(
             &Verb::Whoami,
             2001,
@@ -661,6 +779,7 @@ mod tests {
         assert_eq!(get(&tasked, SUBJECT_AGENT), s("hobi"));
         assert_eq!(get(&tasked, SUBJECT_TASK), s(&task.id.to_string()));
         assert_eq!(get(&tasked, SUBJECT_TASKER), s("uid:1002"));
+        assert_eq!(get(&tasked, SUBJECT_ROOT_TASKER), s("users/1000"));
     }
 
     #[test]
@@ -976,11 +1095,46 @@ mod tests {
     /// vacuously if this helper always returned true.
     fn all_dispatch(terms: &[&str]) -> bool {
         terms.iter().all(|t| {
-            all_verbs()
+            let verbs: Vec<Verb> = all_verbs()
                 .into_iter()
-                .find(|v| verb_to_action(v) == *t)
-                .is_some_and(|v| dispatch_verb(&v) != Dispatch::NoBehaviour)
+                .filter(|v| verb_to_action(v) == *t)
+                .collect();
+            !verbs.is_empty()
+                && verbs
+                    .iter()
+                    .all(|v| dispatch_verb(v) != Dispatch::NoBehaviour)
         })
+    }
+
+    #[test]
+    fn every_task_verb_carries_its_op_and_no_other_verb_does() {
+        let mut ops = Vec::new();
+        for v in all_verbs() {
+            let req = build_authz_request(
+                &v,
+                1000,
+                None,
+                maknae_security::Lane::Local,
+                None,
+                None,
+                &Stamp::Client,
+            );
+            let stamped = req.context.0.str(maknae_security::CONTEXT_TASK_OP);
+            assert_eq!(stamped, task_op(&v), "{v:?}");
+            assert_eq!(
+                stamped.is_some(),
+                verb_to_action(&v) == "session.task",
+                "{v:?}"
+            );
+            if let Some(op) = stamped {
+                ops.push(op.to_owned());
+                assert_eq!(dispatch_verb(&v), Dispatch::TaskRequested, "{v:?}");
+            }
+        }
+        assert_eq!(
+            ops,
+            ["submit", "add", "status", "list", "stop", "drop", "collect", "claim", "report"]
+        );
     }
 
     /// The grantable-side tripwire (#181), replacing what the retired
@@ -1012,16 +1166,9 @@ mod tests {
             ],
             "the hand-copied list in the class test above must match the constant"
         );
-        let (unbuilt, built): (Vec<&str>, Vec<&str>) =
-            real.iter().partition(|t| **t == "session.task");
         assert!(
-            !all_dispatch(&unbuilt),
-            "session.task is decided in #609 and built by #610"
-        );
-        assert!(
-            all_dispatch(&built),
-            "every grantable term other than session.task must dispatch to a \
-             real arm"
+            all_dispatch(real),
+            "every grantable term must dispatch to a real arm"
         );
         // The discriminator discriminates: a known ungrantable term has no
         // real arm, so the helper must say false — otherwise the assert above
@@ -1822,7 +1969,32 @@ mod tests {
                     labels: maknae_proto::Labels {},
                 },
             },
+            Verb::TaskAdd {
+                task: task_ref(),
+                text: maknae_proto::SecretText(maknae_io::Zeroizing::new("p".into())),
+            },
+            Verb::TaskStatus { task: task_ref() },
+            Verb::TaskList {
+                agent: "hobi".into(),
+                after: None,
+            },
+            Verb::TaskStop { task: task_ref() },
+            Verb::TaskDrop { task: task_ref() },
+            Verb::TaskCollect {
+                agent: "hobi".into(),
+                after: None,
+            },
+            Verb::TaskClaim {
+                seen_follow_ups: None,
+            },
+            Verb::TaskReport {
+                text: maknae_proto::SecretText(maknae_io::Zeroizing::new("r".into())),
+            },
         ]
+    }
+
+    fn task_ref() -> maknae_proto::TaskRef {
+        maknae_proto::TaskRef::from_id(&maknae_proto::TaskId([0; 16]))
     }
 
     /// #148: every term is EXACTLY one of control plane or content-bearing, and
@@ -1851,6 +2023,7 @@ mod tests {
         manifest_actions.sort_unstable();
         let mut ours: Vec<&str> = all_verbs().iter().map(|v| verb_to_action(v)).collect();
         ours.sort_unstable();
+        ours.dedup();
         assert_eq!(
             ours, manifest_actions,
             "all_verbs() and verb-manifest.txt disagree -- a verb landed in one and not the other"
@@ -1978,14 +2151,45 @@ mod tests {
     /// #67 D4: the vocabulary is the size the spec says.
     #[test]
     fn the_vocabulary_is_fifty_nine_client_reachable_terms() {
-        assert_eq!(all_verbs().len(), 59);
+        let terms: std::collections::BTreeSet<&str> =
+            all_verbs().iter().map(verb_to_action).collect();
+        assert_eq!(terms.len(), 59);
+        assert_eq!(all_verbs().len(), 67);
     }
 
     /// Two terms sharing an action string would be decided as one another —
     /// a typo'd class prefix in any arm is invisible without this.
     #[test]
     fn every_action_string_is_distinct() {
-        let actions: Vec<&str> = all_verbs().iter().map(verb_to_action).collect();
+        let (task, rest): (Vec<Verb>, Vec<Verb>) = all_verbs()
+            .into_iter()
+            .partition(|v| verb_to_action(v) == "session.task");
+        let task: Vec<String> = task
+            .iter()
+            .map(|v| {
+                format!("{v:?}")
+                    .split([' ', '('])
+                    .next()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(
+            task,
+            [
+                "TaskSubmit",
+                "TaskAdd",
+                "TaskStatus",
+                "TaskList",
+                "TaskStop",
+                "TaskDrop",
+                "TaskCollect",
+                "TaskClaim",
+                "TaskReport"
+            ],
+            "only the task verbs share session.task"
+        );
+        let actions: Vec<&str> = rest.iter().map(verb_to_action).collect();
         let uniq: std::collections::BTreeSet<&&str> = actions.iter().collect();
         assert_eq!(
             uniq.len(),

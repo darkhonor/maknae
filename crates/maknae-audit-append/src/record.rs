@@ -42,6 +42,10 @@ pub struct Subject {
     pub task_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_task_id: Option<String>,
+    /// The `session.task` operation: `submit`, `add`, `status`, `list`, `stop`,
+    /// `drop`, `collect`, `claim` or `report`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_op: Option<String>,
     /// `uid:<n>`, `agent:<id>` or `remote:<id>` (`maknae_proto::tasker_text`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tasker: Option<String>,
@@ -463,6 +467,7 @@ mod tests {
                 agent: None,
                 task_id: None,
                 parent_task_id: None,
+                task_op: None,
                 tasker: None,
             },
             action: "connect".into(),
@@ -882,6 +887,7 @@ mod tests {
                     agent: None,
                     task_id: None,
                     parent_task_id: None,
+                    task_op: None,
                     tasker: None,
                 },
                 action: "fs.read".into(),

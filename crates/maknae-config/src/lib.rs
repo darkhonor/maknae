@@ -136,14 +136,17 @@ pub use providers::{
 };
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
 pub use sensitive::load_host_sensitive_with_requirement;
-pub use sensitive::{load_host_sensitive, native_fold, Fold, SensitiveList, SENSITIVE_FILE};
+pub use sensitive::{
+    fold_path, load_host_sensitive, native_fold, Fold, FoldedPath, Reach, SensitiveList,
+    SENSITIVE_FILE,
+};
 pub use state::{MARKER_FILE, MIRROR_FILE, STATE_DIR, STORE_FILE};
 pub use transport::{
     content_write_bound, transport_from_section, TransportConfig, ADMIN_REPLY_MARGIN_MS,
     ADMISSION_AUDIT_TIMEOUT_MS, BASELINE_ACCEPT_REPLY_STAGES, BLOCKING_STAGE_TIMEOUT_MS,
     CONTAINMENT_REPLY_STAGES, GROUP_LOOKUP_TIMEOUT_MS, HOME_RESOLVE_TIMEOUT_MS,
-    MACOS_AGENT_SOCKET_PATH, MACOS_DAEMON_SOCKET_PATH, PROMPT_MAX_BYTES_FLOOR, TRANSPORT_SECTION,
-    TRANSPORT_TIMEOUT_MS_MAX,
+    MACOS_AGENT_SOCKET_PATH, MACOS_DAEMON_SOCKET_PATH, PROMPT_MAX_BYTES_FLOOR, PROMPT_MAX_CEILING,
+    TRANSPORT_SECTION, TRANSPORT_TIMEOUT_MS_MAX,
 };
 pub use user_providers::{
     user_providers_from_document, UserProviderEntry, UserProviders, USER_PROVIDERS_FILE,

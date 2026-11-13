@@ -1,7 +1,7 @@
 //! The authorization composition root (ADR-0008 decision 1; #154, #148).
 //!
 //! T1 — this is where "a vendor cannot relax our baselines" stops being a hope
-//! and becomes an invariant. Three non-removable floors are NAMED FIELDS, never
+//! and becomes an invariant. Four non-removable floors are NAMED FIELDS, never
 //! elements of an operand vector:
 //!
 //! - `baseline` — the discretionary (RBAC) floor, [`Baseline`]-bounded. The
@@ -17,6 +17,9 @@
 //!   ADR-0034). The field names it; each decision batch builds the operand from
 //!   the same snapshot the baseline decides on, so a reload never pairs one
 //!   snapshot's grants with another's list.
+//! - `partition` — the third mandatory (MAC) floor: an agent's file verbs stay in
+//!   the partition of the task it cites (#628). It holds no state, so the field
+//!   itself decides.
 //!
 //! **No `extensions` vector yet.** ADR-0008's struct shows one; the property
 //! it names — baseline as a named field — holds with or without it, and an
@@ -39,6 +42,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::ceiling_authz::CeilingAuthorizer;
+use crate::partition_authz::PartitionOperand;
 use crate::sensitive_authz::{SensitiveAuthorizer, SensitiveOperand};
 use maknae_authz_basic::snapshot::Snapshot;
 use maknae_authz_basic::Baseline;
@@ -47,7 +51,7 @@ use maknae_security::{
     Authorizer, Decided, Request, SubjectBinding, Verdict,
 };
 
-/// The daemon's PDP: baseline ∧ ceiling ∧ sensitive, deny-overrides.
+/// The daemon's PDP: baseline ∧ ceiling ∧ sensitive ∧ partition, deny-overrides.
 pub struct Composition<B: Baseline> {
     /// The non-removable discretionary floor. A named field, not a vector
     /// element: there is no way to build this type without one.
@@ -57,6 +61,8 @@ pub struct Composition<B: Baseline> {
     ceiling: CeilingAuthorizer,
     /// The non-removable `sensitive.yaml` floor, decided over each batch's snapshot.
     sensitive: SensitiveOperand,
+    /// The non-removable partition floor: an agent's file verbs stay in its task's partition.
+    partition: PartitionOperand,
     /// The view and providers the request path serves; installed only in the live turn.
     live: Arc<crate::live::LiveConfig>,
     #[cfg(test)]
@@ -75,6 +81,7 @@ impl<B: Baseline> Composition<B> {
             baseline,
             ceiling,
             sensitive: SensitiveOperand,
+            partition: PartitionOperand,
             live: Arc::new(crate::live::LiveConfig::new(Default::default(), None)),
             #[cfg(test)]
             panic_on_install: std::sync::atomic::AtomicBool::new(false),
@@ -170,7 +177,7 @@ impl<B: Baseline> Composition<B> {
         self.baseline.live_turn().share()
     }
 
-    /// Decides `reqs` on `candidate` with the installed principal, through both operands.
+    /// Decides `reqs` on `candidate` with the installed principal, through every operand.
     /// Called only under the reload turn, which keeps that principal installed.
     pub(crate) fn decide_candidate_all(
         &self,
@@ -197,20 +204,25 @@ impl<B: Baseline> Composition<B> {
 
     /// Baseline FIRST — see the module doc. Names and subjects only: a decision
     /// goes through [`Composition::operands_with`] over one snapshot.
-    fn operands(&self) -> [&dyn Authorizer; 3] {
-        [&self.baseline, &self.ceiling, &self.sensitive]
+    fn operands(&self) -> [&dyn Authorizer; 4] {
+        [
+            &self.baseline,
+            &self.ceiling,
+            &self.sensitive,
+            &self.partition,
+        ]
     }
 
     fn operands_with<'a>(
         &'a self,
         base: &'a dyn Authorizer,
         sensitive: &'a SensitiveAuthorizer<'a>,
-    ) -> [&'a dyn Authorizer; 3] {
-        [base, &self.ceiling, sensitive]
+    ) -> [&'a dyn Authorizer; 4] {
+        [base, &self.ceiling, sensitive, &self.partition]
     }
 
     /// The live operands, all over the one snapshot installed when the batch starts.
-    fn on_live<R>(&self, decide: impl FnOnce(&[&dyn Authorizer; 3]) -> R) -> R {
+    fn on_live<R>(&self, decide: impl FnOnce(&[&dyn Authorizer; 4]) -> R) -> R {
         let _turn = self.baseline.live_turn().share();
         let snap = self.baseline.snapshot();
         let base = OnSnapshot {
@@ -366,6 +378,10 @@ mod tests {
         // status test drives as peer_uid 0. A CLAIMED attribute here -- this is
         // a unit test of the fold, not of the daemon door that stamps uids.
         subject.insert("uid", AttrValue::Int(0));
+        subject.insert(
+            maknae_security::SUBJECT_CHANNEL,
+            AttrValue::Str(maknae_security::CHANNEL_CLIENT.into()),
+        );
         let mut context = Attributes::new();
         context.insert(
             maknae_security::CONTEXT_DAC_LANE,
@@ -380,17 +396,17 @@ mod tests {
     }
 
     #[test]
-    fn the_composed_name_lists_baseline_then_ceiling_then_sensitive() {
+    fn the_composed_name_lists_the_four_operands_in_order() {
         let (_g, basic) = fixture("name", &status_policy(), Some(ADMIN_ROOT));
         let c = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
         assert_eq!(
             c.backend_name(),
-            "maknae-authz-basic+maknae-ceiling+maknae-sensitive"
+            "maknae-authz-basic+maknae-ceiling+maknae-sensitive+maknae-partition"
         );
         // And through the kernel's choke point, sanitized once.
         assert_eq!(
             maknae_security::guarded_backend_name(&c),
-            "maknae-authz-basic+maknae-ceiling+maknae-sensitive"
+            "maknae-authz-basic+maknae-ceiling+maknae-sensitive+maknae-partition"
         );
     }
 
@@ -566,15 +582,106 @@ mod tests {
         assert!(matches!(probed, Verdict::Deny { .. }), "{probed:?}");
     }
 
+    const FOUR: [&str; 4] = [
+        "maknae-authz-basic",
+        "maknae-ceiling",
+        "maknae-sensitive",
+        "maknae-partition",
+    ];
+
     #[test]
-    fn the_composition_has_a_named_sensitive_operand() {
-        let (_g, basic) = fixture("named-sensitive", READ_POLICY, None);
+    fn the_composition_names_four_operands() {
+        let (_g, basic) = fixture("named-four", READ_POLICY, None);
         let c = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
         let names: Vec<_> = c.operands().iter().map(|o| o.backend_name()).collect();
-        assert_eq!(
-            names,
-            ["maknae-authz-basic", "maknae-ceiling", "maknae-sensitive"]
+        assert_eq!(names, FOUR);
+        let snap = c.baseline().snapshot();
+        let sensitive = SensitiveAuthorizer::new(snap.sensitive());
+        let deciding: Vec<_> = c
+            .operands_with(c.baseline(), &sensitive)
+            .iter()
+            .map(|o| o.backend_name())
+            .collect();
+        assert_eq!(deciding, FOUR);
+    }
+
+    const HOBI_HOME: &str = "/home/hobi-svc";
+
+    fn hobi_composition(
+        tag: &str,
+    ) -> (
+        crate::test_fixtures::DirGuard,
+        Composition<HermeticAuthorizer>,
+    ) {
+        let (g, basic) = fixture(tag, READ_POLICY, None);
+        basic.set_hosts(crate::test_fixtures::HOBI_HOSTS);
+        crate::test_fixtures::write_agent(&g.0, "hobi", "hobi-svc", 2001, "user");
+        crate::test_fixtures::write_agent_policy(
+            &g.0,
+            "hobi",
+            "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Write(~/**)\"]\n",
         );
+        basic.install(basic.compile_from_file().unwrap());
+        (
+            g,
+            Composition::new(basic, ceiling(Ceiling::baseline_for(US))),
+        )
+    }
+
+    fn hobi_asks(action: &str, op: &str, path: &str, root: Option<&str>) -> Request {
+        let mut r = request(action);
+        let s = |v: &str| AttrValue::Str(v.into());
+        r.subject.0.insert("uid", AttrValue::Int(2001));
+        r.subject.0.insert(
+            maknae_security::SUBJECT_CHANNEL,
+            s(maknae_security::CHANNEL_AGENT),
+        );
+        r.subject
+            .0
+            .insert(maknae_security::SUBJECT_AGENT, s("hobi"));
+        r.subject
+            .0
+            .insert(maknae_security::SUBJECT_HOME, s(HOBI_HOME));
+        if let Some(root) = root {
+            r.subject
+                .0
+                .insert(maknae_security::SUBJECT_ROOT_TASKER, s(root));
+        }
+        r.resource.0.insert("path", s(path));
+        r.context
+            .0
+            .insert(maknae_security::CONTEXT_FS_OPERATION, s(op));
+        r
+    }
+
+    #[test]
+    fn another_taskers_partition_is_denied_whatever_the_role_grants() {
+        let (_g, c) = hobi_composition("partition-wins");
+        let mine = Some("users/1000");
+        for (action, op) in [("fs.read", "read"), ("fs.write", "write-create")] {
+            let own = c.decide_cited(&hobi_asks(
+                action,
+                op,
+                "/home/hobi-svc/tasks/users/1000/sentinel-628",
+                mine,
+            ));
+            assert!(
+                matches!(own.verdict, Verdict::Permit { .. }),
+                "the role grants the agent its whole home: {own:?}"
+            );
+            for (path, root) in [
+                ("/home/hobi-svc/tasks/users/1001/sentinel-628", mine),
+                ("/home/hobi-svc/tasks/agents/jin/sentinel-628", mine),
+                ("/home/hobi-svc/tasks/users/1000/sentinel-628", None),
+            ] {
+                let refused = c.decide_cited(&hobi_asks(action, op, path, root));
+                assert!(
+                    matches!(refused.verdict, Verdict::Deny { ref reason } if reason.starts_with("partition: ")),
+                    "{action} {path}: {refused:?}"
+                );
+                assert_eq!(refused.rule, None, "a partition Deny never cites the allow");
+            }
+        }
     }
 
     fn protecting(g: &crate::test_fixtures::DirGuard, basic: &HermeticAuthorizer, entry: &str) {
@@ -928,7 +1035,7 @@ mod tests {
         let pdp3 = build_pdp(&booted("aus", AUS_PROTECTED_CORE), basic3);
         assert_eq!(
             pdp3.backend_name(),
-            "maknae-authz-basic+maknae-ceiling+maknae-sensitive"
+            "maknae-authz-basic+maknae-ceiling+maknae-sensitive+maknae-partition"
         );
         assert!(
             matches!(

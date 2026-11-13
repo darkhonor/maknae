@@ -94,6 +94,14 @@ SURFACE=(
   "crates/maknae-proto/src/wire.rs|StatView|stat|3|wire"
   "crates/maknae-proto/src/mutation.rs|ListGrant|list|2|wire"
   "crates/maknae-proto/src/mutation.rs|ListEntry|list.entries|2|wire"
+  "crates/maknae-proto/src/task.rs|TaskView|task|8|wire"
+  "crates/maknae-proto/src/task.rs|TaskPage|task_list|2|wire"
+  "crates/maknae-proto/src/task.rs|TaskView|task_list.entries|8|wire"
+  "crates/maknae-proto/src/task.rs|TaskReportView|task_report|6|wire"
+  "crates/maknae-proto/src/task.rs|TaskReportPage|task_reports|2|wire"
+  "crates/maknae-proto/src/task.rs|TaskReportView|task_reports.entries|6|wire"
+  "crates/maknae-proto/src/task.rs|TaskDelivery|task_delivery|2|wire"
+  "crates/maknae-proto/src/task.rs|TaskFollowUps|task_follow_ups|2|wire"
   "crates/maknae-vault/src/config.rs|VaultConfig|vault|9|config"
   "crates/maknae-vault/src/config.rs|UserAuthConfig|vault.user_auth|2|config"
 )
@@ -114,6 +122,12 @@ LEAF_ENUMS=(
   "deployment.mode|crates/maknae-config/src/deployment.rs|DeploymentMode"
   "deployment.account_source|crates/maknae-config/src/deployment.rs|AccountSource"
   "stat.kind|crates/maknae-proto/src/wire.rs|StatKind"
+  "task.state|crates/maknae-proto/src/task.rs|TaskState"
+  "task.close|crates/maknae-proto/src/task.rs|TaskClose"
+  "task_list.entries.state|crates/maknae-proto/src/task.rs|TaskState"
+  "task_list.entries.close|crates/maknae-proto/src/task.rs|TaskClose"
+  "task_report.close|crates/maknae-proto/src/task.rs|TaskClose"
+  "task_reports.entries.close|crates/maknae-proto/src/task.rs|TaskClose"
 )
 
 # Fields whose type is a `pub struct <Type>(String);` newtype in the named file: one string on the wire, so a leaf.
@@ -121,7 +135,32 @@ LEAF_NEWTYPES=(
   "conversation.conversation|crates/maknae-proto/src/conversation.rs|ConversationId"
   "conversation_list.entries.conversation|crates/maknae-proto/src/conversation.rs|ConversationId"
   "conversation_list.next|crates/maknae-proto/src/conversation.rs|ConversationId"
+  "task.task|crates/maknae-proto/src/task.rs|TaskRef"
+  "task_list.entries.task|crates/maknae-proto/src/task.rs|TaskRef"
+  "task_list.next|crates/maknae-proto/src/task.rs|TaskCursor"
+  "task_report.task|crates/maknae-proto/src/task.rs|TaskRef"
+  "task_report.cursor|crates/maknae-proto/src/task.rs|TaskCursor"
+  "task_reports.entries.task|crates/maknae-proto/src/task.rs|TaskRef"
+  "task_reports.entries.cursor|crates/maknae-proto/src/task.rs|TaskCursor"
+  "task_reports.next|crates/maknae-proto/src/task.rs|TaskCursor"
 )
+
+# Fields whose type is a zeroizing secret newtype: one CBOR string on the wire, so a leaf.
+# Each type has exactly one accepted declaration, in exactly one file (secret_decl).
+LEAF_SECRETS=(
+  "task_delivery.signed|crates/maknae-proto/src/bytes.rs|Bytes"
+  "task_report.text|crates/maknae-proto/src/wire.rs|SecretText"
+  "task_reports.entries.text|crates/maknae-proto/src/wire.rs|SecretText"
+  "task_follow_ups.items|crates/maknae-proto/src/wire.rs|SecretText"
+)
+
+secret_decl() { # <type>
+  case "$1" in
+    SecretText) echo "crates/maknae-proto/src/wire.rs|pub struct SecretText(pub zeroize::Zeroizing<String>);" ;;
+    Bytes) echo "crates/maknae-proto/src/bytes.rs|pub struct Bytes(pub Zeroizing<Vec<u8>>);" ;;
+    *) return 1 ;;
+  esac
+}
 
 newtype_check() { # <label> <file> <type>
   local label="$1" file="$2" ty="$3" nexact nany
@@ -130,6 +169,36 @@ newtype_check() { # <label> <file> <type>
   nany="$(grep -cE "(^|[^A-Za-z0-9_])(struct|enum|union|type|trait|mod|as)[[:space:]]+$ty([^A-Za-z0-9_]|$)" "$file" || true)"
   if [ "$nexact" != "1" ] || [ "$nany" != "1" ]; then
     echo "FAIL: leaf-newtype row '$label': '$file' must declare '$ty' exactly once, as 'pub struct $ty(String);', and name it nowhere else as an item; it is not a String newtype."
+    return 1
+  fi
+}
+
+secret_check() { # <label> <file> <type> <struct-file> <struct> <field> <field-type>
+  local label="$1" file="$2" ty="$3" structfile="$4" sname="$5" field="$6" fty="$7" want wantfile decl nexact nany tcrate scrate root assert
+  want="$(secret_decl "$ty")" || { echo "FAIL: leaf-secret row '$label': '$ty' is not a zeroizing secret type this gate knows."; return 1; }
+  wantfile="${want%%|*}"; decl="${want#*|}"
+  if [ "$file" != "$wantfile" ]; then
+    echo "FAIL: leaf-secret row '$label': '$ty' is declared in '$wantfile', not '$file'."
+    return 1
+  fi
+  [ -f "$file" ] || { echo "FAIL: leaf-secret row '$label': '$file' does not exist."; return 1; }
+  nexact="$(grep -cxF "$decl" "$file" || true)"
+  nany="$(grep -cE "(^|[^A-Za-z0-9_])(struct|enum|union|type|trait|mod|as)[[:space:]]+$ty([^A-Za-z0-9_]|$)" "$file" || true)"
+  if [ "$nexact" != "1" ] || [ "$nany" != "1" ]; then
+    echo "FAIL: leaf-secret row '$label': '$file' must declare '$ty' exactly once, as '$decl', and name it nowhere else as an item; it is not the zeroizing secret type."
+    return 1
+  fi
+  tcrate="$(printf '%s' "$file" | sed -nE 's#^crates/([a-z0-9-]+)/src/[a-z0-9_]+\.rs$#\1#p' | tr '-' '_')"
+  scrate="$(printf '%s' "$structfile" | sed -nE 's#^crates/([a-z0-9-]+)/src/[a-z0-9_]+\.rs$#\1#p' | tr '-' '_')"
+  root="$(printf '%s' "$file" | sed -nE 's#^crates/[a-z0-9-]+/src/([a-z0-9_]+)\.rs$#\1#p')"
+  if [ -z "$tcrate" ] || [ -z "$scrate" ] || [ -z "$root" ]; then
+    echo "FAIL: leaf-secret row '$label': '$file' or '$structfile' is not a crates/<crate>/src/<module>.rs file."
+    return 1
+  fi
+  if [ "$tcrate" = "$scrate" ]; then root="crate::$root::$ty"; else root="::$tcrate::$root::$ty"; fi
+  assert="const _: fn(&$sname) -> &$(printf '%s' "$fty" | sed -E "s/(^|[^A-Za-z0-9_:])$ty([^A-Za-z0-9_]|$)/\1$root\2/") = |c| &c.$field;"
+  if ! grep -qxF "$assert" "$structfile"; then
+    echo "FAIL: leaf-secret row '$label': '$structfile' does not hold '$assert', so '$ty' may not resolve to the zeroizing secret type."
     return 1
   fi
 }
@@ -221,7 +290,7 @@ done
 # own naming convention, both directions: every `pub struct <Name>View` in the
 # wire file has a SURFACE row, and every wire SURFACE row names such a struct.
 WIRE_FILE="crates/maknae-proto/src/wire.rs"
-WIRE_VIEW_FILES="$WIRE_FILE crates/maknae-proto/src/conversation.rs"
+WIRE_VIEW_FILES="$WIRE_FILE crates/maknae-proto/src/conversation.rs crates/maknae-proto/src/task.rs"
 # shellcheck disable=SC2086
 wire_declared="$(grep -ohE '^(pub([[:space:]]|\([^)]*\)[[:space:]]))?struct [A-Za-z0-9_]+View\b' $WIRE_VIEW_FILES \
   | awk '{print $NF}' | sort -u)"
@@ -285,6 +354,14 @@ PAYLOAD_DISPOSITIONS=(
   "Stat|struct:StatView"   # #161: a permitted fs.stat
   "ListGrant|struct:ListGrant"   # #161: a permitted fs.list page
   "ListContinue|unit"   # #161: the kernel asks for the next chunk
+  "TaskAccepted|struct:TaskView"
+  "TaskState|struct:TaskView"
+  "TaskAcknowledged|struct:TaskView"
+  "TaskList|struct:TaskPage"
+  "TaskReports|struct:TaskReportPage"
+  "TaskDelivered|struct:TaskDelivery"
+  "TaskFollowUps|struct:TaskFollowUps"
+  "TaskIdle|unit"
 )
 payload_variants="$(awk '
   /^pub enum Payload \{/ { inenum=1; next }
@@ -864,6 +941,31 @@ while IFS=$'\t' read -r fpath fty fkind; do
     fi
   done
   [ -z "$leaf_row" ] || continue
+  for row in "${LEAF_SECRETS[@]}"; do
+    IFS='|' read -r lp lf lt <<< "$row"
+    if [ "$lp" = "$fpath" ] && [ "$lt" = "$bare" ]; then
+      raw=$(printf '%s' "$fty" | sed -E -e ':a' -e "s#^${wrappers}<##" -e 'ta' | sed -E 's/>+$//')
+      if [ "$raw" != "$lt" ]; then
+        echo "FAIL: leaf-secret row '$lp': the field's type is spelled '$fty', not exactly '$lt'; a path may name another item."
+        exit 1
+      fi
+      structfile=""
+      for entry in "${SURFACE[@]}"; do
+        IFS='|' read -r ef _ ep _ <<< "$entry"
+        [ "$ep" = "${lp%.*}" ] && structfile="$ef"
+      done
+      [ -n "$structfile" ] || { echo "FAIL: leaf-secret row '$lp': no SURFACE entry holds it."; exit 1; }
+      sname=""
+      for entry in "${SURFACE[@]}"; do
+        IFS='|' read -r _ sn ep _ <<< "$entry"
+        [ "$ep" = "${lp%.*}" ] && sname="$sn"
+      done
+      secret_check "$lp" "$lf" "$lt" "$structfile" "$sname" "${lp##*.}" "$fty" || exit 1
+      echo "$lp" >> "$tmp/leaf-used"
+      leaf_row=1
+    fi
+  done
+  [ -z "$leaf_row" ] || continue
   if [ "$bare" != "__DYNAMIC_MAP__" ]; then
     # `struct` OR `enum`: an enum can carry a map variant just as a struct can
     # carry map fields, and matching only `struct` would leave every
@@ -917,7 +1019,7 @@ while IFS=$'\t' read -r fpath fty fkind; do
     exit 1
   fi
 done < "$tmp/fields"
-for row in "${LEAF_ENUMS[@]}" "${LEAF_NEWTYPES[@]}"; do
+for row in "${LEAF_ENUMS[@]}" "${LEAF_NEWTYPES[@]}" "${LEAF_SECRETS[@]}"; do
   IFS='|' read -r lp _ _ <<< "$row"
   if ! grep -qxF "$lp" "$tmp/leaf-used" 2>/dev/null; then
     echo "FAIL: leaf row '$lp' matched no field of that path and type; a stale row is removed, not kept."

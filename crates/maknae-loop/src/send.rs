@@ -11,7 +11,9 @@ use maknae_vault::{PlaneClient, PlaneConnector, TrustBundle};
 use std::sync::Arc;
 
 fn response_caps(transport: &maknae_config::TransportConfig) -> FrameCaps {
-    FrameCaps::responses(transport.prompt_max_bytes)
+    FrameCaps::responses(maknae_proto::prompt_response_cap(
+        transport.prompt_max_bytes,
+    ))
 }
 
 async fn read_reply<S: tokio::io::AsyncRead + Unpin>(
@@ -268,7 +270,7 @@ async fn exchange(
     let request_caps = FrameCaps {
         control: CONTROL_REQUEST_MAX,
         attempt: ATTEMPT_REQUEST_MAX,
-        prompt: transport.prompt_max_bytes,
+        prompt: maknae_proto::prompt_request_cap(transport.prompt_max_bytes),
     };
     let body = encode_request_zeroizing(&request, request_caps.cap(class))
         .map_err(|e| before(e.to_string()))?;

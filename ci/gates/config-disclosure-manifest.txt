@@ -107,3 +107,37 @@ always	stat.kind	fs.stat (#161): one fixed token, file, directory, symlink or ot
 always	list.truncated	fs.list (#161): whether a further permitted entry exists past this page; carries no total and no count of withheld entries
 always	list.entries.name	fs.list (#161): the bare name of an entry whose own Read the caller is permitted; withheld entries are absent
 always	list.entries.dir	fs.list (#161): whether that permitted entry is a directory, from the subject's own enumeration
+always	task.task	task.add, task.status and task.stop (#628): the caller's own task: the task's own id, which its tasker cites on later task verbs
+always	task.agent	task.add, task.status and task.stop (#628): the caller's own task: the agent the tasker gave the task to, named by the tasker
+always	task.state	task.add, task.status and task.stop (#628): the caller's own task: one fixed token: queued, working, reported or closed
+always	task.close	task.add, task.status and task.stop (#628): the caller's own task: one fixed token naming why the kernel closed it, absent while open
+always	task.submitted_secs	task.add, task.status and task.stop (#628): the caller's own task: when the task was submitted, epoch seconds
+always	task.elapsed_secs	task.add, task.status and task.stop (#628): the caller's own task: seconds since the task was submitted
+always	task.actions	task.add, task.status and task.stop (#628): the caller's own task: how many requests the agent made under the task; a count, never content
+always	task.last_action_secs	task.add, task.status and task.stop (#628): the caller's own task: when the agent last made a request under the task, epoch seconds
+always	task_list.entries.task	task.list (#628): one of the caller's own tasks: the task's own id, which its tasker cites on later task verbs
+always	task_list.entries.agent	task.list (#628): one of the caller's own tasks: the agent the tasker gave the task to, named by the tasker
+always	task_list.entries.state	task.list (#628): one of the caller's own tasks: one fixed token: queued, working, reported or closed
+always	task_list.entries.close	task.list (#628): one of the caller's own tasks: one fixed token naming why the kernel closed it, absent while open
+always	task_list.entries.submitted_secs	task.list (#628): one of the caller's own tasks: when the task was submitted, epoch seconds
+always	task_list.entries.elapsed_secs	task.list (#628): one of the caller's own tasks: seconds since the task was submitted
+always	task_list.entries.actions	task.list (#628): one of the caller's own tasks: how many requests the agent made under the task; a count, never content
+always	task_list.entries.last_action_secs	task.list (#628): one of the caller's own tasks: when the agent last made a request under the task, epoch seconds
+always	task_list.next	task.list (#628): the cursor for the next page, the submission sequence of one of the caller's own tasks
+always	task_report.task	a task report, as task.collect carries it (#628): one of the caller's own tasks: the task's own id
+always	task_report.agent	a task report, as task.collect carries it (#628): one of the caller's own tasks: the agent that reported or was closed
+always	task_report.close	a task report, as task.collect carries it (#628): one of the caller's own tasks: one fixed token naming why the kernel closed it, absent for a report
+always	task_report.text	a task report, as task.collect carries it (#628): one of the caller's own tasks: the agent's report, released only to the task's own tasker by the session.task decision
+always	task_report.at_secs	a task report, as task.collect carries it (#628): one of the caller's own tasks: when the report or the close landed, epoch seconds
+always	task_report.cursor	a task report, as task.collect carries it (#628): one of the caller's own tasks: the report-arrival sequence of this entry
+always	task_reports.entries.task	task.collect (#628): one of the caller's own tasks: the task's own id
+always	task_reports.entries.agent	task.collect (#628): one of the caller's own tasks: the agent that reported or was closed
+always	task_reports.entries.close	task.collect (#628): one of the caller's own tasks: one fixed token naming why the kernel closed it, absent for a report
+always	task_reports.entries.text	task.collect (#628): one of the caller's own tasks: the agent's report, released only to the task's own tasker by the session.task decision
+always	task_reports.entries.at_secs	task.collect (#628): one of the caller's own tasks: when the report or the close landed, epoch seconds
+always	task_reports.entries.cursor	task.collect (#628): one of the caller's own tasks: the report-arrival sequence of this entry
+always	task_reports.next	task.collect (#628): the cursor for the next page, the report-arrival sequence of one of the caller's own tasks
+always	task_delivery.signed	task.claim (#628): the kernel-signed task, released only to the agent holding it
+always	task_delivery.partition	task.claim (#628): the claimed task's working directory, relative to the agent's own home
+always	task_follow_ups.from	task.claim (#628): the index of the first follow-up in this answer; a count, never content
+always	task_follow_ups.items	task.claim (#628): the tasker's follow-ups to the claimed task, released only to the agent holding it

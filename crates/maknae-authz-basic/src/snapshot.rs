@@ -118,6 +118,22 @@ impl Snapshot {
         &self.problems
     }
 
+    /// Whether `uid` is contained: bound to no role but `adversary`.
+    pub fn contained(&self, uid: u32, principal_uid: u32) -> bool {
+        self.loaded.roles.role_for(uid, principal_uid)
+            == crate::binding::Resolution::Role(crate::role::Role::Adversary)
+    }
+
+    /// Whether `uid` holds no role in a load that could not resolve every name it binds:
+    /// the uid may belong to one of those names, so "no role" is not a decided fact.
+    pub fn unresolved(&self, uid: u32, principal_uid: u32) -> bool {
+        self.loaded.roles.role_for(uid, principal_uid) == crate::binding::Resolution::NoRole
+            && self
+                .problems
+                .iter()
+                .any(|p| matches!(p, IdentityProblem::Unresolved { .. }))
+    }
+
     pub fn agent_uid(&self, id: &str) -> Option<u32> {
         self.loaded
             .agents
@@ -1237,6 +1253,44 @@ mod tests {
                 names: vec!["root".into(), "toor".into()],
                 roles: vec!["admin", "user"],
             }]
+        );
+    }
+
+    #[test]
+    fn contained_is_the_adversary_role_and_nothing_else() {
+        let snap = alias_snap(&alias_source(
+            "  admin: [\"root\"]\n  adversary: [\"alex\"]\n",
+        ));
+        let principal = principal().uid;
+        assert!(snap.contained(1000, principal), "bound to adversary");
+        assert!(!snap.contained(0, principal), "bound to admin");
+        assert!(!snap.contained(4242, principal), "bound to nothing");
+    }
+
+    #[test]
+    fn unresolved_needs_both_no_role_and_a_name_the_load_could_not_resolve() {
+        let principal = principal().uid;
+        let resolved = alias_snap(&alias_source("  admin: [\"root\"]\n"));
+        assert!(resolved.identity_problems().is_empty());
+        assert!(
+            !resolved.unresolved(4242, principal),
+            "no role, and every bound name resolved: a decided fact"
+        );
+        assert!(!resolved.unresolved(0, principal));
+        let partial = alias_snap(&alias_source(
+            "  admin: [\"root\"]\n  user: [\"sentinel-628-ghost\"]\n",
+        ));
+        assert!(matches!(
+            partial.identity_problems().as_ref(),
+            [IdentityProblem::Unresolved { .. }]
+        ));
+        assert!(
+            partial.unresolved(4242, principal),
+            "no role, and a bound name did not resolve: the uid may be that name's"
+        );
+        assert!(
+            !partial.unresolved(0, principal),
+            "a uid that holds a role is resolved, whatever else did not"
         );
     }
 

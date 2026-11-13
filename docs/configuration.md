@@ -405,6 +405,41 @@ sensitive:
 
 The shipped `authz.yaml` carries no denies of its own: its `deny:` list is empty, and the credential paths it once denied are in this file. Edit the host file to add or remove entries, then [reload](runbook.md#edit-and-reload-the-host-sensitive-list). Entries that would help every installation are welcome upstream.
 
+### 2.6 Tasks (#628)
+
+The kernel stores each task given to an enrolled agent in the `tasks/` directory beside the kernel graph store, sealed under the same key: `/var/lib/maknae/tasks` on Linux (`StateDirectory=maknae maknae/conversations maknae/tasks`), `/usr/local/var/db/maknae/state/tasks` on macOS, both `_maknae 0700`. Each task is one `<id>.task` file, and `counters.task` holds the sequence numbers already issued. A record holds the signed task with its prompt, its follow-ups and its report, so the directory holds task content. Tasks survive a restart.
+
+**At start.** A record whose submission was never confirmed is discarded, and an unreadable or oversized one is renamed `<id>.task.quarantine` and never read again; each is recorded first ([runbook: Tasks](runbook.md#tasks)). A missing, unreadable or lagging `counters.task` beside stored tasks refuses the start. Every working task's 15-minute lease begins again, and the tasks of an agent that is no longer enrolled are closed.
+
+**Bounds.**
+
+- An agent holds at most 256 open (queued or working) tasks.
+- A tasker holds at most 32 open tasks with one agent, and at most 256 records over every agent, counting open tasks, reports and closes not yet collected.
+- A prompt, a follow-up and a report are each at most `transport.prompt_max_bytes`. A task takes at most 32 follow-ups, together at most `prompt_max_bytes`.
+- A report or close not collected in 30 days expires and is removed.
+- A `list` page holds at most 32 tasks. A `collect` page holds at most 32 reports, as many as fit one frame, and always at least one.
+
+**The frame margin.** `transport.prompt_max_bytes` bounds the text; the frames carry more. A prompt-class request frame may be `prompt_max_bytes + 4096` bytes, so a submission, follow-up or report of the full size fits its envelope. A prompt-class response frame may be 32 KiB more again, so a full task delivered with its kernel signature fits. The daemon bounds its own task answers by the largest `prompt_max_bytes` it may be set to, 16 MiB, not by the current value, so lowering `prompt_max_bytes` never strands a stored report or a queued prompt. A client that reads task answers must accept the same size, whatever its own `prompt_max_bytes`; otherwise one large report would stop it collecting.
+
+**Partitions.** An agent works each task in a directory of its home chosen by the tasker at the root of the task's chain:
+
+| Root tasker | Partition |
+|---|---|
+| a person, by uid | `<agent home>/tasks/users/<uid>` |
+| an agent starting a chain of its own | `<agent home>/tasks/agents/<id>` |
+
+A sub-task, one an agent gives while it works a task, works in its root's partition. The kernel names the partition, relative to the agent's home, when it hands the task out; the agent process creates it (#629). The fourth mandatory operand, `maknae-partition`, decides every file request an agent makes, whatever its role and `policy.yaml` grant:
+
+- inside the partition of the task the request cites, and anywhere outside `<agent home>/tasks`, the other operands decide;
+- `<agent home>/tasks`, `tasks/users` and `tasks/agents` may be listed, statted and created, and nothing more; a listing of them shows only the cited task's own partition;
+- anything else under `tasks/` is refused: another tasker's partition, and every partition when the request cites no task;
+- a delete of a directory that holds `tasks/` is refused;
+- `fs.move`, `fs.link`, `fs.chmod` and `fs.chown` from an agent are refused.
+
+A refusal is the model's uniform `not authorized`, with the reason `partition: …` in the trail. The operand bounds what the kernel releases to the model, not the agent process, whose account owns its whole home; confining the process is #629. People are not affected: the operand abstains for every request off the agent channel.
+
+**Single host.** Like the conversation store, the task store admits one `maknaed` per state directory.
+
 ---
 
 ## 3. Sections and precedence
@@ -639,7 +674,7 @@ Case variants such as `secret` are accepted.
 > `releasable_to`, the CUI fields and `accreditation_ref` have **no bearing** on this
 > operand (an ATO is a US-government artifact; most deployments will never have one).
 > The boot trail records what will be enforced: the `authz` boot record's reason reads
-> `authorization composition: maknae-authz-basic+maknae-ceiling+maknae-sensitive; system: US; ceiling: SECRET; sensitive: <n> host entries`,
+> `authorization composition: maknae-authz-basic+maknae-ceiling+maknae-sensitive+maknae-partition; system: US; ceiling: SECRET; sensitive: <n> host entries`,
 > where `<n>` is the number of entries in `/etc/maknae/sensitive.yaml`.
 
 ---
@@ -1018,7 +1053,7 @@ taskers:
 - `actions` limits `fs.stat` and `fs.list` by its `fs.read` entry; naming either refuses the reload (§2.5).
 - `admin.*` is always refused to an agent, except `admin.whoami`; no file can grant it.
 - `session.new` is refused to an agent unless its `actions.allow` holds it (`session.new` or `session.*`) and its `actions.deny` does not. It still needs the role's grant, which no role holds yet.
-- `taskers` names who may task this agent with `session.task`: account names, `uid:<n>` entries and `agent:<id>` entries. Without the key, only people may task it; another agent may task it only when listed. `taskers: []` admits nobody. Each tasker also needs `session.task` from its own role; the shipped `authz.yaml` grants it to `admin` and `user`. Tasking an agent is refused on the wire until task delivery is built (#610).
+- `taskers` names who may task this agent with `session.task`: account names, `uid:<n>` entries and `agent:<id>` entries. Without the key, only people may task it; another agent may task it only when listed. `taskers: []` admits nobody. Each tasker also needs `session.task` from its own role; the shipped `authz.yaml` grants it to `admin` and `user`. How tasks are stored and bounded, and the partition each works in, are in §2.6.
 - Unknown keys, and any `schema_version` other than `1`, refuse the reload.
 
 **De-enrolling.**

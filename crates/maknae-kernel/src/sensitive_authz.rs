@@ -12,7 +12,7 @@ use maknae_security::{
 
 pub const SENSITIVE_BACKEND_NAME: &str = "maknae-sensitive";
 
-const FILE_VERBS: [&str; 6] = [
+pub(crate) const FILE_VERBS: [&str; 6] = [
     "fs.read",
     "fs.write",
     "fs.delete",

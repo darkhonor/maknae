@@ -248,12 +248,15 @@ impl SessionRecord {
         let _ = self.task.set((task.id.to_string(), task.tasker.clone()));
     }
 
-    /// Stamps the session's agent and, once resolved, its cited task on `rec`.
+    /// Stamps the session's agent on `rec` and, once resolved, its cited task and that
+    /// task's tasker, as a pair, only on a record that names neither of its own.
     pub(crate) fn stamp(&self, rec: &mut maknae_audit_append::AuditRecord) {
         if let Some(agent) = self.agent() {
             rec.subject.agent = Some(agent.as_str().to_string());
         }
-        if let Some((id, tasker)) = self.task.get() {
+        if let (Some((id, tasker)), None, None) =
+            (self.task.get(), &rec.subject.task_id, &rec.subject.tasker)
+        {
             rec.subject.task_id = Some(id.clone());
             rec.subject.tasker = Some(tasker.clone());
         }

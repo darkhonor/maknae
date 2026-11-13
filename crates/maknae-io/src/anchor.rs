@@ -240,6 +240,13 @@ pub(crate) fn read_checked_fd(
     Ok(buf)
 }
 
+/// When a removal syncs the parent directory.
+enum DirSync {
+    Never,
+    IfRemoved,
+    Always,
+}
+
 impl Anchor {
     /// What the capability probe found, once, at construction.
     ///
@@ -695,7 +702,7 @@ impl Anchor {
         rel: &Path,
         desc: Option<DescendantRequired>,
     ) -> Result<Outcome<bool>, IoError> {
-        self.remove_with(rel, desc, false)
+        self.remove_with(rel, desc, DirSync::Never)
     }
 
     /// [`Anchor::remove`], then a sync of the parent directory: `Ok(true)` means the
@@ -705,14 +712,24 @@ impl Anchor {
         rel: &Path,
         desc: Option<DescendantRequired>,
     ) -> Result<Outcome<bool>, IoError> {
-        self.remove_with(rel, desc, true)
+        self.remove_with(rel, desc, DirSync::IfRemoved)
+    }
+
+    /// Unlinks `rel` if it is there, then syncs the parent directory either way: `Ok`
+    /// means the name is durably absent, and the value says whether it was unlinked.
+    pub fn remove_settled(
+        &self,
+        rel: &Path,
+        desc: Option<DescendantRequired>,
+    ) -> Result<Outcome<bool>, IoError> {
+        self.remove_with(rel, desc, DirSync::Always)
     }
 
     fn remove_with(
         &self,
         rel: &Path,
         desc: Option<DescendantRequired>,
-        durable: bool,
+        sync: DirSync,
     ) -> Result<Outcome<bool>, IoError> {
         let (norm, name) = self.split_target(rel, desc.as_ref())?;
         let dir = norm.parent().unwrap_or(Path::new(""));
@@ -733,19 +750,33 @@ impl Anchor {
             None => self.fd.as_fd(),
         };
 
-        if durable {
-            return Ok(Outcome {
-                value: crate::write::remove_at_durable(&base, &name, &full)?,
-                effective_strategy: Strategy::Portable,
-            });
-        }
-        let removed = match crate::syscall::remove_at(&base, &name, false) {
-            Ok(()) => true,
-            Err(nix::errno::Errno::ENOENT) => false,
-            Err(e) => return Err(crate::checks::map_errno_no_disambiguation(e, &full)),
+        let removed = match sync {
+            DirSync::IfRemoved => crate::write::remove_at_durable(&base, &name, &full, false)?,
+            DirSync::Always => crate::write::remove_at_durable(&base, &name, &full, true)?,
+            DirSync::Never => match crate::syscall::remove_at(&base, &name, false) {
+                Ok(()) => true,
+                Err(nix::errno::Errno::ENOENT) => false,
+                Err(e) => return Err(crate::checks::map_errno_no_disambiguation(e, &full)),
+            },
         };
         Ok(Outcome {
             value: removed,
+            effective_strategy: Strategy::Portable,
+        })
+    }
+
+    /// Moves the entry `from` to `to`, both in this directory itself, then syncs the
+    /// directory. An existing `to` is refused (`AlreadyExists`) and both entries are kept.
+    pub fn move_aside_durable(
+        &self,
+        from: &std::ffi::OsStr,
+        to: &std::ffi::OsStr,
+    ) -> Result<Outcome<()>, IoError> {
+        let from = self.one_component(from)?;
+        let to = self.one_component(to)?;
+        crate::write::move_aside_durable(&self.fd, from, to, &self.path)?;
+        Ok(Outcome {
+            value: (),
             effective_strategy: Strategy::Portable,
         })
     }
@@ -3015,6 +3046,77 @@ mod tests {
             a.remove_durable(Path::new("../x"), None).unwrap_err(),
             IoError::EscapesAnchor { .. }
         ));
+    }
+
+    #[test]
+    fn remove_settled_is_done_for_a_present_and_for_an_absent_name() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        std::fs::write(a.path.join("token"), b"x").unwrap();
+        assert!(a.remove_settled(Path::new("token"), None).unwrap().value);
+        assert!(std::fs::symlink_metadata(a.path.join("token")).is_err());
+        assert!(!a.remove_settled(Path::new("token"), None).unwrap().value);
+    }
+
+    #[test]
+    fn remove_settled_refuses_a_directory_and_a_walk_refusal() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        std::fs::create_dir(a.path.join("sub")).unwrap();
+        let e = a.remove_settled(Path::new("sub"), None).unwrap_err();
+        assert!(matches!(e, IoError::Io { .. }), "{e:?}");
+        assert!(a.path.join("sub").is_dir());
+        assert!(matches!(
+            a.remove_settled(Path::new("../x"), None).unwrap_err(),
+            IoError::EscapesAnchor { .. }
+        ));
+    }
+
+    #[test]
+    fn move_aside_durable_moves_an_entry_and_never_replaces_one() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let os = std::ffi::OsStr::new;
+        std::fs::write(a.path.join("rec"), b"first").unwrap();
+        a.move_aside_durable(os("rec"), os("aside")).unwrap();
+        assert!(std::fs::symlink_metadata(a.path.join("rec")).is_err());
+        assert_eq!(std::fs::read(a.path.join("aside")).unwrap(), b"first");
+        std::fs::write(a.path.join("rec"), b"second").unwrap();
+        let e = a.move_aside_durable(os("rec"), os("aside")).unwrap_err();
+        assert_eq!(
+            e,
+            IoError::Io {
+                path: a.path.join("aside"),
+                kind: crate::IoKind::AlreadyExists,
+            }
+        );
+        assert_eq!(std::fs::read(a.path.join("rec")).unwrap(), b"second");
+        assert_eq!(std::fs::read(a.path.join("aside")).unwrap(), b"first");
+    }
+
+    #[test]
+    fn move_aside_durable_refuses_an_absent_name_and_any_name_beyond_the_anchor() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let os = std::ffi::OsStr::new;
+        assert_eq!(
+            a.move_aside_durable(os("absent"), os("aside")).unwrap_err(),
+            IoError::Io {
+                path: a.path.join("absent"),
+                kind: crate::IoKind::NotFound,
+            }
+        );
+        std::fs::write(a.path.join("rec"), b"x").unwrap();
+        for (from, to) in [("../rec", "aside"), ("rec", "sub/aside"), ("rec", "..")] {
+            assert!(
+                matches!(
+                    a.move_aside_durable(os(from), os(to)),
+                    Err(IoError::EscapesAnchor { .. })
+                ),
+                "{from} -> {to}"
+            );
+        }
+        assert!(a.path.join("rec").is_file());
     }
 
     #[test]

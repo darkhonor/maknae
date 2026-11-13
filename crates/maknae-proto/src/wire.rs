@@ -414,7 +414,9 @@ pub enum Verb {
     /// Accept the pending baseline change set whose hash is `hash`. A change to the
     /// running configuration: written ahead, recorded as an `operator` transition;
     /// a hash that is not the current pending set's is refused.
-    AdminBaselineAccept { hash: String },
+    AdminBaselineAccept {
+        hash: String,
+    },
     /// Bind a subject to a role. A policy mutation — write-ahead audit applies.
     /// MUST refuse the `adversary` role: containment has its own sanctioned
     /// spelling below, and admitting it here would grant containment to anyone
@@ -439,7 +441,9 @@ pub enum Verb {
     },
     /// Lift containment. The recovery path for induced containment; must not
     /// depend on the credential that was contained. `target` names the subject.
-    AdminRelease { target: ContainTarget },
+    AdminRelease {
+        target: ContainTarget,
+    },
     /// Rotate the daemon's own credentials.
     AdminCredentialRotate,
     /// Enumerate the model providers available to the agent runtime. A disclosure
@@ -483,9 +487,13 @@ pub enum Verb {
     /// and high-water mark already on it.
     SessionResume,
     /// End a conversation, leaving its record intact.
-    SessionClose { conversation: crate::ConversationId },
+    SessionClose {
+        conversation: crate::ConversationId,
+    },
     /// Destroy conversation state. Irreversible.
-    SessionDelete { conversation: crate::ConversationId },
+    SessionDelete {
+        conversation: crate::ConversationId,
+    },
     /// Enumerate conversations. Discloses their existence and metadata.
     SessionList {
         cursor: Option<crate::ConversationId>,
@@ -582,7 +590,10 @@ pub enum Verb {
     },
     /// Destroy file content. Irreversible, and the strongest argument for
     /// two-phase audit.
-    FsDelete { path: String, recursive: bool },
+    FsDelete {
+        path: String,
+        recursive: bool,
+    },
     /// Relocate content to a new path. A mutation, and a laundering route if
     /// decided against the source alone: deny matching is lexical over paths, so
     /// moving a denied object to a permitted path makes it readable under a rule
@@ -680,7 +691,36 @@ pub enum Verb {
     McpSamplingCreate,
     /// Give a task to an enrolled agent (#609): decided as `session.task`. Its
     /// behaviour and delivery are #610's; a prompt frame because it carries the ask.
-    TaskSubmit { task: crate::TaskSubmission },
+    TaskSubmit {
+        task: crate::TaskSubmission,
+    },
+    TaskAdd {
+        task: crate::TaskRef,
+        text: SecretText,
+    },
+    TaskStatus {
+        task: crate::TaskRef,
+    },
+    TaskList {
+        agent: String,
+        after: Option<crate::TaskCursor>,
+    },
+    TaskStop {
+        task: crate::TaskRef,
+    },
+    TaskDrop {
+        task: crate::TaskRef,
+    },
+    TaskCollect {
+        agent: String,
+        after: Option<crate::TaskCursor>,
+    },
+    TaskClaim {
+        seen_follow_ups: Option<u32>,
+    },
+    TaskReport {
+        text: SecretText,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -733,6 +773,14 @@ pub enum Payload {
     ListGrant(crate::ListGrant),
     /// The kernel decided a non-final [`crate::ListChunk`] and wants the next.
     ListContinue,
+    TaskAccepted(crate::TaskView),
+    TaskState(crate::TaskView),
+    TaskAcknowledged(crate::TaskView),
+    TaskList(crate::TaskPage),
+    TaskReports(crate::TaskReportPage),
+    TaskDelivered(crate::TaskDelivery),
+    TaskFollowUps(crate::TaskFollowUps),
+    TaskIdle,
 }
 
 /// What a permitted `fs.stat` discloses: never uid, gid, mode, inode or link count.
@@ -1154,7 +1202,12 @@ pub fn admits(declared: FrameClass, verb: &Verb) -> bool {
 
 pub fn class_of(verb: &Verb) -> FrameClass {
     match verb {
-        Verb::SessionPrompt { .. } | Verb::TaskSubmit { .. } => FrameClass::Prompt,
+        Verb::SessionPrompt { .. }
+        | Verb::TaskSubmit { .. }
+        | Verb::TaskAdd { .. }
+        | Verb::TaskReport { .. }
+        | Verb::TaskClaim { .. }
+        | Verb::TaskCollect { .. } => FrameClass::Prompt,
         Verb::SessionNew { .. }
         | Verb::Read { .. }
         | Verb::FsWrite { .. }
@@ -1211,7 +1264,11 @@ pub fn class_of(verb: &Verb) -> FrameClass {
         | Verb::McpToolCall
         | Verb::McpResourceRead
         | Verb::McpPromptGet
-        | Verb::McpSamplingCreate => FrameClass::Control,
+        | Verb::McpSamplingCreate
+        | Verb::TaskStatus { .. }
+        | Verb::TaskList { .. }
+        | Verb::TaskStop { .. }
+        | Verb::TaskDrop { .. } => FrameClass::Control,
     }
 }
 

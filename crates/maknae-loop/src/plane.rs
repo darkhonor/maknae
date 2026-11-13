@@ -148,8 +148,9 @@ impl<K: KeySupply> Plane for LoopPlane<K> {
             output_tokens: self.output_tokens,
             choice: None,
         };
+        let cap = maknae_proto::prompt_request_cap(self.transport.prompt_max_bytes);
         // Checked before the key is wrapped, so a retry after shedding reasoning costs no Vault call.
-        if !frame_fits(&verb, self.transport.prompt_max_bytes) {
+        if !frame_fits(&verb, cap) {
             return Err(PlaneError::FrameTooLarge);
         }
         let now = now_unix().map_err(PlaneError::Transport)?;
@@ -167,7 +168,7 @@ impl<K: KeySupply> Plane for LoopPlane<K> {
         if let Verb::SessionPrompt { choice: c, .. } = &mut verb {
             *c = Some(choice);
         }
-        if !frame_fits(&verb, self.transport.prompt_max_bytes) {
+        if !frame_fits(&verb, cap) {
             if let Verb::SessionPrompt {
                 choice: Some(choice),
                 ..

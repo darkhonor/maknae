@@ -281,6 +281,53 @@ fn mapped_roots(lowered: &str) -> Vec<String> {
     vec![root]
 }
 
+/// A path in the spellings `fold` compares: as given under [`Fold::None`]; under
+/// [`Fold::Case`], case-folded, and mapped to the one spelling macOS reports.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FoldedPath {
+    lowered: String,
+    mapped: Vec<String>,
+}
+
+impl FoldedPath {
+    /// One spelling for a path; for a subtree, every mapped root it spans.
+    pub fn mapped(&self) -> &[String] {
+        &self.mapped
+    }
+
+    /// The first mapped spelling: the only one for [`Reach::Path`].
+    pub fn into_one(self) -> String {
+        self.mapped.into_iter().next().unwrap_or_default()
+    }
+}
+
+/// Whether a path is matched as itself, or as the directory tree beneath it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reach {
+    Path,
+    Subtree,
+}
+
+/// The one fold every path-matching operand compares through.
+pub fn fold_path(path: &str, fold: Fold, reach: Reach) -> FoldedPath {
+    match fold {
+        Fold::None => FoldedPath {
+            lowered: path.to_string(),
+            mapped: vec![path.to_string()],
+        },
+        Fold::Case => {
+            let lowered = case_folded(path);
+            FoldedPath {
+                mapped: match reach {
+                    Reach::Subtree => mapped_roots(&lowered),
+                    Reach::Path => vec![mapped(&lowered)],
+                },
+                lowered,
+            }
+        }
+    }
+}
+
 struct Folded {
     lowered: String,
     mapped: Vec<String>,
@@ -290,17 +337,16 @@ struct Folded {
 
 impl Folded {
     fn new(path: &str, home: Option<&Path>, subtree: bool) -> Self {
-        let lowered = case_folded(path);
-        let home_lowered = home.and_then(Path::to_str).map(case_folded);
+        let reach = if subtree { Reach::Subtree } else { Reach::Path };
+        let FoldedPath { lowered, mapped } = fold_path(path, Fold::Case, reach);
+        let home = home
+            .and_then(Path::to_str)
+            .map(|h| fold_path(h, Fold::Case, Reach::Path));
         Folded {
-            mapped: if subtree {
-                mapped_roots(&lowered)
-            } else {
-                vec![mapped(&lowered)]
-            },
             lowered,
-            home_mapped: home_lowered.as_deref().map(mapped),
-            home_lowered,
+            mapped,
+            home_mapped: home.as_ref().and_then(|h| h.mapped.first().cloned()),
+            home_lowered: home.map(|h| h.lowered),
         }
     }
 }
@@ -725,6 +771,44 @@ mod tests {
             assert_eq!(
                 l.matching(Path::new("/home/u/.ssh/k"), raw_home, fold),
                 Err(HomeUnbound)
+            );
+        }
+    }
+
+    #[test]
+    fn into_one_is_the_first_mapped_spelling() {
+        assert_eq!(
+            fold_path("/Users/Hobi/x", Fold::None, Reach::Path).into_one(),
+            "/Users/Hobi/x"
+        );
+        assert_eq!(
+            fold_path("/Users/Hobi/x", Fold::Case, Reach::Path).into_one(),
+            "/users/hobi/x"
+        );
+    }
+
+    #[test]
+    fn fold_path_gives_one_spelling_for_case_nfd_and_the_data_volume() {
+        let one = |p: &str| fold_path(p, Fold::Case, Reach::Path).mapped().to_vec();
+        let want = vec!["/users/hobi/tasks/users/caf\u{e9}".to_string()];
+        for spelling in [
+            "/Users/hobi/tasks/users/caf\u{e9}",
+            "/USERS/Hobi/Tasks/USERS/CAF\u{c9}",
+            "/Users/hobi/tasks/users/cafe\u{301}",
+            "/System/Volumes/Data/Users/hobi/tasks/users/caf\u{e9}",
+        ] {
+            assert_eq!(one(spelling), want, "{spelling}");
+        }
+        assert_eq!(one("/private/var/hobi/tasks"), ["/var/hobi/tasks"]);
+        assert_eq!(one("/private/home/x"), ["/private/home/x"]);
+        let roots = |p: &str| fold_path(p, Fold::Case, Reach::Subtree).mapped().to_vec();
+        assert_eq!(roots("/System/Volumes"), ["/"]);
+        assert_eq!(roots("/private"), ["/private", "/etc", "/tmp", "/var"]);
+        assert_eq!(roots("/Users/Hobi"), ["/users/hobi"]);
+        for reach in [Reach::Path, Reach::Subtree] {
+            assert_eq!(
+                fold_path("/Users/Hobi/x", Fold::None, reach).mapped(),
+                ["/Users/Hobi/x"]
             );
         }
     }

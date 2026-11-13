@@ -2507,6 +2507,16 @@ mod tests {
         fd: Option<OwnedFd>,
         sensitive: SensitiveList,
     ) -> (Vec<u8>, Vec<AuditRecord>) {
+        answer_stamped(fx, pdp, &stat(asked), fd, sensitive, &Stamp::Client).await
+    }
+    async fn answer_stamped(
+        fx: &Fixture,
+        pdp: crate::Composition<maknae_authz_basic::HermeticAuthorizer>,
+        verb: &Verb,
+        fd: Option<OwnedFd>,
+        sensitive: SensitiveList,
+        stamp: &Stamp<'_>,
+    ) -> (Vec<u8>, Vec<AuditRecord>) {
         let cfg = maknae_config::transport_from_section(None).unwrap();
         let fds = maknae_io::DelegatedFds::new(1);
         if let Some(fd) = fd {
@@ -2517,7 +2527,7 @@ mod tests {
         assert!(
             handle(
                 &mut server,
-                &stat(asked),
+                verb,
                 fx.principal.uid,
                 Lane::Local,
                 &fds,
@@ -2531,7 +2541,7 @@ mod tests {
                 AttemptCaps::default(),
                 "US",
                 Arc::new(crate::conversation::mem_store::MemStore::default()),
-                &Stamp::Client,
+                stamp,
                 Arc::new(sensitive),
                 tokio::time::Instant::now(),
             )
@@ -2802,6 +2812,154 @@ mod tests {
             "{}",
             reason(&denied_trail)
         );
+    }
+    fn euid_is_hobi(uid: u32) -> Result<Option<maknae_io::HostAccount>, String> {
+        Ok(
+            (uid == nix::unistd::geteuid().as_raw()).then(|| maknae_io::HostAccount {
+                uid,
+                name: "hobi-svc".into(),
+                primary_gid: uid,
+                shell: "/usr/sbin/nologin".into(),
+                dir: "/var/empty".into(),
+                named_groups: Vec::new(),
+            }),
+        )
+    }
+    /// A composition whose agent `hobi` is the test euid, granted its whole home.
+    fn hobi_pdp(fx: &Fixture) -> crate::Composition<maknae_authz_basic::HermeticAuthorizer> {
+        let config = fx.root.join("etc-628");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let paths = maknae_authz_basic::PolicyPaths::in_dir(&config);
+        crate::test_fixtures::write_0640(&paths.authz, crate::test_fixtures::READ_POLICY);
+        crate::test_fixtures::write_empty_sensitive(&config);
+        let uid = fx.principal.uid;
+        crate::test_fixtures::write_agent(&config, "hobi", "hobi-svc", uid, "user");
+        crate::test_fixtures::write_agent_policy(
+            &config,
+            "hobi",
+            "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Write(~/**)\"]\n",
+        );
+        let baseline = maknae_authz_basic::HermeticAuthorizer::new(
+            paths,
+            maknae_config::Principal {
+                name: "operator".into(),
+                uid: uid.wrapping_add(1),
+            },
+            maknae_config::TargetRequired {
+                owner: None,
+                mode_mask: Some(0o022),
+                nlink_exactly_one: false,
+                regular_file: true,
+                max_bytes: None,
+            },
+            maknae_crypto::sha256,
+        )
+        .unwrap();
+        baseline.set_hosts(maknae_authz_basic::HostLookups {
+            account: euid_is_hobi,
+            ..crate::test_fixtures::HOBI_HOSTS
+        });
+        baseline.reload_from_file().unwrap();
+        let us = &maknae_config::BasicPolicy;
+        crate::Composition::new(
+            baseline,
+            crate::CeilingAuthorizer::new(maknae_config::Ceiling::baseline_for(us), us),
+        )
+    }
+    #[tokio::test]
+    async fn a_partition_denial_is_the_uniform_refusal_not_protected() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let file = |partition: &str| {
+            let dir = fx.root.join("tasks").join(partition);
+            std::fs::create_dir_all(&dir).unwrap();
+            let file = dir.join("sentinel-628");
+            std::fs::write(&file, b"maknae-628").unwrap();
+            file
+        };
+        let (mine, theirs) = (file("users/1000"), file("users/1001"));
+        let hobi = maknae_config::AgentId::parse("hobi").unwrap();
+        let task = crate::handler::TaskStamp {
+            id: maknae_proto::TaskId([7; 16]),
+            tasker: "uid:1000".into(),
+            root: "users/1000".into(),
+        };
+        let cited = Stamp::Agent {
+            agent: &hobi,
+            task: Some(&task),
+        };
+        let uncited = Stamp::Agent {
+            agent: &hobi,
+            task: None,
+        };
+        let ask_with = |verb: Verb, fd: std::io::Result<OwnedFd>, stamp| {
+            let (fd, pdp, fx) = (Some(fd.unwrap()), hobi_pdp(&fx), &fx);
+            async move { answer_stamped(fx, pdp, &verb, fd, SensitiveList::empty(), stamp).await }
+        };
+        let ask =
+            |path: &Path, stamp| ask_with(stat(path), maknae_io::open_path_for_stat(path), stamp);
+        let (own, _) = ask(&mine, &cited).await;
+        assert!(
+            matches!(stat_payload(&own), Payload::Stat(_)),
+            "the role grants the agent its home, and its own partition is served"
+        );
+        let reason = |t: &[AuditRecord]| t.last().unwrap().outcome.reason.clone();
+        let (other, trail) = ask(&theirs, &cited).await;
+        assert_eq!(other, uniform_refusal());
+        assert_eq!(
+            reason(&trail),
+            "partition: the path is in another tasker's partition"
+        );
+        let (bare, trail) = ask(&mine, &uncited).await;
+        assert_eq!(bare, uniform_refusal());
+        assert_eq!(reason(&trail), "partition: the request cites no task");
+        let other = "partition: the path is in another tasker's partition";
+        let read = Verb::Read {
+            path: theirs.to_str().unwrap().into(),
+            conversation: None,
+            page: None,
+        };
+        let (read, trail) =
+            ask_with(read, maknae_io::open_path_for_delegation(&theirs), &cited).await;
+        assert_eq!(read, uniform_refusal());
+        assert_eq!(reason(&trail), other);
+        let dir = theirs.parent().unwrap();
+        let (list, trail) = ask_with(
+            list_verb(dir, None),
+            maknae_io::open_directory_for_delegation(dir),
+            &cited,
+        )
+        .await;
+        assert_eq!(list, uniform_refusal());
+        assert_eq!(reason(&trail), other);
+    }
+    #[test]
+    fn listing_the_partitions_root_shows_only_the_current_partition() {
+        let fx = Fixture::new();
+        let users = fx.root.join("tasks/users");
+        let decider = |task| crate::listing::Decider {
+            authorizer: Arc::new(hobi_pdp(&fx)),
+            verb: list_verb(&users, None),
+            uid: fx.principal.uid,
+            home: fx.root.clone(),
+            facts: None,
+            personal: None,
+            stamped: Some((maknae_config::AgentId::parse("hobi").unwrap(), task)),
+        };
+        let shown = |d: &crate::listing::Decider<_>| -> Vec<&str> {
+            ["1000", "1001", "10000"]
+                .into_iter()
+                .filter(|name| d.permits(users.join(name).to_str().unwrap()))
+                .collect()
+        };
+        let cited = decider(Some(crate::handler::TaskStamp {
+            id: maknae_proto::TaskId([7; 16]),
+            tasker: "agent:jin".into(),
+            root: "users/1000".into(),
+        }));
+        assert_eq!(shown(&cited), ["1000"]);
+        assert!(shown(&decider(None)).is_empty());
     }
     #[tokio::test]
     async fn stat_of_a_protected_path_answers_protected() {

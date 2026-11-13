@@ -138,7 +138,7 @@ refuse_unsafe_ancestors() {
 
 for d in /usr/local /usr/local/var /usr/local/var/db /usr/local/var/run /usr/local/var/log /usr/local/lib \
          /etc/maknae /etc/maknae/private /var/log/maknae /usr/local/var/log/maknae \
-         /usr/local/lib/maknae /usr/local/var/run/maknae "$RECEIPT_DIR" /usr/local/var/db/maknae/state /usr/local/var/db/maknae/state/conversations \
+         /usr/local/lib/maknae /usr/local/var/run/maknae "$RECEIPT_DIR" /usr/local/var/db/maknae/state /usr/local/var/db/maknae/state/conversations /usr/local/var/db/maknae/state/tasks \
          /usr/local/var/run/maknae-egress /usr/local/var/log/maknae-egress \
          /usr/local/var/run/maknae-agent; do
     [ ! -L "$d" ] || { echo "maknae: $d is a symlink — refusing to install through it" >&2; exit 1; }

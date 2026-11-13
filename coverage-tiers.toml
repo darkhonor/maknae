@@ -58,6 +58,8 @@ files = [
   "crates/maknae-kernel/src/composition.rs",
   # #617: the sensitive.yaml operand; a wrong arm serves a protected path.
   "crates/maknae-kernel/src/sensitive_authz.rs",
+  # #628: the partition operand; a wrong arm serves another tasker's partition.
+  "crates/maknae-kernel/src/partition_authz.rs",
   # #161: fs.list's per-entry decisions, bounds and order; a wrong arm releases a
   # withheld name.
   "crates/maknae-kernel/src/listing.rs",
@@ -73,6 +75,10 @@ files = [
   # #609: the task store's binding of each task to its agent and uid, and the
   # submission order (PDP before store); a wrong arm hands an agent another's task.
   "crates/maknae-kernel/src/task.rs",
+  # #628: the task store at rest; a wrong arm resets a counter or loads an unaudited task.
+  "crates/maknae-kernel/src/task_store.rs",
+  # #628: the task facts a tasker verb is decided on; a wrong arm stamps another's task as owned.
+  "crates/maknae-kernel/src/task_verbs.rs",
   "crates/maknae-kernel/src/enrollment.rs",
   # #115: the account state each request is re-decided on. A wrong arm reads a
   # locked, expired or not-yet-valid account as active. The Varlink transport is varlink.rs (T2).
@@ -1166,6 +1172,21 @@ why = "the system random source failing is not provokable from a unit test witho
 path = "crates/maknae-kernel/src/conversation/record.rs"
 anchor = "ciborium::into_writer(rec, &mut out).map_err(|e| StoreError::Io(e.to_string()))?;"
 why = "serializing a derived struct into a Vec cannot fail; not provokable from a unit test without a seam; a pure propagation with no decision"
+
+[[exception]]
+path = "crates/maknae-kernel/src/task_store.rs"
+anchor = "ciborium::into_writer(v, &mut size).map_err(|e| StoreError::Io(e.to_string()))?;"
+why = "serializing a derived struct into a counting writer cannot fail; not provokable from a unit test without a seam; a pure propagation with no decision"
+
+[[exception]]
+path = "crates/maknae-kernel/src/task_store.rs"
+anchor = "        .map_err(|e| StoreError::Io(e.to_string()))?;"
+why = "the second encode writes exactly the bytes the first counted into a buffer of that size, so it cannot fail; a pure propagation with no decision"
+
+[[exception]]
+path = "crates/maknae-kernel/src/task_store.rs"
+anchor = "    fn flush(&mut self) -> std::io::Result<()> {"
+why = "ciborium never flushes the counting writer; the trait requires the method, which holds no decision"
 
 [[exception]]
 path = "crates/maknae-kernel/src/conversation/dir_store.rs"

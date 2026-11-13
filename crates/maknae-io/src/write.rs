@@ -67,30 +67,73 @@ fn publish_synced<F: AsFd>(
     Ok(Strategy::Portable)
 }
 
+/// With `settle`, the directory is synced even when the name was already absent, so
+/// `Ok` proves it absent.
 pub(crate) fn remove_at_durable<F: AsFd>(
     dirfd: &F,
     name: &str,
     at: &Path,
+    settle: bool,
 ) -> Result<bool, IoError> {
-    remove_synced(dirfd, name, at, syscall::fsync_fd)
+    remove_synced(dirfd, name, at, settle, syscall::fsync_fd)
 }
 
 fn remove_synced<F: AsFd>(
     dirfd: &F,
     name: &str,
     at: &Path,
+    settle: bool,
     sync_dir: impl FnOnce(&F) -> nix::Result<()>,
 ) -> Result<bool, IoError> {
-    match syscall::remove_at(dirfd, name, false) {
-        Ok(()) => {}
+    let removed = match syscall::remove_at(dirfd, name, false) {
+        Ok(()) => true,
+        Err(nix::errno::Errno::ENOENT) if settle => false,
         Err(nix::errno::Errno::ENOENT) => return Ok(false),
         Err(e) => return Err(crate::checks::map_errno_no_disambiguation(e, at)),
-    }
+    };
     sync_dir(dirfd).map_err(|e| IoError::RemovedNotDurable {
         path: at.to_path_buf(),
         kind: crate::checks::kind_of_errno(e),
     })?;
-    Ok(true)
+    Ok(removed)
+}
+
+pub(crate) fn move_aside_durable<F: AsFd>(
+    dirfd: &F,
+    from: &std::ffi::OsStr,
+    to: &std::ffi::OsStr,
+    dir: &Path,
+) -> Result<(), IoError> {
+    move_aside_synced(dirfd, from, to, dir, syscall::fsync_fd)
+}
+
+/// `linkat` then `unlinkat`, so an existing `to` is refused with `EEXIST`, never replaced.
+fn move_aside_synced<F: AsFd>(
+    dirfd: &F,
+    from: &std::ffi::OsStr,
+    to: &std::ffi::OsStr,
+    dir: &Path,
+    sync_dir: impl FnOnce(&F) -> nix::Result<()>,
+) -> Result<(), IoError> {
+    syscall::link_at(dirfd, from, to).map_err(|e| {
+        let named = if e == nix::errno::Errno::EEXIST {
+            to
+        } else {
+            from
+        };
+        crate::checks::map_errno_no_disambiguation(e, &dir.join(named))
+    })?;
+    if let Err(e) = syscall::unlink_at(dirfd, from) {
+        let _ = syscall::unlink_at(dirfd, to);
+        return Err(crate::checks::map_errno_no_disambiguation(
+            e,
+            &dir.join(from),
+        ));
+    }
+    sync_dir(dirfd).map_err(|e| IoError::PublishedNotDurable {
+        path: dir.join(to),
+        kind: crate::checks::kind_of_errno(e),
+    })
 }
 
 fn publish_raw<F: AsFd>(
@@ -113,7 +156,7 @@ fn publish_raw<F: AsFd>(
     let fd = syscall::open_temp_excl(dirfd, &tmp, mode)?;
     if let Some(owner) = owner {
         if let Err(e) = syscall::set_owner_and_mode(&fd, owner, mode) {
-            let _ = syscall::unlink_at(dirfd, &tmp);
+            let _ = syscall::unlink_at(dirfd, tmp.as_str());
             return Err(e);
         }
     }
@@ -121,13 +164,13 @@ fn publish_raw<F: AsFd>(
     // Cleanup is best-effort and deliberately `let _ =`: the caller must keep the
     // ORIGINAL error, never a masking unlink error.
     if let Err(write_err) = write_all_sync(&fd, bytes) {
-        let _ = syscall::unlink_at(dirfd, &tmp);
+        let _ = syscall::unlink_at(dirfd, tmp.as_str());
         return Err(write_err);
     }
     drop(fd);
 
     if let Err(e) = syscall::rename_at(dirfd, &tmp, final_name) {
-        let _ = syscall::unlink_at(dirfd, &tmp);
+        let _ = syscall::unlink_at(dirfd, tmp.as_str());
         return Err(e);
     }
     Ok(())
@@ -277,7 +320,7 @@ mod tests {
         std::fs::write(d.path().join("f"), b"old").unwrap();
         let at = d.path().join("f");
         use nix::errno::Errno;
-        let e = remove_synced(&dirfd, "f", &at, |_| Err(Errno::EIO)).unwrap_err();
+        let e = remove_synced(&dirfd, "f", &at, false, |_| Err(Errno::EIO)).unwrap_err();
         assert_eq!(
             e,
             IoError::RemovedNotDurable {
@@ -291,13 +334,35 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_directory_sync_after_a_move_aside_is_published_not_durable() {
+        let d = tempfile::tempdir().unwrap();
+        let dirfd = std::fs::File::open(d.path()).unwrap();
+        std::fs::write(d.path().join("f"), b"old").unwrap();
+        use nix::errno::Errno;
+        let from = std::ffi::OsStr::new("f");
+        let to = std::ffi::OsStr::new("g");
+        let e = move_aside_synced(&dirfd, from, to, d.path(), |_| Err(Errno::EIO)).unwrap_err();
+        assert_eq!(
+            e,
+            IoError::PublishedNotDurable {
+                path: d.path().join("g"),
+                kind: crate::IoKind::Other {
+                    raw: Errno::EIO as i32
+                },
+            }
+        );
+        assert_eq!(std::fs::read(d.path().join("g")).unwrap(), b"old");
+        assert!(std::fs::symlink_metadata(d.path().join("f")).is_err());
+    }
+
+    #[test]
     fn an_unlink_is_synced_before_it_is_reported_removed() {
         let d = tempfile::tempdir().unwrap();
         let dirfd = std::fs::File::open(d.path()).unwrap();
         std::fs::write(d.path().join("f"), b"old").unwrap();
         let at = d.path().join("f");
         let mut synced = false;
-        let removed = remove_synced(&dirfd, "f", &at, |_| {
+        let removed = remove_synced(&dirfd, "f", &at, false, |_| {
             synced = true;
             Ok(())
         })
@@ -311,15 +376,59 @@ mod tests {
         let dirfd = std::fs::File::open(d.path()).unwrap();
         let absent = d.path().join("absent");
         assert_eq!(
-            remove_synced(&dirfd, "absent", &absent, |_| panic!(
+            remove_synced(&dirfd, "absent", &absent, false, |_| panic!(
                 "nothing was unlinked"
             )),
             Ok(false)
         );
         std::fs::create_dir(d.path().join("busy")).unwrap();
         let busy = d.path().join("busy");
-        let e =
-            remove_synced(&dirfd, "busy", &busy, |_| panic!("nothing was unlinked")).unwrap_err();
+        let e = remove_synced(&dirfd, "busy", &busy, false, |_| {
+            panic!("nothing was unlinked")
+        })
+        .unwrap_err();
+        assert!(matches!(e, IoError::Io { .. }), "{e:?}");
+        assert!(busy.is_dir());
+    }
+
+    #[test]
+    fn a_settled_removal_syncs_the_directory_whether_or_not_the_name_was_there() {
+        let d = tempfile::tempdir().unwrap();
+        let dirfd = std::fs::File::open(d.path()).unwrap();
+        std::fs::write(d.path().join("f"), b"old").unwrap();
+        let at = d.path().join("f");
+        for was_there in [true, false] {
+            let mut synced = false;
+            let removed = remove_synced(&dirfd, "f", &at, true, |_| {
+                synced = true;
+                Ok(())
+            });
+            assert_eq!(removed, Ok(was_there));
+            assert!(synced);
+            assert!(std::fs::symlink_metadata(&at).is_err());
+        }
+    }
+
+    #[test]
+    fn a_settled_removal_whose_sync_fails_is_not_durable_and_a_failed_unlink_never_syncs() {
+        let d = tempfile::tempdir().unwrap();
+        let dirfd = std::fs::File::open(d.path()).unwrap();
+        let absent = d.path().join("absent");
+        assert_eq!(
+            remove_synced(&dirfd, "absent", &absent, true, |_| Err(
+                nix::errno::Errno::EIO
+            )),
+            Err(IoError::RemovedNotDurable {
+                path: absent.clone(),
+                kind: crate::checks::kind_of_errno(nix::errno::Errno::EIO),
+            })
+        );
+        std::fs::create_dir(d.path().join("busy")).unwrap();
+        let busy = d.path().join("busy");
+        let e = remove_synced(&dirfd, "busy", &busy, true, |_| {
+            panic!("nothing was unlinked")
+        })
+        .unwrap_err();
         assert!(matches!(e, IoError::Io { .. }), "{e:?}");
         assert!(busy.is_dir());
     }
