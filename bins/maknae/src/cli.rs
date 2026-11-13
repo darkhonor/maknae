@@ -496,7 +496,9 @@ async fn execute(verb: Verb) -> Result<bool, String> {
     let trust = maknae_vault::TrustBundle::from_pins(&[&ca]).map_err(|e| e.to_string())?;
     client.mint().await.map_err(|e| e.to_string())?;
     let outcome = round_trip(verb, request, content, &transport, &client, &trust).await;
-    client.shutdown().await;
+    if let Err(e) = client.shutdown().await {
+        crate::stderr::line(&mut std::io::stderr(), format_args!("maknae-vault: {e}"));
+    }
     outcome
 }
 

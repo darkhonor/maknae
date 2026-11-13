@@ -9562,7 +9562,9 @@ async fn boot_after_sink(
     // graceful one): detached, it could hold the client lock across a Vault
     // call while `shutdown()` waits, or re-install a leaf after retirement.
     supervisor_abort.abort();
-    client.shutdown().await;
+    if let Err(e) = client.shutdown().await {
+        eprintln!("maknae-vault: {e}");
+    }
     outcome.map_err(RunError::Other)
 }
 

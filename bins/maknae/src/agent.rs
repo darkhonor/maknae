@@ -605,7 +605,9 @@ pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
     let mut session = match opened {
         Ok(session) => session,
         Err(e) => {
-            plane.into_client().shutdown().await;
+            if let Err(e) = plane.into_client().shutdown().await {
+                crate::stderr::line(&mut std::io::stderr(), format_args!("maknae-vault: {e}"));
+            }
             return Err(open_failure(&e, &cwd));
         }
     };
@@ -620,7 +622,9 @@ pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
     )
     .await;
     print_diagnostics(&mut plane);
-    plane.into_client().shutdown().await;
+    if let Err(e) = plane.into_client().shutdown().await {
+        crate::stderr::line(&mut std::io::stderr(), format_args!("maknae-vault: {e}"));
+    }
     let (ended, closed) = result.map_err(|e| e.to_string())?;
     if let Some(line) = close_line(&closed, session.conversation()) {
         crate::stderr::line(&mut std::io::stderr(), format_args!("{line}"));

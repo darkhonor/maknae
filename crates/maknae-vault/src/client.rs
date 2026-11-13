@@ -812,7 +812,8 @@ impl PlaneClient {
     }
 
     /// Best-effort revoke of a token this client minted; a user's stored token is never revoked.
-    pub async fn shutdown(&self) {
+    #[must_use = "a failed revoke leaves the token live to its TTL; report it"]
+    pub async fn shutdown(&self) -> Result<(), RevokeFailure> {
         // Retire the transport credential FIRST — clear the resolver slot (a live listener
         // stops presenting a leaf) and the identity — so shutdown actually retires the cert
         // regardless of whether the token revoke below succeeds. Same lock-step order as
@@ -830,7 +831,7 @@ impl PlaneClient {
             *guard = None;
         }
         if !self.auth.token_source().revoked_by_the_client() {
-            return;
+            return Ok(());
         }
         // BOUNDED (#240, review round 4): the kernel aborts the credential
         // supervisor before this on every path, so the lock is free in
@@ -841,16 +842,11 @@ impl PlaneClient {
         // stop timeouts are derived from it.
         let client = match tokio::time::timeout(PLANE_HTTP_TIMEOUT, self.client.lock()).await {
             Ok(c) => c,
-            Err(_elapsed) => {
-                eprintln!(
-                    "maknae-vault: token revoke-self on shutdown skipped: the client was busy for {}s (the token lives to its TTL)",
-                    PLANE_HTTP_TIMEOUT.as_secs()
-                );
-                return;
-            }
+            Err(_elapsed) => return Err(RevokeFailure::Busy),
         };
-        if let Some(Err(e)) = self.revoke_minted_token(&client).await {
-            eprintln!("maknae-vault: token revoke-self on shutdown failed (ignored): {e}");
+        match self.revoke_minted_token(&client).await {
+            Some(Err(e)) => Err(RevokeFailure::Refused(e.to_string())),
+            Some(Ok(())) | None => Ok(()),
         }
     }
 
@@ -862,6 +858,29 @@ impl PlaneClient {
             return None;
         }
         Some(vaultrs::token::revoke_self(client).await)
+    }
+}
+
+/// Why shutdown could not revoke the minted token; it lives to its TTL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RevokeFailure {
+    Busy,
+    Refused(String),
+}
+
+impl std::fmt::Display for RevokeFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RevokeFailure::Busy => write!(
+                f,
+                "token revoke-self on shutdown skipped: the client was busy for {}s (the token lives to its TTL)",
+                PLANE_HTTP_TIMEOUT.as_secs()
+            ),
+            RevokeFailure::Refused(e) => write!(
+                f,
+                "token revoke-self on shutdown failed: {e} (the token lives to its TTL)"
+            ),
+        }
     }
 }
 

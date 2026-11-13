@@ -155,7 +155,7 @@ pub trait Credential: Send + Sync + 'static {
     fn mint(&self) -> impl Future<Output = Result<(), String>> + Send;
     /// Renews the token and rotates the leaf; resolves only when it gives up.
     fn supervise(&self) -> tokio::task::JoinHandle<VaultError>;
-    fn revoke(&self) -> impl Future<Output = ()> + Send;
+    fn revoke(&self) -> impl Future<Output = Result<(), String>> + Send;
 }
 
 impl Credential for PlaneClient {
@@ -168,8 +168,8 @@ impl Credential for PlaneClient {
     fn supervise(&self) -> tokio::task::JoinHandle<VaultError> {
         self.spawn_supervisor()
     }
-    async fn revoke(&self) {
-        self.shutdown().await;
+    async fn revoke(&self) -> Result<(), String> {
+        self.shutdown().await.map_err(|e| e.to_string())
     }
 }
 
@@ -249,13 +249,20 @@ where
         leaf.abort();
         let _ = leaf.await;
     }
-    if tokio::time::timeout(maknae_vault::PLANE_SHUTDOWN_BOUND, cred.revoke())
-        .await
-        .is_err()
-    {
-        eprintln!("maknae-agentd: revoking the plane login did not finish in time");
+    let revoked =
+        match tokio::time::timeout(maknae_vault::PLANE_SHUTDOWN_BOUND, cred.revoke()).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(format!("revoking the plane login failed: {e}")),
+            Err(_elapsed) => Err(format!(
+                "revoking the plane login did not finish within {}s; the token lives to its TTL",
+                maknae_vault::PLANE_SHUTDOWN_BOUND.as_secs()
+            )),
+        };
+    match (result, revoked) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(e), Ok(())) | (Ok(()), Err(e)) => Err(e),
+        (Err(served), Err(revoke)) => Err(format!("{served}; and {revoke}")),
     }
-    result
 }
 
 pub fn agent_id(args: &[String]) -> Result<AgentId, String> {
@@ -384,6 +391,7 @@ mod tests {
         mint_fails: bool,
         mints: AtomicUsize,
         revoke_hangs: bool,
+        revoke_fails: bool,
         supervisor_running: Arc<AtomicBool>,
         revoked_with_supervisor_running: std::sync::Mutex<Vec<bool>>,
     }
@@ -412,7 +420,7 @@ mod tests {
                 std::future::pending::<VaultError>().await
             })
         }
-        async fn revoke(&self) {
+        async fn revoke(&self) -> Result<(), String> {
             self.revoked_with_supervisor_running
                 .lock()
                 .unwrap()
@@ -420,6 +428,10 @@ mod tests {
             if self.revoke_hangs {
                 std::future::pending::<()>().await;
             }
+            if self.revoke_fails {
+                return Err("sentinel-629-revoke-refused".into());
+            }
+            Ok(())
         }
     }
 
@@ -461,11 +473,49 @@ mod tests {
         });
         let start = tokio::time::Instant::now();
         let ran = run_minted(Arc::clone(&login), async { Ok(()) }).await;
-        assert_eq!(ran, Ok(()));
+        let err = ran.unwrap_err();
+        assert!(err.contains("did not finish"), "{err}");
+        assert!(err.contains("lives to its TTL"), "{err}");
         assert_eq!(start.elapsed(), maknae_vault::PLANE_SHUTDOWN_BOUND);
         assert_eq!(
             login.revoked_with_supervisor_running.lock().unwrap().len(),
             1
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_revoke_that_fails_is_a_failed_exit() {
+        let login = Arc::new(FakeLogin {
+            revoke_fails: true,
+            ..Default::default()
+        });
+        let err = run_minted(Arc::clone(&login), async { Ok(()) })
+            .await
+            .unwrap_err();
+        assert!(err.contains("sentinel-629-revoke-refused"), "{err}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_serve_and_a_failed_revoke_are_both_reported() {
+        let login = Arc::new(FakeLogin {
+            revoke_fails: true,
+            ..Default::default()
+        });
+        let err = run_minted(Arc::clone(&login), async {
+            Err("sentinel-629-serve-down".to_string())
+        })
+        .await
+        .unwrap_err();
+        assert!(err.contains("sentinel-629-serve-down"), "{err}");
+        assert!(err.contains("sentinel-629-revoke-refused"), "{err}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_revoke_that_completes_leaves_a_clean_exit_clean() {
+        let login = Arc::new(FakeLogin::default());
+        assert_eq!(
+            run_minted(Arc::clone(&login), async { Ok(()) }).await,
+            Ok(())
         );
     }
 
