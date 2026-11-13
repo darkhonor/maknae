@@ -63,7 +63,7 @@ pub use api_shape::{WrapMismatch, MAX_TOKEN_BYTES, MAX_VAULT_BODY_BYTES};
 pub use auth::{AppRoleAuth, AuthMethod, VaultToken};
 pub use ca::{load_ca_pin, CaBundle};
 pub use client::{
-    AgentLogin, LoginToken, PlaneClient, PlaneIdentity, PLANE_HTTP_TIMEOUT, PLANE_SHUTDOWN_BOUND,
+    AgentLogin, PlaneClient, PlaneIdentity, PLANE_HTTP_TIMEOUT, PLANE_SHUTDOWN_BOUND,
 };
 pub use config::{
     load_vault_config, sign_refusal_detail, user_auth_from_value, validate_deployment_id,

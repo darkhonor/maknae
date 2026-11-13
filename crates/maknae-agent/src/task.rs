@@ -27,6 +27,14 @@ pub enum BeatAnswer {
     Refused(Refused),
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReportOutcome {
+    Acknowledged,
+    Refused(Refused),
+    /// The report does not fit the request frame; nothing was sent.
+    TooLarge,
+}
+
 /// `Err` is a transport or protocol failure: whether the kernel decided anything is unknown.
 pub fn claim_answer(sent: Result<WireOutcome, String>) -> Result<ClaimAnswer, String> {
     match sent? {
@@ -54,10 +62,12 @@ pub fn beat_answer(sent: Result<WireOutcome, String>) -> Result<BeatAnswer, Stri
     }
 }
 
-pub fn report_answer(sent: Result<WireOutcome, String>) -> Result<Result<(), Refused>, String> {
+pub fn report_answer(sent: Result<WireOutcome, String>) -> Result<ReportOutcome, String> {
     match sent? {
-        WireOutcome::Payload(Payload::TaskAcknowledged(_)) => Ok(Ok(())),
-        WireOutcome::Refused { code, message, .. } => Ok(Err(Refused { code, message })),
+        WireOutcome::Payload(Payload::TaskAcknowledged(_)) => Ok(ReportOutcome::Acknowledged),
+        WireOutcome::Refused { code, message, .. } => {
+            Ok(ReportOutcome::Refused(Refused { code, message }))
+        }
         other => Err(unexpected("task.report", &other)),
     }
 }
@@ -163,11 +173,11 @@ mod tests {
             report_answer(payload(Payload::TaskAcknowledged(view(
                 TaskState::Reported
             )))),
-            Ok(Ok(()))
+            Ok(ReportOutcome::Acknowledged)
         );
         assert_eq!(
             report_answer(refusal(ProtoErrCode::Unauthorized)),
-            Ok(Err(Refused {
+            Ok(ReportOutcome::Refused(Refused {
                 code: ProtoErrCode::Unauthorized,
                 message: "sentinel-629-refused".into()
             }))

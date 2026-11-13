@@ -5,9 +5,10 @@ use maknae_config::{AgentId, AgentProvider};
 use maknae_proto::{ProviderChoice, SealedKey};
 use maknae_seal::{SealAad, SealContext, SealPublicKey};
 use maknae_vault::{
-    aad_parts, LoginToken, VaultApi, VaultError, WrapExpectation, WrappedSecret, USER_KEY_WRAP_TTL,
+    aad_parts, PlaneClient, VaultError, WrapExpectation, WrappedSecret, USER_KEY_WRAP_TTL,
 };
 use std::future::Future;
+use std::sync::Arc;
 
 pub trait KeySupply: Send {
     fn choice(
@@ -132,25 +133,66 @@ where
         })
 }
 
-/// The agent host's key supply: each turn reads the agent's own wrapped key with
-/// its current AppRole token and seals it to exactly that request.
-pub struct AgentKeys {
-    pub api: VaultApi,
-    pub token: LoginToken,
-    pub provider: AgentProvider,
-    pub kv_mount: String,
-    pub agent_prefix: String,
-    pub agent: AgentId,
-    pub seal_key: SealPublicKey,
+/// A response-wrapped KV read made as the reader's own Vault login.
+pub trait WrappedRead: Send + Sync {
+    fn read_wrapped(
+        &self,
+        kv_mount: &str,
+        secret_path: &str,
+    ) -> impl Future<Output = Result<WrappedSecret, VaultError>> + Send;
 }
 
-impl KeySupply for AgentKeys {
+impl WrappedRead for PlaneClient {
+    fn read_wrapped(
+        &self,
+        kv_mount: &str,
+        secret_path: &str,
+    ) -> impl Future<Output = Result<WrappedSecret, VaultError>> + Send {
+        self.read_wrapped_as_self(kv_mount, secret_path, USER_KEY_WRAP_TTL)
+    }
+}
+
+/// The agent host's key supply: each turn reads the agent's own wrapped key as
+/// the agent's plane client and seals it to exactly that request.
+pub struct AgentKeys<R: WrappedRead = PlaneClient> {
+    reader: Arc<R>,
+    provider: AgentProvider,
+    kv_mount: String,
+    agent_prefix: String,
+    agent: AgentId,
+    seal_key: SealPublicKey,
+}
+
+impl<R: WrappedRead> AgentKeys<R> {
+    pub fn new(
+        reader: Arc<R>,
+        provider: AgentProvider,
+        kv_mount: String,
+        agent_prefix: String,
+        agent: AgentId,
+        seal_key: SealPublicKey,
+    ) -> Self {
+        AgentKeys {
+            reader,
+            provider,
+            kv_mount,
+            agent_prefix,
+            agent,
+            seal_key,
+        }
+    }
+
+    pub fn reader(&self) -> &Arc<R> {
+        &self.reader
+    }
+
+    pub fn agent(&self) -> &AgentId {
+        &self.agent
+    }
+}
+
+impl<R: WrappedRead> KeySupply for AgentKeys<R> {
     async fn choice(&mut self, conversation: &str, _now: u64) -> Result<ProviderChoice, String> {
-        let token = self
-            .token
-            .current()
-            .await
-            .map_err(|e| format!("the agent holds no Vault login: {e}"))?;
         let key = AgentKeyContext {
             provider: &self.provider,
             kv_mount: &self.kv_mount,
@@ -158,10 +200,9 @@ impl KeySupply for AgentKeys {
             agent: &self.agent,
             seal_key: &self.seal_key,
         };
-        let (api, kv_mount) = (&self.api, self.kv_mount.as_str());
+        let (reader, kv_mount) = (&self.reader, self.kv_mount.as_str());
         agent_choice(&key, conversation, |path| async move {
-            api.read_wrapped(&token, kv_mount, &path, USER_KEY_WRAP_TTL)
-                .await
+            reader.read_wrapped(kv_mount, &path).await
         })
         .await
     }
@@ -326,5 +367,69 @@ mod tests {
             assert!(got.contains(says), "{got}");
             assert!(!got.contains("maknae login"), "{got}");
         }
+    }
+
+    struct FakeReader {
+        asked: std::sync::Mutex<Vec<(String, String)>>,
+        token: &'static str,
+    }
+
+    impl WrappedRead for FakeReader {
+        async fn read_wrapped(
+            &self,
+            kv_mount: &str,
+            secret_path: &str,
+        ) -> Result<WrappedSecret, VaultError> {
+            self.asked
+                .lock()
+                .unwrap()
+                .push((kv_mount.into(), secret_path.into()));
+            Ok(wrapped(self.token, secret_path))
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_keys_read_through_their_client_and_seal_each_turn() {
+        maknae_crypto::init().unwrap();
+        let recipient = maknae_seal::SealPrivateKey::generate().unwrap();
+        let reader = Arc::new(FakeReader {
+            asked: std::sync::Mutex::new(Vec::new()),
+            token: "hvs.wrap-sentinel-629-keys",
+        });
+        let mut keys = AgentKeys::new(
+            Arc::clone(&reader),
+            provider("openai/main"),
+            KV.into(),
+            AGENTS.into(),
+            AgentId::parse("hobi").unwrap(),
+            recipient.public_key().clone(),
+        );
+        let choice = keys.choice("c-629", 0).await.unwrap();
+        let again = keys.choice("c-630", 0).await.unwrap();
+        assert_eq!(
+            *reader.asked.lock().unwrap(),
+            vec![(KV.to_string(), "maknae/agents/hobi/openai/main".to_string()); 2]
+        );
+        let expect = WrapExpectation::new(
+            KV,
+            "maknae/agents/hobi/openai/main",
+            "api_key",
+            USER_KEY_WRAP_TTL,
+        )
+        .unwrap();
+        for (conversation, c) in [("c-629", &choice), ("c-630", &again)] {
+            let parts = aad_parts(&expect, conversation, "openai", "gpt-5.6-luna");
+            let aad = SealAad::new(&SealContext {
+                conversation: parts.conversation,
+                provider: parts.provider,
+                model: parts.model,
+                expected_path: parts.expected_path,
+                key_field: parts.key_field,
+            })
+            .unwrap();
+            let opened = maknae_seal::open(&recipient, &aad, c.sealed_key.as_bytes()).unwrap();
+            assert_eq!(opened.as_slice(), b"hvs.wrap-sentinel-629-keys");
+        }
+        assert_eq!(keys.agent().as_str(), "hobi");
     }
 }

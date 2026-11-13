@@ -1260,6 +1260,7 @@ dependencies = [
  "maknae-seal",
  "maknae-vault",
  "nix",
+ "tempfile",
  "tokio",
  "zeroize",
 ]

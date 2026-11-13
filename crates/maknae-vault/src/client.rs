@@ -12,7 +12,8 @@ use crate::secret_source::{resolve_daemon_secret_source, AgentSecret, Credential
 use crate::{
     generate_plane_csr, load_ca_pin, peer_auth::SanRule, sign_refusal_detail,
     validate_deployment_id, validate_vault_addr, vault_config_from_document, vault_error_text,
-    verify::verify_uri_san, Plane, PlaneSubject, UserToken, VaultConfig, VaultError, VAULT_SECTION,
+    verify::verify_uri_san, Plane, PlaneSubject, UserToken, VaultApi, VaultConfig, VaultError,
+    WrappedSecret, VAULT_SECTION,
 };
 use arc_swap::ArcSwapOption;
 use maknae_config::{load_config, Document, SectionSpec};
@@ -158,23 +159,6 @@ pub struct AgentLogin {
     pub agent: AgentId,
 }
 
-/// Reads this client's current Vault login token, so a read made as the same
-/// identity follows a renewal or a re-login.
-#[derive(Clone)]
-pub struct LoginToken {
-    client: Arc<Mutex<VaultClient>>,
-}
-
-impl LoginToken {
-    pub async fn current(&self) -> Result<UserToken, VaultError> {
-        let client = self.client.lock().await;
-        let held = client.settings.token.as_str();
-        let mut copy = Zeroizing::new(String::with_capacity(held.len()));
-        copy.push_str(held);
-        UserToken::new(copy)
-    }
-}
-
 /// The Stage-1 plane-cert client.
 pub struct PlaneClient {
     subject: PlaneSubject,
@@ -207,6 +191,8 @@ pub struct PlaneClient {
     /// kind right after construction (same module — private-field access is
     /// module-scoped, not impl-scoped, in Rust).
     secret_source_kind: CredentialSourceKind,
+    vault_addr: String,
+    vault_ca: PathBuf,
 }
 
 pub(crate) fn read_trimmed(path: &Path) -> Result<String, VaultError> {
@@ -598,6 +584,8 @@ impl PlaneClient {
             leaf_issued_at: Arc::new(AtomicU64::new(0)),
             leaf_ttl_secs: Arc::new(AtomicU64::new(0)),
             secret_source_kind,
+            vault_addr: addr.to_string(),
+            vault_ca,
         })
     }
 
@@ -758,10 +746,26 @@ impl PlaneClient {
         self.plane_key
     }
 
-    pub fn login_token(&self) -> LoginToken {
-        LoginToken {
-            client: Arc::clone(&self.client),
-        }
+    pub fn subject(&self) -> &PlaneSubject {
+        &self.subject
+    }
+
+    /// A response-wrapped KV read as this client's own Vault login, under its
+    /// client lock, so the token cannot be renewed or replaced mid-read.
+    pub async fn read_wrapped_as_self(
+        &self,
+        kv_mount: &str,
+        secret_path: &str,
+        wrap_ttl: std::time::Duration,
+    ) -> Result<WrappedSecret, VaultError> {
+        let client = self.client.lock().await;
+        let held = client.settings.token.as_str();
+        let mut copy = Zeroizing::new(String::with_capacity(held.len()));
+        copy.push_str(held);
+        let token = UserToken::new(copy)?;
+        VaultApi::new(&self.vault_addr, &self.vault_ca)?
+            .read_wrapped(&token, kv_mount, secret_path, wrap_ttl)
+            .await
     }
 
     /// Non-blocking snapshot of the current identity (for the Stage-2 transport).
@@ -1680,20 +1684,46 @@ mod tests {
     }
 
     #[test]
-    fn the_login_token_follows_the_clients_current_token() {
+    fn a_wrapped_read_as_self_carries_the_clients_own_login_or_nothing() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let fx = DispatchFixture::with_addr("agent-token", DEAD_VAULT, "");
+        let fx = DispatchFixture::with_addr("agent-wrapped-read", DEAD_VAULT, "");
         let secret = AgentSecret::new(Zeroizing::new("s".into()));
         let client = PlaneClient::for_agent(&agent_login(&fx.0, DEAD_VAULT), secret).unwrap();
-        let token = client.login_token();
+        assert_eq!(
+            client.subject(),
+            &crate::PlaneSubject::Agent(crate::agent_enroll::AgentId::parse("hobi").unwrap())
+        );
         let rt = current_thread(false);
-        assert!(rt.block_on(token.current()).is_err());
-        for held in ["hvs.sentinel-629-a", "hvs.sentinel-629-b"] {
-            rt.block_on(async { client.client.lock().await.set_token(held) });
-            let got = rt.block_on(token.current()).unwrap();
-            assert_eq!(got.expose(), held);
-            assert_eq!(got.expose().len(), held.len());
-        }
+        let read = || {
+            rt.block_on(client.read_wrapped_as_self(
+                "maknae-kv",
+                "maknae/agents/hobi/openai",
+                crate::USER_KEY_WRAP_TTL,
+            ))
+        };
+        let before = read();
+        assert!(
+            matches!(
+                before,
+                Err(VaultError::InvalidSecret {
+                    what: "user token",
+                    ..
+                })
+            ),
+            "a read before any login must send nothing: {before:?}"
+        );
+        rt.block_on(async { client.client.lock().await.set_token("hvs.sentinel-629") });
+        let after = read();
+        assert!(
+            matches!(
+                after,
+                Err(VaultError::VaultTransport {
+                    op: "wrapped KV read",
+                    ..
+                })
+            ),
+            "a read after login goes to the client's own Vault: {after:?}"
+        );
     }
 
     #[test]

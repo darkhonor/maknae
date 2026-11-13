@@ -10,9 +10,12 @@ use maknae_agent::wire::{
     check_for, close_outcome, list_outcome, open_outcome, prompt_outcome, read_outcome,
     stat_outcome, write_outcome, WireOutcome,
 };
+use maknae_config::AgentId;
 use maknae_config::TransportConfig;
 use maknae_proto::{ConversationId, ConversationView, ProviderChoice, TaskId, Turn, Verb};
-use maknae_vault::{AuthenticatedStream, PlaneClient, PlaneConnector, TrustBundle, VaultError};
+use maknae_vault::{
+    AuthenticatedStream, PlaneClient, PlaneConnector, PlaneSubject, TrustBundle, VaultError,
+};
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -32,7 +35,7 @@ fn take_spare(spare: &mut Option<Spare>, conversation: &str, now: u64) -> Option
 }
 
 /// Measured against the frame cap before sending (ADR-0023 d7).
-fn frame_fits(verb: &Verb, cap: usize) -> bool {
+pub(crate) fn frame_fits(verb: &Verb, cap: usize) -> bool {
     maknae_proto::encode_request_zeroizing(
         &maknae_proto::Request {
             task: None,
@@ -78,15 +81,27 @@ pub(crate) struct Link<D> {
     cite: Mutex<Option<TaskId>>,
 }
 
+/// A claim or heartbeat never cites (the kernel ends a connection whose cited task
+/// is not `Working`); every other verb a loop sends carries the cite.
+fn cite_for(verb: &Verb, cited: Option<TaskId>) -> Option<TaskId> {
+    match verb {
+        Verb::TaskClaim { .. } => None,
+        _ => cited,
+    }
+}
+
 impl<D: Dial> Link<D> {
-    pub(crate) fn cited(&self) -> Option<TaskId> {
+    fn cited(&self) -> Option<TaskId> {
         // A poisoned guard still holds a whole `Option<TaskId>`: it is only ever assigned.
         *self.cite.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    pub(crate) fn transport(&self) -> &TransportConfig {
+        &self.transport
+    }
+
     pub(crate) async fn send(
         &self,
-        task: Option<TaskId>,
         verb: Verb,
         content: Option<maknae_proto::Bytes>,
         check: crate::mutation::WriteCheck,
@@ -94,7 +109,7 @@ impl<D: Dial> Link<D> {
     ) -> Result<crate::outcome::SentOutcome, String> {
         send_via(
             self.dial.dial(),
-            task,
+            cite_for(&verb, self.cited()),
             verb,
             content,
             check,
@@ -128,7 +143,7 @@ impl<K: KeySupply> LoopPlane<K, PlaneDial> {
         Self::over(
             transport,
             socket,
-            client,
+            Arc::new(client),
             trust,
             output_tokens,
             write_max,
@@ -139,7 +154,7 @@ impl<K: KeySupply> LoopPlane<K, PlaneDial> {
     fn over(
         transport: TransportConfig,
         socket: PathBuf,
-        client: PlaneClient,
+        client: Arc<PlaneClient>,
         trust: Arc<TrustBundle>,
         output_tokens: Option<u64>,
         write_max: usize,
@@ -147,7 +162,7 @@ impl<K: KeySupply> LoopPlane<K, PlaneDial> {
     ) -> Self {
         let dial = PlaneDial {
             socket,
-            client: Arc::new(client),
+            client,
             trust,
         };
         Self::with_dial(dial, transport, output_tokens, write_max, keys)
@@ -158,18 +173,36 @@ impl<K: KeySupply> LoopPlane<K, PlaneDial> {
     }
 }
 
+/// Refuses a client whose leaf would not be `agent`'s own.
+fn agent_subject(subject: &PlaneSubject, agent: &AgentId) -> Result<(), String> {
+    match subject {
+        PlaneSubject::Agent(id) if id == agent => Ok(()),
+        PlaneSubject::Agent(id) => Err(format!(
+            "the plane client is agent {}'s, not agent {}'s",
+            id.as_str(),
+            agent.as_str()
+        )),
+        PlaneSubject::Fixed(plane) => Err(format!(
+            "the plane client is the {plane:?} plane's, not agent {}'s",
+            agent.as_str()
+        )),
+    }
+}
+
 impl LoopPlane<AgentKeys, PlaneDial> {
-    /// The agent's loop: the kernel's agent socket, under the agent's own leaf.
+    /// The agent's loop: the kernel's agent socket, under the leaf of the same
+    /// client its keys read with.
     pub fn for_agent(
         transport: TransportConfig,
-        client: PlaneClient,
         trust: Arc<TrustBundle>,
         output_tokens: Option<u64>,
         write_max: usize,
         keys: AgentKeys,
-    ) -> Self {
+    ) -> Result<Self, String> {
+        let client = Arc::clone(keys.reader());
+        agent_subject(client.subject(), keys.agent())?;
         let socket = transport.agent_socket_path.clone();
-        Self::over(
+        Ok(Self::over(
             transport,
             socket,
             client,
@@ -177,12 +210,12 @@ impl LoopPlane<AgentKeys, PlaneDial> {
             output_tokens,
             write_max,
             keys,
-        )
+        ))
     }
 }
 
 impl<K: KeySupply, D: Dial> LoopPlane<K, D> {
-    pub fn with_dial(
+    pub(crate) fn with_dial(
         dial: D,
         transport: TransportConfig,
         output_tokens: Option<u64>,
@@ -227,7 +260,6 @@ impl<K: KeySupply, D: Dial> LoopPlane<K, D> {
         write_outcome(
             self.link
                 .send(
-                    self.link.cited(),
                     Verb::FsMkdir {
                         path: path.to_string(),
                         parents,
@@ -256,7 +288,6 @@ impl<K: KeySupply, D: Dial> Plane for LoopPlane<K, D> {
         open_outcome(
             self.link
                 .send(
-                    self.link.cited(),
                     Verb::SessionNew {
                         cwd: cwd.into(),
                         sensitive: sensitive.to_vec(),
@@ -278,7 +309,6 @@ impl<K: KeySupply, D: Dial> Plane for LoopPlane<K, D> {
             conversation,
             self.link
                 .send(
-                    self.link.cited(),
                     Verb::SessionClose {
                         conversation: conversation.clone(),
                     },
@@ -339,7 +369,6 @@ impl<K: KeySupply, D: Dial> Plane for LoopPlane<K, D> {
         prompt_outcome(
             self.link
                 .send(
-                    self.link.cited(),
                     verb,
                     None,
                     crate::mutation::WriteCheck::Unchecked,
@@ -359,7 +388,6 @@ impl<K: KeySupply, D: Dial> Plane for LoopPlane<K, D> {
         read_outcome(
             self.link
                 .send(
-                    self.link.cited(),
                     Verb::Read {
                         path: path.to_string(),
                         conversation: Some(conversation.to_string()),
@@ -393,13 +421,9 @@ impl<K: KeySupply, D: Dial> Plane for LoopPlane<K, D> {
         let diagnostics = &mut self.diagnostics;
         let sent = self
             .link
-            .send(
-                self.link.cited(),
-                verb,
-                Some(content),
-                check_for(basis),
-                &mut |l| diagnostics.push(l),
-            )
+            .send(verb, Some(content), check_for(basis), &mut |l| {
+                diagnostics.push(l)
+            })
             .await;
         if let Ok(crate::outcome::SentOutcome::NotAttempted { why }) = &sent {
             diagnostics.push(format!("write not performed: {why}; nothing was written"));
@@ -411,7 +435,6 @@ impl<K: KeySupply, D: Dial> Plane for LoopPlane<K, D> {
         list_outcome(
             self.link
                 .send(
-                    self.link.cited(),
                     Verb::FsList {
                         path: path.to_string(),
                         after: after.map(str::to_string),
@@ -430,7 +453,6 @@ impl<K: KeySupply, D: Dial> Plane for LoopPlane<K, D> {
         stat_outcome(
             self.link
                 .send(
-                    self.link.cited(),
                     Verb::FsStat {
                         path: path.to_string(),
                         conversation: Some(conversation.to_string()),
@@ -571,93 +593,213 @@ mod tests {
         }]
     }
 
-    async fn every_file_and_session_verb(plane: &mut LoopPlane<Keys, fake::FakeKernel>, dir: &str) {
+    const VERBS: [&str; 9] = [
+        "open", "close", "read", "write", "mkdir", "list", "stat", "prompt", "report",
+    ];
+
+    async fn every_cited_verb(
+        plane: &mut LoopPlane<Keys, fake::FakeKernel>,
+        dir: &std::path::Path,
+    ) {
+        let d = dir.to_str().unwrap();
+        let conversation = ConversationId::parse(&"a".repeat(32)).unwrap();
+        let _ = plane.open(dir, &[]).await;
+        let _ = plane.close(&conversation).await;
         let _ = plane
-            .read("c", &format!("{dir}/absent"), maknae_proto::WHOLE_FILE)
+            .read("c", &format!("{d}/absent"), maknae_proto::WHOLE_FILE)
             .await;
         let _ = plane
-            .write("c", &format!("{dir}/new"), b"x", ReadBasis::Unread)
+            .write("c", &format!("{d}/new"), b"x", ReadBasis::Unread)
             .await;
-        let _ = plane.mkdir(&format!("{dir}/tasks/users/1000"), true).await;
+        let _ = plane.mkdir(&format!("{d}/tasks/users/1000"), true).await;
+        let _ = plane.list("c", d, None).await;
+        let _ = plane.stat("c", d).await;
         let _ = plane.prompt("c", &user_turn()).await;
-    }
-
-    #[tokio::test]
-    async fn a_cited_task_is_stamped_on_every_request_until_uncited() {
-        let dir = tempfile_dir("cite");
-        let id = TaskId([0x62; 16]);
-        let mut plane = fake_plane(vec![fake::refused(); 8]);
-        plane.cite(Some(id));
-        every_file_and_session_verb(&mut plane, &dir).await;
-        plane.cite(None);
-        every_file_and_session_verb(&mut plane, &dir).await;
-        let seen = plane.link.dial.finish().await;
-        let verbs: Vec<_> = seen
-            .requests
-            .iter()
-            .map(|r| (verb_name(&r.verb), r.task))
-            .collect();
-        let once = |task| {
-            [
-                ("read", task),
-                ("write", task),
-                ("mkdir", task),
-                ("prompt", task),
-            ]
-        };
-        assert_eq!(verbs, [once(Some(id)), once(None)].concat());
-    }
-
-    #[tokio::test]
-    async fn each_verb_opens_its_own_connection() {
-        let dir = tempfile_dir("connections");
-        let mut plane = fake_plane(vec![fake::refused(); 7]);
-        plane.cite(Some(TaskId([7; 16])));
-        every_file_and_session_verb(&mut plane, &dir).await;
-        let tasks = plane.tasks();
-        let _ = tasks.claim().await;
-        let _ = tasks.heartbeat(0).await;
-        let _ = tasks
+        let _ = plane
+            .tasks()
             .report(maknae_proto::SecretText(zeroize::Zeroizing::new(
                 "r".into(),
             )))
             .await;
+    }
+
+    #[tokio::test]
+    async fn a_cited_task_is_stamped_on_every_request_until_uncited() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let id = TaskId([0x62; 16]);
+        let mut plane = fake_plane(vec![fake::refused(); 2 * VERBS.len()]);
+        plane.cite(Some(id));
+        every_cited_verb(&mut plane, dir.path()).await;
+        plane.cite(None);
+        every_cited_verb(&mut plane, dir.path()).await;
+        let seen = plane.link.dial.finish().await;
+        let sent: Vec<_> = seen
+            .requests
+            .iter()
+            .map(|r| (verb_name(&r.verb), r.task))
+            .collect();
+        let all = |task| VERBS.map(|v| (v, task));
+        assert_eq!(sent, [all(Some(id)), all(None)].concat());
+    }
+
+    #[tokio::test]
+    async fn each_verb_opens_its_own_connection() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut plane = fake_plane(vec![fake::refused(); VERBS.len() + 2]);
+        plane.cite(Some(TaskId([7; 16])));
+        every_cited_verb(&mut plane, dir.path()).await;
+        let tasks = plane.tasks();
+        let _ = tasks.claim().await;
+        let _ = tasks.heartbeat(0).await;
         drop(tasks);
         let seen = plane.link.dial.finish().await;
-        assert_eq!(seen.requests.len(), 7);
-        assert_eq!(seen.frames_per_connection, [1; 7]);
+        assert_eq!(seen.requests.len(), VERBS.len() + 2);
+        assert_eq!(seen.frames_per_connection, vec![1; VERBS.len() + 2]);
     }
 
     #[test]
-    fn the_agent_loop_dials_the_agent_socket_and_the_cli_the_client_socket() {
-        let src = include_str!("plane.rs");
-        let body = |f: &str| {
-            let at = src.find(f).unwrap();
-            &src[at..at + src[at..].find("Self::over(").unwrap()]
+    fn only_a_claim_or_heartbeat_goes_uncited() {
+        let id = Some(TaskId([1; 16]));
+        let text = || maknae_proto::SecretText(zeroize::Zeroizing::new("r".into()));
+        for seen in [None, Some(0)] {
+            let claim = Verb::TaskClaim {
+                seen_follow_ups: seen,
+            };
+            assert_eq!(cite_for(&claim, id), None);
+        }
+        for verb in [
+            Verb::TaskReport { text: text() },
+            Verb::FsStat {
+                path: "/p".into(),
+                conversation: None,
+            },
+            Verb::SessionClose {
+                conversation: ConversationId::parse(&"b".repeat(32)).unwrap(),
+            },
+        ] {
+            assert_eq!(cite_for(&verb, id), id, "{verb:?}");
+            assert_eq!(cite_for(&verb, None), None);
+        }
+    }
+
+    fn pem() -> String {
+        let params = maknae_crypto::rcgen::CertificateParams::new(vec!["ca.test".into()]).unwrap();
+        let key = maknae_crypto::rcgen::KeyPair::generate_for(
+            &maknae_crypto::rcgen::PKCS_ECDSA_P384_SHA384,
+        )
+        .unwrap();
+        params.self_signed(&key).unwrap().pem()
+    }
+
+    /// A real agent client: CA pins on disk, a dead Vault, never minted.
+    fn agent_client(dir: &std::path::Path, agent: &str) -> PlaneClient {
+        maknae_crypto::init().unwrap();
+        std::fs::create_dir_all(dir.join("tls")).unwrap();
+        for f in ["maknae-root-ca.crt", "maknae-int-ca.crt", "vault-ca.crt"] {
+            std::fs::write(dir.join("tls").join(f), pem()).unwrap();
+        }
+        let login = maknae_vault::AgentLogin {
+            config_dir: dir.to_path_buf(),
+            addr: "https://127.0.0.1:1".into(),
+            trust_domain: "dev-01".into(),
+            pki_int_mount: maknae_vault::DEFAULT_PKI_INT_MOUNT.into(),
+            plane_key: maknae_crypto::plane_key::PlaneKey::ALL[0],
+            approle_mount: "agents-approle".into(),
+            role_id: "agent-role".into(),
+            agent: AgentId::parse(agent).unwrap(),
         };
-        assert!(body(concat!("pub fn ", "for_agent("))
-            .contains(concat!("transport.agent_", "socket_path.clone()")));
-        assert!(body(concat!("pub fn ", "new(\n"))
-            .contains(concat!("transport.", "socket_path.clone()")));
+        let secret = maknae_vault::AgentSecret::new(zeroize::Zeroizing::new("s".into()));
+        PlaneClient::for_agent(&login, secret).unwrap()
+    }
+
+    fn agent_keys(client: PlaneClient, agent: &str) -> AgentKeys {
+        AgentKeys::new(
+            Arc::new(client),
+            maknae_config::AgentProvider {
+                provider: "openai".into(),
+                model: "m".into(),
+                key_subpath: "openai/main".into(),
+                key_field: "api_key".into(),
+                context_tokens: 128_000,
+                output_tokens: None,
+            },
+            "maknae-kv".into(),
+            "maknae/agents".into(),
+            AgentId::parse(agent).unwrap(),
+            maknae_seal::SealPrivateKey::generate()
+                .unwrap()
+                .public_key()
+                .clone(),
+        )
+    }
+
+    fn trust(dir: &std::path::Path) -> Arc<TrustBundle> {
+        TrustBundle::from_pins(&[&maknae_vault::load_ca_pin(dir).unwrap()]).unwrap()
+    }
+
+    #[test]
+    fn the_agent_loop_dials_the_agent_socket_with_its_keys_own_client() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let keys = agent_keys(agent_client(dir.path(), "hobi"), "hobi");
+        let reader = Arc::clone(keys.reader());
+        let transport = TransportConfig {
+            socket_path: "/run/maknae/sentinel-client.sock".into(),
+            agent_socket_path: "/run/maknae/sentinel-agent.sock".into(),
+            ..Default::default()
+        };
+        let plane =
+            LoopPlane::for_agent(transport.clone(), trust(dir.path()), None, 4096, keys).unwrap();
+        assert_eq!(plane.link.dial.socket, transport.agent_socket_path);
+        assert!(Arc::ptr_eq(&plane.link.dial.client, &reader));
+        let cli = LoopPlane::new(
+            transport.clone(),
+            agent_client(dir.path(), "hobi"),
+            trust(dir.path()),
+            None,
+            4096,
+            FakeKeys,
+        );
+        assert_eq!(cli.link.dial.socket, transport.socket_path);
+    }
+
+    #[test]
+    fn the_agent_loop_refuses_a_client_that_is_not_its_agents() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let keys = agent_keys(agent_client(dir.path(), "suga"), "hobi");
+        let refused = LoopPlane::for_agent(
+            TransportConfig::default(),
+            trust(dir.path()),
+            None,
+            4096,
+            keys,
+        );
+        assert!(
+            matches!(&refused, Err(m) if m.contains("agent suga's, not agent hobi's")),
+            "{:?}",
+            refused.as_ref().err()
+        );
+        let hobi = AgentId::parse("hobi").unwrap();
+        assert!(agent_subject(&PlaneSubject::Agent(hobi.clone()), &hobi).is_ok());
+        for plane in [maknae_vault::Plane::Cli, maknae_vault::Plane::Kernel] {
+            let got = agent_subject(&PlaneSubject::Fixed(plane), &hobi).unwrap_err();
+            assert!(got.contains("not agent hobi's"), "{got}");
+        }
     }
 
     fn verb_name(v: &Verb) -> &'static str {
         match v {
+            Verb::SessionNew { .. } => "open",
+            Verb::SessionClose { .. } => "close",
             Verb::Read { .. } => "read",
             Verb::FsWrite { .. } => "write",
             Verb::FsMkdir { .. } => "mkdir",
+            Verb::FsList { .. } => "list",
+            Verb::FsStat { .. } => "stat",
             Verb::SessionPrompt { .. } => "prompt",
             Verb::TaskClaim { .. } => "claim",
             Verb::TaskReport { .. } => "report",
             _ => "other",
         }
-    }
-
-    fn tempfile_dir(tag: &str) -> String {
-        let dir =
-            std::env::temp_dir().join(format!("maknae-loop-629-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir.to_str().unwrap().to_string()
     }
 
     #[test]

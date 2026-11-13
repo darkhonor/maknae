@@ -76,6 +76,9 @@ fn reply_wait(
         maknae_proto::Verb::AdminBaselineAccept { .. } => {
             maknae_config::BASELINE_ACCEPT_REPLY_STAGES
         }
+        maknae_proto::Verb::TaskClaim { .. } | maknae_proto::Verb::TaskReport { .. } => {
+            return class_wait(maknae_proto::FrameClass::Control, transport)
+        }
         _ => return class_wait(class_of(verb), transport),
     };
     class_wait(class_of(verb), transport)
@@ -208,7 +211,7 @@ pub async fn send_verb(
 }
 
 /// [`send_verb`] over a stream `connect` opens, for this one verb, with `task` cited on the request.
-pub async fn send_via<S: Wire>(
+pub(crate) async fn send_via<S: Wire>(
     connect: impl std::future::Future<Output = Result<S, maknae_vault::VaultError>>,
     task: Option<maknae_proto::TaskId>,
     request_verb: maknae_proto::Verb,
@@ -492,6 +495,47 @@ mod tests {
                 .await
                 .unwrap_err(),
             "frame class unexpected: Control, expected Prompt"
+        );
+    }
+
+    #[test]
+    fn task_verbs_wait_the_call_timeout_and_read_at_the_ceiling() {
+        let transport = maknae_config::TransportConfig {
+            read_timeout_ms: 7_000,
+            prompt_max_bytes: maknae_config::PROMPT_MAX_BYTES_FLOOR,
+            ..Default::default()
+        };
+        let control = class_wait(maknae_proto::FrameClass::Control, &transport);
+        let ceiling = FrameCaps::responses(maknae_proto::prompt_response_cap(
+            maknae_config::PROMPT_MAX_CEILING,
+        ));
+        for verb in [
+            maknae_proto::Verb::TaskClaim {
+                seen_follow_ups: None,
+            },
+            maknae_proto::Verb::TaskClaim {
+                seen_follow_ups: Some(3),
+            },
+            maknae_proto::Verb::TaskReport {
+                text: maknae_proto::SecretText(zeroize::Zeroizing::new("r".into())),
+            },
+        ] {
+            assert_eq!(reply_wait(&verb, &transport), control, "{verb:?}");
+            assert_eq!(reply_caps(&verb, &transport).prompt, ceiling.prompt);
+        }
+        let prompt = maknae_proto::Verb::SessionPrompt {
+            conversation: "c".into(),
+            turns: vec![],
+            output_tokens: None,
+            choice: None,
+        };
+        assert_eq!(
+            reply_wait(&prompt, &transport),
+            class_wait(maknae_proto::FrameClass::Prompt, &transport)
+        );
+        assert_eq!(
+            reply_caps(&prompt, &transport).prompt,
+            response_caps(&transport).prompt
         );
     }
 

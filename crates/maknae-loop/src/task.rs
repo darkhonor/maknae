@@ -4,10 +4,10 @@
 //! the ceiling cap, because the kernel's task text bound is not the agent's to know.
 use crate::plane::{Dial, Link, PlaneDial};
 use maknae_agent::task::{
-    beat_answer, claim_answer, report_answer, BeatAnswer, ClaimAnswer, Refused,
+    beat_answer, claim_answer, report_answer, BeatAnswer, ClaimAnswer, ReportOutcome,
 };
 use maknae_agent::wire::WireOutcome;
-use maknae_proto::{SecretText, TaskId, Verb};
+use maknae_proto::{SecretText, Verb};
 use std::sync::Arc;
 
 pub struct TaskClient<D: Dial = PlaneDial> {
@@ -21,39 +21,34 @@ impl<D: Dial> TaskClient<D> {
 
     pub async fn claim(&self) -> Result<ClaimAnswer, String> {
         claim_answer(
-            self.send(
-                None,
-                Verb::TaskClaim {
-                    seen_follow_ups: None,
-                },
-            )
+            self.send(Verb::TaskClaim {
+                seen_follow_ups: None,
+            })
             .await,
         )
     }
 
     pub async fn heartbeat(&self, seen: u32) -> Result<BeatAnswer, String> {
         beat_answer(
-            self.send(
-                None,
-                Verb::TaskClaim {
-                    seen_follow_ups: Some(seen),
-                },
-            )
+            self.send(Verb::TaskClaim {
+                seen_follow_ups: Some(seen),
+            })
             .await,
         )
     }
 
-    pub async fn report(&self, text: SecretText) -> Result<Result<(), Refused>, String> {
-        report_answer(
-            self.send(self.link.cited(), Verb::TaskReport { text })
-                .await,
-        )
+    pub async fn report(&self, text: SecretText) -> Result<ReportOutcome, String> {
+        let verb = Verb::TaskReport { text };
+        let cap = maknae_proto::prompt_request_cap(self.link.transport().prompt_max_bytes);
+        if !crate::plane::frame_fits(&verb, cap) {
+            return Ok(ReportOutcome::TooLarge);
+        }
+        report_answer(self.send(verb).await)
     }
 
-    async fn send(&self, task: Option<TaskId>, verb: Verb) -> Result<WireOutcome, String> {
+    async fn send(&self, verb: Verb) -> Result<WireOutcome, String> {
         self.link
             .send(
-                task,
                 verb,
                 None,
                 crate::mutation::WriteCheck::Unchecked,
@@ -69,7 +64,7 @@ mod tests {
     use crate::keys::KeySupply;
     use crate::plane::fake::{refused, FakeKernel};
     use crate::plane::LoopPlane;
-    use maknae_agent::task::{BeatAnswer, ClaimAnswer, Refused};
+    use maknae_agent::task::{BeatAnswer, ClaimAnswer, Refused, ReportOutcome};
     use maknae_proto::{
         Payload, ProtoErrCode, ProviderChoice, RespResult, SecretText, TaskDelivery, TaskId,
         TaskState, Verb,
@@ -135,7 +130,10 @@ mod tests {
             tasks.heartbeat(5).await,
             Ok(BeatAnswer::State(view(TaskState::Held)))
         );
-        assert_eq!(tasks.report(text("done")).await, Ok(Ok(())));
+        assert_eq!(
+            tasks.report(text("done")).await,
+            Ok(ReportOutcome::Acknowledged)
+        );
         let seen = plane.link_for_test().finish().await;
         let sent: Vec<_> = seen
             .requests
@@ -212,8 +210,43 @@ mod tests {
             tasks.heartbeat(0).await,
             Ok(BeatAnswer::Refused(no.clone()))
         );
-        assert_eq!(tasks.report(text("r")).await, Ok(Err(no)));
+        assert_eq!(
+            tasks.report(text("r")).await,
+            Ok(ReportOutcome::Refused(no))
+        );
         let unanswered = plane.tasks().claim().await;
         assert!(unanswered.is_err(), "{unanswered:?}");
+    }
+
+    #[tokio::test]
+    async fn a_task_answer_over_the_ceiling_is_refused_as_oversize() {
+        let over = maknae_proto::prompt_response_cap(maknae_config::PROMPT_MAX_CEILING) + 1;
+        let delivery = TaskDelivery {
+            signed: maknae_proto::Bytes::new(zeroize::Zeroizing::new(vec![0x5a; over])),
+            partition: "tasks/users/1000".into(),
+        };
+        let plane = plane(vec![RespResult::Ok(Payload::TaskDelivered(delivery))]);
+        let got = plane.tasks().claim().await;
+        assert!(matches!(&got, Err(m) if m.contains("oversize")), "{got:?}");
+    }
+
+    #[tokio::test]
+    async fn a_report_too_large_for_the_frame_is_not_sent() {
+        let transport = maknae_config::TransportConfig {
+            prompt_max_bytes: maknae_config::PROMPT_MAX_BYTES_FLOOR,
+            ..Default::default()
+        };
+        let plane = plane_with(transport.clone(), vec![refused()]);
+        let fits = "r".repeat(transport.prompt_max_bytes / 2);
+        let over = "r".repeat(maknae_proto::prompt_request_cap(transport.prompt_max_bytes));
+        assert_eq!(
+            plane.tasks().report(text(&over)).await,
+            Ok(ReportOutcome::TooLarge)
+        );
+        assert!(matches!(
+            plane.tasks().report(text(&fits)).await,
+            Ok(ReportOutcome::Refused(_))
+        ));
+        assert_eq!(plane.link_for_test().finish().await.requests.len(), 1);
     }
 }
