@@ -29,7 +29,8 @@ pub(crate) fn read_enabled() -> Option<String> {
             mode_mask: Some(0o022),
             nlink_exactly_one: false,
             regular_file: true,
-            max_bytes: Some(4096),
+            // sysfs reports PAGE_SIZE as st_size; arm64 may run 64 KiB pages.
+            max_bytes: Some(64 * 1024),
         },
         StrategyPref::Auto,
     )
