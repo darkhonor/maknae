@@ -423,7 +423,7 @@ impl std::fmt::Display for EnrollError {
                 detail,
             } => write!(
                 f,
-                "could not grant `{entry}` on {} ({detail}); the Agent Daemon cannot read its configuration without it. Fix the cause and run `maknae enroll agent` again with --rotate; the SecretID just minted stays recorded under pending, and that run retires it",
+                "could not grant `{entry}` on {} ({detail}); the agent is enrolled, but its daemon cannot read its configuration until it holds this. Fix the cause, then run `sudo maknae enroll agent <id> --refresh-access`",
                 path.display()
             ),
             EnrollError::AgentAccess {
@@ -2074,21 +2074,22 @@ fn egress_traversal_acl_readback() -> String {
 /// identity; without the entry the deputy refuses to start, naming its bounds
 /// file, until the operator grants it by hand. The package scriptlets set the
 /// same entry at install; this re-asserts it on every enroll.
+const EGRESS_GRANT_ARGS: [&str; 5] = ["-P", "-n", "-m", EGRESS_TRAVERSAL_ACL, "/etc/maknae"];
+const EGRESS_READBACK_ARGS: [&str; 3] = ["-P", "-p", "/etc/maknae"];
+
 fn grant_egress_traversal(verbose: bool) {
-    let acl = command(Program::Setfacl)
-        .args(["-m", EGRESS_TRAVERSAL_ACL, "/etc/maknae"])
-        .output();
+    let acl = command(Program::Setfacl).args(EGRESS_GRANT_ARGS).output();
     match acl {
         Ok(o) if o.status.success() => {
             if verbose {
-                errln!("exec: setfacl -m {EGRESS_TRAVERSAL_ACL} /etc/maknae");
+                errln!("exec: setfacl -P -n -m {EGRESS_TRAVERSAL_ACL} /etc/maknae");
             }
             // `setfacl` exits 0 on a filesystem mounted without ACL support in
             // some configurations; read the entry back rather than trust the
             // exit status, since this entry is the only thing that makes the
             // deputy startable.
             let back = command(Program::Getfacl)
-                .args(["-p", "/etc/maknae"])
+                .args(EGRESS_READBACK_ARGS)
                 .output();
             let want = egress_traversal_acl_readback();
             let seen = back
@@ -2117,13 +2118,14 @@ fn grant_egress_traversal(verbose: bool) {
 }
 
 const EGRESS_TRAVERSAL_ACE: &str = "user:_maknae-egress allow list,search";
+const EGRESS_GRANT_ARGS_MACOS: [&str; 4] = ["-h", "+a", EGRESS_TRAVERSAL_ACE, "/etc/maknae"];
 
 fn grant_egress_traversal_macos(verbose: bool) {
     let set = command(Program::Chmod)
-        .args(["+a", EGRESS_TRAVERSAL_ACE, "/etc/maknae"])
+        .args(EGRESS_GRANT_ARGS_MACOS)
         .output();
     if verbose {
-        errln!("exec: /bin/chmod +a {EGRESS_TRAVERSAL_ACE:?} /etc/maknae");
+        errln!("exec: /bin/chmod -h +a {EGRESS_TRAVERSAL_ACE:?} /etc/maknae");
     }
     match command(Program::Ls)
         .args(["-led", "/etc/maknae"])
@@ -2205,11 +2207,14 @@ fn names_acl_entry(getfacl_output: &str, who: &str) -> bool {
     getfacl_output.lines().any(|l| l.starts_with(&entry))
 }
 
+const HOME_READ_FLAGS: [&str; 4] = ["-P", "-p", "-n", "--omit-header"];
+const HOME_REVOKE_FLAGS: [&str; 3] = ["-P", "-n", "-x"];
+
 fn revoke_home_acl(home: &Path, uid: u32, verbose: bool) {
     let who = uid.to_string();
     let present = || {
         command(Program::Getfacl)
-            .args(["-p", "-n", "--omit-header"])
+            .args(HOME_READ_FLAGS)
             .arg(home)
             .output()
             .map(|o| names_acl_entry(&String::from_utf8_lossy(&o.stdout), &who))
@@ -2219,7 +2224,8 @@ fn revoke_home_acl(home: &Path, uid: u32, verbose: bool) {
     }
     let spec = format!("u:{uid}");
     match command(Program::Setfacl)
-        .args(["-x", &spec])
+        .args(HOME_REVOKE_FLAGS)
+        .arg(&spec)
         .arg(home)
         .output()
     {
@@ -3194,6 +3200,26 @@ mod tests {
         assert!(!absent);
         assert!(!operator && operator_kept, "an operator's override is kept");
         assert!(enrolls && enrolls_gone, "enroll's own include is removed");
+    }
+
+    #[test]
+    fn host_acl_calls_never_follow_a_link_or_recalculate_the_mask() {
+        assert_eq!(
+            EGRESS_GRANT_ARGS,
+            ["-P", "-n", "-m", "u:_maknae-egress:rx", "/etc/maknae"]
+        );
+        assert_eq!(EGRESS_READBACK_ARGS, ["-P", "-p", "/etc/maknae"]);
+        assert_eq!(
+            EGRESS_GRANT_ARGS_MACOS,
+            [
+                "-h",
+                "+a",
+                "user:_maknae-egress allow list,search",
+                "/etc/maknae"
+            ]
+        );
+        assert_eq!(HOME_REVOKE_FLAGS, ["-P", "-n", "-x"]);
+        assert_eq!(HOME_READ_FLAGS, ["-P", "-p", "-n", "--omit-header"]);
     }
 
     #[cfg(target_os = "linux")]

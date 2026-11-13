@@ -814,7 +814,7 @@ why = "#168: maknae enroll agent's orchestration behind the AgentOps seam; the r
 
 [[t3]]
 path = "bins/maknae/src/enroll/agent_access.rs"
-why = "#629: the agent account's read ACLs on its configuration — the exact entry list (nothing under private/), the setfacl/getfacl and chmod +a/ls -le argv for both platforms, the read-back match, and the revoke-by-uid order carry unit tests against a fake host whose ACL state the calls change; the runner that executes the programs is bin I/O"
+why = "#629: the agent account's read ACLs on its configuration — the exact entry list below the configured root (nothing under private/), the setfacl -P -n / getfacl -P -n and chmod -h / ls -led argv for both platforms, the mask-preserving and effective-rights read-back, the macOS account-name refusal, the unresolved-account skip and the revoke-by-uid order carry unit tests against a fake host whose ACL state, mask included, the calls change; the runner that executes the programs is bin I/O"
 
 [[t3]]
 path = "bins/maknae/src/enroll/remove_agent.rs"

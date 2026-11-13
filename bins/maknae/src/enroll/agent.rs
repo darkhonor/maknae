@@ -51,10 +51,10 @@ pub struct AgentArgs {
     #[arg(value_name = "ID")]
     pub id: String,
     /// The service account the Agent Daemon runs as.
-    #[arg(long)]
-    pub account: String,
+    #[arg(long, required_unless_present = "refresh_access")]
+    pub account: Option<String>,
     /// An address or CIDR the SecretID may be used from (repeatable).
-    #[arg(long = "bind-cidr", required = true)]
+    #[arg(long = "bind-cidr", required_unless_present = "refresh_access")]
     pub bind_cidr: Vec<String>,
     /// The role the agent is bound to; an agent is never `admin`.
     #[arg(long, value_enum, default_value_t = RoleArg::User)]
@@ -66,20 +66,20 @@ pub struct AgentArgs {
     #[arg(long)]
     pub token_file: Option<PathBuf>,
     /// The authorized provider the agent's model calls go to.
-    #[arg(long)]
-    pub provider: String,
+    #[arg(long, required_unless_present = "refresh_access")]
+    pub provider: Option<String>,
     /// The model the agent uses.
-    #[arg(long)]
-    pub model: String,
+    #[arg(long, required_unless_present = "refresh_access")]
+    pub model: Option<String>,
     /// Where the agent's API key sits in Vault, below `<agent_prefix>/<ID>/`.
-    #[arg(long)]
-    pub key_subpath: String,
+    #[arg(long, required_unless_present = "refresh_access")]
+    pub key_subpath: Option<String>,
     /// The field of that secret that holds the API key.
-    #[arg(long)]
-    pub key_field: String,
+    #[arg(long, required_unless_present = "refresh_access")]
+    pub key_field: Option<String>,
     /// The model's context window, in tokens.
-    #[arg(long)]
-    pub context_tokens: u64,
+    #[arg(long, required_unless_present = "refresh_access")]
+    pub context_tokens: Option<u64>,
     /// The most tokens one answer may hold.
     #[arg(long)]
     pub output_tokens: Option<u64>,
@@ -89,13 +89,20 @@ pub struct AgentArgs {
     /// Replace an enrolled agent's SecretID and destroy the earlier ones.
     #[arg(long)]
     pub rotate: bool,
+    /// Grant the enrolled agent's account its read access again; touches no Vault.
+    #[arg(long, conflicts_with_all = [
+        "account", "bind_cidr", "provider", "model", "key_subpath", "key_field",
+        "context_tokens", "output_tokens", "persona", "rotate", "token_file", "role",
+        "approle_mount",
+    ])]
+    pub refresh_access: bool,
     /// Print raw operation detail.
     #[arg(long)]
     pub verbose: bool,
 }
 
 pub(crate) const PRIVATE_DIR: &str = "/etc/maknae/private";
-const ETC_DIR: &str = "/etc/maknae";
+pub(crate) const ETC_DIR: &str = "/etc/maknae";
 const AGENTS_ENTRY: &str = "agents";
 pub(crate) const AGENTS_DIR: &str = "/etc/maknae/agents";
 const HOST_CONFIG: &str = "/etc/maknae/maknae.yaml";
@@ -202,15 +209,20 @@ pub(crate) fn client_plan(
         kv_mount: bounds.kv_mount.clone(),
         agent_prefix,
         provider: AgentProvider {
-            provider: args.provider.clone(),
-            model: args.model.clone(),
-            key_subpath: args.key_subpath.clone(),
-            key_field: args.key_field.clone(),
-            context_tokens: args.context_tokens,
+            provider: given(&args.provider, "--provider")?,
+            model: given(&args.model, "--model")?,
+            key_subpath: given(&args.key_subpath, "--key-subpath")?,
+            key_field: given(&args.key_field, "--key-field")?,
+            context_tokens: given(&args.context_tokens, "--context-tokens")?,
             output_tokens: args.output_tokens,
         },
         persona: args.persona.into(),
     })
+}
+
+fn given<T: Clone>(v: &Option<T>, flag: &str) -> Result<T, EnrollError> {
+    v.clone()
+        .ok_or_else(|| EnrollError::State(format!("{flag} is required")))
 }
 
 fn yaml_tokens(n: u64) -> Yaml {
@@ -449,7 +461,12 @@ pub(crate) trait AgentOps: AgentVaultOps {
         secret: &Zeroizing<String>,
     ) -> Result<SecretSource, EnrollError>;
     fn write_record(&self, record: &AgentRecord) -> Result<(), EnrollError>;
-    fn write_client(&self, client: &AgentClientConfig, account: &str) -> Result<(), EnrollError>;
+    fn write_client(&self, client: &AgentClientConfig) -> Result<(), EnrollError>;
+    fn grant_access(
+        &self,
+        agent: &AgentId,
+        account: &agent_access::Account,
+    ) -> Result<(), EnrollError>;
 }
 
 pub(crate) fn has_alias_on(entity: &maknae_vault::EntityFacts, mount: &str, role_id: &str) -> bool {
@@ -606,7 +623,7 @@ pub(crate) async fn enroll_agent<O: AgentOps>(
         source,
     };
     ops.write_record(&record)?;
-    ops.write_client(&client, &plan.account)?;
+    ops.write_client(&client)?;
     let live = AgentState {
         live: vec![acc],
         pending: Vec::new(),
@@ -630,6 +647,13 @@ pub(crate) async fn enroll_agent<O: AgentOps>(
     if reenable && failures.is_empty() {
         ops.set_entity_disabled(&entity, false).await?;
     }
+    ops.grant_access(
+        &plan.agent,
+        &agent_access::Account {
+            name: plan.account.clone(),
+            uid: plan.uid,
+        },
+    )?;
     if !failures.is_empty() {
         return Err(EnrollError::AgentRetireFailed {
             agent: id.to_string(),
@@ -815,6 +839,8 @@ impl<T: HasVault> AgentVaultOps for T {
 struct RealAgentOps {
     vault: RealVault,
     agents: maknae_io::Anchor,
+    root: PathBuf,
+    runner: Box<dyn agent_access::Run>,
     daemon_gid: u32,
     resolver: artifact_write::RealOwnerResolver,
     #[cfg(not(target_os = "macos"))]
@@ -915,7 +941,7 @@ impl AgentOps for RealAgentOps {
             .map_err(|e| io_error(&record_path(&agent), e))
     }
 
-    fn write_client(&self, client: &AgentClientConfig, account: &str) -> Result<(), EnrollError> {
+    fn write_client(&self, client: &AgentClientConfig) -> Result<(), EnrollError> {
         let agent = &client.agent;
         let rel = Path::new(agent.as_str()).join(maknae_config::AGENT_CLIENT_FILE);
         self.agents
@@ -929,28 +955,83 @@ impl AgentOps for RealAgentOps {
                     gid: self.daemon_gid,
                 },
             )
-            .map_err(|e| io_error(&Path::new(AGENTS_DIR).join(&rel), e))?;
-        let persona = persona_present(&self.agents, agent)?;
-        agent_access::grant(
-            &agent_access::Host,
+            .map(|_| ())
+            .map_err(|e| io_error(&Path::new(AGENTS_DIR).join(&rel), e))
+    }
+
+    fn grant_access(
+        &self,
+        agent: &AgentId,
+        account: &agent_access::Account,
+    ) -> Result<(), EnrollError> {
+        refresh_access(
+            &*self.runner,
             agent_access::Platform::HOST,
+            &self.root,
+            &self.agents,
+            agent,
             account,
-            &agent_access::grant_entries(agent, persona),
         )
     }
+}
+
+pub(crate) fn refresh_access(
+    r: &dyn agent_access::Run,
+    platform: agent_access::Platform,
+    root: &Path,
+    agents: &maknae_io::Anchor,
+    agent: &AgentId,
+    account: &agent_access::Account,
+) -> Result<(), EnrollError> {
+    let persona = persona_present(agents, agent)?;
+    agent_access::grant(
+        r,
+        platform,
+        account,
+        &agent_access::grant_entries(root, agent, persona),
+    )
+}
+
+pub(crate) fn enrolled_account(
+    agent: &AgentId,
+    record: Option<&AgentRecord>,
+) -> Result<agent_access::Account, EnrollError> {
+    record
+        .map(|r| agent_access::Account {
+            name: r.account.clone(),
+            uid: r.uid,
+        })
+        .ok_or_else(|| {
+            EnrollError::State(format!(
+                "agent {} is not enrolled on this host; there is no access to refresh",
+                agent.as_str()
+            ))
+        })
+}
+
+pub(crate) fn present_own_files(
+    agents: &maknae_io::Anchor,
+    agent: &AgentId,
+) -> Result<Vec<&'static str>, EnrollError> {
+    let entries = agents
+        .enumerate(Path::new(agent.as_str()), None)
+        .map_err(|e| io_error(&Path::new(AGENTS_DIR).join(agent.as_str()), e))?
+        .value;
+    Ok(agent_access::own_files()
+        .into_iter()
+        .filter(|f| {
+            entries
+                .iter()
+                .any(|e| e.name == *f && e.kind == maknae_io::Kind::File)
+        })
+        .collect())
 }
 
 pub(crate) fn persona_present(
     agents: &maknae_io::Anchor,
     agent: &AgentId,
 ) -> Result<bool, EnrollError> {
-    let entries = agents
-        .enumerate(Path::new(agent.as_str()), None)
-        .map_err(|e| io_error(&Path::new(AGENTS_DIR).join(agent.as_str()), e))?
-        .value;
-    Ok(entries
-        .iter()
-        .any(|e| e.name == maknae_config::PERSONA_FILE && e.kind == maknae_io::Kind::File))
+    Ok(present_own_files(agents, agent)?.contains(&maknae_config::PERSONA_FILE))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1053,6 +1134,11 @@ fn named_account(
 }
 
 pub(crate) fn agent_group_command(account: &str) -> String {
+    let account = if agent_access::account_name_ok(account) {
+        account
+    } else {
+        "<account>"
+    };
     let group = maknae_io::MAKNAE_AGENTS_GROUP;
     if cfg!(target_os = "macos") {
         format!("dseditgroup -o edit -a {account} -t user {group}")
@@ -1106,16 +1192,16 @@ fn admit_account(
 }
 
 fn check_account(
-    args: &AgentArgs,
+    account: &str,
     agent: &AgentId,
     host: &HostEnrollment,
     other_agents: &[(String, u32)],
 ) -> Result<u32, EnrollError> {
-    let acct = match maknae_io::user_by_name(&args.account)
-        .map_err(|e| owner_error(&format!("user {}", args.account), e))?
+    let acct = match maknae_io::user_by_name(account)
+        .map_err(|e| owner_error(&format!("user {account}"), e))?
     {
         Some(u) => maknae_io::host_account(u.uid.as_raw())
-            .map_err(|e| owner_error(&format!("user {}", args.account), e))?,
+            .map_err(|e| owner_error(&format!("user {account}"), e))?,
         None => None,
     };
     let maknae_gid = maknae_io::group_gid(maknae_io::MAKNAE_GROUP)
@@ -1129,7 +1215,7 @@ fn check_account(
         maknae_config::load_bindings(&Path::new(ETC_DIR).join(maknae_config::BINDINGS_FILE))
             .map_err(|e| EnrollError::Bindings(format!("bindings.yaml: {e}")))?;
     admit_account(
-        &args.account,
+        account,
         agent,
         acct,
         &HostAccounts {
@@ -1274,6 +1360,30 @@ where
     enroll_agent(&*ops, &plan, host, prior_record, prior_state).await
 }
 
+fn run_refresh_access(agent: &AgentId, locale: Locale) -> Result<String, EnrollError> {
+    agents_dir_check(agents_dir_kind()?)?;
+    let agents = open_dir(AGENTS_DIR, 0o022)?;
+    let _lock = agents.try_lock_exclusive().map_err(|e| match e {
+        IoError::Locked { .. } => {
+            EnrollError::State("another maknae enroll agent is running".to_string())
+        }
+        e => io_error(Path::new(AGENTS_DIR), e),
+    })?;
+    let (record, _) = read_records(&agents, agent)?;
+    let account = enrolled_account(agent, record.as_ref())?;
+    refresh_access(
+        &agent_access::Host,
+        agent_access::Platform::HOST,
+        Path::new(ETC_DIR),
+        &agents,
+        agent,
+        &account,
+    )?;
+    Ok(msg(locale, MsgId::EnrollAgentAccessRefreshed)
+        .replace("{agent}", agent.as_str())
+        .replace("{account}", &account.name))
+}
+
 pub(crate) async fn run_enroll_agent(
     args: &AgentArgs,
     locale: Locale,
@@ -1285,6 +1395,10 @@ pub(crate) async fn run_enroll_agent(
         .inspect_err(|_| errln!("{}", msg(locale, MsgId::EnrollPreflightFailed)))?;
 
     let agent = AgentId::parse(&args.id)?;
+    if args.refresh_access {
+        return run_refresh_access(&agent, locale);
+    }
+    let account = given(&args.account, "--account")?;
     let cidrs = BindCidrs::parse(&args.bind_cidr)?;
     check_mount("--approle-mount", &args.approle_mount)?;
 
@@ -1326,7 +1440,7 @@ pub(crate) async fn run_enroll_agent(
     let prior_state = read_state(&private, &agent)?;
     let plan = AgentPlan {
         agent: agent.clone(),
-        account: args.account.clone(),
+        account: account.clone(),
         uid: 0,
         mount: args.approle_mount.clone(),
         cidrs,
@@ -1335,7 +1449,7 @@ pub(crate) async fn run_enroll_agent(
         client,
     };
     let outcome = admit_then_enroll(
-        || check_account(args, &agent, &host, &other_agents),
+        || check_account(&account, &agent, &host, &other_agents),
         || async {
             #[cfg(target_os = "macos")]
             let team = platform_gate().await?;
@@ -1352,6 +1466,8 @@ pub(crate) async fn run_enroll_agent(
             Ok(Box::new(RealAgentOps {
                 vault: RealVault { client, private },
                 agents,
+                root: PathBuf::from(ETC_DIR),
+                runner: Box::new(agent_access::Host),
                 daemon_gid,
                 resolver,
                 #[cfg(not(target_os = "macos"))]
@@ -1591,15 +1707,28 @@ pub(crate) mod tests {
         fn write_client(
             &self,
             client: &maknae_config::AgentClientConfig,
-            account: &str,
         ) -> Result<(), EnrollError> {
-            self.log.borrow_mut().push(format!("client {account}"));
+            self.log.borrow_mut().push("client".into());
             self.check("client")?;
             self.clients.borrow_mut().push(client.clone());
             self.written
                 .borrow_mut()
                 .extend_from_slice(agent_client_yaml(client).as_bytes());
             Ok(())
+        }
+
+        fn grant_access(
+            &self,
+            agent: &AgentId,
+            account: &agent_access::Account,
+        ) -> Result<(), EnrollError> {
+            self.log.borrow_mut().push(format!(
+                "grant {} {}:{}",
+                agent.as_str(),
+                account.name,
+                account.uid
+            ));
+            self.check("grant")
         }
     }
 
@@ -1759,9 +1888,10 @@ pub(crate) mod tests {
                 "seal",
                 "list",
                 "record",
-                "client hobi-svc",
+                "client",
                 "state",
                 "state",
+                "grant hobi hobi-svc:990",
             ])
         );
         assert_eq!(*fake.clients.borrow(), vec![client_config()]);
@@ -1883,12 +2013,13 @@ pub(crate) mod tests {
                 "seal",
                 "list",
                 "record",
-                "client hobi-svc",
+                "client",
                 "state",
                 "destroy:a",
                 "destroy:p",
                 "destroy:r",
                 "state",
+                "grant hobi hobi-svc:990",
             ])
         );
         assert_eq!(
@@ -1921,7 +2052,12 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(
             fake.log()[9..],
-            strings(&["destroy:acc-stale", "destroy:gone", "state"])[..]
+            strings(&[
+                "destroy:acc-stale",
+                "destroy:gone",
+                "state",
+                "grant hobi hobi-svc:990"
+            ])[..]
         );
         assert_eq!(fake.states().last(), Some(&state(&["acc-new"], &[], &[])));
         assert_eq!(out.retired, 2);
@@ -1939,11 +2075,12 @@ pub(crate) mod tests {
         assert_eq!(
             fake.log()[7..],
             strings(&[
-                "client hobi-svc",
+                "client",
                 "state",
                 "destroy:a",
                 "destroy:b",
-                "state"
+                "state",
+                "grant hobi hobi-svc:990"
             ])[..]
         );
         assert_eq!(
@@ -2080,13 +2217,26 @@ pub(crate) mod tests {
             "{e:?}"
         );
         assert!(!fake.log().iter().any(|l| l.starts_with("destroy:")));
-        assert_eq!(
-            fake.log().last().map(String::as_str),
-            Some("client hobi-svc")
-        );
+        assert_eq!(fake.log().last().map(String::as_str), Some("client"));
         let last = fake.states().last().cloned().unwrap();
         assert!(last.pending.contains(&"acc-new".to_string()));
         assert_eq!(last.live, strings(&["a"]));
+    }
+
+    #[tokio::test]
+    async fn a_grant_failure_comes_after_a_complete_enrollment() {
+        let fake = Fake::failing(&["grant"]);
+        let e = rotate(&fake, &["a"], &[], &[]).await.unwrap_err();
+        assert!(
+            matches!(&e, EnrollError::State(m) if m == "grant failed"),
+            "{e:?}"
+        );
+        assert_eq!(
+            fake.log().last().map(String::as_str),
+            Some("grant hobi hobi-svc:990")
+        );
+        assert!(fake.log().contains(&"destroy:a".to_string()));
+        assert_eq!(fake.states().last(), Some(&state(&["acc-new"], &[], &[])));
     }
 
     #[tokio::test]
@@ -2215,10 +2365,11 @@ pub(crate) mod tests {
             strings(&[
                 "list",
                 "record",
-                "client hobi-svc",
+                "client",
                 "state",
                 "destroy:stray",
-                "state"
+                "state",
+                "grant hobi hobi-svc:990"
             ])[..]
         );
         assert_eq!(
@@ -2673,6 +2824,39 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn refresh_access_needs_only_the_id_and_takes_nothing_else() {
+        use clap::Parser;
+        let got = Cli::try_parse_from(["maknae", "hobi", "--refresh-access"]).unwrap();
+        assert!(got.agent.refresh_access);
+        assert_eq!(got.agent.account, None);
+        assert!(got.agent.bind_cidr.is_empty());
+        assert!(Cli::try_parse_from(["maknae", "--refresh-access"]).is_err());
+        for extra in [
+            &["--account", "hobi-svc"][..],
+            &["--bind-cidr", "10.0.0.5"],
+            &["--provider", "openai"],
+            &["--model", "m"],
+            &["--key-subpath", "k"],
+            &["--key-field", "f"],
+            &["--context-tokens", "1"],
+            &["--output-tokens", "1"],
+            &["--persona", "self"],
+            &["--rotate"],
+            &["--token-file", "/t"],
+            &["--role", "guest"],
+            &["--approle-mount", "m"],
+        ] {
+            let argv: Vec<&str> = ["maknae", "hobi", "--refresh-access"]
+                .into_iter()
+                .chain(extra.iter().copied())
+                .collect();
+            assert!(Cli::try_parse_from(argv).is_err(), "{extra:?}");
+        }
+        assert!(Cli::try_parse_from(["maknae", "hobi"]).is_err());
+        assert!(parse_args(&["--refresh-access"]).is_err());
+    }
+
+    #[test]
     fn the_role_defaults_to_user() {
         assert_eq!(
             AgentRole::from(parse_args(&[]).unwrap().role),
@@ -2811,8 +2995,11 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(
-            fake.log().last().map(String::as_str),
-            Some("set_entity_disabled maknae-agent-hobi false")
+            fake.log()[fake.log().len() - 2..],
+            strings(&[
+                "set_entity_disabled maknae-agent-hobi false",
+                "grant hobi hobi-svc:990"
+            ])[..]
         );
     }
 
@@ -2974,11 +3161,25 @@ pub(crate) mod tests {
     }
 
     fn real_ops(tag: &str) -> ([Scratch; 2], RealAgentOps) {
+        let (scratch, ops, _) = real_ops_with(tag);
+        (scratch, ops)
+    }
+
+    fn real_ops_with(
+        tag: &str,
+    ) -> (
+        [Scratch; 2],
+        RealAgentOps,
+        std::rc::Rc<agent_access::tests::FakeHost>,
+    ) {
         let (d, agents) = scratch_anchor(&format!("{tag}-agents"));
         let (p, private) = scratch_anchor(&format!("{tag}-private"));
+        let host = std::rc::Rc::new(agent_access::tests::FakeHost::default());
         let ops = RealAgentOps {
             vault: unreachable_vault(tag, private),
             agents,
+            root: d.to_path_buf(),
+            runner: Box::new(host.clone()),
             daemon_gid: nix::unistd::getegid().as_raw(),
             resolver: artifact_write::RealOwnerResolver {
                 operator_uid: nix::unistd::geteuid().as_raw(),
@@ -2989,7 +3190,7 @@ pub(crate) mod tests {
             #[cfg(target_os = "macos")]
             team: String::new(),
         };
-        ([d, p], ops)
+        ([d, p], ops, host)
     }
 
     #[tokio::test]
@@ -3043,15 +3244,12 @@ pub(crate) mod tests {
     #[test]
     fn write_client_publishes_a_root_group_0640_file_or_refuses() {
         use std::os::unix::fs::PermissionsExt;
-        let ([d, _], ops) = real_ops("write-client");
+        let ([d, _], ops, host) = real_ops_with("write-client");
         std::fs::create_dir(d.join("hobi")).unwrap();
-        let got = ops.write_client(&client_config(), "maknae-test-no-such-account");
+        let got = ops.write_client(&client_config());
         let path = d.join("hobi").join(maknae_config::AGENT_CLIENT_FILE);
         if running_as_root() {
-            assert!(
-                matches!(&got, Err(EnrollError::AgentAccess { grant: true, .. })),
-                "the scratch tree is not /etc/maknae: {got:?}"
-            );
+            got.unwrap();
             let text = std::fs::read_to_string(&path).unwrap();
             assert_eq!(
                 maknae_config::parse_agent_client(&hobi_id(), &text),
@@ -3062,6 +3260,94 @@ pub(crate) mod tests {
         } else {
             assert!(matches!(&got, Err(EnrollError::Io { .. })), "{got:?}");
             assert!(!path.exists());
+        }
+        assert!(host.calls().is_empty(), "writing the file grants nothing");
+    }
+
+    #[test]
+    fn grant_access_runs_on_the_injected_runner_below_the_configured_root() {
+        let ([d, _], ops, host) = real_ops_with("grant-access");
+        std::fs::create_dir(d.join("hobi")).unwrap();
+        let account = agent_access::Account {
+            name: "hobi-svc".into(),
+            uid: 990,
+        };
+        ops.grant_access(&hobi_id(), &account).unwrap();
+        let calls = host.calls();
+        assert_eq!(calls.len(), 2 * 9, "{calls:?}");
+        let root = d.display().to_string();
+        for c in &calls {
+            assert!(c.ends_with(&root) || c.contains(&format!("{root}/")), "{c}");
+            assert!(!c.contains(" /etc/maknae"), "{c}");
+        }
+        assert!(!calls.iter().any(|c| c.contains("persona.md")));
+        write_0640(
+            &d.join("hobi").join(maknae_config::PERSONA_FILE),
+            "You are hobi.",
+        );
+        ops.grant_access(&hobi_id(), &account).unwrap();
+        assert_eq!(host.calls().len(), 2 * 9 + 2 * 10);
+    }
+
+    #[test]
+    fn refresh_access_refuses_an_unenrolled_agent_and_otherwise_only_grants() {
+        let e = enrolled_account(&hobi_id(), None).unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("agent hobi is not enrolled on this host"),
+            "{e}"
+        );
+        let r = record();
+        assert_eq!(
+            enrolled_account(&hobi_id(), Some(&r)).unwrap(),
+            agent_access::Account {
+                name: "hobi-svc".into(),
+                uid: 990
+            }
+        );
+        let (d, agents) = scratch_anchor("refresh");
+        std::fs::create_dir(d.join("hobi")).unwrap();
+        write_0640(
+            &d.join("hobi").join(maknae_config::ENROLLMENT_FILE),
+            &r.to_yaml(),
+        );
+        let host = agent_access::tests::FakeHost::default();
+        refresh_access(
+            &host,
+            agent_access::Platform::Linux,
+            Path::new("/srv/cfg"),
+            &agents,
+            &hobi_id(),
+            &enrolled_account(&hobi_id(), Some(&r)).unwrap(),
+        )
+        .unwrap();
+        let mut want = Vec::new();
+        for e in agent_access::grant_entries(Path::new("/srv/cfg"), &hobi_id(), false) {
+            let p = e.path.display();
+            let perms = if e.dir { "r-x" } else { "r--" };
+            want.push(format!(
+                "/usr/bin/setfacl -P | -n | -m | u:990:{perms} | {p}"
+            ));
+            want.push(format!("/usr/bin/getfacl -P | -p | -n | {p}"));
+        }
+        assert_eq!(host.calls(), want);
+        let mut names: Vec<_> = std::fs::read_dir(d.join("hobi"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(names, [maknae_config::ENROLLMENT_FILE]);
+    }
+
+    #[test]
+    fn the_group_hint_never_prints_an_unsafe_account_name() {
+        assert!(agent_group_command("hobi-svc").contains("hobi-svc"));
+        for bad in ["-rf", "hobi; rm -rf /", "a b", ""] {
+            let hint = agent_group_command(bad);
+            assert!(hint.contains("<account>"), "{bad:?}: {hint}");
+            if !bad.is_empty() {
+                assert!(!hint.contains(bad), "{bad:?}: {hint}");
+            }
         }
     }
 
@@ -3168,9 +3454,7 @@ pub(crate) mod tests {
 
     #[test]
     fn check_account_refuses_an_account_the_host_does_not_have() {
-        let mut args = parse_args(&[]).unwrap();
-        args.account = "maknae-no-such-user-609".into();
-        let got = check_account(&args, &hobi_id(), &host(), &[]);
+        let got = check_account("maknae-no-such-user-609", &hobi_id(), &host(), &[]);
         assert!(got.is_err(), "{got:?}");
     }
 

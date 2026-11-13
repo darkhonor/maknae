@@ -3,9 +3,13 @@ use maknae_io::program::{command, Program};
 use maknae_vault::agent_enroll::AgentId;
 use std::path::{Path, PathBuf};
 
-const ETC_DIR: &str = "/etc/maknae";
-const TLS_DIR: &str = "/etc/maknae/tls";
+const TLS_DIR: &str = "tls";
 const TLS_FILES: [&str; 3] = ["maknae-root-ca.crt", "maknae-int-ca.crt", "vault-ca.crt"];
+const OWN_FILES: [&str; 3] = [
+    maknae_config::AGENT_CLIENT_FILE,
+    maknae_config::ENROLLMENT_FILE,
+    maknae_config::PERSONA_FILE,
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Platform {
@@ -19,6 +23,12 @@ impl Platform {
     } else {
         Platform::Linux
     };
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Account {
+    pub name: String,
+    pub uid: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,40 +51,51 @@ fn file(path: impl Into<PathBuf>) -> Entry {
     }
 }
 
-fn agent_dir(agent: &AgentId) -> PathBuf {
-    Path::new(super::agent::AGENTS_DIR).join(agent.as_str())
-}
-
-/// Every entry the Agent Daemon's account reads through: the directories its anchored
-/// reader opens, its own files, and the three certificates `AgentLogin` loads.
-pub(crate) fn grant_entries(agent: &AgentId, persona: bool) -> Vec<Entry> {
-    let own = agent_dir(agent);
-    let mut out = vec![
-        dir(ETC_DIR),
-        dir(super::agent::AGENTS_DIR),
-        dir(&own),
-        dir(TLS_DIR),
-        file(own.join(maknae_config::AGENT_CLIENT_FILE)),
-        file(own.join(maknae_config::ENROLLMENT_FILE)),
-    ];
-    if persona {
-        out.push(file(own.join(maknae_config::PERSONA_FILE)));
-    }
-    out.extend(TLS_FILES.iter().map(|f| file(Path::new(TLS_DIR).join(f))));
+/// Every entry the Agent Daemon's account reads through, below the configuration root:
+/// the directories its anchored reader opens, its own files, and the certificates
+/// `AgentLogin` loads.
+pub(crate) fn grant_entries(root: &Path, agent: &AgentId, persona: bool) -> Vec<Entry> {
+    let agents = root.join(maknae_config::AGENTS_DIR);
+    let own = agents.join(agent.as_str());
+    let tls = root.join(TLS_DIR);
+    let mut out = vec![dir(root), dir(&agents), dir(&own), dir(&tls)];
+    out.extend(
+        OWN_FILES
+            .iter()
+            .filter(|f| persona || **f != maknae_config::PERSONA_FILE)
+            .map(|f| file(own.join(f))),
+    );
+    out.extend(TLS_FILES.iter().map(|f| file(tls.join(f))));
     out
 }
 
-/// The entries that outlive `remove-agent`: everything but the two files it deletes.
-pub(crate) fn kept_entries(agent: &AgentId, persona: bool) -> Vec<Entry> {
-    let own = agent_dir(agent);
-    let gone = [
-        own.join(maknae_config::AGENT_CLIENT_FILE),
-        own.join(maknae_config::ENROLLMENT_FILE),
-    ];
-    grant_entries(agent, persona)
+/// [`grant_entries`] less the agent's own files that are not `present`.
+pub(crate) fn revoke_entries(root: &Path, agent: &AgentId, present: &[&str]) -> Vec<Entry> {
+    let own = root.join(maknae_config::AGENTS_DIR).join(agent.as_str());
+    grant_entries(root, agent, true)
         .into_iter()
-        .filter(|e| !gone.contains(&e.path))
+        .filter(|e| {
+            e.path.parent() != Some(own.as_path())
+                || e.dir
+                || e.path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| present.contains(&n))
+        })
         .collect()
+}
+
+pub(crate) fn own_files() -> [&'static str; 3] {
+    OWN_FILES
+}
+
+/// An account name that is safe to write into an ACE or a printed command.
+pub(crate) fn account_name_ok(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('-')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -110,48 +131,91 @@ fn path_arg(p: &Path) -> String {
     p.to_string_lossy().into_owned()
 }
 
-fn linux_spec(account: &str, e: &Entry) -> String {
-    format!("u:{account}:{}", if e.dir { "r-x" } else { "r--" })
+fn perms(e: &Entry) -> &'static str {
+    if e.dir {
+        "r-x"
+    } else {
+        "r--"
+    }
 }
 
-fn macos_ace(account: &str, e: &Entry) -> String {
+fn macos_ace(account: &Account, e: &Entry) -> String {
     format!(
-        "user:{account} allow {}",
+        "user:{} allow {}",
+        account.name,
         if e.dir { "list,search" } else { "read" }
     )
 }
 
-fn entry_text(platform: Platform, account: &str, e: &Entry) -> String {
+fn entry_text(platform: Platform, account: &Account, e: &Entry) -> String {
     match platform {
-        Platform::Linux => linux_spec(account, e),
+        Platform::Linux => format!("u:{}:{}", account.uid, perms(e)),
         Platform::Macos => macos_ace(account, e),
     }
 }
 
-fn grant_call(platform: Platform, account: &str, e: &Entry) -> Call {
+fn grant_call(platform: Platform, account: &Account, e: &Entry) -> Call {
     match platform {
         Platform::Linux => (
             Program::Setfacl,
-            vec!["-m".into(), linux_spec(account, e), path_arg(&e.path)],
+            vec![
+                "-P".into(),
+                "-n".into(),
+                "-m".into(),
+                entry_text(platform, account, e),
+                path_arg(&e.path),
+            ],
         ),
         Platform::Macos => (
             Program::Chmod,
-            vec!["+a".into(), macos_ace(account, e), path_arg(&e.path)],
+            vec![
+                "-h".into(),
+                "+a".into(),
+                macos_ace(account, e),
+                path_arg(&e.path),
+            ],
         ),
     }
 }
 
-fn grant_readback(platform: Platform, e: &Entry) -> Call {
+fn remove_call(platform: Platform, account: &Account, e: &Entry) -> Call {
     match platform {
-        Platform::Linux => (Program::Getfacl, vec!["-p".into(), path_arg(&e.path)]),
+        Platform::Linux => (
+            Program::Setfacl,
+            vec![
+                "-P".into(),
+                "-n".into(),
+                "-x".into(),
+                format!("u:{}", account.uid),
+                path_arg(&e.path),
+            ],
+        ),
+        Platform::Macos => (
+            Program::Chmod,
+            vec![
+                "-h".into(),
+                "-a".into(),
+                macos_ace(account, e),
+                path_arg(&e.path),
+            ],
+        ),
+    }
+}
+
+fn readback(platform: Platform, e: &Entry) -> Call {
+    match platform {
+        Platform::Linux => (
+            Program::Getfacl,
+            vec!["-P".into(), "-p".into(), "-n".into(), path_arg(&e.path)],
+        ),
         Platform::Macos => (Program::Ls, vec!["-led".into(), path_arg(&e.path)]),
     }
 }
 
-/// `getfacl -p` renders `u:NAME:r-x` as the whole line `user:NAME:r-x`; a mask-limited
-/// entry carries a `#effective:` suffix and does not match.
-fn linux_granted(account: &str, e: &Entry, out: &str) -> bool {
-    let want = format!("user:{account}:{}", if e.dir { "r-x" } else { "r--" });
+/// `getfacl -n` renders `u:UID:r-x` as the whole line `user:UID:r-x`; an entry the mask
+/// limits carries an `#effective:` suffix and does not match.
+fn linux_granted(uid: u32, e: &Entry, out: &str) -> bool {
+    let want = format!("user:{uid}:{}", perms(e));
     out.lines().any(|l| l.trim() == want)
 }
 
@@ -163,9 +227,19 @@ fn macos_listed(ace: &str, out: &str) -> bool {
     })
 }
 
-fn granted(platform: Platform, account: &str, e: &Entry, out: &str) -> bool {
+fn granted(platform: Platform, account: &Account, e: &Entry, out: &str) -> bool {
     match platform {
-        Platform::Linux => linux_granted(account, e, out),
+        Platform::Linux => linux_granted(account.uid, e, out),
+        Platform::Macos => macos_listed(&macos_ace(account, e), out),
+    }
+}
+
+fn held(platform: Platform, account: &Account, e: &Entry, out: &str) -> bool {
+    match platform {
+        Platform::Linux => {
+            let who = format!("user:{}:", account.uid);
+            out.lines().any(|l| l.starts_with(&who))
+        }
         Platform::Macos => macos_listed(&macos_ace(account, e), out),
     }
 }
@@ -179,16 +253,27 @@ fn refusal(grant: bool, e: &Entry, entry: String, detail: String) -> EnrollError
     }
 }
 
-fn ran(r: &impl Run, (program, args): Call) -> Result<Ran, String> {
+fn ran(r: &dyn Run, (program, args): Call) -> Result<Ran, String> {
     r.run(program, &args)
 }
 
+fn check_name(platform: Platform, account: &Account) -> Result<(), EnrollError> {
+    if platform == Platform::Macos && !account_name_ok(&account.name) {
+        return Err(EnrollError::Owner(format!(
+            "account {:?} is not 1 or more of [A-Za-z0-9._-] starting with a letter, digit, '.' or '_'; it cannot be named in an ACE",
+            account.name
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn grant(
-    r: &impl Run,
+    r: &dyn Run,
     platform: Platform,
-    account: &str,
+    account: &Account,
     entries: &[Entry],
 ) -> Result<(), EnrollError> {
+    check_name(platform, account)?;
     for e in entries {
         let entry = entry_text(platform, account, e);
         match ran(r, grant_call(platform, account, e)) {
@@ -196,7 +281,7 @@ pub(crate) fn grant(
             Ok(out) => return Err(refusal(true, e, entry, out.stderr)),
             Err(why) => return Err(refusal(true, e, entry, why)),
         }
-        match ran(r, grant_readback(platform, e)) {
+        match ran(r, readback(platform, e)) {
             Ok(out) if out.ok && granted(platform, account, e, &out.stdout) => {}
             Ok(_) => {
                 return Err(refusal(
@@ -212,65 +297,37 @@ pub(crate) fn grant(
     Ok(())
 }
 
-fn revoke_calls(platform: Platform, account: &str, uid: u32, e: &Entry) -> (String, Call, Call) {
-    match platform {
-        Platform::Linux => (
-            format!("u:{uid}"),
-            (
-                Program::Getfacl,
-                vec![
-                    "-p".into(),
-                    "-n".into(),
-                    "--omit-header".into(),
-                    path_arg(&e.path),
-                ],
-            ),
-            (
-                Program::Setfacl,
-                vec!["-x".into(), format!("u:{uid}"), path_arg(&e.path)],
-            ),
-        ),
-        Platform::Macos => {
-            let ace = macos_ace(account, e);
-            (
-                ace.clone(),
-                grant_readback(platform, e),
-                (Program::Chmod, vec!["-a".into(), ace, path_arg(&e.path)]),
-            )
-        }
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Revoked {
+    Done,
+    Unresolved,
 }
 
-fn held(platform: Platform, entry: &str, uid: u32, out: &str) -> bool {
-    match platform {
-        Platform::Linux => {
-            let who = format!("user:{uid}:");
-            out.lines().any(|l| l.starts_with(&who))
-        }
-        Platform::Macos => macos_listed(entry, out),
-    }
-}
-
-/// Linux revokes by uid, so an entry left by an account deleted since enrollment is still
-/// found and removed, and a later account given that uid inherits nothing.
 pub(crate) fn revoke(
-    r: &impl Run,
+    r: &dyn Run,
     platform: Platform,
-    account: &str,
-    uid: u32,
+    account: &Account,
+    resolves: bool,
     entries: &[Entry],
-) -> Result<(), EnrollError> {
+) -> Result<Revoked, EnrollError> {
+    if platform == Platform::Macos && !resolves {
+        return Ok(Revoked::Unresolved);
+    }
+    check_name(platform, account)?;
     for e in entries {
-        let (entry, look, remove) = revoke_calls(platform, account, uid, e);
-        let still_held = || match ran(r, look.clone()) {
-            Ok(out) if out.ok => Ok(held(platform, &entry, uid, &out.stdout)),
+        let entry = match platform {
+            Platform::Linux => format!("u:{}", account.uid),
+            Platform::Macos => macos_ace(account, e),
+        };
+        let still_held = || match ran(r, readback(platform, e)) {
+            Ok(out) if out.ok => Ok(held(platform, account, e, &out.stdout)),
             Ok(out) => Err(refusal(false, e, entry.clone(), out.stderr)),
             Err(why) => Err(refusal(false, e, entry.clone(), why)),
         };
         if !still_held()? {
             continue;
         }
-        match ran(r, remove) {
+        match ran(r, remove_call(platform, account, e)) {
             Ok(out) if out.ok => {}
             Ok(out) => return Err(refusal(false, e, entry.clone(), out.stderr)),
             Err(why) => return Err(refusal(false, e, entry.clone(), why)),
@@ -284,11 +341,11 @@ pub(crate) fn revoke(
             ));
         }
     }
-    Ok(())
+    Ok(Revoked::Done)
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::collections::{BTreeMap, BTreeSet};
@@ -297,20 +354,50 @@ mod tests {
         AgentId::parse("hobi").unwrap()
     }
 
-    const ACCT: &str = "hobi-svc";
-    const UID: u32 = 990;
+    const ROOT: &str = "/etc/maknae";
 
-    /// A host whose ACL state the calls change, so a read-back sees what was written.
+    fn acct() -> Account {
+        Account {
+            name: "hobi-svc".into(),
+            uid: 990,
+        }
+    }
+
+    #[derive(Default, Clone)]
+    struct Acl {
+        users: BTreeMap<String, String>,
+        mask: Option<String>,
+        aces: BTreeSet<String>,
+    }
+
+    const GROUP: &str = "r-x";
+
+    fn union(a: &str, b: &str) -> String {
+        a.chars()
+            .zip(b.chars())
+            .map(|(x, y)| if x != '-' { x } else { y })
+            .collect()
+    }
+
+    fn and(a: &str, b: &str) -> String {
+        a.chars()
+            .zip(b.chars())
+            .map(|(x, y)| if x != '-' && y != '-' { x } else { '-' })
+            .collect()
+    }
+
+    /// A host whose ACL state the calls change, mask included, so a read-back sees what
+    /// was written.
     #[derive(Default)]
-    struct FakeHost {
+    pub(crate) struct FakeHost {
         calls: RefCell<Vec<String>>,
-        acl: RefCell<BTreeMap<String, BTreeSet<String>>>,
+        acl: RefCell<BTreeMap<String, Acl>>,
         refuse: RefCell<BTreeSet<String>>,
         deaf: RefCell<BTreeSet<String>>,
     }
 
     impl FakeHost {
-        fn calls(&self) -> Vec<String> {
+        pub(crate) fn calls(&self) -> Vec<String> {
             self.calls.borrow().clone()
         }
 
@@ -324,14 +411,42 @@ mod tests {
             self
         }
 
-        fn holding(self, path: &str, line: &str) -> Self {
+        fn user(self, path: &str, uid: &str, perms: &str) -> Self {
             self.acl
                 .borrow_mut()
                 .entry(path.into())
                 .or_default()
-                .insert(line.into());
+                .users
+                .insert(uid.into(), perms.into());
             self
         }
+
+        fn mask(self, path: &str, mask: &str) -> Self {
+            self.acl.borrow_mut().entry(path.into()).or_default().mask = Some(mask.into());
+            self
+        }
+
+        fn ace(self, path: &str, ace: &str) -> Self {
+            self.acl
+                .borrow_mut()
+                .entry(path.into())
+                .or_default()
+                .aces
+                .insert(ace.into());
+            self
+        }
+
+        fn state(&self, path: &str) -> Acl {
+            self.acl.borrow().get(path).cloned().unwrap_or_default()
+        }
+    }
+
+    fn recalc(acl: &mut Acl) {
+        acl.mask = Some(
+            acl.users
+                .values()
+                .fold(GROUP.to_string(), |m, p| union(&m, p)),
+        );
     }
 
     impl Run for FakeHost {
@@ -347,8 +462,9 @@ mod tests {
             }
             let path = args.last().unwrap().clone();
             let deaf = self.deaf.borrow().contains(&path);
-            let mut acl = self.acl.borrow_mut();
-            let lines = acl.entry(path.clone()).or_default();
+            let keep_mask = args.iter().any(|a| a == "-n");
+            let mut all = self.acl.borrow_mut();
+            let acl = all.entry(path.clone()).or_default();
             let ok = |stdout: String| {
                 Ok(Ran {
                     ok: true,
@@ -356,33 +472,56 @@ mod tests {
                     stderr: String::new(),
                 })
             };
-            match (program, args[0].as_str()) {
-                (Program::Setfacl, "-m") if !deaf => {
-                    let (who, perms) = args[1].rsplit_once(':').unwrap();
-                    let name = who.strip_prefix("u:").unwrap();
-                    lines.insert(format!("user:{name}:{perms}"));
+            let op = args
+                .iter()
+                .find(|a| ["-m", "-x", "+a", "-a"].contains(&a.as_str()));
+            match (program, op.map(String::as_str)) {
+                (Program::Setfacl, Some("-m")) if !deaf => {
+                    let spec = &args[args.len() - 2];
+                    let (who, p) = spec.rsplit_once(':').unwrap();
+                    acl.users
+                        .insert(who.strip_prefix("u:").unwrap().into(), p.into());
+                    if !keep_mask || acl.mask.is_none() {
+                        recalc(acl);
+                    }
                     ok(String::new())
                 }
-                (Program::Setfacl, "-x") => {
-                    let who = format!("user:{}:", args[1].strip_prefix("u:").unwrap());
-                    lines.retain(|l| !l.starts_with(&who));
+                (Program::Setfacl, Some("-x")) => {
+                    let spec = &args[args.len() - 2];
+                    acl.users.remove(spec.strip_prefix("u:").unwrap());
+                    if !keep_mask {
+                        recalc(acl);
+                    }
                     ok(String::new())
                 }
-                (Program::Getfacl, _) => ok(format!(
-                    "# file: {path}\nuser::rwx\n{}\ngroup::r-x\nmask::r-x\nother::---\n",
-                    lines.iter().cloned().collect::<Vec<_>>().join("\n")
-                )),
-                (Program::Chmod, "+a") if !deaf => {
-                    lines.insert(args[1].clone());
+                (Program::Getfacl, _) => {
+                    let mut out = format!("# file: {path}\n# owner: 0\nuser::rwx\n");
+                    for (u, p) in &acl.users {
+                        match &acl.mask {
+                            Some(m) if and(p, m) != *p => {
+                                out.push_str(&format!("user:{u}:{p}\t#effective:{}\n", and(p, m)))
+                            }
+                            _ => out.push_str(&format!("user:{u}:{p}\n")),
+                        }
+                    }
+                    out.push_str(&format!("group::{GROUP}\n"));
+                    if let Some(m) = &acl.mask {
+                        out.push_str(&format!("mask::{m}\n"));
+                    }
+                    out.push_str("other::---\n");
+                    ok(out)
+                }
+                (Program::Chmod, Some("+a")) if !deaf => {
+                    acl.aces.insert(args[args.len() - 2].clone());
                     ok(String::new())
                 }
-                (Program::Chmod, "-a") => {
-                    lines.remove(&args[1]);
+                (Program::Chmod, Some("-a")) => {
+                    acl.aces.remove(&args[args.len() - 2]);
                     ok(String::new())
                 }
                 (Program::Ls, _) => ok(format!(
                     "drwxr-x---+ 3 root  wheel  96 Nov 13 10:00 {path}\n{}",
-                    lines
+                    acl.aces
                         .iter()
                         .enumerate()
                         .map(|(i, l)| format!(" {i}: {l}\n"))
@@ -390,6 +529,12 @@ mod tests {
                 )),
                 _ => ok(String::new()),
             }
+        }
+    }
+
+    impl Run for std::rc::Rc<FakeHost> {
+        fn run(&self, program: Program, args: &[String]) -> Result<Ran, String> {
+            (**self).run(program, args)
         }
     }
 
@@ -401,9 +546,9 @@ mod tests {
     }
 
     #[test]
-    fn the_grant_covers_exactly_what_the_daemon_reads() {
+    fn the_grant_covers_exactly_what_the_daemon_reads_below_the_root() {
         assert_eq!(
-            paths(&grant_entries(&hobi(), true)),
+            paths(&grant_entries(Path::new(ROOT), &hobi(), true)),
             [
                 ("/etc/maknae", true),
                 ("/etc/maknae/agents", true),
@@ -418,80 +563,151 @@ mod tests {
             ]
             .map(|(p, d)| (p.to_string(), d))
         );
-        let without = paths(&grant_entries(&hobi(), false));
+        let without = paths(&grant_entries(Path::new(ROOT), &hobi(), false));
         assert_eq!(without.len(), 9);
         assert!(!without.iter().any(|(p, _)| p.ends_with("persona.md")));
+        let elsewhere = grant_entries(Path::new("/srv/cfg"), &hobi(), true);
+        assert!(elsewhere.iter().all(|e| e.path.starts_with("/srv/cfg")));
     }
 
     #[test]
     fn no_entry_is_ever_on_private_or_another_agent() {
-        for persona in [true, false] {
-            for e in grant_entries(&hobi(), persona)
-                .iter()
-                .chain(&kept_entries(&hobi(), persona))
-            {
-                let p = e.path.display().to_string();
-                assert!(!p.starts_with(super::super::agent::PRIVATE_DIR), "{p}");
-                assert!(!p.contains("private"), "{p}");
-                assert!(
-                    !p.starts_with("/etc/maknae/agents/")
-                        || p.starts_with("/etc/maknae/agents/hobi"),
-                    "{p}"
-                );
-            }
+        for e in grant_entries(Path::new(ROOT), &hobi(), true)
+            .iter()
+            .chain(&revoke_entries(Path::new(ROOT), &hobi(), &own_files()))
+        {
+            let p = e.path.display().to_string();
+            assert!(!p.contains("private"), "{p}");
+            assert!(
+                !p.starts_with("/etc/maknae/agents/") || p.starts_with("/etc/maknae/agents/hobi"),
+                "{p}"
+            );
         }
     }
 
     #[test]
-    fn kept_entries_drop_only_the_files_remove_agent_deletes() {
-        let kept = paths(&kept_entries(&hobi(), true));
-        let all = paths(&grant_entries(&hobi(), true));
-        let dropped: Vec<_> = all.iter().filter(|e| !kept.contains(e)).collect();
+    fn revoke_entries_are_the_grant_entries_less_absent_own_files() {
+        let root = Path::new(ROOT);
+        assert_eq!(
+            revoke_entries(root, &hobi(), &own_files()),
+            grant_entries(root, &hobi(), true)
+        );
+        let some = paths(&revoke_entries(
+            root,
+            &hobi(),
+            &[maknae_config::ENROLLMENT_FILE],
+        ));
+        let all = paths(&grant_entries(root, &hobi(), true));
+        let dropped: Vec<_> = all.iter().filter(|e| !some.contains(e)).collect();
         assert_eq!(
             dropped,
             [
                 &("/etc/maknae/agents/hobi/agent.yaml".to_string(), false),
-                &("/etc/maknae/agents/hobi/enrollment.yaml".to_string(), false),
+                &("/etc/maknae/agents/hobi/persona.md".to_string(), false),
             ]
         );
-        assert_eq!(kept.len(), all.len() - 2);
+        let none = paths(&revoke_entries(root, &hobi(), &[]));
+        assert_eq!(none.len(), 7);
+        assert!(none.contains(&("/etc/maknae/agents/hobi".to_string(), true)));
     }
 
     #[test]
-    fn linux_grants_each_entry_with_setfacl_and_reads_it_back() {
+    fn linux_grants_each_entry_by_uid_without_following_links_or_widening_the_mask() {
         let host = FakeHost::default();
-        let entries = grant_entries(&hobi(), true);
-        grant(&host, Platform::Linux, ACCT, &entries).unwrap();
+        let entries = grant_entries(Path::new(ROOT), &hobi(), true);
+        grant(&host, Platform::Linux, &acct(), &entries).unwrap();
         let mut want = Vec::new();
         for e in &entries {
-            let perms = if e.dir { "r-x" } else { "r--" };
             let p = e.path.display();
-            want.push(format!("/usr/bin/setfacl -m | u:{ACCT}:{perms} | {p}"));
-            want.push(format!("/usr/bin/getfacl -p | {p}"));
+            want.push(format!(
+                "/usr/bin/setfacl -P | -n | -m | u:990:{} | {p}",
+                perms(e)
+            ));
+            want.push(format!("/usr/bin/getfacl -P | -p | -n | {p}"));
         }
         assert_eq!(host.calls(), want);
     }
 
     #[test]
-    fn macos_grants_each_entry_with_chmod_and_reads_it_back() {
+    fn a_linux_grant_never_widens_an_entry_the_mask_held_back() {
+        let host = FakeHost::default()
+            .user(ROOT, "1234", "rwx")
+            .mask(ROOT, "r-x");
+        grant(&host, Platform::Linux, &acct(), &[dir(ROOT)]).unwrap();
+        let after = host.state(ROOT);
+        assert_eq!(after.mask.as_deref(), Some("r-x"));
+        assert_eq!(after.users.get("990").map(String::as_str), Some("r-x"));
+    }
+
+    #[test]
+    fn a_linux_grant_the_mask_limits_does_not_read_back() {
+        let host = FakeHost::default().mask(ROOT, "r--");
+        let e = grant(&host, Platform::Linux, &acct(), &[dir(ROOT)]).unwrap_err();
+        assert!(
+            matches!(&e, EnrollError::AgentAccess { grant: true, detail, .. } if detail == "the entry did not read back"),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn macos_grants_each_entry_on_the_path_itself_and_reads_it_back() {
         let host = FakeHost::default();
-        let entries = grant_entries(&hobi(), true);
-        grant(&host, Platform::Macos, ACCT, &entries).unwrap();
+        let entries = grant_entries(Path::new(ROOT), &hobi(), true);
+        grant(&host, Platform::Macos, &acct(), &entries).unwrap();
         let mut want = Vec::new();
         for e in &entries {
             let perms = if e.dir { "list,search" } else { "read" };
             let p = e.path.display();
-            want.push(format!("/bin/chmod +a | user:{ACCT} allow {perms} | {p}"));
+            want.push(format!(
+                "/bin/chmod -h | +a | user:hobi-svc allow {perms} | {p}"
+            ));
             want.push(format!("/bin/ls -led | {p}"));
         }
         assert_eq!(host.calls(), want);
     }
 
     #[test]
+    fn a_macos_account_name_an_ace_cannot_carry_is_refused_before_any_call() {
+        for name in [
+            "", "-hobi", "hobi svc", "hobi:x", "hobi,y", "h\u{e9}", "a\nb",
+        ] {
+            let host = FakeHost::default();
+            let a = Account {
+                name: name.into(),
+                uid: 990,
+            };
+            let entries = [dir(ROOT)];
+            for got in [
+                grant(&host, Platform::Macos, &a, &entries).err(),
+                revoke(&host, Platform::Macos, &a, true, &entries).err(),
+            ] {
+                assert!(
+                    matches!(got, Some(EnrollError::Owner(_))),
+                    "{name:?}: {got:?}"
+                );
+            }
+            assert!(host.calls().is_empty(), "{name:?}");
+            assert!(
+                grant(&host, Platform::Linux, &a, &entries).is_ok(),
+                "{name:?}"
+            );
+        }
+        for ok in ["hobi", "hobi-svc", "_hobi", "hobi.svc", "Hobi9"] {
+            assert!(account_name_ok(ok), "{ok}");
+        }
+    }
+
+    #[test]
     fn an_entry_that_does_not_read_back_refuses_and_stops() {
         for platform in [Platform::Linux, Platform::Macos] {
             let host = FakeHost::default().ignoring_writes_to("/etc/maknae/agents/hobi");
-            let e = grant(&host, platform, ACCT, &grant_entries(&hobi(), true)).unwrap_err();
+            let e = grant(
+                &host,
+                platform,
+                &acct(),
+                &grant_entries(Path::new(ROOT), &hobi(), true),
+            )
+            .unwrap_err();
             assert!(
                 matches!(&e, EnrollError::AgentAccess { grant: true, path, detail, .. }
                     if path == Path::new("/etc/maknae/agents/hobi") && detail == "the entry did not read back"),
@@ -507,20 +723,20 @@ mod tests {
 
     #[test]
     fn a_mask_limited_linux_entry_does_not_read_back() {
-        let d = dir("/etc/maknae");
-        assert!(linux_granted(ACCT, &d, "user:hobi-svc:r-x\n"));
-        assert!(linux_granted(ACCT, &d, "  user:hobi-svc:r-x  \n"));
+        let d = dir(ROOT);
+        assert!(linux_granted(990, &d, "user:990:r-x\n"));
+        assert!(linux_granted(990, &d, "  user:990:r-x  \n"));
         for out in [
-            "user:hobi-svc:r-x\t#effective:r--\n",
-            "default:user:hobi-svc:r-x\n",
-            "user:hobi-svc:r--\n",
-            "user:hobi-svc2:r-x\n",
+            "user:990:r-x\t#effective:r--\n",
+            "default:user:990:r-x\n",
+            "user:990:r--\n",
+            "user:9900:r-x\n",
             "",
         ] {
-            assert!(!linux_granted(ACCT, &d, out), "{out:?}");
+            assert!(!linux_granted(990, &d, out), "{out:?}");
         }
-        assert!(linux_granted(ACCT, &file("/x"), "user:hobi-svc:r--\n"));
-        assert!(!linux_granted(ACCT, &file("/x"), "user:hobi-svc:r-x\n"));
+        assert!(linux_granted(990, &file("/x"), "user:990:r--\n"));
+        assert!(!linux_granted(990, &file("/x"), "user:990:r-x\n"));
     }
 
     #[test]
@@ -545,17 +761,23 @@ mod tests {
 
     #[test]
     fn a_refused_grant_names_the_entry_and_the_tools_reason() {
-        let host =
-            FakeHost::default().refusing("/usr/bin/setfacl -m | u:hobi-svc:r-x | /etc/maknae/tls");
-        let e = grant(&host, Platform::Linux, ACCT, &grant_entries(&hobi(), false)).unwrap_err();
+        let host = FakeHost::default()
+            .refusing("/usr/bin/setfacl -P | -n | -m | u:990:r-x | /etc/maknae/tls");
+        let e = grant(
+            &host,
+            Platform::Linux,
+            &acct(),
+            &grant_entries(Path::new(ROOT), &hobi(), false),
+        )
+        .unwrap_err();
         assert!(
             matches!(&e, EnrollError::AgentAccess { grant: true, path, entry, detail }
-                if path == Path::new("/etc/maknae/tls") && entry == "u:hobi-svc:r-x" && detail == "Operation not supported"),
+                if path == Path::new("/etc/maknae/tls") && entry == "u:990:r-x" && detail == "Operation not supported"),
             "{e:?}"
         );
         let text = e.to_string();
         assert!(
-            text.contains("/etc/maknae/tls") && text.contains("--rotate"),
+            text.contains("/etc/maknae/tls") && text.contains("--refresh-access"),
             "{text}"
         );
     }
@@ -570,14 +792,14 @@ mod tests {
 
     #[test]
     fn a_missing_tool_refuses_the_grant_and_the_revoke() {
-        let entries = grant_entries(&hobi(), false);
+        let entries = grant_entries(Path::new(ROOT), &hobi(), false);
         for platform in [Platform::Linux, Platform::Macos] {
-            let e = grant(&Absent, platform, ACCT, &entries).unwrap_err();
+            let e = grant(&Absent, platform, &acct(), &entries).unwrap_err();
             assert!(
                 matches!(&e, EnrollError::AgentAccess { grant: true, detail, .. } if detail.ends_with("not found")),
                 "{e:?}"
             );
-            let e = revoke(&Absent, platform, ACCT, UID, &entries).unwrap_err();
+            let e = revoke(&Absent, platform, &acct(), true, &entries).unwrap_err();
             assert!(
                 matches!(&e, EnrollError::AgentAccess { grant: false, detail, .. } if detail.ends_with("not found")),
                 "{e:?}"
@@ -586,54 +808,79 @@ mod tests {
     }
 
     #[test]
-    fn linux_revokes_each_held_entry_by_uid_and_confirms_it_gone() {
-        let entries = kept_entries(&hobi(), true);
+    fn linux_revokes_each_held_entry_by_uid_and_keeps_the_mask() {
+        let entries = revoke_entries(Path::new(ROOT), &hobi(), &own_files());
         let mut host = FakeHost::default();
         for e in &entries {
-            host = host.holding(&e.path.display().to_string(), "user:990:r-x");
+            host = host.user(&e.path.display().to_string(), "990", perms(e));
         }
-        host = host.holding("/etc/maknae", "user:991:r-x");
-        revoke(&host, Platform::Linux, ACCT, UID, &entries).unwrap();
+        host = host.user(ROOT, "991", "rwx").mask(ROOT, "r-x");
+        assert_eq!(
+            revoke(&host, Platform::Linux, &acct(), true, &entries).ok(),
+            Some(Revoked::Done)
+        );
         let mut want = Vec::new();
         for e in &entries {
             let p = e.path.display();
-            want.push(format!("/usr/bin/getfacl -p | -n | --omit-header | {p}"));
-            want.push(format!("/usr/bin/setfacl -x | u:990 | {p}"));
-            want.push(format!("/usr/bin/getfacl -p | -n | --omit-header | {p}"));
+            want.push(format!("/usr/bin/getfacl -P | -p | -n | {p}"));
+            want.push(format!("/usr/bin/setfacl -P | -n | -x | u:990 | {p}"));
+            want.push(format!("/usr/bin/getfacl -P | -p | -n | {p}"));
         }
         assert_eq!(host.calls(), want);
+        let root = host.state(ROOT);
         assert_eq!(
-            host.acl.borrow().get("/etc/maknae").cloned().unwrap(),
-            BTreeSet::from(["user:991:r-x".to_string()])
+            root.users,
+            BTreeMap::from([("991".to_string(), "rwx".to_string())])
         );
+        assert_eq!(root.mask.as_deref(), Some("r-x"));
     }
 
     #[test]
-    fn macos_revokes_each_held_entry_and_confirms_it_gone() {
-        let entries = kept_entries(&hobi(), false);
+    fn macos_revokes_each_held_entry_on_the_path_itself() {
+        let entries = revoke_entries(Path::new(ROOT), &hobi(), &[]);
         let mut host = FakeHost::default();
         for e in &entries {
-            host = host.holding(&e.path.display().to_string(), &macos_ace(ACCT, e));
+            host = host.ace(&e.path.display().to_string(), &macos_ace(&acct(), e));
         }
-        revoke(&host, Platform::Macos, ACCT, UID, &entries).unwrap();
+        assert_eq!(
+            revoke(&host, Platform::Macos, &acct(), true, &entries).ok(),
+            Some(Revoked::Done)
+        );
         let mut want = Vec::new();
         for e in &entries {
             let p = e.path.display();
-            let ace = macos_ace(ACCT, e);
+            let ace = macos_ace(&acct(), e);
             want.push(format!("/bin/ls -led | {p}"));
-            want.push(format!("/bin/chmod -a | {ace} | {p}"));
+            want.push(format!("/bin/chmod -h | -a | {ace} | {p}"));
             want.push(format!("/bin/ls -led | {p}"));
         }
         assert_eq!(host.calls(), want);
-        assert!(host.acl.borrow().values().all(BTreeSet::is_empty));
+        assert!(host.acl.borrow().values().all(|a| a.aces.is_empty()));
+    }
+
+    #[test]
+    fn an_unresolved_macos_account_is_skipped_and_linux_is_not() {
+        let entries = [dir(ROOT)];
+        let host = FakeHost::default().ace(ROOT, &macos_ace(&acct(), &dir(ROOT)));
+        assert_eq!(
+            revoke(&host, Platform::Macos, &acct(), false, &entries).ok(),
+            Some(Revoked::Unresolved)
+        );
+        assert!(host.calls().is_empty());
+        let host = FakeHost::default().user(ROOT, "990", "r-x");
+        assert_eq!(
+            revoke(&host, Platform::Linux, &acct(), false, &entries).ok(),
+            Some(Revoked::Done)
+        );
+        assert!(host.state(ROOT).users.is_empty());
     }
 
     #[test]
     fn revoke_skips_an_entry_that_is_not_held() {
-        let entries = vec![dir("/etc/maknae")];
+        let entries = vec![dir(ROOT)];
         for platform in [Platform::Linux, Platform::Macos] {
-            let host = FakeHost::default().holding("/etc/maknae", "user:9900:r-x");
-            revoke(&host, platform, ACCT, UID, &entries).unwrap();
+            let host = FakeHost::default().user(ROOT, "9900", "r-x");
+            revoke(&host, platform, &acct(), true, &entries).unwrap();
             assert_eq!(host.calls().len(), 1, "{platform:?}: {:?}", host.calls());
         }
     }
@@ -656,7 +903,7 @@ mod tests {
             }
         }
         for platform in [Platform::Linux, Platform::Macos] {
-            let e = revoke(&Stuck, platform, ACCT, UID, &[dir("/etc/maknae")]).unwrap_err();
+            let e = revoke(&Stuck, platform, &acct(), true, &[dir(ROOT)]).unwrap_err();
             assert!(
                 matches!(&e, EnrollError::AgentAccess { grant: false, detail, .. } if detail == "the entry is still listed"),
                 "{platform:?}: {e:?}"
@@ -667,13 +914,13 @@ mod tests {
 
     #[test]
     fn a_refused_revoke_or_read_names_the_reason() {
-        let held = || FakeHost::default().holding("/etc/maknae", "user:990:r-x");
+        let held = || FakeHost::default().user(ROOT, "990", "r-x");
         let e = revoke(
-            &held().refusing("/usr/bin/setfacl -x | u:990 | /etc/maknae"),
+            &held().refusing("/usr/bin/setfacl -P | -n | -x | u:990 | /etc/maknae"),
             Platform::Linux,
-            ACCT,
-            UID,
-            &[dir("/etc/maknae")],
+            &acct(),
+            true,
+            &[dir(ROOT)],
         )
         .unwrap_err();
         assert!(
@@ -682,28 +929,16 @@ mod tests {
             "{e:?}"
         );
         let e = revoke(
-            &held().refusing("/usr/bin/getfacl -p | -n | --omit-header | /etc/maknae"),
+            &held().refusing("/usr/bin/getfacl -P | -p | -n | /etc/maknae"),
             Platform::Linux,
-            ACCT,
-            UID,
-            &[dir("/etc/maknae")],
+            &acct(),
+            true,
+            &[dir(ROOT)],
         )
         .unwrap_err();
         assert!(
             matches!(&e, EnrollError::AgentAccess { grant: false, detail, .. } if detail == "Operation not supported"),
             "{e:?}"
-        );
-    }
-
-    #[test]
-    fn the_host_platform_matches_the_build_target() {
-        assert_eq!(
-            Platform::HOST,
-            if cfg!(target_os = "macos") {
-                Platform::Macos
-            } else {
-                Platform::Linux
-            }
         );
     }
 }

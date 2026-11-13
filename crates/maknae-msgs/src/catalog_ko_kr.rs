@@ -102,6 +102,9 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         MsgId::EnrollAgentReload => {
             "maknaed가 실행 중이라면 다시 불러와서 이 등록을 반영하세요: {command}"
         }
+        MsgId::EnrollAgentAccessRefreshed => {
+            "에이전트 데몬 {agent}: 계정 {account}에 설정 읽기 권한을 다시 부여했어요"
+        }
         MsgId::EnrollAgentRemoveStarted => "에이전트 데몬 {agent}을(를) 제거하고 있어요",
         MsgId::EnrollAgentRemoved => {
             "에이전트 데몬 {agent}을(를) 제거했어요. 등록 파일을 지웠고, Vault 엔티티를 비활성화했고, SecretID {count}개를 폐기했어요. policy.yaml과 디렉터리는 그대로 두었어요"

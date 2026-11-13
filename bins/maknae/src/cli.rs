@@ -1532,9 +1532,13 @@ mod tests {
             Command::Enroll(args) => match &args.sub {
                 Some(EnrollSub::Agent(a)) => {
                     assert_eq!(a.id, "hobi");
-                    assert_eq!(a.account, "hobi-svc");
+                    assert_eq!(a.account.as_deref(), Some("hobi-svc"));
                     assert_eq!(a.bind_cidr, ["10.0.0.5", "10.0.0.6"]);
-                    assert_eq!((a.provider.as_str(), a.context_tokens), ("openai", 128_000));
+                    assert_eq!(
+                        (a.provider.as_deref(), a.context_tokens),
+                        (Some("openai"), Some(128_000))
+                    );
+                    assert!(!a.refresh_access);
                     assert_eq!(a.approle_mount, "maknae-agent-approle");
                     assert!(!a.rotate);
                     assert_eq!(a.token_file, None);

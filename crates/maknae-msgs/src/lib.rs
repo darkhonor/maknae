@@ -112,6 +112,8 @@ pub enum MsgId {
     EnrollAgentRetired,
     /// `maknaed` must be reloaded to see the enrollment. Carries `{command}`.
     EnrollAgentReload,
+    /// An enrolled agent's read access was granted again. Carries `{agent}` and `{account}`.
+    EnrollAgentAccessRefreshed,
     /// `maknae enroll remove-agent` started. Carries `{agent}`.
     EnrollAgentRemoveStarted,
     /// An agent is de-enrolled. Carries `{agent}` and `{count}`.
@@ -178,6 +180,7 @@ pub const ALL: &[MsgId] = &[
     MsgId::EnrollAgentEnrolled,
     MsgId::EnrollAgentRetired,
     MsgId::EnrollAgentReload,
+    MsgId::EnrollAgentAccessRefreshed,
     MsgId::EnrollAgentRemoveStarted,
     MsgId::EnrollAgentRemoved,
     MsgId::EnrollAgentRoleAbsent,
@@ -369,6 +372,7 @@ mod tests {
                 | MsgId::EnrollAgentEnrolled
                 | MsgId::EnrollAgentRetired
                 | MsgId::EnrollAgentReload
+                | MsgId::EnrollAgentAccessRefreshed
                 | MsgId::EnrollAgentRemoveStarted
                 | MsgId::EnrollAgentRemoved
                 | MsgId::EnrollAgentRoleAbsent
@@ -378,7 +382,7 @@ mod tests {
                 | MsgId::CryptoPolicyDrift => {}
             }
         }
-        const VARIANT_COUNT: usize = 53;
+        const VARIANT_COUNT: usize = 54;
         assert_eq!(ALL.len(), VARIANT_COUNT);
         for &id in ALL {
             assert_covered(id);

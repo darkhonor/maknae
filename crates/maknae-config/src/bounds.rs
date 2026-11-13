@@ -241,6 +241,16 @@ pub fn bounds_from_document(v: &Value) -> Result<EgressBounds, ConfigError> {
         Some((_, Value::Str(v))) => Some(prefix("agent_prefix", v)?),
         Some(_) => return Err(err("'agent_prefix' must be a string")),
     };
+    if let Some(a) = &agent_prefix {
+        if *a == user_prefix
+            || path_is_within_prefix(a, &user_prefix)
+            || path_is_within_prefix(&user_prefix, a)
+        {
+            return Err(err(
+                "'agent_prefix' overlaps 'user_prefix': neither may equal or contain the other",
+            ));
+        }
+    }
     // #240b: the deputy's Vault connection. Required — a deployment that
     // registers a provider needs the deputy to log in, and an absent block is
     // a refusal here rather than a first-request failure. Every key inside it
@@ -523,6 +533,41 @@ mod tests {
         };
         m.push(("agent_prefix".into(), v));
         Value::Map(m)
+    }
+
+    #[test]
+    fn agent_prefix_never_overlaps_the_user_prefix() {
+        let with = |user: &str, agent: &str| {
+            let Value::Map(mut m) = doc2("maknae-kv", user) else {
+                unreachable!()
+            };
+            m.push(("agent_prefix".into(), Value::Str(agent.into())));
+            bounds_from_document(&Value::Map(m))
+        };
+        for (user, agent) in [
+            ("maknae/users", "maknae/users"),
+            ("maknae/users", "maknae/users/agents"),
+            ("maknae", "maknae/agents"),
+            ("maknae/agents/users", "maknae/agents"),
+        ] {
+            let e = with(user, agent).unwrap_err();
+            assert!(
+                e.to_string()
+                    .contains("'agent_prefix' overlaps 'user_prefix'"),
+                "{user} / {agent}: {e}"
+            );
+        }
+        for (user, agent) in [
+            ("maknae/users", "maknae/users2"),
+            ("maknae/users2", "maknae/users"),
+            ("maknae/users", "maknae/agents"),
+        ] {
+            assert_eq!(
+                with(user, agent).unwrap().agent_prefix.as_deref(),
+                Some(agent),
+                "{user} / {agent}"
+            );
+        }
     }
 
     #[test]
