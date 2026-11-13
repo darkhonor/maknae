@@ -817,6 +817,31 @@ impl Anchor {
             .map_err(|e| crate::checks::map_errno_no_disambiguation(e, &self.path.join(name)))
     }
 
+    /// Creates `name` empty when absent, keeps an existing file's bytes, and sets
+    /// `owner` and `mode` on the opened descriptor. A link, a non-regular file and a
+    /// file with more than one link are refused; no link is followed.
+    pub fn own_file(
+        &self,
+        name: &std::ffi::OsStr,
+        owner: FileOwner,
+        mode: Mode,
+    ) -> Result<(), IoError> {
+        let name = self.one_component(name)?;
+        let at = self.path.join(name);
+        let errno = |e| crate::checks::map_errno_no_disambiguation(e, &at);
+        let fd = crate::syscall::open_create_nofollow(&self.fd, name, mode).map_err(errno)?;
+        let st = crate::syscall::fstat(&fd).map_err(errno)?;
+        crate::checks::check_target(
+            &st,
+            &at,
+            &TargetRequired {
+                nlink_exactly_one: true,
+                ..TargetRequired::OS_DAC_REGULAR
+            },
+        )?;
+        crate::syscall::set_owner_and_mode(&fd, owner, mode).map_err(errno)
+    }
+
     fn one_component<'a>(&self, name: &'a std::ffi::OsStr) -> Result<&'a std::ffi::OsStr, IoError> {
         let mut parts = Path::new(name).components();
         match (parts.next(), parts.next()) {
@@ -3469,5 +3494,84 @@ mod tests {
             assert!(matches!(removed, Err(IoError::Io { .. })), "{removed:?}");
             assert!(a.path.join("p.sock").exists());
         }
+    }
+
+    fn me() -> FileOwner {
+        FileOwner {
+            uid: nix::unistd::geteuid().as_raw(),
+            gid: nix::unistd::getegid().as_raw(),
+        }
+    }
+
+    #[test]
+    fn own_file_creates_an_absent_file_with_the_owner_and_exact_mode() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "o");
+        a.own_file(std::ffi::OsStr::new("f.err"), me(), Mode(0o640))
+            .unwrap();
+        let meta = std::fs::symlink_metadata(a.path.join("f.err")).unwrap();
+        assert!(meta.is_file());
+        assert_eq!(meta.len(), 0);
+        assert_eq!(meta.permissions().mode() & 0o7777, 0o640);
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!((meta.uid(), meta.gid()), (me().uid, me().gid));
+    }
+
+    #[test]
+    fn own_file_keeps_an_existing_files_bytes_and_resets_its_mode() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "o");
+        let f = a.path.join("f.err");
+        std::fs::write(&f, b"kept").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o666)).unwrap();
+        a.own_file(std::ffi::OsStr::new("f.err"), me(), Mode(0o640))
+            .unwrap();
+        assert_eq!(std::fs::read(&f).unwrap(), b"kept");
+        assert_eq!(
+            std::fs::metadata(&f).unwrap().permissions().mode() & 0o7777,
+            0o640
+        );
+    }
+
+    #[test]
+    fn own_file_refuses_a_link_a_directory_a_fifo_and_a_hard_link() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "o");
+        let outside = d.path().join("outside");
+        std::fs::write(&outside, b"x").unwrap();
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::os::unix::fs::symlink(&outside, a.path.join("link")).unwrap();
+        std::fs::create_dir(a.path.join("dir")).unwrap();
+        nix::unistd::mkfifo(
+            &a.path.join("fifo"),
+            nix::sys::stat::Mode::from_bits_truncate(0o600),
+        )
+        .unwrap();
+        std::fs::hard_link(&outside, a.path.join("hard")).unwrap();
+        let own = |n: &str| a.own_file(std::ffi::OsStr::new(n), me(), Mode(0o644));
+        assert!(
+            matches!(own("link"), Err(IoError::Symlink { .. })),
+            "{:?}",
+            own("link")
+        );
+        assert!(own("dir").is_err());
+        assert!(
+            matches!(own("fifo"), Err(IoError::NotRegularFile { .. })),
+            "{:?}",
+            own("fifo")
+        );
+        assert!(
+            matches!(own("hard"), Err(IoError::MultiplyLinked { nlink: 2, .. })),
+            "{:?}",
+            own("hard")
+        );
+        assert_eq!(
+            std::fs::metadata(&outside).unwrap().permissions().mode() & 0o7777,
+            0o600
+        );
+        assert!(matches!(
+            own("../escape"),
+            Err(IoError::EscapesAnchor { .. })
+        ));
     }
 }

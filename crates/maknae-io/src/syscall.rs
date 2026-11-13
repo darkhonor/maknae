@@ -401,6 +401,20 @@ pub(crate) fn open_temp_excl<F: AsFd>(
     )
 }
 
+/// No `O_TRUNC`: an existing file keeps its bytes.
+pub(crate) fn open_create_nofollow<F: AsFd>(
+    dirfd: &F,
+    name: &std::ffi::OsStr,
+    mode: crate::anchor::Mode,
+) -> nix::Result<OwnedFd> {
+    nix::fcntl::openat(
+        dirfd,
+        name,
+        OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CREAT | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC,
+        NixMode::from_bits_truncate(mode.0 as _),
+    )
+}
+
 pub(crate) fn set_owner_and_mode<F: AsFd>(
     fd: &F,
     owner: crate::anchor::FileOwner,

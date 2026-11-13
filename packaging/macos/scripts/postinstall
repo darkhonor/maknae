@@ -256,6 +256,7 @@ restart_agents() {
         [ -e "$f" ] || continue
         label="${f##*/}"
         label="${label%.plist}"
+        [[ $label =~ ^io\.maknae\.maknae-agentd\.[a-z0-9_][a-z0-9._-]*$ ]] || continue
         rc=0
         launchctl print "system/$label" >/dev/null 2>&1 || rc=$?
         case "$rc" in

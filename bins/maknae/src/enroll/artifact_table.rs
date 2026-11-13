@@ -39,8 +39,6 @@ pub enum Owner {
     /// The enrolling operator (`$SUDO_UID`'s passwd entry) — every row under
     /// `<cli_dir>`.
     Operator,
-    /// An enrolled account, by id: the agent's macOS log directory.
-    Account { uid: u32, gid: u32 },
 }
 
 /// What KIND of content a row holds. `artifact_table` only classifies the row;

@@ -9,7 +9,7 @@ use super::artifact_write::{self, OwnerResolver};
 use super::keychain_write::AGENT_BINARY;
 use super::EnrollError;
 use maknae_io::program::Program;
-use maknae_io::{AnchorRequired, FileOwner, IoError, Mode, MutationFailure, StrategyPref};
+use maknae_io::{AnchorRequired, FileOwner, IoError, IoKind, Mode, MutationFailure, StrategyPref};
 use maknae_vault::agent_enroll::AgentId;
 use nix::unistd::{Gid, Uid};
 use std::path::{Path, PathBuf};
@@ -53,102 +53,121 @@ pub(crate) fn xml_escape(s: &str) -> String {
 pub(crate) const LOG_ROOT: &str = "/usr/local/var/log/maknae-agent";
 
 pub(crate) fn stderr_path(log_root: &Path, agent: &AgentId) -> PathBuf {
-    log_root.join(agent.as_str()).join("agentd.err")
+    log_root.join(agent.as_str()).join(STDERR_FILE)
 }
 
-struct LogOwners {
-    root: FileOwner,
-}
+const STDERR_FILE: &str = "agentd.err";
+const TREE_DEPTH: usize = 16;
 
-impl OwnerResolver for LogOwners {
+struct RootOwner(FileOwner);
+
+impl OwnerResolver for RootOwner {
     fn resolve(&self, owner: Owner) -> Result<(Option<Uid>, Option<Gid>), EnrollError> {
-        let (uid, gid) = match owner {
-            Owner::RootRoot => (self.root.uid, self.root.gid),
-            Owner::Account { uid, gid } => (uid, gid),
-            other => {
-                return Err(EnrollError::Owner(format!(
-                    "the agent's log directory is never {other:?}"
-                )))
-            }
-        };
-        Ok((Some(Uid::from_raw(uid)), Some(Gid::from_raw(gid))))
+        match owner {
+            Owner::RootRoot => Ok((
+                Some(Uid::from_raw(self.0.uid)),
+                Some(Gid::from_raw(self.0.gid)),
+            )),
+            other => Err(EnrollError::Owner(format!(
+                "the agent's log directory is never {other:?}"
+            ))),
+        }
     }
 }
 
-/// A directory another account holds, or opened wider than 0750, is emptied
-/// first: the new account could neither write nor replace what is in it.
-pub(crate) fn ensure_log_dir(
+fn root_held(path: &Path, root: FileOwner) -> Result<maknae_io::Anchor, EnrollError> {
+    maknae_io::open_anchor(
+        path,
+        AnchorRequired {
+            owner: Some(root.uid),
+            mode_mask: Some(0o022),
+        },
+        StrategyPref::Auto,
+    )
+    .map_err(|e| io_error(path, e))
+}
+
+/// `log_root` must already be root-held (preinstall creates it). `<id>/` is
+/// root-held too, so only the file belongs to the account; whatever else holds
+/// the file's name is removed, never followed.
+pub(crate) fn ensure_log_file(
     log_root: &Path,
     agent: &AgentId,
     account: FileOwner,
     root: FileOwner,
 ) -> Result<(), EnrollError> {
-    let owners = LogOwners { root };
+    root_held(log_root, root)?;
+    let dir = log_root.join(agent.as_str());
     artifact_write::ensure_dir(
         &Artifact {
-            path: log_root.to_path_buf(),
+            path: dir.clone(),
             owner: Owner::RootRoot,
             mode: 0o755,
             content: ContentKind::Dir,
         },
-        &owners,
+        &RootOwner(root),
     )?;
-    let dir = log_root.join(agent.as_str());
-    let held_by_other = match maknae_io::open_anchor(
-        &dir,
-        AnchorRequired {
-            owner: Some(account.uid),
-            mode_mask: Some(0o027),
-        },
-        StrategyPref::Auto,
-    ) {
-        Ok(_) => false,
-        Err(IoError::NotOwned { .. } | IoError::InsecurePermissions { .. }) => true,
-        Err(e) if is_not_found(&e) => false,
-        Err(e) => return Err(io_error(&dir, e)),
-    };
-    if held_by_other {
-        remove_log_dir(log_root, agent)?;
+    let held = root_held(&dir, root)?;
+    let name = std::ffi::OsStr::new(STDERR_FILE);
+    if held.own_file(name, account, Mode(0o640)).is_err() {
+        remove_tree(&mutation_dir(&dir)?, STDERR_FILE, TREE_DEPTH)?;
+        held.own_file(name, account, Mode(0o640))
+            .map_err(|e| io_error(&dir.join(STDERR_FILE), e))?;
     }
-    artifact_write::ensure_dir(
-        &Artifact {
-            path: dir,
-            owner: Owner::Account {
-                uid: account.uid,
-                gid: account.gid,
-            },
-            mode: 0o750,
-            content: ContentKind::Dir,
-        },
-        &owners,
-    )
+    Ok(())
 }
 
-/// Each entry is unlinked, never followed: the account owns the directory.
-pub(crate) fn remove_log_dir(log_root: &Path, agent: &AgentId) -> Result<(), EnrollError> {
+fn mutation_dir(path: &Path) -> Result<maknae_io::MutationDirectory, EnrollError> {
+    let fd = maknae_io::delegated::open_directory_for_delegation(path)
+        .map_err(|e| EnrollError::State(format!("{}: {e}", path.display())))?;
+    maknae_io::verify_mutation_directory(fd).map_err(|e| io_error(path, e))
+}
+
+/// Unlinks `leaf` and, for a directory, everything under it, without following
+/// any link.
+fn remove_tree(
+    parent: &maknae_io::MutationDirectory,
+    leaf: &str,
+    depth: usize,
+) -> Result<(), EnrollError> {
     let failed = |e: MutationFailure| io_error(&e.at, e.source);
+    let dir = match parent.open_child_directory(leaf) {
+        Ok(d) => d,
+        Err(e) if is_not_found(&e) => return Ok(()),
+        Err(IoError::Symlink { .. }) => {
+            return parent.remove_entry(leaf).map(|_| ()).map_err(failed)
+        }
+        Err(IoError::Io {
+            kind: IoKind::NotADirectory,
+            ..
+        }) => return parent.remove_entry(leaf).map(|_| ()).map_err(failed),
+        Err(e) => return Err(io_error(&parent.path().join(leaf), e)),
+    };
+    if depth == 0 {
+        return Err(EnrollError::State(format!(
+            "{} is nested too deeply to remove",
+            dir.path().display()
+        )));
+    }
+    let mut names = Vec::new();
+    let mut cursor = dir.cursor().map_err(|e| io_error(dir.path(), e))?;
+    while let Some(entry) = cursor.next_entry().map_err(|e| io_error(dir.path(), e))? {
+        names.push(entry.name.to_string_lossy().into_owned());
+    }
+    for name in names {
+        remove_tree(&dir, &name, depth - 1)?;
+    }
+    drop(dir);
+    parent.remove_entry(leaf).map(|_| ()).map_err(failed)
+}
+
+pub(crate) fn remove_log_dir(log_root: &Path, agent: &AgentId) -> Result<(), EnrollError> {
     let root = match maknae_io::delegated::open_directory_for_delegation(log_root) {
         Ok(fd) => maknae_io::verify_mutation_directory(fd).map_err(|e| io_error(log_root, e))?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(EnrollError::State(format!("{}: {e}", log_root.display()))),
     };
-    let dir = match root.open_child_directory(agent.as_str()) {
-        Ok(d) => d,
-        Err(e) if is_not_found(&e) => return Ok(()),
-        Err(e) => return Err(io_error(&log_root.join(agent.as_str()), e)),
-    };
-    let mut names = Vec::new();
-    let mut cursor = dir.cursor().map_err(|e| io_error(dir.path(), e))?;
-    while let Some(entry) = cursor.next_entry().map_err(|e| io_error(dir.path(), e))? {
-        names.push(entry.name);
-    }
-    for name in names {
-        let leaf = name.to_string_lossy();
-        dir.remove_entry(&leaf).map_err(failed)?;
-    }
-    drop(dir);
-    root.remove_entry(agent.as_str()).map_err(failed)?;
-    Ok(())
+    remove_tree(&root, agent.as_str(), TREE_DEPTH)
 }
 
 pub(crate) fn plist(agent: &AgentId, user: &str) -> String {
@@ -280,6 +299,7 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::collections::VecDeque;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     fn hobi() -> AgentId {
         AgentId::parse("hobi").unwrap()
@@ -617,7 +637,6 @@ mod tests {
 
     #[test]
     fn the_plist_is_written_mode_0644_to_the_owner_named() {
-        use std::os::unix::fs::MetadataExt;
         let (dir, daemons) = super::super::agent::tests::scratch_anchor("write-plist");
         let me = FileOwner {
             uid: nix::unistd::geteuid().as_raw(),
@@ -778,9 +797,18 @@ launchctl() {{
         let (_, rc, log) = run_shell(
             POSTINSTALL,
             "restart_agents",
-            &plists,
+            &[
+                plists[0],
+                plists[1],
+                "io.maknae.maknae-agentd..x.plist",
+                "io.maknae.maknae-agentd.A.plist",
+            ],
             &Stub {
-                loaded: &["io.maknae.maknae-agentd.hobi"],
+                loaded: &[
+                    "io.maknae.maknae-agentd.hobi",
+                    "io.maknae.maknae-agentd..x",
+                    "io.maknae.maknae-agentd.A",
+                ],
                 ..STUB
             },
         );
@@ -825,54 +853,110 @@ launchctl() {{
         }
     }
 
+    fn log_root(dir: &Path) -> PathBuf {
+        let root = dir.join("maknae-agent");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        root
+    }
+
+    fn mode_owner(path: &Path) -> (u32, u32, u32) {
+        let meta = std::fs::symlink_metadata(path).unwrap();
+        (meta.mode() & 0o7777, meta.uid(), meta.gid())
+    }
+
     #[test]
-    fn the_log_directory_is_made_root_0755_then_the_accounts_0750() {
-        use std::os::unix::fs::MetadataExt;
-        let (dir, _) = super::super::agent::tests::scratch_anchor("log-dir");
-        let root = dir.join("log/maknae-agent");
+    fn the_agents_directory_is_root_held_and_only_its_stderr_file_is_the_accounts() {
+        let (dir, _) = super::super::agent::tests::scratch_anchor("log-file");
+        let root = log_root(&dir);
+        let me = me();
         for _ in 0..2 {
-            ensure_log_dir(&root, &hobi(), me(), me()).unwrap();
-            for (path, mode) in [(root.clone(), 0o755), (root.join("hobi"), 0o750)] {
-                let meta = std::fs::symlink_metadata(&path).unwrap();
-                assert!(meta.is_dir(), "{path:?}");
-                assert_eq!(meta.mode() & 0o7777, mode, "{path:?}");
-                assert_eq!((meta.uid(), meta.gid()), (me().uid, me().gid));
-            }
+            ensure_log_file(&root, &hobi(), me, me).unwrap();
+            assert_eq!(mode_owner(&root.join("hobi")), (0o755, me.uid, me.gid));
+            assert_eq!(
+                mode_owner(&root.join("hobi/agentd.err")),
+                (0o640, me.uid, me.gid)
+            );
         }
         std::fs::write(root.join("hobi/agentd.err"), "kept").unwrap();
-        ensure_log_dir(&root, &hobi(), me(), me()).unwrap();
+        ensure_log_file(&root, &hobi(), me, me).unwrap();
         assert_eq!(
             std::fs::read_to_string(root.join("hobi/agentd.err")).unwrap(),
             "kept"
         );
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(root.join("hobi"), std::fs::Permissions::from_mode(0o777))
-            .unwrap();
-        ensure_log_dir(&root, &hobi(), me(), me()).unwrap();
-        assert!(!root.join("hobi/agentd.err").exists());
-        let meta = std::fs::symlink_metadata(root.join("hobi")).unwrap();
-        assert_eq!(meta.mode() & 0o7777, 0o750);
     }
 
     #[test]
-    fn removing_the_log_directory_unlinks_what_the_agent_planted_and_nothing_it_names() {
+    fn enroll_refuses_a_log_root_that_preinstall_did_not_hold() {
+        let (dir, _) = super::super::agent::tests::scratch_anchor("log-root");
+        let missing = dir.join("absent");
+        assert!(ensure_log_file(&missing, &hobi(), me(), me()).is_err());
+        assert!(!missing.exists());
+        let root = log_root(&dir);
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o775)).unwrap();
+        assert!(ensure_log_file(&root, &hobi(), me(), me()).is_err());
+        assert!(!root.join("hobi").exists());
+        let other = FileOwner {
+            uid: me().uid + 1,
+            gid: me().gid,
+        };
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(ensure_log_file(&root, &hobi(), me(), other).is_err());
+    }
+
+    #[test]
+    fn nothing_planted_at_the_stderr_name_blocks_enroll_or_is_followed() {
+        let (dir, _) = super::super::agent::tests::scratch_anchor("log-planted");
+        let root = log_root(&dir);
+        let outside = dir.join("outside");
+        std::fs::write(&outside, "x").unwrap();
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let file = root.join("hobi/agentd.err");
+        let plants: [&dyn Fn(); 4] = [
+            &|| std::os::unix::fs::symlink(&outside, &file).unwrap(),
+            &|| {
+                std::fs::create_dir_all(file.join("sub/deeper")).unwrap();
+                std::os::unix::fs::symlink(&outside, file.join("sub/link")).unwrap();
+            },
+            &|| std::fs::hard_link(&outside, &file).unwrap(),
+            &|| {
+                nix::unistd::mkfifo(&file, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap()
+            },
+        ];
+        for plant in plants {
+            ensure_log_file(&root, &hobi(), me(), me()).unwrap();
+            std::fs::remove_file(&file).unwrap();
+            plant();
+            ensure_log_file(&root, &hobi(), me(), me()).unwrap();
+            let meta = std::fs::symlink_metadata(&file).unwrap();
+            assert!(meta.is_file() && meta.nlink() == 1, "{meta:?}");
+            assert_eq!(meta.mode() & 0o7777, 0o640);
+            assert_eq!(std::fs::read_to_string(&outside).unwrap(), "x");
+            assert_eq!(mode_owner(&outside).0, 0o600);
+        }
+        std::fs::create_dir(root.join("hobi/other")).unwrap();
+        ensure_log_file(&root, &hobi(), me(), me()).unwrap();
+    }
+
+    #[test]
+    fn removing_the_log_directory_unlinks_everything_in_it_and_follows_nothing() {
         let (dir, _) = super::super::agent::tests::scratch_anchor("log-rm");
         let root = dir.join("maknae-agent");
         remove_log_dir(&root, &hobi()).unwrap();
-        ensure_log_dir(&root, &hobi(), me(), me()).unwrap();
-        ensure_log_dir(&root, &AgentId::parse("jin").unwrap(), me(), me()).unwrap();
+        let root = log_root(&dir);
         remove_log_dir(&root, &hobi()).unwrap();
-        assert!(!root.join("hobi").exists());
-        ensure_log_dir(&root, &hobi(), me(), me()).unwrap();
+        ensure_log_file(&root, &hobi(), me(), me()).unwrap();
+        ensure_log_file(&root, &AgentId::parse("jin").unwrap(), me(), me()).unwrap();
         let outside = dir.join("outside");
-        std::fs::write(&outside, "x").unwrap();
-        std::fs::write(root.join("hobi/agentd.err"), "e").unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("kept"), "x").unwrap();
         std::os::unix::fs::symlink(&outside, root.join("hobi/link")).unwrap();
+        std::fs::create_dir_all(root.join("hobi/sub/deeper")).unwrap();
+        std::fs::write(root.join("hobi/sub/deeper/f"), "f").unwrap();
         remove_log_dir(&root, &hobi()).unwrap();
         assert!(!root.join("hobi").exists());
-        assert!(root.join("jin").is_dir());
-        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "x");
-        remove_log_dir(&root, &hobi()).unwrap();
+        assert!(root.join("jin/agentd.err").is_file());
+        assert!(outside.join("kept").is_file());
     }
 
     #[test]
@@ -903,5 +987,52 @@ launchctl() {{
         assert!(UNINSTALL.contains("        sleep 0.5\n"));
         assert_eq!(UNLOAD_POLL, Duration::from_millis(500));
         assert_eq!(UNLOAD_POLL * polls[0], UNLOAD_WAIT);
+    }
+
+    const LABEL_PATTERN: &str = r"[[ $l =~ ^io\.maknae\.maknae-agentd\.[a-z0-9_][a-z0-9._-]*$ ]]";
+
+    #[test]
+    fn both_scripts_admit_agent_labels_by_the_same_pattern() {
+        assert!(UNINSTALL.contains(LABEL_PATTERN));
+        assert!(POSTINSTALL.contains(&LABEL_PATTERN.replace("$l ", "$label ")));
+    }
+
+    /// `security` is stubbed: it answers each rc in turn, then 44.
+    fn delete_agent_items(rcs: &[i32], keychain_exists: bool) -> (i32, usize) {
+        static RUN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (dir, _) = super::super::agent::tests::scratch_anchor(&format!("kc-{n}"));
+        let keychain = dir.join("System.keychain");
+        if keychain_exists {
+            std::fs::write(&keychain, "").unwrap();
+        }
+        let log = dir.join("security.log");
+        let rcs: Vec<String> = rcs.iter().map(i32::to_string).collect();
+        let program = format!(
+            "set -euo pipefail\nRCS=({rcs})\nsecurity() {{\n    echo \"$*\" >> '{log}'\n    local rc=${{RCS[0]:-44}}\n    RCS=(\"${{RCS[@]:1}}\")\n    return \"$rc\"\n}}\n{function}\nrc=0\ndelete_agent_items \"$1\" || rc=$?\nexit \"$rc\"\n",
+            rcs = rcs.join(" "),
+            log = log.display(),
+            function = shell_function(UNINSTALL, "delete_agent_items"),
+        );
+        let out = std::process::Command::new("/bin/bash")
+            .arg("-c")
+            .arg(program)
+            .arg("sh")
+            .arg(&keychain)
+            .output()
+            .unwrap();
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        (out.status.code().unwrap(), calls.lines().count())
+    }
+
+    #[test]
+    fn uninstall_deletes_every_agent_item_and_fails_when_it_cannot_tell() {
+        assert_eq!(delete_agent_items(&[0, 0], true), (0, 3));
+        assert_eq!(delete_agent_items(&[], true), (0, 1));
+        assert_ne!(delete_agent_items(&[], false).0, 0);
+        assert_ne!(delete_agent_items(&[0, 51], true).0, 0);
+        assert!(UNINSTALL.contains(
+            "\ndelete_agent_items /Library/Keychains/System.keychain || kc_left=\"$kc_left io.maknae.maknae-agentd\"\n"
+        ));
     }
 }

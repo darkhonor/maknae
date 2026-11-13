@@ -19,6 +19,7 @@
 
 mod agent;
 mod agent_access;
+#[cfg(any(target_os = "macos", test))]
 mod agent_launchd;
 mod agent_unit;
 pub mod artifact_table;

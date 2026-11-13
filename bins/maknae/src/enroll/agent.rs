@@ -1027,7 +1027,7 @@ fn start_instance(
 ) -> Result<(), EnrollError> {
     let root = FileOwner { uid: 0, gid: 0 };
     agent_launchd::start(r, agent, &mut std::thread::sleep, || {
-        agent_launchd::ensure_log_dir(
+        agent_launchd::ensure_log_file(
             Path::new(agent_launchd::LOG_ROOT),
             agent,
             FileOwner {

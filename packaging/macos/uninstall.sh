@@ -101,13 +101,16 @@ for s in io.maknae.maknaed io.maknae.maknae-egress; do
 done
 
 # One item per agent, all under one service; each delete removes the first match.
-rc=0
-for _ in $(seq 1000); do
-    rc=0
-    security delete-generic-password -s io.maknae.maknae-agentd /Library/Keychains/System.keychain >/dev/null 2>&1 || rc=$?
-    [ "$rc" -eq 0 ] || break
-done
-[ "$rc" -eq 44 ] || kc_left="$kc_left io.maknae.maknae-agentd"
+delete_agent_items() {
+    local rc=0
+    for _ in $(seq 1000); do
+        rc=0
+        security delete-generic-password -s io.maknae.maknae-agentd "$1" >/dev/null 2>&1 || rc=$?
+        [ "$rc" -eq 0 ] || break
+    done
+    [ "$rc" -eq 44 ] && [ -f "$1" ]
+}
+delete_agent_items /Library/Keychains/System.keychain || kc_left="$kc_left io.maknae.maknae-agentd"
 
 SEAL_PUB_DIR="/Library/Application Support/Maknae/pki"
 rm -f "$SEAL_PUB_DIR/seal.pub" 2>/dev/null || :
