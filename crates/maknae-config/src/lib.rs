@@ -66,10 +66,11 @@ pub use loader::{load_config, load_config_root_owned};
 pub use agents::load_agents_with_requirement;
 #[cfg(unix)]
 pub use agents::{
-    bindings_conflict, load_agents, parse_agent_enrollment, parse_agent_policy,
-    service_account_check, AccountRefusal, AgentEnrollment, AgentId, AgentPolicy, AgentRole,
-    AgentsLoad, HostAccounts, InvalidAgentId, SkippedAgentEntry, TaskerRef, AGENTS_DIR,
-    AGENT_ENTITY_PREFIX, ENROLLMENT_FILE, NON_LOGIN_SHELLS, POLICY_FILE,
+    bindings_conflict, load_agent_client, load_agents, parse_agent_client, parse_agent_enrollment,
+    parse_agent_policy, read_persona, service_account_check, AccountRefusal, AgentClientConfig,
+    AgentEnrollment, AgentId, AgentPolicy, AgentProvider, AgentRole, AgentsLoad, HostAccounts,
+    InvalidAgentId, PersonaMode, SkippedAgentEntry, TaskerRef, AGENTS_DIR, AGENT_CLIENT_FILE,
+    AGENT_ENTITY_PREFIX, ENROLLMENT_FILE, NON_LOGIN_SHELLS, PERSONA_FILE, POLICY_FILE,
 };
 pub use audit_cfg::{
     audit_from_section, resolve_readers, AuditConfig, ReaderAccount, ReaderLookup, AUDIT_SECTION,

@@ -334,6 +334,7 @@ mod tests {
             call_timeout_ms: maknae_config::DEFAULT_CALL_TIMEOUT_MS,
             kv_mount: "maknae-kv".into(),
             user_prefix: PREFIX.into(),
+            agent_prefix: None,
             vault_addr: "https://vault.example:8200".into(),
         };
         assert!(provider_authority(&ProviderSet::empty(), Some(&b)).is_none());

@@ -3,6 +3,7 @@ use super::agent::{
     read_state, AgentState, AgentVaultOps, HasVault, RealVault, AGENTS_DIR, PRIVATE_DIR,
     RELOAD_COMMAND, VAULT_CA,
 };
+use super::agent_access;
 use super::EnrollError;
 use crate::stderr::errln;
 use clap::Args;
@@ -26,6 +27,7 @@ pub struct RemoveAgentArgs {
 }
 
 pub(crate) trait RemoveOps: AgentVaultOps {
+    fn revoke_access(&self, agent: &AgentId) -> Result<(), EnrollError>;
     fn remove_enrollment(&self, agent: &AgentId) -> Result<(), EnrollError>;
     async fn remove_sealed_secret(&self, agent: &AgentId) -> Result<(), EnrollError>;
     fn remove_state(&self, agent: &AgentId) -> Result<(), EnrollError>;
@@ -71,6 +73,7 @@ pub(crate) async fn remove_agent<O: RemoveOps>(
     agent: &AgentId,
     state: AgentState,
 ) -> Result<RemoveOutcome, EnrollError> {
+    ops.revoke_access(agent)?;
     ops.remove_enrollment(agent)?;
 
     let mount = state.approle_mount.clone();
@@ -175,12 +178,18 @@ pub(crate) fn remove_enrollment_file(
     agents: &maknae_io::Anchor,
     agent: &AgentId,
 ) -> Result<(), EnrollError> {
-    let rel = Path::new(agent.as_str()).join(maknae_config::ENROLLMENT_FILE);
-    match agents.remove(&rel, None) {
-        Ok(_) => Ok(()),
-        Err(e) if is_not_found(&e) => Ok(()),
-        Err(e) => Err(io_error(&Path::new(AGENTS_DIR).join(&rel), e)),
+    for file in [
+        maknae_config::ENROLLMENT_FILE,
+        maknae_config::AGENT_CLIENT_FILE,
+    ] {
+        let rel = Path::new(agent.as_str()).join(file);
+        match agents.remove(&rel, None) {
+            Ok(_) => {}
+            Err(e) if is_not_found(&e) => {}
+            Err(e) => return Err(io_error(&Path::new(AGENTS_DIR).join(&rel), e)),
+        }
     }
+    Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -212,6 +221,7 @@ fn remove_sealed_secret_file(
 struct RealRemoveOps {
     vault: RealVault,
     agents: maknae_io::Anchor,
+    owner: Option<(String, u32)>,
 }
 
 impl HasVault for RealRemoveOps {
@@ -221,6 +231,20 @@ impl HasVault for RealRemoveOps {
 }
 
 impl RemoveOps for RealRemoveOps {
+    fn revoke_access(&self, agent: &AgentId) -> Result<(), EnrollError> {
+        let Some((account, uid)) = &self.owner else {
+            return Ok(());
+        };
+        let persona = super::agent::persona_present(&self.agents, agent)?;
+        agent_access::revoke(
+            &agent_access::Host,
+            agent_access::Platform::HOST,
+            account,
+            *uid,
+            &agent_access::kept_entries(agent, persona),
+        )
+    }
+
     fn remove_enrollment(&self, agent: &AgentId) -> Result<(), EnrollError> {
         remove_enrollment_file(&self.agents, agent)
     }
@@ -307,6 +331,7 @@ pub(crate) async fn run_remove_agent(
     let ops = RealRemoveOps {
         vault: RealVault { client, private },
         agents,
+        owner: record.map(|r| (r.account, r.uid)),
     };
     let out = remove_agent(&ops, &agent, state).await?;
     Ok(summary(locale, &agent, &out))
@@ -321,6 +346,11 @@ mod tests {
     use clap::Parser;
 
     impl RemoveOps for Fake {
+        fn revoke_access(&self, _agent: &AgentId) -> Result<(), EnrollError> {
+            self.log.borrow_mut().push("revoke_access".into());
+            self.check("revoke_access")
+        }
+
         fn remove_enrollment(&self, _agent: &AgentId) -> Result<(), EnrollError> {
             self.log.borrow_mut().push("remove_enrollment".into());
             self.check("remove_enrollment")
@@ -368,6 +398,7 @@ mod tests {
         assert_eq!(
             fake.log(),
             strings(&[
+                "revoke_access",
                 "remove_enrollment",
                 "read_role_id",
                 "entity maknae-agent-hobi",
@@ -390,6 +421,31 @@ mod tests {
                 role_absent: false
             }
         );
+    }
+
+    #[tokio::test]
+    async fn a_failed_revoke_removes_nothing() {
+        let fake = Fake::failing(&["revoke_access"]);
+        let e = remove_agent(&fake, &hobi(), state(&["a"], &[], &[]))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&e, EnrollError::State(m) if m == "revoke_access failed"),
+            "{e:?}"
+        );
+        assert_eq!(fake.log(), strings(&["revoke_access"]));
+    }
+
+    #[test]
+    fn revoke_without_a_record_has_no_account_to_revoke() {
+        let (_scratch, agents) = super::super::agent::tests::scratch_anchor("rm-noowner");
+        let (_p, private) = super::super::agent::tests::scratch_anchor("rm-noowner-private");
+        let ops = RealRemoveOps {
+            vault: super::super::agent::tests::unreachable_vault("rm-noowner", private),
+            agents,
+            owner: None,
+        };
+        assert!(ops.revoke_access(&hobi()).is_ok());
     }
 
     #[tokio::test]
@@ -441,6 +497,7 @@ mod tests {
             assert_eq!(
                 fake.log(),
                 strings(&[
+                    "revoke_access",
                     "remove_enrollment",
                     "read_role_id",
                     "entity maknae-agent-hobi"
@@ -483,7 +540,7 @@ mod tests {
         remove_agent(&fake, &hobi(), state(&["a"], &[], &[]))
             .await
             .unwrap_err();
-        assert_eq!(fake.log(), strings(&["remove_enrollment"]));
+        assert_eq!(fake.log(), strings(&["revoke_access", "remove_enrollment"]));
     }
 
     #[test]
@@ -510,6 +567,7 @@ mod tests {
         assert_eq!(
             fake.log(),
             strings(&[
+                "revoke_access",
                 "remove_enrollment",
                 "read_role_id",
                 "entity maknae-agent-hobi",
@@ -556,7 +614,10 @@ mod tests {
         remove_agent(&fake, &hobi(), state(&["a"], &[], &[]))
             .await
             .unwrap_err();
-        assert_eq!(fake.log(), strings(&["remove_enrollment", "read_role_id"]));
+        assert_eq!(
+            fake.log(),
+            strings(&["revoke_access", "remove_enrollment", "read_role_id"])
+        );
     }
 
     #[tokio::test]
@@ -642,6 +703,12 @@ mod tests {
         let d = scratch("policy");
         std::fs::write(d.join("hobi").join(maknae_config::ENROLLMENT_FILE), "x").unwrap();
         std::fs::write(d.join("hobi").join("policy.yaml"), "subjects: []").unwrap();
+        std::fs::write(d.join("hobi").join(maknae_config::AGENT_CLIENT_FILE), "x").unwrap();
+        std::fs::write(
+            d.join("hobi").join(maknae_config::PERSONA_FILE),
+            "You are hobi.",
+        )
+        .unwrap();
         let agents = maknae_io::open_anchor(
             &d,
             maknae_io::AnchorRequired {
@@ -654,6 +721,11 @@ mod tests {
         remove_enrollment_file(&agents, &hobi()).unwrap();
         remove_enrollment_file(&agents, &hobi()).unwrap();
         assert!(!d.join("hobi").join(maknae_config::ENROLLMENT_FILE).exists());
+        assert!(!d
+            .join("hobi")
+            .join(maknae_config::AGENT_CLIENT_FILE)
+            .exists());
+        assert!(d.join("hobi").join(maknae_config::PERSONA_FILE).exists());
         assert_eq!(
             std::fs::read_to_string(d.join("hobi").join("policy.yaml")).unwrap(),
             "subjects: []"
@@ -743,6 +815,7 @@ mod tests {
         let ops = RealRemoveOps {
             vault: unreachable_vault(tag, private),
             agents,
+            owner: None,
         };
         (agents_dir, private_dir, ops)
     }

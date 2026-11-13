@@ -18,6 +18,7 @@
 //! final operator-context child and reporting — monotonic descent by flow order.
 
 mod agent;
+mod agent_access;
 pub mod artifact_table;
 pub mod artifact_write;
 mod helper;
@@ -207,6 +208,13 @@ pub enum EnrollError {
     AgentRemoveRetireFailed {
         agent: String,
         accessors: Vec<String>,
+    },
+    AgentPrefixMissing,
+    AgentAccess {
+        grant: bool,
+        path: PathBuf,
+        entry: String,
+        detail: String,
     },
 }
 
@@ -403,6 +411,30 @@ impl std::fmt::Display for EnrollError {
                 f,
                 "agent {agent} is de-enrolled and its Vault entity is disabled, but these SecretID accessors could not be destroyed: {}; they stay recorded with the sealed SecretID, and running `maknae enroll remove-agent {agent}` again retries them",
                 accessors.join(", ")
+            ),
+            EnrollError::AgentPrefixMissing => write!(
+                f,
+                "/etc/maknae/egress-bounds.yaml has no agent_prefix, so agents have no model access; set it to the KV path under kv_mount where agent keys live (each agent's under <agent_prefix>/<id>/), then run enroll again"
+            ),
+            EnrollError::AgentAccess {
+                grant: true,
+                path,
+                entry,
+                detail,
+            } => write!(
+                f,
+                "could not grant `{entry}` on {} ({detail}); the Agent Daemon cannot read its configuration without it. Fix the cause and run `maknae enroll agent` again with --rotate; the SecretID just minted stays recorded under pending, and that run retires it",
+                path.display()
+            ),
+            EnrollError::AgentAccess {
+                grant: false,
+                path,
+                entry,
+                detail,
+            } => write!(
+                f,
+                "could not remove `{entry}` from {} ({detail}); nothing has been removed yet. Fix the cause and run `maknae enroll remove-agent` again",
+                path.display()
             ),
         }
     }
@@ -3517,6 +3549,7 @@ mod tests {
                 call_timeout_ms: maknae_config::DEFAULT_CALL_TIMEOUT_MS,
                 kv_mount: "corp-kv".to_string(),
                 user_prefix: "corp/users".to_string(),
+                agent_prefix: None,
                 vault_addr: "https://v.example:8200".to_string(),
             }
         );
@@ -4931,6 +4964,16 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
             "hobi-svc",
             "--bind-cidr",
             "10.0.0.5",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-5.6",
+            "--key-subpath",
+            "openai/hobi",
+            "--key-field",
+            "api_key",
+            "--context-tokens",
+            "128000",
         ])
         .unwrap();
         assert_eq!(run_enroll(cli.args).await, ExitCode::FAILURE);

@@ -4,9 +4,9 @@ use crate::value::Value;
 use crate::ConfigError;
 use maknae_io::{
     AnchorRequired, DaemonFacts, DescendantRequired, HostAccount, IoError, IoKind, Kind,
-    StrategyPref, TargetRequired,
+    StrategyPref, TargetRequired, Zeroizing,
 };
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub const AGENTS_DIR: &str = "agents";
 pub const ENROLLMENT_FILE: &str = "enrollment.yaml";
@@ -479,6 +479,326 @@ pub fn bindings_conflict(
             })
         })
     })
+}
+
+pub const AGENT_CLIENT_FILE: &str = "agent.yaml";
+pub const PERSONA_FILE: &str = "persona.md";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PersonaMode {
+    Admin,
+    SelfAuthored,
+}
+
+impl PersonaMode {
+    pub fn key(self) -> &'static str {
+        match self {
+            PersonaMode::Admin => "admin",
+            PersonaMode::SelfAuthored => "self",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<PersonaMode> {
+        match raw {
+            "admin" => Some(PersonaMode::Admin),
+            "self" => Some(PersonaMode::SelfAuthored),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentProvider {
+    pub provider: String,
+    pub model: String,
+    pub key_subpath: String,
+    pub key_field: String,
+    pub context_tokens: u64,
+    pub output_tokens: Option<u64>,
+}
+
+/// `agents/<id>/agent.yaml`: what `maknae-agentd` needs to log in and reach the kernel.
+/// `vault_addr`, `trust_domain` and `plane_key` are shape-checked here and validated
+/// where the Vault client is built.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentClientConfig {
+    pub agent: AgentId,
+    pub vault_addr: String,
+    pub approle_mount: String,
+    pub role_id: String,
+    pub pki_int_mount: String,
+    pub plane_key: String,
+    pub kv_mount: String,
+    pub agent_prefix: String,
+    pub trust_domain: String,
+    pub agent_socket_path: PathBuf,
+    pub provider: AgentProvider,
+    pub persona: PersonaMode,
+}
+
+const CLIENT_KEYS: [&str; 6] = [
+    "agent_id",
+    "vault",
+    "trust_domain",
+    "agent_socket_path",
+    "provider",
+    "persona",
+];
+const CLIENT_VAULT_KEYS: [&str; 7] = [
+    "addr",
+    "approle_mount",
+    "role_id",
+    "pki_int_mount",
+    "plane_key",
+    "kv_mount",
+    "agent_prefix",
+];
+const CLIENT_PROVIDER_KEYS: [&str; 5] = [
+    "provider",
+    "model",
+    "key",
+    "context_tokens",
+    "output_tokens",
+];
+const CLIENT_KEY_KEYS: [&str; 2] = ["subpath", "field"];
+const MAX_CLIENT_TEXT_BYTES: usize = 256;
+
+pub fn parse_agent_client(dir: &AgentId, text: &str) -> Result<AgentClientConfig, ConfigError> {
+    let what = format!("{AGENTS_DIR}/{}/{AGENT_CLIENT_FILE}", dir.as_str());
+    let invalid = |why: &str| ConfigError::InvalidAgent(format!("{what}: {why}"));
+    let root = crate::load_str(text).map_err(|e| invalid(&e.to_string()))?;
+    let Value::Map(map) = root else {
+        return Err(invalid("the root must be a mapping"));
+    };
+    crate::reject_unknown_keys("agent", &map, &CLIENT_KEYS)?;
+    let section = |key: &str| match field(&map, key) {
+        Some(Value::Map(m)) => Ok(m),
+        Some(_) => Err(invalid(&format!("`{key}` must be a mapping"))),
+        None => Err(invalid(&format!("`{key}` is missing"))),
+    };
+    let vault = section("vault")?;
+    crate::reject_unknown_keys("agent.vault", vault, &CLIENT_VAULT_KEYS)?;
+    let provider = section("provider")?;
+    crate::reject_unknown_keys("agent.provider", provider, &CLIENT_PROVIDER_KEYS)?;
+    let key = match field(provider, "key") {
+        Some(Value::Map(m)) => m,
+        Some(_) => {
+            return Err(invalid(
+                "`provider.key` must be a mapping of subpath and field; the API key itself is stored only in Vault",
+            ))
+        }
+        None => return Err(invalid("`provider.key` is missing")),
+    };
+    crate::reject_unknown_keys("agent.provider.key", key, &CLIENT_KEY_KEYS)?;
+
+    let text_in = |m: &[(String, Value)], at: &str, key: &str| -> Result<String, ConfigError> {
+        let v = match field(m, key) {
+            Some(Value::Str(s)) => s,
+            Some(_) => return Err(invalid(&format!("`{at}{key}` must be a string"))),
+            None => return Err(invalid(&format!("`{at}{key}` is missing"))),
+        };
+        if v.is_empty()
+            || v.len() > MAX_CLIENT_TEXT_BYTES
+            || v.chars().any(|c| c.is_whitespace() || c.is_control())
+        {
+            return Err(invalid(&format!(
+                "`{at}{key}` must be 1 to {MAX_CLIENT_TEXT_BYTES} bytes with no whitespace"
+            )));
+        }
+        Ok(v.clone())
+    };
+    let mount = |key: &str| -> Result<String, ConfigError> {
+        let v = text_in(vault, "vault.", key)?;
+        crate::mount_path_is_acceptable(&v)
+            .map_err(|why| invalid(&format!("`vault.{key}` {why}")))?;
+        if !crate::vault_path_is_safe(&v) {
+            return Err(invalid(&format!(
+                "`vault.{key}` has a character outside [A-Za-z0-9._/-]"
+            )));
+        }
+        Ok(v)
+    };
+    let kv = |key: &str| -> Result<String, ConfigError> {
+        let v = text_in(vault, "vault.", key)?;
+        crate::kv_fragment_is_acceptable(&v)
+            .map_err(|why| invalid(&format!("`vault.{key}` {why}")))?;
+        if !crate::vault_path_is_safe(&v) {
+            return Err(invalid(&format!(
+                "`vault.{key}` has a character outside [A-Za-z0-9._/-]"
+            )));
+        }
+        Ok(v)
+    };
+    let tokens = |key: &str| -> Result<Option<u64>, ConfigError> {
+        match field(provider, key) {
+            None => Ok(None),
+            Some(Value::Int(n)) => u64::try_from(*n)
+                .map(Some)
+                .map_err(|_| invalid(&format!("`provider.{key}` must not be negative"))),
+            Some(_) => Err(invalid(&format!("`provider.{key}` must be an integer"))),
+        }
+    };
+
+    let agent_id = match field(&map, "agent_id") {
+        Some(Value::Str(s)) => s,
+        Some(_) => return Err(invalid("`agent_id` must be a string")),
+        None => return Err(invalid("`agent_id` is missing")),
+    };
+    if agent_id != dir.as_str() {
+        return Err(invalid(&format!(
+            "the file names agent {agent_id:?}, not its directory's agent {:?}",
+            dir.as_str()
+        )));
+    }
+    let socket = PathBuf::from(text_in(&map, "", "agent_socket_path")?);
+    if !socket.is_absolute() {
+        return Err(invalid("`agent_socket_path` must be an absolute path"));
+    }
+    let provider_name = text_in(provider, "provider.", "provider")?;
+    if !crate::provider_name_is_acceptable(&provider_name) {
+        return Err(invalid(
+            "`provider.provider` must name an authorized provider (ASCII letters, digits, '-', '_' and '.')",
+        ));
+    }
+    let model = text_in(provider, "provider.", "model")?;
+    if !crate::model_is_acceptable(&model) {
+        return Err(invalid("`provider.model` is not an acceptable model name"));
+    }
+    let key_subpath = text_in(key, "provider.key.", "subpath")?;
+    crate::key_subpath_is_acceptable(&key_subpath)
+        .map_err(|why| invalid(&format!("`provider.key.subpath` {why}")))?;
+    let key_field = text_in(key, "provider.key.", "field")?;
+    if !crate::key_field_is_acceptable(&key_field) {
+        return Err(invalid(
+            "`provider.key.field` is not an acceptable field name",
+        ));
+    }
+    let context_tokens = tokens("context_tokens")?.ok_or_else(|| {
+        invalid(
+            "`provider.context_tokens` is required: declare the model's context window in tokens",
+        )
+    })?;
+    let persona = match field(&map, "persona") {
+        None => PersonaMode::Admin,
+        Some(Value::Str(s)) => PersonaMode::parse(s)
+            .ok_or_else(|| invalid(&format!("persona {s:?} is neither `admin` nor `self`")))?,
+        Some(_) => return Err(invalid("`persona` must be `admin` or `self`")),
+    };
+    Ok(AgentClientConfig {
+        agent: dir.clone(),
+        vault_addr: text_in(vault, "vault.", "addr")?,
+        approle_mount: mount("approle_mount")?,
+        role_id: text_in(vault, "vault.", "role_id")?,
+        pki_int_mount: mount("pki_int_mount")?,
+        plane_key: text_in(vault, "vault.", "plane_key")?,
+        kv_mount: kv("kv_mount")?,
+        agent_prefix: kv("agent_prefix")?,
+        trust_domain: text_in(&map, "", "trust_domain")?,
+        agent_socket_path: socket,
+        provider: AgentProvider {
+            provider: provider_name,
+            model,
+            key_subpath,
+            key_field,
+            context_tokens,
+            output_tokens: tokens("output_tokens")?,
+        },
+        persona,
+    })
+}
+
+fn read_agent_file(
+    config_dir: &Path,
+    id: &AgentId,
+    file: &str,
+    dir: AnchorRequired,
+    target: TargetRequired,
+) -> Result<Option<Zeroizing<Vec<u8>>>, ConfigError> {
+    let agents = std::path::absolute(config_dir.join(AGENTS_DIR))
+        .map_err(|e| ConfigError::Io(e.to_string()))?;
+    let desc = DescendantRequired {
+        owner: dir.owner,
+        mode_mask: dir.mode_mask,
+    };
+    let anchor =
+        maknae_io::open_anchor(&agents, dir, StrategyPref::Auto).map_err(crate::loader::map_io)?;
+    let rel = Path::new(id.as_str()).join(file);
+    let full = agents.join(&rel);
+    match anchor.read(&rel, Some(desc), target) {
+        Ok(out) => Ok(Some(out.value)),
+        Err(IoError::Io {
+            kind: IoKind::NotFound,
+            path,
+        }) if path == full => Ok(None),
+        Err(e) => Err(crate::loader::map_io(e)),
+    }
+}
+
+fn utf8_text(
+    config_dir: &Path,
+    id: &AgentId,
+    file: &str,
+    mut bytes: Zeroizing<Vec<u8>>,
+) -> Result<Zeroizing<String>, ConfigError> {
+    String::from_utf8(std::mem::take(&mut *bytes))
+        .map(Zeroizing::new)
+        .map_err(|e| {
+            drop(Zeroizing::new(e.into_bytes()));
+            ConfigError::Io(format!(
+                "{}: invalid UTF-8",
+                config_dir
+                    .join(AGENTS_DIR)
+                    .join(id.as_str())
+                    .join(file)
+                    .display()
+            ))
+        })
+}
+
+pub fn load_agent_client(
+    config_dir: &Path,
+    id: &AgentId,
+) -> Result<AgentClientConfig, ConfigError> {
+    load_agent_client_required(config_dir, id, agents_dir_required(), agent_file_required())
+}
+
+fn load_agent_client_required(
+    config_dir: &Path,
+    id: &AgentId,
+    dir: AnchorRequired,
+    target: TargetRequired,
+) -> Result<AgentClientConfig, ConfigError> {
+    let Some(bytes) = read_agent_file(config_dir, id, AGENT_CLIENT_FILE, dir, target)? else {
+        let path = std::path::absolute(
+            config_dir
+                .join(AGENTS_DIR)
+                .join(id.as_str())
+                .join(AGENT_CLIENT_FILE),
+        )
+        .map_err(|e| ConfigError::Io(e.to_string()))?;
+        return Err(ConfigError::NotFound {
+            path: path.display().to_string(),
+        });
+    };
+    parse_agent_client(id, &utf8_text(config_dir, id, AGENT_CLIENT_FILE, bytes)?)
+}
+
+pub fn read_persona(
+    config_dir: &Path,
+    id: &AgentId,
+) -> Result<Option<Zeroizing<String>>, ConfigError> {
+    read_persona_required(config_dir, id, agents_dir_required(), agent_file_required())
+}
+
+fn read_persona_required(
+    config_dir: &Path,
+    id: &AgentId,
+    dir: AnchorRequired,
+    target: TargetRequired,
+) -> Result<Option<Zeroizing<String>>, ConfigError> {
+    read_agent_file(config_dir, id, PERSONA_FILE, dir, target)?
+        .map(|bytes| utf8_text(config_dir, id, PERSONA_FILE, bytes))
+        .transpose()
 }
 
 #[cfg(test)]
@@ -1399,5 +1719,394 @@ mod tests {
             bindings_conflict(&bindings("  admin: []\n"), "hobi-svc", 990, none),
             None
         );
+    }
+
+    const CLIENT: &str = "agent_id: hobi\nvault:\n  addr: https://vault.example:8200\n  approle_mount: maknae-agent-approle\n  role_id: role-uuid-1\n  pki_int_mount: maknae-pki-int\n  plane_key: ml-dsa-87\n  kv_mount: maknae-kv\n  agent_prefix: maknae/agents\ntrust_domain: maknae.example\nagent_socket_path: /run/maknae-agent/maknaed.sock\nprovider:\n  provider: openai\n  model: gpt-5.6\n  key:\n    subpath: openai/hobi\n    field: api_key\n  context_tokens: 128000\n  output_tokens: 16000\npersona: self\n";
+
+    fn client() -> AgentClientConfig {
+        AgentClientConfig {
+            agent: hobi(),
+            vault_addr: "https://vault.example:8200".into(),
+            approle_mount: "maknae-agent-approle".into(),
+            role_id: "role-uuid-1".into(),
+            pki_int_mount: "maknae-pki-int".into(),
+            plane_key: "ml-dsa-87".into(),
+            kv_mount: "maknae-kv".into(),
+            agent_prefix: "maknae/agents".into(),
+            trust_domain: "maknae.example".into(),
+            agent_socket_path: PathBuf::from("/run/maknae-agent/maknaed.sock"),
+            provider: AgentProvider {
+                provider: "openai".into(),
+                model: "gpt-5.6".into(),
+                key_subpath: "openai/hobi".into(),
+                key_field: "api_key".into(),
+                context_tokens: 128_000,
+                output_tokens: Some(16_000),
+            },
+            persona: PersonaMode::SelfAuthored,
+        }
+    }
+
+    impl Fixture {
+        fn requirements(&self) -> (AnchorRequired, TargetRequired) {
+            use std::os::unix::fs::MetadataExt;
+            let uid = std::fs::metadata(&self.root).unwrap().uid();
+            (
+                AnchorRequired {
+                    owner: Some(uid),
+                    ..agents_dir_required()
+                },
+                TargetRequired {
+                    owner: Some(uid),
+                    ..agent_file_required()
+                },
+            )
+        }
+
+        fn client(&self, id: &str) -> Result<AgentClientConfig, ConfigError> {
+            let (dir, target) = self.requirements();
+            load_agent_client_required(&self.root, &AgentId::parse(id).unwrap(), dir, target)
+        }
+
+        fn persona(&self, id: &str) -> Result<Option<Zeroizing<String>>, ConfigError> {
+            let (dir, target) = self.requirements();
+            read_persona_required(&self.root, &AgentId::parse(id).unwrap(), dir, target)
+        }
+    }
+
+    #[test]
+    fn agent_client_parses_every_field() {
+        assert_eq!(parse_agent_client(&hobi(), CLIENT), Ok(client()));
+    }
+
+    #[test]
+    fn persona_defaults_to_admin_and_output_tokens_to_none() {
+        let text = CLIENT
+            .replace("persona: self\n", "")
+            .replace("  output_tokens: 16000\n", "");
+        let got = parse_agent_client(&hobi(), &text).unwrap();
+        assert_eq!(got.persona, PersonaMode::Admin);
+        assert_eq!(got.provider.output_tokens, None);
+        let admin = CLIENT.replace("persona: self", "persona: admin");
+        assert_eq!(
+            parse_agent_client(&hobi(), &admin).unwrap().persona,
+            PersonaMode::Admin
+        );
+    }
+
+    #[test]
+    fn persona_mode_parses_only_admin_and_self() {
+        for mode in [PersonaMode::Admin, PersonaMode::SelfAuthored] {
+            assert_eq!(PersonaMode::parse(mode.key()), Some(mode));
+        }
+        assert_eq!(PersonaMode::Admin.key(), "admin");
+        assert_eq!(PersonaMode::SelfAuthored.key(), "self");
+        for refused in ["", "Admin", "self ", "agent", "user"] {
+            assert_eq!(PersonaMode::parse(refused), None, "{refused:?}");
+        }
+    }
+
+    #[test]
+    fn agent_client_refuses_an_unknown_key_at_every_level() {
+        for (after, unknown, section, key) in [
+            ("persona: self\n", "secret_id: x\n", "agent", "secret_id"),
+            (
+                "  agent_prefix: maknae/agents\n",
+                "  token: x\n",
+                "agent.vault",
+                "token",
+            ),
+            (
+                "  output_tokens: 16000\n",
+                "  default: true\n",
+                "agent.provider",
+                "default",
+            ),
+            (
+                "    field: api_key\n",
+                "    api_key: x\n",
+                "agent.provider.key",
+                "api_key",
+            ),
+        ] {
+            let text = CLIENT.replace(after, &format!("{after}{unknown}"));
+            assert_eq!(
+                parse_agent_client(&hobi(), &text),
+                Err(ConfigError::UnknownKey {
+                    section: section.into(),
+                    key: key.into()
+                }),
+                "{unknown:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_client_refuses_each_malformed_field() {
+        let long = format!("agent_prefix: {}", "a".repeat(MAX_CLIENT_TEXT_BYTES + 1));
+        let cases: Vec<(&str, String)> = vec![
+            ("agent_id: hobi\n", "agent_id: suga\n".into()),
+            ("agent_id: hobi\n", String::new()),
+            ("agent_id: hobi\n", "agent_id: 7\n".into()),
+            ("addr: https://vault.example:8200", "addr: \"\"".into()),
+            (
+                "addr: https://vault.example:8200",
+                "addr: \"https://v :8200\"".into(),
+            ),
+            ("  addr: https://vault.example:8200\n", String::new()),
+            (
+                "approle_mount: maknae-agent-approle",
+                "approle_mount: auth/agents".into(),
+            ),
+            (
+                "approle_mount: maknae-agent-approle",
+                "approle_mount: \"a%2fb\"".into(),
+            ),
+            ("role_id: role-uuid-1", "role_id: \"\"".into()),
+            ("role_id: role-uuid-1", "role_id: \"a b\"".into()),
+            ("role_id: role-uuid-1", "role_id: \"a\\x01b\"".into()),
+            (
+                "pki_int_mount: maknae-pki-int",
+                "pki_int_mount: /pki".into(),
+            ),
+            ("plane_key: ml-dsa-87", "plane_key: \"\"".into()),
+            ("plane_key: ml-dsa-87", "plane_key: \"ml dsa\"".into()),
+            ("kv_mount: maknae-kv", "kv_mount: maknae-kv/data".into()),
+            (
+                "agent_prefix: maknae/agents",
+                "agent_prefix: maknae/data/x".into(),
+            ),
+            (
+                "agent_prefix: maknae/agents",
+                "agent_prefix: \"maknae/a b\"".into(),
+            ),
+            (
+                "agent_prefix: maknae/agents",
+                "agent_prefix: \"maknae/a+b\"".into(),
+            ),
+            ("agent_prefix: maknae/agents", long),
+            ("  agent_prefix: maknae/agents\n", String::new()),
+            ("trust_domain: maknae.example", "trust_domain: \"\"".into()),
+            ("trust_domain: maknae.example\n", String::new()),
+            (
+                "agent_socket_path: /run/maknae-agent/maknaed.sock",
+                "agent_socket_path: run/maknaed.sock".into(),
+            ),
+            (
+                "agent_socket_path: /run/maknae-agent/maknaed.sock",
+                "agent_socket_path: \"\"".into(),
+            ),
+            ("  provider: openai", "  provider: \"open ai\"".into()),
+            ("  provider: openai", "  provider: open+ai".into()),
+            ("model: gpt-5.6", "model: \"\"".into()),
+            ("model: gpt-5.6", "model: gpt-\u{e9}".into()),
+            ("subpath: openai/hobi", "subpath: /openai".into()),
+            ("field: api_key", "field: \"\"".into()),
+            ("field: api_key", "field: fi\u{e9}ld".into()),
+            ("context_tokens: 128000", "context_tokens: -1".into()),
+            ("context_tokens: 128000", "context_tokens: \"1\"".into()),
+            ("  context_tokens: 128000\n", String::new()),
+            ("output_tokens: 16000", "output_tokens: -1".into()),
+            ("output_tokens: 16000", "output_tokens: x".into()),
+            ("persona: self", "persona: root".into()),
+            ("persona: self", "persona: 7".into()),
+            (
+                "  key:\n    subpath: openai/hobi\n    field: api_key\n",
+                "  key: sk-123\n".into(),
+            ),
+        ];
+        for (from, to) in cases {
+            assert!(CLIENT.contains(from), "{from:?}");
+            let text = CLIENT.replacen(from, &to, 1);
+            let got = parse_agent_client(&hobi(), &text);
+            assert!(
+                matches!(&got, Err(ConfigError::InvalidAgent(m)) if m.starts_with("agents/hobi/agent.yaml: ")),
+                "{from:?} -> {to:?}: {got:?}"
+            );
+        }
+        let longest = CLIENT.replace(
+            "agent_prefix: maknae/agents",
+            &format!("agent_prefix: {}", "a".repeat(MAX_CLIENT_TEXT_BYTES)),
+        );
+        assert_eq!(
+            parse_agent_client(&hobi(), &longest)
+                .unwrap()
+                .agent_prefix
+                .len(),
+            MAX_CLIENT_TEXT_BYTES
+        );
+        for whole in [
+            "- 1\n",
+            "agent_id: [\n",
+            "agent_id: hobi\nvault: 7\n",
+            "agent_id: hobi\nprovider: 7\n",
+        ] {
+            assert!(
+                matches!(
+                    parse_agent_client(&hobi(), whole),
+                    Err(ConfigError::InvalidAgent(_))
+                ),
+                "{whole:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn load_agent_client_reads_the_agents_own_file() {
+        let f = Fixture::new("client");
+        f.enroll("hobi", &enrollment("hobi", "hobi-svc", 990, "user"));
+        f.file(&format!("hobi/{AGENT_CLIENT_FILE}"), CLIENT, 0o640);
+        assert_eq!(f.client("hobi"), Ok(client()));
+        f.dir("suga");
+        f.file(&format!("suga/{AGENT_CLIENT_FILE}"), CLIENT, 0o640);
+        assert!(
+            matches!(f.client("suga"), Err(ConfigError::InvalidAgent(ref m)) if m.contains("suga")),
+            "{:?}",
+            f.client("suga")
+        );
+    }
+
+    #[test]
+    fn load_agent_client_refuses_missing_insecure_big_or_linked() {
+        let f = Fixture::new("client_missing");
+        f.dir("hobi");
+        let path = f.agents().join("hobi").join(AGENT_CLIENT_FILE);
+        assert_eq!(
+            f.client("hobi"),
+            Err(ConfigError::NotFound {
+                path: std::path::absolute(&path).unwrap().display().to_string()
+            })
+        );
+        for mode in [0o644, 0o660, 0o642] {
+            f.file(&format!("hobi/{AGENT_CLIENT_FILE}"), CLIENT, mode);
+            assert!(
+                matches!(
+                    f.client("hobi"),
+                    Err(ConfigError::InsecurePermissions { .. })
+                ),
+                "{mode:o}: {:?}",
+                f.client("hobi")
+            );
+        }
+        f.file(
+            &format!("hobi/{AGENT_CLIENT_FILE}"),
+            &format!("{CLIENT}# {}\n", "x".repeat(64 * 1024)),
+            0o640,
+        );
+        assert!(
+            matches!(f.client("hobi"), Err(ConfigError::Io(ref m)) if m.contains("65536")),
+            "{:?}",
+            f.client("hobi")
+        );
+        std::fs::remove_file(&path).unwrap();
+        f.file("elsewhere.yaml", CLIENT, 0o640);
+        std::os::unix::fs::symlink(f.agents().join("elsewhere.yaml"), &path).unwrap();
+        assert!(
+            matches!(f.client("hobi"), Err(ConfigError::Symlink { .. })),
+            "{:?}",
+            f.client("hobi")
+        );
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"agent_id: \xff\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(
+            matches!(f.client("hobi"), Err(ConfigError::Io(ref m)) if m.contains("UTF-8")),
+            "{:?}",
+            f.client("hobi")
+        );
+        std::fs::set_permissions(
+            f.agents().join("hobi"),
+            std::fs::Permissions::from_mode(0o770),
+        )
+        .unwrap();
+        assert!(matches!(
+            f.client("hobi"),
+            Err(ConfigError::InsecurePermissions { .. })
+        ));
+    }
+
+    #[test]
+    fn the_production_readers_hold_the_files_to_root_ownership() {
+        use std::os::unix::fs::MetadataExt;
+        let f = Fixture::new("client_root");
+        f.dir("hobi");
+        f.file(&format!("hobi/{AGENT_CLIENT_FILE}"), CLIENT, 0o640);
+        f.file(&format!("hobi/{PERSONA_FILE}"), "You are hobi.\n", 0o640);
+        let client = load_agent_client(&f.root, &hobi());
+        let persona = read_persona(&f.root, &hobi());
+        if std::fs::metadata(&f.root).unwrap().uid() == 0 {
+            assert_eq!(client.unwrap(), self::client());
+            assert_eq!(
+                persona.unwrap().as_deref().map(String::as_str),
+                Some("You are hobi.\n")
+            );
+        } else {
+            assert!(
+                matches!(&client, Err(ConfigError::Io(m)) if m.contains("require 0")),
+                "{client:?}"
+            );
+            assert!(
+                matches!(&persona, Err(ConfigError::Io(m)) if m.contains("require 0")),
+                "{persona:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn read_persona_reads_an_absent_or_present_persona() {
+        let f = Fixture::new("persona");
+        f.dir("hobi");
+        assert_eq!(
+            f.persona("hobi").map(|p| p.map(|s| s.to_string())),
+            Ok(None)
+        );
+        f.file(&format!("hobi/{PERSONA_FILE}"), "You are hobi.\n", 0o640);
+        assert_eq!(
+            f.persona("hobi").map(|p| p.map(|s| s.to_string())),
+            Ok(Some("You are hobi.\n".to_string()))
+        );
+        assert!(
+            f.persona("suga").is_err(),
+            "a missing agent directory is not an absent persona"
+        );
+    }
+
+    #[test]
+    fn read_persona_refuses_insecure_big_or_non_utf8() {
+        let f = Fixture::new("persona_bad");
+        f.dir("hobi");
+        let rel = format!("hobi/{PERSONA_FILE}");
+        f.file(&rel, "You are hobi.\n", 0o644);
+        assert!(matches!(
+            f.persona("hobi"),
+            Err(ConfigError::InsecurePermissions { .. })
+        ));
+        f.file(&rel, &"x".repeat(64 * 1024 + 1), 0o640);
+        assert!(
+            matches!(f.persona("hobi"), Err(ConfigError::Io(ref m)) if m.contains("65536")),
+            "{:?}",
+            f.persona("hobi")
+        );
+        f.file(&rel, &"x".repeat(64 * 1024), 0o640);
+        assert_eq!(f.persona("hobi").unwrap().unwrap().len(), 64 * 1024);
+        let path = f.agents().join(&rel);
+        std::fs::write(&path, b"You are \xff\n").unwrap();
+        assert!(
+            matches!(f.persona("hobi"), Err(ConfigError::Io(ref m)) if m.contains("UTF-8")),
+            "{:?}",
+            f.persona("hobi")
+        );
+    }
+
+    #[test]
+    fn load_agents_ignores_the_client_config_and_persona() {
+        let f = Fixture::new("ignores");
+        f.enroll("hobi", &enrollment("hobi", "hobi-svc", 990, "user"));
+        f.file(&format!("hobi/{AGENT_CLIENT_FILE}"), "garbage: [\n", 0o600);
+        f.file(&format!("hobi/{PERSONA_FILE}"), "\u{0}not yaml", 0o644);
+        let got = f.load().unwrap();
+        assert_eq!(got.enrollments.len(), 1);
+        assert_eq!(got.policies, vec![]);
+        assert_eq!(got.skipped, vec![]);
     }
 }

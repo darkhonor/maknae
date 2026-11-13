@@ -1514,6 +1514,16 @@ mod tests {
             "hobi-svc",
             "--bind-cidr",
             "10.0.0.5",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-5.6",
+            "--key-subpath",
+            "openai/hobi",
+            "--key-field",
+            "api_key",
+            "--context-tokens",
+            "128000",
             "--bind-cidr",
             "10.0.0.6",
         ])
@@ -1524,6 +1534,7 @@ mod tests {
                     assert_eq!(a.id, "hobi");
                     assert_eq!(a.account, "hobi-svc");
                     assert_eq!(a.bind_cidr, ["10.0.0.5", "10.0.0.6"]);
+                    assert_eq!((a.provider.as_str(), a.context_tokens), ("openai", 128_000));
                     assert_eq!(a.approle_mount, "maknae-agent-approle");
                     assert!(!a.rotate);
                     assert_eq!(a.token_file, None);
@@ -1540,7 +1551,17 @@ mod tests {
             "--account",
             "x",
             "--bind-cidr",
-            "10.0.0.5"
+            "10.0.0.5",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-5.6",
+            "--key-subpath",
+            "openai/hobi",
+            "--key-field",
+            "api_key",
+            "--context-tokens",
+            "128000"
         ])
         .is_err());
         assert!(parse(&[
@@ -1552,6 +1573,16 @@ mod tests {
             "x",
             "--bind-cidr",
             "10.0.0.5",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-5.6",
+            "--key-subpath",
+            "openai/hobi",
+            "--key-field",
+            "api_key",
+            "--context-tokens",
+            "128000",
             "--insecure-plaintext-secret"
         ])
         .is_err());
@@ -1565,7 +1596,17 @@ mod tests {
             "--account",
             "x",
             "--bind-cidr",
-            "10.0.0.5"
+            "10.0.0.5",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-5.6",
+            "--key-subpath",
+            "openai/hobi",
+            "--key-field",
+            "api_key",
+            "--context-tokens",
+            "128000"
         ])
         .is_err());
         assert!(parse(&[
@@ -1577,7 +1618,17 @@ mod tests {
             "--account",
             "x",
             "--bind-cidr",
-            "10.0.0.5"
+            "10.0.0.5",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-5.6",
+            "--key-subpath",
+            "openai/hobi",
+            "--key-field",
+            "api_key",
+            "--context-tokens",
+            "128000"
         ])
         .is_err());
         let h = parse(&[

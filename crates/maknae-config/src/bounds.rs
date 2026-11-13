@@ -45,6 +45,9 @@ pub struct EgressBounds {
     pub kv_mount: String,
     /// Relative to `kv_mount`, without `data/`; each user's keys live under `<user_prefix>/<username>/`.
     pub user_prefix: String,
+    /// Relative to `kv_mount`, without `data/`; each agent's keys live under `<agent_prefix>/<id>/`.
+    /// `None` gives agents no model access.
+    pub agent_prefix: Option<String>,
     /// `vault.addr` — where the Egress Daemon unwraps wrapping tokens. Declared in THIS file
     /// because the deputy reads its own bounds and nothing else: the AppArmor
     /// profile and the SELinux type carve-out grant it exactly this document,
@@ -203,12 +206,15 @@ pub fn bounds_from_document(v: &Value) -> Result<EgressBounds, ConfigError> {
     crate::reject_unknown_keys(
         EGRESS_BOUNDS_FILE,
         m,
-        &["user_prefix", "kv_mount", "vault", "call_timeout_ms"],
+        &[
+            "user_prefix",
+            "agent_prefix",
+            "kv_mount",
+            "vault",
+            "call_timeout_ms",
+        ],
     )?;
-    let required = |name: &str| -> Result<String, ConfigError> {
-        let Some((_, Value::Str(v))) = m.iter().find(|(k, _)| k == name) else {
-            return Err(err(format!("'{name}' is required and must be a string")));
-        };
+    let prefix = |name: &str, v: &String| -> Result<String, ConfigError> {
         if v.len() > MAX_USER_PREFIX_BYTES {
             return Err(err(format!(
                 "'{name}' exceeds {MAX_USER_PREFIX_BYTES} bytes"
@@ -222,8 +228,19 @@ pub fn bounds_from_document(v: &Value) -> Result<EgressBounds, ConfigError> {
         }
         Ok(v.clone())
     };
+    let required = |name: &str| -> Result<String, ConfigError> {
+        let Some((_, Value::Str(v))) = m.iter().find(|(k, _)| k == name) else {
+            return Err(err(format!("'{name}' is required and must be a string")));
+        };
+        prefix(name, v)
+    };
     let kv_mount = required("kv_mount")?;
     let user_prefix = required("user_prefix")?;
+    let agent_prefix = match m.iter().find(|(k, _)| k == "agent_prefix") {
+        None => None,
+        Some((_, Value::Str(v))) => Some(prefix("agent_prefix", v)?),
+        Some(_) => return Err(err("'agent_prefix' must be a string")),
+    };
     // #240b: the deputy's Vault connection. Required — a deployment that
     // registers a provider needs the deputy to log in, and an absent block is
     // a refusal here rather than a first-request failure. Every key inside it
@@ -264,6 +281,7 @@ pub fn bounds_from_document(v: &Value) -> Result<EgressBounds, ConfigError> {
     Ok(EgressBounds {
         kv_mount,
         user_prefix,
+        agent_prefix,
         vault_addr: addr.clone(),
         call_timeout_ms,
     })
@@ -493,9 +511,47 @@ mod tests {
                 call_timeout_ms: DEFAULT_CALL_TIMEOUT_MS,
                 kv_mount: "maknae-kv".into(),
                 user_prefix: "maknae/providers".into(),
+                agent_prefix: None,
                 vault_addr: "https://vault.example:8200".into(),
             }
         );
+    }
+
+    fn with_agent_prefix(v: Value) -> Value {
+        let Value::Map(mut m) = doc2("maknae-kv", "maknae/users") else {
+            unreachable!()
+        };
+        m.push(("agent_prefix".into(), v));
+        Value::Map(m)
+    }
+
+    #[test]
+    fn agent_prefix_is_optional_and_validated_like_the_user_prefix() {
+        assert_eq!(
+            bounds_from_document(&with_agent_prefix(Value::Str("maknae/agents".into())))
+                .unwrap()
+                .agent_prefix
+                .as_deref(),
+            Some("maknae/agents")
+        );
+        let longest = "a".repeat(MAX_USER_PREFIX_BYTES);
+        assert_eq!(
+            bounds_from_document(&with_agent_prefix(Value::Str(longest.clone())))
+                .unwrap()
+                .agent_prefix,
+            Some(longest)
+        );
+        for bad in [
+            Value::Str(String::new()),
+            Value::Str("maknae/data/agents".into()),
+            Value::Str("maknae/a b".into()),
+            Value::Str("maknae/a+b".into()),
+            Value::Str("a".repeat(MAX_USER_PREFIX_BYTES + 1)),
+            Value::Int(3),
+        ] {
+            let e = bounds_from_document(&with_agent_prefix(bad.clone())).unwrap_err();
+            assert!(e.to_string().contains("'agent_prefix'"), "{bad:?}: {e}");
+        }
     }
 
     #[test]

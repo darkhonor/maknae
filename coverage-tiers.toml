@@ -813,6 +813,10 @@ path = "bins/maknae/src/enroll/agent.rs"
 why = "#168: maknae enroll agent's orchestration behind the AgentOps seam; the rotation order, the rollback naming of an orphaned accessor, the no-leak property of the SecretID, the state and record YAML round trips and the host-config parse carry real unit tests against a recording fake; the decisions are T1 in maknae-vault/src/agent_enroll.rs"
 
 [[t3]]
+path = "bins/maknae/src/enroll/agent_access.rs"
+why = "#629: the agent account's read ACLs on its configuration — the exact entry list (nothing under private/), the setfacl/getfacl and chmod +a/ls -le argv for both platforms, the read-back match, and the revoke-by-uid order carry unit tests against a fake host whose ACL state the calls change; the runner that executes the programs is bin I/O"
+
+[[t3]]
 path = "bins/maknae/src/enroll/remove_agent.rs"
 why = "#609: maknae enroll remove-agent's orchestration behind the RemoveOps seam; the step order, the refusal that names what remains, the retained accessor after a failed destroy and the policy.yaml-untouched property carry real unit tests against the recording fake from agent.rs"
 

@@ -1505,7 +1505,7 @@ The `syncing` records are written ahead of the store transition at their revisio
 
 ## Enroll an Agent Daemon
 
-An Agent Daemon runs under its own service account, one per agent, and reaches `maknaed` only on the agent socket. Its configuration is the directory `/etc/maknae/agents/<id>/`: `enrollment.yaml`, which `maknae enroll agent` writes, and `policy.yaml`, which you write ([configuration §6.4](configuration.md#64-enrolling-an-agent-daemon) has every rule and refusal). The steps below use the agent id `hobi`. They are not yet measured on a live host.
+An Agent Daemon runs under its own service account, one per agent, and reaches `maknaed` only on the agent socket. Its configuration is the directory `/etc/maknae/agents/<id>/`: `enrollment.yaml` and `agent.yaml`, which `maknae enroll agent` writes, and `policy.yaml` and optionally `persona.md`, which you write ([configuration §6.4](configuration.md#64-enrolling-an-agent-daemon) has every rule and refusal). The steps below use the agent id `hobi`. They are not yet measured on a live host.
 
 1. **Create the account with a non-login shell.** It must not be root, the principal, a Maknae daemon account or a member of `maknae`, `_maknae` or `_maknae-egress`.
 
@@ -1527,11 +1527,14 @@ An Agent Daemon runs under its own service account, one per agent, and reaches `
 
 4. **Enroll it.**
 
+   `/etc/maknae/egress-bounds.yaml` must set `agent_prefix` (for example `agent_prefix: maknae/agents`); enroll refuses without it. Load the agent's API key in Vault at `<kv_mount>/data/<agent_prefix>/hobi/<subpath>`. To give the agent an admin-written persona, install `/etc/maknae/agents/hobi/persona.md` as `root:_maknae 0640` before this step.
+
    ```bash
-   sudo maknae enroll agent hobi --account hobi --bind-cidr <this host's address>/32
+   sudo maknae enroll agent hobi --account hobi --bind-cidr <this host's address>/32 \
+     --provider openai --model <model> --key-subpath openai --key-field api_key --context-tokens <n>
    ```
 
-   `--role guest` binds it to `guest` instead of the default `user`; `admin` is not offered. Enroll seals the SecretID on this host and writes `/etc/maknae/agents/hobi/enrollment.yaml`.
+   `--role guest` binds it to `guest` instead of the default `user`; `admin` is not offered. `--persona self` lets the agent keep its own persona instead of `persona.md`. Enroll seals the SecretID on this host, writes `/etc/maknae/agents/hobi/enrollment.yaml` and `agent.yaml`, and gives the `hobi` account read access to those files, `persona.md`, the directories above them and the three certificates in `/etc/maknae/tls`, and to nothing else. After replacing `persona.md` later, run this step again with `--rotate`.
 
 5. **Write its policy.** Write it as `policy.yaml`, then install it as `root:_maknae 0640`, as the other configuration files are: `sudo install -o root -g _maknae -m 0640 policy.yaml /etc/maknae/agents/hobi/policy.yaml`. Without it the agent holds no file access through Maknae's tools, and only people may task it.
 
@@ -1564,7 +1567,7 @@ An Agent Daemon runs under its own service account, one per agent, and reaches `
    sudo maknae enroll remove-agent hobi
    ```
 
-   It removes `enrollment.yaml`, disables the Vault entity, destroys the SecretIDs and removes the sealed SecretID. Then reload: until a reload succeeds, the agent stays admitted. After it, the agent's next request is refused, each of its open tasks is closed `agent-gone` for its tasker to collect, and the account is an ordinary account again. `policy.yaml` and the directory stay; delete them by hand if you will not re-enroll. When the command fails, run it again before deleting the directory; it still completes once the directory is gone. A login token the agent already holds stays valid until `agent_token_max_ttl`, refused only while the entity stays disabled. When the role and the entity were both already absent, nothing is disabled, and a held token lives until `agent_token_max_ttl`. Re-enrolling re-enables the entity, and such a token works again until `agent_token_max_ttl`.
+   It removes the account's read access, then `enrollment.yaml` and `agent.yaml`, disables the Vault entity, destroys the SecretIDs and removes the sealed SecretID. Then reload: until a reload succeeds, the agent stays admitted. After it, the agent's next request is refused, each of its open tasks is closed `agent-gone` for its tasker to collect, and the account is an ordinary account again. `policy.yaml`, `persona.md` and the directory stay; delete them by hand if you will not re-enroll. When the command fails, run it again before deleting the directory; it still completes once the directory is gone. A login token the agent already holds stays valid until `agent_token_max_ttl`, refused only while the entity stays disabled. When the role and the entity were both already absent, nothing is disabled, and a held token lives until `agent_token_max_ttl`. Re-enrolling re-enables the entity, and such a token works again until `agent_token_max_ttl`.
 
 ## Tasks
 

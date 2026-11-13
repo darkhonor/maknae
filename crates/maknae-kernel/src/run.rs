@@ -13473,6 +13473,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
                     call_timeout_ms: maknae_config::DEFAULT_CALL_TIMEOUT_MS,
                     kv_mount: "kv".into(),
                     user_prefix: "users".into(),
+                    agent_prefix: None,
                     vault_addr: "https://v.example:8200".into(),
                 }),
                 ..TestEnv::default()
@@ -15048,6 +15049,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
                 call_timeout_ms: maknae_config::DEFAULT_CALL_TIMEOUT_MS,
                 kv_mount: "kv".into(),
                 user_prefix: "users".into(),
+                agent_prefix: None,
                 vault_addr: "https://v.example:8200".into(),
             }),
             ..TestEnv::default()

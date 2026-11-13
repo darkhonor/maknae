@@ -50,6 +50,7 @@ impl FakeEnv {
                 call_timeout_ms: maknae_config::DEFAULT_CALL_TIMEOUT_MS,
                 kv_mount: "kv".into(),
                 user_prefix: "users".into(),
+                agent_prefix: None,
                 vault_addr: "https://v:8200".into(),
             }),
             ..FakeEnv::default()
