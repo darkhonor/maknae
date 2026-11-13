@@ -258,7 +258,15 @@ impl RemoveOps for RealRemoveOps {
     #[cfg(target_os = "macos")]
     fn stop_agent(&self, agent: &AgentId) -> Result<(), EnrollError> {
         agent_launchd::stop(&*self.runner, agent, &mut std::thread::sleep, || {
-            agent_launchd::remove_plist(&open_dir(agent_launchd::DAEMON_DIR, 0o022)?, agent)
+            agent_launchd::remove_plist(&open_dir(agent_launchd::DAEMON_DIR, 0o022)?, agent)?;
+            let logs = Path::new(agent_launchd::LOG_ROOT);
+            if let Err(e) = agent_launchd::remove_log_dir(logs, agent) {
+                errln!(
+                    "maknae: {e}; remove {} by hand",
+                    logs.join(agent.as_str()).display()
+                );
+            }
+            Ok(())
         })
     }
 

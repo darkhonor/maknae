@@ -35,6 +35,10 @@
   <key>RunAtLoad</key>
   <true/>
 
+  <!-- launchd opens it as UserName, in a directory enroll gives that account. -->
+  <key>StandardErrorPath</key>
+  <string>@STDERR_PATH@</string>
+
   <key>WorkingDirectory</key>
   <string>/</string>
 

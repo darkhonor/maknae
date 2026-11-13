@@ -1025,12 +1025,22 @@ fn start_instance(
     agent: &AgentId,
     account: &agent_unit::ServiceAccount,
 ) -> Result<(), EnrollError> {
+    let root = FileOwner { uid: 0, gid: 0 };
     agent_launchd::start(r, agent, &mut std::thread::sleep, || {
+        agent_launchd::ensure_log_dir(
+            Path::new(agent_launchd::LOG_ROOT),
+            agent,
+            FileOwner {
+                uid: account.uid,
+                gid: account.gid,
+            },
+            root,
+        )?;
         agent_launchd::write_plist(
             &open_dir(agent_launchd::DAEMON_DIR, 0o022)?,
             agent,
             &account.name,
-            FileOwner { uid: 0, gid: 0 },
+            root,
         )
     })
 }

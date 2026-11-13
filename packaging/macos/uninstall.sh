@@ -71,7 +71,7 @@ done
 rm -f /usr/local/bin/maknaed /usr/local/bin/maknae /usr/local/bin/maknae-egress /usr/local/bin/maknae-agentd
 rm -rf /usr/local/var/run/maknae /usr/local/var/log/maknae /usr/local/share/maknae
 rm -rf /usr/local/var/run/maknae-egress /usr/local/var/log/maknae-egress
-rm -rf /usr/local/var/run/maknae-agent
+rm -rf /usr/local/var/run/maknae-agent /usr/local/var/log/maknae-agent
 rm -f /Library/Logs/maknae-policy-sync.log
 rm -rf /usr/local/lib/maknae
 

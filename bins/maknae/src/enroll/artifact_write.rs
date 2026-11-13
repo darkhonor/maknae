@@ -51,6 +51,7 @@ impl OwnerResolver for RealOwnerResolver {
                 let (uid, gid) = user_uid_gid("_maknae")?;
                 Ok((Some(uid), Some(gid)))
             }
+            Owner::Account { uid, gid } => Ok((Some(Uid::from_raw(uid)), Some(Gid::from_raw(gid)))),
         }
     }
 }
