@@ -351,6 +351,12 @@ files = [
   # control is executable logic and belongs under the T1 floor.
   "crates/maknae-agent/src/plane.rs",
   "crates/maknae-agent/src/wire.rs",
+  # #629: the agent's claim, heartbeat and report answers; a refusal read as a
+  # transport fault, or the reverse, closes or strands a task.
+  "crates/maknae-agent/src/task.rs",
+  # #629: the task driver. Reporting a task it did not finish, or working on after
+  # the kernel answered Held, is false assurance to the tasker.
+  "crates/maknae-agent/src/task_driver.rs",
   "crates/maknae-agent/src/session.rs",
   "crates/maknae-agent/src/route.rs",
   "crates/maknae-agent/src/render.rs",
@@ -457,6 +463,22 @@ files = [
   # #470: SentOutcome and its field-for-field conversion into maknae-agent's
   # WireOutcome, whose mappers are T1. Tested by sent_outcome_converts_field_for_field.
   "crates/maknae-loop/src/outcome.rs",
+  # #629: the provider key a turn reads and the path its seal binds. T2: the
+  # kernel builds the admitted path from the authenticated subject and the egress
+  # refuses any other, so a wrong path here fails the turn closed. Pinned by
+  # agent_keys_read_only_under_the_agent_tree and, against admit_choice, by
+  # maknae-kernel's an_agents_sealed_key_opens_only_on_the_path_the_kernel_admits_for_that_agent.
+  "crates/maknae-loop/src/keys.rs",
+  # #629: the agent daemon's plane. T2: verify decodes a delivered task and hands it
+  # to maknae-vault's verify_task (T1); a home or partition persona is read through
+  # the kernel, cited, and only after a local check that the agent's own account owns
+  # it and no one else can write it; both fail closed. Pinned by its unit tests and
+  # end to end by maknae-kernel's tests/agent_daemon.rs.
+  "crates/maknae-loop/src/agent.rs",
+  # #629: the agent daemon's SIGTERM drain and its interruptible clock. T2: a wrong
+  # arm overruns the stop bound or leaves a 990 s wait unstoppable (availability);
+  # it carries no verdict.
+  "bins/maknae-agentd/src/shutdown.rs",
 ]
 
 [project]
@@ -523,6 +545,14 @@ path = "bins/maknae-egress/src/main.rs"
 why = "thin main: env scrub + FIPS install + arg parse + bounds load + uid resolve + seal-key load + Vault client + socket acquire + the runtime and accept-loop wiring (#321, its runtime proven able to drive concurrent block_on calls by a test here); every decision it makes is fail-closed exit-1, the behaviour lives in maknae-deputy's handle.rs/unseal.rs/call.rs (T1), serve.rs (T2), opener.rs and listen.rs (T3) and maknae-vault's env.rs (T1), and its load-bearing ORDERINGS (scrub first, keys loaded before the listener) are pinned by a source-order test in its OWN test module. Same treatment as bins/maknaed/src/main.rs"
 
 [[t3]]
+path = "bins/maknae-agentd/src/main.rs"
+why = "#629: thin main: arg parse + runtime + signal listener + config, enrollment and SecretID load + the euid check + mint + wiring into maknae-agent's TaskDriver; every refusal is exit 1, and needs a live Vault and kernel. The driver is T1 in maknae-agent::task_driver, the plane T2 in maknae-loop::agent, the drain T2 in shutdown.rs; the whole wiring short of Vault is exercised by maknae-kernel's tests/agent_daemon.rs"
+
+[[t3]]
+path = "bins/maknae-agentd/src/plane_impl.rs"
+why = "#629: the production assembly over a live Vault and kernel: the AgentLogin, the AgentPlane, the mint retry, the leaf supervisor loop and run_minted, the one teardown every post-mint exit takes. login, driver_config, persona_mode, describe, next_backoff, task_trust and agent_id are table-tested; mint_until_held, keep_leaf and run_minted are tested over a fake Credential with paused time (the supervisor reaped before revoke, revoke after a failure, the revoke bound, the stop ending the backoff). connect and the PlaneClient Credential impl need Vault"
+
+[[t3]]
 path = "bins/maknaed/src/main.rs"
 why = "thin main: env scrub + arg resolve + boot + exit mapping; behavior exercised by tests/boot.rs, and the one load-bearing ORDERING #318 added (scrub before the kernel, while single-threaded) is pinned by a source-order test in its own test module — the deputy's treatment, since a behavioural test cannot reach a T3 main"
 
@@ -576,11 +606,11 @@ why = "#470: the wire client moved from bins/maknae/src/cli.rs (T3 there for the
 
 [[t3]]
 path = "crates/maknae-loop/src/plane.rs"
-why = "#470: RealPlane moved from bins/maknae/src/agent.rs as LoopPlane, unchanged in what it needs: a live daemon, Vault and certificates. Every decision it feeds is T1 in maknae-agent::wire; frame_fits, take_spare and the frame-before-key ordering are unit-tested here Amended 2026-11-08 (#170): open and close send session.new (the cwd delegated as a directory descriptor by mutation.rs's prepare_checked, T2) and session.close; their answers are mapped by maknae-agent::wire's open_outcome and close_outcome (T1)."
+why = "#470: RealPlane moved from bins/maknae/src/agent.rs as LoopPlane, unchanged in what it needs: a live daemon, Vault and certificates. Every decision it feeds is T1 in maknae-agent::wire; frame_fits, take_spare and the frame-before-key ordering are unit-tested here Amended 2026-11-08 (#170): open and close send session.new (the cwd delegated as a directory descriptor by mutation.rs's prepare_checked, T2) and session.close; their answers are mapped by maknae-agent::wire's open_outcome and close_outcome (T1). Amended 2026-11-13 (#629): the connection is a Dial (PlaneDial in production, the client or agent socket), and the cited task rides every file, session and mkdir request; both are pinned against an in-process fake kernel by a_cited_task_is_stamped_on_every_request_until_uncited, only_a_claim_or_heartbeat_goes_uncited and each_verb_opens_its_own_connection; for_agent dials the agent socket with its keys' own client and refuses a client that is not that agent's (constructed with a real agent PlaneClient)."
 
 [[t3]]
-path = "crates/maknae-loop/src/keys.rs"
-why = "#470: the KeySupply trait declaration only; the user host's implementation is bins/maknae/src/agent.rs's UserLoginKeys over turn_choice, which is tested there"
+path = "crates/maknae-loop/src/task.rs"
+why = "#629: the agent's claim, heartbeat and report client: one connection per verb over plane.rs's Link, with no decision of its own. Its answers are mapped by maknae-agent::task (T1); which requests carry the cite, and the ceiling read cap, are pinned by claims_and_heartbeats_are_never_cited and task_answers_are_read_with_the_ceiling_cap against an in-process fake kernel; a report longer than prompt_max_bytes (the kernel's text bound) is ReportOutcome::TooLarge and is never sent. Amended 2026-11-13 (#629): verify_class is the one pure decision here, the total map from TaskSignatureError to the driver's VerifyClass, pinned by every_verify_error_maps_to_a_class"
 
 [[t3]]
 path = "crates/maknae-llm/src/lib.rs"
@@ -811,6 +841,10 @@ why = "thin OperatorClient call wrappers; the pure pieces (split_ca_chain, still
 [[t3]]
 path = "bins/maknae/src/enroll/agent.rs"
 why = "#168: maknae enroll agent's orchestration behind the AgentOps seam; the rotation order, the rollback naming of an orphaned accessor, the no-leak property of the SecretID, the state and record YAML round trips and the host-config parse carry real unit tests against a recording fake; the decisions are T1 in maknae-vault/src/agent_enroll.rs"
+
+[[t3]]
+path = "bins/maknae/src/enroll/agent_access.rs"
+why = "#629: the agent account's read ACLs on its configuration — the exact entry list below the configured root (nothing under private/), the setfacl -P -n / getfacl -P -n and chmod -h / ls -led argv for both platforms, the mask-preserving and effective-rights read-back, the macOS account-name refusal, the unresolved-account skip and the revoke-by-uid order carry unit tests against a fake host whose ACL state, mask included, the calls change; the runner that executes the programs is bin I/O"
 
 [[t3]]
 path = "bins/maknae/src/enroll/remove_agent.rs"

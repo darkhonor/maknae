@@ -165,6 +165,11 @@ pub fn classify_bounds_load_error(e: maknae_config::ConfigError) -> EgressBounds
     }
 }
 
+fn key_prefix_gate(name: &str, prefix: &str) -> Result<(), EgressBoundsRefusal> {
+    maknae_config::key_prefix_is_acceptable(prefix)
+        .map_err(|why| EgressBoundsRefusal::Refused(format!("{name} {why}")))
+}
+
 pub fn egress_bounds_boot_gate(
     providers: &maknae_config::ProviderSet,
     bounds: Option<&maknae_config::EgressBounds>,
@@ -179,19 +184,14 @@ pub fn egress_bounds_boot_gate(
             maknae_config::EGRESS_BOUNDS_FILE
         )));
     };
-    if let Err(why) = maknae_config::kv_fragment_is_acceptable(&b.user_prefix) {
-        return Err(EgressBoundsRefusal::Refused(format!("user_prefix {why}")));
-    }
-    if !maknae_config::vault_path_is_safe(&b.user_prefix) {
-        return Err(EgressBoundsRefusal::Refused(
-            "user_prefix has a character outside [A-Za-z0-9._/-]".into(),
-        ));
-    }
-    if b.user_prefix.len() > maknae_config::MAX_USER_PREFIX_BYTES {
-        return Err(EgressBoundsRefusal::Refused(format!(
-            "user_prefix exceeds {} bytes",
-            maknae_config::MAX_USER_PREFIX_BYTES
-        )));
+    key_prefix_gate("user_prefix", &b.user_prefix)?;
+    if let Some(agent_prefix) = &b.agent_prefix {
+        key_prefix_gate("agent_prefix", agent_prefix)?;
+        if maknae_config::prefixes_overlap(agent_prefix, &b.user_prefix) {
+            return Err(EgressBoundsRefusal::Refused(
+                "agent_prefix overlaps user_prefix: neither may equal or contain the other".into(),
+            ));
+        }
     }
     if let Err(e) = maknae_vault::validate_vault_addr(&b.vault_addr) {
         return Err(EgressBoundsRefusal::Refused(format!("vault.addr: {e}")));
@@ -278,6 +278,7 @@ mod tests {
             call_timeout_ms: maknae_config::DEFAULT_CALL_TIMEOUT_MS,
             kv_mount: "maknae-kv".into(),
             user_prefix: user_prefix.into(),
+            agent_prefix: None,
             vault_addr: "https://vault.example:8200".into(),
         }
     }
@@ -301,7 +302,7 @@ mod tests {
             super::egress_bounds_boot_gate(&set(), Some(&bounds("maknae/users")), 280_000),
             Ok(())
         );
-        let at = "u".repeat(maknae_config::MAX_USER_PREFIX_BYTES);
+        let at = "u".repeat(maknae_config::MAX_KEY_PREFIX_BYTES);
         assert_eq!(
             super::egress_bounds_boot_gate(&set(), Some(&bounds(&at)), 280_000),
             Ok(())
@@ -328,11 +329,76 @@ mod tests {
                 other => panic!("expected Refused for {bad:?}, got {other:?}"),
             }
         }
-        let over = "u".repeat(maknae_config::MAX_USER_PREFIX_BYTES + 1);
+        let over = "u".repeat(maknae_config::MAX_KEY_PREFIX_BYTES + 1);
         match super::egress_bounds_boot_gate(&set(), Some(&bounds(&over)), 280_000) {
             Err(super::EgressBoundsRefusal::Refused(m)) => assert!(m.contains("exceeds"), "{m}"),
             other => panic!("expected an over-length refusal, got {other:?}"),
         }
+    }
+
+    fn with_agents(agent_prefix: &str) -> maknae_config::EgressBounds {
+        maknae_config::EgressBounds {
+            agent_prefix: Some(agent_prefix.into()),
+            ..bounds("maknae/users")
+        }
+    }
+
+    #[test]
+    fn boot_accepts_a_sound_agent_prefix_and_its_absence() {
+        let at = "a".repeat(maknae_config::MAX_KEY_PREFIX_BYTES);
+        for good in ["maknae/agents", "agents", at.as_str()] {
+            assert_eq!(
+                super::egress_bounds_boot_gate(&set(), Some(&with_agents(good)), 280_000),
+                Ok(()),
+                "{good:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn boot_refuses_a_malformed_agent_prefix() {
+        let over = "a".repeat(maknae_config::MAX_KEY_PREFIX_BYTES + 1);
+        for bad in [
+            "",
+            "/maknae/agents",
+            "maknae/agents/",
+            "maknae-kv/data/maknae/agents",
+            "maknae/../agents",
+            "maknae agents",
+            "maknae/ag%nts",
+            "maknae/{agents}",
+            over.as_str(),
+        ] {
+            match super::egress_bounds_boot_gate(&set(), Some(&with_agents(bad)), 280_000) {
+                Err(super::EgressBoundsRefusal::Refused(m)) => {
+                    assert!(m.starts_with("agent_prefix "), "{bad:?}: {m}")
+                }
+                other => panic!("expected Refused for {bad:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn boot_refuses_an_agent_prefix_that_overlaps_the_user_prefix() {
+        for bad in ["maknae/users", "maknae/users/agents", "maknae"] {
+            match super::egress_bounds_boot_gate(&set(), Some(&with_agents(bad)), 280_000) {
+                Err(super::EgressBoundsRefusal::Refused(m)) => {
+                    assert!(
+                        m.starts_with("agent_prefix overlaps user_prefix"),
+                        "{bad:?}: {m}"
+                    )
+                }
+                other => panic!("expected Refused for {bad:?}, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            super::egress_bounds_boot_gate(
+                &set(),
+                Some(&with_agents("maknae/users-agents")),
+                280_000
+            ),
+            Ok(())
+        );
     }
 
     #[test]

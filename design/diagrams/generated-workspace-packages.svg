@@ -1,219 +1,236 @@
-<svg width="1498" height="1004" viewBox="0 0 1498 1004" xmlns="http://www.w3.org/2000/svg" role="img">
+<svg width="1498" height="1026" viewBox="0 0 1498 1026" xmlns="http://www.w3.org/2000/svg" role="img">
   <title>Maknae workspace package diagram</title>
   <desc>UML package diagram of the Maknae workspace, layered by dependency.</desc>
-  <rect x="0" y="0" width="1498" height="1004" fill="#FFFFFF"/>
+  <rect x="0" y="0" width="1498" height="1026" fill="#FFFFFF"/>
 <text x="44" y="44" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#2C2C2A">Workspace packages and their dependencies</text>
 <text x="44" y="64" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A">Every package in the workspace, layered by what it depends on. Grey text inside a package is its DIRECT external crates.</text>
 <text x="44" y="80" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A">Normal dependencies only — dev- and build-dependencies are excluded, since they reach no shipped artifact. An edge is a DECLARED dependency: a manifest entry with no use site still draws one.</text>
 <rect x="0" y="98" width="1498" height="104" fill="#FFFFFF"/>
 <text x="24" y="116" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#5F5E5A">layer 5</text>
-<rect x="0" y="218" width="1498" height="93" fill="#FBFAF7"/>
+<rect x="0" y="218" width="1498" height="104" fill="#FBFAF7"/>
 <text x="24" y="236" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#5F5E5A">layer 4</text>
-<rect x="0" y="327" width="1498" height="148" fill="#FFFFFF"/>
-<text x="24" y="345" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#5F5E5A">layer 3</text>
-<rect x="0" y="491" width="1498" height="82" fill="#FBFAF7"/>
-<text x="24" y="509" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#5F5E5A">layer 2</text>
-<rect x="0" y="589" width="1498" height="93" fill="#FFFFFF"/>
-<text x="24" y="607" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#5F5E5A">layer 1</text>
-<rect x="0" y="698" width="1498" height="202" fill="#FBFAF7"/>
-<text x="24" y="716" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#5F5E5A">layer 0</text>
-<text x="24" y="729" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">no deps</text>
+<rect x="0" y="338" width="1498" height="148" fill="#FFFFFF"/>
+<text x="24" y="356" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#5F5E5A">layer 3</text>
+<rect x="0" y="502" width="1498" height="93" fill="#FBFAF7"/>
+<text x="24" y="520" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#5F5E5A">layer 2</text>
+<rect x="0" y="611" width="1498" height="93" fill="#FFFFFF"/>
+<text x="24" y="629" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#5F5E5A">layer 1</text>
+<rect x="0" y="720" width="1498" height="202" fill="#FBFAF7"/>
+<text x="24" y="738" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#5F5E5A">layer 0</text>
+<text x="24" y="751" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">no deps</text>
 <defs><marker id="dep" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#5F5E5A" stroke-width="1.2"/></marker></defs>
-<path d="M 875 188 C 875 396 875 396 875 603" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 875 188 C 875 346 875 346 875 505" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 875 188 C 875 450 1379 450 1379 712" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 875 188 C 875 396 1043 396 1043 603" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 875 188 C 875 210 959 210 959 232" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 875 188 C 875 450 539 450 539 712" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 875 188 C 875 450 707 450 707 712" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 875 188 C 875 396 539 396 539 603" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 875 188 C 875 264 623 264 623 341" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 875 657 C 875 684 707 684 707 712" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 791 417 C 791 461 875 461 875 505" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 791 417 C 791 510 1043 510 1043 603" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 959 406 C 959 456 875 456 875 505" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 959 406 C 959 619 707 619 707 832" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 959 406 C 959 619 539 619 539 832" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 707 640 C 707 736 539 736 539 832" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 875 559 C 875 581 1043 581 1043 603" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 875 559 C 875 696 539 696 539 832" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 455 395 C 455 450 875 450 875 505" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 455 395 C 455 499 371 499 371 603" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 455 395 C 455 554 707 554 707 712" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 623 297 C 623 401 875 401 875 505" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 623 297 C 623 504 1379 504 1379 712" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 623 297 C 623 319 455 319 455 341" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 623 297 C 623 504 707 504 707 712" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 623 297 C 623 450 539 450 539 603" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 623 297 C 623 319 623 319 623 341" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 1043 657 C 1043 744 875 744 875 832" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 791 297 C 791 504 371 504 371 712" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 791 297 C 791 319 791 319 791 341" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 791 297 C 791 319 959 319 959 341" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 791 297 C 791 450 707 450 707 603" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 791 297 C 791 401 875 401 875 505" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 791 297 C 791 504 1379 504 1379 712" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 791 297 C 791 564 707 564 707 832" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 791 297 C 791 450 1043 450 1043 603" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 791 297 C 791 504 539 504 539 712" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 791 297 C 791 504 707 504 707 712" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 791 297 C 791 564 539 564 539 832" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 791 297 C 791 504 875 504 875 712" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 791 297 C 791 319 1127 319 1127 341" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 791 297 C 791 504 1043 504 1043 712" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 791 297 C 791 504 1211 504 1211 712" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 791 297 C 791 319 623 319 623 341" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 371 668 C 371 690 1379 690 1379 712" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 371 668 C 371 690 707 690 707 712" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 959 286 C 959 444 875 444 875 603" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 959 286 C 959 396 875 396 875 505" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 959 286 C 959 499 1379 499 1379 712" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 959 286 C 959 444 1043 444 1043 603" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 959 286 C 959 499 707 499 707 712" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 959 286 C 959 314 623 314 623 341" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 707 559 C 707 581 1043 581 1043 603" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 539 657 C 539 684 1379 684 1379 712" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 1211 640 C 1211 736 1043 736 1043 832" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 1127 395 C 1127 450 875 450 875 505" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 1127 395 C 1127 554 1379 554 1379 712" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 1127 395 C 1127 614 707 614 707 832" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 1127 395 C 1127 499 1043 499 1043 603" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 623 461 C 623 483 875 483 875 505" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 623 461 C 623 586 1379 586 1379 712" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 623 461 C 623 532 1043 532 1043 603" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 623 461 C 623 586 539 586 539 712" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 623 461 C 623 483 707 483 707 505" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
-<path d="M 707 160 C 707 196 791 196 791 232" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 707 160 C 707 436 203 436 203 712" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 707 160 C 707 250 623 250 623 341" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 632.0 121 h 46 l 5 -9 h 0 v 9" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
-<rect x="632.0" y="121" width="150" height="39" rx="3" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
-<text x="641.0" y="138" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#04342C">maknaed</text>
-<text x="641.0" y="148" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#0F6E56">«artifact»</text>
-<path d="M 800.0 121 h 46 l 5 -9 h 0 v 9" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
-<rect x="800.0" y="121" width="150" height="67" rx="3" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
-<text x="809.0" y="138" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#04342C">maknae</text>
-<text x="809.0" y="148" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#0F6E56">«artifact»</text>
-<text x="809.0" y="160" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">clap, nix, rpassword, tokio,</text>
-<text x="809.0" y="171" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">yaml-rust2, zeroize</text>
+<path d="M 623 188 C 623 406 707 406 707 625" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 623 188 C 623 352 875 352 875 516" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 623 188 C 623 461 539 461 539 734" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 623 188 C 623 406 875 406 875 625" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 623 188 C 623 210 791 210 791 232" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 623 188 C 623 461 371 461 371 734" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 623 188 C 623 461 203 461 203 734" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 623 188 C 623 406 539 406 539 625" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 623 188 C 623 270 623 270 623 352" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 707 679 C 707 706 203 706 203 734" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 791 177 C 791 401 707 401 707 625" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 791 177 C 791 346 875 346 875 516" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 791 177 C 791 456 539 456 539 734" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 791 177 C 791 401 875 401 875 625" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 791 177 C 791 204 791 204 791 232" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 791 177 C 791 401 539 401 539 625" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 791 177 C 791 264 623 264 623 352" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 791 428 C 791 472 875 472 875 516" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 791 428 C 791 526 875 526 875 625" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 959 417 C 959 466 875 466 875 516" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 959 417 C 959 636 707 636 707 854" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 959 417 C 959 521 875 521 875 625" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 959 417 C 959 636 539 636 539 854" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 1043 662 C 1043 758 539 758 539 854" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 875 581 C 875 603 875 603 875 625" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 875 581 C 875 718 539 718 539 854" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 455 406 C 455 461 875 461 875 516" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 455 406 C 455 516 371 516 371 625" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 455 406 C 455 570 203 570 203 734" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 623 297 C 623 406 875 406 875 516" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 623 297 C 623 516 539 516 539 734" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 623 297 C 623 324 455 324 455 352" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 623 297 C 623 516 203 516 203 734" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 623 297 C 623 461 539 461 539 625" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 623 297 C 623 324 623 324 623 352" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 875 679 C 875 766 875 766 875 854" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 959 308 C 959 521 707 521 707 734" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 959 308 C 959 330 791 330 791 352" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 959 308 C 959 330 959 330 959 352" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 959 308 C 959 466 1043 466 1043 625" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 959 308 C 959 412 875 412 875 516" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 959 308 C 959 521 539 521 539 734" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 959 308 C 959 581 707 581 707 854" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 959 308 C 959 466 875 466 875 625" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 959 308 C 959 521 371 521 371 734" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 959 308 C 959 521 203 521 203 734" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 959 308 C 959 581 539 581 539 854" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 959 308 C 959 521 1043 521 1043 734" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 959 308 C 959 330 1127 330 1127 352" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 959 308 C 959 521 1211 521 1211 734" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 959 308 C 959 521 1379 521 1379 734" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 959 308 C 959 330 623 330 623 352" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 371 690 C 371 712 539 712 539 734" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 371 690 C 371 712 203 712 203 734" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 791 286 C 791 456 707 456 707 625" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 791 286 C 791 401 875 401 875 516" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 791 286 C 791 510 539 510 539 734" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 791 286 C 791 456 875 456 875 625" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 791 286 C 791 510 203 510 203 734" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 791 286 C 791 456 539 456 539 625" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 791 286 C 791 319 623 319 623 352" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 707 570 C 707 598 875 598 875 625" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 539 679 C 539 706 539 706 539 734" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 1211 662 C 1211 758 1043 758 1043 854" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 1127 406 C 1127 461 875 461 875 516" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 1127 406 C 1127 570 539 570 539 734" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 1127 406 C 1127 630 707 630 707 854" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 1127 406 C 1127 516 875 516 875 625" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 623 472 C 623 494 875 494 875 516" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 623 472 C 623 603 539 603 539 734" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 623 472 C 623 548 875 548 875 625" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 623 472 C 623 603 371 603 371 734" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 623 472 C 623 494 707 494 707 516" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 623 472 C 623 603 203 603 203 734" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 959 160 C 959 196 959 196 959 232" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 959 160 C 959 447 875 447 875 734" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 959 160 C 959 256 623 256 623 352" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
+<path d="M 548.0 121 h 46 l 5 -9 h 0 v 9" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
+<rect x="548.0" y="121" width="150" height="67" rx="3" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
+<text x="557.0" y="138" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#04342C">maknae</text>
+<text x="557.0" y="148" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#0F6E56">«artifact»</text>
+<text x="557.0" y="160" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">clap, nix, rpassword, tokio,</text>
+<text x="557.0" y="171" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">yaml-rust2, zeroize</text>
+<path d="M 716.0 121 h 46 l 5 -9 h 0 v 9" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
+<rect x="716.0" y="121" width="150" height="56" rx="3" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
+<text x="725.0" y="138" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#04342C">agentd</text>
+<text x="725.0" y="148" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#0F6E56">«artifact»</text>
+<text x="725.0" y="160" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">nix, tokio</text>
+<path d="M 884.0 121 h 46 l 5 -9 h 0 v 9" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
+<rect x="884.0" y="121" width="150" height="39" rx="3" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
+<text x="893.0" y="138" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#04342C">maknaed</text>
+<text x="893.0" y="148" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#0F6E56">«artifact»</text>
 <path d="M 548.0 241 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
 <rect x="548.0" y="241" width="150" height="56" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
 <text x="557.0" y="258" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">egress</text>
 <text x="557.0" y="269" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">listenfd, nix, tokio,</text>
 <text x="557.0" y="280" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">zeroize</text>
-<path d="M 716.0 241 h 46 l 5 -9 h 0 v 9" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
-<rect x="716.0" y="241" width="150" height="56" rx="3" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
-<text x="725.0" y="258" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#26215C">kernel</text>
-<text x="725.0" y="268" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#534AB7">«trusted»</text>
-<text x="725.0" y="280" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">nix, serde_json, tokio</text>
-<path d="M 884.0 241 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<rect x="884.0" y="241" width="150" height="45" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<text x="893.0" y="258" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">loop</text>
-<text x="893.0" y="269" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">tokio, zeroize</text>
-<path d="M 380.0 350 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<rect x="380.0" y="350" width="150" height="45" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<text x="389.0" y="367" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">deputy</text>
-<text x="389.0" y="378" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">zeroize</text>
-<path d="M 548.0 350 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<rect x="548.0" y="350" width="150" height="111" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<text x="557.0" y="367" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">vault</text>
-<text x="557.0" y="378" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">arc-swap, bytes, nix,</text>
-<text x="557.0" y="389" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">reqwest, rustify,</text>
-<text x="557.0" y="400" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">rustify_derive,</text>
-<text x="557.0" y="411" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">security-framework, serde,</text>
-<text x="557.0" y="422" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">serde_json, tokio,</text>
-<text x="557.0" y="433" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">tokio-rustls, url, vaultrs,</text>
-<text x="557.0" y="444" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">x509-parser, zeroize</text>
-<path d="M 716.0 350 h 46 l 5 -9 h 0 v 9" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
-<rect x="716.0" y="350" width="150" height="67" rx="3" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
-<text x="725.0" y="367" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#26215C">audit-append</text>
-<text x="725.0" y="377" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#534AB7">«trusted»</text>
-<text x="725.0" y="389" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">nix, serde, serde_json,</text>
-<text x="725.0" y="400" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">tokio</text>
-<path d="M 884.0 350 h 46 l 5 -9 h 0 v 9" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
-<rect x="884.0" y="350" width="150" height="56" rx="3" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
-<text x="893.0" y="367" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#26215C">authz-basic</text>
-<text x="893.0" y="377" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#534AB7">«trusted»</text>
-<text x="893.0" y="389" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">nix</text>
-<path d="M 1052.0 350 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<rect x="1052.0" y="350" width="150" height="45" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<text x="1061.0" y="367" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">state</text>
-<text x="1061.0" y="378" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">serde_json, zeroize</text>
-<path d="M 632.0 514 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<rect x="632.0" y="514" width="150" height="45" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<text x="641.0" y="531" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">plane</text>
-<text x="641.0" y="542" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">tokio</text>
-<path d="M 800.0 514 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<rect x="800.0" y="514" width="150" height="45" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<text x="809.0" y="531" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">config</text>
-<text x="809.0" y="542" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">serde_json, yaml-rust2</text>
-<path d="M 296.0 612 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<rect x="296.0" y="612" width="150" height="56" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<text x="305.0" y="629" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">llm</text>
-<text x="305.0" y="640" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">reqwest, serde, serde_json,</text>
-<text x="305.0" y="651" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">tokio, zeroize</text>
-<path d="M 464.0 612 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<rect x="464.0" y="612" width="150" height="45" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<text x="473.0" y="629" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">seal</text>
-<text x="473.0" y="640" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">zeroize</text>
-<path d="M 632.0 612 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<rect x="632.0" y="612" width="150" height="28" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<text x="641.0" y="629" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">classification-aus</text>
-<path d="M 800.0 612 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<rect x="800.0" y="612" width="150" height="45" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<text x="809.0" y="629" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">agent</text>
-<text x="809.0" y="640" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">serde, serde_json, zeroize</text>
-<path d="M 968.0 612 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<rect x="968.0" y="612" width="150" height="45" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<text x="977.0" y="629" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">io</text>
-<text x="977.0" y="640" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">nix, rustix, zeroize</text>
-<path d="M 1136.0 612 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<rect x="1136.0" y="612" width="150" height="28" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<text x="1145.0" y="629" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">spifc</text>
-<path d="M 128.0 721 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<rect x="128.0" y="721" width="150" height="28" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<text x="137.0" y="738" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">mcp</text>
-<path d="M 296.0 721 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<rect x="296.0" y="721" width="150" height="28" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<text x="305.0" y="738" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">audit</text>
-<path d="M 464.0 721 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<rect x="464.0" y="721" width="150" height="28" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<text x="473.0" y="738" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">msgs</text>
-<path d="M 632.0 721 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<rect x="632.0" y="721" width="150" height="67" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<text x="641.0" y="738" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">proto</text>
-<text x="641.0" y="749" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">ciborium, icu_normalizer,</text>
-<text x="641.0" y="760" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">icu_properties, serde,</text>
-<text x="641.0" y="771" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">tokio, zeroize</text>
-<path d="M 800.0 721 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<rect x="800.0" y="721" width="150" height="28" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<text x="809.0" y="738" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">spif</text>
-<path d="M 968.0 721 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<rect x="968.0" y="721" width="150" height="28" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<text x="977.0" y="738" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">subject-ctx</text>
-<path d="M 1136.0 721 h 46 l 5 -9 h 0 v 9" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
-<rect x="1136.0" y="721" width="150" height="39" rx="3" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
-<text x="1145.0" y="738" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#26215C">subject-ctx-mint</text>
-<text x="1145.0" y="748" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#534AB7">«trusted»</text>
-<path d="M 1304.0 721 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<rect x="1304.0" y="721" width="150" height="45" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<text x="1313.0" y="738" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">crypto</text>
-<text x="1313.0" y="749" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">crypto-profile-awslc4</text>
-<path d="M 464.0 841 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<rect x="464.0" y="841" width="150" height="28" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<text x="473.0" y="858" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">security</text>
-<path d="M 632.0 841 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<rect x="632.0" y="841" width="150" height="28" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<text x="641.0" y="858" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">graph</text>
-<path d="M 800.0 841 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<rect x="800.0" y="841" width="150" height="45" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<text x="809.0" y="858" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">sys</text>
-<text x="809.0" y="869" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">libc</text>
-<path d="M 968.0 841 h 46 l 5 -9 h 0 v 9" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
-<rect x="968.0" y="841" width="150" height="39" rx="3" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
-<text x="977.0" y="858" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#26215C">spif-compile</text>
-<text x="977.0" y="868" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#534AB7">«trusted»</text>
-<text x="44" y="948" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#B3452F">The dependency closure of a «trusted» package covers 20 of the 30 workspace packages and 22 of the 25 direct external crates — 15 through maknae-vault alone.</text>
-<text x="44" y="963" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Closure is not TCB membership (see the component view) — but it is the code a privileged package can reach, so it is the surface that matters.</text>
-<text x="24" y="988" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: cargo metadata (normal deps) · inputs at 82ab50f2 · 2026-11-04</text><text x="1474" y="988" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">UML 2.5.1 (OMG formal/2017-12-05)</text>
+<path d="M 716.0 241 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<rect x="716.0" y="241" width="150" height="45" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="725.0" y="258" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">loop</text>
+<text x="725.0" y="269" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">ciborium, tokio, zeroize</text>
+<path d="M 884.0 241 h 46 l 5 -9 h 0 v 9" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+<rect x="884.0" y="241" width="150" height="67" rx="3" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+<text x="893.0" y="258" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#26215C">kernel</text>
+<text x="893.0" y="268" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#534AB7">«trusted»</text>
+<text x="893.0" y="280" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">ciborium, nix, serde,</text>
+<text x="893.0" y="291" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">serde_json, tokio</text>
+<path d="M 380.0 361 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<rect x="380.0" y="361" width="150" height="45" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="389.0" y="378" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">deputy</text>
+<text x="389.0" y="389" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">zeroize</text>
+<path d="M 548.0 361 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<rect x="548.0" y="361" width="150" height="111" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="557.0" y="378" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">vault</text>
+<text x="557.0" y="389" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">arc-swap, bytes, nix,</text>
+<text x="557.0" y="400" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">reqwest, rustify,</text>
+<text x="557.0" y="411" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">rustify_derive,</text>
+<text x="557.0" y="422" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">security-framework, serde,</text>
+<text x="557.0" y="433" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">serde_json, tokio,</text>
+<text x="557.0" y="444" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">tokio-rustls, url, vaultrs,</text>
+<text x="557.0" y="455" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">x509-parser, zeroize</text>
+<path d="M 716.0 361 h 46 l 5 -9 h 0 v 9" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+<rect x="716.0" y="361" width="150" height="67" rx="3" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+<text x="725.0" y="378" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#26215C">audit-append</text>
+<text x="725.0" y="388" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#534AB7">«trusted»</text>
+<text x="725.0" y="400" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">nix, serde, serde_json,</text>
+<text x="725.0" y="411" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">tokio</text>
+<path d="M 884.0 361 h 46 l 5 -9 h 0 v 9" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+<rect x="884.0" y="361" width="150" height="56" rx="3" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+<text x="893.0" y="378" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#26215C">authz-basic</text>
+<text x="893.0" y="388" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#534AB7">«trusted»</text>
+<text x="893.0" y="400" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">nix</text>
+<path d="M 1052.0 361 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<rect x="1052.0" y="361" width="150" height="45" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="1061.0" y="378" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">state</text>
+<text x="1061.0" y="389" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">serde_json, zeroize</text>
+<path d="M 632.0 525 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<rect x="632.0" y="525" width="150" height="45" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="641.0" y="542" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">plane</text>
+<text x="641.0" y="553" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">tokio</text>
+<path d="M 800.0 525 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<rect x="800.0" y="525" width="150" height="56" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="809.0" y="542" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">config</text>
+<text x="809.0" y="553" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">icu_casemap, icu_normalizer,</text>
+<text x="809.0" y="564" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">serde_json, yaml-rust2</text>
+<path d="M 296.0 634 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<rect x="296.0" y="634" width="150" height="56" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="305.0" y="651" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">llm</text>
+<text x="305.0" y="662" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">reqwest, serde, serde_json,</text>
+<text x="305.0" y="673" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">tokio, zeroize</text>
+<path d="M 464.0 634 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<rect x="464.0" y="634" width="150" height="45" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="473.0" y="651" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">seal</text>
+<text x="473.0" y="662" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">zeroize</text>
+<path d="M 632.0 634 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<rect x="632.0" y="634" width="150" height="45" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="641.0" y="651" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">agent</text>
+<text x="641.0" y="662" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">serde, serde_json, zeroize</text>
+<path d="M 800.0 634 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<rect x="800.0" y="634" width="150" height="45" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="809.0" y="651" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">io</text>
+<text x="809.0" y="662" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">nix, rustix, zeroize</text>
+<path d="M 968.0 634 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<rect x="968.0" y="634" width="150" height="28" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="977.0" y="651" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">classification-aus</text>
+<path d="M 1136.0 634 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<rect x="1136.0" y="634" width="150" height="28" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="1145.0" y="651" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">spifc</text>
+<path d="M 128.0 743 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<rect x="128.0" y="743" width="150" height="67" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="137.0" y="760" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">proto</text>
+<text x="137.0" y="771" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">ciborium, icu_normalizer,</text>
+<text x="137.0" y="782" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">icu_properties, serde,</text>
+<text x="137.0" y="793" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">tokio, zeroize</text>
+<path d="M 296.0 743 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<rect x="296.0" y="743" width="150" height="28" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="305.0" y="760" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">msgs</text>
+<path d="M 464.0 743 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<rect x="464.0" y="743" width="150" height="45" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="473.0" y="760" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">crypto</text>
+<text x="473.0" y="771" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">crypto-profile-awslc4</text>
+<path d="M 632.0 743 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<rect x="632.0" y="743" width="150" height="28" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="641.0" y="760" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">audit</text>
+<path d="M 800.0 743 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<rect x="800.0" y="743" width="150" height="28" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="809.0" y="760" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">mcp</text>
+<path d="M 968.0 743 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<rect x="968.0" y="743" width="150" height="28" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="977.0" y="760" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">spif</text>
+<path d="M 1136.0 743 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<rect x="1136.0" y="743" width="150" height="28" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="1145.0" y="760" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">subject-ctx</text>
+<path d="M 1304.0 743 h 46 l 5 -9 h 0 v 9" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+<rect x="1304.0" y="743" width="150" height="39" rx="3" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+<text x="1313.0" y="760" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#26215C">subject-ctx-mint</text>
+<text x="1313.0" y="770" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#534AB7">«trusted»</text>
+<path d="M 464.0 863 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<rect x="464.0" y="863" width="150" height="28" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="473.0" y="880" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">security</text>
+<path d="M 632.0 863 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<rect x="632.0" y="863" width="150" height="28" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="641.0" y="880" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">graph</text>
+<path d="M 800.0 863 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<rect x="800.0" y="863" width="150" height="45" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="809.0" y="880" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">sys</text>
+<text x="809.0" y="891" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">libc</text>
+<path d="M 968.0 863 h 46 l 5 -9 h 0 v 9" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+<rect x="968.0" y="863" width="150" height="39" rx="3" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+<text x="977.0" y="880" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#26215C">spif-compile</text>
+<text x="977.0" y="890" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#534AB7">«trusted»</text>
+<text x="44" y="970" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#B3452F">The dependency closure of a «trusted» package covers 20 of the 31 workspace packages and 23 of the 26 direct external crates — 15 through maknae-vault alone.</text>
+<text x="44" y="985" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Closure is not TCB membership (see the component view) — but it is the code a privileged package can reach, so it is the surface that matters.</text>
+<text x="24" y="1010" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: cargo metadata (normal deps) · inputs at e7b9b7cb · 2026-11-13</text><text x="1474" y="1010" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">UML 2.5.1 (OMG formal/2017-12-05)</text>
 </svg>

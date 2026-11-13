@@ -7,14 +7,26 @@ here="$(cd "$(dirname "$0")" && pwd)"; source "$here/lib.sh"
 ROOT="${1:-$(git rev-parse --show-toplevel)}"
 cd "$ROOT"
 fail=0
+# Invert form + --prefix none (default output prefixes reverse-deps with box glyphs, so a
+# `^<crate> ` anchor never matches). Fail CLOSED on any cargo-tree error.
+dependents() { cargo tree --workspace -i "$1" -e normal,build --prefix none 2>&1; }
 for p in "${PRIVILEGED_CRATES[@]}"; do
-  # Invert form + --prefix none (default output prefixes reverse-deps with box glyphs, so a
-  # `^${UNTRUSTED_BIN} ` anchor never matches). Fail CLOSED on any cargo-tree error.
-  if ! tree_out="$(cargo tree --workspace -i "$p" -e normal,build --prefix none 2>&1)"; then
+  if ! tree_out="$(dependents "$p")"; then
     echo "FAIL: cargo tree errored for '$p' — failing closed: $tree_out"; fail=1; continue
   fi
-  echo "$tree_out" | grep -qE "^${UNTRUSTED_BIN} " \
-    && { echo "FAIL: privileged '$p' is reachable from '$UNTRUSTED_BIN' (P2a)"; fail=1; }
+  for b in "${UNTRUSTED_BINS[@]}"; do
+    echo "$tree_out" | grep -qE "^${b} " \
+      && { echo "FAIL: privileged '$p' is reachable from '$b' (P2a)"; fail=1; }
+  done
+done
+for l in "${LOOP_CRATES[@]}"; do
+  if ! tree_out="$(dependents "$l")"; then
+    echo "FAIL: cargo tree errored for '$l' — failing closed: $tree_out"; fail=1; continue
+  fi
+  for t in "${TRUSTED_ROOTS[@]}"; do
+    echo "$tree_out" | grep -qE "^${t} " \
+      && { echo "FAIL: untrusted loop crate '$l' is reachable from '$t' (P2-loop)"; fail=1; }
+  done
 done
 [ "$fail" -eq 0 ] && echo "p2-invert-tree: ok"
 exit "$fail"

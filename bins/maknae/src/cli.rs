@@ -496,7 +496,9 @@ async fn execute(verb: Verb) -> Result<bool, String> {
     let trust = maknae_vault::TrustBundle::from_pins(&[&ca]).map_err(|e| e.to_string())?;
     client.mint().await.map_err(|e| e.to_string())?;
     let outcome = round_trip(verb, request, content, &transport, &client, &trust).await;
-    client.shutdown().await;
+    if let Err(e) = client.shutdown().await {
+        crate::stderr::line(&mut std::io::stderr(), format_args!("maknae-vault: {e}"));
+    }
     outcome
 }
 
@@ -1514,6 +1516,16 @@ mod tests {
             "hobi-svc",
             "--bind-cidr",
             "10.0.0.5",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-5.6",
+            "--key-subpath",
+            "openai/hobi",
+            "--key-field",
+            "api_key",
+            "--context-tokens",
+            "128000",
             "--bind-cidr",
             "10.0.0.6",
         ])
@@ -1522,8 +1534,13 @@ mod tests {
             Command::Enroll(args) => match &args.sub {
                 Some(EnrollSub::Agent(a)) => {
                     assert_eq!(a.id, "hobi");
-                    assert_eq!(a.account, "hobi-svc");
+                    assert_eq!(a.account.as_deref(), Some("hobi-svc"));
                     assert_eq!(a.bind_cidr, ["10.0.0.5", "10.0.0.6"]);
+                    assert_eq!(
+                        (a.provider.as_deref(), a.context_tokens),
+                        (Some("openai"), Some(128_000))
+                    );
+                    assert!(!a.refresh_access);
                     assert_eq!(a.approle_mount, "maknae-agent-approle");
                     assert!(!a.rotate);
                     assert_eq!(a.token_file, None);
@@ -1540,7 +1557,17 @@ mod tests {
             "--account",
             "x",
             "--bind-cidr",
-            "10.0.0.5"
+            "10.0.0.5",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-5.6",
+            "--key-subpath",
+            "openai/hobi",
+            "--key-field",
+            "api_key",
+            "--context-tokens",
+            "128000"
         ])
         .is_err());
         assert!(parse(&[
@@ -1552,6 +1579,16 @@ mod tests {
             "x",
             "--bind-cidr",
             "10.0.0.5",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-5.6",
+            "--key-subpath",
+            "openai/hobi",
+            "--key-field",
+            "api_key",
+            "--context-tokens",
+            "128000",
             "--insecure-plaintext-secret"
         ])
         .is_err());
@@ -1565,7 +1602,17 @@ mod tests {
             "--account",
             "x",
             "--bind-cidr",
-            "10.0.0.5"
+            "10.0.0.5",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-5.6",
+            "--key-subpath",
+            "openai/hobi",
+            "--key-field",
+            "api_key",
+            "--context-tokens",
+            "128000"
         ])
         .is_err());
         assert!(parse(&[
@@ -1577,7 +1624,17 @@ mod tests {
             "--account",
             "x",
             "--bind-cidr",
-            "10.0.0.5"
+            "10.0.0.5",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-5.6",
+            "--key-subpath",
+            "openai/hobi",
+            "--key-field",
+            "api_key",
+            "--context-tokens",
+            "128000"
         ])
         .is_err());
         let h = parse(&[
@@ -2093,6 +2150,7 @@ mod tests {
             ),
             (
                 Payload::TaskFollowUps(maknae_proto::TaskFollowUps {
+                    task: maknae_proto::TaskRef::from_id(&maknae_proto::TaskId([0; 16])),
                     from: 0,
                     items: Vec::new(),
                 }),

@@ -111,12 +111,6 @@ fn world(tag: &str, role: &str, grant: bool) -> World {
 }
 
 fn world_with(tag: &str, role: &str, grant: bool, hobi: &str, suga: &str) -> World {
-    let dir = std::env::temp_dir().join(format!("task628_{tag}_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let root = common::DirGuard(dir.canonicalize().unwrap());
-    let paths = maknae_authz_basic::PolicyPaths::in_dir(&root);
     let roles = match (grant, role) {
         (false, _) => String::new(),
         (true, "user") => "roles:\n  user:\n    allow: [\"session.task\"]\n".to_string(),
@@ -124,6 +118,16 @@ fn world_with(tag: &str, role: &str, grant: bool, hobi: &str, suga: &str) -> Wor
             "roles:\n  {role}:\n    allow: [\"session.task\"]\n  user:\n    allow: [\"session.task\"]\n"
         ),
     };
+    world_in(tag, role, &roles, hobi, suga)
+}
+
+fn world_in(tag: &str, role: &str, roles: &str, hobi: &str, suga: &str) -> World {
+    let dir = std::env::temp_dir().join(format!("task628_{tag}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let root = common::DirGuard(dir.canonicalize().unwrap());
+    let paths = maknae_authz_basic::PolicyPaths::in_dir(&root);
     common::write_0640(
         &paths.authz,
         &format!("schema_version: 1\npermissions:\n  allow: []\n  deny: []\n{roles}"),
@@ -222,6 +226,12 @@ fn world_with(tag: &str, role: &str, grant: bool, hobi: &str, suga: &str) -> Wor
         user,
         cfg,
     }
+}
+
+struct Wiring {
+    live: Arc<maknae_kernel::LiveConfig>,
+    egress: Arc<dyn maknae_kernel::Egress>,
+    conversations: Arc<dyn maknae_kernel::ConversationStore>,
 }
 
 impl World {
@@ -344,8 +354,15 @@ impl World {
     }
 
     async fn agent_reports(&self, agent: &str, id: &TaskId, text: &str) -> RespResult {
-        self.agent(agent, Verb::TaskReport { text: secret(text) }, Some(*id))
-            .await
+        self.agent(
+            agent,
+            Verb::TaskReport {
+                text: secret(text),
+                seen_follow_ups: None,
+            },
+            Some(*id),
+        )
+        .await
     }
 
     /// The same disk and clock under a store opened afresh, as after a restart.
@@ -378,6 +395,33 @@ impl World {
         records: &Arc<E>,
         dir: Option<&std::path::Path>,
     ) -> Vec<u8> {
+        self.serve_wired(
+            session,
+            gate,
+            verb,
+            task,
+            records,
+            dir,
+            Wiring {
+                live: Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
+                egress: maknae_kernel::unavailable_egress(),
+                conversations: common::conversations(),
+            },
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn serve_wired<E: maknae_audit_append::AuditEmit + Send + Sync + 'static>(
+        &self,
+        session: maknae_kernel::SessionRecord,
+        gate: Arc<maknae_kernel::FactsGate>,
+        verb: Verb,
+        task: Option<TaskId>,
+        records: &Arc<E>,
+        dir: Option<&std::path::Path>,
+        wiring: Wiring,
+    ) -> Vec<u8> {
         use tokio::io::AsyncReadExt;
         let delegated = maknae_io::DelegatedFds::new(4);
         if let Some(dir) = dir {
@@ -393,17 +437,17 @@ impl World {
             self.cfg.clone(),
             serde_json::json!({}),
             Arc::clone(&self.pdp),
-            Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
+            wiring.live,
             Arc::new("basic+ceiling".into()),
             Arc::new("US".into()),
             Arc::new("ml-dsa-87".to_string()),
             Arc::new(None),
-            maknae_kernel::unavailable_egress(),
+            wiring.egress,
             Duration::from_secs(2),
             delegated,
             common::no_baseline(),
             maknae_kernel::AttemptCaps::default(),
-            common::conversations(),
+            wiring.conversations,
             self.agents.clone(),
         );
         let serving = tokio::spawn(served);
@@ -1221,6 +1265,18 @@ async fn claim_with_none_redelivers_the_working_task_and_some_returns_only_new_f
 }
 
 #[tokio::test]
+async fn a_heartbeats_follow_ups_name_the_working_task() {
+    let w = world("beat-names", "user", true);
+    let first = w.submit("hobi", "a").await;
+    w.submit("hobi", "b").await;
+    assert_eq!(w.claimed("hobi").await, first);
+    match w.beat("hobi", 0).await {
+        RespResult::Ok(Payload::TaskFollowUps(f)) => assert_eq!(f.task, r(&first)),
+        other => panic!("not follow-ups: {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn a_report_reaches_only_the_tasks_own_tasker() {
     let w = world("report-owner", "user", true);
     let theirs = w.anothers("hobi");
@@ -1233,6 +1289,7 @@ async fn a_report_reaches_only_the_tasks_own_tasker() {
             "hobi",
             Verb::TaskReport {
                 text: secret("sentinel-628-theirs"),
+                seen_follow_ups: None,
             },
             Some(theirs),
             &records,
@@ -1264,6 +1321,52 @@ async fn a_report_reaches_only_the_tasks_own_tasker() {
 }
 
 #[tokio::test]
+async fn a_report_that_has_not_seen_every_follow_up_is_refused_and_changes_nothing() {
+    let w = world("report-unseen", "user", true);
+    let id = w.submit("hobi", "a").await;
+    let other = w.submit("hobi", "b").await;
+    assert_eq!(w.claimed("hobi").await, id);
+    w.ask(Verb::TaskAdd {
+        task: r(&id),
+        text: secret("f1"),
+    })
+    .await;
+    let report = |seen| Verb::TaskReport {
+        text: secret("sentinel-629-unseen"),
+        seen_follow_ups: seen,
+    };
+    let records = Records::new(0);
+    let stale = w
+        .agent_with("hobi", report(Some(0)), Some(id), &records)
+        .await
+        .unwrap();
+    assert!(unauthorized(&stale), "{stale:?}");
+    assert!(
+        reasons(&records)
+            .iter()
+            .any(|t| t.contains("follow-ups the report has not seen")),
+        "{:?}",
+        reasons(&records)
+    );
+    let rec = w.store().record(&id).unwrap();
+    assert_eq!(
+        (rec.state, rec.report.is_none()),
+        (TaskState::Working, true)
+    );
+    let seen = w.agent("hobi", report(Some(1)), Some(id)).await;
+    assert!(
+        matches!(&seen, RespResult::Ok(Payload::TaskAcknowledged(v)) if v.state == TaskState::Reported),
+        "{seen:?}"
+    );
+    assert_eq!(w.claimed("hobi").await, other);
+    let unchecked = w.agent("hobi", report(None), Some(other)).await;
+    assert!(
+        matches!(&unchecked, RespResult::Ok(Payload::TaskAcknowledged(_))),
+        "{unchecked:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_report_needs_the_agents_own_working_task_cited() {
     let w = world("report-cited", "user", true);
     let id = w.mine("hobi");
@@ -1272,7 +1375,10 @@ async fn a_report_needs_the_agents_own_working_task_cited() {
     let uncited = w
         .agent_with(
             "hobi",
-            Verb::TaskReport { text: secret("r") },
+            Verb::TaskReport {
+                text: secret("r"),
+                seen_follow_ups: None,
+            },
             None,
             &records,
         )
@@ -1287,8 +1393,15 @@ async fn a_report_needs_the_agents_own_working_task_cited() {
         reasons(&records)
     );
     assert!(
-        w.cannot_cite("hobi", Verb::TaskReport { text: secret("r") }, id)
-            .await,
+        w.cannot_cite(
+            "hobi",
+            Verb::TaskReport {
+                text: secret("r"),
+                seen_follow_ups: None,
+            },
+            id
+        )
+        .await,
         "a queued task is not citable"
     );
     assert_eq!(w.claimed("suga").await, sugas);
@@ -1296,7 +1409,10 @@ async fn a_report_needs_the_agents_own_working_task_cited() {
     let foreign = w
         .agent_with(
             "hobi",
-            Verb::TaskReport { text: secret("r") },
+            Verb::TaskReport {
+                text: secret("r"),
+                seen_follow_ups: None,
+            },
             Some(sugas),
             &records,
         )
@@ -1317,6 +1433,7 @@ async fn a_report_needs_the_agents_own_working_task_cited() {
             "hobi",
             Verb::TaskReport {
                 text: secret(&"r".repeat(w.cfg.prompt_max_bytes + 1)),
+                seen_follow_ups: None,
             },
             Some(id),
         )
@@ -1391,7 +1508,10 @@ async fn claim_and_report_are_refused_on_the_client_channel() {
         Verb::TaskClaim {
             seen_follow_ups: Some(0),
         },
-        Verb::TaskReport { text: secret("r") },
+        Verb::TaskReport {
+            text: secret("r"),
+            seen_follow_ups: None,
+        },
     ] {
         let records = Records::new(0);
         let got = w.ask_with(verb.clone(), &records).await;
@@ -2108,7 +2228,10 @@ async fn a_claim_or_report_whose_record_fails_is_refused_and_recorded() {
     let raw = w
         .agent_raw(
             "hobi",
-            Verb::TaskReport { text: secret("r") },
+            Verb::TaskReport {
+                text: secret("r"),
+                seen_follow_ups: None,
+            },
             Some(id),
             &Records::new(2),
         )
@@ -2910,4 +3033,304 @@ async fn a_submission_held_at_its_confirm_is_recorded_and_answered_as_held() {
         .all(|r| r.subject.task_id == Some(id.to_string())));
     assert!(w.claim("hobi").await.is_none());
     assert_eq!(w.store().record(&id).unwrap().state, TaskState::Held);
+}
+
+const PROMPTING: &str = "roles:\n  user:\n    allow: [\"session.prompt\", \"session.new\"]\ndestinations:\n  user:\n    allow: [\"provider:openai\"]\n";
+const AGENT_PROMPTS: &str =
+    "schema_version: 1\nactions:\n  allow: [\"session.prompt\", \"session.new\"]\n";
+const AGENT_PREFIX: &str = "maknae/agents";
+
+#[derive(Default)]
+struct KeyPaths(std::sync::Mutex<Vec<String>>);
+
+impl KeyPaths {
+    fn seen(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+impl maknae_kernel::Egress for KeyPaths {
+    fn ready(&self) -> Result<(), maknae_kernel::EgressFailure> {
+        Ok(())
+    }
+    fn deadline(&self) -> Duration {
+        Duration::from_secs(5)
+    }
+    fn send(
+        &self,
+        _: &maknae_kernel::DurableEgressIntent,
+        r: maknae_kernel::EgressRequest,
+    ) -> Result<maknae_kernel::EgressReply, maknae_kernel::EgressFailure> {
+        self.0.lock().unwrap().push(r.key_vault_path);
+        Ok(maknae_kernel::EgressReply {
+            reply: maknae_proto::PromptReply {
+                reasoning: None,
+                tool_calls: vec![],
+                blocks: vec![maknae_proto::ContentBlock::Text { text: secret("ok") }],
+                usage: None,
+            },
+        })
+    }
+}
+
+fn prompt_wiring(owner: u32, agent_prefix: Option<&str>, egress: &Arc<KeyPaths>) -> Wiring {
+    let mut authority = common::authority(Some("openai")).unwrap();
+    authority.agent_prefix = agent_prefix.map(str::to_string);
+    Wiring {
+        live: Arc::new(maknae_kernel::LiveConfig::new(
+            Default::default(),
+            Some(authority),
+        )),
+        egress: egress.clone(),
+        conversations: common::seeded(owner, "/"),
+    }
+}
+
+fn prompt(subpath: &str) -> Verb {
+    Verb::SessionPrompt {
+        conversation: common::CONV.into(),
+        turns: vec![maknae_proto::Turn::User {
+            content: vec![maknae_proto::ContentBlock::Text {
+                text: secret("hello"),
+            }],
+        }],
+        output_tokens: None,
+        choice: Some(common::choice("openai", common::TEST_MODEL, subpath)),
+    }
+}
+
+impl World {
+    async fn prompt_as_hobi(&self, wiring: Wiring, records: &Arc<Records>) -> Option<RespResult> {
+        let _shared = STORE.read().await;
+        let mut session = maknae_kernel::SessionRecord::for_test(HOBI_UID, Some("hobi-svc".into()))
+            .with_session_id(473);
+        session.admission = maknae_kernel::Admission::EnrolledAgent;
+        session.channel = maknae_kernel::SessionChannel::Agent {
+            agent: hobi(),
+            leaf_expires: std::time::Instant::now() + Duration::from_secs(3600),
+        };
+        let gate = maknae_kernel::FactsGate::for_test(
+            Arc::new(AgentFacts {
+                user: "hobi-svc".into(),
+                dir: PathBuf::from(&*self.root),
+            }),
+            Duration::from_secs(5),
+        );
+        let raw = self
+            .serve_wired(
+                session,
+                gate,
+                prompt("openai/hobi"),
+                None,
+                records,
+                None,
+                wiring,
+            )
+            .await;
+        first(&raw).await
+    }
+
+    async fn prompt_as_me(&self, wiring: Wiring, records: &Arc<Records>) -> Option<RespResult> {
+        let _shared = STORE.read().await;
+        let session = maknae_kernel::SessionRecord::for_test(self.me, Some(self.user.clone()))
+            .with_session_id(474);
+        let gate = maknae_kernel::FactsGate::allow_as(
+            Some(self.user.clone()),
+            Some(PathBuf::from(&*self.root)),
+        );
+        let raw = self
+            .serve_wired(
+                session,
+                gate,
+                prompt("openai/hobi"),
+                None,
+                records,
+                None,
+                wiring,
+            )
+            .await;
+        first(&raw).await
+    }
+}
+
+async fn first(raw: &[u8]) -> Option<RespResult> {
+    let mut cursor = raw;
+    let frame = common::read_frame(&mut cursor, 1 << 20).await.ok()?;
+    Some(maknae_proto::decode_response(&frame).unwrap().result)
+}
+
+fn prompting(tag: &str) -> World {
+    world_in(tag, "user", PROMPTING, AGENT_PROMPTS, PLAIN)
+}
+
+#[tokio::test]
+async fn an_agent_prompt_reaches_egress_under_its_own_id_never_its_account_or_a_users_tree() {
+    let w = prompting("agentkey");
+    let egress = Arc::new(KeyPaths::default());
+    let records = Records::new(0);
+    let got = w
+        .prompt_as_hobi(
+            prompt_wiring(HOBI_UID, Some(AGENT_PREFIX), &egress),
+            &records,
+        )
+        .await;
+    assert!(
+        matches!(got, Some(RespResult::Ok(Payload::PromptReply(_)))),
+        "{got:?}: {:?}",
+        records.snapshot()
+    );
+    assert_eq!(egress.seen(), ["maknae/agents/hobi/openai/hobi"]);
+}
+
+#[tokio::test]
+async fn an_agent_prompt_with_no_agent_prefix_is_refused_before_egress() {
+    let w = prompting("agentnoprefix");
+    let egress = Arc::new(KeyPaths::default());
+    let records = Records::new(0);
+    let got = w
+        .prompt_as_hobi(prompt_wiring(HOBI_UID, None, &egress), &records)
+        .await;
+    assert!(got.as_ref().is_some_and(unauthorized), "{got:?}");
+    assert!(egress.seen().is_empty());
+    let denied: Vec<_> = records
+        .snapshot()
+        .into_iter()
+        .filter(|r| {
+            r.outcome.result == "deny"
+                && r.outcome.reason == maknae_kernel::ChoiceRefusal::NoAgentPrefix.reason()
+        })
+        .collect();
+    assert_eq!(denied.len(), 1, "{:?}", records.snapshot());
+    assert_eq!(denied[0].subject.agent.as_deref(), Some("hobi"));
+}
+
+#[tokio::test]
+async fn a_client_prompt_on_a_host_with_an_agent_prefix_stays_under_the_user_prefix() {
+    let w = prompting("userkey");
+    let egress = Arc::new(KeyPaths::default());
+    let records = Records::new(0);
+    let got = w
+        .prompt_as_me(prompt_wiring(w.me, Some(AGENT_PREFIX), &egress), &records)
+        .await;
+    assert!(
+        matches!(got, Some(RespResult::Ok(Payload::PromptReply(_)))),
+        "{got:?}: {:?}",
+        records.snapshot()
+    );
+    assert_eq!(
+        egress.seen(),
+        [format!(
+            "{}/{}/openai/hobi",
+            common::TEST_USER_PREFIX,
+            w.user
+        )]
+    );
+}
+
+fn openai() -> maknae_config::ProviderSet {
+    use maknae_config::Value;
+    maknae_config::providers_from_section(Some(&Value::Seq(vec![Value::Map(vec![
+        ("name".into(), Value::Str("openai".into())),
+        (
+            "endpoint".into(),
+            Value::Str("https://api.example.test/v1".into()),
+        ),
+        (
+            "models".into(),
+            Value::Seq(vec![Value::Str("gpt-5.6-luna".into())]),
+        ),
+    ])])))
+    .unwrap()
+}
+
+/// Opens `sealed` as the Egress Daemon does, at the path the kernel admitted.
+fn egress_opens(
+    recipient: &maknae_seal::SealPrivateKey,
+    admitted: &maknae_kernel::AdmittedChoice<'_>,
+    conversation: &str,
+) -> bool {
+    let expect = maknae_vault::WrapExpectation::new(
+        "maknae-kv",
+        &admitted.key_vault_path,
+        admitted.key_field,
+        maknae_vault::USER_KEY_WRAP_TTL,
+    )
+    .unwrap();
+    let p = maknae_vault::aad_parts(&expect, conversation, "openai", admitted.model);
+    let aad = maknae_seal::SealAad::new(&maknae_seal::SealContext {
+        conversation: p.conversation,
+        provider: p.provider,
+        model: p.model,
+        expected_path: p.expected_path,
+        key_field: p.key_field,
+    })
+    .unwrap();
+    maknae_seal::open(recipient, &aad, admitted.sealed_key.as_bytes()).is_ok()
+}
+
+#[tokio::test]
+async fn an_agents_sealed_key_opens_only_on_the_path_the_kernel_admits_for_that_agent() {
+    maknae_crypto::init().unwrap();
+    let recipient = maknae_seal::SealPrivateKey::generate().unwrap();
+    let hobi = maknae_config::AgentId::parse("hobi").unwrap();
+    let suga = maknae_config::AgentId::parse("suga").unwrap();
+    let provider = maknae_config::AgentProvider {
+        provider: "openai".into(),
+        model: "gpt-5.6-luna".into(),
+        key_subpath: "openai/main".into(),
+        key_field: "api_key".into(),
+        context_tokens: 128_000,
+        output_tokens: None,
+    };
+    let key = maknae_loop::keys::AgentKeyContext {
+        provider: &provider,
+        kv_mount: "maknae-kv",
+        agent_prefix: "maknae/agents",
+        agent: &hobi,
+        seal_key: recipient.public_key(),
+    };
+    let read = std::sync::Mutex::new(None);
+    let choice = maknae_loop::keys::agent_choice(&key, "c-629", |path| {
+        *read.lock().unwrap() = Some(path.clone());
+        async move {
+            Ok(maknae_vault::WrappedSecret {
+                token: maknae_vault::WrappingToken::new(Zeroizing::new(
+                    "hvs.wrap-sentinel-629".into(),
+                ))
+                .unwrap(),
+                ttl: Duration::from_secs(60),
+                creation_path: path,
+                creation_time: "2026-11-13T00:00:00Z".into(),
+            })
+        }
+    })
+    .await
+    .unwrap();
+    let set = openai();
+    let admit = |owner| {
+        maknae_kernel::admit_choice(
+            &set,
+            Some(&choice),
+            owner,
+            "maknae/users",
+            Some("maknae/agents"),
+        )
+        .unwrap()
+    };
+    let own = admit(maknae_kernel::KeyOwner::Agent(&hobi));
+    assert_eq!(
+        read.lock().unwrap().as_deref(),
+        Some(own.key_vault_path.as_str())
+    );
+    assert!(egress_opens(&recipient, &own, "c-629"));
+    assert!(!egress_opens(
+        &recipient,
+        &admit(maknae_kernel::KeyOwner::Agent(&suga)),
+        "c-629"
+    ));
+    assert!(!egress_opens(
+        &recipient,
+        &admit(maknae_kernel::KeyOwner::User(Some("hobi"))),
+        "c-629"
+    ));
 }

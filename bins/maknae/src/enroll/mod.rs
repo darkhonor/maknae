@@ -18,6 +18,7 @@
 //! final operator-context child and reporting — monotonic descent by flow order.
 
 mod agent;
+mod agent_access;
 pub mod artifact_table;
 pub mod artifact_write;
 mod helper;
@@ -173,6 +174,7 @@ pub enum EnrollError {
     AgentRetireFailed {
         agent: String,
         accessors: Vec<String>,
+        access: Option<Box<EnrollError>>,
     },
     AgentOrphanedAccessor {
         accessor: String,
@@ -207,6 +209,20 @@ pub enum EnrollError {
     AgentRemoveRetireFailed {
         agent: String,
         accessors: Vec<String>,
+    },
+    AgentPrefixMissing,
+    AgentIdentityChanged {
+        agent: String,
+        account: String,
+        recorded: u32,
+        current: u32,
+    },
+    AgentAccess {
+        agent: String,
+        grant: bool,
+        path: PathBuf,
+        entry: String,
+        detail: String,
     },
 }
 
@@ -327,11 +343,21 @@ impl std::fmt::Display for EnrollError {
                 f,
                 "agent {agent} is enrolled with {field} {recorded}, not {given}; --rotate keeps the {field}, so de-enroll the agent before changing it"
             ),
-            EnrollError::AgentRetireFailed { agent, accessors } => write!(
-                f,
-                "agent {agent} has its new SecretID, but these earlier SecretID accessors could not be destroyed: {}; they stay recorded, and the next --rotate retries them. A disabled Vault entity for this agent stays disabled until a --rotate retires them all",
-                accessors.join(", ")
-            ),
+            EnrollError::AgentRetireFailed {
+                agent,
+                accessors,
+                access,
+            } => {
+                write!(
+                    f,
+                    "agent {agent} has its new SecretID, but these earlier SecretID accessors could not be destroyed: {}; they stay recorded, and the next --rotate retries them. A disabled Vault entity for this agent stays disabled until a --rotate retires them all",
+                    accessors.join(", ")
+                )?;
+                match access {
+                    Some(e) => write!(f, ". Also: {e}"),
+                    None => Ok(()),
+                }
+            }
             EnrollError::AgentOrphanedAccessor {
                 accessor,
                 cause,
@@ -403,6 +429,41 @@ impl std::fmt::Display for EnrollError {
                 f,
                 "agent {agent} is de-enrolled and its Vault entity is disabled, but these SecretID accessors could not be destroyed: {}; they stay recorded with the sealed SecretID, and running `maknae enroll remove-agent {agent}` again retries them",
                 accessors.join(", ")
+            ),
+            EnrollError::AgentIdentityChanged {
+                agent,
+                account,
+                recorded,
+                current,
+            } => write!(
+                f,
+                "agent {agent} was enrolled for account {account} with uid {recorded}, but {account} now has uid {current}; nothing was granted. Restore the account, or remove the agent and enroll it again"
+            ),
+            EnrollError::AgentPrefixMissing => write!(
+                f,
+                "/etc/maknae/egress-bounds.yaml has no agent_prefix, so agents have no model access; set it to the KV path under kv_mount where agent keys live (each agent's under <agent_prefix>/<id>/), then run enroll again"
+            ),
+            EnrollError::AgentAccess {
+                agent,
+                grant: true,
+                path,
+                entry,
+                detail,
+            } => write!(
+                f,
+                "could not grant `{entry}` on {} ({detail}); the agent is enrolled, but its daemon cannot read its configuration until it holds this. Fix the cause, then run `sudo maknae enroll agent {agent} --refresh-access`",
+                path.display()
+            ),
+            EnrollError::AgentAccess {
+                agent: _,
+                grant: false,
+                path,
+                entry,
+                detail,
+            } => write!(
+                f,
+                "could not remove `{entry}` from {} ({detail}); nothing has been removed yet. Fix the cause and run `maknae enroll remove-agent` again",
+                path.display()
             ),
         }
     }
@@ -1309,10 +1370,10 @@ fn check_vault_layout(args: &EnrollArgs) -> Result<(), EnrollError> {
         ("--kv-mount", &args.kv_mount),
         ("--user-prefix", &args.user_prefix),
     ] {
-        if value.len() > maknae_config::MAX_USER_PREFIX_BYTES {
+        if value.len() > maknae_config::MAX_KEY_PREFIX_BYTES {
             return Err(EnrollError::InvalidVaultLayout(format!(
                 "{flag} exceeds {} bytes",
-                maknae_config::MAX_USER_PREFIX_BYTES
+                maknae_config::MAX_KEY_PREFIX_BYTES
             )));
         }
         maknae_config::kv_fragment_is_acceptable(value)
@@ -2042,21 +2103,22 @@ fn egress_traversal_acl_readback() -> String {
 /// identity; without the entry the deputy refuses to start, naming its bounds
 /// file, until the operator grants it by hand. The package scriptlets set the
 /// same entry at install; this re-asserts it on every enroll.
+const EGRESS_GRANT_ARGS: [&str; 5] = ["-P", "-n", "-m", EGRESS_TRAVERSAL_ACL, "/etc/maknae"];
+const EGRESS_READBACK_ARGS: [&str; 3] = ["-P", "-p", "/etc/maknae"];
+
 fn grant_egress_traversal(verbose: bool) {
-    let acl = command(Program::Setfacl)
-        .args(["-m", EGRESS_TRAVERSAL_ACL, "/etc/maknae"])
-        .output();
+    let acl = command(Program::Setfacl).args(EGRESS_GRANT_ARGS).output();
     match acl {
         Ok(o) if o.status.success() => {
             if verbose {
-                errln!("exec: setfacl -m {EGRESS_TRAVERSAL_ACL} /etc/maknae");
+                errln!("exec: setfacl -P -n -m {EGRESS_TRAVERSAL_ACL} /etc/maknae");
             }
             // `setfacl` exits 0 on a filesystem mounted without ACL support in
             // some configurations; read the entry back rather than trust the
             // exit status, since this entry is the only thing that makes the
             // deputy startable.
             let back = command(Program::Getfacl)
-                .args(["-p", "/etc/maknae"])
+                .args(EGRESS_READBACK_ARGS)
                 .output();
             let want = egress_traversal_acl_readback();
             let seen = back
@@ -2085,13 +2147,14 @@ fn grant_egress_traversal(verbose: bool) {
 }
 
 const EGRESS_TRAVERSAL_ACE: &str = "user:_maknae-egress allow list,search";
+const EGRESS_GRANT_ARGS_MACOS: [&str; 4] = ["-h", "+a", EGRESS_TRAVERSAL_ACE, "/etc/maknae"];
 
 fn grant_egress_traversal_macos(verbose: bool) {
     let set = command(Program::Chmod)
-        .args(["+a", EGRESS_TRAVERSAL_ACE, "/etc/maknae"])
+        .args(EGRESS_GRANT_ARGS_MACOS)
         .output();
     if verbose {
-        errln!("exec: /bin/chmod +a {EGRESS_TRAVERSAL_ACE:?} /etc/maknae");
+        errln!("exec: /bin/chmod -h +a {EGRESS_TRAVERSAL_ACE:?} /etc/maknae");
     }
     match command(Program::Ls)
         .args(["-led", "/etc/maknae"])
@@ -2173,11 +2236,14 @@ fn names_acl_entry(getfacl_output: &str, who: &str) -> bool {
     getfacl_output.lines().any(|l| l.starts_with(&entry))
 }
 
+const HOME_READ_FLAGS: [&str; 4] = ["-P", "-p", "-n", "--omit-header"];
+const HOME_REVOKE_FLAGS: [&str; 3] = ["-P", "-n", "-x"];
+
 fn revoke_home_acl(home: &Path, uid: u32, verbose: bool) {
     let who = uid.to_string();
     let present = || {
         command(Program::Getfacl)
-            .args(["-p", "-n", "--omit-header"])
+            .args(HOME_READ_FLAGS)
             .arg(home)
             .output()
             .map(|o| names_acl_entry(&String::from_utf8_lossy(&o.stdout), &who))
@@ -2187,7 +2253,8 @@ fn revoke_home_acl(home: &Path, uid: u32, verbose: bool) {
     }
     let spec = format!("u:{uid}");
     match command(Program::Setfacl)
-        .args(["-x", &spec])
+        .args(HOME_REVOKE_FLAGS)
+        .arg(&spec)
         .arg(home)
         .output()
     {
@@ -3164,6 +3231,26 @@ mod tests {
         assert!(enrolls && enrolls_gone, "enroll's own include is removed");
     }
 
+    #[test]
+    fn host_acl_calls_never_follow_a_link_or_recalculate_the_mask() {
+        assert_eq!(
+            EGRESS_GRANT_ARGS,
+            ["-P", "-n", "-m", "u:_maknae-egress:rx", "/etc/maknae"]
+        );
+        assert_eq!(EGRESS_READBACK_ARGS, ["-P", "-p", "/etc/maknae"]);
+        assert_eq!(
+            EGRESS_GRANT_ARGS_MACOS,
+            [
+                "-h",
+                "+a",
+                "user:_maknae-egress allow list,search",
+                "/etc/maknae"
+            ]
+        );
+        assert_eq!(HOME_REVOKE_FLAGS, ["-P", "-n", "-x"]);
+        assert_eq!(HOME_READ_FLAGS, ["-P", "-p", "-n", "--omit-header"]);
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn revoke_home_acl_removes_the_named_entry_and_keeps_others() {
@@ -3517,6 +3604,7 @@ mod tests {
                 call_timeout_ms: maknae_config::DEFAULT_CALL_TIMEOUT_MS,
                 kv_mount: "corp-kv".to_string(),
                 user_prefix: "corp/users".to_string(),
+                agent_prefix: None,
                 vault_addr: "https://v.example:8200".to_string(),
             }
         );
@@ -3549,7 +3637,7 @@ mod tests {
         assert!(refused(|a| a.user_prefix = "/maknae/users".into()).starts_with("--user-prefix"));
         assert!(refused(|a| a.user_prefix = "maknae/../users".into()).starts_with("--user-prefix"));
         assert!(
-            refused(|a| a.user_prefix = "a".repeat(maknae_config::MAX_USER_PREFIX_BYTES + 1))
+            refused(|a| a.user_prefix = "a".repeat(maknae_config::MAX_KEY_PREFIX_BYTES + 1))
                 .starts_with("--user-prefix")
         );
         assert_eq!(
@@ -4931,6 +5019,16 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
             "hobi-svc",
             "--bind-cidr",
             "10.0.0.5",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-5.6",
+            "--key-subpath",
+            "openai/hobi",
+            "--key-field",
+            "api_key",
+            "--context-tokens",
+            "128000",
         ])
         .unwrap();
         assert_eq!(run_enroll(cli.args).await, ExitCode::FAILURE);

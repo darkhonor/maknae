@@ -167,6 +167,6 @@
   <text x="660" y="1068" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#2C2C2A">confidentiality metadata label binding</text>
   <text x="660" y="1083" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9" font-weight="400" fill="#5F5E5A">ADR-0007 §Out of scope — deferred to the external DCS library</text>
   <text x="40" y="1140" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Every row names evidence a reader can open. A claim with no evidence does not belong in this profile.</text>
-  <text x="40" y="1212" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/standards-profile.toml@5b6758f76f · maknae 375e0f34 · 2026-11-05</text>
+  <text x="40" y="1212" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/standards-profile.toml@5b6758f76f · maknae e7b9b7cb · 2026-11-13</text>
   <text x="1180" y="1212" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">DoDAF 2.02 Change 1 · StdV-1</text>
 </svg>

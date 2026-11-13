@@ -5,7 +5,7 @@
 # marker's owner), and a production build that selected it would be a
 # claim-vs-control gap. Since #609 the same holds for the test-only `test-support`
 # features of maknae-vault (test PKI, `PlaneIdentity` from parts) and maknae-crypto
-# (the `rcgen` re-export, ADR-0030).
+# (the `rcgen` re-export, ADR-0030), and since #629 of maknae-loop (`LoopPlane::with_dial`).
 #
 # Soundness precondition (documented, load-bearing): per-package `-e normal`
 # resolution is authoritative ONLY because build-invocation-lint.sh forbids
@@ -22,7 +22,7 @@ export GIT_NO_REPLACE_OBJECTS=1
 root="${1:-$(git rev-parse --show-toplevel)}"
 fail=0
 
-for bin in maknaed maknae maknae-egress maknae-spifc; do
+for bin in maknaed maknae maknae-agentd maknae-egress maknae-spifc; do
   out="$(cd "$root" && cargo tree -p "$bin" -e normal -f '{p} {f}' 2>/dev/null)" || {
     echo "FAIL: cargo tree -p $bin failed"
     fail=1
@@ -33,7 +33,7 @@ for bin in maknaed maknae maknae-egress maknae-spifc; do
     echo "FAIL: $bin's normal resolution enables hermetic-test-seam (production must never select the weaker authz-load requirement)"
     fail=1
   fi
-  for crate in maknae-vault maknae-crypto; do
+  for crate in maknae-vault maknae-crypto maknae-loop; do
     if printf '%s\n' "$out" | grep -E "(^|[^a-z-])$crate v[0-9]" | grep -q 'test-support'; then
       echo "FAIL: $bin's normal resolution enables $crate/test-support (a test-only feature)"
       fail=1

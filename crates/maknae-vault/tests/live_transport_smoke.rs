@@ -94,8 +94,8 @@ async fn plane_to_plane_roundtrip() {
     c.read_exact(&mut resp).await.unwrap();
     assert_eq!(&resp, b"pong!");
     assert_eq!(&srv.await.unwrap(), b"hello");
-    kclient.shutdown().await;
-    cclient.shutdown().await;
+    kclient.shutdown().await.expect("revoke-self on shutdown");
+    cclient.shutdown().await.expect("revoke-self on shutdown");
     let _ = std::fs::remove_dir_all(&sockdir);
     println!(
         "LIVE TRANSPORT OK: kernel<->cli certless client channel + peer-creds round-trip over UDS"

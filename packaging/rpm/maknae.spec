@@ -31,6 +31,7 @@ Source14:       maknae-policy-sync.path
 Source15:       maknae-policy-sync.service
 Source16:       80-maknae.preset
 Source17:       sensitive.yaml
+Source18:       maknae-agentd
 
 ExclusiveArch:  x86_64
 
@@ -84,6 +85,7 @@ bzip2 -9 maknae.pp
 install -D -m 0755 %{SOURCE0} %{buildroot}%{_bindir}/maknaed
 install -D -m 0755 %{SOURCE1} %{buildroot}%{_bindir}/maknae
 install -D -m 0755 %{SOURCE10} %{buildroot}%{_bindir}/maknae-egress
+install -D -m 0755 %{SOURCE18} %{buildroot}%{_bindir}/maknae-agentd
 
 # systemd unit
 install -D -m 0644 %{SOURCE2} %{buildroot}%{_unitdir}/maknaed.service
@@ -154,7 +156,7 @@ restorecon -Rv %{_bindir}/maknaed %{_bindir}/maknae-egress %{_sysconfdir}/maknae
 # ACL granting `rx` — `r` because maknae-io opens the directory
 # O_RDONLY|O_DIRECTORY, `x` for traversal, never `w` (the loader's 0o022 mask).
 # Requires: acl. Re-asserted on every %post and by `maknae enroll`.
-setfacl -m u:_maknae-egress:rx %{_sysconfdir}/maknae 2>/dev/null || \
+setfacl -P -n -m u:_maknae-egress:rx %{_sysconfdir}/maknae 2>/dev/null || \
     echo "maknae: setfacl failed — grant _maknae-egress rx on %{_sysconfdir}/maknae or the egress deputy cannot start" >&2
 # #240: /run/maknae-egress is the socket unit's, 0751; a directory left by the
 # earlier service-unit shape (0750) is untraversable by _maknae until re-created.
@@ -197,7 +199,7 @@ grant_reader_traverse() {
         echo "maknae: audit.readers printed an unexpected name; not applied" >&2
         return 0
     fi
-    for r in $readers; do setfacl -P -m "u:$r:x" %{_localstatedir}/log/maknae || return 1; done
+    for r in $readers; do setfacl -P -n -m "u:$r:x" %{_localstatedir}/log/maknae || return 1; done
 }
 if ! grant_reader_traverse; then
     echo "maknae: cannot apply audit.readers to %{_localstatedir}/log/maknae; it is left root-owned" >&2
@@ -234,6 +236,7 @@ fi
 %{_bindir}/maknaed
 %{_bindir}/maknae
 %{_bindir}/maknae-egress
+%{_bindir}/maknae-agentd
 %{_unitdir}/maknaed.service
 %{_unitdir}/maknae-egress.service
 %{_unitdir}/maknae-egress.socket

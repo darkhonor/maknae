@@ -4,8 +4,10 @@ use std::net::IpAddr;
 pub const DEFAULT_AGENT_APPROLE_MOUNT: &str = "maknae-agent-approle";
 pub const AGENT_CREDENTIAL_NAME: &str = "maknae-agent-secret-id";
 pub const AGENT_SIGNING_IDENTIFIER: &str = "io.maknae.maknae-agentd";
+pub const AGENT_ROLE_PREFIX: &str = AGENT_ENTITY_PREFIX;
 pub use maknae_config::{
-    service_account_check, AccountRefusal, AgentId, HostAccounts, InvalidAgentId, NON_LOGIN_SHELLS,
+    service_account_check, AccountRefusal, AgentId, HostAccounts, InvalidAgentId,
+    AGENT_ENTITY_PREFIX, NON_LOGIN_SHELLS,
 };
 pub use maknae_io::{HostAccount, MAKNAE_DAEMON_ACCOUNTS};
 

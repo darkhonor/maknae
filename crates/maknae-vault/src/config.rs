@@ -235,10 +235,10 @@ fn kv_location(
             })
         }
     };
-    if value.len() > maknae_config::MAX_USER_PREFIX_BYTES {
+    if value.len() > maknae_config::MAX_KEY_PREFIX_BYTES {
         return Err(refuse(format!(
             "{name} exceeds {} bytes",
-            maknae_config::MAX_USER_PREFIX_BYTES
+            maknae_config::MAX_KEY_PREFIX_BYTES
         )));
     }
     maknae_config::kv_fragment_is_acceptable(value)
@@ -1167,7 +1167,7 @@ mod tests {
 
     #[test]
     fn a_bad_user_key_location_refuses_the_whole_vault_config_naming_its_key() {
-        let max = maknae_config::MAX_USER_PREFIX_BYTES;
+        let max = maknae_config::MAX_KEY_PREFIX_BYTES;
         let at = "p".repeat(max);
         let cases: Vec<(&str, String, String)> = vec![
             (

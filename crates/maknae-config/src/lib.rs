@@ -66,10 +66,12 @@ pub use loader::{load_config, load_config_root_owned};
 pub use agents::load_agents_with_requirement;
 #[cfg(unix)]
 pub use agents::{
-    bindings_conflict, load_agents, parse_agent_enrollment, parse_agent_policy,
-    service_account_check, AccountRefusal, AgentEnrollment, AgentId, AgentPolicy, AgentRole,
-    AgentsLoad, HostAccounts, InvalidAgentId, SkippedAgentEntry, TaskerRef, AGENTS_DIR,
-    AGENT_ENTITY_PREFIX, ENROLLMENT_FILE, NON_LOGIN_SHELLS, POLICY_FILE,
+    bindings_conflict, load_agent_client, load_agent_enrollment, load_agents, parse_agent_client,
+    parse_agent_enrollment, parse_agent_policy, read_persona, service_account_check,
+    AccountRefusal, AgentClientConfig, AgentEnrollment, AgentId, AgentPolicy, AgentProvider,
+    AgentRole, AgentsLoad, HostAccounts, InvalidAgentId, PersonaMode, SkippedAgentEntry, TaskerRef,
+    AGENTS_DIR, AGENT_CLIENT_FILE, AGENT_ENTITY_PREFIX, ENROLLMENT_FILE, NON_LOGIN_SHELLS,
+    PERSONA_FILE, POLICY_FILE,
 };
 pub use audit_cfg::{
     audit_from_section, resolve_readers, AuditConfig, ReaderAccount, ReaderLookup, AUDIT_SECTION,
@@ -99,9 +101,9 @@ pub use authz::{
 };
 pub use baseline_doc::{document_sections, value_from_canonical_json, BaselineSections};
 pub use bounds::{
-    bounds_from_document, kv_fragment_is_acceptable, mount_path_is_acceptable,
-    path_is_within_prefix, vault_path_is_safe, EgressBounds, DEFAULT_CALL_TIMEOUT_MS,
-    EGRESS_BOUNDS_FILE, MAX_USER_PREFIX_BYTES,
+    bounds_from_document, key_prefix_is_acceptable, kv_fragment_is_acceptable,
+    mount_path_is_acceptable, path_is_within_prefix, prefixes_overlap, vault_path_is_safe,
+    EgressBounds, DEFAULT_CALL_TIMEOUT_MS, EGRESS_BOUNDS_FILE, MAX_KEY_PREFIX_BYTES,
 };
 pub use bounds_io::load_egress_bounds;
 pub use ceiling::{ceiling_from_core, policy_name_from_core, Ceiling, IngestPosture};
@@ -127,7 +129,7 @@ pub use mirror::{
 pub use policy::{BasicPolicy, LEVELS as US_LEVELS};
 pub use principal::{principal_from_section, principal_keys_known, Principal, PRINCIPAL_SECTION};
 pub use providers::{
-    endpoint_is_acceptable, key_field_is_acceptable, key_subpath_is_acceptable,
+    agent_key_path, endpoint_is_acceptable, key_field_is_acceptable, key_subpath_is_acceptable,
     model_is_acceptable, provider_name_is_acceptable, providers_from_section,
     reasoning_effort_is_acceptable, refuse_plaintext_keys, user_key_path, AuthorizedProvider,
     ProviderSet, MAX_KEY_FIELD_BYTES, MAX_KEY_SUBPATH_BYTES, MAX_MODELS_PER_PROVIDER,

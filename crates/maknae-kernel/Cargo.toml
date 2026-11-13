@@ -59,5 +59,10 @@ maknae-authz-basic = { path = "../maknae-authz-basic", features = ["hermetic-tes
 maknae-state = { path = "../maknae-state", features = ["hermetic-test-seam"] }
 # #241: the brain under test against the real PDP. DEV-ONLY — the kernel's
 # production graph must never link the loop's decision code (the isolation
-# contract's matrix links `maknae-agent` into `maknae` alone).
+# contract's matrix links `maknae-agent` into `maknae` and `maknae-agentd` alone,
+# and `p2-invert-tree.sh` refuses a normal edge).
 maknae-agent = { path = "../maknae-agent" }
+# #629: the agent's transport, key supply and plane, driven against the kernel
+# (tests/task_loop.rs, tests/agent_daemon.rs). DEV-ONLY, as maknae-agent above.
+maknae-loop = { path = "../maknae-loop", features = ["test-support"] }
+maknae-seal = { path = "../maknae-seal" }

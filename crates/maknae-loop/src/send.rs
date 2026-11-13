@@ -16,6 +16,36 @@ fn response_caps(transport: &maknae_config::TransportConfig) -> FrameCaps {
     ))
 }
 
+/// A task's answer is sized by the kernel's current task text bound, which the agent
+/// knows only as enrollment copied it.
+fn reply_caps(verb: &maknae_proto::Verb, transport: &maknae_config::TransportConfig) -> FrameCaps {
+    match verb {
+        maknae_proto::Verb::TaskClaim { .. } | maknae_proto::Verb::TaskReport { .. } => {
+            FrameCaps::responses(maknae_proto::prompt_response_cap(
+                maknae_config::PROMPT_MAX_CEILING,
+            ))
+        }
+        _ => response_caps(transport),
+    }
+}
+
+/// A connected plane stream. `arm` delegates `fd` with the next write, and says whether it could.
+pub trait Wire: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {
+    fn arm(&self, fd: std::os::fd::OwnedFd) -> bool;
+}
+
+impl Wire for maknae_vault::AuthenticatedStream {
+    fn arm(&self, fd: std::os::fd::OwnedFd) -> bool {
+        match self.armer() {
+            Some(armer) => {
+                armer.arm(fd);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
 async fn read_reply<S: tokio::io::AsyncRead + Unpin>(
     stream: &mut S,
     class: maknae_proto::FrameClass,
@@ -46,6 +76,9 @@ fn reply_wait(
         }
         maknae_proto::Verb::AdminBaselineAccept { .. } => {
             maknae_config::BASELINE_ACCEPT_REPLY_STAGES
+        }
+        maknae_proto::Verb::TaskClaim { .. } | maknae_proto::Verb::TaskReport { .. } => {
+            return class_wait(maknae_proto::FrameClass::Control, transport)
         }
         _ => return class_wait(class_of(verb), transport),
     };
@@ -137,9 +170,9 @@ async fn await_reply<S: tokio::io::AsyncRead + Unpin>(
     stream: &mut S,
     class: maknae_proto::FrameClass,
     wait: std::time::Duration,
-    transport: &maknae_config::TransportConfig,
+    caps: &FrameCaps,
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
-    match tokio::time::timeout(wait, read_reply(stream, class, &response_caps(transport))).await {
+    match tokio::time::timeout(wait, read_reply(stream, class, caps)).await {
         Err(_elapsed) => Err(match class {
             maknae_proto::FrameClass::Control => format!(
                 "no response from daemon within {}ms; it may be slow admitting the connection or re-checking the session (the session-fact lookups at connect and at the request, or the admission audit)",
@@ -166,11 +199,32 @@ pub async fn send_verb(
     trust: &Arc<TrustBundle>,
     diag: &mut (dyn FnMut(String) + Send),
 ) -> Result<SentOutcome, String> {
+    send_via(
+        PlaneConnector::connect(&transport.socket_path, client, trust),
+        None,
+        request_verb,
+        content,
+        check,
+        transport,
+        diag,
+    )
+    .await
+}
+
+/// [`send_verb`] over a stream `connect` opens, for this one verb, with `task` cited on the request.
+pub(crate) async fn send_via<S: Wire>(
+    connect: impl std::future::Future<Output = Result<S, maknae_vault::VaultError>>,
+    task: Option<maknae_proto::TaskId>,
+    request_verb: maknae_proto::Verb,
+    content: Option<maknae_proto::Bytes>,
+    check: crate::mutation::WriteCheck,
+    transport: &maknae_config::TransportConfig,
+    diag: &mut (dyn FnMut(String) + Send),
+) -> Result<SentOutcome, String> {
     let mutating = mutates(&request_verb);
-    let connect = PlaneConnector::connect(&transport.socket_path, client, trust);
     settle(
         mutating,
-        exchange(connect, request_verb, content, check, transport, diag).await,
+        exchange(connect, task, request_verb, content, check, transport, diag).await,
     )
 }
 
@@ -205,10 +259,9 @@ fn before_grant(mutating: bool, why: String) -> Result<SentOutcome, String> {
     }
 }
 
-async fn exchange(
-    connect: impl std::future::Future<
-        Output = Result<maknae_vault::AuthenticatedStream, maknae_vault::VaultError>,
-    >,
+async fn exchange<S: Wire>(
+    connect: impl std::future::Future<Output = Result<S, maknae_vault::VaultError>>,
+    task: Option<maknae_proto::TaskId>,
     request_verb: maknae_proto::Verb,
     content: Option<maknae_proto::Bytes>,
     check: crate::mutation::WriteCheck,
@@ -247,19 +300,14 @@ async fn exchange(
         if let Some(line) = crate::mutation::arming_diagnostic(prepared) {
             diag(line);
         }
-        match (
-            prepared.descriptor().map_err(|e| before(e.to_string()))?,
-            stream.armer(),
-        ) {
-            (Some(fd), Some(armer)) => {
-                armer.arm(fd);
-            }
-            _ => armed = false,
-        }
+        armed = match prepared.descriptor().map_err(|e| before(e.to_string()))? {
+            Some(fd) => stream.arm(fd),
+            None => false,
+        };
     }
 
     let request = Request {
-        task: None,
+        task,
         protocol_version: PROTOCOL_VERSION,
         verb: prepared
             .as_ref()
@@ -282,7 +330,7 @@ async fn exchange(
         &mut stream,
         class,
         reply_wait(&request.verb, transport),
-        transport,
+        &reply_caps(&request.verb, transport),
     )
     .await
     .map_err(before)?;
@@ -452,6 +500,48 @@ mod tests {
     }
 
     #[test]
+    fn task_verbs_wait_the_call_timeout_and_read_at_the_ceiling() {
+        let transport = maknae_config::TransportConfig {
+            read_timeout_ms: 7_000,
+            prompt_max_bytes: maknae_config::PROMPT_MAX_BYTES_FLOOR,
+            ..Default::default()
+        };
+        let control = class_wait(maknae_proto::FrameClass::Control, &transport);
+        let ceiling = FrameCaps::responses(maknae_proto::prompt_response_cap(
+            maknae_config::PROMPT_MAX_CEILING,
+        ));
+        for verb in [
+            maknae_proto::Verb::TaskClaim {
+                seen_follow_ups: None,
+            },
+            maknae_proto::Verb::TaskClaim {
+                seen_follow_ups: Some(3),
+            },
+            maknae_proto::Verb::TaskReport {
+                text: maknae_proto::SecretText(zeroize::Zeroizing::new("r".into())),
+                seen_follow_ups: None,
+            },
+        ] {
+            assert_eq!(reply_wait(&verb, &transport), control, "{verb:?}");
+            assert_eq!(reply_caps(&verb, &transport).prompt, ceiling.prompt);
+        }
+        let prompt = maknae_proto::Verb::SessionPrompt {
+            conversation: "c".into(),
+            turns: vec![],
+            output_tokens: None,
+            choice: None,
+        };
+        assert_eq!(
+            reply_wait(&prompt, &transport),
+            class_wait(maknae_proto::FrameClass::Prompt, &transport)
+        );
+        assert_eq!(
+            reply_caps(&prompt, &transport).prompt,
+            response_caps(&transport).prompt
+        );
+    }
+
+    #[test]
     fn write_request_carries_the_conversation_it_is_given() {
         let (v, _) = write_request(
             "/projects/a".into(),
@@ -516,7 +606,13 @@ mod tests {
             let _ = write_frame(&mut daemon, class, &body).await;
             daemon
         });
-        let got = await_reply(&mut cli, class, class_wait(class, &transport), &transport).await;
+        let got = await_reply(
+            &mut cli,
+            class,
+            class_wait(class, &transport),
+            &response_caps(&transport),
+        )
+        .await;
         writer.abort();
         got
     }
@@ -744,6 +840,7 @@ mod tests {
         };
         let sent = exchange(
             unreachable,
+            None,
             fs_write(),
             Some(maknae_proto::Bytes::new(zeroize::Zeroizing::new(
                 b"x".to_vec(),

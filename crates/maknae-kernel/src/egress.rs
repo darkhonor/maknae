@@ -21,7 +21,7 @@ pub struct EgressRequest {
     /// The admitted provider's endpoint, resolved by the kernel; the deputy parses no provider set.
     pub endpoint: String,
     pub model: String,
-    /// Composed from the user's admitted choice, never from root configuration.
+    /// Composed from the admitted choice and the session's subject, never from root configuration.
     pub key_vault_path: String,
     /// From the user's admitted choice, never from root configuration.
     pub key_field: String,
@@ -1370,8 +1370,14 @@ mod tests {
             maknae_config::Value::Str("none".into()),
         )]);
         let c = chosen("m2");
-        let a = crate::provider_choice::admit_choice(&s, Some(&c), Some("alice"), "maknae/users")
-            .unwrap();
+        let a = crate::provider_choice::admit_choice(
+            &s,
+            Some(&c),
+            crate::provider_choice::KeyOwner::User(Some("alice")),
+            "maknae/users",
+            None,
+        )
+        .unwrap();
         let turns = vec![Turn::User {
             content: vec![text("a")],
         }];
@@ -2050,9 +2056,14 @@ mod tests {
     fn for_choice_sends_a_reply_cap_only_with_its_field() {
         let at = |s: &maknae_config::ProviderSet, o| {
             let c = chosen("m");
-            let a =
-                crate::provider_choice::admit_choice(s, Some(&c), Some("alice"), "maknae/users")
-                    .unwrap();
+            let a = crate::provider_choice::admit_choice(
+                s,
+                Some(&c),
+                crate::provider_choice::KeyOwner::User(Some("alice")),
+                "maknae/users",
+                None,
+            )
+            .unwrap();
             let r = EgressRequest::for_choice(&a, "provider:openai".into(), "c".into(), vec![], o);
             (r.output_tokens, r.output_tokens_field)
         };

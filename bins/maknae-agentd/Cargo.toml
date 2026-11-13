@@ -1,0 +1,33 @@
+[package]
+name = "maknae-agentd"
+publish.workspace = true
+description = "The agent daemon (#629): claims an enrolled agent's kernel-signed tasks and works each through the runtime loop. Untrusted, as the CLI is; it links no privileged crate."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "maknae-agentd"
+path = "src/main.rs"
+
+[dependencies]
+maknae-agent = { path = "../../crates/maknae-agent" }
+maknae-config = { path = "../../crates/maknae-config" }
+maknae-crypto = { path = "../../crates/maknae-crypto" }
+maknae-io = { path = "../../crates/maknae-io" }
+maknae-loop = { path = "../../crates/maknae-loop" }
+maknae-seal = { path = "../../crates/maknae-seal" }
+maknae-vault = { path = "../../crates/maknae-vault" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "signal", "sync"] }
+nix = { version = "0.31", default-features = false, features = ["user"] }
+
+[dev-dependencies]
+maknae-proto = { path = "../../crates/maknae-proto" }
+# The test CA a TaskTrust is built over.
+maknae-vault = { path = "../../crates/maknae-vault", features = ["test-support"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "signal", "sync", "test-util"] }

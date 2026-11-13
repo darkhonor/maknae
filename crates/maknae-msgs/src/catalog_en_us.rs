@@ -99,6 +99,9 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         MsgId::EnrollAgentReload => {
             "If maknaed is running, reload it so it sees this enrollment: {command}"
         }
+        MsgId::EnrollAgentAccessRefreshed => {
+            "Agent Daemon {agent}: its account {account} holds read access to its configuration again"
+        }
         MsgId::EnrollAgentRemoveStarted => "Removing the Agent Daemon {agent}",
         MsgId::EnrollAgentRemoved => {
             "Agent Daemon {agent} is removed: its enrollment is gone, its Vault entity is disabled, and {count} SecretID(s) were destroyed; its policy.yaml and directory are untouched"

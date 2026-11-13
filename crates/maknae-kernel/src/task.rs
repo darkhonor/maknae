@@ -163,6 +163,7 @@ pub enum TaskRefusal {
     TaskerLive { agent: String },
     TaskerHeld,
     FollowUps,
+    FollowUpsUnseen,
     NotWorking,
     Unavailable(String),
 }
@@ -201,6 +202,9 @@ impl std::fmt::Display for TaskRefusal {
                 f,
                 "the task holds {MAX_FOLLOW_UPS_PER_TASK} follow-ups or prompt_max_bytes of them"
             ),
+            TaskRefusal::FollowUpsUnseen => {
+                f.write_str("the task holds follow-ups the report has not seen")
+            }
             TaskRefusal::NotWorking => f.write_str("the task is not working"),
             TaskRefusal::Unavailable(why) => f.write_str(why),
         }
@@ -1498,6 +1502,7 @@ impl TaskStore {
         agent: &AgentId,
         uid: u32,
         text: SecretText,
+        seen: Option<u32>,
     ) -> Result<TaskView, TaskRefusal> {
         let _w = self.writing();
         let held = self.held();
@@ -1508,6 +1513,11 @@ impl TaskStore {
         let next = self.publish(id, text, None, |rec| {
             match (rec.agent == *agent && rec.agent_uid == uid, rec.state) {
                 (false, _) => Err(TaskRefusal::OtherAgent),
+                (true, TaskState::Working)
+                    if seen.is_some_and(|n| rec.follow_ups.len() > n as usize) =>
+                {
+                    Err(TaskRefusal::FollowUpsUnseen)
+                }
                 (true, TaskState::Working) => Ok(()),
                 (
                     true,
@@ -4620,7 +4630,7 @@ mod tests {
             Err(TaskRefusal::Unknown)
         );
         assert_eq!(
-            store.report(&working, &hobi, HOBI, text("late")),
+            store.report(&working, &hobi, HOBI, text("late"), None),
             Err(TaskRefusal::AgentGone)
         );
         assert_eq!(
@@ -4877,7 +4887,9 @@ mod tests {
             Some((working, TaskState::Working)),
             "nothing is decided for a working head"
         );
-        store.report(&working, &hobi, HOBI, text("done")).unwrap();
+        store
+            .report(&working, &hobi, HOBI, text("done"), None)
+            .unwrap();
         assert_eq!(
             claim_as(&store, &hobi, HOBI, signer(), None),
             Ok(Claimed::Idle)
@@ -5230,7 +5242,7 @@ mod tests {
             "marked: the agent no longer holds it, and is not yet told it closed"
         );
         assert_eq!(
-            store.report(&task, &id("hobi"), HOBI, text("late")),
+            store.report(&task, &id("hobi"), HOBI, text("late"), None),
             Err(TaskRefusal::AgentGone)
         );
         assert!(store.sweep().is_empty(), "recorded once");
@@ -5272,7 +5284,7 @@ mod tests {
         );
         store.pass();
         assert_eq!(
-            store.report(&task, &id("hobi"), HOBI, text("late")),
+            store.report(&task, &id("hobi"), HOBI, text("late"), None),
             Err(TaskRefusal::AgentGone),
             "a marked task is not reported, though a writer has passed"
         );
@@ -5457,24 +5469,24 @@ mod tests {
         let hobi = id("hobi");
         let task = held_by(&store, Tasker::Uid(1000));
         assert_eq!(
-            store.report(&task, &hobi, HOBI, text("r")),
+            store.report(&task, &hobi, HOBI, text("r"), None),
             Err(TaskRefusal::NotWorking)
         );
         store.start_for_test(&task);
         store.acted(&task);
         assert_eq!(
-            store.report(&task, &id("jin"), HOBI, text("r")),
+            store.report(&task, &id("jin"), HOBI, text("r"), None),
             Err(TaskRefusal::OtherAgent)
         );
         assert_eq!(
-            store.report(&task, &hobi, JIN, text("r")),
+            store.report(&task, &hobi, JIN, text("r"), None),
             Err(TaskRefusal::OtherAgent)
         );
-        let view = store.report(&task, &hobi, HOBI, text("r")).unwrap();
+        let view = store.report(&task, &hobi, HOBI, text("r"), None).unwrap();
         assert_eq!((view.state, view.actions), (TaskState::Reported, 1));
         assert_eq!(store.record(&task).unwrap().actions, 1);
         assert_eq!(
-            store.report(&task, &hobi, HOBI, text("again")),
+            store.report(&task, &hobi, HOBI, text("again"), None),
             Err(TaskRefusal::NotWorking)
         );
         store.acted(&task);

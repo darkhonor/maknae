@@ -46,7 +46,7 @@ async fn mint_kernel_leaf_against_live_vault() {
     );
 
     let plane_key = client.plane_key().as_str();
-    client.shutdown().await;
+    client.shutdown().await.expect("revoke-self on shutdown");
     println!(
         "LIVE SMOKE OK: minted spiffe://<deployment_id>/plane/kernel ({plane_key}), revoked on shutdown"
     );
@@ -96,6 +96,6 @@ async fn rotate_leaf_against_live_vault() {
         "the rotated leaf is a PEM certificate"
     );
 
-    client.shutdown().await;
+    client.shutdown().await.expect("revoke-self on shutdown");
     println!("LIVE SMOKE OK: rotate_leaf installed a fresh maknae-kernel leaf on the live token");
 }

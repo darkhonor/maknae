@@ -1,3 +1,5 @@
+use crate::agent_enroll::{AgentId, AGENT_SIGNING_IDENTIFIER};
+use crate::secret_source::{AgentSecret, SecretSourceError};
 use crate::VaultError;
 use maknae_config::Value;
 use zeroize::Zeroizing;
@@ -134,6 +136,30 @@ where
     gate(euid, expected_uid, plane)?;
     let item = parse_pointer(&read_pointer()?, plane)?;
     read_item(&item)
+}
+
+pub fn agent_keychain_item(id: &AgentId) -> (&'static str, String) {
+    (AGENT_SIGNING_IDENTIFIER, id.as_str().to_string())
+}
+
+pub fn read_agent_gated<K>(
+    euid: u32,
+    enrolled_uid: u32,
+    id: &AgentId,
+    read_item: K,
+) -> Result<AgentSecret, SecretSourceError>
+where
+    K: FnOnce(&str, &str) -> Result<Zeroizing<String>, VaultError>,
+{
+    if euid != enrolled_uid {
+        return Err(SecretSourceError::WrongUser {
+            euid,
+            enrolled: enrolled_uid,
+        });
+    }
+    let (service, account) = agent_keychain_item(id);
+    let secret = read_item(service, &account).map_err(SecretSourceError::Read)?;
+    AgentSecret::from_trimmed(&secret)
 }
 
 #[cfg(test)]
@@ -336,6 +362,66 @@ mod tests {
                 never_item
             ),
             Err(VaultError::CredentialSource(_))
+        ));
+    }
+
+    fn never_agent_item(_: &str, _: &str) -> Result<Zeroizing<String>, VaultError> {
+        panic!("the keychain must not be touched")
+    }
+
+    #[test]
+    fn an_agent_secret_over_the_cap_is_refused_from_the_keychain() {
+        let id = AgentId::parse("hobi").unwrap();
+        let of = |n: usize| move |_: &str, _: &str| Ok(Zeroizing::new("a".repeat(n)));
+        assert!(matches!(
+            read_agent_gated(990, 990, &id, of(1025)),
+            Err(SecretSourceError::TooLarge { max: 1024 })
+        ));
+        assert_eq!(
+            read_agent_gated(990, 990, &id, of(1024))
+                .unwrap()
+                .expose()
+                .len(),
+            1024
+        );
+    }
+
+    #[test]
+    fn the_agent_item_is_the_one_enroll_writes() {
+        let id = AgentId::parse("hobi").unwrap();
+        assert_eq!(
+            agent_keychain_item(&id),
+            ("io.maknae.maknae-agentd", "hobi".to_string())
+        );
+    }
+
+    #[test]
+    fn an_agent_read_from_another_uid_reads_nothing() {
+        let id = AgentId::parse("hobi").unwrap();
+        for euid in [0, 501, 991] {
+            assert!(matches!(
+                read_agent_gated(euid, 990, &id, never_agent_item),
+                Err(SecretSourceError::WrongUser { euid: e, enrolled: 990 }) if e == euid
+            ));
+        }
+        let got = read_agent_gated(990, 990, &id, |service, account| {
+            assert_eq!(service, "io.maknae.maknae-agentd");
+            assert_eq!(account, "hobi");
+            Ok(Zeroizing::new("agent-sid".to_string()))
+        })
+        .unwrap();
+        assert_eq!(got.expose(), "agent-sid");
+        assert!(matches!(
+            read_agent_gated(990, 990, &id, |_, _| Ok(Zeroizing::new(String::new()))),
+            Err(SecretSourceError::Empty)
+        ));
+        assert!(matches!(
+            read_agent_gated(990, 990, &id, |_, _| Err(VaultError::Keychain {
+                status: -25300
+            })),
+            Err(SecretSourceError::Read(VaultError::Keychain {
+                status: -25300
+            }))
         ));
     }
 

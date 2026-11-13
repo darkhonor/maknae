@@ -10,8 +10,10 @@ use crate::plane::{
 use crate::render::{render, ToolOutcome};
 use crate::route::{route, RouteError, ToolRequest};
 use crate::transcript::Transcript;
-use maknae_proto::{ContentBlock, PromptReply, ProposedToolCall};
+use maknae_proto::{ContentBlock, PromptReply, ProposedToolCall, SecretText};
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
+use zeroize::Zeroizing;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Budget {
@@ -36,35 +38,27 @@ pub enum StopReason {
 
 #[derive(Debug)]
 pub enum Next {
-    Answer(String),
+    Answer(SecretText),
     Execute(Vec<ProposedToolCall>),
     Stop(StopReason),
 }
 
-/// The assistant's answer is copied into a PLAIN `String`, unlike the read
-/// path's `Zeroizing` buffers — the one deliberate asymmetry: this text is
-/// bound for the subject's own stdout, where it is printed in the clear, so a
-/// zeroizing buffer would protect nothing the terminal does not already
-/// disclose. What does not reach here is served content on the DIRECT path: a
-/// `ReadContent` buffer stays zeroizing from [`crate::plane::ReadOutcome`]
-/// through the transcript's `SecretText`, and is never copied into this
-/// `String`.
-///
-/// *(Corrected 2026-09-22, #344: this said "Served file content never reaches
-/// here". A provider ECHO can bring it: the model is shown what it read, and
-/// it may quote those bytes back into the answer, which this function then
-/// copies and `agent::run` prints. The asymmetry stays deliberate — the
-/// destination is the subject's own terminal, which already discloses it — but
-/// it is a statement about the direct path, not about every byte that can
-/// arrive in this string.)*
-fn text_of(blocks: &[ContentBlock]) -> String {
-    let mut s = String::new();
+/// Zeroizing from allocation, and sized once so it never grows (ADR-0026).
+fn text_of(blocks: &[ContentBlock]) -> SecretText {
+    let len = blocks
+        .iter()
+        .map(|b| match b {
+            ContentBlock::Text { text } => text.0.len(),
+            _ => 0,
+        })
+        .sum();
+    let mut s = Zeroizing::new(String::with_capacity(len));
     for b in blocks {
         if let ContentBlock::Text { text } = b {
             s.push_str(&text.0);
         }
     }
-    s
+    SecretText(s)
 }
 
 pub fn step(reply: &PromptReply, steps_remaining: u32, budget: &Budget) -> Next {
@@ -84,7 +78,7 @@ pub fn step(reply: &PromptReply, steps_remaining: u32, budget: &Budget) -> Next 
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Outcome {
-    pub answer: Option<String>,
+    pub answer: Option<SecretText>,
     pub stopped: Option<StopReason>,
     pub steps_used: u32,
 }
@@ -108,6 +102,35 @@ pub enum LoopEvent {
     Stopped(StopReason),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepControl {
+    Continue,
+    Stop,
+}
+
+/// Called once after every executed tool turn, when each call has its result, and
+/// before the next stop and budget check. A turn it appends follows complete tool
+/// turns; `Stop` ends the run as [`StopReason::Stopped`].
+pub trait StepHook<P> {
+    fn after_step(
+        &mut self,
+        plane: &mut P,
+        transcript: &mut Transcript,
+    ) -> impl Future<Output = StepControl> + Send;
+}
+
+pub struct NoHook;
+
+impl<P> StepHook<P> for NoHook {
+    fn after_step(
+        &mut self,
+        _: &mut P,
+        _: &mut Transcript,
+    ) -> impl Future<Output = StepControl> + Send {
+        std::future::ready(StepControl::Continue)
+    }
+}
+
 pub async fn drive<P: Plane>(
     plane: &mut P,
     transcript: &mut Transcript,
@@ -128,6 +151,7 @@ pub async fn drive<P: Plane>(
             }
         },
         None,
+        &mut NoHook,
     )
     .await
 }
@@ -145,6 +169,7 @@ pub async fn drive_session<P: Plane>(
     stop: &AtomicBool,
     emit: &mut impl FnMut(LoopEvent),
     home: Option<&str>,
+    hook: &mut impl StepHook<P>,
 ) -> Outcome {
     let mut steps_used = 0u32;
     loop {
@@ -388,6 +413,13 @@ pub async fn drive_session<P: Plane>(
                     };
                     transcript.push_tool_result(&call.call_id, &render(&outcome, steps_remaining));
                 }
+                if hook.after_step(plane, transcript).await == StepControl::Stop {
+                    return Outcome {
+                        answer: None,
+                        stopped: Some(StopReason::Stopped),
+                        steps_used,
+                    };
+                }
             }
         }
     }
@@ -406,6 +438,41 @@ mod tests {
             text: SecretText(Zeroizing::new(s.into())),
         }
     }
+    #[test]
+    fn an_answer_never_prints_in_a_step_or_an_outcome() {
+        let reply = PromptReply {
+            reasoning: None,
+            blocks: vec![text("sentinel-629-answer")],
+            tool_calls: vec![],
+            usage: None,
+        };
+        let budget = Budget {
+            max_steps: 1,
+            max_tool_calls_per_step: 1,
+        };
+        let next = step(&reply, 1, &budget);
+        assert!(!format!("{next:?}").contains("sentinel-629"), "{next:?}");
+        let Next::Answer(answer) = next else {
+            panic!("not an answer")
+        };
+        let outcome = Outcome {
+            answer: Some(answer),
+            stopped: None,
+            steps_used: 1,
+        };
+        assert!(
+            !format!("{outcome:?}").contains("sentinel-629"),
+            "{outcome:?}"
+        );
+    }
+
+    #[test]
+    fn the_answer_is_sized_once_and_never_grows() {
+        let a = text_of(&[text("12345"), text("678901")]);
+        assert_eq!(a.0.as_str(), "12345678901");
+        assert_eq!(a.0.capacity(), 11);
+    }
+
     fn call(id: &str, name: &str, args: &str) -> ProposedToolCall {
         ProposedToolCall {
             name: name.into(),
@@ -443,7 +510,7 @@ mod tests {
     #[test]
     fn a_text_only_reply_is_the_answer() {
         assert!(
-            matches!(step(&PromptReply { reasoning: None,  blocks: vec![text("done")], tool_calls: vec![], usage: None, }, 3, &budget()), Next::Answer(s) if s == "done")
+            matches!(step(&PromptReply { reasoning: None,  blocks: vec![text("done")], tool_calls: vec![], usage: None, }, 3, &budget()), Next::Answer(s) if s.0.as_str() == "done")
         );
     }
     #[test]
@@ -866,7 +933,7 @@ mod tests {
         ]);
         let mut t = Transcript::new("conv", "edit a.txt");
         let out = drive_unmetered(&mut p, &mut t, &budget()).await;
-        assert_eq!(out.answer.as_deref(), Some("all done"));
+        assert_eq!(out.answer.as_ref().map(|a| a.0.as_str()), Some("all done"));
         assert!(out.stopped.is_none());
         assert_eq!(out.steps_used, 3);
         assert_eq!(p.reads, vec!["/w/a.txt"]);
@@ -904,7 +971,7 @@ mod tests {
         ]);
         let mut t = Transcript::new("conv", "read both");
         let out = drive_unmetered(&mut p, &mut t, &budget()).await;
-        assert_eq!(out.answer.as_deref(), Some("both read"));
+        assert_eq!(out.answer.as_ref().map(|a| a.0.as_str()), Some("both read"));
         assert_eq!(p.reads, vec!["/w/a", "/w/b"], "executed in call order");
         assert_eq!(t.turns().len(), 5, "user, asst, tool c1, tool c2, asst");
         assert_eq!(
@@ -940,7 +1007,10 @@ mod tests {
         p.read_outcome = ReadOutcome::Refused;
         let mut t = Transcript::new("conv", "q");
         let out = drive_unmetered(&mut p, &mut t, &budget()).await;
-        assert_eq!(out.answer.as_deref(), Some("I could not read that"));
+        assert_eq!(
+            out.answer.as_ref().map(|a| a.0.as_str()),
+            Some("I could not read that")
+        );
         assert!(tool_text(&t.turns()[2]).starts_with("unavailable — do not retry"));
     }
     #[tokio::test]
@@ -983,6 +1053,7 @@ mod tests {
             &AtomicBool::new(false),
             &mut |e| events.push(e),
             None,
+            &mut NoHook,
         )
         .await;
         assert_eq!(
@@ -1031,6 +1102,7 @@ mod tests {
             &AtomicBool::new(false),
             &mut |e| events.push(e),
             None,
+            &mut NoHook,
         )
         .await;
         events
@@ -1162,6 +1234,7 @@ mod tests {
             &AtomicBool::new(false),
             &mut |e| events.push(e),
             None,
+            &mut NoHook,
         )
         .await;
         assert_eq!(
@@ -1345,7 +1418,7 @@ mod tests {
             },
         )
         .await;
-        assert_eq!(out.answer.as_deref(), Some("done"));
+        assert_eq!(out.answer.as_ref().map(|a| a.0.as_str()), Some("done"));
         assert_eq!(p.writes.len(), 1);
         assert_eq!(p.reads, vec!["/w/b"]);
         assert_eq!(
@@ -1495,7 +1568,7 @@ mod tests {
             tool_calls: vec![],
             usage: None,
         };
-        assert!(matches!(step(&r, 3, &budget()), Next::Answer(s) if s == "ok"));
+        assert!(matches!(step(&r, 3, &budget()), Next::Answer(s) if s.0.as_str() == "ok"));
     }
     #[tokio::test]
     async fn a_zero_step_budget_stops_before_any_model_call() {
@@ -1597,7 +1670,10 @@ mod tests {
             notices.push(*n)
         })
         .await;
-        assert_eq!((out.answer.as_deref(), p.prompts), (Some("done"), 1));
+        assert_eq!(
+            (out.answer.as_ref().map(|a| a.0.as_str()), p.prompts),
+            (Some("done"), 1)
+        );
 
         let mut p = scripted(vec![answer()]);
         let mut m = Meter::new(ContextBudget::new(3_000, None).unwrap());
@@ -1621,7 +1697,7 @@ mod tests {
             notices.push(*n)
         })
         .await;
-        assert_eq!(out.answer.as_deref(), Some("done"));
+        assert_eq!(out.answer.as_ref().map(|a| a.0.as_str()), Some("done"));
         assert_eq!(
             notices,
             vec![Notice {
@@ -1732,6 +1808,7 @@ mod tests {
             stop,
             &mut |e| events.push(e),
             None,
+            &mut NoHook,
         )
         .await;
         (out, events)
@@ -1752,6 +1829,7 @@ mod tests {
             &AtomicBool::new(false),
             &mut |_| {},
             home,
+            &mut NoHook,
         )
         .await;
         tool_text(&t.turns()[2])
@@ -1786,6 +1864,7 @@ mod tests {
             &AtomicBool::new(false),
             &mut |_| {},
             Some("/home/u"),
+            &mut NoHook,
         )
         .await;
         assert_eq!(p.reads, vec!["/home/u/notes.txt".to_string()]);
@@ -1921,6 +2000,7 @@ mod tests {
             &AtomicBool::new(true),
             &mut |e| events.push(e),
             None,
+            &mut NoHook,
         )
         .await;
         assert_eq!(out.stopped, Some(StopReason::Stopped));
@@ -1946,6 +2026,7 @@ mod tests {
                 events.push(e)
             },
             None,
+            &mut NoHook,
         )
         .await;
         assert_eq!(out.stopped, Some(StopReason::Stopped));
@@ -2089,6 +2170,7 @@ mod tests {
             &stop,
             &mut |e| events.push(e),
             None,
+            &mut NoHook,
         )
         .await;
         let d = |s: &str| LoopEvent::Diagnostic(s.into());
@@ -2118,6 +2200,7 @@ mod tests {
             &stop,
             &mut |e| events.push(e),
             None,
+            &mut NoHook,
         )
         .await;
         assert!(
@@ -2144,6 +2227,7 @@ mod tests {
             &stop,
             &mut |e| events.push(e),
             None,
+            &mut NoHook,
         )
         .await;
         assert!(
@@ -2165,8 +2249,139 @@ mod tests {
             &AtomicBool::new(false),
             &mut |e| events.push(e),
             None,
+            &mut NoHook,
         )
         .await;
         assert!(matches!(&events[..], [LoopEvent::Notice(_)]), "{events:?}");
+    }
+
+    struct Hooked {
+        after: Vec<Vec<Turn>>,
+        append: Vec<&'static str>,
+        stop_at: Option<usize>,
+    }
+    impl<P: Send> StepHook<P> for Hooked {
+        async fn after_step(&mut self, _: &mut P, t: &mut Transcript) -> StepControl {
+            self.after.push(t.turns().to_vec());
+            if let Some(text) = self.append.pop() {
+                t.push_user(text);
+            }
+            if self.stop_at == Some(self.after.len()) {
+                return StepControl::Stop;
+            }
+            StepControl::Continue
+        }
+    }
+    fn two_calls() -> PromptReply {
+        PromptReply {
+            reasoning: None,
+            blocks: vec![],
+            tool_calls: vec![
+                call("c1", "read_file", r#"{"path":"/w/a"}"#),
+                call("c2", "read_file", r#"{"path":"/w/b"}"#),
+            ],
+            usage: None,
+        }
+    }
+    async fn drive_hooked(p: &mut Scripted, t: &mut Transcript, hook: &mut Hooked) -> Outcome {
+        drive_session(
+            p,
+            t,
+            &mut Seen::new(),
+            &budget(),
+            &mut unmetered(),
+            &AtomicBool::new(false),
+            &mut |_| {},
+            None,
+            hook,
+        )
+        .await
+    }
+    fn user_text(t: &Turn) -> String {
+        match t {
+            Turn::User { content } => match &content[0] {
+                ContentBlock::Text { text } => text.0.to_string(),
+                _ => panic!(),
+            },
+            _ => panic!("not a user turn: {t:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_hook_runs_after_every_tool_turn_is_answered_and_never_after_an_answer() {
+        let mut p = scripted(vec![
+            two_calls(),
+            one("c3", "read_file", r#"{"path":"/w/c"}"#),
+            done(),
+        ]);
+        let mut t = Transcript::new("conv", "q");
+        let mut hook = Hooked {
+            after: vec![],
+            append: vec![],
+            stop_at: None,
+        };
+        let out = drive_hooked(&mut p, &mut t, &mut hook).await;
+        assert_eq!(out.answer.as_ref().map(|a| a.0.as_str()), Some("done"));
+        assert_eq!(
+            hook.after.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![4, 6]
+        );
+        assert_eq!(tool_call_id(&hook.after[0][3]), "c2");
+        assert_eq!(tool_call_id(&hook.after[1][5]), "c3");
+    }
+
+    #[tokio::test]
+    async fn a_follow_up_appended_mid_task_follows_the_tool_turns() {
+        let mut p = scripted(vec![two_calls(), done()]);
+        let mut t = Transcript::new("conv", "q");
+        let mut hook = Hooked {
+            after: vec![],
+            append: vec!["follow-up-629-sentinel"],
+            stop_at: None,
+        };
+        drive_hooked(&mut p, &mut t, &mut hook).await;
+        let sent = &p.seen[1];
+        assert_eq!(sent.len(), 5);
+        assert_eq!(tool_call_id(&sent[2]), "c1");
+        assert_eq!(tool_call_id(&sent[3]), "c2");
+        assert_eq!(user_text(&sent[4]), "follow-up-629-sentinel");
+    }
+
+    #[tokio::test]
+    async fn a_hook_stop_ends_the_run_as_stopped_before_the_next_prompt() {
+        let mut p = scripted(vec![two_calls(), done()]);
+        let mut t = Transcript::new("conv", "q");
+        let mut hook = Hooked {
+            after: vec![],
+            append: vec![],
+            stop_at: Some(1),
+        };
+        let out = drive_hooked(&mut p, &mut t, &mut hook).await;
+        assert_eq!(
+            out,
+            Outcome {
+                answer: None,
+                stopped: Some(StopReason::Stopped),
+                steps_used: 1
+            }
+        );
+        assert_eq!(p.prompts, 1);
+        assert_eq!(t.turns().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn the_no_op_hook_leaves_the_interactive_loop_as_it_was() {
+        let mut p = scripted(vec![two_calls(), done()]);
+        let mut t = Transcript::new("conv", "q");
+        let out = drive_unmetered(&mut p, &mut t, &budget()).await;
+        assert_eq!(
+            out,
+            Outcome {
+                answer: Some(SecretText(Zeroizing::new("done".into()))),
+                stopped: None,
+                steps_used: 2
+            }
+        );
+        assert_eq!(p.seen[1].len(), 4);
     }
 }

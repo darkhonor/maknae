@@ -112,17 +112,7 @@ pub fn key_subpath_is_acceptable(s: &str) -> Result<(), String> {
 }
 
 pub fn user_key_path(user_prefix: &str, username: &str, subpath: &str) -> Result<String, String> {
-    if user_prefix.len() > crate::MAX_USER_PREFIX_BYTES {
-        return Err(format!(
-            "the user prefix exceeds {} bytes",
-            crate::MAX_USER_PREFIX_BYTES
-        ));
-    }
-    crate::kv_fragment_is_acceptable(user_prefix)
-        .map_err(|why| format!("the user prefix {why}"))?;
-    if !crate::vault_path_is_safe(user_prefix) {
-        return Err("the user prefix has a character outside [A-Za-z0-9._/-]".into());
-    }
+    crate::key_prefix_is_acceptable(user_prefix).map_err(|why| format!("the user prefix {why}"))?;
     if username.contains('/') {
         return Err("the username is not one path segment".into());
     }
@@ -135,6 +125,17 @@ pub fn user_key_path(user_prefix: &str, username: &str, subpath: &str) -> Result
     }
     key_subpath_is_acceptable(subpath).map_err(|why| format!("the key subpath {why}"))?;
     Ok(format!("{user_prefix}/{username}/{subpath}"))
+}
+
+pub fn agent_key_path(
+    agent_prefix: &str,
+    agent: &crate::AgentId,
+    subpath: &str,
+) -> Result<String, String> {
+    crate::key_prefix_is_acceptable(agent_prefix)
+        .map_err(|why| format!("the agent prefix {why}"))?;
+    key_subpath_is_acceptable(subpath).map_err(|why| format!("the key subpath {why}"))?;
+    Ok(format!("{agent_prefix}/{}/{subpath}", agent.as_str()))
 }
 
 pub fn reasoning_effort_is_acceptable(s: &str) -> bool {
@@ -782,15 +783,89 @@ mod tests {
         }
         let e = user_key_path("maknae/users", "data", "x").unwrap_err();
         assert!(!e.contains("#308"), "{e}");
-        let at = "p".repeat(crate::MAX_USER_PREFIX_BYTES);
+        let at = "p".repeat(crate::MAX_KEY_PREFIX_BYTES);
         assert!(user_key_path(&at, "alice", "x").is_ok());
-        let over = "p".repeat(crate::MAX_USER_PREFIX_BYTES + 1);
+        let over = "p".repeat(crate::MAX_KEY_PREFIX_BYTES + 1);
         assert_eq!(
             user_key_path(&over, "alice", "x"),
             Err(format!(
                 "the user prefix exceeds {} bytes",
-                crate::MAX_USER_PREFIX_BYTES
+                crate::MAX_KEY_PREFIX_BYTES
             ))
         );
+    }
+
+    fn hobi() -> crate::AgentId {
+        crate::AgentId::parse("hobi").unwrap()
+    }
+
+    #[test]
+    fn agent_key_path_composes_prefix_agent_id_and_subpath() {
+        assert_eq!(
+            agent_key_path("maknae/agents", &hobi(), "openai/hobi"),
+            Ok("maknae/agents/hobi/openai/hobi".to_string())
+        );
+        let at = "p".repeat(crate::MAX_KEY_PREFIX_BYTES);
+        assert!(agent_key_path(&at, &hobi(), "x").is_ok());
+    }
+
+    #[test]
+    fn agent_key_path_says_which_part_is_wrong() {
+        let over = "p".repeat(crate::MAX_KEY_PREFIX_BYTES + 1);
+        for (prefix, sub, want) in [
+            ("", "x", "the agent prefix is empty".to_string()),
+            (
+                "/maknae",
+                "x",
+                "the agent prefix must not start with '/'".into(),
+            ),
+            (
+                "maknae/",
+                "x",
+                "the agent prefix must not end with '/'".into(),
+            ),
+            (
+                "maknae/data",
+                "x",
+                "the agent prefix contains a 'data' segment".into(),
+            ),
+            (
+                "maknae/a#b",
+                "x",
+                "the agent prefix has a character outside [A-Za-z0-9._/-]".into(),
+            ),
+            (
+                over.as_str(),
+                "x",
+                format!(
+                    "the agent prefix exceeds {} bytes",
+                    crate::MAX_KEY_PREFIX_BYTES
+                ),
+            ),
+            ("maknae/agents", "", "the key subpath is empty".into()),
+            (
+                "maknae/agents",
+                "/x",
+                "the key subpath must not start with '/'".into(),
+            ),
+            (
+                "maknae/agents",
+                "x//y",
+                "the key subpath has an empty interior path segment".into(),
+            ),
+            (
+                "maknae/agents",
+                "../suga/x",
+                "the key subpath has a '.' or '..' segment".into(),
+            ),
+            (
+                "maknae/agents",
+                "x/../../users/alice",
+                "the key subpath has a '.' or '..' segment".into(),
+            ),
+        ] {
+            let e = agent_key_path(prefix, &hobi(), sub).unwrap_err();
+            assert!(e.starts_with(&want), "{prefix:?} {sub:?}: {e}");
+        }
     }
 }

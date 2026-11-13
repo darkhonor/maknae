@@ -16,6 +16,8 @@ pub mod plane;
 pub mod render;
 pub mod route;
 pub mod session;
+pub mod task;
+pub mod task_driver;
 #[cfg(test)]
 mod testutil;
 pub mod transcript;

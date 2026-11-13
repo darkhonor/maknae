@@ -61,7 +61,7 @@ grant_reader_traverse() {
         echo "maknae: audit.readers printed an unexpected name; not applied" >&2
         return 0
     fi
-    for r in $readers; do chmod +a "user:$r allow search" /var/log/maknae || return 1; done
+    for r in $readers; do chmod -h +a "user:$r allow search" /var/log/maknae || return 1; done
 }
 
 # --- DISABLED by default, on a FRESH INSTALL ONLY ---------------------------

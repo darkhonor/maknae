@@ -11,6 +11,10 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+# LoopPlane::with_dial, for a test Dial in place of the TLS connector; never in a production graph.
+test-support = []
+
 [dependencies]
 # The loop's decision code; this crate is its hands.
 maknae-agent = { path = "../maknae-agent" }
@@ -21,13 +25,22 @@ maknae-config = { path = "../maknae-config" }
 maknae-io = { path = "../maknae-io" }
 # The plane client and its TLS connector.
 maknae-vault = { path = "../maknae-vault" }
+# A turn's wrapped key is sealed to the Egress Daemon (ADR-0028).
+maknae-seal = { path = "../maknae-seal" }
 # Conversation IDs draw from the one random source the project uses.
 maknae-crypto = { path = "../maknae-crypto" }
 # Framing timeouts, frame I/O, and the attempt worker's spawn_blocking.
 tokio = { workspace = true, features = ["rt", "time", "io-util", "macros"] }
+# A delivered task is the kernel's CBOR `SignedTask`, decoded here before its signature is checked.
+ciborium = { workspace = true }
 zeroize = "1"
 
 [dev-dependencies]
+# A real agent PlaneClient for the construction tests needs CA pins on disk.
+maknae-crypto = { path = "../maknae-crypto", features = ["test-support"] }
+# The test CA that signs the tasks agent.rs verifies.
+maknae-vault = { path = "../maknae-vault", features = ["test-support"] }
+tempfile = "3"
 # mutation.rs's tests stat files and check the euid; #421's real-buffer test sets socket buffer sizes.
 nix = { version = "0.31", default-features = false, features = ["fs", "user", "socket"] }
 # start_paused timing tests and #421's UnixStream pair.

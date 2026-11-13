@@ -904,6 +904,7 @@ pub fn authority(provider: Option<&str>) -> Option<maknae_kernel::ProviderAuthor
     Some(maknae_kernel::ProviderAuthority {
         set,
         user_prefix: TEST_USER_PREFIX.into(),
+        agent_prefix: None,
     })
 }
 

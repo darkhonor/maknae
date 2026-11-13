@@ -4,6 +4,7 @@
 //! wins, `secret_io.rs` then reads it. Keeping resolution pure (no filesystem/env
 //! reads inside these functions — the caller supplies already-observed inputs) is what
 //! makes the fail-closed precedence provably testable and mutation-hardened (T1).
+use crate::agent_enroll::AGENT_CREDENTIAL_NAME;
 use crate::VaultError;
 use std::env::VarError;
 use std::fmt;
@@ -284,6 +285,92 @@ fn nibble(c: u8) -> Result<u8, VaultError> {
     }
 }
 
+pub const MAX_AGENT_SECRET_BYTES: u64 = 1024;
+
+pub struct AgentSecret(Zeroizing<String>);
+
+impl AgentSecret {
+    pub fn new(secret: Zeroizing<String>) -> Self {
+        Self(secret)
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+
+    pub(crate) fn into_inner(self) -> Zeroizing<String> {
+        self.0
+    }
+
+    pub(crate) fn from_trimmed(text: &str) -> Result<Self, SecretSourceError> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(SecretSourceError::Empty);
+        }
+        if text.len() as u64 > MAX_AGENT_SECRET_BYTES {
+            return Err(SecretSourceError::TooLarge {
+                max: MAX_AGENT_SECRET_BYTES,
+            });
+        }
+        let mut secret = Zeroizing::new(String::with_capacity(text.len()));
+        secret.push_str(text);
+        Ok(Self(secret))
+    }
+}
+
+impl fmt::Debug for AgentSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("AgentSecret(<redacted>)")
+    }
+}
+
+#[derive(Debug)]
+pub enum SecretSourceError {
+    CredentialsDirectoryUnset,
+    CredentialsDirectoryEmpty,
+    WrongUser { euid: u32, enrolled: u32 },
+    Empty,
+    TooLarge { max: u64 },
+    Read(VaultError),
+}
+
+impl fmt::Display for SecretSourceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SecretSourceError::CredentialsDirectoryUnset => write!(
+                f,
+                "$CREDENTIALS_DIRECTORY is unset; the agent's SecretID comes only from \
+                 $CREDENTIALS_DIRECTORY/{AGENT_CREDENTIAL_NAME}, so start maknae-agentd from its systemd unit"
+            ),
+            SecretSourceError::CredentialsDirectoryEmpty => write!(
+                f,
+                "$CREDENTIALS_DIRECTORY is exported but empty; refusing"
+            ),
+            SecretSourceError::WrongUser { euid, enrolled } => write!(
+                f,
+                "refusing the agent's keychain read: running as uid {euid}, not as the enrolled uid {enrolled}"
+            ),
+            SecretSourceError::Empty => write!(f, "the agent's SecretID is empty"),
+            SecretSourceError::TooLarge { max } => {
+                write!(f, "the agent's SecretID is over {max} bytes")
+            }
+            SecretSourceError::Read(e) => write!(f, "reading the agent's SecretID: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for SecretSourceError {}
+
+pub fn resolve_agent_secret_source(
+    credentials_dir_env: Option<&str>,
+) -> Result<PathBuf, SecretSourceError> {
+    match credentials_dir_env {
+        None => Err(SecretSourceError::CredentialsDirectoryUnset),
+        Some("") => Err(SecretSourceError::CredentialsDirectoryEmpty),
+        Some(dir) => Ok(Path::new(dir).join(AGENT_CREDENTIAL_NAME)),
+    }
+}
+
 /// `$CREDENTIALS_DIRECTORY`: unset is `None`; set but not UTF-8 refuses rather
 /// than reading as unset (#76 codex r3).
 pub fn credentials_directory_env() -> Result<Option<String>, VaultError> {
@@ -305,6 +392,48 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
+
+    #[test]
+    fn every_agent_secret_refusal_names_its_cause() {
+        let io = VaultError::Keychain { status: -25300 };
+        for (e, want) in [
+            (
+                SecretSourceError::CredentialsDirectoryUnset,
+                "$CREDENTIALS_DIRECTORY/maknae-agent-secret-id",
+            ),
+            (
+                SecretSourceError::CredentialsDirectoryEmpty,
+                "exported but empty",
+            ),
+            (
+                SecretSourceError::WrongUser {
+                    euid: 501,
+                    enrolled: 990,
+                },
+                "uid 501, not as the enrolled uid 990",
+            ),
+            (SecretSourceError::Empty, "SecretID is empty"),
+            (SecretSourceError::Read(io), "-25300"),
+        ] {
+            assert!(e.to_string().contains(want), "{e}");
+        }
+    }
+
+    #[test]
+    fn the_agent_secret_path_is_its_one_credential() {
+        assert_eq!(
+            resolve_agent_secret_source(Some("/run/credentials/maknae-agent@hobi.service"))
+                .unwrap(),
+            PathBuf::from("/run/credentials/maknae-agent@hobi.service/maknae-agent-secret-id")
+        );
+        assert!(matches!(
+            AgentSecret::from_trimmed(" \t\n"),
+            Err(SecretSourceError::Empty)
+        ));
+        let s = AgentSecret::from_trimmed("\n sid \n").unwrap();
+        assert_eq!(s.expose(), "sid");
+        assert_eq!(s.0.capacity(), 3);
+    }
 
     #[test]
     fn classify_ok_is_some() {

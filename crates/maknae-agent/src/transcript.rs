@@ -87,6 +87,35 @@ impl Transcript {
             content: vec![text(result)],
         });
     }
+    /// Answers, with `result`, each call of the last assistant turn that has no
+    /// tool turn yet; `true` when one was answered.
+    pub fn close_unanswered(&mut self, result: &str) -> bool {
+        let Some((at, calls)) = self
+            .turns
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(i, t)| match t {
+                Turn::Assistant { tool_calls, .. } => Some((i, tool_calls)),
+                _ => None,
+            })
+        else {
+            return false;
+        };
+        let missing: Vec<String> = calls
+            .iter()
+            .filter(|c| {
+                !self.turns[at..]
+                    .iter()
+                    .any(|t| matches!(t, Turn::Tool { call_id, .. } if *call_id == c.call_id))
+            })
+            .map(|c| c.call_id.clone())
+            .collect();
+        for id in &missing {
+            self.push_tool_result(id, result);
+        }
+        !missing.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -228,5 +257,71 @@ mod tests {
         assert!(t.shed_oldest_reasoning());
         assert_eq!(reasoning(&t, 3), None);
         assert!(!t.shed_oldest_reasoning());
+    }
+
+    #[test]
+    fn a_call_id_reused_from_an_earlier_step_is_still_closed() {
+        let mut t = Transcript::new("c", "q");
+        let calls = |ids: &[&str]| PromptReply {
+            reasoning: None,
+            blocks: vec![],
+            tool_calls: ids.iter().map(|id| call(id)).collect(),
+            usage: None,
+        };
+        t.push_assistant(&calls(&["call_0"]));
+        t.push_tool_result("call_0", "first");
+        t.push_assistant(&calls(&["call_0"]));
+        assert!(t.close_unanswered("lost"));
+        match t.turns().last() {
+            Some(Turn::Tool { call_id, content }) => {
+                assert_eq!(call_id, "call_0");
+                assert!(
+                    matches!(&content[0], ContentBlock::Text { text } if text.0.as_str() == "lost")
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn only_the_last_assistant_turns_unanswered_calls_are_closed() {
+        let mut t = Transcript::new("c", "q");
+        assert!(!t.close_unanswered("lost"));
+        t.push_assistant(&PromptReply {
+            reasoning: None,
+            blocks: vec![],
+            tool_calls: vec![call("c1"), call("c2"), call("c3")],
+            usage: None,
+        });
+        t.push_tool_result("c2", "kept");
+        assert!(t.close_unanswered("lost"));
+        let tools: Vec<(String, String)> = t.turns()[2..]
+            .iter()
+            .map(|turn| match turn {
+                Turn::Tool { call_id, content } => match &content[0] {
+                    ContentBlock::Text { text } => (call_id.clone(), text.0.to_string()),
+                    _ => panic!(),
+                },
+                _ => panic!("{turn:?}"),
+            })
+            .collect();
+        assert_eq!(
+            tools,
+            vec![
+                ("c2".into(), "kept".into()),
+                ("c1".into(), "lost".into()),
+                ("c3".into(), "lost".into())
+            ]
+        );
+        assert!(!t.close_unanswered("lost"));
+        t.push_user("next");
+        t.push_assistant(&PromptReply {
+            reasoning: None,
+            blocks: vec![text("answer")],
+            tool_calls: vec![],
+            usage: None,
+        });
+        assert!(!t.close_unanswered("lost"));
+        assert_eq!(t.turns().len(), 7);
     }
 }

@@ -394,6 +394,7 @@ pub struct TaskDelivery {
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct TaskFollowUps {
+    pub task: TaskRef,
     pub from: u32,
     pub items: Vec<SecretText>,
 }
@@ -855,7 +856,10 @@ mod tests {
             Verb::TaskClaim {
                 seen_follow_ups: None,
             },
-            Verb::TaskReport { text: secret(text) },
+            Verb::TaskReport {
+                text: secret(text),
+                seen_follow_ups: Some(3),
+            },
         ]
     }
 
@@ -882,6 +886,7 @@ mod tests {
                 partition: "tasks/users/alex".into(),
             }),
             Payload::TaskFollowUps(TaskFollowUps {
+                task: TaskRef::from_id(&TaskId([7; 16])),
                 from: 1,
                 items: vec![secret(text), secret("second")],
             }),
@@ -1018,6 +1023,7 @@ mod tests {
                 format!(
                     "{:?}",
                     TaskFollowUps {
+                        task: TaskRef::from_id(&TaskId([7; 16])),
                         from: 0,
                         items: vec![secret(sentinel)],
                     }

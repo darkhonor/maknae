@@ -6,14 +6,11 @@ use maknae_agent::drive::{Budget, LoopEvent, Outcome, StopReason};
 use maknae_agent::plane::{Plane, PlaneError};
 use maknae_agent::session::{Closed, Ended, Session};
 use maknae_config::{UserProviderEntry, UserProviders, Value};
-use maknae_loop::keys::KeySupply;
+use maknae_loop::keys::{sealed_choice, ChoiceFault, KeySupply, KeyTarget};
 use maknae_loop::plane::LoopPlane;
-use maknae_proto::{ProviderChoice, SealedKey};
-use maknae_seal::{SealAad, SealContext, SealPublicKey};
-use maknae_vault::{
-    aad_parts, PlaneClient, UserToken, VaultApi, VaultError, WrapExpectation, WrappedSecret,
-    USER_KEY_WRAP_TTL,
-};
+use maknae_proto::ProviderChoice;
+use maknae_seal::SealPublicKey;
+use maknae_vault::{PlaneClient, UserToken, VaultApi, VaultError, WrappedSecret};
 use std::future::Future;
 use std::io::Write;
 use std::path::Path;
@@ -161,41 +158,24 @@ where
     let secret_path =
         maknae_config::user_key_path(key.user_prefix, key.username, &entry.key_subpath)
             .map_err(|_| unusable())?;
-    let expect = WrapExpectation::new(
-        key.kv_mount,
-        &secret_path,
-        &entry.key_field,
-        USER_KEY_WRAP_TTL,
-    )
-    .map_err(|_| unusable())?;
-    let wrapped = read(secret_path)
-        .await
-        .map_err(|e| key_read_failure(&entry.label, &e))?;
-    let sealing = |e: &dyn std::fmt::Display| {
-        format!(
-            "sealing the key for provider entry {} failed: {e}",
-            entry.label
-        )
+    let target = KeyTarget {
+        kv_mount: key.kv_mount,
+        secret_path: &secret_path,
+        provider: &entry.provider,
+        model: &entry.model,
+        key_subpath: &entry.key_subpath,
+        key_field: &entry.key_field,
     };
-    let parts = aad_parts(&expect, conversation, &entry.provider, &entry.model);
-    let aad = SealAad::new(&SealContext {
-        conversation: parts.conversation,
-        provider: parts.provider,
-        model: parts.model,
-        expected_path: parts.expected_path,
-        key_field: parts.key_field,
-    })
-    .map_err(|e| sealing(&e))?;
-    let blob = maknae_seal::seal(key.seal_key, &aad, wrapped.token.expose().as_bytes())
-        .map_err(|e| sealing(&e))?;
-    let sealed_key = SealedKey::new(blob.into_bytes()).map_err(|e| sealing(&e))?;
-    Ok(ProviderChoice {
-        provider: entry.provider.clone(),
-        model: entry.model.clone(),
-        key_subpath: entry.key_subpath.clone(),
-        key_field: entry.key_field.clone(),
-        sealed_key,
-    })
+    sealed_choice(&target, key.seal_key, conversation, read)
+        .await
+        .map_err(|f| match f {
+            ChoiceFault::Unusable => unusable(),
+            ChoiceFault::Read(e) => key_read_failure(&entry.label, &e),
+            ChoiceFault::Seal(e) => format!(
+                "sealing the key for provider entry {} failed: {e}",
+                entry.label
+            ),
+        })
 }
 
 /// `Some(parsed)` only when the subject's `transport` section sets the key;
@@ -358,7 +338,7 @@ pub fn print_end(
     err: &mut impl Write,
 ) -> std::io::Result<u8> {
     if let Some(answer) = &outcome.answer {
-        writeln!(out, "{answer}")?;
+        writeln!(out, "{}", answer.0.as_str())?;
         return Ok(0);
     }
     crate::stderr::line(
@@ -625,7 +605,9 @@ pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
     let mut session = match opened {
         Ok(session) => session,
         Err(e) => {
-            plane.into_client().shutdown().await;
+            if let Err(e) = plane.into_client().shutdown().await {
+                crate::stderr::line(&mut std::io::stderr(), format_args!("maknae-vault: {e}"));
+            }
             return Err(open_failure(&e, &cwd));
         }
     };
@@ -640,7 +622,9 @@ pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
     )
     .await;
     print_diagnostics(&mut plane);
-    plane.into_client().shutdown().await;
+    if let Err(e) = plane.into_client().shutdown().await {
+        crate::stderr::line(&mut std::io::stderr(), format_args!("maknae-vault: {e}"));
+    }
     let (ended, closed) = result.map_err(|e| e.to_string())?;
     if let Some(line) = close_line(&closed, session.conversation()) {
         crate::stderr::line(&mut std::io::stderr(), format_args!("{line}"));

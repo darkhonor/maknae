@@ -1505,7 +1505,7 @@ The `syncing` records are written ahead of the store transition at their revisio
 
 ## Enroll an Agent Daemon
 
-An Agent Daemon runs under its own service account, one per agent, and reaches `maknaed` only on the agent socket. Its configuration is the directory `/etc/maknae/agents/<id>/`: `enrollment.yaml`, which `maknae enroll agent` writes, and `policy.yaml`, which you write ([configuration §6.4](configuration.md#64-enrolling-an-agent-daemon) has every rule and refusal). The steps below use the agent id `hobi`. They are not yet measured on a live host.
+An Agent Daemon runs under its own service account, one per agent, and reaches `maknaed` only on the agent socket. Its configuration is the directory `/etc/maknae/agents/<id>/`: `enrollment.yaml` and `agent.yaml`, which `maknae enroll agent` writes, and `policy.yaml` and optionally `persona.md`, which you write ([configuration §6.4](configuration.md#64-enrolling-an-agent-daemon) has every rule and refusal). The steps below use the agent id `hobi`. They are not yet measured on a live host.
 
 1. **Create the account with a non-login shell.** It must not be root, the principal, a Maknae daemon account or a member of `maknae`, `_maknae` or `_maknae-egress`.
 
@@ -1527,11 +1527,14 @@ An Agent Daemon runs under its own service account, one per agent, and reaches `
 
 4. **Enroll it.**
 
+   `/etc/maknae/egress-bounds.yaml` must set `agent_prefix` (for example `agent_prefix: maknae/agents`); enroll refuses without it. Load the agent's API key in Vault at `<kv_mount>/data/<agent_prefix>/hobi/<subpath>`. To give the agent an admin-written persona, install `/etc/maknae/agents/hobi/persona.md` as `root:_maknae 0640` before this step.
+
    ```bash
-   sudo maknae enroll agent hobi --account hobi --bind-cidr <this host's address>/32
+   sudo maknae enroll agent hobi --account hobi --bind-cidr <this host's address>/32 \
+     --provider openai --model <model> --key-subpath openai --key-field api_key --context-tokens <n>
    ```
 
-   `--role guest` binds it to `guest` instead of the default `user`; `admin` is not offered. Enroll seals the SecretID on this host and writes `/etc/maknae/agents/hobi/enrollment.yaml`.
+   `--role guest` binds it to `guest` instead of the default `user`; `admin` is not offered. `--persona self` lets the agent keep its own persona instead of `persona.md`. Enroll seals the SecretID on this host, writes `/etc/maknae/agents/hobi/enrollment.yaml` and `agent.yaml`, and gives the `hobi` account read access to those files, `persona.md`, the directories above them and the three certificates in `/etc/maknae/tls`, and to nothing else. If enroll reports that it could not grant an entry, the agent is enrolled but cannot read its configuration: fix the cause and run `sudo maknae enroll agent hobi --refresh-access`. Run that too after replacing `persona.md`; it touches no Vault and writes nothing.
 
 5. **Write its policy.** Write it as `policy.yaml`, then install it as `root:_maknae 0640`, as the other configuration files are: `sudo install -o root -g _maknae -m 0640 policy.yaml /etc/maknae/agents/hobi/policy.yaml`. Without it the agent holds no file access through Maknae's tools, and only people may task it.
 
@@ -1564,7 +1567,7 @@ An Agent Daemon runs under its own service account, one per agent, and reaches `
    sudo maknae enroll remove-agent hobi
    ```
 
-   It removes `enrollment.yaml`, disables the Vault entity, destroys the SecretIDs and removes the sealed SecretID. Then reload: until a reload succeeds, the agent stays admitted. After it, the agent's next request is refused, each of its open tasks is closed `agent-gone` for its tasker to collect, and the account is an ordinary account again. `policy.yaml` and the directory stay; delete them by hand if you will not re-enroll. When the command fails, run it again before deleting the directory; it still completes once the directory is gone. A login token the agent already holds stays valid until `agent_token_max_ttl`, refused only while the entity stays disabled. When the role and the entity were both already absent, nothing is disabled, and a held token lives until `agent_token_max_ttl`. Re-enrolling re-enables the entity, and such a token works again until `agent_token_max_ttl`.
+   It removes the account's read access, then `agent.yaml` and `enrollment.yaml`, disables the Vault entity, destroys the SecretIDs and removes the sealed SecretID. Then reload: until a reload succeeds, the agent stays admitted. After it, the agent's next request is refused, each of its open tasks is closed `agent-gone` for its tasker to collect, and the account is an ordinary account again. `policy.yaml`, `persona.md` and the directory stay; delete them by hand if you will not re-enroll. On macOS, if the `hobi` account was deleted first, it warns that the account's ACEs stay on `/etc/maknae` and its files and continues; remove them by hand with `chmod -h -a`. When the command fails, run it again before deleting the directory; it still completes once the directory is gone. A login token the agent already holds stays valid until `agent_token_max_ttl`, refused only while the entity stays disabled. When the role and the entity were both already absent, nothing is disabled, and a held token lives until `agent_token_max_ttl`. Re-enrolling re-enables the entity, and such a token works again until `agent_token_max_ttl`.
 
 ## Tasks
 
@@ -1596,7 +1599,7 @@ Every task verb is `action: session.task`. A request record names its operation 
 | `claim` whose queued task is not handed out | one | `idle: the tasker's authority was withdrawn: <reason>`, or `idle: the tasker's standing could not be decided: <cause>` (posture `unavailable`; the task stays queued and the next claim decides again). Both name the task and its tasker |
 | `claim` that hands out a task | `intent recorded`, then `delivered` | |
 | heartbeat (`claim` with `seen_follow_ups`) | one | `heartbeat: <n> follow-ups after <m>`, `heartbeat: the task is closed`, `heartbeat: the task is held` or `idle` |
-| `report` | `intent recorded`, then `done` or the refusal | |
+| `report` | `intent recorded`, then `done` or the refusal | `the task holds follow-ups the report has not seen` when a follow-up was added after the agent's last heartbeat; the task stays working and the agent folds it in |
 
 A refused store step after a permit keeps `result: permit`, the decision, and carries the cause with posture `unavailable` or `unauthorized`. The client is told only `not authorized`.
 
@@ -1605,7 +1608,7 @@ The kernel's own records are `event: task`, written by the boot, a reload or the
 | Reason | `result` | Meaning | What to do |
 |---|---|---|---|
 | `closed:agent-gone` | `deny` | The task is about to be closed because its agent is gone. | Nothing; the tasker collects the close. |
-| `closed:agent-lost` | `deny` | The task is about to be closed because its lease lapsed. | Check the agent process; it stopped claiming or citing. |
+| `closed:agent-lost` | `deny` | The task is about to be closed because its lease lapsed. | Check the agent process; it stopped claiming or citing. `maknae-agentd` also stops on its own when the kernel's replies to its claims, heartbeats or reports go missing for a whole lease: it logs `task <id> ended: Unsendable` and sends nothing for about 16 minutes, so the lease lapses here. |
 | `closed:withdrawn` | `deny` | A queued task is about to be closed because its tasker may no longer task the agent. | Nothing, if the change of role or `taskers:` was intended. The claim record just before it carries the reason. |
 | `task held: tasker contained`, `task held: root contained`, `task held: agent <id> contained` | `deny` | The task is about to be put on hold because the tasker who gave it, the person or agent at the root of its chain, or the agent holding it is contained. | Treat the task, its report and the agent's partition as evidence; leave them as they are. An admin releases held tasks (#632). |
 | `expired` | `deny` | A report or close nobody collected in 30 days is about to be removed. | Nothing. |
@@ -1829,11 +1832,11 @@ readers="$(/usr/bin/maknae audit-readers --stopped)" || { echo "audit.readers no
 for f in "$d"/*.jsonl; do
     [ -f "$f" ] && [ ! -h "$f" ] && [ "$(stat -c %h "$f")" = 1 ] || continue
     chattr -a "$f"
-    for r in $readers; do setfacl -P -m "u:$r:r" "$f" || { chattr +a "$f"; exit 1; }; done
+    for r in $readers; do setfacl -P -n -m "u:$r:r" "$f" || { chattr +a "$f"; exit 1; }; done
     chattr +a "$f"
     lsattr -d "$f" | cut -c6 | grep -qx a || { echo "$f is not append-only; $d is left root-owned" >&2; exit 1; }
 done
-for r in $readers; do setfacl -P -m "u:$r:x" "$d"; done
+for r in $readers; do setfacl -P -n -m "u:$r:x" "$d"; done
 chown -h _maknae:_maknae "$d"
 GRANT
 sudo systemctl start maknaed.service
@@ -1859,11 +1862,11 @@ for f in "$d"/*.jsonl; do
         *) echo "$f is not append-only; $d is left root-owned" >&2; exit 1 ;;
     esac
     chflags "no$flag" "$f"
-    for r in $readers; do chmod +a "user:$r allow read" "$f" || { chflags "$flag" "$f"; exit 1; }; done
+    for r in $readers; do chmod -h +a "user:$r allow read" "$f" || { chflags "$flag" "$f"; exit 1; }; done
     chflags "$flag" "$f"
     stat -f %Sf "$f" | grep -q "$flag" || { echo "$f is not flagged $flag; $d is left root-owned" >&2; exit 1; }
 done
-for r in $readers; do chmod +a "user:$r allow search" "$d"; done
+for r in $readers; do chmod -h +a "user:$r allow search" "$d"; done
 chown -h _maknae:_maknae "$d"
 GRANT
 sudo launchctl bootstrap system /Library/LaunchDaemons/io.maknae.maknaed.plist

@@ -1,12 +1,30 @@
+use crate::session::SessionChannel;
 use maknae_config::{
-    key_field_is_acceptable, key_subpath_is_acceptable, kv_fragment_is_acceptable, user_key_path,
-    AuthorizedProvider, EgressBounds, ProviderSet,
+    agent_key_path, key_field_is_acceptable, key_subpath_is_acceptable, kv_fragment_is_acceptable,
+    user_key_path, AgentId, AuthorizedProvider, EgressBounds, ProviderSet,
 };
 use maknae_proto::{ProviderChoice, SealedKey};
 
 pub struct ProviderAuthority {
     pub set: ProviderSet,
     pub user_prefix: String,
+    pub agent_prefix: Option<String>,
+}
+
+/// Whose key a provider choice names: the session's authenticated subject, never the request.
+#[derive(Clone, Copy, Debug)]
+pub enum KeyOwner<'s> {
+    User(Option<&'s str>),
+    Agent(&'s AgentId),
+}
+
+impl<'s> KeyOwner<'s> {
+    pub fn of(channel: &'s SessionChannel, peer_user: Option<&'s str>) -> Self {
+        match channel {
+            SessionChannel::Client => KeyOwner::User(peer_user),
+            SessionChannel::Agent { agent, .. } => KeyOwner::Agent(agent),
+        }
+    }
 }
 
 pub fn provider_authority(
@@ -17,6 +35,7 @@ pub fn provider_authority(
         Some(b) if !set.is_empty() => Some(ProviderAuthority {
             set: set.clone(),
             user_prefix: b.user_prefix.clone(),
+            agent_prefix: b.agent_prefix.clone(),
         }),
         _ => None,
     }
@@ -37,6 +56,7 @@ pub enum ChoiceRefusal {
     UnknownProvider,
     ModelNotListed,
     UnsafeUsername,
+    NoAgentPrefix,
     MalformedSubpath,
     MalformedField,
 }
@@ -53,6 +73,9 @@ impl ChoiceRefusal {
             ChoiceRefusal::UnsafeUsername => {
                 "local account has no name usable as a key path segment"
             }
+            ChoiceRefusal::NoAgentPrefix => {
+                "no model access: no agent key prefix is configured on this host"
+            }
             ChoiceRefusal::MalformedSubpath => "key subpath malformed",
             ChoiceRefusal::MalformedField => "key field malformed",
         }
@@ -62,8 +85,9 @@ impl ChoiceRefusal {
 pub fn admit_choice<'a>(
     set: &'a ProviderSet,
     choice: Option<&'a ProviderChoice>,
-    username: Option<&str>,
+    owner: KeyOwner<'_>,
     user_prefix: &str,
+    agent_prefix: Option<&str>,
 ) -> Result<AdmittedChoice<'a>, ChoiceRefusal> {
     let choice = choice.ok_or(ChoiceRefusal::NoChoice)?;
     if set.is_empty() {
@@ -75,20 +99,34 @@ pub fn admit_choice<'a>(
     if !provider.models.contains(&choice.model) {
         return Err(ChoiceRefusal::ModelNotListed);
     }
-    let username = username
-        .filter(|u| {
-            maknae_vault::userpass_username_is_acceptable(u).is_ok()
-                && kv_fragment_is_acceptable(u).is_ok()
-        })
-        .ok_or(ChoiceRefusal::UnsafeUsername)?;
+    enum Tree<'o> {
+        User(&'o str),
+        Agent(&'o AgentId, &'o str),
+    }
+    let tree = match owner {
+        KeyOwner::User(username) => Tree::User(
+            username
+                .filter(|u| {
+                    maknae_vault::userpass_username_is_acceptable(u).is_ok()
+                        && kv_fragment_is_acceptable(u).is_ok()
+                })
+                .ok_or(ChoiceRefusal::UnsafeUsername)?,
+        ),
+        KeyOwner::Agent(agent) => {
+            Tree::Agent(agent, agent_prefix.ok_or(ChoiceRefusal::NoAgentPrefix)?)
+        }
+    };
     if key_subpath_is_acceptable(&choice.key_subpath).is_err() {
         return Err(ChoiceRefusal::MalformedSubpath);
     }
     if !key_field_is_acceptable(&choice.key_field) {
         return Err(ChoiceRefusal::MalformedField);
     }
-    let key_vault_path = user_key_path(user_prefix, username, &choice.key_subpath)
-        .map_err(|_| ChoiceRefusal::MalformedSubpath)?;
+    let key_vault_path = match tree {
+        Tree::User(username) => user_key_path(user_prefix, username, &choice.key_subpath),
+        Tree::Agent(agent, prefix) => agent_key_path(prefix, agent, &choice.key_subpath),
+    }
+    .map_err(|_| ChoiceRefusal::MalformedSubpath)?;
     Ok(AdmittedChoice {
         provider,
         model: &choice.model,
@@ -142,14 +180,14 @@ mod tests {
     }
 
     fn refusal(c: &ProviderChoice, user: Option<&str>) -> Option<ChoiceRefusal> {
-        admit_choice(&set(), Some(c), user, PREFIX).err()
+        admit_choice(&set(), Some(c), KeyOwner::User(user), PREFIX, None).err()
     }
 
     #[test]
     fn an_admitted_choice_carries_the_sets_entry_the_choices_model_and_field_and_the_peers_path() {
         let s = set();
         let c = good();
-        let a = admit_choice(&s, Some(&c), Some("alice"), PREFIX).unwrap();
+        let a = admit_choice(&s, Some(&c), KeyOwner::User(Some("alice")), PREFIX, None).unwrap();
         assert!(std::ptr::eq(a.provider, s.get("openai").unwrap()));
         assert_eq!(a.model, "gpt-5.6");
         assert_eq!(a.key_field, "api_key");
@@ -163,19 +201,26 @@ mod tests {
         let empty = ProviderSet::empty();
         let worst = choice("anthropic", "gpt-9", "../x", "a b");
         assert_eq!(
-            admit_choice(&empty, None, None, PREFIX).err(),
+            admit_choice(&empty, None, KeyOwner::User(None), PREFIX, None).err(),
             Some(ChoiceRefusal::NoChoice)
         );
         assert_eq!(
-            admit_choice(&s, None, Some("alice"), PREFIX).err(),
+            admit_choice(&s, None, KeyOwner::User(Some("alice")), PREFIX, None).err(),
             Some(ChoiceRefusal::NoChoice)
         );
         assert_eq!(
-            admit_choice(&empty, Some(&worst), None, PREFIX).err(),
+            admit_choice(&empty, Some(&worst), KeyOwner::User(None), PREFIX, None).err(),
             Some(ChoiceRefusal::NoProviders)
         );
         assert_eq!(
-            admit_choice(&empty, Some(&good()), Some("alice"), PREFIX).err(),
+            admit_choice(
+                &empty,
+                Some(&good()),
+                KeyOwner::User(Some("alice")),
+                PREFIX,
+                None
+            )
+            .err(),
             Some(ChoiceRefusal::NoProviders)
         );
         assert_eq!(refusal(&worst, None), Some(ChoiceRefusal::UnknownProvider));
@@ -215,8 +260,9 @@ mod tests {
         assert!(admit_choice(
             &set(),
             Some(&choice("local", "llama-4", "local/k", "api_key")),
-            Some("alice"),
-            PREFIX
+            KeyOwner::User(Some("alice")),
+            PREFIX,
+            None
         )
         .is_ok());
     }
@@ -244,7 +290,7 @@ mod tests {
         }
         for ok in ["alice", "svc_maknae", "a.b-c", at.as_str()] {
             assert!(
-                admit_choice(&set(), Some(&c), Some(ok), PREFIX).is_ok(),
+                admit_choice(&set(), Some(&c), KeyOwner::User(Some(ok)), PREFIX, None).is_ok(),
                 "{ok}"
             );
         }
@@ -290,8 +336,9 @@ mod tests {
         assert!(admit_choice(
             &set(),
             Some(&choice("openai", "gpt-5.6", "openai/personal", &at)),
-            Some("alice"),
-            PREFIX
+            KeyOwner::User(Some("alice")),
+            PREFIX,
+            None
         )
         .is_ok());
     }
@@ -299,7 +346,14 @@ mod tests {
     #[test]
     fn a_path_that_cannot_be_composed_is_refused_as_a_malformed_subpath() {
         assert_eq!(
-            admit_choice(&set(), Some(&good()), Some("alice"), "").err(),
+            admit_choice(
+                &set(),
+                Some(&good()),
+                KeyOwner::User(Some("alice")),
+                "",
+                None
+            )
+            .err(),
             Some(ChoiceRefusal::MalformedSubpath)
         );
     }
@@ -313,6 +367,7 @@ mod tests {
                 ChoiceRefusal::UnknownProvider.reason(),
                 ChoiceRefusal::ModelNotListed.reason(),
                 ChoiceRefusal::UnsafeUsername.reason(),
+                ChoiceRefusal::NoAgentPrefix.reason(),
                 ChoiceRefusal::MalformedSubpath.reason(),
                 ChoiceRefusal::MalformedField.reason(),
             ],
@@ -322,10 +377,161 @@ mod tests {
                 "provider not in the authorized set",
                 "model not on the authorized provider's list",
                 "local account has no name usable as a key path segment",
+                "no model access: no agent key prefix is configured on this host",
                 "key subpath malformed",
                 "key field malformed",
             ]
         );
+    }
+
+    const AGENTS: &str = "maknae/agents";
+
+    fn hobi() -> maknae_config::AgentId {
+        maknae_config::AgentId::parse("hobi").unwrap()
+    }
+
+    fn agent_channel(id: &str) -> SessionChannel {
+        SessionChannel::Agent {
+            agent: maknae_config::AgentId::parse(id).unwrap(),
+            leaf_expires: std::time::Instant::now() + std::time::Duration::from_secs(60),
+        }
+    }
+
+    fn as_agent<'a>(
+        s: &'a ProviderSet,
+        c: &'a ProviderChoice,
+        agent: &maknae_config::AgentId,
+        agent_prefix: Option<&str>,
+    ) -> Result<AdmittedChoice<'a>, ChoiceRefusal> {
+        admit_choice(s, Some(c), KeyOwner::Agent(agent), PREFIX, agent_prefix)
+    }
+
+    #[test]
+    fn an_agent_choice_resolves_under_the_agent_prefix_by_its_own_id() {
+        let s = set();
+        let c = choice("openai", "gpt-5.6", "openai/hobi", "api_key");
+        let a = as_agent(&s, &c, &hobi(), Some(AGENTS)).unwrap();
+        assert_eq!(a.key_vault_path, "maknae/agents/hobi/openai/hobi");
+        let suga = maknae_config::AgentId::parse("suga").unwrap();
+        assert_eq!(
+            as_agent(&s, &c, &suga, Some(AGENTS))
+                .unwrap()
+                .key_vault_path,
+            "maknae/agents/suga/openai/hobi"
+        );
+    }
+
+    #[test]
+    fn the_key_owner_is_the_sessions_channel_never_the_peers_account_name() {
+        let ch = agent_channel("hobi");
+        match KeyOwner::of(&ch, Some("alice")) {
+            KeyOwner::Agent(a) => assert_eq!(a.as_str(), "hobi"),
+            KeyOwner::User(u) => panic!("an agent session owned as user {u:?}"),
+        }
+        match KeyOwner::of(&SessionChannel::Client, Some("alice")) {
+            KeyOwner::User(u) => assert_eq!(u, Some("alice")),
+            KeyOwner::Agent(a) => panic!("a client session owned as agent {a:?}"),
+        }
+        let s = set();
+        let c = good();
+        let a = admit_choice(
+            &s,
+            Some(&c),
+            KeyOwner::of(&ch, Some("alice")),
+            PREFIX,
+            Some(AGENTS),
+        )
+        .unwrap();
+        assert_eq!(a.key_vault_path, "maknae/agents/hobi/openai/personal");
+    }
+
+    #[test]
+    fn an_agent_choice_with_no_agent_prefix_is_refused() {
+        let s = set();
+        let c = good();
+        assert_eq!(
+            as_agent(&s, &c, &hobi(), None).err(),
+            Some(ChoiceRefusal::NoAgentPrefix)
+        );
+        assert_eq!(
+            as_agent(&s, &c, &hobi(), Some("")).err(),
+            Some(ChoiceRefusal::MalformedSubpath)
+        );
+        assert_eq!(
+            as_agent(
+                &s,
+                &choice("openai", "gpt-9", "openai/personal", "api_key"),
+                &hobi(),
+                None
+            )
+            .err(),
+            Some(ChoiceRefusal::ModelNotListed)
+        );
+        assert_eq!(
+            as_agent(
+                &s,
+                &choice("openai", "gpt-5.6", "../x", "a b"),
+                &hobi(),
+                None
+            )
+            .err(),
+            Some(ChoiceRefusal::NoAgentPrefix)
+        );
+    }
+
+    #[test]
+    fn an_agent_subpath_cannot_climb_out_of_its_tree() {
+        let s = set();
+        for bad in [
+            "../suga/openai",
+            "openai/../../suga",
+            "../../users/alice/openai",
+            "/openai",
+            "/maknae/users/alice/openai",
+            "openai//x",
+            "openai/",
+            "",
+            "data/openai",
+        ] {
+            assert_eq!(
+                as_agent(
+                    &s,
+                    &choice("openai", "gpt-5.6", bad, "api_key"),
+                    &hobi(),
+                    Some(AGENTS)
+                )
+                .err(),
+                Some(ChoiceRefusal::MalformedSubpath),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_user_choice_never_resolves_under_the_agent_prefix() {
+        let s = set();
+        for sub in ["openai/personal", "hobi/openai"] {
+            let c = choice("openai", "gpt-5.6", sub, "api_key");
+            let a = admit_choice(
+                &s,
+                Some(&c),
+                KeyOwner::User(Some("alice")),
+                PREFIX,
+                Some(AGENTS),
+            )
+            .unwrap();
+            assert_eq!(a.key_vault_path, format!("maknae/users/alice/{sub}"));
+            assert!(!maknae_config::path_is_within_prefix(
+                &a.key_vault_path,
+                AGENTS
+            ));
+        }
+        let c = choice("openai", "gpt-5.6", "openai/hobi", "api_key");
+        let a = as_agent(&s, &c, &hobi(), Some(AGENTS)).unwrap();
+        assert!(!maknae_config::path_is_within_prefix(
+            &a.key_vault_path,
+            PREFIX
+        ));
     }
 
     #[test]
@@ -334,12 +540,14 @@ mod tests {
             call_timeout_ms: maknae_config::DEFAULT_CALL_TIMEOUT_MS,
             kv_mount: "maknae-kv".into(),
             user_prefix: PREFIX.into(),
+            agent_prefix: Some(AGENTS.into()),
             vault_addr: "https://vault.example:8200".into(),
         };
         assert!(provider_authority(&ProviderSet::empty(), Some(&b)).is_none());
         assert!(provider_authority(&set(), None).is_none());
         let a = provider_authority(&set(), Some(&b)).unwrap();
         assert_eq!(a.user_prefix, PREFIX);
+        assert_eq!(a.agent_prefix.as_deref(), Some(AGENTS));
         assert_eq!(a.set.len(), 2);
         assert!(a.set.get("local").is_some());
     }

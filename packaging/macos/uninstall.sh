@@ -43,7 +43,7 @@ for LABEL in io.maknae.policy-sync io.maknae.maknaed io.maknae.maknae-egress; do
     rm -f "/Library/LaunchDaemons/${LABEL}.plist"
 done
 
-rm -f /usr/local/bin/maknaed /usr/local/bin/maknae /usr/local/bin/maknae-egress
+rm -f /usr/local/bin/maknaed /usr/local/bin/maknae /usr/local/bin/maknae-egress /usr/local/bin/maknae-agentd
 rm -rf /usr/local/var/run/maknae /usr/local/var/log/maknae /usr/local/share/maknae
 rm -rf /usr/local/var/run/maknae-egress /usr/local/var/log/maknae-egress
 rm -rf /usr/local/var/run/maknae-agent
@@ -51,7 +51,7 @@ rm -f /Library/Logs/maknae-policy-sync.log
 rm -rf /usr/local/lib/maknae
 
 # Before the accounts go: the ACE names _maknae-egress and must still resolve.
-chmod -a "user:_maknae-egress allow list,search" /etc/maknae 2>/dev/null || :
+chmod -h -a "user:_maknae-egress allow list,search" /etc/maknae 2>/dev/null || :
 ace_left=false
 if [ -e /etc/maknae ]; then
     if ! led="$(ls -led /etc/maknae)"; then

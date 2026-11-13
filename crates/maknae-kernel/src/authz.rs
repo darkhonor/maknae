@@ -123,6 +123,7 @@ pub fn task_for(
                     | TaskRefusal::TaskerLive { .. }
                     | TaskRefusal::TaskerHeld
                     | TaskRefusal::FollowUps
+                    | TaskRefusal::FollowUpsUnseen
                     | TaskRefusal::Unavailable(_) => DenyCause::TaskNotWorking { cited: *id },
                 })
         }
@@ -216,6 +217,7 @@ fn task_reason(r: &TaskRefusal) -> &'static str {
         TaskRefusal::TaskerLive { .. } => "task-tasker-live",
         TaskRefusal::TaskerHeld => "task-tasker-held",
         TaskRefusal::FollowUps => "task-follow-ups",
+        TaskRefusal::FollowUpsUnseen => "task-follow-ups-unseen",
         TaskRefusal::NotWorking => "task-not-working",
         TaskRefusal::Unavailable(_) => "task-unavailable",
     }
@@ -1512,6 +1514,7 @@ mod tests {
             ),
             (TaskRefusal::TaskerHeld, "task-tasker-held"),
             (TaskRefusal::FollowUps, "task-follow-ups"),
+            (TaskRefusal::FollowUpsUnseen, "task-follow-ups-unseen"),
             (TaskRefusal::NotWorking, "task-not-working"),
             (TaskRefusal::Unavailable("u".into()), "task-unavailable"),
         ] {

@@ -718,8 +718,10 @@ pub enum Verb {
     TaskClaim {
         seen_follow_ups: Option<u32>,
     },
+    /// `seen_follow_ups`: refused while the task holds more follow-ups than this; `None` skips the check.
     TaskReport {
         text: SecretText,
+        seen_follow_ups: Option<u32>,
     },
 }
 

@@ -68,14 +68,28 @@ pub(crate) fn caller(stamp: &Stamp<'_>, uid: u32) -> Tasker {
 /// A task verb's operands, read once from the wire verb.
 pub(crate) enum TaskVerb<'a> {
     Submit(&'a TaskSubmission),
-    Add { task: TaskId, text: &'a SecretText },
+    Add {
+        task: TaskId,
+        text: &'a SecretText,
+    },
     Status(TaskId),
-    List { agent: &'a str, after: Option<u64> },
+    List {
+        agent: &'a str,
+        after: Option<u64>,
+    },
     Stop(TaskId),
     Drop(TaskId),
-    Collect { agent: &'a str, after: Option<u64> },
-    Claim { seen: Option<u32> },
-    Report { text: &'a SecretText },
+    Collect {
+        agent: &'a str,
+        after: Option<u64>,
+    },
+    Claim {
+        seen: Option<u32>,
+    },
+    Report {
+        text: &'a SecretText,
+        seen: Option<u32>,
+    },
 }
 
 pub(crate) fn task_verb(verb: &Verb) -> Option<TaskVerb<'_>> {
@@ -99,7 +113,13 @@ pub(crate) fn task_verb(verb: &Verb) -> Option<TaskVerb<'_>> {
         Verb::TaskClaim { seen_follow_ups } => Some(TaskVerb::Claim {
             seen: *seen_follow_ups,
         }),
-        Verb::TaskReport { text } => Some(TaskVerb::Report { text }),
+        Verb::TaskReport {
+            text,
+            seen_follow_ups,
+        } => Some(TaskVerb::Report {
+            text,
+            seen: *seen_follow_ups,
+        }),
         Verb::Ping
         | Verb::Whoami
         | Verb::AdminStatus
@@ -425,6 +445,7 @@ mod tests {
             },
             Verb::TaskReport {
                 text: SecretText(Zeroizing::new("r".into())),
+                seen_follow_ups: Some(0),
             },
         ] {
             let tv = task_verb(&verb).unwrap();

@@ -21,3 +21,4 @@
 maknaed
 maknae
 maknae-egress
+maknae-agentd

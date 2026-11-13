@@ -191,6 +191,7 @@ install -d "$D/usr/local/bin" "$D/Library/LaunchDaemons" \
            "$D/usr/local/share/maknae/defaults" "$D$FIPS_LIBDIR"
 install -m 0755 "$BIN/maknaed" "$D/usr/local/bin/maknaed"
 install -m 0755 "$BIN/maknae-egress" "$D/usr/local/bin/maknae-egress"
+install -m 0755 "$BIN/maknae-agentd" "$D/usr/local/bin/maknae-agentd"
 install -m 0755 "$STAGE/$FIPS_BASE" "$D$FIPS_LIBDIR/$FIPS_BASE"
 # Apple ships plists in binary1. Convert the INSTALLED copy; the repo keeps XML so
 # the unit stays reviewable in a diff.

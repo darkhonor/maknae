@@ -791,8 +791,8 @@ pub async fn handle<S, E, P>(
 pub async fn handle_with_attempt_caps<S, E, P>(
     mut stream: S,
     peer_uri: Option<String>,
-    // `session.user` also chooses the key path's `<username>` segment (ADR-0028 §3),
-    // so it stays kernel-resolved from the peer uid, never taken from the request.
+    // `session.user` (client channel) or `session.channel`'s agent id (agent channel) names
+    // the key path's owner segment (ADR-0028 §3), never the request.
     session: Arc<SessionRecord>,
     gate: Arc<FactsGate>,
     emit: Arc<E>,
@@ -1363,15 +1363,16 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     let (admitted_view, providers, admitted_generation) = live.admission();
     let admitted = match &request.verb {
         Verb::SessionPrompt { choice, .. } => {
-            let (set, user_prefix) = match &*providers {
-                Some(a) => (&a.set, a.user_prefix.as_str()),
-                None => (&no_providers, ""),
+            let (set, user_prefix, agent_prefix) = match &*providers {
+                Some(a) => (&a.set, a.user_prefix.as_str(), a.agent_prefix.as_deref()),
+                None => (&no_providers, "", None),
             };
             match crate::provider_choice::admit_choice(
                 set,
                 choice.as_ref(),
-                peer_user.as_deref(),
+                crate::provider_choice::KeyOwner::of(&session.channel, peer_user.as_deref()),
                 user_prefix,
+                agent_prefix,
             ) {
                 Ok(a) => Some(a),
                 Err(refusal) => {
@@ -3597,7 +3598,11 @@ async fn serve_task_verb<S, E, P>(
                             &task,
                             &tasker,
                         ),
-                        Payload::TaskFollowUps(maknae_proto::TaskFollowUps { from, items }),
+                        Payload::TaskFollowUps(maknae_proto::TaskFollowUps {
+                            task: maknae_proto::TaskRef::from_id(&task),
+                            from,
+                            items,
+                        }),
                     ),
                     crate::task::Heartbeat::Closed(view) => {
                         let said = match view.state {
@@ -3725,7 +3730,7 @@ async fn serve_task_verb<S, E, P>(
                 Err(r) => trail.unauthorized(stream, &refused(&intent, &r)).await,
             }
         }
-        TaskVerb::Report { text } => {
+        TaskVerb::Report { text, seen } => {
             let held = match (stamp, &tasks.channel_agent) {
                 (Stamp::Agent { task: Some(t), .. }, Some(agent)) => Some((t, agent.clone())),
                 (Stamp::Client | Stamp::Agent { task: None, .. }, _) | (_, None) => None,
@@ -3758,7 +3763,7 @@ async fn serve_task_verb<S, E, P>(
                 return;
             }
             let (id, uid, text) = (held.id, trail.uid, text.clone());
-            let done = mutate(Box::new(move |s| s.report(&id, &agent, uid, text))).await;
+            let done = mutate(Box::new(move |s| s.report(&id, &agent, uid, text, seen))).await;
             acknowledge_task(
                 stream,
                 trail,
@@ -9557,7 +9562,9 @@ async fn boot_after_sink(
     // graceful one): detached, it could hold the client lock across a Vault
     // call while `shutdown()` waits, or re-install a leaf after retirement.
     supervisor_abort.abort();
-    client.shutdown().await;
+    if let Err(e) = client.shutdown().await {
+        eprintln!("maknae-vault: {e}");
+    }
     outcome.map_err(RunError::Other)
 }
 
@@ -10074,6 +10081,25 @@ pub(crate) mod baseline_stub {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_drivers_waits_derive_from_the_lease_and_one_prompt_exchange_fits_inside_it() {
+        use maknae_agent::task_driver::{HEARTBEAT_EVERY, UNDECODABLE_WAIT};
+        let lease = crate::task_store::CLAIM_LEASE;
+        assert_eq!(maknae_agent::task_driver::CLAIM_LEASE, lease);
+        assert_eq!(
+            UNDECODABLE_WAIT,
+            lease + TASK_SWEEP_EVERY + Duration::from_secs(30)
+        );
+        assert_eq!(HEARTBEAT_EVERY, lease / 3);
+        let exchange = Duration::from_millis(
+            maknae_config::EGRESS_DEADLINE_MS_MAX + maknae_config::TRANSPORT_TIMEOUT_MS_MAX,
+        );
+        assert!(
+            exchange < lease,
+            "one cited prompt exchange, the longest gap between renewing requests, outlives the claim lease"
+        );
+    }
 
     #[test]
     fn only_a_linux_host_that_declared_no_account_source_says_so_at_boot() {
@@ -13473,6 +13499,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
                     call_timeout_ms: maknae_config::DEFAULT_CALL_TIMEOUT_MS,
                     kv_mount: "kv".into(),
                     user_prefix: "users".into(),
+                    agent_prefix: None,
                     vault_addr: "https://v.example:8200".into(),
                 }),
                 ..TestEnv::default()
@@ -15048,6 +15075,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
                 call_timeout_ms: maknae_config::DEFAULT_CALL_TIMEOUT_MS,
                 kv_mount: "kv".into(),
                 user_prefix: "users".into(),
+                agent_prefix: None,
                 vault_addr: "https://v.example:8200".into(),
             }),
             ..TestEnv::default()
