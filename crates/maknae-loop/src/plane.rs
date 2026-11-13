@@ -648,9 +648,10 @@ mod tests {
         let _ = plane.prompt("c", &user_turn()).await;
         let _ = plane
             .tasks()
-            .report(maknae_proto::SecretText(zeroize::Zeroizing::new(
-                "r".into(),
-            )))
+            .report(
+                maknae_proto::SecretText(zeroize::Zeroizing::new("r".into())),
+                None,
+            )
             .await;
     }
 
@@ -699,7 +700,10 @@ mod tests {
             assert_eq!(cite_for(&claim, id), None);
         }
         for verb in [
-            Verb::TaskReport { text: text() },
+            Verb::TaskReport {
+                text: text(),
+                seen_follow_ups: None,
+            },
             Verb::FsStat {
                 path: "/p".into(),
                 conversation: None,

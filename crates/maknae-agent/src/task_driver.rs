@@ -127,9 +127,11 @@ pub trait Clock {
 pub trait TaskPlane: Plane {
     fn claim(&mut self) -> impl Future<Output = Result<ClaimAnswer, String>> + Send;
     fn heartbeat(&mut self, seen: u32) -> impl Future<Output = Result<BeatAnswer, String>> + Send;
+    /// `seen` is the follow-ups the report answers; the kernel refuses it while more exist.
     fn report(
         &mut self,
         text: SecretText,
+        seen: Option<u32>,
     ) -> impl Future<Output = Result<ReportOutcome, String>> + Send;
     fn cite(&mut self, task: Option<TaskId>);
     /// Creates mode 0700. An existing directory is `Applied`.
@@ -470,7 +472,8 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
             if self.stopping() {
                 return Reported::Shutdown;
             }
-            match self.plane.report(text).await {
+            let checked = content.then_some(*seen);
+            match self.plane.report(text, checked).await {
                 Ok(ReportOutcome::Acknowledged) => {
                     self.backoff = Backoff(BACKOFF_FIRST);
                     return Reported::Done(fixed);
@@ -776,6 +779,7 @@ mod tests {
         now: Duration,
         shutdown: Option<ShutdownHandle>,
         sent: Vec<Vec<Turn>>,
+        report_seen: Vec<Option<u32>>,
     }
     type Shared = Arc<Mutex<World>>;
 
@@ -898,8 +902,13 @@ mod tests {
                 items: vec![],
             }))
         }
-        async fn report(&mut self, text: SecretText) -> Result<ReportOutcome, String> {
+        async fn report(
+            &mut self,
+            text: SecretText,
+            seen: Option<u32>,
+        ) -> Result<ReportOutcome, String> {
             self.log(format!("report {}", *text.0));
+            self.w.lock().unwrap().report_seen.push(seen);
             if self.shutdown_on_report {
                 let w = self.w.lock().unwrap();
                 w.shutdown.as_ref().unwrap().shut_down();
@@ -1909,6 +1918,29 @@ mod tests {
         let (log, _, w) = run_with(f, PersonaMode::Own).await;
         assert_eq!(reports(&log), strs(&["report a1", "report a2"]));
         assert_eq!(user_text(&w.lock().unwrap().sent[1][2]), "late-629");
+    }
+
+    #[tokio::test]
+    async fn a_follow_up_accepted_after_the_last_heartbeat_is_folded_in_not_dropped() {
+        let mut f = fake();
+        f.claims = VecDeque::from([delivered(1, PART)]);
+        f.reports = VecDeque::from([Ok(ReportOutcome::Refused(refused()))]);
+        f.beats
+            .extend([follow_ups(0, &[]), follow_ups(0, &["between-629"])]);
+        f.replies = VecDeque::from([answer("a1"), answer("a2")]);
+        let (log, _, w) = run_with(f, PersonaMode::Own).await;
+        assert_eq!(reports(&log), strs(&["report a1", "report a2"]));
+        {
+            let w = w.lock().unwrap();
+            assert_eq!(user_text(&w.sent[1][2]), "between-629");
+            assert_eq!(w.report_seen, vec![Some(0), Some(1)]);
+        }
+
+        let mut f = fake();
+        f.claims = VecDeque::from([delivered(1, PART)]);
+        f.replies = VecDeque::from([Err(PlaneError::Refused)]);
+        let (_, _, w) = run_with(f, PersonaMode::Own).await;
+        assert_eq!(w.lock().unwrap().report_seen, vec![None]);
     }
 
     #[tokio::test]

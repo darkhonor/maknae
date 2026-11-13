@@ -40,11 +40,21 @@ impl<D: Dial> TaskClient<D> {
         )
     }
 
-    pub async fn report(&self, text: SecretText) -> Result<ReportOutcome, String> {
+    pub async fn report(
+        &self,
+        text: SecretText,
+        seen_follow_ups: Option<u32>,
+    ) -> Result<ReportOutcome, String> {
         if text.0.len() > self.link.transport().prompt_max_bytes {
             return Ok(ReportOutcome::TooLarge);
         }
-        report_answer(self.send(Verb::TaskReport { text }).await)
+        report_answer(
+            self.send(Verb::TaskReport {
+                text,
+                seen_follow_ups,
+            })
+            .await,
+        )
     }
 
     async fn send(&self, verb: Verb) -> Result<WireOutcome, String> {
@@ -144,7 +154,7 @@ mod tests {
             Ok(BeatAnswer::State(view(TaskState::Held)))
         );
         assert_eq!(
-            tasks.report(text("done")).await,
+            tasks.report(text("done"), Some(4)).await,
             Ok(ReportOutcome::Acknowledged)
         );
         let seen = plane.link_for_test().finish().await;
@@ -153,16 +163,23 @@ mod tests {
             .iter()
             .map(|r| match &r.verb {
                 Verb::TaskClaim { seen_follow_ups } => (Some(*seen_follow_ups), r.task),
-                Verb::TaskReport { text } => {
+                Verb::TaskReport {
+                    text,
+                    seen_follow_ups,
+                } => {
                     assert_eq!(text.0.as_str(), "done");
-                    (None, r.task)
+                    (Some(*seen_follow_ups), r.task)
                 }
                 other => panic!("unexpected verb {other:?}"),
             })
             .collect();
         assert_eq!(
             sent,
-            [(Some(None), None), (Some(Some(5)), None), (None, Some(id))]
+            [
+                (Some(None), None),
+                (Some(Some(5)), None),
+                (Some(Some(4)), Some(id))
+            ]
         );
     }
 
@@ -224,7 +241,7 @@ mod tests {
             Ok(BeatAnswer::Refused(no.clone()))
         );
         assert_eq!(
-            tasks.report(text("r")).await,
+            tasks.report(text("r"), None).await,
             Ok(ReportOutcome::Refused(no))
         );
         let unanswered = plane.tasks().claim().await;
@@ -253,11 +270,11 @@ mod tests {
         let fits = "r".repeat(transport.prompt_max_bytes / 2);
         let over = "r".repeat(maknae_proto::prompt_request_cap(transport.prompt_max_bytes));
         assert_eq!(
-            plane.tasks().report(text(&over)).await,
+            plane.tasks().report(text(&over), None).await,
             Ok(ReportOutcome::TooLarge)
         );
         assert!(matches!(
-            plane.tasks().report(text(&fits)).await,
+            plane.tasks().report(text(&fits), None).await,
             Ok(ReportOutcome::Refused(_))
         ));
         assert_eq!(plane.link_for_test().finish().await.requests.len(), 1);
@@ -273,11 +290,11 @@ mod tests {
         let over = "r".repeat(transport.prompt_max_bytes + 1);
         let at = "r".repeat(transport.prompt_max_bytes);
         assert_eq!(
-            plane.tasks().report(text(&over)).await,
+            plane.tasks().report(text(&over), None).await,
             Ok(ReportOutcome::TooLarge)
         );
         assert!(matches!(
-            plane.tasks().report(text(&at)).await,
+            plane.tasks().report(text(&at), None).await,
             Ok(ReportOutcome::Refused(_))
         ));
         assert_eq!(plane.link_for_test().finish().await.requests.len(), 1);

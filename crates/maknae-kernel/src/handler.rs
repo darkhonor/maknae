@@ -1991,6 +1991,7 @@ mod tests {
             },
             Verb::TaskReport {
                 text: maknae_proto::SecretText(maknae_io::Zeroizing::new("r".into())),
+                seen_follow_ups: None,
             },
         ]
     }

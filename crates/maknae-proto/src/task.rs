@@ -856,7 +856,10 @@ mod tests {
             Verb::TaskClaim {
                 seen_follow_ups: None,
             },
-            Verb::TaskReport { text: secret(text) },
+            Verb::TaskReport {
+                text: secret(text),
+                seen_follow_ups: Some(3),
+            },
         ]
     }
 

@@ -519,6 +519,7 @@ mod tests {
             },
             maknae_proto::Verb::TaskReport {
                 text: maknae_proto::SecretText(zeroize::Zeroizing::new("r".into())),
+                seen_follow_ups: None,
             },
         ] {
             assert_eq!(reply_wait(&verb, &transport), control, "{verb:?}");

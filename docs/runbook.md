@@ -1599,7 +1599,7 @@ Every task verb is `action: session.task`. A request record names its operation 
 | `claim` whose queued task is not handed out | one | `idle: the tasker's authority was withdrawn: <reason>`, or `idle: the tasker's standing could not be decided: <cause>` (posture `unavailable`; the task stays queued and the next claim decides again). Both name the task and its tasker |
 | `claim` that hands out a task | `intent recorded`, then `delivered` | |
 | heartbeat (`claim` with `seen_follow_ups`) | one | `heartbeat: <n> follow-ups after <m>`, `heartbeat: the task is closed`, `heartbeat: the task is held` or `idle` |
-| `report` | `intent recorded`, then `done` or the refusal | |
+| `report` | `intent recorded`, then `done` or the refusal | `the task holds follow-ups the report has not seen` when a follow-up was added after the agent's last heartbeat; the task stays working and the agent folds it in |
 
 A refused store step after a permit keeps `result: permit`, the decision, and carries the cause with posture `unavailable` or `unauthorized`. The client is told only `not authorized`.
 

@@ -354,8 +354,15 @@ impl World {
     }
 
     async fn agent_reports(&self, agent: &str, id: &TaskId, text: &str) -> RespResult {
-        self.agent(agent, Verb::TaskReport { text: secret(text) }, Some(*id))
-            .await
+        self.agent(
+            agent,
+            Verb::TaskReport {
+                text: secret(text),
+                seen_follow_ups: None,
+            },
+            Some(*id),
+        )
+        .await
     }
 
     /// The same disk and clock under a store opened afresh, as after a restart.
@@ -1282,6 +1289,7 @@ async fn a_report_reaches_only_the_tasks_own_tasker() {
             "hobi",
             Verb::TaskReport {
                 text: secret("sentinel-628-theirs"),
+                seen_follow_ups: None,
             },
             Some(theirs),
             &records,
@@ -1313,6 +1321,52 @@ async fn a_report_reaches_only_the_tasks_own_tasker() {
 }
 
 #[tokio::test]
+async fn a_report_that_has_not_seen_every_follow_up_is_refused_and_changes_nothing() {
+    let w = world("report-unseen", "user", true);
+    let id = w.submit("hobi", "a").await;
+    let other = w.submit("hobi", "b").await;
+    assert_eq!(w.claimed("hobi").await, id);
+    w.ask(Verb::TaskAdd {
+        task: r(&id),
+        text: secret("f1"),
+    })
+    .await;
+    let report = |seen| Verb::TaskReport {
+        text: secret("sentinel-629-unseen"),
+        seen_follow_ups: seen,
+    };
+    let records = Records::new(0);
+    let stale = w
+        .agent_with("hobi", report(Some(0)), Some(id), &records)
+        .await
+        .unwrap();
+    assert!(unauthorized(&stale), "{stale:?}");
+    assert!(
+        reasons(&records)
+            .iter()
+            .any(|t| t.contains("follow-ups the report has not seen")),
+        "{:?}",
+        reasons(&records)
+    );
+    let rec = w.store().record(&id).unwrap();
+    assert_eq!(
+        (rec.state, rec.report.is_none()),
+        (TaskState::Working, true)
+    );
+    let seen = w.agent("hobi", report(Some(1)), Some(id)).await;
+    assert!(
+        matches!(&seen, RespResult::Ok(Payload::TaskAcknowledged(v)) if v.state == TaskState::Reported),
+        "{seen:?}"
+    );
+    assert_eq!(w.claimed("hobi").await, other);
+    let unchecked = w.agent("hobi", report(None), Some(other)).await;
+    assert!(
+        matches!(&unchecked, RespResult::Ok(Payload::TaskAcknowledged(_))),
+        "{unchecked:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_report_needs_the_agents_own_working_task_cited() {
     let w = world("report-cited", "user", true);
     let id = w.mine("hobi");
@@ -1321,7 +1375,10 @@ async fn a_report_needs_the_agents_own_working_task_cited() {
     let uncited = w
         .agent_with(
             "hobi",
-            Verb::TaskReport { text: secret("r") },
+            Verb::TaskReport {
+                text: secret("r"),
+                seen_follow_ups: None,
+            },
             None,
             &records,
         )
@@ -1336,8 +1393,15 @@ async fn a_report_needs_the_agents_own_working_task_cited() {
         reasons(&records)
     );
     assert!(
-        w.cannot_cite("hobi", Verb::TaskReport { text: secret("r") }, id)
-            .await,
+        w.cannot_cite(
+            "hobi",
+            Verb::TaskReport {
+                text: secret("r"),
+                seen_follow_ups: None,
+            },
+            id
+        )
+        .await,
         "a queued task is not citable"
     );
     assert_eq!(w.claimed("suga").await, sugas);
@@ -1345,7 +1409,10 @@ async fn a_report_needs_the_agents_own_working_task_cited() {
     let foreign = w
         .agent_with(
             "hobi",
-            Verb::TaskReport { text: secret("r") },
+            Verb::TaskReport {
+                text: secret("r"),
+                seen_follow_ups: None,
+            },
             Some(sugas),
             &records,
         )
@@ -1366,6 +1433,7 @@ async fn a_report_needs_the_agents_own_working_task_cited() {
             "hobi",
             Verb::TaskReport {
                 text: secret(&"r".repeat(w.cfg.prompt_max_bytes + 1)),
+                seen_follow_ups: None,
             },
             Some(id),
         )
@@ -1440,7 +1508,10 @@ async fn claim_and_report_are_refused_on_the_client_channel() {
         Verb::TaskClaim {
             seen_follow_ups: Some(0),
         },
-        Verb::TaskReport { text: secret("r") },
+        Verb::TaskReport {
+            text: secret("r"),
+            seen_follow_ups: None,
+        },
     ] {
         let records = Records::new(0);
         let got = w.ask_with(verb.clone(), &records).await;
@@ -2157,7 +2228,10 @@ async fn a_claim_or_report_whose_record_fails_is_refused_and_recorded() {
     let raw = w
         .agent_raw(
             "hobi",
-            Verb::TaskReport { text: secret("r") },
+            Verb::TaskReport {
+                text: secret("r"),
+                seen_follow_ups: None,
+            },
             Some(id),
             &Records::new(2),
         )

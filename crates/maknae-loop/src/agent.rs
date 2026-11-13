@@ -198,8 +198,12 @@ impl<K: KeySupply, R: PersonaRead, D: Dial> TaskPlane for AgentPlane<K, R, D> {
     async fn heartbeat(&mut self, seen: u32) -> Result<BeatAnswer, String> {
         self.plane.tasks().heartbeat(seen).await
     }
-    async fn report(&mut self, text: SecretText) -> Result<ReportOutcome, String> {
-        self.plane.tasks().report(text).await
+    async fn report(
+        &mut self,
+        text: SecretText,
+        seen: Option<u32>,
+    ) -> Result<ReportOutcome, String> {
+        self.plane.tasks().report(text, seen).await
     }
     fn cite(&mut self, task: Option<TaskId>) {
         self.plane.cite(task);
@@ -339,7 +343,9 @@ mod tests {
         plane.cite(Some(id));
         let _ = plane.claim().await;
         let _ = plane.heartbeat(3).await;
-        let _ = plane.report(SecretText(Zeroizing::new("r".into()))).await;
+        let _ = plane
+            .report(SecretText(Zeroizing::new("r".into())), None)
+            .await;
         let _ = plane.mkdir(&format!("{d}/tasks/users/1000"), true).await;
         let _ = plane.open(&dir, &[]).await;
         let _ = plane.prompt("c", &turn).await;
@@ -353,7 +359,9 @@ mod tests {
         let _ = plane.stat("c", d).await;
         let _ = plane.close(&conversation).await;
         plane.cite(None);
-        let _ = plane.report(SecretText(Zeroizing::new("r".into()))).await;
+        let _ = plane
+            .report(SecretText(Zeroizing::new("r".into())), None)
+            .await;
         let _ = plane.take_diagnostics();
         plane.note(DriverEvent::CloseFailed(PlaneError::Refused));
         plane.cite(Some(id));

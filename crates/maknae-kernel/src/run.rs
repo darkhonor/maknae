@@ -3730,7 +3730,7 @@ async fn serve_task_verb<S, E, P>(
                 Err(r) => trail.unauthorized(stream, &refused(&intent, &r)).await,
             }
         }
-        TaskVerb::Report { text } => {
+        TaskVerb::Report { text, seen } => {
             let held = match (stamp, &tasks.channel_agent) {
                 (Stamp::Agent { task: Some(t), .. }, Some(agent)) => Some((t, agent.clone())),
                 (Stamp::Client | Stamp::Agent { task: None, .. }, _) | (_, None) => None,
@@ -3763,7 +3763,7 @@ async fn serve_task_verb<S, E, P>(
                 return;
             }
             let (id, uid, text) = (held.id, trail.uid, text.clone());
-            let done = mutate(Box::new(move |s| s.report(&id, &agent, uid, text))).await;
+            let done = mutate(Box::new(move |s| s.report(&id, &agent, uid, text, seen))).await;
             acknowledge_task(
                 stream,
                 trail,
