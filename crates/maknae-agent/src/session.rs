@@ -436,7 +436,7 @@ mod tests {
     async fn run_answer(s: &mut Session, p: &mut Fake) -> (Vec<LoopEvent>, Option<String>) {
         let mut events = vec![];
         let out = s.run(p, &mut |e| events.push(e)).await;
-        (events, out.answer)
+        (events, out.answer.map(|a| a.0.to_string()))
     }
 
     #[tokio::test]
@@ -559,7 +559,13 @@ mod tests {
         let (eb, pb, sb, ab) = b.await.unwrap();
         assert_eq!(ea.last(), Some(&LoopEvent::Answered));
         assert_eq!(eb.last(), Some(&LoopEvent::Answered));
-        assert_eq!((aa.as_deref(), ab.as_deref()), (Some("A"), Some("B")));
+        assert_eq!(
+            (
+                aa.as_ref().map(|a| a.0.as_str()),
+                ab.as_ref().map(|a| a.0.as_str())
+            ),
+            (Some("A"), Some("B"))
+        );
         assert!(pa.prompts.iter().all(|(c, _)| c == "conv-a"));
         assert!(pb.prompts.iter().all(|(c, _)| c == "conv-b"));
         assert!(tool_ids(&sa).iter().all(|id| id.starts_with('a')));
@@ -605,7 +611,7 @@ mod tests {
         assert_eq!(ea.last(), Some(&LoopEvent::Stopped(StopReason::Stopped)));
         let (eb, ab) = b.await.unwrap();
         assert_eq!(eb.last(), Some(&LoopEvent::Answered));
-        assert_eq!(ab.as_deref(), Some("B"));
+        assert_eq!(ab.as_ref().map(|a| a.0.as_str()), Some("B"));
     }
 
     #[tokio::test]
@@ -639,7 +645,10 @@ mod tests {
         let mut p = fake(vec![answer("SENTINEL-ANSWER-TEXT")]);
         let mut events = vec![];
         let out = s.run(&mut p, &mut |e| events.push(e)).await;
-        assert_eq!(out.answer.as_deref(), Some("SENTINEL-ANSWER-TEXT"));
+        assert_eq!(
+            out.answer.as_ref().map(|a| a.0.as_str()),
+            Some("SENTINEL-ANSWER-TEXT")
+        );
         let shown = format!("{events:?}");
         assert!(!shown.contains("SENTINEL-ANSWER-TEXT"), "{shown}");
     }
@@ -770,7 +779,7 @@ mod tests {
         assert_eq!(
             ended,
             Ended::Ran(Outcome {
-                answer: Some("hi".into()),
+                answer: Some(SecretText(Zeroizing::new("hi".into()))),
                 stopped: None,
                 steps_used: 1,
             })
@@ -923,7 +932,7 @@ mod tests {
         let out = s
             .resume(&mut p, &[], &mut NoHook, &mut |e| events.push(e))
             .await;
-        assert_eq!(out.answer.as_deref(), Some("after"));
+        assert_eq!(out.answer.as_ref().map(|a| a.0.as_str()), Some("after"));
         assert_eq!(tool_text_of(&s, "c1"), OUTCOME_LOST);
         assert_eq!(OUTCOME_LOST, "outcome unknown: the connection was lost");
         assert_eq!(p.prompts.last().map(|(_, n)| *n), Some(3));
@@ -938,7 +947,10 @@ mod tests {
         let lost = s.run(&mut p, &mut |_| {}).await;
         assert_eq!(lost.stopped, Some(StopReason::Transport("reset".into())));
         let out = s.resume(&mut p, &[], &mut NoHook, &mut |_| {}).await;
-        assert_eq!(out.answer.as_deref(), Some("second try"));
+        assert_eq!(
+            out.answer.as_ref().map(|a| a.0.as_str()),
+            Some("second try")
+        );
         assert_eq!(p.prompts, vec![("conv-1".to_string(), 1)]);
     }
 
@@ -969,7 +981,7 @@ mod tests {
                 &mut |_| {},
             )
             .await;
-        assert_eq!(out.answer.as_deref(), Some("second"));
+        assert_eq!(out.answer.as_ref().map(|a| a.0.as_str()), Some("second"));
         assert_eq!(p.prompts.last().map(|(_, n)| *n), Some(4));
         assert!(
             matches!(&s.transcript.turns()[3], Turn::User { content } if matches!(&content[0], ContentBlock::Text { text } if &*text.0 == "more-2"))

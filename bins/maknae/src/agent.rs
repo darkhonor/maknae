@@ -338,7 +338,7 @@ pub fn print_end(
     err: &mut impl Write,
 ) -> std::io::Result<u8> {
     if let Some(answer) = &outcome.answer {
-        writeln!(out, "{answer}")?;
+        writeln!(out, "{}", answer.0.as_str())?;
         return Ok(0);
     }
     crate::stderr::line(

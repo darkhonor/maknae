@@ -574,7 +574,7 @@ async fn read_then_write_then_answer_leaves_the_sequence_the_issue_names_in_the_
     )
     .await;
 
-    assert_eq!(out.answer.as_deref(), Some("Edited."));
+    assert_eq!(out.answer.as_ref().map(|a| a.0.as_str()), Some("Edited."));
     assert_eq!(
         std::fs::read_to_string(&target).unwrap(),
         // SHORTER than "old body" on purpose: an overwrite that wrote the
@@ -1574,7 +1574,9 @@ async fn a_session_opens_converses_and_closes_one_kernel_conversation() {
         )
         .await;
     match ended {
-        maknae_agent::session::Ended::Ran(o) => assert_eq!(o.answer.as_deref(), Some("hello")),
+        maknae_agent::session::Ended::Ran(o) => {
+            assert_eq!(o.answer.as_ref().map(|a| a.0.as_str()), Some("hello"))
+        }
         maknae_agent::session::Ended::Interrupted(()) => panic!("not interrupted"),
     }
     match closed {

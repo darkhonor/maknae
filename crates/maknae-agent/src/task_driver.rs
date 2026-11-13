@@ -713,7 +713,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
                 self.plane.note(DriverEvent::Loop(e));
             }
             if let Some(answer) = outcome.answer {
-                held.answer = Some(Zeroizing::new(answer));
+                held.answer = Some(answer.0);
             }
             let stopped = match outcome.stopped {
                 None | Some(StopReason::NothingPending) if held.answer.is_some() => {
@@ -2668,13 +2668,16 @@ mod tests {
         let (mut d, w) = driver(f, PersonaMode::Own);
         let mut session = Session::new(CONV, "q", d.config.budget, d.config.context, None);
         let first = session.run(&mut d.plane, &mut |_| {}).await;
-        assert_eq!(first.answer.as_deref(), Some("held-629"));
+        assert_eq!(
+            first.answer.as_ref().map(|a| a.0.as_str()),
+            Some("held-629")
+        );
         let held = Held {
             id: id(1),
             session,
             seen: 0,
             last_beat: Duration::ZERO,
-            answer: first.answer.map(Zeroizing::new),
+            answer: first.answer.map(|a| a.0),
             resumes: 0,
         };
         d.work(held, Then::Resume(vec![])).await;
