@@ -7541,11 +7541,7 @@ mod tests {
         };
         assert!(mint(&mut draw).is_ok());
         assert_eq!(mint(&mut draw).err(), Some(TaskRefusal::Random));
-        assert_eq!(
-            drawn.get(),
-            1 + ID_DRAWS,
-            "no id is drawn after the last attempt"
-        );
+        assert_eq!(drawn.get(), 5, "no id is drawn after the last attempt");
         assert_eq!(store.len(), 1);
     }
 
