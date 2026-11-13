@@ -244,8 +244,9 @@ fn held(platform: Platform, account: &Account, e: &Entry, out: &str) -> bool {
     }
 }
 
-fn refusal(grant: bool, e: &Entry, entry: String, detail: String) -> EnrollError {
+fn refusal(agent: &AgentId, grant: bool, e: &Entry, entry: String, detail: String) -> EnrollError {
     EnrollError::AgentAccess {
+        agent: agent.as_str().to_string(),
         grant,
         path: e.path.clone(),
         entry,
@@ -270,6 +271,7 @@ fn check_name(platform: Platform, account: &Account) -> Result<(), EnrollError> 
 pub(crate) fn grant(
     r: &dyn Run,
     platform: Platform,
+    agent: &AgentId,
     account: &Account,
     entries: &[Entry],
 ) -> Result<(), EnrollError> {
@@ -278,20 +280,21 @@ pub(crate) fn grant(
         let entry = entry_text(platform, account, e);
         match ran(r, grant_call(platform, account, e)) {
             Ok(out) if out.ok => {}
-            Ok(out) => return Err(refusal(true, e, entry, out.stderr)),
-            Err(why) => return Err(refusal(true, e, entry, why)),
+            Ok(out) => return Err(refusal(agent, true, e, entry, out.stderr)),
+            Err(why) => return Err(refusal(agent, true, e, entry, why)),
         }
         match ran(r, readback(platform, e)) {
             Ok(out) if out.ok && granted(platform, account, e, &out.stdout) => {}
             Ok(_) => {
                 return Err(refusal(
+                    agent,
                     true,
                     e,
                     entry,
                     "the entry did not read back".into(),
                 ))
             }
-            Err(why) => return Err(refusal(true, e, entry, why)),
+            Err(why) => return Err(refusal(agent, true, e, entry, why)),
         }
     }
     Ok(())
@@ -306,6 +309,7 @@ pub(crate) enum Revoked {
 pub(crate) fn revoke(
     r: &dyn Run,
     platform: Platform,
+    agent: &AgentId,
     account: &Account,
     resolves: bool,
     entries: &[Entry],
@@ -321,19 +325,20 @@ pub(crate) fn revoke(
         };
         let still_held = || match ran(r, readback(platform, e)) {
             Ok(out) if out.ok => Ok(held(platform, account, e, &out.stdout)),
-            Ok(out) => Err(refusal(false, e, entry.clone(), out.stderr)),
-            Err(why) => Err(refusal(false, e, entry.clone(), why)),
+            Ok(out) => Err(refusal(agent, false, e, entry.clone(), out.stderr)),
+            Err(why) => Err(refusal(agent, false, e, entry.clone(), why)),
         };
         if !still_held()? {
             continue;
         }
         match ran(r, remove_call(platform, account, e)) {
             Ok(out) if out.ok => {}
-            Ok(out) => return Err(refusal(false, e, entry.clone(), out.stderr)),
-            Err(why) => return Err(refusal(false, e, entry.clone(), why)),
+            Ok(out) => return Err(refusal(agent, false, e, entry.clone(), out.stderr)),
+            Err(why) => return Err(refusal(agent, false, e, entry.clone(), why)),
         }
         if still_held()? {
             return Err(refusal(
+                agent,
                 false,
                 e,
                 entry.clone(),
@@ -615,7 +620,7 @@ pub(crate) mod tests {
     fn linux_grants_each_entry_by_uid_without_following_links_or_widening_the_mask() {
         let host = FakeHost::default();
         let entries = grant_entries(Path::new(ROOT), &hobi(), true);
-        grant(&host, Platform::Linux, &acct(), &entries).unwrap();
+        grant(&host, Platform::Linux, &hobi(), &acct(), &entries).unwrap();
         let mut want = Vec::new();
         for e in &entries {
             let p = e.path.display();
@@ -633,7 +638,7 @@ pub(crate) mod tests {
         let host = FakeHost::default()
             .user(ROOT, "1234", "rwx")
             .mask(ROOT, "r-x");
-        grant(&host, Platform::Linux, &acct(), &[dir(ROOT)]).unwrap();
+        grant(&host, Platform::Linux, &hobi(), &acct(), &[dir(ROOT)]).unwrap();
         let after = host.state(ROOT);
         assert_eq!(after.mask.as_deref(), Some("r-x"));
         assert_eq!(after.users.get("990").map(String::as_str), Some("r-x"));
@@ -642,7 +647,7 @@ pub(crate) mod tests {
     #[test]
     fn a_linux_grant_the_mask_limits_does_not_read_back() {
         let host = FakeHost::default().mask(ROOT, "r--");
-        let e = grant(&host, Platform::Linux, &acct(), &[dir(ROOT)]).unwrap_err();
+        let e = grant(&host, Platform::Linux, &hobi(), &acct(), &[dir(ROOT)]).unwrap_err();
         assert!(
             matches!(&e, EnrollError::AgentAccess { grant: true, detail, .. } if detail == "the entry did not read back"),
             "{e:?}"
@@ -653,7 +658,7 @@ pub(crate) mod tests {
     fn macos_grants_each_entry_on_the_path_itself_and_reads_it_back() {
         let host = FakeHost::default();
         let entries = grant_entries(Path::new(ROOT), &hobi(), true);
-        grant(&host, Platform::Macos, &acct(), &entries).unwrap();
+        grant(&host, Platform::Macos, &hobi(), &acct(), &entries).unwrap();
         let mut want = Vec::new();
         for e in &entries {
             let perms = if e.dir { "list,search" } else { "read" };
@@ -678,8 +683,8 @@ pub(crate) mod tests {
             };
             let entries = [dir(ROOT)];
             for got in [
-                grant(&host, Platform::Macos, &a, &entries).err(),
-                revoke(&host, Platform::Macos, &a, true, &entries).err(),
+                grant(&host, Platform::Macos, &hobi(), &a, &entries).err(),
+                revoke(&host, Platform::Macos, &hobi(), &a, true, &entries).err(),
             ] {
                 assert!(
                     matches!(got, Some(EnrollError::Owner(_))),
@@ -688,7 +693,7 @@ pub(crate) mod tests {
             }
             assert!(host.calls().is_empty(), "{name:?}");
             assert!(
-                grant(&host, Platform::Linux, &a, &entries).is_ok(),
+                grant(&host, Platform::Linux, &hobi(), &a, &entries).is_ok(),
                 "{name:?}"
             );
         }
@@ -704,6 +709,7 @@ pub(crate) mod tests {
             let e = grant(
                 &host,
                 platform,
+                &hobi(),
                 &acct(),
                 &grant_entries(Path::new(ROOT), &hobi(), true),
             )
@@ -766,18 +772,20 @@ pub(crate) mod tests {
         let e = grant(
             &host,
             Platform::Linux,
+            &hobi(),
             &acct(),
             &grant_entries(Path::new(ROOT), &hobi(), false),
         )
         .unwrap_err();
         assert!(
-            matches!(&e, EnrollError::AgentAccess { grant: true, path, entry, detail }
+            matches!(&e, EnrollError::AgentAccess { grant: true, path, entry, detail, .. }
                 if path == Path::new("/etc/maknae/tls") && entry == "u:990:r-x" && detail == "Operation not supported"),
             "{e:?}"
         );
         let text = e.to_string();
         assert!(
-            text.contains("/etc/maknae/tls") && text.contains("--refresh-access"),
+            text.contains("/etc/maknae/tls")
+                && text.contains("run `sudo maknae enroll agent hobi --refresh-access`"),
             "{text}"
         );
     }
@@ -794,12 +802,12 @@ pub(crate) mod tests {
     fn a_missing_tool_refuses_the_grant_and_the_revoke() {
         let entries = grant_entries(Path::new(ROOT), &hobi(), false);
         for platform in [Platform::Linux, Platform::Macos] {
-            let e = grant(&Absent, platform, &acct(), &entries).unwrap_err();
+            let e = grant(&Absent, platform, &hobi(), &acct(), &entries).unwrap_err();
             assert!(
                 matches!(&e, EnrollError::AgentAccess { grant: true, detail, .. } if detail.ends_with("not found")),
                 "{e:?}"
             );
-            let e = revoke(&Absent, platform, &acct(), true, &entries).unwrap_err();
+            let e = revoke(&Absent, platform, &hobi(), &acct(), true, &entries).unwrap_err();
             assert!(
                 matches!(&e, EnrollError::AgentAccess { grant: false, detail, .. } if detail.ends_with("not found")),
                 "{e:?}"
@@ -816,7 +824,7 @@ pub(crate) mod tests {
         }
         host = host.user(ROOT, "991", "rwx").mask(ROOT, "r-x");
         assert_eq!(
-            revoke(&host, Platform::Linux, &acct(), true, &entries).ok(),
+            revoke(&host, Platform::Linux, &hobi(), &acct(), true, &entries).ok(),
             Some(Revoked::Done)
         );
         let mut want = Vec::new();
@@ -843,7 +851,7 @@ pub(crate) mod tests {
             host = host.ace(&e.path.display().to_string(), &macos_ace(&acct(), e));
         }
         assert_eq!(
-            revoke(&host, Platform::Macos, &acct(), true, &entries).ok(),
+            revoke(&host, Platform::Macos, &hobi(), &acct(), true, &entries).ok(),
             Some(Revoked::Done)
         );
         let mut want = Vec::new();
@@ -863,13 +871,13 @@ pub(crate) mod tests {
         let entries = [dir(ROOT)];
         let host = FakeHost::default().ace(ROOT, &macos_ace(&acct(), &dir(ROOT)));
         assert_eq!(
-            revoke(&host, Platform::Macos, &acct(), false, &entries).ok(),
+            revoke(&host, Platform::Macos, &hobi(), &acct(), false, &entries).ok(),
             Some(Revoked::Unresolved)
         );
         assert!(host.calls().is_empty());
         let host = FakeHost::default().user(ROOT, "990", "r-x");
         assert_eq!(
-            revoke(&host, Platform::Linux, &acct(), false, &entries).ok(),
+            revoke(&host, Platform::Linux, &hobi(), &acct(), false, &entries).ok(),
             Some(Revoked::Done)
         );
         assert!(host.state(ROOT).users.is_empty());
@@ -880,7 +888,7 @@ pub(crate) mod tests {
         let entries = vec![dir(ROOT)];
         for platform in [Platform::Linux, Platform::Macos] {
             let host = FakeHost::default().user(ROOT, "9900", "r-x");
-            revoke(&host, platform, &acct(), true, &entries).unwrap();
+            revoke(&host, platform, &hobi(), &acct(), true, &entries).unwrap();
             assert_eq!(host.calls().len(), 1, "{platform:?}: {:?}", host.calls());
         }
     }
@@ -903,7 +911,7 @@ pub(crate) mod tests {
             }
         }
         for platform in [Platform::Linux, Platform::Macos] {
-            let e = revoke(&Stuck, platform, &acct(), true, &[dir(ROOT)]).unwrap_err();
+            let e = revoke(&Stuck, platform, &hobi(), &acct(), true, &[dir(ROOT)]).unwrap_err();
             assert!(
                 matches!(&e, EnrollError::AgentAccess { grant: false, detail, .. } if detail == "the entry is still listed"),
                 "{platform:?}: {e:?}"
@@ -918,6 +926,7 @@ pub(crate) mod tests {
         let e = revoke(
             &held().refusing("/usr/bin/setfacl -P | -n | -x | u:990 | /etc/maknae"),
             Platform::Linux,
+            &hobi(),
             &acct(),
             true,
             &[dir(ROOT)],
@@ -931,6 +940,7 @@ pub(crate) mod tests {
         let e = revoke(
             &held().refusing("/usr/bin/getfacl -P | -p | -n | /etc/maknae"),
             Platform::Linux,
+            &hobi(),
             &acct(),
             true,
             &[dir(ROOT)],

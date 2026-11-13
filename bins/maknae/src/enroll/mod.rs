@@ -174,6 +174,7 @@ pub enum EnrollError {
     AgentRetireFailed {
         agent: String,
         accessors: Vec<String>,
+        access: Option<Box<EnrollError>>,
     },
     AgentOrphanedAccessor {
         accessor: String,
@@ -210,7 +211,14 @@ pub enum EnrollError {
         accessors: Vec<String>,
     },
     AgentPrefixMissing,
+    AgentIdentityChanged {
+        agent: String,
+        account: String,
+        recorded: u32,
+        current: u32,
+    },
     AgentAccess {
+        agent: String,
         grant: bool,
         path: PathBuf,
         entry: String,
@@ -335,11 +343,21 @@ impl std::fmt::Display for EnrollError {
                 f,
                 "agent {agent} is enrolled with {field} {recorded}, not {given}; --rotate keeps the {field}, so de-enroll the agent before changing it"
             ),
-            EnrollError::AgentRetireFailed { agent, accessors } => write!(
-                f,
-                "agent {agent} has its new SecretID, but these earlier SecretID accessors could not be destroyed: {}; they stay recorded, and the next --rotate retries them. A disabled Vault entity for this agent stays disabled until a --rotate retires them all",
-                accessors.join(", ")
-            ),
+            EnrollError::AgentRetireFailed {
+                agent,
+                accessors,
+                access,
+            } => {
+                write!(
+                    f,
+                    "agent {agent} has its new SecretID, but these earlier SecretID accessors could not be destroyed: {}; they stay recorded, and the next --rotate retries them. A disabled Vault entity for this agent stays disabled until a --rotate retires them all",
+                    accessors.join(", ")
+                )?;
+                match access {
+                    Some(e) => write!(f, ". Also: {e}"),
+                    None => Ok(()),
+                }
+            }
             EnrollError::AgentOrphanedAccessor {
                 accessor,
                 cause,
@@ -412,21 +430,32 @@ impl std::fmt::Display for EnrollError {
                 "agent {agent} is de-enrolled and its Vault entity is disabled, but these SecretID accessors could not be destroyed: {}; they stay recorded with the sealed SecretID, and running `maknae enroll remove-agent {agent}` again retries them",
                 accessors.join(", ")
             ),
+            EnrollError::AgentIdentityChanged {
+                agent,
+                account,
+                recorded,
+                current,
+            } => write!(
+                f,
+                "agent {agent} was enrolled for account {account} with uid {recorded}, but {account} now has uid {current}; nothing was granted. Restore the account, or remove the agent and enroll it again"
+            ),
             EnrollError::AgentPrefixMissing => write!(
                 f,
                 "/etc/maknae/egress-bounds.yaml has no agent_prefix, so agents have no model access; set it to the KV path under kv_mount where agent keys live (each agent's under <agent_prefix>/<id>/), then run enroll again"
             ),
             EnrollError::AgentAccess {
+                agent,
                 grant: true,
                 path,
                 entry,
                 detail,
             } => write!(
                 f,
-                "could not grant `{entry}` on {} ({detail}); the agent is enrolled, but its daemon cannot read its configuration until it holds this. Fix the cause, then run `sudo maknae enroll agent <id> --refresh-access`",
+                "could not grant `{entry}` on {} ({detail}); the agent is enrolled, but its daemon cannot read its configuration until it holds this. Fix the cause, then run `sudo maknae enroll agent {agent} --refresh-access`",
                 path.display()
             ),
             EnrollError::AgentAccess {
+                agent: _,
                 grant: false,
                 path,
                 entry,

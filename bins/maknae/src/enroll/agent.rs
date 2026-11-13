@@ -647,19 +647,21 @@ pub(crate) async fn enroll_agent<O: AgentOps>(
     if reenable && failures.is_empty() {
         ops.set_entity_disabled(&entity, false).await?;
     }
-    ops.grant_access(
+    let granted = ops.grant_access(
         &plan.agent,
         &agent_access::Account {
             name: plan.account.clone(),
             uid: plan.uid,
         },
-    )?;
+    );
     if !failures.is_empty() {
         return Err(EnrollError::AgentRetireFailed {
             agent: id.to_string(),
             accessors: failures,
+            access: granted.err().map(Box::new),
         });
     }
+    granted?;
     Ok(AgentOutcome { record, retired })
 }
 
@@ -987,9 +989,27 @@ pub(crate) fn refresh_access(
     agent_access::grant(
         r,
         platform,
+        agent,
         account,
         &agent_access::grant_entries(root, agent, persona),
     )
+}
+
+pub(crate) fn readmitted(
+    agent: &AgentId,
+    recorded: &agent_access::Account,
+    admitted: Result<u32, EnrollError>,
+) -> Result<agent_access::Account, EnrollError> {
+    let current = admitted?;
+    if current != recorded.uid {
+        return Err(EnrollError::AgentIdentityChanged {
+            agent: agent.as_str().to_string(),
+            account: recorded.name.clone(),
+            recorded: recorded.uid,
+            current,
+        });
+    }
+    Ok(recorded.clone())
 }
 
 pub(crate) fn enrolled_account(
@@ -1369,8 +1389,14 @@ fn run_refresh_access(agent: &AgentId, locale: Locale) -> Result<String, EnrollE
         }
         e => io_error(Path::new(AGENTS_DIR), e),
     })?;
-    let (record, _) = read_records(&agents, agent)?;
-    let account = enrolled_account(agent, record.as_ref())?;
+    let (record, others) = read_records(&agents, agent)?;
+    let enrolled = enrolled_account(agent, record.as_ref())?;
+    let host = read_host()?;
+    let account = readmitted(
+        agent,
+        &enrolled,
+        check_account(&enrolled.name, agent, &host, &others),
+    )?;
     refresh_access(
         &agent_access::Host,
         agent_access::Platform::HOST,
@@ -2068,7 +2094,7 @@ pub(crate) mod tests {
         let fake = Fake::failing(&["destroy:b"]);
         let e = rotate(&fake, &["a", "b"], &[], &[]).await.unwrap_err();
         assert!(
-            matches!(&e, EnrollError::AgentRetireFailed { agent, accessors }
+            matches!(&e, EnrollError::AgentRetireFailed { agent, accessors, .. }
                 if agent == "hobi" && *accessors == strings(&["b"])),
             "{e:?}"
         );
@@ -2237,6 +2263,22 @@ pub(crate) mod tests {
         );
         assert!(fake.log().contains(&"destroy:a".to_string()));
         assert_eq!(fake.states().last(), Some(&state(&["acc-new"], &[], &[])));
+    }
+
+    #[tokio::test]
+    async fn a_grant_failure_never_hides_a_retire_failure() {
+        let fake = Fake::failing(&["destroy:b", "grant"]);
+        let e = rotate(&fake, &["a", "b"], &[], &[]).await.unwrap_err();
+        assert!(
+            matches!(&e, EnrollError::AgentRetireFailed { accessors, access: Some(inner), .. }
+                if *accessors == strings(&["b"]) && matches!(&**inner, EnrollError::State(m) if m == "grant failed")),
+            "{e:?}"
+        );
+        let text = e.to_string();
+        assert!(
+            text.contains("could not be destroyed: b") && text.contains("grant failed"),
+            "{text}"
+        );
     }
 
     #[tokio::test]
@@ -2909,6 +2951,103 @@ pub(crate) mod tests {
             bindings,
             uid_of,
         )
+    }
+
+    fn recorded() -> agent_access::Account {
+        agent_access::Account {
+            name: "hobi-svc".into(),
+            uid: 990,
+        }
+    }
+
+    fn refresh_admit(acct: Option<maknae_io::HostAccount>) -> Result<u32, EnrollError> {
+        let daemons = maknae_io::DaemonFacts {
+            uids: vec![970, 971],
+            gids: vec![970, 971],
+        };
+        admit_account(
+            "hobi-svc",
+            &hobi_id(),
+            acct,
+            &HostAccounts {
+                maknae_gid: Some(950),
+                principal_uid: 1000,
+                daemons: &daemons,
+                other_agents: &[("suga".to_string(), 995)],
+            },
+            Some(AGENTS_GID),
+            &maknae_config::Bindings::absent(),
+            &BTreeMap::new(),
+        )
+    }
+
+    #[test]
+    fn refresh_readmits_the_enrolled_identity() {
+        let got = readmitted(
+            &hobi_id(),
+            &recorded(),
+            refresh_admit(Some(account(&[990, AGENTS_GID]))),
+        );
+        assert_eq!(got.unwrap(), recorded());
+    }
+
+    #[test]
+    fn refresh_refuses_an_account_that_is_gone() {
+        let e = readmitted(&hobi_id(), &recorded(), refresh_admit(None)).unwrap_err();
+        assert!(e.to_string().contains("no account named hobi-svc"), "{e}");
+    }
+
+    #[test]
+    fn refresh_refuses_a_name_now_on_another_uid() {
+        let mut moved = account(&[991, AGENTS_GID]);
+        moved.uid = 991;
+        let e = readmitted(&hobi_id(), &recorded(), refresh_admit(Some(moved))).unwrap_err();
+        assert!(
+            matches!(&e, EnrollError::AgentIdentityChanged { agent, account, recorded: 990, current: 991 }
+                if agent == "hobi" && account == "hobi-svc"),
+            "{e:?}"
+        );
+        assert_eq!(
+            e.to_string(),
+            "agent hobi was enrolled for account hobi-svc with uid 990, but hobi-svc now has uid 991; nothing was granted. Restore the account, or remove the agent and enroll it again"
+        );
+    }
+
+    #[test]
+    fn refresh_refuses_a_recorded_uid_now_under_another_name() {
+        let mut other = account(&[990, AGENTS_GID]);
+        other.name = "intruder".into();
+        let e = readmitted(&hobi_id(), &recorded(), refresh_admit(Some(other))).unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("shares uid 990 with account intruder"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn refresh_refuses_an_account_that_left_the_agent_group() {
+        let e = readmitted(
+            &hobi_id(),
+            &recorded(),
+            refresh_admit(Some(account(&[990]))),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&e, EnrollError::AgentNotInAgentGroup { .. }),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn refresh_refuses_a_uid_another_agent_holds() {
+        let mut taken = account(&[995, AGENTS_GID]);
+        taken.uid = 995;
+        let e = readmitted(&hobi_id(), &recorded(), refresh_admit(Some(taken))).unwrap_err();
+        assert!(
+            e.to_string().contains("already enrolled for agent suga"),
+            "{e}"
+        );
     }
 
     #[test]

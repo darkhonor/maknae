@@ -251,6 +251,7 @@ impl RemoveOps for RealRemoveOps {
         let revoked = agent_access::revoke(
             &*self.runner,
             agent_access::Platform::HOST,
+            agent,
             account,
             resolves,
             &agent_access::revoke_entries(&self.root, agent, &present),
