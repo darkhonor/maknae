@@ -1242,4 +1242,88 @@ mod tests {
         assert_eq!(lines.iter().filter(|l| **l == want).count(), 1);
         assert_eq!(maknae_config::state::TASKS_DIR, "tasks");
     }
+
+    #[test]
+    fn counters_behind_one_taskers_stored_ordinal_refuse_open() {
+        let b = MemTaskBlobs::default();
+        let store = open_mem(&b);
+        let id = by_uid(&store, "one");
+        store.publish_report(&id, secret("r"), None).unwrap();
+        drop(store);
+        let good: Counters = ciborium::from_reader(b.load(COUNTERS).unwrap().as_slice()).unwrap();
+        let lags: [fn(&mut Ordinals); 2] = [|o| o.seq -= 1, |o| o.rseq -= 1];
+        for lag in lags {
+            let mut behind = good.clone();
+            behind.taskers.values_mut().for_each(lag);
+            assert_eq!(behind.seq, good.seq);
+            b.put(COUNTERS, &encode(&behind).unwrap());
+            assert_eq!(
+                TaskStore::open(Box::new(b.clone()), Arc::new(SystemClock)).err(),
+                Some(StoreError::Counters(
+                    "are behind a stored task's sequence".into()
+                ))
+            );
+        }
+        b.put(COUNTERS, &encode(&good).unwrap());
+        assert!(TaskStore::open(Box::new(b.clone()), Arc::new(SystemClock)).is_ok());
+    }
+
+    #[test]
+    fn a_crash_keeps_the_synced_state_and_only_the_first_kept_unsynced_changes() {
+        let unsynced = || {
+            let b = MemTaskBlobs::default();
+            b.put("a", b"synced");
+            b.fail(Some(Fail::Unsynced));
+            assert!(b.save("a", b"one").is_err());
+            assert!(b.save("b", b"two").is_err());
+            b.fail(None);
+            b
+        };
+        let b = unsynced();
+        b.crash(0);
+        assert_eq!(b.load("a").unwrap().as_slice(), b"synced");
+        assert!(!b.has("b"));
+        let b = unsynced();
+        b.crash(1);
+        assert_eq!(b.load("a").unwrap().as_slice(), b"one");
+        assert!(!b.has("b"));
+    }
+
+    #[test]
+    fn a_records_or_panics_failure_spares_the_counters() {
+        for fail in [Fail::Records, Fail::Panics] {
+            let b = MemTaskBlobs::default();
+            b.fail(Some(fail));
+            assert_eq!(b.save(COUNTERS, b"c"), Ok(()));
+            assert!(b.has(COUNTERS));
+        }
+    }
+
+    #[test]
+    fn awaiting_stalls_returns_only_once_that_many_have_begun() {
+        let b = MemTaskBlobs::default();
+        b.slow(Some(Duration::from_millis(500)));
+        let saving = {
+            let b = b.clone();
+            std::thread::spawn(move || {
+                b.save("one", b"x").unwrap();
+                b.save("two", b"x").unwrap();
+            })
+        };
+        b.await_stalls(2);
+        assert!(b.0.stalls.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+        saving.join().unwrap();
+    }
+
+    #[test]
+    fn the_lease_and_the_record_bound_are_the_specified_values() {
+        assert_eq!(CLAIM_LEASE, Duration::from_secs(900));
+        assert_eq!(
+            RECORD_MAX,
+            (3 * maknae_config::PROMPT_MAX_CEILING
+                + maknae_proto::TASK_ENVELOPE_MARGIN
+                + maknae_proto::TASK_SIGNATURE_MAX_BYTES
+                + 4096) as u64
+        );
+    }
 }
