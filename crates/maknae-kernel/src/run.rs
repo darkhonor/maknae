@@ -10085,6 +10085,10 @@ mod tests {
             lease + TASK_SWEEP_EVERY + Duration::from_secs(30)
         );
         assert_eq!(HEARTBEAT_EVERY, lease / 3);
+        let step = Duration::from_millis(
+            maknae_config::EGRESS_DEADLINE_MS_MAX + maknae_config::TRANSPORT_TIMEOUT_MS_MAX,
+        );
+        assert!(step < lease, "one step can outlive the claim lease");
     }
 
     #[test]

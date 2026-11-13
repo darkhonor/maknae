@@ -202,6 +202,17 @@ impl Session {
         self.run_with(plane, hook, emit).await
     }
 
+    /// `None` when the kernel never opened this conversation.
+    pub async fn close<P: Plane + Send>(
+        &self,
+        plane: &mut P,
+    ) -> Option<Result<ConversationView, PlaneError>> {
+        match &self.kernel {
+            Some(id) => Some(plane.close(id).await),
+            None => None,
+        }
+    }
+
     pub(crate) fn share_stop(&mut self, stop: Arc<AtomicBool>) {
         self.stop = stop;
     }

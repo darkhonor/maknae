@@ -40,12 +40,10 @@ impl<D: Dial> TaskClient<D> {
     }
 
     pub async fn report(&self, text: SecretText) -> Result<ReportOutcome, String> {
-        let verb = Verb::TaskReport { text };
-        let cap = maknae_proto::prompt_request_cap(self.link.transport().prompt_max_bytes);
-        if !crate::plane::frame_fits(&verb, cap) {
+        if text.0.len() > self.link.transport().prompt_max_bytes {
             return Ok(ReportOutcome::TooLarge);
         }
-        report_answer(self.send(verb).await)
+        report_answer(self.send(Verb::TaskReport { text }).await)
     }
 
     async fn send(&self, verb: Verb) -> Result<WireOutcome, String> {
@@ -259,6 +257,26 @@ mod tests {
         );
         assert!(matches!(
             plane.tasks().report(text(&fits)).await,
+            Ok(ReportOutcome::Refused(_))
+        ));
+        assert_eq!(plane.link_for_test().finish().await.requests.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_report_longer_than_the_kernels_text_bound_is_not_sent() {
+        let transport = maknae_config::TransportConfig {
+            prompt_max_bytes: maknae_config::PROMPT_MAX_BYTES_FLOOR,
+            ..Default::default()
+        };
+        let plane = plane_with(transport.clone(), vec![refused()]);
+        let over = "r".repeat(transport.prompt_max_bytes + 1);
+        let at = "r".repeat(transport.prompt_max_bytes);
+        assert_eq!(
+            plane.tasks().report(text(&over)).await,
+            Ok(ReportOutcome::TooLarge)
+        );
+        assert!(matches!(
+            plane.tasks().report(text(&at)).await,
             Ok(ReportOutcome::Refused(_))
         ));
         assert_eq!(plane.link_for_test().finish().await.requests.len(), 1);

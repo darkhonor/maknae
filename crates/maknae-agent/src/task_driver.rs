@@ -1,11 +1,10 @@
 //! The agent's task driver (#629): claims kernel-signed tasks, works each through
 //! the loop inside its tasker's partition, and ends every one with a report or with
-//! the kernel's own answer that the task is no longer this agent's to report. No
-//! ending leaves a task `Working` behind, because the kernel re-delivers a `Working`
-//! task on every claim. Pure: every effect goes through [`TaskPlane`] and [`Clock`].
+//! the kernel's own answer that the task is no longer this agent's to report.
+//! Pure: every effect goes through [`TaskPlane`] and [`Clock`].
 use crate::budget::ContextBudget;
 use crate::drive::{Budget, LoopEvent, StepControl, StepHook, StopReason};
-use crate::plane::{Plane, WriteOutcome};
+use crate::plane::{Plane, PlaneError, WriteOutcome};
 use crate::session::Session;
 use crate::task::{BeatAnswer, ClaimAnswer, ReportOutcome};
 use crate::transcript::Transcript;
@@ -26,7 +25,10 @@ pub const BACKOFF_FIRST: Duration = Duration::from_secs(1);
 pub const BACKOFF_MAX: Duration = Duration::from_secs(60);
 
 pub const RESTARTED: &str = "stopped: agent restarted";
-pub const TOO_LARGE: &str = "stopped: report too large";
+pub const TOO_LARGE: &str = "report too large";
+pub const REPORT_REFUSED: &str = "report refused";
+/// Resumes after a lost connection, per task, before it is reported `stopped: transport`.
+pub const MAX_RESUMES: u32 = 3;
 pub const PARTITION_UNAVAILABLE: &str = "partition-unavailable";
 pub const PERSONA_UNAVAILABLE: &str = "persona-unavailable";
 pub const SESSION_UNAVAILABLE: &str = "session-unavailable";
@@ -112,6 +114,7 @@ pub enum DriverEvent {
         ending: Ending,
     },
     Loop(LoopEvent),
+    CloseFailed(PlaneError),
 }
 
 pub trait Clock {
@@ -160,6 +163,7 @@ struct Held {
     seen: u32,
     last_beat: Duration,
     answer: Option<String>,
+    resumes: u32,
 }
 
 enum Beat {
@@ -235,7 +239,8 @@ impl<P: TaskPlane + Send, C: Clock + Sync> StepHook<P> for TaskHook<'_, C> {
 }
 
 enum Reported {
-    Done,
+    /// `Some` names the fixed report sent in place of the one asked for.
+    Done(Option<&'static str>),
     FollowUps(Vec<SecretText>),
     Held,
     Gone,
@@ -245,7 +250,7 @@ enum Reported {
 
 enum Reconnected {
     Resume(Vec<SecretText>),
-    Ended,
+    Ended(Ending),
     Hold,
 }
 
@@ -344,7 +349,12 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
                     self.backoff = Backoff(BACKOFF_FIRST);
                     self.delivered(&d.signed, &d.partition).await;
                 }
-                Ok(ClaimAnswer::Idle | ClaimAnswer::Refused(_)) => {
+                Ok(ClaimAnswer::Idle) => {
+                    self.leftover = false;
+                    self.backoff = Backoff(BACKOFF_FIRST);
+                    self.pause(POLL_EVERY).await;
+                }
+                Ok(ClaimAnswer::Refused(_)) => {
                     self.backoff = Backoff(BACKOFF_FIRST);
                     self.pause(POLL_EVERY).await;
                 }
@@ -403,31 +413,41 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
 
     async fn cite_and_report(&mut self, id: TaskId, text: String, ending: Ending) {
         self.plane.cite(Some(id));
-        let mut seen = 0;
-        let done = self.report(secret(&text), false, &mut seen).await;
-        self.plane.cite(None);
-        self.after_fixed(id, done, ending).await;
+        let done = self.report(secret(&text), false, &mut 0).await;
+        self.conclude(id, None, fixed_ending(done, ending)).await;
     }
 
-    async fn after_fixed(&mut self, id: TaskId, done: Reported, ending: Ending) {
-        match done {
-            Reported::Done | Reported::FollowUps(_) => self.ended(Some(id), ending),
-            Reported::Held => self.ended(Some(id), Ending::Held),
-            Reported::Gone => self.ended(Some(id), Ending::Gone),
-            Reported::Shutdown => self.ended(Some(id), Ending::Shutdown),
-            Reported::Unsendable => {
-                self.ended(Some(id), Ending::Unsendable);
-                self.pause(UNDECODABLE_WAIT).await;
+    /// Uncites, then closes the conversation of a task that was reported or is
+    /// gone. A close the kernel refuses is noted, never fatal.
+    async fn conclude(&mut self, id: TaskId, session: Option<&Session>, ending: Ending) {
+        self.plane.cite(None);
+        self.ended(Some(id), ending);
+        let closes = match ending {
+            Ending::Answered | Ending::Stopped(_) | Ending::Gone => true,
+            Ending::Unverified(_)
+            | Ending::Undecodable
+            | Ending::Held
+            | Ending::Restarted
+            | Ending::Shutdown
+            | Ending::Unsendable => false,
+        };
+        if let (true, Some(session)) = (closes, session) {
+            if let Some(Err(e)) = session.close(&mut self.plane).await {
+                self.plane.note(DriverEvent::CloseFailed(e));
             }
+        }
+        if ending == Ending::Unsendable {
+            self.pause(UNDECODABLE_WAIT).await;
         }
     }
 
-    /// Sends `text` until the kernel acknowledges it or says the task is no longer
-    /// this agent's to report. After a refusal or a lost connection, an uncited
-    /// heartbeat decides: still `Working` with nothing new, report again.
-    async fn report(&mut self, text: SecretText, fold: bool, seen: &mut u32) -> Reported {
+    /// One content report. When it is not acknowledged and the task is still
+    /// `Working` with nothing new, the content-free `stopped: report refused`
+    /// follows once; a fixed report that is not acknowledged is `Unsendable`.
+    async fn report(&mut self, text: SecretText, content: bool, seen: &mut u32) -> Reported {
         let mut text = text;
-        let mut fold = fold;
+        let mut content = content;
+        let mut fixed = None;
         loop {
             if self.stopping() {
                 return Reported::Shutdown;
@@ -435,11 +455,12 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
             match self.plane.report(text.clone()).await {
                 Ok(ReportOutcome::Acknowledged) => {
                     self.backoff = Backoff(BACKOFF_FIRST);
-                    return Reported::Done;
+                    return Reported::Done(fixed);
                 }
-                Ok(ReportOutcome::TooLarge) if fold => {
-                    text = secret(TOO_LARGE);
-                    fold = false;
+                Ok(ReportOutcome::TooLarge) if content => {
+                    text = secret(&stop_report(TOO_LARGE));
+                    content = false;
+                    fixed = Some(TOO_LARGE);
                     continue;
                 }
                 Ok(ReportOutcome::TooLarge) => return Reported::Unsendable,
@@ -450,7 +471,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
                     return Reported::Shutdown;
                 }
                 match read_beat(self.plane.heartbeat(*seen).await, seen) {
-                    Beat::More(items) if fold && !items.is_empty() => {
+                    Beat::More(items) if content && !items.is_empty() => {
                         return Reported::FollowUps(items)
                     }
                     Beat::More(_) => break,
@@ -459,7 +480,12 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
                     Beat::Refused | Beat::Lost => self.back_off().await,
                 }
             }
-            self.back_off().await;
+            if !content {
+                return Reported::Unsendable;
+            }
+            text = secret(&stop_report(REPORT_REFUSED));
+            content = false;
+            fixed = Some(REPORT_REFUSED);
         }
     }
 
@@ -468,10 +494,12 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
         self.plane.cite(Some(id));
         let cwd = format!("{}/{partition}", self.config.home);
         if !partition_is_relative_and_canonical(partition) || !self.make_partition(&cwd).await {
-            return self.stop_cited(id, PARTITION_UNAVAILABLE, &mut 0).await;
+            return self
+                .stop_cited(id, None, PARTITION_UNAVAILABLE, &mut 0)
+                .await;
         }
         let Ok(persona) = self.persona(partition) else {
-            return self.stop_cited(id, PERSONA_UNAVAILABLE, &mut 0).await;
+            return self.stop_cited(id, None, PERSONA_UNAVAILABLE, &mut 0).await;
         };
         let Ask::Prompt { prompt } = &task.task.ask;
         let first = first_turn(persona.as_ref(), &prompt.0);
@@ -486,7 +514,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
         )
         .await;
         let Ok(mut session) = opened else {
-            return self.stop_cited(id, SESSION_UNAVAILABLE, &mut 0).await;
+            return self.stop_cited(id, None, SESSION_UNAVAILABLE, &mut 0).await;
         };
         session.share_stop(Arc::clone(&self.shutdown));
         let held = Held {
@@ -495,6 +523,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
             seen: 0,
             last_beat: self.clock.now(),
             answer: None,
+            resumes: 0,
         };
         self.work(held, Then::Run).await;
     }
@@ -530,11 +559,16 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
         Ok(None)
     }
 
-    /// Ending 4's rule for a task that is cited: the fixed report, then uncite.
-    async fn stop_cited(&mut self, id: TaskId, class: &'static str, seen: &mut u32) {
+    async fn stop_cited(
+        &mut self,
+        id: TaskId,
+        session: Option<&Session>,
+        class: &'static str,
+        seen: &mut u32,
+    ) {
         let done = self.report(secret(&stop_report(class)), false, seen).await;
-        self.plane.cite(None);
-        self.after_fixed(id, done, Ending::Stopped(class)).await;
+        self.conclude(id, session, fixed_ending(done, Ending::Stopped(class)))
+            .await;
     }
 
     async fn work(&mut self, mut held: Held, then: Then) {
@@ -570,37 +604,46 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
             let stopped = match outcome.stopped {
                 None | Some(StopReason::NothingPending) if held.answer.is_some() => {
                     match self.done(&mut held).await {
-                        Some(items) => {
+                        Ok(items) => {
                             then = Then::Resume(items);
                             continue;
                         }
-                        None => return,
+                        Err(ending) => {
+                            return self.conclude(held.id, Some(&held.session), ending).await
+                        }
                     }
                 }
                 None => StopReason::NothingPending,
                 Some(reason) => reason,
             };
-            match stopped {
+            let class = match stopped {
                 StopReason::Stopped => {
                     let ending = match end {
                         Some(HookEnd::Held) => Ending::Held,
                         Some(HookEnd::Gone) => Ending::Gone,
                         None => Ending::Shutdown,
                     };
-                    self.plane.cite(None);
-                    self.ended(Some(held.id), ending);
-                    return;
+                    return self.conclude(held.id, Some(&held.session), ending).await;
                 }
-                StopReason::Transport(_) => match self.reconnect(&mut held).await {
-                    Reconnected::Resume(items) => then = Then::Resume(items),
-                    Reconnected::Ended => return,
-                    Reconnected::Hold => {
-                        self.plane.cite(None);
-                        self.held = Some(held);
-                        return;
+                StopReason::Transport(_) if held.resumes < MAX_RESUMES => {
+                    held.resumes += 1;
+                    match self.reconnect(&mut held).await {
+                        Reconnected::Resume(items) => {
+                            then = Then::Resume(items);
+                            continue;
+                        }
+                        Reconnected::Ended(ending) => {
+                            return self.conclude(held.id, Some(&held.session), ending).await
+                        }
+                        Reconnected::Hold => {
+                            self.plane.cite(None);
+                            self.held = Some(held);
+                            return;
+                        }
                     }
-                },
-                reason @ (StopReason::StepBudget
+                }
+                reason @ (StopReason::Transport(_)
+                | StopReason::StepBudget
                 | StopReason::TooManyToolCalls(_)
                 | StopReason::FrameBound
                 | StopReason::PromptRefused
@@ -608,31 +651,30 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
                 | StopReason::ReplyUnusable(_)
                 | StopReason::EgressUnavailable
                 | StopReason::ContextBudget
-                | StopReason::NothingPending) => {
-                    let id = held.id;
-                    return self
-                        .stop_cited(id, stop_class(&reason), &mut held.seen)
-                        .await;
-                }
-            }
+                | StopReason::NothingPending) => stop_class(&reason),
+            };
+            let id = held.id;
+            return self
+                .stop_cited(id, Some(&held.session), class, &mut held.seen)
+                .await;
         }
     }
 
-    /// Ending 1. `Some` carries follow-ups to continue the session with.
-    async fn done(&mut self, held: &mut Held) -> Option<Vec<SecretText>> {
+    /// Ending 1. `Ok` carries follow-ups to continue the session with.
+    async fn done(&mut self, held: &mut Held) -> Result<Vec<SecretText>, Ending> {
         let answer = held.answer.clone().unwrap_or_default();
         loop {
             if self.stopping() {
-                return self.silent(held.id, Ending::Shutdown);
+                return Err(Ending::Shutdown);
             }
             match read_beat(self.plane.heartbeat(held.seen).await, &mut held.seen) {
                 Beat::More(items) if !items.is_empty() => {
                     held.answer = None;
-                    return Some(items);
+                    return Ok(items);
                 }
                 Beat::More(_) => break,
-                Beat::Held => return self.silent(held.id, Ending::Held),
-                Beat::Gone => return self.silent(held.id, Ending::Gone),
+                Beat::Held => return Err(Ending::Held),
+                Beat::Gone => return Err(Ending::Gone),
                 Beat::Refused => self.pause(POLL_EVERY).await,
                 Beat::Lost => self.back_off().await,
             }
@@ -643,24 +685,10 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
         {
             Reported::FollowUps(items) => {
                 held.answer = None;
-                Some(items)
+                Ok(items)
             }
-            Reported::Done => self.silent(held.id, Ending::Answered),
-            Reported::Held => self.silent(held.id, Ending::Held),
-            Reported::Gone => self.silent(held.id, Ending::Gone),
-            Reported::Shutdown => self.silent(held.id, Ending::Shutdown),
-            Reported::Unsendable => {
-                self.silent(held.id, Ending::Unsendable);
-                self.pause(UNDECODABLE_WAIT).await;
-                None
-            }
+            done => Err(fixed_ending(done, Ending::Answered)),
         }
-    }
-
-    fn silent(&mut self, id: TaskId, ending: Ending) -> Option<Vec<SecretText>> {
-        self.plane.cite(None);
-        self.ended(Some(id), ending);
-        None
     }
 
     /// Ending 9. A refused heartbeat holds the task for the claim that re-delivers it.
@@ -669,23 +697,28 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
         loop {
             self.back_off().await;
             if self.stopping() {
-                self.silent(held.id, Ending::Shutdown);
-                return Reconnected::Ended;
+                return Reconnected::Ended(Ending::Shutdown);
             }
             match read_beat(self.plane.heartbeat(held.seen).await, &mut held.seen) {
                 Beat::More(items) => return Reconnected::Resume(items),
-                Beat::Held => {
-                    self.silent(held.id, Ending::Held);
-                    return Reconnected::Ended;
-                }
-                Beat::Gone => {
-                    self.silent(held.id, Ending::Gone);
-                    return Reconnected::Ended;
-                }
+                Beat::Held => return Reconnected::Ended(Ending::Held),
+                Beat::Gone => return Reconnected::Ended(Ending::Gone),
                 Beat::Refused => return Reconnected::Hold,
                 Beat::Lost => {}
             }
         }
+    }
+}
+
+/// `asked` is the ending of a report acknowledged as it was sent.
+fn fixed_ending(done: Reported, asked: Ending) -> Ending {
+    match done {
+        Reported::Done(None) | Reported::FollowUps(_) => asked,
+        Reported::Done(Some(class)) => Ending::Stopped(class),
+        Reported::Held => Ending::Held,
+        Reported::Gone => Ending::Gone,
+        Reported::Shutdown => Ending::Shutdown,
+        Reported::Unsendable => Ending::Unsendable,
     }
 }
 
@@ -758,6 +791,7 @@ mod tests {
         shutdown_at_prompt: Option<usize>,
         shutdown_on_report: bool,
         open_error: Option<PlaneError>,
+        close_error: Option<PlaneError>,
         calls: usize,
     }
 
@@ -782,8 +816,20 @@ mod tests {
                 None => Ok(ConversationId::parse(CONV).unwrap()),
             }
         }
-        async fn close(&mut self, _: &ConversationId) -> Result<ConversationView, PlaneError> {
-            panic!("the driver never closes a conversation");
+        async fn close(&mut self, c: &ConversationId) -> Result<ConversationView, PlaneError> {
+            self.log(format!("close {}", c.as_str()));
+            match self.close_error.take() {
+                Some(e) => Err(e),
+                None => Ok(ConversationView {
+                    conversation: c.clone(),
+                    cwd: format!("{HOME}/{PART}"),
+                    opened_at: 0,
+                    last_active: 0,
+                    turns: 0,
+                    bytes: 0,
+                    chain_head: String::new(),
+                }),
+            }
         }
         async fn prompt(&mut self, _: &str, turns: &[Turn]) -> Result<PromptReply, PlaneError> {
             self.log(format!("prompt {}", turns.len()));
@@ -1237,6 +1283,7 @@ mod tests {
             "report answer-629-sentinel",
             "uncite",
         ]));
+        want.push(format!("close {CONV}"));
         want.extend(tail());
         assert_eq!(log, want);
         assert_eq!(events, vec![ended(1, Ending::Answered)]);
@@ -1579,16 +1626,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_refused_report_is_sent_again_only_while_the_task_is_working_with_nothing_new() {
+    async fn a_refused_answer_is_followed_once_by_the_content_free_report_refused() {
         let mut f = fake();
         f.claims = VecDeque::from([delivered(1, PART), Err("reset".into())]);
-        f.reports = VecDeque::from([Ok(ReportOutcome::Refused(refused())), Err("reset".into())]);
-        f.beats.extend([
-            follow_ups(0, &[]),
-            follow_ups(0, &[]),
-            Err("reset".into()),
-            follow_ups(0, &[]),
-        ]);
+        f.reports = VecDeque::from([Ok(ReportOutcome::Refused(refused()))]);
+        f.beats
+            .extend([follow_ups(0, &[]), Err("reset".into()), follow_ups(0, &[])]);
         f.replies = VecDeque::from([answer("a1")]);
         let (log, events) = run(f).await;
         let at = log.iter().position(|l| l == "prompt 1").unwrap();
@@ -1598,19 +1641,214 @@ mod tests {
             "report a1",
             "beat 0",
             "sleep 1",
-            "report a1",
             "beat 0",
-            "sleep 2",
-            "beat 0",
-            "sleep 4",
-            "report a1",
+            "report stopped: report refused",
             "uncite",
-            "claim",
-            "sleep 1",
+        ]);
+        want.push(format!("close {CONV}"));
+        want.extend(strs(&["claim", "sleep 1"]));
+        want.extend(tail());
+        assert_eq!(&log[at..], &want[..]);
+        assert_eq!(events, vec![ended(1, Ending::Stopped(REPORT_REFUSED))]);
+    }
+
+    #[tokio::test]
+    async fn a_lost_answer_report_is_not_resent_either() {
+        let mut f = fake();
+        f.claims = VecDeque::from([delivered(1, PART)]);
+        f.reports = VecDeque::from([Err("reset".into())]);
+        f.replies = VecDeque::from([answer("a1")]);
+        let (log, _) = run(f).await;
+        assert_eq!(
+            reports(&log),
+            strs(&["report a1", "report stopped: report refused"])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fixed_report_refused_while_the_task_is_working_goes_quiet_for_the_lease() {
+        let mut f = fake();
+        f.claims = VecDeque::from([delivered(1, PART)]);
+        f.reports = VecDeque::from([
+            Ok(ReportOutcome::Refused(refused())),
+            Ok(ReportOutcome::Refused(refused())),
+        ]);
+        f.replies = VecDeque::from([answer("a1")]);
+        let (log, events) = run(f).await;
+        let at = log
+            .iter()
+            .position(|l| l == "report stopped: report refused")
+            .unwrap();
+        let mut want = strs(&[
+            "report stopped: report refused",
+            "beat 0",
+            "uncite",
+            "sleep 990",
         ]);
         want.extend(tail());
         assert_eq!(&log[at..], &want[..]);
+        assert_eq!(events, vec![ended(1, Ending::Unsendable)]);
+
+        for fixed in [Err(Unverified::Failed {
+            task: id(9),
+            class: VerifyClass::Key,
+        })] {
+            let mut f = fake();
+            f.tasks.insert(9, fixed);
+            f.claims = VecDeque::from([delivered(9, PART)]);
+            f.reports = VecDeque::from([Err("reset".into())]);
+            let (log, events) = run(f).await;
+            let mut want = strs(&[
+                "beat 0",
+                "claim",
+                "verify",
+                "cite t9",
+                "report refused: this task's kernel signature did not verify (key)",
+                "beat 0",
+                "uncite",
+                "sleep 990",
+            ]);
+            want.extend(tail());
+            assert_eq!(log, want);
+            assert_eq!(events, vec![ended(9, Ending::Unsendable)]);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reconnect_backs_off_to_at_most_a_minute() {
+        let mut f = fake();
+        f.claims = VecDeque::from([delivered(1, PART)]);
+        f.beats
+            .extend((0..9).map(|_| Err::<BeatAnswer, String>("reset".into())));
+        f.replies = VecDeque::from([Err(PlaneError::Transport("x".into())), answer("a1")]);
+        let (log, _) = run(f).await;
+        let sleeps: Vec<u64> = log
+            .iter()
+            .filter_map(|l| l.strip_prefix("sleep "))
+            .map(|n| n.parse().unwrap())
+            .collect();
+        assert_eq!(sleeps, vec![1, 2, 4, 8, 16, 32, 60, 60, 60, 60, 5]);
+    }
+
+    #[tokio::test]
+    async fn a_task_whose_connection_keeps_failing_is_resumed_at_most_three_times() {
+        let mut f = fake();
+        f.claims = VecDeque::from([delivered(1, PART)]);
+        f.replies = (0..4)
+            .map(|_| Err(PlaneError::Transport("ended".into())))
+            .collect();
+        let (log, events) = run(f).await;
+        assert_eq!(log.iter().filter(|l| l.starts_with("prompt")).count(), 4);
+        assert_eq!(reports(&log), strs(&["report stopped: transport"]));
+        assert_eq!(events, vec![ended(1, Ending::Stopped("transport"))]);
+    }
+
+    #[tokio::test]
+    async fn a_resume_through_the_claim_counts_against_the_same_bound() {
+        let mut f = fake();
+        f.claims = (0..4).map(|_| delivered(1, PART)).collect();
+        f.beats
+            .extend((0..4).map(|_| Ok(BeatAnswer::Refused(refused()))));
+        f.replies = (0..4)
+            .map(|_| Err(PlaneError::Transport("ended".into())))
+            .collect();
+        let (log, _) = run(f).await;
+        assert_eq!(log.iter().filter(|l| l.starts_with("prompt")).count(), 4);
+        assert_eq!(reports(&log), strs(&["report stopped: transport"]));
+    }
+
+    #[tokio::test]
+    async fn the_conversation_is_closed_uncited_after_a_report_or_when_the_task_is_gone() {
+        let close = format!("close {CONV}");
+        let mut f = fake();
+        f.claims = VecDeque::from([delivered(1, PART)]);
+        f.replies = VecDeque::from([answer("a1")]);
+        let (log, _) = run(f).await;
+        let at = log.iter().position(|l| l == "report a1").unwrap();
+        assert_eq!(log[at + 1..at + 3], [String::from("uncite"), close.clone()]);
+
+        let mut f = fake();
+        f.claims = VecDeque::from([delivered(1, PART)]);
+        f.replies = VecDeque::from([Err(PlaneError::Refused)]);
+        let (log, _) = run(f).await;
+        let at = log.iter().position(|l| l.starts_with("report")).unwrap();
+        assert_eq!(log[at + 1..at + 3], [String::from("uncite"), close.clone()]);
+
+        let mut f = fake();
+        f.claims = VecDeque::from([delivered(1, PART)]);
+        f.beats.push_back(Ok(BeatAnswer::Idle));
+        f.replies = VecDeque::from([answer("a1")]);
+        let (log, _) = run(f).await;
+        let at = log.iter().position(|l| l == "prompt 1").unwrap();
+        assert_eq!(log[at + 1..at + 4], strs(&["beat 0", "uncite", &close])[..]);
+    }
+
+    #[tokio::test]
+    async fn a_refused_close_is_noted_and_the_next_claim_still_follows() {
+        let mut f = fake();
+        f.claims = VecDeque::from([delivered(1, PART), delivered(2, PART)]);
+        f.close_error = Some(PlaneError::Refused);
+        f.replies = VecDeque::from([answer("a1"), answer("a2")]);
+        let (log, events) = run(f).await;
+        assert_eq!(reports(&log), strs(&["report a1", "report a2"]));
+        assert_eq!(log.iter().filter(|l| l.starts_with("close")).count(), 2);
+        assert_eq!(
+            events,
+            vec![ended(1, Ending::Answered), ended(2, Ending::Answered)]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_held_task_or_a_resumed_one_keeps_its_conversation() {
+        let mut f = fake();
+        f.claims = VecDeque::from([delivered(1, PART)]);
+        f.beats
+            .push_back(Ok(BeatAnswer::State(view(TaskState::Held))));
+        f.replies = VecDeque::from([answer("a1")]);
+        let (log, _) = run(f).await;
+        assert!(!log.iter().any(|l| l.starts_with("close")));
+
+        let mut f = fake();
+        f.claims = VecDeque::from([delivered(1, PART)]);
+        f.step_cost = HEARTBEAT_EVERY;
+        f.beats
+            .push_back(Ok(BeatAnswer::State(view(TaskState::Held))));
+        f.replies = VecDeque::from([read("c1", "/w/a")]);
+        let (log, _) = run(f).await;
+        assert!(!log.iter().any(|l| l.starts_with("close")));
+
+        let mut f = fake();
+        f.claims = VecDeque::from([delivered(1, PART)]);
+        f.replies = VecDeque::from([Err(PlaneError::Transport("x".into())), answer("a1")]);
+        let (log, _) = run(f).await;
+        let closes: Vec<usize> = log
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.starts_with("close"))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(closes.len(), 1);
+        assert!(closes[0] > log.iter().position(|l| l == "report a1").unwrap());
+    }
+
+    #[tokio::test]
+    async fn an_idle_claim_clears_the_mark_left_by_the_startup_heartbeat() {
+        let mut f = Fake::default();
+        f.beats.push_back(follow_ups(0, &[]));
+        f.tasks.insert(1, Ok(signed(1, "prompt-1")));
+        f.claims = VecDeque::from([Ok(ClaimAnswer::Idle), delivered(1, PART)]);
+        f.replies = VecDeque::from([answer("a1")]);
+        let (log, events) = run(f).await;
+        assert_eq!(reports(&log), strs(&["report a1"]));
         assert_eq!(events, vec![ended(1, Ending::Answered)]);
+
+        let mut f = Fake::default();
+        f.beats.push_back(follow_ups(0, &[]));
+        f.tasks.insert(1, Ok(signed(1, "prompt-1")));
+        f.claims = VecDeque::from([Ok(ClaimAnswer::Refused(refused())), delivered(1, PART)]);
+        let (log, events) = run(f).await;
+        assert_eq!(reports(&log), strs(&["report stopped: agent restarted"]));
+        assert_eq!(events, vec![ended(1, Ending::Restarted)]);
     }
 
     #[tokio::test]
@@ -1665,7 +1903,7 @@ mod tests {
             .position(|l| l == "report huge-629-sentinel")
             .unwrap();
         assert_eq!(log[at + 1], "report stopped: report too large");
-        assert_eq!(events, vec![ended(1, Ending::Answered)]);
+        assert_eq!(events, vec![ended(1, Ending::Stopped(TOO_LARGE))]);
     }
 
     #[tokio::test]
@@ -1769,7 +2007,11 @@ mod tests {
             f.replies = VecDeque::from([Err(err)]);
             let (log, events) = run(f).await;
             let at = log.iter().position(|l| l == "prompt 1").unwrap();
-            let mut want = vec![format!("report stopped: {class}"), "uncite".into()];
+            let mut want = vec![
+                format!("report stopped: {class}"),
+                "uncite".into(),
+                format!("close {CONV}"),
+            ];
             want.extend(tail());
             assert_eq!(&log[at + 1..], &want[..]);
             assert_eq!(
@@ -1991,6 +2233,9 @@ mod tests {
             let (log, events) = run(f).await;
             let at = log.iter().position(|l| l == "prompt 1").unwrap();
             let mut want = strs(&["sleep 1", "beat 0", "uncite"]);
+            if ending == Ending::Gone {
+                want.push(format!("close {CONV}"));
+            }
             want.extend(tail());
             assert_eq!(&log[at + 1..], &want[..]);
             assert_eq!(events, vec![ended(1, ending)]);
@@ -2078,6 +2323,7 @@ mod tests {
             seen: 0,
             last_beat: Duration::ZERO,
             answer: first.answer,
+            resumes: 0,
         };
         d.work(held, Then::Resume(vec![])).await;
         let log = w.lock().unwrap().log.clone();

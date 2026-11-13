@@ -31,7 +31,7 @@ pub enum BeatAnswer {
 pub enum ReportOutcome {
     Acknowledged,
     Refused(Refused),
-    /// The report does not fit the request frame; nothing was sent.
+    /// The report is longer than `prompt_max_bytes`, the kernel's bound; nothing was sent.
     TooLarge,
 }
 
