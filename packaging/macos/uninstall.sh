@@ -51,7 +51,7 @@ rm -f /Library/Logs/maknae-policy-sync.log
 rm -rf /usr/local/lib/maknae
 
 # Before the accounts go: the ACE names _maknae-egress and must still resolve.
-chmod -a "user:_maknae-egress allow list,search" /etc/maknae 2>/dev/null || :
+chmod -h -a "user:_maknae-egress allow list,search" /etc/maknae 2>/dev/null || :
 ace_left=false
 if [ -e /etc/maknae ]; then
     if ! led="$(ls -led /etc/maknae)"; then

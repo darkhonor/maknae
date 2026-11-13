@@ -35,7 +35,7 @@ reader_grant_cases() {
     }
     rm -f "$t/granted"; run_grant $'alice\n_vector' 0 0; rc=$?
     out="$(cat "$t/granted" 2>/dev/null)"
-    [ "$rc" -eq 0 ] && [ "$out" = $'+a user:alice allow search /var/log/maknae\n+a user:_vector allow search /var/log/maknae' ] \
+    [ "$rc" -eq 0 ] && [ "$out" = $'-h +a user:alice allow search /var/log/maknae\n-h +a user:_vector allow search /var/log/maknae' ] \
         && ok "grant: each declared reader gets one search entry on the directory" \
         || fail "grant: valid readers -> rc=$rc granted='$out'"
     for bad in '*' 'Alice' 'a b' 'x$y' 'abcdefghijklmnopqrstuvwxyzabcdefg' $'alice\n-r'; do
@@ -184,8 +184,8 @@ phase1() {
     grant="$(grep -nxF 'if ! grant_reader_traverse; then' "$pi" | cut -d: -f1)"
     gfn="$(sed -n '/^grant_reader_traverse() {$/,/^}$/p' "$pi")"
     if [ -n "$grant" ] && [ -n "$last" ] && [ -n "$back" ] && [ "$last" -lt "$grant" ] && [ "$grant" -lt "$back" ] \
-        && [ "$(grep -c 'chmod +a' <<<"$gfn")" -eq 1 ] \
-        && grep -qF 'chmod +a "user:$r allow search" /var/log/maknae || return 1' <<<"$gfn" \
+        && [ "$(grep -c 'chmod -h +a' <<<"$gfn")" -eq 1 ] \
+        && grep -qF 'chmod -h +a "user:$r allow search" /var/log/maknae || return 1' <<<"$gfn" \
         && ! grep -qE 'AUDIT|jsonl|chflags' <<<"$gfn"; then
         ok "postinstall grants the readers' directory search inside the hold and never touches a trail file"
     else
@@ -707,7 +707,7 @@ PROBE
             -w smoke-sentinel /Library/Keychains/System.keychain \
             && ok "planted $svc keychain item" || fail "could not plant $svc keychain item"
     done
-    chmod +a "user:_maknae-egress allow list,search" /etc/maknae \
+    chmod -h +a "user:_maknae-egress allow list,search" /etc/maknae \
         && ok "planted the deputy's /etc/maknae ACE" || fail "could not plant the ACE"
     install -d -m 0755 "/Library/Application Support/Maknae/pki" \
         && install -m 0644 /dev/null "/Library/Application Support/Maknae/pki/seal.pub" \

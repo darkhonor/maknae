@@ -1832,11 +1832,11 @@ readers="$(/usr/bin/maknae audit-readers --stopped)" || { echo "audit.readers no
 for f in "$d"/*.jsonl; do
     [ -f "$f" ] && [ ! -h "$f" ] && [ "$(stat -c %h "$f")" = 1 ] || continue
     chattr -a "$f"
-    for r in $readers; do setfacl -P -m "u:$r:r" "$f" || { chattr +a "$f"; exit 1; }; done
+    for r in $readers; do setfacl -P -n -m "u:$r:r" "$f" || { chattr +a "$f"; exit 1; }; done
     chattr +a "$f"
     lsattr -d "$f" | cut -c6 | grep -qx a || { echo "$f is not append-only; $d is left root-owned" >&2; exit 1; }
 done
-for r in $readers; do setfacl -P -m "u:$r:x" "$d"; done
+for r in $readers; do setfacl -P -n -m "u:$r:x" "$d"; done
 chown -h _maknae:_maknae "$d"
 GRANT
 sudo systemctl start maknaed.service
@@ -1862,11 +1862,11 @@ for f in "$d"/*.jsonl; do
         *) echo "$f is not append-only; $d is left root-owned" >&2; exit 1 ;;
     esac
     chflags "no$flag" "$f"
-    for r in $readers; do chmod +a "user:$r allow read" "$f" || { chflags "$flag" "$f"; exit 1; }; done
+    for r in $readers; do chmod -h +a "user:$r allow read" "$f" || { chflags "$flag" "$f"; exit 1; }; done
     chflags "$flag" "$f"
     stat -f %Sf "$f" | grep -q "$flag" || { echo "$f is not flagged $flag; $d is left root-owned" >&2; exit 1; }
 done
-for r in $readers; do chmod +a "user:$r allow search" "$d"; done
+for r in $readers; do chmod -h +a "user:$r allow search" "$d"; done
 chown -h _maknae:_maknae "$d"
 GRANT
 sudo launchctl bootstrap system /Library/LaunchDaemons/io.maknae.maknaed.plist
