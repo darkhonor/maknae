@@ -62,7 +62,7 @@ loads with no agent enrolled; `maknae enroll agent` writes the agent's home to
 `tunables/maknae-agents.d/<id>.home` and reloads the profile (it refuses to enroll when the
 kernel does not enforce AppArmor), and `remove-agent` removes that file and reloads. It denies
 `/var/mail` and `/var/spool/mail`; writes to `/dev/tty*`, `/dev/pts/*`, `/dev/log` and the
-journal's sockets; executing `wall` and `write`; and abstract unix sockets. It cannot name a TCP port, so outbound TCP is not bounded to Vault (see the isolation contract).
+journal's sockets; executing `wall` and `write`; and abstract unix sockets. It names no port or host for TCP, nor for the UDP the `nameservice` abstraction allows, so the agent's network egress is not bounded to Vault (see the isolation contract).
 
 The audit trail is append-only by the inode's append-only attribute (`chattr +a`),
 not by AppArmor. AppArmor revalidates every `write()` on an `O_APPEND`

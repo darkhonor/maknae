@@ -10,6 +10,19 @@ hold_audit_dir() {
     acl="$(getfacl -P -s -p "$d")" && [ -z "$acl" ]
 }
 
+# A glob on `systemctl disable` matches only loaded units, and the template is gone.
+disable_agent_instances() {
+    local d u
+    for d in /etc/systemd/system/maknae-agent@*.service.d /etc/systemd/system/multi-user.target.wants/maknae-agent@*.service; do
+        [ -e "$d" ] || [ -h "$d" ] || continue
+        u="${d##*/}"
+        u="${u%.d}"
+        systemctl disable "$u" 2>/dev/null || :
+        rm -f "/etc/systemd/system/multi-user.target.wants/$u"
+        rm -rf "/etc/systemd/system/$u.d"
+    done
+}
+
 case "$1" in
     purge)
         # rm cannot unlink an append-only inode, and archived trails carry the
@@ -37,6 +50,7 @@ case "$1" in
         rm -rf /var/log/maknae || echo "maknae: /var/log/maknae was not fully removed; remove it by hand (runbook: Remove a kept trail)" >&2
         rm -rf /var/lib/maknae
         rm -rf /etc/apparmor.d/tunables/maknae-agents.d
+        disable_agent_instances
 
         systemctl daemon-reload 2>/dev/null || :
         ;;

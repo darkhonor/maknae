@@ -211,9 +211,19 @@ fi
 chown -h _maknae:_maknae %{_localstatedir}/log/maknae
 
 %preun
-# %%systemd_preun cannot name a template's instances.
+# %%systemd_preun cannot name a template's instances, and a glob on `systemctl
+# disable` matches only loaded units.
 if [ $1 -eq 0 ]; then
     systemctl stop 'maknae-agent@*.service' 2>/dev/null || :
+    for d in /etc/systemd/system/maknae-agent@*.service.d /etc/systemd/system/multi-user.target.wants/maknae-agent@*.service; do
+        [ -e "$d" ] || [ -h "$d" ] || continue
+        u="${d##*/}"
+        u="${u%%.d}"
+        systemctl disable "$u" 2>/dev/null || :
+        rm -f "/etc/systemd/system/multi-user.target.wants/$u"
+        rm -rf "/etc/systemd/system/$u.d"
+    done
+    systemctl daemon-reload 2>/dev/null || :
 fi
 %systemd_preun maknaed.service maknae-egress.service maknae-egress.socket maknae-policy-sync.path maknae-policy-sync.service
 

@@ -3,9 +3,9 @@
 Native `rpmbuild` package (`maknae.spec` + `build-rpm.sh`) for RHEL / Rocky. It
 installs the `maknaed` daemon, the `maknae` CLI, the `maknae-egress` deputy and the
 `maknae-agentd` Agent Daemon, the hardened `maknaed.service` system unit, the template
-`maknae-agent@.service` (no instance enabled; `%preun` stops every running instance on erase
+`maknae-agent@.service` (no instance enabled; `%preun` stops every running instance on erase, then disables each and removes its drop-in directory and `multi-user.target.wants` link
 and `%postun` restarts each running one on upgrade), `/var/lib/maknae-agents` (`root:root 0755`,
-labelled `maknae_agent_homes_root_t`; each home in it is `maknae_agent_home_t`, the only type the `maknae_agentd_t` domain may write), the sysusers.d definition (`_maknae` service account + `maknae`
+labelled `maknae_agent_homes_root_t`; each home in it is `maknae_agent_home_t`, the only type in which the `maknae_agentd_t` domain may write files), the sysusers.d definition (`_maknae` service account + `maknae`
 operator group), the shipped default YAMLs (`authz.yaml` / `maknae.yaml` / `sensitive.yaml`; `bindings.yaml` ships as
 `/usr/share/maknae/bindings.yaml`, and `%post` copies it to `/etc/maknae` only
 when neither that file nor `/var/lib/maknae/kernel.graph` exists), the
