@@ -848,7 +848,7 @@ why = "#629: the agent account's read ACLs on its configuration — the exact en
 
 [[t3]]
 path = "bins/maknae/src/enroll/agent_unit.rs"
-why = "#629: the Agent Daemon's systemd instance; the home refusal for each character a unit would expand, split or unquote and for a relative or non-canonical home, the exact drop-in text, the systemctl argv and order on start and stop, the stop-before-remove order and the drop-in removal against a real directory carry unit tests against a recording runner; the runner that executes systemctl is bin I/O"
+why = "#629: the Agent Daemon's systemd instance; the unit text (each key that matters exactly once, the unenrolled-sentinel User= no package creates, the start limit), the exact drop-in text, the systemctl argv and order on start and stop, the stop-before-remove order and the drop-in removal against a real directory carry unit tests against a recording runner; the runner that executes systemctl is bin I/O"
 
 [[t3]]
 path = "bins/maknae/src/enroll/remove_agent.rs"

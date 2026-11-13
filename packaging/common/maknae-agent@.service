@@ -4,17 +4,17 @@ Documentation=https://github.com/darkhonor/maknae
 # Stopped before maknaed at shutdown, so the drain below reaches a live kernel.
 After=network-online.target maknaed.service nss-user-lookup.target
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
 
 [Service]
 Type=exec
-# User=, Group=, SupplementaryGroups= and ReadWritePaths= come from the drop-in
-# `maknae enroll agent` writes: /etc/systemd/system/maknae-agent@<id>.service.d/account.conf.
+# No such account exists: an instance without its account.conf drop-in fails
+# 217/USER before exec instead of running as root. The drop-in's User= replaces it.
+User=maknae-agent-unenrolled
 ExecStart=/usr/bin/maknae-agentd %i
-# The shutdown chain, held two-sided by the_agent_units_stop_timeout_covers_its_shutdown_chain
-# (bins/maknae-agentd/src/shutdown.rs).
 TimeoutStopSec=181
 LoadCredentialEncrypted=maknae-agent-secret-id:/etc/maknae/private/agent-%i-secret-id.cred
-# Equal to maknae_vault::SCRUBBED_ENV, held by a test in crates/maknae-vault/src/env.rs.
 UnsetEnvironment=HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy VAULT_ADDR VAULT_TOKEN VAULT_SKIP_VERIFY VAULT_CACERT VAULT_CAPATH VAULT_CLIENT_CERT VAULT_CLIENT_KEY VAULT_NAMESPACE SSL_CERT_FILE SSL_CERT_DIR
 ProtectSystem=strict
 ProtectHome=read-only
@@ -33,7 +33,6 @@ RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
-# MemoryDenyWriteExecute= and a subtractive SystemCallFilter= crash-loop aws-lc-fips (maknaed.service).
 SystemCallFilter=@system-service
 SystemCallArchitectures=native
 # systemd never restarts a unit it was told to stop, whatever its exit status.

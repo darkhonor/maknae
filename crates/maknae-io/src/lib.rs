@@ -86,7 +86,7 @@ pub use delegated::{
     SenderCreds, DELEGATED_FDS_PER_CONNECTION,
 };
 pub use error::{IoError, IoKind};
-pub use home::{canonical_home, session_home};
+pub use home::{canonical_home, session_home, unit_safe_home, UnsafeHome};
 pub use host_facts::presence;
 pub use mutation::{
     held_file_is_readable, read_held_file, read_held_page, replace_held_file,

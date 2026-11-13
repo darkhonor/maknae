@@ -11,6 +11,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 const CONFIG_DIR: &str = "/etc/maknae";
+const USAGE_EXIT: u8 = 2;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -18,7 +19,7 @@ fn main() -> ExitCode {
         Ok(id) => id,
         Err(e) => {
             eprintln!("maknae-agentd: {e}");
-            return ExitCode::from(2);
+            return ExitCode::from(USAGE_EXIT);
         }
     };
     let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -126,4 +127,17 @@ async fn serve(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_unit_never_restarts_a_usage_refusal() {
+        let unit = include_str!("../../../packaging/common/maknae-agent@.service");
+        let prevent: Vec<&str> = unit
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("RestartPreventExitStatus="))
+            .collect();
+        assert_eq!(prevent, [super::USAGE_EXIT.to_string()]);
+    }
 }

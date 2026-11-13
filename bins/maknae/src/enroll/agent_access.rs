@@ -406,7 +406,7 @@ pub(crate) mod tests {
             self.calls.borrow().clone()
         }
 
-        fn refusing(self, call: &str) -> Self {
+        pub(crate) fn refusing(self, call: &str) -> Self {
             self.refuse.borrow_mut().insert(call.into());
             self
         }

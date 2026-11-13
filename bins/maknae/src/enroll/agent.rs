@@ -998,23 +998,31 @@ impl AgentOps for RealAgentOps {
         )
     }
 
-    #[cfg(not(target_os = "macos"))]
     fn start_agent(
         &self,
         agent: &AgentId,
         account: &agent_unit::ServiceAccount,
     ) -> Result<(), EnrollError> {
-        agent_unit::start(&*self.runner, agent, || write_drop_in(agent, account))
+        start_instance(&*self.runner, agent, account)
     }
+}
 
-    #[cfg(target_os = "macos")]
-    fn start_agent(
-        &self,
-        _agent: &AgentId,
-        _account: &agent_unit::ServiceAccount,
-    ) -> Result<(), EnrollError> {
-        Ok(())
-    }
+#[cfg(not(target_os = "macos"))]
+fn start_instance(
+    r: &dyn agent_access::Run,
+    agent: &AgentId,
+    account: &agent_unit::ServiceAccount,
+) -> Result<(), EnrollError> {
+    agent_unit::start(r, agent, || write_drop_in(agent, account))
+}
+
+#[cfg(target_os = "macos")]
+fn start_instance(
+    _r: &dyn agent_access::Run,
+    _agent: &AgentId,
+    _account: &agent_unit::ServiceAccount,
+) -> Result<(), EnrollError> {
+    Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1059,6 +1067,20 @@ pub(crate) fn refresh_access(
         account,
         &agent_access::grant_entries(root, agent, persona),
     )
+}
+
+/// A changed home reaches the instance's drop-in only through `start`.
+pub(crate) fn refresh_and_restart(
+    r: &dyn agent_access::Run,
+    platform: agent_access::Platform,
+    root: &Path,
+    agents: &maknae_io::Anchor,
+    agent: &AgentId,
+    account: &agent_access::Account,
+    start: impl FnOnce() -> Result<(), EnrollError>,
+) -> Result<(), EnrollError> {
+    refresh_access(r, platform, root, agents, agent, account)?;
+    start()
 }
 
 pub(crate) fn readmitted(
@@ -1318,7 +1340,11 @@ fn check_account(
     let Some((gid, dir)) = unit else {
         return Err(EnrollError::Owner(format!("no such user: {account}")));
     };
-    let home = agent_unit::checked_home(account, &dir, maknae_io::canonical_home(&dir).as_deref())?;
+    let home = maknae_io::unit_safe_home(&dir).map_err(|why| {
+        EnrollError::Owner(format!(
+            "account {account}: its home {dir:?} {why}; the Agent Daemon's unit cannot name it"
+        ))
+    })?;
     Ok(agent_unit::ServiceAccount { uid, gid, home })
 }
 
@@ -1467,18 +1493,21 @@ fn run_refresh_access(agent: &AgentId, locale: Locale) -> Result<String, EnrollE
     let (record, others) = read_records(&agents, agent)?;
     let enrolled = enrolled_account(agent, record.as_ref())?;
     let host = read_host()?;
-    let account = readmitted(
-        agent,
-        &enrolled,
-        check_account(&enrolled.name, agent, &host, &others).map(|s| s.uid),
-    )?;
-    refresh_access(
+    let (admitted, service) = match check_account(&enrolled.name, agent, &host, &others) {
+        Ok(s) => (Ok(s.uid), Some(s)),
+        Err(e) => (Err(e), None),
+    };
+    let account = readmitted(agent, &enrolled, admitted)?;
+    let service =
+        service.ok_or_else(|| EnrollError::State("the account was not admitted".into()))?;
+    refresh_and_restart(
         &agent_access::Host,
         agent_access::Platform::HOST,
         Path::new(ETC_DIR),
         &agents,
         agent,
         &account,
+        || start_instance(&agent_access::Host, agent, &service),
     )?;
     Ok(msg(locale, MsgId::EnrollAgentAccessRefreshed)
         .replace("{agent}", agent.as_str())
@@ -3617,6 +3646,53 @@ pub(crate) mod tests {
             .collect();
         names.sort();
         assert_eq!(names, [maknae_config::ENROLLMENT_FILE]);
+    }
+
+    #[test]
+    fn refresh_regrants_then_restarts_and_a_refused_grant_starts_nothing() {
+        let r = record();
+        let (d, agents) = scratch_anchor("refresh-restart");
+        std::fs::create_dir(d.join("hobi")).unwrap();
+        let account = enrolled_account(&hobi_id(), Some(&r)).unwrap();
+        let root = Path::new("/srv/cfg");
+        let host = agent_access::tests::FakeHost::default();
+        let started_after = Cell::new(None);
+        refresh_and_restart(
+            &host,
+            agent_access::Platform::Linux,
+            root,
+            &agents,
+            &hobi_id(),
+            &account,
+            || {
+                started_after.set(Some(host.calls().len()));
+                Ok(())
+            },
+        )
+        .unwrap();
+        let grants = 2 * agent_access::grant_entries(root, &hobi_id(), false).len();
+        assert_eq!(started_after.get(), Some(grants));
+
+        let first = format!(
+            "/usr/bin/setfacl -P | -n | -m | u:990:r-x | {}",
+            root.display()
+        );
+        let host = agent_access::tests::FakeHost::default().refusing(&first);
+        let started = Cell::new(false);
+        refresh_and_restart(
+            &host,
+            agent_access::Platform::Linux,
+            root,
+            &agents,
+            &hobi_id(),
+            &account,
+            || {
+                started.set(true);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(!started.get());
     }
 
     #[test]

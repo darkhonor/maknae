@@ -16,7 +16,7 @@ pub(crate) const DROP_IN_FILE: &str = "account.conf";
 pub(crate) struct ServiceAccount {
     pub uid: u32,
     pub gid: u32,
-    /// Only ever a value [`checked_home`] returned.
+    /// Only ever a value [`maknae_io::unit_safe_home`] returned.
     pub home: String,
 }
 
@@ -26,40 +26,6 @@ pub(crate) fn unit_name(agent: &AgentId) -> String {
 
 pub(crate) fn drop_in_dir(agent: &AgentId) -> String {
     format!("{}.d", unit_name(agent))
-}
-
-fn forbidden(c: char) -> bool {
-    c.is_whitespace() || c.is_control() || matches!(c, '%' | '"' | '\'' | '\\')
-}
-
-/// The passwd home, as a unit file or a plist may carry it unquoted: absolute,
-/// canonical, and free of anything systemd would expand (`%`), unquote (`"`, `'`,
-/// `\`) or split on (whitespace, control characters).
-pub(crate) fn checked_home(
-    account: &str,
-    raw: &Path,
-    canonical: Option<&Path>,
-) -> Result<String, EnrollError> {
-    let refuse = |why: &str| {
-        Err(EnrollError::Owner(format!(
-            "account {account}: its home {raw:?} {why}; the Agent Daemon's unit cannot name it"
-        )))
-    };
-    let Some(text) = raw.to_str() else {
-        return refuse("is not UTF-8");
-    };
-    if !raw.is_absolute() {
-        return refuse("is not absolute");
-    }
-    if let Some(c) = text.chars().find(|c| forbidden(*c)) {
-        return refuse(&format!("contains {c:?}"));
-    }
-    if canonical.and_then(Path::to_str) != Some(text) {
-        return refuse(
-            "is not canonical (a symlink, `.`, `..` or a repeated `/`), or does not exist",
-        );
-    }
-    Ok(text.to_string())
 }
 
 pub(crate) fn drop_in(account: &ServiceAccount) -> String {
@@ -129,7 +95,6 @@ mod tests {
     use super::super::agent_access::Ran;
     use super::*;
     use std::cell::RefCell;
-    use std::path::PathBuf;
 
     const UNIT: &str = include_str!("../../../../packaging/common/maknae-agent@.service");
     const PRESET: &str = include_str!("../../../../packaging/common/80-maknae.preset");
@@ -174,25 +139,100 @@ mod tests {
         out
     }
 
+    fn section_lines(section: &str) -> Vec<&'static str> {
+        let mut inside = false;
+        let mut out = Vec::new();
+        for l in UNIT.lines().map(str::trim) {
+            if l.starts_with('[') {
+                inside = l == section;
+            } else if inside && !l.is_empty() && !l.starts_with('#') {
+                out.push(l);
+            }
+        }
+        out
+    }
+
+    fn the_one(lines: &[&'static str], key: &str) -> &'static str {
+        let found: Vec<&str> = lines
+            .iter()
+            .filter_map(|l| l.strip_prefix(key)?.strip_prefix('='))
+            .collect();
+        assert_eq!(found.len(), 1, "{key}= appears {} times", found.len());
+        found[0]
+    }
+
+    const UNENROLLED: &str = "maknae-agent-unenrolled";
+
     #[test]
     fn the_unit_runs_the_agent_daemon_on_its_own_sealed_credential() {
         let lines = service_lines();
-        for want in [
-            "ExecStart=/usr/bin/maknae-agentd %i",
-            "LoadCredentialEncrypted=maknae-agent-secret-id:/etc/maknae/private/agent-%i-secret-id.cred",
-            "PrivateTmp=yes",
-            "ProtectHome=read-only",
-            "ProtectSystem=strict",
-            "Restart=on-failure",
-            "RestartPreventExitStatus=2",
+        for (key, want) in [
+            ("ExecStart", "/usr/bin/maknae-agentd %i"),
+            ("User", UNENROLLED),
+            (
+                "LoadCredentialEncrypted",
+                "maknae-agent-secret-id:/etc/maknae/private/agent-%i-secret-id.cred",
+            ),
+            ("PrivateTmp", "yes"),
+            ("ProtectHome", "read-only"),
+            ("ProtectSystem", "strict"),
+            ("NoNewPrivileges", "yes"),
+            ("CapabilityBoundingSet", ""),
+            ("Restart", "on-failure"),
+            ("RestartPreventExitStatus", "2"),
         ] {
-            assert!(lines.contains(&want), "{want} is not in maknae-agent@.service");
+            assert_eq!(the_one(&lines, key), want, "{key}");
         }
-        for owned_by_the_drop_in in ["User=", "Group=", "SupplementaryGroups=", "ReadWritePaths="] {
+        the_one(&lines, "TimeoutStopSec");
+        for owned_by_the_drop_in in ["Group=", "SupplementaryGroups=", "ReadWritePaths="] {
             assert!(
                 !lines.iter().any(|l| l.starts_with(owned_by_the_drop_in)),
                 "{owned_by_the_drop_in} belongs to the drop-in"
             );
+        }
+    }
+
+    /// systemd fails an instance whose `User=` does not resolve (217/USER) before
+    /// exec, so an instance without its drop-in never runs as root.
+    #[test]
+    fn no_package_creates_the_unenrolled_sentinel_account() {
+        for (name, text) in [
+            (
+                "maknae.sysusers",
+                include_str!("../../../../packaging/common/maknae.sysusers"),
+            ),
+            (
+                "maknae.spec",
+                include_str!("../../../../packaging/rpm/maknae.spec"),
+            ),
+            (
+                "postinst",
+                include_str!("../../../../packaging/deb/postinst"),
+            ),
+            (
+                "build-deb.sh",
+                include_str!("../../../../packaging/deb/build-deb.sh"),
+            ),
+        ] {
+            assert!(!text.contains(UNENROLLED), "{name} names {UNENROLLED}");
+        }
+        assert!(!drop_in(&account()).contains(UNENROLLED));
+        assert!(drop_in(&account()).contains("\nUser=990\n"));
+    }
+
+    #[test]
+    fn repeated_failures_stop_the_instance_within_minutes() {
+        let unit = section_lines("[Unit]");
+        let interval: u64 = the_one(&unit, "StartLimitIntervalSec").parse().unwrap();
+        let burst: u64 = the_one(&unit, "StartLimitBurst").parse().unwrap();
+        let restart_sec: u64 = the_one(&service_lines(), "RestartSec")
+            .trim_end_matches('s')
+            .parse()
+            .unwrap();
+        assert_eq!((interval, burst), (300, 10));
+        assert!(burst * restart_sec < interval, "the limit never trips");
+        for key in ["StartLimitIntervalSec=", "StartLimitBurst="] {
+            assert!(!service_lines().iter().any(|l| l.starts_with(key)), "{key}");
         }
     }
 
@@ -247,73 +287,6 @@ mod tests {
         );
         assert_eq!(unit_name(&hobi()), "maknae-agent@hobi.service");
         assert_eq!(drop_in_dir(&hobi()), "maknae-agent@hobi.service.d");
-    }
-
-    #[test]
-    fn a_canonical_home_passes_as_its_text() {
-        let home = Path::new("/home/hobi-svc");
-        assert_eq!(
-            checked_home("hobi-svc", home, Some(home)).unwrap(),
-            "/home/hobi-svc"
-        );
-    }
-
-    #[test]
-    fn a_home_a_unit_could_expand_split_or_unquote_is_refused() {
-        for bad in [
-            "/home/ho bi",
-            "/home/ho\tbi",
-            "/home/ho\nbi",
-            "/home/ho\rbi",
-            "/home/ho\u{7}bi",
-            "/home/ho\u{a0}bi",
-            "/home/ho%ibi",
-            "/home/ho\"bi",
-            "/home/ho'bi",
-            "/home/ho\\bi",
-        ] {
-            let home = Path::new(bad);
-            let e = checked_home("hobi-svc", home, Some(home)).unwrap_err();
-            assert!(
-                matches!(&e, EnrollError::Owner(m) if m.contains("contains") && m.contains("hobi-svc")),
-                "{bad:?}: {e:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_relative_non_canonical_or_missing_home_is_refused() {
-        let rel = Path::new("home/hobi");
-        assert!(matches!(
-            checked_home("h", rel, Some(rel)),
-            Err(EnrollError::Owner(m)) if m.contains("not absolute")
-        ));
-        for (raw, canonical) in [
-            ("/home/./hobi", Some("/home/hobi")),
-            ("/home/link", Some("/data/hobi")),
-            ("/home//hobi", Some("/home/hobi")),
-            ("/home/hobi/", Some("/home/hobi")),
-            ("/home/gone", None),
-        ] {
-            let canonical = canonical.map(PathBuf::from);
-            assert!(
-                matches!(
-                    checked_home("h", Path::new(raw), canonical.as_deref()),
-                    Err(EnrollError::Owner(m)) if m.contains("not canonical")
-                ),
-                "{raw}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_non_utf8_home_is_refused() {
-        use std::os::unix::ffi::OsStrExt;
-        let raw = Path::new(std::ffi::OsStr::from_bytes(b"/home/h\xffbi"));
-        assert!(matches!(
-            checked_home("h", raw, Some(raw)),
-            Err(EnrollError::Owner(m)) if m.contains("not UTF-8")
-        ));
     }
 
     #[test]
