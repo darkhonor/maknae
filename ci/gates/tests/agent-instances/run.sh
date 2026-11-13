@@ -76,10 +76,41 @@ table shipped "$repo/packaging/deb/prerm" "$repo/packaging/deb/postinst" "$repo/
 [ "$fail_n" -eq 0 ] || { echo "FAIL: agent-instances: $fail_n case(s) failed"; exit 1; }
 cases=$pass_n
 
-sed "/maknae-agent@/d" "$repo/packaging/deb/prerm" >"$scratch/prerm"
-sed "/maknae-agent@/d" "$repo/packaging/rpm/maknae.spec" >"$scratch/spec"
-before=$fail_n; table broken "$scratch/prerm" "$repo/packaging/deb/postinst" "$scratch/spec" >/dev/null
-[ $((fail_n - before)) -ge 3 ] \
-  || { echo "FAIL: agent-instances: the table passes packages that never stop or restart an agent"; exit 1; }
+# Each mutant stays valid shell and fails its own named case.
+mutant() { # $1=label $2=prerm $3=postinst $4=spec $5=the case its failure must name
+  local out
+  for f in "$2" "$3"; do bash -n "$f" || { echo "FAIL: agent-instances: mutant $1 is not valid shell ($f)"; exit 1; }; done
+  for sec in preun postun; do
+    bash -n <(section "$4" "$sec") || { echo "FAIL: agent-instances: mutant $1's %$sec is not valid shell"; exit 1; }
+  done
+  out="$(table "$1" "$2" "$3" "$4" || true)"
+  printf '%s\n' "$out" | grep -qF "FIXTURE-FAIL: $1: $5 ->" \
+    || { echo "FAIL: agent-instances: mutant $1 did not fail '$5'"; printf '%s\n' "$out"; exit 1; }
+  echo "mutant-ok: $1 fails '$5'"
+}
+prerm="$repo/packaging/deb/prerm"; postinst="$repo/packaging/deb/postinst"; spec="$repo/packaging/rpm/maknae.spec"
 
-echo "PASS: agent-instances: $cases cases, and the table fails packages that skip the agent instances"
+sed "s|^    systemctl stop 'maknae-agent@\*.service'.*|    :|" "$prerm" >"$scratch/prerm.nostop"
+cmp -s "$prerm" "$scratch/prerm.nostop" && { echo "FAIL: agent-instances: prerm mutant changed nothing"; exit 1; }
+mutant prerm-nostop "$scratch/prerm.nostop" "$postinst" "$spec" "deb remove"
+
+awk '/^        stop_agent_instances$/ {next} {print} /^        systemctl stop maknaed.service/ {print "        stop_agent_instances"}' "$prerm" >"$scratch/prerm.late"
+grep -qx '        stop_agent_instances' "$scratch/prerm.late" || { echo "FAIL: agent-instances: late-stop mutant lost the call"; exit 1; }
+mutant prerm-late "$scratch/prerm.late" "$postinst" "$spec" "deb remove"
+
+sed "s|^    systemctl try-restart 'maknae-agent@\*.service'.*|    :|" "$postinst" >"$scratch/postinst.norestart"
+cmp -s "$postinst" "$scratch/postinst.norestart" && { echo "FAIL: agent-instances: postinst mutant changed nothing"; exit 1; }
+mutant postinst-norestart "$prerm" "$scratch/postinst.norestart" "$spec" "deb restart_agent_instances"
+
+sed "s|^    systemctl stop 'maknae-agent@\*.service'.*|    :|" "$spec" >"$scratch/spec.nostop"
+cmp -s "$spec" "$scratch/spec.nostop" && { echo "FAIL: agent-instances: %preun mutant changed nothing"; exit 1; }
+mutant spec-nostop "$prerm" "$postinst" "$scratch/spec.nostop" "rpm %preun 0"
+
+sed "s|^    systemctl try-restart 'maknae-agent@\*.service'.*|    :|" "$spec" >"$scratch/spec.norestart"
+cmp -s "$spec" "$scratch/spec.norestart" && { echo "FAIL: agent-instances: %postun mutant changed nothing"; exit 1; }
+mutant spec-norestart "$prerm" "$postinst" "$scratch/spec.norestart" "rpm %postun 1"
+
+awk '/^%preun$/ {print; getline; getline; getline; getline; print "%systemd_preun maknaed.service maknae-egress.service maknae-egress.socket maknae-policy-sync.path maknae-policy-sync.service"; print "if [ $1 -eq 0 ]; then"; print "    systemctl stop '"'"'maknae-agent@*.service'"'"' 2>/dev/null || :"; print "fi"; getline; next} {print}' "$spec" >"$scratch/spec.late"
+mutant spec-late "$prerm" "$postinst" "$scratch/spec.late" "rpm %preun 0"
+
+echo "PASS: agent-instances: $cases cases, and 6 mutants each fail their own case"

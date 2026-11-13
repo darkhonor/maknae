@@ -1510,12 +1510,14 @@ An Agent Daemon runs under its own service account, one per agent, and reaches `
 1. **Create the agent's account.** Enroll never creates it; it checks it, and refuses an account that fails any of these:
 
    - it exists, has its own uid (no other account name resolves to that uid), and is not root, the principal's account, `_maknae` or `_maknae-egress`;
-   - it is a member of `maknae-agents` and of no group in `maknae`, `_maknae` or `_maknae-egress`;
+   - it is a member of `maknae-agents`, and not of `maknae`, `_maknae` or `_maknae-egress`;
    - its shell is `/usr/sbin/nologin`, `/sbin/nologin`, `/usr/bin/nologin`, `/bin/false` or `/usr/bin/false`;
    - no other agent is enrolled with its uid, and `bindings.yaml` does not name it under `admin`, `user` or `guest` (naming it under `adversary` contains it);
-   - its home is an absolute, existing directory, written exactly as the system resolves it (no symbolic link, `.`, `..`, repeated or trailing `/`), with no whitespace, control character, `%`, `"`, `'` or `\`, and on Linux only `A-Z`, `a-z`, `0-9`, `.`, `_`, `-` and `/`.
+   - its home is an absolute, existing directory, written exactly as the system resolves it (no symbolic link, `.`, `..`, repeated or trailing `/`), with no whitespace, control character, `%`, `"`, `'` or `\`, and on Linux only `A-Z`, `a-z`, `0-9`, `.`, `_`, `-` and `/`;
+   - on an SELinux host, its home is labelled `maknae_agent_home_t`;
+   - on a host with the AppArmor profile installed, the kernel enforces AppArmor.
 
-   The daemon also reads a persona from the home only when the account owns it and neither group nor others can write it, so create the home `0750` (or `0700`), owned by the account. Give the account its own primary group. The agent socket is group-owned by `maknae-agents`, and no person belongs in it.
+   The daemon also reads a persona from the home only when the account owns it and neither group nor others can write it, so create the home `0750` (or `0700`), owned by the account. Give the account its own primary group. No person belongs in `maknae-agents`: the agent socket is group-owned by it.
 
    **RHEL family (EL9, EL10).** Agent homes go in `/var/lib/maknae-agents`, which the package creates; the SELinux domain writes nowhere else.
 
@@ -1547,6 +1549,7 @@ An Agent Daemon runs under its own service account, one per agent, and reaches `
           dscl . -search /Groups PrimaryGroupID "$i" | grep -q . && continue
           echo "$i"; break
         done)
+   [ -n "$id" ] || { echo "no free id in 450-499; choose one by hand" >&2; exit 1; }
    sudo dseditgroup -o create -i "$id" -r "Maknae agent hobi" hobi
    sudo dscl . -create /Users/hobi
    sudo dscl . -create /Users/hobi UniqueID "$id"

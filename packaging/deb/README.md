@@ -59,9 +59,10 @@ credential, connects to `/run/maknae-agent/maknaed.sock` and over TCP to Vault, 
 only in the enrolled agents' homes, through `owner` rules. The homes come from
 `/etc/apparmor.d/tunables/maknae-agents`, whose placeholder names no directory, so the profile
 loads with no agent enrolled; `maknae enroll agent` writes the agent's home to
-`tunables/maknae-agents.d/<id>` and reloads the profile, and `remove-agent` removes that file
-and reloads. It denies `/var/mail` and `/var/spool/mail`, writes to `/dev/tty*` and
-`/dev/pts/*`, and executing `wall` and `write`.
+`tunables/maknae-agents.d/<id>.home` and reloads the profile (it refuses to enroll when the
+kernel does not enforce AppArmor), and `remove-agent` removes that file and reloads. It denies
+`/var/mail` and `/var/spool/mail`; writes to `/dev/tty*`, `/dev/pts/*`, `/dev/log` and the
+journal's sockets; executing `wall` and `write`; and abstract unix sockets. It cannot name a TCP port, so outbound TCP is not bounded to Vault (see the isolation contract).
 
 The audit trail is append-only by the inode's append-only attribute (`chattr +a`),
 not by AppArmor. AppArmor revalidates every `write()` on an `O_APPEND`

@@ -48,7 +48,7 @@ files_config_file(maknae_egress_bounds_t)
 
 # #240b: the deputy's credential dir (/etc/maknae/egress: its copy of the
 # Vault TLS anchor). Its own type, so the grant is by TYPE and the
-# maknae_etc_t wildcard (maknae.yaml, maknaed-approle-id, tls/) stays
+# maknae_etc_t wildcard (maknae.yaml, maknaed-approle-id) stays
 # unreadable to the deputy. Its sealed seal key is maknae_secret_t and stays
 # neverallow'd below; systemd decrypts it into $CREDENTIALS_DIRECTORY.
 type maknae_egress_etc_t;
@@ -96,9 +96,14 @@ type maknae_agentd_t;
 type maknae_agentd_exec_t;
 init_daemon_domain(maknae_agentd_t, maknae_agentd_exec_t)
 allow init_t maknae_agentd_t:process2 { nnp_transition nosuid_transition };
-# Agent homes under /var/lib/maknae-agents (maknae.fc).
+type maknae_agent_homes_root_t;
+files_type(maknae_agent_homes_root_t)
 type maknae_agent_home_t;
 files_type(maknae_agent_home_t)
+type maknae_agent_etc_t;
+files_config_file(maknae_agent_etc_t)
+type maknae_tls_t;
+files_config_file(maknae_tls_t)
 
 ########################################
 # Policy rules
@@ -111,6 +116,8 @@ allow maknaed_t maknaed_exec_t:file { read execute execute_no_trans open getattr
 # read by init_t, NOT here — this grants only the daemon-read artifacts).
 allow maknaed_t maknae_etc_t:dir { open read search getattr };
 allow maknaed_t maknae_etc_t:file { read open getattr };
+allow maknaed_t { maknae_agent_etc_t maknae_tls_t }:dir { open read search getattr };
+allow maknaed_t { maknae_agent_etc_t maknae_tls_t }:file { read open getattr };
 # #240a: both readers of the bounds file, by type.
 allow maknaed_t maknae_egress_bounds_t:file { read open getattr };
 allow maknae_egress_t maknae_egress_bounds_t:file { read open getattr };
@@ -329,10 +336,13 @@ gen_require(`
     type devpts_t;
     type user_tty_device_t;
     type user_devpts_t;
+    type console_device_t;
+    type ptmx_t;
 ')
 allow maknae_agentd_t maknae_agentd_exec_t:file { read execute execute_no_trans open getattr };
 allow maknae_agentd_t maknae_etc_t:dir { open read search getattr };
-allow maknae_agentd_t maknae_etc_t:file { read open getattr };
+allow maknae_agentd_t { maknae_agent_etc_t maknae_tls_t }:dir { open read search getattr };
+allow maknae_agentd_t { maknae_agent_etc_t maknae_tls_t }:file { read open getattr };
 allow maknae_agentd_t var_run_t:dir { search getattr open read };
 allow maknae_agentd_t init_var_run_t:dir { search getattr open read };
 allow maknae_agentd_t init_var_run_t:file { read open getattr };
@@ -353,10 +363,12 @@ sysnet_dns_name_resolve(maknae_agentd_t)
 miscfiles_read_generic_certs(maknae_agentd_t)
 
 files_search_var_lib(maknae_agentd_t)
+allow maknae_agentd_t maknae_agent_homes_root_t:dir { open read search getattr };
 manage_dirs_pattern(maknae_agentd_t, maknae_agent_home_t, maknae_agent_home_t)
 manage_files_pattern(maknae_agentd_t, maknae_agent_home_t, maknae_agent_home_t)
 read_lnk_files_pattern(maknae_agentd_t, maknae_agent_home_t, maknae_agent_home_t)
-allow maknaed_t maknae_agent_home_t:dir { getattr search ioctl };
+allow maknaed_t maknae_agent_homes_root_t:dir { search getattr };
+allow maknaed_t maknae_agent_home_t:dir { getattr ioctl };
 allow maknaed_t maknae_agent_home_t:file { getattr ioctl };
 allowxperm maknaed_t maknae_agent_home_t:dir ioctl 0x0000;
 allowxperm maknaed_t maknae_agent_home_t:file ioctl 0x0000;
@@ -370,4 +382,4 @@ kernel_read_system_state(maknae_agentd_t)
 neverallow maknae_agentd_t { maknae_private_t maknae_secret_t maknae_egress_etc_t maknae_egress_bounds_t }:file { read open };
 neverallow maknae_agentd_t { maknae_state_t maknae_audit_t }:{ dir file } *;
 neverallow maknae_agentd_t mail_spool_t:{ dir file } *;
-neverallow maknae_agentd_t { tty_device_t devpts_t user_tty_device_t user_devpts_t }:chr_file { write append };
+neverallow maknae_agentd_t { tty_device_t devpts_t user_tty_device_t user_devpts_t console_device_t ptmx_t }:chr_file { write append };

@@ -20,10 +20,11 @@ pub enum Program {
     Ls,
     Systemctl,
     Launchctl,
+    Stat,
 }
 
 impl Program {
-    pub const ALL: [Program; 16] = [
+    pub const ALL: [Program; 17] = [
         Program::SystemdCreds,
         Program::Setfacl,
         Program::Getfacl,
@@ -40,6 +41,7 @@ impl Program {
         Program::Ls,
         Program::Systemctl,
         Program::Launchctl,
+        Program::Stat,
     ];
 
     pub fn path(self) -> &'static Path {
@@ -60,6 +62,7 @@ impl Program {
             Program::Ls => "/bin/ls",
             Program::Systemctl => "/usr/bin/systemctl",
             Program::Launchctl => "/bin/launchctl",
+            Program::Stat => "/usr/bin/stat",
         })
     }
 }
@@ -102,6 +105,7 @@ mod tests {
             Program::Ls => 13,
             Program::Systemctl => 14,
             Program::Launchctl => 15,
+            Program::Stat => 16,
         }
     }
 
@@ -115,7 +119,7 @@ mod tests {
             seen[position(p)] = true;
         }
         assert!(seen.iter().all(|s| *s));
-        assert_eq!(position(Program::Launchctl), Program::ALL.len() - 1);
+        assert_eq!(position(Program::Stat), Program::ALL.len() - 1);
     }
 
     #[test]
@@ -167,6 +171,7 @@ mod tests {
                 (Program::Ls, "/bin/ls"),
                 (Program::Systemctl, "/usr/bin/systemctl"),
                 (Program::Launchctl, "/bin/launchctl"),
+                (Program::Stat, "/usr/bin/stat"),
             ]
         );
     }

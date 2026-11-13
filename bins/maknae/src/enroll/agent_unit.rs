@@ -81,6 +81,37 @@ pub(crate) fn start(
     systemctl(r, &["restart", &unit])
 }
 
+pub(crate) const SELINUX_ENFORCE: &str = "/sys/fs/selinux/enforce";
+pub(crate) const AGENT_HOME_TYPE: &str = "maknae_agent_home_t";
+
+/// `maknae_agentd_t` writes only `maknae_agent_home_t`; a home of another type
+/// would leave an instance that starts and cannot write.
+pub(crate) fn selinux_home_check(
+    r: &dyn Run,
+    account: &str,
+    home: &str,
+) -> Result<(), EnrollError> {
+    let args = vec!["--format=%C".to_string(), home.to_string()];
+    let program = format!("{} --format=%C {home}", Program::Stat);
+    let label = match r.run(Program::Stat, &args) {
+        Ok(out) if out.ok => out.stdout,
+        Ok(out) => {
+            return Err(EnrollError::Command {
+                program,
+                detail: out.stderr,
+            })
+        }
+        Err(detail) => return Err(EnrollError::Command { program, detail }),
+    };
+    let label = label.trim();
+    if label.split(':').nth(2) == Some(AGENT_HOME_TYPE) {
+        return Ok(());
+    }
+    Err(EnrollError::Owner(format!(
+        "account {account}: its home {home:?} is labelled {label:?}, not {AGENT_HOME_TYPE}, so the Agent Daemon could not write it; put the home under /var/lib/maknae-agents and run restorecon -RF {home}"
+    )))
+}
+
 /// `remove` deletes the drop-in, once the instance has stopped.
 pub(crate) fn stop(
     r: &dyn Run,
@@ -404,11 +435,32 @@ mod tests {
                 "--",
                 "gen_context(system_u:object_r:maknae_agentd_exec_t,s0)"
             ]));
-        assert!(FC.lines().any(|l| l.split_whitespace().collect::<Vec<_>>()
-            == [
-                "/var/lib/maknae-agents(/.*)?",
-                "gen_context(system_u:object_r:maknae_agent_home_t,s0)"
-            ]));
+        for want in [
+            [
+                "/var/lib/maknae-agents",
+                "-d",
+                "gen_context(system_u:object_r:maknae_agent_homes_root_t,s0)",
+            ]
+            .as_slice(),
+            &[
+                "/var/lib/maknae-agents/.*",
+                "gen_context(system_u:object_r:maknae_agent_home_t,s0)",
+            ],
+            &[
+                "/etc/maknae/agents(/.*)?",
+                "gen_context(system_u:object_r:maknae_agent_etc_t,s0)",
+            ],
+            &[
+                "/etc/maknae/tls(/.*)?",
+                "gen_context(system_u:object_r:maknae_tls_t,s0)",
+            ],
+        ] {
+            assert!(
+                FC.lines()
+                    .any(|l| l.split_whitespace().collect::<Vec<_>>() == want),
+                "{want:?}"
+            );
+        }
         assert!(!TE.contains("policy_module(maknae, 1.0.3)"));
     }
 
@@ -466,10 +518,79 @@ mod tests {
             "neverallow maknae_agentd_t { maknae_private_t maknae_secret_t maknae_egress_etc_t maknae_egress_bounds_t }:file { read open };",
             "neverallow maknae_agentd_t { maknae_state_t maknae_audit_t }:{ dir file } *;",
             "neverallow maknae_agentd_t mail_spool_t:{ dir file } *;",
-            "neverallow maknae_agentd_t { tty_device_t devpts_t user_tty_device_t user_devpts_t }:chr_file { write append };",
+            "neverallow maknae_agentd_t { tty_device_t devpts_t user_tty_device_t user_devpts_t console_device_t ptmx_t }:chr_file { write append };",
         ] {
             assert!(TE.lines().any(|l| l == line), "{line}");
         }
+    }
+
+    /// journald forwards an emerg message to every terminal (`ForwardToWall=yes`,
+    /// `MaxLevelWall=emerg`), so no journal or syslog socket may be reachable and
+    /// the inherited stream may carry no level prefix.
+    #[test]
+    fn the_agent_daemon_cannot_raise_a_journal_message_to_wall() {
+        for reach in [
+            "logging_send_syslog_msg(maknae_agentd_t)",
+            "logging_send_audit_msgs(maknae_agentd_t)",
+            "devlog_t",
+            "syslogd_var_run_t",
+            "syslogd_t",
+            "kernel_t:unix_dgram_socket",
+            "unix_dgram_socket",
+        ] {
+            assert!(
+                !te_rules("maknae_agentd_t")
+                    .iter()
+                    .any(|l| !l.starts_with("neverallow") && l.contains(reach)),
+                "{reach}"
+            );
+        }
+        assert_eq!(the_one(&service_lines(), "SyslogLevelPrefix"), "no");
+        assert!(!service_lines()
+            .iter()
+            .any(|l| l.starts_with("LogLevelMax=")));
+    }
+
+    #[test]
+    fn the_agent_daemon_reads_its_configuration_types_and_only_lists_the_rest_of_etc() {
+        let on_etc: Vec<_> = te_rules("allow maknae_agentd_t")
+            .into_iter()
+            .filter(|l| l.contains("maknae_etc_t"))
+            .collect();
+        assert_eq!(
+            on_etc,
+            ["allow maknae_agentd_t maknae_etc_t:dir { open read search getattr };"]
+        );
+        for who in ["maknaed_t", "maknae_agentd_t"] {
+            for class in [
+                "dir { open read search getattr };",
+                "file { read open getattr };",
+            ] {
+                let line = format!("allow {who} {{ maknae_agent_etc_t maknae_tls_t }}:{class}");
+                assert!(TE.lines().any(|l| l == line), "{line}");
+            }
+        }
+    }
+
+    #[test]
+    fn maknaed_only_stats_and_receives_in_agent_homes() {
+        let on_homes: Vec<_> = te_rules("maknaed_t")
+            .into_iter()
+            .filter(|l| l.contains("maknae_agent_home"))
+            .collect();
+        assert_eq!(
+            on_homes,
+            [
+                "allow maknaed_t maknae_agent_homes_root_t:dir { search getattr };",
+                "allow maknaed_t maknae_agent_home_t:dir { getattr ioctl };",
+                "allow maknaed_t maknae_agent_home_t:file { getattr ioctl };",
+                "allowxperm maknaed_t maknae_agent_home_t:dir ioctl 0x0000;",
+                "allowxperm maknaed_t maknae_agent_home_t:file ioctl 0x0000;",
+            ]
+        );
+        assert!(TE
+            .lines()
+            .any(|l| l == "allow maknaed_t maknae_agentd_t:fd use;"));
     }
 
     #[test]
@@ -510,6 +631,56 @@ mod tests {
         assert!(SPEC
             .lines()
             .any(|l| l == "%dir %attr(0755,root,root) %{_localstatedir}/lib/maknae-agents"));
+    }
+
+    struct Labelled(&'static str, bool);
+
+    impl Run for Labelled {
+        fn run(&self, program: Program, args: &[String]) -> Result<Ran, String> {
+            assert_eq!(program, Program::Stat);
+            assert_eq!(args, ["--format=%C", "/var/lib/maknae-agents/hobi"]);
+            Ok(Ran {
+                ok: self.1,
+                code: Some(i32::from(!self.1)),
+                stdout: self.0.to_string(),
+                stderr: if self.1 {
+                    String::new()
+                } else {
+                    "stat: cannot stat".into()
+                },
+            })
+        }
+    }
+
+    #[test]
+    fn an_selinux_host_admits_only_a_home_labelled_for_the_agent_domain() {
+        let home = "/var/lib/maknae-agents/hobi";
+        selinux_home_check(
+            &Labelled("system_u:object_r:maknae_agent_home_t:s0\n", true),
+            "hobi",
+            home,
+        )
+        .unwrap();
+        for label in [
+            "system_u:object_r:maknae_agent_homes_root_t:s0\n",
+            "unconfined_u:object_r:user_home_dir_t:s0\n",
+            "system_u:object_r:var_lib_t:s0\n",
+            "?\n",
+            "",
+        ] {
+            let e = selinux_home_check(&Labelled(label, true), "hobi", home).unwrap_err();
+            assert!(
+                matches!(&e, EnrollError::Owner(m) if m.contains("restorecon -RF /var/lib/maknae-agents/hobi")),
+                "{label:?}: {e:?}"
+            );
+        }
+        let e = selinux_home_check(&Labelled("", false), "hobi", home).unwrap_err();
+        assert!(
+            matches!(&e, EnrollError::Command { program, detail }
+                if program == "/usr/bin/stat --format=%C /var/lib/maknae-agents/hobi"
+                    && detail == "stat: cannot stat"),
+            "{e:?}"
+        );
     }
 
     #[test]

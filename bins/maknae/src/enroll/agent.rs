@@ -1378,8 +1378,17 @@ fn check_account(
         ))
     })?;
     #[cfg(not(target_os = "macos"))]
-    if !agent_apparmor::home_ok(&home) {
-        return Err(agent_apparmor::home_refusal(account, &home));
+    {
+        if !agent_apparmor::home_ok(&home) {
+            return Err(agent_apparmor::home_refusal(account, &home));
+        }
+        if Path::new(agent_unit::SELINUX_ENFORCE).exists() {
+            agent_unit::selinux_home_check(&agent_access::Host, account, &home)?;
+        }
+        agent_apparmor::require_enabled(
+            agent_apparmor::open_tunables(Path::new(agent_apparmor::TUNABLES_DIR))?.is_some(),
+            agent_apparmor::read_enabled().as_deref(),
+        )?;
     }
     Ok(agent_unit::ServiceAccount {
         name: account.to_string(),

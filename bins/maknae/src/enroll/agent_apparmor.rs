@@ -12,6 +12,45 @@ use std::path::Path;
 pub(crate) const TUNABLES_DIR: &str = "/etc/apparmor.d/tunables/maknae-agents.d";
 pub(crate) const PROFILE: &str = "/etc/apparmor.d/usr.bin.maknae-agentd";
 
+pub(crate) const ENABLED_PARAM: &str = "/sys/module/apparmor/parameters/enabled";
+
+/// AppArmor's directory include skips names ending `.orig`, `.rej`, `.dpkg-*`
+/// and the like, which an agent id may; the fixed suffix keeps every file read.
+pub(crate) fn file_name(agent: &AgentId) -> String {
+    format!("{}.home", agent.as_str())
+}
+
+/// `None` when the kernel has no AppArmor module.
+pub(crate) fn read_enabled() -> Option<String> {
+    let out = maknae_io::read_absolute(
+        Path::new(ENABLED_PARAM),
+        maknae_io::TargetRequired {
+            owner: Some(0),
+            mode_mask: Some(0o022),
+            nlink_exactly_one: false,
+            regular_file: true,
+            max_bytes: Some(4096),
+        },
+        StrategyPref::Auto,
+    )
+    .ok()?;
+    String::from_utf8(out.value.to_vec()).ok()
+}
+
+/// A host that ships the profile but whose kernel does not enforce AppArmor
+/// would run the agent unconfined.
+pub(crate) fn require_enabled(
+    profile_host: bool,
+    enabled: Option<&str>,
+) -> Result<(), EnrollError> {
+    if !profile_host || enabled.map(str::trim) == Some("Y") {
+        return Ok(());
+    }
+    Err(EnrollError::State(format!(
+        "AppArmor is not enabled in this kernel ({ENABLED_PARAM} does not read Y), so the Agent Daemon would run unconfined; enable AppArmor and enroll again"
+    )))
+}
+
 /// A home the profile can name: AppArmor reads `*`, `?`, `[`, `{`, `,`, `@`, `^`,
 /// `#`, `=` and `+` in a variable's value as pattern or syntax.
 pub(crate) fn home_ok(home: &str) -> bool {
@@ -85,13 +124,13 @@ pub(crate) fn place(
     };
     let text = tunable(account, home)?;
     dir.publish_owned(
-        Path::new(agent.as_str()),
+        Path::new(&file_name(agent)),
         None,
         text.as_bytes(),
         Mode(0o644),
         owner,
     )
-    .map_err(|e| io_error(&Path::new(TUNABLES_DIR).join(agent.as_str()), e))?;
+    .map_err(|e| io_error(&Path::new(TUNABLES_DIR).join(file_name(agent)), e))?;
     reload(r)
 }
 
@@ -104,10 +143,10 @@ pub(crate) fn withdraw(
     let Some(dir) = dir else {
         return Ok(());
     };
-    match dir.remove(Path::new(agent.as_str()), None) {
+    match dir.remove(Path::new(&file_name(agent)), None) {
         Ok(_) => {}
         Err(e) if is_not_found(&e) => {}
-        Err(e) => return Err(io_error(&Path::new(TUNABLES_DIR).join(agent.as_str()), e)),
+        Err(e) => return Err(io_error(&Path::new(TUNABLES_DIR).join(file_name(agent)), e)),
     }
     reload(r)
 }
@@ -177,6 +216,40 @@ mod tests {
     }
 
     #[test]
+    fn each_agents_file_ends_home_so_the_directory_include_reads_it() {
+        for (id, want) in [
+            ("hobi", "hobi.home"),
+            ("a.orig", "a.orig.home"),
+            ("a.dpkg-old", "a.dpkg-old.home"),
+            ("a.rej", "a.rej.home"),
+        ] {
+            assert_eq!(file_name(&AgentId::parse(id).unwrap()), want);
+        }
+        let (dir, anchor) = super::super::agent::tests::scratch_anchor("aa-suffix");
+        let id = AgentId::parse("a.dpkg-old").unwrap();
+        let r = Recorder::default();
+        place(&r, Some(&anchor), &id, "a", "/srv/a", me()).unwrap();
+        assert!(dir.join("a.dpkg-old.home").exists());
+        assert!(!dir.join("a.dpkg-old").exists());
+        withdraw(&r, Some(&anchor), &id).unwrap();
+        assert!(!dir.join("a.dpkg-old.home").exists());
+    }
+
+    #[test]
+    fn a_host_with_the_profile_refuses_to_enroll_when_the_kernel_does_not_enforce_apparmor() {
+        for enabled in [None, Some("N\n"), Some(""), Some("y\n")] {
+            let e = require_enabled(true, enabled).unwrap_err();
+            assert!(
+                matches!(&e, EnrollError::State(m) if m.contains("unconfined")),
+                "{enabled:?}: {e:?}"
+            );
+        }
+        require_enabled(true, Some("Y\n")).unwrap();
+        require_enabled(false, None).unwrap();
+        require_enabled(false, Some("N\n")).unwrap();
+    }
+
+    #[test]
     fn the_tunable_names_the_home_and_its_parent() {
         assert_eq!(
             tunable("hobi", "/var/lib/maknae-agents/hobi").unwrap(),
@@ -231,7 +304,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            std::fs::read_to_string(dir.join("hobi")).unwrap(),
+            std::fs::read_to_string(dir.join("hobi.home")).unwrap(),
             tunable("hobi", "/var/lib/maknae-agents/hobi").unwrap()
         );
         assert_eq!(
@@ -245,7 +318,7 @@ mod tests {
         let (dir, anchor) = super::super::agent::tests::scratch_anchor("aa-refuse");
         let r = Recorder::default();
         assert!(place(&r, Some(&anchor), &hobi(), "hobi", "/home/a*", me()).is_err());
-        assert!(!dir.join("hobi").exists());
+        assert!(!dir.join("hobi.home").exists());
         assert!(r.log.borrow().is_empty());
     }
 
@@ -270,12 +343,12 @@ mod tests {
     #[test]
     fn withdraw_removes_only_the_agents_file_and_a_missing_one_is_already_removed() {
         let (dir, anchor) = super::super::agent::tests::scratch_anchor("aa-withdraw");
-        std::fs::write(dir.join("hobi"), "x").unwrap();
-        std::fs::write(dir.join("jin"), "y").unwrap();
+        std::fs::write(dir.join("hobi.home"), "x").unwrap();
+        std::fs::write(dir.join("jin.home"), "y").unwrap();
         let r = Recorder::default();
         withdraw(&r, Some(&anchor), &hobi()).unwrap();
-        assert!(!dir.join("hobi").exists());
-        assert!(dir.join("jin").exists());
+        assert!(!dir.join("hobi.home").exists());
+        assert!(dir.join("jin.home").exists());
         withdraw(&r, Some(&anchor), &hobi()).unwrap();
         assert_eq!(r.log.borrow().len(), 2);
     }
@@ -369,8 +442,15 @@ mod tests {
             ("deny /etc/maknae/private/**", "rwklx"),
             ("deny /var/lib/maknae/**", "rwklx"),
             ("deny /var/log/maknae/**", "rwklx"),
+            ("deny /dev/log", "w"),
+            ("deny /run/systemd/journal/socket", "w"),
+            ("deny /run/systemd/journal/dev-log", "w"),
+            ("deny /run/systemd/journal/stdout", "w"),
         ] {
             assert!(has_rule(path, mode), "{path} {mode}");
+        }
+        for abstract_ in ["deny unix addr=@**,", "deny unix peer=(addr=@**),"] {
+            assert!(rules().contains(&abstract_), "{abstract_}");
         }
         let executes = |l: &&str| {
             l.trim_end_matches(',')

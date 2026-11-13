@@ -42,6 +42,7 @@ RestartPreventExitStatus=2
 RestartSec=5s
 StandardOutput=journal
 StandardError=journal
+SyslogLevelPrefix=no
 SyslogIdentifier=maknae-agentd-%i
 
 [Install]
