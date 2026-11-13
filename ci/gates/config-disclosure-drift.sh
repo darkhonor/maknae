@@ -101,7 +101,7 @@ SURFACE=(
   "crates/maknae-proto/src/task.rs|TaskReportPage|task_reports|2|wire"
   "crates/maknae-proto/src/task.rs|TaskReportView|task_reports.entries|6|wire"
   "crates/maknae-proto/src/task.rs|TaskDelivery|task_delivery|2|wire"
-  "crates/maknae-proto/src/task.rs|TaskFollowUps|task_follow_ups|2|wire"
+  "crates/maknae-proto/src/task.rs|TaskFollowUps|task_follow_ups|3|wire"
   "crates/maknae-vault/src/config.rs|VaultConfig|vault|9|config"
   "crates/maknae-vault/src/config.rs|UserAuthConfig|vault.user_auth|2|config"
 )
@@ -143,6 +143,7 @@ LEAF_NEWTYPES=(
   "task_reports.entries.task|crates/maknae-proto/src/task.rs|TaskRef"
   "task_reports.entries.cursor|crates/maknae-proto/src/task.rs|TaskCursor"
   "task_reports.next|crates/maknae-proto/src/task.rs|TaskCursor"
+  "task_follow_ups.task|crates/maknae-proto/src/task.rs|TaskRef"
 )
 
 # Fields whose type is a zeroizing secret newtype: one CBOR string on the wire, so a leaf.

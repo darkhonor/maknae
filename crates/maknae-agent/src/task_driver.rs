@@ -181,7 +181,7 @@ enum Beat {
 
 fn read_beat(answer: Result<BeatAnswer, String>, seen: &mut u32) -> Beat {
     match answer {
-        Ok(BeatAnswer::FollowUps { from, items }) => {
+        Ok(BeatAnswer::FollowUps { from, items, .. }) => {
             let skip = seen.saturating_sub(from) as usize;
             let end = from.saturating_add(u32::try_from(items.len()).unwrap_or(u32::MAX));
             *seen = (*seen).max(end);
@@ -306,7 +306,8 @@ pub struct TaskDriver<P, C> {
     config: DriverConfig,
     shutdown: Arc<AtomicBool>,
     held: Option<Held>,
-    leftover: bool,
+    /// The task found `Working` by the startup heartbeat, until a claim settles it.
+    leftover: Option<TaskId>,
     backoff: Backoff,
 }
 
@@ -318,7 +319,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
             config,
             shutdown: Arc::new(AtomicBool::new(false)),
             held: None,
-            leftover: false,
+            leftover: None,
             backoff: Backoff(BACKOFF_FIRST),
         }
     }
@@ -354,7 +355,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
                     self.delivered(&d.signed, &d.partition).await;
                 }
                 Ok(ClaimAnswer::Idle) => {
-                    self.leftover = false;
+                    self.leftover = None;
                     self.backoff = Backoff(BACKOFF_FIRST);
                     self.pause(POLL_EVERY).await;
                 }
@@ -370,15 +371,18 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
 
     async fn startup(&mut self) {
         while !self.stopping() {
-            let mut seen = 0;
-            match read_beat(self.plane.heartbeat(0).await, &mut seen) {
-                Beat::More(_) => {
-                    self.leftover = true;
+            match self.plane.heartbeat(0).await {
+                Ok(BeatAnswer::FollowUps { task, .. }) => {
+                    self.leftover = Some(task);
                     return;
                 }
-                Beat::Held | Beat::Gone => return,
-                Beat::Refused => self.pause(POLL_EVERY).await,
-                Beat::Lost => self.back_off().await,
+                Ok(BeatAnswer::State(view)) if view.state == TaskState::Working => {
+                    self.leftover = Some(view.task.to_id());
+                    return;
+                }
+                Ok(BeatAnswer::State(_) | BeatAnswer::Idle) => return,
+                Ok(BeatAnswer::Refused(_)) => self.pause(POLL_EVERY).await,
+                Err(_) => self.back_off().await,
             }
         }
     }
@@ -407,7 +411,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
                 return;
             }
         }
-        if leftover {
+        if leftover == Some(id) {
             self.cite_and_report(id, RESTARTED.into(), Ending::Restarted)
                 .await;
             return;
@@ -882,6 +886,7 @@ mod tests {
         async fn heartbeat(&mut self, seen: u32) -> Result<BeatAnswer, String> {
             self.log(format!("beat {seen}"));
             self.beats.pop_front().unwrap_or(Ok(BeatAnswer::FollowUps {
+                task: id(1),
                 from: seen,
                 items: vec![],
             }))
@@ -980,6 +985,7 @@ mod tests {
     }
     fn follow_ups(from: u32, items: &[&str]) -> Result<BeatAnswer, String> {
         Ok(BeatAnswer::FollowUps {
+            task: id(1),
             from,
             items: items.iter().map(|s| st(s)).collect(),
         })
@@ -1852,6 +1858,34 @@ mod tests {
         f.claims = VecDeque::from([Ok(ClaimAnswer::Refused(refused())), delivered(1, PART)]);
         let (log, events) = run(f).await;
         assert_eq!(reports(&log), strs(&["report stopped: agent restarted"]));
+        assert_eq!(events, vec![ended(1, Ending::Restarted)]);
+    }
+
+    #[tokio::test]
+    async fn the_restart_mark_names_one_task_and_a_different_one_after_it_is_worked_fresh() {
+        let mut f = Fake::default();
+        f.beats.push_back(follow_ups(0, &[]));
+        f.tasks.insert(2, Ok(signed(2, "prompt-2")));
+        f.claims = VecDeque::from([Ok(ClaimAnswer::Refused(refused())), delivered(2, PART)]);
+        f.replies = VecDeque::from([answer("a2")]);
+        let (log, events) = run(f).await;
+        assert_eq!(reports(&log), strs(&["report a2"]));
+        assert_eq!(events, vec![ended(2, Ending::Answered)]);
+
+        let mut f = Fake::default();
+        f.beats.push_back(follow_ups(0, &[]));
+        f.tasks.insert(1, Ok(signed(1, "prompt-1")));
+        f.claims = VecDeque::from([Ok(ClaimAnswer::Refused(refused())), delivered(1, PART)]);
+        let (log, events) = run(f).await;
+        assert_eq!(reports(&log), strs(&["report stopped: agent restarted"]));
+        assert_eq!(events, vec![ended(1, Ending::Restarted)]);
+
+        let mut f = Fake::default();
+        f.beats
+            .push_back(Ok(BeatAnswer::State(view(TaskState::Working))));
+        f.tasks.insert(1, Ok(signed(1, "prompt-1")));
+        f.claims = VecDeque::from([delivered(1, PART)]);
+        let (_, events) = run(f).await;
         assert_eq!(events, vec![ended(1, Ending::Restarted)]);
     }
 

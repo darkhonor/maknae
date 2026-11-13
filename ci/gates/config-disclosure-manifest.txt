@@ -139,5 +139,6 @@ always	task_reports.entries.cursor	task.collect (#628): one of the caller's own 
 always	task_reports.next	task.collect (#628): the cursor for the next page, the report-arrival sequence of one of the caller's own tasks
 always	task_delivery.signed	task.claim (#628): the kernel-signed task, released only to the agent holding it
 always	task_delivery.partition	task.claim (#628): the claimed task's working directory, relative to the agent's own home
+always	task_follow_ups.task	task.claim (#629): the id of the claimed task these follow-ups belong to, released only to the agent holding it
 always	task_follow_ups.from	task.claim (#628): the index of the first follow-up in this answer; a count, never content
 always	task_follow_ups.items	task.claim (#628): the tasker's follow-ups to the claimed task, released only to the agent holding it

@@ -2,7 +2,7 @@
 //! Pure, for the same reason as [`crate::wire`]: the client converts into
 //! [`WireOutcome`], and the decisions stay here, where they are mutation-tested.
 use crate::wire::WireOutcome;
-use maknae_proto::{Payload, ProtoErrCode, SecretText, TaskDelivery, TaskView};
+use maknae_proto::{Payload, ProtoErrCode, SecretText, TaskDelivery, TaskId, TaskView};
 
 /// The kernel answered, and the answer was no. Not a transport failure: the
 /// connection completed and the refusal is on the trail.
@@ -21,7 +21,11 @@ pub enum ClaimAnswer {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum BeatAnswer {
-    FollowUps { from: u32, items: Vec<SecretText> },
+    FollowUps {
+        task: TaskId,
+        from: u32,
+        items: Vec<SecretText>,
+    },
     State(TaskView),
     Idle,
     Refused(Refused),
@@ -50,6 +54,7 @@ pub fn claim_answer(sent: Result<WireOutcome, String>) -> Result<ClaimAnswer, St
 pub fn beat_answer(sent: Result<WireOutcome, String>) -> Result<BeatAnswer, String> {
     match sent? {
         WireOutcome::Payload(Payload::TaskFollowUps(f)) => Ok(BeatAnswer::FollowUps {
+            task: f.task.to_id(),
             from: f.from,
             items: f.items,
         }),
@@ -79,7 +84,7 @@ fn unexpected(verb: &str, other: &WireOutcome) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use maknae_proto::{TaskFollowUps, TaskId, TaskRef, TaskState};
+    use maknae_proto::{TaskFollowUps, TaskRef, TaskState};
 
     fn view(state: TaskState) -> TaskView {
         TaskView {
@@ -142,10 +147,12 @@ mod tests {
     fn a_heartbeat_reads_follow_ups_state_idle_and_refusal() {
         assert_eq!(
             beat_answer(payload(Payload::TaskFollowUps(TaskFollowUps {
+                task: TaskRef::from_id(&TaskId([9; 16])),
                 from: 4,
                 items: vec![text("more")],
             }))),
             Ok(BeatAnswer::FollowUps {
+                task: TaskId([9; 16]),
                 from: 4,
                 items: vec![text("more")]
             })

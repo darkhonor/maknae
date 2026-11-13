@@ -2148,6 +2148,7 @@ mod tests {
             ),
             (
                 Payload::TaskFollowUps(maknae_proto::TaskFollowUps {
+                    task: maknae_proto::TaskRef::from_id(&maknae_proto::TaskId([0; 16])),
                     from: 0,
                     items: Vec::new(),
                 }),

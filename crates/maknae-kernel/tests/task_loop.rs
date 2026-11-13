@@ -1258,6 +1258,18 @@ async fn claim_with_none_redelivers_the_working_task_and_some_returns_only_new_f
 }
 
 #[tokio::test]
+async fn a_heartbeats_follow_ups_name_the_working_task() {
+    let w = world("beat-names", "user", true);
+    let first = w.submit("hobi", "a").await;
+    w.submit("hobi", "b").await;
+    assert_eq!(w.claimed("hobi").await, first);
+    match w.beat("hobi", 0).await {
+        RespResult::Ok(Payload::TaskFollowUps(f)) => assert_eq!(f.task, r(&first)),
+        other => panic!("not follow-ups: {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn a_report_reaches_only_the_tasks_own_tasker() {
     let w = world("report-owner", "user", true);
     let theirs = w.anothers("hobi");

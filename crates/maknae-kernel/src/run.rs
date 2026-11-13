@@ -3598,7 +3598,11 @@ async fn serve_task_verb<S, E, P>(
                             &task,
                             &tasker,
                         ),
-                        Payload::TaskFollowUps(maknae_proto::TaskFollowUps { from, items }),
+                        Payload::TaskFollowUps(maknae_proto::TaskFollowUps {
+                            task: maknae_proto::TaskRef::from_id(&task),
+                            from,
+                            items,
+                        }),
                     ),
                     crate::task::Heartbeat::Closed(view) => {
                         let said = match view.state {
