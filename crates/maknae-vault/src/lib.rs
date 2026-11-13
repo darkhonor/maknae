@@ -62,7 +62,9 @@ pub use accounts::{account_uid, NssAccounts};
 pub use api_shape::{WrapMismatch, MAX_TOKEN_BYTES, MAX_VAULT_BODY_BYTES};
 pub use auth::{AppRoleAuth, AuthMethod, VaultToken};
 pub use ca::{load_ca_pin, CaBundle};
-pub use client::{PlaneClient, PlaneIdentity, PLANE_HTTP_TIMEOUT, PLANE_SHUTDOWN_BOUND};
+pub use client::{
+    AgentLogin, PlaneClient, PlaneIdentity, PLANE_HTTP_TIMEOUT, PLANE_SHUTDOWN_BOUND,
+};
 pub use config::{
     load_vault_config, sign_refusal_detail, user_auth_from_value, validate_deployment_id,
     validate_vault_addr, vault_config_from_document, vault_error_text, UserAuth, UserAuthConfig,
@@ -74,9 +76,9 @@ pub use env::{scrub_with, NEVER_SCRUB_ENV, SCRUBBED_ENV};
 pub use error::VaultError;
 pub use graph_key_io::read_graph_key;
 pub use keychain_policy::{
-    daemon_keychain_pointer, gate, graph_keychain_pointer, parse_pointer, pointer_document,
-    read_gated, KeychainDelete, KeychainItem, KeychainPlane, CLI_TOKEN_KEYCHAIN_ITEM,
-    KEYCHAIN_ACCOUNT, SYSTEM_KEYCHAIN,
+    agent_keychain_item, daemon_keychain_pointer, gate, graph_keychain_pointer, parse_pointer,
+    pointer_document, read_agent_gated, read_gated, KeychainDelete, KeychainItem, KeychainPlane,
+    CLI_TOKEN_KEYCHAIN_ITEM, KEYCHAIN_ACCOUNT, SYSTEM_KEYCHAIN,
 };
 #[cfg(unix)]
 pub use maknae_plane::SenderVerdict;
@@ -85,7 +87,7 @@ pub use password_line::{PasswordFeed, PasswordLine};
 pub use peer_auth::{ChannelPeer, PeerAuth, SanRule};
 pub use peer_identity::{creds_match_listener_uid, creds_match_uid, listener_uid_is, peer_uid_is};
 pub use peercred::PeerCreds;
-pub use plane::{agent_uri_san, Plane};
+pub use plane::{agent_uri_san, Plane, PlaneSubject};
 pub use refusal::crypto_refusal_message;
 pub use seal_key_io::read_egress_seal_key;
 #[cfg(unix)]
@@ -94,13 +96,15 @@ pub use seal_pub_io::read_seal_pub_pem;
 pub use seal_pub_store::{
     choose_present, linux_home_from_os_release, seal_pub_path, SealPubHome, MAX_SEAL_PUB_BYTES,
 };
+pub use secret_io::read_agent_secret;
 pub use secret_source::{
     credentials_directory_env, graph_key_from_bytes, graph_key_from_hex,
-    resolve_daemon_secret_source, resolve_egress_seal_key_source, resolve_graph_key_source,
-    seal_key_from_hex, seal_key_to_hex, CredentialSourceKind, DaemonSecretSource,
-    EgressSealKeySource, GraphKey, GraphKeySource, SealKeyDer, SealKeyHex,
-    DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME, EGRESS_SEAL_KEY_CRED_NAME, GRAPH_KEY_BYTES,
-    GRAPH_KEY_CRED_NAME, MAX_SEAL_KEY_BYTES,
+    resolve_agent_secret_source, resolve_daemon_secret_source, resolve_egress_seal_key_source,
+    resolve_graph_key_source, seal_key_from_hex, seal_key_to_hex, AgentSecret,
+    CredentialSourceKind, DaemonSecretSource, EgressSealKeySource, GraphKey, GraphKeySource,
+    SealKeyDer, SealKeyHex, SecretSourceError, DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME,
+    EGRESS_SEAL_KEY_CRED_NAME, GRAPH_KEY_BYTES, GRAPH_KEY_CRED_NAME, MAX_AGENT_SECRET_BYTES,
+    MAX_SEAL_KEY_BYTES,
 };
 #[cfg(unix)]
 pub use socket::bind_listener as bind_group_gated_uds;

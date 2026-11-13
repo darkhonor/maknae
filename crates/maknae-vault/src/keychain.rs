@@ -34,6 +34,29 @@ fn read_item_from(keychain: &Path, item: &KeychainItem) -> Result<Zeroizing<Stri
 }
 
 #[cfg(target_os = "macos")]
+pub(crate) fn read_agent_secret(
+    id: &crate::agent_enroll::AgentId,
+    enrolled_uid: u32,
+) -> Result<crate::AgentSecret, crate::SecretSourceError> {
+    crate::keychain_policy::read_agent_gated(
+        nix::unistd::geteuid().as_raw(),
+        enrolled_uid,
+        id,
+        |service, account| {
+            read_generic_in(
+                || {
+                    security_framework::os::macos::keychain::SecKeychain::open(Path::new(
+                        crate::SYSTEM_KEYCHAIN,
+                    ))
+                },
+                service,
+                account,
+            )
+        },
+    )
+}
+
+#[cfg(target_os = "macos")]
 pub(crate) fn read_item_in(
     open: impl FnOnce() -> Result<
         security_framework::os::macos::keychain::SecKeychain,
@@ -41,14 +64,25 @@ pub(crate) fn read_item_in(
     >,
     item: &KeychainItem,
 ) -> Result<Zeroizing<String>, VaultError> {
+    read_generic_in(open, item.service, item.account)
+}
+
+#[cfg(target_os = "macos")]
+fn read_generic_in(
+    open: impl FnOnce() -> Result<
+        security_framework::os::macos::keychain::SecKeychain,
+        security_framework::base::Error,
+    >,
+    service: &str,
+    account: &str,
+) -> Result<Zeroizing<String>, VaultError> {
     use security_framework::os::macos::keychain::SecKeychain;
     use security_framework::os::macos::passwords::find_generic_password;
     let status = |e: security_framework::base::Error| VaultError::Keychain { status: e.code() };
     let _serial = KEYCHAIN_READ.lock().unwrap_or_else(|e| e.into_inner());
     let _no_ui = SecKeychain::disable_user_interaction().map_err(status)?;
     let kc = open().map_err(status)?;
-    let (password, _) =
-        find_generic_password(Some(&[kc]), item.service, item.account).map_err(status)?;
+    let (password, _) = find_generic_password(Some(&[kc]), service, account).map_err(status)?;
     let raw = Zeroizing::new(password.to_vec());
     let text = std::str::from_utf8(&raw)
         .map_err(|_| VaultError::CredentialSource("the keychain item is not UTF-8".to_string()))?;
@@ -352,6 +386,17 @@ pub(crate) mod tests {
             observe_pointer(dir.path(), KeychainPlane::Daemon).unwrap(),
             Some(p)
         );
+    }
+
+    #[test]
+    fn macos_agent_secret_is_refused_when_the_euid_is_not_the_enrolled_uid() {
+        let euid = nix::unistd::geteuid().as_raw();
+        let other = euid.wrapping_add(1);
+        let id = crate::agent_enroll::AgentId::parse("hobi").unwrap();
+        assert!(matches!(
+            crate::read_agent_secret(&id, other),
+            Err(crate::SecretSourceError::WrongUser { euid: e, enrolled }) if e == euid && enrolled == other
+        ));
     }
 
     #[test]

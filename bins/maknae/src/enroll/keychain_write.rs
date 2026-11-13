@@ -199,14 +199,8 @@ async fn delete_item(service: &str, account: &str) -> Result<(), EnrollError> {
     }
 }
 
-pub(crate) fn agent_keychain_item(
-    agent: &maknae_vault::agent_enroll::AgentId,
-) -> (&'static str, String) {
-    (
-        maknae_vault::agent_enroll::AGENT_SIGNING_IDENTIFIER,
-        agent.as_str().to_string(),
-    )
-}
+#[cfg(any(target_os = "macos", test))]
+use maknae_vault::agent_keychain_item;
 
 #[cfg(target_os = "macos")]
 pub(crate) async fn seal_agent_secret_macos(

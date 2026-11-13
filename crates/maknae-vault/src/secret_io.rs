@@ -16,9 +16,12 @@
 //! plaintext gate to them would be redundant at best and a spurious refusal at
 //! worst (systemd may root-own the credentials directory in a way this process's
 //! uid doesn't "own" by our check).
+use crate::agent_enroll::AgentId;
 use crate::client::read_secret_credential;
 use crate::keychain::read_plane_secret;
-use crate::secret_source::DaemonSecretSource;
+#[cfg(any(test, not(target_os = "macos")))]
+use crate::secret_source::{resolve_agent_secret_source, MAX_AGENT_SECRET_BYTES};
+use crate::secret_source::{AgentSecret, DaemonSecretSource, SecretSourceError};
 use crate::{KeychainPlane, VaultError};
 use std::path::Path;
 use zeroize::Zeroizing;
@@ -48,6 +51,42 @@ pub(crate) fn read_daemon_secret(
         DaemonSecretSource::Keychain(pointer) => read_plane_secret(pointer, KeychainPlane::Daemon),
         DaemonSecretSource::PlaintextPath(path) => read_secret_credential(path).map(Zeroizing::new),
     }
+}
+
+#[cfg(any(test, not(target_os = "macos")))]
+pub(crate) fn read_agent_secret_in(
+    credentials_dir_env: Option<&str>,
+) -> Result<AgentSecret, SecretSourceError> {
+    let path = resolve_agent_secret_source(credentials_dir_env)?;
+    let bytes = crate::read_storage_within(&path, Some(MAX_AGENT_SECRET_BYTES))
+        .map_err(SecretSourceError::Read)?;
+    let text = std::str::from_utf8(&bytes).map_err(|e| {
+        SecretSourceError::Read(VaultError::Io {
+            path: path.clone(),
+            source: std::io::Error::other(e.to_string()),
+        })
+    })?;
+    AgentSecret::from_trimmed(text)
+}
+
+/// The agent's standing SecretID. On Linux it is read only from
+/// `$CREDENTIALS_DIRECTORY/maknae-agent-secret-id`; on macOS only from the System keychain
+/// item enroll wrote, and only when this process runs as `enrolled_uid`.
+#[cfg(not(target_os = "macos"))]
+pub fn read_agent_secret(
+    _id: &AgentId,
+    _enrolled_uid: u32,
+) -> Result<AgentSecret, SecretSourceError> {
+    let env = crate::secret_source::credentials_directory_env().map_err(SecretSourceError::Read)?;
+    read_agent_secret_in(env.as_deref())
+}
+
+#[cfg(target_os = "macos")]
+pub fn read_agent_secret(
+    id: &AgentId,
+    enrolled_uid: u32,
+) -> Result<AgentSecret, SecretSourceError> {
+    crate::keychain::read_agent_secret(id, enrolled_uid)
 }
 
 #[cfg(all(test, unix))]
@@ -110,6 +149,64 @@ mod tests {
             got.is_err(),
             "a keychain source must not read its pointer as the secret"
         );
+    }
+
+    #[test]
+    fn linux_agent_secret_comes_only_from_the_credentials_directory() {
+        let creds = tempfile::tempdir().unwrap();
+        let dir = creds.path().to_str().unwrap();
+        std::fs::write(creds.path().join("maknaed-secret-id"), "kernel-sid").unwrap();
+        assert!(matches!(
+            read_agent_secret_in(Some(dir)),
+            Err(SecretSourceError::Read(VaultError::Io { .. }))
+        ));
+        std::fs::write(
+            creds
+                .path()
+                .join(crate::agent_enroll::AGENT_CREDENTIAL_NAME),
+            "  agent-sid\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_agent_secret_in(Some(dir)).unwrap().expose(),
+            "agent-sid"
+        );
+        assert!(matches!(
+            read_agent_secret_in(None),
+            Err(SecretSourceError::CredentialsDirectoryUnset)
+        ));
+        assert!(matches!(
+            read_agent_secret_in(Some("")),
+            Err(SecretSourceError::CredentialsDirectoryEmpty)
+        ));
+        std::fs::write(
+            creds
+                .path()
+                .join(crate::agent_enroll::AGENT_CREDENTIAL_NAME),
+            " \n",
+        )
+        .unwrap();
+        assert!(matches!(
+            read_agent_secret_in(Some(dir)),
+            Err(SecretSourceError::Empty)
+        ));
+        std::fs::write(
+            creds
+                .path()
+                .join(crate::agent_enroll::AGENT_CREDENTIAL_NAME),
+            vec![b'a'; 4096],
+        )
+        .unwrap();
+        assert!(matches!(
+            read_agent_secret_in(Some(dir)),
+            Err(SecretSourceError::Read(VaultError::Io { .. }))
+        ));
+    }
+
+    #[test]
+    fn the_agent_secret_prints_nothing_of_the_secret() {
+        let s = AgentSecret::new(Zeroizing::new("agent-sid-sentinel".into()));
+        assert!(!format!("{s:?}").contains("sentinel"));
     }
 
     // ---- plaintext branches: gate enforced --------------------------------------

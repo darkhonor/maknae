@@ -17,6 +17,10 @@ impl SanRule {
     pub fn for_plane(plane: Plane, trust_domain: &str) -> Self {
         SanRule::Exact(plane.uri_san(trust_domain))
     }
+
+    pub fn for_subject(subject: &crate::PlaneSubject, trust_domain: &str) -> Self {
+        SanRule::Exact(subject.san(trust_domain))
+    }
 }
 
 #[derive(Debug)]

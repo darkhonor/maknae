@@ -15,17 +15,17 @@
 //! (I/O + external-error plumbing). No decision logic was demoted: the shape
 //! decision is T1 and self-checked below, fail-closed.
 use crate::csr::csr_matches_plane_shape;
-use crate::{Plane, VaultError};
+use crate::{PlaneSubject, VaultError};
 use maknae_crypto::plane_key::PlaneKey;
 use zeroize::Zeroizing;
 
 /// Generate the plane's keypair + CSR. Returns `(key_der, csr_pem)`.
 pub fn generate_plane_csr(
-    plane: Plane,
+    subject: &PlaneSubject,
     deployment_id: &str,
     plane_key: PlaneKey,
 ) -> Result<(Zeroizing<Vec<u8>>, String), VaultError> {
-    let want = plane.uri_san(deployment_id);
+    let want = subject.san(deployment_id);
     let mut params = maknae_crypto::csr::CsrParams::default();
     params.uris = vec![want.clone()];
     let key =
@@ -44,13 +44,15 @@ pub fn generate_plane_csr(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Plane;
     use maknae_crypto::rustls::pki_types::PrivateKeyDer;
 
     #[test]
     fn each_plane_key_generates_its_own_shape_and_a_key_rustls_signs_with() {
         let schemes = PlaneKey::ALL.map(PlaneKey::signature_scheme);
         for k in PlaneKey::ALL {
-            let (key_der, csr_pem) = generate_plane_csr(Plane::Kernel, "dev-01", k).unwrap();
+            let (key_der, csr_pem) =
+                generate_plane_csr(&PlaneSubject::Fixed(Plane::Kernel), "dev-01", k).unwrap();
             assert!(csr_matches_plane_shape(
                 &csr_pem,
                 "spiffe://dev-01/plane/kernel",
@@ -76,7 +78,8 @@ mod tests {
     fn a_plane_csr_carries_no_usage_extensions() {
         use x509_parser::prelude::FromDer;
         for k in PlaneKey::ALL {
-            let (_, pem) = generate_plane_csr(Plane::Kernel, "dev-01", k).unwrap();
+            let (_, pem) =
+                generate_plane_csr(&PlaneSubject::Fixed(Plane::Kernel), "dev-01", k).unwrap();
             let (_, der) = x509_parser::pem::parse_x509_pem(pem.as_bytes()).unwrap();
             let (_, csr) = x509_parser::certification_request::X509CertificationRequest::from_der(
                 &der.contents,
