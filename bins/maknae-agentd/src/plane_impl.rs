@@ -8,7 +8,8 @@ use maknae_crypto::plane_key::PlaneKey;
 use maknae_loop::agent::{AgentPlane, PersonaFiles, TaskTrust};
 use maknae_loop::keys::AgentKeys;
 use maknae_loop::plane::LoopPlane;
-use maknae_vault::{AgentLogin, PlaneClient, TrustBundle};
+use maknae_vault::{AgentLogin, PlaneClient, TrustBundle, VaultError};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -75,9 +76,16 @@ pub fn describe(event: &DriverEvent) -> Option<String> {
     }
 }
 
+pub fn task_trust(cfg: &AgentClientConfig, trust: Arc<TrustBundle>) -> TaskTrust {
+    TaskTrust {
+        trust,
+        trust_domain: cfg.trust_domain.clone(),
+        agent: cfg.agent.clone(),
+    }
+}
+
 pub struct Connected {
     pub plane: Plane,
-    pub client: Arc<PlaneClient>,
 }
 
 pub struct Assembly<'a> {
@@ -111,11 +119,7 @@ pub fn connect(a: Assembly<'_>) -> Result<Connected, String> {
         write_max,
         keys,
     )?;
-    let trust = TaskTrust {
-        trust: a.trust,
-        trust_domain: cfg.trust_domain.clone(),
-        agent: cfg.agent.clone(),
-    };
+    let trust = task_trust(cfg, a.trust);
     let personas = PersonaFiles {
         config_dir: a.config_dir.to_path_buf(),
         agent: cfg.agent.clone(),
@@ -129,7 +133,6 @@ pub fn connect(a: Assembly<'_>) -> Result<Connected, String> {
     });
     Ok(Connected {
         plane: AgentPlane::new(plane, trust, personas, note),
-        client: a.client,
     })
 }
 
@@ -140,15 +143,38 @@ pub fn next_backoff(d: Duration) -> Duration {
     (d * 2).min(MINT_BACKOFF_MAX)
 }
 
+/// The agent's Vault login, as the daemon's lifecycle uses it.
+pub trait Credential: Send + Sync + 'static {
+    fn mint(&self) -> impl Future<Output = Result<(), String>> + Send;
+    /// Renews the token and rotates the leaf; resolves only when it gives up.
+    fn supervise(&self) -> tokio::task::JoinHandle<VaultError>;
+    fn revoke(&self) -> impl Future<Output = ()> + Send;
+}
+
+impl Credential for PlaneClient {
+    async fn mint(&self) -> Result<(), String> {
+        PlaneClient::mint(self)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    fn supervise(&self) -> tokio::task::JoinHandle<VaultError> {
+        self.spawn_supervisor()
+    }
+    async fn revoke(&self) {
+        self.shutdown().await;
+    }
+}
+
 /// Mints until a leaf is held; `false` when the stop signal came first.
-pub async fn mint_until_held(client: &PlaneClient, stop: &watch::Receiver<bool>) -> bool {
+pub async fn mint_until_held<C: Credential>(cred: &C, stop: &watch::Receiver<bool>) -> bool {
     let mut wait = MINT_BACKOFF_FIRST;
     loop {
         if *stop.borrow() {
             return false;
         }
-        match client.mint().await {
-            Ok(_) => return true,
+        match cred.mint().await {
+            Ok(()) => return true,
             Err(e) => eprintln!(
                 "maknae-agentd: minting the plane leaf failed ({e}); retrying in {}s",
                 wait.as_secs()
@@ -162,14 +188,27 @@ pub async fn mint_until_held(client: &PlaneClient, stop: &watch::Receiver<bool>)
     }
 }
 
-/// Keeps a current leaf: the credential supervisor renews the token and rotates
-/// the leaf before its `not_after`; when it gives up, the login is minted again.
-pub async fn keep_leaf(client: Arc<PlaneClient>, stop: watch::Receiver<bool>) {
+struct AbortOnDrop(tokio::task::JoinHandle<VaultError>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Keeps a current leaf: the supervisor renews the token and rotates the leaf before
+/// its `not_after`; when it gives up, the login is minted again. On `done` the
+/// supervisor is aborted and reaped before this returns.
+async fn keep_leaf<C: Credential>(cred: Arc<C>, done: watch::Receiver<bool>) {
     loop {
-        let supervisor = client.spawn_supervisor();
+        let mut supervisor = AbortOnDrop(cred.supervise());
         let gave_up = tokio::select! {
-            r = supervisor => r,
-            () = crate::shutdown::stopped(stop.clone()) => return,
+            r = &mut supervisor.0 => r,
+            () = crate::shutdown::stopped(done.clone()) => {
+                supervisor.0.abort();
+                let _ = (&mut supervisor.0).await;
+                return;
+            }
         };
         match gave_up {
             Ok(e) => {
@@ -179,10 +218,37 @@ pub async fn keep_leaf(client: Arc<PlaneClient>, stop: watch::Receiver<bool>) {
                 eprintln!("maknae-agentd: the credential supervisor ended ({e}); logging in again")
             }
         }
-        if !mint_until_held(&client, &stop).await {
+        if !mint_until_held(&*cred, &done).await {
             return;
         }
     }
+}
+
+/// Runs `serve` with the leaf kept current, then, whatever `serve` returned, stops
+/// and reaps the supervisor and revokes the login within `PLANE_SHUTDOWN_BOUND`.
+pub async fn run_minted<C, F>(cred: Arc<C>, serve: F) -> Result<(), String>
+where
+    C: Credential,
+    F: Future<Output = Result<(), String>>,
+{
+    let (done, rx) = watch::channel(false);
+    let mut leaf = tokio::spawn(keep_leaf(Arc::clone(&cred), rx));
+    let result = serve.await;
+    let _ = done.send(true);
+    if tokio::time::timeout(maknae_vault::PLANE_HTTP_TIMEOUT, &mut leaf)
+        .await
+        .is_err()
+    {
+        leaf.abort();
+        let _ = leaf.await;
+    }
+    if tokio::time::timeout(maknae_vault::PLANE_SHUTDOWN_BOUND, cred.revoke())
+        .await
+        .is_err()
+    {
+        eprintln!("maknae-agentd: revoking the plane login did not finish in time");
+    }
+    result
 }
 
 pub fn agent_id(args: &[String]) -> Result<AgentId, String> {
@@ -291,6 +357,128 @@ mod tests {
             seen.push(d.as_secs());
         }
         assert_eq!(seen, [1, 2, 4, 8, 16, 32, 60, 60, 60]);
+    }
+
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct FakeLogin {
+        mint_fails: bool,
+        mints: AtomicUsize,
+        revoke_hangs: bool,
+        supervisor_running: Arc<AtomicBool>,
+        revoked_with_supervisor_running: std::sync::Mutex<Vec<bool>>,
+    }
+
+    struct Running(Arc<AtomicBool>);
+    impl Drop for Running {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
+
+    impl Credential for FakeLogin {
+        async fn mint(&self) -> Result<(), String> {
+            self.mints.fetch_add(1, Ordering::SeqCst);
+            if self.mint_fails {
+                Err("sentinel-629-vault-down".into())
+            } else {
+                Ok(())
+            }
+        }
+        fn supervise(&self) -> tokio::task::JoinHandle<VaultError> {
+            let flag = Arc::clone(&self.supervisor_running);
+            flag.store(true, Ordering::SeqCst);
+            tokio::spawn(async move {
+                let _running = Running(flag);
+                std::future::pending::<VaultError>().await
+            })
+        }
+        async fn revoke(&self) {
+            self.revoked_with_supervisor_running
+                .lock()
+                .unwrap()
+                .push(self.supervisor_running.load(Ordering::SeqCst));
+            if self.revoke_hangs {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_supervisor_is_reaped_before_the_login_is_revoked() {
+        let login = Arc::new(FakeLogin::default());
+        let ran = run_minted(Arc::clone(&login), async {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            Ok(())
+        })
+        .await;
+        assert_eq!(ran, Ok(()));
+        assert_eq!(
+            *login.revoked_with_supervisor_running.lock().unwrap(),
+            [false]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failure_after_the_mint_still_reaps_and_revokes() {
+        let login = Arc::new(FakeLogin::default());
+        let ran = run_minted(Arc::clone(&login), async {
+            tokio::task::yield_now().await;
+            Err("sentinel-629-connect-failed".to_string())
+        })
+        .await;
+        assert_eq!(ran, Err("sentinel-629-connect-failed".to_string()));
+        assert_eq!(
+            *login.revoked_with_supervisor_running.lock().unwrap(),
+            [false]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_revoke_that_hangs_ends_at_the_shutdown_bound() {
+        let login = Arc::new(FakeLogin {
+            revoke_hangs: true,
+            ..Default::default()
+        });
+        let start = tokio::time::Instant::now();
+        let ran = run_minted(Arc::clone(&login), async { Ok(()) }).await;
+        assert_eq!(ran, Ok(()));
+        assert_eq!(start.elapsed(), maknae_vault::PLANE_SHUTDOWN_BOUND);
+        assert_eq!(
+            login.revoked_with_supervisor_running.lock().unwrap().len(),
+            1
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_stop_signal_ends_the_mint_backoff() {
+        let login = FakeLogin {
+            mint_fails: true,
+            ..Default::default()
+        };
+        let (tx, rx) = crate::shutdown::stop_signal();
+        let start = tokio::time::Instant::now();
+        let stopper = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(20)).await;
+            tx.send(true).unwrap();
+        });
+        assert!(!mint_until_held(&login, &rx).await);
+        stopper.await.unwrap();
+        assert_eq!(start.elapsed(), Duration::from_secs(20));
+        assert_eq!(
+            login.mints.load(Ordering::SeqCst),
+            5,
+            "1+2+4+8 s of backoff, then the stop"
+        );
+    }
+
+    #[test]
+    fn the_task_trust_is_the_agents_own_id_and_trust_domain() {
+        let ca = maknae_vault::test_pki::TestCa::new(PlaneKey::MlDsa87);
+        let trust = task_trust(&cfg(), ca.trust());
+        assert_eq!(trust.agent.as_str(), "hobi");
+        assert_eq!(trust.trust_domain, "maknae.example");
     }
 
     #[test]

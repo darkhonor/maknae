@@ -28,4 +28,6 @@ nix = { version = "0.31", default-features = false, features = ["user"] }
 
 [dev-dependencies]
 maknae-proto = { path = "../../crates/maknae-proto" }
+# The test CA a TaskTrust is built over.
+maknae-vault = { path = "../../crates/maknae-vault", features = ["test-support"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "signal", "sync", "test-util"] }

@@ -4,7 +4,7 @@ PRIVILEGED_CRATES=(maknae-kernel maknae-subject-ctx-mint maknae-audit-append mak
 UNTRUSTED_BINS=(maknae maknae-agentd)
 # P2-loop (#629): unreachable through normal dependencies from every TRUSTED_ROOTS member.
 LOOP_CRATES=(maknae-loop maknae-agent)
-TRUSTED_ROOTS=(maknaed "${PRIVILEGED_CRATES[@]}")
+TRUSTED_ROOTS=(maknaed maknae-egress maknae-spifc "${PRIVILEGED_CRATES[@]}")
 # Per-consumer allowlist: which privileged crate each trust-plane binary may DIRECTLY depend on
 # (mirrors packaging/isolation-contract.md crate×binary matrix). maknaed gets the kernel (which
 # itself carries mint/append transitively); the setup-only tool gets ONLY the compiler. Anything

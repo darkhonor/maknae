@@ -135,7 +135,11 @@ pub trait TaskPlane: Plane {
     /// Creates mode 0700. An existing directory is `Applied`.
     fn mkdir(&mut self, path: &str, parents: bool) -> impl Future<Output = WriteOutcome> + Send;
     fn verify(&mut self, signed: &Bytes) -> Result<SignedTask, Unverified>;
-    fn persona(&mut self, at: PersonaAt<'_>) -> Result<Option<SecretText>, String>;
+    /// Cited: a home or partition persona is read as the task's own request.
+    fn persona(
+        &mut self,
+        at: PersonaAt<'_>,
+    ) -> impl Future<Output = Result<Option<SecretText>, String>> + Send;
     fn note(&mut self, _event: DriverEvent) {}
 }
 
@@ -498,7 +502,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
                 .stop_cited(id, None, PARTITION_UNAVAILABLE, &mut 0)
                 .await;
         }
-        let Ok(persona) = self.persona(partition) else {
+        let Ok(persona) = self.persona(partition).await else {
             return self.stop_cited(id, None, PERSONA_UNAVAILABLE, &mut 0).await;
         };
         let Ask::Prompt { prompt } = &task.task.ask;
@@ -542,7 +546,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
         true
     }
 
-    fn persona(&mut self, partition: &str) -> Result<Option<SecretText>, String> {
+    async fn persona(&mut self, partition: &str) -> Result<Option<SecretText>, String> {
         let order: &[PersonaAt<'_>] = match self.config.persona {
             PersonaMode::Admin => &[PersonaAt::Etc],
             PersonaMode::Own => &[
@@ -552,7 +556,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
             ],
         };
         for at in order {
-            if let Some(text) = self.plane.persona(*at)? {
+            if let Some(text) = self.plane.persona(*at).await? {
                 return Ok(Some(text));
             }
         }
@@ -908,7 +912,7 @@ mod tests {
             self.log("verify".into());
             self.tasks[&signed.0[0]].clone()
         }
-        fn persona(&mut self, at: PersonaAt<'_>) -> Result<Option<SecretText>, String> {
+        async fn persona(&mut self, at: PersonaAt<'_>) -> Result<Option<SecretText>, String> {
             let key = match at {
                 PersonaAt::Etc => "etc".to_string(),
                 PersonaAt::Home => "home".to_string(),

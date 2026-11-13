@@ -265,6 +265,26 @@ impl<K: KeySupply, D: Dial> LoopPlane<K, D> {
         crate::task::TaskClient::over(Arc::clone(&self.link))
     }
 
+    /// A whole-file read that belongs to no conversation, carrying the cite.
+    pub async fn read_whole(&mut self, path: &str) -> ReadOutcome {
+        let diagnostics = &mut self.diagnostics;
+        read_outcome(
+            self.link
+                .send(
+                    Verb::Read {
+                        path: path.to_string(),
+                        conversation: None,
+                        page: Some(maknae_proto::WHOLE_FILE),
+                    },
+                    None,
+                    crate::mutation::WriteCheck::Unchecked,
+                    &mut |l| diagnostics.push(l),
+                )
+                .await
+                .map(WireOutcome::from),
+        )
+    }
+
     /// The directory is created mode 0700, as every subject-side mkdir is.
     pub async fn mkdir(&mut self, path: &str, parents: bool) -> WriteOutcome {
         let diagnostics = &mut self.diagnostics;

@@ -67,7 +67,7 @@ ANY non-privileged package in the workspace, with `TRUST_CONSUMER_ALLOW` naming 
 edges, so `maknaed` → `maknae-spif-compile` fails P1 although its cell here reads `—`. For the
 `maknae-agent` and `maknae-loop` rows (`LOOP_CRATES`), `p2-invert-tree.sh` enforces the FORBIDDEN
 `maknaed` cell: neither crate may be reachable through normal or build dependencies from `maknaed`,
-`maknae-kernel` or any privileged crate. `maknae-kernel` takes both as **dev**-dependencies, for its
+`maknae-egress`, `maknae-spifc`, `maknae-kernel` or any privileged crate. `maknae-kernel` takes both as **dev**-dependencies, for its
 integration tests (`agent_loop.rs`, `task_loop.rs`, `agent_daemon.rs`), which link into no shipped
 binary. The other NON-PRIVILEGED rows are un-gated prose; that `isolation-contract-lint.sh` skips a
 4-column table is a separate fact, and it is why no cell in this table carries a `✓<check>` token.
@@ -101,7 +101,7 @@ binary. The other NON-PRIVILEGED rows are un-gated prose; that `isolation-contra
 `maknae` is: the kernel decides every request it makes, and the partition operand bounds what a
 task may reach under the agent's `tasks/` directory. **Accepted residual (#629, spec Goal 9):**
 under `persona: self`, the daemon reads a persona from the task's partition, then the agent's
-home, then `/etc/maknae/agents/<id>/persona.md`. A home-level `persona.md` written while working
+home, then `/etc/maknae/agents/<id>/persona.md`; the first two are kernel reads cited to the task. A home-level `persona.md` written while working
 one tasker's task is therefore read at the start of other taskers' tasks. A persona grants
 nothing: every request is still decided against the agent's role and policy, and every persona
 write is an `fs.write` the kernel decides and audits.

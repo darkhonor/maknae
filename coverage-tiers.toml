@@ -470,9 +470,10 @@ files = [
   # maknae-kernel's an_agents_sealed_key_opens_only_on_the_path_the_kernel_admits_for_that_agent.
   "crates/maknae-loop/src/keys.rs",
   # #629: the agent daemon's plane. T2: verify decodes a delivered task and hands it
-  # to maknae-vault's verify_task (T1), and a persona is read only when the agent's
-  # own account owns it and no one else can write it; both fail closed. Pinned by
-  # its unit tests and end to end by maknae-kernel's tests/agent_daemon.rs.
+  # to maknae-vault's verify_task (T1); a home or partition persona is read through
+  # the kernel, cited, and only after a local check that the agent's own account owns
+  # it and no one else can write it; both fail closed. Pinned by its unit tests and
+  # end to end by maknae-kernel's tests/agent_daemon.rs.
   "crates/maknae-loop/src/agent.rs",
   # #629: the agent daemon's SIGTERM drain and its interruptible clock. T2: a wrong
   # arm overruns the stop bound or leaves a 990 s wait unstoppable (availability);
@@ -549,7 +550,7 @@ why = "#629: thin main: arg parse + runtime + signal listener + config, enrollme
 
 [[t3]]
 path = "bins/maknae-agentd/src/plane_impl.rs"
-why = "#629: the production assembly over a live Vault and kernel: the AgentLogin, the AgentPlane, the mint retry and the leaf supervisor loop. login, driver_config, persona_mode, describe, next_backoff and agent_id are pure and table-tested here; connect, mint_until_held and keep_leaf need Vault, as bins/maknae/src/agent.rs's run does"
+why = "#629: the production assembly over a live Vault and kernel: the AgentLogin, the AgentPlane, the mint retry, the leaf supervisor loop and run_minted, the one teardown every post-mint exit takes. login, driver_config, persona_mode, describe, next_backoff, task_trust and agent_id are table-tested; mint_until_held, keep_leaf and run_minted are tested over a fake Credential with paused time (the supervisor reaped before revoke, revoke after a failure, the revoke bound, the stop ending the backoff). connect and the PlaneClient Credential impl need Vault"
 
 [[t3]]
 path = "bins/maknaed/src/main.rs"

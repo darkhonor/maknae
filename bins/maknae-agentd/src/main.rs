@@ -31,7 +31,9 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(run(id)) {
+    let result = runtime.block_on(run(id));
+    runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("maknae-agentd: {e}");
@@ -83,28 +85,36 @@ async fn run(id: maknae_config::AgentId) -> Result<(), String> {
         &maknae_vault::read_seal_pub_pem().map_err(|e| e.to_string())?,
     )
     .map_err(|e| format!("the Egress Daemon public key on this host is not usable: {e}"))?;
-    if !plane_impl::mint_until_held(&client, &stop_rx).await {
+    if !plane_impl::mint_until_held(&*client, &stop_rx).await {
         return Ok(());
     }
-    let leaf = tokio::spawn(plane_impl::keep_leaf(Arc::clone(&client), stop_rx.clone()));
-    let connected = plane_impl::connect(plane_impl::Assembly {
+    let assembly = plane_impl::Assembly {
         config_dir: &config_dir,
         cfg: &cfg,
-        client,
+        client: Arc::clone(&client),
         trust,
         seal_key,
         home,
         owner: enrollment.uid,
-    })?;
+    };
+    plane_impl::run_minted(client, serve(assembly, driver_config, stop_rx)).await
+}
+
+async fn serve(
+    assembly: plane_impl::Assembly<'_>,
+    driver_config: maknae_agent::task_driver::DriverConfig,
+    stop: tokio::sync::watch::Receiver<bool>,
+) -> Result<(), String> {
+    let connected = plane_impl::connect(assembly)?;
     let mut driver = TaskDriver::new(
         connected.plane,
-        shutdown::TokioClock::new(stop_rx.clone()),
+        shutdown::TokioClock::new(stop.clone()),
         driver_config,
     );
     let handle = driver.shutdown_handle();
     let ended = shutdown::run_until_drained(
         driver.run(),
-        shutdown::stopped(stop_rx),
+        shutdown::stopped(stop),
         || handle.shut_down(),
         shutdown::AGENTD_EXCHANGE_DRAIN,
     )
@@ -114,17 +124,6 @@ async fn run(id: maknae_config::AgentId) -> Result<(), String> {
             "maknae-agentd: the exchange in flight did not end within {}s; its task is reported at the next start",
             shutdown::AGENTD_EXCHANGE_DRAIN.as_secs()
         );
-    }
-    leaf.abort();
-    let _ = leaf.await;
-    if tokio::time::timeout(
-        maknae_vault::PLANE_SHUTDOWN_BOUND,
-        connected.client.shutdown(),
-    )
-    .await
-    .is_err()
-    {
-        eprintln!("maknae-agentd: revoking the plane login did not finish in time");
     }
     Ok(())
 }

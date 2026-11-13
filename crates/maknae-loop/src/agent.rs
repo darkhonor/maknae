@@ -48,12 +48,17 @@ impl TaskTrust {
     }
 }
 
+/// The admin persona is root-owned and read here. A home or partition persona the
+/// model can write is only checked here; its text is read through the kernel.
 pub trait PersonaRead: Send {
-    fn read(&mut self, at: PersonaAt<'_>) -> Result<Option<SecretText>, String>;
+    fn etc(&mut self) -> Result<Option<SecretText>, String>;
+    /// Whether `rel`, under the agent's home, is present and fit to read.
+    fn present(&mut self, rel: &Path) -> Result<bool, String>;
+    fn home(&self) -> &Path;
 }
 
-/// `/etc` through the root-owned agent reader; the home and partition copies only
-/// when the agent's own account owns them and no one else can write them.
+/// `/etc` through the root-owned agent reader; a home or partition copy is fit to
+/// read only when the agent's own account owns it and no one else can write it.
 pub struct PersonaFiles {
     pub config_dir: PathBuf,
     pub agent: AgentId,
@@ -61,8 +66,14 @@ pub struct PersonaFiles {
     pub owner: u32,
 }
 
-impl PersonaFiles {
-    fn own(&self, rel: &Path) -> Result<Option<SecretText>, String> {
+impl PersonaRead for PersonaFiles {
+    fn etc(&mut self) -> Result<Option<SecretText>, String> {
+        maknae_config::read_persona(&self.config_dir, &self.agent)
+            .map(|p| p.map(SecretText))
+            .map_err(|e| e.to_string())
+    }
+
+    fn present(&mut self, rel: &Path) -> Result<bool, String> {
         let dir = AnchorRequired {
             owner: Some(self.owner),
             mode_mask: Some(0o022),
@@ -85,13 +96,17 @@ impl PersonaFiles {
         let read = maknae_io::open_anchor(&self.home, dir, StrategyPref::Auto)
             .and_then(|anchor| anchor.read(rel, desc, target));
         match read {
-            Ok(out) => text(out.value).map(Some),
+            Ok(_) => Ok(true),
             Err(IoError::Io {
                 kind: IoKind::NotFound,
                 path,
-            }) if path == full => Ok(None),
+            }) if path == full => Ok(false),
             Err(e) => Err(format!("{}: {e}", full.display())),
         }
+    }
+
+    fn home(&self) -> &Path {
+        &self.home
     }
 }
 
@@ -102,20 +117,6 @@ fn text(mut bytes: Zeroizing<Vec<u8>>) -> Result<SecretText, String> {
             drop(Zeroizing::new(e.into_bytes()));
             "the persona is not UTF-8".to_string()
         })
-}
-
-impl PersonaRead for PersonaFiles {
-    fn read(&mut self, at: PersonaAt<'_>) -> Result<Option<SecretText>, String> {
-        match at {
-            PersonaAt::Etc => maknae_config::read_persona(&self.config_dir, &self.agent)
-                .map(|p| p.map(SecretText))
-                .map_err(|e| e.to_string()),
-            PersonaAt::Home => self.own(Path::new(maknae_config::PERSONA_FILE)),
-            PersonaAt::Partition(partition) => {
-                self.own(&Path::new(partition).join(maknae_config::PERSONA_FILE))
-            }
-        }
-    }
 }
 
 pub struct AgentPlane<K: KeySupply, R: PersonaRead, D: Dial = PlaneDial> {
@@ -209,8 +210,24 @@ impl<K: KeySupply, R: PersonaRead, D: Dial> TaskPlane for AgentPlane<K, R, D> {
     fn verify(&mut self, signed: &Bytes) -> Result<SignedTask, Unverified> {
         self.trust.verify(signed, std::time::SystemTime::now())
     }
-    fn persona(&mut self, at: PersonaAt<'_>) -> Result<Option<SecretText>, String> {
-        self.personas.read(at)
+    async fn persona(&mut self, at: PersonaAt<'_>) -> Result<Option<SecretText>, String> {
+        let rel = match at {
+            PersonaAt::Etc => return self.personas.etc(),
+            PersonaAt::Home => PathBuf::from(maknae_config::PERSONA_FILE),
+            PersonaAt::Partition(p) => Path::new(p).join(maknae_config::PERSONA_FILE),
+        };
+        if !self.personas.present(&rel)? {
+            return Ok(None);
+        }
+        let path = self.personas.home().join(&rel);
+        let path = path.to_str().ok_or("the persona path is not UTF-8")?;
+        match self.plane.read_whole(path).await {
+            ReadOutcome::Content(page) if page.eof => text(page.content).map(Some),
+            ReadOutcome::Content(_) => Err(format!("{path}: the persona is longer than one read")),
+            ReadOutcome::Refused => Err(format!("{path}: the kernel refused the read")),
+            ReadOutcome::Protected(by) => Err(format!("{path}: protected ({by:?})")),
+            ReadOutcome::Unavailable => Err(format!("{path}: the read was unavailable")),
+        }
     }
     fn note(&mut self, event: DriverEvent) {
         (self.note)(event);
@@ -272,15 +289,16 @@ mod tests {
         }
     }
 
-    struct NoPersona;
-    impl PersonaRead for NoPersona {
-        fn read(&mut self, at: PersonaAt<'_>) -> Result<Option<SecretText>, String> {
-            match at {
-                PersonaAt::Partition(p) => Ok(Some(SecretText(Zeroizing::new(format!(
-                    "sentinel-629-{p}"
-                ))))),
-                PersonaAt::Etc | PersonaAt::Home => Ok(None),
-            }
+    struct PartitionPersona(PathBuf);
+    impl PersonaRead for PartitionPersona {
+        fn etc(&mut self) -> Result<Option<SecretText>, String> {
+            Ok(Some(SecretText(Zeroizing::new("sentinel-629-etc".into()))))
+        }
+        fn present(&mut self, rel: &Path) -> Result<bool, String> {
+            Ok(rel.starts_with("tasks"))
+        }
+        fn home(&self) -> &Path {
+            &self.0
         }
     }
 
@@ -289,7 +307,7 @@ mod tests {
         use crate::plane::fake::{refused, FakeKernel};
         use maknae_proto::Verb;
         let ca = TestCa::new(PlaneKey::MlDsa87);
-        let verbs = 12;
+        let verbs = 13;
         let lp = LoopPlane::with_dial(
             FakeKernel::answering(vec![refused(); verbs]),
             maknae_config::TransportConfig::default(),
@@ -306,7 +324,7 @@ mod tests {
                 trust_domain: TRUST_DOMAIN.into(),
                 agent: hobi(),
             },
-            NoPersona,
+            PartitionPersona(PathBuf::from("/home/hobi")),
             Box::new(move |e| seen.lock().unwrap().push(e)),
         );
         let id = TaskId([0x29; 16]);
@@ -338,14 +356,24 @@ mod tests {
         let _ = plane.report(SecretText(Zeroizing::new("r".into()))).await;
         let _ = plane.take_diagnostics();
         plane.note(DriverEvent::CloseFailed(PlaneError::Refused));
+        plane.cite(Some(id));
+        assert_eq!(plane.persona(PersonaAt::Home).await, Ok(None));
         assert_eq!(
             plane
-                .persona(PersonaAt::Partition("tasks/users/1000"))
+                .persona(PersonaAt::Etc)
+                .await
                 .unwrap()
                 .unwrap()
                 .0
                 .as_str(),
-            "sentinel-629-tasks/users/1000"
+            "sentinel-629-etc"
+        );
+        let refused = plane
+            .persona(PersonaAt::Partition("tasks/users/1000"))
+            .await;
+        assert_eq!(
+            refused,
+            Err("/home/hobi/tasks/users/1000/persona.md: the read was unavailable".into())
         );
         let sent: Vec<_> = plane
             .plane
@@ -366,6 +394,11 @@ mod tests {
                     Verb::FsMkdir { parents: true, .. } => "mkdir",
                     Verb::SessionNew { .. } => "open",
                     Verb::SessionPrompt { .. } => "prompt",
+                    Verb::Read {
+                        conversation: None,
+                        path,
+                        ..
+                    } if path == "/home/hobi/tasks/users/1000/persona.md" => "persona",
                     Verb::Read { .. } => "read",
                     Verb::FsWrite { .. } => "write",
                     Verb::FsList { .. } => "list",
@@ -392,6 +425,7 @@ mod tests {
                 cited("stat"),
                 cited("close"),
                 ("report", None),
+                cited("persona"),
             ]
         );
         assert_eq!(
@@ -514,75 +548,86 @@ mod tests {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
     }
 
-    fn read(files: &mut PersonaFiles, at: PersonaAt<'_>) -> Result<Option<String>, String> {
-        files.read(at).map(|p| p.map(|t| t.0.to_string()))
+    fn present(files: &mut PersonaFiles, rel: &str) -> Result<bool, String> {
+        files.present(Path::new(rel))
     }
 
+    const HOME: &str = "persona.md";
+    const PART: &str = "tasks/users/1000/persona.md";
+
     #[test]
-    fn the_home_and_partition_personas_are_read_when_present_and_absent_otherwise() {
+    fn the_home_and_partition_personas_are_fit_to_read_when_present_and_absent_otherwise() {
         let (h, mut files) = home("present");
-        let part = PersonaAt::Partition("tasks/users/1000");
-        assert_eq!(read(&mut files, PersonaAt::Home), Ok(None));
-        assert_eq!(read(&mut files, part), Ok(None));
-        put(&h.0.join("persona.md"), "sentinel-629-home-persona", 0o600);
-        put(
-            &h.0.join("tasks/users/1000/persona.md"),
-            "sentinel-629-partition-persona",
-            0o644,
-        );
-        assert_eq!(
-            read(&mut files, PersonaAt::Home),
-            Ok(Some("sentinel-629-home-persona".into()))
-        );
-        assert_eq!(
-            read(&mut files, part),
-            Ok(Some("sentinel-629-partition-persona".into()))
-        );
+        assert_eq!(present(&mut files, HOME), Ok(false));
+        assert_eq!(present(&mut files, PART), Ok(false));
+        put(&h.0.join(HOME), "sentinel-629-home-persona", 0o600);
+        put(&h.0.join(PART), "sentinel-629-partition-persona", 0o644);
+        assert_eq!(present(&mut files, HOME), Ok(true));
+        assert_eq!(present(&mut files, PART), Ok(true));
+        assert_eq!(files.home(), h.0.as_path());
     }
 
     #[test]
-    fn a_persona_others_can_write_or_that_is_linked_or_too_big_or_not_utf8_is_an_error() {
+    fn a_persona_others_can_write_or_that_is_linked_or_too_big_is_an_error() {
         let (h, mut files) = home("refused");
-        let path = h.0.join("persona.md");
+        let path = h.0.join(HOME);
         for mode in [0o620, 0o602] {
             put(&path, "sentinel-629-writable", mode);
-            assert!(read(&mut files, PersonaAt::Home).is_err(), "{mode:o}");
+            assert!(present(&mut files, HOME).is_err(), "{mode:o}");
         }
         std::fs::remove_file(&path).unwrap();
         put(&h.0.join("elsewhere.md"), "sentinel-629-linked", 0o600);
         std::os::unix::fs::symlink(h.0.join("elsewhere.md"), &path).unwrap();
-        assert!(read(&mut files, PersonaAt::Home).is_err());
+        assert!(present(&mut files, HOME).is_err());
         std::fs::remove_file(&path).unwrap();
         put(&path, &"p".repeat(PERSONA_MAX_BYTES as usize + 1), 0o600);
-        assert!(read(&mut files, PersonaAt::Home).is_err());
-        std::fs::write(&path, b"\xff\xfe").unwrap();
-        assert_eq!(
-            read(&mut files, PersonaAt::Home),
-            Err("the persona is not UTF-8".into())
-        );
+        assert!(present(&mut files, HOME).is_err());
         std::fs::remove_file(&path).unwrap();
-        std::fs::set_permissions(&h.0, std::fs::Permissions::from_mode(0o720)).unwrap();
+        std::fs::set_permissions(&h.0, std::fs::Permissions::from_mode(0o775)).unwrap();
         assert!(
-            read(&mut files, PersonaAt::Home).is_err(),
+            present(&mut files, HOME).is_err(),
             "a home others can write"
+        );
+        std::fs::set_permissions(&h.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(
+            h.0.join("tasks/users"),
+            std::fs::Permissions::from_mode(0o777),
+        )
+        .unwrap();
+        assert!(
+            present(&mut files, PART).is_err(),
+            "a partition parent others can write"
         );
     }
 
     #[test]
     fn a_persona_owned_by_another_account_is_an_error() {
         let (h, mut files) = home("owner");
-        put(&h.0.join("persona.md"), "sentinel-629-owner", 0o600);
+        put(&h.0.join(HOME), "sentinel-629-owner", 0o600);
         files.owner = files.owner.wrapping_add(1);
-        assert!(read(&mut files, PersonaAt::Home).is_err());
+        assert!(present(&mut files, HOME).is_err());
     }
 
     #[test]
     fn the_etc_persona_is_read_through_the_root_owned_agent_reader() {
         let (_h, mut files) = home("etc");
-        let got = read(&mut files, PersonaAt::Etc);
+        let got = files.etc();
         assert!(
             got.is_err(),
-            "a missing agents directory is never an absent persona: {got:?}"
+            "a missing agents directory is never an absent persona: {:?}",
+            got.map(|p| p.is_some())
+        );
+    }
+
+    #[test]
+    fn persona_text_must_be_utf8() {
+        assert_eq!(
+            text(Zeroizing::new(b"sentinel-629-text".to_vec())).map(|t| t.0.to_string()),
+            Ok("sentinel-629-text".to_string())
+        );
+        assert_eq!(
+            text(Zeroizing::new(vec![0xff, 0xfe])).map(|t| t.0.to_string()),
+            Err("the persona is not UTF-8".to_string())
         );
     }
 }

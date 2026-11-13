@@ -7,14 +7,14 @@ use common::Records;
 use maknae_agent::budget::ContextBudget;
 use maknae_agent::drive::Budget;
 use maknae_agent::task_driver::{
-    Clock, DriverConfig, DriverEvent, Ending, PersonaAt, PersonaMode, ShutdownHandle, TaskDriver,
+    Clock, DriverConfig, DriverEvent, Ending, PersonaMode, ShutdownHandle, TaskDriver,
 };
 use maknae_crypto::plane_key::PlaneKey;
 use maknae_io::Zeroizing;
 use maknae_kernel::{
     AgentAdmission, ManualClock, MemTaskBlobs, TaskRefusal, TaskStore, CLAIM_LEASE,
 };
-use maknae_loop::agent::{AgentPlane, PersonaRead, TaskTrust};
+use maknae_loop::agent::{AgentPlane, PersonaFiles, PersonaRead, TaskTrust};
 use maknae_loop::keys::{AgentKeys, WrappedRead};
 use maknae_loop::plane::{Dial, LoopPlane};
 use maknae_proto::{
@@ -25,7 +25,7 @@ use maknae_vault::test_pki::{TestCa, TRUST_DOMAIN};
 use std::collections::VecDeque;
 use std::future::Future;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -687,23 +687,18 @@ impl WrappedRead for Vault {
     }
 }
 
-/// Reads the home and partition personas from the test's home.
-struct Personas {
-    home: PathBuf,
-}
+/// The production persona checks over the test's home; no `/etc` persona.
+struct Personas(PersonaFiles);
 
 impl PersonaRead for Personas {
-    fn read(&mut self, at: PersonaAt<'_>) -> Result<Option<SecretText>, String> {
-        let path = match at {
-            PersonaAt::Etc => return Ok(None),
-            PersonaAt::Home => self.home.join("persona.md"),
-            PersonaAt::Partition(p) => self.home.join(p).join("persona.md"),
-        };
-        match std::fs::read_to_string(&path) {
-            Ok(s) => Ok(Some(secret(&s))),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e.to_string()),
-        }
+    fn etc(&mut self) -> Result<Option<SecretText>, String> {
+        Ok(None)
+    }
+    fn present(&mut self, rel: &Path) -> Result<bool, String> {
+        self.0.present(rel)
+    }
+    fn home(&self) -> &Path {
+        self.0.home()
     }
 }
 
@@ -763,6 +758,11 @@ impl Daemon {
                 _ => None,
             })
             .collect()
+    }
+
+    /// The task's ending is noted after its report is acknowledged and before its close.
+    fn ended(&self, id: &TaskId) -> bool {
+        self.endings().iter().any(|(t, _)| t.as_ref() == Some(id))
     }
 
     fn close_failures(&self) -> usize {
@@ -833,7 +833,12 @@ fn plane(w: &World, model: &Arc<Model>, events: &Arc<Mutex<Vec<DriverEvent>>>) -
             trust_domain: TRUST_DOMAIN.into(),
             agent: hobi,
         },
-        Personas { home },
+        Personas(PersonaFiles {
+            config_dir: home.join("etc"),
+            agent: maknae_config::AgentId::parse("hobi").unwrap(),
+            home,
+            owner: nix::unistd::geteuid().as_raw(),
+        }),
         Box::new(move |e| seen.lock().unwrap().push(e)),
     )
 }
@@ -885,14 +890,16 @@ async fn an_agent_carries_out_a_prompt_task_in_its_taskers_partition() {
     let _one = ONE_DAEMON.lock().await;
     let w = world("carries", HOBI_POLICY);
     let id = w.submit("sentinel-629-carry-prompt").await;
+    let persona = w.root.join("persona.md");
+    std::fs::write(&persona, "sentinel-629-home-persona").unwrap();
+    std::fs::set_permissions(&persona, std::fs::Permissions::from_mode(0o600)).unwrap();
     let notes = w.partition().join("notes.md");
     let model = Model::script(vec![
         write_file("w1", notes.to_str().unwrap(), "sentinel-629-written"),
         answer("sentinel-629-answer"),
     ]);
     let d = start(&w, &model);
-    d.until("the report", |_| w.state(&id) == TaskState::Reported)
-        .await;
+    d.until("the report", |d| d.ended(&id)).await;
     d.until("the conversation is closed", |d| {
         !closed(&w).is_empty() || d.close_failures() > 0
     })
@@ -914,7 +921,18 @@ async fn an_agent_carries_out_a_prompt_task_in_its_taskers_partition() {
         },
         other => panic!("{other:?}"),
     };
-    assert_eq!(first, "sentinel-629-carry-prompt");
+    assert_eq!(
+        first,
+        "sentinel-629-home-persona\n\nsentinel-629-carry-prompt"
+    );
+    let persona_reads: Vec<_> = cited(&w, &id, "fs.read")
+        .into_iter()
+        .filter(|r| r.object.as_deref() == persona.to_str())
+        .collect();
+    assert!(
+        persona_reads.iter().any(|r| r.outcome.result == "permit"),
+        "the home persona is read through the kernel under the task: {persona_reads:?}"
+    );
     let reports = w.collected().await;
     assert_eq!(reports, vec![(id, None, "sentinel-629-answer".to_string())]);
     let close = closed(&w);
@@ -972,12 +990,19 @@ async fn an_agent_is_refused_what_its_policy_denies() {
         answer("sentinel-629-denied-answer"),
     ]);
     let d = start(&w, &model);
-    d.until("the report", |_| reported(&w, &id)).await;
+    d.until("the report", |d| d.ended(&id)).await;
     d.stop().await;
     assert!(!denied.exists(), "the denied write landed");
     let writes = cited(&w, &id, "fs.write");
     assert_eq!(writes.len(), 1, "{writes:?}");
     assert_eq!(writes[0].outcome.result, "deny");
+    assert_eq!(writes[0].subject.agent.as_deref(), Some("hobi"));
+    assert_eq!(
+        writes[0].outcome.reason,
+        format!(
+            "denied by agents.hobi.policy.permissions entry Write(~/tasks/users/{me}/sentinel-629-denied.md)"
+        )
+    );
     let results = tool_results(&model.prompts()[1]);
     assert_eq!(results.len(), 1);
     assert!(!results[0].starts_with("applied"), "{results:?}");
@@ -1001,13 +1026,13 @@ async fn an_agent_request_outside_its_taskers_partition_is_refused() {
         answer("sentinel-629-partition-answer"),
     ]);
     let d = start(&w, &model);
-    d.until("the report", |_| reported(&w, &id)).await;
+    d.until("the report", |d| d.ended(&id)).await;
     d.stop().await;
     let reads = cited(&w, &id, "fs.read");
     assert_eq!(reads.len(), 1, "{reads:?}");
     assert_eq!(reads[0].outcome.result, "deny");
     assert!(
-        reads[0].outcome.reason.contains("partition"),
+        reads[0].outcome.reason.starts_with("partition: "),
         "{:?}",
         reads[0].outcome.reason
     );
@@ -1043,7 +1068,7 @@ async fn an_agent_resumes_its_working_task_after_a_kernel_restart() {
     std::fs::create_dir_all(w.partition()).unwrap();
     std::fs::write(&notes, "sentinel-629-notes").unwrap();
     let d = start(&w, &model);
-    d.until("the report", |_| reported(&w, &id)).await;
+    d.until("the report", |d| d.ended(&id)).await;
     let endings = d.endings();
     let slept = d.ticks.slept();
     d.stop().await;
@@ -1094,7 +1119,7 @@ async fn a_kernel_restart_mid_step_resumes_the_same_task_with_the_lost_tool_call
         }
     }));
     let d = start(&w, &model);
-    d.until("the report", |_| reported(&w, &id)).await;
+    d.until("the report", |d| d.ended(&id)).await;
     let endings = d.endings();
     d.stop().await;
     assert_eq!(w.kernel.lock().unwrap().restarts, 1);
@@ -1181,10 +1206,8 @@ async fn a_session_that_stops_without_an_answer_is_reported_stopped_and_the_next
             max_tool_calls_per_step: 4,
         },
     );
-    d.until("both reports", |_| {
-        reported(&w, &first) && reported(&w, &second)
-    })
-    .await;
+    d.until("both reports", |d| d.ended(&first) && d.ended(&second))
+        .await;
     let endings = d.endings();
     d.stop().await;
     assert_eq!(
@@ -1228,7 +1251,7 @@ async fn an_agent_restarted_mid_task_reports_it_stopped_and_does_not_rerun_it() 
     assert!(!reported(&w, &id));
 
     let second = start(&w, &model);
-    second.until("the report", |_| reported(&w, &id)).await;
+    second.until("the report", |d| d.ended(&id)).await;
     let after = second.endings();
     second.stop().await;
     assert_eq!(after, vec![(Some(id), Ending::Restarted)]);
@@ -1265,8 +1288,7 @@ async fn an_undecodable_delivery_lapses_to_agent_lost_under_the_real_sweep_and_t
         }
     }));
     let d = start_with(&w, &model, ticks, BUDGET);
-    d.until("the next task's report", |_| reported(&w, &next))
-        .await;
+    d.until("the next task's report", |d| d.ended(&next)).await;
     let endings = d.endings();
     let slept = d.ticks.slept();
     d.stop().await;
@@ -1318,10 +1340,8 @@ async fn the_uncited_close_after_a_report_is_permitted_and_a_policy_refused_clos
         answer("sentinel-629-close-second-answer"),
     ]);
     let d = start(&w, &model);
-    d.until("both reports", |_| {
-        reported(&w, &first) && reported(&w, &second)
-    })
-    .await;
+    d.until("both reports", |d| d.ended(&first) && d.ended(&second))
+        .await;
     d.until("both closes", |d| d.close_failures() == 2).await;
     d.stop().await;
     let refused = records(&w, "session.close", "session.close is not in");

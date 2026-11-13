@@ -175,8 +175,8 @@ p2_fixture() { # [<member>:<crate>]... — each <member> takes a normal dependen
   local fixture members m edge dir kind
   fixture="$(mktemp -d -p "$NC_TMP")"
   members=''
-  for m in "${PRIVILEGED_CRATES[@]}" maknae-loop maknae-agent maknaed maknae maknae-agentd; do
-    case "$m" in maknaed|maknae|maknae-agentd) dir="bins/$m"; kind=bin ;; *) dir="crates/$m"; kind=lib ;; esac
+  for m in "${PRIVILEGED_CRATES[@]}" maknae-loop maknae-agent maknaed maknae maknae-agentd maknae-egress maknae-spifc; do
+    case "$m" in maknaed|maknae|maknae-agentd|maknae-egress|maknae-spifc) dir="bins/$m"; kind=bin ;; *) dir="crates/$m"; kind=lib ;; esac
     mkdir -p "$fixture/$dir/src"
     {
       printf '[package]\nname = "%s"\nversion = "0.0.0"\nedition = "2021"\n[dependencies]\n' "$m"
@@ -219,6 +219,12 @@ expect_reject_because "p2/agentd-links-privileged" \
 expect_reject_because "p2/daemon-links-loop" \
   "untrusted loop crate 'maknae-loop' is reachable from 'maknaed' (P2-loop)" \
   "$here/p2-invert-tree.sh" "$(p2_fixture maknaed:maknae-loop)"
+expect_reject_because "p2/egress-links-loop" \
+  "untrusted loop crate 'maknae-loop' is reachable from 'maknae-egress' (P2-loop)" \
+  "$here/p2-invert-tree.sh" "$(p2_fixture maknae-egress:maknae-loop)"
+expect_reject_because "p2/spifc-links-agent" \
+  "untrusted loop crate 'maknae-agent' is reachable from 'maknae-spifc' (P2-loop)" \
+  "$here/p2-invert-tree.sh" "$(p2_fixture maknae-spifc:maknae-agent)"
 expect_reject_because "p2/kernel-links-agent" \
   "untrusted loop crate 'maknae-agent' is reachable from 'maknae-kernel' (P2-loop)" \
   "$here/p2-invert-tree.sh" "$(p2_fixture maknae-kernel:maknae-agent)"
