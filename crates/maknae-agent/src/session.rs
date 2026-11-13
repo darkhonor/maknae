@@ -3,10 +3,10 @@
 //! prompt after prompt. Each session is its own value; nothing is shared
 //! between sessions except through the kernel.
 use crate::budget::{ContextBudget, Meter};
-use crate::drive::{drive_session, Budget, LoopEvent, Outcome, Seen, StopReason};
+use crate::drive::{drive_session, Budget, LoopEvent, NoHook, Outcome, Seen, StepHook, StopReason};
 use crate::plane::{Plane, PlaneError};
 use crate::transcript::Transcript;
-use maknae_proto::{ConversationId, ConversationView};
+use maknae_proto::{ConversationId, ConversationView, SecretText};
 use std::future::Future;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,6 +23,8 @@ impl LoopHandle {
         self.0.store(true, Ordering::Release);
     }
 }
+
+pub const OUTCOME_LOST: &str = "outcome unknown: the connection was lost";
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct SessionClosed;
@@ -137,6 +139,15 @@ impl Session {
         plane: &mut P,
         emit: &mut (impl FnMut(LoopEvent) + Send),
     ) -> Outcome {
+        self.run_with(plane, &mut NoHook, emit).await
+    }
+
+    pub async fn run_with<P: Plane + Send, H: StepHook<P> + Send>(
+        &mut self,
+        plane: &mut P,
+        hook: &mut H,
+        emit: &mut (impl FnMut(LoopEvent) + Send),
+    ) -> Outcome {
         if !self.pending {
             emit(LoopEvent::Stopped(StopReason::NothingPending));
             return Outcome {
@@ -158,6 +169,7 @@ impl Session {
             &self.stop,
             emit,
             self.home.as_deref(),
+            hook,
         )
         .await;
         match (&outcome.answer, &outcome.stopped) {
@@ -167,6 +179,31 @@ impl Session {
         }
         self.answered = outcome.answer.is_some();
         outcome
+    }
+
+    /// Re-enters a conversation whose run ended without an answer, or adds
+    /// `follow_ups` to one that answered. Every tool call left without a result
+    /// is closed as [`OUTCOME_LOST`]. An answered session with nothing new
+    /// answers [`StopReason::NothingPending`].
+    pub async fn resume<P: Plane + Send, H: StepHook<P> + Send>(
+        &mut self,
+        plane: &mut P,
+        follow_ups: &[SecretText],
+        hook: &mut H,
+        emit: &mut (impl FnMut(LoopEvent) + Send),
+    ) -> Outcome {
+        let closed = self.transcript.close_unanswered(OUTCOME_LOST);
+        for item in follow_ups {
+            self.transcript.push_user(&item.0);
+        }
+        if closed || !follow_ups.is_empty() || !self.answered {
+            self.pending = true;
+        }
+        self.run_with(plane, hook, emit).await
+    }
+
+    pub(crate) fn share_stop(&mut self, stop: Arc<AtomicBool>) {
+        self.stop = stop;
     }
 
     pub async fn converse<P, S, D>(
@@ -837,5 +874,105 @@ mod tests {
         let mut s = Session::new("c", "q", budget(), unmetered(), None);
         let mut p = fake(vec![]);
         assert_send(s.converse(&mut p, async { 0 }, || async {}, &mut |_| {}));
+    }
+
+    fn secret(s: &str) -> SecretText {
+        SecretText(Zeroizing::new(s.into()))
+    }
+    fn tool_text_of(s: &Session, id: &str) -> String {
+        s.transcript
+            .turns()
+            .iter()
+            .find_map(|t| match t {
+                Turn::Tool { call_id, content } if call_id == id => match &content[0] {
+                    ContentBlock::Text { text } => Some(text.0.to_string()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("a tool turn")
+    }
+
+    #[tokio::test]
+    async fn a_resume_closes_every_unanswered_call_as_lost_and_drives_on() {
+        let mut s = Session::new("conv-1", "hello", budget(), unmetered(), None);
+        let (_hold, release) = tokio::sync::oneshot::channel::<()>();
+        let mut p = fake(vec![
+            tool("c1", "write_file", &write_args("/w/a")),
+            answer("after"),
+        ]);
+        p.release = Some(release);
+        let cut = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            s.run(&mut p, &mut |_| {}),
+        )
+        .await;
+        assert!(cut.is_err());
+        let mut events = vec![];
+        let out = s
+            .resume(&mut p, &[], &mut NoHook, &mut |e| events.push(e))
+            .await;
+        assert_eq!(out.answer.as_deref(), Some("after"));
+        assert_eq!(tool_text_of(&s, "c1"), OUTCOME_LOST);
+        assert_eq!(OUTCOME_LOST, "outcome unknown: the connection was lost");
+        assert_eq!(p.prompts.last().map(|(_, n)| *n), Some(3));
+        assert_eq!(events, vec![LoopEvent::Answered]);
+    }
+
+    #[tokio::test]
+    async fn a_resume_after_a_lost_prompt_redrives_the_same_conversation() {
+        let mut s = Session::new("conv-1", "hello", budget(), unmetered(), None);
+        let mut p = fake(vec![answer("second try")]);
+        p.prompt_error = Some(PlaneError::Transport("reset".into()));
+        let lost = s.run(&mut p, &mut |_| {}).await;
+        assert_eq!(lost.stopped, Some(StopReason::Transport("reset".into())));
+        let out = s.resume(&mut p, &[], &mut NoHook, &mut |_| {}).await;
+        assert_eq!(out.answer.as_deref(), Some("second try"));
+        assert_eq!(p.prompts, vec![("conv-1".to_string(), 1)]);
+    }
+
+    #[tokio::test]
+    async fn a_resume_of_an_answered_session_with_nothing_new_is_nothing_pending() {
+        let mut s = Session::new("conv-1", "hello", budget(), unmetered(), None);
+        let mut p = fake(vec![answer("held")]);
+        assert_eq!(run_answer(&mut s, &mut p).await.1.as_deref(), Some("held"));
+        let mut events = vec![];
+        let out = s
+            .resume(&mut p, &[], &mut NoHook, &mut |e| events.push(e))
+            .await;
+        assert_eq!(out.stopped, Some(StopReason::NothingPending));
+        assert_eq!(events, vec![LoopEvent::Stopped(StopReason::NothingPending)]);
+        assert_eq!(p.prompts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn follow_ups_to_an_answered_session_are_user_turns_after_the_answer() {
+        let mut s = Session::new("conv-1", "hello", budget(), unmetered(), None);
+        let mut p = fake(vec![answer("first"), answer("second")]);
+        run_answer(&mut s, &mut p).await;
+        let out = s
+            .resume(
+                &mut p,
+                &[secret("more-1"), secret("more-2")],
+                &mut NoHook,
+                &mut |_| {},
+            )
+            .await;
+        assert_eq!(out.answer.as_deref(), Some("second"));
+        assert_eq!(p.prompts.last().map(|(_, n)| *n), Some(4));
+        assert!(
+            matches!(&s.transcript.turns()[3], Turn::User { content } if matches!(&content[0], ContentBlock::Text { text } if &*text.0 == "more-2"))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shared_stop_flag_stops_the_session() {
+        let mut s = Session::new("conv-1", "hello", budget(), unmetered(), None);
+        let flag = Arc::new(AtomicBool::new(true));
+        s.share_stop(Arc::clone(&flag));
+        let mut p = fake(vec![]);
+        let out = s.run(&mut p, &mut |_| {}).await;
+        assert_eq!(out.stopped, Some(StopReason::Stopped));
+        assert!(p.prompts.is_empty());
     }
 }

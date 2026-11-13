@@ -6,8 +6,10 @@ use crate::plane::{Dial, Link, PlaneDial};
 use maknae_agent::task::{
     beat_answer, claim_answer, report_answer, BeatAnswer, ClaimAnswer, ReportOutcome,
 };
+use maknae_agent::task_driver::VerifyClass;
 use maknae_agent::wire::WireOutcome;
 use maknae_proto::{SecretText, Verb};
+use maknae_vault::task_sig::TaskSignatureError;
 use std::sync::Arc;
 
 pub struct TaskClient<D: Dial = PlaneDial> {
@@ -56,6 +58,18 @@ impl<D: Dial> TaskClient<D> {
             )
             .await
             .map(WireOutcome::from)
+    }
+}
+
+/// Total: a new `TaskSignatureError` variant does not compile until it is classed.
+pub fn verify_class(e: TaskSignatureError) -> VerifyClass {
+    match e {
+        TaskSignatureError::AgentMismatch => VerifyClass::Agent,
+        TaskSignatureError::Algorithm => VerifyClass::Algorithm,
+        TaskSignatureError::NotKernel => VerifyClass::NotKernel,
+        TaskSignatureError::KeyMismatch => VerifyClass::Key,
+        TaskSignatureError::BadSignature => VerifyClass::Signature,
+        TaskSignatureError::Encoding => VerifyClass::Encoding,
     }
 }
 
@@ -248,5 +262,32 @@ mod tests {
             Ok(ReportOutcome::Refused(_))
         ));
         assert_eq!(plane.link_for_test().finish().await.requests.len(), 1);
+    }
+
+    #[test]
+    fn every_verify_error_maps_to_a_class() {
+        use super::verify_class;
+        use maknae_agent::task_driver::VerifyClass;
+        use maknae_vault::task_sig::TaskSignatureError;
+        let all = [
+            TaskSignatureError::AgentMismatch,
+            TaskSignatureError::Algorithm,
+            TaskSignatureError::NotKernel,
+            TaskSignatureError::KeyMismatch,
+            TaskSignatureError::BadSignature,
+            TaskSignatureError::Encoding,
+        ];
+        for e in all {
+            let want = match e {
+                TaskSignatureError::AgentMismatch => (VerifyClass::Agent, "agent"),
+                TaskSignatureError::Algorithm => (VerifyClass::Algorithm, "algorithm"),
+                TaskSignatureError::NotKernel => (VerifyClass::NotKernel, "not-kernel"),
+                TaskSignatureError::KeyMismatch => (VerifyClass::Key, "key"),
+                TaskSignatureError::BadSignature => (VerifyClass::Signature, "signature"),
+                TaskSignatureError::Encoding => (VerifyClass::Encoding, "encoding"),
+            };
+            assert_eq!(verify_class(e), want.0, "{e:?}");
+            assert_eq!(verify_class(e).as_str(), want.1, "{e:?}");
+        }
     }
 }

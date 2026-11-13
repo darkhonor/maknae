@@ -11,6 +11,7 @@ use crate::render::{render, ToolOutcome};
 use crate::route::{route, RouteError, ToolRequest};
 use crate::transcript::Transcript;
 use maknae_proto::{ContentBlock, PromptReply, ProposedToolCall};
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone, Copy)]
@@ -108,6 +109,35 @@ pub enum LoopEvent {
     Stopped(StopReason),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepControl {
+    Continue,
+    Stop,
+}
+
+/// Called once after every executed tool turn, when each call has its result, and
+/// before the next stop and budget check. A turn it appends follows complete tool
+/// turns; `Stop` ends the run as [`StopReason::Stopped`].
+pub trait StepHook<P> {
+    fn after_step(
+        &mut self,
+        plane: &mut P,
+        transcript: &mut Transcript,
+    ) -> impl Future<Output = StepControl> + Send;
+}
+
+pub struct NoHook;
+
+impl<P> StepHook<P> for NoHook {
+    fn after_step(
+        &mut self,
+        _: &mut P,
+        _: &mut Transcript,
+    ) -> impl Future<Output = StepControl> + Send {
+        std::future::ready(StepControl::Continue)
+    }
+}
+
 pub async fn drive<P: Plane>(
     plane: &mut P,
     transcript: &mut Transcript,
@@ -128,6 +158,7 @@ pub async fn drive<P: Plane>(
             }
         },
         None,
+        &mut NoHook,
     )
     .await
 }
@@ -145,6 +176,7 @@ pub async fn drive_session<P: Plane>(
     stop: &AtomicBool,
     emit: &mut impl FnMut(LoopEvent),
     home: Option<&str>,
+    hook: &mut impl StepHook<P>,
 ) -> Outcome {
     let mut steps_used = 0u32;
     loop {
@@ -387,6 +419,13 @@ pub async fn drive_session<P: Plane>(
                         }
                     };
                     transcript.push_tool_result(&call.call_id, &render(&outcome, steps_remaining));
+                }
+                if hook.after_step(plane, transcript).await == StepControl::Stop {
+                    return Outcome {
+                        answer: None,
+                        stopped: Some(StopReason::Stopped),
+                        steps_used,
+                    };
                 }
             }
         }
@@ -983,6 +1022,7 @@ mod tests {
             &AtomicBool::new(false),
             &mut |e| events.push(e),
             None,
+            &mut NoHook,
         )
         .await;
         assert_eq!(
@@ -1031,6 +1071,7 @@ mod tests {
             &AtomicBool::new(false),
             &mut |e| events.push(e),
             None,
+            &mut NoHook,
         )
         .await;
         events
@@ -1162,6 +1203,7 @@ mod tests {
             &AtomicBool::new(false),
             &mut |e| events.push(e),
             None,
+            &mut NoHook,
         )
         .await;
         assert_eq!(
@@ -1732,6 +1774,7 @@ mod tests {
             stop,
             &mut |e| events.push(e),
             None,
+            &mut NoHook,
         )
         .await;
         (out, events)
@@ -1752,6 +1795,7 @@ mod tests {
             &AtomicBool::new(false),
             &mut |_| {},
             home,
+            &mut NoHook,
         )
         .await;
         tool_text(&t.turns()[2])
@@ -1786,6 +1830,7 @@ mod tests {
             &AtomicBool::new(false),
             &mut |_| {},
             Some("/home/u"),
+            &mut NoHook,
         )
         .await;
         assert_eq!(p.reads, vec!["/home/u/notes.txt".to_string()]);
@@ -1921,6 +1966,7 @@ mod tests {
             &AtomicBool::new(true),
             &mut |e| events.push(e),
             None,
+            &mut NoHook,
         )
         .await;
         assert_eq!(out.stopped, Some(StopReason::Stopped));
@@ -1946,6 +1992,7 @@ mod tests {
                 events.push(e)
             },
             None,
+            &mut NoHook,
         )
         .await;
         assert_eq!(out.stopped, Some(StopReason::Stopped));
@@ -2089,6 +2136,7 @@ mod tests {
             &stop,
             &mut |e| events.push(e),
             None,
+            &mut NoHook,
         )
         .await;
         let d = |s: &str| LoopEvent::Diagnostic(s.into());
@@ -2118,6 +2166,7 @@ mod tests {
             &stop,
             &mut |e| events.push(e),
             None,
+            &mut NoHook,
         )
         .await;
         assert!(
@@ -2144,6 +2193,7 @@ mod tests {
             &stop,
             &mut |e| events.push(e),
             None,
+            &mut NoHook,
         )
         .await;
         assert!(
@@ -2165,8 +2215,139 @@ mod tests {
             &AtomicBool::new(false),
             &mut |e| events.push(e),
             None,
+            &mut NoHook,
         )
         .await;
         assert!(matches!(&events[..], [LoopEvent::Notice(_)]), "{events:?}");
+    }
+
+    struct Hooked {
+        after: Vec<Vec<Turn>>,
+        append: Vec<&'static str>,
+        stop_at: Option<usize>,
+    }
+    impl<P: Send> StepHook<P> for Hooked {
+        async fn after_step(&mut self, _: &mut P, t: &mut Transcript) -> StepControl {
+            self.after.push(t.turns().to_vec());
+            if let Some(text) = self.append.pop() {
+                t.push_user(text);
+            }
+            if self.stop_at == Some(self.after.len()) {
+                return StepControl::Stop;
+            }
+            StepControl::Continue
+        }
+    }
+    fn two_calls() -> PromptReply {
+        PromptReply {
+            reasoning: None,
+            blocks: vec![],
+            tool_calls: vec![
+                call("c1", "read_file", r#"{"path":"/w/a"}"#),
+                call("c2", "read_file", r#"{"path":"/w/b"}"#),
+            ],
+            usage: None,
+        }
+    }
+    async fn drive_hooked(p: &mut Scripted, t: &mut Transcript, hook: &mut Hooked) -> Outcome {
+        drive_session(
+            p,
+            t,
+            &mut Seen::new(),
+            &budget(),
+            &mut unmetered(),
+            &AtomicBool::new(false),
+            &mut |_| {},
+            None,
+            hook,
+        )
+        .await
+    }
+    fn user_text(t: &Turn) -> String {
+        match t {
+            Turn::User { content } => match &content[0] {
+                ContentBlock::Text { text } => text.0.to_string(),
+                _ => panic!(),
+            },
+            _ => panic!("not a user turn: {t:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_hook_runs_after_every_tool_turn_is_answered_and_never_after_an_answer() {
+        let mut p = scripted(vec![
+            two_calls(),
+            one("c3", "read_file", r#"{"path":"/w/c"}"#),
+            done(),
+        ]);
+        let mut t = Transcript::new("conv", "q");
+        let mut hook = Hooked {
+            after: vec![],
+            append: vec![],
+            stop_at: None,
+        };
+        let out = drive_hooked(&mut p, &mut t, &mut hook).await;
+        assert_eq!(out.answer.as_deref(), Some("done"));
+        assert_eq!(
+            hook.after.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![4, 6]
+        );
+        assert_eq!(tool_call_id(&hook.after[0][3]), "c2");
+        assert_eq!(tool_call_id(&hook.after[1][5]), "c3");
+    }
+
+    #[tokio::test]
+    async fn a_follow_up_appended_mid_task_follows_the_tool_turns() {
+        let mut p = scripted(vec![two_calls(), done()]);
+        let mut t = Transcript::new("conv", "q");
+        let mut hook = Hooked {
+            after: vec![],
+            append: vec!["follow-up-629-sentinel"],
+            stop_at: None,
+        };
+        drive_hooked(&mut p, &mut t, &mut hook).await;
+        let sent = &p.seen[1];
+        assert_eq!(sent.len(), 5);
+        assert_eq!(tool_call_id(&sent[2]), "c1");
+        assert_eq!(tool_call_id(&sent[3]), "c2");
+        assert_eq!(user_text(&sent[4]), "follow-up-629-sentinel");
+    }
+
+    #[tokio::test]
+    async fn a_hook_stop_ends_the_run_as_stopped_before_the_next_prompt() {
+        let mut p = scripted(vec![two_calls(), done()]);
+        let mut t = Transcript::new("conv", "q");
+        let mut hook = Hooked {
+            after: vec![],
+            append: vec![],
+            stop_at: Some(1),
+        };
+        let out = drive_hooked(&mut p, &mut t, &mut hook).await;
+        assert_eq!(
+            out,
+            Outcome {
+                answer: None,
+                stopped: Some(StopReason::Stopped),
+                steps_used: 1
+            }
+        );
+        assert_eq!(p.prompts, 1);
+        assert_eq!(t.turns().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn the_no_op_hook_leaves_the_interactive_loop_as_it_was() {
+        let mut p = scripted(vec![two_calls(), done()]);
+        let mut t = Transcript::new("conv", "q");
+        let out = drive_unmetered(&mut p, &mut t, &budget()).await;
+        assert_eq!(
+            out,
+            Outcome {
+                answer: Some("done".into()),
+                stopped: None,
+                steps_used: 2
+            }
+        );
+        assert_eq!(p.seen[1].len(), 4);
     }
 }

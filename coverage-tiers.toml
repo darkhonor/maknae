@@ -354,6 +354,9 @@ files = [
   # #629: the agent's claim, heartbeat and report answers; a refusal read as a
   # transport fault, or the reverse, closes or strands a task.
   "crates/maknae-agent/src/task.rs",
+  # #629: the task driver. Reporting a task it did not finish, or working on after
+  # the kernel answered Held, is false assurance to the tasker.
+  "crates/maknae-agent/src/task_driver.rs",
   "crates/maknae-agent/src/session.rs",
   "crates/maknae-agent/src/route.rs",
   "crates/maknae-agent/src/render.rs",
@@ -589,7 +592,7 @@ why = "#470: RealPlane moved from bins/maknae/src/agent.rs as LoopPlane, unchang
 
 [[t3]]
 path = "crates/maknae-loop/src/task.rs"
-why = "#629: the agent's claim, heartbeat and report client: one connection per verb over plane.rs's Link, with no decision of its own. Its answers are mapped by maknae-agent::task (T1); which requests carry the cite, and the ceiling read cap, are pinned by claims_and_heartbeats_are_never_cited and task_answers_are_read_with_the_ceiling_cap against an in-process fake kernel; a report too large for the frame is ReportOutcome::TooLarge and is never sent"
+why = "#629: the agent's claim, heartbeat and report client: one connection per verb over plane.rs's Link, with no decision of its own. Its answers are mapped by maknae-agent::task (T1); which requests carry the cite, and the ceiling read cap, are pinned by claims_and_heartbeats_are_never_cited and task_answers_are_read_with_the_ceiling_cap against an in-process fake kernel; a report too large for the frame is ReportOutcome::TooLarge and is never sent. Amended 2026-11-13 (#629): verify_class is the one pure decision here, the total map from TaskSignatureError to the driver's VerifyClass, pinned by every_verify_error_maps_to_a_class"
 
 [[t3]]
 path = "crates/maknae-llm/src/lib.rs"

@@ -10077,6 +10077,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_agents_task_driver_waits_and_beats_on_the_kernels_lease() {
+        use maknae_agent::task_driver::{HEARTBEAT_EVERY, UNDECODABLE_WAIT};
+        let lease = crate::task_store::CLAIM_LEASE;
+        assert_eq!(
+            UNDECODABLE_WAIT,
+            lease + TASK_SWEEP_EVERY + Duration::from_secs(30)
+        );
+        assert_eq!(HEARTBEAT_EVERY, lease / 3);
+    }
+
+    #[test]
     fn only_a_linux_host_that_declared_no_account_source_says_so_at_boot() {
         use maknae_config::{AccountSource, Deployment, DeploymentMode};
         let d = |mode, account_source| Deployment {
