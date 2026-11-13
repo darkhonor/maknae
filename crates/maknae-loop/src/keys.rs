@@ -369,6 +369,50 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn an_agent_key_field_that_names_no_vault_key_is_never_read() {
+        maknae_crypto::init().unwrap();
+        let recipient = maknae_seal::SealPrivateKey::generate().unwrap();
+        let hobi = AgentId::parse("hobi").unwrap();
+        let mut p = provider("openai/main");
+        p.key_field = String::new();
+        let key = AgentKeyContext {
+            provider: &p,
+            kv_mount: KV,
+            agent_prefix: AGENTS,
+            agent: &hobi,
+            seal_key: recipient.public_key(),
+        };
+        let got = agent_choice(&key, "c-629", |_| async { panic!("read") })
+            .await
+            .unwrap_err();
+        assert!(got.contains("not a Vault key"), "{got}");
+        assert!(got.contains("agent.yaml"), "{got}");
+    }
+
+    #[tokio::test]
+    async fn an_agent_key_that_cannot_be_sealed_says_so() {
+        maknae_crypto::init().unwrap();
+        let recipient = maknae_seal::SealPrivateKey::generate().unwrap();
+        let hobi = AgentId::parse("hobi").unwrap();
+        let p = provider("openai/main");
+        let key = AgentKeyContext {
+            provider: &p,
+            kv_mount: KV,
+            agent_prefix: AGENTS,
+            agent: &hobi,
+            seal_key: recipient.public_key(),
+        };
+        let path = format!("{KV}/data/{AGENTS}/hobi/openai/main");
+        let got = agent_choice(&key, "", |_| async move { Ok(wrapped("s.629", &path)) })
+            .await
+            .unwrap_err();
+        assert!(
+            got.starts_with("sealing the agent's provider key failed"),
+            "{got}"
+        );
+    }
+
     struct FakeReader {
         asked: std::sync::Mutex<Vec<(String, String)>>,
         token: &'static str,
