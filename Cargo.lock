@@ -1162,6 +1162,7 @@ dependencies = [
  "icu_casemap",
  "icu_normalizer",
  "maknae-io",
+ "maknae-proto",
  "maknae-security",
  "serde_json",
  "yaml-rust2",

@@ -144,6 +144,7 @@ The host side, `<config-dir>` (`/etc/maknae` when packaged):
 ├── authz.yaml            # the authorization policy — a SEPARATE document, not a section
 ├── bindings.yaml         # who holds which role, and who is contained — a SEPARATE document (§2.3)
 ├── sensitive.yaml        # paths no file verb may reach, whatever is granted — a SEPARATE document (§2.5)
+├── banner.yaml           # the operator's banner for the agent session — a SEPARATE document (§2.7)
 ├── egress-bounds.yaml    # required WHEN any provider is authorized (§6.1.3); written by `maknae enroll`, 0644 root:root
 ├── egress/               # 0750 root:_maknae-egress, created by the package; files written by `maknae enroll`
 │   ├── vault-ca.crt      # 0640 root:_maknae-egress — the deputy's Vault TLS anchor
@@ -180,7 +181,7 @@ The user side, `~/.maknae` (or `$MAKNAE_CONFIG_DIR`):
 
 On macOS `maknae login` keeps the token in the default keychain instead (service `maknae-cli`, account `maknae-vault-token`), and neither token file exists (`crates/maknae-vault/src/token_record.rs`, `keychain_policy.rs`).
 
-**Sections versus standalone documents.** `maknae.yaml` and `config.d/*.yaml` contribute **registered sections** and are merged section-by-section by this loader. `authz.yaml`, `bindings.yaml`, `sensitive.yaml` and `egress-bounds.yaml` are **standalone documents with their own readers**: each is opened by path (`<config-dir>/authz.yaml`, `<config-dir>/bindings.yaml`, `<config-dir>/sensitive.yaml`, `<config-dir>/egress-bounds.yaml`), never merged, never shadowed, and putting any of them inside `config.d/` does not work. `providers.yaml` and the personal `sensitive.yaml` are likewise standalone documents, read by the CLI from its own directory.
+**Sections versus standalone documents.** `maknae.yaml` and `config.d/*.yaml` contribute **registered sections** and are merged section-by-section by this loader. `authz.yaml`, `bindings.yaml`, `sensitive.yaml`, `banner.yaml` and `egress-bounds.yaml` are **standalone documents with their own readers**: each is opened by path (`<config-dir>/authz.yaml`, `<config-dir>/bindings.yaml`, `<config-dir>/sensitive.yaml`, `<config-dir>/banner.yaml`, `<config-dir>/egress-bounds.yaml`), never merged, never shadowed, and putting any of them inside `config.d/` does not work. `providers.yaml` and the personal `sensitive.yaml` are likewise standalone documents, read by the CLI from its own directory.
 
 - **`maknae.yaml`** — the **base** file. Required: it is the deployment's anchor, the
   one file that must exist even if empty. A missing base is an error. An empty base is
@@ -439,6 +440,21 @@ A sub-task, one an agent gives while it works a task, works in its root's partit
 A refusal is the model's uniform `not authorized`, with the reason `partition: …` in the trail. The operand bounds what the kernel releases to the model, not the agent process, whose account owns its whole home; confining the process is #629. People are not affected: the operand abstains for every request off the agent channel.
 
 **Single host.** Like the conversation store, the task store admits one `maknaed` per state directory.
+
+### 2.7 `banner.yaml` (#630)
+
+`<config-dir>/banner.yaml` holds the operator's banner, the line the agent session shows at the top and bottom of the screen. `maknaed` reads it and serves it to the CLI, which never opens the file (a user cannot traverse `/etc/maknae`, which is `root:_maknae 0750`). The banner is shown verbatim and never interpreted. The file is optional.
+
+```yaml
+text: "UNCLASSIFIED//FOR OFFICIAL USE ONLY"
+color: "#ffd700"
+```
+
+- `text` (required): 1 to 256 bytes, with no control character, line or paragraph separator, or format character (bidirectional overrides included).
+- `color` (optional): `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, or `"#rrggbb"`. Quote a `#rrggbb` value, since an unquoted `#` starts a YAML comment. The banner's text is black or white, whichever has the higher contrast against the colour. Without `color` the banner is shown in reverse video.
+- Any other key refuses.
+- **Ownership and mode.** A regular file, not a symlink, owned by root and not group- or other-writable. `<config-dir>` must be owned by root and not group- or other-writable, or the file is refused, naming the directory. Only a missing file inside such a directory reads as no banner; a missing directory, a symlink, the wrong owner or mode, an invalid file and a read error each refuse.
+- **Invalid file.** An invalid `banner.yaml` refuses `maknaed`'s start, naming `banner.yaml` and the reason.
 
 ---
 

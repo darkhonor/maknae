@@ -258,6 +258,8 @@ files = [
   # the T1 line-drawing rule. In [t1].files ONLY (own 95% floor; NOT
   # ratchet_cohort).
   "crates/maknae-config/src/principal.rs",
+  # #630: the operator banner document; a wrong arm shows the wrong banner or boots on a file it should refuse.
+  "crates/maknae-config/src/banner.rs",
   # #115: the `deployment` section; a wrong arm boots a container as a host, or
   # checks no account state on a host that declared a source.
   "crates/maknae-config/src/deployment.rs",

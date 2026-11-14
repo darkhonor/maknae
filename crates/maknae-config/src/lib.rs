@@ -34,6 +34,7 @@
 mod agents;
 mod audit_cfg;
 mod authz;
+mod banner;
 mod baseline_doc;
 mod bindings;
 pub mod bindings_sync;
@@ -99,6 +100,7 @@ pub use authz::{
     AuthzError, AuthzPolicy, HomeUnbound, Match3, ModelRef, PathGlob, Pattern, RawActionGrants,
     RawDestinations, Request, SubjectActions, SubjectPermissions, SubjectPolicy,
 };
+pub use banner::{banner_from_document, load_banner, BANNER_PATH};
 pub use baseline_doc::{document_sections, value_from_canonical_json, BaselineSections};
 pub use bounds::{
     bounds_from_document, key_prefix_is_acceptable, kv_fragment_is_acceptable,
