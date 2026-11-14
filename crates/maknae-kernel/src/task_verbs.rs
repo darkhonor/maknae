@@ -268,8 +268,8 @@ pub(crate) enum Listing {
 }
 
 /// An enrolled agent, from the caller's submit decision. A refused agent is listed only
-/// while the caller holds tasks there: contained, or withdrawn while anything is open or
-/// waiting.
+/// while the caller holds tasks there and may collect from it: contained, or withdrawn
+/// while anything is open or waiting.
 pub(crate) fn enrolled_listing(
     submit: &Authority,
     contained: bool,
@@ -279,9 +279,7 @@ pub(crate) fn enrolled_listing(
         (Authority::Permit, _) => Listing::Decided(Some(AgentStanding::Enrolled)),
         (Authority::Undecided(_), _) => Listing::Decided(Some(AgentStanding::Undecided)),
         (Authority::Refused(_), None) => Listing::Decided(None),
-        (Authority::Refused(_), Some(_)) if contained => {
-            Listing::Decided(Some(AgentStanding::Contained))
-        }
+        (Authority::Refused(_), Some(_)) if contained => Listing::Collect(AgentStanding::Contained),
         (Authority::Refused(_), Some(h)) if h.waiting > 0 || h.open > 0 => {
             Listing::Collect(AgentStanding::Withdrawn)
         }
@@ -494,7 +492,7 @@ mod tests {
         for held in [holding(0, 0), holding(1, 0), holding(0, 1)] {
             assert_eq!(
                 enrolled_listing(&refused, true, held),
-                Listing::Decided(Some(Contained))
+                Listing::Collect(Contained)
             );
         }
         assert_eq!(
@@ -518,7 +516,11 @@ mod tests {
             removed_listing(holding(0, 1)),
             Listing::Collect(AgentStanding::Removed)
         );
-        for permitted in [AgentStanding::Removed, AgentStanding::Withdrawn] {
+        for permitted in [
+            AgentStanding::Removed,
+            AgentStanding::Withdrawn,
+            AgentStanding::Contained,
+        ] {
             assert_eq!(collected(&Authority::Permit, permitted), Some(permitted));
             assert_eq!(
                 collected(&Authority::Undecided("x".into()), permitted),

@@ -3997,8 +3997,9 @@ async fn authority<P: Authorizer + Send + Sync + 'static>(
 }
 
 /// The agents person `uid` may task, or still holds tasks or reports with, after `after`,
-/// under one deadline of `timeout`; and each agent's outcome, for the trail. `after` must
-/// name an agent the caller holds tasks with or may task, or the page is refused.
+/// and each agent's outcome, for the trail. `after` must name an agent the caller holds
+/// tasks with or may task, or the page is refused. No decision starts once `timeout` has
+/// passed and each runs with the whole `timeout`, so a page takes at most twice `timeout`.
 async fn agent_page<P: Authorizer + Send + Sync + 'static>(
     authorizer: &Arc<P>,
     view: &Arc<dyn crate::enrollment::EnrollmentView>,
@@ -4009,14 +4010,13 @@ async fn agent_page<P: Authorizer + Send + Sync + 'static>(
     timeout: Duration,
 ) -> Result<(maknae_proto::AgentPage, Vec<String>), &'static str> {
     use crate::task_verbs as tv;
-    let deadline = tokio::time::Instant::now() + timeout;
+    let bound = (tokio::time::Instant::now() + timeout, timeout);
     let holdings = store.holdings(&maknae_proto::Tasker::Uid(uid));
     if let Some(after) = after {
         if !holdings.contains_key(after)
-            && decide_by(authorizer, uid, after, true, lane, deadline).await
-                != tv::Authority::Permit
+            && decide_by(authorizer, uid, after, true, lane, bound).await != tv::Authority::Permit
         {
-            return Err("the cursor names no agent the caller is shown");
+            return Err("the cursor names no agent the caller holds tasks with or may task");
         }
     }
     let enrolled: std::collections::BTreeMap<maknae_config::AgentId, u32> =
@@ -4039,7 +4039,7 @@ async fn agent_page<P: Authorizer + Send + Sync + 'static>(
         let held = holdings.get(agent).copied();
         let listing = match enrolled.get(agent) {
             Some(agent_uid) => {
-                let submit = decide_by(authorizer, uid, agent, true, lane, deadline).await;
+                let submit = decide_by(authorizer, uid, agent, true, lane, bound).await;
                 tv::enrolled_listing(&submit, view.contained(*agent_uid), held)
             }
             None => tv::removed_listing(held),
@@ -4048,7 +4048,7 @@ async fn agent_page<P: Authorizer + Send + Sync + 'static>(
             tv::Listing::Skip => continue,
             tv::Listing::Decided(standing) => standing,
             tv::Listing::Collect(permitted) => {
-                let collect = decide_by(authorizer, uid, agent, false, lane, deadline).await;
+                let collect = decide_by(authorizer, uid, agent, false, lane, bound).await;
                 tv::collected(&collect, permitted)
             }
         };
@@ -4064,22 +4064,22 @@ async fn agent_page<P: Authorizer + Send + Sync + 'static>(
     Ok((page, said))
 }
 
-/// A submit or collect decision for one agent of a list, in the time left before `deadline`.
+/// A submit or collect decision for one agent of a list, started only before `deadline`
+/// and bounded by the whole `budget`, so a timeout is the decision's own.
 async fn decide_by<P: Authorizer + Send + Sync + 'static>(
     authorizer: &Arc<P>,
     uid: u32,
     agent: &maknae_config::AgentId,
     submit: bool,
     lane: maknae_security::Lane,
-    deadline: tokio::time::Instant,
+    (deadline, budget): (tokio::time::Instant, Duration),
 ) -> crate::task_verbs::Authority {
-    let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-    if left.is_zero() {
+    if tokio::time::Instant::now() >= deadline {
         return crate::task_verbs::Authority::Undecided("not reached before the deadline".into());
     }
     match submit {
-        true => submit_authority(authorizer, uid, &Stamp::Client, agent, lane, left).await,
-        false => collect_authority(authorizer, uid, &Stamp::Client, agent, lane, left).await,
+        true => submit_authority(authorizer, uid, &Stamp::Client, agent, lane, budget).await,
+        false => collect_authority(authorizer, uid, &Stamp::Client, agent, lane, budget).await,
     }
 }
 
@@ -24488,17 +24488,17 @@ mod task_sweep_tests {
         let (_blobs, _clock, store) = mem(1_000);
         let me = Tasker::Uid(1000);
         queued(&store, "hobi", me.clone());
-        let late = maknae_security::Verdict::Deny {
-            reason: "late".into(),
-        };
         let (page, said) = agent_page(
-            &Arc::new(Says(late, Duration::from_millis(300))),
+            &Arc::new(Says(
+                maknae_security::Verdict::Indeterminate,
+                Duration::ZERO,
+            )),
             &hobi_and_jin(),
             &store,
             1000,
             None,
             maknae_security::Lane::Local,
-            Duration::from_millis(20),
+            Duration::from_secs(5),
         )
         .await
         .unwrap();
@@ -24546,24 +24546,45 @@ mod task_sweep_tests {
         ))
     }
 
+    struct Counted(Says, std::sync::atomic::AtomicUsize);
+
+    impl Authorizer for Counted {
+        fn decide_cited_all(
+            &self,
+            reqs: &[maknae_security::Request],
+        ) -> Vec<maknae_security::Decided> {
+            maknae_security::decide_each_cited(self, reqs)
+        }
+
+        fn decide(&self, req: &maknae_security::Request) -> maknae_security::Verdict {
+            self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.0.decide(req)
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn one_deadline_bounds_the_whole_list() {
+    async fn a_decision_begun_before_the_deadline_has_its_whole_budget() {
         let (_blobs, _clock, store) = mem(1_000);
         let refuse = maknae_security::Verdict::Deny {
             reason: "no".into(),
         };
+        let pdp = Arc::new(Counted(
+            Says(refuse, Duration::from_millis(200)),
+            Default::default(),
+        ));
         let (_, said) = agent_page(
-            &Arc::new(Says(refuse, Duration::from_millis(30))),
+            &pdp,
             &enrolled(&["a", "b", "c"]),
             &store,
             1000,
             None,
             maknae_security::Lane::Local,
-            Duration::from_millis(50),
+            Duration::from_millis(300),
         )
         .await
         .unwrap();
-        assert_eq!(said, ["a:refused", "b:undecided", "c:undecided"]);
+        assert_eq!(said, ["a:refused", "b:refused", "c:undecided"]);
+        assert_eq!(pdp.1.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -24591,7 +24612,7 @@ mod task_sweep_tests {
         };
         assert_eq!(
             page("hobi").await,
-            Err("the cursor names no agent the caller is shown")
+            Err("the cursor names no agent the caller holds tasks with or may task")
         );
         assert!(page("jin").await.is_ok(), "a held agent is a cursor");
     }
@@ -24616,7 +24637,7 @@ mod task_sweep_tests {
             .await;
             assert_eq!(
                 got,
-                Err("the cursor names no agent the caller is shown"),
+                Err("the cursor names no agent the caller holds tasks with or may task"),
                 "{after}"
             );
         }

@@ -68,7 +68,7 @@ impl<D: Dial> TaskerClient<D> {
                     "the kernel's banner changed between agent pages".into(),
                 ));
             }
-            if page.next.as_ref() == Some(&after) {
+            if page.next.as_ref().is_some_and(|next| *next <= after) {
                 return Err(TaskerError::Protocol(
                     "the kernel's agent cursor did not advance".into(),
                 ));
@@ -400,6 +400,18 @@ mod tests {
             vec![
                 agents_page(&["a"], Some("a"), 0, "B"),
                 agents_page(&["a"], Some("a"), 0, "B"),
+            ],
+        );
+        assert!(matches!(
+            c.all_agents().await,
+            Err(TaskerError::Protocol(_))
+        ));
+        let c = client(
+            Default::default(),
+            vec![
+                agents_page(&["a"], Some("b"), 0, "B"),
+                agents_page(&["b"], Some("a"), 0, "B"),
+                agents_page(&["a"], Some("b"), 0, "B"),
             ],
         );
         assert!(matches!(

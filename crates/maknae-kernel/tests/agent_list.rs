@@ -541,6 +541,32 @@ async fn a_contained_agent_is_listed_only_for_a_caller_with_tasks_there() {
 }
 
 #[tokio::test]
+async fn a_caller_whose_grant_is_revoked_sees_no_contained_agent() {
+    let user = common::euid_name();
+    let w = world_bound(
+        "contained-revoked",
+        &[agent("hobi", nobody(), PLAIN), agent("jin", JIN_UID, PLAIN)],
+        &format!("schema_version: 1\nbindings:\n  user: [\"{user}\"]\n  adversary: [\"nobody\"]\n"),
+    );
+    w.mine("hobi", nobody());
+    assert_eq!(
+        w.list(None).await.entries,
+        [
+            entry("hobi", AgentStanding::Contained, 0),
+            entry("jin", AgentStanding::Enrolled, 0)
+        ]
+    );
+    common::write_0640(
+        &maknae_authz_basic::PolicyPaths::in_dir(&w.root).authz,
+        PLAIN,
+    );
+    w.reload();
+    let page = w.list(None).await;
+    assert!(page.entries.is_empty(), "{page:?}");
+    assert_eq!(page.undecided, 0);
+}
+
+#[tokio::test]
 async fn a_removed_agent_with_waiting_reports_is_listed_removed() {
     let w = world("removed", &hobi_and_jin());
     let id = w.submit("hobi").await;
@@ -706,7 +732,7 @@ async fn a_cursor_naming_an_agent_the_caller_may_not_task_is_refused() {
         );
         assert_eq!(
             reasons(&records),
-            ["deny the cursor names no agent the caller is shown"],
+            ["deny the cursor names no agent the caller holds tasks with or may task"],
             "{after}"
         );
     }

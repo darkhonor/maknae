@@ -2099,9 +2099,9 @@ expect_reject_because "config-disclosure-drift/dead-wrapper-strip-is-refused" \
 # REJECT: the same dead strip, reaching the WIRE branch. `$tmp/fields` is
 # sort -u'd, so the probe above always trips on `audit.siem` (config) and the
 # `(Option|Box|Arc|Vec)` spelling of the post-condition -- the one that needs
-# `Vec` present -- is never evaluated. Retyping `siem` to a scalar makes every
-# config row scalar, so the first offender becomes `baseline.changes`
-# (`Vec<String>`, wire) and the wire arm is the one under test.
+# `Vec` present -- is never evaluated. Retyping `siem`, `agent_list.banner` and
+# `agent_list.banner.color` to bare types leaves `agent_list.entries`
+# (`Vec<AgentEntry>`, wire) the first offender, so the wire arm is under test.
 fx="$(cfg_fixture "$CFG_OK")"
 python3 - "$fx" <<'PY'
 import pathlib, sys
@@ -2116,9 +2116,16 @@ a = d / "crates/maknae-config/src/audit_cfg.rs"
 t = a.read_text()
 assert t.count("pub siem: Option<String>,") == 1, "the siem anchor moved"
 a.write_text(t.replace("pub siem: Option<String>,", "pub siem: String,"))
+k = d / "crates/maknae-proto/src/task.rs"
+u = k.read_text()
+for was, now in [("pub banner: Option<BannerSpec>,", "pub banner: BannerSpec,"),
+                 ("pub color: Option<BannerColor>,", "pub color: BannerColor,")]:
+    assert u.count(was) == 1, f"the {was} anchor moved"
+    u = u.replace(was, now)
+k.write_text(u)
 PY
 expect_reject_because "config-disclosure-drift/dead-wrapper-strip-is-refused-on-the-wire-arm" \
-  "it still LEADS with a wrapper this surface strips" \
+  "'agent_list.entries' has type 'Vec<AgentEntry>', which reduced to 'Vec<AgentEntry'" \
   "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a field declaration the extractor cannot read. The awk emits a row
