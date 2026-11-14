@@ -3,7 +3,7 @@ use maknae_agent::screen::frame::{FrameError, TerminalSize};
 use nix::errno::Errno;
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use nix::sys::signal::{raise, Signal};
-use nix::sys::termios::{tcgetattr, tcsetattr, LocalFlags, SetArg, Termios};
+use nix::sys::termios::{tcflush, tcgetattr, tcsetattr, FlushArg, LocalFlags, SetArg, Termios};
 use std::io::IsTerminal;
 use std::os::fd::{AsFd, OwnedFd};
 use std::panic::PanicHookInfo;
@@ -79,6 +79,7 @@ fn restore_termios(input: &OwnedFd, saved: &Termios) {
     if tcsetattr(input, SetArg::TCSANOW, saved) == Err(Errno::EINTR) {
         let _ = tcsetattr(input, SetArg::TCSANOW, saved);
     }
+    let _ = tcflush(input, FlushArg::TCIFLUSH);
 }
 
 type Shared = Arc<Mutex<Option<Restorer>>>;
@@ -475,6 +476,19 @@ mod tests {
             ]
             .concat()
         );
+    }
+
+    #[test]
+    fn input_typed_but_not_read_never_reaches_the_shell_after_leaving() {
+        let _one = one_session();
+        let pty = pty(24, 80);
+        let session = Session::enter_on(pty.slave(), pty.slave()).unwrap();
+        pty.type_keys(b"rm -rf ~\n");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        drop(session);
+        let mut fds = [PollFd::new(pty.slave.as_fd(), PollFlags::POLLIN)];
+        let ready = poll(&mut fds, PollTimeout::from(200u16)).unwrap();
+        assert_eq!(ready, 0, "typed-ahead input was left for the shell");
     }
 
     #[test]
