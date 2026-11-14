@@ -553,7 +553,7 @@ shim="$(newroot)"; cat >"$shim/cargo-mutants" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
-printf '#!/bin/sh\necho "cargo-nextest 0.9.152 (fixture)"\n' >"$shim/cargo-nextest"
+printf '#!/bin/sh\necho "cargo-nextest 0.9.151 (fixture)"\n' >"$shim/cargo-nextest"
 chmod +x "$shim/cargo-mutants" "$shim/cargo-nextest"
 expect "mutation-stage unknown crate" "unknown crate in mutants_crates: xcore" nonzero -- \
   env PATH="$shim:$PATH" COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
@@ -653,7 +653,7 @@ cat >"$shimD/cargo-mutants" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
-printf '#!/bin/sh\necho "cargo-nextest 0.9.152 (fixture)"\n' >"$shimD/cargo-nextest"
+printf '#!/bin/sh\necho "cargo-nextest 0.9.151 (fixture)"\n' >"$shimD/cargo-nextest"
 chmod +x "$shimD/cargo" "$shimD/cargo-mutants" "$shimD/cargo-nextest"
 expect "live mode D: mutation-path name-oracle failure" "cannot resolve mutants_crates package names (mutation stage)" nonzero -- \
   env PATH="$shimD:$PATH" "$gate" --root "$r" --mutants-all
@@ -673,7 +673,7 @@ expect "malformed collection shape ([t3] not [[t3]], no traceback)" "array of ta
 # absent in the gates job. Shim a stub (same pattern as the unknown-crate
 # fixture) so the mode-identifying contract-shape FAIL is reachable in ANY
 # lane (lane-dependent fixtures are forbidden).
-shimM="$(newroot)"; printf '#!/bin/sh\nexit 0\n' >"$shimM/cargo-mutants"; printf '#!/bin/sh\necho "cargo-nextest 0.9.152 (fixture)"\n' >"$shimM/cargo-nextest"
+shimM="$(newroot)"; printf '#!/bin/sh\nexit 0\n' >"$shimM/cargo-mutants"; printf '#!/bin/sh\necho "cargo-nextest 0.9.151 (fixture)"\n' >"$shimM/cargo-nextest"
 chmod +x "$shimM/cargo-mutants" "$shimM/cargo-nextest"
 
 r="$(newroot)"; mk_base "$r"   # mutants_crates = [] in mk_base
@@ -860,7 +860,7 @@ cat >"$shim/cargo" <<'EOF'
 import json, os, sys
 args = sys.argv[1:]
 if args == ['nextest', '--version']:
-    print('cargo-nextest 0.9.152 (fixture)')
+    print('cargo-nextest 0.9.151 (fixture)')
     sys.exit(0)
 if args[:1] != ['mutants']:
     raise SystemExit('unexpected cargo invocation')
@@ -926,7 +926,7 @@ if shape == 'enospc':
 print('verified mutant budget for ' + package)
 sys.exit(int(os.environ.get('FIXTURE_MUTANT_EXIT', '0')))
 EOF
-printf '#!/bin/sh\necho "cargo-nextest 0.9.152 (fixture)"\n' >"$shim/cargo-nextest"
+printf '#!/bin/sh\necho "cargo-nextest 0.9.151 (fixture)"\n' >"$shim/cargo-nextest"
 chmod +x "$shim/cargo" "$shim/cargo-mutants" "$shim/cargo-nextest"
 mutants_crates_only() {
   sed -i.bak "s/^mutants_crates = .*/mutants_crates = [\"$2\"]/" "$1/coverage-tiers.toml" && rm "$1/coverage-tiers.toml.bak"

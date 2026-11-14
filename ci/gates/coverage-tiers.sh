@@ -201,9 +201,9 @@ else
     nextest_out="$(cd "$root" && cargo nextest --version 2>&1 || true)"
     nextest_v="$(printf '%s\n' "$nextest_out" | grep -m1 '^cargo-nextest ' || true)"
     case "$nextest_v" in
-      "cargo-nextest 0.9.152"|"cargo-nextest 0.9.152 "*) :;;
-      "") r_fail "cargo-nextest missing (cargo nextest --version: $(printf '%s' "$nextest_out" | head -1)) — install cargo-nextest 0.9.152 (the version CI pins)";;
-      *) r_fail "'$nextest_v' is not cargo-nextest 0.9.152 (the version CI pins)";;
+      "cargo-nextest 0.9.151"|"cargo-nextest 0.9.151 "*) :;;
+      "") r_fail "cargo-nextest missing (cargo nextest --version: $(printf '%s' "$nextest_out" | head -1)) — install cargo-nextest 0.9.151 (the version CI pins)";;
+      *) r_fail "'$nextest_v' is not cargo-nextest 0.9.151 (the version CI pins)";;
     esac
   fi
   if [ "$injection" -eq 0 ] && ! command -v cargo >/dev/null 2>&1; then
