@@ -12,6 +12,7 @@ pub const CONNECTED: &str = "connected";
 pub const UNREACHABLE: &str = "kernel unreachable, retrying";
 pub const UNREADABLE: &str = "kernel answer unreadable, retrying";
 pub const NO_IDENTITY: &str = "cannot get a plane identity, retrying";
+pub const MORE_NOTICES: &str = "more notices were not shown";
 pub const LOGIN_STOPPED: &str = "not sent: your Vault login expired";
 pub const LOGIN_ENDED: &str = "login expired";
 pub const AWAY: &str = "while you were away";

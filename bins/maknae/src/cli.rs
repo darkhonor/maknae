@@ -521,13 +521,7 @@ fn absolute_path(path: PathBuf) -> Result<String, String> {
         .map_err(|_| "path is not valid UTF-8".into())
 }
 
-/// The full round trip: resolve config → mint a plane leaf → connect →
-/// request/response → print → shut down. Returns `Ok(true)` on a successful
-/// verb response, `Ok(false)` when the daemon returned a `ProtoError` (already
-/// printed to stderr — the caller maps this to a non-zero exit), `Err` for any
-/// earlier (config/mint/connect/frame) failure.
-/// The CLI's configuration, read once: the FIPS provider installed, then the
-/// document and its transport section.
+/// The FIPS provider installed, then the CLI's document and its transport section.
 pub(crate) fn cli_config() -> Result<(PathBuf, Document, TransportConfig), String> {
     // Install the aws-lc-rs FIPS provider as the process default BEFORE any operation
     // that asserts FIPS (`PlaneClient::for_user` → `mint()` assert `.fips()`). The
@@ -565,6 +559,11 @@ pub(crate) async fn minted_plane(
     Ok((client, trust))
 }
 
+/// The full round trip: resolve config → mint a plane leaf → connect →
+/// request/response → print → shut down. Returns `Ok(true)` on a successful
+/// verb response, `Ok(false)` when the daemon returned a `ProtoError` (already
+/// printed to stderr — the caller maps this to a non-zero exit), `Err` for any
+/// earlier (config/mint/connect/frame) failure.
 async fn execute(verb: Verb) -> Result<bool, String> {
     let (dir, document, transport) = cli_config()?;
 

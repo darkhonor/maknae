@@ -17,6 +17,8 @@ pub const COLLECT_IDLE_MS: u64 = 5_000;
 pub const SWEEP_PAGES: u32 = 16;
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const SPIN_MS: u64 = 100;
+/// Notices kept while the conversation has no room for them.
+pub const UNSAID_CAP: usize = 8;
 
 /// The caller's standing with the agent, as the agent list said when the session opened.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -208,7 +210,8 @@ pub struct Book {
     status: Vec<String>,
     away: bool,
     adopt: bool,
-    unsaid: Option<String>,
+    unsaid: VecDeque<String>,
+    folded: bool,
 }
 
 impl std::fmt::Debug for Book {
@@ -257,7 +260,8 @@ impl Book {
             status: Vec::new(),
             away: true,
             adopt: false,
-            unsaid: None,
+            unsaid: VecDeque::with_capacity(UNSAID_CAP + 1),
+            folded: false,
         }
     }
 
@@ -278,7 +282,7 @@ impl Book {
             (_, Connection::Connected, Standing::Enrolled) => text::CONNECTED,
         };
         let right = match self.held.len() {
-            0 if self.unsaid.is_some() => "a notice is waiting: scroll down to read on".into(),
+            0 if !self.unsaid.is_empty() => "a notice is waiting: scroll down to read on".into(),
             0 => String::new(),
             1 => "1 report waiting: scroll down to read on".into(),
             n => format!("{n} reports waiting: scroll down to read on"),
@@ -893,15 +897,17 @@ impl Book {
         if waiting > 0 {
             self.place(now, conv);
         }
-        let unsaid = self.unsaid.take();
-        let said = match unsaid {
-            Some(line) if conv.push(EntryKind::Notice, &line).is_err() => {
-                self.unsaid = Some(line);
-                false
+        let mut said = false;
+        while let Some(line) = self.unsaid.front() {
+            if conv.push(EntryKind::Notice, line).is_err() {
+                break;
             }
-            Some(_) => true,
-            None => false,
-        };
+            self.unsaid.pop_front();
+            said = true;
+        }
+        if self.unsaid.is_empty() {
+            self.folded = false;
+        }
         let before = std::mem::take(&mut self.status);
         self.refresh(now);
         said || before != self.status || waiting != self.held.len()
@@ -945,8 +951,18 @@ impl Book {
 
     /// A notice the conversation has no room for now is kept and said later.
     fn say(&mut self, conv: &mut Conversation, line: &str) {
-        if conv.push(EntryKind::Notice, line).is_err() {
-            self.unsaid = Some(line.to_owned());
+        if !self.unsaid.is_empty() || conv.push(EntryKind::Notice, line).is_err() {
+            self.defer(line);
+        }
+    }
+
+    /// Keeps a notice for later, in order; past [`UNSAID_CAP`] the rest are one line.
+    fn defer(&mut self, line: &str) {
+        if self.unsaid.len() < UNSAID_CAP {
+            self.unsaid.push_back(line.to_owned());
+        } else if !self.folded {
+            self.unsaid.push_back(text::MORE_NOTICES.to_owned());
+            self.folded = true;
         }
     }
 
@@ -1900,6 +1916,62 @@ mod tests {
             "/frobnicate is not a command and was not sent: /help lists the commands"
         );
         assert_eq!(run.book.header().right, "");
+    }
+
+    fn full_run() -> Run {
+        let mut run = Run {
+            book: Book::new("hobi", Standing::Enrolled, false),
+            conv: Conversation::new(3 * 256, 256),
+            now: 0,
+        };
+        let _ = run.op();
+        run.answer(reports(vec![report(1, 1, &"a".repeat(700), None)]));
+        let _ = run.op();
+        run.answer(Ok(Answer::Tasks(vec![])));
+        run
+    }
+
+    #[test]
+    fn deferred_notices_all_arrive_in_order() {
+        let mut run = full_run();
+        run.enter("/first");
+        run.enter("/second");
+        assert_eq!(run.texts().len(), 1);
+        for _ in 0..4 {
+            run.draw_all();
+            run.wait(100);
+        }
+        let texts = run.texts();
+        let first = texts.iter().position(|t| t.starts_with("/first "));
+        let second = texts.iter().position(|t| t.starts_with("/second "));
+        assert!(
+            matches!((first, second), (Some(a), Some(b)) if a < b),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn deferred_notices_past_the_bound_fold_into_one_line() {
+        let mut run = full_run();
+        let cap = run.book.unsaid.capacity();
+        for n in 0..12 {
+            run.enter(&format!("/w{n}"));
+        }
+        assert_eq!(run.book.unsaid.capacity(), cap, "the queue never grows");
+        for _ in 0..20 {
+            run.draw_all();
+            run.wait(100);
+        }
+        let texts = run.texts();
+        let said: Vec<_> = texts.iter().filter(|t| t.starts_with("/w")).collect();
+        assert_eq!(said.len(), UNSAID_CAP, "{texts:?}");
+        assert!(said[0].starts_with("/w0 ") && said[UNSAID_CAP - 1].starts_with("/w7 "));
+        assert_eq!(
+            texts.iter().filter(|t| *t == text::MORE_NOTICES).count(),
+            1,
+            "{texts:?}"
+        );
+        assert_eq!(texts.last().map(String::as_str), Some(text::MORE_NOTICES));
     }
 
     #[test]
