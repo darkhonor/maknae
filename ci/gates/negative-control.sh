@@ -1140,6 +1140,7 @@ pub enum Payload {
     TaskDelivered(crate::TaskDelivery),
     TaskFollowUps(crate::TaskFollowUps),
     TaskIdle,
+    Agents(crate::AgentPage),
 }
 
 pub struct SecretText(pub zeroize::Zeroizing<String>);
@@ -1177,11 +1178,44 @@ pub struct TaskView {
     pub elapsed_secs: u64,
     pub actions: u32,
     pub last_action_secs: Option<i64>,
+    pub cursor: TaskCursor,
 }
 
 pub struct TaskPage {
     pub entries: Vec<TaskView>,
     pub next: Option<TaskCursor>,
+}
+
+pub enum AgentStanding {
+    Enrolled,
+    Contained,
+    Withdrawn,
+    Removed,
+    Undecided,
+}
+
+pub struct AgentEntry {
+    pub agent: String,
+    pub standing: AgentStanding,
+    pub waiting: u32,
+}
+
+pub enum BannerColor {
+    Black,
+    Red,
+    Rgb(u8, u8, u8),
+}
+
+pub struct BannerSpec {
+    pub text: String,
+    pub color: Option<BannerColor>,
+}
+
+pub struct AgentPage {
+    pub entries: Vec<AgentEntry>,
+    pub next: Option<String>,
+    pub undecided: u32,
+    pub banner: Option<BannerSpec>,
 }
 
 pub struct TaskReportView {
@@ -1468,6 +1502,15 @@ always	task.task	ships by construction
 always	task.agent	ships by construction
 always	task.state	ships by construction
 always	task.close	ships by construction
+always	task.cursor	ships by construction
+always	task_list.entries.cursor	ships by construction
+always	agent_list.entries.agent	ships by construction
+always	agent_list.entries.standing	ships by construction
+always	agent_list.entries.waiting	ships by construction
+always	agent_list.next	ships by construction
+always	agent_list.undecided	ships by construction
+always	agent_list.banner.text	ships by construction
+always	agent_list.banner.color	ships by construction
 always	task.submitted_secs	ships by construction
 always	task.elapsed_secs	ships by construction
 always	task.actions	ships by construction
@@ -1578,7 +1621,7 @@ cat > "$fx/crates/maknae-config/src/document.rs" <<'FIX'
 const DISCLOSABLE: &[&str] = &["transport", "providers[].name", "providers[].endpoint", "providers[].models", "providers[].models[]", "providers[].reasoning_effort", "providers[].output_tokens_field", "vault.addr", "vault.approle_mount", "vault.pki_int_mount", "vault.deployment_id", "vault.user_auth", "vault.user_auth.type", "vault.user_auth.mount", "vault.kv_mount", "vault.user_prefix", "vault.plane_key", "audit.jsonl_path", "principal", "egress.socket_path", "egress.deadline_ms", "deployment.mode", "deployment.account_source"];
 const SUPPRESSED: &[&str] = &["vault.insecure_plaintext_secret_path", "core.handling", "audit.au3_1"];
 FIX
-expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" ": 114 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" ": 123 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a section registered in boot.rs with no SURFACE entry. THE THIRD
 # fail-open, and the one that closes the PROPERTY rather than an instance: the
@@ -1803,19 +1846,26 @@ expect_reject_because "config-disclosure-drift/whitespace-bearing-surface-prefix
 # The leaf-enum row is the one place an enum-typed field is a leaf. The fixture
 # carries the real row's shape: ContainmentView.outcome is a unit-only enum in
 # the same file. Each probe breaks one thing the row's checks rest on.
-enum_probe() { # <name> <wanted> <python-expr transforming s>
+enum_probe() { # <name> <wanted> <python-expr transforming s> [<file in crates/maknae-proto/src>]
   local fx; fx="$(cfg_fixture "$CFG_OK")"
-  python3 - "$fx" "$3" <<'PYFIX'
+  python3 - "$fx" "$3" "${4:-wire.rs}" <<'PYFIX'
 import pathlib, sys
-p = pathlib.Path(sys.argv[1]) / "crates/maknae-proto/src/wire.rs"
+p = pathlib.Path(sys.argv[1]) / "crates/maknae-proto/src" / sys.argv[3]
 s = p.read_text()
 s = eval(sys.argv[2])
 p.write_text(s)
 PYFIX
   expect_reject_because "config-disclosure-drift/$1" "$2" "$fx/ci/gates/config-disclosure-drift.sh"
 }
-enum_probe leaf-enum-gains-a-data-variant "not unit-only" \
-  's.replace("    Released,\n}", "    Released,\n    Refused(String),\n}")'
+for variant in unit-only scalar; do
+  if [ "$variant" = unit-only ]; then
+    enum_probe leaf-enum-gains-a-data-variant "not unit-only" \
+      's.replace("    Released,\n}", "    Released,\n    Refused(String),\n}")'
+  else
+    enum_probe leaf-enum-gains-a-data-variant/scalar-rule "not unit-only or integer-tuple-only" \
+      's.replace("    Rgb(u8, u8, u8),\n}", "    Rgb(u8, u8, u8),\n    Named(String),\n}")' task.rs
+  fi
+done
 enum_probe leaf-enum-one-line-data-variant "not unit-only" \
   's.replace("""pub enum ContainmentOutcome {\n    Contained,\n    Released,\n}""", "pub enum ContainmentOutcome { Contained, Refused(String) }")'
 enum_probe leaf-enum-attributed-data-variant "not unit-only" \
@@ -2061,7 +2111,7 @@ assert t.count("pub siem: Option<String>,") == 1, "the siem anchor moved"
 a.write_text(t.replace("pub siem: Option<String>,", "pub siem: String,"))
 PY
 expect_reject_because "config-disclosure-drift/dead-wrapper-strip-is-refused-on-the-wire-arm" \
-  "'baseline.changes' has type 'Vec<String>', which reduced to 'Vec<String'" \
+  "it still LEADS with a wrapper this surface strips" \
   "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a field declaration the extractor cannot read. The awk emits a row
@@ -2149,7 +2199,7 @@ fi
 # go check a sed flag. This probe pins the corrected order.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'std::sync::Arc<String>')"
 expect_accept "config-disclosure-drift/qualified-wrapper-is-a-leaf" \
-  ": 114 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 123 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the config-surface `Vec` exemption holds for the QUALIFIED spelling
 # too. Under the old post-loop `s/.*:://`, `Vec<crate::Principal>` reduced to
@@ -2158,7 +2208,7 @@ expect_accept "config-disclosure-drift/qualified-wrapper-is-a-leaf" \
 # the unqualified `config-vec-of-struct-is-a-leaf` probe below cannot see.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'Vec<crate::Principal>')"
 expect_accept "config-disclosure-drift/qualified-config-vec-is-still-a-leaf" \
-  ": 114 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 123 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the mirror image. `Vec<WorkspaceStruct>` on a CONFIG surface is a
 # LEAF -- only a sequence whose element paths are declared is walked;
@@ -2167,12 +2217,12 @@ expect_accept "config-disclosure-drift/qualified-config-vec-is-still-a-leaf" \
 # did not, and every config row was silently held to the wire rule.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'Vec<Principal>')"
 expect_accept "config-disclosure-drift/config-vec-of-struct-is-a-leaf" \
-  ": 114 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 123 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the clean fixture passes and reports both counts. Without this every
 # rejection above would stay green against a gate that refuses everything.
 fx="$(cfg_fixture "$CFG_OK")"
-expect_accept "config-disclosure-drift/clean-fixture-passes" ": 114 paths decided, 128 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/clean-fixture-passes" ": 123 paths decided, 139 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
 
 fx="$(cfg_fixture "$CFG_OK")"
 python3 - "$fx" <<'PYFIX'
@@ -2288,7 +2338,7 @@ expect_reported_count "p1-manifest/packages-match-the-workspace" "ok (" "$exp_p1
 # control; asserting it here means any future silent shrink is a red build.
 
 expect_accept "config-disclosure-drift/real-repo-counts-pinned" \
-  ": 126 paths decided, 128 struct fields covered" "$here/config-disclosure-drift.sh"
+  ": 135 paths decided, 139 struct fields covered" "$here/config-disclosure-drift.sh"
 
 
 # #158: a grant's own disclosure inventory must reject new data and type changes.

@@ -207,7 +207,7 @@ fn json_string(s: &str) -> String {
     let json = serde_json::Value::String(s.to_string()).to_string();
     let mut out = String::with_capacity(json.len());
     for c in json.chars() {
-        if c.is_control() || c == '\u{2028}' || c == '\u{2029}' || maknae_proto::is_format_char(c) {
+        if maknae_proto::is_display_unsafe(c) {
             let mut units = [0u16; 2];
             for u in c.encode_utf16(&mut units) {
                 out.push_str(&format!("\\u{:04x}", u));
@@ -507,10 +507,8 @@ mod tests {
                     }
                 }
                 assert!(
-                    !out.chars().any(|c| c.is_control() && c != '\n'
-                        || c == '\u{2028}'
-                        || c == '\u{2029}'
-                        || maknae_proto::is_format_char(c)),
+                    !out.chars()
+                        .any(|c| c != '\n' && maknae_proto::is_display_unsafe(c)),
                     "{out:?}"
                 );
             }

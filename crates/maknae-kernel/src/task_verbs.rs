@@ -502,6 +502,7 @@ mod tests {
     #[test]
     fn a_view_carries_elapsed_time_and_the_hot_facts() {
         let mut r = rec(1, None, "");
+        r.tseq = 7;
         r.state = TaskState::Closed;
         r.close = Some(TaskClose::Stopped);
         let hot = Hot {
@@ -522,7 +523,7 @@ mod tests {
                 elapsed_secs: 42,
                 actions: 4,
                 last_action_secs: Some(140),
-                cursor: TaskCursor::from_seq(r.tseq),
+                cursor: TaskCursor::from_seq(7),
             }
         );
         assert_eq!(view(&r, &hot, 50).elapsed_secs, 0);

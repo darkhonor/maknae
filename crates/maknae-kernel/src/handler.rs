@@ -1120,7 +1120,7 @@ mod tests {
     }
 
     #[test]
-    fn every_task_verb_carries_its_op_and_no_other_verb_does() {
+    fn every_task_verb_but_agent_list_carries_its_op_and_no_other_verb_does() {
         let mut ops = Vec::new();
         for v in all_verbs() {
             let req = build_authz_request(

@@ -431,8 +431,7 @@ impl BannerColor {
         }
     }
 
-    /// The text colour with the higher WCAG contrast ratio against this background.
-    pub fn contrast(self) -> Contrast {
+    fn luminance(self) -> f64 {
         fn lin(c: u8) -> f64 {
             let c = f64::from(c) / 255.0;
             if c <= 0.04045 {
@@ -442,7 +441,12 @@ impl BannerColor {
             }
         }
         let (r, g, b) = self.rgb();
-        let lum = 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+        0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+    }
+
+    /// The text colour with the higher WCAG contrast ratio against this background.
+    pub fn contrast(self) -> Contrast {
+        let lum = self.luminance();
         let black_ratio = (lum + 0.05) / 0.05;
         let white_ratio = 1.05 / (lum + 0.05);
         if white_ratio > black_ratio {
@@ -487,14 +491,14 @@ pub fn check_banner(spec: &BannerSpec) -> Result<(), BannerError> {
     if spec.text.len() > BANNER_TEXT_MAX {
         return Err(BannerError::TooLong);
     }
-    if spec
-        .text
-        .chars()
-        .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}' || is_format_char(c))
-    {
+    if spec.text.chars().any(is_display_unsafe) {
         return Err(BannerError::ForbiddenChar);
     }
     Ok(())
+}
+
+pub fn is_display_unsafe(c: char) -> bool {
+    c.is_control() || c == '\u{2028}' || c == '\u{2029}' || is_format_char(c)
 }
 
 /// Unicode general category Cf (format), as of Unicode 15.1.
@@ -1018,6 +1022,10 @@ mod tests {
                 text: secret(text),
                 seen_follow_ups: Some(3),
             },
+            Verb::AgentList {
+                after: Some("hobi".into()),
+            },
+            Verb::AgentList { after: None },
         ]
     }
 
@@ -1049,6 +1057,19 @@ mod tests {
                 items: vec![secret(text), secret("second")],
             }),
             Payload::TaskIdle,
+            Payload::Agents(AgentPage {
+                entries: vec![AgentEntry {
+                    agent: "hobi".into(),
+                    standing: AgentStanding::Contained,
+                    waiting: 2,
+                }],
+                next: Some("hobi".into()),
+                undecided: 1,
+                banner: Some(BannerSpec {
+                    text: "lab".into(),
+                    color: Some(BannerColor::Rgb(1, 2, 3)),
+                }),
+            }),
         ]
     }
 
@@ -1097,7 +1118,8 @@ mod tests {
                 Verb::TaskStatus { .. }
                 | Verb::TaskList { .. }
                 | Verb::TaskStop { .. }
-                | Verb::TaskDrop { .. } => FrameClass::Control,
+                | Verb::TaskDrop { .. }
+                | Verb::AgentList { .. } => FrameClass::Control,
                 other => panic!("not a task verb: {other:?}"),
             };
             assert_eq!(class_of(&verb), want, "{verb:?}");
@@ -1250,7 +1272,9 @@ mod tests {
             task: None,
         };
         let bytes = crate::encode_request(&req).unwrap();
-        assert_eq!(crate::decode_request(&bytes).unwrap(), req);
+        let back = crate::decode_request(&bytes).unwrap();
+        assert_eq!(back, req);
+        assert_eq!(crate::encode_request(&back).unwrap(), bytes);
         let resp = crate::Response {
             protocol_version: crate::PROTOCOL_VERSION,
             result: crate::RespResult::Ok(crate::Payload::Agents(AgentPage {
@@ -1268,8 +1292,9 @@ mod tests {
             })),
         };
         let bytes = crate::encode_response(&resp).unwrap();
-        assert_eq!(crate::decode_response(&bytes).unwrap(), resp);
-        assert_eq!(crate::encode_response(&resp).unwrap(), bytes);
+        let back = crate::decode_response(&bytes).unwrap();
+        assert_eq!(back, resp);
+        assert_eq!(crate::encode_response(&back).unwrap(), bytes);
     }
 
     #[test]
@@ -1331,22 +1356,99 @@ mod tests {
         };
         assert_eq!(check_banner(&spec("ok")), Ok(()));
         assert_eq!(check_banner(&spec(&"a".repeat(256))), Ok(()));
-        for bad in [
-            String::new(),
-            "a".repeat(257),
-            "a\u{7}b".into(),
-            "a\u{2028}b".into(),
-            "a\u{202e}b".into(),
-        ] {
-            assert!(check_banner(&spec(&bad)).is_err(), "{bad:?}");
+        assert_eq!(check_banner(&spec("")), Err(BannerError::Empty));
+        assert_eq!(
+            check_banner(&spec(&"a".repeat(257))),
+            Err(BannerError::TooLong)
+        );
+        for bad in ["a\u{7}b", "a\u{2028}b", "a\u{2029}b", "a\u{202e}b"] {
+            assert_eq!(
+                check_banner(&spec(bad)),
+                Err(BannerError::ForbiddenChar),
+                "{bad:?}"
+            );
         }
     }
 
     #[test]
+    fn every_banner_error_says_what_it_refused() {
+        assert_eq!(BannerError::Empty.to_string(), "banner text is empty");
+        assert_eq!(
+            BannerError::TooLong.to_string(),
+            "banner text is over 256 bytes"
+        );
+        assert_eq!(
+            BannerError::ForbiddenChar.to_string(),
+            "banner text holds a control, line or format character"
+        );
+    }
+
+    #[test]
+    fn luminance_follows_the_wcag_formula() {
+        let near = |c: BannerColor, want: f64| {
+            let got = c.luminance();
+            assert!((got - want).abs() < 1e-6, "{c:?}: {got} != {want}");
+        };
+        near(BannerColor::Rgb(10, 10, 10), 0.003_035_3);
+        near(BannerColor::Rgb(128, 128, 128), 0.215_860_5);
+        near(BannerColor::Rgb(0, 0, 0), 0.0);
+        near(BannerColor::Rgb(255, 255, 255), 1.0);
+    }
+
+    #[test]
+    fn the_contrast_choice_flips_between_grey_117_and_118() {
+        assert_eq!(
+            BannerColor::Rgb(117, 117, 117).contrast(),
+            Contrast::WhiteText
+        );
+        assert_eq!(
+            BannerColor::Rgb(118, 118, 118).contrast(),
+            Contrast::BlackText
+        );
+    }
+
+    #[test]
     fn format_chars_are_the_unicode_cf_set() {
-        assert!(is_format_char('\u{200b}'));
-        assert!(is_format_char('\u{e0001}'));
+        let ranges: [(u32, u32); 21] = [
+            (0x00AD, 0x00AD),
+            (0x0600, 0x0605),
+            (0x061C, 0x061C),
+            (0x06DD, 0x06DD),
+            (0x070F, 0x070F),
+            (0x0890, 0x0891),
+            (0x08E2, 0x08E2),
+            (0x180E, 0x180E),
+            (0x200B, 0x200F),
+            (0x202A, 0x202E),
+            (0x2060, 0x2064),
+            (0x2066, 0x206F),
+            (0xFEFF, 0xFEFF),
+            (0xFFF9, 0xFFFB),
+            (0x110BD, 0x110BD),
+            (0x110CD, 0x110CD),
+            (0x13430, 0x1343F),
+            (0x1BCA0, 0x1BCA3),
+            (0x1D173, 0x1D17A),
+            (0xE0001, 0xE0001),
+            (0xE0020, 0xE007F),
+        ];
+        let at = |u: u32| char::from_u32(u).is_some_and(is_format_char);
+        for (lo, hi) in ranges {
+            assert!(at(lo) && at(hi), "{lo:x}..={hi:x}");
+            assert!(!at(lo - 1) || ranges.iter().any(|&(a, b)| (a..=b).contains(&(lo - 1))));
+            assert!(!at(hi + 1) || ranges.iter().any(|&(a, b)| (a..=b).contains(&(hi + 1))));
+        }
         assert!(!is_format_char('a'));
         assert!(!is_format_char('\u{2028}'));
+    }
+
+    #[test]
+    fn display_unsafe_covers_controls_line_separators_and_format_characters() {
+        for c in [
+            '\u{7}', '\n', '\u{2028}', '\u{2029}', '\u{202e}', '\u{200b}',
+        ] {
+            assert!(is_display_unsafe(c), "{c:?}");
+        }
+        assert!(!is_display_unsafe('a') && !is_display_unsafe('é'));
     }
 }
