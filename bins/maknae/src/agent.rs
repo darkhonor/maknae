@@ -1,4 +1,4 @@
-//! `maknae agent` — the HANDS of the runtime loop (#241). T3: I/O wiring over
+//! `maknae -p` — the HANDS of the runtime loop (#241). T3: I/O wiring over
 //! the brain in `maknae-agent`. Runs as the subject, holds no key and no
 //! policy, and asks the kernel for everything (ADR-0023 d2, d4).
 use maknae_agent::budget::{prompt_cap, ContextBudget, Notice};
@@ -343,10 +343,7 @@ pub fn print_end(
     }
     crate::stderr::line(
         err,
-        format_args!(
-            "maknae agent: {}",
-            stop_line(outcome.stopped.as_ref(), budget)
-        ),
+        format_args!("maknae: {}", stop_line(outcome.stopped.as_ref(), budget)),
     );
     Ok(2)
 }
@@ -460,7 +457,7 @@ pub fn close_line(closed: &Closed, conversation: &str) -> Option<String> {
         Closed::Closed(_) | Closed::NotOpened => return None,
         Closed::TimedOut => {
             return Some(format!(
-                "maknae agent: whether conversation {conversation} was closed is unknown (no answer within {} s); if it was not, the kernel closes it at your next session.new or session.list once it has been idle 24 hours",
+                "maknae: whether conversation {conversation} was closed is unknown (no answer within {} s); if it was not, the kernel closes it at your next session.new or session.list once it has been idle 24 hours",
                 CLOSE_WITHIN.as_secs()
             ))
         }
@@ -471,7 +468,7 @@ pub fn close_line(closed: &Closed, conversation: &str) -> Option<String> {
         Closed::Failed(other) => format!("{other:?}"),
     };
     Some(format!(
-        "maknae agent: conversation {conversation} was not closed ({why}); the kernel closes it at your next session.new or session.list once it has been idle 24 hours"
+        "maknae: conversation {conversation} was not closed ({why}); the kernel closes it at your next session.new or session.list once it has been idle 24 hours"
     ))
 }
 
@@ -1506,7 +1503,7 @@ mod tests {
                 assert!(out.is_empty());
                 assert_eq!(
                     String::from_utf8(err).unwrap(),
-                    format!("maknae agent: {}\n", stop_line(Some(r), &b))
+                    format!("maknae: {}\n", stop_line(Some(r), &b))
                 );
             }
         }
@@ -1537,11 +1534,11 @@ mod tests {
             for (r, want) in [
                 (
                     StopReason::StepBudget,
-                    "maknae agent: stopped: the step budget (8) was spent without an answer\n",
+                    "maknae: stopped: the step budget (8) was spent without an answer\n",
                 ),
                 (
                     StopReason::TooManyToolCalls(5),
-                    "maknae agent: stopped: the model asked for 5 tools in one step (cap 4)\n",
+                    "maknae: stopped: the model asked for 5 tools in one step (cap 4)\n",
                 ),
             ] {
                 let (mut out, mut err) = (vec![], vec![]);
@@ -1588,10 +1585,7 @@ mod tests {
             assert_eq!(lines[2], ATTEMPT);
             assert_eq!(
                 lines[3],
-                format!(
-                    "maknae agent: {}",
-                    stop_line(Some(&StopReason::StepBudget), &b)
-                )
+                format!("maknae: {}", stop_line(Some(&StopReason::StepBudget), &b))
             );
             assert!(err.ends_with('\n'));
         }
@@ -1711,7 +1705,7 @@ mod tests {
             ));
             assert_eq!(
                 close_line(&closed, KERNEL_ID).unwrap(),
-                format!("maknae agent: conversation {KERNEL_ID} was not closed (daemon gone); the kernel closes it at your next session.new or session.list once it has been idle 24 hours")
+                format!("maknae: conversation {KERNEL_ID} was not closed (daemon gone); the kernel closes it at your next session.new or session.list once it has been idle 24 hours")
             );
         }
     }
@@ -1755,14 +1749,14 @@ mod tests {
             assert_eq!(
                 close_line(&closed, id),
                 Some(format!(
-                    "maknae agent: conversation {id} was not closed ({why}){tail}"
+                    "maknae: conversation {id} was not closed ({why}){tail}"
                 ))
             );
         }
         assert_eq!(
             close_line(&Closed::TimedOut, id),
             Some(format!(
-                "maknae agent: whether conversation {id} was closed is unknown (no answer within 5 s); if it was not, the kernel closes it at your next session.new or session.list once it has been idle 24 hours"
+                "maknae: whether conversation {id} was closed is unknown (no answer within 5 s); if it was not, the kernel closes it at your next session.new or session.list once it has been idle 24 hours"
             ))
         );
     }

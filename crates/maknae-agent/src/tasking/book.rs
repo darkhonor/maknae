@@ -80,9 +80,15 @@ pub enum Answer {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Failure {
-    Refused { outcome_unknown: bool },
-    Unreachable { after_write: bool },
+    Refused {
+        outcome_unknown: bool,
+    },
+    Unreachable {
+        after_write: bool,
+    },
     Protocol(String),
+    /// No plane leaf could be had, so nothing was sent.
+    NoIdentity,
 }
 
 impl Failure {
@@ -92,6 +98,7 @@ impl Failure {
             Failure::Refused { outcome_unknown } => *outcome_unknown,
             Failure::Unreachable { after_write } => *after_write,
             Failure::Protocol(_) => true,
+            Failure::NoIdentity => false,
         }
     }
 }
@@ -108,6 +115,7 @@ enum Connection {
     Connected,
     Unreachable,
     Unreadable,
+    NoIdentity,
 }
 
 /// What the verb in flight was, to read its answer.
@@ -198,6 +206,9 @@ pub struct Book {
     collect_refusal_said: bool,
     stopped: bool,
     status: Vec<String>,
+    away: bool,
+    adopt: bool,
+    unsaid: Option<String>,
 }
 
 impl std::fmt::Debug for Book {
@@ -244,6 +255,9 @@ impl Book {
             collect_refusal_said: false,
             stopped: false,
             status: Vec::new(),
+            away: true,
+            adopt: false,
+            unsaid: None,
         }
     }
 
@@ -256,6 +270,7 @@ impl Book {
             (true, _, _) => text::LOGIN_ENDED,
             (_, Connection::Unreachable, _) => text::UNREACHABLE,
             (_, Connection::Unreadable, _) => text::UNREADABLE,
+            (_, Connection::NoIdentity, _) => text::NO_IDENTITY,
             (_, _, Standing::Removed) => "removed",
             (_, _, Standing::Contained) => "on hold (contained)",
             (_, _, Standing::Withdrawn) => "you can no longer task this agent",
@@ -263,6 +278,7 @@ impl Book {
             (_, Connection::Connected, Standing::Enrolled) => text::CONNECTED,
         };
         let right = match self.held.len() {
+            0 if self.unsaid.is_some() => "a notice is waiting: scroll down to read on".into(),
             0 => String::new(),
             1 => "1 report waiting: scroll down to read on".into(),
             n => format!("{n} reports waiting: scroll down to read on"),
@@ -287,16 +303,35 @@ impl Book {
         self.flight.is_some()
     }
 
+    /// Whether anything typed or the opening reads are still queued or unanswered.
+    pub fn busy(&self) -> bool {
+        !self.queue.is_empty()
+            || matches!(self.flight, Some(Asked::ListAll { opening: true }))
+            || self.steering_in_flight()
+    }
+
+    /// Whether a submit, add, stop or drop is sent and unanswered.
+    pub fn steering_in_flight(&self) -> bool {
+        matches!(
+            self.flight,
+            Some(Asked::Submit | Asked::Add(_) | Asked::Stop(_) | Asked::Drop(_))
+        )
+    }
+
     /// An entered line: a request, a command, or nothing.
     pub fn enter(&mut self, line: Zeroizing<String>, now: u64, conv: &mut Conversation) -> Entered {
         let parsed = parse(&line);
+        if self.stopped && !matches!(parsed, Parsed::Empty | Parsed::Bye | Parsed::Help) {
+            self.say(conv, text::LOGIN_STOPPED);
+            return Entered::Stay;
+        }
         let entered = match parsed {
             Parsed::Empty => Entered::Stay,
             Parsed::Request => {
                 if let Some(refusal) = self.refuse_tasking() {
-                    say(conv, &refusal);
+                    self.say(conv, &refusal);
                 } else if conv.push(EntryKind::Request, &line).is_err() {
-                    say(conv, text::CONVERSATION_FULL);
+                    self.say(conv, text::CONVERSATION_FULL);
                 } else {
                     let text = SecretText(line);
                     self.queue.push_back((Op::Submit { text }, Asked::Submit));
@@ -323,7 +358,7 @@ impl Book {
                         self.queue
                             .push_back((Op::Status { task }, Asked::Status(n)));
                     }
-                    None => say(conv, &format!("there is no task #{n}")),
+                    None => self.say(conv, &format!("there is no task #{n}")),
                 }
                 Entered::Stay
             }
@@ -335,10 +370,10 @@ impl Book {
                     .map(|t| self.status_of(t, now))
                     .collect();
                 if lines.is_empty() {
-                    say(conv, "no open tasks");
+                    self.say(conv, "no open tasks");
                 }
                 for line in lines {
-                    say(conv, &line);
+                    self.say(conv, &line);
                 }
                 Entered::Stay
             }
@@ -350,20 +385,20 @@ impl Book {
             Parsed::Bye => Entered::Leave,
             Parsed::Help => {
                 for line in text::help_lines() {
-                    say(conv, &line);
+                    self.say(conv, &line);
                 }
                 Entered::Stay
             }
             Parsed::Unknown(word) => {
                 let word = text::safe(word);
-                say(
+                self.say(
                     conv,
                     &format!("{word} is not a command and was not sent: /help lists the commands"),
                 );
                 Entered::Stay
             }
             Parsed::Usage(usage) => {
-                say(conv, usage);
+                self.say(conv, usage);
                 Entered::Stay
             }
         };
@@ -397,16 +432,15 @@ impl Book {
 
     fn add(&mut self, number: Option<u32>, add: &str, line: &str, conv: &mut Conversation) {
         if let Some(refusal) = self.refuse_tasking() {
-            return say(conv, &refusal);
+            return self.say(conv, &refusal);
         }
         let Some((n, task)) = self.target(number, conv, "add to") else {
             return;
         };
         if conv.push(EntryKind::Request, line).is_err() {
-            return say(conv, text::CONVERSATION_FULL);
+            return self.say(conv, text::CONVERSATION_FULL);
         }
-        let mut copy = Zeroizing::new(String::with_capacity(add.len()));
-        copy.push_str(add);
+        let (copy, _) = add_copy(add);
         self.queue.push_back((
             Op::Add {
                 task,
@@ -418,7 +452,7 @@ impl Book {
 
     fn steer(&mut self, number: Option<u32>, conv: &mut Conversation, stop: bool) {
         if let Some(refusal) = self.refuse_steering() {
-            return say(conv, &refusal);
+            return self.say(conv, &refusal);
         }
         let verb = if stop { "stop" } else { "drop" };
         let Some((n, task)) = self.target(number, conv, verb) else {
@@ -434,7 +468,7 @@ impl Book {
 
     /// Task `number`, or with none the newest open task.
     fn target(
-        &self,
+        &mut self,
         number: Option<u32>,
         conv: &mut Conversation,
         verb: &str,
@@ -446,15 +480,16 @@ impl Book {
                 .iter()
                 .filter(|t| t.open())
                 .max_by_key(|t| t.cursor()),
-        };
+        }
+        .map(|t| (t.number, t.task.clone()));
         match (found, number) {
-            (Some(t), _) => Some((t.number, t.task.clone())),
+            (Some(found), _) => Some(found),
             (None, Some(n)) => {
-                say(conv, &format!("there is no task #{n}"));
+                self.say(conv, &format!("there is no task #{n}"));
                 None
             }
             (None, None) => {
-                say(conv, &format!("there is no open task to {verb}"));
+                self.say(conv, &format!("there is no open task to {verb}"));
                 None
             }
         }
@@ -498,7 +533,10 @@ impl Book {
             self.collect_soon = false;
             self.collected_at = now;
             let after = self.ack_upto(conv);
-            self.flight = Some(Asked::Collect { after, away: false });
+            self.flight = Some(Asked::Collect {
+                after,
+                away: self.away,
+            });
             return Some(Op::Collect {
                 after: after.map(TaskCursor::from_seq),
             });
@@ -543,6 +581,7 @@ impl Book {
             Ok(_) | Err(Failure::Refused { .. }) => self.connection = Connection::Connected,
             Err(Failure::Unreachable { .. }) => self.connection = Connection::Unreachable,
             Err(Failure::Protocol(_)) => self.connection = Connection::Unreadable,
+            Err(Failure::NoIdentity) => self.connection = Connection::NoIdentity,
         }
         match (asked, answer) {
             (Asked::Collect { after, away }, Ok(Answer::Reports(page))) => {
@@ -560,27 +599,31 @@ impl Book {
                 self.listed(opening, all, now, conv)
             }
             (Asked::ListAll { opening: false } | Asked::Status(_), Err(e)) => {
-                say(conv, &read_failure(&e))
+                self.say(conv, &read_failure(&e))
             }
             (Asked::ListAll { opening: true }, Err(_)) => self.reread = true,
             (Asked::Submit, Ok(Answer::View(view))) => self.submitted(view, now, conv),
             (Asked::Add(n), Ok(Answer::View(view))) => {
                 self.update(view, now, conv);
-                say(conv, &format!("added to #{n}"));
+                self.say(conv, &format!("added to #{n}"));
             }
             (Asked::Stop(n), Ok(Answer::View(view))) => {
                 self.update(view, now, conv);
-                say(conv, &format!("stopped #{n}"));
+                self.say(conv, &format!("stopped #{n}"));
             }
             (Asked::Drop(n), Ok(Answer::View(view))) => {
+                let task = view.task.clone();
                 self.update(view, now, conv);
-                say(conv, &format!("dropped #{n}"));
+                if let Some(at) = self.index_of(&task) {
+                    self.tasks[at].gone = true;
+                }
+                self.say(conv, &format!("dropped #{n}"));
             }
             (Asked::Status(n), Ok(Answer::View(view))) => {
                 self.update(view, now, conv);
                 if let Some(at) = self.task_index(n) {
                     let line = self.full_status(&self.tasks[at], now);
-                    say(conv, &line);
+                    self.say(conv, &line);
                 }
             }
             (Asked::Submit, Err(e)) => self.steer_failed(Unknown::Submit, &e, conv),
@@ -589,7 +632,7 @@ impl Book {
             (Asked::Drop(n), Err(e)) => self.steer_failed(Unknown::Drop(n), &e, conv),
             (_, Ok(_)) => {
                 self.connection = Connection::Unreadable;
-                say(
+                self.say(
                     conv,
                     "the kernel answered with something other than what was asked",
                 );
@@ -601,11 +644,18 @@ impl Book {
 
     fn steer_failed(&mut self, op: Unknown, e: &Failure, conv: &mut Conversation) {
         if e.unknown() {
-            say(conv, &text::outcome_unknown_line(op));
+            self.say(conv, &text::outcome_unknown_line(op));
             self.reread = true;
+            self.adopt |= op == Unknown::Submit;
             return;
         }
         let line = match (op, e) {
+            (Unknown::Submit, Failure::NoIdentity) => {
+                "no plane identity could be had; your request was not sent".to_string()
+            }
+            (_, Failure::NoIdentity) => {
+                "no plane identity could be had; nothing was sent".to_string()
+            }
             (Unknown::Submit, Failure::Unreachable { .. }) => {
                 "the kernel could not be reached; your request was not sent".to_string()
             }
@@ -614,7 +664,7 @@ impl Book {
             }
             _ => "the kernel refused it".to_string(),
         };
-        say(conv, &line);
+        self.say(conv, &line);
     }
 
     fn collected(
@@ -642,6 +692,9 @@ impl Book {
             self.held.push_back(Held { report, away });
         }
         self.collect_soon = more && fresh;
+        if !more {
+            self.away = false;
+        }
         self.place(now, conv);
     }
 
@@ -650,7 +703,7 @@ impl Book {
             return;
         }
         if !self.collect_refusal_said {
-            say(conv, &text::outcome_unknown_line(Unknown::Collect));
+            self.say(conv, &text::outcome_unknown_line(Unknown::Collect));
             self.collect_refusal_said = true;
         }
         self.high = self.acked;
@@ -675,14 +728,10 @@ impl Book {
                 Some(close) => text::close_line(close),
                 None => &report.text.0,
             };
-            let len = head.len() + 1 + body.len();
             if conv.would_drop_unseen(display_safe_len(&head) + 1 + display_safe_len(body)) {
                 return;
             }
-            let mut entry = Zeroizing::new(String::with_capacity(len));
-            entry.push_str(&head);
-            entry.push('\n');
-            entry.push_str(body);
+            let (entry, _) = report_entry(&head, body);
             let Ok(id) = conv.push(EntryKind::Report, &entry) else {
                 return;
             };
@@ -743,6 +792,7 @@ impl Book {
             Some(next) if pages < SWEEP_PAGES => self.sweep = Some((next, from, pages + 1)),
             Some(_) => {}
             None => {
+                self.adopt = false;
                 for task in &mut self.tasks {
                     let listed_range = task.cursor().is_some_and(|c| from.is_none_or(|f| c > f));
                     if task.shown() && listed_range && !self.swept.contains(&task.task) {
@@ -762,9 +812,8 @@ impl Book {
             view.state,
             TaskState::Queued | TaskState::Working | TaskState::Held | TaskState::Reported
         ) {
-            let n = self.number(view.task.clone(), None, now, false);
+            self.number(view.task.clone(), None, now, self.adopt);
             self.update(view, now, conv);
-            debug_assert!(n > 0);
         }
     }
 
@@ -783,9 +832,9 @@ impl Book {
         }
         let n = task.number;
         if state == TaskState::Held {
-            say(conv, &format!("#{n} {}", text::held_line()));
+            self.say(conv, &format!("#{n} {}", text::held_line()));
         } else if self.announce {
-            say(conv, &format!("#{n} {}", text::state_word(state)));
+            self.say(conv, &format!("#{n} {}", text::state_word(state)));
         }
     }
 
@@ -797,7 +846,7 @@ impl Book {
             return;
         }
         if all.is_empty() {
-            say(conv, &format!("you have no tasks with {}", self.agent));
+            self.say(conv, &format!("you have no tasks with {}", self.agent));
         }
         for view in all {
             let n = match self.index_of(&view.task) {
@@ -810,7 +859,7 @@ impl Book {
                 line.push_str(text::close_line(close));
             }
             self.update(view, now, conv);
-            say(conv, &line);
+            self.say(conv, &line);
         }
     }
 
@@ -828,12 +877,12 @@ impl Book {
         self.update(view, now, conv);
         self.announce = quiet;
         if others {
-            say(
+            self.say(
                 conv,
-                &format!("started a new task #{n} (use /add {n} to add to a running one)"),
+                &format!("started a new task #{n} (use /add <n> to add to a running one)"),
             );
         } else {
-            say(conv, &format!("#{n} submitted"));
+            self.say(conv, &format!("#{n} submitted"));
         }
     }
 
@@ -844,15 +893,24 @@ impl Book {
         if waiting > 0 {
             self.place(now, conv);
         }
+        let unsaid = self.unsaid.take();
+        let said = match unsaid {
+            Some(line) if conv.push(EntryKind::Notice, &line).is_err() => {
+                self.unsaid = Some(line);
+                false
+            }
+            Some(_) => true,
+            None => false,
+        };
         let before = std::mem::take(&mut self.status);
         self.refresh(now);
-        before != self.status || waiting != self.held.len()
+        said || before != self.status || waiting != self.held.len()
     }
 
     /// The login ended: say so once and poll no more.
     pub fn stop(&mut self, line: &str, conv: &mut Conversation) {
         if !self.stopped {
-            say(conv, line);
+            self.say(conv, line);
         }
         self.stopped = true;
         self.flight = None;
@@ -885,6 +943,13 @@ impl Book {
         }
     }
 
+    /// A notice the conversation has no room for now is kept and said later.
+    fn say(&mut self, conv: &mut Conversation, line: &str) {
+        if conv.push(EntryKind::Notice, line).is_err() {
+            self.unsaid = Some(line.to_owned());
+        }
+    }
+
     fn refresh(&mut self, now: u64) {
         let lines: Vec<String> = self
             .tasks
@@ -902,7 +967,7 @@ impl Book {
     fn elapsed_of(task: &Task, now: u64) -> u64 {
         let base = task.view.as_ref().map_or(0, |v| v.elapsed_secs);
         if Self::running(task) {
-            base + now.saturating_sub(task.polled_at) / 1000
+            base.saturating_add(now.saturating_sub(task.polled_at) / 1000)
         } else {
             base
         }
@@ -942,8 +1007,36 @@ impl Book {
     }
 }
 
-fn say(conv: &mut Conversation, line: &str) {
-    let _ = conv.push(EntryKind::Notice, line);
+/// Where a buffer was allocated, to prove it never moved or grew.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Alloc {
+    pub ptr: usize,
+    pub cap: usize,
+}
+
+pub fn alloc_of(s: &str, cap: usize) -> Alloc {
+    Alloc {
+        ptr: s.as_ptr() as usize,
+        cap,
+    }
+}
+
+/// `parts` in one zeroizing buffer allocated at `len` bytes, and where it was allocated.
+pub fn joined(len: usize, parts: &[&str]) -> (Zeroizing<String>, Alloc) {
+    let mut out = Zeroizing::new(String::with_capacity(len));
+    let at = alloc_of(&out, out.capacity());
+    for part in parts {
+        out.push_str(part);
+    }
+    (out, at)
+}
+
+fn add_copy(add: &str) -> (Zeroizing<String>, Alloc) {
+    joined(add.len(), &[add])
+}
+
+fn report_entry(head: &str, body: &str) -> (Zeroizing<String>, Alloc) {
+    joined(head.len() + 1 + body.len(), &[head, "\n", body])
 }
 
 fn read_failure(e: &Failure) -> String {
@@ -951,6 +1044,7 @@ fn read_failure(e: &Failure) -> String {
         Failure::Refused { .. } => "the kernel refused it".into(),
         Failure::Unreachable { .. } => "the kernel could not be reached; try again".into(),
         Failure::Protocol(_) => "the kernel's answer could not be read; try again".into(),
+        Failure::NoIdentity => "no plane identity could be had; try again".into(),
     }
 }
 
@@ -1120,7 +1214,7 @@ mod tests {
         run.submit("also email bob", 2, 2);
         assert_eq!(
             run.last_text(),
-            "started a new task #2 (use /add 2 to add to a running one)"
+            "started a new task #2 (use /add <n> to add to a running one)"
         );
         assert_eq!(run.book.status().len(), 2);
         assert!(run.book.status()[0].contains("#1 queued"));
@@ -1603,6 +1697,209 @@ mod tests {
         );
         assert!(run.texts().iter().all(|t| t != "/frobnicate everything"));
         assert_eq!(run.enter("/bye"), Entered::Leave);
+    }
+
+    #[test]
+    fn a_successful_drop_closes_the_task_so_a_wait_ends() {
+        let mut run = Run::with(Standing::Enrolled, true, vec![], vec![]);
+        run.submit("one", 1, 1);
+        assert!(!run.book.settled(true));
+        run.enter("/drop");
+        assert!(matches!(run.op(), Op::Drop { .. }));
+        let mut dropped = view(1, 1, TaskState::Closed);
+        dropped.close = Some(TaskClose::Dropped);
+        run.answer(Ok(Answer::View(dropped)));
+        assert!(
+            run.book.settled(true),
+            "the kernel holds nothing more for a dropped task"
+        );
+        assert!(run.book.status().is_empty());
+
+        let mut run = Run::with(Standing::Enrolled, true, vec![], vec![]);
+        run.submit("one", 1, 1);
+        run.enter("/drop");
+        let _ = run.op();
+        run.answer(Err(REFUSED));
+        assert!(
+            !run.book.settled(true),
+            "an unknown drop is re-read, never assumed"
+        );
+    }
+
+    #[test]
+    fn the_add_copy_never_grows() {
+        let (copy, at) = add_copy("the logs too \u{1F600}");
+        assert_eq!(alloc_of(&copy, copy.capacity()), at);
+        assert_eq!(copy.as_str(), "the logs too \u{1F600}");
+    }
+
+    #[test]
+    fn a_report_entry_never_grows() {
+        let (entry, at) = report_entry("hobi #1 · while you were away", "done ✓\nnext");
+        assert_eq!(alloc_of(&entry, entry.capacity()), at);
+        assert_eq!(
+            entry.as_str(),
+            "hobi #1 · while you were away\ndone ✓\nnext"
+        );
+    }
+
+    #[test]
+    fn a_missing_plane_identity_has_its_own_header_and_sends_nothing_again() {
+        let mut run = Run::new(Standing::Enrolled);
+        run.enter("one");
+        let _ = run.op();
+        run.answer(Err(Failure::NoIdentity));
+        assert_eq!(
+            run.book.header().left,
+            "hobi · cannot get a plane identity, retrying"
+        );
+        assert_eq!(
+            run.last_text(),
+            "no plane identity could be had; your request was not sent"
+        );
+        run.now = 5_000;
+        assert!(!matches!(run.op(), Op::Submit { .. }));
+    }
+
+    #[test]
+    fn a_task_at_cursor_0_polls_from_none() {
+        let mut run = Run::new(Standing::Enrolled);
+        run.submit("one", 1, 0);
+        run.now = 1_000;
+        assert!(matches!(run.op(), Op::Poll { after: None }));
+    }
+
+    #[test]
+    fn a_stopped_book_refuses_what_is_typed() {
+        let mut run = Run::new(Standing::Enrolled);
+        run.book.stop(
+            "your Vault login expired: run `maknae login`",
+            &mut run.conv,
+        );
+        for line in ["do it", "/add more", "/stop", "/list", "/status 1"] {
+            run.enter(line);
+            run.nothing_queued();
+            assert_eq!(run.last_text(), text::LOGIN_STOPPED, "{line}");
+        }
+        assert!(run.texts().iter().all(|t| t != "do it"));
+        assert_eq!(run.enter("/bye"), Entered::Leave);
+    }
+
+    #[test]
+    fn the_new_task_hint_does_not_name_the_new_task() {
+        let mut run = Run::new(Standing::Enrolled);
+        run.submit("one", 1, 1);
+        run.submit("two", 2, 2);
+        assert_eq!(
+            run.last_text(),
+            "started a new task #2 (use /add <n> to add to a running one)"
+        );
+    }
+
+    #[test]
+    fn a_steering_verb_in_flight_is_known() {
+        let mut run = Run::new(Standing::Enrolled);
+        assert!(!run.book.steering_in_flight());
+        run.enter("one");
+        let _ = run.op();
+        assert!(run.book.steering_in_flight());
+        assert!(run.book.busy());
+        run.answer(Ok(Answer::View(view(1, 1, TaskState::Queued))));
+        assert!(!run.book.busy());
+        run.now = 5_000;
+        let _ = run.op();
+        assert!(run.book.in_flight() && !run.book.steering_in_flight());
+        assert!(!run.book.busy(), "a poll is not something typed");
+    }
+
+    #[test]
+    fn a_hostile_elapsed_time_does_not_overflow() {
+        let mut run = Run::new(Standing::Enrolled);
+        run.submit("one", 1, 1);
+        run.now = 1_000;
+        let _ = run.op();
+        let mut working = view(1, 1, TaskState::Working);
+        working.elapsed_secs = u64::MAX;
+        run.answer(page(vec![working], None));
+        run.wait(5_000);
+        assert!(run.book.status()[0].contains("#1 working"));
+    }
+
+    #[test]
+    fn every_page_of_the_opening_collect_is_marked_away_and_a_retry_too() {
+        let mut run = Run {
+            book: Book::new("hobi", Standing::Enrolled, false),
+            conv: Conversation::new(1 << 20, 4096),
+            now: 0,
+        };
+        let _ = run.op();
+        run.answer(Err(Failure::Unreachable { after_write: false }));
+        let _ = run.op();
+        run.answer(Ok(Answer::Tasks(vec![])));
+        run.now = COLLECT_IDLE_MS;
+        assert!(matches!(run.op(), Op::Collect { .. }));
+        run.answer(Ok(Answer::Reports(TaskReportPage {
+            entries: vec![report(1, 1, "first", None)],
+            next: Some(TaskCursor::from_seq(1)),
+        })));
+        run.draw_all();
+        assert!(matches!(run.op(), Op::Collect { .. }));
+        run.answer(reports(vec![
+            report(1, 1, "first", None),
+            report(2, 2, "second", None),
+        ]));
+        run.draw_all();
+        run.now += COLLECT_IDLE_MS;
+        let _ = run.op();
+        run.answer(reports(vec![report(3, 3, "later", None)]));
+        assert_eq!(
+            run.texts(),
+            [
+                "hobi #1 · while you were away\nfirst",
+                "hobi #2 · while you were away\nsecond",
+                "hobi #3\nlater"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_task_found_after_a_lost_submit_is_waited_for() {
+        let mut run = Run::with(Standing::Enrolled, true, vec![], vec![]);
+        run.enter("one");
+        let _ = run.op();
+        run.answer(Err(Failure::Unreachable { after_write: true }));
+        assert!(matches!(run.op(), Op::Poll { .. }));
+        run.answer(page(vec![view(1, 1, TaskState::Queued)], None));
+        assert!(
+            !run.book.settled(true),
+            "the task the lost submit made is waited for"
+        );
+    }
+
+    #[test]
+    fn a_notice_that_does_not_fit_waits_and_is_said_later() {
+        let mut run = Run {
+            book: Book::new("hobi", Standing::Enrolled, false),
+            conv: Conversation::new(2 * 64, 64),
+            now: 0,
+        };
+        let _ = run.op();
+        run.answer(reports(vec![report(1, 1, &"a".repeat(60), None)]));
+        let _ = run.op();
+        run.answer(Ok(Answer::Tasks(vec![])));
+        run.enter("/frobnicate");
+        assert_eq!(run.texts().len(), 1);
+        assert_eq!(
+            run.book.header().right,
+            "a notice is waiting: scroll down to read on"
+        );
+        run.draw_all();
+        run.wait(100);
+        assert_eq!(
+            run.last_text(),
+            "/frobnicate is not a command and was not sent: /help lists the commands"
+        );
+        assert_eq!(run.book.header().right, "");
     }
 
     #[test]

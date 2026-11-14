@@ -8,7 +8,7 @@ use crate::screen::term::{both_terminals, Session, TermError};
 use crate::stderr::errln;
 use maknae_agent::screen::blocks::{Conversation, EntryId, EntryKind};
 use maknae_agent::screen::{Commands, HeaderLine, MenuItem};
-use maknae_agent::tasking::book::{Answer, Book, Entered, Failure, Op, Standing};
+use maknae_agent::tasking::book::{joined, Alloc, Answer, Book, Entered, Failure, Op, Standing};
 use maknae_agent::tasking::text;
 use maknae_config::AgentId;
 use maknae_loop::tasker::{AgentRoster, TaskerClient, TaskerError};
@@ -24,6 +24,8 @@ use zeroize::Zeroizing;
 /// A leaf this close to its NotAfter is minted again before the next verb.
 const REMINT_WITHIN_SECS: u64 = 60;
 const PLAIN_TICK: Duration = Duration::from_millis(250);
+const CUT_OFF: &str =
+    "a request was still being sent when the session ended; its outcome is unknown";
 
 /// The tasker verbs the session sends, so tests can stand in for the kernel.
 pub(crate) trait Tasker {
@@ -118,16 +120,15 @@ pub(crate) struct Kernel<T, L> {
 
 impl<T: Tasker, L: Leaf> Kernel<T, L> {
     async fn send(&self, op: Op, now: u64) -> Event {
-        let fresh = self
-            .leaf
-            .not_after()
-            .is_some_and(|at| now.saturating_add(REMINT_WITHIN_SECS) < at);
+        let not_after = self.leaf.not_after();
+        let fresh = not_after.is_some_and(|at| now.saturating_add(REMINT_WITHIN_SECS) < at);
         if !fresh {
             if crate::agent::login_expired(self.login_expires_at, now) {
                 return Event::LoginExpired;
             }
-            if self.leaf.remint().await.is_err() {
-                return Event::Done(Err(Failure::Unreachable { after_write: false }));
+            let valid = not_after.is_some_and(|at| now < at);
+            if self.leaf.remint().await.is_err() && !valid {
+                return Event::Done(Err(Failure::NoIdentity));
             }
         }
         Event::Done(self.perform(op).await)
@@ -476,7 +477,11 @@ async fn full_screen<T: Tasker, L: Leaf>(
         () = kernel.serve(op_rx, event_tx) => run.await,
     };
     let stopped = screen.book.stopped();
+    let cut = screen.book.steering_in_flight();
     drop(screen);
+    if cut && !matches!(result, Ok(Exit::Signal(_))) {
+        errln!("maknae: {CUT_OFF}");
+    }
     screen_end(result, stopped)
 }
 
@@ -513,9 +518,7 @@ fn print_new(
     };
     while let Some(id) = at {
         if conv.kind(id) != Some(EntryKind::Request) {
-            let len = conv.segments(id).map(str::len).sum();
-            let mut entry = Zeroizing::new(String::with_capacity(len));
-            conv.segments(id).for_each(|s| entry.push_str(s));
+            let (entry, _) = entry_text(conv, id);
             lines.write_line(&entry)?;
         }
         conv.mark_seen(id..=id);
@@ -523,6 +526,11 @@ fn print_new(
         at = conv.next_item(id).filter(|next| *next <= last);
     }
     Ok(())
+}
+
+fn entry_text(conv: &Conversation, id: EntryId) -> (Zeroizing<String>, Alloc) {
+    let segments: Vec<&str> = conv.segments(id).collect();
+    joined(segments.iter().map(|s| s.len()).sum(), &segments)
 }
 
 async fn plain<T: Tasker, L: Leaf>(
@@ -558,7 +566,7 @@ async fn plain<T: Tasker, L: Leaf>(
             book.hurry();
         }
         tokio::select! {
-            line = lines.next_line(), if !ended => match line {
+            line = lines.next_line(), if !ended && !book.busy() => match line {
                 Ok(Line::Text(text)) => {
                     if book.enter(text, ms(start), &mut conv) == Entered::Leave {
                         (ended, bye) = (true, true);
@@ -689,9 +697,18 @@ mod tests {
             self.note("stop");
             Err(TaskerError::Protocol("unused".into()))
         }
-        async fn drop(&self, _: &TaskRef) -> Result<TaskView, TaskerError> {
-            self.note("drop");
-            Err(TaskerError::Protocol("unused".into()))
+        async fn drop(&self, task: &TaskRef) -> Result<TaskView, TaskerError> {
+            let mut s = self.call("drop");
+            let at = s.tasks.iter().position(|t| t.task == *task);
+            let Some(at) = at else {
+                return Err(TaskerError::Refused {
+                    outcome_unknown: true,
+                });
+            };
+            let mut v = s.tasks.remove(at);
+            v.state = TaskState::Closed;
+            v.close = Some(maknae_proto::TaskClose::Dropped);
+            Ok(v)
         }
         async fn list_page(
             &self,
@@ -1048,6 +1065,85 @@ mod tests {
         }
         assert_eq!(end, Ok(End::Left));
         assert_eq!(fake.calls().iter().filter(|c| **c == "submit").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn wait_ends_once_a_dropped_task_is_closed() {
+        let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
+        let mut io = pipes("tidy my downloads\n/drop\n");
+        let end = bounded(open(
+            fake.clone(),
+            fresh_leaf(),
+            u64::MAX,
+            "hobi",
+            true,
+            4096,
+            io.io(),
+        ))
+        .await;
+        assert_eq!(end, End::Left);
+        let out = io.output();
+        assert!(out.contains("dropped #1\n"), "{out}");
+        assert_eq!(fake.calls().iter().filter(|c| **c == "drop").count(), 1);
+    }
+
+    #[test]
+    fn a_printed_entry_never_grows() {
+        let mut conv = Conversation::new(1 << 16, 64);
+        let id = conv
+            .push(EntryKind::Report, &"report text ✓ ".repeat(20))
+            .unwrap();
+        let (entry, at) = entry_text(&conv, id);
+        assert_eq!(
+            maknae_agent::tasking::book::alloc_of(&entry, entry.capacity()),
+            at
+        );
+        assert_eq!(entry.as_str(), "report text ✓ ".repeat(20));
+    }
+
+    #[tokio::test]
+    async fn a_failed_remint_keeps_a_valid_leaf_and_says_no_identity_once_it_expires() {
+        struct Refusing(Mutex<Option<u64>>, AtomicU32);
+        impl Leaf for Refusing {
+            fn not_after(&self) -> Option<u64> {
+                *self.0.lock().unwrap()
+            }
+            async fn remint(&self) -> Result<(), String> {
+                self.1.fetch_add(1, Ordering::SeqCst);
+                Err("vault refused".into())
+            }
+        }
+        let now = unix_now();
+        let kernel = Kernel {
+            tasker: Fake::new(&[], 0),
+            leaf: Refusing(Mutex::new(Some(now + 30)), AtomicU32::new(0)),
+            login_expires_at: now + 7200,
+            agent: agent(),
+        };
+        assert!(matches!(
+            kernel.send(Op::Collect { after: None }, now).await,
+            Event::Done(Ok(_))
+        ));
+        assert_eq!(kernel.tasker.calls(), ["collect"], "the valid leaf is used");
+        assert!(matches!(
+            kernel.send(Op::Collect { after: None }, now).await,
+            Event::Done(Ok(_))
+        ));
+        assert_eq!(
+            kernel.leaf.1.load(Ordering::SeqCst),
+            2,
+            "the mint is retried each time"
+        );
+        *kernel.leaf.0.lock().unwrap() = Some(now);
+        assert!(matches!(
+            kernel.send(Op::Collect { after: None }, now).await,
+            Event::Done(Err(Failure::NoIdentity))
+        ));
+        assert_eq!(
+            kernel.tasker.calls().len(),
+            2,
+            "nothing is sent without a leaf"
+        );
     }
 
     #[test]
