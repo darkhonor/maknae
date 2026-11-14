@@ -336,6 +336,11 @@ mod tests {
     fn malformed_input_is_unknown_and_consumed() {
         let mut d = Decoder::new();
         assert_eq!(d.next(b"\xff"), (Some(Key::Unknown), 1));
+        assert_eq!(d.next(b"\x9b31m"), (Some(Key::Unknown), 1));
+        assert_eq!(d.next(b"\x9d0;t\x07"), (Some(Key::Unknown), 1));
+        let mut p = Decoder::new();
+        p.next(b"\x1b[200~");
+        assert_eq!(p.next(b"\x9b2J"), (Some(Key::Unknown), 1));
         assert_eq!(d.next(b"\xed\x41"), (Some(Key::Unknown), 1));
         assert_eq!(d.next(b"\x1b[9~"), (Some(Key::Unknown), 4));
         assert_eq!(d.next(b"\x1b[Z"), (Some(Key::Unknown), 3));

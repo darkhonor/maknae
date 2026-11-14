@@ -41,11 +41,10 @@ serde_json = "1"
 # bytes — accepted residual, #241, stated in full at `route.rs`'s
 # `ZeroizingString`.
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
-# The session screen's display-width table (#630): the column a character takes
-# decides where a row wraps and that a wide character is never split. Exact pin
-# because a table change moves every wrap point, and a wrap point that disagrees
-# with the terminal's own width writes past the row into the fixed rows. No
-# default features: `cjk` adds the ambiguous-width table the screen does not use.
+# The session screen's display-width table (#630). Exact pin: a table change moves
+# every wrap point and the column budget of every row the composer writes, so it
+# is a reviewed change, not a lockfile drift. No default features: `cjk` adds the
+# ambiguous-width table the screen does not use.
 unicode-width = { version = "=0.2.2", default-features = false }
 
 [dev-dependencies]

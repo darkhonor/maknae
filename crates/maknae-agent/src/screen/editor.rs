@@ -39,6 +39,7 @@ pub struct Editor {
     cursor: usize,
     recall: Recall,
     browsing: Option<usize>,
+    draft: Option<FixedText>,
     leave_armed: bool,
 }
 
@@ -63,6 +64,7 @@ impl Editor {
                 next: 0,
             },
             browsing: None,
+            draft: None,
             leave_armed: false,
         }
     }
@@ -162,6 +164,9 @@ impl Editor {
         sent.push_str(self.text());
         self.recall.store(self.text.as_str());
         self.wipe();
+        if let Some(draft) = self.draft.as_mut() {
+            draft.clear();
+        }
         EditOutcome::Submitted(sent)
     }
 
@@ -237,6 +242,14 @@ impl Editor {
 
     fn recall_older(&mut self) -> EditOutcome {
         let age = self.browsing.map_or(0, |a| a + 1);
+        if self.browsing.is_none() && self.recall.get(0).is_some() {
+            let cap = self.text.capacity();
+            let draft = self
+                .draft
+                .get_or_insert_with(|| FixedText::with_capacity(cap));
+            draft.clear();
+            let _ = draft.push_str(self.text.as_str());
+        }
         self.load_recalled(age)
     }
 
@@ -246,6 +259,11 @@ impl Editor {
             Some(0) => {
                 self.browsing = None;
                 self.wipe();
+                if let Some(draft) = self.draft.as_mut() {
+                    let _ = self.text.push_str(draft.as_str());
+                    draft.clear();
+                }
+                self.cursor = self.text.len();
                 EditOutcome::Changed
             }
             Some(age) => self.load_recalled(age - 1),
@@ -276,7 +294,6 @@ impl Recall {
         }
         let slot = &mut self.slots[self.next];
         slot.clear();
-        // A slot is the editor's own capacity, so the editor's text always fits.
         let _ = slot.push_str(text);
         self.next = (self.next + 1) % RECALL_SLOTS;
     }
@@ -485,7 +502,39 @@ mod tests {
         assert_eq!(e.text(), "two!");
         e.apply(&Key::Ctrl('p'));
         assert_eq!(e.text(), "two");
+        e.apply(&Key::Ctrl('n'));
+        assert_eq!(e.text(), "two!");
+        e.apply(&Key::Ctrl('p'));
         assert_eq!(submit(&mut e), "two");
+    }
+
+    #[test]
+    fn ctrl_n_past_the_newest_restores_the_draft() {
+        let mut e = Editor::new(32);
+        typed(&mut e, "sent");
+        submit(&mut e);
+        assert!(e.draft.is_none());
+        typed(&mut e, "half typed");
+        e.apply(&Key::Left);
+        e.apply(&Key::Ctrl('p'));
+        assert_eq!(e.text(), "sent");
+        let draft = e.draft.as_ref().unwrap();
+        assert_eq!(draft.capacity(), 32);
+        let ptr = draft.as_str().as_ptr();
+        assert!(matches!(e.apply(&Key::Ctrl('n')), EditOutcome::Changed));
+        assert_eq!(e.text(), "half typed");
+        assert_eq!(e.cursor(), "half typed".len());
+        assert!(e.draft.as_ref().unwrap().is_empty());
+        e.apply(&Key::Ctrl('u'));
+        typed(&mut e, "next");
+        e.apply(&Key::Ctrl('p'));
+        assert_eq!(e.draft.as_ref().unwrap().as_str(), "next");
+        assert_eq!(e.draft.as_ref().unwrap().as_str().as_ptr(), ptr);
+        assert_eq!(submit(&mut e), "sent");
+        assert!(e.draft.as_ref().unwrap().is_empty());
+        e.apply(&Key::Ctrl('p'));
+        e.apply(&Key::Ctrl('n'));
+        assert_eq!(e.text(), "");
     }
 
     #[test]

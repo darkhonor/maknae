@@ -1,6 +1,5 @@
 //! The session screen's pure core (#630): key decoding, the line editor, the
 //! conversation's block store, display-width wrapping and the frame composer.
-//! The terminal driver in `bins/maknae` reads the keys and writes the frames.
 pub mod blocks;
 pub mod editor;
 pub mod fixed;

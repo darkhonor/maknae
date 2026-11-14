@@ -255,7 +255,8 @@ pub fn display_safe_len(s: &str) -> usize {
 /// `s` for a terminal: every control character but the line break, U+2028,
 /// U+2029 and every format character as visible `\u{XXXX}`, everything else
 /// verbatim. A line break stays, because the screen ends a row at it and never
-/// writes it. Writes all of `s` or, when it does not fit, nothing.
+/// writes it. A tab is escaped here; the conversation store expands it to
+/// spaces instead. Writes all of `s` or, when it does not fit, nothing.
 pub fn display_safe(s: &str, out: &mut FixedText) -> Result<(), Full> {
     if display_safe_len(s) > out.room() {
         return Err(Full);
@@ -831,12 +832,12 @@ mod tests {
     #[test]
     fn display_safe_escapes_controls_and_bidi_and_keeps_korean() {
         let input =
-            "안녕 \x1b[2J\r\t\u{7f}\u{85}\u{2028}\u{2029}\u{202e}\u{200b}\u{feff}\u{e0041}é\nend";
+            "안녕 \x1b[2J\r\t\u{7f}\u{85}\u{2028}\u{2029}\u{202e}\u{200b}\u{feff}\u{e0041}\u{9b}\u{9d}é\nend";
         let mut out = FixedText::with_capacity(display_safe_len(input));
         display_safe(input, &mut out).unwrap();
         assert_eq!(
             out.as_str(),
-            "안녕 \\u{001b}[2J\\u{000d}\\u{0009}\\u{007f}\\u{0085}\\u{2028}\\u{2029}\\u{202e}\\u{200b}\\u{feff}\\u{e0041}é\nend"
+            "안녕 \\u{001b}[2J\\u{000d}\\u{0009}\\u{007f}\\u{0085}\\u{2028}\\u{2029}\\u{202e}\\u{200b}\\u{feff}\\u{e0041}\\u{009b}\\u{009d}é\nend"
         );
         assert_eq!(out.len(), out.capacity());
         assert!(!out

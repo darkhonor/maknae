@@ -1,5 +1,5 @@
 use super::fixed::{FixedText, Full};
-use super::wrap::{RowSpan, Wrapper};
+use super::wrap::{cell_width, RowSpan, Wrapper};
 use crate::render::{display_piece, DISPLAY_EXPANSION, DISPLAY_PIECE_MAX};
 use std::collections::VecDeque;
 use std::ops::{Range, RangeInclusive};
@@ -7,6 +7,33 @@ use std::ops::{Range, RangeInclusive};
 pub const BLOCK_BYTES: usize = 64 * 1024;
 pub const EARLIER_OUTPUT_DROPPED: &str = "earlier output dropped";
 const CHECKPOINT_ROWS: u32 = 256;
+const TAB_STOP: usize = 8;
+const TAB_SPACES: &str = "        ";
+
+/// Calls `f` with each piece `text` is stored as: its display piece, or for a
+/// tab the spaces to the next stop, counted from the start of its line.
+fn stored_pieces(text: &str, mut f: impl FnMut(&str) -> Result<(), Full>) -> Result<(), Full> {
+    let mut buf = [0; DISPLAY_PIECE_MAX];
+    let mut col = 0;
+    for c in text.chars() {
+        match c {
+            '\t' => {
+                let n = TAB_STOP - col % TAB_STOP;
+                col += n;
+                f(&TAB_SPACES[..n])?;
+            }
+            '\n' => {
+                col = 0;
+                f("\n")?;
+            }
+            _ => {
+                col += cell_width(c);
+                f(display_piece(c, &mut buf))?;
+            }
+        }
+    }
+    Ok(())
+}
 
 /// The conversation cap for a host whose prompts are at most `prompt_ceiling`
 /// bytes: room for one maximal report and one maximal request, each escaped at
@@ -113,21 +140,15 @@ impl Conversation {
     /// room. `Full`, with nothing changed, when that would drop a report not
     /// yet seen or the text does not fit the cap at all.
     pub fn push(&mut self, kind: EntryKind, text: &str) -> Result<EntryId, Full> {
-        let mut buf = [0; DISPLAY_PIECE_MAX];
-        let pieces = || {
-            text.chars()
-                .map(|c| display_piece(c, &mut [0; DISPLAY_PIECE_MAX]).len())
-        };
-        let with_tail = self.blocks_needed(pieces(), self.tail_room());
-        let fresh = self.blocks_needed(pieces(), 0);
+        let with_tail = self.blocks_needed(text, self.tail_room());
+        let fresh = self.blocks_needed(text, 0);
         let drop = self.plan(|all_dropped| if all_dropped { fresh } else { with_tail })?;
         self.drop_oldest(drop);
 
         let id = EntryId(self.next_id);
         let mut start = None;
         let mut len = 0;
-        for c in text.chars() {
-            let piece = display_piece(c, &mut buf);
+        stored_pieces(text, |piece| {
             if self.tail_room() < piece.len() {
                 self.blocks
                     .push_back(FixedText::with_capacity(self.block_bytes));
@@ -135,9 +156,9 @@ impl Conversation {
             let block_index = self.blocks.len() - 1;
             let block = &mut self.blocks[block_index];
             start.get_or_insert((self.base + block_index as u64, block.len()));
-            block.push_str(piece)?;
             len += piece.len();
-        }
+            block.push_str(piece)
+        })?;
         let (block, offset) = start.unwrap_or_else(|| self.end_position());
         self.next_id += 1;
         self.entries.push_back(Entry {
@@ -193,15 +214,16 @@ impl Conversation {
         }
     }
 
-    fn blocks_needed(&self, pieces: impl Iterator<Item = usize>, mut room: usize) -> usize {
+    fn blocks_needed(&self, text: &str, mut room: usize) -> usize {
         let mut needed = 0;
-        for piece in pieces {
-            if piece > room {
+        let _ = stored_pieces(text, |piece| {
+            if piece.len() > room {
                 needed += 1;
                 room = self.block_bytes;
             }
-            room -= piece;
-        }
+            room -= piece.len();
+            Ok(())
+        });
         needed
     }
 
@@ -596,6 +618,30 @@ mod tests {
         assert!(c.is_empty());
         assert_eq!(c.block_count(), 0);
         assert!(c.would_drop_unseen(129));
+    }
+
+    #[test]
+    fn a_tab_expands_to_the_next_eight_column_stop() {
+        let mut c = Conversation::new(64 * 8, 64);
+        let cases = [
+            ("a\tb", format!("a{}b", " ".repeat(7))),
+            ("12345678\tx", format!("12345678{}x", " ".repeat(8))),
+            (
+                "a\tb\n\tc",
+                format!("a{}b\n{}c", " ".repeat(7), " ".repeat(8)),
+            ),
+            ("가\tx", format!("가{}x", " ".repeat(6))),
+            ("\u{1b}\tx", format!("\\u{{001b}}{}x", " ".repeat(8))),
+            ("\t\t", " ".repeat(16)),
+        ];
+        for (input, want) in cases {
+            let id = c.push(EntryKind::Report, input).unwrap();
+            assert_eq!(text(&c, id), want, "{input:?}");
+            assert!(!text(&c, id).contains('\t'));
+        }
+        let mut tight = Conversation::new(64, 64);
+        assert!(tight.push(EntryKind::Report, &"\t".repeat(8)).is_ok());
+        assert_eq!(tight.push(EntryKind::Report, "\t"), Err(Full));
     }
 
     #[test]
