@@ -3990,7 +3990,10 @@ async fn authority<P: Authorizer + Send + Sync + 'static>(
         Err(Offload::TimedOut) => undecided("the decision timed out"),
         Ok(maknae_security::Verdict::Indeterminate) => undecided("the decision was indeterminate"),
         Ok(verdict) => match finalize(combine(vec![verdict])) {
-            Decision::Permit { .. } => Authority::Permit,
+            Decision::Permit { obligations } => match discharge_plan(&obligations) {
+                Ok(()) => Authority::Permit,
+                Err(u) => Authority::Refused(format!("unhonorable obligation: {}", u.0)),
+            },
             Decision::Deny { reason } => Authority::Refused(reason),
         },
     }
@@ -24512,6 +24515,44 @@ mod task_sweep_tests {
         );
         assert_eq!((page.undecided, page.next), (1, None));
         assert_eq!(said, ["hobi:undecided", "jin:undecided"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_permit_whose_obligation_cannot_be_discharged_lists_no_agent() {
+        let (_blobs, _clock, store) = mem(1_000);
+        let list = |obligations: Vec<maknae_security::Obligation>| {
+            let store = Arc::clone(&store);
+            async move {
+                agent_page(
+                    &Arc::new(Says(
+                        maknae_security::Verdict::Permit { obligations },
+                        Duration::ZERO,
+                    )),
+                    &hobi_and_jin(),
+                    &store,
+                    1000,
+                    None,
+                    maknae_security::Lane::Local,
+                    Duration::from_secs(5),
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let (page, said) = list(vec![maknae_security::Obligation {
+            id: "SENTINEL-undischargeable".into(),
+            params: maknae_security::Attributes::new(),
+        }])
+        .await;
+        assert!(page.entries.is_empty(), "{page:?}");
+        assert_eq!((page.undecided, page.next), (0, None));
+        assert_eq!(said, ["hobi:refused", "jin:refused"]);
+        let (page, _) = list(vec![maknae_security::Obligation {
+            id: "audit".into(),
+            params: maknae_security::Attributes::new(),
+        }])
+        .await;
+        assert_eq!(page.entries.len(), 2, "{page:?}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
