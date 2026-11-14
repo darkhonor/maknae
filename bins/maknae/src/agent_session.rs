@@ -155,7 +155,7 @@ impl<T: Tasker, L: Leaf> Kernel<T, L> {
         while let Some(op) = ops.recv().await {
             let event = match maknae_io::now_unix() {
                 Ok(now) => self.send(op, now).await,
-                Err(_) => Event::Done(Err(Failure::NoIdentity)),
+                Err(_) => Event::Done(Err(Failure::Clock)),
             };
             if events.send(event).await.is_err() {
                 return;
@@ -292,10 +292,23 @@ pub(crate) async fn run_session(name: &str, wait: bool) -> ExitCode {
     for line in left.lines(name) {
         errln!("maknae: {line}");
     }
-    if !matches!(end, End::Signal(_)) {
-        retire(&plane.client).await;
-    }
+    let end = match end {
+        End::Signal(_) => end,
+        end => retire_unless_signalled(retire(&plane.client), end).await,
+    };
     end.exit_code()
+}
+
+/// `end`, unless a signal arrives while the plane client retires.
+async fn retire_unless_signalled(retiring: impl std::future::Future<Output = ()>, end: End) -> End {
+    let Ok(mut ending) = Ending::register() else {
+        retiring.await;
+        return end;
+    };
+    tokio::select! {
+        () = retiring => end,
+        signal = ending.next() => End::Signal(signal),
+    }
 }
 
 pub(crate) type Enter = Box<dyn FnOnce() -> Result<Session, TermError>>;
@@ -323,11 +336,12 @@ impl End {
 }
 
 /// What a session left behind when it ended: a steering request sent and not
-/// answered, and requests never sent.
+/// answered, requests never sent, and requests the kernel did not take.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Left {
     cut: bool,
     unsent: usize,
+    not_taken: usize,
 }
 
 impl Left {
@@ -335,13 +349,14 @@ impl Left {
         Left {
             cut: book.steering_in_flight(),
             unsent: book.unsent(),
+            not_taken: book.not_taken(),
         }
     }
 
     /// A session that left anything behind did not end cleanly.
     fn end(&self, end: End) -> End {
         match end {
-            End::Left if self.cut || self.unsent > 0 => End::Failed,
+            End::Left if self.cut || self.unsent > 0 || self.not_taken > 0 => End::Failed,
             end => end,
         }
     }
@@ -353,6 +368,9 @@ impl Left {
         }
         if self.unsent > 0 {
             lines.push(text::not_sent(self.unsent, agent));
+        }
+        if self.not_taken > 0 {
+            lines.push(text::not_taken(self.not_taken));
         }
         lines
     }
@@ -704,6 +722,7 @@ mod tests {
         reports: Vec<TaskReportView>,
         seq: u64,
         report_with: Option<&'static str>,
+        refuse_submit: bool,
         /// Every collect after the first waits while this is set.
         hold: bool,
         holding: bool,
@@ -800,6 +819,11 @@ mod tests {
         }
         async fn submit(&self, _: &AgentId, _: SecretText) -> Result<TaskView, TaskerError> {
             let mut s = self.call("submit");
+            if s.refuse_submit {
+                return Err(TaskerError::Refused {
+                    outcome_unknown: false,
+                });
+            }
             s.seq += 1;
             let seq = s.seq;
             let mut v = view(seq, TaskState::Working);
@@ -1300,7 +1324,8 @@ mod tests {
                 End::Failed,
                 Left {
                     cut: false,
-                    unsent: 1
+                    unsent: 1,
+                    not_taken: 0,
                 }
             )
         );
@@ -1325,7 +1350,8 @@ mod tests {
                 End::Signal(Signal::SIGTERM as i32),
                 Left {
                     cut: false,
-                    unsent: 1
+                    unsent: 1,
+                    not_taken: 0,
                 }
             )
         );
@@ -1348,7 +1374,8 @@ mod tests {
                 End::Failed,
                 Left {
                     cut: false,
-                    unsent: 1
+                    unsent: 1,
+                    not_taken: 0,
                 }
             )
         );
@@ -1376,7 +1403,8 @@ mod tests {
                 End::Signal(Signal::SIGTERM as i32),
                 Left {
                     cut: false,
-                    unsent: 1
+                    unsent: 1,
+                    not_taken: 0,
                 }
             )
         );
@@ -1413,7 +1441,8 @@ mod tests {
                 End::Failed,
                 Left {
                     cut: false,
-                    unsent: 1
+                    unsent: 1,
+                    not_taken: 0,
                 }
             )
         );
@@ -1592,6 +1621,76 @@ mod tests {
     }
 
     #[test]
+    fn a_plain_wait_session_whose_request_was_refused_exits_1() {
+        let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
+        fake.set(|s| s.refuse_submit = true);
+        let mut io = pipes("tidy my downloads\n");
+        let ended = in_turn(&fake, fresh_leaf(), u64::MAX, true, io.lines());
+        assert_eq!(
+            ended,
+            (
+                End::Failed,
+                Left {
+                    cut: false,
+                    unsent: 0,
+                    not_taken: 1,
+                }
+            )
+        );
+        assert_eq!(
+            ended.1.lines("hobi"),
+            ["1 request was refused, not sent, or of unknown outcome"]
+        );
+    }
+
+    #[test]
+    fn a_queued_read_on_leaving_names_nothing_and_exits_0() {
+        let _one = crate::screen::testing::one_session();
+        let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
+        let (mut pty, done) = full_screen_behind_a_collect(&fake, Arc::new(fresh_leaf()), u64::MAX);
+        assert!(pty.out.wait_for(b"connected"), "never connected");
+        pty.type_keys(b"one\r");
+        assert!(pty.out.wait_for(b"#1 submitted"), "no echo");
+        fake.held_collect();
+        pty.type_keys(b"/status 1\r/x\r");
+        assert!(
+            pty.out.wait_for(b"unknown command"),
+            "the lines were not read"
+        );
+        pty.type_keys(b"/bye\r");
+        assert!(pty.out.wait_for(b"1 request is not yet sent or answered"));
+        pty.type_keys(b"/bye\r");
+        assert_eq!(ended(&mut pty, &done), (End::Left, Left::default()));
+    }
+
+    #[test]
+    fn a_signal_while_retiring_still_ends_with_its_status() {
+        use nix::sys::signal::{kill, Signal};
+        let _one = crate::screen::testing::one_session();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        assert_eq!(
+            rt.block_on(retire_unless_signalled(async {}, End::Left)),
+            End::Left
+        );
+        let end = rt.block_on(async {
+            let retiring = retire_unless_signalled(std::future::pending(), End::Left);
+            tokio::pin!(retiring);
+            tokio::select! {
+                end = &mut retiring => end,
+                () = async {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    kill(nix::unistd::Pid::this(), Signal::SIGINT).unwrap();
+                    std::future::pending::<()>().await;
+                } => unreachable!(),
+            }
+        });
+        assert_eq!(end, End::Signal(Signal::SIGINT as i32));
+    }
+
+    #[test]
     fn what_a_session_left_behind_fails_it_and_is_named() {
         let clean = Left::default();
         assert_eq!(clean.end(End::Left), End::Left);
@@ -1599,6 +1698,7 @@ mod tests {
         let unsent = Left {
             cut: false,
             unsent: 2,
+            not_taken: 0,
         };
         assert_eq!(unsent.end(End::Left), End::Failed);
         assert_eq!(unsent.end(End::Signal(15)), End::Signal(15));
@@ -1609,6 +1709,7 @@ mod tests {
         let cut = Left {
             cut: true,
             unsent: 0,
+            not_taken: 0,
         };
         assert_eq!(cut.end(End::Left), End::Failed);
         assert_eq!(cut.lines("hobi"), [CUT_OFF]);

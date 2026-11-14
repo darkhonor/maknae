@@ -92,9 +92,15 @@ fn reply_wait(
         | maknae_proto::Verb::TaskList { .. }
         | maknae_proto::Verb::TaskStop { .. }
         | maknae_proto::Verb::TaskDrop { .. }
-        | maknae_proto::Verb::TaskCollect { .. }
-        | maknae_proto::Verb::AgentList { .. } => {
+        | maknae_proto::Verb::TaskCollect { .. } => {
             return class_wait(maknae_proto::FrameClass::Control, transport)
+        }
+        maknae_proto::Verb::AgentList { .. } => {
+            return class_wait(maknae_proto::FrameClass::Control, transport)
+                + std::time::Duration::from_millis(
+                    maknae_config::AGENT_LIST_REPLY_STAGES
+                        * maknae_config::BLOCKING_STAGE_TIMEOUT_MS,
+                )
         }
         _ => return class_wait(class_of(verb), transport),
     };
@@ -638,7 +644,11 @@ mod tests {
         let transport = maknae_config::TransportConfig::default();
         let control = class_wait(maknae_proto::FrameClass::Control, &transport);
         for verb in tasker_verbs() {
-            assert_eq!(reply_wait(&verb, &transport), control, "{verb:?}");
+            if matches!(verb, maknae_proto::Verb::AgentList { .. }) {
+                assert!(reply_wait(&verb, &transport) > control);
+            } else {
+                assert_eq!(reply_wait(&verb, &transport), control, "{verb:?}");
+            }
         }
     }
 
@@ -1162,6 +1172,21 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err, control_stalled(wait_ms));
+    }
+
+    #[test]
+    fn an_agent_list_waits_out_the_kernels_worst_case() {
+        let transport = maknae_config::TransportConfig {
+            read_timeout_ms: READ_TIMEOUT_MS,
+            ..Default::default()
+        };
+        let stage = maknae_config::BLOCKING_STAGE_TIMEOUT_MS;
+        let worst =
+            READ_TIMEOUT_MS + SESSION_CHECKS_MS + maknae_config::AGENT_LIST_REPLY_STAGES * stage;
+        assert!(
+            reply_wait(&maknae_proto::Verb::AgentList { after: None }, &transport)
+                >= std::time::Duration::from_millis(worst)
+        );
     }
 
     #[test]

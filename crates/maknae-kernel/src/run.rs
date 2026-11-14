@@ -24562,6 +24562,14 @@ mod task_sweep_tests {
         }
     }
 
+    #[test]
+    fn the_clients_agent_list_wait_covers_a_page_and_its_outcome_append() {
+        let stages = std::time::Duration::from_millis(
+            maknae_config::AGENT_LIST_REPLY_STAGES * maknae_config::BLOCKING_STAGE_TIMEOUT_MS,
+        );
+        assert!(2 * AUTHZ_DECIDE_TIMEOUT + AUDIT_APPEND_TIMEOUT <= stages);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_decision_begun_before_the_deadline_has_its_whole_budget() {
         let (_blobs, _clock, store) = mem(1_000);
@@ -24569,7 +24577,7 @@ mod task_sweep_tests {
             reason: "no".into(),
         };
         let pdp = Arc::new(Counted(
-            Says(refuse, Duration::from_millis(200)),
+            Says(refuse, Duration::from_millis(400)),
             Default::default(),
         ));
         let (_, said) = agent_page(
@@ -24579,7 +24587,7 @@ mod task_sweep_tests {
             1000,
             None,
             maknae_security::Lane::Local,
-            Duration::from_millis(300),
+            Duration::from_millis(600),
         )
         .await
         .unwrap();

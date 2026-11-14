@@ -54,6 +54,9 @@ pub const HOME_RESOLVE_TIMEOUT_MS: u64 = 5_000;
 pub const BLOCKING_STAGE_TIMEOUT_MS: u64 = 5_000;
 /// The bounded stages `admin.contain` and `admin.release` pass through in sequence.
 pub const CONTAINMENT_REPLY_STAGES: u64 = 10;
+/// The bounded stages an agent list passes through after the session checks: the
+/// page's decisions (at most two decision bounds) and the outcome append.
+pub const AGENT_LIST_REPLY_STAGES: u64 = 3;
 /// The bounded stages `admin.baseline.accept` passes through in sequence.
 pub const BASELINE_ACCEPT_REPLY_STAGES: u64 = 11;
 /// An admin live edit's unbounded work beyond its stages: the persist and the mirror render.

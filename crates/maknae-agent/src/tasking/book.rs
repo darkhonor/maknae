@@ -91,6 +91,7 @@ pub enum Failure {
     Protocol(String),
     /// No plane leaf could be had, so nothing was sent.
     NoIdentity,
+    Clock,
 }
 
 impl Failure {
@@ -100,7 +101,7 @@ impl Failure {
             Failure::Refused { outcome_unknown } => *outcome_unknown,
             Failure::Unreachable { after_write } => *after_write,
             Failure::Protocol(_) => true,
-            Failure::NoIdentity => false,
+            Failure::NoIdentity | Failure::Clock => false,
         }
     }
 }
@@ -118,6 +119,7 @@ enum Connection {
     Unreachable,
     Unreadable,
     NoIdentity,
+    Clock,
 }
 
 /// What the verb in flight was, to read its answer.
@@ -139,6 +141,14 @@ impl Asked {
         !matches!(
             self,
             Asked::Collect { .. } | Asked::Poll { .. } | Asked::ListAll { opening: true }
+        )
+    }
+
+    /// A submit, add, stop or drop: what is handed to the agent.
+    fn steering(&self) -> bool {
+        matches!(
+            self,
+            Asked::Submit | Asked::Add(_) | Asked::Stop(_) | Asked::Drop(_)
         )
     }
 }
@@ -224,6 +234,8 @@ pub struct Book {
     folded: bool,
     warned: bool,
     lost: usize,
+    not_taken: usize,
+    plain: bool,
 }
 
 impl std::fmt::Debug for Book {
@@ -276,6 +288,8 @@ impl Book {
             folded: false,
             warned: false,
             lost: 0,
+            not_taken: 0,
+            plain: announce,
         }
     }
 
@@ -294,6 +308,7 @@ impl Book {
             (_, Connection::Unreachable, _) => text::UNREACHABLE,
             (_, Connection::Unreadable, _) => text::UNREADABLE,
             (_, Connection::NoIdentity, _) => text::NO_IDENTITY,
+            (_, Connection::Clock, _) => text::CLOCK,
             (_, _, Standing::Removed) => "removed",
             (_, _, Standing::Contained) => "on hold (contained)",
             (_, _, Standing::Withdrawn) => "you can no longer task this agent",
@@ -333,19 +348,24 @@ impl Book {
             || matches!(self.flight, Some(Asked::ListAll { opening: true }))
     }
 
-    fn queued(&self) -> usize {
-        self.queue.iter().filter(|(_, asked)| asked.typed()).count()
+    fn queued(&self, of: fn(&Asked) -> bool) -> usize {
+        self.queue.iter().filter(|(_, asked)| of(asked)).count()
     }
 
-    /// Requests the person typed that were never sent: still queued, or dropped when
-    /// the login ended.
+    /// Steering requests that were never sent: still queued, or dropped when the
+    /// login ended.
     pub fn unsent(&self) -> usize {
-        self.lost + self.queued()
+        self.lost + self.queued(Asked::steering)
     }
 
-    /// Requests the person typed that are queued, or sent and not yet answered.
+    /// Steering requests the kernel answered as not sent, refused, or of unknown outcome.
+    pub fn not_taken(&self) -> usize {
+        self.not_taken
+    }
+
+    /// Requests and reads the person typed that are queued, or sent and not yet answered.
     pub fn unanswered(&self) -> usize {
-        self.queued() + usize::from(self.flight.as_ref().is_some_and(Asked::typed))
+        self.queued(Asked::typed) + usize::from(self.flight.as_ref().is_some_and(Asked::typed))
     }
 
     /// The person asked to leave. While requests are unanswered the first ask is
@@ -368,6 +388,7 @@ impl Book {
             Connection::Unreachable => text::UNREACHABLE,
             Connection::Unreadable => text::UNREADABLE,
             Connection::NoIdentity => text::NO_IDENTITY,
+            Connection::Clock => text::CLOCK,
         }
     }
 
@@ -651,6 +672,7 @@ impl Book {
             Err(Failure::Unreachable { .. }) => self.connection = Connection::Unreachable,
             Err(Failure::Protocol(_)) => self.connection = Connection::Unreadable,
             Err(Failure::NoIdentity) => self.connection = Connection::NoIdentity,
+            Err(Failure::Clock) => self.connection = Connection::Clock,
         }
         match (asked, answer) {
             (Asked::Collect { after, away }, Ok(Answer::Reports(page))) => {
@@ -712,6 +734,7 @@ impl Book {
     }
 
     fn steer_failed(&mut self, op: Unknown, e: &Failure, conv: &mut Conversation) {
+        self.not_taken += 1;
         if e.unknown() {
             self.say(conv, &text::outcome_unknown_line(op));
             self.reread = true;
@@ -719,6 +742,12 @@ impl Book {
             return;
         }
         let line = match (op, e) {
+            (Unknown::Submit, Failure::Clock) => {
+                "the system clock reads before 1970; your request was not sent".to_string()
+            }
+            (_, Failure::Clock) => {
+                "the system clock reads before 1970; nothing was sent".to_string()
+            }
             (Unknown::Submit, Failure::NoIdentity) => {
                 "no plane identity could be had; your request was not sent".to_string()
             }
@@ -901,7 +930,9 @@ impl Book {
         }
         let n = task.number;
         if state == TaskState::Held {
-            self.say(conv, &format!("#{n} {}", text::held_line()));
+            if !self.plain {
+                self.say(conv, &format!("#{n} {}", text::held_line()));
+            }
         } else if self.announce {
             self.say(conv, &format!("#{n} {}", text::state_word(state)));
         }
@@ -982,7 +1013,8 @@ impl Book {
     pub fn stop(&mut self, line: &str, conv: &mut Conversation) {
         if !self.stopped {
             self.say(conv, line);
-            self.lost = self.unanswered();
+            self.lost = self.queued(Asked::steering)
+                + usize::from(self.flight.as_ref().is_some_and(Asked::steering));
         }
         self.stopped = true;
         self.flight = None;
@@ -1127,6 +1159,9 @@ fn read_failure(e: &Failure) -> String {
         Failure::Unreachable { .. } => "the kernel could not be reached; try again".into(),
         Failure::Protocol(_) => "the kernel's answer could not be read; try again".into(),
         Failure::NoIdentity => "no plane identity could be had; try again".into(),
+        Failure::Clock => {
+            "the system clock reads before 1970; set the clock, then try again".into()
+        }
     }
 }
 
@@ -2168,5 +2203,77 @@ mod tests {
         run.answer(page(vec![view(1, 1, TaskState::Held)], None));
         assert_eq!(run.book.link(), text::CONNECTED);
         assert_eq!(run.book.held(), [1]);
+    }
+
+    #[test]
+    fn a_read_is_never_counted_unsent() {
+        let mut run = behind_a_collect();
+        run.enter("/status 1");
+        run.enter("/list");
+        assert_eq!((run.book.unsent(), run.book.unanswered()), (0, 2));
+        assert!(run.book.busy(), "a read still holds the next line");
+        run.book.stop(
+            "your Vault login expired: run `maknae login`",
+            &mut run.conv,
+        );
+        assert_eq!(run.book.unsent(), 0);
+    }
+
+    #[test]
+    fn a_request_the_kernel_did_not_take_is_counted() {
+        let mut run = Run::new(Standing::Enrolled);
+        run.enter("one");
+        let _ = run.op();
+        run.answer(Err(Failure::Unreachable { after_write: false }));
+        assert_eq!(run.book.not_taken(), 1);
+        run.enter("two");
+        let _ = run.op();
+        run.answer(Err(REFUSED));
+        assert_eq!(
+            run.book.not_taken(),
+            2,
+            "an unknown outcome is not a hand-over"
+        );
+        run.enter("three");
+        let _ = run.op();
+        run.answer(Err(Failure::Refused {
+            outcome_unknown: false,
+        }));
+        assert_eq!(run.book.not_taken(), 3);
+        run.enter("/list");
+        let _ = run.op();
+        run.answer(Err(Failure::Unreachable { after_write: false }));
+        assert_eq!(run.book.not_taken(), 3, "a read is not counted");
+    }
+
+    #[test]
+    fn a_held_task_in_plain_mode_is_left_to_the_diagnostics() {
+        let run = Run::with(
+            Standing::Contained,
+            true,
+            vec![],
+            vec![view(1, 1, TaskState::Held)],
+        );
+        assert!(
+            run.texts().iter().all(|t| !t.contains("on hold")),
+            "{:?}",
+            run.texts()
+        );
+        assert_eq!(run.book.held(), [1]);
+    }
+
+    #[test]
+    fn a_clock_before_1970_says_so_and_sends_nothing() {
+        let mut run = Run::new(Standing::Enrolled);
+        run.enter("one");
+        let _ = run.op();
+        run.answer(Err(Failure::Clock));
+        assert_eq!(
+            run.last_text(),
+            "the system clock reads before 1970; your request was not sent"
+        );
+        assert_eq!(run.book.link(), text::CLOCK);
+        assert_eq!(run.book.header().left, format!("hobi · {}", text::CLOCK));
+        assert_eq!(run.book.not_taken(), 1);
     }
 }

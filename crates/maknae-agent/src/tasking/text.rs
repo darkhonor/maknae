@@ -12,6 +12,7 @@ pub const CONNECTED: &str = "connected";
 pub const UNREACHABLE: &str = "kernel unreachable, retrying";
 pub const UNREADABLE: &str = "kernel answer unreadable, retrying";
 pub const NO_IDENTITY: &str = "cannot get a plane identity, retrying";
+pub const CLOCK: &str = "the system clock reads before 1970; set the clock";
 pub const MORE_NOTICES: &str = "more notices were not shown";
 pub const LOGIN_STOPPED: &str = "not sent: your Vault login expired";
 pub const LOGIN_ENDED: &str = "login expired";
@@ -94,7 +95,6 @@ pub fn outcome_unknown_line(op: Unknown) -> String {
     }
 }
 
-/// `m:ss`, or `h:mm:ss` from an hour.
 pub fn not_answered_yet(n: usize) -> String {
     match n {
         1 => "1 request is not yet sent or answered: /bye or Ctrl-D again leaves without it".into(),
@@ -111,6 +111,14 @@ pub fn not_sent(n: usize, agent: &str) -> String {
     }
 }
 
+pub fn not_taken(n: usize) -> String {
+    match n {
+        1 => "1 request was refused, not sent, or of unknown outcome".into(),
+        n => format!("{n} requests were refused, not sent, or of unknown outcome"),
+    }
+}
+
+/// `m:ss`, or `h:mm:ss` from an hour.
 pub fn elapsed(secs: u64) -> String {
     let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);
     if h > 0 {
