@@ -28,7 +28,7 @@
 <path d="M 623 188 C 623 461 203 461 203 734" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
 <path d="M 623 188 C 623 406 539 406 539 625" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
 <path d="M 623 188 C 623 270 623 270 623 352" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
-<path d="M 707 679 C 707 706 203 706 203 734" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 707 690 C 707 712 203 712 203 734" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
 <path d="M 791 177 C 791 401 707 401 707 625" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
 <path d="M 791 177 C 791 346 875 346 875 516" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
 <path d="M 791 177 C 791 456 539 456 539 734" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
@@ -44,6 +44,7 @@
 <path d="M 959 417 C 959 636 539 636 539 854" fill="none" stroke="#534AB7" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.55" marker-end="url(#dep)"/>
 <path d="M 1043 662 C 1043 758 539 758 539 854" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
 <path d="M 875 581 C 875 603 875 603 875 625" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
+<path d="M 875 581 C 875 658 203 658 203 734" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
 <path d="M 875 581 C 875 718 539 718 539 854" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
 <path d="M 455 406 C 455 461 875 461 875 516" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
 <path d="M 455 406 C 455 516 371 516 371 625" fill="none" stroke="#5F5E5A" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.3" marker-end="url(#dep)"/>
@@ -174,9 +175,10 @@
 <text x="473.0" y="651" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">seal</text>
 <text x="473.0" y="662" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">zeroize</text>
 <path d="M 632.0 634 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<rect x="632.0" y="634" width="150" height="45" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<rect x="632.0" y="634" width="150" height="56" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
 <text x="641.0" y="651" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">agent</text>
-<text x="641.0" y="662" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">serde, serde_json, zeroize</text>
+<text x="641.0" y="662" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">serde, serde_json,</text>
+<text x="641.0" y="673" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">unicode-width, zeroize</text>
 <path d="M 800.0 634 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
 <rect x="800.0" y="634" width="150" height="45" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
 <text x="809.0" y="651" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">io</text>
@@ -230,7 +232,7 @@
 <rect x="968.0" y="863" width="150" height="39" rx="3" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
 <text x="977.0" y="880" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#26215C">spif-compile</text>
 <text x="977.0" y="890" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#534AB7">«trusted»</text>
-<text x="44" y="970" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#B3452F">The dependency closure of a «trusted» package covers 20 of the 31 workspace packages and 23 of the 26 direct external crates — 15 through maknae-vault alone.</text>
+<text x="44" y="970" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#B3452F">The dependency closure of a «trusted» package covers 20 of the 31 workspace packages and 23 of the 27 direct external crates — 15 through maknae-vault alone.</text>
 <text x="44" y="985" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Closure is not TCB membership (see the component view) — but it is the code a privileged package can reach, so it is the surface that matters.</text>
-<text x="24" y="1010" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: cargo metadata (normal deps) · inputs at e7b9b7cb · 2026-11-13</text><text x="1474" y="1010" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">UML 2.5.1 (OMG formal/2017-12-05)</text>
+<text x="24" y="1010" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: cargo metadata (normal deps) · inputs at 6fd20b0d · 2026-11-15</text><text x="1474" y="1010" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">UML 2.5.1 (OMG formal/2017-12-05)</text>
 </svg>

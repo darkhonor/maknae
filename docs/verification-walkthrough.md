@@ -36,7 +36,7 @@ Below, `<A>` and `<B>` are their account names. `<kv>` is the KV v2 mount and `<
 
 **B's tools work in B's home.** `~` in B's requests is B's own home, so B's reads and writes are decided against B's `~`, not A's.
 
-**B's prompt is visible to other local users.** On a multi-user host, other local users can read a running `maknae agent`'s prompt and `--provider` from its command line (#436, undecided).
+**B's prompt is visible to other local users.** On a multi-user host, other local users can read a running `maknae -p`'s prompt and `--provider` from its command line (#436, undecided).
 
 **The `vault` CLI, in every shell that runs a `vault` command.** Point it at the Vault and CA your Maknae configuration uses:
 
@@ -69,7 +69,7 @@ Run `unset VT` when you are done.
 
 **Never paste a wrapping token from a successful read.** A wrapped read of a key returns a token that wraps the key itself. None of the commands below asks for one.
 
-**Where refusals show.** A kernel refusal reaches the user only as one line, exit 2: `maknae agent: stopped: ` followed by the `PROMPT_REFUSED` text (`bins/maknae/src/agent.rs:95`, printed by `print_end`, `:349`). That text begins `the kernel refused the exchange — whether the prompt reached the provider is in the host's audit trail`, and it is quoted in full in [When it does not work](first-provider.md#when-it-does-not-work). The kernel's reason is only in the audit trail, which the administrator reads with `sudo jq`. The CLI's own setup refusals print after `maknae: ` and exit 1 (`bins/maknae/src/cli.rs:931`).
+**Where refusals show.** A kernel refusal reaches the user only as one line, exit 2: `maknae: stopped: ` followed by the `PROMPT_REFUSED` text (`bins/maknae/src/agent.rs`, printed by `print_end`). That text begins `the kernel refused the exchange — whether the prompt reached the provider is in the host's audit trail`, and it is quoted in full in [When it does not work](first-provider.md#when-it-does-not-work). The kernel's reason is only in the audit trail, which the administrator reads with `sudo jq`. The CLI's own setup refusals print after `maknae: ` and exit 1 (`bins/maknae/src/cli.rs:931`).
 
 The administrator's audit query for every claim below (the same on macOS):
 
@@ -86,7 +86,7 @@ sudo jq -c 'select(.action=="session.prompt") | {ts, user: .subject.user, object
 **Command.** As A:
 
 ```bash
-maknae agent "Reply with one word: hello."
+maknae -p "Reply with one word: hello."
 ```
 
 **Expected.** A reply on standard output, exit 0. In the administrator's audit query, a `session.prompt` pair for A: `status` `"IntentOnly"`, then `"Sent"`, each with `"user":"<A>"`, `"object":"provider:openai"` and `"model":"gpt-5.6-luna"`. The object is `provider:` followed by the provider's `name` (`crates/maknae-kernel/src/run.rs:1425`).
@@ -145,7 +145,7 @@ providers:
       field: api_key
     context_tokens: 128000
 EOF
-maknae agent "Reply with one word: hello."
+maknae -p "Reply with one word: hello."
 mv ~/.maknae/providers.yaml.orig ~/.maknae/providers.yaml
 ```
 
@@ -240,11 +240,11 @@ providers:
       field: api_key
     context_tokens: 128000
 EOF
-maknae agent "Reply with one word: hello."
+maknae -p "Reply with one word: hello."
 mv ~/.maknae/providers.yaml.orig ~/.maknae/providers.yaml
 ```
 
-**Expected.** A sees `maknae agent: stopped: the kernel refused the exchange — …` (the full `PROMPT_REFUSED` line), exit 2. In the administrator's audit query: `"result":"deny"`, `"reason":"model not on the authorized provider's list"` (`provider_choice.rs:52`), with `object`, `status` and `model` all `null`. The record has no `egress` block, so nothing was sent.
+**Expected.** A sees `maknae: stopped: the kernel refused the exchange — …` (the full `PROMPT_REFUSED` line), exit 2. In the administrator's audit query: `"result":"deny"`, `"reason":"model not on the authorized provider's list"` (`provider_choice.rs:52`), with `object`, `status` and `model` all `null`. The record has no `egress` block, so nothing was sent.
 
 **Measured.** 2026-10-02 on Rocky 10.2 (`.42`) and on macOS 26.6.2 (Wrathion), with `gpt-5.6`: the `PROMPT_REFUSED` line and exit 2. The trail showed `deny` with `model not on the authorized provider's list`, no object and no egress block.
 
@@ -254,11 +254,11 @@ mv ~/.maknae/providers.yaml.orig ~/.maknae/providers.yaml
 
 **Control.** No matrix cell is keyed to token validity, so the control is cited by credential-path step. Every turn makes its own wrapped read of the key with the stored token (`bins/maknae/src/agent.rs:268`), and Vault refuses that read once the token is revoked. The CLI also mints its plane leaf with the token first (`bins/maknae/src/agent.rs:443`); until #116 the CLI refuses to connect when that mint fails, so a revoked token also stops B's CLI there. The daemon requests no client certificate and admits B by its kernel-attested uid and `maknae`-group membership, which a token revocation does not touch. Credential-path steps: `load the user token; choose the providers.yaml entry` and `wrapped read of <kv>/data/<prefix>/<user>/<subpath>, X-Vault-Wrap-TTL: 60s`. A's unaffected run rests on `cli_a × key_a`, A's own identity.
 
-`maknae agent` runs one prompt per invocation (`bins/maknae/src/cli.rs:146-151`). So "mid-conversation" means between the loop steps of one run. This claim therefore uses fresh runs.
+`maknae -p` runs one prompt per invocation (`bins/maknae/src/cli.rs`, the `-p` route). So "mid-conversation" means between the loop steps of one run. This claim therefore uses fresh runs.
 
 **Command.**
 
-1. B completes one turn: `maknae agent "Reply with one word: hello."`
+1. B completes one turn: `maknae -p "Reply with one word: hello."`
 2. The administrator, with an administrator Vault token, finds every token issued to B's login and revokes it. `maknae login` keeps B's token in B's own custody and never prints it or its accessor, so B cannot hand it over. Listing accessors needs a token with `sudo` on `auth/token/accessors`. This step is not yet measured. Matching on `.data.meta.username` is inferred from a test fixture (`crates/maknae-vault/src/user_login.rs:164`), not observed on a real token:
 
    ```bash
@@ -270,8 +270,8 @@ mv ~/.maknae/providers.yaml.orig ~/.maknae/providers.yaml
    ```
 
    The same loop works in zsh and bash. An alternative, also not yet measured, is `vault token revoke -mode=path auth/maknae-userpass/login/<B>`. It needs `sudo` on `sys/leases/revoke-prefix`. It is a prefix match, so it also revokes the tokens of any user whose name begins with `<B>`.
-3. B runs a fresh `maknae agent "Reply with one word: hello."`.
-4. A runs `maknae agent "Reply with one word: hello."`.
+3. B runs a fresh `maknae -p "Reply with one word: hello."`.
+4. A runs `maknae -p "Reply with one word: hello."`.
 
 **Expected.** In step 3, B's run stops before it reaches the daemon, exit 1, with a line that begins:
 
@@ -281,7 +281,7 @@ maknae: pki/sign rejected: <Vault's answer>
 
 where `<Vault's answer>` is Vault's own text (`crates/maknae-vault/src/error.rs:194`, printed at `bins/maknae/src/cli.rs:735`). The CLI checks only the token's recorded expiry, not whether it was revoked (`bins/maknae/src/login.rs:90-101`), so the refusal comes from Vault at the certificate mint. In step 4, A gets a reply.
 
-A run that is already past its mint would stop at its next turn's key read. That read gets a 403, printed as `` maknae agent: stopped: Vault refused to read the key for provider entry <label> (HTTP 403): the key is outside your Vault policy, or your login was revoked: run `maknae login` `` (`agent.rs:99-104`). This is from the code path, not shown live.
+A run that is already past its mint would stop at its next turn's key read. That read gets a 403, printed as `` maknae: stopped: Vault refused to read the key for provider entry <label> (HTTP 403): the key is outside your Vault policy, or your login was revoked: run `maknae login` `` (`agent.rs:99-104`). This is from the code path, not shown live.
 
 After the claim, B runs `maknae login` again.
 
@@ -298,14 +298,14 @@ After the claim, B runs `maknae login` again.
 **Command.** The administrator removes `provider:openai` from B's role's `destinations` in `/etc/maknae/authz.yaml` (`sudoedit /etc/maknae/authz.yaml`; B's role is `user` in step 4a). Then reload the policy (`sudo systemctl reload maknaed`; on macOS, `sudo launchctl kill SIGHUP system/io.maknae.maknaed`): an edit applies at reload, not on the next request ([runbook](runbook.md#reload-the-policy)). Then, as B:
 
 ```bash
-maknae agent "Reply with one word: hello."
+maknae -p "Reply with one word: hello."
 ```
 
 The administrator then restores the line and reloads again. Separately, to see the shipped CLI's behaviour, as B:
 
 ```bash
 mv ~/.maknae/providers.yaml ~/.maknae/providers.yaml.aside
-maknae agent "Reply with one word: hello."
+maknae -p "Reply with one word: hello."
 mv ~/.maknae/providers.yaml.aside ~/.maknae/providers.yaml
 ```
 
@@ -340,7 +340,7 @@ maknae: no model access: no providers are defined in <B's home>/.maknae/provider
    ```
 
    Do not restart the Egress Daemon yet.
-2. A runs `maknae agent "Reply with one word: hello."`.
+2. A runs `maknae -p "Reply with one word: hello."`.
 3. The administrator restarts the Egress Daemon with the command enroll printed: `sudo systemctl try-restart maknae-egress.service`, or on macOS `sudo launchctl kickstart -k system/io.maknae.maknae-egress`.
 4. A runs the same prompt again.
 

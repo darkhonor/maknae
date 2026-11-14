@@ -929,7 +929,7 @@ maknae ping                                  # expect: pong
 
 If `maknaed` had already started on this host before step 5, the restart does not apply the provider file: it is a pending baseline change. Run `maknae baseline-show`, then `maknae baseline-accept <hash>`; the daemon restarts itself to apply it ([Change the configuration](#change-the-configuration)). What it prints, where it keeps the token and how long it lasts are in [first-provider step U1](first-provider.md#u1-log-in).
 
-**Restart, don't just enable.** The authorized provider set is read at boot, and `enable --now` does nothing to a daemon that is already running. A daemon that booted with no providers refuses every prompt: the user sees `maknae agent: stopped: ` and the CLI's generic refusal text, and the administrator's `jq` over the trail (step 11) shows the reason `no model access: no providers are authorized on this host`.
+**Restart, don't just enable.** The authorized provider set is read at boot, and `enable --now` does nothing to a daemon that is already running. A daemon that booted with no providers refuses every prompt: the user sees `maknae: stopped: ` and the CLI's generic refusal text, and the administrator's `jq` over the trail (step 11) shows the reason `no model access: no providers are authorized on this host`.
 
 - **The deputy is socket-activated.** It starts on the first prompt. It makes no Vault login and does not contact Vault at start-up; it reaches Vault only per turn, to unwrap the user's key.
 - **Neither daemon prints a "ready" line.** A failure prints `refusing to start: …` to the journal (`journalctl -u maknaed -u maknae-egress`).
@@ -939,12 +939,12 @@ If `maknaed` had already started on this host before step 5, the restart does no
 
 ```bash
 START=$(date -u +%Y-%m-%dT%H:%M:%S)
-maknae agent "Read $HOME/projects/maknae-242/input.txt, write a one-sentence summary of it to $HOME/projects/maknae-242/output.txt, then tell me what you wrote."
+maknae -p "Read $HOME/projects/maknae-242/input.txt, write a one-sentence summary of it to $HOME/projects/maknae-242/output.txt, then tell me what you wrote."
 cat ~/projects/maknae-242/output.txt
 ```
 
 - **Paths must be absolute.** The loop refuses relative paths.
-- **Exit codes:** the model's answer on stdout with exit `0`; a stop is `maknae agent: stopped: …` with exit `2`.
+- **Exit codes:** the model's answer on stdout with exit `0`; a stop is `maknae: stopped: …` with exit `2`.
 - **Record what happened.** An exit `2` or an error is a finding. Capture it together with the audit lines from step 11.
 
 ### 11. Quote the audit trail
@@ -993,7 +993,7 @@ What to find:
 
 There is **one `session.prompt` intent-and-outcome pair per model turn that is sent**, so a read-then-write conversation has several.
 
-Every refusal reaches the user the same way: `maknae agent: stopped: ` followed by the CLI's generic refusal text (`docs/configuration.md` §6.1.1), exit `2`. The reasons in the table are what the administrator's `jq` shows; they never reach the user's terminal.
+Every refusal reaches the user the same way: `maknae: stopped: ` followed by the CLI's generic refusal text (`docs/configuration.md` §6.1.1), exit `2`. The reasons in the table are what the administrator's `jq` shows; they never reach the user's terminal.
 
 **Correlation:**
 - `session_id` is per connection and each turn is a connection, so it does **not** group the conversation.
@@ -1002,7 +1002,7 @@ Every refusal reaches the user the same way: `maknae agent: stopped: ` followed 
 ### 12. The refused turns
 
 - **An oversize read** is no longer refused: reads are paged (§12a).
-- **At the context budget.** Set `context_tokens: 4096` (and no `output_tokens`) in your entry in `~/.maknae/providers.yaml`. Create two files, each inside one page: `for n in 1 2; do head -c 6000 /dev/urandom | base64 > ~/projects/maknae-242/half$n.txt; done` (about 8 KB each). Ask the agent to read both. As the transcript grows, the loop prints `warning: this conversation is at …% of the declared context budget (… of 4,096 tokens)` once it passes 80% and again past 95%; one large read can jump straight past both, so a warning line is not guaranteed. Before a turn would exceed the budget, it stops: `maknae agent: stopped: the conversation has reached the declared context budget; compaction arrives with #171`, exit `2`. The trail has no intent for the stopped turn, because nothing was sent. Restore `context_tokens` afterwards.
+- **At the context budget.** Set `context_tokens: 4096` (and no `output_tokens`) in your entry in `~/.maknae/providers.yaml`. Create two files, each inside one page: `for n in 1 2; do head -c 6000 /dev/urandom | base64 > ~/projects/maknae-242/half$n.txt; done` (about 8 KB each). Ask the agent to read both. As the transcript grows, the loop prints `warning: this conversation is at …% of the declared context budget (… of 4,096 tokens)` once it passes 80% and again past 95%; one large read can jump straight past both, so a warning line is not guaranteed. Before a turn would exceed the budget, it stops: `maknae: stopped: the conversation has reached the declared context budget; compaction arrives with #171`, exit `2`. The trail has no intent for the stopped turn, because nothing was sent. Restore `context_tokens` afterwards.
 
 ### 12a. Paged reads
 
@@ -1023,7 +1023,7 @@ Since #388 the agent replaces an existing file only if it has read that file in 
 - **What changes count.** The device, inode, size and modification time. A change to permissions or extended attributes alone (`chmod`, `restorecon`) does not refuse a write. A same-size edit within one timestamp tick is not seen, as for paged reads (§12a).
 - **The agent's own writes.** An applied write records the written file's version, so the agent may write the same file again without reading it.
 - **The trail.** A refused replacement has its `fs.write` intent, as every write does, and a completion with `ReportedPathChanged` and no effect. Since #388 that completion can mean "the agent had not read the file, or it changed since", not only a race. The agent's user sees it only in the model's answer and the trail; nothing is printed to the terminal.
-- **Try it.** `printf 'keep me\n' > ~/projects/maknae-242/existing.txt`, then `maknae agent "Replace $HOME/projects/maknae-242/existing.txt with the word hello."` It exits `0` either way, and what the trail shows depends on the model. A model that follows the `write_file` description reads first: an `fs.read`, then one applied `fs.write`. A model that writes blind is refused: an `fs.write` ending `ReportedPathChanged`, then the `fs.read`, then the applied `fs.write`. To see the refusal regardless of the model, edit the file between the agent's read and its write (the "changed since you read it" case).
+- **Try it.** `printf 'keep me\n' > ~/projects/maknae-242/existing.txt`, then `maknae -p "Replace $HOME/projects/maknae-242/existing.txt with the word hello."` It exits `0` either way, and what the trail shows depends on the model. A model that follows the `write_file` description reads first: an `fs.read`, then one applied `fs.write`. A model that writes blind is refused: an `fs.write` ending `ReportedPathChanged`, then the `fs.read`, then the applied `fs.write`. To see the refusal regardless of the model, edit the file between the agent's read and its write (the "changed since you read it" case).
 - **`maknae write` is not checked.** A human may replace a file without reading it, as before.
 - **Write-only paths and unreadable files.** A policy that grants `Write` on a path without `Read` permits no write there, from the agent or from `maknae write`. A file the OS will not let the agent read (mode `0200`) or open for writing (mode `0000`, `0400`) answers `unavailable — do not retry`, as a missing or refused file does, and nothing is written; the agent's terminal shows `write not performed: …; nothing was written`, or `mutation not performed: …; nothing was changed` when the directory the agent holds is not the one the daemon granted. The same answer and line follow any write the agent stopped before attempting it, including one that could not reach the daemon. A write whose finish was not acknowledged after the agent had attempted it still answers `outcome unknown`, and so does a new file the OS refuses for any reason other than a name that exists, a missing or non-directory parent, a symlink loop, an overlong name or a read-only filesystem (a directory the agent cannot write, for example): Linux can create the file before such a refusal.
 - **A refused write still opens the file for writing.** The check runs after the ordinary refusals, which need the file opened for writing, so a tool watching for write-closes (an IDE, a build watcher) sees one, although the bytes, size and modification time are unchanged.
@@ -1050,7 +1050,7 @@ sudo -u _maknae test -r /etc/maknae/private/maknae-egress-seal-key.cred && echo 
 - **Expected owners and modes:** `/etc/maknae` `root:_maknae 750`, with an ACL entry for `_maknae-egress` only; `private/` `root:_maknae 750`; `egress/` `root:_maknae-egress 750`; the sealed seal key `root:root 400`.
 - **Expected reads:** every `test -r` says `not readable`, for the operator and for `_maknae`.
   - The operator's `not readable` proves only that `/etc/maknae` (`root:_maknae 750`) cannot be traversed. Judge the file modes from the `stat` output. The same holds for `_maknae`, which can traverse `private/` but not read a `root:root 400` file.
-  - The runtime credential exists only once the deputy has started. Run `maknae agent` once, and confirm `runtime credential present` before reading its `test -r` line.
+  - The runtime credential exists only once the deputy has started. Run `maknae -p "<prompt>"` once, and confirm `runtime credential present` before reading its `test -r` line.
 - **What this check does not cover:** your own processes can read your key. Your Vault login reads it, so any process running as you can make its own wrapped read, unwrap it and call the provider without `maknaed` — the agent loop included (ADR-0028). Each such read is in Vault's audit log under your identity. That lies outside the file-custody claim; state it alongside the result.
 
 **On macOS**, run this from a console session:
@@ -1594,7 +1594,7 @@ An Agent Daemon runs under its own service account, one per agent, and reaches `
        - "session.prompt"
    ```
 
-   Add `taskers:` to say who may task it, for example `taskers: ["alice", "agent:jin"]`; another agent may task it only when listed here. `maknaed` decides and serves tasking; the CLI that sends a task is #630 and the agent process that works one is #629 ([Tasks](#tasks)).
+   Add `taskers:` to say who may task it, for example `taskers: ["alice", "agent:jin"]`; another agent may task it only when listed here. `maknaed` decides and serves tasking; people task an agent with `maknae agent <name>` ([Task an agent](#task-an-agent)), and the agent process that works the task is `maknae-agentd` (#629, [Tasks](#tasks)).
 
 5. **Reload `maknaed`** ([Reload the policy](#reload-the-policy)), then confirm:
 
@@ -1625,6 +1625,73 @@ An Agent Daemon runs under its own service account, one per agent, and reaches `
    ```
 
    On Linux it first stops and disables `maknae-agent@hobi.service` and removes its drop-in and, on a Debian host, the home it named to the AppArmor profile; on macOS it boots out `io.maknae.maknae-agentd.hobi`, removes its plist and `/usr/local/var/log/maknae-agent/hobi`, and runs `launchctl enable` on the label so no `launchctl disable` outlives the agent. It then removes the account's read access, then `agent.yaml` and `enrollment.yaml`, disables the Vault entity, destroys the SecretIDs and removes the sealed SecretID. Then reload: until a reload succeeds, the agent stays admitted. After it, the agent's next request is refused, each of its open tasks is closed `agent-gone` for its tasker to collect, and the account is an ordinary account again. `policy.yaml`, `persona.md` and the directory stay; delete them by hand if you will not re-enroll. On macOS, if the `hobi` account was deleted first, it warns that the account's ACEs stay on `/etc/maknae` and its files and continues; remove them by hand with `chmod -h -a`. When the command fails, run it again before deleting the directory; it still completes once the directory is gone. A login token the agent already holds stays valid until `agent_token_max_ttl`, refused only while the entity stays disabled. When the role and the entity were both already absent, nothing is disabled, and a held token lives until `agent_token_max_ttl`. Re-enrolling re-enables the entity, and such a token works again until `agent_token_max_ttl`.
+
+## Task an agent
+
+A person tasks an enrolled agent from the `maknae` CLI. The person needs `session.task` from their role (the shipped `authz.yaml` grants it to `admin` and `user`), and the agent's `taskers:` must admit them ([Enroll an Agent Daemon](#enroll-an-agent-daemon), step 4). Everything the CLI does here is a task verb to `maknaed`, which decides each one; the CLI is untrusted, and the agent's own process never talks to it.
+
+**List the agents you may task.**
+
+```bash
+maknae agent list
+```
+
+It prints one line per agent: the name, then by standing `  (removed)`, `  (on hold: contained)`, `  (you can no longer task this agent)` or `  (could not be checked right now)`, then `  1 report waiting` or `  <n> reports waiting` when the agent holds reports for you. An empty list prints `no agents can be tasked by you`. When the kernel could not decide every agent, a last line says `the list may be incomplete; try again`; the exit status is still `0`. A refusal prints `maknae: the kernel refused the agent list` and an unreachable kernel `maknae: the kernel could not be reached: <why>`, on stderr.
+
+**Open a session.**
+
+```bash
+maknae agent hobi
+```
+
+The name must be on the list. Anything else is refused on stderr, exit `1`, and is never run as a prompt: `maknae: <name> is not an agent you can task; see maknae agent list`. When the kernel could not decide the name, `maknae: the kernel could not decide whether you can task <name>; try again`; when the name is missing and some agents could not be checked, `maknae: could not check every agent right now; try again`. The refusal never says whether the agent exists. `maknae agent` alone is an error, and `list` and `data` are reserved, so no agent can be enrolled under either name.
+
+On a terminal (stdin and stdout both), the session takes the whole screen. Its header reads `<agent> · connected`, or one of `connecting`, `kernel unreachable, retrying`, `kernel answer unreadable, retrying`, `cannot get a plane identity, retrying` (the Vault identity could not be minted for a reason other than an expired login), `removed`, `on hold (contained)`, `you can no longer task this agent` and `login expired`. The operator's banner ([configuration §2.7](configuration.md#27-banneryaml-630)) is the top and bottom row when one is set, and an invalid banner refuses to open the session: `maknae: the kernel's banner is not valid (<why>); the session was not opened`.
+
+Reports that arrived while you were away are collected first and shown oldest first, marked `<agent> #n · while you were away`, then your open tasks follow. While the session runs, a request you type becomes a task (`#n submitted`, or `started a new task #n (use /add <n> to add to a running one)` while another is open), each open task has a line `⠋ #2 working 0:42`, and a report appears as `<agent> #n` followed by its text. A close is written from the kernel's field, never from the agent's text: `stopped at your request`, `dropped`, `the agent was removed`, `the agent stopped responding` or `your authority to task this agent was withdrawn`. A held task reads `on hold: its tasker or the agent was contained; only an administrator can release it (#632)`.
+
+When unread reports would not fit the conversation, the session stops collecting, so nothing unread is dropped: the header right reads `<n> reports waiting: scroll down to read on` and a request is refused with `unread reports fill the conversation: scroll down to read them, then send this again`. A notice with no room waits, and the header says `a notice is waiting: scroll down to read on`.
+
+| Command | Effect |
+|---|---|
+| `/add [n] <text>` | add to task n, or the newest open task |
+| `/stop [n]` | stop task n, or the newest open task |
+| `/drop [n]` | drop task n, or the newest open task |
+| `/status [n]` | one task in full (`#n <state> · m:ss elapsed · <k> action(s)`), or every open task |
+| `/list` | every task you have with this agent |
+| `/bye` | leave; tasks keep running and their reports wait for your next session |
+| `/help` | the commands and keys |
+
+An unknown `/word` is refused (`/word is not a command and was not sent: /help lists the commands`) and never sent as a task.
+
+| Key | Effect |
+|---|---|
+| Enter, Ctrl-J | send; start a new line |
+| Up, Down, the mouse wheel; PgUp, PgDn; Home, End | scroll a line; a page; to the top and the bottom |
+| Ctrl-A, Ctrl-E, Ctrl-B, Ctrl-F, Alt-B, Alt-F | move |
+| Ctrl-U, Ctrl-K, Ctrl-W | kill to the start, to the end, a word |
+| Ctrl-P, Ctrl-N | recall this session's earlier requests |
+| Ctrl-C | clear the line; twice on an empty line leaves |
+| Ctrl-D | leave, on an empty line |
+| Ctrl-Z | suspend |
+
+The wheel scrolls through the terminal's alternate scroll mode, so the left button still selects text. Ctrl-Z suspends only when `maknae` was started from a job-control shell; otherwise the session says `Ctrl-Z is not available here: nothing could resume a stopped session`. The conversation is held in memory only and is wiped when the session ends.
+
+**Refused or outcome unknown.** Every refusal on the wire reaches the CLI as one uniform `not authorized`, and a request can also be lost after it was sent. For a request, `/add`, `/stop`, `/drop` and a collect, the session therefore says the request `was refused or its outcome is unknown`, for example `your request was refused or its outcome is unknown; it was not sent again, and the kernel is asked what it holds`. It never sends it again on its own; it asks the kernel what it holds and shows only what the kernel says. A collect says `collecting reports was refused or its outcome is unknown; reports already shown may be shown again`, because the acknowledgement may not have landed. When nothing could be sent, the line says so instead: `the kernel could not be reached; your request was not sent`, `the kernel could not be reached; nothing was sent`, `the kernel refused it`, or, when the plane identity could not be minted, `no plane identity could be had; your request was not sent`. If the session ends while a request is still being sent, stderr says `maknae: a request was still being sent when the session ended; its outcome is unknown`; look in `maknae agent list` and the audit trail.
+
+**Your login ends.** The session stops tasking and says `your Vault login expired: run `maknae login``; a stopped session refuses everything except `/bye` and `/help` with `not sent: your Vault login expired`. After a full-screen session ends this way the line is printed again on stderr as `maknae: your Vault login expired: run `maknae login``, exit `1`.
+
+**Without a terminal.** When stdin or stdout is not a terminal, the session reads lines instead: each line is a request or a command, state changes print as `#n <state>`, and reports print as they arrive, with no banner, spinner or clock. It reads the next input line only once everything typed before it has been answered, so `/drop` after a request finds its task. Without `--wait` it ends at the end of input once nothing it sent is unanswered and the reports already printed are acknowledged (or the kernel is unreachable); the reports of anything still running wait for a later session.
+
+```bash
+printf 'summarize the notes directory\n' | maknae agent hobi --wait
+```
+
+`--wait` keeps polling after the input ends until every task the session submitted has been reported and collected, or closed (a successful `/drop` counts as closed), so a script receives its reports. The exit status is `0` on leaving, `1` on a failure or an expired login, and `128` plus the signal number after a signal.
+
+**One-shot, with no agent.** `maknae -p "<prompt>"` (and `--provider <label>`) runs the direct-model loop of [Hold the conversation](#10-hold-the-conversation). `--provider` without `-p`, and `-p` with a subcommand, are refused. The prompt is argv, so other local users can read it (#436); a request typed in `maknae agent <name>` is not.
+
+**Cadence and cost.** While anything is shown, the session lists tasks about once a second and collects about every 2 seconds; with nothing shown it collects about every 5 seconds. Each poll is one trail record, and one verb is in flight at a time. The agent list is a query of the kernel's graph and policy and never of the agents. The listing is not measured end to end; live run pending.
 
 ## Tasks
 
