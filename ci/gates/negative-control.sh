@@ -1846,26 +1846,33 @@ expect_reject_because "config-disclosure-drift/whitespace-bearing-surface-prefix
 # The leaf-enum row is the one place an enum-typed field is a leaf. The fixture
 # carries the real row's shape: ContainmentView.outcome is a unit-only enum in
 # the same file. Each probe breaks one thing the row's checks rest on.
-enum_probe() { # <name> <wanted> <python-expr transforming s> [<file in crates/maknae-proto/src>]
+enum_fixture() { # <python-expr transforming s> <file in crates/maknae-proto/src>
   local fx; fx="$(cfg_fixture "$CFG_OK")"
-  python3 - "$fx" "$3" "${4:-wire.rs}" <<'PYFIX'
+  python3 - "$fx" "$1" "$2" <<'PYFIX'
 import pathlib, sys
 p = pathlib.Path(sys.argv[1]) / "crates/maknae-proto/src" / sys.argv[3]
 s = p.read_text()
 s = eval(sys.argv[2])
 p.write_text(s)
 PYFIX
-  expect_reject_because "config-disclosure-drift/$1" "$2" "$fx/ci/gates/config-disclosure-drift.sh"
+  echo "$fx/ci/gates/config-disclosure-drift.sh"
 }
-for variant in unit-only scalar; do
-  if [ "$variant" = unit-only ]; then
-    enum_probe leaf-enum-gains-a-data-variant "not unit-only" \
-      's.replace("    Released,\n}", "    Released,\n    Refused(String),\n}")'
-  else
-    enum_probe leaf-enum-gains-a-data-variant/scalar-rule "not unit-only or integer-tuple-only" \
-      's.replace("    Rgb(u8, u8, u8),\n}", "    Rgb(u8, u8, u8),\n    Named(String),\n}")' task.rs
+enum_probe() { # <name> <wanted> <python-expr transforming wire.rs> [<python-expr transforming task.rs>]
+  local cmd=("$(enum_fixture "$3" wire.rs)")
+  [ -z "${4:-}" ] || cmd=(unit_and_scalar_rules_both_reject "${cmd[0]}" "$(enum_fixture "$4" task.rs)")
+  expect_reject_because "config-disclosure-drift/$1" "$2" "${cmd[@]}"
+}
+unit_and_scalar_rules_both_reject() { # <gate on a unit-only enum> <gate on a scalar enum>
+  local unit scalar
+  if unit="$("$1" 2>&1)" || scalar="$("$2" 2>&1)"; then return 0; fi
+  if grep -qF "not unit-only (" <<<"$unit" && grep -qF "not unit-only or integer-tuple-only" <<<"$scalar"; then
+    echo "FAIL: both rules rejected: not unit-only; not unit-only or integer-tuple-only"; return 1
   fi
-done
+  return 0
+}
+enum_probe leaf-enum-gains-a-data-variant "not unit-only or integer-tuple-only" \
+  's.replace("    Released,\n}", "    Released,\n    Refused(String),\n}")' \
+  's.replace("    Rgb(u8, u8, u8),\n}", "    Rgb(u8, u8, u8),\n    Named(String),\n}")'
 enum_probe leaf-enum-one-line-data-variant "not unit-only" \
   's.replace("""pub enum ContainmentOutcome {\n    Contained,\n    Released,\n}""", "pub enum ContainmentOutcome { Contained, Refused(String) }")'
 enum_probe leaf-enum-attributed-data-variant "not unit-only" \
