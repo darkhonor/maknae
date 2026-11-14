@@ -94,14 +94,18 @@ SURFACE=(
   "crates/maknae-proto/src/wire.rs|StatView|stat|3|wire"
   "crates/maknae-proto/src/mutation.rs|ListGrant|list|2|wire"
   "crates/maknae-proto/src/mutation.rs|ListEntry|list.entries|2|wire"
-  "crates/maknae-proto/src/task.rs|TaskView|task|8|wire"
+  "crates/maknae-proto/src/task.rs|TaskView|task|9|wire"
   "crates/maknae-proto/src/task.rs|TaskPage|task_list|2|wire"
-  "crates/maknae-proto/src/task.rs|TaskView|task_list.entries|8|wire"
+  "crates/maknae-proto/src/task.rs|TaskView|task_list.entries|9|wire"
   "crates/maknae-proto/src/task.rs|TaskReportView|task_report|6|wire"
   "crates/maknae-proto/src/task.rs|TaskReportPage|task_reports|2|wire"
   "crates/maknae-proto/src/task.rs|TaskReportView|task_reports.entries|6|wire"
   "crates/maknae-proto/src/task.rs|TaskDelivery|task_delivery|2|wire"
   "crates/maknae-proto/src/task.rs|TaskFollowUps|task_follow_ups|3|wire"
+  "crates/maknae-proto/src/task.rs|AgentPage|agents|4|wire"
+  "crates/maknae-proto/src/task.rs|AgentEntry|agents.entries|3|wire"
+  "crates/maknae-proto/src/task.rs|BannerSpec|agents.banner|2|wire"
+  "crates/maknae-proto/src/task.rs|BannerColor|agents.banner.color|0|wire"
   "crates/maknae-vault/src/config.rs|VaultConfig|vault|9|config"
   "crates/maknae-vault/src/config.rs|UserAuthConfig|vault.user_auth|2|config"
 )
@@ -126,6 +130,7 @@ LEAF_ENUMS=(
   "task.close|crates/maknae-proto/src/task.rs|TaskClose"
   "task_list.entries.state|crates/maknae-proto/src/task.rs|TaskState"
   "task_list.entries.close|crates/maknae-proto/src/task.rs|TaskClose"
+  "agents.entries.standing|crates/maknae-proto/src/task.rs|AgentStanding"
   "task_report.close|crates/maknae-proto/src/task.rs|TaskClose"
   "task_reports.entries.close|crates/maknae-proto/src/task.rs|TaskClose"
 )
@@ -138,6 +143,8 @@ LEAF_NEWTYPES=(
   "task.task|crates/maknae-proto/src/task.rs|TaskRef"
   "task_list.entries.task|crates/maknae-proto/src/task.rs|TaskRef"
   "task_list.next|crates/maknae-proto/src/task.rs|TaskCursor"
+  "task.cursor|crates/maknae-proto/src/task.rs|TaskCursor"
+  "task_list.entries.cursor|crates/maknae-proto/src/task.rs|TaskCursor"
   "task_report.task|crates/maknae-proto/src/task.rs|TaskRef"
   "task_report.cursor|crates/maknae-proto/src/task.rs|TaskCursor"
   "task_reports.entries.task|crates/maknae-proto/src/task.rs|TaskRef"
@@ -363,6 +370,7 @@ PAYLOAD_DISPOSITIONS=(
   "TaskDelivered|struct:TaskDelivery"
   "TaskFollowUps|struct:TaskFollowUps"
   "TaskIdle|unit"
+  "Agents|struct:AgentPage"
 )
 payload_variants="$(awk '
   /^pub enum Payload \{/ { inenum=1; next }

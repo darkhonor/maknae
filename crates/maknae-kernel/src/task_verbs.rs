@@ -120,7 +120,8 @@ pub(crate) fn task_verb(verb: &Verb) -> Option<TaskVerb<'_>> {
             text,
             seen: *seen_follow_ups,
         }),
-        Verb::Ping
+        Verb::AgentList { .. }
+        | Verb::Ping
         | Verb::Whoami
         | Verb::AdminStatus
         | Verb::AdminConfigShow
@@ -248,6 +249,7 @@ pub(crate) fn view(rec: &TaskRecord, hot: &Hot, now: i64) -> TaskView {
         elapsed_secs: now.saturating_sub(rec.submitted).max(0).unsigned_abs(),
         actions: hot.actions,
         last_action_secs: hot.last_action,
+        cursor: TaskCursor::from_seq(rec.tseq),
     }
 }
 
@@ -520,6 +522,7 @@ mod tests {
                 elapsed_secs: 42,
                 actions: 4,
                 last_action_secs: Some(140),
+                cursor: TaskCursor::from_seq(r.tseq),
             }
         );
         assert_eq!(view(&r, &hot, 50).elapsed_secs, 0);

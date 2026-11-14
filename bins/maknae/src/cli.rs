@@ -354,6 +354,7 @@ fn payload_kind(p: &Payload) -> &'static str {
         Payload::TaskDelivered(_) => "task delivery",
         Payload::TaskFollowUps(_) => "task follow-ups",
         Payload::TaskIdle => "task idle",
+        Payload::Agents(_) => "agent list",
     }
 }
 
@@ -999,7 +1000,8 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
         | (v, p @ Payload::TaskReports(_))
         | (v, p @ Payload::TaskDelivered(_))
         | (v, p @ Payload::TaskFollowUps(_))
-        | (v, p @ Payload::TaskIdle) => Err(format!(
+        | (v, p @ Payload::TaskIdle)
+        | (v, p @ Payload::Agents(_)) => Err(format!(
             "protocol error: daemon returned a {} payload for a {} request",
             payload_kind(&p),
             v.kind()
@@ -2071,6 +2073,7 @@ mod tests {
             elapsed_secs: 0,
             actions: 0,
             last_action_secs: None,
+            cursor: maknae_proto::TaskCursor::from_seq(1),
         }
     }
 

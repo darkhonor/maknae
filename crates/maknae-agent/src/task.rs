@@ -97,6 +97,7 @@ mod tests {
             elapsed_secs: 2,
             actions: 3,
             last_action_secs: None,
+            cursor: maknae_proto::TaskCursor::from_seq(1),
         }
     }
 

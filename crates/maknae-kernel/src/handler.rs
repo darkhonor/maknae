@@ -173,7 +173,8 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         | Verb::TaskDrop { .. }
         | Verb::TaskCollect { .. }
         | Verb::TaskClaim { .. }
-        | Verb::TaskReport { .. } => Dispatch::TaskRequested,
+        | Verb::TaskReport { .. }
+        | Verb::AgentList { .. } => Dispatch::TaskRequested,
     }
 }
 
@@ -189,6 +190,7 @@ pub fn task_op(verb: &Verb) -> Option<&'static str> {
         Verb::TaskCollect { .. } => Some("collect"),
         Verb::TaskClaim { .. } => Some("claim"),
         Verb::TaskReport { .. } => Some("report"),
+        Verb::AgentList { .. } => None,
         Verb::Ping
         | Verb::Whoami
         | Verb::AdminStatus
@@ -428,6 +430,7 @@ pub fn verb_to_action(verb: &Verb) -> &'static str {
         Verb::TaskCollect { .. } => "session.task",
         Verb::TaskClaim { .. } => "session.task",
         Verb::TaskReport { .. } => "session.task",
+        Verb::AgentList { .. } => "session.task",
     }
 }
 
@@ -1109,6 +1112,14 @@ mod tests {
     }
 
     #[test]
+    fn agent_list_is_a_task_request_decided_as_session_task() {
+        let v = Verb::AgentList { after: None };
+        assert_eq!(dispatch_verb(&v), Dispatch::TaskRequested);
+        assert_eq!(verb_to_action(&v), "session.task");
+        assert_eq!(task_op(&v), None);
+    }
+
+    #[test]
     fn every_task_verb_carries_its_op_and_no_other_verb_does() {
         let mut ops = Vec::new();
         for v in all_verbs() {
@@ -1125,11 +1136,13 @@ mod tests {
             assert_eq!(stamped, task_op(&v), "{v:?}");
             assert_eq!(
                 stamped.is_some(),
-                verb_to_action(&v) == "session.task",
+                verb_to_action(&v) == "session.task" && !matches!(v, Verb::AgentList { .. }),
                 "{v:?}"
             );
             if let Some(op) = stamped {
                 ops.push(op.to_owned());
+            }
+            if verb_to_action(&v) == "session.task" {
                 assert_eq!(dispatch_verb(&v), Dispatch::TaskRequested, "{v:?}");
             }
         }
@@ -1993,6 +2006,7 @@ mod tests {
                 text: maknae_proto::SecretText(maknae_io::Zeroizing::new("r".into())),
                 seen_follow_ups: None,
             },
+            Verb::AgentList { after: None },
         ]
     }
 
@@ -2157,7 +2171,7 @@ mod tests {
         let terms: std::collections::BTreeSet<&str> =
             all_verbs().iter().map(verb_to_action).collect();
         assert_eq!(terms.len(), 59);
-        assert_eq!(all_verbs().len(), 67);
+        assert_eq!(all_verbs().len(), 68);
     }
 
     /// Two terms sharing an action string would be decided as one another —
@@ -2188,7 +2202,8 @@ mod tests {
                 "TaskDrop",
                 "TaskCollect",
                 "TaskClaim",
-                "TaskReport"
+                "TaskReport",
+                "AgentList"
             ],
             "only the task verbs share session.task"
         );

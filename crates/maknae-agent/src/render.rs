@@ -201,41 +201,13 @@ fn listing_text(page: &maknae_proto::ListGrant) -> Zeroizing<String> {
     out
 }
 
-/// Unicode general category Cf (format), as of Unicode 15.1.
-fn format_char(c: char) -> bool {
-    matches!(
-        u32::from(c),
-        0x00AD
-            | 0x0600..=0x0605
-            | 0x061C
-            | 0x06DD
-            | 0x070F
-            | 0x0890..=0x0891
-            | 0x08E2
-            | 0x180E
-            | 0x200B..=0x200F
-            | 0x202A..=0x202E
-            | 0x2060..=0x2064
-            | 0x2066..=0x206F
-            | 0xFEFF
-            | 0xFFF9..=0xFFFB
-            | 0x110BD
-            | 0x110CD
-            | 0x13430..=0x1343F
-            | 0x1BCA0..=0x1BCA3
-            | 0x1D173..=0x1D17A
-            | 0xE0001
-            | 0xE0020..=0xE007F
-    )
-}
-
 /// serde_json's escaping, plus every other control character, U+2028, U+2029 and
 /// every format character as `\uXXXX`.
 fn json_string(s: &str) -> String {
     let json = serde_json::Value::String(s.to_string()).to_string();
     let mut out = String::with_capacity(json.len());
     for c in json.chars() {
-        if c.is_control() || c == '\u{2028}' || c == '\u{2029}' || format_char(c) {
+        if c.is_control() || c == '\u{2028}' || c == '\u{2029}' || maknae_proto::is_format_char(c) {
             let mut units = [0u16; 2];
             for u in c.encode_utf16(&mut units) {
                 out.push_str(&format!("\\u{:04x}", u));
@@ -538,7 +510,7 @@ mod tests {
                     !out.chars().any(|c| c.is_control() && c != '\n'
                         || c == '\u{2028}'
                         || c == '\u{2029}'
-                        || format_char(c)),
+                        || maknae_proto::is_format_char(c)),
                     "{out:?}"
                 );
             }

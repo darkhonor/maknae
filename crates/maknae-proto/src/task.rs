@@ -359,6 +359,7 @@ pub struct TaskView {
     pub elapsed_secs: u64,
     pub actions: u32,
     pub last_action_secs: Option<i64>,
+    pub cursor: TaskCursor,
 }
 
 /// `next` is the submission sequence to resume after.
@@ -366,6 +367,162 @@ pub struct TaskView {
 pub struct TaskPage {
     pub entries: Vec<TaskView>,
     pub next: Option<TaskCursor>,
+}
+
+pub const AGENT_PAGE_MAX: usize = 256;
+pub const BANNER_TEXT_MAX: usize = 256;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum AgentStanding {
+    Enrolled,
+    Contained,
+    Withdrawn,
+    Removed,
+    Undecided,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct AgentEntry {
+    pub agent: String,
+    pub standing: AgentStanding,
+    pub waiting: u32,
+}
+
+/// `next` is the last returned entry's id; `undecided` counts the page's unnamed undecided agents.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct AgentPage {
+    pub entries: Vec<AgentEntry>,
+    pub next: Option<String>,
+    pub undecided: u32,
+    pub banner: Option<BannerSpec>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum BannerColor {
+    Black,
+    Red,
+    Green,
+    Yellow,
+    Blue,
+    Magenta,
+    Cyan,
+    White,
+    Rgb(u8, u8, u8),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Contrast {
+    BlackText,
+    WhiteText,
+}
+
+impl BannerColor {
+    fn rgb(self) -> (u8, u8, u8) {
+        match self {
+            Self::Black => (0, 0, 0),
+            Self::Red => (205, 0, 0),
+            Self::Green => (0, 205, 0),
+            Self::Yellow => (205, 205, 0),
+            Self::Blue => (0, 0, 238),
+            Self::Magenta => (205, 0, 205),
+            Self::Cyan => (0, 205, 205),
+            Self::White => (229, 229, 229),
+            Self::Rgb(r, g, b) => (r, g, b),
+        }
+    }
+
+    /// The text colour with the higher WCAG contrast ratio against this background.
+    pub fn contrast(self) -> Contrast {
+        fn lin(c: u8) -> f64 {
+            let c = f64::from(c) / 255.0;
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        let (r, g, b) = self.rgb();
+        let lum = 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+        let black_ratio = (lum + 0.05) / 0.05;
+        let white_ratio = 1.05 / (lum + 0.05);
+        if white_ratio > black_ratio {
+            Contrast::WhiteText
+        } else {
+            Contrast::BlackText
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct BannerSpec {
+    pub text: String,
+    pub color: Option<BannerColor>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BannerError {
+    Empty,
+    TooLong,
+    ForbiddenChar,
+}
+
+impl std::fmt::Display for BannerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => f.write_str("banner text is empty"),
+            Self::TooLong => write!(f, "banner text is over {BANNER_TEXT_MAX} bytes"),
+            Self::ForbiddenChar => {
+                f.write_str("banner text holds a control, line or format character")
+            }
+        }
+    }
+}
+
+impl std::error::Error for BannerError {}
+
+pub fn check_banner(spec: &BannerSpec) -> Result<(), BannerError> {
+    if spec.text.is_empty() {
+        return Err(BannerError::Empty);
+    }
+    if spec.text.len() > BANNER_TEXT_MAX {
+        return Err(BannerError::TooLong);
+    }
+    if spec
+        .text
+        .chars()
+        .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}' || is_format_char(c))
+    {
+        return Err(BannerError::ForbiddenChar);
+    }
+    Ok(())
+}
+
+/// Unicode general category Cf (format), as of Unicode 15.1.
+pub fn is_format_char(c: char) -> bool {
+    matches!(
+        u32::from(c),
+        0x00AD
+            | 0x0600..=0x0605
+            | 0x061C
+            | 0x06DD
+            | 0x070F
+            | 0x0890..=0x0891
+            | 0x08E2
+            | 0x180E
+            | 0x200B..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x2064
+            | 0x2066..=0x206F
+            | 0xFEFF
+            | 0xFFF9..=0xFFFB
+            | 0x110BD
+            | 0x110CD
+            | 0x13430..=0x1343F
+            | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A
+            | 0xE0001
+            | 0xE0020..=0xE007F
+    )
 }
 
 /// `cursor` is the report-arrival sequence, assigned when the report or the close lands.
@@ -814,6 +971,7 @@ mod tests {
             elapsed_secs: 42,
             actions: 3,
             last_action_secs: Some(1_700_000_040),
+            cursor: TaskCursor::from_seq(4),
         }
     }
 
@@ -1080,5 +1238,115 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn agent_list_round_trips() {
+        let req = crate::Request {
+            protocol_version: crate::PROTOCOL_VERSION,
+            verb: crate::Verb::AgentList {
+                after: Some("hobi".into()),
+            },
+            task: None,
+        };
+        let bytes = crate::encode_request(&req).unwrap();
+        assert_eq!(crate::decode_request(&bytes).unwrap(), req);
+        let resp = crate::Response {
+            protocol_version: crate::PROTOCOL_VERSION,
+            result: crate::RespResult::Ok(crate::Payload::Agents(AgentPage {
+                entries: vec![AgentEntry {
+                    agent: "hobi".into(),
+                    standing: AgentStanding::Contained,
+                    waiting: 2,
+                }],
+                next: Some("hobi".into()),
+                undecided: 1,
+                banner: Some(BannerSpec {
+                    text: "lab".into(),
+                    color: Some(BannerColor::Rgb(1, 2, 3)),
+                }),
+            })),
+        };
+        let bytes = crate::encode_response(&resp).unwrap();
+        assert_eq!(crate::decode_response(&bytes).unwrap(), resp);
+        assert_eq!(crate::encode_response(&resp).unwrap(), bytes);
+    }
+
+    #[test]
+    fn agent_list_is_a_control_frame() {
+        let verb = crate::Verb::AgentList { after: None };
+        assert_eq!(crate::class_of(&verb), crate::FrameClass::Control);
+    }
+
+    #[test]
+    fn a_maximal_agent_page_fits_a_control_frame() {
+        let page = AgentPage {
+            entries: (0..AGENT_PAGE_MAX)
+                .map(|_| AgentEntry {
+                    agent: "a".repeat(32),
+                    standing: AgentStanding::Undecided,
+                    waiting: u32::MAX,
+                })
+                .collect(),
+            next: Some("a".repeat(32)),
+            undecided: u32::MAX,
+            banner: Some(BannerSpec {
+                text: "é".repeat(BANNER_TEXT_MAX / 2),
+                color: Some(BannerColor::Rgb(255, 255, 255)),
+            }),
+        };
+        let resp = crate::Response {
+            protocol_version: crate::PROTOCOL_VERSION,
+            result: crate::RespResult::Ok(crate::Payload::Agents(page)),
+        };
+        let bytes = crate::encode_response(&resp).unwrap();
+        assert!(
+            bytes.len() <= crate::CONTROL_RESPONSE_MAX,
+            "{}",
+            bytes.len()
+        );
+    }
+
+    #[test]
+    fn red_takes_white_text_and_yellow_takes_black() {
+        assert_eq!(BannerColor::Red.contrast(), Contrast::WhiteText);
+        assert_eq!(BannerColor::Yellow.contrast(), Contrast::BlackText);
+        assert_eq!(BannerColor::Black.contrast(), Contrast::WhiteText);
+        assert_eq!(BannerColor::White.contrast(), Contrast::BlackText);
+        assert_eq!(BannerColor::Blue.contrast(), Contrast::WhiteText);
+        assert_eq!(BannerColor::Green.contrast(), Contrast::BlackText);
+        assert_eq!(BannerColor::Cyan.contrast(), Contrast::BlackText);
+        assert_eq!(
+            BannerColor::Rgb(255, 255, 255).contrast(),
+            Contrast::BlackText
+        );
+        assert_eq!(BannerColor::Rgb(0, 0, 0).contrast(), Contrast::WhiteText);
+    }
+
+    #[test]
+    fn each_banner_rule_refuses() {
+        let spec = |text: &str| BannerSpec {
+            text: text.into(),
+            color: None,
+        };
+        assert_eq!(check_banner(&spec("ok")), Ok(()));
+        assert_eq!(check_banner(&spec(&"a".repeat(256))), Ok(()));
+        for bad in [
+            String::new(),
+            "a".repeat(257),
+            "a\u{7}b".into(),
+            "a\u{2028}b".into(),
+            "a\u{202e}b".into(),
+        ] {
+            assert!(check_banner(&spec(&bad)).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn format_chars_are_the_unicode_cf_set() {
+        assert!(is_format_char('\u{200b}'));
+        assert!(is_format_char('\u{e0001}'));
+        assert!(!is_format_char('a'));
+        assert!(!is_format_char('\u{2028}'));
     }
 }
