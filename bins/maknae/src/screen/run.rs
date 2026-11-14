@@ -18,6 +18,7 @@ const ESCAPE_WAIT: Duration = Duration::from_millis(100);
 const LEAVE_WINDOW: Duration = Duration::from_secs(2);
 const SPINNER_TICK: Duration = Duration::from_millis(100);
 const CLOCK_TICK: Duration = Duration::from_secs(1);
+const NO_SUSPEND: &str = "Ctrl-Z is not available here: nothing could resume a stopped session";
 
 /// How often the caller's [`Caller::tick`] runs: never, each second while
 /// something is open, or at the spinner's rate while a status line animates.
@@ -63,13 +64,14 @@ pub(crate) trait Caller: Commands {
 pub(crate) enum Exit {
     /// `/bye` (a caller's [`Step::Leave`]), Ctrl-D on an empty line, or a second Ctrl-C.
     Bye,
-    /// SIGTERM, SIGHUP or SIGINT from outside, by number.
+    /// SIGTERM, SIGHUP, SIGINT or SIGQUIT from outside, by number.
     Signal(i32),
     /// The terminal hung up.
     InputClosed,
 }
 
 pub(crate) struct Driver<C: Caller> {
+    signals: Signals,
     session: Session,
     readable: Readable,
     input: Input,
@@ -94,21 +96,29 @@ enum Wake<E> {
     Escape,
     LeaveWindow,
     Resize,
+    Suspend,
+    Continued,
+    Ended,
     Leave(i32),
 }
 
 impl<C: Caller> Driver<C> {
-    /// `input_cap` is the request bound in bytes (the host's `prompt_max_bytes`).
+    /// Registers the session's signals, then calls `enter` (normally
+    /// [`Session::enter`]). `input_cap` is the request bound in bytes (the
+    /// host's `prompt_max_bytes`).
     pub(crate) fn new(
-        session: Session,
+        enter: impl FnOnce() -> Result<Session, TermError>,
         caller: C,
         events: mpsc::Receiver<C::Event>,
         banner: Option<BannerSpec>,
         conversation: Conversation,
         input_cap: usize,
     ) -> Result<Self, TermError> {
+        let signals = Signals::register()?;
+        let session = enter()?;
         let size = session.size()?;
         Ok(Self {
+            signals,
             readable: Readable::new(session.input())?,
             session,
             input: Input::new(),
@@ -135,16 +145,20 @@ impl<C: Caller> Driver<C> {
             session,
             readable,
             caller,
+            signals,
             ..
         } = self;
         drop(readable);
         drop(session);
+        drop(signals);
         (caller, result)
     }
 
     async fn drive(&mut self) -> Result<Exit, TermError> {
-        let mut signals = Signals::register()?;
         loop {
+            if self.session.is_ended() {
+                return Err(TermError::Ended);
+            }
             if self.dirty {
                 self.draw()?;
             }
@@ -156,7 +170,8 @@ impl<C: Caller> Driver<C> {
                 () = at(self.tick.map(|(at, _)| at)) => Wake::Tick,
                 () = at(escape_at) => Wake::Escape,
                 () = at(self.leave_until) => Wake::LeaveWindow,
-                wake = signals.next() => wake,
+                wake = self.signals.next() => wake,
+                () = self.session.ended() => Wake::Ended,
             };
             if let Some(exit) = self.wake(wake)? {
                 return Ok(exit);
@@ -196,8 +211,25 @@ impl<C: Caller> Driver<C> {
                 self.resize(false)?;
                 Ok(None)
             }
+            Wake::Suspend => {
+                self.suspend()?;
+                Ok(None)
+            }
+            Wake::Continued => {
+                self.session.reenter()?;
+                self.resize(true)?;
+                Ok(None)
+            }
+            Wake::Ended => Err(TermError::Ended),
             Wake::Leave(signal) => Ok(Some(Exit::Signal(signal))),
         }
+    }
+
+    fn suspend(&mut self) -> Result<(), TermError> {
+        if !self.session.suspend()? {
+            let _ = self.conversation.push(EntryKind::Notice, NO_SUSPEND);
+        }
+        self.resize(true)
     }
 
     fn step(&mut self, step: Step) -> Option<Exit> {
@@ -233,8 +265,7 @@ impl<C: Caller> Driver<C> {
 
     fn key(&mut self, key: Key) -> Result<Option<Exit>, TermError> {
         if key == Key::Ctrl('z') {
-            self.session.suspend()?;
-            self.resize(true)?;
+            self.suspend()?;
             return Ok(None);
         }
         if self.viewport.key(&mut self.conversation, &key) {
@@ -333,9 +364,12 @@ async fn recv<E>(events: &mut Option<mpsc::Receiver<E>>) -> Option<E> {
 
 struct Signals {
     winch: tokio::signal::unix::Signal,
+    tstp: tokio::signal::unix::Signal,
+    cont: tokio::signal::unix::Signal,
     term: tokio::signal::unix::Signal,
     hup: tokio::signal::unix::Signal,
     int: tokio::signal::unix::Signal,
+    quit: tokio::signal::unix::Signal,
 }
 
 impl Signals {
@@ -343,18 +377,24 @@ impl Signals {
         let one = |kind| signal(kind).map_err(TermError::Signals);
         Ok(Self {
             winch: one(SignalKind::window_change())?,
+            tstp: one(SignalKind::from_raw(Signal::SIGTSTP as i32))?,
+            cont: one(SignalKind::from_raw(Signal::SIGCONT as i32))?,
             term: one(SignalKind::terminate())?,
             hup: one(SignalKind::hangup())?,
             int: one(SignalKind::interrupt())?,
+            quit: one(SignalKind::quit())?,
         })
     }
 
     async fn next<E>(&mut self) -> Wake<E> {
         tokio::select! {
             Some(()) = self.winch.recv() => Wake::Resize,
+            Some(()) = self.tstp.recv() => Wake::Suspend,
+            Some(()) = self.cont.recv() => Wake::Continued,
             Some(()) = self.term.recv() => Wake::Leave(Signal::SIGTERM as i32),
             Some(()) = self.hup.recv() => Wake::Leave(Signal::SIGHUP as i32),
             Some(()) = self.int.recv() => Wake::Leave(Signal::SIGINT as i32),
+            Some(()) = self.quit.recv() => Wake::Leave(Signal::SIGQUIT as i32),
         }
     }
 }
@@ -441,9 +481,10 @@ mod tests {
     #![allow(clippy::disallowed_methods)]
     use super::*;
     use crate::screen::term::{ENTER, LEAVE};
-    use crate::screen::testing::{modes, one_session, pty, Pty, FRAME_END, WAIT};
+    use crate::screen::testing::{modes, one_session, pty, Mode, Pty, FRAME_END, WAIT};
     use maknae_agent::screen::{HeaderLine, MenuItem};
     use nix::sys::signal::{kill, Signal};
+    use nix::sys::termios::{tcgetattr, tcsetattr, SetArg};
     use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
     use nix::unistd::Pid;
     use std::sync::{mpsc as std_mpsc, Arc, Mutex};
@@ -524,10 +565,9 @@ mod tests {
             .build()
             .unwrap();
         rt.block_on(async {
-            let session = enter().map_err(|e| e.to_string())?;
             let (_tx, rx) = mpsc::channel(1);
             let driver = Driver::new(
-                session,
+                enter,
                 caller,
                 rx,
                 None,
@@ -651,6 +691,55 @@ mod tests {
     }
 
     #[test]
+    fn sigterm_sigint_and_sigquit_leave_and_restore_the_terminal() {
+        let _one = one_session();
+        for sig in [Signal::SIGTERM, Signal::SIGINT, Signal::SIGQUIT] {
+            let mut pty = pty(24, 80);
+            let before = modes(&pty.slave);
+            let (caller, _seen) = Fake::new(Pace::Idle, Step::Unchanged);
+            let done = drive(&pty, caller);
+            assert!(pty.out.wait_for(FRAME_END), "no first frame before {sig:?}");
+            kill(Pid::this(), sig).unwrap();
+            assert_eq!(ended(&done), Ok(Exit::Signal(sig as i32)), "{sig:?}");
+            assert!(pty.out.wait_for(LEAVE), "{sig:?} left the modes on");
+            assert_eq!(modes(&pty.slave), before, "{sig:?} left the terminal raw");
+        }
+    }
+
+    #[test]
+    fn a_hung_up_terminal_ends_the_session_as_input_closed() {
+        let _one = one_session();
+        let mut pty = pty(24, 80);
+        let (caller, _seen) = Fake::new(Pace::Idle, Step::Unchanged);
+        let done = drive(&pty, caller);
+        assert!(pty.out.wait_for(FRAME_END), "no first frame");
+        drop(pty.hang_up());
+        assert_eq!(ended(&done), Ok(Exit::InputClosed));
+    }
+
+    #[test]
+    fn a_panic_on_another_thread_ends_the_session_with_the_terminal_restored() {
+        let _one = one_session();
+        let mut pty = pty(24, 80);
+        let before = modes(&pty.slave);
+        let original = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let (caller, _seen) = Fake::new(Pace::Idle, Step::Unchanged);
+        let done = drive(&pty, caller);
+        let first = pty.out.wait_for(FRAME_END);
+        let _ = std::thread::spawn(|| panic!("a network task")).join();
+        let result = ended(&done);
+        std::panic::set_hook(original);
+        assert!(first, "no first frame");
+        assert_eq!(result, Err(TermError::Ended.to_string()));
+        assert!(
+            pty.out.wait_for(&[&b"\x1b[?2026l"[..], LEAVE].concat()),
+            "the hook did not end synchronized output and leave the modes"
+        );
+        assert_eq!(modes(&pty.slave), before);
+    }
+
+    #[test]
     fn the_read_buffer_never_moves_or_grows() {
         let (r, w) = nix::unistd::pipe().unwrap();
         let mut input = Input::new();
@@ -661,8 +750,13 @@ mod tests {
         let writer = std::thread::spawn(move || {
             crate::screen::term::write_all(&w, &paste).unwrap();
         });
+        let deadline = std::time::Instant::now() + WAIT;
         let mut chars = 0;
         while chars < 3 * READ_BYTES {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the paste was not read within 10 s"
+            );
             assert!(matches!(input.fill(&r).unwrap(), Filled::Bytes));
             while let Some(key) = input.next_key(false) {
                 if key == Key::Char('x') {
@@ -674,84 +768,180 @@ mod tests {
         writer.join().unwrap();
     }
 
-    const CHILD: &str = "MAKNAE_TEST_CTRL_Z_CHILD";
+    const CHILD: &str = "MAKNAE_TEST_SCREEN_CHILD";
+    const JOB: &str = "job";
+    const ORPHAN: &str = "orphan";
 
     #[test]
-    #[ignore = "the child process of ctrl_z_restores_the_terminal_and_stops_and_sigcont_redraws"]
-    fn ctrl_z_child() {
-        if std::env::var_os(CHILD).is_none() {
+    #[ignore = "the child process of the stop and continue tests"]
+    fn screen_child() {
+        let Some(mode) = std::env::var_os(CHILD) else {
             return;
+        };
+        if mode == ORPHAN {
+            nix::unistd::setsid().unwrap();
         }
         let (caller, _seen) = Fake::new(Pace::Idle, Step::Unchanged);
         assert_eq!(run_on(Session::enter, caller), Ok(Exit::Bye));
     }
 
-    struct Reap(Option<Pid>);
+    /// A session in a child process; killed on drop unless it was seen to exit.
+    struct Child {
+        pid: Pid,
+        statuses: std_mpsc::Receiver<WaitStatus>,
+        exited: bool,
+    }
 
-    impl Drop for Reap {
+    impl Drop for Child {
         fn drop(&mut self) {
-            if let Some(pid) = self.0 {
-                let _ = kill(pid, Signal::SIGKILL);
+            if !self.exited {
+                let _ = kill(self.pid, Signal::SIGKILL);
             }
         }
+    }
+
+    impl Child {
+        /// `JOB`: its own process group in this session, as a shell runs a job.
+        /// `ORPHAN`: a session of its own, which nothing can continue once stopped.
+        fn spawn(pty: &mut Pty, mode: &str) -> Child {
+            use std::os::unix::process::CommandExt;
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "screen::run::tests::screen_child",
+                    "--test-threads=1",
+                ])
+                .env(CHILD, mode)
+                .stdin(pty.slave())
+                .stdout(pty.slave());
+            if mode == JOB {
+                command.process_group(0);
+            }
+            #[allow(clippy::zombie_processes, reason = "reaped by waitpid below")]
+            let child = command.spawn().unwrap();
+            let pid = Pid::from_raw(i32::try_from(child.id()).unwrap());
+            let (tx, statuses) = std_mpsc::channel();
+            std::thread::spawn(move || loop {
+                match waitpid(pid, Some(WaitPidFlag::WUNTRACED)) {
+                    Ok(status) => {
+                        let last =
+                            matches!(status, WaitStatus::Exited(..) | WaitStatus::Signaled(..));
+                        if tx.send(status).is_err() || last {
+                            break;
+                        }
+                    }
+                    Err(nix::errno::Errno::EINTR) => {}
+                    Err(_) => break,
+                }
+            });
+            let child = Child {
+                pid,
+                statuses,
+                exited: false,
+            };
+            assert!(
+                pty.out.wait_for(ENTER),
+                "the child never entered the session"
+            );
+            assert!(pty.out.wait_for(FRAME_END), "no first frame");
+            child
+        }
+
+        fn status(&self, within: Duration) -> Option<WaitStatus> {
+            self.statuses.recv_timeout(within).ok()
+        }
+
+        fn leave(mut self, pty: &Pty) {
+            pty.type_keys(b"\x04");
+            assert_eq!(self.status(WAIT), Some(WaitStatus::Exited(self.pid, 0)));
+            self.exited = true;
+        }
+    }
+
+    fn stopped_restored_then_continued(pty: &mut Pty, child: &Child, before: &Mode) {
+        assert_eq!(
+            child.status(WAIT),
+            Some(WaitStatus::Stopped(child.pid, Signal::SIGSTOP))
+        );
+        assert!(
+            pty.out.wait_for(LEAVE),
+            "the modes were not left before the stop"
+        );
+        assert_eq!(&modes(&pty.slave), before);
+        kill(child.pid, Signal::SIGCONT).unwrap();
+        assert!(pty.out.wait_for(ENTER), "the modes were not entered again");
+        assert!(pty.out.wait_for(FRAME_END), "no redraw after SIGCONT");
+        assert_ne!(&modes(&pty.slave), before);
     }
 
     #[test]
     fn ctrl_z_restores_the_terminal_and_stops_and_sigcont_redraws() {
         let mut pty = pty(24, 80);
         let before = modes(&pty.slave);
-        #[allow(clippy::zombie_processes, reason = "reaped by waitpid below")]
-        let child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--ignored",
-                "--exact",
-                "screen::run::tests::ctrl_z_child",
-                "--test-threads=1",
-            ])
-            .env(CHILD, "1")
-            .stdin(pty.slave())
-            .stdout(pty.slave())
-            .spawn()
-            .unwrap();
-        let pid = Pid::from_raw(i32::try_from(child.id()).unwrap());
-        let mut reap = Reap(Some(pid));
-        let (tx, statuses) = std_mpsc::channel();
-        std::thread::spawn(move || loop {
-            match waitpid(pid, Some(WaitPidFlag::WUNTRACED)) {
-                Ok(status) => {
-                    let last = matches!(status, WaitStatus::Exited(..) | WaitStatus::Signaled(..));
-                    if tx.send(status).is_err() || last {
-                        break;
-                    }
-                }
-                Err(nix::errno::Errno::EINTR) => {}
-                Err(_) => break,
-            }
-        });
-        assert!(
-            pty.out.wait_for(ENTER),
-            "the child never entered the session"
-        );
-        assert!(pty.out.wait_for(FRAME_END), "no first frame");
+        let child = Child::spawn(&mut pty, JOB);
         assert_ne!(modes(&pty.slave), before);
         pty.type_keys(b"\x1a");
-        assert_eq!(
-            statuses.recv_timeout(WAIT),
-            Ok(WaitStatus::Stopped(pid, Signal::SIGSTOP))
-        );
-        assert!(
-            pty.out.wait_for(LEAVE),
-            "the modes were not left before the stop"
-        );
+        stopped_restored_then_continued(&mut pty, &child, &before);
+        child.leave(&pty);
+        assert!(pty.out.wait_for(LEAVE));
         assert_eq!(modes(&pty.slave), before);
-        kill(pid, Signal::SIGCONT).unwrap();
+    }
+
+    #[test]
+    fn an_outside_sigtstp_stops_like_ctrl_z_and_sigcont_redraws() {
+        let mut pty = pty(24, 80);
+        let before = modes(&pty.slave);
+        let child = Child::spawn(&mut pty, JOB);
+        kill(child.pid, Signal::SIGTSTP).unwrap();
+        stopped_restored_then_continued(&mut pty, &child, &before);
+        child.leave(&pty);
+        assert_eq!(modes(&pty.slave), before);
+    }
+
+    #[test]
+    fn an_outside_sigstop_then_sigcont_reenters_raw_mode_and_redraws() {
+        let mut pty = pty(24, 80);
+        let cooked = tcgetattr(&pty.slave).unwrap();
+        let before = modes(&pty.slave);
+        let child = Child::spawn(&mut pty, JOB);
+        kill(child.pid, Signal::SIGSTOP).unwrap();
+        assert_eq!(
+            child.status(WAIT),
+            Some(WaitStatus::Stopped(child.pid, Signal::SIGSTOP))
+        );
+        tcsetattr(&pty.slave, SetArg::TCSANOW, &cooked).unwrap();
+        assert_eq!(modes(&pty.slave), before);
+        kill(child.pid, Signal::SIGCONT).unwrap();
         assert!(pty.out.wait_for(ENTER), "the modes were not entered again");
         assert!(pty.out.wait_for(FRAME_END), "no redraw after SIGCONT");
+        assert_ne!(
+            modes(&pty.slave),
+            before,
+            "SIGCONT left the terminal cooked"
+        );
+        child.leave(&pty);
+        assert_eq!(modes(&pty.slave), before);
+    }
+
+    #[test]
+    fn ctrl_z_in_an_orphaned_group_does_not_stop_the_session() {
+        let mut pty = pty(24, 80);
+        let before = modes(&pty.slave);
+        let child = Child::spawn(&mut pty, ORPHAN);
+        pty.type_keys(b"\x1a");
+        assert!(
+            pty.out.wait_for(b"Ctrl-Z is not available"),
+            "no notice that Ctrl-Z cannot stop the session"
+        );
+        assert_eq!(
+            child.status(Duration::from_secs(1)),
+            None,
+            "the session stopped"
+        );
         assert_ne!(modes(&pty.slave), before);
-        pty.type_keys(b"\x04");
-        assert_eq!(statuses.recv_timeout(WAIT), Ok(WaitStatus::Exited(pid, 0)));
-        reap.0 = None;
-        assert!(pty.out.wait_for(LEAVE));
+        child.leave(&pty);
         assert_eq!(modes(&pty.slave), before);
     }
 }

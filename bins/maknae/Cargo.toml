@@ -49,7 +49,8 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "pr
 # `term` — termios for `maknae login`'s hidden prompt: rpassword leaves echo off on Ctrl-C and returns a growing String.
 # `signal` — SigSet masks for that prompt: SIGINT/SIGTERM/SIGHUP/SIGQUIT from another process would end it with echo off.
 # `poll` — the session screen's wait for input (#630): a readiness wait that carries no bytes.
-nix = { version = "0.31", default-features = false, features = ["user", "fs", "term", "signal", "poll"] }
+# `process` — getpgid/getsid: Ctrl-Z stops the session only where a shell can continue it (#630).
+nix = { version = "0.31", default-features = false, features = ["user", "fs", "term", "signal", "poll", "process"] }
 # Zeroizing wrapper for the operator's Vault token + the minted SecretIDs in transit
 # through the enroll flow (never argv/env/log). PR-J1 Task 8.
 zeroize = "1"
@@ -85,7 +86,3 @@ maknae-crypto = { path = "../../crates/maknae-crypto" }
 # maknae-loop, which `cli.rs` and `agent.rs` now reach them through; `maknae-io` stays a
 # direct dependency for `enroll/`, `reseed`, `policy_sync` and `audit_readers`. #421's
 # real-buffer test and its dev-dependencies moved to maknae-loop with the code it tests.)
-
-[dev-dependencies]
-# `process` — waitpid for the session screen's Ctrl-Z child (#630).
-nix = { version = "0.31", default-features = false, features = ["process"] }

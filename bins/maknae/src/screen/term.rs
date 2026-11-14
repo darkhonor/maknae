@@ -7,11 +7,14 @@ use nix::sys::termios::{tcgetattr, tcsetattr, LocalFlags, SetArg, Termios};
 use std::io::IsTerminal;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::panic::PanicHookInfo;
-use std::sync::{Arc, Mutex, PoisonError, TryLockError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 pub(crate) const ENTER: &[u8] = b"\x1b[?1049h\x1b[?7l\x1b[?2004h\x1b[?1007h\x1b[?25l";
 pub(crate) const LEAVE: &[u8] = b"\x1b[?1007l\x1b[?2004l\x1b[?7h\x1b[?25h\x1b[?1049l";
+const SYNC_OFF: &[u8] = b"\x1b[?2026l";
+const HOOK_TRIES: usize = 1000;
 
 #[derive(Debug)]
 pub(crate) enum TermError {
@@ -24,6 +27,7 @@ pub(crate) enum TermError {
     Stop(Errno),
     Frame(FrameError),
     Waiter,
+    Ended,
 }
 
 impl std::fmt::Display for TermError {
@@ -42,6 +46,7 @@ impl std::fmt::Display for TermError {
             TermError::Stop(e) => write!(f, "the session could not be suspended: {e}"),
             TermError::Frame(e) => write!(f, "{e}"),
             TermError::Waiter => f.write_str("the wait for input stopped unexpectedly"),
+            TermError::Ended => f.write_str("a panic put the terminal back, so the session ended"),
         }
     }
 }
@@ -63,12 +68,15 @@ impl Restorer {
 type Shared = Arc<Mutex<Option<Restorer>>>;
 
 /// The terminal in raw mode and the session's modes until dropped, a panic or
-/// a stop puts it back.
+/// a stop puts it back. A panic on any thread ends the session: the restorer is
+/// gone and [`Session::ended`] fires. Dropping it drops any panic hook installed
+/// after it, and after an unwind the previous hook stays chained, not reinstalled.
 pub(crate) struct Session {
     input: OwnedFd,
     output: OwnedFd,
     raw: Termios,
     restorer: Shared,
+    ended: Arc<Notify>,
     previous_hook: Option<Arc<Hook>>,
 }
 
@@ -95,7 +103,7 @@ impl Session {
             output: dup(&output)?,
             termios: Restore::new(dup(&input)?, saved),
         };
-        if let Err(e) = set_raw(&input, &raw) {
+        if let Err(e) = set_raw(&input, &raw, SetArg::TCSAFLUSH) {
             drop(restorer);
             return Err(e);
         }
@@ -104,12 +112,14 @@ impl Session {
             return Err(TermError::Write(e));
         }
         let restorer = Arc::new(Mutex::new(Some(restorer)));
-        let previous_hook = Some(install_hook(&restorer));
+        let ended = Arc::new(Notify::new());
+        let previous_hook = Some(install_hook(&restorer, &ended));
         Ok(Session {
             input,
             output,
             raw,
             restorer,
+            ended,
             previous_hook,
         })
     }
@@ -130,20 +140,56 @@ impl Session {
         write_all(&self.output, bytes).map_err(TermError::Write)
     }
 
-    /// Ctrl-Z: puts the terminal back, stops the process, and on SIGCONT
-    /// takes the terminal again. The caller redraws.
-    pub(crate) fn suspend(&self) -> Result<(), TermError> {
-        if let Some(restorer) = self
-            .restorer
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .as_ref()
-        {
-            restorer.leave();
+    fn slot(&self) -> MutexGuard<'_, Option<Restorer>> {
+        self.restorer.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(crate) fn is_ended(&self) -> bool {
+        self.slot().is_none()
+    }
+
+    /// Completes once a panic has put the terminal back.
+    pub(crate) async fn ended(&self) {
+        self.ended.notified().await;
+    }
+
+    /// Ctrl-Z or SIGTSTP: puts the terminal back, stops the process and takes
+    /// the terminal again when continued. `false`, with nothing changed, when no
+    /// shell could continue it (an orphaned process group). The caller redraws.
+    pub(crate) fn suspend(&self) -> Result<bool, TermError> {
+        if !job_control() {
+            return Ok(false);
+        }
+        match self.slot().as_ref() {
+            Some(restorer) => restorer.leave(),
+            None => return Err(TermError::Ended),
         }
         raise(Signal::SIGSTOP).map_err(TermError::Stop)?;
-        set_raw(&self.input, &self.raw)?;
+        self.reenter()?;
+        Ok(true)
+    }
+
+    /// SIGCONT: raw mode and the session's modes again, keeping typed input;
+    /// harmless when they are on.
+    pub(crate) fn reenter(&self) -> Result<(), TermError> {
+        let slot = self.slot();
+        if slot.is_none() {
+            return Err(TermError::Ended);
+        }
+        set_raw(&self.input, &self.raw, SetArg::TCSANOW)?;
         self.write(ENTER)
+    }
+}
+
+/// Whether a stop can be undone: the parent is in this session but another
+/// process group, as a job-control shell's job is. A group whose leader's
+/// parent is in another session is orphaned, and SIGSTOP there never ends.
+fn job_control() -> bool {
+    use nix::unistd::{getpgid, getpgrp, getppid, getsid};
+    let parent = getppid();
+    match (getpgid(Some(parent)), getsid(Some(parent)), getsid(None)) {
+        (Ok(group), Ok(session), Ok(own)) => group != getpgrp() && session == own,
+        _ => false,
     }
 }
 
@@ -167,25 +213,38 @@ impl Drop for Session {
     }
 }
 
-fn install_hook(restorer: &Shared) -> Arc<Hook> {
+fn install_hook(restorer: &Shared, ended: &Arc<Notify>) -> Arc<Hook> {
     let previous: Arc<Hook> = Arc::new(std::panic::take_hook());
-    let (chained, shared) = (Arc::clone(&previous), Arc::clone(restorer));
+    let (chained, shared, ended) = (
+        Arc::clone(&previous),
+        Arc::clone(restorer),
+        Arc::clone(ended),
+    );
     std::panic::set_hook(Box::new(move |info| {
-        let slot = match shared.try_lock() {
-            Ok(slot) => Some(slot),
-            Err(TryLockError::Poisoned(slot)) => Some(slot.into_inner()),
-            Err(TryLockError::WouldBlock) => None,
-        };
-        if let Some(restorer) = slot.and_then(|mut slot| slot.take()) {
+        if let Some(restorer) = take_for_hook(&shared) {
+            let _ = write_all(&restorer.output, SYNC_OFF);
             restorer.leave();
+            ended.notify_one();
         }
         chained(info);
     }));
     previous
 }
 
-fn set_raw(fd: &OwnedFd, raw: &Termios) -> Result<(), TermError> {
-    tcsetattr(fd, SetArg::TCSAFLUSH, raw).map_err(TermError::Terminal)?;
+/// Bounded, so a panic on a thread that holds the slot cannot deadlock its hook.
+fn take_for_hook(shared: &Shared) -> Option<Restorer> {
+    for _ in 0..HOOK_TRIES {
+        match shared.try_lock() {
+            Ok(mut slot) => return slot.take(),
+            Err(TryLockError::Poisoned(slot)) => return slot.into_inner().take(),
+            Err(TryLockError::WouldBlock) => std::thread::yield_now(),
+        }
+    }
+    None
+}
+
+fn set_raw(fd: &OwnedFd, raw: &Termios, when: SetArg) -> Result<(), TermError> {
+    tcsetattr(fd, when, raw).map_err(TermError::Terminal)?;
     let applied = tcgetattr(fd).map_err(TermError::Terminal)?;
     if applied
         .local_flags
@@ -213,11 +272,12 @@ pub(crate) fn write_all(fd: &impl AsFd, mut bytes: &[u8]) -> Result<(), Errno> {
 }
 
 /// Waits until a descriptor has input, carrying no bytes: a blocking `poll`
-/// on the blocking pool, kept across cancelled waits and woken on drop.
+/// on the blocking pool, kept across cancelled waits. Dropping it closes the
+/// wake pipe's only write end, which ends the `poll`.
 pub(crate) struct Readable {
     fd: Arc<OwnedFd>,
     wake: Arc<OwnedFd>,
-    waker: OwnedFd,
+    _waker: OwnedFd,
     pending: Option<JoinHandle<Result<(), Errno>>>,
 }
 
@@ -231,7 +291,7 @@ impl Readable {
         Ok(Readable {
             fd: Arc::new(fd),
             wake: Arc::new(wake),
-            waker,
+            _waker: waker,
             pending: None,
         })
     }
@@ -247,12 +307,6 @@ impl Readable {
             Ok(polled) => polled.map_err(TermError::Read),
             Err(_) => Err(TermError::Waiter),
         }
-    }
-}
-
-impl Drop for Readable {
-    fn drop(&mut self) {
-        let _ = nix::unistd::write(&self.waker, &[1]);
     }
 }
 
@@ -273,7 +327,7 @@ fn wait_readable(fd: &OwnedFd, wake: &OwnedFd) -> Result<(), Errno> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::screen::testing::{modes, one_session, pty};
+    use crate::screen::testing::{modes, one_session, pty, WAIT};
     use nix::sys::termios::{tcgetattr, InputFlags, LocalFlags, OutputFlags};
     use std::sync::{Arc, Mutex};
 
@@ -293,6 +347,8 @@ mod tests {
                 | InputFlags::IXON
                 | InputFlags::ISTRIP
                 | InputFlags::BRKINT
+                | InputFlags::IGNCR
+                | InputFlags::PARMRK
         ));
         assert!(inside.output_flags.contains(OutputFlags::OPOST));
         drop(session);
@@ -337,6 +393,30 @@ mod tests {
     }
 
     #[test]
+    fn dropping_a_readable_frees_its_waiting_thread() {
+        let (r, _w) = nix::unistd::pipe().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let held = rt.block_on(async {
+            let mut readable = Readable::new(&r).unwrap();
+            let held = Arc::downgrade(&readable.fd);
+            let waited =
+                tokio::time::timeout(std::time::Duration::from_millis(100), readable.wait()).await;
+            assert!(waited.is_err(), "the pipe was readable");
+            held
+        });
+        let deadline = std::time::Instant::now() + WAIT;
+        while held.upgrade().is_some() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let released = held.upgrade().is_none();
+        rt.shutdown_timeout(std::time::Duration::ZERO);
+        assert!(released, "the waiting thread still holds the descriptor");
+    }
+
+    #[test]
     fn every_failure_reads_as_a_sentence() {
         for e in [
             TermError::Terminal(Errno::ENOTTY),
@@ -348,6 +428,7 @@ mod tests {
             TermError::Stop(Errno::EPERM),
             TermError::Frame(FrameError::Overflow),
             TermError::Waiter,
+            TermError::Ended,
         ] {
             assert!(!e.to_string().is_empty());
         }

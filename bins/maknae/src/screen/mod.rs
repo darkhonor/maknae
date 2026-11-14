@@ -7,11 +7,14 @@ pub(crate) mod term;
 
 #[cfg(test)]
 pub(crate) mod testing {
+    use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
     use nix::sys::termios::{
         tcgetattr, tcsetattr, ControlFlags, InputFlags, LocalFlags, OutputFlags, SetArg,
     };
     use std::os::fd::{AsFd, OwnedFd};
-    use std::sync::{mpsc, Mutex, MutexGuard, PoisonError};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Arc, Mutex, MutexGuard, PoisonError};
+    use std::thread::JoinHandle;
     use std::time::{Duration, Instant};
 
     pub(crate) const WAIT: Duration = Duration::from_secs(10);
@@ -19,7 +22,8 @@ pub(crate) mod testing {
 
     static ONE_SESSION: Mutex<()> = Mutex::new(());
 
-    /// Sessions install a process-wide panic hook, so tests that enter one take turns.
+    /// Sessions install a process-wide panic hook, and some tests signal the
+    /// whole test process, so every test that does either takes its turn.
     pub(crate) fn one_session() -> MutexGuard<'static, ()> {
         ONE_SESSION.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -85,15 +89,33 @@ pub(crate) mod testing {
         pub(crate) master: OwnedFd,
         pub(crate) slave: OwnedFd,
         pub(crate) out: Output,
+        stop: Arc<AtomicBool>,
+        drain: Option<JoinHandle<()>>,
     }
 
     impl Pty {
+        /// Closes every descriptor of the master side, as a closed terminal window does.
+        pub(crate) fn hang_up(&mut self) -> OwnedFd {
+            self.stop.store(true, Ordering::SeqCst);
+            if let Some(drain) = self.drain.take() {
+                drain.join().unwrap();
+            }
+            let (spare, _) = nix::unistd::pipe().unwrap();
+            std::mem::replace(&mut self.master, spare)
+        }
+
         pub(crate) fn slave(&self) -> OwnedFd {
             self.slave.try_clone().unwrap()
         }
 
         pub(crate) fn type_keys(&self, keys: &[u8]) {
             nix::unistd::write(&self.master, keys).unwrap();
+        }
+    }
+
+    impl Drop for Pty {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
         }
     }
 
@@ -109,18 +131,32 @@ pub(crate) mod testing {
         let mut t = tcgetattr(&p.slave).unwrap();
         t.local_flags
             .insert(LocalFlags::ECHO | LocalFlags::ICANON | LocalFlags::ISIG | LocalFlags::IEXTEN);
-        t.input_flags
-            .insert(InputFlags::ICRNL | InputFlags::IXON | InputFlags::BRKINT);
+        t.input_flags.insert(
+            InputFlags::ICRNL
+                | InputFlags::IXON
+                | InputFlags::BRKINT
+                | InputFlags::IGNCR
+                | InputFlags::PARMRK,
+        );
         t.input_flags.remove(InputFlags::IXANY);
         t.output_flags.insert(OutputFlags::OPOST);
         tcsetattr(&p.slave, SetArg::TCSANOW, &t).unwrap();
-        let drain = p.master.try_clone().unwrap();
+        let master = p.master.try_clone().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::clone(&stop);
         let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
+        let drain = std::thread::spawn(move || {
             let mut chunk = [0u8; 4096];
-            while let Ok(n @ 1..) = nix::unistd::read(&drain, &mut chunk) {
-                if tx.send(chunk[..n].to_vec()).is_err() {
-                    break;
+            while !stopped.load(Ordering::SeqCst) {
+                let mut fds = [PollFd::new(master.as_fd(), PollFlags::POLLIN)];
+                match poll(&mut fds, PollTimeout::from(50u16)) {
+                    Ok(0) | Err(nix::errno::Errno::EINTR) => continue,
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+                match nix::unistd::read(&master, &mut chunk) {
+                    Ok(n @ 1..) if tx.send(chunk[..n].to_vec()).is_ok() => {}
+                    _ => break,
                 }
             }
         });
@@ -132,6 +168,8 @@ pub(crate) mod testing {
                 seen: Vec::new(),
                 at: 0,
             },
+            stop,
+            drain: Some(drain),
         }
     }
 }

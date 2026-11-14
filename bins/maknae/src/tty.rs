@@ -111,7 +111,8 @@ fn hidden(saved: &Termios) -> Termios {
     t
 }
 
-/// [`hidden`], and CR stays CR, LF stays LF, and Ctrl-S and Ctrl-Q are keys.
+/// [`hidden`], and every input byte arrives as typed: CR stays CR, LF stays
+/// LF, and Ctrl-S and Ctrl-Q are keys.
 pub(crate) fn raw(saved: &Termios) -> Termios {
     let mut t = hidden(saved);
     t.input_flags.remove(
@@ -119,7 +120,9 @@ pub(crate) fn raw(saved: &Termios) -> Termios {
             | InputFlags::INLCR
             | InputFlags::IXON
             | InputFlags::ISTRIP
-            | InputFlags::BRKINT,
+            | InputFlags::BRKINT
+            | InputFlags::IGNCR
+            | InputFlags::PARMRK,
     );
     t
 }

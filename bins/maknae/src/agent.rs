@@ -1858,9 +1858,14 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "it signals the whole test process, so it runs alone with the screen tests"
+    )]
     async fn a_second_signal_during_the_close_exits_at_once_with_its_status() {
         use nix::sys::signal::{kill, Signal};
         use nix::unistd::Pid;
+        let _one = crate::screen::testing::one_session();
         let closes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut plane = Hanging {
             closes: std::sync::Arc::clone(&closes),
