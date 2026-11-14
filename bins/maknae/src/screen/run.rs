@@ -1,4 +1,4 @@
-use super::term::{Readable, Session, TermError};
+use super::term::{Readable, Session, TermError, Writer, Written, LEAVE_WAIT};
 use maknae_agent::screen::blocks::{Conversation, EntryKind};
 use maknae_agent::screen::editor::{EditOutcome, Editor};
 use maknae_agent::screen::frame::{compose, frame_capacity, ScreenState, TerminalSize, Viewport};
@@ -86,7 +86,13 @@ pub(crate) struct Driver<C: Caller> {
     viewport: Viewport,
     editor: Editor,
     size: TerminalSize,
-    frame: Zeroizing<Vec<u8>>,
+    writer: Writer,
+    /// The frame buffer, or `None` while the writer holds it.
+    frame: Option<Zeroizing<Vec<u8>>>,
+    /// What the frame the writer holds shows.
+    showing: Option<maknae_agent::screen::frame::Drawn>,
+    enter_owed: bool,
+    suspend_owed: bool,
     dirty: bool,
     full_shown: bool,
     leave_until: Option<Instant>,
@@ -96,6 +102,7 @@ pub(crate) struct Driver<C: Caller> {
 enum Wake<E> {
     Input(Result<(), TermError>),
     Event(Option<E>),
+    Written(Option<Written>),
     Tick,
     Escape,
     LeaveWindow,
@@ -125,6 +132,7 @@ impl<C: Caller> Driver<C> {
         Ok(Self {
             signals,
             readable: Readable::new(session.input())?,
+            writer: session.writer()?,
             session,
             input: Input::new(),
             caller,
@@ -134,7 +142,10 @@ impl<C: Caller> Driver<C> {
             viewport: Viewport::new(),
             editor: Editor::new(input_cap),
             size,
-            frame: Zeroizing::new(Vec::with_capacity(frame_capacity(size))),
+            frame: Some(Zeroizing::new(Vec::with_capacity(frame_capacity(size)))),
+            showing: None,
+            enter_owed: false,
+            suspend_owed: false,
             dirty: true,
             full_shown: false,
             leave_until: None,
@@ -146,13 +157,23 @@ impl<C: Caller> Driver<C> {
     /// restored before this returns, and the caller handed back.
     pub(crate) async fn run(mut self) -> (C, Result<Exit, TermError>) {
         let result = self.drive().await;
+        if self.frame.is_none()
+            && !matches!(
+                tokio::time::timeout(LEAVE_WAIT, self.writer.written()).await,
+                Ok(Some(_))
+            )
+        {
+            self.session.restore_termios_only();
+        }
         let Driver {
             session,
             readable,
+            writer,
             caller,
             signals,
             ..
         } = self;
+        drop(writer);
         drop(readable);
         drop(session);
         drop(signals);
@@ -171,6 +192,7 @@ impl<C: Caller> Driver<C> {
             let escape_at = self.input.pending_since().map(|at| at + ESCAPE_WAIT);
             let wake = tokio::select! {
                 waited = self.readable.wait() => Wake::Input(waited),
+                written = self.writer.written() => Wake::Written(written),
                 event = recv(&mut self.events) => Wake::Event(event),
                 () = at(self.tick.map(|(at, _)| at)) => Wake::Tick,
                 () = at(escape_at) => Wake::Escape,
@@ -194,6 +216,10 @@ impl<C: Caller> Driver<C> {
                 }
             }
             Wake::Escape => self.keys(true),
+            Wake::Written(written) => {
+                self.written(written)?;
+                Ok(None)
+            }
             Wake::Event(Some(event)) => {
                 let step = self.caller.event(event, &mut self.conversation);
                 Ok(self.step(step))
@@ -222,6 +248,7 @@ impl<C: Caller> Driver<C> {
             }
             Wake::Continued => {
                 self.session.reenter()?;
+                self.enter_owed = true;
                 self.resize(true)?;
                 Ok(None)
             }
@@ -230,11 +257,33 @@ impl<C: Caller> Driver<C> {
         }
     }
 
+    /// Waits for the frame being written, so the modes' reset follows it whole.
     fn suspend(&mut self) -> Result<(), TermError> {
-        if !self.session.suspend()? {
+        if self.frame.is_none() {
+            self.suspend_owed = true;
+            return Ok(());
+        }
+        self.suspend_owed = false;
+        if self.session.suspend()? {
+            self.enter_owed = true;
+        } else {
             let _ = self.conversation.push(EntryKind::Notice, NO_SUSPEND);
         }
         self.resize(true)
+    }
+
+    fn written(&mut self, written: Option<Written>) -> Result<(), TermError> {
+        let Written { frame, result } = written.ok_or(TermError::Write(Errno::EIO))?;
+        self.frame = Some(frame);
+        let showing = self.showing.take();
+        result.map_err(TermError::Write)?;
+        if let Some(showing) = showing {
+            showing.mark(&mut self.conversation);
+        }
+        if self.suspend_owed {
+            self.suspend()?;
+        }
+        Ok(())
     }
 
     fn step(&mut self, step: Step) -> Option<Exit> {
@@ -315,12 +364,7 @@ impl<C: Caller> Driver<C> {
 
     fn resize(&mut self, required: bool) -> Result<(), TermError> {
         match self.session.size() {
-            Ok(size) => {
-                if size != self.size {
-                    self.frame = Zeroizing::new(Vec::with_capacity(frame_capacity(size)));
-                    self.size = size;
-                }
-            }
+            Ok(size) => self.size = size,
             Err(e) if required => return Err(e),
             Err(_) => {}
         }
@@ -328,7 +372,16 @@ impl<C: Caller> Driver<C> {
         Ok(())
     }
 
+    /// Hands a frame to the writer; while it holds one, the frame is drawn once
+    /// that one is written.
     fn draw(&mut self) -> Result<(), TermError> {
+        let Some(mut frame) = self.frame.take() else {
+            return Ok(());
+        };
+        let capacity = frame_capacity(self.size);
+        if frame.capacity() < capacity {
+            frame = Zeroizing::new(Vec::with_capacity(capacity));
+        }
         let header = self.caller.header();
         let menu = self
             .editor
@@ -344,11 +397,16 @@ impl<C: Caller> Driver<C> {
             editor: &self.editor,
             menu: &menu,
         };
-        let drawn = compose(&mut state, self.size, &mut self.frame).map_err(TermError::Frame)?;
-        let written = self.session.write(&self.frame);
-        self.frame.zeroize();
-        written?;
-        drawn.mark(&mut self.conversation);
+        let drawn = match compose(&mut state, self.size, &mut frame) {
+            Ok(drawn) => drawn,
+            Err(e) => {
+                self.frame = Some(frame);
+                return Err(TermError::Frame(e));
+            }
+        };
+        self.writer
+            .send(std::mem::take(&mut self.enter_owed), frame)?;
+        self.showing = Some(drawn);
         self.dirty = false;
         Ok(())
     }
@@ -765,6 +823,34 @@ mod tests {
             assert!(pty.out.wait_for(LEAVE), "{sig:?} left the modes on");
             assert_eq!(modes(&pty.slave), before, "{sig:?} left the terminal raw");
         }
+    }
+
+    #[test]
+    fn a_signal_ends_the_session_and_restores_termios_while_output_is_stopped() {
+        use nix::sys::termios::{tcflow, FlowArg};
+        let _one = one_session();
+        let mut pty = pty(24, 80);
+        let before = modes(&pty.slave);
+        let (caller, _seen) = Fake::new(Pace::Animating, Step::Changed);
+        let done = drive(&pty, caller);
+        assert!(pty.out.wait_for(FRAME_END), "no first frame");
+        tcflow(&pty.slave, FlowArg::TCOOFF).unwrap();
+        let filler = pty.slave();
+        let filled = std::thread::spawn(move || {
+            let _ = crate::screen::term::write_all(&filler, &[b'.'; 1 << 20]);
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        kill(Pid::this(), Signal::SIGTERM).unwrap();
+        let ran = done.recv_timeout(Duration::from_secs(3));
+        let after = modes(&pty.slave);
+        tcflow(&pty.slave, FlowArg::TCOON).unwrap();
+        filled.join().unwrap();
+        assert_eq!(
+            ran.ok(),
+            Some(Ok(Exit::Signal(Signal::SIGTERM as i32))),
+            "the session did not end within 3 s of SIGTERM"
+        );
+        assert_eq!(after, before, "the terminal was left raw");
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use crate::tty::{self, Restore};
+use crate::tty;
 use maknae_agent::screen::frame::{FrameError, TerminalSize};
 use nix::errno::Errno;
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
@@ -8,12 +8,16 @@ use std::io::IsTerminal;
 use std::os::fd::{AsFd, OwnedFd};
 use std::panic::PanicHookInfo;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
-use tokio::sync::Notify;
+use std::time::{Duration, Instant};
+use tokio::sync::{mpsc, Notify};
 use tokio::task::JoinHandle;
+use zeroize::{Zeroize, Zeroizing};
 
 pub(crate) const ENTER: &[u8] = b"\x1b[?1049h\x1b[?7l\x1b[?2004h\x1b[?1007h\x1b[?25l";
 pub(crate) const LEAVE: &[u8] = b"\x1b[?2026l\x1b[?1007l\x1b[?2004l\x1b[?7h\x1b[?25h\x1b[?1049l";
 const HOOK_TRIES: usize = 1000;
+/// How long the modes' reset waits for the terminal to take output.
+pub(crate) const LEAVE_WAIT: Duration = Duration::from_millis(100);
 
 #[derive(Debug)]
 pub(crate) enum TermError {
@@ -53,14 +57,27 @@ impl std::fmt::Display for TermError {
 type Hook = Box<dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static>;
 
 struct Restorer {
+    input: OwnedFd,
     output: OwnedFd,
-    termios: Restore<OwnedFd>,
+    saved: Termios,
 }
 
 impl Restorer {
     fn leave(&self) {
-        let _ = write_all(&self.output, LEAVE);
-        self.termios.restore();
+        put_back(&self.input, &self.saved, &self.output);
+    }
+}
+
+/// The saved termios at once, then the modes' reset if the terminal takes it
+/// within [`LEAVE_WAIT`].
+fn put_back(input: &OwnedFd, saved: &Termios, output: &OwnedFd) {
+    restore_termios(input, saved);
+    let _ = write_bounded(output, LEAVE, LEAVE_WAIT);
+}
+
+fn restore_termios(input: &OwnedFd, saved: &Termios) {
+    if tcsetattr(input, SetArg::TCSANOW, saved) == Err(Errno::EINTR) {
+        let _ = tcsetattr(input, SetArg::TCSANOW, saved);
     }
 }
 
@@ -94,11 +111,12 @@ impl Session {
         let raw = tty::raw(&saved);
         let dup = |fd: &OwnedFd| super::dup(fd.as_fd(), TermError::Terminal);
         let restorer = Restorer {
+            input: dup(&input)?,
             output: dup(&output)?,
-            termios: Restore::new(dup(&input)?, saved.clone()),
+            saved: saved.clone(),
         };
         if let Err(e) = set_raw(&input, &raw, SetArg::TCSAFLUSH) {
-            drop(restorer);
+            restore_termios(&restorer.input, &restorer.saved);
             return Err(e);
         }
         if let Err(e) = write_all(&output, ENTER) {
@@ -131,8 +149,17 @@ impl Session {
         })
     }
 
-    pub(crate) fn write(&self, bytes: &[u8]) -> Result<(), TermError> {
-        write_all(&self.output, bytes).map_err(TermError::Write)
+    /// A writer of frames to this session's terminal.
+    pub(crate) fn writer(&self) -> Result<Writer, TermError> {
+        Writer::new(super::dup(self.output.as_fd(), TermError::Write)?)
+    }
+
+    /// Puts the saved termios back without the modes' reset, which a write still
+    /// blocked on the terminal would interleave with.
+    pub(crate) fn restore_termios_only(&self) {
+        if let Some(restorer) = self.slot().take() {
+            restore_termios(&restorer.input, &restorer.saved);
+        }
     }
 
     fn slot(&self) -> MutexGuard<'_, Option<Restorer>> {
@@ -164,15 +191,13 @@ impl Session {
         Ok(true)
     }
 
-    /// SIGCONT: raw mode and the session's modes again, keeping typed input;
-    /// harmless when they are on. The slot is not held while writing, so a
-    /// blocked terminal cannot keep a panic's hook from restoring it.
+    /// SIGCONT: raw mode again, keeping typed input; harmless when it is on. The
+    /// caller writes [`ENTER`] before its next frame.
     pub(crate) fn reenter(&self) -> Result<(), TermError> {
         if self.is_ended() {
             return Err(TermError::Ended);
         }
         set_raw(&self.input, &self.raw, SetArg::TCSANOW)?;
-        self.write(ENTER)?;
         if self.is_ended() {
             self.put_back();
             return Err(TermError::Ended);
@@ -181,8 +206,7 @@ impl Session {
     }
 
     fn put_back(&self) {
-        let _ = write_all(&self.output, LEAVE);
-        let _ = tcsetattr(&self.input, SetArg::TCSAFLUSH, &self.saved);
+        put_back(&self.input, &self.saved, &self.output);
     }
 }
 
@@ -262,6 +286,92 @@ fn set_raw(fd: &OwnedFd, raw: &Termios, when: SetArg) -> Result<(), TermError> {
 
 pub(crate) fn both_terminals() -> bool {
     std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+}
+
+/// Writes `bytes` while the terminal takes them within `wait`, and gives up
+/// otherwise.
+fn write_bounded(fd: &impl AsFd, bytes: &[u8], wait: Duration) -> Result<(), Errno> {
+    let deadline = Instant::now() + wait;
+    // One byte per write: POLLOUT promises room for one, so no write blocks.
+    for byte in bytes.chunks(1) {
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let mut fds = [PollFd::new(fd.as_fd(), PollFlags::POLLOUT)];
+            match poll(
+                &mut fds,
+                PollTimeout::try_from(left).unwrap_or(PollTimeout::ZERO),
+            ) {
+                Ok(0) => return Err(Errno::EAGAIN),
+                Ok(_)
+                    if fds[0]
+                        .revents()
+                        .is_some_and(|r| r.contains(PollFlags::POLLOUT)) => {}
+                Ok(_) => return Err(Errno::EIO),
+                Err(Errno::EINTR) => continue,
+                Err(e) => return Err(e),
+            }
+            match nix::unistd::write(fd, byte) {
+                Ok(1) => break,
+                Ok(_) => return Err(Errno::EIO),
+                Err(Errno::EINTR) => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A frame written, or not, and its buffer back, wiped.
+pub(crate) struct Written {
+    pub(crate) frame: Zeroizing<Vec<u8>>,
+    pub(crate) result: Result<(), Errno>,
+}
+
+struct Job {
+    enter: bool,
+    frame: Zeroizing<Vec<u8>>,
+}
+
+/// Writes frames on a thread of its own, so a terminal that takes no output
+/// blocks that thread and never the session's loop. One frame at a time.
+pub(crate) struct Writer {
+    jobs: std::sync::mpsc::SyncSender<Job>,
+    written: mpsc::UnboundedReceiver<Written>,
+}
+
+impl Writer {
+    fn new(output: OwnedFd) -> Result<Writer, TermError> {
+        let (jobs, todo) = std::sync::mpsc::sync_channel::<Job>(1);
+        let (done, written) = mpsc::unbounded_channel();
+        std::thread::Builder::new()
+            .name("maknae-screen-writer".into())
+            .spawn(move || {
+                for Job { enter, mut frame } in todo {
+                    let enter = if enter { ENTER } else { &[] };
+                    let result =
+                        write_all(&output, enter).and_then(|()| write_all(&output, &frame));
+                    frame.zeroize();
+                    if done.send(Written { frame, result }).is_err() {
+                        return;
+                    }
+                }
+            })
+            .map_err(|e| TermError::Write(Errno::from_raw(e.raw_os_error().unwrap_or(0))))?;
+        Ok(Writer { jobs, written })
+    }
+
+    /// Hands `frame` over, after [`ENTER`] when `enter`. Called only once the
+    /// previous frame is [`Writer::written`].
+    pub(crate) fn send(&self, enter: bool, frame: Zeroizing<Vec<u8>>) -> Result<(), TermError> {
+        self.jobs
+            .try_send(Job { enter, frame })
+            .map_err(|_| TermError::Write(Errno::EIO))
+    }
+
+    /// The next frame done with; `None` once the thread is gone.
+    pub(crate) async fn written(&mut self) -> Option<Written> {
+        self.written.recv().await
+    }
 }
 
 pub(crate) fn write_all(fd: &impl AsFd, mut bytes: &[u8]) -> Result<(), Errno> {
@@ -418,9 +528,28 @@ mod tests {
         assert!(released, "the waiting thread still holds the descriptor");
     }
 
-    #[test]
-    fn a_panic_while_reentry_is_blocked_still_restores_the_terminal() {
+    /// Stops the pty's output and fills its queue, so a write to it blocks.
+    fn stopped(pty: &crate::screen::testing::Pty) -> std::thread::JoinHandle<()> {
         use nix::sys::termios::{tcflow, FlowArg};
+        tcflow(&pty.slave, FlowArg::TCOOFF).unwrap();
+        let filler = pty.slave();
+        let filled = std::thread::spawn(move || {
+            let _ = write_all(&filler, &[b'.'; 1 << 20]);
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        filled
+    }
+
+    fn resumed(pty: &crate::screen::testing::Pty, filled: std::thread::JoinHandle<()>) {
+        use nix::sys::termios::{tcflow, FlowArg};
+        tcflow(&pty.slave, FlowArg::TCOON).unwrap();
+        filled.join().unwrap();
+    }
+
+    const PROMPTLY: std::time::Duration = std::time::Duration::from_secs(3);
+
+    #[test]
+    fn a_panic_while_output_is_stopped_restores_termios_at_once() {
         let _one = one_session();
         let mut pty = pty(24, 80);
         let before = modes(&pty.slave);
@@ -428,28 +557,39 @@ mod tests {
         std::panic::set_hook(Box::new(|_| {}));
         let session = Session::enter_on(pty.slave(), pty.slave()).unwrap();
         assert!(pty.out.wait_for(ENTER));
-        tcflow(&pty.slave, FlowArg::TCOOFF).unwrap();
-        let filler = pty.slave();
-        let filled = std::thread::spawn(move || write_all(&filler, &[b'.'; 1 << 20]));
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        let (tx, reentered) = std::sync::mpsc::channel();
+        let filled = stopped(&pty);
+        let (tx, hooked) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let result = session.reenter().map_err(|e| e.to_string());
-            let _ = tx.send((result, session));
+            let _ = std::thread::spawn(|| panic!("a network task")).join();
+            let _ = tx.send(());
         });
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        let panicked = std::thread::spawn(|| panic!("a network task"));
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        tcflow(&pty.slave, FlowArg::TCOON).unwrap();
-        let joined = reentered.recv_timeout(WAIT);
-        let _ = panicked.join();
-        let _ = filled.join();
+        let hooked = hooked.recv_timeout(PROMPTLY);
+        let after = modes(&pty.slave);
+        resumed(&pty, filled);
         std::panic::set_hook(original);
-        let (result, session) = joined.expect("the re-entry never returned");
-        assert_eq!(result, Err(TermError::Ended.to_string()));
-        assert!(session.is_ended(), "the hook could not take the terminal");
-        drop(session);
-        assert_eq!(modes(&pty.slave), before, "the terminal was left raw");
+        assert!(hooked.is_ok(), "the hook waited on the stopped output");
+        assert_eq!(after, before, "the terminal was left raw");
+        assert!(session.is_ended());
+    }
+
+    #[test]
+    fn dropping_the_session_while_output_is_stopped_restores_termios_at_once() {
+        let _one = one_session();
+        let mut pty = pty(24, 80);
+        let before = modes(&pty.slave);
+        let session = Session::enter_on(pty.slave(), pty.slave()).unwrap();
+        assert!(pty.out.wait_for(ENTER));
+        let filled = stopped(&pty);
+        let (tx, dropped) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(session);
+            let _ = tx.send(());
+        });
+        let dropped = dropped.recv_timeout(PROMPTLY);
+        let after = modes(&pty.slave);
+        resumed(&pty, filled);
+        assert!(dropped.is_ok(), "the drop waited on the stopped output");
+        assert_eq!(after, before, "the terminal was left raw");
     }
 
     #[test]
