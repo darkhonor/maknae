@@ -44,13 +44,12 @@ concurrency:
 # clean, so ten crates -- `maknae-authz-basic` among them -- were compiled for
 # macOS by nothing. Same defect class as #74's clippy list, same cure.
 env:
-  # Exact versions from the passing #235 merge run. Floating installs made
-  # cold and cached runs use different tools; every pin participates in its
-  # executable-only cache key. No coverage reports or test outcomes cached.
-  CARGO_DENY_VERSION: "0.19.9"
-  CARGO_AUDITABLE_VERSION: "0.7.6"
+  # The shared tool release baseline (#640). Exact pins: each keys its
+  # executable-only cache. No coverage reports or test outcomes cached.
+  CARGO_DENY_VERSION: "0.20.2"
+  CARGO_AUDITABLE_VERSION: "0.7.7"
   RUST_AUDIT_INFO_VERSION: "0.5.4"
-  CARGO_LLVM_COV_VERSION: "0.8.7"
+  CARGO_LLVM_COV_VERSION: "0.9.1"
   MUTANTS_PATHS: "crates/maknae-config,crates/maknae-security,crates/maknae-io,crates/maknae-kernel,crates/maknae-vault,crates/maknae-crypto,crates/maknae-proto,crates/maknae-audit-append,crates/maknae-msgs,crates/maknae-authz-basic,crates/maknae-classification-aus,crates/maknae-llm,crates/maknae-agent,crates/maknae-deputy,crates/maknae-sys,crates/maknae-seal,crates/maknae-graph,crates/maknae-state"
 
 jobs:

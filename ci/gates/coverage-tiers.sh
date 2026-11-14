@@ -185,7 +185,7 @@ if [ "$need_default" -eq 1 ]; then
       fi
     fi
     if ! command -v cargo-llvm-cov >/dev/null 2>&1; then
-      r_fail "cargo-llvm-cov missing — cargo install cargo-llvm-cov --locked --version '^0.8'"
+      r_fail "cargo-llvm-cov missing — cargo install cargo-llvm-cov --locked --version 0.9.1"
     fi
   fi
   # sync: cargo presence on live roots only
@@ -195,15 +195,15 @@ if [ "$need_default" -eq 1 ]; then
   check_python
 else
   if ! command -v cargo-mutants >/dev/null 2>&1; then
-    r_fail "cargo-mutants missing — cargo install cargo-mutants --locked"
+    r_fail "cargo-mutants missing — cargo install cargo-mutants --locked --version 27.1.0"
   fi
   if [ "$mutants_mode" = "all" ] || [[ " ${mutant_crates[*]} " == *" maknae-io "* ]]; then
     nextest_out="$(cd "$root" && cargo nextest --version 2>&1 || true)"
     nextest_v="$(printf '%s\n' "$nextest_out" | grep -m1 '^cargo-nextest ' || true)"
     case "$nextest_v" in
-      "cargo-nextest 0.9.146"|"cargo-nextest 0.9.146 "*) :;;
-      "") r_fail "cargo-nextest missing (cargo nextest --version: $(printf '%s' "$nextest_out" | head -1)) — install cargo-nextest 0.9.146 (the version CI pins)";;
-      *) r_fail "'$nextest_v' is not cargo-nextest 0.9.146 (the version CI pins)";;
+      "cargo-nextest 0.9.151"|"cargo-nextest 0.9.151 "*) :;;
+      "") r_fail "cargo-nextest missing (cargo nextest --version: $(printf '%s' "$nextest_out" | head -1)) — install cargo-nextest 0.9.151 (the version CI pins)";;
+      *) r_fail "'$nextest_v' is not cargo-nextest 0.9.151 (the version CI pins)";;
     esac
   fi
   if [ "$injection" -eq 0 ] && ! command -v cargo >/dev/null 2>&1; then

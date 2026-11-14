@@ -7,7 +7,7 @@
 FROM rust:1.99.1@sha256:931c2c0531a8b143e044f0f3914dfe802f15bb3d1955f0b657e9359327ac2ffc AS build
 WORKDIR /src
 COPY . .
-RUN rustup target add x86_64-unknown-linux-musl && cargo install cargo-auditable --locked
+RUN rustup target add x86_64-unknown-linux-musl && cargo install cargo-auditable --locked --version 0.7.7
 # single-package AUDITABLE static build (spec §3 build-invocation discipline + §6 inventory + musl)
 RUN cargo auditable build -p maknaed --release --target x86_64-unknown-linux-musl
 FROM scratch
