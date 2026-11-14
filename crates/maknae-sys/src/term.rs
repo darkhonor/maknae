@@ -12,7 +12,8 @@ pub fn window_size(tty: BorrowedFd<'_>) -> io::Result<(u16, u16)> {
     };
     // SAFETY: the descriptor is borrowed, so it stays open for the whole call. TIOCGWINSZ
     // copies out exactly one `struct winsize`, and the pointer is to `size`, an initialised
-    // local `libc::winsize` that outlives the call.
+    // local `libc::winsize` that outlives the call. On Linux the request number encodes no
+    // size, so a non-tty descriptor is safe only because its driver refuses it with ENOTTY.
     let rc = unsafe { libc::ioctl(tty.as_raw_fd(), libc::TIOCGWINSZ, &raw mut size) };
     if rc == -1 {
         return Err(io::Error::last_os_error());
