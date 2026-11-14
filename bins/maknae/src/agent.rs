@@ -1897,9 +1897,17 @@ mod tests {
             )
             .await
         };
+        let started = std::sync::Arc::clone(&closes);
         let driver = async {
             tokio::task::yield_now().await;
             kill(Pid::this(), Signal::SIGINT).unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                while started.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("the first signal did not start the close");
             let mut exit_rx = exit_rx;
             tokio::time::timeout(std::time::Duration::from_secs(10), async {
                 loop {

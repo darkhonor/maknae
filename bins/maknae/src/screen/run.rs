@@ -105,7 +105,8 @@ enum Wake<E> {
 impl<C: Caller> Driver<C> {
     /// Registers the session's signals, then calls `enter` (normally
     /// [`Session::enter`]). `input_cap` is the request bound in bytes (the
-    /// host's `prompt_max_bytes`).
+    /// host's `prompt_max_bytes`). The signal handlers stay installed for the
+    /// rest of the process, so the caller owns exit after `run` returns.
     pub(crate) fn new(
         enter: impl FnOnce() -> Result<Session, TermError>,
         caller: C,

@@ -74,6 +74,7 @@ type Shared = Arc<Mutex<Option<Restorer>>>;
 pub(crate) struct Session {
     input: OwnedFd,
     output: OwnedFd,
+    saved: Termios,
     raw: Termios,
     restorer: Shared,
     ended: Arc<Notify>,
@@ -101,7 +102,7 @@ impl Session {
         };
         let restorer = Restorer {
             output: dup(&output)?,
-            termios: Restore::new(dup(&input)?, saved),
+            termios: Restore::new(dup(&input)?, saved.clone()),
         };
         if let Err(e) = set_raw(&input, &raw, SetArg::TCSAFLUSH) {
             drop(restorer);
@@ -117,6 +118,7 @@ impl Session {
         Ok(Session {
             input,
             output,
+            saved,
             raw,
             restorer,
             ended,
@@ -160,30 +162,41 @@ impl Session {
         if !job_control() {
             return Ok(false);
         }
-        match self.slot().as_ref() {
-            Some(restorer) => restorer.leave(),
-            None => return Err(TermError::Ended),
+        if self.is_ended() {
+            return Err(TermError::Ended);
         }
+        self.put_back();
         raise(Signal::SIGSTOP).map_err(TermError::Stop)?;
         self.reenter()?;
         Ok(true)
     }
 
     /// SIGCONT: raw mode and the session's modes again, keeping typed input;
-    /// harmless when they are on.
+    /// harmless when they are on. The slot is not held while writing, so a
+    /// blocked terminal cannot keep a panic's hook from restoring it.
     pub(crate) fn reenter(&self) -> Result<(), TermError> {
-        let slot = self.slot();
-        if slot.is_none() {
+        if self.is_ended() {
             return Err(TermError::Ended);
         }
         set_raw(&self.input, &self.raw, SetArg::TCSANOW)?;
-        self.write(ENTER)
+        self.write(ENTER)?;
+        if self.is_ended() {
+            self.put_back();
+            return Err(TermError::Ended);
+        }
+        Ok(())
+    }
+
+    fn put_back(&self) {
+        let _ = write_all(&self.output, LEAVE);
+        let _ = tcsetattr(&self.input, SetArg::TCSAFLUSH, &self.saved);
     }
 }
 
 /// Whether a stop can be undone: the parent is in this session but another
 /// process group, as a job-control shell's job is. A group whose leader's
 /// parent is in another session is orphaned, and SIGSTOP there never ends.
+/// It assumes such a parent waits for stops, as a shell does.
 fn job_control() -> bool {
     use nix::unistd::{getpgid, getpgrp, getppid, getsid};
     let parent = getppid();
@@ -414,6 +427,40 @@ mod tests {
         let released = held.upgrade().is_none();
         rt.shutdown_timeout(std::time::Duration::ZERO);
         assert!(released, "the waiting thread still holds the descriptor");
+    }
+
+    #[test]
+    fn a_panic_while_reentry_is_blocked_still_restores_the_terminal() {
+        use nix::sys::termios::{tcflow, FlowArg};
+        let _one = one_session();
+        let mut pty = pty(24, 80);
+        let before = modes(&pty.slave);
+        let original = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let session = Session::enter_on(pty.slave(), pty.slave()).unwrap();
+        assert!(pty.out.wait_for(ENTER));
+        tcflow(&pty.slave, FlowArg::TCOOFF).unwrap();
+        let filler = pty.slave();
+        let filled = std::thread::spawn(move || write_all(&filler, &[b'.'; 1 << 20]));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let (tx, reentered) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = session.reenter().map_err(|e| e.to_string());
+            let _ = tx.send((result, session));
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let panicked = std::thread::spawn(|| panic!("a network task"));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        tcflow(&pty.slave, FlowArg::TCOON).unwrap();
+        let joined = reentered.recv_timeout(WAIT);
+        let _ = panicked.join();
+        let _ = filled.join();
+        std::panic::set_hook(original);
+        let (result, session) = joined.expect("the re-entry never returned");
+        assert_eq!(result, Err(TermError::Ended.to_string()));
+        assert!(session.is_ended(), "the hook could not take the terminal");
+        drop(session);
+        assert_eq!(modes(&pty.slave), before, "the terminal was left raw");
     }
 
     #[test]
