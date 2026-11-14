@@ -366,6 +366,14 @@ files = [
   "crates/maknae-agent/src/budget.rs",
   # #170: session.list's paging and its client-side --cwd filter; a wrong match lists another directory's conversations as this one's.
   "crates/maknae-agent/src/conversations.rs",
+  # #630: the session screen's pure core. A key read as Enter submits a half-typed task; a store that drops an unseen report loses it after the kernel was told it was delivered; a composer that writes report text raw lets it move the cursor over the banner.
+  "crates/maknae-agent/src/screen/mod.rs",
+  "crates/maknae-agent/src/screen/fixed.rs",
+  "crates/maknae-agent/src/screen/keys.rs",
+  "crates/maknae-agent/src/screen/editor.rs",
+  "crates/maknae-agent/src/screen/blocks.rs",
+  "crates/maknae-agent/src/screen/wrap.rs",
+  "crates/maknae-agent/src/screen/frame.rs",
   "crates/maknae-sys/src/reply.rs",
   "crates/maknae-sys/src/macos.rs",
   # #490: whether a prepared audit trail carries the append-only flag; a false "yes" moves the trail to a file the daemon can rewrite.

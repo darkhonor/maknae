@@ -25,8 +25,9 @@ maknae-config = { path = "../../crates/maknae-config" }
 maknae-io = { path = "../../crates/maknae-io" }
 maknae-vault = { path = "../../crates/maknae-vault" }
 maknae-msgs = { path = "../../crates/maknae-msgs" }
-# The runtime loop's BRAIN (#241): transcript, routing, rendering, drive. Non-privileged,
-# and its four direct dependencies are maknae-proto, serde, serde_json and zeroize — so the
+# The runtime loop's BRAIN (#241): transcript, routing, rendering, drive, and the session
+# screen's pure core (#630). Non-privileged, and its five direct dependencies are
+# maknae-proto, serde, serde_json, zeroize and unicode-width — so the
 # hands (`src/agent.rs`) are what reaches a socket on this binary's wire path.
 # (Corrected 2026-09-22, #344: this said "I/O-free by construction … and no I/O crate".
 # maknae-agent's own graph reaches tokio through maknae-proto, and inside THIS binary Cargo
@@ -67,7 +68,7 @@ maknae-crypto = { path = "../../crates/maknae-crypto" }
 # maknae-proto, maknae-vault, maknae-config, maknae-msgs, maknae-io, maknae-agent, maknae-loop, maknae-seal, clap,
 # tokio, nix, zeroize, yaml-rust2, rpassword and maknae-crypto (policy_sync.rs's digest, the TLS provider) — no
 # maknae-mcp either. maknae-agent is non-privileged; it is the loop's decision code and its
-# four direct deps are maknae-proto, serde, serde_json and zeroize. No gate enforces this
+# five direct deps are maknae-proto, serde, serde_json, zeroize and unicode-width. No gate enforces this
 # set, so this comment IS the record.
 # (Corrected 2026-09-22, #344: "— no I/O crate" struck here as well. tokio arrives in
 # maknae-agent's graph transitively, via maknae-proto; what holds is the absence of

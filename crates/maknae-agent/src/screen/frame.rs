@@ -1,0 +1,1243 @@
+use super::blocks::{Conversation, EntryId};
+use super::editor::Editor;
+use super::keys::Key;
+use super::wrap::{rows_for, RowSpan};
+use super::{HeaderLine, MenuItem};
+use crate::render::{display_piece, DISPLAY_PIECE_MAX};
+use maknae_proto::{BannerColor, BannerSpec, Contrast};
+use std::ops::RangeInclusive;
+use unicode_width::UnicodeWidthChar;
+use zeroize::{Zeroize, Zeroizing};
+
+pub const TOO_SMALL: &str = "terminal too small";
+/// The largest window the composer lays out; a larger one is drawn at this size.
+pub const MAX_ROWS: u16 = 512;
+pub const MAX_COLS: u16 = 1024;
+const MIN_CONVERSATION_ROWS: usize = 3;
+const STATUS_ROWS_MAX: usize = 3;
+const INPUT_ROWS_MAX: usize = 3;
+const MENU_ROWS_MAX: usize = 5;
+const BANNER_MARGIN: usize = 1;
+const PROMPT: &str = "> ";
+const CONTINUATION: &str = "  ";
+/// Bytes one cell may carry: a four-byte character and three combining marks.
+pub const CELL_BYTES: usize = 16;
+/// A row's control bytes at most: its position, the erase, and a banner's
+/// background, foreground and reset.
+pub const ROW_CONTROL_BYTES: usize = 48;
+/// The frame's own control bytes: synchronized output on and off and the cursor.
+pub const FRAME_CONTROL_BYTES: usize = 32;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct TerminalSize {
+    pub rows: u16,
+    pub cols: u16,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FrameError {
+    /// The frame did not fit the buffer; nothing was grown.
+    Overflow,
+}
+
+impl std::fmt::Display for FrameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the frame does not fit its buffer")
+    }
+}
+
+impl std::error::Error for FrameError {}
+
+/// The capacity the caller allocates the frame buffer at, once per size.
+pub fn frame_capacity(size: TerminalSize) -> usize {
+    let (rows, cols) = clamped(size);
+    rows * (cols * CELL_BYTES + ROW_CONTROL_BYTES) + FRAME_CONTROL_BYTES
+}
+
+fn clamped(size: TerminalSize) -> (usize, usize) {
+    (
+        usize::from(size.rows.min(MAX_ROWS)),
+        usize::from(size.cols.min(MAX_COLS)),
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Pos {
+    item: EntryId,
+    row: u32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Scroll {
+    Up(u32),
+    Down(u32),
+    PageUp,
+    PageDown,
+    Top,
+    Bottom,
+}
+
+/// Where the conversation region looks: following the newest row, or held at a
+/// row while new output arrives below it.
+#[derive(Debug, Default)]
+pub struct Viewport {
+    anchor: Option<Pos>,
+    width: u16,
+    height: u16,
+}
+
+impl Viewport {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn following(&self) -> bool {
+        self.anchor.is_none()
+    }
+
+    /// Scrolls for the conversation keys of §7; false for any other key.
+    pub fn key(&mut self, conv: &mut Conversation, key: &Key) -> bool {
+        let by = match key {
+            Key::Up => Scroll::Up(1),
+            Key::Down => Scroll::Down(1),
+            Key::PageUp => Scroll::PageUp,
+            Key::PageDown => Scroll::PageDown,
+            Key::Home => Scroll::Top,
+            Key::End => Scroll::Bottom,
+            _ => return false,
+        };
+        self.scroll(conv, by);
+        true
+    }
+
+    /// Scrolls by rows of the last composed frame's conversation region.
+    pub fn scroll(&mut self, conv: &mut Conversation, by: Scroll) {
+        let (width, height) = (self.width, u32::from(self.height));
+        match by {
+            Scroll::Bottom => self.anchor = None,
+            Scroll::Top => {
+                self.anchor = conv.first_item().map(|item| Pos { item, row: 0 });
+            }
+            _ if height == 0 => return,
+            Scroll::Up(n) => self.anchor = self.top(conv).map(|top| up(conv, width, top, n)),
+            Scroll::PageUp => {
+                self.anchor = self.top(conv).map(|top| up(conv, width, top, height));
+            }
+            Scroll::Down(_) | Scroll::PageDown if self.anchor.is_none() => return,
+            Scroll::Down(n) => self.anchor = self.top(conv).map(|top| down(conv, width, top, n)),
+            Scroll::PageDown => {
+                self.anchor = self.top(conv).map(|top| down(conv, width, top, height));
+            }
+        }
+        if let Some(anchor) = self.anchor {
+            if height > 0 && rows_from(conv, width, anchor, height + 1) <= height {
+                self.anchor = None;
+            }
+        }
+    }
+
+    /// The first row on screen: the held row, still valid, or the one that
+    /// shows the newest row last.
+    fn top(&mut self, conv: &mut Conversation) -> Option<Pos> {
+        let (width, height) = (self.width, u32::from(self.height));
+        if let Some(anchor) = self.anchor {
+            let anchor = if conv.has_item(anchor.item) {
+                let rows = conv.item_rows(anchor.item, width);
+                Pos {
+                    item: anchor.item,
+                    row: anchor.row.min(rows.saturating_sub(1)),
+                }
+            } else if conv.last().is_some_and(|last| anchor.item > last) {
+                Pos {
+                    item: conv.last_item()?,
+                    row: 0,
+                }
+            } else {
+                Pos {
+                    item: conv.first_item()?,
+                    row: 0,
+                }
+            };
+            if rows_from(conv, width, anchor, height + 1) > height {
+                self.anchor = Some(anchor);
+                return Some(anchor);
+            }
+            self.anchor = None;
+        }
+        let last = conv.last_item()?;
+        let bottom = Pos {
+            item: last,
+            row: conv.item_rows(last, width).saturating_sub(1),
+        };
+        Some(up(conv, width, bottom, height.saturating_sub(1)))
+    }
+}
+
+fn up(conv: &mut Conversation, width: u16, mut pos: Pos, mut n: u32) -> Pos {
+    loop {
+        if n <= pos.row {
+            pos.row -= n;
+            return pos;
+        }
+        n -= pos.row + 1;
+        match conv.prev_item(pos.item) {
+            Some(prev) => {
+                pos = Pos {
+                    item: prev,
+                    row: conv.item_rows(prev, width).saturating_sub(1),
+                };
+            }
+            None => {
+                pos.row = 0;
+                return pos;
+            }
+        }
+    }
+}
+
+fn down(conv: &mut Conversation, width: u16, mut pos: Pos, mut n: u32) -> Pos {
+    loop {
+        let rows = conv.item_rows(pos.item, width);
+        if pos.row + n < rows {
+            pos.row += n;
+            return pos;
+        }
+        n -= rows - pos.row;
+        match conv.next_item(pos.item) {
+            Some(next) => pos = Pos { item: next, row: 0 },
+            None => {
+                pos.row = rows.saturating_sub(1);
+                return pos;
+            }
+        }
+    }
+}
+
+/// Rows from `pos` to the end, counted up to `limit`.
+fn rows_from(conv: &mut Conversation, width: u16, pos: Pos, limit: u32) -> u32 {
+    let mut count = conv.item_rows(pos.item, width).saturating_sub(pos.row);
+    let mut item = pos.item;
+    while count < limit {
+        match conv.next_item(item) {
+            Some(next) => {
+                count += conv.item_rows(next, width);
+                item = next;
+            }
+            None => break,
+        }
+    }
+    count
+}
+
+pub struct ScreenState<'a> {
+    pub banner: Option<&'a BannerSpec>,
+    pub header: &'a HeaderLine,
+    pub conversation: &'a mut Conversation,
+    pub viewport: &'a mut Viewport,
+    /// One line per open task; past three, the rest are counted.
+    pub status: &'a [String],
+    pub editor: &'a Editor,
+    pub menu: &'a [MenuItem],
+}
+
+/// What a frame put on screen, for the caller to act on once it is written.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Drawn {
+    pub seen: Option<RangeInclusive<EntryId>>,
+    pub new_below: u32,
+    pub too_small: bool,
+}
+
+/// Composes one frame into `out`, which holds at least
+/// [`frame_capacity`]`(size)` and is never grown.
+pub fn compose(
+    state: &mut ScreenState<'_>,
+    size: TerminalSize,
+    out: &mut Zeroizing<Vec<u8>>,
+) -> Result<Drawn, FrameError> {
+    out.zeroize();
+    let mut out = Out { buf: out };
+    let (rows, cols) = clamped(size);
+    out.put(b"\x1b[?2026h")?;
+    let drawn = if rows == 0 || cols == 0 {
+        Drawn {
+            too_small: true,
+            ..Drawn::default()
+        }
+    } else {
+        layout(state, rows, cols, &mut out)?
+    };
+    out.put(b"\x1b[?2026l")?;
+    Ok(drawn)
+}
+
+struct Out<'a> {
+    buf: &'a mut Vec<u8>,
+}
+
+impl Out<'_> {
+    fn put(&mut self, bytes: &[u8]) -> Result<(), FrameError> {
+        if self.buf.capacity() - self.buf.len() < bytes.len() {
+            return Err(FrameError::Overflow);
+        }
+        self.buf.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn num(&mut self, n: usize) -> Result<(), FrameError> {
+        let mut digits = [0u8; 20];
+        let mut at = digits.len();
+        let mut n = n;
+        loop {
+            at -= 1;
+            digits[at] = b'0' + (n % 10) as u8;
+            n /= 10;
+            if n == 0 {
+                break;
+            }
+        }
+        self.put(&digits[at..])
+    }
+
+    fn cup(&mut self, row: usize, col: usize) -> Result<(), FrameError> {
+        self.put(b"\x1b[")?;
+        self.num(row)?;
+        self.put(b";")?;
+        self.num(col)?;
+        self.put(b"H")
+    }
+
+    fn row(&mut self, row: usize) -> Result<(), FrameError> {
+        self.cup(row, 1)?;
+        self.put(b"\x1b[K")
+    }
+}
+
+/// One row's writing: columns and bytes it has left.
+struct Line<'o, 'b> {
+    out: &'o mut Out<'b>,
+    cols: usize,
+    bytes: usize,
+    based: bool,
+}
+
+impl<'o, 'b> Line<'o, 'b> {
+    fn new(out: &'o mut Out<'b>, cols: usize) -> Self {
+        Self {
+            out,
+            cols,
+            bytes: cols * CELL_BYTES,
+            based: false,
+        }
+    }
+
+    /// Writes what fits of `chars`; stops at the first that does not.
+    fn chars(&mut self, chars: impl Iterator<Item = char>) -> Result<(), FrameError> {
+        let mut buf = [0; DISPLAY_PIECE_MAX];
+        for c in chars {
+            let (piece, width) = screen_piece(c, &mut buf);
+            if width == 0 && !self.based {
+                continue;
+            }
+            if width > self.cols || piece.len() > self.bytes {
+                return Ok(());
+            }
+            self.out.put(piece.as_bytes())?;
+            self.cols -= width;
+            self.bytes -= piece.len();
+            self.based |= width > 0;
+        }
+        Ok(())
+    }
+
+    fn text(&mut self, text: &str) -> Result<(), FrameError> {
+        self.chars(text.chars())
+    }
+
+    fn spaces(&mut self, n: usize) -> Result<(), FrameError> {
+        self.chars(std::iter::repeat_n(' ', n))
+    }
+}
+
+/// What the composer writes for `c`, and its columns. Unlike the stored
+/// form, a line break is escaped too: no row ever writes one.
+fn screen_piece(c: char, buf: &mut [u8; DISPLAY_PIECE_MAX]) -> (&str, usize) {
+    if c == '\n' {
+        return ("\\u{000a}", 8);
+    }
+    let piece = display_piece(c, buf);
+    if maknae_proto::is_display_unsafe(c) {
+        (piece, piece.len())
+    } else {
+        (piece, c.width().unwrap_or(0))
+    }
+}
+
+fn text_width(text: &str) -> usize {
+    let mut buf = [0; DISPLAY_PIECE_MAX];
+    text.chars().map(|c| screen_piece(c, &mut buf).1).sum()
+}
+
+fn status_rows(status: &[String]) -> usize {
+    status.len().min(STATUS_ROWS_MAX) + usize::from(status.len() > STATUS_ROWS_MAX)
+}
+
+fn banner_row(out: &mut Out<'_>, banner: &BannerSpec, cols: usize) -> Result<(), FrameError> {
+    let basic = |n: u8| [0x1b, b'[', b'4', b'0' + n, b'm'];
+    match banner.color {
+        None => out.put(b"\x1b[7m")?,
+        Some(BannerColor::Rgb(r, g, b)) => {
+            out.put(b"\x1b[48;2;")?;
+            out.num(r.into())?;
+            out.put(b";")?;
+            out.num(g.into())?;
+            out.put(b";")?;
+            out.num(b.into())?;
+            out.put(b"m")?;
+        }
+        Some(BannerColor::Black) => out.put(&basic(0))?,
+        Some(BannerColor::Red) => out.put(&basic(1))?,
+        Some(BannerColor::Green) => out.put(&basic(2))?,
+        Some(BannerColor::Yellow) => out.put(&basic(3))?,
+        Some(BannerColor::Blue) => out.put(&basic(4))?,
+        Some(BannerColor::Magenta) => out.put(&basic(5))?,
+        Some(BannerColor::Cyan) => out.put(&basic(6))?,
+        Some(BannerColor::White) => out.put(&basic(7))?,
+    }
+    match banner.color.map(BannerColor::contrast) {
+        Some(Contrast::BlackText) => out.put(b"\x1b[30m")?,
+        Some(Contrast::WhiteText) => out.put(b"\x1b[97m")?,
+        None => {}
+    }
+    let width = text_width(&banner.text);
+    let left = cols.saturating_sub(width) / 2;
+    let mut line = Line::new(out, cols);
+    line.spaces(left)?;
+    line.text(&banner.text)?;
+    let rest = line.cols;
+    line.spaces(rest)?;
+    out.put(b"\x1b[0m")
+}
+
+fn layout(
+    state: &mut ScreenState<'_>,
+    rows: usize,
+    cols: usize,
+    out: &mut Out<'_>,
+) -> Result<Drawn, FrameError> {
+    let banner = state.banner;
+    let banner_rows = if banner.is_some() { 2 } else { 0 };
+    let banner_fits = banner.is_none_or(|b| text_width(&b.text) + 2 * BANNER_MARGIN <= cols);
+    let status_rows = status_rows(state.status);
+    let fixed = banner_rows + 1 + status_rows;
+    if !banner_fits || rows < fixed + MIN_CONVERSATION_ROWS + 1 {
+        return too_small(banner.filter(|_| banner_fits && rows >= 3), rows, cols, out);
+    }
+
+    let text = state.editor.text();
+    let cursor = state.editor.cursor();
+    let input_width = cols.saturating_sub(PROMPT.len()).max(1);
+    let mut input = Vec::new();
+    rows_for(
+        text,
+        u16::try_from(input_width).unwrap_or(u16::MAX),
+        &mut input,
+    );
+    let cursor_row = input.iter().rposition(|r| r.start <= cursor).unwrap_or(0);
+    let spare = rows - fixed - MIN_CONVERSATION_ROWS;
+    let input_rows = input.len().min(INPUT_ROWS_MAX).min(spare);
+    let input_top = cursor_row.saturating_sub(input_rows - 1);
+    let menu_rows = state.menu.len().min(MENU_ROWS_MAX).min(spare - input_rows);
+    let conversation_rows = rows - fixed - menu_rows - input_rows;
+
+    let width = u16::try_from(cols).unwrap_or(u16::MAX);
+    state.viewport.width = width;
+    state.viewport.height = u16::try_from(conversation_rows).unwrap_or(u16::MAX);
+    let mut visible = Vec::new();
+    let mut seen: Option<(EntryId, EntryId)> = None;
+    if let Some(mut pos) = state.viewport.top(state.conversation) {
+        let mut spans = Vec::new();
+        while visible.len() < conversation_rows {
+            let item_rows = state.conversation.item_rows(pos.item, width);
+            let left = u32::try_from(conversation_rows - visible.len()).unwrap_or(u32::MAX);
+            let take = item_rows.saturating_sub(pos.row).min(left);
+            state
+                .conversation
+                .rows_of(pos.item, width, pos.row..pos.row + take, &mut spans);
+            visible.extend(spans.iter().map(|span| (pos.item, *span)));
+            if pos.item != EntryId::DROPPED_NOTICE && take > 0 {
+                seen = Some(seen.map_or((pos.item, pos.item), |(first, _)| (first, pos.item)));
+            }
+            match state.conversation.next_item(pos.item) {
+                Some(next) => pos = Pos { item: next, row: 0 },
+                None => break,
+            }
+        }
+    }
+    let new_below = seen.map_or(0, |(_, last)| state.conversation.unseen_after(last));
+
+    let mut row = 1;
+    if let Some(banner) = banner {
+        out.row(row)?;
+        banner_row(out, banner, cols)?;
+        row += 1;
+    }
+    out.row(row)?;
+    header_row(out, state.header, new_below, cols)?;
+    row += 1;
+    for at in 0..conversation_rows {
+        out.row(row)?;
+        if let Some(&(item, span)) = visible.get(at) {
+            Line::new(out, cols).chars(state.conversation.chars_of(item, span))?;
+        }
+        row += 1;
+    }
+    for line in state.status.iter().take(STATUS_ROWS_MAX) {
+        out.row(row)?;
+        Line::new(out, cols).text(line)?;
+        row += 1;
+    }
+    if state.status.len() > STATUS_ROWS_MAX {
+        out.row(row)?;
+        let more = format!("+{} more", state.status.len() - STATUS_ROWS_MAX);
+        Line::new(out, cols).text(&more)?;
+        row += 1;
+    }
+    for item in state.menu.iter().take(menu_rows) {
+        out.row(row)?;
+        let mut line = Line::new(out, cols);
+        line.text(CONTINUATION)?;
+        line.text(&item.name)?;
+        line.text(CONTINUATION)?;
+        line.text(&item.help)?;
+        row += 1;
+    }
+    let input_first = row;
+    for (i, span) in input.iter().enumerate().skip(input_top).take(input_rows) {
+        out.row(row)?;
+        let mut line = Line::new(out, cols);
+        line.text(if i == 0 { PROMPT } else { CONTINUATION })?;
+        line.text(&text[span.start..span.end])?;
+        row += 1;
+    }
+    if let Some(banner) = banner {
+        out.row(row)?;
+        banner_row(out, banner, cols)?;
+    }
+
+    let span: RowSpan = input[cursor_row];
+    let col = PROMPT.len() + text_width(&text[span.start..cursor.max(span.start)]);
+    out.cup(input_first + cursor_row - input_top, (col + 1).min(cols))?;
+    Ok(Drawn {
+        seen: seen.map(|(first, last)| first..=last),
+        new_below,
+        too_small: false,
+    })
+}
+
+fn header_row(
+    out: &mut Out<'_>,
+    header: &HeaderLine,
+    new_below: u32,
+    cols: usize,
+) -> Result<(), FrameError> {
+    let right = match (new_below, header.right.is_empty()) {
+        (0, _) => header.right.clone(),
+        (n, true) => format!("↓ {n} new"),
+        (n, false) => format!("{} · ↓ {n} new", header.right),
+    };
+    let right_width = text_width(&right);
+    let mut line = Line::new(out, cols);
+    if right_width < cols {
+        let left_room = cols - right_width - 1;
+        line.cols = left_room;
+        line.text(&header.left)?;
+        let used = left_room - line.cols;
+        line.cols = cols - used;
+        line.spaces(cols - used - right_width)?;
+    }
+    line.text(&right)
+}
+
+fn too_small(
+    banner: Option<&BannerSpec>,
+    rows: usize,
+    cols: usize,
+    out: &mut Out<'_>,
+) -> Result<Drawn, FrameError> {
+    let notice = if banner.is_some() { 2 } else { 1 };
+    for row in 1..=rows {
+        out.row(row)?;
+        match banner {
+            Some(banner) if row == 1 || row == rows => banner_row(out, banner, cols)?,
+            _ if row == notice => Line::new(out, cols).text(TOO_SMALL)?,
+            _ => {}
+        }
+    }
+    out.cup(notice, 1)?;
+    Ok(Drawn {
+        too_small: true,
+        ..Drawn::default()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::blocks::EntryKind;
+    use super::super::editor::EditOutcome;
+    use super::*;
+    use maknae_proto::BannerColor;
+    use unicode_width::UnicodeWidthChar;
+
+    #[derive(Debug, PartialEq, Eq, Clone)]
+    struct Term {
+        cells: Vec<Vec<String>>,
+        styles: Vec<Vec<String>>,
+        cursor: (usize, usize),
+    }
+
+    impl Term {
+        fn row(&self, r: usize) -> String {
+            self.cells[r].concat().trim_end().to_string()
+        }
+        fn rows(&self) -> Vec<String> {
+            (0..self.cells.len()).map(|r| self.row(r)).collect()
+        }
+    }
+
+    /// A terminal with autowrap off that accepts only the composer's sequences.
+    fn emulate(bytes: &[u8], rows: usize, cols: usize) -> Term {
+        let text = std::str::from_utf8(bytes).expect("utf-8 frame");
+        let mut t = Term {
+            cells: vec![vec![String::new(); cols]; rows],
+            styles: vec![vec![String::new(); cols]; rows],
+            cursor: (0, 0),
+        };
+        let mut style = String::new();
+        let mut erased = vec![false; rows];
+        let mut chars = text.chars().peekable();
+        let mut last_cell: Option<(usize, usize)> = None;
+        let mut began = false;
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                assert_eq!(chars.next(), Some('['), "foreign escape");
+                let mut seq = String::new();
+                loop {
+                    let n = chars.next().expect("cut sequence");
+                    seq.push(n);
+                    if ('\u{40}'..='\u{7e}').contains(&n) {
+                        break;
+                    }
+                }
+                match seq.as_str() {
+                    "?2026h" => began = true,
+                    "?2026l" => assert!(chars.peek().is_none(), "bytes after the frame"),
+                    "K" => {
+                        let (r, c0) = t.cursor;
+                        for c in c0..cols {
+                            t.cells[r][c].clear();
+                            t.styles[r][c].clear();
+                        }
+                        erased[r] = true;
+                    }
+                    "0m" => style.clear(),
+                    s if s.ends_with('H') => {
+                        let (r, c) = s[..s.len() - 1].split_once(';').unwrap();
+                        let (r, c): (usize, usize) = (r.parse().unwrap(), c.parse().unwrap());
+                        assert!(r >= 1 && r <= rows && c >= 1 && c <= cols, "{s}");
+                        t.cursor = (r - 1, c - 1);
+                        last_cell = None;
+                    }
+                    s if s == "7m"
+                        || s == "30m"
+                        || s == "97m"
+                        || (s.len() == 3 && s.starts_with('4'))
+                        || s.starts_with("48;2;") =>
+                    {
+                        style.push_str(s);
+                        style.push('|');
+                    }
+                    s => panic!("foreign sequence ESC[{s}"),
+                }
+                continue;
+            }
+            assert!(began, "text before synchronized output began");
+            assert!(!c.is_control(), "raw control {c:?}");
+            assert!(!maknae_proto::is_display_unsafe(c), "raw unsafe {c:?}");
+            let w = c.width().unwrap_or(0);
+            let (r, col) = t.cursor;
+            if w == 0 {
+                let (lr, lc) = last_cell.expect("a mark with nothing to attach to");
+                t.cells[lr][lc].push(c);
+                continue;
+            }
+            assert!(col + w <= cols, "wrote past the row: {c:?} at {r},{col}");
+            t.cells[r][col] = c.to_string();
+            t.styles[r][col] = style.clone();
+            for k in 1..w {
+                t.cells[r][col + k] = String::new();
+                t.styles[r][col + k] = style.clone();
+            }
+            last_cell = Some((r, col));
+            t.cursor = (r, (col + w).min(cols - 1));
+        }
+        assert!(erased.iter().all(|e| *e), "a row was never erased");
+        t
+    }
+
+    struct Fixture {
+        banner: Option<BannerSpec>,
+        header: HeaderLine,
+        conv: Conversation,
+        viewport: Viewport,
+        status: Vec<String>,
+        editor: Editor,
+        menu: Vec<MenuItem>,
+    }
+
+    impl Fixture {
+        fn new(banner: Option<BannerSpec>) -> Self {
+            Self {
+                banner,
+                header: HeaderLine {
+                    left: "hobi · connected".into(),
+                    right: "2 reports waiting".into(),
+                },
+                conv: Conversation::new(1 << 20, 4096),
+                viewport: Viewport::new(),
+                status: Vec::new(),
+                editor: Editor::new(256),
+                menu: Vec::new(),
+            }
+        }
+
+        fn frame(&mut self, rows: u16, cols: u16) -> (Vec<u8>, Drawn) {
+            let size = TerminalSize { rows, cols };
+            let mut out = Zeroizing::new(Vec::with_capacity(frame_capacity(size)));
+            let cap = out.capacity();
+            let mut state = ScreenState {
+                banner: self.banner.as_ref(),
+                header: &self.header,
+                conversation: &mut self.conv,
+                viewport: &mut self.viewport,
+                status: &self.status,
+                editor: &self.editor,
+                menu: &self.menu,
+            };
+            let drawn = compose(&mut state, size, &mut out).unwrap();
+            assert_eq!(out.capacity(), cap);
+            if let Some(seen) = drawn.seen.clone() {
+                self.conv.mark_seen(seen);
+            }
+            (out.to_vec(), drawn)
+        }
+
+        fn term(&mut self, rows: u16, cols: u16) -> (Term, Drawn) {
+            let (bytes, drawn) = self.frame(rows, cols);
+            (emulate(&bytes, rows.into(), cols.into()), drawn)
+        }
+
+        fn scroll(&mut self, by: Scroll) {
+            self.viewport.scroll(&mut self.conv, by);
+        }
+    }
+
+    fn banner(text: &str, color: Option<BannerColor>) -> BannerSpec {
+        BannerSpec {
+            text: text.into(),
+            color,
+        }
+    }
+
+    fn centred(text: &str, cols: usize) -> String {
+        let left = (cols - text.chars().count()) / 2;
+        format!("{}{}", " ".repeat(left), text)
+    }
+
+    fn lines(n: usize) -> Fixture {
+        let mut f = Fixture::new(Some(banner("UNCLASSIFIED//TEST", Some(BannerColor::Green))));
+        for i in 0..n {
+            f.conv
+                .push(EntryKind::Report, &format!("line {i}"))
+                .unwrap();
+        }
+        f
+    }
+
+    #[test]
+    fn the_layout_puts_each_region_on_its_rows() {
+        let mut f = lines(30);
+        f.status = vec!["⠋ #1 working 0:42".into()];
+        for c in "hello".chars() {
+            f.editor.apply(&Key::Char(c));
+        }
+        let (t, drawn) = f.term(12, 40);
+        let rows = t.rows();
+        assert_eq!(rows[0], centred("UNCLASSIFIED//TEST", 40));
+        assert_eq!(
+            rows[1],
+            format!(
+                "hobi · connected{}2 reports waiting",
+                " ".repeat(40 - 16 - 17)
+            )
+        );
+        assert_eq!(
+            &rows[2..9],
+            ["line 23", "line 24", "line 25", "line 26", "line 27", "line 28", "line 29"]
+        );
+        assert_eq!(rows[9], "⠋ #1 working 0:42");
+        assert_eq!(rows[10], "> hello");
+        assert_eq!(rows[11], rows[0]);
+        assert_eq!(t.cursor, (10, 7));
+        let first = f.conv.first().unwrap().get();
+        assert_eq!(
+            drawn.seen,
+            Some(EntryId::nth(first + 23)..=EntryId::nth(first + 29))
+        );
+        assert_eq!(drawn.new_below, 0);
+        assert!(!drawn.too_small);
+    }
+
+    #[test]
+    fn a_coloured_banner_fills_its_row_with_contrasting_text_and_none_is_reverse() {
+        for (color, want) in [
+            (Some(BannerColor::Red), "41|97|"),
+            (Some(BannerColor::Yellow), "43|30|"),
+            (Some(BannerColor::Black), "40|97|"),
+            (Some(BannerColor::White), "47|30|"),
+            (
+                Some(BannerColor::Rgb(255, 255, 255)),
+                "48;2;255;255;255|30|",
+            ),
+            (Some(BannerColor::Rgb(0, 0, 128)), "48;2;0;0;128|97|"),
+            (None, "7m|"),
+        ] {
+            let mut f = Fixture::new(Some(banner("CUI", color)));
+            let (t, _) = f.term(10, 20);
+            let want = want.replace('|', "m|").replace("mm|", "m|");
+            for r in [0, 9] {
+                assert!(
+                    t.styles[r].iter().all(|s| *s == want),
+                    "{color:?} {:?}",
+                    t.styles[r]
+                );
+            }
+            assert!(t.styles[1].iter().all(String::is_empty));
+        }
+    }
+
+    #[test]
+    fn banners_are_rows_one_and_n_through_any_scroll() {
+        let mut f = lines(200);
+        let (first, _) = f.term(20, 40);
+        let want = centred("UNCLASSIFIED//TEST", 40);
+        let mut seen_rows = Vec::new();
+        for by in [
+            Scroll::Up(1),
+            Scroll::PageUp,
+            Scroll::Up(57),
+            Scroll::Top,
+            Scroll::Up(3),
+            Scroll::Down(2),
+            Scroll::PageDown,
+            Scroll::Bottom,
+        ] {
+            f.scroll(by);
+            let (t, _) = f.term(20, 40);
+            assert_eq!(t.row(0), want, "{by:?}");
+            assert_eq!(t.row(19), want, "{by:?}");
+            assert_eq!(t.styles[0], first.styles[0]);
+            assert_eq!(t.styles[19], first.styles[19]);
+            seen_rows.push(t.row(2));
+        }
+        assert_eq!(seen_rows[3], "line 0");
+        assert_eq!(seen_rows[4], "line 0");
+        assert_eq!(seen_rows[5], "line 2");
+        assert_eq!(seen_rows[7], first.row(2));
+        assert_ne!(seen_rows[0], first.row(2));
+    }
+
+    #[test]
+    fn hostile_report_text_cannot_move_the_cursor_or_forge_the_banner() {
+        let text = "UNCLASSIFIED//TEST";
+        let mut clean = lines(3);
+        let mut hostile = lines(3);
+        let forged = format!(
+            "\u{1b}[1;1H\u{1b}[2J\u{202e}{text}\u{1b}[0m\u{9b}31m\n{}\n\u{2028}x",
+            centred(text, 40)
+        );
+        hostile.conv.push(EntryKind::Report, &forged).unwrap();
+        let (bytes, _) = hostile.frame(12, 40);
+        let (clean_bytes, _) = clean.frame(12, 40);
+        let t = emulate(&bytes, 12, 40);
+        let c = emulate(&clean_bytes, 12, 40);
+        let esc_count = |b: &[u8]| b.iter().filter(|&&x| x == 0x1b).count();
+        assert_eq!(esc_count(&bytes), esc_count(&clean_bytes));
+        for r in [0, 11] {
+            assert_eq!(t.cells[r], c.cells[r]);
+            assert_eq!(t.styles[r], c.styles[r]);
+        }
+        let shown = t.rows()[2..10].join("");
+        assert!(
+            shown.contains("\\u{001b}[1;1H\\u{001b}[2J\\u{202e}UNCLASSIFIED//TEST"),
+            "{shown}"
+        );
+        assert!(shown.contains("\\u{009b}31m"), "{shown}");
+        assert!(shown.contains("\\u{2028}x"), "{shown}");
+        for r in 2..10 {
+            assert!(t.styles[r].iter().all(String::is_empty), "row {r} styled");
+        }
+    }
+
+    #[test]
+    fn hostile_header_status_and_menu_text_is_escaped_too() {
+        let mut f = lines(1);
+        f.header.left = "\u{1b}[2Jagent".into();
+        f.header.right = "\u{202e}".into();
+        f.status = vec!["\u{1b}]0;title\u{7}".into()];
+        f.menu = vec![MenuItem {
+            name: "/x\u{1b}[H".into(),
+            help: "\r\n".into(),
+        }];
+        f.editor.apply(&Key::Char('\u{1b}'));
+        let (bytes, _) = f.frame(14, 60);
+        let t = emulate(&bytes, 14, 60);
+        let all = t.rows().join("\n");
+        assert!(all.contains("\\u{001b}[2Jagent"));
+        assert!(all.contains("\\u{202e}"));
+        assert!(all.contains("\\u{001b}]0;title\\u{0007}"));
+        assert!(all.contains("/x\\u{001b}[H"));
+        assert!(all.contains("\\u{000d}\\u{000a}"));
+        assert!(all.contains("> \\u{001b}"));
+        assert_eq!(t.cursor, (12, 10));
+    }
+
+    #[test]
+    fn shrinking_below_the_minimum_shows_only_the_notice_and_growing_back_restores() {
+        let mut f = lines(40);
+        f.status = vec!["⠋ #1 working 0:01".into()];
+        let (before, _) = f.frame(12, 40);
+        let (t, drawn) = f.term(7, 40);
+        assert!(drawn.too_small);
+        assert_eq!(drawn.seen, None);
+        let rows = t.rows();
+        assert_eq!(rows[0], centred("UNCLASSIFIED//TEST", 40));
+        assert_eq!(rows[6], rows[0]);
+        assert_eq!(rows.iter().filter(|r| r.contains(TOO_SMALL)).count(), 1);
+        assert!(
+            rows[1..6]
+                .iter()
+                .all(|r| r.is_empty() || r.trim() == TOO_SMALL),
+            "{rows:?}"
+        );
+        let (t, drawn) = f.term(8, 40);
+        assert!(!drawn.too_small);
+        assert_eq!(t.row(2), "line 37");
+        let (t, _) = f.term(2, 40);
+        assert_eq!(t.rows(), [TOO_SMALL.to_string(), String::new()]);
+        let (t, _) = f.term(1, 10);
+        assert_eq!(t.rows(), ["terminal t"]);
+        let (after, _) = f.frame(12, 40);
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn scrolled_up_new_output_shows_a_count_not_a_jump() {
+        let mut f = lines(30);
+        f.term(12, 40);
+        f.scroll(Scroll::Up(5));
+        assert!(!f.viewport.following());
+        let (held, _) = f.term(12, 40);
+        let id = f.conv.push(EntryKind::Report, "fresh").unwrap();
+        f.conv.push(EntryKind::Report, "fresher").unwrap();
+        let (t, drawn) = f.term(12, 40);
+        assert_eq!(t.rows()[2..9], held.rows()[2..9]);
+        assert_eq!(drawn.new_below, 2);
+        assert!(
+            t.row(1).ends_with("2 reports waiting · ↓ 2 new"),
+            "{}",
+            t.row(1)
+        );
+        assert_eq!(f.conv.is_seen(id), Some(false));
+        f.scroll(Scroll::Bottom);
+        let (t, drawn) = f.term(12, 40);
+        assert_eq!(drawn.new_below, 0);
+        assert!(t.row(1).ends_with("2 reports waiting"));
+        assert_eq!(t.row(9), "fresher");
+        f.conv.mark_seen(drawn.seen.unwrap());
+        assert_eq!(f.conv.is_seen(id), Some(true));
+    }
+
+    #[test]
+    fn scrolling_down_to_the_end_resumes_following() {
+        let mut f = lines(30);
+        f.term(12, 40);
+        f.scroll(Scroll::Up(2));
+        f.scroll(Scroll::Down(1));
+        assert!(!f.viewport.following());
+        f.scroll(Scroll::Down(1));
+        assert!(f.viewport.following());
+        f.scroll(Scroll::Down(1));
+        assert!(f.viewport.following());
+        f.scroll(Scroll::Top);
+        assert!(!f.viewport.following());
+        f.scroll(Scroll::Up(4));
+        let (t, _) = f.term(12, 40);
+        assert_eq!(t.row(2), "line 0");
+        let mut short = lines(2);
+        short.term(12, 40);
+        short.scroll(Scroll::Up(1));
+        short.scroll(Scroll::Top);
+        assert!(short.viewport.following());
+    }
+
+    #[test]
+    fn the_scroll_keys_map_to_scrolls_and_others_are_left_alone() {
+        let mut f = lines(60);
+        f.term(12, 40);
+        for key in [Key::Up, Key::PageUp, Key::Home, Key::PageDown, Key::Down] {
+            assert!(f.viewport.key(&mut f.conv, &key), "{key:?}");
+        }
+        assert!(!f.viewport.key(&mut f.conv, &Key::Left));
+        assert!(!f.viewport.key(&mut f.conv, &Key::Char('k')));
+        assert!(!f.viewport.following());
+        let (t, _) = f.term(12, 40);
+        assert_eq!(t.row(2), "line 9");
+        assert!(f.viewport.key(&mut f.conv, &Key::End));
+        assert!(f.viewport.following());
+        f.viewport.key(&mut f.conv, &Key::Home);
+        f.viewport.key(&mut f.conv, &Key::PageDown);
+        let (t, _) = f.term(12, 40);
+        assert_eq!(t.row(2), "line 8");
+    }
+
+    #[test]
+    fn a_banner_wider_than_the_window_shows_too_small_not_a_cut_banner() {
+        let text = "SECRET//NOFORN//THIS-IS-LONG-X";
+        let mut f = Fixture::new(Some(banner(text, Some(BannerColor::Red))));
+        f.conv.push(EntryKind::Report, "report").unwrap();
+        let (t, drawn) = f.term(20, 31);
+        assert!(drawn.too_small);
+        let all = t.rows().join("\n");
+        assert!(all.contains(TOO_SMALL));
+        assert!(!all.contains("SECRET"), "{all}");
+        assert!(!all.contains("report"));
+        assert!(t.styles.iter().flatten().all(String::is_empty));
+        let (t, drawn) = f.term(20, 32);
+        assert!(!drawn.too_small);
+        assert_eq!(t.row(0), format!(" {text}"));
+    }
+
+    #[test]
+    fn no_row_ends_with_a_newline_on_the_last_line() {
+        let mut f = lines(30);
+        f.editor.apply(&Key::Char('x'));
+        for (rows, cols) in [(12, 40), (3, 40), (40, 120), (1, 1)] {
+            let (bytes, _) = f.frame(rows, cols);
+            assert!(!bytes.contains(&b'\n'), "{rows}x{cols}");
+            assert!(!bytes.contains(&b'\r'), "{rows}x{cols}");
+            assert!(bytes.starts_with(b"\x1b[?2026h"));
+            assert!(bytes.ends_with(b"\x1b[?2026l"));
+            let positions = (1..=rows)
+                .filter(|r| {
+                    let cup = format!("\x1b[{r};1H\x1b[K");
+                    bytes.windows(cup.len()).any(|w| w == cup.as_bytes())
+                })
+                .count();
+            assert_eq!(positions, usize::from(rows));
+        }
+    }
+
+    #[test]
+    fn status_lines_stop_at_three_and_count_the_rest() {
+        let mut f = lines(30);
+        f.status = (1..=5).map(|i| format!("#{i} working")).collect();
+        let (t, _) = f.term(16, 40);
+        let rows = t.rows();
+        assert_eq!(
+            &rows[10..14],
+            ["#1 working", "#2 working", "#3 working", "+2 more"]
+        );
+        assert_eq!(rows[14], ">");
+        f.status.truncate(3);
+        let (t, _) = f.term(16, 40);
+        assert_eq!(
+            &t.rows()[11..14],
+            ["#1 working", "#2 working", "#3 working"]
+        );
+    }
+
+    #[test]
+    fn the_input_grows_to_three_rows_and_keeps_the_cursor_in_view() {
+        let mut f = lines(30);
+        for c in "one\ntwo\nthree\nfour".chars() {
+            let key = if c == '\n' { Key::CtrlJ } else { Key::Char(c) };
+            f.editor.apply(&key);
+        }
+        let (t, _) = f.term(14, 40);
+        let rows = t.rows();
+        assert_eq!(&rows[10..13], ["  two", "  three", "  four"]);
+        assert_eq!(t.cursor, (12, 6));
+        for _ in 0..12 {
+            f.editor.apply(&Key::Left);
+        }
+        let (t, _) = f.term(14, 40);
+        assert_eq!(&t.rows()[10..13], ["> one", "  two", "  three"]);
+        assert_eq!(t.cursor, (11, 4));
+        let mut wide = lines(1);
+        for _ in 0..25 {
+            wide.editor.apply(&Key::Char('가'));
+        }
+        let (t, _) = wide.term(12, 20);
+        assert_eq!(
+            &t.rows()[8..11],
+            [
+                "> 가가가가가가가가가",
+                "  가가가가가가가가가",
+                "  가가가가가가가"
+            ]
+        );
+        assert_eq!(t.cursor, (10, 16));
+    }
+
+    #[test]
+    fn the_slash_menu_sits_above_the_input() {
+        let mut f = lines(30);
+        f.menu = ["/stop", "/status"]
+            .iter()
+            .map(|n| MenuItem {
+                name: (*n).into(),
+                help: "do it".into(),
+            })
+            .collect();
+        f.editor.apply(&Key::Char('/'));
+        let (t, _) = f.term(14, 40);
+        let rows = t.rows();
+        assert_eq!(&rows[10..13], ["  /stop  do it", "  /status  do it", "> /"]);
+        f.menu = (0..9)
+            .map(|i| MenuItem {
+                name: format!("/c{i}"),
+                help: String::new(),
+            })
+            .collect();
+        let (t, _) = f.term(20, 40);
+        assert_eq!(t.rows().iter().filter(|r| r.starts_with("  /c")).count(), 5);
+        let (t, _) = f.term(9, 40);
+        assert_eq!(t.rows().iter().filter(|r| r.starts_with("  /c")).count(), 2);
+        let (t, _) = f.term(8, 40);
+        assert_eq!(t.rows().iter().filter(|r| r.starts_with("  /c")).count(), 1);
+    }
+
+    #[test]
+    fn the_dropped_notice_heads_the_conversation_once_output_is_dropped() {
+        let mut f = Fixture::new(None);
+        f.conv = Conversation::new(64 * 3, 64);
+        let a = f.conv.push(EntryKind::Report, &"a".repeat(64)).unwrap();
+        f.conv.mark_seen(a..=a);
+        for i in 0..2 {
+            let id = f
+                .conv
+                .push(EntryKind::Report, &format!("{i}").repeat(64))
+                .unwrap();
+            f.conv.mark_seen(id..=id);
+        }
+        f.conv.push(EntryKind::Report, "new").unwrap();
+        assert!(f.conv.dropped_earlier());
+        f.scroll(Scroll::Top);
+        let (t, drawn) = f.term(30, 80);
+        assert_eq!(t.row(1), crate::screen::blocks::EARLIER_OUTPUT_DROPPED);
+        assert_eq!(t.row(2), "0".repeat(64));
+        assert_eq!(drawn.seen.map(|r| r.start().get()), Some(2));
+    }
+
+    #[test]
+    fn a_wide_character_that_does_not_fit_the_row_is_not_written() {
+        let mut f = Fixture::new(None);
+        f.conv.push(EntryKind::Report, "가").unwrap();
+        f.header = HeaderLine::default();
+        let (t, _) = f.term(6, 1);
+        assert_eq!(t.row(1), "");
+    }
+
+    fn worst_case(rows: u16, cols: u16) -> Fixture {
+        let cell = "𝐀\u{1d167}\u{1d167}\u{1d167}";
+        let mut f = Fixture::new(Some(banner(
+            &"𝐀".repeat(64),
+            Some(BannerColor::Rgb(255, 255, 255)),
+        )));
+        f.conv = Conversation::new(1 << 24, 1 << 16);
+        let line = cell.repeat(usize::from(cols) + 3);
+        for _ in 0..rows {
+            f.conv.push(EntryKind::Report, &line).unwrap();
+        }
+        f.header = HeaderLine {
+            left: line.clone(),
+            right: line.clone(),
+        };
+        f.status = vec![line.clone(); 5];
+        f.menu = vec![
+            MenuItem {
+                name: line.clone(),
+                help: line.clone(),
+            };
+            5
+        ];
+        f.editor = Editor::new(1 << 16);
+        f.editor.apply(&Key::Char('/'));
+        for c in line.chars().take(usize::from(cols) * 12) {
+            assert!(!matches!(f.editor.apply(&Key::Char(c)), EditOutcome::Full));
+        }
+        f
+    }
+
+    #[test]
+    fn the_worst_case_frame_fits_its_capacity_without_growing() {
+        for (rows, cols) in [(40, 200), (12, 80), (11, 66)] {
+            let mut f = worst_case(rows, cols);
+            let (bytes, drawn) = f.frame(rows, cols);
+            assert!(!drawn.too_small);
+            assert!(bytes.len() <= frame_capacity(TerminalSize { rows, cols }));
+            emulate(&bytes, rows.into(), cols.into());
+        }
+    }
+
+    #[test]
+    fn a_buffer_below_the_capacity_is_refused_not_grown() {
+        let mut f = worst_case(12, 80);
+        let size = TerminalSize { rows: 12, cols: 80 };
+        let mut out = Zeroizing::new(Vec::with_capacity(512));
+        let cap = out.capacity();
+        let ptr = out.as_ptr();
+        let mut state = ScreenState {
+            banner: f.banner.as_ref(),
+            header: &f.header,
+            conversation: &mut f.conv,
+            viewport: &mut f.viewport,
+            status: &f.status,
+            editor: &f.editor,
+            menu: &f.menu,
+        };
+        assert_eq!(
+            compose(&mut state, size, &mut out),
+            Err(FrameError::Overflow)
+        );
+        assert_eq!(out.capacity(), cap);
+        assert_eq!(out.as_ptr(), ptr);
+    }
+
+    #[test]
+    fn the_capacity_is_rows_times_cells_and_controls_and_clamps_the_size() {
+        let at = |rows, cols| frame_capacity(TerminalSize { rows, cols });
+        assert_eq!(
+            at(10, 20),
+            10 * (20 * CELL_BYTES + ROW_CONTROL_BYTES) + FRAME_CONTROL_BYTES
+        );
+        assert_eq!(at(u16::MAX, u16::MAX), at(MAX_ROWS, MAX_COLS));
+        assert_eq!(at(0, 0), FRAME_CONTROL_BYTES);
+        let mut f = lines(3);
+        let (big, _) = f.frame(MAX_ROWS + 5, 50);
+        assert!(!big
+            .windows(5)
+            .any(|w| w == format!("[{};", MAX_ROWS + 1).as_bytes()));
+    }
+}
