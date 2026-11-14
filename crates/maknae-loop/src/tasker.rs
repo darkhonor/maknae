@@ -1,7 +1,4 @@
-//! The tasker's verbs: submit, follow up, status, list, stop, drop and collect, plus
-//! the agent list, one connection each. A tasker's calls can fail with the outcome
-//! unknown: the kernel's refusals to a mutating verb are one answer whatever the
-//! cause, and a connection lost after the request was written may have been acted on.
+//! The tasker's verbs and the agent list, one connection each.
 use crate::outcome::SentOutcome;
 use crate::plane::{Dial, Link, PlaneDial};
 use maknae_config::AgentId;
@@ -14,16 +11,8 @@ use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TaskerError {
-    /// `outcome_unknown` is true for every verb that changes a task or reads a report:
-    /// the wire does not say whether the kernel acted before it refused.
-    Refused {
-        outcome_unknown: bool,
-    },
-    /// `after_write` is true when the request had been written, so a mutating verb may have landed.
-    Unreachable {
-        after_write: bool,
-        why: String,
-    },
+    Refused { outcome_unknown: bool },
+    Unreachable { after_write: bool, why: String },
     Protocol(String),
 }
 
@@ -430,6 +419,7 @@ mod tests {
 
     #[tokio::test]
     async fn each_verb_is_sent_as_asked_and_a_wrong_payload_is_a_protocol_error() {
+        let other = TaskRef::from_id(&TaskId([4; 16]));
         let c = client(
             Default::default(),
             vec![
@@ -439,26 +429,151 @@ mod tests {
                 RespResult::Ok(Payload::TaskAcknowledged(view(1))),
                 RespResult::Ok(Payload::TaskState(view(1))),
                 RespResult::Ok(Payload::TaskIdle),
+                RespResult::Ok(Payload::TaskReports(TaskReportPage {
+                    entries: vec![],
+                    next: None,
+                })),
+                RespResult::Ok(Payload::TaskList(TaskPage {
+                    entries: vec![],
+                    next: None,
+                })),
+                agents_page(&[], None, 0, "B"),
             ],
         );
         assert!(c.submit(&agent(), text("ask")).await.is_ok());
         assert!(c.add(&task_ref(), text("more")).await.is_ok());
         assert!(c.stop(&task_ref()).await.is_ok());
-        assert!(c.drop(&task_ref()).await.is_ok());
-        assert!(c.status(&task_ref()).await.is_ok());
+        assert!(c.drop(&other).await.is_ok());
+        assert!(c.status(&other).await.is_ok());
         assert!(matches!(
             c.status(&task_ref()).await,
             Err(TaskerError::Protocol(_))
         ));
+        let after = TaskCursor::from_seq(9);
+        assert!(c.collect(&agent(), Some(after.clone())).await.is_ok());
+        assert!(c.list(&agent()).await.is_ok());
+        assert!(c.agents(Some("a".into())).await.is_ok());
         let seen = c.link.dial_for_test().finish().await;
+        let verbs: Vec<_> = seen.requests.iter().map(|r| r.verb.clone()).collect();
         assert!(matches!(
-            &seen.requests[0].verb,
+            &verbs[0],
             Verb::TaskSubmit { task } if task.agent == "hobi"
                 && matches!(&task.ask, Ask::Prompt { prompt } if prompt.0.as_str() == "ask")
         ));
-        assert!(matches!(&seen.requests[1].verb, Verb::TaskAdd { .. }));
-        assert!(matches!(&seen.requests[2].verb, Verb::TaskStop { .. }));
-        assert!(matches!(&seen.requests[3].verb, Verb::TaskDrop { .. }));
-        assert!(matches!(&seen.requests[4].verb, Verb::TaskStatus { .. }));
+        assert!(matches!(
+            &verbs[1],
+            Verb::TaskAdd { task, text } if *task == task_ref() && text.0.as_str() == "more"
+        ));
+        assert!(matches!(&verbs[2], Verb::TaskStop { task } if *task == task_ref()));
+        assert!(matches!(&verbs[3], Verb::TaskDrop { task } if *task == other));
+        assert!(matches!(&verbs[4], Verb::TaskStatus { task } if *task == other));
+        assert!(matches!(&verbs[5], Verb::TaskStatus { task } if *task == task_ref()));
+        assert!(matches!(
+            &verbs[6],
+            Verb::TaskCollect { agent, after: a } if agent == "hobi" && *a == Some(after.clone())
+        ));
+        assert!(matches!(
+            &verbs[7],
+            Verb::TaskList { agent, after: None } if agent == "hobi"
+        ));
+        assert!(matches!(
+            &verbs[8],
+            Verb::AgentList { after: Some(a) } if a == "a"
+        ));
+    }
+
+    #[tokio::test]
+    async fn every_refusal_says_whether_the_outcome_is_unknown() {
+        async fn refusal<F, Fut, T>(call: F) -> TaskerError
+        where
+            F: FnOnce(TaskerClient<FakeKernel>) -> Fut,
+            Fut: std::future::Future<Output = Result<T, TaskerError>>,
+        {
+            let c = client(Default::default(), vec![refused()]);
+            match call(c).await {
+                Err(e) => e,
+                Ok(_) => panic!("a refusal was answered Ok"),
+            }
+        }
+        let want = |outcome_unknown| TaskerError::Refused { outcome_unknown };
+        let t = task_ref();
+        let a = agent();
+        assert_eq!(
+            refusal(|c| async move { c.submit(&a, text("p")).await }).await,
+            want(true)
+        );
+        let (t1, t2, t3, t4) = (t.clone(), t.clone(), t.clone(), t.clone());
+        assert_eq!(
+            refusal(|c| async move { c.add(&t1, text("p")).await }).await,
+            want(true)
+        );
+        assert_eq!(
+            refusal(|c| async move { c.stop(&t2).await }).await,
+            want(true)
+        );
+        assert_eq!(
+            refusal(|c| async move { c.drop(&t3).await }).await,
+            want(true)
+        );
+        let a = agent();
+        assert_eq!(
+            refusal(|c| async move { c.collect(&a, None).await }).await,
+            want(true)
+        );
+        assert_eq!(
+            refusal(|c| async move { c.status(&t4).await }).await,
+            want(false)
+        );
+        let a = agent();
+        assert_eq!(
+            refusal(|c| async move { c.list(&a).await }).await,
+            want(false)
+        );
+        assert_eq!(
+            refusal(|c| async move { c.agents(None).await }).await,
+            want(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_prompt_too_large_to_encode_fails_before_the_write() {
+        let transport = maknae_config::TransportConfig {
+            prompt_max_bytes: 4096,
+            ..Default::default()
+        };
+        let over = "p".repeat(maknae_proto::prompt_request_cap(4096));
+        let c = client(transport, vec![]);
+        assert!(matches!(
+            c.submit(&agent(), text(&over)).await,
+            Err(TaskerError::Unreachable {
+                after_write: false,
+                ..
+            })
+        ));
+        assert!(c.link.dial_for_test().finish().await.requests.is_empty());
+    }
+
+    struct Stalled;
+    impl Dial for Stalled {
+        type Stream = tokio::io::DuplexStream;
+        async fn dial(&self) -> Result<tokio::io::DuplexStream, maknae_vault::VaultError> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_handshake_that_times_out_fails_before_the_write() {
+        let transport = maknae_config::TransportConfig {
+            handshake_timeout_ms: 20,
+            ..Default::default()
+        };
+        let c = TaskerClient::over(Stalled, transport);
+        match c.status(&task_ref()).await {
+            Err(TaskerError::Unreachable { after_write, why }) => {
+                assert!(!after_write);
+                assert!(why.contains("handshake"), "{why}");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }

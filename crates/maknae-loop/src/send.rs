@@ -84,7 +84,16 @@ fn reply_wait(
         maknae_proto::Verb::AdminBaselineAccept { .. } => {
             maknae_config::BASELINE_ACCEPT_REPLY_STAGES
         }
-        maknae_proto::Verb::TaskClaim { .. } | maknae_proto::Verb::TaskReport { .. } => {
+        maknae_proto::Verb::TaskClaim { .. }
+        | maknae_proto::Verb::TaskReport { .. }
+        | maknae_proto::Verb::TaskSubmit { .. }
+        | maknae_proto::Verb::TaskAdd { .. }
+        | maknae_proto::Verb::TaskStatus { .. }
+        | maknae_proto::Verb::TaskList { .. }
+        | maknae_proto::Verb::TaskStop { .. }
+        | maknae_proto::Verb::TaskDrop { .. }
+        | maknae_proto::Verb::TaskCollect { .. }
+        | maknae_proto::Verb::AgentList { .. } => {
             return class_wait(maknae_proto::FrameClass::Control, transport)
         }
         _ => return class_wait(class_of(verb), transport),
@@ -218,7 +227,6 @@ pub async fn send_verb(
     .await
 }
 
-/// A failed send, and whether the request frame had finished writing when it failed.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct SendFailure {
     pub(crate) after_write: bool,
@@ -583,6 +591,67 @@ mod tests {
             reply_caps(&prompt, &transport).prompt,
             response_caps(&transport).prompt
         );
+    }
+
+    fn tasker_verbs() -> Vec<maknae_proto::Verb> {
+        use maknae_proto::{Ask, Labels, SecretText, TaskId, TaskRef, TaskSubmission, Verb};
+        let task = TaskRef::from_id(&TaskId([3; 16]));
+        let text = || SecretText(zeroize::Zeroizing::new("t".into()));
+        vec![
+            Verb::TaskSubmit {
+                task: TaskSubmission {
+                    schema: maknae_proto::TASK_SCHEMA.into(),
+                    version: maknae_proto::TASK_VERSION,
+                    agent: "hobi".into(),
+                    ask: Ask::Prompt { prompt: text() },
+                    labels: Labels {},
+                },
+            },
+            Verb::TaskAdd {
+                task: task.clone(),
+                text: text(),
+            },
+            Verb::TaskStatus { task: task.clone() },
+            Verb::TaskList {
+                agent: "hobi".into(),
+                after: None,
+            },
+            Verb::TaskStop { task: task.clone() },
+            Verb::TaskDrop { task },
+            Verb::TaskCollect {
+                agent: "hobi".into(),
+                after: None,
+            },
+            Verb::TaskClaim {
+                seen_follow_ups: None,
+            },
+            Verb::TaskReport {
+                text: text(),
+                seen_follow_ups: None,
+            },
+            Verb::AgentList { after: None },
+        ]
+    }
+
+    #[test]
+    fn every_tasker_verb_waits_the_control_reply() {
+        let transport = maknae_config::TransportConfig::default();
+        let control = class_wait(maknae_proto::FrameClass::Control, &transport);
+        for verb in tasker_verbs() {
+            assert_eq!(reply_wait(&verb, &transport), control, "{verb:?}");
+        }
+    }
+
+    #[test]
+    fn every_tasker_verb_is_read_at_the_ceiling_cap() {
+        let transport = maknae_config::TransportConfig {
+            prompt_max_bytes: 4096,
+            ..Default::default()
+        };
+        let ceiling = maknae_proto::prompt_response_cap(maknae_config::PROMPT_MAX_CEILING);
+        for verb in tasker_verbs() {
+            assert_eq!(reply_caps(&verb, &transport).prompt, ceiling, "{verb:?}");
+        }
     }
 
     #[test]
