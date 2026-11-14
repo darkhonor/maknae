@@ -61,6 +61,7 @@ mod page;
 pub mod program;
 mod strategy;
 mod syscall;
+mod term;
 mod walk;
 mod write;
 
@@ -95,6 +96,7 @@ pub use mutation::{
 };
 pub use normalize::normalize;
 pub use page::{read_page, Page, PageNext, PageWindow};
+pub use term::{terminal_size, TerminalSize};
 /// Re-exported as a convenience so consumers need no `zeroize` pin of their own.
 pub use zeroize::Zeroizing;
 

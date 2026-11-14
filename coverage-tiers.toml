@@ -371,6 +371,9 @@ files = [
   # #490: whether a prepared audit trail carries the append-only flag; a false "yes" moves the trail to a file the daemon can rewrite.
   "crates/maknae-sys/src/flags.rs",
   "crates/maknae-sys/src/linux.rs",
+  # #630: the terminal's window size; a wrong answer lays the session's screen out past the terminal.
+  "crates/maknae-sys/src/term.rs",
+  "crates/maknae-io/src/term.rs",
   # The kernel graph's schema and codec (#485): a wrong check loads a forged enforcement state.
   "crates/maknae-graph/src/bytes.rs",
   "crates/maknae-graph/src/format.rs",

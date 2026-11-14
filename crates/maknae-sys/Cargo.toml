@@ -20,7 +20,13 @@ multiple_unsafe_ops_per_block = "forbid"
 # Floor, not an exact pin. 0.2.189 is what Cargo.lock already resolves (via nix and
 # rustix), and its apple/mod.rs was verified to declare every item this crate uses:
 # attrlist, attrgroup_t, ATTR_BIT_MAP_COUNT, ATTR_CMN_OBJTYPE, ATTR_CMN_FULLPATH and
-# getattrlist; its linux_like/mod.rs declares FS_IOC_GETFLAGS and ioctl. It is not
-# the first release that declares them. An `=` pin would hold
+# getattrlist; its linux_like/mod.rs declares FS_IOC_GETFLAGS and ioctl; its unix/mod.rs
+# declares winsize, and new/apple/xnu/sys/ttycom.rs and linux/arch/*/mod.rs declare
+# TIOCGWINSZ. It is not the first release that declares them. An `=` pin would hold
 # every libc user in the workspace at this release and block a libc security fix.
 libc = "0.2.189"
+
+[dev-dependencies]
+# term — openpty, which hands the window-size test a real terminal whose size the test
+# chose. Test-only: the version is the one Cargo.lock already resolves for maknae-io.
+nix = { version = "0.31", default-features = false, features = ["term"] }
