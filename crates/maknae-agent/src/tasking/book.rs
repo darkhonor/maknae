@@ -1641,6 +1641,42 @@ mod tests {
     }
 
     #[test]
+    fn collect_stays_paused_while_a_tall_report_is_only_partly_drawn() {
+        let mut run = Run {
+            book: Book::new("hobi", Standing::Enrolled, false),
+            conv: Conversation::new(3 * 64, 64),
+            now: 0,
+        };
+        let _ = run.op();
+        run.answer(reports(vec![
+            report(1, 1, &"a".repeat(100), None),
+            report(2, 2, &"b".repeat(100), None),
+        ]));
+        let _ = run.op();
+        run.answer(Ok(Answer::Tasks(vec![])));
+        let first = run.conv.first().unwrap();
+        let rows = run.conv.item_rows(first, 10);
+        run.conv.mark_rows(first, 10, 1..rows);
+        run.wait(60_000);
+        assert_eq!(run.texts().len(), 1, "the head was never drawn");
+        assert_eq!(
+            run.book.header().right,
+            "1 report waiting: scroll down to read on"
+        );
+        run.conv.mark_rows(first, 10, 0..1);
+        run.wait(1_000);
+        let texts = run.texts();
+        assert!(
+            texts.last().unwrap().ends_with(&"b".repeat(100)),
+            "{texts:?}"
+        );
+        assert!(
+            matches!(run.op(), Op::Collect { after: Some(a) } if a.seq() == 1),
+            "only the report every row of which was drawn is acknowledged"
+        );
+    }
+
+    #[test]
     fn an_unreachable_kernel_changes_only_the_header_and_resumes() {
         let mut run = Run::new(Standing::Enrolled);
         assert_eq!(run.book.header().left, "hobi · connected");

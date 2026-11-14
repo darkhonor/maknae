@@ -348,9 +348,7 @@ impl<C: Caller> Driver<C> {
         let written = self.session.write(&self.frame);
         self.frame.zeroize();
         written?;
-        for seen in drawn.seen {
-            self.conversation.mark_seen(seen);
-        }
+        drawn.mark(&mut self.conversation);
         self.dirty = false;
         Ok(())
     }

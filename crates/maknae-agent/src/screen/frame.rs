@@ -5,7 +5,7 @@ use super::wrap::{rows_for, RowSpan};
 use super::{HeaderLine, MenuItem};
 use crate::render::{display_piece, DISPLAY_PIECE_MAX};
 use maknae_proto::{BannerColor, BannerSpec, Contrast};
-use std::ops::RangeInclusive;
+use std::ops::{Range, RangeInclusive};
 use unicode_width::UnicodeWidthChar;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -254,10 +254,30 @@ pub struct ScreenState<'a> {
 /// What a frame put on screen, for the caller to act on once it is written.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Drawn {
-    /// The entries with a cell on screen, as runs of consecutive ids.
+    /// The entries with a cell on every one of their rows on screen, as runs of
+    /// consecutive ids.
     pub seen: Vec<RangeInclusive<EntryId>>,
+    /// The rows on screen of each entry only partly on screen.
+    pub rows: Vec<(EntryId, Range<u32>)>,
+    pub width: u16,
     pub new_below: u32,
     pub too_small: bool,
+}
+
+impl Drawn {
+    /// Records in `conv` what this frame showed, once it is written.
+    pub fn mark(&self, conv: &mut Conversation) {
+        if self.width == 0 {
+            return;
+        }
+        conv.drawn_at(self.width);
+        for ids in &self.seen {
+            conv.mark_seen(ids.clone());
+        }
+        for (id, rows) in &self.rows {
+            conv.mark_rows(*id, self.width, rows.clone());
+        }
+    }
 }
 
 /// Composes one frame into `out`, which holds at least
@@ -551,7 +571,11 @@ fn layout(
             state
                 .conversation
                 .rows_of(pos.item, width, pos.row..pos.row + take, &mut spans);
-            visible.extend(spans.iter().map(|span| (pos.item, *span)));
+            visible.extend(
+                (pos.row..)
+                    .zip(&spans)
+                    .map(|(r, span)| (pos.item, r, *span)),
+            );
             match state.conversation.next_item(pos.item) {
                 Some(next) => pos = Pos { item: next, row: 0 },
                 None => break,
@@ -561,7 +585,7 @@ fn layout(
     let new_below = visible
         .iter()
         .rev()
-        .map(|(item, _)| *item)
+        .map(|(item, _, _)| *item)
         .find(|item| *item != EntryId::DROPPED_NOTICE)
         .map_or(0, |last| state.conversation.unseen_after(last));
 
@@ -574,23 +598,32 @@ fn layout(
     out.row(row)?;
     header_row(out, state.header, new_below, cols)?;
     row += 1;
-    let mut seen: Vec<RangeInclusive<EntryId>> = Vec::new();
+    let mut runs: Vec<(EntryId, Range<u32>)> = Vec::new();
     for at in 0..conversation_rows {
         out.row(row)?;
-        if let Some(&(item, span)) = visible.get(at) {
+        if let Some(&(item, item_row, span)) = visible.get(at) {
             let mut line = Line::new(out, cols);
             line.chars(state.conversation.chars_of(item, span))?;
             if item != EntryId::DROPPED_NOTICE && (line.wrote || span.start == span.end) {
-                match seen.last_mut() {
-                    Some(run) if run.end().get() + 1 == item.get() => {
-                        *run = *run.start()..=item;
-                    }
-                    Some(run) if *run.end() == item => {}
-                    _ => seen.push(item..=item),
+                match runs.last_mut() {
+                    Some((id, rows)) if *id == item && rows.end == item_row => rows.end += 1,
+                    _ => runs.push((item, item_row..item_row + 1)),
                 }
             }
         }
         row += 1;
+    }
+    let mut seen: Vec<RangeInclusive<EntryId>> = Vec::new();
+    let mut partly = Vec::new();
+    for (item, rows) in runs {
+        if rows.start > 0 || rows.end < state.conversation.item_rows(item, width) {
+            partly.push((item, rows));
+            continue;
+        }
+        match seen.last_mut() {
+            Some(run) if run.end().get() + 1 == item.get() => *run = *run.start()..=item,
+            _ => seen.push(item..=item),
+        }
     }
     for line in state.status.iter().take(STATUS_ROWS_MAX) {
         out.row(row)?;
@@ -638,6 +671,8 @@ fn layout(
     out.cup(input_first + cursor_row - input_top, (col + 1).min(cols))?;
     Ok(Drawn {
         seen,
+        rows: partly,
+        width,
         new_below,
         too_small: false,
     })
@@ -834,9 +869,7 @@ mod tests {
             };
             let drawn = compose(&mut state, size, &mut out).unwrap();
             assert_eq!(out.capacity(), cap);
-            for seen in drawn.seen.clone() {
-                self.conv.mark_seen(seen);
-            }
+            drawn.mark(&mut self.conv);
             (out.to_vec(), drawn)
         }
 
@@ -1497,5 +1530,72 @@ mod tests {
         assert_eq!(drawn.seen, [a..=a, b..=empty]);
         assert_eq!(f.conv.is_seen(wide), Some(false));
         assert_eq!(f.conv.is_seen(b), Some(true));
+    }
+
+    fn tall() -> (Fixture, EntryId) {
+        let mut f = lines(0);
+        let text = (0..40)
+            .map(|i| format!("r{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let id = f.conv.push(EntryKind::Report, &text).unwrap();
+        (f, id)
+    }
+
+    #[test]
+    fn a_report_taller_than_the_screen_is_seen_only_once_every_row_was_drawn() {
+        let (mut f, id) = tall();
+        let (t, drawn) = f.term(12, 40);
+        assert!(t.rows().iter().any(|r| r == "r39"), "{:?}", t.rows());
+        assert!(drawn.seen.is_empty(), "{drawn:?}");
+        assert_eq!(f.conv.is_seen(id), Some(false), "only its tail was drawn");
+        let mut pages = 0;
+        while f.conv.is_seen(id) == Some(false) && pages < 20 {
+            f.scroll(Scroll::PageUp);
+            f.term(12, 40);
+            pages += 1;
+        }
+        assert_eq!(f.conv.is_seen(id), Some(true));
+        assert!(pages > 1, "{pages}");
+        f.scroll(Scroll::Bottom);
+        f.term(12, 40);
+        f.term(12, 30);
+        assert_eq!(f.conv.is_seen(id), Some(true), "seen is for good");
+    }
+
+    #[test]
+    fn rows_skipped_by_a_jump_leave_a_tall_report_unseen() {
+        for jump in [Scroll::Top, Scroll::Up(20)] {
+            let (mut f, id) = tall();
+            f.term(12, 40);
+            f.scroll(jump);
+            let (t, _) = f.term(12, 40);
+            assert!(t.rows().iter().all(|r| r != "r39"));
+            assert_eq!(f.conv.is_seen(id), Some(false), "{jump:?}");
+        }
+    }
+
+    #[test]
+    fn a_resize_mid_way_forgets_the_rows_drawn_at_the_old_width() {
+        let (mut f, id) = tall();
+        f.term(12, 40);
+        f.scroll(Scroll::PageUp);
+        f.term(12, 40);
+        f.scroll(Scroll::PageUp);
+        f.term(12, 39);
+        for _ in 0..20 {
+            f.scroll(Scroll::PageUp);
+            f.term(12, 39);
+        }
+        assert_eq!(
+            f.conv.is_seen(id),
+            Some(false),
+            "the tail was drawn only at the old width"
+        );
+        for _ in 0..20 {
+            f.scroll(Scroll::PageDown);
+            f.term(12, 39);
+        }
+        assert_eq!(f.conv.is_seen(id), Some(true));
     }
 }

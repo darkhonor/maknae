@@ -91,6 +91,8 @@ struct Entry {
     offset: usize,
     len: usize,
     seen: bool,
+    /// The rows drawn so far at `Conversation::drawn_width`, while not yet seen.
+    drawn: Option<Range<u32>>,
     index: Option<WrapIndex>,
 }
 
@@ -104,6 +106,7 @@ pub struct Conversation {
     entries: VecDeque<Entry>,
     next_id: u64,
     dropped: bool,
+    drawn_width: u16,
 }
 
 impl std::fmt::Debug for Conversation {
@@ -129,6 +132,7 @@ impl Conversation {
             entries: VecDeque::new(),
             next_id: 1,
             dropped: false,
+            drawn_width: 0,
         }
     }
 
@@ -168,6 +172,7 @@ impl Conversation {
             offset,
             len,
             seen: false,
+            drawn: None,
             index: None,
         });
         Ok(id)
@@ -190,6 +195,42 @@ impl Conversation {
                 Some(entry) => entry.seen = true,
                 None => return,
             }
+        }
+    }
+
+    /// Forgets the rows drawn of every entry not yet seen when `width` is not the
+    /// width they were drawn at.
+    pub fn drawn_at(&mut self, width: u16) {
+        if width != self.drawn_width {
+            self.drawn_width = width;
+            for entry in &mut self.entries {
+                entry.drawn = None;
+            }
+        }
+    }
+
+    /// Rows `rows` of `id` were drawn at `width`. The entry is seen once the rows
+    /// drawn, joined while each new run overlaps or touches them, cover all of it.
+    pub fn mark_rows(&mut self, id: EntryId, width: u16, rows: Range<u32>) {
+        self.drawn_at(width);
+        if rows.is_empty() || self.is_seen(id) != Some(false) {
+            return;
+        }
+        let total = self.item_rows(id, width);
+        let Some(entry) = self.entry_mut(id) else {
+            return;
+        };
+        let drawn = match entry.drawn.take() {
+            Some(d) if rows.start <= d.end && d.start <= rows.end => {
+                d.start.min(rows.start)..d.end.max(rows.end)
+            }
+            Some(d) => d,
+            None => rows,
+        };
+        if drawn.start == 0 && drawn.end >= total {
+            entry.seen = true;
+        } else {
+            entry.drawn = Some(drawn);
         }
     }
 
@@ -315,6 +356,12 @@ impl Conversation {
         let first = self.entries.front()?.id.0;
         self.entries
             .get(usize::try_from(id.0.checked_sub(first)?).ok()?)
+    }
+
+    fn entry_mut(&mut self, id: EntryId) -> Option<&mut Entry> {
+        let first = self.entries.front()?.id.0;
+        self.entries
+            .get_mut(usize::try_from(id.0.checked_sub(first)?).ok()?)
     }
 
     /// The first row source: the dropped notice once output was dropped, else the oldest entry.
