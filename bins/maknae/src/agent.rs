@@ -10,7 +10,7 @@ use maknae_loop::keys::{sealed_choice, ChoiceFault, KeySupply, KeyTarget};
 use maknae_loop::plane::LoopPlane;
 use maknae_proto::ProviderChoice;
 use maknae_seal::SealPublicKey;
-use maknae_vault::{PlaneClient, UserToken, VaultApi, VaultError, WrappedSecret};
+use maknae_vault::{UserToken, VaultApi, VaultError, WrappedSecret};
 use std::future::Future;
 use std::io::Write;
 use std::path::Path;
@@ -540,13 +540,7 @@ where
 }
 
 pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
-    maknae_crypto::init().map_err(|e| maknae_vault::crypto_refusal_message(&e))?;
-    let dir = crate::cli::resolve_config_dir();
-    let document = maknae_config::load_config(&dir, &crate::cli::cli_config_specs())
-        .map_err(|e| e.to_string())?;
-    let transport =
-        maknae_config::transport_from_section(document.section(maknae_config::TRANSPORT_SECTION))
-            .map_err(|e| e.to_string())?;
+    let (dir, document, transport) = crate::cli::cli_config()?;
     let agent = agent_from_section(document.section(AGENT_SECTION))?;
     let vault = maknae_vault::vault_config_from_document(&document).map_err(|e| e.to_string())?;
     let (kv_mount, user_prefix) =
@@ -570,11 +564,8 @@ pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
     // One snapshot per session: `~` cannot change meaning for this process (#596).
     let home = snapshot_home(HOME_SNAPSHOT_TIMEOUT, maknae_io::session_home).await;
     let sensitive = personal_sensitive(&dir, home.as_deref(), &cwd)?;
-    let client = PlaneClient::for_user(&document, &dir, token_copy(&session.token)?)
-        .map_err(|e| e.to_string())?;
-    let ca = maknae_vault::load_ca_pin(&dir).map_err(|e| e.to_string())?;
-    let trust = maknae_vault::TrustBundle::from_pins(&[&ca]).map_err(|e| e.to_string())?;
-    client.mint().await.map_err(|e| e.to_string())?;
+    let (client, trust) =
+        crate::cli::minted_plane(&document, &dir, token_copy(&session.token)?).await?;
     let keys = UserLoginKeys {
         api: session.api,
         token: session.token,

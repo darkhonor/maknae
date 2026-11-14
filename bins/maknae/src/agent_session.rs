@@ -207,19 +207,10 @@ struct Plane {
 }
 
 async fn connect() -> Result<Plane, String> {
-    maknae_crypto::init().map_err(|e| maknae_vault::crypto_refusal_message(&e))?;
-    let dir = crate::cli::resolve_config_dir();
-    let document = maknae_config::load_config(&dir, &crate::cli::cli_config_specs())
-        .map_err(|e| e.to_string())?;
-    let transport =
-        maknae_config::transport_from_section(document.section(maknae_config::TRANSPORT_SECTION))
-            .map_err(|e| e.to_string())?;
+    let (dir, document, transport) = crate::cli::cli_config()?;
     let session = crate::login::user_session(&document, &dir)?;
-    let client =
-        Arc::new(PlaneClient::for_user(&document, &dir, session.token).map_err(|e| e.to_string())?);
-    let ca = maknae_vault::load_ca_pin(&dir).map_err(|e| e.to_string())?;
-    let trust = maknae_vault::TrustBundle::from_pins(&[&ca]).map_err(|e| e.to_string())?;
-    client.mint().await.map_err(|e| e.to_string())?;
+    let (client, trust) = crate::cli::minted_plane(&document, &dir, session.token).await?;
+    let client = Arc::new(client);
     let input_cap = transport.prompt_max_bytes;
     Ok(Plane {
         tasker: TaskerClient::new(transport, Arc::clone(&client), trust),

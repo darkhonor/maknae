@@ -22,12 +22,14 @@
 
 use crate::stderr::errln;
 use clap::{Parser, Subcommand};
-use maknae_config::{load_config, transport_from_section, SectionSpec, TRANSPORT_SECTION};
+use maknae_config::{
+    load_config, transport_from_section, Document, SectionSpec, TransportConfig, TRANSPORT_SECTION,
+};
 use maknae_loop::outcome::SentOutcome;
 use maknae_loop::send::send_verb;
 use maknae_proto::Payload;
 use maknae_vault::{load_ca_pin, PlaneClient, VAULT_SECTION};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 /// The `MAKNAE_CONFIG_DIR` env var name (overrides the `$HOME/.maknae` default).
@@ -524,7 +526,9 @@ fn absolute_path(path: PathBuf) -> Result<String, String> {
 /// verb response, `Ok(false)` when the daemon returned a `ProtoError` (already
 /// printed to stderr — the caller maps this to a non-zero exit), `Err` for any
 /// earlier (config/mint/connect/frame) failure.
-async fn execute(verb: Verb) -> Result<bool, String> {
+/// The CLI's configuration, read once: the FIPS provider installed, then the
+/// document and its transport section.
+pub(crate) fn cli_config() -> Result<(PathBuf, Document, TransportConfig), String> {
     // Install the aws-lc-rs FIPS provider as the process default BEFORE any operation
     // that asserts FIPS (`PlaneClient::for_user` → `mint()` assert `.fips()`). The
     // daemon does the identical install-then-assert in `run_inner`; the CLI is a separate
@@ -545,6 +549,24 @@ async fn execute(verb: Verb) -> Result<bool, String> {
     let document = load_config(&dir, &cli_config_specs()).map_err(|e| e.to_string())?;
     let transport =
         transport_from_section(document.section(TRANSPORT_SECTION)).map_err(|e| e.to_string())?;
+    Ok((dir, document, transport))
+}
+
+/// The user's plane client, minted, and the trust bundle its connections pin.
+pub(crate) async fn minted_plane(
+    document: &Document,
+    dir: &Path,
+    token: maknae_vault::UserToken,
+) -> Result<(PlaneClient, std::sync::Arc<maknae_vault::TrustBundle>), String> {
+    let client = PlaneClient::for_user(document, dir, token).map_err(|e| e.to_string())?;
+    let ca = load_ca_pin(dir).map_err(|e| e.to_string())?;
+    let trust = maknae_vault::TrustBundle::from_pins(&[&ca]).map_err(|e| e.to_string())?;
+    client.mint().await.map_err(|e| e.to_string())?;
+    Ok((client, trust))
+}
+
+async fn execute(verb: Verb) -> Result<bool, String> {
+    let (dir, document, transport) = cli_config()?;
 
     let session = crate::login::user_session(&document, &dir)?;
     let (request, content) = request_from_input(
@@ -553,11 +575,7 @@ async fn execute(verb: Verb) -> Result<bool, String> {
         &mut std::io::stdin().lock(),
     )?;
 
-    let client =
-        PlaneClient::for_user(&document, &dir, session.token).map_err(|e| e.to_string())?;
-    let ca = load_ca_pin(&dir).map_err(|e| e.to_string())?;
-    let trust = maknae_vault::TrustBundle::from_pins(&[&ca]).map_err(|e| e.to_string())?;
-    client.mint().await.map_err(|e| e.to_string())?;
+    let (client, trust) = minted_plane(&document, &dir, session.token).await?;
     let outcome = round_trip(verb, request, content, &transport, &client, &trust).await;
     if let Err(e) = client.shutdown().await {
         crate::stderr::line(&mut std::io::stderr(), format_args!("maknae-vault: {e}"));
