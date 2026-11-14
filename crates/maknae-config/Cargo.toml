@@ -21,6 +21,7 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 # itself (`BasicPolicy`) lives HERE because it is the config's default
 # vocabulary; the seam is policy-agnostic and depends on nothing of ours.
 maknae-security = { path = "../maknae-security" }
+# The banner's wire types and their checks (`BannerSpec`, `check_banner`), one definition (#630).
 maknae-proto = { path = "../maknae-proto" }
 icu_normalizer = { version = "2.4.0", default-features = false, features = ["compiled_data"] }
 icu_casemap = { version = "2.4.0", default-features = false, features = ["compiled_data"] }

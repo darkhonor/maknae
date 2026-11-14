@@ -318,7 +318,7 @@ mod tests {
         }
 
         #[test]
-        fn a_file_not_owned_by_the_required_owner_refuses() {
+        fn a_directory_not_owned_by_the_required_owner_refuses() {
             let d = dir("owner");
             let file = d.join(BANNER_FILE);
             std::fs::write(&file, "text: x\n").unwrap();
