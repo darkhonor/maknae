@@ -374,6 +374,11 @@ files = [
   "crates/maknae-agent/src/screen/blocks.rs",
   "crates/maknae-agent/src/screen/wrap.rs",
   "crates/maknae-agent/src/screen/frame.rs",
+  # #630: the agent session's task book. A bare /stop that reaches a reported task stops the wrong one; an acknowledgement sent before its report is drawn removes a report nobody saw; a close read from report text lets an agent forge "stopped".
+  "crates/maknae-agent/src/tasking/mod.rs",
+  "crates/maknae-agent/src/tasking/book.rs",
+  "crates/maknae-agent/src/tasking/commands.rs",
+  "crates/maknae-agent/src/tasking/text.rs",
   "crates/maknae-sys/src/reply.rs",
   "crates/maknae-sys/src/macos.rs",
   # #490: whether a prepared audit trail carries the append-only flag; a false "yes" moves the trail to a file the daemon can rewrite.
@@ -839,6 +844,10 @@ why = "#630: the session screen's terminal I/O — raw mode over tty.rs's Restor
 [[t3]]
 path = "bins/maknae/src/screen/run.rs"
 why = "#630: the session screen's run loop — stdin bytes through the fixed read buffer into maknae-agent::screen's key decoder, editor and frame composer (T1), ticks, the caller's events and signals, one write per changed frame. Proven on a real pseudo-terminal: CR and LF through the real line discipline, SIGWINCH redraws at the new size, an idle or unchanged loop writes nothing, SIGTERM, SIGHUP, SIGINT, SIGQUIT and a hang-up restore, a panic on another thread ends the session restored, and in child processes Ctrl-Z and an outside SIGTSTP stop a job with the terminal restored, SIGCONT re-enters raw mode and redraws (also after an outside SIGSTOP), and Ctrl-Z in an orphaned group does not stop."
+
+[[t3]]
+path = "bins/maknae/src/agent_session.rs"
+why = "#630: maknae agent list and maknae agent <name> wired to the kernel: the CLI's plane client and leaf, one tasker verb in flight at a time, the full-screen driver or the plain-line loop, and the exit status. Every decision it feeds is T1 in maknae-agent::tasking (the book, the command parser, the text). Tested with a fake tasker and leaf: a name off the list is refused with nothing submitted, an invalid banner opens no session, a leaf within 60 s of its NotAfter is reminted and an expired login is said as such, the plain session exits once its requests are acknowledged and with --wait once its reports are shown and acknowledged, and on a real pseudo-terminal a request is submitted and /bye leaves."
 
 [[t3]]
 path = "bins/maknae/src/screen/plain.rs"

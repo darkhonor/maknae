@@ -19,6 +19,7 @@ pub mod screen;
 pub mod session;
 pub mod task;
 pub mod task_driver;
+pub mod tasking;
 #[cfg(test)]
 mod testutil;
 pub mod transcript;

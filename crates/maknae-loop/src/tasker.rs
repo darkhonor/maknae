@@ -114,18 +114,26 @@ impl<D: Dial> TaskerClient<D> {
         }
     }
 
+    pub async fn list_page(
+        &self,
+        agent: &AgentId,
+        after: Option<TaskCursor>,
+    ) -> Result<TaskPage, TaskerError> {
+        let verb = Verb::TaskList {
+            agent: agent.as_str().into(),
+            after,
+        };
+        match self.call(verb, false).await? {
+            Payload::TaskList(page) => Ok(page),
+            other => Err(unexpected("task.list", &other)),
+        }
+    }
+
     pub async fn list(&self, agent: &AgentId) -> Result<Vec<TaskView>, TaskerError> {
         let mut all = Vec::new();
         let mut after = None;
         loop {
-            let verb = Verb::TaskList {
-                agent: agent.as_str().into(),
-                after: after.clone(),
-            };
-            let TaskPage { entries, next } = match self.call(verb, false).await? {
-                Payload::TaskList(page) => page,
-                other => return Err(unexpected("task.list", &other)),
-            };
+            let TaskPage { entries, next } = self.list_page(agent, after.clone()).await?;
             all.extend(entries);
             match next {
                 Some(next) if after.as_ref() == Some(&next) => {

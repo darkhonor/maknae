@@ -72,7 +72,7 @@ pub use agents::{
     AccountRefusal, AgentClientConfig, AgentEnrollment, AgentId, AgentPolicy, AgentProvider,
     AgentRole, AgentsLoad, HostAccounts, InvalidAgentId, PersonaMode, SkippedAgentEntry, TaskerRef,
     AGENTS_DIR, AGENT_CLIENT_FILE, AGENT_ENTITY_PREFIX, ENROLLMENT_FILE, NON_LOGIN_SHELLS,
-    PERSONA_FILE, POLICY_FILE,
+    PERSONA_FILE, POLICY_FILE, RESERVED_AGENT_IDS,
 };
 pub use audit_cfg::{
     audit_from_section, resolve_readers, AuditConfig, ReaderAccount, ReaderLookup, AUDIT_SECTION,

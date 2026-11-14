@@ -4,13 +4,13 @@
 #![cfg_attr(not(test), deny(clippy::print_stderr))]
 
 mod agent;
+mod agent_session;
 mod audit_readers;
 mod cli;
 mod enroll;
 mod login;
 mod policy_sync;
 mod reseed;
-#[allow(dead_code, reason = "#630: the agent session drives it")]
 mod screen;
 mod stderr;
 mod tty;

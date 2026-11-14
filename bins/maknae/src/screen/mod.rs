@@ -79,10 +79,6 @@ pub(crate) mod testing {
             }
             self.seen.len() - start
         }
-
-        pub(crate) fn since_last_match(&self) -> &[u8] {
-            &self.seen[self.at..]
-        }
     }
 
     pub(crate) struct Pty {
