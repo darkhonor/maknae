@@ -317,7 +317,7 @@ pub(crate) fn label(standing: Option<AgentStanding>) -> &'static str {
 }
 
 /// Adds the agent to `page`; an undecided agent the caller holds nothing with is only
-/// counted, so no caller learns a name from a decision that failed.
+/// counted.
 pub(crate) fn place(
     page: &mut AgentPage,
     agent: &AgentId,

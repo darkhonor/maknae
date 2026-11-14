@@ -695,6 +695,66 @@ async fn an_invalid_after_is_a_bad_request() {
 }
 
 #[tokio::test]
+async fn a_cursor_naming_an_agent_the_caller_may_not_task_is_refused() {
+    let w = world("cursor-refused", &hobi_and_jin());
+    for after in ["jin", "zzz"] {
+        let records = Records::new(0);
+        let got = w.ask_with(list(Some(after)), &records).await;
+        assert!(
+            matches!(&got, RespResult::Err(e) if e.code == ProtoErrCode::Unauthorized),
+            "{after}: {got:?}"
+        );
+        assert_eq!(
+            reasons(&records),
+            ["deny the cursor names no agent the caller is shown"],
+            "{after}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_cursor_naming_a_held_agent_is_accepted() {
+    let w = world("cursor-held", &hobi_and_jin());
+    w.mine("hobi", HOBI_UID);
+    w.agent_policy("hobi", "schema_version: 1\ntaskers: []\n");
+    let page = w.list(Some("hobi")).await;
+    assert!(page.entries.is_empty(), "{page:?}");
+    assert_eq!((page.next, page.undecided), (None, 0));
+}
+
+#[tokio::test]
+async fn a_refused_collect_leaves_withdrawn_and_removed_candidates_out() {
+    let w = world("collect-refused", &hobi_and_jin());
+    let held = w.mine("hobi", HOBI_UID);
+    w.report(&held, "r");
+    let gone = w.mine("rm", 14_000);
+    w.report(&gone, "r");
+    assert_eq!(
+        w.list(None).await.entries,
+        [
+            entry("hobi", AgentStanding::Enrolled, 1),
+            entry("rm", AgentStanding::Removed, 1)
+        ]
+    );
+    common::write_0640(
+        &maknae_authz_basic::PolicyPaths::in_dir(&w.root).authz,
+        PLAIN,
+    );
+    w.reload();
+    assert!(
+        unauthorized(&w.ask(collect("hobi", None)).await),
+        "the collect decision is refused"
+    );
+    let page = w.list(None).await;
+    assert!(page.entries.is_empty(), "{page:?}");
+    assert_eq!(page.undecided, 0);
+}
+
+fn unauthorized(r: &RespResult) -> bool {
+    matches!(r, RespResult::Err(e) if e.code == ProtoErrCode::Unauthorized)
+}
+
+#[tokio::test]
 async fn the_banner_rides_every_page() {
     let w = world("banner", &hobi_and_jin());
     let spec = BannerSpec {
@@ -702,7 +762,7 @@ async fn the_banner_rides_every_page() {
         color: None,
     };
     *w.agents.banner.write().unwrap() = Some(spec.clone());
-    for after in [None, Some("hobi"), Some("zzz")] {
+    for after in [None, Some("hobi")] {
         assert_eq!(w.list(after).await.banner, Some(spec.clone()), "{after:?}");
     }
 }

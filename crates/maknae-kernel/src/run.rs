@@ -3358,13 +3358,14 @@ async fn serve_task_verb<S, E, P>(
         let after = match after.map(maknae_config::AgentId::parse).transpose() {
             Ok(after) => after,
             Err(_) => {
+                let rec = refuse("the cursor is not an agent id");
                 trail
-                    .unauthorized(stream, &refuse("the cursor is not an agent id"))
+                    .refuse(stream, &rec, ProtoErrCode::BadRequest, "invalid request")
                     .await;
                 return;
             }
         };
-        let (mut page, said) = agent_page(
+        let listed = agent_page(
             authorizer,
             &tasks.agents.view,
             store,
@@ -3374,6 +3375,13 @@ async fn serve_task_verb<S, E, P>(
             timeout,
         )
         .await;
+        let (mut page, said) = match listed {
+            Ok(listed) => listed,
+            Err(why) => {
+                trail.unauthorized(stream, &refuse(why)).await;
+                return;
+            }
+        };
         page.banner = tasks
             .agents
             .banner
@@ -3989,7 +3997,8 @@ async fn authority<P: Authorizer + Send + Sync + 'static>(
 }
 
 /// The agents person `uid` may task, or still holds tasks or reports with, after `after`,
-/// under one deadline of `timeout`; and each agent's outcome, for the trail.
+/// under one deadline of `timeout`; and each agent's outcome, for the trail. `after` must
+/// name an agent the caller holds tasks with or may task, or the page is refused.
 async fn agent_page<P: Authorizer + Send + Sync + 'static>(
     authorizer: &Arc<P>,
     view: &Arc<dyn crate::enrollment::EnrollmentView>,
@@ -3998,10 +4007,18 @@ async fn agent_page<P: Authorizer + Send + Sync + 'static>(
     after: Option<&maknae_config::AgentId>,
     lane: maknae_security::Lane,
     timeout: Duration,
-) -> (maknae_proto::AgentPage, Vec<String>) {
+) -> Result<(maknae_proto::AgentPage, Vec<String>), &'static str> {
     use crate::task_verbs as tv;
     let deadline = tokio::time::Instant::now() + timeout;
     let holdings = store.holdings(&maknae_proto::Tasker::Uid(uid));
+    if let Some(after) = after {
+        if !holdings.contains_key(after)
+            && decide_by(authorizer, uid, after, true, lane, deadline).await
+                != tv::Authority::Permit
+        {
+            return Err("the cursor names no agent the caller is shown");
+        }
+    }
     let enrolled: std::collections::BTreeMap<maknae_config::AgentId, u32> =
         view.agents().into_iter().collect();
     let mut candidates: std::collections::BTreeSet<&maknae_config::AgentId> =
@@ -4044,7 +4061,7 @@ async fn agent_page<P: Authorizer + Send + Sync + 'static>(
             break;
         }
     }
-    (page, said)
+    Ok((page, said))
 }
 
 /// A submit or collect decision for one agent of a list, in the time left before `deadline`.
@@ -13791,7 +13808,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         }
     }
 
-    /// Reads `banner.yaml` as the production loader does, from a directory the test owns.
+    /// Reads `banner.yaml` from a directory the test owns.
     pub(super) fn owned_banner(
         path: &Path,
     ) -> Result<Option<maknae_proto::BannerSpec>, maknae_config::ConfigError> {
@@ -15282,6 +15299,13 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             "{m}"
         );
         assert_eq!(refusal_exit_code(e), 1);
+        let recs = trail_of(&d, "audit.jsonl");
+        let last = recs.last().expect("the refusal is recorded");
+        assert_eq!(
+            (last.action.as_str(), last.outcome.result.as_str()),
+            ("start", "deny")
+        );
+        assert_eq!(&last.outcome.reason, m);
     }
 
     #[test]
@@ -24476,7 +24500,8 @@ mod task_sweep_tests {
             maknae_security::Lane::Local,
             Duration::from_millis(20),
         )
-        .await;
+        .await
+        .unwrap();
         assert_eq!(
             page.entries,
             [maknae_proto::AgentEntry {
@@ -24505,9 +24530,96 @@ mod task_sweep_tests {
             maknae_security::Lane::Local,
             Duration::from_secs(5),
         )
-        .await;
+        .await
+        .unwrap();
         assert!(page.entries.is_empty(), "{page:?}");
         assert_eq!((page.undecided, page.next), (2, None));
+    }
+
+    fn enrolled(names: &[&str]) -> Arc<dyn crate::enrollment::EnrollmentView> {
+        Arc::new(FixedEnrollment(
+            names
+                .iter()
+                .zip(2001..)
+                .map(|(a, u)| (maknae_config::AgentId::parse(a).unwrap(), u))
+                .collect(),
+        ))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn one_deadline_bounds_the_whole_list() {
+        let (_blobs, _clock, store) = mem(1_000);
+        let refuse = maknae_security::Verdict::Deny {
+            reason: "no".into(),
+        };
+        let (_, said) = agent_page(
+            &Arc::new(Says(refuse, Duration::from_millis(30))),
+            &enrolled(&["a", "b", "c"]),
+            &store,
+            1000,
+            None,
+            maknae_security::Lane::Local,
+            Duration::from_millis(50),
+        )
+        .await
+        .unwrap();
+        assert_eq!(said, ["a:refused", "b:undecided", "c:undecided"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_undecided_cursor_is_refused_not_served() {
+        let (_blobs, _clock, store) = mem(1_000);
+        queued(&store, "jin", Tasker::Uid(1000));
+        let page = |after: &'static str| {
+            let store = Arc::clone(&store);
+            async move {
+                agent_page(
+                    &Arc::new(Says(
+                        maknae_security::Verdict::Indeterminate,
+                        Duration::ZERO,
+                    )),
+                    &hobi_and_jin(),
+                    &store,
+                    1000,
+                    Some(&maknae_config::AgentId::parse(after).unwrap()),
+                    maknae_security::Lane::Local,
+                    Duration::from_secs(5),
+                )
+                .await
+                .map(|(page, _)| page)
+            }
+        };
+        assert_eq!(
+            page("hobi").await,
+            Err("the cursor names no agent the caller is shown")
+        );
+        assert!(page("jin").await.is_ok(), "a held agent is a cursor");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_guest_cannot_bisect_undecided_counts_by_cursor() {
+        let (_blobs, _clock, store) = mem(1_000);
+        let view = enrolled(&["b", "hobi", "jin", "s"]);
+        for after in ["a", "b", "hobi", "i", "jin", "zzz"] {
+            let got = agent_page(
+                &Arc::new(Says(
+                    maknae_security::Verdict::Indeterminate,
+                    Duration::ZERO,
+                )),
+                &view,
+                &store,
+                1000,
+                Some(&maknae_config::AgentId::parse(after).unwrap()),
+                maknae_security::Lane::Local,
+                Duration::from_secs(5),
+            )
+            .await;
+            assert_eq!(
+                got,
+                Err("the cursor names no agent the caller is shown"),
+                "{after}"
+            );
+        }
     }
 
     /// A view whose load is replaced once `swapped` is set; the new load does not resolve
