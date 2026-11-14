@@ -2,7 +2,7 @@ use maknae_vault::{Password, PasswordFeed, PasswordLine, VaultError};
 use nix::errno::Errno;
 use nix::sys::signal::{SigSet, SigmaskHow, Signal};
 use nix::sys::termios::{
-    tcgetattr, tcsetattr, LocalFlags, SetArg, SpecialCharacterIndices, Termios,
+    tcgetattr, tcsetattr, InputFlags, LocalFlags, SetArg, SpecialCharacterIndices, Termios,
 };
 use std::io::{IsTerminal, Write};
 use std::os::fd::{AsFd, BorrowedFd};
@@ -49,16 +49,28 @@ impl std::fmt::Display for PromptError {
     }
 }
 
-struct Restore<'a> {
-    fd: BorrowedFd<'a>,
+/// Puts `saved` back on the terminal when dropped, and on demand.
+pub(crate) struct Restore<F: AsFd> {
+    fd: F,
     saved: Termios,
 }
 
-impl Drop for Restore<'_> {
-    fn drop(&mut self) {
-        if tcsetattr(self.fd, SetArg::TCSAFLUSH, &self.saved) == Err(Errno::EINTR) {
-            let _ = tcsetattr(self.fd, SetArg::TCSAFLUSH, &self.saved);
+impl<F: AsFd> Restore<F> {
+    pub(crate) fn new(fd: F, saved: Termios) -> Self {
+        Self { fd, saved }
+    }
+
+    pub(crate) fn restore(&self) {
+        let fd = self.fd.as_fd();
+        if tcsetattr(fd, SetArg::TCSAFLUSH, &self.saved) == Err(Errno::EINTR) {
+            let _ = tcsetattr(fd, SetArg::TCSAFLUSH, &self.saved);
         }
+    }
+}
+
+impl<F: AsFd> Drop for Restore<F> {
+    fn drop(&mut self) {
+        self.restore();
     }
 }
 
@@ -99,6 +111,19 @@ fn hidden(saved: &Termios) -> Termios {
     t
 }
 
+/// [`hidden`], and CR stays CR, LF stays LF, and Ctrl-S and Ctrl-Q are keys.
+pub(crate) fn raw(saved: &Termios) -> Termios {
+    let mut t = hidden(saved);
+    t.input_flags.remove(
+        InputFlags::ICRNL
+            | InputFlags::INLCR
+            | InputFlags::IXON
+            | InputFlags::ISTRIP
+            | InputFlags::BRKINT,
+    );
+    t
+}
+
 pub(crate) fn stdin_is_terminal() -> bool {
     std::io::stdin().is_terminal()
 }
@@ -123,7 +148,7 @@ pub(crate) fn read_password_on(
             .map_err(PromptError::Signals)?,
     );
     tcsetattr(fd, SetArg::TCSAFLUSH, &hidden(&saved)).map_err(PromptError::Terminal)?;
-    let restore = Restore { fd, saved };
+    let restore = Restore::new(fd, saved);
     let applied = tcgetattr(fd).map_err(PromptError::Terminal)?;
     if applied.local_flags.contains(LocalFlags::ECHO) {
         return Err(PromptError::EchoStillOn);

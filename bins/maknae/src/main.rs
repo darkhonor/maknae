@@ -10,6 +10,8 @@ mod enroll;
 mod login;
 mod policy_sync;
 mod reseed;
+#[allow(dead_code, reason = "#630: the agent session drives it")]
+mod screen;
 mod stderr;
 mod tty;
 
