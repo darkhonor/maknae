@@ -1,5 +1,4 @@
 # cargo-deny >= 0.19 required — the scope-valued `unmaintained = "all"` is rejected by 0.17.x
-# (validated against 0.20.2, the version CI pins).
 [graph]
 targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin"]
 
