@@ -88,14 +88,14 @@ jobs:
       - name: Install cargo-mutants 27.1.0
         if: steps.mutants-cache.outputs.cache-hit != 'true'
         run: cargo install cargo-mutants --version 27.1.0 --locked
-      - name: Install cargo-nextest 0.9.146 (prebuilt, checksum-pinned)
+      - name: Install cargo-nextest 0.9.152 (prebuilt, checksum-pinned)
         if: contains(format(' {0} ', steps.packages.outputs.mutants), ' maknae-io ')
         env:
-          NEXTEST_TARBALL: cargo-nextest-0.9.146-x86_64-unknown-linux-gnu.tar.gz
-          NEXTEST_SHA256: 682c21b777c333e96fd532e114d3a5a894e0729ab88d94c0a9f20f8419695428
+          NEXTEST_TARBALL: cargo-nextest-0.9.152-x86_64-unknown-linux-gnu.tar.gz
+          NEXTEST_SHA256: d039b43c3e0958441b6ad0a39c8884d018b3d2e8fb9928f209074b1100b5e17a
         run: |
           curl -fsSL --retry 3 -o "$RUNNER_TEMP/$NEXTEST_TARBALL" \
-            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.146/$NEXTEST_TARBALL"
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.152/$NEXTEST_TARBALL"
           (cd "$RUNNER_TEMP" && printf '%s  %s\n' "$NEXTEST_SHA256" "$NEXTEST_TARBALL" | sha256sum -c -)
           tar -xzf "$RUNNER_TEMP/$NEXTEST_TARBALL" -C ~/.cargo/bin cargo-nextest
           cargo nextest --version

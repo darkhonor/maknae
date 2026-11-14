@@ -21,7 +21,7 @@ REAL_CARGO = shutil.which("cargo")
 
 
 class MutationGate(unittest.TestCase):
-    def run_gate(self, crate, *, nextest="0.9.146", logs=None, total=None, reviewed=None,
+    def run_gate(self, crate, *, nextest="0.9.152", logs=None, total=None, reviewed=None,
                  path=None, fake_exit=0, litter=False, extra_env=None,
                  failing_chmod=False, term=False, planned_extra=0, phase="Test", plan=True,
                  home_nextest=None, baseline=None):
@@ -169,15 +169,15 @@ class MutationGate(unittest.TestCase):
             self.assertIsNone(run.argv)
 
     def test_gate_fails_closed_on_another_nextest_version(self):
-        run = self.run_gate("maknae-io", nextest="0.9.145")
+        run = self.run_gate("maknae-io", nextest="0.9.151")
         self.assertNotEqual(run.result.returncode, 0)
-        self.assertIn("'cargo-nextest 0.9.145 (fixture)' is not cargo-nextest 0.9.146", run.result.stdout)
+        self.assertIn("'cargo-nextest 0.9.151 (fixture)' is not cargo-nextest 0.9.152", run.result.stdout)
         self.assertIsNone(run.argv)
 
     def test_readiness_checks_the_nextest_cargo_runs(self):
-        run = self.run_gate("maknae-io", home_nextest="0.9.145")
+        run = self.run_gate("maknae-io", home_nextest="0.9.151")
         self.assertNotEqual(run.result.returncode, 0)
-        self.assertIn("'cargo-nextest 0.9.145 (fixture)' is not cargo-nextest 0.9.146", run.result.stdout)
+        self.assertIn("'cargo-nextest 0.9.151 (fixture)' is not cargo-nextest 0.9.152", run.result.stdout)
         self.assertIsNone(run.argv)
 
     def assertGate(self, ok, logs, reviewed=None, *, contains=(), **kwargs):
@@ -744,7 +744,7 @@ class InDiff(unittest.TestCase):
     def test_in_diff_native_filter_reaches_both_listings(self):
         native = subprocess.run([BASH, str(ROOT / "ci/gates/mutation-platform.sh")],
                                 capture_output=True, text=True, check=True).stdout.strip()
-        fake_nextest(self.aux / "tools", "0.9.146")
+        fake_nextest(self.aux / "tools", "0.9.152")
         for crate in ("maknae-io", "maknae-sys"):
             with self.subTest(crate):
                 shutil.rmtree(self.tmp / "repo", ignore_errors=True)

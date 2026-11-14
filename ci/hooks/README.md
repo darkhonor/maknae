@@ -29,6 +29,6 @@ bash ci/gates/isolation-contract-lint.sh
 Local coverage prerequisites (derive current versions from `.github/workflows/ci.yml` and `.github/workflows/mutation.yml`; the gate's readiness step prints install guidance if missing):
 
 ```sh
-cargo install cargo-llvm-cov --locked --version 0.8.7
+cargo install cargo-llvm-cov --locked --version 0.9.1
 python3 --version   # >= 3.11 (stdlib tomllib)
 ```
