@@ -1695,7 +1695,7 @@ printf 'summarize the notes directory\n' | maknae agent hobi --wait
 
 **One-shot, with no agent.** `maknae -p "<prompt>"` (and `--provider <label>`) runs the direct-model loop of [Hold the conversation](#10-hold-the-conversation). `--provider` without `-p`, and `-p` with a subcommand, are refused. The prompt is argv, so other local users can read it (#436); a request typed in `maknae agent <name>` is not.
 
-**Cadence and cost.** While anything is shown, the session lists tasks about once a second and collects about every 2 seconds; with nothing shown it collects about every 5 seconds. Each poll is one trail record, and one verb is in flight at a time. The agent list is a query of the kernel's graph and policy and never of the agents.
+**Cadence and cost.** While anything is shown, the session lists tasks about once a second and collects about every 2 seconds; with nothing shown it collects about every 5 seconds. Each interval counts from the previous answer, and a collect that is due goes before a poll, so a slow kernel delays reports but never withholds them. Each poll is one trail record, and one verb is in flight at a time. The agent list is a query of the kernel's graph and policy and never of the agents.
 
 ## Tasks
 

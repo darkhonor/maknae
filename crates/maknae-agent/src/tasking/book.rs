@@ -615,16 +615,6 @@ impl Book {
             return Some(Op::Poll { after: Some(after) });
         }
         let shown = self.tasks.iter().any(Task::shown);
-        if (self.reread || shown) && now >= self.next_poll {
-            self.reread = false;
-            self.next_poll = now + POLL_EVERY_MS;
-            let from = self.poll_from();
-            self.swept.clear();
-            self.flight = Some(Asked::Poll { from, pages: 1 });
-            return Some(Op::Poll {
-                after: from.map(TaskCursor::from_seq),
-            });
-        }
         let every = if shown {
             COLLECT_OPEN_MS
         } else {
@@ -632,7 +622,6 @@ impl Book {
         };
         if self.held.is_empty() && (self.collect_soon || now >= self.collected_at + every) {
             self.collect_soon = false;
-            self.collected_at = now;
             let after = self.ack_upto(conv).filter(|upto| Some(*upto) != self.acked);
             self.flight = Some(Asked::Collect {
                 after,
@@ -640,6 +629,15 @@ impl Book {
             });
             return Some(Op::Collect {
                 after: after.map(TaskCursor::from_seq),
+            });
+        }
+        if (self.reread || shown) && now >= self.next_poll {
+            self.reread = false;
+            let from = self.poll_from();
+            self.swept.clear();
+            self.flight = Some(Asked::Poll { from, pages: 1 });
+            return Some(Op::Poll {
+                after: from.map(TaskCursor::from_seq),
             });
         }
         None
@@ -678,6 +676,11 @@ impl Book {
         let Some(asked) = self.flight.take() else {
             return;
         };
+        match asked {
+            Asked::Collect { .. } => self.collected_at = now,
+            Asked::Poll { .. } => self.next_poll = now + POLL_EVERY_MS,
+            _ => {}
+        }
         match &answer {
             Ok(_) | Err(Failure::Refused { .. }) => self.connection = Connection::Connected,
             Err(Failure::Unreachable { .. }) => self.connection = Connection::Unreachable,
@@ -1569,13 +1572,14 @@ mod tests {
         let mut run = Run::new(Standing::Enrolled);
         run.submit("one", 1, 1);
         run.submit("two", 2, 2);
-        run.now = COLLECT_OPEN_MS;
+        run.now = POLL_EVERY_MS;
         let working = vec![
             view(1, 1, TaskState::Working),
             view(2, 2, TaskState::Working),
         ];
         assert!(!run.answer_due(working, vec![]));
-        let _ = run.op();
+        run.now = COLLECT_OPEN_MS;
+        assert!(matches!(run.op(), Op::Collect { .. }));
         run.answer(reports(vec![
             report(1, 1, "stopped at your request", None),
             report(
@@ -1789,7 +1793,9 @@ mod tests {
         assert!(run.book.status()[0].ends_with("#1 working 0:40"));
         run.wait(2_000);
         assert!(run.book.status()[0].ends_with("#1 working 0:42"));
-        let _ = run.op();
+        assert!(matches!(run.op(), Op::Collect { .. }));
+        run.answer(reports(vec![]));
+        assert!(matches!(run.op(), Op::Poll { .. }));
         working.elapsed_secs = 50;
         run.answer(page(vec![working], None));
         assert!(run.book.status()[0].ends_with("#1 working 0:50"));
@@ -1899,6 +1905,67 @@ mod tests {
         run.submit("one", 1, 0);
         run.now = 1_000;
         assert!(matches!(run.op(), Op::Poll { after: None }));
+    }
+
+    #[test]
+    fn polls_that_take_the_whole_interval_never_starve_collection() {
+        for slow in [POLL_EVERY_MS, POLL_EVERY_MS * 3] {
+            let mut run = Run::with(Standing::Enrolled, true, vec![], vec![]);
+            run.submit("one", 1, 1);
+            let mut collected = 0;
+            for _ in 0..64 {
+                if run.book.settled(true) {
+                    break;
+                }
+                match run.book.next_op(run.now, &run.conv) {
+                    None => run.wait(100),
+                    Some(Op::Poll { .. }) => {
+                        run.now += slow;
+                        run.answer(page(vec![view(1, 1, TaskState::Reported)], None));
+                    }
+                    Some(Op::Collect { .. }) => {
+                        run.now += slow;
+                        collected += 1;
+                        let got = match collected {
+                            1 => vec![report(1, 1, "done", None)],
+                            _ => vec![],
+                        };
+                        run.answer(reports(got));
+                    }
+                    Some(other) => panic!("{other:?}"),
+                }
+                run.draw_all();
+            }
+            assert!(collected > 0, "{slow}: no collect was ever sent");
+            assert!(
+                run.texts().iter().any(|t| t.ends_with("\ndone")),
+                "{:?}",
+                run.texts()
+            );
+            assert!(run.book.settled(true), "{slow}: --wait never ends");
+        }
+    }
+
+    #[test]
+    fn each_schedule_counts_its_interval_from_its_own_answer() {
+        let mut run = Run::new(Standing::Enrolled);
+        run.submit("one", 1, 1);
+        run.now = COLLECT_OPEN_MS;
+        assert!(matches!(run.op(), Op::Collect { .. }));
+        run.now += 900;
+        run.answer(reports(vec![]));
+        assert!(matches!(run.op(), Op::Poll { .. }));
+        run.now += 900;
+        run.answer(page(vec![view(1, 1, TaskState::Working)], None));
+        run.now += POLL_EVERY_MS - 1;
+        run.none_due();
+        run.now += 1;
+        assert!(matches!(run.op(), Op::Poll { .. }));
+        run.answer(page(vec![view(1, 1, TaskState::Working)], None));
+        run.now = COLLECT_OPEN_MS + 900 + COLLECT_OPEN_MS - 1;
+        run.none_due();
+        run.now += 1;
+        assert!(matches!(run.op(), Op::Collect { .. }));
     }
 
     #[test]
@@ -2263,7 +2330,10 @@ mod tests {
         run.answer(Err(Failure::Unreachable { after_write: false }));
         assert_eq!(run.book.link(), text::UNREACHABLE);
         run.now = 2_000;
-        let _ = run.op();
+        assert!(matches!(run.op(), Op::Collect { .. }));
+        run.answer(Err(Failure::Unreachable { after_write: false }));
+        assert_eq!(run.book.link(), text::UNREACHABLE);
+        assert!(matches!(run.op(), Op::Poll { .. }));
         run.answer(page(vec![view(1, 1, TaskState::Held)], None));
         assert_eq!(run.book.link(), text::CONNECTED);
         assert_eq!(run.book.held(), [1]);
