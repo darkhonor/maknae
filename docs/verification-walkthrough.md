@@ -69,7 +69,7 @@ Run `unset VT` when you are done.
 
 **Never paste a wrapping token from a successful read.** A wrapped read of a key returns a token that wraps the key itself. None of the commands below asks for one.
 
-**Where refusals show.** A kernel refusal reaches the user only as one line, exit 2: `maknae: stopped: ` followed by the `PROMPT_REFUSED` text (`bins/maknae/src/agent.rs`, printed by `print_end`). That text begins `the kernel refused the exchange — whether the prompt reached the provider is in the host's audit trail`, and it is quoted in full in [When it does not work](first-provider.md#when-it-does-not-work). The kernel's reason is only in the audit trail, which the administrator reads with `sudo jq`. The CLI's own setup refusals print after `maknae: ` and exit 1 (`bins/maknae/src/cli.rs:1245`).
+**Where refusals show.** A kernel refusal reaches the user only as one line, exit 2: `maknae: stopped: ` followed by the `PROMPT_REFUSED` text (`bins/maknae/src/agent.rs`, printed by `print_end`). That text begins `the kernel refused the exchange — whether the prompt reached the provider is in the host's audit trail`, and it is quoted in full in [When it does not work](first-provider.md#when-it-does-not-work). The kernel's reason is only in the audit trail, which the administrator reads with `sudo jq`. The CLI's own setup refusals print after `maknae: ` and exit 1 (`bins/maknae/src/cli.rs:1243`).
 
 The administrator's audit query for every claim below (the same on macOS):
 
@@ -279,7 +279,7 @@ mv ~/.maknae/providers.yaml.orig ~/.maknae/providers.yaml
 maknae: pki/sign rejected: <Vault's answer>
 ```
 
-where `<Vault's answer>` is Vault's own text (`crates/maknae-vault/src/error.rs:194`, printed at `bins/maknae/src/cli.rs:1256`). The CLI checks only the token's recorded expiry, not whether it was revoked (`bins/maknae/src/login.rs:90-101`), so the refusal comes from Vault at the certificate mint. In step 4, A gets a reply.
+where `<Vault's answer>` is Vault's own text (`crates/maknae-vault/src/error.rs:194`, printed at `bins/maknae/src/cli.rs:1254`). The CLI checks only the token's recorded expiry, not whether it was revoked (`bins/maknae/src/login.rs:83-99`), so the refusal comes from Vault at the certificate mint. In step 4, A gets a reply.
 
 A run that is already past its mint would stop at its next turn's key read. That read gets a 403, printed as `` maknae: stopped: Vault refused to read the key for provider entry <label> (HTTP 403): the key is outside your Vault policy, or your login was revoked: run `maknae login` `` (`agent.rs:99-104`). This is from the code path, not shown live.
 

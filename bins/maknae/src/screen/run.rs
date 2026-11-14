@@ -58,6 +58,10 @@ pub(crate) trait Caller: Commands {
     fn event(&mut self, event: Self::Event, conversation: &mut Conversation) -> Step;
     /// An entered line: a request or a `/` command.
     fn submit(&mut self, text: Zeroizing<String>, conversation: &mut Conversation) -> Step;
+    /// Ctrl-D on an empty line, or a second Ctrl-C.
+    fn leave(&mut self, _conversation: &mut Conversation) -> Step {
+        Step::Leave
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -295,7 +299,10 @@ impl<C: Caller> Driver<C> {
                 None
             }
             EditOutcome::Full | EditOutcome::Nothing => None,
-            EditOutcome::LeaveRequested => Some(Exit::Bye),
+            EditOutcome::LeaveRequested => {
+                let step = self.caller.leave(&mut self.conversation);
+                self.step(step)
+            }
         };
         self.full_shown = full;
         self.leave_until = match (self.editor.leave_armed(), self.leave_until) {
@@ -363,27 +370,53 @@ async fn recv<E>(events: &mut Option<mpsc::Receiver<E>>) -> Option<E> {
     }
 }
 
-struct Signals {
-    winch: tokio::signal::unix::Signal,
-    tstp: tokio::signal::unix::Signal,
-    cont: tokio::signal::unix::Signal,
+fn one(kind: SignalKind) -> Result<tokio::signal::unix::Signal, TermError> {
+    signal(kind).map_err(TermError::Signals)
+}
+
+/// The signals that end a session: SIGTERM, SIGHUP, SIGINT and SIGQUIT.
+pub(crate) struct Ending {
     term: tokio::signal::unix::Signal,
     hup: tokio::signal::unix::Signal,
     int: tokio::signal::unix::Signal,
     quit: tokio::signal::unix::Signal,
 }
 
-impl Signals {
-    fn register() -> Result<Self, TermError> {
-        let one = |kind| signal(kind).map_err(TermError::Signals);
+impl Ending {
+    pub(crate) fn register() -> Result<Self, TermError> {
         Ok(Self {
-            winch: one(SignalKind::window_change())?,
-            tstp: one(SignalKind::from_raw(Signal::SIGTSTP as i32))?,
-            cont: one(SignalKind::from_raw(Signal::SIGCONT as i32))?,
             term: one(SignalKind::terminate())?,
             hup: one(SignalKind::hangup())?,
             int: one(SignalKind::interrupt())?,
             quit: one(SignalKind::quit())?,
+        })
+    }
+
+    /// The number of the next one to arrive.
+    pub(crate) async fn next(&mut self) -> i32 {
+        tokio::select! {
+            Some(()) = self.term.recv() => Signal::SIGTERM as i32,
+            Some(()) = self.hup.recv() => Signal::SIGHUP as i32,
+            Some(()) = self.int.recv() => Signal::SIGINT as i32,
+            Some(()) = self.quit.recv() => Signal::SIGQUIT as i32,
+        }
+    }
+}
+
+struct Signals {
+    winch: tokio::signal::unix::Signal,
+    tstp: tokio::signal::unix::Signal,
+    cont: tokio::signal::unix::Signal,
+    ending: Ending,
+}
+
+impl Signals {
+    fn register() -> Result<Self, TermError> {
+        Ok(Self {
+            winch: one(SignalKind::window_change())?,
+            tstp: one(SignalKind::from_raw(Signal::SIGTSTP as i32))?,
+            cont: one(SignalKind::from_raw(Signal::SIGCONT as i32))?,
+            ending: Ending::register()?,
         })
     }
 
@@ -392,10 +425,7 @@ impl Signals {
             Some(()) = self.winch.recv() => Wake::Resize,
             Some(()) = self.tstp.recv() => Wake::Suspend,
             Some(()) = self.cont.recv() => Wake::Continued,
-            Some(()) = self.term.recv() => Wake::Leave(Signal::SIGTERM as i32),
-            Some(()) = self.hup.recv() => Wake::Leave(Signal::SIGHUP as i32),
-            Some(()) = self.int.recv() => Wake::Leave(Signal::SIGINT as i32),
-            Some(()) = self.quit.recv() => Wake::Leave(Signal::SIGQUIT as i32),
+            signal = self.ending.next() => Wake::Leave(signal),
         }
     }
 }
@@ -495,6 +525,7 @@ mod tests {
     struct Seen {
         submitted: Vec<String>,
         ticks: u32,
+        leaves: u32,
     }
 
     struct Fake {
@@ -502,6 +533,7 @@ mod tests {
         on_tick: Step,
         seen: Arc<Mutex<Seen>>,
         status: Vec<String>,
+        refused_leaves: u32,
     }
 
     impl Fake {
@@ -513,6 +545,7 @@ mod tests {
                     on_tick,
                     seen: Arc::clone(&seen),
                     status: Vec::new(),
+                    refused_leaves: 0,
                 },
                 seen,
             )
@@ -555,6 +588,16 @@ mod tests {
         fn submit(&mut self, text: Zeroizing<String>, _conversation: &mut Conversation) -> Step {
             self.seen.lock().unwrap().submitted.push(text.to_string());
             Step::Changed
+        }
+
+        fn leave(&mut self, _conversation: &mut Conversation) -> Step {
+            let mut seen = self.seen.lock().unwrap();
+            seen.leaves += 1;
+            if seen.leaves > self.refused_leaves {
+                Step::Leave
+            } else {
+                Step::Changed
+            }
         }
     }
 
@@ -612,6 +655,25 @@ mod tests {
         pty.type_keys(b"\r\x04");
         assert_eq!(ended(&done), Ok(Exit::Bye));
         assert_eq!(seen.lock().unwrap().submitted, ["a", "b\nc", "d"]);
+    }
+
+    #[test]
+    fn ctrl_d_and_a_second_ctrl_c_ask_the_caller_before_leaving() {
+        let _one = one_session();
+        let mut pty = pty(24, 80);
+        let (mut caller, seen) = Fake::new(Pace::Idle, Step::Unchanged);
+        caller.refused_leaves = 1;
+        let done = drive(&pty, caller);
+        assert!(pty.out.wait_for(FRAME_END), "no first frame");
+        pty.type_keys(b"\x04");
+        assert!(
+            done.recv_timeout(Duration::from_millis(500)).is_err(),
+            "a refused leave ended the session"
+        );
+        assert_eq!(seen.lock().unwrap().leaves, 1);
+        pty.type_keys(b"\x03\x03");
+        assert_eq!(ended(&done), Ok(Exit::Bye));
+        assert_eq!(seen.lock().unwrap().leaves, 2);
     }
 
     #[test]
@@ -734,7 +796,7 @@ mod tests {
         assert!(first, "no first frame");
         assert_eq!(result, Err(TermError::Ended.to_string()));
         assert!(
-            pty.out.wait_for(&[&b"\x1b[?2026l"[..], LEAVE].concat()),
+            pty.out.wait_for(LEAVE),
             "the hook did not end synchronized output and leave the modes"
         );
         assert_eq!(modes(&pty.slave), before);

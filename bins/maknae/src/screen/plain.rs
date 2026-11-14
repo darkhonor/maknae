@@ -2,7 +2,7 @@ use super::term::{write_all, Readable, TermError};
 use maknae_agent::render::display_safe;
 use maknae_agent::screen::fixed::FixedText;
 use nix::errno::Errno;
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, OwnedFd};
 use zeroize::{Zeroize, Zeroizing};
 
 pub(crate) const OUT_BYTES: usize = 4096;
@@ -46,10 +46,7 @@ pub(crate) struct Lines {
 
 impl Lines {
     pub(crate) fn stdio(line_max: usize) -> Result<Lines, TermError> {
-        let dup = |fd: BorrowedFd<'_>| {
-            fd.try_clone_to_owned()
-                .map_err(|e| TermError::Read(Errno::from_raw(e.raw_os_error().unwrap_or(0))))
-        };
+        let dup = |fd| super::dup(fd, TermError::Read);
         Self::new(
             dup(std::io::stdin().as_fd())?,
             dup(std::io::stdout().as_fd())?,
@@ -93,6 +90,10 @@ impl Lines {
 
     pub(crate) fn write_line(&mut self, text: &str) -> Result<(), TermError> {
         self.put(Stream::Output, text)
+    }
+
+    pub(crate) fn say(&mut self, text: &str) -> Result<(), TermError> {
+        self.put(Stream::Diagnostics, text)
     }
 
     fn put(&mut self, to: Stream, text: &str) -> Result<(), TermError> {

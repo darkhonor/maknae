@@ -180,14 +180,14 @@ subject = "cli_b"
 object = "prompt"
 right = "r"
 control = "no control while A's CLI runs (#436, undecided): maknae -p takes the prompt as the argv value of -p, and argv is world-readable on a default host (Linux /proc/<pid>/cmdline without hidepid, macOS ps -ax -o args); the audit trail keeps only its digest and length, in a 0700 _maknae directory"
-evidence = "bins/maknae/src/cli.rs:93 · crates/maknae-audit-append/src/record.rs:130 · packaging/rpm/maknae.spec:176 · packaging/deb/postinst:48 · packaging/macos/scripts/preinstall:203"
+evidence = "bins/maknae/src/cli.rs:91 · crates/maknae-audit-append/src/record.rs:130 · packaging/rpm/maknae.spec:176 · packaging/deb/postinst:48 · packaging/macos/scripts/preinstall:203"
 
 [[cell]]
 subject = "cli_b"
 object = "meta"
 right = "p"
 control = "part; no control while A's CLI runs (#436, undecided): argv is world-readable on a default host (Linux /proc without hidepid, macOS ps), so B sees --provider <label> and the process owner; the audit trail holding the rest is written by maknaed in a 0700 _maknae directory"
-evidence = "bins/maknae/src/cli.rs:93 · crates/maknae-audit-append/src/sink.rs:48 · packaging/rpm/maknae.spec:176 · packaging/deb/postinst:48 · packaging/macos/scripts/preinstall:203"
+evidence = "bins/maknae/src/cli.rs:91 · crates/maknae-audit-append/src/sink.rs:48 · packaging/rpm/maknae.spec:176 · packaging/deb/postinst:48 · packaging/macos/scripts/preinstall:203"
 
 # --- Agent Daemon (#629) --------------------------------------------------
 

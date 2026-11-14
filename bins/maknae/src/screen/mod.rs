@@ -5,6 +5,16 @@ pub(crate) mod plain;
 pub(crate) mod run;
 pub(crate) mod term;
 
+use nix::errno::Errno;
+use std::os::fd::{BorrowedFd, OwnedFd};
+use term::TermError;
+
+/// A descriptor of the session's own for `fd`; a failure is reported as `err`.
+pub(crate) fn dup(fd: BorrowedFd<'_>, err: fn(Errno) -> TermError) -> Result<OwnedFd, TermError> {
+    fd.try_clone_to_owned()
+        .map_err(|e| err(Errno::from_raw(e.raw_os_error().unwrap_or(0))))
+}
+
 #[cfg(test)]
 pub(crate) mod testing {
     use nix::poll::{poll, PollFd, PollFlags, PollTimeout};

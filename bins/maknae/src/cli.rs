@@ -57,11 +57,9 @@ pub fn resolve_config_dir() -> PathBuf {
 /// One list serves every verb, so `agent` is ACCEPTED — but not validated — for `ping` as
 /// much as for `agent`: the combined registry is what the unknown-section check consults,
 /// so the section's presence never fails any verb, while its BOUNDS are read only by
-/// `agent_from_section`, whose one production caller is `maknae agent`'s own `run`. A
-/// documented residual of the single-registry design, not a per-verb grammar: an `[agent]`
-/// section with `max_steps: 1000` loads clean under `maknae ping` and is refused by
-/// `maknae agent` (corrected 2026-09-22, #344 — this said "accepted (and validated)",
-/// which `execute` never does).
+/// `agent_from_section`, whose one production caller is `maknae -p`. A documented
+/// residual of the single-registry design, not a per-verb grammar: an `[agent]` section
+/// with `max_steps: 1000` loads clean under `maknae ping` and is refused by `maknae -p`.
 pub(crate) fn cli_config_specs() -> [SectionSpec; 3] {
     [
         SectionSpec {

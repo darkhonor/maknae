@@ -47,13 +47,6 @@ pub(crate) fn frame_fits(verb: &Verb, cap: usize) -> bool {
     .is_ok()
 }
 
-fn now_unix() -> Result<u64, String> {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .map_err(|_| "the system clock reads before 1970; set the clock, then retry".to_string())
-}
-
 /// Opens one connection to the kernel. Every verb dials its own: the kernel
 /// binds a connection's audit task once (send.rs).
 pub trait Dial: Send + Sync {
@@ -406,7 +399,7 @@ impl<K: KeySupply, D: Dial> Plane for LoopPlane<K, D> {
         if !frame_fits(&verb, cap) {
             return Err(PlaneError::FrameTooLarge);
         }
-        let now = now_unix().map_err(PlaneError::Transport)?;
+        let now = maknae_io::now_unix().map_err(PlaneError::Transport)?;
         let (choice, minted_at) = match take_spare(&mut self.spare, conversation, now) {
             Some(s) => (s.choice, s.minted_at),
             None => {
@@ -942,7 +935,7 @@ mod tests {
 
     /// Structural tripwire: a LoopPlane needs a live daemon, so this pins the
     /// wiring by source. Without the override, the trait default drops every
-    /// line `maknae agent` used to print.
+    /// diagnostic line.
     #[test]
     fn loop_plane_hands_its_diagnostics_to_the_loop() {
         let src = include_str!("plane.rs");

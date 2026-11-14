@@ -1,4 +1,4 @@
-//! Host facts (#115): whether a path is present.
+//! Host facts (#115): whether a path is present, and the clock.
 
 use std::io;
 use std::path::Path;
@@ -23,6 +23,14 @@ pub fn presence(path: &Path) -> io::Result<bool> {
     }
 }
 
+/// The clock in whole seconds since the Unix epoch; a clock before 1970 is an error.
+pub fn now_unix() -> Result<u64, String> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .map_err(|_| "the system clock reads before 1970; set the clock, then retry".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -32,6 +40,20 @@ mod tests {
         let d = tempfile::tempdir().expect("tempdir");
         std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).expect("chmod");
         d
+    }
+
+    #[test]
+    fn now_unix_is_the_clock_in_whole_seconds() {
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let now = now_unix().unwrap();
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!((before..=after).contains(&now), "{before} {now} {after}");
     }
 
     #[test]

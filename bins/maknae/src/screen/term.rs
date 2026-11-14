@@ -5,15 +5,14 @@ use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use nix::sys::signal::{raise, Signal};
 use nix::sys::termios::{tcgetattr, tcsetattr, LocalFlags, SetArg, Termios};
 use std::io::IsTerminal;
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, OwnedFd};
 use std::panic::PanicHookInfo;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 pub(crate) const ENTER: &[u8] = b"\x1b[?1049h\x1b[?7l\x1b[?2004h\x1b[?1007h\x1b[?25l";
-pub(crate) const LEAVE: &[u8] = b"\x1b[?1007l\x1b[?2004l\x1b[?7h\x1b[?25h\x1b[?1049l";
-const SYNC_OFF: &[u8] = b"\x1b[?2026l";
+pub(crate) const LEAVE: &[u8] = b"\x1b[?2026l\x1b[?1007l\x1b[?2004l\x1b[?7h\x1b[?25h\x1b[?1049l";
 const HOOK_TRIES: usize = 1000;
 
 #[derive(Debug)]
@@ -83,10 +82,7 @@ pub(crate) struct Session {
 
 impl Session {
     pub(crate) fn enter() -> Result<Session, TermError> {
-        let dup = |fd: BorrowedFd<'_>| {
-            fd.try_clone_to_owned()
-                .map_err(|e| TermError::Terminal(Errno::from_raw(e.raw_os_error().unwrap_or(0))))
-        };
+        let dup = |fd| super::dup(fd, TermError::Terminal);
         Self::enter_on(
             dup(std::io::stdin().as_fd())?,
             dup(std::io::stdout().as_fd())?,
@@ -96,10 +92,7 @@ impl Session {
     pub(crate) fn enter_on(input: OwnedFd, output: OwnedFd) -> Result<Session, TermError> {
         let saved = tcgetattr(&input).map_err(TermError::Terminal)?;
         let raw = tty::raw(&saved);
-        let dup = |fd: &OwnedFd| {
-            fd.try_clone()
-                .map_err(|e| TermError::Terminal(Errno::from_raw(e.raw_os_error().unwrap_or(0))))
-        };
+        let dup = |fd: &OwnedFd| super::dup(fd.as_fd(), TermError::Terminal);
         let restorer = Restorer {
             output: dup(&output)?,
             termios: Restore::new(dup(&input)?, saved.clone()),
@@ -235,7 +228,6 @@ fn install_hook(restorer: &Shared, ended: &Arc<Notify>) -> Arc<Hook> {
     );
     std::panic::set_hook(Box::new(move |info| {
         if let Some(restorer) = take_for_hook(&shared) {
-            let _ = write_all(&restorer.output, SYNC_OFF);
             restorer.leave();
             ended.notify_one();
         }
@@ -296,10 +288,7 @@ pub(crate) struct Readable {
 
 impl Readable {
     pub(crate) fn new(fd: &impl AsFd) -> Result<Readable, TermError> {
-        let fd = fd
-            .as_fd()
-            .try_clone_to_owned()
-            .map_err(|e| TermError::Read(Errno::from_raw(e.raw_os_error().unwrap_or(0))))?;
+        let fd = super::dup(fd.as_fd(), TermError::Read)?;
         let (wake, waker) = nix::unistd::pipe().map_err(TermError::Read)?;
         Ok(Readable {
             fd: Arc::new(fd),
@@ -365,7 +354,7 @@ mod tests {
         ));
         assert!(inside.output_flags.contains(OutputFlags::OPOST));
         drop(session);
-        let leave = b"\x1b[?1007l\x1b[?2004l\x1b[?7h\x1b[?25h\x1b[?1049l";
+        let leave = b"\x1b[?2026l\x1b[?1007l\x1b[?2004l\x1b[?7h\x1b[?25h\x1b[?1049l";
         assert!(pty.out.wait_for(leave), "the modes were never left");
         assert_eq!(modes(&pty.slave), before);
         assert_eq!(

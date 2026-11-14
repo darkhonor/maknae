@@ -455,7 +455,7 @@ color: "#ffd700"
 - Any other key refuses.
 - **Ownership and mode.** A regular file, not a symlink, owned by root and not group- or other-writable. `<config-dir>` must be owned by root and not group- or other-writable, or the file is refused, naming the directory. Only a missing file inside such a directory reads as no banner; a missing directory, a symlink, the wrong owner or mode, an invalid file and a read error each refuse.
 - **Invalid file.** An invalid `banner.yaml` refuses `maknaed`'s start, naming `banner.yaml` and the reason. A reload (`SIGHUP`) reads it again: an invalid file refuses the whole reload, as an invalid `authz.yaml` does, so the running policy and banner stay and the refusal is recorded in the trail; a removed file removes the banner.
-- **In the CLI.** `maknae agent <name>` checks the banner it receives again, in a terminal and without one, and an invalid banner refuses to open the session: `maknae: the kernel's banner is not valid (<why>); the session was not opened`. The session never opens unmarked. Without a terminal no banner is shown.
+- **In the CLI.** `maknae agent <name>` checks the banner it receives again, in a terminal and without one, and an invalid banner refuses to open the session: `maknae: the kernel's banner is not valid (<why>); the session was not opened`. On a terminal the session never opens unmarked; without a terminal no banner is shown.
 
 ---
 

@@ -16,6 +16,7 @@ pub const MORE_NOTICES: &str = "more notices were not shown";
 pub const LOGIN_STOPPED: &str = "not sent: your Vault login expired";
 pub const LOGIN_ENDED: &str = "login expired";
 pub const AWAY: &str = "while you were away";
+pub const UNKNOWN_COMMAND: &str = "unknown command; /help lists them";
 pub const CONVERSATION_FULL: &str =
     "unread reports fill the conversation: scroll down to read them, then send this again";
 
@@ -94,6 +95,22 @@ pub fn outcome_unknown_line(op: Unknown) -> String {
 }
 
 /// `m:ss`, or `h:mm:ss` from an hour.
+pub fn not_answered_yet(n: usize) -> String {
+    match n {
+        1 => "1 request is not yet sent or answered: /bye or Ctrl-D again leaves without it".into(),
+        n => format!(
+            "{n} requests are not yet sent or answered: /bye or Ctrl-D again leaves without them"
+        ),
+    }
+}
+
+pub fn not_sent(n: usize, agent: &str) -> String {
+    match n {
+        1 => format!("1 request was not sent; it was not given to {agent}"),
+        n => format!("{n} requests were not sent; they were not given to {agent}"),
+    }
+}
+
 pub fn elapsed(secs: u64) -> String {
     let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);
     if h > 0 {

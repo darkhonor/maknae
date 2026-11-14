@@ -183,10 +183,10 @@ pub fn check_for(basis: ReadBasis) -> WriteCheck {
 
 /// The prompt leg's mapper, pure and tested for the same reason the read and
 /// write mappers are: it is a CONTROL. A `BadRequest` on `session.prompt` is a
-/// pre-gate fault on the request's own shape — `maknae agent "   "` is refused
+/// pre-gate fault on the request's own shape — `maknae -p "   "` is refused
 /// for carrying no text to send, and provably never reached the provider: no
 /// egress block was opened and no intent record was written. Reporting that
-/// with the host's refusal line (`PROMPT_REFUSED` in `maknae agent`) would send
+/// with the host's refusal line (`PROMPT_REFUSED` in `maknae -p`) would send
 /// the subject to their providers.yaml and their login for a fault they can fix
 /// from the message. What
 /// the trail does hold is the pre-gate deny: the kernel appends

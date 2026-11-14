@@ -3,7 +3,7 @@
 //! to the kernel's tasker verbs. What the session decides is
 //! `maknae_agent::tasking::Book`'s.
 use crate::screen::plain::{Line, Lines};
-use crate::screen::run::{Caller, Driver, Exit, Pace, Step};
+use crate::screen::run::{Caller, Driver, Ending, Exit, Pace, Step};
 use crate::screen::term::{both_terminals, Session, TermError};
 use crate::stderr::errln;
 use maknae_agent::screen::blocks::{Conversation, EntryId, EntryKind};
@@ -149,10 +149,15 @@ impl<T: Tasker, L: Leaf> Kernel<T, L> {
         answer.map_err(failure)
     }
 
-    /// Sends each op in turn until the session drops its sender.
+    /// Sends each op in turn until the session drops its sender. Without a clock
+    /// the leaf cannot be judged, so nothing is sent.
     async fn serve(&self, mut ops: mpsc::UnboundedReceiver<Op>, events: mpsc::Sender<Event>) {
         while let Some(op) = ops.recv().await {
-            if events.send(self.send(op, unix_now()).await).await.is_err() {
+            let event = match maknae_io::now_unix() {
+                Ok(now) => self.send(op, now).await,
+                Err(_) => Event::Done(Err(Failure::NoIdentity)),
+            };
+            if events.send(event).await.is_err() {
                 return;
             }
         }
@@ -165,12 +170,6 @@ fn failure(e: TaskerError) -> Failure {
         TaskerError::Unreachable { after_write, .. } => Failure::Unreachable { after_write },
         TaskerError::Protocol(why) => Failure::Protocol(why),
     }
-}
-
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
 }
 
 /// The roster's entry for `name`, or the line that refuses it.
@@ -237,15 +236,23 @@ pub(crate) async fn run_list() -> ExitCode {
     let roster = plane.tasker.all_agents().await;
     retire(&plane.client).await;
     match roster {
-        Ok(roster) => {
-            let mut out = std::io::stdout().lock();
-            for line in text::agent_list_lines(&roster.entries, roster.undecided) {
-                crate::stderr::line(&mut out, format_args!("{line}"));
-            }
-            ExitCode::SUCCESS
-        }
+        Ok(roster) => print_list(&mut std::io::stdout().lock(), &roster),
         Err(e) => {
             errln!("{}", roster_failure(&e));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn print_list(out: &mut impl std::io::Write, roster: &AgentRoster) -> ExitCode {
+    let written = text::agent_list_lines(&roster.entries, roster.undecided)
+        .iter()
+        .try_for_each(|line| writeln!(out, "{line}"))
+        .and_then(|()| out.flush());
+    match written {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            errln!("maknae: the agent list could not be written: {e}");
             ExitCode::FAILURE
         }
     }
@@ -272,7 +279,7 @@ pub(crate) async fn run_session(name: &str, wait: bool) -> ExitCode {
         }
     };
     let leaf = PlaneLeaf(Arc::clone(&plane.client));
-    let end = open(
+    let (end, left) = open(
         plane.tasker,
         leaf,
         plane.login_expires_at,
@@ -282,6 +289,9 @@ pub(crate) async fn run_session(name: &str, wait: bool) -> ExitCode {
         io,
     )
     .await;
+    for line in left.lines(name) {
+        errln!("maknae: {line}");
+    }
     if !matches!(end, End::Signal(_)) {
         retire(&plane.client).await;
     }
@@ -306,11 +316,45 @@ impl End {
     fn exit_code(&self) -> ExitCode {
         match self {
             End::Left => ExitCode::SUCCESS,
-            End::Signal(signal) => {
-                ExitCode::from(u8::try_from(128i32.saturating_add(*signal)).unwrap_or(u8::MAX))
-            }
+            End::Signal(signal) => ExitCode::from(crate::agent::interrupted_status(*signal)),
             End::Failed => ExitCode::FAILURE,
         }
+    }
+}
+
+/// What a session left behind when it ended: a steering request sent and not
+/// answered, and requests never sent.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Left {
+    cut: bool,
+    unsent: usize,
+}
+
+impl Left {
+    fn of(book: &Book) -> Left {
+        Left {
+            cut: book.steering_in_flight(),
+            unsent: book.unsent(),
+        }
+    }
+
+    /// A session that left anything behind did not end cleanly.
+    fn end(&self, end: End) -> End {
+        match end {
+            End::Left if self.cut || self.unsent > 0 => End::Failed,
+            end => end,
+        }
+    }
+
+    fn lines(&self, agent: &str) -> Vec<String> {
+        let mut lines = Vec::new();
+        if self.cut {
+            lines.push(CUT_OFF.to_owned());
+        }
+        if self.unsent > 0 {
+            lines.push(text::not_sent(self.unsent, agent));
+        }
+        lines
     }
 }
 
@@ -323,24 +367,25 @@ pub(crate) async fn open<T: Tasker, L: Leaf>(
     wait: bool,
     input_cap: usize,
     io: Io,
-) -> End {
+) -> (End, Left) {
+    let refused = (End::Failed, Left::default());
     let roster = match tasker.agents().await {
         Ok(roster) => roster,
         Err(e) => {
             errln!("{}", roster_failure(&e));
-            return End::Failed;
+            return refused;
         }
     };
     let (agent, standing) = match admit(&roster, name) {
         Ok(admitted) => admitted,
         Err(refusal) => {
             errln!("{refusal}");
-            return End::Failed;
+            return refused;
         }
     };
     if let Some(Err(e)) = roster.banner.as_ref().map(maknae_proto::check_banner) {
         errln!("maknae: the kernel's banner is not valid ({e}); the session was not opened");
-        return End::Failed;
+        return refused;
     }
     let kernel = Kernel {
         tasker,
@@ -434,6 +479,13 @@ impl Caller for Screen {
             }
         }
     }
+
+    fn leave(&mut self, conversation: &mut Conversation) -> Step {
+        match self.book.leave(conversation) {
+            Entered::Leave => Step::Leave,
+            Entered::Stay => Step::Changed,
+        }
+    }
 }
 
 async fn full_screen<T: Tasker, L: Leaf>(
@@ -442,7 +494,7 @@ async fn full_screen<T: Tasker, L: Leaf>(
     banner: Option<maknae_proto::BannerSpec>,
     input_cap: usize,
     enter: Enter,
-) -> End {
+) -> (End, Left) {
     let (op_tx, op_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::channel(4);
     let start = Instant::now();
@@ -458,7 +510,7 @@ async fn full_screen<T: Tasker, L: Leaf>(
         Ok(driver) => driver,
         Err(e) => {
             errln!("maknae: {e}");
-            return End::Failed;
+            return (End::Failed, Left::default());
         }
     };
     let run = driver.run();
@@ -467,13 +519,10 @@ async fn full_screen<T: Tasker, L: Leaf>(
         out = &mut run => out,
         () = kernel.serve(op_rx, event_tx) => run.await,
     };
-    let stopped = screen.book.stopped();
-    let cut = screen.book.steering_in_flight();
+    let end = screen_end(result, screen.book.stopped());
+    let left = Left::of(&screen.book);
     drop(screen);
-    if cut && !matches!(result, Ok(Exit::Signal(_))) {
-        errln!("maknae: {CUT_OFF}");
-    }
-    screen_end(result, stopped)
+    (left.end(end), left)
 }
 
 fn screen_end(result: Result<Exit, TermError>, stopped: bool) -> End {
@@ -529,6 +578,63 @@ async fn plain<T: Tasker, L: Leaf>(
     standing: Standing,
     wait: bool,
     lines: &mut Lines,
+) -> (End, Left) {
+    let mut ending = match Ending::register() {
+        Ok(ending) => ending,
+        Err(e) => {
+            errln!("maknae: {e}");
+            return (End::Failed, Left::default());
+        }
+    };
+    let mut book = Book::new(kernel.agent.as_str(), standing, true);
+    let end = plain_lines(kernel, &mut book, wait, lines, &mut ending).await;
+    let left = Left::of(&book);
+    (left.end(end), left)
+}
+
+/// What a session without a screen says on stderr as it happens: the connection
+/// changing and a task put on hold, each once.
+struct Said {
+    link: &'static str,
+    held: Vec<u32>,
+}
+
+impl Said {
+    fn new() -> Said {
+        Said {
+            link: text::CONNECTING,
+            held: Vec::new(),
+        }
+    }
+
+    fn say(&mut self, book: &Book, lines: &mut Lines) -> Result<(), TermError> {
+        let link = book.link();
+        if link != self.link {
+            let first = self.link == text::CONNECTING && link == text::CONNECTED;
+            self.link = link;
+            if !first {
+                lines.say(&format!("maknae: {} · {link}", book.agent()))?;
+            }
+        }
+        let held = book.held();
+        for n in held.iter().filter(|n| !self.held.contains(n)) {
+            lines.say(&format!(
+                "maknae: {} #{n} {}",
+                book.agent(),
+                text::held_line()
+            ))?;
+        }
+        self.held = held;
+        Ok(())
+    }
+}
+
+async fn plain_lines<T: Tasker, L: Leaf>(
+    kernel: &Kernel<T, L>,
+    book: &mut Book,
+    wait: bool,
+    lines: &mut Lines,
+    ending: &mut Ending,
 ) -> End {
     let (op_tx, op_rx) = mpsc::unbounded_channel();
     let (event_tx, mut event_rx) = mpsc::channel(4);
@@ -536,13 +642,14 @@ async fn plain<T: Tasker, L: Leaf>(
     tokio::pin!(serve);
     let start = Instant::now();
     let mut conv = Conversation::for_prompt_ceiling(maknae_config::PROMPT_MAX_CEILING);
-    let mut book = Book::new(kernel.agent.as_str(), standing, true);
+    let mut said = Said::new();
     let mut printed = None;
     let (mut ended, mut bye, mut served) = (false, false, false);
     loop {
         let now = ms(start);
-        pump(&mut book, &op_tx, now, &mut conv);
-        if let Err(e) = print_new(&mut conv, &mut printed, lines) {
+        pump(book, &op_tx, now, &mut conv);
+        let shown = print_new(&mut conv, &mut printed, lines).and_then(|()| said.say(book, lines));
+        if let Err(e) = shown {
             errln!("maknae: {e}");
             return End::Failed;
         }
@@ -570,11 +677,12 @@ async fn plain<T: Tasker, L: Leaf>(
                     return End::Failed;
                 }
             },
-            Some(event) = event_rx.recv() => apply(&mut book, event, ms(start), &mut conv),
+            Some(event) = event_rx.recv() => apply(book, event, ms(start), &mut conv),
             () = tokio::time::sleep(PLAIN_TICK) => {
                 book.tick(ms(start), &mut conv);
             }
             () = &mut serve, if !served => served = true,
+            signal = ending.next() => return End::Signal(signal),
         }
     }
 }
@@ -596,6 +704,11 @@ mod tests {
         reports: Vec<TaskReportView>,
         seq: u64,
         report_with: Option<&'static str>,
+        /// Every collect after the first waits while this is set.
+        hold: bool,
+        holding: bool,
+        collects: u32,
+        unreachable: bool,
     }
 
     #[derive(Clone)]
@@ -635,6 +748,34 @@ mod tests {
             let mut state = self.state.lock().unwrap();
             state.calls.push(name);
             state
+        }
+
+        fn set(&self, f: impl FnOnce(&mut State)) {
+            f(&mut self.state.lock().unwrap());
+        }
+
+        /// Waits up to [`BOUND`] for a collect to be held.
+        fn held_collect(&self) {
+            let deadline = std::time::Instant::now() + BOUND;
+            while !self.state.lock().unwrap().holding {
+                assert!(std::time::Instant::now() < deadline, "no collect was held");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        async fn gate(&self) {
+            loop {
+                {
+                    let mut s = self.state.lock().unwrap();
+                    if !(s.hold && s.collects > 0) {
+                        s.collects += 1;
+                        s.holding = false;
+                        return;
+                    }
+                    s.holding = true;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
         }
     }
 
@@ -707,6 +848,12 @@ mod tests {
             after: Option<TaskCursor>,
         ) -> Result<TaskPage, TaskerError> {
             let s = self.call("list_page");
+            if s.unreachable {
+                return Err(TaskerError::Unreachable {
+                    after_write: false,
+                    why: "test".into(),
+                });
+            }
             let after = after.map_or(0, |a| a.seq());
             let entries = s
                 .tasks
@@ -727,7 +874,14 @@ mod tests {
             _: &AgentId,
             after: Option<TaskCursor>,
         ) -> Result<TaskReportPage, TaskerError> {
+            self.gate().await;
             let mut s = self.call("collect");
+            if s.unreachable {
+                return Err(TaskerError::Unreachable {
+                    after_write: false,
+                    why: "test".into(),
+                });
+            }
             if let Some(after) = after {
                 let upto = after.seq();
                 s.reports.retain(|r| r.cursor.seq() > upto);
@@ -760,55 +914,104 @@ mod tests {
         }
         async fn remint(&self) -> Result<(), String> {
             self.mints.fetch_add(1, Ordering::SeqCst);
-            *self.not_after.lock().unwrap() = Some(unix_now() + 3600);
+            *self.not_after.lock().unwrap() = Some(now() + 3600);
             Ok(())
         }
     }
 
+    impl Leaf for Arc<FakeLeaf> {
+        fn not_after(&self) -> Option<u64> {
+            FakeLeaf::not_after(self)
+        }
+        async fn remint(&self) -> Result<(), String> {
+            FakeLeaf::remint(self).await
+        }
+    }
+
+    fn now() -> u64 {
+        maknae_io::now_unix().unwrap()
+    }
+
     fn fresh_leaf() -> FakeLeaf {
-        FakeLeaf::expiring_at(unix_now() + 3600)
+        FakeLeaf::expiring_at(now() + 3600)
     }
 
     fn agent() -> AgentId {
         AgentId::parse("hobi").unwrap()
     }
 
-    /// A plain-line session's descriptors: input already written and closed,
-    /// output and diagnostics read back after it ends.
+    /// A plain-line session's descriptors: input written, and closed unless the
+    /// test keeps writing; output and diagnostics read back.
     struct Pipes {
         lines: Option<Lines>,
+        input: Option<OwnedFd>,
         output: OwnedFd,
+        diagnostics: OwnedFd,
     }
 
     fn pipes(input: &str) -> Pipes {
+        let mut pipes = open_pipes(input);
+        pipes.input = None;
+        pipes
+    }
+
+    fn open_pipes(input: &str) -> Pipes {
         let (in_r, in_w) = nix::unistd::pipe().unwrap();
         let (out_r, out_w) = nix::unistd::pipe().unwrap();
-        let (_err_r, err_w) = nix::unistd::pipe().unwrap();
+        let (err_r, err_w) = nix::unistd::pipe().unwrap();
         nix::unistd::write(&in_w, input.as_bytes()).unwrap();
-        drop(in_w);
         Pipes {
             lines: Some(Lines::new(in_r, out_w, err_w, 4096).unwrap()),
+            input: Some(in_w),
             output: out_r,
+            diagnostics: err_r,
         }
+    }
+
+    fn drain(fd: &OwnedFd) -> String {
+        nix::fcntl::fcntl(
+            fd,
+            nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK),
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        let mut chunk = [0u8; 4096];
+        while let Ok(n @ 1..) = nix::unistd::read(fd, &mut chunk) {
+            out.extend_from_slice(&chunk[..n]);
+        }
+        String::from_utf8(out).unwrap()
     }
 
     impl Pipes {
         fn io(&mut self) -> Io {
-            Io::Plain(self.lines.take().unwrap())
+            Io::Plain(self.lines())
         }
 
-        fn output(self) -> String {
-            nix::fcntl::fcntl(
-                &self.output,
-                nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK),
-            )
-            .unwrap();
-            let mut out = Vec::new();
-            let mut chunk = [0u8; 4096];
-            while let Ok(n @ 1..) = nix::unistd::read(&self.output, &mut chunk) {
-                out.extend_from_slice(&chunk[..n]);
+        fn lines(&mut self) -> Lines {
+            self.lines.take().unwrap()
+        }
+
+        fn type_line(&self, line: &str) {
+            nix::unistd::write(self.input.as_ref().unwrap(), line.as_bytes()).unwrap();
+        }
+
+        fn output(&self) -> String {
+            drain(&self.output)
+        }
+
+        /// Waits up to [`BOUND`] for `needle` on the diagnostics.
+        fn said(&self, seen: &mut String, needle: &str) -> bool {
+            let deadline = std::time::Instant::now() + BOUND;
+            loop {
+                seen.push_str(&drain(&self.diagnostics));
+                if seen.contains(needle) {
+                    return true;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(10));
             }
-            String::from_utf8(out).unwrap()
         }
     }
 
@@ -816,6 +1019,52 @@ mod tests {
         tokio::time::timeout(BOUND, f)
             .await
             .expect("the session did not end in time")
+    }
+
+    /// Runs a session on a thread of its own while the caller holds the one-session
+    /// turn: a session registers the ending signals, which other tests send to the
+    /// whole process.
+    fn spawn_session(
+        fake: &Fake,
+        leaf: Arc<FakeLeaf>,
+        login_expires_at: u64,
+        wait: bool,
+        io: impl FnOnce() -> Io + Send + 'static,
+    ) -> std::sync::mpsc::Receiver<(End, Left)> {
+        let (tx, done) = std::sync::mpsc::channel();
+        let session = fake.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let ended = rt.block_on(open(
+                session,
+                leaf,
+                login_expires_at,
+                "hobi",
+                wait,
+                4096,
+                io(),
+            ));
+            let _ = tx.send(ended);
+        });
+        done
+    }
+
+    fn in_turn(
+        fake: &Fake,
+        leaf: FakeLeaf,
+        login_expires_at: u64,
+        wait: bool,
+        lines: Lines,
+    ) -> (End, Left) {
+        let _one = crate::screen::testing::one_session();
+        spawn_session(fake, Arc::new(leaf), login_expires_at, wait, move || {
+            Io::Plain(lines)
+        })
+        .recv_timeout(BOUND)
+        .expect("the session did not end in time")
     }
 
     #[test]
@@ -854,7 +1103,7 @@ mod tests {
     async fn a_name_off_the_list_is_refused_and_never_run_as_a_prompt() {
         let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
         let mut io = pipes("");
-        let end = bounded(open(
+        let ended = bounded(open(
             fake.clone(),
             fresh_leaf(),
             u64::MAX,
@@ -864,7 +1113,7 @@ mod tests {
             io.io(),
         ))
         .await;
-        assert_eq!(end, End::Failed);
+        assert_eq!(ended, (End::Failed, Left::default()));
         assert_eq!(fake.calls(), ["agents"], "nothing was submitted");
         assert_eq!(io.output(), "");
         for name in ["jin", "list", "help"] {
@@ -884,7 +1133,7 @@ mod tests {
             color: None,
         });
         let mut io = pipes("hello\n");
-        let end = bounded(open(
+        let (end, _) = bounded(open(
             fake.clone(),
             fresh_leaf(),
             u64::MAX,
@@ -898,21 +1147,12 @@ mod tests {
         assert_eq!(fake.calls(), ["agents"]);
     }
 
-    #[tokio::test]
-    async fn plain_mode_exits_after_acknowledgement_and_wait_waits_for_reports() {
+    #[test]
+    fn plain_mode_exits_after_acknowledgement_and_wait_waits_for_reports() {
         let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
         let mut io = pipes("tidy my downloads\n");
-        let end = bounded(open(
-            fake.clone(),
-            fresh_leaf(),
-            u64::MAX,
-            "hobi",
-            false,
-            4096,
-            io.io(),
-        ))
-        .await;
-        assert_eq!(end, End::Left);
+        let ended = in_turn(&fake, fresh_leaf(), u64::MAX, false, io.lines());
+        assert_eq!(ended, (End::Left, Left::default()));
         let out = io.output();
         assert!(out.contains("#1 submitted\n"), "{out}");
         assert!(
@@ -924,16 +1164,7 @@ mod tests {
         let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
         fake.state.lock().unwrap().report_with = Some("moved 3 files\u{1b}[2J");
         let mut io = pipes("tidy my downloads\n");
-        let end = bounded(open(
-            fake.clone(),
-            fresh_leaf(),
-            u64::MAX,
-            "hobi",
-            true,
-            4096,
-            io.io(),
-        ))
-        .await;
+        let (end, _) = in_turn(&fake, fresh_leaf(), u64::MAX, true, io.lines());
         assert_eq!(end, End::Left);
         let out = io.output();
         assert!(
@@ -949,8 +1180,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_expiring_leaf_is_reminted_and_an_expired_login_says_so() {
-        let now = unix_now();
+    async fn an_expiring_leaf_is_reminted_and_an_expired_login_sends_nothing() {
+        let now = now();
         let kernel = Kernel {
             tasker: Fake::new(&[], 0),
             leaf: FakeLeaf::expiring_at(now + 3600),
@@ -993,23 +1224,240 @@ mod tests {
             "nothing is sent on an expired login"
         );
         assert_eq!(expired.leaf.mints.load(Ordering::SeqCst), 0);
+    }
 
+    #[test]
+    fn an_expired_login_ends_a_plain_session_and_says_so() {
+        let now = now();
         let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
         let mut io = pipes("tidy my downloads\n");
-        let end = bounded(open(
-            fake,
-            FakeLeaf::expiring_at(now),
-            now,
-            "hobi",
-            true,
-            4096,
-            io.io(),
-        ))
-        .await;
+        let (end, _) = in_turn(&fake, FakeLeaf::expiring_at(now), now, true, io.lines());
         assert_eq!(end, End::Failed);
         let out = io.output();
         assert!(out.contains(crate::agent::LOGIN_EXPIRED), "{out}");
         assert!(!out.contains(text::UNREACHABLE), "{out}");
+    }
+
+    /// Opens a full-screen session on a pty with `fake`, submits `one`, waits for a
+    /// collect to be held, and types `two`, which then waits behind it.
+    fn full_screen_behind_a_collect(
+        fake: &Fake,
+        leaf: Arc<FakeLeaf>,
+        login_expires_at: u64,
+    ) -> (
+        crate::screen::testing::Pty,
+        std::sync::mpsc::Receiver<(End, Left)>,
+    ) {
+        use crate::screen::testing::pty;
+        let pty = pty(24, 80);
+        fake.set(|s| s.hold = true);
+        let (input, output) = (pty.slave(), pty.slave());
+        let done = spawn_session(fake, leaf, login_expires_at, false, move || {
+            Io::Screen(Box::new(move || Session::enter_on(input, output)))
+        });
+        (pty, done)
+    }
+
+    fn type_one_then_two(pty: &mut crate::screen::testing::Pty, fake: &Fake) {
+        assert!(pty.out.wait_for(b"connected"), "never connected");
+        pty.type_keys(b"one\r");
+        assert!(pty.out.wait_for(b"#1 submitted"), "no echo");
+        fake.held_collect();
+        pty.type_keys(b"two\r/x\r");
+        assert!(
+            pty.out.wait_for(b"unknown command"),
+            "the lines after the request were not read"
+        );
+    }
+
+    fn ended(
+        pty: &mut crate::screen::testing::Pty,
+        done: &std::sync::mpsc::Receiver<(End, Left)>,
+    ) -> (End, Left) {
+        let ended = done.recv_timeout(crate::screen::testing::WAIT);
+        if ended.is_err() {
+            pty.hang_up();
+        }
+        ended.expect("the session did not end in time")
+    }
+
+    #[test]
+    fn a_request_queued_behind_a_collect_holds_the_first_bye_and_is_named_on_the_second() {
+        let _one = crate::screen::testing::one_session();
+        let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
+        let (mut pty, done) = full_screen_behind_a_collect(&fake, Arc::new(fresh_leaf()), u64::MAX);
+        type_one_then_two(&mut pty, &fake);
+        pty.type_keys(b"/bye\r");
+        assert!(
+            pty.out.wait_for(b"1 request is not yet sent or answered"),
+            "the first /bye was not held"
+        );
+        pty.type_keys(b"/bye\r");
+        let ended = ended(&mut pty, &done);
+        assert_eq!(
+            ended,
+            (
+                End::Failed,
+                Left {
+                    cut: false,
+                    unsent: 1
+                }
+            )
+        );
+        assert_eq!(
+            ended.1.lines("hobi"),
+            ["1 request was not sent; it was not given to hobi"]
+        );
+        assert_eq!(fake.calls().iter().filter(|c| **c == "submit").count(), 1);
+    }
+
+    #[test]
+    fn a_request_queued_behind_a_collect_is_named_after_a_signal() {
+        use nix::sys::signal::{kill, Signal};
+        let _one = crate::screen::testing::one_session();
+        let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
+        let (mut pty, done) = full_screen_behind_a_collect(&fake, Arc::new(fresh_leaf()), u64::MAX);
+        type_one_then_two(&mut pty, &fake);
+        kill(nix::unistd::Pid::this(), Signal::SIGTERM).unwrap();
+        assert_eq!(
+            ended(&mut pty, &done),
+            (
+                End::Signal(Signal::SIGTERM as i32),
+                Left {
+                    cut: false,
+                    unsent: 1
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn a_request_queued_when_the_login_expires_is_named() {
+        let _one = crate::screen::testing::one_session();
+        let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
+        let leaf = Arc::new(fresh_leaf());
+        let (mut pty, done) = full_screen_behind_a_collect(&fake, Arc::clone(&leaf), now());
+        type_one_then_two(&mut pty, &fake);
+        *leaf.not_after.lock().unwrap() = Some(0);
+        fake.set(|s| s.hold = false);
+        assert!(pty.out.wait_for(b"login expired"), "the login never ended");
+        pty.type_keys(b"/bye\r");
+        assert_eq!(
+            ended(&mut pty, &done),
+            (
+                End::Failed,
+                Left {
+                    cut: false,
+                    unsent: 1
+                }
+            )
+        );
+        assert_eq!(fake.calls().iter().filter(|c| **c == "submit").count(), 1);
+    }
+
+    #[test]
+    fn a_plain_session_names_a_request_queued_behind_a_collect_after_a_signal() {
+        use nix::sys::signal::{kill, Signal};
+        let _one = crate::screen::testing::one_session();
+        let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
+        fake.set(|s| s.hold = true);
+        let mut io = open_pipes("one\n");
+        let done = spawn_session(&fake, Arc::new(fresh_leaf()), u64::MAX, false, {
+            let lines = io.lines();
+            move || Io::Plain(lines)
+        });
+        fake.held_collect();
+        io.type_line("two\n");
+        std::thread::sleep(Duration::from_millis(500));
+        kill(nix::unistd::Pid::this(), Signal::SIGTERM).unwrap();
+        assert_eq!(
+            done.recv_timeout(BOUND).expect("the session did not end"),
+            (
+                End::Signal(Signal::SIGTERM as i32),
+                Left {
+                    cut: false,
+                    unsent: 1
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn a_plain_session_names_a_request_queued_when_the_login_expires() {
+        let _one = crate::screen::testing::one_session();
+        let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
+        fake.set(|s| s.hold = true);
+        let leaf = Arc::new(fresh_leaf());
+        let mut io = open_pipes("one\n");
+        let done = spawn_session(&fake, Arc::clone(&leaf), now(), false, {
+            let lines = io.lines();
+            move || Io::Plain(lines)
+        });
+        fake.held_collect();
+        io.type_line("two\n");
+        std::thread::sleep(Duration::from_millis(500));
+        *leaf.not_after.lock().unwrap() = Some(0);
+        fake.set(|s| s.hold = false);
+        let deadline = std::time::Instant::now() + BOUND;
+        while !io.output().contains(crate::agent::LOGIN_EXPIRED) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the login never ended"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        io.input = None;
+        assert_eq!(
+            done.recv_timeout(BOUND).expect("the session did not end"),
+            (
+                End::Failed,
+                Left {
+                    cut: false,
+                    unsent: 1
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn a_plain_session_says_on_stderr_when_the_kernel_is_lost_and_back_and_a_task_is_held() {
+        let _one = crate::screen::testing::one_session();
+        let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
+        let mut io = open_pipes("one\n");
+        let done = spawn_session(&fake, Arc::new(fresh_leaf()), u64::MAX, false, {
+            let lines = io.lines();
+            move || Io::Plain(lines)
+        });
+        let mut seen = String::new();
+        let deadline = std::time::Instant::now() + BOUND;
+        while !fake.calls().contains(&"submit") {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "nothing was submitted"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        fake.set(|s| s.unreachable = true);
+        assert!(
+            io.said(&mut seen, "maknae: hobi · kernel unreachable, retrying\n"),
+            "{seen:?}"
+        );
+        fake.set(|s| s.unreachable = false);
+        assert!(io.said(&mut seen, "maknae: hobi · connected\n"), "{seen:?}");
+        fake.set(|s| s.tasks[0].state = TaskState::Held);
+        let held = format!("maknae: hobi #1 {}\n", text::held_line());
+        assert!(io.said(&mut seen, &held), "{seen:?}");
+        io.input = None;
+        assert_eq!(
+            done.recv_timeout(BOUND).expect("the session did not end").0,
+            End::Left
+        );
+        assert_eq!(seen.matches(&held).count(), 1, "said once: {seen:?}");
+        assert_eq!(
+            seen.matches("unreachable").count(),
+            1,
+            "said once: {seen:?}"
+        );
     }
 
     #[test]
@@ -1023,24 +1471,8 @@ mod tests {
             color: None,
         });
         let (input, output) = (pty.slave(), pty.slave());
-        let (tx, done) = std::sync::mpsc::channel();
-        let session = fake.clone();
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            let enter: Enter = Box::new(move || Session::enter_on(input, output));
-            let end = rt.block_on(open(
-                session,
-                fresh_leaf(),
-                u64::MAX,
-                "hobi",
-                false,
-                4096,
-                Io::Screen(enter),
-            ));
-            let _ = tx.send(end);
+        let done = spawn_session(&fake, Arc::new(fresh_leaf()), u64::MAX, false, move || {
+            Io::Screen(Box::new(move || Session::enter_on(input, output)))
         });
         assert!(pty.out.wait_for(b"TEST BANNER 630"), "no banner");
         assert!(
@@ -1054,24 +1486,15 @@ mod tests {
         if end.is_err() {
             pty.hang_up();
         }
-        assert_eq!(end, Ok(End::Left));
+        assert_eq!(end, Ok((End::Left, Left::default())));
         assert_eq!(fake.calls().iter().filter(|c| **c == "submit").count(), 1);
     }
 
-    #[tokio::test]
-    async fn wait_ends_once_a_dropped_task_is_closed() {
+    #[test]
+    fn wait_ends_once_a_dropped_task_is_closed() {
         let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
         let mut io = pipes("tidy my downloads\n/drop\n");
-        let end = bounded(open(
-            fake.clone(),
-            fresh_leaf(),
-            u64::MAX,
-            "hobi",
-            true,
-            4096,
-            io.io(),
-        ))
-        .await;
+        let (end, _) = in_turn(&fake, fresh_leaf(), u64::MAX, true, io.lines());
         assert_eq!(end, End::Left);
         let out = io.output();
         assert!(out.contains("dropped #1\n"), "{out}");
@@ -1104,7 +1527,7 @@ mod tests {
                 Err("vault refused".into())
             }
         }
-        let now = unix_now();
+        let now = now();
         let kernel = Kernel {
             tasker: Fake::new(&[], 0),
             leaf: Refusing(Mutex::new(Some(now + 30)), AtomicU32::new(0)),
@@ -1148,5 +1571,46 @@ mod tests {
         assert_eq!(screen_end(Ok(Exit::InputClosed), false), End::Left);
         assert_eq!(screen_end(Ok(Exit::Bye), true), End::Failed);
         assert_eq!(screen_end(Err(TermError::Ended), false), End::Failed);
+    }
+
+    #[test]
+    fn an_agent_list_that_cannot_be_written_fails() {
+        struct Closed;
+        impl std::io::Write for Closed {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let roster = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0).roster;
+        assert_eq!(print_list(&mut Closed, &roster), ExitCode::FAILURE);
+        let mut out = Vec::new();
+        assert_eq!(print_list(&mut out, &roster), ExitCode::SUCCESS);
+        assert_eq!(out, b"hobi\n");
+    }
+
+    #[test]
+    fn what_a_session_left_behind_fails_it_and_is_named() {
+        let clean = Left::default();
+        assert_eq!(clean.end(End::Left), End::Left);
+        assert!(clean.lines("hobi").is_empty());
+        let unsent = Left {
+            cut: false,
+            unsent: 2,
+        };
+        assert_eq!(unsent.end(End::Left), End::Failed);
+        assert_eq!(unsent.end(End::Signal(15)), End::Signal(15));
+        assert_eq!(
+            unsent.lines("hobi"),
+            ["2 requests were not sent; they were not given to hobi"]
+        );
+        let cut = Left {
+            cut: true,
+            unsent: 0,
+        };
+        assert_eq!(cut.end(End::Left), End::Failed);
+        assert_eq!(cut.lines("hobi"), [CUT_OFF]);
     }
 }

@@ -16,7 +16,7 @@ pub enum Parsed<'a> {
     Bye,
     Help,
     /// A `/word` the session does not know.
-    Unknown(&'a str),
+    Unknown,
     /// A known command written wrongly: the line that says how to write it.
     Usage(&'static str),
 }
@@ -48,7 +48,7 @@ pub fn parse(line: &str) -> Parsed<'_> {
         "list" => bare(args, Parsed::List, LIST_USAGE),
         "bye" => bare(args, Parsed::Bye, BYE_USAGE),
         "help" => bare(args, Parsed::Help, HELP_USAGE),
-        _ => Parsed::Unknown(&line[..=word.len()]),
+        _ => Parsed::Unknown,
     }
 }
 
@@ -108,13 +108,9 @@ mod tests {
 
     #[test]
     fn an_unknown_slash_word_is_never_sent_as_a_task() {
-        assert_eq!(
-            parse("/frobnicate the files"),
-            Parsed::Unknown("/frobnicate")
-        );
-        assert_eq!(parse("/etc/hosts please"), Parsed::Unknown("/etc/hosts"));
-        assert_eq!(parse("/"), Parsed::Unknown("/"));
-        assert_eq!(parse("/Stop"), Parsed::Unknown("/Stop"));
+        for line in ["/frobnicate the files", "/etc/hosts please", "/", "/Stop"] {
+            assert_eq!(parse(line), Parsed::Unknown, "{line}");
+        }
         assert_eq!(parse("summarise /etc/hosts"), Parsed::Request);
         assert_eq!(parse(" /stop"), Parsed::Request);
     }

@@ -133,6 +133,16 @@ enum Asked {
     Status(u32),
 }
 
+impl Asked {
+    /// Something the person typed, not a read the session makes on its own.
+    fn typed(&self) -> bool {
+        !matches!(
+            self,
+            Asked::Collect { .. } | Asked::Poll { .. } | Asked::ListAll { opening: true }
+        )
+    }
+}
+
 struct Task {
     number: u32,
     task: TaskRef,
@@ -212,6 +222,8 @@ pub struct Book {
     adopt: bool,
     unsaid: VecDeque<String>,
     folded: bool,
+    warned: bool,
+    lost: usize,
 }
 
 impl std::fmt::Debug for Book {
@@ -262,7 +274,14 @@ impl Book {
             adopt: false,
             unsaid: VecDeque::with_capacity(UNSAID_CAP + 1),
             folded: false,
+            warned: false,
+            lost: 0,
         }
+    }
+
+    /// The agent's name, made safe to display.
+    pub fn agent(&self) -> &str {
+        &self.agent
     }
 
     pub fn status(&self) -> &[String] {
@@ -309,9 +328,56 @@ impl Book {
 
     /// Whether anything typed or the opening reads are still queued or unanswered.
     pub fn busy(&self) -> bool {
-        !self.queue.is_empty()
+        self.unanswered() > 0
+            || !self.queue.is_empty()
             || matches!(self.flight, Some(Asked::ListAll { opening: true }))
-            || self.steering_in_flight()
+    }
+
+    fn queued(&self) -> usize {
+        self.queue.iter().filter(|(_, asked)| asked.typed()).count()
+    }
+
+    /// Requests the person typed that were never sent: still queued, or dropped when
+    /// the login ended.
+    pub fn unsent(&self) -> usize {
+        self.lost + self.queued()
+    }
+
+    /// Requests the person typed that are queued, or sent and not yet answered.
+    pub fn unanswered(&self) -> usize {
+        self.queued() + usize::from(self.flight.as_ref().is_some_and(Asked::typed))
+    }
+
+    /// The person asked to leave. While requests are unanswered the first ask is
+    /// refused with a notice and the next one leaves.
+    pub fn leave(&mut self, conv: &mut Conversation) -> Entered {
+        let n = self.unanswered();
+        if n == 0 || self.warned {
+            return Entered::Leave;
+        }
+        self.warned = true;
+        self.say(conv, &text::not_answered_yet(n));
+        Entered::Stay
+    }
+
+    /// The connection as the header names it.
+    pub fn link(&self) -> &'static str {
+        match self.connection {
+            Connection::Connecting => text::CONNECTING,
+            Connection::Connected => text::CONNECTED,
+            Connection::Unreachable => text::UNREACHABLE,
+            Connection::Unreadable => text::UNREADABLE,
+            Connection::NoIdentity => text::NO_IDENTITY,
+        }
+    }
+
+    /// The numbers of the shown tasks that are on hold.
+    pub fn held(&self) -> Vec<u32> {
+        self.tasks
+            .iter()
+            .filter(|t| t.shown() && t.state() == Some(TaskState::Held))
+            .map(|t| t.number)
+            .collect()
     }
 
     /// Whether a submit, add, stop or drop is sent and unanswered.
@@ -325,6 +391,9 @@ impl Book {
     /// An entered line: a request, a command, or nothing.
     pub fn enter(&mut self, line: Zeroizing<String>, now: u64, conv: &mut Conversation) -> Entered {
         let parsed = parse(&line);
+        if parsed != Parsed::Bye {
+            self.warned = false;
+        }
         if self.stopped && !matches!(parsed, Parsed::Empty | Parsed::Bye | Parsed::Help) {
             self.say(conv, text::LOGIN_STOPPED);
             return Entered::Stay;
@@ -386,19 +455,15 @@ impl Book {
                     .push_back((Op::ListAll, Asked::ListAll { opening: false }));
                 Entered::Stay
             }
-            Parsed::Bye => Entered::Leave,
+            Parsed::Bye => self.leave(conv),
             Parsed::Help => {
                 for line in text::help_lines() {
                     self.say(conv, &line);
                 }
                 Entered::Stay
             }
-            Parsed::Unknown(word) => {
-                let word = text::safe(word);
-                self.say(
-                    conv,
-                    &format!("{word} is not a command and was not sent: /help lists the commands"),
-                );
+            Parsed::Unknown => {
+                self.say(conv, text::UNKNOWN_COMMAND);
                 Entered::Stay
             }
             Parsed::Usage(usage) => {
@@ -536,7 +601,7 @@ impl Book {
         if self.held.is_empty() && (self.collect_soon || now >= self.collected_at + every) {
             self.collect_soon = false;
             self.collected_at = now;
-            let after = self.ack_upto(conv);
+            let after = self.ack_upto(conv).filter(|upto| Some(*upto) != self.acked);
             self.flight = Some(Asked::Collect {
                 after,
                 away: self.away,
@@ -917,6 +982,7 @@ impl Book {
     pub fn stop(&mut self, line: &str, conv: &mut Conversation) {
         if !self.stopped {
             self.say(conv, line);
+            self.lost = self.unanswered();
         }
         self.stopped = true;
         self.flight = None;
@@ -1355,7 +1421,14 @@ mod tests {
         assert!(matches!(run.op(), Op::Collect { after: Some(a) } if a.seq() == 5));
         run.answer(reports(vec![]));
         run.now += COLLECT_IDLE_MS;
-        assert!(matches!(run.op(), Op::Collect { after: Some(a) } if a.seq() == 5));
+        assert!(
+            matches!(run.op(), Op::Collect { after: None }),
+            "an acknowledgement already made is not sent again"
+        );
+        run.answer(reports(vec![report(9, 6, "later", None)]));
+        run.draw_all();
+        run.now += COLLECT_IDLE_MS;
+        assert!(matches!(run.op(), Op::Collect { after: Some(a) } if a.seq() == 6));
     }
 
     #[test]
@@ -1707,11 +1780,8 @@ mod tests {
         let mut run = Run::new(Standing::Enrolled);
         run.enter("/frobnicate everything");
         run.nothing_queued();
-        assert_eq!(
-            run.last_text(),
-            "/frobnicate is not a command and was not sent: /help lists the commands"
-        );
-        assert!(run.texts().iter().all(|t| t != "/frobnicate everything"));
+        assert_eq!(run.last_text(), "unknown command; /help lists them");
+        assert!(run.texts().iter().all(|t| !t.contains("frobnicate")));
         assert_eq!(run.enter("/bye"), Entered::Leave);
     }
 
@@ -1903,7 +1973,7 @@ mod tests {
         run.answer(reports(vec![report(1, 1, &"a".repeat(60), None)]));
         let _ = run.op();
         run.answer(Ok(Answer::Tasks(vec![])));
-        run.enter("/frobnicate");
+        refused(&mut run, "/stop 1");
         assert_eq!(run.texts().len(), 1);
         assert_eq!(
             run.book.header().right,
@@ -1913,9 +1983,15 @@ mod tests {
         run.wait(100);
         assert_eq!(
             run.last_text(),
-            "/frobnicate is not a command and was not sent: /help lists the commands"
+            text::outcome_unknown_line(Unknown::Stop(1))
         );
         assert_eq!(run.book.header().right, "");
+    }
+
+    fn refused(run: &mut Run, line: &str) {
+        run.enter(line);
+        let _ = run.op();
+        run.answer(Err(REFUSED));
     }
 
     fn full_run() -> Run {
@@ -1934,16 +2010,16 @@ mod tests {
     #[test]
     fn deferred_notices_all_arrive_in_order() {
         let mut run = full_run();
-        run.enter("/first");
-        run.enter("/second");
+        refused(&mut run, "/stop 1");
+        refused(&mut run, "/drop 1");
         assert_eq!(run.texts().len(), 1);
         for _ in 0..4 {
             run.draw_all();
             run.wait(100);
         }
         let texts = run.texts();
-        let first = texts.iter().position(|t| t.starts_with("/first "));
-        let second = texts.iter().position(|t| t.starts_with("/second "));
+        let first = texts.iter().position(|t| t.starts_with("stopping #1 "));
+        let second = texts.iter().position(|t| t.starts_with("dropping #1 "));
         assert!(
             matches!((first, second), (Some(a), Some(b)) if a < b),
             "{texts:?}"
@@ -1955,7 +2031,7 @@ mod tests {
         let mut run = full_run();
         let cap = run.book.unsaid.capacity();
         for n in 0..12 {
-            run.enter(&format!("/w{n}"));
+            refused(&mut run, if n % 2 == 0 { "/stop 1" } else { "/drop 1" });
         }
         assert_eq!(run.book.unsaid.capacity(), cap, "the queue never grows");
         for _ in 0..20 {
@@ -1963,9 +2039,12 @@ mod tests {
             run.wait(100);
         }
         let texts = run.texts();
-        let said: Vec<_> = texts.iter().filter(|t| t.starts_with("/w")).collect();
+        let said: Vec<_> = texts
+            .iter()
+            .filter(|t| t.ends_with("the kernel is asked again"))
+            .collect();
         assert_eq!(said.len(), UNSAID_CAP, "{texts:?}");
-        assert!(said[0].starts_with("/w0 ") && said[UNSAID_CAP - 1].starts_with("/w7 "));
+        assert!(said[0].starts_with("stopping") && said[UNSAID_CAP - 1].starts_with("dropping"));
         assert_eq!(
             texts.iter().filter(|t| *t == text::MORE_NOTICES).count(),
             1,
@@ -1985,5 +2064,109 @@ mod tests {
         run.none_due();
         assert_eq!(run.book.header().left, "hobi · login expired");
         assert!(run.book.settled(true));
+    }
+
+    /// A run with task #1 open and a collect in flight, so what is typed next waits.
+    fn behind_a_collect() -> Run {
+        let mut run = Run::new(Standing::Enrolled);
+        run.submit("one", 1, 1);
+        run.now = COLLECT_OPEN_MS;
+        while !matches!(run.op(), Op::Collect { .. }) {
+            run.answer(page(vec![view(1, 1, TaskState::Working)], None));
+        }
+        run
+    }
+
+    #[test]
+    fn a_request_queued_behind_a_collect_holds_the_first_leave() {
+        let mut run = behind_a_collect();
+        assert_eq!(run.book.unanswered(), 0);
+        run.enter("two");
+        assert_eq!((run.book.unsent(), run.book.unanswered()), (1, 1));
+        assert!(run.book.busy());
+        assert_eq!(run.enter("/bye"), Entered::Stay);
+        assert_eq!(
+            run.last_text(),
+            "1 request is not yet sent or answered: /bye or Ctrl-D again leaves without it"
+        );
+        assert_eq!(run.book.leave(&mut run.conv), Entered::Leave);
+        assert_eq!(run.book.unsent(), 1, "leaving does not send it");
+    }
+
+    #[test]
+    fn a_leave_refused_once_is_asked_again_after_more_is_typed() {
+        let mut run = behind_a_collect();
+        run.enter("two");
+        run.enter("/status 1");
+        assert_eq!(run.book.unanswered(), 2);
+        assert_eq!(run.book.leave(&mut run.conv), Entered::Stay);
+        assert_eq!(
+            run.last_text(),
+            "2 requests are not yet sent or answered: /bye or Ctrl-D again leaves without them"
+        );
+        run.enter("three");
+        assert_eq!(run.enter("/bye"), Entered::Stay, "a new request asks again");
+        assert_eq!(run.enter("/bye"), Entered::Leave);
+    }
+
+    #[test]
+    fn a_request_sent_and_unanswered_also_holds_the_leave() {
+        let mut run = Run::new(Standing::Enrolled);
+        run.enter("one");
+        let _ = run.op();
+        assert_eq!((run.book.unsent(), run.book.unanswered()), (0, 1));
+        assert_eq!(run.enter("/bye"), Entered::Stay);
+        assert_eq!(run.enter("/bye"), Entered::Leave);
+        assert!(run.book.steering_in_flight());
+    }
+
+    #[test]
+    fn nothing_unanswered_leaves_at_once() {
+        let mut run = behind_a_collect();
+        assert_eq!(run.book.leave(&mut run.conv), Entered::Leave);
+        assert_eq!(run.enter("/bye"), Entered::Leave);
+    }
+
+    #[test]
+    fn a_login_that_ends_with_requests_queued_counts_them_unsent() {
+        let mut run = behind_a_collect();
+        run.enter("two");
+        run.enter("/stop 1");
+        run.book.stop(
+            "your Vault login expired: run `maknae login`",
+            &mut run.conv,
+        );
+        assert_eq!(run.book.unsent(), 2);
+        assert_eq!(run.book.unanswered(), 0, "nothing more will be sent");
+        assert!(!run.book.busy());
+    }
+
+    #[test]
+    fn a_login_that_ends_before_the_verb_in_flight_was_sent_counts_it_unsent() {
+        let mut run = Run::new(Standing::Enrolled);
+        run.enter("one");
+        let _ = run.op();
+        run.book.stop(
+            "your Vault login expired: run `maknae login`",
+            &mut run.conv,
+        );
+        assert_eq!(run.book.unsent(), 1);
+        assert!(!run.book.steering_in_flight());
+    }
+
+    #[test]
+    fn the_connection_and_held_tasks_are_known_for_a_session_without_a_screen() {
+        let mut run = Run::with(Standing::Enrolled, true, vec![], vec![]);
+        assert_eq!(run.book.link(), text::CONNECTED);
+        run.submit("one", 1, 1);
+        run.now = 1_000;
+        let _ = run.op();
+        run.answer(Err(Failure::Unreachable { after_write: false }));
+        assert_eq!(run.book.link(), text::UNREACHABLE);
+        run.now = 2_000;
+        let _ = run.op();
+        run.answer(page(vec![view(1, 1, TaskState::Held)], None));
+        assert_eq!(run.book.link(), text::CONNECTED);
+        assert_eq!(run.book.held(), [1]);
     }
 }
