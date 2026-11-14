@@ -20,11 +20,18 @@ fn response_caps(transport: &maknae_config::TransportConfig) -> FrameCaps {
 /// knows only as enrollment copied it.
 fn reply_caps(verb: &maknae_proto::Verb, transport: &maknae_config::TransportConfig) -> FrameCaps {
     match verb {
-        maknae_proto::Verb::TaskClaim { .. } | maknae_proto::Verb::TaskReport { .. } => {
-            FrameCaps::responses(maknae_proto::prompt_response_cap(
-                maknae_config::PROMPT_MAX_CEILING,
-            ))
-        }
+        maknae_proto::Verb::TaskClaim { .. }
+        | maknae_proto::Verb::TaskReport { .. }
+        | maknae_proto::Verb::TaskSubmit { .. }
+        | maknae_proto::Verb::TaskAdd { .. }
+        | maknae_proto::Verb::TaskStatus { .. }
+        | maknae_proto::Verb::TaskList { .. }
+        | maknae_proto::Verb::TaskStop { .. }
+        | maknae_proto::Verb::TaskDrop { .. }
+        | maknae_proto::Verb::TaskCollect { .. }
+        | maknae_proto::Verb::AgentList { .. } => FrameCaps::responses(
+            maknae_proto::prompt_response_cap(maknae_config::PROMPT_MAX_CEILING),
+        ),
         _ => response_caps(transport),
     }
 }
@@ -211,6 +218,13 @@ pub async fn send_verb(
     .await
 }
 
+/// A failed send, and whether the request frame had finished writing when it failed.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct SendFailure {
+    pub(crate) after_write: bool,
+    pub(crate) why: String,
+}
+
 /// [`send_verb`] over a stream `connect` opens, for this one verb, with `task` cited on the request.
 pub(crate) async fn send_via<S: Wire>(
     connect: impl std::future::Future<Output = Result<S, maknae_vault::VaultError>>,
@@ -221,22 +235,51 @@ pub(crate) async fn send_via<S: Wire>(
     transport: &maknae_config::TransportConfig,
     diag: &mut (dyn FnMut(String) + Send),
 ) -> Result<SentOutcome, String> {
+    send_located(connect, task, request_verb, content, check, transport, diag)
+        .await
+        .map_err(|f| f.why)
+}
+
+/// [`send_via`], with the failure saying whether it came after the request was written.
+pub(crate) async fn send_located<S: Wire>(
+    connect: impl std::future::Future<Output = Result<S, maknae_vault::VaultError>>,
+    task: Option<maknae_proto::TaskId>,
+    request_verb: maknae_proto::Verb,
+    content: Option<maknae_proto::Bytes>,
+    check: crate::mutation::WriteCheck,
+    transport: &maknae_config::TransportConfig,
+    diag: &mut (dyn FnMut(String) + Send),
+) -> Result<SentOutcome, SendFailure> {
     let mutating = mutates(&request_verb);
-    settle(
+    settle_located(
         mutating,
         exchange(connect, task, request_verb, content, check, transport, diag).await,
     )
 }
 
+#[cfg(test)]
 fn settle(mutating: bool, sent: Result<SentOutcome, Failed>) -> Result<SentOutcome, String> {
+    settle_located(mutating, sent).map_err(|f| f.why)
+}
+
+fn settle_located(
+    mutating: bool,
+    sent: Result<SentOutcome, Failed>,
+) -> Result<SentOutcome, SendFailure> {
+    let failure = |after_write, why| SendFailure { after_write, why };
     match sent {
         Ok(sent) => Ok(sent),
-        Err(Failed::BeforeGrant(why)) => before_grant(mutating, why),
-        Err(Failed::After(why)) => Err(why),
+        Err(Failed::Unsent(why)) => before_grant(mutating, why).map_err(|why| failure(false, why)),
+        Err(Failed::BeforeGrant(why)) => {
+            before_grant(mutating, why).map_err(|why| failure(true, why))
+        }
+        Err(Failed::After(why)) => Err(failure(true, why)),
     }
 }
 
 enum Failed {
+    /// No request frame had been written: nothing the kernel could have acted on.
+    Unsent(String),
     BeforeGrant(String),
     After(String),
 }
@@ -270,6 +313,7 @@ async fn exchange<S: Wire>(
 ) -> Result<SentOutcome, Failed> {
     let mutating = mutates(&request_verb);
     let before = Failed::BeforeGrant;
+    let unsent = Failed::Unsent;
     // Bound the client-side TLS handshake by the configured `handshake_timeout_ms`: a
     // process that accepts the Unix socket but never completes TLS must not hang the CLI
     // forever (it still fails non-zero).
@@ -280,12 +324,12 @@ async fn exchange<S: Wire>(
     .await;
     let mut stream = match connect {
         Err(_elapsed) => {
-            return Err(before(format!(
+            return Err(unsent(format!(
                 "TLS handshake to the daemon timed out after {}ms",
                 transport.handshake_timeout_ms
             )))
         }
-        Ok(r) => r.map_err(|e| before(e.to_string()))?,
+        Ok(r) => r.map_err(|e| unsent(e.to_string()))?,
     };
 
     // ADR-0009: for a term that names an object, WE open it — as the subject, for
@@ -300,7 +344,7 @@ async fn exchange<S: Wire>(
         if let Some(line) = crate::mutation::arming_diagnostic(prepared) {
             diag(line);
         }
-        armed = match prepared.descriptor().map_err(|e| before(e.to_string()))? {
+        armed = match prepared.descriptor().map_err(|e| unsent(e.to_string()))? {
             Some(fd) => stream.arm(fd),
             None => false,
         };
@@ -321,7 +365,7 @@ async fn exchange<S: Wire>(
         prompt: maknae_proto::prompt_request_cap(transport.prompt_max_bytes),
     };
     let body = encode_request_zeroizing(&request, request_caps.cap(class))
-        .map_err(|e| before(e.to_string()))?;
+        .map_err(|e| unsent(e.to_string()))?;
     let written = send_request_frame(&mut stream, class, &body, transport)
         .await
         .map_err(before)?;

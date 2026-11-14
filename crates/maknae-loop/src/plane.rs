@@ -2,7 +2,7 @@
 //! live daemon, Vault and certificates, so it is T3; every decision it feeds
 //! is T1 in `maknae_agent::wire`.
 use crate::keys::{AgentKeys, KeySupply};
-use crate::send::{send_via, write_request, Wire};
+use crate::send::{send_located, send_via, write_request, SendFailure, Wire};
 use maknae_agent::plane::{
     ListOutcome, Plane, PlaneError, ReadBasis, ReadOutcome, StatOutcome, WriteOutcome,
 };
@@ -67,6 +67,16 @@ pub struct PlaneDial {
     trust: Arc<TrustBundle>,
 }
 
+impl PlaneDial {
+    pub fn new(socket: PathBuf, client: Arc<PlaneClient>, trust: Arc<TrustBundle>) -> Self {
+        Self {
+            socket,
+            client,
+            trust,
+        }
+    }
+}
+
 impl Dial for PlaneDial {
     type Stream = AuthenticatedStream;
     fn dial(&self) -> impl Future<Output = Result<AuthenticatedStream, VaultError>> + Send {
@@ -91,6 +101,14 @@ fn cite_for(verb: &Verb, cited: Option<TaskId>) -> Option<TaskId> {
 }
 
 impl<D: Dial> Link<D> {
+    pub(crate) fn new(dial: D, transport: TransportConfig) -> Self {
+        Self {
+            dial,
+            transport,
+            cite: Mutex::new(None),
+        }
+    }
+
     fn cited(&self) -> Option<TaskId> {
         // A poisoned guard still holds a whole `Option<TaskId>`: it is only ever assigned.
         *self.cite.lock().unwrap_or_else(PoisonError::into_inner)
@@ -98,6 +116,27 @@ impl<D: Dial> Link<D> {
 
     pub(crate) fn transport(&self) -> &TransportConfig {
         &self.transport
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dial_for_test(&self) -> &D {
+        &self.dial
+    }
+
+    pub(crate) async fn send_located(
+        &self,
+        verb: Verb,
+    ) -> Result<crate::outcome::SentOutcome, SendFailure> {
+        send_located(
+            self.dial.dial(),
+            cite_for(&verb, self.cited()),
+            verb,
+            None,
+            crate::mutation::WriteCheck::Unchecked,
+            &self.transport,
+            &mut |_| {},
+        )
+        .await
     }
 
     pub(crate) async fn send(
