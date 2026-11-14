@@ -173,17 +173,18 @@ fn main() {
 #[cfg(test)]
 mod tests {
 
-    /// The deputy's unit carries EVERY `[Service]` line maknaed's unit
-    /// carries, except a NAMED set that differs by design, and NEITHER carries
-    /// the two directives maknaed's unit records as a measured SIGSYS
-    /// crash-loop for aws-lc-fips — the module both binaries install at start.
-    /// Derived from the daemon's file, not an allowlist: a directive added to
-    /// maknaed.service is held to the deputy by default (review round 6; the
+    /// The deputy's and the Agent Daemon's units each carry EVERY `[Service]`
+    /// line maknaed's unit carries, except a NAMED set that differs by design,
+    /// and none carries the two directives maknaed's unit records as a measured
+    /// SIGSYS crash-loop for aws-lc-fips — the module all three binaries install
+    /// at start. Derived from the daemon's file, not an allowlist: a directive
+    /// added to maknaed.service is held to both by default (review round 6; the
     /// first version of this test was an allowlist that already missed
     /// `AmbientCapabilities=`). Lines are trimmed, as systemd trims them.
     #[test]
     fn the_units_confinement_is_maknaeds_and_never_the_two_fips_incompatible_directives() {
         let deputy = include_str!("../../../packaging/common/maknae-egress.service");
+        let agent = include_str!("../../../packaging/common/maknae-agent@.service");
         let daemon = include_str!("../../../packaging/common/maknaed.service");
         fn service_lines(unit: &str) -> Vec<&str> {
             let mut in_service = false;
@@ -200,7 +201,7 @@ mod tests {
             }
             out
         }
-        for unit in [deputy, daemon] {
+        for unit in [deputy, agent, daemon] {
             for l in service_lines(unit) {
                 assert!(
                     !l.starts_with("MemoryDenyWriteExecute="),
@@ -232,22 +233,43 @@ mod tests {
             "Type=",
             "User=",
         ];
-        let deputy_lines = service_lines(deputy);
-        let mut held = 0;
-        for line in service_lines(daemon) {
-            if DEPUTY_DIFFERS.iter().any(|p| line.starts_with(p)) {
-                continue;
+        // The account and its home come from the drop-in enroll writes.
+        const AGENT_DIFFERS: &[&str] = &[
+            "ExecStart=",
+            "ExecReload=",
+            "LoadCredentialEncrypted=",
+            "ReadWritePaths=",
+            "RestartForceExitStatus=",
+            "RuntimeDirectory=",
+            "RuntimeDirectoryMode=",
+            "StateDirectory=",
+            "StateDirectoryMode=",
+            "SupplementaryGroups=",
+            "SyslogIdentifier=",
+            "TimeoutStopSec=",
+            "User=",
+        ];
+        for (name, unit, differs, floor) in [
+            ("maknae-egress.service", deputy, DEPUTY_DIFFERS, 17),
+            ("maknae-agent@.service", agent, AGENT_DIFFERS, 25),
+        ] {
+            let lines = service_lines(unit);
+            let mut held = 0;
+            for line in service_lines(daemon) {
+                if differs.iter().any(|p| line.starts_with(p)) {
+                    continue;
+                }
+                assert!(
+                    lines.contains(&line),
+                    "maknaed.service's `{line}` is missing from {name}"
+                );
+                held += 1;
             }
             assert!(
-                deputy_lines.contains(&line),
-                "maknaed.service's `{line}` is missing from maknae-egress.service"
+                held >= floor,
+                "only {held} hardening lines were held to {name}"
             );
-            held += 1;
         }
-        assert!(
-            held >= 17,
-            "only {held} hardening lines were held to the deputy"
-        );
     }
 
     #[test]

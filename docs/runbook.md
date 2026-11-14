@@ -1507,25 +1507,69 @@ The `syncing` records are written ahead of the store transition at their revisio
 
 An Agent Daemon runs under its own service account, one per agent, and reaches `maknaed` only on the agent socket. Its configuration is the directory `/etc/maknae/agents/<id>/`: `enrollment.yaml` and `agent.yaml`, which `maknae enroll agent` writes, and `policy.yaml` and optionally `persona.md`, which you write ([configuration §6.4](configuration.md#64-enrolling-an-agent-daemon) has every rule and refusal). The steps below use the agent id `hobi`. They are not yet measured on a live host.
 
-1. **Create the account with a non-login shell.** It must not be root, the principal, a Maknae daemon account or a member of `maknae`, `_maknae` or `_maknae-egress`.
+1. **Create the agent's account.** Enroll never creates it; it checks it, and refuses an account that fails any of these:
+
+   - it exists, has its own uid (no other account name resolves to that uid), and is not root, the principal's account, `_maknae` or `_maknae-egress`;
+   - it is a member of `maknae-agents`, and not of `maknae`, `_maknae` or `_maknae-egress`;
+   - its shell is `/usr/sbin/nologin`, `/sbin/nologin`, `/usr/bin/nologin`, `/bin/false` or `/usr/bin/false`;
+   - no other agent is enrolled with its uid, and `bindings.yaml` does not name it under `admin`, `user` or `guest` (naming it under `adversary` contains it);
+   - its home is an absolute, existing directory, written exactly as the system resolves it (no symbolic link, `.`, `..`, repeated or trailing `/`), with no whitespace, control character, `%`, `"`, `'` or `\`, and on Linux only `A-Z`, `a-z`, `0-9`, `.`, `_`, `-` and `/`;
+   - on an SELinux host, its home is labelled `maknae_agent_home_t`;
+   - on a host with the AppArmor profile installed, the kernel enforces AppArmor.
+
+   The daemon also reads a persona from the home only when the account owns it and neither group nor others can write it, so create the home `0750` (or `0700`), owned by the account. Give the account its own primary group. No person belongs in `maknae-agents`: the agent socket is group-owned by it.
+
+   **RHEL family (EL9, EL10).** Agent homes go in `/var/lib/maknae-agents`, which the package creates; the SELinux domain writes nowhere else.
 
    ```bash
-   sudo useradd --system --create-home --shell /usr/sbin/nologin hobi        # Linux
-   sudo sysadminctl -addUser hobi -shell /usr/bin/false                        # macOS
+   sudo useradd --system --user-group --groups maknae-agents \
+     --home-dir /var/lib/maknae-agents/hobi --no-create-home \
+     --shell /usr/sbin/nologin --comment "Maknae agent hobi" hobi
+   sudo install -d -m 0750 -o hobi -g hobi /var/lib/maknae-agents/hobi
+   sudo restorecon -RF /var/lib/maknae-agents/hobi
+   ls -Zd /var/lib/maknae-agents/hobi    # ... maknae_agent_home_t ...
+   id hobi                               # groups include maknae-agents and nothing Maknae else
    ```
 
-2. **Add it to `maknae-agents`.** The package creates the group; the agent socket is group-owned by it, and no person belongs in it.
+   **Debian 13.** The same layout; the package creates `/var/lib/maknae-agents`.
 
    ```bash
-   sudo usermod -aG maknae-agents hobi                                         # Linux
-   sudo dseditgroup -o edit -a hobi -t user maknae-agents                      # macOS
+   sudo useradd --system --user-group --groups maknae-agents \
+     --home-dir /var/lib/maknae-agents/hobi --no-create-home \
+     --shell /usr/sbin/nologin --comment "Maknae agent hobi" hobi
+   sudo install -d -m 0750 -o hobi -g hobi /var/lib/maknae-agents/hobi
+   id hobi
+   ```
+
+   **macOS (Apple Silicon).** Choose an id below 500 that no user or group holds, so the account stays off the login window, and put the home under `/usr/local/var/maknae-agents` (`/var` is a symbolic link on macOS, so a home under it is refused).
+
+   ```bash
+   id=$(for i in $(seq 450 499); do
+          dscl . -search /Users UniqueID "$i" | grep -q . && continue
+          dscl . -search /Groups PrimaryGroupID "$i" | grep -q . && continue
+          echo "$i"; break
+        done)
+   [ -n "$id" ] || { echo "no free id in 450-499; choose one by hand" >&2; exit 1; }
+   sudo dseditgroup -o create -i "$id" -r "Maknae agent hobi" hobi
+   sudo dscl . -create /Users/hobi
+   sudo dscl . -create /Users/hobi UniqueID "$id"
+   sudo dscl . -create /Users/hobi PrimaryGroupID "$id"
+   sudo dscl . -create /Users/hobi UserShell /usr/bin/false
+   sudo dscl . -create /Users/hobi NFSHomeDirectory /usr/local/var/maknae-agents/hobi
+   sudo dscl . -create /Users/hobi RealName "Maknae agent hobi"
+   sudo dscl . -create /Users/hobi Password '*'
+   sudo dscl . -create /Users/hobi IsHidden 1
+   sudo dseditgroup -o edit -a hobi -t user maknae-agents
+   sudo install -d -m 0755 -o root -g wheel /usr/local/var/maknae-agents
+   sudo install -d -m 0750 -o hobi -g hobi /usr/local/var/maknae-agents/hobi
+   id hobi
    ```
 
    Do not name the account in `bindings.yaml`, except under `adversary` to contain it.
 
-3. **Create the agent's Vault objects.** On the agent AppRole mount (default `maknae-agent-approle`, never `maknaed`'s): the role `agent-hobi` with the policy `maknae-agent-hobi`; on the intermediate PKI mount the role `maknae-agent-hobi`; and the entity `maknae-agent-hobi` with an alias on the agent mount named by the role's RoleID. Configuration §6.4 lists what each must allow. `deploy/vault-pki` is one way to create them (`maknae_agents = { hobi = {} }`); manage them however you manage Vault. The operator token you enroll with needs the `maknae-enroll-agent` policy.
+2. **Create the agent's Vault objects.** On the agent AppRole mount (default `maknae-agent-approle`, never `maknaed`'s): the role `agent-hobi` with the policy `maknae-agent-hobi`; on the intermediate PKI mount the role `maknae-agent-hobi`; and the entity `maknae-agent-hobi` with an alias on the agent mount named by the role's RoleID. Configuration §6.4 lists what each must allow. `deploy/vault-pki` is one way to create them (`maknae_agents = { hobi = {} }`); manage them however you manage Vault. The operator token you enroll with needs the `maknae-enroll-agent` policy.
 
-4. **Enroll it.**
+3. **Enroll it.**
 
    `/etc/maknae/egress-bounds.yaml` must set `agent_prefix` (for example `agent_prefix: maknae/agents`); enroll refuses without it. Load the agent's API key in Vault at `<kv_mount>/data/<agent_prefix>/hobi/<subpath>`. To give the agent an admin-written persona, install `/etc/maknae/agents/hobi/persona.md` as `root:_maknae 0640` before this step.
 
@@ -1534,9 +1578,9 @@ An Agent Daemon runs under its own service account, one per agent, and reaches `
      --provider openai --model <model> --key-subpath openai --key-field api_key --context-tokens <n>
    ```
 
-   `--role guest` binds it to `guest` instead of the default `user`; `admin` is not offered. `--persona self` lets the agent keep its own persona instead of `persona.md`. Enroll seals the SecretID on this host, writes `/etc/maknae/agents/hobi/enrollment.yaml` and `agent.yaml`, and gives the `hobi` account read access to those files, `persona.md`, the directories above them and the three certificates in `/etc/maknae/tls`, and to nothing else. If enroll reports that it could not grant an entry, the agent is enrolled but cannot read its configuration: fix the cause and run `sudo maknae enroll agent hobi --refresh-access`. Run that too after replacing `persona.md`; it touches no Vault and writes nothing.
+   `--role guest` binds it to `guest` instead of the default `user`; `admin` is not offered. `--persona self` lets the agent keep its own persona instead of `persona.md`. Enroll seals the SecretID on this host, writes `/etc/maknae/agents/hobi/enrollment.yaml` and `agent.yaml`, and gives the `hobi` account read access to those files, `persona.md`, the directories above them and the three certificates in `/etc/maknae/tls`, and to nothing else. If enroll reports that it could not grant an entry, the agent is enrolled but cannot read its configuration: fix the cause and run `sudo maknae enroll agent hobi --refresh-access`. On Linux enroll then starts the agent as `maknae-agent@hobi.service`, after naming its home to the AppArmor profile and reloading it on a Debian host; on macOS as the launchd job `io.maknae.maknae-agentd.hobi`, whose stderr is `/usr/local/var/log/maknae-agent/hobi/agentd.err`. Run `--refresh-access` too after replacing `persona.md` or changing the account's home; it touches no Vault, and on Linux it rewrites the instance's drop-in and restarts it.
 
-5. **Write its policy.** Write it as `policy.yaml`, then install it as `root:_maknae 0640`, as the other configuration files are: `sudo install -o root -g _maknae -m 0640 policy.yaml /etc/maknae/agents/hobi/policy.yaml`. Without it the agent holds no file access through Maknae's tools, and only people may task it.
+4. **Write its policy.** Write it as `policy.yaml`, then install it as `root:_maknae 0640`, as the other configuration files are: `sudo install -o root -g _maknae -m 0640 policy.yaml /etc/maknae/agents/hobi/policy.yaml`. Without it the agent holds no file access through Maknae's tools, and only people may task it.
 
    ```yaml
    schema_version: 1
@@ -1552,7 +1596,7 @@ An Agent Daemon runs under its own service account, one per agent, and reaches `
 
    Add `taskers:` to say who may task it, for example `taskers: ["alice", "agent:jin"]`; another agent may task it only when listed here. `maknaed` decides and serves tasking; the CLI that sends a task is #630 and the agent process that works one is #629 ([Tasks](#tasks)).
 
-6. **Reload `maknaed`** ([Reload the policy](#reload-the-policy)), then confirm:
+5. **Reload `maknaed`** ([Reload the policy](#reload-the-policy)), then confirm:
 
    ```bash
    sudo jq -c 'select(.action=="graph.identity") | {ts, result: .outcome.result, reason: .outcome.reason}' /var/log/maknae/audit.jsonl | tail -n 5
@@ -1561,13 +1605,26 @@ An Agent Daemon runs under its own service account, one per agent, and reaches `
 
    An accepted agent reads `agent 'hobi' (uid <n>) is enrolled`, and `maknae subject-list` shows it with its agent id. `agent 'hobi' (uid <n>) is not enrolled: <why>` means the account failed a check: the account keeps its ordinary standing and the agent is not admitted until you fix the cause and reload. A reload refused with ``the service account hobi of agent `hobi` is bound to admin`` means `bindings.yaml` binds the account under `admin`; remove that binding.
 
-7. **Remove it.**
+   Then confirm the Agent Daemon runs, confined:
+
+   ```bash
+   systemctl status maknae-agent@hobi                 # Linux: active (running)
+   journalctl -u maknae-agent@hobi -n 20              # Linux: its messages
+   ps -eZ | grep maknae-agentd                        # RHEL family: ...:maknae_agentd_t:...
+   sudo aa-status | grep maknae-agentd                # Debian: the profile, in enforce mode
+   sudo ausearch -m AVC -ts recent -c maknae-agentd   # RHEL family: no denials
+   sudo journalctl -k -g 'apparmor="DENIED".*maknae-agentd' -n 20   # Debian: no denials
+   sudo launchctl print system/io.maknae.maknae-agentd.hobi | grep -E 'state|pid'   # macOS
+   sudo tail /usr/local/var/log/maknae-agent/hobi/agentd.err                         # macOS
+   ```
+
+6. **Remove it.**
 
    ```bash
    sudo maknae enroll remove-agent hobi
    ```
 
-   It removes the account's read access, then `agent.yaml` and `enrollment.yaml`, disables the Vault entity, destroys the SecretIDs and removes the sealed SecretID. Then reload: until a reload succeeds, the agent stays admitted. After it, the agent's next request is refused, each of its open tasks is closed `agent-gone` for its tasker to collect, and the account is an ordinary account again. `policy.yaml`, `persona.md` and the directory stay; delete them by hand if you will not re-enroll. On macOS, if the `hobi` account was deleted first, it warns that the account's ACEs stay on `/etc/maknae` and its files and continues; remove them by hand with `chmod -h -a`. When the command fails, run it again before deleting the directory; it still completes once the directory is gone. A login token the agent already holds stays valid until `agent_token_max_ttl`, refused only while the entity stays disabled. When the role and the entity were both already absent, nothing is disabled, and a held token lives until `agent_token_max_ttl`. Re-enrolling re-enables the entity, and such a token works again until `agent_token_max_ttl`.
+   On Linux it first stops and disables `maknae-agent@hobi.service` and removes its drop-in and, on a Debian host, the home it named to the AppArmor profile; on macOS it boots out `io.maknae.maknae-agentd.hobi`, removes its plist and `/usr/local/var/log/maknae-agent/hobi`, and runs `launchctl enable` on the label so no `launchctl disable` outlives the agent. It then removes the account's read access, then `agent.yaml` and `enrollment.yaml`, disables the Vault entity, destroys the SecretIDs and removes the sealed SecretID. Then reload: until a reload succeeds, the agent stays admitted. After it, the agent's next request is refused, each of its open tasks is closed `agent-gone` for its tasker to collect, and the account is an ordinary account again. `policy.yaml`, `persona.md` and the directory stay; delete them by hand if you will not re-enroll. On macOS, if the `hobi` account was deleted first, it warns that the account's ACEs stay on `/etc/maknae` and its files and continues; remove them by hand with `chmod -h -a`. When the command fails, run it again before deleting the directory; it still completes once the directory is gone. A login token the agent already holds stays valid until `agent_token_max_ttl`, refused only while the entity stays disabled. When the role and the entity were both already absent, nothing is disabled, and a held token lives until `agent_token_max_ttl`. Re-enrolling re-enables the entity, and such a token works again until `agent_token_max_ttl`.
 
 ## Tasks
 

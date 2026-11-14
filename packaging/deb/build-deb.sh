@@ -69,6 +69,8 @@ cat > "$PKG_ROOT/DEBIAN/conffiles" <<'CONF'
 /etc/maknae/sensitive.yaml
 /etc/apparmor.d/usr.bin.maknaed
 /etc/apparmor.d/usr.bin.maknae-egress
+/etc/apparmor.d/usr.bin.maknae-agentd
+/etc/apparmor.d/tunables/maknae-agents
 CONF
 
 # --- Binaries -------------------------------------------------------------------
@@ -95,6 +97,8 @@ install -D -m 0644 "$COMMON/maknae-policy-sync.path" \
     "$PKG_ROOT/usr/lib/systemd/system/maknae-policy-sync.path"
 install -D -m 0644 "$COMMON/maknae-policy-sync.service" \
     "$PKG_ROOT/usr/lib/systemd/system/maknae-policy-sync.service"
+install -D -m 0644 "$COMMON/maknae-agent@.service" \
+    "$PKG_ROOT/usr/lib/systemd/system/maknae-agent@.service"
 install -D -m 0644 "$COMMON/80-maknae.preset" \
     "$PKG_ROOT/usr/lib/systemd/system-preset/80-maknae.preset"
 
@@ -107,6 +111,11 @@ install -D -m 0644 "$HERE/apparmor/usr.bin.maknaed" \
     "$PKG_ROOT/etc/apparmor.d/usr.bin.maknaed"
 install -D -m 0644 "$HERE/apparmor/usr.bin.maknae-egress" \
     "$PKG_ROOT/etc/apparmor.d/usr.bin.maknae-egress"
+install -D -m 0644 "$HERE/apparmor/usr.bin.maknae-agentd" \
+    "$PKG_ROOT/etc/apparmor.d/usr.bin.maknae-agentd"
+install -D -m 0644 "$HERE/apparmor/tunables.maknae-agents" \
+    "$PKG_ROOT/etc/apparmor.d/tunables/maknae-agents"
+install -d -m 0755 "$PKG_ROOT/etc/apparmor.d/tunables/maknae-agents.d"
 
 # --- Vault-port label helper (layout parity; SELinux-only no-op on Debian) ------
 install -D -m 0750 "$COMMON/maknae-selinux-ports.sh" \
@@ -155,6 +164,16 @@ declared="$(printf '%s\n' $BINS | sort)"
 }
 echo "payload check: $(echo $landed | wc -w) binary/binaries match the manifest"
 
+units_landed="$(cd "$PKG_ROOT/usr/lib/systemd/system" && ls | sort)"
+units_want="$(cd "$COMMON" && ls *.service *.socket *.path | sort)"
+[ -n "$units_want" ] && [ "$units_landed" = "$units_want" ] || {
+    echo "ERROR: payload usr/lib/systemd/system does not match the units in packaging/common" >&2
+    echo "  common:  $(echo $units_want)" >&2
+    echo "  payload: $(echo $units_landed)" >&2
+    exit 1
+}
+echo "payload check: $(echo $units_landed | wc -w) unit(s) match packaging/common"
+
 # --- Payload vs declaration: every conffile MUST be in the payload ------------
 # #240a. The failure this prevents, which shipped once and was caught in review:
 # the egress AppArmor profile was DECLARED in conffiles and LOADED in postinst,
@@ -192,6 +211,17 @@ while IFS= read -r cf; do
 done < "$PKG_ROOT/DEBIAN/conffiles"
 [ "$checked" -gt 0 ] || { echo "ERROR: checked ZERO conffiles" >&2; exit 1; }
 echo "payload check: $checked declared conffile(s) present"
+
+profiles_shipped="$(cd "$HERE/apparmor" && ls usr.bin.* | sort)"
+for p in $profiles_shipped; do
+    grep -qx "/etc/apparmor.d/$p" "$PKG_ROOT/DEBIAN/conffiles" || {
+        echo "ERROR: AppArmor profile $p is not a declared conffile" >&2; exit 1; }
+    grep -q "apparmor_parser -r /etc/apparmor.d/$p " "$PKG_ROOT/DEBIAN/postinst" || {
+        echo "ERROR: postinst does not load the AppArmor profile $p" >&2; exit 1; }
+    grep -q "apparmor_parser -R /etc/apparmor.d/$p " "$PKG_ROOT/DEBIAN/prerm" || {
+        echo "ERROR: prerm does not unload the AppArmor profile $p" >&2; exit 1; }
+done
+echo "payload check: $(echo $profiles_shipped | wc -w) AppArmor profile(s) declared, loaded and unloaded"
 
 # --- Build the .deb -------------------------------------------------------------
 mkdir -p "$DIST"

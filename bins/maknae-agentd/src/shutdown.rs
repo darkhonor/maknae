@@ -7,6 +7,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 
 pub const AGENTD_EXCHANGE_DRAIN: Duration = Duration::from_secs(30);
+pub const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub fn stop_signal() -> (watch::Sender<bool>, watch::Receiver<bool>) {
     watch::channel(false)
@@ -85,6 +86,54 @@ mod tests {
     use maknae_agent::task_driver::UNDECODABLE_WAIT;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+
+    fn only(text: &str, key: &str, value: impl Fn(&str) -> Option<u64>) -> Duration {
+        let found: Vec<u64> = text
+            .match_indices(key)
+            .filter_map(|(at, _)| value(&text[at + key.len()..]))
+            .collect();
+        assert_eq!(found.len(), 1, "{key}: {found:?}");
+        Duration::from_secs(found[0])
+    }
+
+    /// A SIGTERM inside the first mint waits out its login and leaf signing, then
+    /// the drain, the leaf supervisor's stop, the revoke and the runtime teardown.
+    /// Two-sided, as the kernel's unit test is: a unit far above the chain means a
+    /// term was dropped from this expression. The launchd job's `ExitTimeOut` is
+    /// the same bound.
+    #[test]
+    fn the_agent_units_stop_timeout_covers_its_shutdown_chain() {
+        const SLACK: Duration = Duration::from_secs(10);
+        const MINT_REQUESTS: u32 = 2;
+        let chain = maknae_vault::PLANE_HTTP_TIMEOUT * MINT_REQUESTS
+            + AGENTD_EXCHANGE_DRAIN
+            + crate::plane_impl::LEAF_STOP_WAIT
+            + maknae_vault::PLANE_SHUTDOWN_BOUND
+            + RUNTIME_SHUTDOWN_TIMEOUT;
+        let unit = include_str!("../../../packaging/common/maknae-agent@.service");
+        let plist = include_str!("../../../packaging/macos/io.maknae.maknae-agentd.template.plist");
+        let systemd = only(unit, "\nTimeoutStopSec=", |v| {
+            v.lines().next()?.trim().parse().ok()
+        });
+        let launchd = only(plist, "<key>ExitTimeOut</key>", |v| {
+            v.trim_start()
+                .strip_prefix("<integer>")?
+                .split_once("</integer>")?
+                .0
+                .parse()
+                .ok()
+        });
+        for (name, stop) in [("TimeoutStopSec", systemd), ("ExitTimeOut", launchd)] {
+            assert!(
+                stop >= chain,
+                "{name}={stop:?} is below the chain {chain:?}"
+            );
+            assert!(
+                stop <= chain + SLACK,
+                "{name}={stop:?} is more than {SLACK:?} above the chain {chain:?}"
+            );
+        }
+    }
 
     #[tokio::test(start_paused = true)]
     async fn a_sleep_runs_its_length_when_nothing_stops_it() {

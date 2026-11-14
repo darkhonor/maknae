@@ -240,6 +240,8 @@ jobs:
         run: bash ci/gates/tests/reader-grant/run.sh
       - name: Gate — the RPM erase removes the Vault port labels before the SELinux module (#584)
         run: bash ci/gates/tests/selinux-removal/run.sh
+      - name: Gate — the packages stop agent instances on erase and restart them on upgrade (#629)
+        run: bash ci/gates/tests/agent-instances/run.sh
       - name: Gate — every mktemp in the gates names its parent (macOS ignores TMPDIR otherwise)
         run: ci/gates/scratch-lint.sh
       - name: Gate — verb-vocabulary drift (#67)

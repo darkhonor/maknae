@@ -10,6 +10,10 @@ import unittest
 SELECTOR = Path(__file__).resolve().parents[1] / 'affected.py'
 
 
+
+def contract_table(row):
+    return '| Property | A | B | C | D |\n|---|---|---|---|---|\n' + row + '\n'
+
 class AffectedTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -171,14 +175,14 @@ class AffectedTests(unittest.TestCase):
 
     def test_docs_only_workflow_still_rejects_invalid_isolation_contract(self):
         contract = 'packaging/isolation-contract.md'
-        self.write(contract, '| descriptor | ✓ | ✓ | ✓ | ✓ |\n')
+        self.write(contract, contract_table('| descriptor | ✓ | ✓ | ✓ | ✓ |'))
         self.base = self.commit()
         # Real gate accepts the starting contract, then rejects an empty cell.
         gate = SELECTOR.parent / 'gates/isolation-contract-lint.sh'
         good = subprocess.run(['bash', str(gate), str(self.root)],
                               capture_output=True, text=True)
         self.assertEqual(good.returncode, 0, good.stdout + good.stderr)
-        self.write(contract, '| descriptor | ✓ | | ✓ | ✓ |\n')
+        self.write(contract, contract_table('| descriptor | ✓ | | ✓ | ✓ |'))
         self.commit()
         bad = subprocess.run(['bash', str(gate), str(self.root)],
                              capture_output=True, text=True)
@@ -326,8 +330,8 @@ class AffectedTests(unittest.TestCase):
         self.write('design/contract.md', 'Local authority.\n')
         self.write('AGENTS.md', 'Local authority.\n')
         self.write('packaging/isolation-contract.md',
-                   '| descriptor | ✓ | | ✓ | ✓ |\n' if invalid_contract else
-                   '| descriptor | ✓ | ✓ | ✓ | ✓ |\n')
+                   contract_table('| descriptor | ✓ | | ✓ | ✓ |') if invalid_contract else
+                   contract_table('| descriptor | ✓ | ✓ | ✓ | ✓ |'))
         if remote_head:
             self.git('update-ref', 'refs/remotes/origin/main', remote_head)
             self.git('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main')
@@ -386,7 +390,7 @@ class AffectedTests(unittest.TestCase):
         self.assertEqual(invocations, [])
 
     def test_hook_rejects_invalid_docs_without_running_rust(self):
-        self.write('packaging/isolation-contract.md', '| descriptor | ✓ | | ✓ | ✓ |\n')
+        self.write('packaging/isolation-contract.md', contract_table('| descriptor | ✓ | | ✓ | ✓ |'))
         self.commit()
         self.hook(self.base, mutations=True, invalid_contract=True)
 

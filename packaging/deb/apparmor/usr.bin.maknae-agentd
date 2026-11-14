@@ -1,0 +1,65 @@
+# AppArmor profile for maknae-agentd (#629), shared by every enrolled agent's
+# instance. Each runs under its own account; `owner` keeps one agent's process
+# out of another's home.
+# Install to: /etc/apparmor.d/usr.bin.maknae-agentd
+# Reload:     apparmor_parser -r /etc/apparmor.d/usr.bin.maknae-agentd
+
+#include <tunables/global>
+#include <tunables/maknae-agents>
+
+profile maknae-agentd /usr/bin/maknae-agentd {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+  #include <abstractions/ssl_certs>
+
+  /usr/bin/maknae-agentd                       mr,
+
+  /etc/                                        r,
+  /etc/maknae/                                 r,
+  /etc/maknae/agents/                          r,
+  /etc/maknae/agents/*/                        r,
+  /etc/maknae/agents/*/{agent.yaml,persona.md,enrollment.yaml} r,
+  /etc/maknae/tls/                             r,
+  /etc/maknae/tls/{maknae-root-ca,maknae-int-ca,vault-ca}.crt r,
+  /etc/ssl/maknae/                             r,
+  /etc/ssl/maknae/seal.pub                     r,
+
+  /run/credentials/maknae-agent@*.service/     r,
+  /run/credentials/maknae-agent@*.service/**   r,
+
+  /run/maknae-agent/                           r,
+  /run/maknae-agent/maknaed.sock               rw,
+  network unix stream,
+  unix (create, connect, send, receive, getattr, getopt, setopt, shutdown) type=stream,
+  deny unix addr=@**,
+  deny unix peer=(addr=@**),
+
+  network inet stream,
+  network inet6 stream,
+
+  @{MAKNAE_AGENT_HOME_PARENTS}/                r,
+  owner @{MAKNAE_AGENT_HOMES}/                 r,
+  owner @{MAKNAE_AGENT_HOMES}/**               rwk,
+
+  owner @{PROC}/@{pid}/cgroup                   r,
+  /sys/fs/cgroup/                              r,
+  /sys/fs/cgroup/**                            r,
+  /sys/devices/system/cpu/                     r,
+  /sys/devices/system/cpu/**                   r,
+  /dev/urandom                                 r,
+
+  deny /var/mail/**                            rwklx,
+  deny /var/spool/mail/**                      rwklx,
+  deny /dev/tty*                               w,
+  deny /dev/pts/*                              w,
+  deny /usr/bin/wall                           x,
+  deny /usr/bin/write                          x,
+  deny /usr/bin/write.ul                       x,
+  deny /dev/log                                w,
+  deny /run/systemd/journal/socket             w,
+  deny /run/systemd/journal/dev-log            w,
+  deny /run/systemd/journal/stdout             w,
+  deny /etc/maknae/private/**                  rwklx,
+  deny /var/lib/maknae/**                      rwklx,
+  deny /var/log/maknae/**                      rwklx,
+}

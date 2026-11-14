@@ -2272,7 +2272,7 @@ fi
 
 # These two derive from files on disk, so they need no checkout.
 # `awk` over the table against a gate that reads it line-by-line.
-exp_ic="$(cd "$repo_root" && awk -F'|' 'NF-2==5' packaging/isolation-contract.md \
+exp_ic="$(cd "$repo_root" && sed 's/\\|//g' packaging/isolation-contract.md | awk -F'|' 'NF-2==5' \
           | grep -cvE '\|[[:space:]]*(Property|:?-{3,})')"
 expect_reported_count "isolation-contract/linted-rows-match-the-table" "ok (" "$exp_ic" \
   "$here/isolation-contract-lint.sh" "$repo_root"

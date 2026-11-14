@@ -32,6 +32,7 @@ Source15:       maknae-policy-sync.service
 Source16:       80-maknae.preset
 Source17:       sensitive.yaml
 Source18:       maknae-agentd
+Source19:       maknae-agent@.service
 
 ExclusiveArch:  x86_64
 
@@ -93,6 +94,7 @@ install -D -m 0644 %{SOURCE11} %{buildroot}%{_unitdir}/maknae-egress.service
 install -D -m 0644 %{SOURCE12} %{buildroot}%{_unitdir}/maknae-egress.socket
 install -D -m 0644 %{SOURCE14} %{buildroot}%{_unitdir}/maknae-policy-sync.path
 install -D -m 0644 %{SOURCE15} %{buildroot}%{_unitdir}/maknae-policy-sync.service
+install -D -m 0644 %{SOURCE19} %{buildroot}%{_unitdir}/maknae-agent@.service
 install -D -m 0644 %{SOURCE16} %{buildroot}%{_presetdir}/80-maknae.preset
 
 # sysusers.d
@@ -118,6 +120,7 @@ install -d -m 0750 %{buildroot}%{_sysconfdir}/maknae/egress
 install -d -m 0755 %{buildroot}%{_sysconfdir}/pki/maknae
 install -d -m 0700 %{buildroot}%{_localstatedir}/log/maknae
 install -d -m 0700 %{buildroot}%{_localstatedir}/lib/maknae
+install -d -m 0755 %{buildroot}%{_localstatedir}/lib/maknae-agents
 # audit.jsonl is not a payload file and not package-owned: %post creates it, so
 # erase keeps the trail and an upgrade never replaces the append-only inode.
 
@@ -150,7 +153,7 @@ if [ ! -e "$B" ] && [ ! -h "$B" ] && [ ! -e %{_localstatedir}/lib/maknae/kernel.
         exit 1
     fi
 fi
-restorecon -Rv %{_bindir}/maknaed %{_bindir}/maknae-egress %{_sysconfdir}/maknae %{_sysconfdir}/pki/maknae %{_localstatedir}/log/maknae %{_localstatedir}/lib/maknae 2>/dev/null || :
+restorecon -Rv %{_bindir}/maknaed %{_bindir}/maknae-egress %{_bindir}/maknae-agentd %{_sysconfdir}/maknae %{_sysconfdir}/pki/maknae %{_localstatedir}/log/maknae %{_localstatedir}/lib/maknae %{_localstatedir}/lib/maknae-agents 2>/dev/null || :
 # #240b (D3): the egress deputy is in neither root nor _maknae, and the config
 # loader refuses any world bit on /etc/maknae, so it reaches the dir by a user
 # ACL granting `rx` — `r` because maknae-io opens the directory
@@ -208,6 +211,30 @@ fi
 chown -h _maknae:_maknae %{_localstatedir}/log/maknae
 
 %preun
+# %%systemd_preun cannot name a template's instances, and a glob on `systemctl
+# disable` matches only loaded units. Only the listed instances are stopped, so the
+# erase aborts on a real failure, not on a pattern that matched nothing.
+if [ $1 -eq 0 ]; then
+    rc=0
+    units="$(systemctl list-units --plain --no-legend 'maknae-agent@*.service')" || rc=1
+    units="$(printf '%%s\n' "$units" | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^maknae-agent@/) {printf "%%s%%s", s, $i; s=" "; break}}')"
+    printf '%%s\n' "$units" | xargs -r systemctl stop || rc=1
+    left="$(systemctl list-units --plain --no-legend --state=active,activating,deactivating,reloading 'maknae-agent@*.service')" || rc=1
+    left="$(printf '%%s\n' "$left" | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^maknae-agent@/) {printf "%%s%%s", s, $i; s=" "; break}}')"
+    if [ "$rc" -ne 0 ] || [ -n "$left" ]; then
+        echo "maknae: the Agent Daemon did not stop (${left:-${units:-its instances could not be listed}}); the erase is aborted" >&2
+        exit 1
+    fi
+    for d in /etc/systemd/system/maknae-agent@*.service.d /etc/systemd/system/multi-user.target.wants/maknae-agent@*.service; do
+        [ -e "$d" ] || [ -h "$d" ] || continue
+        u="${d##*/}"
+        u="${u%%.d}"
+        systemctl disable "$u" 2>/dev/null || :
+        rm -f "/etc/systemd/system/multi-user.target.wants/$u" || exit 1
+        rm -rf "/etc/systemd/system/$u.d" || exit 1
+    done
+    systemctl daemon-reload || echo "maknae: systemctl daemon-reload failed; run it by hand" >&2
+fi
 %systemd_preun maknaed.service maknae-egress.service maknae-egress.socket maknae-policy-sync.path maknae-policy-sync.service
 
 %postun
@@ -217,6 +244,13 @@ chown -h _maknae:_maknae %{_localstatedir}/log/maknae
 # from maknae-egress.service's Requires=/After=, not from this argv.
 %systemd_postun_with_restart maknaed.service maknae-egress.socket maknae-egress.service
 %systemd_postun maknae-policy-sync.path maknae-policy-sync.service
+if [ $1 -ge 1 ]; then
+    units="$(systemctl list-units --plain --no-legend --state=active,activating,reloading 'maknae-agent@*.service')" \
+        || echo "maknae: cannot list the Agent Daemon instances; restart each running maknae-agent@ instance by hand" >&2
+    for u in $(printf '%%s\n' "$units" | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^maknae-agent@/) {print $i; break}}'); do
+        systemctl try-restart "$u" || echo "maknae: $u did not restart onto the new binary: run systemctl restart $u" >&2
+    done
+fi
 if [ $1 -eq 0 ]; then
     fapolicyd-cli --update 2>/dev/null || :
     # A local maknae_vault_port_t label references the module's type and blocks its removal (#584).
@@ -242,6 +276,7 @@ fi
 %{_unitdir}/maknae-egress.socket
 %{_unitdir}/maknae-policy-sync.path
 %{_unitdir}/maknae-policy-sync.service
+%{_unitdir}/maknae-agent@.service
 %{_presetdir}/80-maknae.preset
 %{_sysusersdir}/maknae.conf
 %{_datadir}/selinux/packages/%{selinuxtype}/maknae.pp.bz2
@@ -258,6 +293,7 @@ fi
 %dir %attr(0755,root,root) %{_sysconfdir}/pki/maknae
 %dir %attr(0700,_maknae,_maknae) %{_localstatedir}/log/maknae
 %dir %attr(0700,_maknae,_maknae) %{_localstatedir}/lib/maknae
+%dir %attr(0755,root,root) %{_localstatedir}/lib/maknae-agents
 
 %changelog
 * Mon Aug 17 2026 Alex Ackerman <developer@maknae.io> - 0.1.0-1

@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Never installed as is: `maknae enroll agent` renders it per agent, with
+       every @NAME@ XML-escaped (bins/maknae/src/enroll/agent_launchd.rs). -->
+  <key>Label</key>
+  <string>io.maknae.maknae-agentd.@AGENT_ID@</string>
+
+  <!-- launchd has NO UnsetEnvironment= equivalent; maknae-agentd's main() scrubs
+       maknae_vault::SCRUBBED_ENV itself, so there is no EnvironmentVariables dict. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>@PROGRAM@</string>
+    <string>@AGENT_ID@</string>
+  </array>
+
+  <!-- No GroupName: the user's primary group, and InitGroups (default true) adds
+       maknae-agents, as the Linux drop-in's Group= and SupplementaryGroups= do. -->
+  <key>UserName</key>
+  <string>@USER_NAME@</string>
+
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+
+  <!-- maknae-agent@.service TimeoutStopSec; both are held to the shutdown chain
+       by bins/maknae-agentd/src/shutdown.rs. -->
+  <key>ExitTimeOut</key>
+  <integer>181</integer>
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- launchd opens it as UserName, in a directory enroll gives that account. -->
+  <key>StandardErrorPath</key>
+  <string>@STDERR_PATH@</string>
+
+  <key>WorkingDirectory</key>
+  <string>/</string>
+
+  <key>ProcessType</key>
+  <string>Standard</string>
+</dict>
+</plist>

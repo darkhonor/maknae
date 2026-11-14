@@ -11,6 +11,25 @@ const OWN_FILES: [&str; 3] = [
     maknae_config::PERSONA_FILE,
 ];
 
+/// A sysfs or selinuxfs flag; `None` when the file is absent or unreadable.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn kernel_flag(path: &str) -> Option<String> {
+    let out = maknae_io::read_kernel_attribute(
+        Path::new(path),
+        maknae_io::TargetRequired {
+            owner: Some(0),
+            mode_mask: Some(0o022),
+            nlink_exactly_one: false,
+            regular_file: true,
+            // kernfs reports PAGE_SIZE as st_size; arm64 may run 64 KiB pages.
+            max_bytes: Some(64 * 1024),
+        },
+        16,
+    )
+    .ok()?;
+    String::from_utf8(out.to_vec()).ok()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Platform {
     Linux,
@@ -101,6 +120,8 @@ pub(crate) fn account_name_ok(name: &str) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Ran {
     pub ok: bool,
+    /// `None` when a signal ended the program.
+    pub code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
 }
@@ -120,6 +141,7 @@ impl Run for Host {
             .output()
             .map(|o| Ran {
                 ok: o.status.success(),
+                code: o.status.code(),
                 stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
                 stderr: String::from_utf8_lossy(&o.stderr).trim().to_string(),
             })
@@ -406,7 +428,7 @@ pub(crate) mod tests {
             self.calls.borrow().clone()
         }
 
-        fn refusing(self, call: &str) -> Self {
+        pub(crate) fn refusing(self, call: &str) -> Self {
             self.refuse.borrow_mut().insert(call.into());
             self
         }
@@ -461,6 +483,7 @@ pub(crate) mod tests {
             if self.refuse.borrow().contains(&call) {
                 return Ok(Ran {
                     ok: false,
+                    code: Some(1),
                     stdout: String::new(),
                     stderr: "Operation not supported".into(),
                 });
@@ -473,6 +496,7 @@ pub(crate) mod tests {
             let ok = |stdout: String| {
                 Ok(Ran {
                     ok: true,
+                    code: Some(0),
                     stdout,
                     stderr: String::new(),
                 })
@@ -905,6 +929,7 @@ pub(crate) mod tests {
                 };
                 Ok(Ran {
                     ok: true,
+                    code: Some(0),
                     stdout,
                     stderr: String::new(),
                 })

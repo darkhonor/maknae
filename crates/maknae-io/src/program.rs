@@ -18,10 +18,13 @@ pub enum Program {
     Codesign,
     Chmod,
     Ls,
+    Systemctl,
+    Launchctl,
+    Stat,
 }
 
 impl Program {
-    pub const ALL: [Program; 14] = [
+    pub const ALL: [Program; 17] = [
         Program::SystemdCreds,
         Program::Setfacl,
         Program::Getfacl,
@@ -36,6 +39,9 @@ impl Program {
         Program::Codesign,
         Program::Chmod,
         Program::Ls,
+        Program::Systemctl,
+        Program::Launchctl,
+        Program::Stat,
     ];
 
     pub fn path(self) -> &'static Path {
@@ -54,6 +60,9 @@ impl Program {
             Program::Codesign => "/usr/bin/codesign",
             Program::Chmod => "/bin/chmod",
             Program::Ls => "/bin/ls",
+            Program::Systemctl => "/usr/bin/systemctl",
+            Program::Launchctl => "/bin/launchctl",
+            Program::Stat => "/usr/bin/stat",
         })
     }
 }
@@ -94,6 +103,9 @@ mod tests {
             Program::Codesign => 11,
             Program::Chmod => 12,
             Program::Ls => 13,
+            Program::Systemctl => 14,
+            Program::Launchctl => 15,
+            Program::Stat => 16,
         }
     }
 
@@ -107,7 +119,7 @@ mod tests {
             seen[position(p)] = true;
         }
         assert!(seen.iter().all(|s| *s));
-        assert_eq!(position(Program::Ls), Program::ALL.len() - 1);
+        assert_eq!(position(Program::Stat), Program::ALL.len() - 1);
     }
 
     #[test]
@@ -157,6 +169,9 @@ mod tests {
                 (Program::Codesign, "/usr/bin/codesign"),
                 (Program::Chmod, "/bin/chmod"),
                 (Program::Ls, "/bin/ls"),
+                (Program::Systemctl, "/usr/bin/systemctl"),
+                (Program::Launchctl, "/bin/launchctl"),
+                (Program::Stat, "/usr/bin/stat"),
             ]
         );
     }

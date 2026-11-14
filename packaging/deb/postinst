@@ -34,6 +34,29 @@ grant_reader_traverse() {
     for r in $readers; do setfacl -P -n -m "u:$r:x" "$d" || return 1; done
 }
 
+restart_agent_instances() {
+    local units u failed=""
+    units="$(systemctl list-units --plain --no-legend --state=active,activating,reloading 'maknae-agent@*.service')" || {
+        echo "maknae: cannot list the Agent Daemon instances to restart them onto the new binary" >&2
+        return 1
+    }
+    for u in $(printf '%s\n' "$units" | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^maknae-agent@/) {print $i; break}}'); do
+        systemctl try-restart "$u" || failed="$failed $u"
+    done
+    [ -z "$failed" ] && return 0
+    echo "maknae: these Agent Daemon instances did not restart onto the new binary:$failed" >&2
+    return 1
+}
+
+# A kernel without AppArmor cannot load it, and enrollment refuses there.
+load_agent_profile() {
+    local out
+    [ "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null)" = Y ] || return 0
+    out="$(apparmor_parser -r /etc/apparmor.d/usr.bin.maknae-agentd 2>&1)" && return 0
+    echo "maknae: the maknae-agentd AppArmor profile did not load, so no agent instance is restarted: $out" >&2
+    return 1
+}
+
 case "$1" in
     configure)
         # --- Users/groups (Jackrabbit §4.6 / §9.1) ------------------------------
@@ -95,6 +118,7 @@ case "$1" in
             exit 1
         }
         install -d -m 0700 -o _maknae -g _maknae /var/lib/maknae
+        install -d -m 0755 -o root    -g root    /var/lib/maknae-agents
         # #240b: the deputy's Vault CA copy (written by `maknae enroll`), under
         # the deputy's OWN group.
         install -d -m 0750 -o root    -g _maknae-egress /etc/maknae/egress
@@ -141,6 +165,7 @@ case "$1" in
             # profiles load — which is exactly what a per-daemon literal here
             # invites. Add a line whenever a daemon is added.
             apparmor_parser -r /etc/apparmor.d/usr.bin.maknae-egress 2>/dev/null || :
+            load_agent_profile || exit 1
         fi
 
         # --- systemd unit --------------------------------------------------------
@@ -163,6 +188,7 @@ case "$1" in
             [ -d /run/maknae-egress ] && chmod 0751 /run/maknae-egress 2>/dev/null || :
             systemctl try-restart maknae-egress.socket 2>/dev/null || :
             systemctl try-restart maknae-egress.service 2>/dev/null || :
+            restart_agent_instances || exit 1
         fi
         ;;
 esac

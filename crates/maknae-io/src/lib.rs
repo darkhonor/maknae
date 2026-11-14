@@ -73,8 +73,8 @@ pub use account_facts::{
     MAKNAE_GROUP,
 };
 pub use anchor::{
-    open_anchor, open_anchor_resolved, read_absolute, resolve_dir, Anchor, AnchorLock, Entry,
-    EntryId, FileOwner, Kind, Mode, Outcome, Strategy, StrategyPref,
+    open_anchor, open_anchor_resolved, read_absolute, read_kernel_attribute, resolve_dir, Anchor,
+    AnchorLock, Entry, EntryId, FileOwner, Kind, Mode, Outcome, Strategy, StrategyPref,
 };
 pub use audit_append::{open_audit_append, open_existing_audit_append};
 pub use checks::{AnchorRequired, DescendantRequired, TargetRequired};
@@ -86,7 +86,7 @@ pub use delegated::{
     SenderCreds, DELEGATED_FDS_PER_CONNECTION,
 };
 pub use error::{IoError, IoKind};
-pub use home::{canonical_home, session_home};
+pub use home::{canonical_home, session_home, unit_safe_home, UnsafeHome};
 pub use host_facts::presence;
 pub use mutation::{
     held_file_is_readable, read_held_file, read_held_page, replace_held_file,

@@ -23,15 +23,31 @@ fail=0
 # property x profile enforcement matrix goes unexamined and the gate reports
 # `ok` at rc 0. A present file is not a scanned file.
 linted=0
+# A row belongs to the table whose header precedes it; a non-table line ends the table.
+# `\|` is a pipe inside a cell, so it is removed before the row is split.
+table=""
 while IFS= read -r line; do
   case "$line" in
-    \|*Property*|\|*---*|\|*:---*) continue ;;
     \|*) : ;;
-    *) continue ;;
+    *) table=""; continue ;;
   esac
-  # Only lint the property × profile table (5 columns → NF-2 == 5). Skip the crate × binary matrix.
+  line="${line//\\|/}"
+  case "$line" in
+    "| Property |"*) table=profile; continue ;;
+    "| Crate |"*) table=matrix; continue ;;
+    \|*---*|\|*:---*) continue ;;
+  esac
   ncols=$(echo "$line" | awk -F'|' '{print NF-2}')
-  [ "$ncols" = "5" ] || continue
+  if [ "$table" = matrix ]; then
+    [ "$ncols" = "4" ] || { echo "FAIL: a crate × binary matrix row has $ncols columns, not 4: ${line:0:80}"; fail=1; }
+    continue
+  fi
+  [ "$table" = profile ] || continue
+  if [ "$ncols" != "5" ]; then
+    echo "FAIL: a property × profile row has $ncols columns, not 5 (escape a pipe inside a cell as \\|): ${line:0:80}"
+    fail=1
+    continue
+  fi
   linted=$((linted+1))
   IFS='|' read -r _ _prop c1 c2 c3 c4 _ <<< "$line"
   i=0

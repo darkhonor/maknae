@@ -1003,7 +1003,7 @@ class InDiff(unittest.TestCase):
 
     def test_in_diff_the_pre_push_hook_runs_an_embedded_readme_change_in_diff(self):
         hook_files = {"ci/hooks/pre-push": (ROOT / "ci/hooks/pre-push").read_text(),
-                      "packaging/isolation-contract.md": "| descriptor | ✓ | ✓ | ✓ | ✓ |\n",
+                      "packaging/isolation-contract.md": "| Property | A | B | C | D |\n|---|---|---|---|---|\n| descriptor | ✓ | ✓ | ✓ | ✓ |\n",
                       "AGENTS.md": "Local authority.\n", "design/contract.md": "Local authority.\n"}
         for name in ("external-authority-lint.sh", "isolation-contract-lint.sh"):
             hook_files[f"ci/gates/{name}"] = (ROOT / "ci/gates" / name).read_text()

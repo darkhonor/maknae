@@ -444,6 +444,11 @@ pub fn read_absolute(
     target: TargetRequired,
     pref: StrategyPref,
 ) -> Result<Outcome<Zeroizing<Vec<u8>>>, IoError> {
+    let (anchor, name) = parent_anchor(path, pref)?;
+    anchor.read(&name, None, target)
+}
+
+fn parent_anchor(path: &Path, pref: StrategyPref) -> Result<(Anchor, PathBuf), IoError> {
     // `std::path::absolute` fails only on an empty path or an unreadable cwd; neither
     // carries a raw errno on every platform, so the fallback keeps the error typed.
     let path = &std::path::absolute(path).map_err(|e| IoError::Io {
@@ -459,7 +464,58 @@ pub fn read_absolute(
             path: path.to_path_buf(),
         })?;
     let anchor = open_anchor_resolved(parent, AnchorRequired::OS_DAC, pref)?;
-    anchor.read(Path::new(name), None, target)
+    Ok((anchor, PathBuf::from(name)))
+}
+
+/// Reads a kernel attribute file (sysfs, selinuxfs) to EOF. Its `st_size` is the
+/// page size or 0, not its length, so [`read_absolute`] refuses it as a size change.
+/// `target` is checked against the `fstat`; content past `max_bytes` is refused.
+pub fn read_kernel_attribute(
+    path: &Path,
+    target: TargetRequired,
+    max_bytes: usize,
+) -> Result<Zeroizing<Vec<u8>>, IoError> {
+    let (anchor, name) = parent_anchor(path, StrategyPref::ForcePortable)?;
+    let full = anchor.path.join(&name);
+    let name = name
+        .to_str()
+        .ok_or_else(|| IoError::NonUtf8Component { path: full.clone() })?;
+    let fd = syscall::open_read_target(&anchor.fd, name)
+        .map_err(|e| crate::checks::map_errno_no_disambiguation(e, &full))?;
+    read_attribute(&full, &target, max_bytes, syscall::fstat(&fd), |buf| {
+        nix::unistd::read(&fd, buf)
+    })
+}
+
+fn read_attribute(
+    full: &Path,
+    target: &TargetRequired,
+    max_bytes: usize,
+    st: nix::Result<nix::sys::stat::FileStat>,
+    mut read: impl FnMut(&mut [u8]) -> nix::Result<usize>,
+) -> Result<Zeroizing<Vec<u8>>, IoError> {
+    let st = st.map_err(|errno| crate::checks::map_errno_no_disambiguation(errno, full))?;
+    crate::checks::check_target(&st, full, target)?;
+    let mut buf = Zeroizing::new(vec![0u8; max_bytes + 1]);
+    let mut n = 0;
+    loop {
+        // At the cap the slice is empty, and a read of 0 bytes ends the loop.
+        match read(&mut buf[n..]) {
+            Ok(0) => break,
+            Ok(k) => n += k,
+            Err(nix::errno::Errno::EINTR) => {}
+            Err(errno) => return Err(crate::checks::map_errno_no_disambiguation(errno, full)),
+        }
+    }
+    if n > max_bytes {
+        return Err(IoError::TargetTooLarge {
+            path: full.to_path_buf(),
+            limit: max_bytes as u64,
+            actual: n as u64,
+        });
+    }
+    buf.truncate(n);
+    Ok(buf)
 }
 
 impl Anchor {
@@ -815,6 +871,31 @@ impl Anchor {
         nix::unistd::unlinkat(&self.fd, name, nix::unistd::UnlinkatFlags::NoRemoveDir)
             .map(|()| true)
             .map_err(|e| crate::checks::map_errno_no_disambiguation(e, &self.path.join(name)))
+    }
+
+    /// Creates `name` empty when absent, keeps an existing file's bytes, and sets
+    /// `owner` and `mode` on the opened descriptor. A link, a non-regular file and a
+    /// file with more than one link are refused; no link is followed.
+    pub fn own_file(
+        &self,
+        name: &std::ffi::OsStr,
+        owner: FileOwner,
+        mode: Mode,
+    ) -> Result<(), IoError> {
+        let name = self.one_component(name)?;
+        let at = self.path.join(name);
+        let errno = |e| crate::checks::map_errno_no_disambiguation(e, &at);
+        let fd = crate::syscall::open_create_nofollow(&self.fd, name, mode).map_err(errno)?;
+        let st = crate::syscall::fstat(&fd).map_err(errno)?;
+        crate::checks::check_target(
+            &st,
+            &at,
+            &TargetRequired {
+                nlink_exactly_one: true,
+                ..TargetRequired::OS_DAC_REGULAR
+            },
+        )?;
+        crate::syscall::set_owner_and_mode(&fd, owner, mode).map_err(errno)
     }
 
     fn one_component<'a>(&self, name: &'a std::ffi::OsStr) -> Result<&'a std::ffi::OsStr, IoError> {
@@ -3469,5 +3550,189 @@ mod tests {
             assert!(matches!(removed, Err(IoError::Io { .. })), "{removed:?}");
             assert!(a.path.join("p.sock").exists());
         }
+    }
+
+    fn me() -> FileOwner {
+        FileOwner {
+            uid: nix::unistd::geteuid().as_raw(),
+            gid: nix::unistd::getegid().as_raw(),
+        }
+    }
+
+    #[test]
+    fn own_file_creates_an_absent_file_with_the_owner_and_exact_mode() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "o");
+        a.own_file(std::ffi::OsStr::new("f.err"), me(), Mode(0o640))
+            .unwrap();
+        let meta = std::fs::symlink_metadata(a.path.join("f.err")).unwrap();
+        assert!(meta.is_file());
+        assert_eq!(meta.len(), 0);
+        assert_eq!(meta.permissions().mode() & 0o7777, 0o640);
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!((meta.uid(), meta.gid()), (me().uid, me().gid));
+    }
+
+    #[test]
+    fn own_file_keeps_an_existing_files_bytes_and_resets_its_mode() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "o");
+        let f = a.path.join("f.err");
+        std::fs::write(&f, b"kept").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o666)).unwrap();
+        a.own_file(std::ffi::OsStr::new("f.err"), me(), Mode(0o640))
+            .unwrap();
+        assert_eq!(std::fs::read(&f).unwrap(), b"kept");
+        assert_eq!(
+            std::fs::metadata(&f).unwrap().permissions().mode() & 0o7777,
+            0o640
+        );
+    }
+
+    #[test]
+    fn own_file_refuses_a_link_a_directory_a_fifo_and_a_hard_link() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "o");
+        let outside = d.path().join("outside");
+        std::fs::write(&outside, b"x").unwrap();
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::os::unix::fs::symlink(&outside, a.path.join("link")).unwrap();
+        std::fs::create_dir(a.path.join("dir")).unwrap();
+        nix::unistd::mkfifo(
+            &a.path.join("fifo"),
+            nix::sys::stat::Mode::from_bits_truncate(0o600),
+        )
+        .unwrap();
+        std::fs::hard_link(&outside, a.path.join("hard")).unwrap();
+        let own = |n: &str| a.own_file(std::ffi::OsStr::new(n), me(), Mode(0o644));
+        assert!(
+            matches!(own("link"), Err(IoError::Symlink { .. })),
+            "{:?}",
+            own("link")
+        );
+        assert!(own("dir").is_err());
+        assert!(
+            matches!(own("fifo"), Err(IoError::NotRegularFile { .. })),
+            "{:?}",
+            own("fifo")
+        );
+        assert!(
+            matches!(own("hard"), Err(IoError::MultiplyLinked { nlink: 2, .. })),
+            "{:?}",
+            own("hard")
+        );
+        assert_eq!(
+            std::fs::metadata(&outside).unwrap().permissions().mode() & 0o7777,
+            0o600
+        );
+        assert!(matches!(
+            own("../escape"),
+            Err(IoError::EscapesAnchor { .. })
+        ));
+    }
+
+    // --- #629: kernel attribute files ----------------------------------------
+    fn attribute(d: &Path, body: &[u8], mode: u32) -> PathBuf {
+        let f = d.join("enforce");
+        std::fs::write(&f, body).unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(mode)).unwrap();
+        f
+    }
+
+    #[test]
+    fn a_kernel_attribute_reads_to_eof_up_to_its_limit() {
+        let d = dir(0o750);
+        let f = attribute(d.path(), b"1\n", 0o644);
+        let got = read_kernel_attribute(&f, t_req(), 2).unwrap();
+        assert_eq!(got.as_slice(), b"1\n");
+        let e = read_kernel_attribute(&f, t_req(), 1).unwrap_err();
+        assert!(
+            matches!(&e, IoError::TargetTooLarge { limit: 1, actual: 2, path } if path == &f),
+            "got {e:?}"
+        );
+        std::fs::write(&f, b"").unwrap();
+        assert!(read_kernel_attribute(&f, t_req(), 2).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_kernel_attribute_is_held_to_its_target_and_never_followed() {
+        let d = dir(0o750);
+        let f = attribute(d.path(), b"Y\n", 0o666);
+        let strict = TargetRequired {
+            mode_mask: Some(0o022),
+            ..t_req()
+        };
+        let e = read_kernel_attribute(&f, strict, 64).unwrap_err();
+        assert!(
+            !matches!(e, IoError::TargetTooLarge { .. } | IoError::Symlink { .. }),
+            "got {e:?}"
+        );
+        let link = d.path().join("link");
+        symlink(&f, &link).unwrap();
+        let e = read_kernel_attribute(&link, t_req(), 64).unwrap_err();
+        assert!(matches!(e, IoError::Symlink { .. }), "got {e:?}");
+        let e = read_kernel_attribute(&d.path().join("absent"), t_req(), 64).unwrap_err();
+        assert!(matches!(e, IoError::Io { .. }), "got {e:?}");
+        let e = read_kernel_attribute(&d.path().join("absent/enforce"), t_req(), 64).unwrap_err();
+        assert!(matches!(e, IoError::Io { .. }), "got {e:?}");
+        let e = read_kernel_attribute(Path::new("/"), t_req(), 64).unwrap_err();
+        assert!(matches!(e, IoError::RootAnchor), "got {e:?}");
+    }
+
+    #[test]
+    fn a_kernel_attribute_with_a_non_utf8_name_is_refused() {
+        use std::os::unix::ffi::OsStrExt;
+        let d = dir(0o750);
+        let f = d.path().join(std::ffi::OsStr::from_bytes(b"\xff"));
+        let e = read_kernel_attribute(&f, t_req(), 64).unwrap_err();
+        assert!(matches!(e, IoError::NonUtf8Component { .. }), "got {e:?}");
+    }
+
+    #[test]
+    fn a_kernel_attribute_read_retries_eintr_and_refuses_an_error() {
+        let d = dir(0o750);
+        let f = attribute(d.path(), b"", 0o644);
+        let st = || nix::sys::stat::stat(&f);
+        let mut script = vec![
+            Err(nix::errno::Errno::EINTR),
+            Ok(b"1".as_slice()),
+            Ok(b"\n".as_slice()),
+            Ok(b"".as_slice()),
+        ]
+        .into_iter();
+        let got = read_attribute(&f, &t_req(), 8, st(), |buf| {
+            let step = script.next().unwrap()?;
+            buf[..step.len()].copy_from_slice(step);
+            Ok(step.len())
+        })
+        .unwrap();
+        assert_eq!(got.as_slice(), b"1\n");
+        let e = read_attribute(&f, &t_req(), 8, st(), |_| Err(nix::errno::Errno::EIO)).unwrap_err();
+        assert!(matches!(e, IoError::Io { .. }), "got {e:?}");
+        let e =
+            read_attribute(&f, &t_req(), 8, Err(nix::errno::Errno::EIO), |_| Ok(0)).unwrap_err();
+        assert!(matches!(e, IoError::Io { .. }), "got {e:?}");
+    }
+
+    /// The fixtures `read_absolute` refuses: sysfs reports more than it holds,
+    /// procfs less.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_kernel_attribute_whose_st_size_is_not_its_length_reads_whole() {
+        let online = Path::new("/sys/devices/system/cpu/online");
+        if !online.exists() {
+            crate::testutil::skip_or_fail(
+                "a_kernel_attribute_whose_st_size_is_not_its_length_reads_whole",
+                "/sys is not mounted",
+            );
+            return;
+        }
+        let sz = std::fs::symlink_metadata(online).unwrap().len() as usize;
+        let got = read_kernel_attribute(online, t_req(), 64 * 1024).unwrap();
+        assert!(!got.is_empty() && got.len() < sz && got.ends_with(b"\n"));
+        let status = PathBuf::from(format!("/proc/{}/status", std::process::id()));
+        assert_eq!(std::fs::symlink_metadata(&status).unwrap().len(), 0);
+        let got = read_kernel_attribute(&status, t_req(), 64 * 1024).unwrap();
+        assert!(got.starts_with(b"Name:"));
     }
 }

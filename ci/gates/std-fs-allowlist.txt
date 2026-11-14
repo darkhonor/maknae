@@ -47,6 +47,10 @@ crates/maknae-io/src/checks.rs|mode_mask: None,
 # each carried their own copy of this anchor requirement until the adapter absorbed
 # absolutization and they were deleted.
 crates/maknae-io/src/anchor.rs|let anchor = open_anchor_resolved(parent, AnchorRequired::OS_DAC, pref)?;
+# Anchor::own_file (#629) sets the owner and mode it was given on the opened file, so
+# the file's prior owner and mode are not a requirement; it still requires a regular,
+# singly-linked file.
+crates/maknae-io/src/anchor.rs|..TargetRequired::OS_DAC_REGULAR
 
 # read_storage carries no requirement of its own beyond regular-file: it reads
 # non-sensitive artifacts (CA pins, sealed-source blobs), and every caller needing a

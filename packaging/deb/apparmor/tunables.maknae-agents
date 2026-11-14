@@ -1,0 +1,6 @@
+# Agent homes for /etc/apparmor.d/usr.bin.maknae-agentd. `maknae enroll agent`
+# appends each enrolled agent's home in maknae-agents.d/<id>; these placeholders
+# name no directory, so the profile loads with no agent enrolled.
+@{MAKNAE_AGENT_HOMES}=/nonexistent/maknae-no-agent
+@{MAKNAE_AGENT_HOME_PARENTS}=/nonexistent/maknae-no-agent
+include if exists <tunables/maknae-agents.d>

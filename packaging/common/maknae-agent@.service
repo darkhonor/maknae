@@ -1,0 +1,50 @@
+[Unit]
+Description=maknae Agent Daemon %i (maknae-agentd)
+Documentation=https://github.com/darkhonor/maknae
+# Stopped before maknaed at shutdown, so the drain below reaches a live kernel.
+After=network-online.target maknaed.service nss-user-lookup.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=exec
+# No such account exists: an instance without its account.conf drop-in fails
+# 217/USER before exec instead of running as root. The drop-in's User= replaces it.
+User=maknae-agent-unenrolled
+ExecStart=/usr/bin/maknae-agentd %i
+TimeoutStopSec=181
+LoadCredentialEncrypted=maknae-agent-secret-id:/etc/maknae/private/agent-%i-secret-id.cred
+UnsetEnvironment=HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy VAULT_ADDR VAULT_TOKEN VAULT_SKIP_VERIFY VAULT_CACERT VAULT_CAPATH VAULT_CLIENT_CERT VAULT_CLIENT_KEY VAULT_NAMESPACE SSL_CERT_FILE SSL_CERT_DIR
+ProtectSystem=strict
+ProtectHome=read-only
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+# systemd never restarts a unit it was told to stop, whatever its exit status.
+Restart=on-failure
+# 2 is a usage error: a bad instance name never starts.
+RestartPreventExitStatus=2
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogLevelPrefix=no
+SyslogIdentifier=maknae-agentd-%i
+
+[Install]
+WantedBy=multi-user.target

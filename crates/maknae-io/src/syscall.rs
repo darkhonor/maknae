@@ -401,6 +401,28 @@ pub(crate) fn open_temp_excl<F: AsFd>(
     )
 }
 
+/// No `O_TRUNC`: an existing file keeps its bytes.
+fn create_nofollow_flags() -> OFlag {
+    OFlag::O_RDONLY
+        .union(OFlag::O_NOFOLLOW)
+        .union(OFlag::O_CREAT)
+        .union(OFlag::O_NONBLOCK)
+        .union(OFlag::O_CLOEXEC)
+}
+
+pub(crate) fn open_create_nofollow<F: AsFd>(
+    dirfd: &F,
+    name: &std::ffi::OsStr,
+    mode: crate::anchor::Mode,
+) -> nix::Result<OwnedFd> {
+    nix::fcntl::openat(
+        dirfd,
+        name,
+        create_nofollow_flags(),
+        NixMode::from_bits_truncate(mode.0 as _),
+    )
+}
+
 pub(crate) fn set_owner_and_mode<F: AsFd>(
     fd: &F,
     owner: crate::anchor::FileOwner,
@@ -594,6 +616,18 @@ mod tests {
 
     fn tmp() -> tempfile::TempDir {
         tempfile::tempdir().expect("tempdir")
+    }
+
+    #[test]
+    fn the_create_open_never_follows_never_blocks_and_never_leaks() {
+        assert_eq!(
+            super::create_nofollow_flags(),
+            OFlag::O_RDONLY
+                | OFlag::O_NOFOLLOW
+                | OFlag::O_CREAT
+                | OFlag::O_NONBLOCK
+                | OFlag::O_CLOEXEC
+        );
     }
 
     #[test]

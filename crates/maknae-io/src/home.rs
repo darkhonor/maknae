@@ -26,6 +26,52 @@ pub fn session_home() -> Option<PathBuf> {
         .and_then(|u| canonical_home(&u.dir))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnsafeHome {
+    NotUtf8,
+    NotAbsolute,
+    Contains(char),
+    NotCanonical,
+}
+
+impl std::fmt::Display for UnsafeHome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UnsafeHome::NotUtf8 => f.write_str("is not UTF-8"),
+            UnsafeHome::NotAbsolute => f.write_str("is not absolute"),
+            UnsafeHome::Contains(c) => write!(f, "contains {c:?}"),
+            UnsafeHome::NotCanonical => f.write_str(
+                "is not canonical (a symlink, `.`, `..` or a repeated `/`), or is not a directory",
+            ),
+        }
+    }
+}
+
+fn unit_unsafe(c: char) -> bool {
+    c.is_whitespace() || c.is_control() || matches!(c, '%' | '"' | '\'' | '\\')
+}
+
+/// A passwd home a systemd unit or a launchd plist may carry unquoted: absolute,
+/// already [`canonical_home`] as text, and free of anything systemd would expand
+/// (`%`), unquote (`"`, `'`, `\`) or split on (whitespace, control characters).
+pub fn unit_safe_home(raw: &Path) -> Result<String, UnsafeHome> {
+    unit_safe_home_given(raw, canonical_home(raw).as_deref())
+}
+
+fn unit_safe_home_given(raw: &Path, canonical: Option<&Path>) -> Result<String, UnsafeHome> {
+    let text = raw.to_str().ok_or(UnsafeHome::NotUtf8)?;
+    if !raw.is_absolute() {
+        return Err(UnsafeHome::NotAbsolute);
+    }
+    if let Some(c) = text.chars().find(|c| unit_unsafe(*c)) {
+        return Err(UnsafeHome::Contains(c));
+    }
+    if canonical.and_then(Path::to_str) != Some(text) {
+        return Err(UnsafeHome::NotCanonical);
+    }
+    Ok(text.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::disallowed_methods)]
@@ -165,5 +211,100 @@ mod tests {
         assert!(stdout.contains(&want), "{stdout}");
         assert!(!stdout.contains(decoy.to_str().unwrap()), "{stdout}");
         let _ = std::fs::remove_dir_all(&decoy);
+    }
+
+    #[test]
+    fn a_canonical_unit_safe_home_passes_as_its_text() {
+        let home = Path::new("/home/hobi-svc");
+        assert_eq!(
+            unit_safe_home_given(home, Some(home)),
+            Ok("/home/hobi-svc".into())
+        );
+        let d = scratch("unitsafe");
+        let canon = canonical_home(&d).unwrap();
+        assert_eq!(
+            unit_safe_home(&canon),
+            Ok(canon.to_str().unwrap().to_string())
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_home_a_unit_could_expand_split_or_unquote_is_refused() {
+        for (bad, c) in [
+            ("/home/ho bi", ' '),
+            ("/home/ho\tbi", '\t'),
+            ("/home/ho\nbi", '\n'),
+            ("/home/ho\rbi", '\r'),
+            ("/home/ho\u{7}bi", '\u{7}'),
+            ("/home/ho\u{a0}bi", '\u{a0}'),
+            ("/home/ho%ibi", '%'),
+            ("/home/ho\"bi", '"'),
+            ("/home/ho'bi", '\''),
+            ("/home/ho\\bi", '\\'),
+        ] {
+            let home = Path::new(bad);
+            assert_eq!(
+                unit_safe_home_given(home, Some(home)),
+                Err(UnsafeHome::Contains(c)),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_relative_non_canonical_or_missing_home_is_refused() {
+        let rel = Path::new("home/hobi");
+        assert_eq!(
+            unit_safe_home_given(rel, Some(rel)),
+            Err(UnsafeHome::NotAbsolute)
+        );
+        assert_eq!(unit_safe_home(rel), Err(UnsafeHome::NotAbsolute));
+        for (raw, canonical) in [
+            ("/home/./hobi", Some("/home/hobi")),
+            ("/home/link", Some("/data/hobi")),
+            ("/home//hobi", Some("/home/hobi")),
+            ("/home/hobi/", Some("/home/hobi")),
+            ("/home/gone", None),
+        ] {
+            assert_eq!(
+                unit_safe_home_given(Path::new(raw), canonical.map(Path::new)),
+                Err(UnsafeHome::NotCanonical),
+                "{raw}"
+            );
+        }
+        let d = scratch("unitsafe-link");
+        let link = d.with_extension("link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&d, &link).unwrap();
+        assert_eq!(unit_safe_home(&link), Err(UnsafeHome::NotCanonical));
+        assert_eq!(
+            unit_safe_home(&d.join("missing")),
+            Err(UnsafeHome::NotCanonical)
+        );
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_non_utf8_home_is_not_unit_safe() {
+        use std::os::unix::ffi::OsStrExt;
+        let raw = Path::new(std::ffi::OsStr::from_bytes(b"/home/h\xffbi"));
+        assert_eq!(
+            unit_safe_home_given(raw, Some(raw)),
+            Err(UnsafeHome::NotUtf8)
+        );
+    }
+
+    #[test]
+    fn each_refusal_names_why() {
+        for (e, want) in [
+            (UnsafeHome::NotUtf8, "is not UTF-8"),
+            (UnsafeHome::NotAbsolute, "is not absolute"),
+            (UnsafeHome::Contains('%'), "contains '%'"),
+            (UnsafeHome::NotCanonical, "is not canonical"),
+        ] {
+            assert!(e.to_string().starts_with(want), "{e}");
+        }
     }
 }
