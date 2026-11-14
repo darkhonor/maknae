@@ -1,11 +1,13 @@
 //! The tasker verbs' decision facts, views and pages (#628).
+use maknae_config::AgentId;
 use maknae_proto::{
-    SecretText, TaskCursor, TaskId, TaskRef, TaskReportPage, TaskReportView, TaskState,
-    TaskSubmission, TaskView, Tasker, Verb,
+    AgentEntry, AgentPage, AgentStanding, SecretText, TaskCursor, TaskId, TaskRef, TaskReportPage,
+    TaskReportView, TaskState, TaskSubmission, TaskView, Tasker, Verb,
 };
 use maknae_security::{AttrValue, Request};
 
 use crate::handler::Stamp;
+use crate::task::Holding;
 use crate::task_store::{Hot, TaskRecord};
 
 pub(crate) const TASK_PAGE_MAX: usize = 32;
@@ -90,6 +92,9 @@ pub(crate) enum TaskVerb<'a> {
         text: &'a SecretText,
         seen: Option<u32>,
     },
+    Agents {
+        after: Option<&'a str>,
+    },
 }
 
 pub(crate) fn task_verb(verb: &Verb) -> Option<TaskVerb<'_>> {
@@ -120,8 +125,10 @@ pub(crate) fn task_verb(verb: &Verb) -> Option<TaskVerb<'_>> {
             text,
             seen: *seen_follow_ups,
         }),
-        Verb::AgentList { .. }
-        | Verb::Ping
+        Verb::AgentList { after } => Some(TaskVerb::Agents {
+            after: after.as_deref(),
+        }),
+        Verb::Ping
         | Verb::Whoami
         | Verb::AdminStatus
         | Verb::AdminConfigShow
@@ -194,7 +201,8 @@ impl TaskVerb<'_> {
             | TaskVerb::List { .. }
             | TaskVerb::Collect { .. }
             | TaskVerb::Claim { .. }
-            | TaskVerb::Report { .. } => None,
+            | TaskVerb::Report { .. }
+            | TaskVerb::Agents { .. } => None,
         }
     }
 
@@ -208,7 +216,8 @@ impl TaskVerb<'_> {
             | TaskVerb::Stop(_)
             | TaskVerb::Drop(_)
             | TaskVerb::Claim { .. }
-            | TaskVerb::Report { .. } => None,
+            | TaskVerb::Report { .. }
+            | TaskVerb::Agents { .. } => None,
         }
     }
 
@@ -237,6 +246,109 @@ pub(crate) fn named(ids: &[TaskId]) -> String {
         n => format!(" and {n} more"),
     };
     format!(": {}{more}", shown.join(","))
+}
+
+/// One `session.task` decision about an agent, as a submission or a collect would make it.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Authority {
+    Permit,
+    Refused(String),
+    Undecided(String),
+}
+
+/// What an agent list does with one agent.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Listing {
+    /// Not a candidate: no decision is asked.
+    Skip,
+    /// `None` is left out.
+    Decided(Option<AgentStanding>),
+    /// Listed with this standing if the caller may collect from the agent.
+    Collect(AgentStanding),
+}
+
+/// An enrolled agent, from the caller's submit decision. A refused agent is listed only
+/// while the caller holds tasks there: contained, or withdrawn while anything is open or
+/// waiting.
+pub(crate) fn enrolled_listing(
+    submit: &Authority,
+    contained: bool,
+    held: Option<Holding>,
+) -> Listing {
+    match (submit, held) {
+        (Authority::Permit, _) => Listing::Decided(Some(AgentStanding::Enrolled)),
+        (Authority::Undecided(_), _) => Listing::Decided(Some(AgentStanding::Undecided)),
+        (Authority::Refused(_), None) => Listing::Decided(None),
+        (Authority::Refused(_), Some(_)) if contained => {
+            Listing::Decided(Some(AgentStanding::Contained))
+        }
+        (Authority::Refused(_), Some(h)) if h.waiting > 0 || h.open > 0 => {
+            Listing::Collect(AgentStanding::Withdrawn)
+        }
+        (Authority::Refused(_), Some(_)) => Listing::Decided(None),
+    }
+}
+
+/// An agent no longer enrolled is a candidate only while reports from it wait.
+pub(crate) fn removed_listing(held: Option<Holding>) -> Listing {
+    match held {
+        Some(h) if h.waiting > 0 => Listing::Collect(AgentStanding::Removed),
+        Some(_) | None => Listing::Skip,
+    }
+}
+
+pub(crate) fn collected(collect: &Authority, permitted: AgentStanding) -> Option<AgentStanding> {
+    match collect {
+        Authority::Permit => Some(permitted),
+        Authority::Undecided(_) => Some(AgentStanding::Undecided),
+        Authority::Refused(_) => None,
+    }
+}
+
+pub(crate) fn label(standing: Option<AgentStanding>) -> &'static str {
+    match standing {
+        None => "refused",
+        Some(AgentStanding::Enrolled) => "enrolled",
+        Some(AgentStanding::Contained) => "contained",
+        Some(AgentStanding::Withdrawn) => "withdrawn",
+        Some(AgentStanding::Removed) => "removed",
+        Some(AgentStanding::Undecided) => "undecided",
+    }
+}
+
+/// Adds the agent to `page`; an undecided agent the caller holds nothing with is only
+/// counted, so no caller learns a name from a decision that failed.
+pub(crate) fn place(
+    page: &mut AgentPage,
+    agent: &AgentId,
+    standing: Option<AgentStanding>,
+    held: Option<Holding>,
+) {
+    match (standing, held) {
+        (None, _) => {}
+        (Some(AgentStanding::Undecided), None) => page.undecided = page.undecided.saturating_add(1),
+        (Some(standing), held) => page.entries.push(AgentEntry {
+            agent: agent.as_str().to_owned(),
+            standing,
+            waiting: held.map_or(0, |h| h.waiting),
+        }),
+    }
+}
+
+/// How many per-agent outcomes an audit reason names before it counts the rest.
+pub(crate) const DECIDED_NAMED_MAX: usize = 8;
+
+/// `: agent:outcome, …` for an audit reason, the first [`DECIDED_NAMED_MAX`], then how
+/// many more.
+pub(crate) fn decided(said: &[String]) -> String {
+    if said.is_empty() {
+        return String::new();
+    }
+    let shown = said[..said.len().min(DECIDED_NAMED_MAX)].join(",");
+    match said.len().saturating_sub(DECIDED_NAMED_MAX) {
+        0 => format!(": {shown}"),
+        n => format!(": {shown} and {n} more"),
+    }
 }
 
 pub(crate) fn view(rec: &TaskRecord, hot: &Hot, now: i64) -> TaskView {
@@ -344,6 +456,160 @@ mod tests {
         let all = named(&ids);
         assert_eq!(all.matches(',').count(), TASK_PAGE_MAX - 1);
         assert!(all.ends_with(&format!("{} and 2 more", ids[31])), "{all}");
+    }
+
+    fn holding(open: usize, waiting: u32) -> Option<Holding> {
+        Some(Holding {
+            records: open + waiting as usize,
+            open,
+            waiting,
+        })
+    }
+
+    #[test]
+    fn an_enrolled_agent_is_listed_by_the_submit_decision_and_what_the_caller_holds() {
+        use AgentStanding::*;
+        let (permit, refused, undecided) = (
+            Authority::Permit,
+            Authority::Refused("no".into()),
+            Authority::Undecided("late".into()),
+        );
+        for contained in [false, true] {
+            for held in [None, holding(0, 0), holding(1, 2)] {
+                assert_eq!(
+                    enrolled_listing(&permit, contained, held),
+                    Listing::Decided(Some(Enrolled))
+                );
+                assert_eq!(
+                    enrolled_listing(&undecided, contained, held),
+                    Listing::Decided(Some(Undecided))
+                );
+            }
+            assert_eq!(
+                enrolled_listing(&refused, contained, None),
+                Listing::Decided(None),
+                "nothing held: refused is left out"
+            );
+        }
+        for held in [holding(0, 0), holding(1, 0), holding(0, 1)] {
+            assert_eq!(
+                enrolled_listing(&refused, true, held),
+                Listing::Decided(Some(Contained))
+            );
+        }
+        assert_eq!(
+            enrolled_listing(&refused, false, holding(0, 0)),
+            Listing::Decided(None),
+            "nothing open or waiting"
+        );
+        for held in [holding(1, 0), holding(0, 1)] {
+            assert_eq!(
+                enrolled_listing(&refused, false, held),
+                Listing::Collect(Withdrawn)
+            );
+        }
+    }
+
+    #[test]
+    fn an_agent_no_longer_enrolled_is_a_candidate_only_while_reports_wait() {
+        assert_eq!(removed_listing(None), Listing::Skip);
+        assert_eq!(removed_listing(holding(3, 0)), Listing::Skip);
+        assert_eq!(
+            removed_listing(holding(0, 1)),
+            Listing::Collect(AgentStanding::Removed)
+        );
+        for permitted in [AgentStanding::Removed, AgentStanding::Withdrawn] {
+            assert_eq!(collected(&Authority::Permit, permitted), Some(permitted));
+            assert_eq!(
+                collected(&Authority::Undecided("x".into()), permitted),
+                Some(AgentStanding::Undecided)
+            );
+            assert_eq!(collected(&Authority::Refused("x".into()), permitted), None);
+        }
+    }
+
+    #[test]
+    fn each_standing_has_its_trail_label() {
+        use AgentStanding::*;
+        let labels: Vec<&str> = [
+            None,
+            Some(Enrolled),
+            Some(Contained),
+            Some(Withdrawn),
+            Some(Removed),
+            Some(Undecided),
+        ]
+        .into_iter()
+        .map(label)
+        .collect();
+        assert_eq!(
+            labels,
+            [
+                "refused",
+                "enrolled",
+                "contained",
+                "withdrawn",
+                "removed",
+                "undecided"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_undecided_agent_is_named_only_when_the_caller_holds_something_there() {
+        let mut page = AgentPage {
+            entries: Vec::new(),
+            next: None,
+            undecided: 0,
+            banner: None,
+        };
+        let a = |s: &str| AgentId::parse(s).unwrap();
+        place(&mut page, &a("jin"), Some(AgentStanding::Undecided), None);
+        place(&mut page, &a("suga"), None, holding(1, 1));
+        assert!(page.entries.is_empty());
+        assert_eq!(page.undecided, 1);
+        place(
+            &mut page,
+            &a("hobi"),
+            Some(AgentStanding::Undecided),
+            holding(0, 0),
+        );
+        place(&mut page, &a("rm"), Some(AgentStanding::Enrolled), None);
+        place(
+            &mut page,
+            &a("v"),
+            Some(AgentStanding::Withdrawn),
+            holding(1, 3),
+        );
+        assert_eq!(page.undecided, 1);
+        let got: Vec<(&str, AgentStanding, u32)> = page
+            .entries
+            .iter()
+            .map(|e| (e.agent.as_str(), e.standing, e.waiting))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("hobi", AgentStanding::Undecided, 0),
+                ("rm", AgentStanding::Enrolled, 0),
+                ("v", AgentStanding::Withdrawn, 3)
+            ]
+        );
+    }
+
+    #[test]
+    fn per_agent_outcomes_are_named_up_to_eight_and_the_rest_counted() {
+        let said: Vec<String> = (0..10).map(|n| format!("a{n}:enrolled")).collect();
+        assert_eq!(decided(&[]), "");
+        assert_eq!(decided(&said[..1]), ": a0:enrolled");
+        assert_eq!(
+            decided(&said[..DECIDED_NAMED_MAX]),
+            format!(": {}", said[..8].join(","))
+        );
+        assert_eq!(
+            decided(&said),
+            format!(": {} and 2 more", said[..8].join(","))
+        );
     }
 
     #[test]
@@ -468,6 +734,20 @@ mod tests {
             task_verb(&listed),
             Some(TaskVerb::List { after: Some(4), .. })
         ));
+        let agents = Verb::AgentList {
+            after: Some("hobi".into()),
+        };
+        let tv = task_verb(&agents).unwrap();
+        assert!(matches!(
+            tv,
+            TaskVerb::Agents {
+                after: Some("hobi")
+            }
+        ));
+        assert_eq!(
+            (tv.cited(), tv.named_agent(), tv.object()),
+            (None, None, None)
+        );
     }
 
     #[test]

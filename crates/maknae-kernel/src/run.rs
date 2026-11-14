@@ -1190,6 +1190,9 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         Verb::Read { page: Some(p), .. } if !maknae_proto::page_request_is_acceptable(p) => {
             Some(("read", "page request not acceptable".to_string()))
         }
+        Verb::AgentList { after: Some(after) } if maknae_config::AgentId::parse(after).is_err() => {
+            Some(("agent list", "cursor not acceptable".to_string()))
+        }
         _ => None,
     };
     if let Some((noun, reason)) = operand_refusal.or(pregate) {
@@ -3344,6 +3347,53 @@ async fn serve_task_verb<S, E, P>(
         return;
     }
 
+    if let TaskVerb::Agents { after } = asked {
+        let refuse = |reason: &str| stamped(trail.record(action, "deny", reason, "unauthorized"));
+        if tasks.channel_agent.is_some() {
+            trail
+                .unauthorized(stream, &refuse("an agent is not a tasker here"))
+                .await;
+            return;
+        }
+        let after = match after.map(maknae_config::AgentId::parse).transpose() {
+            Ok(after) => after,
+            Err(_) => {
+                trail
+                    .unauthorized(stream, &refuse("the cursor is not an agent id"))
+                    .await;
+                return;
+            }
+        };
+        let (mut page, said) = agent_page(
+            authorizer,
+            &tasks.agents.view,
+            store,
+            trail.uid,
+            after.as_ref(),
+            lane,
+            timeout,
+        )
+        .await;
+        page.banner = tasks
+            .agents
+            .banner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let listed = page.entries.len();
+        let reason = format!(
+            "listed {listed} agents, {} undecided{}",
+            page.undecided,
+            tv::decided(&said)
+        );
+        let mut outcome = stamped(trail.record(action, "permit", &reason, "authorized"));
+        outcome.object = Some(format!("{listed} agents"));
+        trail
+            .deliver(stream, &outcome, Payload::Agents(page), None, None, action)
+            .await;
+        return;
+    }
+
     let (_, _, generation) = live.admission();
     let mut sec_req = build_authz_request(verb, trail.uid, None, lane, None, None, stamp);
     if let TaskVerb::Report { .. } = asked {
@@ -3774,7 +3824,7 @@ async fn serve_task_verb<S, E, P>(
             )
             .await;
         }
-        TaskVerb::Submit(_) => {
+        TaskVerb::Submit(_) | TaskVerb::Agents { .. } => {
             trail
                 .unauthorized(
                     stream,
@@ -3848,6 +3898,32 @@ async fn tasker_standing<P: Authorizer + Send + Sync + 'static>(
         None => Stamp::Client,
         Some(agent) => Stamp::Agent { agent, task: None },
     };
+    let decided = submit_authority(authorizer, uid, &stamp, &target, lane, timeout).await;
+    if let crate::task_verbs::Authority::Undecided(why) = &decided {
+        return undecided(Some(&tasker), why);
+    }
+    if let Some(why) = not_decidable() {
+        return undecided(Some(&tasker), why);
+    }
+    if !load.same(&view.load()) {
+        return undecided(Some(&tasker), "the policy changed during the decision");
+    }
+    match decided {
+        crate::task_verbs::Authority::Permit => Standing::Stands(load),
+        crate::task_verbs::Authority::Refused(why) => Standing::Withdrawn { tasker, why },
+        crate::task_verbs::Authority::Undecided(why) => undecided(Some(&tasker), &why),
+    }
+}
+
+/// Whether `uid`, on the channel `stamp` names, may submit to `target`.
+async fn submit_authority<P: Authorizer + Send + Sync + 'static>(
+    authorizer: &Arc<P>,
+    uid: u32,
+    stamp: &Stamp<'_>,
+    target: &maknae_config::AgentId,
+    lane: maknae_security::Lane,
+    timeout: Duration,
+) -> crate::task_verbs::Authority {
     let verb = Verb::TaskSubmit {
         task: maknae_proto::TaskSubmission {
             schema: maknae_proto::TASK_SCHEMA.into(),
@@ -3859,7 +3935,36 @@ async fn tasker_standing<P: Authorizer + Send + Sync + 'static>(
             labels: maknae_proto::Labels {},
         },
     };
-    let mut req = build_authz_request(&verb, uid, None, lane, None, None, &stamp);
+    authority(authorizer, &verb, uid, stamp, target, lane, timeout).await
+}
+
+/// Whether `uid` may collect its reports from `target`.
+async fn collect_authority<P: Authorizer + Send + Sync + 'static>(
+    authorizer: &Arc<P>,
+    uid: u32,
+    stamp: &Stamp<'_>,
+    target: &maknae_config::AgentId,
+    lane: maknae_security::Lane,
+    timeout: Duration,
+) -> crate::task_verbs::Authority {
+    let verb = Verb::TaskCollect {
+        agent: target.as_str().to_owned(),
+        after: None,
+    };
+    authority(authorizer, &verb, uid, stamp, target, lane, timeout).await
+}
+
+async fn authority<P: Authorizer + Send + Sync + 'static>(
+    authorizer: &Arc<P>,
+    verb: &Verb,
+    uid: u32,
+    stamp: &Stamp<'_>,
+    target: &maknae_config::AgentId,
+    lane: maknae_security::Lane,
+    timeout: Duration,
+) -> crate::task_verbs::Authority {
+    use crate::task_verbs::Authority;
+    let mut req = build_authz_request(verb, uid, None, lane, None, None, stamp);
     crate::task_verbs::stamp_agent(&mut req, target.as_str());
     let pdp = Arc::clone(authorizer);
     let decided = admit_blocking(
@@ -3869,32 +3974,95 @@ async fn tasker_standing<P: Authorizer + Send + Sync + 'static>(
         move || guarded_decide_cited(&*pdp, &req).verdict,
     )
     .await;
+    let undecided = |why: &str| Authority::Undecided(why.to_string());
     match decided {
-        Err(Offload::Open) => undecided(Some(&tasker), "the decision circuit breaker is open"),
-        Err(Offload::AtCapacity) => {
-            undecided(Some(&tasker), "the decision worker budget is exhausted")
-        }
-        Err(Offload::Join) => undecided(Some(&tasker), "the decision failed (join)"),
-        Err(Offload::TimedOut) => undecided(Some(&tasker), "the decision timed out"),
-        Ok(maknae_security::Verdict::Indeterminate) => {
-            undecided(Some(&tasker), "the decision was indeterminate")
-        }
-        Ok(verdict) => {
-            let decision = finalize(combine(vec![verdict]));
-            if let Some(why) = not_decidable() {
-                return undecided(Some(&tasker), why);
+        Err(Offload::Open) => undecided("the decision circuit breaker is open"),
+        Err(Offload::AtCapacity) => undecided("the decision worker budget is exhausted"),
+        Err(Offload::Join) => undecided("the decision failed (join)"),
+        Err(Offload::TimedOut) => undecided("the decision timed out"),
+        Ok(maknae_security::Verdict::Indeterminate) => undecided("the decision was indeterminate"),
+        Ok(verdict) => match finalize(combine(vec![verdict])) {
+            Decision::Permit { .. } => Authority::Permit,
+            Decision::Deny { reason } => Authority::Refused(reason),
+        },
+    }
+}
+
+/// The agents person `uid` may task, or still holds tasks or reports with, after `after`,
+/// under one deadline of `timeout`; and each agent's outcome, for the trail.
+async fn agent_page<P: Authorizer + Send + Sync + 'static>(
+    authorizer: &Arc<P>,
+    view: &Arc<dyn crate::enrollment::EnrollmentView>,
+    store: &crate::task::TaskStore,
+    uid: u32,
+    after: Option<&maknae_config::AgentId>,
+    lane: maknae_security::Lane,
+    timeout: Duration,
+) -> (maknae_proto::AgentPage, Vec<String>) {
+    use crate::task_verbs as tv;
+    let deadline = tokio::time::Instant::now() + timeout;
+    let holdings = store.holdings(&maknae_proto::Tasker::Uid(uid));
+    let enrolled: std::collections::BTreeMap<maknae_config::AgentId, u32> =
+        view.agents().into_iter().collect();
+    let mut candidates: std::collections::BTreeSet<&maknae_config::AgentId> =
+        enrolled.keys().collect();
+    candidates.extend(holdings.keys());
+    let rest: Vec<&maknae_config::AgentId> = candidates
+        .into_iter()
+        .filter(|a| after.is_none_or(|after| *a > after))
+        .collect();
+    let mut page = maknae_proto::AgentPage {
+        entries: Vec::new(),
+        next: None,
+        undecided: 0,
+        banner: None,
+    };
+    let mut said = Vec::new();
+    for (at, agent) in rest.iter().copied().enumerate() {
+        let held = holdings.get(agent).copied();
+        let listing = match enrolled.get(agent) {
+            Some(agent_uid) => {
+                let submit = decide_by(authorizer, uid, agent, true, lane, deadline).await;
+                tv::enrolled_listing(&submit, view.contained(*agent_uid), held)
             }
-            if !load.same(&view.load()) {
-                return undecided(Some(&tasker), "the policy changed during the decision");
+            None => tv::removed_listing(held),
+        };
+        let standing = match listing {
+            tv::Listing::Skip => continue,
+            tv::Listing::Decided(standing) => standing,
+            tv::Listing::Collect(permitted) => {
+                let collect = decide_by(authorizer, uid, agent, false, lane, deadline).await;
+                tv::collected(&collect, permitted)
             }
-            match decision {
-                Decision::Permit { .. } => Standing::Stands(load),
-                Decision::Deny { reason } => Standing::Withdrawn {
-                    tasker,
-                    why: reason,
-                },
+        };
+        said.push(format!("{}:{}", agent.as_str(), tv::label(standing)));
+        tv::place(&mut page, agent, standing, held);
+        if page.entries.len() == maknae_proto::AGENT_PAGE_MAX {
+            if at + 1 < rest.len() {
+                page.next = page.entries.last().map(|e| e.agent.clone());
             }
+            break;
         }
+    }
+    (page, said)
+}
+
+/// A submit or collect decision for one agent of a list, in the time left before `deadline`.
+async fn decide_by<P: Authorizer + Send + Sync + 'static>(
+    authorizer: &Arc<P>,
+    uid: u32,
+    agent: &maknae_config::AgentId,
+    submit: bool,
+    lane: maknae_security::Lane,
+    deadline: tokio::time::Instant,
+) -> crate::task_verbs::Authority {
+    let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if left.is_zero() {
+        return crate::task_verbs::Authority::Undecided("not reached before the deadline".into());
+    }
+    match submit {
+        true => submit_authority(authorizer, uid, &Stamp::Client, agent, lane, left).await,
+        false => collect_authority(authorizer, uid, &Stamp::Client, agent, lane, left).await,
     }
 }
 
@@ -4565,7 +4733,11 @@ pub struct AgentAdmission {
     pub view: Arc<dyn crate::enrollment::EnrollmentView>,
     pub tasks: Arc<crate::task::TaskStore>,
     pub signer: Arc<dyn crate::task::TaskSigner>,
+    pub banner: Banner,
 }
+
+/// The operator's banner: loaded at start, replaced by each applied reload.
+pub type Banner = Arc<std::sync::RwLock<Option<maknae_proto::BannerSpec>>>;
 
 impl AgentAdmission {
     #[cfg(any(test, feature = "hermetic-test-seam"))]
@@ -4574,6 +4746,7 @@ impl AgentAdmission {
             view: Arc::new(crate::enrollment::FixedEnrollment(Default::default())),
             tasks: Arc::new(crate::task::TaskStore::new()),
             signer: Arc::new(crate::task::UnverifiedSigner),
+            banner: Banner::default(),
         }
     }
 }
@@ -5315,6 +5488,7 @@ pub fn run(config_dir: &Path) -> ExitCode {
         policy_load: maknae_authz_basic::PolicySource::load,
         conversations_open: production_conversations,
         tasks_open: production_tasks,
+        banner_load: maknae_config::load_banner,
     };
     let code = runtime.block_on(async move {
         match run_inner(
@@ -6360,6 +6534,8 @@ struct Reloader<B: maknae_authz_basic::Baseline, E> {
     containment: Arc<ContainmentStatus>,
     /// Reconciled against every installed snapshot.
     tasks: Arc<crate::task::TaskStore>,
+    banner: Banner,
+    banner_load: BannerLoader,
     #[cfg(test)]
     load_gate: Option<Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>>,
     #[cfg(test)]
@@ -6393,6 +6569,7 @@ struct ReloadCandidate {
     initiator: &'static str,
     counts: crate::sync::SyncCounts,
     lost: Option<String>,
+    banner: Option<maknae_proto::BannerSpec>,
 }
 
 impl<B, E> Reloader<B, E>
@@ -6476,6 +6653,7 @@ where
             ))),
             tasks: Arc::clone(&self.tasks),
             signer,
+            banner: Arc::clone(&self.banner),
         }
     }
 
@@ -7664,6 +7842,8 @@ fn load_candidate<B: maknae_authz_basic::Baseline, E>(
     let file = baseline
         .load_source()
         .map_err(|e| Refusal::Load(e.to_string()))?;
+    let banner = crate::boot_gate::banner_boot_gate(&reloader.config_dir, reloader.banner_load)
+        .map_err(|e| Refusal::Load(e.to_string()))?;
     let merged = crate::sync::merge_source(file, persisted.sync.as_ref()).map_err(|e| match e {
         crate::sync::MergeError::Stored(m) => Refusal::Compile(m),
         crate::sync::MergeError::Policy(m) => Refusal::Load(m),
@@ -7730,6 +7910,7 @@ fn load_candidate<B: maknae_authz_basic::Baseline, E>(
             counts: merged.counts,
             lost: merged.lost,
             source: Arc::new(merged.source),
+            banner,
         },
     ))
 }
@@ -7845,6 +8026,11 @@ where
         );
         self.reloader
             .install_and_reconcile(Some(candidate.snapshot));
+        *self
+            .reloader
+            .banner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = candidate.banner;
         *self
             .reloader
             .applied_source
@@ -8172,7 +8358,11 @@ struct BootSeams {
     policy_load: PolicyLoader,
     conversations_open: ConversationsOpener,
     tasks_open: TasksOpener,
+    banner_load: BannerLoader,
 }
+
+type BannerLoader =
+    fn(&Path) -> Result<Option<maknae_proto::BannerSpec>, maknae_config::ConfigError>;
 
 type ConversationsOpener =
     fn(&Path, u32, WrappingKey) -> Result<Arc<dyn ConversationStore>, ConversationError>;
@@ -9197,6 +9387,8 @@ async fn boot_after_sink(
         seams.env.egress_account()
     })
     .map_err(|e| RunError::Other(e.to_string()))?;
+    let banner = crate::boot_gate::banner_boot_gate(config_dir, seams.banner_load)
+        .map_err(|e| RunError::Other(e.to_string()))?;
 
     // --- AUTHZ GATE (#77, spec D1): the daemon constructs its PDP at boot or
     // refuses to start, after the validator passed the principal. Any PDP
@@ -9527,6 +9719,8 @@ async fn boot_after_sink(
         lookup_breaker: account_lookup_breaker(),
         containment: containment_status,
         tasks,
+        banner: Arc::new(std::sync::RwLock::new(banner)),
+        banner_load: seams.banner_load,
         #[cfg(test)]
         load_gate: None,
         #[cfg(test)]
@@ -13593,6 +13787,20 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             policy_load: maknae_authz_basic::PolicySource::load,
             conversations_open: memory_conversations,
             tasks_open: memory_tasks,
+            banner_load: owned_banner,
+        }
+    }
+
+    /// Reads `banner.yaml` as the production loader does, from a directory the test owns.
+    pub(super) fn owned_banner(
+        path: &Path,
+    ) -> Result<Option<maknae_proto::BannerSpec>, maknae_config::ConfigError> {
+        match std::fs::read_to_string(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(maknae_config::ConfigError::Io(e.to_string())),
+            Ok(text) => {
+                maknae_config::banner_from_document(&maknae_config::load_str(&text)?).map(Some)
+            }
         }
     }
 
@@ -15057,6 +15265,23 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             assert_eq!(recs.last().unwrap().action, GRAPH_LOAD_ACTION, "{tag}");
             assert_eq!(revision_of_store(&d), revision, "{tag}");
         }
+    }
+
+    #[test]
+    fn maknaed_refuses_to_start_on_an_invalid_banner() {
+        let _g = env_lock();
+        let d = fixture("banner-refused");
+        put(&d.0, maknae_config::BANNER_FILE, "text: \"\"\n", 0o640);
+        let r = boot(&d);
+        let Err(e @ RunError::Other(m)) = &r else {
+            panic!("expected the start refusal, got {r:?}");
+        };
+        assert!(
+            m.contains(&d.0.join(maknae_config::BANNER_FILE).display().to_string())
+                && m.contains("empty"),
+            "{m}"
+        );
+        assert_eq!(refusal_exit_code(e), 1);
     }
 
     #[test]
@@ -17247,6 +17472,8 @@ mod reload_fixture {
             lookup_breaker: Arc::default(),
             containment: Arc::clone(&status.containment),
             tasks: Arc::new(crate::task::TaskStore::new()),
+            banner: Banner::default(),
+            banner_load: super::boot_gate_tests::owned_banner,
             load_gate: opts.load_gate.map(|g| Arc::new(std::sync::Mutex::new(g))),
             load_entered: std::sync::Mutex::new(None),
             release_resolved: std::sync::Mutex::new(None),
@@ -19818,6 +20045,39 @@ mod reload_tests {
             "{got:?}"
         );
         assert_eq!(host_list(&fx), ["~/.ssh/**"]);
+    }
+
+    #[tokio::test]
+    async fn a_reload_with_an_invalid_banner_keeps_the_running_one() {
+        let fx = fixture("banner_bad", AUTHZ, Some(ROOT_ADMIN)).await;
+        let banner = fx.dir.join(maknae_config::BANNER_FILE);
+        let served = || fx.reloader.banner.read().unwrap().clone();
+        assert_eq!(served(), None);
+        std::fs::write(&banner, "text: \"sentinel-630-banner\"\n").unwrap();
+        bounded(fx.reloader.run()).await.unwrap();
+        let running = Some(maknae_proto::BannerSpec {
+            text: "sentinel-630-banner".into(),
+            color: None,
+        });
+        assert_eq!(served(), running, "an applied reload installs it");
+        std::fs::write(&banner, "text: \"\"\n").unwrap();
+        let got = bounded(fx.reloader.run()).await;
+        assert!(
+            matches!(&got, Err(crate::reload::Refusal::Load(m)) if m.contains(maknae_config::BANNER_FILE)),
+            "{got:?}"
+        );
+        assert_eq!(served(), running);
+        let last = outcomes(&fx.reload_records()).pop().unwrap();
+        assert_eq!((last.0.as_str(), last.1.as_str()), ("graph.reload", "deny"));
+        assert!(
+            last.2.starts_with("reload refused: policy load:")
+                && last.2.contains(maknae_config::BANNER_FILE),
+            "{}",
+            last.2
+        );
+        std::fs::remove_file(&banner).unwrap();
+        bounded(fx.reloader.run()).await.unwrap();
+        assert_eq!(served(), None, "a removed file removes the banner");
     }
 
     #[tokio::test]
@@ -24190,6 +24450,66 @@ mod task_sweep_tests {
         assert_eq!(store.record(&id).unwrap().state, TaskState::Queued);
     }
 
+    fn hobi_and_jin() -> Arc<dyn crate::enrollment::EnrollmentView> {
+        Arc::new(FixedEnrollment(
+            [("hobi", 2001), ("jin", 2002)]
+                .into_iter()
+                .map(|(a, u)| (maknae_config::AgentId::parse(a).unwrap(), u))
+                .collect(),
+        ))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_undecided_agent_with_holdings_is_named_and_others_are_counted() {
+        let (_blobs, _clock, store) = mem(1_000);
+        let me = Tasker::Uid(1000);
+        queued(&store, "hobi", me.clone());
+        let late = maknae_security::Verdict::Deny {
+            reason: "late".into(),
+        };
+        let (page, said) = agent_page(
+            &Arc::new(Says(late, Duration::from_millis(300))),
+            &hobi_and_jin(),
+            &store,
+            1000,
+            None,
+            maknae_security::Lane::Local,
+            Duration::from_millis(20),
+        )
+        .await;
+        assert_eq!(
+            page.entries,
+            [maknae_proto::AgentEntry {
+                agent: "hobi".into(),
+                standing: maknae_proto::AgentStanding::Undecided,
+                waiting: 0,
+            }]
+        );
+        assert_eq!((page.undecided, page.next), (1, None));
+        assert_eq!(said, ["hobi:undecided", "jin:undecided"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_guest_without_a_grant_learns_no_agent_name_from_an_undecided_list() {
+        let (_blobs, _clock, store) = mem(1_000);
+        queued(&store, "hobi", Tasker::Uid(1001));
+        let (page, _) = agent_page(
+            &Arc::new(Says(
+                maknae_security::Verdict::Indeterminate,
+                Duration::ZERO,
+            )),
+            &hobi_and_jin(),
+            &store,
+            1000,
+            None,
+            maknae_security::Lane::Local,
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(page.entries.is_empty(), "{page:?}");
+        assert_eq!((page.undecided, page.next), (2, None));
+    }
+
     /// A view whose load is replaced once `swapped` is set; the new load does not resolve
     /// the tasker's name when `unresolves`.
     struct Reloading {
@@ -24217,6 +24537,9 @@ mod task_sweep_tests {
     impl crate::enrollment::EnrollmentView for Reloading {
         fn agent_uid(&self, id: &maknae_config::AgentId) -> Option<u32> {
             self.view.agent_uid(id)
+        }
+        fn agents(&self) -> Vec<(maknae_config::AgentId, u32)> {
+            self.view.agents()
         }
         fn is_enrolled(&self, uid: u32) -> bool {
             self.view.is_enrolled(uid)

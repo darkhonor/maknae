@@ -454,7 +454,7 @@ color: "#ffd700"
 - `color` (optional): `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, or `"#rrggbb"`. Quote a `#rrggbb` value, since an unquoted `#` starts a YAML comment. The banner's text is black or white, whichever has the higher contrast against the colour. Without `color` the banner is shown in reverse video.
 - Any other key refuses.
 - **Ownership and mode.** A regular file, not a symlink, owned by root and not group- or other-writable. `<config-dir>` must be owned by root and not group- or other-writable, or the file is refused, naming the directory. Only a missing file inside such a directory reads as no banner; a missing directory, a symlink, the wrong owner or mode, an invalid file and a read error each refuse.
-- **Invalid file.** An invalid `banner.yaml` refuses `maknaed`'s start, naming `banner.yaml` and the reason.
+- **Invalid file.** An invalid `banner.yaml` refuses `maknaed`'s start, naming `banner.yaml` and the reason. A reload (`SIGHUP`) reads it again: an invalid file refuses the whole reload, as an invalid `authz.yaml` does, so the running policy and banner stay and the refusal is recorded in the trail; a removed file removes the banner.
 
 ---
 

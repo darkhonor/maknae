@@ -306,6 +306,14 @@ impl Held {
         self.tasks.get(id).filter(|r| !r.pending)
     }
 
+    /// Whether a collect returns the record's report or close: neither held nor due a hold.
+    fn collectable(&self, r: &TaskRecord) -> bool {
+        r.rseq.is_some()
+            && r.report.is_some()
+            && r.state != TaskState::Held
+            && !self.holding.contains_key(&r.signed.task.task_id)
+    }
+
     fn note(&mut self, notice: Notice) {
         self.notices.push(notice);
     }
@@ -397,6 +405,15 @@ impl Held {
             self.expose(rec);
         }
     }
+}
+
+/// A tasker's tasks with one agent: `open` those queued, working or held, `waiting` its
+/// reports and close notices a collect would return.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Holding {
+    pub records: usize,
+    pub open: usize,
+    pub waiting: u32,
 }
 
 /// The agent's generation and enrolled uid, as read before the decision.
@@ -1860,13 +1877,36 @@ impl TaskStore {
         let mut mine: Vec<&TaskRecord> = held
             .tasks
             .values()
-            .filter(|r| !r.pending && r.tasker == *tasker && r.agent == *agent && r.rseq.is_some())
-            .filter(|r| {
-                r.state != TaskState::Held && !held.holding.contains_key(&r.signed.task.task_id)
-            })
+            .filter(|r| !r.pending && r.tasker == *tasker && r.agent == *agent)
+            .filter(|r| held.collectable(r))
             .collect();
         mine.sort_by_key(|r| r.rseq);
         crate::task_verbs::report_page(mine.into_iter(), budget)
+    }
+
+    /// What `tasker` holds with each agent; `waiting` is every report and close notice
+    /// [`TaskStore::reports`] would return, across all its pages.
+    pub fn holdings(&self, tasker: &Tasker) -> BTreeMap<AgentId, Holding> {
+        let held = self.held();
+        let mut by_agent: BTreeMap<AgentId, Holding> = BTreeMap::new();
+        for r in held
+            .tasks
+            .values()
+            .filter(|r| !r.pending && r.tasker == *tasker)
+        {
+            let h = by_agent.entry(r.agent.clone()).or_default();
+            h.records += 1;
+            if matches!(
+                r.state,
+                TaskState::Queued | TaskState::Working | TaskState::Held
+            ) {
+                h.open += 1;
+            }
+            if held.collectable(r) {
+                h.waiting = h.waiting.saturating_add(1);
+            }
+        }
+        by_agent
     }
 
     /// True when the disk no longer holds the record confirmed; otherwise the record
@@ -3419,6 +3459,47 @@ mod tests {
         assert_eq!(closed.close, Some(TaskClose::Stopped));
         assert_eq!(store.reports(&me, &id("hobi"), 0).entries.len(), 1);
         assert!(store.reports(&me, &id("jin"), 0).entries.is_empty());
+    }
+
+    #[test]
+    fn holdings_count_what_collect_would_return() {
+        let (_blobs, store) = mem();
+        let me = Tasker::Uid(1000);
+        let held = held_by(&store, me.clone());
+        store.publish_report(&held, text("h"), None).unwrap();
+        store.mark_unenrolled(&crate::enrollment::Containing(
+            view(&[("hobi", HOBI)]),
+            [1000].into(),
+        ));
+        store.close_all_due();
+        assert_eq!(store.record(&held).unwrap().state, TaskState::Held);
+        let (a, b) = (held_by(&store, me.clone()), held_by(&store, me.clone()));
+        store.publish_report(&a, text("a"), None).unwrap();
+        store
+            .publish_report(&b, text(""), Some(TaskClose::Stopped))
+            .unwrap();
+        held_by(&store, me.clone());
+        let working = held_by(&store, me.clone());
+        store.start_for_test(&working);
+        held_by(&store, Tasker::Uid(1001));
+        let got = store.holdings(&me);
+        assert_eq!(
+            got.into_iter().collect::<Vec<_>>(),
+            [(
+                id("hobi"),
+                Holding {
+                    records: 5,
+                    open: 3,
+                    waiting: 2
+                }
+            )]
+        );
+        assert_eq!(
+            store.reports(&me, &id("hobi"), usize::MAX).entries.len(),
+            2,
+            "what a collect would return"
+        );
+        assert!(store.holdings(&Tasker::Uid(999)).is_empty());
     }
 
     #[test]

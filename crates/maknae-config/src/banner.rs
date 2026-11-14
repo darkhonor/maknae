@@ -6,7 +6,7 @@ use std::path::Path;
 
 pub const BANNER_PATH: &str = "/etc/maknae/banner.yaml";
 
-const BANNER_FILE: &str = "banner.yaml";
+pub const BANNER_FILE: &str = "banner.yaml";
 
 fn invalid(reason: impl std::fmt::Display) -> ConfigError {
     ConfigError::InvalidBanner(reason.to_string())

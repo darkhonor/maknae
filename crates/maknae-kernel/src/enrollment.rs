@@ -8,6 +8,8 @@ use crate::Composition;
 
 pub trait EnrollmentView: Send + Sync {
     fn agent_uid(&self, id: &AgentId) -> Option<u32>;
+    /// Every enrolled agent and its uid, by id.
+    fn agents(&self) -> Vec<(AgentId, u32)>;
     fn is_enrolled(&self, uid: u32) -> bool;
     /// Whether the person or agent `uid` is contained.
     fn contained(&self, uid: u32) -> bool;
@@ -74,6 +76,19 @@ impl<B: Baseline> EnrollmentView for SnapshotEnrollment<B> {
         self.0.baseline().snapshot().agent_uid(id.as_str())
     }
 
+    fn agents(&self) -> Vec<(AgentId, u32)> {
+        let mut agents: Vec<(AgentId, u32)> = self
+            .0
+            .baseline()
+            .snapshot()
+            .agents()
+            .into_iter()
+            .filter_map(|(uid, name)| AgentId::parse(&name).ok().map(|id| (id, uid)))
+            .collect();
+        agents.sort();
+        agents
+    }
+
     fn is_enrolled(&self, uid: u32) -> bool {
         self.0.baseline().snapshot().agent_of(uid).is_some()
     }
@@ -105,6 +120,10 @@ impl EnrollmentView for FixedEnrollment {
         self.0.get(id).copied()
     }
 
+    fn agents(&self) -> Vec<(AgentId, u32)> {
+        self.0.iter().map(|(id, uid)| (id.clone(), *uid)).collect()
+    }
+
     fn is_enrolled(&self, uid: u32) -> bool {
         self.0.values().any(|u| *u == uid)
     }
@@ -128,6 +147,10 @@ impl<V: EnrollmentView> EnrollmentView for Unresolving<V> {
         self.0.agent_uid(id)
     }
 
+    fn agents(&self) -> Vec<(AgentId, u32)> {
+        self.0.agents()
+    }
+
     fn is_enrolled(&self, uid: u32) -> bool {
         self.0.is_enrolled(uid)
     }
@@ -149,6 +172,10 @@ pub struct Containing<V>(pub V, pub std::collections::BTreeSet<u32>);
 impl<V: EnrollmentView> EnrollmentView for Containing<V> {
     fn agent_uid(&self, id: &AgentId) -> Option<u32> {
         self.0.agent_uid(id)
+    }
+
+    fn agents(&self) -> Vec<(AgentId, u32)> {
+        self.0.agents()
     }
 
     fn is_enrolled(&self, uid: u32) -> bool {
@@ -180,6 +207,15 @@ mod tests {
         assert!(view.is_enrolled(2001));
         assert!(!view.is_enrolled(2002));
         assert!(!view.contained(2001));
+    }
+
+    #[test]
+    fn every_view_lists_its_agents_by_id() {
+        let fixed = FixedEnrollment([(id("jin"), 2002), (id("hobi"), 2001)].into());
+        let want = vec![(id("hobi"), 2001), (id("jin"), 2002)];
+        assert_eq!(fixed.agents(), want);
+        assert_eq!(Containing(fixed.clone(), [2001].into()).agents(), want);
+        assert_eq!(Unresolving(fixed, [2001].into()).agents(), want);
     }
 
     #[test]
@@ -253,5 +289,6 @@ mod tests {
         assert_eq!(view.agent_uid(&id("hobi")), Some(2001));
         assert!(view.is_enrolled(2001));
         assert!(!view.is_enrolled(2002));
+        assert_eq!(view.agents(), [(id("hobi"), 2001)]);
     }
 }
