@@ -1644,6 +1644,30 @@ mod tests {
     }
 
     #[test]
+    fn a_plain_wait_session_against_a_contained_agent_exits_1() {
+        let fake = Fake::new(&[("hobi", AgentStanding::Contained)], 0);
+        let mut io = pipes("tidy my downloads\n");
+        let ended = in_turn(&fake, fresh_leaf(), u64::MAX, true, io.lines());
+        assert_eq!(
+            ended,
+            (
+                End::Failed,
+                Left {
+                    cut: false,
+                    unsent: 0,
+                    not_taken: 1,
+                }
+            )
+        );
+        assert_eq!(
+            ended.1.lines("hobi"),
+            ["1 request was refused, not sent, or of unknown outcome"]
+        );
+        assert!(!fake.calls().contains(&"submit"));
+        assert_eq!(io.output(), "hobi is on hold because it was contained\n");
+    }
+
+    #[test]
     fn a_queued_read_on_leaving_names_nothing_and_exits_0() {
         let _one = crate::screen::testing::one_session();
         let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);

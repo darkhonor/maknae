@@ -358,7 +358,7 @@ impl Book {
         self.lost + self.queued(Asked::steering)
     }
 
-    /// Steering requests the kernel answered as not sent, refused, or of unknown outcome.
+    /// Steering requests refused here, or answered as not sent, refused, or of unknown outcome.
     pub fn not_taken(&self) -> usize {
         self.not_taken
     }
@@ -416,6 +416,12 @@ impl Book {
             self.warned = false;
         }
         if self.stopped && !matches!(parsed, Parsed::Empty | Parsed::Bye | Parsed::Help) {
+            if matches!(
+                parsed,
+                Parsed::Request | Parsed::Add { .. } | Parsed::Stop(_) | Parsed::Drop(_)
+            ) {
+                self.not_taken += 1;
+            }
             self.say(conv, text::LOGIN_STOPPED);
             return Entered::Stay;
         }
@@ -423,9 +429,9 @@ impl Book {
             Parsed::Empty => Entered::Stay,
             Parsed::Request => {
                 if let Some(refusal) = self.refuse_tasking() {
-                    self.say(conv, &refusal);
+                    self.refuse(conv, &refusal);
                 } else if conv.push(EntryKind::Request, &line).is_err() {
-                    self.say(conv, text::CONVERSATION_FULL);
+                    self.refuse(conv, text::CONVERSATION_FULL);
                 } else {
                     let text = SecretText(line);
                     self.queue.push_back((Op::Submit { text }, Asked::Submit));
@@ -522,13 +528,13 @@ impl Book {
 
     fn add(&mut self, number: Option<u32>, add: &str, line: &str, conv: &mut Conversation) {
         if let Some(refusal) = self.refuse_tasking() {
-            return self.say(conv, &refusal);
+            return self.refuse(conv, &refusal);
         }
         let Some((n, task)) = self.target(number, conv, "add to") else {
             return;
         };
         if conv.push(EntryKind::Request, line).is_err() {
-            return self.say(conv, text::CONVERSATION_FULL);
+            return self.refuse(conv, text::CONVERSATION_FULL);
         }
         let (copy, _) = add_copy(add);
         self.queue.push_back((
@@ -542,7 +548,7 @@ impl Book {
 
     fn steer(&mut self, number: Option<u32>, conv: &mut Conversation, stop: bool) {
         if let Some(refusal) = self.refuse_steering() {
-            return self.say(conv, &refusal);
+            return self.refuse(conv, &refusal);
         }
         let verb = if stop { "stop" } else { "drop" };
         let Some((n, task)) = self.target(number, conv, verb) else {
@@ -575,14 +581,19 @@ impl Book {
         match (found, number) {
             (Some(found), _) => Some(found),
             (None, Some(n)) => {
-                self.say(conv, &format!("there is no task #{n}"));
+                self.refuse(conv, &format!("there is no task #{n}"));
                 None
             }
             (None, None) => {
-                self.say(conv, &format!("there is no open task to {verb}"));
+                self.refuse(conv, &format!("there is no open task to {verb}"));
                 None
             }
         }
+    }
+
+    fn refuse(&mut self, conv: &mut Conversation, why: &str) {
+        self.not_taken += 1;
+        self.say(conv, why);
     }
 
     fn task_index(&self, n: u32) -> Option<usize> {
@@ -1888,6 +1899,59 @@ mod tests {
         run.submit("one", 1, 0);
         run.now = 1_000;
         assert!(matches!(run.op(), Op::Poll { after: None }));
+    }
+
+    #[test]
+    fn a_request_the_book_refuses_itself_is_counted_not_taken() {
+        let cases: [(Standing, &[&str]); 3] = [
+            (
+                Standing::Contained,
+                &["do it", "/add more", "/stop", "/drop 1"],
+            ),
+            (
+                Standing::Removed,
+                &["do it", "/add more", "/stop", "/drop 1"],
+            ),
+            (Standing::Withdrawn, &["do it", "/add more"]),
+        ];
+        for (standing, lines) in cases {
+            let mut run = Run::with(standing, false, vec![], vec![view(1, 1, TaskState::Queued)]);
+            for line in lines {
+                run.enter(line);
+                run.nothing_queued();
+            }
+            assert_eq!(run.book.not_taken(), lines.len(), "{standing:?}");
+        }
+        let mut run = Run::new(Standing::Enrolled);
+        for line in ["/stop", "/drop", "/add more", "/stop 9", "/add 9 more"] {
+            run.enter(line);
+            run.nothing_queued();
+        }
+        assert_eq!(run.book.not_taken(), 5);
+        for line in ["/status 9", "/list", "/x", "/help", ""] {
+            run.enter(line);
+        }
+        assert_eq!(
+            run.book.not_taken(),
+            5,
+            "a read or a command is not counted"
+        );
+        run.book.stop(
+            "your Vault login expired: run `maknae login`",
+            &mut run.conv,
+        );
+        for line in ["do it", "/add more", "/stop", "/drop", "/list", "/status 1"] {
+            run.enter(line);
+        }
+        assert_eq!(run.book.not_taken(), 9);
+        let mut run = Run {
+            book: Book::new("hobi", Standing::Enrolled, false),
+            conv: Conversation::new(8, 4096),
+            now: 0,
+        };
+        run.enter("a request longer than the conversation holds");
+        run.enter("/add more than the conversation holds");
+        assert_eq!(run.book.not_taken(), 2, "{:?}", run.texts());
     }
 
     #[test]
