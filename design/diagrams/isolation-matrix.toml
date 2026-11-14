@@ -102,7 +102,7 @@ subject = "cli_a"
 object = "key_a"
 right = "r"
 control = "A's own userpass identity reads it, response-wrapped (min_wrapping_ttl), and A can unwrap that token itself: the accepted residual #429"
-evidence = "bins/maknae/src/agent.rs:373 · deploy/vault-pki/main.tf:207 · ADR-0028"
+evidence = "bins/maknae/src/agent.rs:248 · deploy/vault-pki/main.tf:207 · ADR-0028"
 test = "crates/maknae-vault/src/api_request.rs::the_wrapped_read_carries_the_user_token_and_the_wrap_ttl"
 
 [[cell]]
@@ -117,7 +117,7 @@ subject = "cli_a"
 object = "wrap"
 right = "r"
 control = "Vault returns it to A's own wrapped read; a reply carrying the key instead is refused"
-evidence = "bins/maknae/src/agent.rs:373 · crates/maknae-vault/src/wrap.rs:243"
+evidence = "bins/maknae/src/agent.rs:248 · crates/maknae-vault/src/wrap.rs:243"
 test = "crates/maknae-vault/src/wrap.rs::an_unwrapped_response_is_refused"
 
 [[cell]]
@@ -125,7 +125,7 @@ subject = "cli_a"
 object = "sealed"
 right = "r"
 control = "A's CLI seals it, so A already holds what it contains"
-evidence = "bins/maknae/src/agent.rs:185 · crates/maknae-seal/src/seal.rs:105"
+evidence = "bins/maknae/src/agent.rs:169 · crates/maknae-seal/src/seal.rs:105"
 test = "bins/maknae/src/agent.rs::a_turn_reads_the_wrapped_key_then_seals_it_to_exactly_this_request"
 
 [[cell]]
@@ -133,14 +133,14 @@ subject = "cli_a"
 object = "prompt"
 right = "r"
 control = "A writes it"
-evidence = "bins/maknae/src/agent.rs:506"
+evidence = "bins/maknae/src/agent.rs:542"
 
 [[cell]]
 subject = "cli_a"
 object = "meta"
 right = "r"
 control = "A chooses the providers.yaml entry; the CLI mints the conversation id"
-evidence = "bins/maknae/src/agent.rs:519 · bins/maknae/src/agent.rs:553"
+evidence = "bins/maknae/src/agent.rs:549 · bins/maknae/src/agent.rs:542"
 test = "bins/maknae/src/agent.rs::the_entry_is_the_default_or_the_named_label_and_no_entries_means_no_model_access"
 
 # --- CLI as user B --------------------------------------------------------
@@ -164,7 +164,7 @@ subject = "cli_b"
 object = "wrap"
 right = "none"
 control = "OS process isolation between uids, not proven by code here: the token sits unsealed in A's CLI memory between the wrapped read and the seal, and B holding it could unwrap it at Vault directly; past the seal it travels only sealed, and the creation_path check only stops B using the Egress Daemon with A's token"
-evidence = "bins/maknae/src/agent.rs:373 · bins/maknae/src/agent.rs:185 · bins/maknae-egress/src/opener.rs:83 · crates/maknae-vault/src/wrap.rs:299 · ADR-0028"
+evidence = "bins/maknae/src/agent.rs:248 · bins/maknae/src/agent.rs:169 · bins/maknae-egress/src/opener.rs:83 · crates/maknae-vault/src/wrap.rs:299 · ADR-0028"
 test = "crates/maknae-vault/src/wrap.rs::another_users_token_is_refused_before_it_is_unwrapped · bins/maknae-egress/src/opener.rs::user_a_presenting_user_bs_wrapping_token_is_refused_at_the_path_check"
 
 [[cell]]
@@ -172,7 +172,7 @@ subject = "cli_b"
 object = "sealed"
 right = "none"
 control = "it crosses only A's plane connection; replayed in B's turn it does not open, because the AAD binds conversation and path and the kernel derives the username from B's uid"
-evidence = "crates/maknae-kernel/src/run.rs:862 · crates/maknae-kernel/src/provider_choice.rs:62 · crates/maknae-seal/src/aad.rs:35"
+evidence = "crates/maknae-kernel/src/run.rs:1373 · crates/maknae-kernel/src/provider_choice.rs:62 · crates/maknae-seal/src/aad.rs:35"
 test = "crates/maknae-kernel/src/provider_choice.rs::an_admitted_choice_carries_the_sets_entry_the_choices_model_and_field_and_the_peers_path · crates/maknae-seal/src/seal.rs::a_blob_retargeted_to_another_request_fails_to_open"
 
 [[cell]]
@@ -180,14 +180,14 @@ subject = "cli_b"
 object = "prompt"
 right = "r"
 control = "no control while A's CLI runs (#436, undecided): maknae -p takes the prompt as the argv value of -p, and argv is world-readable on a default host (Linux /proc/<pid>/cmdline without hidepid, macOS ps -ax -o args); the audit trail keeps only its digest and length, in a 0700 _maknae directory"
-evidence = "bins/maknae/src/cli.rs:147 · crates/maknae-audit-append/src/record.rs:130 · packaging/rpm/maknae.spec:176 · packaging/deb/postinst:48 · packaging/macos/scripts/preinstall:203"
+evidence = "bins/maknae/src/cli.rs:93 · crates/maknae-audit-append/src/record.rs:130 · packaging/rpm/maknae.spec:176 · packaging/deb/postinst:48 · packaging/macos/scripts/preinstall:203"
 
 [[cell]]
 subject = "cli_b"
 object = "meta"
 right = "p"
 control = "part; no control while A's CLI runs (#436, undecided): argv is world-readable on a default host (Linux /proc without hidepid, macOS ps), so B sees --provider <label> and the process owner; the audit trail holding the rest is written by maknaed in a 0700 _maknae directory"
-evidence = "bins/maknae/src/cli.rs:147 · crates/maknae-audit-append/src/sink.rs:48 · packaging/rpm/maknae.spec:176 · packaging/deb/postinst:48 · packaging/macos/scripts/preinstall:203"
+evidence = "bins/maknae/src/cli.rs:93 · crates/maknae-audit-append/src/sink.rs:48 · packaging/rpm/maknae.spec:176 · packaging/deb/postinst:48 · packaging/macos/scripts/preinstall:203"
 
 # --- Agent Daemon (#629) --------------------------------------------------
 
@@ -271,7 +271,7 @@ subject = "kernel"
 object = "prompt"
 right = "r"
 control = "prompt content transits maknaed on its way to the Egress Daemon: the open residual #417"
-evidence = "crates/maknae-kernel/src/run.rs:1561 · ADR-0028"
+evidence = "crates/maknae-kernel/src/run.rs:1564 · ADR-0028"
 test = "crates/maknae-kernel/src/egress.rs::a_request_for_a_choice_carries_the_providers_record_the_choices_model_and_the_admitted_path"
 
 [[cell]]
@@ -279,7 +279,7 @@ subject = "kernel"
 object = "meta"
 right = "r"
 control = "maknaed decides on it: admission derives the username from the peer uid and composes the key path itself"
-evidence = "crates/maknae-kernel/src/run.rs:862 · crates/maknae-kernel/src/provider_choice.rs:62"
+evidence = "crates/maknae-kernel/src/run.rs:1373 · crates/maknae-kernel/src/provider_choice.rs:62"
 test = "crates/maknae-kernel/src/provider_choice.rs::the_refusals_come_in_the_ruled_order · crates/maknae-kernel/src/provider_choice.rs::an_admitted_choice_carries_the_sets_entry_the_choices_model_and_field_and_the_peers_path"
 
 # --- Egress Daemon --------------------------------------------------------

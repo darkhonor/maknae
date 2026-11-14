@@ -69,7 +69,7 @@ Run `unset VT` when you are done.
 
 **Never paste a wrapping token from a successful read.** A wrapped read of a key returns a token that wraps the key itself. None of the commands below asks for one.
 
-**Where refusals show.** A kernel refusal reaches the user only as one line, exit 2: `maknae: stopped: ` followed by the `PROMPT_REFUSED` text (`bins/maknae/src/agent.rs`, printed by `print_end`). That text begins `the kernel refused the exchange — whether the prompt reached the provider is in the host's audit trail`, and it is quoted in full in [When it does not work](first-provider.md#when-it-does-not-work). The kernel's reason is only in the audit trail, which the administrator reads with `sudo jq`. The CLI's own setup refusals print after `maknae: ` and exit 1 (`bins/maknae/src/cli.rs:931`).
+**Where refusals show.** A kernel refusal reaches the user only as one line, exit 2: `maknae: stopped: ` followed by the `PROMPT_REFUSED` text (`bins/maknae/src/agent.rs`, printed by `print_end`). That text begins `the kernel refused the exchange — whether the prompt reached the provider is in the host's audit trail`, and it is quoted in full in [When it does not work](first-provider.md#when-it-does-not-work). The kernel's reason is only in the audit trail, which the administrator reads with `sudo jq`. The CLI's own setup refusals print after `maknae: ` and exit 1 (`bins/maknae/src/cli.rs:1245`).
 
 The administrator's audit query for every claim below (the same on macOS):
 
@@ -89,7 +89,7 @@ sudo jq -c 'select(.action=="session.prompt") | {ts, user: .subject.user, object
 maknae -p "Reply with one word: hello."
 ```
 
-**Expected.** A reply on standard output, exit 0. In the administrator's audit query, a `session.prompt` pair for A: `status` `"IntentOnly"`, then `"Sent"`, each with `"user":"<A>"`, `"object":"provider:openai"` and `"model":"gpt-5.6-luna"`. The object is `provider:` followed by the provider's `name` (`crates/maknae-kernel/src/run.rs:1425`).
+**Expected.** A reply on standard output, exit 0. In the administrator's audit query, a `session.prompt` pair for A: `status` `"IntentOnly"`, then `"Sent"`, each with `"user":"<A>"`, `"object":"provider:openai"` and `"model":"gpt-5.6-luna"`. The object is `provider:` followed by the provider's `name` (`crates/maknae-kernel/src/run.rs:2199`).
 
 **Measured.** Single-user, 2026-10-02, on Rocky 10.2 (`.42`, RPM) as `byeori`: the reply `Hello hello hello hello hello`, and a `Sent` record with `subject.user` `byeori`, object `provider:openai`, `egress.model` `gpt-5.6-luna`. On macOS 26.6.2 (Wrathion, signed `.pkg`) as `aackerman`: the reply `Hello there, friend, nice to meet.`, and a `Sent` record with user `aackerman`, object `provider:openai`, model `gpt-5.6-luna`. The `IntentOnly` record was not noted on macOS. On both hosts a scan of the recent records found no `maknae/users`, `api_key`, `hvs.`, `openai/` or `subpath`. Two users on one host: not yet measured.
 
@@ -129,7 +129,7 @@ VAULT_TOKEN="$VT" vault read <kv>/data/<prefix>/<A>/openai
 
 **Claim.** B cannot make the kernel name A's key path, whatever B writes in `providers.yaml`.
 
-**Control.** `cli_b × key_a` and `cli_b × sealed`, and `kernel × meta`: the kernel builds the key path from the username of the uid that connected. It passes that username to `admit_choice` as a parameter (`crates/maknae-kernel/src/run.rs:862-865`, `provider_choice.rs:62`). The request has no username field (`ProviderChoice`, `crates/maknae-proto/src/wire.rs:254-260`). The kernel refuses a subpath with a `.`, `..` or `data` segment. The user sees only the `PROMPT_REFUSED` line. The administrator's audit query shows `"result":"deny"` with `"reason":"key subpath malformed"`. Credential-path step: `admit (peer-uid username, set, model, subpath, field), PDP, destination stamp: metadata only`.
+**Control.** `cli_b × key_a` and `cli_b × sealed`, and `kernel × meta`: the kernel builds the key path from the username of the uid that connected. It passes that username to `admit_choice` as a parameter (`crates/maknae-kernel/src/run.rs:1373-1376`, `provider_choice.rs:62`). The request has no username field (`ProviderChoice`, `crates/maknae-proto/src/wire.rs:358-363`). The kernel refuses a subpath with a `.`, `..` or `data` segment. The user sees only the `PROMPT_REFUSED` line. The administrator's audit query shows `"result":"deny"` with `"reason":"key subpath malformed"`. Credential-path step: `admit (peer-uid username, set, model, subpath, field), PDP, destination stamp: metadata only`.
 
 **Command, part 1: the CLI's own refusal.** As B, point the entry's key at A's:
 
@@ -155,7 +155,7 @@ mv ~/.maknae/providers.yaml.orig ~/.maknae/providers.yaml
 maknae: providers.yaml: providers[0].key.subpath has a '.' or '..' segment
 ```
 
-(`crates/maknae-config/src/providers.rs:105`; the `providers.yaml: ` prefix is `crates/maknae-config/src/error.rs:206`.)
+(`crates/maknae-config/src/providers.rs:105`; the `providers.yaml: ` prefix is `crates/maknae-config/src/error.rs:216`.)
 
 **Command, part 2: the kernel's own refusal.** The CLI is untrusted, so its check proves nothing about the kernel. The kernel's check is shown by its tests. On a build host with the repository checked out:
 
@@ -252,7 +252,7 @@ mv ~/.maknae/providers.yaml.orig ~/.maknae/providers.yaml
 
 **Claim.** Once the administrator revokes B's Vault token, B gets no more model calls, and A carries on.
 
-**Control.** No matrix cell is keyed to token validity, so the control is cited by credential-path step. Every turn makes its own wrapped read of the key with the stored token (`bins/maknae/src/agent.rs:268`), and Vault refuses that read once the token is revoked. The CLI also mints its plane leaf with the token first (`bins/maknae/src/agent.rs:443`); until #116 the CLI refuses to connect when that mint fails, so a revoked token also stops B's CLI there. The daemon requests no client certificate and admits B by its kernel-attested uid and `maknae`-group membership, which a token revocation does not touch. Credential-path steps: `load the user token; choose the providers.yaml entry` and `wrapped read of <kv>/data/<prefix>/<user>/<subpath>, X-Vault-Wrap-TTL: 60s`. A's unaffected run rests on `cli_a × key_a`, A's own identity.
+**Control.** No matrix cell is keyed to token validity, so the control is cited by credential-path step. Every turn makes its own wrapped read of the key with the stored token (`bins/maknae/src/agent.rs:248`), and Vault refuses that read once the token is revoked. The CLI also mints its plane leaf with the token first (`bins/maknae/src/agent.rs:568`); until #116 the CLI refuses to connect when that mint fails, so a revoked token also stops B's CLI there. The daemon requests no client certificate and admits B by its kernel-attested uid and `maknae`-group membership, which a token revocation does not touch. Credential-path steps: `load the user token; choose the providers.yaml entry` and `wrapped read of <kv>/data/<prefix>/<user>/<subpath>, X-Vault-Wrap-TTL: 60s`. A's unaffected run rests on `cli_a × key_a`, A's own identity.
 
 `maknae -p` runs one prompt per invocation (`bins/maknae/src/cli.rs`, the `-p` route). So "mid-conversation" means between the loop steps of one run. This claim therefore uses fresh runs.
 
@@ -279,7 +279,7 @@ mv ~/.maknae/providers.yaml.orig ~/.maknae/providers.yaml
 maknae: pki/sign rejected: <Vault's answer>
 ```
 
-where `<Vault's answer>` is Vault's own text (`crates/maknae-vault/src/error.rs:194`, printed at `bins/maknae/src/cli.rs:735`). The CLI checks only the token's recorded expiry, not whether it was revoked (`bins/maknae/src/login.rs:90-101`), so the refusal comes from Vault at the certificate mint. In step 4, A gets a reply.
+where `<Vault's answer>` is Vault's own text (`crates/maknae-vault/src/error.rs:194`, printed at `bins/maknae/src/cli.rs:1256`). The CLI checks only the token's recorded expiry, not whether it was revoked (`bins/maknae/src/login.rs:90-101`), so the refusal comes from Vault at the certificate mint. In step 4, A gets a reply.
 
 A run that is already past its mint would stop at its next turn's key read. That read gets a 403, printed as `` maknae: stopped: Vault refused to read the key for provider entry <label> (HTTP 403): the key is outside your Vault policy, or your login was revoked: run `maknae login` `` (`agent.rs:99-104`). This is from the code path, not shown live.
 
