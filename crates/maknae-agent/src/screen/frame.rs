@@ -1310,6 +1310,44 @@ mod tests {
     }
 
     #[test]
+    fn the_oversize_worst_case_frame_fits_its_capacity_without_growing() {
+        let (rows, cols) = (600u16, 1100u16);
+        let mut f = worst_case(0, cols);
+        let hostile = format!("{}{}", "\u{1b}".repeat(128), "𝐀".repeat(32));
+        assert_eq!(hostile.len(), maknae_proto::BANNER_TEXT_MAX);
+        f.banner = Some(banner(&hostile, Some(BannerColor::Rgb(1, 2, 3))));
+        let big = "𝐀\u{1d167}\u{1d167}\u{1d167}".repeat(usize::from(MAX_COLS) * 520);
+        f.conv.push(EntryKind::Report, &big).unwrap();
+        f.conv
+            .push(EntryKind::Report, &format!("a{}", "\u{301}".repeat(5000)))
+            .unwrap();
+        let size = TerminalSize { rows, cols };
+        let mut out = Zeroizing::new(Vec::with_capacity(frame_capacity(size)));
+        let (cap, ptr) = (out.capacity(), out.as_ptr());
+        let mut state = ScreenState {
+            banner: f.banner.as_ref(),
+            header: &f.header,
+            conversation: &mut f.conv,
+            viewport: &mut f.viewport,
+            status: &f.status,
+            editor: &f.editor,
+            menu: &f.menu,
+        };
+        let drawn = compose(&mut state, size, &mut out).unwrap();
+        assert!(!drawn.too_small);
+        assert_eq!(out.capacity(), cap);
+        assert_eq!(out.as_ptr(), ptr);
+        assert!(out.len() <= cap);
+        let shown = rows_by_position(&out);
+        assert_eq!(shown.len(), usize::from(rows));
+        let banner_row = &shown[&1];
+        assert_eq!(banner_row.chars().count(), usize::from(cols));
+        assert!(banner_row.contains("\\u{001b}𝐀"));
+        assert_eq!(shown[&usize::from(rows)], *banner_row);
+        assert!(shown.values().any(|r| r.ends_with('…')));
+    }
+
+    #[test]
     fn a_buffer_below_the_capacity_is_refused_not_grown() {
         let mut f = worst_case(12, 80);
         let size = TerminalSize { rows: 12, cols: 80 };

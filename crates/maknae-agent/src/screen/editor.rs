@@ -105,6 +105,9 @@ impl Editor {
         }
         if !matches!(key, Key::Ctrl('p' | 'n')) {
             self.browsing = None;
+            if let Some(draft) = self.draft.as_mut() {
+                draft.clear();
+            }
         }
         match *key {
             Key::Char(c) => self.insert(c),
@@ -506,6 +509,23 @@ mod tests {
         assert_eq!(e.text(), "two!");
         e.apply(&Key::Ctrl('p'));
         assert_eq!(submit(&mut e), "two");
+    }
+
+    #[test]
+    fn ctrl_c_or_an_edit_while_recalling_wipes_the_draft_copy() {
+        for key in [Key::Ctrl('c'), Key::Char('x'), Key::Backspace] {
+            let mut e = Editor::new(32);
+            typed(&mut e, "sent");
+            submit(&mut e);
+            typed(&mut e, "secret draft");
+            e.apply(&Key::Ctrl('p'));
+            assert_eq!(e.draft.as_ref().unwrap().as_str(), "secret draft");
+            e.apply(&key);
+            assert!(e.draft.as_ref().unwrap().is_empty(), "{key:?}");
+            e.apply(&Key::Ctrl('p'));
+            e.apply(&Key::Ctrl('n'));
+            assert!(!e.text().contains("secret"), "{key:?}");
+        }
     }
 
     #[test]
