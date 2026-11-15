@@ -159,7 +159,6 @@ fn selected(view: &dyn EnrollmentView, rec: &TaskRecord, select: HeldSelect<'_>)
     }
 }
 
-/// The state a held task returns to: a working task is queued again, to be claimed anew.
 fn release_state(from: TaskState) -> TaskState {
     match from {
         TaskState::Working => TaskState::Queued,
@@ -488,8 +487,6 @@ impl Held {
         !held
     }
 
-    /// The held records `select` picks after `after`, by `seq`, at most `limit`, and the
-    /// last `seq` returned when more remain.
     fn held_page(
         &self,
         view: &dyn EnrollmentView,
@@ -497,6 +494,7 @@ impl Held {
         after: Option<u64>,
         limit: usize,
     ) -> (Vec<&TaskRecord>, Option<u64>) {
+        debug_assert!(limit > 0);
         let mut page: Vec<&TaskRecord> = self
             .tasks
             .values()
@@ -511,8 +509,6 @@ impl Held {
         (page, next)
     }
 
-    /// The held record `id`, the state it was held from and the one a release gives it,
-    /// unless its parent is held or due a hold, or the view would hold it contained.
     fn releasable(
         &self,
         id: &TaskId,
@@ -522,9 +518,14 @@ impl Held {
         if rec.state != TaskState::Held {
             return Err(ReleaseRefusal::NotHeld);
         }
-        let from = rec.held_from.ok_or_else(|| {
-            ReleaseRefusal::NotDone("the record does not name the state it was held from".into())
-        })?;
+        let from = rec
+            .held_from
+            .filter(|s| *s != TaskState::Held)
+            .ok_or_else(|| {
+                ReleaseRefusal::NotDone(
+                    "the record does not name the state it was held from".into(),
+                )
+            })?;
         let parent_held = |p: &TaskId| {
             self.holding.contains_key(p) || self.live(p).is_some_and(|r| r.state == TaskState::Held)
         };
@@ -5356,7 +5357,6 @@ mod tests {
         (r.state, r.held_from, r.held_for, r.held_at)
     }
 
-    /// Bob's task t1 to hobi, started, and t2 from hobi to jin under it.
     fn chain(store: &TaskStore) -> (TaskId, TaskId) {
         let t1 = held_by(store, Tasker::Uid(BOB));
         store.start_for_test(&t1);
@@ -5657,8 +5657,13 @@ mod tests {
         store.publish_report(&reported, text("r"), None).unwrap();
         hold(&store, &[BOB]);
         let lift = containing(&[]);
-        for (task, fail) in [(working, Fail::UnsyncedOnce), (reported, Fail::Every)] {
+        for (task, fail, counters_kept) in [
+            (working, Fail::UnsyncedOnce, true),
+            (reported, Fail::Every, true),
+            (reported, Fail::Records, false),
+        ] {
             let before = (hold_fields(&store, &task), store.held().issued.clone());
+            let rec = encode(&store.record(&task).unwrap()).unwrap();
             blobs.fail(Some(fail));
             let said = store.release(&task, &lift);
             blobs.fail(None);
@@ -5666,11 +5671,15 @@ mod tests {
                 matches!(said, Err(ReleaseRefusal::NotDone(_))),
                 "{fail:?} {said:?}"
             );
+            assert_eq!(hold_fields(&store, &task), before.0, "{fail:?}");
             assert_eq!(
-                (hold_fields(&store, &task), store.held().issued.clone()),
-                before,
+                *encode(&store.record(&task).unwrap()).unwrap(),
+                *rec,
                 "{fail:?}"
             );
+            if counters_kept {
+                assert_eq!(store.held().issued, before.1, "{fail:?}");
+            }
             assert_eq!(reopen(&blobs).record(&task).unwrap().state, TaskState::Held);
         }
     }
@@ -5757,26 +5766,42 @@ mod tests {
             store.release_plan(&unknown, &lift).map(|p| p.task),
             Err(ReleaseRefusal::Unknown)
         );
-        let bare = held_by(&store, Tasker::Uid(BOB));
-        hold(&store, &[BOB]);
-        store.held().tasks.get_mut(&bare).unwrap().held_from = None;
-        assert!(matches!(
-            store.release_plan(&bare, &lift),
-            Err(ReleaseRefusal::NotDone(_))
-        ));
-        assert!(matches!(
-            store.release(&bare, &lift),
-            Err(ReleaseRefusal::NotDone(_))
-        ));
-        assert_eq!(store.record(&bare).unwrap().state, TaskState::Held);
-        let (page, _) = store.held_tasks(&lift, HeldSelect::Every, None, 32);
-        let bare_ref = maknae_proto::TaskRef::from_id(&bare);
-        assert_eq!(
-            page.iter()
-                .find(|h| h.view.task == bare_ref)
-                .map(|h| h.held_from),
-            Some(TaskState::Held)
-        );
+        for from in [None, Some(TaskState::Held)] {
+            let bare = held_by(&store, Tasker::Uid(BOB));
+            hold(&store, &[BOB]);
+            store.held().tasks.get_mut(&bare).unwrap().held_from = from;
+            assert!(
+                matches!(
+                    store.release_plan(&bare, &lift),
+                    Err(ReleaseRefusal::NotDone(_))
+                ),
+                "{from:?}"
+            );
+            assert!(
+                matches!(store.release(&bare, &lift), Err(ReleaseRefusal::NotDone(_))),
+                "{from:?}"
+            );
+            assert_eq!(
+                hold_fields(&store, &bare),
+                (
+                    TaskState::Held,
+                    from,
+                    Some(Contained::Tasker),
+                    store.record(&bare).unwrap().held_at
+                ),
+                "{from:?}"
+            );
+            assert!(store.record(&bare).unwrap().held_at.is_some(), "{from:?}");
+            let (page, _) = store.held_tasks(&lift, HeldSelect::Every, None, 32);
+            let bare_ref = maknae_proto::TaskRef::from_id(&bare);
+            assert_eq!(
+                page.iter()
+                    .find(|h| h.view.task == bare_ref)
+                    .map(|h| h.held_from),
+                Some(TaskState::Held),
+                "{from:?}"
+            );
+        }
     }
 
     #[test]
