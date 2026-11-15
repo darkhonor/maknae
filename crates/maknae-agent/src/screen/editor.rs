@@ -584,10 +584,12 @@ mod tests {
             assert_eq!(e.recall.slots[i + 1].as_str().as_ptr(), *p);
             assert_eq!(e.recall.slots[i + 1].capacity(), 24);
         }
-        let mut seen = Vec::new();
-        while let EditOutcome::Changed = e.apply(&Key::Ctrl('p')) {
-            seen.push(e.text().to_string());
-        }
+        let seen: Vec<String> = (0..=RECALL_SLOTS)
+            .map_while(|_| {
+                matches!(e.apply(&Key::Ctrl('p')), EditOutcome::Changed)
+                    .then(|| e.text().to_string())
+            })
+            .collect();
         assert_eq!(seen.len(), RECALL_SLOTS);
         assert_eq!(seen[0], "x");
         assert_eq!(seen[1], "r15");
@@ -615,7 +617,37 @@ mod tests {
         let mut e = Editor::new(32);
         typed(&mut e, "sentinel-91c2");
         assert!(!format!("{e:?}").contains("sentinel"));
+        assert_eq!(
+            format!("{e:?}"),
+            "Editor { text: FixedText(<13 of 32 bytes>), cursor: 13, recalled: 0 }"
+        );
         let out = e.apply(&Key::Enter);
-        assert!(!format!("{out:?}").contains("sentinel"));
+        assert_eq!(format!("{out:?}"), "Submitted(<13 bytes>)");
+        assert_eq!(format!("{:?}", EditOutcome::Cleared), "Cleared");
+    }
+
+    #[test]
+    fn line_end_and_word_forward_stop_inside_the_text() {
+        let mut e = Editor::new(32);
+        typed(&mut e, "ab\ncd");
+        for _ in 0..4 {
+            e.apply(&Key::Left);
+        }
+        assert_eq!(e.cursor(), 1);
+        assert!(matches!(e.apply(&Key::Ctrl('e')), EditOutcome::Changed));
+        assert_eq!(e.cursor(), 2);
+        assert!(matches!(e.apply(&Key::Ctrl('e')), EditOutcome::Nothing));
+        e.apply(&Key::Left);
+        e.apply(&Key::Ctrl('k'));
+        assert_eq!(e.text(), "a\ncd");
+        assert!(matches!(e.apply(&Key::Ctrl('a')), EditOutcome::Changed));
+        assert!(matches!(e.apply(&Key::Ctrl('a')), EditOutcome::Nothing));
+
+        let mut e = Editor::new(32);
+        typed(&mut e, "a  bc d");
+        e.apply(&Key::Ctrl('a'));
+        e.apply(&Key::Right);
+        assert!(matches!(e.apply(&Key::Alt('f')), EditOutcome::Changed));
+        assert_eq!(e.cursor(), 5);
     }
 }

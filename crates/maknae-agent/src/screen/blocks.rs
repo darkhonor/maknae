@@ -269,7 +269,7 @@ impl Conversation {
     }
 
     /// How many of the oldest entries must go for `needed` more blocks, given
-    /// whether every entry (and so every block) has gone.
+    /// whether every block has gone.
     fn plan(&self, needed: impl Fn(bool) -> usize) -> Result<usize, Full> {
         for drop in 0..=self.entries.len() {
             if drop > 0 {
@@ -278,12 +278,10 @@ impl Conversation {
                     return Err(Full);
                 }
             }
-            let kept = match self.entries.get(drop) {
-                Some(next) => self.blocks.len() - (next.block - self.base) as usize,
-                None if drop == 0 => self.blocks.len(),
-                None => 0,
-            };
-            if kept + needed(kept == 0 && drop > 0) <= self.max_blocks {
+            let kept = self.entries.get(drop).map_or(0, |next| {
+                self.blocks.len() - (next.block - self.base) as usize
+            });
+            if kept + needed(kept == 0) <= self.max_blocks {
                 return Ok(drop);
             }
         }
@@ -300,12 +298,10 @@ impl Conversation {
             .entries
             .front()
             .map_or(self.base + self.blocks.len() as u64, |e| e.block);
-        while self.base < keep_from {
-            if let Some(mut block) = self.blocks.pop_front() {
-                block.clear();
-            }
-            self.base += 1;
+        for mut block in self.blocks.drain(..(keep_from - self.base) as usize) {
+            block.clear();
         }
+        self.base = keep_from;
     }
 
     pub fn dropped_earlier(&self) -> bool {
@@ -579,7 +575,16 @@ mod tests {
     #[test]
     fn small_entries_share_a_block_and_a_large_one_spans_blocks_without_splitting_a_piece() {
         let mut c = Conversation::new(64 * 8, 64);
+        assert!(!c.has_item(EntryId::DROPPED_NOTICE));
+        assert!(!c.has_item(EntryId(1)));
         let a = c.push(EntryKind::Request, "hello").unwrap();
+        assert!(!c.is_empty());
+        assert!(c.has_item(a));
+        assert!(!c.has_item(EntryId(a.0 + 1)));
+        assert_eq!(
+            format!("{c:?}"),
+            "Conversation { entries: 1, blocks: 1, max_blocks: 8 }"
+        );
         let b = c.push(EntryKind::Notice, "#1 submitted").unwrap();
         assert_eq!(c.block_count(), 1);
         let long = "가나다\u{1b}".repeat(10);
@@ -613,6 +618,9 @@ mod tests {
         assert!(c.dropped_earlier());
         assert_eq!(c.first(), Some(ids[1]));
         assert_eq!(c.is_seen(ids[0]), None);
+        assert!(!c.has_item(ids[0]));
+        assert!(c.has_item(ids[1]));
+        assert!(c.has_item(EntryId::DROPPED_NOTICE));
         assert_eq!(c.block_count(), 4);
         let kept: Vec<*const u8> = c.blocks.iter().map(|b| b.as_str().as_ptr()).collect();
         assert_eq!(&kept[..3], &ptrs[1..]);
@@ -620,7 +628,9 @@ mod tests {
         assert_eq!(text(&c, next), "n".repeat(64));
         let two = c.push(EntryKind::Notice, &"t".repeat(120)).unwrap();
         assert_eq!(c.first(), Some(ids[3]));
+        assert_eq!(text(&c, ids[3]), "3".repeat(64));
         assert_eq!(text(&c, two), "t".repeat(120));
+        assert_eq!(c.block_count(), 4);
     }
 
     #[test]
@@ -659,6 +669,55 @@ mod tests {
     }
 
     #[test]
+    fn a_kept_tail_block_takes_the_start_of_the_next_entry() {
+        let mut c = Conversation::new(64 * 2, 64);
+        let a = c.push(EntryKind::Report, &"a".repeat(64)).unwrap();
+        c.mark_seen(a..=a);
+        let b = c.push(EntryKind::Notice, &"b".repeat(10)).unwrap();
+        let next = c.push(EntryKind::Notice, &"c".repeat(100)).unwrap();
+        assert_eq!(c.first(), Some(b));
+        assert_eq!(text(&c, b), "b".repeat(10));
+        assert_eq!(text(&c, next), "c".repeat(100));
+        assert_eq!(c.block_count(), 2);
+    }
+
+    #[test]
+    fn once_every_block_would_go_the_entry_is_counted_from_a_fresh_block() {
+        let mut c = Conversation::new(64 * 2, 64);
+        let a = c.push(EntryKind::Report, &"a".repeat(64)).unwrap();
+        c.mark_seen(a..=a);
+        c.push(EntryKind::Notice, &"b".repeat(10)).unwrap();
+        assert_eq!(c.push(EntryKind::Notice, &"c".repeat(130)), Err(Full));
+        assert_eq!(c.first(), Some(a));
+        assert_eq!(c.block_count(), 2);
+    }
+
+    #[test]
+    fn an_empty_entry_sits_at_the_end_of_the_last_block() {
+        let mut c = Conversation::new(64 * 3, 64);
+        let a = c.push(EntryKind::Report, &"a".repeat(64)).unwrap();
+        let b = c.push(EntryKind::Report, &"b".repeat(128)).unwrap();
+        c.mark_seen(a..=b);
+        let empty = c.push(EntryKind::Notice, "").unwrap();
+        let f = c.push(EntryKind::Notice, &"f".repeat(128)).unwrap();
+        assert_eq!(c.first(), Some(empty));
+        assert_eq!(text(&c, empty), "");
+        assert_eq!(text(&c, f), "f".repeat(128));
+        assert_eq!(c.block_count(), 3);
+    }
+
+    #[test]
+    fn rows_drawn_with_an_empty_run_still_join() {
+        let mut c = Conversation::new(64 * 4, 64);
+        let id = c.push(EntryKind::Report, "ab\ncd").unwrap();
+        c.mark_rows(id, 10, 0..0);
+        c.mark_rows(id, 10, 1..2);
+        assert_eq!(c.is_seen(id), Some(false));
+        c.mark_rows(id, 10, 0..1);
+        assert_eq!(c.is_seen(id), Some(true));
+    }
+
+    #[test]
     fn an_entry_larger_than_the_cap_is_refused_even_when_empty() {
         let mut c = Conversation::new(64 * 2, 64);
         assert_eq!(c.push(EntryKind::Report, &"a".repeat(129)), Err(Full));
@@ -680,6 +739,7 @@ mod tests {
             ("가\tx", format!("가{}x", " ".repeat(6))),
             ("\u{1b}\tx", format!("\\u{{001b}}{}x", " ".repeat(8))),
             ("\t\t", " ".repeat(16)),
+            ("ab\t\tx", format!("ab{}x", " ".repeat(14))),
         ];
         for (input, want) in cases {
             let id = c.push(EntryKind::Report, input).unwrap();

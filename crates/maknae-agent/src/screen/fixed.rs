@@ -139,4 +139,9 @@ mod tests {
         assert!(!d.contains("sentinel"), "{d}");
         assert!(d.contains("13"), "{d}");
     }
+
+    #[test]
+    fn full_says_the_buffer_is_full() {
+        assert_eq!(Full.to_string(), "buffer full");
+    }
 }

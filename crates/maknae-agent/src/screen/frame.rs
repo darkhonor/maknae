@@ -17,7 +17,7 @@ const MIN_CONVERSATION_ROWS: usize = 3;
 const STATUS_ROWS_MAX: usize = 3;
 const INPUT_ROWS_MAX: usize = 3;
 const MENU_ROWS_MAX: usize = 5;
-const BANNER_MARGIN: usize = 1;
+const BANNER_MARGINS: usize = 2;
 const PROMPT: &str = "> ";
 const CONTINUATION: &str = "  ";
 /// A content row's byte budget is its columns times this.
@@ -134,14 +134,13 @@ impl Viewport {
             Scroll::PageUp => {
                 self.anchor = self.top(conv).map(|top| up(conv, width, top, height));
             }
-            Scroll::Down(_) | Scroll::PageDown if self.anchor.is_none() => return,
             Scroll::Down(n) => self.anchor = self.top(conv).map(|top| down(conv, width, top, n)),
             Scroll::PageDown => {
                 self.anchor = self.top(conv).map(|top| down(conv, width, top, height));
             }
         }
         if let Some(anchor) = self.anchor {
-            if height > 0 && rows_from(conv, width, anchor, height + 1) <= height {
+            if !overflows(conv, width, anchor, height) {
                 self.anchor = None;
             }
         }
@@ -158,18 +157,13 @@ impl Viewport {
                     item: anchor.item,
                     row: anchor.row.min(rows.saturating_sub(1)),
                 }
-            } else if conv.last().is_some_and(|last| anchor.item > last) {
-                Pos {
-                    item: conv.last_item()?,
-                    row: 0,
-                }
             } else {
                 Pos {
                     item: conv.first_item()?,
                     row: 0,
                 }
             };
-            if rows_from(conv, width, anchor, height + 1) > height {
+            if overflows(conv, width, anchor, height) {
                 self.anchor = Some(anchor);
                 return Some(anchor);
             }
@@ -224,20 +218,20 @@ fn down(conv: &mut Conversation, width: u16, mut pos: Pos, mut n: u32) -> Pos {
     }
 }
 
-/// Rows from `pos` to the end, counted up to `limit`.
-fn rows_from(conv: &mut Conversation, width: u16, pos: Pos, limit: u32) -> u32 {
+/// Whether more than `height` rows run from `pos` to the end.
+fn overflows(conv: &mut Conversation, width: u16, pos: Pos, height: u32) -> bool {
     let mut count = conv.item_rows(pos.item, width).saturating_sub(pos.row);
     let mut item = pos.item;
-    while count < limit {
+    while count <= height {
         match conv.next_item(item) {
             Some(next) => {
                 count += conv.item_rows(next, width);
                 item = next;
             }
-            None => break,
+            None => return false,
         }
     }
-    count
+    true
 }
 
 pub struct ScreenState<'a> {
@@ -440,13 +434,12 @@ impl<'o, 'b> Line<'o, 'b> {
     fn cut_at_last_whole_cell(&mut self, cell_is_partial: bool) -> Result<(), FrameError> {
         self.cut = true;
         if let Some((at, width)) = self.cell.filter(|_| cell_is_partial) {
-            self.bytes += self.out.len() - at;
             self.cols += width;
             self.out.wipe_from(at);
         }
-        if self.cols > 0 {
+        if let Some(cols) = self.cols.checked_sub(1) {
             self.out.put(CUT.as_bytes())?;
-            self.cols -= 1;
+            self.cols = cols;
             self.wrote = true;
         }
         Ok(())
@@ -530,7 +523,7 @@ fn layout(
 ) -> Result<Drawn, FrameError> {
     let banner = state.banner;
     let banner_rows = if banner.is_some() { 2 } else { 0 };
-    let banner_fits = banner.is_none_or(|b| text_width(&b.text) + 2 * BANNER_MARGIN <= window.cols);
+    let banner_fits = banner.is_none_or(|b| text_width(&b.text) + BANNER_MARGINS <= window.cols);
     let status_rows = status_rows(state.status);
     let fixed = banner_rows + 1 + status_rows;
     if !banner_fits || rows < fixed + MIN_CONVERSATION_ROWS + 1 {
@@ -564,7 +557,7 @@ fn layout(
     let mut visible = Vec::new();
     if let Some(mut pos) = state.viewport.top(state.conversation) {
         let mut spans = Vec::new();
-        while visible.len() < conversation_rows {
+        loop {
             let item_rows = state.conversation.item_rows(pos.item, width);
             let left = u32::try_from(conversation_rows - visible.len()).unwrap_or(u32::MAX);
             let take = item_rows.saturating_sub(pos.row).min(left);
@@ -576,6 +569,9 @@ fn layout(
                     .zip(&spans)
                     .map(|(r, span)| (pos.item, r, *span)),
             );
+            if visible.len() == conversation_rows {
+                break;
+            }
             match state.conversation.next_item(pos.item) {
                 Some(next) => pos = Pos { item: next, row: 0 },
                 None => break,
@@ -692,12 +688,10 @@ fn header_row(
     let right_width = text_width(&right);
     let mut line = Line::new(out, cols);
     if right_width < cols {
-        let left_room = cols - right_width - 1;
-        line.cols = left_room;
+        line.cols = cols - right_width - 1;
         line.text(&header.left)?;
-        let used = left_room - line.cols;
-        line.cols = cols - used;
-        line.spaces(cols - used - right_width)?;
+        line.cols += right_width + 1;
+        line.spaces(line.cols - right_width)?;
     }
     line.text(&right)
 }
@@ -1182,7 +1176,11 @@ mod tests {
             let positions = (1..=rows)
                 .filter(|r| {
                     let cup = format!("\x1b[{r};1H\x1b[K");
-                    bytes.windows(cup.len()).any(|w| w == cup.as_bytes())
+                    bytes
+                        .windows(cup.len())
+                        .filter(|w| *w == cup.as_bytes())
+                        .count()
+                        == 1
                 })
                 .count();
             assert_eq!(positions, usize::from(rows));
@@ -1203,8 +1201,8 @@ mod tests {
         f.status.truncate(3);
         let (t, _) = f.term(16, 40);
         assert_eq!(
-            &t.rows()[11..14],
-            ["#1 working", "#2 working", "#3 working"]
+            &t.rows()[11..15],
+            ["#1 working", "#2 working", "#3 working", ">"]
         );
     }
 
@@ -1597,5 +1595,174 @@ mod tests {
             f.term(12, 39);
         }
         assert_eq!(f.conv.is_seen(id), Some(true));
+    }
+
+    #[test]
+    fn frame_error_says_the_frame_does_not_fit() {
+        assert_eq!(
+            FrameError::Overflow.to_string(),
+            "the frame does not fit its buffer"
+        );
+    }
+
+    #[test]
+    fn a_window_with_no_rows_or_no_columns_is_too_small_and_draws_nothing() {
+        let mut f = lines(3);
+        for (rows, cols) in [(0, 40), (40, 0), (0, 0)] {
+            let (bytes, drawn) = f.frame(rows, cols);
+            assert_eq!(bytes, b"\x1b[?2026h\x1b[?2026l", "{rows}x{cols}");
+            assert!(drawn.too_small, "{rows}x{cols}");
+        }
+    }
+
+    #[test]
+    fn a_buffer_of_exactly_the_frame_length_holds_it() {
+        let mut f = lines(3);
+        let size = TerminalSize { rows: 12, cols: 40 };
+        let (want, _) = f.frame(12, 40);
+        for (cap, fits) in [(want.len(), true), (want.len() - 1, false)] {
+            let mut out = Zeroizing::new(Vec::with_capacity(cap));
+            assert_eq!(out.capacity(), cap);
+            let mut state = ScreenState {
+                banner: f.banner.as_ref(),
+                header: &f.header,
+                conversation: &mut f.conv,
+                viewport: &mut f.viewport,
+                status: &f.status,
+                editor: &f.editor,
+                menu: &f.menu,
+            };
+            let drawn = compose(&mut state, size, &mut out);
+            assert_eq!(drawn.is_ok(), fits, "{cap}");
+            if fits {
+                assert_eq!(*out, want);
+            }
+        }
+    }
+
+    fn written(cols: usize, budget: usize, text: &str) -> String {
+        let mut buf = Vec::with_capacity(64);
+        let mut out = Out { buf: &mut buf };
+        Line::with_bytes(&mut out, cols, budget + CUT.len())
+            .text(text)
+            .unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn a_piece_that_exactly_fills_the_byte_budget_is_written() {
+        assert_eq!(written(5, 3, "abc"), "abc");
+        assert_eq!(written(5, 3, "abcd"), "abc…");
+        assert_eq!(written(5, 3, "ab\u{301}"), "a…");
+        assert_eq!(written(5, 6, "ab\u{301}\u{301}c"), "ab\u{301}\u{301}…");
+    }
+
+    #[test]
+    fn scrolling_before_any_frame_keeps_following() {
+        let mut f = lines(30);
+        for by in [
+            Scroll::Up(1),
+            Scroll::PageUp,
+            Scroll::Down(1),
+            Scroll::PageDown,
+        ] {
+            f.scroll(by);
+            assert!(f.viewport.following(), "{by:?}");
+        }
+    }
+
+    #[test]
+    fn a_held_row_whose_entry_was_dropped_moves_to_the_oldest_row_left() {
+        let mut f = Fixture::new(None);
+        f.header = HeaderLine::default();
+        f.conv = Conversation::new(64 * 3, 64);
+        let ids: Vec<EntryId> = ["a", "b", "c"]
+            .iter()
+            .map(|t| f.conv.push(EntryKind::Report, &t.repeat(64)).unwrap())
+            .collect();
+        f.conv.mark_seen(ids[0]..=ids[2]);
+        f.term(6, 40);
+        f.scroll(Scroll::Top);
+        let (t, _) = f.term(6, 40);
+        assert_eq!(t.row(1), "a".repeat(40));
+        f.conv.push(EntryKind::Report, &"d".repeat(64)).unwrap();
+        assert!(!f.conv.has_item(ids[0]));
+        let (t, _) = f.term(6, 40);
+        assert!(!f.viewport.following());
+        assert_eq!(
+            &t.rows()[1..5],
+            [
+                crate::screen::blocks::EARLIER_OUTPUT_DROPPED.to_string(),
+                "b".repeat(40),
+                "b".repeat(24),
+                "c".repeat(40)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_held_view_that_a_taller_window_shows_to_the_end_follows_again() {
+        let mut f = lines(30);
+        f.term(12, 40);
+        f.scroll(Scroll::Up(2));
+        f.term(12, 40);
+        assert!(!f.viewport.following());
+        f.term(14, 40);
+        assert!(f.viewport.following());
+        f.conv.push(EntryKind::Report, "fresh").unwrap();
+        let (t, drawn) = f.term(14, 40);
+        assert_eq!(t.row(11), "fresh");
+        assert_eq!(drawn.new_below, 0);
+    }
+
+    #[test]
+    fn scrolling_down_from_inside_an_entry_crosses_into_the_next() {
+        let mut f = Fixture::new(None);
+        f.header = HeaderLine::default();
+        for i in 0..10 {
+            f.conv
+                .push(EntryKind::Report, &format!("a{i}\nb{i}\nc{i}"))
+                .unwrap();
+        }
+        f.term(12, 40);
+        f.scroll(Scroll::Up(10));
+        let (t, _) = f.term(12, 40);
+        assert_eq!(t.row(1), "b3");
+        for _ in 0..2 {
+            f.conv.push(EntryKind::Report, "x\ny\nz").unwrap();
+        }
+        let (t, drawn) = f.term(12, 40);
+        assert_eq!(t.row(1), "b3");
+        assert_eq!(drawn.new_below, 2);
+        f.scroll(Scroll::Down(4));
+        let (t, _) = f.term(12, 40);
+        assert_eq!(t.row(1), "c4");
+    }
+
+    #[test]
+    fn a_row_with_no_cell_does_not_join_the_previous_entry_run() {
+        let mut f = Fixture::new(None);
+        f.header = HeaderLine::default();
+        let a = f.conv.push(EntryKind::Report, "a").unwrap();
+        let wide = f.conv.push(EntryKind::Report, "가\nb").unwrap();
+        let (t, drawn) = f.term(8, 1);
+        assert_eq!(&t.rows()[1..4], ["a", "", "b"]);
+        assert_eq!(drawn.seen, [a..=a]);
+        assert_eq!(drawn.rows, [(wide, 1..2)]);
+    }
+
+    #[test]
+    fn the_header_keeps_a_column_between_its_halves_and_gives_a_full_right_all_of_it() {
+        let mut f = lines(1);
+        f.banner = None;
+        f.header = HeaderLine {
+            left: "L".repeat(30),
+            right: "R".into(),
+        };
+        let (t, _) = f.term(8, 20);
+        assert_eq!(t.row(0), format!("{} R", "L".repeat(18)));
+        f.header.right = "r".repeat(20);
+        let (t, _) = f.term(8, 20);
+        assert_eq!(t.row(0), "r".repeat(20));
     }
 }
