@@ -1669,6 +1669,8 @@ mod tests {
             f.scroll(by);
             assert!(f.viewport.following(), "{by:?}");
         }
+        f.scroll(Scroll::Top);
+        assert!(!f.viewport.following());
     }
 
     #[test]
@@ -1764,5 +1766,58 @@ mod tests {
         f.header.right = "r".repeat(20);
         let (t, _) = f.term(8, 20);
         assert_eq!(t.row(0), "r".repeat(20));
+    }
+
+    #[test]
+    fn an_unchecked_banner_of_control_characters_is_drawn_escaped() {
+        let text = "\u{1}".repeat(maknae_proto::BANNER_TEXT_MAX);
+        let mut f = lines(3);
+        f.banner = Some(banner(&text, Some(BannerColor::Red)));
+        let cols = 8 * maknae_proto::BANNER_TEXT_MAX + 2;
+        let (bytes, drawn) = f.frame(12, u16::try_from(cols).unwrap());
+        assert!(!drawn.too_small);
+        let rows = rows_by_position(&bytes);
+        let want = format!(" {} ", "\\u{0001}".repeat(maknae_proto::BANNER_TEXT_MAX));
+        assert_eq!(rows[&1], want);
+        assert_eq!(rows[&12], want);
+    }
+
+    #[test]
+    fn an_unchecked_banner_is_drawn_whole_within_its_byte_budget_and_cut_past_it() {
+        for (marks, want) in [
+            (
+                1000,
+                format!(
+                    "{}A{}{}",
+                    " ".repeat(19),
+                    "\u{301}".repeat(1000),
+                    " ".repeat(20)
+                ),
+            ),
+            (1100, format!("{}…", " ".repeat(19))),
+        ] {
+            let mut f = lines(3);
+            f.banner = Some(banner(
+                &format!("A{}", "\u{301}".repeat(marks)),
+                Some(BannerColor::Red),
+            ));
+            let (bytes, drawn) = f.frame(12, 40);
+            assert!(!drawn.too_small);
+            let rows = rows_by_position(&bytes);
+            assert_eq!(rows[&1], want, "{marks}");
+            assert_eq!(rows[&12], want, "{marks}");
+        }
+    }
+
+    #[test]
+    fn an_unchecked_multibyte_banner_on_a_wide_window_is_cut_at_its_byte_budget() {
+        let mut f = lines(3);
+        f.banner = Some(banner(&"€".repeat(2000), Some(BannerColor::Red)));
+        let (bytes, drawn) = f.frame(12, 2002);
+        assert!(!drawn.too_small);
+        let want = format!(" {}…", "€".repeat(1348));
+        let rows = rows_by_position(&bytes);
+        assert_eq!(rows[&1], want);
+        assert_eq!(rows[&12], want);
     }
 }
