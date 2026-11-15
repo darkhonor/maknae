@@ -11,6 +11,7 @@
 //! plaintext secret as `hrot_sealed`) — exactly the "emit false assurance" T1
 //! line-drawing rule.
 
+pub use maknae_config::{PostureMarker, MECHANISM_KEYCHAIN, MECHANISM_TPM2};
 use maknae_vault::CredentialSourceKind;
 
 /// Mirrors [`maknae_vault::CredentialSourceKind`] (named `CredentialSource`, NOT
@@ -31,23 +32,6 @@ impl From<CredentialSourceKind> for CredentialSource {
         }
     }
 }
-
-/// The root-owned provisioning-time attestation (`<config_dir>/private/posture.yaml`,
-/// spec §4.6/§5.2): the sealing mechanism, the sealed target path, and when it was
-/// written. The daemon can read this file but not modify it. A missing or
-/// malformed marker file parses to `None` at the read site (`run.rs`) — never to a
-/// fabricated "matches" marker.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PostureMarker {
-    pub mechanism: String,
-    pub target: String,
-    pub timestamp: String,
-}
-
-/// The mechanism token a [`CredentialSource::CredentialsDirectory`] boot expects
-/// its marker to attest (Linux `systemd-creds`, TPM2-key-pinned per spec §6.1).
-pub const MECHANISM_TPM2: &str = "tpm2";
-pub const MECHANISM_KEYCHAIN: &str = "keychain";
 
 /// The daemon's honestly-stated boot credential posture (spec §5.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

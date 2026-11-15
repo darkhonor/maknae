@@ -244,7 +244,7 @@ pub fn artifact_table(cli_dir: &Path, macos: bool, insecure_plaintext: bool) -> 
     });
 
     rows.push(row(
-        etc.join("private/posture.yaml"),
+        etc.join(maknae_config::POSTURE_MARKER_FILE),
         Owner::RootMaknaeGroup,
         0o640,
         ContentKind::Posture,

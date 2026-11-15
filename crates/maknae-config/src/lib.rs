@@ -49,6 +49,7 @@ mod error;
 mod loader;
 pub mod mirror;
 mod policy;
+mod posture_marker;
 mod principal;
 mod providers;
 mod scalar;
@@ -129,6 +130,7 @@ pub use mirror::{
     Mirror, MirrorError, MirrorHeader, SyncPlan, MIRROR_BANNER, MIRROR_MAX_BYTES,
 };
 pub use policy::{BasicPolicy, LEVELS as US_LEVELS};
+pub use posture_marker::{PostureMarker, MECHANISM_KEYCHAIN, MECHANISM_TPM2, POSTURE_MARKER_FILE};
 pub use principal::{principal_from_section, principal_keys_known, Principal, PRINCIPAL_SECTION};
 pub use providers::{
     agent_key_path, endpoint_is_acceptable, key_field_is_acceptable, key_subpath_is_acceptable,
