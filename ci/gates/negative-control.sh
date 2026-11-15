@@ -6404,8 +6404,8 @@ open(p, "w").write(s.replace(old, new))' "$f" "$2" "$3"; then
     maknae-loop send::tests::a_mutation_that_fails_before
   expect_reject_because "uniform/a-connect-failure-told-unknown-goes-red" \
     "a_write_that_cannot_reach_the_daemon_answers_unavailable" cv_mutant crates/maknae-loop/src/send.rs \
-    '    let before = Failed::BeforeGrant;' \
-    '    let before = Failed::After;' \
+    '    let unsent = Failed::Unsent;' \
+    '    let unsent = Failed::After;' \
     maknae-loop send::tests::a_write_that_cannot_reach
   expect_reject_because "uniform/a-lost-ack-after-an-effect-told-no-effect-goes-red" \
     "an_effect_whose_finish_ack_is_lost_stays_unknown" cv_mutant crates/maknae-loop/src/mutation.rs \
