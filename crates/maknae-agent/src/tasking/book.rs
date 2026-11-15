@@ -1004,9 +1004,7 @@ impl Book {
     /// waiting for room. True when the screen changed.
     pub fn tick(&mut self, now: u64, conv: &mut Conversation) -> bool {
         let waiting = self.held.len();
-        if waiting > 0 {
-            self.place(now, conv);
-        }
+        self.place(now, conv);
         let mut said = false;
         while let Some(line) = self.unsaid.front() {
             if conv.push(EntryKind::Notice, line).is_err() {
@@ -2445,5 +2443,247 @@ mod tests {
         assert_eq!(run.book.link(), text::CLOCK);
         assert_eq!(run.book.header().left, format!("hobi · {}", text::CLOCK));
         assert_eq!(run.book.not_taken(), 1);
+    }
+
+    #[test]
+    fn only_a_decided_standing_opens_a_session() {
+        for (standing, of) in [
+            (AgentStanding::Enrolled, Some(Standing::Enrolled)),
+            (AgentStanding::Contained, Some(Standing::Contained)),
+            (AgentStanding::Withdrawn, Some(Standing::Withdrawn)),
+            (AgentStanding::Removed, Some(Standing::Removed)),
+            (AgentStanding::Undecided, None),
+        ] {
+            assert_eq!(Standing::of(standing), of, "{standing:?}");
+        }
+    }
+
+    #[test]
+    fn the_book_names_its_agent_and_its_debug_prints_only_counts() {
+        let mut run = Run::new(Standing::Enrolled);
+        assert_eq!(run.book.agent(), "hobi");
+        run.submit("tidy my downloads", 1, 1);
+        run.enter("a secret plan");
+        assert_eq!(
+            format!("{:?}", run.book),
+            "Book { tasks: 1, queued: 1, held: 0 }"
+        );
+        assert_eq!(
+            Book::new("ho\x1bbi", Standing::Enrolled, false).agent(),
+            "ho\\u{001b}bi"
+        );
+    }
+
+    #[test]
+    fn the_spinner_turns_only_while_a_task_is_shown_and_the_login_lives() {
+        let mut run = Run::new(Standing::Enrolled);
+        assert!(!run.book.animating());
+        assert!(!run.book.in_flight());
+        assert!(!run.book.stopped());
+        run.submit("one", 1, 1);
+        assert!(run.book.animating());
+        assert!(run.book.held().is_empty(), "a queued task is not held");
+        run.book.stop(
+            "your Vault login expired: run `maknae login`",
+            &mut run.conv,
+        );
+        assert!(run.book.stopped());
+        assert!(!run.book.animating());
+    }
+
+    #[test]
+    fn the_opening_list_keeps_the_session_busy_until_it_is_answered() {
+        let mut run = Run {
+            book: Book::new("hobi", Standing::Enrolled, false),
+            conv: Conversation::new(1 << 20, 4096),
+            now: 0,
+        };
+        assert!(matches!(run.op(), Op::Collect { after: None }));
+        run.answer(reports(vec![]));
+        assert!(matches!(run.op(), Op::ListAll));
+        assert_eq!(run.book.unanswered(), 0);
+        assert!(run.book.busy());
+        run.answer(Ok(Answer::Tasks(vec![])));
+        assert!(!run.book.busy());
+    }
+
+    #[test]
+    fn one_verb_is_in_flight_at_a_time_and_a_number_past_the_last_task_is_refused() {
+        let mut run = Run::new(Standing::Enrolled);
+        run.submit("one", 1, 1);
+        run.enter("/status 2");
+        run.nothing_queued();
+        assert_eq!(run.last_text(), "there is no task #2");
+        run.enter("two");
+        assert!(matches!(run.op(), Op::Submit { .. }));
+        run.enter("three");
+        run.none_due();
+    }
+
+    #[test]
+    fn a_steering_verb_that_was_never_sent_says_nothing_was_sent() {
+        let mut run = Run::new(Standing::Enrolled);
+        run.submit("one", 1, 1);
+        for (failure, line) in [
+            (
+                Failure::Clock,
+                "the system clock reads before 1970; nothing was sent",
+            ),
+            (
+                Failure::NoIdentity,
+                "no plane identity could be had; nothing was sent",
+            ),
+            (
+                Failure::Unreachable { after_write: false },
+                "the kernel could not be reached; nothing was sent",
+            ),
+        ] {
+            run.enter("/stop 1");
+            assert!(matches!(run.op(), Op::Stop { .. }));
+            run.answer(Err(failure));
+            assert_eq!(run.last_text(), line);
+        }
+    }
+
+    #[test]
+    fn a_last_page_of_reports_asks_for_no_more_at_once() {
+        let mut run = Run::with(
+            Standing::Enrolled,
+            false,
+            vec![report(1, 1, "done", None)],
+            vec![],
+        );
+        run.none_due();
+    }
+
+    #[test]
+    fn a_report_waits_while_its_worst_case_size_would_push_out_an_unseen_one() {
+        for (body, shown) in [(102, 2), (103, 1)] {
+            let mut run = Run::new(Standing::Enrolled);
+            run.conv = Conversation::new(3 * 64, 64);
+            run.now = COLLECT_IDLE_MS;
+            assert!(matches!(run.op(), Op::Collect { .. }));
+            run.answer(reports(vec![
+                report(1, 1, &"a".repeat(56), None),
+                report(2, 2, &"b".repeat(body), None),
+            ]));
+            assert_eq!(run.texts().len(), shown, "a body of {body}");
+        }
+    }
+
+    #[test]
+    fn a_task_at_the_polls_lower_bound_is_outside_the_listed_range() {
+        let mut run = Run::new(Standing::Enrolled);
+        run.submit("one", 1, 5);
+        run.now = POLL_EVERY_MS;
+        assert!(matches!(run.op(), Op::Poll { after: Some(a) } if a.seq() == 4));
+        run.answer(page(vec![view(1, 5, TaskState::Working)], Some(5)));
+        run.enter("two");
+        assert!(matches!(run.op(), Op::Submit { .. }));
+        run.answer(Ok(Answer::View(view(2, 4, TaskState::Queued))));
+        assert!(matches!(run.op(), Op::Poll { after: Some(a) } if a.seq() == 5));
+        run.answer(page(vec![], None));
+        assert_eq!(run.book.status().len(), 2, "{:?}", run.book.status());
+    }
+
+    #[test]
+    fn status_of_one_task_is_its_full_line_and_an_unchanged_state_is_not_announced() {
+        let mut run = Run::with(Standing::Enrolled, true, vec![], vec![]);
+        run.submit("one", 1, 1);
+        run.now = POLL_EVERY_MS;
+        assert!(matches!(run.op(), Op::Poll { .. }));
+        run.answer(page(vec![view(1, 1, TaskState::Working)], None));
+        assert_eq!(run.last_text(), "#1 working");
+        let said = run.texts().len();
+        run.enter("/status 1");
+        assert!(matches!(run.op(), Op::Status { .. }));
+        let mut working = view(1, 1, TaskState::Working);
+        working.elapsed_secs = 65;
+        working.actions = 1;
+        run.answer(Ok(Answer::View(working)));
+        assert_eq!(
+            run.texts()[said..],
+            ["#1 working · 1:05 elapsed · 1 action"]
+        );
+        run.enter("/status 1");
+        assert!(matches!(run.op(), Op::Status { .. }));
+        let mut closed = view(1, 1, TaskState::Closed);
+        closed.close = Some(TaskClose::Stopped);
+        closed.elapsed_secs = 3_725;
+        closed.actions = 3;
+        run.answer(Ok(Answer::View(closed)));
+        assert_eq!(
+            run.last_text(),
+            "#1 closed: stopped at your request · 1:02:05 elapsed · 3 actions"
+        );
+    }
+
+    #[test]
+    fn a_read_that_fails_says_why_and_to_try_again() {
+        let mut run = Run::new(Standing::Enrolled);
+        for (failure, line) in [
+            (REFUSED, "the kernel refused it"),
+            (
+                Failure::Unreachable { after_write: true },
+                "the kernel could not be reached; try again",
+            ),
+            (
+                Failure::Protocol("bad".into()),
+                "the kernel's answer could not be read; try again",
+            ),
+            (
+                Failure::NoIdentity,
+                "no plane identity could be had; try again",
+            ),
+            (
+                Failure::Clock,
+                "the system clock reads before 1970; set the clock, then try again",
+            ),
+        ] {
+            run.enter("/list");
+            assert!(matches!(run.op(), Op::ListAll));
+            run.answer(Err(failure));
+            assert_eq!(run.last_text(), line);
+        }
+    }
+
+    #[test]
+    fn a_tick_reports_a_change_only_when_the_screen_changed() {
+        let mut run = Run::new(Standing::Enrolled);
+        assert!(!run.book.tick(run.now, &mut run.conv));
+        run.submit("one", 1, 1);
+        assert!(!run.book.tick(run.now, &mut run.conv));
+        run.now += SPIN_MS;
+        assert!(run.book.tick(run.now, &mut run.conv), "the spinner turned");
+    }
+
+    #[test]
+    fn a_session_without_a_screen_is_not_settled_while_a_request_waits_or_is_in_flight() {
+        let mut run = Run::with(Standing::Enrolled, true, vec![], vec![]);
+        run.enter("one");
+        assert!(!run.book.settled(false), "queued");
+        assert!(matches!(run.op(), Op::Submit { .. }));
+        assert!(!run.book.settled(false), "in flight");
+    }
+
+    #[test]
+    fn a_task_not_running_shows_a_still_glyph_and_its_elapsed_time_holds() {
+        let mut run = Run::with(
+            Standing::Contained,
+            false,
+            vec![],
+            vec![view(1, 1, TaskState::Held)],
+        );
+        assert_eq!(run.book.status(), ["· #1 held 0:00"]);
+        run.wait(5_000);
+        assert_eq!(run.book.status(), ["· #1 held 0:00"]);
+    }
+
+    #[test]
+    fn the_spinner_frame_follows_the_clock() {
+        let mut run = Run::new(Standing::Enrolled);
+        run.submit("one", 1, 1);
+        run.wait(1_200);
+        assert_eq!(run.book.status(), ["⠹ #1 queued 0:01"]);
     }
 }

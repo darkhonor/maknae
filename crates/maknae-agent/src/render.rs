@@ -893,6 +893,10 @@ mod tests {
             let (key, used) = decoder.next(&paste[at..]);
             assert!(used > 0);
             at += used;
+            assert!(
+                decoder.in_paste() || at == paste.len(),
+                "left the paste at {at}"
+            );
             if let Some(key) = key {
                 assert!(!matches!(editor.apply(&key), EditOutcome::Full));
             }

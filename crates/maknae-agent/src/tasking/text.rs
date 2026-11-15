@@ -325,6 +325,26 @@ mod tests {
     }
 
     #[test]
+    fn the_leaving_lines_count_what_was_not_sent_or_not_taken() {
+        assert_eq!(
+            not_sent(1, "hobi"),
+            "1 request was not sent; it was not given to hobi"
+        );
+        assert_eq!(
+            not_sent(3, "hobi"),
+            "3 requests were not sent; they were not given to hobi"
+        );
+        assert_eq!(
+            not_taken(1),
+            "1 request was refused, not sent, or of unknown outcome"
+        );
+        assert_eq!(
+            not_taken(2),
+            "2 requests were refused, not sent, or of unknown outcome"
+        );
+    }
+
+    #[test]
     fn the_menu_offers_the_commands_that_match() {
         let names: Vec<_> = menu("/").into_iter().map(|m| m.name).collect();
         assert_eq!(

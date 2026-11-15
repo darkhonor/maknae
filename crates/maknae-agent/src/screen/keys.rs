@@ -121,18 +121,19 @@ impl Decoder {
     }
 
     fn csi(&mut self, input: &[u8]) -> (Option<Key>, usize) {
-        let mut at = 2;
-        let fin = loop {
-            if at >= CSI_MAX {
-                return (Some(Key::Unknown), at);
-            }
-            match input.get(at) {
-                None => return (None, 0),
-                Some(&b) if (0x40..=0x7e).contains(&b) => break b,
-                Some(&b) if (0x20..=0x3f).contains(&b) => at += 1,
-                Some(_) => return (Some(Key::Unknown), at),
-            }
+        let window = &input[2..input.len().min(CSI_MAX)];
+        let Some(at) = window.iter().position(|b| !(0x20..=0x3f).contains(b)) else {
+            return if input.len() >= CSI_MAX {
+                (Some(Key::Unknown), CSI_MAX)
+            } else {
+                (None, 0)
+            };
         };
+        let at = at + 2;
+        let fin = input[at];
+        if !(0x40..=0x7e).contains(&fin) {
+            return (Some(Key::Unknown), at);
+        }
         let used = at + 1;
         let param = input[2..at]
             .split(|&b| b == b';')
@@ -178,11 +179,10 @@ fn utf8(input: &[u8]) -> Utf8 {
     };
     let have = input.len().min(want);
     match std::str::from_utf8(&input[..have]) {
-        Ok(s) if have == want => s
+        Ok(s) => s
             .chars()
             .next()
             .map_or(Utf8::Invalid, |c| Utf8::Char(c, want)),
-        Ok(_) => Utf8::Incomplete,
         Err(e) if e.error_len().is_none() => Utf8::Incomplete,
         Err(_) => Utf8::Invalid,
     }
@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn control_bytes_and_text_decode() {
         let mut d = Decoder::new();
-        let input = "\r\n\x7f\x08\x01\x05\x17\x03\x04a한😀".as_bytes();
+        let input = "\r\n\x7f\x08\x01\x05\x17\x03\x04aé한😀".as_bytes();
         let (keys, used) = decode_all(&mut d, input);
         assert_eq!(used, input.len());
         use Key::*;
@@ -312,6 +312,7 @@ mod tests {
                 Ctrl('c'),
                 Ctrl('d'),
                 Char('a'),
+                Char('é'),
                 Char('한'),
                 Char('😀')
             ]
@@ -329,6 +330,7 @@ mod tests {
         assert_eq!(d.next(b"\x1bOB"), (Some(Key::Down), 3));
         assert_eq!(d.next(b"\xed\x95"), (None, 0));
         assert_eq!(d.next(b"\xed\x95\x9c"), (Some(Key::Char('한')), 3));
+        assert_eq!(d.next(b"\x1b\xed\x95"), (None, 0));
         assert_eq!(d.next(b""), (None, 0));
     }
 
@@ -344,6 +346,8 @@ mod tests {
         assert_eq!(d.next(b"\xed\x41"), (Some(Key::Unknown), 1));
         assert_eq!(d.next(b"\x1b[9~"), (Some(Key::Unknown), 4));
         assert_eq!(d.next(b"\x1b[Z"), (Some(Key::Unknown), 3));
+        assert_eq!(d.next(b"\x1b[201~"), (Some(Key::PasteEnd), 6));
+        assert!(!d.in_paste());
         assert_eq!(d.next(b"\x1bOZ"), (Some(Key::Unknown), 3));
         assert_eq!(d.next(b"\x1b\x1b"), (Some(Key::Unknown), 1));
         assert_eq!(d.next(b"\x1b\x7f"), (Some(Key::Unknown), 2));
@@ -367,6 +371,7 @@ mod tests {
         assert_eq!(d.flush(b""), (None, 0));
         let mut p = Decoder::new();
         assert_eq!(p.next(b"\x1b[200~"), (Some(Key::PasteStart), 6));
+        assert!(p.in_paste());
         assert_eq!(p.next(b"\x1b[20"), (None, 0));
         assert_eq!(p.flush(b"\x1b[20"), (Some(Key::Char('\x1b')), 1));
     }

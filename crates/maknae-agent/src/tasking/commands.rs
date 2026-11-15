@@ -156,6 +156,7 @@ mod tests {
         assert_eq!(parse("/stop 0"), Parsed::Usage(STOP_USAGE));
         assert_eq!(parse("/stop 2 3"), Parsed::Usage(STOP_USAGE));
         assert_eq!(parse("/stop 99999999999"), Parsed::Usage(STOP_USAGE));
+        assert_eq!(parse("/stop +2"), Parsed::Usage(STOP_USAGE));
         assert_eq!(parse("/drop -1"), Parsed::Usage(DROP_USAGE));
         assert_eq!(parse("/status x"), Parsed::Usage(STATUS_USAGE));
         assert_eq!(parse("/add"), Parsed::Usage(ADD_USAGE));

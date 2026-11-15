@@ -96,6 +96,7 @@ mod tests {
         assert_eq!(rows("ab한글", 3), ["ab", "한", "글"]);
         assert_eq!(rows("a😀b", 2), ["a", "😀", "b"]);
         assert_eq!(rows("한", 1), ["한"]);
+        assert_eq!(rows("한\u{301}", 1), ["한\u{301}"]);
         for w in 1..8 {
             for row in rows("x한글😀y가나다", w) {
                 assert!(width_of(row) <= usize::from(w) || row.chars().count() == 1);
