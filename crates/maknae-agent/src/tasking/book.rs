@@ -2686,4 +2686,251 @@ mod tests {
         run.wait(1_200);
         assert_eq!(run.book.status(), ["⠹ #1 queued 0:01"]);
     }
+
+    #[test]
+    fn the_header_and_link_name_each_connection_state() {
+        let book = Book::new("hobi", Standing::Enrolled, false);
+        assert_eq!(book.header().left, "hobi · connecting");
+        assert_eq!(book.link(), text::CONNECTING);
+        let mut run = Run::new(Standing::Enrolled);
+        for (failure, link) in [
+            (Failure::Protocol("bad".into()), text::UNREADABLE),
+            (Failure::NoIdentity, text::NO_IDENTITY),
+        ] {
+            run.enter("/list");
+            assert!(matches!(run.op(), Op::ListAll));
+            run.answer(Err(failure));
+            assert_eq!(run.book.link(), link);
+            assert_eq!(run.book.header().left, format!("hobi · {link}"));
+        }
+    }
+
+    #[test]
+    fn an_answer_of_the_wrong_kind_is_unreadable_and_rereads() {
+        let mut run = Run::new(Standing::Enrolled);
+        run.now = COLLECT_IDLE_MS;
+        assert!(matches!(run.op(), Op::Collect { .. }));
+        run.answer(page(vec![], None));
+        assert_eq!(
+            run.last_text(),
+            "the kernel answered with something other than what was asked"
+        );
+        assert_eq!(run.book.link(), text::UNREADABLE);
+        assert_eq!(
+            run.book.header().left,
+            "hobi · kernel answer unreadable, retrying"
+        );
+        assert!(matches!(run.op(), Op::Poll { after: None }));
+    }
+
+    #[test]
+    fn an_unreadable_answer_to_a_submit_is_of_unknown_outcome() {
+        let mut run = Run::new(Standing::Enrolled);
+        run.enter("one");
+        assert!(matches!(run.op(), Op::Submit { .. }));
+        run.answer(Err(Failure::Protocol("bad".into())));
+        assert_eq!(run.last_text(), text::outcome_unknown_line(Unknown::Submit));
+        assert_eq!(run.book.not_taken(), 1);
+        assert!(matches!(run.op(), Op::Poll { after: None }));
+    }
+
+    #[test]
+    fn a_refused_add_says_its_outcome_is_unknown() {
+        let mut run = Run::new(Standing::Enrolled);
+        run.submit("one", 1, 1);
+        refused(&mut run, "/add 1 the logs too");
+        assert_eq!(run.last_text(), text::outcome_unknown_line(Unknown::Add(1)));
+        assert_eq!(run.book.not_taken(), 1);
+    }
+
+    #[test]
+    fn a_failed_opening_list_says_nothing_and_rereads() {
+        let mut run = Run {
+            book: Book::new("hobi", Standing::Enrolled, false),
+            conv: Conversation::new(1 << 20, 4096),
+            now: 0,
+        };
+        assert!(matches!(run.op(), Op::Collect { after: None }));
+        run.answer(reports(vec![]));
+        assert!(matches!(run.op(), Op::ListAll));
+        run.answer(Err(REFUSED));
+        assert!(run.texts().is_empty());
+        assert!(!run.book.busy());
+        assert!(matches!(run.op(), Op::Poll { after: None }));
+    }
+
+    #[test]
+    fn a_collect_refused_twice_says_so_once() {
+        let mut run = Run::new(Standing::Enrolled);
+        for at in [1, 2] {
+            run.now = at * COLLECT_IDLE_MS;
+            assert!(matches!(run.op(), Op::Collect { .. }));
+            run.answer(Err(REFUSED));
+        }
+        assert_eq!(run.texts(), [text::outcome_unknown_line(Unknown::Collect)]);
+    }
+
+    #[test]
+    fn a_bare_status_lists_the_shown_tasks_or_says_there_are_none() {
+        let mut run = Run::new(Standing::Enrolled);
+        run.enter("/status");
+        run.nothing_queued();
+        assert_eq!(run.last_text(), "no open tasks");
+        run.submit("one", 1, 1);
+        run.submit("two", 2, 2);
+        let said = run.texts().len();
+        run.enter("/status");
+        run.nothing_queued();
+        assert_eq!(
+            run.texts()[said..],
+            ["⠋ #1 queued 0:00", "⠋ #2 queued 0:00"]
+        );
+    }
+
+    #[test]
+    fn a_command_written_wrongly_says_how_to_write_it() {
+        let mut run = Run::new(Standing::Enrolled);
+        run.enter("/stop two");
+        run.nothing_queued();
+        assert_eq!(run.last_text(), super::super::commands::STOP_USAGE);
+        assert_eq!(run.book.not_taken(), 0);
+    }
+
+    #[test]
+    fn an_add_with_no_room_in_the_conversation_is_refused_and_said_once_there_is() {
+        let mut run = full_run();
+        run.enter(&format!("/add 1 {}", "m".repeat(100)));
+        run.nothing_queued();
+        assert_eq!(run.book.not_taken(), 1);
+        assert_eq!(run.texts().len(), 1);
+        assert_eq!(run.book.unsaid, [text::CONVERSATION_FULL]);
+        assert!(!run.book.tick(run.now, &mut run.conv));
+        assert_eq!(run.book.unsaid, [text::CONVERSATION_FULL]);
+        assert_eq!(
+            run.book.header().right,
+            "a notice is waiting: scroll down to read on"
+        );
+        run.draw_all();
+        assert!(run.book.tick(run.now, &mut run.conv));
+        assert!(run.book.unsaid.is_empty());
+        assert_eq!(run.last_text(), text::CONVERSATION_FULL);
+    }
+
+    #[test]
+    fn two_reports_waiting_for_room_are_counted_in_the_header() {
+        let mut run = full_run();
+        run.now = COLLECT_IDLE_MS;
+        assert!(matches!(run.op(), Op::Collect { after: None }));
+        run.answer(reports(vec![
+            report(1, 2, &"b".repeat(100), None),
+            report(1, 3, &"c".repeat(100), None),
+        ]));
+        assert_eq!(run.texts().len(), 1);
+        assert_eq!(
+            run.book.header().right,
+            "2 reports waiting: scroll down to read on"
+        );
+    }
+
+    #[test]
+    fn a_closed_task_first_seen_by_a_poll_is_not_numbered() {
+        let mut run = Run::with(
+            Standing::Enrolled,
+            false,
+            vec![],
+            vec![view(1, 1, TaskState::Closed)],
+        );
+        assert!(run.book.tasks.is_empty());
+        run.enter("/status 1");
+        run.nothing_queued();
+        assert_eq!(run.last_text(), "there is no task #1");
+    }
+
+    #[test]
+    fn list_numbers_each_task_and_names_its_close() {
+        let mut run = Run::new(Standing::Enrolled);
+        run.enter("/list");
+        assert!(matches!(run.op(), Op::ListAll));
+        run.answer(Ok(Answer::Tasks(vec![])));
+        assert_eq!(run.last_text(), "you have no tasks with hobi");
+        run.submit("one", 1, 1);
+        let said = run.texts().len();
+        run.enter("/list");
+        assert!(matches!(run.op(), Op::ListAll));
+        let mut stopped = view(2, 2, TaskState::Closed);
+        stopped.close = Some(TaskClose::Stopped);
+        run.answer(Ok(Answer::Tasks(vec![
+            view(1, 1, TaskState::Working),
+            stopped,
+        ])));
+        assert_eq!(
+            run.texts()[said..],
+            ["#1 working", "#2 closed: stopped at your request"]
+        );
+        assert_eq!(run.book.tasks.len(), 2);
+        assert_eq!(run.book.tasks[1].task, task(2));
+    }
+
+    #[test]
+    fn a_submit_answered_with_a_task_already_known_keeps_its_number() {
+        let mut run = Run::with(
+            Standing::Enrolled,
+            false,
+            vec![],
+            vec![view(1, 1, TaskState::Working)],
+        );
+        assert!(!run.book.tasks[0].mine);
+        run.submit("one", 1, 1);
+        assert_eq!(run.book.tasks.len(), 1);
+        assert!(run.book.tasks[0].mine);
+        assert_eq!(
+            run.last_text(),
+            "started a new task #1 (use /add <n> to add to a running one)"
+        );
+        assert!(!run.book.settled(true));
+    }
+
+    #[test]
+    fn a_drop_answered_for_another_task_leaves_the_dropped_one_shown() {
+        let mut run = Run::new(Standing::Enrolled);
+        run.submit("one", 1, 1);
+        run.enter("/drop 1");
+        assert!(matches!(run.op(), Op::Drop { .. }));
+        run.answer(Ok(Answer::View(view(9, 9, TaskState::Closed))));
+        assert_eq!(run.last_text(), "dropped #1");
+        assert_eq!(run.book.tasks.len(), 1);
+        assert!(!run.book.tasks[0].gone);
+        assert_eq!(run.book.status(), ["⠋ #1 queued 0:00"]);
+    }
+
+    #[test]
+    fn status_of_a_task_known_only_by_its_report_is_its_number() {
+        let mut run = Run::with(
+            Standing::Enrolled,
+            false,
+            vec![report(1, 1, "done", None)],
+            vec![],
+        );
+        run.enter("/status 1");
+        assert!(matches!(run.op(), Op::Status { task: t } if t == task(1)));
+        run.answer(Ok(Answer::View(view(2, 2, TaskState::Working))));
+        assert_eq!(run.last_text(), "#1");
+        assert_eq!(run.book.tasks.len(), 1);
+    }
+
+    #[test]
+    fn a_second_stop_says_nothing_more() {
+        let mut run = Run::new(Standing::Enrolled);
+        run.book.stop("ended", &mut run.conv);
+        run.book.stop("again", &mut run.conv);
+        assert_eq!(run.texts(), ["ended"]);
+        assert!(run.book.stopped());
+    }
+
+    #[test]
+    fn hurrying_with_nothing_placed_asks_for_nothing() {
+        let mut run = Run::new(Standing::Enrolled);
+        run.book.hurry();
+        run.none_due();
+    }
 }

@@ -1820,4 +1820,132 @@ mod tests {
         assert_eq!(rows[&1], want);
         assert_eq!(rows[&12], want);
     }
+
+    fn refused_at_every_length_short_of_the_frame(f: &mut Fixture, rows: u16, cols: u16) {
+        let size = TerminalSize { rows, cols };
+        let mut compose_into = |cap: usize| {
+            let mut out = Zeroizing::new(Vec::with_capacity(cap));
+            let mut state = ScreenState {
+                banner: f.banner.as_ref(),
+                header: &f.header,
+                conversation: &mut f.conv,
+                viewport: &mut f.viewport,
+                status: &f.status,
+                editor: &f.editor,
+                menu: &f.menu,
+            };
+            let drawn = compose(&mut state, size, &mut out);
+            (drawn, out.to_vec())
+        };
+        let (drawn, want) = compose_into(frame_capacity(size));
+        drawn.unwrap();
+        for cap in 0..want.len() {
+            let (drawn, bytes) = compose_into(cap);
+            assert_eq!(drawn, Err(FrameError::Overflow), "{cap}");
+            assert!(bytes.is_empty(), "{cap}");
+        }
+    }
+
+    #[test]
+    fn a_full_frame_is_refused_at_every_length_short_of_it() {
+        for color in [
+            BannerColor::Rgb(1, 2, 3),
+            BannerColor::Black,
+            BannerColor::Red,
+            BannerColor::Green,
+            BannerColor::Yellow,
+            BannerColor::Magenta,
+            BannerColor::Cyan,
+            BannerColor::White,
+        ] {
+            let mut f = lines(30);
+            f.banner = Some(banner("CUI", Some(color)));
+            f.status = (1..=5).map(|i| format!("#{i} working")).collect();
+            f.menu = vec![MenuItem {
+                name: "/stop".into(),
+                help: "stop it".into(),
+            }];
+            for c in "/a\nb".chars() {
+                let key = if c == '\n' { Key::CtrlJ } else { Key::Char(c) };
+                f.editor.apply(&key);
+            }
+            f.conv.push(EntryKind::Report, &"x".repeat(200)).unwrap();
+            f.conv
+                .push(EntryKind::Report, &format!("a{}€", "\u{301}".repeat(157)))
+                .unwrap();
+            let (bytes, _) = f.frame(18, 20);
+            assert!(rows_by_position(&bytes).values().any(|r| r.ends_with('…')));
+            refused_at_every_length_short_of_the_frame(&mut f, 18, 20);
+        }
+    }
+
+    #[test]
+    fn a_window_taller_than_the_clamp_is_refused_at_every_length_short_of_it() {
+        let mut f = Fixture::new(None);
+        f.header = HeaderLine::default();
+        let (t, drawn) = f.term(MAX_ROWS + 1, 4);
+        assert!(!drawn.too_small);
+        assert_eq!(t.row(usize::from(MAX_ROWS)), "");
+        refused_at_every_length_short_of_the_frame(&mut f, MAX_ROWS + 1, 4);
+    }
+
+    #[test]
+    fn a_too_small_frame_is_refused_at_every_length_short_of_it() {
+        for color in [None, Some(BannerColor::Blue)] {
+            let mut f = lines(3);
+            f.banner = Some(banner("CUI", color));
+            let (t, drawn) = f.term(4, 20);
+            assert!(drawn.too_small);
+            assert_eq!(t.row(1), TOO_SMALL);
+            refused_at_every_length_short_of_the_frame(&mut f, 4, 20);
+        }
+        let mut f = Fixture::new(None);
+        refused_at_every_length_short_of_the_frame(&mut f, 2, 20);
+    }
+
+    #[test]
+    fn blue_magenta_and_cyan_banners_use_their_basic_backgrounds() {
+        for (color, want) in [
+            (BannerColor::Blue, "44m|97m|"),
+            (BannerColor::Magenta, "45m|97m|"),
+            (BannerColor::Cyan, "46m|30m|"),
+            (BannerColor::Green, "42m|30m|"),
+        ] {
+            let mut f = Fixture::new(Some(banner("CUI", Some(color))));
+            let (t, _) = f.term(10, 20);
+            for r in [0, 9] {
+                assert!(
+                    t.styles[r].iter().all(|s| s == want),
+                    "{color:?} {:?}",
+                    t.styles[r]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_mark_with_no_cell_before_it_is_skipped() {
+        assert_eq!(written(5, 8, "\u{301}a\u{301}"), "a\u{301}");
+        assert_eq!(written(5, 8, "\u{301}\u{301}"), "");
+    }
+
+    #[test]
+    fn a_held_row_in_a_conversation_now_empty_draws_no_conversation() {
+        let mut f = lines(30);
+        f.term(12, 40);
+        f.scroll(Scroll::Up(2));
+        f.term(12, 40);
+        assert!(!f.viewport.following());
+        f.conv = Conversation::new(1 << 20, 4096);
+        let (t, drawn) = f.term(12, 40);
+        assert!(!drawn.too_small);
+        assert!(drawn.seen.is_empty());
+        assert!(drawn.rows.is_empty());
+        assert!(
+            t.rows()[2..9].iter().all(String::is_empty),
+            "{:?}",
+            t.rows()
+        );
+        assert!(!f.viewport.following());
+    }
 }
