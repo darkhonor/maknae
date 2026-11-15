@@ -141,6 +141,8 @@ pub(crate) fn task_verb(verb: &Verb) -> Option<TaskVerb<'_>> {
         | Verb::AdminSubjectUnbind
         | Verb::AdminContain { .. }
         | Verb::AdminRelease { .. }
+        | Verb::AdminHeldList { .. }
+        | Verb::AdminHeldRelease { .. }
         | Verb::AdminCredentialRotate
         | Verb::AdminProviderList
         | Verb::AdminProviderSet

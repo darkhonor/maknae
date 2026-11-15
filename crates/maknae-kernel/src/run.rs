@@ -1619,7 +1619,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             close_bounded(&mut stream).await;
             return;
         }
-        Dispatch::NoBehaviour => {
+        Dispatch::NoBehaviour | Dispatch::HeldRequested => {
             // Decided and PERMITTED above; the term simply has no behaviour.
             // Same audit-then-respond gate as every sibling path — the record
             // must be durable before any frame is released (ADR-0019).
@@ -2088,6 +2088,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                     }
                 }
                 Dispatch::NoBehaviour
+                | Dispatch::HeldRequested
                 | Dispatch::MutationRequested
                 | Dispatch::PromptRequested
                 | Dispatch::ConversationNewRequested

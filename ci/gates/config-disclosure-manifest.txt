@@ -151,3 +151,22 @@ always	agent_list.next	agent.list (#630): the cursor for the next page, the id o
 always	agent_list.undecided	agent.list (#630): how many agents on this page the kernel could not decide and with which the caller holds nothing; a count, never an id
 always	agent_list.banner.text	agent.list (#630): the operator's banner text, bounded and free of control and format characters
 always	agent_list.banner.color	agent.list (#630): the operator's banner colour: one of eight fixed names or an RGB triple; never text
+always	held_list.entries.view.task	admin.release (#632): one held task: the task's own id, which a held-task release names
+always	held_list.entries.view.agent	admin.release (#632): one held task: the agent the task was given to, named by its tasker
+always	held_list.entries.view.state	admin.release (#632): one held task: one fixed token, held
+always	held_list.entries.view.close	admin.release (#632): one held task: one fixed token naming why the kernel closed it, absent while open
+always	held_list.entries.view.submitted_secs	admin.release (#632): one held task: when the task was submitted, epoch seconds
+always	held_list.entries.view.elapsed_secs	admin.release (#632): one held task: seconds since the task was submitted
+always	held_list.entries.view.actions	admin.release (#632): one held task: how many requests the agent made under the task; a count, never content
+always	held_list.entries.view.last_action_secs	admin.release (#632): one held task: when the agent last made a request under the task, epoch seconds
+always	held_list.entries.view.cursor	admin.release (#632): one held task: the store sequence of this task, the value a held-task list or release takes as its cursor
+always	held_list.entries.tasker	admin.release (#632): one held task: the tasker's name and uid from the last applied load, or an agent id; never a live account lookup
+always	held_list.entries.held_from	admin.release (#632): one held task: one fixed token naming the state the task was held from
+always	held_list.entries.held_for	admin.release (#632): one held task: one fixed token naming whose containment holds it, tasker, root or agent; absent when the store did not record it
+always	held_list.entries.held_secs	admin.release (#632): one held task: when the hold was written, epoch seconds
+always	held_list.next	admin.release (#632): the cursor for the next page, the store sequence of the last held task returned
+always	held_release.outcomes.task	admin.release (#632): one release attempt: the id of the held task it names
+always	held_release.outcomes.result	admin.release (#632): one release attempt: one fixed token naming its outcome; the reason is the trail's, never the wire's
+always	held_release.outcomes.state	admin.release (#632): one release attempt: one fixed token naming the task's state after it, absent when the outcome is unknown
+always	held_release.outcomes.parent	admin.release (#632): one release attempt: the id of the held parent task that refused it, present only for that refusal
+always	held_release.next	admin.release (#632): the cursor to resume after: the store sequence of a task this page attempted, or the request's own cursor

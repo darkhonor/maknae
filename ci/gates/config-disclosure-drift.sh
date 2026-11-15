@@ -105,6 +105,11 @@ SURFACE=(
   "crates/maknae-proto/src/task.rs|AgentPage|agent_list|4|wire"
   "crates/maknae-proto/src/task.rs|AgentEntry|agent_list.entries|3|wire"
   "crates/maknae-proto/src/task.rs|BannerSpec|agent_list.banner|2|wire"
+  "crates/maknae-proto/src/task.rs|HeldPage|held_list|2|wire"
+  "crates/maknae-proto/src/task.rs|HeldView|held_list.entries|5|wire"
+  "crates/maknae-proto/src/task.rs|TaskView|held_list.entries.view|9|wire"
+  "crates/maknae-proto/src/task.rs|ReleasePage|held_release|2|wire"
+  "crates/maknae-proto/src/task.rs|ReleaseOutcome|held_release.outcomes|4|wire"
   "crates/maknae-vault/src/config.rs|VaultConfig|vault|9|config"
   "crates/maknae-vault/src/config.rs|UserAuthConfig|vault.user_auth|2|config"
 )
@@ -132,6 +137,12 @@ LEAF_ENUMS=(
   "agent_list.entries.standing|crates/maknae-proto/src/task.rs|AgentStanding"
   "task_report.close|crates/maknae-proto/src/task.rs|TaskClose"
   "task_reports.entries.close|crates/maknae-proto/src/task.rs|TaskClose"
+  "held_list.entries.held_from|crates/maknae-proto/src/task.rs|TaskState"
+  "held_list.entries.view.state|crates/maknae-proto/src/task.rs|TaskState"
+  "held_release.outcomes.state|crates/maknae-proto/src/task.rs|TaskState"
+  "held_list.entries.view.close|crates/maknae-proto/src/task.rs|TaskClose"
+  "held_list.entries.held_for|crates/maknae-proto/src/task.rs|HeldCause"
+  "held_release.outcomes.result|crates/maknae-proto/src/task.rs|ReleaseResult"
 )
 
 # Fields whose type is an enum of unit variants and tuple variants of fixed-width integers only: a fixed
@@ -156,6 +167,12 @@ LEAF_NEWTYPES=(
   "task_reports.entries.cursor|crates/maknae-proto/src/task.rs|TaskCursor"
   "task_reports.next|crates/maknae-proto/src/task.rs|TaskCursor"
   "task_follow_ups.task|crates/maknae-proto/src/task.rs|TaskRef"
+  "held_list.next|crates/maknae-proto/src/task.rs|TaskCursor"
+  "held_list.entries.view.cursor|crates/maknae-proto/src/task.rs|TaskCursor"
+  "held_release.next|crates/maknae-proto/src/task.rs|TaskCursor"
+  "held_list.entries.view.task|crates/maknae-proto/src/task.rs|TaskRef"
+  "held_release.outcomes.task|crates/maknae-proto/src/task.rs|TaskRef"
+  "held_release.outcomes.parent|crates/maknae-proto/src/task.rs|TaskRef"
 )
 
 # Fields whose type is a zeroizing secret newtype: one CBOR string on the wire, so a leaf.
@@ -403,6 +420,8 @@ PAYLOAD_DISPOSITIONS=(
   "TaskFollowUps|struct:TaskFollowUps"
   "TaskIdle|unit"
   "Agents|struct:AgentPage"
+  "HeldTasks|struct:HeldPage"
+  "HeldReleased|struct:ReleasePage"
 )
 payload_variants="$(awk '
   /^pub enum Payload \{/ { inenum=1; next }

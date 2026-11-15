@@ -89,6 +89,8 @@ pub enum Dispatch {
     ContainRequested,
     /// The peer asked to lift a containment; the target is read from the verb by the arm, never passed to the PDP.
     ReleaseRequested,
+    /// The peer asked to list or release held tasks; the operands are read from the verb by the arm, never passed to the PDP.
+    HeldRequested,
     ConversationNewRequested,
     ConversationCloseRequested,
     ConversationListRequested,
@@ -122,6 +124,7 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         Verb::AdminBaselineAccept { .. } => Dispatch::BaselineAcceptRequested,
         Verb::AdminContain { .. } => Dispatch::ContainRequested,
         Verb::AdminRelease { .. } => Dispatch::ReleaseRequested,
+        Verb::AdminHeldList { .. } | Verb::AdminHeldRelease { .. } => Dispatch::HeldRequested,
         Verb::SessionPrompt { .. } => Dispatch::PromptRequested,
         Verb::SessionNew { .. } => Dispatch::ConversationNewRequested,
         Verb::SessionClose { .. } => Dispatch::ConversationCloseRequested,
@@ -204,6 +207,8 @@ pub fn task_op(verb: &Verb) -> Option<&'static str> {
         | Verb::AdminSubjectUnbind
         | Verb::AdminContain { .. }
         | Verb::AdminRelease { .. }
+        | Verb::AdminHeldList { .. }
+        | Verb::AdminHeldRelease { .. }
         | Verb::AdminCredentialRotate
         | Verb::AdminProviderList
         | Verb::AdminProviderSet
@@ -376,6 +381,7 @@ pub fn verb_to_action(verb: &Verb) -> &'static str {
         Verb::AdminSubjectUnbind => "admin.subject.unbind",
         Verb::AdminContain { .. } => "admin.contain",
         Verb::AdminRelease { .. } => "admin.release",
+        Verb::AdminHeldList { .. } | Verb::AdminHeldRelease { .. } => "admin.release",
         Verb::AdminCredentialRotate => "admin.credential.rotate",
         Verb::AdminProviderList => "admin.provider.list",
         Verb::AdminProviderSet => "admin.provider.set",
@@ -1041,6 +1047,20 @@ mod tests {
             }),
             Dispatch::ReleaseRequested
         );
+        assert_eq!(
+            dispatch_verb(&Verb::AdminHeldList {
+                filter: None,
+                after: None
+            }),
+            Dispatch::HeldRequested
+        );
+        assert_eq!(
+            dispatch_verb(&Verb::AdminHeldRelease {
+                target: maknae_proto::HeldTarget::Agent("hobi".into()),
+                after: None
+            }),
+            Dispatch::HeldRequested
+        );
         // And EVERY term that is not grantable still has no behaviour --
         // DERIVED, not hand-typed.
         //
@@ -1066,7 +1086,8 @@ mod tests {
             .iter()
             .map(verb_to_action)
             .filter(|a| a.starts_with("admin.") && *a != "admin.whoami")
-            .count();
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
         let grantable_admin = grantable.iter().filter(|a| a.starts_with("admin.")).count();
         let ungrantable: Vec<Verb> = all_verbs()
             .into_iter()
@@ -1887,6 +1908,14 @@ mod tests {
             Verb::AdminRelease {
                 target: maknae_proto::ContainTarget::Uid(1),
             },
+            Verb::AdminHeldList {
+                filter: None,
+                after: None,
+            },
+            Verb::AdminHeldRelease {
+                target: maknae_proto::HeldTarget::Task(task_ref()),
+                after: None,
+            },
             Verb::AdminCredentialRotate,
             Verb::AdminProviderList,
             Verb::AdminProviderSet,
@@ -2171,28 +2200,38 @@ mod tests {
         let terms: std::collections::BTreeSet<&str> =
             all_verbs().iter().map(verb_to_action).collect();
         assert_eq!(terms.len(), 59);
-        assert_eq!(all_verbs().len(), 68);
+        assert_eq!(all_verbs().len(), 70);
     }
 
     /// Two terms sharing an action string would be decided as one another —
     /// a typo'd class prefix in any arm is invisible without this.
     #[test]
     fn every_action_string_is_distinct() {
+        let names = |verbs: &[Verb]| -> Vec<String> {
+            verbs
+                .iter()
+                .map(|v| {
+                    format!("{v:?}")
+                        .split([' ', '('])
+                        .next()
+                        .unwrap()
+                        .to_owned()
+                })
+                .collect()
+        };
         let (task, rest): (Vec<Verb>, Vec<Verb>) = all_verbs()
             .into_iter()
             .partition(|v| verb_to_action(v) == "session.task");
-        let task: Vec<String> = task
-            .iter()
-            .map(|v| {
-                format!("{v:?}")
-                    .split([' ', '('])
-                    .next()
-                    .unwrap()
-                    .to_owned()
-            })
-            .collect();
+        let (release, rest): (Vec<Verb>, Vec<Verb>) = rest
+            .into_iter()
+            .partition(|v| verb_to_action(v) == "admin.release");
         assert_eq!(
-            task,
+            names(&release),
+            ["AdminRelease", "AdminHeldList", "AdminHeldRelease"],
+            "only the release and held verbs share admin.release"
+        );
+        assert_eq!(
+            names(&task),
             [
                 "TaskSubmit",
                 "TaskAdd",
@@ -2369,6 +2408,20 @@ mod tests {
             },
             Verb::AdminRelease {
                 target: ContainTarget::Uid(424242),
+            },
+            Verb::AdminHeldList {
+                filter: Some(maknae_proto::HeldFilter::User(ContainTarget::Name(
+                    "SENTINEL-NAME".into(),
+                ))),
+                after: None,
+            },
+            Verb::AdminHeldRelease {
+                target: maknae_proto::HeldTarget::User(ContainTarget::Uid(424242)),
+                after: None,
+            },
+            Verb::AdminHeldRelease {
+                target: maknae_proto::HeldTarget::Agent("SENTINEL-AGENT".into()),
+                after: None,
             },
         ] {
             let dbg = format!(

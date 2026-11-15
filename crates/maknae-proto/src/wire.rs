@@ -444,6 +444,16 @@ pub enum Verb {
     AdminRelease {
         target: ContainTarget,
     },
+    /// List the tasks containment holds, decided as `admin.release`.
+    AdminHeldList {
+        filter: Option<crate::HeldFilter>,
+        after: Option<crate::TaskCursor>,
+    },
+    /// Release the held tasks `target` names, decided as `admin.release`.
+    AdminHeldRelease {
+        target: crate::HeldTarget,
+        after: Option<crate::TaskCursor>,
+    },
     /// Rotate the daemon's own credentials.
     AdminCredentialRotate,
     /// Enumerate the model providers available to the agent runtime. A disclosure
@@ -787,6 +797,8 @@ pub enum Payload {
     TaskFollowUps(crate::TaskFollowUps),
     TaskIdle,
     Agents(crate::AgentPage),
+    HeldTasks(crate::HeldPage),
+    HeldReleased(crate::ReleasePage),
 }
 
 /// What a permitted `fs.stat` discloses: never uid, gid, mode, inode or link count.
@@ -1238,6 +1250,8 @@ pub fn class_of(verb: &Verb) -> FrameClass {
         | Verb::AdminSubjectUnbind
         | Verb::AdminContain { .. }
         | Verb::AdminRelease { .. }
+        | Verb::AdminHeldList { .. }
+        | Verb::AdminHeldRelease { .. }
         | Verb::AdminCredentialRotate
         | Verb::AdminProviderList
         | Verb::AdminProviderSet
@@ -3677,6 +3691,22 @@ mod tests {
                     },
                     FrameClass::Control,
                 ),
+                (
+                    Verb::AdminHeldList {
+                        filter: Some(crate::HeldFilter::User(ContainTarget::Name(
+                            "n".repeat(CONTAIN_NAME_MAX_BYTES),
+                        ))),
+                        after: Some(crate::TaskCursor::from_seq(u64::MAX)),
+                    },
+                    FrameClass::Control,
+                ),
+                (
+                    Verb::AdminHeldRelease {
+                        target: crate::HeldTarget::Agent("a".repeat(32)),
+                        after: Some(crate::TaskCursor::from_seq(u64::MAX)),
+                    },
+                    FrameClass::Control,
+                ),
                 (Verb::AdminCredentialRotate, FrameClass::Control),
                 (Verb::AdminProviderList, FrameClass::Control),
                 (Verb::AdminProviderSet, FrameClass::Control),
@@ -3793,22 +3823,23 @@ mod tests {
         #[test]
         fn class_of_pins_every_verb() {
             let all = every_verb();
-            assert_eq!(all.len(), 58);
+            assert_eq!(all.len(), 60);
             for (verb, class) in all {
                 assert_eq!(class_of(&verb), class, "{verb:?}");
             }
         }
 
         #[test]
-        fn every_control_verb_encodes_under_the_control_request_cap() {
+        fn every_control_verb_encodes_under_the_control_request_cap_and_round_trips() {
             for (verb, class) in every_verb() {
+                let request = Request {
+                    task: None,
+                    protocol_version: PROTOCOL_VERSION,
+                    verb,
+                };
+                let bytes = encode_request(&request).unwrap();
+                assert_eq!(decode_request(&bytes).unwrap(), request);
                 if class == FrameClass::Control {
-                    let bytes = encode_request(&Request {
-                        task: None,
-                        protocol_version: PROTOCOL_VERSION,
-                        verb,
-                    })
-                    .unwrap();
                     assert!(bytes.len() <= CONTROL_REQUEST_MAX);
                 }
             }
