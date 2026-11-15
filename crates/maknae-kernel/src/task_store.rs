@@ -96,6 +96,10 @@ pub struct TaskRecord {
     /// The state a held task was in when it was held.
     #[serde(default)]
     pub held_from: Option<TaskState>,
+    #[serde(default)]
+    pub held_at: Option<i64>,
+    #[serde(default)]
+    pub held_for: Option<crate::task::Contained>,
     pub pending: bool,
     /// Set with `pending` when the record is being taken back, not awaiting its confirm.
     #[serde(default)]
@@ -702,7 +706,7 @@ impl TaskBlobs for MemTaskBlobs {
 mod tests {
     use super::*;
     use crate::enrollment::FixedEnrollment;
-    use crate::task::{Enrolled, TaskRefusal, TaskSigner, TaskStore};
+    use crate::task::{Contained, Enrolled, TaskRefusal, TaskSigner, TaskStore};
     use maknae_proto::{Ask, Bytes, Labels, TaskObject, TaskSignature, TaskSubmission};
     use maknae_state::envelope::{WrappingKey, KEY_LEN};
     use std::os::unix::fs::PermissionsExt;
@@ -814,8 +818,17 @@ mod tests {
         let t = tmp();
         let store = open_dir(t.path()).unwrap();
         let id = mint(&store).unwrap().task.task_id;
-        let before = encode(&store.record(&id).unwrap()).unwrap();
+        let mut rec = store.record(&id).unwrap();
         drop(store);
+        rec.state = TaskState::Held;
+        rec.held_from = Some(TaskState::Queued);
+        rec.held_at = Some(1_234);
+        rec.held_for = Some(Contained::Root);
+        let before = encode(&rec).unwrap();
+        let uid = nix::unistd::geteuid().as_raw();
+        let blobs = DirBlobs::open(t.path(), uid, key(), TASKS).unwrap();
+        TaskBlobs::save(&blobs, &name_of(&id), &before).unwrap();
+        drop(blobs);
         let raw = std::fs::read(t.path().join(format!("{id}.task"))).unwrap();
         assert!(!raw
             .windows(SENTINEL.len())
@@ -825,6 +838,29 @@ mod tests {
         let after = encode(&reopened.record(&id).unwrap()).unwrap();
         assert_eq!(*before, *after);
         assert!(reopened.take_boot_findings().is_empty());
+    }
+
+    #[test]
+    fn a_record_written_before_the_hold_fields_loads_with_none() {
+        let b = MemTaskBlobs::default();
+        let store = open_mem(&b);
+        let id = by_uid(&store, "old");
+        let mut rec = store.record(&id).unwrap();
+        rec.held_at = Some(1_234);
+        rec.held_for = Some(Contained::Tasker);
+        let mut value: ciborium::Value =
+            ciborium::from_reader(encode(&rec).unwrap().as_slice()).unwrap();
+        let ciborium::Value::Map(fields) = &mut value else {
+            panic!("a record encodes as a map");
+        };
+        let before = fields.len();
+        fields.retain(|(k, _)| !matches!(k.as_text(), Some("held_at" | "held_for")));
+        assert_eq!(fields.len(), before - 2);
+        let mut plain = Vec::new();
+        ciborium::into_writer(&value, &mut plain).unwrap();
+        b.put(&name_of(&id), &plain);
+        let loaded = read_record(&b, &name_of(&id)).unwrap();
+        assert_eq!((loaded.held_at, loaded.held_for), (None, None));
     }
 
     #[test]

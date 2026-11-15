@@ -428,6 +428,8 @@ mod tests {
             state: TaskState::Reported,
             close: None,
             held_from: None,
+            held_at: None,
+            held_for: None,
             pending: false,
             removing: false,
             seq,
