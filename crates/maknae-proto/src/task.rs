@@ -1443,7 +1443,11 @@ mod tests {
                 .map(|result| ReleaseOutcome {
                     task: TaskRef::from_id(&TaskId([2; 16])),
                     result,
-                    state: (result != ReleaseResult::Unknown).then_some(TaskState::Queued),
+                    state: (!matches!(
+                        result,
+                        ReleaseResult::Unknown | ReleaseResult::OutcomeUnknown
+                    ))
+                    .then_some(TaskState::Queued),
                     parent: (result == ReleaseResult::ParentHeld)
                         .then(|| TaskRef::from_id(&TaskId([3; 16]))),
                 })
