@@ -10,8 +10,8 @@ pub const POSTURE_MARKER_FILE: &str = "private/posture.yaml";
 pub const MECHANISM_TPM2: &str = "tpm2";
 pub const MECHANISM_KEYCHAIN: &str = "keychain";
 
-/// The root-owned provisioning-time attestation: the sealing mechanism, the sealed target
-/// path, and when it was written. The daemon can read this file but not modify it.
+/// The provisioning-time attestation: the sealing mechanism, the sealed target path, and
+/// when it was written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PostureMarker {
     pub mechanism: String,
@@ -95,6 +95,11 @@ mod tests {
     }
 
     #[test]
+    fn the_mechanism_tokens_are_the_wire_values() {
+        assert_eq!((MECHANISM_TPM2, MECHANISM_KEYCHAIN), ("tpm2", "keychain"));
+    }
+
+    #[test]
     fn an_all_digit_timestamp_is_written_as_a_string() {
         let text = marker("/etc/maknae/private/maknaed-secret-id.cred", "1786563711").render();
         assert_eq!(
@@ -116,6 +121,15 @@ mod tests {
                 target: "/t".into(),
                 timestamp: "9".into(),
             })
+        );
+    }
+
+    #[test]
+    fn a_plain_iso_timestamp_parses() {
+        assert_eq!(
+            parse("mechanism: tpm2\ntarget: /t\ntimestamp: 2026-08-12T00:00:00.000Z\n")
+                .map(|m| m.timestamp),
+            Some("2026-08-12T00:00:00.000Z".to_string())
         );
     }
 

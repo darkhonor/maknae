@@ -13913,52 +13913,6 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         assert!(maknae_config::load_str("x: [1, 2\n").is_err());
     }
 
-    fn rendered_marker(mechanism: &str, target: &str) -> Option<crate::posture::PostureMarker> {
-        let text = crate::posture::PostureMarker {
-            mechanism: mechanism.to_string(),
-            target: target.to_string(),
-            timestamp: "1786563711".to_string(),
-        }
-        .render();
-        crate::posture::PostureMarker::from_value(&maknae_config::load_str(&text).unwrap())
-    }
-
-    #[test]
-    fn a_rendered_tpm2_marker_determines_hrot_sealed() {
-        let target = "/etc/maknae/private/maknaed-secret-id.cred";
-        let posture = crate::posture::determine(
-            crate::posture::CredentialSource::CredentialsDirectory,
-            rendered_marker(crate::posture::MECHANISM_TPM2, target).as_ref(),
-            target,
-        );
-        assert_eq!(posture, crate::posture::Posture::HrotSealed);
-    }
-
-    #[test]
-    fn a_rendered_keychain_marker_determines_code_bound() {
-        let target = "/etc/maknae/private/maknaed-secret-id.keychain";
-        let posture = crate::posture::determine(
-            crate::posture::CredentialSource::Keychain,
-            rendered_marker(crate::posture::MECHANISM_KEYCHAIN, target).as_ref(),
-            target,
-        );
-        assert_eq!(posture, crate::posture::Posture::CodeBound);
-    }
-
-    #[test]
-    fn a_rendered_marker_for_another_target_is_unverified() {
-        let posture = crate::posture::determine(
-            crate::posture::CredentialSource::CredentialsDirectory,
-            rendered_marker(
-                crate::posture::MECHANISM_TPM2,
-                "/etc/maknae/private/maknaed-secret-id.cred",
-            )
-            .as_ref(),
-            "/etc/maknae/private/some-other-host-secret-id.cred",
-        );
-        assert_eq!(posture, crate::posture::Posture::Unverified);
-    }
-
     // ---- #490: the boot starts from the accepted baseline ----
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {

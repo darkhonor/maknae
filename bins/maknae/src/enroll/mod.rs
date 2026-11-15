@@ -977,6 +977,14 @@ fn build_enroll_state_yaml(mount: &str, records: &[(String, String)]) -> String 
     ]))
 }
 
+fn posture_mechanism(macos: bool) -> &'static str {
+    if macos {
+        maknae_config::MECHANISM_KEYCHAIN
+    } else {
+        maknae_config::MECHANISM_TPM2
+    }
+}
+
 fn build_posture_yaml(mechanism: &str, target: &str) -> String {
     let sealed_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2707,14 +2715,8 @@ async fn finish_enrollment(
         .iter()
         .find(|a| a.content == artifact_table::ContentKind::SealedDaemonSecret)
         .expect("artifact_table always emits exactly one SealedDaemonSecret row");
-    let posture_yaml = build_posture_yaml(
-        if macos {
-            maknae_config::MECHANISM_KEYCHAIN
-        } else {
-            maknae_config::MECHANISM_TPM2
-        },
-        &sealed_row.path.to_string_lossy(),
-    );
+    let posture_yaml =
+        build_posture_yaml(posture_mechanism(macos), &sealed_row.path.to_string_lossy());
 
     let etc = Path::new("/etc/maknae");
     let mut contents: BTreeMap<PathBuf, Vec<u8>> = BTreeMap::new();
@@ -3922,6 +3924,24 @@ mod tests {
     #[test]
     fn parse_state_accessors_rejects_malformed_entry() {
         assert!(parse_state_accessors("accessors:\n  - role: maknaed\n").is_err());
+    }
+
+    #[test]
+    fn macos_seals_to_the_keychain_and_linux_to_the_tpm() {
+        assert_eq!(posture_mechanism(true), "keychain");
+        assert_eq!(posture_mechanism(false), "tpm2");
+    }
+
+    #[test]
+    fn the_posture_marker_carries_its_arguments_and_the_seal_time() {
+        let text = build_posture_yaml("keychain", "/etc/maknae/private/x.keychain");
+        let marker =
+            maknae_config::PostureMarker::from_value(&maknae_config::load_str(&text).unwrap())
+                .expect("enroll writes a marker the daemon parses");
+        assert_eq!(marker.mechanism, "keychain");
+        assert_eq!(marker.target, "/etc/maknae/private/x.keychain");
+        let sealed_at: u64 = marker.timestamp.parse().expect("seconds since the epoch");
+        assert!(sealed_at > 1_700_000_000, "{sealed_at}");
     }
 
     // ---- round-1 review Important #2: rotate destroys against the RECORDED

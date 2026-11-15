@@ -271,6 +271,52 @@ mod tests {
         );
     }
 
+    fn rendered(mechanism: &str, target: &str) -> Option<PostureMarker> {
+        let text = PostureMarker {
+            mechanism: mechanism.to_string(),
+            target: target.to_string(),
+            timestamp: "1786563711".to_string(),
+        }
+        .render();
+        PostureMarker::from_value(&maknae_config::load_str(&text).unwrap())
+    }
+
+    #[test]
+    fn a_rendered_tpm2_marker_determines_hrot_sealed() {
+        assert_eq!(
+            determine(
+                CredentialSource::CredentialsDirectory,
+                rendered(MECHANISM_TPM2, EXPECTED_TARGET).as_ref(),
+                EXPECTED_TARGET
+            ),
+            Posture::HrotSealed
+        );
+    }
+
+    #[test]
+    fn a_rendered_keychain_marker_determines_code_bound() {
+        assert_eq!(
+            determine(
+                CredentialSource::Keychain,
+                rendered(MECHANISM_KEYCHAIN, EXPECTED_TARGET).as_ref(),
+                EXPECTED_TARGET
+            ),
+            Posture::CodeBound
+        );
+    }
+
+    #[test]
+    fn a_rendered_marker_for_another_target_is_unverified() {
+        assert_eq!(
+            determine(
+                CredentialSource::CredentialsDirectory,
+                rendered(MECHANISM_TPM2, EXPECTED_TARGET).as_ref(),
+                "/etc/maknae/private/some-other-host-secret-id.cred"
+            ),
+            Posture::Unverified
+        );
+    }
+
     // ---- CredentialSourceKind mirror ----
 
     #[test]
