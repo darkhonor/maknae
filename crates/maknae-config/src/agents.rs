@@ -26,11 +26,13 @@ impl std::fmt::Display for InvalidAgentId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "agent id {:?} is not valid; use 1 to 32 characters of a-z, 0-9, '.', '_' or '-', starting and ending with a letter, digit or '_', and not \"data\"",
+            "agent id {:?} is not valid; use 1 to 32 characters of a-z, 0-9, '.', '_' or '-', starting and ending with a letter, digit or '_', and not \"data\" or \"list\"",
             self.0
         )
     }
 }
+
+pub const RESERVED_AGENT_IDS: [&str; 2] = ["data", "list"];
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AgentId(String);
@@ -44,7 +46,7 @@ impl AgentId {
             && edge(bytes[0])
             && edge(bytes[bytes.len() - 1])
             && bytes.iter().all(|&b| inner(b))
-            && raw != "data";
+            && !RESERVED_AGENT_IDS.contains(&raw);
         if ok {
             Ok(Self(raw.to_string()))
         } else {
@@ -895,6 +897,19 @@ mod tests {
 
     fn check(a: &HostAccount, others: &[(String, u32)]) -> Result<(), AccountRefusal> {
         check_with(Some(a), Some(980), others)
+    }
+
+    #[test]
+    fn list_and_data_are_reserved_agent_ids() {
+        for reserved in RESERVED_AGENT_IDS {
+            assert!(AgentId::parse(reserved).is_err(), "{reserved}");
+        }
+        assert!(AgentId::parse("list").is_err() && AgentId::parse("data").is_err());
+        for ok in ["lists", "list1"] {
+            assert!(AgentId::parse(ok).is_ok(), "{ok}");
+        }
+        let text = InvalidAgentId("list".into()).to_string();
+        assert!(text.contains("not \"data\" or \"list\""), "{text}");
     }
 
     #[test]

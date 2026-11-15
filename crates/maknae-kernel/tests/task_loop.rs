@@ -213,6 +213,7 @@ fn world_in(tag: &str, role: &str, roles: &str, hobi: &str, suga: &str) -> World
         view: Arc::new(maknae_kernel::SnapshotEnrollment(Arc::clone(&pdp))),
         tasks,
         signer: Arc::new(FixedSigner),
+        banner: Default::default(),
     };
     let mut cfg = maknae_config::transport_from_section(None).unwrap();
     cfg.prompt_max_bytes = maknae_config::PROMPT_MAX_BYTES_FLOOR;
@@ -377,6 +378,7 @@ impl World {
                 view: self.agents.view.clone(),
                 tasks,
                 signer: self.agents.signer.clone(),
+                banner: self.agents.banner.clone(),
             },
             clock: self.clock.clone(),
             blobs: self.blobs.clone(),
@@ -716,6 +718,7 @@ async fn status_reports_elapsed_actions_and_last_action_and_nothing_about_others
             elapsed_secs: 42,
             actions: 2,
             last_action_secs: Some(T0 + 40),
+            cursor: maknae_proto::TaskCursor::from_seq(1),
         }
     );
 }

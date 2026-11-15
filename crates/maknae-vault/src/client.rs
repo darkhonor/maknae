@@ -770,6 +770,13 @@ impl PlaneClient {
             .await
     }
 
+    /// The current leaf's NotAfter in Unix seconds; `None` before the first mint.
+    pub fn leaf_not_after_secs(&self) -> Option<u64> {
+        let issued = self.leaf_issued_at.load(Ordering::Relaxed);
+        let ttl = self.leaf_ttl_secs.load(Ordering::Relaxed);
+        (ttl > 0).then(|| issued.saturating_add(ttl))
+    }
+
     /// Non-blocking snapshot of the current identity (for the Stage-2 transport).
     pub fn current_identity(&self) -> Option<PlaneIdentity> {
         self.identity
@@ -1566,6 +1573,17 @@ mod tests {
             .start_paused(paused)
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn the_leaf_expiry_is_unknown_before_a_mint_and_read_from_the_issued_window() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let fx = DispatchFixture::with_addr("leaf-not-after", DEAD_VAULT, "");
+        let client = PlaneClient::for_user(&fx.doc(), &fx.0, user_token()).unwrap();
+        assert_eq!(client.leaf_not_after_secs(), None);
+        client.leaf_issued_at.store(1_000, Ordering::Relaxed);
+        client.leaf_ttl_secs.store(300, Ordering::Relaxed);
+        assert_eq!(client.leaf_not_after_secs(), Some(1_300));
     }
 
     #[test]

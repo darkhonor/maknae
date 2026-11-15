@@ -12,6 +12,7 @@
 //! `list_directory`'s and `stat_path`'s descriptions. Duplicated here by
 //! contract, never by linkage. `tool error:` is renderer-only.
 use crate::plane::{ReadPage, StatView};
+use crate::screen::fixed::{FixedText, Full};
 use zeroize::Zeroizing;
 
 /// `ReadContent` carries a [`ReadPage`] for the reason
@@ -201,41 +202,13 @@ fn listing_text(page: &maknae_proto::ListGrant) -> Zeroizing<String> {
     out
 }
 
-/// Unicode general category Cf (format), as of Unicode 15.1.
-fn format_char(c: char) -> bool {
-    matches!(
-        u32::from(c),
-        0x00AD
-            | 0x0600..=0x0605
-            | 0x061C
-            | 0x06DD
-            | 0x070F
-            | 0x0890..=0x0891
-            | 0x08E2
-            | 0x180E
-            | 0x200B..=0x200F
-            | 0x202A..=0x202E
-            | 0x2060..=0x2064
-            | 0x2066..=0x206F
-            | 0xFEFF
-            | 0xFFF9..=0xFFFB
-            | 0x110BD
-            | 0x110CD
-            | 0x13430..=0x1343F
-            | 0x1BCA0..=0x1BCA3
-            | 0x1D173..=0x1D17A
-            | 0xE0001
-            | 0xE0020..=0xE007F
-    )
-}
-
 /// serde_json's escaping, plus every other control character, U+2028, U+2029 and
 /// every format character as `\uXXXX`.
 fn json_string(s: &str) -> String {
     let json = serde_json::Value::String(s.to_string()).to_string();
     let mut out = String::with_capacity(json.len());
     for c in json.chars() {
-        if c.is_control() || c == '\u{2028}' || c == '\u{2029}' || format_char(c) {
+        if maknae_proto::is_display_unsafe(c) {
             let mut units = [0u16; 2];
             for u in c.encode_utf16(&mut units) {
                 out.push_str(&format!("\\u{:04x}", u));
@@ -245,6 +218,54 @@ fn json_string(s: &str) -> String {
         }
     }
     out
+}
+
+/// The longest piece one character can become on screen: `\u{` and `}`
+/// around at most six hex digits.
+pub const DISPLAY_PIECE_MAX: usize = 10;
+
+/// The most bytes [`display_safe`] writes per input byte: a one-byte control
+/// character becomes the eight bytes of `\u{001b}`.
+pub const DISPLAY_EXPANSION: usize = 8;
+
+/// What `c` is on screen: itself, or for a character
+/// [`maknae_proto::is_display_unsafe`] refuses (a line break excepted) its
+/// visible `\u{XXXX}`. Writes into `buf`; allocates nothing.
+pub fn display_piece(c: char, buf: &mut [u8; DISPLAY_PIECE_MAX]) -> &str {
+    if c == '\n' || !maknae_proto::is_display_unsafe(c) {
+        return c.encode_utf8(buf);
+    }
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let code = u32::from(c);
+    let digits = ((32 - code.leading_zeros()).div_ceil(4) as usize).max(4);
+    buf[..3].copy_from_slice(b"\\u{");
+    for i in 0..digits {
+        buf[3 + i] = HEX[((code >> (4 * (digits - 1 - i))) & 0xf) as usize];
+    }
+    buf[3 + digits] = b'}';
+    std::str::from_utf8(&buf[..4 + digits]).unwrap_or("?")
+}
+
+/// The bytes [`display_safe`] would write for `s`.
+pub fn display_safe_len(s: &str) -> usize {
+    let mut buf = [0; DISPLAY_PIECE_MAX];
+    s.chars().map(|c| display_piece(c, &mut buf).len()).sum()
+}
+
+/// `s` for a terminal: every control character but the line break, U+2028,
+/// U+2029 and every format character as visible `\u{XXXX}`, everything else
+/// verbatim. A line break stays, because the screen ends a row at it and never
+/// writes it. A tab is escaped here; the conversation store expands it to
+/// spaces instead. Writes all of `s` or, when it does not fit, nothing.
+pub fn display_safe(s: &str, out: &mut FixedText) -> Result<(), Full> {
+    if display_safe_len(s) > out.room() {
+        return Err(Full);
+    }
+    let mut buf = [0; DISPLAY_PIECE_MAX];
+    for c in s.chars() {
+        out.push_str(display_piece(c, &mut buf))?;
+    }
+    Ok(())
 }
 
 fn stat_json(view: &StatView) -> Zeroizing<String> {
@@ -535,10 +556,8 @@ mod tests {
                     }
                 }
                 assert!(
-                    !out.chars().any(|c| c.is_control() && c != '\n'
-                        || c == '\u{2028}'
-                        || c == '\u{2029}'
-                        || format_char(c)),
+                    !out.chars()
+                        .any(|c| c != '\n' && maknae_proto::is_display_unsafe(c)),
                     "{out:?}"
                 );
             }
@@ -808,5 +827,90 @@ mod tests {
             assert!(!shown.contains("Zeroizing"), "{shown}");
             assert!(!shown.contains("65, 71"), "{shown}");
         }
+    }
+
+    #[test]
+    fn display_safe_escapes_controls_and_bidi_and_keeps_korean() {
+        let input =
+            "안녕 \x1b[2J\r\t\u{7f}\u{85}\u{2028}\u{2029}\u{202e}\u{200b}\u{feff}\u{e0041}\u{9b}\u{9d}é\nend";
+        let mut out = FixedText::with_capacity(display_safe_len(input));
+        display_safe(input, &mut out).unwrap();
+        assert_eq!(
+            out.as_str(),
+            "안녕 \\u{001b}[2J\\u{000d}\\u{0009}\\u{007f}\\u{0085}\\u{2028}\\u{2029}\\u{202e}\\u{200b}\\u{feff}\\u{e0041}\\u{009b}\\u{009d}é\nend"
+        );
+        assert_eq!(out.len(), out.capacity());
+        assert!(!out
+            .as_str()
+            .chars()
+            .any(|c| c != '\n' && maknae_proto::is_display_unsafe(c)));
+    }
+
+    #[test]
+    fn display_safe_writes_all_or_nothing() {
+        let mut out = FixedText::with_capacity(12);
+        out.push_str("ab").unwrap();
+        assert_eq!(display_safe("x\x1bzz", &mut out), Err(Full));
+        assert_eq!(out.as_str(), "ab");
+        display_safe("x\x1b", &mut out).unwrap();
+        assert_eq!(out.as_str(), "abx\\u{001b}");
+    }
+
+    #[test]
+    fn the_widest_piece_and_the_worst_expansion_are_the_stated_bounds() {
+        let mut buf = [0u8; DISPLAY_PIECE_MAX];
+        assert_eq!(display_piece('\u{e0001}', &mut buf), "\\u{e0001}");
+        assert_eq!(display_piece('한', &mut buf), "한");
+        assert_eq!(display_piece('\n', &mut buf), "\n");
+        for c in (0..=0x10ffffu32).filter_map(char::from_u32) {
+            let piece = display_piece(c, &mut buf).len();
+            assert!(piece <= DISPLAY_EXPANSION * c.len_utf8(), "{c:?}");
+            assert!(piece <= DISPLAY_PIECE_MAX);
+        }
+        assert_eq!(display_safe_len("\x00\x01"), 2 * DISPLAY_EXPANSION);
+    }
+
+    #[test]
+    fn the_decoder_and_escaper_never_grow_a_buffer() {
+        use crate::screen::editor::{EditOutcome, Editor};
+        use crate::screen::keys::Decoder;
+        const MIB: usize = 1 << 20;
+        let mut paste = Vec::with_capacity(MIB + 12);
+        paste.extend_from_slice(b"\x1b[200~");
+        paste.extend((0..MIB).map(|i| {
+            if i % 64 == 63 {
+                b'\r'
+            } else {
+                b'a' + (i % 26) as u8
+            }
+        }));
+        paste.extend_from_slice(b"\x1b[201~");
+        let mut editor = Editor::new(MIB);
+        let ptr = editor.text().as_ptr();
+        let mut decoder = Decoder::new();
+        let mut at = 0;
+        while at < paste.len() {
+            let (key, used) = decoder.next(&paste[at..]);
+            assert!(used > 0);
+            at += used;
+            assert!(
+                decoder.in_paste() || at == paste.len(),
+                "left the paste at {at}"
+            );
+            if let Some(key) = key {
+                assert!(!matches!(editor.apply(&key), EditOutcome::Full));
+            }
+        }
+        assert_eq!(editor.text().len(), MIB);
+        assert_eq!(editor.text().as_ptr(), ptr);
+        assert_eq!(editor.capacity(), MIB);
+
+        let hostile = "\x1b".repeat(MIB / 8) + &"가".repeat(MIB / 3);
+        let mut out = FixedText::with_capacity(display_safe_len(&hostile));
+        let (ptr, cap) = (out.as_str().as_ptr(), out.allocated());
+        display_safe(&hostile, &mut out).unwrap();
+        assert_eq!(out.len(), MIB + 3 * (MIB / 3));
+        assert_eq!(out.as_str().as_ptr(), ptr);
+        assert_eq!(out.allocated(), cap);
     }
 }

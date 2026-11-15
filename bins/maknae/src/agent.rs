@@ -1,4 +1,4 @@
-//! `maknae agent` — the HANDS of the runtime loop (#241). T3: I/O wiring over
+//! `maknae -p` — the HANDS of the runtime loop (#241). T3: I/O wiring over
 //! the brain in `maknae-agent`. Runs as the subject, holds no key and no
 //! policy, and asks the kernel for everything (ADR-0023 d2, d4).
 use maknae_agent::budget::{prompt_cap, ContextBudget, Notice};
@@ -10,7 +10,7 @@ use maknae_loop::keys::{sealed_choice, ChoiceFault, KeySupply, KeyTarget};
 use maknae_loop::plane::LoopPlane;
 use maknae_proto::ProviderChoice;
 use maknae_seal::SealPublicKey;
-use maknae_vault::{PlaneClient, UserToken, VaultApi, VaultError, WrappedSecret};
+use maknae_vault::{UserToken, VaultApi, VaultError, WrappedSecret};
 use std::future::Future;
 use std::io::Write;
 use std::path::Path;
@@ -343,10 +343,7 @@ pub fn print_end(
     }
     crate::stderr::line(
         err,
-        format_args!(
-            "maknae agent: {}",
-            stop_line(outcome.stopped.as_ref(), budget)
-        ),
+        format_args!("maknae: {}", stop_line(outcome.stopped.as_ref(), budget)),
     );
     Ok(2)
 }
@@ -460,7 +457,7 @@ pub fn close_line(closed: &Closed, conversation: &str) -> Option<String> {
         Closed::Closed(_) | Closed::NotOpened => return None,
         Closed::TimedOut => {
             return Some(format!(
-                "maknae agent: whether conversation {conversation} was closed is unknown (no answer within {} s); if it was not, the kernel closes it at your next session.new or session.list once it has been idle 24 hours",
+                "maknae: whether conversation {conversation} was closed is unknown (no answer within {} s); if it was not, the kernel closes it at your next session.new or session.list once it has been idle 24 hours",
                 CLOSE_WITHIN.as_secs()
             ))
         }
@@ -471,7 +468,7 @@ pub fn close_line(closed: &Closed, conversation: &str) -> Option<String> {
         Closed::Failed(other) => format!("{other:?}"),
     };
     Some(format!(
-        "maknae agent: conversation {conversation} was not closed ({why}); the kernel closes it at your next session.new or session.list once it has been idle 24 hours"
+        "maknae: conversation {conversation} was not closed ({why}); the kernel closes it at your next session.new or session.list once it has been idle 24 hours"
     ))
 }
 
@@ -543,13 +540,7 @@ where
 }
 
 pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
-    maknae_crypto::init().map_err(|e| maknae_vault::crypto_refusal_message(&e))?;
-    let dir = crate::cli::resolve_config_dir();
-    let document = maknae_config::load_config(&dir, &crate::cli::cli_config_specs())
-        .map_err(|e| e.to_string())?;
-    let transport =
-        maknae_config::transport_from_section(document.section(maknae_config::TRANSPORT_SECTION))
-            .map_err(|e| e.to_string())?;
+    let (dir, document, transport) = crate::cli::cli_config()?;
     let agent = agent_from_section(document.section(AGENT_SECTION))?;
     let vault = maknae_vault::vault_config_from_document(&document).map_err(|e| e.to_string())?;
     let (kv_mount, user_prefix) =
@@ -573,11 +564,8 @@ pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
     // One snapshot per session: `~` cannot change meaning for this process (#596).
     let home = snapshot_home(HOME_SNAPSHOT_TIMEOUT, maknae_io::session_home).await;
     let sensitive = personal_sensitive(&dir, home.as_deref(), &cwd)?;
-    let client = PlaneClient::for_user(&document, &dir, token_copy(&session.token)?)
-        .map_err(|e| e.to_string())?;
-    let ca = maknae_vault::load_ca_pin(&dir).map_err(|e| e.to_string())?;
-    let trust = maknae_vault::TrustBundle::from_pins(&[&ca]).map_err(|e| e.to_string())?;
-    client.mint().await.map_err(|e| e.to_string())?;
+    let (client, trust) =
+        crate::cli::minted_plane(&document, &dir, token_copy(&session.token)?).await?;
     let keys = UserLoginKeys {
         api: session.api,
         token: session.token,
@@ -1506,7 +1494,7 @@ mod tests {
                 assert!(out.is_empty());
                 assert_eq!(
                     String::from_utf8(err).unwrap(),
-                    format!("maknae agent: {}\n", stop_line(Some(r), &b))
+                    format!("maknae: {}\n", stop_line(Some(r), &b))
                 );
             }
         }
@@ -1537,11 +1525,11 @@ mod tests {
             for (r, want) in [
                 (
                     StopReason::StepBudget,
-                    "maknae agent: stopped: the step budget (8) was spent without an answer\n",
+                    "maknae: stopped: the step budget (8) was spent without an answer\n",
                 ),
                 (
                     StopReason::TooManyToolCalls(5),
-                    "maknae agent: stopped: the model asked for 5 tools in one step (cap 4)\n",
+                    "maknae: stopped: the model asked for 5 tools in one step (cap 4)\n",
                 ),
             ] {
                 let (mut out, mut err) = (vec![], vec![]);
@@ -1588,10 +1576,7 @@ mod tests {
             assert_eq!(lines[2], ATTEMPT);
             assert_eq!(
                 lines[3],
-                format!(
-                    "maknae agent: {}",
-                    stop_line(Some(&StopReason::StepBudget), &b)
-                )
+                format!("maknae: {}", stop_line(Some(&StopReason::StepBudget), &b))
             );
             assert!(err.ends_with('\n'));
         }
@@ -1711,7 +1696,7 @@ mod tests {
             ));
             assert_eq!(
                 close_line(&closed, KERNEL_ID).unwrap(),
-                format!("maknae agent: conversation {KERNEL_ID} was not closed (daemon gone); the kernel closes it at your next session.new or session.list once it has been idle 24 hours")
+                format!("maknae: conversation {KERNEL_ID} was not closed (daemon gone); the kernel closes it at your next session.new or session.list once it has been idle 24 hours")
             );
         }
     }
@@ -1755,14 +1740,14 @@ mod tests {
             assert_eq!(
                 close_line(&closed, id),
                 Some(format!(
-                    "maknae agent: conversation {id} was not closed ({why}){tail}"
+                    "maknae: conversation {id} was not closed ({why}){tail}"
                 ))
             );
         }
         assert_eq!(
             close_line(&Closed::TimedOut, id),
             Some(format!(
-                "maknae agent: whether conversation {id} was closed is unknown (no answer within 5 s); if it was not, the kernel closes it at your next session.new or session.list once it has been idle 24 hours"
+                "maknae: whether conversation {id} was closed is unknown (no answer within 5 s); if it was not, the kernel closes it at your next session.new or session.list once it has been idle 24 hours"
             ))
         );
     }
@@ -1858,9 +1843,14 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "it signals the whole test process, so it runs alone with the screen tests"
+    )]
     async fn a_second_signal_during_the_close_exits_at_once_with_its_status() {
         use nix::sys::signal::{kill, Signal};
         use nix::unistd::Pid;
+        let _one = crate::screen::testing::one_session();
         let closes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut plane = Hanging {
             closes: std::sync::Arc::clone(&closes),
@@ -1892,9 +1882,17 @@ mod tests {
             )
             .await
         };
+        let started = std::sync::Arc::clone(&closes);
         let driver = async {
             tokio::task::yield_now().await;
             kill(Pid::this(), Signal::SIGINT).unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                while started.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("the first signal did not start the close");
             let mut exit_rx = exit_rx;
             tokio::time::timeout(std::time::Duration::from_secs(10), async {
                 loop {

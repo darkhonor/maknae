@@ -2,7 +2,7 @@
 //! live daemon, Vault and certificates, so it is T3; every decision it feeds
 //! is T1 in `maknae_agent::wire`.
 use crate::keys::{AgentKeys, KeySupply};
-use crate::send::{send_via, write_request, Wire};
+use crate::send::{send_located, send_via, write_request, SendFailure, Wire};
 use maknae_agent::plane::{
     ListOutcome, Plane, PlaneError, ReadBasis, ReadOutcome, StatOutcome, WriteOutcome,
 };
@@ -47,13 +47,6 @@ pub(crate) fn frame_fits(verb: &Verb, cap: usize) -> bool {
     .is_ok()
 }
 
-fn now_unix() -> Result<u64, String> {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .map_err(|_| "the system clock reads before 1970; set the clock, then retry".to_string())
-}
-
 /// Opens one connection to the kernel. Every verb dials its own: the kernel
 /// binds a connection's audit task once (send.rs).
 pub trait Dial: Send + Sync {
@@ -65,6 +58,16 @@ pub struct PlaneDial {
     socket: PathBuf,
     client: Arc<PlaneClient>,
     trust: Arc<TrustBundle>,
+}
+
+impl PlaneDial {
+    pub fn new(socket: PathBuf, client: Arc<PlaneClient>, trust: Arc<TrustBundle>) -> Self {
+        Self {
+            socket,
+            client,
+            trust,
+        }
+    }
 }
 
 impl Dial for PlaneDial {
@@ -91,6 +94,14 @@ fn cite_for(verb: &Verb, cited: Option<TaskId>) -> Option<TaskId> {
 }
 
 impl<D: Dial> Link<D> {
+    pub(crate) fn new(dial: D, transport: TransportConfig) -> Self {
+        Self {
+            dial,
+            transport,
+            cite: Mutex::new(None),
+        }
+    }
+
     fn cited(&self) -> Option<TaskId> {
         // A poisoned guard still holds a whole `Option<TaskId>`: it is only ever assigned.
         *self.cite.lock().unwrap_or_else(PoisonError::into_inner)
@@ -98,6 +109,27 @@ impl<D: Dial> Link<D> {
 
     pub(crate) fn transport(&self) -> &TransportConfig {
         &self.transport
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dial_for_test(&self) -> &D {
+        &self.dial
+    }
+
+    pub(crate) async fn send_located(
+        &self,
+        verb: Verb,
+    ) -> Result<crate::outcome::SentOutcome, SendFailure> {
+        send_located(
+            self.dial.dial(),
+            cite_for(&verb, self.cited()),
+            verb,
+            None,
+            crate::mutation::WriteCheck::Unchecked,
+            &self.transport,
+            &mut |_| {},
+        )
+        .await
     }
 
     pub(crate) async fn send(
@@ -367,7 +399,7 @@ impl<K: KeySupply, D: Dial> Plane for LoopPlane<K, D> {
         if !frame_fits(&verb, cap) {
             return Err(PlaneError::FrameTooLarge);
         }
-        let now = now_unix().map_err(PlaneError::Transport)?;
+        let now = maknae_io::now_unix().map_err(PlaneError::Transport)?;
         let (choice, minted_at) = match take_spare(&mut self.spare, conversation, now) {
             Some(s) => (s.choice, s.minted_at),
             None => {
@@ -903,7 +935,7 @@ mod tests {
 
     /// Structural tripwire: a LoopPlane needs a live daemon, so this pins the
     /// wiring by source. Without the override, the trait default drops every
-    /// line `maknae agent` used to print.
+    /// diagnostic line.
     #[test]
     fn loop_plane_hands_its_diagnostics_to_the_loop() {
         let src = include_str!("plane.rs");

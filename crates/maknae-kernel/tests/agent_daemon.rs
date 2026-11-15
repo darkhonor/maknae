@@ -404,6 +404,7 @@ fn admission(
             identity: ca.kernel(PlaneKey::MlDsa87, None),
             unsigned: Arc::clone(unsigned),
         }),
+        banner: Default::default(),
     }
 }
 

@@ -1,7 +1,7 @@
 [package]
 name = "maknae-agent"
 publish.workspace = true
-description = "The runtime loop's decision code (#241): transcript, routing, rendering, drive. PURE — no I/O; every effect goes through the Plane trait the untrusted CLI implements."
+description = "The runtime loop's decision code (#241): transcript, routing, rendering, drive; and the session screen's pure core (#630). PURE — no I/O; every effect goes through the Plane trait the untrusted CLI implements."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -41,6 +41,13 @@ serde_json = "1"
 # bytes — accepted residual, #241, stated in full at `route.rs`'s
 # `ZeroizingString`.
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
+# The session screen's display-width table (#630). Exact pin: a table change moves
+# every wrap point and the column budget of every row the composer writes, so it
+# is a reviewed change, not a lockfile drift. No default features: `cjk` adds the
+# ambiguous-width table the screen does not use.
+unicode-width = { version = "=0.2.2", default-features = false }
 
 [dev-dependencies]
+# PROMPT_MAX_CEILING, so the conversation-cap test is held to the real bound.
+maknae-config = { path = "../maknae-config" }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }

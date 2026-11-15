@@ -67,6 +67,8 @@ When the model asks for `read_file`, the loop sends **`fs.read`** the way the CL
 
 ### 5. The MVP loop is Rust, a subcommand of the existing untrusted binary: `maknae agent`.
 
+**Amended 2026-11-15 (#630):** the one-shot loop this decision names is now `maknae -p "<prompt>" [--provider <label>]`; `maknae agent "<prompt>"` no longer exists. `maknae agent list` and `maknae agent <name>` are the person's side of tasking an enrolled agent, a session in which the CLI sends the tasker verbs to `maknaed` and collects the agent's reports. The CLI stays untrusted and decides nothing. Wherever this ADR says `maknae agent` for the loop, read `maknae -p`.
+
 Operator ruling 2026-09-07. The reasons, recorded so the decision can be revisited on evidence rather than taste:
 
 - **Every client-side piece already exists in Rust** — the plane connector, mTLS, the CBOR frames, descriptor delegation, the subject-side write path. A Python loop would have to reimplement the plane client before it could send its first verb; a Rust loop reuses `bins/maknae`'s.

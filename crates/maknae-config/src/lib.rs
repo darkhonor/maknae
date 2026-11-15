@@ -34,6 +34,7 @@
 mod agents;
 mod audit_cfg;
 mod authz;
+mod banner;
 mod baseline_doc;
 mod bindings;
 pub mod bindings_sync;
@@ -71,7 +72,7 @@ pub use agents::{
     AccountRefusal, AgentClientConfig, AgentEnrollment, AgentId, AgentPolicy, AgentProvider,
     AgentRole, AgentsLoad, HostAccounts, InvalidAgentId, PersonaMode, SkippedAgentEntry, TaskerRef,
     AGENTS_DIR, AGENT_CLIENT_FILE, AGENT_ENTITY_PREFIX, ENROLLMENT_FILE, NON_LOGIN_SHELLS,
-    PERSONA_FILE, POLICY_FILE,
+    PERSONA_FILE, POLICY_FILE, RESERVED_AGENT_IDS,
 };
 pub use audit_cfg::{
     audit_from_section, resolve_readers, AuditConfig, ReaderAccount, ReaderLookup, AUDIT_SECTION,
@@ -99,6 +100,7 @@ pub use authz::{
     AuthzError, AuthzPolicy, HomeUnbound, Match3, ModelRef, PathGlob, Pattern, RawActionGrants,
     RawDestinations, Request, SubjectActions, SubjectPermissions, SubjectPolicy,
 };
+pub use banner::{banner_from_document, load_banner, BANNER_FILE, BANNER_PATH};
 pub use baseline_doc::{document_sections, value_from_canonical_json, BaselineSections};
 pub use bounds::{
     bounds_from_document, key_prefix_is_acceptable, kv_fragment_is_acceptable,
@@ -145,10 +147,10 @@ pub use sensitive::{
 pub use state::{MARKER_FILE, MIRROR_FILE, STATE_DIR, STORE_FILE};
 pub use transport::{
     content_write_bound, transport_from_section, TransportConfig, ADMIN_REPLY_MARGIN_MS,
-    ADMISSION_AUDIT_TIMEOUT_MS, BASELINE_ACCEPT_REPLY_STAGES, BLOCKING_STAGE_TIMEOUT_MS,
-    CONTAINMENT_REPLY_STAGES, GROUP_LOOKUP_TIMEOUT_MS, HOME_RESOLVE_TIMEOUT_MS,
-    MACOS_AGENT_SOCKET_PATH, MACOS_DAEMON_SOCKET_PATH, PROMPT_MAX_BYTES_FLOOR, PROMPT_MAX_CEILING,
-    TRANSPORT_SECTION, TRANSPORT_TIMEOUT_MS_MAX,
+    ADMISSION_AUDIT_TIMEOUT_MS, AGENT_LIST_REPLY_STAGES, BASELINE_ACCEPT_REPLY_STAGES,
+    BLOCKING_STAGE_TIMEOUT_MS, CONTAINMENT_REPLY_STAGES, GROUP_LOOKUP_TIMEOUT_MS,
+    HOME_RESOLVE_TIMEOUT_MS, MACOS_AGENT_SOCKET_PATH, MACOS_DAEMON_SOCKET_PATH,
+    PROMPT_MAX_BYTES_FLOOR, PROMPT_MAX_CEILING, TRANSPORT_SECTION, TRANSPORT_TIMEOUT_MS_MAX,
 };
 pub use user_providers::{
     user_providers_from_document, UserProviderEntry, UserProviders, USER_PROVIDERS_FILE,

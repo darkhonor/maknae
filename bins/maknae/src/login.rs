@@ -8,7 +8,6 @@ use maknae_vault::{
 };
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const INTERRUPTED: u8 = 130;
 
@@ -27,13 +26,6 @@ struct Session {
     dir: PathBuf,
     api: VaultApi,
     auth: UserAuth,
-}
-
-pub(crate) fn now_unix() -> Result<u64, String> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .map_err(|_| "the system clock reads before 1970; set the clock, then retry".to_string())
 }
 
 pub(crate) fn local_username() -> Result<String, String> {
@@ -94,7 +86,11 @@ pub(crate) fn user_session(
 ) -> Result<UserSession, String> {
     let vault = vault_config_from_document(doc).map_err(|e| e.to_string())?;
     let api = vault_api(dir, &vault)?;
-    let (token, expires_at) = usable_token(read_user_token(dir), api.vault_addr(), now_unix()?)?;
+    let (token, expires_at) = usable_token(
+        read_user_token(dir),
+        api.vault_addr(),
+        maknae_io::now_unix()?,
+    )?;
     Ok(UserSession {
         api,
         token,
@@ -278,7 +274,7 @@ async fn login() -> Result<String, Failure> {
             other => Failure::Refused(other.to_string()),
         })?;
     let previous = read_user_token(&s.dir);
-    let issued_before = now_unix()?;
+    let issued_before = maknae_io::now_unix()?;
     let login = s
         .api
         .login(&s.auth, &name, &password)
@@ -458,7 +454,7 @@ pub(crate) fn logout_plan(
 
 async fn logout() -> Result<LogoutOutcome, String> {
     let dir = crate::cli::resolve_config_dir();
-    let now = now_unix()?;
+    let now = maknae_io::now_unix()?;
     let read = read_user_token(&dir);
     let session = match &read {
         Ok(_) => session(),

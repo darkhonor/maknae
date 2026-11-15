@@ -61,6 +61,7 @@ mod page;
 pub mod program;
 mod strategy;
 mod syscall;
+mod term;
 mod walk;
 mod write;
 
@@ -87,7 +88,7 @@ pub use delegated::{
 };
 pub use error::{IoError, IoKind};
 pub use home::{canonical_home, session_home, unit_safe_home, UnsafeHome};
-pub use host_facts::presence;
+pub use host_facts::{now_unix, presence};
 pub use mutation::{
     held_file_is_readable, read_held_file, read_held_page, replace_held_file,
     verify_mutation_directory, verify_unconfined_directory, DirectoryCursor, EffectState,
@@ -95,6 +96,7 @@ pub use mutation::{
 };
 pub use normalize::normalize;
 pub use page::{read_page, Page, PageNext, PageWindow};
+pub use term::{terminal_size, TerminalSize};
 /// Re-exported as a convenience so consumers need no `zeroize` pin of their own.
 pub use zeroize::Zeroizing;
 

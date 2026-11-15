@@ -1,6 +1,6 @@
 # Your first model provider
 
-This walkthrough connects Maknae to one model provider, so that `maknae agent` can hold a conversation: read a file, write a file, and answer you. Every step of that conversation is decided by the kernel and recorded before it happens.
+This walkthrough connects Maknae to one model provider, so that `maknae -p` can hold a conversation: read a file, write a file, and answer you. Every step of that conversation is decided by the kernel and recorded before it happens.
 
 It is written for a person doing this for the first time. The administrator authorizes a provider for the host; each user logs in, stores their own API key in Vault under their own login, and chooses among the authorized providers. For every key and every rule, see the configuration reference: [the `providers` section](configuration.md#61-the-providers-section) (§6.1), [each user's `providers.yaml`](configuration.md#611-each-users-providersyaml) (§6.1.1), [the user `vault` block](configuration.md#612-the-user-vault-block) (§6.1.2), [`egress-bounds.yaml`](configuration.md#613-egress-boundsyaml) (§6.1.3) and [the worked example](configuration.md#93-authorizing-providers-in-configd) (§9.3). For the full acceptance procedure, including custody and SELinux checks, see [runbook Chapter 4](runbook.md).
 
@@ -23,7 +23,7 @@ The administrator is the account that runs `sudo maknae enroll`. That account is
 
 ### 1. Create the user in Vault
 
-Every person who will use `maknae agent`, the administrator included, is a Vault userpass user named after their local account, with an identity entity `maknae-<user>` whose alias is that username on the userpass mount, and that entity a member of the `maknae-users` group, which carries the `maknae-user` policy. Create them however you manage Vault. With `deploy/vault-pki`, list each local account name in its `maknae_users` input (`deploy/vault-pki/variables.tf`) and apply:
+Every person who will use `maknae -p`, the administrator included, is a Vault userpass user named after their local account, with an identity entity `maknae-<user>` whose alias is that username on the userpass mount, and that entity a member of the `maknae-users` group, which carries the `maknae-user` policy. Create them however you manage Vault. With `deploy/vault-pki`, list each local account name in its `maknae_users` input (`deploy/vault-pki/variables.tf`) and apply:
 
 ```hcl
 maknae_users = {
@@ -150,7 +150,7 @@ Enroll writes `~/.maknae` only for the account that ran it. Each further local u
 
 **A second user works in their own home.** For each request the kernel resolves the requesting user's home from the kernel-verified peer ID, and `~` in `authz.yaml` and `sensitive.yaml` means that home for every role. The shipped `~/.maknae/**` entry in `/etc/maknae/sensitive.yaml` therefore protects each user's own `~/.maknae`. File actions are not confined to the home: a path outside it is decided by the grants, and a request to delete the home itself, or a directory containing it, is refused. A grant for a folder that does not exist yet permits once the folder is created, with no restart. The home is resolved only for a file action, after the request arrives. If it cannot be used, conversation turns, `whoami`, liveness and admin commands still work, and file actions are refused. The user sees only `not authorized`; the cause is in the audit record's reason, `requester home unavailable: <cause>`, which the administrator reads with the `jq` query in [runbook step 11](runbook.md#11-quote-the-audit-trail). The cause is `unresolvable` when the home does not exist, is not a directory, is `/` or is not valid UTF-8; `timed out` when it does not resolve within the time limit, as on a hung network mount; `at capacity for this requester` when that user already has a resolution in progress; and `at capacity` when every resolution slot is busy. Each user can have at most one home resolution and one file-action preparation running at a time, so a stalled home delays only that user's file actions, and a file action from a user whose previous one is still being prepared or decided is refused with `mutation worker budget exhausted for this requester`. A granted file action then keeps one of 16 shared workers until its client reports it finished or the read timeout passes, so 16 granted file actions in flight, from one user or several, refuse every user's next file action with `mutation worker budget exhausted`. Conversation bookkeeping (`session.new`, `close`, `list`, `delete`, and each prompt's conversation check and reply) does not use those workers: each user has one store slot beside a separate pool of 16 store workers, so a stalled store request delays only that user's next one, and other users only when 16 users' store requests are stalled at once. What a second user's file actions do was read from the code, not yet measured.
 
-**On a multi-user host, other local users can read a running `maknae agent`'s prompt and `--provider` from its command line** (#436, undecided).
+**On a multi-user host, other local users can read a running `maknae -p`'s prompt and `--provider` from its command line** (#436, undecided).
 
 1. **Create the account and add it to the `maknae` group.** The daemon's socket is `0660`, group `maknae`.
 
@@ -410,7 +410,7 @@ providers:
 ```
 
 ```bash
-maknae agent --provider local "<prompt>"
+maknae -p "<prompt>" --provider local
 ```
 
 The second entry works only once `local` is authorized like `openai`: its own entry in step 3's `providers:` list (with `llama` in its `models`), a `provider:local` destination for your role in step 4 (step 4a for a second user), and your key stored at subpath `local` in step U2. Without the step 3 entry or the grant, the turn is refused: you see the refusal line ([When it does not work](#when-it-does-not-work)), and your administrator's audit shows `provider not in the authorized set` (no step 3 entry) or `destination not allowlisted for role <role>: provider:local` (no grant). Without the key, the CLI stops with `no key is stored in Vault for provider entry local: store it, then retry`.
@@ -422,16 +422,16 @@ Paths must be absolute, and the shipped policy lets the agent write only under `
 ```bash
 mkdir -p ~/projects/hello
 printf 'Maknae is a security kernel for AI agents.\n' > ~/projects/hello/input.txt
-maknae agent "Read $HOME/projects/hello/input.txt, write a one-sentence summary of it to $HOME/projects/hello/output.txt, then tell me what you wrote."
+maknae -p "Read $HOME/projects/hello/input.txt, write a one-sentence summary of it to $HOME/projects/hello/output.txt, then tell me what you wrote."
 cat ~/projects/hello/output.txt
 ```
 
-The answer arrives with exit `0`. A stop prints `maknae agent: stopped: …` and exits `2`.
+The answer arrives with exit `0`. A stop prints `maknae: stopped: …` and exits `2`.
 
 
 To run it again, first `rm ~/projects/hello/output.txt`. The agent may replace only a file it has read in the same conversation, so a re-run that meets the first run's `output.txt` is told to read it first: it reads it, then writes, and §7 shows one extra `fs.read` and one `fs.write` ending `ReportedPathChanged` with no effect (and more records than §7's list, so widen its `tail`).
 
-Each turn, `maknae agent` makes a wrapped read of your key with your own login, seals the wrapping token to the Egress Daemon's `seal.pub`, and sends it with the prompt. The kernel admits the turn on the provider, the model and your account name; it never sees the key.
+Each turn, `maknae -p` makes a wrapped read of your key with your own login, seals the wrapping token to the Egress Daemon's `seal.pub`, and sends it with the prompt. The kernel admits the turn on the provider, the model and your account name; it never sees the key.
 
 ## 7. See what it did
 
@@ -454,7 +454,7 @@ Where a row below names `systemctl` or `journalctl`, it also gives the macOS for
 
 A kernel refusal reaches you only as one line, `PROMPT_REFUSED` below; the reason is in the audit trail, which only your administrator can read. `PROMPT_REFUSED` is this whole line, exit 2:
 
-> maknae agent: stopped: the kernel refused the exchange — whether the prompt reached the provider is in the host's audit trail (ask your administrator); if it did not, check that your providers.yaml names a provider and model your administrator has authorized for your role and the key subpath and field of your own Vault secret, that your maknae.yaml vault block matches the host's, and that your login is current (maknae login)
+> maknae: stopped: the kernel refused the exchange — whether the prompt reached the provider is in the host's audit trail (ask your administrator); if it did not, check that your providers.yaml names a provider and model your administrator has authorized for your role and the key subpath and field of your own Vault secret, that your maknae.yaml vault block matches the host's, and that your login is current (maknae login)
 
 A provider answer that could not be used reaches you as a different line, in "The provider's reply was unusable" below.
 
@@ -462,7 +462,7 @@ A provider answer that could not be used reaches you as a different line, in "Th
 
 | Your administrator's audit shows | Why | Fix |
 |---|---|---|
-| `session.prompt carries no provider choice` | the request named no provider; the shipped CLI always names one, so another client sent it | use the shipped `maknae agent` |
+| `session.prompt carries no provider choice` | the request named no provider; the shipped CLI always names one, so another client sent it | use the shipped `maknae -p` |
 | `no model access: no providers are authorized on this host` | the host authorizes no provider, or the daemon booted before step 3's file existed | step 3, then `maknae baseline-show` and `maknae baseline-accept <hash>` (step 5) |
 | `provider not in the authorized set` | your entry's `provider` is not a `name` in step 3's list | correct `provider` in `providers.yaml`, or ask for it to be authorized |
 | `model not on the authorized provider's list` | your entry's `model` is not on that provider's `models` | correct `model`, or ask for it to be added |
@@ -472,22 +472,22 @@ A provider answer that could not be used reaches you as a different line, in "Th
 | `role <role>: no rule for session.prompt` | the policy has no `session.prompt` grant for your role | step 4 (step 4a for a second user) |
 | `destination not allowlisted for role <role>: provider:<name>` | your role may prompt, but not to that provider | add `provider:<name>` to your role's `destinations` (step 4, 4a) |
 | `egress backend not ready` | the deputy's socket is not running | `sudo systemctl enable --now maknae-egress.socket`; on macOS, step 5's loop |
-| `prompt needs an active conversation` | the prompt named a conversation id the kernel does not hold | start `maknae agent` again; it opens a new conversation |
-| `conversation not active` | the conversation was closed: at the end of its run, by `maknae session close`, or by the idle sweep | start `maknae agent` again |
-| `conversation belongs to another subject` | the prompt named a conversation another user opened | start `maknae agent` again; the shipped CLI only names its own |
-| `history rewrite refused` | the turns sent do not extend, exactly, the turns the kernel recorded for this conversation | start `maknae agent` again; the shipped loop never rewrites, so another client sent it |
-| `conversation is full` | the conversation holds 256 MiB of request turns and replies; the wire code is `TooLarge` | start `maknae agent` again |
-| `reply refused: conversation changed` or `reply refused: conversation full` | the provider answered, but before its reply was bound the conversation moved on or filled; the trail records `LandedUndelivered`, so the turn was billed | start `maknae agent` again |
-| `outcome unknown: conversation store not flushed: …` or `reply refused: conversation outcome unknown` | the kernel wrote the conversation record, but the host did not confirm the write reached the disk; the record may hold the change, or lose it after a crash | start `maknae agent` again; the host's disk needs attention |
+| `prompt needs an active conversation` | the prompt named a conversation id the kernel does not hold | start `maknae -p` again; it opens a new conversation |
+| `conversation not active` | the conversation was closed: at the end of its run, by `maknae session close`, or by the idle sweep | start `maknae -p` again |
+| `conversation belongs to another subject` | the prompt named a conversation another user opened | start `maknae -p` again; the shipped CLI only names its own |
+| `history rewrite refused` | the turns sent do not extend, exactly, the turns the kernel recorded for this conversation | start `maknae -p` again; the shipped loop never rewrites, so another client sent it |
+| `conversation is full` | the conversation holds 256 MiB of request turns and replies; the wire code is `TooLarge` | start `maknae -p` again |
+| `reply refused: conversation changed` or `reply refused: conversation full` | the provider answered, but before its reply was bound the conversation moved on or filled; the trail records `LandedUndelivered`, so the turn was billed | start `maknae -p` again |
+| `outcome unknown: conversation store not flushed: …` or `reply refused: conversation outcome unknown` | the kernel wrote the conversation record, but the host did not confirm the write reached the disk; the record may hold the change, or lose it after a crash | start `maknae -p` again; the host's disk needs attention |
 
-**Refused when the conversation opens.** `maknae agent` opens a conversation before its first prompt. In the trail, `session.new` is denied with the reason below. A grant refusal prints `maknae: the kernel refused to open a conversation in <dir>: …`; a bound prints `maknae: the kernel did not open a conversation: <reason>`.
+**Refused when the conversation opens.** `maknae -p` opens a conversation before its first prompt. In the trail, `session.new` is denied with the reason below. A grant refusal prints `maknae: the kernel refused to open a conversation in <dir>: …`; a bound prints `maknae: the kernel did not open a conversation: <reason>`.
 
 | Your administrator's audit shows | Why | Fix |
 |---|---|---|
 | `role <role>: no rule for session.new` | the policy has no `session.new` grant for your role | grant `session.new` beside `session.prompt` (step 4, 4a) |
 | `too many active conversations` | you hold 32 active conversations; the wire code is `TooLarge` | `maknae session list`, then `maknae session close <id>` for the ones you no longer need |
 
-**The provider's reply was unusable.** The provider answered, but nothing was delivered. You see `maknae agent: stopped: ` and one of the lines below, exit 2. The trail records the prompt `permit`, `LandedUndelivered`, posture `unavailable`, reason `reply unusable: <name>`; the Egress Daemon's journal holds the detail (for a provider error, `maknae-egress: provider answered <code> (conversation …): <body, key masked>`; otherwise `maknae-egress: provider reply unusable (conversation …): <name>`). The turn is not resent. When the kernel itself finds the reply empty, a tool call over its bounds or reasoning over its bound (the Egress Daemon did not catch it first), the trail keeps `reply refused: empty`, `reply refused: tool call` or `reply refused: reasoning`, posture `unauthorized`, with a `reply_length`, and you see the `empty` or `over-bound` line. With a small daemon `transport.prompt_max_bytes`, several tool calls that are each within the bound can be refused together as over the frame cap: you see `PROMPT_REFUSED`, the trail records `reply refused: oversize` and `LandedUndelivered`, and the journal has no line.
+**The provider's reply was unusable.** The provider answered, but nothing was delivered. You see `maknae: stopped: ` and one of the lines below, exit 2. The trail records the prompt `permit`, `LandedUndelivered`, posture `unavailable`, reason `reply unusable: <name>`; the Egress Daemon's journal holds the detail (for a provider error, `maknae-egress: provider answered <code> (conversation …): <body, key masked>`; otherwise `maknae-egress: provider reply unusable (conversation …): <name>`). The turn is not resent. When the kernel itself finds the reply empty, a tool call over its bounds or reasoning over its bound (the Egress Daemon did not catch it first), the trail keeps `reply refused: empty`, `reply refused: tool call` or `reply refused: reasoning`, posture `unauthorized`, with a `reply_length`, and you see the `empty` or `over-bound` line. With a small daemon `transport.prompt_max_bytes`, several tool calls that are each within the bound can be refused together as over the frame cap: you see `PROMPT_REFUSED`, the trail records `reply refused: oversize` and `LandedUndelivered`, and the journal has no line.
 
 | You see (after "stopped: ") | `<name>` | Fix |
 |---|---|---|
@@ -505,13 +505,13 @@ A provider answer that could not be used reaches you as a different line, in "Th
 
 A connection that fails without any answer from the provider is not in this table: the trail records the turn `OutcomeUnknown` and the journal shows `connection refused: Fulfil("…")`.
 
-**Refused by the CLI before sending.** These print before anything reaches the daemon; the CLI prefixes them `maknae: `, or `maknae agent: stopped: ` once the conversation has begun.
+**Refused by the CLI before sending.** These print before anything reaches the daemon; the CLI prefixes them `maknae: `, or `maknae: stopped: ` once the conversation has begun.
 
 | What you see | Why | Fix |
 |---|---|---|
 | `` maknae: no Vault token is stored: run `maknae login` `` | you have not logged in on this account | step U1 |
 | `` maknae: your Vault token has expired or expires within 60 s: run `maknae login` `` | the 8-hour login ran out | step U1 |
-| `` maknae agent: stopped: your Vault login expired: run `maknae login` `` | the login ran out during the conversation | step U1, then start the conversation again |
+| `` maknae: stopped: your Vault login expired: run `maknae login` `` | the login ran out during the conversation | step U1, then start the conversation again |
 | `maknae: no model access: no providers are defined in <path>` | `providers.yaml` is absent, empty, or has no `providers` key | step U3 |
 | `maknae: providers.yaml: <N> entries and none is marked default: true; mark exactly one (labels: <labels>)`, or `… more than one entry is marked default: true (<labels>)` | two or more entries need exactly one default | mark exactly one `default: true` |
 | `maknae: providers.yaml: no entry is labelled '<label>' (labels: <labels>)` | `--provider` names no entry | use one of the listed labels |
@@ -522,8 +522,8 @@ A connection that fails without any answer from the provider is not in this tabl
 | `maknae: Egress Daemon public keys are published at both <first> and <second>, and exactly one is expected: ask your administrator to remove the stale one` | both Linux `seal.pub` paths exist | remove the one that does not match this distribution's family |
 | `maknae: the Egress Daemon public key at <path> was refused (…): it must be a regular file with one link, owned by root, not writable by group or others, in a directory only root can write; ask your administrator` | `seal.pub` or its directory has the wrong owner, mode or link count | re-run step 2 |
 | `maknae: the Egress Daemon public key at <path> could not be used (…): ask your administrator`, or `` maknae: the Egress Daemon public key published on this host is not usable (…): ask your administrator to run `sudo maknae enroll` `` | `seal.pub` is not a usable key | rotate it (below) |
-| `` maknae agent: stopped: Vault refused to read the key for provider entry <label> (HTTP 403): the key is outside your Vault policy, or your login was revoked: run `maknae login` `` | the path is not under your own `<user_prefix>/<username>/`, or your login no longer works | check `key.subpath`; step U1 |
-| `maknae agent: stopped: no key is stored in Vault for provider entry <label>: store it, then retry` | nothing is stored at that subpath | step U2, with the same subpath |
+| `` maknae: stopped: Vault refused to read the key for provider entry <label> (HTTP 403): the key is outside your Vault policy, or your login was revoked: run `maknae login` `` | the path is not under your own `<user_prefix>/<username>/`, or your login no longer works | check `key.subpath`; step U1 |
+| `maknae: stopped: no key is stored in Vault for provider entry <label>: store it, then retry` | nothing is stored at that subpath | step U2, with the same subpath |
 
 **Refused by the Egress Daemon.** You see `PROMPT_REFUSED`; the trail records the prompt `Failed` (refused before anything was sent); and `journalctl -u maknae-egress` (on macOS, `sudo tail /usr/local/var/log/maknae-egress/maknae-egress.err`) shows `maknae-egress: connection refused: OpenFailed(<reason>)`. For `Vault`, a line `maknae-egress: the Vault unwrap failed: …` gives Vault's own answer.
 
@@ -545,11 +545,11 @@ A connection that fails without any answer from the provider is not in this tabl
 | What you see | Why | Fix |
 |---|---|---|
 | `maknaed` will not start: `<path> must be owned by root and not group- or world-writable, as must every maknae.yaml and config.d source and the directories that hold them` | `maknae.yaml`, a `config.d/` member or one of their directories is not root-owned, or is writable by group or other | step 3's owner and mode |
-| `maknae agent: stopped: the conversation has reached the declared context budget; compaction arrives with #171` | the next turn would exceed the window you declared | start a new conversation, or declare the larger window your model has |
-| `maknae agent: stopped:` with a connection error, on a long conversation | the daemon's prompt cap is below your loop's, so the daemon refused the frame and closed the connection | raise the daemon's `transport.prompt_max_bytes` (step 3; on macOS, under the existing `transport:` block — a second `transport:` key refuses the file with `duplicate config key 'transport' at LINE:COL`) |
-| `maknae agent: stopped: no response from daemon within 690000ms (stalled?)`, exit 2 | the agent waits for a model reply for as long as the daemon could take at its ceilings (the 600 s `egress.deadline_ms` maximum, the 60 s transport maximum and a 30 s margin), and the daemon never answered: it is wedged: the only unbounded step on that path is an audit append, so check for a stalled audit filesystem first | check `maknaed`'s state, its log and the audit filesystem, then restart it |
+| `maknae: stopped: the conversation has reached the declared context budget; compaction arrives with #171` | the next turn would exceed the window you declared | start a new conversation, or declare the larger window your model has |
+| `maknae: stopped:` with a connection error, on a long conversation | the daemon's prompt cap is below your loop's, so the daemon refused the frame and closed the connection | raise the daemon's `transport.prompt_max_bytes` (step 3; on macOS, under the existing `transport:` block — a second `transport:` key refuses the file with `duplicate config key 'transport' at LINE:COL`) |
+| `maknae: stopped: no response from daemon within 690000ms (stalled?)`, exit 2 | the agent waits for a model reply for as long as the daemon could take at its ceilings (the 600 s `egress.deadline_ms` maximum, the 60 s transport maximum and a 30 s margin), and the daemon never answered: it is wedged: the only unbounded step on that path is an audit append, so check for a stalled audit filesystem first | check `maknaed`'s state, its log and the audit filesystem, then restart it |
 | The deputy's log shows `provider reply forwarded without its reasoning (conversation …): reasoning-over-bound` | the reply was passed on; its reasoning was over 61,440 bytes and was not kept for the next turn | nothing; a model that reasons this long on every turn loses that context each time |
-| `maknae agent: stopped: the conversation has reached the platform's frame bound` | your own `transport.prompt_max_bytes` in `~/.maknae` is smaller than your window needs; or, with none set, the conversation's framing outgrew the margin in `context_tokens × 6` bytes (very many small turns: the meter counts text, not framing) | remove the setting, and the loop derives its cap from `context_tokens`; otherwise start a new conversation |
+| `maknae: stopped: the conversation has reached the platform's frame bound` | your own `transport.prompt_max_bytes` in `~/.maknae` is smaller than your window needs; or, with none set, the conversation's framing outgrew the margin in `context_tokens × 6` bytes (very many small turns: the meter counts text, not framing) | remove the setting, and the loop derives its cap from `context_tokens`; otherwise start a new conversation |
 | `journalctl -u maknae-egress` (on macOS, `maknae-egress.err`) shows file or prompt text after `provider answered …` | some servers quote the rejected request in their error body | expected: the journal can hold up to 4 KiB of conversation content; limit who reads it (`docs/configuration.md` §6.2). On macOS the `.err` file holds the same content, and nothing rotates it |
 
 **Rotating the seal key.** Run the full enroll again with `--rotate-seal-key`; it needs your administrator Vault token, as in step 2:

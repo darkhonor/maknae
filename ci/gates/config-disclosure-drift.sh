@@ -94,14 +94,17 @@ SURFACE=(
   "crates/maknae-proto/src/wire.rs|StatView|stat|3|wire"
   "crates/maknae-proto/src/mutation.rs|ListGrant|list|2|wire"
   "crates/maknae-proto/src/mutation.rs|ListEntry|list.entries|2|wire"
-  "crates/maknae-proto/src/task.rs|TaskView|task|8|wire"
+  "crates/maknae-proto/src/task.rs|TaskView|task|9|wire"
   "crates/maknae-proto/src/task.rs|TaskPage|task_list|2|wire"
-  "crates/maknae-proto/src/task.rs|TaskView|task_list.entries|8|wire"
+  "crates/maknae-proto/src/task.rs|TaskView|task_list.entries|9|wire"
   "crates/maknae-proto/src/task.rs|TaskReportView|task_report|6|wire"
   "crates/maknae-proto/src/task.rs|TaskReportPage|task_reports|2|wire"
   "crates/maknae-proto/src/task.rs|TaskReportView|task_reports.entries|6|wire"
   "crates/maknae-proto/src/task.rs|TaskDelivery|task_delivery|2|wire"
   "crates/maknae-proto/src/task.rs|TaskFollowUps|task_follow_ups|3|wire"
+  "crates/maknae-proto/src/task.rs|AgentPage|agent_list|4|wire"
+  "crates/maknae-proto/src/task.rs|AgentEntry|agent_list.entries|3|wire"
+  "crates/maknae-proto/src/task.rs|BannerSpec|agent_list.banner|2|wire"
   "crates/maknae-vault/src/config.rs|VaultConfig|vault|9|config"
   "crates/maknae-vault/src/config.rs|UserAuthConfig|vault.user_auth|2|config"
 )
@@ -126,8 +129,15 @@ LEAF_ENUMS=(
   "task.close|crates/maknae-proto/src/task.rs|TaskClose"
   "task_list.entries.state|crates/maknae-proto/src/task.rs|TaskState"
   "task_list.entries.close|crates/maknae-proto/src/task.rs|TaskClose"
+  "agent_list.entries.standing|crates/maknae-proto/src/task.rs|AgentStanding"
   "task_report.close|crates/maknae-proto/src/task.rs|TaskClose"
   "task_reports.entries.close|crates/maknae-proto/src/task.rs|TaskClose"
+)
+
+# Fields whose type is an enum of unit variants and tuple variants of fixed-width integers only: a fixed
+# token or a number triple on the wire, so a leaf. leaf_enum_check refuses any other variant.
+LEAF_SCALAR_ENUMS=(
+  "agent_list.banner.color|crates/maknae-proto/src/task.rs|BannerColor"
 )
 
 # Fields whose type is a `pub struct <Type>(String);` newtype in the named file: one string on the wire, so a leaf.
@@ -138,6 +148,8 @@ LEAF_NEWTYPES=(
   "task.task|crates/maknae-proto/src/task.rs|TaskRef"
   "task_list.entries.task|crates/maknae-proto/src/task.rs|TaskRef"
   "task_list.next|crates/maknae-proto/src/task.rs|TaskCursor"
+  "task.cursor|crates/maknae-proto/src/task.rs|TaskCursor"
+  "task_list.entries.cursor|crates/maknae-proto/src/task.rs|TaskCursor"
   "task_report.task|crates/maknae-proto/src/task.rs|TaskRef"
   "task_report.cursor|crates/maknae-proto/src/task.rs|TaskCursor"
   "task_reports.entries.task|crates/maknae-proto/src/task.rs|TaskRef"
@@ -204,8 +216,8 @@ secret_check() { # <label> <file> <type> <struct-file> <struct> <field> <field-t
   fi
 }
 
-leaf_enum_check() { # <field-path> <file> <type>
-  local fp="$1" file="$2" ty="$3" ndef nother structfile body prefix
+leaf_enum_check() { # <field-path> <file> <type> [scalar]
+  local fp="$1" file="$2" ty="$3" mode="${4:-}" ndef nother structfile body prefix
   [ -f "$file" ] || { echo "FAIL: leaf-enum row '$fp': '$file' does not exist."; return 1; }
   ndef="$(grep -cE "(^|[^A-Za-z0-9_])enum[[:space:]]+$ty([^A-Za-z0-9_]|$)" "$file" || true)"
   if [ "$ndef" != "1" ]; then
@@ -258,6 +270,33 @@ leaf_enum_check() { # <field-path> <file> <type>
       print substr(rest, o + 1, i - o - 1)
     }')" || { echo "FAIL: leaf-enum row '$fp': could not read the body of 'enum $ty'."; return 1; }
   body="$(printf '%s' "$body" | sed -E 's/#\[[^]]*\]//g')"
+  if [ "$mode" = scalar ]; then
+    local group elem
+    case "$body" in
+      *[\#\{]*)
+        echo "FAIL: leaf-enum row '$fp': 'enum $ty' is not unit-only or integer-tuple-only (a struct variant, or an attribute could not be read)."
+        return 1 ;;
+    esac
+    while IFS= read -r group; do
+      [ -n "$group" ] || continue
+      group="${group#(}"; group="${group%)}"
+      while IFS= read -r elem; do
+        elem="$(printf '%s' "$elem" | tr -d '[:space:]')"
+        case "$elem" in
+          u8|u16|u32|u64|i8|i16|i32|i64) ;;
+          *)
+            echo "FAIL: leaf-enum row '$fp': 'enum $ty' is not unit-only or integer-tuple-only (a variant field is '$elem', not a fixed-width integer)."
+            return 1 ;;
+        esac
+      done < <(printf '%s\n' "$group" | tr ',' '\n')
+    done < <(printf '%s' "$body" | grep -oE '\([^)]*\)' || true)
+    case "$(printf '%s' "$body" | sed -E 's/\([^)]*\)//g')" in
+      *[\(\)]*)
+        echo "FAIL: leaf-enum row '$fp': 'enum $ty' is not unit-only or integer-tuple-only (a variant group is nested or unbalanced)."
+        return 1 ;;
+    esac
+    return 0
+  fi
   case "$body" in
     *[\#\(\{]*)
       echo "FAIL: leaf-enum row '$fp': 'enum $ty' is not unit-only (a variant carries data, or an attribute could not be read)."
@@ -363,6 +402,7 @@ PAYLOAD_DISPOSITIONS=(
   "TaskDelivered|struct:TaskDelivery"
   "TaskFollowUps|struct:TaskFollowUps"
   "TaskIdle|unit"
+  "Agents|struct:AgentPage"
 )
 payload_variants="$(awk '
   /^pub enum Payload \{/ { inenum=1; next }
@@ -905,7 +945,7 @@ while IFS=$'\t' read -r fpath fty fkind; do
       exit 1 ;;
   esac
   leaf_row=""
-  for row in "${LEAF_ENUMS[@]}"; do
+  for row in "${LEAF_ENUMS[@]}" "${LEAF_SCALAR_ENUMS[@]}"; do
     IFS='|' read -r lp lf lt <<< "$row"
     if [ "$lp" = "$fpath" ] && [ "$lt" = "$bare" ]; then
       raw=$(printf '%s' "$fty" | sed -E -e ':a' -e "s#^${wrappers}<##" -e 'ta' | sed -E 's/>+$//')
@@ -913,7 +953,9 @@ while IFS=$'\t' read -r fpath fty fkind; do
         echo "FAIL: leaf-enum row '$lp': the field's type is spelled '$fty', not exactly '$lt'; a path may name another item."
         exit 1
       fi
-      leaf_enum_check "$lp" "$lf" "$lt" || exit 1
+      mode=""
+      for srow in "${LEAF_SCALAR_ENUMS[@]}"; do [ "$srow" = "$row" ] && mode=scalar; done
+      leaf_enum_check "$lp" "$lf" "$lt" "$mode" || exit 1
       echo "$lp" >> "$tmp/leaf-used"
       leaf_row=1
     fi
@@ -1020,7 +1062,7 @@ while IFS=$'\t' read -r fpath fty fkind; do
     exit 1
   fi
 done < "$tmp/fields"
-for row in "${LEAF_ENUMS[@]}" "${LEAF_NEWTYPES[@]}" "${LEAF_SECRETS[@]}"; do
+for row in "${LEAF_ENUMS[@]}" "${LEAF_SCALAR_ENUMS[@]}" "${LEAF_NEWTYPES[@]}" "${LEAF_SECRETS[@]}"; do
   IFS='|' read -r lp _ _ <<< "$row"
   if ! grep -qxF "$lp" "$tmp/leaf-used" 2>/dev/null; then
     echo "FAIL: leaf row '$lp' matched no field of that path and type; a stale row is removed, not kept."

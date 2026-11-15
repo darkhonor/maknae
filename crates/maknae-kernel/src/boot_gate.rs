@@ -208,6 +208,38 @@ pub fn egress_bounds_boot_gate(
     Ok(())
 }
 
+/// A present `banner.yaml` that was refused.
+#[derive(Debug, PartialEq, Eq)]
+pub struct BannerRefused {
+    pub path: std::path::PathBuf,
+    pub cause: String,
+}
+
+impl std::fmt::Display for BannerRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the banner {} was refused: {}",
+            self.path.display(),
+            self.cause
+        )
+    }
+}
+
+/// The banner in `config_dir`, read by `load`; absent is no banner.
+pub fn banner_boot_gate(
+    config_dir: &std::path::Path,
+    load: fn(
+        &std::path::Path,
+    ) -> Result<Option<maknae_proto::BannerSpec>, maknae_config::ConfigError>,
+) -> Result<Option<maknae_proto::BannerSpec>, BannerRefused> {
+    let path = config_dir.join(maknae_config::BANNER_FILE);
+    load(&path).map_err(|e| BannerRefused {
+        cause: e.to_string(),
+        path,
+    })
+}
+
 /// Fail closed when the config promises offload the daemon cannot perform.
 ///
 /// **Pure predicate, deliberately here and not in `run.rs`.** `run.rs` is T3 and

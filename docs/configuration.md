@@ -144,6 +144,7 @@ The host side, `<config-dir>` (`/etc/maknae` when packaged):
 ├── authz.yaml            # the authorization policy — a SEPARATE document, not a section
 ├── bindings.yaml         # who holds which role, and who is contained — a SEPARATE document (§2.3)
 ├── sensitive.yaml        # paths no file verb may reach, whatever is granted — a SEPARATE document (§2.5)
+├── banner.yaml           # the operator's banner for the agent session — a SEPARATE document (§2.7)
 ├── egress-bounds.yaml    # required WHEN any provider is authorized (§6.1.3); written by `maknae enroll`, 0644 root:root
 ├── egress/               # 0750 root:_maknae-egress, created by the package; files written by `maknae enroll`
 │   ├── vault-ca.crt      # 0640 root:_maknae-egress — the deputy's Vault TLS anchor
@@ -180,7 +181,7 @@ The user side, `~/.maknae` (or `$MAKNAE_CONFIG_DIR`):
 
 On macOS `maknae login` keeps the token in the default keychain instead (service `maknae-cli`, account `maknae-vault-token`), and neither token file exists (`crates/maknae-vault/src/token_record.rs`, `keychain_policy.rs`).
 
-**Sections versus standalone documents.** `maknae.yaml` and `config.d/*.yaml` contribute **registered sections** and are merged section-by-section by this loader. `authz.yaml`, `bindings.yaml`, `sensitive.yaml` and `egress-bounds.yaml` are **standalone documents with their own readers**: each is opened by path (`<config-dir>/authz.yaml`, `<config-dir>/bindings.yaml`, `<config-dir>/sensitive.yaml`, `<config-dir>/egress-bounds.yaml`), never merged, never shadowed, and putting any of them inside `config.d/` does not work. `providers.yaml` and the personal `sensitive.yaml` are likewise standalone documents, read by the CLI from its own directory.
+**Sections versus standalone documents.** `maknae.yaml` and `config.d/*.yaml` contribute **registered sections** and are merged section-by-section by this loader. `authz.yaml`, `bindings.yaml`, `sensitive.yaml`, `banner.yaml` and `egress-bounds.yaml` are **standalone documents with their own readers**: each is opened by path (`<config-dir>/authz.yaml`, `<config-dir>/bindings.yaml`, `<config-dir>/sensitive.yaml`, `<config-dir>/banner.yaml`, `<config-dir>/egress-bounds.yaml`), never merged, never shadowed, and putting any of them inside `config.d/` does not work. `providers.yaml` and the personal `sensitive.yaml` are likewise standalone documents, read by the CLI from its own directory.
 
 - **`maknae.yaml`** — the **base** file. Required: it is the deployment's anchor, the
   one file that must exist even if empty. A missing base is an error. An empty base is
@@ -370,9 +371,9 @@ sensitive:
 
 **What the model and the user are told.**
 
-- **A protected path answers `Protected`.** The kernel matches the path the request asks for against both lists before it opens anything, so the answer is the same whether or not the file exists. The CLI prints `maknae: <path> is protected by <list> (<entry>). Maknae will not touch it; run this outside Maknae.`, where `<list>` is `/etc/maknae/sensitive.yaml` or `~/.maknae/sensitive.yaml`. When the model's tool call is refused this way, `maknae agent` prints the same notice on stderr. The model sees only `protected by policy — ask the user to do this outside Maknae`, which names no list and no entry.
+- **A protected path answers `Protected`.** The kernel matches the path the request asks for against both lists before it opens anything, so the answer is the same whether or not the file exists. The CLI prints `maknae: <path> is protected by <list> (<entry>). Maknae will not touch it; run this outside Maknae.`, where `<list>` is `/etc/maknae/sensitive.yaml` or `~/.maknae/sensitive.yaml`. When the model's tool call is refused this way, `maknae -p` prints the same notice on stderr. The model sees only `protected by policy — ask the user to do this outside Maknae`, which names no list and no entry.
 - **Every other refusal of a file verb reads the same to the model:** `unavailable — do not retry`. That covers a missing file, a path no grant covers, a refusal by the OS or the ceiling, a descriptor check (a second hard link, the wrong kind), a request whose asked path is not listed but whose target is (a symlink into `~/.ssh`), and transport and capacity faults. The model cannot tell from the answer whether the file exists. The standing prompt tells it that some files are withheld this way and that it must not infer state from them or ask you to paste a credential.
-- **A listing shows only what may be seen.** The model's `list_directory` releases only the entries whose own `Read` is permitted: an entry a list, a grant or the ceiling withholds is absent, exactly as a name that does not exist, and the listing carries no count or total. That holds up to the 65,536-name bound: a call decides at most 65,536 names, so a directory that reaches the bound before a full page is permitted answers `unavailable`, and enough withheld names can turn a page into that answer; entries past the 65,536th name cannot be reached with the cursor. A page holds up to 1024 entries, fewer when names are long. `maknae agent` prints `maknae: <n> entries not released`, `maknae: <n> entries with a non-UTF-8 name not listed` and `maknae: <n> entries changed while being listed and not listed` on stderr for you; the model never sees these lines. `stat_path` returns a path's kind, size and modification time and nothing else.
+- **A listing shows only what may be seen.** The model's `list_directory` releases only the entries whose own `Read` is permitted: an entry a list, a grant or the ceiling withholds is absent, exactly as a name that does not exist, and the listing carries no count or total. That holds up to the 65,536-name bound: a call decides at most 65,536 names, so a directory that reaches the bound before a full page is permitted answers `unavailable`, and enough withheld names can turn a page into that answer; entries past the 65,536th name cannot be reached with the cursor. A page holds up to 1024 entries, fewer when names are long. `maknae -p` prints `maknae: <n> entries not released`, `maknae: <n> entries with a non-UTF-8 name not listed` and `maknae: <n> entries changed while being listed and not listed` on stderr for you; the model never sees these lines. `stat_path` returns a path's kind, size and modification time and nothing else.
 - **The trail says which.** A refusal by either list is audited with the reason `sensitive: host <entry>` or `sensitive: personal <entry>`; every other cause keeps its own reason.
 
 **The personal list.**
@@ -439,6 +440,22 @@ A sub-task, one an agent gives while it works a task, works in its root's partit
 A refusal is the model's uniform `not authorized`, with the reason `partition: …` in the trail. The operand bounds what the kernel releases to the model, not the agent process, whose account owns its whole home; confining the process is #629. People are not affected: the operand abstains for every request off the agent channel.
 
 **Single host.** Like the conversation store, the task store admits one `maknaed` per state directory.
+
+### 2.7 `banner.yaml` (#630)
+
+`<config-dir>/banner.yaml` holds the operator's banner, the line the agent session shows at the top and bottom of the screen. `maknaed` reads it and serves it to the CLI, which never opens the file (a user cannot traverse `/etc/maknae`, which is `root:_maknae 0750`). The banner is shown verbatim and never interpreted. The file is optional.
+
+```yaml
+text: "UNCLASSIFIED//FOR OFFICIAL USE ONLY"
+color: "#ffd700"
+```
+
+- `text` (required): 1 to 256 bytes, with no control character, line or paragraph separator, or format character (bidirectional overrides included).
+- `color` (optional): `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, or `"#rrggbb"`. Quote a `#rrggbb` value, since an unquoted `#` starts a YAML comment. The banner's text is black or white, whichever has the higher contrast against the colour. Without `color` the banner is shown in reverse video.
+- Any other key refuses.
+- **Ownership and mode.** A regular file, not a symlink, owned by root and not group- or other-writable. `<config-dir>` must be owned by root and not group- or other-writable, or the file is refused, naming the directory. Only a missing file inside such a directory reads as no banner; a missing directory, a symlink, the wrong owner or mode, an invalid file and a read error each refuse.
+- **Invalid file.** An invalid `banner.yaml` refuses `maknaed`'s start, naming `banner.yaml` and the reason. A reload (`SIGHUP`) reads it again: an invalid file refuses the whole reload, as an invalid `authz.yaml` does, so the running policy and banner stay and the refusal is recorded in the trail; a removed file removes the banner.
+- **In the CLI.** `maknae agent <name>` checks the banner it receives again, in a terminal and without one, and an invalid banner refuses to open the session: `maknae: the kernel's banner is not valid (<why>); the session was not opened`. On a terminal the session never opens unmarked; without a terminal no banner is shown.
 
 ---
 
@@ -756,7 +773,7 @@ The value is a list of at most **32** entries, and each `name` may appear once (
 
 A malformed entry refuses boot with `InvalidProvider`, which reads `invalid provider config: <reason>` and names the entry by index, for example `invalid provider config: providers[0].endpoint must be an https:// URL (http:// is permitted to loopback only)`.
 
-- **No providers is a valid state.** An absent section, or `providers: []`, boots, and `egress-bounds.yaml` is then not read. Every prompt is then refused by the kernel: the administrator's `jq` over the audit trail shows the reason `no model access: no providers are authorized on this host`, while the user sees only `maknae agent: stopped: ` followed by the CLI's generic refusal text (§6.1.1). A `providers:` key with no value (YAML `null`) is not the same thing and refuses boot: `invalid provider config: providers must be a sequence of provider entries`.
+- **No providers is a valid state.** An absent section, or `providers: []`, boots, and `egress-bounds.yaml` is then not read. Every prompt is then refused by the kernel: the administrator's `jq` over the audit trail shows the reason `no model access: no providers are authorized on this host`, while the user sees only `maknae: stopped: ` followed by the CLI's generic refusal text (§6.1.1). A `providers:` key with no value (YAML `null`) is not the same thing and refuses boot: `invalid provider config: providers must be a sequence of provider entries`.
 - **Values are taken as written.** Nothing is trimmed; a value with surrounding whitespace fails its own shape rule.
 - **No key is ever in this file.** A key named `key`, `api_key`, `apikey`, `token`, `secret`, `secret_key` or `bearer` (case-insensitive) in any entry refuses boot before any other defect in the section is reported (ownership and classification checks run earlier in boot): `provider config carries a plaintext credential under '<field>': each user's key lives in Vault under their own login, never in the config` (`ProviderPlaintextKey`). The scan covers every entry and **every contribution** to the section, including a base block that a `config.d/` member shadows. It is a field-name check only, not a general secret scanner: a secret pasted as the *value* of `name` is not detected.
 - **Who may write the section.** The file that contributes `providers` — `maknae.yaml` **or a `config.d/` member** — must be **root-owned and not group/other-writable**, and so must the **config directory and `config.d/` themselves** (a subject who owns the directory could otherwise choose between root-authored candidates by renaming one out of the scan); otherwise boot refuses with `SourceNotRootOwned` (§2.2). The packaged `/etc/maknae` (`root:_maknae 0640` under `0750`) satisfies this; the subject the loop runs as cannot authorize a destination. A dev-shape `~/.maknae/maknae.yaml` owned by the operator does not, by design.
@@ -767,7 +784,7 @@ A malformed entry refuses boot with `InvalidProvider`, which reads `invalid prov
 
 ### 6.1.1 Each user's `providers.yaml`
 
-Each user lists the providers they use in `providers.yaml` in their own configuration directory (`~/.maknae/providers.yaml`, or under `$MAKNAE_CONFIG_DIR`). The file is the user's, written by the user, held to the same file rules as any config file (§2.2), and read by `maknae agent` only (`crates/maknae-config/src/user_providers.rs`, `user_providers_io.rs`).
+Each user lists the providers they use in `providers.yaml` in their own configuration directory (`~/.maknae/providers.yaml`, or under `$MAKNAE_CONFIG_DIR`). The file is the user's, written by the user, held to the same file rules as any config file (§2.2), and read by `maknae -p` only (`crates/maknae-config/src/user_providers.rs`, `user_providers_io.rs`).
 
 ```yaml
 # ~/.maknae/providers.yaml
@@ -802,20 +819,20 @@ The top-level key is `providers` only, a list of at most **32** entries. Each en
 | `output_tokens` | no | the reply cap sent with every request: at least 1, and `context_tokens` less `output_tokens` must exceed the 2,304-token preamble allowance. |
 | `default` | no | `true` or `false` (default `false`). |
 
-**How the CLI prints these.** `maknae agent` prints every setup refusal after `maknae: ` and exits 1 (`bins/maknae/src/cli.rs`); `maknae login` prints its own after `maknae login: ` (`bins/maknae/src/login.rs`). The texts below are quoted without the prefix.
+**How the CLI prints these.** `maknae -p` prints every setup refusal after `maknae: ` and exits 1 (`bins/maknae/src/cli.rs`); `maknae login` prints its own after `maknae login: ` (`bins/maknae/src/login.rs`). The texts below are quoted without the prefix.
 
 Every refusal of this file reads `providers.yaml: <reason>` (`UserProviders`), for example `providers.yaml: providers[0].context_tokens is required: declare the model's context window in tokens`. Two worth knowing:
 
 - Writing `key:` as a string refuses with `providers.yaml: providers[<i>].key must be a map of subpath and field; the API key itself is stored only in Vault, never in this file`. Another spelling, such as `api_key:`, refuses as an unknown key.
-- `maknae agent` checks the budget before it sends anything, prefixed by the entry's label: `provider entry <label>: context_tokens <N> is above the 16777216 ceiling`, `provider entry <label>: output_tokens must be at least 1`, or `provider entry <label>: context_tokens less output_tokens must exceed the 2304-token preamble allowance` (`crates/maknae-agent/src/budget.rs`). The smallest window accepted is therefore 2,305.
+- `maknae -p` checks the budget before it sends anything, prefixed by the entry's label: `provider entry <label>: context_tokens <N> is above the 16777216 ceiling`, `provider entry <label>: output_tokens must be at least 1`, or `provider entry <label>: context_tokens less output_tokens must exceed the 2304-token preamble allowance` (`crates/maknae-agent/src/budget.rs`). The smallest window accepted is therefore 2,305.
 
 **Which entry a turn uses.**
 
 - With one entry, it is used. With two or more, exactly one must be `default: true`, or the file refuses: `providers.yaml: <N> entries and none is marked default: true; mark exactly one (labels: <labels>)`, or `providers.yaml: more than one entry is marked default: true (<labels>)`.
-- `maknae agent --provider <label> "<prompt>"` uses the entry with that label instead. An unknown label refuses with `providers.yaml: no entry is labelled '<label>' (labels: <labels>)`; a value that is not a valid label refuses with `providers.yaml: the requested provider is not a valid label (1 to 32 bytes of ASCII letters, digits, '-', '_' and '.')`.
-- An absent file, an empty document, or a document with no `providers` key means no model access: `maknae agent` stops before contacting anything with `no model access: no providers are defined in <path>`.
+- `maknae -p "<prompt>" --provider <label>` uses the entry with that label instead. An unknown label refuses with `providers.yaml: no entry is labelled '<label>' (labels: <labels>)`; a value that is not a valid label refuses with `providers.yaml: the requested provider is not a valid label (1 to 32 bytes of ASCII letters, digits, '-', '_' and '.')`.
+- An absent file, an empty document, or a document with no `providers` key means no model access: `maknae -p` stops before contacting anything with `no model access: no providers are defined in <path>`.
 
-**Where the key is.** Each turn, `maknae agent` reads the entry's key from Vault with the user's own `maknae login` token, at
+**Where the key is.** Each turn, `maknae -p` reads the entry's key from Vault with the user's own `maknae login` token, at
 
 ```
 <kv_mount>/data/<user_prefix>/<username>/<subpath>
@@ -823,7 +840,7 @@ Every refusal of this file reads `providers.yaml: <reason>` (`UserProviders`), f
 
 field `<field>`, where `kv_mount` and `user_prefix` come from the user's `vault` block (§6.1.2) and `<username>` is the local account name of the uid running the CLI, never a value from any file (ADR-0028 decision 3). The account name must be 1 to 32 bytes of `[a-z0-9._-]`, starting and ending with `[a-z0-9_]`, and must not be `data`. With enroll's defaults (`maknae-kv`, `maknae/users`), user `alice` and the first entry above, that is `maknae-kv/data/maknae/users/alice/openai/personal`, field `api_key`. The read is response-wrapped: Vault answers with a single-use wrapping token, which the CLI seals to the Egress Daemon's `seal.pub` (§2) and sends; the kernel admits the request on metadata alone and never sees the key (ADR-0028 §5). Loading the key into Vault is `docs/first-provider.md`'s step U2.
 
-**What the user sees when the kernel refuses.** A kernel refusal reaches the user only as `maknae agent: stopped: the kernel refused the exchange — whether the prompt reached the provider is in the host's audit trail (ask your administrator); if it did not, check that your providers.yaml names a provider and model your administrator has authorized for your role and the key subpath and field of your own Vault secret, that your maknae.yaml vault block matches the host's, and that your login is current (maknae login)`. The reason — for example `provider not in the authorized set` or `model not on the authorized provider's list` — is what the administrator's `jq` over the audit trail shows (`crates/maknae-kernel/src/provider_choice.rs`).
+**What the user sees when the kernel refuses.** A kernel refusal reaches the user only as `maknae: stopped: the kernel refused the exchange — whether the prompt reached the provider is in the host's audit trail (ask your administrator); if it did not, check that your providers.yaml names a provider and model your administrator has authorized for your role and the key subpath and field of your own Vault secret, that your maknae.yaml vault block matches the host's, and that your login is current (maknae login)`. The reason — for example `provider not in the authorized set` or `model not on the authorized provider's list` — is what the administrator's `jq` over the audit trail shows (`crates/maknae-kernel/src/provider_choice.rs`).
 
 **How the loop meters the window.**
 
@@ -850,7 +867,7 @@ vault:
   user_prefix: maknae/users
 ```
 
-- **`kv_mount` and `user_prefix`** are required by `maknae agent`, and enroll writes them from `--kv-mount` (default `maknae-kv`) and `--user-prefix` (default `maknae/users`). Each is at most 256 bytes of `[A-Za-z0-9._/-]`, with no empty, `.`, `..` or `data` segment and no leading or trailing `/`. When one is missing, `maknae agent` stops with ``vault.kv_mount is not set in your maknae.yaml: `sudo maknae enroll` writes it`` (likewise `vault.user_prefix`). Only `maknae agent` requires them, but every CLI verb parses the `vault` block, so a malformed value refuses every verb.
+- **`kv_mount` and `user_prefix`** are required by `maknae -p`, and enroll writes them from `--kv-mount` (default `maknae-kv`) and `--user-prefix` (default `maknae/users`). Each is at most 256 bytes of `[A-Za-z0-9._/-]`, with no empty, `.`, `..` or `data` segment and no leading or trailing `/`. When one is missing, `maknae -p` stops with ``vault.kv_mount is not set in your maknae.yaml: `sudo maknae enroll` writes it`` (likewise `vault.user_prefix`). Only `maknae -p` requires them, but every CLI verb parses the `vault` block, so a malformed value refuses every verb.
 - **`user_auth { type, mount }`** says how `maknae login` authenticates. An absent block means userpass on `maknae-userpass`. When the block is present, `type` is required and must be `userpass`; anything else refuses with ``vault.user_auth.type "<type>" is not supported: the only method is `userpass` ``. `mount` defaults to `maknae-userpass` and is a bare mount name: a leading `auth` segment refuses (`invalid Vault mount: vault.user_auth.mount starts with 'auth' — the auth/ prefix is composed by the client; write the bare mount name`), as does a character outside `[A-Za-z0-9._/-]`, whitespace, or an empty, `.` or `..` segment. Keys other than `type` and `mount` refuse with `unknown key '<key>' in 'vault.user_auth'`. The root `maknae.yaml` may carry the same block.
 - **`plane_key`** (`ml-dsa-87`, `ecdsa-p384-sha384` or `ecdsa-p521-sha512`; absent means `ml-dsa-87`) is the key algorithm this plane mints its identity with. It must equal the key type of the Vault PKI roles (with `deploy/vault-pki`, its `plane_key_algorithm`), in the root `maknae.yaml` (the daemon's plane) and in each user's (the CLI's plane): Vault refuses a CSR of another key type or size, and a refusal whose message concerns the key adds a hint naming both settings. `ml-dsa-87` needs a Vault 2.2.0+ PKI. Any other value refuses with ``vault.plane_key `<value>` is not one of ml-dsa-87, ecdsa-p384-sha384, ecdsa-p521-sha512``. `maknae enroll` writes it into both files from `--plane-key` (default `ml-dsa-87`), so a deployment that keeps EC passes `--plane-key ecdsa-p384-sha384` (or `ecdsa-p521-sha512`) on every enroll. `admin.status` reports the value the daemon booted with, and the boot trail's posture record names it. `admin.config.show` reports the accepted configuration snapshot, which an edit changes only once the baseline is accepted (§6.4); the plane uses the new value only after a restart.
 - **They must match the host.** A user whose `kv_mount` or `user_prefix` differs from the host's `egress-bounds.yaml` (§6.1.3) seals a key the Egress Daemon cannot open: the seal binds the key path from the user's copy, the deputy opens it under the path from the host's, so it refuses with `OpenFailed(Seal)` before any Vault request or provider I/O; `maknaed` records every such turn `Failed` (ADR-0028 §5, amended, and §6). The user sees only the generic refusal text (§6.1.1). Keep both files written from the same enroll flags.
@@ -1359,4 +1376,4 @@ Only immediate entries are read; only `*.yaml` / `*.yml` (case-insensitive); dot
 - `admin.config.show` shows each provider's `name`, `endpoint`, `models`, `reasoning_effort` and `output_tokens_field` in the clear (§6.1).
 - The deputy's socket unit is enabled (`sudo systemctl enable --now maknae-egress.socket`, §6.2), or every permitted prompt is refused as not ready.
 - Which roles may send content to a provider is a separate decision, made in `authz.yaml` (`roles:` and `destinations:`, destination `provider:<name>`) — see the runbook, Chapter 3 §7. An authorized provider is reachable by nobody until that grant exists.
-- A user's first turn (`maknae login`, then `maknae agent "<prompt>"`) is `docs/first-provider.md`'s walk-through.
+- A user's first turn (`maknae login`, then `maknae -p "<prompt>"`) is `docs/first-provider.md`'s walk-through.

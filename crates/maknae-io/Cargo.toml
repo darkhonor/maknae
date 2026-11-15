@@ -55,4 +55,5 @@ tempfile = "3"
 # invites the reader to think one of them is deliberate.
 [target.'cfg(unix)'.dev-dependencies]
 # "user" is also a production feature now (home.rs); tests use it for geteuid owner checks.
-nix = { version = "0.31", default-features = false, features = ["fs", "dir", "user"] }
+# "term" — openpty, the real terminal term.rs's tests size.
+nix = { version = "0.31", default-features = false, features = ["fs", "dir", "user", "term"] }

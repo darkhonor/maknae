@@ -114,6 +114,8 @@ pub enum ConfigError {
     InvalidAgent(String),
     /// A `sensitive.yaml` document or one of its entries was refused (#617).
     InvalidSensitive(String),
+    /// `banner.yaml` was refused.
+    InvalidBanner(String),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -220,6 +222,7 @@ impl std::fmt::Display for ConfigError {
                 write!(f, "agent configuration refused: {reason}")
             }
             ConfigError::InvalidSensitive(reason) => write!(f, "sensitive.yaml: {reason}"),
+            ConfigError::InvalidBanner(reason) => write!(f, "banner.yaml: {reason}"),
         }
     }
 }

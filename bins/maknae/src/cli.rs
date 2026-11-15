@@ -22,12 +22,14 @@
 
 use crate::stderr::errln;
 use clap::{Parser, Subcommand};
-use maknae_config::{load_config, transport_from_section, SectionSpec, TRANSPORT_SECTION};
+use maknae_config::{
+    load_config, transport_from_section, Document, SectionSpec, TransportConfig, TRANSPORT_SECTION,
+};
 use maknae_loop::outcome::SentOutcome;
 use maknae_loop::send::send_verb;
 use maknae_proto::Payload;
 use maknae_vault::{load_ca_pin, PlaneClient, VAULT_SECTION};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 /// The `MAKNAE_CONFIG_DIR` env var name (overrides the `$HOME/.maknae` default).
@@ -55,11 +57,9 @@ pub fn resolve_config_dir() -> PathBuf {
 /// One list serves every verb, so `agent` is ACCEPTED — but not validated — for `ping` as
 /// much as for `agent`: the combined registry is what the unknown-section check consults,
 /// so the section's presence never fails any verb, while its BOUNDS are read only by
-/// `agent_from_section`, whose one production caller is `maknae agent`'s own `run`. A
-/// documented residual of the single-registry design, not a per-verb grammar: an `[agent]`
-/// section with `max_steps: 1000` loads clean under `maknae ping` and is refused by
-/// `maknae agent` (corrected 2026-09-22, #344 — this said "accepted (and validated)",
-/// which `execute` never does).
+/// `agent_from_section`, whose one production caller is `maknae -p`. A documented
+/// residual of the single-registry design, not a per-verb grammar: an `[agent]` section
+/// with `max_steps: 1000` loads clean under `maknae ping` and is refused by `maknae -p`.
 pub(crate) fn cli_config_specs() -> [SectionSpec; 3] {
     [
         SectionSpec {
@@ -82,11 +82,53 @@ pub(crate) fn cli_config_specs() -> [SectionSpec; 3] {
 #[derive(Parser, Debug)]
 #[command(
     name = "maknae",
-    about = "CLI for maknaed: filesystem operations, daemon queries, and enrollment"
+    about = "CLI for maknaed: filesystem operations, daemon queries, and enrollment",
+    args_conflicts_with_subcommands = true,
+    arg_required_else_help = true
 )]
 pub(crate) struct Cli {
+    /// Run the agent loop on one prompt (ADR-0023).
+    #[arg(short = 'p', long = "prompt", value_name = "PROMPT")]
+    prompt: Option<String>,
+    /// With -p: the providers.yaml entry to use instead of the default.
+    #[arg(long, requires = "prompt")]
+    provider: Option<String>,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
+}
+
+/// What one invocation runs.
+#[derive(Debug)]
+enum Route {
+    OneShot {
+        provider: Option<String>,
+        prompt: String,
+    },
+    AgentList,
+    AgentSession {
+        name: String,
+        wait: bool,
+    },
+    Command(Command),
+}
+
+fn route(cli: Cli) -> Option<Route> {
+    match (cli.prompt, cli.command) {
+        (Some(prompt), None) => Some(Route::OneShot {
+            provider: cli.provider,
+            prompt,
+        }),
+        (None, Some(Command::Agent(args))) => match (args.sub, args.name) {
+            (Some(AgentCommand::List), _) => Some(Route::AgentList),
+            (None, Some(name)) => Some(Route::AgentSession {
+                name,
+                wait: args.wait,
+            }),
+            (None, None) => None,
+        },
+        (None, Some(command)) => Some(Route::Command(command)),
+        (Some(_), Some(_)) | (None, None) => None,
+    }
 }
 
 /// The top-level subcommand surface. `Ping`/`Whoami` route to the existing
@@ -181,13 +223,9 @@ enum Command {
         #[command(subcommand)]
         action: SessionCommand,
     },
-    /// Run the agent loop on one prompt (ADR-0023).
-    Agent {
-        /// The providers.yaml entry to use instead of the default.
-        #[arg(long)]
-        provider: Option<String>,
-        prompt: String,
-    },
+    /// The agents you may task (`maknae agent list`), and a session with one
+    /// (`maknae agent <NAME>`).
+    Agent(AgentArgs),
     /// Log in to Vault as your local account; stores only the token.
     Login,
     /// Revoke and erase your stored Vault token.
@@ -207,6 +245,30 @@ enum Command {
     /// user-facing verb.
     #[command(hide = true, name = "enroll-helper")]
     EnrollHelper(crate::enroll::HelperArgs),
+}
+
+#[derive(clap::Args, Debug)]
+#[command(
+    args_conflicts_with_subcommands = true,
+    disable_help_subcommand = true,
+    subcommand_negates_reqs = true
+)]
+struct AgentArgs {
+    #[command(subcommand)]
+    sub: Option<AgentCommand>,
+    /// The agent to open a session with; `maknae agent list` names them.
+    #[arg(required = true)]
+    name: Option<String>,
+    /// Without a terminal: after the input ends, keep polling until every task
+    /// sent has reported or closed.
+    #[arg(long)]
+    wait: bool,
+}
+
+#[derive(Subcommand, Debug)]
+enum AgentCommand {
+    /// The agents you may task, with the reports each holds for you.
+    List,
 }
 
 #[derive(Subcommand, Debug)]
@@ -354,6 +416,7 @@ fn payload_kind(p: &Payload) -> &'static str {
         Payload::TaskDelivered(_) => "task delivery",
         Payload::TaskFollowUps(_) => "task follow-ups",
         Payload::TaskIdle => "task idle",
+        Payload::Agents(_) => "agent list",
     }
 }
 
@@ -456,12 +519,8 @@ fn absolute_path(path: PathBuf) -> Result<String, String> {
         .map_err(|_| "path is not valid UTF-8".into())
 }
 
-/// The full round trip: resolve config → mint a plane leaf → connect →
-/// request/response → print → shut down. Returns `Ok(true)` on a successful
-/// verb response, `Ok(false)` when the daemon returned a `ProtoError` (already
-/// printed to stderr — the caller maps this to a non-zero exit), `Err` for any
-/// earlier (config/mint/connect/frame) failure.
-async fn execute(verb: Verb) -> Result<bool, String> {
+/// The FIPS provider installed, then the CLI's document and its transport section.
+pub(crate) fn cli_config() -> Result<(PathBuf, Document, TransportConfig), String> {
     // Install the aws-lc-rs FIPS provider as the process default BEFORE any operation
     // that asserts FIPS (`PlaneClient::for_user` → `mint()` assert `.fips()`). The
     // daemon does the identical install-then-assert in `run_inner`; the CLI is a separate
@@ -482,6 +541,29 @@ async fn execute(verb: Verb) -> Result<bool, String> {
     let document = load_config(&dir, &cli_config_specs()).map_err(|e| e.to_string())?;
     let transport =
         transport_from_section(document.section(TRANSPORT_SECTION)).map_err(|e| e.to_string())?;
+    Ok((dir, document, transport))
+}
+
+/// The user's plane client, minted, and the trust bundle its connections pin.
+pub(crate) async fn minted_plane(
+    document: &Document,
+    dir: &Path,
+    token: maknae_vault::UserToken,
+) -> Result<(PlaneClient, std::sync::Arc<maknae_vault::TrustBundle>), String> {
+    let client = PlaneClient::for_user(document, dir, token).map_err(|e| e.to_string())?;
+    let ca = load_ca_pin(dir).map_err(|e| e.to_string())?;
+    let trust = maknae_vault::TrustBundle::from_pins(&[&ca]).map_err(|e| e.to_string())?;
+    client.mint().await.map_err(|e| e.to_string())?;
+    Ok((client, trust))
+}
+
+/// The full round trip: resolve config → mint a plane leaf → connect →
+/// request/response → print → shut down. Returns `Ok(true)` on a successful
+/// verb response, `Ok(false)` when the daemon returned a `ProtoError` (already
+/// printed to stderr — the caller maps this to a non-zero exit), `Err` for any
+/// earlier (config/mint/connect/frame) failure.
+async fn execute(verb: Verb) -> Result<bool, String> {
+    let (dir, document, transport) = cli_config()?;
 
     let session = crate::login::user_session(&document, &dir)?;
     let (request, content) = request_from_input(
@@ -490,11 +572,7 @@ async fn execute(verb: Verb) -> Result<bool, String> {
         &mut std::io::stdin().lock(),
     )?;
 
-    let client =
-        PlaneClient::for_user(&document, &dir, session.token).map_err(|e| e.to_string())?;
-    let ca = load_ca_pin(&dir).map_err(|e| e.to_string())?;
-    let trust = maknae_vault::TrustBundle::from_pins(&[&ca]).map_err(|e| e.to_string())?;
-    client.mint().await.map_err(|e| e.to_string())?;
+    let (client, trust) = minted_plane(&document, &dir, session.token).await?;
     let outcome = round_trip(verb, request, content, &transport, &client, &trust).await;
     if let Err(e) = client.shutdown().await {
         crate::stderr::line(&mut std::io::stderr(), format_args!("maknae-vault: {e}"));
@@ -508,7 +586,7 @@ async fn execute(verb: Verb) -> Result<bool, String> {
 /// `ProtoError` (already printed), `Err` on any transport/codec/timeout failure.
 ///
 /// On this file's wire path, result printing lives here and in [`print_payload_for_verb`];
-/// `maknae agent` prints its own (`agent::print_end`). The sendable core is
+/// `maknae -p` prints its own (`agent::print_end`). The sendable core is
 /// [`send_verb`], which prints no result, so a caller that sends many verbs is not also
 /// a printer. Its arming line (`cannot prepare filesystem operation`) and the attempt's
 /// stop line go to the `diag` sink, which this file prints to stderr.
@@ -999,7 +1077,8 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
         | (v, p @ Payload::TaskReports(_))
         | (v, p @ Payload::TaskDelivered(_))
         | (v, p @ Payload::TaskFollowUps(_))
-        | (v, p @ Payload::TaskIdle) => Err(format!(
+        | (v, p @ Payload::TaskIdle)
+        | (v, p @ Payload::Agents(_)) => Err(format!(
             "protocol error: daemon returned a {} payload for a {} request",
             payload_kind(&p),
             v.kind()
@@ -1011,8 +1090,24 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
 /// (`ping`/`whoami`) or `enroll`/`enroll-helper`, map the outcome to an exit
 /// code. Fail-closed — any error prints to stderr and exits non-zero.
 pub async fn run_cli() -> ExitCode {
-    let cli = Cli::parse();
-    match cli.command {
+    let Some(route) = route(Cli::parse()) else {
+        errln!("maknae: give -p <PROMPT> or a command; see maknae --help");
+        return ExitCode::from(2);
+    };
+    let command = match route {
+        Route::OneShot { provider, prompt } => {
+            return agent_exit(
+                crate::agent::run(provider, prompt).await,
+                &mut std::io::stderr(),
+            )
+        }
+        Route::AgentList => return crate::agent_session::run_list().await,
+        Route::AgentSession { name, wait } => {
+            return crate::agent_session::run_session(&name, wait).await
+        }
+        Route::Command(command) => command,
+    };
+    match command {
         Command::Ping => wire_exit_code(execute(Verb::Ping).await, &mut std::io::stderr()),
         Command::Whoami => wire_exit_code(execute(Verb::Whoami).await, &mut std::io::stderr()),
         Command::Status => wire_exit_code(execute(Verb::AdminStatus).await, &mut std::io::stderr()),
@@ -1094,10 +1189,7 @@ pub async fn run_cli() -> ExitCode {
         Command::Session { action } => {
             operand_exit(session_verb(action), &mut std::io::stderr()).await
         }
-        Command::Agent { provider, prompt } => agent_exit(
-            crate::agent::run(provider, prompt).await,
-            &mut std::io::stderr(),
-        ),
+        Command::Agent(_) => ExitCode::from(2),
         Command::Login => crate::login::run_login().await,
         Command::Logout => crate::login::run_logout().await,
         Command::Enroll(args) => crate::enroll::run_enroll(*args).await,
@@ -1334,13 +1426,15 @@ mod tests {
         assert!(matches!(
             super::Cli::try_parse_from(["maknae", "write", "a"])
                 .unwrap()
-                .command,
+                .command
+                .unwrap(),
             super::Command::Write { .. }
         ));
         assert!(matches!(
             super::Cli::try_parse_from(["maknae", "delete", "-r", "a"])
                 .unwrap()
-                .command,
+                .command
+                .unwrap(),
             super::Command::Delete {
                 recursive: true,
                 ..
@@ -1349,7 +1443,8 @@ mod tests {
         assert!(matches!(
             super::Cli::try_parse_from(["maknae", "mkdir", "-p", "a/b"])
                 .unwrap()
-                .command,
+                .command
+                .unwrap(),
             super::Command::Mkdir { parents: true, .. }
         ));
     }
@@ -1403,21 +1498,21 @@ mod tests {
     #[test]
     fn parses_ping() {
         let cli = Cli::try_parse_from(["maknae", "ping"]).expect("parses");
-        assert!(matches!(cli.command, Command::Ping));
+        assert!(matches!(cli.command.unwrap(), Command::Ping));
     }
 
     #[test]
     fn parses_whoami() {
         let cli = Cli::try_parse_from(["maknae", "whoami"]).expect("parses");
-        assert!(matches!(cli.command, Command::Whoami));
+        assert!(matches!(cli.command.unwrap(), Command::Whoami));
     }
 
     #[test]
     fn login_and_logout_parse_and_take_no_arguments() {
         let cli = Cli::try_parse_from(["maknae", "login"]).expect("parses");
-        assert!(matches!(cli.command, Command::Login));
+        assert!(matches!(cli.command.unwrap(), Command::Login));
         let cli = Cli::try_parse_from(["maknae", "logout"]).expect("parses");
-        assert!(matches!(cli.command, Command::Logout));
+        assert!(matches!(cli.command.unwrap(), Command::Logout));
         for argv in [
             ["maknae", "login", "password=hunter2"].as_slice(),
             ["maknae", "login", "--password", "hunter2"].as_slice(),
@@ -1430,30 +1525,85 @@ mod tests {
     }
 
     #[test]
-    fn agent_takes_an_optional_provider_label_before_the_prompt() {
-        match Cli::try_parse_from(["maknae", "agent", "--provider", "home", "hello"])
-            .unwrap()
-            .command
-        {
-            Command::Agent { provider, prompt } => {
-                assert_eq!(
-                    (provider.as_deref(), prompt.as_str()),
-                    (Some("home"), "hello")
-                )
-            }
-            other => panic!("expected Command::Agent, got {other:?}"),
+    fn dash_p_runs_the_one_shot_loop() {
+        let one_shot = |argv: &[&str]| match route(Cli::try_parse_from(argv).unwrap()) {
+            Some(Route::OneShot { provider, prompt }) => (provider, prompt),
+            other => panic!("expected the one-shot loop, got {other:?}"),
+        };
+        assert_eq!(
+            one_shot(&["maknae", "-p", "hello", "--provider", "home"]),
+            (Some("home".into()), "hello".into())
+        );
+        assert_eq!(
+            one_shot(&["maknae", "--provider", "home", "--prompt", "hello"]),
+            (Some("home".into()), "hello".into())
+        );
+        assert_eq!(one_shot(&["maknae", "-p", "hello"]), (None, "hello".into()));
+        for argv in [
+            ["maknae", "-p"].as_slice(),
+            ["maknae", "--provider", "home"].as_slice(),
+            ["maknae", "-p", "hello", "ping"].as_slice(),
+            ["maknae"].as_slice(),
+        ] {
+            assert!(Cli::try_parse_from(argv).is_err(), "{argv:?}");
         }
-        match Cli::try_parse_from(["maknae", "agent", "hello"])
-            .unwrap()
-            .command
-        {
-            Command::Agent { provider, prompt } => {
-                assert_eq!((provider, prompt.as_str()), (None, "hello"))
+        assert!(matches!(
+            route(Cli::try_parse_from(["maknae", "ping"]).unwrap()),
+            Some(Route::Command(Command::Ping))
+        ));
+    }
+
+    #[test]
+    fn agent_list_and_agent_name_route_to_the_session() {
+        assert!(matches!(
+            route(Cli::try_parse_from(["maknae", "agent", "list"]).unwrap()),
+            Some(Route::AgentList)
+        ));
+        match route(Cli::try_parse_from(["maknae", "agent", "hobi", "--wait"]).unwrap()) {
+            Some(Route::AgentSession { name, wait }) => {
+                assert_eq!((name.as_str(), wait), ("hobi", true))
             }
-            other => panic!("expected Command::Agent, got {other:?}"),
+            other => panic!("{other:?}"),
         }
-        assert!(Cli::try_parse_from(["maknae", "agent", "--provider"]).is_err());
-        assert!(Cli::try_parse_from(["maknae", "agent", "--provider", "home"]).is_err());
+        assert!(Cli::try_parse_from(["maknae", "agent"]).is_err());
+        assert!(Cli::try_parse_from(["maknae", "agent", "list", "hobi"]).is_err());
+        assert!(Cli::try_parse_from(["maknae", "agent", "--provider", "home", "hello"]).is_err());
+    }
+
+    #[test]
+    fn a_quoted_prompt_given_to_agent_is_a_name_never_a_prompt() {
+        match route(Cli::try_parse_from(["maknae", "agent", "summarize my files"]).unwrap()) {
+            Some(Route::AgentSession { name, wait: false }) => {
+                assert_eq!(name, "summarize my files")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_agent_subcommand_is_a_reserved_agent_id() {
+        use clap::CommandFactory;
+        let mut cli = Cli::command();
+        cli.build();
+        let agent = cli
+            .get_subcommands()
+            .find(|c| c.get_name() == "agent")
+            .expect("the agent subcommand");
+        let names: Vec<&str> = agent
+            .get_subcommands()
+            .flat_map(|c| std::iter::once(c.get_name()).chain(c.get_all_aliases()))
+            .collect();
+        assert!(!names.is_empty());
+        for name in names {
+            assert!(
+                maknae_config::RESERVED_AGENT_IDS.contains(&name),
+                "`maknae agent {name}` is a subcommand, so {name} must be a reserved agent id"
+            );
+        }
+        match route(Cli::try_parse_from(["maknae", "agent", "help"]).unwrap()) {
+            Some(Route::AgentSession { name, .. }) => assert_eq!(name, "help"),
+            other => panic!("help must parse as a name: {other:?}"),
+        }
     }
 
     #[test]
@@ -1482,7 +1632,7 @@ mod tests {
     #[test]
     fn enroll_parses_with_required_args() {
         let cli = Cli::try_parse_from(ENROLL_REQUIRED).expect("parses");
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Enroll(args) => {
                 assert_eq!(args.vault_ca, Some(std::path::PathBuf::from("/tmp/ca.crt")));
                 assert_eq!(args.ca_dir, None);
@@ -1530,7 +1680,7 @@ mod tests {
             "10.0.0.6",
         ])
         .unwrap();
-        match c.command {
+        match c.command.unwrap() {
             Command::Enroll(args) => match &args.sub {
                 Some(EnrollSub::Agent(a)) => {
                     assert_eq!(a.id, "hobi");
@@ -1648,7 +1798,7 @@ mod tests {
             "d",
         ])
         .unwrap();
-        match h.command {
+        match h.command.unwrap() {
             Command::Enroll(args) => {
                 assert!(args.sub.is_none());
                 assert_eq!(args.vault_addr.as_deref(), Some("https://v:8200"));
@@ -1698,7 +1848,7 @@ mod tests {
             "dev-01",
         ])
         .expect("parses");
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Enroll(args) => {
                 assert_eq!(args.ca_dir, Some(std::path::PathBuf::from("/tmp/cadir")));
                 assert_eq!(args.vault_ca, None);
@@ -1783,7 +1933,7 @@ mod tests {
             "--verbose",
         ]);
         let cli = Cli::try_parse_from(argv).expect("parses");
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Enroll(args) => {
                 assert_eq!(args.approle_mount, "alt-approle");
                 assert_eq!(args.pki_int_mount, "alt-pki-int");
@@ -1816,7 +1966,7 @@ mod tests {
     #[test]
     fn reseed_parses_and_takes_no_arguments() {
         let cli = Cli::try_parse_from(["maknae", "reseed"]).expect("parses");
-        assert!(matches!(cli.command, Command::Reseed));
+        assert!(matches!(cli.command.unwrap(), Command::Reseed));
         assert!(Cli::try_parse_from(["maknae", "reseed", "--force"]).is_err());
     }
 
@@ -2015,7 +2165,7 @@ mod tests {
             "1000",
         ])
         .expect("parses");
-        assert!(matches!(cli.command, Command::EnrollHelper(_)));
+        assert!(matches!(cli.command.unwrap(), Command::EnrollHelper(_)));
     }
 
     #[test]
@@ -2071,6 +2221,7 @@ mod tests {
             elapsed_secs: 0,
             actions: 0,
             last_action_secs: None,
+            cursor: maknae_proto::TaskCursor::from_seq(1),
         }
     }
 
@@ -2327,7 +2478,7 @@ mod tests {
     #[test]
     fn read_parses_with_a_path() {
         let cli = Cli::try_parse_from(["maknae", "read", "/home/op/notes.txt"]).unwrap();
-        assert!(matches!(cli.command, Command::Read { .. }));
+        assert!(matches!(cli.command.unwrap(), Command::Read { .. }));
     }
 
     #[test]
@@ -2498,10 +2649,12 @@ mod tests {
     #[test]
     fn the_baseline_commands_parse_and_reach_the_wire_verbs() {
         let cli = Cli::try_parse_from(["maknae", "baseline-show"]).expect("parses");
-        assert!(matches!(cli.command, Command::BaselineShow));
+        assert!(matches!(cli.command.unwrap(), Command::BaselineShow));
         let h = "ab".repeat(32);
         let cli = Cli::try_parse_from(["maknae", "baseline-accept", &h]).expect("parses");
-        assert!(matches!(&cli.command, Command::BaselineAccept { hash } if *hash == h));
+        assert!(
+            matches!(cli.command.as_ref().unwrap(), Command::BaselineAccept { hash } if *hash == h)
+        );
         assert!(Cli::try_parse_from(["maknae", "baseline-accept"]).is_err());
         assert_eq!(
             maknae_proto::Verb::from(Verb::AdminBaselineShow),
@@ -2515,12 +2668,12 @@ mod tests {
         );
         let cli = Cli::try_parse_from(["maknae", "audit-readers"]).expect("parses");
         assert!(matches!(
-            cli.command,
+            cli.command.unwrap(),
             Command::AuditReaders { stopped: false }
         ));
         let cli = Cli::try_parse_from(["maknae", "audit-readers", "--stopped"]).expect("parses");
         assert!(matches!(
-            cli.command,
+            cli.command.unwrap(),
             Command::AuditReaders { stopped: true }
         ));
     }
@@ -2533,7 +2686,7 @@ mod tests {
         ] {
             let cli = Cli::try_parse_from(argv).expect("parses");
             assert!(
-                matches!(cli.command, Command::Policy { action: PolicyCommand::Sync { check } } if check == want),
+                matches!(cli.command.unwrap(), Command::Policy { action: PolicyCommand::Sync { check } } if check == want),
                 "{argv:?}"
             );
         }
@@ -2790,7 +2943,7 @@ mod tests {
     }
 
     fn session_action(args: &[&str]) -> SessionCommand {
-        match Cli::try_parse_from(args).expect("parses").command {
+        match Cli::try_parse_from(args).expect("parses").command.unwrap() {
             Command::Session { action } => action,
             other => panic!("{other:?}"),
         }

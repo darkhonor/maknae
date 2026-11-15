@@ -115,6 +115,7 @@ always	task.submitted_secs	task.add, task.status and task.stop (#628): the calle
 always	task.elapsed_secs	task.add, task.status and task.stop (#628): the caller's own task: seconds since the task was submitted
 always	task.actions	task.add, task.status and task.stop (#628): the caller's own task: how many requests the agent made under the task; a count, never content
 always	task.last_action_secs	task.add, task.status and task.stop (#628): the caller's own task: when the agent last made a request under the task, epoch seconds
+always	task.cursor	task.add, task.status and task.stop (#630): the caller's own task: the submission sequence of this task, the value task.list takes as its cursor
 always	task_list.entries.task	task.list (#628): one of the caller's own tasks: the task's own id, which its tasker cites on later task verbs
 always	task_list.entries.agent	task.list (#628): one of the caller's own tasks: the agent the tasker gave the task to, named by the tasker
 always	task_list.entries.state	task.list (#628): one of the caller's own tasks: one fixed token: queued, working, reported or closed
@@ -123,6 +124,7 @@ always	task_list.entries.submitted_secs	task.list (#628): one of the caller's ow
 always	task_list.entries.elapsed_secs	task.list (#628): one of the caller's own tasks: seconds since the task was submitted
 always	task_list.entries.actions	task.list (#628): one of the caller's own tasks: how many requests the agent made under the task; a count, never content
 always	task_list.entries.last_action_secs	task.list (#628): one of the caller's own tasks: when the agent last made a request under the task, epoch seconds
+always	task_list.entries.cursor	task.list (#630): one of the caller's own tasks: the submission sequence of this task, the value task.list takes as its cursor
 always	task_list.next	task.list (#628): the cursor for the next page, the submission sequence of one of the caller's own tasks
 always	task_report.task	a task report, as task.collect carries it (#628): one of the caller's own tasks: the task's own id
 always	task_report.agent	a task report, as task.collect carries it (#628): one of the caller's own tasks: the agent that reported or was closed
@@ -142,3 +144,10 @@ always	task_delivery.partition	task.claim (#628): the claimed task's working dir
 always	task_follow_ups.task	task.claim (#629): the id of the claimed task these follow-ups belong to, released only to the agent holding it
 always	task_follow_ups.from	task.claim (#628): the index of the first follow-up in this answer; a count, never content
 always	task_follow_ups.items	task.claim (#628): the tasker's follow-ups to the claimed task, released only to the agent holding it
+always	agent_list.entries.agent	agent.list (#630): an agent the caller may task, or one with which it holds tasks or reports: its id
+always	agent_list.entries.standing	agent.list (#630): one agent: one fixed token: enrolled, contained, withdrawn, removed or undecided
+always	agent_list.entries.waiting	agent.list (#630): one agent: how many of the caller's own tasks wait on it; a count, never content
+always	agent_list.next	agent.list (#630): the cursor for the next page, the id of the last agent returned
+always	agent_list.undecided	agent.list (#630): how many agents on this page the kernel could not decide and with which the caller holds nothing; a count, never an id
+always	agent_list.banner.text	agent.list (#630): the operator's banner text, bounded and free of control and format characters
+always	agent_list.banner.color	agent.list (#630): the operator's banner colour: one of eight fixed names or an RGB triple; never text

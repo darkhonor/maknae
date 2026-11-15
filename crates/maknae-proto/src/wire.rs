@@ -723,6 +723,9 @@ pub enum Verb {
         text: SecretText,
         seen_follow_ups: Option<u32>,
     },
+    AgentList {
+        after: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -783,6 +786,7 @@ pub enum Payload {
     TaskDelivered(crate::TaskDelivery),
     TaskFollowUps(crate::TaskFollowUps),
     TaskIdle,
+    Agents(crate::AgentPage),
 }
 
 /// What a permitted `fs.stat` discloses: never uid, gid, mode, inode or link count.
@@ -1270,7 +1274,8 @@ pub fn class_of(verb: &Verb) -> FrameClass {
         | Verb::TaskStatus { .. }
         | Verb::TaskList { .. }
         | Verb::TaskStop { .. }
-        | Verb::TaskDrop { .. } => FrameClass::Control,
+        | Verb::TaskDrop { .. }
+        | Verb::AgentList { .. } => FrameClass::Control,
     }
 }
 

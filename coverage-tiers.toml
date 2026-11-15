@@ -258,6 +258,8 @@ files = [
   # the T1 line-drawing rule. In [t1].files ONLY (own 95% floor; NOT
   # ratchet_cohort).
   "crates/maknae-config/src/principal.rs",
+  # #630: the operator banner document; a wrong arm shows the wrong banner or boots on a file it should refuse.
+  "crates/maknae-config/src/banner.rs",
   # #115: the `deployment` section; a wrong arm boots a container as a host, or
   # checks no account state on a host that declared a source.
   "crates/maknae-config/src/deployment.rs",
@@ -364,11 +366,25 @@ files = [
   "crates/maknae-agent/src/budget.rs",
   # #170: session.list's paging and its client-side --cwd filter; a wrong match lists another directory's conversations as this one's.
   "crates/maknae-agent/src/conversations.rs",
+  # #630: the session screen's pure core. A key read as Enter submits a half-typed task; a store that drops an unseen report loses it after the kernel was told it was delivered; a composer that writes report text raw lets it move the cursor over the banner.
+  "crates/maknae-agent/src/screen/fixed.rs",
+  "crates/maknae-agent/src/screen/keys.rs",
+  "crates/maknae-agent/src/screen/editor.rs",
+  "crates/maknae-agent/src/screen/blocks.rs",
+  "crates/maknae-agent/src/screen/wrap.rs",
+  "crates/maknae-agent/src/screen/frame.rs",
+  # #630: the agent session's task book. A bare /stop that reaches a reported task stops the wrong one; an acknowledgement sent before its report is drawn removes a report nobody saw; a close read from report text lets an agent forge "stopped".
+  "crates/maknae-agent/src/tasking/book.rs",
+  "crates/maknae-agent/src/tasking/commands.rs",
+  "crates/maknae-agent/src/tasking/text.rs",
   "crates/maknae-sys/src/reply.rs",
   "crates/maknae-sys/src/macos.rs",
   # #490: whether a prepared audit trail carries the append-only flag; a false "yes" moves the trail to a file the daemon can rewrite.
   "crates/maknae-sys/src/flags.rs",
   "crates/maknae-sys/src/linux.rs",
+  # #630: the terminal's window size; a wrong answer lays the session's screen out past the terminal.
+  "crates/maknae-sys/src/term.rs",
+  "crates/maknae-io/src/term.rs",
   # The kernel graph's schema and codec (#485): a wrong check loads a forged enforcement state.
   "crates/maknae-graph/src/bytes.rs",
   "crates/maknae-graph/src/format.rs",
@@ -589,6 +605,14 @@ path = "crates/maknae-kernel/src/conversation/mod.rs"
 why = "#170: module declarations only; the chain logic is chain.rs (T1)"
 
 [[t3]]
+path = "crates/maknae-agent/src/screen/mod.rs"
+why = "#630: module declarations, two plain data types and the Commands trait; no production regions. The screen logic is in its submodules (T1)"
+
+[[t3]]
+path = "crates/maknae-agent/src/tasking/mod.rs"
+why = "#630: module declarations only; the task book, parser and text are its submodules (T1)"
+
+[[t3]]
 path = "crates/maknae-kernel/src/lib.rs"
 why = "module declarations + re-exports + PRIVILEGED_MARKER; the boot logic is boot.rs (T1)"
 
@@ -603,6 +627,10 @@ why = "#470: module declarations only, as crates/maknae-agent/src/lib.rs"
 [[t3]]
 path = "crates/maknae-loop/src/send.rs"
 why = "#470: the wire client moved from bins/maknae/src/cli.rs (T3 there for the same reason): connect and frame I/O against a live daemon over an already-minted client, with no fail-closed decision of its own. Its frame-timing and write-bound tests moved with it; the arming line it emits is decided by mutation.rs's arming_diagnostic (T2) and the outcome it returns is mapped by maknae-agent::wire (T1)"
+
+[[t3]]
+path = "crates/maknae-loop/src/tasker.rs"
+why = "#630: the tasker's verbs over a Dial, one connection each: connect and frame I/O against a live daemon with no fail-closed decision of its own. What it adds is the classification of a failure (refused, unreachable before or after the request was written, protocol), which is pinned against an in-process fake kernel by an_unreachable_kernel_is_unreachable_not_refused, a_connection_lost_after_a_submit_is_written_is_outcome_unknown, a_refused_submit_is_outcome_unknown and a_refused_status_is_not; the session decides what to do with it"
 
 [[t3]]
 path = "crates/maknae-loop/src/plane.rs"
@@ -809,7 +837,27 @@ why = "#241: the loop's I/O wiring — config, one plane client, stdout — T3 o
 
 [[t3]]
 path = "bins/maknae/src/tty.rs"
-why = "#153: the termios glue for maknae login's hidden prompt — tcgetattr/tcsetattr, an echo re-check and a byte read on stdin's descriptor; proven on a real pseudo-terminal with a 10 s watchdog (echo off, the typed bytes arrive, Ctrl-C and Ctrl-D end it, the saved mode is restored, a non-terminal is refused, and SIGINT, SIGTERM, SIGHUP and SIGQUIT are held back while echo is off and released after the restore, on the prompting thread and on every runtime thread from its start). The line discipline it drives is T1 in maknae-vault password_line.rs"
+why = "#153: the termios glue for maknae login's hidden prompt — tcgetattr/tcsetattr, an echo re-check and a byte read on stdin's descriptor; proven on a real pseudo-terminal with a 10 s watchdog (echo off, the typed bytes arrive, Ctrl-C and Ctrl-D end it, the saved mode is restored, a non-terminal is refused, and SIGINT, SIGTERM, SIGHUP and SIGQUIT are held back while echo is off and released after the restore, on the prompting thread and on every runtime thread from its start). The line discipline it drives is T1 in maknae-vault password_line.rs. Amended 2026-11-15 (#630): Restore is shared with the session screen's raw mode (screen/term.rs), and raw() is hidden() with ICRNL, INLCR, IXON, ISTRIP, BRKINT, IGNCR and PARMRK cleared."
+
+[[t3]]
+path = "bins/maknae/src/screen/mod.rs"
+why = "#630: the terminal driver's module root and its pseudo-terminal test support; no logic of its own."
+
+[[t3]]
+path = "bins/maknae/src/screen/term.rs"
+why = "#630: the session screen's terminal I/O — raw mode over tty.rs's Restore, the enter and leave mode sequences, the panic hook that restores the terminal and ends the session, the stop that is taken only where a shell can continue it, and the readiness wait for input. Proven on a real pseudo-terminal: the exact termios and mode bytes come back on drop and on a panic (observed by the panic's own hook before unwinding), and dropping the wait releases its thread. The decisions it serves are T1 in maknae-agent::screen."
+
+[[t3]]
+path = "bins/maknae/src/screen/run.rs"
+why = "#630: the session screen's run loop — stdin bytes through the fixed read buffer into maknae-agent::screen's key decoder, editor and frame composer (T1), ticks, the caller's events and signals, one write per changed frame. Proven on a real pseudo-terminal: CR and LF through the real line discipline, SIGWINCH redraws at the new size, an idle or unchanged loop writes nothing, SIGTERM, SIGHUP, SIGINT, SIGQUIT and a hang-up restore, a panic on another thread ends the session restored, and in child processes Ctrl-Z and an outside SIGTSTP stop a job with the terminal restored, SIGCONT re-enters raw mode and redraws (also after an outside SIGSTOP), and Ctrl-Z in an orphaned group does not stop."
+
+[[t3]]
+path = "bins/maknae/src/agent_session.rs"
+why = "#630: maknae agent list and maknae agent <name> wired to the kernel: the CLI's plane client and leaf, one tasker verb in flight at a time, the full-screen driver or the plain-line loop, and the exit status. Every decision it feeds is T1 in maknae-agent::tasking (the book, the command parser, the text). Tested with a fake tasker and leaf: a name off the list is refused with nothing submitted, an invalid banner opens no session, a leaf within 60 s of its NotAfter is reminted and an expired login is said as such, the plain session exits once its requests are acknowledged and with --wait once its reports are shown and acknowledged, and on a real pseudo-terminal a request is submitted and /bye leaves. Amended (fix round 1): a failed remint keeps a leaf that is still valid and says no plane identity only once it has expired, --wait ends after a /drop because the plain loop reads the next line only once the last one is answered, and the printed entry buffer never grows."
+
+[[t3]]
+path = "bins/maknae/src/screen/plain.rs"
+why = "#630: the plain-line session's reader and writer: lines in through one fixed zeroizing buffer, an over-long or non-UTF-8 line refused on the diagnostics descriptor (stderr), lines out through maknae-agent's display_safe (T1). Tested over pipes with bounded reads."
 
 [[t3]]
 path = "bins/maknae/src/login.rs"
@@ -897,6 +945,11 @@ why = "declaration-only string-table match arms, no decision logic (precedent: m
 # line_start falls within [anchor, end_anchor] from numerator AND denominator.
 # Fail-closed: zero/multi-match anchors, zero-region spans, all-covered
 # (stale) spans, blank why. Never a dodge for testable logic.
+[[exception]]
+path = "crates/maknae-io/src/host_facts.rs"
+anchor = ".map_err(|_| \"the system clock reads before 1970; set the clock, then retry\".to_string())"
+why = "now_unix's error for a system clock before the Unix epoch; a unit test cannot set the host clock, and the function takes no clock to inject. The success path is tested against the clock it reads"
+
 [[exception]]
 path = "crates/maknae-proto/src/frame.rs"
 anchor = "map_err(|_| ProtoFrameError::Oversize {"
