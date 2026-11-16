@@ -211,6 +211,8 @@ enum Command {
         #[arg(long)]
         uid: Option<u32>,
     },
+    /// The tasks containment holds, or release them. Granted by admin.release.
+    Held(HeldArgs),
     /// Print the accounts `audit.readers` grants read on the audit trail, validated, one
     /// per line. Run as root; the packages call it after every hold of /var/log/maknae.
     /// With --stopped it refuses unless maknaed is stopped (the runbook's file grant).
@@ -263,6 +265,44 @@ struct AgentArgs {
     /// sent has reported or closed.
     #[arg(long)]
     wait: bool,
+}
+
+#[derive(clap::Args, Debug)]
+#[command(args_conflicts_with_subcommands = true, disable_help_subcommand = true)]
+struct HeldArgs {
+    #[command(subcommand)]
+    sub: Option<HeldCommand>,
+    /// Only the tasks held for this account.
+    #[arg(long, conflicts_with_all = ["uid", "agent"])]
+    user: Option<String>,
+    /// Only the tasks held for this uid.
+    #[arg(long, conflicts_with = "agent")]
+    uid: Option<u32>,
+    /// Only the tasks held for this agent.
+    #[arg(long)]
+    agent: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+enum HeldCommand {
+    /// Release held tasks: one task by its id, or every task held for an account or agent.
+    Release {
+        /// The task to release, as `maknae held` prints it.
+        #[arg(
+            required_unless_present_any = ["user", "uid", "agent"],
+            conflicts_with_all = ["user", "uid", "agent"]
+        )]
+        task: Option<String>,
+        /// Release the tasks held for this account.
+        #[arg(long, conflicts_with_all = ["uid", "agent"])]
+        user: Option<String>,
+        /// Release the tasks held for this uid.
+        #[arg(long, conflicts_with = "agent")]
+        uid: Option<u32>,
+        /// Release the tasks held for this agent.
+        #[arg(long)]
+        agent: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -330,6 +370,12 @@ enum Verb {
     Release {
         target: maknae_proto::ContainTarget,
     },
+    HeldList {
+        filter: Option<maknae_proto::HeldFilter>,
+    },
+    HeldRelease {
+        target: maknae_proto::HeldTarget,
+    },
     SessionList {
         cwd: Option<PathBuf>,
     },
@@ -355,6 +401,8 @@ impl Verb {
             Verb::AdminBaselineAccept { .. } => "baseline accept",
             Verb::Contain { .. } => "contain",
             Verb::Release { .. } => "release",
+            Verb::HeldList { .. } => "held list",
+            Verb::HeldRelease { .. } => "held release",
             Verb::SessionList { .. } => "session list",
             Verb::SessionClose { .. } => "session close",
         }
@@ -475,6 +523,14 @@ impl From<Verb> for maknae_proto::Verb {
             }
             Verb::Contain { target, reason } => maknae_proto::Verb::AdminContain { target, reason },
             Verb::Release { target } => maknae_proto::Verb::AdminRelease { target },
+            Verb::HeldList { filter } => maknae_proto::Verb::AdminHeldList {
+                filter,
+                after: None,
+            },
+            Verb::HeldRelease { target } => maknae_proto::Verb::AdminHeldRelease {
+                target,
+                after: None,
+            },
             Verb::SessionList { .. } => maknae_proto::Verb::SessionList { cursor: None },
             Verb::SessionClose { conversation } => {
                 maknae_proto::Verb::SessionClose { conversation }
@@ -654,6 +710,25 @@ async fn round_trip(
         )
         .await;
     }
+    if matches!(verb, Verb::HeldList { .. } | Verb::HeldRelease { .. }) {
+        return held_pages(
+            &verb,
+            |v| async move {
+                send_verb(
+                    v,
+                    None,
+                    maknae_loop::mutation::WriteCheck::Unchecked,
+                    transport,
+                    client,
+                    trust,
+                    &mut |l| errln!("{l}"),
+                )
+                .await
+            },
+            &mut |l| println!("{l}"),
+        )
+        .await;
+    }
     match send_verb(
         request_verb,
         content,
@@ -782,9 +857,198 @@ fn release_verb(user: Option<String>, uid: Option<u32>) -> Result<Verb, String> 
     Ok(Verb::Release { target })
 }
 
+fn held_verb(args: HeldArgs) -> Result<Verb, String> {
+    match args.sub {
+        None => Ok(Verb::HeldList {
+            filter: held_filter(args.user, args.uid, args.agent)?,
+        }),
+        Some(HeldCommand::Release {
+            task,
+            user,
+            uid,
+            agent,
+        }) => Ok(Verb::HeldRelease {
+            target: held_target(task, user, uid, agent)?,
+        }),
+    }
+}
+
+fn held_filter(
+    user: Option<String>,
+    uid: Option<u32>,
+    agent: Option<String>,
+) -> Result<Option<maknae_proto::HeldFilter>, String> {
+    match (user.is_some() || uid.is_some(), agent) {
+        (false, None) => Ok(None),
+        (true, None) => Ok(Some(maknae_proto::HeldFilter::User(account_target(
+            user, uid,
+        )?))),
+        (false, Some(agent)) => Ok(Some(maknae_proto::HeldFilter::Agent(agent_operand(
+            &agent,
+        )?))),
+        (true, Some(_)) => Err("maknae: name an account or an agent, not both".into()),
+    }
+}
+
+fn held_target(
+    task: Option<String>,
+    user: Option<String>,
+    uid: Option<u32>,
+    agent: Option<String>,
+) -> Result<maknae_proto::HeldTarget, String> {
+    match (task, held_filter(user, uid, agent)?) {
+        (Some(task), None) => maknae_proto::TaskRef::parse(&task)
+            .map(maknae_proto::HeldTarget::Task)
+            .map_err(|_| {
+                "maknae: a task is 32 lowercase hex characters, as `maknae held` prints it".into()
+            }),
+        (None, Some(maknae_proto::HeldFilter::User(t))) => Ok(maknae_proto::HeldTarget::User(t)),
+        (None, Some(maknae_proto::HeldFilter::Agent(a))) => Ok(maknae_proto::HeldTarget::Agent(a)),
+        _ => Err("maknae: name one task, one account or one agent".into()),
+    }
+}
+
+fn account_target(
+    user: Option<String>,
+    uid: Option<u32>,
+) -> Result<maknae_proto::ContainTarget, String> {
+    maknae_proto::contain_target(&target_operand(user, uid)?).map_err(|e| format!("maknae: {e}"))
+}
+
+fn agent_operand(agent: &str) -> Result<String, String> {
+    maknae_config::AgentId::parse(agent)
+        .map(|id| id.as_str().to_string())
+        .map_err(|_| "maknae: not an agent id; `maknae agent list` names them".into())
+}
+
+fn held_line(v: &maknae_proto::HeldView) -> String {
+    use maknae_proto::{HeldCause as C, TaskState as S};
+    let from = match v.held_from {
+        S::Held => "unknown",
+        s => maknae_agent::tasking::text::state_word(s),
+    };
+    let cause = match v.held_for {
+        Some(C::Tasker) => "tasker contained",
+        Some(C::Root) => "root contained",
+        Some(C::Agent) => "agent contained",
+        None => "unknown",
+    };
+    let since = v
+        .held_secs
+        .map_or_else(|| "unknown".to_string(), |s| s.to_string());
+    format!(
+        "{}  {}  {}  held from {from}  cause {cause}  held since {since}",
+        v.view.task.to_id(),
+        terminal_safe(&v.view.agent),
+        terminal_safe(&v.tasker),
+    )
+}
+
+fn release_line(o: &maknae_proto::ReleaseOutcome) -> String {
+    use maknae_proto::ReleaseResult as R;
+    let task = o.task.to_id();
+    let refused = |why: &str| format!("{task} refused: {why}");
+    match (o.result, &o.parent, o.state) {
+        (R::Released, _, Some(s)) => format!(
+            "{task} released, now {}",
+            maknae_agent::tasking::text::state_word(s)
+        ),
+        (R::Released, _, None) => format!("{task} released"),
+        (R::TaskerContained, ..) => refused("tasker still contained"),
+        (R::RootContained, ..) => refused("root still contained"),
+        (R::AgentContained, ..) => refused("agent still contained"),
+        (R::ParentHeld, Some(p), _) => {
+            let p = p.to_id();
+            refused(&format!(
+                "parent {p} is held; release it first: maknae held release {p}"
+            ))
+        }
+        (R::ParentHeld, None, _) => refused("parent held"),
+        (R::NotHeld, ..) => refused("not held"),
+        (R::Unknown, ..) => refused("no such task"),
+        (R::Unauthorized, ..) => format!("{task} not authorized; check your admin.release grant"),
+        (R::NotDone, ..) => format!("{task} not done; try again"),
+        (R::OutcomeUnknown, ..) => {
+            format!("{task} outcome unknown; run maknae held to see whether it is still held")
+        }
+    }
+}
+
+async fn held_pages<F, Fut>(
+    verb: &Verb,
+    mut send: F,
+    emit: &mut dyn FnMut(String),
+) -> Result<bool, String>
+where
+    F: FnMut(maknae_proto::Verb) -> Fut,
+    Fut: std::future::Future<Output = Result<SentOutcome, String>>,
+{
+    use maknae_proto::ReleaseResult as R;
+    let mut after = None;
+    let mut all_released = true;
+    loop {
+        let wire = match verb {
+            Verb::HeldList { filter } => maknae_proto::Verb::AdminHeldList {
+                filter: filter.clone(),
+                after: after.take(),
+            },
+            Verb::HeldRelease { target } => maknae_proto::Verb::AdminHeldRelease {
+                target: target.clone(),
+                after: after.take(),
+            },
+            other => {
+                return Err(format!(
+                    "protocol error: a {} request is not a held request",
+                    other.kind()
+                ))
+            }
+        };
+        let payload = match send(wire).await? {
+            SentOutcome::Payload(p) => p,
+            SentOutcome::NotAttempted { why } => return Err(why),
+            SentOutcome::Refused { code, message, .. } => {
+                errln!("{}", refusal_line(None, &code, &message));
+                return Ok(false);
+            }
+            _ => return Err("protocol error: a held request answered with something else".into()),
+        };
+        let next =
+            match (verb, payload) {
+                (Verb::HeldList { .. }, Payload::HeldTasks(page)) => {
+                    page.entries.iter().for_each(|e| emit(held_line(e)));
+                    page.next
+                }
+                (Verb::HeldRelease { .. }, Payload::HeldReleased(page)) => {
+                    page.outcomes.iter().for_each(|o| emit(release_line(o)));
+                    all_released &= page.outcomes.iter().all(|o| o.result == R::Released);
+                    if page.outcomes.iter().any(|o| {
+                        matches!(o.result, R::NotDone | R::OutcomeUnknown | R::Unauthorized)
+                    }) {
+                        return Ok(false);
+                    }
+                    page.next
+                }
+                (v, p) => {
+                    print_payload_for_verb(v.clone(), p)?;
+                    return Ok(false);
+                }
+            };
+        match next {
+            Some(cursor) => after = Some(cursor),
+            None => return Ok(all_released),
+        }
+    }
+}
+
 fn containment_line(verb: &Verb, v: &maknae_proto::ContainmentView) -> Result<String, String> {
     use maknae_proto::ContainmentOutcome as O;
-    if !matches!(verb, Verb::Contain { .. } | Verb::Release { .. }) {
+    if !matches!(
+        verb,
+        Verb::Contain { .. }
+            | Verb::Release { .. }
+            | Verb::HeldList { .. }
+            | Verb::HeldRelease { .. }
+    ) {
         return Err(format!(
             "protocol error: daemon returned a containment payload for a {} request",
             verb.kind()
@@ -1037,7 +1301,13 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
             println!("{}", accepted_line(&hash, &v)?);
             Ok(())
         }
-        (v @ (Verb::Contain { .. } | Verb::Release { .. }), Payload::Containment(c)) => {
+        (
+            v @ (Verb::Contain { .. }
+            | Verb::Release { .. }
+            | Verb::HeldList { .. }
+            | Verb::HeldRelease { .. }),
+            Payload::Containment(c),
+        ) => {
             println!("{}", containment_line(&v, &c)?);
             Ok(())
         }
@@ -1139,6 +1409,7 @@ pub async fn run_cli() -> ExitCode {
         Command::Release { user, uid } => {
             operand_exit(release_verb(user, uid), &mut std::io::stderr()).await
         }
+        Command::Held(args) => operand_exit(held_verb(args), &mut std::io::stderr()).await,
         Command::AuditReaders { stopped } => {
             crate::audit_readers::run(nix::unistd::geteuid().as_raw(), stopped)
         }
@@ -2899,6 +3170,12 @@ mod tests {
             ),
             Ok("subject is not contained".into())
         );
+        let held = [
+            Verb::HeldList { filter: None },
+            Verb::HeldRelease {
+                target: maknae_proto::HeldTarget::User(maknae_proto::ContainTarget::Uid(1003)),
+            },
+        ];
         for o in [
             O::LastReleaser,
             O::SelfContainWithoutRelease,
@@ -2908,18 +3185,20 @@ mod tests {
             O::UnknownAccount,
             O::LookupUnavailable,
         ] {
-            assert_eq!(
-                containment_line(
-                    &c(),
-                    &V {
-                        outcome: o,
-                        target_uid: None,
-                        revision: None
-                    }
-                ),
-                Err(o.text().to_string()),
-                "{o:?}"
-            );
+            for verb in [c(), held[0].clone(), held[1].clone()] {
+                assert_eq!(
+                    containment_line(
+                        &verb,
+                        &V {
+                            outcome: o,
+                            target_uid: None,
+                            revision: None
+                        }
+                    ),
+                    Err(o.text().to_string()),
+                    "{o:?}"
+                );
+            }
         }
         assert!(print_payload_for_verb(
             Verb::AdminStatus,
@@ -3070,5 +3349,335 @@ mod tests {
                 "a".repeat(32)
             )
         );
+    }
+
+    const HELD_ID: &str = "0123456789abcdef0123456789abcdef";
+
+    fn held_verb_of(args: &[&str]) -> Result<Verb, String> {
+        match Cli::try_parse_from(args).expect("parses").command.unwrap() {
+            Command::Held(a) => held_verb(a),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn held_arguments_parse_to_one_filter_or_target() {
+        use maknae_proto::{ContainTarget as T, HeldFilter as F, HeldTarget as H};
+        let task = maknae_proto::TaskRef::parse(HELD_ID).unwrap();
+        for (args, want) in [
+            (vec!["held"], Verb::HeldList { filter: None }),
+            (
+                vec!["held", "--user", "bob"],
+                Verb::HeldList {
+                    filter: Some(F::User(T::Name("bob".into()))),
+                },
+            ),
+            (
+                vec!["held", "--uid", "7"],
+                Verb::HeldList {
+                    filter: Some(F::User(T::Uid(7))),
+                },
+            ),
+            (
+                vec!["held", "--agent", "hobi"],
+                Verb::HeldList {
+                    filter: Some(F::Agent("hobi".into())),
+                },
+            ),
+            (
+                vec!["held", "release", HELD_ID],
+                Verb::HeldRelease {
+                    target: H::Task(task),
+                },
+            ),
+            (
+                vec!["held", "release", "--user", "bob"],
+                Verb::HeldRelease {
+                    target: H::User(T::Name("bob".into())),
+                },
+            ),
+            (
+                vec!["held", "release", "--agent", "hobi"],
+                Verb::HeldRelease {
+                    target: H::Agent("hobi".into()),
+                },
+            ),
+        ] {
+            let mut argv = vec!["maknae"];
+            argv.extend(args.iter());
+            assert_eq!(held_verb_of(&argv), Ok(want), "{args:?}");
+        }
+        for bad in [
+            vec!["held", "--user", "a", "--agent", "b"],
+            vec!["held", "--user", "a", "--uid", "1"],
+            vec!["held", "release"],
+            vec!["held", "release", HELD_ID, "--user", "bob"],
+        ] {
+            let mut argv = vec!["maknae"];
+            argv.extend(bad.iter());
+            assert!(Cli::try_parse_from(&argv).is_err(), "{bad:?}");
+        }
+        for bad in ["not-hex", "0123", &HELD_ID.to_uppercase()] {
+            assert!(
+                held_verb_of(&["maknae", "held", "release", bad])
+                    .unwrap_err()
+                    .starts_with("maknae: a task is 32 lowercase hex"),
+                "{bad}"
+            );
+        }
+        assert!(held_verb_of(&["maknae", "held", "--agent", "Not An Id"])
+            .unwrap_err()
+            .starts_with("maknae: not an agent id"));
+        assert_eq!(Verb::HeldList { filter: None }.kind(), "held list");
+        assert_eq!(
+            held_verb_of(&["maknae", "held", "release", HELD_ID])
+                .unwrap()
+                .kind(),
+            "held release"
+        );
+    }
+
+    fn held_view(held_from: maknae_proto::TaskState) -> maknae_proto::HeldView {
+        let mut view = task_view();
+        view.state = maknae_proto::TaskState::Held;
+        maknae_proto::HeldView {
+            view,
+            tasker: "bob".into(),
+            held_from,
+            held_for: Some(maknae_proto::HeldCause::Tasker),
+            held_secs: Some(99),
+        }
+    }
+
+    #[test]
+    fn held_rows_render_every_cause_and_unknown_fields() {
+        use maknae_proto::{HeldCause as C, TaskState as S};
+        let zero = "0".repeat(32);
+        assert_eq!(
+            held_line(&held_view(S::Working)),
+            format!("{zero}  hobi  bob  held from working  cause tasker contained  held since 99")
+        );
+        for (cause, word) in [
+            (C::Tasker, "tasker contained"),
+            (C::Root, "root contained"),
+            (C::Agent, "agent contained"),
+        ] {
+            let mut v = held_view(S::Queued);
+            v.held_for = Some(cause);
+            assert!(held_line(&v).contains(&format!("cause {word}")), "{word}");
+        }
+        let mut v = held_view(S::Held);
+        v.held_for = None;
+        v.held_secs = None;
+        assert_eq!(
+            held_line(&v),
+            format!("{zero}  hobi  bob  held from unknown  cause unknown  held since unknown")
+        );
+        let mut v = held_view(S::Queued);
+        v.tasker = "bo\u{1b}[2Jb".into();
+        v.view.agent = "ho\u{7}bi".into();
+        let line = held_line(&v);
+        assert!(!line.chars().any(char::is_control), "{line}");
+        assert!(
+            line.contains("bo\\u{1b}[2Jb") && line.contains("ho\\u{7}bi"),
+            "{line}"
+        );
+    }
+
+    fn outcome(
+        result: maknae_proto::ReleaseResult,
+        state: Option<maknae_proto::TaskState>,
+        parent: Option<maknae_proto::TaskRef>,
+    ) -> maknae_proto::ReleaseOutcome {
+        maknae_proto::ReleaseOutcome {
+            task: maknae_proto::TaskRef::parse(HELD_ID).unwrap(),
+            result,
+            state,
+            parent,
+        }
+    }
+
+    #[test]
+    fn every_release_result_has_its_line() {
+        use maknae_proto::{ReleaseResult as R, TaskState as S};
+        let p = maknae_proto::TaskRef::parse(&"f".repeat(32)).unwrap();
+        let f = "f".repeat(32);
+        for (o, want) in [
+            (
+                outcome(R::Released, Some(S::Queued), None),
+                format!("{HELD_ID} released, now queued"),
+            ),
+            (
+                outcome(R::TaskerContained, None, None),
+                format!("{HELD_ID} refused: tasker still contained"),
+            ),
+            (
+                outcome(R::RootContained, None, None),
+                format!("{HELD_ID} refused: root still contained"),
+            ),
+            (
+                outcome(R::AgentContained, None, None),
+                format!("{HELD_ID} refused: agent still contained"),
+            ),
+            (
+                outcome(R::ParentHeld, None, Some(p)),
+                format!("{HELD_ID} refused: parent {f} is held; release it first: maknae held release {f}"),
+            ),
+            (
+                outcome(R::NotHeld, None, None),
+                format!("{HELD_ID} refused: not held"),
+            ),
+            (
+                outcome(R::Unknown, None, None),
+                format!("{HELD_ID} refused: no such task"),
+            ),
+            (
+                outcome(R::Unauthorized, None, None),
+                format!("{HELD_ID} not authorized; check your admin.release grant"),
+            ),
+            (
+                outcome(R::NotDone, None, None),
+                format!("{HELD_ID} not done; try again"),
+            ),
+            (
+                outcome(R::OutcomeUnknown, None, None),
+                format!("{HELD_ID} outcome unknown; run maknae held to see whether it is still held"),
+            ),
+        ] {
+            assert_eq!(release_line(&o), want, "{:?}", o.result);
+        }
+    }
+
+    fn page_of(results: &[maknae_proto::ReleaseResult], next: Option<u64>) -> SentOutcome {
+        SentOutcome::Payload(Payload::HeldReleased(maknae_proto::ReleasePage {
+            outcomes: results.iter().map(|r| outcome(*r, None, None)).collect(),
+            next: next.map(maknae_proto::TaskCursor::from_seq),
+        }))
+    }
+
+    fn run_pages(
+        verb: &Verb,
+        replies: Vec<SentOutcome>,
+    ) -> (Result<bool, String>, Vec<String>, Vec<maknae_proto::Verb>) {
+        let replies = std::sync::Mutex::new(replies.into_iter());
+        let sent = std::sync::Mutex::new(Vec::new());
+        let mut lines = Vec::new();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let result = rt.block_on(held_pages(
+            verb,
+            |v| {
+                sent.lock().unwrap().push(v);
+                let r = replies.lock().unwrap().next().expect("a reply is queued");
+                async move { Ok(r) }
+            },
+            &mut |l| lines.push(l),
+        ));
+        (result, lines, sent.into_inner().unwrap())
+    }
+
+    fn release_all() -> Verb {
+        Verb::HeldRelease {
+            target: maknae_proto::HeldTarget::Agent("hobi".into()),
+        }
+    }
+
+    #[test]
+    fn an_empty_held_list_prints_nothing_and_exits_zero() {
+        let page = SentOutcome::Payload(Payload::HeldTasks(maknae_proto::HeldPage {
+            entries: vec![],
+            next: None,
+        }));
+        let (result, lines, sent) = run_pages(&Verb::HeldList { filter: None }, vec![page]);
+        assert_eq!(result, Ok(true));
+        assert!(lines.is_empty());
+        assert_eq!(sent.len(), 1);
+    }
+
+    #[test]
+    fn paging_follows_next_until_none() {
+        use maknae_proto::ReleaseResult as R;
+        let (result, lines, sent) = run_pages(
+            &release_all(),
+            vec![
+                page_of(&[R::Released, R::NotHeld], Some(5)),
+                page_of(&[R::Released], Some(9)),
+                page_of(&[R::Released], None),
+            ],
+        );
+        assert_eq!(result, Ok(false));
+        assert_eq!(lines.len(), 4);
+        let afters: Vec<_> = sent
+            .iter()
+            .map(|v| match v {
+                maknae_proto::Verb::AdminHeldRelease { after, .. } => after.clone(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            afters,
+            vec![
+                None,
+                Some(maknae_proto::TaskCursor::from_seq(5)),
+                Some(maknae_proto::TaskCursor::from_seq(9))
+            ]
+        );
+
+        let list = SentOutcome::Payload(Payload::HeldTasks(maknae_proto::HeldPage {
+            entries: vec![held_view(maknae_proto::TaskState::Queued)],
+            next: Some(maknae_proto::TaskCursor::from_seq(3)),
+        }));
+        let last = SentOutcome::Payload(Payload::HeldTasks(maknae_proto::HeldPage {
+            entries: vec![held_view(maknae_proto::TaskState::Queued)],
+            next: None,
+        }));
+        let (result, lines, sent) = run_pages(&Verb::HeldList { filter: None }, vec![list, last]);
+        assert_eq!((result, lines.len(), sent.len()), (Ok(true), 2, 2));
+
+        let (result, lines, _) = run_pages(&release_all(), vec![page_of(&[R::Released], None)]);
+        assert_eq!((result, lines.len()), (Ok(true), 1));
+    }
+
+    #[test]
+    fn paging_stops_at_a_page_with_a_failed_outcome() {
+        use maknae_proto::ReleaseResult as R;
+        for stop in [R::NotDone, R::OutcomeUnknown, R::Unauthorized] {
+            let (result, lines, sent) =
+                run_pages(&release_all(), vec![page_of(&[R::Released, stop], Some(5))]);
+            assert_eq!(result, Ok(false), "{stop:?}");
+            assert_eq!((lines.len(), sent.len()), (2, 1), "{stop:?}");
+        }
+        let (result, _, sent) = run_pages(
+            &release_all(),
+            vec![
+                page_of(&[R::NotHeld], Some(5)),
+                page_of(&[R::Released], None),
+            ],
+        );
+        assert_eq!((result, sent.len()), (Ok(false), 2));
+    }
+
+    #[test]
+    fn a_refused_release_exits_non_zero() {
+        use maknae_proto::ReleaseResult as R;
+        for refused in [
+            R::TaskerContained,
+            R::RootContained,
+            R::AgentContained,
+            R::ParentHeld,
+            R::NotHeld,
+            R::Unknown,
+        ] {
+            let (result, _, _) = run_pages(&release_all(), vec![page_of(&[refused], None)]);
+            assert_eq!(result, Ok(false), "{refused:?}");
+        }
+        let busy = SentOutcome::Payload(Payload::Containment(maknae_proto::ContainmentView {
+            outcome: maknae_proto::ContainmentOutcome::Busy,
+            target_uid: None,
+            revision: None,
+        }));
+        let (result, lines, _) = run_pages(&release_all(), vec![busy]);
+        assert!(result.is_err() && lines.is_empty(), "{result:?}");
     }
 }
