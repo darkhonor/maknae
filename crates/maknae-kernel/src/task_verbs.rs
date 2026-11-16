@@ -1040,6 +1040,14 @@ mod tests {
             ),
             "agent hobi"
         );
+        let remote_fits = "r".repeat(HELD_TASKER_LABEL_MAX - "remote ".len());
+        for (id, want) in [
+            ("site-b/ops", "remote site-b/ops".to_string()),
+            (remote_fits.as_str(), format!("remote {remote_fits}")),
+            (&format!("{remote_fits}r"), "remote".to_string()),
+        ] {
+            assert_eq!(tasker_label(&Tasker::Remote(id.into()), &subjects), want);
+        }
         assert_eq!(
             [Contained::Tasker, Contained::Root, Contained::Agent].map(held_cause),
             [HeldCause::Tasker, HeldCause::Root, HeldCause::Agent]
@@ -1224,8 +1232,9 @@ mod tests {
             bool,
             Option<TaskCursor>,
         );
-        let rows: [Row; 12] = [
+        let rows: [Row; 13] = [
             (&[], None, false, None),
+            (&[], Some(3), false, None),
             (&[], Some(3), true, c(3)),
             (&[(4, R::Released), (6, R::Released)], Some(3), false, None),
             (&[(4, R::Released), (6, R::Released)], Some(3), true, c(6)),
