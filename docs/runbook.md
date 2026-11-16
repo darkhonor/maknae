@@ -1329,7 +1329,7 @@ maknae held release --agent hobi
   0f1e2d3c4b5a69788796a5b4c3d2e1f0  hobi  mallory (uid 4242)  held from working  cause tasker contained  held since 2026-11-15T09:12:44.000Z
   ```
 
-  The columns are the task, the agent it was given to, the tasker, the state it was held from, whose containment holds it (`tasker contained`, `root contained` or `agent contained`) and when the hold was written, in UTC. The tasker is the name and uid from the last applied load, `uid <n>` when the load has no name for it, `agent <id>`, or `remote <id>` (`remote` when that label is too long). A field the store did not record prints `unknown`. The list never shows the task's text, its follow-ups or its report.
+  The columns are the task, the agent it was given to, the tasker, the state it was held from, whose containment holds it (`tasker contained`, `root contained` or `agent contained`) and when the hold was written, in UTC. The tasker is the name and uid from the last applied load, `uid <n>` when the load has no name for it or the name and uid together are longer than 256 bytes, `agent <id>`, or `remote <id>` (`remote` when that is longer than 256 bytes). A field the store did not record prints `unknown`. The list never shows the task's text, its follow-ups or its report.
 - **What a release does.** Each task is released or refused on its own, one line each:
 
   ```text
