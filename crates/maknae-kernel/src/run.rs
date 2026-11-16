@@ -1275,7 +1275,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     }
 
     if let Some(t) = &task {
-        agents.tasks.acted(&t.id);
+        agents.tasks.acted(&t.id, t.start);
     }
 
     if matches!(
@@ -26326,7 +26326,7 @@ mod task_sweep_tests {
     async fn the_sweep_records_and_closes_a_lapsed_lease_and_sweeps_once_more_at_stop() {
         let (_blobs, clock, store) = mem(1_000);
         let lost = working(&store, "hobi", Tasker::Uid(1000));
-        store.acted(&lost);
+        store.acted(&lost, store.hot(&lost).map_or(0, |h| h.start));
         let trail = Trail::new(0);
         let stop = Arc::new(tokio::sync::Notify::new());
         let where_ = WhereCtx {

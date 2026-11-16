@@ -471,6 +471,7 @@ pub struct TaskStamp {
     pub id: maknae_proto::TaskId,
     pub tasker: String,
     pub root: String,
+    pub start: u64,
 }
 
 impl TaskStamp {
@@ -479,6 +480,7 @@ impl TaskStamp {
             id: cited.signed.task.task_id,
             tasker: maknae_proto::tasker_text(&cited.signed.task.tasker),
             root: cited.root.partition(),
+            start: cited.start,
         }
     }
 }
@@ -773,6 +775,7 @@ mod tests {
                 },
             }),
             root: crate::task_store::RootTasker::Person { uid: 1000 },
+            start: 0,
         });
         let tasked = build_authz_request(
             &Verb::Whoami,

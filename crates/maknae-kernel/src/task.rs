@@ -385,6 +385,7 @@ fn leaf_of(identity: Option<&maknae_vault::PlaneIdentity>) -> Option<[u8; 32]> {
 struct Held {
     tasks: BTreeMap<TaskId, TaskRecord>,
     hot: HashMap<TaskId, Hot>,
+    starts: u64,
     generations: BTreeMap<AgentId, u64>,
     enrolled: BTreeMap<AgentId, u32>,
     issued: Counters,
@@ -1737,8 +1738,10 @@ impl TaskStore {
                 self.write(&next, Some(&prior))?;
                 let handed = delivered(&next, true);
                 let mut held = self.held();
+                held.starts += 1;
+                let start = held.starts;
                 let hot = held.hot.entry(id).or_default();
-                (hot.lease_until, hot.cited) = (lease, false);
+                (hot.lease_until, hot.cited, hot.start) = (lease, false, start);
                 held.tasks.insert(id, next);
                 match held.closing.contains_key(&id) || held.holding.contains_key(&id) {
                     true => Err(TaskRefusal::AgentGone),
@@ -1831,14 +1834,15 @@ impl TaskStore {
     }
 
     /// One decided request citing the working task `id`: counted, and the lease renewed.
-    pub fn acted(&self, id: &TaskId) {
+    /// It marks the start seen only when it was resolved against that start.
+    pub fn acted(&self, id: &TaskId, start: u64) {
         let now = self.clock.now_secs();
         let mut held = self.held();
         if held.live(id).is_some_and(|r| r.state == TaskState::Working) {
             let hot = held.hot.entry(*id).or_default();
             hot.actions = hot.actions.saturating_add(1);
             hot.last_action = Some(now);
-            hot.cited = true;
+            hot.cited |= hot.start == start;
             hot.lease_until = now + CLAIM_LEASE.as_secs() as i64;
         }
     }
@@ -2022,6 +2026,7 @@ impl TaskStore {
             Some((TaskState::Working, root)) => Ok(CitedTask {
                 signed,
                 root: root.clone(),
+                start: held.hot.get(id).map_or(0, |h| h.start),
             }),
             Some((
                 TaskState::Queued | TaskState::Reported | TaskState::Closed | TaskState::Held,
@@ -2309,8 +2314,10 @@ impl TaskStore {
             .expect("the test store writes the task");
         let lease = self.clock.now_secs() + CLAIM_LEASE.as_secs() as i64;
         let mut held = self.held();
+        held.starts += 1;
+        let start = held.starts;
         let hot = held.hot.entry(*id).or_default();
-        (hot.lease_until, hot.cited) = (lease, false);
+        (hot.lease_until, hot.cited, hot.start) = (lease, false, start);
         held.tasks.insert(*id, next);
     }
 
@@ -2506,6 +2513,7 @@ fn tasker_room(held: &Held, tasker: &Tasker, agent: &AgentId) -> Result<(), Task
 pub struct CitedTask {
     pub signed: Arc<SignedTask>,
     pub root: RootTasker,
+    pub start: u64,
 }
 
 /// A sub-task works in its parent's partition, and is taken only while that parent is
@@ -5710,6 +5718,30 @@ mod tests {
         assert_eq!(store.record(&t1).unwrap().state, TaskState::Held);
     }
 
+    fn cite(store: &TaskStore, id: &TaskId) {
+        store.acted(id, store.hot(id).map_or(0, |h| h.start));
+    }
+
+    #[test]
+    fn a_request_resolved_before_a_release_does_not_mark_the_new_start_seen() {
+        let hobi = id("hobi");
+        let fresh = |store: &TaskStore| match claim_head(store, &hobi, HOBI, signer()) {
+            Ok(Claimed::Delivered { fresh, .. }) => fresh,
+            other => panic!("{other:?}"),
+        };
+        let (_blobs, store) = mem();
+        let task = held_by(&store, Tasker::Uid(BOB));
+        assert!(fresh(&store));
+        let before = store.working(&task, &hobi, HOBI).unwrap().start;
+        hold(&store, &[BOB]);
+        store.release(&task, &containing(&[])).unwrap();
+        assert!(fresh(&store));
+        store.acted(&task, before);
+        assert!(fresh(&store), "a citation of the earlier start");
+        store.acted(&task, store.working(&task, &hobi, HOBI).unwrap().start);
+        assert!(!fresh(&store));
+    }
+
     #[test]
     fn a_start_stays_fresh_until_a_request_cites_it_and_a_restart_errs_fresh() {
         let fresh = |store: &TaskStore| match claim_head(store, &id("hobi"), HOBI, signer()) {
@@ -5722,10 +5754,10 @@ mod tests {
         assert!(store.record(&task).unwrap().unseen);
         let store = reopen(&blobs);
         assert!(fresh(&store), "a lost start is fresh again after a restart");
-        store.acted(&task);
+        cite(&store, &task);
         let store = reopen(&blobs);
         assert!(fresh(&store), "a citation not yet stored errs fresh");
-        store.acted(&task);
+        cite(&store, &task);
         assert!(!fresh(&store));
         store.store_counters();
         assert!(!store.record(&task).unwrap().unseen);
@@ -5738,7 +5770,7 @@ mod tests {
         let hobi = id("hobi");
         let task = held_by(&store, Tasker::Uid(BOB));
         store.start_for_test(&task);
-        store.acted(&task);
+        cite(&store, &task);
         assert!(matches!(
             claim_head(&store, &hobi, HOBI, signer()),
             Ok(Claimed::Delivered { fresh: false, .. })
@@ -6495,7 +6527,7 @@ mod tests {
             "another uid holds nothing"
         );
         assert_eq!(claim_head(&store, &hobi, JIN, signer()), Ok(Claimed::Idle));
-        for (cite, fresh_now) in [(false, true), (true, true), (false, false)] {
+        for (cites, fresh_now) in [(false, true), (true, true), (false, false)] {
             match claim_head(&store, &hobi, HOBI, signer()).unwrap() {
                 Claimed::Delivered {
                     signed,
@@ -6508,8 +6540,8 @@ mod tests {
                 }
                 Claimed::Idle => panic!("idle"),
             }
-            if cite {
-                store.acted(&first);
+            if cites {
+                cite(&store, &first);
             }
         }
         assert_eq!(store.record(&second).unwrap().state, TaskState::Queued);
@@ -6611,7 +6643,7 @@ mod tests {
             Err(TaskRefusal::NotWorking)
         );
         store.start_for_test(&task);
-        store.acted(&task);
+        cite(&store, &task);
         assert_eq!(
             store.report(&task, &id("jin"), HOBI, text("r"), None),
             Err(TaskRefusal::OtherAgent)
@@ -6627,7 +6659,7 @@ mod tests {
             store.report(&task, &hobi, HOBI, text("again"), None),
             Err(TaskRefusal::NotWorking)
         );
-        store.acted(&task);
+        cite(&store, &task);
         assert_eq!(
             store.hot(&task).unwrap().actions,
             1,
@@ -6653,8 +6685,8 @@ mod tests {
         let idle = held_by(&store, Tasker::Uid(1000));
         store.start_for_test(&task);
         clock.set(1_010);
-        store.acted(&task);
-        store.acted(&idle);
+        cite(&store, &task);
+        cite(&store, &idle);
         assert_eq!(
             store.hot(&idle).unwrap().actions,
             0,
