@@ -10625,9 +10625,6 @@ pub(crate) fn hostname() -> String {
         .unwrap_or_else(|| "maknaed".to_string())
 }
 
-/// RFC3339 UTC timestamp (millisecond precision) with no date-library dependency, via
-/// Howard Hinnant's days-from-civil algorithm. `ts` is an AU-3 correlation field, not a
-/// security decision — but it is pinned by a unit test so a drift is caught.
 pub(crate) fn rfc3339_now() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
