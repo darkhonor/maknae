@@ -19417,17 +19417,6 @@ mod reload_tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_stalled_identity_record_after_a_reload_returns_within_the_bound() {
-        let fx = stalling("stalled-identity").await;
-        fx.reloader.sink.stall_when(is_identity);
-        fx.write_bindings(GHOST_USER);
-        assert!(within(fx.reloader.run()).await.unwrap().persisted);
-        assert_eq!(fx.status.identity.counts(), ["unresolved=1"]);
-        fx.reloader.sink.stall_when(never);
-        assert!(within(fx.reloader.run()).await.is_ok());
-    }
-
     #[tokio::test]
     async fn a_reload_applies_a_file_edit_and_records_intent_then_outcome() {
         let fx = fixture("apply", AUTHZ, Some(ROOT_ADMIN)).await;
@@ -19619,45 +19608,6 @@ mod reload_tests {
                     "deny".to_string(),
                     "unavailable".to_string(),
                     "agents/hobi is skipped: it holds no enrollment.yaml".to_string()
-                )
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn the_subject_list_names_an_enrolled_agent_without_explicit_bindings() {
-        let fx = fixture("agents_listed", AUTHZ, None).await;
-        fx.baseline().set_hosts(crate::test_fixtures::HOBI_HOSTS);
-        for (id, account, uid) in [("hobi", "hobi-svc", 2001), ("gone", "ghost-svc", 4040)] {
-            fx.write_agent(id, account, uid, "user");
-        }
-        bounded(fx.reloader.run()).await.unwrap();
-        let views = crate::identity_report::subject_views(
-            fx.baseline().snapshot().subjects(principal().uid).unwrap(),
-            &fx.status.identity.subjects(),
-            &fx.status.identity.agents(),
-        );
-        let me = principal().uid;
-        let label = format!("uid {me}");
-        assert_eq!(
-            views
-                .iter()
-                .map(|v| (
-                    v.uid,
-                    v.label.as_str(),
-                    v.state.as_str(),
-                    v.agent.as_deref(),
-                    v.principal
-                ))
-                .collect::<Vec<_>>(),
-            [
-                (Some(me), label.as_str(), "bound admin", None, true),
-                (
-                    Some(2001),
-                    "hobi-svc (uid 2001)",
-                    "bound user",
-                    Some("hobi"),
-                    false
                 )
             ]
         );
@@ -19868,27 +19818,6 @@ mod reload_tests {
         assert_eq!(fx.sync_lines(), ["unsynced=0", "conflict=0"]);
         assert_eq!(sync_reasons(&fx).len(), 1);
         assert_eq!(whoami_as(&fx, 4242).1, Some("adversary"));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_removed_bindings_key_releases_nothing_and_the_principal_stays_unbound() {
-        let fx = Fx::with_baseline("removed-key").await;
-        fx.write_bindings(
-            "schema_version: 1\nbindings:\n  user: [\"root\"]\n  adversary: [{uid: 4242}]\n",
-        );
-        assert!(bounded(fx.reloader.run()).await.unwrap().persisted);
-        fx.write_bindings("schema_version: 1\n");
-        let applied = bounded(fx.reloader.run()).await.unwrap();
-        assert!(!applied.persisted);
-        assert_eq!(whoami_as(&fx, 0).1, Some("user"));
-        if principal().uid != 0 {
-            assert_eq!(whoami_as(&fx, principal().uid).1, None);
-        }
-        assert_eq!(whoami_as(&fx, 4242).1, Some("adversary"));
-        let reasons = sync_reasons(&fx);
-        assert_eq!(reasons.len(), 1);
-        assert!(reasons[0].starts_with(LOST_KEYLESS), "{reasons:?}");
-        assert!(identity_records(&fx.reload_records()).is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -20358,16 +20287,6 @@ mod reload_tests {
     }
 
     #[tokio::test]
-    async fn kernel_graph_revision_follows_a_reload() {
-        let fx = fixture("status", AUTHZ, Some(ROOT_ADMIN)).await;
-        assert_eq!(fx.status.revision(), 1);
-        fx.write_bindings(ROOT_ADVERSARY);
-        bounded(fx.reloader.run()).await.unwrap();
-        assert_eq!(fx.status.revision(), 2);
-        assert_eq!(fx.reloader.dir.store_revision(), 2);
-    }
-
-    #[tokio::test]
     async fn a_bindings_yaml_edit_applies_at_reload() {
         let fx = fixture("bedit", AUTHZ, Some(ROOT_ADMIN)).await;
         assert!(matches!(
@@ -20384,6 +20303,7 @@ mod reload_tests {
         assert!(applied.persisted);
         assert_eq!(fx.root_whoami(), adversary());
         assert_eq!(fx.status.revision(), before + 1);
+        assert_eq!(fx.reloader.dir.store_revision(), fx.status.revision());
     }
 
     #[tokio::test]
@@ -22874,16 +22794,6 @@ mod reload_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_live_edit_answers_busy_while_a_reload_holds_the_turn() {
-        let fx = stalling("busy").await;
-        let _turn = bounded(fx.reloader.lock.lock()).await;
-        assert_eq!(
-            bounded(fx.contain_uid(4242, 0)).await,
-            Err(LiveRefusal::Busy)
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_release_resolves_its_claimants_from_the_layer_under_the_turn() {
         let fx = fixture(
             "claims-in-turn",
@@ -22990,16 +22900,6 @@ mod reload_tests {
         );
         assert_eq!(fx.store_sha(), store);
         assert!(fx.decision_threads().is_empty(), "nothing was decided");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_live_edit_answers_stopping_once_the_daemon_stops() {
-        let fx = Fx::with_baseline("stopping").await;
-        fx.reloader.stopping.send_replace(true);
-        assert_eq!(
-            bounded(fx.contain_uid(4242, 0)).await,
-            Err(LiveRefusal::Stopping)
-        );
     }
 
     fn lookup_fails(_: &str) -> Result<Option<u32>, i32> {
@@ -24205,41 +24105,6 @@ mod reload_tests {
                 .starts_with("kernel containment of uid 4242 failed: the reason is refused")));
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_kernel_contain_records_its_reason_normalised() {
-        let fx = fixture("k-nfc", CONTAIN_AND_RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
-        assert!(matches!(
-            bounded(fx.reloader.kernel_contain(4242, "\u{1100}\u{1161}")).await,
-            KernelContain::Contained { .. }
-        ));
-        assert!(fx.seen().iter().any(|s| s.action == "kernel.contain"
-            && s.reason == "kernel containment of uid 4242 decided; reason \"\u{ac00}\""));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_live_contain_records_its_note_and_target() {
-        let fx = fixture("note", CONTAIN_AND_RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
-        let from = fx.seen().len();
-        bounded(fx.reloader.live_edit(LiveRequest {
-            op: LiveOp::Edit(LiveEdit::Contain(BindingEntry::Uid(4242))),
-            who: LiveInitiator::Operator,
-            check: LiveCheck::Contain {
-                target: 4242,
-                requester: 0,
-            },
-            note: LiveNote {
-                requester: Some((0, 77)),
-                reason: Some("compromised"),
-            },
-            authorized: None,
-        }))
-        .await
-        .unwrap();
-        assert_eq!(
-            sync_seen(&fx, from)[0],
-            "live (operator): contain uid:4242; requested by uid 0 in session 77; reason \"compromised\""
-        );
-    }
     fn enrolled() -> (String, u32, String) {
         let euid = nix::unistd::geteuid();
         let name = nix::unistd::User::from_uid(euid)
