@@ -1751,7 +1751,7 @@ printf 'summarize the notes directory\n' | maknae agent hobi --wait
 
 ## Tasks
 
-A person or another agent gives an enrolled agent a task with `session.task`; `maknaed` decides it, signs it, stores it and hands it to the agent when the agent claims. Tasks are kept on disk, sealed, in `STATE_DIR/tasks` ([configuration §2.6](configuration.md#26-tasks-628)), so a restart keeps every queued, working and reported task. The CLI that sends tasks is #630 and the agent process that claims them is #629; until they land, nothing on a host sends these verbs.
+A person or another agent gives an enrolled agent a task with `session.task`; `maknaed` decides it, signs it, stores it and hands it to the agent when the agent claims. Tasks are kept on disk, sealed, in `STATE_DIR/tasks` ([configuration §2.6](configuration.md#26-tasks-628)), so a restart keeps every queued, working and reported task. People task an agent with `maknae agent <name>` ([Task an agent](#task-an-agent)); the agent process that claims and works tasks is `maknae-agentd`; an agent tasks another with its model's `task_agent` tool ([Agents task agents](#agents-task-agents)).
 
 A task is `queued` until the agent claims it, then `working`. The agent's report makes it `reported`; a stop, or a close by the kernel, makes it `closed`. The tasker collects reports and closes, and a collected one is removed. A report or close nobody collects expires after 30 days.
 
@@ -1759,11 +1759,22 @@ A task is `queued` until the agent claims it, then `working`. The agent's report
 
 **A contained subject's tasks are held.** When a person is contained, every task they gave, and every sub-task under one, becomes `held`, whatever state it was in. When an agent is contained, every open task it holds becomes `held`, and so does every task it gave and every task in a chain it started. A contained agent is given no new task: a submission that names it is refused, `session.task: agent <id> is contained`. A submission caught by a containment while it is being stored is either refused (`the tasker, the root of its chain or the agent is contained`) or, if its `task stored` record was already written, recorded `task held: …` and stored `held`. A sub-task is refused (`the cited task is not held by the submitting agent`) once its parent is held, due a hold or due a close. A held task is never handed out, reported on, added to, stopped, dropped, collected, expired or closed, and its lease no longer runs: it stays exactly as it was, with the state it was held from recorded, as possible evidence. The agent's next heartbeat answers `held`, which tells it to stop and leave the partition untouched. Releasing the subject from containment does not release its tasks; an administrator releases them once no cause is contained ([Release held tasks](#release-held-tasks)).
 
-The kernel closes a task itself in three cases, and keeps the closed record for the tasker:
+The kernel closes a task itself in these cases, and keeps the closed record for the tasker:
 
 - **`agent-gone`:** the agent was de-enrolled, or its account's uid changed. The tasks are marked at the reload that installs the change, so the agent is refused them from then on, and are closed by the reload's own pass or the next sweep.
 - **`agent-lost`:** a working task's lease lapsed. The lease is 15 minutes, renewed by each request that cites the task, permitted or denied, and by each heartbeat. At start every working task's lease begins again.
 - **`withdrawn`:** a queued task's tasker may no longer task the agent, found when the task was about to be handed out.
+- **`parent-ended`:** a sub-task whose parent stopped working: the parent was stopped, reported, lapsed, removed, or released to start again. Nothing waits for it any more, so the kernel closes it and keeps no record for anyone to collect (`closed:parent-ended` in the trail), and removes a sub-task that had already reported or closed (`removed:parent-ended`). It is never handed out, and its agent's next request citing it is refused.
+
+### Agents task agents
+
+An agent gives another enrolled agent a task with its model's `task_agent` tool, while it works a task of its own. The target's `taskers:` must list it (`agent:<id>`), and its role must grant `session.task`, as for a person.
+
+- **The sub-task.** It is submitted citing the working task, works in the root's partition of the target's home, and its first turn says which agent gave it (`Task from agent <id>:`). The two agents' files stay apart: the target cannot read the tasking agent's home or the other way round, so what the target needs goes in the prompt and what comes back is the report (#661 tracks passing files).
+- **Waiting.** The tool waits until the sub-task reports or ends, with no time limit. A sub-task whose agent stops responding is closed `agent-lost` when its lease lapses; stopping the tasking agent's own task ends the wait and closes the sub-task `parent-ended`. While it waits, follow-ups to the tasking agent's task are held until the tool returns.
+- **The report.** The whole report is written to `reports/<sub-task>.md` in the tasking agent's partition and its start is shown to the model, with the path; the model reads the rest with `read_file`. A refused write leaves only the start, and says so.
+- **Refusals.** Every refused submission reads `not accepted, or its outcome is unknown; do not retry it`, so the model never learns whether the target exists or why. A submission whose target is, through the tasks it is waiting on, already waiting on the tasking agent is refused, so two or more agents can never wait on each other (`task chain already waits on agent <id>` in the trail).
+- **What an agent can reach.** An agent's status, add, stop, drop, list and collect, citing its working task, reach only the sub-tasks of that task.
 
 ### What the trail shows
 

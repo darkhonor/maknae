@@ -430,7 +430,7 @@ The kernel stores each task given to an enrolled agent in the `tasks/` directory
 | a person, by uid | `<agent home>/tasks/users/<uid>` |
 | an agent starting a chain of its own | `<agent home>/tasks/agents/<id>` |
 
-A sub-task, one an agent gives while it works a task, works in its root's partition. The kernel names the partition, relative to the agent's home, when it hands the task out; the agent process creates it (#629). The fourth mandatory operand, `maknae-partition`, decides every file request an agent makes, whatever its role and `policy.yaml` grant:
+A sub-task, one an agent gives while it works a task (its model's `task_agent` tool, [runbook](runbook.md#agents-task-agents)), works in its root's partition and ends when its parent stops working (`parent-ended`). The kernel names the partition, relative to the agent's home, when it hands the task out; the agent process creates it (#629). The fourth mandatory operand, `maknae-partition`, decides every file request an agent makes, whatever its role and `policy.yaml` grant:
 
 - inside the partition of the task the request cites, and anywhere outside `<agent home>/tasks`, the other operands decide;
 - `<agent home>/tasks`, `tasks/users` and `tasks/agents` may be listed, statted and created, and nothing more; a listing of them shows only the cited task's own partition;
@@ -817,7 +817,7 @@ The top-level key is `providers` only, a list of at most **32** entries. Each en
 | `model` | yes | 1 to 128 printable ASCII characters with no whitespace; it must be on that provider's `models` list. |
 | `key` | yes | a map of exactly `subpath` and `field` — where your API key is in Vault, never the key itself. `subpath`: at most 256 bytes, `/`-separated segments of `[A-Za-z0-9._-]`, with no empty, `.`, `..` or `data` segment and no leading or trailing `/`. `field`: 1 to 64 printable ASCII characters with no whitespace — the field name inside your Vault secret. |
 | `context_tokens` | yes | the model's context window in tokens, at most 16,777,216. |
-| `output_tokens` | no | the reply cap sent with every request: at least 1, and `context_tokens` less `output_tokens` must exceed the 2,688-token preamble allowance. |
+| `output_tokens` | no | the reply cap sent with every request: at least 1, and `context_tokens` less `output_tokens` must exceed the 3,136-token preamble allowance. |
 | `default` | no | `true` or `false` (default `false`). |
 
 **How the CLI prints these.** `maknae -p` prints every setup refusal after `maknae: ` and exits 1 (`bins/maknae/src/cli.rs`); `maknae login` prints its own after `maknae login: ` (`bins/maknae/src/login.rs`). The texts below are quoted without the prefix.
@@ -825,7 +825,7 @@ The top-level key is `providers` only, a list of at most **32** entries. Each en
 Every refusal of this file reads `providers.yaml: <reason>` (`UserProviders`), for example `providers.yaml: providers[0].context_tokens is required: declare the model's context window in tokens`. Two worth knowing:
 
 - Writing `key:` as a string refuses with `providers.yaml: providers[<i>].key must be a map of subpath and field; the API key itself is stored only in Vault, never in this file`. Another spelling, such as `api_key:`, refuses as an unknown key.
-- `maknae -p` checks the budget before it sends anything, prefixed by the entry's label: `provider entry <label>: context_tokens <N> is above the 16777216 ceiling`, `provider entry <label>: output_tokens must be at least 1`, or `provider entry <label>: context_tokens less output_tokens must exceed the 2688-token preamble allowance` (`crates/maknae-agent/src/budget.rs`). The smallest window accepted is therefore 2,689.
+- `maknae -p` checks the budget before it sends anything, prefixed by the entry's label: `provider entry <label>: context_tokens <N> is above the 16777216 ceiling`, `provider entry <label>: output_tokens must be at least 1`, or `provider entry <label>: context_tokens less output_tokens must exceed the 3136-token preamble allowance` (`crates/maknae-agent/src/budget.rs`). The smallest window accepted is therefore 3,137.
 
 **Which entry a turn uses.**
 
