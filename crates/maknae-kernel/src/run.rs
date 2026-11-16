@@ -7758,6 +7758,7 @@ where
         let plan = self.tasks.release_plan(&id, view);
         let (tasker, parent) = match &plan {
             Ok(p) => (Some(p.tasker.clone()), p.parent),
+            Err(ReleaseRefusal::ParentHeld(parent)) => (None, Some(*parent)),
             Err(_) => (None, None),
         };
         let planned: Result<Released, ReleaseRefusal> = plan.map(|p| Released {
@@ -22078,6 +22079,14 @@ mod reload_tests {
         assert_eq!(
             records[2].subject.tasker.as_deref(),
             Some(format!("uid:{}", daemon_uid()).as_str())
+        );
+        assert_eq!(
+            (
+                records[1].subject.parent_task_id.clone(),
+                records[1].subject.tasker.clone()
+            ),
+            (Some(t1.to_string()), None),
+            "a parent-held refusal names the parent that blocks it"
         );
         assert_eq!(records[3].subject.parent_task_id, Some(t1.to_string()));
         for r in fx.records() {

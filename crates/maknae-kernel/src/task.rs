@@ -36,6 +36,12 @@ pub struct GoodStanding {
     pub load: Load,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Confirm {
+    Queued,
+    Held,
+}
+
 /// The trail's reason for a hold.
 pub(crate) fn held_reason(who: Contained, agent: &AgentId) -> String {
     match who {
@@ -1904,8 +1910,8 @@ impl TaskStore {
     }
 
     /// Makes a minted task visible, once its submission is audited. A task marked due a
-    /// hold is refused until the caller has recorded the hold and passes `held_for`; it
-    /// is then stored held, never queued. The `ticket` is
+    /// hold is refused until the caller has recorded the hold and passes `Confirm::Held`;
+    /// it is then stored held, never queued, for the cause its mark names. The `ticket` is
     /// kept before anything is written: a submission that gave up first leaves the record
     /// pending, and one that gives up later can only call the outcome unknown. A write
     /// that fails once kept is taken back.
@@ -1913,10 +1919,10 @@ impl TaskStore {
         &self,
         id: &TaskId,
         ticket: Option<&Ticket>,
-        held_for: Option<Contained>,
+        how: Confirm,
     ) -> Result<(), TaskRefusal> {
         let _w = self.writing();
-        let mut next = {
+        let (mut next, cause) = {
             let mut held = self.held();
             let prior = held
                 .tasks
@@ -1924,19 +1930,19 @@ impl TaskStore {
                 .filter(|r| r.pending)
                 .cloned()
                 .ok_or(TaskRefusal::Unknown)?;
-            if held_for.is_none() && held.holding.contains_key(id) {
+            if how == Confirm::Queued && held.holding.contains_key(id) {
                 return Err(TaskRefusal::Unavailable(DUE_A_HOLD.into()));
             }
             if ticket.is_some_and(|t| !t.keep(*id)) {
                 return Err(abandoned());
             }
             held.expose(prior.clone());
-            prior
+            (prior, held.holding.get(id).copied())
         };
         next.pending = false;
-        if held_for.is_some() {
+        if how == Confirm::Held {
             next.held_from = Some(next.state);
-            next.held_for = held_for;
+            next.held_for = cause;
             next.held_at = Some(self.clock.now_secs());
             next.state = TaskState::Held;
         }
@@ -2300,7 +2306,7 @@ impl TaskStore {
         sub: TaskSubmission,
     ) -> Result<Arc<SignedTask>, TaskRefusal> {
         let t = self.mint(signer, view, enrolled, tasker, parent, sub)?;
-        self.confirm(&t.task.task_id, None, None)?;
+        self.confirm(&t.task.task_id, None, Confirm::Queued)?;
         Ok(t)
     }
 
@@ -2317,7 +2323,7 @@ impl TaskStore {
         sub: TaskSubmission,
     ) -> Result<Arc<SignedTask>, TaskRefusal> {
         let t = self.mint_with(draw, signer, view, enrolled, tasker, parent, sub, None)?;
-        self.confirm(&t.task.task_id, None, None)?;
+        self.confirm(&t.task.task_id, None, Confirm::Queued)?;
         Ok(t)
     }
 
@@ -2860,15 +2866,19 @@ async fn submit_under<P: Authorizer + Send + Sync + 'static>(
             let id = task.task.task_id;
             let ticket = Arc::new(Ticket::default());
             let mut held_for = store.hold_mark(&id);
+            let mut how = match held_for {
+                Some(_) => Confirm::Held,
+                None => Confirm::Queued,
+            };
             let mut confirmed = Err(TaskRefusal::Unknown);
             for _ in 0..2 {
-                if let Some(who) = held_for {
+                if how == Confirm::Held {
                     let mut hold = attempt.record(ctx, Some(&task.task), None);
                     hold.outcome.result = "deny".into();
                     hold.outcome.posture = "unavailable".into();
-                    hold.outcome.reason = match AgentId::parse(&task.task.agent) {
-                        Ok(agent) => held_reason(who, &agent),
-                        Err(_) => "task held: contained".into(),
+                    hold.outcome.reason = match (held_for, AgentId::parse(&task.task.agent)) {
+                        (Some(who), Ok(agent)) => held_reason(who, &agent),
+                        (None, _) | (_, Err(_)) => "task held: contained".into(),
                     };
                     let said = emit
                         .emit_within(&hold, crate::blocking_guard::AUDIT_APPEND_TIMEOUT)
@@ -2879,13 +2889,13 @@ async fn submit_under<P: Authorizer + Send + Sync + 'static>(
                     }
                 }
                 let (s, t) = (Arc::clone(store), Arc::clone(&ticket));
-                confirmed =
-                    offload(uid, deadline, move || s.confirm(&id, Some(&t), held_for)).await;
+                confirmed = offload(uid, deadline, move || s.confirm(&id, Some(&t), how)).await;
                 match &confirmed {
                     Err(TaskRefusal::Unavailable(why))
-                        if why == DUE_A_HOLD && held_for.is_none() =>
+                        if why == DUE_A_HOLD && how == Confirm::Queued =>
                     {
-                        held_for = Some(store.hold_mark(&id).unwrap_or(Contained::Tasker));
+                        held_for = store.hold_mark(&id);
+                        how = Confirm::Held;
                     }
                     _ => break,
                 }
@@ -3682,7 +3692,10 @@ mod tests {
         assert_eq!(store.state_for(&mine, &me), Some(TaskState::Queued));
         assert_eq!(store.state_for(&theirs, &me), None);
         assert!(store.status(&theirs, &me).is_none());
-        assert_eq!(store.confirm(&mine, None, None), Err(TaskRefusal::Unknown));
+        assert_eq!(
+            store.confirm(&mine, None, Confirm::Queued),
+            Err(TaskRefusal::Unknown)
+        );
         assert_eq!(
             store.follow_up(&theirs, &me, text("x"), 10).unwrap_err(),
             TaskRefusal::Unknown
@@ -3841,7 +3854,7 @@ mod tests {
                 agent: "hobi".into()
             }
         );
-        store.confirm(&pending, None, None).unwrap();
+        store.confirm(&pending, None, Confirm::Queued).unwrap();
         assert_eq!(store.state_for(&pending, &me), Some(TaskState::Queued));
         let (page, next) = store.list(&me, &id("hobi"), None, 10);
         assert_eq!(page.len(), 10);
@@ -4511,7 +4524,9 @@ mod tests {
         let ticket = Ticket::default();
         assert_eq!(ticket.abandon(), None);
         blobs.after_save(|| panic!("an abandoned confirm writes nothing"));
-        assert!(store.confirm(&task, Some(&ticket), None).is_err());
+        assert!(store
+            .confirm(&task, Some(&ticket), Confirm::Queued)
+            .is_err());
         let reopened =
             TaskStore::open(Box::new(blobs), Arc::new(crate::task_store::SystemClock)).unwrap();
         assert_eq!(reopened.len(), 0);
@@ -4540,7 +4555,7 @@ mod tests {
         let seen = Arc::new(Mutex::new(None));
         let (t, s) = (Arc::clone(&ticket), Arc::clone(&seen));
         blobs.after_save(move || *s.lock().unwrap() = Some(t.abandon()));
-        assert_eq!(store.confirm(&task, Some(&ticket), None), Ok(()));
+        assert_eq!(store.confirm(&task, Some(&ticket), Confirm::Queued), Ok(()));
         assert_eq!(
             *seen.lock().unwrap(),
             Some(Some(task)),
@@ -5117,12 +5132,12 @@ mod tests {
             "a writer passing keeps the mark of a submission not yet confirmed"
         );
         assert_eq!(
-            store.confirm(&task, None, None),
+            store.confirm(&task, None, Confirm::Queued),
             Err(TaskRefusal::Unavailable(DUE_A_HOLD.into())),
             "not published as queued work"
         );
         assert!(store.record(&task).is_none());
-        assert_eq!(store.confirm(&task, None, Some(Contained::Tasker)), Ok(()));
+        assert_eq!(store.confirm(&task, None, Confirm::Held), Ok(()));
         let rec = store.record(&task).unwrap();
         assert_eq!(
             (rec.state, rec.held_from, rec.held_for),
@@ -5142,6 +5157,29 @@ mod tests {
         );
         let reopened = reopen(&blobs);
         assert_eq!(reopened.record(&task).unwrap().state, TaskState::Held);
+
+        let unmarked = store
+            .mint(
+                signer(),
+                &v,
+                at(0, HOBI),
+                Tasker::Uid(1000),
+                None,
+                sub("hobi"),
+            )
+            .unwrap()
+            .task
+            .task_id;
+        store.mark_unenrolled(&containing(&[1000]));
+        store.held().holding.remove(&unmarked);
+        assert_eq!(store.confirm(&unmarked, None, Confirm::Held), Ok(()));
+        let rec = store.record(&unmarked).unwrap();
+        assert_eq!(
+            (rec.state, rec.held_for),
+            (TaskState::Held, None),
+            "a hold whose mark is gone names no cause"
+        );
+        assert_eq!(reopen(&blobs).record(&unmarked).unwrap().held_for, None);
     }
 
     #[test]
@@ -7168,7 +7206,7 @@ mod tests {
             .task_id;
         blobs.fail(Some(crate::task_store::Fail::Unsynced));
         assert!(matches!(
-            store.confirm(&task, None, None),
+            store.confirm(&task, None, Confirm::Queued),
             Err(TaskRefusal::Store(_))
         ));
         assert!(!store.withdraw(&task), "the unlink is not proven either");
@@ -7198,7 +7236,7 @@ mod tests {
             .task_id;
         blobs.after_save(|| panic!("sentinel-628-confirm-panic"));
         let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            store.confirm(&task, None, None)
+            store.confirm(&task, None, Confirm::Queued)
         }));
         assert!(unwound.is_err());
         blobs.fail(Some(crate::task_store::Fail::Unlinks));

@@ -809,7 +809,7 @@ mod tests {
             agent_uid: HOBI,
         };
         let t = store.mint(&Unverified, &v, enrolled, Tasker::Uid(1000), None, sub)?;
-        store.confirm(&t.task.task_id, None, None)?;
+        store.confirm(&t.task.task_id, None, crate::task::Confirm::Queued)?;
         Ok(t)
     }
 
