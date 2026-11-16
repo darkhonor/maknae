@@ -1019,6 +1019,14 @@ mod tests {
             self.log(format!("stat {p}"));
             StatOutcome::Unavailable
         }
+        async fn mkdir(&mut self, _: &str, p: &str) -> crate::plane::MkdirOutcome {
+            self.log(format!("mkdir {p}"));
+            crate::plane::MkdirOutcome::Unavailable
+        }
+        async fn delete(&mut self, _: &str, p: &str, _: bool) -> crate::plane::DeleteOutcome {
+            self.log(format!("delete {p}"));
+            crate::plane::DeleteOutcome::Unavailable
+        }
     }
 
     impl TaskPlane for Fake {

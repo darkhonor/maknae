@@ -3,7 +3,8 @@
 use crate::keys::KeySupply;
 use crate::plane::{Dial, LoopPlane, PlaneDial};
 use maknae_agent::plane::{
-    ListOutcome, Plane, PlaneError, ReadBasis, ReadOutcome, StatOutcome, WriteOutcome,
+    DeleteOutcome, ListOutcome, MkdirOutcome, Plane, PlaneError, ReadBasis, ReadOutcome,
+    StatOutcome, WriteOutcome,
 };
 use maknae_agent::task::{BeatAnswer, ClaimAnswer, ReportOutcome};
 use maknae_agent::task_driver::{DriverEvent, PersonaAt, TaskPlane, Unverified};
@@ -186,6 +187,12 @@ impl<K: KeySupply, R: PersonaRead, D: Dial> Plane for AgentPlane<K, R, D> {
     async fn stat(&mut self, conversation: &str, path: &str) -> StatOutcome {
         self.plane.stat(conversation, path).await
     }
+    async fn mkdir(&mut self, conversation: &str, path: &str) -> MkdirOutcome {
+        Plane::mkdir(&mut self.plane, conversation, path).await
+    }
+    async fn delete(&mut self, conversation: &str, path: &str, recursive: bool) -> DeleteOutcome {
+        Plane::delete(&mut self.plane, conversation, path, recursive).await
+    }
     fn take_diagnostics(&mut self) -> Vec<String> {
         self.plane.take_diagnostics()
     }
@@ -311,7 +318,7 @@ mod tests {
         use crate::plane::fake::{refused, FakeKernel};
         use maknae_proto::Verb;
         let ca = TestCa::new(PlaneKey::MlDsa87);
-        let verbs = 13;
+        let verbs = 15;
         let lp = LoopPlane::with_dial(
             FakeKernel::answering(vec![refused(); verbs]),
             maknae_config::TransportConfig::default(),
@@ -359,6 +366,8 @@ mod tests {
             .await;
         let _ = plane.list("c", d, None).await;
         let _ = plane.stat("c", d).await;
+        let _ = Plane::mkdir(&mut plane, "c", &format!("{d}/made-158")).await;
+        let _ = Plane::delete(&mut plane, "c", &format!("{d}/gone-158"), true).await;
         let _ = plane.close(&conversation).await;
         plane.cite(None);
         let _ = plane
@@ -401,7 +410,22 @@ mod tests {
                         seen_follow_ups: Some(3),
                     } => "heartbeat",
                     Verb::TaskReport { .. } => "report",
-                    Verb::FsMkdir { parents: true, .. } => "mkdir",
+                    Verb::FsMkdir {
+                        parents: true,
+                        conversation: None,
+                        ..
+                    } => "mkdir",
+                    Verb::FsMkdir {
+                        parents: true,
+                        conversation: Some(c),
+                        path,
+                        ..
+                    } if c == "c" && path.ends_with("/made-158") => "model-mkdir",
+                    Verb::FsDelete {
+                        recursive: true,
+                        conversation: Some(c),
+                        path,
+                    } if c == "c" && path.ends_with("/gone-158") => "delete",
                     Verb::SessionNew { .. } => "open",
                     Verb::SessionPrompt { .. } => "prompt",
                     Verb::Read {
@@ -433,6 +457,8 @@ mod tests {
                 cited("write"),
                 cited("list"),
                 cited("stat"),
+                cited("model-mkdir"),
+                cited("delete"),
                 cited("close"),
                 ("report", None),
                 cited("persona"),

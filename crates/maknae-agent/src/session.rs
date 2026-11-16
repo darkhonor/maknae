@@ -415,6 +415,14 @@ mod tests {
             self.paths.push(p.into());
             StatOutcome::Unavailable
         }
+        async fn mkdir(&mut self, _c: &str, p: &str) -> crate::plane::MkdirOutcome {
+            self.paths.push(p.into());
+            crate::plane::MkdirOutcome::Unavailable
+        }
+        async fn delete(&mut self, _c: &str, p: &str, _r: bool) -> crate::plane::DeleteOutcome {
+            self.paths.push(p.into());
+            crate::plane::DeleteOutcome::Unavailable
+        }
     }
     fn fake(replies: Vec<PromptReply>) -> Fake {
         Fake {
@@ -522,7 +530,7 @@ mod tests {
             "c",
             &"q".repeat(1_700),
             budget(),
-            ContextBudget::new(3_000, None).unwrap(),
+            ContextBudget::new(3_384, None).unwrap(),
             None,
         );
         let mut p = fake(vec![answer("one"), answer("two")]);

@@ -1079,12 +1079,19 @@ mod tests {
     }
 
     #[test]
-    fn baseline_catalog_is_exactly_the_four_maknae_tools() {
+    fn baseline_catalog_is_exactly_the_six_maknae_tools() {
         let catalog = baseline_catalog();
         let names: Vec<&str> = catalog.iter().map(|t| t.function.name.as_str()).collect();
         assert_eq!(
             names,
-            vec!["read_file", "write_file", "list_directory", "stat_path"]
+            vec![
+                "read_file",
+                "write_file",
+                "list_directory",
+                "stat_path",
+                "make_directory",
+                "delete_path"
+            ]
         );
         assert!(
             catalog[1]
@@ -1107,6 +1114,8 @@ mod tests {
             ("write_file", &["content", "path"], &["path", "content"]),
             ("list_directory", &["after", "path"], &["path"]),
             ("stat_path", &["path"], &["path"]),
+            ("make_directory", &["path"], &["path"]),
+            ("delete_path", &["path", "recursive"], &["path"]),
         ];
         assert_eq!(catalog.len(), want.len());
         for (t, (name, props, required)) in catalog.iter().zip(want) {
@@ -1187,7 +1196,57 @@ mod tests {
     }
 
     #[test]
-    fn advertise_is_a_function_and_returns_the_whole_catalog_at_n_of_four() {
+    fn the_tool_list_offers_make_directory_and_delete_path() {
+        let catalog = baseline_catalog();
+        let described = |name: &str| {
+            let t = catalog
+                .iter()
+                .find(|t| t.function.name == name)
+                .unwrap_or_else(|| panic!("{name} is not offered"));
+            t.function
+                .description
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let mkdir = described("make_directory");
+        for promise in [
+            "any missing directories above it",
+            "the directory exists",
+            "it was created, or was already there",
+            "unavailable — do not retry",
+            "outcome unknown: the change may have happened; do not retry it",
+        ] {
+            assert!(mkdir.contains(promise), "make_directory: {promise:?}");
+        }
+        let delete = described("delete_path");
+        for promise in [
+            "with recursive true",
+            "This cannot be undone.",
+            "deleted",
+            "unavailable — do not retry",
+            "outcome unknown: the change may have happened; do not retry it",
+        ] {
+            assert!(delete.contains(promise), "delete_path: {promise:?}");
+        }
+        let recursive = &catalog
+            .iter()
+            .find(|t| t.function.name == "delete_path")
+            .unwrap()
+            .function
+            .parameters["properties"]["recursive"];
+        assert_eq!(recursive["type"], "boolean");
+        let write = described("write_file");
+        assert!(
+            write.contains(
+                "The file's directory must already exist; create it first with make_directory."
+            ),
+            "write_file must say to create the directory first"
+        );
+    }
+
+    #[test]
+    fn advertise_is_a_function_and_returns_the_whole_catalog_at_n_of_six() {
         // Cooky advertises everything; the SEAM is what matters. Progressive
         // disclosure later returns a subset plus a discovery tool at this same
         // call site, and selection is gated on measured savings versus
@@ -1224,12 +1283,15 @@ mod tests {
         assert_eq!(v["messages"][1]["content"], "sentinel");
 
         let tools = v["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 4);
-        for (t, name) in
-            tools
-                .iter()
-                .zip(["read_file", "write_file", "list_directory", "stat_path"])
-        {
+        assert_eq!(tools.len(), 6);
+        for (t, name) in tools.iter().zip([
+            "read_file",
+            "write_file",
+            "list_directory",
+            "stat_path",
+            "make_directory",
+            "delete_path",
+        ]) {
             // `type`, not `kind` -- the rename must survive the round trip.
             assert_eq!(t["type"], "function");
             assert_eq!(t["function"]["name"], name);

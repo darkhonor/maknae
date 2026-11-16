@@ -5,7 +5,8 @@
 //! to. The kernel decides every verb this asks for.
 use crate::budget::{Gate, Meter, Notice};
 use crate::plane::{
-    same_content, ListOutcome, Plane, PlaneError, ReadBasis, ReadOutcome, StatOutcome, WriteOutcome,
+    same_content, DeleteOutcome, ListOutcome, MkdirOutcome, Plane, PlaneError, ReadBasis,
+    ReadOutcome, StatOutcome, WriteOutcome,
 };
 use crate::render::{render, ToolOutcome};
 use crate::route::{route, RouteError, ToolRequest};
@@ -84,6 +85,15 @@ pub struct Outcome {
 }
 
 pub type Seen = std::collections::HashMap<String, [i64; 7]>;
+
+fn forget(seen: &mut Seen, path: &str) {
+    seen.retain(|p, _| {
+        p != path
+            && !p
+                .strip_prefix(path)
+                .is_some_and(|rest| rest.starts_with('/'))
+    });
+}
 
 /// What a loop reports while it runs. Never carries the model's reply, served
 /// content, a provider key or a wrapping token: the reply is in the `Outcome`.
@@ -410,6 +420,44 @@ pub async fn drive_session<P: Plane>(
                                 }
                             }
                         }
+                        Ok(ToolRequest::Mkdir { path, .. }) => {
+                            let made = plane.mkdir(transcript.conversation(), &path).await;
+                            for d in plane.take_diagnostics() {
+                                emit(LoopEvent::Diagnostic(d));
+                            }
+                            match made {
+                                MkdirOutcome::Exists => ToolOutcome::MkdirExists,
+                                MkdirOutcome::Unavailable => ToolOutcome::MkdirUnavailable,
+                                MkdirOutcome::Unknown => ToolOutcome::ChangeUnknown,
+                                MkdirOutcome::Protected(by) => {
+                                    emit(LoopEvent::Protected { path, by });
+                                    ToolOutcome::Protected
+                                }
+                            }
+                        }
+                        Ok(ToolRequest::Delete { path, recursive, .. }) => {
+                            let deleted = plane
+                                .delete(transcript.conversation(), &path, recursive)
+                                .await;
+                            for d in plane.take_diagnostics() {
+                                emit(LoopEvent::Diagnostic(d));
+                            }
+                            match deleted {
+                                DeleteOutcome::Deleted => {
+                                    forget(seen, &path);
+                                    ToolOutcome::DeleteDeleted
+                                }
+                                DeleteOutcome::Unavailable => ToolOutcome::DeleteUnavailable,
+                                DeleteOutcome::Unknown => {
+                                    forget(seen, &path);
+                                    ToolOutcome::ChangeUnknown
+                                }
+                                DeleteOutcome::Protected(by) => {
+                                    emit(LoopEvent::Protected { path, by });
+                                    ToolOutcome::Protected
+                                }
+                            }
+                        }
                     };
                     transcript.push_tool_result(&call.call_id, &render(&outcome, steps_remaining));
                 }
@@ -569,6 +617,10 @@ mod tests {
         list_outcomes: VecDeque<ListOutcome>,
         stats: Vec<String>,
         stat_outcomes: VecDeque<StatOutcome>,
+        mkdirs: Vec<(String, String)>,
+        mkdir_outcomes: VecDeque<MkdirOutcome>,
+        deletes: Vec<(String, String, bool)>,
+        delete_outcomes: VecDeque<DeleteOutcome>,
     }
     impl Plane for Scripted {
         async fn open(
@@ -621,6 +673,18 @@ mod tests {
                 .pop_front()
                 .unwrap_or(StatOutcome::Unavailable)
         }
+        async fn mkdir(&mut self, c: &str, p: &str) -> MkdirOutcome {
+            self.mkdirs.push((c.into(), p.into()));
+            self.mkdir_outcomes
+                .pop_front()
+                .unwrap_or(MkdirOutcome::Unavailable)
+        }
+        async fn delete(&mut self, c: &str, p: &str, recursive: bool) -> DeleteOutcome {
+            self.deletes.push((c.into(), p.into(), recursive));
+            self.delete_outcomes
+                .pop_front()
+                .unwrap_or(DeleteOutcome::Unavailable)
+        }
     }
     fn scripted(replies: Vec<PromptReply>) -> Scripted {
         Scripted {
@@ -646,6 +710,10 @@ mod tests {
             list_outcomes: VecDeque::new(),
             stats: vec![],
             stat_outcomes: VecDeque::new(),
+            mkdirs: vec![],
+            mkdir_outcomes: VecDeque::new(),
+            deletes: vec![],
+            delete_outcomes: VecDeque::new(),
         }
     }
 
@@ -1288,6 +1356,202 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn each_mkdir_outcome_reaches_the_model_as_its_own_text() {
+        let mut p = scripted(vec![
+            calls_reply(vec![
+                call("m1", "make_directory", r#"{"path":"/w/made-158"}"#),
+                call("m2", "make_directory", r#"{"path":"/w/denied-158"}"#),
+                call("m3", "make_directory", r#"{"path":"/w/lost-158"}"#),
+            ]),
+            done(),
+        ]);
+        p.mkdir_outcomes = VecDeque::from([
+            MkdirOutcome::Exists,
+            MkdirOutcome::Unavailable,
+            MkdirOutcome::Unknown,
+        ]);
+        let mut t = Transcript::new("conv-158", "q");
+        let events = drive_wide(&mut p, &mut t).await;
+        assert_eq!(
+            p.mkdirs,
+            [
+                ("conv-158", "/w/made-158"),
+                ("conv-158", "/w/denied-158"),
+                ("conv-158", "/w/lost-158")
+            ]
+            .map(|(c, x)| (c.to_string(), x.to_string()))
+        );
+        let said: Vec<String> = t.turns()[2..5].iter().map(tool_text).collect();
+        assert_eq!(
+            said,
+            [
+                crate::render::MKDIR_EXISTS,
+                crate::render::UNAVAILABLE,
+                crate::render::CHANGE_UNKNOWN
+            ]
+            .map(|s| format!("{s}\n\nsteps remaining: 3"))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, LoopEvent::Protected { .. })),
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn each_delete_outcome_reaches_the_model_as_its_own_text() {
+        let mut p = scripted(vec![
+            calls_reply(vec![
+                call("d1", "delete_path", r#"{"path":"/w/gone-158"}"#),
+                call(
+                    "d2",
+                    "delete_path",
+                    r#"{"path":"/w/tree-158","recursive":true}"#,
+                ),
+                call("d3", "delete_path", r#"{"path":"/w/lost-158"}"#),
+            ]),
+            done(),
+        ]);
+        p.delete_outcomes = VecDeque::from([
+            DeleteOutcome::Deleted,
+            DeleteOutcome::Unavailable,
+            DeleteOutcome::Unknown,
+        ]);
+        let mut t = Transcript::new("conv-158", "q");
+        let events = drive_wide(&mut p, &mut t).await;
+        assert_eq!(
+            p.deletes,
+            [
+                ("conv-158", "/w/gone-158", false),
+                ("conv-158", "/w/tree-158", true),
+                ("conv-158", "/w/lost-158", false)
+            ]
+            .map(|(c, x, r)| (c.to_string(), x.to_string(), r))
+        );
+        let said: Vec<String> = t.turns()[2..5].iter().map(tool_text).collect();
+        assert_eq!(
+            said,
+            [
+                crate::render::DELETED,
+                crate::render::UNAVAILABLE,
+                crate::render::CHANGE_UNKNOWN
+            ]
+            .map(|s| format!("{s}\n\nsteps remaining: 3"))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, LoopEvent::Protected { .. })),
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_protected_mkdir_or_delete_tells_the_user_and_the_model_only_that_it_is_protected() {
+        let by = ProtectedBy {
+            list: maknae_proto::PERSONAL_SENSITIVE_LIST.into(),
+            entry: "/w/mine-158".into(),
+        };
+        let mut p = scripted(vec![
+            calls_reply(vec![
+                call("m1", "make_directory", r#"{"path":"/w/mine-158"}"#),
+                call("d1", "delete_path", r#"{"path":"/w/mine-158/f"}"#),
+            ]),
+            done(),
+        ]);
+        p.mkdir_outcomes
+            .push_back(MkdirOutcome::Protected(by.clone()));
+        p.delete_outcomes
+            .push_back(DeleteOutcome::Protected(by.clone()));
+        let mut t = Transcript::new("conv", "q");
+        let events = drive_wide(&mut p, &mut t).await;
+        let protected: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, LoopEvent::Protected { .. }))
+            .cloned()
+            .collect();
+        assert_eq!(
+            protected,
+            vec![
+                LoopEvent::Protected {
+                    path: "/w/mine-158".into(),
+                    by: by.clone()
+                },
+                LoopEvent::Protected {
+                    path: "/w/mine-158/f".into(),
+                    by
+                },
+            ]
+        );
+        for i in [2, 3] {
+            assert_eq!(
+                tool_text(&t.turns()[i]),
+                format!("{}\n\nsteps remaining: 3", crate::render::PROTECTED)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_deleted_or_unknown_path_must_be_read_again_before_it_is_replaced() {
+        let read = |id: &str, path: &str| {
+            calls_reply(vec![call(
+                id,
+                "read_file",
+                &format!(r#"{{"path":"{path}"}}"#),
+            )])
+        };
+        let write = |id: &str, path: &str| {
+            calls_reply(vec![call(
+                id,
+                "write_file",
+                &format!(r#"{{"path":"{path}","content":"x"}}"#),
+            )])
+        };
+        let mut p = scripted(vec![
+            read("r1", "/w/a-158"),
+            read("r2", "/w/t-158/b"),
+            read("r3", "/w/c-158"),
+            read("r4", "/w/t-1580"),
+            calls_reply(vec![
+                call("d1", "delete_path", r#"{"path":"/w/a-158"}"#),
+                call(
+                    "d2",
+                    "delete_path",
+                    r#"{"path":"/w/t-158","recursive":true}"#,
+                ),
+                call("d3", "delete_path", r#"{"path":"/w/c-158"}"#),
+            ]),
+            write("w1", "/w/a-158"),
+            write("w2", "/w/t-158/b"),
+            write("w3", "/w/c-158"),
+            write("w4", "/w/t-1580"),
+            done(),
+        ]);
+        p.read_versions = VecDeque::from([[1; 7], [2; 7], [3; 7], [4; 7]]);
+        p.delete_outcomes = VecDeque::from([
+            DeleteOutcome::Deleted,
+            DeleteOutcome::Deleted,
+            DeleteOutcome::Unknown,
+        ]);
+        let mut t = Transcript::new("conv", "q");
+        let budget = Budget {
+            max_steps: 12,
+            max_tool_calls_per_step: 3,
+        };
+        drive_unmetered(&mut p, &mut t, &budget).await;
+        assert_eq!(
+            p.bases,
+            vec![
+                ReadBasis::Unread,
+                ReadBasis::Unread,
+                ReadBasis::Unread,
+                ReadBasis::Read([4; 7])
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn a_protected_write_renders_protected() {
         let mut p = scripted(vec![
             PromptReply {
@@ -1664,7 +1928,7 @@ mod tests {
     async fn the_loop_stops_before_sending_a_turn_past_the_budget() {
         let mut notices = vec![];
         let mut p = scripted(vec![answer()]);
-        let mut m = Meter::new(ContextBudget::new(3_000, None).unwrap());
+        let mut m = Meter::new(ContextBudget::new(3_500, None).unwrap());
         let mut t = Transcript::new("c", &"q".repeat(100));
         let out = drive(&mut p, &mut t, &budget(), &mut m, &mut |n: &Notice| {
             notices.push(*n)
@@ -1676,7 +1940,7 @@ mod tests {
         );
 
         let mut p = scripted(vec![answer()]);
-        let mut m = Meter::new(ContextBudget::new(3_000, None).unwrap());
+        let mut m = Meter::new(ContextBudget::new(3_500, None).unwrap());
         let mut t = Transcript::new("c", &"q".repeat(5_000));
         let out = drive(&mut p, &mut t, &budget(), &mut m, &mut |n: &Notice| {
             notices.push(*n)
@@ -1691,7 +1955,7 @@ mod tests {
     async fn a_turn_near_the_budget_is_sent_with_a_notice() {
         let mut notices = vec![];
         let mut p = scripted(vec![answer()]);
-        let mut m = Meter::new(ContextBudget::new(3_000, None).unwrap());
+        let mut m = Meter::new(ContextBudget::new(3_384, None).unwrap());
         let mut t = Transcript::new("c", &"q".repeat(2_700));
         let out = drive(&mut p, &mut t, &budget(), &mut m, &mut |n: &Notice| {
             notices.push(*n)
@@ -1702,8 +1966,8 @@ mod tests {
             notices,
             vec![Notice {
                 percent: 99,
-                tokens: 2_979,
-                budget: 3_000,
+                tokens: 3_363,
+                budget: 3_384,
                 estimated: true
             }]
         );
@@ -1915,6 +2179,12 @@ mod tests {
         async fn stat(&mut self, c: &str, p: &str) -> StatOutcome {
             self.inner.stat(c, p).await
         }
+        async fn mkdir(&mut self, c: &str, p: &str) -> MkdirOutcome {
+            self.inner.mkdir(c, p).await
+        }
+        async fn delete(&mut self, c: &str, p: &str, recursive: bool) -> DeleteOutcome {
+            self.inner.delete(c, p, recursive).await
+        }
     }
 
     #[tokio::test]
@@ -1970,6 +2240,12 @@ mod tests {
         async fn stat(&mut self, c: &str, p: &str) -> StatOutcome {
             self.inner.stat(c, p).await
         }
+        async fn mkdir(&mut self, c: &str, p: &str) -> MkdirOutcome {
+            self.inner.mkdir(c, p).await
+        }
+        async fn delete(&mut self, c: &str, p: &str, recursive: bool) -> DeleteOutcome {
+            self.inner.delete(c, p, recursive).await
+        }
     }
 
     #[tokio::test]
@@ -2017,7 +2293,7 @@ mod tests {
             &mut Transcript::new("c", &"q".repeat(1_800)),
             &mut Seen::new(),
             &budget(),
-            &mut Meter::new(ContextBudget::new(3_000, None).unwrap()),
+            &mut Meter::new(ContextBudget::new(3_384, None).unwrap()),
             &stop,
             &mut |e| {
                 if matches!(e, LoopEvent::Notice(_)) {
@@ -2134,6 +2410,12 @@ mod tests {
         async fn stat(&mut self, c: &str, p: &str) -> StatOutcome {
             self.inner.stat(c, p).await
         }
+        async fn mkdir(&mut self, c: &str, p: &str) -> MkdirOutcome {
+            self.inner.mkdir(c, p).await
+        }
+        async fn delete(&mut self, c: &str, p: &str, recursive: bool) -> DeleteOutcome {
+            self.inner.delete(c, p, recursive).await
+        }
         fn take_diagnostics(&mut self) -> Vec<String> {
             std::mem::take(&mut self.queued)
         }
@@ -2166,7 +2448,7 @@ mod tests {
             &mut Transcript::new("c", "q"),
             &mut Seen::new(),
             &budget(),
-            &mut Meter::new(ContextBudget::new(3_000, None).unwrap()),
+            &mut Meter::new(ContextBudget::new(3_384, None).unwrap()),
             &stop,
             &mut |e| events.push(e),
             None,
@@ -2196,7 +2478,7 @@ mod tests {
             &mut Transcript::new("c", "q"),
             &mut Seen::new(),
             &budget(),
-            &mut Meter::new(ContextBudget::new(3_000, None).unwrap()),
+            &mut Meter::new(ContextBudget::new(3_384, None).unwrap()),
             &stop,
             &mut |e| events.push(e),
             None,
@@ -2223,7 +2505,7 @@ mod tests {
             &mut Transcript::new("c", &"q".repeat(1_800)),
             &mut Seen::new(),
             &budget(),
-            &mut Meter::new(ContextBudget::new(3_000, None).unwrap()),
+            &mut Meter::new(ContextBudget::new(3_384, None).unwrap()),
             &stop,
             &mut |e| events.push(e),
             None,
@@ -2245,7 +2527,7 @@ mod tests {
             &mut Transcript::new("c", &"q".repeat(1_700)),
             &mut Seen::new(),
             &budget(),
-            &mut Meter::new(ContextBudget::new(3_000, None).unwrap()),
+            &mut Meter::new(ContextBudget::new(3_384, None).unwrap()),
             &AtomicBool::new(false),
             &mut |e| events.push(e),
             None,

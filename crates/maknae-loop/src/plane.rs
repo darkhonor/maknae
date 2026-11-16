@@ -4,7 +4,8 @@
 use crate::keys::{AgentKeys, KeySupply};
 use crate::send::{send_located, send_via, write_request, SendFailure, Wire};
 use maknae_agent::plane::{
-    ListOutcome, Plane, PlaneError, ReadBasis, ReadOutcome, StatOutcome, WriteOutcome,
+    DeleteOutcome, ListOutcome, MkdirOutcome, Plane, PlaneError, ReadBasis, ReadOutcome,
+    StatOutcome, WriteOutcome,
 };
 use maknae_agent::wire::{
     check_for, close_outcome, list_outcome, open_outcome, prompt_outcome, read_outcome,
@@ -342,6 +343,30 @@ impl<K: KeySupply, D: Dial> LoopPlane<K, D> {
                 .map(WireOutcome::from),
         )
     }
+
+    pub async fn delete(
+        &mut self,
+        path: &str,
+        recursive: bool,
+        conversation: Option<&str>,
+    ) -> WriteOutcome {
+        let diagnostics = &mut self.diagnostics;
+        write_outcome(
+            self.link
+                .send(
+                    Verb::FsDelete {
+                        path: path.to_string(),
+                        recursive,
+                        conversation: conversation.map(str::to_string),
+                    },
+                    None,
+                    crate::mutation::WriteCheck::Unchecked,
+                    &mut |l| diagnostics.push(l),
+                )
+                .await
+                .map(WireOutcome::from),
+        )
+    }
 }
 
 impl<K: KeySupply, D: Dial> Plane for LoopPlane<K, D> {
@@ -533,6 +558,16 @@ impl<K: KeySupply, D: Dial> Plane for LoopPlane<K, D> {
                 .await
                 .map(WireOutcome::from),
         )
+    }
+    async fn mkdir(&mut self, conversation: &str, path: &str) -> MkdirOutcome {
+        LoopPlane::mkdir(self, path, true, Some(conversation))
+            .await
+            .into()
+    }
+    async fn delete(&mut self, conversation: &str, path: &str, recursive: bool) -> DeleteOutcome {
+        LoopPlane::delete(self, path, recursive, Some(conversation))
+            .await
+            .into()
     }
     fn take_diagnostics(&mut self) -> Vec<String> {
         std::mem::take(&mut self.diagnostics)
@@ -875,6 +910,52 @@ mod tests {
             Verb::TaskReport { .. } => "report",
             _ => "other",
         }
+    }
+
+    #[tokio::test]
+    async fn the_models_mkdir_and_delete_carry_its_conversation() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let d = dir.path().to_str().unwrap();
+        let mut plane = fake_plane(vec![fake::refused(); 3]);
+        let made = Plane::mkdir(&mut plane, "conv-158", &format!("{d}/a-158/b")).await;
+        let gone = Plane::delete(&mut plane, "conv-158", &format!("{d}/t-158"), true).await;
+        let one = Plane::delete(&mut plane, "conv-158", &format!("{d}/f-158"), false).await;
+        assert_eq!(made, maknae_agent::plane::MkdirOutcome::Unavailable);
+        assert_eq!(
+            (gone, one),
+            (
+                maknae_agent::plane::DeleteOutcome::Unavailable,
+                maknae_agent::plane::DeleteOutcome::Unavailable
+            )
+        );
+        let seen = plane.link.dial.finish().await;
+        let sent: Vec<_> = seen
+            .requests
+            .iter()
+            .map(|r| match &r.verb {
+                Verb::FsMkdir {
+                    path,
+                    parents,
+                    conversation,
+                    ..
+                } => ("mkdir", path.clone(), *parents, conversation.clone()),
+                Verb::FsDelete {
+                    path,
+                    recursive,
+                    conversation,
+                } => ("delete", path.clone(), *recursive, conversation.clone()),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        let conv = Some("conv-158".to_string());
+        assert_eq!(
+            sent,
+            vec![
+                ("mkdir", format!("{d}/a-158/b"), true, conv.clone()),
+                ("delete", format!("{d}/t-158"), true, conv.clone()),
+                ("delete", format!("{d}/f-158"), false, conv),
+            ]
+        );
     }
 
     #[test]

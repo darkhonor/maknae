@@ -9,7 +9,9 @@
 //! `baseline-tools.json`, which names each result (#388: write results live in
 //! the tool's description, the core prompt keeps only the rules that hold for
 //! every tool). `LIST_CONTINUE` and `UNAVAILABLE` are the same contract with
-//! `list_directory`'s and `stat_path`'s descriptions. Duplicated here by
+//! `list_directory`'s and `stat_path`'s descriptions; `MKDIR_EXISTS`,
+//! `UNAVAILABLE` and `CHANGE_UNKNOWN` with `make_directory`'s; `DELETED`,
+//! `UNAVAILABLE` and `CHANGE_UNKNOWN` with `delete_path`'s. Duplicated here by
 //! contract, never by linkage. `tool error:` is renderer-only.
 use crate::plane::{ReadPage, StatView};
 use crate::screen::fixed::{FixedText, Full};
@@ -33,6 +35,11 @@ pub enum ToolOutcome {
     ListUnavailable,
     Stat(StatView),
     StatUnavailable,
+    MkdirExists,
+    MkdirUnavailable,
+    DeleteDeleted,
+    DeleteUnavailable,
+    ChangeUnknown,
     Protected,
     NotRun,
     BadCall(String),
@@ -69,6 +76,11 @@ impl std::fmt::Debug for ToolOutcome {
             ToolOutcome::ListUnavailable => f.write_str("ListUnavailable"),
             ToolOutcome::Stat(_) => f.write_str("Stat"),
             ToolOutcome::StatUnavailable => f.write_str("StatUnavailable"),
+            ToolOutcome::MkdirExists => f.write_str("MkdirExists"),
+            ToolOutcome::MkdirUnavailable => f.write_str("MkdirUnavailable"),
+            ToolOutcome::DeleteDeleted => f.write_str("DeleteDeleted"),
+            ToolOutcome::DeleteUnavailable => f.write_str("DeleteUnavailable"),
+            ToolOutcome::ChangeUnknown => f.write_str("ChangeUnknown"),
             ToolOutcome::Protected => f.write_str("Protected"),
             ToolOutcome::NotRun => f.write_str("NotRun"),
             ToolOutcome::BadCall(why) => f.debug_tuple("BadCall").field(why).finish(),
@@ -87,6 +99,9 @@ pub const NOT_WRITTEN_UNREAD: &str =
     "not written — the file exists and you have not read it; read it first, then write";
 /// A LOCAL pre-send refusal is a tool error, not an unknown outcome.
 pub const WRITE_NOT_SENT: &str = "tool error: write not sent — content exceeds the frame bound";
+pub const MKDIR_EXISTS: &str = "the directory exists";
+pub const DELETED: &str = "deleted";
+pub const CHANGE_UNKNOWN: &str = "outcome unknown: the change may have happened; do not retry it";
 /// Names no list and no entry: the user is told those, the model never is.
 pub const PROTECTED: &str = "protected by policy — ask the user to do this outside Maknae";
 /// Followed by the last released name as a JSON string. Half of the contract with
@@ -336,7 +351,9 @@ pub fn render(outcome: &ToolOutcome, steps_remaining: u32) -> Zeroizing<String> 
         | ToolOutcome::ReadUnavailable
         | ToolOutcome::WriteUnavailable
         | ToolOutcome::ListUnavailable
-        | ToolOutcome::StatUnavailable => Zeroizing::new(UNAVAILABLE.to_string()),
+        | ToolOutcome::StatUnavailable
+        | ToolOutcome::MkdirUnavailable
+        | ToolOutcome::DeleteUnavailable => Zeroizing::new(UNAVAILABLE.to_string()),
         ToolOutcome::Listing(page) => listing_text(page),
         ToolOutcome::Stat(view) => stat_json(view),
         ToolOutcome::WriteApplied => Zeroizing::new(APPLIED.to_string()),
@@ -345,6 +362,9 @@ pub fn render(outcome: &ToolOutcome, steps_remaining: u32) -> Zeroizing<String> 
         ToolOutcome::WriteUnknown => Zeroizing::new(OUTCOME_UNKNOWN.to_string()),
         ToolOutcome::WriteNotSent => Zeroizing::new(WRITE_NOT_SENT.to_string()),
         ToolOutcome::Protected => Zeroizing::new(PROTECTED.to_string()),
+        ToolOutcome::MkdirExists => Zeroizing::new(MKDIR_EXISTS.to_string()),
+        ToolOutcome::DeleteDeleted => Zeroizing::new(DELETED.to_string()),
+        ToolOutcome::ChangeUnknown => Zeroizing::new(CHANGE_UNKNOWN.to_string()),
         ToolOutcome::NotRun => Zeroizing::new(NOT_RUN.to_string()),
         ToolOutcome::BadCall(why) => Zeroizing::new(format!("tool error: {why}")),
     };
@@ -397,6 +417,18 @@ mod tests {
             render(&ToolOutcome::WriteUnread, 5).as_str(),
             "not written — the file exists and you have not read it; read it first, then write\n\nsteps remaining: 5"
         );
+        assert_eq!(
+            render(&ToolOutcome::MkdirExists, 6).as_str(),
+            "the directory exists\n\nsteps remaining: 6"
+        );
+        assert_eq!(
+            render(&ToolOutcome::DeleteDeleted, 7).as_str(),
+            "deleted\n\nsteps remaining: 7"
+        );
+        assert_eq!(
+            render(&ToolOutcome::ChangeUnknown, 8).as_str(),
+            "outcome unknown: the change may have happened; do not retry it\n\nsteps remaining: 8"
+        );
     }
     #[test]
     fn every_file_refusal_renders_the_same_bytes() {
@@ -407,11 +439,14 @@ mod tests {
             ToolOutcome::WriteUnavailable,
             ToolOutcome::ListUnavailable,
             ToolOutcome::StatUnavailable,
+            ToolOutcome::MkdirUnavailable,
+            ToolOutcome::DeleteUnavailable,
         ] {
             assert_eq!(render(&o, 4).as_str(), want, "{o:?}");
         }
         assert_ne!(render(&ToolOutcome::Protected, 4).as_str(), want);
         assert_ne!(render(&ToolOutcome::WriteUnknown, 4).as_str(), want);
+        assert_ne!(render(&ToolOutcome::ChangeUnknown, 4).as_str(), want);
     }
     #[test]
     fn the_model_text_names_no_entry() {

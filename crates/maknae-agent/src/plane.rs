@@ -130,6 +130,44 @@ pub enum WriteOutcome {
     Protected(ProtectedBy),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MkdirOutcome {
+    Exists,
+    Unavailable,
+    Unknown,
+    Protected(ProtectedBy),
+}
+
+impl From<WriteOutcome> for MkdirOutcome {
+    fn from(w: WriteOutcome) -> Self {
+        match w {
+            WriteOutcome::Applied(_) => MkdirOutcome::Exists,
+            WriteOutcome::Unavailable | WriteOutcome::NotSent => MkdirOutcome::Unavailable,
+            WriteOutcome::Unknown | WriteOutcome::Stale => MkdirOutcome::Unknown,
+            WriteOutcome::Protected(by) => MkdirOutcome::Protected(by),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeleteOutcome {
+    Deleted,
+    Unavailable,
+    Unknown,
+    Protected(ProtectedBy),
+}
+
+impl From<WriteOutcome> for DeleteOutcome {
+    fn from(w: WriteOutcome) -> Self {
+        match w {
+            WriteOutcome::Applied(_) => DeleteOutcome::Deleted,
+            WriteOutcome::Unavailable | WriteOutcome::NotSent => DeleteOutcome::Unavailable,
+            WriteOutcome::Unknown | WriteOutcome::Stale => DeleteOutcome::Unknown,
+            WriteOutcome::Protected(by) => DeleteOutcome::Protected(by),
+        }
+    }
+}
+
 /// What the loop knows of a file it is about to replace (#388).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadBasis {
@@ -199,6 +237,17 @@ pub trait Plane {
         after: Option<&str>,
     ) -> impl Future<Output = ListOutcome> + Send;
     fn stat(&mut self, conversation: &str, path: &str) -> impl Future<Output = StatOutcome> + Send;
+    fn mkdir(
+        &mut self,
+        conversation: &str,
+        path: &str,
+    ) -> impl Future<Output = MkdirOutcome> + Send;
+    fn delete(
+        &mut self,
+        conversation: &str,
+        path: &str,
+        recursive: bool,
+    ) -> impl Future<Output = DeleteOutcome> + Send;
     /// Lines the plane would have printed during its last call, for the host
     /// to show. Drained after every call, so order is preserved.
     fn take_diagnostics(&mut self) -> Vec<String> {
@@ -308,6 +357,62 @@ mod tests {
         assert_eq!(format!("{:?}", ReadOutcome::Refused), "Refused");
         assert_eq!(format!("{:?}", ReadOutcome::Unavailable), "Unavailable");
     }
+    #[test]
+    fn a_mkdir_or_delete_takes_its_outcome_from_the_write_mapping() {
+        let by = ProtectedBy {
+            list: "l".into(),
+            entry: "e".into(),
+        };
+        let rows = [
+            (
+                WriteOutcome::Applied(None),
+                MkdirOutcome::Exists,
+                DeleteOutcome::Deleted,
+            ),
+            (
+                WriteOutcome::Applied(Some([1; 7])),
+                MkdirOutcome::Exists,
+                DeleteOutcome::Deleted,
+            ),
+            (
+                WriteOutcome::Unavailable,
+                MkdirOutcome::Unavailable,
+                DeleteOutcome::Unavailable,
+            ),
+            (
+                WriteOutcome::Unknown,
+                MkdirOutcome::Unknown,
+                DeleteOutcome::Unknown,
+            ),
+            (
+                WriteOutcome::Stale,
+                MkdirOutcome::Unknown,
+                DeleteOutcome::Unknown,
+            ),
+            (
+                WriteOutcome::Protected(by.clone()),
+                MkdirOutcome::Protected(by.clone()),
+                DeleteOutcome::Protected(by),
+            ),
+        ];
+        for (w, m, d) in rows {
+            assert_eq!(MkdirOutcome::from(w.clone()), m, "{w:?}");
+            assert_eq!(DeleteOutcome::from(w.clone()), d, "{w:?}");
+        }
+    }
+
+    #[test]
+    fn a_not_sent_mkdir_or_delete_is_unavailable_never_unknown() {
+        assert_eq!(
+            MkdirOutcome::from(WriteOutcome::NotSent),
+            MkdirOutcome::Unavailable
+        );
+        assert_eq!(
+            DeleteOutcome::from(WriteOutcome::NotSent),
+            DeleteOutcome::Unavailable
+        );
+    }
+
     #[test]
     fn same_content_compares_every_index_but_ctime() {
         let base = [1, 2, 3, 4, 5, 6, 7];
