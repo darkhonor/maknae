@@ -496,7 +496,6 @@ pub(crate) fn release_reason(r: &Result<Released, ReleaseRefusal>) -> String {
     }
 }
 
-/// The record's (result, posture).
 pub(crate) fn release_record_class(
     r: &Result<Released, ReleaseRefusal>,
 ) -> (&'static str, &'static str) {
@@ -514,8 +513,6 @@ pub(crate) fn release_record_class(
     }
 }
 
-/// The record of a release the request's decision, made again under a later task's turn,
-/// refused; its class is `deny` / `unauthorized`.
 pub(crate) fn release_unauthorized_reason(why: &str) -> String {
     format!("task release refused: not authorized: {why}")
 }
@@ -524,14 +521,11 @@ pub(crate) fn requested_by((uid, session): (u32, u64)) -> String {
     format!("; requested by uid {uid} in session {session}")
 }
 
-/// A store step that did not run, or did not answer, within its bound.
 pub(crate) fn release_blocked(b: crate::mutation::Blocked) -> ReleaseRefusal {
     match b {
-        crate::mutation::Blocked::NotStarted => {
-            ReleaseRefusal::NotDone("the task store was busy".into())
-        }
+        crate::mutation::Blocked::NotStarted => ReleaseRefusal::NotDone(crate::task::BUSY.into()),
         crate::mutation::Blocked::Unknown => {
-            ReleaseRefusal::OutcomeUnknown("the task store did not answer in time".into())
+            ReleaseRefusal::OutcomeUnknown(crate::task::LATE.into())
         }
     }
 }
@@ -1192,11 +1186,11 @@ mod tests {
         use crate::mutation::Blocked;
         assert_eq!(
             release_blocked(Blocked::NotStarted),
-            ReleaseRefusal::NotDone("the task store was busy".into())
+            ReleaseRefusal::NotDone(crate::task::BUSY.into())
         );
         assert_eq!(
             release_blocked(Blocked::Unknown),
-            ReleaseRefusal::OutcomeUnknown("the task store did not answer in time".into())
+            ReleaseRefusal::OutcomeUnknown(crate::task::LATE.into())
         );
     }
 

@@ -4041,7 +4041,6 @@ async fn a_held_operand_the_pre_gate_refuses_is_a_bad_request_and_reaches_nothin
     }
 }
 
-/// A held list and a held release, each with a filter, a target and a cursor.
 fn held_verbs() -> [maknae_proto::Verb; 2] {
     [
         maknae_proto::Verb::AdminHeldList {

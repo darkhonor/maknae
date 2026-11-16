@@ -203,7 +203,6 @@ pub struct ReleaseRequest<'a> {
     pub action: &'a maknae_security::Request,
 }
 
-/// What an operator's held-task request asks: a page of held tasks, or a page released.
 #[derive(Debug, Clone, Copy)]
 pub enum HeldOp<'a> {
     List {
@@ -216,7 +215,6 @@ pub enum HeldOp<'a> {
     },
 }
 
-/// An operator's `admin.release` of held tasks, its operands already through the operand rule.
 pub struct HeldRequest<'a> {
     pub requester: u32,
     pub session: u64,
@@ -280,7 +278,6 @@ impl std::fmt::Debug for ContainAnswer {
 pub trait ContainmentOps: Send + Sync {
     fn contain<'a>(&'a self, req: ContainRequest<'a>) -> BoxFuture<'a, ContainAnswer>;
     fn release<'a>(&'a self, req: ReleaseRequest<'a>) -> BoxFuture<'a, ContainAnswer>;
-    /// `Ok` is `HeldTasks` or `HeldReleased`.
     fn held<'a>(
         &'a self,
         req: HeldRequest<'a>,
@@ -6643,7 +6640,6 @@ struct Reloader<B: maknae_authz_basic::Baseline, E> {
     load_entered: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
     #[cfg(test)]
     release_resolved: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
-    /// One stage of a held-task release batch's window.
     held_stage: Duration,
     #[cfg(test)]
     held_between: std::sync::Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
@@ -8128,7 +8124,6 @@ where
     }
 }
 
-/// Whose held tasks a request names, resolved.
 enum HeldWho {
     Every,
     Uid(u32),
@@ -8155,7 +8150,6 @@ fn held_agent(agent: &str) -> Result<HeldWho, ContainAnswer> {
         })
 }
 
-/// The per-task stage bound of a held task's store write.
 const HELD_TASK_WRITE_BOUND: Duration =
     Duration::from_millis(maknae_config::BLOCKING_STAGE_TIMEOUT_MS);
 
@@ -17399,7 +17393,6 @@ mod reload_fixture {
             .expect("the release returns")
         }
 
-        /// A held-task list or release, carrying the permitted `admin.release` request.
         pub(super) async fn held(
             &self,
             op: HeldOp<'_>,
@@ -21864,7 +21857,6 @@ mod reload_tests {
     const JIN: (&str, u32) = ("jin", 2002);
     const HELD_PROMPT: &str = "SENTINEL-held-prompt-6b1d";
 
-    /// A task given by `tasker` to `agent`, stored as queued.
     fn given(
         fx: &Fx,
         (agent, agent_uid): (&str, u32),
@@ -21910,7 +21902,6 @@ mod reload_tests {
         fx.reloader.tasks.record(id).unwrap().state
     }
 
-    /// Tasks `tasker` gave hobi, held by containing `tasker` and still held once it is released.
     async fn held_by_a_released_tasker(
         fx: &Fx,
         tasker: u32,
@@ -22275,6 +22266,36 @@ mod reload_tests {
                 "{fail:?}: {added:?}"
             );
         }
+        let before = held_records(&fx).len();
+        let (ready, slot_held) = tokio::sync::oneshot::channel();
+        let (free, freed) = std::sync::mpsc::channel::<()>();
+        let slot = tokio::spawn(crate::mutation::blocking(
+            admin,
+            Duration::from_secs(60),
+            move || {
+                let _ = ready.send(());
+                freed.recv()
+            },
+        ));
+        bounded(slot_held).await.unwrap();
+        let page = release_page(fx.held(release(), admin).await);
+        free.send(()).unwrap();
+        bounded(slot).await.unwrap().unwrap().unwrap();
+        assert_eq!(
+            page.outcomes,
+            [outcome(&ids[0], R::NotDone, Some(TaskState::Held))]
+        );
+        assert_eq!(task_state(&fx, &ids[0]), TaskState::Held);
+        let added = held_records(&fx).split_off(before);
+        assert_eq!(added.len(), 2, "{added:?}");
+        assert_eq!(
+            added[1].outcome.reason,
+            format!(
+                "task release not done: {}; requested by uid {admin} in session {}",
+                crate::task::BUSY,
+                fx.last_session()
+            )
+        );
         blobs.slow(Some(HELD_TASK_WRITE_BOUND + Duration::from_secs(1)));
         let page = release_page(fx.held(release(), admin).await);
         blobs.slow(None);
@@ -22283,7 +22304,8 @@ mod reload_tests {
         assert_eq!(
             late.outcome.reason,
             format!(
-                "task release outcome unknown: the task store did not answer in time; requested by uid {admin} in session {}",
+                "task release outcome unknown: {}; requested by uid {admin} in session {}",
+                crate::task::LATE,
                 fx.last_session()
             )
         );
@@ -22511,24 +22533,53 @@ mod reload_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_stopping_daemon_refuses_a_batch_or_stops_it_between_tasks() {
+    async fn a_batch_refused_before_its_first_task_is_refused_whole_and_a_stop_ends_it_between_tasks(
+    ) {
         use maknae_proto::{HeldTarget, ReleaseResult as R, TaskState};
-        let fx = fixture("held-stop", CONTAIN_AND_RELEASE_TO_ADMIN, Some(ROOT_ADMIN)).await;
+        let fx = fixture("held-stop", CONTAIN_AND_RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
         let fx = Arc::new(with_agents(fx, &[HOBI]).await);
         let ids = held_by_a_released_tasker(&fx, 1002, 2).await;
         let target = HeldTarget::User(ContainTarget::Uid(1002));
-        fx.reloader.stopping.send_replace(true);
-        let got = fx
-            .held(
-                HeldOp::Release {
-                    target: &target,
-                    after: None,
-                },
-                0,
-            )
-            .await;
-        assert_eq!(answer_code(&got.unwrap_err()), ContainmentOutcome::Stopping);
+        assert_eq!(
+            answer_code(
+                &fx.contain(ContainTarget::Name("daemon".into()), 0, "r")
+                    .await
+            ),
+            ContainmentOutcome::Contained
+        );
+        let before = held_records(&fx).len();
+        for (requester, stopping, drain) in [
+            (daemon_uid(), false, Drain::Serving),
+            (0, true, Drain::Serving),
+            (0, false, Drain::Begun),
+        ] {
+            fx.reloader.stopping.send_replace(stopping);
+            fx.reloader.drain.send_replace(drain);
+            let got = fx
+                .held(
+                    HeldOp::Release {
+                        target: &target,
+                        after: None,
+                    },
+                    requester,
+                )
+                .await;
+            match got {
+                Err(ContainAnswer::Denied { why }) if requester != 0 => {
+                    assert_eq!(why, "subject contained: role=adversary")
+                }
+                Err(a) if requester == 0 => {
+                    assert_eq!(answer_code(&a), ContainmentOutcome::Stopping, "{drain:?}")
+                }
+                got => panic!("{requester} {stopping} {drain:?}: {got:?}"),
+            }
+            assert_eq!(held_records(&fx).len(), before);
+            for id in &ids {
+                assert_eq!(task_state(&fx, id), TaskState::Held);
+            }
+        }
         fx.reloader.stopping.send_replace(false);
+        fx.reloader.drain.send_replace(Drain::Serving);
         let (reached, go) = (
             Arc::new(tokio::sync::Notify::new()),
             Arc::new(tokio::sync::Notify::new()),
@@ -22560,7 +22611,7 @@ mod reload_tests {
             ]
         );
         assert_eq!(page.next, Some(cursor_of(&fx, &ids[0])));
-        assert_eq!(held_records(&fx).len(), 1);
+        assert_eq!(held_records(&fx).len(), before + 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

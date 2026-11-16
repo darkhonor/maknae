@@ -2676,16 +2676,17 @@ where
     let left = deadline.saturating_duration_since(tokio::time::Instant::now());
     match crate::mutation::blocking(uid, left, f).await {
         Ok(done) => done,
-        Err(crate::mutation::Blocked::NotStarted) => Err(TaskRefusal::Unavailable(
-            "not done: the task store was busy".into(),
-        )),
+        Err(crate::mutation::Blocked::NotStarted) => {
+            Err(TaskRefusal::Unavailable(format!("not done: {BUSY}")))
+        }
         Err(crate::mutation::Blocked::Unknown) => {
             Err(TaskRefusal::Unavailable(format!("outcome unknown: {LATE}")))
         }
     }
 }
 
-const LATE: &str = "the task store did not answer in time";
+pub(crate) const LATE: &str = "the task store did not answer in time";
+pub(crate) const BUSY: &str = "the task store was busy";
 
 /// What a submission says of a confirm that did not answer `Ok`. Once the confirm kept
 /// the ticket the record may be stored, so the outcome is unknown and nothing is taken
@@ -8289,7 +8290,7 @@ mod tests {
         let store = Arc::new(TaskStore::new());
         let deadline = tokio::time::Instant::now() + BOUND;
         let late = format!("outcome unknown: {LATE}");
-        let busy = "not done: the task store was busy".to_string();
+        let busy = format!("not done: {BUSY}");
         let said = |kept, why: &str| {
             let (store, why) = (Arc::clone(&store), why.to_string());
             async move {

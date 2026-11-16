@@ -1187,7 +1187,6 @@ pub struct ScriptedContainment {
     held: Mutex<Vec<SeenHeld>>,
 }
 
-/// A held-task request as the containment service received it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeenHeld {
     pub requester: u32,
@@ -1196,7 +1195,6 @@ pub struct SeenHeld {
     pub after: Option<maknae_proto::TaskCursor>,
 }
 
-/// The page the scripted service answers a held list with.
 pub fn scripted_held_page() -> maknae_proto::HeldPage {
     maknae_proto::HeldPage {
         entries: Vec::new(),
@@ -1204,7 +1202,6 @@ pub fn scripted_held_page() -> maknae_proto::HeldPage {
     }
 }
 
-/// The page the scripted service answers a held release with.
 pub fn scripted_release_page() -> maknae_proto::ReleasePage {
     maknae_proto::ReleasePage {
         outcomes: vec![maknae_proto::ReleaseOutcome {
@@ -1218,7 +1215,6 @@ pub fn scripted_release_page() -> maknae_proto::ReleasePage {
 }
 
 impl ScriptedContainment {
-    /// Each held-task request this service received.
     pub fn held(&self) -> Vec<SeenHeld> {
         self.held.lock().unwrap().clone()
     }
