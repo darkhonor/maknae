@@ -1092,6 +1092,9 @@ permissions:
   allow:
     - "Read(~/notes/**)"
     - "Write(~/notes/**)"
+    - "Read(~/tasks/**)"
+    - "Write(~/tasks)"
+    - "Write(~/tasks/**)"
 actions:
   allow:
     - "fs.read"
@@ -1110,6 +1113,7 @@ taskers:
 ```
 
 - An agent with no `policy.yaml`, or one without `permissions`, holds no file access through Maknae's tools.
+- `permissions.allow` replaces the site allow list for the agent, so it must reach `~/tasks`: the agent creates each task's partition there (§2.6) with `fs.mkdir`, decided as a `Write`. Without `Write(~/tasks)` and `Write(~/tasks/**)` every task stops `partition-unavailable`.
 - `actions` limits `fs.stat` and `fs.list` by its `fs.read` entry; naming either refuses the reload (§2.5).
 - `admin.*` is always refused to an agent, except `admin.whoami`; no file can grant it.
 - `maknae-agentd` closes each task's conversation when the task ends, so list `session.close` beside `session.new` and `session.prompt`; without it every close is refused, each refusal is in the trail, the task still ends, and the agent's kernel conversations accumulate until the idle close or its 32-conversation limit.

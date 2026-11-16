@@ -851,6 +851,7 @@ sudo restorecon -Rv /etc/maknae
 - **`endpoint` is POSTed exactly as written.** Give the full chat-completions URL, not the API base (`crates/maknae-llm/src/client.rs`).
 - **`models`** lists the models users may ask this provider for; the kernel refuses any other at admission.
 - **`reasoning_effort: none` is required for `gpt-5.6-luna`.** Without it the model refuses the loop's tools on chat completions: every turn is recorded `LandedUndelivered`, reason `reply unusable: provider-rejected`, with `provider answered 400` in the deputy's journal and `the provider rejected the request` at the user's terminal. The journal line carries up to 4 KiB of the provider's error body with the key masked, and that body can quote the rejected request — prompt and file content included — so treat the deputy's journal as holding conversation content (`docs/configuration.md` §6.2).
+- **`gpt-6.1-sol` cannot be used.** On chat completions it refuses the loop's tools unless `reasoning_effort` is `none`, and it refuses `none`; it takes tools only on the Responses API, which Maknae does not speak (`crates/maknae-llm/src/wire.rs`). Each turn is recorded `reply unusable: provider-rejected` either way.
 - **No key goes in this file.** A field named like a key (`key`, `api_key`, `token`, `secret` and others) refuses boot. Each entry may hold only the keys `name`, `endpoint`, `models`, `reasoning_effort` and `output_tokens_field`; the last two are optional (`docs/configuration.md` §6.1).
 - **The daemon's prompt cap.** `transport.prompt_max_bytes` in `/etc/maknae/maknae.yaml` defaults to 1 MiB, enough for a context window of about 174,000 tokens. For a larger window raise it to `context_tokens × 6`, at most 16 MiB, or the daemon refuses the loop's larger frames. Enroll rewrites that file, so set it again after a re-enroll.
 
@@ -1612,14 +1613,16 @@ An Agent Daemon runs under its own service account, one per agent, and reaches `
 
 3. **Enroll it.**
 
-   `/etc/maknae/egress-bounds.yaml` must set `agent_prefix` (for example `agent_prefix: maknae/agents`); enroll refuses without it. Load the agent's API key in Vault at `<kv_mount>/data/<agent_prefix>/hobi/<subpath>`. To give the agent an admin-written persona, install `/etc/maknae/agents/hobi/persona.md` as `root:_maknae 0640` before this step.
+   `/etc/maknae/egress-bounds.yaml` must set `agent_prefix` (for example `agent_prefix: maknae/agents`); enroll refuses without it. Load the agent's API key in Vault at `<kv_mount>/data/<agent_prefix>/hobi/<subpath>`. The provider you name must be authorized on the host ([Chapter 4 step 5](#5-authorize-the-provider)), and `user`, the role the agent is bound to, must hold it in `destinations:` ([step 7](#7-grant-the-prompt)); otherwise every task stops `prompt-refused`, and the trail's `session.prompt` record gives the reason. To give the agent an admin-written persona, install `/etc/maknae/agents/hobi/persona.md` as `root:_maknae 0640` before this step.
 
    ```bash
    sudo maknae enroll agent hobi --account hobi --bind-cidr <this host's address>/32 \
      --provider openai --model <model> --key-subpath openai --key-field api_key --context-tokens <n>
    ```
 
-   `--role guest` binds it to `guest` instead of the default `user`; `admin` is not offered. `--persona self` lets the agent keep its own persona instead of `persona.md`. Enroll seals the SecretID on this host, writes `/etc/maknae/agents/hobi/enrollment.yaml` and `agent.yaml`, and gives the `hobi` account read access to those files, `persona.md`, the directories above them and the three certificates in `/etc/maknae/tls`, and to nothing else. If enroll reports that it could not grant an entry, the agent is enrolled but cannot read its configuration: fix the cause and run `sudo maknae enroll agent hobi --refresh-access`. On Linux enroll then starts the agent as `maknae-agent@hobi.service`, after naming its home to the AppArmor profile and reloading it on a Debian host; on macOS as the launchd job `io.maknae.maknae-agentd.hobi`, whose stderr is `/usr/local/var/log/maknae-agent/hobi/agentd.err`. Run `--refresh-access` too after replacing `persona.md` or changing the account's home; it touches no Vault, and on Linux it rewrites the instance's drop-in and restarts it.
+   `--bind-cidr` is the address Vault sees, after any NAT, proxy or tunnel between this host and Vault ([configuration §6.4](configuration.md#64-enrolling-an-agent-daemon)). A SecretID bound to any other address fails every login: the agent's journal repeats `minting the plane leaf failed (AppRole login failed: … (status code 400))`, and no task is ever claimed. Vault's audit log shows the address it saw as `request.remote_address`; enroll again with that address and `--rotate`.
+
+   `--role guest` binds it to `guest` instead of the default `user`; `admin` is not offered. `guest` holds no grants and `destinations:` refuses it, so a `guest` agent can be tasked but works no task: each stops `partition-unavailable`. `--persona self` lets the agent keep its own persona instead of `persona.md`. Enroll seals the SecretID on this host, writes `/etc/maknae/agents/hobi/enrollment.yaml` and `agent.yaml`, and gives the `hobi` account read access to those files, `persona.md`, the directories above them and the three certificates in `/etc/maknae/tls`, and to nothing else. If enroll reports that it could not grant an entry, the agent is enrolled but cannot read its configuration: fix the cause and run `sudo maknae enroll agent hobi --refresh-access`. On Linux enroll then starts the agent as `maknae-agent@hobi.service`, after naming its home to the AppArmor profile and reloading it on a Debian host; on macOS as the launchd job `io.maknae.maknae-agentd.hobi`, whose stderr is `/usr/local/var/log/maknae-agent/hobi/agentd.err`. Run `--refresh-access` too after replacing `persona.md` or changing the account's home; it touches no Vault, and on Linux it rewrites the instance's drop-in and restarts it.
 
 4. **Write its policy.** Write it as `policy.yaml`, then install it as `root:_maknae 0640`, as the other configuration files are: `sudo install -o root -g _maknae -m 0640 policy.yaml /etc/maknae/agents/hobi/policy.yaml`. Without it the agent holds no file access through Maknae's tools, and only people may task it.
 
@@ -1629,11 +1632,19 @@ An Agent Daemon runs under its own service account, one per agent, and reaches `
      allow:
        - "Read(~/notes/**)"
        - "Write(~/notes/**)"
+       - "Read(~/tasks/**)"
+       - "Write(~/tasks)"
+       - "Write(~/tasks/**)"
    actions:
      allow:
        - "fs.*"
+       - "session.new"
        - "session.prompt"
+       - "session.close"
    ```
+
+   - **`~/tasks` is required.** The agent creates each task's partition, `~/tasks/users/<uid>` or `~/tasks/agents/<id>`, and works in it ([Tasks](#tasks)). This `permissions.allow` replaces the site's allow list for the agent, whose `Write(~/projects/**)` would not reach it anyway, so without these entries every task stops `partition-unavailable` and the trail records `fs.mkdir` of `~/tasks` refused with `role user: no capability entry for fs.mkdir`. The partition operand still confines each request to the partition of the task it cites.
+   - **`session.new`, `session.prompt` and `session.close`** are the conversation each task runs in ([configuration §6.4](configuration.md#64-enrolling-an-agent-daemon)).
 
    Add `taskers:` to say who may task it, for example `taskers: ["alice", "agent:jin"]`; another agent may task it only when listed here. `maknaed` decides and serves tasking; people task an agent with `maknae agent <name>` ([Task an agent](#task-an-agent)), and the agent process that works the task is `maknae-agentd` (#629, [Tasks](#tasks)).
 
