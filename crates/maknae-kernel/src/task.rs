@@ -4375,7 +4375,8 @@ mod tests {
         assert!(reopened.take_boot_findings().is_empty());
     }
 
-    /// The tests that stall the store share the euid's store slots; they take turns.
+    /// The tests that stall the store, or need a slot free within a bound, share per-uid store
+    /// slots; they take turns.
     static STALLS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     struct SlowsStoreOnAudit(Recorder, crate::task_store::MemTaskBlobs);
@@ -4614,6 +4615,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_withdrawal_runs_or_is_queued_never_both_and_is_said_so() {
+        let _alone = STALLS.lock().await;
         let store = Arc::new(TaskStore::new());
         let id = held_by(&store, Tasker::Uid(1000));
         let w = withdraw_within(&store, 1000, tokio::time::Instant::now(), id).await;
@@ -5815,6 +5817,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_release_whose_store_step_does_not_answer_is_outcome_unknown_and_a_repeat_is_safe() {
+        let _alone = STALLS.lock().await;
         let (blobs, store) = mem();
         let task = held_by(&store, Tasker::Uid(BOB));
         hold(&store, &[BOB]);
