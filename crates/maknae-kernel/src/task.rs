@@ -5597,13 +5597,22 @@ mod tests {
                 as_agent("jin", JIN),
                 &[HOBI][..],
                 only_jin(&[HOBI]),
-                ReleaseRefusal::RootUnresolved,
+                Some(ReleaseRefusal::RootUnresolved),
             ),
             (
                 as_agent("hobi", HOBI),
                 &[JIN][..],
                 only_jin(&[]),
-                ReleaseRefusal::TaskerUnresolved,
+                Some(ReleaseRefusal::TaskerUnresolved),
+            ),
+            (
+                as_agent("jin", JIN),
+                &[HOBI][..],
+                crate::enrollment::Containing(
+                    view(&[("jin", JIN), ("hobi", HOBI)]),
+                    BTreeSet::new(),
+                ),
+                None,
             ),
         ];
         for (row, (tasker, at_hold, at_release, refusal)) in rows.into_iter().enumerate() {
@@ -5619,6 +5628,16 @@ mod tests {
             hold(&store, at_hold);
             let before = hold_fields(&store, &task);
             assert_eq!(before.0, TaskState::Held, "row {row}");
+            let Some(refusal) = refusal else {
+                assert_eq!(
+                    store.release_plan(&task, &at_release).map(|p| p.task),
+                    Ok(task),
+                    "row {row}"
+                );
+                assert!(store.release(&task, &at_release).is_ok(), "row {row}");
+                assert_eq!(hold_fields(&store, &task).0, TaskState::Queued, "row {row}");
+                continue;
+            };
             assert_eq!(
                 store.release_plan(&task, &at_release).map(|p| p.task),
                 Err(refusal.clone()),
