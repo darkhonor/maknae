@@ -205,7 +205,7 @@ pub fn artifact_table(cli_dir: &Path, macos: bool, insecure_plaintext: bool) -> 
         )
     } else {
         row(
-            etc.join("private/maknaed-secret-id.cred"),
+            maknae_vault::daemon_sealed_credential(etc),
             Owner::RootRoot,
             0o400,
             ContentKind::SealedDaemonSecret,

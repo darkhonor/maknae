@@ -15,6 +15,13 @@ use zeroize::Zeroizing;
 /// (systemd `LoadCredential=maknaed-secret-id:...` / `SetCredentialEncrypted`).
 pub const DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME: &str = "maknaed-secret-id";
 
+/// The TPM2-sealed file enroll writes and the posture marker names as its target.
+pub fn daemon_sealed_credential(config_dir: &Path) -> PathBuf {
+    config_dir
+        .join("private")
+        .join(format!("{DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME}.cred"))
+}
+
 pub const EGRESS_SEAL_KEY_CRED_NAME: &str = "maknae-egress-seal-key";
 pub const MAX_SEAL_KEY_BYTES: usize = 512;
 pub const GRAPH_KEY_CRED_NAME: &str = "maknaed-graph-key";
@@ -390,6 +397,14 @@ fn classify(r: Result<String, VarError>) -> Result<Option<String>, VaultError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sealed_daemon_credential_is_under_private() {
+        assert_eq!(
+            daemon_sealed_credential(Path::new("/etc/maknae")),
+            PathBuf::from("/etc/maknae/private/maknaed-secret-id.cred")
+        );
+    }
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
 

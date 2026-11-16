@@ -10022,7 +10022,7 @@ async fn boot_after_sink(
     let secret_source_kind = client.secret_source();
     let expected_target = match secret_source_kind {
         maknae_vault::CredentialSourceKind::CredentialsDirectory => {
-            config_dir.join("private").join("maknaed-secret-id.cred")
+            maknae_vault::daemon_sealed_credential(config_dir)
         }
         maknae_vault::CredentialSourceKind::Keychain => {
             maknae_vault::daemon_keychain_pointer(config_dir)
@@ -13897,13 +13897,17 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let d = Dir::new("read_marker_refused");
         put(
             &d.0,
-            "private/posture.yaml",
+            maknae_config::POSTURE_MARKER_FILE,
             "mechanism: tpm2\ntarget: /x\ntimestamp: \"1\"\n",
             0o640,
         );
         if nix::unistd::geteuid().as_raw() == 0 {
-            std::os::unix::fs::chown(d.0.join("private").join("posture.yaml"), Some(65534), None)
-                .expect("root can chown the fixture to a non-root uid");
+            std::os::unix::fs::chown(
+                d.0.join(maknae_config::POSTURE_MARKER_FILE),
+                Some(65534),
+                None,
+            )
+            .expect("root can chown the fixture to a non-root uid");
         }
         assert_eq!(read_posture_marker(&d.0), None);
     }

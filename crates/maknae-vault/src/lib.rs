@@ -98,7 +98,7 @@ pub use seal_pub_store::{
 };
 pub use secret_io::read_agent_secret;
 pub use secret_source::{
-    credentials_directory_env, graph_key_from_bytes, graph_key_from_hex,
+    credentials_directory_env, daemon_sealed_credential, graph_key_from_bytes, graph_key_from_hex,
     resolve_agent_secret_source, resolve_daemon_secret_source, resolve_egress_seal_key_source,
     resolve_graph_key_source, seal_key_from_hex, seal_key_to_hex, AgentSecret,
     CredentialSourceKind, DaemonSecretSource, EgressSealKeySource, GraphKey, GraphKeySource,
