@@ -2304,11 +2304,13 @@ impl TaskStore {
         let mut next = prior.clone();
         next.state = TaskState::Working;
         next.claimed = Some(self.clock.now_secs());
+        next.unseen = true;
         self.write(&next, Some(&prior))
             .expect("the test store writes the task");
         let lease = self.clock.now_secs() + CLAIM_LEASE.as_secs() as i64;
         let mut held = self.held();
-        held.hot.entry(*id).or_default().lease_until = lease;
+        let hot = held.hot.entry(*id).or_default();
+        (hot.lease_until, hot.cited) = (lease, false);
         held.tasks.insert(*id, next);
     }
 
@@ -5736,11 +5738,11 @@ mod tests {
         let hobi = id("hobi");
         let task = held_by(&store, Tasker::Uid(BOB));
         store.start_for_test(&task);
+        store.acted(&task);
         assert!(matches!(
             claim_head(&store, &hobi, HOBI, signer()),
             Ok(Claimed::Delivered { fresh: false, .. })
         ));
-        store.acted(&task);
         if let Some(hot) = store.held().hot.get_mut(&task) {
             (hot.retry_after, hot.retry_secs) = (i64::MAX, RETRY_MAX_SECS);
         }

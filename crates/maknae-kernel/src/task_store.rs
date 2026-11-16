@@ -183,7 +183,7 @@ pub fn ordinal_key(tasker: &Tasker) -> String {
     }
 }
 
-/// In memory only; `lease_until` is never persisted.
+/// In memory only.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Hot {
     pub actions: u32,
