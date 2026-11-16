@@ -11,6 +11,7 @@
 //! plaintext secret as `hrot_sealed`) — exactly the "emit false assurance" T1
 //! line-drawing rule.
 
+pub use maknae_config::{PostureMarker, MECHANISM_KEYCHAIN, MECHANISM_TPM2};
 use maknae_vault::CredentialSourceKind;
 
 /// Mirrors [`maknae_vault::CredentialSourceKind`] (named `CredentialSource`, NOT
@@ -31,23 +32,6 @@ impl From<CredentialSourceKind> for CredentialSource {
         }
     }
 }
-
-/// The root-owned provisioning-time attestation (`<config_dir>/private/posture.yaml`,
-/// spec §4.6/§5.2): the sealing mechanism, the sealed target path, and when it was
-/// written. The daemon can read this file but not modify it. A missing or
-/// malformed marker file parses to `None` at the read site (`run.rs`) — never to a
-/// fabricated "matches" marker.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PostureMarker {
-    pub mechanism: String,
-    pub target: String,
-    pub timestamp: String,
-}
-
-/// The mechanism token a [`CredentialSource::CredentialsDirectory`] boot expects
-/// its marker to attest (Linux `systemd-creds`, TPM2-key-pinned per spec §6.1).
-pub const MECHANISM_TPM2: &str = "tpm2";
-pub const MECHANISM_KEYCHAIN: &str = "keychain";
 
 /// The daemon's honestly-stated boot credential posture (spec §5.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -284,6 +268,52 @@ mod tests {
                 EXPECTED_TARGET
             ),
             Posture::PlaintextDegraded
+        );
+    }
+
+    fn rendered(mechanism: &str, target: &str) -> Option<PostureMarker> {
+        let text = PostureMarker {
+            mechanism: mechanism.to_string(),
+            target: target.to_string(),
+            timestamp: "1786563711".to_string(),
+        }
+        .render();
+        PostureMarker::from_value(&maknae_config::load_str(&text).unwrap())
+    }
+
+    #[test]
+    fn a_rendered_tpm2_marker_determines_hrot_sealed() {
+        assert_eq!(
+            determine(
+                CredentialSource::CredentialsDirectory,
+                rendered(MECHANISM_TPM2, EXPECTED_TARGET).as_ref(),
+                EXPECTED_TARGET
+            ),
+            Posture::HrotSealed
+        );
+    }
+
+    #[test]
+    fn a_rendered_keychain_marker_determines_code_bound() {
+        assert_eq!(
+            determine(
+                CredentialSource::Keychain,
+                rendered(MECHANISM_KEYCHAIN, EXPECTED_TARGET).as_ref(),
+                EXPECTED_TARGET
+            ),
+            Posture::CodeBound
+        );
+    }
+
+    #[test]
+    fn a_rendered_marker_for_another_target_is_unverified() {
+        assert_eq!(
+            determine(
+                CredentialSource::CredentialsDirectory,
+                rendered(MECHANISM_TPM2, EXPECTED_TARGET).as_ref(),
+                "/etc/maknae/private/some-other-host-secret-id.cred"
+            ),
+            Posture::Unverified
         );
     }
 

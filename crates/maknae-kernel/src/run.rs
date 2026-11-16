@@ -8667,7 +8667,7 @@ where
 /// tell "never enrolled" from "enrolled but broken" instead of both looking
 /// identical in the boot posture record.
 fn read_posture_marker(config_dir: &Path) -> Option<crate::posture::PostureMarker> {
-    let path = config_dir.join("private").join("posture.yaml");
+    let path = config_dir.join(maknae_config::POSTURE_MARKER_FILE);
     match classify_marker_load(maknae_config::load_root_file(&path)) {
         MarkerOutcome::Absent => None,
         MarkerOutcome::Refused(reason) => {
@@ -8677,7 +8677,7 @@ fn read_posture_marker(config_dir: &Path) -> Option<crate::posture::PostureMarke
             );
             None
         }
-        MarkerOutcome::Loaded(value) => parse_posture_marker(&value),
+        MarkerOutcome::Loaded(value) => crate::posture::PostureMarker::from_value(&value),
     }
 }
 
@@ -8695,7 +8695,7 @@ enum MarkerOutcome {
     /// to parse. `String` is the `ConfigError`'s `Display` text.
     Refused(String),
     /// The file was read and parsed into a generic YAML `Value`; still needs
-    /// `parse_posture_marker` to confirm the marker shape.
+    /// `PostureMarker::from_value` to confirm the marker shape.
     Loaded(maknae_config::Value),
 }
 
@@ -8723,27 +8723,6 @@ fn classify_marker_load(
         Err(maknae_config::ConfigError::NotFound { .. }) => MarkerOutcome::Absent,
         Err(e) => MarkerOutcome::Refused(e.to_string()),
     }
-}
-
-fn parse_posture_marker(value: &maknae_config::Value) -> Option<crate::posture::PostureMarker> {
-    let entries = match &value {
-        maknae_config::Value::Map(entries) => entries,
-        _ => return None,
-    };
-    let get = |key: &str| -> Option<String> {
-        entries
-            .iter()
-            .find(|(k, _)| k == key)
-            .and_then(|(_, v)| match v {
-                maknae_config::Value::Str(s) => Some(s.clone()),
-                _ => None,
-            })
-    };
-    Some(crate::posture::PostureMarker {
-        mechanism: get("mechanism")?,
-        target: get("target")?,
-        timestamp: get("timestamp")?,
-    })
 }
 
 /// Where the kernel graph key comes from. Production reads the enrolled credential;
@@ -10043,7 +10022,7 @@ async fn boot_after_sink(
     let secret_source_kind = client.secret_source();
     let expected_target = match secret_source_kind {
         maknae_vault::CredentialSourceKind::CredentialsDirectory => {
-            config_dir.join("private").join("maknaed-secret-id.cred")
+            maknae_vault::daemon_sealed_credential(config_dir)
         }
         maknae_vault::CredentialSourceKind::Keychain => {
             maknae_vault::daemon_keychain_pointer(config_dir)
@@ -13918,13 +13897,17 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let d = Dir::new("read_marker_refused");
         put(
             &d.0,
-            "private/posture.yaml",
+            maknae_config::POSTURE_MARKER_FILE,
             "mechanism: tpm2\ntarget: /x\ntimestamp: \"1\"\n",
             0o640,
         );
         if nix::unistd::geteuid().as_raw() == 0 {
-            std::os::unix::fs::chown(d.0.join("private").join("posture.yaml"), Some(65534), None)
-                .expect("root can chown the fixture to a non-root uid");
+            std::os::unix::fs::chown(
+                d.0.join(maknae_config::POSTURE_MARKER_FILE),
+                Some(65534),
+                None,
+            )
+            .expect("root can chown the fixture to a non-root uid");
         }
         assert_eq!(read_posture_marker(&d.0), None);
     }
@@ -13934,125 +13917,6 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         assert!(maknae_config::load_str("x: [1, 2\n").is_err());
     }
 
-    #[test]
-    fn read_posture_marker_scalar_root_is_none() {
-        let value = maknae_config::load_str("just a scalar\n").unwrap();
-        assert_eq!(parse_posture_marker(&value), None);
-    }
-
-    #[test]
-    fn read_posture_marker_missing_field_is_none() {
-        // `timestamp` is absent — the whole marker must not be fabricated from a
-        // partial record.
-        let value = maknae_config::load_str(
-            "mechanism: tpm2\ntarget: /etc/maknae/private/maknaed-secret-id.cred\n",
-        )
-        .unwrap();
-        assert_eq!(parse_posture_marker(&value), None);
-    }
-
-    #[test]
-    fn read_posture_marker_valid_parses() {
-        let value = maknae_config::load_str("mechanism: tpm2\ntarget: /etc/maknae/private/maknaed-secret-id.cred\ntimestamp: 2026-08-12T00:00:00.000Z\n").unwrap();
-        let m = parse_posture_marker(&value).expect("valid marker parses");
-        assert_eq!(m.mechanism, "tpm2");
-        assert_eq!(m.target, "/etc/maknae/private/maknaed-secret-id.cred");
-        assert_eq!(m.timestamp, "2026-08-12T00:00:00.000Z");
-    }
-
-    // ---- final-fix wave, Fix 1: posture-marker key/type contract pin -------
-    // (reader half — see `bins/maknae/src/enroll/mod.rs`'s
-    // `build_posture_yaml_emits_the_three_reader_keys_as_strings` for the
-    // writer-side half of this same cross-crate pin. `bins/maknae` cannot
-    // depend on `maknae-kernel` (bin/lib layering), so there is no single
-    // shared test crate; this fixture closes the gap by being
-    // BYTE-IDENTICAL to `build_posture_yaml`'s actual emitted output —
-    // captured by literally running that function and copying its output,
-    // not hand-typed from the format string.)
-
-    #[test]
-    fn posture_marker_matches_enroll_writer_output() {
-        // Exact byte-for-byte capture of
-        // `bins/maknae/src/enroll/mod.rs::build_posture_yaml("tpm2",
-        // "/etc/maknae/private/maknaed-secret-id.cred")`'s output (its
-        // `yaml_rust2::YamlEmitter` quotes the all-digit `timestamp` scalar
-        // to preserve its string type — confirmed by actually running the
-        // writer, not assumed). If enroll's writer format ever drifts from
-        // this, this test — not just the reader's own schema tests — must
-        // be the one that catches it.
-        let fixture = "---\nmechanism: tpm2\ntarget: /etc/maknae/private/maknaed-secret-id.cred\ntimestamp: \"1786563711\"\n";
-        let value = maknae_config::load_str(fixture).unwrap();
-        let marker = parse_posture_marker(&value).expect("enroll's real writer output parses");
-        assert_eq!(marker.mechanism, "tpm2");
-        assert_eq!(marker.target, "/etc/maknae/private/maknaed-secret-id.cred");
-        assert_eq!(marker.timestamp, "1786563711");
-    }
-
-    #[test]
-    fn enroll_writer_fixture_determines_hrot_sealed() {
-        // The actual regression this fix closes: feed the enroll writer's
-        // real output through BOTH `read_posture_marker` AND
-        // `posture::determine` and assert a healthy sealed boot yields
-        // `HrotSealed` — not `Unverified`, which is what the pre-fix key
-        // mismatch produced on every real `maknae enroll` + boot.
-        let fixture = "---\nmechanism: tpm2\ntarget: /etc/maknae/private/maknaed-secret-id.cred\ntimestamp: \"1786563711\"\n";
-        let value = maknae_config::load_str(fixture).unwrap();
-        let marker = parse_posture_marker(&value);
-        // The expected target matches enroll's ALWAYS-`/etc/maknae` write
-        // target (bins/maknae's `artifact_table.rs` hardcodes `/etc/maknae`,
-        // not the daemon's `config_dir` argument) — the real daemon's default
-        // `config_dir` is also `/etc/maknae` (bins/maknaed/src/main.rs), so
-        // this fixture models the default-deployment case where the two
-        // agree. A non-default `--config-dir` daemon boot is a legitimate,
-        // documented case where they would NOT agree — out of scope here.
-        let posture = crate::posture::determine(
-            crate::posture::CredentialSource::CredentialsDirectory,
-            marker.as_ref(),
-            "/etc/maknae/private/maknaed-secret-id.cred",
-        );
-        assert_eq!(
-            posture,
-            crate::posture::Posture::HrotSealed,
-            "enroll's real writer output must determine HrotSealed on a \
-             healthy CredentialsDirectory boot, not Unverified"
-        );
-    }
-
-    #[test]
-    fn keychain_marker_fixture_determines_code_bound() {
-        let fixture = "---\nmechanism: keychain\ntarget: /etc/maknae/private/maknaed-secret-id.keychain\ntimestamp: \"1786563711\"\n";
-        let value = maknae_config::load_str(fixture).unwrap();
-        let marker = parse_posture_marker(&value);
-        let posture = crate::posture::determine(
-            crate::posture::CredentialSource::Keychain,
-            marker.as_ref(),
-            "/etc/maknae/private/maknaed-secret-id.keychain",
-        );
-        assert_eq!(posture, crate::posture::Posture::CodeBound);
-    }
-
-    #[test]
-    fn enroll_writer_fixture_with_foreign_target_is_unverified() {
-        // The regression pin for the finding at the cross-crate (enroll-writer
-        // fixture) level: same mechanism (tpm2) as the healthy fixture above,
-        // but a target that does NOT match this boot's expected sealed-
-        // credential path (e.g. a marker copied from another host) — must
-        // yield Unverified, not HrotSealed.
-        let fixture = "---\nmechanism: tpm2\ntarget: /etc/maknae/private/maknaed-secret-id.cred\ntimestamp: \"1786563711\"\n";
-        let value = maknae_config::load_str(fixture).unwrap();
-        let marker = parse_posture_marker(&value);
-        let posture = crate::posture::determine(
-            crate::posture::CredentialSource::CredentialsDirectory,
-            marker.as_ref(),
-            "/etc/maknae/private/some-other-host-secret-id.cred",
-        );
-        assert_eq!(
-            posture,
-            crate::posture::Posture::Unverified,
-            "a marker with the right mechanism but the wrong target must not \
-             determine HrotSealed"
-        );
-    }
     // ---- #490: the boot starts from the accepted baseline ----
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
