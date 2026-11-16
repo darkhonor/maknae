@@ -1768,7 +1768,7 @@ The kernel closes a task itself in these cases, and keeps the closed record for 
 
 ### Agents task agents
 
-An agent gives another enrolled agent a task with its model's `task_agent` tool, while it works a task of its own. The target's `taskers:` must list it (`agent:<id>`), and its role must grant `session.task`, as for a person.
+An agent gives another enrolled agent a task with its model's `task_agent` tool, while it works a task of its own. The target's `taskers:` must list it (`agent:<id>`), its role must grant `session.task`, as for a person, and its own `policy.yaml` must allow `session.task` when it has an `actions:` list; otherwise every call answers the uniform refusal and the trail reads `session.task is not in agents.<id>.policy.actions allow`.
 
 - **The sub-task.** It is submitted citing the working task, works in the root's partition of the target's home, and its first turn says which agent gave it (`Task from agent <id>:`). The two agents' files stay apart: the target cannot read the tasking agent's home or the other way round, so what the target needs goes in the prompt and what comes back is the report (#661 tracks passing files).
 - **Waiting.** The tool waits until the sub-task reports or ends, with no time limit. A sub-task whose agent stops responding is closed `agent-lost` when its lease lapses; stopping the tasking agent's own task ends the wait and closes the sub-task `parent-ended`. While it waits, follow-ups to the tasking agent's task are held until the tool returns.
