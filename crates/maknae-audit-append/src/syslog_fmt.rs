@@ -670,7 +670,7 @@ mod tests {
     const MEASURED_TASKER_LINE: usize = 858;
     const MEASURED_WIDEST_TASK_LINE: usize = 1229;
     const MEASURED_RELEASE_LINE: usize = 876;
-    const MEASURED_WIDEST_RELEASE_LINE: usize = 1083;
+    const MEASURED_WIDEST_RELEASE_LINE: usize = 1076;
 
     fn widest_shapes() -> Vec<(String, crate::record::AuditRecord)> {
         let mut out = Vec::new();
@@ -805,7 +805,7 @@ mod tests {
 
     fn widest_release() -> crate::record::AuditRecord {
         let mut r = rec(
-            "task release not done: the record does not name the state it was held from; \
+            "task release outcome unknown: the task store did not answer in time; \
              requested by uid 4294967295 in session 18446744073709551615",
         );
         r.action = "admin.release".into();
