@@ -22175,13 +22175,13 @@ mod reload_tests {
                 Fail::Records,
                 R::NotDone,
                 Some(TaskState::Held),
-                "task release not done: ",
+                "task release not done: sentinel-628-write-refused",
             ),
             (
                 Fail::Unsynced,
                 R::OutcomeUnknown,
                 None,
-                "task release outcome unknown: ",
+                "task release outcome unknown: sentinel-628-unsynced",
             ),
         ] {
             let before = held_records(&fx).len();
@@ -22222,10 +22222,7 @@ mod reload_tests {
                 (Some(planned.clone()), "deny", "unavailable"),
                 "{fail:?}"
             );
-            assert!(
-                added[1].3.starts_with(second) && added[1].3.ends_with(&by),
-                "{fail:?}: {added:?}"
-            );
+            assert_eq!(added[1].3, format!("{second}{by}"), "{fail:?}");
         }
         let before = held_records(&fx).len();
         let (ready, slot_held) = tokio::sync::oneshot::channel();

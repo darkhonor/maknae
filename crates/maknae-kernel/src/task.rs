@@ -168,7 +168,10 @@ fn release_state(from: TaskState) -> TaskState {
 
 fn unreleased(refused: TaskRefusal) -> ReleaseRefusal {
     match refused {
-        TaskRefusal::Unavailable(why) => ReleaseRefusal::OutcomeUnknown(why),
+        TaskRefusal::Unavailable(why) => ReleaseRefusal::OutcomeUnknown(
+            why.strip_prefix(OUTCOME_UNKNOWN)
+                .map_or_else(|| why.clone(), str::to_owned),
+        ),
         TaskRefusal::Store(why) => ReleaseRefusal::NotDone(why),
         other => ReleaseRefusal::NotDone(other.to_string()),
     }
@@ -684,7 +687,7 @@ impl TaskStore {
             (Err(e), Some(_)) => {
                 self.held()
                     .owe(&id, format!("written unsynced ({why}), not undone ({e})"));
-                Err(TaskRefusal::Unavailable(format!("outcome unknown: {why}")))
+                Err(TaskRefusal::Unavailable(format!("{OUTCOME_UNKNOWN}{why}")))
             }
         }
     }
@@ -1865,9 +1868,9 @@ impl TaskStore {
         let gone = taken;
         match self.held().exposed.values().any(acked) {
             false => Ok(gone),
-            true => Err(TaskRefusal::Unavailable(
-                "outcome unknown: the acknowledgement is left to a later store write".into(),
-            )),
+            true => Err(TaskRefusal::Unavailable(format!(
+                "{OUTCOME_UNKNOWN}the acknowledgement is left to a later store write"
+            ))),
         }
     }
 
@@ -2413,7 +2416,9 @@ impl Drop for PutBack<'_> {
 }
 
 fn drop_owed() -> TaskRefusal {
-    TaskRefusal::Unavailable("outcome unknown: the drop is left to a later store write".into())
+    TaskRefusal::Unavailable(format!(
+        "{OUTCOME_UNKNOWN}the drop is left to a later store write"
+    ))
 }
 
 fn abandoned() -> TaskRefusal {
@@ -2680,11 +2685,12 @@ where
             Err(TaskRefusal::Unavailable(format!("not done: {BUSY}")))
         }
         Err(crate::mutation::Blocked::Unknown) => {
-            Err(TaskRefusal::Unavailable(format!("outcome unknown: {LATE}")))
+            Err(TaskRefusal::Unavailable(format!("{OUTCOME_UNKNOWN}{LATE}")))
         }
     }
 }
 
+pub(crate) const OUTCOME_UNKNOWN: &str = "outcome unknown: ";
 pub(crate) const LATE: &str = "the task store did not answer in time";
 pub(crate) const BUSY: &str = "the task store was busy";
 
@@ -2699,13 +2705,13 @@ async fn unconfirmed(
     kept: bool,
     refusal: TaskRefusal,
 ) -> (TaskRefusal, String) {
-    let late = format!("outcome unknown: {LATE}");
+    let late = format!("{OUTCOME_UNKNOWN}{LATE}");
     match (kept, refusal) {
-        (true, TaskRefusal::Unavailable(why)) if why == late => {
-            (TaskRefusal::Unavailable(late.clone()), late)
+        (true, TaskRefusal::Unavailable(why)) if why.starts_with(OUTCOME_UNKNOWN) => {
+            (TaskRefusal::Unavailable(why.clone()), why)
         }
         (true, other) => {
-            let said = format!("outcome unknown: {other}");
+            let said = format!("{OUTCOME_UNKNOWN}{other}");
             (TaskRefusal::Unavailable(said.clone()), said)
         }
         (false, refusal) => {
@@ -2888,7 +2894,7 @@ async fn submit_under<P: Authorizer + Send + Sync + 'static>(
                 Ok(()) => Ok(task),
                 Err(refusal) => {
                     let kept = ticket.abandon().is_some();
-                    let late = TaskRefusal::Unavailable(format!("outcome unknown: {LATE}"));
+                    let late = TaskRefusal::Unavailable(format!("{OUTCOME_UNKNOWN}{LATE}"));
                     if let (true, Some(failed)) = (kept && refusal == late, ticket.gave_up()) {
                         store.note(Notice::Late {
                             task: id,
@@ -8314,6 +8320,11 @@ mod tests {
         assert_eq!(
             said(true, &busy).await,
             (TaskRefusal::Unavailable(unknown.clone()), unknown)
+        );
+        let unsynced = "outcome unknown: sentinel-632-unsynced".to_string();
+        assert_eq!(
+            said(true, &unsynced).await,
+            (TaskRefusal::Unavailable(unsynced.clone()), unsynced)
         );
         let (refusal, why) = said(false, &late).await;
         assert_eq!(
