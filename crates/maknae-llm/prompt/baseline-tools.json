@@ -138,7 +138,7 @@
     "type": "function",
     "function": {
       "name": "task_agent",
-      "description": "Gives a task to another agent and waits until it reports or its task ends. The other agent cannot see your files and you cannot see its files: put what it needs in the prompt, and ask for what you need in its report. Returns the start of its report and the path of a file holding all of it, or one of: not accepted; stopped; dropped; the agent was removed; the agent stopped responding; withdrawn; on hold — its agent or tasker was contained; the wait ended; the other agent's work will be closed; outcome unknown: the other agent may have the task; do not retry it; or, outside an agent's own task, unavailable — do not retry.",
+      "description": "Gives a task to another agent and waits until it reports or its task ends. The other agent cannot see your files and you cannot see its files: put what it needs in the prompt, and ask for what you need in its report. Returns the start of its report and the path of a file holding all of it, or exactly one of these: \"not accepted, or its outcome is unknown; do not retry it\"; \"outcome unknown: the other agent may have the task; do not retry it\"; \"stopped\"; \"dropped\"; \"the agent was removed\"; \"the agent stopped responding\"; \"withdrawn\"; \"the task that asked for it ended\"; \"on hold — its agent or tasker was contained\"; \"the wait ended; the other agent's work will be closed\"; or, outside an agent's own task, \"unavailable — do not retry\".",
       "parameters": {
         "type": "object",
         "properties": {

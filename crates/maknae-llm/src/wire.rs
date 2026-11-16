@@ -1266,13 +1266,26 @@ mod tests {
             "put what it needs in the prompt",
             "ask for what you need in its report",
             "the start of its report and the path of a file holding all of it",
-            "not accepted",
+        ] {
+            assert!(said.contains(promise), "task_agent: {promise:?}");
+        }
+        for outcome in [
+            "not accepted, or its outcome is unknown; do not retry it",
             "outcome unknown: the other agent may have the task; do not retry it",
+            "stopped",
+            "dropped",
+            "the agent was removed",
+            "the agent stopped responding",
+            "withdrawn",
+            "the task that asked for it ended",
             "on hold — its agent or tasker was contained",
             "the wait ended; the other agent's work will be closed",
             "unavailable — do not retry",
         ] {
-            assert!(said.contains(promise), "task_agent: {promise:?}");
+            assert!(
+                said.contains(&format!("\"{outcome}\"")),
+                "task_agent quotes {outcome:?}"
+            );
         }
         for field in ["agent", "prompt"] {
             assert_eq!(

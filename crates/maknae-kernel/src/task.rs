@@ -475,50 +475,42 @@ impl Held {
         })
     }
 
-    /// Whether `r` was given under a task that is gone, or neither working, held nor due a
-    /// hold: no tasker can reach it any more.
+    /// Whether `r` was given under a task that is gone, neither working, held nor due a
+    /// hold, or started again since: no tasker can reach it any more.
     fn parent_ended(&self, r: &TaskRecord) -> bool {
         r.parent.is_some_and(|p| {
             !self.holding.contains_key(&p)
-                && !self
-                    .live(&p)
-                    .is_some_and(|p| matches!(p.state, TaskState::Working | TaskState::Held))
+                && !self.live(&p).is_some_and(|p| {
+                    matches!(p.state, TaskState::Working | TaskState::Held)
+                        && r.parent_start.is_none_or(|s| s == p.starts)
+                })
         })
     }
 
-    /// Whether a task from agent `by` to `target` would wait on itself: `target` is `by`,
-    /// or what `target` holds working or pending leads, through open or pending sub-tasks,
-    /// to a task `by` holds. An ancestor of the cited task is always working here (an
-    /// orphan's cite is refused, a held chain holds its sub-tasks), so the walk covers it.
+    /// An agent waits on every agent its working or pending tasks have a sub-task at.
     fn would_wait(&self, by: &str, target: &AgentId) -> bool {
-        if target.as_str() == by {
-            return true;
-        }
         let waiting = |id: &TaskId, r: &TaskRecord| {
             (r.pending || open(r)) && self.closing.get(id) != Some(&TaskClose::Withdrawn)
         };
-        let mut children: BTreeMap<TaskId, Vec<(TaskId, &AgentId)>> = BTreeMap::new();
-        for (id, r) in self.tasks.iter().filter(|(id, r)| waiting(id, r)) {
-            if let Some(p) = r.parent {
-                children.entry(p).or_default().push((*id, &r.agent));
+        let mut agents = vec![target];
+        let mut visited = BTreeSet::new();
+        while let Some(agent) = agents.pop() {
+            if agent.as_str() == by {
+                return true;
             }
-        }
-        let mut frontier: Vec<TaskId> = self
-            .tasks
-            .iter()
-            .filter(|(_, r)| r.agent == *target && (r.pending || r.state == TaskState::Working))
-            .map(|(id, _)| *id)
-            .collect();
-        let mut seen = BTreeSet::new();
-        while let Some(id) = frontier.pop() {
-            if !seen.insert(id) {
+            if !visited.insert(agent) {
                 continue;
             }
-            for (child, agent) in children.get(&id).into_iter().flatten() {
-                if agent.as_str() == by {
-                    return true;
+            let busy: BTreeSet<&TaskId> = self
+                .tasks
+                .iter()
+                .filter(|(_, r)| r.agent == *agent && (r.pending || r.state == TaskState::Working))
+                .map(|(id, _)| id)
+                .collect();
+            for (id, r) in &self.tasks {
+                if r.parent.is_some_and(|p| busy.contains(&p)) && waiting(id, r) {
+                    agents.push(&r.agent);
                 }
-                frontier.push(*child);
             }
         }
         false
@@ -1539,8 +1531,15 @@ impl TaskStore {
                     )));
                 }
             }
-            root_of(&held, &task.task)?
+            let root = root_of(&held, &task.task)?;
+            let parent_start = task
+                .task
+                .parent
+                .and_then(|p| held.live(&p))
+                .map(|p| p.starts);
+            (root, parent_start)
         };
+        let (root, parent_start) = root;
         let (seq, tseq) = self.issue_submission(&task.task.tasker)?;
         let rec = TaskRecord {
             signed: task.clone(),
@@ -1566,6 +1565,8 @@ impl TaskStore {
             actions: 0,
             last_action: None,
             unseen: false,
+            starts: 0,
+            parent_start,
         };
         self.write(&rec, None)?;
         if let Some(t) = ticket {
@@ -1823,6 +1824,7 @@ impl TaskStore {
                 next.state = TaskState::Working;
                 next.claimed = Some(self.clock.now_secs());
                 next.unseen = true;
+                next.starts = prior.starts.saturating_add(1);
                 self.write(&next, Some(&prior))?;
                 let handed = delivered(&next, true);
                 let mut held = self.held();
@@ -1944,9 +1946,10 @@ impl TaskStore {
         held.notices = unsaid;
     }
 
-    /// Removes `tasker`'s reports from `agent` up to its own report ordinal `upto`; a
-    /// cursor above every ordinal this tasker was ever issued is refused. Answered done
-    /// only when no such report is still owed its removal, from this call or an earlier one.
+    /// Removes the reports from `agent` that `by` reaches, up to its report ordinal `upto`.
+    /// A person's cursor above every ordinal it was issued is refused; an agent's ordinals
+    /// span every root it works for, so its cursor is never refused. Answered done only
+    /// when no such report is still owed its removal, from this call or an earlier one.
     pub fn acknowledge<'a>(
         &self,
         by: impl Into<Reach<'a>>,
@@ -1965,14 +1968,15 @@ impl TaskStore {
     ) -> Result<Vec<TaskId>, TaskRefusal> {
         let by = by.into();
         let _w = self.writing();
+        let spans_roots = matches!(by.tasker, Tasker::Agent { .. });
+        if !spans_roots && upto > self.held().issued.of(by.tasker).rseq {
+            return Err(TaskRefusal::CursorAhead);
+        }
         let acked = |r: &TaskRecord| {
             by.reaches(r) && r.agent == *agent && r.rseq.is_some_and(|s| s <= upto)
         };
         let gone: Vec<TaskId> = {
             let held = self.held();
-            if upto > held.issued.of(by.tasker).rseq {
-                return Err(TaskRefusal::CursorAhead);
-            }
             held.tasks
                 .iter()
                 .filter(|(_, r)| !r.pending && acked(r))
@@ -2121,13 +2125,13 @@ impl TaskStore {
         }
     }
 
-    /// The task's state when `tasker` submitted it; any other task, foreign or unknown,
-    /// reads as `None`.
+    /// The task's state when `by` reaches it; any other task, foreign or unknown, reads
+    /// as `None`.
     pub fn state_for<'a>(&self, id: &TaskId, by: impl Into<Reach<'a>>) -> Option<TaskState> {
         tasker_record(&self.held(), id, by.into()).map(|r| r.state)
     }
 
-    /// `tasker`'s own task, as a view.
+    /// The task, when `by` reaches it, as a view.
     pub fn status<'a>(&self, id: &TaskId, by: impl Into<Reach<'a>>) -> Option<TaskView> {
         let held = self.held();
         let rec = tasker_record(&held, id, by.into())?;
@@ -2143,7 +2147,7 @@ impl TaskStore {
         crate::task_verbs::view(rec, &hot, self.clock.now_secs())
     }
 
-    /// Appends `text` to `tasker`'s working task, within the count and the byte total.
+    /// Appends `text` to a working task `by` reaches, within the count and the byte total.
     pub fn follow_up<'a>(
         &self,
         id: &TaskId,
@@ -2176,7 +2180,7 @@ impl TaskStore {
         Ok(view)
     }
 
-    /// Closes `tasker`'s working task as `Stopped`; the notice is collected like a report.
+    /// Closes a working task `by` reaches as `Stopped`; the notice is collected like a report.
     pub fn stop<'a>(&self, id: &TaskId, by: impl Into<Reach<'a>>) -> Result<TaskView, TaskRefusal> {
         let by = by.into();
         let _w = self.writing();
@@ -2196,7 +2200,7 @@ impl TaskStore {
         Ok(self.view_of(&self.held(), &next))
     }
 
-    /// Withdraws `tasker`'s queued task. Answered once the record is durably pending or
+    /// Withdraws a queued task `by` reaches. Answered once the record is durably pending or
     /// gone; otherwise the task leaves memory and the outcome is unknown.
     pub fn drop_queued<'a>(
         &self,
@@ -2227,8 +2231,8 @@ impl TaskStore {
         Ok(view)
     }
 
-    /// `tasker`'s tasks with `agent` after its own submission ordinal `after`, oldest
-    /// first, at most `limit`, and the ordinal to resume after when more remain.
+    /// The tasks `by` reaches with `agent` after the tasker's submission ordinal `after`,
+    /// oldest first, at most `limit`, and the ordinal to resume after when more remain.
     pub fn list<'a>(
         &self,
         by: impl Into<Reach<'a>>,
@@ -2253,8 +2257,8 @@ impl TaskStore {
         (page, next)
     }
 
-    /// `tasker`'s reports and close notices from `agent`, in arrival order, as one page
-    /// built under the lock; only the entries that fit are copied.
+    /// The reports and close notices from `agent` that `by` reaches, in arrival order, as
+    /// one page built under the lock; only the entries that fit are copied.
     pub fn reports<'a>(
         &self,
         by: impl Into<Reach<'a>>,
@@ -2350,10 +2354,11 @@ impl TaskStore {
     #[cfg(any(test, feature = "hermetic-test-seam"))]
     pub fn insert_for_test(&self, signed: SignedTask, agent_uid: u32) -> Arc<SignedTask> {
         let agent = AgentId::parse(&signed.task.agent).expect("a test task names a valid agent id");
-        let inherited = signed
+        let (inherited, parent_start) = signed
             .task
             .parent
-            .and_then(|p| self.held().live(&p).map(|r| r.root.clone()));
+            .and_then(|p| self.held().live(&p).map(|r| (r.root.clone(), r.starts)))
+            .unzip();
         let root = inherited.unwrap_or_else(|| match &signed.task.tasker {
             Tasker::Uid(uid) => RootTasker::Person { uid: *uid },
             Tasker::Agent { agent, .. } | Tasker::Remote(agent) => RootTasker::Agent {
@@ -2389,6 +2394,8 @@ impl TaskStore {
             actions: 0,
             last_action: None,
             unseen: false,
+            starts: 0,
+            parent_start,
         };
         self.write(&rec, None)
             .expect("the test store writes the task");
@@ -2406,6 +2413,7 @@ impl TaskStore {
         next.state = TaskState::Working;
         next.claimed = Some(self.clock.now_secs());
         next.unseen = true;
+        next.starts = prior.starts.saturating_add(1);
         self.write(&next, Some(&prior))
             .expect("the test store writes the task");
         let lease = self.clock.now_secs() + CLAIM_LEASE.as_secs() as i64;

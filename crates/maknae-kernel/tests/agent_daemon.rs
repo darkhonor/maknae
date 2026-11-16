@@ -1580,7 +1580,10 @@ async fn a_task_the_other_agent_will_not_take_is_not_accepted() {
     hd.until("hobi reports", |d| d.ended(&t1)).await;
     hd.stop().await;
     let said = tool_results(&hobi.prompts()[1]);
-    assert!(said[0].starts_with("not accepted\n\n"), "{said:?}");
+    assert!(
+        said[0].starts_with("not accepted, or its outcome is unknown; do not retry it\n\n"),
+        "{said:?}"
+    );
     assert!(given_under(&w, &t1).is_empty());
 }
 

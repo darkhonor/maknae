@@ -3792,3 +3792,107 @@ async fn a_chain_that_waits_on_no_one_behind_it_is_taken() {
     let g1 = w.give("jin", "suga", s1).await;
     assert_eq!(w.store().record(&g1).unwrap().parent, Some(s1));
 }
+
+/// hobi, jin and suga each take tasks from the other two.
+fn triangle_world(tag: &str) -> World {
+    let (hobi, jin, suga) = (
+        tasks_and_tasked_by(&["jin", "suga"]),
+        tasks_and_tasked_by(&["hobi", "suga"]),
+        tasks_and_tasked_by(&["hobi", "jin"]),
+    );
+    world_of(
+        tag,
+        "user",
+        ROLES_TASK,
+        &[
+            ("hobi", HOBI_UID, &hobi),
+            ("suga", SUGA_UID, &suga),
+            ("jin", JIN_UID, &jin),
+        ],
+    )
+}
+
+#[tokio::test]
+async fn a_wait_through_a_third_agents_queue_is_refused() {
+    let w = triangle_world("waits-triangle");
+    let working = |agent: &str| {
+        let t = w.mine(agent);
+        w.working(&t);
+        t
+    };
+    let (ta, tb, tc) = (working("hobi"), working("jin"), working("suga"));
+    let to_c = w.give("hobi", "suga", ta).await;
+    let to_b = w.give("suga", "jin", tc).await;
+    for queued in [to_c, to_b] {
+        assert_eq!(w.store().record(&queued).unwrap().state, TaskState::Queued);
+    }
+    let said = w.refused_as("jin", "hobi", tb).await;
+    assert!(said.iter().any(|r| r == WAITS_ON_HOBI), "{said:?}");
+}
+
+#[tokio::test]
+async fn the_last_agent_of_a_chain_cannot_task_its_first() {
+    let w = triangle_world("waits-long-chain");
+    let (_, s1) = w.chain().await;
+    assert_eq!(w.claimed("jin").await, s1);
+    let g1 = w.give("jin", "suga", s1).await;
+    assert_eq!(w.claimed("suga").await, g1);
+    let said = w.refused_as("suga", "hobi", g1).await;
+    assert!(said.iter().any(|r| r == WAITS_ON_HOBI), "{said:?}");
+}
+
+#[tokio::test]
+async fn a_parent_released_and_started_again_never_revives_its_old_sub_task() {
+    let w = chain_world("orphan-restarted-parent");
+    let (t1, s1) = w.chain().await;
+    assert_eq!(w.claimed("jin").await, s1);
+    w.store().mark_unenrolled(&maknae_kernel::Containing(
+        everyone(),
+        [HOBI_UID].into_iter().collect(),
+    ));
+    w.store().sweep();
+    assert_eq!(w.store().record(&s1).unwrap().state, TaskState::Held);
+    w.store().release(&t1, &everyone()).unwrap();
+    assert_eq!(w.claimed("hobi").await, t1, "the parent starts afresh");
+    w.store().release(&s1, &everyone()).unwrap();
+    assert_eq!(
+        w.claim("jin").await.map(|(t, _)| t.task.task_id),
+        None,
+        "the old sub-task is not delivered again"
+    );
+    assert!(parent_ended(&w.store().sweep(), s1, t1));
+    assert!(w.store().record(&s1).is_none());
+    let reopened = w.restarted();
+    assert!(reopened.store().record(&s1).is_none());
+}
+
+#[tokio::test]
+async fn an_acknowledgement_under_one_root_answers_alike_whatever_another_root_has_reported() {
+    let w = chain_world("ack-scope");
+    let (t1, s1) = w.chain().await;
+    let t9 = w.anothers("hobi");
+    w.working(&t9);
+    assert_eq!(w.claimed("jin").await, s1);
+    w.agent_reports("jin", &s1, "sentinel-609-other-root").await;
+    let high = w.store().record(&s1).unwrap().rseq.unwrap();
+    let mut answers = Vec::new();
+    for upto in [high - 1, high, high + 1] {
+        let records = Records::new(0);
+        let got = w
+            .agent_with("hobi", collect("jin", Some(upto)), Some(t9), &records)
+            .await
+            .unwrap();
+        let reasons: Vec<String> = reasons(&records)
+            .into_iter()
+            .map(|r| r.replace(&format!("through {upto}"), "through N"))
+            .collect();
+        answers.push((format!("{got:?}"), reasons));
+    }
+    assert!(answers.windows(2).all(|a| a[0] == a[1]), "{answers:#?}");
+    assert!(
+        w.store().record(&s1).is_some(),
+        "the other root's report is untouched"
+    );
+    let page = reports(w.agent("hobi", collect("jin", None), Some(t1)).await);
+    assert_eq!(report_ids(&page), vec![s1]);
+}

@@ -112,7 +112,7 @@ pub const LIST_CONTINUE: &str = "truncated — continue with after: ";
 /// A call skipped because the host stopped the loop: not the model's error.
 pub const NOT_RUN: &str = "not run: the loop was stopped";
 /// `task_agent`'s fixed outcomes; half of the contract with its description.
-pub const NOT_ACCEPTED: &str = "not accepted";
+pub const NOT_ACCEPTED: &str = "not accepted, or its outcome is unknown; do not retry it";
 pub const SUB_OUTCOME_UNKNOWN: &str =
     "outcome unknown: the other agent may have the task; do not retry it";
 pub const ON_HOLD: &str = "on hold — its agent or tasker was contained";
@@ -128,7 +128,7 @@ fn closed_text(close: maknae_proto::TaskClose) -> &'static str {
         maknae_proto::TaskClose::AgentGone => "the agent was removed",
         maknae_proto::TaskClose::AgentLost => "the agent stopped responding",
         maknae_proto::TaskClose::Withdrawn => "withdrawn",
-        maknae_proto::TaskClose::ParentEnded => WAIT_ENDED,
+        maknae_proto::TaskClose::ParentEnded => "the task that asked for it ended",
     }
 }
 
@@ -467,7 +467,10 @@ mod tests {
         use crate::plane::TaskAgentOutcome as T;
         for (got, said) in [
             (T::Unavailable, "unavailable — do not retry"),
-            (T::NotAccepted, "not accepted"),
+            (
+                T::NotAccepted,
+                "not accepted, or its outcome is unknown; do not retry it",
+            ),
             (
                 T::OutcomeUnknown,
                 "outcome unknown: the other agent may have the task; do not retry it",
@@ -479,7 +482,7 @@ mod tests {
             ),
             (
                 T::Closed(maknae_proto::TaskClose::ParentEnded),
-                "the wait ended; the other agent's work will be closed",
+                "the task that asked for it ended",
             ),
         ] {
             assert_eq!(

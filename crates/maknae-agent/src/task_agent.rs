@@ -48,16 +48,26 @@ pub async fn run<P: TaskPlane + Send, C: Clock + Send>(
             Ok(view) => match view.state {
                 TaskState::Queued | TaskState::Working => state = view.state,
                 TaskState::Held => return TaskAgentOutcome::OnHold,
-                TaskState::Reported => {
-                    return reported(plane, &wait, cwd, conversation, &target, &task).await
-                }
-                TaskState::Closed => {
-                    if let Some(entry) = entry(plane, &target, &task).await {
-                        let _ = plane.collect_one(&target, &task, Some(entry.cursor)).await;
+                TaskState::Reported => match entry(plane, &target, &task).await {
+                    Ok(Some(entry)) => {
+                        return reported(plane, &wait, cwd, conversation, &target, &task, entry)
+                            .await
                     }
-                    return view
+                    Ok(None) | Err(TaskerFail::Refused) => return TaskAgentOutcome::WaitEnded,
+                    Err(TaskerFail::Unreachable { .. } | TaskerFail::Protocol) => {}
+                },
+                TaskState::Closed => {
+                    let closed = view
                         .close
                         .map_or(TaskAgentOutcome::WaitEnded, TaskAgentOutcome::Closed);
+                    match entry(plane, &target, &task).await {
+                        Ok(Some(entry)) => {
+                            let _ = plane.collect_one(&target, &task, Some(entry.cursor)).await;
+                            return closed;
+                        }
+                        Ok(None) | Err(TaskerFail::Refused) => return closed,
+                        Err(TaskerFail::Unreachable { .. } | TaskerFail::Protocol) => {}
+                    }
                 }
             },
             Err(TaskerFail::Refused) => return TaskAgentOutcome::WaitEnded,
@@ -83,9 +93,9 @@ async fn entry<P: TaskPlane + Send>(
     plane: &mut P,
     agent: &str,
     task: &TaskRef,
-) -> Option<TaskReportView> {
-    let page = plane.collect_one(agent, task, None).await.ok()?;
-    page.entries.into_iter().find(|e| e.task == *task)
+) -> Result<Option<TaskReportView>, TaskerFail> {
+    let page = plane.collect_one(agent, task, None).await?;
+    Ok(page.entries.into_iter().find(|e| e.task == *task))
 }
 
 /// Stores the whole report under the partition, never over an existing file, and
@@ -97,10 +107,8 @@ async fn reported<P: TaskPlane + Send, C: Clock>(
     conversation: &str,
     agent: &str,
     task: &TaskRef,
+    entry: TaskReportView,
 ) -> TaskAgentOutcome {
-    let Some(entry) = entry(plane, agent, task).await else {
-        return TaskAgentOutcome::WaitEnded;
-    };
     let dir = format!("{cwd}/{REPORTS_DIR}");
     let path = format!("{dir}/{}.md", task.to_id());
     let made = matches!(
@@ -469,6 +477,40 @@ mod tests {
             assert!(text.ends_with(
                 "\n[cut here — the rest of the report could not be stored and is not shown]\n\nsteps remaining: 1"
             ));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_lost_collect_goes_back_to_polling_and_the_report_still_arrives() {
+        for lost in [
+            TaskerFail::Unreachable { after_write: true },
+            TaskerFail::Protocol,
+        ] {
+            let mut p = fake();
+            p.polls = [
+                Ok(view(TaskState::Reported, None)),
+                Ok(view(TaskState::Reported, None)),
+            ]
+            .into();
+            p.collects = [Err(lost), Ok(page("sentinel-609-late", None))].into();
+            let r = ran(p, None).await;
+            assert!(
+                matches!(
+                    &r.got,
+                    TaskAgentOutcome::Report {
+                        stored: Some(_),
+                        ..
+                    }
+                ),
+                "{lost:?}: {:?}",
+                r.got
+            );
+            assert_eq!(
+                r.log.iter().filter(|l| l.starts_with("status")).count(),
+                2,
+                "{:?}",
+                r.log
+            );
         }
     }
 

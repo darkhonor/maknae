@@ -604,6 +604,8 @@ mod tests {
             actions: 0,
             last_action: None,
             unseen: false,
+            starts: 0,
+            parent_start: None,
         }
     }
 
