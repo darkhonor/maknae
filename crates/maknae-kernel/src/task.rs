@@ -416,6 +416,12 @@ struct Held {
 }
 
 impl Held {
+    fn start(&mut self, id: TaskId, lease: i64) {
+        self.starts += 1;
+        let hot = self.hot.entry(id).or_default();
+        (hot.lease_until, hot.cited, hot.start) = (lease, false, self.starts);
+    }
+
     fn generation(&self, agent: &AgentId) -> u64 {
         self.generations.get(agent).copied().unwrap_or(0)
     }
@@ -1738,10 +1744,7 @@ impl TaskStore {
                 self.write(&next, Some(&prior))?;
                 let handed = delivered(&next, true);
                 let mut held = self.held();
-                held.starts += 1;
-                let start = held.starts;
-                let hot = held.hot.entry(id).or_default();
-                (hot.lease_until, hot.cited, hot.start) = (lease, false, start);
+                held.start(id, lease);
                 held.tasks.insert(id, next);
                 match held.closing.contains_key(&id) || held.holding.contains_key(&id) {
                     true => Err(TaskRefusal::AgentGone),
@@ -2314,10 +2317,7 @@ impl TaskStore {
             .expect("the test store writes the task");
         let lease = self.clock.now_secs() + CLAIM_LEASE.as_secs() as i64;
         let mut held = self.held();
-        held.starts += 1;
-        let start = held.starts;
-        let hot = held.hot.entry(*id).or_default();
-        (hot.lease_until, hot.cited, hot.start) = (lease, false, start);
+        held.start(*id, lease);
         held.tasks.insert(*id, next);
     }
 
