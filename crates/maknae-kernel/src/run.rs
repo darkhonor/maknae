@@ -17002,10 +17002,15 @@ mod reload_fixture {
     /// named by a marker (`vault_addr_marker: `, `socket_path_marker: `, ...) set that
     /// value instead of being appended.
     fn yaml(dir: &Path, core_extra: &str, tail: &str) -> String {
-        yaml_for(dir, core_extra, tail, nix::unistd::geteuid().as_raw())
+        yaml_for(dir, core_extra, tail, &principal())
     }
 
-    fn yaml_for(dir: &Path, core_extra: &str, tail: &str, uid: u32) -> String {
+    fn yaml_for(
+        dir: &Path,
+        core_extra: &str,
+        tail: &str,
+        principal: &maknae_config::Principal,
+    ) -> String {
         let mut vault_addr = "https://v.example:8200".to_string();
         let mut socket = dir.join("maknaed.sock").display().to_string();
         let mut trail = dir.join("audit.jsonl").display().to_string();
@@ -17027,7 +17032,9 @@ mod reload_fixture {
             }
         }
         format!(
-            "core:\n  deployment_id: dev-01\n{core_extra}vault:\n  addr: {vault_addr}\ntransport:\n  socket_path: {socket}\n{transport}audit:\n  jsonl_path: {trail}\n{audit}principal:\n  name: op\n  uid: {uid}\n{deployment}{rest}",
+            "core:\n  deployment_id: dev-01\n{core_extra}vault:\n  addr: {vault_addr}\ntransport:\n  socket_path: {socket}\n{transport}audit:\n  jsonl_path: {trail}\n{audit}principal:\n  name: {name}\n  uid: {uid}\n{deployment}{rest}",
+            name = principal.name,
+            uid = principal.uid,
             deployment = crate::test_fixtures::DEPLOYMENT_YAML,
         )
     }
@@ -17120,7 +17127,12 @@ mod reload_fixture {
         pub(super) fn write_yaml_principal(&self, uid: u32, tail: &str) {
             write_0640(
                 &self.dir.join("maknae.yaml"),
-                &yaml_for(&self.dir, "", tail, uid),
+                &yaml_for(
+                    &self.dir,
+                    "",
+                    tail,
+                    &maknae_config::Principal { uid, ..principal() },
+                ),
             );
         }
 
@@ -17722,7 +17734,7 @@ mod reload_fixture {
         let principal = opts.principal.clone().unwrap_or_else(principal);
         write_0640(
             &dir.join("maknae.yaml"),
-            &yaml_for(&dir, opts.core, opts.tail, principal.uid),
+            &yaml_for(&dir, opts.core, opts.tail, &principal),
         );
         let layer = files_baseline(&dir, &opts.env);
         let paths = maknae_authz_basic::PolicyPaths::in_dir(&dir);
@@ -19963,17 +19975,17 @@ mod reload_tests {
         assert_eq!(recs[n - 1].seq, recs[n - 2].seq + 1);
         assert_eq!(recs[n - 1].session_id, recs[n - 2].session_id);
         assert_eq!(fx.status.identity.counts(), ["unresolved=1"]);
-        let listed = fx.status.identity.subjects();
+        let mut labels: Vec<String> = fx
+            .status
+            .identity
+            .subjects()
+            .iter()
+            .map(crate::identity_report::label)
+            .collect();
+        labels.sort();
         assert_eq!(
-            listed
-                .iter()
-                .map(crate::identity_report::label)
-                .collect::<std::collections::BTreeSet<_>>(),
-            [
-                "no-such-user-maknae-496 (no account)".to_string(),
-                "root (uid 0)".to_string()
-            ]
-            .into()
+            labels,
+            ["no-such-user-maknae-496 (no account)", "root (uid 0)"]
         );
         assert!(
             matches!(fx.root_whoami(), maknae_security::Verdict::Permit { .. }),
@@ -20062,12 +20074,14 @@ mod reload_tests {
             &fx.status.identity.subjects(),
             &fx.status.identity.agents(),
         );
+        assert_eq!(views.len(), 3);
         let view = |label: &str| {
             views
                 .iter()
                 .find(|v| v.label == label)
                 .map(|v| (v.uid, v.state.as_str()))
         };
+        assert_eq!(view("root (uid 0)"), Some((Some(0), "bound admin")));
         assert_eq!(view("uid 4242"), Some((Some(4242), "contained")));
         assert_eq!(
             view("no-such-user-maknae-496 (no account)"),
