@@ -3934,14 +3934,22 @@ mod tests {
 
     #[test]
     fn the_posture_marker_carries_its_arguments_and_the_seal_time() {
+        let now = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        };
+        let before = now();
         let text = build_posture_yaml("keychain", "/etc/maknae/private/x.keychain");
+        let after = now();
         let marker =
             maknae_config::PostureMarker::from_value(&maknae_config::load_str(&text).unwrap())
                 .expect("enroll writes a marker the daemon parses");
         assert_eq!(marker.mechanism, "keychain");
         assert_eq!(marker.target, "/etc/maknae/private/x.keychain");
         let sealed_at: u64 = marker.timestamp.parse().expect("seconds since the epoch");
-        assert!(sealed_at > 1_700_000_000, "{sealed_at}");
+        assert!((before..=after).contains(&sealed_at), "{sealed_at}");
     }
 
     // ---- round-1 review Important #2: rotate destroys against the RECORDED
