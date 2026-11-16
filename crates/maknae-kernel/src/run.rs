@@ -16982,6 +16982,22 @@ mod reload_fixture {
         }
     }
 
+    pub(super) fn daemon_uid() -> u32 {
+        nix::unistd::User::from_name("daemon")
+            .ok()
+            .flatten()
+            .expect("the daemon system account exists on every supported host")
+            .uid
+            .as_raw()
+    }
+
+    pub(super) fn daemon_principal() -> maknae_config::Principal {
+        maknae_config::Principal {
+            name: "daemon".into(),
+            uid: daemon_uid(),
+        }
+    }
+
     /// The fixture's `maknae.yaml`: `core_extra` under `core:`, then `tail`, whose lines
     /// named by a marker (`vault_addr_marker: `, `socket_path_marker: `, ...) set that
     /// value instead of being appended.
@@ -17095,6 +17111,10 @@ mod reload_fixture {
 
         pub(super) fn live_config(&self) -> &Arc<crate::live::LiveConfig> {
             self.reloader.authorizer.live()
+        }
+
+        pub(super) fn move_principal_to_daemon(&self) {
+            self.write_yaml_principal(daemon_uid(), "");
         }
 
         pub(super) fn write_yaml_principal(&self, uid: u32, tail: &str) {
@@ -17601,6 +17621,7 @@ mod reload_fixture {
     }
 
     pub(super) struct Opts<'a> {
+        pub(super) principal: Option<maknae_config::Principal>,
         pub(super) authz: &'a str,
         pub(super) bindings: Option<&'a str>,
         pub(super) load_gate: Option<std::sync::mpsc::Receiver<()>>,
@@ -17622,6 +17643,7 @@ mod reload_fixture {
     impl Default for Opts<'_> {
         fn default() -> Self {
             Opts {
+                principal: None,
                 authz: AUTHZ,
                 bindings: Some(ROOT_ADMIN),
                 load_gate: None,
@@ -17697,7 +17719,11 @@ mod reload_fixture {
             })
             .unwrap(),
         );
-        write_0640(&dir.join("maknae.yaml"), &yaml(&dir, opts.core, opts.tail));
+        let principal = opts.principal.clone().unwrap_or_else(principal);
+        write_0640(
+            &dir.join("maknae.yaml"),
+            &yaml_for(&dir, opts.core, opts.tail, principal.uid),
+        );
         let layer = files_baseline(&dir, &opts.env);
         let paths = maknae_authz_basic::PolicyPaths::in_dir(&dir);
         write_0640(&paths.authz, opts.authz);
@@ -17705,7 +17731,7 @@ mod reload_fixture {
         if let Some(b) = opts.bindings {
             write_0640(&paths.bindings, b);
         }
-        assemble(dir.clone(), Some(dir), sink, layer, principal(), opts).await
+        assemble(dir.clone(), Some(dir), sink, layer, principal, opts).await
     }
 
     /// A fixture over a start's existing configuration and state directories, running
@@ -19741,29 +19767,26 @@ mod reload_tests {
         assert_eq!(sync_reasons(&fx).len(), 1);
     }
 
-    fn principal_admin_reason() -> String {
-        format!(
-            "uid {}, the enrolled principal, now holds admin: bindings.yaml has no bindings: key",
-            principal().uid
-        )
-    }
-
     #[tokio::test]
     async fn a_keyless_reload_over_explicit_bindings_promotes_nobody() {
-        let fx = fixture("keyless_promote", AUTHZ, Some(ROOT_ADMIN)).await;
+        let opts = Opts {
+            principal: Some(daemon_principal()),
+            bindings: Some(ROOT_ADMIN),
+            ..Opts::default()
+        };
+        let fx = fixture_with("keyless_promote", opts).await;
         fx.write_bindings("schema_version: 1\n");
         let applied = bounded(fx.reloader.run()).await.unwrap();
         assert!(!applied.persisted);
         assert_eq!(whoami_as(&fx, 0).1, Some("admin"));
-        if principal().uid != 0 {
-            assert_eq!(whoami_as(&fx, principal().uid).1, None);
-        }
+        assert_eq!(whoami_as(&fx, daemon_uid()).1, None);
         let recs = fx.reload_records();
         let actions: Vec<&str> = recs.iter().map(|r| r.action.as_str()).collect();
         assert_eq!(actions, ["graph.reload", "graph.reload", "graph.sync"]);
-        assert!(!recs
-            .iter()
-            .any(|r| r.outcome.reason == principal_admin_reason()));
+        assert!(!recs.iter().any(|r| r
+            .outcome
+            .reason
+            .contains("the enrolled principal, now holds admin")));
         assert!(fx.status.identity.counts().is_empty());
         fx.write_bindings(ROOT_ADMIN);
         let restored = bounded(fx.reloader.run()).await.unwrap();
@@ -19945,8 +19968,12 @@ mod reload_tests {
             listed
                 .iter()
                 .map(crate::identity_report::label)
-                .collect::<Vec<_>>(),
-            ["root (uid 0)", "no-such-user-maknae-496 (no account)"]
+                .collect::<std::collections::BTreeSet<_>>(),
+            [
+                "no-such-user-maknae-496 (no account)".to_string(),
+                "root (uid 0)".to_string()
+            ]
+            .into()
         );
         assert!(
             matches!(fx.root_whoami(), maknae_security::Verdict::Permit { .. }),
@@ -20022,7 +20049,11 @@ mod reload_tests {
             ("graph.identity", "deny", "unavailable")
         );
         assert_eq!(fx.status.identity.counts(), ["unresolved_adversary=1"]);
-        let subjects = fx.baseline().snapshot().subjects(principal().uid).unwrap();
+        let subjects = fx
+            .baseline()
+            .snapshot()
+            .subjects(fx.baseline().principal().uid)
+            .unwrap();
         assert!(subjects
             .iter()
             .any(|b| b.role == "adversary" && b.members == ["uid:4242"]));
@@ -20031,20 +20062,16 @@ mod reload_tests {
             &fx.status.identity.subjects(),
             &fx.status.identity.agents(),
         );
-        assert_eq!(
+        let view = |label: &str| {
             views
                 .iter()
-                .map(|v| (v.uid, v.label.as_str(), v.state.as_str()))
-                .collect::<Vec<_>>(),
-            [
-                (Some(0), "root (uid 0)", "bound admin"),
-                (Some(4242), "uid 4242", "contained"),
-                (
-                    None,
-                    "no-such-user-maknae-496 (no account)",
-                    "unresolved adversary (no account, not contained)"
-                ),
-            ]
+                .find(|v| v.label == label)
+                .map(|v| (v.uid, v.state.as_str()))
+        };
+        assert_eq!(view("uid 4242"), Some((Some(4242), "contained")));
+        assert_eq!(
+            view("no-such-user-maknae-496 (no account)"),
+            Some((None, "unresolved adversary (no account, not contained)"))
         );
     }
 
@@ -20076,7 +20103,7 @@ mod reload_tests {
             publish_boot_identity(
                 &status,
                 &snapshot,
-                principal().uid,
+                fx.baseline().principal().uid,
                 &[],
                 &fx.reloader.sink,
                 &ctx,
@@ -20121,9 +20148,16 @@ mod reload_tests {
         .await
         .unwrap();
         let status = crate::identity_report::IdentityStatus::default();
-        publish_boot_identity(&status, &snapshot, principal().uid, &[], sink, &ctx)
-            .await
-            .unwrap();
+        publish_boot_identity(
+            &status,
+            &snapshot,
+            fx.baseline().principal().uid,
+            &[],
+            sink,
+            &ctx,
+        )
+        .await
+        .unwrap();
         let recs: Vec<AuditRecord> = std::fs::read_to_string(fx.dir.join("audit.jsonl"))
             .unwrap()
             .lines()
@@ -20148,8 +20182,15 @@ mod reload_tests {
         assert_eq!(status.counts(), ["unresolved=1", "unresolved_adversary=1"]);
         sink.fail_identity
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        let refused =
-            publish_boot_identity(&status, &snapshot, principal().uid, &[], sink, &ctx).await;
+        let refused = publish_boot_identity(
+            &status,
+            &snapshot,
+            fx.baseline().principal().uid,
+            &[],
+            sink,
+            &ctx,
+        )
+        .await;
         assert!(
             matches!(&refused, Err(e) if e.to_string().contains("identity append refused")),
             "{refused:?}"
@@ -20225,6 +20266,7 @@ mod reload_tests {
         let accepted = fx.stored().unwrap();
         let before = fx.dir.join("audit.jsonl");
         let reloaded = std::fs::read_to_string(&before).unwrap().lines().count();
+        let principal = fx.baseline().principal().clone();
         let Fx {
             dir,
             reloader,
@@ -20243,7 +20285,7 @@ mod reload_tests {
         );
         let source = maknae_authz_basic::PolicySource::load_with_requirement(
             maknae_authz_basic::PolicyPaths::in_dir(&dir),
-            principal(),
+            principal,
             requirement(),
         )
         .unwrap();
@@ -20258,7 +20300,9 @@ mod reload_tests {
                 event: "boot",
                 host: "h",
                 socket: "s",
-                euid: nix::unistd::geteuid().as_raw(),
+                euid: std::os::unix::fs::MetadataExt::uid(
+                    &std::fs::metadata(dir.join("state")).unwrap(),
+                ),
                 session_id: 10 << 32,
                 seq: &seq,
                 au3_1: &au3_1,
@@ -20359,14 +20403,18 @@ mod reload_tests {
     async fn a_bindings_yaml_without_the_key_keeps_empty_bindings_at_reload() {
         let fx = fixture("brm", AUTHZ, Some("schema_version: 1\nbindings: {}\n")).await;
         assert_eq!(
-            fx.baseline().snapshot().subjects(principal().uid),
+            fx.baseline()
+                .snapshot()
+                .subjects(fx.baseline().principal().uid),
             Some(vec![])
         );
         fx.write_bindings("schema_version: 1\n");
         let applied = bounded(fx.reloader.run()).await.unwrap();
         assert!(!applied.persisted, "the bindings Section node stays");
         assert_eq!(
-            fx.baseline().snapshot().subjects(principal().uid),
+            fx.baseline()
+                .snapshot()
+                .subjects(fx.baseline().principal().uid),
             Some(vec![])
         );
         assert_eq!(fx.sync_lines(), ["unsynced=0", "conflict=0", "file=lost"]);
@@ -20928,15 +20976,6 @@ mod reload_tests {
         );
     }
 
-    fn daemon_uid() -> u32 {
-        nix::unistd::User::from_name("daemon")
-            .ok()
-            .flatten()
-            .expect("the daemon system account exists on every supported host")
-            .uid
-            .as_raw()
-    }
-
     /// The task store's blocking slot is per uid and process-wide: a test that holds
     /// it past a stage requests as `nobody`, which no other test does.
     fn nobody_uid() -> u32 {
@@ -21264,8 +21303,7 @@ mod reload_tests {
         assert!(bounded(fx.reloader.run()).await.unwrap().persisted);
         assert!(!mirror.exists(), "reload");
 
-        let uid = nix::unistd::geteuid().as_raw().wrapping_add(1);
-        fx.write_yaml_principal(uid, "");
+        fx.move_principal_to_daemon();
         let shown = fx.show().await;
         assert_eq!(shown.apply, "live");
         crash_after_the_commit();
@@ -21311,8 +21349,7 @@ mod reload_tests {
         assert!(!bounded(fx.reloader.run()).await.unwrap().persisted);
         healed("reload");
 
-        let uid = nix::unistd::geteuid().as_raw().wrapping_add(1);
-        fx.write_yaml_principal(uid, "");
+        fx.move_principal_to_daemon();
         let shown = fx.show().await;
         fx.reloader.dir.fail_next_store_publish();
         let answer = fx.accept(&shown.hash).await;
@@ -21355,8 +21392,7 @@ mod reload_tests {
         assert!(!bounded(fx.reloader.run()).await.unwrap().persisted);
         assert_eq!(fx.mirror(), bytes, "a load that commits nothing");
 
-        let uid = nix::unistd::geteuid().as_raw().wrapping_add(1);
-        fx.write_yaml_principal(uid, "");
+        fx.move_principal_to_daemon();
         let shown = fx.show().await;
         assert_eq!(shown.apply, "live");
         let before = running_revision(&fx);
@@ -21444,7 +21480,11 @@ mod reload_tests {
             sync_seen(&fx, from),
             ["conflict: \"daemon\" changed in bindings.yaml and by an unsynced live transition; failed closed: unbound"]
         );
-        let subjects = fx.baseline().snapshot().subjects(principal().uid).unwrap();
+        let subjects = fx
+            .baseline()
+            .snapshot()
+            .subjects(fx.baseline().principal().uid)
+            .unwrap();
         assert!(
             !subjects.iter().any(|b| b
                 .members
@@ -24105,51 +24145,42 @@ mod reload_tests {
                 .starts_with("kernel containment of uid 4242 failed: the reason is refused")));
     }
 
-    fn enrolled() -> (String, u32, String) {
-        let euid = nix::unistd::geteuid();
-        let name = nix::unistd::User::from_uid(euid)
+    fn enrolled(name: &str, uid: u32) -> String {
+        let section =
+            maknae_config::enroll_section(&maknae_config::Section::Absent, None, name, uid, |_| {
+                None
+            })
             .unwrap()
-            .expect("the test runs as an account with a passwd entry")
-            .name;
-        let section = maknae_config::enroll_section(
-            &maknae_config::Section::Absent,
-            None,
-            &name,
-            euid.as_raw(),
-            |_| None,
-        )
-        .unwrap()
-        .unwrap();
-        let bytes = format!(
+            .unwrap();
+        format!(
             "# written by sudo maknae enroll: {name} holds admin\n{}",
             maknae_config::section_body(&section)
-        );
-        (name, euid.as_raw(), bytes)
+        )
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_enroll_section_boots_and_the_principal_stays_admin_after_a_contain() {
-        let (_, euid, bytes) = enrolled();
-        assert_eq!(principal().uid, euid);
+    async fn the_enroll_section_boots_and_its_admin_stays_admin_after_a_contain() {
+        let daemon = daemon_uid();
+        let bytes = enrolled("daemon", daemon);
         let fx = fixture("enroll-boot", CONTAIN_AND_RELEASE_TO_ADMIN, Some(&bytes)).await;
         assert!(matches!(
-            fx.decide_action(euid, "admin.whoami"),
+            fx.decide_action(daemon, "admin.whoami"),
             maknae_security::Verdict::Permit { .. }
         ));
         assert_eq!(
-            answer_code(&fx.contain(ContainTarget::Uid(4242), euid, "r").await),
+            answer_code(&fx.contain(ContainTarget::Uid(4242), daemon, "r").await),
             ContainmentOutcome::Contained
         );
         assert_eq!(fx.decide_uid(4242), adversary());
         assert!(matches!(
-            fx.decide_action(euid, "admin.whoami"),
+            fx.decide_action(daemon, "admin.whoami"),
             maknae_security::Verdict::Permit { .. }
         ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn re_enroll_over_a_keyless_store_is_a_root_edit() {
-        let (name, euid, bytes) = enrolled();
+        let bytes = enrolled("daemon", daemon_uid());
         let fx = fixture("enroll-keyless", AUTHZ, Some("schema_version: 1\n")).await;
         fx.write_bindings(&bytes);
         let from = fx.seen().len();
@@ -24158,11 +24189,11 @@ mod reload_tests {
         assert_eq!(transitions_seen(&fx, from), ["intent recorded (root-file)"]);
         assert_eq!(
             maknae_config::Section::of(fx.reloader.applied_source.read().unwrap().bindings())
-                .roles_of(&BindingEntry::Name(name)),
+                .roles_of(&BindingEntry::Name("daemon".into())),
             ["admin"].into(),
             "admin by binding"
         );
-        assert_eq!(whoami_as(&fx, euid).1, Some("admin"));
+        assert_eq!(whoami_as(&fx, daemon_uid()).1, Some("admin"));
         assert_eq!(fx.sync_lines(), ["unsynced=0", "conflict=0"]);
     }
 }
