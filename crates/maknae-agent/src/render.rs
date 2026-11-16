@@ -136,10 +136,7 @@ fn closed_text(close: maknae_proto::TaskClose) -> &'static str {
 /// The head of another agent's report, cut on a character boundary, under a line that
 /// names whose output it is; built once in a zeroizing buffer with room for the suffix.
 fn report_text(agent: &str, stored: Option<&str>, text: &str) -> Zeroizing<String> {
-    let mut end = text.len().min(REPORT_HEAD_BYTES);
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = text.floor_char_boundary(REPORT_HEAD_BYTES);
     let cut = end < text.len();
     let header = match stored {
         Some(path) => format!(
@@ -931,6 +928,28 @@ mod tests {
                 "Stat",
             ),
             (ToolOutcome::NotRun, "NotRun"),
+            (ToolOutcome::MkdirExists, "MkdirExists"),
+            (ToolOutcome::MkdirUnavailable, "MkdirUnavailable"),
+            (ToolOutcome::DeleteDeleted, "DeleteDeleted"),
+            (ToolOutcome::DeleteUnavailable, "DeleteUnavailable"),
+            (ToolOutcome::ChangeUnknown, "ChangeUnknown"),
+            (ToolOutcome::Protected, "Protected"),
+            (
+                ToolOutcome::TaskAgent(crate::plane::TaskAgentOutcome::Closed(
+                    maknae_proto::TaskClose::ParentEnded,
+                )),
+                "TaskAgent(Closed(ParentEnded))",
+            ),
+            (
+                ToolOutcome::TaskAgent(crate::plane::TaskAgentOutcome::Report {
+                    agent: "jin".into(),
+                    stored: None,
+                    text: maknae_proto::SecretText(zeroize::Zeroizing::new(
+                        "SENTINEL-REPORT".into(),
+                    )),
+                }),
+                "TaskAgent(Report { agent: \"jin\", stored: None, text: <15 bytes> })",
+            ),
         ] {
             assert_eq!(format!("{o:?}"), want);
         }

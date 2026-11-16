@@ -6482,6 +6482,26 @@ mod tests {
         };
         assert_eq!(store.perform(&[early]), 0, "its hold has not run out");
         assert!(store.record(&reported).is_some());
+        let working = held_by(&store, Tasker::Uid(1000));
+        store.start_for_test(&working);
+        let unparented = |task, why| Due {
+            task,
+            agent: id("hobi"),
+            tasker: Tasker::Uid(1000),
+            parent: None,
+            why,
+            recorded: false,
+        };
+        assert_eq!(
+            store.perform(&[
+                unparented(working, DueFor::Close(TaskClose::ParentEnded)),
+                unparented(reported, DueFor::Orphaned),
+            ]),
+            0,
+            "neither has a parent that ended"
+        );
+        assert_eq!(closed(&store, &working), None);
+        assert!(store.record(&reported).is_some());
     }
 
     #[test]

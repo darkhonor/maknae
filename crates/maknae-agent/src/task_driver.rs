@@ -1070,6 +1070,7 @@ mod tests {
         refuse_claims: bool,
         calls: usize,
         accept_subs: bool,
+        diagnostics: Vec<String>,
     }
 
     impl Fake {
@@ -1149,6 +1150,7 @@ mod tests {
         }
         async fn list(&mut self, _: &str, p: &str, _: Option<&str>) -> ListOutcome {
             self.log(format!("list {p}"));
+            self.diagnostics.push(format!("listed {p}"));
             ListOutcome::Unavailable
         }
         async fn stat(&mut self, _: &str, p: &str) -> StatOutcome {
@@ -1159,9 +1161,12 @@ mod tests {
             self.log(format!("mkdir {p}"));
             crate::plane::MkdirOutcome::Unavailable
         }
-        async fn delete(&mut self, _: &str, p: &str, _: bool) -> crate::plane::DeleteOutcome {
-            self.log(format!("delete {p}"));
+        async fn delete(&mut self, _: &str, p: &str, r: bool) -> crate::plane::DeleteOutcome {
+            self.log(format!("delete {p} {r}"));
             crate::plane::DeleteOutcome::Unavailable
+        }
+        fn take_diagnostics(&mut self) -> Vec<String> {
+            std::mem::take(&mut self.diagnostics)
         }
     }
 
@@ -1260,7 +1265,7 @@ mod tests {
             self.personas.get(&key).cloned().unwrap_or(Ok(None))
         }
         fn note(&mut self, event: DriverEvent) {
-            if let DriverEvent::Ended { .. } = event {
+            if let DriverEvent::Ended { .. } | DriverEvent::Loop(LoopEvent::Diagnostic(_)) = event {
                 self.w.lock().unwrap().events.push(event);
             }
         }
@@ -1339,18 +1344,21 @@ mod tests {
             usage: None,
         })
     }
-    fn read(call: &str, path: &str) -> Result<PromptReply, PlaneError> {
+    fn call(name: &str, call_id: &str, arguments: &str) -> Result<PromptReply, PlaneError> {
         Ok(PromptReply {
             reasoning: None,
             blocks: vec![],
             tool_calls: vec![ProposedToolCall {
-                name: "read_file".into(),
-                call_id: call.into(),
-                arguments: st(&format!(r#"{{"path":"{path}"}}"#)),
+                name: name.into(),
+                call_id: call_id.into(),
+                arguments: st(arguments),
                 refused: None,
             }],
             usage: None,
         })
+    }
+    fn read(call_id: &str, path: &str) -> Result<PromptReply, PlaneError> {
+        call("read_file", call_id, &format!(r#"{{"path":"{path}"}}"#))
     }
 
     /// A fake whose startup heartbeat finds nothing left over, with tasks 1 to 3 valid.
@@ -1897,17 +1905,61 @@ mod tests {
     }
 
     fn task_agent_call() -> Result<PromptReply, PlaneError> {
-        Ok(PromptReply {
-            reasoning: None,
-            blocks: vec![],
-            tool_calls: vec![ProposedToolCall {
-                name: "task_agent".into(),
-                call_id: "t1".into(),
-                arguments: st(r#"{"agent":"jin","prompt":"sentinel-609-driver"}"#),
-                refused: None,
-            }],
-            usage: None,
-        })
+        call(
+            "task_agent",
+            "t1",
+            r#"{"agent":"jin","prompt":"sentinel-609-driver"}"#,
+        )
+    }
+
+    #[tokio::test]
+    async fn the_loops_list_and_delete_reach_the_plane_and_its_diagnostics_the_driver() {
+        let mut f = fake();
+        f.claims = VecDeque::from([delivered(1, PART)]);
+        f.replies = VecDeque::from([
+            call("list_directory", "l1", r#"{"path":"/w/a"}"#),
+            call("delete_path", "d1", r#"{"path":"/w/b","recursive":true}"#),
+            answer("a1"),
+        ]);
+        let (log, events) = run(f).await;
+        let at = log.iter().position(|l| l == "list /w/a").unwrap();
+        assert!(log[at..].iter().any(|l| l == "delete /w/b true"), "{log:?}");
+        assert!(events.contains(&DriverEvent::Loop(LoopEvent::Diagnostic(
+            "listed /w/a".into()
+        ))));
+    }
+
+    #[tokio::test]
+    async fn the_loops_plane_opens_and_closes_on_the_drivers_plane() {
+        let (mut f, w) = (fake(), Shared::default());
+        f.w = w.clone();
+        let mut clock = FakeClock(w.clone());
+        let shutdown = AtomicBool::new(false);
+        let mut tool = Tool {
+            plane: &mut f,
+            clock: &mut clock,
+            shutdown: &shutdown,
+            cwd: HOME,
+        };
+        let id = tool.open(Path::new(HOME), &[]).await.unwrap();
+        assert!(tool.close(&id).await.is_ok());
+        assert_eq!(
+            w.lock().unwrap().log,
+            strs(&[&format!("open {HOME}"), &format!("close {CONV}")])
+        );
+    }
+
+    #[test]
+    fn a_first_turn_is_allocated_once_at_its_exact_length() {
+        let persona = secret("persona-609");
+        for (p, from) in [
+            (None, None),
+            (Some(&persona), None),
+            (Some(&persona), Some("hobi")),
+        ] {
+            let t = first_turn(p, from, "prompt-609");
+            assert_eq!(t.capacity(), t.len(), "{from:?}");
+        }
     }
 
     fn tool_text(t: &Turn) -> String {
