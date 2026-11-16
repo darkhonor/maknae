@@ -1,0 +1,60 @@
+<svg width="840" height="440" viewBox="0 0 840 440" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>What containment holds (access-control matrix, Lampson 1974)</title>
+  <desc>When a person or an agent is contained, which of the tasks around them are held, and in which states? On the chain Bob, a person, gives t1 to the agent Hobi, and Hobi gives t2 to the agent Jin. Containing Bob holds t1 in any state, as its tasker, and t2 in any state, as its root. Containing Hobi holds t1 only if it is still open, as its agent, and t2 in any state, as its tasker. Containing Jin leaves t1 untouched and holds t2 only if it is still open, as its agent. Lifting a containment releases nothing; maknae held release does, once no cause is contained and the parent is released.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+  <rect x="0" y="0" width="840" height="440" fill="#FFFFFF"/>
+<g font-family="Helvetica, Arial, sans-serif">
+<rect x="150" y="24" width="90" height="34" rx="6" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.9"/>
+<text x="195" y="46" text-anchor="middle" font-size="13" font-weight="600" fill="#2C2C2A">Bob</text>
+<rect x="370" y="24" width="90" height="34" rx="6" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.9"/>
+<text x="415" y="46" text-anchor="middle" font-size="13" font-weight="600" fill="#26215C">Hobi</text>
+<rect x="590" y="24" width="90" height="34" rx="6" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.9"/>
+<text x="635" y="46" text-anchor="middle" font-size="13" font-weight="600" fill="#26215C">Jin</text>
+<path d="M242 41 H368" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<text x="305" y="35" text-anchor="middle" font-size="11.5" font-weight="600" fill="#2C2C2A">t1</text>
+<path d="M462 41 H588" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<text x="525" y="35" text-anchor="middle" font-size="11.5" font-weight="600" fill="#2C2C2A">t2</text>
+<text x="195" y="74" text-anchor="middle" font-size="10.5" fill="#5F5E5A">a person</text>
+<text x="415" y="74" text-anchor="middle" font-size="10.5" fill="#5F5E5A">an agent, orchestrating</text>
+<text x="635" y="74" text-anchor="middle" font-size="10.5" fill="#5F5E5A">an agent</text>
+
+<rect x="30" y="100" width="780" height="250" fill="none" stroke="#5F5E5A" stroke-width="1"/>
+<rect x="30" y="100" width="200" height="70" fill="#F1EFE8"/>
+<rect x="230" y="100" width="290" height="70" fill="#F1EFE8"/>
+<rect x="520" y="100" width="290" height="70" fill="#F1EFE8"/>
+<text x="130" y="140" text-anchor="middle" font-size="12" font-weight="600" fill="#2C2C2A">Contained</text>
+<text x="375" y="128" text-anchor="middle" font-size="14" font-weight="600" fill="#2C2C2A">t1</text>
+<text x="375" y="148" text-anchor="middle" font-size="11" fill="#5F5E5A">tasker Bob, root Bob, agent Hobi</text>
+<text x="665" y="128" text-anchor="middle" font-size="14" font-weight="600" fill="#2C2C2A">t2</text>
+<text x="665" y="148" text-anchor="middle" font-size="11" fill="#5F5E5A">tasker Hobi, root Bob, agent Jin</text>
+
+<rect x="230" y="170" width="290" height="60" fill="#FBEAEA"/>
+<rect x="520" y="170" width="290" height="60" fill="#FBEAEA"/>
+<rect x="230" y="230" width="290" height="60" fill="#FAEEDA"/>
+<rect x="520" y="230" width="290" height="60" fill="#FBEAEA"/>
+<rect x="230" y="290" width="290" height="60" fill="#FFFFFF"/>
+<rect x="520" y="290" width="290" height="60" fill="#FAEEDA"/>
+
+<path d="M30 170 H810 M30 230 H810 M30 290 H810 M230 100 V350 M520 100 V350" fill="none" stroke="#5F5E5A" stroke-width="0.9"/>
+
+<text x="130" y="205" text-anchor="middle" font-size="13" font-weight="600" fill="#2C2C2A">Bob contained</text>
+<text x="130" y="265" text-anchor="middle" font-size="13" font-weight="600" fill="#2C2C2A">Hobi contained</text>
+<text x="130" y="325" text-anchor="middle" font-size="13" font-weight="600" fill="#2C2C2A">Jin contained</text>
+
+<text x="375" y="198" text-anchor="middle" font-size="13" font-weight="600" fill="#A32D2D">held, any state</text>
+<text x="375" y="216" text-anchor="middle" font-size="11" fill="#A32D2D">as tasker</text>
+<text x="665" y="198" text-anchor="middle" font-size="13" font-weight="600" fill="#A32D2D">held, any state</text>
+<text x="665" y="216" text-anchor="middle" font-size="11" fill="#A32D2D">as root</text>
+<text x="375" y="258" text-anchor="middle" font-size="13" font-weight="600" fill="#854F0B">held only if still open</text>
+<text x="375" y="276" text-anchor="middle" font-size="11" fill="#854F0B">as agent: Queued or Working</text>
+<text x="665" y="258" text-anchor="middle" font-size="13" font-weight="600" fill="#A32D2D">held, any state</text>
+<text x="665" y="276" text-anchor="middle" font-size="11" fill="#A32D2D">as tasker</text>
+<text x="375" y="325" text-anchor="middle" font-size="13" font-weight="600" fill="#5F5E5A">untouched</text>
+<text x="665" y="318" text-anchor="middle" font-size="13" font-weight="600" fill="#854F0B">held only if still open</text>
+<text x="665" y="336" text-anchor="middle" font-size="11" fill="#854F0B">as agent: Queued or Working</text>
+
+<text x="30" y="380" font-size="11.5" fill="#2C2C2A">Lifting a containment releases nothing; <tspan font-family="Menlo, Consolas, monospace">maknae held release</tspan> does, once no cause is contained and the parent is released.</text>
+<text x="30" y="400" font-size="11" fill="#5F5E5A">"Any state" is Queued, Working, Reported or Closed. Nothing is dropped: a task is held as it stood, as evidence.</text>
+<text x="30" y="418" font-size="11" fill="#5F5E5A">A contained agent is given no new task.</text>
+</g>
+</svg>

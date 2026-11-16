@@ -270,3 +270,31 @@ A close or expiry record carries `object: task:<hex>`, `subject.task_id`, `subje
 **4. "Outcome unknown" and "not done" are distinct.** A task-store step the kernel cannot prove is recorded `outcome unknown: <cause>`, posture `unavailable`: the change may stand or not, and a later store write settles it. `not done: <cause>` means nothing was written and nothing will be, for example `not done: the task store was busy`. A submission the store definitely refused before it was kept is `not stored: <cause>`, followed by whether its record was withdrawn. The wire answer for all three is `Unauthorized`; only the trail tells them apart.
 
 **5. macOS sizes.** A person's task-verb record mirrors in full at 858 bytes. The widest task record (a 32-byte user, agent and agent tasker, task and parent ids, `collect`) is 1229 bytes and mirrors as the degraded marker of the 2026-09-10 amendment, as the widest `session.prompt` records already do. The summary line adds `op=<op>` after `tasker=`. The JSONL has the whole record on both platforms.
+
+## Amendment (2026-11-15, #632) — held-task release records
+
+Dated as-built amendment; rides the #632 PR. Six statements.
+
+**1. Each release attempt has a record of its own.** `admin.release` lists held tasks (`AdminHeldList`) and releases them (`AdminHeldRelease`), one task or every task held for a person or an agent. Each task a release reaches is recorded separately, as `event: request`, `action: admin.release`, in a session of its own, with `source.uid` the administrator's. It is `event: request`, not `event: task` (statement 2 of the 2026-11-11 amendment), because it records an administrator's act, not the kernel's own. It joins to the task by `object: task:<hex>` and `subject.task_id`, and to the request that caused it by the reason's suffix `; requested by uid <U> in session <S>`, as the live-edit record does. A record for a release the store will attempt carries `subject.tasker` and, for a sub-task, `subject.parent_task_id`; a refusal decided before the write carries neither. The record is written before the store write: a release the trail refuses is not attempted. A list writes only the request's own record. No record carries the task's text, its follow-ups or its report.
+
+**2. The reasons.** Each reason below is followed by the `requested by` suffix:
+
+| Reason | `result` / `posture` | When |
+|---|---|---|
+| `task released: held from <state>, now <state>` | `permit` / `authorized` | the release is about to be written; a task held from `working` is released `queued`, every other state as it was |
+| `task release refused: tasker still contained`, `task release refused: root still contained`, `task release refused: agent still contained` | `deny` / `refused` | a cause of the hold is still contained, decided on the task as it would be after release |
+| `task release refused: parent held` | `deny` / `refused` | the task's parent is held or due a hold; the reply names the parent |
+| `task release refused: not held`, `task release refused: no such task` | `deny` / `refused` | as they say; a repeat after a release that landed answers `not held` |
+| `task release refused: not authorized: <the PDP's reason>` | `deny` / `unauthorized` | the request, decided again for a later task, was refused (statement 4) |
+| `task release not done: <why>` | `deny` / `unavailable` | nothing was written: the store was busy (`the task store was busy`), refused the write, or the record does not name the state it was held from |
+| `task release outcome unknown: <why>` | `deny` / `unavailable` | the write was started and not proven (`the task store did not answer in time`, or the store's own unproven write) |
+
+A `not done` or `outcome unknown` record is either the only record of the attempt (a refusal found by the store under its writer) or the second, after a `task released` record whose write then failed.
+
+**3. "Not done" and "outcome unknown" stay distinct** (statement 4 of the 2026-11-11 amendment). After `not done` the task is still held. After `outcome unknown` the release may have landed. A repeat is safe after either: a release that landed answers `not held` and changes nothing, and one that did not is released by the repeat.
+
+**4. The request is decided again for each task.** A release takes the daemon's reload turn for one task at a time, and under each turn decides the administrator's request again on the installed policy. Before the first task, a turn not won, a stopping or draining daemon, or a refused decision answers the whole request, recorded by the request's corrective record, as for a live edit (`held refused: busy: …` or `held refused: stopping: …` for the first two). At a later task the batch stops there: a refused decision writes the `not authorized` record of statement 2 and answers that task `unauthorized`; a turn not won, or a stopping or draining daemon, answers it `not-done`. In both cases the reply's `next` cursor points just before that task, so a repeat starts at it.
+
+**5. Outcomes with no per-task record.** A turn not won and a stop or drain between tasks are recorded only by the request's own record and the reply. A per-task record the trail refuses leaves the task held and is answered `not-done`; it has no record, and stderr carries `AUDIT WRITE FAILED on a held-task release record`.
+
+**6. macOS sizes.** A person's release record (a `uid:` tasker, no parent, `task released: held from reported, now reported`) mirrors in full at 876 bytes. The widest release record (an agent tasker at 32 bytes, task and parent ids, the longest fixed reason `task release not done: the record does not name the state it was held from`, and `; requested by uid 4294967295 in session 18446744073709551615`) is 1083 bytes and mirrors as the degraded marker of the 2026-09-10 amendment. The PDP's reason in a `not authorized` record and the store's cause in a `not done` record are not bounded here; a longer one degrades the same way. Measured by `a_tasker_record_mirrors_in_full_and_the_widest_degrades` in `crates/maknae-audit-append/src/syslog_fmt.rs`. The JSONL has the whole record on both platforms.

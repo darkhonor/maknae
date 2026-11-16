@@ -82,6 +82,8 @@ Maknae is **deny-by-default**. Two mechanisms move a subject off that default, a
 
 **Containment is therefore part of the access model, not an incident-response convenience.** It is implemented by the `admin.contain` / `admin.release` / `kernel.contain` terms ([#165](https://github.com/darkhonor/maknae/issues/165)), and it has **exactly one sanctioned spelling** — `admin.subject.bind`/`.unbind` refuse the `adversary` role precisely so the carve mechanism stays the single auditable path. A second route into containment makes "denied for cause" unreconstructable.
 
+*(Amended 2026-11-15, #632: lifting a containment releases none of the tasks it held ([ADR-0033](ADR-0033-agent-identity-admission-and-tasks.md) decision 9). An administrator releases them with `admin.release` (`maknae held release`). A release is refused while the task's tasker, the root of its chain, or, for a task that was open when held, its agent is still contained, decided on the task as it would be after release, and while its parent is held. The containment is lifted first, then the work it held.)*
+
 **A carve is scoped.** A bare carve is **total** (the `adversary` role, deny-all); a scoped carve is a **subject-scoped deny list** reusing the policy's own deny vocabulary. Total containment is the degenerate case where the scope is everything. Because a carve is expressed in the deny grammar, **the whole-vocabulary deny requirement in Consequences below is what makes scoped carves possible at all.**
 
 **A carve is never waivable, only liftable.** No `Permit` from any operand composes past it — including a **mandatory operand's `Permit`**, now that decision 2 allows one. `combine` rule 1 gives this for free; #165 asserts it rather than assuming it.

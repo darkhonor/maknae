@@ -1,0 +1,74 @@
+<svg width="1000" height="860" viewBox="0 0 1000 860" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>Agent task lifecycle (UML 2.5.1 state machine)</title>
+  <desc>What states does an agent task pass through, from submission to collection, and what moves it between them, including hold and release? A submitted task is Queued, or Held when a containment caught it while it was stored. A claim makes it Working; a report makes it Reported; a stop, a lapsed lease, an un-enrolled agent or a withdrawn tasker makes it Closed. A drop deletes a queued task; an acknowledgement or the REPORT_HOLD expiry deletes a report or a close. A contained tasker or root holds the task from any of the four states; a contained agent holds it only from Queued or Working. A release returns a task held from Queued or Working to Queued, and one held from Reported or Closed to that state under a new report ordinal, once no cause of the hold is contained and its parent is not held. Each numbered arrow is one transition per number, keyed below as event [guard] / function.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker><marker id="hold" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#A32D2D" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker><marker id="ok" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#0F6E56" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+  <rect x="0" y="0" width="1000" height="860" fill="#FFFFFF"/>
+<rect x="100" y="30" width="790" height="300" rx="12" fill="none" stroke="#5F5E5A" stroke-width="1"/>
+<text x="112" y="48" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#2C2C2A">Live</text>
+<rect x="120" y="76" width="440" height="124" rx="10" fill="none" stroke="#5F5E5A" stroke-width="1" stroke-dasharray="4 3"/>
+<text x="132" y="94" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#2C2C2A">Open</text>
+<rect x="140" y="120" width="140" height="56" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.9"/>
+<text x="210" y="153" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#04342C">Queued</text>
+<rect x="400" y="120" width="140" height="56" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.9"/>
+<text x="470" y="153" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#04342C">Working</text>
+<rect x="700" y="80" width="150" height="56" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.9"/>
+<text x="775" y="113" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#26215C">Reported</text>
+<rect x="700" y="230" width="150" height="56" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.9"/>
+<text x="775" y="263" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#26215C">Closed</text>
+<rect x="300" y="420" width="400" height="56" rx="8" fill="#FBEAEA" stroke="#A32D2D" stroke-width="0.9"/>
+<text x="500" y="445" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#501313">Held</text>
+<text x="500" y="463" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#A32D2D">held_from records the state it was held from</text>
+<circle cx="40" cy="148" r="7" fill="#2C2C2A"/>
+<circle cx="955" cy="183" r="9" fill="none" stroke="#2C2C2A" stroke-width="1.5"/><circle cx="955" cy="183" r="5" fill="#2C2C2A"/>
+<text x="955" y="210" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="600" fill="#2C2C2A">deleted</text>
+<path d="M47 148 H138" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M40 155 V460 H298" fill="none" stroke="#A32D2D" stroke-width="1.5" marker-end="url(#hold)"/>
+<path d="M282 148 H398" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M542 135 H620 V100 H698" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M542 162 H620 V250 H698" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M240 176 V270 H698" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M210 120 V58 H955 V172" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M852 108 L944 176" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M852 258 L944 191" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M650 332 V418" fill="none" stroke="#A32D2D" stroke-width="1.5" marker-end="url(#hold)"/>
+<path d="M470 202 V418" fill="none" stroke="#A32D2D" stroke-width="1.5" marker-end="url(#hold)"/>
+<path d="M298 440 H180 V178" fill="none" stroke="#0F6E56" stroke-width="1.5" stroke-dasharray="6 3" marker-end="url(#ok)"/>
+<path d="M702 440 H775 V288" fill="none" stroke="#0F6E56" stroke-width="1.5" stroke-dasharray="6 3" marker-end="url(#ok)"/>
+<path d="M702 460 H920 V122 H852" fill="none" stroke="#0F6E56" stroke-width="1.5" stroke-dasharray="6 3" marker-end="url(#ok)"/>
+<g font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600">
+<rect x="78" y="134" width="22" height="16" rx="3" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.8"/><text x="89" y="146" text-anchor="middle" fill="#2C2C2A">1</text>
+<rect x="29" y="300" width="22" height="16" rx="3" fill="#FFFFFF" stroke="#A32D2D" stroke-width="0.8"/><text x="40" y="312" text-anchor="middle" fill="#A32D2D">2</text>
+<rect x="329" y="130" width="22" height="16" rx="3" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.8"/><text x="340" y="142" text-anchor="middle" fill="#2C2C2A">3</text>
+<rect x="640" y="84" width="22" height="16" rx="3" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.8"/><text x="651" y="96" text-anchor="middle" fill="#2C2C2A">4</text>
+<rect x="628" y="200" width="54" height="16" rx="3" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.8"/><text x="655" y="212" text-anchor="middle" fill="#2C2C2A">5, 6, 7</text>
+<rect x="400" y="262" width="40" height="16" rx="3" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.8"/><text x="420" y="274" text-anchor="middle" fill="#2C2C2A">7, 8</text>
+<rect x="569" y="50" width="22" height="16" rx="3" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.8"/><text x="580" y="62" text-anchor="middle" fill="#2C2C2A">9</text>
+<rect x="868" y="96" width="46" height="16" rx="3" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.8"/><text x="891" y="108" text-anchor="middle" fill="#2C2C2A">10, 11</text>
+<rect x="866" y="228" width="46" height="16" rx="3" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.8"/><text x="889" y="240" text-anchor="middle" fill="#2C2C2A">10, 11</text>
+<rect x="656" y="368" width="26" height="16" rx="3" fill="#FFFFFF" stroke="#A32D2D" stroke-width="0.8"/><text x="669" y="380" text-anchor="middle" fill="#A32D2D">12</text>
+<rect x="476" y="330" width="26" height="16" rx="3" fill="#FFFFFF" stroke="#A32D2D" stroke-width="0.8"/><text x="489" y="342" text-anchor="middle" fill="#A32D2D">13</text>
+<rect x="186" y="380" width="26" height="16" rx="3" fill="#FFFFFF" stroke="#0F6E56" stroke-width="0.8"/><text x="199" y="392" text-anchor="middle" fill="#0F6E56">14</text>
+<rect x="782" y="366" width="26" height="16" rx="3" fill="#FFFFFF" stroke="#0F6E56" stroke-width="0.8"/><text x="795" y="378" text-anchor="middle" fill="#0F6E56">15</text>
+<rect x="926" y="380" width="26" height="16" rx="3" fill="#FFFFFF" stroke="#0F6E56" stroke-width="0.8"/><text x="939" y="392" text-anchor="middle" fill="#0F6E56">15</text>
+</g>
+<g font-family="Helvetica, Arial, sans-serif" font-size="11.5" fill="#2C2C2A">
+<text x="30" y="520" font-size="12.5" font-weight="600">Transitions: event [guard] / function (functions in crates/maknae-kernel/src/task.rs)</text>
+<text x="30" y="542"><tspan font-weight="600">1</tspan>  initial → Queued: submit / submit_task, TaskStore::confirm</text>
+<text x="30" y="560"><tspan font-weight="600">2</tspan>  initial → Held: submit [tasker, root or agent contained while stored] / TaskStore::confirm (held path)</text>
+<text x="30" y="578"><tspan font-weight="600">3</tspan>  Queued → Working: claim [tasker's standing decided] / TaskStore::claim</text>
+<text x="30" y="596"><tspan font-weight="600">4</tspan>  Working → Reported: report / TaskStore::report</text>
+<text x="30" y="614"><tspan font-weight="600">5</tspan>  Working → Closed: stop / TaskStore::stop</text>
+<text x="30" y="632"><tspan font-weight="600">6</tspan>  Working → Closed: [lease lapsed] / perform (AgentLost)</text>
+<text x="30" y="650"><tspan font-weight="600">7</tspan>  Queued, Working → Closed: [agent un-enrolled] / perform (AgentGone)</text>
+<text x="30" y="668"><tspan font-weight="600">8</tspan>  Queued → Closed: [tasker's authority withdrawn] / perform (Withdrawn)</text>
+<text x="30" y="686"><tspan font-weight="600">9</tspan>  Queued → deleted: drop / TaskStore::drop_queued</text>
+<text x="30" y="704"><tspan font-weight="600">10</tspan>  Reported, Closed → deleted: acknowledge / TaskStore::acknowledged</text>
+<text x="30" y="722"><tspan font-weight="600">11</tspan>  Reported, Closed → deleted: [REPORT_HOLD elapsed] / perform (expiry)</text>
+<text x="30" y="740" fill="#A32D2D"><tspan font-weight="600">12</tspan>  Live → Held, from any of the four states: [tasker or root contained] / perform → hold_durably</text>
+<text x="30" y="758" fill="#A32D2D"><tspan font-weight="600">13</tspan>  Open → Held, from Queued or Working: [agent contained] / perform → hold_durably</text>
+<text x="30" y="776" fill="#0F6E56"><tspan font-weight="600">14</tspan>  Held → Queued: release [no cause contained, parent not held, held from Queued or Working] / TaskStore::release</text>
+<text x="30" y="794" fill="#0F6E56"><tspan font-weight="600">15</tspan>  Held → Reported, Held → Closed: release [no cause contained, parent not held, held from that state] / TaskStore::release; new rseq, report time reset</text>
+</g>
+<text x="30" y="824" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#5F5E5A">Red: hold, by containment. Dashed green: release, by an administrator (maknae held release). Lifting a containment releases nothing.</text>
+<text x="30" y="840" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#5F5E5A">A held task is never handed out, closed or expired. Live and Open are composite states: a transition from one leaves any state inside it.</text>
+</svg>

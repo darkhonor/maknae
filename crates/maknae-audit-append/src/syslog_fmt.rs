@@ -669,6 +669,8 @@ mod tests {
     /// the degraded arm is always exercised.
     const MEASURED_TASKER_LINE: usize = 858;
     const MEASURED_WIDEST_TASK_LINE: usize = 1229;
+    const MEASURED_RELEASE_LINE: usize = 876;
+    const MEASURED_WIDEST_RELEASE_LINE: usize = 1083;
 
     fn widest_shapes() -> Vec<(String, crate::record::AuditRecord)> {
         let mut out = Vec::new();
@@ -781,6 +783,7 @@ mod tests {
             .collect();
         out.push(("sent with 17 refused tool calls".into(), refused));
         out.push(("widest session.task".into(), widest_task()));
+        out.push(("widest held-task release".into(), widest_release()));
         out
     }
 
@@ -797,6 +800,27 @@ mod tests {
         r.subject.parent_task_id = Some("a0".repeat(16));
         r.subject.tasker = Some(format!("agent:{}", "b".repeat(32)));
         r.subject.task_op = Some("collect".into());
+        r
+    }
+
+    fn widest_release() -> crate::record::AuditRecord {
+        let mut r = rec(
+            "task release not done: the record does not name the state it was held from; \
+             requested by uid 4294967295 in session 18446744073709551615",
+        );
+        r.action = "admin.release".into();
+        r.object = Some(format!("task:{}", "0f".repeat(16)));
+        r.source = crate::record::Source {
+            uid: u32::MAX,
+            gid: None,
+            pid: None,
+            plane_uri_san: None,
+        };
+        r.subject.user = None;
+        r.subject.task_id = Some("0f".repeat(16));
+        r.subject.parent_task_id = Some("a0".repeat(16));
+        r.subject.tasker = Some(format!("agent:{}", "b".repeat(32)));
+        r.outcome.posture = "unavailable".into();
         r
     }
 
@@ -824,6 +848,28 @@ mod tests {
         assert!(format_record(&widest_task(), PrimaryOutcome::Ok)
             .unwrap()
             .is_degraded());
+        let release = format_line_unchecked(&widest_release(), PrimaryOutcome::Ok).unwrap();
+        assert_eq!(release.len(), MEASURED_WIDEST_RELEASE_LINE, "{release}");
+        assert!(format_record(&widest_release(), PrimaryOutcome::Ok)
+            .unwrap()
+            .is_degraded());
+        let mut person = widest_release();
+        person.source.uid = 501;
+        person.subject.parent_task_id = None;
+        person.subject.tasker = Some("uid:1000".into());
+        person.outcome = crate::record::Outcome {
+            result: "permit".into(),
+            reason: "task released: held from reported, now reported; \
+                     requested by uid 501 in session 7"
+                .into(),
+            posture: "authorized".into(),
+        };
+        let line = format_line_unchecked(&person, PrimaryOutcome::Ok).unwrap();
+        assert_eq!(line.len(), MEASURED_RELEASE_LINE, "{line}");
+        assert!(format_record(&person, PrimaryOutcome::Ok)
+            .unwrap()
+            .into_full()
+            .is_some());
     }
 
     /// Built LITERALLY. It CANNOT be shared: `journal.rs`'s and
