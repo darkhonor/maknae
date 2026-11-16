@@ -47,6 +47,7 @@ pub fn close_line(close: TaskClose) -> &'static str {
         TaskClose::AgentGone => "the agent was removed",
         TaskClose::AgentLost => "the agent stopped responding",
         TaskClose::Withdrawn => "your authority to task this agent was withdrawn",
+        TaskClose::ParentEnded => "the task that asked for it ended",
     }
 }
 
@@ -219,6 +220,10 @@ mod tests {
         assert_eq!(
             close_line(TaskClose::Withdrawn),
             "your authority to task this agent was withdrawn"
+        );
+        assert_eq!(
+            close_line(TaskClose::ParentEnded),
+            "the task that asked for it ended"
         );
         assert_eq!(
             held_line(),

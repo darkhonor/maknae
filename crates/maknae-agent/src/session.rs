@@ -538,7 +538,7 @@ mod tests {
             "c",
             &"q".repeat(1_700),
             budget(),
-            ContextBudget::new(3_384, None).unwrap(),
+            ContextBudget::new(3_832, None).unwrap(),
             None,
         );
         let mut p = fake(vec![answer("one"), answer("two")]);

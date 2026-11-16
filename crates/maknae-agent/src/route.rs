@@ -34,6 +34,11 @@ pub enum ToolRequest {
         path: String,
         recursive: bool,
     },
+    TaskAgent {
+        call_id: String,
+        agent: String,
+        prompt: Zeroizing<String>,
+    },
 }
 
 /// Redacting, by hand — the crate convention (`maknae-proto/src/bytes.rs:25-32`,
@@ -92,6 +97,16 @@ impl std::fmt::Debug for ToolRequest {
                 .field("call_id", call_id)
                 .field("path", path)
                 .field("recursive", recursive)
+                .finish(),
+            ToolRequest::TaskAgent {
+                call_id,
+                agent,
+                prompt,
+            } => f
+                .debug_struct("TaskAgent")
+                .field("call_id", call_id)
+                .field("agent", agent)
+                .field("prompt", &format_args!("<{} bytes>", prompt.len()))
                 .finish(),
         }
     }
@@ -233,6 +248,13 @@ struct DeleteArgs {
     path: String,
     #[serde(default)]
     recursive: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskAgentArgs {
+    agent: String,
+    prompt: ZeroizingString,
 }
 
 /// Mirrors the kernel's cursor pre-gate (`maknae-kernel`'s `mutation::normal`).
@@ -450,6 +472,16 @@ pub fn route(call: &ProposedToolCall, home: Option<&str>) -> Result<ToolRequest,
                 call_id: call.call_id.clone(),
                 path: checked_path(a.path, home)?,
                 recursive: a.recursive,
+            })
+        }
+        "task_agent" => {
+            require_object(args)?;
+            let mut a: TaskAgentArgs =
+                serde_json::from_str(args).map_err(|e| RouteError::BadArguments(e.to_string()))?;
+            Ok(ToolRequest::TaskAgent {
+                call_id: call.call_id.clone(),
+                agent: a.agent,
+                prompt: Zeroizing::new(std::mem::take(&mut *a.prompt.0)),
             })
         }
         other => Err(RouteError::UnknownTool(other.to_string())),
@@ -1044,6 +1076,46 @@ mod tests {
         assert!(e.to_string().contains("a JSON string"), "{e}");
     }
     #[test]
+    fn task_agent_routes_its_agent_and_prompt_and_never_prints_the_prompt() {
+        let got = route(
+            &call(
+                "task_agent",
+                r#"{"agent":"jin","prompt":"sentinel-609-route"}"#,
+            ),
+            None,
+        )
+        .unwrap();
+        assert!(
+            !format!("{got:?}").contains("sentinel-609-route"),
+            "{got:?}"
+        );
+        let ToolRequest::TaskAgent {
+            call_id,
+            agent,
+            prompt,
+        } = got
+        else {
+            panic!("{got:?}");
+        };
+        assert_eq!((call_id.as_str(), agent.as_str()), ("c1", "jin"));
+        assert_eq!(prompt.as_str(), "sentinel-609-route");
+        for args in [
+            r#"{"agent":"jin"}"#,
+            r#"{"prompt":"p"}"#,
+            r#"{"agent":"jin","prompt":"p","path":"/x"}"#,
+            r#"["jin","p"]"#,
+        ] {
+            assert!(
+                matches!(
+                    route(&call("task_agent", args), None),
+                    Err(RouteError::BadArguments(_))
+                ),
+                "{args}"
+            );
+        }
+    }
+
+    #[test]
     fn a_refused_call_is_refused_by_its_marker_before_any_argument_parse() {
         for name in [
             "write_file",
@@ -1052,6 +1124,7 @@ mod tests {
             "stat_path",
             "make_directory",
             "delete_path",
+            "task_agent",
         ] {
             let c = ProposedToolCall {
                 refused: Some(maknae_proto::CallRefusal::ArgumentsOverBound { bytes: 70_000 }),

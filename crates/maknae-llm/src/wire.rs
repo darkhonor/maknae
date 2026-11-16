@@ -1079,7 +1079,7 @@ mod tests {
     }
 
     #[test]
-    fn baseline_catalog_is_exactly_the_six_maknae_tools() {
+    fn baseline_catalog_is_exactly_the_seven_maknae_tools() {
         let catalog = baseline_catalog();
         let names: Vec<&str> = catalog.iter().map(|t| t.function.name.as_str()).collect();
         assert_eq!(
@@ -1090,7 +1090,8 @@ mod tests {
                 "list_directory",
                 "stat_path",
                 "make_directory",
-                "delete_path"
+                "delete_path",
+                "task_agent"
             ]
         );
         assert!(
@@ -1116,6 +1117,7 @@ mod tests {
             ("stat_path", &["path"], &["path"]),
             ("make_directory", &["path"], &["path"]),
             ("delete_path", &["path", "recursive"], &["path"]),
+            ("task_agent", &["agent", "prompt"], &["agent", "prompt"]),
         ];
         assert_eq!(catalog.len(), want.len());
         for (t, (name, props, required)) in catalog.iter().zip(want) {
@@ -1246,7 +1248,42 @@ mod tests {
     }
 
     #[test]
-    fn advertise_is_a_function_and_returns_the_whole_catalog_at_n_of_six() {
+    fn the_tool_list_offers_task_agent() {
+        let catalog = baseline_catalog();
+        let t = catalog
+            .iter()
+            .find(|t| t.function.name == "task_agent")
+            .expect("task_agent is offered");
+        let said = t
+            .function
+            .description
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for promise in [
+            "waits until it reports or its task ends",
+            "cannot see your files and you cannot see its files",
+            "put what it needs in the prompt",
+            "ask for what you need in its report",
+            "the start of its report and the path of a file holding all of it",
+            "not accepted",
+            "outcome unknown: the other agent may have the task; do not retry it",
+            "on hold — its agent or tasker was contained",
+            "the wait ended; the other agent's work will be closed",
+            "unavailable — do not retry",
+        ] {
+            assert!(said.contains(promise), "task_agent: {promise:?}");
+        }
+        for field in ["agent", "prompt"] {
+            assert_eq!(
+                t.function.parameters["properties"][field]["type"], "string",
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn advertise_is_a_function_and_returns_the_whole_catalog_at_n_of_seven() {
         // Cooky advertises everything; the SEAM is what matters. Progressive
         // disclosure later returns a subset plus a discovery tool at this same
         // call site, and selection is gated on measured savings versus
@@ -1283,7 +1320,7 @@ mod tests {
         assert_eq!(v["messages"][1]["content"], "sentinel");
 
         let tools = v["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 6);
+        assert_eq!(tools.len(), 7);
         for (t, name) in tools.iter().zip([
             "read_file",
             "write_file",
@@ -1291,6 +1328,7 @@ mod tests {
             "stat_path",
             "make_directory",
             "delete_path",
+            "task_agent",
         ]) {
             // `type`, not `kind` -- the rename must survive the round trip.
             assert_eq!(t["type"], "function");

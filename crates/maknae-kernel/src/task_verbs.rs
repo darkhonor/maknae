@@ -87,6 +87,7 @@ pub(crate) enum TaskVerb<'a> {
     Collect {
         agent: &'a str,
         after: Option<u64>,
+        task: Option<TaskId>,
     },
     Claim {
         seen: Option<u32>,
@@ -114,9 +115,10 @@ pub(crate) fn task_verb(verb: &Verb) -> Option<TaskVerb<'_>> {
         }),
         Verb::TaskStop { task } => Some(TaskVerb::Stop(task.to_id())),
         Verb::TaskDrop { task } => Some(TaskVerb::Drop(task.to_id())),
-        Verb::TaskCollect { agent, after } => Some(TaskVerb::Collect {
+        Verb::TaskCollect { agent, after, task } => Some(TaskVerb::Collect {
             agent,
             after: after.as_ref().map(TaskCursor::seq),
+            task: task.as_ref().map(TaskRef::to_id),
         }),
         Verb::TaskClaim { seen_follow_ups } => Some(TaskVerb::Claim {
             seen: *seen_follow_ups,
@@ -852,6 +854,7 @@ mod tests {
             Verb::TaskCollect {
                 agent: "suga".into(),
                 after: None,
+                task: None,
             },
         ] {
             let tv = task_verb(&verb).unwrap();

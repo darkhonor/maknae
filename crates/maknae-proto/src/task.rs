@@ -347,6 +347,8 @@ pub enum TaskClose {
     AgentLost,
     /// Its tasker lost the authority to task the agent before it was handed out.
     Withdrawn,
+    /// The task it was given under stopped working.
+    ParentEnded,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -1102,6 +1104,12 @@ mod tests {
             Verb::TaskCollect {
                 agent: "hobi".into(),
                 after: Some(TaskCursor::from_seq(0)),
+                task: None,
+            },
+            Verb::TaskCollect {
+                agent: "hobi".into(),
+                after: None,
+                task: Some(task_ref()),
             },
             Verb::TaskClaim {
                 seen_follow_ups: Some(2),
@@ -1196,6 +1204,43 @@ mod tests {
         assert_eq!(wire.as_text(), Some("a0a1a2a3a4a5a6a7a8a9aaabacadaeaf"));
         let wire: ciborium::Value = dec(&enc(&TaskCursor::from_seq(12))).unwrap();
         assert_eq!(wire.as_text(), Some("12"));
+    }
+
+    #[test]
+    fn a_collect_sent_without_a_task_decodes_as_naming_none() {
+        #[derive(Serialize)]
+        enum Before {
+            TaskCollect {
+                agent: String,
+                after: Option<TaskCursor>,
+            },
+        }
+        let sent = enc(&Before::TaskCollect {
+            agent: "hobi".into(),
+            after: Some(TaskCursor::from_seq(3)),
+        });
+        assert_eq!(
+            dec::<crate::Verb>(&sent).unwrap(),
+            crate::Verb::TaskCollect {
+                agent: "hobi".into(),
+                after: Some(TaskCursor::from_seq(3)),
+                task: None,
+            }
+        );
+        let unnamed = enc(&crate::Verb::TaskCollect {
+            agent: "hobi".into(),
+            after: None,
+            task: None,
+        });
+        assert_eq!(
+            unnamed,
+            enc(&Before::TaskCollect {
+                agent: "hobi".into(),
+                after: None,
+            })
+        );
+        let close: TaskClose = dec(&enc(&TaskClose::ParentEnded)).unwrap();
+        assert_eq!(close, TaskClose::ParentEnded);
     }
 
     #[test]

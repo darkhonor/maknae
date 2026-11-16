@@ -56,7 +56,7 @@ pub fn page_request_is_acceptable(p: &PageRequest) -> bool {
 
 pub const MAX_CONTEXT_TOKENS: u64 = 16_777_216;
 pub const DEFAULT_BYTES_PER_TOKEN: u64 = 4;
-pub const PREAMBLE_ALLOWANCE_TOKENS: u64 = 2_688;
+pub const PREAMBLE_ALLOWANCE_TOKENS: u64 = 3_136;
 
 pub fn output_tokens_is_acceptable(n: u64) -> bool {
     (1..=MAX_CONTEXT_TOKENS).contains(&n)
@@ -725,9 +725,12 @@ pub enum Verb {
     TaskDrop {
         task: crate::TaskRef,
     },
+    /// `task`, when set, narrows the page and the acknowledgement to that one task.
     TaskCollect {
         agent: String,
         after: Option<crate::TaskCursor>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<crate::TaskRef>,
     },
     TaskClaim {
         seen_follow_ups: Option<u32>,

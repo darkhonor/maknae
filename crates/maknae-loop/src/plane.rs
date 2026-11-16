@@ -298,6 +298,11 @@ impl<K: KeySupply, D: Dial> LoopPlane<K, D> {
         crate::task::TaskClient::over(Arc::clone(&self.link))
     }
 
+    /// The tasker verbs over this plane's link, each carrying the plane's cite.
+    pub fn tasker(&self) -> crate::tasker::TaskerClient<D> {
+        crate::tasker::TaskerClient::on(Arc::clone(&self.link))
+    }
+
     /// A whole-file read that belongs to no conversation, carrying the cite.
     pub async fn read_whole(&mut self, path: &str) -> ReadOutcome {
         let diagnostics = &mut self.diagnostics;
@@ -742,6 +747,24 @@ mod tests {
             .collect();
         let all = |task| VERBS.map(|v| (v, task));
         assert_eq!(sent, [all(Some(id)), all(None)].concat());
+    }
+
+    #[tokio::test]
+    async fn the_planes_tasker_carries_the_planes_cite() {
+        let id = TaskId([0x63; 16]);
+        let plane = fake_plane(vec![fake::refused(); 3]);
+        plane.cite(Some(id));
+        let tasker = plane.tasker();
+        let hobi = maknae_config::AgentId::parse("hobi").unwrap();
+        let text = maknae_proto::SecretText(zeroize::Zeroizing::new("p".into()));
+        let _ = tasker.submit(&hobi, text).await;
+        let sub = maknae_proto::TaskRef::from_id(&TaskId([4; 16]));
+        let _ = tasker.status(&sub).await;
+        plane.cite(None);
+        let _ = tasker.status(&sub).await;
+        let seen = plane.link.dial.finish().await;
+        let cites: Vec<_> = seen.requests.iter().map(|r| r.task).collect();
+        assert_eq!(cites, [Some(id), Some(id), None]);
     }
 
     #[tokio::test]

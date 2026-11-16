@@ -458,6 +458,15 @@ pub async fn drive_session<P: Plane>(
                                 }
                             }
                         }
+                        Ok(ToolRequest::TaskAgent { agent, prompt, .. }) => {
+                            let got = plane
+                                .task_agent(transcript.conversation(), &agent, SecretText(prompt))
+                                .await;
+                            for d in plane.take_diagnostics() {
+                                emit(LoopEvent::Diagnostic(d));
+                            }
+                            ToolOutcome::TaskAgent(got)
+                        }
                     };
                     transcript.push_tool_result(&call.call_id, &render(&outcome, steps_remaining));
                 }
@@ -1356,6 +1365,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn task_agent_is_unavailable_on_a_plane_that_has_no_tasker() {
+        let mut p = scripted(vec![
+            calls_reply(vec![call(
+                "a1",
+                "task_agent",
+                r#"{"agent":"jin","prompt":"sentinel-609-cli"}"#,
+            )]),
+            done(),
+        ]);
+        let mut t = Transcript::new("conv-609", "q");
+        drive_wide(&mut p, &mut t).await;
+        assert_eq!(
+            tool_text(&t.turns()[2]),
+            format!("{}\n\nsteps remaining: 3", crate::render::UNAVAILABLE)
+        );
+    }
+
+    #[tokio::test]
     async fn each_mkdir_outcome_reaches_the_model_as_its_own_text() {
         let mut p = scripted(vec![
             calls_reply(vec![
@@ -1928,7 +1955,7 @@ mod tests {
     async fn the_loop_stops_before_sending_a_turn_past_the_budget() {
         let mut notices = vec![];
         let mut p = scripted(vec![answer()]);
-        let mut m = Meter::new(ContextBudget::new(3_500, None).unwrap());
+        let mut m = Meter::new(ContextBudget::new(4_100, None).unwrap());
         let mut t = Transcript::new("c", &"q".repeat(100));
         let out = drive(&mut p, &mut t, &budget(), &mut m, &mut |n: &Notice| {
             notices.push(*n)
@@ -1940,7 +1967,7 @@ mod tests {
         );
 
         let mut p = scripted(vec![answer()]);
-        let mut m = Meter::new(ContextBudget::new(3_500, None).unwrap());
+        let mut m = Meter::new(ContextBudget::new(4_100, None).unwrap());
         let mut t = Transcript::new("c", &"q".repeat(5_000));
         let out = drive(&mut p, &mut t, &budget(), &mut m, &mut |n: &Notice| {
             notices.push(*n)
@@ -1955,7 +1982,7 @@ mod tests {
     async fn a_turn_near_the_budget_is_sent_with_a_notice() {
         let mut notices = vec![];
         let mut p = scripted(vec![answer()]);
-        let mut m = Meter::new(ContextBudget::new(3_384, None).unwrap());
+        let mut m = Meter::new(ContextBudget::new(3_832, None).unwrap());
         let mut t = Transcript::new("c", &"q".repeat(2_700));
         let out = drive(&mut p, &mut t, &budget(), &mut m, &mut |n: &Notice| {
             notices.push(*n)
@@ -1966,8 +1993,8 @@ mod tests {
             notices,
             vec![Notice {
                 percent: 99,
-                tokens: 3_363,
-                budget: 3_384,
+                tokens: 3_811,
+                budget: 3_832,
                 estimated: true
             }]
         );
@@ -1981,13 +2008,13 @@ mod tests {
                 blocks: vec![],
                 tool_calls: vec![call("c1", "read_file", r#"{"path":"/w/a.txt"}"#)],
                 usage: Some(maknae_proto::Usage {
-                    prompt_tokens: 2_990,
+                    prompt_tokens: 3_438,
                     completion_tokens: None,
                 }),
             },
             answer(),
         ]);
-        let mut m = Meter::new(ContextBudget::new(3_000, None).unwrap());
+        let mut m = Meter::new(ContextBudget::new(3_448, None).unwrap());
         let mut t = Transcript::new("c", "q");
         let out = drive(&mut p, &mut t, &budget(), &mut m, &mut |_: &Notice| {}).await;
         assert_eq!(out.stopped, Some(StopReason::ContextBudget));
@@ -2272,7 +2299,7 @@ mod tests {
             &mut Transcript::new("c", &"q".repeat(1_800)),
             &mut Seen::new(),
             &budget(),
-            &mut Meter::new(ContextBudget::new(3_000, None).unwrap()),
+            &mut Meter::new(ContextBudget::new(3_448, None).unwrap()),
             &AtomicBool::new(true),
             &mut |e| events.push(e),
             None,
@@ -2293,7 +2320,7 @@ mod tests {
             &mut Transcript::new("c", &"q".repeat(1_800)),
             &mut Seen::new(),
             &budget(),
-            &mut Meter::new(ContextBudget::new(3_384, None).unwrap()),
+            &mut Meter::new(ContextBudget::new(3_832, None).unwrap()),
             &stop,
             &mut |e| {
                 if matches!(e, LoopEvent::Notice(_)) {
@@ -2448,7 +2475,7 @@ mod tests {
             &mut Transcript::new("c", "q"),
             &mut Seen::new(),
             &budget(),
-            &mut Meter::new(ContextBudget::new(3_384, None).unwrap()),
+            &mut Meter::new(ContextBudget::new(4_000, None).unwrap()),
             &stop,
             &mut |e| events.push(e),
             None,
@@ -2478,7 +2505,7 @@ mod tests {
             &mut Transcript::new("c", "q"),
             &mut Seen::new(),
             &budget(),
-            &mut Meter::new(ContextBudget::new(3_384, None).unwrap()),
+            &mut Meter::new(ContextBudget::new(4_000, None).unwrap()),
             &stop,
             &mut |e| events.push(e),
             None,
@@ -2505,7 +2532,7 @@ mod tests {
             &mut Transcript::new("c", &"q".repeat(1_800)),
             &mut Seen::new(),
             &budget(),
-            &mut Meter::new(ContextBudget::new(3_384, None).unwrap()),
+            &mut Meter::new(ContextBudget::new(3_832, None).unwrap()),
             &stop,
             &mut |e| events.push(e),
             None,
@@ -2527,7 +2554,7 @@ mod tests {
             &mut Transcript::new("c", &"q".repeat(1_700)),
             &mut Seen::new(),
             &budget(),
-            &mut Meter::new(ContextBudget::new(3_384, None).unwrap()),
+            &mut Meter::new(ContextBudget::new(3_832, None).unwrap()),
             &AtomicBool::new(false),
             &mut |e| events.push(e),
             None,

@@ -106,10 +106,16 @@ pub fn agent_transport(cfg: &AgentClientConfig) -> Result<TransportConfig, Strin
     Ok(transport)
 }
 
+/// The largest file the plane writes: a whole report, which the kernel bounds by the
+/// same `prompt_max_bytes`, so `task_agent` can always store one.
+pub fn write_max(transport: &TransportConfig) -> usize {
+    transport.prompt_max_bytes
+}
+
 pub fn connect(a: Assembly<'_>) -> Result<Connected, String> {
     let cfg = a.cfg;
     let transport = agent_transport(cfg)?;
-    let write_max = transport.prompt_max_bytes;
+    let write_max = write_max(&transport);
     let keys = AgentKeys::new(
         Arc::clone(&a.client),
         cfg.provider.clone(),
@@ -332,6 +338,17 @@ mod tests {
             PathBuf::from("/run/maknae-agent/maknaed.sock")
         );
         assert_eq!(t.prompt_max_bytes, 262_144);
+    }
+
+    #[test]
+    fn the_plane_writes_a_whole_report_at_the_kernels_report_bound() {
+        let t = agent_transport(&cfg()).unwrap();
+        assert_eq!(write_max(&t), cfg().prompt_max_bytes);
+        assert_eq!(
+            maknae_agent::render::REPORT_HEAD_BYTES,
+            4096,
+            "the head the model sees"
+        );
     }
 
     #[test]

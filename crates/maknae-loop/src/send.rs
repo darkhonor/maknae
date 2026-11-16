@@ -630,6 +630,7 @@ mod tests {
             Verb::TaskCollect {
                 agent: "hobi".into(),
                 after: None,
+                task: None,
             },
             Verb::TaskClaim {
                 seen_follow_ups: None,

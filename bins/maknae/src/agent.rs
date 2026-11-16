@@ -1448,7 +1448,7 @@ mod tests {
                     "c",
                     &"q".repeat(2_700),
                     budget(),
-                    ContextBudget::new(3_384, None).unwrap(),
+                    ContextBudget::new(3_832, None).unwrap(),
                     None,
                 ),
                 &mut fake(vec![reply(Some("ok"), &[])]),
@@ -1456,8 +1456,8 @@ mod tests {
             .await;
             let notice = Notice {
                 percent: 99,
-                tokens: 3_363,
-                budget: 3_384,
+                tokens: 3_811,
+                budget: 3_832,
                 estimated: true,
             };
             assert_eq!(out, b"ok\n");
@@ -1571,7 +1571,7 @@ mod tests {
                     "c",
                     &"q".repeat(1_700),
                     b,
-                    ContextBudget::new(3_384, None).unwrap(),
+                    ContextBudget::new(3_832, None).unwrap(),
                     None,
                 ),
                 &mut p,
@@ -1634,7 +1634,7 @@ mod tests {
                 "c",
                 &"q".repeat(1_800),
                 budget(),
-                ContextBudget::new(3_384, None).unwrap(),
+                ContextBudget::new(3_832, None).unwrap(),
                 None,
             );
             match drive_to(&mut session, &mut p, &mut Broken).await {

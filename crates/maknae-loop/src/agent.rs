@@ -2,17 +2,21 @@
 //! the signature check and the persona reads the task driver asks for.
 use crate::keys::KeySupply;
 use crate::plane::{Dial, LoopPlane, PlaneDial};
+use crate::tasker::TaskerError;
 use maknae_agent::plane::{
     DeleteOutcome, ListOutcome, MkdirOutcome, Plane, PlaneError, ReadBasis, ReadOutcome,
     StatOutcome, WriteOutcome,
 };
-use maknae_agent::task::{BeatAnswer, ClaimAnswer, ReportOutcome};
+use maknae_agent::task::{BeatAnswer, ClaimAnswer, ReportOutcome, TaskerFail};
 use maknae_agent::task_driver::{DriverEvent, PersonaAt, TaskPlane, Unverified};
 use maknae_config::AgentId;
 use maknae_io::{
     AnchorRequired, DescendantRequired, IoError, IoKind, StrategyPref, TargetRequired, Zeroizing,
 };
-use maknae_proto::{Bytes, ConversationId, ConversationView, SecretText, SignedTask, TaskId, Turn};
+use maknae_proto::{
+    Bytes, ConversationId, ConversationView, SecretText, SignedTask, TaskCursor, TaskId, TaskRef,
+    TaskReportPage, TaskView, Turn,
+};
 use maknae_vault::TrustBundle;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -243,6 +247,45 @@ impl<K: KeySupply, R: PersonaRead, D: Dial> TaskPlane for AgentPlane<K, R, D> {
     fn note(&mut self, event: DriverEvent) {
         (self.note)(event);
     }
+    async fn submit(&mut self, agent: &str, prompt: SecretText) -> Result<TaskView, TaskerFail> {
+        let agent = AgentId::parse(agent).map_err(|_| TaskerFail::Refused)?;
+        self.plane
+            .tasker()
+            .submit(&agent, prompt)
+            .await
+            .map_err(fail)
+    }
+    async fn sub_status(&mut self, task: &TaskRef) -> Result<TaskView, TaskerFail> {
+        self.plane.tasker().status(task).await.map_err(fail)
+    }
+    async fn collect_one(
+        &mut self,
+        agent: &str,
+        task: &TaskRef,
+        after: Option<TaskCursor>,
+    ) -> Result<TaskReportPage, TaskerFail> {
+        let agent = AgentId::parse(agent).map_err(|_| TaskerFail::Protocol)?;
+        self.plane
+            .tasker()
+            .collect_one(&agent, task, after)
+            .await
+            .map_err(fail)
+    }
+    async fn end_sub(&mut self, task: &TaskRef, queued: bool) {
+        let tasker = self.plane.tasker();
+        let _ = match queued {
+            true => tasker.drop(task).await,
+            false => tasker.stop(task).await,
+        };
+    }
+}
+
+fn fail(e: TaskerError) -> TaskerFail {
+    match e {
+        TaskerError::Refused { .. } => TaskerFail::Refused,
+        TaskerError::Unreachable { after_write, .. } => TaskerFail::Unreachable { after_write },
+        TaskerError::Protocol(_) => TaskerFail::Protocol,
+    }
 }
 
 #[cfg(test)]
@@ -318,7 +361,7 @@ mod tests {
         use crate::plane::fake::{refused, FakeKernel};
         use maknae_proto::Verb;
         let ca = TestCa::new(PlaneKey::MlDsa87);
-        let verbs = 15;
+        let verbs = 20;
         let lp = LoopPlane::with_dial(
             FakeKernel::answering(vec![refused(); verbs]),
             maknae_config::TransportConfig::default(),
@@ -394,6 +437,14 @@ mod tests {
             refused,
             Err("/home/hobi/tasks/users/1000/persona.md: the read was unavailable".into())
         );
+        let sub = maknae_proto::TaskRef::from_id(&TaskId([0x30; 16]));
+        let asked = SecretText(Zeroizing::new("sentinel-609-agent-plane".into()));
+        assert_eq!(plane.submit("jin", asked).await, Err(TaskerFail::Refused));
+        assert_eq!(plane.sub_status(&sub).await, Err(TaskerFail::Refused));
+        let cursor = Some(maknae_proto::TaskCursor::from_seq(4));
+        let _ = plane.collect_one("jin", &sub, cursor).await;
+        plane.end_sub(&sub, true).await;
+        plane.end_sub(&sub, false).await;
         let sent: Vec<_> = plane
             .plane
             .link_for_test()
@@ -438,6 +489,15 @@ mod tests {
                     Verb::FsList { .. } => "list",
                     Verb::FsStat { .. } => "stat",
                     Verb::SessionClose { .. } => "close",
+                    Verb::TaskSubmit { task } if task.agent == "jin" => "submit",
+                    Verb::TaskStatus { task } if *task == sub => "status",
+                    Verb::TaskCollect {
+                        agent,
+                        after: Some(c),
+                        task: Some(t),
+                    } if agent == "jin" && c.seq() == 4 && *t == sub => "ack-one",
+                    Verb::TaskDrop { task } if *task == sub => "drop",
+                    Verb::TaskStop { task } if *task == sub => "stop",
                     other => panic!("unexpected {other:?}"),
                 };
                 (name, r.task)
@@ -462,6 +522,11 @@ mod tests {
                 cited("close"),
                 ("report", None),
                 cited("persona"),
+                cited("submit"),
+                cited("status"),
+                cited("ack-one"),
+                cited("drop"),
+                cited("stop"),
             ]
         );
         assert_eq!(

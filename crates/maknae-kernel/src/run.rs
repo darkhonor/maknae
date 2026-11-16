@@ -3261,6 +3261,18 @@ type StoreChange = Box<
         + Send,
 >;
 
+fn reach_of(
+    tasker: &maknae_proto::Tasker,
+    under: Option<maknae_proto::TaskId>,
+    task: Option<maknae_proto::TaskId>,
+) -> crate::task::Reach<'_> {
+    crate::task::Reach {
+        tasker,
+        under,
+        task,
+    }
+}
+
 /// Who calls on this channel, and how the tasker verbs reach the store and the signer.
 struct TaskCtx<'a> {
     agents: &'a AgentAdmission,
@@ -3293,6 +3305,11 @@ async fn serve_task_verb<S, E, P>(
     let op = crate::handler::task_op(verb);
     let store = &tasks.agents.tasks;
     let caller = &tasks.caller;
+    let reach = crate::task::Reach {
+        tasker: caller,
+        under: tasks.under,
+        task: None,
+    };
     let Some(asked) = tv::task_verb(verb) else {
         let rec = trail.record(action, "deny", "not a task verb", "unauthorized");
         trail.unauthorized(stream, &rec).await;
@@ -3354,7 +3371,7 @@ async fn serve_task_verb<S, E, P>(
         match submitted {
             Ok(signed) => {
                 let id = signed.task.task_id;
-                let shown = store.status(&id, caller);
+                let shown = store.status(&id, reach);
                 let said = match shown.as_ref().map(|v| v.state) {
                     Some(maknae_proto::TaskState::Held) => "task held",
                     Some(
@@ -3464,7 +3481,7 @@ async fn serve_task_verb<S, E, P>(
         tv::stamp_held(&mut sec_req, stamp);
     }
     if let Some(id) = &cited {
-        tv::stamp_task(&mut sec_req, store.state_for(id, caller));
+        tv::stamp_task(&mut sec_req, store.state_for(id, reach));
     }
     if let Some(agent) = asked.named_agent() {
         tv::stamp_agent(&mut sec_req, agent);
@@ -3509,7 +3526,7 @@ async fn serve_task_verb<S, E, P>(
         crate::task::offload(trail.uid, deadline, move || change(&s))
     };
     match asked {
-        TaskVerb::Status(id) => match store.status(&id, caller) {
+        TaskVerb::Status(id) => match store.status(&id, reach) {
             Some(view) => {
                 let outcome = decided("permit", "status", "authorized");
                 trail
@@ -3541,8 +3558,12 @@ async fn serve_task_verb<S, E, P>(
             if !trail.record_bounded(&intent).await {
                 return;
             }
-            let (who, text, max) = (caller.clone(), text.clone(), tasks.text_max);
-            let done = mutate(Box::new(move |s| s.follow_up(&task, &who, text, max))).await;
+            let (who, under, text, max) =
+                (caller.clone(), tasks.under, text.clone(), tasks.text_max);
+            let done = mutate(Box::new(move |s| {
+                s.follow_up(&task, reach_of(&who, under, None), text, max)
+            }))
+            .await;
             acknowledge_task(
                 stream,
                 trail,
@@ -3558,8 +3579,11 @@ async fn serve_task_verb<S, E, P>(
             if !trail.record_bounded(&intent).await {
                 return;
             }
-            let who = caller.clone();
-            let done = mutate(Box::new(move |s| s.stop(&task, &who))).await;
+            let (who, under) = (caller.clone(), tasks.under);
+            let done = mutate(Box::new(move |s| {
+                s.stop(&task, reach_of(&who, under, None))
+            }))
+            .await;
             acknowledge_task(
                 stream,
                 trail,
@@ -3575,8 +3599,11 @@ async fn serve_task_verb<S, E, P>(
             if !trail.record_bounded(&intent).await {
                 return;
             }
-            let who = caller.clone();
-            let done = mutate(Box::new(move |s| s.drop_queued(&task, &who))).await;
+            let (who, under) = (caller.clone(), tasks.under);
+            let done = mutate(Box::new(move |s| {
+                s.drop_queued(&task, reach_of(&who, under, None))
+            }))
+            .await;
             acknowledge_task(
                 stream,
                 trail,
@@ -3597,7 +3624,7 @@ async fn serve_task_verb<S, E, P>(
                     .await;
                 return;
             };
-            let (entries, next) = store.list(caller, &agent, after, tv::TASK_PAGE_MAX);
+            let (entries, next) = store.list(reach, &agent, after, tv::TASK_PAGE_MAX);
             let outcome = decided(
                 "permit",
                 &format!("listed {} tasks", entries.len()),
@@ -3611,7 +3638,8 @@ async fn serve_task_verb<S, E, P>(
                 .deliver(stream, &outcome, payload, role, rule.as_ref(), action)
                 .await;
         }
-        TaskVerb::Collect { after, .. } => {
+        TaskVerb::Collect { after, task, .. } => {
+            let reach = crate::task::Reach { task, ..reach };
             let Some(Ok(agent)) = named else {
                 trail
                     .unauthorized(
@@ -3632,8 +3660,9 @@ async fn serve_task_verb<S, E, P>(
                     return;
                 }
                 let (s, who, a) = (Arc::clone(store), caller.clone(), agent.clone());
+                let under = tasks.under;
                 let acked = crate::task::offload(trail.uid, deadline, move || {
-                    s.acknowledged(&who, &a, upto)
+                    s.acknowledged(reach_of(&who, under, task), &a, upto)
                 })
                 .await;
                 match acked {
@@ -3645,7 +3674,7 @@ async fn serve_task_verb<S, E, P>(
                 }
             }
             let page = store.reports(
-                caller,
+                reach,
                 &agent,
                 maknae_proto::prompt_request_cap(tasks.text_max),
             );
@@ -4026,6 +4055,7 @@ async fn collect_authority<P: Authorizer + Send + Sync + 'static>(
     let verb = Verb::TaskCollect {
         agent: target.as_str().to_owned(),
         after: None,
+        task: None,
     };
     authority(authorizer, &verb, uid, stamp, target, lane, timeout).await
 }
@@ -8856,7 +8886,9 @@ fn task_due_record(ctx: &BootCtx<'_>, due: &crate::task::Due) -> AuditRecord {
         DueFor::Close(TaskClose::AgentGone) => "closed:agent-gone",
         DueFor::Close(TaskClose::AgentLost) => "closed:agent-lost",
         DueFor::Close(TaskClose::Withdrawn) => "closed:withdrawn",
+        DueFor::Close(TaskClose::ParentEnded) => "closed:parent-ended",
         DueFor::Expiry => "expired",
+        DueFor::Orphaned => "removed:parent-ended",
         DueFor::Hold(who) => {
             return task_record(
                 ctx,
@@ -25115,6 +25147,7 @@ mod task_sweep_tests {
             (TaskClose::Withdrawn, "closed:withdrawn"),
             (TaskClose::Stopped, "closed:stopped"),
             (TaskClose::Dropped, "closed:dropped"),
+            (TaskClose::ParentEnded, "closed:parent-ended"),
         ] {
             assert_eq!(
                 due(&agent, Some(parent), DueFor::Close(close)),
@@ -25162,6 +25195,18 @@ mod task_sweep_tests {
                 1000,
                 Some(s("uid:1000")),
                 None,
+                object.clone()
+            )
+        );
+        assert_eq!(
+            due(&agent, Some(parent), DueFor::Orphaned),
+            (
+                s("deny"),
+                s("removed:parent-ended"),
+                s("unavailable"),
+                2001,
+                Some(s("agent:hobi")),
+                Some(parent.to_string()),
                 object.clone()
             )
         );
@@ -25955,6 +26000,62 @@ mod task_sweep_tests {
         );
         assert_eq!(*trail.open.lock().unwrap(), [true, true]);
         assert_eq!(store.record(&id).unwrap().state, TaskState::Held);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_sub_task_under_an_ended_parent_is_recorded_before_it_is_removed() {
+        let (blobs, _clock, store) = mem(1_000);
+        let parent = working(&store, "hobi", Tasker::Uid(1000));
+        let mut task = maknae_proto::TaskObject::for_test("jin", 0);
+        task.tasker = Tasker::Agent {
+            agent: "hobi".into(),
+            uid: 2001,
+        };
+        task.parent = Some(parent);
+        let sub = store
+            .insert_for_test(
+                maknae_proto::SignedTask {
+                    task,
+                    signature: maknae_proto::TaskSignature {
+                        alg: "test".into(),
+                        leaf: maknae_proto::Bytes(maknae_io::Zeroizing::new(vec![1])),
+                        chain: Vec::new(),
+                        sig: maknae_proto::Bytes(maknae_io::Zeroizing::new(vec![2])),
+                    },
+                },
+                2002,
+            )
+            .task
+            .task_id;
+        store
+            .publish_report(
+                &parent,
+                maknae_proto::SecretText(String::new().into()),
+                Some(TaskClose::Stopped),
+            )
+            .unwrap();
+        let (seq, au) = (Seq::new(), serde_json::json!({}));
+        let trail = Trail::watching(0, Some(Arc::clone(&store)));
+        let swept = close_due(&store, &*trail, &ctx(&seq, &au), soon()).await;
+        assert_eq!((swept.remaining, swept.stopped), (0, None));
+        let recs = trail.recs();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].outcome.reason, "closed:parent-ended");
+        assert_eq!(recs[0].subject.task_id, Some(sub.to_string()));
+        assert_eq!(recs[0].subject.parent_task_id, Some(parent.to_string()));
+        assert_eq!(
+            *trail.open.lock().unwrap(),
+            [true],
+            "recorded while still open"
+        );
+        assert!(store.record(&sub).is_none());
+        assert!(
+            TaskStore::open(Box::new(blobs.clone()), Arc::new(ManualClock::at(1_000)))
+                .unwrap()
+                .record(&sub)
+                .is_none(),
+            "removed from the disk"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

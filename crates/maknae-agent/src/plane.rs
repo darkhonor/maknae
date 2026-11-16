@@ -202,6 +202,46 @@ pub enum PlaneError {
     },
 }
 
+/// What a `task_agent` call came to: one fixed outcome, or the other agent's report,
+/// with the path it was stored at when it was.
+#[derive(Clone, PartialEq, Eq)]
+pub enum TaskAgentOutcome {
+    Unavailable,
+    NotAccepted,
+    OutcomeUnknown,
+    Closed(maknae_proto::TaskClose),
+    OnHold,
+    WaitEnded,
+    Report {
+        agent: String,
+        stored: Option<String>,
+        text: maknae_proto::SecretText,
+    },
+}
+
+impl std::fmt::Debug for TaskAgentOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TaskAgentOutcome::Unavailable => f.write_str("Unavailable"),
+            TaskAgentOutcome::NotAccepted => f.write_str("NotAccepted"),
+            TaskAgentOutcome::OutcomeUnknown => f.write_str("OutcomeUnknown"),
+            TaskAgentOutcome::Closed(c) => f.debug_tuple("Closed").field(c).finish(),
+            TaskAgentOutcome::OnHold => f.write_str("OnHold"),
+            TaskAgentOutcome::WaitEnded => f.write_str("WaitEnded"),
+            TaskAgentOutcome::Report {
+                agent,
+                stored,
+                text,
+            } => f
+                .debug_struct("Report")
+                .field("agent", agent)
+                .field("stored", stored)
+                .field("text", &format_args!("<{} bytes>", text.0.len()))
+                .finish(),
+        }
+    }
+}
+
 pub trait Plane {
     fn open(
         &mut self,
@@ -252,6 +292,15 @@ pub trait Plane {
     /// to show. Drained after every call, so order is preserved.
     fn take_diagnostics(&mut self) -> Vec<String> {
         vec![]
+    }
+    /// Only the Agent Daemon's plane, inside a task, gives a task to another agent.
+    fn task_agent(
+        &mut self,
+        _conversation: &str,
+        _agent: &str,
+        _prompt: maknae_proto::SecretText,
+    ) -> impl Future<Output = TaskAgentOutcome> + Send {
+        std::future::ready(TaskAgentOutcome::Unavailable)
     }
 }
 

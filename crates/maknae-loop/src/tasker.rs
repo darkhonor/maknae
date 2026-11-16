@@ -46,6 +46,10 @@ impl<D: Dial> TaskerClient<D> {
         }
     }
 
+    pub(crate) fn on(link: Arc<Link<D>>) -> Self {
+        Self { link }
+    }
+
     pub async fn agents(&self, after: Option<String>) -> Result<AgentPage, TaskerError> {
         match self.call(Verb::AgentList { after }, false).await? {
             Payload::Agents(page) => Ok(page),
@@ -162,9 +166,29 @@ impl<D: Dial> TaskerClient<D> {
         agent: &AgentId,
         after: Option<TaskCursor>,
     ) -> Result<TaskReportPage, TaskerError> {
+        self.collect_from(agent, after, None).await
+    }
+
+    /// `task`'s report or close notice alone; `after` acknowledges it alone.
+    pub async fn collect_one(
+        &self,
+        agent: &AgentId,
+        task: &TaskRef,
+        after: Option<TaskCursor>,
+    ) -> Result<TaskReportPage, TaskerError> {
+        self.collect_from(agent, after, Some(task.clone())).await
+    }
+
+    async fn collect_from(
+        &self,
+        agent: &AgentId,
+        after: Option<TaskCursor>,
+        task: Option<TaskRef>,
+    ) -> Result<TaskReportPage, TaskerError> {
         let verb = Verb::TaskCollect {
             agent: agent.as_str().into(),
             after,
+            task,
         };
         match self.call(verb, true).await? {
             Payload::TaskReports(page) => Ok(page),
@@ -269,6 +293,38 @@ mod tests {
         let c = client(transport, vec![RespResult::Ok(Payload::TaskReports(page))]);
         let got = c.collect(&agent(), None).await.unwrap();
         assert_eq!(got.entries[0].text.0.len(), body.len());
+    }
+
+    #[tokio::test]
+    async fn collect_one_names_its_task_and_its_cursor() {
+        let page = || {
+            RespResult::Ok(Payload::TaskReports(TaskReportPage {
+                entries: Vec::new(),
+                next: None,
+            }))
+        };
+        let c = client(Default::default(), vec![page(), page()]);
+        c.collect_one(&agent(), &task_ref(), None).await.unwrap();
+        c.collect_one(&agent(), &task_ref(), Some(TaskCursor::from_seq(4)))
+            .await
+            .unwrap();
+        let seen = c.link.dial_for_test().finish().await;
+        let sent: Vec<_> = seen.requests.iter().map(|r| r.verb.clone()).collect();
+        assert_eq!(
+            sent,
+            [
+                Verb::TaskCollect {
+                    agent: "hobi".into(),
+                    after: None,
+                    task: Some(task_ref()),
+                },
+                Verb::TaskCollect {
+                    agent: "hobi".into(),
+                    after: Some(TaskCursor::from_seq(4)),
+                    task: Some(task_ref()),
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -490,7 +546,7 @@ mod tests {
         assert!(matches!(&verbs[5], Verb::TaskStatus { task } if *task == task_ref()));
         assert!(matches!(
             &verbs[6],
-            Verb::TaskCollect { agent, after: a } if agent == "hobi" && *a == Some(after.clone())
+            Verb::TaskCollect { agent, after: a, task: None } if agent == "hobi" && *a == Some(after.clone())
         ));
         assert!(matches!(
             &verbs[7],

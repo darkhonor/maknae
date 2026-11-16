@@ -13,7 +13,7 @@
 //! `UNAVAILABLE` and `CHANGE_UNKNOWN` with `make_directory`'s; `DELETED`,
 //! `UNAVAILABLE` and `CHANGE_UNKNOWN` with `delete_path`'s. Duplicated here by
 //! contract, never by linkage. `tool error:` is renderer-only.
-use crate::plane::{ReadPage, StatView};
+use crate::plane::{ReadPage, StatView, TaskAgentOutcome};
 use crate::screen::fixed::{FixedText, Full};
 use zeroize::Zeroizing;
 
@@ -43,6 +43,7 @@ pub enum ToolOutcome {
     Protected,
     NotRun,
     BadCall(String),
+    TaskAgent(TaskAgentOutcome),
 }
 
 /// Redacting, by hand — the crate convention (`route.rs`'s `ToolRequest`,
@@ -84,6 +85,7 @@ impl std::fmt::Debug for ToolOutcome {
             ToolOutcome::Protected => f.write_str("Protected"),
             ToolOutcome::NotRun => f.write_str("NotRun"),
             ToolOutcome::BadCall(why) => f.debug_tuple("BadCall").field(why).finish(),
+            ToolOutcome::TaskAgent(got) => f.debug_tuple("TaskAgent").field(got).finish(),
         }
     }
 }
@@ -109,6 +111,71 @@ pub const PROTECTED: &str = "protected by policy — ask the user to do this out
 pub const LIST_CONTINUE: &str = "truncated — continue with after: ";
 /// A call skipped because the host stopped the loop: not the model's error.
 pub const NOT_RUN: &str = "not run: the loop was stopped";
+/// `task_agent`'s fixed outcomes; half of the contract with its description.
+pub const NOT_ACCEPTED: &str = "not accepted";
+pub const SUB_OUTCOME_UNKNOWN: &str =
+    "outcome unknown: the other agent may have the task; do not retry it";
+pub const ON_HOLD: &str = "on hold — its agent or tasker was contained";
+pub const WAIT_ENDED: &str = "the wait ended; the other agent's work will be closed";
+pub const REPORT_HEAD_BYTES: usize = 4096;
+pub const CUT_MARKER: &str = "[cut here — read the rest with read_file]";
+pub const NOT_STORED: &str = "the rest of the report could not be stored and is not shown";
+
+fn closed_text(close: maknae_proto::TaskClose) -> &'static str {
+    match close {
+        maknae_proto::TaskClose::Stopped => "stopped",
+        maknae_proto::TaskClose::Dropped => "dropped",
+        maknae_proto::TaskClose::AgentGone => "the agent was removed",
+        maknae_proto::TaskClose::AgentLost => "the agent stopped responding",
+        maknae_proto::TaskClose::Withdrawn => "withdrawn",
+        maknae_proto::TaskClose::ParentEnded => WAIT_ENDED,
+    }
+}
+
+/// The head of another agent's report, cut on a character boundary, under a line that
+/// names whose output it is; built once in a zeroizing buffer with room for the suffix.
+fn report_text(agent: &str, stored: Option<&str>, text: &str) -> Zeroizing<String> {
+    let mut end = text.len().min(REPORT_HEAD_BYTES);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let cut = end < text.len();
+    let header = match stored {
+        Some(path) => format!(
+            "Report from agent {agent} (shown up to {REPORT_HEAD_BYTES} bytes; all of it is in {path}):\n"
+        ),
+        None => format!("Report from agent {agent} (shown up to {REPORT_HEAD_BYTES} bytes):\n"),
+    };
+    let tail = match (cut, stored) {
+        (false, _) => String::new(),
+        (true, Some(_)) => format!("\n{CUT_MARKER}"),
+        (true, None) => format!("\n[cut here — {NOT_STORED}]"),
+    };
+    let mut out = Zeroizing::new(String::with_capacity(
+        header.len() + end + tail.len() + SUFFIX_HEADROOM,
+    ));
+    out.push_str(&header);
+    out.push_str(&text[..end]);
+    out.push_str(&tail);
+    out
+}
+
+fn task_agent_text(got: &TaskAgentOutcome) -> Zeroizing<String> {
+    let fixed = match got {
+        TaskAgentOutcome::Report {
+            agent,
+            stored,
+            text,
+        } => return report_text(agent, stored.as_deref(), &text.0),
+        TaskAgentOutcome::Unavailable => UNAVAILABLE,
+        TaskAgentOutcome::NotAccepted => NOT_ACCEPTED,
+        TaskAgentOutcome::OutcomeUnknown => SUB_OUTCOME_UNKNOWN,
+        TaskAgentOutcome::Closed(close) => closed_text(*close),
+        TaskAgentOutcome::OnHold => ON_HOLD,
+        TaskAgentOutcome::WaitEnded => WAIT_ENDED,
+    };
+    Zeroizing::new(fixed.to_string())
+}
 
 /// Headroom the read arm pre-allocates for the suffix `render`
 /// appends, so THAT append never reallocates: 19 bytes of
@@ -367,6 +434,7 @@ pub fn render(outcome: &ToolOutcome, steps_remaining: u32) -> Zeroizing<String> 
         ToolOutcome::ChangeUnknown => Zeroizing::new(CHANGE_UNKNOWN.to_string()),
         ToolOutcome::NotRun => Zeroizing::new(NOT_RUN.to_string()),
         ToolOutcome::BadCall(why) => Zeroizing::new(format!("tool error: {why}")),
+        ToolOutcome::TaskAgent(got) => task_agent_text(got),
     };
     // The live step count rides HERE, in per-turn content — never in the
     // compiled prompt, which ships verbatim (#264). Appended IN PLACE into the
@@ -394,6 +462,45 @@ pub fn render(outcome: &ToolOutcome, steps_remaining: u32) -> Zeroizing<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn task_agents_fixed_outcomes_are_the_strings_its_description_names() {
+        use crate::plane::TaskAgentOutcome as T;
+        for (got, said) in [
+            (T::Unavailable, "unavailable — do not retry"),
+            (T::NotAccepted, "not accepted"),
+            (
+                T::OutcomeUnknown,
+                "outcome unknown: the other agent may have the task; do not retry it",
+            ),
+            (T::OnHold, "on hold — its agent or tasker was contained"),
+            (
+                T::WaitEnded,
+                "the wait ended; the other agent's work will be closed",
+            ),
+            (
+                T::Closed(maknae_proto::TaskClose::ParentEnded),
+                "the wait ended; the other agent's work will be closed",
+            ),
+        ] {
+            assert_eq!(
+                render(&ToolOutcome::TaskAgent(got), 2).as_str(),
+                format!("{said}\n\nsteps remaining: 2")
+            );
+        }
+        let whole = render(
+            &ToolOutcome::TaskAgent(T::Report {
+                agent: "jin".into(),
+                stored: Some("/h/r.md".into()),
+                text: maknae_proto::SecretText(Zeroizing::new("short".into())),
+            }),
+            2,
+        );
+        assert_eq!(
+            whole.as_str(),
+            "Report from agent jin (shown up to 4096 bytes; all of it is in /h/r.md):\nshort\n\nsteps remaining: 2"
+        );
+    }
+
     #[test]
     fn the_strings_the_compiled_prompt_promises_are_exact() {
         // Duplicated BY CONTRACT with crates/maknae-llm/prompt/core-prompt.txt and

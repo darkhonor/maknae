@@ -18,6 +18,7 @@ use std::time::Duration;
 
 const HOBI_UID: u32 = 12_101;
 const SUGA_UID: u32 = 12_102;
+const JIN_UID: u32 = 12_103;
 const OTHER: u32 = 31_337;
 const T0: i64 = 1_800_000_000;
 
@@ -122,6 +123,23 @@ fn world_with(tag: &str, role: &str, grant: bool, hobi: &str, suga: &str) -> Wor
 }
 
 fn world_in(tag: &str, role: &str, roles: &str, hobi: &str, suga: &str) -> World {
+    world_of(
+        tag,
+        role,
+        roles,
+        &[("hobi", HOBI_UID, hobi), ("suga", SUGA_UID, suga)],
+    )
+}
+
+fn uid_of(agent: &str) -> u32 {
+    match agent {
+        "hobi" => HOBI_UID,
+        "jin" => JIN_UID,
+        _ => SUGA_UID,
+    }
+}
+
+fn world_of(tag: &str, role: &str, roles: &str, agents: &[(&str, u32, &str)]) -> World {
     let dir = std::env::temp_dir().join(format!("task628_{tag}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -148,7 +166,7 @@ fn world_in(tag: &str, role: &str, roles: &str, hobi: &str, suga: &str) -> World
     let agents_dir = root.join(maknae_config::AGENTS_DIR);
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::set_permissions(&agents_dir, std::fs::Permissions::from_mode(0o750)).unwrap();
-    for (id, uid, policy) in [("hobi", HOBI_UID, hobi), ("suga", SUGA_UID, suga)] {
+    for &(id, uid, policy) in agents {
         let d = agents_dir.join(id);
         std::fs::create_dir_all(&d).unwrap();
         std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o750)).unwrap();
@@ -180,6 +198,7 @@ fn world_in(tag: &str, role: &str, roles: &str, hobi: &str, suga: &str) -> World
             let name = match uid {
                 HOBI_UID => "hobi-svc",
                 SUGA_UID => "suga-svc",
+                JIN_UID => "jin-svc",
                 _ => return Ok(None),
             };
             Ok(Some(maknae_io::HostAccount {
@@ -276,7 +295,7 @@ impl World {
         dir: Option<&std::path::Path>,
     ) -> Vec<u8> {
         let _shared = STORE.read().await;
-        let uid = if agent == "hobi" { HOBI_UID } else { SUGA_UID };
+        let uid = uid_of(agent);
         let mut session = maknae_kernel::SessionRecord::for_test(uid, Some(format!("{agent}-svc")))
             .with_session_id(629);
         session.admission = maknae_kernel::Admission::EnrolledAgent;
@@ -515,7 +534,7 @@ impl World {
     }
 
     fn mine(&self, agent: &str) -> TaskId {
-        let uid = if agent == "hobi" { HOBI_UID } else { SUGA_UID };
+        let uid = uid_of(agent);
         self.insert(agent, uid, Tasker::Uid(self.me))
     }
 
@@ -608,7 +627,7 @@ fn closes(due: &[Due]) -> Vec<(TaskId, TaskClose)> {
     due.iter()
         .filter_map(|d| match d.why {
             DueFor::Close(close) => Some((d.task, close)),
-            DueFor::Expiry | DueFor::Hold(_) => None,
+            DueFor::Expiry | DueFor::Hold(_) | DueFor::Orphaned => None,
         })
         .collect()
 }
@@ -628,6 +647,7 @@ fn collect(agent: &str, after: Option<u64>) -> Verb {
     Verb::TaskCollect {
         agent: agent.into(),
         after: after.map(TaskCursor::from_seq),
+        task: None,
     }
 }
 
@@ -1464,7 +1484,6 @@ async fn a_sub_tasks_report_is_collected_by_the_submitting_agent() {
         format!("tasks/users/{}", w.me),
         "the root person's partition"
     );
-    w.agent_reports("hobi", &parent, "parent done").await;
     w.agent_reports("suga", &sub, "sentinel-628-sub").await;
     assert!(
         reports(w.ask(collect("suga", None)).await)
@@ -1472,7 +1491,13 @@ async fn a_sub_tasks_report_is_collected_by_the_submitting_agent() {
             .is_empty(),
         "the person did not submit the sub-task"
     );
-    let page = reports(w.agent("hobi", collect("suga", None), None).await);
+    assert!(
+        reports(w.agent("hobi", collect("suga", None), None).await)
+            .entries
+            .is_empty(),
+        "an uncited collect reaches only tasks given with no parent"
+    );
+    let page = reports(w.agent("hobi", collect("suga", None), Some(parent)).await);
     assert_eq!(report_ids(&page), vec![sub]);
     assert_eq!(&**page.entries[0].text.0, "sentinel-628-sub");
 }
@@ -2091,14 +2116,21 @@ async fn the_submitting_agent_can_stop_and_add_to_its_sub_task() {
         unauthorized(&w.ask(Verb::TaskStop { task: r(&sub) }).await),
         "the person is not the sub-task's tasker"
     );
+    assert!(
+        unauthorized(
+            &w.agent("hobi", Verb::TaskStatus { task: r(&sub) }, None)
+                .await
+        ),
+        "an uncited status does not reach a sub-task"
+    );
     let status = w
-        .agent("hobi", Verb::TaskStatus { task: r(&sub) }, None)
+        .agent("hobi", Verb::TaskStatus { task: r(&sub) }, Some(parent))
         .await;
     assert!(
         matches!(status, RespResult::Ok(Payload::TaskState(v)) if v.state == TaskState::Working)
     );
     let stopped = w
-        .agent("hobi", Verb::TaskStop { task: r(&sub) }, None)
+        .agent("hobi", Verb::TaskStop { task: r(&sub) }, Some(parent))
         .await;
     assert!(
         matches!(&stopped, RespResult::Ok(Payload::TaskAcknowledged(v)) if v.close == Some(TaskClose::Stopped)),
@@ -2108,17 +2140,22 @@ async fn the_submitting_agent_can_stop_and_add_to_its_sub_task() {
         w.beat("suga", 1).await,
         RespResult::Ok(Payload::TaskState(v)) if v.close == Some(TaskClose::Stopped)
     ));
-    w.ask(Verb::TaskStop { task: r(&parent) }).await;
-    assert_eq!(
-        w.store().record(&sub).unwrap().close,
-        Some(TaskClose::Stopped),
-        "the parent's close changes nothing in the sub-task"
-    );
-    let page = reports(w.agent("hobi", collect("suga", None), None).await);
+    let page = reports(w.agent("hobi", collect("suga", None), Some(parent)).await);
     assert_eq!(
         report_ids(&page),
         vec![sub],
-        "held for the submitting agent"
+        "held for the submitting agent under its parent"
+    );
+    w.ask(Verb::TaskStop { task: r(&parent) }).await;
+    let said = w.store().sweep();
+    assert!(
+        said.iter()
+            .any(|d| d.task == sub && d.parent == Some(parent) && d.why == DueFor::Orphaned),
+        "{said:?}"
+    );
+    assert!(
+        w.store().record(&sub).is_none(),
+        "once its parent ends, no tasker can collect the stop notice, and it is removed"
     );
 }
 
@@ -3354,4 +3391,404 @@ async fn an_agents_sealed_key_opens_only_on_the_path_the_kernel_admits_for_that_
         &admit(maknae_kernel::KeyOwner::User(Some("hobi"))),
         "c-629"
     ));
+}
+
+const ROLES_TASK: &str = "roles:\n  user:\n    allow: [\"session.task\"]\n";
+
+/// An agent policy granting `session.task`, tasked by the agents named.
+fn tasks_and_tasked_by(taskers: &[&str]) -> String {
+    let listed: Vec<String> = taskers.iter().map(|a| format!("\"agent:{a}\"")).collect();
+    format!(
+        "schema_version: 1\nactions:\n  allow: [\"session.task\"]\ntaskers: [{}]\n",
+        listed.join(", ")
+    )
+}
+
+/// hobi works for the person and tasks jin; jin tasks suga; suga takes jin's tasks.
+fn chain_world(tag: &str) -> World {
+    let (jin, suga) = (
+        tasks_and_tasked_by(&["hobi"]),
+        tasks_and_tasked_by(&["jin"]),
+    );
+    world_of(
+        tag,
+        "user",
+        ROLES_TASK,
+        &[
+            ("hobi", HOBI_UID, GRANTED),
+            ("suga", SUGA_UID, &suga),
+            ("jin", JIN_UID, &jin),
+        ],
+    )
+}
+
+fn everyone() -> FixedEnrollment {
+    only(&[("hobi", HOBI_UID), ("suga", SUGA_UID), ("jin", JIN_UID)])
+}
+
+fn hobis() -> Tasker {
+    Tasker::Agent {
+        agent: "hobi".into(),
+        uid: HOBI_UID,
+    }
+}
+
+impl World {
+    /// `by`'s submission to `target`, citing `under`.
+    async fn give(&self, by: &str, target: &str, under: TaskId) -> TaskId {
+        let records = Records::new(0);
+        match self
+            .agent_with(by, submit(target, "sub"), Some(under), &records)
+            .await
+        {
+            Some(RespResult::Ok(Payload::TaskAccepted(v))) => v.task.to_id(),
+            other => panic!("{by} -> {target}: {other:?} {:?}", reasons(&records)),
+        }
+    }
+
+    /// hobi working the person's T1, and jin's S1 given under it.
+    async fn chain(&self) -> (TaskId, TaskId) {
+        let t1 = self.mine("hobi");
+        self.working(&t1);
+        let s1 = self.give("hobi", "jin", t1).await;
+        (t1, s1)
+    }
+
+    async fn stop_as_person(&self, id: &TaskId) {
+        let stopped = self.ask(Verb::TaskStop { task: r(id) }).await;
+        assert!(
+            matches!(stopped, RespResult::Ok(Payload::TaskAcknowledged(_))),
+            "{stopped:?}"
+        );
+    }
+}
+
+fn parent_ended(said: &[Due], sub: TaskId, parent: TaskId) -> bool {
+    said.iter().any(|d| {
+        d.task == sub
+            && d.parent == Some(parent)
+            && d.why == DueFor::Close(TaskClose::ParentEnded)
+            && d.tasker == hobis()
+    })
+}
+
+#[tokio::test]
+async fn a_sub_task_is_closed_parent_ended_however_its_parent_stops_working() {
+    for ending in [
+        "stopped",
+        "reported",
+        "restarted",
+        "lapsed",
+        "deenrolled",
+        "released",
+    ] {
+        let mut w = chain_world(&format!("orphan-{ending}"));
+        let (t1, s1) = w.chain().await;
+        assert_eq!(w.claimed("jin").await, s1, "{ending}");
+        let mut said = Vec::new();
+        match ending {
+            "stopped" => w.stop_as_person(&t1).await,
+            "reported" => {
+                w.agent_reports("hobi", &t1, "done").await;
+            }
+            "restarted" => {
+                w = w.restarted();
+                assert!(matches!(
+                    w.agent_reports("hobi", &t1, "RESTARTED").await,
+                    RespResult::Ok(Payload::TaskAcknowledged(_))
+                ));
+            }
+            "lapsed" => {
+                let lease = CLAIM_LEASE.as_secs() as i64;
+                w.clock.set(T0 + lease / 2);
+                follow_ups(w.beat("jin", 0).await);
+                w.clock.set(T0 + lease + 1);
+            }
+            "deenrolled" => {
+                said = w
+                    .store()
+                    .retain_enrolled(&only(&[("suga", SUGA_UID), ("jin", JIN_UID)]));
+            }
+            "released" => {
+                w.store().mark_unenrolled(&maknae_kernel::Containing(
+                    everyone(),
+                    [HOBI_UID].into_iter().collect(),
+                ));
+                w.store().sweep();
+                assert_eq!(w.store().record(&s1).unwrap().state, TaskState::Held);
+                w.store().release(&t1, &everyone()).unwrap();
+                assert_eq!(w.store().record(&t1).unwrap().state, TaskState::Queued);
+                assert!(
+                    w.store().sweep().is_empty(),
+                    "a held sub-task stays held under an ended parent"
+                );
+                w.store().release(&s1, &everyone()).unwrap();
+                assert_eq!(
+                    w.claim("jin").await.map(|(t, _)| t.task.task_id),
+                    None,
+                    "a released sub-task under an ended parent is never handed out"
+                );
+            }
+            _ => unreachable!(),
+        }
+        said.extend(w.store().sweep());
+        assert!(parent_ended(&said, s1, t1), "{ending}: {said:?}");
+        assert_eq!(
+            said.iter().filter(|d| d.task == s1).count(),
+            1,
+            "{ending}: one close, never a collectable record first: {said:?}"
+        );
+        assert!(w.store().record(&s1).is_none(), "{ending}");
+        assert!(
+            w.store().holdings(&hobis()).is_empty(),
+            "{ending}: hobi holds no record"
+        );
+        assert!(w.store().sweep().is_empty(), "{ending}: closed once");
+    }
+}
+
+#[tokio::test]
+async fn a_shutdown_stop_then_a_restarted_parent_leaves_hobi_no_record() {
+    let w = chain_world("orphan-shutdown");
+    let (t1, s1) = w.chain().await;
+    assert_eq!(w.claimed("jin").await, s1);
+    let stopped = w
+        .agent("hobi", Verb::TaskStop { task: r(&s1) }, Some(t1))
+        .await;
+    assert!(
+        matches!(&stopped, RespResult::Ok(Payload::TaskAcknowledged(v)) if v.close == Some(TaskClose::Stopped)),
+        "{stopped:?}"
+    );
+    let w = w.restarted();
+    w.agent_reports("hobi", &t1, "RESTARTED").await;
+    let said = w.store().sweep();
+    assert!(
+        said.iter()
+            .any(|d| d.task == s1 && d.parent == Some(t1) && d.why == DueFor::Orphaned),
+        "{said:?}"
+    );
+    assert!(w.store().holdings(&hobis()).is_empty());
+    assert!(
+        w.restarted().store().record(&s1).is_none(),
+        "gone from disk"
+    );
+}
+
+#[tokio::test]
+async fn a_working_orphan_is_refused_its_next_cited_request_before_any_sweep() {
+    let w = chain_world("orphan-cite");
+    let (t1, s1) = w.chain().await;
+    assert_eq!(w.claimed("jin").await, s1);
+    w.stop_as_person(&t1).await;
+    let read = Verb::Read {
+        path: "/etc/hostname".into(),
+        conversation: None,
+        page: None,
+    };
+    assert!(w.cannot_cite("jin", read, s1).await);
+    assert!(
+        !matches!(
+            w.beat("jin", 0).await,
+            RespResult::Ok(Payload::TaskFollowUps(_))
+        ),
+        "its heartbeat no longer runs it"
+    );
+}
+
+#[tokio::test]
+async fn a_close_left_by_a_crash_before_the_sweep_is_made_on_the_first_sweep() {
+    let w = chain_world("orphan-crash");
+    let (t1, s1) = w.chain().await;
+    assert_eq!(w.claimed("jin").await, s1);
+    w.stop_as_person(&t1).await;
+    let w = w.restarted();
+    assert!(parent_ended(&w.store().sweep(), s1, t1));
+    assert!(w.store().record(&s1).is_none());
+}
+
+#[tokio::test]
+async fn a_grandchild_closes_after_its_parent() {
+    let w = chain_world("orphan-grandchild");
+    let (t1, s1) = w.chain().await;
+    assert_eq!(w.claimed("jin").await, s1);
+    let g1 = w.give("jin", "suga", s1).await;
+    w.stop_as_person(&t1).await;
+    let said = w.store().sweep();
+    assert!(parent_ended(&said, s1, t1), "{said:?}");
+    assert!(
+        said.iter().any(|d| d.task == g1
+            && d.parent == Some(s1)
+            && d.why == DueFor::Close(TaskClose::ParentEnded)),
+        "{said:?}"
+    );
+    assert!(w.store().record(&g1).is_none());
+}
+
+#[tokio::test]
+async fn a_queued_orphan_is_never_delivered() {
+    let w = chain_world("orphan-queued");
+    let (t1, s1) = w.chain().await;
+    w.stop_as_person(&t1).await;
+    assert_eq!(w.claim("jin").await.map(|(t, _)| t.task.task_id), None);
+    assert!(parent_ended(&w.store().sweep(), s1, t1));
+}
+
+#[tokio::test]
+async fn an_agent_taskers_verbs_reach_only_the_sub_tasks_of_the_task_it_cites() {
+    let w = chain_world("scoped");
+    let (t1, s1) = w.chain().await;
+    let t9 = w.anothers("hobi");
+    w.working(&t9);
+    assert_eq!(w.claimed("jin").await, s1);
+    w.agent_reports("jin", &s1, "sentinel-609-scoped").await;
+    let rseq = w.store().record(&s1).unwrap().rseq.unwrap();
+    for under in [Some(t9), None] {
+        for verb in [
+            Verb::TaskStatus { task: r(&s1) },
+            Verb::TaskStop { task: r(&s1) },
+            Verb::TaskDrop { task: r(&s1) },
+            Verb::TaskAdd {
+                task: r(&s1),
+                text: secret("more"),
+            },
+        ] {
+            let got = w.agent("hobi", verb.clone(), under).await;
+            assert!(unauthorized(&got), "{under:?} {verb:?}: {got:?}");
+        }
+        assert!(ids(&page(w.agent("hobi", list("jin", None), under).await)).is_empty());
+        let acked = reports(w.agent("hobi", collect("jin", Some(rseq)), under).await);
+        assert!(acked.entries.is_empty(), "{under:?}");
+    }
+    let got = reports(w.agent("hobi", collect("jin", None), Some(t1)).await);
+    assert_eq!(report_ids(&got), vec![s1], "the report survives");
+    assert_eq!(&**got.entries[0].text.0, "sentinel-609-scoped");
+    assert_eq!(
+        ids(&page(w.agent("hobi", list("jin", None), Some(t1)).await)),
+        vec![s1]
+    );
+    assert!(matches!(
+        w.agent("hobi", Verb::TaskStatus { task: r(&s1) }, Some(t1))
+            .await,
+        RespResult::Ok(Payload::TaskState(_))
+    ));
+    assert_eq!(
+        ids(&page(w.ask(list("hobi", None)).await)),
+        vec![t1],
+        "the person's own view is unchanged"
+    );
+}
+
+fn collect_one(agent: &str, after: Option<u64>, task: TaskId) -> Verb {
+    Verb::TaskCollect {
+        agent: agent.into(),
+        after: after.map(TaskCursor::from_seq),
+        task: Some(r(&task)),
+    }
+}
+
+#[tokio::test]
+async fn a_collect_naming_a_task_returns_and_acknowledges_only_that_task() {
+    let w = chain_world("collect-one");
+    let (t1, a) = w.chain().await;
+    let b = w.give("hobi", "jin", t1).await;
+    assert_eq!(w.claimed("jin").await, a);
+    w.agent_reports("jin", &a, "sentinel-609-a").await;
+    assert_eq!(w.claimed("jin").await, b);
+    w.agent_reports("jin", &b, "sentinel-609-b").await;
+    let only_b = reports(w.agent("hobi", collect_one("jin", None, b), Some(t1)).await);
+    assert_eq!(report_ids(&only_b), vec![b]);
+    let upto = w.store().record(&b).unwrap().rseq.unwrap();
+    let after = reports(
+        w.agent("hobi", collect_one("jin", Some(upto), b), Some(t1))
+            .await,
+    );
+    assert!(after.entries.is_empty());
+    assert!(w.store().record(&b).is_none(), "b acknowledged");
+    assert!(
+        w.store().record(&a).is_some(),
+        "a, below the cursor, is not acknowledged"
+    );
+    let rest = reports(w.agent("hobi", collect("jin", None), Some(t1)).await);
+    assert_eq!(report_ids(&rest), vec![a]);
+}
+
+const WAITS_ON_HOBI: &str = "deny task chain already waits on agent hobi";
+
+/// hobi and jin each grant `session.task` and take each other's tasks, and hobi its own.
+fn crossed_world(tag: &str) -> World {
+    let (hobi, jin, suga) = (
+        tasks_and_tasked_by(&["hobi", "jin"]),
+        tasks_and_tasked_by(&["hobi"]),
+        tasks_and_tasked_by(&["jin"]),
+    );
+    world_of(
+        tag,
+        "user",
+        ROLES_TASK,
+        &[
+            ("hobi", HOBI_UID, &hobi),
+            ("suga", SUGA_UID, &suga),
+            ("jin", JIN_UID, &jin),
+        ],
+    )
+}
+
+impl World {
+    /// `by`'s submission to `target` under `under`, refused, and the trail's reasons.
+    async fn refused_as(&self, by: &str, target: &str, under: TaskId) -> Vec<String> {
+        self.refused_citing(by, target, Some(under)).await
+    }
+
+    async fn refused_citing(&self, by: &str, target: &str, under: Option<TaskId>) -> Vec<String> {
+        let records = Records::new(0);
+        let got = self
+            .agent_with(by, submit(target, "sub"), under, &records)
+            .await
+            .unwrap();
+        assert!(unauthorized(&got), "{by} -> {target}: {got:?}");
+        reasons(&records)
+    }
+}
+
+#[tokio::test]
+async fn an_agent_cannot_task_itself() {
+    let w = crossed_world("waits-self");
+    let said = w.refused_citing("hobi", "hobi", None).await;
+    assert!(said.iter().any(|r| r == WAITS_ON_HOBI), "{said:?}");
+    let t1 = w.mine("hobi");
+    w.working(&t1);
+    let said = w.refused_as("hobi", "hobi", t1).await;
+    assert!(said.iter().any(|r| r == WAITS_ON_HOBI), "{said:?}");
+}
+
+#[tokio::test]
+async fn a_sub_task_cannot_task_an_agent_up_its_chain() {
+    let w = crossed_world("waits-chain");
+    let (_, s1) = w.chain().await;
+    assert_eq!(w.claimed("jin").await, s1);
+    let said = w.refused_as("jin", "hobi", s1).await;
+    assert!(said.iter().any(|r| r == WAITS_ON_HOBI), "{said:?}");
+    assert!(w.store().queue(&hobi()).is_empty());
+}
+
+#[tokio::test]
+async fn two_chains_cannot_wait_on_each_other() {
+    let w = crossed_world("waits-crossed");
+    let t1 = w.mine("hobi");
+    w.working(&t1);
+    let t3 = w.mine("jin");
+    w.working(&t3);
+    let sa = w.give("hobi", "jin", t1).await;
+    assert_eq!(w.store().record(&sa).unwrap().state, TaskState::Queued);
+    let said = w.refused_as("jin", "hobi", t3).await;
+    assert!(said.iter().any(|r| r == WAITS_ON_HOBI), "{said:?}");
+}
+
+#[tokio::test]
+async fn a_chain_that_waits_on_no_one_behind_it_is_taken() {
+    let w = crossed_world("waits-none");
+    let (_t1, s1) = w.chain().await;
+    assert_eq!(w.claimed("jin").await, s1);
+    let g1 = w.give("jin", "suga", s1).await;
+    assert_eq!(w.store().record(&g1).unwrap().parent, Some(s1));
 }
