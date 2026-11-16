@@ -603,6 +603,8 @@ pub enum Verb {
     FsDelete {
         path: String,
         recursive: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conversation: Option<String>,
     },
     /// Relocate content to a new path. A mutation, and a laundering route if
     /// decided against the source alone: deny matching is lexical over paths, so
@@ -641,6 +643,8 @@ pub enum Verb {
         /// validates every component and decides paths from the descriptor's
         /// kernel-reported location; this sequence supplies no OS authority.
         components: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conversation: Option<String>,
     },
     /// Create a symbolic or hard link. A mutation and an aliasing primitive — the
     /// exact class `maknae-io` exists to defend against, and a second laundering
@@ -2176,6 +2180,39 @@ mod tests {
         assert_eq!(class_of(&stat(None).verb), FrameClass::Attempt);
     }
 
+    #[test]
+    fn a_mkdirs_and_a_deletes_conversation_is_omitted_when_none_and_round_trips_when_set() {
+        let request = |verb: Verb| Request {
+            task: None,
+            protocol_version: PROTOCOL_VERSION,
+            verb,
+        };
+        let mkdir = |conversation: Option<&str>| {
+            request(Verb::FsMkdir {
+                path: "/p/q".into(),
+                parents: true,
+                components: vec!["q".into()],
+                conversation: conversation.map(str::to_string),
+            })
+        };
+        let delete = |conversation: Option<&str>| {
+            request(Verb::FsDelete {
+                path: "/p/q".into(),
+                recursive: true,
+                conversation: conversation.map(str::to_string),
+            })
+        };
+        for build in [&mkdir as &dyn Fn(Option<&str>) -> Request, &delete] {
+            let none = encode_request(&build(None)).unwrap();
+            assert!(!none.windows(12).any(|w| w == b"conversation"));
+            assert_eq!(decode_request(&none).unwrap(), build(None));
+            let some = encode_request(&build(Some("conv-660"))).unwrap();
+            assert!(some.windows(12).any(|w| w == b"conversation"));
+            assert_eq!(decode_request(&some).unwrap(), build(Some("conv-660")));
+            assert_eq!(class_of(&build(None).verb), FrameClass::Attempt);
+        }
+    }
+
     fn text(s: &str) -> ContentBlock {
         ContentBlock::Text {
             text: SecretText(zeroize::Zeroizing::new(s.to_string())),
@@ -2439,11 +2476,13 @@ mod tests {
             Verb::FsDelete {
                 path: "/home/u/projects/x".into(),
                 recursive: true,
+                conversation: None,
             },
             Verb::FsMkdir {
                 path: "/home/u/projects/a/b".into(),
                 parents: true,
                 components: vec!["a".into(), "b".into()],
+                conversation: None,
             },
         ];
         for verb in verbs {
@@ -3774,6 +3813,7 @@ mod tests {
                     Verb::FsDelete {
                         path: "/p".into(),
                         recursive: false,
+                        conversation: None,
                     },
                     FrameClass::Attempt,
                 ),
@@ -3798,6 +3838,7 @@ mod tests {
                         path: "/p".into(),
                         parents: false,
                         components: vec![],
+                        conversation: None,
                     },
                     FrameClass::Attempt,
                 ),
@@ -3872,6 +3913,7 @@ mod tests {
                     path: path.clone(),
                     parents: true,
                     components,
+                    conversation: Some("c".repeat(MAX_CONVERSATION_ID_BYTES)),
                 },
                 Verb::FsWrite {
                     path,

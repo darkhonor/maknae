@@ -305,7 +305,7 @@ mod tests {
             assert!(denied(&r), "{op:?}");
         }
         for op in [FsOperation::DeleteEntry, FsOperation::DeleteTree] {
-            for action in ["fs.write", "fs.mkdir", "fs.list"] {
+            for action in ["fs.write", "fs.mkdir", "fs.list", "fs.read"] {
                 let mut r = agent(action, Some("/home/hobi-svc"), MINE);
                 r.context
                     .0

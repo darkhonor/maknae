@@ -318,7 +318,12 @@ impl<K: KeySupply, D: Dial> LoopPlane<K, D> {
     }
 
     /// The directory is created mode 0700, as every subject-side mkdir is.
-    pub async fn mkdir(&mut self, path: &str, parents: bool) -> WriteOutcome {
+    pub async fn mkdir(
+        &mut self,
+        path: &str,
+        parents: bool,
+        conversation: Option<&str>,
+    ) -> WriteOutcome {
         let diagnostics = &mut self.diagnostics;
         write_outcome(
             self.link
@@ -327,6 +332,7 @@ impl<K: KeySupply, D: Dial> LoopPlane<K, D> {
                         path: path.to_string(),
                         parents,
                         components: Vec::new(),
+                        conversation: conversation.map(str::to_string),
                     },
                     None,
                     crate::mutation::WriteCheck::Unchecked,
@@ -674,7 +680,9 @@ mod tests {
         let _ = plane
             .write("c", &format!("{d}/new"), b"x", ReadBasis::Unread)
             .await;
-        let _ = plane.mkdir(&format!("{d}/tasks/users/1000"), true).await;
+        let _ = plane
+            .mkdir(&format!("{d}/tasks/users/1000"), true, None)
+            .await;
         let _ = plane.list("c", d, None).await;
         let _ = plane.stat("c", d).await;
         let _ = plane.prompt("c", &user_turn()).await;

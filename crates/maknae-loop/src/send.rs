@@ -918,11 +918,13 @@ mod tests {
             maknae_proto::Verb::FsDelete {
                 path: p(),
                 recursive: false,
+                conversation: None,
             },
             maknae_proto::Verb::FsMkdir {
                 path: p(),
                 parents: false,
                 components: vec![],
+                conversation: None,
             },
         ] {
             let sent = before_grant(

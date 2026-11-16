@@ -331,6 +331,19 @@ mod tests {
     }
 
     #[test]
+    fn a_read_twin_of_a_tree_delete_is_refused_by_an_entry_beneath_its_root() {
+        let host = list(&["/home/u/keys-660/id"]);
+        let op = SensitiveAuthorizer::new(&host);
+        let root = || req("fs.read", Some("/home/u"), Some("/home/u"));
+        assert_eq!(op.decide(&root()), NA);
+        assert_eq!(op.decide(&with_op(root(), FsOperation::Read)), NA);
+        assert!(matches!(
+            op.decide(&with_op(root(), FsOperation::DeleteTree)),
+            Verdict::Deny { .. }
+        ));
+    }
+
+    #[test]
     fn a_personal_match_denies_from_the_context_set() {
         let host = list(&["/etc/shadow"]);
         let op = SensitiveAuthorizer::new(&host);

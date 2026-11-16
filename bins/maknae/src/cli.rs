@@ -508,11 +508,16 @@ impl From<Verb> for maknae_proto::Verb {
                 mode: maknae_proto::WriteMode::Existing,
                 conversation: None,
             },
-            Verb::Delete { path, recursive } => maknae_proto::Verb::FsDelete { path, recursive },
+            Verb::Delete { path, recursive } => maknae_proto::Verb::FsDelete {
+                path,
+                recursive,
+                conversation: None,
+            },
             Verb::Mkdir { path, parents } => maknae_proto::Verb::FsMkdir {
                 path,
                 parents,
                 components: Vec::new(),
+                conversation: None,
             },
             Verb::AdminStatus => maknae_proto::Verb::AdminStatus,
             Verb::AdminConfigShow => maknae_proto::Verb::AdminConfigShow,

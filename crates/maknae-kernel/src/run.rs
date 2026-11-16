@@ -1189,30 +1189,13 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         }
         .err()
         .map(|reason| ("prompt", reason)),
-        Verb::FsWrite {
-            conversation: Some(conversation),
-            ..
-        } if !maknae_proto::conversation_id_is_acceptable(conversation) => Some((
-            "write",
-            "conversation identifier not acceptable".to_string(),
-        )),
-        Verb::Read {
-            conversation: Some(conversation),
-            ..
-        } if !maknae_proto::conversation_id_is_acceptable(conversation) => {
-            Some(("read", "conversation identifier not acceptable".to_string()))
-        }
-        Verb::FsStat {
-            conversation: Some(conversation),
-            ..
-        } if !maknae_proto::conversation_id_is_acceptable(conversation) => {
-            Some(("stat", "conversation identifier not acceptable".to_string()))
-        }
-        Verb::FsList {
-            conversation: Some(conversation),
-            ..
-        } if !maknae_proto::conversation_id_is_acceptable(conversation) => {
-            Some(("list", "conversation identifier not acceptable".to_string()))
+        verb if matches!(
+            crate::mutation::citing(verb),
+            Some((_, Some(c))) if !maknae_proto::conversation_id_is_acceptable(c)
+        ) =>
+        {
+            crate::mutation::citing(verb)
+                .map(|(noun, _)| (noun, "conversation identifier not acceptable".to_string()))
         }
         Verb::FsList {
             after: Some(after), ..
@@ -1374,12 +1357,8 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         );
         // #275: the peer identity, bounded and audit-only.
         record.subject.user = admitted_user(peer_user.as_deref());
-        if let Verb::FsWrite { conversation, .. }
-        | Verb::Read { conversation, .. }
-        | Verb::FsStat { conversation, .. }
-        | Verb::FsList { conversation, .. } = &request.verb
-        {
-            record.conversation.clone_from(conversation);
+        if let Some((_, conversation)) = crate::mutation::citing(&request.verb) {
+            record.conversation = conversation.map(str::to_string);
         }
         crate::mutation::handle(
             &mut stream,

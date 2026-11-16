@@ -208,8 +208,8 @@ impl<K: KeySupply, R: PersonaRead, D: Dial> TaskPlane for AgentPlane<K, R, D> {
     fn cite(&mut self, task: Option<TaskId>) {
         self.plane.cite(task);
     }
-    async fn mkdir(&mut self, path: &str, parents: bool) -> WriteOutcome {
-        self.plane.mkdir(path, parents).await
+    async fn make_partition_dir(&mut self, path: &str) -> WriteOutcome {
+        self.plane.mkdir(path, true, None).await
     }
     fn verify(&mut self, signed: &Bytes) -> Result<SignedTask, Unverified> {
         self.trust.verify(signed, std::time::SystemTime::now())
@@ -346,7 +346,9 @@ mod tests {
         let _ = plane
             .report(SecretText(Zeroizing::new("r".into())), None)
             .await;
-        let _ = plane.mkdir(&format!("{d}/tasks/users/1000"), true).await;
+        let _ = plane
+            .make_partition_dir(&format!("{d}/tasks/users/1000"))
+            .await;
         let _ = plane.open(&dir, &[]).await;
         let _ = plane.prompt("c", &turn).await;
         let _ = plane

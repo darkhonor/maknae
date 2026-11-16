@@ -1186,6 +1186,7 @@ fn kernel_decided(req: &SecRequest) -> Verdict {
 /// testimony only; it does not select a different path permission set.
 enum FsScope {
     Read,
+    ReadSubtree,
     Write,
     WriteSubtree,
 }
@@ -1212,6 +1213,7 @@ fn attempt_scope(req: &SecRequest) -> Result<FsScope, Verdict> {
         | ("fs.delete", FsOperation::DeleteEntry)
         | ("fs.mkdir", FsOperation::Mkdir) => FsScope::Write,
         ("fs.delete", FsOperation::DeleteTree) => FsScope::WriteSubtree,
+        ("fs.read", FsOperation::DeleteTree) => FsScope::ReadSubtree,
         _ => {
             return Err(refuse(
                 "filesystem attempt preparation does not match action",
@@ -1270,6 +1272,7 @@ fn decide_fs(
             lp.policy
                 .evaluate3_floored(set, &maknae_config::Request::Write(path), home)
         }
+        FsScope::ReadSubtree => lp.policy.evaluate_read_subtree_floored(set, path, home),
         FsScope::WriteSubtree => lp.policy.evaluate_write_subtree_floored(set, path, home),
     };
     let Ok(matched) = matched else {
@@ -1459,6 +1462,53 @@ mod tests {
                     "Read authority must not imply Write"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_read_twin_of_a_tree_delete_is_decided_over_the_whole_subtree() {
+        for role in ["admin", "user"] {
+            let mut lp = lp_with(
+                Some(&[(role, &["operator"])]),
+                &[("operator", OPERATOR_UID)],
+            );
+            lp.policy = maknae_config::parse_authz("schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Write(~/projects/**)\"]\n  deny: [\"Read(~/projects/hidden-660/**)\"]\n").unwrap();
+            let decide = |op: &str, path: &str| {
+                let mut req = read_req(Some("local"), None);
+                req.context
+                    .0
+                    .insert("fs_operation", AttrValue::Str(op.into()));
+                req.resource
+                    .0
+                    .insert(RESOURCE_PATH, AttrValue::Str(path.into()));
+                decide_loaded(&lp, &principal(), &req)
+            };
+            let refused = decide("delete-tree", "/home/operator/projects");
+            assert!(
+                matches!(refused, Verdict::Deny { ref reason } if reason.contains("Read(~/projects/hidden-660/**)")),
+                "{role}: {refused:?}"
+            );
+            assert!(
+                matches!(
+                    decide("read", "/home/operator/projects"),
+                    Verdict::Permit { .. }
+                ),
+                "{role}: a point read of the root is not the subtree"
+            );
+            assert!(
+                matches!(
+                    decide("delete-tree", "/home/operator/projects/open-660"),
+                    Verdict::Permit { .. }
+                ),
+                "{role}"
+            );
+            assert!(
+                matches!(
+                    decide("delete-entry", "/home/operator/projects/open-660"),
+                    Verdict::Deny { ref reason } if reason == "filesystem attempt preparation does not match action"
+                ),
+                "{role}"
+            );
         }
     }
 

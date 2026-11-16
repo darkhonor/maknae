@@ -174,14 +174,20 @@ fn stat_kind(kind: maknae_io::FileKind) -> maknae_proto::StatKind {
         maknae_io::FileKind::Other => maknae_proto::StatKind::Other,
     }
 }
+pub(crate) fn citing(verb: &Verb) -> Option<(&'static str, Option<&str>)> {
+    let (noun, conversation) = match verb {
+        Verb::FsWrite { conversation, .. } => ("write", conversation),
+        Verb::Read { conversation, .. } => ("read", conversation),
+        Verb::FsStat { conversation, .. } => ("stat", conversation),
+        Verb::FsList { conversation, .. } => ("list", conversation),
+        Verb::FsMkdir { conversation, .. } => ("mkdir", conversation),
+        Verb::FsDelete { conversation, .. } => ("delete", conversation),
+        _ => return None,
+    };
+    Some((noun, conversation.as_deref()))
+}
 fn cited(verb: &Verb) -> Option<&str> {
-    match verb {
-        Verb::FsWrite { conversation, .. }
-        | Verb::Read { conversation, .. }
-        | Verb::FsStat { conversation, .. }
-        | Verb::FsList { conversation, .. } => conversation.as_deref(),
-        _ => None,
-    }
+    citing(verb).and_then(|(_, conversation)| conversation)
 }
 pub(crate) fn normal(component: &str) -> bool {
     !component.is_empty()
@@ -386,18 +392,34 @@ fn prepare(
 type DecidedBy = (Option<&'static str>, Option<maknae_security::RuleCitation>);
 type AuthorizeErr = (String, String, DecidedBy);
 
+#[cfg(test)]
 const WRITE_NEEDS_READ: &str = "fs.write needs fs.read: ";
 
-/// The `fs.read` twin of a write's request (ADR-0034 decision 7): a write is permitted
-/// only when a read of the same path would be.
+/// The `fs.read` twin of a request (ADR-0034 decision 7): it is permitted only when a
+/// read of the same path would be. A tree delete's twin keeps its operation, so the
+/// read is decided over the whole subtree.
 pub(crate) fn read_of(write: &maknae_security::Request) -> maknae_security::Request {
     let mut read = write.clone();
     read.action = maknae_security::Action("fs.read".into());
-    read.context.0.insert(
-        maknae_security::CONTEXT_FS_OPERATION,
-        AttrValue::Str(FsOperation::Read.as_str().into()),
+    let tree = matches!(
+        write.context.0.get(maknae_security::CONTEXT_FS_OPERATION),
+        Some(AttrValue::Str(op)) if FsOperation::parse(op) == Some(FsOperation::DeleteTree)
     );
+    if !tree {
+        read.context.0.insert(
+            maknae_security::CONTEXT_FS_OPERATION,
+            AttrValue::Str(FsOperation::Read.as_str().into()),
+        );
+    }
     read
+}
+
+fn needs_read(verb: &Verb) -> bool {
+    match verb {
+        Verb::FsWrite { .. } => true,
+        Verb::FsMkdir { .. } | Verb::FsDelete { .. } => cited(verb).is_some(),
+        _ => false,
+    }
 }
 
 /// One file verb's request for one path, as the PDP decides it.
@@ -447,7 +469,7 @@ fn authorize<P: Authorizer>(
     personal: Option<&AttrValue>,
     stamp: &Stamp<'_>,
 ) -> Result<(DecidedBy, maknae_proto::ObjectLabel), AuthorizeErr> {
-    let with_read = matches!(verb, Verb::FsWrite { .. });
+    let with_read = needs_read(verb);
     let mut requests = Vec::new();
     for path in &prepared.paths {
         let request = path_request(verb, uid, home, facts, personal, stamp, path, prepared.kind);
@@ -476,7 +498,7 @@ fn authorize<P: Authorizer>(
             })?,
             Decision::Deny { reason } if read => {
                 return Err((
-                    format!("{WRITE_NEEDS_READ}{reason}"),
+                    format!("{} needs fs.read: {reason}", requests[i - 1].action.0),
                     path.clone(),
                     (d.role, d.rule),
                 ))
@@ -1460,6 +1482,7 @@ mod tests {
                 path: self.root.join("one/two").to_str().unwrap().into(),
                 parents,
                 components,
+                conversation: None,
             }
         }
     }
@@ -2183,7 +2206,8 @@ mod tests {
         assert!(prepare(
             Verb::FsDelete {
                 path: "/".into(),
-                recursive: false
+                recursive: false,
+                conversation: None,
             },
             Some(fx.fd()),
             &fx.root,
@@ -2193,7 +2217,8 @@ mod tests {
         assert!(prepare(
             Verb::FsDelete {
                 path: "/../x".into(),
-                recursive: false
+                recursive: false,
+                conversation: None,
             },
             Some(fx.fd()),
             &fx.root,
@@ -2301,6 +2326,101 @@ mod tests {
         .unwrap_err();
         assert!(reason.contains("Write(~/one/two)"), "{reason}");
         assert_eq!(path, prepared.paths[1]);
+    }
+    #[tokio::test]
+    async fn a_cited_mkdir_or_delete_needs_read_and_a_tree_delete_needs_it_beneath() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let pdp = fixture_pdp(&fx);
+        let policy = fx.root.join("authz.yaml");
+        let tree = fx.root.join("tree-660");
+        std::fs::create_dir_all(tree.join("hidden-660")).unwrap();
+        std::fs::write(tree.join("hidden-660/f"), b"x").unwrap();
+        std::fs::write(fx.root.join("entry-660"), b"x").unwrap();
+        let p = |name: &str| fx.root.join(name).to_str().unwrap().to_string();
+        let verbs = |conversation: Option<&str>| {
+            let conversation = conversation.map(str::to_string);
+            [
+                (
+                    Verb::FsMkdir {
+                        path: p("made-660"),
+                        parents: false,
+                        components: vec!["made-660".into()],
+                        conversation: conversation.clone(),
+                    },
+                    "fs.mkdir needs fs.read: ",
+                ),
+                (
+                    Verb::FsDelete {
+                        path: p("entry-660"),
+                        recursive: false,
+                        conversation: conversation.clone(),
+                    },
+                    "fs.delete needs fs.read: ",
+                ),
+                (
+                    Verb::FsDelete {
+                        path: p("tree-660"),
+                        recursive: true,
+                        conversation,
+                    },
+                    "fs.delete needs fs.read: ",
+                ),
+            ]
+        };
+        let decide = |verb: &Verb| {
+            let prepared = prepare(verb.clone(), Some(fx.fd()), &fx.root, Lane::Local).unwrap();
+            authorize(
+                &prepared,
+                verb,
+                fx.principal.uid,
+                Some(&fx.root),
+                &pdp,
+                "US",
+                None,
+                None,
+                &Stamp::Client,
+            )
+        };
+        let reload = |allow: &str, deny: &str| {
+            std::fs::write(
+                &policy,
+                format!("schema_version: 1\npermissions:\n  allow:\n{allow}  deny:{deny}\n"),
+            )
+            .unwrap();
+            pdp.baseline().reload_from_file().unwrap();
+        };
+        reload("    - \"Write(~/**)\"\n", " []");
+        for (verb, prefix) in verbs(Some("conv-660")) {
+            let (reason, _, _) = decide(&verb).unwrap_err();
+            assert!(reason.starts_with(prefix), "{reason}");
+        }
+        for (verb, _) in verbs(None) {
+            assert!(
+                decide(&verb).is_ok(),
+                "uncited {verb:?} is decided as before"
+            );
+        }
+        reload(
+            "    - \"Read(~/**)\"\n    - \"Write(~/**)\"\n",
+            "\n    - \"Read(~/tree-660/hidden-660/**)\"",
+        );
+        let [mkdir, entry, tree_delete] = verbs(Some("conv-660"));
+        assert!(decide(&mkdir.0).is_ok());
+        assert!(decide(&entry.0).is_ok());
+        let (reason, _, by) = decide(&tree_delete.0).unwrap_err();
+        assert!(reason.starts_with("fs.delete needs fs.read: "), "{reason}");
+        assert!(
+            reason.contains("Read(~/tree-660/hidden-660/**)"),
+            "{reason}"
+        );
+        assert_eq!(
+            by.1.expect("the deny cites its rule").key,
+            "rule:permissions:deny:0"
+        );
+        let [_, _, uncited_tree] = verbs(None);
+        assert!(decide(&uncited_tree.0).is_ok());
+        assert!(tree.join("hidden-660/f").exists());
     }
     #[tokio::test]
     async fn a_write_is_permitted_only_when_a_read_of_the_same_path_is() {
@@ -2423,6 +2543,74 @@ mod tests {
         );
         assert_eq!(owned_personal(Some(&rec), 1002), None);
         assert_eq!(owned_personal(None, 1001), None);
+    }
+    #[test]
+    fn every_verb_that_carries_a_conversation_is_cited_by_its_noun() {
+        let c = || Some("conv-660".to_string());
+        let verbs = [
+            (
+                Verb::FsWrite {
+                    path: "/p".into(),
+                    content_length: 0,
+                    mode: maknae_proto::WriteMode::Existing,
+                    conversation: c(),
+                },
+                "write",
+            ),
+            (
+                Verb::Read {
+                    path: "/p".into(),
+                    conversation: c(),
+                    page: None,
+                },
+                "read",
+            ),
+            (
+                Verb::FsStat {
+                    path: "/p".into(),
+                    conversation: c(),
+                },
+                "stat",
+            ),
+            (
+                Verb::FsList {
+                    path: "/p".into(),
+                    after: None,
+                    conversation: c(),
+                },
+                "list",
+            ),
+            (
+                Verb::FsMkdir {
+                    path: "/p".into(),
+                    parents: true,
+                    components: vec![],
+                    conversation: c(),
+                },
+                "mkdir",
+            ),
+            (
+                Verb::FsDelete {
+                    path: "/p".into(),
+                    recursive: true,
+                    conversation: c(),
+                },
+                "delete",
+            ),
+        ];
+        for (verb, noun) in &verbs {
+            assert_eq!(citing(verb), Some((*noun, Some("conv-660"))), "{noun}");
+            assert_eq!(cited(verb), Some("conv-660"), "{noun}");
+        }
+        let uncited = Verb::FsMkdir {
+            path: "/p".into(),
+            parents: true,
+            components: vec![],
+            conversation: None,
+        };
+        assert_eq!(citing(&uncited), Some(("mkdir", None)));
+        assert_eq!(cited(&uncited), None);
+        assert_eq!(citing(&Verb::Ping), None);
     }
     #[tokio::test]
     async fn the_personal_list_is_decided_on_every_path_of_the_request() {

@@ -745,6 +745,7 @@ async fn mkdir_every_prefix_is_decided_and_alias_deny_uses_verified_path() {
             path: fx.root.join("blocked/child").to_str().unwrap().into(),
             parents: true,
             components: vec!["blocked".into(), "child".into()],
+            conversation: None,
         },
     )
     .await;
@@ -826,6 +827,7 @@ async fn user_and_admin_share_write_policy_and_bad_mkdir_suffix_cannot_grant() {
                     path: fx.root.join(asked).to_str().unwrap().into(),
                     parents: true,
                     components,
+                    conversation: None,
                 },
             )
             .await;
@@ -855,6 +857,7 @@ async fn mkdir_depth_limit_grants_128_prefixes_and_refuses_129_before_intent() {
                 path: target.to_str().unwrap().into(),
                 parents: true,
                 components,
+                conversation: None,
             },
         )
         .await;
@@ -925,6 +928,7 @@ async fn noop_mkdir_success_is_client_reported_with_zero_effects() {
             path: fx.root.join("existing").to_str().unwrap().into(),
             parents: true,
             components: vec!["existing".into()],
+            conversation: None,
         },
     )
     .await;
@@ -969,6 +973,7 @@ async fn namespace_progress_does_not_extend_configured_absolute_deadline() {
     let verb = Verb::FsDelete {
         path: fx.root.join("tree").to_str().unwrap().into(),
         recursive: true,
+        conversation: None,
     };
     let (mut client, task, body) = fx.start_with_config(verb, Some(fd), records.clone(), config);
     common::write_frame(&mut client, &body).await.unwrap();
@@ -1119,6 +1124,7 @@ async fn every_client_finish_category_keeps_its_typed_origin_and_stopped_path() 
             Verb::FsDelete {
                 path: target.to_str().unwrap().into(),
                 recursive: false,
+                conversation: None,
             },
         )
         .await;
@@ -1163,6 +1169,7 @@ async fn oversized_grant_is_withheld_even_when_the_prepare_frame_fits() {
         path: asked.to_str().unwrap().into(),
         parents: true,
         components,
+        conversation: None,
     };
     let (mut client, task, body) = fx.start_with_attempt_caps(
         verb,
@@ -1499,6 +1506,7 @@ async fn single_mkdir_grants_exact_created_directory_and_success_requires_one_ef
                 path: target.to_str().unwrap().into(),
                 parents: false,
                 components: vec!["single-created-directory-sentinel".into()],
+                conversation: None,
             },
         )
         .await;
@@ -1626,6 +1634,7 @@ fn mkdir_in(target: &std::path::Path) -> Verb {
         path: target.to_str().unwrap().into(),
         parents: false,
         components: vec![target.file_name().unwrap().to_str().unwrap().into()],
+        conversation: None,
     }
 }
 
@@ -1733,6 +1742,7 @@ async fn a_second_user_deletes_a_tree_beneath_their_own_home() {
         Verb::FsDelete {
             path: target.to_str().unwrap().into(),
             recursive: true,
+            conversation: None,
         },
         &b,
     )
@@ -1757,6 +1767,7 @@ async fn a_second_user_cannot_delete_in_the_enrolled_home() {
         Verb::FsDelete {
             path: target.to_str().unwrap().into(),
             recursive: true,
+            conversation: None,
         },
         &fx.root,
     )
@@ -1787,6 +1798,7 @@ async fn a_requester_cannot_delete_their_own_home() {
                 Verb::FsDelete {
                     path: target.to_str().unwrap().into(),
                     recursive,
+                    conversation: None,
                 },
                 parent,
             )
@@ -2119,6 +2131,7 @@ async fn a_protected_file_cannot_be_written_deleted_or_created_under() {
         Verb::FsDelete {
             path: kept.to_str().unwrap().into(),
             recursive: false,
+            conversation: None,
         },
         create_in(&vault.join("new")),
         mkdir_in(&vault.join("sub")),
@@ -2132,6 +2145,7 @@ async fn a_protected_file_cannot_be_written_deleted_or_created_under() {
         Verb::FsDelete {
             path: vault.to_str().unwrap().into(),
             recursive: true,
+            conversation: None,
         },
         &outside,
     )
@@ -2267,6 +2281,7 @@ async fn the_shipped_list_permits_an_unrelated_recursive_delete() {
         Verb::FsDelete {
             path: target.to_str().unwrap().into(),
             recursive: true,
+            conversation: None,
         },
         &projects,
     )
@@ -2283,6 +2298,7 @@ async fn the_shipped_list_permits_an_unrelated_recursive_delete() {
         Verb::FsDelete {
             path: fx.root.join(".ssh").to_str().unwrap().into(),
             recursive: true,
+            conversation: None,
         },
         &fx.root,
     )
@@ -2304,6 +2320,7 @@ fn recursive_delete(target: &std::path::Path) -> Verb {
     Verb::FsDelete {
         path: target.to_str().unwrap().into(),
         recursive: true,
+        conversation: None,
     }
 }
 
@@ -2326,6 +2343,7 @@ async fn an_unarmed_write_delete_or_mkdir_of_a_protected_path_answers_protected(
         Verb::FsDelete {
             path: gone.to_str().unwrap().into(),
             recursive: false,
+            conversation: None,
         },
         mkdir_in(&gone),
     ] {
@@ -2364,6 +2382,7 @@ async fn a_delete_of_a_directory_that_could_hold_an_entry_answers_protected() {
     let entry_delete = Verb::FsDelete {
         path: keys.to_str().unwrap().into(),
         recursive: false,
+        conversation: None,
     };
     let (empty, empty_record) = second_subject_attempt(&fx, entry_delete.clone(), &fx.root).await;
     assert_protected_by(&empty, "~/keys/id");

@@ -137,7 +137,7 @@ pub trait TaskPlane: Plane {
     ) -> impl Future<Output = Result<ReportOutcome, String>> + Send;
     fn cite(&mut self, task: Option<TaskId>);
     /// Creates mode 0700. An existing directory is `Applied`.
-    fn mkdir(&mut self, path: &str, parents: bool) -> impl Future<Output = WriteOutcome> + Send;
+    fn make_partition_dir(&mut self, path: &str) -> impl Future<Output = WriteOutcome> + Send;
     fn verify(&mut self, signed: &Bytes) -> Result<SignedTask, Unverified>;
     /// Cited: a home or partition persona is read as the task's own request.
     fn persona(
@@ -655,7 +655,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
 
     async fn make_partition(&mut self, cwd: &str) -> bool {
         for dir in [cwd.to_string(), format!("{cwd}/tmp")] {
-            match self.plane.mkdir(&dir, true).await {
+            match self.plane.make_partition_dir(&dir).await {
                 WriteOutcome::Applied(_) => {}
                 WriteOutcome::Stale
                 | WriteOutcome::Unavailable
@@ -1076,8 +1076,8 @@ mod tests {
                 None => "uncite".into(),
             });
         }
-        async fn mkdir(&mut self, path: &str, parents: bool) -> WriteOutcome {
-            self.log(format!("mkdir {path} {parents}"));
+        async fn make_partition_dir(&mut self, path: &str) -> WriteOutcome {
+            self.log(format!("mkdir {path} true"));
             self.mkdirs
                 .pop_front()
                 .unwrap_or(WriteOutcome::Applied(None))

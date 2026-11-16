@@ -109,6 +109,7 @@ pub fn prepare_checked(
             path,
             parents,
             components: wire_components,
+            ..
         } => {
             let result = split(path).and_then(|(mut parent, leaf)| {
                 components.push(leaf);
@@ -1943,7 +1944,8 @@ mod tests {
             proto::Verb::FsMkdir {
                 path: d.path("prepare-parent/child"),
                 parents: true,
-                components: vec![]
+                components: vec![],
+                conversation: None,
             },
             None
         )
@@ -1974,10 +1976,15 @@ mod tests {
             path,
             parents,
             components: vec![],
+            conversation: None,
         }
     }
     fn delete(path: String, recursive: bool) -> proto::Verb {
-        proto::Verb::FsDelete { path, recursive }
+        proto::Verb::FsDelete {
+            path,
+            recursive,
+            conversation: None,
+        }
     }
     async fn read_frame<R: AsyncRead + Unpin>(
         r: &mut R,
