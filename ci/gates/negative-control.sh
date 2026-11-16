@@ -1606,6 +1606,7 @@ always	task_reports.entries.cursor	ships by construction
 always	task_reports.next	ships by construction
 always	task_delivery.signed	ships by construction
 always	task_delivery.partition	ships by construction
+always	task_delivery.fresh	ships by construction
 always	task_follow_ups.task	ships by construction
 always	task_follow_ups.from	ships by construction
 always	task_follow_ups.items	ships by construction
