@@ -118,6 +118,9 @@ pub struct TaskRecord {
     pub actions: u32,
     #[serde(default)]
     pub last_action: Option<i64>,
+    /// Started from `Queued` with no request citing it since, so a hand-out of it is fresh.
+    #[serde(default)]
+    pub unseen: bool,
 }
 
 mod arc_signed {
@@ -185,6 +188,7 @@ pub fn ordinal_key(tasker: &Tasker) -> String {
 pub struct Hot {
     pub actions: u32,
     pub last_action: Option<i64>,
+    pub cited: bool,
     pub lease_until: i64,
     /// No claim is handed this task before this time; `retry_secs` is the last wait.
     pub retry_after: i64,

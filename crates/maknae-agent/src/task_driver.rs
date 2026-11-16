@@ -2570,7 +2570,11 @@ mod tests {
     #[tokio::test]
     async fn a_fresh_redelivery_of_the_kept_id_closes_its_conversation_and_starts_again() {
         let mut f = fake();
-        f.claims = VecDeque::from([delivered(1, PART), delivered_fresh(1, PART)]);
+        f.claims = VecDeque::from([
+            delivered(1, PART),
+            Err("lost".into()),
+            delivered_fresh(1, PART),
+        ]);
         f.beats.push_back(Ok(BeatAnswer::Refused(refused())));
         f.replies = VecDeque::from([
             Err(PlaneError::Transport("leaf expired".into())),

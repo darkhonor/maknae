@@ -240,7 +240,7 @@ pub enum Notice {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Claimed {
-    /// `fresh` when this hand-out started the task from `Queued`.
+    /// `fresh` from the task's start from `Queued` until a request cites it.
     Delivered {
         signed: Arc<SignedTask>,
         partition: String,
@@ -1293,6 +1293,7 @@ impl TaskStore {
             let mut next = prior.clone();
             next.actions = hot.actions;
             next.last_action = hot.last_action;
+            next.unseen &= !hot.cited;
             if self.write(&next, Some(&prior)).is_err() {
                 break;
             }
@@ -1475,6 +1476,7 @@ impl TaskStore {
             report: None,
             actions: 0,
             last_action: None,
+            unseen: false,
         };
         self.write(&rec, None)?;
         if let Some(t) = ticket {
@@ -1714,7 +1716,8 @@ impl TaskStore {
                     .held_by(&id, agent, uid)
                     .filter(|r| r.state == TaskState::Working)
                     .ok_or_else(moved)?;
-                let handed = delivered(rec, false);
+                let cited = held.hot.get(&id).is_some_and(|h| h.cited);
+                let handed = delivered(rec, rec.unseen && !cited);
                 held.hot.entry(id).or_default().lease_until = lease;
                 Ok(handed)
             }
@@ -1730,10 +1733,12 @@ impl TaskStore {
                 let mut next = prior.clone();
                 next.state = TaskState::Working;
                 next.claimed = Some(self.clock.now_secs());
+                next.unseen = true;
                 self.write(&next, Some(&prior))?;
                 let handed = delivered(&next, true);
                 let mut held = self.held();
-                held.hot.entry(id).or_default().lease_until = lease;
+                let hot = held.hot.entry(id).or_default();
+                (hot.lease_until, hot.cited) = (lease, false);
                 held.tasks.insert(id, next);
                 match held.closing.contains_key(&id) || held.holding.contains_key(&id) {
                     true => Err(TaskRefusal::AgentGone),
@@ -1833,6 +1838,7 @@ impl TaskStore {
             let hot = held.hot.entry(*id).or_default();
             hot.actions = hot.actions.saturating_add(1);
             hot.last_action = Some(now);
+            hot.cited = true;
             hot.lease_until = now + CLAIM_LEASE.as_secs() as i64;
         }
     }
@@ -2281,6 +2287,7 @@ impl TaskStore {
             report: None,
             actions: 0,
             last_action: None,
+            unseen: false,
         };
         self.write(&rec, None)
             .expect("the test store writes the task");
@@ -2311,6 +2318,7 @@ impl TaskStore {
         let hot = held.hot.entry(*id).or_default();
         hot.actions += 1;
         hot.last_action = Some(at);
+        hot.cited = true;
     }
 
     #[cfg(any(test, feature = "hermetic-test-seam"))]
@@ -5701,6 +5709,28 @@ mod tests {
     }
 
     #[test]
+    fn a_start_stays_fresh_until_a_request_cites_it_and_a_restart_errs_fresh() {
+        let fresh = |store: &TaskStore| match claim_head(store, &id("hobi"), HOBI, signer()) {
+            Ok(Claimed::Delivered { fresh, .. }) => fresh,
+            other => panic!("{other:?}"),
+        };
+        let (blobs, store) = mem();
+        let task = held_by(&store, Tasker::Uid(BOB));
+        assert!(fresh(&store));
+        assert!(store.record(&task).unwrap().unseen);
+        let store = reopen(&blobs);
+        assert!(fresh(&store), "a lost start is fresh again after a restart");
+        store.acted(&task);
+        let store = reopen(&blobs);
+        assert!(fresh(&store), "a citation not yet stored errs fresh");
+        store.acted(&task);
+        assert!(!fresh(&store));
+        store.store_counters();
+        assert!(!store.record(&task).unwrap().unseen);
+        assert!(!fresh(&reopen(&blobs)));
+    }
+
+    #[test]
     fn a_released_working_task_is_queued_and_handed_out_fresh() {
         let (_blobs, store) = mem();
         let hobi = id("hobi");
@@ -5710,6 +5740,7 @@ mod tests {
             claim_head(&store, &hobi, HOBI, signer()),
             Ok(Claimed::Delivered { fresh: false, .. })
         ));
+        store.acted(&task);
         if let Some(hot) = store.held().hot.get_mut(&task) {
             (hot.retry_after, hot.retry_secs) = (i64::MAX, RETRY_MAX_SECS);
         }
@@ -5723,10 +5754,12 @@ mod tests {
             (0, 0, 0)
         );
         assert_eq!(store.next_for(&hobi, HOBI), Some((task, TaskState::Queued)));
-        assert!(matches!(
-            claim_head(&store, &hobi, HOBI, signer()),
-            Ok(Claimed::Delivered { fresh: true, .. })
-        ));
+        for _ in 0..2 {
+            assert!(matches!(
+                claim_head(&store, &hobi, HOBI, signer()),
+                Ok(Claimed::Delivered { fresh: true, .. })
+            ));
+        }
     }
 
     #[test]
@@ -6460,7 +6493,7 @@ mod tests {
             "another uid holds nothing"
         );
         assert_eq!(claim_head(&store, &hobi, JIN, signer()), Ok(Claimed::Idle));
-        for started in [true, false] {
+        for (cite, fresh_now) in [(false, true), (true, true), (false, false)] {
             match claim_head(&store, &hobi, HOBI, signer()).unwrap() {
                 Claimed::Delivered {
                     signed,
@@ -6469,9 +6502,12 @@ mod tests {
                 } => {
                     assert_eq!(signed.task.task_id, first);
                     assert_eq!(partition, "tasks/users/1000");
-                    assert_eq!(fresh, started);
+                    assert_eq!(fresh, fresh_now);
                 }
                 Claimed::Idle => panic!("idle"),
+            }
+            if cite {
+                store.acted(&first);
             }
         }
         assert_eq!(store.record(&second).unwrap().state, TaskState::Queued);

@@ -635,7 +635,8 @@ pub struct TaskReportPage {
 }
 
 /// `signed` is the CBOR of a [`SignedTask`]; `partition` is relative to the agent's home.
-/// `fresh` when this delivery started the task, so no earlier work on it may be resumed.
+/// `fresh` when the task was started and no request has cited it since, so nothing kept
+/// from before the start may be resumed.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct TaskDelivery {
     pub signed: Bytes,

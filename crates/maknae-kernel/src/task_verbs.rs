@@ -601,6 +601,7 @@ mod tests {
             report: rseq.map(|_| (SecretText(Zeroizing::new(text.into())), 150)),
             actions: 0,
             last_action: None,
+            unseen: false,
         }
     }
 
