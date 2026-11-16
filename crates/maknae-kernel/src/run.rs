@@ -10632,25 +10632,7 @@ pub(crate) fn rfc3339_now() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
-    epoch_to_rfc3339(now.as_secs(), now.subsec_millis())
-}
-
-fn epoch_to_rfc3339(secs: u64, millis: u32) -> String {
-    let days = (secs / 86_400) as i64;
-    let rem = secs % 86_400;
-    let (hh, mm, ss) = (rem / 3_600, (rem % 3_600) / 60, rem % 60);
-    // days since 1970-01-01 → civil (y, m, d).
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097; // [0, 146096]
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
-    let year = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let day = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if month <= 2 { year + 1 } else { year };
-    format!("{year:04}-{month:02}-{day:02}T{hh:02}:{mm:02}:{ss:02}.{millis:03}Z")
+    maknae_proto::epoch_to_rfc3339(now.as_secs(), now.subsec_millis())
 }
 
 #[cfg(test)]
@@ -10789,20 +10771,6 @@ mod tests {
         assert_eq!(
             accept_journal("0123456789ab", 7, reason, &Err("disk full".into())),
             "maknaed: AUDIT WRITE FAILED on the baseline accept outcome: disk full; accepted at revision 7; restarting to apply"
-        );
-    }
-
-    #[test]
-    fn epoch_zero_is_unix_epoch() {
-        assert_eq!(epoch_to_rfc3339(0, 0), "1970-01-01T00:00:00.000Z");
-    }
-
-    #[test]
-    fn known_epoch_formats_correctly() {
-        // 1_700_000_000 == 2023-11-14T22:13:20Z (a fixed, verifiable instant).
-        assert_eq!(
-            epoch_to_rfc3339(1_700_000_000, 250),
-            "2023-11-14T22:13:20.250Z"
         );
     }
 

@@ -933,9 +933,10 @@ fn held_line(v: &maknae_proto::HeldView) -> String {
         Some(C::Agent) => "agent contained",
         None => "unknown",
     };
-    let since = v
-        .held_secs
-        .map_or_else(|| "unknown".to_string(), |s| s.to_string());
+    let since = v.held_secs.and_then(|s| u64::try_from(s).ok()).map_or_else(
+        || "unknown".to_string(),
+        |s| maknae_proto::epoch_to_rfc3339(s, 0),
+    );
     format!(
         "{}  {}  {}  held from {from}  cause {cause}  held since {since}",
         v.view.task.to_id(),
@@ -3096,13 +3097,18 @@ mod tests {
             let end = start + src[start..].find("\n}\n").unwrap();
             &src[start..end]
         };
-        let (contain, release) = (body("contain_verb"), body("release_verb"));
+        let (contain, release, account) = (
+            body("contain_verb"),
+            body("release_verb"),
+            body("account_target"),
+        );
         assert!(
             contain.contains("maknae_proto::contain_reason(")
                 && contain.contains("maknae_proto::contain_target(")
         );
         assert!(release.contains("maknae_proto::contain_target("));
-        for b in [contain, release] {
+        assert!(account.contains("maknae_proto::contain_target("));
+        for b in [contain, release, account] {
             for own in [
                 "is_ascii",
                 "is_control",
@@ -3455,7 +3461,7 @@ mod tests {
         let zero = "0".repeat(32);
         assert_eq!(
             held_line(&held_view(S::Working)),
-            format!("{zero}  hobi  bob  held from working  cause tasker contained  held since 99")
+            format!("{zero}  hobi  bob  held from working  cause tasker contained  held since 1970-01-01T00:01:39.000Z")
         );
         for (cause, word) in [
             (C::Tasker, "tasker contained"),
@@ -3473,6 +3479,9 @@ mod tests {
             held_line(&v),
             format!("{zero}  hobi  bob  held from unknown  cause unknown  held since unknown")
         );
+        let mut v = held_view(S::Queued);
+        v.held_secs = Some(-1);
+        assert!(held_line(&v).ends_with("held since unknown"));
         let mut v = held_view(S::Queued);
         v.tasker = "bo\u{1b}[2Jb".into();
         v.view.agent = "ho\u{7}bi".into();
@@ -3506,6 +3515,14 @@ mod tests {
             (
                 outcome(R::Released, Some(S::Queued), None),
                 format!("{HELD_ID} released, now queued"),
+            ),
+            (
+                outcome(R::Released, None, None),
+                format!("{HELD_ID} released"),
+            ),
+            (
+                outcome(R::ParentHeld, None, None),
+                format!("{HELD_ID} refused: parent held"),
             ),
             (
                 outcome(R::TaskerContained, None, None),
