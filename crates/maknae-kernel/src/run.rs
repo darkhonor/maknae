@@ -19216,6 +19216,17 @@ mod reload_tests {
         );
         let me = principal().uid;
         let label = format!("uid {me}");
+        let mut expected = [
+            (Some(me), label.as_str(), "bound admin", None, true),
+            (
+                Some(2001),
+                "hobi-svc (uid 2001)",
+                "bound user",
+                Some("hobi"),
+                false,
+            ),
+        ];
+        expected.sort_by_key(|row| row.0);
         assert_eq!(
             views
                 .iter()
@@ -19227,16 +19238,7 @@ mod reload_tests {
                     v.principal
                 ))
                 .collect::<Vec<_>>(),
-            [
-                (Some(me), label.as_str(), "bound admin", None, true),
-                (
-                    Some(2001),
-                    "hobi-svc (uid 2001)",
-                    "bound user",
-                    Some("hobi"),
-                    false
-                )
-            ]
+            expected
         );
     }
 
