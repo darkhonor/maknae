@@ -170,7 +170,7 @@ The kernel served agent taskers since #628, but no model could reach `session.ta
 
 `TaskClose::ParentEnded` and `TaskCollect`'s `task` field are additive; `PROTOCOL_VERSION` is unchanged.
 
-**Residuals.** A sub-task that is never claimed (its agent's daemon is down) has no lease, so only stopping the parent ends that wait. A sub-task the tool left on hold may report under a parent still working, with nobody collecting it until the parent ends. A pending submission that is never confirmed counts as waiting until it is cleared, so a legitimate submission can be refused meanwhile. Every poll counts as an action on the parent, so a waiting agent looks busy. Files do not cross between agents (#661).
+**Residuals.** A sub-task that is never claimed (its agent's daemon is down) has no lease, so only stopping the parent ends that wait. A sub-task the tool left on hold may report under a parent still working, with nobody collecting it until the parent ends. A pending submission that is never confirmed counts as waiting until it is cleared, so a legitimate submission can be refused meanwhile. Every poll counts as an action on the parent, so a waiting agent looks busy. A sub-task report held under a parent that a release sends back to start again is removed, never collected, because the restarted parent no longer waits for it. Files do not cross between agents (#661).
 
 ## Related
 
