@@ -24,6 +24,7 @@ pub(crate) enum Kind {
     Contain,
     Release,
     KernelContain,
+    Held,
 }
 
 /// The safety check a live edit runs in the turn.
@@ -119,6 +120,7 @@ pub(crate) fn corrective(
         Kind::Contain => "contain",
         Kind::Release => "release",
         Kind::KernelContain => "kernel containment",
+        Kind::Held => "held",
     };
     let subject = uid.map_or_else(|| "the subject".to_string(), |u| format!("uid {u}"));
     let text = match o {
@@ -295,7 +297,7 @@ pub(crate) fn check_contain(
 /// The check a request of `kind` runs in the turn.
 pub(crate) fn check_for(kind: Kind, target: u32, requester: u32) -> LiveCheck {
     match kind {
-        Kind::Release => LiveCheck::None,
+        Kind::Release | Kind::Held => LiveCheck::None,
         Kind::Contain => LiveCheck::Contain { target, requester },
         Kind::KernelContain => LiveCheck::KernelContain { target },
     }
@@ -317,6 +319,16 @@ pub(crate) fn normalise_operands(verb: &mut Verb) -> Result<(), (&'static str, O
         }
         Verb::AdminRelease { target } => {
             *target = maknae_proto::contain_target(target).map_err(|e| ("release", e))?;
+        }
+        Verb::AdminHeldList {
+            filter: Some(maknae_proto::HeldFilter::User(target)),
+            ..
+        }
+        | Verb::AdminHeldRelease {
+            target: maknae_proto::HeldTarget::User(target),
+            ..
+        } => {
+            *target = maknae_proto::contain_target(target).map_err(|e| ("held", e))?;
         }
         _ => {}
     }
@@ -560,6 +572,31 @@ mod tests {
                 target: ContainTarget::Name("\u{d55c}".into())
             }
         );
+        let padded = || ContainTarget::Name(" padded".into());
+        let composed = || ContainTarget::Name("\u{1112}\u{1161}\u{11ab}".into());
+        let normal = || ContainTarget::Name("\u{d55c}".into());
+        let list = |t| Verb::AdminHeldList {
+            filter: Some(maknae_proto::HeldFilter::User(t)),
+            after: None,
+        };
+        let release = |t| Verb::AdminHeldRelease {
+            target: maknae_proto::HeldTarget::User(t),
+            after: None,
+        };
+        for mut bad in [list(padded()), release(padded())] {
+            assert_eq!(
+                normalise_operands(&mut bad),
+                Err(("held", OperandError::EdgeWhitespace)),
+                "{bad:?}"
+            );
+        }
+        for (mut v, want) in [
+            (list(composed()), list(normal())),
+            (release(composed()), release(normal())),
+        ] {
+            assert_eq!(normalise_operands(&mut v), Ok(()));
+            assert_eq!(v, want);
+        }
     }
 
     #[test]
@@ -800,6 +837,20 @@ mod tests {
                 None
             ),
             "release unchanged: uid 7 is not contained"
+        );
+        assert_eq!(
+            corrective(
+                Kind::Held,
+                ContainmentOutcome::UnknownAccount,
+                None,
+                "no account named \"gh\\u{7f}\"",
+                None
+            ),
+            "held refused: unknown-account: no account named \"gh\\u{7f}\""
+        );
+        assert_eq!(
+            corrective(Kind::Held, ContainmentOutcome::Busy, None, "", None),
+            format!("held refused: busy: {}", ContainmentOutcome::Busy.text())
         );
         assert_eq!(
             corrective(

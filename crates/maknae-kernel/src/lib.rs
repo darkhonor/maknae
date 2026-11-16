@@ -92,8 +92,8 @@ pub use provider_choice::{
 pub use run::{
     accept_loop, handle, handle_with_attempt_caps, run, AcceptAnswer, AdminOps, AgentAdmission,
     BaselineOps, BoxFuture, ConfigView, Conn, ContainAnswer, ContainRequest, ContainmentOps,
-    ContainmentStatus, Corrective, KernelGraphStatus, PlaneAccept, ReleaseRequest, WhereCtx,
-    MAX_SUBJECT_USER_BYTES,
+    ContainmentStatus, Corrective, HeldOp, HeldRequest, KernelGraphStatus, PlaneAccept,
+    ReleaseRequest, WhereCtx, MAX_SUBJECT_USER_BYTES,
 };
 pub use sensitive_authz::SensitiveNow;
 pub use sensitive_authz::{sensitive_match, SensitiveMatch};

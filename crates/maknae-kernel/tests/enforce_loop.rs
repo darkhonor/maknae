@@ -3753,6 +3753,13 @@ impl maknae_kernel::ContainmentOps for ScriptedBaseline {
     ) -> maknae_kernel::BoxFuture<'a, maknae_kernel::ContainAnswer> {
         Box::pin(async { common::no_containment() })
     }
+    fn held<'a>(
+        &'a self,
+        _: maknae_kernel::HeldRequest<'a>,
+    ) -> maknae_kernel::BoxFuture<'a, Result<maknae_proto::Payload, maknae_kernel::ContainAnswer>>
+    {
+        Box::pin(async { Err(common::no_containment()) })
+    }
 }
 
 const CHECK_SENTINEL: &str = "panicked at ceiling-value-7f3a";
@@ -3928,6 +3935,124 @@ async fn under_the_shipped_policy_release_is_permitted_to_admin_and_contain_is_n
             other => panic!("{verb:?}: {other:?}"),
         }
     }
+    for (bindings, admin) in [(BINDINGS_ROOT_ADMIN, true), (BINDINGS_ROOT_USER, false)] {
+        fx.write_bindings(bindings);
+        for verb in held_verbs() {
+            let ops = common::scripted_containment(ContainmentOutcome::Released);
+            let emit = RecEmit::new();
+            let frame = drive_with_ops(
+                &fx.dir,
+                fx.authorizer(),
+                emit.clone(),
+                0,
+                verb.clone(),
+                ops.clone(),
+            )
+            .await
+            .expect("a frame");
+            let req = request_record(&emit.records()).clone();
+            assert_eq!(
+                (req.action.as_str(), req.outcome.result == "permit"),
+                ("admin.release", admin),
+                "{verb:?}"
+            );
+            match maknae_proto::decode_response(&frame).unwrap().result {
+                RespResult::Err(e) if !admin => {
+                    assert_eq!(
+                        (e.code, e.message.as_str()),
+                        (ProtoErrCode::Unauthorized, "not authorized")
+                    );
+                    assert_eq!(
+                        req.outcome.reason, "role user: no rule for admin.release",
+                        "{verb:?}"
+                    );
+                }
+                RespResult::Ok(
+                    maknae_proto::Payload::HeldTasks(_) | maknae_proto::Payload::HeldReleased(_),
+                ) if admin => {}
+                other => panic!("{verb:?}: {other:?}"),
+            }
+            assert_eq!(ops.calls(), usize::from(admin), "{verb:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_held_operand_the_pre_gate_refuses_is_a_bad_request_and_reaches_nothing() {
+    use maknae_proto::{HeldFilter, HeldTarget, Verb};
+    let fx = Fixture::new("held-pregate");
+    fx.write_policy(SHIPPED_POLICY);
+    fx.write_bindings(BINDINGS_ROOT_ADMIN);
+    let padded = || ContainTarget::Name(" padded".into());
+    for (verb, why) in [
+        (
+            Verb::AdminHeldList {
+                filter: Some(HeldFilter::Agent("Not An Id".into())),
+                after: None,
+            },
+            "held fails operand pre-gate: agent not acceptable".to_string(),
+        ),
+        (
+            Verb::AdminHeldRelease {
+                target: HeldTarget::Agent("Not An Id".into()),
+                after: None,
+            },
+            "held fails operand pre-gate: agent not acceptable".to_string(),
+        ),
+        (
+            Verb::AdminHeldList {
+                filter: Some(HeldFilter::User(padded())),
+                after: None,
+            },
+            format!(
+                "held fails operand pre-gate: {}",
+                maknae_proto::OperandError::EdgeWhitespace
+            ),
+        ),
+        (
+            Verb::AdminHeldRelease {
+                target: HeldTarget::User(padded()),
+                after: None,
+            },
+            format!(
+                "held fails operand pre-gate: {}",
+                maknae_proto::OperandError::EdgeWhitespace
+            ),
+        ),
+    ] {
+        let ops = common::scripted_containment(ContainmentOutcome::Released);
+        let emit = RecEmit::new();
+        let frame = drive_with_ops(
+            &fx.dir,
+            fx.authorizer(),
+            emit.clone(),
+            0,
+            verb.clone(),
+            ops.clone(),
+        )
+        .await
+        .expect("a frame");
+        match maknae_proto::decode_response(&frame).unwrap().result {
+            RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::BadRequest, "{verb:?}"),
+            other => panic!("{verb:?}: {other:?}"),
+        }
+        assert_eq!(request_record(&emit.records()).outcome.reason, why);
+        assert_eq!(ops.calls(), 0, "{verb:?}");
+    }
+}
+
+/// A held list and a held release, each with a filter, a target and a cursor.
+fn held_verbs() -> [maknae_proto::Verb; 2] {
+    [
+        maknae_proto::Verb::AdminHeldList {
+            filter: Some(maknae_proto::HeldFilter::User(ContainTarget::Uid(4242))),
+            after: Some(maknae_proto::TaskCursor::from_seq(7)),
+        },
+        maknae_proto::Verb::AdminHeldRelease {
+            target: maknae_proto::HeldTarget::Agent("hobi".into()),
+            after: Some(maknae_proto::TaskCursor::from_seq(9)),
+        },
+    ]
 }
 
 #[tokio::test]
@@ -4132,6 +4257,59 @@ async fn a_permitted_contain_and_release_each_reach_the_containment_service() {
             recs,
             [("permit".to_string(), "authorized".to_string())],
             "{verb:?}: a success writes no corrective record"
+        );
+    }
+    let [list, release] = held_verbs();
+    for (verb, list, after, payload) in [
+        (
+            list,
+            true,
+            7,
+            maknae_proto::Payload::HeldTasks(common::scripted_held_page()),
+        ),
+        (
+            release,
+            false,
+            9,
+            maknae_proto::Payload::HeldReleased(common::scripted_release_page()),
+        ),
+    ] {
+        let ops = common::scripted_containment(ContainmentOutcome::Released);
+        let emit = RecEmit::new();
+        let frame = drive_with_ops(
+            &fx.dir,
+            fx.authorizer(),
+            emit.clone(),
+            0,
+            verb.clone(),
+            ops.clone(),
+        )
+        .await
+        .expect("a frame");
+        assert_eq!(
+            maknae_proto::decode_response(&frame).unwrap().result,
+            RespResult::Ok(payload),
+            "{verb:?}"
+        );
+        let req = request_record(&emit.records()).clone();
+        assert_eq!(
+            ops.held(),
+            [common::SeenHeld {
+                requester: 0,
+                session: req.session_id,
+                list,
+                after: Some(maknae_proto::TaskCursor::from_seq(after)),
+            }],
+            "{verb:?}"
+        );
+        assert_eq!(ops.actions()[0].action.0, "admin.release", "{verb:?}");
+        assert_eq!(
+            emit.records()
+                .iter()
+                .filter(|r| r.event == "request")
+                .count(),
+            1,
+            "{verb:?}: a page writes no corrective record"
         );
     }
 }
@@ -4417,6 +4595,7 @@ async fn a_request_record_that_cannot_append_never_reaches_the_containment_servi
         maknae_proto::Verb::AdminBaselineAccept {
             hash: "0".repeat(64),
         },
+        held_verbs()[1].clone(),
     ] {
         let ops = common::scripted_containment(ContainmentOutcome::Contained);
         let emit = FailNthEmit::new(2);

@@ -6,8 +6,11 @@ use maknae_proto::{
 };
 use maknae_security::{AttrValue, Request};
 
+use maknae_authz_basic::ListedSubject;
+use maknae_proto::{HeldCause, HeldView, ReleaseResult};
+
 use crate::handler::Stamp;
-use crate::task::Holding;
+use crate::task::{Contained, HeldTask, Holding, ReleaseRefusal, Released};
 use crate::task_store::{Hot, TaskRecord};
 
 pub(crate) const TASK_PAGE_MAX: usize = 32;
@@ -400,6 +403,161 @@ pub(crate) fn report_page<'a>(
         .then(|| entries.last().map(|e| e.cursor.clone()))
         .flatten();
     TaskReportPage { entries, next }
+}
+
+pub(crate) const HELD_TASKER_LABEL_MAX: usize = 256;
+
+pub(crate) fn held_cause(c: Contained) -> HeldCause {
+    match c {
+        Contained::Tasker => HeldCause::Tasker,
+        Contained::Root => HeldCause::Root,
+        Contained::Agent => HeldCause::Agent,
+    }
+}
+
+/// From the last applied load, never a live account lookup.
+pub(crate) fn tasker_label(tasker: &Tasker, subjects: &[ListedSubject]) -> String {
+    match tasker {
+        Tasker::Uid(uid) => subjects
+            .iter()
+            .find(|s| s.uid == Some(*uid))
+            .map(crate::identity_report::label)
+            .filter(|l| l.len() <= HELD_TASKER_LABEL_MAX)
+            .unwrap_or_else(|| format!("uid {uid}")),
+        Tasker::Agent { agent, .. } => format!("agent {agent}"),
+        Tasker::Remote(id) => Some(format!("remote {id}"))
+            .filter(|l| l.len() <= HELD_TASKER_LABEL_MAX)
+            .unwrap_or_else(|| "remote".into()),
+    }
+}
+
+/// The entry's cursor is the store-wide `seq` the page is ordered by.
+pub(crate) fn held_view(t: &HeldTask, subjects: &[ListedSubject]) -> HeldView {
+    HeldView {
+        view: TaskView {
+            cursor: TaskCursor::from_seq(t.seq),
+            ..t.view.clone()
+        },
+        tasker: tasker_label(&t.tasker, subjects),
+        held_from: t.held_from,
+        held_for: t.held_for.map(held_cause),
+        held_secs: t.held_at,
+    }
+}
+
+pub(crate) fn release_result(r: &Result<Released, ReleaseRefusal>) -> ReleaseResult {
+    match r {
+        Ok(_) => ReleaseResult::Released,
+        Err(ReleaseRefusal::StillContained(Contained::Tasker)) => ReleaseResult::TaskerContained,
+        Err(ReleaseRefusal::StillContained(Contained::Root)) => ReleaseResult::RootContained,
+        Err(ReleaseRefusal::StillContained(Contained::Agent)) => ReleaseResult::AgentContained,
+        Err(ReleaseRefusal::ParentHeld(_)) => ReleaseResult::ParentHeld,
+        Err(ReleaseRefusal::NotHeld) => ReleaseResult::NotHeld,
+        Err(ReleaseRefusal::Unknown) => ReleaseResult::Unknown,
+        Err(ReleaseRefusal::NotDone(_)) => ReleaseResult::NotDone,
+        Err(ReleaseRefusal::OutcomeUnknown(_)) => ReleaseResult::OutcomeUnknown,
+    }
+}
+
+pub(crate) fn release_parent(r: &Result<Released, ReleaseRefusal>) -> Option<TaskRef> {
+    match r {
+        Err(ReleaseRefusal::ParentHeld(p)) => Some(TaskRef::from_id(p)),
+        _ => None,
+    }
+}
+
+pub(crate) fn release_state_after(
+    r: &Result<Released, ReleaseRefusal>,
+    prior: Option<TaskState>,
+) -> Option<TaskState> {
+    match r {
+        Ok(released) => Some(released.now),
+        Err(ReleaseRefusal::Unknown | ReleaseRefusal::OutcomeUnknown(_)) => None,
+        Err(_) => prior,
+    }
+}
+
+pub(crate) fn release_reason(r: &Result<Released, ReleaseRefusal>) -> String {
+    let refused = |why: &str| format!("task release refused: {why}");
+    match r {
+        Ok(released) => format!(
+            "task released: held from {}, now {}",
+            state_attr(Some(released.from)),
+            state_attr(Some(released.now))
+        ),
+        Err(ReleaseRefusal::StillContained(Contained::Tasker)) => refused("tasker still contained"),
+        Err(ReleaseRefusal::StillContained(Contained::Root)) => refused("root still contained"),
+        Err(ReleaseRefusal::StillContained(Contained::Agent)) => refused("agent still contained"),
+        Err(ReleaseRefusal::ParentHeld(_)) => refused("parent held"),
+        Err(ReleaseRefusal::NotHeld) => refused("not held"),
+        Err(ReleaseRefusal::Unknown) => refused("no such task"),
+        Err(ReleaseRefusal::NotDone(why)) => format!("task release not done: {why}"),
+        Err(ReleaseRefusal::OutcomeUnknown(why)) => format!("task release outcome unknown: {why}"),
+    }
+}
+
+/// The record's (result, posture).
+pub(crate) fn release_record_class(
+    r: &Result<Released, ReleaseRefusal>,
+) -> (&'static str, &'static str) {
+    match r {
+        Ok(_) => ("permit", "authorized"),
+        Err(ReleaseRefusal::NotDone(_) | ReleaseRefusal::OutcomeUnknown(_)) => {
+            ("deny", "unavailable")
+        }
+        Err(
+            ReleaseRefusal::StillContained(_)
+            | ReleaseRefusal::ParentHeld(_)
+            | ReleaseRefusal::NotHeld
+            | ReleaseRefusal::Unknown,
+        ) => ("deny", "refused"),
+    }
+}
+
+/// The record of a release the request's decision, made again under a later task's turn,
+/// refused; its class is `deny` / `unauthorized`.
+pub(crate) fn release_unauthorized_reason(why: &str) -> String {
+    format!("task release refused: not authorized: {why}")
+}
+
+pub(crate) fn requested_by((uid, session): (u32, u64)) -> String {
+    format!("; requested by uid {uid} in session {session}")
+}
+
+/// A store step that did not run, or did not answer, within its bound.
+pub(crate) fn release_blocked(b: crate::mutation::Blocked) -> ReleaseRefusal {
+    match b {
+        crate::mutation::Blocked::NotStarted => {
+            ReleaseRefusal::NotDone("the task store was busy".into())
+        }
+        crate::mutation::Blocked::Unknown => {
+            ReleaseRefusal::OutcomeUnknown("the task store did not answer in time".into())
+        }
+    }
+}
+
+/// A page ends at its first failure, resuming at that task; otherwise after its last task
+/// while more remain.
+pub(crate) fn release_next(
+    attempted: &[(u64, ReleaseResult)],
+    after: Option<u64>,
+    more: bool,
+) -> Option<TaskCursor> {
+    let resume = match attempted.split_last() {
+        Some((
+            (
+                _,
+                ReleaseResult::NotDone
+                | ReleaseResult::OutcomeUnknown
+                | ReleaseResult::Unauthorized,
+            ),
+            before,
+        )) => before.last().map(|(seq, _)| *seq).or(after),
+        Some(((seq, _), _)) if more => Some(*seq),
+        None if more => after,
+        Some(_) | None => None,
+    };
+    resume.map(TaskCursor::from_seq)
 }
 
 #[cfg(test)]
@@ -838,5 +996,250 @@ mod tests {
         let p = report_page(many.iter(), usize::MAX);
         assert_eq!(p.entries.len(), TASK_PAGE_MAX);
         assert_eq!(p.next, Some(TaskCursor::from_seq(TASK_PAGE_MAX as u64)));
+    }
+
+    fn subject(uid: Option<u32>, names: &[&str]) -> ListedSubject {
+        ListedSubject {
+            uid,
+            names: names.iter().map(|n| (*n).to_owned()).collect(),
+            state: maknae_authz_basic::SubjectState::Bound("user"),
+        }
+    }
+
+    #[test]
+    fn tasker_label_comes_from_the_load_and_falls_back_to_the_uid() {
+        let long = "n".repeat(HELD_TASKER_LABEL_MAX);
+        let subjects = [
+            subject(Some(1000), &["alex"]),
+            subject(Some(1001), &[long.as_str()]),
+            subject(Some(1002), &["mal\u{7}"]),
+        ];
+        assert_eq!(
+            tasker_label(&Tasker::Uid(1000), &subjects),
+            "alex (uid 1000)"
+        );
+        assert_eq!(tasker_label(&Tasker::Uid(1001), &subjects), "uid 1001");
+        assert_eq!(
+            tasker_label(&Tasker::Uid(1002), &subjects),
+            "mal\\u{7} (uid 1002)"
+        );
+        assert_eq!(tasker_label(&Tasker::Uid(4242), &subjects), "uid 4242");
+        let fits = "n".repeat(HELD_TASKER_LABEL_MAX - " (uid 1003)".len());
+        let at_max = [subject(Some(1003), &[fits.as_str()])];
+        assert_eq!(
+            tasker_label(&Tasker::Uid(1003), &at_max).len(),
+            HELD_TASKER_LABEL_MAX
+        );
+        assert_eq!(
+            tasker_label(
+                &Tasker::Agent {
+                    agent: "hobi".into(),
+                    uid: 1000
+                },
+                &subjects
+            ),
+            "agent hobi"
+        );
+        assert_eq!(
+            [Contained::Tasker, Contained::Root, Contained::Agent].map(held_cause),
+            [HeldCause::Tasker, HeldCause::Root, HeldCause::Agent]
+        );
+    }
+
+    #[test]
+    fn a_held_view_carries_the_store_sequence_and_no_text() {
+        let r = rec(3, None, "SENTINEL-held-text");
+        let task = HeldTask {
+            seq: 77,
+            view: view(&r, &Hot::default(), 50),
+            tasker: Tasker::Uid(1000),
+            held_from: TaskState::Working,
+            held_for: Some(Contained::Root),
+            held_at: Some(60),
+        };
+        let v = held_view(&task, &[subject(Some(1000), &["alex"])]);
+        assert_eq!(v.view.cursor, TaskCursor::from_seq(77));
+        assert_eq!(v.view.task, task.view.task);
+        assert_eq!(
+            (v.tasker.as_str(), v.held_from, v.held_for, v.held_secs),
+            (
+                "alex (uid 1000)",
+                TaskState::Working,
+                Some(HeldCause::Root),
+                Some(60)
+            )
+        );
+        assert!(!format!("{v:?}").contains("SENTINEL"));
+    }
+
+    #[test]
+    fn every_release_outcome_has_its_result_state_reason_and_class() {
+        let id = TaskId([9; 16]);
+        let parent = TaskId([8; 16]);
+        let released = Ok(Released {
+            task: id,
+            from: TaskState::Working,
+            now: TaskState::Queued,
+            rseq: None,
+        });
+        let reported = Ok(Released {
+            task: id,
+            from: TaskState::Reported,
+            now: TaskState::Reported,
+            rseq: Some(4),
+        });
+        let refused = |r: ReleaseRefusal| Err::<Released, _>(r);
+        let held = Some(TaskState::Held);
+        type Row<'a> = (
+            Result<Released, ReleaseRefusal>,
+            ReleaseResult,
+            Option<TaskState>,
+            &'a str,
+            (&'a str, &'a str),
+        );
+        let rows: [Row; 10] = [
+            (
+                released,
+                ReleaseResult::Released,
+                Some(TaskState::Queued),
+                "task released: held from working, now queued",
+                ("permit", "authorized"),
+            ),
+            (
+                reported,
+                ReleaseResult::Released,
+                Some(TaskState::Reported),
+                "task released: held from reported, now reported",
+                ("permit", "authorized"),
+            ),
+            (
+                refused(ReleaseRefusal::StillContained(Contained::Tasker)),
+                ReleaseResult::TaskerContained,
+                held,
+                "task release refused: tasker still contained",
+                ("deny", "refused"),
+            ),
+            (
+                refused(ReleaseRefusal::StillContained(Contained::Root)),
+                ReleaseResult::RootContained,
+                held,
+                "task release refused: root still contained",
+                ("deny", "refused"),
+            ),
+            (
+                refused(ReleaseRefusal::StillContained(Contained::Agent)),
+                ReleaseResult::AgentContained,
+                held,
+                "task release refused: agent still contained",
+                ("deny", "refused"),
+            ),
+            (
+                refused(ReleaseRefusal::ParentHeld(parent)),
+                ReleaseResult::ParentHeld,
+                held,
+                "task release refused: parent held",
+                ("deny", "refused"),
+            ),
+            (
+                refused(ReleaseRefusal::NotHeld),
+                ReleaseResult::NotHeld,
+                held,
+                "task release refused: not held",
+                ("deny", "refused"),
+            ),
+            (
+                refused(ReleaseRefusal::Unknown),
+                ReleaseResult::Unknown,
+                None,
+                "task release refused: no such task",
+                ("deny", "refused"),
+            ),
+            (
+                refused(ReleaseRefusal::NotDone("the disk said no".into())),
+                ReleaseResult::NotDone,
+                held,
+                "task release not done: the disk said no",
+                ("deny", "unavailable"),
+            ),
+            (
+                refused(ReleaseRefusal::OutcomeUnknown("late".into())),
+                ReleaseResult::OutcomeUnknown,
+                None,
+                "task release outcome unknown: late",
+                ("deny", "unavailable"),
+            ),
+        ];
+        for (r, result, state, reason, class) in rows {
+            assert_eq!(release_result(&r), result, "{r:?}");
+            assert_eq!(release_state_after(&r, held), state, "{r:?}");
+            assert_eq!(release_reason(&r), reason, "{r:?}");
+            assert_eq!(release_record_class(&r), class, "{r:?}");
+            assert_eq!(
+                release_parent(&r),
+                (result == ReleaseResult::ParentHeld).then(|| TaskRef::from_id(&parent)),
+                "{r:?}"
+            );
+        }
+        assert_eq!(
+            release_unauthorized_reason("role admin: no rule for admin.release"),
+            "task release refused: not authorized: role admin: no rule for admin.release"
+        );
+        assert_eq!(requested_by((0, 7)), "; requested by uid 0 in session 7");
+    }
+
+    #[test]
+    fn a_store_step_that_never_started_is_not_done_and_one_that_never_answered_is_unknown() {
+        use crate::mutation::Blocked;
+        assert_eq!(
+            release_blocked(Blocked::NotStarted),
+            ReleaseRefusal::NotDone("the task store was busy".into())
+        );
+        assert_eq!(
+            release_blocked(Blocked::Unknown),
+            ReleaseRefusal::OutcomeUnknown("the task store did not answer in time".into())
+        );
+    }
+
+    #[test]
+    fn a_release_page_ends_at_its_first_failure() {
+        use ReleaseResult as R;
+        let c = |s: u64| Some(TaskCursor::from_seq(s));
+        type Row<'a> = (
+            &'a [(u64, ReleaseResult)],
+            Option<u64>,
+            bool,
+            Option<TaskCursor>,
+        );
+        let rows: [Row; 12] = [
+            (&[], None, false, None),
+            (&[], Some(3), true, c(3)),
+            (&[(4, R::Released), (6, R::Released)], Some(3), false, None),
+            (&[(4, R::Released), (6, R::Released)], Some(3), true, c(6)),
+            (&[(4, R::Released), (6, R::NotHeld)], None, true, c(6)),
+            (&[(4, R::ParentHeld)], None, false, None),
+            (&[(4, R::NotDone)], Some(3), true, c(3)),
+            (&[(4, R::NotDone)], None, true, None),
+            (&[(4, R::Released), (6, R::NotDone)], Some(3), true, c(4)),
+            (
+                &[(4, R::Released), (6, R::OutcomeUnknown)],
+                Some(3),
+                false,
+                c(4),
+            ),
+            (
+                &[(4, R::TaskerContained), (6, R::Unauthorized)],
+                Some(3),
+                true,
+                c(4),
+            ),
+            (&[(4, R::OutcomeUnknown)], Some(3), false, c(3)),
+        ];
+        for (attempted, after, more, next) in rows {
+            assert_eq!(
+                release_next(attempted, after, more),
+                next,
+                "{attempted:?} after {after:?} more {more}"
+            );
+        }
     }
 }
