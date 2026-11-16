@@ -2208,6 +2208,24 @@ async fn a_full_size_task_round_trips_within_the_frame_caps() {
 }
 
 #[tokio::test]
+async fn a_started_task_is_delivered_fresh_until_a_request_cites_it() {
+    let w = world("claim-fresh", "user", true);
+    let id = w.submit("hobi", "a").await;
+    for (cite, fresh) in [(false, true), (true, true), (false, false)] {
+        match w.agent("hobi", CLAIM, None).await {
+            RespResult::Ok(Payload::TaskDelivered(d)) => assert_eq!(d.fresh, fresh),
+            other => panic!("claim: {other:?}"),
+        }
+        if cite {
+            assert!(matches!(
+                w.agent("hobi", Verb::Ping, Some(id)).await,
+                RespResult::Ok(_)
+            ));
+        }
+    }
+}
+
+#[tokio::test]
 async fn a_claim_or_report_whose_record_fails_is_refused_and_recorded() {
     let w = world("claim-audit", "user", true);
     let id = w.submit("hobi", "a").await;

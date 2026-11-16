@@ -451,7 +451,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
             match answer {
                 Ok(ClaimAnswer::Delivered(d)) => {
                     self.backoff = Backoff(BACKOFF_FIRST);
-                    self.delivered(&d.signed, &d.partition).await;
+                    self.delivered(&d.signed, &d.partition, d.fresh).await;
                 }
                 Ok(ClaimAnswer::Idle | ClaimAnswer::Refused(_)) => {
                     self.backoff = Backoff(BACKOFF_FIRST);
@@ -484,7 +484,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
         }
     }
 
-    async fn delivered(&mut self, signed: &Bytes, partition: &str) {
+    async fn delivered(&mut self, signed: &Bytes, partition: &str, fresh: bool) {
         let task = match self.plane.verify(signed) {
             Ok(task) => task,
             Err(Unverified::Undecodable) => {
@@ -507,14 +507,14 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
         let id = task.task.task_id;
         let leftover = self.leftover.take();
         if let Some(held) = self.held.take() {
-            if held.id == id {
+            if held.id == id && !fresh {
                 self.plane.cite(Some(id));
                 self.work(held, Then::Resume(vec![])).await;
                 return;
             }
             self.drop_held(held).await;
         }
-        if leftover == Some(id) {
+        if leftover == Some(id) && !fresh {
             self.cite_and_report(id, RESTARTED.into(), Ending::Restarted)
                 .await;
             return;
@@ -1129,9 +1129,16 @@ mod tests {
         }
     }
     fn delivered(n: u8, partition: &str) -> Result<ClaimAnswer, String> {
+        handed(n, partition, false)
+    }
+    fn delivered_fresh(n: u8, partition: &str) -> Result<ClaimAnswer, String> {
+        handed(n, partition, true)
+    }
+    fn handed(n: u8, partition: &str, fresh: bool) -> Result<ClaimAnswer, String> {
         Ok(ClaimAnswer::Delivered(TaskDelivery {
             signed: Bytes::new(Zeroizing::new(vec![n])),
             partition: partition.into(),
+            fresh,
         }))
     }
     fn view(state: TaskState) -> TaskView {
@@ -2544,16 +2551,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_task_held_when_the_agent_restarted_is_reported_restarted_not_rerun_on_release() {
-        let mut f = Fake::default();
-        f.beats
-            .push_back(Ok(BeatAnswer::State(view(TaskState::Held))));
-        f.tasks.insert(1, Ok(signed(1, "prompt-1")));
-        f.claims = VecDeque::from([delivered(1, PART)]);
+    async fn a_leftover_released_after_a_hold_runs_fresh_not_reported_restarted() {
+        for startup in [
+            Ok(BeatAnswer::State(view(TaskState::Held))),
+            follow_ups(0, &[]),
+        ] {
+            let mut f = Fake::default();
+            f.beats.push_back(startup);
+            f.tasks.insert(1, Ok(signed(1, "prompt-1")));
+            f.claims = VecDeque::from([delivered_fresh(1, PART)]);
+            f.replies = VecDeque::from([answer("a1")]);
+            let (log, events) = run(f).await;
+            assert_eq!(reports(&log), strs(&["report a1"]));
+            assert_eq!(events, vec![ended(1, Ending::Answered)]);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_fresh_redelivery_of_the_kept_id_closes_its_conversation_and_starts_again() {
+        let mut f = fake();
+        f.claims = VecDeque::from([
+            delivered(1, PART),
+            Err("lost".into()),
+            delivered_fresh(1, PART),
+        ]);
+        f.beats.push_back(Ok(BeatAnswer::Refused(refused())));
+        f.replies = VecDeque::from([
+            Err(PlaneError::Transport("leaf expired".into())),
+            answer("a1"),
+        ]);
         let (log, events) = run(f).await;
-        assert_eq!(reports(&log), strs(&[&format!("report {RESTARTED}")]));
-        assert_eq!(events, vec![ended(1, Ending::Restarted)]);
-        assert!(!log.iter().any(|l| l.starts_with("open")), "{log:?}");
+        assert_eq!(log.iter().filter(|l| l.starts_with("open")).count(), 2);
+        assert_eq!(reports(&log), strs(&["report a1"]));
+        assert_eq!(events, vec![ended(1, Ending::Answered)]);
+        let at = log.iter().rposition(|l| l == "cite t1").unwrap();
+        assert_eq!(
+            log[at - 2..at],
+            strs(&["verify", &format!("close {CONV}")])[..]
+        );
     }
 
     #[tokio::test]

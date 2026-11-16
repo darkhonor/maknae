@@ -2884,6 +2884,7 @@ mod tests {
             id: maknae_proto::TaskId([7; 16]),
             tasker: "uid:1000".into(),
             root: "users/1000".into(),
+            start: 0,
         };
         let cited = Stamp::Agent {
             agent: &hobi,
@@ -2957,6 +2958,7 @@ mod tests {
             id: maknae_proto::TaskId([7; 16]),
             tasker: "agent:jin".into(),
             root: "users/1000".into(),
+            start: 0,
         }));
         assert_eq!(shown(&cited), ["1000"]);
         assert!(shown(&decider(None)).is_empty());

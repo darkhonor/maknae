@@ -84,6 +84,9 @@ fn reply_wait(
         maknae_proto::Verb::AdminBaselineAccept { .. } => {
             maknae_config::BASELINE_ACCEPT_REPLY_STAGES
         }
+        maknae_proto::Verb::AdminHeldList { .. } | maknae_proto::Verb::AdminHeldRelease { .. } => {
+            maknae_config::HELD_REPLY_STAGES
+        }
         maknae_proto::Verb::TaskClaim { .. }
         | maknae_proto::Verb::TaskReport { .. }
         | maknae_proto::Verb::TaskSubmit { .. }
@@ -1212,6 +1215,20 @@ mod tests {
             (
                 maknae_proto::Verb::AdminBaselineAccept { hash: "h".into() },
                 maknae_config::BASELINE_ACCEPT_REPLY_STAGES,
+            ),
+            (
+                maknae_proto::Verb::AdminHeldList {
+                    filter: None,
+                    after: None,
+                },
+                maknae_config::HELD_REPLY_STAGES,
+            ),
+            (
+                maknae_proto::Verb::AdminHeldRelease {
+                    target: maknae_proto::HeldTarget::User(target()),
+                    after: None,
+                },
+                maknae_config::HELD_REPLY_STAGES,
             ),
         ] {
             assert!(stages > 0);

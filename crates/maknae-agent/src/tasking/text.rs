@@ -5,8 +5,7 @@ use maknae_proto::{AgentEntry, AgentStanding, TaskClose, TaskState};
 
 pub const NO_AGENTS: &str = "no agents can be tasked by you";
 pub const LIST_INCOMPLETE: &str = "the list may be incomplete; try again";
-pub const HELD: &str =
-    "on hold: its tasker or the agent was contained; only an administrator can release it (#632)";
+pub const HELD: &str = "on hold: its tasker or the agent was contained; an administrator can release it with maknae held release";
 pub const CONNECTING: &str = "connecting";
 pub const CONNECTED: &str = "connected";
 pub const UNREACHABLE: &str = "kernel unreachable, retrying";
@@ -223,7 +222,7 @@ mod tests {
         );
         assert_eq!(
             held_line(),
-            "on hold: its tasker or the agent was contained; only an administrator can release it (#632)"
+            "on hold: its tasker or the agent was contained; an administrator can release it with maknae held release"
         );
     }
 

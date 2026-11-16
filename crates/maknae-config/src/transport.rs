@@ -59,6 +59,13 @@ pub const CONTAINMENT_REPLY_STAGES: u64 = 10;
 pub const AGENT_LIST_REPLY_STAGES: u64 = 3;
 /// The bounded stages `admin.baseline.accept` passes through in sequence.
 pub const BASELINE_ACCEPT_REPLY_STAGES: u64 = 11;
+/// The bounded stages one held task's release passes through: the reload turn, the
+/// decision, the record, the store write and the corrective record.
+pub const HELD_TASK_STAGES: u64 = 5;
+/// The stage budget a held-task page's loop starts tasks within.
+pub const HELD_LOOP_STAGES: u64 = 10;
+/// The bounded stages a held-task list or release passes through: the account lookup and the loop.
+pub const HELD_REPLY_STAGES: u64 = 11;
 /// An admin live edit's unbounded work beyond its stages: the persist and the mirror render.
 pub const ADMIN_REPLY_MARGIN_MS: u64 = 10_000;
 /// How long the daemon waits for the peer's `maknae`-group lookup (NSS,

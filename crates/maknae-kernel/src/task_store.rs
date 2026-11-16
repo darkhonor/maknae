@@ -96,6 +96,10 @@ pub struct TaskRecord {
     /// The state a held task was in when it was held.
     #[serde(default)]
     pub held_from: Option<TaskState>,
+    #[serde(default)]
+    pub held_at: Option<i64>,
+    #[serde(default)]
+    pub held_for: Option<crate::task::Contained>,
     pub pending: bool,
     /// Set with `pending` when the record is being taken back, not awaiting its confirm.
     #[serde(default)]
@@ -114,6 +118,9 @@ pub struct TaskRecord {
     pub actions: u32,
     #[serde(default)]
     pub last_action: Option<i64>,
+    /// Started from `Queued` with no request citing it since, so a hand-out of it is fresh.
+    #[serde(default)]
+    pub unseen: bool,
 }
 
 mod arc_signed {
@@ -176,11 +183,14 @@ pub fn ordinal_key(tasker: &Tasker) -> String {
     }
 }
 
-/// In memory only; `lease_until` is never persisted.
+/// In memory only.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Hot {
     pub actions: u32,
     pub last_action: Option<i64>,
+    pub cited: bool,
+    /// The store-wide ordinal of the task's current start.
+    pub start: u64,
     pub lease_until: i64,
     /// No claim is handed this task before this time; `retry_secs` is the last wait.
     pub retry_after: i64,
@@ -702,7 +712,7 @@ impl TaskBlobs for MemTaskBlobs {
 mod tests {
     use super::*;
     use crate::enrollment::FixedEnrollment;
-    use crate::task::{Enrolled, TaskRefusal, TaskSigner, TaskStore};
+    use crate::task::{Contained, Enrolled, TaskRefusal, TaskSigner, TaskStore};
     use maknae_proto::{Ask, Bytes, Labels, TaskObject, TaskSignature, TaskSubmission};
     use maknae_state::envelope::{WrappingKey, KEY_LEN};
     use std::os::unix::fs::PermissionsExt;
@@ -805,7 +815,7 @@ mod tests {
             agent_uid: HOBI,
         };
         let t = store.mint(&Unverified, &v, enrolled, Tasker::Uid(1000), None, sub)?;
-        store.confirm(&t.task.task_id, None, None)?;
+        store.confirm(&t.task.task_id, None, crate::task::Confirm::Queued)?;
         Ok(t)
     }
 
@@ -814,8 +824,17 @@ mod tests {
         let t = tmp();
         let store = open_dir(t.path()).unwrap();
         let id = mint(&store).unwrap().task.task_id;
-        let before = encode(&store.record(&id).unwrap()).unwrap();
+        let mut rec = store.record(&id).unwrap();
         drop(store);
+        rec.state = TaskState::Held;
+        rec.held_from = Some(TaskState::Queued);
+        rec.held_at = Some(1_234);
+        rec.held_for = Some(Contained::Root);
+        let before = encode(&rec).unwrap();
+        let uid = nix::unistd::geteuid().as_raw();
+        let blobs = DirBlobs::open(t.path(), uid, key(), TASKS).unwrap();
+        TaskBlobs::save(&blobs, &name_of(&id), &before).unwrap();
+        drop(blobs);
         let raw = std::fs::read(t.path().join(format!("{id}.task"))).unwrap();
         assert!(!raw
             .windows(SENTINEL.len())
@@ -825,6 +844,29 @@ mod tests {
         let after = encode(&reopened.record(&id).unwrap()).unwrap();
         assert_eq!(*before, *after);
         assert!(reopened.take_boot_findings().is_empty());
+    }
+
+    #[test]
+    fn a_record_written_before_the_hold_fields_loads_with_none() {
+        let b = MemTaskBlobs::default();
+        let store = open_mem(&b);
+        let id = by_uid(&store, "old");
+        let mut rec = store.record(&id).unwrap();
+        rec.held_at = Some(1_234);
+        rec.held_for = Some(Contained::Tasker);
+        let mut value: ciborium::Value =
+            ciborium::from_reader(encode(&rec).unwrap().as_slice()).unwrap();
+        let ciborium::Value::Map(fields) = &mut value else {
+            panic!("a record encodes as a map");
+        };
+        let before = fields.len();
+        fields.retain(|(k, _)| !matches!(k.as_text(), Some("held_at" | "held_for")));
+        assert_eq!(fields.len(), before - 2);
+        let mut plain = Vec::new();
+        ciborium::into_writer(&value, &mut plain).unwrap();
+        b.put(&name_of(&id), &plain);
+        let loaded = read_record(&b, &name_of(&id)).unwrap();
+        assert_eq!((loaded.held_at, loaded.held_for), (None, None));
     }
 
     #[test]

@@ -92,8 +92,8 @@ pub use provider_choice::{
 pub use run::{
     accept_loop, handle, handle_with_attempt_caps, run, AcceptAnswer, AdminOps, AgentAdmission,
     BaselineOps, BoxFuture, ConfigView, Conn, ContainAnswer, ContainRequest, ContainmentOps,
-    ContainmentStatus, Corrective, KernelGraphStatus, PlaneAccept, ReleaseRequest, WhereCtx,
-    MAX_SUBJECT_USER_BYTES,
+    ContainmentStatus, Corrective, HeldOp, HeldRequest, KernelGraphStatus, PlaneAccept,
+    ReleaseRequest, WhereCtx, MAX_SUBJECT_USER_BYTES,
 };
 pub use sensitive_authz::SensitiveNow;
 pub use sensitive_authz::{sensitive_match, SensitiveMatch};
@@ -101,9 +101,10 @@ pub use sensitive_authz::{sensitive_match, SensitiveMatch};
 pub use session::AllowFacts;
 pub use session::{Facts, FactsGate, SessionChannel, SessionFacts, SessionRecord};
 pub use task::{
-    Claimed, Contained, Due, DueFor, Enrolled, GoodStanding, Heartbeat, Notice, PlaneSigner,
-    Submitter, TaskRefusal, TaskSigner, TaskStore, MAX_FOLLOW_UPS_PER_TASK,
-    MAX_HELD_REPORTS_PER_TASKER, MAX_LIVE_TASKS_PER_AGENT, MAX_LIVE_TASKS_PER_TASKER_PER_AGENT,
+    Claimed, Contained, Due, DueFor, Enrolled, GoodStanding, Heartbeat, HeldSelect, HeldTask,
+    Notice, PlaneSigner, ReleasePlan, ReleaseRefusal, Released, Submitter, TaskRefusal, TaskSigner,
+    TaskStore, MAX_FOLLOW_UPS_PER_TASK, MAX_HELD_REPORTS_PER_TASKER, MAX_LIVE_TASKS_PER_AGENT,
+    MAX_LIVE_TASKS_PER_TASKER_PER_AGENT,
 };
 #[cfg(any(test, feature = "hermetic-test-seam"))]
 pub use task::{TaskObjectForTest, UnverifiedSigner};

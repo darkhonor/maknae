@@ -317,6 +317,27 @@ fn hobi_account(uid: u32) -> Result<Option<maknae_io::HostAccount>, String> {
     }))
 }
 
+pub(crate) const HOBI_AND_JIN_HOSTS: maknae_authz_basic::HostLookups =
+    maknae_authz_basic::HostLookups {
+        account: hobi_and_jin_account,
+        daemons: no_daemons,
+        group: no_group,
+    };
+
+fn hobi_and_jin_account(uid: u32) -> Result<Option<maknae_io::HostAccount>, String> {
+    if uid != 2002 {
+        return hobi_account(uid);
+    }
+    Ok(Some(maknae_io::HostAccount {
+        uid,
+        name: "jin-svc".into(),
+        primary_gid: uid,
+        shell: "/usr/sbin/nologin".into(),
+        dir: "/var/empty".into(),
+        named_groups: Vec::new(),
+    }))
+}
+
 fn no_daemons() -> Result<maknae_io::DaemonFacts, String> {
     Ok(maknae_io::DaemonFacts {
         uids: Vec::new(),

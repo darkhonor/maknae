@@ -1152,6 +1152,13 @@ impl maknae_kernel::ContainmentOps for NoBaseline {
     ) -> maknae_kernel::BoxFuture<'a, maknae_kernel::ContainAnswer> {
         Box::pin(async { no_containment() })
     }
+    fn held<'a>(
+        &'a self,
+        _: maknae_kernel::HeldRequest<'a>,
+    ) -> maknae_kernel::BoxFuture<'a, Result<maknae_proto::Payload, maknae_kernel::ContainAnswer>>
+    {
+        Box::pin(async { Err(no_containment()) })
+    }
 }
 
 pub fn no_containment() -> maknae_kernel::ContainAnswer {
@@ -1177,9 +1184,40 @@ pub struct ScriptedContainment {
     requesters: Mutex<Vec<u32>>,
     denied: Option<&'static str>,
     actions: Mutex<Vec<maknae_security::Request>>,
+    held: Mutex<Vec<SeenHeld>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeenHeld {
+    pub requester: u32,
+    pub session: u64,
+    pub list: bool,
+    pub after: Option<maknae_proto::TaskCursor>,
+}
+
+pub fn scripted_held_page() -> maknae_proto::HeldPage {
+    maknae_proto::HeldPage {
+        entries: Vec::new(),
+        next: Some(maknae_proto::TaskCursor::from_seq(41)),
+    }
+}
+
+pub fn scripted_release_page() -> maknae_proto::ReleasePage {
+    maknae_proto::ReleasePage {
+        outcomes: vec![maknae_proto::ReleaseOutcome {
+            task: maknae_proto::TaskRef::from_id(&maknae_proto::TaskId([4; 16])),
+            result: maknae_proto::ReleaseResult::Released,
+            state: Some(maknae_proto::TaskState::Queued),
+            parent: None,
+        }],
+        next: Some(maknae_proto::TaskCursor::from_seq(42)),
+    }
 }
 
 impl ScriptedContainment {
+    pub fn held(&self) -> Vec<SeenHeld> {
+        self.held.lock().unwrap().clone()
+    }
     pub fn requesters(&self) -> Vec<u32> {
         self.requesters.lock().unwrap().clone()
     }
@@ -1255,6 +1293,30 @@ impl maknae_kernel::ContainmentOps for ScriptedContainment {
         let answer = self.answer();
         Box::pin(async move { answer })
     }
+    fn held<'a>(
+        &'a self,
+        req: maknae_kernel::HeldRequest<'a>,
+    ) -> maknae_kernel::BoxFuture<'a, Result<maknae_proto::Payload, maknae_kernel::ContainAnswer>>
+    {
+        let (list, after) = match req.op {
+            maknae_kernel::HeldOp::List { after, .. } => (true, after),
+            maknae_kernel::HeldOp::Release { after, .. } => (false, after),
+        };
+        self.held.lock().unwrap().push(SeenHeld {
+            requester: req.requester,
+            session: req.session,
+            list,
+            after: after.cloned(),
+        });
+        self.actions.lock().unwrap().push(req.action.clone());
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let answer = match (self.denied, list) {
+            (Some(why), _) => Err(maknae_kernel::ContainAnswer::Denied { why: why.into() }),
+            (None, true) => Ok(maknae_proto::Payload::HeldTasks(scripted_held_page())),
+            (None, false) => Ok(maknae_proto::Payload::HeldReleased(scripted_release_page())),
+        };
+        Box::pin(async move { answer })
+    }
 }
 
 pub fn scripted_containment(outcome: maknae_proto::ContainmentOutcome) -> Arc<ScriptedContainment> {
@@ -1265,6 +1327,7 @@ pub fn scripted_containment(outcome: maknae_proto::ContainmentOutcome) -> Arc<Sc
         requesters: Mutex::new(Vec::new()),
         denied: None,
         actions: Mutex::default(),
+        held: Mutex::default(),
     })
 }
 
@@ -1277,6 +1340,7 @@ pub fn denying_containment(why: &'static str) -> Arc<ScriptedContainment> {
         requesters: Mutex::new(Vec::new()),
         denied: Some(why),
         actions: Mutex::default(),
+        held: Mutex::default(),
     })
 }
 

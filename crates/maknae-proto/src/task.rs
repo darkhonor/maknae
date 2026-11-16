@@ -369,6 +369,94 @@ pub struct TaskPage {
     pub next: Option<TaskCursor>,
 }
 
+pub const HELD_PAGE_MAX: usize = 32;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum HeldCause {
+    Tasker,
+    Root,
+    Agent,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum HeldFilter {
+    User(crate::ContainTarget),
+    Agent(String),
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum HeldTarget {
+    Task(TaskRef),
+    User(crate::ContainTarget),
+    Agent(String),
+}
+
+/// `held_secs` is the epoch second the hold was written.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct HeldView {
+    pub view: TaskView,
+    pub tasker: String,
+    pub held_from: TaskState,
+    pub held_for: Option<HeldCause>,
+    pub held_secs: Option<i64>,
+}
+
+/// `next` is the store sequence to resume after.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct HeldPage {
+    pub entries: Vec<HeldView>,
+    pub next: Option<TaskCursor>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum ReleaseResult {
+    Released,
+    TaskerContained,
+    RootContained,
+    AgentContained,
+    TaskerUnresolved,
+    RootUnresolved,
+    ParentHeld,
+    NotHeld,
+    Unknown,
+    Unauthorized,
+    NotDone,
+    OutcomeUnknown,
+}
+
+/// `state` is the task's state after the attempt, `None` when it is unknown;
+/// `parent` is set only for `ParentHeld`.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ReleaseOutcome {
+    pub task: TaskRef,
+    pub result: ReleaseResult,
+    pub state: Option<TaskState>,
+    pub parent: Option<TaskRef>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ReleasePage {
+    pub outcomes: Vec<ReleaseOutcome>,
+    pub next: Option<TaskCursor>,
+}
+
+pub fn epoch_to_rfc3339(secs: u64, millis: u32) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (hh, mm, ss) = (rem / 3_600, (rem % 3_600) / 60, rem % 60);
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { year + 1 } else { year };
+    format!("{year:04}-{month:02}-{day:02}T{hh:02}:{mm:02}:{ss:02}.{millis:03}Z")
+}
+
 pub const AGENT_PAGE_MAX: usize = 256;
 pub const BANNER_TEXT_MAX: usize = 256;
 
@@ -547,10 +635,13 @@ pub struct TaskReportPage {
 }
 
 /// `signed` is the CBOR of a [`SignedTask`]; `partition` is relative to the agent's home.
+/// `fresh` when the task was started and no request has cited it since, so nothing kept
+/// from before the start may be resumed.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct TaskDelivery {
     pub signed: Bytes,
     pub partition: String,
+    pub fresh: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -1050,6 +1141,7 @@ mod tests {
             Payload::TaskDelivered(TaskDelivery {
                 signed: Bytes::new(text.as_bytes().to_vec().into()),
                 partition: "tasks/users/alex".into(),
+                fresh: true,
             }),
             Payload::TaskFollowUps(TaskFollowUps {
                 task: TaskRef::from_id(&TaskId([7; 16])),
@@ -1262,39 +1354,141 @@ mod tests {
         }
     }
 
+    fn held_view(held_for: Option<HeldCause>, optional: bool) -> HeldView {
+        HeldView {
+            view: TaskView {
+                task: TaskRef::from_id(&TaskId([7; 16])),
+                agent: "jin".into(),
+                state: TaskState::Held,
+                close: optional.then_some(TaskClose::AgentGone),
+                submitted_secs: 11,
+                elapsed_secs: 12,
+                actions: 3,
+                last_action_secs: optional.then_some(14),
+                cursor: TaskCursor::from_seq(9),
+            },
+            tasker: "uid 1234".into(),
+            held_from: TaskState::Working,
+            held_for,
+            held_secs: optional.then_some(15),
+        }
+    }
+
     #[test]
-    fn agent_list_round_trips() {
-        let req = crate::Request {
-            protocol_version: crate::PROTOCOL_VERSION,
-            verb: crate::Verb::AgentList {
+    fn agent_and_held_pages_round_trip() {
+        let requests = [
+            crate::Verb::AgentList {
                 after: Some("hobi".into()),
             },
-            task: None,
-        };
-        let bytes = crate::encode_request(&req).unwrap();
-        let back = crate::decode_request(&bytes).unwrap();
-        assert_eq!(back, req);
-        assert_eq!(crate::encode_request(&back).unwrap(), bytes);
-        let resp = crate::Response {
-            protocol_version: crate::PROTOCOL_VERSION,
-            result: crate::RespResult::Ok(crate::Payload::Agents(AgentPage {
-                entries: vec![AgentEntry {
-                    agent: "hobi".into(),
-                    standing: AgentStanding::Contained,
-                    waiting: 2,
-                }],
-                next: Some("hobi".into()),
-                undecided: 1,
-                banner: Some(BannerSpec {
-                    text: "lab".into(),
-                    color: Some(BannerColor::Rgb(1, 2, 3)),
-                }),
-            })),
-        };
-        let bytes = crate::encode_response(&resp).unwrap();
-        let back = crate::decode_response(&bytes).unwrap();
-        assert_eq!(back, resp);
-        assert_eq!(crate::encode_response(&back).unwrap(), bytes);
+            crate::Verb::AdminHeldList {
+                filter: None,
+                after: None,
+            },
+            crate::Verb::AdminHeldList {
+                filter: Some(HeldFilter::User(crate::ContainTarget::Name(
+                    "daemon".into(),
+                ))),
+                after: Some(TaskCursor::from_seq(3)),
+            },
+            crate::Verb::AdminHeldList {
+                filter: Some(HeldFilter::Agent("jin".into())),
+                after: None,
+            },
+            crate::Verb::AdminHeldRelease {
+                target: HeldTarget::Task(TaskRef::from_id(&TaskId([1; 16]))),
+                after: None,
+            },
+            crate::Verb::AdminHeldRelease {
+                target: HeldTarget::User(crate::ContainTarget::Uid(4242)),
+                after: Some(TaskCursor::from_seq(5)),
+            },
+            crate::Verb::AdminHeldRelease {
+                target: HeldTarget::Agent("hobi".into()),
+                after: None,
+            },
+        ];
+        for verb in requests {
+            let req = crate::Request {
+                protocol_version: crate::PROTOCOL_VERSION,
+                verb,
+                task: None,
+            };
+            let bytes = crate::encode_request(&req).unwrap();
+            let back = crate::decode_request(&bytes).unwrap();
+            assert_eq!(back, req);
+            assert_eq!(crate::encode_request(&back).unwrap(), bytes);
+        }
+        let agents = crate::Payload::Agents(AgentPage {
+            entries: vec![AgentEntry {
+                agent: "hobi".into(),
+                standing: AgentStanding::Contained,
+                waiting: 2,
+            }],
+            next: Some("hobi".into()),
+            undecided: 1,
+            banner: Some(BannerSpec {
+                text: "lab".into(),
+                color: Some(BannerColor::Rgb(1, 2, 3)),
+            }),
+        });
+        let held = crate::Payload::HeldTasks(HeldPage {
+            entries: [
+                Some(HeldCause::Tasker),
+                Some(HeldCause::Root),
+                Some(HeldCause::Agent),
+                None,
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(i, cause)| held_view(cause, i % 2 == 0))
+            .collect(),
+            next: Some(TaskCursor::from_seq(9)),
+        });
+        let empty_held = crate::Payload::HeldTasks(HeldPage {
+            entries: vec![],
+            next: None,
+        });
+        let results = [
+            ReleaseResult::Released,
+            ReleaseResult::TaskerContained,
+            ReleaseResult::RootContained,
+            ReleaseResult::AgentContained,
+            ReleaseResult::TaskerUnresolved,
+            ReleaseResult::RootUnresolved,
+            ReleaseResult::ParentHeld,
+            ReleaseResult::NotHeld,
+            ReleaseResult::Unknown,
+            ReleaseResult::Unauthorized,
+            ReleaseResult::NotDone,
+            ReleaseResult::OutcomeUnknown,
+        ];
+        let released = crate::Payload::HeldReleased(ReleasePage {
+            outcomes: results
+                .into_iter()
+                .map(|result| ReleaseOutcome {
+                    task: TaskRef::from_id(&TaskId([2; 16])),
+                    result,
+                    state: (!matches!(
+                        result,
+                        ReleaseResult::Unknown | ReleaseResult::OutcomeUnknown
+                    ))
+                    .then_some(TaskState::Queued),
+                    parent: (result == ReleaseResult::ParentHeld)
+                        .then(|| TaskRef::from_id(&TaskId([3; 16]))),
+                })
+                .collect(),
+            next: None,
+        });
+        for payload in [agents, held, empty_held, released] {
+            let resp = crate::Response {
+                protocol_version: crate::PROTOCOL_VERSION,
+                result: crate::RespResult::Ok(payload),
+            };
+            let bytes = crate::encode_response(&resp).unwrap();
+            let back = crate::decode_response(&bytes).unwrap();
+            assert_eq!(back, resp);
+            assert_eq!(crate::encode_response(&back).unwrap(), bytes);
+        }
     }
 
     #[test]
@@ -1330,6 +1524,63 @@ mod tests {
             "{}",
             bytes.len()
         );
+    }
+
+    fn assert_fits_a_control_frame(payload: crate::Payload) {
+        let resp = crate::Response {
+            protocol_version: crate::PROTOCOL_VERSION,
+            result: crate::RespResult::Ok(payload),
+        };
+        let bytes = crate::encode_response(&resp).unwrap();
+        assert!(
+            bytes.len() <= crate::CONTROL_RESPONSE_MAX,
+            "{}",
+            bytes.len()
+        );
+    }
+
+    fn maximal_ref() -> TaskRef {
+        TaskRef::from_id(&TaskId([0xff; 16]))
+    }
+
+    #[test]
+    fn a_maximal_held_page_fits_a_control_frame() {
+        let entry = HeldView {
+            view: TaskView {
+                task: maximal_ref(),
+                agent: "a".repeat(32),
+                state: TaskState::Held,
+                close: Some(TaskClose::AgentGone),
+                submitted_secs: i64::MAX,
+                elapsed_secs: u64::MAX,
+                actions: u32::MAX,
+                last_action_secs: Some(i64::MAX),
+                cursor: TaskCursor::from_seq(u64::MAX),
+            },
+            tasker: "é".repeat(128),
+            held_from: TaskState::Reported,
+            held_for: Some(HeldCause::Tasker),
+            held_secs: Some(i64::MAX),
+        };
+        assert_eq!(entry.tasker.len(), 256);
+        assert_fits_a_control_frame(crate::Payload::HeldTasks(HeldPage {
+            entries: vec![entry; HELD_PAGE_MAX],
+            next: Some(TaskCursor::from_seq(u64::MAX)),
+        }));
+    }
+
+    #[test]
+    fn a_maximal_release_page_fits_a_control_frame() {
+        let outcome = ReleaseOutcome {
+            task: maximal_ref(),
+            result: ReleaseResult::OutcomeUnknown,
+            state: Some(TaskState::Reported),
+            parent: Some(maximal_ref()),
+        };
+        assert_fits_a_control_frame(crate::Payload::HeldReleased(ReleasePage {
+            outcomes: vec![outcome; HELD_PAGE_MAX],
+            next: Some(TaskCursor::from_seq(u64::MAX)),
+        }));
     }
 
     #[test]
@@ -1450,5 +1701,24 @@ mod tests {
             assert!(is_display_unsafe(c), "{c:?}");
         }
         assert!(!is_display_unsafe('a') && !is_display_unsafe('é'));
+    }
+
+    #[test]
+    fn epochs_format_as_rfc3339_utc_with_milliseconds() {
+        for (secs, millis, want) in [
+            (0, 0, "1970-01-01T00:00:00.000Z"),
+            (1_700_000_000, 250, "2023-11-14T22:13:20.250Z"),
+            (1_709_164_800, 7, "2024-02-29T00:00:00.007Z"),
+            (1_709_251_199, 999, "2024-02-29T23:59:59.999Z"),
+            (1_709_251_200, 0, "2024-03-01T00:00:00.000Z"),
+            (1_735_689_599, 0, "2024-12-31T23:59:59.000Z"),
+            (951_782_400, 0, "2000-02-29T00:00:00.000Z"),
+            (951_868_800, 0, "2000-03-01T00:00:00.000Z"),
+            (4_107_456_000, 0, "2100-02-28T00:00:00.000Z"),
+            (4_107_542_400, 0, "2100-03-01T00:00:00.000Z"),
+            (13_574_563_200, 0, "2400-02-29T00:00:00.000Z"),
+        ] {
+            assert_eq!(epoch_to_rfc3339(secs, millis), want, "{secs}");
+        }
     }
 }

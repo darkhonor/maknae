@@ -194,6 +194,7 @@ mod tests {
         let delivery = TaskDelivery {
             signed: maknae_proto::Bytes::new(zeroize::Zeroizing::new(vec![0x5a; over])),
             partition: "tasks/users/1000".into(),
+            fresh: true,
         };
         let big_reply = maknae_proto::PromptReply {
             reasoning: None,
@@ -255,6 +256,7 @@ mod tests {
         let delivery = TaskDelivery {
             signed: maknae_proto::Bytes::new(zeroize::Zeroizing::new(vec![0x5a; over])),
             partition: "tasks/users/1000".into(),
+            fresh: true,
         };
         let plane = plane(vec![RespResult::Ok(Payload::TaskDelivered(delivery))]);
         let got = plane.tasks().claim().await;

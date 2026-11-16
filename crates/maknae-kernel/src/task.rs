@@ -36,6 +36,12 @@ pub struct GoodStanding {
     pub load: Load,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Confirm {
+    Queued,
+    Held(Option<Contained>),
+}
+
 /// The trail's reason for a hold.
 pub(crate) fn held_reason(who: Contained, agent: &AgentId) -> String {
     match who {
@@ -45,27 +51,49 @@ pub(crate) fn held_reason(who: Contained, agent: &AgentId) -> String {
     }
 }
 
-/// Who, of `rec`'s tasker, root and agent, the view holds contained.
-fn contained_in(view: &dyn EnrollmentView, rec: &TaskRecord) -> Option<Contained> {
-    let of = |t: &Tasker| match t {
+fn tasker_uid(tasker: &Tasker) -> Option<u32> {
+    match tasker {
         Tasker::Uid(uid) | Tasker::Agent { uid, .. } => Some(*uid),
         Tasker::Remote(_) => None,
-    };
-    let root = match &rec.root {
+    }
+}
+
+fn root_uid(view: &dyn EnrollmentView, root: &RootTasker) -> Option<u32> {
+    match root {
         RootTasker::Person { uid } => Some(*uid),
         RootTasker::Agent { agent } => AgentId::parse(agent)
             .ok()
             .and_then(|agent| view.agent_uid(&agent)),
-    };
+    }
+}
+
+/// Who, of `rec`'s tasker, root and agent, the view holds contained.
+fn contained_in(view: &dyn EnrollmentView, rec: &TaskRecord) -> Option<Contained> {
     let contained = |uid: u32| view.contained(uid);
-    if of(&rec.tasker).is_some_and(contained) {
+    if tasker_uid(&rec.tasker).is_some_and(contained) {
         Some(Contained::Tasker)
-    } else if root.is_some_and(contained) {
+    } else if root_uid(view, &rec.root).is_some_and(contained) {
         Some(Contained::Root)
     } else if open(rec) && contained(rec.agent_uid) {
         Some(Contained::Agent)
     } else {
         None
+    }
+}
+
+/// A tasker or root that is an agent the view no longer resolves, whose containment
+/// therefore cannot be judged.
+fn unresolved(view: &dyn EnrollmentView, rec: &TaskRecord) -> Option<ReleaseRefusal> {
+    let gone = |agent: &str| {
+        AgentId::parse(agent)
+            .ok()
+            .and_then(|agent| view.agent_uid(&agent))
+            .is_none()
+    };
+    match (&rec.tasker, &rec.root) {
+        (Tasker::Agent { agent, .. }, _) if gone(agent) => Some(ReleaseRefusal::TaskerUnresolved),
+        (_, RootTasker::Agent { agent }) if gone(agent) => Some(ReleaseRefusal::RootUnresolved),
+        _ => None,
     }
 }
 
@@ -79,11 +107,98 @@ pub enum DueFor {
 
 /// Who is contained, for a task that is held: its agent, the tasker who gave it, or the
 /// person or agent at the root of its chain.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Contained {
     Tasker,
     Root,
     Agent,
+}
+
+/// The held tasks an administrator names: every one, or those whose tasker, root or
+/// agent is the uid, or is the agent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeldSelect<'a> {
+    Every,
+    Uid(u32),
+    Agent(&'a AgentId),
+}
+
+/// A held task, as an administrator lists it; `held_from` reads `Held` when the record
+/// does not name it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeldTask {
+    pub seq: u64,
+    pub view: TaskView,
+    pub tasker: Tasker,
+    pub held_from: TaskState,
+    pub held_for: Option<Contained>,
+    pub held_at: Option<i64>,
+}
+
+/// What a release of `task` would do, as decided before it is recorded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReleasePlan {
+    pub task: TaskId,
+    pub agent: AgentId,
+    pub tasker: Tasker,
+    pub parent: Option<TaskId>,
+    pub from: TaskState,
+    pub to: TaskState,
+}
+
+/// A stored release; `rseq` is the report ordinal issued again for a held report.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Released {
+    pub task: TaskId,
+    pub from: TaskState,
+    pub now: TaskState,
+    pub rseq: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReleaseRefusal {
+    Unknown,
+    NotHeld,
+    ParentHeld(TaskId),
+    StillContained(Contained),
+    TaskerUnresolved,
+    RootUnresolved,
+    NotDone(String),
+    OutcomeUnknown(String),
+}
+
+fn selected(view: &dyn EnrollmentView, rec: &TaskRecord, select: HeldSelect<'_>) -> bool {
+    match select {
+        HeldSelect::Every => true,
+        HeldSelect::Uid(uid) => {
+            tasker_uid(&rec.tasker) == Some(uid)
+                || root_uid(view, &rec.root) == Some(uid)
+                || rec.agent_uid == uid
+        }
+        HeldSelect::Agent(agent) => {
+            matches!(&rec.tasker, Tasker::Agent { agent: a, .. } if a == agent.as_str())
+                || matches!(&rec.root, RootTasker::Agent { agent: a } if a == agent.as_str())
+                || rec.agent == *agent
+        }
+    }
+}
+
+fn release_state(from: TaskState) -> TaskState {
+    match from {
+        TaskState::Working => TaskState::Queued,
+        TaskState::Queued | TaskState::Reported | TaskState::Closed | TaskState::Held => from,
+    }
+}
+
+fn unreleased(refused: TaskRefusal) -> ReleaseRefusal {
+    match refused {
+        TaskRefusal::Unavailable(why) => ReleaseRefusal::OutcomeUnknown(
+            why.strip_prefix(OUTCOME_UNKNOWN)
+                .map_or_else(|| why.clone(), str::to_owned),
+        ),
+        TaskRefusal::Store(why) => ReleaseRefusal::NotDone(why),
+        other => ReleaseRefusal::NotDone(other.to_string()),
+    }
 }
 
 /// A close or an expiry the kernel records before it asks the store to perform it.
@@ -125,9 +240,11 @@ pub enum Notice {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Claimed {
+    /// `fresh` from the task's start from `Queued` until a request cites it.
     Delivered {
         signed: Arc<SignedTask>,
         partition: String,
+        fresh: bool,
     },
     Idle,
 }
@@ -268,6 +385,7 @@ fn leaf_of(identity: Option<&maknae_vault::PlaneIdentity>) -> Option<[u8; 32]> {
 struct Held {
     tasks: BTreeMap<TaskId, TaskRecord>,
     hot: HashMap<TaskId, Hot>,
+    starts: u64,
     generations: BTreeMap<AgentId, u64>,
     enrolled: BTreeMap<AgentId, u32>,
     issued: Counters,
@@ -298,6 +416,12 @@ struct Held {
 }
 
 impl Held {
+    fn start(&mut self, id: TaskId, lease: i64) {
+        self.starts += 1;
+        let hot = self.hot.entry(id).or_default();
+        (hot.lease_until, hot.cited, hot.start) = (lease, false, self.starts);
+    }
+
     fn generation(&self, agent: &AgentId) -> u64 {
         self.generations.get(agent).copied().unwrap_or(0)
     }
@@ -397,6 +521,63 @@ impl Held {
             self.take_back(id);
         }
         !held
+    }
+
+    fn held_page(
+        &self,
+        view: &dyn EnrollmentView,
+        select: HeldSelect<'_>,
+        after: Option<u64>,
+        limit: usize,
+    ) -> (Vec<&TaskRecord>, Option<u64>) {
+        debug_assert!(limit > 0);
+        let mut page: Vec<&TaskRecord> = self
+            .tasks
+            .values()
+            .filter(|r| !r.pending && r.state == TaskState::Held)
+            .filter(|r| after.is_none_or(|a| r.seq > a))
+            .filter(|r| selected(view, r, select))
+            .collect();
+        page.sort_by_key(|r| r.seq);
+        let more = page.len() > limit;
+        page.truncate(limit);
+        let next = more.then(|| page.last().map(|r| r.seq)).flatten();
+        (page, next)
+    }
+
+    fn releasable(
+        &self,
+        id: &TaskId,
+        view: &dyn EnrollmentView,
+    ) -> Result<(TaskRecord, TaskState, TaskState), ReleaseRefusal> {
+        let rec = self.live(id).ok_or(ReleaseRefusal::Unknown)?;
+        if rec.state != TaskState::Held {
+            return Err(ReleaseRefusal::NotHeld);
+        }
+        let from = rec
+            .held_from
+            .filter(|s| *s != TaskState::Held)
+            .ok_or_else(|| {
+                ReleaseRefusal::NotDone(
+                    "the record does not name the state it was held from".into(),
+                )
+            })?;
+        let parent_held = |p: &TaskId| {
+            self.holding.contains_key(p) || self.live(p).is_some_and(|r| r.state == TaskState::Held)
+        };
+        if let Some(parent) = rec.parent.filter(parent_held) {
+            return Err(ReleaseRefusal::ParentHeld(parent));
+        }
+        let to = release_state(from);
+        let mut after = rec.clone();
+        after.state = to;
+        if let Some(who) = contained_in(view, &after) {
+            return Err(ReleaseRefusal::StillContained(who));
+        }
+        if let Some(refusal) = unresolved(view, &after) {
+            return Err(refusal);
+        }
+        Ok((rec.clone(), from, to))
     }
 
     fn take_back(&mut self, id: &TaskId) {
@@ -542,7 +723,7 @@ impl TaskStore {
             (Err(e), Some(_)) => {
                 self.held()
                     .owe(&id, format!("written unsynced ({why}), not undone ({e})"));
-                Err(TaskRefusal::Unavailable(format!("outcome unknown: {why}")))
+                Err(TaskRefusal::Unavailable(format!("{OUTCOME_UNKNOWN}{why}")))
             }
         }
     }
@@ -961,15 +1142,18 @@ impl TaskStore {
     /// Writes the marked task `id` held, keeping the state it was in; memory follows only
     /// a synced write. The caller holds the writer.
     fn hold_durably(&self, id: &TaskId) -> bool {
-        let (prior, hot) = {
+        let (prior, hot, cause) = {
             let held = self.held();
             let Some(prior) = held.live(id).cloned() else {
                 return true;
             };
-            (prior, held.hot.get(id).copied().unwrap_or_default())
+            let hot = held.hot.get(id).copied().unwrap_or_default();
+            (prior, hot, held.holding.get(id).copied())
         };
         let mut next = prior.clone();
         next.held_from = Some(prior.state);
+        next.held_for = cause;
+        next.held_at = Some(self.clock.now_secs());
         next.state = TaskState::Held;
         next.actions = hot.actions;
         next.last_action = hot.last_action;
@@ -989,6 +1173,106 @@ impl TaskStore {
                 false
             }
         }
+    }
+
+    /// The held tasks `select` picks, after the store-wide `seq` `after`, at most `limit`;
+    /// the second value is the cursor of the last one when more remain.
+    pub fn held_tasks(
+        &self,
+        view: &dyn EnrollmentView,
+        select: HeldSelect<'_>,
+        after: Option<u64>,
+        limit: usize,
+    ) -> (Vec<HeldTask>, Option<u64>) {
+        let held = self.held();
+        let (page, next) = held.held_page(view, select, after, limit);
+        let tasks = page
+            .into_iter()
+            .map(|r| HeldTask {
+                seq: r.seq,
+                view: self.view_of(&held, r),
+                tasker: r.tasker.clone(),
+                held_from: r.held_from.unwrap_or(TaskState::Held),
+                held_for: r.held_for,
+                held_at: r.held_at,
+            })
+            .collect();
+        (tasks, next)
+    }
+
+    /// [`TaskStore::held_tasks`], as ids.
+    pub fn held_seqs(
+        &self,
+        view: &dyn EnrollmentView,
+        select: HeldSelect<'_>,
+        after: Option<u64>,
+        limit: usize,
+    ) -> (Vec<(u64, TaskId)>, Option<u64>) {
+        let held = self.held();
+        let (page, next) = held.held_page(view, select, after, limit);
+        let ids = page
+            .into_iter()
+            .map(|r| (r.seq, r.signed.task.task_id))
+            .collect();
+        (ids, next)
+    }
+
+    /// What [`TaskStore::release`] would do now; no I/O.
+    pub fn release_plan(
+        &self,
+        id: &TaskId,
+        view: &dyn EnrollmentView,
+    ) -> Result<ReleasePlan, ReleaseRefusal> {
+        let (rec, from, to) = self.held().releasable(id, view)?;
+        Ok(ReleasePlan {
+            task: *id,
+            agent: rec.agent,
+            tasker: rec.tasker,
+            parent: rec.parent,
+            from,
+            to,
+        })
+    }
+
+    /// Writes the held task `id` in the state it was held from, a working task queued
+    /// again and a report under a new report ordinal; memory follows only a synced write.
+    /// Every check of [`TaskStore::release_plan`] is made again under the writer, and a
+    /// containment installed meanwhile marks the task due a hold again.
+    pub fn release(
+        &self,
+        id: &TaskId,
+        view: &dyn EnrollmentView,
+    ) -> Result<Released, ReleaseRefusal> {
+        let _w = self.writing();
+        let (prior, from, to) = self.held().releasable(id, view)?;
+        let mut next = prior.clone();
+        next.state = to;
+        (next.held_from, next.held_for, next.held_at) = (None, None, None);
+        if from == TaskState::Working {
+            next.claimed = None;
+        }
+        if prior.rseq.is_some() {
+            next.rseq = Some(self.issue_report(&prior.tasker).map_err(unreleased)?);
+            let now = self.clock.now_secs();
+            if let Some((_, at)) = next.report.as_mut() {
+                *at = now;
+            }
+        }
+        self.write(&next, Some(&prior)).map_err(unreleased)?;
+        {
+            let mut held = self.held();
+            if let Some(hot) = held.hot.get_mut(id).filter(|_| from == TaskState::Working) {
+                (hot.lease_until, hot.retry_after, hot.retry_secs) = (0, 0, 0);
+            }
+            held.tasks.insert(*id, next.clone());
+        }
+        self.mark_unenrolled(view);
+        Ok(Released {
+            task: *id,
+            from,
+            now: to,
+            rseq: next.rseq,
+        })
     }
 
     /// Stores each working task's action counters that changed, until the disk first
@@ -1016,6 +1300,7 @@ impl TaskStore {
             let mut next = prior.clone();
             next.actions = hot.actions;
             next.last_action = hot.last_action;
+            next.unseen &= !hot.cited;
             if self.write(&next, Some(&prior)).is_err() {
                 break;
             }
@@ -1185,6 +1470,8 @@ impl TaskStore {
             state: TaskState::Queued,
             close: None,
             held_from: None,
+            held_at: None,
+            held_for: None,
             pending: true,
             removing: false,
             seq,
@@ -1196,6 +1483,7 @@ impl TaskStore {
             report: None,
             actions: 0,
             last_action: None,
+            unseen: false,
         };
         self.write(&rec, None)?;
         if let Some(t) = ticket {
@@ -1419,7 +1707,8 @@ impl TaskStore {
         self.resign_if_stale(&id, agent, uid, signer)?;
         let moved = || TaskRefusal::Unavailable(MOVED.into());
         let lease = self.clock.now_secs() + CLAIM_LEASE.as_secs() as i64;
-        let delivered = |rec: &TaskRecord| Claimed::Delivered {
+        let delivered = |rec: &TaskRecord, fresh: bool| Claimed::Delivered {
+            fresh,
             signed: rec.signed.clone(),
             partition: format!(
                 "{}/{}",
@@ -1434,7 +1723,8 @@ impl TaskStore {
                     .held_by(&id, agent, uid)
                     .filter(|r| r.state == TaskState::Working)
                     .ok_or_else(moved)?;
-                let handed = delivered(rec);
+                let cited = held.hot.get(&id).is_some_and(|h| h.cited);
+                let handed = delivered(rec, rec.unseen && !cited);
                 held.hot.entry(id).or_default().lease_until = lease;
                 Ok(handed)
             }
@@ -1450,10 +1740,11 @@ impl TaskStore {
                 let mut next = prior.clone();
                 next.state = TaskState::Working;
                 next.claimed = Some(self.clock.now_secs());
+                next.unseen = true;
                 self.write(&next, Some(&prior))?;
-                let handed = delivered(&next);
+                let handed = delivered(&next, true);
                 let mut held = self.held();
-                held.hot.entry(id).or_default().lease_until = lease;
+                held.start(id, lease);
                 held.tasks.insert(id, next);
                 match held.closing.contains_key(&id) || held.holding.contains_key(&id) {
                     true => Err(TaskRefusal::AgentGone),
@@ -1546,13 +1837,15 @@ impl TaskStore {
     }
 
     /// One decided request citing the working task `id`: counted, and the lease renewed.
-    pub fn acted(&self, id: &TaskId) {
+    /// It marks the start seen only when it was resolved against that start.
+    pub fn acted(&self, id: &TaskId, start: u64) {
         let now = self.clock.now_secs();
         let mut held = self.held();
         if held.live(id).is_some_and(|r| r.state == TaskState::Working) {
             let hot = held.hot.entry(*id).or_default();
             hot.actions = hot.actions.saturating_add(1);
             hot.last_action = Some(now);
+            hot.cited |= hot.start == start;
             hot.lease_until = now + CLAIM_LEASE.as_secs() as i64;
         }
     }
@@ -1618,9 +1911,9 @@ impl TaskStore {
         let gone = taken;
         match self.held().exposed.values().any(acked) {
             false => Ok(gone),
-            true => Err(TaskRefusal::Unavailable(
-                "outcome unknown: the acknowledgement is left to a later store write".into(),
-            )),
+            true => Err(TaskRefusal::Unavailable(format!(
+                "{OUTCOME_UNKNOWN}the acknowledgement is left to a later store write"
+            ))),
         }
     }
 
@@ -1654,8 +1947,8 @@ impl TaskStore {
     }
 
     /// Makes a minted task visible, once its submission is audited. A task marked due a
-    /// hold is refused until the caller has recorded the hold and passes `held_for`; it
-    /// is then stored held, never queued. The `ticket` is
+    /// hold is refused until the caller has recorded the hold and passes `Confirm::Held`
+    /// with the cause that record named; it is then stored held, never queued. The `ticket` is
     /// kept before anything is written: a submission that gave up first leaves the record
     /// pending, and one that gives up later can only call the outcome unknown. A write
     /// that fails once kept is taken back.
@@ -1663,7 +1956,7 @@ impl TaskStore {
         &self,
         id: &TaskId,
         ticket: Option<&Ticket>,
-        held_for: Option<Contained>,
+        how: Confirm,
     ) -> Result<(), TaskRefusal> {
         let _w = self.writing();
         let mut next = {
@@ -1674,7 +1967,7 @@ impl TaskStore {
                 .filter(|r| r.pending)
                 .cloned()
                 .ok_or(TaskRefusal::Unknown)?;
-            if held_for.is_none() && held.holding.contains_key(id) {
+            if how == Confirm::Queued && held.holding.contains_key(id) {
                 return Err(TaskRefusal::Unavailable(DUE_A_HOLD.into()));
             }
             if ticket.is_some_and(|t| !t.keep(*id)) {
@@ -1684,8 +1977,10 @@ impl TaskStore {
             prior
         };
         next.pending = false;
-        if held_for.is_some() {
+        if let Confirm::Held(cause) = how {
             next.held_from = Some(next.state);
+            next.held_for = cause;
+            next.held_at = Some(self.clock.now_secs());
             next.state = TaskState::Held;
         }
         let late = |failed: Option<String>| Notice::Late {
@@ -1734,6 +2029,7 @@ impl TaskStore {
             Some((TaskState::Working, root)) => Ok(CitedTask {
                 signed,
                 root: root.clone(),
+                start: held.hot.get(id).map_or(0, |h| h.start),
             }),
             Some((
                 TaskState::Queued | TaskState::Reported | TaskState::Closed | TaskState::Held,
@@ -1986,6 +2282,8 @@ impl TaskStore {
             state: TaskState::Queued,
             close: None,
             held_from: None,
+            held_at: None,
+            held_for: None,
             pending: false,
             removing: false,
             seq,
@@ -1997,6 +2295,7 @@ impl TaskStore {
             report: None,
             actions: 0,
             last_action: None,
+            unseen: false,
         };
         self.write(&rec, None)
             .expect("the test store writes the task");
@@ -2013,11 +2312,12 @@ impl TaskStore {
         let mut next = prior.clone();
         next.state = TaskState::Working;
         next.claimed = Some(self.clock.now_secs());
+        next.unseen = true;
         self.write(&next, Some(&prior))
             .expect("the test store writes the task");
         let lease = self.clock.now_secs() + CLAIM_LEASE.as_secs() as i64;
         let mut held = self.held();
-        held.hot.entry(*id).or_default().lease_until = lease;
+        held.start(*id, lease);
         held.tasks.insert(*id, next);
     }
 
@@ -2027,6 +2327,7 @@ impl TaskStore {
         let hot = held.hot.entry(*id).or_default();
         hot.actions += 1;
         hot.last_action = Some(at);
+        hot.cited = true;
     }
 
     #[cfg(any(test, feature = "hermetic-test-seam"))]
@@ -2046,7 +2347,7 @@ impl TaskStore {
         sub: TaskSubmission,
     ) -> Result<Arc<SignedTask>, TaskRefusal> {
         let t = self.mint(signer, view, enrolled, tasker, parent, sub)?;
-        self.confirm(&t.task.task_id, None, None)?;
+        self.confirm(&t.task.task_id, None, Confirm::Queued)?;
         Ok(t)
     }
 
@@ -2063,7 +2364,7 @@ impl TaskStore {
         sub: TaskSubmission,
     ) -> Result<Arc<SignedTask>, TaskRefusal> {
         let t = self.mint_with(draw, signer, view, enrolled, tasker, parent, sub, None)?;
-        self.confirm(&t.task.task_id, None, None)?;
+        self.confirm(&t.task.task_id, None, Confirm::Queued)?;
         Ok(t)
     }
 
@@ -2162,7 +2463,9 @@ impl Drop for PutBack<'_> {
 }
 
 fn drop_owed() -> TaskRefusal {
-    TaskRefusal::Unavailable("outcome unknown: the drop is left to a later store write".into())
+    TaskRefusal::Unavailable(format!(
+        "{OUTCOME_UNKNOWN}the drop is left to a later store write"
+    ))
 }
 
 fn abandoned() -> TaskRefusal {
@@ -2210,6 +2513,7 @@ fn tasker_room(held: &Held, tasker: &Tasker, agent: &AgentId) -> Result<(), Task
 pub struct CitedTask {
     pub signed: Arc<SignedTask>,
     pub root: RootTasker,
+    pub start: u64,
 }
 
 /// A sub-task works in its parent's partition, and is taken only while that parent is
@@ -2425,16 +2729,18 @@ where
     let left = deadline.saturating_duration_since(tokio::time::Instant::now());
     match crate::mutation::blocking(uid, left, f).await {
         Ok(done) => done,
-        Err(crate::mutation::Blocked::NotStarted) => Err(TaskRefusal::Unavailable(
-            "not done: the task store was busy".into(),
-        )),
+        Err(crate::mutation::Blocked::NotStarted) => {
+            Err(TaskRefusal::Unavailable(format!("not done: {BUSY}")))
+        }
         Err(crate::mutation::Blocked::Unknown) => {
-            Err(TaskRefusal::Unavailable(format!("outcome unknown: {LATE}")))
+            Err(TaskRefusal::Unavailable(format!("{OUTCOME_UNKNOWN}{LATE}")))
         }
     }
 }
 
-const LATE: &str = "the task store did not answer in time";
+pub(crate) const OUTCOME_UNKNOWN: &str = "outcome unknown: ";
+pub(crate) const LATE: &str = "the task store did not answer in time";
+pub(crate) const BUSY: &str = "the task store was busy";
 
 /// What a submission says of a confirm that did not answer `Ok`. Once the confirm kept
 /// the ticket the record may be stored, so the outcome is unknown and nothing is taken
@@ -2447,13 +2753,13 @@ async fn unconfirmed(
     kept: bool,
     refusal: TaskRefusal,
 ) -> (TaskRefusal, String) {
-    let late = format!("outcome unknown: {LATE}");
+    let late = format!("{OUTCOME_UNKNOWN}{LATE}");
     match (kept, refusal) {
-        (true, TaskRefusal::Unavailable(why)) if why == late => {
-            (TaskRefusal::Unavailable(late.clone()), late)
+        (true, TaskRefusal::Unavailable(why)) if why.starts_with(OUTCOME_UNKNOWN) => {
+            (TaskRefusal::Unavailable(why.clone()), why)
         }
         (true, other) => {
-            let said = format!("outcome unknown: {other}");
+            let said = format!("{OUTCOME_UNKNOWN}{other}");
             (TaskRefusal::Unavailable(said.clone()), said)
         }
         (false, refusal) => {
@@ -2601,16 +2907,19 @@ async fn submit_under<P: Authorizer + Send + Sync + 'static>(
         (Ok(task), Ok(())) => {
             let id = task.task.task_id;
             let ticket = Arc::new(Ticket::default());
-            let mut held_for = store.hold_mark(&id);
+            let mut how = match store.hold_mark(&id) {
+                Some(who) => Confirm::Held(Some(who)),
+                None => Confirm::Queued,
+            };
             let mut confirmed = Err(TaskRefusal::Unknown);
             for _ in 0..2 {
-                if let Some(who) = held_for {
+                if let Confirm::Held(cause) = how {
                     let mut hold = attempt.record(ctx, Some(&task.task), None);
                     hold.outcome.result = "deny".into();
                     hold.outcome.posture = "unavailable".into();
-                    hold.outcome.reason = match AgentId::parse(&task.task.agent) {
-                        Ok(agent) => held_reason(who, &agent),
-                        Err(_) => "task held: contained".into(),
+                    hold.outcome.reason = match (cause, AgentId::parse(&task.task.agent)) {
+                        (Some(who), Ok(agent)) => held_reason(who, &agent),
+                        (None, _) | (_, Err(_)) => "task held: contained".into(),
                     };
                     let said = emit
                         .emit_within(&hold, crate::blocking_guard::AUDIT_APPEND_TIMEOUT)
@@ -2621,13 +2930,12 @@ async fn submit_under<P: Authorizer + Send + Sync + 'static>(
                     }
                 }
                 let (s, t) = (Arc::clone(store), Arc::clone(&ticket));
-                confirmed =
-                    offload(uid, deadline, move || s.confirm(&id, Some(&t), held_for)).await;
+                confirmed = offload(uid, deadline, move || s.confirm(&id, Some(&t), how)).await;
                 match &confirmed {
                     Err(TaskRefusal::Unavailable(why))
-                        if why == DUE_A_HOLD && held_for.is_none() =>
+                        if why == DUE_A_HOLD && how == Confirm::Queued =>
                     {
-                        held_for = Some(store.hold_mark(&id).unwrap_or(Contained::Tasker));
+                        how = Confirm::Held(store.hold_mark(&id));
                     }
                     _ => break,
                 }
@@ -2636,7 +2944,7 @@ async fn submit_under<P: Authorizer + Send + Sync + 'static>(
                 Ok(()) => Ok(task),
                 Err(refusal) => {
                     let kept = ticket.abandon().is_some();
-                    let late = TaskRefusal::Unavailable(format!("outcome unknown: {LATE}"));
+                    let late = TaskRefusal::Unavailable(format!("{OUTCOME_UNKNOWN}{LATE}"));
                     if let (true, Some(failed)) = (kept && refusal == late, ticket.gave_up()) {
                         store.note(Notice::Late {
                             task: id,
@@ -3424,7 +3732,10 @@ mod tests {
         assert_eq!(store.state_for(&mine, &me), Some(TaskState::Queued));
         assert_eq!(store.state_for(&theirs, &me), None);
         assert!(store.status(&theirs, &me).is_none());
-        assert_eq!(store.confirm(&mine, None, None), Err(TaskRefusal::Unknown));
+        assert_eq!(
+            store.confirm(&mine, None, Confirm::Queued),
+            Err(TaskRefusal::Unknown)
+        );
         assert_eq!(
             store.follow_up(&theirs, &me, text("x"), 10).unwrap_err(),
             TaskRefusal::Unknown
@@ -3583,7 +3894,7 @@ mod tests {
                 agent: "hobi".into()
             }
         );
-        store.confirm(&pending, None, None).unwrap();
+        store.confirm(&pending, None, Confirm::Queued).unwrap();
         assert_eq!(store.state_for(&pending, &me), Some(TaskState::Queued));
         let (page, next) = store.list(&me, &id("hobi"), None, 10);
         assert_eq!(page.len(), 10);
@@ -4085,7 +4396,8 @@ mod tests {
         assert!(reopened.take_boot_findings().is_empty());
     }
 
-    /// The tests that stall the store share the euid's store slots; they take turns.
+    /// The tests that stall the store, or need a slot free within a bound, share per-uid store
+    /// slots; they take turns.
     static STALLS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     struct SlowsStoreOnAudit(Recorder, crate::task_store::MemTaskBlobs);
@@ -4253,7 +4565,9 @@ mod tests {
         let ticket = Ticket::default();
         assert_eq!(ticket.abandon(), None);
         blobs.after_save(|| panic!("an abandoned confirm writes nothing"));
-        assert!(store.confirm(&task, Some(&ticket), None).is_err());
+        assert!(store
+            .confirm(&task, Some(&ticket), Confirm::Queued)
+            .is_err());
         let reopened =
             TaskStore::open(Box::new(blobs), Arc::new(crate::task_store::SystemClock)).unwrap();
         assert_eq!(reopened.len(), 0);
@@ -4282,7 +4596,7 @@ mod tests {
         let seen = Arc::new(Mutex::new(None));
         let (t, s) = (Arc::clone(&ticket), Arc::clone(&seen));
         blobs.after_save(move || *s.lock().unwrap() = Some(t.abandon()));
-        assert_eq!(store.confirm(&task, Some(&ticket), None), Ok(()));
+        assert_eq!(store.confirm(&task, Some(&ticket), Confirm::Queued), Ok(()));
         assert_eq!(
             *seen.lock().unwrap(),
             Some(Some(task)),
@@ -4322,6 +4636,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_withdrawal_runs_or_is_queued_never_both_and_is_said_so() {
+        let _alone = STALLS.lock().await;
         let store = Arc::new(TaskStore::new());
         let id = held_by(&store, Tasker::Uid(1000));
         let w = withdraw_within(&store, 1000, tokio::time::Instant::now(), id).await;
@@ -4859,17 +5174,25 @@ mod tests {
             "a writer passing keeps the mark of a submission not yet confirmed"
         );
         assert_eq!(
-            store.confirm(&task, None, None),
+            store.confirm(&task, None, Confirm::Queued),
             Err(TaskRefusal::Unavailable(DUE_A_HOLD.into())),
             "not published as queued work"
         );
         assert!(store.record(&task).is_none());
-        assert_eq!(store.confirm(&task, None, Some(Contained::Tasker)), Ok(()));
+        assert_eq!(
+            store.confirm(&task, None, Confirm::Held(Some(Contained::Tasker))),
+            Ok(())
+        );
         let rec = store.record(&task).unwrap();
         assert_eq!(
-            (rec.state, rec.held_from),
-            (TaskState::Held, Some(TaskState::Queued))
+            (rec.state, rec.held_from, rec.held_for),
+            (
+                TaskState::Held,
+                Some(TaskState::Queued),
+                Some(Contained::Tasker)
+            )
         );
+        assert!(rec.held_at.is_some());
         assert_eq!(store.hold_mark(&task), None);
         store.mark_unenrolled(&v);
         assert!(store.close_all_due().is_empty(), "a release lifts no hold");
@@ -4879,6 +5202,42 @@ mod tests {
         );
         let reopened = reopen(&blobs);
         assert_eq!(reopened.record(&task).unwrap().state, TaskState::Held);
+
+        let fresh = || {
+            store
+                .mint(
+                    signer(),
+                    &v,
+                    at(0, HOBI),
+                    Tasker::Uid(1000),
+                    None,
+                    sub("hobi"),
+                )
+                .unwrap()
+                .task
+                .task_id
+        };
+        let (unmarked, rooted) = (fresh(), fresh());
+        store.mark_unenrolled(&containing(&[1000]));
+        assert_eq!(store.hold_mark(&unmarked), Some(Contained::Tasker));
+        store.held().holding.remove(&unmarked);
+        let gone = store.hold_mark(&unmarked);
+        assert_eq!(gone, None);
+        assert_eq!(store.confirm(&unmarked, None, Confirm::Held(gone)), Ok(()));
+        assert_eq!(
+            store.confirm(&rooted, None, Confirm::Held(Some(Contained::Root))),
+            Ok(())
+        );
+        let reopened = reopen(&blobs);
+        for (task, cause) in [(unmarked, None), (rooted, Some(Contained::Root))] {
+            let rec = store.record(&task).unwrap();
+            assert_eq!(
+                (rec.state, rec.held_for),
+                (TaskState::Held, cause),
+                "the store keeps the cause the hold record named"
+            );
+            assert_eq!(reopened.record(&task).unwrap().held_for, cause);
+        }
     }
 
     #[test]
@@ -5080,8 +5439,730 @@ mod tests {
         want.sort_by_key(|(t, _)| *t);
         assert_eq!(why, want);
         assert_eq!(store.close_all_due().len(), 3);
+        for (task, cause) in want {
+            let rec = store.record(&task).unwrap();
+            assert_eq!(
+                (rec.state, rec.held_for.map(DueFor::Hold)),
+                (TaskState::Held, Some(cause))
+            );
+            assert!(rec.held_at.is_some());
+        }
         assert_eq!(store.record(&reported).unwrap().state, TaskState::Reported);
         assert_eq!(store.record(&others).unwrap().state, TaskState::Queued);
+    }
+
+    const BOB: u32 = 1000;
+
+    type HoldFields = (TaskState, Option<TaskState>, Option<Contained>, Option<i64>);
+
+    fn hold_fields(store: &TaskStore, task: &TaskId) -> HoldFields {
+        let r = store.record(task).unwrap();
+        (r.state, r.held_from, r.held_for, r.held_at)
+    }
+
+    fn chain(store: &TaskStore) -> (TaskId, TaskId) {
+        let t1 = held_by(store, Tasker::Uid(BOB));
+        store.start_for_test(&t1);
+        let hobis = Tasker::Agent {
+            agent: "hobi".into(),
+            uid: HOBI,
+        };
+        let t2 = store
+            .mint_live(
+                signer(),
+                &view(&[("hobi", HOBI), ("jin", JIN)]),
+                at(0, JIN),
+                hobis,
+                Some(t1),
+                sub("jin"),
+            )
+            .unwrap()
+            .task
+            .task_id;
+        (t1, t2)
+    }
+
+    fn hold(store: &TaskStore, uids: &[u32]) {
+        store.mark_unenrolled(&containing(uids));
+        store.close_all_due();
+    }
+
+    #[test]
+    fn release_mirrors_the_hold() {
+        #[derive(Clone, Copy, Debug)]
+        enum Of {
+            T1,
+            T2,
+        }
+        #[derive(Clone, Copy, Debug)]
+        enum Want {
+            Released(TaskState, TaskState),
+            ParentHeld,
+            Still(Contained),
+        }
+        use TaskState::{Queued, Working};
+        type Row<'a> = (&'a [u32], &'a [u32], Contained, &'a [(Of, Want)]);
+        let rows: [Row<'_>; 5] = [
+            (
+                &[BOB],
+                &[],
+                Contained::Root,
+                &[
+                    (Of::T1, Want::Released(Working, Queued)),
+                    (Of::T2, Want::Released(Queued, Queued)),
+                ],
+            ),
+            (&[BOB], &[], Contained::Root, &[(Of::T2, Want::ParentHeld)]),
+            (
+                &[BOB, HOBI],
+                &[HOBI],
+                Contained::Tasker,
+                &[
+                    (Of::T1, Want::Still(Contained::Agent)),
+                    (Of::T2, Want::ParentHeld),
+                ],
+            ),
+            (
+                &[BOB],
+                &[BOB],
+                Contained::Root,
+                &[(Of::T1, Want::Still(Contained::Tasker))],
+            ),
+            (
+                &[HOBI],
+                &[],
+                Contained::Tasker,
+                &[(Of::T1, Want::Released(Working, Queued))],
+            ),
+        ];
+        for (row, (at_hold, at_release, t2_cause, steps)) in rows.iter().enumerate() {
+            let (_blobs, store) = mem();
+            let (t1, t2) = chain(&store);
+            hold(&store, at_hold);
+            assert_eq!(hold_fields(&store, &t2).2, Some(*t2_cause), "row {row}");
+            let mut released = BTreeSet::new();
+            let held = [
+                (t1, hold_fields(&store, &t1)),
+                (t2, hold_fields(&store, &t2)),
+            ];
+            let v = containing(at_release);
+            for (of, want) in steps.iter() {
+                let task = match of {
+                    Of::T1 => t1,
+                    Of::T2 => t2,
+                };
+                let want = match want {
+                    Want::Released(from, now) => Ok(Released {
+                        task,
+                        from: *from,
+                        now: *now,
+                        rseq: None,
+                    }),
+                    Want::ParentHeld => Err(ReleaseRefusal::ParentHeld(t1)),
+                    Want::Still(who) => Err(ReleaseRefusal::StillContained(*who)),
+                };
+                assert_eq!(
+                    store
+                        .release_plan(&task, &v)
+                        .map(|p| (p.task, p.from, p.to)),
+                    want.clone().map(|r| (r.task, r.from, r.now)),
+                    "row {row} {of:?}"
+                );
+                assert_eq!(store.release(&task, &v), want, "row {row} {of:?}");
+                if let Ok(r) = want {
+                    released.insert(task);
+                    assert_eq!(
+                        hold_fields(&store, &task),
+                        (r.now, None, None, None),
+                        "row {row} {of:?}"
+                    );
+                }
+            }
+            for (task, fields) in held {
+                if !released.contains(&task) {
+                    assert_eq!(fields.0, TaskState::Held, "row {row}");
+                    assert_eq!(hold_fields(&store, &task), fields, "row {row}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_containment_between_plan_and_release_is_refused_under_the_writer() {
+        let (_blobs, store) = mem();
+        let (t1, _) = chain(&store);
+        hold(&store, &[BOB]);
+        let before = hold_fields(&store, &t1);
+        assert!(store.release_plan(&t1, &containing(&[])).is_ok());
+        assert_eq!(
+            store.release(&t1, &containing(&[BOB])),
+            Err(ReleaseRefusal::StillContained(Contained::Tasker))
+        );
+        assert_eq!(hold_fields(&store, &t1), before);
+    }
+
+    #[test]
+    fn a_release_whose_tasker_or_root_agent_left_is_refused_unresolved() {
+        let as_agent = |agent: &str, uid: u32| Tasker::Agent {
+            agent: agent.into(),
+            uid,
+        };
+        let hobi_root = RootTasker::Agent {
+            agent: "hobi".into(),
+        };
+        let only_jin = |uids: &[u32]| {
+            crate::enrollment::Containing(view(&[("jin", JIN)]), uids.iter().copied().collect())
+        };
+        let rows = [
+            (
+                as_agent("jin", JIN),
+                &[HOBI][..],
+                only_jin(&[HOBI]),
+                Some(ReleaseRefusal::RootUnresolved),
+            ),
+            (
+                as_agent("hobi", HOBI),
+                &[JIN][..],
+                only_jin(&[]),
+                Some(ReleaseRefusal::TaskerUnresolved),
+            ),
+            (
+                as_agent("jin", JIN),
+                &[HOBI][..],
+                crate::enrollment::Containing(
+                    view(&[("jin", JIN), ("hobi", HOBI)]),
+                    BTreeSet::new(),
+                ),
+                None,
+            ),
+        ];
+        for (row, (tasker, at_hold, at_release, refusal)) in rows.into_iter().enumerate() {
+            let (_blobs, store) = mem();
+            let mut task = TaskObject::for_test("jin", 0);
+            task.tasker = tasker;
+            let task = store
+                .insert_for_test(signer().sign(task).unwrap(), JIN)
+                .task
+                .task_id;
+            store.held().tasks.get_mut(&task).unwrap().root = hobi_root.clone();
+            store.start_for_test(&task);
+            hold(&store, at_hold);
+            let before = hold_fields(&store, &task);
+            assert_eq!(before.0, TaskState::Held, "row {row}");
+            let Some(refusal) = refusal else {
+                assert_eq!(
+                    store.release_plan(&task, &at_release).map(|p| p.task),
+                    Ok(task),
+                    "row {row}"
+                );
+                assert!(store.release(&task, &at_release).is_ok(), "row {row}");
+                assert_eq!(hold_fields(&store, &task).0, TaskState::Queued, "row {row}");
+                continue;
+            };
+            assert_eq!(
+                store.release_plan(&task, &at_release).map(|p| p.task),
+                Err(refusal.clone()),
+                "row {row}"
+            );
+            assert_eq!(store.release(&task, &at_release), Err(refusal), "row {row}");
+            assert_eq!(hold_fields(&store, &task), before, "row {row}");
+        }
+    }
+
+    struct Switching {
+        base: FixedEnrollment,
+        contained: Arc<Mutex<BTreeSet<u32>>>,
+    }
+
+    impl EnrollmentView for Switching {
+        fn agent_uid(&self, id: &AgentId) -> Option<u32> {
+            self.base.agent_uid(id)
+        }
+        fn agents(&self) -> Vec<(AgentId, u32)> {
+            self.base.agents()
+        }
+        fn is_enrolled(&self, uid: u32) -> bool {
+            self.base.is_enrolled(uid)
+        }
+        fn contained(&self, uid: u32) -> bool {
+            self.contained.lock().unwrap().contains(&uid)
+        }
+        fn unresolved(&self, uid: u32) -> bool {
+            self.base.unresolved(uid)
+        }
+    }
+
+    #[test]
+    fn a_containment_installed_during_the_write_marks_the_released_task_for_a_hold() {
+        let (blobs, store) = mem();
+        let (t1, t2) = chain(&store);
+        hold(&store, &[BOB]);
+        let contained = Arc::new(Mutex::new(BTreeSet::new()));
+        let v = Switching {
+            base: view(&[("hobi", HOBI), ("jin", JIN)]),
+            contained: Arc::clone(&contained),
+        };
+        blobs.after_save(move || {
+            contained.lock().unwrap().insert(BOB);
+        });
+        assert!(store.release(&t1, &v).is_ok());
+        assert_eq!(store.record(&t1).unwrap().state, TaskState::Queued);
+        assert_eq!(store.hold_mark(&t1), Some(Contained::Tasker));
+        assert_eq!(store.next_for(&id("hobi"), HOBI), None);
+        assert_eq!(
+            store.release(&t2, &containing(&[])),
+            Err(ReleaseRefusal::ParentHeld(t1)),
+            "the parent is due a hold"
+        );
+        store.close_all_due();
+        assert_eq!(store.record(&t1).unwrap().state, TaskState::Held);
+    }
+
+    fn cite(store: &TaskStore, id: &TaskId) {
+        store.acted(id, store.hot(id).map_or(0, |h| h.start));
+    }
+
+    #[test]
+    fn a_request_resolved_before_a_release_does_not_mark_the_new_start_seen() {
+        let hobi = id("hobi");
+        let fresh = |store: &TaskStore| match claim_head(store, &hobi, HOBI, signer()) {
+            Ok(Claimed::Delivered { fresh, .. }) => fresh,
+            other => panic!("{other:?}"),
+        };
+        let (_blobs, store) = mem();
+        let task = held_by(&store, Tasker::Uid(BOB));
+        assert!(fresh(&store));
+        let before = store.working(&task, &hobi, HOBI).unwrap().start;
+        hold(&store, &[BOB]);
+        store.release(&task, &containing(&[])).unwrap();
+        assert!(fresh(&store));
+        store.acted(&task, before);
+        assert!(fresh(&store), "a citation of the earlier start");
+        store.acted(&task, store.working(&task, &hobi, HOBI).unwrap().start);
+        assert!(!fresh(&store));
+    }
+
+    #[test]
+    fn a_start_stays_fresh_until_a_request_cites_it_and_a_restart_errs_fresh() {
+        let fresh = |store: &TaskStore| match claim_head(store, &id("hobi"), HOBI, signer()) {
+            Ok(Claimed::Delivered { fresh, .. }) => fresh,
+            other => panic!("{other:?}"),
+        };
+        let (blobs, store) = mem();
+        let task = held_by(&store, Tasker::Uid(BOB));
+        assert!(fresh(&store));
+        assert!(store.record(&task).unwrap().unseen);
+        let store = reopen(&blobs);
+        assert!(fresh(&store), "a lost start is fresh again after a restart");
+        cite(&store, &task);
+        let store = reopen(&blobs);
+        assert!(fresh(&store), "a citation not yet stored errs fresh");
+        cite(&store, &task);
+        assert!(!fresh(&store));
+        store.store_counters();
+        assert!(!store.record(&task).unwrap().unseen);
+        assert!(!fresh(&reopen(&blobs)));
+    }
+
+    #[test]
+    fn a_released_working_task_is_queued_and_handed_out_fresh() {
+        let (_blobs, store) = mem();
+        let hobi = id("hobi");
+        let task = held_by(&store, Tasker::Uid(BOB));
+        store.start_for_test(&task);
+        cite(&store, &task);
+        assert!(matches!(
+            claim_head(&store, &hobi, HOBI, signer()),
+            Ok(Claimed::Delivered { fresh: false, .. })
+        ));
+        if let Some(hot) = store.held().hot.get_mut(&task) {
+            (hot.retry_after, hot.retry_secs) = (i64::MAX, RETRY_MAX_SECS);
+        }
+        hold(&store, &[BOB]);
+        store.release(&task, &containing(&[])).unwrap();
+        let rec = store.record(&task).unwrap();
+        assert_eq!((rec.state, rec.claimed), (TaskState::Queued, None));
+        let hot = store.hot(&task).unwrap();
+        assert_eq!(
+            (hot.lease_until, hot.retry_after, hot.retry_secs),
+            (0, 0, 0)
+        );
+        assert_eq!(store.next_for(&hobi, HOBI), Some((task, TaskState::Queued)));
+        for _ in 0..2 {
+            assert!(matches!(
+                claim_head(&store, &hobi, HOBI, signer()),
+                Ok(Claimed::Delivered { fresh: true, .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn a_released_report_gets_a_new_rseq_and_is_collected_after_a_later_acknowledgement() {
+        let (_blobs, store) = mem();
+        let hobis = Tasker::Agent {
+            agent: "hobi".into(),
+            uid: HOBI,
+        };
+        let jin = id("jin");
+        let (t1, a) = chain(&store);
+        store.publish_report(&a, text("a"), None).unwrap();
+        hold(&store, &[BOB]);
+        let b = store
+            .mint_live(
+                signer(),
+                &view(&[("hobi", HOBI), ("jin", JIN)]),
+                at(0, JIN),
+                hobis.clone(),
+                None,
+                sub("jin"),
+            )
+            .unwrap()
+            .task
+            .task_id;
+        let rseq_b = store.publish_report(&b, text("b"), None).unwrap();
+        assert_eq!(store.acknowledged(&hobis, &jin, rseq_b), Ok(vec![b]));
+        let lift = containing(&[]);
+        store.release(&t1, &lift).unwrap();
+        let released = store.release(&a, &lift).unwrap();
+        assert!(released.rseq > Some(rseq_b), "{released:?}");
+        assert_eq!(
+            store
+                .reports(&hobis, &jin, usize::MAX)
+                .entries
+                .iter()
+                .map(|e| e.task.clone())
+                .collect::<Vec<_>>(),
+            vec![maknae_proto::TaskRef::from_id(&a)]
+        );
+        assert_eq!(
+            store.acknowledged(&hobis, &jin, released.rseq.unwrap()),
+            Ok(vec![a])
+        );
+    }
+
+    #[test]
+    fn a_report_held_past_report_hold_is_collectable_after_release() {
+        let (_blobs, clock, store) = clocked();
+        let me = Tasker::Uid(BOB);
+        let task = held_by(&store, me.clone());
+        store.publish_report(&task, text("r"), None).unwrap();
+        hold(&store, &[BOB]);
+        let hold_secs = REPORT_HOLD.as_secs() as i64;
+        let now = 1_000 + hold_secs + 86_400;
+        clock.set(now);
+        store.release(&task, &containing(&[])).unwrap();
+        assert!(store.due(8).iter().all(|d| d.why != DueFor::Expiry));
+        assert_eq!(
+            store
+                .reports(&me, &id("hobi"), usize::MAX)
+                .entries
+                .iter()
+                .map(|e| e.at_secs)
+                .collect::<Vec<_>>(),
+            vec![now]
+        );
+        clock.set(now + hold_secs);
+        assert!(matches!(
+            store.due(8)[..],
+            [Due {
+                why: DueFor::Expiry,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn a_release_whose_write_is_refused_is_not_done_and_stays_held() {
+        use crate::task_store::Fail;
+        let (blobs, store) = mem();
+        let working = held_by(&store, Tasker::Uid(BOB));
+        store.start_for_test(&working);
+        let reported = held_by(&store, Tasker::Uid(BOB));
+        store.publish_report(&reported, text("r"), None).unwrap();
+        hold(&store, &[BOB]);
+        let lift = containing(&[]);
+        for (task, fail, counters_kept) in [
+            (working, Fail::UnsyncedOnce, true),
+            (reported, Fail::Every, true),
+            (reported, Fail::Records, false),
+        ] {
+            let before = (hold_fields(&store, &task), store.held().issued.clone());
+            let rec = encode(&store.record(&task).unwrap()).unwrap();
+            blobs.fail(Some(fail));
+            let said = store.release(&task, &lift);
+            blobs.fail(None);
+            assert!(
+                matches!(said, Err(ReleaseRefusal::NotDone(_))),
+                "{fail:?} {said:?}"
+            );
+            assert_eq!(hold_fields(&store, &task), before.0, "{fail:?}");
+            assert_eq!(
+                *encode(&store.record(&task).unwrap()).unwrap(),
+                *rec,
+                "{fail:?}"
+            );
+            if counters_kept {
+                assert_eq!(store.held().issued, before.1, "{fail:?}");
+            }
+            assert_eq!(reopen(&blobs).record(&task).unwrap().state, TaskState::Held);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_release_whose_store_step_does_not_answer_is_outcome_unknown_and_a_repeat_is_safe() {
+        let _alone = STALLS.lock().await;
+        let (blobs, store) = mem();
+        let task = held_by(&store, Tasker::Uid(BOB));
+        hold(&store, &[BOB]);
+        let lift = containing(&[]);
+        blobs.fail(Some(crate::task_store::Fail::Unsynced));
+        assert!(matches!(
+            store.release(&task, &lift),
+            Err(ReleaseRefusal::OutcomeUnknown(_))
+        ));
+        blobs.fail(None);
+        store.pass();
+        assert_eq!(reopen(&blobs).record(&task).unwrap().state, TaskState::Held);
+        assert_eq!(
+            store.release(&task, &lift).map(|r| r.now),
+            Ok(TaskState::Queued)
+        );
+        for owed in [false, true] {
+            let (blobs, store) = mem();
+            let store = Arc::new(store);
+            let task = held_by(&store, Tasker::Uid(BOB));
+            hold(&store, &[BOB]);
+            blobs.slow(Some(std::time::Duration::from_secs(1)));
+            let s = Arc::clone(&store);
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(100);
+            let said = offload(
+                BOB,
+                deadline,
+                move || Ok(s.release(&task, &containing(&[]))),
+            )
+            .await;
+            assert!(
+                matches!(&said, Err(TaskRefusal::Unavailable(why)) if why.starts_with("outcome unknown: ")),
+                "{said:?}"
+            );
+            blobs.await_stalls(1);
+            if owed {
+                blobs.fail(Some(crate::task_store::Fail::UnsyncedOnce));
+            }
+            blobs.slow(None);
+            let s = Arc::clone(&store);
+            tokio::task::spawn_blocking(move || s.pass()).await.unwrap();
+            let lift = containing(&[]);
+            if owed {
+                assert_eq!(store.record(&task).unwrap().state, TaskState::Held);
+                assert_eq!(
+                    store.release(&task, &lift).map(|r| r.now),
+                    Ok(TaskState::Queued)
+                );
+            } else {
+                let landed = hold_fields(&store, &task);
+                assert_eq!(landed, (TaskState::Queued, None, None, None));
+                let attempts = blobs.attempts();
+                assert_eq!(store.release(&task, &lift), Err(ReleaseRefusal::NotHeld));
+                assert_eq!(
+                    (hold_fields(&store, &task), blobs.attempts()),
+                    (landed, attempts)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_second_release_is_not_held_and_an_unknown_task_is_unknown() {
+        let (_blobs, store) = mem();
+        let task = held_by(&store, Tasker::Uid(BOB));
+        let lift = containing(&[]);
+        assert_eq!(store.release(&task, &lift), Err(ReleaseRefusal::NotHeld));
+        hold(&store, &[BOB]);
+        assert!(store.release(&task, &lift).is_ok());
+        assert_eq!(store.release(&task, &lift), Err(ReleaseRefusal::NotHeld));
+        assert_eq!(
+            store.release_plan(&task, &lift).map(|p| p.task),
+            Err(ReleaseRefusal::NotHeld)
+        );
+        let unknown = TaskId([9; 16]);
+        assert_eq!(store.release(&unknown, &lift), Err(ReleaseRefusal::Unknown));
+        assert_eq!(
+            store.release_plan(&unknown, &lift).map(|p| p.task),
+            Err(ReleaseRefusal::Unknown)
+        );
+        for from in [None, Some(TaskState::Held)] {
+            let bare = held_by(&store, Tasker::Uid(BOB));
+            hold(&store, &[BOB]);
+            store.held().tasks.get_mut(&bare).unwrap().held_from = from;
+            assert!(
+                matches!(
+                    store.release_plan(&bare, &lift),
+                    Err(ReleaseRefusal::NotDone(_))
+                ),
+                "{from:?}"
+            );
+            assert!(
+                matches!(store.release(&bare, &lift), Err(ReleaseRefusal::NotDone(_))),
+                "{from:?}"
+            );
+            assert_eq!(
+                hold_fields(&store, &bare),
+                (
+                    TaskState::Held,
+                    from,
+                    Some(Contained::Tasker),
+                    store.record(&bare).unwrap().held_at
+                ),
+                "{from:?}"
+            );
+            assert!(store.record(&bare).unwrap().held_at.is_some(), "{from:?}");
+            let (page, _) = store.held_tasks(&lift, HeldSelect::Every, None, 32);
+            let bare_ref = maknae_proto::TaskRef::from_id(&bare);
+            assert_eq!(
+                page.iter()
+                    .find(|h| h.view.task == bare_ref)
+                    .map(|h| h.held_from),
+                Some(TaskState::Held),
+                "{from:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_released_record_reopens_released() {
+        let (blobs, store) = mem();
+        let task = held_by(&store, Tasker::Uid(BOB));
+        hold(&store, &[BOB]);
+        store.release(&task, &containing(&[])).unwrap();
+        assert_eq!(
+            hold_fields(&reopen(&blobs), &task),
+            (TaskState::Queued, None, None, None)
+        );
+    }
+
+    #[test]
+    fn held_tasks_select_by_tasker_root_or_agent_in_store_order_and_page() {
+        let (_blobs, store) = mem();
+        let all = view(&[("hobi", HOBI), ("jin", JIN), ("suga", SUGA)]);
+        let (hobi, jin, suga) = (id("hobi"), id("jin"), id("suga"));
+        let (t1, t2) = chain(&store);
+        let hobis = Tasker::Agent {
+            agent: "hobi".into(),
+            uid: HOBI,
+        };
+        let jins = Tasker::Agent {
+            agent: "jin".into(),
+            uid: JIN,
+        };
+        let g = store
+            .mint_live(signer(), &all, at(0, JIN), hobis, None, sub("jin"))
+            .unwrap()
+            .task
+            .task_id;
+        store.start_for_test(&g);
+        let u = store
+            .mint_live(signer(), &all, at(0, SUGA), jins, Some(g), sub("suga"))
+            .unwrap()
+            .task
+            .task_id;
+        let free = store
+            .mint_live(
+                signer(),
+                &all,
+                at(0, SUGA),
+                Tasker::Uid(1001),
+                None,
+                sub("suga"),
+            )
+            .unwrap()
+            .task
+            .task_id;
+        let v = crate::enrollment::Containing(all, [BOB, HOBI].into());
+        store.mark_unenrolled(&v);
+        store.close_all_due();
+        assert_eq!(store.record(&free).unwrap().state, TaskState::Queued);
+        for (select, want) in [
+            (HeldSelect::Uid(BOB), vec![t1, t2]),
+            (HeldSelect::Uid(HOBI), vec![t1, t2, g, u]),
+            (HeldSelect::Uid(JIN), vec![t2, g, u]),
+            (HeldSelect::Uid(SUGA), vec![u]),
+            (HeldSelect::Agent(&hobi), vec![t1, t2, g, u]),
+            (HeldSelect::Agent(&jin), vec![t2, g, u]),
+            (HeldSelect::Agent(&suga), vec![u]),
+            (HeldSelect::Every, vec![t1, t2, g, u]),
+        ] {
+            let (tasks, next) = store.held_tasks(&v, select, None, 32);
+            assert_eq!(
+                tasks
+                    .iter()
+                    .map(|h| h.view.task.clone())
+                    .collect::<Vec<_>>(),
+                want.iter()
+                    .map(maknae_proto::TaskRef::from_id)
+                    .collect::<Vec<_>>(),
+                "{select:?}"
+            );
+            assert_eq!(next, None, "{select:?}");
+            let (seqs, next) = store.held_seqs(&v, select, None, 32);
+            assert_eq!(
+                seqs,
+                want.iter()
+                    .map(|t| (store.record(t).unwrap().seq, *t))
+                    .collect::<Vec<_>>(),
+                "{select:?}"
+            );
+            assert_eq!(next, None, "{select:?}");
+        }
+        let (first, _) = store.held_tasks(&v, HeldSelect::Every, None, 1);
+        let rec = store.record(&t1).unwrap();
+        let [h] = &first[..] else {
+            panic!("{first:?}");
+        };
+        assert_eq!(
+            (
+                h.seq,
+                h.view.state,
+                &h.tasker,
+                h.held_from,
+                h.held_for,
+                h.held_at
+            ),
+            (
+                rec.seq,
+                TaskState::Held,
+                &Tasker::Uid(BOB),
+                TaskState::Working,
+                Some(Contained::Tasker),
+                rec.held_at
+            )
+        );
+        assert!(rec.held_at.is_some());
+        let (mut tasks, mut seqs, mut after) = (Vec::new(), Vec::new(), None);
+        loop {
+            let (page, next) = store.held_tasks(&v, HeldSelect::Every, after, 1);
+            let (ids, ids_next) = store.held_seqs(&v, HeldSelect::Every, after, 1);
+            assert_eq!(next, ids_next);
+            assert_eq!(page.len(), 1);
+            assert_eq!(next.is_some(), tasks.len() < 3);
+            if let Some(n) = next {
+                assert_eq!(n, page[0].seq);
+            }
+            tasks.extend(page.iter().map(|h| h.view.task.clone()));
+            seqs.extend(ids.iter().map(|(_, t)| *t));
+            match next {
+                Some(n) => after = Some(n),
+                None => break,
+            }
+        }
+        assert_eq!(seqs, vec![t1, t2, g, u]);
+        assert_eq!(
+            tasks,
+            [t1, t2, g, u]
+                .iter()
+                .map(maknae_proto::TaskRef::from_id)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -5446,13 +6527,21 @@ mod tests {
             "another uid holds nothing"
         );
         assert_eq!(claim_head(&store, &hobi, JIN, signer()), Ok(Claimed::Idle));
-        for _ in 0..2 {
+        for (cites, fresh_now) in [(false, true), (true, true), (false, false)] {
             match claim_head(&store, &hobi, HOBI, signer()).unwrap() {
-                Claimed::Delivered { signed, partition } => {
+                Claimed::Delivered {
+                    signed,
+                    partition,
+                    fresh,
+                } => {
                     assert_eq!(signed.task.task_id, first);
                     assert_eq!(partition, "tasks/users/1000");
+                    assert_eq!(fresh, fresh_now);
                 }
                 Claimed::Idle => panic!("idle"),
+            }
+            if cites {
+                cite(&store, &first);
             }
         }
         assert_eq!(store.record(&second).unwrap().state, TaskState::Queued);
@@ -5554,7 +6643,7 @@ mod tests {
             Err(TaskRefusal::NotWorking)
         );
         store.start_for_test(&task);
-        store.acted(&task);
+        cite(&store, &task);
         assert_eq!(
             store.report(&task, &id("jin"), HOBI, text("r"), None),
             Err(TaskRefusal::OtherAgent)
@@ -5570,7 +6659,7 @@ mod tests {
             store.report(&task, &hobi, HOBI, text("again"), None),
             Err(TaskRefusal::NotWorking)
         );
-        store.acted(&task);
+        cite(&store, &task);
         assert_eq!(
             store.hot(&task).unwrap().actions,
             1,
@@ -5596,8 +6685,8 @@ mod tests {
         let idle = held_by(&store, Tasker::Uid(1000));
         store.start_for_test(&task);
         clock.set(1_010);
-        store.acted(&task);
-        store.acted(&idle);
+        cite(&store, &task);
+        cite(&store, &idle);
         assert_eq!(
             store.hot(&idle).unwrap().actions,
             0,
@@ -6305,7 +7394,7 @@ mod tests {
             .task_id;
         blobs.fail(Some(crate::task_store::Fail::Unsynced));
         assert!(matches!(
-            store.confirm(&task, None, None),
+            store.confirm(&task, None, Confirm::Queued),
             Err(TaskRefusal::Store(_))
         ));
         assert!(!store.withdraw(&task), "the unlink is not proven either");
@@ -6335,7 +7424,7 @@ mod tests {
             .task_id;
         blobs.after_save(|| panic!("sentinel-628-confirm-panic"));
         let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            store.confirm(&task, None, None)
+            store.confirm(&task, None, Confirm::Queued)
         }));
         assert!(unwound.is_err());
         blobs.fail(Some(crate::task_store::Fail::Unlinks));
@@ -7433,7 +8522,7 @@ mod tests {
         let store = Arc::new(TaskStore::new());
         let deadline = tokio::time::Instant::now() + BOUND;
         let late = format!("outcome unknown: {LATE}");
-        let busy = "not done: the task store was busy".to_string();
+        let busy = format!("not done: {BUSY}");
         let said = |kept, why: &str| {
             let (store, why) = (Arc::clone(&store), why.to_string());
             async move {
@@ -7457,6 +8546,11 @@ mod tests {
         assert_eq!(
             said(true, &busy).await,
             (TaskRefusal::Unavailable(unknown.clone()), unknown)
+        );
+        let unsynced = "outcome unknown: sentinel-632-unsynced".to_string();
+        assert_eq!(
+            said(true, &unsynced).await,
+            (TaskRefusal::Unavailable(unsynced.clone()), unsynced)
         );
         let (refusal, why) = said(false, &late).await;
         assert_eq!(
