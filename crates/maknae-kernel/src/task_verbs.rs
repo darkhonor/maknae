@@ -451,6 +451,8 @@ pub(crate) fn release_result(r: &Result<Released, ReleaseRefusal>) -> ReleaseRes
         Err(ReleaseRefusal::StillContained(Contained::Tasker)) => ReleaseResult::TaskerContained,
         Err(ReleaseRefusal::StillContained(Contained::Root)) => ReleaseResult::RootContained,
         Err(ReleaseRefusal::StillContained(Contained::Agent)) => ReleaseResult::AgentContained,
+        Err(ReleaseRefusal::TaskerUnresolved) => ReleaseResult::TaskerUnresolved,
+        Err(ReleaseRefusal::RootUnresolved) => ReleaseResult::RootUnresolved,
         Err(ReleaseRefusal::ParentHeld(_)) => ReleaseResult::ParentHeld,
         Err(ReleaseRefusal::NotHeld) => ReleaseResult::NotHeld,
         Err(ReleaseRefusal::Unknown) => ReleaseResult::Unknown,
@@ -488,6 +490,8 @@ pub(crate) fn release_reason(r: &Result<Released, ReleaseRefusal>) -> String {
         Err(ReleaseRefusal::StillContained(Contained::Tasker)) => refused("tasker still contained"),
         Err(ReleaseRefusal::StillContained(Contained::Root)) => refused("root still contained"),
         Err(ReleaseRefusal::StillContained(Contained::Agent)) => refused("agent still contained"),
+        Err(ReleaseRefusal::TaskerUnresolved) => refused("tasker unresolved"),
+        Err(ReleaseRefusal::RootUnresolved) => refused("root unresolved"),
         Err(ReleaseRefusal::ParentHeld(_)) => refused("parent held"),
         Err(ReleaseRefusal::NotHeld) => refused("not held"),
         Err(ReleaseRefusal::Unknown) => refused("no such task"),
@@ -506,6 +510,8 @@ pub(crate) fn release_record_class(
         }
         Err(
             ReleaseRefusal::StillContained(_)
+            | ReleaseRefusal::TaskerUnresolved
+            | ReleaseRefusal::RootUnresolved
             | ReleaseRefusal::ParentHeld(_)
             | ReleaseRefusal::NotHeld
             | ReleaseRefusal::Unknown,
@@ -1091,7 +1097,7 @@ mod tests {
             &'a str,
             (&'a str, &'a str),
         );
-        let rows: [Row; 10] = [
+        let rows: [Row; 12] = [
             (
                 released,
                 ReleaseResult::Released,
@@ -1125,6 +1131,20 @@ mod tests {
                 ReleaseResult::AgentContained,
                 held,
                 "task release refused: agent still contained",
+                ("deny", "refused"),
+            ),
+            (
+                refused(ReleaseRefusal::TaskerUnresolved),
+                ReleaseResult::TaskerUnresolved,
+                held,
+                "task release refused: tasker unresolved",
+                ("deny", "refused"),
+            ),
+            (
+                refused(ReleaseRefusal::RootUnresolved),
+                ReleaseResult::RootUnresolved,
+                held,
+                "task release refused: root unresolved",
                 ("deny", "refused"),
             ),
             (

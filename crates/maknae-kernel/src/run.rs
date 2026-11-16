@@ -16992,6 +16992,15 @@ mod reload_fixture {
             .as_raw()
     }
 
+    pub(super) fn another_account(than: u32) -> u32 {
+        ["daemon", "nobody"]
+            .into_iter()
+            .filter_map(|name| nix::unistd::User::from_name(name).ok().flatten())
+            .map(|user| user.uid.as_raw())
+            .find(|uid| *uid != than)
+            .expect("daemon or nobody is an account other than the given uid")
+    }
+
     pub(super) fn daemon_principal() -> maknae_config::Principal {
         maknae_config::Principal {
             name: "daemon".into(),
@@ -17121,8 +17130,9 @@ mod reload_fixture {
             self.reloader.authorizer.live()
         }
 
-        pub(super) fn move_principal_to_daemon(&self) {
-            self.write_yaml_principal(daemon_uid(), "");
+        pub(super) fn move_principal_elsewhere(&self) {
+            let current = self.composition().baseline().principal().uid;
+            self.write_yaml_principal(another_account(current), "");
         }
 
         pub(super) fn write_yaml_principal(&self, uid: u32, tail: &str) {
@@ -21318,7 +21328,7 @@ mod reload_tests {
         assert!(bounded(fx.reloader.run()).await.unwrap().persisted);
         assert!(!mirror.exists(), "reload");
 
-        fx.move_principal_to_daemon();
+        fx.move_principal_elsewhere();
         let shown = fx.show().await;
         assert_eq!(shown.apply, "live");
         crash_after_the_commit();
@@ -21364,7 +21374,7 @@ mod reload_tests {
         assert!(!bounded(fx.reloader.run()).await.unwrap().persisted);
         healed("reload");
 
-        fx.move_principal_to_daemon();
+        fx.move_principal_elsewhere();
         let shown = fx.show().await;
         fx.reloader.dir.fail_next_store_publish();
         let answer = fx.accept(&shown.hash).await;
@@ -21407,7 +21417,7 @@ mod reload_tests {
         assert!(!bounded(fx.reloader.run()).await.unwrap().persisted);
         assert_eq!(fx.mirror(), bytes, "a load that commits nothing");
 
-        fx.move_principal_to_daemon();
+        fx.move_principal_elsewhere();
         let shown = fx.show().await;
         assert_eq!(shown.apply, "live");
         let before = running_revision(&fx);

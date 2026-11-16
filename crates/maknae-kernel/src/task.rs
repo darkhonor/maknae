@@ -81,6 +81,22 @@ fn contained_in(view: &dyn EnrollmentView, rec: &TaskRecord) -> Option<Contained
     }
 }
 
+/// A tasker or root that is an agent the view no longer resolves, whose containment
+/// therefore cannot be judged.
+fn unresolved(view: &dyn EnrollmentView, rec: &TaskRecord) -> Option<ReleaseRefusal> {
+    let gone = |agent: &str| {
+        AgentId::parse(agent)
+            .ok()
+            .and_then(|agent| view.agent_uid(&agent))
+            .is_none()
+    };
+    match (&rec.tasker, &rec.root) {
+        (Tasker::Agent { agent, .. }, _) if gone(agent) => Some(ReleaseRefusal::TaskerUnresolved),
+        (_, RootTasker::Agent { agent }) if gone(agent) => Some(ReleaseRefusal::RootUnresolved),
+        _ => None,
+    }
+}
+
 /// Why a task is due an act of the kernel's own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DueFor {
@@ -145,6 +161,8 @@ pub enum ReleaseRefusal {
     NotHeld,
     ParentHeld(TaskId),
     StillContained(Contained),
+    TaskerUnresolved,
+    RootUnresolved,
     NotDone(String),
     OutcomeUnknown(String),
 }
@@ -546,6 +564,9 @@ impl Held {
         after.state = to;
         if let Some(who) = contained_in(view, &after) {
             return Err(ReleaseRefusal::StillContained(who));
+        }
+        if let Some(refusal) = unresolved(view, &after) {
+            return Err(refusal);
         }
         Ok((rec.clone(), from, to))
     }
@@ -5555,6 +5576,55 @@ mod tests {
             Err(ReleaseRefusal::StillContained(Contained::Tasker))
         );
         assert_eq!(hold_fields(&store, &t1), before);
+    }
+
+    #[test]
+    fn a_release_whose_tasker_or_root_agent_left_is_refused_unresolved() {
+        let as_agent = |agent: &str, uid: u32| Tasker::Agent {
+            agent: agent.into(),
+            uid,
+        };
+        let hobi_root = RootTasker::Agent {
+            agent: "hobi".into(),
+        };
+        let only_jin = |uids: &[u32]| {
+            crate::enrollment::Containing(view(&[("jin", JIN)]), uids.iter().copied().collect())
+        };
+        let rows = [
+            (
+                as_agent("jin", JIN),
+                &[HOBI][..],
+                only_jin(&[HOBI]),
+                ReleaseRefusal::RootUnresolved,
+            ),
+            (
+                as_agent("hobi", HOBI),
+                &[JIN][..],
+                only_jin(&[]),
+                ReleaseRefusal::TaskerUnresolved,
+            ),
+        ];
+        for (row, (tasker, at_hold, at_release, refusal)) in rows.into_iter().enumerate() {
+            let (_blobs, store) = mem();
+            let mut task = TaskObject::for_test("jin", 0);
+            task.tasker = tasker;
+            let task = store
+                .insert_for_test(signer().sign(task).unwrap(), JIN)
+                .task
+                .task_id;
+            store.held().tasks.get_mut(&task).unwrap().root = hobi_root.clone();
+            store.start_for_test(&task);
+            hold(&store, at_hold);
+            let before = hold_fields(&store, &task);
+            assert_eq!(before.0, TaskState::Held, "row {row}");
+            assert_eq!(
+                store.release_plan(&task, &at_release).map(|p| p.task),
+                Err(refusal.clone()),
+                "row {row}"
+            );
+            assert_eq!(store.release(&task, &at_release), Err(refusal), "row {row}");
+            assert_eq!(hold_fields(&store, &task), before, "row {row}");
+        }
     }
 
     struct Switching {

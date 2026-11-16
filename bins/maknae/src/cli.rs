@@ -958,6 +958,8 @@ fn release_line(o: &maknae_proto::ReleaseOutcome) -> String {
         (R::TaskerContained, ..) => refused("tasker still contained"),
         (R::RootContained, ..) => refused("root still contained"),
         (R::AgentContained, ..) => refused("agent still contained"),
+        (R::TaskerUnresolved, ..) => refused("tasker unresolved (its agent is no longer enrolled)"),
+        (R::RootUnresolved, ..) => refused("root unresolved (its agent is no longer enrolled)"),
         (R::ParentHeld, Some(p), _) => {
             let p = p.to_id();
             refused(&format!(
@@ -3537,6 +3539,14 @@ mod tests {
                 format!("{HELD_ID} refused: agent still contained"),
             ),
             (
+                outcome(R::TaskerUnresolved, None, None),
+                format!("{HELD_ID} refused: tasker unresolved (its agent is no longer enrolled)"),
+            ),
+            (
+                outcome(R::RootUnresolved, None, None),
+                format!("{HELD_ID} refused: root unresolved (its agent is no longer enrolled)"),
+            ),
+            (
                 outcome(R::ParentHeld, None, Some(p)),
                 format!("{HELD_ID} refused: parent {f} is held; release it first: maknae held release {f}"),
             ),
@@ -3682,6 +3692,8 @@ mod tests {
             R::TaskerContained,
             R::RootContained,
             R::AgentContained,
+            R::TaskerUnresolved,
+            R::RootUnresolved,
             R::ParentHeld,
             R::NotHeld,
             R::Unknown,

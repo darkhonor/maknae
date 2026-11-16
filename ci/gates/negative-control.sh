@@ -1212,6 +1212,8 @@ pub enum ReleaseResult {
     TaskerContained,
     RootContained,
     AgentContained,
+    TaskerUnresolved,
+    RootUnresolved,
     ParentHeld,
     NotHeld,
     Unknown,
