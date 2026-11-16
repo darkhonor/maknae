@@ -219,7 +219,6 @@ pub struct HeldRequest<'a> {
     pub requester: u32,
     pub session: u64,
     pub op: HeldOp<'a>,
-    /// The request the PDP permitted; decided again under each task's reload turn.
     pub action: &'a maknae_security::Request,
 }
 
@@ -7646,8 +7645,6 @@ where
         }
     }
 
-    /// Each task under its own reload turn, the request decided again under each; the page
-    /// ends at its first not-done, unknown or unauthorized task, and at the stage window.
     async fn release_held(
         &self,
         r: &HeldRequest<'_>,
@@ -7749,7 +7746,6 @@ where
         ))
     }
 
-    /// One task's plan, record and write, under the turn the caller holds.
     async fn release_one(
         &self,
         ctx: &BootCtx<'_>,
@@ -22548,10 +22544,14 @@ mod reload_tests {
             ContainmentOutcome::Contained
         );
         let before = held_records(&fx).len();
-        for (requester, stopping, drain) in [
-            (daemon_uid(), false, Drain::Serving),
-            (0, true, Drain::Serving),
-            (0, false, Drain::Begun),
+        enum Expect {
+            Denied,
+            Stopping,
+        }
+        for (requester, stopping, drain, expect) in [
+            (daemon_uid(), false, Drain::Serving, Expect::Denied),
+            (0, true, Drain::Serving, Expect::Stopping),
+            (0, false, Drain::Begun, Expect::Stopping),
         ] {
             fx.reloader.stopping.send_replace(stopping);
             fx.reloader.drain.send_replace(drain);
@@ -22564,14 +22564,14 @@ mod reload_tests {
                     requester,
                 )
                 .await;
-            match got {
-                Err(ContainAnswer::Denied { why }) if requester != 0 => {
+            match (got, expect) {
+                (Err(ContainAnswer::Denied { why }), Expect::Denied) => {
                     assert_eq!(why, "subject contained: role=adversary")
                 }
-                Err(a) if requester == 0 => {
+                (Err(a), Expect::Stopping) => {
                     assert_eq!(answer_code(&a), ContainmentOutcome::Stopping, "{drain:?}")
                 }
-                got => panic!("{requester} {stopping} {drain:?}: {got:?}"),
+                (got, _) => panic!("{requester} {stopping} {drain:?}: {got:?}"),
             }
             assert_eq!(held_records(&fx).len(), before);
             for id in &ids {

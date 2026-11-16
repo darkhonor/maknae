@@ -317,7 +317,6 @@ fn hobi_account(uid: u32) -> Result<Option<maknae_io::HostAccount>, String> {
     }))
 }
 
-/// [`HOBI_HOSTS`], and `jin-svc` at uid 2002.
 pub(crate) const HOBI_AND_JIN_HOSTS: maknae_authz_basic::HostLookups =
     maknae_authz_basic::HostLookups {
         account: hobi_and_jin_account,
