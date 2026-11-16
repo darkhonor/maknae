@@ -490,7 +490,9 @@ impl Held {
     /// An agent waits on every agent its working or pending tasks have a sub-task at.
     fn would_wait(&self, by: &str, target: &AgentId) -> bool {
         let waiting = |id: &TaskId, r: &TaskRecord| {
-            (r.pending || open(r)) && self.closing.get(id) != Some(&TaskClose::Withdrawn)
+            (r.pending || open(r))
+                && self.closing.get(id) != Some(&TaskClose::Withdrawn)
+                && !self.parent_ended(r)
         };
         let mut agents = vec![target];
         let mut visited = BTreeSet::new();
@@ -1653,7 +1655,7 @@ impl TaskStore {
         close: Option<TaskClose>,
     ) -> Result<u64, TaskRefusal> {
         let _w = self.writing();
-        let rec = self.publish(id, text, close, |_| Ok(()))?;
+        let rec = self.publish(id, text, close, |_, _| Ok(()))?;
         Ok(rec.rseq.unwrap_or_default())
     }
 
@@ -1663,12 +1665,12 @@ impl TaskStore {
         id: &TaskId,
         text: SecretText,
         close: Option<TaskClose>,
-        check: impl FnOnce(&TaskRecord) -> Result<(), TaskRefusal>,
+        check: impl FnOnce(&Held, &TaskRecord) -> Result<(), TaskRefusal>,
     ) -> Result<TaskRecord, TaskRefusal> {
         let prior = {
             let held = self.held();
             let rec = held.live(id).ok_or(TaskRefusal::Unknown)?;
-            check(rec)?;
+            check(&held, rec)?;
             match rec.state {
                 TaskState::Queued | TaskState::Working if !held.holding.contains_key(id) => {}
                 TaskState::Queued
@@ -1824,7 +1826,7 @@ impl TaskStore {
                 next.state = TaskState::Working;
                 next.claimed = Some(self.clock.now_secs());
                 next.unseen = true;
-                next.starts = prior.starts.saturating_add(1);
+                next.starts = prior.starts + 1;
                 self.write(&next, Some(&prior))?;
                 let handed = delivered(&next, true);
                 let mut held = self.held();
@@ -1902,7 +1904,7 @@ impl TaskStore {
             return Err(TaskRefusal::AgentGone);
         }
         drop(held);
-        let next = self.publish(id, text, None, |rec| {
+        let next = self.publish(id, text, None, |_, rec| {
             match (rec.agent == *agent && rec.agent_uid == uid, rec.state) {
                 (false, _) => Err(TaskRefusal::OtherAgent),
                 (true, TaskState::Working)
@@ -1972,14 +1974,14 @@ impl TaskStore {
         if !spans_roots && upto > self.held().issued.of(by.tasker).rseq {
             return Err(TaskRefusal::CursorAhead);
         }
-        let acked = |r: &TaskRecord| {
-            by.reaches(r) && r.agent == *agent && r.rseq.is_some_and(|s| s <= upto)
+        let acked = |held: &Held, r: &TaskRecord| {
+            by.reaches(held, r) && r.agent == *agent && r.rseq.is_some_and(|s| s <= upto)
         };
         let gone: Vec<TaskId> = {
             let held = self.held();
             held.tasks
                 .iter()
-                .filter(|(_, r)| !r.pending && acked(r))
+                .filter(|(_, r)| !r.pending && acked(&held, r))
                 .map(|(id, _)| *id)
                 .collect()
         };
@@ -1995,7 +1997,11 @@ impl TaskStore {
             }
         }
         let gone = taken;
-        match self.held().exposed.values().any(acked) {
+        let owed = {
+            let held = self.held();
+            held.exposed.values().any(|r| acked(&held, r))
+        };
+        match owed {
             false => Ok(gone),
             true => Err(TaskRefusal::Unavailable(format!(
                 "{OUTCOME_UNKNOWN}the acknowledgement is left to a later store write"
@@ -2188,7 +2194,7 @@ impl TaskStore {
             id,
             SecretText(String::new().into()),
             Some(TaskClose::Stopped),
-            |rec| match (by.reaches(rec), rec.state) {
+            |held, rec| match (by.reaches(held, rec), rec.state) {
                 (false, _) => Err(TaskRefusal::Unknown),
                 (true, TaskState::Working) => Ok(()),
                 (
@@ -2211,7 +2217,7 @@ impl TaskStore {
         let _w = self.writing();
         let mut view = {
             let held = self.held();
-            if held.exposed.get(id).is_some_and(|r| by.reaches(r)) {
+            if held.exposed.get(id).is_some_and(|r| by.reaches(&held, r)) {
                 return Err(drop_owed());
             }
             let rec = tasker_record(&held, id, by).ok_or(TaskRefusal::Unknown)?;
@@ -2246,7 +2252,10 @@ impl TaskStore {
             .tasks
             .values()
             .filter(|r| {
-                !r.pending && by.reaches(r) && r.agent == *agent && after.is_none_or(|a| r.tseq > a)
+                !r.pending
+                    && by.reaches(&held, r)
+                    && r.agent == *agent
+                    && after.is_none_or(|a| r.tseq > a)
             })
             .collect();
         mine.sort_by_key(|r| r.tseq);
@@ -2270,7 +2279,7 @@ impl TaskStore {
         let mut mine: Vec<&TaskRecord> = held
             .tasks
             .values()
-            .filter(|r| !r.pending && by.reaches(r) && r.agent == *agent)
+            .filter(|r| !r.pending && by.reaches(&held, r) && r.agent == *agent)
             .filter(|r| held.collectable(r))
             .collect();
         mine.sort_by_key(|r| r.rseq);
@@ -2413,7 +2422,7 @@ impl TaskStore {
         next.state = TaskState::Working;
         next.claimed = Some(self.clock.now_secs());
         next.unseen = true;
-        next.starts = prior.starts.saturating_add(1);
+        next.starts = prior.starts + 1;
         self.write(&next, Some(&prior))
             .expect("the test store writes the task");
         let lease = self.clock.now_secs() + CLAIM_LEASE.as_secs() as i64;
@@ -2584,7 +2593,7 @@ fn store(e: StoreError) -> TaskRefusal {
 }
 
 fn tasker_record<'h>(held: &'h Held, id: &TaskId, by: Reach<'_>) -> Option<&'h TaskRecord> {
-    held.live(id).filter(|r| by.reaches(r))
+    held.live(id).filter(|r| by.reaches(held, r))
 }
 
 /// A tasker's live tasks with one agent, and its live tasks plus held reports overall,
@@ -2629,8 +2638,9 @@ impl<'a> From<&'a Tasker> for Reach<'a> {
 }
 
 impl Reach<'_> {
-    fn reaches(&self, r: &TaskRecord) -> bool {
-        r.tasker == *self.tasker
+    fn reaches(&self, held: &Held, r: &TaskRecord) -> bool {
+        !held.parent_ended(r)
+            && r.tasker == *self.tasker
             && r.parent == self.under
             && self.task.is_none_or(|t| t == r.signed.task.task_id)
     }
@@ -5975,40 +5985,33 @@ mod tests {
     #[test]
     fn a_released_report_gets_a_new_rseq_and_is_collected_after_a_later_acknowledgement() {
         let (_blobs, store) = mem();
-        let hobis = Tasker::Agent {
-            agent: "hobi".into(),
-            uid: HOBI,
-        };
+        let bob = Tasker::Uid(BOB);
         let jin = id("jin");
-        let (t1, a) = chain(&store);
+        let give = || {
+            store
+                .mint_live(
+                    signer(),
+                    &view(&[("hobi", HOBI), ("jin", JIN)]),
+                    at(0, JIN),
+                    bob.clone(),
+                    None,
+                    sub("jin"),
+                )
+                .unwrap()
+                .task
+                .task_id
+        };
+        let a = give();
         store.publish_report(&a, text("a"), None).unwrap();
         hold(&store, &[BOB]);
-        let b = store
-            .mint_live(
-                signer(),
-                &view(&[("hobi", HOBI), ("jin", JIN)]),
-                at(0, JIN),
-                hobis.clone(),
-                None,
-                sub("jin"),
-            )
-            .unwrap()
-            .task
-            .task_id;
+        let b = give();
         let rseq_b = store.publish_report(&b, text("b"), None).unwrap();
-        assert_eq!(store.acknowledged(&hobis, &jin, rseq_b), Ok(vec![b]));
-        let lift = containing(&[]);
-        store.release(&t1, &lift).unwrap();
-        let released = store.release(&a, &lift).unwrap();
+        assert_eq!(store.acknowledged(&bob, &jin, rseq_b), Ok(vec![b]));
+        let released = store.release(&a, &containing(&[])).unwrap();
         assert!(released.rseq > Some(rseq_b), "{released:?}");
-        let under_t1 = Reach {
-            tasker: &hobis,
-            under: Some(t1),
-            task: None,
-        };
         assert_eq!(
             store
-                .reports(under_t1, &jin, usize::MAX)
+                .reports(&bob, &jin, usize::MAX)
                 .entries
                 .iter()
                 .map(|e| e.task.clone())
@@ -6016,7 +6019,7 @@ mod tests {
             vec![maknae_proto::TaskRef::from_id(&a)]
         );
         assert_eq!(
-            store.acknowledged(under_t1, &jin, released.rseq.unwrap()),
+            store.acknowledged(&bob, &jin, released.rseq.unwrap()),
             Ok(vec![a])
         );
     }

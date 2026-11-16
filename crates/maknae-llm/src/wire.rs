@@ -1279,7 +1279,7 @@ mod tests {
             "withdrawn",
             "the task that asked for it ended",
             "on hold — its agent or tasker was contained",
-            "the wait ended; the other agent's work will be closed",
+            "the wait ended; the other agent's task may still run until it is closed; do not retry it",
             "unavailable — do not retry",
         ] {
             assert!(

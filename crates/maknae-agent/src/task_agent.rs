@@ -11,6 +11,8 @@ use std::time::Duration;
 pub const POLL_FIRST: Duration = Duration::from_secs(5);
 pub const POLL_MAX: Duration = Duration::from_secs(30);
 pub const REPORTS_DIR: &str = "reports";
+/// Consecutive unreachable collects retried before the wait ends.
+pub const COLLECT_RETRIES: usize = 10;
 
 /// The driver's clock and shutdown flag, for as long as the call waits.
 pub struct Wait<'a, C> {
@@ -39,6 +41,7 @@ pub async fn run<P: TaskPlane + Send, C: Clock + Send>(
     let (task, target) = (given.task, given.agent);
     let mut state = given.state;
     let mut every = POLL_FIRST;
+    let mut lost = 0;
     loop {
         if !wait.idle(&mut every).await {
             plane.end_sub(&task, state == TaskState::Queued).await;
@@ -53,8 +56,13 @@ pub async fn run<P: TaskPlane + Send, C: Clock + Send>(
                         return reported(plane, &wait, cwd, conversation, &target, &task, entry)
                             .await
                     }
-                    Ok(None) | Err(TaskerFail::Refused) => return TaskAgentOutcome::WaitEnded,
-                    Err(TaskerFail::Unreachable { .. } | TaskerFail::Protocol) => {}
+                    Ok(None) | Err(TaskerFail::Refused | TaskerFail::Protocol) => {
+                        return TaskAgentOutcome::WaitEnded
+                    }
+                    Err(TaskerFail::Unreachable { .. }) if lost == COLLECT_RETRIES => {
+                        return TaskAgentOutcome::WaitEnded
+                    }
+                    Err(TaskerFail::Unreachable { .. }) => lost += 1,
                 },
                 TaskState::Closed => {
                     let closed = view
@@ -66,7 +74,11 @@ pub async fn run<P: TaskPlane + Send, C: Clock + Send>(
                             return closed;
                         }
                         Ok(None) | Err(TaskerFail::Refused) => return closed,
-                        Err(TaskerFail::Unreachable { .. } | TaskerFail::Protocol) => {}
+                        Err(TaskerFail::Protocol) => return TaskAgentOutcome::WaitEnded,
+                        Err(TaskerFail::Unreachable { .. }) if lost == COLLECT_RETRIES => {
+                            return TaskAgentOutcome::WaitEnded
+                        }
+                        Err(TaskerFail::Unreachable { .. }) => lost += 1,
                     }
                 }
             },
@@ -480,37 +492,69 @@ mod tests {
         }
     }
 
+    fn arms() -> [(TaskState, Option<TaskClose>, TaskAgentOutcome); 2] {
+        [
+            (
+                TaskState::Reported,
+                None,
+                TaskAgentOutcome::Report {
+                    agent: "jin".into(),
+                    stored: Some(PATH.into()),
+                    text: secret("sentinel-609-late"),
+                },
+            ),
+            (
+                TaskState::Closed,
+                Some(TaskClose::Stopped),
+                TaskAgentOutcome::Closed(TaskClose::Stopped),
+            ),
+        ]
+    }
+
+    fn scripted(state: TaskState, close: Option<TaskClose>, lost: usize, then: bool) -> Fake {
+        let mut p = fake();
+        p.polls = std::iter::repeat_with(|| Ok(view(state, close)))
+            .take(lost + 1)
+            .collect();
+        p.collects = std::iter::repeat_with(|| Err(TaskerFail::Unreachable { after_write: true }))
+            .take(lost)
+            .collect();
+        if then {
+            let text = if close.is_some() {
+                ""
+            } else {
+                "sentinel-609-late"
+            };
+            p.collects.push_back(Ok(page(text, close)));
+        }
+        p
+    }
+
+    fn collects(log: &[String]) -> usize {
+        log.iter().filter(|l| l.starts_with("collect")).count()
+    }
+
     #[tokio::test]
-    async fn a_lost_collect_goes_back_to_polling_and_the_report_still_arrives() {
-        for lost in [
-            TaskerFail::Unreachable { after_write: true },
-            TaskerFail::Protocol,
-        ] {
+    async fn a_lost_collect_is_polled_again_up_to_its_bound() {
+        for (state, close, arrived) in arms() {
+            let r = ran(scripted(state, close, COLLECT_RETRIES, true), None).await;
+            assert_eq!(r.got, arrived, "{state:?}");
+            assert_eq!(collects(&r.log), COLLECT_RETRIES + 1, "{state:?}");
+            let r = ran(scripted(state, close, COLLECT_RETRIES + 1, false), None).await;
+            assert_eq!(r.got, TaskAgentOutcome::WaitEnded, "{state:?}");
+            assert_eq!(collects(&r.log), COLLECT_RETRIES + 1, "{state:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_collect_answered_with_a_protocol_failure_ends_the_wait() {
+        for (state, close, _) in arms() {
             let mut p = fake();
-            p.polls = [
-                Ok(view(TaskState::Reported, None)),
-                Ok(view(TaskState::Reported, None)),
-            ]
-            .into();
-            p.collects = [Err(lost), Ok(page("sentinel-609-late", None))].into();
+            p.polls = [Ok(view(state, close))].into();
+            p.collects = [Err(TaskerFail::Protocol)].into();
             let r = ran(p, None).await;
-            assert!(
-                matches!(
-                    &r.got,
-                    TaskAgentOutcome::Report {
-                        stored: Some(_),
-                        ..
-                    }
-                ),
-                "{lost:?}: {:?}",
-                r.got
-            );
-            assert_eq!(
-                r.log.iter().filter(|l| l.starts_with("status")).count(),
-                2,
-                "{:?}",
-                r.log
-            );
+            assert_eq!(r.got, TaskAgentOutcome::WaitEnded, "{state:?}");
+            assert_eq!(collects(&r.log), 1, "{state:?}");
         }
     }
 

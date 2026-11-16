@@ -3831,14 +3831,20 @@ async fn a_wait_through_a_third_agents_queue_is_refused() {
 }
 
 #[tokio::test]
-async fn the_last_agent_of_a_chain_cannot_task_its_first() {
-    let w = triangle_world("waits-long-chain");
+async fn a_wait_closed_by_a_queued_sub_task_under_an_unrelated_task_is_refused() {
+    let w = triangle_world("waits-unrelated-queue");
     let (_, s1) = w.chain().await;
     assert_eq!(w.claimed("jin").await, s1);
-    let g1 = w.give("jin", "suga", s1).await;
-    assert_eq!(w.claimed("suga").await, g1);
-    let said = w.refused_as("suga", "hobi", g1).await;
-    assert!(said.iter().any(|r| r == WAITS_ON_HOBI), "{said:?}");
+    let ts = w.mine("suga");
+    w.working(&ts);
+    let h = w.give("suga", "hobi", ts).await;
+    assert_eq!(w.store().record(&h).unwrap().state, TaskState::Queued);
+    let said = w.refused_as("jin", "suga", s1).await;
+    assert!(
+        said.iter()
+            .any(|r| r == "deny task chain already waits on agent suga"),
+        "{said:?}"
+    );
 }
 
 #[tokio::test]
@@ -3895,4 +3901,76 @@ async fn an_acknowledgement_under_one_root_answers_alike_whatever_another_root_h
     );
     let page = reports(w.agent("hobi", collect("jin", None), Some(t1)).await);
     assert_eq!(report_ids(&page), vec![s1]);
+}
+
+#[tokio::test]
+async fn a_parent_started_again_reaches_none_of_its_old_runs_sub_tasks_before_any_sweep() {
+    let w = triangle_world("old-run");
+    let t1 = w.mine("hobi");
+    w.working(&t1);
+    let s1 = w.give("hobi", "jin", t1).await;
+    let s2 = w.give("hobi", "suga", t1).await;
+    assert_eq!(w.claimed("jin").await, s1);
+    w.agent_reports("jin", &s1, "sentinel-609-old-run").await;
+    w.store().mark_unenrolled(&maknae_kernel::Containing(
+        everyone(),
+        [HOBI_UID].into_iter().collect(),
+    ));
+    w.store().sweep();
+    w.store().release(&t1, &everyone()).unwrap();
+    w.working(&t1);
+    for old in [s1, s2] {
+        w.store().release(&old, &everyone()).unwrap();
+    }
+    let status = w
+        .agent("hobi", Verb::TaskStatus { task: r(&s1) }, Some(t1))
+        .await;
+    assert!(unauthorized(&status), "{status:?}");
+    assert!(
+        reports(w.agent("hobi", collect("jin", None), Some(t1)).await)
+            .entries
+            .is_empty()
+    );
+    let rseq = w.store().record(&s1).unwrap().rseq.unwrap();
+    w.agent("hobi", collect("jin", Some(rseq)), Some(t1)).await;
+    assert!(
+        w.store().record(&s1).is_some(),
+        "not acknowledged by the new run"
+    );
+    let ts = w.mine("suga");
+    w.working(&ts);
+    w.give("suga", "hobi", ts).await;
+}
+
+#[tokio::test]
+async fn a_fan_out_whose_branches_meet_at_one_agent_is_taken() {
+    let w = triangle_world("waits-fan-out");
+    let (t1, s1) = w.chain().await;
+    let s2 = w.give("hobi", "suga", t1).await;
+    assert_eq!(w.claimed("jin").await, s1);
+    assert_eq!(w.store().record(&s2).unwrap().state, TaskState::Queued);
+    let g = w.give("jin", "suga", s1).await;
+    assert_eq!(w.store().record(&g).unwrap().parent, Some(s1));
+}
+
+#[tokio::test]
+async fn a_queued_task_waits_on_nothing_even_while_due_a_hold() {
+    let w = triangle_world("waits-queued-parent");
+    let (t1, s1) = w.chain().await;
+    let hold_hobi = || {
+        w.store().mark_unenrolled(&maknae_kernel::Containing(
+            everyone(),
+            [HOBI_UID].into_iter().collect(),
+        ))
+    };
+    hold_hobi();
+    w.store().sweep();
+    for id in [t1, s1] {
+        w.store().release(&id, &everyone()).unwrap();
+        assert_eq!(w.store().record(&id).unwrap().state, TaskState::Queued);
+    }
+    hold_hobi();
+    let tj = w.mine("jin");
+    w.working(&tj);
+    w.give("jin", "hobi", tj).await;
 }

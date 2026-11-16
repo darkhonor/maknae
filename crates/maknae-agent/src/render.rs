@@ -116,7 +116,8 @@ pub const NOT_ACCEPTED: &str = "not accepted, or its outcome is unknown; do not 
 pub const SUB_OUTCOME_UNKNOWN: &str =
     "outcome unknown: the other agent may have the task; do not retry it";
 pub const ON_HOLD: &str = "on hold — its agent or tasker was contained";
-pub const WAIT_ENDED: &str = "the wait ended; the other agent's work will be closed";
+pub const WAIT_ENDED: &str =
+    "the wait ended; the other agent's task may still run until it is closed; do not retry it";
 pub const REPORT_HEAD_BYTES: usize = 4096;
 pub const CUT_MARKER: &str = "[cut here — read the rest with read_file]";
 pub const NOT_STORED: &str = "the rest of the report could not be stored and is not shown";
@@ -478,7 +479,7 @@ mod tests {
             (T::OnHold, "on hold — its agent or tasker was contained"),
             (
                 T::WaitEnded,
-                "the wait ended; the other agent's work will be closed",
+                "the wait ended; the other agent's task may still run until it is closed; do not retry it",
             ),
             (
                 T::Closed(maknae_proto::TaskClose::ParentEnded),

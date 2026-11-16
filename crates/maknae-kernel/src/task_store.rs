@@ -123,10 +123,10 @@ pub struct TaskRecord {
     pub unseen: bool,
     /// How many times it has been started from `Queued`.
     #[serde(default)]
-    pub starts: u32,
+    pub starts: u64,
     /// The parent's `starts` when this sub-task was given under it.
     #[serde(default)]
-    pub parent_start: Option<u32>,
+    pub parent_start: Option<u64>,
 }
 
 mod arc_signed {
