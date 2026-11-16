@@ -1283,6 +1283,7 @@ pub struct TaskReportPage {
 pub struct TaskDelivery {
     pub signed: Bytes,
     pub partition: String,
+    pub fresh: bool,
 }
 
 pub struct TaskFollowUps {
