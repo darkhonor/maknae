@@ -105,7 +105,12 @@ impl Session {
         home: Option<String>,
     ) -> Result<Self, PlaneError> {
         let id = plane.open(cwd, sensitive).await?;
-        let mut session = Session::new(id.as_str(), first_prompt, budget, context, home);
+        let line = format!("Working directory: {}\n\n", cwd.display());
+        let mut first =
+            zeroize::Zeroizing::new(String::with_capacity(line.len() + first_prompt.len()));
+        first.push_str(&line);
+        first.push_str(first_prompt);
+        let mut session = Session::new(id.as_str(), &first, budget, context, home);
         session.kernel = Some(id);
         Ok(session)
     }
@@ -739,6 +744,20 @@ mod tests {
             None,
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn the_first_turn_names_the_working_directory() {
+        let mut p = fake(vec![]);
+        let s = opened(&mut p).await.unwrap();
+        assert!(matches!(
+            &s.transcript.turns()[0],
+            Turn::User { content } if matches!(&content[0], ContentBlock::Text { text } if &*text.0 == "Working directory: /home/a/w\n\ngo")
+        ));
+        assert!(matches!(
+            &Session::new("c", "go", budget(), unmetered(), None).transcript.turns()[0],
+            Turn::User { content } if matches!(&content[0], ContentBlock::Text { text } if &*text.0 == "go")
+        ));
     }
 
     async fn converse_with(

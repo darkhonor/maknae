@@ -1455,7 +1455,10 @@ mod tests {
         assert_eq!(&log[..2], &strs(&["beat 0", "claim"]));
         assert_eq!(&log[2..10], &fresh_start(1)[..]);
         assert_eq!(log[10], "prompt 1");
-        assert_eq!(user_text(&w.lock().unwrap().sent[0][0]), "prompt-1");
+        assert_eq!(
+            user_text(&w.lock().unwrap().sent[0][0]),
+            "Working directory: /home/hobi/tasks/users/1000\n\nprompt-1"
+        );
     }
 
     #[tokio::test]
@@ -1585,7 +1588,7 @@ mod tests {
         assert_eq!(reads, strs(&["persona etc"]));
         assert_eq!(
             user_text(&w.lock().unwrap().sent[0][0]),
-            "You are hobi.\n\nprompt-1"
+            "Working directory: /home/hobi/tasks/users/1000\n\nYou are hobi.\n\nprompt-1"
         );
     }
 
@@ -1609,7 +1612,7 @@ mod tests {
         );
         assert_eq!(
             user_text(&w.lock().unwrap().sent[0][0]),
-            "home persona\n\nprompt-1"
+            "Working directory: /home/hobi/tasks/users/1000\n\nhome persona\n\nprompt-1"
         );
 
         let mut f = fake();
@@ -1622,7 +1625,7 @@ mod tests {
         let (_, _, w) = run_with(f, PersonaMode::Own).await;
         assert_eq!(
             user_text(&w.lock().unwrap().sent[0][0]),
-            "partition persona\n\nprompt-1"
+            "Working directory: /home/hobi/tasks/users/1000\n\npartition persona\n\nprompt-1"
         );
     }
 
@@ -1654,7 +1657,10 @@ mod tests {
             ])
         );
         let w = w.lock().unwrap();
-        assert_eq!(user_text(&w.sent[1][0]), "prompt-2");
+        assert_eq!(
+            user_text(&w.sent[1][0]),
+            "Working directory: /home/hobi/tasks/agents/suga\n\nprompt-2"
+        );
     }
 
     #[tokio::test]

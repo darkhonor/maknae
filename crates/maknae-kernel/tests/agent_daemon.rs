@@ -954,7 +954,10 @@ async fn an_agent_carries_out_a_prompt_task_in_its_taskers_partition() {
     };
     assert_eq!(
         first,
-        "sentinel-629-home-persona\n\nsentinel-629-carry-prompt"
+        format!(
+            "Working directory: {}\n\nsentinel-629-home-persona\n\nsentinel-629-carry-prompt",
+            w.partition().display()
+        )
     );
     let persona_reads: Vec<_> = cited(&w, &id, "fs.read")
         .into_iter()
@@ -1117,8 +1120,11 @@ async fn an_agent_resumes_its_working_task_after_a_kernel_restart() {
         "the step lost to the restart is the only one re-sent"
     );
     assert_eq!(
-        user_text(&prompts[1][0]).as_deref(),
-        Some("sentinel-629-restart-prompt"),
+        user_text(&prompts[1][0]),
+        Some(format!(
+            "Working directory: {}\n\nsentinel-629-restart-prompt",
+            w.partition().display()
+        )),
         "the resumed session is the same conversation"
     );
     assert!(tool_results(&prompts[1])
