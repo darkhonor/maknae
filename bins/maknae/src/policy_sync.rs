@@ -2016,7 +2016,7 @@ mod tests {
     }
 
     #[test]
-    fn systemd_may_read_the_mirror_it_watches_and_nothing_else_in_state() {
+    fn systemd_may_read_the_mirror_and_create_state_subdirectories_and_nothing_else_in_state() {
         let te = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../packaging/common/maknae.te"
@@ -2027,7 +2027,52 @@ mod tests {
             .map(str::trim)
             .filter(|l| !l.starts_with('#') && l.contains("init_t") && l.contains("maknae_state_t"))
             .collect();
-        assert_eq!(init_on_state, ["allow init_t maknae_state_t:file read;"]);
+        assert_eq!(
+            init_on_state,
+            [
+                "allow init_t maknae_state_t:dir { write add_name create setattr };",
+                "allow init_t maknae_state_t:file read;",
+            ]
+        );
+        let unit = include_str!("../../../packaging/common/maknaed.service");
+        let state: Vec<_> = unit
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("StateDirectory="))
+            .collect();
+        assert_eq!(state.len(), 1);
+        let nested: Vec<_> = state[0]
+            .split_whitespace()
+            .filter(|d| d.contains('/'))
+            .collect();
+        assert!(!nested.is_empty());
+        assert!(
+            nested.iter().all(|d| d.starts_with("maknae/")),
+            "{nested:?}"
+        );
+        let fc = include_str!("../../../packaging/common/maknae.fc");
+        let state_fc: Vec<Vec<&str>> = fc
+            .lines()
+            .map(|l| l.split_whitespace().collect())
+            .filter(|f: &Vec<&str>| f.first().is_some_and(|p| p.starts_with("/var/lib/maknae")))
+            .collect();
+        assert_eq!(
+            state_fc,
+            [
+                vec![
+                    "/var/lib/maknae(/.*)?",
+                    "gen_context(system_u:object_r:maknae_state_t,s0)"
+                ],
+                vec![
+                    "/var/lib/maknae-agents",
+                    "-d",
+                    "gen_context(system_u:object_r:maknae_agent_homes_root_t,s0)"
+                ],
+                vec![
+                    "/var/lib/maknae-agents/.*",
+                    "gen_context(system_u:object_r:maknae_agent_home_t,s0)"
+                ],
+            ]
+        );
         assert!(te
             .lines()
             .any(|l| l == "neverallow maknae_egress_t maknae_state_t:{ dir file } *;"));
