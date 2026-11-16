@@ -140,6 +140,9 @@ struct PreparedMutation {
     granted: Granted,
     paths: Vec<String>,
     kind: FsOperation,
+    /// The kernel-reported path of a delegated existing directory a namespace
+    /// mutation acts in: mkdir's nearest existing ancestor, a delete's or create's parent.
+    within: Option<String>,
 }
 pub(crate) struct DurableIntent {
     pub(crate) record: AuditRecord,
@@ -236,6 +239,7 @@ fn prepare(
             granted: Granted::List,
             paths: vec![path],
             kind: FsOperation::Read,
+            within: None,
         });
     }
     if let Verb::FsStat { .. } = verb {
@@ -253,6 +257,7 @@ fn prepare(
             granted: Granted::Stat(verified.meta),
             paths: vec![path],
             kind: FsOperation::Read,
+            within: None,
         });
     }
     let object = match &verb {
@@ -290,10 +295,16 @@ fn prepare(
             }),
             paths: vec![path],
             kind,
+            within: None,
         });
     }
     let directory = maknae_io::verify_mutation_directory(fd)
         .map_err(|e| format!("namespace location evidence refused: {e}"))?;
+    let within = directory
+        .path()
+        .to_str()
+        .ok_or("non-UTF-8 directory path")?
+        .to_owned();
     let mut current = directory.path().to_path_buf();
     let components = match &verb {
         Verb::FsMkdir {
@@ -386,6 +397,7 @@ fn prepare(
         granted: Granted::Attempt(scope),
         paths,
         kind,
+        within: Some(within),
     })
 }
 
@@ -468,18 +480,36 @@ fn authorize<P: Authorizer>(
 ) -> Result<(DecidedBy, maknae_proto::ObjectLabel), AuthorizeErr> {
     let with_read = needs_read(verb);
     let mut requests = Vec::new();
+    let mut decides: Vec<(&String, bool)> = Vec::new();
+    if let (Some(within), Some(_)) = (&prepared.within, cited(verb)) {
+        let at = path_request(
+            verb,
+            uid,
+            home,
+            facts,
+            personal,
+            stamp,
+            within,
+            FsOperation::Read,
+        );
+        requests.push(read_of(&at));
+        decides.push((within, true));
+    }
     for path in &prepared.paths {
         let request = path_request(verb, uid, home, facts, personal, stamp, path, prepared.kind);
         let read = with_read.then(|| read_of(&request));
         requests.push(request);
-        requests.extend(read);
+        decides.push((path, false));
+        if let Some(read) = read {
+            requests.push(read);
+            decides.push((path, true));
+        }
     }
-    let stride = if with_read { 2 } else { 1 };
+    let action = crate::handler::verb_to_action(verb);
     let verdicts = maknae_security::guarded_decide_cited_all(authorizer, &requests);
     let mut decided: DecidedBy = (None, None);
     for (i, d) in verdicts.into_iter().enumerate() {
-        let path = &prepared.paths[i / stride];
-        let read = i % stride == 1;
+        let (path, read) = decides[i];
         if !read {
             decided = (d.role, d.rule.clone());
         }
@@ -495,7 +525,7 @@ fn authorize<P: Authorizer>(
             })?,
             Decision::Deny { reason } if read => {
                 return Err((
-                    format!("{} needs fs.read: {reason}", requests[i - 1].action.0),
+                    format!("{action} needs fs.read: {reason}"),
                     path.clone(),
                     (d.role, d.rule),
                 ))

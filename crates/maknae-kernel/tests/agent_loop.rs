@@ -1311,7 +1311,8 @@ async fn every_mkdir_and_delete_refusal_renders_the_same_bytes() {
     for want in [
         "denied by policy entry Write(~/leaf-denied-158)",
         "denied by policy entry Write(~/anc-denied-158)",
-        "sensitive: host ~/hidden-158/**",
+        "fs.mkdir needs fs.read: sensitive: host ~/hidden-158",
+        "fs.delete needs fs.read: sensitive: host ~/hidden-158",
     ] {
         assert!(reasons.contains(&want), "{want}: {reasons:?}");
     }
@@ -1471,30 +1472,121 @@ async fn deleting_the_home_under_the_shipped_list_is_refused_as_the_home_not_as_
 }
 
 #[tokio::test]
-async fn an_unreadable_existing_ancestor_answers_unlike_a_missing_one() {
+async fn a_read_denied_parent_refuses_alike_whether_or_not_it_exists() {
     let fx = Fixture::with_rules(
-        "agent-158-residual",
+        "agent-158-parent",
         &["Read", "Write"],
-        &["Read(~/res-158)", "Read(~/res-missing-158)"],
+        &["Read(~/hidden-158)", "Read(~/hidden-missing-158)"],
         GRANTED,
     );
     let r = fx.root.clone();
-    std::fs::create_dir_all(r.join("res-158")).unwrap();
+    std::fs::create_dir_all(r.join("hidden-158")).unwrap();
+    std::fs::write(r.join("hidden-158/x"), "SENTINEL-158").unwrap();
+    let mut calls = vec![];
+    for (i, dir) in ["hidden-158", "hidden-missing-158"].iter().enumerate() {
+        let d = r.join(dir);
+        calls.push(path_call(
+            &format!("m{i}"),
+            "make_directory",
+            &d.join("child"),
+        ));
+        calls.push(delete_call(&format!("d{i}"), &d.join("x"), false));
+        calls.push(call(
+            &format!("w{i}"),
+            "write_file",
+            &format!(
+                r#"{{"path":"{}","content":"new"}}"#,
+                d.join("new").display()
+            ),
+        ));
+    }
+    let Stepped {
+        said, _fx: _kept, ..
+    } = drive_one_step_in(fx, calls, vec![], &[]).await;
+    assert_eq!(said, vec![UNAVAILABLE_AT_2.to_string(); 6]);
+    assert!(!r.join("hidden-158/child").exists());
+    assert!(!r.join("hidden-158/new").exists());
+    assert_eq!(
+        std::fs::read_to_string(r.join("hidden-158/x")).unwrap(),
+        "SENTINEL-158"
+    );
+    assert!(!r.join("hidden-missing-158").exists());
+}
+
+#[tokio::test]
+async fn a_symlinked_ancestor_refuses_alike_whether_or_not_its_target_exists() {
+    let fx = Fixture::with_rules("agent-158-dangling", &["Read", "Write"], &[], GRANTED);
+    let r = fx.root.clone();
+    common::write_0640(
+        &fx.paths().sensitive,
+        "schema_version: 1\nsensitive:\n  - \"~/private-158\"\n  - \"~/private-158/**\"\n",
+    );
+    std::fs::create_dir_all(r.join("projects-158")).unwrap();
+    std::fs::create_dir_all(r.join("private-158/target-a")).unwrap();
+    std::os::unix::fs::symlink(
+        r.join("private-158/target-a"),
+        r.join("projects-158/link-a"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        r.join("private-158/target-b"),
+        r.join("projects-158/link-b"),
+    )
+    .unwrap();
     let calls = vec![
-        path_call("c1", "make_directory", &r.join("res-158/sub-158")),
-        path_call("c2", "make_directory", &r.join("res-missing-158/sub-158")),
+        path_call("a", "make_directory", &r.join("projects-158/link-a/child")),
+        path_call("b", "make_directory", &r.join("projects-158/link-b/child")),
     ];
     let Stepped {
         said, _fx: _kept, ..
     } = drive_one_step_in(fx, calls, vec![], &[]).await;
-    assert_eq!(
-        said[0],
-        rendered_at_2(maknae_agent::render::MKDIR_EXISTS),
-        "the named residual: an existing ancestor is never decided"
-    );
-    assert_eq!(said[1], UNAVAILABLE_AT_2);
-    assert!(r.join("res-158/sub-158").is_dir());
-    assert!(!r.join("res-missing-158").exists());
+    assert_eq!(said, vec![UNAVAILABLE_AT_2.to_string(); 2]);
+    assert!(!r.join("private-158/target-a/child").exists());
+    assert!(!r.join("private-158/target-b").exists());
+    assert!(r.join("projects-158/link-b").is_symlink());
+}
+
+#[tokio::test]
+async fn a_cited_delete_of_what_the_subject_cannot_read_is_refused_alike() {
+    use std::os::unix::fs::PermissionsExt;
+    if nix::unistd::geteuid().is_root() {
+        panic!("running as root voids the os-refused premise; run as an unprivileged user");
+    }
+    let fx = Fixture::with_rules("agent-158-unreadable", &["Read", "Write"], &[], GRANTED);
+    let r = fx.root.clone();
+    std::fs::write(r.join("locked-158"), "SENTINEL-158").unwrap();
+    std::fs::create_dir_all(r.join("tree-158/inner")).unwrap();
+    std::fs::write(r.join("tree-158/readable"), "SENTINEL-158").unwrap();
+    std::fs::write(r.join("tree-158/inner/locked"), "SENTINEL-158").unwrap();
+    std::fs::create_dir(r.join("empty-158")).unwrap();
+    for p in ["locked-158", "tree-158/inner/locked"] {
+        std::fs::set_permissions(r.join(p), std::fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    std::fs::set_permissions(r.join("empty-158"), std::fs::Permissions::from_mode(0o000)).unwrap();
+    let unlocks = vec![
+        Unlock(r.join("empty-158")),
+        Unlock(r.join("tree-158/inner/locked")),
+        Unlock(r.join("locked-158")),
+    ];
+    let calls = vec![
+        delete_call("c1", &r.join("locked-158"), false),
+        delete_call("c2", &r.join("missing-158"), false),
+        delete_call("c3", &r.join("tree-158"), true),
+        delete_call("c4", &r.join("empty-158"), false),
+        delete_call("c5", &r.join("empty-158"), true),
+    ];
+    let Stepped {
+        said, _fx: _kept, ..
+    } = drive_one_step_in(fx, calls, unlocks, &[]).await;
+    assert_eq!(said, vec![UNAVAILABLE_AT_2.to_string(); 5]);
+    for kept in ["locked-158", "tree-158/readable", "tree-158/inner/locked"] {
+        assert_eq!(
+            std::fs::read_to_string(r.join(kept)).unwrap(),
+            "SENTINEL-158",
+            "{kept}"
+        );
+    }
+    assert!(r.join("empty-158").is_dir());
 }
 
 #[tokio::test]
