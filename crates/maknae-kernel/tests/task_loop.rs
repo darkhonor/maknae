@@ -2208,6 +2208,18 @@ async fn a_full_size_task_round_trips_within_the_frame_caps() {
 }
 
 #[tokio::test]
+async fn only_the_claim_that_starts_a_task_delivers_it_fresh() {
+    let w = world("claim-fresh", "user", true);
+    w.submit("hobi", "a").await;
+    for started in [true, false] {
+        match w.agent("hobi", CLAIM, None).await {
+            RespResult::Ok(Payload::TaskDelivered(d)) => assert_eq!(d.fresh, started),
+            other => panic!("claim: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
 async fn a_claim_or_report_whose_record_fails_is_refused_and_recorded() {
     let w = world("claim-audit", "user", true);
     let id = w.submit("hobi", "a").await;

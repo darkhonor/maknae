@@ -240,9 +240,11 @@ pub enum Notice {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Claimed {
+    /// `fresh` when this hand-out started the task from `Queued`.
     Delivered {
         signed: Arc<SignedTask>,
         partition: String,
+        fresh: bool,
     },
     Idle,
 }
@@ -1696,7 +1698,8 @@ impl TaskStore {
         self.resign_if_stale(&id, agent, uid, signer)?;
         let moved = || TaskRefusal::Unavailable(MOVED.into());
         let lease = self.clock.now_secs() + CLAIM_LEASE.as_secs() as i64;
-        let delivered = |rec: &TaskRecord| Claimed::Delivered {
+        let delivered = |rec: &TaskRecord, fresh: bool| Claimed::Delivered {
+            fresh,
             signed: rec.signed.clone(),
             partition: format!(
                 "{}/{}",
@@ -1711,7 +1714,7 @@ impl TaskStore {
                     .held_by(&id, agent, uid)
                     .filter(|r| r.state == TaskState::Working)
                     .ok_or_else(moved)?;
-                let handed = delivered(rec);
+                let handed = delivered(rec, false);
                 held.hot.entry(id).or_default().lease_until = lease;
                 Ok(handed)
             }
@@ -1728,7 +1731,7 @@ impl TaskStore {
                 next.state = TaskState::Working;
                 next.claimed = Some(self.clock.now_secs());
                 self.write(&next, Some(&prior))?;
-                let handed = delivered(&next);
+                let handed = delivered(&next, true);
                 let mut held = self.held();
                 held.hot.entry(id).or_default().lease_until = lease;
                 held.tasks.insert(id, next);
@@ -5703,6 +5706,10 @@ mod tests {
         let hobi = id("hobi");
         let task = held_by(&store, Tasker::Uid(BOB));
         store.start_for_test(&task);
+        assert!(matches!(
+            claim_head(&store, &hobi, HOBI, signer()),
+            Ok(Claimed::Delivered { fresh: false, .. })
+        ));
         if let Some(hot) = store.held().hot.get_mut(&task) {
             (hot.retry_after, hot.retry_secs) = (i64::MAX, RETRY_MAX_SECS);
         }
@@ -5718,7 +5725,7 @@ mod tests {
         assert_eq!(store.next_for(&hobi, HOBI), Some((task, TaskState::Queued)));
         assert!(matches!(
             claim_head(&store, &hobi, HOBI, signer()),
-            Ok(Claimed::Delivered { .. })
+            Ok(Claimed::Delivered { fresh: true, .. })
         ));
     }
 
@@ -6453,11 +6460,16 @@ mod tests {
             "another uid holds nothing"
         );
         assert_eq!(claim_head(&store, &hobi, JIN, signer()), Ok(Claimed::Idle));
-        for _ in 0..2 {
+        for started in [true, false] {
             match claim_head(&store, &hobi, HOBI, signer()).unwrap() {
-                Claimed::Delivered { signed, partition } => {
+                Claimed::Delivered {
+                    signed,
+                    partition,
+                    fresh,
+                } => {
                     assert_eq!(signed.task.task_id, first);
                     assert_eq!(partition, "tasks/users/1000");
+                    assert_eq!(fresh, started);
                 }
                 Claimed::Idle => panic!("idle"),
             }

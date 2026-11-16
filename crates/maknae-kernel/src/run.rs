@@ -3828,10 +3828,19 @@ async fn serve_task_verb<S, E, P>(
             let claimed = crate::task::offload(uid, deadline, move || {
                 match s.claim(&agent, uid, &*signer, &*view, decided_on.as_ref())? {
                     crate::task::Claimed::Idle => Ok(None),
-                    crate::task::Claimed::Delivered { signed, partition } => {
+                    crate::task::Claimed::Delivered {
+                        signed,
+                        partition,
+                        fresh,
+                    } => {
                         let wire = crate::task_store::encode(&*signed)
                             .map_err(|e| crate::task::TaskRefusal::Store(e.to_string()))?;
-                        Ok(Some((signed, maknae_proto::Bytes::new(wire), partition)))
+                        Ok(Some((
+                            signed,
+                            maknae_proto::Bytes::new(wire),
+                            partition,
+                            fresh,
+                        )))
                     }
                 }
             })
@@ -3850,14 +3859,17 @@ async fn serve_task_verb<S, E, P>(
                         )
                         .await;
                 }
-                Ok(Some((task, signed, partition))) => {
+                Ok(Some((task, signed, partition, fresh))) => {
                     let outcome = of(
                         trail.outcome(&intent, "delivered", "authorized"),
                         &task.task.task_id,
                         &task.task.tasker,
                     );
-                    let payload =
-                        Payload::TaskDelivered(maknae_proto::TaskDelivery { signed, partition });
+                    let payload = Payload::TaskDelivered(maknae_proto::TaskDelivery {
+                        signed,
+                        partition,
+                        fresh,
+                    });
                     trail
                         .deliver(stream, &outcome, payload, role, rule.as_ref(), action)
                         .await;

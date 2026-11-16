@@ -105,6 +105,7 @@ mod tests {
         TaskDelivery {
             signed: maknae_proto::Bytes::new(zeroize::Zeroizing::new(vec![1, 2, 3])),
             partition: "tasks/users/1000".into(),
+            fresh: false,
         }
     }
 

@@ -2574,6 +2574,7 @@ mod tests {
                 Payload::TaskDelivered(maknae_proto::TaskDelivery {
                     signed: maknae_proto::Bytes::new(Vec::new().into()),
                     partition: "tasks/users/alex".into(),
+                    fresh: true,
                 }),
                 "task delivery",
             ),

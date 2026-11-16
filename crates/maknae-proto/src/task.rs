@@ -635,10 +635,12 @@ pub struct TaskReportPage {
 }
 
 /// `signed` is the CBOR of a [`SignedTask`]; `partition` is relative to the agent's home.
+/// `fresh` when this delivery started the task, so no earlier work on it may be resumed.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct TaskDelivery {
     pub signed: Bytes,
     pub partition: String,
+    pub fresh: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -1138,6 +1140,7 @@ mod tests {
             Payload::TaskDelivered(TaskDelivery {
                 signed: Bytes::new(text.as_bytes().to_vec().into()),
                 partition: "tasks/users/alex".into(),
+                fresh: true,
             }),
             Payload::TaskFollowUps(TaskFollowUps {
                 task: TaskRef::from_id(&TaskId([7; 16])),
