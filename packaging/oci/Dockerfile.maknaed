@@ -4,7 +4,7 @@
 # cannot). The tag is a label for humans; Dependabot's docker ecosystem moves both.
 # The image's rustup honors rust-toolchain.toml from the COPY, so the toolchain that
 # builds is the pinned 1.99.1, whatever the base carries.
-FROM rust:1.99.1@sha256:931c2c0531a8b143e044f0f3914dfe802f15bb3d1955f0b657e9359327ac2ffc AS build
+FROM rust:1.100.0@sha256:e19840879045c951c905d0eaa9887f3439c62000e429963371b376bac8d38c31 AS build
 WORKDIR /src
 COPY . .
 RUN rustup target add x86_64-unknown-linux-musl && cargo install cargo-auditable --locked --version 0.7.7
