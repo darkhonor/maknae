@@ -611,12 +611,22 @@ impl MutationDirectory {
     /// Remove the entry itself, including symlinks. A directory must be empty;
     /// this function never falls back to recursive removal.
     pub fn remove_entry(&self, leaf: &str) -> Result<MutationEffect, MutationFailure> {
-        let path = self.child_path(leaf).map_err(no_effect(&self.path))?;
+        let certified = |mut e: MutationFailure| {
+            e.before_write = true;
+            e
+        };
+        let path = self
+            .child_path(leaf)
+            .map_err(no_effect(&self.path))
+            .map_err(certified)?;
         let st = syscall::fstatat_nofollow(&self.fd, leaf)
-            .map_err(|e| failure(&path, EffectState::NoEffect, io_error(e, &path)))?;
+            .map_err(|e| failure(&path, EffectState::NoEffect, io_error(e, &path)))
+            .map_err(certified)?;
         let directory = st.st_mode & nix::libc::S_IFMT == nix::libc::S_IFDIR;
-        self.reverify(&self.path).map_err(no_effect(&path))?;
-        self.check_deadline(&path)?;
+        self.reverify(&self.path)
+            .map_err(no_effect(&path))
+            .map_err(certified)?;
+        self.check_deadline(&path).map_err(certified)?;
         syscall::remove_at(&self.fd, leaf, directory)
             .map_err(|e| failure(&path, EffectState::NoEffect, io_error(e, &path)))?;
         Ok(MutationEffect {
@@ -935,6 +945,18 @@ mod tests {
             .unwrap_err();
         assert_eq!(e.state, EffectState::Partial);
         assert!(!e.before_write, "the entry exists once the open succeeds");
+    }
+    #[test]
+    fn a_remove_refused_before_the_unlink_is_certified_and_a_refused_unlink_is_not() {
+        let d = tempfile::tempdir().unwrap();
+        let e = directory(&d).remove_entry("missing-sentinel").unwrap_err();
+        assert_eq!(e.state, EffectState::NoEffect);
+        assert!(e.before_write, "{e:?}");
+        std::fs::create_dir_all(d.path().join("full/inside")).unwrap();
+        let e = directory(&d).remove_entry("full").unwrap_err();
+        assert_eq!(e.state, EffectState::NoEffect);
+        assert!(!e.before_write, "the rmdir was attempted: {e:?}");
+        assert!(d.path().join("full/inside").exists());
     }
     #[test]
     fn a_create_open_refused_by_permission_is_not_certified_before_any_effect() {

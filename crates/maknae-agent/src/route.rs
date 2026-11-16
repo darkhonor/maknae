@@ -223,6 +223,12 @@ struct StatArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct MkdirArgs {
+    path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DeleteArgs {
     path: String,
     #[serde(default)]
@@ -429,7 +435,7 @@ pub fn route(call: &ProposedToolCall, home: Option<&str>) -> Result<ToolRequest,
         }
         "make_directory" => {
             require_object(args)?;
-            let a: StatArgs =
+            let a: MkdirArgs =
                 serde_json::from_str(args).map_err(|e| RouteError::BadArguments(e.to_string()))?;
             Ok(ToolRequest::Mkdir {
                 call_id: call.call_id.clone(),

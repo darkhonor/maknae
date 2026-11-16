@@ -1207,13 +1207,12 @@ async fn every_mkdir_and_delete_refusal_renders_the_same_bytes() {
     );
     let mkdir = |p: &str| ("make_directory", r.join(p), false);
     let delete = |p: &str, recursive| ("delete_path", r.join(p), recursive);
-    let uniform: [(&str, (&str, std::path::PathBuf, bool)); 10] = [
+    let uniform: [(&str, (&str, std::path::PathBuf, bool)); 11] = [
         ("mkdir denied leaf", mkdir("leaf-denied-158")),
         (
             "mkdir denied missing ancestor",
             mkdir("anc-denied-158/x-158"),
         ),
-        ("mkdir os-refused ancestor", mkdir("locked-158/x-158")),
         (
             "mkdir host list via symlinked parent",
             mkdir("via-158/x-158"),
@@ -1221,6 +1220,11 @@ async fn every_mkdir_and_delete_refusal_renders_the_same_bytes() {
         ("mkdir write without read", mkdir("unread-158")),
         ("delete denied", delete("del-denied-158", false)),
         ("delete os-refused parent", delete("locked-158/f", false)),
+        ("delete missing path", delete("missing-158", false)),
+        (
+            "recursive delete of a missing path",
+            delete("missing-158", true),
+        ),
         (
             "delete host list via symlinked parent",
             delete("via-158/f", false),
@@ -1234,7 +1238,8 @@ async fn every_mkdir_and_delete_refusal_renders_the_same_bytes() {
             delete("tree-158", true),
         ),
     ];
-    let calls = uniform
+    let locked_child = r.join("locked-158/x-158");
+    let mut calls: Vec<_> = uniform
         .iter()
         .enumerate()
         .map(|(i, (_, (tool, p, recursive)))| match *tool {
@@ -1242,6 +1247,7 @@ async fn every_mkdir_and_delete_refusal_renders_the_same_bytes() {
             _ => path_call(&format!("c{i}"), tool, p),
         })
         .collect();
+    calls.push(path_call("os", "make_directory", &locked_child));
     let Stepped {
         said,
         trail,
@@ -1251,7 +1257,32 @@ async fn every_mkdir_and_delete_refusal_renders_the_same_bytes() {
     for ((cause, _), s) in uniform.iter().zip(&said) {
         assert_eq!(s, UNAVAILABLE_AT_2, "{cause}");
     }
-    assert_eq!(said.len(), uniform.len());
+    assert_eq!(said.len(), uniform.len() + 1);
+    let os_mkdir: Vec<&str> = trail
+        .iter()
+        .filter(|t| t.action == "fs.mkdir" && t.object.as_deref() == locked_child.to_str())
+        .map(|t| t.outcome.result.as_str())
+        .collect();
+    if cfg!(target_os = "linux") {
+        assert_eq!(
+            said[uniform.len()],
+            rendered_at_2(maknae_agent::render::CHANGE_UNKNOWN),
+            "Linux delegates the 0000 parent by O_PATH, so the kernel grants and mkdirat is refused after it"
+        );
+        assert!(os_mkdir.contains(&"permit"), "{os_mkdir:?}");
+    } else {
+        assert_eq!(
+            said[uniform.len()],
+            UNAVAILABLE_AT_2,
+            "macOS cannot open the 0000 parent, so the request goes unarmed and is refused"
+        );
+        assert!(!os_mkdir.contains(&"permit"), "{os_mkdir:?}");
+    }
+    assert!(!locked_child.exists());
+    assert_eq!(
+        std::fs::read_to_string(r.join("locked-158/f")).unwrap(),
+        "SENTINEL-158"
+    );
     for gone in [
         "leaf-denied-158",
         "anc-denied-158",
@@ -1404,6 +1435,39 @@ async fn the_model_makes_and_deletes_through_the_real_kernel() {
     for t in changed {
         assert_eq!(t.conversation.as_deref(), Some(conv.as_str()), "{t:?}");
     }
+}
+
+#[tokio::test]
+async fn deleting_the_home_under_the_shipped_list_is_refused_as_the_home_not_as_protected() {
+    let fx = Fixture::with_rules("agent-158-home", &["Read", "Write"], &[], GRANTED);
+    common::write_0640(
+        &fx.paths().sensitive,
+        include_str!("../../../packaging/common/sensitive.yaml"),
+    );
+    let r = fx.root.clone();
+    let calls = vec![
+        delete_call("c1", &r, true),
+        delete_call("c2", &r, false),
+        delete_call("c3", r.parent().unwrap(), true),
+    ];
+    let Stepped {
+        said,
+        trail,
+        _fx: _kept,
+        ..
+    } = drive_one_step_in(fx, calls, vec![], &[]).await;
+    assert_eq!(said, vec![UNAVAILABLE_AT_2.to_string(); 3]);
+    let reasons: Vec<(&str, &str)> = trail
+        .iter()
+        .filter(|t| t.action == "fs.delete")
+        .map(|t| (t.outcome.result.as_str(), t.outcome.reason.as_str()))
+        .collect();
+    assert_eq!(
+        reasons,
+        vec![("deny", "cannot delete the requester's home"); 3],
+        "{trail:?}"
+    );
+    assert!(r.is_dir());
 }
 
 #[tokio::test]

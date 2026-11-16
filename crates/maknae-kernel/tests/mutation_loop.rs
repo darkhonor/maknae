@@ -2365,12 +2365,15 @@ async fn a_delete_of_a_directory_that_could_hold_an_entry_answers_protected() {
     let parent = fx.root.parent().unwrap().to_path_buf();
 
     let (result, record) = unarmed_attempt(&fx, recursive_delete(&fx.root)).await;
-    assert_protected_by(&result, "~/.ssh/**");
-    assert_eq!(record.outcome.reason, "sensitive: host ~/.ssh/**");
+    assert_refused(&result, &record, "cannot delete the requester's home");
 
     std::fs::create_dir(fx.root.join(".ssh")).unwrap();
-    let (result, _) = second_subject_attempt(&fx, recursive_delete(&fx.root), &parent).await;
-    assert_protected_by(&result, "~/.ssh/**");
+    let (result, record) = second_subject_attempt(&fx, recursive_delete(&fx.root), &parent).await;
+    assert_refused(&result, &record, "cannot delete the requester's home");
+    assert!(
+        !matches!(&result, RespResult::Err(e) if e.code == maknae_proto::ProtoErrCode::Protected),
+        "the home refusal comes before the protection check: {result:?}"
+    );
 
     let missing = fx.root.join("proj");
     assert!(!missing.exists());

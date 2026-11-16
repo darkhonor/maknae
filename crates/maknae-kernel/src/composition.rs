@@ -787,9 +787,14 @@ mod tests {
                             AttrValue::Str((*o).into()),
                         );
                     }
-                    let twin = (*term == "fs.write").then(|| crate::mutation::read_of(&r));
-                    for (half, op, r) in [("", *op, Some(r)), (" read-twin", Some("read"), twin)] {
+                    let twin = matches!(*term, "fs.write" | "fs.mkdir" | "fs.delete")
+                        .then(|| crate::mutation::read_of(&r));
+                    for (half, r) in [("", Some(r)), (" read-twin", twin)] {
                         let Some(r) = r else { continue };
+                        let op = match r.context.0.get(maknae_security::CONTEXT_FS_OPERATION) {
+                            Some(AttrValue::Str(o)) => Some(o.as_str()),
+                            _ => None,
+                        };
                         let d = c.decide_cited(&r);
                         let rule = d.rule.map(|c| {
                             let section =

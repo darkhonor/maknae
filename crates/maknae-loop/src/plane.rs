@@ -325,23 +325,13 @@ impl<K: KeySupply, D: Dial> LoopPlane<K, D> {
         parents: bool,
         conversation: Option<&str>,
     ) -> WriteOutcome {
-        let diagnostics = &mut self.diagnostics;
-        write_outcome(
-            self.link
-                .send(
-                    Verb::FsMkdir {
-                        path: path.to_string(),
-                        parents,
-                        components: Vec::new(),
-                        conversation: conversation.map(str::to_string),
-                    },
-                    None,
-                    crate::mutation::WriteCheck::Unchecked,
-                    &mut |l| diagnostics.push(l),
-                )
-                .await
-                .map(WireOutcome::from),
-        )
+        self.namespace(Verb::FsMkdir {
+            path: path.to_string(),
+            parents,
+            components: Vec::new(),
+            conversation: conversation.map(str::to_string),
+        })
+        .await
     }
 
     pub async fn delete(
@@ -350,15 +340,20 @@ impl<K: KeySupply, D: Dial> LoopPlane<K, D> {
         recursive: bool,
         conversation: Option<&str>,
     ) -> WriteOutcome {
+        self.namespace(Verb::FsDelete {
+            path: path.to_string(),
+            recursive,
+            conversation: conversation.map(str::to_string),
+        })
+        .await
+    }
+
+    async fn namespace(&mut self, verb: Verb) -> WriteOutcome {
         let diagnostics = &mut self.diagnostics;
         write_outcome(
             self.link
                 .send(
-                    Verb::FsDelete {
-                        path: path.to_string(),
-                        recursive,
-                        conversation: conversation.map(str::to_string),
-                    },
+                    verb,
                     None,
                     crate::mutation::WriteCheck::Unchecked,
                     &mut |l| diagnostics.push(l),

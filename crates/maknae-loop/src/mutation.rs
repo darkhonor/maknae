@@ -782,8 +782,9 @@ impl Worker {
                         Ok(p) => p,
                         Err(s) => return *s,
                     };
-                    self.attempted = true;
-                    match target_parent.remove_entry(&target_leaf) {
+                    let removed = target_parent.remove_entry(&target_leaf);
+                    self.attempted |= removed.as_ref().map_or_else(|e| !e.before_write, |_| true);
+                    match removed {
                         Ok(_) => {
                             if closing {
                                 stack.pop();
@@ -836,7 +837,10 @@ impl Worker {
                                 depth,
                             });
                         }
-                        Err(e) => return error_step(e, ReportedEffect::DeletedEntry, path),
+                        Err(e) => {
+                            self.withheld = !self.attempted;
+                            return error_step(e, ReportedEffect::DeletedEntry, path);
+                        }
                     }
                 }
             }
@@ -3731,6 +3735,48 @@ mod tests {
         assert!(task.await.unwrap().is_err());
         assert!(d.0.join("wrong-ack-parent").is_dir());
         assert!(!d.0.join("wrong-ack-parent/untouched-sentinel").exists());
+    }
+    #[tokio::test]
+    async fn a_granted_delete_refused_before_the_unlink_is_withheld_and_a_refused_unlink_is_not() {
+        let d = Fixture::new();
+        let missing = d.path("missing-delete-sentinel");
+        let full = d.path("full-delete-sentinel");
+        std::fs::create_dir_all(format!("{full}/inside")).unwrap();
+        for (path, recursive, withheld) in [
+            (&missing, false, true),
+            (&missing, true, true),
+            (&full, false, false),
+        ] {
+            let scope = if recursive {
+                MutationScope::RecursiveDelete { root: path.clone() }
+            } else {
+                MutationScope::Exact {
+                    path: path.clone(),
+                    effect: ReportedEffect::DeletedEntry,
+                }
+            };
+            let (end, _) = acknowledged_end(
+                prepare(delete(path.clone(), recursive), None).unwrap(),
+                grant(scope),
+            )
+            .await;
+            let end = end.unwrap();
+            assert!(!end.applied, "{path}: {end:?}");
+            assert_eq!(
+                end.withheld, withheld,
+                "{path} recursive {recursive}: {end:?}"
+            );
+            assert_eq!(
+                the_model_is_told(end),
+                if withheld {
+                    maknae_agent::plane::WriteOutcome::Unavailable
+                } else {
+                    maknae_agent::plane::WriteOutcome::Unknown
+                },
+                "{path}"
+            );
+        }
+        assert!(Path::new(&format!("{full}/inside")).is_dir());
     }
     #[tokio::test]
     async fn recursive_removes_unreadable_empty_directory_without_enumeration() {

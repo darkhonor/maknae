@@ -3915,6 +3915,11 @@ mod tests {
                     components,
                     conversation: Some("c".repeat(MAX_CONVERSATION_ID_BYTES)),
                 },
+                Verb::FsDelete {
+                    path: path.clone(),
+                    recursive: true,
+                    conversation: Some("c".repeat(MAX_CONVERSATION_ID_BYTES)),
+                },
                 Verb::FsWrite {
                     path,
                     content_length: u64::MAX,

@@ -347,7 +347,7 @@ fn prepare(
         ),
         Verb::FsDelete { recursive, .. } => {
             if home.starts_with(&root) {
-                return Err("cannot delete the requester's home".into());
+                return Err(DELETE_HOME.into());
             }
             if recursive {
                 (
@@ -391,9 +391,6 @@ fn prepare(
 
 type DecidedBy = (Option<&'static str>, Option<maknae_security::RuleCitation>);
 type AuthorizeErr = (String, String, DecidedBy);
-
-#[cfg(test)]
-const WRITE_NEEDS_READ: &str = "fs.write needs fs.read: ";
 
 /// The `fs.read` twin of a request (ADR-0034 decision 7): it is permitted only when a
 /// read of the same path would be. A tree delete's twin keeps its operation, so the
@@ -543,6 +540,8 @@ fn personal_list(personal: Option<&AttrValue>) -> Option<SensitiveList> {
         Some(_) => None,
     }
 }
+
+const DELETE_HOME: &str = "cannot delete the requester's home";
 
 fn protection(
     verb: &Verb,
@@ -910,6 +909,9 @@ where
             let _claim = claim;
             let asked = path(&original).ok_or("not a mutation")?;
             checked(asked)?;
+            if matches!(original, Verb::FsDelete { .. }) && home.starts_with(asked) {
+                return Err(DELETE_HOME.into());
+            }
             let gathered = gather(&*conversations, uid, cited(&original), None);
             let personal = owned_personal(gathered.as_ref().and_then(|(_, rec)| rec.as_ref()), uid);
             if let Some(p) = personal_list(personal.as_ref())
@@ -2328,7 +2330,7 @@ mod tests {
         assert_eq!(path, prepared.paths[1]);
     }
     #[tokio::test]
-    async fn a_cited_mkdir_or_delete_needs_read_and_a_tree_delete_needs_it_beneath() {
+    async fn every_twin_refusal_names_its_verb_and_a_tree_delete_needs_read_beneath() {
         let _turn = EUID_TURN.lock().await;
         let fx = Fixture::new();
         let pdp = fixture_pdp(&fx);
@@ -2341,6 +2343,15 @@ mod tests {
         let verbs = |conversation: Option<&str>| {
             let conversation = conversation.map(str::to_string);
             [
+                (
+                    Verb::FsWrite {
+                        path: p("entry-660"),
+                        content_length: 1,
+                        mode: maknae_proto::WriteMode::Existing,
+                        conversation: conversation.clone(),
+                    },
+                    "fs.write needs fs.read: ",
+                ),
                 (
                     Verb::FsMkdir {
                         path: p("made-660"),
@@ -2369,7 +2380,13 @@ mod tests {
             ]
         };
         let decide = |verb: &Verb| {
-            let prepared = prepare(verb.clone(), Some(fx.fd()), &fx.root, Lane::Local).unwrap();
+            let fd = match verb {
+                Verb::FsWrite { .. } => {
+                    maknae_io::open_path_for_delegation(&fx.root.join("entry-660")).unwrap()
+                }
+                _ => fx.fd(),
+            };
+            let prepared = prepare(verb.clone(), Some(fd), &fx.root, Lane::Local).unwrap();
             authorize(
                 &prepared,
                 verb,
@@ -2395,7 +2412,7 @@ mod tests {
             let (reason, _, _) = decide(&verb).unwrap_err();
             assert!(reason.starts_with(prefix), "{reason}");
         }
-        for (verb, _) in verbs(None) {
+        for (verb, _) in verbs(None).into_iter().skip(1) {
             assert!(
                 decide(&verb).is_ok(),
                 "uncited {verb:?} is decided as before"
@@ -2405,7 +2422,7 @@ mod tests {
             "    - \"Read(~/**)\"\n    - \"Write(~/**)\"\n",
             "\n    - \"Read(~/tree-660/hidden-660/**)\"",
         );
-        let [mkdir, entry, tree_delete] = verbs(Some("conv-660"));
+        let [_, mkdir, entry, tree_delete] = verbs(Some("conv-660"));
         assert!(decide(&mkdir.0).is_ok());
         assert!(decide(&entry.0).is_ok());
         let (reason, _, by) = decide(&tree_delete.0).unwrap_err();
@@ -2418,7 +2435,7 @@ mod tests {
             by.1.expect("the deny cites its rule").key,
             "rule:permissions:deny:0"
         );
-        let [_, _, uncited_tree] = verbs(None);
+        let [_, _, _, uncited_tree] = verbs(None);
         assert!(decide(&uncited_tree.0).is_ok());
         assert!(tree.join("hidden-660/f").exists());
     }
@@ -2478,7 +2495,6 @@ mod tests {
         reload("    - \"Write(~/**)\"\n", " []");
         for (verb, fd) in &cases {
             let (reason, path, _) = decide(verb, fd).unwrap_err();
-            assert!(reason.starts_with(WRITE_NEEDS_READ), "{reason}");
             assert!(reason.contains("fs.read"), "{reason}");
             assert_eq!(Some(path.as_str()), super::path(verb));
         }
@@ -2494,7 +2510,6 @@ mod tests {
         );
         for (verb, fd) in &cases {
             let (reason, _, by) = decide(verb, fd).unwrap_err();
-            assert!(reason.starts_with(WRITE_NEEDS_READ), "{reason}");
             assert!(reason.contains("Read(~/write-needs-read-*)"), "{reason}");
             let rule = by.1.expect("the deny cites the read's rule");
             assert_eq!(rule.key, "rule:permissions:deny:0", "the Read deny");

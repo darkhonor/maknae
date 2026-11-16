@@ -1171,6 +1171,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     let operand_refusal = crate::containment::normalise_operands(&mut request.verb)
         .err()
         .map(|(noun, e)| (noun, e.to_string()));
+    let citing = crate::mutation::citing(&request.verb);
     let pregate = match &request.verb {
         Verb::SessionPrompt {
             output_tokens: Some(n),
@@ -1189,13 +1190,12 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         }
         .err()
         .map(|reason| ("prompt", reason)),
-        verb if matches!(
-            crate::mutation::citing(verb),
+        _ if matches!(
+            citing,
             Some((_, Some(c))) if !maknae_proto::conversation_id_is_acceptable(c)
         ) =>
         {
-            crate::mutation::citing(verb)
-                .map(|(noun, _)| (noun, "conversation identifier not acceptable".to_string()))
+            citing.map(|(noun, _)| (noun, "conversation identifier not acceptable".to_string()))
         }
         Verb::FsList {
             after: Some(after), ..
