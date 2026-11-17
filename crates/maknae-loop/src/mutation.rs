@@ -109,6 +109,7 @@ pub fn prepare_checked(
             path,
             parents,
             components: wire_components,
+            ..
         } => {
             let result = split(path).and_then(|(mut parent, leaf)| {
                 components.push(leaf);
@@ -116,6 +117,16 @@ pub fn prepare_checked(
                     match maknae_io::open_directory_for_delegation(&parent) {
                         Ok(fd) => break Ok(fd),
                         Err(e) if *parents && e.kind() == io::ErrorKind::NotFound => {
+                            match maknae_io::open_path_for_stat(&parent) {
+                                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                                Ok(_) => {
+                                    break Err(io::Error::new(
+                                        io::ErrorKind::AlreadyExists,
+                                        "an entry that is not a directory is in the way",
+                                    ))
+                                }
+                                Err(e) => break Err(e),
+                            }
                             if components.len() >= usize::from(proto::MAX_MUTATION_DEPTH) {
                                 break Err(io::Error::new(
                                     io::ErrorKind::InvalidInput,
@@ -347,6 +358,7 @@ enum Work {
         recursive: bool,
         stack: Vec<WalkFrame>,
         pending: Option<String>,
+        read_first: bool,
     },
     Mkdir {
         parent: MutationDirectory,
@@ -462,6 +474,10 @@ impl Worker {
             self.withheld = !self.attempted;
         }
         reserved
+    }
+    /// An effect syscall was reached unless the failure is certified before it.
+    fn reached<T>(&mut self, result: &Result<T, MutationFailure>) {
+        self.attempted |= result.as_ref().map_or_else(|e| !e.before_write, |_| true);
     }
     fn reservation(
         &self,
@@ -680,8 +696,9 @@ impl Worker {
                     Ok(p) => p,
                     Err(s) => return *s,
                 };
-                self.attempted = true;
-                match parent.mkdir_one(&leaf) {
+                let made = parent.mkdir_one(&leaf);
+                self.reached(&made);
+                match made {
                     Ok(_) => {
                         let effect = Some(EffectEntry {
                             path: path.clone(),
@@ -728,7 +745,10 @@ impl Worker {
                         Ok(child) => parent = child,
                         Err(e) => return Step::stop(io_finish(&e), Some(path)),
                     },
-                    Err(e) => return error_step(e, ReportedEffect::CreatedDirectory, path),
+                    Err(e) => {
+                        self.withheld = !self.attempted;
+                        return error_step(e, ReportedEffect::CreatedDirectory, path);
+                    }
                 }
             },
             Work::Delete {
@@ -737,7 +757,15 @@ impl Worker {
                 recursive,
                 mut stack,
                 mut pending,
+                read_first,
             } => {
+                if read_first {
+                    let depth = recursive.then_some(usize::from(self.grant.limits.max_depth));
+                    if let Err(e) = parent.check_readable(&leaf, depth) {
+                        self.withheld = !self.attempted;
+                        return Step::stop(io_finish(&e.source), None);
+                    }
+                }
                 loop {
                     if Instant::now() >= self.deadline {
                         return Step::stop(ReportedFinish::LimitReached, None);
@@ -781,8 +809,9 @@ impl Worker {
                         Ok(p) => p,
                         Err(s) => return *s,
                     };
-                    self.attempted = true;
-                    match target_parent.remove_entry(&target_leaf) {
+                    let removed = target_parent.remove_entry(&target_leaf);
+                    self.reached(&removed);
+                    match removed {
                         Ok(_) => {
                             if closing {
                                 stack.pop();
@@ -795,6 +824,7 @@ impl Worker {
                                     recursive,
                                     stack,
                                     pending,
+                                    read_first: false,
                                 };
                             }
                             return Step {
@@ -835,7 +865,10 @@ impl Worker {
                                 depth,
                             });
                         }
-                        Err(e) => return error_step(e, ReportedEffect::DeletedEntry, path),
+                        Err(e) => {
+                            self.withheld = !self.attempted;
+                            return error_step(e, ReportedEffect::DeletedEntry, path);
+                        }
                     }
                 }
             }
@@ -1308,12 +1341,17 @@ async fn start_attempt(
                             .content
                             .ok_or_else(|| "write content missing".to_string())?,
                     },
-                    proto::Verb::FsDelete { recursive, .. } => Work::Delete {
+                    proto::Verb::FsDelete {
+                        recursive,
+                        ref conversation,
+                        ..
+                    } => Work::Delete {
                         parent,
                         leaf,
                         recursive,
                         stack: Vec::new(),
                         pending: None,
+                        read_first: conversation.is_some(),
                     },
                     proto::Verb::FsMkdir { parents, .. } => Work::Mkdir {
                         parent,
@@ -1943,7 +1981,8 @@ mod tests {
             proto::Verb::FsMkdir {
                 path: d.path("prepare-parent/child"),
                 parents: true,
-                components: vec![]
+                components: vec![],
+                conversation: None,
             },
             None
         )
@@ -1974,10 +2013,15 @@ mod tests {
             path,
             parents,
             components: vec![],
+            conversation: None,
         }
     }
     fn delete(path: String, recursive: bool) -> proto::Verb {
-        proto::Verb::FsDelete { path, recursive }
+        proto::Verb::FsDelete {
+            path,
+            recursive,
+            conversation: None,
+        }
     }
     async fn read_frame<R: AsyncRead + Unpin>(
         r: &mut R,
@@ -3724,6 +3768,145 @@ mod tests {
         assert!(task.await.unwrap().is_err());
         assert!(d.0.join("wrong-ack-parent").is_dir());
         assert!(!d.0.join("wrong-ack-parent/untouched-sentinel").exists());
+    }
+    #[tokio::test]
+    async fn a_granted_delete_refused_before_the_unlink_is_withheld_and_a_refused_unlink_is_not() {
+        let d = Fixture::new();
+        let missing = d.path("missing-delete-sentinel");
+        let full = d.path("full-delete-sentinel");
+        std::fs::create_dir_all(format!("{full}/inside")).unwrap();
+        for (path, recursive, withheld) in [
+            (&missing, false, true),
+            (&missing, true, true),
+            (&full, false, false),
+        ] {
+            let scope = if recursive {
+                MutationScope::RecursiveDelete { root: path.clone() }
+            } else {
+                MutationScope::Exact {
+                    path: path.clone(),
+                    effect: ReportedEffect::DeletedEntry,
+                }
+            };
+            let (end, _) = acknowledged_end(
+                prepare(delete(path.clone(), recursive), None).unwrap(),
+                grant(scope),
+            )
+            .await;
+            let end = end.unwrap();
+            assert!(!end.applied, "{path}: {end:?}");
+            assert_eq!(
+                end.withheld, withheld,
+                "{path} recursive {recursive}: {end:?}"
+            );
+            assert_eq!(
+                the_model_is_told(end),
+                if withheld {
+                    maknae_agent::plane::WriteOutcome::Unavailable
+                } else {
+                    maknae_agent::plane::WriteOutcome::Unknown
+                },
+                "{path}"
+            );
+        }
+        assert!(Path::new(&format!("{full}/inside")).is_dir());
+    }
+    #[test]
+    fn a_mkdir_never_walks_past_a_name_that_is_there() {
+        let d = Fixture::new();
+        std::os::unix::fs::symlink(d.path("nowhere-sentinel"), d.path("dangling-sentinel"))
+            .unwrap();
+        std::fs::create_dir(d.path("present-sentinel")).unwrap();
+        std::os::unix::fs::symlink(
+            d.path("present-sentinel/nowhere"),
+            d.path("present-sentinel/dangling"),
+        )
+        .unwrap();
+        for asked in [
+            "dangling-sentinel/child",
+            "dangling-sentinel/a/b",
+            "present-sentinel/dangling/child",
+        ] {
+            let p = prepare(mkdir(d.path(asked), true), None).unwrap();
+            assert!(p.descriptor().unwrap().is_none(), "{asked} was armed");
+            assert!(p.preparation_error().is_some(), "{asked}");
+        }
+        let p = prepare(mkdir(d.path("missing-sentinel/a/b"), true), None).unwrap();
+        assert!(p.descriptor().unwrap().is_some());
+        assert_eq!(p.components, ["missing-sentinel", "a", "b"]);
+        assert!(!Path::new(&d.path("nowhere-sentinel")).exists());
+    }
+
+    #[tokio::test]
+    async fn a_cited_delete_removes_nothing_its_subject_cannot_read() {
+        use std::os::unix::fs::PermissionsExt;
+        assert!(
+            !nix::unistd::geteuid().is_root(),
+            "running as root, which reads a 0000 file and voids the premise"
+        );
+        let d = Fixture::new();
+        let locked = d.path("cited-locked-sentinel");
+        let tree = d.path("cited-tree-sentinel");
+        let empty = d.path("cited-empty-sentinel");
+        std::fs::write(&locked, b"x").unwrap();
+        std::fs::create_dir_all(format!("{tree}/inner")).unwrap();
+        std::fs::write(format!("{tree}/readable"), b"x").unwrap();
+        std::fs::write(format!("{tree}/inner/locked"), b"x").unwrap();
+        std::fs::create_dir(&empty).unwrap();
+        let mode = |p: &str, m: u32| {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap()
+        };
+        mode(&locked, 0o000);
+        mode(&format!("{tree}/inner/locked"), 0o000);
+        mode(&empty, 0o000);
+        let cited = |path: &str, recursive| proto::Verb::FsDelete {
+            path: path.to_string(),
+            recursive,
+            conversation: Some("conv-158".into()),
+        };
+        for (path, recursive) in [
+            (&locked, false),
+            (&tree, true),
+            (&empty, false),
+            (&empty, true),
+        ] {
+            let scope = if recursive {
+                MutationScope::RecursiveDelete { root: path.clone() }
+            } else {
+                MutationScope::Exact {
+                    path: path.clone(),
+                    effect: ReportedEffect::DeletedEntry,
+                }
+            };
+            let (end, reports) =
+                acknowledged_end(prepare(cited(path, recursive), None).unwrap(), grant(scope))
+                    .await;
+            let end = end.unwrap();
+            assert!(!end.applied && end.withheld, "{path}: {end:?}");
+            assert!(
+                reports
+                    .iter()
+                    .all(|r| !matches!(r, MutationReport::Batch { .. })),
+                "{path}: nothing was deleted: {reports:?}"
+            );
+        }
+        assert!(Path::new(&format!("{tree}/readable")).exists());
+        assert!(Path::new(&empty).is_dir());
+        mode(&format!("{tree}/inner/locked"), 0o600);
+        mode(&empty, 0o700);
+        let (end, _) = acknowledged_end(
+            prepare(delete(locked.clone(), false), None).unwrap(),
+            grant(MutationScope::Exact {
+                path: locked.clone(),
+                effect: ReportedEffect::DeletedEntry,
+            }),
+        )
+        .await;
+        assert!(
+            end.unwrap().applied,
+            "an uncited delete keeps today's semantics"
+        );
+        assert!(!Path::new(&locked).exists());
     }
     #[tokio::test]
     async fn recursive_removes_unreadable_empty_directory_without_enumeration() {

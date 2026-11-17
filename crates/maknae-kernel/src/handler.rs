@@ -1974,6 +1974,7 @@ mod tests {
             Verb::FsDelete {
                 path: "/x".into(),
                 recursive: false,
+                conversation: None,
             },
             Verb::FsMove,
             Verb::FsList {
@@ -1989,6 +1990,7 @@ mod tests {
                 path: "/x".into(),
                 parents: false,
                 components: vec!["x".into()],
+                conversation: None,
             },
             Verb::FsLink,
             Verb::FsChmod,
@@ -2031,6 +2033,7 @@ mod tests {
             Verb::TaskCollect {
                 agent: "hobi".into(),
                 after: None,
+                task: None,
             },
             Verb::TaskClaim {
                 seen_follow_ups: None,

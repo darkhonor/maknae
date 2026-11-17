@@ -103,6 +103,8 @@ pub enum DueFor {
     Close(TaskClose),
     Expiry,
     Hold(Contained),
+    /// A report or close notice no tasker can collect: the task it was given under ended.
+    Orphaned,
 }
 
 /// Who is contained, for a task that is held: its agent, the tasker who gave it, or the
@@ -462,14 +464,58 @@ impl Held {
     }
 
     /// A task `agent` may still be handed or act on: its own, under this uid, with no
-    /// close owed.
+    /// close owed and its parent, if any, still working.
     fn held_by(&self, id: &TaskId, agent: &AgentId, uid: u32) -> Option<&TaskRecord> {
         self.live(id).filter(|r| {
             r.agent == *agent
                 && r.agent_uid == uid
                 && !self.closing.contains_key(id)
                 && !self.holding.contains_key(id)
+                && !self.parent_ended(r)
         })
+    }
+
+    /// Whether `r` was given under a task that is gone, neither working, held nor due a
+    /// hold, or started again since: no tasker can reach it any more.
+    fn parent_ended(&self, r: &TaskRecord) -> bool {
+        r.parent.is_some_and(|p| {
+            !self.holding.contains_key(&p)
+                && !self.live(&p).is_some_and(|p| {
+                    matches!(p.state, TaskState::Working | TaskState::Held)
+                        && r.parent_start.is_none_or(|s| s == p.starts)
+                })
+        })
+    }
+
+    /// An agent waits on every agent its working or pending tasks have a sub-task at.
+    fn would_wait(&self, by: &str, target: &AgentId) -> bool {
+        let waiting = |id: &TaskId, r: &TaskRecord| {
+            (r.pending || open(r))
+                && self.closing.get(id) != Some(&TaskClose::Withdrawn)
+                && !self.parent_ended(r)
+        };
+        let mut agents = vec![target];
+        let mut visited = BTreeSet::new();
+        while let Some(agent) = agents.pop() {
+            if agent.as_str() == by {
+                return true;
+            }
+            if !visited.insert(agent) {
+                continue;
+            }
+            let busy: BTreeSet<&TaskId> = self
+                .tasks
+                .iter()
+                .filter(|(_, r)| r.agent == *agent && (r.pending || r.state == TaskState::Working))
+                .map(|(id, _)| id)
+                .collect();
+            for (id, r) in &self.tasks {
+                if r.parent.is_some_and(|p| busy.contains(&p)) && waiting(id, r) {
+                    agents.push(&r.agent);
+                }
+            }
+        }
+        false
     }
 
     /// Marks for a hold every task the view's contained subjects gave or are the root of,
@@ -993,6 +1039,10 @@ impl TaskStore {
                 (Some(close), TaskState::Queued | TaskState::Working, _) => {
                     Some(DueFor::Close(*close))
                 }
+                _ if held.parent_ended(r) => match open(r) {
+                    true => Some(DueFor::Close(TaskClose::ParentEnded)),
+                    false => Some(DueFor::Orphaned),
+                },
                 (None, TaskState::Working, _) if lapsed() => {
                     Some(DueFor::Close(TaskClose::AgentLost))
                 }
@@ -1014,7 +1064,7 @@ impl TaskStore {
                     recorded: match why {
                         DueFor::Hold(_) => held.hold_said.contains(id),
                         DueFor::Close(_) => held.recorded.contains_key(id),
-                        DueFor::Expiry => false,
+                        DueFor::Expiry | DueFor::Orphaned => false,
                     },
                 };
                 Some((r.seq, due))
@@ -1043,7 +1093,13 @@ impl TaskStore {
                 let holding = held.holding.contains_key(&d.task);
                 let still = match (d.why, held.closing.get(&d.task)) {
                     (DueFor::Hold(_), _) => holding,
-                    (DueFor::Close(_) | DueFor::Expiry, _) if holding => false,
+                    (DueFor::Close(_) | DueFor::Expiry | DueFor::Orphaned, _) if holding => false,
+                    (DueFor::Close(TaskClose::ParentEnded), _) => {
+                        rec.is_some_and(|r| open(r) && held.parent_ended(r))
+                    }
+                    (DueFor::Orphaned, _) => rec.is_some_and(|r| {
+                        !open(r) && r.state != TaskState::Held && held.parent_ended(r)
+                    }),
                     (DueFor::Close(_), Some(_)) => rec.is_some_and(open),
                     (DueFor::Close(TaskClose::AgentLost), None) => {
                         rec.is_some_and(|r| r.state == TaskState::Working) && lapsed
@@ -1063,6 +1119,7 @@ impl TaskStore {
                         .is_some_and(|(_, at)| now.saturating_sub(*at) >= hold),
                 };
                 match (still, d.why) {
+                    (true, DueFor::Close(TaskClose::ParentEnded)) => {}
                     (true, DueFor::Close(close)) => {
                         held.closing.insert(d.task, close);
                         held.recorded.insert(d.task, close);
@@ -1070,12 +1127,23 @@ impl TaskStore {
                     (true, DueFor::Hold(_)) => {
                         held.hold_said.insert(d.task);
                     }
-                    (true, DueFor::Expiry) | (false, _) => {}
+                    (true, DueFor::Expiry | DueFor::Orphaned) | (false, _) => {}
                 }
                 still
             };
             match (still, d.why, disk) {
                 (false, _, _) => {}
+                (true, DueFor::Close(TaskClose::ParentEnded) | DueFor::Orphaned, on_disk) => {
+                    let mut held = self.held();
+                    if held.take_back_unless_held(&d.task) {
+                        held.unmark(&d.task);
+                        drop(held);
+                        done += 1;
+                        if on_disk {
+                            disk = self.withdraw_locked(&d.task);
+                        }
+                    }
+                }
                 (true, DueFor::Close(_), true) => {
                     disk = self.close_durably(&d.task);
                     done += usize::from(disk);
@@ -1457,8 +1525,23 @@ impl TaskStore {
                 return Ok(Placed::Collided);
             }
             tasker_room(&held, &task.task.tasker, agent)?;
-            root_of(&held, &task.task)?
+            if let Tasker::Agent { agent: by, .. } = &task.task.tasker {
+                if held.would_wait(by, agent) {
+                    return Err(TaskRefusal::Denied(format!(
+                        "task chain already waits on agent {}",
+                        agent.as_str()
+                    )));
+                }
+            }
+            let root = root_of(&held, &task.task)?;
+            let parent_start = task
+                .task
+                .parent
+                .and_then(|p| held.live(&p))
+                .map(|p| p.starts);
+            (root, parent_start)
         };
+        let (root, parent_start) = root;
         let (seq, tseq) = self.issue_submission(&task.task.tasker)?;
         let rec = TaskRecord {
             signed: task.clone(),
@@ -1484,6 +1567,8 @@ impl TaskStore {
             actions: 0,
             last_action: None,
             unseen: false,
+            starts: 0,
+            parent_start,
         };
         self.write(&rec, None)?;
         if let Some(t) = ticket {
@@ -1570,7 +1655,7 @@ impl TaskStore {
         close: Option<TaskClose>,
     ) -> Result<u64, TaskRefusal> {
         let _w = self.writing();
-        let rec = self.publish(id, text, close, |_| Ok(()))?;
+        let rec = self.publish(id, text, close, |_, _| Ok(()))?;
         Ok(rec.rseq.unwrap_or_default())
     }
 
@@ -1580,12 +1665,12 @@ impl TaskStore {
         id: &TaskId,
         text: SecretText,
         close: Option<TaskClose>,
-        check: impl FnOnce(&TaskRecord) -> Result<(), TaskRefusal>,
+        check: impl FnOnce(&Held, &TaskRecord) -> Result<(), TaskRefusal>,
     ) -> Result<TaskRecord, TaskRefusal> {
         let prior = {
             let held = self.held();
             let rec = held.live(id).ok_or(TaskRefusal::Unknown)?;
-            check(rec)?;
+            check(&held, rec)?;
             match rec.state {
                 TaskState::Queued | TaskState::Working if !held.holding.contains_key(id) => {}
                 TaskState::Queued
@@ -1741,6 +1826,7 @@ impl TaskStore {
                 next.state = TaskState::Working;
                 next.claimed = Some(self.clock.now_secs());
                 next.unseen = true;
+                next.starts = prior.starts + 1;
                 self.write(&next, Some(&prior))?;
                 let handed = delivered(&next, true);
                 let mut held = self.held();
@@ -1818,7 +1904,7 @@ impl TaskStore {
             return Err(TaskRefusal::AgentGone);
         }
         drop(held);
-        let next = self.publish(id, text, None, |rec| {
+        let next = self.publish(id, text, None, |_, rec| {
             match (rec.agent == *agent && rec.agent_uid == uid, rec.state) {
                 (false, _) => Err(TaskRefusal::OtherAgent),
                 (true, TaskState::Working)
@@ -1862,38 +1948,40 @@ impl TaskStore {
         held.notices = unsaid;
     }
 
-    /// Removes `tasker`'s reports from `agent` up to its own report ordinal `upto`; a
-    /// cursor above every ordinal this tasker was ever issued is refused. Answered done
-    /// only when no such report is still owed its removal, from this call or an earlier one.
-    pub fn acknowledge(
+    /// Removes the reports from `agent` that `by` reaches, up to its report ordinal `upto`.
+    /// A person's cursor above every ordinal it was issued is refused; an agent's ordinals
+    /// span every root it works for, so its cursor is never refused. Answered done only
+    /// when no such report is still owed its removal, from this call or an earlier one.
+    pub fn acknowledge<'a>(
         &self,
-        tasker: &Tasker,
+        by: impl Into<Reach<'a>>,
         agent: &AgentId,
         upto: u64,
     ) -> Result<usize, TaskRefusal> {
-        self.acknowledged(tasker, agent, upto)
-            .map(|gone| gone.len())
+        self.acknowledged(by, agent, upto).map(|gone| gone.len())
     }
 
     /// [`TaskStore::acknowledge`], naming the tasks whose reports it removed.
-    pub fn acknowledged(
+    pub fn acknowledged<'a>(
         &self,
-        tasker: &Tasker,
+        by: impl Into<Reach<'a>>,
         agent: &AgentId,
         upto: u64,
     ) -> Result<Vec<TaskId>, TaskRefusal> {
+        let by = by.into();
         let _w = self.writing();
-        let acked = |r: &TaskRecord| {
-            r.tasker == *tasker && r.agent == *agent && r.rseq.is_some_and(|s| s <= upto)
+        let spans_roots = matches!(by.tasker, Tasker::Agent { .. });
+        if !spans_roots && upto > self.held().issued.of(by.tasker).rseq {
+            return Err(TaskRefusal::CursorAhead);
+        }
+        let acked = |held: &Held, r: &TaskRecord| {
+            by.reaches(held, r) && r.agent == *agent && r.rseq.is_some_and(|s| s <= upto)
         };
         let gone: Vec<TaskId> = {
             let held = self.held();
-            if upto > held.issued.of(tasker).rseq {
-                return Err(TaskRefusal::CursorAhead);
-            }
             held.tasks
                 .iter()
-                .filter(|(_, r)| !r.pending && acked(r))
+                .filter(|(_, r)| !r.pending && acked(&held, r))
                 .map(|(id, _)| *id)
                 .collect()
         };
@@ -1909,7 +1997,11 @@ impl TaskStore {
             }
         }
         let gone = taken;
-        match self.held().exposed.values().any(acked) {
+        let owed = {
+            let held = self.held();
+            held.exposed.values().any(|r| acked(&held, r))
+        };
+        match owed {
             false => Ok(gone),
             true => Err(TaskRefusal::Unavailable(format!(
                 "{OUTCOME_UNKNOWN}the acknowledgement is left to a later store write"
@@ -2039,16 +2131,16 @@ impl TaskStore {
         }
     }
 
-    /// The task's state when `tasker` submitted it; any other task, foreign or unknown,
-    /// reads as `None`.
-    pub fn state_for(&self, id: &TaskId, tasker: &Tasker) -> Option<TaskState> {
-        tasker_record(&self.held(), id, tasker).map(|r| r.state)
+    /// The task's state when `by` reaches it; any other task, foreign or unknown, reads
+    /// as `None`.
+    pub fn state_for<'a>(&self, id: &TaskId, by: impl Into<Reach<'a>>) -> Option<TaskState> {
+        tasker_record(&self.held(), id, by.into()).map(|r| r.state)
     }
 
-    /// `tasker`'s own task, as a view.
-    pub fn status(&self, id: &TaskId, tasker: &Tasker) -> Option<TaskView> {
+    /// The task, when `by` reaches it, as a view.
+    pub fn status<'a>(&self, id: &TaskId, by: impl Into<Reach<'a>>) -> Option<TaskView> {
         let held = self.held();
-        let rec = tasker_record(&held, id, tasker)?;
+        let rec = tasker_record(&held, id, by.into())?;
         Some(self.view_of(&held, rec))
     }
 
@@ -2061,18 +2153,19 @@ impl TaskStore {
         crate::task_verbs::view(rec, &hot, self.clock.now_secs())
     }
 
-    /// Appends `text` to `tasker`'s working task, within the count and the byte total.
-    pub fn follow_up(
+    /// Appends `text` to a working task `by` reaches, within the count and the byte total.
+    pub fn follow_up<'a>(
         &self,
         id: &TaskId,
-        tasker: &Tasker,
+        by: impl Into<Reach<'a>>,
         text: SecretText,
         total_max: usize,
     ) -> Result<TaskView, TaskRefusal> {
+        let by = by.into();
         let _w = self.writing();
         let prior = {
             let held = self.held();
-            let rec = tasker_record(&held, id, tasker).ok_or(TaskRefusal::Unknown)?;
+            let rec = tasker_record(&held, id, by).ok_or(TaskRefusal::Unknown)?;
             if rec.state != TaskState::Working || held.holding.contains_key(id) {
                 return Err(TaskRefusal::NotWorking);
             }
@@ -2093,14 +2186,15 @@ impl TaskStore {
         Ok(view)
     }
 
-    /// Closes `tasker`'s working task as `Stopped`; the notice is collected like a report.
-    pub fn stop(&self, id: &TaskId, tasker: &Tasker) -> Result<TaskView, TaskRefusal> {
+    /// Closes a working task `by` reaches as `Stopped`; the notice is collected like a report.
+    pub fn stop<'a>(&self, id: &TaskId, by: impl Into<Reach<'a>>) -> Result<TaskView, TaskRefusal> {
+        let by = by.into();
         let _w = self.writing();
         let next = self.publish(
             id,
             SecretText(String::new().into()),
             Some(TaskClose::Stopped),
-            |rec| match (rec.tasker == *tasker, rec.state) {
+            |held, rec| match (by.reaches(held, rec), rec.state) {
                 (false, _) => Err(TaskRefusal::Unknown),
                 (true, TaskState::Working) => Ok(()),
                 (
@@ -2112,16 +2206,21 @@ impl TaskStore {
         Ok(self.view_of(&self.held(), &next))
     }
 
-    /// Withdraws `tasker`'s queued task. Answered once the record is durably pending or
+    /// Withdraws a queued task `by` reaches. Answered once the record is durably pending or
     /// gone; otherwise the task leaves memory and the outcome is unknown.
-    pub fn drop_queued(&self, id: &TaskId, tasker: &Tasker) -> Result<TaskView, TaskRefusal> {
+    pub fn drop_queued<'a>(
+        &self,
+        id: &TaskId,
+        by: impl Into<Reach<'a>>,
+    ) -> Result<TaskView, TaskRefusal> {
+        let by = by.into();
         let _w = self.writing();
         let mut view = {
             let held = self.held();
-            if held.exposed.get(id).is_some_and(|r| r.tasker == *tasker) {
+            if held.exposed.get(id).is_some_and(|r| by.reaches(&held, r)) {
                 return Err(drop_owed());
             }
-            let rec = tasker_record(&held, id, tasker).ok_or(TaskRefusal::Unknown)?;
+            let rec = tasker_record(&held, id, by).ok_or(TaskRefusal::Unknown)?;
             if rec.state != TaskState::Queued || held.holding.contains_key(id) {
                 return Err(TaskRefusal::Finished);
             }
@@ -2138,22 +2237,23 @@ impl TaskStore {
         Ok(view)
     }
 
-    /// `tasker`'s tasks with `agent` after its own submission ordinal `after`, oldest
-    /// first, at most `limit`, and the ordinal to resume after when more remain.
-    pub fn list(
+    /// The tasks `by` reaches with `agent` after the tasker's submission ordinal `after`,
+    /// oldest first, at most `limit`, and the ordinal to resume after when more remain.
+    pub fn list<'a>(
         &self,
-        tasker: &Tasker,
+        by: impl Into<Reach<'a>>,
         agent: &AgentId,
         after: Option<u64>,
         limit: usize,
     ) -> (Vec<TaskView>, Option<u64>) {
+        let by = by.into();
         let held = self.held();
         let mut mine: Vec<&TaskRecord> = held
             .tasks
             .values()
             .filter(|r| {
                 !r.pending
-                    && r.tasker == *tasker
+                    && by.reaches(&held, r)
                     && r.agent == *agent
                     && after.is_none_or(|a| r.tseq > a)
             })
@@ -2166,14 +2266,20 @@ impl TaskStore {
         (page, next)
     }
 
-    /// `tasker`'s reports and close notices from `agent`, in arrival order, as one page
-    /// built under the lock; only the entries that fit are copied.
-    pub fn reports(&self, tasker: &Tasker, agent: &AgentId, budget: usize) -> TaskReportPage {
+    /// The reports and close notices from `agent` that `by` reaches, in arrival order, as
+    /// one page built under the lock; only the entries that fit are copied.
+    pub fn reports<'a>(
+        &self,
+        by: impl Into<Reach<'a>>,
+        agent: &AgentId,
+        budget: usize,
+    ) -> TaskReportPage {
+        let by = by.into();
         let held = self.held();
         let mut mine: Vec<&TaskRecord> = held
             .tasks
             .values()
-            .filter(|r| !r.pending && r.tasker == *tasker && r.agent == *agent)
+            .filter(|r| !r.pending && by.reaches(&held, r) && r.agent == *agent)
             .filter(|r| held.collectable(r))
             .collect();
         mine.sort_by_key(|r| r.rseq);
@@ -2257,10 +2363,11 @@ impl TaskStore {
     #[cfg(any(test, feature = "hermetic-test-seam"))]
     pub fn insert_for_test(&self, signed: SignedTask, agent_uid: u32) -> Arc<SignedTask> {
         let agent = AgentId::parse(&signed.task.agent).expect("a test task names a valid agent id");
-        let inherited = signed
+        let (inherited, parent_start) = signed
             .task
             .parent
-            .and_then(|p| self.held().live(&p).map(|r| r.root.clone()));
+            .and_then(|p| self.held().live(&p).map(|r| (r.root.clone(), r.starts)))
+            .unzip();
         let root = inherited.unwrap_or_else(|| match &signed.task.tasker {
             Tasker::Uid(uid) => RootTasker::Person { uid: *uid },
             Tasker::Agent { agent, .. } | Tasker::Remote(agent) => RootTasker::Agent {
@@ -2296,6 +2403,8 @@ impl TaskStore {
             actions: 0,
             last_action: None,
             unseen: false,
+            starts: 0,
+            parent_start,
         };
         self.write(&rec, None)
             .expect("the test store writes the task");
@@ -2313,6 +2422,7 @@ impl TaskStore {
         next.state = TaskState::Working;
         next.claimed = Some(self.clock.now_secs());
         next.unseen = true;
+        next.starts = prior.starts + 1;
         self.write(&next, Some(&prior))
             .expect("the test store writes the task");
         let lease = self.clock.now_secs() + CLAIM_LEASE.as_secs() as i64;
@@ -2482,8 +2592,8 @@ fn store(e: StoreError) -> TaskRefusal {
     TaskRefusal::Store(e.to_string())
 }
 
-fn tasker_record<'h>(held: &'h Held, id: &TaskId, tasker: &Tasker) -> Option<&'h TaskRecord> {
-    held.live(id).filter(|r| r.tasker == *tasker)
+fn tasker_record<'h>(held: &'h Held, id: &TaskId, by: Reach<'_>) -> Option<&'h TaskRecord> {
+    held.live(id).filter(|r| by.reaches(held, r))
 }
 
 /// A tasker's live tasks with one agent, and its live tasks plus held reports overall,
@@ -2506,6 +2616,34 @@ fn tasker_room(held: &Held, tasker: &Tasker, agent: &AgentId) -> Result<(), Task
         return Err(TaskRefusal::TaskerHeld);
     }
     Ok(())
+}
+
+/// The tasks one tasker request reaches: those `tasker` gave under the task the request
+/// cites, or with no parent when it cites none, and only `task` when the request names one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Reach<'a> {
+    pub tasker: &'a Tasker,
+    pub under: Option<TaskId>,
+    pub task: Option<TaskId>,
+}
+
+impl<'a> From<&'a Tasker> for Reach<'a> {
+    fn from(tasker: &'a Tasker) -> Self {
+        Reach {
+            tasker,
+            under: None,
+            task: None,
+        }
+    }
+}
+
+impl Reach<'_> {
+    fn reaches(&self, held: &Held, r: &TaskRecord) -> bool {
+        !held.parent_ended(r)
+            && r.tasker == *self.tasker
+            && r.parent == self.under
+            && self.task.is_none_or(|t| t == r.signed.task.task_id)
+    }
 }
 
 /// A citable task: the agent's own `Working` task and the stored root of its chain.
@@ -2550,7 +2688,7 @@ fn owned(
     if stored.agent != *agent || stored.agent_uid != uid {
         return Err(TaskRefusal::OtherAgent);
     }
-    if held.closing.contains_key(id) || held.holding.contains_key(id) {
+    if held.closing.contains_key(id) || held.holding.contains_key(id) || held.parent_ended(stored) {
         return Err(TaskRefusal::Unknown);
     }
     Ok(stored.signed.clone())
@@ -5124,6 +5262,54 @@ mod tests {
     }
 
     #[test]
+    fn of_two_crossed_submissions_placed_before_either_confirms_the_second_is_refused() {
+        let (_blobs, store) = mem();
+        let v = view(&[("hobi", HOBI), ("jin", JIN)]);
+        let working = |agent: &str| {
+            let t = mint(&store, &v, agent).task.task_id;
+            store.start_for_test(&t);
+            t
+        };
+        let (t1, t3) = (working("hobi"), working("jin"));
+        let by = |agent: &str, uid| Tasker::Agent {
+            agent: agent.into(),
+            uid,
+        };
+        let first = store
+            .mint(
+                signer(),
+                &v,
+                at(0, JIN),
+                by("hobi", HOBI),
+                Some(t1),
+                sub("jin"),
+            )
+            .unwrap();
+        assert!(store.record(&first.task.task_id).is_none(), "still pending");
+        assert_eq!(
+            store
+                .mint(
+                    signer(),
+                    &v,
+                    at(0, HOBI),
+                    by("jin", JIN),
+                    Some(t3),
+                    sub("hobi")
+                )
+                .unwrap_err(),
+            TaskRefusal::Denied("task chain already waits on agent hobi".into())
+        );
+        store
+            .confirm(&first.task.task_id, None, Confirm::Queued)
+            .unwrap();
+        assert_eq!(
+            store.record(&first.task.task_id).unwrap().state,
+            TaskState::Queued
+        );
+        assert_eq!(store.queue(&id("hobi")), Vec::<TaskId>::new());
+    }
+
+    #[test]
     fn a_submission_is_not_stored_when_its_tasker_root_or_agent_is_contained() {
         let (blobs, store) = mem();
         let v = view(&[("hobi", HOBI), ("jin", JIN)]);
@@ -5799,35 +5985,33 @@ mod tests {
     #[test]
     fn a_released_report_gets_a_new_rseq_and_is_collected_after_a_later_acknowledgement() {
         let (_blobs, store) = mem();
-        let hobis = Tasker::Agent {
-            agent: "hobi".into(),
-            uid: HOBI,
-        };
+        let bob = Tasker::Uid(BOB);
         let jin = id("jin");
-        let (t1, a) = chain(&store);
+        let give = || {
+            store
+                .mint_live(
+                    signer(),
+                    &view(&[("hobi", HOBI), ("jin", JIN)]),
+                    at(0, JIN),
+                    bob.clone(),
+                    None,
+                    sub("jin"),
+                )
+                .unwrap()
+                .task
+                .task_id
+        };
+        let a = give();
         store.publish_report(&a, text("a"), None).unwrap();
         hold(&store, &[BOB]);
-        let b = store
-            .mint_live(
-                signer(),
-                &view(&[("hobi", HOBI), ("jin", JIN)]),
-                at(0, JIN),
-                hobis.clone(),
-                None,
-                sub("jin"),
-            )
-            .unwrap()
-            .task
-            .task_id;
+        let b = give();
         let rseq_b = store.publish_report(&b, text("b"), None).unwrap();
-        assert_eq!(store.acknowledged(&hobis, &jin, rseq_b), Ok(vec![b]));
-        let lift = containing(&[]);
-        store.release(&t1, &lift).unwrap();
-        let released = store.release(&a, &lift).unwrap();
+        assert_eq!(store.acknowledged(&bob, &jin, rseq_b), Ok(vec![b]));
+        let released = store.release(&a, &containing(&[])).unwrap();
         assert!(released.rseq > Some(rseq_b), "{released:?}");
         assert_eq!(
             store
-                .reports(&hobis, &jin, usize::MAX)
+                .reports(&bob, &jin, usize::MAX)
                 .entries
                 .iter()
                 .map(|e| e.task.clone())
@@ -5835,7 +6019,7 @@ mod tests {
             vec![maknae_proto::TaskRef::from_id(&a)]
         );
         assert_eq!(
-            store.acknowledged(&hobis, &jin, released.rseq.unwrap()),
+            store.acknowledged(&bob, &jin, released.rseq.unwrap()),
             Ok(vec![a])
         );
     }
@@ -6298,6 +6482,26 @@ mod tests {
         };
         assert_eq!(store.perform(&[early]), 0, "its hold has not run out");
         assert!(store.record(&reported).is_some());
+        let working = held_by(&store, Tasker::Uid(1000));
+        store.start_for_test(&working);
+        let unparented = |task, why| Due {
+            task,
+            agent: id("hobi"),
+            tasker: Tasker::Uid(1000),
+            parent: None,
+            why,
+            recorded: false,
+        };
+        assert_eq!(
+            store.perform(&[
+                unparented(working, DueFor::Close(TaskClose::ParentEnded)),
+                unparented(reported, DueFor::Orphaned),
+            ]),
+            0,
+            "neither has a parent that ended"
+        );
+        assert_eq!(closed(&store, &working), None);
+        assert!(store.record(&reported).is_some());
     }
 
     #[test]
@@ -6333,7 +6537,7 @@ mod tests {
         due.iter()
             .filter_map(|d| match d.why {
                 DueFor::Close(close) => Some(close),
-                DueFor::Expiry | DueFor::Hold(_) => None,
+                DueFor::Expiry | DueFor::Hold(_) | DueFor::Orphaned => None,
             })
             .collect()
     }

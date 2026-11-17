@@ -36,7 +36,7 @@
     "type": "function",
     "function": {
       "name": "write_file",
-      "description": "Replaces the entire contents of path with content. This is not an edit, patch, or append — whatever was there is gone. Read the file before replacing it, every page until `eof` is true if you need all of its contents. Returns one of: applied; not written — nothing was written because the file exists and you have not read it, or it changed since you read it: read it, then write again; unavailable — do not retry; or outcome unknown — the write may have happened: do not retry it. The call's arguments, as JSON with `content` escaped, may be at most 61440 bytes, and a longer call is not run: you get an error giving its size, and the other calls in the reply still run. A large write, even within that limit, must be the only call in its reply; otherwise the reply may be refused, nothing in it is written, and the task ends.",
+      "description": "Replaces the entire contents of path with content. The file's directory must already exist; create it first with make_directory. This is not an edit, patch, or append — whatever was there is gone. Read the file before replacing it, every page until `eof` is true if you need all of its contents. Returns one of: applied; not written — nothing was written because the file exists and you have not read it, or it changed since you read it: read it, then write again; unavailable — do not retry; or outcome unknown — the write may have happened: do not retry it. The call's arguments, as JSON with `content` escaped, may be at most 61440 bytes, and a longer call is not run: you get an error giving its size, and the other calls in the reply still run. A large write, even within that limit, must be the only call in its reply; otherwise the reply may be refused, nothing in it is written, and the task ends.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -90,6 +90,68 @@
           }
         },
         "required": ["path"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "make_directory",
+      "description": "Creates the directory at path, and any missing directories above it. Returns one of: the directory exists — it was created, or was already there; unavailable — do not retry; or outcome unknown: the change may have happened; do not retry it.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute path to the directory to create."
+          }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "delete_path",
+      "description": "Deletes the file or empty directory at path; with recursive true, a directory and everything beneath it. This cannot be undone. Returns one of: deleted; unavailable — do not retry; or outcome unknown: the change may have happened; do not retry it.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute path to delete."
+          },
+          "recursive": {
+            "type": "boolean",
+            "description": "Delete a directory and everything in it. Default false: only a file or an empty directory."
+          }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "task_agent",
+      "description": "Gives a task to another agent and waits until it reports or its task ends. The other agent cannot see your files and you cannot see its files: put what it needs in the prompt, and ask for what you need in its report. Returns the start of its report and the path of a file holding all of it, or exactly one of: \"not accepted, or its outcome is unknown; do not retry it\"; \"outcome unknown: the other agent may have the task; do not retry it\"; \"stopped\"; \"dropped\"; \"the agent was removed\"; \"the agent stopped responding\"; \"withdrawn\"; \"the task that asked for it ended\"; \"on hold — its agent or tasker was contained\"; \"the wait ended; the other agent's task may still run until it is closed; do not retry it\"; or, outside an agent's own task, \"unavailable — do not retry\".",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "agent": {
+            "type": "string",
+            "description": "The id of the agent to give the task to."
+          },
+          "prompt": {
+            "type": "string",
+            "description": "The task, with everything the other agent needs to do it."
+          }
+        },
+        "required": ["agent", "prompt"],
         "additionalProperties": false
       }
     }

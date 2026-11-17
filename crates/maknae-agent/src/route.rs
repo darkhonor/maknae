@@ -1,4 +1,4 @@
-//! Tool name → kernel verb. A ROUTING TABLE, closed and exact: the four names
+//! Tool name → kernel verb. A ROUTING TABLE, closed and exact: the six names
 //! the compiled baseline-tools.json publishes, and nothing else. Never a
 //! decision — the kernel decides the verb this produces.
 use maknae_proto::ProposedToolCall;
@@ -24,6 +24,20 @@ pub enum ToolRequest {
     Stat {
         call_id: String,
         path: String,
+    },
+    Mkdir {
+        call_id: String,
+        path: String,
+    },
+    Delete {
+        call_id: String,
+        path: String,
+        recursive: bool,
+    },
+    TaskAgent {
+        call_id: String,
+        agent: String,
+        prompt: Zeroizing<String>,
     },
 }
 
@@ -68,6 +82,31 @@ impl std::fmt::Debug for ToolRequest {
                 .debug_struct("Stat")
                 .field("call_id", call_id)
                 .field("path", path)
+                .finish(),
+            ToolRequest::Mkdir { call_id, path } => f
+                .debug_struct("Mkdir")
+                .field("call_id", call_id)
+                .field("path", path)
+                .finish(),
+            ToolRequest::Delete {
+                call_id,
+                path,
+                recursive,
+            } => f
+                .debug_struct("Delete")
+                .field("call_id", call_id)
+                .field("path", path)
+                .field("recursive", recursive)
+                .finish(),
+            ToolRequest::TaskAgent {
+                call_id,
+                agent,
+                prompt,
+            } => f
+                .debug_struct("TaskAgent")
+                .field("call_id", call_id)
+                .field("agent", agent)
+                .field("prompt", &format_args!("<{} bytes>", prompt.len()))
                 .finish(),
         }
     }
@@ -195,6 +234,27 @@ struct ListArgs {
 #[serde(deny_unknown_fields)]
 struct StatArgs {
     path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MkdirArgs {
+    path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeleteArgs {
+    path: String,
+    #[serde(default)]
+    recursive: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskAgentArgs {
+    agent: String,
+    prompt: ZeroizingString,
 }
 
 /// Mirrors the kernel's cursor pre-gate (`maknae-kernel`'s `mutation::normal`).
@@ -393,6 +453,35 @@ pub fn route(call: &ProposedToolCall, home: Option<&str>) -> Result<ToolRequest,
             Ok(ToolRequest::Stat {
                 call_id: call.call_id.clone(),
                 path: checked_path(a.path, home)?,
+            })
+        }
+        "make_directory" => {
+            require_object(args)?;
+            let a: MkdirArgs =
+                serde_json::from_str(args).map_err(|e| RouteError::BadArguments(e.to_string()))?;
+            Ok(ToolRequest::Mkdir {
+                call_id: call.call_id.clone(),
+                path: checked_path(a.path, home)?,
+            })
+        }
+        "delete_path" => {
+            require_object(args)?;
+            let a: DeleteArgs =
+                serde_json::from_str(args).map_err(|e| RouteError::BadArguments(e.to_string()))?;
+            Ok(ToolRequest::Delete {
+                call_id: call.call_id.clone(),
+                path: checked_path(a.path, home)?,
+                recursive: a.recursive,
+            })
+        }
+        "task_agent" => {
+            require_object(args)?;
+            let mut a: TaskAgentArgs =
+                serde_json::from_str(args).map_err(|e| RouteError::BadArguments(e.to_string()))?;
+            Ok(ToolRequest::TaskAgent {
+                call_id: call.call_id.clone(),
+                agent: a.agent,
+                prompt: Zeroizing::new(std::mem::take(&mut *a.prompt.0)),
             })
         }
         other => Err(RouteError::UnknownTool(other.to_string())),
@@ -747,6 +836,103 @@ mod tests {
     }
 
     #[test]
+    fn make_directory_and_delete_path_route_to_a_mkdir_and_a_delete() {
+        match route(
+            &call("make_directory", r#"{"path":"~/proj/src-158"}"#),
+            Some("/home/u"),
+        ) {
+            Ok(ToolRequest::Mkdir { call_id, path }) => {
+                assert_eq!(call_id, "c1");
+                assert_eq!(path, "/home/u/proj/src-158");
+            }
+            other => panic!("{other:?}"),
+        }
+        for (args, want) in [
+            (r#"{"path":"/w/gone-158"}"#, false),
+            (r#"{"path":"/w/gone-158","recursive":false}"#, false),
+            (r#"{"path":"/w/gone-158","recursive":true}"#, true),
+        ] {
+            match route(&call("delete_path", args), None) {
+                Ok(ToolRequest::Delete {
+                    call_id,
+                    path,
+                    recursive,
+                }) => {
+                    assert_eq!(call_id, "c1");
+                    assert_eq!(path, "/w/gone-158");
+                    assert_eq!(recursive, want, "{args}");
+                }
+                other => panic!("{args}: {other:?}"),
+            }
+        }
+        let shown = format!(
+            "{:?} {:?}",
+            route(&call("make_directory", r#"{"path":"/a"}"#), None).unwrap(),
+            route(
+                &call("delete_path", r#"{"path":"/b","recursive":true}"#),
+                None
+            )
+            .unwrap()
+        );
+        assert!(shown.contains("Mkdir") && shown.contains("/a"), "{shown}");
+        assert!(
+            shown.contains("Delete") && shown.contains("/b") && shown.contains("recursive: true"),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn a_mkdir_or_delete_call_is_checked_as_a_read_is() {
+        for name in ["make_directory", "delete_path"] {
+            for (args, want) in [
+                (r#"{"path":"rel"}"#, RouteError::RelativePath),
+                (r#"{"path":""}"#, RouteError::EmptyPath),
+                (r#"{"path":"/a/../b"}"#, RouteError::MalformedPath),
+                (r#"{"path":"/a/"}"#, RouteError::MalformedPath),
+                (r#"{"path":"~/a"}"#, RouteError::HomeUnavailable),
+                (r#"{"path":"~u/a"}"#, RouteError::RelativePath),
+            ] {
+                assert_eq!(
+                    route(&call(name, args), None).err(),
+                    Some(want),
+                    "{name} {args}"
+                );
+            }
+            for args in [
+                r#"{"path":"/a","extra":1}"#,
+                r#"["/a"]"#,
+                r#"{}"#,
+                r#"{"path":7}"#,
+            ] {
+                assert!(
+                    matches!(
+                        route(&call(name, args), None),
+                        Err(RouteError::BadArguments(_))
+                    ),
+                    "{name} {args}"
+                );
+            }
+        }
+        for recursive in [r#""yes""#, "1", "null", "[true]"] {
+            let args = format!(r#"{{"path":"/a","recursive":{recursive}}}"#);
+            assert!(
+                matches!(
+                    route(&call("delete_path", &args), None),
+                    Err(RouteError::BadArguments(_))
+                ),
+                "{args}"
+            );
+        }
+        assert!(matches!(
+            route(
+                &call("make_directory", r#"{"path":"/a","recursive":true}"#),
+                None
+            ),
+            Err(RouteError::BadArguments(_))
+        ));
+    }
+
+    #[test]
     fn a_listing_or_stat_call_is_checked_as_a_read_is() {
         for name in ["list_directory", "stat_path"] {
             for (args, want) in [
@@ -890,8 +1076,56 @@ mod tests {
         assert!(e.to_string().contains("a JSON string"), "{e}");
     }
     #[test]
+    fn task_agent_routes_its_agent_and_prompt_and_never_prints_the_prompt() {
+        let got = route(
+            &call(
+                "task_agent",
+                r#"{"agent":"jin","prompt":"sentinel-609-route"}"#,
+            ),
+            None,
+        )
+        .unwrap();
+        assert!(
+            !format!("{got:?}").contains("sentinel-609-route"),
+            "{got:?}"
+        );
+        let ToolRequest::TaskAgent {
+            call_id,
+            agent,
+            prompt,
+        } = got
+        else {
+            panic!("{got:?}");
+        };
+        assert_eq!((call_id.as_str(), agent.as_str()), ("c1", "jin"));
+        assert_eq!(prompt.as_str(), "sentinel-609-route");
+        for args in [
+            r#"{"agent":"jin"}"#,
+            r#"{"prompt":"p"}"#,
+            r#"{"agent":"jin","prompt":"p","path":"/x"}"#,
+            r#"["jin","p"]"#,
+        ] {
+            assert!(
+                matches!(
+                    route(&call("task_agent", args), None),
+                    Err(RouteError::BadArguments(_))
+                ),
+                "{args}"
+            );
+        }
+    }
+
+    #[test]
     fn a_refused_call_is_refused_by_its_marker_before_any_argument_parse() {
-        for name in ["write_file", "read_file", "list_directory", "stat_path"] {
+        for name in [
+            "write_file",
+            "read_file",
+            "list_directory",
+            "stat_path",
+            "make_directory",
+            "delete_path",
+            "task_agent",
+        ] {
             let c = ProposedToolCall {
                 refused: Some(maknae_proto::CallRefusal::ArgumentsOverBound { bytes: 70_000 }),
                 ..call(name, "")

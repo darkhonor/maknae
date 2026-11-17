@@ -1343,6 +1343,11 @@ mod tests {
 
     fn descriptors_open_on(obj: &std::path::Path) -> usize {
         use std::os::unix::fs::MetadataExt;
+        // Each scan opens a copy of every descriptor in the process, so two concurrent scans count each other's copies (#652).
+        static SCAN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _scan = SCAN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let want = std::fs::metadata(obj).expect("stat obj");
         std::fs::read_dir("/dev/fd")
             .expect("list /dev/fd")

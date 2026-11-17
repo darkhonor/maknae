@@ -6,9 +6,12 @@ use crate::budget::ContextBudget;
 use crate::drive::{Budget, LoopEvent, StepControl, StepHook, StopReason};
 use crate::plane::{Plane, PlaneError, WriteOutcome};
 use crate::session::Session;
-use crate::task::{BeatAnswer, ClaimAnswer, ReportOutcome};
+use crate::task::{BeatAnswer, ClaimAnswer, ReportOutcome, TaskerFail};
 use crate::transcript::Transcript;
-use maknae_proto::{Ask, Bytes, SecretText, SignedTask, TaskId, TaskState};
+use maknae_proto::{
+    Ask, Bytes, SecretText, SignedTask, TaskCursor, TaskId, TaskRef, TaskReportPage, TaskState,
+    TaskView,
+};
 use std::future::Future;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -137,7 +140,7 @@ pub trait TaskPlane: Plane {
     ) -> impl Future<Output = Result<ReportOutcome, String>> + Send;
     fn cite(&mut self, task: Option<TaskId>);
     /// Creates mode 0700. An existing directory is `Applied`.
-    fn mkdir(&mut self, path: &str, parents: bool) -> impl Future<Output = WriteOutcome> + Send;
+    fn make_partition_dir(&mut self, path: &str) -> impl Future<Output = WriteOutcome> + Send;
     fn verify(&mut self, signed: &Bytes) -> Result<SignedTask, Unverified>;
     /// Cited: a home or partition persona is read as the task's own request.
     fn persona(
@@ -145,6 +148,25 @@ pub trait TaskPlane: Plane {
         at: PersonaAt<'_>,
     ) -> impl Future<Output = Result<Option<SecretText>, String>> + Send;
     fn note(&mut self, _event: DriverEvent) {}
+    /// Cited: a task for `agent` under the cited task.
+    fn submit(
+        &mut self,
+        agent: &str,
+        prompt: SecretText,
+    ) -> impl Future<Output = Result<TaskView, TaskerFail>> + Send;
+    fn sub_status(
+        &mut self,
+        task: &TaskRef,
+    ) -> impl Future<Output = Result<TaskView, TaskerFail>> + Send;
+    /// `task`'s entry alone; `after` acknowledges it alone.
+    fn collect_one(
+        &mut self,
+        agent: &str,
+        task: &TaskRef,
+        after: Option<TaskCursor>,
+    ) -> impl Future<Output = Result<TaskReportPage, TaskerFail>> + Send;
+    /// Best effort: stops a working sub-task, or drops a queued one.
+    fn end_sub(&mut self, task: &TaskRef, queued: bool) -> impl Future<Output = ()> + Send;
 }
 
 #[derive(Debug, Clone)]
@@ -168,6 +190,8 @@ impl ShutdownHandle {
 struct Held {
     id: TaskId,
     session: Session,
+    /// The partition, where `task_agent` stores a report.
+    cwd: String,
     seen: u32,
     last_beat: Duration,
     answer: Option<Zeroizing<String>>,
@@ -228,8 +252,7 @@ enum HookEnd {
     Gone,
 }
 
-struct TaskHook<'a, C> {
-    clock: &'a C,
+struct TaskHook<'a> {
     shutdown: &'a AtomicBool,
     seen: &'a mut u32,
     last_beat: &'a mut Duration,
@@ -237,21 +260,119 @@ struct TaskHook<'a, C> {
     end: Option<HookEnd>,
 }
 
-impl<P: TaskPlane + Send, C: Clock + Sync> StepHook<P> for TaskHook<'_, C> {
-    async fn after_step(&mut self, plane: &mut P, transcript: &mut Transcript) -> StepControl {
+/// The driver's plane as its loop sees it: `task_agent` waits on the driver's clock
+/// and ends with its shutdown flag.
+struct Tool<'a, P, C> {
+    plane: &'a mut P,
+    clock: &'a mut C,
+    shutdown: &'a AtomicBool,
+    cwd: &'a str,
+}
+
+impl<P: TaskPlane + Send, C: Clock + Send + Sync> Plane for Tool<'_, P, C> {
+    async fn open(
+        &mut self,
+        cwd: &Path,
+        sensitive: &[String],
+    ) -> Result<maknae_proto::ConversationId, PlaneError> {
+        self.plane.open(cwd, sensitive).await
+    }
+    async fn close(
+        &mut self,
+        conversation: &maknae_proto::ConversationId,
+    ) -> Result<maknae_proto::ConversationView, PlaneError> {
+        self.plane.close(conversation).await
+    }
+    async fn prompt(
+        &mut self,
+        conversation: &str,
+        turns: &[maknae_proto::Turn],
+    ) -> Result<maknae_proto::PromptReply, PlaneError> {
+        self.plane.prompt(conversation, turns).await
+    }
+    async fn read(
+        &mut self,
+        conversation: &str,
+        path: &str,
+        page: maknae_proto::PageRequest,
+    ) -> crate::plane::ReadOutcome {
+        self.plane.read(conversation, path, page).await
+    }
+    async fn write(
+        &mut self,
+        conversation: &str,
+        path: &str,
+        content: &[u8],
+        basis: crate::plane::ReadBasis,
+    ) -> WriteOutcome {
+        self.plane.write(conversation, path, content, basis).await
+    }
+    async fn list(
+        &mut self,
+        conversation: &str,
+        path: &str,
+        after: Option<&str>,
+    ) -> crate::plane::ListOutcome {
+        self.plane.list(conversation, path, after).await
+    }
+    async fn stat(&mut self, conversation: &str, path: &str) -> crate::plane::StatOutcome {
+        self.plane.stat(conversation, path).await
+    }
+    async fn mkdir(&mut self, conversation: &str, path: &str) -> crate::plane::MkdirOutcome {
+        self.plane.mkdir(conversation, path).await
+    }
+    async fn delete(
+        &mut self,
+        conversation: &str,
+        path: &str,
+        recursive: bool,
+    ) -> crate::plane::DeleteOutcome {
+        self.plane.delete(conversation, path, recursive).await
+    }
+    fn take_diagnostics(&mut self) -> Vec<String> {
+        self.plane.take_diagnostics()
+    }
+    async fn task_agent(
+        &mut self,
+        conversation: &str,
+        agent: &str,
+        prompt: SecretText,
+    ) -> crate::plane::TaskAgentOutcome {
+        let wait = crate::task_agent::Wait {
+            clock: &mut *self.clock,
+            shutdown: self.shutdown,
+        };
+        crate::task_agent::run(
+            &mut *self.plane,
+            wait,
+            self.cwd,
+            conversation,
+            agent,
+            prompt,
+        )
+        .await
+    }
+}
+
+impl<P: TaskPlane + Send, C: Clock + Send + Sync> StepHook<Tool<'_, P, C>> for TaskHook<'_> {
+    async fn after_step(
+        &mut self,
+        tool: &mut Tool<'_, P, C>,
+        transcript: &mut Transcript,
+    ) -> StepControl {
         self.renewal.progressed();
         if self.shutdown.load(Ordering::Acquire) {
             return StepControl::Stop;
         }
-        let now = self.clock.now();
+        let now = tool.clock.now();
         if now.saturating_sub(*self.last_beat) < HEARTBEAT_EVERY {
             return StepControl::Continue;
         }
-        let answer = plane.heartbeat(*self.seen).await;
+        let answer = tool.plane.heartbeat(*self.seen).await;
         match &answer {
             Ok(_) => self.renewal.progressed(),
             Err(_) => {
-                self.renewal.unanswered(now, self.clock.now());
+                self.renewal.unanswered(now, tool.clock.now());
             }
         }
         match read_beat(answer, self.seen) {
@@ -321,13 +442,17 @@ fn partition_is_relative_and_canonical(partition: &str) -> bool {
             .all(|s| !s.is_empty() && s != "." && s != "..")
 }
 
-fn first_turn(persona: Option<&SecretText>, prompt: &str) -> Zeroizing<String> {
-    let Some(persona) = persona else {
-        return Zeroizing::new(prompt.to_string());
-    };
-    let mut text = Zeroizing::new(String::with_capacity(persona.0.len() + 2 + prompt.len()));
-    text.push_str(&persona.0);
-    text.push_str("\n\n");
+/// `from` names the agent that gave a sub-task.
+fn first_turn(persona: Option<&SecretText>, from: Option<&str>, prompt: &str) -> Zeroizing<String> {
+    let given = from.map(|agent| format!("Task from agent {agent}:\n\n"));
+    let given = given.as_deref().unwrap_or("");
+    let held = persona.map_or(0, |p| p.0.len() + 2);
+    let mut text = Zeroizing::new(String::with_capacity(held + given.len() + prompt.len()));
+    if let Some(persona) = persona {
+        text.push_str(&persona.0);
+        text.push_str("\n\n");
+    }
+    text.push_str(given);
     text.push_str(prompt);
     text
 }
@@ -627,7 +752,11 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
             return self.stop_cited(id, None, PERSONA_UNAVAILABLE, &mut 0).await;
         };
         let Ask::Prompt { prompt } = &task.task.ask;
-        let first = first_turn(persona.as_ref(), &prompt.0);
+        let from = match &task.task.tasker {
+            maknae_proto::Tasker::Agent { agent, .. } => Some(agent.as_str()),
+            maknae_proto::Tasker::Uid(_) | maknae_proto::Tasker::Remote(_) => None,
+        };
+        let first = first_turn(persona.as_ref(), from, &prompt.0);
         let opened = Session::open(
             &mut self.plane,
             Path::new(&cwd),
@@ -645,6 +774,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
         let held = Held {
             id,
             session,
+            cwd,
             seen: 0,
             last_beat: self.clock.now(),
             answer: None,
@@ -655,7 +785,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
 
     async fn make_partition(&mut self, cwd: &str) -> bool {
         for dir in [cwd.to_string(), format!("{cwd}/tmp")] {
-            match self.plane.mkdir(&dir, true).await {
+            match self.plane.make_partition_dir(&dir).await {
                 WriteOutcome::Applied(_) => {}
                 WriteOutcome::Stale
                 | WriteOutcome::Unavailable
@@ -701,22 +831,27 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
         loop {
             let mut events = vec![];
             let mut hook = TaskHook {
-                clock: &self.clock,
                 shutdown: &self.shutdown,
                 seen: &mut held.seen,
                 last_beat: &mut held.last_beat,
                 renewal: &mut self.renewal,
                 end: None,
             };
+            let mut tool = Tool {
+                plane: &mut self.plane,
+                clock: &mut self.clock,
+                shutdown: &self.shutdown,
+                cwd: &held.cwd,
+            };
             let outcome = match then {
                 Then::Run => {
                     held.session
-                        .run_with(&mut self.plane, &mut hook, &mut |e| events.push(e))
+                        .run_with(&mut tool, &mut hook, &mut |e| events.push(e))
                         .await
                 }
                 Then::Resume(items) => {
                     held.session
-                        .resume(&mut self.plane, &items, &mut hook, &mut |e| events.push(e))
+                        .resume(&mut tool, &items, &mut hook, &mut |e| events.push(e))
                         .await
                 }
             };
@@ -934,6 +1069,8 @@ mod tests {
         refuse_beats: bool,
         refuse_claims: bool,
         calls: usize,
+        accept_subs: bool,
+        diagnostics: Vec<String>,
     }
 
     impl Fake {
@@ -1013,11 +1150,23 @@ mod tests {
         }
         async fn list(&mut self, _: &str, p: &str, _: Option<&str>) -> ListOutcome {
             self.log(format!("list {p}"));
+            self.diagnostics.push(format!("listed {p}"));
             ListOutcome::Unavailable
         }
         async fn stat(&mut self, _: &str, p: &str) -> StatOutcome {
             self.log(format!("stat {p}"));
             StatOutcome::Unavailable
+        }
+        async fn mkdir(&mut self, _: &str, p: &str) -> crate::plane::MkdirOutcome {
+            self.log(format!("mkdir {p}"));
+            crate::plane::MkdirOutcome::Unavailable
+        }
+        async fn delete(&mut self, _: &str, p: &str, r: bool) -> crate::plane::DeleteOutcome {
+            self.log(format!("delete {p} {r}"));
+            crate::plane::DeleteOutcome::Unavailable
+        }
+        fn take_diagnostics(&mut self) -> Vec<String> {
+            std::mem::take(&mut self.diagnostics)
         }
     }
 
@@ -1076,8 +1225,28 @@ mod tests {
                 None => "uncite".into(),
             });
         }
-        async fn mkdir(&mut self, path: &str, parents: bool) -> WriteOutcome {
-            self.log(format!("mkdir {path} {parents}"));
+        async fn submit(&mut self, agent: &str, _: SecretText) -> Result<TaskView, TaskerFail> {
+            self.log(format!("submit {agent}"));
+            match self.accept_subs {
+                true => Ok(view(TaskState::Queued)),
+                false => Err(TaskerFail::Refused),
+            }
+        }
+        async fn sub_status(&mut self, _: &TaskRef) -> Result<TaskView, TaskerFail> {
+            self.log("sub status".into());
+            Err(TaskerFail::Refused)
+        }
+        async fn collect_one(
+            &mut self,
+            _: &str,
+            _: &TaskRef,
+            _: Option<TaskCursor>,
+        ) -> Result<TaskReportPage, TaskerFail> {
+            Err(TaskerFail::Refused)
+        }
+        async fn end_sub(&mut self, _: &TaskRef, _: bool) {}
+        async fn make_partition_dir(&mut self, path: &str) -> WriteOutcome {
+            self.log(format!("mkdir {path} true"));
             self.mkdirs
                 .pop_front()
                 .unwrap_or(WriteOutcome::Applied(None))
@@ -1096,7 +1265,7 @@ mod tests {
             self.personas.get(&key).cloned().unwrap_or(Ok(None))
         }
         fn note(&mut self, event: DriverEvent) {
-            if let DriverEvent::Ended { .. } = event {
+            if let DriverEvent::Ended { .. } | DriverEvent::Loop(LoopEvent::Diagnostic(_)) = event {
                 self.w.lock().unwrap().events.push(event);
             }
         }
@@ -1175,18 +1344,21 @@ mod tests {
             usage: None,
         })
     }
-    fn read(call: &str, path: &str) -> Result<PromptReply, PlaneError> {
+    fn call(name: &str, call_id: &str, arguments: &str) -> Result<PromptReply, PlaneError> {
         Ok(PromptReply {
             reasoning: None,
             blocks: vec![],
             tool_calls: vec![ProposedToolCall {
-                name: "read_file".into(),
-                call_id: call.into(),
-                arguments: st(&format!(r#"{{"path":"{path}"}}"#)),
+                name: name.into(),
+                call_id: call_id.into(),
+                arguments: st(arguments),
                 refused: None,
             }],
             usage: None,
         })
+    }
+    fn read(call_id: &str, path: &str) -> Result<PromptReply, PlaneError> {
+        call("read_file", call_id, &format!(r#"{{"path":"{path}"}}"#))
     }
 
     /// A fake whose startup heartbeat finds nothing left over, with tasks 1 to 3 valid.
@@ -1455,7 +1627,10 @@ mod tests {
         assert_eq!(&log[..2], &strs(&["beat 0", "claim"]));
         assert_eq!(&log[2..10], &fresh_start(1)[..]);
         assert_eq!(log[10], "prompt 1");
-        assert_eq!(user_text(&w.lock().unwrap().sent[0][0]), "prompt-1");
+        assert_eq!(
+            user_text(&w.lock().unwrap().sent[0][0]),
+            "Working directory: /home/hobi/tasks/users/1000\n\nprompt-1"
+        );
     }
 
     #[tokio::test]
@@ -1585,7 +1760,7 @@ mod tests {
         assert_eq!(reads, strs(&["persona etc"]));
         assert_eq!(
             user_text(&w.lock().unwrap().sent[0][0]),
-            "You are hobi.\n\nprompt-1"
+            "Working directory: /home/hobi/tasks/users/1000\n\nYou are hobi.\n\nprompt-1"
         );
     }
 
@@ -1609,7 +1784,7 @@ mod tests {
         );
         assert_eq!(
             user_text(&w.lock().unwrap().sent[0][0]),
-            "home persona\n\nprompt-1"
+            "Working directory: /home/hobi/tasks/users/1000\n\nhome persona\n\nprompt-1"
         );
 
         let mut f = fake();
@@ -1622,7 +1797,28 @@ mod tests {
         let (_, _, w) = run_with(f, PersonaMode::Own).await;
         assert_eq!(
             user_text(&w.lock().unwrap().sent[0][0]),
-            "partition persona\n\nprompt-1"
+            "Working directory: /home/hobi/tasks/users/1000\n\npartition persona\n\nprompt-1"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sub_tasks_first_turn_names_the_agent_that_gave_it() {
+        let mut f = fake();
+        f.claims = VecDeque::from([delivered(1, PART)]);
+        let mut sub = signed(1, "sentinel-609-sub");
+        sub.task.tasker = Tasker::Agent {
+            agent: "suga".into(),
+            uid: 2002,
+        };
+        sub.task.parent = Some(id(9));
+        f.tasks.insert(1, Ok(sub));
+        f.personas
+            .insert("etc".into(), Ok(Some(st("You are hobi."))));
+        f.replies = VecDeque::from([answer("a1")]);
+        let (_, _, w) = run_with(f, PersonaMode::Admin).await;
+        assert_eq!(
+            user_text(&w.lock().unwrap().sent[0][0]),
+            "Working directory: /home/hobi/tasks/users/1000\n\nYou are hobi.\n\nTask from agent suga:\n\nsentinel-609-sub"
         );
     }
 
@@ -1654,7 +1850,10 @@ mod tests {
             ])
         );
         let w = w.lock().unwrap();
-        assert_eq!(user_text(&w.sent[1][0]), "prompt-2");
+        assert_eq!(
+            user_text(&w.sent[1][0]),
+            "Working directory: /home/hobi/tasks/agents/suga\n\nprompt-2"
+        );
     }
 
     #[tokio::test]
@@ -1703,6 +1902,96 @@ mod tests {
                 "beat 0"
             ]
         );
+    }
+
+    fn task_agent_call() -> Result<PromptReply, PlaneError> {
+        call(
+            "task_agent",
+            "t1",
+            r#"{"agent":"jin","prompt":"sentinel-609-driver"}"#,
+        )
+    }
+
+    #[tokio::test]
+    async fn the_loops_list_and_delete_reach_the_plane_and_its_diagnostics_the_driver() {
+        let mut f = fake();
+        f.claims = VecDeque::from([delivered(1, PART)]);
+        f.replies = VecDeque::from([
+            call("list_directory", "l1", r#"{"path":"/w/a"}"#),
+            call("delete_path", "d1", r#"{"path":"/w/b","recursive":true}"#),
+            answer("a1"),
+        ]);
+        let (log, events) = run(f).await;
+        let at = log.iter().position(|l| l == "list /w/a").unwrap();
+        assert!(log[at..].iter().any(|l| l == "delete /w/b true"), "{log:?}");
+        assert!(events.contains(&DriverEvent::Loop(LoopEvent::Diagnostic(
+            "listed /w/a".into()
+        ))));
+    }
+
+    #[tokio::test]
+    async fn the_loops_plane_opens_and_closes_on_the_drivers_plane() {
+        let (mut f, w) = (fake(), Shared::default());
+        f.w = w.clone();
+        let mut clock = FakeClock(w.clone());
+        let shutdown = AtomicBool::new(false);
+        let mut tool = Tool {
+            plane: &mut f,
+            clock: &mut clock,
+            shutdown: &shutdown,
+            cwd: HOME,
+        };
+        let id = tool.open(Path::new(HOME), &[]).await.unwrap();
+        assert!(tool.close(&id).await.is_ok());
+        assert_eq!(
+            w.lock().unwrap().log,
+            strs(&[&format!("open {HOME}"), &format!("close {CONV}")])
+        );
+    }
+
+    #[test]
+    fn a_first_turn_is_allocated_once_at_its_exact_length() {
+        let persona = secret("persona-609");
+        for (p, from) in [
+            (None, None),
+            (Some(&persona), None),
+            (Some(&persona), Some("hobi")),
+        ] {
+            let t = first_turn(p, from, "prompt-609");
+            assert_eq!(t.capacity(), t.len(), "{from:?}");
+        }
+    }
+
+    fn tool_text(t: &Turn) -> String {
+        match t {
+            Turn::Tool { content, .. } => match &content[0] {
+                ContentBlock::Text { text } => text.0.to_string(),
+                other => panic!("{other:?}"),
+            },
+            other => panic!("not a tool turn: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn task_agent_runs_on_the_drivers_plane_and_clock() {
+        for (accept, said) in [
+            (false, crate::render::NOT_ACCEPTED),
+            (true, crate::render::WAIT_ENDED),
+        ] {
+            let mut f = fake();
+            f.accept_subs = accept;
+            f.claims = VecDeque::from([delivered(1, PART)]);
+            f.replies = VecDeque::from([task_agent_call(), answer("a1")]);
+            let (log, _, w) = run_with(f, PersonaMode::Own).await;
+            let w = w.lock().unwrap();
+            assert!(tool_text(&w.sent[1][2]).starts_with(&format!("{said}\n\n")));
+            let at = log.iter().position(|l| l == "submit jin").unwrap();
+            let waited: Vec<&str> = log[at + 1..].iter().take(2).map(String::as_str).collect();
+            match accept {
+                true => assert_eq!(waited, ["sleep 5", "sub status"]),
+                false => assert_ne!(waited.first(), Some(&"sleep 5")),
+            }
+        }
     }
 
     #[tokio::test]
@@ -2810,6 +3099,7 @@ mod tests {
         let held = Held {
             id: id(1),
             session,
+            cwd: format!("{HOME}/{PART}"),
             seen: 0,
             last_beat: Duration::ZERO,
             answer: first.answer.map(|a| a.0),

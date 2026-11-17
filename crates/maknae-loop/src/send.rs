@@ -630,6 +630,7 @@ mod tests {
             Verb::TaskCollect {
                 agent: "hobi".into(),
                 after: None,
+                task: None,
             },
             Verb::TaskClaim {
                 seen_follow_ups: None,
@@ -918,11 +919,13 @@ mod tests {
             maknae_proto::Verb::FsDelete {
                 path: p(),
                 recursive: false,
+                conversation: None,
             },
             maknae_proto::Verb::FsMkdir {
                 path: p(),
                 parents: false,
                 components: vec![],
+                conversation: None,
             },
         ] {
             let sent = before_grant(

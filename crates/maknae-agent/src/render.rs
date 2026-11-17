@@ -9,9 +9,11 @@
 //! `baseline-tools.json`, which names each result (#388: write results live in
 //! the tool's description, the core prompt keeps only the rules that hold for
 //! every tool). `LIST_CONTINUE` and `UNAVAILABLE` are the same contract with
-//! `list_directory`'s and `stat_path`'s descriptions. Duplicated here by
+//! `list_directory`'s and `stat_path`'s descriptions; `MKDIR_EXISTS`,
+//! `UNAVAILABLE` and `CHANGE_UNKNOWN` with `make_directory`'s; `DELETED`,
+//! `UNAVAILABLE` and `CHANGE_UNKNOWN` with `delete_path`'s. Duplicated here by
 //! contract, never by linkage. `tool error:` is renderer-only.
-use crate::plane::{ReadPage, StatView};
+use crate::plane::{ReadPage, StatView, TaskAgentOutcome};
 use crate::screen::fixed::{FixedText, Full};
 use zeroize::Zeroizing;
 
@@ -33,9 +35,15 @@ pub enum ToolOutcome {
     ListUnavailable,
     Stat(StatView),
     StatUnavailable,
+    MkdirExists,
+    MkdirUnavailable,
+    DeleteDeleted,
+    DeleteUnavailable,
+    ChangeUnknown,
     Protected,
     NotRun,
     BadCall(String),
+    TaskAgent(TaskAgentOutcome),
 }
 
 /// Redacting, by hand — the crate convention (`route.rs`'s `ToolRequest`,
@@ -69,9 +77,15 @@ impl std::fmt::Debug for ToolOutcome {
             ToolOutcome::ListUnavailable => f.write_str("ListUnavailable"),
             ToolOutcome::Stat(_) => f.write_str("Stat"),
             ToolOutcome::StatUnavailable => f.write_str("StatUnavailable"),
+            ToolOutcome::MkdirExists => f.write_str("MkdirExists"),
+            ToolOutcome::MkdirUnavailable => f.write_str("MkdirUnavailable"),
+            ToolOutcome::DeleteDeleted => f.write_str("DeleteDeleted"),
+            ToolOutcome::DeleteUnavailable => f.write_str("DeleteUnavailable"),
+            ToolOutcome::ChangeUnknown => f.write_str("ChangeUnknown"),
             ToolOutcome::Protected => f.write_str("Protected"),
             ToolOutcome::NotRun => f.write_str("NotRun"),
             ToolOutcome::BadCall(why) => f.debug_tuple("BadCall").field(why).finish(),
+            ToolOutcome::TaskAgent(got) => f.debug_tuple("TaskAgent").field(got).finish(),
         }
     }
 }
@@ -87,6 +101,9 @@ pub const NOT_WRITTEN_UNREAD: &str =
     "not written — the file exists and you have not read it; read it first, then write";
 /// A LOCAL pre-send refusal is a tool error, not an unknown outcome.
 pub const WRITE_NOT_SENT: &str = "tool error: write not sent — content exceeds the frame bound";
+pub const MKDIR_EXISTS: &str = "the directory exists";
+pub const DELETED: &str = "deleted";
+pub const CHANGE_UNKNOWN: &str = "outcome unknown: the change may have happened; do not retry it";
 /// Names no list and no entry: the user is told those, the model never is.
 pub const PROTECTED: &str = "protected by policy — ask the user to do this outside Maknae";
 /// Followed by the last released name as a JSON string. Half of the contract with
@@ -94,6 +111,69 @@ pub const PROTECTED: &str = "protected by policy — ask the user to do this out
 pub const LIST_CONTINUE: &str = "truncated — continue with after: ";
 /// A call skipped because the host stopped the loop: not the model's error.
 pub const NOT_RUN: &str = "not run: the loop was stopped";
+/// `task_agent`'s fixed outcomes; half of the contract with its description.
+pub const NOT_ACCEPTED: &str = "not accepted, or its outcome is unknown; do not retry it";
+pub const SUB_OUTCOME_UNKNOWN: &str =
+    "outcome unknown: the other agent may have the task; do not retry it";
+pub const ON_HOLD: &str = "on hold — its agent or tasker was contained";
+pub const WAIT_ENDED: &str =
+    "the wait ended; the other agent's task may still run until it is closed; do not retry it";
+pub const REPORT_HEAD_BYTES: usize = 4096;
+pub const CUT_MARKER: &str = "[cut here — read the rest with read_file]";
+pub const NOT_STORED: &str = "the rest of the report could not be stored and is not shown";
+
+fn closed_text(close: maknae_proto::TaskClose) -> &'static str {
+    match close {
+        maknae_proto::TaskClose::Stopped => "stopped",
+        maknae_proto::TaskClose::Dropped => "dropped",
+        maknae_proto::TaskClose::AgentGone => "the agent was removed",
+        maknae_proto::TaskClose::AgentLost => "the agent stopped responding",
+        maknae_proto::TaskClose::Withdrawn => "withdrawn",
+        maknae_proto::TaskClose::ParentEnded => "the task that asked for it ended",
+    }
+}
+
+/// The head of another agent's report, cut on a character boundary, under a line that
+/// names whose output it is; built once in a zeroizing buffer with room for the suffix.
+fn report_text(agent: &str, stored: Option<&str>, text: &str) -> Zeroizing<String> {
+    let end = text.floor_char_boundary(REPORT_HEAD_BYTES);
+    let cut = end < text.len();
+    let header = match stored {
+        Some(path) => format!(
+            "Report from agent {agent} (shown up to {REPORT_HEAD_BYTES} bytes; all of it is in {path}):\n"
+        ),
+        None => format!("Report from agent {agent} (shown up to {REPORT_HEAD_BYTES} bytes):\n"),
+    };
+    let tail = match (cut, stored) {
+        (false, _) => String::new(),
+        (true, Some(_)) => format!("\n{CUT_MARKER}"),
+        (true, None) => format!("\n[cut here — {NOT_STORED}]"),
+    };
+    let mut out = Zeroizing::new(String::with_capacity(
+        header.len() + end + tail.len() + SUFFIX_HEADROOM,
+    ));
+    out.push_str(&header);
+    out.push_str(&text[..end]);
+    out.push_str(&tail);
+    out
+}
+
+fn task_agent_text(got: &TaskAgentOutcome) -> Zeroizing<String> {
+    let fixed = match got {
+        TaskAgentOutcome::Report {
+            agent,
+            stored,
+            text,
+        } => return report_text(agent, stored.as_deref(), &text.0),
+        TaskAgentOutcome::Unavailable => UNAVAILABLE,
+        TaskAgentOutcome::NotAccepted => NOT_ACCEPTED,
+        TaskAgentOutcome::OutcomeUnknown => SUB_OUTCOME_UNKNOWN,
+        TaskAgentOutcome::Closed(close) => closed_text(*close),
+        TaskAgentOutcome::OnHold => ON_HOLD,
+        TaskAgentOutcome::WaitEnded => WAIT_ENDED,
+    };
+    Zeroizing::new(fixed.to_string())
+}
 
 /// Headroom the read arm pre-allocates for the suffix `render`
 /// appends, so THAT append never reallocates: 19 bytes of
@@ -336,7 +416,9 @@ pub fn render(outcome: &ToolOutcome, steps_remaining: u32) -> Zeroizing<String> 
         | ToolOutcome::ReadUnavailable
         | ToolOutcome::WriteUnavailable
         | ToolOutcome::ListUnavailable
-        | ToolOutcome::StatUnavailable => Zeroizing::new(UNAVAILABLE.to_string()),
+        | ToolOutcome::StatUnavailable
+        | ToolOutcome::MkdirUnavailable
+        | ToolOutcome::DeleteUnavailable => Zeroizing::new(UNAVAILABLE.to_string()),
         ToolOutcome::Listing(page) => listing_text(page),
         ToolOutcome::Stat(view) => stat_json(view),
         ToolOutcome::WriteApplied => Zeroizing::new(APPLIED.to_string()),
@@ -345,8 +427,12 @@ pub fn render(outcome: &ToolOutcome, steps_remaining: u32) -> Zeroizing<String> 
         ToolOutcome::WriteUnknown => Zeroizing::new(OUTCOME_UNKNOWN.to_string()),
         ToolOutcome::WriteNotSent => Zeroizing::new(WRITE_NOT_SENT.to_string()),
         ToolOutcome::Protected => Zeroizing::new(PROTECTED.to_string()),
+        ToolOutcome::MkdirExists => Zeroizing::new(MKDIR_EXISTS.to_string()),
+        ToolOutcome::DeleteDeleted => Zeroizing::new(DELETED.to_string()),
+        ToolOutcome::ChangeUnknown => Zeroizing::new(CHANGE_UNKNOWN.to_string()),
         ToolOutcome::NotRun => Zeroizing::new(NOT_RUN.to_string()),
         ToolOutcome::BadCall(why) => Zeroizing::new(format!("tool error: {why}")),
+        ToolOutcome::TaskAgent(got) => task_agent_text(got),
     };
     // The live step count rides HERE, in per-turn content — never in the
     // compiled prompt, which ships verbatim (#264). Appended IN PLACE into the
@@ -375,6 +461,48 @@ pub fn render(outcome: &ToolOutcome, steps_remaining: u32) -> Zeroizing<String> 
 mod tests {
     use super::*;
     #[test]
+    fn task_agents_fixed_outcomes_are_the_strings_its_description_names() {
+        use crate::plane::TaskAgentOutcome as T;
+        for (got, said) in [
+            (T::Unavailable, "unavailable — do not retry"),
+            (
+                T::NotAccepted,
+                "not accepted, or its outcome is unknown; do not retry it",
+            ),
+            (
+                T::OutcomeUnknown,
+                "outcome unknown: the other agent may have the task; do not retry it",
+            ),
+            (T::OnHold, "on hold — its agent or tasker was contained"),
+            (
+                T::WaitEnded,
+                "the wait ended; the other agent's task may still run until it is closed; do not retry it",
+            ),
+            (
+                T::Closed(maknae_proto::TaskClose::ParentEnded),
+                "the task that asked for it ended",
+            ),
+        ] {
+            assert_eq!(
+                render(&ToolOutcome::TaskAgent(got), 2).as_str(),
+                format!("{said}\n\nsteps remaining: 2")
+            );
+        }
+        let whole = render(
+            &ToolOutcome::TaskAgent(T::Report {
+                agent: "jin".into(),
+                stored: Some("/h/r.md".into()),
+                text: maknae_proto::SecretText(Zeroizing::new("short".into())),
+            }),
+            2,
+        );
+        assert_eq!(
+            whole.as_str(),
+            "Report from agent jin (shown up to 4096 bytes; all of it is in /h/r.md):\nshort\n\nsteps remaining: 2"
+        );
+    }
+
+    #[test]
     fn the_strings_the_compiled_prompt_promises_are_exact() {
         // Duplicated BY CONTRACT with crates/maknae-llm/prompt/core-prompt.txt and
         // write_file's description in baseline-tools.json (this crate must never
@@ -397,6 +525,18 @@ mod tests {
             render(&ToolOutcome::WriteUnread, 5).as_str(),
             "not written — the file exists and you have not read it; read it first, then write\n\nsteps remaining: 5"
         );
+        assert_eq!(
+            render(&ToolOutcome::MkdirExists, 6).as_str(),
+            "the directory exists\n\nsteps remaining: 6"
+        );
+        assert_eq!(
+            render(&ToolOutcome::DeleteDeleted, 7).as_str(),
+            "deleted\n\nsteps remaining: 7"
+        );
+        assert_eq!(
+            render(&ToolOutcome::ChangeUnknown, 8).as_str(),
+            "outcome unknown: the change may have happened; do not retry it\n\nsteps remaining: 8"
+        );
     }
     #[test]
     fn every_file_refusal_renders_the_same_bytes() {
@@ -407,11 +547,14 @@ mod tests {
             ToolOutcome::WriteUnavailable,
             ToolOutcome::ListUnavailable,
             ToolOutcome::StatUnavailable,
+            ToolOutcome::MkdirUnavailable,
+            ToolOutcome::DeleteUnavailable,
         ] {
             assert_eq!(render(&o, 4).as_str(), want, "{o:?}");
         }
         assert_ne!(render(&ToolOutcome::Protected, 4).as_str(), want);
         assert_ne!(render(&ToolOutcome::WriteUnknown, 4).as_str(), want);
+        assert_ne!(render(&ToolOutcome::ChangeUnknown, 4).as_str(), want);
     }
     #[test]
     fn the_model_text_names_no_entry() {
@@ -785,6 +928,28 @@ mod tests {
                 "Stat",
             ),
             (ToolOutcome::NotRun, "NotRun"),
+            (ToolOutcome::MkdirExists, "MkdirExists"),
+            (ToolOutcome::MkdirUnavailable, "MkdirUnavailable"),
+            (ToolOutcome::DeleteDeleted, "DeleteDeleted"),
+            (ToolOutcome::DeleteUnavailable, "DeleteUnavailable"),
+            (ToolOutcome::ChangeUnknown, "ChangeUnknown"),
+            (ToolOutcome::Protected, "Protected"),
+            (
+                ToolOutcome::TaskAgent(crate::plane::TaskAgentOutcome::Closed(
+                    maknae_proto::TaskClose::ParentEnded,
+                )),
+                "TaskAgent(Closed(ParentEnded))",
+            ),
+            (
+                ToolOutcome::TaskAgent(crate::plane::TaskAgentOutcome::Report {
+                    agent: "jin".into(),
+                    stored: None,
+                    text: maknae_proto::SecretText(zeroize::Zeroizing::new(
+                        "SENTINEL-REPORT".into(),
+                    )),
+                }),
+                "TaskAgent(Report { agent: \"jin\", stored: None, text: <15 bytes> })",
+            ),
         ] {
             assert_eq!(format!("{o:?}"), want);
         }

@@ -597,8 +597,11 @@ impl MutationDirectory {
     }
 
     pub fn mkdir_one(&self, leaf: &str) -> Result<MutationEffect, MutationFailure> {
-        let path = self.child_path(leaf).map_err(no_effect(&self.path))?;
-        self.check_deadline(&path)?;
+        let path = self
+            .child_path(leaf)
+            .map_err(no_effect(&self.path))
+            .map_err(certified)?;
+        self.check_deadline(&path).map_err(certified)?;
         syscall::mkdir_at(&self.fd, leaf)
             .map_err(|e| failure(&path, EffectState::NoEffect, io_error(e, &path)))?;
         Ok(MutationEffect {
@@ -611,12 +614,18 @@ impl MutationDirectory {
     /// Remove the entry itself, including symlinks. A directory must be empty;
     /// this function never falls back to recursive removal.
     pub fn remove_entry(&self, leaf: &str) -> Result<MutationEffect, MutationFailure> {
-        let path = self.child_path(leaf).map_err(no_effect(&self.path))?;
+        let path = self
+            .child_path(leaf)
+            .map_err(no_effect(&self.path))
+            .map_err(certified)?;
         let st = syscall::fstatat_nofollow(&self.fd, leaf)
-            .map_err(|e| failure(&path, EffectState::NoEffect, io_error(e, &path)))?;
+            .map_err(|e| failure(&path, EffectState::NoEffect, io_error(e, &path)))
+            .map_err(certified)?;
         let directory = st.st_mode & nix::libc::S_IFMT == nix::libc::S_IFDIR;
-        self.reverify(&self.path).map_err(no_effect(&path))?;
-        self.check_deadline(&path)?;
+        self.reverify(&self.path)
+            .map_err(no_effect(&path))
+            .map_err(certified)?;
+        self.check_deadline(&path).map_err(certified)?;
         syscall::remove_at(&self.fd, leaf, directory)
             .map_err(|e| failure(&path, EffectState::NoEffect, io_error(e, &path)))?;
         Ok(MutationEffect {
@@ -624,6 +633,43 @@ impl MutationDirectory {
             kind: MutationEffectKind::DeletedEntry,
             version: None,
         })
+    }
+
+    /// Opens `leaf` for reading without following it and, with `depth`, every entry
+    /// up to that many levels beneath it; a symlink is not opened. Every failure is
+    /// certified before any effect.
+    pub fn check_readable(&self, leaf: &str, depth: Option<usize>) -> Result<(), MutationFailure> {
+        let path = self
+            .child_path(leaf)
+            .map_err(no_effect(&self.path))
+            .map_err(certified)?;
+        self.check_deadline(&path).map_err(certified)?;
+        let refused = |e| certified(failure(&path, EffectState::NoEffect, io_error(e, &path)));
+        let st = syscall::fstatat_nofollow(&self.fd, leaf).map_err(refused)?;
+        match st.st_mode & nix::libc::S_IFMT {
+            nix::libc::S_IFLNK => Ok(()),
+            nix::libc::S_IFDIR => {
+                drop(syscall::open_dir_at(&self.fd, leaf).map_err(refused)?);
+                let Some(depth) = depth.filter(|d| *d > 0) else {
+                    return Ok(());
+                };
+                let below = |e| certified(failure(&path, EffectState::NoEffect, e));
+                let child = self.open_child_directory(leaf).map_err(below)?;
+                let mut cursor = child.cursor().map_err(below)?;
+                while let Some(entry) = cursor.next_entry().map_err(below)? {
+                    let name = entry.name.to_str().ok_or_else(|| {
+                        below(IoError::NonUtf8Component {
+                            path: path.join(&entry.name),
+                        })
+                    })?;
+                    child.check_readable(name, Some(depth - 1))?;
+                }
+                Ok(())
+            }
+            _ => syscall::open_read_target(&self.fd, leaf)
+                .map(drop)
+                .map_err(refused),
+        }
     }
 
     pub fn open_child_directory(&self, leaf: &str) -> Result<Self, IoError> {
@@ -650,6 +696,12 @@ impl MutationDirectory {
             .into_iter();
         Ok(DirectoryCursor { directory, entries })
     }
+}
+
+/// A failure decided before any effect syscall was attempted (ADR-0034 decision 7).
+fn certified(mut e: MutationFailure) -> MutationFailure {
+    e.before_write = true;
+    e
 }
 
 impl AsFd for MutationDirectory {
@@ -935,6 +987,75 @@ mod tests {
             .unwrap_err();
         assert_eq!(e.state, EffectState::Partial);
         assert!(!e.before_write, "the entry exists once the open succeeds");
+    }
+    #[test]
+    fn an_entry_or_tree_the_subject_cannot_read_is_refused_before_any_effect() {
+        use std::os::unix::fs::PermissionsExt;
+        assert!(
+            !nix::unistd::geteuid().is_root(),
+            "running as root, which reads a 0000 file and voids the premise"
+        );
+        let d = tempfile::tempdir().unwrap();
+        let p = |n: &str| d.path().join(n);
+        std::fs::write(p("plain"), b"x").unwrap();
+        std::fs::write(p("locked"), b"x").unwrap();
+        std::fs::create_dir_all(p("tree/deep/deeper")).unwrap();
+        std::fs::write(p("tree/deep/deeper/locked"), b"x").unwrap();
+        std::fs::create_dir(p("empty")).unwrap();
+        std::os::unix::fs::symlink(p("nowhere"), p("dangling")).unwrap();
+        let mode = |n: &str, m: u32| {
+            std::fs::set_permissions(p(n), std::fs::Permissions::from_mode(m)).unwrap()
+        };
+        mode("locked", 0o000);
+        mode("tree/deep/deeper/locked", 0o000);
+        mode("empty", 0o000);
+        let dir = directory(&d);
+        let refused = |leaf: &str, depth: Option<usize>| {
+            let e = dir.check_readable(leaf, depth).unwrap_err();
+            assert_eq!(e.state, EffectState::NoEffect, "{leaf}");
+            assert!(e.before_write, "{leaf}: {e:?}");
+        };
+        dir.check_readable("plain", None).unwrap();
+        dir.check_readable("dangling", None).unwrap();
+        dir.check_readable("tree", None).unwrap();
+        dir.check_readable("tree", Some(1)).unwrap();
+        refused("locked", None);
+        refused("missing", None);
+        refused("empty", None);
+        refused("empty", Some(8));
+        refused("tree", Some(8));
+        mode("empty", 0o700);
+        mode("tree/deep/deeper/locked", 0o600);
+        mode("locked", 0o600);
+        dir.check_readable("tree", Some(8)).unwrap();
+        assert!(p("tree/deep/deeper/locked").exists() && p("locked").exists());
+    }
+    #[test]
+    fn a_mkdir_refused_before_the_mkdirat_is_certified_and_a_refused_mkdirat_is_not() {
+        let d = tempfile::tempdir().unwrap();
+        let late = directory(&d).with_deadline(std::time::Instant::now());
+        let e = late.mkdir_one("late-sentinel").unwrap_err();
+        assert_eq!(e.state, EffectState::NoEffect);
+        assert!(e.before_write, "{e:?}");
+        assert!(!d.path().join("late-sentinel").exists());
+        let e = directory(&d).mkdir_one("..").unwrap_err();
+        assert!(e.before_write, "{e:?}");
+        std::fs::create_dir(d.path().join("taken-sentinel")).unwrap();
+        let e = directory(&d).mkdir_one("taken-sentinel").unwrap_err();
+        assert_eq!(e.state, EffectState::NoEffect);
+        assert!(!e.before_write, "the mkdirat was attempted: {e:?}");
+    }
+    #[test]
+    fn a_remove_refused_before_the_unlink_is_certified_and_a_refused_unlink_is_not() {
+        let d = tempfile::tempdir().unwrap();
+        let e = directory(&d).remove_entry("missing-sentinel").unwrap_err();
+        assert_eq!(e.state, EffectState::NoEffect);
+        assert!(e.before_write, "{e:?}");
+        std::fs::create_dir_all(d.path().join("full/inside")).unwrap();
+        let e = directory(&d).remove_entry("full").unwrap_err();
+        assert_eq!(e.state, EffectState::NoEffect);
+        assert!(!e.before_write, "the rmdir was attempted: {e:?}");
+        assert!(d.path().join("full/inside").exists());
     }
     #[test]
     fn a_create_open_refused_by_permission_is_not_certified_before_any_effect() {

@@ -2,16 +2,21 @@
 //! the signature check and the persona reads the task driver asks for.
 use crate::keys::KeySupply;
 use crate::plane::{Dial, LoopPlane, PlaneDial};
+use crate::tasker::TaskerError;
 use maknae_agent::plane::{
-    ListOutcome, Plane, PlaneError, ReadBasis, ReadOutcome, StatOutcome, WriteOutcome,
+    DeleteOutcome, ListOutcome, MkdirOutcome, Plane, PlaneError, ReadBasis, ReadOutcome,
+    StatOutcome, WriteOutcome,
 };
-use maknae_agent::task::{BeatAnswer, ClaimAnswer, ReportOutcome};
+use maknae_agent::task::{BeatAnswer, ClaimAnswer, ReportOutcome, TaskerFail};
 use maknae_agent::task_driver::{DriverEvent, PersonaAt, TaskPlane, Unverified};
 use maknae_config::AgentId;
 use maknae_io::{
     AnchorRequired, DescendantRequired, IoError, IoKind, StrategyPref, TargetRequired, Zeroizing,
 };
-use maknae_proto::{Bytes, ConversationId, ConversationView, SecretText, SignedTask, TaskId, Turn};
+use maknae_proto::{
+    Bytes, ConversationId, ConversationView, SecretText, SignedTask, TaskCursor, TaskId, TaskRef,
+    TaskReportPage, TaskView, Turn,
+};
 use maknae_vault::TrustBundle;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -186,6 +191,12 @@ impl<K: KeySupply, R: PersonaRead, D: Dial> Plane for AgentPlane<K, R, D> {
     async fn stat(&mut self, conversation: &str, path: &str) -> StatOutcome {
         self.plane.stat(conversation, path).await
     }
+    async fn mkdir(&mut self, conversation: &str, path: &str) -> MkdirOutcome {
+        Plane::mkdir(&mut self.plane, conversation, path).await
+    }
+    async fn delete(&mut self, conversation: &str, path: &str, recursive: bool) -> DeleteOutcome {
+        Plane::delete(&mut self.plane, conversation, path, recursive).await
+    }
     fn take_diagnostics(&mut self) -> Vec<String> {
         self.plane.take_diagnostics()
     }
@@ -208,8 +219,8 @@ impl<K: KeySupply, R: PersonaRead, D: Dial> TaskPlane for AgentPlane<K, R, D> {
     fn cite(&mut self, task: Option<TaskId>) {
         self.plane.cite(task);
     }
-    async fn mkdir(&mut self, path: &str, parents: bool) -> WriteOutcome {
-        self.plane.mkdir(path, parents).await
+    async fn make_partition_dir(&mut self, path: &str) -> WriteOutcome {
+        self.plane.mkdir(path, true, None).await
     }
     fn verify(&mut self, signed: &Bytes) -> Result<SignedTask, Unverified> {
         self.trust.verify(signed, std::time::SystemTime::now())
@@ -235,6 +246,45 @@ impl<K: KeySupply, R: PersonaRead, D: Dial> TaskPlane for AgentPlane<K, R, D> {
     }
     fn note(&mut self, event: DriverEvent) {
         (self.note)(event);
+    }
+    async fn submit(&mut self, agent: &str, prompt: SecretText) -> Result<TaskView, TaskerFail> {
+        let agent = AgentId::parse(agent).map_err(|_| TaskerFail::Refused)?;
+        self.plane
+            .tasker()
+            .submit(&agent, prompt)
+            .await
+            .map_err(fail)
+    }
+    async fn sub_status(&mut self, task: &TaskRef) -> Result<TaskView, TaskerFail> {
+        self.plane.tasker().status(task).await.map_err(fail)
+    }
+    async fn collect_one(
+        &mut self,
+        agent: &str,
+        task: &TaskRef,
+        after: Option<TaskCursor>,
+    ) -> Result<TaskReportPage, TaskerFail> {
+        let agent = AgentId::parse(agent).map_err(|_| TaskerFail::Protocol)?;
+        self.plane
+            .tasker()
+            .collect_one(&agent, task, after)
+            .await
+            .map_err(fail)
+    }
+    async fn end_sub(&mut self, task: &TaskRef, queued: bool) {
+        let tasker = self.plane.tasker();
+        let _ = match queued {
+            true => tasker.drop(task).await,
+            false => tasker.stop(task).await,
+        };
+    }
+}
+
+fn fail(e: TaskerError) -> TaskerFail {
+    match e {
+        TaskerError::Refused { .. } => TaskerFail::Refused,
+        TaskerError::Unreachable { after_write, .. } => TaskerFail::Unreachable { after_write },
+        TaskerError::Protocol(_) => TaskerFail::Protocol,
     }
 }
 
@@ -311,7 +361,7 @@ mod tests {
         use crate::plane::fake::{refused, FakeKernel};
         use maknae_proto::Verb;
         let ca = TestCa::new(PlaneKey::MlDsa87);
-        let verbs = 13;
+        let verbs = 20;
         let lp = LoopPlane::with_dial(
             FakeKernel::answering(vec![refused(); verbs]),
             maknae_config::TransportConfig::default(),
@@ -346,7 +396,9 @@ mod tests {
         let _ = plane
             .report(SecretText(Zeroizing::new("r".into())), None)
             .await;
-        let _ = plane.mkdir(&format!("{d}/tasks/users/1000"), true).await;
+        let _ = plane
+            .make_partition_dir(&format!("{d}/tasks/users/1000"))
+            .await;
         let _ = plane.open(&dir, &[]).await;
         let _ = plane.prompt("c", &turn).await;
         let _ = plane
@@ -357,6 +409,8 @@ mod tests {
             .await;
         let _ = plane.list("c", d, None).await;
         let _ = plane.stat("c", d).await;
+        let _ = Plane::mkdir(&mut plane, "c", &format!("{d}/made-158")).await;
+        let _ = Plane::delete(&mut plane, "c", &format!("{d}/gone-158"), true).await;
         let _ = plane.close(&conversation).await;
         plane.cite(None);
         let _ = plane
@@ -383,6 +437,14 @@ mod tests {
             refused,
             Err("/home/hobi/tasks/users/1000/persona.md: the read was unavailable".into())
         );
+        let sub = maknae_proto::TaskRef::from_id(&TaskId([0x30; 16]));
+        let asked = SecretText(Zeroizing::new("sentinel-609-agent-plane".into()));
+        assert_eq!(plane.submit("jin", asked).await, Err(TaskerFail::Refused));
+        assert_eq!(plane.sub_status(&sub).await, Err(TaskerFail::Refused));
+        let cursor = Some(maknae_proto::TaskCursor::from_seq(4));
+        let _ = plane.collect_one("jin", &sub, cursor).await;
+        plane.end_sub(&sub, true).await;
+        plane.end_sub(&sub, false).await;
         let sent: Vec<_> = plane
             .plane
             .link_for_test()
@@ -399,7 +461,22 @@ mod tests {
                         seen_follow_ups: Some(3),
                     } => "heartbeat",
                     Verb::TaskReport { .. } => "report",
-                    Verb::FsMkdir { parents: true, .. } => "mkdir",
+                    Verb::FsMkdir {
+                        parents: true,
+                        conversation: None,
+                        ..
+                    } => "mkdir",
+                    Verb::FsMkdir {
+                        parents: true,
+                        conversation: Some(c),
+                        path,
+                        ..
+                    } if c == "c" && path.ends_with("/made-158") => "model-mkdir",
+                    Verb::FsDelete {
+                        recursive: true,
+                        conversation: Some(c),
+                        path,
+                    } if c == "c" && path.ends_with("/gone-158") => "delete",
                     Verb::SessionNew { .. } => "open",
                     Verb::SessionPrompt { .. } => "prompt",
                     Verb::Read {
@@ -412,6 +489,15 @@ mod tests {
                     Verb::FsList { .. } => "list",
                     Verb::FsStat { .. } => "stat",
                     Verb::SessionClose { .. } => "close",
+                    Verb::TaskSubmit { task } if task.agent == "jin" => "submit",
+                    Verb::TaskStatus { task } if *task == sub => "status",
+                    Verb::TaskCollect {
+                        agent,
+                        after: Some(c),
+                        task: Some(t),
+                    } if agent == "jin" && c.seq() == 4 && *t == sub => "ack-one",
+                    Verb::TaskDrop { task } if *task == sub => "drop",
+                    Verb::TaskStop { task } if *task == sub => "stop",
                     other => panic!("unexpected {other:?}"),
                 };
                 (name, r.task)
@@ -431,9 +517,16 @@ mod tests {
                 cited("write"),
                 cited("list"),
                 cited("stat"),
+                cited("model-mkdir"),
+                cited("delete"),
                 cited("close"),
                 ("report", None),
                 cited("persona"),
+                cited("submit"),
+                cited("status"),
+                cited("ack-one"),
+                cited("drop"),
+                cited("stop"),
             ]
         );
         assert_eq!(

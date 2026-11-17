@@ -447,6 +447,7 @@ fn collect(agent: &str, after: Option<u64>) -> Verb {
     Verb::TaskCollect {
         agent: agent.into(),
         after: after.map(TaskCursor::from_seq),
+        task: None,
     }
 }
 

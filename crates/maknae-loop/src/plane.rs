@@ -4,7 +4,8 @@
 use crate::keys::{AgentKeys, KeySupply};
 use crate::send::{send_located, send_via, write_request, SendFailure, Wire};
 use maknae_agent::plane::{
-    ListOutcome, Plane, PlaneError, ReadBasis, ReadOutcome, StatOutcome, WriteOutcome,
+    DeleteOutcome, ListOutcome, MkdirOutcome, Plane, PlaneError, ReadBasis, ReadOutcome,
+    StatOutcome, WriteOutcome,
 };
 use maknae_agent::wire::{
     check_for, close_outcome, list_outcome, open_outcome, prompt_outcome, read_outcome,
@@ -297,6 +298,11 @@ impl<K: KeySupply, D: Dial> LoopPlane<K, D> {
         crate::task::TaskClient::over(Arc::clone(&self.link))
     }
 
+    /// The tasker verbs over this plane's link, each carrying the plane's cite.
+    pub fn tasker(&self) -> crate::tasker::TaskerClient<D> {
+        crate::tasker::TaskerClient::on(Arc::clone(&self.link))
+    }
+
     /// A whole-file read that belongs to no conversation, carrying the cite.
     pub async fn read_whole(&mut self, path: &str) -> ReadOutcome {
         let diagnostics = &mut self.diagnostics;
@@ -318,16 +324,41 @@ impl<K: KeySupply, D: Dial> LoopPlane<K, D> {
     }
 
     /// The directory is created mode 0700, as every subject-side mkdir is.
-    pub async fn mkdir(&mut self, path: &str, parents: bool) -> WriteOutcome {
+    pub async fn mkdir(
+        &mut self,
+        path: &str,
+        parents: bool,
+        conversation: Option<&str>,
+    ) -> WriteOutcome {
+        self.namespace(Verb::FsMkdir {
+            path: path.to_string(),
+            parents,
+            components: Vec::new(),
+            conversation: conversation.map(str::to_string),
+        })
+        .await
+    }
+
+    pub async fn delete(
+        &mut self,
+        path: &str,
+        recursive: bool,
+        conversation: Option<&str>,
+    ) -> WriteOutcome {
+        self.namespace(Verb::FsDelete {
+            path: path.to_string(),
+            recursive,
+            conversation: conversation.map(str::to_string),
+        })
+        .await
+    }
+
+    async fn namespace(&mut self, verb: Verb) -> WriteOutcome {
         let diagnostics = &mut self.diagnostics;
         write_outcome(
             self.link
                 .send(
-                    Verb::FsMkdir {
-                        path: path.to_string(),
-                        parents,
-                        components: Vec::new(),
-                    },
+                    verb,
                     None,
                     crate::mutation::WriteCheck::Unchecked,
                     &mut |l| diagnostics.push(l),
@@ -528,6 +559,16 @@ impl<K: KeySupply, D: Dial> Plane for LoopPlane<K, D> {
                 .map(WireOutcome::from),
         )
     }
+    async fn mkdir(&mut self, conversation: &str, path: &str) -> MkdirOutcome {
+        LoopPlane::mkdir(self, path, true, Some(conversation))
+            .await
+            .into()
+    }
+    async fn delete(&mut self, conversation: &str, path: &str, recursive: bool) -> DeleteOutcome {
+        LoopPlane::delete(self, path, recursive, Some(conversation))
+            .await
+            .into()
+    }
     fn take_diagnostics(&mut self) -> Vec<String> {
         std::mem::take(&mut self.diagnostics)
     }
@@ -674,7 +715,9 @@ mod tests {
         let _ = plane
             .write("c", &format!("{d}/new"), b"x", ReadBasis::Unread)
             .await;
-        let _ = plane.mkdir(&format!("{d}/tasks/users/1000"), true).await;
+        let _ = plane
+            .mkdir(&format!("{d}/tasks/users/1000"), true, None)
+            .await;
         let _ = plane.list("c", d, None).await;
         let _ = plane.stat("c", d).await;
         let _ = plane.prompt("c", &user_turn()).await;
@@ -704,6 +747,24 @@ mod tests {
             .collect();
         let all = |task| VERBS.map(|v| (v, task));
         assert_eq!(sent, [all(Some(id)), all(None)].concat());
+    }
+
+    #[tokio::test]
+    async fn the_planes_tasker_carries_the_planes_cite() {
+        let id = TaskId([0x63; 16]);
+        let plane = fake_plane(vec![fake::refused(); 3]);
+        plane.cite(Some(id));
+        let tasker = plane.tasker();
+        let hobi = maknae_config::AgentId::parse("hobi").unwrap();
+        let text = maknae_proto::SecretText(zeroize::Zeroizing::new("p".into()));
+        let _ = tasker.submit(&hobi, text).await;
+        let sub = maknae_proto::TaskRef::from_id(&TaskId([4; 16]));
+        let _ = tasker.status(&sub).await;
+        plane.cite(None);
+        let _ = tasker.status(&sub).await;
+        let seen = plane.link.dial.finish().await;
+        let cites: Vec<_> = seen.requests.iter().map(|r| r.task).collect();
+        assert_eq!(cites, [Some(id), Some(id), None]);
     }
 
     #[tokio::test]
@@ -867,6 +928,52 @@ mod tests {
             Verb::TaskReport { .. } => "report",
             _ => "other",
         }
+    }
+
+    #[tokio::test]
+    async fn the_models_mkdir_and_delete_carry_its_conversation() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let d = dir.path().to_str().unwrap();
+        let mut plane = fake_plane(vec![fake::refused(); 3]);
+        let made = Plane::mkdir(&mut plane, "conv-158", &format!("{d}/a-158/b")).await;
+        let gone = Plane::delete(&mut plane, "conv-158", &format!("{d}/t-158"), true).await;
+        let one = Plane::delete(&mut plane, "conv-158", &format!("{d}/f-158"), false).await;
+        assert_eq!(made, maknae_agent::plane::MkdirOutcome::Unavailable);
+        assert_eq!(
+            (gone, one),
+            (
+                maknae_agent::plane::DeleteOutcome::Unavailable,
+                maknae_agent::plane::DeleteOutcome::Unavailable
+            )
+        );
+        let seen = plane.link.dial.finish().await;
+        let sent: Vec<_> = seen
+            .requests
+            .iter()
+            .map(|r| match &r.verb {
+                Verb::FsMkdir {
+                    path,
+                    parents,
+                    conversation,
+                    ..
+                } => ("mkdir", path.clone(), *parents, conversation.clone()),
+                Verb::FsDelete {
+                    path,
+                    recursive,
+                    conversation,
+                } => ("delete", path.clone(), *recursive, conversation.clone()),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        let conv = Some("conv-158".to_string());
+        assert_eq!(
+            sent,
+            vec![
+                ("mkdir", format!("{d}/a-158/b"), true, conv.clone()),
+                ("delete", format!("{d}/t-158"), true, conv.clone()),
+                ("delete", format!("{d}/f-158"), false, conv),
+            ]
+        );
     }
 
     #[test]

@@ -851,6 +851,7 @@ sudo restorecon -Rv /etc/maknae
 - **`endpoint` is POSTed exactly as written.** Give the full chat-completions URL, not the API base (`crates/maknae-llm/src/client.rs`).
 - **`models`** lists the models users may ask this provider for; the kernel refuses any other at admission.
 - **`reasoning_effort: none` is required for `gpt-5.6-luna`.** Without it the model refuses the loop's tools on chat completions: every turn is recorded `LandedUndelivered`, reason `reply unusable: provider-rejected`, with `provider answered 400` in the deputy's journal and `the provider rejected the request` at the user's terminal. The journal line carries up to 4 KiB of the provider's error body with the key masked, and that body can quote the rejected request — prompt and file content included — so treat the deputy's journal as holding conversation content (`docs/configuration.md` §6.2).
+- **`gpt-6.1-sol` cannot be used.** On chat completions it refuses the loop's tools unless `reasoning_effort` is `none`, and it refuses `none`; it takes tools only on the Responses API, which Maknae does not speak (`crates/maknae-llm/src/wire.rs`). Each turn is recorded `reply unusable: provider-rejected` either way.
 - **No key goes in this file.** A field named like a key (`key`, `api_key`, `token`, `secret` and others) refuses boot. Each entry may hold only the keys `name`, `endpoint`, `models`, `reasoning_effort` and `output_tokens_field`; the last two are optional (`docs/configuration.md` §6.1).
 - **The daemon's prompt cap.** `transport.prompt_max_bytes` in `/etc/maknae/maknae.yaml` defaults to 1 MiB, enough for a context window of about 174,000 tokens. For a larger window raise it to `context_tokens × 6`, at most 16 MiB, or the daemon refuses the loop's larger frames. Enroll rewrites that file, so set it again after a re-enroll.
 
@@ -1013,7 +1014,7 @@ Every read is paged: each page is its own decided, recorded `fs.read` attempt of
 - **One page.** `maknae read --offset 2 --limit 1 <file>` prints that page and names the next position on stderr (`next: line L column C`, or `eof`). `--column` continues a long line.
 - **A file that changes.** Maknae does not lock the file: Unix locks are advisory and a held lock would hang your own tools. A file written while a page is read refuses that page (`PathChanged`, nothing released). A file that changes between pages, edited in place or replaced, stops `maknae read` with `file changed during the read`, and the agent sees `"changed": true` and reads again. Detection rests on size and timestamps, so a same-size edit within one timestamp tick is not seen.
 - **Practical ceiling.** Each page rescans the file from the start, and each page is its own connection with about four audit records, so a very large file is slow; past roughly 6 GB, one page exceeds the default 5 s `read_timeout_ms`.
-- **The agent.** `read_file` takes `offset`, `limit` (default 2000 lines) and `column`, and returns the page as JSON with the file's text only in `content`. `list_directory` returns at most 1024 names a page, and its `after` argument continues from the last name of the page before; `stat_path` returns a path's kind, size and modification time. The loop's prompt cap follows `provider.context_tokens` (about 768 KB for a 128,000-token window), so a full 64 KiB page fits alongside the rest of the conversation.
+- **The agent.** `read_file` takes `offset`, `limit` (default 2000 lines) and `column`, and returns the page as JSON with the file's text only in `content`. `list_directory` returns at most 1024 names a page, and its `after` argument continues from the last name of the page before; `stat_path` returns a path's kind, size and modification time. `make_directory` creates a directory and any missing directories above it, and answers `the directory exists` whether it made it or found it; `delete_path` deletes a file or an empty directory, or with `recursive` a directory and everything in it. Both are decided like `write_file`, and the model's need `Read` as well as `Write` ([configuration](configuration.md)). The loop's prompt cap follows `provider.context_tokens` (about 768 KB for a 128,000-token window), so a full 64 KiB page fits alongside the rest of the conversation.
 
 ### 12b. Read before write
 
@@ -1612,14 +1613,16 @@ An Agent Daemon runs under its own service account, one per agent, and reaches `
 
 3. **Enroll it.**
 
-   `/etc/maknae/egress-bounds.yaml` must set `agent_prefix` (for example `agent_prefix: maknae/agents`); enroll refuses without it. Load the agent's API key in Vault at `<kv_mount>/data/<agent_prefix>/hobi/<subpath>`. To give the agent an admin-written persona, install `/etc/maknae/agents/hobi/persona.md` as `root:_maknae 0640` before this step.
+   `/etc/maknae/egress-bounds.yaml` must set `agent_prefix` (for example `agent_prefix: maknae/agents`); enroll refuses without it. Load the agent's API key in Vault at `<kv_mount>/data/<agent_prefix>/hobi/<subpath>`. The provider you name must be authorized on the host ([Chapter 4 step 5](#5-authorize-the-provider)), and `user`, the role the agent is bound to, must hold it in `destinations:` ([step 7](#7-grant-the-prompt)); otherwise every task stops `prompt-refused`, and the trail's `session.prompt` record gives the reason. To give the agent an admin-written persona, install `/etc/maknae/agents/hobi/persona.md` as `root:_maknae 0640` before this step.
 
    ```bash
    sudo maknae enroll agent hobi --account hobi --bind-cidr <this host's address>/32 \
      --provider openai --model <model> --key-subpath openai --key-field api_key --context-tokens <n>
    ```
 
-   `--role guest` binds it to `guest` instead of the default `user`; `admin` is not offered. `--persona self` lets the agent keep its own persona instead of `persona.md`. Enroll seals the SecretID on this host, writes `/etc/maknae/agents/hobi/enrollment.yaml` and `agent.yaml`, and gives the `hobi` account read access to those files, `persona.md`, the directories above them and the three certificates in `/etc/maknae/tls`, and to nothing else. If enroll reports that it could not grant an entry, the agent is enrolled but cannot read its configuration: fix the cause and run `sudo maknae enroll agent hobi --refresh-access`. On Linux enroll then starts the agent as `maknae-agent@hobi.service`, after naming its home to the AppArmor profile and reloading it on a Debian host; on macOS as the launchd job `io.maknae.maknae-agentd.hobi`, whose stderr is `/usr/local/var/log/maknae-agent/hobi/agentd.err`. Run `--refresh-access` too after replacing `persona.md` or changing the account's home; it touches no Vault, and on Linux it rewrites the instance's drop-in and restarts it.
+   `--bind-cidr` is the address Vault sees, after any NAT, proxy or tunnel between this host and Vault ([configuration §6.4](configuration.md#64-enrolling-an-agent-daemon)). A SecretID bound to any other address fails every login: the agent's journal repeats `minting the plane leaf failed (AppRole login failed: … (status code 400))`, and no task is ever claimed. Vault's audit log shows the address it saw as `request.remote_address`; enroll again with that address and `--rotate`.
+
+   `--role guest` binds it to `guest` instead of the default `user`; `admin` is not offered. `guest` holds no grants and `destinations:` refuses it, so a `guest` agent can be tasked but works no task: each stops `partition-unavailable`. `--persona self` lets the agent keep its own persona instead of `persona.md`. Enroll seals the SecretID on this host, writes `/etc/maknae/agents/hobi/enrollment.yaml` and `agent.yaml`, and gives the `hobi` account read access to those files, `persona.md`, the directories above them and the three certificates in `/etc/maknae/tls`, and to nothing else. If enroll reports that it could not grant an entry, the agent is enrolled but cannot read its configuration: fix the cause and run `sudo maknae enroll agent hobi --refresh-access`. On Linux enroll then starts the agent as `maknae-agent@hobi.service`, after naming its home to the AppArmor profile and reloading it on a Debian host; on macOS as the launchd job `io.maknae.maknae-agentd.hobi`, whose stderr is `/usr/local/var/log/maknae-agent/hobi/agentd.err`. Run `--refresh-access` too after replacing `persona.md` or changing the account's home; it touches no Vault, and on Linux it rewrites the instance's drop-in and restarts it.
 
 4. **Write its policy.** Write it as `policy.yaml`, then install it as `root:_maknae 0640`, as the other configuration files are: `sudo install -o root -g _maknae -m 0640 policy.yaml /etc/maknae/agents/hobi/policy.yaml`. Without it the agent holds no file access through Maknae's tools, and only people may task it.
 
@@ -1629,11 +1632,19 @@ An Agent Daemon runs under its own service account, one per agent, and reaches `
      allow:
        - "Read(~/notes/**)"
        - "Write(~/notes/**)"
+       - "Read(~/tasks/**)"
+       - "Write(~/tasks)"
+       - "Write(~/tasks/**)"
    actions:
      allow:
        - "fs.*"
+       - "session.new"
        - "session.prompt"
+       - "session.close"
    ```
+
+   - **`~/tasks` is required.** The agent creates each task's partition, `~/tasks/users/<uid>` or `~/tasks/agents/<id>`, and works in it ([Tasks](#tasks)). This `permissions.allow` replaces the site's allow list for the agent, whose `Write(~/projects/**)` would not reach it anyway, so without these entries every task stops `partition-unavailable` and the trail records `fs.mkdir` of `~/tasks` refused with `role user: no capability entry for fs.mkdir`. The partition operand still confines each request to the partition of the task it cites.
+   - **`session.new`, `session.prompt` and `session.close`** are the conversation each task runs in ([configuration §6.4](configuration.md#64-enrolling-an-agent-daemon)).
 
    Add `taskers:` to say who may task it, for example `taskers: ["alice", "agent:jin"]`; another agent may task it only when listed here. `maknaed` decides and serves tasking; people task an agent with `maknae agent <name>` ([Task an agent](#task-an-agent)), and the agent process that works the task is `maknae-agentd` (#629, [Tasks](#tasks)).
 
@@ -1740,7 +1751,7 @@ printf 'summarize the notes directory\n' | maknae agent hobi --wait
 
 ## Tasks
 
-A person or another agent gives an enrolled agent a task with `session.task`; `maknaed` decides it, signs it, stores it and hands it to the agent when the agent claims. Tasks are kept on disk, sealed, in `STATE_DIR/tasks` ([configuration §2.6](configuration.md#26-tasks-628)), so a restart keeps every queued, working and reported task. The CLI that sends tasks is #630 and the agent process that claims them is #629; until they land, nothing on a host sends these verbs.
+A person or another agent gives an enrolled agent a task with `session.task`; `maknaed` decides it, signs it, stores it and hands it to the agent when the agent claims. Tasks are kept on disk, sealed, in `STATE_DIR/tasks` ([configuration §2.6](configuration.md#26-tasks-628)), so a restart keeps every queued, working and reported task. People task an agent with `maknae agent <name>` ([Task an agent](#task-an-agent)); the agent process that claims and works tasks is `maknae-agentd`; an agent tasks another with its model's `task_agent` tool ([Agents task agents](#agents-task-agents)).
 
 A task is `queued` until the agent claims it, then `working`. The agent's report makes it `reported`; a stop, or a close by the kernel, makes it `closed`. The tasker collects reports and closes, and a collected one is removed. A report or close nobody collects expires after 30 days.
 
@@ -1748,11 +1759,22 @@ A task is `queued` until the agent claims it, then `working`. The agent's report
 
 **A contained subject's tasks are held.** When a person is contained, every task they gave, and every sub-task under one, becomes `held`, whatever state it was in. When an agent is contained, every open task it holds becomes `held`, and so does every task it gave and every task in a chain it started. A contained agent is given no new task: a submission that names it is refused, `session.task: agent <id> is contained`. A submission caught by a containment while it is being stored is either refused (`the tasker, the root of its chain or the agent is contained`) or, if its `task stored` record was already written, recorded `task held: …` and stored `held`. A sub-task is refused (`the cited task is not held by the submitting agent`) once its parent is held, due a hold or due a close. A held task is never handed out, reported on, added to, stopped, dropped, collected, expired or closed, and its lease no longer runs: it stays exactly as it was, with the state it was held from recorded, as possible evidence. The agent's next heartbeat answers `held`, which tells it to stop and leave the partition untouched. Releasing the subject from containment does not release its tasks; an administrator releases them once no cause is contained ([Release held tasks](#release-held-tasks)).
 
-The kernel closes a task itself in three cases, and keeps the closed record for the tasker:
+The kernel closes a task itself in these cases, and keeps the closed record for the tasker:
 
 - **`agent-gone`:** the agent was de-enrolled, or its account's uid changed. The tasks are marked at the reload that installs the change, so the agent is refused them from then on, and are closed by the reload's own pass or the next sweep.
 - **`agent-lost`:** a working task's lease lapsed. The lease is 15 minutes, renewed by each request that cites the task, permitted or denied, and by each heartbeat. At start every working task's lease begins again.
 - **`withdrawn`:** a queued task's tasker may no longer task the agent, found when the task was about to be handed out.
+- **`parent-ended`:** a sub-task whose parent stopped working: the parent was stopped, reported, lapsed, removed, or released to start again. Nothing waits for it any more, so the kernel closes it and keeps no record for anyone to collect (`closed:parent-ended` in the trail), and removes a sub-task that had already reported or closed (`removed:parent-ended`). It is never handed out, and its agent's next request citing it is refused.
+
+### Agents task agents
+
+An agent gives another enrolled agent a task with its model's `task_agent` tool, while it works a task of its own. The target's `taskers:` must list it (`agent:<id>`), its role must grant `session.task`, as for a person, and its own `policy.yaml` must allow `session.task` when it has an `actions:` list; otherwise every call answers the uniform refusal and the trail reads `session.task is not in agents.<id>.policy.actions allow`.
+
+- **The sub-task.** It is submitted citing the working task, works in the root's partition of the target's home, and its first turn says which agent gave it (`Task from agent <id>:`). The two agents' files stay apart: the target cannot read the tasking agent's home or the other way round, so what the target needs goes in the prompt and what comes back is the report (#661 tracks passing files).
+- **Waiting.** The tool waits until the sub-task reports or ends, with no time limit. A sub-task whose agent stops responding is closed `agent-lost` when its lease lapses; stopping the tasking agent's own task ends the wait and closes the sub-task `parent-ended`. While it waits, follow-ups to the tasking agent's task are held until the tool returns.
+- **The report.** The whole report is written to `reports/<sub-task>.md` in the tasking agent's partition and its start is shown to the model, with the path; the model reads the rest with `read_file`. A refused write leaves only the start, and says so.
+- **Refusals.** Every refused submission reads `not accepted, or its outcome is unknown; do not retry it`, so the model never learns whether the target exists or why. A submission whose target is, through the tasks it is waiting on, already waiting on the tasking agent is refused, so two or more agents can never wait on each other (`task chain already waits on agent <id>` in the trail).
+- **What an agent can reach.** An agent's status, add, stop, drop, list and collect, citing its working task, reach only the sub-tasks of that task.
 
 ### What the trail shows
 

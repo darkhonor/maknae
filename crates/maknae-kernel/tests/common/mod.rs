@@ -686,12 +686,73 @@ impl Fixture {
     where
         P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
     {
-        let (client, server) = tokio::io::duplex(65536);
         let fds = maknae_io::DelegatedFds::new(4);
         if let Some(fd) = fd {
             fds.push(fd);
         }
-        let turn = self.take_turns.then(|| verb.clone());
+        let turn = self.take_turns
+            && (maknae_kernel::is_filesystem_verb(&verb)
+                || matches!(verb, Verb::SessionNew { .. }));
+        let (client, task) = self.serve(
+            session,
+            authz,
+            live,
+            fds,
+            records,
+            config,
+            egress,
+            attempt_caps,
+            turn,
+        );
+        let body = maknae_proto::encode_request(&maknae_proto::Request {
+            task: None,
+            protocol_version: maknae_proto::PROTOCOL_VERSION,
+            verb,
+        })
+        .unwrap();
+        (client, task, body)
+    }
+    /// One connection served by the real kernel, with no request written: the
+    /// caller is the client, and delegates descriptors through `fds`.
+    pub fn connect_egress(
+        &self,
+        fds: maknae_io::DelegatedFds,
+        records: Arc<impl AuditEmit + Send + Sync + 'static>,
+        provider: Option<&str>,
+        egress: Arc<dyn maknae_kernel::Egress>,
+    ) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<()>) {
+        self.serve(
+            Arc::new(self.session()),
+            self.authorizer(),
+            Arc::new(maknae_kernel::LiveConfig::new(
+                Default::default(),
+                authority(provider),
+            )),
+            fds,
+            records,
+            maknae_config::transport_from_section(None).unwrap(),
+            egress,
+            maknae_kernel::AttemptCaps::default(),
+            self.take_turns,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn serve<P>(
+        &self,
+        session: Arc<maknae_kernel::SessionRecord>,
+        authz: Arc<P>,
+        live: Arc<maknae_kernel::LiveConfig>,
+        fds: maknae_io::DelegatedFds,
+        records: Arc<impl AuditEmit + Send + Sync + 'static>,
+        config: maknae_config::TransportConfig,
+        egress: Arc<dyn maknae_kernel::Egress>,
+        attempt_caps: maknae_kernel::AttemptCaps,
+        turn: bool,
+    ) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<()>)
+    where
+        P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
+    {
+        let (client, server) = tokio::io::duplex(65536);
         let served = maknae_kernel::handle_with_attempt_caps(
             server,
             Some("spiffe://d/plane/cli".into()),
@@ -715,20 +776,13 @@ impl Fixture {
             maknae_kernel::AgentAdmission::none(),
         );
         let task = tokio::spawn(async move {
-            let _turn = match &turn {
-                Some(verb) => fs_turn(verb).await,
-                None => None,
+            let _turn = match turn {
+                true => Some(FS_TURN.lock().await),
+                false => None,
             };
             served.await
         });
-        let body = maknae_proto::encode_request(&maknae_proto::Request {
-            task: None,
-            protocol_version: maknae_proto::PROTOCOL_VERSION,
-            verb,
-        })
-        .unwrap();
-        // The client write happens in the driver, leaving this reusable for reports.
-        (client, task, body)
+        (client, task)
     }
     pub async fn open_conversation(&self) -> String {
         let cwd = self.root.join("work");

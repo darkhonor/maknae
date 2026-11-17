@@ -388,6 +388,7 @@ sensitive:
 
 - **When your home cannot be looked up**, every `fs.*` request is refused before any list is consulted, with the trail reason `requester home unavailable: <cause>`, where the cause is `unresolvable`, `timed out`, `at capacity for this requester` or `at capacity`. A listed path then reads `unavailable — do not retry` to the model, not `Protected`. Other verbs are unaffected.
 - **A write needs `Read` as well as `Write`.** Every `fs.write`, creating a file or replacing one, is permitted only when `authz.yaml` permits both `Read` and `Write` on the path, so a `Write`-only grant permits no write, for your own `maknae write` as for the model. The trail reason of a write refused for want of `Read` is `fs.write needs fs.read: <the read's reason>`.
+- **The model's directories and deletes need `Read` too.** A `make_directory` or `delete_path` from the model cites its conversation, and is permitted only when `Read` is permitted on every path it creates or deletes and on the directory the client opened for it; a recursive delete needs `Read` over everything beneath the directory, so it never removes what a `Read` deny withholds. A file the model creates likewise needs `Read` on the directory it is created in. The trail reasons are `fs.mkdir needs fs.read: <reason>` and `fs.delete needs fs.read: <reason>`. Your own `maknae mkdir` and `maknae rm` are decided on `Write` alone.
 - **`fs.stat` and `fs.list` are decided by the `fs.read` grant.** They are not separate grants: the `Read` entry of `authz.yaml`'s `permissions:` that decides a read of a path decides a stat of it and a listing of it, and each listed entry is decided as a read of that entry. An `actions:` limit, in an `authz.yaml` `subjects:` entry or an agent's `policy.yaml`, limits them by its `fs.read` entry. Naming `fs.stat` or `fs.list` in either list is refused at load: ``authz: `fs.stat` is decided as `fs.read` (#161 M15) and no list may name it; name `fs.read` `` (`fs.list` likewise).
 
 **The shipped host list.** The defaults were built from the paths that hold credentials and system secrets on Debian 13, Rocky 9, a STIG'd Rocky 10 and macOS 26. Each group in the file carries a comment saying why it is there:
@@ -429,7 +430,7 @@ The kernel stores each task given to an enrolled agent in the `tasks/` directory
 | a person, by uid | `<agent home>/tasks/users/<uid>` |
 | an agent starting a chain of its own | `<agent home>/tasks/agents/<id>` |
 
-A sub-task, one an agent gives while it works a task, works in its root's partition. The kernel names the partition, relative to the agent's home, when it hands the task out; the agent process creates it (#629). The fourth mandatory operand, `maknae-partition`, decides every file request an agent makes, whatever its role and `policy.yaml` grant:
+A sub-task, one an agent gives while it works a task (its model's `task_agent` tool, [runbook](runbook.md#agents-task-agents)), works in its root's partition and ends when its parent stops working (`parent-ended`). The kernel names the partition, relative to the agent's home, when it hands the task out; the agent process creates it (#629). The fourth mandatory operand, `maknae-partition`, decides every file request an agent makes, whatever its role and `policy.yaml` grant:
 
 - inside the partition of the task the request cites, and anywhere outside `<agent home>/tasks`, the other operands decide;
 - `<agent home>/tasks`, `tasks/users` and `tasks/agents` may be listed, statted and created, and nothing more; a listing of them shows only the cited task's own partition;
@@ -816,7 +817,7 @@ The top-level key is `providers` only, a list of at most **32** entries. Each en
 | `model` | yes | 1 to 128 printable ASCII characters with no whitespace; it must be on that provider's `models` list. |
 | `key` | yes | a map of exactly `subpath` and `field` — where your API key is in Vault, never the key itself. `subpath`: at most 256 bytes, `/`-separated segments of `[A-Za-z0-9._-]`, with no empty, `.`, `..` or `data` segment and no leading or trailing `/`. `field`: 1 to 64 printable ASCII characters with no whitespace — the field name inside your Vault secret. |
 | `context_tokens` | yes | the model's context window in tokens, at most 16,777,216. |
-| `output_tokens` | no | the reply cap sent with every request: at least 1, and `context_tokens` less `output_tokens` must exceed the 2,304-token preamble allowance. |
+| `output_tokens` | no | the reply cap sent with every request: at least 1, and `context_tokens` less `output_tokens` must exceed the 3,136-token preamble allowance. |
 | `default` | no | `true` or `false` (default `false`). |
 
 **How the CLI prints these.** `maknae -p` prints every setup refusal after `maknae: ` and exits 1 (`bins/maknae/src/cli.rs`); `maknae login` prints its own after `maknae login: ` (`bins/maknae/src/login.rs`). The texts below are quoted without the prefix.
@@ -824,7 +825,7 @@ The top-level key is `providers` only, a list of at most **32** entries. Each en
 Every refusal of this file reads `providers.yaml: <reason>` (`UserProviders`), for example `providers.yaml: providers[0].context_tokens is required: declare the model's context window in tokens`. Two worth knowing:
 
 - Writing `key:` as a string refuses with `providers.yaml: providers[<i>].key must be a map of subpath and field; the API key itself is stored only in Vault, never in this file`. Another spelling, such as `api_key:`, refuses as an unknown key.
-- `maknae -p` checks the budget before it sends anything, prefixed by the entry's label: `provider entry <label>: context_tokens <N> is above the 16777216 ceiling`, `provider entry <label>: output_tokens must be at least 1`, or `provider entry <label>: context_tokens less output_tokens must exceed the 2304-token preamble allowance` (`crates/maknae-agent/src/budget.rs`). The smallest window accepted is therefore 2,305.
+- `maknae -p` checks the budget before it sends anything, prefixed by the entry's label: `provider entry <label>: context_tokens <N> is above the 16777216 ceiling`, `provider entry <label>: output_tokens must be at least 1`, or `provider entry <label>: context_tokens less output_tokens must exceed the 3136-token preamble allowance` (`crates/maknae-agent/src/budget.rs`). The smallest window accepted is therefore 3,137.
 
 **Which entry a turn uses.**
 
@@ -1092,6 +1093,9 @@ permissions:
   allow:
     - "Read(~/notes/**)"
     - "Write(~/notes/**)"
+    - "Read(~/tasks/**)"
+    - "Write(~/tasks)"
+    - "Write(~/tasks/**)"
 actions:
   allow:
     - "fs.read"
@@ -1110,6 +1114,7 @@ taskers:
 ```
 
 - An agent with no `policy.yaml`, or one without `permissions`, holds no file access through Maknae's tools.
+- `permissions.allow` replaces the site allow list for the agent, so it must reach `~/tasks`: the agent creates each task's partition there (§2.6) with `fs.mkdir`, decided as a `Write`. Without `Write(~/tasks)` and `Write(~/tasks/**)` every task stops `partition-unavailable`.
 - `actions` limits `fs.stat` and `fs.list` by its `fs.read` entry; naming either refuses the reload (§2.5).
 - `admin.*` is always refused to an agent, except `admin.whoami`; no file can grant it.
 - `maknae-agentd` closes each task's conversation when the task ends, so list `session.close` beside `session.new` and `session.prompt`; without it every close is refused, each refusal is in the trail, the task still ends, and the agent's kernel conversations accumulate until the idle close or its 32-conversation limit.

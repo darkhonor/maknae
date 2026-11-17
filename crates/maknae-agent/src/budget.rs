@@ -11,7 +11,7 @@ pub struct ContextBudget {
 
 impl ContextBudget {
     /// `context_tokens` ≤ `MAX_CONTEXT_TOKENS`, `output_tokens` in `1..context_tokens`, and
-    /// the prompt budget must exceed `PREAMBLE_ALLOWANCE_TOKENS`, so the floor is 2,305.
+    /// the prompt budget must exceed `PREAMBLE_ALLOWANCE_TOKENS`, so the floor is 3,137.
     pub fn new(context_tokens: u64, output_tokens: Option<u64>) -> Result<Self, String> {
         if context_tokens > MAX_CONTEXT_TOKENS {
             return Err(format!(
@@ -172,7 +172,7 @@ mod tests {
         let b = ContextBudget::new(PREAMBLE_ALLOWANCE_TOKENS + 1, None).unwrap();
         assert_eq!(
             (b.context_tokens(), b.output_tokens(), b.prompt_budget()),
-            (2_305, None, 2_305)
+            (3_137, None, 3_137)
         );
         assert!(ContextBudget::new(MAX_CONTEXT_TOKENS, None).is_ok());
         assert!(ContextBudget::new(MAX_CONTEXT_TOKENS + 1, None).is_err());
@@ -181,13 +181,14 @@ mod tests {
         assert!(ContextBudget::new(4_096, Some(0)).is_err());
         assert!(ContextBudget::new(4_096, Some(2_600)).is_err());
         assert!(ContextBudget::new(4_096, Some(2_000)).is_err());
-        let o = ContextBudget::new(4_096, Some(1_000)).unwrap();
+        assert!(ContextBudget::new(4_096, Some(1_000)).is_err());
+        let o = ContextBudget::new(4_096, Some(900)).unwrap();
         assert_eq!(
             (o.context_tokens(), o.output_tokens(), o.prompt_budget()),
-            (4_096, Some(1_000), 3_096)
+            (4_096, Some(900), 3_196)
         );
-        let edge = ContextBudget::new(4_096, Some(4_096 - 2_305)).unwrap();
-        assert_eq!(edge.prompt_budget(), 2_305);
+        let edge = ContextBudget::new(4_096, Some(4_096 - 3_137)).unwrap();
+        assert_eq!(edge.prompt_budget(), 3_137);
     }
 
     #[test]
@@ -348,7 +349,7 @@ mod tests {
     fn a_provider_without_usage_is_estimated_throughout() {
         let mut m = meter(10_000, None);
         m.record(40_000, None);
-        assert_eq!(warns(m.gate(4 * 7_000)), Some((93, 9_304, true)));
+        assert_eq!(warns(m.gate(4 * 6_552)), Some((96, 9_688, true)));
     }
 
     #[test]
@@ -367,7 +368,7 @@ mod tests {
         assert_eq!(m.gate(u64::MAX), Gate::Stop);
         let mut z = meter(10_000, None);
         measured(&mut z, 100, 0);
-        assert_eq!(warns(z.gate(4 * 7_000)), Some((93, 9_304, true)));
+        assert_eq!(warns(z.gate(4 * 6_552)), Some((96, 9_688, true)));
         let mut f = meter(10_000, None);
         measured(&mut f, 100, 1_000);
         measured(&mut f, 5, 2_000);

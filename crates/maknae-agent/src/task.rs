@@ -31,6 +31,17 @@ pub enum BeatAnswer {
     Refused(Refused),
 }
 
+/// Why a tasker verb an agent sent got no answer it can use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskerFail {
+    Refused,
+    /// `after_write` when the request may have reached the kernel.
+    Unreachable {
+        after_write: bool,
+    },
+    Protocol,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum ReportOutcome {
     Acknowledged,

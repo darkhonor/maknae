@@ -158,6 +158,20 @@ Dated as-built amendment; rides #629 PR B. It narrows amendment 2026-11-11's res
 
 *Failure it prevents:* an agent process that could write another agent's home, or a person's terminal or mailbox, would bypass the kernel's decisions on everything it can reach; and residuals stated only in an issue are lost to the next reader of this ADR.
 
+## Amendment 2026-11-16 (#609): agents task agents
+
+The kernel served agent taskers since #628, but no model could reach `session.task`: the model's `task_agent` tool (ADR-0023 decision 6, amendment 2026-11-16) closes that gap. The maintainer's rulings of 2026-11-16 decide how a chain of agents behaves:
+
+1. **A sub-task ends with its parent.** A sub-task is *orphaned* when its parent is absent or is neither working, nor held, nor marked for a hold. The sweep derives this on every pass, so it holds across a crash, a hold and a release: an open orphan is closed `parent-ended`, and an orphan that already reported or closed is removed (`removed:parent-ended`). Neither leaves a record for anyone to collect, so neither counts against the tasker's record cap. An orphan is never handed out, and its agent's next request citing it is refused at once. A parent released from a hold to start again ends its old sub-tasks for good.
+2. **An agent reaches only the sub-tasks of the task it cites.** Its status, add, stop, drop, list, collect and acknowledgement, citing its working task, reach only that task's sub-tasks (one predicate, the tasker, the parent and, when named, the task); uncited, only the tasks it gave on its own initiative. A person's views are unchanged.
+3. **No agent waits on itself.** A submission is refused when its target, through the tasks it is working and the sub-tasks those wait on, is already waiting on the submitter, counting submissions not yet confirmed and checked under the store's writer (`task chain already waits on agent <id>`). Each agent works one task at a time, so the check follows agents, not only the task tree.
+4. **The wait has no clock.** `task_agent` waits for the sub-task's report or its end; liveness comes from the sub-agent's lease (`agent-lost`) and from rule 1. Its polls cite the parent and renew its lease.
+5. **The sub-task says who gave it** (`Task from agent <id>:` in its first turn), and its report is written whole into the tasking agent's partition before it is acknowledged.
+
+`TaskClose::ParentEnded` and `TaskCollect`'s `task` field are additive; `PROTOCOL_VERSION` is unchanged.
+
+**Residuals.** A sub-task that is never claimed (its agent's daemon is down) has no lease, so only stopping the parent ends that wait. A sub-task the tool left on hold may report under a parent still working, with nobody collecting it until the parent ends. A pending submission that is never confirmed counts as waiting until it is cleared, so a legitimate submission can be refused meanwhile. Every poll counts as an action on the parent, so a waiting agent looks busy. A sub-task report held under a parent that a release sends back to start again is removed, never collected, because the restarted parent no longer waits for it. Files do not cross between agents (#661).
+
 ## Related
 
 ADR-0005, ADR-0006, ADR-0008, ADR-0018, ADR-0019, ADR-0024, ADR-0026, ADR-0029, ADR-0032, #472, #561, #608, #609, #610, #611, #628, #629, #630.

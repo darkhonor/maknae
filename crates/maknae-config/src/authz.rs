@@ -362,6 +362,33 @@ impl AuthzPolicy {
         root: &Path,
         home: Option<&Path>,
     ) -> Result<Match3, HomeUnbound> {
+        self.evaluate_subtree_floored(subject, root, home, |p| match p {
+            Pattern::Write(g) => Some(g),
+            Pattern::Read(_) => None,
+        })
+    }
+
+    /// [`Self::evaluate_write_subtree_floored`] over `Read` patterns: a read of every
+    /// path beneath `root`, so any `Read` deny that may intersect the subtree refuses.
+    pub fn evaluate_read_subtree_floored(
+        &self,
+        subject: Option<&SubjectPermissions>,
+        root: &Path,
+        home: Option<&Path>,
+    ) -> Result<Match3, HomeUnbound> {
+        self.evaluate_subtree_floored(subject, root, home, |p| match p {
+            Pattern::Read(g) => Some(g),
+            Pattern::Write(_) => None,
+        })
+    }
+
+    fn evaluate_subtree_floored(
+        &self,
+        subject: Option<&SubjectPermissions>,
+        root: &Path,
+        home: Option<&Path>,
+        glob_of: fn(&Pattern) -> Option<&PathGlob>,
+    ) -> Result<Match3, HomeUnbound> {
         let Some(text) = root.to_str() else {
             return Ok(Match3::NoMatch);
         };
@@ -373,17 +400,14 @@ impl AuthzPolicy {
         }
         let home = valid_home(home);
         let (deny, allow) = self.lists(subject);
-        if unbound_home(
-            home,
-            &deny,
-            &allow,
-            |p| matches!(p, Pattern::Write(g) if g.is_home()),
-        ) {
+        if unbound_home(home, &deny, &allow, |p| {
+            glob_of(p).is_some_and(PathGlob::is_home)
+        }) {
             return Err(HomeUnbound);
         }
         for list in deny.iter().flatten() {
             for (i, pattern) in list.patterns.iter().enumerate() {
-                if let Pattern::Write(glob) = pattern {
+                if let Some(glob) = glob_of(pattern) {
                     if glob.may_intersect_subtree(text, home)? {
                         return Ok(Match3::DenyMatch {
                             source: list.source(i, "deny"),
@@ -394,7 +418,7 @@ impl AuthzPolicy {
         }
         for list in [&allow] {
             for (i, pattern) in list.patterns.iter().enumerate() {
-                if let Pattern::Write(glob) = pattern {
+                if let Some(glob) = glob_of(pattern) {
                     if glob.covers_subtree(text, home)? {
                         return Ok(Match3::AllowMatch {
                             source: list.source(i, "allow"),
@@ -2550,6 +2574,40 @@ mod tests {
             }
         );
         assert_eq!(p.deny_sources(), &["Read(/x)".to_string()]);
+    }
+
+    #[test]
+    fn a_read_subtree_is_refused_by_any_read_deny_beneath_it_and_covered_only_by_a_read_allow() {
+        let p = parse_authz("schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Write(~/projects/**)\", \"Write(/srv/**)\"]\n  deny: [\"Read(~/projects/hidden-660/**)\", \"Write(~/notes/**)\"]\n").unwrap();
+        let home = home();
+        let read = |root: &str| {
+            p.evaluate_read_subtree_floored(None, Path::new(root), Some(&home))
+                .unwrap()
+        };
+        assert_eq!(
+            read("/home/operator/projects"),
+            Match3::DenyMatch {
+                source: "Read(~/projects/hidden-660/**)".into()
+            }
+        );
+        assert_eq!(
+            read("/home/operator/notes"),
+            Match3::AllowMatch {
+                source: "Read(~/**)".into()
+            }
+        );
+        assert_eq!(read("/srv/data"), Match3::NoMatch);
+        assert_eq!(
+            p.evaluate_write_subtree_floored(
+                None,
+                Path::new("/home/operator/projects"),
+                Some(&home)
+            )
+            .unwrap(),
+            Match3::AllowMatch {
+                source: "Write(~/projects/**)".into()
+            }
+        );
     }
 
     #[test]

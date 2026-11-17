@@ -28,13 +28,19 @@
 //! integration test. Nothing here can go red if the hand-mapped halves
 //! change; their faithfulness to this fixture is by inspection, and the
 //! mappers' own discriminating tests live beside them in `maknae_agent::wire`.
+//! `make_directory` and `delete_path` are the exception: `FixturePlane` runs
+//! them through the loop's real `LoopPlane` over one kernel connection per dial.
 mod common;
 use common::{Fixture, Records};
 use maknae_agent::budget::{ContextBudget, Meter, Notice};
 use maknae_agent::drive::{drive, Budget, StopReason};
-use maknae_agent::plane::{ListOutcome, Plane, PlaneError, ReadOutcome, StatOutcome, WriteOutcome};
+use maknae_agent::plane::{
+    DeleteOutcome, ListOutcome, MkdirOutcome, Plane, PlaneError, ReadOutcome, StatOutcome,
+    WriteOutcome,
+};
 use maknae_agent::transcript::Transcript;
 use maknae_io::Zeroizing;
+use maknae_loop::plane::LoopPlane;
 use maknae_proto::{
     ContentBlock, Payload, PromptReply, ProposedToolCall, RespResult, SecretText, Turn, Verb,
 };
@@ -488,6 +494,118 @@ impl Plane for FixturePlane {
                 armed,
             })),
         }
+    }
+    async fn mkdir(&mut self, conversation: &str, path: &str) -> MkdirOutcome {
+        let served = Served::default();
+        let made = Plane::mkdir(&mut self.client(&served), conversation, path).await;
+        served.finish().await;
+        made
+    }
+    async fn delete(&mut self, conversation: &str, path: &str, recursive: bool) -> DeleteOutcome {
+        let served = Served::default();
+        let deleted = Plane::delete(&mut self.client(&served), conversation, path, recursive).await;
+        served.finish().await;
+        deleted
+    }
+}
+
+impl FixturePlane {
+    fn client<'a>(&'a self, served: &'a Served) -> LoopPlane<NoKeys, FixtureDial<'a>> {
+        LoopPlane::with_dial(
+            FixtureDial {
+                plane: self,
+                served,
+            },
+            maknae_config::transport_from_section(None).unwrap(),
+            None,
+            maknae_proto::MAX_TOOL_CALL_ARGS_BYTES,
+            NoKeys,
+        )
+    }
+}
+
+struct NoKeys;
+impl maknae_loop::keys::KeySupply for NoKeys {
+    async fn choice(&mut self, _: &str, _: u64) -> Result<maknae_proto::ProviderChoice, String> {
+        Err("no provider key in a file request".into())
+    }
+}
+
+struct FixtureDial<'a> {
+    plane: &'a FixturePlane,
+    served: &'a Served,
+}
+
+#[derive(Default)]
+struct Served(Mutex<Vec<tokio::task::JoinHandle<()>>>);
+
+impl Served {
+    async fn finish(&self) {
+        let served = std::mem::take(&mut *self.0.lock().unwrap());
+        for s in served {
+            s.await.unwrap();
+        }
+    }
+}
+
+struct Conn {
+    stream: tokio::io::DuplexStream,
+    delegated: maknae_io::DelegatedFds,
+}
+
+impl tokio::io::AsyncRead for Conn {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+
+impl tokio::io::AsyncWrite for Conn {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.stream).poll_write(cx, buf)
+    }
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.stream).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
+}
+
+impl maknae_loop::send::Wire for Conn {
+    fn arm(&self, fd: std::os::fd::OwnedFd) -> bool {
+        self.delegated.push(fd);
+        true
+    }
+}
+
+impl maknae_loop::plane::Dial for FixtureDial<'_> {
+    type Stream = Conn;
+    fn dial(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Conn, maknae_vault::VaultError>> + Send {
+        let delegated = maknae_io::DelegatedFds::new(4);
+        let (stream, served) = self.plane.fx.connect_egress(
+            delegated.clone(),
+            Arc::clone(&self.plane.records),
+            Some("openai"),
+            self.plane.egress.clone(),
+        );
+        self.served.0.lock().unwrap().push(served);
+        std::future::ready(Ok(Conn { stream, delegated }))
     }
 }
 
@@ -953,6 +1071,23 @@ async fn drive_one_step(
     calls: Vec<ProposedToolCall>,
     unlocks: Vec<Unlock>,
 ) -> (Vec<String>, Vec<maknae_audit_append::AuditRecord>) {
+    let stepped = drive_one_step_in(fx, calls, unlocks, &[]).await;
+    (stepped.said, stepped.trail)
+}
+
+struct Stepped {
+    said: Vec<String>,
+    trail: Vec<maknae_audit_append::AuditRecord>,
+    conv: String,
+    _fx: Fixture,
+}
+
+async fn drive_one_step_in(
+    fx: Fixture,
+    calls: Vec<ProposedToolCall>,
+    unlocks: Vec<Unlock>,
+    personal: &[String],
+) -> Stepped {
     let n = calls.len();
     let egress = Arc::new(Scripted::default());
     script(
@@ -979,7 +1114,18 @@ async fn drive_one_step(
         egress: egress.clone(),
     };
     let _unlocks = unlocks;
-    let conv = plane.fx.open_conversation().await;
+    let conv = if personal.is_empty() {
+        plane.fx.open_conversation().await
+    } else {
+        let cwd = plane.fx.root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        plane
+            .open(&cwd, personal)
+            .await
+            .expect("the kernel opens the conversation")
+            .as_str()
+            .to_owned()
+    };
     let mut transcript = Transcript::new(conv.as_str(), "look around");
     drive(
         &mut plane,
@@ -994,11 +1140,453 @@ async fn drive_one_step(
     .await;
     assert_eq!(egress.remaining(), 0);
     let said = transcript.turns()[2..2 + n].iter().map(tool_text).collect();
-    (said, records.snapshot())
+    Stepped {
+        said,
+        trail: records.snapshot(),
+        conv,
+        _fx: plane.fx,
+    }
 }
 
 fn path_call(id: &str, tool: &str, p: &std::path::Path) -> ProposedToolCall {
     call(id, tool, &format!(r#"{{"path":"{}"}}"#, p.display()))
+}
+
+fn delete_call(id: &str, p: &std::path::Path, recursive: bool) -> ProposedToolCall {
+    call(
+        id,
+        "delete_path",
+        &format!(r#"{{"path":"{}","recursive":{recursive}}}"#, p.display()),
+    )
+}
+
+const UNAVAILABLE_AT_2: &str = "unavailable — do not retry\n\nsteps remaining: 2";
+
+fn rendered_at_2(text: &str) -> String {
+    format!("{text}\n\nsteps remaining: 2")
+}
+
+#[tokio::test]
+async fn every_mkdir_and_delete_refusal_renders_the_same_bytes() {
+    use std::os::unix::fs::PermissionsExt;
+    if nix::unistd::geteuid().is_root() {
+        panic!("running as root voids the os-refused premise; run as an unprivileged user");
+    }
+    let fx = Fixture::with_rules(
+        "agent-158-uniform",
+        &["Read", "Write"],
+        &[
+            "Write(~/leaf-denied-158)",
+            "Write(~/del-denied-158)",
+            "Write(~/anc-denied-158)",
+            "Read(~/unread-158)",
+            "Read(~/unread-file-158)",
+            "Read(~/tree-158/inner-158/**)",
+        ],
+        GRANTED,
+    );
+    let r = fx.root.clone();
+    for d in ["locked-158", "hidden-158", "tree-158/inner-158"] {
+        std::fs::create_dir_all(r.join(d)).unwrap();
+    }
+    for f in [
+        "locked-158/f",
+        "hidden-158/f",
+        "del-denied-158",
+        "unread-file-158",
+        "tree-158/inner-158/f",
+    ] {
+        std::fs::write(r.join(f), "SENTINEL-158").unwrap();
+    }
+    std::os::unix::fs::symlink(r.join("hidden-158"), r.join("via-158")).unwrap();
+    std::fs::set_permissions(r.join("locked-158"), std::fs::Permissions::from_mode(0o000)).unwrap();
+    let unlock = Unlock(r.join("locked-158"));
+    common::write_0640(
+        &fx.paths().sensitive,
+        "schema_version: 1\nsensitive:\n  - \"~/hidden-158\"\n  - \"~/hidden-158/**\"\n",
+    );
+    let mkdir = |p: &str| ("make_directory", r.join(p), false);
+    let delete = |p: &str, recursive| ("delete_path", r.join(p), recursive);
+    let uniform: [(&str, (&str, std::path::PathBuf, bool)); 11] = [
+        ("mkdir denied leaf", mkdir("leaf-denied-158")),
+        (
+            "mkdir denied missing ancestor",
+            mkdir("anc-denied-158/x-158"),
+        ),
+        (
+            "mkdir host list via symlinked parent",
+            mkdir("via-158/x-158"),
+        ),
+        ("mkdir write without read", mkdir("unread-158")),
+        ("delete denied", delete("del-denied-158", false)),
+        ("delete os-refused parent", delete("locked-158/f", false)),
+        ("delete missing path", delete("missing-158", false)),
+        (
+            "recursive delete of a missing path",
+            delete("missing-158", true),
+        ),
+        (
+            "delete host list via symlinked parent",
+            delete("via-158/f", false),
+        ),
+        (
+            "delete write without read",
+            delete("unread-file-158", false),
+        ),
+        (
+            "recursive delete over a read deny",
+            delete("tree-158", true),
+        ),
+    ];
+    let locked_child = r.join("locked-158/x-158");
+    let mut calls: Vec<_> = uniform
+        .iter()
+        .enumerate()
+        .map(|(i, (_, (tool, p, recursive)))| match *tool {
+            "delete_path" => delete_call(&format!("c{i}"), p, *recursive),
+            _ => path_call(&format!("c{i}"), tool, p),
+        })
+        .collect();
+    calls.push(path_call("os", "make_directory", &locked_child));
+    let Stepped {
+        said,
+        trail,
+        _fx: _kept,
+        ..
+    } = drive_one_step_in(fx, calls, vec![unlock], &[]).await;
+    for ((cause, _), s) in uniform.iter().zip(&said) {
+        assert_eq!(s, UNAVAILABLE_AT_2, "{cause}");
+    }
+    assert_eq!(said.len(), uniform.len() + 1);
+    let os_mkdir: Vec<&str> = trail
+        .iter()
+        .filter(|t| t.action == "fs.mkdir" && t.object.as_deref() == locked_child.to_str())
+        .map(|t| t.outcome.result.as_str())
+        .collect();
+    if cfg!(target_os = "linux") {
+        assert_eq!(
+            said[uniform.len()],
+            rendered_at_2(maknae_agent::render::CHANGE_UNKNOWN),
+            "Linux delegates the 0000 parent by O_PATH, so the kernel grants and mkdirat is refused after it"
+        );
+        assert!(os_mkdir.contains(&"permit"), "{os_mkdir:?}");
+    } else {
+        assert_eq!(
+            said[uniform.len()],
+            UNAVAILABLE_AT_2,
+            "macOS cannot open the 0000 parent, so the request goes unarmed and is refused"
+        );
+        assert!(!os_mkdir.contains(&"permit"), "{os_mkdir:?}");
+    }
+    assert!(!locked_child.exists());
+    assert_eq!(
+        std::fs::read_to_string(r.join("locked-158/f")).unwrap(),
+        "SENTINEL-158"
+    );
+    for gone in [
+        "leaf-denied-158",
+        "anc-denied-158",
+        "unread-158",
+        "hidden-158/x-158",
+    ] {
+        assert!(!r.join(gone).exists(), "{gone} was created");
+    }
+    for kept in [
+        "hidden-158/f",
+        "del-denied-158",
+        "unread-file-158",
+        "tree-158/inner-158/f",
+    ] {
+        assert_eq!(
+            std::fs::read_to_string(r.join(kept)).unwrap(),
+            "SENTINEL-158",
+            "{kept}"
+        );
+    }
+    let reasons: Vec<&str> = trail
+        .iter()
+        .filter(|t| t.action == "fs.mkdir" || t.action == "fs.delete")
+        .map(|t| t.outcome.reason.as_str())
+        .collect();
+    for want in [
+        "denied by policy entry Write(~/leaf-denied-158)",
+        "denied by policy entry Write(~/anc-denied-158)",
+        "fs.mkdir needs fs.read: sensitive: host ~/hidden-158",
+        "fs.delete needs fs.read: sensitive: host ~/hidden-158",
+    ] {
+        assert!(reasons.contains(&want), "{want}: {reasons:?}");
+    }
+    for twin in ["fs.mkdir needs fs.read: ", "fs.delete needs fs.read: "] {
+        assert!(
+            reasons.iter().any(|r| r.starts_with(twin)),
+            "{twin}: {reasons:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_personal_entry_protects_only_the_path_the_model_asks_for() {
+    let fx = Fixture::with_rules("agent-158-personal", &["Read", "Write"], &[], GRANTED);
+    let r = fx.root.clone();
+    std::fs::create_dir_all(r.join("p-158")).unwrap();
+    std::fs::write(r.join("mine-file-158"), "SENTINEL-158").unwrap();
+    let personal = [
+        "~/mine-158".to_string(),
+        "~/mine-file-158".to_string(),
+        "~/p-158/sentinel-660".to_string(),
+    ];
+    let calls = vec![
+        path_call("c1", "make_directory", &r.join("mine-158")),
+        delete_call("c2", &r.join("mine-file-158"), false),
+        path_call("c3", "make_directory", &r.join("p-158/sentinel-660/x")),
+    ];
+    let Stepped {
+        said,
+        trail,
+        _fx: _kept,
+        ..
+    } = drive_one_step_in(fx, calls, vec![], &personal).await;
+    let protected = rendered_at_2(maknae_agent::render::PROTECTED);
+    assert_eq!(said[0], protected, "mkdir of a personal entry");
+    assert_eq!(said[1], protected, "delete of a personal entry");
+    assert_eq!(
+        said[2], UNAVAILABLE_AT_2,
+        "a personal entry naming a missing intermediate meets only the descriptor's decision"
+    );
+    assert!(!r.join("mine-158").exists());
+    assert!(!r.join("p-158/sentinel-660").exists());
+    assert_eq!(
+        std::fs::read_to_string(r.join("mine-file-158")).unwrap(),
+        "SENTINEL-158"
+    );
+    let reasons: Vec<&str> = trail
+        .iter()
+        .filter(|t| t.action == "fs.mkdir" || t.action == "fs.delete")
+        .map(|t| t.outcome.reason.as_str())
+        .collect();
+    assert!(
+        reasons.contains(&"sensitive: personal ~/p-158/sentinel-660"),
+        "{reasons:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_model_makes_and_deletes_through_the_real_kernel() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = Fixture::with_rules("agent-158-make", &["Read", "Write"], &[], GRANTED);
+    let r = fx.root.clone();
+    std::fs::create_dir_all(r.join("exists-158")).unwrap();
+    std::fs::write(r.join("gone-158"), "SENTINEL-158").unwrap();
+    std::fs::create_dir_all(r.join("tree-158/inner-158")).unwrap();
+    std::fs::write(r.join("tree-158/inner-158/f"), "SENTINEL-158").unwrap();
+    let calls = vec![
+        path_call("c1", "make_directory", &r.join("made-158/a/b")),
+        path_call("c2", "make_directory", &r.join("exists-158")),
+        delete_call("c3", &r.join("gone-158"), false),
+        delete_call("c4", &r.join("tree-158"), true),
+        delete_call("c5", &r, true),
+        delete_call("c6", &r, false),
+    ];
+    let Stepped {
+        said,
+        trail,
+        conv,
+        _fx: _kept,
+    } = drive_one_step_in(fx, calls, vec![], &[]).await;
+    let exists = rendered_at_2(maknae_agent::render::MKDIR_EXISTS);
+    let deleted = rendered_at_2(maknae_agent::render::DELETED);
+    assert_eq!(
+        said,
+        vec![
+            exists.clone(),
+            exists,
+            deleted.clone(),
+            deleted,
+            UNAVAILABLE_AT_2.to_string(),
+            UNAVAILABLE_AT_2.to_string()
+        ]
+    );
+    assert!(r.join("exists-158").is_dir());
+    let home = r.to_str().unwrap();
+    let home_deletes: Vec<_> = trail
+        .iter()
+        .filter(|t| t.action == "fs.delete" && t.object.as_deref() == Some(home))
+        .map(|t| (t.outcome.result.as_str(), t.outcome.reason.as_str()))
+        .collect();
+    assert_eq!(
+        home_deletes,
+        vec![("deny", "cannot delete the requester's home"); 2],
+        "{trail:?}"
+    );
+    for d in ["made-158", "made-158/a", "made-158/a/b"] {
+        let mode = std::fs::metadata(r.join(d)).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o700, "{d}");
+    }
+    assert!(!r.join("gone-158").exists());
+    assert!(!r.join("tree-158").exists());
+    let changed: Vec<_> = trail
+        .iter()
+        .filter(|t| t.action == "fs.mkdir" || t.action == "fs.delete")
+        .collect();
+    assert!(
+        changed.iter().any(|t| t.action == "fs.mkdir")
+            && changed.iter().any(|t| t.action == "fs.delete"),
+        "{changed:?}"
+    );
+    for t in changed {
+        assert_eq!(t.conversation.as_deref(), Some(conv.as_str()), "{t:?}");
+    }
+}
+
+#[tokio::test]
+async fn deleting_the_home_under_the_shipped_list_is_refused_as_the_home_not_as_protected() {
+    let fx = Fixture::with_rules("agent-158-home", &["Read", "Write"], &[], GRANTED);
+    common::write_0640(
+        &fx.paths().sensitive,
+        include_str!("../../../packaging/common/sensitive.yaml"),
+    );
+    let r = fx.root.clone();
+    let calls = vec![
+        delete_call("c1", &r, true),
+        delete_call("c2", &r, false),
+        delete_call("c3", r.parent().unwrap(), true),
+    ];
+    let Stepped {
+        said,
+        trail,
+        _fx: _kept,
+        ..
+    } = drive_one_step_in(fx, calls, vec![], &[]).await;
+    assert_eq!(said, vec![UNAVAILABLE_AT_2.to_string(); 3]);
+    let reasons: Vec<(&str, &str)> = trail
+        .iter()
+        .filter(|t| t.action == "fs.delete")
+        .map(|t| (t.outcome.result.as_str(), t.outcome.reason.as_str()))
+        .collect();
+    assert_eq!(
+        reasons,
+        vec![("deny", "cannot delete the requester's home"); 3],
+        "{trail:?}"
+    );
+    assert!(r.is_dir());
+}
+
+#[tokio::test]
+async fn a_read_denied_parent_refuses_alike_whether_or_not_it_exists() {
+    let fx = Fixture::with_rules(
+        "agent-158-parent",
+        &["Read", "Write"],
+        &["Read(~/hidden-158)", "Read(~/hidden-missing-158)"],
+        GRANTED,
+    );
+    let r = fx.root.clone();
+    std::fs::create_dir_all(r.join("hidden-158")).unwrap();
+    std::fs::write(r.join("hidden-158/x"), "SENTINEL-158").unwrap();
+    let mut calls = vec![];
+    for (i, dir) in ["hidden-158", "hidden-missing-158"].iter().enumerate() {
+        let d = r.join(dir);
+        calls.push(path_call(
+            &format!("m{i}"),
+            "make_directory",
+            &d.join("child"),
+        ));
+        calls.push(delete_call(&format!("d{i}"), &d.join("x"), false));
+        calls.push(call(
+            &format!("w{i}"),
+            "write_file",
+            &format!(
+                r#"{{"path":"{}","content":"new"}}"#,
+                d.join("new").display()
+            ),
+        ));
+    }
+    let Stepped {
+        said, _fx: _kept, ..
+    } = drive_one_step_in(fx, calls, vec![], &[]).await;
+    assert_eq!(said, vec![UNAVAILABLE_AT_2.to_string(); 6]);
+    assert!(!r.join("hidden-158/child").exists());
+    assert!(!r.join("hidden-158/new").exists());
+    assert_eq!(
+        std::fs::read_to_string(r.join("hidden-158/x")).unwrap(),
+        "SENTINEL-158"
+    );
+    assert!(!r.join("hidden-missing-158").exists());
+}
+
+#[tokio::test]
+async fn a_symlinked_ancestor_refuses_alike_whether_or_not_its_target_exists() {
+    let fx = Fixture::with_rules("agent-158-dangling", &["Read", "Write"], &[], GRANTED);
+    let r = fx.root.clone();
+    common::write_0640(
+        &fx.paths().sensitive,
+        "schema_version: 1\nsensitive:\n  - \"~/private-158\"\n  - \"~/private-158/**\"\n",
+    );
+    std::fs::create_dir_all(r.join("projects-158")).unwrap();
+    std::fs::create_dir_all(r.join("private-158/target-a")).unwrap();
+    std::os::unix::fs::symlink(
+        r.join("private-158/target-a"),
+        r.join("projects-158/link-a"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        r.join("private-158/target-b"),
+        r.join("projects-158/link-b"),
+    )
+    .unwrap();
+    let calls = vec![
+        path_call("a", "make_directory", &r.join("projects-158/link-a/child")),
+        path_call("b", "make_directory", &r.join("projects-158/link-b/child")),
+    ];
+    let Stepped {
+        said, _fx: _kept, ..
+    } = drive_one_step_in(fx, calls, vec![], &[]).await;
+    assert_eq!(said, vec![UNAVAILABLE_AT_2.to_string(); 2]);
+    assert!(!r.join("private-158/target-a/child").exists());
+    assert!(!r.join("private-158/target-b").exists());
+    assert!(r.join("projects-158/link-b").is_symlink());
+}
+
+#[tokio::test]
+async fn a_cited_delete_of_what_the_subject_cannot_read_is_refused_alike() {
+    use std::os::unix::fs::PermissionsExt;
+    if nix::unistd::geteuid().is_root() {
+        panic!("running as root voids the os-refused premise; run as an unprivileged user");
+    }
+    let fx = Fixture::with_rules("agent-158-unreadable", &["Read", "Write"], &[], GRANTED);
+    let r = fx.root.clone();
+    std::fs::write(r.join("locked-158"), "SENTINEL-158").unwrap();
+    std::fs::create_dir_all(r.join("tree-158/inner")).unwrap();
+    std::fs::write(r.join("tree-158/readable"), "SENTINEL-158").unwrap();
+    std::fs::write(r.join("tree-158/inner/locked"), "SENTINEL-158").unwrap();
+    std::fs::create_dir(r.join("empty-158")).unwrap();
+    for p in ["locked-158", "tree-158/inner/locked"] {
+        std::fs::set_permissions(r.join(p), std::fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    std::fs::set_permissions(r.join("empty-158"), std::fs::Permissions::from_mode(0o000)).unwrap();
+    let unlocks = vec![
+        Unlock(r.join("empty-158")),
+        Unlock(r.join("tree-158/inner/locked")),
+        Unlock(r.join("locked-158")),
+    ];
+    let calls = vec![
+        delete_call("c1", &r.join("locked-158"), false),
+        delete_call("c2", &r.join("missing-158"), false),
+        delete_call("c3", &r.join("tree-158"), true),
+        delete_call("c4", &r.join("empty-158"), false),
+        delete_call("c5", &r.join("empty-158"), true),
+    ];
+    let Stepped {
+        said, _fx: _kept, ..
+    } = drive_one_step_in(fx, calls, unlocks, &[]).await;
+    assert_eq!(said, vec![UNAVAILABLE_AT_2.to_string(); 5]);
+    for kept in ["locked-158", "tree-158/readable", "tree-158/inner/locked"] {
+        assert_eq!(
+            std::fs::read_to_string(r.join(kept)).unwrap(),
+            "SENTINEL-158",
+            "{kept}"
+        );
+    }
+    assert!(r.join("empty-158").is_dir());
 }
 
 #[tokio::test]

@@ -970,6 +970,52 @@ async fn a_stat_is_decided_by_the_read_grant_and_answered_from_the_delegated_des
 }
 
 #[tokio::test]
+async fn a_mkdir_or_delete_citing_a_malformed_conversation_is_refused_before_the_pdp() {
+    let fx = Fixture::new("cite158");
+    fx.write_policy(SHIPPED_POLICY);
+    fx.write_sensitive(SHIPPED_SENSITIVE);
+    let target = fx.dir.join("cite-158").to_string_lossy().into_owned();
+    let me = nix::unistd::geteuid().as_raw();
+    let bad = Some("not a conversation".to_string());
+    for (verb, why) in [
+        (
+            maknae_proto::Verb::FsMkdir {
+                path: target.clone(),
+                parents: true,
+                components: vec!["cite-158".into()],
+                conversation: bad.clone(),
+            },
+            "mkdir fails operand pre-gate: conversation identifier not acceptable",
+        ),
+        (
+            maknae_proto::Verb::FsDelete {
+                path: target.clone(),
+                recursive: true,
+                conversation: bad.clone(),
+            },
+            "delete fails operand pre-gate: conversation identifier not acceptable",
+        ),
+    ] {
+        let emit = RecEmit::new();
+        let frame = drive(
+            &fx.dir,
+            composed(&fx, "UNCLASSIFIED"),
+            emit.clone(),
+            me,
+            verb,
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("an answer");
+        match maknae_proto::decode_response(&frame).unwrap().result {
+            RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::BadRequest),
+            other => panic!("refused before the PDP: {other:?}"),
+        }
+        assert_eq!(request_record(&emit.records()).outcome.reason, why);
+    }
+}
+
+#[tokio::test]
 async fn a_symlinked_requester_home_serves_a_read_beneath_its_target() {
     let fx = Fixture::new("symroot");
     fx.write_policy(SHIPPED_POLICY);

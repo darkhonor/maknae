@@ -33,6 +33,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 const HOBI_UID: u32 = 12_101;
+const JIN_UID: u32 = 12_103;
 const T0: i64 = 1_800_000_000;
 const AGENT_PREFIX: &str = "maknae/agents";
 /// The kernel's `TASK_SWEEP_EVERY`.
@@ -110,6 +111,7 @@ type Hook<T> = Box<dyn FnMut(T) + Send>;
 /// The scripted model: each prompt takes the next reply; the hook sees its number first.
 #[derive(Default)]
 struct Model {
+    agent: &'static str,
     replies: Mutex<VecDeque<PromptReply>>,
     seen: Mutex<Vec<Vec<Turn>>>,
     on_prompt: Mutex<Option<Hook<usize>>>,
@@ -117,7 +119,11 @@ struct Model {
 
 impl Model {
     fn script(replies: Vec<PromptReply>) -> Arc<Self> {
+        Self::script_for("hobi", replies)
+    }
+    fn script_for(agent: &'static str, replies: Vec<PromptReply>) -> Arc<Self> {
         Arc::new(Model {
+            agent,
             replies: Mutex::new(replies.into()),
             ..Default::default()
         })
@@ -140,7 +146,8 @@ impl maknae_kernel::Egress for Model {
         r: maknae_kernel::EgressRequest,
     ) -> Result<maknae_kernel::EgressReply, maknae_kernel::EgressFailure> {
         assert_eq!(
-            r.key_vault_path, "maknae/agents/hobi/openai/hobi",
+            r.key_vault_path,
+            format!("maknae/agents/{0}/openai/{0}", self.agent),
             "the agent's own key path"
         );
         let n = {
@@ -276,6 +283,10 @@ struct World {
 }
 
 fn world(tag: &str, hobi_policy: &str) -> World {
+    world_of(tag, &[("hobi", HOBI_UID, hobi_policy)])
+}
+
+fn world_of(tag: &str, enrolled: &[(&str, u32, &str)]) -> World {
     let dir = std::env::temp_dir().join(format!("agentd629_{tag}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -293,16 +304,18 @@ fn world(tag: &str, hobi_policy: &str) -> World {
         &format!("schema_version: 1\nbindings:\n  user: [\"{user}\"]\n"),
     );
     let agents_dir = root.join(maknae_config::AGENTS_DIR);
-    let hobi_dir = agents_dir.join("hobi");
-    std::fs::create_dir_all(&hobi_dir).unwrap();
-    for d in [&agents_dir, &hobi_dir] {
-        std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o750)).unwrap();
+    std::fs::create_dir_all(&agents_dir).unwrap();
+    std::fs::set_permissions(&agents_dir, std::fs::Permissions::from_mode(0o750)).unwrap();
+    for &(agent, uid, policy) in enrolled {
+        let dir = agents_dir.join(agent);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o750)).unwrap();
+        common::write_0640(
+            &dir.join(maknae_config::ENROLLMENT_FILE),
+            &format!("agent_id: {agent}\naccount: {agent}-svc\nuid: {uid}\nrole: user\n"),
+        );
+        common::write_0640(&dir.join(maknae_config::POLICY_FILE), policy);
     }
-    common::write_0640(
-        &hobi_dir.join(maknae_config::ENROLLMENT_FILE),
-        &format!("agent_id: hobi\naccount: hobi-svc\nuid: {HOBI_UID}\nrole: user\n"),
-    );
-    common::write_0640(&hobi_dir.join(maknae_config::POLICY_FILE), hobi_policy);
     let me = nix::unistd::geteuid().as_raw();
     let basic = maknae_authz_basic::HermeticAuthorizer::new(
         paths,
@@ -322,12 +335,14 @@ fn world(tag: &str, hobi_policy: &str) -> World {
     .unwrap();
     basic.set_hosts(maknae_authz_basic::HostLookups {
         account: |uid| {
-            if uid != HOBI_UID {
-                return Ok(None);
-            }
+            let name = match uid {
+                HOBI_UID => "hobi-svc",
+                JIN_UID => "jin-svc",
+                _ => return Ok(None),
+            };
             Ok(Some(maknae_io::HostAccount {
                 uid,
-                name: "hobi-svc".into(),
+                name: name.into(),
                 primary_gid: uid,
                 shell: "/usr/sbin/nologin".into(),
                 dir: "/var/empty".into(),
@@ -513,6 +528,7 @@ impl World {
             .ask(Verb::TaskCollect {
                 agent: "hobi".into(),
                 after: None,
+                task: None,
             })
             .await
         {
@@ -541,6 +557,8 @@ struct Wiring {
 
 /// One connection to the kernel's agent channel per dial, as the agent socket gives.
 struct KernelDial {
+    agent: &'static str,
+    uid: u32,
     kernel: Arc<Mutex<Kernel>>,
     pdp: Arc<maknae_kernel::Composition<maknae_authz_basic::HermeticAuthorizer>>,
     cfg: maknae_config::TransportConfig,
@@ -607,16 +625,17 @@ impl Dial for KernelDial {
             let relay = garble.is_some() || std::mem::take(&mut k.cut);
             (k.agents.clone(), relay.then_some(garble))
         };
-        let mut session = maknae_kernel::SessionRecord::for_test(HOBI_UID, Some("hobi-svc".into()))
+        let account = format!("{}-svc", self.agent);
+        let mut session = maknae_kernel::SessionRecord::for_test(self.uid, Some(account.clone()))
             .with_session_id(629);
         session.admission = maknae_kernel::Admission::EnrolledAgent;
         session.channel = maknae_kernel::SessionChannel::Agent {
-            agent: maknae_config::AgentId::parse("hobi").unwrap(),
+            agent: maknae_config::AgentId::parse(self.agent).unwrap(),
             leaf_expires: std::time::Instant::now() + Duration::from_secs(3600),
         };
         let gate = maknae_kernel::FactsGate::for_test(
             Arc::new(AgentFacts {
-                user: "hobi-svc".into(),
+                user: account,
                 dir: self.home.clone(),
             }),
             Duration::from_secs(5),
@@ -632,7 +651,7 @@ impl Dial for KernelDial {
         };
         let served = maknae_kernel::handle_with_attempt_caps(
             kernel_end,
-            Some("spiffe://d/agent/hobi".into()),
+            Some(format!("spiffe://d/agent/{}", self.agent)),
             Arc::new(session),
             gate,
             Arc::clone(&self.records),
@@ -827,9 +846,24 @@ impl Daemon {
     }
 }
 
-fn plane(w: &World, model: &Arc<Model>, events: &Arc<Mutex<Vec<DriverEvent>>>) -> Plane {
-    let home = PathBuf::from(&*w.root);
+/// hobi's home is the world's root; any other agent's is a directory under it.
+fn home_of(w: &World, agent: &str) -> PathBuf {
+    match agent {
+        "hobi" => PathBuf::from(&*w.root),
+        other => w.root.join(other),
+    }
+}
+
+fn plane_for(
+    w: &World,
+    agent: &'static str,
+    model: &Arc<Model>,
+    events: &Arc<Mutex<Vec<DriverEvent>>>,
+) -> Plane {
+    let home = home_of(w, agent);
     let dial = KernelDial {
+        agent,
+        uid: if agent == "hobi" { HOBI_UID } else { JIN_UID },
         kernel: Arc::clone(&w.kernel),
         pdp: Arc::clone(&w.pdp),
         cfg: w.cfg.clone(),
@@ -838,14 +872,14 @@ fn plane(w: &World, model: &Arc<Model>, events: &Arc<Mutex<Vec<DriverEvent>>>) -
         conversations: Arc::clone(&w.conversations),
         records: Arc::clone(&w.records),
     };
-    let hobi = maknae_config::AgentId::parse("hobi").unwrap();
+    let hobi = maknae_config::AgentId::parse(agent).unwrap();
     let recipient = maknae_seal::SealPrivateKey::generate().unwrap();
     let keys = AgentKeys::new(
         Arc::new(Vault),
         maknae_config::AgentProvider {
             provider: "openai".into(),
             model: common::TEST_MODEL.into(),
-            key_subpath: "openai/hobi".into(),
+            key_subpath: format!("openai/{agent}"),
             key_field: "api_key".into(),
             context_tokens: 128_000,
             output_tokens: None,
@@ -866,7 +900,7 @@ fn plane(w: &World, model: &Arc<Model>, events: &Arc<Mutex<Vec<DriverEvent>>>) -
         },
         Personas(PersonaFiles {
             config_dir: home.join("etc"),
-            agent: maknae_config::AgentId::parse("hobi").unwrap(),
+            agent: maknae_config::AgentId::parse(agent).unwrap(),
             home,
             owner: nix::unistd::geteuid().as_raw(),
         }),
@@ -884,12 +918,22 @@ fn start(w: &World, model: &Arc<Model>) -> Daemon {
 }
 
 fn start_with(w: &World, model: &Arc<Model>, ticks: Ticks, budget: Budget) -> Daemon {
+    start_agent(w, "hobi", model, ticks, budget)
+}
+
+fn start_agent(
+    w: &World,
+    agent: &'static str,
+    model: &Arc<Model>,
+    ticks: Ticks,
+    budget: Budget,
+) -> Daemon {
     let events = Arc::new(Mutex::new(Vec::new()));
     let mut driver = TaskDriver::new(
-        plane(w, model, &events),
+        plane_for(w, agent, model, &events),
         ticks.clone(),
         DriverConfig {
-            home: w.root.to_str().unwrap().to_string(),
+            home: home_of(w, agent).to_str().unwrap().to_string(),
             persona: PersonaMode::Own,
             budget,
             context: ContextBudget::new(128_000, None).unwrap(),
@@ -954,7 +998,10 @@ async fn an_agent_carries_out_a_prompt_task_in_its_taskers_partition() {
     };
     assert_eq!(
         first,
-        "sentinel-629-home-persona\n\nsentinel-629-carry-prompt"
+        format!(
+            "Working directory: {}\n\nsentinel-629-home-persona\n\nsentinel-629-carry-prompt",
+            w.partition().display()
+        )
     );
     let persona_reads: Vec<_> = cited(&w, &id, "fs.read")
         .into_iter()
@@ -1117,8 +1164,11 @@ async fn an_agent_resumes_its_working_task_after_a_kernel_restart() {
         "the step lost to the restart is the only one re-sent"
     );
     assert_eq!(
-        user_text(&prompts[1][0]).as_deref(),
-        Some("sentinel-629-restart-prompt"),
+        user_text(&prompts[1][0]),
+        Some(format!(
+            "Working directory: {}\n\nsentinel-629-restart-prompt",
+            w.partition().display()
+        )),
         "the resumed session is the same conversation"
     );
     assert!(tool_results(&prompts[1])
@@ -1424,4 +1474,191 @@ async fn the_uncited_close_after_a_report_is_permitted_and_a_policy_refused_clos
         .iter()
         .all(|r| r.outcome.result == "deny" && r.subject.task_id.is_none()));
     assert_eq!(w.collected().await.len(), 2);
+}
+
+const HOBI_TASKS: &str = "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Write(~/**)\"]\n  deny: []\nactions:\n  allow: [\"session.prompt\", \"session.new\", \"session.close\", \"session.task\", \"fs.mkdir\", \"fs.read\", \"fs.write\"]\n";
+
+/// hobi tasks; jin works for the agents in `taskers`.
+fn two_agents(tag: &str, taskers: &str) -> World {
+    let jin = format!("{HOBI_POLICY}taskers: [{taskers}]\n");
+    let w = world_of(
+        tag,
+        &[("hobi", HOBI_UID, HOBI_TASKS), ("jin", JIN_UID, &jin)],
+    );
+    let home = home_of(&w, "jin");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755)).unwrap();
+    w
+}
+
+fn task_agent(call: &str, agent: &str, prompt: &str) -> PromptReply {
+    tool(
+        "task_agent",
+        call,
+        serde_json::json!({ "agent": agent, "prompt": prompt }).to_string(),
+    )
+}
+
+/// The sub-tasks given under `parent`, as the trail recorded their submissions.
+fn given_under(w: &World, parent: &TaskId) -> Vec<TaskId> {
+    let parent = parent.to_string();
+    w.snapshot()
+        .into_iter()
+        .filter(|r| {
+            r.action == "session.task"
+                && r.subject.task_op.as_deref() == Some("submit")
+                && r.outcome.result == "permit"
+                && r.subject.parent_task_id.as_deref() == Some(parent.as_str())
+        })
+        .filter_map(|r| r.subject.task_id?.parse().ok())
+        .fold(Vec::new(), |mut ids, id| {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+            ids
+        })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_tasks_another_and_reads_its_report_from_a_file() {
+    let _one = ONE_DAEMON.lock().await;
+    let w = two_agents("task-agent", "\"agent:hobi\"");
+    let t1 = w.submit("sentinel-609-ask").await;
+    let report = format!("sentinel-609-jin-report {}", "r".repeat(6000));
+    let hobi = Model::script(vec![
+        task_agent("a1", "jin", "sentinel-609-sub"),
+        answer("sentinel-609-hobi-done"),
+    ]);
+    let jin = Model::script_for("jin", vec![answer(&report)]);
+    let hd = start(&w, &hobi);
+    let jd = start_agent(&w, "jin", &jin, Ticks::new(), BUDGET);
+    hd.until("hobi reports", |d| d.ended(&t1)).await;
+    hd.stop().await;
+    jd.stop().await;
+    let subs = given_under(&w, &t1);
+    assert_eq!(subs.len(), 1, "the trail names the parent: {subs:?}");
+    let s1 = subs[0];
+    let stored = w.partition().join(format!("reports/{s1}.md"));
+    assert_eq!(
+        std::fs::read_to_string(&stored).unwrap(),
+        report,
+        "the whole report"
+    );
+    let said = tool_results(&hobi.prompts()[1]);
+    let head = format!(
+        "Report from agent jin (shown up to 4096 bytes; all of it is in {}):\nsentinel-609-jin-report r",
+        stored.display()
+    );
+    assert!(said[0].starts_with(&head), "{}", &said[0][..200]);
+    assert!(said[0].contains("[cut here — read the rest with read_file]"));
+    assert!(w.store().record(&s1).is_none(), "acknowledged once stored");
+    let first = user_text(&jin.prompts()[0][0]).unwrap();
+    assert_eq!(
+        first,
+        format!(
+            "Working directory: {}/tasks/users/{}\n\nTask from agent hobi:\n\nsentinel-609-sub",
+            home_of(&w, "jin").display(),
+            w.me
+        )
+    );
+    assert_eq!(
+        w.collected().await,
+        vec![(t1, None, "sentinel-609-hobi-done".to_string())]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_task_the_other_agent_will_not_take_is_not_accepted() {
+    let _one = ONE_DAEMON.lock().await;
+    let w = two_agents("task-agent-refused", "");
+    let t1 = w.submit("sentinel-609-ask").await;
+    let hobi = Model::script(vec![
+        task_agent("a1", "jin", "sentinel-609-sub"),
+        answer("done"),
+    ]);
+    let hd = start(&w, &hobi);
+    hd.until("hobi reports", |d| d.ended(&t1)).await;
+    hd.stop().await;
+    let said = tool_results(&hobi.prompts()[1]);
+    assert!(
+        said[0].starts_with("not accepted, or its outcome is unknown; do not retry it\n\n"),
+        "{said:?}"
+    );
+    assert!(given_under(&w, &t1).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_person_stopping_the_waiting_task_ends_the_wait_and_closes_the_sub_task() {
+    let _one = ONE_DAEMON.lock().await;
+    let w = two_agents("task-agent-stopped", "\"agent:hobi\"");
+    let t1 = w.submit("sentinel-609-ask").await;
+    let hobi = Model::script(vec![task_agent("a1", "jin", "sentinel-609-sub")]);
+    let hd = start(&w, &hobi);
+    hd.until("the sub-task is given", |_| {
+        !given_under(&w, &t1).is_empty()
+    })
+    .await;
+    let s1 = given_under(&w, &t1)[0];
+    let stopped = w
+        .ask(Verb::TaskStop {
+            task: maknae_proto::TaskRef::from_id(&t1),
+        })
+        .await;
+    assert!(
+        matches!(stopped, RespResult::Ok(Payload::TaskAcknowledged(_))),
+        "{stopped:?}"
+    );
+    hd.until("the call returns and the driver ends the task", |d| {
+        d.ended(&t1)
+    })
+    .await;
+    hd.stop().await;
+    let said = w.store().sweep();
+    assert!(
+        said.iter().any(|d| d.task == s1
+            && d.parent == Some(t1)
+            && d.why == maknae_kernel::DueFor::Close(TaskClose::ParentEnded)),
+        "{said:?}"
+    );
+    assert!(w.store().record(&s1).is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shutdown_mid_wait_drops_the_sub_task_and_the_restart_reports_restarted() {
+    let _one = ONE_DAEMON.lock().await;
+    let w = two_agents("task-agent-shutdown", "\"agent:hobi\"");
+    let t1 = w.submit("sentinel-609-ask").await;
+    let hobi = Model::script(vec![task_agent("a1", "jin", "sentinel-609-sub")]);
+    let hd = start(&w, &hobi);
+    hd.until("the sub-task is given", |_| {
+        !given_under(&w, &t1).is_empty()
+    })
+    .await;
+    let s1 = given_under(&w, &t1)[0];
+    hd.stop().await;
+    assert_eq!(w.state(&t1), TaskState::Working);
+    let object = format!("task:{s1}");
+    assert!(
+        w.snapshot()
+            .iter()
+            .any(|r| r.subject.task_op.as_deref() == Some("drop")
+                && r.object.as_deref() == Some(object.as_str())
+                && r.outcome.result == "permit"),
+        "the queued sub-task is dropped on shutdown"
+    );
+    assert!(w.store().record(&s1).is_none());
+    let second = start(&w, &hobi);
+    second.until("the restart reports", |d| d.ended(&t1)).await;
+    let after = second.endings();
+    second.stop().await;
+    assert_eq!(after, vec![(Some(t1), Ending::Restarted)]);
+    w.store().sweep();
+    assert!(
+        w.store().record(&s1).is_none(),
+        "no sub-task outlives its parent"
+    );
+    assert_eq!(
+        w.collected().await,
+        vec![(t1, None, maknae_agent::task_driver::RESTARTED.to_string())]
+    );
 }

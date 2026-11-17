@@ -6452,8 +6452,8 @@ open(p, "w").write(s.replace(old, new))' "$f" "$2" "$3"; then
     maknae-agent wire::tests
   expect_reject_because "uniform/a-write-decided-without-read-goes-red" \
     "a_write_is_permitted_only_when_a_read_of_the_same_path_is" cv_mutant crates/maknae-kernel/src/mutation.rs \
-    '    let with_read = matches!(verb, Verb::FsWrite { .. });' \
-    '    let with_read = matches!(verb, Verb::FsMkdir { .. }) && false;' \
+    '        Verb::FsWrite { .. } => true,' \
+    '        Verb::FsWrite { .. } => false,' \
     maknae-kernel mutation::tests::a_write_is_permitted
   expect_reject_because "uniform/a-create-refused-at-the-open-told-unknown-goes-red" \
     "a_create_refused_at_the_open_is_decided_before_any_write" cv_mutant crates/maknae-io/src/mutation.rs \
@@ -6500,9 +6500,8 @@ open(p, "w").write(s.replace(old, new))' "$f" "$2" "$3"; then
     maknae-loop mutation::tests::a_refused_unlink_whose
   expect_reject_because "uniform/a-delete-stopped-after-an-unlink-told-withheld-goes-red" \
     "a_delete_stopped_after_an_attempted_unlink_is_never_withheld" cv_mutant crates/maknae-loop/src/mutation.rs \
-    '                    self.attempted = true;
-                    match target_parent.remove_entry(&target_leaf) {' \
-    '                    match target_parent.remove_entry(&target_leaf) {' \
+    '                    self.reached(&removed);' \
+    '' \
     maknae-loop mutation::tests::a_delete_stopped_after
 else
   skipped=$((skipped+21))

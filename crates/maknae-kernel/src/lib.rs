@@ -102,9 +102,9 @@ pub use session::AllowFacts;
 pub use session::{Facts, FactsGate, SessionChannel, SessionFacts, SessionRecord};
 pub use task::{
     Claimed, Contained, Due, DueFor, Enrolled, GoodStanding, Heartbeat, HeldSelect, HeldTask,
-    Notice, PlaneSigner, ReleasePlan, ReleaseRefusal, Released, Submitter, TaskRefusal, TaskSigner,
-    TaskStore, MAX_FOLLOW_UPS_PER_TASK, MAX_HELD_REPORTS_PER_TASKER, MAX_LIVE_TASKS_PER_AGENT,
-    MAX_LIVE_TASKS_PER_TASKER_PER_AGENT,
+    Notice, PlaneSigner, Reach, ReleasePlan, ReleaseRefusal, Released, Submitter, TaskRefusal,
+    TaskSigner, TaskStore, MAX_FOLLOW_UPS_PER_TASK, MAX_HELD_REPORTS_PER_TASKER,
+    MAX_LIVE_TASKS_PER_AGENT, MAX_LIVE_TASKS_PER_TASKER_PER_AGENT,
 };
 #[cfg(any(test, feature = "hermetic-test-seam"))]
 pub use task::{TaskObjectForTest, UnverifiedSigner};

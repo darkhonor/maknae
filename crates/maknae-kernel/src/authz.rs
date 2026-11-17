@@ -1314,6 +1314,7 @@ mod tests {
     fn a_sub_task_is_cited_with_the_root_persons_partition() {
         let store = TaskStore::new();
         let parent = store.insert_for_test(task_of("jin", 1000), JIN);
+        store.start_for_test(&parent.task.task_id);
         let mut sub = task_of("hobi", 0);
         sub.task.tasker = maknae_proto::Tasker::Agent {
             agent: "jin".into(),
