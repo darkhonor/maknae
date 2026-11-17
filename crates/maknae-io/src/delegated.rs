@@ -1343,16 +1343,18 @@ mod tests {
 
     fn descriptors_open_on(obj: &std::path::Path) -> usize {
         use std::os::unix::fs::MetadataExt;
-        // Each scan opens a copy of every descriptor in the process, so two concurrent scans count each other's copies (#652).
-        static SCAN: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _scan = SCAN
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let want = std::fs::metadata(obj).expect("stat obj");
-        std::fs::read_dir("/dev/fd")
-            .expect("list /dev/fd")
-            .filter_map(|e| std::fs::File::open(e.ok()?.path()).ok()?.metadata().ok())
-            .filter(|m| m.dev() == want.dev() && m.ino() == want.ino())
+        let dir = if cfg!(target_os = "linux") {
+            "/proc/self/fd"
+        } else {
+            "/dev/fd"
+        };
+        std::fs::read_dir(dir)
+            .expect("list descriptors")
+            .filter_map(|e| std::fs::metadata(e.ok()?.path()).ok())
+            .filter(|m| {
+                m.ino() == want.ino() && (cfg!(target_os = "macos") || m.dev() == want.dev())
+            })
             .count()
     }
 
@@ -1379,6 +1381,29 @@ mod tests {
         let err = recv_delegated(rx.as_fd(), &mut buf)
             .expect_err("a message carrying more descriptors than the cap must be refused");
         (err, descriptors_open_on(&obj))
+    }
+
+    #[test]
+    fn concurrent_scans_count_only_their_own_descriptors() {
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    let dir = tempfile::tempdir().expect("tempdir");
+                    let obj = a_file(dir.path(), "obj", b"x");
+                    for _ in 0..200 {
+                        let held: Vec<std::fs::File> = (0..4)
+                            .map(|_| std::fs::File::open(&obj).expect("open"))
+                            .collect();
+                        assert_eq!(descriptors_open_on(&obj), 4);
+                        drop(held);
+                        assert_eq!(descriptors_open_on(&obj), 0);
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().expect("scan thread");
+        }
     }
 
     #[test]
