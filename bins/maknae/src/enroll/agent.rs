@@ -21,14 +21,12 @@ use zeroize::Zeroizing;
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum RoleArg {
     User,
-    Guest,
 }
 
 impl From<RoleArg> for AgentRole {
     fn from(r: RoleArg) -> Self {
         match r {
             RoleArg::User => AgentRole::User,
-            RoleArg::Guest => AgentRole::Guest,
         }
     }
 }
@@ -2985,7 +2983,7 @@ pub(crate) mod tests {
     #[test]
     fn the_record_round_trips_its_role() {
         let id = AgentId::parse("hobi").unwrap();
-        for role in [AgentRole::User, AgentRole::Guest] {
+        for role in [AgentRole::User] {
             let r = AgentRecord { role, ..record() };
             let yaml = r.to_yaml();
             assert!(yaml.contains(&format!("role: {}", role.key())), "{yaml}");
@@ -3037,9 +3035,10 @@ pub(crate) mod tests {
     #[test]
     fn role_admin_is_not_a_choice() {
         assert!(parse_args(&["--role", "admin"]).is_err());
+        assert!(parse_args(&["--role", "guest"]).is_err());
         assert_eq!(
-            AgentRole::from(parse_args(&["--role", "guest"]).unwrap().role),
-            AgentRole::Guest
+            AgentRole::from(parse_args(&["--role", "user"]).unwrap().role),
+            AgentRole::User
         );
     }
 

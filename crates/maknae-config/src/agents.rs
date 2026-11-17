@@ -1,4 +1,4 @@
-use crate::authz::{AuthzError, SubjectPolicy};
+use crate::authz::{AuthzError, Pattern, SubjectPermissions, SubjectPolicy};
 use crate::bindings::{name_fault, BindingEntry, Bindings};
 use crate::value::Value;
 use crate::ConfigError;
@@ -69,24 +69,70 @@ impl AgentId {
 
 pub const AGENT_ENTITY_PREFIX: &str = "maknae-agent-";
 
+pub const TASKS_RIGHT_PATHS: [&str; 3] =
+    ["Read(~/tasks/**)", "Write(~/tasks)", "Write(~/tasks/**)"];
+pub const TASKS_RIGHT_SESSION: [&str; 3] = ["session.new", "session.prompt", "session.close"];
+
+pub const STARTER_POLICY: &str = "\
+schema_version: 1
+
+# Every agent already holds, whatever this file says:
+#   files:    Read(~/tasks/**), Write(~/tasks), Write(~/tasks/**)
+#   sessions: session.new, session.prompt, session.close
+# Add only what the agent needs beyond its own ~/tasks.
+
+# permissions:
+#   allow: [\"Read(~/notes/**)\"]
+#   deny: [\"Write(~/notes/private/**)\"]
+
+# actions:
+#   allow: [\"fs.*\"]
+#   deny: [\"fs.delete\"]
+
+# models:
+#   allow: [\"anthropic/claude-sonnet\"]
+
+# taskers:
+#   - \"uid:1000\"
+#   - \"agent:suga\"
+";
+
+fn tasks_right_value() -> Value {
+    let paths = TASKS_RIGHT_PATHS
+        .iter()
+        .map(|p| Value::Str((*p).to_string()))
+        .collect();
+    Value::Map(vec![(
+        "permissions".to_string(),
+        Value::Map(vec![("allow".to_string(), Value::Seq(paths))]),
+    )])
+}
+
+pub fn tasks_right() -> Result<SubjectPermissions, AuthzError> {
+    crate::authz::parse_subject_at("tasks-right", "tasks-right", &tasks_right_value())?
+        .permissions
+        .ok_or_else(|| AuthzError::Yaml("the tasks right has no permissions".into()))
+}
+
+pub fn tasks_right_canonical() -> String {
+    crate::value::canonical_json(&tasks_right_value())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentRole {
     User,
-    Guest,
 }
 
 impl AgentRole {
     pub fn key(self) -> &'static str {
         match self {
             AgentRole::User => "user",
-            AgentRole::Guest => "guest",
         }
     }
 
     pub fn parse(raw: &str) -> Option<AgentRole> {
         match raw {
             "user" => Some(AgentRole::User),
-            "guest" => Some(AgentRole::Guest),
             _ => None,
         }
     }
@@ -152,7 +198,7 @@ pub fn parse_agent_enrollment(dir: &AgentId, text: &str) -> Result<AgentEnrollme
     let role = text_of("role")?;
     let role = AgentRole::parse(role).ok_or_else(|| {
         invalid(&format!(
-            "role {role:?} is refused; an agent is bound to `user` or `guest`, never `admin`"
+            "role {role:?} is refused; an agent is bound to `user`: edit `role:` to `user`"
         ))
     })?;
     Ok(AgentEnrollment {
@@ -202,6 +248,21 @@ fn taskers(v: &Value) -> Result<Vec<TaskerRef>, AuthzError> {
         .collect()
 }
 
+fn refuse_denied_tasks(entry: &SubjectPolicy) -> Result<(), AuthzError> {
+    let Some(perms) = &entry.permissions else {
+        return Ok(());
+    };
+    for (pattern, source) in perms.deny.iter().zip(perms.deny_sources()) {
+        let (Pattern::Read(glob) | Pattern::Write(glob)) = pattern;
+        if glob.within_home_tasks() {
+            return Err(AuthzError::Yaml(format!(
+                "permissions.deny {source:?} cannot deny the agent's own ~/tasks"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub fn parse_agent_policy(id: &AgentId, text: &str) -> Result<AgentPolicy, AuthzError> {
     let root = crate::load_str(text).map_err(|e| AuthzError::Yaml(e.to_string()))?;
     let Value::Map(map) = &root else {
@@ -231,9 +292,11 @@ pub fn parse_agent_policy(id: &AgentId, text: &str) -> Result<AgentPolicy, Authz
         .filter(|(k, _)| matches!(k.as_str(), "permissions" | "actions" | "models"))
         .cloned()
         .collect();
+    let entry = crate::authz::parse_subject_at("policy", id.as_str(), &Value::Map(entry))?;
+    refuse_denied_tasks(&entry)?;
     Ok(AgentPolicy {
         id: id.clone(),
-        entry: crate::authz::parse_subject_at("policy", id.as_str(), &Value::Map(entry))?,
+        entry,
         canonical: crate::value::canonical_json(&root),
         taskers: field(map, "taskers").map(taskers).transpose()?,
     })
@@ -941,17 +1004,74 @@ mod tests {
     }
 
     #[test]
-    fn agent_role_never_parses_admin_or_adversary() {
+    fn agent_role_parses_only_user() {
         assert_eq!(AgentRole::parse("user"), Some(AgentRole::User));
-        assert_eq!(AgentRole::parse("guest"), Some(AgentRole::Guest));
-        for refused in ["admin", "adversary", "User", "", " user", "agent"] {
+        for refused in ["guest", "admin", "adversary", ""] {
             assert_eq!(AgentRole::parse(refused), None, "{refused:?}");
         }
-        for role in [AgentRole::User, AgentRole::Guest] {
-            assert_eq!(AgentRole::parse(role.key()), Some(role));
-        }
         assert_eq!(AgentRole::User.key(), "user");
-        assert_eq!(AgentRole::Guest.key(), "guest");
+    }
+
+    #[test]
+    fn a_guest_enrollment_is_refused_with_the_fix_named() {
+        let text = enrollment("hobi", "hobi-svc", 990, "guest");
+        let err = parse_agent_enrollment(&hobi(), &text)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(
+                "role \"guest\" is refused; an agent is bound to `user`: edit `role:` to `user`"
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn the_tasks_right_parses_to_its_three_allow_entries() {
+        let right = tasks_right().unwrap();
+        assert_eq!(right.allow_sources(), TASKS_RIGHT_PATHS);
+        assert!(right.deny_sources().is_empty() && right.deny.is_empty());
+        assert!(tasks_right_canonical().contains("Write(~/tasks/**)"));
+    }
+
+    #[test]
+    fn the_starter_policy_parses_and_grants_nothing() {
+        let policy = parse_agent_policy(&AgentId::parse("jin").unwrap(), STARTER_POLICY).unwrap();
+        assert_eq!(policy.entry.permissions, None);
+        assert_eq!(policy.entry.actions, None);
+        assert_eq!(policy.entry.models, None);
+        assert_eq!(policy.taskers, None);
+        for held in TASKS_RIGHT_PATHS.iter().chain(TASKS_RIGHT_SESSION.iter()) {
+            assert!(STARTER_POLICY.contains(held), "{held}");
+        }
+        for section in ["permissions:", "actions:", "models:", "taskers:"] {
+            assert!(
+                STARTER_POLICY.contains(&format!("# {section}")),
+                "{section}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_policy_denying_inside_tasks_is_refused() {
+        let policy = |deny: &str| {
+            parse_agent_policy(
+                &hobi(),
+                &format!("schema_version: 1\npermissions:\n  deny: [\"{deny}\"]\n"),
+            )
+        };
+        for denied in [
+            "Write(~/tasks/**)",
+            "Read(~/tasks)",
+            "Write(~//tasks/agents/x)",
+        ] {
+            let err = policy(denied).unwrap_err().to_string();
+            assert!(err.contains(denied), "{err}");
+            assert!(err.contains("cannot deny the agent's own ~/tasks"), "{err}");
+        }
+        for fine in ["Write(~/taskslist/**)", "Write(~/**)"] {
+            assert!(policy(fine).is_ok(), "{fine}");
+        }
     }
 
     #[test]
@@ -1192,7 +1312,7 @@ mod tests {
     #[test]
     fn load_agents_reads_one_directory_per_agent() {
         let f = Fixture::new("reads");
-        f.enroll("suga", &enrollment("suga", "suga-svc", 991, "guest"));
+        f.enroll("suga", &enrollment("suga", "suga-svc", 991, "user"));
         f.enroll("hobi", &enrollment("hobi", "hobi-svc", 990, "user"));
         f.file(&format!("hobi/{POLICY_FILE}"), POLICY, 0o640);
         let got = f.load().unwrap();
@@ -1209,7 +1329,7 @@ mod tests {
                     id: AgentId::parse("suga").unwrap(),
                     account: "suga-svc".into(),
                     uid: 991,
-                    role: AgentRole::Guest,
+                    role: AgentRole::User,
                 },
             ]
         );

@@ -2246,7 +2246,6 @@ mod tests {
                 .map(|(uid, _, role)| {
                     let role = match role {
                         maknae_config::AgentRole::User => Role::User,
-                        maknae_config::AgentRole::Guest => Role::Guest,
                     };
                     (*uid, role)
                 })
@@ -7078,7 +7077,7 @@ mod tests {
 
         #[test]
         fn an_enrolled_agent_is_bound_to_its_role_without_bindings() {
-            let suga = enrollment("suga", "suga-svc", SUGA, AgentRole::Guest);
+            let suga = enrollment("suga", "suga-svc", SUGA, AgentRole::User);
             let src = source(None, &[], load(vec![hobi(), suga], &[]));
             let snap = compiled(&src);
             assert_eq!(snap.agent_uid("hobi"), Some(HOBI));
@@ -7086,7 +7085,7 @@ mod tests {
             assert_eq!(snap.agent_of(HOBI), Some("hobi"));
             assert_eq!(snap.agent_of(501), None);
             assert_eq!(role_of(&src, HOBI), Some("user"));
-            assert_eq!(role_of(&src, SUGA), Some("guest"));
+            assert_eq!(role_of(&src, SUGA), Some("user"));
             assert!(src.identity_problems().is_empty());
             let layer = src.identity_layer(LABEL, None);
             assert_eq!(
@@ -7099,7 +7098,7 @@ mod tests {
                     .iter()
                     .map(|s| (s.uid, s.name.as_str(), s.role.as_str()))
                     .collect::<Vec<_>>(),
-                [(HOBI, "hobi-svc", "user"), (SUGA, "suga-svc", "guest")]
+                [(HOBI, "hobi-svc", "user"), (SUGA, "suga-svc", "user")]
             );
         }
 
@@ -7606,7 +7605,7 @@ mod tests {
                 let src = source(
                     Some(&bindings),
                     &[("jin", JIN)],
-                    load(vec![enrollment("jin", "jin", JIN, AgentRole::Guest)], &[]),
+                    load(vec![enrollment("jin", "jin", JIN, AgentRole::User)], &[]),
                 );
                 assert_eq!(
                     src.identity_problems(),
@@ -8048,7 +8047,7 @@ mod tests {
                 Some("schema_version: 1\nbindings:\n  user: [\"ursula\"]\n  admin: [\"jin\"]\n"),
                 &[("ursula", URSULA), ("jin", JIN)],
                 load(
-                    vec![hobi(), enrollment("jin", "jin", JIN, AgentRole::Guest)],
+                    vec![hobi(), enrollment("jin", "jin", JIN, AgentRole::User)],
                     &[],
                 ),
             );
