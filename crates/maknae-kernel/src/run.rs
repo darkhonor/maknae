@@ -2739,6 +2739,16 @@ pub(crate) fn submit_outcome_record(
     outcome
 }
 
+pub(crate) fn decision_record(
+    mut rec: AuditRecord,
+    role: Option<&str>,
+    rule: Option<&RuleCitation>,
+) -> AuditRecord {
+    rec.subject.role = role.map(str::to_string);
+    rec.rule = rule.map(rule_audit);
+    rec
+}
+
 pub(crate) fn collect_intent_reason(upto: u64) -> String {
     format!("acknowledge through {upto}; intent recorded")
 }
@@ -3523,10 +3533,11 @@ async fn serve_task_verb<S, E, P>(
     let (verdict, role, rule) =
         decide_bounded(authorizer, live, sec_req, generation, timeout).await;
     let decided = |result: &str, reason: &str, posture: &str| {
-        let mut rec = stamped(trail.record(action, result, reason, posture));
-        rec.subject.role = role.map(str::to_string);
-        rec.rule = rule.as_ref().map(rule_audit);
-        rec
+        decision_record(
+            stamped(trail.record(action, result, reason, posture)),
+            role,
+            rule.as_ref(),
+        )
     };
     match finalize(verdict) {
         Decision::Deny { reason } => {
@@ -10723,6 +10734,7 @@ mod record_widths {
     use crate::task::{Contained, ReleaseRefusal, Released, TaskRefusal};
     use crate::task_verbs as tv;
     use maknae_audit_append::test_support::{macos_mirror, MACOS_SYSLOG_MAX};
+    use maknae_authz_basic::HermeticAuthorizer;
     use maknae_config::{AgentId, MACOS_AGENT_SOCKET_PATH, MACOS_DAEMON_SOCKET_PATH};
     use maknae_proto::{TaskId, TaskState, Tasker, Verb};
     use maknae_security::Authorizer;
@@ -10731,6 +10743,7 @@ mod record_widths {
     const TASK: TaskId = TaskId([0xff; 16]);
     const PARENT: TaskId = TaskId([0xfe; 16]);
     const AUTHZ_PATH: &str = "/etc/maknae/authz.yaml";
+    const AGENT_UID: u32 = 2001;
 
     fn host() -> String {
         "h".repeat(HOST_BYTES)
@@ -10794,19 +10807,74 @@ mod record_widths {
             .expect("the op names a task verb")
     }
 
-    fn widest_task_op() -> &'static str {
+    fn ops() -> Vec<&'static str> {
         task_verbs("a")
             .iter()
             .filter_map(crate::handler::task_op)
-            .max_by_key(|op| op.len())
-            .expect("a task verb has an op")
+            .collect()
+    }
+
+    fn reasons_of(op: &str, person: bool) -> Vec<String> {
+        let ids = vec![TASK; tv::TASK_PAGE_MAX + 1];
+        let collected = format!("collected {} reports{}", ids.len(), tv::named(&ids));
+        let literals = |all: &[&str]| all.iter().map(|r| (*r).to_owned()).collect();
+        match (op, person) {
+            ("submit", _) => Vec::new(),
+            ("add", _) => {
+                let mut all: Vec<String> = literals(&["intent recorded", "done"]);
+                all.push(TaskRefusal::TooLong.to_string());
+                all
+            }
+            ("status", _) => literals(&["status", "task gone"]),
+            ("list", _) => vec![format!("listed {} tasks", tv::TASK_PAGE_MAX)],
+            ("stop" | "drop", _) => literals(&["intent recorded", "done"]),
+            ("collect", _) => vec![
+                collect_intent_reason(u64::MAX),
+                collected.clone(),
+                format!("acknowledged {}{}; {collected}", ids.len(), tv::named(&ids)),
+            ],
+            ("claim", false) => vec![
+                "idle".to_owned(),
+                "heartbeat: the task is held".to_owned(),
+                format!(
+                    "heartbeat: {} follow-ups after {}",
+                    crate::task::MAX_FOLLOW_UPS_PER_TASK,
+                    u32::MAX
+                ),
+            ],
+            ("report", false) => {
+                literals(&["intent recorded", "delivered", "no working task cited"])
+            }
+            ("claim" | "report", true) => Vec::new(),
+            _ => panic!("an unknown task op"),
+        }
     }
 
     struct Who {
         person: bool,
+        shipped: (
+            crate::test_fixtures::DirGuard,
+            crate::composition::Composition<HermeticAuthorizer>,
+        ),
+    }
+
+    struct Case {
+        rec: AuditRecord,
+        reason: String,
+        tasker: String,
+        task: Option<String>,
+        parent: Option<String>,
+        op: Option<&'static str>,
     }
 
     impl Who {
+        fn new(person: bool) -> Self {
+            Who {
+                person,
+                shipped: crate::test_fixtures::shipped_composition(),
+            }
+        }
+
         fn tasker(&self) -> Tasker {
             if self.person {
                 Tasker::Uid(u32::MAX)
@@ -10826,7 +10894,7 @@ mod record_widths {
             }
         }
 
-        fn decided(&self, verb: &Verb) -> (Option<String>, Option<maknae_audit_append::RuleAudit>) {
+        fn decided(&self, verb: &Verb) -> (Option<&'static str>, Option<RuleCitation>) {
             let agent = AgentId::parse("hobi").expect("hobi is an agent id");
             let (stamp, uid) = if self.person {
                 (Stamp::Client, nix::unistd::geteuid().as_raw())
@@ -10836,7 +10904,7 @@ mod record_widths {
                         agent: &agent,
                         task: None,
                     },
-                    2001,
+                    AGENT_UID,
                 )
             };
             let mut req = build_authz_request(
@@ -10853,16 +10921,17 @@ mod record_widths {
             {
                 tv::stamp_agent(&mut req, &named);
             }
-            let (_guard, shipped) = crate::test_fixtures::shipped_composition();
-            let d = shipped.decide_cited(&req);
-            let rule = d.rule.as_ref().map(|c| {
-                let mut audit = rule_audit(c);
-                let name = c.section.rsplit('#').next().unwrap_or_default();
-                audit.section = format!("{AUTHZ_PATH}#{name}");
-                audit.node = u64::MAX;
-                audit
+            let d = self.shipped.1.decide_cited(&req);
+            assert_eq!(d.role, Some(if self.person { "admin" } else { "user" }));
+            let rule = d.rule.map(|c| RuleCitation {
+                node: u64::MAX,
+                key: c.key,
+                section: format!(
+                    "{AUTHZ_PATH}#{}",
+                    c.section.rsplit('#').next().unwrap_or_default()
+                ),
             });
-            (d.role.map(str::to_owned), rule)
+            (d.role, rule)
         }
 
         fn session(&self) -> SessionRecord {
@@ -10904,34 +10973,121 @@ mod record_widths {
             rec
         }
 
-        fn verb_record(&self, op: &str, reason: &str) -> AuditRecord {
+        fn case(&self, op: &'static str, reason: &str, submitted: Option<&TaskId>) -> Case {
             let verb = verb_of(op);
             let asked = tv::task_verb(&verb).expect("a task verb");
             let agent = match self.tasker() {
                 Tasker::Agent { agent, .. } => Some(AgentId::parse(&agent).expect("parses")),
                 Tasker::Uid(_) | Tasker::Remote(_) => None,
             };
-            let mut rec = task_verb_record(
-                self.request(reason),
-                asked.object(),
-                asked.cited().as_ref(),
-                crate::handler::task_op(&verb),
-                &self.tasker(),
-                agent.as_ref(),
-            );
             let (role, rule) = self.decided(&verb);
-            rec.subject.role = role;
-            rec.rule = rule;
-            rec
-        }
-
-        fn submit_outcome(&self, parent: Option<&TaskId>) -> AuditRecord {
-            submit_outcome_record(self.verb_record("submit", "task queued"), &TASK, parent)
-        }
-
-        fn stamped(&self, mut rec: AuditRecord) -> AuditRecord {
+            let mut rec = decision_record(
+                task_verb_record(
+                    self.request(reason),
+                    asked.object(),
+                    asked.cited().as_ref(),
+                    crate::handler::task_op(&verb),
+                    &self.tasker(),
+                    agent.as_ref(),
+                ),
+                role,
+                rule.as_ref(),
+            );
+            let mut task = asked.cited().map(|id| id.to_string());
+            let mut parent = None;
+            if op == "submit" {
+                rec = submit_outcome_record(rec, &TASK, submitted);
+                task = Some(TASK.to_string());
+                parent = submitted.map(ToString::to_string);
+            }
             self.session().stamp(&mut rec);
-            rec
+            Case {
+                rec,
+                reason: reason.to_owned(),
+                tasker: maknae_proto::tasker_text(&self.tasker()),
+                task,
+                parent,
+                op: Some(op),
+            }
+        }
+
+        fn task_verb_cases(&self) -> Vec<Case> {
+            let parent = (!self.person).then_some(&PARENT);
+            let mut all = Vec::new();
+            for op in ops() {
+                if op == "submit" {
+                    for reason in ["task held", "task queued"] {
+                        all.push(self.case(op, reason, parent));
+                    }
+                }
+                for reason in reasons_of(op, self.person) {
+                    all.push(self.case(op, &reason, None));
+                }
+            }
+            all
+        }
+
+        fn release_case(&self, outcome: &Result<Released, ReleaseRefusal>) -> Case {
+            let seq = Seq::new();
+            let (h, au3_1) = (host(), serde_json::Value::Null);
+            let ctx = BootCtx {
+                event: "request",
+                host: &h,
+                socket: MACOS_DAEMON_SOCKET_PATH,
+                euid: u32::MAX,
+                session_id: u64::MAX,
+                seq: &seq,
+                au3_1: &au3_1,
+            };
+            let (result, posture) = tv::release_record_class(outcome);
+            let reason = tv::release_reason(outcome);
+            let parent = (!self.person).then_some(&PARENT);
+            let mut rec = held_release_record(
+                &ctx,
+                (u32::MAX, u64::MAX),
+                &TASK,
+                Some(&self.tasker()),
+                parent,
+                (result, posture, &reason),
+            );
+            rec.seq = u64::MAX;
+            Case {
+                rec,
+                reason,
+                tasker: maknae_proto::tasker_text(&self.tasker()),
+                task: Some(TASK.to_string()),
+                parent: parent.map(ToString::to_string),
+                op: None,
+            }
+        }
+    }
+
+    fn bounded_cause(r: &TaskRefusal, agent: &str) -> Option<TaskRefusal> {
+        match r {
+            TaskRefusal::Schema(_)
+            | TaskRefusal::Denied(_)
+            | TaskRefusal::Audit(_)
+            | TaskRefusal::Store(_)
+            | TaskRefusal::Unavailable(_) => None,
+            TaskRefusal::AtCapacity { .. } => Some(TaskRefusal::AtCapacity {
+                agent: agent.to_owned(),
+            }),
+            TaskRefusal::TaskerLive { .. } => Some(TaskRefusal::TaskerLive {
+                agent: agent.to_owned(),
+            }),
+            TaskRefusal::Unknown
+            | TaskRefusal::OtherAgent
+            | TaskRefusal::ParentNotHeld
+            | TaskRefusal::AgentGone
+            | TaskRefusal::Random
+            | TaskRefusal::Unsigned
+            | TaskRefusal::CursorAhead
+            | TaskRefusal::Finished
+            | TaskRefusal::TooLong
+            | TaskRefusal::TaskerHeld
+            | TaskRefusal::FollowUps
+            | TaskRefusal::FollowUpsUnseen
+            | TaskRefusal::NotWorking => Some(r.clone()),
         }
     }
 
@@ -10965,26 +11121,38 @@ mod record_widths {
             all.push(Err(ReleaseRefusal::RootUnresolved));
             all.push(Err(ReleaseRefusal::ParentHeld(PARENT)));
         }
-        let bounded = [
+        let kinds = [
+            TaskRefusal::Schema(String::new()),
+            TaskRefusal::Denied(String::new()),
             TaskRefusal::AtCapacity {
-                agent: agent.clone(),
+                agent: String::new(),
             },
             TaskRefusal::Unknown,
             TaskRefusal::OtherAgent,
             TaskRefusal::ParentNotHeld,
             TaskRefusal::AgentGone,
             TaskRefusal::Random,
+            TaskRefusal::Audit(String::new()),
             TaskRefusal::Unsigned,
+            TaskRefusal::Store(String::new()),
             TaskRefusal::CursorAhead,
             TaskRefusal::Finished,
             TaskRefusal::TooLong,
-            TaskRefusal::TaskerLive { agent },
+            TaskRefusal::TaskerLive {
+                agent: String::new(),
+            },
             TaskRefusal::TaskerHeld,
             TaskRefusal::FollowUps,
             TaskRefusal::FollowUpsUnseen,
             TaskRefusal::NotWorking,
+            TaskRefusal::Unavailable(String::new()),
         ];
-        all.extend(bounded.into_iter().map(|r| Err(crate::task::unreleased(r))));
+        all.extend(
+            kinds
+                .iter()
+                .filter_map(|k| bounded_cause(k, &agent))
+                .map(|r| Err(crate::task::unreleased(r))),
+        );
         all.push(Err(tv::release_blocked(
             crate::mutation::Blocked::NotStarted,
         )));
@@ -10992,89 +11160,70 @@ mod record_widths {
         all
     }
 
-    fn widest_release(person: bool) -> (Result<Released, ReleaseRefusal>, String) {
+    fn release_cases(person: bool) -> Vec<Case> {
+        let who = Who::new(person);
         release_candidates(person)
-            .into_iter()
-            .map(|r| {
-                let reason = tv::release_reason(&r);
-                (r, reason)
-            })
-            .max_by_key(|(_, reason)| reason.len())
-            .expect("there are release outcomes")
-    }
-
-    fn release_record(person: bool, outcome: &Result<Released, ReleaseRefusal>) -> AuditRecord {
-        let who = Who { person };
-        let seq = Seq::new();
-        let (h, au3_1) = (host(), serde_json::Value::Null);
-        let ctx = BootCtx {
-            event: "request",
-            host: &h,
-            socket: MACOS_DAEMON_SOCKET_PATH,
-            euid: u32::MAX,
-            session_id: u64::MAX,
-            seq: &seq,
-            au3_1: &au3_1,
-        };
-        let (result, posture) = tv::release_record_class(outcome);
-        let reason = tv::release_reason(outcome);
-        let parent = (!person).then_some(&PARENT);
-        let mut rec = held_release_record(
-            &ctx,
-            (u32::MAX, u64::MAX),
-            &TASK,
-            Some(&who.tasker()),
-            parent,
-            (result, posture, &reason),
-        );
-        rec.seq = u64::MAX;
-        rec
-    }
-
-    fn task_verb_records(person: bool) -> Vec<AuditRecord> {
-        let who = Who { person };
-        let parent = (!person).then_some(&PARENT);
-        vec![
-            who.stamped(who.verb_record(widest_task_op(), &collect_intent_reason(u64::MAX))),
-            who.stamped(who.submit_outcome(parent)),
-        ]
-    }
-
-    fn widest(records: &[AuditRecord]) -> &AuditRecord {
-        records
             .iter()
-            .max_by_key(|r| macos_mirror(r).full_len)
-            .expect("there are records")
+            .map(|r| who.release_case(r))
+            .collect()
     }
 
-    fn assert_degrades_and_the_marker_fits(rec: &AuditRecord) {
-        let m = macos_mirror(rec);
-        assert!(!m.mirrored_in_full, "the record mirrors in full");
+    fn assert_the_lines_carry_what_the_builder_set(c: &Case) {
+        let m = macos_mirror(&c.rec);
+        let line = &m.full_line;
+        assert!(line.contains(&c.reason), "reason in {line}");
+        assert!(
+            line.contains(&format!("tasker={}", c.tasker)),
+            "tasker in {line}"
+        );
+        if let Some(id) = &c.task {
+            assert!(line.contains(&format!("task={id}")), "task in {line}");
+        }
+        if let Some(id) = &c.parent {
+            assert!(line.contains(&format!("parent={id}")), "parent in {line}");
+        }
+        if let Some(op) = c.op {
+            assert!(line.contains(&format!("op={op}")), "op in {line}");
+        }
+        if let Some(degraded) = &m.degraded_line {
+            assert!(degraded.contains(&format!("session={}", u64::MAX)));
+            assert!(degraded.contains(&format!("seq={}", u64::MAX)));
+            assert!(degraded.contains("MAKNAE_PRIMARY=ok"));
+        }
+    }
+
+    fn assert_the_widest_degrades_and_its_marker_fits(cases: &[Case]) {
+        cases
+            .iter()
+            .for_each(assert_the_lines_carry_what_the_builder_set);
+        let widest = cases
+            .iter()
+            .max_by_key(|c| macos_mirror(&c.rec).full_len)
+            .expect("there are records");
+        let m = macos_mirror(&widest.rec);
+        assert!(!m.mirrored_in_full, "the widest record mirrors in full");
         assert!(m.full_len > MACOS_SYSLOG_MAX);
-        let marker = m.degraded_len.expect("a degraded record has a marker");
-        assert!(marker <= MACOS_SYSLOG_MAX);
+        assert!(m.degraded_len.expect("a marker") <= MACOS_SYSLOG_MAX);
     }
 
     #[test]
     fn a_persons_task_verb_record_degrades_and_its_marker_fits() {
-        assert_degrades_and_the_marker_fits(widest(&task_verb_records(true)));
+        assert_the_widest_degrades_and_its_marker_fits(&Who::new(true).task_verb_cases());
     }
 
     #[test]
     fn the_widest_task_verb_record_degrades_and_its_marker_fits() {
-        assert_degrades_and_the_marker_fits(widest(&task_verb_records(false)));
+        assert_the_widest_degrades_and_its_marker_fits(&Who::new(false).task_verb_cases());
     }
 
     #[test]
     fn a_persons_release_record_degrades_and_its_marker_fits() {
-        let (outcome, _) = widest_release(true);
-        assert_degrades_and_the_marker_fits(&release_record(true, &outcome));
+        assert_the_widest_degrades_and_its_marker_fits(&release_cases(true));
     }
 
     #[test]
     fn the_widest_release_record_degrades_and_its_marker_fits() {
-        let (outcome, _) = widest_release(false);
-        assert_degrades_and_the_marker_fits(&release_record(false, &outcome));
+        assert_the_widest_degrades_and_its_marker_fits(&release_cases(false));
     }
 }
 
