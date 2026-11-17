@@ -723,10 +723,9 @@ mod tests {
         seq: u64,
         report_with: Option<&'static str>,
         refuse_submit: bool,
-        /// Every collect after the first waits while this is set.
+        /// Every collect waits while this is set.
         hold: bool,
         holding: bool,
-        collects: u32,
         unreachable: bool,
     }
 
@@ -773,6 +772,10 @@ mod tests {
             f(&mut self.state.lock().unwrap());
         }
 
+        fn hold_collects(&self) {
+            self.set(|s| s.hold = true);
+        }
+
         /// Waits up to [`BOUND`] for a collect to be held.
         fn held_collect(&self) {
             let deadline = std::time::Instant::now() + BOUND;
@@ -786,8 +789,7 @@ mod tests {
             loop {
                 {
                     let mut s = self.state.lock().unwrap();
-                    if !(s.hold && s.collects > 0) {
-                        s.collects += 1;
+                    if !s.hold {
                         s.holding = false;
                         return;
                     }
@@ -1021,6 +1023,22 @@ mod tests {
 
         fn output(&self) -> String {
             drain(&self.output)
+        }
+
+        /// Waits up to [`BOUND`] for `needle` on the output.
+        fn shows(&self, needle: &str) -> bool {
+            let mut seen = String::new();
+            let deadline = std::time::Instant::now() + BOUND;
+            loop {
+                seen.push_str(&self.output());
+                if seen.contains(needle) {
+                    return true;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
         }
 
         /// Waits up to [`BOUND`] for `needle` on the diagnostics.
@@ -1262,9 +1280,8 @@ mod tests {
         assert!(!out.contains(text::UNREACHABLE), "{out}");
     }
 
-    /// Opens a full-screen session on a pty with `fake`, submits `one`, waits for a
-    /// collect to be held, and types `two`, which then waits behind it.
-    fn full_screen_behind_a_collect(
+    /// Opens a full-screen session on a pty with `fake`.
+    fn full_screen(
         fake: &Fake,
         leaf: Arc<FakeLeaf>,
         login_expires_at: u64,
@@ -1274,7 +1291,6 @@ mod tests {
     ) {
         use crate::screen::testing::pty;
         let pty = pty(24, 80);
-        fake.set(|s| s.hold = true);
         let (input, output) = (pty.slave(), pty.slave());
         let done = spawn_session(fake, leaf, login_expires_at, false, move || {
             Io::Screen(Box::new(move || Session::enter_on(input, output)))
@@ -1282,11 +1298,16 @@ mod tests {
         (pty, done)
     }
 
-    fn type_one_then_two(pty: &mut crate::screen::testing::Pty, fake: &Fake) {
+    fn submit_one_behind_a_collect(pty: &mut crate::screen::testing::Pty, fake: &Fake) {
         assert!(pty.out.wait_for(b"connected"), "never connected");
         pty.type_keys(b"one\r");
         assert!(pty.out.wait_for(b"#1 submitted"), "no echo");
+        fake.hold_collects();
         fake.held_collect();
+    }
+
+    fn type_one_then_two(pty: &mut crate::screen::testing::Pty, fake: &Fake) {
+        submit_one_behind_a_collect(pty, fake);
         pty.type_keys(b"two\r/x\r");
         assert!(
             pty.out.wait_for(b"unknown command"),
@@ -1309,7 +1330,7 @@ mod tests {
     fn a_request_queued_behind_a_collect_holds_the_first_bye_and_is_named_on_the_second() {
         let _one = crate::screen::testing::one_session();
         let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
-        let (mut pty, done) = full_screen_behind_a_collect(&fake, Arc::new(fresh_leaf()), u64::MAX);
+        let (mut pty, done) = full_screen(&fake, Arc::new(fresh_leaf()), u64::MAX);
         type_one_then_two(&mut pty, &fake);
         pty.type_keys(b"/bye\r");
         assert!(
@@ -1341,7 +1362,7 @@ mod tests {
         use nix::sys::signal::{kill, Signal};
         let _one = crate::screen::testing::one_session();
         let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
-        let (mut pty, done) = full_screen_behind_a_collect(&fake, Arc::new(fresh_leaf()), u64::MAX);
+        let (mut pty, done) = full_screen(&fake, Arc::new(fresh_leaf()), u64::MAX);
         type_one_then_two(&mut pty, &fake);
         kill(nix::unistd::Pid::this(), Signal::SIGTERM).unwrap();
         assert_eq!(
@@ -1362,7 +1383,7 @@ mod tests {
         let _one = crate::screen::testing::one_session();
         let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
         let leaf = Arc::new(fresh_leaf());
-        let (mut pty, done) = full_screen_behind_a_collect(&fake, Arc::clone(&leaf), now());
+        let (mut pty, done) = full_screen(&fake, Arc::clone(&leaf), now());
         type_one_then_two(&mut pty, &fake);
         *leaf.not_after.lock().unwrap() = Some(0);
         fake.set(|s| s.hold = false);
@@ -1387,12 +1408,13 @@ mod tests {
         use nix::sys::signal::{kill, Signal};
         let _one = crate::screen::testing::one_session();
         let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
-        fake.set(|s| s.hold = true);
         let mut io = open_pipes("one\n");
         let done = spawn_session(&fake, Arc::new(fresh_leaf()), u64::MAX, false, {
             let lines = io.lines();
             move || Io::Plain(lines)
         });
+        assert!(io.shows("#1 submitted"), "nothing was submitted");
+        fake.hold_collects();
         fake.held_collect();
         io.type_line("two\n");
         std::thread::sleep(Duration::from_millis(500));
@@ -1414,13 +1436,14 @@ mod tests {
     fn a_plain_session_names_a_request_queued_when_the_login_expires() {
         let _one = crate::screen::testing::one_session();
         let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
-        fake.set(|s| s.hold = true);
         let leaf = Arc::new(fresh_leaf());
         let mut io = open_pipes("one\n");
         let done = spawn_session(&fake, Arc::clone(&leaf), now(), false, {
             let lines = io.lines();
             move || Io::Plain(lines)
         });
+        assert!(io.shows("#1 submitted"), "nothing was submitted");
+        fake.hold_collects();
         fake.held_collect();
         io.type_line("two\n");
         std::thread::sleep(Duration::from_millis(500));
@@ -1671,10 +1694,30 @@ mod tests {
     fn a_queued_read_on_leaving_names_nothing_and_exits_0() {
         let _one = crate::screen::testing::one_session();
         let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
-        let (mut pty, done) = full_screen_behind_a_collect(&fake, Arc::new(fresh_leaf()), u64::MAX);
+        let (mut pty, done) = full_screen(&fake, Arc::new(fresh_leaf()), u64::MAX);
+        submit_one_behind_a_collect(&mut pty, &fake);
+        pty.type_keys(b"/status 1\r/x\r");
+        assert!(
+            pty.out.wait_for(b"unknown command"),
+            "the lines were not read"
+        );
+        pty.type_keys(b"/bye\r");
+        assert!(pty.out.wait_for(b"1 request is not yet sent or answered"));
+        pty.type_keys(b"/bye\r");
+        assert_eq!(ended(&mut pty, &done), (End::Left, Left::default()));
+    }
+
+    #[test]
+    fn a_submit_typed_after_a_collect_falls_due_is_still_sent() {
+        use maknae_agent::tasking::book::{COLLECT_IDLE_MS, COLLECT_OPEN_MS};
+        let _one = crate::screen::testing::one_session();
+        let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
+        let (mut pty, done) = full_screen(&fake, Arc::new(fresh_leaf()), u64::MAX);
         assert!(pty.out.wait_for(b"connected"), "never connected");
+        std::thread::sleep(Duration::from_millis(COLLECT_IDLE_MS + COLLECT_OPEN_MS));
         pty.type_keys(b"one\r");
         assert!(pty.out.wait_for(b"#1 submitted"), "no echo");
+        fake.hold_collects();
         fake.held_collect();
         pty.type_keys(b"/status 1\r/x\r");
         assert!(
