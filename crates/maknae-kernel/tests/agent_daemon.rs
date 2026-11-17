@@ -114,7 +114,7 @@ type Hook<T> = Box<dyn FnMut(T) + Send>;
 #[derive(Default)]
 struct Model {
     agent: &'static str,
-    replies: Mutex<VecDeque<PromptReply>>,
+    replies: Mutex<VecDeque<Result<PromptReply, maknae_kernel::EgressFailure>>>,
     seen: Mutex<Vec<Vec<Turn>>>,
     on_prompt: Mutex<Option<Hook<usize>>>,
 }
@@ -124,6 +124,12 @@ impl Model {
         Self::script_for("hobi", replies)
     }
     fn script_for(agent: &'static str, replies: Vec<PromptReply>) -> Arc<Self> {
+        Self::script_results(agent, replies.into_iter().map(Ok).collect())
+    }
+    fn script_results(
+        agent: &'static str,
+        replies: Vec<Result<PromptReply, maknae_kernel::EgressFailure>>,
+    ) -> Arc<Self> {
         Arc::new(Model {
             agent,
             replies: Mutex::new(replies.into()),
@@ -165,7 +171,7 @@ impl maknae_kernel::Egress for Model {
             .lock()
             .unwrap()
             .pop_front()
-            .expect("the model's script ran out");
+            .expect("the model's script ran out")?;
         Ok(maknae_kernel::EgressReply { reply })
     }
 }
@@ -1355,6 +1361,33 @@ async fn a_session_that_stops_without_an_answer_is_reported_stopped_and_the_next
         ]
     );
     assert_eq!(closed(&w).len(), 2, "each conversation is closed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_task_stopped_by_an_unusable_reply_reports_its_reason_and_action_to_the_tasker() {
+    let _one = ONE_DAEMON.lock().await;
+    let w = world("unusable", HOBI_POLICY);
+    let id = w.submit("sentinel-524-prompt").await;
+    let model = Model::script_results(
+        "hobi",
+        vec![Err(maknae_kernel::EgressFailure::ReplyUnusable {
+            defect: maknae_proto::ReplyDefect::ProviderAuth,
+            usage: None,
+        })],
+    );
+    let d = start(&w, &model);
+    d.until("the report", |d| d.ended(&id)).await;
+    let endings = d.endings();
+    d.stop().await;
+    assert_eq!(endings, vec![(Some(id), Ending::Stopped("reply-unusable"))]);
+    assert_eq!(
+        w.collected().await,
+        vec![(
+            id,
+            None,
+            "stopped: reply-unusable: provider-auth: the provider refused the agent's key, or its access to the agent's model: ask the agent's administrator to check the agent's provider key and model".to_string()
+        )]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
