@@ -2255,31 +2255,25 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             let destination = format!("provider:{name}");
             let m = crate::egress::content_measure(turns);
             let model = chosen.model.to_string();
-            let egress_meta =
-                |status| prompt_egress_audit(status, &m, conversation, &model, *output_tokens);
+            let facts = |seq: u64| PromptRecordFacts {
+                host: &host,
+                socket: &socket,
+                peer_uid,
+                peer_uri: peer_uri.as_deref(),
+                session_id,
+                seq,
+                destination: &destination,
+                au3_1: &au3_1,
+                peer_user: peer_user.as_deref(),
+                role: decided_role,
+                rule: decided_rule.as_ref(),
+                conversation,
+                model: &model,
+                content: &m,
+                output_tokens: *output_tokens,
+            };
             let refuse_turn = |reason: &str, posture: &str| {
-                let mut rec = make_record(
-                    "request",
-                    &host,
-                    &socket,
-                    peer_uid,
-                    None,
-                    None,
-                    peer_uri.as_deref(),
-                    session_id,
-                    seq.next(),
-                    "session.prompt",
-                    Some(&destination),
-                    "deny",
-                    reason,
-                    posture,
-                    &au3_1,
-                );
-                rec.subject.user = admitted_user(peer_user.as_deref());
-                rec.subject.role = decided_role.map(str::to_string);
-                rec.rule = decided_rule.as_ref().map(rule_audit);
-                rec.conversation = Some(conversation.clone());
-                rec
+                prompt_refusal_record(&facts(seq.next()), reason, posture)
             };
             let advanced = match advance_conversation(
                 &conversations,
@@ -2313,29 +2307,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             };
             // 1. readiness BEFORE any intent: a refusal is not a send.
             if let Err(_f) = egress.ready() {
-                let mut rec = make_record(
-                    "request",
-                    &host,
-                    &socket,
-                    peer_uid,
-                    None,
-                    None,
-                    peer_uri.as_deref(),
-                    session_id,
-                    seq.next(),
-                    "session.prompt",
-                    Some(&destination),
-                    "deny",
-                    "egress backend not ready",
-                    "unavailable",
-                    &au3_1,
-                );
-                // #275: the peer identity AND the role this very decision was
-                // made on. The egress records are permitted decisions, so
-                // omitting the role would make every prompt say role=none.
-                rec.subject.user = admitted_user(peer_user.as_deref());
-                rec.subject.role = decided_role.map(str::to_string);
-                rec.egress = Some(egress_meta(EgressStatus::BackendUnavailable));
+                let rec = backend_unavailable_record(&facts(seq.next()));
                 let appended =
                     emit_or_report(&emit, &rec, "egress refusal", peer_uid, session_id).await;
                 // Build state is not a wire disclosure (ruling 2026-09-02).
@@ -2354,23 +2326,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             }
             // 2. the write-ahead intent; the TYPE of `send` makes step 3
             //    impossible without it (egress.rs).
-            let intent = prompt_intent_record(&PromptRecordFacts {
-                host: &host,
-                socket: &socket,
-                peer_uid,
-                peer_uri: peer_uri.as_deref(),
-                session_id,
-                seq: seq.next(),
-                destination: &destination,
-                au3_1: &au3_1,
-                peer_user: peer_user.as_deref(),
-                role: decided_role,
-                rule: decided_rule.as_ref(),
-                conversation,
-                model: &model,
-                content: &m,
-                output_tokens: *output_tokens,
-            });
+            let intent = prompt_intent_record(&facts(seq.next()));
             let intent = match crate::egress::commit_intent(&*emit, intent).await {
                 Ok(i) => i,
                 Err(e) => {
@@ -2733,6 +2689,65 @@ fn prompt_egress_audit(
         completion_tokens: None,
         refused_tool_calls: vec![],
     }
+}
+
+pub(crate) fn prompt_refusal_record(
+    f: &PromptRecordFacts<'_>,
+    reason: &str,
+    posture: &str,
+) -> AuditRecord {
+    let mut rec = make_record(
+        "request",
+        f.host,
+        f.socket,
+        f.peer_uid,
+        None,
+        None,
+        f.peer_uri,
+        f.session_id,
+        f.seq,
+        "session.prompt",
+        Some(f.destination),
+        "deny",
+        reason,
+        posture,
+        f.au3_1,
+    );
+    rec.subject.user = admitted_user(f.peer_user);
+    rec.subject.role = f.role.map(str::to_string);
+    rec.rule = f.rule.map(rule_audit);
+    rec.conversation = Some(f.conversation.to_owned());
+    rec
+}
+
+pub(crate) fn backend_unavailable_record(f: &PromptRecordFacts<'_>) -> AuditRecord {
+    let mut rec = make_record(
+        "request",
+        f.host,
+        f.socket,
+        f.peer_uid,
+        None,
+        None,
+        f.peer_uri,
+        f.session_id,
+        f.seq,
+        "session.prompt",
+        Some(f.destination),
+        "deny",
+        "egress backend not ready",
+        "unavailable",
+        f.au3_1,
+    );
+    rec.subject.user = admitted_user(f.peer_user);
+    rec.subject.role = f.role.map(str::to_string);
+    rec.egress = Some(prompt_egress_audit(
+        EgressStatus::BackendUnavailable,
+        f.content,
+        f.conversation,
+        f.model,
+        f.output_tokens,
+    ));
+    rec
 }
 
 pub(crate) fn prompt_intent_record(f: &PromptRecordFacts<'_>) -> AuditRecord {
@@ -4699,6 +4714,32 @@ pub(crate) fn rule_audit(c: &RuleCitation) -> maknae_audit_append::RuleAudit {
 /// the pre-decision paths, where nothing is served), every caller here has a
 /// frame to release and must know the append landed. Returns append success.
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn request_outcome_record(
+    host: &str,
+    socket: &str,
+    uid: u32,
+    peer_uri: Option<&str>,
+    peer_user: Option<&str>,
+    role: Option<&'static str>,
+    rule: Option<&RuleCitation>,
+    session_id: u64,
+    seq: u64,
+    (action, object, object_requested): (&str, Option<&str>, Option<&str>),
+    (result, reason, posture): (&str, &str, &str),
+    au3_1: &serde_json::Value,
+) -> AuditRecord {
+    let mut rec = make_record(
+        "request", host, socket, uid, None, None, peer_uri, session_id, seq, action, object,
+        result, reason, posture, au3_1,
+    );
+    rec.subject.user = admitted_user(peer_user);
+    rec.subject.role = role.map(str::to_string);
+    rec.rule = rule.map(rule_audit);
+    rec.object_requested = object_requested.map(str::to_string);
+    rec
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn emit_request_outcome<E: AuditEmit + Send + Sync>(
     emit: &Arc<E>,
     host: &str,
@@ -4724,15 +4765,20 @@ async fn emit_request_outcome<E: AuditEmit + Send + Sync>(
     posture: &str,
     au3_1: &serde_json::Value,
 ) -> bool {
-    let mut rec = make_record(
-        "request", host, socket, uid, None, None, peer_uri, session_id, seq, action, object,
-        result, reason, posture, au3_1,
+    let rec = request_outcome_record(
+        host,
+        socket,
+        uid,
+        peer_uri,
+        peer_user,
+        role,
+        rule,
+        session_id,
+        seq,
+        (action, object, object_requested),
+        (result, reason, posture),
+        au3_1,
     );
-    // #275: the peer identity, bounded and audit-only.
-    rec.subject.user = admitted_user(peer_user);
-    rec.subject.role = role.map(str::to_string);
-    rec.rule = rule.map(rule_audit);
-    rec.object_requested = object_requested.map(str::to_string);
     match emit.emit_within(&rec, AUDIT_APPEND_TIMEOUT).await {
         Ok(()) => true,
         Err(e) => {
@@ -10907,6 +10953,7 @@ mod record_widths {
 
     struct Who {
         person: bool,
+        uid: u32,
         shipped: (
             crate::test_fixtures::DirGuard,
             crate::composition::Composition<HermeticAuthorizer>,
@@ -10926,17 +10973,37 @@ mod record_widths {
         fn new(person: bool) -> Self {
             Who {
                 person,
+                uid: nix::unistd::geteuid().as_raw(),
                 shipped: crate::test_fixtures::shipped_composition(),
             }
         }
 
-        fn granting_the_widest_provider(person: bool) -> Self {
+        fn contained() -> Self {
+            Who {
+                person: true,
+                uid: 0,
+                shipped: crate::test_fixtures::shipped_composition_with(
+                    &Self::destinations(),
+                    Some("schema_version: 1\nbindings:\n  adversary:\n    - uid: 0\n"),
+                ),
+            }
+        }
+
+        fn destinations() -> String {
             let destination = format!("provider:{}", widest_provider());
+            format!(
+                "destinations:\n  admin:\n    allow: [\"{destination}\"]\n  user:\n    allow: [\"{destination}\"]\n"
+            )
+        }
+
+        fn granting_the_widest_provider(person: bool) -> Self {
             Who {
                 person,
-                shipped: crate::test_fixtures::shipped_composition_with(&format!(
-                    "destinations:\n  admin:\n    allow: [\"{destination}\"]\n  user:\n    allow: [\"{destination}\"]\n"
-                )),
+                uid: nix::unistd::geteuid().as_raw(),
+                shipped: crate::test_fixtures::shipped_composition_with(
+                    &Self::destinations(),
+                    None,
+                ),
             }
         }
 
@@ -10969,9 +11036,23 @@ mod record_widths {
             facts: Option<&crate::conversation::facts::ConversationFacts>,
             resource: &[(&str, String)],
         ) -> (Option<&'static str>, Option<RuleCitation>) {
+            let (_, role, rule) = self.decision(verb, facts, resource);
+            (role, rule)
+        }
+
+        fn decision(
+            &self,
+            verb: &Verb,
+            facts: Option<&crate::conversation::facts::ConversationFacts>,
+            resource: &[(&str, String)],
+        ) -> (
+            maknae_security::Verdict,
+            Option<&'static str>,
+            Option<RuleCitation>,
+        ) {
             let agent = AgentId::parse("hobi").expect("hobi is an agent id");
             let (stamp, uid) = if self.person {
-                (Stamp::Client, nix::unistd::geteuid().as_raw())
+                (Stamp::Client, self.uid)
             } else {
                 (
                     Stamp::Agent {
@@ -11001,7 +11082,12 @@ mod record_widths {
                 tv::stamp_agent(&mut req, &named);
             }
             let d = self.shipped.1.decide_cited(&req);
-            assert_eq!(d.role, Some(if self.person { "admin" } else { "user" }));
+            let held = match (self.person, self.uid) {
+                (true, 0) => "adversary",
+                (true, _) => "admin",
+                (false, _) => "user",
+            };
+            assert_eq!(d.role, Some(held));
             let rule = d.rule.map(|c| RuleCitation {
                 node: u64::MAX,
                 key: c.key,
@@ -11010,7 +11096,7 @@ mod record_widths {
                     c.section.rsplit('#').next().unwrap_or_default()
                 ),
             });
-            (d.role, rule)
+            (d.verdict, d.role, rule)
         }
 
         fn session(&self) -> SessionRecord {
@@ -11388,12 +11474,6 @@ mod record_widths {
             },
             Identity {
                 user: widest_user(),
-                role: "adversary",
-                rule: admin_rule,
-                stamped_by: Who::new(true),
-            },
-            Identity {
-                user: widest_user(),
                 role: user,
                 rule: user_rule,
                 stamped_by: Who::new(false),
@@ -11401,10 +11481,10 @@ mod record_widths {
         ]
     }
 
-    fn widest_prompt_intent(i: &Identity) -> crate::egress::DurableEgressIntent {
+    fn with_facts<R>(i: &Identity, f: impl FnOnce(&PromptRecordFacts<'_>) -> R) -> R {
         let content = prompt_content();
         let au3_1 = serde_json::Value::Null;
-        let mut rec = prompt_intent_record(&PromptRecordFacts {
+        f(&PromptRecordFacts {
             host: &host(),
             socket: MACOS_DAEMON_SOCKET_PATH,
             peer_uid: u32::MAX,
@@ -11420,84 +11500,116 @@ mod record_widths {
             model: &prompt_model(),
             content: &content,
             output_tokens: Some(u64::MAX),
-        });
-        i.stamped_by.session().stamp(&mut rec);
-        crate::egress::DurableEgressIntent::for_test(rec)
+        })
     }
 
-    fn listed(o: SendOutcome) -> SendOutcome {
-        match o {
-            SendOutcome::Sent { .. }
-            | SendOutcome::Failed
-            | SendOutcome::DeadlineExpired
-            | SendOutcome::OutcomeUnknown => {}
-            SendOutcome::LandedUndelivered { refusal, .. } => match refusal {
-                ReplyRefusal::Oversize
-                | ReplyRefusal::NonText
-                | ReplyRefusal::Empty
-                | ReplyRefusal::ToolCallUnacceptable
-                | ReplyRefusal::ReasoningUnacceptable
-                | ReplyRefusal::Unusable(_)
-                | ReplyRefusal::ConversationFull
-                | ReplyRefusal::ConversationChanged
-                | ReplyRefusal::ConversationOutcomeUnknown => {}
+    fn stamped(i: &Identity, mut rec: AuditRecord) -> AuditRecord {
+        i.stamped_by.session().stamp(&mut rec);
+        rec
+    }
+
+    fn widest_prompt_intent(i: &Identity) -> crate::egress::DurableEgressIntent {
+        crate::egress::DurableEgressIntent::for_test(stamped(
+            i,
+            with_facts(i, prompt_intent_record),
+        ))
+    }
+
+    fn usage() -> Option<maknae_proto::Usage> {
+        Some(maknae_proto::Usage {
+            prompt_tokens: u64::MAX,
+            completion_tokens: Some(u64::MAX),
+        })
+    }
+
+    fn outcome_of_refusal(refusal: ReplyRefusal) -> SendOutcome {
+        match refusal {
+            ReplyRefusal::Oversize
+            | ReplyRefusal::NonText
+            | ReplyRefusal::Empty
+            | ReplyRefusal::ToolCallUnacceptable
+            | ReplyRefusal::ReasoningUnacceptable
+            | ReplyRefusal::ConversationFull
+            | ReplyRefusal::ConversationChanged
+            | ReplyRefusal::ConversationOutcomeUnknown => SendOutcome::LandedUndelivered {
+                reply_length: Some(u64::MAX),
+                refusal,
+                usage: usage(),
+            },
+            ReplyRefusal::Unusable(_) => SendOutcome::LandedUndelivered {
+                reply_length: None,
+                refusal,
+                usage: usage(),
             },
         }
-        o
+    }
+
+    fn after_refusal(r: ReplyRefusal) -> Option<ReplyRefusal> {
+        let defects = maknae_proto::ReplyDefect::ALL;
+        match r {
+            ReplyRefusal::Oversize => Some(ReplyRefusal::NonText),
+            ReplyRefusal::NonText => Some(ReplyRefusal::Empty),
+            ReplyRefusal::Empty => Some(ReplyRefusal::ToolCallUnacceptable),
+            ReplyRefusal::ToolCallUnacceptable => Some(ReplyRefusal::ReasoningUnacceptable),
+            ReplyRefusal::ReasoningUnacceptable => Some(ReplyRefusal::Unusable(defects[0])),
+            ReplyRefusal::Unusable(d) => {
+                let at = defects
+                    .iter()
+                    .position(|x| *x == d)
+                    .expect("a listed defect");
+                Some(
+                    defects
+                        .get(at + 1)
+                        .map_or(ReplyRefusal::ConversationFull, |n| {
+                            ReplyRefusal::Unusable(*n)
+                        }),
+                )
+            }
+            ReplyRefusal::ConversationFull => Some(ReplyRefusal::ConversationChanged),
+            ReplyRefusal::ConversationChanged => Some(ReplyRefusal::ConversationOutcomeUnknown),
+            ReplyRefusal::ConversationOutcomeUnknown => None,
+        }
+    }
+
+    fn after_outcome(o: &SendOutcome) -> Option<SendOutcome> {
+        match o {
+            SendOutcome::Sent { .. } => Some(SendOutcome::Failed),
+            SendOutcome::Failed => Some(SendOutcome::DeadlineExpired),
+            SendOutcome::DeadlineExpired => Some(SendOutcome::OutcomeUnknown),
+            SendOutcome::OutcomeUnknown => Some(outcome_of_refusal(ReplyRefusal::Oversize)),
+            SendOutcome::LandedUndelivered { refusal, .. } => {
+                after_refusal(*refusal).map(outcome_of_refusal)
+            }
+        }
     }
 
     fn every_outcome() -> Vec<SendOutcome> {
-        let usage = Some(maknae_proto::Usage {
-            prompt_tokens: u64::MAX,
-            completion_tokens: Some(u64::MAX),
+        let mut next = Some(SendOutcome::Sent {
+            reply_length: u64::MAX,
+            usage: usage(),
         });
-        let mut refusals = vec![
-            ReplyRefusal::Oversize,
-            ReplyRefusal::NonText,
-            ReplyRefusal::Empty,
-            ReplyRefusal::ToolCallUnacceptable,
-            ReplyRefusal::ReasoningUnacceptable,
-            ReplyRefusal::ConversationFull,
-            ReplyRefusal::ConversationChanged,
-            ReplyRefusal::ConversationOutcomeUnknown,
-        ];
-        refusals.extend(maknae_proto::ReplyDefect::ALL.map(ReplyRefusal::Unusable));
-        let mut all = vec![
-            SendOutcome::Sent {
-                reply_length: u64::MAX,
-                usage,
-            },
-            SendOutcome::Failed,
-            SendOutcome::DeadlineExpired,
-            SendOutcome::OutcomeUnknown,
-        ];
-        all.extend(
-            refusals
-                .into_iter()
-                .map(|refusal| SendOutcome::LandedUndelivered {
-                    reply_length: Some(u64::MAX),
-                    refusal,
-                    usage,
-                }),
-        );
-        all.into_iter().map(listed).collect()
+        let mut all = Vec::new();
+        while let Some(o) = next {
+            next = after_outcome(&o);
+            all.push(o);
+        }
+        all
     }
 
-    fn assert_the_prompt_line_carries_what_the_builder_set(rec: &AuditRecord, i: &Identity) {
+    fn assert_degrades_and_carries(rec: &AuditRecord, i: &Identity, with_rule: bool) {
         let m = macos_mirror(rec);
         let line = &m.full_line;
-        let content = prompt_content();
-        for want in [
-            format!("\"model\":\"{}\"", prompt_model()),
-            format!("\"conversation\":\"{}\"", prompt_conversation()),
-            format!("\"content_digest\":\"{}\"", content.digest32),
-            format!("\"object\":\"provider:{}\"", widest_provider()),
-            format!("\"output_tokens\":{}", u64::MAX),
+        let mut wants = vec![
+            format!("\"host\":\"{}\"", host()),
+            format!("\"session_id\":{}", u64::MAX),
             format!("\"user\":\"{}\"", i.user),
             format!("\"role\":\"{}\"", i.role),
-            format!("\"key\":\"{}\"", i.rule.key),
             format!("\"reason\":\"{}\"", rec.outcome.reason),
-        ] {
+        ];
+        if with_rule {
+            wants.push(format!("\"key\":\"{}\"", i.rule.key));
+        }
+        for want in wants {
             assert!(line.contains(&want), "{want} in {line}");
         }
         assert!(
@@ -11513,6 +11625,21 @@ mod record_widths {
         assert!(degraded.contains("MAKNAE_PRIMARY=ok"));
     }
 
+    fn assert_the_prompt_line_carries_what_the_builder_set(rec: &AuditRecord, i: &Identity) {
+        assert_degrades_and_carries(rec, i, true);
+        let line = macos_mirror(rec).full_line;
+        let content = prompt_content();
+        for want in [
+            format!("\"model\":\"{}\"", prompt_model()),
+            format!("\"conversation\":\"{}\"", prompt_conversation()),
+            format!("\"content_digest\":\"{}\"", content.digest32),
+            format!("\"object\":\"provider:{}\"", widest_provider()),
+            format!("\"output_tokens\":{}", u64::MAX),
+        ] {
+            assert!(line.contains(&want), "{want} in {line}");
+        }
+    }
+
     #[test]
     fn every_prompt_outcome_at_the_widest_bounds_degrades_and_its_marker_fits() {
         for i in identities() {
@@ -11522,6 +11649,94 @@ mod record_widths {
                 let rec = crate::egress::outcome_for(&intent, u64::MAX, "t".into(), outcome);
                 assert_the_prompt_line_carries_what_the_builder_set(&rec, &i);
             }
+        }
+    }
+
+    #[test]
+    fn the_prompt_refusals_and_the_unavailable_backend_degrade_and_their_markers_fit() {
+        use crate::conversation::answer::{advance_answer, StepFailure};
+        use crate::conversation::bounds::BoundRefusal;
+        use crate::conversation::turn::TurnRefusal;
+        use crate::mutation::Blocked;
+        let failures = [
+            StepFailure::NoConversation,
+            StepFailure::Turn(TurnRefusal::Bound(BoundRefusal::ConversationFull)),
+            StepFailure::Turn(TurnRefusal::Bound(BoundRefusal::OwnerFull)),
+            StepFailure::Turn(TurnRefusal::Rewrite),
+            StepFailure::Turn(TurnRefusal::Unencodable),
+            StepFailure::Blocked(Blocked::NotStarted),
+            StepFailure::Blocked(Blocked::Unknown),
+        ];
+        for i in identities() {
+            for failure in &failures {
+                let answer = advance_answer(failure);
+                let rec = stamped(
+                    &i,
+                    with_facts(&i, |f| {
+                        prompt_refusal_record(f, &answer.reason, answer.posture)
+                    }),
+                );
+                assert_degrades_and_carries(&rec, &i, true);
+                let line = macos_mirror(&rec).full_line;
+                assert!(line.contains(&format!("\"conversation\":\"{}\"", prompt_conversation())));
+            }
+            let rec = stamped(&i, with_facts(&i, backend_unavailable_record));
+            assert_degrades_and_carries(&rec, &i, false);
+            let line = macos_mirror(&rec).full_line;
+            assert!(line.contains(&format!("\"model\":\"{}\"", prompt_model())));
+        }
+    }
+
+    #[test]
+    fn a_contained_subjects_prompt_deny_record_degrades_and_its_marker_fits() {
+        let who = Who::contained();
+        let facts = crate::conversation::facts::ConversationFacts {
+            state: crate::conversation::facts::FactState::Active,
+            owner_uid: Some(who.uid),
+            extends: Some(crate::conversation::chain::Extends::Advance { new: 1 }),
+        };
+        let name = widest_provider();
+        let (verdict, role, rule) = who.decision(
+            &prompt_verb(),
+            Some(&facts),
+            &[
+                ("destination", format!("provider:{name}")),
+                ("model", format!("{name}/{}", prompt_model())),
+            ],
+        );
+        let Decision::Deny { reason } = finalize(verdict) else {
+            panic!("a contained subject is denied");
+        };
+        assert_eq!(role, Some("adversary"));
+        let mut rec = request_outcome_record(
+            &host(),
+            MACOS_DAEMON_SOCKET_PATH,
+            u32::MAX,
+            None,
+            Some(&widest_user()),
+            role,
+            rule.as_ref(),
+            u64::MAX,
+            u64::MAX,
+            ("session.prompt", None, None),
+            ("deny", &reason, "unauthorized"),
+            &serde_json::Value::Null,
+        );
+        who.session().stamp(&mut rec);
+        let m = macos_mirror(&rec);
+        assert!(m.mirrored_in_full);
+        assert!(m.full_len <= MACOS_SYSLOG_MAX);
+        assert_eq!(m.degraded_len, None);
+        for want in [
+            format!("\"host\":\"{}\"", host()),
+            format!("\"session_id\":{}", u64::MAX),
+            format!("\"seq\":{}", u64::MAX),
+            format!("\"user\":\"{}\"", widest_user()),
+            "\"role\":\"adversary\"".to_owned(),
+            format!("\"reason\":\"{reason}\""),
+            "\"result\":\"deny\"".to_owned(),
+        ] {
+            assert!(m.full_line.contains(&want), "{want} in {}", m.full_line);
         }
     }
 

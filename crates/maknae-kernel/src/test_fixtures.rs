@@ -402,11 +402,12 @@ pub(crate) fn shipped_composition() -> (
     DirGuard,
     crate::composition::Composition<HermeticAuthorizer>,
 ) {
-    shipped_composition_with("")
+    shipped_composition_with("", None)
 }
 
 pub(crate) fn shipped_composition_with(
     authz_tail: &str,
+    bindings: Option<&str>,
 ) -> (
     DirGuard,
     crate::composition::Composition<HermeticAuthorizer>,
@@ -421,7 +422,7 @@ pub(crate) fn shipped_composition_with(
             "{}{authz_tail}",
             include_str!("../../../packaging/common/authz.yaml")
         ),
-        None,
+        bindings,
     );
     write_sensitive(
         &g.0,
