@@ -1341,7 +1341,7 @@ mod tests {
         .expect("sendmsg");
     }
 
-    // macOS: stat through /dev/fd races other threads' descriptor churn (EBADF on held fds), so nothing counts there (#652).
+    // Linux-only: /dev/fd stat races on macOS (#652).
     #[cfg(target_os = "linux")]
     fn descriptors_open_on(obj: &std::path::Path) -> usize {
         use std::os::unix::fs::MetadataExt;
