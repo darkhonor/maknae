@@ -2806,6 +2806,26 @@ pub(crate) fn submit_outcome_record(
     outcome
 }
 
+pub(crate) fn refusal_posture(r: &crate::task::TaskRefusal) -> &'static str {
+    use crate::task::TaskRefusal;
+    if matches!(r, TaskRefusal::Unavailable(_) | TaskRefusal::Unsigned) {
+        "unavailable"
+    } else {
+        "unauthorized"
+    }
+}
+
+pub(crate) fn cite_task(
+    mut rec: AuditRecord,
+    id: &maknae_proto::TaskId,
+    tasker: Option<String>,
+) -> AuditRecord {
+    rec.object = Some(format!("task:{id}"));
+    rec.subject.task_id = Some(id.to_string());
+    rec.subject.tasker = tasker;
+    rec
+}
+
 pub(crate) fn decision_record(
     mut rec: AuditRecord,
     role: Option<&str>,
@@ -2836,25 +2856,20 @@ struct Trail<'a, E> {
 
 impl<E: AuditEmit + Send + Sync> Trail<'_, E> {
     fn record(&self, action: &str, result: &str, reason: &str, posture: &str) -> AuditRecord {
-        let mut rec = make_record(
-            "request",
+        request_outcome_record(
             self.host,
             self.socket,
             self.uid,
-            None,
-            None,
             self.peer_uri,
+            self.peer_user,
+            None,
+            None,
             self.session_id,
             self.seq.next(),
-            action,
-            None,
-            result,
-            reason,
-            posture,
+            (action, None, None),
+            (result, reason, posture),
             self.au3_1,
-        );
-        rec.subject.user = admitted_user(self.peer_user);
-        rec
+        )
     }
 
     fn outcome(&self, intent: &AuditRecord, reason: &str, posture: &str) -> AuditRecord {
@@ -3627,12 +3642,7 @@ async fn serve_task_verb<S, E, P>(
     }
     let deadline = tokio::time::Instant::now() + timeout;
     let refused = |intent: &AuditRecord, r: &TaskRefusal| {
-        let posture = if matches!(r, TaskRefusal::Unavailable(_) | TaskRefusal::Unsigned) {
-            "unavailable"
-        } else {
-            "unauthorized"
-        };
-        trail.outcome(intent, &r.to_string(), posture)
+        trail.outcome(intent, &r.to_string(), refusal_posture(r))
     };
     let named = asked.named_agent().map(maknae_config::AgentId::parse);
     let mutate = |change: StoreChange| {
@@ -3822,11 +3832,8 @@ async fn serve_task_verb<S, E, P>(
                 return;
             };
             let of =
-                |mut rec: AuditRecord, id: &maknae_proto::TaskId, tasker: &maknae_proto::Tasker| {
-                    rec.object = Some(format!("task:{id}"));
-                    rec.subject.task_id = Some(id.to_string());
-                    rec.subject.tasker = Some(maknae_proto::tasker_text(tasker));
-                    rec
+                |rec: AuditRecord, id: &maknae_proto::TaskId, tasker: &maknae_proto::Tasker| {
+                    cite_task(rec, id, Some(maknae_proto::tasker_text(tasker)))
                 };
             let idle = || {
                 let mut rec = decided("permit", "idle", "authorized");
@@ -3865,10 +3872,11 @@ async fn serve_task_verb<S, E, P>(
                             | maknae_proto::TaskState::Reported
                             | maknae_proto::TaskState::Closed => "heartbeat: the task is closed",
                         };
-                        let mut rec = decided("permit", said, "authorized");
-                        rec.object = Some(format!("task:{}", view.task.to_id()));
-                        rec.subject.task_id = Some(view.task.to_id().to_string());
-                        rec.subject.tasker = None;
+                        let rec = cite_task(
+                            decided("permit", said, "authorized"),
+                            &view.task.to_id(),
+                            None,
+                        );
                         (rec, Payload::TaskState(view))
                     }
                     crate::task::Heartbeat::Idle => (idle(), Payload::TaskIdle),
@@ -3920,10 +3928,11 @@ async fn serve_task_verb<S, E, P>(
                         }
                     };
                     if let Some(reason) = reason {
-                        let mut rec = decided("permit", &reason, posture);
-                        rec.object = Some(format!("task:{id}"));
-                        rec.subject.task_id = Some(id.to_string());
-                        rec.subject.tasker = tasker.as_ref().map(maknae_proto::tasker_text);
+                        let rec = cite_task(
+                            decided("permit", &reason, posture),
+                            &id,
+                            tasker.as_ref().map(maknae_proto::tasker_text),
+                        );
                         trail
                             .deliver(stream, &rec, Payload::TaskIdle, role, rule.as_ref(), action)
                             .await;
@@ -4009,10 +4018,11 @@ async fn serve_task_verb<S, E, P>(
                     .await;
                 return;
             };
-            let mut intent = decided("permit", "intent recorded", "authorized");
-            intent.object = Some(format!("task:{}", held.id));
-            intent.subject.task_id = Some(held.id.to_string());
-            intent.subject.tasker = Some(held.tasker.clone());
+            let mut intent = cite_task(
+                decided("permit", "intent recorded", "authorized"),
+                &held.id,
+                Some(held.tasker.clone()),
+            );
             if text.0.len() > tasks.text_max {
                 let r = TaskRefusal::TooLong;
                 intent.outcome.result = "deny".into();
@@ -7914,20 +7924,9 @@ where
         view: &crate::enrollment::SnapshotEnrollment<B>,
         id: maknae_proto::TaskId,
     ) -> Result<crate::task::Released, crate::task::ReleaseRefusal> {
-        use crate::task::{ReleaseRefusal, Released};
+        use crate::task::ReleaseRefusal;
         use crate::task_verbs as tv;
-        let plan = self.tasks.release_plan(&id, view);
-        let (tasker, parent) = match &plan {
-            Ok(p) => (Some(p.tasker.clone()), p.parent),
-            Err(ReleaseRefusal::ParentHeld(parent)) => (None, Some(*parent)),
-            Err(_) => (None, None),
-        };
-        let planned: Result<Released, ReleaseRefusal> = plan.map(|p| Released {
-            task: p.task,
-            from: p.from,
-            now: p.to,
-            rseq: None,
-        });
+        let (tasker, parent, planned) = planned_release(self.tasks.release_plan(&id, view));
         let (result, posture) = tv::release_record_class(&planned);
         let reason = tv::release_reason(&planned);
         if !self
@@ -8994,6 +8993,29 @@ fn task_record(
         None => ctx.euid,
     };
     rec
+}
+
+/// What the first release record names of a plan, and what the plan would release.
+pub(crate) fn planned_release(
+    plan: Result<crate::task::ReleasePlan, crate::task::ReleaseRefusal>,
+) -> (
+    Option<maknae_proto::Tasker>,
+    Option<maknae_proto::TaskId>,
+    Result<crate::task::Released, crate::task::ReleaseRefusal>,
+) {
+    use crate::task::{ReleaseRefusal, Released};
+    let (tasker, parent) = match &plan {
+        Ok(p) => (Some(p.tasker.clone()), p.parent),
+        Err(ReleaseRefusal::ParentHeld(parent)) => (None, Some(*parent)),
+        Err(_) => (None, None),
+    };
+    let planned = plan.map(|p| Released {
+        task: p.task,
+        from: p.from,
+        now: p.to,
+        rseq: None,
+    });
+    (tasker, parent, planned)
 }
 
 /// An administrator's release of one held task: `admin.release`, joined to the request by
@@ -10831,7 +10853,7 @@ mod record_widths {
     use super::*;
     use crate::egress::{ReplyRefusal, SendOutcome};
     use crate::handler::{build_authz_request, Stamp, TaskStamp};
-    use crate::task::{Contained, ReleaseRefusal, Released, TaskRefusal};
+    use crate::task::{ReleaseRefusal, TaskRefusal};
     use crate::task_verbs as tv;
     use maknae_audit_append::test_support::{macos_mirror, MACOS_SYSLOG_MAX};
     use maknae_authz_basic::HermeticAuthorizer;
@@ -10914,36 +10936,153 @@ mod record_widths {
             .collect()
     }
 
-    fn reasons_of(op: &str, person: bool) -> Vec<String> {
+    fn held_tasker() -> String {
+        maknae_proto::tasker_text(&Tasker::Uid(u32::MAX))
+    }
+
+    #[derive(Clone)]
+    enum Shape {
+        Plain,
+        NoTasker,
+        Cites(Option<String>),
+        Submitted,
+    }
+
+    struct Say {
+        result: &'static str,
+        reason: String,
+        posture: &'static str,
+        shape: Shape,
+    }
+
+    fn bounded_refusals() -> Vec<TaskRefusal> {
+        let agent = widest_agent_id();
+        let kinds = [
+            TaskRefusal::Schema(String::new()),
+            TaskRefusal::Denied(String::new()),
+            TaskRefusal::AtCapacity {
+                agent: String::new(),
+            },
+            TaskRefusal::Unknown,
+            TaskRefusal::OtherAgent,
+            TaskRefusal::ParentNotHeld,
+            TaskRefusal::AgentGone,
+            TaskRefusal::Random,
+            TaskRefusal::Audit(String::new()),
+            TaskRefusal::Unsigned,
+            TaskRefusal::Store(String::new()),
+            TaskRefusal::CursorAhead,
+            TaskRefusal::Finished,
+            TaskRefusal::TooLong,
+            TaskRefusal::TaskerLive {
+                agent: String::new(),
+            },
+            TaskRefusal::TaskerHeld,
+            TaskRefusal::FollowUps,
+            TaskRefusal::FollowUpsUnseen,
+            TaskRefusal::NotWorking,
+            TaskRefusal::Unavailable(String::new()),
+        ];
+        kinds
+            .iter()
+            .filter_map(|k| bounded_cause(k, &agent))
+            .collect()
+    }
+
+    fn says(op: &str, person: bool, tasker: &str) -> Vec<Say> {
+        let held = Shape::Cites(Some(held_tasker()));
         let ids = vec![TASK; tv::TASK_PAGE_MAX + 1];
         let collected = format!("collected {} reports{}", ids.len(), tv::named(&ids));
-        let literals = |all: &[&str]| all.iter().map(|r| (*r).to_owned()).collect();
+        let permit = |reason: String, shape: Shape| Say {
+            result: "permit",
+            reason,
+            posture: "authorized",
+            shape,
+        };
+        let deny = |reason: String, shape: Shape| Say {
+            result: "deny",
+            reason,
+            posture: "unauthorized",
+            shape,
+        };
+        let refusals = |shape: Shape| -> Vec<Say> {
+            bounded_refusals()
+                .iter()
+                .map(|r| Say {
+                    result: "permit",
+                    reason: r.to_string(),
+                    posture: crate::run::refusal_posture(r),
+                    shape: shape.clone(),
+                })
+                .collect()
+        };
+        let too_long = TaskRefusal::TooLong.to_string();
+        let no_agent = "agent name not an agent id".to_owned();
+        let intent = || permit("intent recorded".into(), Shape::Plain);
+        let done = || permit("done".into(), Shape::Plain);
         match (op, person) {
-            ("submit", _) => Vec::new(),
+            ("submit", _) => ["task held", "task queued", "task gone before the answer"]
+                .iter()
+                .map(|r| permit((*r).into(), Shape::Submitted))
+                .collect(),
             ("add", _) => {
-                let mut all: Vec<String> = literals(&["intent recorded", "done"]);
-                all.push(TaskRefusal::TooLong.to_string());
+                let mut all = vec![deny(too_long, Shape::Plain), intent(), done()];
+                all.extend(refusals(Shape::Plain));
                 all
             }
-            ("status", _) => literals(&["status", "task gone"]),
-            ("list", _) => vec![format!("listed {} tasks", tv::TASK_PAGE_MAX)],
-            ("stop" | "drop", _) => literals(&["intent recorded", "done"]),
-            ("collect", _) => vec![
-                collect_intent_reason(u64::MAX),
-                collected.clone(),
-                format!("acknowledged {}{}; {collected}", ids.len(), tv::named(&ids)),
+            ("status", _) => vec![
+                permit("status".into(), Shape::Plain),
+                deny("task gone".into(), Shape::Plain),
             ],
-            ("claim", false) => vec![
-                "idle".to_owned(),
-                "heartbeat: the task is held".to_owned(),
-                format!(
-                    "heartbeat: {} follow-ups after {}",
-                    crate::task::MAX_FOLLOW_UPS_PER_TASK,
-                    u32::MAX
-                ),
+            ("list", _) => vec![
+                permit(format!("listed {} tasks", tv::TASK_PAGE_MAX), Shape::Plain),
+                deny(no_agent, Shape::Plain),
             ],
+            ("stop" | "drop", _) => {
+                let mut all = vec![intent(), done()];
+                all.extend(refusals(Shape::Plain));
+                all
+            }
+            ("collect", _) => {
+                let mut all = vec![
+                    deny(no_agent, Shape::Plain),
+                    permit(collect_intent_reason(u64::MAX), Shape::Plain),
+                    permit(collected.clone(), Shape::Plain),
+                    permit(
+                        format!("acknowledged {}{}; {collected}", ids.len(), tv::named(&ids)),
+                        Shape::Plain,
+                    ),
+                ];
+                all.extend(refusals(Shape::Plain));
+                all
+            }
+            ("claim", false) => {
+                let mut all = vec![
+                    permit("idle".into(), Shape::NoTasker),
+                    permit("intent recorded".into(), Shape::NoTasker),
+                    permit("delivered".into(), Shape::Cites(Some(tasker.to_owned()))),
+                    permit("heartbeat: the task is held".into(), Shape::Cites(None)),
+                    permit(
+                        format!(
+                            "heartbeat: {} follow-ups after {}",
+                            crate::task::MAX_FOLLOW_UPS_PER_TASK,
+                            u32::MAX
+                        ),
+                        Shape::Cites(Some(tasker.to_owned())),
+                    ),
+                ];
+                all.extend(refusals(Shape::NoTasker));
+                all
+            }
             ("report", false) => {
-                literals(&["intent recorded", "delivered", "no working task cited"])
+                let mut all = vec![
+                    deny("no working task cited".into(), Shape::Plain),
+                    permit("intent recorded".into(), held.clone()),
+                    permit("done".into(), held.clone()),
+                    deny(too_long, held.clone()),
+                ];
+                all.extend(refusals(held));
+                all
             }
             ("claim" | "report", true) => Vec::new(),
             _ => panic!("an unknown task op"),
@@ -10960,12 +11099,17 @@ mod record_widths {
     }
 
     struct Case {
+        label: String,
         rec: AuditRecord,
-        reason: String,
-        tasker: String,
+        tasker: Option<String>,
         task: Option<String>,
         parent: Option<String>,
         op: Option<&'static str>,
+    }
+
+    enum Release {
+        Planned,
+        Written,
     }
 
     impl Who {
@@ -11015,6 +11159,10 @@ mod record_widths {
                     uid: u32::MAX,
                 }
             }
+        }
+
+        fn parent(&self) -> Option<TaskId> {
+            (!self.person).then_some(PARENT)
         }
 
         fn socket(&self) -> &'static str {
@@ -11107,7 +11255,7 @@ mod record_widths {
                 };
                 s.cite(&TaskStamp {
                     id: TASK,
-                    tasker: maknae_proto::tasker_text(&Tasker::Uid(u32::MAX)),
+                    tasker: held_tasker(),
                     root: "users/4294967295".into(),
                     start: u64::MAX,
                 });
@@ -11115,60 +11263,75 @@ mod record_widths {
             s
         }
 
-        fn request(&self, reason: &str) -> AuditRecord {
-            let mut rec = make_record(
-                "request",
-                &host(),
-                self.socket(),
-                u32::MAX,
-                None,
-                None,
-                None,
-                u64::MAX,
-                u64::MAX,
-                "session.task",
-                None,
-                "permit",
-                reason,
-                "authorized",
-                &serde_json::Value::Null,
-            );
-            rec.subject.user = admitted_user(Some(&widest_user()));
-            rec
-        }
-
-        fn case(&self, op: &'static str, reason: &str, submitted: Option<&TaskId>) -> Case {
+        fn task_case(&self, op: &'static str, say: &Say) -> Case {
             let verb = verb_of(op);
             let asked = tv::task_verb(&verb).expect("a task verb");
-            let agent = match self.tasker() {
+            let channel_agent = match self.tasker() {
                 Tasker::Agent { agent, .. } => Some(AgentId::parse(&agent).expect("parses")),
                 Tasker::Uid(_) | Tasker::Remote(_) => None,
             };
-            let (role, rule) = self.decided(&verb);
-            let mut rec = decision_record(
-                task_verb_record(
-                    self.request(reason),
-                    asked.object(),
-                    asked.cited().as_ref(),
-                    crate::handler::task_op(&verb),
-                    &self.tasker(),
-                    agent.as_ref(),
+            let own = maknae_proto::tasker_text(&self.tasker());
+            let rec = task_verb_record(
+                request_outcome_record(
+                    &host(),
+                    self.socket(),
+                    u32::MAX,
+                    None,
+                    Some(&widest_user()),
+                    None,
+                    None,
+                    u64::MAX,
+                    u64::MAX,
+                    (crate::handler::verb_to_action(&verb), None, None),
+                    (say.result, &say.reason, say.posture),
+                    &serde_json::Value::Null,
                 ),
-                role,
-                rule.as_ref(),
+                asked.object(),
+                asked.cited().as_ref(),
+                crate::handler::task_op(&verb),
+                &self.tasker(),
+                channel_agent.as_ref(),
             );
-            let mut task = asked.cited().map(|id| id.to_string());
-            let mut parent = None;
-            if op == "submit" {
-                rec = submit_outcome_record(rec, &TASK, submitted);
-                task = Some(TASK.to_string());
-                parent = submitted.map(ToString::to_string);
-            }
+            let (mut tasker, mut task, parent);
+            let mut rec = match &say.shape {
+                Shape::Submitted => {
+                    (tasker, task, parent) = (
+                        Some(own),
+                        Some(TASK.to_string()),
+                        self.parent().map(|p| p.to_string()),
+                    );
+                    submit_outcome_record(rec, &TASK, self.parent().as_ref())
+                }
+                shape => {
+                    let (role, rule) = self.decided(&verb);
+                    let rec = decision_record(rec, role, rule.as_ref());
+                    parent = None;
+                    match shape {
+                        Shape::Plain | Shape::Submitted => {
+                            (tasker, task) = (Some(own), asked.cited().map(|id| id.to_string()));
+                            rec
+                        }
+                        Shape::NoTasker => {
+                            (tasker, task) = (None, asked.cited().map(|id| id.to_string()));
+                            let mut rec = rec;
+                            rec.subject.tasker = None;
+                            rec
+                        }
+                        Shape::Cites(by) => {
+                            (tasker, task) = (by.clone(), Some(TASK.to_string()));
+                            cite_task(rec, &TASK, by.clone())
+                        }
+                    }
+                }
+            };
             self.session().stamp(&mut rec);
+            if !self.person && task.is_none() && tasker.is_none() {
+                (tasker, task) = (Some(held_tasker()), Some(TASK.to_string()));
+            }
             Case {
+                label: format!("{op}: {} {}", say.result, say.reason),
                 rec,
-                reason: reason.to_owned(),
-                tasker: maknae_proto::tasker_text(&self.tasker()),
+                tasker,
                 task,
                 parent,
                 op: Some(op),
@@ -11176,22 +11339,38 @@ mod record_widths {
         }
 
         fn task_verb_cases(&self) -> Vec<Case> {
-            let parent = (!self.person).then_some(&PARENT);
-            let mut all = Vec::new();
-            for op in ops() {
-                if op == "submit" {
-                    for reason in ["task held", "task queued"] {
-                        all.push(self.case(op, reason, parent));
-                    }
-                }
-                for reason in reasons_of(op, self.person) {
-                    all.push(self.case(op, &reason, None));
-                }
-            }
-            all
+            let own = maknae_proto::tasker_text(&self.tasker());
+            ops()
+                .into_iter()
+                .flat_map(|op| {
+                    says(op, self.person, &own)
+                        .iter()
+                        .map(|say| self.task_case(op, say))
+                        .collect::<Vec<_>>()
+                })
+                .collect()
         }
 
-        fn release_case(&self, outcome: &Result<Released, ReleaseRefusal>) -> Case {
+        fn release_case(
+            &self,
+            record: &Release,
+            plan: Result<crate::task::ReleasePlan, ReleaseRefusal>,
+            written: Option<ReleaseRefusal>,
+        ) -> Case {
+            let (tasker, parent, planned) = planned_release(plan);
+            let outcome = written.map_or(planned.clone(), Err);
+            let own = maknae_proto::tasker_text(&self.tasker());
+            let (named_tasker, named_parent) = match (record, &planned) {
+                (Release::Written, _) | (Release::Planned, Ok(_)) => (Some(own), self.parent()),
+                (Release::Planned, Err(ReleaseRefusal::ParentHeld(_))) => (None, Some(PARENT)),
+                (Release::Planned, Err(_)) => (None, None),
+            };
+            assert_eq!(
+                tasker.as_ref().map(maknae_proto::tasker_text),
+                named_tasker,
+                "the tasker the record names"
+            );
+            assert_eq!(parent, named_parent, "the parent the record names");
             let seq = Seq::new();
             let (h, au3_1) = (host(), serde_json::Value::Null);
             let ctx = BootCtx {
@@ -11203,26 +11382,81 @@ mod record_widths {
                 seq: &seq,
                 au3_1: &au3_1,
             };
-            let (result, posture) = tv::release_record_class(outcome);
-            let reason = tv::release_reason(outcome);
-            let parent = (!self.person).then_some(&PARENT);
+            let (result, posture) = tv::release_record_class(&outcome);
+            let reason = tv::release_reason(&outcome);
             let mut rec = held_release_record(
                 &ctx,
                 (u32::MAX, u64::MAX),
                 &TASK,
-                Some(&self.tasker()),
-                parent,
+                tasker.as_ref(),
+                parent.as_ref(),
                 (result, posture, &reason),
             );
             rec.seq = u64::MAX;
+            let label = match record {
+                Release::Planned => format!("planned: {reason}"),
+                Release::Written => format!("written: {reason}"),
+            };
             Case {
+                label,
                 rec,
-                reason,
-                tasker: maknae_proto::tasker_text(&self.tasker()),
+                tasker: named_tasker,
                 task: Some(TASK.to_string()),
-                parent: parent.map(ToString::to_string),
+                parent: named_parent.map(|p| p.to_string()),
                 op: None,
             }
+        }
+
+        fn plan(&self, from: TaskState, to: TaskState) -> crate::task::ReleasePlan {
+            crate::task::ReleasePlan {
+                task: TASK,
+                agent: AgentId::parse(&widest_agent_id()).expect("the widest id parses"),
+                tasker: self.tasker(),
+                parent: self.parent(),
+                from,
+                to,
+            }
+        }
+
+        fn release_cases(&self) -> Vec<Case> {
+            use crate::task::{Contained, ReleaseRefusal as R};
+            let states = [
+                (TaskState::Queued, TaskState::Queued),
+                (TaskState::Working, TaskState::Queued),
+                (TaskState::Reported, TaskState::Reported),
+                (TaskState::Closed, TaskState::Closed),
+                (TaskState::Held, TaskState::Held),
+            ];
+            let mut refusals = vec![
+                R::StillContained(Contained::Tasker),
+                R::StillContained(Contained::Root),
+                R::StillContained(Contained::Agent),
+                R::NotHeld,
+                R::Unknown,
+            ];
+            if !self.person {
+                refusals.extend([
+                    R::TaskerUnresolved,
+                    R::RootUnresolved,
+                    R::ParentHeld(PARENT),
+                ]);
+            }
+            let mut all = Vec::new();
+            for (from, to) in states {
+                all.push(self.release_case(&Release::Planned, Ok(self.plan(from, to)), None));
+            }
+            for r in &refusals {
+                all.push(self.release_case(&Release::Planned, Err(r.clone()), None));
+            }
+            let written = refusals.iter().cloned().chain([
+                tv::release_blocked(crate::mutation::Blocked::NotStarted),
+                tv::release_blocked(crate::mutation::Blocked::Unknown),
+            ]);
+            for r in written {
+                let plan = Ok(self.plan(TaskState::Held, TaskState::Held));
+                all.push(self.release_case(&Release::Written, plan, Some(r)));
+            }
+            all
         }
     }
 
@@ -11255,140 +11489,109 @@ mod record_widths {
         }
     }
 
-    fn release_candidates(person: bool) -> Vec<Result<Released, ReleaseRefusal>> {
-        let agent = widest_agent_id();
-        let states = [
-            TaskState::Queued,
-            TaskState::Working,
-            TaskState::Reported,
-            TaskState::Closed,
-            TaskState::Held,
-        ];
-        let mut all: Vec<Result<Released, ReleaseRefusal>> = Vec::new();
-        for from in states {
-            for now in states {
-                all.push(Ok(Released {
-                    task: TASK,
-                    from,
-                    now,
-                    rseq: Some(u64::MAX),
-                }));
-            }
-        }
-        for c in [Contained::Tasker, Contained::Root, Contained::Agent] {
-            all.push(Err(ReleaseRefusal::StillContained(c)));
-        }
-        all.push(Err(ReleaseRefusal::NotHeld));
-        all.push(Err(ReleaseRefusal::Unknown));
-        if !person {
-            all.push(Err(ReleaseRefusal::TaskerUnresolved));
-            all.push(Err(ReleaseRefusal::RootUnresolved));
-            all.push(Err(ReleaseRefusal::ParentHeld(PARENT)));
-        }
-        let kinds = [
-            TaskRefusal::Schema(String::new()),
-            TaskRefusal::Denied(String::new()),
-            TaskRefusal::AtCapacity {
-                agent: String::new(),
-            },
-            TaskRefusal::Unknown,
-            TaskRefusal::OtherAgent,
-            TaskRefusal::ParentNotHeld,
-            TaskRefusal::AgentGone,
-            TaskRefusal::Random,
-            TaskRefusal::Audit(String::new()),
-            TaskRefusal::Unsigned,
-            TaskRefusal::Store(String::new()),
-            TaskRefusal::CursorAhead,
-            TaskRefusal::Finished,
-            TaskRefusal::TooLong,
-            TaskRefusal::TaskerLive {
-                agent: String::new(),
-            },
-            TaskRefusal::TaskerHeld,
-            TaskRefusal::FollowUps,
-            TaskRefusal::FollowUpsUnseen,
-            TaskRefusal::NotWorking,
-            TaskRefusal::Unavailable(String::new()),
-        ];
-        all.extend(
-            kinds
-                .iter()
-                .filter_map(|k| bounded_cause(k, &agent))
-                .map(|r| Err(crate::task::unreleased(r))),
-        );
-        all.push(Err(tv::release_blocked(
-            crate::mutation::Blocked::NotStarted,
-        )));
-        all.push(Err(tv::release_blocked(crate::mutation::Blocked::Unknown)));
-        all
-    }
-
-    fn release_cases(person: bool) -> Vec<Case> {
-        let who = Who::new(person);
-        release_candidates(person)
-            .iter()
-            .map(|r| who.release_case(r))
-            .collect()
-    }
-
-    fn assert_the_lines_carry_what_the_builder_set(c: &Case) {
+    fn assert_the_line_carries_what_the_builder_set(c: &Case) {
         let m = macos_mirror(&c.rec);
         let line = &m.full_line;
-        assert!(line.contains(&c.reason), "reason in {line}");
-        assert!(
-            line.contains(&format!("tasker={}", c.tasker)),
-            "tasker in {line}"
-        );
-        if let Some(id) = &c.task {
-            assert!(line.contains(&format!("task={id}")), "task in {line}");
-        }
-        if let Some(id) = &c.parent {
-            assert!(line.contains(&format!("parent={id}")), "parent in {line}");
+        let at = &c.label;
+        assert_eq!(c.rec.subject.tasker, c.tasker, "tasker of {at}");
+        assert_eq!(c.rec.subject.task_id, c.task, "task of {at}");
+        assert_eq!(c.rec.subject.parent_task_id, c.parent, "parent of {at}");
+        assert!(line.contains(&c.rec.outcome.reason), "reason in {line}");
+        for (key, value) in [
+            ("tasker", &c.tasker),
+            ("task", &c.task),
+            ("parent", &c.parent),
+        ] {
+            match value {
+                Some(v) => assert!(line.contains(&format!("{key}={v}")), "{key} in {line}"),
+                None => assert!(!line.contains(&format!(" {key}=")), "no {key} in {line}"),
+            }
         }
         if let Some(op) = c.op {
             assert!(line.contains(&format!("op={op}")), "op in {line}");
         }
-        if let Some(degraded) = &m.degraded_line {
-            assert!(degraded.contains(&format!("session={}", u64::MAX)));
-            assert!(degraded.contains(&format!("seq={}", u64::MAX)));
-            assert!(degraded.contains("MAKNAE_PRIMARY=ok"));
+    }
+
+    fn assert_each_case_mirrors_as_measured(cases: &[Case], in_full: &[&str]) {
+        let labels: std::collections::BTreeSet<&str> =
+            cases.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels.len(), cases.len(), "labels name one case each");
+        for named in in_full {
+            assert!(labels.contains(named), "{named} names no case");
+        }
+        for c in cases {
+            assert_the_line_carries_what_the_builder_set(c);
+            let m = macos_mirror(&c.rec);
+            if in_full.contains(&c.label.as_str()) {
+                assert!(m.mirrored_in_full, "{} degrades", c.label);
+                assert!(m.full_len <= MACOS_SYSLOG_MAX);
+                assert_eq!(m.degraded_len, None);
+            } else {
+                assert!(!m.mirrored_in_full, "{} mirrors in full", c.label);
+                assert!(m.full_len > MACOS_SYSLOG_MAX);
+                let degraded = m.degraded_line.expect("a marker");
+                assert!(degraded.len() <= MACOS_SYSLOG_MAX, "{degraded}");
+                assert!(degraded.contains(&format!("session={}", u64::MAX)));
+                assert!(degraded.contains(&format!("seq={}", u64::MAX)));
+                assert!(degraded.contains("MAKNAE_PRIMARY=ok"));
+            }
         }
     }
 
-    fn assert_the_widest_degrades_and_its_marker_fits(cases: &[Case]) {
-        cases
-            .iter()
-            .for_each(assert_the_lines_carry_what_the_builder_set);
-        let widest = cases
+    fn widest_label(cases: &[Case]) -> &str {
+        &cases
             .iter()
             .max_by_key(|c| macos_mirror(&c.rec).full_len)
-            .expect("there are records");
-        let m = macos_mirror(&widest.rec);
-        assert!(!m.mirrored_in_full, "the widest record mirrors in full");
-        assert!(m.full_len > MACOS_SYSLOG_MAX);
-        assert!(m.degraded_len.expect("a marker") <= MACOS_SYSLOG_MAX);
+            .expect("there are records")
+            .label
     }
 
     #[test]
-    fn a_persons_task_verb_record_degrades_and_its_marker_fits() {
-        assert_the_widest_degrades_and_its_marker_fits(&Who::new(true).task_verb_cases());
+    fn a_persons_task_verb_records_mirror_as_measured() {
+        let cases = Who::new(true).task_verb_cases();
+        assert_each_case_mirrors_as_measured(&cases, &[]);
+        assert!(widest_label(&cases).starts_with("collect: permit acknowledged "));
     }
 
     #[test]
-    fn the_widest_task_verb_record_degrades_and_its_marker_fits() {
-        assert_the_widest_degrades_and_its_marker_fits(&Who::new(false).task_verb_cases());
+    fn the_task_verb_records_of_the_widest_agent_mirror_as_measured() {
+        let cases = Who::new(false).task_verb_cases();
+        assert_each_case_mirrors_as_measured(&cases, &[]);
+        assert!(widest_label(&cases).starts_with("collect: permit acknowledged "));
+    }
+
+    const WIDEST_RELEASE: &str =
+        "written: task release outcome unknown: the task store did not answer in time";
+
+    #[test]
+    fn a_persons_release_records_mirror_as_measured() {
+        let cases = Who::new(true).release_cases();
+        assert_each_case_mirrors_as_measured(&cases, PLAN_REFUSALS_NAMING_NO_PARTY);
+        assert_eq!(widest_label(&cases), WIDEST_RELEASE);
     }
 
     #[test]
-    fn a_persons_release_record_degrades_and_its_marker_fits() {
-        assert_the_widest_degrades_and_its_marker_fits(&release_cases(true));
+    fn the_release_records_of_the_widest_agent_mirror_as_measured() {
+        let cases = Who::new(false).release_cases();
+        let in_full = [
+            PLAN_REFUSALS_NAMING_NO_PARTY,
+            &[
+                "planned: task release refused: tasker unresolved",
+                "planned: task release refused: root unresolved",
+            ],
+        ]
+        .concat();
+        assert_each_case_mirrors_as_measured(&cases, &in_full);
+        assert_eq!(widest_label(&cases), WIDEST_RELEASE);
     }
 
-    #[test]
-    fn the_widest_release_record_degrades_and_its_marker_fits() {
-        assert_the_widest_degrades_and_its_marker_fits(&release_cases(false));
-    }
+    const PLAN_REFUSALS_NAMING_NO_PARTY: &[&str] = &[
+        "planned: task release refused: not held",
+        "planned: task release refused: no such task",
+        "planned: task release refused: root still contained",
+        "planned: task release refused: agent still contained",
+        "planned: task release refused: tasker still contained",
+    ];
 
     fn prompt_verb() -> Verb {
         Verb::SessionPrompt {
@@ -11424,6 +11627,7 @@ mod record_widths {
     }
 
     struct Identity {
+        name: &'static str,
         user: String,
         role: &'static str,
         rule: RuleCitation,
@@ -11460,18 +11664,28 @@ mod record_widths {
         let (user, user_rule) = decide(false);
         vec![
             Identity {
+                name: "alice as user",
                 user: "alice".into(),
                 role: user,
                 rule: user_rule.clone(),
                 stamped_by: Who::new(true),
             },
             Identity {
+                name: "aackerman as admin",
                 user: "aackerman".into(),
                 role: admin,
                 rule: admin_rule.clone(),
                 stamped_by: Who::new(true),
             },
             Identity {
+                name: "the widest user as admin",
+                user: widest_user(),
+                role: admin,
+                rule: admin_rule,
+                stamped_by: Who::new(true),
+            },
+            Identity {
+                name: "the widest user as user",
                 user: widest_user(),
                 role: user,
                 rule: user_rule,
@@ -11686,8 +11900,8 @@ mod record_widths {
         }
         assert!(
             !m.mirrored_in_full,
-            "{} mirrored in full",
-            rec.outcome.reason
+            "{}: {} mirrored in full",
+            i.name, rec.outcome.reason
         );
         assert!(m.full_len > MACOS_SYSLOG_MAX);
         let degraded = m.degraded_line.expect("a marker");
@@ -11784,6 +11998,9 @@ mod record_widths {
             &serde_json::Value::Null,
         );
         who.session().stamp(&mut rec);
+        assert_eq!(rec.object, None);
+        assert_eq!(rec.egress, None);
+        assert_eq!(rec.rule, None);
         let m = macos_mirror(&rec);
         assert!(m.mirrored_in_full);
         assert!(m.full_len <= MACOS_SYSLOG_MAX);
@@ -11801,51 +12018,79 @@ mod record_widths {
         }
     }
 
-    #[test]
-    fn a_sent_record_with_the_most_refused_tool_calls_degrades_and_its_marker_fits() {
-        let stub = || maknae_proto::ProposedToolCall {
-            name: "w".repeat(maknae_proto::MAX_TOOL_CALL_NAME_BYTES),
-            call_id: "i".repeat(maknae_proto::MAX_TOOL_CALL_ID_BYTES),
-            arguments: maknae_proto::SecretText(maknae_io::Zeroizing::new(String::new())),
-            refused: Some(maknae_proto::CallRefusal::ArgumentsOverBound { bytes: u64::MAX }),
+    fn the_most_refused_tool_calls_a_provider_body_can_carry() -> maknae_proto::PromptReply {
+        let (name, id) = (
+            "w".repeat(maknae_proto::MAX_TOOL_CALL_NAME_BYTES),
+            "i".repeat(maknae_proto::MAX_TOOL_CALL_ID_BYTES),
+        );
+        let args = "a".repeat(maknae_proto::MAX_TOOL_CALL_ARGS_BYTES + 1);
+        let body_of = |n: usize| {
+            let call = serde_json::json!({
+                "id": id,
+                "function": {"name": name, "arguments": args},
+            });
+            serde_json::json!({"choices": [{"message": {"tool_calls": vec![call; n]}}]})
+                .to_string()
+                .len()
         };
-        let reply_of = |n: usize| maknae_proto::PromptReply {
+        let most = (1..)
+            .take_while(|n| body_of(*n) <= maknae_config::PROVIDER_BODY_MAX_BYTES)
+            .last()
+            .expect("one refused call fits the body");
+        let reply = maknae_proto::PromptReply {
             reasoning: None,
             blocks: vec![],
-            tool_calls: (0..n).map(|_| stub()).collect(),
+            tool_calls: (0..most)
+                .map(|_| maknae_proto::ProposedToolCall {
+                    name: name.clone(),
+                    call_id: id.clone(),
+                    arguments: maknae_proto::SecretText(maknae_io::Zeroizing::new(String::new())),
+                    refused: Some(maknae_proto::CallRefusal::ArgumentsOverBound {
+                        bytes: args.len() as u64,
+                    }),
+                })
+                .collect(),
             usage: None,
         };
-        let per_stub = crate::egress::reply_capacity(&reply_of(1))
-            - crate::egress::reply_capacity(&reply_of(0));
-        let most = maknae_config::PROMPT_MAX_CEILING / per_stub;
-        let reply = reply_of(most);
-        let i = identities().remove(1);
-        let mut rec = crate::egress::outcome_for(
-            &widest_prompt_intent(&i),
-            u64::MAX,
-            "t".into(),
-            SendOutcome::Sent {
-                reply_length: u64::MAX,
-                usage: None,
-            },
-        );
-        crate::egress::record_refused_tool_calls(&mut rec, Some(&reply));
-        let calls = &rec
-            .egress
-            .as_ref()
-            .expect("an egress block")
-            .refused_tool_calls;
-        assert_eq!(calls.len(), most);
-        let m = macos_mirror(&rec);
-        assert!(m
-            .full_line
-            .contains(&format!("\"arguments_bytes\":{}", u64::MAX)));
-        assert!(m.full_line.contains(&format!(
-            "\"name\":\"{}\"",
-            "w".repeat(maknae_proto::MAX_TOOL_CALL_NAME_BYTES)
-        )));
-        assert!(!m.mirrored_in_full);
-        assert!(m.degraded_len.expect("a marker") <= MACOS_SYSLOG_MAX);
+        assert!(body_of(most + 1) > maknae_config::PROVIDER_BODY_MAX_BYTES);
+        assert_eq!(crate::egress::admitted_reply(&reply), Ok(()));
+        assert!(crate::egress::reply_capacity(&reply) <= maknae_config::PROMPT_MAX_CEILING);
+        reply
+    }
+
+    #[test]
+    fn a_sent_record_with_the_most_refused_tool_calls_degrades_and_its_marker_fits() {
+        let reply = the_most_refused_tool_calls_a_provider_body_can_carry();
+        let most = reply.tool_calls.len();
+        for i in identities() {
+            let mut rec = crate::egress::outcome_for(
+                &widest_prompt_intent(&i),
+                u64::MAX,
+                "t".into(),
+                SendOutcome::Sent {
+                    reply_length: crate::egress::reply_text_length(&reply),
+                    usage: reply.usage,
+                },
+            );
+            crate::egress::record_refused_tool_calls(&mut rec, Some(&reply));
+            let calls = &rec
+                .egress
+                .as_ref()
+                .expect("an egress block")
+                .refused_tool_calls;
+            assert_eq!(calls.len(), most, "{}", i.name);
+            let m = macos_mirror(&rec);
+            assert!(m.full_line.contains(&format!(
+                "\"arguments_bytes\":{}",
+                maknae_proto::MAX_TOOL_CALL_ARGS_BYTES + 1
+            )));
+            assert!(m.full_line.contains(&format!(
+                "\"name\":\"{}\"",
+                "w".repeat(maknae_proto::MAX_TOOL_CALL_NAME_BYTES)
+            )));
+            assert!(!m.mirrored_in_full, "{}", i.name);
+            assert!(m.degraded_len.expect("a marker") <= MACOS_SYSLOG_MAX);
+        }
     }
 
     #[test]

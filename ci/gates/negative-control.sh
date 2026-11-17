@@ -651,9 +651,9 @@ frp_fixture() {
   cat > "$root/Cargo.toml" <<'EOF_G'
 [workspace]
 resolver = "3"
-members = ["crates/maknae-config", "crates/maknae-vault", "crates/maknae-crypto", "crates/maknae-loop", "bins/maknaed", "bins/maknae", "bins/maknae-agentd", "bins/maknae-egress", "bins/maknae-spifc"]
+members = ["crates/maknae-config", "crates/maknae-vault", "crates/maknae-crypto", "crates/maknae-loop", "crates/maknae-audit-append", "bins/maknaed", "bins/maknae", "bins/maknae-agentd", "bins/maknae-egress", "bins/maknae-spifc"]
 EOF_G
-  for crate in maknae-config maknae-vault maknae-crypto maknae-loop; do
+  for crate in maknae-config maknae-vault maknae-crypto maknae-loop maknae-audit-append; do
     mkdir -p "$root/crates/$crate/src"
     echo '' > "$root/crates/$crate/src/lib.rs"
     cat > "$root/crates/$crate/Cargo.toml" <<EOF_G
@@ -671,7 +671,7 @@ EOF_G
     echo 'fn main() {}' > "$root/bins/$bin/src/main.rs"
     {
       printf '[package]\nname = "%s"\nversion = "0.0.0"\nedition = "2021"\n[dependencies]\n' "$bin"
-      for crate in maknae-config maknae-vault maknae-crypto maknae-loop; do
+      for crate in maknae-config maknae-vault maknae-crypto maknae-loop maknae-audit-append; do
         if [ "$bin" = "$1" ] && [ "$crate" = "$2" ]; then
           printf '%s = { path = "../../crates/%s", features = ["%s"] }\n' "$crate" "$crate" "$3"
         else
@@ -690,6 +690,8 @@ expect_reject_because "feature-resolution-pin/egress-enables-crypto-test-support
   "$here/feature-resolution-pin.sh" "$(frp_fixture maknae-egress maknae-crypto test-support)"
 expect_reject_because "feature-resolution-pin/agentd-enables-loop-test-support" "maknae-agentd's normal resolution enables maknae-loop/test-support" \
   "$here/feature-resolution-pin.sh" "$(frp_fixture maknae-agentd maknae-loop test-support)"
+expect_reject_because "feature-resolution-pin/agentd-enables-audit-append-test-support" "maknae-agentd's normal resolution enables maknae-audit-append/test-support" \
+  "$here/feature-resolution-pin.sh" "$(frp_fixture maknae-agentd maknae-audit-append test-support)"
 expect_reject_because "feature-resolution-pin/agentd-enables-vault-test-support" "maknae-agentd's normal resolution enables maknae-vault/test-support" \
   "$here/feature-resolution-pin.sh" "$(frp_fixture maknae-agentd maknae-vault test-support)"
 expect_accept "feature-resolution-pin/clean" "feature-resolution-pin: ok" \

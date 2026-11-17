@@ -73,7 +73,7 @@ impl Default for CallBounds {
     fn default() -> Self {
         Self {
             timeout: Duration::from_millis(maknae_config::DEFAULT_CALL_TIMEOUT_MS),
-            max_body_bytes: 1024 * 1024,
+            max_body_bytes: maknae_config::PROVIDER_BODY_MAX_BYTES,
         }
     }
 }

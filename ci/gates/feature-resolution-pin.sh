@@ -33,7 +33,7 @@ for bin in maknaed maknae maknae-agentd maknae-egress maknae-spifc; do
     echo "FAIL: $bin's normal resolution enables hermetic-test-seam (production must never select the weaker authz-load requirement)"
     fail=1
   fi
-  for crate in maknae-vault maknae-crypto maknae-loop; do
+  for crate in maknae-vault maknae-crypto maknae-loop maknae-audit-append; do
     if printf '%s\n' "$out" | grep -E "(^|[^a-z-])$crate v[0-9]" | grep -q 'test-support'; then
       echo "FAIL: $bin's normal resolution enables $crate/test-support (a test-only feature)"
       fail=1

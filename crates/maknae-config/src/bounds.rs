@@ -33,6 +33,9 @@ pub const EGRESS_BOUNDS_FILE: &str = "egress-bounds.yaml";
 /// Upper bound on the prefix. It reaches audit records and terminals.
 pub const MAX_KEY_PREFIX_BYTES: usize = 256;
 
+/// The largest provider response body the Egress Daemon reads.
+pub const PROVIDER_BODY_MAX_BYTES: usize = 1024 * 1024;
+
 /// The provider call timeout when `call_timeout_ms` is absent.
 pub const DEFAULT_CALL_TIMEOUT_MS: u64 = 120_000;
 const CALL_TIMEOUT_MS_RANGE: std::ops::RangeInclusive<i64> =
