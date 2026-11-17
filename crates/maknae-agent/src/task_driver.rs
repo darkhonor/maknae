@@ -435,6 +435,24 @@ pub fn stop_report(class: &str) -> String {
     format!("stopped: {class}")
 }
 
+pub fn reply_unusable_report(d: maknae_proto::ReplyDefect) -> String {
+    use maknae_proto::ReplyDefect as D;
+    let line = match d {
+        D::Malformed => "the provider's reply was not a chat completion: ask the agent's administrator to check the agent's provider endpoint and model",
+        D::NoChoices => "the provider's reply carried no answer: retry the task",
+        D::Empty => "the provider's reply was empty: retry the task",
+        D::ReasoningOnly => "the model reasoned but gave no final answer: retry the task, or ask the agent's administrator about the agent's model",
+        D::TokenLimit => "the model reached its reply token limit before answering: ask for the work in smaller pieces, or ask the agent's administrator to raise the agent's output_tokens",
+        D::UnknownTool => "the model asked for a tool Maknae does not offer: ask the agent's administrator about the agent's model",
+        D::OverBound => "the model's reply exceeded a platform limit: ask for the work in smaller pieces",
+        D::ProviderAuth => "the provider refused the agent's key, or its access to the agent's model: ask the agent's administrator to check the agent's provider key and model",
+        D::ProviderRateLimit => "the provider is rate-limiting the agent's key: retry later",
+        D::ProviderRejected => "the provider rejected the request: ask the agent's administrator to check the agent's model name and the Egress Daemon's journal",
+        D::ProviderError => "the provider failed to answer: retry later",
+    };
+    format!("stopped: reply-unusable: {}: {line}", d.name())
+}
+
 fn partition_is_relative_and_canonical(partition: &str) -> bool {
     !partition.is_empty()
         && partition
@@ -821,7 +839,19 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
         class: &'static str,
         seen: &mut u32,
     ) {
-        let done = self.report(secret(&stop_report(class)), false, seen).await;
+        self.stop_cited_with(id, session, class, stop_report(class), seen)
+            .await;
+    }
+
+    async fn stop_cited_with(
+        &mut self,
+        id: TaskId,
+        session: Option<&Session>,
+        class: &'static str,
+        report: String,
+        seen: &mut u32,
+    ) {
+        let done = self.report(secret(&report), false, seen).await;
         self.conclude(id, session, fixed_ending(done, Ending::Stopped(class)))
             .await;
     }
@@ -877,6 +907,10 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
                 },
                 Some(reason) => reason,
             };
+            let report = match &stopped {
+                StopReason::ReplyUnusable(d) => Some(reply_unusable_report(*d)),
+                _ => None,
+            };
             let class = match stopped {
                 StopReason::Stopped => {
                     let ending = match end {
@@ -915,8 +949,9 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
                 | StopReason::NothingPending) => stop_class(&reason),
             };
             let id = held.id;
+            let report = report.unwrap_or_else(|| stop_report(class));
             return self
-                .stop_cited(id, Some(&held.session), class, &mut held.seen)
+                .stop_cited_with(id, Some(&held.session), class, report, &mut held.seen)
                 .await;
         }
     }
@@ -2691,10 +2726,6 @@ mod tests {
             (PlaneError::Malformed, "prompt-malformed"),
             (PlaneError::Unavailable, "egress-unavailable"),
             (PlaneError::FrameTooLarge, "frame-bound"),
-            (
-                PlaneError::ReplyUnusable(maknae_proto::ReplyDefect::Empty),
-                "reply-unusable",
-            ),
         ] {
             let mut f = fake();
             f.claims = VecDeque::from([delivered(1, PART)]);
@@ -2713,6 +2744,60 @@ mod tests {
                 vec![ended(1, Ending::Stopped(stop_class_static(class)))]
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_reply_unusable_stop_reports_its_closed_reason_to_the_tasker() {
+        let d = maknae_proto::ReplyDefect::ProviderAuth;
+        let mut f = fake();
+        f.claims = VecDeque::from([delivered(1, PART)]);
+        f.replies = VecDeque::from([Err(PlaneError::ReplyUnusable(d))]);
+        let (log, events) = run(f).await;
+        let at = log.iter().position(|l| l == "prompt 1").unwrap();
+        let text = reply_unusable_report(d);
+        assert!(
+            text.starts_with("stopped: reply-unusable: provider-auth: "),
+            "{text}"
+        );
+        let mut want = vec![
+            format!("report {text}"),
+            "uncite".into(),
+            format!("close {CONV}"),
+        ];
+        want.extend(tail());
+        assert_eq!(&log[at + 1..], &want[..]);
+        assert_eq!(events, vec![ended(1, Ending::Stopped("reply-unusable"))]);
+    }
+
+    #[test]
+    fn reply_unusable_report_names_each_defect_and_an_action() {
+        use maknae_proto::ReplyDefect as D;
+        let all = [
+            D::Malformed,
+            D::NoChoices,
+            D::Empty,
+            D::ReasoningOnly,
+            D::TokenLimit,
+            D::UnknownTool,
+            D::OverBound,
+            D::ProviderAuth,
+            D::ProviderRateLimit,
+            D::ProviderRejected,
+            D::ProviderError,
+        ];
+        let mut suffixes = std::collections::BTreeSet::new();
+        for d in all {
+            let text = reply_unusable_report(d);
+            let prefix = format!("stopped: reply-unusable: {}: ", d.name());
+            let suffix = text.strip_prefix(&prefix).expect(&text);
+            assert!(!suffix.is_empty());
+            for banned in ["providers.yaml", "your Vault", "maknae login"] {
+                assert!(!suffix.contains(banned), "{text}");
+            }
+            assert!(text.len() <= maknae_config::PROMPT_MAX_BYTES_FLOOR);
+            suffixes.insert(suffix.to_string());
+        }
+        assert_eq!(suffixes.len(), all.len());
     }
 
     fn stop_class_static(class: &str) -> &'static str {
