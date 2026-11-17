@@ -3557,6 +3557,7 @@ mod tests {
             ("~/taskslist/**", false),
             ("~/**", false),
             ("/var/tasks/**", false),
+            ("/tasks/**", false),
             ("~/notes/tasks/**", false),
         ] {
             assert_eq!(
