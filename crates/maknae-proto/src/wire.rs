@@ -22,7 +22,7 @@ pub const PROTOCOL_VERSION: u16 = 1;
 
 /// Upper bound on the loop's conversation identifier (#241). 32, not 64: it is
 /// written into every egress audit record, and the macOS unified-log line cap was measured with
-/// this bound (maknae-audit-append `syslog_fmt.rs` tests).
+/// this bound (`record_widths` tests in maknae-kernel `run.rs`).
 pub const MAX_CONVERSATION_ID_BYTES: usize = 32;
 
 /// `[A-Za-z0-9._-]{1,32}`: it reaches audit records and terminals, so no

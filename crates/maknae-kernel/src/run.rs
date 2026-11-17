@@ -11750,7 +11750,7 @@ mod record_widths {
     }
 
     #[test]
-    fn a_contained_subjects_prompt_deny_record_degrades_and_its_marker_fits() {
+    fn a_contained_subjects_prompt_deny_record_mirrors_in_full() {
         let who = Who::contained();
         let facts = crate::conversation::facts::ConversationFacts {
             state: crate::conversation::facts::FactState::Active,
