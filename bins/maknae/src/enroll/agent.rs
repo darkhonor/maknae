@@ -3668,6 +3668,19 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn write_starter_policy_settles_a_leftover_temp_link_the_loader_would_refuse() {
+        use std::os::unix::fs::MetadataExt;
+        let (d, agents) = scratch_anchor("starter-policy-leftover");
+        std::fs::create_dir(d.join("hobi")).unwrap();
+        let path = d.join("hobi").join(maknae_config::POLICY_FILE);
+        assert!(write_starter_policy_as(&agents, &hobi_id(), current_owner()).unwrap());
+        std::fs::hard_link(&path, d.join("hobi").join(".policy.yaml.tmp.77.3")).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().nlink(), 2);
+        assert!(!write_starter_policy_as(&agents, &hobi_id(), current_owner()).unwrap());
+        assert_eq!(std::fs::metadata(&path).unwrap().nlink(), 1);
+    }
+
+    #[test]
     fn write_starter_policy_as_the_daemon_group_is_root_only() {
         let (d, agents) = scratch_anchor("starter-policy-root");
         std::fs::create_dir(d.join("hobi")).unwrap();

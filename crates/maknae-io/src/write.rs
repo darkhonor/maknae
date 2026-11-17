@@ -58,8 +58,16 @@ fn publish_synced<F: AsFd>(
     owner: Option<FileOwner>,
     sync_dir: impl FnOnce(&F) -> nix::Result<()>,
 ) -> Result<Strategy, IoError> {
-    publish_raw(dirfd, final_name, bytes, mode, owner, true)
-        .map_err(|e| crate::checks::map_errno_no_disambiguation(e, at))?;
+    publish_raw(
+        dirfd,
+        final_name,
+        bytes,
+        mode,
+        owner,
+        true,
+        syscall::unlink_at,
+    )
+    .map_err(|e| crate::checks::map_errno_no_disambiguation(e, at))?;
     sync_dir(dirfd).map_err(|e| IoError::PublishedNotDurable {
         path: at.to_path_buf(),
         kind: crate::checks::kind_of_errno(e),
@@ -76,7 +84,23 @@ pub(crate) fn publish_new_at<F: AsFd>(
     mode: Mode,
     owner: FileOwner,
 ) -> Result<bool, IoError> {
-    publish_new_synced(dirfd, final_name, at, bytes, mode, owner, syscall::fsync_fd)
+    publish_new_synced(
+        dirfd,
+        final_name,
+        at,
+        bytes,
+        mode,
+        owner,
+        Seams {
+            sync_dir: syscall::fsync_fd,
+            unlink_linked: syscall::unlink_at,
+        },
+    )
+}
+
+struct Seams<S, U> {
+    sync_dir: S,
+    unlink_linked: U,
 }
 
 fn publish_new_synced<F: AsFd>(
@@ -86,17 +110,79 @@ fn publish_new_synced<F: AsFd>(
     bytes: &[u8],
     mode: Mode,
     owner: FileOwner,
-    sync_dir: impl FnOnce(&F) -> nix::Result<()>,
+    seams: Seams<impl FnOnce(&F) -> nix::Result<()>, impl Fn(&F, &str) -> nix::Result<()>>,
 ) -> Result<bool, IoError> {
-    let created = publish_raw(dirfd, final_name, bytes, mode, Some(owner), false)
-        .map_err(|e| crate::checks::map_errno_no_disambiguation(e, at))?;
-    if created {
-        sync_dir(dirfd).map_err(|e| IoError::PublishedNotDurable {
-            path: at.to_path_buf(),
-            kind: crate::checks::kind_of_errno(e),
-        })?;
+    let created = publish_raw(
+        dirfd,
+        final_name,
+        bytes,
+        mode,
+        Some(owner),
+        false,
+        seams.unlink_linked,
+    )
+    .map_err(|e| crate::checks::map_errno_no_disambiguation(e, at))?;
+    if !created {
+        settle_existing(dirfd, final_name, at)?;
     }
+    (seams.sync_dir)(dirfd).map_err(|e| IoError::PublishedNotDurable {
+        path: at.to_path_buf(),
+        kind: crate::checks::kind_of_errno(e),
+    })?;
     Ok(created)
+}
+
+/// Removes only publish temp names that share the final's inode; any other link is refused.
+fn settle_existing<F: AsFd>(dirfd: &F, final_name: &str, at: &Path) -> Result<(), IoError> {
+    let map = |e| crate::checks::map_errno_no_disambiguation(e, at);
+    let multiply_linked = |nlink| IoError::MultiplyLinked {
+        path: at.to_path_buf(),
+        nlink,
+    };
+    let st = syscall::fstatat_nofollow(dirfd, final_name).map_err(map)?;
+    let nlink = syscall::nlink_count(st.st_nlink);
+    if nlink <= 1 {
+        return Ok(());
+    }
+    let mut dir = syscall::open_dir_handle(dirfd).map_err(map)?;
+    let mut leftovers = Vec::new();
+    for ent in dir.iter() {
+        let ent = ent.map_err(map)?;
+        if !is_temp_name_of(ent.file_name().to_bytes(), final_name) {
+            continue;
+        }
+        let Ok(t) = syscall::fstatat_nofollow(dirfd, ent.file_name()) else {
+            continue;
+        };
+        if (t.st_dev, t.st_ino) == (st.st_dev, st.st_ino) {
+            leftovers.push(ent.file_name().to_owned());
+        }
+    }
+    if leftovers.is_empty() {
+        return Err(multiply_linked(nlink));
+    }
+    for name in &leftovers {
+        syscall::unlink_at(dirfd, name.as_c_str()).map_err(map)?;
+    }
+    let left = syscall::fstatat_nofollow(dirfd, final_name).map_err(map)?;
+    match syscall::nlink_count(left.st_nlink) {
+        0 | 1 => Ok(()),
+        n => Err(multiply_linked(n)),
+    }
+}
+
+fn is_temp_name_of(name: &[u8], final_name: &str) -> bool {
+    let Some(rest) = name
+        .strip_prefix(b".")
+        .and_then(|n| n.strip_prefix(final_name.as_bytes()))
+        .and_then(|n| n.strip_prefix(b".tmp."))
+    else {
+        return false;
+    };
+    let mut parts = rest.split(|b| *b == b'.');
+    let digits =
+        |p: Option<&[u8]>| p.is_some_and(|p| !p.is_empty() && p.iter().all(u8::is_ascii_digit));
+    digits(parts.next()) && digits(parts.next()) && parts.next().is_none()
 }
 
 /// With `settle`, the directory is synced even when the name was already absent, so
@@ -175,6 +261,7 @@ fn publish_raw<F: AsFd>(
     mode: Mode,
     owner: Option<FileOwner>,
     replace: bool,
+    unlink_linked: impl Fn(&F, &str) -> nix::Result<()>,
 ) -> nix::Result<bool> {
     // CONTRACT LIMIT (external review): the temp adds "." + ".tmp.<pid>.<counter>" to
     // the caller's name, so a final name a filesystem accepts (up to 255 bytes on
@@ -210,9 +297,9 @@ fn publish_raw<F: AsFd>(
         return Ok(true);
     }
     let linked = syscall::link_at(dirfd, tmp.as_ref(), final_name.as_ref());
-    let _ = syscall::unlink_at(dirfd, tmp.as_str());
+    let unlinked = unlink_linked(dirfd, tmp.as_str());
     match linked {
-        Ok(()) => Ok(true),
+        Ok(()) => unlinked.map(|()| true),
         Err(nix::errno::Errno::EEXIST) => Ok(false),
         Err(e) => Err(e),
     }
@@ -491,13 +578,56 @@ mod tests {
         assert!(left.is_empty(), "{left:?}");
     }
 
+    fn real_unlink(d: &std::fs::File, n: &str) -> nix::Result<()> {
+        syscall::unlink_at(d, n)
+    }
+
+    fn publish_new(
+        dirfd: &std::fs::File,
+        name: &str,
+        at: &Path,
+        bytes: &[u8],
+        owner: crate::anchor::FileOwner,
+        sync: impl FnOnce(&std::fs::File) -> nix::Result<()>,
+    ) -> Result<bool, IoError> {
+        publish_new_synced(
+            dirfd,
+            name,
+            at,
+            bytes,
+            Mode(0o640),
+            owner,
+            Seams {
+                sync_dir: sync,
+                unlink_linked: real_unlink,
+            },
+        )
+    }
+
+    fn io_eio(at: &Path) -> IoError {
+        IoError::PublishedNotDurable {
+            path: at.to_path_buf(),
+            kind: crate::IoKind::Other {
+                raw: nix::errno::Errno::EIO as i32,
+            },
+        }
+    }
+
+    fn temp_links(dir: &Path) -> Vec<std::ffi::OsString> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|n| n.to_string_lossy().contains(".tmp."))
+            .collect()
+    }
+
     #[test]
     fn a_new_publish_creates_then_syncs_the_directory_and_reports_created() {
         let d = tempfile::tempdir().unwrap();
         let dirfd = std::fs::File::open(d.path()).unwrap();
         let at = d.path().join("f");
         let mut synced = false;
-        let created = publish_new_synced(&dirfd, "f", &at, b"one", Mode(0o640), own_ids(), |_| {
+        let created = publish_new(&dirfd, "f", &at, b"one", own_ids(), |_| {
             synced = true;
             Ok(())
         });
@@ -508,17 +638,34 @@ mod tests {
     }
 
     #[test]
-    fn a_new_publish_onto_an_existing_name_leaves_it_and_never_syncs() {
+    fn a_new_publish_onto_an_existing_name_leaves_it_and_syncs_the_directory() {
         let d = tempfile::tempdir().unwrap();
         let dirfd = std::fs::File::open(d.path()).unwrap();
         let at = d.path().join("f");
         std::fs::write(&at, b"old").unwrap();
-        let created = publish_new_synced(&dirfd, "f", &at, b"new", Mode(0o640), own_ids(), |_| {
-            panic!("nothing was created, so nothing is synced")
+        let mut synced = false;
+        let created = publish_new(&dirfd, "f", &at, b"new", own_ids(), |_| {
+            synced = true;
+            Ok(())
         });
         assert_eq!(created, Ok(false));
+        assert!(synced, "a retry settles an earlier failed directory sync");
         assert_eq!(std::fs::read(&at).unwrap(), b"old");
         no_temp_left(d.path());
+    }
+
+    #[test]
+    fn a_failed_directory_sync_on_an_existing_name_is_published_not_durable() {
+        let d = tempfile::tempdir().unwrap();
+        let dirfd = std::fs::File::open(d.path()).unwrap();
+        let at = d.path().join("f");
+        std::fs::write(&at, b"old").unwrap();
+        let e = publish_new(&dirfd, "f", &at, b"new", own_ids(), |_| {
+            Err(nix::errno::Errno::EIO)
+        })
+        .unwrap_err();
+        assert_eq!(e, io_eio(&at));
+        assert_eq!(std::fs::read(&at).unwrap(), b"old");
     }
 
     #[test]
@@ -526,21 +673,126 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let dirfd = std::fs::File::open(d.path()).unwrap();
         let at = d.path().join("f");
-        use nix::errno::Errno;
-        let e = publish_new_synced(&dirfd, "f", &at, b"new", Mode(0o640), own_ids(), |_| {
-            Err(Errno::EIO)
+        let e = publish_new(&dirfd, "f", &at, b"new", own_ids(), |_| {
+            Err(nix::errno::Errno::EIO)
         })
+        .unwrap_err();
+        assert_eq!(e, io_eio(&at));
+        assert_eq!(std::fs::read(&at).unwrap(), b"new");
+    }
+
+    #[test]
+    fn a_failed_temp_unlink_after_the_link_is_an_error_not_success() {
+        let d = tempfile::tempdir().unwrap();
+        let dirfd = std::fs::File::open(d.path()).unwrap();
+        let at = d.path().join("f");
+        let e = publish_new_synced(
+            &dirfd,
+            "f",
+            &at,
+            b"new",
+            Mode(0o640),
+            own_ids(),
+            Seams {
+                sync_dir: |_: &std::fs::File| -> nix::Result<()> {
+                    panic!("an unsettled publication is not synced")
+                },
+                unlink_linked: |_: &std::fs::File, _: &str| Err(nix::errno::Errno::EIO),
+            },
+        )
         .unwrap_err();
         assert_eq!(
             e,
-            IoError::PublishedNotDurable {
+            IoError::Io {
                 path: at.clone(),
                 kind: crate::IoKind::Other {
-                    raw: Errno::EIO as i32
+                    raw: nix::errno::Errno::EIO as i32
                 },
             }
         );
-        assert_eq!(std::fs::read(&at).unwrap(), b"new");
+        assert_eq!(temp_links(d.path()).len(), 1);
+    }
+
+    #[test]
+    fn a_leftover_temp_link_is_settled_by_the_next_call() {
+        use std::os::unix::fs::MetadataExt;
+        let d = tempfile::tempdir().unwrap();
+        let dirfd = std::fs::File::open(d.path()).unwrap();
+        let at = d.path().join("f");
+        let first = publish_new_synced(
+            &dirfd,
+            "f",
+            &at,
+            b"one",
+            Mode(0o640),
+            own_ids(),
+            Seams {
+                sync_dir: |_: &std::fs::File| Ok(()),
+                unlink_linked: |_: &std::fs::File, _: &str| Err(nix::errno::Errno::EIO),
+            },
+        );
+        assert!(first.is_err());
+        assert_eq!(std::fs::metadata(&at).unwrap().nlink(), 2);
+        let mut synced = false;
+        let again = publish_new(&dirfd, "f", &at, b"two", own_ids(), |_| {
+            synced = true;
+            Ok(())
+        });
+        assert_eq!(again, Ok(false));
+        assert!(synced);
+        assert_eq!(std::fs::metadata(&at).unwrap().nlink(), 1);
+        assert_eq!(std::fs::read(&at).unwrap(), b"one");
+        no_temp_left(d.path());
+    }
+
+    #[test]
+    fn a_settled_leftover_is_refused_when_the_sync_fails() {
+        use std::os::unix::fs::MetadataExt;
+        let d = tempfile::tempdir().unwrap();
+        let dirfd = std::fs::File::open(d.path()).unwrap();
+        let at = d.path().join("f");
+        std::fs::write(&at, b"one").unwrap();
+        std::fs::hard_link(&at, d.path().join(".f.tmp.4242.7")).unwrap();
+        let e = publish_new(&dirfd, "f", &at, b"two", own_ids(), |_| {
+            Err(nix::errno::Errno::EIO)
+        })
+        .unwrap_err();
+        assert_eq!(e, io_eio(&at));
+        assert_eq!(std::fs::metadata(&at).unwrap().nlink(), 1);
+    }
+
+    #[test]
+    fn an_unrelated_extra_hard_link_is_refused_and_left_alone() {
+        use std::os::unix::fs::MetadataExt;
+        let d = tempfile::tempdir().unwrap();
+        let dirfd = std::fs::File::open(d.path()).unwrap();
+        let at = d.path().join("f");
+        std::fs::write(&at, b"one").unwrap();
+        std::fs::hard_link(&at, d.path().join("other")).unwrap();
+        std::fs::hard_link(&at, d.path().join(".f.tmp.notdigits.1")).unwrap();
+        let e = publish_new(&dirfd, "f", &at, b"two", own_ids(), |_| Ok(())).unwrap_err();
+        assert_eq!(
+            e,
+            IoError::MultiplyLinked {
+                path: at.clone(),
+                nlink: 3
+            }
+        );
+        assert_eq!(std::fs::metadata(&at).unwrap().nlink(), 3);
+        assert!(d.path().join("other").exists());
+        assert!(d.path().join(".f.tmp.notdigits.1").exists());
+    }
+
+    #[test]
+    fn a_temp_named_file_of_another_inode_is_never_touched() {
+        let d = tempfile::tempdir().unwrap();
+        let dirfd = std::fs::File::open(d.path()).unwrap();
+        let at = d.path().join("f");
+        std::fs::write(&at, b"one").unwrap();
+        std::fs::write(d.path().join(".f.tmp.1.1"), b"x").unwrap();
+        let again = publish_new(&dirfd, "f", &at, b"two", own_ids(), |_| Ok(()));
+        assert_eq!(again, Ok(false));
+        assert!(d.path().join(".f.tmp.1.1").exists());
     }
 
     #[test]
@@ -550,7 +802,7 @@ mod tests {
         let temp_dir = d.path().join(".d");
         std::fs::create_dir(&temp_dir).unwrap();
         let at = d.path().join("d/x");
-        let e = publish_new_synced(&dirfd, "d/x", &at, b"new", Mode(0o640), own_ids(), |_| {
+        let e = publish_new(&dirfd, "d/x", &at, b"new", own_ids(), |_| {
             panic!("nothing was created, so nothing is synced")
         })
         .unwrap_err();
@@ -571,7 +823,7 @@ mod tests {
             uid: nix::unistd::geteuid().as_raw() + 1,
             gid: nix::unistd::getegid().as_raw(),
         };
-        let e = publish_new_synced(&dirfd, "f", &at, b"new", Mode(0o640), other, |_| {
+        let e = publish_new(&dirfd, "f", &at, b"new", other, |_| {
             panic!("nothing was created, so nothing is synced")
         })
         .unwrap_err();
