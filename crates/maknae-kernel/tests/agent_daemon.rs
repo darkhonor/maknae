@@ -106,6 +106,8 @@ impl maknae_kernel::SessionFacts for AgentFacts {
 const ROLES: &str = "roles:\n  user:\n    allow: [\"session.task\", \"session.prompt\", \"session.new\", \"session.close\"]\ndestinations:\n  user:\n    allow: [\"provider:openai\"]\n";
 const HOBI_POLICY: &str = "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Write(~/**)\"]\n  deny: []\nactions:\n  allow: [\"session.prompt\", \"session.new\", \"session.close\", \"fs.mkdir\", \"fs.read\", \"fs.write\"]\n";
 
+const NO_POLICY: &str = "";
+
 type Hook<T> = Box<dyn FnMut(T) + Send>;
 
 /// The scripted model: each prompt takes the next reply; the hook sees its number first.
@@ -287,16 +289,21 @@ fn world(tag: &str, hobi_policy: &str) -> World {
 }
 
 fn world_of(tag: &str, enrolled: &[(&str, u32, &str)]) -> World {
+    world_over(
+        tag,
+        &format!("schema_version: 1\npermissions:\n  allow: []\n  deny: []\n{ROLES}"),
+        enrolled,
+    )
+}
+
+fn world_over(tag: &str, authz: &str, enrolled: &[(&str, u32, &str)]) -> World {
     let dir = std::env::temp_dir().join(format!("agentd629_{tag}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     let root = common::DirGuard(dir.canonicalize().unwrap());
     let paths = maknae_authz_basic::PolicyPaths::in_dir(&root);
-    common::write_0640(
-        &paths.authz,
-        &format!("schema_version: 1\npermissions:\n  allow: []\n  deny: []\n{ROLES}"),
-    );
+    common::write_0640(&paths.authz, authz);
     common::write_0640(&paths.sensitive, common::EMPTY_SENSITIVE);
     let user = common::euid_name();
     common::write_0640(
@@ -314,7 +321,9 @@ fn world_of(tag: &str, enrolled: &[(&str, u32, &str)]) -> World {
             &dir.join(maknae_config::ENROLLMENT_FILE),
             &format!("agent_id: {agent}\naccount: {agent}-svc\nuid: {uid}\nrole: user\n"),
         );
-        common::write_0640(&dir.join(maknae_config::POLICY_FILE), policy);
+        if policy != NO_POLICY {
+            common::write_0640(&dir.join(maknae_config::POLICY_FILE), policy);
+        }
     }
     let me = nix::unistd::geteuid().as_raw();
     let basic = maknae_authz_basic::HermeticAuthorizer::new(
@@ -1020,6 +1029,48 @@ async fn an_agent_carries_out_a_prompt_task_in_its_taskers_partition() {
     assert_eq!(close[0].subject.agent.as_deref(), Some("hobi"));
 }
 
+async fn works_one_task_on_the_tasks_right_alone(tag: &str, policy: &str) {
+    let _one = ONE_DAEMON.lock().await;
+    let w = world(tag, policy);
+    let id = w.submit("sentinel-663-right-prompt").await;
+    let notes = w.partition().join("notes.md");
+    let model = Model::script(vec![
+        write_file("w1", notes.to_str().unwrap(), "sentinel-663-written"),
+        answer("sentinel-663-answer"),
+    ]);
+    let d = start(&w, &model);
+    d.until("the report", |d| d.ended(&id)).await;
+    d.until("the conversation is closed", |d| {
+        !closed(&w).is_empty() || d.close_failures() > 0
+    })
+    .await;
+    assert_eq!(d.close_failures(), 0, "{:?}", d.events.lock().unwrap());
+    let endings = d.endings();
+    d.stop().await;
+    assert_eq!(endings, vec![(Some(id), Ending::Answered)]);
+    assert_eq!(
+        std::fs::read_to_string(&notes).unwrap(),
+        "sentinel-663-written"
+    );
+    let close = closed(&w);
+    assert_eq!(close.len(), 1);
+    assert_eq!(close[0].outcome.result, "permit");
+    assert_eq!(
+        w.collected().await,
+        vec![(id, None, "sentinel-663-answer".to_string())]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_with_only_the_starter_policy_works_a_task_to_its_report() {
+    works_one_task_on_the_tasks_right_alone("starter", maknae_config::STARTER_POLICY).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_with_no_policy_file_works_a_task_to_its_report() {
+    works_one_task_on_the_tasks_right_alone("no-policy", NO_POLICY).await;
+}
+
 fn user_text(turn: &Turn) -> Option<String> {
     match turn {
         Turn::User { content } => match content.first() {
@@ -1053,14 +1104,14 @@ fn reported(w: &World, id: &TaskId) -> bool {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_agent_is_refused_what_its_policy_denies() {
+async fn an_agent_is_refused_what_the_site_denies_inside_its_tasks() {
     let _one = ONE_DAEMON.lock().await;
     let me = nix::unistd::geteuid().as_raw();
-    let policy = HOBI_POLICY.replace(
-        "  deny: []\n",
-        &format!("  deny: [\"Write(~/tasks/users/{me}/sentinel-629-denied.md)\"]\n"),
+    let w = world_over(
+        "site-denied",
+        &format!("schema_version: 1\npermissions:\n  allow: []\n  deny: [\"Write(~/tasks/users/{me}/sentinel-629-denied.md)\"]\n{ROLES}"),
+        &[("hobi", HOBI_UID, HOBI_POLICY)],
     );
-    let w = world("policy-denied", &policy);
     let id = w.submit("sentinel-629-denied-prompt").await;
     let denied = w.partition().join("sentinel-629-denied.md");
     let model = Model::script(vec![
@@ -1077,9 +1128,7 @@ async fn an_agent_is_refused_what_its_policy_denies() {
     assert_eq!(writes[0].subject.agent.as_deref(), Some("hobi"));
     assert_eq!(
         writes[0].outcome.reason,
-        format!(
-            "denied by agents.hobi.policy.permissions entry Write(~/tasks/users/{me}/sentinel-629-denied.md)"
-        )
+        format!("denied by policy entry Write(~/tasks/users/{me}/sentinel-629-denied.md)")
     );
     let results = tool_results(&model.prompts()[1]);
     assert_eq!(results.len(), 1);
@@ -1452,11 +1501,15 @@ async fn an_undecodable_delivery_lapses_to_agent_lost_under_the_real_sweep_and_t
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_uncited_close_after_a_report_is_permitted_and_a_policy_refused_close_is_not_fatal() {
+async fn the_uncited_close_after_a_report_is_permitted_and_a_role_refused_close_is_not_fatal() {
     let _one = ONE_DAEMON.lock().await;
-    let unclosable = HOBI_POLICY.replace("\"session.close\", ", "");
-    assert_ne!(unclosable, HOBI_POLICY);
-    let w = world("close", &unclosable);
+    let unclosable = ROLES.replace(", \"session.close\"]", "]\n    deny: [\"session.close\"]");
+    assert_ne!(unclosable, ROLES);
+    let w = world_over(
+        "close",
+        &format!("schema_version: 1\npermissions:\n  allow: []\n  deny: []\n{unclosable}"),
+        &[("hobi", HOBI_UID, HOBI_POLICY)],
+    );
     let first = w.submit("sentinel-629-close-first").await;
     let second = w.submit("sentinel-629-close-second").await;
     let model = Model::script(vec![
@@ -1468,7 +1521,7 @@ async fn the_uncited_close_after_a_report_is_permitted_and_a_policy_refused_clos
         .await;
     d.until("both closes", |d| d.close_failures() == 2).await;
     d.stop().await;
-    let refused = records(&w, "session.close", "session.close is not in");
+    let refused = records(&w, "session.close", "denied by role grant session.close");
     assert_eq!(refused.len(), 2, "{refused:?}");
     assert!(refused
         .iter()

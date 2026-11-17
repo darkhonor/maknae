@@ -462,7 +462,8 @@ pub(crate) fn path_request(
 }
 
 /// Decides every path from one snapshot, and for an `fs.write` the `fs.read` twin
-/// of each path too. Returns the role of the last path decided, in both arms (on a
+/// of each path too; a cited verb is also decided as an `fs.list` of the directory
+/// it works in. Returns the role of the last path decided, in both arms (on a
 /// deny, the path that refused, #275), and that path's rule, except on a deny
 /// written in place of a permit that was never acted on. A permit cites the
 /// write's rule; a deny cites the request that refused.
@@ -482,7 +483,7 @@ fn authorize<P: Authorizer>(
     let mut requests = Vec::new();
     let mut decides: Vec<(&String, bool)> = Vec::new();
     if let (Some(within), Some(_)) = (&prepared.within, cited(verb)) {
-        let at = path_request(
+        let mut list = path_request(
             verb,
             uid,
             home,
@@ -492,7 +493,8 @@ fn authorize<P: Authorizer>(
             within,
             FsOperation::Read,
         );
-        requests.push(read_of(&at));
+        list.action = maknae_security::Action("fs.list".into());
+        requests.push(list);
         decides.push((within, true));
     }
     for path in &prepared.paths {
@@ -3060,19 +3062,31 @@ mod tests {
     }
     /// A composition whose agent `hobi` is the test euid, granted its whole home.
     fn hobi_pdp(fx: &Fixture) -> crate::Composition<maknae_authz_basic::HermeticAuthorizer> {
-        let config = fx.root.join("etc-628");
+        agent_pdp(
+            fx,
+            "etc-628",
+            crate::test_fixtures::READ_POLICY,
+            Some("schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Write(~/**)\"]\n"),
+        )
+    }
+    /// A composition whose agent `hobi` is the test euid, under `host` and its own `policy`.
+    fn agent_pdp(
+        fx: &Fixture,
+        dir: &str,
+        host: &str,
+        policy: Option<&str>,
+    ) -> crate::Composition<maknae_authz_basic::HermeticAuthorizer> {
+        let config = fx.root.join(dir);
         std::fs::create_dir_all(&config).unwrap();
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o750)).unwrap();
         let paths = maknae_authz_basic::PolicyPaths::in_dir(&config);
-        crate::test_fixtures::write_0640(&paths.authz, crate::test_fixtures::READ_POLICY);
+        crate::test_fixtures::write_0640(&paths.authz, host);
         crate::test_fixtures::write_empty_sensitive(&config);
         let uid = fx.principal.uid;
         crate::test_fixtures::write_agent(&config, "hobi", "hobi-svc", uid, "user");
-        crate::test_fixtures::write_agent_policy(
-            &config,
-            "hobi",
-            "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Write(~/**)\"]\n",
-        );
+        if let Some(policy) = policy {
+            crate::test_fixtures::write_agent_policy(&config, "hobi", policy);
+        }
         let baseline = maknae_authz_basic::HermeticAuthorizer::new(
             paths,
             maknae_config::Principal {
@@ -3195,6 +3209,72 @@ mod tests {
         }));
         assert_eq!(shown(&cited), ["1000"]);
         assert!(shown(&decider(None)).is_empty());
+    }
+    #[test]
+    fn an_agent_on_the_tasks_right_alone_may_make_its_own_partition_root() {
+        let fx = Fixture::new();
+        let pdp = agent_pdp(
+            &fx,
+            "etc-663",
+            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n",
+            None,
+        );
+        let hobi = maknae_config::AgentId::parse("hobi").unwrap();
+        let mkdir = |root: &str, parent: &str, name: &str, personal: Option<&AttrValue>| {
+            let parent = fx.root.join("tasks").join(parent);
+            std::fs::create_dir_all(parent.join(name)).unwrap();
+            let verb = Verb::FsMkdir {
+                path: parent.join(name).to_str().unwrap().into(),
+                parents: false,
+                components: vec![name.into()],
+                conversation: Some("conv-663".into()),
+            };
+            let fd: OwnedFd = std::fs::File::open(&parent).unwrap().into();
+            let prepared = prepare(verb.clone(), Some(fd), &fx.root, Lane::Local).unwrap();
+            let task = crate::handler::TaskStamp {
+                id: maknae_proto::TaskId([6; 16]),
+                tasker: "uid:1004".into(),
+                root: root.into(),
+                start: 0,
+            };
+            let stamp = Stamp::Agent {
+                agent: &hobi,
+                task: Some(&task),
+            };
+            authorize(
+                &prepared,
+                &verb,
+                fx.principal.uid,
+                Some(&fx.root),
+                &pdp,
+                "US",
+                None,
+                personal,
+                &stamp,
+            )
+            .map(|_| ())
+            .map_err(|(reason, path, _)| (reason, path))
+        };
+        assert_eq!(mkdir("users/1004", "users", "1004", None), Ok(()));
+        assert_eq!(mkdir("agents/jin", "agents", "jin", None), Ok(()));
+        let theirs = fx.root.join("tasks/users/31337");
+        assert_eq!(
+            mkdir("users/1004", "users", "31337", None),
+            Err((
+                "partition: the path is in another tasker's partition".into(),
+                theirs.to_str().unwrap().into()
+            ))
+        );
+        let users = fx.root.join("tasks/users");
+        let listed = users.to_str().unwrap().to_string();
+        let personal = AttrValue::Set([listed.clone()].into_iter().collect());
+        assert_eq!(
+            mkdir("users/1004", "users", "1004", Some(&personal)),
+            Err((
+                format!("fs.mkdir needs fs.read: sensitive: personal {listed}"),
+                listed
+            ))
+        );
     }
     #[tokio::test]
     async fn stat_of_a_protected_path_answers_protected() {

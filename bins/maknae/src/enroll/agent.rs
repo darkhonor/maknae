@@ -19,21 +19,6 @@ use yaml_rust2::Yaml;
 use zeroize::Zeroizing;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
-pub enum RoleArg {
-    User,
-    Guest,
-}
-
-impl From<RoleArg> for AgentRole {
-    fn from(r: RoleArg) -> Self {
-        match r {
-            RoleArg::User => AgentRole::User,
-            RoleArg::Guest => AgentRole::Guest,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum PersonaArg {
     Admin,
     #[value(name = "self")]
@@ -61,9 +46,6 @@ pub struct AgentArgs {
     /// An address or CIDR the SecretID may be used from (repeatable).
     #[arg(long = "bind-cidr", required_unless_present = "refresh_access")]
     pub bind_cidr: Vec<String>,
-    /// The role the agent is bound to; an agent is never `admin`.
-    #[arg(long, value_enum, default_value_t = RoleArg::User)]
-    pub role: RoleArg,
     /// The AppRole auth mount the agent's role lives on.
     #[arg(long, default_value = DEFAULT_AGENT_APPROLE_MOUNT)]
     pub approle_mount: String,
@@ -97,7 +79,7 @@ pub struct AgentArgs {
     /// Grant the enrolled agent's account its read access again; touches no Vault.
     #[arg(long, conflicts_with_all = [
         "account", "bind_cidr", "provider", "model", "key_subpath", "key_field",
-        "context_tokens", "output_tokens", "persona", "rotate", "token_file", "role",
+        "context_tokens", "output_tokens", "persona", "rotate", "token_file",
         "approle_mount",
     ])]
     pub refresh_access: bool,
@@ -388,7 +370,7 @@ impl AgentRecord {
         };
         let role = req_str(&doc, "role", WHAT)?;
         let role = AgentRole::parse(&role)
-            .ok_or_else(|| EnrollError::State(format!("{WHAT}: unknown role {role:?}")))?;
+            .ok_or_else(|| EnrollError::State(format!("{WHAT}: {}", AgentRole::refusal(&role))))?;
         Ok(Self {
             agent_id: req_str(&doc, "agent_id", WHAT)?,
             account: req_str(&doc, "account", WHAT)?,
@@ -472,6 +454,7 @@ pub(crate) trait AgentOps: AgentVaultOps {
     ) -> Result<SecretSource, EnrollError>;
     fn write_record(&self, record: &AgentRecord) -> Result<(), EnrollError>;
     fn write_client(&self, client: &AgentClientConfig) -> Result<(), EnrollError>;
+    fn write_policy_if_absent(&self, agent: &AgentId) -> Result<bool, EnrollError>;
     fn grant_access(
         &self,
         agent: &AgentId,
@@ -642,6 +625,7 @@ pub(crate) async fn enroll_agent<O: AgentOps>(
     };
     ops.write_record(&record)?;
     ops.write_client(&client)?;
+    ops.write_policy_if_absent(&plan.agent)?;
     let live = AgentState {
         live: vec![acc],
         pending: Vec::new(),
@@ -988,6 +972,10 @@ impl AgentOps for RealAgentOps {
             .map_err(|e| io_error(&Path::new(AGENTS_DIR).join(&rel), e))
     }
 
+    fn write_policy_if_absent(&self, agent: &AgentId) -> Result<bool, EnrollError> {
+        write_starter_policy(&self.agents, agent, self.daemon_gid)
+    }
+
     fn grant_access(
         &self,
         agent: &AgentId,
@@ -1081,6 +1069,39 @@ fn write_drop_in(agent: &AgentId, account: &agent_unit::ServiceAccount) -> Resul
         .map_err(|e| io_error(&dir.join(agent_unit::DROP_IN_FILE), e))?;
     artifact_write::maybe_restorecon(&dir.join(agent_unit::DROP_IN_FILE));
     Ok(())
+}
+
+pub(crate) fn write_starter_policy(
+    agents: &maknae_io::Anchor,
+    agent: &AgentId,
+    daemon_gid: u32,
+) -> Result<bool, EnrollError> {
+    write_starter_policy_as(
+        agents,
+        agent,
+        FileOwner {
+            uid: 0,
+            gid: daemon_gid,
+        },
+    )
+}
+
+fn write_starter_policy_as(
+    agents: &maknae_io::Anchor,
+    agent: &AgentId,
+    owner: FileOwner,
+) -> Result<bool, EnrollError> {
+    let rel = Path::new(agent.as_str()).join(maknae_config::POLICY_FILE);
+    agents
+        .publish_owned_new(
+            &rel,
+            None,
+            maknae_config::STARTER_POLICY.as_bytes(),
+            Mode(0o640),
+            owner,
+        )
+        .map(|o| o.value)
+        .map_err(|e| io_error(&Path::new(AGENTS_DIR).join(&rel), e))
 }
 
 pub(crate) fn refresh_access(
@@ -1540,6 +1561,13 @@ where
     enroll_agent(&*ops, &plan, host, prior_record, prior_state).await
 }
 
+fn daemon_gid(resolver: &artifact_write::RealOwnerResolver) -> Result<u32, EnrollError> {
+    match resolver.resolve(Owner::RootMaknaeGroup)? {
+        (_, Some(gid)) => Ok(gid.as_raw()),
+        (_, None) => Err(EnrollError::Owner("no _maknae group".to_string())),
+    }
+}
+
 fn run_refresh_access(agent: &AgentId, locale: Locale) -> Result<String, EnrollError> {
     agents_dir_check(agents_dir_kind()?)?;
     let agents = open_dir(AGENTS_DIR, 0o022)?;
@@ -1559,6 +1587,12 @@ fn run_refresh_access(agent: &AgentId, locale: Locale) -> Result<String, EnrollE
     let account = readmitted(agent, &enrolled, admitted)?;
     let service =
         service.ok_or_else(|| EnrollError::State("the account was not admitted".into()))?;
+    let resolver = artifact_write::RealOwnerResolver {
+        operator_uid: 0,
+        operator_gid: 0,
+    };
+    let daemon_gid = daemon_gid(&resolver)?;
+    write_starter_policy(&agents, agent, daemon_gid)?;
     refresh_and_restart(
         &agent_access::Host,
         agent_access::Platform::HOST,
@@ -1612,10 +1646,7 @@ pub(crate) async fn run_enroll_agent(
         },
         &resolver,
     )?;
-    let daemon_gid = match resolver.resolve(Owner::RootMaknaeGroup)? {
-        (_, Some(gid)) => gid.as_raw(),
-        (_, None) => return Err(EnrollError::Owner("no _maknae group".to_string())),
-    };
+    let daemon_gid = daemon_gid(&resolver)?;
     let agents = open_dir(AGENTS_DIR, 0o022)?;
     let _lock = agents.try_lock_exclusive().map_err(|e| match e {
         IoError::Locked { .. } => {
@@ -1635,7 +1666,7 @@ pub(crate) async fn run_enroll_agent(
         home: String::new(),
         mount: args.approle_mount.clone(),
         cidrs,
-        role: args.role.into(),
+        role: AgentRole::User,
         rotate: args.rotate,
         client,
     };
@@ -1908,6 +1939,12 @@ pub(crate) mod tests {
             Ok(())
         }
 
+        fn write_policy_if_absent(&self, _agent: &AgentId) -> Result<bool, EnrollError> {
+            self.log.borrow_mut().push("policy".into());
+            self.check("policy")?;
+            Ok(true)
+        }
+
         fn grant_access(
             &self,
             agent: &AgentId,
@@ -2099,6 +2136,7 @@ pub(crate) mod tests {
                 "list",
                 "record",
                 "client",
+                "policy",
                 "state",
                 "state",
                 "grant hobi hobi-svc:990",
@@ -2225,6 +2263,7 @@ pub(crate) mod tests {
                 "list",
                 "record",
                 "client",
+                "policy",
                 "state",
                 "destroy:a",
                 "destroy:p",
@@ -2263,7 +2302,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(
-            fake.log()[9..],
+            fake.log()[10..],
             strings(&[
                 "destroy:acc-stale",
                 "destroy:gone",
@@ -2289,6 +2328,7 @@ pub(crate) mod tests {
             fake.log()[7..],
             strings(&[
                 "client",
+                "policy",
                 "state",
                 "destroy:a",
                 "destroy:b",
@@ -2623,6 +2663,7 @@ pub(crate) mod tests {
                 "list",
                 "record",
                 "client",
+                "policy",
                 "state",
                 "destroy:stray",
                 "state",
@@ -2985,14 +3026,13 @@ pub(crate) mod tests {
     #[test]
     fn the_record_round_trips_its_role() {
         let id = AgentId::parse("hobi").unwrap();
-        for role in [AgentRole::User, AgentRole::Guest] {
-            let r = AgentRecord { role, ..record() };
-            let yaml = r.to_yaml();
-            assert!(yaml.contains(&format!("role: {}", role.key())), "{yaml}");
-            assert_eq!(AgentRecord::parse(&yaml).unwrap(), r);
-            let enrolled = maknae_config::parse_agent_enrollment(&id, &yaml).unwrap();
-            assert_eq!((enrolled.role, enrolled.uid), (role, 990));
-        }
+        let role = AgentRole::User;
+        let r = AgentRecord { role, ..record() };
+        let yaml = r.to_yaml();
+        assert!(yaml.contains(&format!("role: {}", role.key())), "{yaml}");
+        assert_eq!(AgentRecord::parse(&yaml).unwrap(), r);
+        let enrolled = maknae_config::parse_agent_enrollment(&id, &yaml).unwrap();
+        assert_eq!((enrolled.role, enrolled.uid), (role, 990));
         let admin = record().to_yaml().replace("role: user", "role: admin");
         assert!(matches!(
             AgentRecord::parse(&admin),
@@ -3035,12 +3075,10 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn role_admin_is_not_a_choice() {
-        assert!(parse_args(&["--role", "admin"]).is_err());
-        assert_eq!(
-            AgentRole::from(parse_args(&["--role", "guest"]).unwrap().role),
-            AgentRole::Guest
-        );
+    fn role_is_not_an_enroll_flag() {
+        for role in ["user", "admin", "guest"] {
+            assert!(parse_args(&["--role", role]).is_err(), "{role}");
+        }
     }
 
     #[test]
@@ -3105,7 +3143,6 @@ pub(crate) mod tests {
             &["--persona", "self"],
             &["--rotate"],
             &["--token-file", "/t"],
-            &["--role", "guest"],
             &["--approle-mount", "m"],
         ] {
             let argv: Vec<&str> = ["maknae", "hobi", "--refresh-access"]
@@ -3116,14 +3153,6 @@ pub(crate) mod tests {
         }
         assert!(Cli::try_parse_from(["maknae", "hobi"]).is_err());
         assert!(parse_args(&["--refresh-access"]).is_err());
-    }
-
-    #[test]
-    fn the_role_defaults_to_user() {
-        assert_eq!(
-            AgentRole::from(parse_args(&[]).unwrap().role),
-            AgentRole::User
-        );
     }
 
     fn account(groups: &[u32]) -> maknae_io::HostAccount {
@@ -3608,6 +3637,84 @@ pub(crate) mod tests {
         let got = ops.write_record(&record());
         assert!(got.is_err(), "{got:?}");
         assert!(!d.join("hobi").exists());
+    }
+
+    fn current_owner() -> FileOwner {
+        FileOwner {
+            uid: nix::unistd::geteuid().as_raw(),
+            gid: nix::unistd::getegid().as_raw(),
+        }
+    }
+
+    #[test]
+    fn write_starter_policy_writes_only_when_absent() {
+        use std::os::unix::fs::PermissionsExt;
+        let (d, agents) = scratch_anchor("starter-policy");
+        std::fs::create_dir(d.join("hobi")).unwrap();
+        let path = d.join("hobi").join(maknae_config::POLICY_FILE);
+        assert!(write_starter_policy_as(&agents, &hobi_id(), current_owner()).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            maknae_config::STARTER_POLICY
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        std::fs::write(&path, "schema_version: 1\nmodels:\n  allow: [\"x/y\"]\n").unwrap();
+        let edited = std::fs::read(&path).unwrap();
+        assert!(!write_starter_policy_as(&agents, &hobi_id(), current_owner()).unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), edited);
+    }
+
+    #[test]
+    fn write_starter_policy_settles_a_leftover_temp_link_the_loader_would_refuse() {
+        use std::os::unix::fs::MetadataExt;
+        let (d, agents) = scratch_anchor("starter-policy-leftover");
+        std::fs::create_dir(d.join("hobi")).unwrap();
+        let path = d.join("hobi").join(maknae_config::POLICY_FILE);
+        assert!(write_starter_policy_as(&agents, &hobi_id(), current_owner()).unwrap());
+        std::fs::hard_link(&path, d.join("hobi").join(".policy.yaml.tmp.77.3")).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().nlink(), 2);
+        assert!(!write_starter_policy_as(&agents, &hobi_id(), current_owner()).unwrap());
+        assert_eq!(std::fs::metadata(&path).unwrap().nlink(), 1);
+    }
+
+    #[test]
+    fn write_starter_policy_as_the_daemon_group_is_root_only() {
+        let (d, agents) = scratch_anchor("starter-policy-root");
+        std::fs::create_dir(d.join("hobi")).unwrap();
+        let got = write_starter_policy(&agents, &hobi_id(), 0);
+        if running_as_root() {
+            assert!(got.unwrap());
+        } else {
+            assert!(matches!(&got, Err(EnrollError::Io { .. })), "{got:?}");
+            assert!(!d.join("hobi").join(maknae_config::POLICY_FILE).exists());
+        }
+    }
+
+    #[test]
+    fn a_stale_guest_record_names_its_fix() {
+        let (d, agents) = scratch_anchor("stale-guest");
+        std::fs::create_dir(d.join("jin")).unwrap();
+        let mut r = record();
+        r.agent_id = "jin".into();
+        r.uid = 991;
+        write_0640(
+            &d.join("jin").join(maknae_config::ENROLLMENT_FILE),
+            &r.to_yaml().replace("role: user", "role: guest"),
+        );
+        let got = read_records(&agents, &hobi_id());
+        if running_as_root() {
+            let e = got.unwrap_err().to_string();
+            assert!(e.contains("edit `role:` to `user`"), "{e}");
+        } else {
+            assert!(got.is_err());
+        }
+        let direct = AgentRecord::parse(&r.to_yaml().replace("role: user", "role: guest"))
+            .unwrap_err()
+            .to_string();
+        assert!(direct.contains("edit `role:` to `user`"), "{direct}");
     }
 
     #[test]

@@ -69,11 +69,12 @@ pub use agents::load_agents_with_requirement;
 #[cfg(unix)]
 pub use agents::{
     bindings_conflict, load_agent_client, load_agent_enrollment, load_agents, parse_agent_client,
-    parse_agent_enrollment, parse_agent_policy, read_persona, service_account_check,
-    AccountRefusal, AgentClientConfig, AgentEnrollment, AgentId, AgentPolicy, AgentProvider,
-    AgentRole, AgentsLoad, HostAccounts, InvalidAgentId, PersonaMode, SkippedAgentEntry, TaskerRef,
-    AGENTS_DIR, AGENT_CLIENT_FILE, AGENT_ENTITY_PREFIX, ENROLLMENT_FILE, NON_LOGIN_SHELLS,
-    PERSONA_FILE, POLICY_FILE, RESERVED_AGENT_IDS,
+    parse_agent_enrollment, parse_agent_policy, read_persona, service_account_check, tasks_right,
+    tasks_right_canonical, AccountRefusal, AgentClientConfig, AgentEnrollment, AgentId,
+    AgentPolicy, AgentProvider, AgentRole, AgentsLoad, HostAccounts, InvalidAgentId, PersonaMode,
+    SkippedAgentEntry, TaskerRef, AGENTS_DIR, AGENT_CLIENT_FILE, AGENT_ENTITY_PREFIX,
+    ENROLLMENT_FILE, NON_LOGIN_SHELLS, PERSONA_FILE, POLICY_FILE, RESERVED_AGENT_IDS,
+    STARTER_POLICY, TASKS_RIGHT_PATHS, TASKS_RIGHT_SESSION,
 };
 pub use audit_cfg::{
     audit_from_section, resolve_readers, AuditConfig, ReaderAccount, ReaderLookup, AUDIT_SECTION,
@@ -98,8 +99,8 @@ pub use bindings_sync::{
 // dependency of their own; unix-gated like the fn whose signature carries it.
 pub use authz::{
     destination_entry_is_acceptable, load_authz, parse_authz, parse_subject_entry, ActionPattern,
-    AuthzError, AuthzPolicy, HomeUnbound, Match3, ModelRef, PathGlob, Pattern, RawActionGrants,
-    RawDestinations, Request, SubjectActions, SubjectPermissions, SubjectPolicy,
+    AgentMatch, AuthzError, AuthzPolicy, HomeUnbound, Match3, ModelRef, PathGlob, Pattern,
+    RawActionGrants, RawDestinations, Request, SubjectActions, SubjectPermissions, SubjectPolicy,
 };
 pub use banner::{banner_from_document, load_banner, BANNER_FILE, BANNER_PATH};
 pub use baseline_doc::{document_sections, value_from_canonical_json, BaselineSections};

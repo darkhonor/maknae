@@ -11,6 +11,7 @@
 
 use crate::binding::{Resolution, Roles};
 use crate::role::Role;
+use maknae_config::AgentMatch;
 use maknae_security::{AttrValue, Attributes, Obligation, Request as SecRequest, Verdict};
 
 /// Subject attribute key (spec §6, pinned for #77): `uid`, the authenticated
@@ -56,9 +57,6 @@ impl AgentUids {
     }
 }
 
-/// Actions an enrolled agent holds only when its own `policy.yaml` grants them (ADR-0033 decision 4).
-const AGENT_DEFAULT_DENIED: [&str; 1] = ["session.new"];
-
 /// Each enrolled agent's `taskers:` resolved to uids; `None` where its policy lists none.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub(crate) struct AgentTaskers(
@@ -82,9 +80,17 @@ pub(crate) struct SubjectEntry {
     pub(crate) actions: Option<SubjectActionSet>,
     pub(crate) models: Option<Vec<maknae_config::ModelRef>>,
     pub(crate) origin: SubjectOrigin,
+    pub(crate) right: Option<maknae_config::SubjectPermissions>,
 }
 
 impl SubjectEntry {
+    pub(crate) fn agent_right(&self) -> Option<(&str, &maknae_config::SubjectPermissions)> {
+        match (&self.origin, &self.right) {
+            (SubjectOrigin::Agent(id), Some(right)) => Some((id.as_str(), right)),
+            (SubjectOrigin::Agent(_), None) | (SubjectOrigin::Authz, _) => None,
+        }
+    }
+
     fn section(&self) -> String {
         match &self.origin {
             SubjectOrigin::Authz => format!("subjects.{}", self.name),
@@ -144,6 +150,10 @@ pub(crate) enum Cited {
     AgentPath {
         agent: String,
         effect: Effect,
+        source: String,
+    },
+    AgentRight {
+        agent: String,
         source: String,
     },
 }
@@ -870,12 +880,12 @@ pub(crate) fn decide_loaded_cited(
             (decided, None)
         }
         Role::Admin | Role::User | Role::Guest
-            if let Some(decided) = agent_arm(&lp.agents, lp.subjects.get(uid), uid, role, req) =>
+            if let Some(decided) = agent_arm(&lp.agents, uid, role, req) =>
         {
             (decided, None)
         }
         Role::Admin | Role::User | Role::Guest
-            if let Some(limited) = action_limit(lp.subjects.get(uid), &req.action.0) =>
+            if let Some(limited) = action_limit(&lp.policy, lp.subjects.get(uid), req) =>
         {
             (limited, None)
         }
@@ -1092,13 +1102,7 @@ fn holding_arm(agents: &AgentUids, uid: u32, role: Role, req: &SecRequest) -> Op
     }
 }
 
-fn agent_arm(
-    agents: &AgentUids,
-    entry: Option<&SubjectEntry>,
-    uid: u32,
-    role: Role,
-    req: &SecRequest,
-) -> Option<Verdict> {
+fn agent_arm(agents: &AgentUids, uid: u32, role: Role, req: &SecRequest) -> Option<Verdict> {
     let id = agents.get(uid)?;
     let action = req.action.0.as_str();
     let deny = |reason: String| Some(Verdict::Deny { reason });
@@ -1108,12 +1112,10 @@ fn agent_arm(
         Role::User | Role::Guest => {}
     }
     match class_of(action) {
-        Some(Class::Admin) if action == "admin.whoami" => return None,
-        Some(Class::Admin) => {
-            return deny(format!(
-                "agent {id}: {action} is never permitted to an agent"
-            ))
-        }
+        Some(Class::Admin) if action == "admin.whoami" => None,
+        Some(Class::Admin) => deny(format!(
+            "agent {id}: {action} is never permitted to an agent"
+        )),
         Some(
             Class::Liveness
             | Class::Session
@@ -1122,22 +1124,18 @@ fn agent_arm(
             | Class::Mcp
             | Class::Kernel,
         )
-        | None => {}
+        | None => None,
     }
-    let granted = entry
-        .filter(|e| matches!(e.origin, SubjectOrigin::Agent(_)))
-        .and_then(|e| e.actions.as_ref())
-        .is_some_and(|set| set.allow.contains_key(action) && !set.deny.contains_key(action));
-    if AGENT_DEFAULT_DENIED.contains(&action) && !granted {
-        return deny(format!(
-            "agent {id}: {action} needs a grant in its policy.yaml"
-        ));
-    }
-    None
 }
 
-fn action_limit(entry: Option<&SubjectEntry>, action: &str) -> Option<Verdict> {
+/// The operator's `actions:` limit, except on a file request the entry's built-in right decides.
+fn action_limit(
+    policy: &maknae_config::AuthzPolicy,
+    entry: Option<&SubjectEntry>,
+    req: &SecRequest,
+) -> Option<Verdict> {
     let entry = entry?;
+    let action = req.action.0.as_str();
     let action = if DECIDED_AS_READ.contains(&action) {
         "fs.read"
     } else {
@@ -1147,6 +1145,7 @@ fn action_limit(entry: Option<&SubjectEntry>, action: &str) -> Option<Verdict> {
     match class_of(action) {
         Some(Class::Liveness | Class::Kernel) | None => return None,
         Some(Class::Admin) if action == "admin.whoami" => return None,
+        Some(Class::Fs) if right_decides(policy, entry, req) => return None,
         Some(Class::Admin | Class::Session | Class::Fs | Class::Terminal | Class::Mcp) => {}
     }
     let (name, section) = (&entry.name, entry.section());
@@ -1184,6 +1183,7 @@ fn kernel_decided(req: &SecRequest) -> Verdict {
 
 /// Universal filesystem capability grammar (#158). `role_key` supplies audit
 /// testimony only; it does not select a different path permission set.
+#[derive(Clone, Copy)]
 enum FsScope {
     Read,
     ReadSubtree,
@@ -1226,6 +1226,81 @@ fn attempt_scope(req: &SecRequest) -> Result<FsScope, Verdict> {
     Ok(scope)
 }
 
+/// The request's canonical path and the home `~` binds to; a missing or wrong-typed
+/// attribute is failed-to-evaluate, a non-canonical path a refusal (spec §4.4).
+fn fs_target(req: &SecRequest) -> Result<(&std::path::Path, Option<&std::path::Path>), Decision> {
+    let path = match req.resource.0.get(RESOURCE_PATH) {
+        Some(AttrValue::Str(s)) => s.as_str(),
+        _ => return Err((Verdict::Indeterminate, None)),
+    };
+    if let Some(offense) = canonical_violation(path) {
+        return Err((
+            Verdict::Deny {
+                reason: format!("non-canonical resource path ({offense})"),
+            },
+            None,
+        ));
+    }
+    let home = match req.subject.0.get(maknae_security::SUBJECT_HOME) {
+        None => None,
+        Some(AttrValue::Str(h)) => Some(std::path::Path::new(h.as_str())),
+        Some(_) => return Err((Verdict::Indeterminate, None)),
+    };
+    Ok((std::path::Path::new(path), home))
+}
+
+fn evaluate_floored(
+    policy: &maknae_config::AuthzPolicy,
+    set: Option<&maknae_config::SubjectPermissions>,
+    scope: FsScope,
+    path: &std::path::Path,
+    home: Option<&std::path::Path>,
+) -> Result<maknae_config::Match3, maknae_config::HomeUnbound> {
+    match scope {
+        FsScope::Read => policy.evaluate3_floored(set, &maknae_config::Request::Read(path), home),
+        FsScope::Write => policy.evaluate3_floored(set, &maknae_config::Request::Write(path), home),
+        FsScope::ReadSubtree => policy.evaluate_read_subtree_floored(set, path, home),
+        FsScope::WriteSubtree => policy.evaluate_write_subtree_floored(set, path, home),
+    }
+}
+
+fn evaluate_agent(
+    policy: &maknae_config::AuthzPolicy,
+    right: &maknae_config::SubjectPermissions,
+    set: Option<&maknae_config::SubjectPermissions>,
+    scope: FsScope,
+    path: &std::path::Path,
+    home: Option<&std::path::Path>,
+) -> Result<AgentMatch, maknae_config::HomeUnbound> {
+    match scope {
+        FsScope::Read => {
+            policy.evaluate3_agent(right, set, &maknae_config::Request::Read(path), home)
+        }
+        FsScope::Write => {
+            policy.evaluate3_agent(right, set, &maknae_config::Request::Write(path), home)
+        }
+        FsScope::ReadSubtree => policy.evaluate_read_subtree_agent(right, set, path, home),
+        FsScope::WriteSubtree => policy.evaluate_write_subtree_agent(right, set, path, home),
+    }
+}
+
+fn right_decides(
+    policy: &maknae_config::AuthzPolicy,
+    entry: &SubjectEntry,
+    req: &SecRequest,
+) -> bool {
+    let Some((_, right)) = entry.agent_right() else {
+        return false;
+    };
+    let (Ok(scope), Ok((path, home))) = (attempt_scope(req), fs_target(req)) else {
+        return false;
+    };
+    matches!(
+        evaluate_agent(policy, right, entry.permissions.as_ref(), scope, path, home),
+        Ok(AgentMatch::Right { .. })
+    )
+}
+
 fn decide_fs(
     lp: &LoadedPolicy,
     req: &SecRequest,
@@ -1240,40 +1315,27 @@ fn decide_fs(
         Some(Conversation::Active { owned: false }) => return refused(FOREIGN),
         None => return (Verdict::Indeterminate, None),
     }
-    let path = match req.resource.0.get(RESOURCE_PATH) {
-        Some(AttrValue::Str(s)) => s.as_str(),
-        // Required at THIS point of use: absent or wrong-typed → Indeterminate.
-        _ => return (Verdict::Indeterminate, None),
-    };
-    if let Some(offense) = canonical_violation(path) {
-        // A non-canonical path is a matcher bypass, refused BEFORE matching —
-        // never passed through, never NotApplicable (spec §4.4).
-        return (
-            Verdict::Deny {
-                reason: format!("non-canonical resource path ({offense})"),
-            },
-            None,
-        );
-    }
-    let path = std::path::Path::new(path);
-    let home = match req.subject.0.get(maknae_security::SUBJECT_HOME) {
-        None => None,
-        Some(AttrValue::Str(h)) => Some(std::path::Path::new(h.as_str())),
-        Some(_) => return (Verdict::Indeterminate, None),
+    let (path, home) = match fs_target(req) {
+        Ok(target) => target,
+        Err(decision) => return decision,
     };
     let subject = entry.and_then(|e| e.permissions.as_ref().map(|p| (e, p)));
     let set = subject.map(|(_, p)| p);
-    let matched = match scope {
-        FsScope::Read => {
-            lp.policy
-                .evaluate3_floored(set, &maknae_config::Request::Read(path), home)
-        }
-        FsScope::Write => {
-            lp.policy
-                .evaluate3_floored(set, &maknae_config::Request::Write(path), home)
-        }
-        FsScope::ReadSubtree => lp.policy.evaluate_read_subtree_floored(set, path, home),
-        FsScope::WriteSubtree => lp.policy.evaluate_write_subtree_floored(set, path, home),
+    let matched = match entry.and_then(SubjectEntry::agent_right) {
+        Some((agent, right)) => match evaluate_agent(&lp.policy, right, set, scope, path, home) {
+            Ok(AgentMatch::Right { source }) => {
+                return (
+                    permit_with_audit(),
+                    Some(Cited::AgentRight {
+                        agent: agent.to_string(),
+                        source,
+                    }),
+                )
+            }
+            Ok(AgentMatch::Floored(m)) => Ok(m),
+            Err(unbound) => Err(unbound),
+        },
+        None => evaluate_floored(&lp.policy, set, scope, path, home),
     };
     let Ok(matched) = matched else {
         return (Verdict::Indeterminate, None);
@@ -4651,8 +4713,8 @@ mod tests {
             permit_with_audit()
         );
         assert_eq!(
-            decide_loaded_cited(&lp, &principal(), &as_hobi("session.prompt")).verdict,
-            deny("subject hobi-svc: session.prompt is not in agents.hobi.policy.actions allow")
+            decide_loaded_cited(&lp, &principal(), &as_hobi("session.list")).verdict,
+            deny("subject hobi-svc: session.list is not in agents.hobi.policy.actions allow")
         );
     }
 
@@ -4801,7 +4863,6 @@ mod tests {
         assert_eq!(
             agent_arm(
                 &lp.agents,
-                lp.subjects.get(HOBI_UID),
                 HOBI_UID,
                 Role::Adversary,
                 &as_hobi("admin.whoami")
@@ -4890,10 +4951,8 @@ mod tests {
         );
     }
 
-    const SESSION_NEW_DEFAULT: &str = "agent hobi: session.new needs a grant in its policy.yaml";
-
     #[test]
-    fn an_agent_asking_session_new_without_a_grant_is_denied() {
+    fn an_agents_session_new_is_decided_by_its_role() {
         for policy in [
             None,
             Some("schema_version: 1\n"),
@@ -4903,92 +4962,16 @@ mod tests {
             for role in ["user", "guest"] {
                 let lp = lp_agent(role, policy);
                 let d = decide_loaded_cited(&lp, &principal(), &as_hobi("session.new"));
-                assert_eq!(d.verdict, deny(SESSION_NEW_DEFAULT), "{role} {policy:?}");
-                assert_eq!(d.role, Some(role), "{policy:?}");
-            }
-        }
-        assert_eq!(AGENT_DEFAULT_DENIED, ["session.new"]);
-    }
-
-    #[test]
-    fn a_policy_grant_lifts_the_session_new_default() {
-        for allow in [
-            "[\"session.new\"]",
-            "[\"session.*\"]",
-            "[\"session.prompt\", \"session.new\"]",
-        ] {
-            let policy = format!("schema_version: 1\nactions:\n  allow: {allow}\n");
-            for role in ["user", "guest"] {
-                let lp = lp_agent(role, Some(&policy));
-                let req = as_hobi("session.new");
-                assert_eq!(
-                    agent_arm(
-                        &lp.agents,
-                        lp.subjects.get(HOBI_UID),
-                        HOBI_UID,
-                        Role::User,
-                        &req
-                    ),
-                    None,
-                    "{allow}"
-                );
                 let want = match role {
                     "user" => permit_with_audit(),
                     _ => Verdict::NotApplicable {
                         note: Some(format!("role {role}: no rule for session.new")),
                     },
                 };
-                let d = decide_loaded_cited(&lp, &principal(), &req);
-                assert_eq!(d.verdict, want, "{role} {allow}");
+                assert_eq!(d.verdict, want, "{role} {policy:?}");
+                assert_eq!(d.role, Some(role), "{policy:?}");
             }
         }
-    }
-
-    #[test]
-    fn a_policy_deny_keeps_the_session_new_default() {
-        for actions in [
-            "  allow: [\"session.*\"]\n  deny: [\"session.new\"]\n",
-            "  allow: [\"session.new\"]\n  deny: [\"session.*\"]\n",
-            "  allow: [\"session.new\"]\n  deny: [\"session.new\"]\n",
-        ] {
-            let policy = format!("schema_version: 1\nactions:\n{actions}");
-            let lp = lp_agent("user", Some(&policy));
-            assert_eq!(
-                decide_loaded_cited(&lp, &principal(), &as_hobi("session.new")).verdict,
-                deny(SESSION_NEW_DEFAULT),
-                "{actions}"
-            );
-        }
-    }
-
-    #[test]
-    fn only_the_agents_own_policy_lifts_the_session_new_default() {
-        let lp = lp_agent("user", None);
-        let mut allow = BTreeMap::new();
-        allow.insert("session.new", "session.new".to_string());
-        let authz_entry = SubjectEntry {
-            name: "hobi-svc".into(),
-            permissions: None,
-            actions: Some(SubjectActionSet {
-                allow,
-                deny: BTreeMap::new(),
-            }),
-            models: None,
-            origin: SubjectOrigin::Authz,
-        };
-        let req = as_hobi("session.new");
-        assert_eq!(
-            agent_arm(&lp.agents, Some(&authz_entry), HOBI_UID, Role::User, &req),
-            Some(deny(SESSION_NEW_DEFAULT))
-        );
-        let agent_entry = SubjectEntry {
-            origin: SubjectOrigin::Agent("hobi".into()),
-            ..authz_entry
-        };
-        assert_eq!(
-            agent_arm(&lp.agents, Some(&agent_entry), HOBI_UID, Role::User, &req),
-            None
-        );
     }
 
     #[test]
@@ -5025,13 +5008,7 @@ mod tests {
             for action in ["admin.status", "session.new", "liveness.ping"] {
                 let req = any_action(HUMAN_UID, action);
                 assert_eq!(
-                    agent_arm(
-                        &lp.agents,
-                        lp.subjects.get(HUMAN_UID),
-                        HUMAN_UID,
-                        role,
-                        &req
-                    ),
+                    agent_arm(&lp.agents, HUMAN_UID, role, &req),
                     None,
                     "{role:?} {action}"
                 );

@@ -317,6 +317,30 @@ fn hobi_account(uid: u32) -> Result<Option<maknae_io::HostAccount>, String> {
     }))
 }
 
+pub(crate) const BTS_HOSTS: maknae_authz_basic::HostLookups = maknae_authz_basic::HostLookups {
+    account: bts_account,
+    daemons: no_daemons,
+    group: no_group,
+};
+
+fn bts_account(uid: u32) -> Result<Option<maknae_io::HostAccount>, String> {
+    let name = match uid {
+        2001 => "hobi-svc",
+        2002 => "jin-svc",
+        2003 => "suga-svc",
+        2004 => "jimin-svc",
+        _ => return Ok(None),
+    };
+    Ok(Some(maknae_io::HostAccount {
+        uid,
+        name: name.into(),
+        primary_gid: uid,
+        shell: "/usr/sbin/nologin".into(),
+        dir: "/var/empty".into(),
+        named_groups: Vec::new(),
+    }))
+}
+
 pub(crate) const HOBI_AND_JIN_HOSTS: maknae_authz_basic::HostLookups =
     maknae_authz_basic::HostLookups {
         account: hobi_and_jin_account,

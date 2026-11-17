@@ -606,21 +606,35 @@ mod tests {
     }
 
     const HOBI_HOME: &str = "/home/hobi-svc";
+    const HOBI_POLICY: &str =
+        "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Write(~/**)\"]\n";
 
-    fn hobi_composition(
+    const AGENTS: &[(&str, u32, Option<&str>)] = &[
+        ("hobi", 2001, Some(HOBI_POLICY)),
+        ("jin", 2002, None),
+        ("suga", 2003, Some("schema_version: 1\n")),
+        (
+            "jimin",
+            2004,
+            Some("schema_version: 1\npermissions:\n  allow: [\"Read(~/notes/**)\"]\n"),
+        ),
+    ];
+
+    fn agents_composition(
         tag: &str,
+        policy: &str,
     ) -> (
         crate::test_fixtures::DirGuard,
         Composition<HermeticAuthorizer>,
     ) {
-        let (g, basic) = fixture(tag, READ_POLICY, None);
-        basic.set_hosts(crate::test_fixtures::HOBI_HOSTS);
-        crate::test_fixtures::write_agent(&g.0, "hobi", "hobi-svc", 2001, "user");
-        crate::test_fixtures::write_agent_policy(
-            &g.0,
-            "hobi",
-            "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Write(~/**)\"]\n",
-        );
+        let (g, basic) = fixture(tag, policy, None);
+        basic.set_hosts(crate::test_fixtures::BTS_HOSTS);
+        for (id, uid, agent_policy) in AGENTS {
+            crate::test_fixtures::write_agent(&g.0, id, &format!("{id}-svc"), *uid, "user");
+            if let Some(agent_policy) = agent_policy {
+                crate::test_fixtures::write_agent_policy(&g.0, id, agent_policy);
+            }
+        }
         basic.install(basic.compile_from_file().unwrap());
         (
             g,
@@ -628,20 +642,36 @@ mod tests {
         )
     }
 
-    fn hobi_asks(action: &str, op: &str, path: &str, root: Option<&str>) -> Request {
+    fn hobi_composition(
+        tag: &str,
+    ) -> (
+        crate::test_fixtures::DirGuard,
+        Composition<HermeticAuthorizer>,
+    ) {
+        agents_composition(tag, READ_POLICY)
+    }
+
+    fn agent_asks(
+        agent: (&str, u32),
+        home: &str,
+        action: &str,
+        op: &str,
+        path: &str,
+        root: Option<&str>,
+    ) -> Request {
         let mut r = request(action);
         let s = |v: &str| AttrValue::Str(v.into());
-        r.subject.0.insert("uid", AttrValue::Int(2001));
+        r.subject
+            .0
+            .insert("uid", AttrValue::Int(i64::from(agent.1)));
         r.subject.0.insert(
             maknae_security::SUBJECT_CHANNEL,
             s(maknae_security::CHANNEL_AGENT),
         );
         r.subject
             .0
-            .insert(maknae_security::SUBJECT_AGENT, s("hobi"));
-        r.subject
-            .0
-            .insert(maknae_security::SUBJECT_HOME, s(HOBI_HOME));
+            .insert(maknae_security::SUBJECT_AGENT, s(agent.0));
+        r.subject.0.insert(maknae_security::SUBJECT_HOME, s(home));
         if let Some(root) = root {
             r.subject
                 .0
@@ -652,6 +682,36 @@ mod tests {
             .0
             .insert(maknae_security::CONTEXT_FS_OPERATION, s(op));
         r
+    }
+
+    fn hobi_asks(action: &str, op: &str, path: &str, root: Option<&str>) -> Request {
+        agent_asks(("hobi", 2001), HOBI_HOME, action, op, path, root)
+    }
+
+    #[test]
+    fn another_taskers_partition_is_denied_to_an_agent_holding_only_the_right() {
+        let (_g, c) = hobi_composition("partition-right-only");
+        let jin = |path: &str| {
+            agent_asks(
+                ("jin", 2002),
+                "/home/jin-svc",
+                "fs.write",
+                "write-create",
+                path,
+                Some("users/1"),
+            )
+        };
+        let other = c.decide_cited(&jin("/home/jin-svc/tasks/users/2/x"));
+        assert!(
+            matches!(other.verdict, Verdict::Deny { ref reason } if reason.starts_with("partition: ")),
+            "{other:?}"
+        );
+        let own = c.decide_cited(&jin("/home/jin-svc/tasks/users/1/x"));
+        assert!(matches!(own.verdict, Verdict::Permit { .. }), "{own:?}");
+        assert_eq!(
+            own.rule.map(|c| c.key),
+            Some("rule:agents.jin.tasks-right:allow:2".to_owned())
+        );
     }
 
     #[test]
@@ -728,26 +788,26 @@ mod tests {
             &g.0,
             include_str!("../../../packaging/common/sensitive.yaml"),
         );
-        basic.set_hosts(crate::test_fixtures::HOBI_HOSTS);
-        crate::test_fixtures::write_agent(&g.0, "hobi", "hobi-svc", 2001, "user");
-        crate::test_fixtures::write_agent_policy(
-            &g.0,
-            "hobi",
-            "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Write(~/**)\"]\n",
-        );
+        basic.set_hosts(crate::test_fixtures::BTS_HOSTS);
+        for (id, uid, policy) in AGENTS {
+            crate::test_fixtures::write_agent(&g.0, id, &format!("{id}-svc"), *uid, "user");
+            if let Some(policy) = policy {
+                crate::test_fixtures::write_agent_policy(&g.0, id, policy);
+            }
+        }
         basic.install(basic.compile_from_file().unwrap());
         let c = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
         let principal = i64::from(nix::unistd::geteuid().as_raw());
         let mut out = String::from(
             "# The shipped authz.yaml and sensitive.yaml, decided through the Composition.\n",
         );
-        let cases: &[(&str, Option<&str>, &[&str])] = &[
-            ("liveness.ping", None, &[""]),
-            ("session.new", None, &[""]),
-            ("fs.read", Some("read"), FS_TARGETS),
-            ("fs.write", Some("write-existing"), FS_TARGETS),
-            ("fs.write", Some("write-create"), FS_TARGETS),
-            ("fs.delete", Some("delete-entry"), FS_TARGETS),
+        let cases: &[(&str, Option<&str>, &[&str], bool)] = &[
+            ("liveness.ping", None, &[""], false),
+            ("session.new", None, &[""], false),
+            ("fs.read", Some("read"), FS_TARGETS, true),
+            ("fs.write", Some("write-existing"), FS_TARGETS, true),
+            ("fs.write", Some("write-create"), FS_TARGETS, true),
+            ("fs.delete", Some("delete-entry"), FS_TARGETS, true),
             (
                 "fs.delete",
                 Some("delete-tree"),
@@ -756,61 +816,100 @@ mod tests {
                     "/home/operator/projects",
                     "/home/operator/.ssh",
                 ],
+                false,
             ),
-            ("fs.mkdir", Some("mkdir"), FS_TARGETS),
+            ("fs.mkdir", Some("mkdir"), FS_TARGETS, true),
+            ("fs.list", Some("read"), &[], true),
+            ("fs.stat", Some("read"), &[], true),
         ];
-        for (who, uid) in [("principal", principal), ("unbound", 4242), ("agent", 2001)] {
-            for (term, op, targets) in cases {
-                for path in *targets {
-                    let mut r = request(term);
-                    r.subject.0.insert("uid", AttrValue::Int(uid));
-                    if who == "agent" {
+        let mut subjects: Vec<(String, i64, Option<&str>)> = vec![
+            ("principal".into(), principal, None),
+            ("unbound".into(), 4242, None),
+        ];
+        subjects.extend(
+            AGENTS
+                .iter()
+                .map(|(id, uid, _)| (format!("agent {id}"), i64::from(*uid), Some(*id))),
+        );
+        for (who, uid, agent) in &subjects {
+            for (term, op, targets, with_tasks) in cases {
+                let tasks: &[&str] = if agent.is_some() && *with_tasks {
+                    TASKS_TARGETS
+                } else {
+                    &[]
+                };
+                let targets = targets.iter().chain(tasks);
+                for path in targets {
+                    let tasked = path.contains("/tasks");
+                    let roots: &[Option<&str>] = if agent.is_some() && tasked {
+                        &[Some("users/1"), None]
+                    } else {
+                        &[None]
+                    };
+                    for root in roots {
+                        let mut r = request(term);
+                        r.subject.0.insert("uid", AttrValue::Int(*uid));
+                        if let Some(agent) = agent {
+                            r.subject.0.insert(
+                                maknae_security::SUBJECT_CHANNEL,
+                                AttrValue::Str(maknae_security::CHANNEL_AGENT.into()),
+                            );
+                            r.subject.0.insert(
+                                maknae_security::SUBJECT_AGENT,
+                                AttrValue::Str((*agent).into()),
+                            );
+                        }
+                        if let Some(root) = root {
+                            r.subject.0.insert(
+                                maknae_security::SUBJECT_ROOT_TASKER,
+                                AttrValue::Str((*root).into()),
+                            );
+                        }
                         r.subject.0.insert(
-                            maknae_security::SUBJECT_CHANNEL,
-                            AttrValue::Str(maknae_security::CHANNEL_AGENT.into()),
+                            maknae_security::SUBJECT_HOME,
+                            AttrValue::Str("/home/operator".into()),
                         );
-                        r.subject.0.insert(
-                            maknae_security::SUBJECT_AGENT,
-                            AttrValue::Str("hobi".into()),
-                        );
-                    }
-                    r.subject.0.insert(
-                        maknae_security::SUBJECT_HOME,
-                        AttrValue::Str("/home/operator".into()),
-                    );
-                    if !path.is_empty() {
-                        r.resource.0.insert("path", AttrValue::Str((*path).into()));
-                    }
-                    if let Some(o) = op {
-                        r.context.0.insert(
-                            maknae_security::CONTEXT_FS_OPERATION,
-                            AttrValue::Str((*o).into()),
-                        );
-                    }
-                    let twin = matches!(*term, "fs.write" | "fs.mkdir" | "fs.delete")
-                        .then(|| crate::mutation::read_of(&r));
-                    for (half, r) in [("", Some(r)), (" read-twin", twin)] {
-                        let Some(r) = r else { continue };
-                        let op = match r.context.0.get(maknae_security::CONTEXT_FS_OPERATION) {
-                            Some(AttrValue::Str(o)) => Some(o.as_str()),
-                            _ => None,
-                        };
-                        let d = c.decide_cited(&r);
-                        let rule = d.rule.map(|c| {
-                            let section =
-                                c.section.rsplit('#').next().unwrap_or_default().to_owned();
-                            format!("{} in #{section}", c.key)
-                        });
-                        out.push_str(&format!(
-                            "{who} {term}{half} {op:?} {path:?} -> {:?} {:?} {rule:?}\n",
-                            d.verdict, d.role
-                        ));
+                        if !path.is_empty() {
+                            r.resource.0.insert("path", AttrValue::Str((*path).into()));
+                        }
+                        if let Some(o) = op {
+                            r.context.0.insert(
+                                maknae_security::CONTEXT_FS_OPERATION,
+                                AttrValue::Str((*o).into()),
+                            );
+                        }
+                        let twin = matches!(*term, "fs.write" | "fs.mkdir" | "fs.delete")
+                            .then(|| crate::mutation::read_of(&r));
+                        for (half, r) in [("", Some(r)), (" read-twin", twin)] {
+                            let Some(r) = r else { continue };
+                            let op = match r.context.0.get(maknae_security::CONTEXT_FS_OPERATION) {
+                                Some(AttrValue::Str(o)) => Some(o.as_str()),
+                                _ => None,
+                            };
+                            let d = c.decide_cited(&r);
+                            let rule = d.rule.map(|c| {
+                                let section =
+                                    c.section.rsplit('#').next().unwrap_or_default().to_owned();
+                                format!("{} in #{section}", c.key)
+                            });
+                            let root = root.map_or(String::new(), |r| format!(" root={r}"));
+                            out.push_str(&format!(
+                                "{who}{root} {term}{half} {op:?} {path:?} -> {:?} {:?} {rule:?}\n",
+                                d.verdict, d.role
+                            ));
+                        }
                     }
                 }
             }
         }
         out
     }
+
+    const TASKS_TARGETS: &[&str] = &[
+        "/home/operator/tasks",
+        "/home/operator/tasks/users/1/x",
+        "/home/operator/tasks/users/2/x",
+    ];
 
     const FS_TARGETS: &[&str] = &[
         "/home/operator/notes",
@@ -826,9 +925,27 @@ mod tests {
     #[test]
     fn the_shipped_files_decide_identically_through_the_composition() {
         let got = shipped_effective_decisions();
+        if std::env::var_os("MAKNAE_BLESS").is_some() {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "MAKNAE_BLESS must not be set in CI"
+            );
+            std::fs::write(
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/src/testdata/shipped-effective-decisions.txt"
+                ),
+                &got,
+            )
+            .unwrap();
+            return;
+        }
         let want = include_str!("testdata/shipped-effective-decisions.txt");
         for (i, (g, w)) in got.lines().zip(want.lines()).enumerate() {
-            assert_eq!(g, w, "first difference at line {i}");
+            assert_eq!(
+                g, w,
+                "first difference at line {i}; regenerate with MAKNAE_BLESS=1 and review the diff"
+            );
         }
         assert_eq!(got.lines().count(), want.lines().count(), "line count");
     }

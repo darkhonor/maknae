@@ -1547,7 +1547,7 @@ The `syncing` records are written ahead of the store transition at their revisio
 
 ## Enroll an Agent Daemon
 
-An Agent Daemon runs under its own service account, one per agent, and reaches `maknaed` only on the agent socket. Its configuration is the directory `/etc/maknae/agents/<id>/`: `enrollment.yaml` and `agent.yaml`, which `maknae enroll agent` writes, and `policy.yaml` and optionally `persona.md`, which you write ([configuration §6.4](configuration.md#64-enrolling-an-agent-daemon) has every rule and refusal). The steps below use the agent id `hobi`. They are not yet measured on a live host.
+An Agent Daemon runs under its own service account, one per agent, and reaches `maknaed` only on the agent socket. Its configuration is the directory `/etc/maknae/agents/<id>/`: `enrollment.yaml` and `agent.yaml`, which `maknae enroll agent` writes, and `policy.yaml`, a commented starter that enroll writes when none exists and you edit, and optionally `persona.md`, which you write ([configuration §6.4](configuration.md#64-enrolling-an-agent-daemon) has every rule and refusal). The steps below use the agent id `hobi`. They are not yet measured on a live host.
 
 1. **Create the agent's account.** Enroll never creates it; it checks it, and refuses an account that fails any of these:
 
@@ -1622,9 +1622,14 @@ An Agent Daemon runs under its own service account, one per agent, and reaches `
 
    `--bind-cidr` is the address Vault sees, after any NAT, proxy or tunnel between this host and Vault ([configuration §6.4](configuration.md#64-enrolling-an-agent-daemon)). A SecretID bound to any other address fails every login: the agent's journal repeats `minting the plane leaf failed (AppRole login failed: … (status code 400))`, and no task is ever claimed. Vault's audit log shows the address it saw as `request.remote_address`; enroll again with that address and `--rotate`.
 
-   `--role guest` binds it to `guest` instead of the default `user`; `admin` is not offered. `guest` holds no grants and `destinations:` refuses it, so a `guest` agent can be tasked but works no task: each stops `partition-unavailable`. `--persona self` lets the agent keep its own persona instead of `persona.md`. Enroll seals the SecretID on this host, writes `/etc/maknae/agents/hobi/enrollment.yaml` and `agent.yaml`, and gives the `hobi` account read access to those files, `persona.md`, the directories above them and the three certificates in `/etc/maknae/tls`, and to nothing else. If enroll reports that it could not grant an entry, the agent is enrolled but cannot read its configuration: fix the cause and run `sudo maknae enroll agent hobi --refresh-access`. On Linux enroll then starts the agent as `maknae-agent@hobi.service`, after naming its home to the AppArmor profile and reloading it on a Debian host; on macOS as the launchd job `io.maknae.maknae-agentd.hobi`, whose stderr is `/usr/local/var/log/maknae-agent/hobi/agentd.err`. Run `--refresh-access` too after replacing `persona.md` or changing the account's home; it touches no Vault, and on Linux it rewrites the instance's drop-in and restarts it.
+   Every agent is bound to `user`; enroll also writes a commented starter `/etc/maknae/agents/hobi/policy.yaml` when none exists and never replaces one. `--persona self` lets the agent keep its own persona instead of `persona.md`; a `persona.md` in the agent's home is outside its tasks right, so its `policy.yaml` must grant `Read(~/persona.md)` for the daemon to read it. Enroll seals the SecretID on this host, writes `/etc/maknae/agents/hobi/enrollment.yaml` and `agent.yaml`, and gives the `hobi` account read access to those files, `persona.md`, the directories above them and the three certificates in `/etc/maknae/tls`, and to nothing else. If enroll reports that it could not grant an entry, the agent is enrolled but cannot read its configuration: fix the cause and run `sudo maknae enroll agent hobi --refresh-access`. On Linux enroll then starts the agent as `maknae-agent@hobi.service`, after naming its home to the AppArmor profile and reloading it on a Debian host; on macOS as the launchd job `io.maknae.maknae-agentd.hobi`, whose stderr is `/usr/local/var/log/maknae-agent/hobi/agentd.err`. Run `--refresh-access` too after replacing `persona.md` or changing the account's home; it touches no Vault, and on Linux it rewrites the instance's drop-in and restarts it.
 
-4. **Write its policy.** Write it as `policy.yaml`, then install it as `root:_maknae 0640`, as the other configuration files are: `sudo install -o root -g _maknae -m 0640 policy.yaml /etc/maknae/agents/hobi/policy.yaml`. Without it the agent holds no file access through Maknae's tools, and only people may task it.
+4. **Grant more than the agent's tasks.** Every agent already holds the built-in tasks right, whatever its `policy.yaml` says or whether it has one:
+
+   - **Files:** `Read(~/tasks/**)`, `Write(~/tasks)` and `Write(~/tasks/**)`, which let it create each task's partition, `~/tasks/users/<uid>` or `~/tasks/agents/<id>`, and work in it ([Tasks](#tasks)). A request the right decides is decided after the site's deny list and before the agent's own `permissions:`, and the trail cites it as `agents.hobi.tasks-right`. The partition operand still confines each request to the partition of the task it cites.
+   - **Sessions:** `session.new`, `session.prompt` and `session.close`, the conversation each task runs in. They are added to an `actions.allow` the agent writes, so a list need not repeat them, and its `actions:` limit never refuses a file request the right decides. The role decides the rest: the packaged `user` role holds all three.
+
+   Edit the `policy.yaml` that enroll wrote to grant more, then keep it `root:_maknae 0640`: `sudo install -o root -g _maknae -m 0640 policy.yaml /etc/maknae/agents/hobi/policy.yaml`. Enroll never replaces it.
 
    ```yaml
    schema_version: 1
@@ -1632,19 +1637,9 @@ An Agent Daemon runs under its own service account, one per agent, and reaches `
      allow:
        - "Read(~/notes/**)"
        - "Write(~/notes/**)"
-       - "Read(~/tasks/**)"
-       - "Write(~/tasks)"
-       - "Write(~/tasks/**)"
-   actions:
-     allow:
-       - "fs.*"
-       - "session.new"
-       - "session.prompt"
-       - "session.close"
    ```
 
-   - **`~/tasks` is required.** The agent creates each task's partition, `~/tasks/users/<uid>` or `~/tasks/agents/<id>`, and works in it ([Tasks](#tasks)). This `permissions.allow` replaces the site's allow list for the agent, whose `Write(~/projects/**)` would not reach it anyway, so without these entries every task stops `partition-unavailable` and the trail records `fs.mkdir` of `~/tasks` refused with `role user: no capability entry for fs.mkdir`. The partition operand still confines each request to the partition of the task it cites.
-   - **`session.new`, `session.prompt` and `session.close`** are the conversation each task runs in ([configuration §6.4](configuration.md#64-enrolling-an-agent-daemon)).
+   A `permissions.deny` whose path is `~/tasks` or begins `~/tasks/` is refused at load, and so is an `actions.deny` that covers `session.new`, `session.prompt` or `session.close` (`session.*` included). Any other deny, such as `Write(~/**)`, loads and is outranked inside `~/tasks`: it still denies the rest of the agent's home. A host enrollment whose `enrollment.yaml` still says `role: guest` refuses the reload; edit `role:` to `user`.
 
    Add `taskers:` to say who may task it, for example `taskers: ["alice", "agent:jin"]`; another agent may task it only when listed here. `maknaed` decides and serves tasking; people task an agent with `maknae agent <name>` ([Task an agent](#task-an-agent)), and the agent process that works the task is `maknae-agentd` (#629, [Tasks](#tasks)).
 

@@ -2459,11 +2459,11 @@ async fn an_agent_request_citing_its_task_is_stamped_and_audited() {
 }
 
 #[tokio::test]
-async fn agents_are_denied_session_new_by_default() {
+async fn an_agents_session_new_is_decided_by_its_role() {
     let _turn = FS_TURN.lock().await;
     let (_root, pdp) = agent_pdp_over(
-        "session-new-default",
-        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nroles:\n  user:\n    allow: [\"session.new\"]\n",
+        "session-new-role",
+        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nroles:\n  user:\n    deny: [\"session.new\"]\n",
     );
     let pdp = Seen::new(pdp);
     let home = common::second_home("agent609-session-new");
@@ -2516,11 +2516,7 @@ async fn agents_are_denied_session_new_by_default() {
             new.outcome.reason.as_str(),
             new.subject.agent.as_deref()
         ),
-        (
-            "deny",
-            "agent hobi: session.new needs a grant in its policy.yaml",
-            Some("hobi")
-        ),
+        ("deny", "denied by role grant session.new", Some("hobi")),
         "{new:?}"
     );
 }

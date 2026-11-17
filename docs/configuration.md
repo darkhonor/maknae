@@ -298,7 +298,7 @@ The kernel records each conversation a loop opens: an owner, the working directo
 | `session.close` | close an active conversation the subject owns |
 | `session.delete` | delete an active conversation the subject owns. For an id the kernel does not hold, the kernel names the caller as its owner, so the grant alone permits it; the outcome reads `conversation deleted; the kernel held no record` |
 
-The shipped file grants all five to `admin` and to `user`. It has no `destinations:` key, so a prompt is refused at the destination check until you add one ([first provider](first-provider.md#4-allow-the-prompt)). Agents are refused `session.new` unless an agent `policy.yaml` grants it.
+The shipped file grants all five to `admin` and to `user`. It has no `destinations:` key, so a prompt is refused at the destination check until you add one ([first provider](first-provider.md#4-allow-the-prompt)).
 
 **The working directory is recorded, not decided.** `session.new` is decided by the grant alone; only once the grant permits does the kernel check the client's descriptor. It records the directory the descriptor resolves to, as the kernel reports it, and neither decides it as a read nor confines the conversation to it. A symlinked directory is recorded as its target. What bounds each `fs.*` request is the OS's own permissions, the `permissions:` entries of `authz.yaml`, the classification ceiling, and `sensitive.yaml` (the host list and the conversation's personal list); `fs.*` is not confined to the home (ADR-0034).
 
@@ -388,7 +388,7 @@ sensitive:
 
 - **When your home cannot be looked up**, every `fs.*` request is refused before any list is consulted, with the trail reason `requester home unavailable: <cause>`, where the cause is `unresolvable`, `timed out`, `at capacity for this requester` or `at capacity`. A listed path then reads `unavailable — do not retry` to the model, not `Protected`. Other verbs are unaffected.
 - **A write needs `Read` as well as `Write`.** Every `fs.write`, creating a file or replacing one, is permitted only when `authz.yaml` permits both `Read` and `Write` on the path, so a `Write`-only grant permits no write, for your own `maknae write` as for the model. The trail reason of a write refused for want of `Read` is `fs.write needs fs.read: <the read's reason>`.
-- **The model's directories and deletes need `Read` too.** A `make_directory` or `delete_path` from the model cites its conversation, and is permitted only when `Read` is permitted on every path it creates or deletes and on the directory the client opened for it; a recursive delete needs `Read` over everything beneath the directory, so it never removes what a `Read` deny withholds. A file the model creates likewise needs `Read` on the directory it is created in. The trail reasons are `fs.mkdir needs fs.read: <reason>` and `fs.delete needs fs.read: <reason>`. Your own `maknae mkdir` and `maknae rm` are decided on `Write` alone.
+- **The model's directories and deletes need `Read` too.** A `make_directory` or `delete_path` from the model cites its conversation, and is permitted only when `Read` is permitted on every path it creates or deletes and, decided as a listing, on the directory the client opened for it; a recursive delete needs `Read` over everything beneath the directory, so it never removes what a `Read` deny withholds. A file the model creates likewise needs `Read` on the directory it is created in. The trail reasons are `fs.mkdir needs fs.read: <reason>` and `fs.delete needs fs.read: <reason>`. Your own `maknae mkdir` and `maknae rm` are decided on `Write` alone.
 - **`fs.stat` and `fs.list` are decided by the `fs.read` grant.** They are not separate grants: the `Read` entry of `authz.yaml`'s `permissions:` that decides a read of a path decides a stat of it and a listing of it, and each listed entry is decided as a read of that entry. An `actions:` limit, in an `authz.yaml` `subjects:` entry or an agent's `policy.yaml`, limits them by its `fs.read` entry. Naming `fs.stat` or `fs.list` in either list is refused at load: ``authz: `fs.stat` is decided as `fs.read` (#161 M15) and no list may name it; name `fs.read` `` (`fs.list` likewise).
 
 **The shipped host list.** The defaults were built from the paths that hold credentials and system secrets on Debian 13, Rocky 9, a STIG'd Rocky 10 and macOS 26. Each group in the file carries a comment saying why it is there:
@@ -1026,13 +1026,13 @@ audit:
 sudo maknae enroll agent <id> --account <service-account> --bind-cidr <cidr> [--bind-cidr <cidr>…] \
   --provider <provider> --model <model> --key-subpath <subpath> --key-field <field> \
   --context-tokens <n> [--output-tokens <n>] [--persona admin|self] \
-  [--role user|guest] [--approle-mount <mount>] [--token-file <file>] [--verbose]
+  [--approle-mount <mount>] [--token-file <file>] [--verbose]
 sudo maknae enroll agent <id> --refresh-access [--verbose]
 ```
 
-The provider flags name the agent's one model: the authorized provider, the model, where its API key sits in Vault (`<kv_mount>/data/<agent_prefix>/<id>/<subpath>`, field `<field>`), and its context window and answer bound in tokens, under the grammar of a `providers.yaml` entry (§6.1.1). `--persona` defaults to `admin`: the agent's persona is `/etc/maknae/agents/<id>/persona.md`, written by root, which the Agent Daemon reads itself. `self` lets the agent keep its own: at the start of each task the daemon uses the task partition's `persona.md`, else `persona.md` in the agent's home, else the one in `/etc`. The home and partition files are read through the kernel, as a read cited to the task, so the agent's policy and the mandatory operands decide them and the trail records them; an absent file is skipped. Before that read the daemon checks the file locally: a persona file the agent's account does not own, one others can write, or a home or partition directory others can write (a `0775` home, say) refuses it, and every task then stops `persona-unavailable`, as it does when the kernel refuses the read. Enroll checks that the `agent.yaml` it will write loads before it mints a SecretID.
+The provider flags name the agent's one model: the authorized provider, the model, where its API key sits in Vault (`<kv_mount>/data/<agent_prefix>/<id>/<subpath>`, field `<field>`), and its context window and answer bound in tokens, under the grammar of a `providers.yaml` entry (§6.1.1). `--persona` defaults to `admin`: the agent's persona is `/etc/maknae/agents/<id>/persona.md`, written by root, which the Agent Daemon reads itself. `self` lets the agent keep its own: at the start of each task the daemon uses the task partition's `persona.md`, else `persona.md` in the agent's home, else the one in `/etc`. The home and partition files are read through the kernel, as a read cited to the task, so the agent's policy and the mandatory operands decide them and the trail records them; an absent file is skipped. The partition's file is inside the agent's tasks right; the home file is not, and the agent's `policy.yaml` must grant `Read(~/persona.md)` for it, or the read is refused and the task stops `persona-unavailable`. Before that read the daemon checks the file locally: a persona file the agent's account does not own, one others can write, or a home or partition directory others can write (a `0775` home, say) refuses it, and every task then stops `persona-unavailable`, as it does when the kernel refuses the read. Enroll checks that the `agent.yaml` it will write loads before it mints a SecretID.
 
-`--role` defaults to `user`; `admin` is not a choice. Before minting a SecretID, enroll reads the Vault entity `maknae-agent-<id>` and refuses, with no side effect, when it is absent or has no alias on the agent mount named by the role's RoleID. A disabled entity is re-enabled as the last step, and only when every earlier SecretID of the role was destroyed; if any destroy failed, the entity stays disabled until a `--rotate` retires them all. Enroll ends by telling you to reload `maknaed`.
+Every agent is bound to `user`, or to `adversary` when `bindings.yaml` contains its account; an `enrollment.yaml` that says `role: guest` does not parse and refuses the reload with the fix named (edit `role:` to `user`). Enroll writes `/etc/maknae/agents/<id>/policy.yaml` (root:`_maknae`, `0640`) as a commented starter when the file is absent and never replaces an existing one; `--refresh-access` writes it too when absent. Before minting a SecretID, enroll reads the Vault entity `maknae-agent-<id>` and refuses, with no side effect, when it is absent or has no alias on the agent mount named by the role's RoleID. A disabled entity is re-enabled as the last step, and only when every earlier SecretID of the role was destroyed; if any destroy failed, the entity stays disabled until a `--rotate` retires them all. Enroll ends by telling you to reload `maknaed`.
 
 Re-enabling an entity makes the tokens issued before it was disabled usable again until they reach `agent_token_max_ttl`. Disabling does not revoke them.
 
@@ -1049,6 +1049,7 @@ Re-enabling an entity makes the tokens issued before it was disabled usable agai
 | `/etc/systemd/system/maknae-agent@<id>.service.d/account.conf` (Linux, `root:root 0644`) | the instance's account: `User=<uid>`, `Group=<primary gid>`, `SupplementaryGroups=maknae-agents` and `ReadWritePaths=<home>` |
 | `/Library/LaunchDaemons/io.maknae.maknae-agentd.<id>.plist` (macOS, `root:wheel 0644`) | the agent's launchd job: `/usr/local/bin/maknae-agentd <id>` as `UserName=<account>`, its stderr to `agentd.err` in the log directory below |
 | `/usr/local/var/log/maknae-agent/<id>/agentd.err` (macOS, `<account>:<primary group> 0640`, in a `root:wheel 0755` directory under the package's `root:wheel 0755` `/usr/local/var/log/maknae-agent`) | the Agent Daemon's stderr, which nothing rotates |
+| `/etc/maknae/agents/<id>/policy.yaml` (`root:_maknae 0640`, only when absent) | a commented starter that grants nothing; enroll never replaces an existing one |
 | `/etc/maknae/agents/<id>/agent.yaml` (`root:_maknae 0640`) | what the Agent Daemon reads to log in and reach `maknaed`: `vault` (`addr`, `approle_mount`, `role_id`, `pki_int_mount`, `plane_key`, `kv_mount`, `agent_prefix`), `trust_domain`, `agent_socket_path`, `prompt_max_bytes`, `provider` and `persona`. The RoleID is not a secret; the SecretID never appears in it |
 
 **What the agent account may read.** As its last step, after the SecretID is sealed and the earlier ones are retired, enrollment gives the agent's account read access, and nothing more, to exactly these, and reads each entry back: `/etc/maknae`, `/etc/maknae/agents`, `/etc/maknae/agents/<id>` and `/etc/maknae/tls` (`r-x`: the reader opens each directory), and `agent.yaml`, `enrollment.yaml`, `persona.md` when present, and `tls/maknae-root-ca.crt`, `tls/maknae-int-ca.crt` and `tls/vault-ca.crt` (`r`). Nothing is granted on `/etc/maknae/private`, and no entry follows a symbolic link: a path that is a link fails its read-back.
@@ -1085,7 +1086,7 @@ When an entry cannot be written or does not read back, the agent is enrolled but
 
 Each agent accepted is recorded as `agent '<id>' (uid <n>) is enrolled`, and one that is gone as `agent '<id>' (uid <n>) is no longer enrolled` (both `graph.identity`, `graph.anchor:"enrolling"`). A directory with no `enrollment.yaml`, a name that is not an agent id, or an entry that is not a directory is skipped and recorded as `agents/<entry> is skipped: <why>`. An `enrollment.yaml` or `policy.yaml` that does not parse, or an `enrollment.yaml` whose `agent_id` is not its directory's name, refuses the reload. A `policy.yaml` without an `enrollment.yaml` beside it is not read. `maknae status` counts these problems, and `maknae subject-list` lists each enrolled agent with its id; when `bindings.yaml` has no `bindings:` key it also lists the principal as `admin`, marked as the principal.
 
-**The agent's policy (`policy.yaml`).** `/etc/maknae/agents/<id>/policy.yaml` is written by hand, as root, and holds this agent's limits; they never live in `authz.yaml`, and an `authz.yaml` `subjects:` entry that names an enrolled agent's account refuses the reload. Its keys are `schema_version: 1` and, each optional, the three keys of an `authz.yaml` `subjects:` entry (`permissions`, `actions` and `models`, with the grammar and rules of the runbook's Chapter 3 §7 and ADR-0032: the site `deny` is a floor, deny beats allow, and a limit never grants) and `taskers`:
+**The agent's policy (`policy.yaml`).** `/etc/maknae/agents/<id>/policy.yaml` is a commented starter that enroll writes when the file is absent, and root edits it from there. It holds this agent's grants and limits beyond its built-in tasks right (below); they never live in `authz.yaml`, and an `authz.yaml` `subjects:` entry that names an enrolled agent's account refuses the reload. Its keys are `schema_version: 1` and, each optional, the three keys of an `authz.yaml` `subjects:` entry (`permissions`, `actions` and `models`, with the grammar and rules of the runbook's Chapter 3 §7 and ADR-0032: the site `deny` is a floor, deny beats allow, and a limit never grants) and `taskers`:
 
 ```yaml
 schema_version: 1
@@ -1093,17 +1094,11 @@ permissions:
   allow:
     - "Read(~/notes/**)"
     - "Write(~/notes/**)"
-    - "Read(~/tasks/**)"
-    - "Write(~/tasks)"
-    - "Write(~/tasks/**)"
 actions:
   allow:
     - "fs.read"
     - "fs.write"
     - "fs.mkdir"
-    - "session.new"
-    - "session.prompt"
-    - "session.close"
 models:
   allow:
     - "local/llama"
@@ -1113,12 +1108,11 @@ taskers:
   - "agent:hobi"
 ```
 
-- An agent with no `policy.yaml`, or one without `permissions`, holds no file access through Maknae's tools.
-- `permissions.allow` replaces the site allow list for the agent, so it must reach `~/tasks`: the agent creates each task's partition there (§2.6) with `fs.mkdir`, decided as a `Write`. Without `Write(~/tasks)` and `Write(~/tasks/**)` every task stops `partition-unavailable`.
+- Every agent holds a built-in tasks right whatever its `policy.yaml` says or whether it has one. Files: `Read(~/tasks/**)`, `Write(~/tasks)` and `Write(~/tasks/**)`, decided after the site `deny` and before the agent's own `permissions`, cited `rule:agents.<id>.tasks-right:allow:<i>` in the section `agents.<id>.tasks-right`. Sessions: `session.new`, `session.prompt` and `session.close`, added to an `actions.allow` the agent writes. The agent's `actions:` limit never refuses a file request the right decides; the role decides the session actions, and the packaged `user` role holds all three.
+- Without `permissions`, the agent holds no file access beyond its tasks right. `permissions.allow` replaces the site allow list for the agent and adds to the right.
+- A `permissions.deny` whose path is `~/tasks` or begins `~/tasks/`, and an `actions.deny` that covers `session.new`, `session.prompt` or `session.close` (`session.*` included), refuse the reload. Any other deny loads and is outranked inside `~/tasks`.
 - `actions` limits `fs.stat` and `fs.list` by its `fs.read` entry; naming either refuses the reload (§2.5).
 - `admin.*` is always refused to an agent, except `admin.whoami`; no file can grant it.
-- `maknae-agentd` closes each task's conversation when the task ends, so list `session.close` beside `session.new` and `session.prompt`; without it every close is refused, each refusal is in the trail, the task still ends, and the agent's kernel conversations accumulate until the idle close or its 32-conversation limit.
-- `session.new` is refused to an agent unless its `actions.allow` holds it (`session.new` or `session.*`) and its `actions.deny` does not. It still needs the role's grant; the packaged `user` role holds it.
 - `taskers` names who may task this agent with `session.task`: account names, `uid:<n>` entries and `agent:<id>` entries. Without the key, only people may task it; another agent may task it only when listed. `taskers: []` admits nobody. Each tasker also needs `session.task` from its own role; the shipped `authz.yaml` grants it to `admin` and `user`. How tasks are stored and bounded, and the partition each works in, are in §2.6.
 - Unknown keys, and any `schema_version` other than `1`, refuse the reload.
 

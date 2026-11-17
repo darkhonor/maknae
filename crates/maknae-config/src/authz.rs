@@ -222,6 +222,14 @@ pub enum Match3 {
     NoMatch,
 }
 
+/// [`AuthzPolicy::evaluate3_agent`]'s answer: whether the built-in right
+/// granted the request, or the floored evaluation decided it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AgentMatch {
+    Right { source: String },
+    Floored(Match3),
+}
+
 /// A single filesystem capability request the PDP asks the policy about.
 #[derive(Clone, Copy, Debug)]
 pub enum Request<'a> {
@@ -282,32 +290,23 @@ impl AuthzPolicy {
         req: &Request<'_>,
         home: Option<&Path>,
     ) -> Result<Match3, HomeUnbound> {
-        let home = valid_home(home);
         let (deny, allow) = self.lists(subject);
-        if unbound_home(home, &deny, &allow, |p| {
-            p.glob_for(req).is_some_and(|(g, _)| g.is_home())
-        }) {
-            return Err(HomeUnbound);
-        }
-        for list in deny.iter().flatten() {
-            for (i, p) in list.patterns.iter().enumerate() {
-                if p.matches_req(req, home)? {
-                    return Ok(Match3::DenyMatch {
-                        source: list.source(i, "deny"),
-                    });
-                }
-            }
-        }
-        for list in [&allow] {
-            for (i, p) in list.patterns.iter().enumerate() {
-                if p.matches_req(req, home)? {
-                    return Ok(Match3::AllowMatch {
-                        source: list.source(i, "allow"),
-                    });
-                }
-            }
-        }
-        Ok(Match3::NoMatch)
+        evaluate3_over(&deny, &allow, req, home)
+    }
+
+    /// [`Self::evaluate3_floored`] for an agent: the site deny, then the built-in
+    /// `right`'s allow, then the floored evaluation over `subject`.
+    pub fn evaluate3_agent(
+        &self,
+        right: &SubjectPermissions,
+        subject: Option<&SubjectPermissions>,
+        req: &Request<'_>,
+        home: Option<&Path>,
+    ) -> Result<AgentMatch, HomeUnbound> {
+        let (deny, allow) = self.right_lists(right);
+        agent_match(evaluate3_over(&deny, &allow, req, home)?, || {
+            self.evaluate3_floored(subject, req, home)
+        })
     }
 
     fn lists<'a>(
@@ -342,6 +341,20 @@ impl AuthzPolicy {
         }
     }
 
+    fn right_lists<'a>(
+        &'a self,
+        right: &'a SubjectPermissions,
+    ) -> ([Option<SourcedList<'a>>; 2], SourcedList<'a>) {
+        let (deny, _) = self.lists(None);
+        (
+            deny,
+            SourcedList {
+                patterns: &right.allow,
+                sources: &right.allow_sources,
+            },
+        )
+    }
+
     /// Authorize the whole subtree for recursive deletion (#158). A point grant
     /// cannot authorize destruction of descendants. Denies use conservative
     /// intersection; allows require a provable literal-prefix/** covering grant.
@@ -362,10 +375,7 @@ impl AuthzPolicy {
         root: &Path,
         home: Option<&Path>,
     ) -> Result<Match3, HomeUnbound> {
-        self.evaluate_subtree_floored(subject, root, home, |p| match p {
-            Pattern::Write(g) => Some(g),
-            Pattern::Read(_) => None,
-        })
+        self.evaluate_subtree_floored(subject, root, home, write_glob)
     }
 
     /// [`Self::evaluate_write_subtree_floored`] over `Read` patterns: a read of every
@@ -376,10 +386,44 @@ impl AuthzPolicy {
         root: &Path,
         home: Option<&Path>,
     ) -> Result<Match3, HomeUnbound> {
-        self.evaluate_subtree_floored(subject, root, home, |p| match p {
-            Pattern::Read(g) => Some(g),
-            Pattern::Write(_) => None,
-        })
+        self.evaluate_subtree_floored(subject, root, home, read_glob)
+    }
+
+    /// [`Self::evaluate3_agent`] for [`Self::evaluate_write_subtree_floored`].
+    pub fn evaluate_write_subtree_agent(
+        &self,
+        right: &SubjectPermissions,
+        subject: Option<&SubjectPermissions>,
+        root: &Path,
+        home: Option<&Path>,
+    ) -> Result<AgentMatch, HomeUnbound> {
+        self.subtree_agent(right, subject, root, home, write_glob)
+    }
+
+    /// [`Self::evaluate3_agent`] for [`Self::evaluate_read_subtree_floored`].
+    pub fn evaluate_read_subtree_agent(
+        &self,
+        right: &SubjectPermissions,
+        subject: Option<&SubjectPermissions>,
+        root: &Path,
+        home: Option<&Path>,
+    ) -> Result<AgentMatch, HomeUnbound> {
+        self.subtree_agent(right, subject, root, home, read_glob)
+    }
+
+    fn subtree_agent(
+        &self,
+        right: &SubjectPermissions,
+        subject: Option<&SubjectPermissions>,
+        root: &Path,
+        home: Option<&Path>,
+        glob_of: fn(&Pattern) -> Option<&PathGlob>,
+    ) -> Result<AgentMatch, HomeUnbound> {
+        let (deny, allow) = self.right_lists(right);
+        agent_match(
+            evaluate_subtree_over(&deny, &allow, root, home, glob_of)?,
+            || self.evaluate_subtree_floored(subject, root, home, glob_of),
+        )
     }
 
     fn evaluate_subtree_floored(
@@ -389,45 +433,22 @@ impl AuthzPolicy {
         home: Option<&Path>,
         glob_of: fn(&Pattern) -> Option<&PathGlob>,
     ) -> Result<Match3, HomeUnbound> {
-        let Some(text) = root.to_str() else {
-            return Ok(Match3::NoMatch);
-        };
-        if !text.starts_with('/')
-            || text.contains('\0')
-            || (text != "/" && text[1..].split('/').any(|c| matches!(c, "" | "." | "..")))
-        {
-            return Ok(Match3::NoMatch);
-        }
-        let home = valid_home(home);
         let (deny, allow) = self.lists(subject);
-        if unbound_home(home, &deny, &allow, |p| {
-            glob_of(p).is_some_and(PathGlob::is_home)
-        }) {
-            return Err(HomeUnbound);
-        }
-        for list in deny.iter().flatten() {
-            for (i, pattern) in list.patterns.iter().enumerate() {
-                if let Some(glob) = glob_of(pattern) {
-                    if glob.may_intersect_subtree(text, home)? {
-                        return Ok(Match3::DenyMatch {
-                            source: list.source(i, "deny"),
-                        });
-                    }
-                }
-            }
-        }
-        for list in [&allow] {
-            for (i, pattern) in list.patterns.iter().enumerate() {
-                if let Some(glob) = glob_of(pattern) {
-                    if glob.covers_subtree(text, home)? {
-                        return Ok(Match3::AllowMatch {
-                            source: list.source(i, "allow"),
-                        });
-                    }
-                }
-            }
-        }
-        Ok(Match3::NoMatch)
+        evaluate_subtree_over(&deny, &allow, root, home, glob_of)
+    }
+}
+
+fn write_glob(p: &Pattern) -> Option<&PathGlob> {
+    match p {
+        Pattern::Write(g) => Some(g),
+        Pattern::Read(_) => None,
+    }
+}
+
+fn read_glob(p: &Pattern) -> Option<&PathGlob> {
+    match p {
+        Pattern::Read(g) => Some(g),
+        Pattern::Write(_) => None,
     }
 }
 
@@ -445,9 +466,100 @@ impl SourcedList<'_> {
     }
 }
 
+type DenyLists<'a> = [Option<SourcedList<'a>>; 2];
+
+fn evaluate3_over(
+    deny: &DenyLists<'_>,
+    allow: &SourcedList<'_>,
+    req: &Request<'_>,
+    home: Option<&Path>,
+) -> Result<Match3, HomeUnbound> {
+    let home = valid_home(home);
+    if unbound_home(home, deny, allow, |p| {
+        p.glob_for(req).is_some_and(|(g, _)| g.is_home())
+    }) {
+        return Err(HomeUnbound);
+    }
+    for list in deny.iter().flatten() {
+        for (i, p) in list.patterns.iter().enumerate() {
+            if p.matches_req(req, home)? {
+                return Ok(Match3::DenyMatch {
+                    source: list.source(i, "deny"),
+                });
+            }
+        }
+    }
+    for (i, p) in allow.patterns.iter().enumerate() {
+        if p.matches_req(req, home)? {
+            return Ok(Match3::AllowMatch {
+                source: allow.source(i, "allow"),
+            });
+        }
+    }
+    Ok(Match3::NoMatch)
+}
+
+fn evaluate_subtree_over(
+    deny: &DenyLists<'_>,
+    allow: &SourcedList<'_>,
+    root: &Path,
+    home: Option<&Path>,
+    glob_of: fn(&Pattern) -> Option<&PathGlob>,
+) -> Result<Match3, HomeUnbound> {
+    let Some(text) = root.to_str() else {
+        return Ok(Match3::NoMatch);
+    };
+    if !text.starts_with('/')
+        || text.contains('\0')
+        || (text != "/" && text[1..].split('/').any(|c| matches!(c, "" | "." | "..")))
+    {
+        return Ok(Match3::NoMatch);
+    }
+    let home = valid_home(home);
+    if unbound_home(home, deny, allow, |p| {
+        glob_of(p).is_some_and(PathGlob::is_home)
+    }) {
+        return Err(HomeUnbound);
+    }
+    for list in deny.iter().flatten() {
+        for (i, pattern) in list.patterns.iter().enumerate() {
+            if let Some(glob) = glob_of(pattern) {
+                if glob.may_intersect_subtree(text, home)? {
+                    return Ok(Match3::DenyMatch {
+                        source: list.source(i, "deny"),
+                    });
+                }
+            }
+        }
+    }
+    for list in [allow] {
+        for (i, pattern) in list.patterns.iter().enumerate() {
+            if let Some(glob) = glob_of(pattern) {
+                if glob.covers_subtree(text, home)? {
+                    return Ok(Match3::AllowMatch {
+                        source: list.source(i, "allow"),
+                    });
+                }
+            }
+        }
+    }
+    Ok(Match3::NoMatch)
+}
+
+fn agent_match(
+    right_first: Match3,
+    floored: impl FnOnce() -> Result<Match3, HomeUnbound>,
+) -> Result<AgentMatch, HomeUnbound> {
+    match right_first {
+        Match3::DenyMatch { source } => Ok(AgentMatch::Floored(Match3::DenyMatch { source })),
+        Match3::AllowMatch { source } => Ok(AgentMatch::Right { source }),
+        Match3::NoMatch => floored().map(AgentMatch::Floored),
+    }
+}
+
 fn unbound_home(
     home: Option<&Path>,
-    deny: &[Option<SourcedList<'_>>; 2],
+    deny: &DenyLists<'_>,
     allow: &SourcedList<'_>,
     mut wants: impl FnMut(&Pattern) -> bool,
 ) -> bool {
@@ -544,6 +656,10 @@ impl PathGlob {
 
     fn is_home(&self) -> bool {
         self.anchor == Anchor::Home
+    }
+
+    pub(crate) fn within_home_tasks(&self) -> bool {
+        self.is_home() && matches!(self.segments.first(), Some(GlobSeg::Comp(c)) if c == "tasks")
     }
 
     fn base<'h>(&self, home: Option<&'h Path>) -> Result<Vec<&'h str>, HomeUnbound> {
@@ -3329,6 +3445,105 @@ mod tests {
                 p.evaluate3_floored(s, &req, None),
                 want,
                 "{site_allow} {site_deny} {sub_allow} {sub_deny}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_right_is_decided_after_the_site_deny_and_before_the_subject() {
+        let p = parse_authz(
+            "schema_version: 1\npermissions:\n  allow: []\n  deny: [\"Write(~/tasks/blocked/**)\"]\nsubjects:\n  right:\n    permissions:\n      allow: [\"Write(~/tasks/**)\"]\n  sub:\n    permissions:\n      deny: [\"Write(~/**)\"]\n",
+        )
+        .unwrap();
+        let right = p.subjects["right"].permissions.as_ref().unwrap();
+        let sub = p.subjects["sub"].permissions.as_ref();
+        let home = Path::new("/h/a");
+        let h = Some(home);
+        let deny = |s: &str| AgentMatch::Floored(Match3::DenyMatch { source: s.into() });
+        let granted = AgentMatch::Right {
+            source: "Write(~/tasks/**)".into(),
+        };
+        let blocked = home.join("tasks/blocked/x");
+        let ok = home.join("tasks/a/x");
+        let notes = home.join("notes/x");
+        assert_eq!(
+            p.evaluate3_agent(right, sub, &Request::Write(&blocked), h),
+            Ok(deny("Write(~/tasks/blocked/**)"))
+        );
+        assert_eq!(
+            p.evaluate3_agent(right, sub, &Request::Write(&ok), h),
+            Ok(granted.clone())
+        );
+        assert_eq!(
+            p.evaluate3_agent(right, sub, &Request::Write(&notes), h),
+            Ok(deny("Write(~/**)"))
+        );
+        assert_eq!(
+            p.evaluate3_agent(right, sub, &Request::Read(&notes), h),
+            Ok(AgentMatch::Floored(Match3::NoMatch))
+        );
+
+        let tasks_a = home.join("tasks/a");
+        let tasks_blocked = home.join("tasks/blocked");
+        assert_eq!(
+            p.evaluate_write_subtree_agent(right, sub, &tasks_blocked, h),
+            Ok(deny("Write(~/tasks/blocked/**)"))
+        );
+        assert_eq!(
+            p.evaluate_write_subtree_agent(right, sub, &tasks_a, h),
+            Ok(granted)
+        );
+        assert_eq!(
+            p.evaluate_write_subtree_agent(right, sub, &home.join("notes"), h),
+            Ok(deny("Write(~/**)"))
+        );
+        assert_eq!(
+            p.evaluate_read_subtree_agent(right, sub, &home.join("notes"), h),
+            Ok(AgentMatch::Floored(Match3::NoMatch))
+        );
+        let read_right = parse_authz(
+            "schema_version: 1\npermissions:\n  allow: []\n  deny: [\"Read(~/tasks/blocked/**)\"]\nsubjects:\n  right:\n    permissions:\n      allow: [\"Read(~/tasks/**)\"]\n  sub:\n    permissions:\n      deny: [\"Read(~/**)\"]\n",
+        )
+        .unwrap();
+        let r = read_right.subjects["right"].permissions.as_ref().unwrap();
+        let s = read_right.subjects["sub"].permissions.as_ref();
+        assert_eq!(
+            read_right.evaluate_read_subtree_agent(r, s, &tasks_blocked, h),
+            Ok(deny("Read(~/tasks/blocked/**)"))
+        );
+        assert_eq!(
+            read_right.evaluate_read_subtree_agent(r, s, &tasks_a, h),
+            Ok(AgentMatch::Right {
+                source: "Read(~/tasks/**)".into()
+            })
+        );
+        assert_eq!(
+            read_right.evaluate_read_subtree_agent(r, s, &home.join("notes"), h),
+            Ok(deny("Read(~/**)"))
+        );
+        assert_eq!(
+            read_right.evaluate_write_subtree_agent(r, s, &home.join("notes"), h),
+            Ok(AgentMatch::Floored(Match3::NoMatch))
+        );
+    }
+
+    #[test]
+    fn within_home_tasks_reads_the_parsed_glob() {
+        for (spec, want) in [
+            ("~/tasks", true),
+            ("~/tasks/**", true),
+            ("~//tasks/x", true),
+            ("~/tasks/agents/x", true),
+            ("~/taskslist/**", false),
+            ("~/**", false),
+            ("/var/tasks/**", false),
+            ("/tasks/**", false),
+            ("~/notes/tasks/**", false),
+        ] {
+            assert_eq!(
+                PathGlob::parse(spec).unwrap().within_home_tasks(),
+                want,
+                "{spec}"
             );
         }
     }
