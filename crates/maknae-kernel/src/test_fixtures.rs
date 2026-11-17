@@ -436,6 +436,8 @@ pub(crate) fn shipped_composition_with(
         }
     }
     basic.install(basic.compile_from_file().unwrap());
-    let ceiling = crate::ceiling_authz::CeilingAuthorizer::new(Ceiling::baseline_for(US), US);
-    (g, crate::composition::Composition::new(basic, ceiling))
+    (
+        g,
+        crate::composition::Composition::with_us_baseline_ceiling(basic),
+    )
 }

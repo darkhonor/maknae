@@ -94,6 +94,15 @@ impl<B: Baseline> Composition<B> {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_us_baseline_ceiling(baseline: B) -> Self {
+        const US: &maknae_config::BasicPolicy = &maknae_config::BasicPolicy;
+        Self::new(
+            baseline,
+            CeilingAuthorizer::new(maknae_config::Ceiling::baseline_for(US), US),
+        )
+    }
+
     /// The booted view and providers, set before the composition is shared.
     pub fn with_live(mut self, live: crate::live::LiveConfig) -> Self {
         self.live = Arc::new(live);
