@@ -2815,6 +2815,11 @@ pub(crate) fn refusal_posture(r: &crate::task::TaskRefusal) -> &'static str {
     }
 }
 
+pub(crate) fn without_tasker(mut rec: AuditRecord) -> AuditRecord {
+    rec.subject.tasker = None;
+    rec
+}
+
 pub(crate) fn cite_task(
     mut rec: AuditRecord,
     id: &maknae_proto::TaskId,
@@ -3835,11 +3840,7 @@ async fn serve_task_verb<S, E, P>(
                 |rec: AuditRecord, id: &maknae_proto::TaskId, tasker: &maknae_proto::Tasker| {
                     cite_task(rec, id, Some(maknae_proto::tasker_text(tasker)))
                 };
-            let idle = || {
-                let mut rec = decided("permit", "idle", "authorized");
-                rec.subject.tasker = None;
-                rec
-            };
+            let idle = || without_tasker(decided("permit", "idle", "authorized"));
             if let Some(seen) = seen {
                 let budget = maknae_proto::prompt_request_cap(tasks.text_max);
                 let (outcome, payload) = match store.heartbeat(&agent, trail.uid, seen, budget) {
@@ -3941,8 +3942,7 @@ async fn serve_task_verb<S, E, P>(
                     load.map(|load| crate::task::GoodStanding { task: id, load })
                 }
             };
-            let mut intent = decided("permit", "intent recorded", "authorized");
-            intent.subject.tasker = None;
+            let intent = without_tasker(decided("permit", "intent recorded", "authorized"));
             if !trail.record_bounded(&intent).await {
                 return;
             }
@@ -11313,9 +11313,7 @@ mod record_widths {
                         }
                         Shape::NoTasker => {
                             (tasker, task) = (None, asked.cited().map(|id| id.to_string()));
-                            let mut rec = rec;
-                            rec.subject.tasker = None;
-                            rec
+                            without_tasker(rec)
                         }
                         Shape::Cites(by) => {
                             (tasker, task) = (by.clone(), Some(TASK.to_string()));
