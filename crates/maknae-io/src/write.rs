@@ -383,6 +383,7 @@ fn append_raw(fd: &OwnedFd, bytes: &[u8]) -> nix::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nix::errno::Errno;
 
     #[test]
     fn temp_open_refuses_a_preexisting_name() {
@@ -390,7 +391,7 @@ mod tests {
         let dirfd = std::fs::File::open(d.path()).unwrap();
         std::fs::write(d.path().join("squat"), b"there first").unwrap();
         let e = crate::syscall::open_temp_excl(&dirfd, "squat", Mode(0o600)).unwrap_err();
-        assert_eq!(e, nix::errno::Errno::EEXIST);
+        assert_eq!(e, Errno::EEXIST);
     }
 
     #[test]
@@ -399,11 +400,7 @@ mod tests {
         let dirfd = std::fs::File::open(d.path()).unwrap();
         std::os::unix::fs::symlink("/etc/passwd", d.path().join("squat")).unwrap();
         let e = crate::syscall::open_temp_excl(&dirfd, "squat", Mode(0o600)).unwrap_err();
-        assert_eq!(
-            e,
-            nix::errno::Errno::EEXIST,
-            "O_EXCL must refuse a symlink too"
-        );
+        assert_eq!(e, Errno::EEXIST, "O_EXCL must refuse a symlink too");
     }
 
     #[test]
@@ -412,7 +409,6 @@ mod tests {
         let dirfd = std::fs::File::open(d.path()).unwrap();
         std::fs::write(d.path().join("f"), b"old").unwrap();
         let at = d.path().join("f");
-        use nix::errno::Errno;
         let e = publish_synced(&dirfd, "f", &at, b"new", Mode(0o600), None, |_| {
             Err(Errno::EIO)
         })
@@ -448,7 +444,6 @@ mod tests {
         let dirfd = std::fs::File::open(d.path()).unwrap();
         std::fs::write(d.path().join("f"), b"old").unwrap();
         let at = d.path().join("f");
-        use nix::errno::Errno;
         let e = remove_synced(&dirfd, "f", &at, false, |_| Err(Errno::EIO)).unwrap_err();
         assert_eq!(
             e,
@@ -467,7 +462,6 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let dirfd = std::fs::File::open(d.path()).unwrap();
         std::fs::write(d.path().join("f"), b"old").unwrap();
-        use nix::errno::Errno;
         let from = std::ffi::OsStr::new("f");
         let to = std::ffi::OsStr::new("g");
         let e = move_aside_synced(&dirfd, from, to, d.path(), |_| Err(Errno::EIO)).unwrap_err();
@@ -544,12 +538,10 @@ mod tests {
         let dirfd = std::fs::File::open(d.path()).unwrap();
         let absent = d.path().join("absent");
         assert_eq!(
-            remove_synced(&dirfd, "absent", &absent, true, |_| Err(
-                nix::errno::Errno::EIO
-            )),
+            remove_synced(&dirfd, "absent", &absent, true, |_| Err(Errno::EIO)),
             Err(IoError::RemovedNotDurable {
                 path: absent.clone(),
-                kind: crate::checks::kind_of_errno(nix::errno::Errno::EIO),
+                kind: crate::checks::kind_of_errno(Errno::EIO),
             })
         );
         std::fs::create_dir(d.path().join("busy")).unwrap();
@@ -608,7 +600,7 @@ mod tests {
         IoError::PublishedNotDurable {
             path: at.to_path_buf(),
             kind: crate::IoKind::Other {
-                raw: nix::errno::Errno::EIO as i32,
+                raw: Errno::EIO as i32,
             },
         }
     }
@@ -660,10 +652,7 @@ mod tests {
         let dirfd = std::fs::File::open(d.path()).unwrap();
         let at = d.path().join("f");
         std::fs::write(&at, b"old").unwrap();
-        let e = publish_new(&dirfd, "f", &at, b"new", own_ids(), |_| {
-            Err(nix::errno::Errno::EIO)
-        })
-        .unwrap_err();
+        let e = publish_new(&dirfd, "f", &at, b"new", own_ids(), |_| Err(Errno::EIO)).unwrap_err();
         assert_eq!(e, io_eio(&at));
         assert_eq!(std::fs::read(&at).unwrap(), b"old");
     }
@@ -673,10 +662,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let dirfd = std::fs::File::open(d.path()).unwrap();
         let at = d.path().join("f");
-        let e = publish_new(&dirfd, "f", &at, b"new", own_ids(), |_| {
-            Err(nix::errno::Errno::EIO)
-        })
-        .unwrap_err();
+        let e = publish_new(&dirfd, "f", &at, b"new", own_ids(), |_| Err(Errno::EIO)).unwrap_err();
         assert_eq!(e, io_eio(&at));
         assert_eq!(std::fs::read(&at).unwrap(), b"new");
     }
@@ -697,7 +683,7 @@ mod tests {
                 sync_dir: |_: &std::fs::File| -> nix::Result<()> {
                     panic!("an unsettled publication is not synced")
                 },
-                unlink_linked: |_: &std::fs::File, _: &str| Err(nix::errno::Errno::EIO),
+                unlink_linked: |_: &std::fs::File, _: &str| Err(Errno::EIO),
             },
         )
         .unwrap_err();
@@ -706,7 +692,7 @@ mod tests {
             IoError::Io {
                 path: at.clone(),
                 kind: crate::IoKind::Other {
-                    raw: nix::errno::Errno::EIO as i32
+                    raw: Errno::EIO as i32
                 },
             }
         );
@@ -728,7 +714,7 @@ mod tests {
             own_ids(),
             Seams {
                 sync_dir: |_: &std::fs::File| Ok(()),
-                unlink_linked: |_: &std::fs::File, _: &str| Err(nix::errno::Errno::EIO),
+                unlink_linked: |_: &std::fs::File, _: &str| Err(Errno::EIO),
             },
         );
         assert!(first.is_err());
@@ -753,10 +739,7 @@ mod tests {
         let at = d.path().join("f");
         std::fs::write(&at, b"one").unwrap();
         std::fs::hard_link(&at, d.path().join(".f.tmp.4242.7")).unwrap();
-        let e = publish_new(&dirfd, "f", &at, b"two", own_ids(), |_| {
-            Err(nix::errno::Errno::EIO)
-        })
-        .unwrap_err();
+        let e = publish_new(&dirfd, "f", &at, b"two", own_ids(), |_| Err(Errno::EIO)).unwrap_err();
         assert_eq!(e, io_eio(&at));
         assert_eq!(std::fs::metadata(&at).unwrap().nlink(), 1);
     }
