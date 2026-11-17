@@ -772,13 +772,19 @@ mod tests {
         let mut out = String::from(
             "# The shipped authz.yaml and sensitive.yaml, decided through the Composition.\n",
         );
-        let cases: &[(&str, Option<&str>, &[&str], bool)] = &[
-            ("liveness.ping", None, &[""], false),
-            ("session.new", None, &[""], false),
-            ("fs.read", Some("read"), FS_TARGETS, true),
-            ("fs.write", Some("write-existing"), FS_TARGETS, true),
-            ("fs.write", Some("write-create"), FS_TARGETS, true),
-            ("fs.delete", Some("delete-entry"), FS_TARGETS, true),
+        type Case<'a> = (&'a str, Option<&'a str>, &'a [&'a str], &'a [&'a str]);
+        let cases: &[Case] = &[
+            ("liveness.ping", None, &[""], &[]),
+            ("session.new", None, &[""], &[]),
+            ("fs.read", Some("read"), FS_TARGETS, TASKS_AND_PARENTS),
+            (
+                "fs.write",
+                Some("write-existing"),
+                FS_TARGETS,
+                TASKS_TARGETS,
+            ),
+            ("fs.write", Some("write-create"), FS_TARGETS, TASKS_TARGETS),
+            ("fs.delete", Some("delete-entry"), FS_TARGETS, TASKS_TARGETS),
             (
                 "fs.delete",
                 Some("delete-tree"),
@@ -787,11 +793,11 @@ mod tests {
                     "/home/operator/projects",
                     "/home/operator/.ssh",
                 ],
-                false,
+                &[],
             ),
-            ("fs.mkdir", Some("mkdir"), FS_TARGETS, true),
-            ("fs.list", Some("read"), &[], true),
-            ("fs.stat", Some("read"), &[], true),
+            ("fs.mkdir", Some("mkdir"), FS_TARGETS, TASKS_TARGETS),
+            ("fs.list", Some("read"), &[], TASKS_AND_PARENTS),
+            ("fs.stat", Some("read"), &[], TASKS_TARGETS),
         ];
         let mut subjects: Vec<(String, i64, Option<&str>)> = vec![
             ("principal".into(), principal, None),
@@ -803,12 +809,8 @@ mod tests {
                 .map(|(id, uid, _)| (format!("agent {id}"), i64::from(*uid), Some(*id))),
         );
         for (who, uid, agent) in &subjects {
-            for (term, op, targets, with_tasks) in cases {
-                let tasks: &[&str] = if agent.is_some() && *with_tasks {
-                    TASKS_TARGETS
-                } else {
-                    &[]
-                };
+            for (term, op, targets, agent_targets) in cases {
+                let tasks: &[&str] = if agent.is_some() { agent_targets } else { &[] };
                 let targets = targets.iter().chain(tasks);
                 for path in targets {
                     let tasked = path.contains("/tasks");
@@ -880,6 +882,14 @@ mod tests {
         "/home/operator/tasks",
         "/home/operator/tasks/users/1/x",
         "/home/operator/tasks/users/2/x",
+    ];
+
+    const TASKS_AND_PARENTS: &[&str] = &[
+        "/home/operator/tasks",
+        "/home/operator/tasks/users/1/x",
+        "/home/operator/tasks/users/2/x",
+        "/home/operator/tasks/users",
+        "/home/operator/tasks/agents",
     ];
 
     const FS_TARGETS: &[&str] = &[

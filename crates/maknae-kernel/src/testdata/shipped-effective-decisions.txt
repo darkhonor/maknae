@@ -175,6 +175,10 @@ agent hobi root=users/1 fs.read Some("read") "/home/operator/tasks/users/1/x" ->
 agent hobi fs.read Some("read") "/home/operator/tasks/users/1/x" -> Deny { reason: "partition: the request cites no task" } Some("user") None
 agent hobi root=users/1 fs.read Some("read") "/home/operator/tasks/users/2/x" -> Deny { reason: "partition: the path is in another tasker's partition" } Some("user") None
 agent hobi fs.read Some("read") "/home/operator/tasks/users/2/x" -> Deny { reason: "partition: the request cites no task" } Some("user") None
+agent hobi root=users/1 fs.read Some("read") "/home/operator/tasks/users" -> Deny { reason: "partition: the partitions' parent directories are listed and made, nothing else" } Some("user") None
+agent hobi fs.read Some("read") "/home/operator/tasks/users" -> Deny { reason: "partition: the partitions' parent directories are listed and made, nothing else" } Some("user") None
+agent hobi root=users/1 fs.read Some("read") "/home/operator/tasks/agents" -> Deny { reason: "partition: the partitions' parent directories are listed and made, nothing else" } Some("user") None
+agent hobi fs.read Some("read") "/home/operator/tasks/agents" -> Deny { reason: "partition: the partitions' parent directories are listed and made, nothing else" } Some("user") None
 agent hobi fs.write Some("write-existing") "/home/operator/notes" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.hobi.permissions:allow:1 in #agents.hobi")
 agent hobi fs.write read-twin Some("read") "/home/operator/notes" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.hobi.permissions:allow:0 in #agents.hobi")
 agent hobi fs.write Some("write-existing") "/home/operator/projects/x" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.hobi.permissions:allow:1 in #agents.hobi")
@@ -299,6 +303,10 @@ agent hobi root=users/1 fs.list Some("read") "/home/operator/tasks/users/1/x" ->
 agent hobi fs.list Some("read") "/home/operator/tasks/users/1/x" -> Deny { reason: "partition: the request cites no task" } Some("user") None
 agent hobi root=users/1 fs.list Some("read") "/home/operator/tasks/users/2/x" -> Deny { reason: "partition: the path is in another tasker's partition" } Some("user") None
 agent hobi fs.list Some("read") "/home/operator/tasks/users/2/x" -> Deny { reason: "partition: the request cites no task" } Some("user") None
+agent hobi root=users/1 fs.list Some("read") "/home/operator/tasks/users" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.hobi.tasks-right:allow:0 in #agents.hobi.tasks-right")
+agent hobi fs.list Some("read") "/home/operator/tasks/users" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.hobi.tasks-right:allow:0 in #agents.hobi.tasks-right")
+agent hobi root=users/1 fs.list Some("read") "/home/operator/tasks/agents" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.hobi.tasks-right:allow:0 in #agents.hobi.tasks-right")
+agent hobi fs.list Some("read") "/home/operator/tasks/agents" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.hobi.tasks-right:allow:0 in #agents.hobi.tasks-right")
 agent hobi root=users/1 fs.stat Some("read") "/home/operator/tasks" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.hobi.tasks-right:allow:0 in #agents.hobi.tasks-right")
 agent hobi fs.stat Some("read") "/home/operator/tasks" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.hobi.tasks-right:allow:0 in #agents.hobi.tasks-right")
 agent hobi root=users/1 fs.stat Some("read") "/home/operator/tasks/users/1/x" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.hobi.tasks-right:allow:0 in #agents.hobi.tasks-right")
@@ -321,6 +329,10 @@ agent jin root=users/1 fs.read Some("read") "/home/operator/tasks/users/1/x" -> 
 agent jin fs.read Some("read") "/home/operator/tasks/users/1/x" -> Deny { reason: "partition: the request cites no task" } Some("user") None
 agent jin root=users/1 fs.read Some("read") "/home/operator/tasks/users/2/x" -> Deny { reason: "partition: the path is in another tasker's partition" } Some("user") None
 agent jin fs.read Some("read") "/home/operator/tasks/users/2/x" -> Deny { reason: "partition: the request cites no task" } Some("user") None
+agent jin root=users/1 fs.read Some("read") "/home/operator/tasks/users" -> Deny { reason: "partition: the partitions' parent directories are listed and made, nothing else" } Some("user") None
+agent jin fs.read Some("read") "/home/operator/tasks/users" -> Deny { reason: "partition: the partitions' parent directories are listed and made, nothing else" } Some("user") None
+agent jin root=users/1 fs.read Some("read") "/home/operator/tasks/agents" -> Deny { reason: "partition: the partitions' parent directories are listed and made, nothing else" } Some("user") None
+agent jin fs.read Some("read") "/home/operator/tasks/agents" -> Deny { reason: "partition: the partitions' parent directories are listed and made, nothing else" } Some("user") None
 agent jin fs.write Some("write-existing") "/home/operator/notes" -> NotApplicable { note: Some("role user: no capability entry for fs.write") } Some("user") None
 agent jin fs.write read-twin Some("read") "/home/operator/notes" -> NotApplicable { note: Some("role user: no capability entry for fs.read") } Some("user") None
 agent jin fs.write Some("write-existing") "/home/operator/projects/x" -> NotApplicable { note: Some("role user: no capability entry for fs.write") } Some("user") None
@@ -445,6 +457,10 @@ agent jin root=users/1 fs.list Some("read") "/home/operator/tasks/users/1/x" -> 
 agent jin fs.list Some("read") "/home/operator/tasks/users/1/x" -> Deny { reason: "partition: the request cites no task" } Some("user") None
 agent jin root=users/1 fs.list Some("read") "/home/operator/tasks/users/2/x" -> Deny { reason: "partition: the path is in another tasker's partition" } Some("user") None
 agent jin fs.list Some("read") "/home/operator/tasks/users/2/x" -> Deny { reason: "partition: the request cites no task" } Some("user") None
+agent jin root=users/1 fs.list Some("read") "/home/operator/tasks/users" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.jin.tasks-right:allow:0 in #agents.jin.tasks-right")
+agent jin fs.list Some("read") "/home/operator/tasks/users" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.jin.tasks-right:allow:0 in #agents.jin.tasks-right")
+agent jin root=users/1 fs.list Some("read") "/home/operator/tasks/agents" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.jin.tasks-right:allow:0 in #agents.jin.tasks-right")
+agent jin fs.list Some("read") "/home/operator/tasks/agents" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.jin.tasks-right:allow:0 in #agents.jin.tasks-right")
 agent jin root=users/1 fs.stat Some("read") "/home/operator/tasks" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.jin.tasks-right:allow:0 in #agents.jin.tasks-right")
 agent jin fs.stat Some("read") "/home/operator/tasks" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.jin.tasks-right:allow:0 in #agents.jin.tasks-right")
 agent jin root=users/1 fs.stat Some("read") "/home/operator/tasks/users/1/x" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.jin.tasks-right:allow:0 in #agents.jin.tasks-right")
@@ -467,6 +483,10 @@ agent suga root=users/1 fs.read Some("read") "/home/operator/tasks/users/1/x" ->
 agent suga fs.read Some("read") "/home/operator/tasks/users/1/x" -> Deny { reason: "partition: the request cites no task" } Some("user") None
 agent suga root=users/1 fs.read Some("read") "/home/operator/tasks/users/2/x" -> Deny { reason: "partition: the path is in another tasker's partition" } Some("user") None
 agent suga fs.read Some("read") "/home/operator/tasks/users/2/x" -> Deny { reason: "partition: the request cites no task" } Some("user") None
+agent suga root=users/1 fs.read Some("read") "/home/operator/tasks/users" -> Deny { reason: "partition: the partitions' parent directories are listed and made, nothing else" } Some("user") None
+agent suga fs.read Some("read") "/home/operator/tasks/users" -> Deny { reason: "partition: the partitions' parent directories are listed and made, nothing else" } Some("user") None
+agent suga root=users/1 fs.read Some("read") "/home/operator/tasks/agents" -> Deny { reason: "partition: the partitions' parent directories are listed and made, nothing else" } Some("user") None
+agent suga fs.read Some("read") "/home/operator/tasks/agents" -> Deny { reason: "partition: the partitions' parent directories are listed and made, nothing else" } Some("user") None
 agent suga fs.write Some("write-existing") "/home/operator/notes" -> NotApplicable { note: Some("role user: no capability entry for fs.write") } Some("user") None
 agent suga fs.write read-twin Some("read") "/home/operator/notes" -> NotApplicable { note: Some("role user: no capability entry for fs.read") } Some("user") None
 agent suga fs.write Some("write-existing") "/home/operator/projects/x" -> NotApplicable { note: Some("role user: no capability entry for fs.write") } Some("user") None
@@ -591,6 +611,10 @@ agent suga root=users/1 fs.list Some("read") "/home/operator/tasks/users/1/x" ->
 agent suga fs.list Some("read") "/home/operator/tasks/users/1/x" -> Deny { reason: "partition: the request cites no task" } Some("user") None
 agent suga root=users/1 fs.list Some("read") "/home/operator/tasks/users/2/x" -> Deny { reason: "partition: the path is in another tasker's partition" } Some("user") None
 agent suga fs.list Some("read") "/home/operator/tasks/users/2/x" -> Deny { reason: "partition: the request cites no task" } Some("user") None
+agent suga root=users/1 fs.list Some("read") "/home/operator/tasks/users" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.suga.tasks-right:allow:0 in #agents.suga.tasks-right")
+agent suga fs.list Some("read") "/home/operator/tasks/users" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.suga.tasks-right:allow:0 in #agents.suga.tasks-right")
+agent suga root=users/1 fs.list Some("read") "/home/operator/tasks/agents" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.suga.tasks-right:allow:0 in #agents.suga.tasks-right")
+agent suga fs.list Some("read") "/home/operator/tasks/agents" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.suga.tasks-right:allow:0 in #agents.suga.tasks-right")
 agent suga root=users/1 fs.stat Some("read") "/home/operator/tasks" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.suga.tasks-right:allow:0 in #agents.suga.tasks-right")
 agent suga fs.stat Some("read") "/home/operator/tasks" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.suga.tasks-right:allow:0 in #agents.suga.tasks-right")
 agent suga root=users/1 fs.stat Some("read") "/home/operator/tasks/users/1/x" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.suga.tasks-right:allow:0 in #agents.suga.tasks-right")
@@ -613,6 +637,10 @@ agent jimin root=users/1 fs.read Some("read") "/home/operator/tasks/users/1/x" -
 agent jimin fs.read Some("read") "/home/operator/tasks/users/1/x" -> Deny { reason: "partition: the request cites no task" } Some("user") None
 agent jimin root=users/1 fs.read Some("read") "/home/operator/tasks/users/2/x" -> Deny { reason: "partition: the path is in another tasker's partition" } Some("user") None
 agent jimin fs.read Some("read") "/home/operator/tasks/users/2/x" -> Deny { reason: "partition: the request cites no task" } Some("user") None
+agent jimin root=users/1 fs.read Some("read") "/home/operator/tasks/users" -> Deny { reason: "partition: the partitions' parent directories are listed and made, nothing else" } Some("user") None
+agent jimin fs.read Some("read") "/home/operator/tasks/users" -> Deny { reason: "partition: the partitions' parent directories are listed and made, nothing else" } Some("user") None
+agent jimin root=users/1 fs.read Some("read") "/home/operator/tasks/agents" -> Deny { reason: "partition: the partitions' parent directories are listed and made, nothing else" } Some("user") None
+agent jimin fs.read Some("read") "/home/operator/tasks/agents" -> Deny { reason: "partition: the partitions' parent directories are listed and made, nothing else" } Some("user") None
 agent jimin fs.write Some("write-existing") "/home/operator/notes" -> NotApplicable { note: Some("role user: no capability entry for fs.write") } Some("user") None
 agent jimin fs.write read-twin Some("read") "/home/operator/notes" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.jimin.permissions:allow:0 in #agents.jimin")
 agent jimin fs.write Some("write-existing") "/home/operator/projects/x" -> NotApplicable { note: Some("role user: no capability entry for fs.write") } Some("user") None
@@ -737,6 +765,10 @@ agent jimin root=users/1 fs.list Some("read") "/home/operator/tasks/users/1/x" -
 agent jimin fs.list Some("read") "/home/operator/tasks/users/1/x" -> Deny { reason: "partition: the request cites no task" } Some("user") None
 agent jimin root=users/1 fs.list Some("read") "/home/operator/tasks/users/2/x" -> Deny { reason: "partition: the path is in another tasker's partition" } Some("user") None
 agent jimin fs.list Some("read") "/home/operator/tasks/users/2/x" -> Deny { reason: "partition: the request cites no task" } Some("user") None
+agent jimin root=users/1 fs.list Some("read") "/home/operator/tasks/users" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.jimin.tasks-right:allow:0 in #agents.jimin.tasks-right")
+agent jimin fs.list Some("read") "/home/operator/tasks/users" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.jimin.tasks-right:allow:0 in #agents.jimin.tasks-right")
+agent jimin root=users/1 fs.list Some("read") "/home/operator/tasks/agents" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.jimin.tasks-right:allow:0 in #agents.jimin.tasks-right")
+agent jimin fs.list Some("read") "/home/operator/tasks/agents" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.jimin.tasks-right:allow:0 in #agents.jimin.tasks-right")
 agent jimin root=users/1 fs.stat Some("read") "/home/operator/tasks" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.jimin.tasks-right:allow:0 in #agents.jimin.tasks-right")
 agent jimin fs.stat Some("read") "/home/operator/tasks" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.jimin.tasks-right:allow:0 in #agents.jimin.tasks-right")
 agent jimin root=users/1 fs.stat Some("read") "/home/operator/tasks/users/1/x" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.jimin.tasks-right:allow:0 in #agents.jimin.tasks-right")

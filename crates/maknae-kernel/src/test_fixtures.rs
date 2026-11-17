@@ -390,7 +390,7 @@ const HOBI_POLICY: &str =
 pub(crate) const AGENTS: &[(&str, u32, Option<&str>)] = &[
     ("hobi", 2001, Some(HOBI_POLICY)),
     ("jin", 2002, None),
-    ("suga", 2003, Some("schema_version: 1\n")),
+    ("suga", 2003, Some(maknae_config::STARTER_POLICY)),
     (
         "jimin",
         2004,
