@@ -2843,7 +2843,7 @@ impl Attempt {
             &ctx.where_.au3_1,
         );
         rec.subject.user = crate::run::admitted_user_pub(ctx.user);
-        rec.subject.role = self.role.map(str::to_string);
+        let mut rec = crate::run::decision_record(rec, self.role, None);
         rec.subject.agent = self.agent.as_ref().map(|a| a.as_str().to_string());
         rec.subject.task_id = task.map(|t| t.task_id.to_string());
         rec.subject.parent_task_id = self.parent.map(|p| p.to_string());

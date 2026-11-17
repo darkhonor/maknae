@@ -2714,8 +2714,7 @@ pub(crate) fn prompt_refusal_record(
         f.au3_1,
     );
     rec.subject.user = admitted_user(f.peer_user);
-    rec.subject.role = f.role.map(str::to_string);
-    rec.rule = f.rule.map(rule_audit);
+    let mut rec = decision_record(rec, f.role, f.rule);
     rec.conversation = Some(f.conversation.to_owned());
     rec
 }
@@ -2739,7 +2738,7 @@ pub(crate) fn backend_unavailable_record(f: &PromptRecordFacts<'_>) -> AuditReco
         f.au3_1,
     );
     rec.subject.user = admitted_user(f.peer_user);
-    rec.subject.role = f.role.map(str::to_string);
+    let mut rec = decision_record(rec, f.role, None);
     rec.egress = Some(prompt_egress_audit(
         EgressStatus::BackendUnavailable,
         f.content,
@@ -2769,8 +2768,7 @@ pub(crate) fn prompt_intent_record(f: &PromptRecordFacts<'_>) -> AuditRecord {
         f.au3_1,
     );
     intent.subject.user = admitted_user(f.peer_user);
-    intent.subject.role = f.role.map(str::to_string);
-    intent.rule = f.rule.map(rule_audit);
+    let mut intent = decision_record(intent, f.role, f.rule);
     intent.egress = Some(prompt_egress_audit(
         EgressStatus::IntentOnly,
         f.content,
@@ -3094,9 +3092,11 @@ async fn serve_conversation_verb<S, E, P>(
     let (verdict, role, rule) =
         decide_bounded(authorizer, live, sec_req, generation, timeout).await;
     let decided = |result: &str, reason: &str, posture: &str| {
-        let mut rec = trail.record(action, result, reason, posture);
-        rec.subject.role = role.map(str::to_string);
-        rec.rule = rule.as_ref().map(rule_audit);
+        let mut rec = decision_record(
+            trail.record(action, result, reason, posture),
+            role,
+            rule.as_ref(),
+        );
         rec.object_requested.clone_from(&asked);
         rec.conversation = cited.as_ref().map(|c| c.as_str().to_owned());
         rec
@@ -4729,8 +4729,7 @@ pub(crate) fn request_outcome_record(
         result, reason, posture, au3_1,
     );
     rec.subject.user = admitted_user(peer_user);
-    rec.subject.role = role.map(str::to_string);
-    rec.rule = rule.map(rule_audit);
+    let mut rec = decision_record(rec, role, rule);
     rec.object_requested = object_requested.map(str::to_string);
     rec
 }
@@ -4815,7 +4814,7 @@ async fn emit_request_deny<E: AuditEmit + Send + Sync>(
     );
     // #275: the peer identity, bounded and audit-only.
     rec.subject.user = admitted_user(peer_user);
-    rec.subject.role = role.map(str::to_string);
+    let rec = decision_record(rec, role, None);
     if let Err(e) = emit.emit_within(&rec, AUDIT_APPEND_TIMEOUT).await {
         // Logged, not control-flow-changing — the caller already closes the
         // connection regardless.
