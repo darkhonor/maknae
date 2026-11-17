@@ -987,7 +987,7 @@ impl PolicySource {
 
     /// `authz.yaml`'s top-level sections, `"bindings"` from `bindings.yaml` when it has
     /// the key, `"sensitive"` from `sensitive.yaml`, `"agents.<id>"` for each enrolled
-    /// agent's `policy.yaml` and `"agents.<id>.tasks-right"` for every enrolled agent,
+    /// agent's `policy.yaml` and `"agents.<id>#tasks-right"` for every enrolled agent,
     /// each canonical JSON through the caller's digest, by key.
     pub fn section_digests(
         &self,
@@ -1010,7 +1010,7 @@ impl PolicySource {
         }
         let right = digest(maknae_config::tasks_right_canonical().as_bytes());
         for id in self.agents.enrolled.keys() {
-            out.insert(format!("agents.{}.tasks-right", id.as_str()), right);
+            out.insert(format!("agents.{}#tasks-right", id.as_str()), right);
         }
         out
     }
@@ -8197,12 +8197,49 @@ mod tests {
                     );
                 }
                 assert_eq!(
-                    digests.get(&format!("agents.{id}.tasks-right")),
+                    digests.get(&format!("agents.{id}#tasks-right")),
                     Some(&want),
                     "{id}"
                 );
             }
             assert_eq!(digests.get("agents.suga"), None, "suga has no policy.yaml");
+        }
+
+        #[test]
+        fn an_agent_named_like_a_tasks_right_key_keeps_its_policy_digest() {
+            let policy =
+                |allow: &str| format!("schema_version: 1\npermissions:\n  allow: [\"{allow}\"]\n");
+            let built = |twin_policy: &str| {
+                let src = source(
+                    None,
+                    &[],
+                    load(
+                        vec![
+                            enrollment("x", "hobi-svc", HOBI, AgentRole::User),
+                            enrollment("x.tasks-right", "suga-svc", SUGA, AgentRole::User),
+                        ],
+                        &[
+                            ("x", &policy("Read(~/a/**)")),
+                            ("x.tasks-right", twin_policy),
+                        ],
+                    ),
+                );
+                (
+                    src.section_digests(test_digest),
+                    compiled(&src).policy_sha256(test_digest),
+                )
+            };
+            let (digests, before) = built(&policy("Read(~/b/**)"));
+            let right = test_digest(maknae_config::tasks_right_canonical().as_bytes());
+            assert!(digests.contains_key("agents.x"));
+            assert!(
+                digests
+                    .iter()
+                    .any(|(k, d)| k.starts_with("agents.x.tasks-right") && *d != right),
+                "the policy of agent x.tasks-right must have its own digest"
+            );
+            let (_, after) = built(&policy("Read(~/c/**)"));
+            assert_ne!(before, after);
         }
 
         const HOBI_POLICY: &str = "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: [\"Read(~/docs/secret/**)\"]\n";

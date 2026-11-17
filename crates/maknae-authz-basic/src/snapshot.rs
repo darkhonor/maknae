@@ -563,7 +563,14 @@ pub fn compile(
         let source_id = c.add_node(CONFIG_SOURCE, TASKS_RIGHT_SOURCE.into(), Attrs::new());
         for (id, right) in rights {
             let name = format!("agents.{id}.tasks-right");
-            let sec = c.section_of(source_id, TASKS_RIGHT_SOURCE, &name, section_sha256, &name)?;
+            let digest_key = format!("agents.{id}#tasks-right");
+            let sec = c.section_of(
+                source_id,
+                TASKS_RIGHT_SOURCE,
+                &name,
+                section_sha256,
+                &digest_key,
+            )?;
             let word = effect_attrs(Effect::Allow).1;
             for (i, entry) in right.allow_sources().iter().enumerate() {
                 let mut attrs = Attrs::new();

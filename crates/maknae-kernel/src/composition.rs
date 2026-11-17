@@ -926,6 +926,10 @@ mod tests {
     fn the_shipped_files_decide_identically_through_the_composition() {
         let got = shipped_effective_decisions();
         if std::env::var_os("MAKNAE_BLESS").is_some() {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "MAKNAE_BLESS must not be set in CI"
+            );
             std::fs::write(
                 concat!(
                     env!("CARGO_MANIFEST_DIR"),

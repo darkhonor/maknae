@@ -76,10 +76,22 @@ pub(crate) fn publish_new_at<F: AsFd>(
     mode: Mode,
     owner: FileOwner,
 ) -> Result<bool, IoError> {
+    publish_new_synced(dirfd, final_name, at, bytes, mode, owner, syscall::fsync_fd)
+}
+
+fn publish_new_synced<F: AsFd>(
+    dirfd: &F,
+    final_name: &str,
+    at: &Path,
+    bytes: &[u8],
+    mode: Mode,
+    owner: FileOwner,
+    sync_dir: impl FnOnce(&F) -> nix::Result<()>,
+) -> Result<bool, IoError> {
     let created = publish_raw(dirfd, final_name, bytes, mode, Some(owner), false)
         .map_err(|e| crate::checks::map_errno_no_disambiguation(e, at))?;
     if created {
-        syscall::fsync_fd(dirfd).map_err(|e| IoError::PublishedNotDurable {
+        sync_dir(dirfd).map_err(|e| IoError::PublishedNotDurable {
             path: at.to_path_buf(),
             kind: crate::checks::kind_of_errno(e),
         })?;
@@ -461,6 +473,111 @@ mod tests {
         .unwrap_err();
         assert!(matches!(e, IoError::Io { .. }), "{e:?}");
         assert!(busy.is_dir());
+    }
+
+    fn own_ids() -> crate::anchor::FileOwner {
+        crate::anchor::FileOwner {
+            uid: nix::unistd::geteuid().as_raw(),
+            gid: nix::unistd::getegid().as_raw(),
+        }
+    }
+
+    fn no_temp_left(dir: &Path) {
+        let left: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|n| n.to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+    }
+
+    #[test]
+    fn a_new_publish_creates_then_syncs_the_directory_and_reports_created() {
+        let d = tempfile::tempdir().unwrap();
+        let dirfd = std::fs::File::open(d.path()).unwrap();
+        let at = d.path().join("f");
+        let mut synced = false;
+        let created = publish_new_synced(&dirfd, "f", &at, b"one", Mode(0o640), own_ids(), |_| {
+            synced = true;
+            Ok(())
+        });
+        assert_eq!(created, Ok(true));
+        assert!(synced);
+        assert_eq!(std::fs::read(&at).unwrap(), b"one");
+        no_temp_left(d.path());
+    }
+
+    #[test]
+    fn a_new_publish_onto_an_existing_name_leaves_it_and_never_syncs() {
+        let d = tempfile::tempdir().unwrap();
+        let dirfd = std::fs::File::open(d.path()).unwrap();
+        let at = d.path().join("f");
+        std::fs::write(&at, b"old").unwrap();
+        let created = publish_new_synced(&dirfd, "f", &at, b"new", Mode(0o640), own_ids(), |_| {
+            panic!("nothing was created, so nothing is synced")
+        });
+        assert_eq!(created, Ok(false));
+        assert_eq!(std::fs::read(&at).unwrap(), b"old");
+        no_temp_left(d.path());
+    }
+
+    #[test]
+    fn a_failed_directory_sync_after_a_new_publish_is_published_not_durable() {
+        let d = tempfile::tempdir().unwrap();
+        let dirfd = std::fs::File::open(d.path()).unwrap();
+        let at = d.path().join("f");
+        use nix::errno::Errno;
+        let e = publish_new_synced(&dirfd, "f", &at, b"new", Mode(0o640), own_ids(), |_| {
+            Err(Errno::EIO)
+        })
+        .unwrap_err();
+        assert_eq!(
+            e,
+            IoError::PublishedNotDurable {
+                path: at.clone(),
+                kind: crate::IoKind::Other {
+                    raw: Errno::EIO as i32
+                },
+            }
+        );
+        assert_eq!(std::fs::read(&at).unwrap(), b"new");
+    }
+
+    #[test]
+    fn a_new_publish_whose_link_fails_other_than_by_existing_errs_and_removes_its_temp() {
+        let d = tempfile::tempdir().unwrap();
+        let dirfd = std::fs::File::open(d.path()).unwrap();
+        let temp_dir = d.path().join(".d");
+        std::fs::create_dir(&temp_dir).unwrap();
+        let at = d.path().join("d/x");
+        let e = publish_new_synced(&dirfd, "d/x", &at, b"new", Mode(0o640), own_ids(), |_| {
+            panic!("nothing was created, so nothing is synced")
+        })
+        .unwrap_err();
+        assert!(matches!(e, IoError::Io { .. }), "{e:?}");
+        no_temp_left(&temp_dir);
+        assert!(!d.path().join("d").exists());
+    }
+
+    #[test]
+    fn a_new_publish_that_cannot_take_its_owner_errs_and_removes_its_temp() {
+        if nix::unistd::geteuid().is_root() {
+            return;
+        }
+        let d = tempfile::tempdir().unwrap();
+        let dirfd = std::fs::File::open(d.path()).unwrap();
+        let at = d.path().join("f");
+        let other = crate::anchor::FileOwner {
+            uid: nix::unistd::geteuid().as_raw() + 1,
+            gid: nix::unistd::getegid().as_raw(),
+        };
+        let e = publish_new_synced(&dirfd, "f", &at, b"new", Mode(0o640), other, |_| {
+            panic!("nothing was created, so nothing is synced")
+        })
+        .unwrap_err();
+        assert!(matches!(e, IoError::Io { .. }), "{e:?}");
+        assert!(!at.exists());
+        no_temp_left(d.path());
     }
 
     /// The pid is not decoration: without it a counter restarting at 0 each process

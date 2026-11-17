@@ -82,8 +82,9 @@ schema_version: 1
 ## Add only what the agent needs beyond its own ~/tasks.
 ## Lines starting with a single # are examples; remove the # to use one.
 
+## `--persona self` reads <home>/persona.md, outside ~/tasks: list Read(~/persona.md) to allow it.
 # permissions:
-#   allow: [\"Read(~/notes/**)\"]
+#   allow: [\"Read(~/notes/**)\", \"Read(~/persona.md)\"]
 #   deny: [\"Write(~/notes/private/**)\"]
 
 # actions:
@@ -93,9 +94,7 @@ schema_version: 1
 # models:
 #   allow: [\"anthropic/claude-sonnet\"]
 
-# taskers:
-#   - \"uid:1000\"
-#   - \"agent:suga\"
+# taskers: [\"alice\", \"agent:jin\"]
 ";
 
 fn tasks_right_value() -> Value {
@@ -1045,6 +1044,10 @@ mod tests {
         for held in TASKS_RIGHT_PATHS.iter().chain(TASKS_RIGHT_SESSION.iter()) {
             assert!(STARTER_POLICY.contains(held), "{held}");
         }
+        assert!(
+            STARTER_POLICY.contains("# permissions:")
+                && STARTER_POLICY.contains("Read(~/persona.md)")
+        );
         for section in ["permissions:", "actions:", "models:", "taskers:"] {
             assert!(
                 STARTER_POLICY.contains(&format!("# {section}")),

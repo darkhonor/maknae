@@ -2980,6 +2980,24 @@ mod tests {
     }
 
     #[test]
+    fn publish_owned_new_walks_into_a_subdirectory() {
+        let _g = PUBLISH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        std::fs::create_dir(a.path.join("sub")).unwrap();
+        std::fs::set_permissions(a.path.join("sub"), std::fs::Permissions::from_mode(0o750))
+            .unwrap();
+        let (uid, gid) = ids();
+        let owner = FileOwner { uid, gid };
+        let made = a
+            .publish_owned_new(Path::new("sub/f"), None, b"one", m(0o640), owner)
+            .unwrap();
+        assert!(made.value);
+        assert_eq!(std::fs::read(a.path.join("sub/f")).unwrap(), b"one");
+        assert_no_temp_left(&a.path.join("sub"));
+    }
+
+    #[test]
     fn publish_owned_replaces_atomically_and_leaves_a_sibling_untouched() {
         let _g = PUBLISH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let d = dir(0o750);
