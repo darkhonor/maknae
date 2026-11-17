@@ -1033,8 +1033,7 @@ where
         Ok((by, _)) => by,
         Err((_, _, by)) => by,
     };
-    record.subject.role = role.map(str::to_string);
-    record.rule = rule.as_ref().map(crate::run::rule_audit);
+    let mut record = crate::run::decision_record(record, *role, rule.as_ref());
     let label = match decision {
         Ok((_, label)) => label,
         Err((reason, denied_path, _)) => {

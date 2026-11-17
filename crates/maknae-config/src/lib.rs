@@ -108,6 +108,7 @@ pub use bounds::{
     bounds_from_document, key_prefix_is_acceptable, kv_fragment_is_acceptable,
     mount_path_is_acceptable, path_is_within_prefix, prefixes_overlap, vault_path_is_safe,
     EgressBounds, DEFAULT_CALL_TIMEOUT_MS, EGRESS_BOUNDS_FILE, MAX_KEY_PREFIX_BYTES,
+    PROVIDER_BODY_MAX_BYTES,
 };
 pub use bounds_io::load_egress_bounds;
 pub use ceiling::{ceiling_from_core, policy_name_from_core, Ceiling, IngestPosture};

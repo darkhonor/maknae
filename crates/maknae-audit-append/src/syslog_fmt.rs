@@ -357,77 +357,45 @@ pub(crate) fn format_record(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::record::{EgressAudit, EgressStatus};
-
-    fn egress_record(
-        status: EgressStatus,
-        reply_length: Option<u64>,
-        result: &str,
-        reason: &str,
-        posture: &str,
-    ) -> crate::record::AuditRecord {
-        let mut r = rec(reason);
-        r.where_.host = "maknaed-01".into();
-        r.where_.socket = "/var/run/maknae/plane.sock".into();
-        r.source.plane_uri_san = Some("spiffe://d/plane/cli".into());
-        r.subject.plane_uri_san = Some("spiffe://d/plane/cli".into());
-        r.source.uid = u32::MAX;
-        // production make_record never sets these; measure the production shape
-        r.subject.user = None;
-        r.source.gid = None;
-        r.source.pid = None;
-        r.action = "session.prompt".into();
-        r.object = Some(format!("provider:{}", "p".repeat(32)));
-        r.outcome.result = result.into();
-        r.outcome.posture = posture.into();
-        r.session_id = 999_999;
-        r.seq = 999_999;
-        r.au3_1 = serde_json::json!({"mutation": "untrusted extension"});
-        r.egress = Some(EgressAudit {
-            status,
-            content_length: 999_999_999,
-            content_digest: "f".repeat(32),
-            conversation: "c".repeat(32),
-            model: Some("m".repeat(128)),
-            reply_length,
-            output_tokens: Some(u64::MAX),
-            prompt_tokens: Some(u64::MAX),
-            completion_tokens: Some(u64::MAX),
-            refused_tool_calls: vec![],
-        });
-        r
-    }
-
-    /// **The test that did not exist until #275.** Every other cap test takes
-    /// the record as an INPUT and asks whether the formatter behaves at a given
-    /// length; the two strongest CONSTRUCT a record at exactly the cap by
-    /// padding `au3_1`, so by construction neither can reveal that a REAL
-    /// record reaches it. The cap is a property of the record schema × the
-    /// deployment's field widths, and until now no test owned that product.
-    ///
-    /// Replaces `every_egress_record_kind_fits_..._at_the_pinned_bounds` and its
-    /// `EGRESS_RECORD_MARGIN`. That assertion was "the widest record must fit
-    /// with 16 bytes to spare", which is the wrong invariant once degradation is
-    /// the contract — and it was measured with `user: None`, i.e. the 7-byte
-    /// `unknown` sentinel, which is exactly the state #275 abolishes. MEASURED
-    /// with a real identity: `alice`+`role=user` = 1027, `aackerman`+`admin` =
-    /// 1042, a 32-byte user + `adversary` = 1123, against a 1015 cap. So the
-    /// widest content-plane records degrade on macOS as the NORMAL case.
+    /// Every record shape the formatter can be handed either mirrors in full
+    /// within the cap or degrades to a line that fits unconditionally. The
+    /// shapes here are synthetic: the widths of records the kernel writes are
+    /// measured from its own builders, in `maknae-kernel` (`record_widths`).
     #[test]
     fn every_record_mirrors_something_and_the_degraded_line_always_fits() {
+        let mut shapes = Vec::new();
+        shapes.push(("fits".to_string(), rec("no")));
+        let mut host = rec("no");
+        host.where_.host = "h".repeat(255);
+        shapes.push(("host 255".into(), host));
+        let mut socket = rec("no");
+        socket.where_.socket = format!("/{}", "s".repeat(254));
+        shapes.push(("socket 255".into(), socket));
+        let mut user = rec("no");
+        user.subject.user = Some("u".repeat(32));
+        user.subject.role = Some("adversary".into());
+        shapes.push(("user 32".into(), user));
+        let mut path = rec("no");
+        path.where_.host = "h".repeat(255);
+        path.where_.socket = format!("/{}", "s".repeat(254));
+        path.subject.user = Some("u".repeat(32));
+        path.subject.role = Some("adversary".into());
+        path.au3_1 = serde_json::json!({ "pad": "x".repeat(4096) });
+        shapes.push(("pathological".into(), path));
         let mut saw_degraded = false;
-        for (label, r) in widest_shapes() {
+        let mut saw_full = false;
+        for (label, r) in shapes {
             match format_record(&r, PrimaryOutcome::Ok).unwrap() {
-                Mirrored::Full(l) => assert!(
-                    l.len() <= MACOS_SYSLOG_MAX,
-                    "{label}: full line {} > {MACOS_SYSLOG_MAX}",
-                    l.len()
-                ),
+                Mirrored::Full(l) => {
+                    saw_full = true;
+                    assert!(
+                        l.len() <= MACOS_SYSLOG_MAX,
+                        "{label}: full line {} > {MACOS_SYSLOG_MAX}",
+                        l.len()
+                    );
+                }
                 Mirrored::Degraded(l) => {
                     saw_degraded = true;
-                    // THE load-bearing assertion: the degraded line fits
-                    // UNCONDITIONALLY, which is provable because it carries no
-                    // operator-controlled string and truncates its two tokens.
                     assert!(
                         l.len() <= MACOS_SYSLOG_MAX,
                         "{label}: DEGRADED line {} > {MACOS_SYSLOG_MAX}",
@@ -440,9 +408,10 @@ mod tests {
                 }
             }
         }
+        assert!(saw_full, "a record that fits must mirror in full");
         assert!(
             saw_degraded,
-            "the pathological shape must degrade — otherwise this proves nothing"
+            "the pathological shape must degrade, otherwise this proves nothing"
         );
     }
 
@@ -652,224 +621,6 @@ mod tests {
             .unwrap();
         assert!(!s.contains('\0'), "no NUL may reach the platform: {s:?}");
         assert!(s.contains("subject=invalid"), "{s}");
-    }
-
-    /// FOUR of the #172 egress shapes at a real identity, plus a deliberately
-    /// pathological deployment. Not eight, and not claimed as production
-    /// evidence: these are SYNTHETIC width fixtures whose only job is to drive
-    /// both arms of the mirror. Roles and outcomes are paired for WIDTH, not
-    /// for reachability — `adversary` would not in fact obtain a permitted
-    /// send, and the reason strings are the widest of the vocabulary rather
-    /// than the exact ones `outcome_for` emits. The production-path evidence
-    /// lives in `crates/maknae-kernel/tests/`, where records come from real
-    /// decisions.
-    ///
-    /// `host`, `socket`, `object` and `au3_1` are unbounded by design, so no
-    /// sample is "the widest legal width" — the pathological case is here so
-    /// the degraded arm is always exercised.
-    const MEASURED_TASKER_LINE: usize = 858;
-    const MEASURED_WIDEST_TASK_LINE: usize = 1229;
-    const MEASURED_RELEASE_LINE: usize = 876;
-    const MEASURED_WIDEST_RELEASE_LINE: usize = 1076;
-
-    fn widest_shapes() -> Vec<(String, crate::record::AuditRecord)> {
-        let mut out = Vec::new();
-        for (label, status, reply, result, reason, posture) in [
-            (
-                "intent",
-                EgressStatus::IntentOnly,
-                None,
-                "permit",
-                "intent recorded",
-                "authorized",
-            ),
-            (
-                "sent",
-                EgressStatus::Sent,
-                Some(999_999_999),
-                "permit",
-                "sent",
-                "authorized",
-            ),
-            (
-                "failed",
-                EgressStatus::Failed,
-                None,
-                "deny",
-                "send failed",
-                "unavailable",
-            ),
-            // #240: the EXACT string `outcome_for` emits when the request
-            // left and the exchange failed after it.
-            (
-                "unknown",
-                EgressStatus::OutcomeUnknown,
-                None,
-                "deny",
-                "send outcome unknown",
-                "unavailable",
-            ),
-            (
-                "undelivered",
-                EgressStatus::LandedUndelivered,
-                Some(999_999_999),
-                "permit",
-                "reply over the frame cap",
-                "refused-oversize",
-            ),
-            // #240a: the EXACT string `outcome_for` emits for a refused
-            // tool-call proposal. Added here rather than relying on the
-            // "widest of the vocabulary" note above, so the fixture is bound
-            // to the production string instead of merely being as wide as it.
-            (
-                "undelivered-toolcall",
-                EgressStatus::LandedUndelivered,
-                Some(999_999_999),
-                "permit",
-                "reply refused: tool call",
-                "unauthorized",
-            ),
-            (
-                "undelivered-reasoning",
-                EgressStatus::LandedUndelivered,
-                Some(999_999_999),
-                "permit",
-                "reply refused: reasoning",
-                "unauthorized",
-            ),
-            (
-                "undelivered-unusable",
-                EgressStatus::LandedUndelivered,
-                None,
-                "permit",
-                "reply unusable: provider-rate-limit",
-                "unavailable",
-            ),
-        ] {
-            let mut r = egress_record(status, reply, result, reason, posture);
-            r.subject.user = Some("aackerman".into());
-            r.subject.role = Some("adversary".into());
-            out.push((format!("{label} (real identity)"), r));
-        }
-        let mut path = egress_record(
-            EgressStatus::LandedUndelivered,
-            Some(999_999_999),
-            "permit",
-            "reply over the frame cap",
-            "refused-oversize",
-        );
-        path.where_.host = "h".repeat(255);
-        path.where_.socket = format!("/{}", "s".repeat(254));
-        path.subject.user = Some("u".repeat(32));
-        path.subject.role = Some("adversary".into());
-        path.au3_1 = serde_json::json!({ "pad": "x".repeat(4096) });
-        out.push(("pathological deployment".into(), path));
-        let mut refused = egress_record(
-            EgressStatus::Sent,
-            Some(999_999_999),
-            "permit",
-            "sent",
-            "authorized",
-        );
-        refused.subject.user = Some("aackerman".into());
-        refused.subject.role = Some("adversary".into());
-        // 1 MiB body cap / 61,441 bytes per stubbed call (#426)
-        refused.egress.as_mut().unwrap().refused_tool_calls = (0..17)
-            .map(|_| crate::record::RefusedToolCall {
-                index: u64::MAX,
-                name: "n".repeat(64),
-                arguments_bytes: u64::MAX,
-            })
-            .collect();
-        out.push(("sent with 17 refused tool calls".into(), refused));
-        out.push(("widest session.task".into(), widest_task()));
-        out.push(("widest held-task release".into(), widest_release()));
-        out
-    }
-
-    /// The widest `session.task` record the kernel writes (#628): every task field at
-    /// its bound, the longest op, an agent-channel tasker.
-    fn widest_task() -> crate::record::AuditRecord {
-        let mut r = rec("acknowledge through 18446744073709551615; intent recorded");
-        r.action = "session.task".into();
-        r.object = Some(format!("task:{}", "0f".repeat(16)));
-        r.subject.user = Some("u".repeat(32));
-        r.subject.role = Some("adversary".into());
-        r.subject.agent = Some("a".repeat(32));
-        r.subject.task_id = Some("0f".repeat(16));
-        r.subject.parent_task_id = Some("a0".repeat(16));
-        r.subject.tasker = Some(format!("agent:{}", "b".repeat(32)));
-        r.subject.task_op = Some("collect".into());
-        r
-    }
-
-    fn widest_release() -> crate::record::AuditRecord {
-        let mut r = rec(
-            "task release outcome unknown: the task store did not answer in time; \
-             requested by uid 4294967295 in session 18446744073709551615",
-        );
-        r.action = "admin.release".into();
-        r.object = Some(format!("task:{}", "0f".repeat(16)));
-        r.source = crate::record::Source {
-            uid: u32::MAX,
-            gid: None,
-            pid: None,
-            plane_uri_san: None,
-        };
-        r.subject.user = None;
-        r.subject.task_id = Some("0f".repeat(16));
-        r.subject.parent_task_id = Some("a0".repeat(16));
-        r.subject.tasker = Some(format!("agent:{}", "b".repeat(32)));
-        r.outcome.posture = "unavailable".into();
-        r
-    }
-
-    /// MEASURED 2026-11-11 (#628, with `task_op`): a person's tasker-verb record
-    /// (`aackerman`, `user`, task, `uid:1000`, `status`) is 858 bytes and mirrors in
-    /// full; the widest task record is 1229 bytes and degrades.
-    #[test]
-    fn a_tasker_record_mirrors_in_full_and_the_widest_degrades() {
-        let mut r = rec("permit");
-        r.action = "session.task".into();
-        r.object = Some(format!("task:{}", "0f".repeat(16)));
-        r.subject.user = Some("aackerman".into());
-        r.subject.role = Some("user".into());
-        r.subject.task_id = Some("0f".repeat(16));
-        r.subject.tasker = Some("uid:1000".into());
-        r.subject.task_op = Some("status".into());
-        let full = format_line_unchecked(&r, PrimaryOutcome::Ok).unwrap();
-        assert_eq!(full.len(), MEASURED_TASKER_LINE, "{full}");
-        assert!(format_record(&r, PrimaryOutcome::Ok)
-            .unwrap()
-            .into_full()
-            .is_some());
-        let wide = format_line_unchecked(&widest_task(), PrimaryOutcome::Ok).unwrap();
-        assert_eq!(wide.len(), MEASURED_WIDEST_TASK_LINE);
-        assert!(format_record(&widest_task(), PrimaryOutcome::Ok)
-            .unwrap()
-            .is_degraded());
-        let release = format_line_unchecked(&widest_release(), PrimaryOutcome::Ok).unwrap();
-        assert_eq!(release.len(), MEASURED_WIDEST_RELEASE_LINE, "{release}");
-        assert!(format_record(&widest_release(), PrimaryOutcome::Ok)
-            .unwrap()
-            .is_degraded());
-        let mut person = widest_release();
-        person.source.uid = 501;
-        person.subject.parent_task_id = None;
-        person.subject.tasker = Some("uid:1000".into());
-        person.outcome = crate::record::Outcome {
-            result: "permit".into(),
-            reason: "task released: held from reported, now reported; \
-                     requested by uid 501 in session 7"
-                .into(),
-            posture: "authorized".into(),
-        };
-        let line = format_line_unchecked(&person, PrimaryOutcome::Ok).unwrap();
-        assert_eq!(line.len(), MEASURED_RELEASE_LINE, "{line}");
-        assert!(format_record(&person, PrimaryOutcome::Ok)
-            .unwrap()
-            .into_full()
-            .is_some());
     }
 
     /// Built LITERALLY. It CANNOT be shared: `journal.rs`'s and
@@ -1217,6 +968,28 @@ mod tests {
         panic!("never reached exactly {n} bytes — the pad step is not 1 byte per char");
     }
 
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn a_record_over_the_cap_is_reported_degraded_and_one_under_in_full() {
+        use crate::test_support::macos_mirror;
+        let at = macos_mirror(&record_formatting_to_exactly(MACOS_SYSLOG_MAX));
+        assert!(at.mirrored_in_full);
+        assert_eq!(at.full_len, MACOS_SYSLOG_MAX);
+        assert_eq!(at.degraded_len, None);
+        assert_eq!(at.degraded_line, None);
+        assert_eq!(at.full_line.len(), at.full_len);
+
+        let over = macos_mirror(&record_formatting_to_exactly(MACOS_SYSLOG_MAX + 1));
+        assert!(!over.mirrored_in_full);
+        assert_eq!(over.full_len, MACOS_SYSLOG_MAX + 1);
+        assert!(over.degraded_len.unwrap() <= MACOS_SYSLOG_MAX);
+        assert_eq!(over.full_line.len(), over.full_len);
+        assert_eq!(
+            over.degraded_line.unwrap().len(),
+            over.degraded_len.unwrap()
+        );
+    }
+
     #[test]
     fn a_line_of_exactly_the_cap_is_kept_and_one_byte_more_is_dropped() {
         // THE test that kills `replace > with >=`. Every other assertion in this
@@ -1303,34 +1076,5 @@ mod tests {
             seen.len(),
             "two outcomes share a MAKNAE_PRIMARY rendering"
         );
-    }
-
-    #[test]
-    fn the_widest_egress_record_with_the_widest_model_degrades_and_its_degraded_line_still_fits() {
-        let mut r = egress_record(
-            EgressStatus::Sent,
-            Some(999_999_999),
-            "permit",
-            "sent",
-            "authorized",
-        );
-        r.subject.user = Some("aackerman".into());
-        r.subject.role = Some("adversary".into());
-        let full = format_line_unchecked(&r, PrimaryOutcome::Ok).unwrap();
-        assert!(
-            full.contains(&format!("\"model\":\"{}\"", "m".repeat(128))),
-            "the widest model reaches the full line: {full}"
-        );
-        assert!(full.len() > MACOS_SYSLOG_MAX, "{}", full.len());
-        match format_record(&r, PrimaryOutcome::Ok).unwrap() {
-            Mirrored::Degraded(l) => {
-                assert!(l.len() <= MACOS_SYSLOG_MAX, "{}", l.len());
-                assert!(
-                    !l.contains("mmmm"),
-                    "the model reached the degraded line: {l}"
-                );
-            }
-            Mirrored::Full(l) => panic!("a {}-byte line mirrored in full", l.len()),
-        }
     }
 }

@@ -33,6 +33,9 @@ pub const EGRESS_BOUNDS_FILE: &str = "egress-bounds.yaml";
 /// Upper bound on the prefix. It reaches audit records and terminals.
 pub const MAX_KEY_PREFIX_BYTES: usize = 256;
 
+/// The largest provider response body the Egress Daemon reads.
+pub const PROVIDER_BODY_MAX_BYTES: usize = 1024 * 1024;
+
 /// The provider call timeout when `call_timeout_ms` is absent.
 pub const DEFAULT_CALL_TIMEOUT_MS: u64 = 120_000;
 const CALL_TIMEOUT_MS_RANGE: std::ops::RangeInclusive<i64> =
@@ -305,6 +308,11 @@ pub fn bounds_from_document(v: &Value) -> Result<EgressBounds, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_provider_body_cap_is_one_mebibyte() {
+        assert_eq!(PROVIDER_BODY_MAX_BYTES, 1 << 20);
+    }
 
     fn doc2(mount: &str, prefix: &str) -> Value {
         doc2_vault(mount, prefix, Some("https://vault.example:8200"))

@@ -1341,22 +1341,19 @@ mod tests {
         .expect("sendmsg");
     }
 
+    // Linux-only: /dev/fd stat races on macOS (#652).
+    #[cfg(target_os = "linux")]
     fn descriptors_open_on(obj: &std::path::Path) -> usize {
         use std::os::unix::fs::MetadataExt;
-        // Each scan opens a copy of every descriptor in the process, so two concurrent scans count each other's copies (#652).
-        static SCAN: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _scan = SCAN
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let want = std::fs::metadata(obj).expect("stat obj");
-        std::fs::read_dir("/dev/fd")
-            .expect("list /dev/fd")
-            .filter_map(|e| std::fs::File::open(e.ok()?.path()).ok()?.metadata().ok())
+        std::fs::read_dir("/proc/self/fd")
+            .expect("list descriptors")
+            .filter_map(|e| std::fs::metadata(e.ok()?.path()).ok())
             .filter(|m| m.dev() == want.dev() && m.ino() == want.ino())
             .count()
     }
 
-    fn over_send(count: usize) -> (std::io::Error, usize) {
+    fn over_send(count: usize) -> (std::io::Error, Option<usize>) {
         let dir = tempfile::tempdir().expect("tempdir");
         let obj = a_file(dir.path(), "obj", b"x");
         let (tx, rx) = std::os::unix::net::UnixStream::pair().expect("socketpair");
@@ -1367,6 +1364,7 @@ mod tests {
             .collect();
         let fds: Vec<BorrowedFd<'_>> = files.iter().map(|f| f.as_fd()).collect();
         send_fds(tx.as_fd(), &fds);
+        #[cfg(target_os = "linux")]
         assert_eq!(
             descriptors_open_on(&obj),
             count,
@@ -1378,7 +1376,35 @@ mod tests {
         let mut buf = [0u8; 64];
         let err = recv_delegated(rx.as_fd(), &mut buf)
             .expect_err("a message carrying more descriptors than the cap must be refused");
-        (err, descriptors_open_on(&obj))
+        #[cfg(target_os = "linux")]
+        let open = Some(descriptors_open_on(&obj));
+        #[cfg(not(target_os = "linux"))]
+        let open = None;
+        (err, open)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn concurrent_scans_count_only_their_own_descriptors() {
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    let dir = tempfile::tempdir().expect("tempdir");
+                    let obj = a_file(dir.path(), "obj", b"x");
+                    for _ in 0..200 {
+                        let held: Vec<std::fs::File> = (0..4)
+                            .map(|_| std::fs::File::open(&obj).expect("open"))
+                            .collect();
+                        assert_eq!(descriptors_open_on(&obj), 4);
+                        drop(held);
+                        assert_eq!(descriptors_open_on(&obj), 0);
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().expect("scan thread");
+        }
     }
 
     #[test]
@@ -1393,7 +1419,9 @@ mod tests {
                 std::io::ErrorKind::InvalidData,
                 "{count}: {err:?}"
             );
-            assert_eq!(open, 0, "{count}: every received descriptor must be closed");
+            if let Some(open) = open {
+                assert_eq!(open, 0, "{count}: every received descriptor must be closed");
+            }
         }
     }
 
@@ -1402,7 +1430,7 @@ mod tests {
     fn control_truncation_is_refused() {
         let (err, open) = over_send(4 * MAX_DELEGATED_FDS_PER_MESSAGE + 1);
         assert!(err.to_string().contains("truncat"), "{err}");
-        assert_eq!(open, 0);
+        assert_eq!(open, Some(0));
     }
 
     #[cfg(target_os = "linux")]

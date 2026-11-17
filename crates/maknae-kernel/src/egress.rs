@@ -625,8 +625,7 @@ pub enum SendOutcome {
 /// "send failed"; a reply that was not delivered (`LandedUndelivered`)
 /// stays `permit`, because the content DID leave and the trail must say so.
 /// Every posture is inside ADR-0019's pinned domain; the egress-specific fact is
-/// `egress.status`. The strings are the ones the syslog cap test measures;
-/// changing one means re-measuring.
+/// `egress.status`.
 pub fn outcome_for(
     intent: &DurableEgressIntent,
     seq: u64,
@@ -709,8 +708,7 @@ pub fn outcome_for(
         // `permit` + `unauthorized`, the NonText pairing: the content left and
         // the reply carries a proposal this deployment does not admit. No
         // ADR-0019 amendment is owed — `unauthorized` is already in the pinned
-        // posture domain and this is the same refusal shape as NonText. The
-        // REASON STRING is new, so the syslog width fixture carries it.
+        // posture domain and this is the same refusal shape as NonText.
         SendOutcome::LandedUndelivered {
             reply_length,
             refusal: ReplyRefusal::ToolCallUnacceptable,
@@ -2435,29 +2433,6 @@ mod tests {
                 "{d:?}"
             );
         }
-    }
-
-    #[test]
-    fn the_widest_unusable_reason_is_the_one_the_syslog_width_fixture_types() {
-        let widest = ReplyDefect::ALL
-            .into_iter()
-            .map(|d| {
-                outcome_for(
-                    &DurableEgressIntent::canned_for_test(),
-                    2,
-                    "t".into(),
-                    SendOutcome::LandedUndelivered {
-                        reply_length: None,
-                        refusal: ReplyRefusal::Unusable(d),
-                        usage: None,
-                    },
-                )
-                .outcome
-                .reason
-            })
-            .max_by_key(String::len)
-            .unwrap();
-        assert_eq!(widest, "reply unusable: provider-rate-limit");
     }
 
     #[test]

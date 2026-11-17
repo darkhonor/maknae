@@ -94,6 +94,15 @@ impl<B: Baseline> Composition<B> {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_us_baseline_ceiling(baseline: B) -> Self {
+        const US: &maknae_config::BasicPolicy = &maknae_config::BasicPolicy;
+        Self::new(
+            baseline,
+            CeilingAuthorizer::new(maknae_config::Ceiling::baseline_for(US), US),
+        )
+    }
+
     /// The booted view and providers, set before the composition is shared.
     pub fn with_live(mut self, live: crate::live::LiveConfig) -> Self {
         self.live = Arc::new(live);
@@ -606,19 +615,7 @@ mod tests {
     }
 
     const HOBI_HOME: &str = "/home/hobi-svc";
-    const HOBI_POLICY: &str =
-        "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Write(~/**)\"]\n";
-
-    const AGENTS: &[(&str, u32, Option<&str>)] = &[
-        ("hobi", 2001, Some(HOBI_POLICY)),
-        ("jin", 2002, None),
-        ("suga", 2003, Some("schema_version: 1\n")),
-        (
-            "jimin",
-            2004,
-            Some("schema_version: 1\npermissions:\n  allow: [\"Read(~/notes/**)\"]\n"),
-        ),
-    ];
+    use crate::test_fixtures::AGENTS;
 
     fn agents_composition(
         tag: &str,
@@ -779,35 +776,24 @@ mod tests {
     }
 
     fn shipped_effective_decisions() -> String {
-        let (g, basic) = fixture(
-            "shipped-effective",
-            include_str!("../../../packaging/common/authz.yaml"),
-            None,
-        );
-        crate::test_fixtures::write_sensitive(
-            &g.0,
-            include_str!("../../../packaging/common/sensitive.yaml"),
-        );
-        basic.set_hosts(crate::test_fixtures::BTS_HOSTS);
-        for (id, uid, policy) in AGENTS {
-            crate::test_fixtures::write_agent(&g.0, id, &format!("{id}-svc"), *uid, "user");
-            if let Some(policy) = policy {
-                crate::test_fixtures::write_agent_policy(&g.0, id, policy);
-            }
-        }
-        basic.install(basic.compile_from_file().unwrap());
-        let c = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
+        let (_g, c) = crate::test_fixtures::shipped_composition();
         let principal = i64::from(nix::unistd::geteuid().as_raw());
         let mut out = String::from(
             "# The shipped authz.yaml and sensitive.yaml, decided through the Composition.\n",
         );
-        let cases: &[(&str, Option<&str>, &[&str], bool)] = &[
-            ("liveness.ping", None, &[""], false),
-            ("session.new", None, &[""], false),
-            ("fs.read", Some("read"), FS_TARGETS, true),
-            ("fs.write", Some("write-existing"), FS_TARGETS, true),
-            ("fs.write", Some("write-create"), FS_TARGETS, true),
-            ("fs.delete", Some("delete-entry"), FS_TARGETS, true),
+        type Case<'a> = (&'a str, Option<&'a str>, &'a [&'a str], &'a [&'a str]);
+        let cases: &[Case] = &[
+            ("liveness.ping", None, &[""], &[]),
+            ("session.new", None, &[""], &[]),
+            ("fs.read", Some("read"), FS_TARGETS, TASKS_AND_PARENTS),
+            (
+                "fs.write",
+                Some("write-existing"),
+                FS_TARGETS,
+                TASKS_TARGETS,
+            ),
+            ("fs.write", Some("write-create"), FS_TARGETS, TASKS_TARGETS),
+            ("fs.delete", Some("delete-entry"), FS_TARGETS, TASKS_TARGETS),
             (
                 "fs.delete",
                 Some("delete-tree"),
@@ -816,11 +802,11 @@ mod tests {
                     "/home/operator/projects",
                     "/home/operator/.ssh",
                 ],
-                false,
+                &[],
             ),
-            ("fs.mkdir", Some("mkdir"), FS_TARGETS, true),
-            ("fs.list", Some("read"), &[], true),
-            ("fs.stat", Some("read"), &[], true),
+            ("fs.mkdir", Some("mkdir"), FS_TARGETS, TASKS_TARGETS),
+            ("fs.list", Some("read"), &[], TASKS_AND_PARENTS),
+            ("fs.stat", Some("read"), &[], TASKS_TARGETS),
         ];
         let mut subjects: Vec<(String, i64, Option<&str>)> = vec![
             ("principal".into(), principal, None),
@@ -832,12 +818,8 @@ mod tests {
                 .map(|(id, uid, _)| (format!("agent {id}"), i64::from(*uid), Some(*id))),
         );
         for (who, uid, agent) in &subjects {
-            for (term, op, targets, with_tasks) in cases {
-                let tasks: &[&str] = if agent.is_some() && *with_tasks {
-                    TASKS_TARGETS
-                } else {
-                    &[]
-                };
+            for (term, op, targets, agent_targets) in cases {
+                let tasks: &[&str] = if agent.is_some() { agent_targets } else { &[] };
                 let targets = targets.iter().chain(tasks);
                 for path in targets {
                     let tasked = path.contains("/tasks");
@@ -909,6 +891,14 @@ mod tests {
         "/home/operator/tasks",
         "/home/operator/tasks/users/1/x",
         "/home/operator/tasks/users/2/x",
+    ];
+
+    const TASKS_AND_PARENTS: &[&str] = &[
+        "/home/operator/tasks",
+        "/home/operator/tasks/users/1/x",
+        "/home/operator/tasks/users/2/x",
+        "/home/operator/tasks/users",
+        "/home/operator/tasks/agents",
     ];
 
     const FS_TARGETS: &[&str] = &[
