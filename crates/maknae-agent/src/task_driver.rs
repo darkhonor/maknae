@@ -2755,9 +2755,9 @@ mod tests {
         let (log, events) = run(f).await;
         let at = log.iter().position(|l| l == "prompt 1").unwrap();
         let text = reply_unusable_report(d);
-        assert!(
-            text.starts_with("stopped: reply-unusable: provider-auth: "),
-            "{text}"
+        assert_eq!(
+            text,
+            "stopped: reply-unusable: provider-auth: the provider refused the agent's key, or its access to the agent's model: ask the agent's administrator to check the agent's provider key and model"
         );
         let mut want = vec![
             format!("report {text}"),
@@ -2771,27 +2771,25 @@ mod tests {
 
     #[test]
     fn reply_unusable_report_names_each_defect_and_an_action() {
-        use maknae_proto::ReplyDefect as D;
-        let all = [
-            D::Malformed,
-            D::NoChoices,
-            D::Empty,
-            D::ReasoningOnly,
-            D::TokenLimit,
-            D::UnknownTool,
-            D::OverBound,
-            D::ProviderAuth,
-            D::ProviderRateLimit,
-            D::ProviderRejected,
-            D::ProviderError,
-        ];
+        let all = maknae_proto::ReplyDefect::ALL;
         let mut suffixes = std::collections::BTreeSet::new();
         for d in all {
             let text = reply_unusable_report(d);
             let prefix = format!("stopped: reply-unusable: {}: ", d.name());
             let suffix = text.strip_prefix(&prefix).expect(&text);
             assert!(!suffix.is_empty());
-            for banned in ["providers.yaml", "your Vault", "maknae login"] {
+            let (why, action) = suffix.rsplit_once(": ").expect(&text);
+            assert!(!why.is_empty(), "{text}");
+            assert!(
+                action.starts_with("retry") || action.starts_with("ask"),
+                "{text}"
+            );
+            for banned in [
+                "providers.yaml",
+                "your Vault",
+                "maknae login",
+                "this entry's",
+            ] {
                 assert!(!suffix.contains(banned), "{text}");
             }
             assert!(text.len() <= maknae_config::PROMPT_MAX_BYTES_FLOOR);
