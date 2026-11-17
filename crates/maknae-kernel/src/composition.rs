@@ -606,19 +606,7 @@ mod tests {
     }
 
     const HOBI_HOME: &str = "/home/hobi-svc";
-    const HOBI_POLICY: &str =
-        "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Write(~/**)\"]\n";
-
-    const AGENTS: &[(&str, u32, Option<&str>)] = &[
-        ("hobi", 2001, Some(HOBI_POLICY)),
-        ("jin", 2002, None),
-        ("suga", 2003, Some("schema_version: 1\n")),
-        (
-            "jimin",
-            2004,
-            Some("schema_version: 1\npermissions:\n  allow: [\"Read(~/notes/**)\"]\n"),
-        ),
-    ];
+    use crate::test_fixtures::AGENTS;
 
     fn agents_composition(
         tag: &str,
@@ -779,24 +767,7 @@ mod tests {
     }
 
     fn shipped_effective_decisions() -> String {
-        let (g, basic) = fixture(
-            "shipped-effective",
-            include_str!("../../../packaging/common/authz.yaml"),
-            None,
-        );
-        crate::test_fixtures::write_sensitive(
-            &g.0,
-            include_str!("../../../packaging/common/sensitive.yaml"),
-        );
-        basic.set_hosts(crate::test_fixtures::BTS_HOSTS);
-        for (id, uid, policy) in AGENTS {
-            crate::test_fixtures::write_agent(&g.0, id, &format!("{id}-svc"), *uid, "user");
-            if let Some(policy) = policy {
-                crate::test_fixtures::write_agent_policy(&g.0, id, policy);
-            }
-        }
-        basic.install(basic.compile_from_file().unwrap());
-        let c = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
+        let (_g, c) = crate::test_fixtures::shipped_composition();
         let principal = i64::from(nix::unistd::geteuid().as_raw());
         let mut out = String::from(
             "# The shipped authz.yaml and sensitive.yaml, decided through the Composition.\n",

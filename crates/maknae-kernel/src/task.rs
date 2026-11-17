@@ -192,7 +192,7 @@ fn release_state(from: TaskState) -> TaskState {
     }
 }
 
-fn unreleased(refused: TaskRefusal) -> ReleaseRefusal {
+pub(crate) fn unreleased(refused: TaskRefusal) -> ReleaseRefusal {
     match refused {
         TaskRefusal::Unavailable(why) => ReleaseRefusal::OutcomeUnknown(
             why.strip_prefix(OUTCOME_UNKNOWN)

@@ -2712,6 +2712,37 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     close_bounded(&mut stream).await;
 }
 
+pub(crate) fn task_verb_record(
+    mut rec: AuditRecord,
+    object: Option<String>,
+    cited: Option<&maknae_proto::TaskId>,
+    op: Option<&str>,
+    caller: &maknae_proto::Tasker,
+    channel_agent: Option<&maknae_config::AgentId>,
+) -> AuditRecord {
+    rec.object = object;
+    rec.subject.task_id = cited.map(ToString::to_string);
+    rec.subject.task_op = op.map(str::to_owned);
+    rec.subject.tasker = Some(maknae_proto::tasker_text(caller));
+    rec.subject.agent = channel_agent.map(|a| a.as_str().to_owned());
+    rec
+}
+
+pub(crate) fn submit_outcome_record(
+    mut outcome: AuditRecord,
+    id: &maknae_proto::TaskId,
+    parent: Option<&maknae_proto::TaskId>,
+) -> AuditRecord {
+    outcome.object = Some(format!("task:{id}"));
+    outcome.subject.task_id = Some(id.to_string());
+    outcome.subject.parent_task_id = parent.map(ToString::to_string);
+    outcome
+}
+
+pub(crate) fn collect_intent_reason(upto: u64) -> String {
+    format!("acknowledge through {upto}; intent recorded")
+}
+
 struct Trail<'a, E> {
     emit: &'a Arc<E>,
     cfg: &'a TransportConfig,
@@ -3317,13 +3348,15 @@ async fn serve_task_verb<S, E, P>(
     };
     let object = asked.object();
     let cited = asked.cited();
-    let stamped = |mut rec: AuditRecord| {
-        rec.object.clone_from(&object);
-        rec.subject.task_id = cited.map(|id| id.to_string());
-        rec.subject.task_op = op.map(str::to_owned);
-        rec.subject.tasker = Some(maknae_proto::tasker_text(caller));
-        rec.subject.agent = tasks.channel_agent.as_ref().map(|a| a.as_str().to_owned());
-        rec
+    let stamped = |rec: AuditRecord| {
+        task_verb_record(
+            rec,
+            object.clone(),
+            cited.as_ref(),
+            op,
+            caller,
+            tasks.channel_agent.as_ref(),
+        )
     };
 
     if let TaskVerb::Submit(task) = asked {
@@ -3382,10 +3415,11 @@ async fn serve_task_verb<S, E, P>(
                     )
                     | None => "task queued",
                 };
-                let mut outcome = stamped(trail.record(action, "permit", said, "authorized"));
-                outcome.object = Some(format!("task:{id}"));
-                outcome.subject.task_id = Some(id.to_string());
-                outcome.subject.parent_task_id = signed.task.parent.map(|p| p.to_string());
+                let mut outcome = submit_outcome_record(
+                    stamped(trail.record(action, "permit", said, "authorized")),
+                    &id,
+                    signed.task.parent.as_ref(),
+                );
                 match shown {
                     Some(view) => {
                         trail
@@ -3651,11 +3685,7 @@ async fn serve_task_verb<S, E, P>(
             };
             let mut intent = None;
             if let Some(upto) = after {
-                let rec = decided(
-                    "permit",
-                    &format!("acknowledge through {upto}; intent recorded"),
-                    "authorized",
-                );
+                let rec = decided("permit", &collect_intent_reason(upto), "authorized");
                 if !trail.record_bounded(&rec).await {
                     return;
                 }
@@ -10683,6 +10713,368 @@ pub(crate) mod baseline_stub {
 
     pub(crate) fn serving() -> tokio::sync::watch::Receiver<Drain> {
         tokio::sync::watch::channel(Drain::Serving).1
+    }
+}
+
+#[cfg(test)]
+mod record_widths {
+    use super::*;
+    use crate::handler::{build_authz_request, Stamp, TaskStamp};
+    use crate::task::{Contained, ReleaseRefusal, Released, TaskRefusal};
+    use crate::task_verbs as tv;
+    use maknae_audit_append::test_support::{macos_mirror, MACOS_SYSLOG_MAX};
+    use maknae_config::{AgentId, MACOS_AGENT_SOCKET_PATH, MACOS_DAEMON_SOCKET_PATH};
+    use maknae_proto::{TaskId, TaskState, Tasker, Verb};
+    use maknae_security::Authorizer;
+
+    const HOST_BYTES: usize = 64;
+    const TASK: TaskId = TaskId([0xff; 16]);
+    const PARENT: TaskId = TaskId([0xfe; 16]);
+    const AUTHZ_PATH: &str = "/etc/maknae/authz.yaml";
+
+    fn host() -> String {
+        "h".repeat(HOST_BYTES)
+    }
+
+    fn widest_agent_id() -> String {
+        (1..=255)
+            .filter(|n| AgentId::parse(&"a".repeat(*n)).is_ok())
+            .max()
+            .map(|n| "a".repeat(n))
+            .expect("some agent id parses")
+    }
+
+    fn widest_user() -> String {
+        "u".repeat(MAX_SUBJECT_USER_BYTES)
+    }
+
+    fn task_verbs(agent: &str) -> Vec<Verb> {
+        let text = || maknae_proto::SecretText(String::new().into());
+        let task = || maknae_proto::TaskRef::from_id(&TASK);
+        vec![
+            Verb::TaskSubmit {
+                task: maknae_proto::TaskSubmission {
+                    schema: maknae_proto::TASK_SCHEMA.into(),
+                    version: maknae_proto::TASK_VERSION,
+                    agent: agent.into(),
+                    ask: maknae_proto::Ask::Prompt { prompt: text() },
+                    labels: maknae_proto::Labels {},
+                },
+            },
+            Verb::TaskAdd {
+                task: task(),
+                text: text(),
+            },
+            Verb::TaskStatus { task: task() },
+            Verb::TaskList {
+                agent: agent.into(),
+                after: None,
+            },
+            Verb::TaskStop { task: task() },
+            Verb::TaskDrop { task: task() },
+            Verb::TaskCollect {
+                agent: agent.into(),
+                after: None,
+                task: None,
+            },
+            Verb::TaskClaim {
+                seen_follow_ups: None,
+            },
+            Verb::TaskReport {
+                text: text(),
+                seen_follow_ups: None,
+            },
+        ]
+    }
+
+    fn verb_of(op: &str) -> Verb {
+        task_verbs(&widest_agent_id())
+            .into_iter()
+            .find(|v| crate::handler::task_op(v) == Some(op))
+            .expect("the op names a task verb")
+    }
+
+    fn widest_task_op() -> &'static str {
+        task_verbs("a")
+            .iter()
+            .filter_map(crate::handler::task_op)
+            .max_by_key(|op| op.len())
+            .expect("a task verb has an op")
+    }
+
+    struct Who {
+        person: bool,
+    }
+
+    impl Who {
+        fn tasker(&self) -> Tasker {
+            if self.person {
+                Tasker::Uid(u32::MAX)
+            } else {
+                Tasker::Agent {
+                    agent: widest_agent_id(),
+                    uid: u32::MAX,
+                }
+            }
+        }
+
+        fn socket(&self) -> &'static str {
+            if self.person {
+                MACOS_DAEMON_SOCKET_PATH
+            } else {
+                MACOS_AGENT_SOCKET_PATH
+            }
+        }
+
+        fn decided(&self, verb: &Verb) -> (Option<String>, Option<maknae_audit_append::RuleAudit>) {
+            let agent = AgentId::parse("hobi").expect("hobi is an agent id");
+            let (stamp, uid) = if self.person {
+                (Stamp::Client, nix::unistd::geteuid().as_raw())
+            } else {
+                (
+                    Stamp::Agent {
+                        agent: &agent,
+                        task: None,
+                    },
+                    2001,
+                )
+            };
+            let mut req = build_authz_request(
+                verb,
+                uid,
+                None,
+                maknae_security::Lane::Local,
+                None,
+                None,
+                &stamp,
+            );
+            if let Some(named) =
+                tv::task_verb(verb).and_then(|v| v.named_agent().map(str::to_owned))
+            {
+                tv::stamp_agent(&mut req, &named);
+            }
+            let (_guard, shipped) = crate::test_fixtures::shipped_composition();
+            let d = shipped.decide_cited(&req);
+            let rule = d.rule.as_ref().map(|c| {
+                let mut audit = rule_audit(c);
+                let name = c.section.rsplit('#').next().unwrap_or_default();
+                audit.section = format!("{AUTHZ_PATH}#{name}");
+                audit.node = u64::MAX;
+                audit
+            });
+            (d.role.map(str::to_owned), rule)
+        }
+
+        fn session(&self) -> SessionRecord {
+            let mut s = SessionRecord::for_test(u32::MAX, Some(widest_user()));
+            if !self.person {
+                s.channel = crate::session::SessionChannel::Agent {
+                    agent: AgentId::parse(&widest_agent_id()).expect("the widest id parses"),
+                    leaf_expires: std::time::Instant::now(),
+                };
+                s.cite(&TaskStamp {
+                    id: TASK,
+                    tasker: maknae_proto::tasker_text(&Tasker::Uid(u32::MAX)),
+                    root: "users/4294967295".into(),
+                    start: u64::MAX,
+                });
+            }
+            s
+        }
+
+        fn request(&self, reason: &str) -> AuditRecord {
+            let mut rec = make_record(
+                "request",
+                &host(),
+                self.socket(),
+                u32::MAX,
+                None,
+                None,
+                None,
+                u64::MAX,
+                u64::MAX,
+                "session.task",
+                None,
+                "permit",
+                reason,
+                "authorized",
+                &serde_json::Value::Null,
+            );
+            rec.subject.user = admitted_user(Some(&widest_user()));
+            rec
+        }
+
+        fn verb_record(&self, op: &str, reason: &str) -> AuditRecord {
+            let verb = verb_of(op);
+            let asked = tv::task_verb(&verb).expect("a task verb");
+            let agent = match self.tasker() {
+                Tasker::Agent { agent, .. } => Some(AgentId::parse(&agent).expect("parses")),
+                Tasker::Uid(_) | Tasker::Remote(_) => None,
+            };
+            let mut rec = task_verb_record(
+                self.request(reason),
+                asked.object(),
+                asked.cited().as_ref(),
+                crate::handler::task_op(&verb),
+                &self.tasker(),
+                agent.as_ref(),
+            );
+            let (role, rule) = self.decided(&verb);
+            rec.subject.role = role;
+            rec.rule = rule;
+            rec
+        }
+
+        fn submit_outcome(&self, parent: Option<&TaskId>) -> AuditRecord {
+            submit_outcome_record(self.verb_record("submit", "task queued"), &TASK, parent)
+        }
+
+        fn stamped(&self, mut rec: AuditRecord) -> AuditRecord {
+            self.session().stamp(&mut rec);
+            rec
+        }
+    }
+
+    fn release_candidates(person: bool) -> Vec<Result<Released, ReleaseRefusal>> {
+        let agent = widest_agent_id();
+        let states = [
+            TaskState::Queued,
+            TaskState::Working,
+            TaskState::Reported,
+            TaskState::Closed,
+            TaskState::Held,
+        ];
+        let mut all: Vec<Result<Released, ReleaseRefusal>> = Vec::new();
+        for from in states {
+            for now in states {
+                all.push(Ok(Released {
+                    task: TASK,
+                    from,
+                    now,
+                    rseq: Some(u64::MAX),
+                }));
+            }
+        }
+        for c in [Contained::Tasker, Contained::Root, Contained::Agent] {
+            all.push(Err(ReleaseRefusal::StillContained(c)));
+        }
+        all.push(Err(ReleaseRefusal::NotHeld));
+        all.push(Err(ReleaseRefusal::Unknown));
+        if !person {
+            all.push(Err(ReleaseRefusal::TaskerUnresolved));
+            all.push(Err(ReleaseRefusal::RootUnresolved));
+            all.push(Err(ReleaseRefusal::ParentHeld(PARENT)));
+        }
+        let bounded = [
+            TaskRefusal::AtCapacity {
+                agent: agent.clone(),
+            },
+            TaskRefusal::Unknown,
+            TaskRefusal::OtherAgent,
+            TaskRefusal::ParentNotHeld,
+            TaskRefusal::AgentGone,
+            TaskRefusal::Random,
+            TaskRefusal::Unsigned,
+            TaskRefusal::CursorAhead,
+            TaskRefusal::Finished,
+            TaskRefusal::TooLong,
+            TaskRefusal::TaskerLive { agent },
+            TaskRefusal::TaskerHeld,
+            TaskRefusal::FollowUps,
+            TaskRefusal::FollowUpsUnseen,
+            TaskRefusal::NotWorking,
+        ];
+        all.extend(bounded.into_iter().map(|r| Err(crate::task::unreleased(r))));
+        all.push(Err(tv::release_blocked(
+            crate::mutation::Blocked::NotStarted,
+        )));
+        all.push(Err(tv::release_blocked(crate::mutation::Blocked::Unknown)));
+        all
+    }
+
+    fn widest_release(person: bool) -> (Result<Released, ReleaseRefusal>, String) {
+        release_candidates(person)
+            .into_iter()
+            .map(|r| {
+                let reason = tv::release_reason(&r);
+                (r, reason)
+            })
+            .max_by_key(|(_, reason)| reason.len())
+            .expect("there are release outcomes")
+    }
+
+    fn release_record(person: bool, outcome: &Result<Released, ReleaseRefusal>) -> AuditRecord {
+        let who = Who { person };
+        let seq = Seq::new();
+        let (h, au3_1) = (host(), serde_json::Value::Null);
+        let ctx = BootCtx {
+            event: "request",
+            host: &h,
+            socket: MACOS_DAEMON_SOCKET_PATH,
+            euid: u32::MAX,
+            session_id: u64::MAX,
+            seq: &seq,
+            au3_1: &au3_1,
+        };
+        let (result, posture) = tv::release_record_class(outcome);
+        let reason = tv::release_reason(outcome);
+        let parent = (!person).then_some(&PARENT);
+        let mut rec = held_release_record(
+            &ctx,
+            (u32::MAX, u64::MAX),
+            &TASK,
+            Some(&who.tasker()),
+            parent,
+            (result, posture, &reason),
+        );
+        rec.seq = u64::MAX;
+        rec
+    }
+
+    fn task_verb_records(person: bool) -> Vec<AuditRecord> {
+        let who = Who { person };
+        let parent = (!person).then_some(&PARENT);
+        vec![
+            who.stamped(who.verb_record(widest_task_op(), &collect_intent_reason(u64::MAX))),
+            who.stamped(who.submit_outcome(parent)),
+        ]
+    }
+
+    fn widest(records: &[AuditRecord]) -> &AuditRecord {
+        records
+            .iter()
+            .max_by_key(|r| macos_mirror(r).full_len)
+            .expect("there are records")
+    }
+
+    fn assert_degrades_and_the_marker_fits(rec: &AuditRecord) {
+        let m = macos_mirror(rec);
+        assert!(!m.mirrored_in_full, "the record mirrors in full");
+        assert!(m.full_len > MACOS_SYSLOG_MAX);
+        let marker = m.degraded_len.expect("a degraded record has a marker");
+        assert!(marker <= MACOS_SYSLOG_MAX);
+    }
+
+    #[test]
+    fn a_persons_task_verb_record_degrades_and_its_marker_fits() {
+        assert_degrades_and_the_marker_fits(widest(&task_verb_records(true)));
+    }
+
+    #[test]
+    fn the_widest_task_verb_record_degrades_and_its_marker_fits() {
+        assert_degrades_and_the_marker_fits(widest(&task_verb_records(false)));
+    }
+
+    #[test]
+    fn a_persons_release_record_degrades_and_its_marker_fits() {
+        let (outcome, _) = widest_release(true);
+        assert_degrades_and_the_marker_fits(&release_record(true, &outcome));
+    }
+
+    #[test]
+    fn the_widest_release_record_degrades_and_its_marker_fits() {
+        let (outcome, _) = widest_release(false);
+        assert_degrades_and_the_marker_fits(&release_record(false, &outcome));
     }
 }
 

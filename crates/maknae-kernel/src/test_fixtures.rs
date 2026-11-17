@@ -383,3 +383,46 @@ pub(crate) fn remove_enrollment(config: &Path, id: &str) {
     )
     .unwrap();
 }
+
+const HOBI_POLICY: &str =
+    "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Write(~/**)\"]\n";
+
+pub(crate) const AGENTS: &[(&str, u32, Option<&str>)] = &[
+    ("hobi", 2001, Some(HOBI_POLICY)),
+    ("jin", 2002, None),
+    ("suga", 2003, Some("schema_version: 1\n")),
+    (
+        "jimin",
+        2004,
+        Some("schema_version: 1\npermissions:\n  allow: [\"Read(~/notes/**)\"]\n"),
+    ),
+];
+
+pub(crate) fn shipped_composition() -> (
+    DirGuard,
+    crate::composition::Composition<HermeticAuthorizer>,
+) {
+    use maknae_authz_basic::Baseline;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let tag = format!("shipped-{}", NEXT.fetch_add(1, Ordering::Relaxed));
+    let (g, basic) = fixture(
+        &tag,
+        include_str!("../../../packaging/common/authz.yaml"),
+        None,
+    );
+    write_sensitive(
+        &g.0,
+        include_str!("../../../packaging/common/sensitive.yaml"),
+    );
+    basic.set_hosts(BTS_HOSTS);
+    for (id, uid, policy) in AGENTS {
+        write_agent(&g.0, id, &format!("{id}-svc"), *uid, "user");
+        if let Some(policy) = policy {
+            write_agent_policy(&g.0, id, policy);
+        }
+    }
+    basic.install(basic.compile_from_file().unwrap());
+    let ceiling = crate::ceiling_authz::CeilingAuthorizer::new(Ceiling::baseline_for(US), US);
+    (g, crate::composition::Composition::new(basic, ceiling))
+}
