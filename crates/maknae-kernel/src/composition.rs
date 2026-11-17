@@ -801,13 +801,13 @@ mod tests {
         let mut out = String::from(
             "# The shipped authz.yaml and sensitive.yaml, decided through the Composition.\n",
         );
-        let cases: &[(&str, Option<&str>, &[&str])] = &[
-            ("liveness.ping", None, &[""]),
-            ("session.new", None, &[""]),
-            ("fs.read", Some("read"), FS_TARGETS),
-            ("fs.write", Some("write-existing"), FS_TARGETS),
-            ("fs.write", Some("write-create"), FS_TARGETS),
-            ("fs.delete", Some("delete-entry"), FS_TARGETS),
+        let cases: &[(&str, Option<&str>, &[&str], bool)] = &[
+            ("liveness.ping", None, &[""], false),
+            ("session.new", None, &[""], false),
+            ("fs.read", Some("read"), FS_TARGETS, true),
+            ("fs.write", Some("write-existing"), FS_TARGETS, true),
+            ("fs.write", Some("write-create"), FS_TARGETS, true),
+            ("fs.delete", Some("delete-entry"), FS_TARGETS, true),
             (
                 "fs.delete",
                 Some("delete-tree"),
@@ -816,8 +816,11 @@ mod tests {
                     "/home/operator/projects",
                     "/home/operator/.ssh",
                 ],
+                false,
             ),
-            ("fs.mkdir", Some("mkdir"), FS_TARGETS),
+            ("fs.mkdir", Some("mkdir"), FS_TARGETS, true),
+            ("fs.list", Some("read"), &[], true),
+            ("fs.stat", Some("read"), &[], true),
         ];
         let mut subjects: Vec<(String, i64, Option<&str>)> = vec![
             ("principal".into(), principal, None),
@@ -829,8 +832,8 @@ mod tests {
                 .map(|(id, uid, _)| (format!("agent {id}"), i64::from(*uid), Some(*id))),
         );
         for (who, uid, agent) in &subjects {
-            for (term, op, targets) in cases {
-                let tasks: &[&str] = if agent.is_some() && *targets == FS_TARGETS {
+            for (term, op, targets, with_tasks) in cases {
+                let tasks: &[&str] = if agent.is_some() && *with_tasks {
                     TASKS_TARGETS
                 } else {
                     &[]
@@ -922,9 +925,23 @@ mod tests {
     #[test]
     fn the_shipped_files_decide_identically_through_the_composition() {
         let got = shipped_effective_decisions();
+        if std::env::var_os("MAKNAE_BLESS").is_some() {
+            std::fs::write(
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/src/testdata/shipped-effective-decisions.txt"
+                ),
+                &got,
+            )
+            .unwrap();
+            return;
+        }
         let want = include_str!("testdata/shipped-effective-decisions.txt");
         for (i, (g, w)) in got.lines().zip(want.lines()).enumerate() {
-            assert_eq!(g, w, "first difference at line {i}");
+            assert_eq!(
+                g, w,
+                "first difference at line {i}; regenerate with MAKNAE_BLESS=1 and review the diff"
+            );
         }
         assert_eq!(got.lines().count(), want.lines().count(), "line count");
     }

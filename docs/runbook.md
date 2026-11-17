@@ -1547,7 +1547,7 @@ The `syncing` records are written ahead of the store transition at their revisio
 
 ## Enroll an Agent Daemon
 
-An Agent Daemon runs under its own service account, one per agent, and reaches `maknaed` only on the agent socket. Its configuration is the directory `/etc/maknae/agents/<id>/`: `enrollment.yaml` and `agent.yaml`, which `maknae enroll agent` writes, and `policy.yaml` and optionally `persona.md`, which you write ([configuration §6.4](configuration.md#64-enrolling-an-agent-daemon) has every rule and refusal). The steps below use the agent id `hobi`. They are not yet measured on a live host.
+An Agent Daemon runs under its own service account, one per agent, and reaches `maknaed` only on the agent socket. Its configuration is the directory `/etc/maknae/agents/<id>/`: `enrollment.yaml` and `agent.yaml`, which `maknae enroll agent` writes, and `policy.yaml`, a commented starter that enroll writes when none exists and you edit, and optionally `persona.md`, which you write ([configuration §6.4](configuration.md#64-enrolling-an-agent-daemon) has every rule and refusal). The steps below use the agent id `hobi`. They are not yet measured on a live host.
 
 1. **Create the agent's account.** Enroll never creates it; it checks it, and refuses an account that fails any of these:
 
