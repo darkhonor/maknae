@@ -166,7 +166,7 @@ fn settle_existing<F: AsFd>(dirfd: &F, final_name: &str, at: &Path) -> Result<()
     }
     let left = syscall::fstatat_nofollow(dirfd, final_name).map_err(map)?;
     match syscall::nlink_count(left.st_nlink) {
-        0 | 1 => Ok(()),
+        1 => Ok(()),
         n => Err(multiply_linked(n)),
     }
 }
@@ -781,6 +781,79 @@ mod tests {
         assert_eq!(std::fs::metadata(&at).unwrap().nlink(), 3);
         assert!(d.path().join("other").exists());
         assert!(d.path().join(".f.tmp.notdigits.1").exists());
+    }
+
+    #[test]
+    fn names_that_are_not_exact_publish_temps_are_refused_and_left_alone() {
+        for name in [
+            ".f.tmp.1.x",
+            ".f.tmp.x.1",
+            ".f.tmp..1",
+            ".f.tmp.1.",
+            ".f.tmp.1.2.3",
+            ".f.tmp.1",
+            "f.tmp.1.2",
+            ".g.tmp.1.2",
+            ".f.tmpx.1.2",
+        ] {
+            let d = tempfile::tempdir().unwrap();
+            let dirfd = std::fs::File::open(d.path()).unwrap();
+            let at = d.path().join("f");
+            std::fs::write(&at, b"one").unwrap();
+            std::fs::hard_link(&at, d.path().join(name)).unwrap();
+            let e = publish_new(&dirfd, "f", &at, b"two", own_ids(), |_| Ok(())).unwrap_err();
+            assert_eq!(
+                e,
+                IoError::MultiplyLinked {
+                    path: at.clone(),
+                    nlink: 2
+                },
+                "{name}"
+            );
+            assert!(d.path().join(name).exists(), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_temp_link_beside_an_unrelated_link_is_removed_and_the_call_still_errs() {
+        let d = tempfile::tempdir().unwrap();
+        let dirfd = std::fs::File::open(d.path()).unwrap();
+        let at = d.path().join("f");
+        std::fs::write(&at, b"one").unwrap();
+        std::fs::hard_link(&at, d.path().join(".f.tmp.4242.7")).unwrap();
+        std::fs::hard_link(&at, d.path().join("other")).unwrap();
+        let e = publish_new(&dirfd, "f", &at, b"two", own_ids(), |_| {
+            panic!("an unsettled name is not synced")
+        })
+        .unwrap_err();
+        assert_eq!(
+            e,
+            IoError::MultiplyLinked {
+                path: at.clone(),
+                nlink: 2
+            }
+        );
+        assert!(!d.path().join(".f.tmp.4242.7").exists());
+        assert!(d.path().join("other").exists());
+    }
+
+    #[test]
+    fn a_temp_named_file_of_another_inode_is_not_taken_for_the_leftover() {
+        let d = tempfile::tempdir().unwrap();
+        let dirfd = std::fs::File::open(d.path()).unwrap();
+        let at = d.path().join("f");
+        std::fs::write(&at, b"one").unwrap();
+        std::fs::hard_link(&at, d.path().join("other")).unwrap();
+        std::fs::write(d.path().join(".f.tmp.1.1"), b"x").unwrap();
+        let e = publish_new(&dirfd, "f", &at, b"two", own_ids(), |_| Ok(())).unwrap_err();
+        assert_eq!(
+            e,
+            IoError::MultiplyLinked {
+                path: at.clone(),
+                nlink: 2
+            }
+        );
+        assert!(d.path().join(".f.tmp.1.1").exists());
     }
 
     #[test]
