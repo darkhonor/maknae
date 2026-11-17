@@ -76,10 +76,11 @@ pub const TASKS_RIGHT_SESSION: [&str; 3] = ["session.new", "session.prompt", "se
 pub const STARTER_POLICY: &str = "\
 schema_version: 1
 
-# Every agent already holds, whatever this file says:
-#   files:    Read(~/tasks/**), Write(~/tasks), Write(~/tasks/**)
-#   sessions: session.new, session.prompt, session.close
-# Add only what the agent needs beyond its own ~/tasks.
+## Every agent already holds, whatever this file says:
+##   files:    Read(~/tasks/**), Write(~/tasks), Write(~/tasks/**)
+##   sessions: session.new, session.prompt, session.close
+## Add only what the agent needs beyond its own ~/tasks.
+## Lines starting with a single # are examples; remove the # to use one.
 
 # permissions:
 #   allow: [\"Read(~/notes/**)\"]
@@ -135,6 +136,10 @@ impl AgentRole {
             "user" => Some(AgentRole::User),
             _ => None,
         }
+    }
+
+    pub fn refusal(raw: &str) -> String {
+        format!("role {raw:?} is refused; an agent is bound to `user`: edit `role:` to `user`")
     }
 }
 
@@ -196,11 +201,7 @@ pub fn parse_agent_enrollment(dir: &AgentId, text: &str) -> Result<AgentEnrollme
     }
     .ok_or_else(|| invalid("`uid` must be a whole number from 0 to 4294967295"))?;
     let role = text_of("role")?;
-    let role = AgentRole::parse(role).ok_or_else(|| {
-        invalid(&format!(
-            "role {role:?} is refused; an agent is bound to `user`: edit `role:` to `user`"
-        ))
-    })?;
+    let role = AgentRole::parse(role).ok_or_else(|| invalid(&AgentRole::refusal(role)))?;
     Ok(AgentEnrollment {
         id: dir.clone(),
         account: account.to_string(),
@@ -1050,6 +1051,22 @@ mod tests {
                 "{section}"
             );
         }
+    }
+
+    #[test]
+    fn every_uncommented_starter_example_parses() {
+        let uncommented: String = STARTER_POLICY
+            .lines()
+            .filter(|l| !l.starts_with("##"))
+            .map(|l| l.strip_prefix("# ").unwrap_or(l))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        let policy = parse_agent_policy(&AgentId::parse("jin").unwrap(), &uncommented)
+            .unwrap_or_else(|e| panic!("{e}\n{uncommented}"));
+        assert!(policy.entry.permissions.is_some(), "{uncommented}");
+        assert!(policy.entry.actions.is_some(), "{uncommented}");
+        assert!(policy.entry.models.is_some(), "{uncommented}");
+        assert_eq!(policy.taskers.map(|t| t.len()), Some(2), "{uncommented}");
     }
 
     #[test]

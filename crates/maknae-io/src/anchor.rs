@@ -674,6 +674,41 @@ impl Anchor {
         self.publish_with(rel, desc, bytes, mode, Some(owner))
     }
 
+    /// `publish_owned` that never replaces: the value is `false`, and the existing file is untouched, when `rel` already exists.
+    pub fn publish_owned_new(
+        &self,
+        rel: &Path,
+        desc: Option<DescendantRequired>,
+        bytes: &[u8],
+        mode: Mode,
+        owner: FileOwner,
+    ) -> Result<Outcome<bool>, IoError> {
+        let (norm, name) = self.split_target(rel, desc.as_ref())?;
+        let dir = norm.parent().unwrap_or(Path::new(""));
+        let full = self.path.join(&norm);
+
+        let walked: Option<OwnedFd> = if dir.as_os_str().is_empty() {
+            None
+        } else {
+            Some(crate::walk::walk_dirs(
+                &self.fd,
+                &self.path,
+                dir,
+                desc.as_ref(),
+            )?)
+        };
+        let base = match &walked {
+            Some(fd) => fd.as_fd(),
+            None => self.fd.as_fd(),
+        };
+
+        let created = crate::write::publish_new_at(&base, &name, &full, bytes, mode, owner)?;
+        Ok(Outcome {
+            value: created,
+            effective_strategy: Strategy::Portable,
+        })
+    }
+
     fn publish_with(
         &self,
         rel: &Path,
@@ -2915,6 +2950,32 @@ mod tests {
         );
         assert_eq!((md.uid(), md.gid()), (uid, gid));
         assert_eq!(std::fs::read(a.path.join("f")).unwrap(), b"x");
+        assert_no_temp_left(&a.path);
+    }
+
+    #[test]
+    fn publish_owned_new_never_replaces() {
+        let _g = PUBLISH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let (uid, gid) = ids();
+        let owner = FileOwner { uid, gid };
+        let first = a
+            .publish_owned_new(Path::new("f"), None, b"one", m(0o640), owner)
+            .unwrap();
+        assert!(first.value, "an absent name is created");
+        let md = std::fs::symlink_metadata(a.path.join("f")).unwrap();
+        assert_eq!(md.permissions().mode() & 0o7777, 0o640);
+        assert_eq!((md.uid(), md.gid()), (uid, gid));
+        let ino = md.ino();
+        let second = a
+            .publish_owned_new(Path::new("f"), None, b"two", m(0o600), owner)
+            .unwrap();
+        assert!(!second.value, "a present name is reported, not replaced");
+        assert_eq!(std::fs::read(a.path.join("f")).unwrap(), b"one");
+        let md = std::fs::symlink_metadata(a.path.join("f")).unwrap();
+        assert_eq!(md.ino(), ino);
+        assert_eq!(md.permissions().mode() & 0o7777, 0o640);
         assert_no_temp_left(&a.path);
     }
 

@@ -58,13 +58,33 @@ fn publish_synced<F: AsFd>(
     owner: Option<FileOwner>,
     sync_dir: impl FnOnce(&F) -> nix::Result<()>,
 ) -> Result<Strategy, IoError> {
-    publish_raw(dirfd, final_name, bytes, mode, owner)
+    publish_raw(dirfd, final_name, bytes, mode, owner, true)
         .map_err(|e| crate::checks::map_errno_no_disambiguation(e, at))?;
     sync_dir(dirfd).map_err(|e| IoError::PublishedNotDurable {
         path: at.to_path_buf(),
         kind: crate::checks::kind_of_errno(e),
     })?;
     Ok(Strategy::Portable)
+}
+
+/// `publish_at` that never replaces: an existing `final_name` is left untouched and reported as `false`.
+pub(crate) fn publish_new_at<F: AsFd>(
+    dirfd: &F,
+    final_name: &str,
+    at: &Path,
+    bytes: &[u8],
+    mode: Mode,
+    owner: FileOwner,
+) -> Result<bool, IoError> {
+    let created = publish_raw(dirfd, final_name, bytes, mode, Some(owner), false)
+        .map_err(|e| crate::checks::map_errno_no_disambiguation(e, at))?;
+    if created {
+        syscall::fsync_fd(dirfd).map_err(|e| IoError::PublishedNotDurable {
+            path: at.to_path_buf(),
+            kind: crate::checks::kind_of_errno(e),
+        })?;
+    }
+    Ok(created)
 }
 
 /// With `settle`, the directory is synced even when the name was already absent, so
@@ -142,7 +162,8 @@ fn publish_raw<F: AsFd>(
     bytes: &[u8],
     mode: Mode,
     owner: Option<FileOwner>,
-) -> nix::Result<()> {
+    replace: bool,
+) -> nix::Result<bool> {
     // CONTRACT LIMIT (external review): the temp adds "." + ".tmp.<pid>.<counter>" to
     // the caller's name, so a final name a filesystem accepts (up to 255 bytes on
     // ext4/xfs) can exceed NAME_MAX in its temp form and be REFUSED — ENAMETOOLONG
@@ -169,11 +190,20 @@ fn publish_raw<F: AsFd>(
     }
     drop(fd);
 
-    if let Err(e) = syscall::rename_at(dirfd, &tmp, final_name) {
-        let _ = syscall::unlink_at(dirfd, tmp.as_str());
-        return Err(e);
+    if replace {
+        if let Err(e) = syscall::rename_at(dirfd, &tmp, final_name) {
+            let _ = syscall::unlink_at(dirfd, tmp.as_str());
+            return Err(e);
+        }
+        return Ok(true);
     }
-    Ok(())
+    let linked = syscall::link_at(dirfd, tmp.as_ref(), final_name.as_ref());
+    let _ = syscall::unlink_at(dirfd, tmp.as_str());
+    match linked {
+        Ok(()) => Ok(true),
+        Err(nix::errno::Errno::EEXIST) => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 /// The shared write loop. Both modes need it, and duplicating it would duplicate its

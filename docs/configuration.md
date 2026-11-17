@@ -1026,13 +1026,13 @@ audit:
 sudo maknae enroll agent <id> --account <service-account> --bind-cidr <cidr> [--bind-cidr <cidr>…] \
   --provider <provider> --model <model> --key-subpath <subpath> --key-field <field> \
   --context-tokens <n> [--output-tokens <n>] [--persona admin|self] \
-  [--role user|guest] [--approle-mount <mount>] [--token-file <file>] [--verbose]
+  [--approle-mount <mount>] [--token-file <file>] [--verbose]
 sudo maknae enroll agent <id> --refresh-access [--verbose]
 ```
 
 The provider flags name the agent's one model: the authorized provider, the model, where its API key sits in Vault (`<kv_mount>/data/<agent_prefix>/<id>/<subpath>`, field `<field>`), and its context window and answer bound in tokens, under the grammar of a `providers.yaml` entry (§6.1.1). `--persona` defaults to `admin`: the agent's persona is `/etc/maknae/agents/<id>/persona.md`, written by root, which the Agent Daemon reads itself. `self` lets the agent keep its own: at the start of each task the daemon uses the task partition's `persona.md`, else `persona.md` in the agent's home, else the one in `/etc`. The home and partition files are read through the kernel, as a read cited to the task, so the agent's policy and the mandatory operands decide them and the trail records them; an absent file is skipped. Before that read the daemon checks the file locally: a persona file the agent's account does not own, one others can write, or a home or partition directory others can write (a `0775` home, say) refuses it, and every task then stops `persona-unavailable`, as it does when the kernel refuses the read. Enroll checks that the `agent.yaml` it will write loads before it mints a SecretID.
 
-`--role` defaults to `user`; `admin` is not a choice. Before minting a SecretID, enroll reads the Vault entity `maknae-agent-<id>` and refuses, with no side effect, when it is absent or has no alias on the agent mount named by the role's RoleID. A disabled entity is re-enabled as the last step, and only when every earlier SecretID of the role was destroyed; if any destroy failed, the entity stays disabled until a `--rotate` retires them all. Enroll ends by telling you to reload `maknaed`.
+Every agent is bound to `user`. Enroll writes `/etc/maknae/agents/<id>/policy.yaml` (root:`_maknae`, `0640`) as a commented starter when the file is absent and never replaces an existing one; `--refresh-access` writes it too when absent. Before minting a SecretID, enroll reads the Vault entity `maknae-agent-<id>` and refuses, with no side effect, when it is absent or has no alias on the agent mount named by the role's RoleID. A disabled entity is re-enabled as the last step, and only when every earlier SecretID of the role was destroyed; if any destroy failed, the entity stays disabled until a `--rotate` retires them all. Enroll ends by telling you to reload `maknaed`.
 
 Re-enabling an entity makes the tokens issued before it was disabled usable again until they reach `agent_token_max_ttl`. Disabling does not revoke them.
 
