@@ -24584,6 +24584,30 @@ mod agent_listener_tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reload_that_enrolls_an_agent_without_a_policy_compiles_its_tasks_right() {
+        let fx = enrolling("agent-right").await;
+        let before = fx.baseline().policy_sha256();
+        fx.write_agent("hobi", "hobi-svc", HOBI_UID, "user");
+        reload(&fx).await;
+        let snapshot = fx.baseline().snapshot();
+        assert_eq!(snapshot.agent_uid("hobi"), Some(HOBI_UID));
+        assert!(snapshot
+            .graph()
+            .lookup(
+                maknae_graph::kernel::SECTION,
+                "maknaed:tasks-right#agents.hobi.tasks-right"
+            )
+            .is_some());
+        let last = fx.reload_records().pop().unwrap();
+        assert_eq!(last.outcome.result, "permit");
+        assert_eq!(
+            last.policy_sha256.as_deref(),
+            Some(fx.baseline().policy_sha256().as_str())
+        );
+        assert_ne!(fx.baseline().policy_sha256(), before);
+    }
+
     fn hobi_svc_is_2001(name: &str) -> Result<Option<u32>, i32> {
         Ok(match name {
             "root" => Some(0),

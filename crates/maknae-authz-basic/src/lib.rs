@@ -119,6 +119,11 @@ pub enum AuthzBasicError {
         account: String,
         name: String,
     },
+    /// An agent's `actions.deny` names a term of the built-in tasks right's session half.
+    AgentDeniesTasksRight {
+        agent: String,
+        action: String,
+    },
     /// The snapshot compiler refused the policy against the persisted identity
     /// layer or the vocabulary.
     Compile(snapshot::CompileError),
@@ -179,6 +184,11 @@ impl std::fmt::Display for AuthzBasicError {
                 f,
                 "authz subjects: `{name}` is the account of agent `{agent}` ({account}); an agent's policy lives only in agents/{agent}/policy.yaml"
             ),
+            AuthzBasicError::AgentDeniesTasksRight { agent, action } => write!(
+                f,
+                "authz agents: agents/{agent}/policy.yaml denies `{action}`, but every agent holds {} to work its tasks",
+                tasks_right_session_list()
+            ),
             AuthzBasicError::Compile(e) => write!(f, "authz {e}"),
             AuthzBasicError::PromptWithoutNew { scope } => write!(
                 f,
@@ -189,6 +199,12 @@ impl std::fmt::Display for AuthzBasicError {
 }
 
 impl std::error::Error for AuthzBasicError {}
+
+fn tasks_right_session_list() -> String {
+    match maknae_config::TASKS_RIGHT_SESSION {
+        [a, b, c] => format!("{a}, {b} and {c}"),
+    }
+}
 
 /// The RBAC PDP backend: the enrolled principal and the compiled policy
 /// snapshot every decision reads. `paths` and `digest` are what a reload loads
@@ -970,9 +986,9 @@ impl PolicySource {
     }
 
     /// `authz.yaml`'s top-level sections, `"bindings"` from `bindings.yaml` when it has
-    /// the key, `"sensitive"` from `sensitive.yaml`, and `"agents.<id>"` for each
-    /// enrolled agent's `policy.yaml`, each canonical JSON through the caller's digest,
-    /// by key.
+    /// the key, `"sensitive"` from `sensitive.yaml`, `"agents.<id>"` for each enrolled
+    /// agent's `policy.yaml` and `"agents.<id>.tasks-right"` for every enrolled agent,
+    /// each canonical JSON through the caller's digest, by key.
     pub fn section_digests(
         &self,
         digest: fn(&[u8]) -> [u8; 32],
@@ -991,6 +1007,10 @@ impl PolicySource {
         );
         for (id, _, p) in self.agent_policies() {
             out.insert(format!("agents.{id}"), digest(p.canonical.as_bytes()));
+        }
+        let right = digest(maknae_config::tasks_right_canonical().as_bytes());
+        for id in self.agents.enrolled.keys() {
+            out.insert(format!("agents.{}.tasks-right", id.as_str()), right);
         }
         out
     }
@@ -1218,9 +1238,28 @@ fn agent_subjects(
     agents: &AgentOutcome,
     subjects: &mut decide::SubjectGrants,
 ) -> Result<(), AuthzBasicError> {
+    let right = maknae_config::tasks_right().map_err(|e| AuthzBasicError::Load(e.to_string()))?;
     let mut entries = std::collections::BTreeMap::new();
     for p in &agents.load.policies {
-        entries.insert(p.id.clone(), (action_set(&p.entry)?, &p.entry));
+        let actions = action_set(&p.entry)?.map(|mut set| {
+            for term in maknae_config::TASKS_RIGHT_SESSION {
+                set.allow
+                    .entry(term)
+                    .or_insert_with(|| "tasks-right".into());
+            }
+            set
+        });
+        if let Some(action) = actions.as_ref().and_then(|set| {
+            maknae_config::TASKS_RIGHT_SESSION
+                .iter()
+                .find_map(|t| set.deny.get(t))
+        }) {
+            return Err(AuthzBasicError::AgentDeniesTasksRight {
+                agent: p.id.as_str().to_string(),
+                action: action.clone(),
+            });
+        }
+        entries.insert(p.id.clone(), (actions, &p.entry));
     }
     for (id, (uid, account, _)) in &agents.enrolled {
         if let Some(named) = subjects.0.get(uid) {
@@ -1246,6 +1285,7 @@ fn agent_subjects(
                 actions,
                 models: entry.and_then(|e| e.models.clone()),
                 origin: decide::SubjectOrigin::Agent(id.as_str().to_string()),
+                right: Some(right.clone()),
             },
         );
     }
@@ -1412,6 +1452,7 @@ fn validate_subjects(
                 actions,
                 models: entry.models.clone(),
                 origin: decide::SubjectOrigin::Authz,
+                right: None,
             },
         );
     }
@@ -2318,6 +2359,7 @@ mod tests {
                     actions,
                     models: entry.models.clone(),
                     origin: crate::decide::SubjectOrigin::Authz,
+                    right: None,
                 };
                 if by_uid.insert(*uid, compiled).is_some() {
                     return Err(format!("oracle refuses a second subject on uid {uid}"));
@@ -7757,22 +7799,410 @@ mod tests {
 
         const URSULA_USER: &str = "schema_version: 1\nbindings:\n  user: [\"ursula\"]\n";
 
+        const TASKS: &str = "/home/operator/tasks";
+
+        fn hobi_fs(action: &str, op: &str, path: &str) -> maknae_security::Request {
+            let mut r = read(HOBI, path);
+            r.action = Action(action.into());
+            r.context.0.insert(
+                maknae_security::CONTEXT_FS_OPERATION,
+                AttrValue::Str(op.into()),
+            );
+            agent_channel(r, "hobi")
+        }
+
+        fn hobi_session(action: &str) -> maknae_security::Request {
+            let mut r = agent_channel(whoami(i64::from(HOBI)), "hobi");
+            r.action = Action(action.into());
+            r.context.0.insert(
+                maknae_security::CONTEXT_DAC_LANE,
+                AttrValue::Str("local".into()),
+            );
+            if action != "session.new" {
+                for (k, v) in [
+                    (
+                        RESOURCE_CONVERSATION_STATE_KEY,
+                        AttrValue::Str("active".into()),
+                    ),
+                    (
+                        RESOURCE_CONVERSATION_OWNER_KEY,
+                        AttrValue::Int(i64::from(HOBI)),
+                    ),
+                    (
+                        RESOURCE_CONVERSATION_EXTENDS_KEY,
+                        AttrValue::Str("advance".into()),
+                    ),
+                    (
+                        decide::RESOURCE_DESTINATION,
+                        AttrValue::Str("provider:openai".into()),
+                    ),
+                ] {
+                    r.resource.0.insert(k, v);
+                }
+            }
+            r
+        }
+
+        fn by_the_right(d: &maknae_security::Decided, entry: usize, why: &str) {
+            assert_eq!(d.verdict, audit_permit(), "{why}: {d:?}");
+            let rule = d.rule.as_ref().unwrap_or_else(|| panic!("{why}: {d:?}"));
+            assert_eq!(
+                (rule.key.as_str(), rule.section.as_str()),
+                (
+                    format!("rule:agents.hobi.tasks-right:allow:{entry}").as_str(),
+                    "maknaed:tasks-right#agents.hobi.tasks-right"
+                ),
+                "{why}"
+            );
+        }
+
+        fn works_its_tasks(a: &BasicAuthorizer, why: &str) {
+            for (action, op, path, entry) in [
+                ("fs.mkdir", "mkdir", TASKS.to_string(), 1),
+                ("fs.write", "write-create", format!("{TASKS}/users/1/x"), 2),
+                ("fs.read", "read", format!("{TASKS}/users/1/x"), 0),
+                ("fs.list", "read", format!("{TASKS}/users/1"), 0),
+                ("fs.delete", "delete-tree", format!("{TASKS}/users/1/d"), 2),
+                ("fs.read", "delete-tree", format!("{TASKS}/users/1/d"), 0),
+            ] {
+                by_the_right(
+                    &a.decide_cited(&hobi_fs(action, op, &path)),
+                    entry,
+                    &format!("{why} {action} {op} {path}"),
+                );
+            }
+        }
+
+        fn with_destination() -> String {
+            format!(
+                "{}destinations:\n  user:\n    allow: [\"provider:openai\"]\n",
+                super::shipped_denying()
+            )
+        }
+
         #[test]
-        fn an_agent_without_policy_reads_nothing() {
+        fn an_agent_without_policy_works_its_tasks() {
             let src = source(
                 Some(URSULA_USER),
                 &[("ursula", URSULA)],
                 load(vec![hobi()], &[]),
             );
             let a = auth(&src, 501);
-            let agent = a.decide_cited(&agent_channel(read(HOBI, "/home/operator/notes"), "hobi"));
+            works_its_tasks(&a, "no policy");
+            let notes = a.decide_cited(&hobi_fs("fs.read", "read", "/home/operator/notes/x"));
             assert!(
-                matches!(agent.verdict, Verdict::NotApplicable { .. }),
-                "{agent:?}"
+                matches!(notes.verdict, Verdict::NotApplicable { .. }),
+                "{notes:?}"
             );
-            assert_eq!(agent.role, Some("user"));
+            assert_eq!(notes.role, Some("user"));
+            for action in ["session.new", "session.close"] {
+                let d = a.decide_cited(&hobi_session(action));
+                assert_eq!(d.verdict, audit_permit(), "{action}: {d:?}");
+                assert_eq!(d.role, Some("user"), "{action}");
+            }
+            let mut unbound = whoami(i64::from(HOBI));
+            unbound.action = Action("fs.mkdir".into());
+            unbound
+                .resource
+                .0
+                .insert(RESOURCE_PATH_KEY, AttrValue::Str(TASKS.into()));
+            for (k, v) in [
+                (maknae_security::CONTEXT_DAC_LANE, "local"),
+                (maknae_security::CONTEXT_FS_OPERATION, "mkdir"),
+            ] {
+                unbound.context.0.insert(k, AttrValue::Str(v.into()));
+            }
+            assert_eq!(
+                a.decide(&agent_channel(unbound, "hobi")),
+                Verdict::Indeterminate
+            );
             let human = a.decide_cited(&read(URSULA, "/home/operator/notes"));
             assert_eq!(human.verdict, audit_permit());
+        }
+
+        #[test]
+        fn an_empty_policy_and_a_notes_only_policy_both_work_their_tasks() {
+            for policy in [
+                "schema_version: 1\n",
+                "schema_version: 1\npermissions:\n  allow: [\"Read(~/notes/**)\", \"Write(~/notes/**)\"]\n",
+            ] {
+                let src = source(None, &[], load(vec![hobi()], &[("hobi", policy)]));
+                works_its_tasks(&auth(&src, 501), policy);
+            }
+            let notes_only = source(
+                None,
+                &[],
+                load(
+                    vec![hobi()],
+                    &[(
+                        "hobi",
+                        "schema_version: 1\npermissions:\n  allow: [\"Read(~/notes/**)\"]\n",
+                    )],
+                ),
+            );
+            let d = auth(&notes_only, 501).decide_cited(&hobi_fs(
+                "fs.read",
+                "read",
+                "/home/operator/notes/x",
+            ));
+            assert_eq!(d.verdict, audit_permit());
+            assert_eq!(d.rule.unwrap().key, "rule:agents.hobi.permissions:allow:0");
+        }
+
+        #[test]
+        fn an_actions_list_limits_everything_but_the_right() {
+            let src = source(
+                None,
+                &[],
+                load(
+                    vec![hobi()],
+                    &[(
+                        "hobi",
+                        "schema_version: 1\npermissions:\n  allow: [\"Read(~/notes/**)\"]\nactions:\n  allow: [\"session.prompt\"]\n",
+                    )],
+                ),
+            );
+            let a = auth(&src, 501);
+            by_the_right(
+                &a.decide_cited(&hobi_fs("fs.mkdir", "mkdir", TASKS)),
+                1,
+                "mkdir",
+            );
+            assert_eq!(
+                a.decide(&hobi_fs("fs.read", "read", "/home/operator/notes/x")),
+                Verdict::Deny {
+                    reason: "subject hobi-svc: fs.read is not in agents.hobi.policy.actions allow"
+                        .into()
+                }
+            );
+        }
+
+        #[test]
+        fn a_broad_policy_deny_is_outranked_only_inside_tasks() {
+            let src = source(
+                None,
+                &[],
+                load(
+                    vec![hobi()],
+                    &[(
+                        "hobi",
+                        "schema_version: 1\npermissions:\n  allow: [\"Write(~/notes/**)\"]\n  deny: [\"Write(~/**)\"]\n",
+                    )],
+                ),
+            );
+            let a = auth(&src, 501);
+            by_the_right(
+                &a.decide_cited(&hobi_fs(
+                    "fs.write",
+                    "write-create",
+                    &format!("{TASKS}/users/1/x"),
+                )),
+                2,
+                "tasks write",
+            );
+            let notes = a.decide_cited(&hobi_fs(
+                "fs.write",
+                "write-create",
+                "/home/operator/notes/x",
+            ));
+            assert_eq!(
+                notes.verdict,
+                Verdict::Deny {
+                    reason: "denied by agents.hobi.policy.permissions entry Write(~/**)".into()
+                }
+            );
+            assert_eq!(
+                notes.rule.unwrap().key,
+                "rule:agents.hobi.permissions:deny:0"
+            );
+        }
+
+        #[test]
+        fn the_site_deny_floor_holds_inside_tasks() {
+            let site = "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: [\"Write(~/tasks/users/1/secret/**)\", \"Read(~/tasks/users/1/secret/**)\"]\n";
+            for policy in [None, Some("schema_version: 1\n")] {
+                let policies: Vec<(&str, &str)> = policy.map(|p| ("hobi", p)).into_iter().collect();
+                let src = try_source(site, None, &[], load(vec![hobi()], &policies)).unwrap();
+                let a = auth(&src, 501);
+                for (action, op, path, entry) in [
+                    (
+                        "fs.write",
+                        "write-create",
+                        format!("{TASKS}/users/1/secret/x"),
+                        "Write(~/tasks/users/1/secret/**)",
+                    ),
+                    (
+                        "fs.read",
+                        "read",
+                        format!("{TASKS}/users/1/secret/x"),
+                        "Read(~/tasks/users/1/secret/**)",
+                    ),
+                    (
+                        "fs.delete",
+                        "delete-tree",
+                        format!("{TASKS}/users/1"),
+                        "Write(~/tasks/users/1/secret/**)",
+                    ),
+                    (
+                        "fs.read",
+                        "delete-tree",
+                        format!("{TASKS}/users/1"),
+                        "Read(~/tasks/users/1/secret/**)",
+                    ),
+                ] {
+                    let d = a.decide_cited(&hobi_fs(action, op, &path));
+                    assert_eq!(
+                        d.verdict,
+                        Verdict::Deny {
+                            reason: format!("denied by policy entry {entry}")
+                        },
+                        "{policy:?} {action} {op} {path}"
+                    );
+                    assert_eq!(d.rule.unwrap().section, format!("{PATH}#permissions"));
+                }
+            }
+        }
+
+        #[test]
+        fn the_session_half_is_granted_under_an_actions_list() {
+            let src = try_source(
+                &with_destination(),
+                None,
+                &[],
+                load(
+                    vec![hobi()],
+                    &[("hobi", "schema_version: 1\nactions:\n  allow: [\"fs.*\"]\n")],
+                ),
+            )
+            .unwrap();
+            let a = auth(&src, 501);
+            for action in ["session.new", "session.prompt", "session.close"] {
+                let d = a.decide_cited(&hobi_session(action));
+                assert_eq!(d.verdict, audit_permit(), "{action}: {d:?}");
+            }
+            assert_eq!(
+                a.decide(&hobi_session("session.list")),
+                Verdict::Deny {
+                    reason:
+                        "subject hobi-svc: session.list is not in agents.hobi.policy.actions allow"
+                            .into()
+                }
+            );
+        }
+
+        #[test]
+        fn an_actions_deny_of_the_session_half_refuses_the_load() {
+            let policy = |actions: &str| format!("schema_version: 1\nactions:\n{actions}");
+            for denied in ["session.new", "session.*"] {
+                let got = try_source(
+                    super::shipped_denying(),
+                    None,
+                    &[],
+                    load(
+                        vec![hobi()],
+                        &[("hobi", &policy(&format!("  deny: [\"{denied}\"]\n")))],
+                    ),
+                );
+                assert_eq!(
+                    got.err(),
+                    Some(AuthzBasicError::AgentDeniesTasksRight {
+                        agent: "hobi".into(),
+                        action: denied.into()
+                    }),
+                    "{denied}"
+                );
+            }
+            assert_eq!(
+                AuthzBasicError::AgentDeniesTasksRight {
+                    agent: "hobi".into(),
+                    action: "session.*".into()
+                }
+                .to_string(),
+                "authz agents: agents/hobi/policy.yaml denies `session.*`, but every agent holds session.new, session.prompt and session.close to work its tasks"
+            );
+            for denied in ["session.task", "fs.write"] {
+                try_source(
+                    super::shipped_denying(),
+                    None,
+                    &[],
+                    load(
+                        vec![hobi()],
+                        &[("hobi", &policy(&format!("  deny: [\"{denied}\"]\n")))],
+                    ),
+                )
+                .unwrap_or_else(|e| panic!("{denied}: {e}"));
+            }
+            let src = source(
+                None,
+                &[],
+                load(
+                    vec![hobi()],
+                    &[(
+                        "hobi",
+                        "schema_version: 1\npermissions:\n  allow: [\"Write(~/notes/**)\"]\nactions:\n  allow: [\"fs.*\"]\n  deny: [\"fs.write\"]\n",
+                    )],
+                ),
+            );
+            let a = auth(&src, 501);
+            by_the_right(
+                &a.decide_cited(&hobi_fs(
+                    "fs.write",
+                    "write-create",
+                    &format!("{TASKS}/users/1/x"),
+                )),
+                2,
+                "tasks write under an fs.write deny",
+            );
+            assert_eq!(
+                a.decide(&hobi_fs("fs.write", "write-create", "/home/operator/notes/x")),
+                Verdict::Deny {
+                    reason: "subject hobi-svc: fs.write denied by agents.hobi.policy.actions entry fs.write".into()
+                }
+            );
+        }
+
+        #[test]
+        fn every_enrolled_agent_has_its_tasks_right_section() {
+            let suga = enrollment("suga", "suga-svc", SUGA, AgentRole::User);
+            let src = source(
+                None,
+                &[],
+                load(vec![hobi(), suga], &[("hobi", HOBI_POLICY)]),
+            );
+            let graph = compiled(&src).graph().clone();
+            let right = graph
+                .lookup(maknae_graph::kernel::CONFIG_SOURCE, "maknaed:tasks-right")
+                .expect("one config source for the built-in right");
+            let digests = src.section_digests(test_digest);
+            let want = test_digest(maknae_config::tasks_right_canonical().as_bytes());
+            for id in ["hobi", "suga"] {
+                let section = graph
+                    .lookup(
+                        maknae_graph::kernel::SECTION,
+                        &format!("maknaed:tasks-right#agents.{id}.tasks-right"),
+                    )
+                    .unwrap_or_else(|| panic!("{id}'s tasks-right section"));
+                assert!(graph
+                    .out_edges(section.id, maknae_graph::kernel::PART_OF)
+                    .any(|e| e.to == right.id));
+                for i in 0..maknae_config::TASKS_RIGHT_PATHS.len() {
+                    assert!(
+                        graph
+                            .lookup(
+                                maknae_graph::kernel::RULE,
+                                &format!("rule:agents.{id}.tasks-right:allow:{i}")
+                            )
+                            .is_some(),
+                        "{id} {i}"
+                    );
+                }
+                assert_eq!(
+                    digests.get(&format!("agents.{id}.tasks-right")),
+                    Some(&want),
+                    "{id}"
+                );
+            }
+            assert_eq!(digests.get("agents.suga"), None, "suga has no policy.yaml");
         }
 
         const HOBI_POLICY: &str = "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: [\"Read(~/docs/secret/**)\"]\n";
@@ -7857,12 +8287,12 @@ mod tests {
                 ),
             );
             let mut status = agent_channel(whoami(i64::from(HOBI)), "hobi");
-            status.action = Action("session.prompt".into());
+            status.action = Action("session.list".into());
             assert_eq!(
                 auth(&limited, 501).decide(&status),
                 Verdict::Deny {
                     reason:
-                        "subject hobi-svc: session.prompt is not in agents.hobi.policy.actions allow"
+                        "subject hobi-svc: session.list is not in agents.hobi.policy.actions allow"
                             .into()
                 }
             );

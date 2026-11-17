@@ -25,6 +25,7 @@ const ATTR_ENTRY: &str = "entry";
 const ATTR_EFFECT: &str = "effect";
 const ATTR_TERM: &str = "term";
 const ATTR_DESTINATION: &str = "destination";
+const TASKS_RIGHT_SOURCE: &str = "maknaed:tasks-right";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompileError {
@@ -545,6 +546,35 @@ pub fn compile(
                     Cited::AgentPath {
                         agent: id.to_string(),
                         effect,
+                        source: entry.clone(),
+                    },
+                );
+            }
+        }
+    }
+
+    let rights: Vec<_> = source
+        .subject_grants()
+        .0
+        .values()
+        .filter_map(crate::decide::SubjectEntry::agent_right)
+        .collect();
+    if !rights.is_empty() {
+        let source_id = c.add_node(CONFIG_SOURCE, TASKS_RIGHT_SOURCE.into(), Attrs::new());
+        for (id, right) in rights {
+            let name = format!("agents.{id}.tasks-right");
+            let sec = c.section_of(source_id, TASKS_RIGHT_SOURCE, &name, section_sha256, &name)?;
+            let word = effect_attrs(Effect::Allow).1;
+            for (i, entry) in right.allow_sources().iter().enumerate() {
+                let mut attrs = Attrs::new();
+                attrs.insert(ATTR_ENTRY.into(), AttrValue::Str(entry.clone()));
+                attrs.insert(ATTR_EFFECT.into(), AttrValue::Str(word.into()));
+                c.rule(
+                    format!("rule:{name}:{word}:{i}"),
+                    attrs,
+                    &sec,
+                    Cited::AgentRight {
+                        agent: id.to_string(),
                         source: entry.clone(),
                     },
                 );

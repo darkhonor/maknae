@@ -397,14 +397,7 @@ impl AuthzPolicy {
         root: &Path,
         home: Option<&Path>,
     ) -> Result<AgentMatch, HomeUnbound> {
-        self.subtree_agent(
-            right,
-            subject,
-            root,
-            home,
-            write_glob,
-            Self::evaluate_write_subtree_floored,
-        )
+        self.subtree_agent(right, subject, root, home, write_glob)
     }
 
     /// [`Self::evaluate3_agent`] for [`Self::evaluate_read_subtree_floored`].
@@ -415,14 +408,7 @@ impl AuthzPolicy {
         root: &Path,
         home: Option<&Path>,
     ) -> Result<AgentMatch, HomeUnbound> {
-        self.subtree_agent(
-            right,
-            subject,
-            root,
-            home,
-            read_glob,
-            Self::evaluate_read_subtree_floored,
-        )
+        self.subtree_agent(right, subject, root, home, read_glob)
     }
 
     fn subtree_agent(
@@ -432,17 +418,11 @@ impl AuthzPolicy {
         root: &Path,
         home: Option<&Path>,
         glob_of: fn(&Pattern) -> Option<&PathGlob>,
-        floored: fn(
-            &Self,
-            Option<&SubjectPermissions>,
-            &Path,
-            Option<&Path>,
-        ) -> Result<Match3, HomeUnbound>,
     ) -> Result<AgentMatch, HomeUnbound> {
         let (deny, allow) = self.right_lists(right);
         agent_match(
             evaluate_subtree_over(&deny, &allow, root, home, glob_of)?,
-            || floored(self, subject, root, home),
+            || self.evaluate_subtree_floored(subject, root, home, glob_of),
         )
     }
 

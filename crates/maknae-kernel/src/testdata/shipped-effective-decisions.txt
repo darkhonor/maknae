@@ -160,7 +160,7 @@ unbound fs.mkdir read-twin Some("read") "/etc/maknae/authz.yaml" -> Deny { reaso
 unbound fs.mkdir Some("mkdir") "/proc/1/environ" -> Deny { reason: "sensitive: host /proc/*/environ" } None None
 unbound fs.mkdir read-twin Some("read") "/proc/1/environ" -> Deny { reason: "sensitive: host /proc/*/environ" } None None
 agent liveness.ping None "" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") None
-agent session.new None "" -> Deny { reason: "agent hobi: session.new needs a grant in its policy.yaml" } Some("user") None
+agent session.new None "" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:roles.user:allow:1 in #roles.user")
 agent fs.read Some("read") "/home/operator/notes" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.hobi.permissions:allow:0 in #agents.hobi")
 agent fs.read Some("read") "/home/operator/projects/x" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.hobi.permissions:allow:0 in #agents.hobi")
 agent fs.read Some("read") "/home/operator/.ssh/id" -> Deny { reason: "sensitive: host ~/.ssh/**" } Some("user") None

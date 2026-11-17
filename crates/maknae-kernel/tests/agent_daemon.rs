@@ -287,16 +287,21 @@ fn world(tag: &str, hobi_policy: &str) -> World {
 }
 
 fn world_of(tag: &str, enrolled: &[(&str, u32, &str)]) -> World {
+    world_over(
+        tag,
+        &format!("schema_version: 1\npermissions:\n  allow: []\n  deny: []\n{ROLES}"),
+        enrolled,
+    )
+}
+
+fn world_over(tag: &str, authz: &str, enrolled: &[(&str, u32, &str)]) -> World {
     let dir = std::env::temp_dir().join(format!("agentd629_{tag}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     let root = common::DirGuard(dir.canonicalize().unwrap());
     let paths = maknae_authz_basic::PolicyPaths::in_dir(&root);
-    common::write_0640(
-        &paths.authz,
-        &format!("schema_version: 1\npermissions:\n  allow: []\n  deny: []\n{ROLES}"),
-    );
+    common::write_0640(&paths.authz, authz);
     common::write_0640(&paths.sensitive, common::EMPTY_SENSITIVE);
     let user = common::euid_name();
     common::write_0640(
@@ -1053,14 +1058,14 @@ fn reported(w: &World, id: &TaskId) -> bool {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_agent_is_refused_what_its_policy_denies() {
+async fn an_agent_is_refused_what_the_site_denies_inside_its_tasks() {
     let _one = ONE_DAEMON.lock().await;
     let me = nix::unistd::geteuid().as_raw();
-    let policy = HOBI_POLICY.replace(
-        "  deny: []\n",
-        &format!("  deny: [\"Write(~/tasks/users/{me}/sentinel-629-denied.md)\"]\n"),
+    let w = world_over(
+        "site-denied",
+        &format!("schema_version: 1\npermissions:\n  allow: []\n  deny: [\"Write(~/tasks/users/{me}/sentinel-629-denied.md)\"]\n{ROLES}"),
+        &[("hobi", HOBI_UID, HOBI_POLICY)],
     );
-    let w = world("policy-denied", &policy);
     let id = w.submit("sentinel-629-denied-prompt").await;
     let denied = w.partition().join("sentinel-629-denied.md");
     let model = Model::script(vec![
@@ -1077,9 +1082,7 @@ async fn an_agent_is_refused_what_its_policy_denies() {
     assert_eq!(writes[0].subject.agent.as_deref(), Some("hobi"));
     assert_eq!(
         writes[0].outcome.reason,
-        format!(
-            "denied by agents.hobi.policy.permissions entry Write(~/tasks/users/{me}/sentinel-629-denied.md)"
-        )
+        format!("denied by policy entry Write(~/tasks/users/{me}/sentinel-629-denied.md)")
     );
     let results = tool_results(&model.prompts()[1]);
     assert_eq!(results.len(), 1);
@@ -1452,11 +1455,15 @@ async fn an_undecodable_delivery_lapses_to_agent_lost_under_the_real_sweep_and_t
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_uncited_close_after_a_report_is_permitted_and_a_policy_refused_close_is_not_fatal() {
+async fn the_uncited_close_after_a_report_is_permitted_and_a_role_refused_close_is_not_fatal() {
     let _one = ONE_DAEMON.lock().await;
-    let unclosable = HOBI_POLICY.replace("\"session.close\", ", "");
-    assert_ne!(unclosable, HOBI_POLICY);
-    let w = world("close", &unclosable);
+    let unclosable = ROLES.replace(", \"session.close\"]", "]\n    deny: [\"session.close\"]");
+    assert_ne!(unclosable, ROLES);
+    let w = world_over(
+        "close",
+        &format!("schema_version: 1\npermissions:\n  allow: []\n  deny: []\n{unclosable}"),
+        &[("hobi", HOBI_UID, HOBI_POLICY)],
+    );
     let first = w.submit("sentinel-629-close-first").await;
     let second = w.submit("sentinel-629-close-second").await;
     let model = Model::script(vec![
@@ -1468,7 +1475,7 @@ async fn the_uncited_close_after_a_report_is_permitted_and_a_policy_refused_clos
         .await;
     d.until("both closes", |d| d.close_failures() == 2).await;
     d.stop().await;
-    let refused = records(&w, "session.close", "session.close is not in");
+    let refused = records(&w, "session.close", "denied by role grant session.close");
     assert_eq!(refused.len(), 2, "{refused:?}");
     assert!(refused
         .iter()
