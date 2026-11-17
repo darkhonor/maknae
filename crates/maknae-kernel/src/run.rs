@@ -2254,18 +2254,9 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             let name = chosen.provider.name.as_str();
             let destination = format!("provider:{name}");
             let m = crate::egress::content_measure(turns);
-            let egress_meta = |status| EgressAudit {
-                status,
-                content_length: m.length,
-                content_digest: m.digest32.clone(),
-                conversation: conversation.clone(),
-                model: Some(chosen.model.to_string()),
-                reply_length: None,
-                output_tokens: *output_tokens,
-                prompt_tokens: None,
-                completion_tokens: None,
-                refused_tool_calls: vec![],
-            };
+            let model = chosen.model.to_string();
+            let egress_meta =
+                |status| prompt_egress_audit(status, &m, conversation, &model, *output_tokens);
             let refuse_turn = |reason: &str, posture: &str| {
                 let mut rec = make_record(
                     "request",
@@ -2363,30 +2354,23 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             }
             // 2. the write-ahead intent; the TYPE of `send` makes step 3
             //    impossible without it (egress.rs).
-            let mut intent = make_record(
-                "request",
-                &host,
-                &socket,
+            let intent = prompt_intent_record(&PromptRecordFacts {
+                host: &host,
+                socket: &socket,
                 peer_uid,
-                None,
-                None,
-                peer_uri.as_deref(),
+                peer_uri: peer_uri.as_deref(),
                 session_id,
-                seq.next(),
-                "session.prompt",
-                Some(&destination),
-                "permit",
-                "intent recorded",
-                "authorized",
-                &au3_1,
-            );
-            // #275: identity AND role. The OUTCOME record is derived from this
-            // intent by clone, so an omission here propagates to both halves of
-            // the write-ahead pair.
-            intent.subject.user = admitted_user(peer_user.as_deref());
-            intent.subject.role = decided_role.map(str::to_string);
-            intent.rule = decided_rule.as_ref().map(rule_audit);
-            intent.egress = Some(egress_meta(EgressStatus::IntentOnly));
+                seq: seq.next(),
+                destination: &destination,
+                au3_1: &au3_1,
+                peer_user: peer_user.as_deref(),
+                role: decided_role,
+                rule: decided_rule.as_ref(),
+                conversation,
+                model: &model,
+                content: &m,
+                output_tokens: *output_tokens,
+            });
             let intent = match crate::egress::commit_intent(&*emit, intent).await {
                 Ok(i) => i,
                 Err(e) => {
@@ -2710,6 +2694,76 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         }
     }
     close_bounded(&mut stream).await;
+}
+
+pub(crate) struct PromptRecordFacts<'a> {
+    pub(crate) host: &'a str,
+    pub(crate) socket: &'a str,
+    pub(crate) peer_uid: u32,
+    pub(crate) peer_uri: Option<&'a str>,
+    pub(crate) session_id: u64,
+    pub(crate) seq: u64,
+    pub(crate) destination: &'a str,
+    pub(crate) au3_1: &'a serde_json::Value,
+    pub(crate) peer_user: Option<&'a str>,
+    pub(crate) role: Option<&'a str>,
+    pub(crate) rule: Option<&'a RuleCitation>,
+    pub(crate) conversation: &'a str,
+    pub(crate) model: &'a str,
+    pub(crate) content: &'a crate::egress::ContentMeasure,
+    pub(crate) output_tokens: Option<u64>,
+}
+
+fn prompt_egress_audit(
+    status: EgressStatus,
+    content: &crate::egress::ContentMeasure,
+    conversation: &str,
+    model: &str,
+    output_tokens: Option<u64>,
+) -> EgressAudit {
+    EgressAudit {
+        status,
+        content_length: content.length,
+        content_digest: content.digest32.clone(),
+        conversation: conversation.to_owned(),
+        model: Some(model.to_owned()),
+        reply_length: None,
+        output_tokens,
+        prompt_tokens: None,
+        completion_tokens: None,
+        refused_tool_calls: vec![],
+    }
+}
+
+pub(crate) fn prompt_intent_record(f: &PromptRecordFacts<'_>) -> AuditRecord {
+    let mut intent = make_record(
+        "request",
+        f.host,
+        f.socket,
+        f.peer_uid,
+        None,
+        None,
+        f.peer_uri,
+        f.session_id,
+        f.seq,
+        "session.prompt",
+        Some(f.destination),
+        "permit",
+        "intent recorded",
+        "authorized",
+        f.au3_1,
+    );
+    intent.subject.user = admitted_user(f.peer_user);
+    intent.subject.role = f.role.map(str::to_string);
+    intent.rule = f.rule.map(rule_audit);
+    intent.egress = Some(prompt_egress_audit(
+        EgressStatus::IntentOnly,
+        f.content,
+        f.conversation,
+        f.model,
+        f.output_tokens,
+    ));
+    intent
 }
 
 pub(crate) fn task_verb_record(
@@ -10730,6 +10784,7 @@ pub(crate) mod baseline_stub {
 #[cfg(test)]
 mod record_widths {
     use super::*;
+    use crate::egress::{ReplyRefusal, SendOutcome};
     use crate::handler::{build_authz_request, Stamp, TaskStamp};
     use crate::task::{Contained, ReleaseRefusal, Released, TaskRefusal};
     use crate::task_verbs as tv;
@@ -10875,6 +10930,16 @@ mod record_widths {
             }
         }
 
+        fn granting_the_widest_provider(person: bool) -> Self {
+            let destination = format!("provider:{}", widest_provider());
+            Who {
+                person,
+                shipped: crate::test_fixtures::shipped_composition_with(&format!(
+                    "destinations:\n  admin:\n    allow: [\"{destination}\"]\n  user:\n    allow: [\"{destination}\"]\n"
+                )),
+            }
+        }
+
         fn tasker(&self) -> Tasker {
             if self.person {
                 Tasker::Uid(u32::MAX)
@@ -10895,6 +10960,15 @@ mod record_widths {
         }
 
         fn decided(&self, verb: &Verb) -> (Option<&'static str>, Option<RuleCitation>) {
+            self.decided_with(verb, None, &[])
+        }
+
+        fn decided_with(
+            &self,
+            verb: &Verb,
+            facts: Option<&crate::conversation::facts::ConversationFacts>,
+            resource: &[(&str, String)],
+        ) -> (Option<&'static str>, Option<RuleCitation>) {
             let agent = AgentId::parse("hobi").expect("hobi is an agent id");
             let (stamp, uid) = if self.person {
                 (Stamp::Client, nix::unistd::geteuid().as_raw())
@@ -10913,9 +10987,14 @@ mod record_widths {
                 None,
                 maknae_security::Lane::Local,
                 None,
-                None,
+                facts,
                 &stamp,
             );
+            for (k, v) in resource {
+                req.resource
+                    .0
+                    .insert(*k, maknae_security::AttrValue::Str(v.clone()));
+            }
             if let Some(named) =
                 tv::task_verb(verb).and_then(|v| v.named_agent().map(str::to_owned))
             {
@@ -11224,6 +11303,281 @@ mod record_widths {
     #[test]
     fn the_widest_release_record_degrades_and_its_marker_fits() {
         assert_the_widest_degrades_and_its_marker_fits(&release_cases(false));
+    }
+
+    fn prompt_verb() -> Verb {
+        Verb::SessionPrompt {
+            conversation: "c".repeat(maknae_proto::MAX_CONVERSATION_ID_BYTES),
+            turns: Vec::new(),
+            output_tokens: Some(u64::MAX),
+            choice: None,
+        }
+    }
+
+    fn prompt_conversation() -> String {
+        "c".repeat(maknae_proto::MAX_CONVERSATION_ID_BYTES)
+    }
+
+    fn widest_provider() -> String {
+        "p".repeat(maknae_config::MAX_PROVIDER_NAME_BYTES)
+    }
+
+    fn prompt_model() -> String {
+        "m".repeat(maknae_config::MAX_MODEL_BYTES)
+    }
+
+    fn prompt_content() -> crate::egress::ContentMeasure {
+        let turn = maknae_proto::Turn::User {
+            content: vec![maknae_proto::ContentBlock::Text {
+                text: maknae_proto::SecretText(maknae_io::Zeroizing::new("t".into())),
+            }],
+        };
+        crate::egress::ContentMeasure {
+            length: u64::MAX,
+            ..crate::egress::content_measure(&[turn])
+        }
+    }
+
+    struct Identity {
+        user: String,
+        role: &'static str,
+        rule: RuleCitation,
+        stamped_by: Who,
+    }
+
+    fn identities() -> Vec<Identity> {
+        let decide = |person: bool| {
+            let who = Who::granting_the_widest_provider(person);
+            let facts = crate::conversation::facts::ConversationFacts {
+                state: crate::conversation::facts::FactState::Active,
+                owner_uid: Some(if person {
+                    nix::unistd::geteuid().as_raw()
+                } else {
+                    AGENT_UID
+                }),
+                extends: Some(crate::conversation::chain::Extends::Advance { new: 1 }),
+            };
+            let name = widest_provider();
+            let (role, rule) = who.decided_with(
+                &prompt_verb(),
+                Some(&facts),
+                &[
+                    ("destination", format!("provider:{name}")),
+                    ("model", format!("{name}/{}", prompt_model())),
+                ],
+            );
+            (
+                role.expect("the PDP names a role"),
+                rule.expect("the PDP cites the destination rule"),
+            )
+        };
+        let (admin, admin_rule) = decide(true);
+        let (user, user_rule) = decide(false);
+        vec![
+            Identity {
+                user: "alice".into(),
+                role: user,
+                rule: user_rule.clone(),
+                stamped_by: Who::new(true),
+            },
+            Identity {
+                user: "aackerman".into(),
+                role: admin,
+                rule: admin_rule.clone(),
+                stamped_by: Who::new(true),
+            },
+            Identity {
+                user: widest_user(),
+                role: "adversary",
+                rule: admin_rule,
+                stamped_by: Who::new(true),
+            },
+            Identity {
+                user: widest_user(),
+                role: user,
+                rule: user_rule,
+                stamped_by: Who::new(false),
+            },
+        ]
+    }
+
+    fn widest_prompt_intent(i: &Identity) -> crate::egress::DurableEgressIntent {
+        let content = prompt_content();
+        let au3_1 = serde_json::Value::Null;
+        let mut rec = prompt_intent_record(&PromptRecordFacts {
+            host: &host(),
+            socket: MACOS_DAEMON_SOCKET_PATH,
+            peer_uid: u32::MAX,
+            peer_uri: None,
+            session_id: u64::MAX,
+            seq: u64::MAX,
+            destination: &format!("provider:{}", widest_provider()),
+            au3_1: &au3_1,
+            peer_user: Some(&i.user),
+            role: Some(i.role),
+            rule: Some(&i.rule),
+            conversation: &prompt_conversation(),
+            model: &prompt_model(),
+            content: &content,
+            output_tokens: Some(u64::MAX),
+        });
+        i.stamped_by.session().stamp(&mut rec);
+        crate::egress::DurableEgressIntent::for_test(rec)
+    }
+
+    fn listed(o: SendOutcome) -> SendOutcome {
+        match o {
+            SendOutcome::Sent { .. }
+            | SendOutcome::Failed
+            | SendOutcome::DeadlineExpired
+            | SendOutcome::OutcomeUnknown => {}
+            SendOutcome::LandedUndelivered { refusal, .. } => match refusal {
+                ReplyRefusal::Oversize
+                | ReplyRefusal::NonText
+                | ReplyRefusal::Empty
+                | ReplyRefusal::ToolCallUnacceptable
+                | ReplyRefusal::ReasoningUnacceptable
+                | ReplyRefusal::Unusable(_)
+                | ReplyRefusal::ConversationFull
+                | ReplyRefusal::ConversationChanged
+                | ReplyRefusal::ConversationOutcomeUnknown => {}
+            },
+        }
+        o
+    }
+
+    fn every_outcome() -> Vec<SendOutcome> {
+        let usage = Some(maknae_proto::Usage {
+            prompt_tokens: u64::MAX,
+            completion_tokens: Some(u64::MAX),
+        });
+        let mut refusals = vec![
+            ReplyRefusal::Oversize,
+            ReplyRefusal::NonText,
+            ReplyRefusal::Empty,
+            ReplyRefusal::ToolCallUnacceptable,
+            ReplyRefusal::ReasoningUnacceptable,
+            ReplyRefusal::ConversationFull,
+            ReplyRefusal::ConversationChanged,
+            ReplyRefusal::ConversationOutcomeUnknown,
+        ];
+        refusals.extend(maknae_proto::ReplyDefect::ALL.map(ReplyRefusal::Unusable));
+        let mut all = vec![
+            SendOutcome::Sent {
+                reply_length: u64::MAX,
+                usage,
+            },
+            SendOutcome::Failed,
+            SendOutcome::DeadlineExpired,
+            SendOutcome::OutcomeUnknown,
+        ];
+        all.extend(
+            refusals
+                .into_iter()
+                .map(|refusal| SendOutcome::LandedUndelivered {
+                    reply_length: Some(u64::MAX),
+                    refusal,
+                    usage,
+                }),
+        );
+        all.into_iter().map(listed).collect()
+    }
+
+    fn assert_the_prompt_line_carries_what_the_builder_set(rec: &AuditRecord, i: &Identity) {
+        let m = macos_mirror(rec);
+        let line = &m.full_line;
+        let content = prompt_content();
+        for want in [
+            format!("\"model\":\"{}\"", prompt_model()),
+            format!("\"conversation\":\"{}\"", prompt_conversation()),
+            format!("\"content_digest\":\"{}\"", content.digest32),
+            format!("\"object\":\"provider:{}\"", widest_provider()),
+            format!("\"output_tokens\":{}", u64::MAX),
+            format!("\"user\":\"{}\"", i.user),
+            format!("\"role\":\"{}\"", i.role),
+            format!("\"key\":\"{}\"", i.rule.key),
+            format!("\"reason\":\"{}\"", rec.outcome.reason),
+        ] {
+            assert!(line.contains(&want), "{want} in {line}");
+        }
+        assert!(
+            !m.mirrored_in_full,
+            "{} mirrored in full",
+            rec.outcome.reason
+        );
+        assert!(m.full_len > MACOS_SYSLOG_MAX);
+        let degraded = m.degraded_line.expect("a marker");
+        assert!(degraded.len() <= MACOS_SYSLOG_MAX, "{degraded}");
+        assert!(degraded.contains(&format!("session={}", u64::MAX)));
+        assert!(degraded.contains(&format!("seq={}", u64::MAX)));
+        assert!(degraded.contains("MAKNAE_PRIMARY=ok"));
+    }
+
+    #[test]
+    fn every_prompt_outcome_at_the_widest_bounds_degrades_and_its_marker_fits() {
+        for i in identities() {
+            let intent = widest_prompt_intent(&i);
+            assert_the_prompt_line_carries_what_the_builder_set(intent.record(), &i);
+            for outcome in every_outcome() {
+                let rec = crate::egress::outcome_for(&intent, u64::MAX, "t".into(), outcome);
+                assert_the_prompt_line_carries_what_the_builder_set(&rec, &i);
+            }
+        }
+    }
+
+    #[test]
+    fn a_sent_record_with_the_most_refused_tool_calls_degrades_and_its_marker_fits() {
+        let stub = || maknae_proto::ProposedToolCall {
+            name: "w".repeat(maknae_proto::MAX_TOOL_CALL_NAME_BYTES),
+            call_id: "i".repeat(maknae_proto::MAX_TOOL_CALL_ID_BYTES),
+            arguments: maknae_proto::SecretText(maknae_io::Zeroizing::new(String::new())),
+            refused: Some(maknae_proto::CallRefusal::ArgumentsOverBound { bytes: u64::MAX }),
+        };
+        let reply_of = |n: usize| maknae_proto::PromptReply {
+            reasoning: None,
+            blocks: vec![],
+            tool_calls: (0..n).map(|_| stub()).collect(),
+            usage: None,
+        };
+        let per_stub = crate::egress::reply_capacity(&reply_of(1))
+            - crate::egress::reply_capacity(&reply_of(0));
+        let most = maknae_config::PROMPT_MAX_CEILING / per_stub;
+        let reply = reply_of(most);
+        let i = identities().remove(1);
+        let mut rec = crate::egress::outcome_for(
+            &widest_prompt_intent(&i),
+            u64::MAX,
+            "t".into(),
+            SendOutcome::Sent {
+                reply_length: u64::MAX,
+                usage: None,
+            },
+        );
+        crate::egress::record_refused_tool_calls(&mut rec, Some(&reply));
+        let calls = &rec
+            .egress
+            .as_ref()
+            .expect("an egress block")
+            .refused_tool_calls;
+        assert_eq!(calls.len(), most);
+        let m = macos_mirror(&rec);
+        assert!(m
+            .full_line
+            .contains(&format!("\"arguments_bytes\":{}", u64::MAX)));
+        assert!(m.full_line.contains(&format!(
+            "\"name\":\"{}\"",
+            "w".repeat(maknae_proto::MAX_TOOL_CALL_NAME_BYTES)
+        )));
+        assert!(!m.mirrored_in_full);
+        assert!(m.degraded_len.expect("a marker") <= MACOS_SYSLOG_MAX);
+    }
+
+    #[test]
+    fn the_widest_model_reaches_the_full_line_and_not_the_marker() {
+        let i = identities().remove(1);
+        let m = macos_mirror(widest_prompt_intent(&i).record());
+        assert!(m.full_line.contains(&prompt_model()));
+        assert!(!m.degraded_line.expect("a marker").contains(&prompt_model()));
     }
 }
 

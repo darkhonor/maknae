@@ -402,13 +402,25 @@ pub(crate) fn shipped_composition() -> (
     DirGuard,
     crate::composition::Composition<HermeticAuthorizer>,
 ) {
+    shipped_composition_with("")
+}
+
+pub(crate) fn shipped_composition_with(
+    authz_tail: &str,
+) -> (
+    DirGuard,
+    crate::composition::Composition<HermeticAuthorizer>,
+) {
     use maknae_authz_basic::Baseline;
     use std::sync::atomic::{AtomicUsize, Ordering};
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let tag = format!("shipped-{}", NEXT.fetch_add(1, Ordering::Relaxed));
     let (g, basic) = fixture(
         &tag,
-        include_str!("../../../packaging/common/authz.yaml"),
+        &format!(
+            "{}{authz_tail}",
+            include_str!("../../../packaging/common/authz.yaml")
+        ),
         None,
     );
     write_sensitive(
