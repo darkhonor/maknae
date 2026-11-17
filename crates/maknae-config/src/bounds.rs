@@ -309,6 +309,11 @@ pub fn bounds_from_document(v: &Value) -> Result<EgressBounds, ConfigError> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_provider_body_cap_is_one_mebibyte() {
+        assert_eq!(PROVIDER_BODY_MAX_BYTES, 1 << 20);
+    }
+
     fn doc2(mount: &str, prefix: &str) -> Value {
         doc2_vault(mount, prefix, Some("https://vault.example:8200"))
     }
