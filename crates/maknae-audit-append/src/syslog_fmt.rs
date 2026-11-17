@@ -355,7 +355,7 @@ pub(crate) fn format_record(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::record::{EgressAudit, EgressStatus};
 
@@ -877,7 +877,7 @@ mod tests {
     /// two versions differ in arity. `Where`/`Integrity` derive no `Default` and
     /// MUST NOT gain one — this is a `[t1]` file, and a `Default` on a mutated
     /// return type makes its mutant equivalent-and-unkillable.
-    fn rec(reason: &str) -> crate::record::AuditRecord {
+    pub(crate) fn rec(reason: &str) -> crate::record::AuditRecord {
         use crate::record::{AuditRecord, Integrity, Outcome, Source, Subject, Where};
         AuditRecord {
             ts: "2026-09-05T00:00:00.000Z".into(),
@@ -1192,7 +1192,7 @@ mod tests {
     /// Grow `au3_1`'s pad one byte at a time until the formatted line is EXACTLY
     /// n bytes. Each pad character adds exactly one byte, because the pad appears
     /// only inside `MAKNAE_RECORD`'s canonical JSON and never in the summary.
-    fn record_formatting_to_exactly(n: usize) -> crate::record::AuditRecord {
+    pub(crate) fn record_formatting_to_exactly(n: usize) -> crate::record::AuditRecord {
         // BOUNDED, deliberately. An unbounded `loop` here produces TIMEOUT
         // mutants: cargo-mutants replaces `format_line_unchecked`'s body with a
         // constant-length string, the loop never reaches `len == n`, and the

@@ -20,6 +20,8 @@ mod session;
 mod sink;
 mod syslog_fmt;
 mod syslog_io;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 
 pub use error::AuditError;
 pub use record::{

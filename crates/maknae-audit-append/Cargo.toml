@@ -11,6 +11,9 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 maknae-config = { path = "../maknae-config" }
 maknae-io = { path = "../maknae-io" }

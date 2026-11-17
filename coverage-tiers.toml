@@ -303,6 +303,7 @@ files = [
   # failure lets a subject forge structured fields into their own deny record.
   # Pure; the syslog(3) call lives in syslog_io.rs, tiered separately.
   "crates/maknae-audit-append/src/syslog_fmt.rs",
+  "crates/maknae-audit-append/src/test_support.rs",
   "crates/maknae-audit-append/src/session.rs",
   # #488: the backward rollback-anchor scan. A lost carry-over at a window
   # boundary skips the newest checkpoint and anchors boot to an older one.
@@ -432,7 +433,7 @@ mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kerne
 # Contract: every key MUST appear in mutants_crates; every value MUST be a
 # list of strings; an absent table is legal. Validated in coverage-tiers.sh's
 # prologue (BOTH lanes).
-mutants_features = { maknae-config = ["hermetic-test-seam"], maknae-authz-basic = ["hermetic-test-seam"], maknae-state = ["hermetic-test-seam"], maknae-crypto = ["test-support"] }
+mutants_features = { maknae-config = ["hermetic-test-seam"], maknae-authz-basic = ["hermetic-test-seam"], maknae-state = ["hermetic-test-seam"], maknae-crypto = ["test-support"], maknae-audit-append = ["test-support"] }
 
 [t2]
 floor_production_region = 90
