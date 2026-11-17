@@ -1035,6 +1035,7 @@ mod tests {
                     return true;
                 }
                 if std::time::Instant::now() >= deadline {
+                    eprintln!("timed out waiting for {needle:?}; saw {seen:?}");
                     return false;
                 }
                 std::thread::sleep(Duration::from_millis(10));
@@ -1050,6 +1051,7 @@ mod tests {
                     return true;
                 }
                 if std::time::Instant::now() >= deadline {
+                    eprintln!("timed out waiting for {needle:?}; saw {seen:?}");
                     return false;
                 }
                 std::thread::sleep(Duration::from_millis(10));
@@ -1313,6 +1315,21 @@ mod tests {
             pty.out.wait_for(b"unknown command"),
             "the lines after the request were not read"
         );
+    }
+
+    fn leave_with_one_unsent(
+        pty: &mut crate::screen::testing::Pty,
+        done: &std::sync::mpsc::Receiver<(End, Left)>,
+    ) {
+        pty.type_keys(b"/status 1\r/x\r");
+        assert!(
+            pty.out.wait_for(b"unknown command"),
+            "the lines were not read"
+        );
+        pty.type_keys(b"/bye\r");
+        assert!(pty.out.wait_for(b"1 request is not yet sent or answered"));
+        pty.type_keys(b"/bye\r");
+        assert_eq!(ended(pty, done), (End::Left, Left::default()));
     }
 
     fn ended(
@@ -1696,15 +1713,7 @@ mod tests {
         let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
         let (mut pty, done) = full_screen(&fake, Arc::new(fresh_leaf()), u64::MAX);
         submit_one_behind_a_collect(&mut pty, &fake);
-        pty.type_keys(b"/status 1\r/x\r");
-        assert!(
-            pty.out.wait_for(b"unknown command"),
-            "the lines were not read"
-        );
-        pty.type_keys(b"/bye\r");
-        assert!(pty.out.wait_for(b"1 request is not yet sent or answered"));
-        pty.type_keys(b"/bye\r");
-        assert_eq!(ended(&mut pty, &done), (End::Left, Left::default()));
+        leave_with_one_unsent(&mut pty, &done);
     }
 
     #[test]
@@ -1719,15 +1728,7 @@ mod tests {
         assert!(pty.out.wait_for(b"#1 submitted"), "no echo");
         fake.hold_collects();
         fake.held_collect();
-        pty.type_keys(b"/status 1\r/x\r");
-        assert!(
-            pty.out.wait_for(b"unknown command"),
-            "the lines were not read"
-        );
-        pty.type_keys(b"/bye\r");
-        assert!(pty.out.wait_for(b"1 request is not yet sent or answered"));
-        pty.type_keys(b"/bye\r");
-        assert_eq!(ended(&mut pty, &done), (End::Left, Left::default()));
+        leave_with_one_unsent(&mut pty, &done);
     }
 
     #[test]
