@@ -355,7 +355,7 @@ pub(crate) fn format_record(
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
     /// Every record shape the formatter can be handed either mirrors in full
     /// within the cap or degrades to a line that fits unconditionally. The
@@ -628,7 +628,7 @@ pub(crate) mod tests {
     /// two versions differ in arity. `Where`/`Integrity` derive no `Default` and
     /// MUST NOT gain one — this is a `[t1]` file, and a `Default` on a mutated
     /// return type makes its mutant equivalent-and-unkillable.
-    pub(crate) fn rec(reason: &str) -> crate::record::AuditRecord {
+    fn rec(reason: &str) -> crate::record::AuditRecord {
         use crate::record::{AuditRecord, Integrity, Outcome, Source, Subject, Where};
         AuditRecord {
             ts: "2026-09-05T00:00:00.000Z".into(),
@@ -943,7 +943,7 @@ pub(crate) mod tests {
     /// Grow `au3_1`'s pad one byte at a time until the formatted line is EXACTLY
     /// n bytes. Each pad character adds exactly one byte, because the pad appears
     /// only inside `MAKNAE_RECORD`'s canonical JSON and never in the summary.
-    pub(crate) fn record_formatting_to_exactly(n: usize) -> crate::record::AuditRecord {
+    fn record_formatting_to_exactly(n: usize) -> crate::record::AuditRecord {
         // BOUNDED, deliberately. An unbounded `loop` here produces TIMEOUT
         // mutants: cargo-mutants replaces `format_line_unchecked`'s body with a
         // constant-length string, the loop never reaches `len == n`, and the
@@ -966,6 +966,28 @@ pub(crate) mod tests {
             );
         }
         panic!("never reached exactly {n} bytes — the pad step is not 1 byte per char");
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn a_record_over_the_cap_is_reported_degraded_and_one_under_in_full() {
+        use crate::test_support::macos_mirror;
+        let at = macos_mirror(&record_formatting_to_exactly(MACOS_SYSLOG_MAX));
+        assert!(at.mirrored_in_full);
+        assert_eq!(at.full_len, MACOS_SYSLOG_MAX);
+        assert_eq!(at.degraded_len, None);
+        assert_eq!(at.degraded_line, None);
+        assert_eq!(at.full_line.len(), at.full_len);
+
+        let over = macos_mirror(&record_formatting_to_exactly(MACOS_SYSLOG_MAX + 1));
+        assert!(!over.mirrored_in_full);
+        assert_eq!(over.full_len, MACOS_SYSLOG_MAX + 1);
+        assert!(over.degraded_len.unwrap() <= MACOS_SYSLOG_MAX);
+        assert_eq!(over.full_line.len(), over.full_len);
+        assert_eq!(
+            over.degraded_line.unwrap().len(),
+            over.degraded_len.unwrap()
+        );
     }
 
     #[test]

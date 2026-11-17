@@ -34,29 +34,3 @@ pub fn macos_mirror(r: &AuditRecord) -> MacosMirror {
         },
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::syslog_fmt::tests::record_formatting_to_exactly;
-
-    #[test]
-    fn a_record_over_the_cap_is_reported_degraded_and_one_under_in_full() {
-        let at = macos_mirror(&record_formatting_to_exactly(MACOS_SYSLOG_MAX));
-        assert!(at.mirrored_in_full);
-        assert_eq!(at.full_len, MACOS_SYSLOG_MAX);
-        assert_eq!(at.degraded_len, None);
-        assert_eq!(at.degraded_line, None);
-        assert_eq!(at.full_line.len(), at.full_len);
-
-        let over = macos_mirror(&record_formatting_to_exactly(MACOS_SYSLOG_MAX + 1));
-        assert!(!over.mirrored_in_full);
-        assert_eq!(over.full_len, MACOS_SYSLOG_MAX + 1);
-        assert!(over.degraded_len.unwrap() <= MACOS_SYSLOG_MAX);
-        assert_eq!(over.full_line.len(), over.full_len);
-        assert_eq!(
-            over.degraded_line.unwrap().len(),
-            over.degraded_len.unwrap()
-        );
-    }
-}
