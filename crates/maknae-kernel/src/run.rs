@@ -4709,10 +4709,6 @@ pub(crate) fn rule_audit(c: &RuleCitation) -> maknae_audit_append::RuleAudit {
     }
 }
 
-/// The RESULT-RETURNING request-record emitter the decision paths gate on
-/// (spec D3): unlike `emit_request_deny` (deliberately fire-and-forget for
-/// the pre-decision paths, where nothing is served), every caller here has a
-/// frame to release and must know the append landed. Returns append success.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn request_outcome_record(
     host: &str,
@@ -4739,6 +4735,10 @@ pub(crate) fn request_outcome_record(
     rec
 }
 
+/// The RESULT-RETURNING request-record emitter the decision paths gate on
+/// (spec D3): unlike `emit_request_deny` (deliberately fire-and-forget for
+/// the pre-decision paths, where nothing is served), every caller here has a
+/// frame to release and must know the append landed. Returns append success.
 #[allow(clippy::too_many_arguments)]
 async fn emit_request_outcome<E: AuditEmit + Send + Sync>(
     emit: &Arc<E>,
@@ -11544,55 +11544,128 @@ mod record_widths {
         }
     }
 
-    fn after_refusal(r: ReplyRefusal) -> Option<ReplyRefusal> {
+    fn refusal_ordinal(r: &ReplyRefusal) -> usize {
         let defects = maknae_proto::ReplyDefect::ALL;
         match r {
-            ReplyRefusal::Oversize => Some(ReplyRefusal::NonText),
-            ReplyRefusal::NonText => Some(ReplyRefusal::Empty),
-            ReplyRefusal::Empty => Some(ReplyRefusal::ToolCallUnacceptable),
-            ReplyRefusal::ToolCallUnacceptable => Some(ReplyRefusal::ReasoningUnacceptable),
-            ReplyRefusal::ReasoningUnacceptable => Some(ReplyRefusal::Unusable(defects[0])),
+            ReplyRefusal::Oversize => 0,
+            ReplyRefusal::NonText => 1,
+            ReplyRefusal::Empty => 2,
+            ReplyRefusal::ToolCallUnacceptable => 3,
+            ReplyRefusal::ReasoningUnacceptable => 4,
             ReplyRefusal::Unusable(d) => {
-                let at = defects
+                5 + defects
                     .iter()
-                    .position(|x| *x == d)
-                    .expect("a listed defect");
-                Some(
-                    defects
-                        .get(at + 1)
-                        .map_or(ReplyRefusal::ConversationFull, |n| {
-                            ReplyRefusal::Unusable(*n)
-                        }),
-                )
+                    .position(|x| x == d)
+                    .expect("a listed defect")
             }
-            ReplyRefusal::ConversationFull => Some(ReplyRefusal::ConversationChanged),
-            ReplyRefusal::ConversationChanged => Some(ReplyRefusal::ConversationOutcomeUnknown),
-            ReplyRefusal::ConversationOutcomeUnknown => None,
+            ReplyRefusal::ConversationFull => 5 + defects.len(),
+            ReplyRefusal::ConversationChanged => 6 + defects.len(),
+            ReplyRefusal::ConversationOutcomeUnknown => 7 + defects.len(),
         }
     }
 
-    fn after_outcome(o: &SendOutcome) -> Option<SendOutcome> {
+    fn refusal_from_ordinal(i: usize) -> Option<ReplyRefusal> {
+        let defects = maknae_proto::ReplyDefect::ALL;
+        let n = defects.len();
+        match i {
+            0 => Some(ReplyRefusal::Oversize),
+            1 => Some(ReplyRefusal::NonText),
+            2 => Some(ReplyRefusal::Empty),
+            3 => Some(ReplyRefusal::ToolCallUnacceptable),
+            4 => Some(ReplyRefusal::ReasoningUnacceptable),
+            i if i < 5 + n => Some(ReplyRefusal::Unusable(defects[i - 5])),
+            i if i == 5 + n => Some(ReplyRefusal::ConversationFull),
+            i if i == 6 + n => Some(ReplyRefusal::ConversationChanged),
+            i if i == 7 + n => Some(ReplyRefusal::ConversationOutcomeUnknown),
+            _ => None,
+        }
+    }
+
+    fn outcome_ordinal(o: &SendOutcome) -> usize {
         match o {
-            SendOutcome::Sent { .. } => Some(SendOutcome::Failed),
-            SendOutcome::Failed => Some(SendOutcome::DeadlineExpired),
-            SendOutcome::DeadlineExpired => Some(SendOutcome::OutcomeUnknown),
-            SendOutcome::OutcomeUnknown => Some(outcome_of_refusal(ReplyRefusal::Oversize)),
-            SendOutcome::LandedUndelivered { refusal, .. } => {
-                after_refusal(*refusal).map(outcome_of_refusal)
-            }
+            SendOutcome::Sent { .. } => 0,
+            SendOutcome::Failed => 1,
+            SendOutcome::DeadlineExpired => 2,
+            SendOutcome::OutcomeUnknown => 3,
+            SendOutcome::LandedUndelivered { refusal, .. } => 4 + refusal_ordinal(refusal),
+        }
+    }
+
+    fn outcome_from_ordinal(i: usize) -> Option<SendOutcome> {
+        match i {
+            0 => Some(SendOutcome::Sent {
+                reply_length: u64::MAX,
+                usage: usage(),
+            }),
+            1 => Some(SendOutcome::Failed),
+            2 => Some(SendOutcome::DeadlineExpired),
+            3 => Some(SendOutcome::OutcomeUnknown),
+            i => refusal_from_ordinal(i - 4).map(outcome_of_refusal),
         }
     }
 
     fn every_outcome() -> Vec<SendOutcome> {
-        let mut next = Some(SendOutcome::Sent {
-            reply_length: u64::MAX,
-            usage: usage(),
-        });
-        let mut all = Vec::new();
-        while let Some(o) = next {
-            next = after_outcome(&o);
-            all.push(o);
+        let all: Vec<SendOutcome> = (0..).map_while(outcome_from_ordinal).collect();
+        for (i, o) in all.iter().enumerate() {
+            assert_eq!(outcome_ordinal(o), i, "{o:?}");
         }
+        let tail = outcome_of_refusal(ReplyRefusal::ConversationOutcomeUnknown);
+        assert_eq!(
+            all.last().map(outcome_ordinal),
+            Some(outcome_ordinal(&tail))
+        );
+        all
+    }
+
+    fn step_failure_ordinal(f: &crate::conversation::answer::StepFailure) -> Option<usize> {
+        use crate::conversation::answer::StepFailure;
+        use crate::conversation::bounds::BoundRefusal;
+        use crate::conversation::turn::TurnRefusal;
+        use crate::mutation::Blocked;
+        match f {
+            StepFailure::NoConversation => Some(0),
+            StepFailure::Turn(TurnRefusal::Bound(BoundRefusal::ConversationFull)) => Some(1),
+            StepFailure::Turn(TurnRefusal::Bound(BoundRefusal::OwnerFull)) => Some(2),
+            StepFailure::Turn(TurnRefusal::Rewrite) => Some(3),
+            StepFailure::Turn(TurnRefusal::Unencodable) => Some(4),
+            StepFailure::Blocked(Blocked::NotStarted) => Some(5),
+            StepFailure::Blocked(Blocked::Unknown) => Some(6),
+            StepFailure::Store(_) => None,
+        }
+    }
+
+    fn step_failure_from_ordinal(i: usize) -> Option<crate::conversation::answer::StepFailure> {
+        use crate::conversation::answer::StepFailure;
+        use crate::conversation::bounds::BoundRefusal;
+        use crate::conversation::turn::TurnRefusal;
+        use crate::mutation::Blocked;
+        match i {
+            0 => Some(StepFailure::NoConversation),
+            1 => Some(StepFailure::Turn(TurnRefusal::Bound(
+                BoundRefusal::ConversationFull,
+            ))),
+            2 => Some(StepFailure::Turn(TurnRefusal::Bound(
+                BoundRefusal::OwnerFull,
+            ))),
+            3 => Some(StepFailure::Turn(TurnRefusal::Rewrite)),
+            4 => Some(StepFailure::Turn(TurnRefusal::Unencodable)),
+            5 => Some(StepFailure::Blocked(Blocked::NotStarted)),
+            6 => Some(StepFailure::Blocked(Blocked::Unknown)),
+            _ => None,
+        }
+    }
+
+    fn every_step_failure() -> Vec<crate::conversation::answer::StepFailure> {
+        let all: Vec<_> = (0..).map_while(step_failure_from_ordinal).collect();
+        for (i, f) in all.iter().enumerate() {
+            assert_eq!(step_failure_ordinal(f), Some(i), "{f:?}");
+        }
+        let tail =
+            crate::conversation::answer::StepFailure::Blocked(crate::mutation::Blocked::Unknown);
+        assert_eq!(
+            all.last().map(step_failure_ordinal),
+            Some(step_failure_ordinal(&tail))
+        );
         all
     }
 
@@ -11654,19 +11727,8 @@ mod record_widths {
 
     #[test]
     fn the_prompt_refusals_and_the_unavailable_backend_degrade_and_their_markers_fit() {
-        use crate::conversation::answer::{advance_answer, StepFailure};
-        use crate::conversation::bounds::BoundRefusal;
-        use crate::conversation::turn::TurnRefusal;
-        use crate::mutation::Blocked;
-        let failures = [
-            StepFailure::NoConversation,
-            StepFailure::Turn(TurnRefusal::Bound(BoundRefusal::ConversationFull)),
-            StepFailure::Turn(TurnRefusal::Bound(BoundRefusal::OwnerFull)),
-            StepFailure::Turn(TurnRefusal::Rewrite),
-            StepFailure::Turn(TurnRefusal::Unencodable),
-            StepFailure::Blocked(Blocked::NotStarted),
-            StepFailure::Blocked(Blocked::Unknown),
-        ];
+        use crate::conversation::answer::advance_answer;
+        let failures = every_step_failure();
         for i in identities() {
             for failure in &failures {
                 let answer = advance_answer(failure);
