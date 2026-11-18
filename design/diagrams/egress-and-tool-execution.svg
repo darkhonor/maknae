@@ -4,11 +4,11 @@
 <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="context-stroke" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
 <rect x="0" y="0" width="1180" height="1130" rx="0" fill="#FFFFFF" stroke="#FFFFFF" stroke-width="0"/>
 <text x="30" y="34" font-family="Helvetica, Arial, sans-serif" font-size="18" font-weight="600" fill="#2C2C2A" text-anchor="start">Egress and tool execution — who decides, who enforces, who carries each hop</text>
-<text x="30" y="54" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#5F5E5A" text-anchor="start">UML 2.5.1 component view. Solid lines and borders are built today; dashed are proposed by a design concept, design/egress-and-tool-execution.md, which is not authoritative.</text>
+<text x="30" y="54" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#5F5E5A" text-anchor="start">UML 2.5.1 component view. Solid lines and borders are built today; dashed are decided (ADR-0035, ADR-0036) or proposed in design/egress-and-tool-execution.md, not built.</text>
 <text x="30" y="70" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#5F5E5A" text-anchor="start">Dashing alone marks status. A person and an Agent Daemon use the same path; their tier's policy differs (§3), not the mechanism.</text>
 <rect x="20" y="100" width="330" height="660" rx="14" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<text x="36" y="124" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#2C2C2A" text-anchor="start">Subject side · subject or workspace uids</text>
-<text x="36" y="141" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="start">«untrusted» (ADR-0023 d2) · launcher: §10 item 4</text>
+<text x="36" y="124" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#2C2C2A" text-anchor="start">Subject side · the person's or the agent's uid</text>
+<text x="36" y="141" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="start">«untrusted» (ADR-0023 d2) · a PEP toward the model (ADR-0035)</text>
 <rect x="400" y="100" width="380" height="660" rx="14" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
 <text x="416" y="124" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#26215C" text-anchor="start">Trust plane</text>
 <text x="416" y="141" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#534AB7" text-anchor="start">each process under its own service account</text>
@@ -19,20 +19,20 @@
 <text x="185.0" y="180" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">«untrusted» · the person's uid</text>
 <text x="185.0" y="198" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#2C2C2A" text-anchor="middle">maknae TUI  (maknae agent &lt;name&gt;)</text>
 <text x="185.0" y="216" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">the person's agent loop</text>
-<rect x="45" y="270" width="280" height="78" rx="8" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25" stroke-dasharray="7 5"/>
+<rect x="45" y="270" width="280" height="78" rx="8" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
 <text x="185.0" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">«untrusted» · the agent's account</text>
 <text x="185.0" y="308" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#2C2C2A" text-anchor="middle">Agent Daemon  (maknae-agentd)</text>
-<text x="185.0" y="326" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">to be built (#472)</text>
+<text x="185.0" y="326" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">built (#629)</text>
 <rect x="45" y="420" width="280" height="70" rx="8" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25" stroke-dasharray="7 5"/>
-<text x="185.0" y="440" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">trusted or not: §10 item 4</text>
-<text x="185.0" y="458" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#2C2C2A" text-anchor="middle">launcher</text>
-<text x="185.0" y="476" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">applies the envelope; trusted for an agent's task</text>
+<text x="185.0" y="440" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">«untrusted» · a PEP toward the model</text>
+<text x="185.0" y="458" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#2C2C2A" text-anchor="middle">front end</text>
+<text x="185.0" y="476" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">maknae · maknae-agentd · starts containers, runs the relay</text>
 <rect x="45" y="560" width="280" height="100" rx="8" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25" stroke-dasharray="7 5"/>
-<text x="185.0" y="580" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">«untrusted» · subject's or workspace uid</text>
+<text x="185.0" y="580" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">«untrusted» · in a container, as the subject's uid</text>
 <text x="185.0" y="598" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#2C2C2A" text-anchor="middle">tool</text>
 <text x="185.0" y="616" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">git · gh · glab · cargo · vault · ssh …</text>
-<text x="185.0" y="631" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">the host's own binaries</text>
-<text x="185.0" y="646" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">own credential via a plug-in point</text>
+<text x="185.0" y="631" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">in a tool container (ADR-0036)</text>
+<text x="185.0" y="646" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">credential through its class's plug-in point</text>
 <rect x="425" y="160" width="330" height="88" rx="8" fill="#FFFFFF" stroke="#534AB7" stroke-width="1.25"/>
 <text x="590.0" y="180" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#534AB7" text-anchor="middle">«PDP» · _maknae</text>
 <text x="590.0" y="198" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#26215C" text-anchor="middle">maknaed</text>
@@ -79,7 +79,7 @@
 <circle cx="375" cy="190" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
 <text x="375" y="194" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">1</text>
 <text x="375" y="175" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="middle">requests</text>
-<path d="M325 300 L390 300 L390 232 L425 232" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-dasharray="7 5" marker-end="url(#arrow)"/>
+<path d="M325 300 L390 300 L390 232 L425 232" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
 <circle cx="368" cy="300" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
 <text x="368" y="304" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">2</text>
 <path d="M45 199 L32 199 L32 455 L45 455" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-dasharray="7 5" marker-end="url(#arrow)"/>
@@ -145,19 +145,19 @@
 <circle cx="46" cy="866" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
 <text x="46" y="870" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">2</text>
 <text x="64" y="864" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">The Agent Daemon asks maknaed over its own plane certificate, mutual TLS</text>
-<text x="64" y="877" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">(ADR-0006 decision 9; built by #472).</text>
+<text x="64" y="877" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">(ADR-0006 decision 9; built, #629).</text>
 <circle cx="46" cy="896" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
 <text x="46" y="900" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">3</text>
-<text x="64" y="894" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">After a permit, the loop hands the invocation to the launcher; a trusted</text>
-<text x="64" y="907" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">launcher takes the run-as uid from maknaed, not the loop.</text>
+<text x="64" y="894" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">After a permit, the front end receives the launch shape as an obligation</text>
+<text x="64" y="907" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">(ADR-0035 d3) and applies it; the run-as uid is its own.</text>
 <circle cx="46" cy="926" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
 <text x="46" y="930" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">4</text>
-<text x="64" y="924" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">The launcher starts the host's own tool as the subject (for an agent's task, the</text>
-<text x="64" y="937" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">tasker's workspace uid), inside the envelope, with HTTPS_PROXY set.</text>
+<text x="64" y="924" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">The front end starts the tool in a container as the subject (an agent's</text>
+<text x="64" y="937" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">uid; the tasker's partition mounted), internal network, HTTPS_PROXY = relay.</text>
 <circle cx="46" cy="956" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
 <text x="46" y="960" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">5</text>
 <text x="64" y="954" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">The tool's connections go to maknae-proxy (HTTP CONNECT, with the proxy</text>
-<text x="64" y="967" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">identity): by default, and as their only network path where §7 enforces.</text>
+<text x="64" y="967" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">identity), and that is their only network path, at every tier (ADR-0036 d9).</text>
 <circle cx="46" cy="986" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
 <text x="46" y="990" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">6</text>
 <text x="64" y="984" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">maknae-proxy asks maknaed, per connection, whether this subject may reach this</text>
@@ -203,6 +203,6 @@
 <text x="634" y="1027" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">maknaed; a sealed key or a Vault SSH certificate (#456).</text>
 <circle cx="616" cy="1046" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
 <text x="616" y="1050" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">17</text>
-<text x="634" y="1044" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">A trusted launcher (an agent's task) takes the decided invocation and its run-as</text>
-<text x="634" y="1057" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">uid from maknaed (§10 item 4).</text>
+<text x="634" y="1044" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">Tool containers reach maknae-proxy only through the front end's relay;</text>
+<text x="634" y="1057" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">the agent account is also fenced by its uid rule (ADR-0036 d9–10).</text>
 </svg>
