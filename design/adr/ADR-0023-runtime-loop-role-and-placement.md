@@ -61,7 +61,7 @@ Because the Agent is untrusted and holds no egress credential, it cannot make th
 
 ### 4. Tool calls are executed as the subject, through the kernel's verbs — never by the kernel on the Agent's own authority, and never with a reason on the wire.
 
-**Amended 2026-11-18 ([#477](https://github.com/darkhonor/maknae/issues/477), [ADR-0036](ADR-0036-the-tool-model.md)):** the subject's process still does the work, and now does it in a tool container by default (ADR-0036 decisions 1 and 2). Terminal (host) execution is configurable and disabled by default. The kernel authorizes each invocation and never executes it.
+**Amended 2026-11-18 ([#477](https://github.com/darkhonor/maknae/issues/477), [ADR-0036](ADR-0036-the-tool-model.md)):** the subject's process still does the work, and now does it in a tool container by default (ADR-0036; not built) (ADR-0036 decisions 1 and 2). Terminal (host) execution is configurable and disabled by default. The kernel authorizes each invocation and never executes it.
 
 **Amended 2026-09-26 (#365):** this paragraph, the verdict paragraph after it, and the acceptance-lanes and status-list bullets under Consequences.
 
