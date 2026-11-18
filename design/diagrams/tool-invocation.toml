@@ -1,11 +1,4 @@
-# One tool invocation, end to end, for either front end: the operator's
-# `maknae` session or the Agent Daemon. Curated, like read-path.toml: a call
-# sequence is not derivable from a manifest. Nothing here is built yet, so each
-# step cites the decision that fixes it rather than code.
-#
-# The kernel decides twice: once for the invocation, and once for every
-# connection the tool opens. The model asks and gets back a result; it never
-# runs anything and never sees a delivered credential.
+# One tool invocation by either front end. Steps cite decisions, not code: none of it is built.
 
 title = "One tool invocation — who decides, who runs it, what the model sees"
 subtitle = [
@@ -162,4 +155,4 @@ to = "model"
 kind = "reply"
 label = "released in the next model turn: redacted, or status only"
 evidence = "ADR-0023 decision 3 · ADR-0036 decision 14"
-note = "The release is a kernel decision; the mandatory operands apply to it. In full it travels maknaed → maknae-egress → the provider, with the next session.prompt."
+note = "The release is a kernel decision; the ceiling operand and egress category detection apply to it. In full it travels maknaed → maknae-egress → the provider, with the next session.prompt."

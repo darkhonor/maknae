@@ -70,7 +70,7 @@ The table shows the target. `maknae-proxy`, the relay and the tool path do not e
 
 ![Egress and tool execution: who decides, who enforces, who carries each hop](diagrams/egress-and-tool-execution.svg)
 
-A person and an agent use the same mechanism. What differs is the policy their tier gives them (§3, decision 2), and that an agent's account is also fenced by a network rule on its uid (§7).
+A person and an agent use the same mechanism. What differs is the policy their tier gives them (§3, decision 2), and that an agent's account will also be fenced by a network rule on its uid once it is built (§7).
 
 ## 5. Flows
 
@@ -192,7 +192,7 @@ The invocation identifier is the trail's, not the proxy identity of §6.1, so th
 
 **A tool container's only network path is the proxy, at every tier** (ADR-0036 decisions 9 and 10). On Podman the container sits on an internal network with no route but the front end's relay; measured 2026-11-18, direct TCP by IP, DNS, UDP, IPv6, the host's LAN address and Podman's host address were all blocked from inside it. On Kubernetes a NetworkPolicy allows egress only to the proxy's Service. That fence holds against the tool's code whoever launched it, and it is the same for a person and an agent. None of this exists yet.
 
-**An agent's account is fenced as well.** The Agent Daemon is untrusted (ADR-0023 decision 2), so a compromised Agent Daemon can skip the kernel and run a tool on the host as the agent's uid. On Linux, Maknae ships a network rule keyed to the agent account at every tier (`nftables` `meta skuid` on the output hook, covering the account's own uid and its subordinate uid range, which rootless Podman gives it; or a rule keyed on its SELinux type), leaving `maknae-proxy` as that account's only network path, local services excepted (below). A cgroup-keyed rule would not hold, because the account's processes can move between their own cgroups. Maknae ships no network ruleset today (#562 corrects the isolation contract's claim of one).
+**An agent's account is fenced as well.** The Agent Daemon is untrusted (ADR-0023 decision 2), so a compromised Agent Daemon can skip the kernel and run a tool on the host as the agent's uid. On Linux, Maknae will ship a network rule keyed to the agent account at every tier (`nftables` `meta skuid` on the output hook, covering the account's own uid and its subordinate uid range, which rootless Podman gives it; or a rule keyed on its SELinux type), leaving `maknae-proxy` as that account's only network path, local services excepted (below). A cgroup-keyed rule would not hold, because the account's processes can move between their own cgroups. Maknae ships no network ruleset today (#562 corrects the isolation contract's claim of one).
 
 | What is fenced (target; not built) | HomeLab | Small/Medium Business | Enterprise |
 |---|---|---|---|
@@ -202,7 +202,7 @@ The invocation identifier is the trail's, not the proxy identity of §6.1, so th
 
 On macOS every cell is advisory until §10 item 8 is settled (ADR-0036 decision 20).
 
-**What a subject cannot bypass, and what it can.** The Agent Daemon and the TUI are untrusted (ADR-0023 decision 2), so a confinement applied by them can be skipped by them; they are PEPs only toward the model (ADR-0035 decision 1). The layers they cannot skip are the ones the system applies to their account: operating-system DAC on the account's files, the mandatory access control domain (SELinux; the Agent Daemon's domain `maknae_agentd_t` ships, #639, and must change to let it launch containers, ADR-0036 decision 19), a network rule keyed to the account's uid, and Vault's policy on the account's identity. A person's own account gets no uid rule by default: the person can already reach the network from their own terminal, and the container fences the tool's code.
+**What a subject cannot bypass, and what it can.** The Agent Daemon and the TUI are untrusted (ADR-0023 decision 2), so a confinement applied by them can be skipped by them; they are PEPs only toward the model (ADR-0035 decision 1). The layers they cannot skip are the ones the system applies to their account: operating-system DAC on the account's files, the mandatory access control domain (SELinux; the Agent Daemon's domain `maknae_agentd_t` ships, #639, and must change to let it launch containers, ADR-0036 decision 19), a network rule keyed to the account's uid once it is built, and Vault's policy on the account's identity. A person's own account gets no uid rule by default: the person can already reach the network from their own terminal, and the container fences the tool's code.
 
 **Two levels, two owners.** The user and host level (whether a person or machine may reach the network at all, and through what) belongs to the deployment: an enterprise's forced proxy, firewall and endpoint controls. Maknae does not rebuild it. For people, shipping a uid rule as a tier option for a deployment that has none is a direction beyond ADR-0036, which ships none by default. The Agent Daemon's account is different: on Linux, Maknae ships its uid rule at every tier. The process level belongs to Maknae: the tools Maknae launches, per subject and per invocation, in their containers.
 
@@ -210,7 +210,7 @@ On macOS every cell is advisory until §10 item 8 is settled (ADR-0036 decision 
 
 ### 7.1 Terminal mode (disabled by default)
 
-Terminal mode runs a tool on the host instead of in a container. It is configurable and disabled by default (ADR-0036 decision 2). Where a deployment enables it, a person's terminal-mode tools are confined as follows; the longer-term question of what terminal mode costs for tools that need network is #175's.
+Terminal mode runs a tool on the host instead of in a container. It is configurable and disabled by default, and may not be enabled until its commands honor both `sensitive.yaml` lists, as ADR-0034 decision 10 requires of a command verb (ADR-0036 decision 2). Where a deployment enables it, a person's terminal-mode tools are confined as follows; the longer-term question of what terminal mode costs for tools that need network is #175's.
 
 **A person's terminal-mode tools are confined by cgroup, not by uid.** A network rule keyed to a person's uid would confine all of their processes, including their work outside Maknae. Instead, each terminal-mode tool Maknae launches for a person runs in a dedicated systemd slice, and the network rule matches that slice. An `nftables` rule matching `socket cgroupv2` for the slice can limit it to the proxy's address and port; systemd's per-unit `IPAddressAllow=` is coarser, since allowing `127.0.0.1` admits every loopback service, not only the proxy. The rule resolves the slice when it loads, so the slice is persistent and each invocation runs beneath it. The person's other processes are untouched. This needs systemd, cgroup v2 and `nftables`, which RHEL 9 and 10 and Debian 12 and later ship by default.
 
@@ -224,7 +224,7 @@ The decided model (ADR-0036):
 
 - **Containers are the default for every tool invocation,** for a person's `maknae` session and for the Agent Daemon alike; terminal mode is disabled by default.
 - **`/etc/maknae/tools.yaml` is Maknae's own format, backend-neutral.** Each entry states intents (image and verification, `isolation: container | vm`, network intent, volume roles, resources, a command allowlist, `executes_workspace`, what returns to the model); a backend renderer produces the rootless Podman invocation on a host or an Agent Sandbox `SandboxTemplate` on Kubernetes (ADR-0036 decision 7).
-- **Steps that need network and steps that run the workspace's code are separate entries where the tool allows it** (a fetch entry with the proxy and a credential; a build entry with neither, so the build's own processes hold no credential), sharing the task's workspace (ADR-0036 decision 8).
+- **Steps that need network and steps that run the pull request's build code are separate entries where the tool allows it** (a fetch entry with the proxy and a credential; a build entry with neither, so the build's own processes hold no credential), sharing the task's workspace (ADR-0036 decision 8).
 - **The network fence on Podman is an internal network plus the front end's relay** to `maknae-proxy` (§7, ADR-0036 decision 9).
 - **Images are configurable per tool.** The reference build image, `maknae-rust-build`, is based on Rocky Linux 10 and carries the build tools without a Rust toolchain; the toolchain pinned by `rust-toolchain.toml` comes from a shared, read-only tools volume (ADR-0036 decision 17). An enterprise mirrors or rebuilds into its own registry.
 - **Caches:** build output per task, the registry per operator uid or agent tasker (ADR-0036 decision 12).
@@ -347,3 +347,5 @@ Each statement this concept makes about something not yet built, and the breakdo
 | `maknae-ssh` as the SSH path where Maknae holds the credential | §3 decision 10, §5.5 | #456 |
 | A person's terminal-mode tools confined by cgroup, where terminal mode is enabled | §7.1 | 5 |
 | Tool entries render to Agent Sandbox under a Maknae RuntimeClass | §8 | 9 |
+| A tasked tool mounts only its task's own directory (the per-task layout) | §3 decision 14, §5.4 | 4 |
+| Terminal mode honors both `sensitive.yaml` lists, so it may be enabled | §7.1 | not scheduled |
