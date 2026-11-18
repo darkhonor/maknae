@@ -114,6 +114,7 @@ For source changes, run the applicable heavier gates before pushing (derive the 
 cargo deny --locked check
 ci/gates/p1-manifest-lint.sh
 ci/gates/unsafe-confinement.sh
+ci/gates/panic-strategy.sh                          # and --release-proof (#544)
 ci/gates/p2-invert-tree.sh
 ci/gates/p2-artifact-witness.sh
 ci/gates/build-invocation-lint.sh

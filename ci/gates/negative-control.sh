@@ -6509,6 +6509,177 @@ else
   skipped=$((skipped+21))
 fi
 
+# ---- panic-strategy (#544): the panic strategy stays unwind ----------------
+pf_fixture() { # <name> — a tracked tree the gate passes: pinned root, one workflow, one script
+  local d="$NC_TMP/pf-$1"
+  mkdir -p "$d/.github/workflows" "$d/scripts"
+  printf '[workspace]\nmembers = []\n\n[profile.dev]\npanic = "unwind"\n\n[profile.release]\npanic = "unwind"\n' > "$d/Cargo.toml"
+  printf 'on: push\njobs:\n  b:\n    runs-on: x\n    steps:\n      - run: cargo build --release -p a\n' > "$d/.github/workflows/w.yml"
+  printf '#!/bin/sh\ncargo build --release -p a\n' > "$d/scripts/build.sh"
+  printf '%s' "$d"
+}
+pf_track() { git -C "$1" init -q && git -C "$1" add -A; }
+pf_expect_pass() { # <label> <cmd...>
+  local label="$1" out; shift; total=$((total+1))
+  if out="$("$@" 2>&1)"; then
+    echo "neg-ok: [$label] clean fixture permitted"; pass=$((pass+1))
+  else
+    echo "NEG-FAIL: [$label] gate rejected a clean fixture: $out"
+  fi
+}
+pf_reject() { # <label> <expected-FAIL-substring> <fixture> — the static gate on a tracked fixture
+  pf_track "$3"
+  expect_reject_because "panic-strategy/$1" "$2" "$here/panic-strategy.sh" --root "$3"
+}
+
+fx_pf="$(pf_fixture clean)"; pf_track "$fx_pf"
+pf_expect_pass "panic-strategy/clean" "$here/panic-strategy.sh" --root "$fx_pf"
+fx_pf="$(pf_fixture inline-unwind)"
+printf "cargo build --release -p a --config 'profile.release.panic=\"unwind\"'\n" >> "$fx_pf/scripts/build.sh"
+pf_track "$fx_pf"
+pf_expect_pass "panic-strategy/inline-unwind-config" "$here/panic-strategy.sh" --root "$fx_pf"
+
+fx_pf="$(pf_fixture no-dev-pin)"
+printf '[workspace]\nmembers = []\n\n[profile.release]\npanic = "unwind"\n' > "$fx_pf/Cargo.toml"
+pf_reject no-dev-pin '[profile.dev] must pin panic = "unwind"' "$fx_pf"
+fx_pf="$(pf_fixture release-abort)"
+sed -i.bak '$s/unwind/abort/' "$fx_pf/Cargo.toml" && rm "$fx_pf/Cargo.toml.bak"
+pf_reject release-abort "Cargo.toml: profile.release.panic = 'abort'" "$fx_pf"
+fx_pf="$(pf_fixture member-abort)"; mkdir -p "$fx_pf/crates/m"
+printf '[package]\nname = "m"\n\n[profile.release]\npanic = "abort"\n' > "$fx_pf/crates/m/Cargo.toml"
+pf_reject member-abort "crates/m/Cargo.toml: profile.release.panic = 'abort'" "$fx_pf"
+fx_pf="$(pf_fixture nested-config)"; mkdir -p "$fx_pf/x/.cargo"
+printf '[profile.dev]\npanic = "abort"\n' > "$fx_pf/x/.cargo/config.toml"
+pf_reject nested-config "x/.cargo/config.toml: profile.dev.panic = 'abort'" "$fx_pf"
+fx_pf="$(pf_fixture bare-config)"; mkdir -p "$fx_pf/.cargo"
+printf '[profile.dev]\npanic = "abort"\n' > "$fx_pf/.cargo/config"
+pf_reject bare-config ".cargo/config: profile.dev.panic = 'abort'" "$fx_pf"
+fx_pf="$(pf_fixture any-toml)"
+printf '[profile.dev]\npanic = "abort"\n' > "$fx_pf/abort.toml"
+pf_reject any-toml "abort.toml: profile.dev.panic = 'abort'" "$fx_pf"
+fx_pf="$(pf_fixture codegen-flag)"
+printf '      - run: RUSTFLAGS="-C panic=abort" cargo build --release -p a\n' >> "$fx_pf/.github/workflows/w.yml"
+pf_reject codegen-flag ".github/workflows/w.yml: logical line 7: sets the panic strategy to 'abort'" "$fx_pf"
+fx_pf="$(pf_fixture profile-env)"
+printf '        env:\n          CARGO_PROFILE_RELEASE_PANIC: abort\n' >> "$fx_pf/.github/workflows/w.yml"
+pf_reject profile-env ".github/workflows/w.yml: logical line 8: sets the panic strategy to 'abort'" "$fx_pf"
+fx_pf="$(pf_fixture dockerfile)"
+printf 'FROM x\nENV RUSTFLAGS="-Cpanic=abort"\n' > "$fx_pf/Dockerfile"
+pf_reject dockerfile "Dockerfile: logical line 2: sets the panic strategy to 'abort'" "$fx_pf"
+fx_pf="$(pf_fixture continued)"
+printf 'RUSTFLAGS="-C \\\n  panic=abort" cargo build --release -p a\n' >> "$fx_pf/scripts/build.sh"
+pf_reject continued "scripts/build.sh: logical line 3: sets the panic strategy to 'abort'" "$fx_pf"
+fx_pf="$(pf_fixture inline-config)"
+printf "cargo build --release -p a --config \"profile.release.panic = 'abort'\"\n" >> "$fx_pf/scripts/build.sh"
+pf_reject inline-config "setting profile.release.panic to 'abort'" "$fx_pf"
+fx_pf="$(pf_fixture variable)"
+printf 'RUSTFLAGS="-C panic=$P" cargo build --release -p a\n' >> "$fx_pf/scripts/build.sh"
+pf_reject variable "sets the panic strategy to '\$P'" "$fx_pf"
+fx_pf="$(pf_fixture expression)"
+printf '        env:\n          CARGO_PROFILE_RELEASE_PANIC: ${{ env.P }}\n' >> "$fx_pf/.github/workflows/w.yml"
+pf_reject expression "sets the panic strategy to '\${{'" "$fx_pf"
+fx_pf="$(pf_fixture immediate-abort)"
+printf 'cargo build --release -p a -Zbuild-std-features=panic_immediate_abort\n' >> "$fx_pf/scripts/build.sh"
+pf_reject immediate-abort "names panic_immediate_abort" "$fx_pf"
+fx_pf="$(pf_fixture config-path)"
+printf 'cargo build --release -p a --config abort.cfg\n' >> "$fx_pf/scripts/build.sh"
+pf_reject config-path "passes --config 'abort.cfg'" "$fx_pf"
+fx_pf="$(pf_fixture config-path-joined)"
+printf 'cargo build --release -p a --config=abort.cfg\n' >> "$fx_pf/scripts/build.sh"
+pf_reject config-path-joined "passes --config 'abort.cfg'" "$fx_pf"
+fx_pf="$(pf_fixture cargo-home)"
+printf '        env:\n          CARGO_HOME: ./x\n' >> "$fx_pf/.github/workflows/w.yml"
+pf_reject cargo-home "sets CARGO_HOME" "$fx_pf"
+fx_pf="$(pf_fixture unparseable)"
+printf '[profile.dev\n' >> "$fx_pf/Cargo.toml"
+pf_reject unparseable "Cargo.toml: cannot be read as TOML" "$fx_pf"
+fx_pf="$(pf_fixture untracked)"
+expect_reject_because "panic-strategy/not-a-git-checkout" "git ls-files failed" \
+  env GIT_CEILING_DIRECTORIES="$NC_TMP" "$here/panic-strategy.sh" --root "$fx_pf"
+fx_pf="$(pf_fixture no-tracked-toml)"; pf_track "$fx_pf"; git -C "$fx_pf" rm -q --cached Cargo.toml
+expect_reject_because "panic-strategy/no-tracked-toml" "no tracked TOML file was read" \
+  "$here/panic-strategy.sh" --root "$fx_pf"
+fx_pf="$(pf_fixture no-surfaces)"; rm -r "$fx_pf/.github" "$fx_pf/scripts"
+pf_reject no-surfaces "no build-surface file was scanned" "$fx_pf"
+fx_pf="$(pf_fixture reads-cargo-home)"
+printf 'ls "${CARGO_HOME:-$HOME/.cargo}/bin" $CARGO_HOME\n' >> "$fx_pf/scripts/build.sh"
+printf '      - run: ls ${{ env.CARGO_HOME }}/registry\n' >> "$fx_pf/.github/workflows/w.yml"
+pf_track "$fx_pf"
+pf_expect_pass "panic-strategy/reading-cargo-home" "$here/panic-strategy.sh" --root "$fx_pf"
+fx_pf="$(pf_fixture quoted-yaml-key)"
+printf '        env:\n          "CARGO_PROFILE_RELEASE_PANIC": abort\n' >> "$fx_pf/.github/workflows/w.yml"
+pf_reject quoted-yaml-key ".github/workflows/w.yml: logical line 8: sets the panic strategy to 'abort'" "$fx_pf"
+fx_pf="$(pf_fixture docker-env-space)"
+printf 'FROM x\nENV CARGO_PROFILE_RELEASE_PANIC abort\n' > "$fx_pf/Dockerfile"
+pf_reject docker-env-space "Dockerfile: logical line 2: sets the panic strategy to 'abort'" "$fx_pf"
+fx_pf="$(pf_fixture make-conditional)"
+printf 'export CARGO_PROFILE_RELEASE_PANIC ?= abort\n' > "$fx_pf/Makefile"
+pf_reject make-conditional "Makefile: logical line 1: sets the panic strategy to 'abort'" "$fx_pf"
+fx_pf="$(pf_fixture docker-cargo-home)"
+printf 'FROM x\nENV CARGO_HOME /opt/cargo\n' > "$fx_pf/Dockerfile"
+pf_reject docker-cargo-home "Dockerfile: logical line 2: sets CARGO_HOME" "$fx_pf"
+fx_pf="$(pf_fixture quoted-config-key)"
+printf "cargo build --release -p a --config 'profile.release.\"panic\"=\"abort\"'\n" >> "$fx_pf/scripts/build.sh"
+pf_reject quoted-config-key "setting profile.release.panic to 'abort'" "$fx_pf"
+fx_pf="$(pf_fixture config-rustflags)"
+printf "cargo build --release -p a --config 'build.rustflags=[\"-C\", \"link-arg=-s\"]'\n" >> "$fx_pf/scripts/build.sh"
+pf_reject config-rustflags "which sets build.rustflags" "$fx_pf"
+fx_pf="$(pf_fixture config-include)"
+printf "cargo build --release -p a --config 'include=[\"/tmp/x.toml\"]'\n" >> "$fx_pf/scripts/build.sh"
+pf_reject config-include "whose include cargo would load unchecked" "$fx_pf"
+fx_pf="$(pf_fixture config-without-cargo)"
+printf 'FLAGS=(--config abort.cfg)\n' >> "$fx_pf/scripts/build.sh"
+pf_reject config-without-cargo "passes --config 'abort.cfg)'" "$fx_pf"
+fx_pf="$(pf_fixture cargo-home-default)"
+printf ': "${CARGO_HOME:=/tmp/ch}"\n' >> "$fx_pf/scripts/build.sh"
+pf_reject cargo-home-default-assignment "sets CARGO_HOME" "$fx_pf"
+fx_pf="$(pf_fixture action)"; mkdir -p "$fx_pf/.github/actions/x"
+printf 'runs:\n  using: composite\n  steps:\n    - run: RUSTFLAGS="-C panic=abort" cargo build -p a\n      shell: bash\n' > "$fx_pf/.github/actions/x/action.yml"
+pf_reject composite-action ".github/actions/x/action.yml: logical line 4: sets the panic strategy to 'abort'" "$fx_pf"
+fx_pf="$(pf_fixture hook)"; mkdir -p "$fx_pf/ci/hooks"
+printf '#!/bin/sh\nRUSTFLAGS="-C panic=abort" cargo build -p a\n' > "$fx_pf/ci/hooks/pre-push"
+pf_reject hook "ci/hooks/pre-push: logical line 2: sets the panic strategy to 'abort'" "$fx_pf"
+fx_pf="$(pf_fixture spec)"; mkdir -p "$fx_pf/packaging/rpm"
+printf '%%build\nRUSTFLAGS="-C panic=abort" cargo build -p a\n' > "$fx_pf/packaging/rpm/x.spec"
+pf_reject rpm-spec "packaging/rpm/x.spec: logical line 2: sets the panic strategy to 'abort'" "$fx_pf"
+fx_pf="$(pf_fixture abort-tests)"
+printf 'cargo test -p a -Zpanic-abort-tests\n' >> "$fx_pf/scripts/build.sh"
+pf_reject abort-tests "names panic-abort-tests" "$fx_pf"
+fx_pf="$(pf_fixture immediate-abort-hyphen)"
+printf 'cargo build -p a -Zbuild-std-features=panic-immediate-abort\n' >> "$fx_pf/scripts/build.sh"
+pf_reject immediate-abort-hyphen "names immediate-abort" "$fx_pf"
+fx_pf="$(pf_fixture upper-config)"; mkdir -p "$fx_pf/.cargo"
+printf '[profile.dev]\npanic = "abort"\n' > "$fx_pf/.cargo/config.TOML"
+pf_reject upper-case-config ".cargo/config.TOML: profile.dev.panic = 'abort'" "$fx_pf"
+fx_pf="$(pf_fixture upper-bare-config)"; mkdir -p "$fx_pf/.CARGO"
+printf '[profile.dev]\npanic = "abort"\n' > "$fx_pf/.CARGO/CONFIG"
+pf_reject upper-case-bare-config ".CARGO/CONFIG: profile.dev.panic = 'abort'" "$fx_pf"
+if [ "$(id -u)" -eq 0 ]; then
+  echo "neg-skip: [panic-strategy/unreadable-root-manifest] running as root; chmod 000 cannot make the read fail"
+  skipped=$((skipped+1))
+else
+  fx_pf="$(pf_fixture unreadable-manifest)"; pf_track "$fx_pf"
+  chmod 000 "$fx_pf/Cargo.toml"
+  expect_reject_because "panic-strategy/unreadable-root-manifest" "Cargo.toml: cannot be read as TOML" \
+    "$here/panic-strategy.sh" --root "$fx_pf"
+  chmod 644 "$fx_pf/Cargo.toml"
+fi
+if [ "$(id -u)" -eq 0 ]; then
+  echo "neg-skip: [panic-strategy/unreadable-surface] running as root; chmod 000 cannot make the read fail"
+  skipped=$((skipped+1))
+else
+  fx_pf="$(pf_fixture unreadable)"; pf_track "$fx_pf"
+  chmod 000 "$fx_pf/scripts/build.sh"
+  expect_reject_because "panic-strategy/unreadable-surface" "could not read" \
+    "$here/panic-strategy.sh" --root "$fx_pf"
+  chmod 644 "$fx_pf/scripts/build.sh"
+fi
+# The release proof on the real tree, rebuilt with the abort strategy: the process
+# must die at the boundary, and the gate must say so.
+expect_reject_because "panic-strategy/release-proof-under-abort" "died on SIGABRT" \
+  bash -c 'ulimit -c 0; exec env CARGO_PROFILE_RELEASE_PANIC=abort CARGO_TARGET_DIR="$1" "$2" --root "$3" --release-proof' _ \
+  "$NC_TMP/pf-target" "$here/panic-strategy.sh" "$here/../.."
+
 # The skip count is REPORTED, because `$total` is environment-dependent: probes
 # that need `cargo-auditable`, and the root-guarded ones, drop out silently and
 # a bare `N/N` then looks identical to a full run. CONTRIBUTING tells readers to

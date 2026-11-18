@@ -233,9 +233,9 @@ PROFILE_PIN=(--config 'profile.dev.debug-assertions=true' --config 'profile.test
 # forced config value never collides with a legitimate setting). And the
 # PANIC STRATEGY is conditional compilation too: `[profile.dev] panic =
 # "abort"` or CARGO_PROFILE_DEV_PANIC=abort flipped `cfg(panic = "unwind")`
-# and hid gated code -- the repo's CI grep for `panic = "abort"` covers
-# manifests, not the env or config spellings. Pinned to unwind, which the
-# workspace requires anyway (maknae-config's catch_unwind boundary). The test
+# and hid gated code. `panic-strategy.sh` refuses those spellings in the
+# tree, not in this gate's environment, so it is pinned here too; unwind is
+# what the workspace requires anyway (#544). The test
 # profile's panic setting is ignored by cargo, so only dev is pinned.
 # --- HERMETIC EXECUTION: an allowlist, not a blocklist --------------------
 # Nine review rounds closed cargo knobs one name at a time -- RUSTC, six

@@ -53,3 +53,10 @@ unsafe_code = "forbid"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1" }
 ciborium = "0.2"
+
+# #544: panic boundaries (catch_unwind, JoinError::is_panic) depend on unwinding; ci/gates/panic-strategy.sh holds it.
+[profile.dev]
+panic = "unwind"
+
+[profile.release]
+panic = "unwind"
