@@ -79,7 +79,7 @@ evidence = "ADR-0036 decision 1"
 from = "kernel"
 to = "kernel"
 kind = "self"
-label = "decide: tools.yaml ceiling, policy grants, mandatory operands; record intent"
+label = "decide the tool and the workspace mount: tools.yaml ceiling, grants, mandatory operands; record intent"
 evidence = "ADR-0036 decision 7 · ADR-0008"
 note = "tools.yaml is the ceiling; policy grants within it (Tool(rust-fetch gh pr view *)); deny-overrides with the mandatory operands."
 
@@ -87,7 +87,7 @@ note = "tools.yaml is the ceiling; policy grants within it (Tool(rust-fetch gh p
 from = "kernel"
 to = "front"
 kind = "reply"
-label = "Permit + launch-shape obligation + proxy identity"
+label = "Permit + launch-shape obligation (workspace, mask set) + proxy identity"
 evidence = "ADR-0035 decision 3 · ADR-0036 decision 6"
 note = "A PEP that cannot carry out an obligation must deny."
 
