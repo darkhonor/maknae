@@ -13,7 +13,7 @@ Because this is a single-operator private project and every ADR carries its **to
 | 0001 | Adopt architecture decision records | Accepted |
 | 0002 | Kernel is Rust | Accepted |
 | 0003 | Cedar as the policy engine (leading candidate) | **Superseded by 0004** (demoted to an optional backend) |
-| 0004 | Modular authorization architecture — the `maknae-security` contract and its pluggable `maknae-authz-*` backends | Accepted (operator-directed 2026-08-22) |
+| 0004 | Modular authorization architecture — the `maknae-security` contract and its pluggable `maknae-authz-*` backends | Accepted (operator-directed 2026-08-22); amended 2026-11-18 by 0036 |
 | 0005 | Enforcement locus & TCB boundary — split-kernel, mTLS plane transport, plane-cert identity | Accepted (finalized 2026-08-10); amended 2026-10-01 by 0028; amended 2026-11-18 by 0035 |
 | 0006 | Client authentication (AuthN) model — sole trust-plane door; boundary-native factors (peer-cred local, OIDC remote); uniform bounded sessions; X.509 is machine identity only | Accepted (operator-ratified 2026-08-22) — **target model**; code convergence #114/#115/#116; amended 2026-10-01 by 0028; amended 2026-10-23 (decision 9: the Agent Daemon authenticates as a workload, with its own plane leaf); amended 2026-11-18 by 0035 |
 | 0007 | Key & signature model (non-DCS core) | Accepted (2026-08-10) |

@@ -153,12 +153,13 @@ note = "Default redacted, with a marker saying a Maknae-managed credential was u
 from = "front"
 to = "kernel"
 kind = "call"
-label = "outcome; minted credential revoked"
+label = "outcome + redacted output; minted credential revoked"
 evidence = "ADR-0036 decision 1 · ADR-0036 decision 13"
 
 [[step]]
-from = "front"
+from = "kernel"
 to = "model"
 kind = "reply"
-label = "result: redacted, or status only"
-evidence = "ADR-0036 decision 14"
+label = "released in the next model turn: redacted, or status only"
+evidence = "ADR-0023 decision 3 · ADR-0036 decision 14"
+note = "The release is a kernel decision; the mandatory operands apply to it."

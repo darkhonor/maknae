@@ -87,7 +87,7 @@ The subject makes a response-wrapped read of its own provider key under its own 
 3. `git` asks its credential helper, which hands it the credential the person's credential class delivered for this invocation (ADR-0036 decision 13).
 4. `git` opens `CONNECT github.com:443` through the relay. The proxy asks `maknaed` whether this subject may reach `github.com`; `maknaed` decides on the tier's policy and records the connection.
 5. TLS runs end to end between `git` and GitHub. GitHub decides whether this account may push to this repository.
-6. The front end reports the exit status and releases the output to the model with delivered credentials redacted (ADR-0036 decision 14); `maknaed` records the outcome.
+6. The front end reports the exit status and the output, with every credential value it delivered redacted (ADR-0036 decision 14); `maknaed` records the outcome, and the output reaches the model only in its next model turn, which `maknaed` decides (ADR-0023 decision 3).
 
 ### 5.3 A person reads project secrets: the `vault` CLI
 
@@ -113,7 +113,7 @@ The same flow applies to an agent, with one consequence that is intended: the ag
 5. Building or testing the pull request's code runs in a separate entry with no network and no credential (ADR-0036 decision 8).
 6. Posting the review is a separate grant (#480).
 
-**What enforces repository scope and the post grant after intake.** The site, through the token. The kernel's per-invocation decision on `gh`'s arguments binds the model, not a compromised Agent Daemon, whose own account can run any tool without asking the kernel, with any token it can reach; and the proxy sees only `api.github.com:443`. So a task's installation token can reach only the repositories it names, with only the permissions it carries: a container running tasker A's task holds no token for B's private repository and none that can post. Four limits follow, each in §10 item 13. Every installation token can read public repositories. Posting a review needs `pull_requests: write`, which also lets the token approve, so refusing self-approval (#480) is not something the token can do. Whoever reaches a token holds its permissions: each container receives only its own task's token, but the Agent Daemon mints and delivers them, so it holds every running task's tokens. And a token in a tool's environment reaches every process the invocation spawns, including code from the repository under review (a build script, a git hook): a tasker who wrote that code could approve their own pull request as the app. Keeping code execution in an entry with no credential (ADR-0036 decision 8) closes that for builds and tests, not for a hook that `git` itself runs in the fetch entry. A container mounts only one tasker's partition, so code running for tasker A cannot plant a hook in B's partition through the mount. The guarantee also assumes the app's private key is unreadable by the agent's account; an agent that can read the key can mint an unrestricted token.
+**What enforces repository scope and the post grant after intake.** The site, through the token. The kernel's per-invocation decision on `gh`'s arguments binds the model, not a compromised Agent Daemon, whose own account can run any tool without asking the kernel, with any token it can reach; and the proxy sees only `api.github.com:443`. So a task's installation token can reach only the repositories it names, with only the permissions it carries: a container running tasker A's task holds no token for B's private repository and none that can post. Four limits follow, each in §10 item 13. Every installation token can read public repositories. Posting a review needs `pull_requests: write`, which also lets the token approve, so refusing self-approval (#480) is not something the token can do. Whoever reaches a token holds its permissions: each container receives only its own task's token, but the Agent Daemon mints and delivers them, so it holds every running task's tokens. And a token in a tool's environment reaches every process the invocation spawns, including code from the repository under review (a build script, a git hook): a tasker who wrote that code could approve their own pull request as the app. Keeping code execution in an entry with no credential (ADR-0036 decision 8) closes that for builds and tests. It does not close it for repository-local configuration (a hook, `core.fsmonitor`, `.cargo/config.toml`) that a pull request ships or build-time code writes, and that git or cargo then honors in the fetch entry: the front end neutralizes what it can at launch, and the rest is a named residual (ADR-0036 decision 8). A container mounts only one tasker's partition, and caches are kept per tasker partition (ADR-0036 decision 12), so code running for tasker A cannot plant a hook in B's partition or poison B's build cache through the mount. The guarantee also assumes the app's private key is unreadable by the agent's account; an agent that can read the key can mint an unrestricted token.
 
 ### 5.5 SSH
 
@@ -192,7 +192,7 @@ The invocation identifier is the trail's, not the proxy identity of §6.1, so th
 
 **A tool container's only network path is the proxy, at every tier** (ADR-0036 decisions 9 and 10). On Podman the container sits on an internal network with no route but the front end's relay; measured 2026-11-18, direct TCP by IP, DNS, UDP, IPv6, the host's LAN address and Podman's host address were all blocked from inside it. On Kubernetes a NetworkPolicy allows egress only to the proxy's Service. That fence holds against the tool's code whoever launched it, and it is the same for a person and an agent. None of this exists yet.
 
-**An agent's account is fenced as well.** The Agent Daemon is untrusted (ADR-0023 decision 2), so a compromised Agent Daemon can skip the kernel and run a tool on the host as the agent's uid. On Linux, Maknae ships a network rule keyed to the agent account's uid at every tier (`nftables` `meta skuid` on the output hook), leaving `maknae-proxy` as that account's only network path, local services excepted (below). Maknae ships no network ruleset today (#562 corrects the isolation contract's claim of one).
+**An agent's account is fenced as well.** The Agent Daemon is untrusted (ADR-0023 decision 2), so a compromised Agent Daemon can skip the kernel and run a tool on the host as the agent's uid. On Linux, Maknae ships a network rule keyed to the agent account at every tier (`nftables` `meta skuid` on the output hook, covering the account's own uid and its subordinate uid range, which rootless Podman gives it; or a rule keyed on its cgroup or SELinux type), leaving `maknae-proxy` as that account's only network path, local services excepted (below). The agent's Podman configuration refuses host networking. Maknae ships no network ruleset today (#562 corrects the isolation contract's claim of one).
 
 | What is fenced | HomeLab | Small/Medium Business | Enterprise |
 |---|---|---|---|
@@ -202,7 +202,7 @@ The invocation identifier is the trail's, not the proxy identity of §6.1, so th
 
 On macOS every cell is advisory until §10 item 8 is settled (ADR-0036 decision 20).
 
-**What a subject cannot bypass, and what it can.** The Agent Daemon and the TUI are untrusted (ADR-0023 decision 2), so a confinement applied by them can be skipped by them; they are PEPs only toward the model (ADR-0035 decision 1). The layers they cannot skip are the ones the system applies to their account: operating-system DAC on the account's files, the mandatory access control domain (SELinux; the Agent Daemon has no domain of its own yet), a network rule keyed to the account's uid, and Vault's policy on the account's identity. A person's own account gets no uid rule by default: the person can already reach the network from their own terminal, and the container fences the tool's code.
+**What a subject cannot bypass, and what it can.** The Agent Daemon and the TUI are untrusted (ADR-0023 decision 2), so a confinement applied by them can be skipped by them; they are PEPs only toward the model (ADR-0035 decision 1). The layers they cannot skip are the ones the system applies to their account: operating-system DAC on the account's files, the mandatory access control domain (SELinux; the Agent Daemon's domain `maknae_agentd_t` ships, #639, and must change to let it launch containers, ADR-0036 decision 19), a network rule keyed to the account's uid, and Vault's policy on the account's identity. A person's own account gets no uid rule by default: the person can already reach the network from their own terminal, and the container fences the tool's code.
 
 **Two levels, two owners.** The user and host level (whether a person or machine may reach the network at all, and through what) belongs to the deployment: an enterprise's forced proxy, firewall and endpoint controls. Maknae does not rebuild it. For people, shipping a uid rule as a tier option for a deployment that has none is a direction beyond ADR-0036, which ships none by default. The Agent Daemon's account is different: on Linux, Maknae ships its uid rule at every tier. The process level belongs to Maknae: the tools Maknae launches, per subject and per invocation, in their containers.
 
@@ -227,7 +227,7 @@ The decided model (ADR-0036):
 - **Steps that need network and steps that run the workspace's code are separate entries where the tool allows it** (a fetch entry with the proxy and a credential; a build entry with neither), sharing the task's workspace (ADR-0036 decision 8).
 - **The network fence on Podman is an internal network plus the front end's relay** to `maknae-proxy` (§7, ADR-0036 decision 9).
 - **Images are configurable per tool.** The reference build image, `maknae-rust-build`, is based on Rocky Linux 10 and carries the build tools without a Rust toolchain; the toolchain pinned by `rust-toolchain.toml` comes from a shared, read-only tools volume (ADR-0036 decision 17). An enterprise mirrors or rebuilds into its own registry.
-- **Caches are separated by uid** (ADR-0036 decision 12).
+- **Caches are separated by subject, and for an agent by tasker partition** (ADR-0036 decision 12).
 
 A container launched for a subject is still a tool under §3: decided per invocation, its network through `maknae-proxy`, its credential through a credential class.
 
@@ -281,7 +281,7 @@ Each item says whether ADR-0035 or ADR-0036 has settled it.
 - **#477:** satisfied by ADR-0036.
 - **#479:** the `gh` tool runs in a fetch entry's container, as the agent's uid, with the tasker's partition mounted.
 - **#480:** posting is a permission the task token carries only when the task's grant includes it (§5.4). Refusing self-approval is not expressible in the token and is §10 item 13.
-- **#539** (settled 2026-10-19: "the Agent Daemon acts under its own identity (for example, its own GitHub account)"; an operator's own credential "released to the Egress Daemon as under ADR-0028 and #168"): the agent's identity is an app by default (§3, decision 11), and a person's tool receives the person's own credential through its class (§5.3). How an on-behalf-of-the-tasker mode composes with an app identity stays #539's.
+- **#539** (settled 2026-10-19: the Agent Daemon acts under its own identity, its own account at the site, and an operator's own credential is "released to the Egress Daemon as under ADR-0028 and #168"): the agent's identity is an app by default (§3, decision 11), and a person's tool receives the person's own credential through its class (§5.3). How an on-behalf-of-the-tasker mode composes with an app identity stays #539's.
 - **#175 and #176 (`terminal.*`):** #175's ruling that execution isolation is undecided is answered by ADR-0036 decision 2 (containers by default, terminal mode disabled); the network cost of terminal-mode tools is studied under #175.
 - **#481:** a per-task stop ends the task's running containers, which the front end started and Podman (or Kubernetes) can stop without the tool's cooperation; a stop that must hold against a compromised Agent Daemon rests on the tiers beneath it (ADR-0035 decision 2).
 - These corrections are made in the bodies of #168, #175, #420, #476, #477, #479, #480, #481 and #539, with dated banners, after the ADRs merge.
@@ -307,7 +307,7 @@ Each item says whether ADR-0035 or ADR-0036 has settled it.
 4. The tool path: the model-facing tool and its verb (#479), the launch-shape obligation and the kernel's forward class (ADR-0035 decision 3), the Podman renderer and relay, the parity test, output redaction, and the reference image repository.
 5. The system drop-ins and the SSH connector.
 6. The credential classes, the operator documentation for credentials, and the tested-tool matrix.
-7. The Agent Daemon's own SELinux domain and the network rule for its account, which uses 2 to 6.
+7. The Agent Daemon's confinement for launching containers (its unit, a container-launch SELinux domain, `packaging/isolation-contract.md`) and the network rule for its account and subordinate uid range, which uses 2 to 6.
 8. #168 slice 3 as rescoped above, then slice 4.
 9. The Kubernetes renderer and the Maknae RuntimeClass.
 
@@ -336,7 +336,7 @@ Each statement this concept makes about something not yet built, and the breakdo
 | Per-connection site decisions and the connection trail pair | §6.2, §6.5 | 3 |
 | Ports, address ranges and DNS restricted at the proxy | §6.4 | 3 |
 | The Agent Daemon's account reaches nothing but the proxy | §7 | 7 |
-| The Agent Daemon has its own SELinux domain | §7 | 7 |
+| The Agent Daemon's unit and SELinux domain let it launch containers, narrowly | §7 | 7 |
 | Tool output reaches the model with delivered credentials redacted | §5.2 | 4 |
 | Proxy decisions carry site and subject attributes; the trail records the site's `handling` | §9 | 2, 3 |
 | The agent's `gh` review flow | §5.4 | 8, with #475 and #480 |

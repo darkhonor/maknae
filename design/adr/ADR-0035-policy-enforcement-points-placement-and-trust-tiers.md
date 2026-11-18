@@ -8,7 +8,7 @@
 
 ## Context
 
-[ADR-0005](ADR-0005-enforcement-locus-tcb-boundary.md) puts the reference monitor in one process and says so as a limitation: "at MVP the PDP and sole PEP are one process; stated, not hidden; the ratified shape returns at constellation." The shape was never written down. Every enforcement point Maknae has today lives inside `maknaed`: the `fs.*` verbs' delegated-descriptor checks, the egress screen, the audit obligation.
+[ADR-0005](ADR-0005-enforcement-locus-tcb-boundary.md) puts the reference monitor in one process and says so as a limitation: "at MVP the PDP and sole PEP are one process", with "the ratified shape" to return later. The shape was never written down. Every enforcement point Maknae has today lives inside `maknaed`: the `fs.*` verbs' delegated-descriptor checks, the egress screen, the audit obligation.
 
 The tool model ([ADR-0036](ADR-0036-the-tool-model.md), decided the same day) cannot be enforced that way. The kernel authorizes each tool invocation and never executes one; the process that asked runs it. So the thing that turns a decision into a container with the decided image, mounts and network is a process outside the TCB: `maknae` for an operator, `maknae-agentd` for an agent. The same holds for the egress proxy that decides each outbound connection, for a front end on another host, and on Kubernetes for the runtime and admission control.
 
@@ -27,7 +27,7 @@ During the design session an identity scheme was proposed: a hash built into eac
    | Kernel-internal | the `fs.*` verbs' checks in `maknaed`; the audit obligation | every subject | an external root compromise (ADR-0006 assumption 3) | yes |
    | Local front end | `maknae`, `maknae-agentd` | the model's tool calls | the front end's own compromise | no (the tool path) |
    | Remote workload | `maknae-agentd` on another host, by its workload certificate (ADR-0006 decision 9) | the model's tool calls on that host | its own compromise; the custody of its key on its host | no |
-   | Runtime and infrastructure | the Maknae RuntimeClass on Kubernetes (below); Kubernetes admission; SELinux domain confinement; the host network rule keyed on uid | everything inside it, a compromised front end included | root on the node | no |
+   | Runtime and infrastructure | the Maknae RuntimeClass on Kubernetes (below); Kubernetes admission; SELinux domain confinement; the host network rule keyed on uid | everything inside it, a compromised front end included | root on the node | partly: the Agent Daemon's SELinux domain `maknae_agentd_t` ships (#639); its confinement of container launches, the uid network rule, admission and the RuntimeClass do not |
    | Network | `maknae-proxy` | every outbound connection of a launched tool | a route that bypasses it, which the runtime tier closes | no |
 
 3. **A Permit may carry obligations, and a PEP that cannot carry one out must deny.** This is the obligation rule already in force inside the kernel, extended to PEPs outside it. The tool model's launch shape travels this way ([ADR-0036](ADR-0036-the-tool-model.md) decision 6). The `Obligation {id, params}` type in `crates/maknae-security/src/obligation.rs` is opaque and already sufficient, so the `Authorizer` contract and its types do not change ([ADR-0004](ADR-0004-modular-authorization-architecture.md)). Two kernel-side additions are needed, and neither is built:
@@ -39,7 +39,7 @@ During the design session an identity scheme was proposed: a hash built into eac
    | Platform | Peer identity observed | Built? |
    |---|---|---|
    | All | the peer uid (`SO_PEERCRED`, `LOCAL_PEERCRED`) | yes |
-   | Enterprise Linux with Maknae's SELinux policy | the peer's SELinux label (`getpeercon`), for example a `maknae_agentd_t` domain that only the labelled binary runs in | no; lands with the RPM's SELinux policy |
+   | Enterprise Linux with Maknae's SELinux policy | the peer's SELinux label (`getpeercon`), for example the `maknae_agentd_t` domain that only the labelled binary runs in | the domain ships (#639); `maknaed`'s label check does not |
    | macOS | the peer's code signature, through its audit token, against the signing identifier ADR-0006 fixes (`io.maknae.maknae-agentd`) | no |
    | Debian and Ubuntu (AppArmor) | the peer's executable path; weaker, since another process of the same uid can attach to the genuine binary unless the host restricts ptrace | no |
 
@@ -51,7 +51,7 @@ During the design session an identity scheme was proposed: a hash built into eac
 
 ## Consequences
 
-- **The tool model can be enforced, and its residual is named.** A front end enforces toward the model. Toward a compromised front end only the tiers beneath it enforce: the host network rule on agent accounts now, SELinux confinement and the RuntimeClass later. [ADR-0036](ADR-0036-the-tool-model.md) records this as its residual.
+- **The tool model can be enforced, and its residual is named.** A front end enforces toward the model. Toward a compromised front end only the tiers beneath it enforce: the host network rule on agent accounts, SELinux confinement and the RuntimeClass, none of which is built for container launches yet. [ADR-0036](ADR-0036-the-tool-model.md) records this as its residual.
 - **The Maknae RuntimeClass is the direction for the runtime tier on Kubernetes.** It is an existing VM sandbox (Kata) with Maknae at its boundaries, not a new isolation runtime: the host-side file server (`virtiofsd`) asks `maknaed` on every open, create, unlink and mkdir; the guest's only network route is a virtual socket to `maknae-proxy` or the Egress Daemon; and the runtime attests which sandbox a connection came from. Not built.
 - **Two kernel additions are owed** (decision 3): the additive wire field and the forward class in `discharge_plan`.
 - **ADR-0005 and ADR-0006 are amended in place,** with dated banners: ADR-0005's single-process collapse now points here; ADR-0006 decision 10's table gains the front end's role as a PEP.

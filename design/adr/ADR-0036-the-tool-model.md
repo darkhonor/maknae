@@ -4,7 +4,7 @@
 - **Date:** 2026-11-18
 - **Deciders:** Alex Ackerman (maintainer)
 - **Raised by:** [#420](https://github.com/darkhonor/maknae/issues/420) (decisions 3, 4, 10 and 12), [#477](https://github.com/darkhonor/maknae/issues/477)
-- **Amends:** [ADR-0023](ADR-0023-runtime-loop-role-and-placement.md) decisions 2, 4 and 6; [ADR-0024](ADR-0024-tenancy-model-and-agent-identity.md) decision 6 and its workspace residual
+- **Amends:** [ADR-0004](ADR-0004-modular-authorization-architecture.md) (the 2026-08-29 retirement of `Bash(argv)`); [ADR-0023](ADR-0023-runtime-loop-role-and-placement.md) decisions 2, 4 and 6; [ADR-0024](ADR-0024-tenancy-model-and-agent-identity.md) decision 6 and its workspace residual
 - **Builds on:** [ADR-0035](ADR-0035-policy-enforcement-points-placement-and-trust-tiers.md) (PEP placement and trust tiers)
 
 ## Context
@@ -28,28 +28,28 @@ Three approaches were surveyed: a host fence (bubblewrap or systemd sandboxing o
 
 ## Decision
 
-1. **The kernel authorizes; the front end executes.** For each tool call the model makes, the front end (`maknae` for an operator, `maknae-agentd` for an agent) asks `maknaed`. The kernel decides and records intent. On a Permit the front end starts the tool's container under its own uid, carries out the decision's obligations ([ADR-0035](ADR-0035-policy-enforcement-points-placement-and-trust-tiers.md) decision 3), and reports the outcome, which the kernel records. This extends [ADR-0023](ADR-0023-runtime-loop-role-and-placement.md) decision 4 (the subject's process does the work) to tool containers. A trusted launcher, a privileged component that would be the only path to the container runtime, was considered and rejected: what it would add, enforcement against a compromised front end, is better delivered by the runtime and infrastructure tier ([ADR-0035](ADR-0035-policy-enforcement-points-placement-and-trust-tiers.md) decision 2).
+1. **The kernel authorizes; the front end executes.** For each tool call the model makes, the front end (`maknae` for an operator, `maknae-agentd` for an agent) asks `maknaed`. The kernel decides and records intent. On a Permit the front end starts the tool's container under its own uid, carries out the decision's obligations ([ADR-0035](ADR-0035-policy-enforcement-points-placement-and-trust-tiers.md) decision 3), and reports the outcome, which the kernel records. This extends [ADR-0023](ADR-0023-runtime-loop-role-and-placement.md) decision 4 (the subject's process does the work) to tool containers. A trusted launcher, a privileged component that would be the only path to the container runtime, was considered and rejected: what it would add, enforcement against a compromised front end, is better delivered by the runtime and infrastructure tier ([ADR-0035](ADR-0035-policy-enforcement-points-placement-and-trust-tiers.md) decision 2), and agent tools run as the agent's own uid (decision 4), so no component needs to switch uids.
 
 2. **Containers are the default for tool invocation. Terminal (host) execution is configurable and disabled by default.** It is a single site setting in the global configuration (for example `tools.terminal.enabled: false`), not a per-tool or per-user field, and only the host administrator can enable it.
 
 3. **Rabbithole scope: local front ends only.** Tool execution is for `maknae` and `maknae-agentd` on the same host as `maknaed`. Remote and mobile front ends belong to the gateway ([#117](https://github.com/darkhonor/maknae/issues/117)), another milestone.
 
-4. **Agent tools run as the agent's uid, and taskers are separated by partition.** The partition operand ([ADR-0008](ADR-0008-authorization-composition-contract.md), amendment 2026-11-11) already separates taskers inside the agent's home. A tasked tool's work is never mounted outside the tasker's partition: the workspace mount lies inside `tasks/users/<uid>` or `tasks/agents/<id>` for the task's tasker. Per-tasker workspace uids ([#476](https://github.com/darkhonor/maknae/issues/476)) are retired: starting a process as another uid needs a privilege the untrusted Agent Daemon must not hold, and the partition already gives the separation.
+4. **Agent tools run as the agent's uid, and taskers are separated by partition.** The partition operand ([ADR-0008](ADR-0008-authorization-composition-contract.md), amendment 2026-11-11) already separates taskers inside the agent's home. A tasked tool's work is never mounted outside the tasker's partition: the workspace mount lies inside `tasks/users/<uid>` or `tasks/agents/<id>` for the task's tasker. Per-tasker workspace uids ([#476](https://github.com/darkhonor/maknae/issues/476)) are retired: starting a process as another uid needs a privilege the untrusted Agent Daemon must not hold, and the partition already gives the separation. On Podman the renderer runs the container with `--userns=keep-id` and the subject's uid, so the tool runs as that uid rather than a subordinate one, files it writes belong to the subject, and the proxy's peer-uid binding (decision 11) lines up (measured 2026-11-18).
 
 5. **The operator's tool workspace is chosen from a closed set.** The global configuration offers the set; the operator's own Maknae configuration picks one.
    - `current`: the folder the session started in. It is refused when that folder is the operator's home or any folder above it, so the home cannot come back through `current`.
    - `path`: one named folder, for example `/opt/Development`. The operator must have OS access and Maknae file-policy access to it.
    - `home` is not an option: a home holds secrets nobody thought to list.
-   - **Protected folders** are the `sensitive.yaml` lists (the host's and the person's) and a fixed set of system folders (`/etc`, `/usr`, `/var/lib/maknae` and similar). The rule works both ways. A workspace that is, or sits inside, a protected folder is refused. A protected folder inside the workspace is masked: an empty read-only mount on Podman, an `emptyDir` on Kubernetes. Without the mask, a mounted workspace would hand the tool's code a path the `sensitive` operand denies to `fs.read`.
+   - **Protected folders** are the `sensitive.yaml` lists (the host's and the person's) and a fixed set of system folders (`/etc`, `/usr`, `/var/lib/maknae` and similar). The rule works both ways. A workspace that is, or sits inside, a protected folder is refused. A protected folder inside the workspace is masked: an empty read-only mount on Podman, an `emptyDir` on Kubernetes. `sensitive.yaml` also names files and globs (for example `/etc/passwd*`, `~/.*_history`, or a personal `**/.env`): each path inside the workspace that one of them matches at launch is masked the same way. Without the mask, a mounted workspace would hand the tool's code a path the `sensitive` operand denies to `fs.read`. A file created during the run that a glob would match is not masked; that is a named residual.
 
 6. **The launch shape is an obligation.** `maknaed` compiles `tools.yaml`. A Permit carries an obligation naming the decided tool entry and a digest of its compiled shape, with the per-call values: subcommand and arguments, workspace, task, and the per-invocation proxy identity. The front end renders the shape for its backend.
    - **Launch parity** (#420 decision 10): a test proves that the rendered Podman invocation and the rendered Kubernetes manifest both match the decided shape (image digest, mounts, uid, network, credential, limits).
-   - **What parity proves.** It proves the renderer is correct, not that a given launch was faithful. Toward a compromised front end the launch shape is enforced only by the tiers beneath it: on hosts, the uid network rule, and later SELinux and the RuntimeClass; on Kubernetes, an admission policy that checks the pod against the kernel-generated template. On Podman nothing besides the front end checks the shape's digest. That is part of this ADR's residual.
+   - **What parity proves.** It proves the renderer is correct, not that a given launch was faithful. Toward a compromised front end the launch shape is enforced only by the tiers beneath it: on hosts, the uid network rule once it is built, and SELinux confinement and the RuntimeClass; on Kubernetes, an admission policy that checks the pod against the kernel-generated template. On Podman nothing besides the front end checks the shape's digest. That is part of this ADR's residual.
 
 7. **`/etc/maknae/tools.yaml` is Maknae-native and backend-neutral.**
    - Entries speak in intents: the image and its verification, `isolation: container | vm` (a minimum; the backend chooses a runtime that meets it), the network intent, volume roles, resources, commands (an allowlist of subcommands, argument denials, a timeout and an output cap), the lifetime, `executes_workspace` (decision 8), and what goes back to the model (decision 14).
    - No host paths, no runtime names, no Kubernetes or Podman field names. Volume sources are bound once per site and per backend, outside the tool entries.
-   - **Precedence.** `tools.yaml` is the ceiling. Policy grants within it in the existing grammar (`Tool(cargo test *)` beside `Read(~/tasks/**)`), per user, role or agent, and both compile into the kernel graph. The composition's deny-overrides with the mandatory operands applies as usual. A policy grant for a tool that `tools.yaml` lacks or disables loads and grants nothing, and `maknaed` warns at load; refusing to load would make removing a tool break every policy that names it, and deny-by-default already keeps it safe.
+   - **Precedence.** `tools.yaml` is the ceiling. Policy grants within it through a **new capability**, `Tool(<entry> <subcommand pattern>)` (for example `Tool(cargo test *)`), beside the existing `Read(...)` and `Write(...)`, per user, role or agent, and both compile into the kernel graph. It is not built: the policy parser accepts only `Read` and `Write` today, and refuses to load any other capability. The pattern matches the entry and its subcommand, within the entry's own allowlist and argument denials, so `tools.yaml` bounds what any pattern can reach. This reintroduces subcommand matching, which [ADR-0004](ADR-0004-modular-authorization-architecture.md)'s 2026-08-29 amendment retired as `Bash(argv)`, by the maintainer's ruling of 2026-11-18; ADR-0004 is amended. The `terminal.*` action family stays the vocabulary for terminal mode. The composition's deny-overrides with the mandatory operands applies as usual. Once `Tool(...)` parses, a grant for a tool that `tools.yaml` lacks or disables loads and grants nothing, and `maknaed` warns at load; refusing to load would make removing a tool break every policy that names it, and deny-by-default already keeps it safe.
    - **Backends.** Rootless Podman on a host. Agent Sandbox on Kubernetes, pinned to its `v1beta1` API (`agents.x-k8s.io`, `extensions.agents.x-k8s.io`; read 2026-11-18 at release v1.0.11, per the project's repository): the renderer emits a `SandboxTemplate` whose `runtimeClassName` is the Maknae RuntimeClass or a class the site chooses. CI renders every shipped entry for both backends and validates the Kubernetes output against the pinned schema, so a field that cannot be expressed on Kubernetes fails the day it is added.
    - **No exec into running sandboxes.** One container (one pod) per invocation; warm pools are a site optimization. This keeps `design/references/2026-11-15-agent-sandbox-assessment.md` §5.1(3): no router and no in-sandbox daemon.
 
@@ -59,21 +59,29 @@ Three approaches were surveyed: a host fence (bubblewrap or systemd sandboxing o
    schema_version: 1
    credential_classes:
      github-task:
-       kind: github-app-installation   # minted per task, narrowed by GitHub
-       delivery: env:GH_TOKEN
+       kind: github-app-installation
+       source: minted-per-task
+       narrowing: provider              # GitHub: the task's repositories and permissions
+       lifetime: { expires: 1h, revoke_on_outcome: true }
+       minting: trust-plane             # the app's private key never reaches the subject (#168)
+       delivery: [env:GH_TOKEN, git-credential-file]   # git's built-in store helper, a read-only file
      vault-invocation:
-       kind: vault-child-token         # minted per invocation from the subject's own token
+       kind: vault-child-token
+       source: minted-per-invocation
+       narrowing: provider              # Vault: a child's policies are a subset of its parent's
+       lifetime: { ttl: invocation-timeout, revoke_on_outcome: true }
+       minting: front-end               # from the subject's own Vault token
        policies: [kv-read-infra]
-       delivery: env:VAULT_TOKEN
+       delivery: [env:VAULT_TOKEN]
    tools:
      rust-fetch:
        enabled: true
        image: { ref: ghcr.io/<org>/maknae-rust-build@sha256:…, verify: { signature: required, sbom: required } }
        isolation: container
-       executes_workspace: false
+       executes_workspace: true        # git and cargo read repository-local config another entry can write (decision 8)
        network: { via: maknae-proxy, sites: [github.com, api.github.com, index.crates.io, static.crates.io] }
        workspace: rw
-       volumes: { shared_tools: { access: ro }, cargo_registry: { access: rw, scope: uid } }
+       volumes: { shared_tools: { access: ro }, cargo_registry: { access: rw, scope: subject } }
        credential: github-task
        output_to_model: redacted
        resources: { cpus: 2, memory: 2Gi }
@@ -88,7 +96,7 @@ Three approaches were surveyed: a host fence (bubblewrap or systemd sandboxing o
        executes_workspace: true
        network: none
        workspace: rw
-       volumes: { shared_tools: { access: ro }, cargo_registry: { access: ro, scope: uid }, cargo_target: { access: rw, scope: uid } }
+       volumes: { shared_tools: { access: ro }, cargo_registry: { access: ro, scope: subject }, cargo_target: { access: rw, scope: subject } }
        credential: none
        output_to_model: redacted
        resources: { cpus: 4, memory: 8Gi }
@@ -111,7 +119,8 @@ Three approaches were surveyed: a host fence (bubblewrap or systemd sandboxing o
 8. **Maknae bounds what workspace code can do; it does not judge whether that code is trustworthy.** Maknae cannot control the code an operator brings in or is tasked with. Its job is that everything inside Maknae is bounded and policy-decided. Outside Maknae, the operating system and the use of the same code are not Maknae's to govern.
    - An entry declares `executes_workspace: true` when its tool runs code from the workspace: cargo's `build.rs`, procedural macros and tests; Terraform's providers and `data "external"`; Packer's provisioners.
    - **Validator rule:** an entry with `executes_workspace: true` that holds a credential and has network must name its sites explicitly, with no wildcard. If the workspace's code steals the credential, the channel it can use is at most that credential's own provider, through connections each decided, on the trail.
-   - **Where a tool can separate its steps, the entries do.** `rust-fetch` above has network and a credential and runs no workspace code; `rust-build` runs the workspace's code with no network and no credential, and with the registry cache read-only, so build-time code cannot tamper with the sources the next build trusts. Tools that cannot separate (`terraform plan`, `packer build`) hold a narrowed, short-lived credential and named sites in one entry.
+   - **Repository-local configuration is workspace code.** A tool that reads configuration from a workspace another entry can write runs code the workspace controls: git runs hooks and honors `core.fsmonitor`, `core.hooksPath` and `core.sshCommand` from `.git/`, and cargo reads `.cargo/config.toml` (credential providers, source replacement). Build-time code can write those files, and a pull request can ship `.cargo/config.toml`. So an entry that runs git or cargo on the workspace declares `executes_workspace: true`, and the validator rule applies to it. The front end also neutralizes repository-local configuration at launch where the tool allows it (for git: `core.hooksPath=/dev/null`, `core.fsmonitor=false`, `GIT_CONFIG_NOSYSTEM=1`, and a restricted protocol list). That narrows the gap and does not close it, so it is named as a residual.
+   - **Where a tool can separate its steps, the entries do.** `rust-fetch` above has network and a credential, with its sites named; `rust-build` runs the pull request's build scripts, procedural macros and tests with no network and no credential, and with the registry cache read-only, so build-time code cannot tamper with the sources the next build trusts. Tools that cannot separate (`terraform plan`, `packer build`) hold a narrowed, short-lived credential and named sites in one entry.
    - Two alternatives were rejected: a `runs_untrusted_code` flag forbidding network and credentials outright (it cannot express Terraform or Packer), and letting the session decide whether workspace code is trusted (Maknae cannot know whose code is trustworthy).
 
 9. **A tool reaches the network only through `maknae-proxy`.** Tools never get a direct route. `maknae-proxy` (`design/egress-and-tool-execution.md` §6) asks `maknaed` about every `CONNECT` ([ADR-0035](ADR-0035-policy-enforcement-points-placement-and-trust-tiers.md) decision 5) and chains to the site's upstream proxy where one is required.
@@ -120,12 +129,12 @@ Three approaches were surveyed: a host fence (bubblewrap or systemd sandboxing o
 
 10. **Two fences, two threats.**
     - The internal network fences the tool's code, for both front ends.
-    - The host network rule keyed on uid (`design/egress-and-tool-execution.md` §7) fences a compromised `maknae-agentd`: the agent's uid can reach only `maknae-proxy`. It applies to enrolled agent accounts only, because installing Maknae changes nobody's own traffic.
+    - The host network rule keyed on uid (`design/egress-and-tool-execution.md` §7) fences a compromised `maknae-agentd`: the agent's account can reach only `maknae-proxy`. It must cover the account's subordinate uid range (`/etc/subuid`) as well, or be keyed on the account's cgroup or SELinux type: rootless Podman gives the account a subordinate range, and a process in a user namespace that shares the host network carries a subordinate uid that a rule on the account's own uid would miss. The agent's Podman configuration also refuses host networking. The rule applies to enrolled agent accounts only, because installing Maknae changes nobody's own traffic. **Not built:** today the agent account's network is not fenced (`packaging/isolation-contract.md`).
     - The operator gets no uid rule by default. The operator can already reach the network from their own terminal, and the internal network fences the tool's code.
 
 11. **Proxy identity.** The per-invocation proxy identity (`design/egress-and-tool-execution.md` §6.1, carried in the proxy URL) is the link from a `CONNECT` to the decided invocation: it names the invocation, its task and its subject for `maknaed`. Through the relay, the proxy sees a host-side socket owned by the subject's uid, so the check that the peer socket's uid matches the run-as uid plausibly holds there too. That is a requirement the implementation must demonstrate; if it does not hold, the identity alone links the connection and the gap is named. For each decision, `maknae-proxy` sends `maknaed` the invocation identity, the target host and the port.
 
-12. **Caches are separated by uid.** A persistent cache is allowed only when one uid's cache is never another's: one registry cache and one build-output cache per uid. Without persistent caches every invocation is a cold build; with a cache shared across uids, one user's tool could plant content another user's build trusts. The registry cache is mounted read-write only in entries that do not execute workspace code.
+12. **Caches are separated by subject, and for an agent by tasker.** A persistent cache is allowed only when one subject's cache is never another's: one registry cache and one build-output cache per operator uid, and for an agent one per tasker partition, because every tasker's work runs as the agent's one uid (decision 4). Without persistent caches every invocation is a cold build; with a cache shared across subjects or taskers, one tasker's pull request could plant build output another tasker's build trusts. The registry cache is mounted read-write only in fetch entries and read-only where a build runs.
 
 13. **Credentials are per tool, and never one-size-fits-all.** A tool entry's `credential` is `none` or the name of a **credential class** defined once per site. A class declares:
     - **delivery:** the plug-in point the tool already supports (a token environment variable, git's credential helper, cargo's credential provider, `.netrc`, or a file);
@@ -134,7 +143,7 @@ Three approaches were surveyed: a host fence (bubblewrap or systemd sandboxing o
     - **lifetime:** whether it expires on its own or must be revoked when the task ends, with a failed revocation recorded as an outcome;
     - **minting authority:** where the key that mints it lives.
 
-    A front end holds a credential only to mint it and deliver it to the tool container (decision 14 keeps it from the model). A credential goes into an entry only under decision 8's validator rule. The first classes:
+    A front end holds a credential only to deliver it to the tool container, minting it first where its class mints in the front end (a Vault child token, from the subject's own token). A class whose minting key must not reach the subject (a GitHub App's private key) is minted in the trust plane, and the front end only receives and delivers it (#168). Decision 14 keeps it from the model. A credential goes into an entry only under decision 8's validator rule. The first classes:
 
     | Class | Source | Narrowed by | Lifetime | Where it fits |
     |---|---|---|---|---|
@@ -149,9 +158,9 @@ Three approaches were surveyed: a host fence (bubblewrap or systemd sandboxing o
 
 14. **Secrets reach tools, never the model.**
     - A credential reaches a container only through its class's delivery, and is never placed in arguments the model writes.
-    - What the model gets back is set per entry: `full`, `redacted` or `status_only`. **The default is `redacted`.** The front end strips every credential value it delivered for the invocation (the minted token, the child token, a lease's secret values) from stdout and stderr before the output is released, and replaces each with a marker saying a Maknae-managed credential was redacted. The model therefore knows a credential was provided and used, and does not keep asking whether the user supplied one.
+    - What the model gets back is set per entry: `full`, `redacted` or `status_only`. **The default is `redacted`.** The front end strips every credential value it delivered for the invocation (the minted token, the child token, a lease's secret values, and the per-invocation proxy identity) from stdout and stderr before the output is released, and replaces each with a marker saying a Maknae-managed credential was redacted. The model therefore knows a credential was provided and used, and does not keep asking whether the user supplied one.
     - `status_only` is required for entries whose purpose is to reveal secrets (`vault kv get`, `vault read`, `terraform output -raw`): the model learns whether the call succeeded. A value the tool writes into the workspace is then governed by the kernel's file operands (`sensitive.yaml`, the ceiling) if the model later asks to read it.
-    - The release of tool output to the model is a release the kernel decides ([ADR-0023](ADR-0023-runtime-loop-role-and-placement.md)), so the mandatory operands apply to it as well.
+    - Tool output reaches the model only in its next model turn, which the kernel decides ([ADR-0023](ADR-0023-runtime-loop-role-and-placement.md) decision 3), so the mandatory operands apply to it as well.
 
 15. **No Maknae socket in a tool container,** on any backend: not the kernel's client socket or Agent Daemon socket, not the Egress Daemon's. The container's own namespaces keep the tool's code from the kernel only if the sockets never enter them.
 
@@ -163,6 +172,8 @@ Three approaches were surveyed: a host fence (bubblewrap or systemd sandboxing o
 
 19. **Host prerequisites.** Rootless Podman needs user namespaces; a STIG'd host that sets `user.max_user_namespaces=0` needs its security officer's exemption. That setting stays the site's decision, and a preflight reports it. The RPM ships the fapolicyd trust and the SELinux policy.
 
+    **The Agent Daemon's shipped confinement changes.** Its unit sets `NoNewPrivileges=yes`, an empty `CapabilityBoundingSet=`, `RestrictNamespaces=yes` and `RestrictSUIDSGID=yes`, and its SELinux domain `maknae_agentd_t` may execute only its own entrypoint. Rootless Podman needs user namespaces, the setuid `newuidmap` and `newgidmap` helpers, execution of `podman`, `conmon` and `crun`, a runtime directory and cgroup delegation. The packaging change narrows each relaxation to what launching needs, for example a transition into a dedicated container-launch domain rather than a wider `maknae_agentd_t`. `packaging/isolation-contract.md`'s statement that the daemon spawns no program changes with it. The unit and policy shape is the implementation slice's; until it lands, `maknae-agentd` cannot launch tool containers.
+
 20. **macOS is a supported platform, and its tool execution is a staged gap, not a reduced profile.** Tool execution, the uid network rule and the relay are Linux-first for Rabbithole. macOS tool execution is tracked in [#478](https://github.com/darkhonor/maknae/issues/478).
 
 21. **The model gets one new tool that requests a tool invocation.** It is an additive verb; its name stays open (`design/egress-and-tool-execution.md` §10 item 3) and is settled with [#479](https://github.com/darkhonor/maknae/issues/479). It joins [ADR-0023](ADR-0023-runtime-loop-role-and-placement.md) decision 6's list of tools when #479 lands. Not built.
@@ -170,15 +181,17 @@ Three approaches were surveyed: a host fence (bubblewrap or systemd sandboxing o
 ## Consequences
 
 - **Residuals.**
-  - A compromised `maknae-agentd` can run commands as the agent's uid without asking the kernel. It is fenced by the uid network rule now, and by SELinux domain confinement and the RuntimeClass later.
+  - A compromised `maknae-agentd` can run commands as the agent's uid without asking the kernel. Today nothing fences its network (`packaging/isolation-contract.md`). Once built, the uid network rule over the account and its subordinate range fences it (decision 10), and SELinux confinement of its container launches and the RuntimeClass bound it further.
+  - Build-time code can write repository-local configuration that a later git or cargo run in a fetch entry honors, with that entry's credential and named sites. The launch-time neutralization narrows it (decision 8).
+  - A file created during a run that a `sensitive.yaml` glob would match is not masked (decision 5).
   - A compromised `maknae` front end is the operator's own uid, which can already act from a terminal.
   - On Podman nothing besides the front end checks the launch shape's digest (decision 6).
   - On Debian and Ubuntu the kernel's view of the peer is path-based ([ADR-0035](ADR-0035-policy-enforcement-points-placement-and-trust-tiers.md) decision 4).
 - **#420 decisions settled:** 3 (the tool model) by decisions 1, 2 and 7; 4 (workspace uids) by decision 4; 10 (launch parity) by decision 6; 12 (image provenance) by decisions 16 and 17.
 - **#477 is satisfied** by this ADR. **#476 is retired as written:** there are no workspace uids; the workspace is the tasker's partition.
-- **Owed, none built:** the additive wire field and the kernel's forward class for obligations ([ADR-0035](ADR-0035-policy-enforcement-points-placement-and-trust-tiers.md) decision 3); `maknae-proxy`; the relay; both renderers and the parity test; the credential classes; output redaction; the reference image repository; the model-facing tool (decision 21).
+- **Owed, none built:** the `Tool(...)` capability in the policy parser (decision 7); the uid network rule and its subordinate-range coverage (decision 10); the Agent Daemon's confinement changes for launching (decision 19); repository-config neutralization at launch (decision 8); the additive wire field and the kernel's forward class for obligations ([ADR-0035](ADR-0035-policy-enforcement-points-placement-and-trust-tiers.md) decision 3); `maknae-proxy`; the relay; both renderers and the parity test; the credential classes; output redaction; the reference image repository; the model-facing tool (decision 21).
 - **Longer-term:** the network impact of terminal tool calls, where the route is a default rather than a fence, is studied under [#175](https://github.com/darkhonor/maknae/issues/175).
-- **Amended in place:** [ADR-0023](ADR-0023-runtime-loop-role-and-placement.md) decisions 2, 4 and 6; [ADR-0024](ADR-0024-tenancy-model-and-agent-identity.md) decision 6 and its workspace residual. `design/egress-and-tool-execution.md`, the README and the diagrams are brought to the current state.
+- **Amended in place:** [ADR-0004](ADR-0004-modular-authorization-architecture.md) (the `Tool(...)` capability against its retirement of `Bash(argv)`); [ADR-0023](ADR-0023-runtime-loop-role-and-placement.md) decisions 2, 4 and 6; [ADR-0024](ADR-0024-tenancy-model-and-agent-identity.md) decision 6 and its workspace residual. `design/egress-and-tool-execution.md`, the README and the diagrams are brought to the current state.
 - `design/references/2026-11-15-agent-sandbox-assessment.md` keeps its wording about #477's tier option, under the history rule for references.
 
 ## References
