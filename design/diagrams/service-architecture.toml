@@ -135,7 +135,7 @@ trust = "untrusted"
 account = "rootless Podman"
 unit = "one per invocation"
 status = "proposed"
-detail = "ADR-0036. Verified images by digest; commands from the tool's allowlist; mounts: the task's partition (agent) or the operator's chosen workspace; network only via maknae-proxy. The only containers in the deployment."
+detail = "ADR-0036. Verified images by digest; commands from the tool's allowlist; mounts: the tasker's partition (agent) or the operator's chosen workspace; network only via maknae-proxy. The only containers in the deployment."
 
 [[node]]
 id = "agent"
