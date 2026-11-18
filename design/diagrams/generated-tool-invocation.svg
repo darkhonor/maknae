@@ -1,0 +1,102 @@
+<svg width="1042" height="1149" viewBox="0 0 1042 1149" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>Maknae tool invocation</title>
+  <desc>UML sequence diagram of one tool invocation by either front end: the kernel's decision, the container launch, the per-connection proxy decision, and redacted output to the model.</desc>
+  <rect x="0" y="0" width="1042" height="1149" fill="#FFFFFF"/>
+<text x="40" y="44" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#2C2C2A">One tool invocation — who decides, who runs it, what the model sees</text>
+<text x="40" y="64" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A">The model asks; the front end (maknae, or maknae-agentd) asks maknaed, then starts the tool in a container as the subject and carries out the decision.</text>
+<text x="40" y="79" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A">The container's only route is the relay to maknae-proxy, which asks maknaed about every CONNECT. Decided by ADR-0035 and ADR-0036; not built.</text>
+<defs><marker id="call" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 1 L 9 5 L 0 9 z" fill="#2C2C2A"/></marker><marker id="rep" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#5F5E5A" stroke-width="1.1"/></marker></defs>
+<rect x="517.0" y="116" width="340.0" height="764" fill="#EEEDFE" opacity="0.35"/>
+<line x1="517.0" y1="116" x2="517.0" y2="880" stroke="#B3452F" stroke-width="1.2" stroke-dasharray="7 4"/>
+<text x="509.0" y="110" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#B3452F">untrusted · subject uid</text>
+<text x="525.0" y="110" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#B3452F">TRUST BOUNDARY — trust plane</text>
+<line x1="857.0" y1="116" x2="857.0" y2="880" stroke="#B3452F" stroke-width="1.2" stroke-dasharray="7 4"/>
+<text x="865.0" y="110" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#B3452F">external</text>
+<rect x="17.0" y="122" width="150" height="34" rx="4" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="92" y="136" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#2C2C2A">model</text>
+<text x="92" y="147" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">«external»</text>
+<line x1="92" y1="156" x2="92" y2="868" stroke="#5F5E5A" stroke-width="0.7" stroke-dasharray="3 4"/>
+<rect x="187.0" y="122" width="150" height="34" rx="4" fill="#FDEEE9" stroke="#B3452F" stroke-width="0.75"/>
+<text x="262" y="136" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#7A2415">front end</text>
+<text x="262" y="147" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">«untrusted» maknae · agentd</text>
+<line x1="262" y1="156" x2="262" y2="868" stroke="#5F5E5A" stroke-width="0.7" stroke-dasharray="3 4"/>
+<rect x="357.0" y="122" width="150" height="34" rx="4" fill="#FDEEE9" stroke="#B3452F" stroke-width="0.75"/>
+<text x="432" y="136" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#7A2415">tool container</text>
+<text x="432" y="147" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">«untrusted»</text>
+<line x1="432" y1="156" x2="432" y2="868" stroke="#5F5E5A" stroke-width="0.7" stroke-dasharray="3 4"/>
+<rect x="527.0" y="122" width="150" height="34" rx="4" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+<text x="602" y="136" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#26215C">maknaed</text>
+<text x="602" y="147" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#534AB7">«trusted» sole PDP</text>
+<line x1="602" y1="156" x2="602" y2="868" stroke="#5F5E5A" stroke-width="0.7" stroke-dasharray="3 4"/>
+<rect x="697.0" y="122" width="150" height="34" rx="4" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+<text x="772" y="136" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#26215C">maknae-proxy</text>
+<text x="772" y="147" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#534AB7">«trusted» PEP</text>
+<line x1="772" y1="156" x2="772" y2="868" stroke="#5F5E5A" stroke-width="0.7" stroke-dasharray="3 4"/>
+<rect x="867.0" y="122" width="150" height="34" rx="4" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="942" y="136" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#2C2C2A">site</text>
+<text x="942" y="147" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">«external»</text>
+<line x1="942" y1="156" x2="942" y2="868" stroke="#5F5E5A" stroke-width="0.7" stroke-dasharray="3 4"/>
+<line x1="92" y1="188" x2="262" y2="188" stroke="#2C2C2A" stroke-width="1" marker-end="url(#call)"/>
+<text x="177.0" y="182" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">1. tool call: gh pr view 42</text>
+<text x="177.0" y="199" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">ADR-0036 decision 21</text>
+<line x1="262" y1="244" x2="602" y2="244" stroke="#2C2C2A" stroke-width="1" marker-end="url(#call)"/>
+<text x="432.0" y="226" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">2. request: entry, subcommand,</text>
+<text x="432.0" y="238" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">workspace, task</text>
+<text x="432.0" y="255" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">ADR-0036 decision 1</text>
+<path d="M 602 278 h 30 v 20 h -30" fill="none" stroke="#2C2C2A" stroke-width="1" marker-end="url(#call)"/>
+<text x="562" y="282" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">3. decide: tools.yaml ceiling, policy grants, mandatory operands; record intent</text>
+<text x="562" y="299" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">ADR-0036 decision 7 · ADR-0008</text>
+<line x1="602" y1="344" x2="262" y2="344" stroke="#5F5E5A" stroke-width="1" stroke-dasharray="5 3" marker-end="url(#rep)"/>
+<text x="432.0" y="326" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">4. Permit + launch-shape</text>
+<text x="432.0" y="338" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">obligation + proxy identity</text>
+<text x="432.0" y="355" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">ADR-0035 decision 3 · ADR-0036 decision 6</text>
+<line x1="262" y1="424" x2="432" y2="424" stroke="#2C2C2A" stroke-width="1" marker-end="url(#call)"/>
+<text x="347.0" y="382" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">5. start as the subject's uid:</text>
+<text x="347.0" y="394" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">image by digest, workspace,</text>
+<text x="347.0" y="406" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">internal network, credential</text>
+<text x="347.0" y="418" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">by class</text>
+<text x="347.0" y="435" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">ADR-0036 decision 4 · ADR-0036 decision 5 · ADR-0036 decision 13</text>
+<line x1="432" y1="480" x2="772" y2="480" stroke="#2C2C2A" stroke-width="1" marker-end="url(#call)"/>
+<text x="602.0" y="462" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">6. CONNECT api.github.com:443,</text>
+<text x="602.0" y="474" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">through the front end's relay</text>
+<text x="602.0" y="491" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">ADR-0036 decision 9</text>
+<line x1="772" y1="536" x2="602" y2="536" stroke="#2C2C2A" stroke-width="1" marker-end="url(#call)"/>
+<text x="687.0" y="518" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">7. decide this CONNECT: identity,</text>
+<text x="687.0" y="530" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">host, port</text>
+<text x="687.0" y="547" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">ADR-0035 decision 5</text>
+<line x1="602" y1="592" x2="772" y2="592" stroke="#5F5E5A" stroke-width="1" stroke-dasharray="5 3" marker-end="url(#rep)"/>
+<text x="687.0" y="574" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">8. Permit or Deny; connection</text>
+<text x="687.0" y="586" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">recorded</text>
+<text x="687.0" y="603" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">ADR-0035 decision 5</text>
+<line x1="772" y1="636" x2="942" y2="636" stroke="#2C2C2A" stroke-width="1" marker-end="url(#call)"/>
+<text x="857.0" y="630" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">9. tunnel; TLS end to end</text>
+<line x1="432" y1="680" x2="262" y2="680" stroke="#5F5E5A" stroke-width="1" stroke-dasharray="5 3" marker-end="url(#rep)"/>
+<text x="347.0" y="674" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">10. exit status + output</text>
+<path d="M 262 714 h 30 v 20 h -30" fill="none" stroke="#2C2C2A" stroke-width="1" marker-end="url(#call)"/>
+<text x="302" y="718" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">11. redact every credential value it delivered</text>
+<text x="302" y="735" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">ADR-0036 decision 14</text>
+<line x1="262" y1="780" x2="602" y2="780" stroke="#2C2C2A" stroke-width="1" marker-end="url(#call)"/>
+<text x="432.0" y="762" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">12. outcome; minted credential</text>
+<text x="432.0" y="774" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">revoked</text>
+<text x="432.0" y="791" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">ADR-0036 decision 1 · ADR-0036 decision 13</text>
+<line x1="262" y1="836" x2="92" y2="836" stroke="#5F5E5A" stroke-width="1" stroke-dasharray="5 3" marker-end="url(#rep)"/>
+<text x="177.0" y="818" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">13. result: redacted, or status</text>
+<text x="177.0" y="830" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">only</text>
+<text x="177.0" y="847" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">ADR-0036 decision 14</text>
+<text x="40" y="912" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#2C2C2A">Notes</text>
+<text x="40" y="939" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#B3452F">1.</text>
+<text x="60" y="939" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">The model only asks. It runs nothing, and a front end is the PEP that stands between it and the host (ADR-0035 decision 1).</text>
+<text x="40" y="966" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#B3452F">3.</text>
+<text x="60" y="966" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">tools.yaml is the ceiling; policy grants within it (Tool(gh pr view *)); deny-overrides with the mandatory operands.</text>
+<text x="40" y="993" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#B3452F">4.</text>
+<text x="60" y="993" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">A PEP that cannot carry out an obligation must deny.</text>
+<text x="40" y="1020" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#B3452F">5.</text>
+<text x="60" y="1020" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">Agent: the agent's own uid, only its tasker's partition mounted. Operator: current or path; never home; protected folders masked.</text>
+<text x="40" y="1047" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#B3452F">6.</text>
+<text x="60" y="1047" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">The container has no other route: no DNS, no direct TCP (measured 2026-11-18).</text>
+<text x="40" y="1074" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#B3452F">9.</text>
+<text x="60" y="1074" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">The proxy sees the host and port only, never content.</text>
+<text x="40" y="1101" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#B3452F">11.</text>
+<text x="60" y="1101" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">Default redacted, with a marker saying a Maknae-managed credential was used; status only for secret-reading entries.</text>
+<text x="24" y="1133" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/tool-invocation.toml@c501481b93 · maknae 00a7312a · 2026-11-18</text><text x="1018" y="1133" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">UML 2.5.1 (OMG formal/2017-12-05)</text>
+</svg>
