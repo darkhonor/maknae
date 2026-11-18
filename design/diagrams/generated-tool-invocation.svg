@@ -91,7 +91,7 @@
 <text x="40" y="993" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#B3452F">4.</text>
 <text x="60" y="993" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">A PEP that cannot carry out an obligation must deny.</text>
 <text x="40" y="1020" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#B3452F">5.</text>
-<text x="60" y="1020" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">Agent: the agent's own uid, only its tasker's partition mounted. Operator: current or path; never home; protected folders masked.</text>
+<text x="60" y="1020" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">Agent: the agent's own uid, only the task's own directory mounted. Operator: current or path; never home; protected folders masked.</text>
 <text x="40" y="1047" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#B3452F">6.</text>
 <text x="60" y="1047" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">The container has no other route: no DNS, no direct TCP (measured 2026-11-18).</text>
 <text x="40" y="1074" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#B3452F">9.</text>
@@ -100,5 +100,5 @@
 <text x="60" y="1101" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">Default redacted, with a marker saying a Maknae-managed credential was used; status only for secret-reading entries.</text>
 <text x="40" y="1128" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#B3452F">13.</text>
 <text x="60" y="1128" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">The release is a kernel decision; the mandatory operands apply to it. In full it travels maknaed → maknae-egress → the provider, with the next session.prompt.</text>
-<text x="24" y="1160" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/tool-invocation.toml@95d876b541 · maknae 00a7312a · 2026-11-18</text><text x="1018" y="1160" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">UML 2.5.1 (OMG formal/2017-12-05)</text>
+<text x="24" y="1160" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/tool-invocation.toml@b41b7cda3e · maknae 00a7312a · 2026-11-18</text><text x="1018" y="1160" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">UML 2.5.1 (OMG formal/2017-12-05)</text>
 </svg>

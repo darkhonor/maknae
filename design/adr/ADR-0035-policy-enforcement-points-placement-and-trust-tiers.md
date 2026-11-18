@@ -51,7 +51,7 @@ During the design session an identity scheme was proposed: a hash built into eac
 
 ## Consequences
 
-- **The tool model can be enforced, and its residual is named.** A front end enforces toward the model. Toward a compromised front end only the tiers beneath it enforce: the host network rule on agent accounts, SELinux confinement and the RuntimeClass, none of which is built for container launches yet. [ADR-0036](ADR-0036-the-tool-model.md) records this as its residual.
+- **The tool model can be enforced, and its residual is named.** A front end enforces toward the model. Toward a compromised front end only the tiers beneath it enforce: the host network rule on agent accounts (over the account's uid and subordinate range, or its SELinux type) and SELinux confinement on hosts, admission control and the RuntimeClass on Kubernetes; none of them is built for container launches yet. [ADR-0036](ADR-0036-the-tool-model.md) records this as its residual.
 - **The Maknae RuntimeClass is the direction for the runtime tier on Kubernetes.** It is an existing VM sandbox (Kata) with Maknae at its boundaries, not a new isolation runtime: the host-side file server (`virtiofsd`) asks `maknaed` on every open, create, unlink and mkdir; the guest's only network route is a virtual socket to `maknae-proxy` or the Egress Daemon; and the runtime attests which sandbox a connection came from. Not built.
 - **Two kernel additions are owed** (decision 3): the additive wire field and the forward class in `discharge_plan`.
 - **ADR-0005 and ADR-0006 are amended in place,** with dated banners: ADR-0005's single-process collapse now points here; ADR-0006 decision 10's table gains the front end's role as a PEP.

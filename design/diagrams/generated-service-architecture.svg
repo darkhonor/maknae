@@ -103,10 +103,10 @@
 <text x="269" y="981" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">one per invocation</text>
 <text x="269" y="995" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">ADR-0036. Verified images by digest;</text>
 <text x="269" y="1006" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">commands from the tool's allowlist; mounts:</text>
-<text x="269" y="1017" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">the tasker's partition (agent) or the</text>
-<text x="269" y="1028" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">operator's chosen workspace; network only</text>
-<text x="269" y="1039" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">via maknae-proxy. The only containers in the</text>
-<text x="269" y="1050" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">deployment.</text>
+<text x="269" y="1017" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">the task's own directory in its tasker's</text>
+<text x="269" y="1028" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">partition (agent) or the operator's chosen</text>
+<text x="269" y="1039" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">workspace; network only via maknae-proxy.</text>
+<text x="269" y="1050" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">The only containers in the deployment.</text>
 <rect x="536" y="925" width="254" height="138" rx="7" fill="#FDEEE9" stroke="#B3452F" stroke-width="0.75"/>
 <text x="547" y="943" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#7A2415">maknae-agentd</text>
 <text x="547" y="956" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">«untrusted» · built</text>
@@ -201,5 +201,5 @@
 <text x="44" y="1375" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#B3452F">ratifies tool containers, a direct-model interactive TUI, direct prompt delivery, or shared/dedicated modes; tool containers are decided by ADR-0036 (not built). The Agent Daemon (maknae-agentd, #629) runs one instance per enrolled</text>
 <text x="44" y="1388" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#B3452F">agent under the agent's own account (systemd maknae-agent@&lt;id&gt;, launchd io.maknae.maknae-agentd.&lt;id&gt;), confined by its own SELinux domain or a shared AppArmor profile; it logs in with the agent's AppRole, has its agent leaf signed,</text>
 <text x="44" y="1401" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#B3452F">claims kernel-signed tasks on the agent socket and works each in its tasker's partition of its home, with every request decided by maknaed.</text>
-<text x="24" y="1452" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/service-architecture.toml@0b55266c7a · maknae 00a7312a · 2026-11-18</text><text x="1376" y="1452" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">UML 2.5.1 (OMG formal/2017-12-05)</text>
+<text x="24" y="1452" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/service-architecture.toml@23d2bc74f9 · maknae 00a7312a · 2026-11-18</text><text x="1376" y="1452" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">UML 2.5.1 (OMG formal/2017-12-05)</text>
 </svg>

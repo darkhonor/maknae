@@ -104,7 +104,7 @@ to = "tool"
 kind = "call"
 label = "start as the subject's uid: image by digest, workspace, internal network, credential by class"
 evidence = "ADR-0036 decision 4 · ADR-0036 decision 5 · ADR-0036 decision 13"
-note = "Agent: the agent's own uid, only its tasker's partition mounted. Operator: current or path; never home; protected folders masked."
+note = "Agent: the agent's own uid, only the task's own directory mounted. Operator: current or path; never home; protected folders masked."
 
 [[step]]
 from = "tool"
