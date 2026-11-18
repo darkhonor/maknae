@@ -160,6 +160,19 @@ check_python() {
   fi
 }
 
+read_nextest_pin() {
+  python3 - "$root/.config/nextest.toml" 2>/dev/null <<'PYEOF'
+import re, sys, tomllib
+with open(sys.argv[1], "rb") as f:
+    v = tomllib.load(f)["nextest-version"]
+if isinstance(v, dict):
+    v = v["required"]
+if not isinstance(v, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", v):
+    sys.exit(1)
+print(v)
+PYEOF
+}
+
 if [ "$need_default" -eq 1 ]; then
   # partition: git presence (suppressed when FILELIST injected)
   if [ -z "${COVERAGE_TIERS_FILELIST+x}" ] && ! command -v git >/dev/null 2>&1; then
@@ -198,13 +211,17 @@ else
     r_fail "cargo-mutants missing — cargo install cargo-mutants --locked --version 27.1.0"
   fi
   if [ "$mutants_mode" = "all" ] || [[ " ${mutant_crates[*]} " == *" maknae-io "* ]]; then
-    nextest_out="$(cd "$root" && cargo nextest --version 2>&1 || true)"
-    nextest_v="$(printf '%s\n' "$nextest_out" | grep -m1 '^cargo-nextest ' || true)"
-    case "$nextest_v" in
-      "cargo-nextest 0.9.151"|"cargo-nextest 0.9.151 "*) :;;
-      "") r_fail "cargo-nextest missing (cargo nextest --version: $(printf '%s' "$nextest_out" | head -1)) — install cargo-nextest 0.9.151 (the version CI pins)";;
-      *) r_fail "'$nextest_v' is not cargo-nextest 0.9.151 (the version CI pins)";;
-    esac
+    if ! nextest_pin="$(read_nextest_pin)"; then
+      r_fail "cannot read the cargo-nextest pin from .config/nextest.toml (nextest-version.required, x.y.z)"
+    else
+      nextest_out="$(cd "$root" && cargo nextest --version 2>&1 || true)"
+      nextest_v="$(printf '%s\n' "$nextest_out" | grep -m1 '^cargo-nextest ' || true)"
+      case "$nextest_v" in
+        "cargo-nextest $nextest_pin"|"cargo-nextest $nextest_pin "*) :;;
+        "") r_fail "cargo-nextest missing (cargo nextest --version: $(printf '%s' "$nextest_out" | head -1)) — install cargo-nextest $nextest_pin (the version .config/nextest.toml pins)";;
+        *) r_fail "'$nextest_v' is not cargo-nextest $nextest_pin (the version .config/nextest.toml pins)";;
+      esac
+    fi
   fi
   if [ "$injection" -eq 0 ] && ! command -v cargo >/dev/null 2>&1; then
     r_fail "cargo missing (mutation name oracle) — install rustup/cargo"
@@ -660,7 +677,7 @@ if [ "$mutants_mode" != "" ]; then
     if ! out="$(python3 "$here/mutation-diff.py" snapshot "$root" "$head_oid" "$snap" 2>&1)"; then
       printf 'FAIL: --in-diff: cannot snapshot HEAD: %s\n' "$out"; exit 1
     fi
-    attested=(coverage-tiers.toml)
+    attested=(coverage-tiers.toml .config/nextest.toml)
     if [ "$(cd -P "$here" && pwd)" = "$(cd -P "$root" && pwd)/ci/gates" ]; then
       attested+=(ci/affected.py ci/gates/coverage-tiers.sh ci/gates/mutation-oracle.sh
                  ci/gates/mutation-platform.sh ci/gates/mutation-diff.py ci/gates/mutation-terminated.txt)

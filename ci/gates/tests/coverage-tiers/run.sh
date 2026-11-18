@@ -9,6 +9,7 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 gate="$here/../../coverage-tiers.sh"
 repo_root="$(env -u GIT_DIR -u GIT_WORK_TREE git rev-parse --show-toplevel)"
+nextest_pin="$(python3 -c 'import sys, tomllib; v = tomllib.load(open(sys.argv[1], "rb"))["nextest-version"]; print(v["required"] if isinstance(v, dict) else v)' "$repo_root/.config/nextest.toml")"
 
 pass_n=0; fail_n=0
 ok()  { printf 'fixture-ok: %s\n' "$1"; pass_n=$((pass_n+1)); }
@@ -81,7 +82,8 @@ PYEOF
 
 mk_base() { # mk_base <root>  — happy injection fixture: t1 file 2/2 covered
   local r="$1"
-  mkdir -p "$r/crates/x/src"
+  mkdir -p "$r/crates/x/src" "$r/.config"
+  cp "$repo_root/.config/nextest.toml" "$r/.config/nextest.toml"
   cat >"$r/crates/x/src/core.rs" <<'EOF'
 pub fn a() -> u32 { 1 }
 pub fn b() -> u32 { 2 }
@@ -553,7 +555,7 @@ shim="$(newroot)"; cat >"$shim/cargo-mutants" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
-printf '#!/bin/sh\necho "cargo-nextest 0.9.151 (fixture)"\n' >"$shim/cargo-nextest"
+printf '#!/bin/sh\necho "cargo-nextest %s (fixture)"\n' "$nextest_pin" >"$shim/cargo-nextest"
 chmod +x "$shim/cargo-mutants" "$shim/cargo-nextest"
 expect "mutation-stage unknown crate" "unknown crate in mutants_crates: xcore" nonzero -- \
   env PATH="$shim:$PATH" COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
@@ -576,7 +578,8 @@ mk_live() { # <root> — genuine live root passing readiness + partition
   ( cd "$r"
     env -u GIT_DIR -u GIT_WORK_TREE git init -q
     cp "$repo_root/rust-toolchain.toml" .
-    mkdir -p member/src
+    mkdir -p member/src .config
+    cp "$repo_root/.config/nextest.toml" .config/
     cat >Cargo.toml <<'EOF'
 [workspace]
 resolver = "2"
@@ -653,7 +656,7 @@ cat >"$shimD/cargo-mutants" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
-printf '#!/bin/sh\necho "cargo-nextest 0.9.151 (fixture)"\n' >"$shimD/cargo-nextest"
+printf '#!/bin/sh\necho "cargo-nextest %s (fixture)"\n' "$nextest_pin" >"$shimD/cargo-nextest"
 chmod +x "$shimD/cargo" "$shimD/cargo-mutants" "$shimD/cargo-nextest"
 expect "live mode D: mutation-path name-oracle failure" "cannot resolve mutants_crates package names (mutation stage)" nonzero -- \
   env PATH="$shimD:$PATH" "$gate" --root "$r" --mutants-all
@@ -673,7 +676,7 @@ expect "malformed collection shape ([t3] not [[t3]], no traceback)" "array of ta
 # absent in the gates job. Shim a stub (same pattern as the unknown-crate
 # fixture) so the mode-identifying contract-shape FAIL is reachable in ANY
 # lane (lane-dependent fixtures are forbidden).
-shimM="$(newroot)"; printf '#!/bin/sh\nexit 0\n' >"$shimM/cargo-mutants"; printf '#!/bin/sh\necho "cargo-nextest 0.9.151 (fixture)"\n' >"$shimM/cargo-nextest"
+shimM="$(newroot)"; printf '#!/bin/sh\nexit 0\n' >"$shimM/cargo-mutants"; printf '#!/bin/sh\necho "cargo-nextest %s (fixture)"\n' "$nextest_pin" >"$shimM/cargo-nextest"
 chmod +x "$shimM/cargo-mutants" "$shimM/cargo-nextest"
 
 r="$(newroot)"; mk_base "$r"   # mutants_crates = [] in mk_base
@@ -860,7 +863,7 @@ cat >"$shim/cargo" <<'EOF'
 import json, os, sys
 args = sys.argv[1:]
 if args == ['nextest', '--version']:
-    print('cargo-nextest 0.9.151 (fixture)')
+    print('cargo-nextest __NEXTEST_PIN__ (fixture)')
     sys.exit(0)
 if args[:1] != ['mutants']:
     raise SystemExit('unexpected cargo invocation')
@@ -926,7 +929,8 @@ if shape == 'enospc':
 print('verified mutant budget for ' + package)
 sys.exit(int(os.environ.get('FIXTURE_MUTANT_EXIT', '0')))
 EOF
-printf '#!/bin/sh\necho "cargo-nextest 0.9.151 (fixture)"\n' >"$shim/cargo-nextest"
+sed -i.bak "s/__NEXTEST_PIN__/$nextest_pin/" "$shim/cargo" && rm "$shim/cargo.bak"
+printf '#!/bin/sh\necho "cargo-nextest %s (fixture)"\n' "$nextest_pin" >"$shim/cargo-nextest"
 chmod +x "$shim/cargo" "$shim/cargo-mutants" "$shim/cargo-nextest"
 mutants_crates_only() {
   sed -i.bak "s/^mutants_crates = .*/mutants_crates = [\"$2\"]/" "$1/coverage-tiers.toml" && rm "$1/coverage-tiers.toml.bak"

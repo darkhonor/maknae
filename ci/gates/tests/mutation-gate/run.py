@@ -18,13 +18,17 @@ ROOT = Path(__file__).resolve().parents[4]
 SCRIPT = ROOT / "ci/gates/mutation-platform.sh"
 CHANNEL = tomllib.loads((ROOT / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
 REAL_CARGO = shutil.which("cargo")
+NEXTEST_TOML = (ROOT / ".config/nextest.toml").read_text()
+PIN = tomllib.loads(NEXTEST_TOML)["nextest-version"]
+PIN = PIN["required"] if isinstance(PIN, dict) else PIN
+OTHER = ".".join(PIN.split(".")[:2] + [str(int(PIN.split(".")[2]) + 1)])
 
 
 class MutationGate(unittest.TestCase):
-    def run_gate(self, crate, *, nextest="0.9.151", logs=None, total=None, reviewed=None,
+    def run_gate(self, crate, *, nextest=PIN, logs=None, total=None, reviewed=None,
                  path=None, fake_exit=0, litter=False, extra_env=None,
                  failing_chmod=False, term=False, planned_extra=0, phase="Test", plan=True,
-                 home_nextest=None, baseline=None):
+                 home_nextest=None, baseline=None, pin=NEXTEST_TOML):
         # The real gate, with its documented injection fixture interface. This
         # proves CLI wiring, independently of what the filter script prints.
         with tempfile.TemporaryDirectory() as directory:
@@ -32,13 +36,13 @@ class MutationGate(unittest.TestCase):
             try:
                 return self._run_gate(root, crate, nextest, logs, total, reviewed, path,
                                       fake_exit, litter, extra_env or {}, failing_chmod, term,
-                                      planned_extra, phase, plan, home_nextest, baseline)
+                                      planned_extra, phase, plan, home_nextest, baseline, pin)
             finally:
                 subprocess.run(["chmod", "-R", "u+rwx", str(root)])
 
     def _run_gate(self, root, crate, nextest, logs, total, reviewed, path, fake_exit,
                   litter, extra_env, failing_chmod, term, planned_extra, phase, plan,
-                  home_nextest, baseline):
+                  home_nextest, baseline, pin):
         tools = root / "tools"
         tools.mkdir()
         gate = ROOT / "ci/gates/coverage-tiers.sh"
@@ -51,6 +55,9 @@ class MutationGate(unittest.TestCase):
                 (gates / "mutation-terminated.txt").write_text(reviewed)
             gate = gates / "coverage-tiers.sh"
         (root / "coverage-tiers.toml").write_text(f'[t1]\nmutants_crates = ["{crate}"]\n')
+        if pin is not None:
+            (root / ".config").mkdir()
+            (root / ".config/nextest.toml").write_text(pin)
         payload = root / "payload"
         write_payload(payload, CAUGHT_LOGS if logs is None else logs, total, planned_extra, phase, plan,
                       baseline)
@@ -169,16 +176,35 @@ class MutationGate(unittest.TestCase):
             self.assertIsNone(run.argv)
 
     def test_gate_fails_closed_on_another_nextest_version(self):
-        run = self.run_gate("maknae-io", nextest="0.9.152")
+        run = self.run_gate("maknae-io", nextest=OTHER)
         self.assertNotEqual(run.result.returncode, 0)
-        self.assertIn("'cargo-nextest 0.9.152 (fixture)' is not cargo-nextest 0.9.151", run.result.stdout)
+        self.assertIn(f"'cargo-nextest {OTHER} (fixture)' is not cargo-nextest {PIN}", run.result.stdout)
         self.assertIsNone(run.argv)
 
     def test_readiness_checks_the_nextest_cargo_runs(self):
-        run = self.run_gate("maknae-io", home_nextest="0.9.152")
+        run = self.run_gate("maknae-io", home_nextest=OTHER)
         self.assertNotEqual(run.result.returncode, 0)
-        self.assertIn("'cargo-nextest 0.9.152 (fixture)' is not cargo-nextest 0.9.151", run.result.stdout)
+        self.assertIn(f"'cargo-nextest {OTHER} (fixture)' is not cargo-nextest {PIN}", run.result.stdout)
         self.assertIsNone(run.argv)
+
+    def test_gate_requires_the_version_the_root_pins(self):
+        pin = 'nextest-version = { required = "7.8.9" }\n'
+        self.gate_argv("maknae-io", nextest="7.8.9", pin=pin)
+        self.gate_argv("maknae-io", nextest="7.8.9", pin='nextest-version = "7.8.9"\n')
+        run = self.run_gate("maknae-io", pin=pin)
+        self.assertIn(f"'cargo-nextest {PIN} (fixture)' is not cargo-nextest 7.8.9", run.result.stdout)
+        self.assertIsNone(run.argv)
+
+    def test_gate_fails_closed_without_a_usable_nextest_pin(self):
+        for pin in (None, "", "nextest-version = \"0.9\"\n", "nextest-version = { required = 9 }\n",
+                    'nextest-version = { required = "0.9" }\n', 'nextest-version = { required = "0.9.x" }\n',
+                    "not toml ["):
+            with self.subTest(pin=pin):
+                run = self.run_gate("maknae-io", pin=pin)
+                self.assertNotEqual(run.result.returncode, 0)
+                self.assertIn("readiness: cannot read the cargo-nextest pin from .config/nextest.toml",
+                              run.result.stdout)
+                self.assertIsNone(run.argv)
 
     def assertGate(self, ok, logs, reviewed=None, *, contains=(), **kwargs):
         run = self.run_gate("maknae-io", logs=logs, **kwargs,
@@ -744,11 +770,12 @@ class InDiff(unittest.TestCase):
     def test_in_diff_native_filter_reaches_both_listings(self):
         native = subprocess.run([BASH, str(ROOT / "ci/gates/mutation-platform.sh")],
                                 capture_output=True, text=True, check=True).stdout.strip()
-        fake_nextest(self.aux / "tools", "0.9.151")
+        fake_nextest(self.aux / "tools", PIN)
         for crate in ("maknae-io", "maknae-sys"):
             with self.subTest(crate):
                 shutil.rmtree(self.tmp / "repo", ignore_errors=True)
-                repo = self.in_diff_repo(EDIT_A, names=(crate, "b"))
+                repo = self.in_diff_repo(EDIT_A, names=(crate, "b"),
+                                         base_files={".config/nextest.toml": NEXTEST_TOML})
                 listed_a = [dict(m, package=crate) for m in WHOLE_EDIT[2:3]]
                 result, out = self.gate(repo, crates=(crate, "b"), whole=listed_a)
                 self.assertEqual(result.returncode, 0, out)
@@ -835,10 +862,11 @@ class InDiff(unittest.TestCase):
         self.assertSnapshotOnly(repo)
 
     def test_in_diff_hidden_working_tree_contract_fails(self):
-        for rel in ("coverage-tiers.toml", "ci/gates/mutation-terminated.txt", "ci/affected.py"):
+        for rel in ("coverage-tiers.toml", "ci/gates/mutation-terminated.txt", "ci/affected.py",
+                    ".config/nextest.toml"):
             with self.subTest(rel):
                 shutil.rmtree(self.tmp / "repo", ignore_errors=True)
-                repo = self.in_diff_repo(EDIT_A)
+                repo = self.in_diff_repo(EDIT_A, base_files={".config/nextest.toml": NEXTEST_TOML})
                 git(repo, "update-index", "--assume-unchanged", rel)
                 with (repo / rel).open("a") as f:
                     f.write("\n# local\n")
