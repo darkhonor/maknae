@@ -125,6 +125,8 @@ The shipped `authz.yaml` allows `Read(~/**)` and `Write(~/projects/**)` site-wid
 
 ### 10. Obligation on any future command verb
 
+**Amended 2026-11-18 ([#477](https://github.com/darkhonor/maknae/issues/477), [ADR-0036](ADR-0036-the-tool-model.md) decision 5):** the tool path is the first command verb. Its containers honor both lists by masking at launch, with named residuals this ADR's single-link rule does not have on the kernel path: a matching file created during a run, hard-link aliases the front end cannot attribute, and denied files' aliases outside the workspace. Terminal mode may not be enabled until it honors both lists.
+
 Maknae has no command verb (`Bash` was retired). When it gives the model a way to run commands, those commands must honour both `sensitive.yaml` lists, or the file block is cosmetic: `cat ~/.docker/config.json` through a shell reaches what `fs.read` cannot. Honouring both lists is a precondition on that verb. A command verb that does not honour them may not ship.
 
 ## Consequences

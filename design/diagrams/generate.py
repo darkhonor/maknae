@@ -2050,6 +2050,7 @@ def main(argv: list) -> None:
         ("generated-workspace-packages.svg", lambda: d4_packages(gates, cg, prov)),
         ("generated-read-path.svg", lambda: d5_readpath(prov)),
         ("generated-credential-path.svg", lambda: sequence("credential-path.toml")),
+        ("generated-tool-invocation.svg", lambda: sequence("tool-invocation.toml")),
         ("generated-isolation-matrix.svg", lambda: matrix("isolation-matrix.toml")),
         ("generated-decision-cycle.svg", lambda: d6_decision(prov)),
         ("generated-data-model.svg", lambda: d7_datamodel(prov)),

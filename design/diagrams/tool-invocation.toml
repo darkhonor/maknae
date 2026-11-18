@@ -1,0 +1,158 @@
+# One tool invocation by either front end. Steps cite decisions, not code: none of it is built.
+
+title = "One tool invocation — who decides, who runs it, what the model sees"
+subtitle = [
+  "The model asks; the front end (maknae, or maknae-agentd) asks maknaed, then starts the tool in a container as the subject and carries out the decision.",
+  "The container's only route is the relay to maknae-proxy, which asks maknaed about every CONNECT. Decided by ADR-0035 and ADR-0036; not built.",
+]
+svg_title = "Maknae tool invocation"
+svg_desc = "UML sequence diagram of one tool invocation by either front end: the kernel's decision, the container launch, the per-connection proxy decision, and redacted output to the model."
+pitch = 170
+wrap_cols = 30
+
+[[boundary]]
+before = "kernel"
+left = "untrusted · subject uid"
+right = "TRUST BOUNDARY — trust plane"
+shade = true
+
+[[boundary]]
+before = "site"
+left = ""
+right = "external"
+shade = false
+
+[[participant]]
+id = "model"
+label = "model"
+stereo = "«external»"
+kind = "external"
+
+[[participant]]
+id = "front"
+label = "front end"
+stereo = "«untrusted» maknae · agentd"
+kind = "untrusted"
+
+[[participant]]
+id = "tool"
+label = "tool container"
+stereo = "«untrusted»"
+kind = "untrusted"
+
+[[participant]]
+id = "kernel"
+label = "maknaed"
+stereo = "«trusted» sole PDP"
+kind = "trusted"
+
+[[participant]]
+id = "proxy"
+label = "maknae-proxy"
+stereo = "«trusted» PEP"
+kind = "trusted"
+
+[[participant]]
+id = "site"
+label = "site"
+stereo = "«external»"
+kind = "external"
+
+# --- the sequence ---------------------------------------------------------
+
+[[step]]
+from = "model"
+to = "front"
+kind = "call"
+label = "tool call: gh pr view 42"
+evidence = "ADR-0036 decision 21"
+note = "The model only asks. It runs nothing, and a front end is the PEP that stands between it and the host (ADR-0035 decision 1)."
+
+[[step]]
+from = "front"
+to = "kernel"
+kind = "call"
+label = "request: entry, subcommand, workspace, task"
+evidence = "ADR-0036 decision 1"
+
+[[step]]
+from = "kernel"
+to = "kernel"
+kind = "self"
+label = "decide the tool and the workspace mount: tools.yaml ceiling, grants, mandatory operands; record intent"
+evidence = "ADR-0036 decision 7 · ADR-0008"
+note = "tools.yaml is the ceiling; policy grants within it (Tool(rust-fetch gh pr view *)); deny-overrides with the mandatory operands."
+
+[[step]]
+from = "kernel"
+to = "front"
+kind = "reply"
+label = "Permit + launch-shape obligation (workspace, mask set) + proxy identity"
+evidence = "ADR-0035 decision 3 · ADR-0036 decision 6"
+note = "A PEP that cannot carry out an obligation must deny."
+
+[[step]]
+from = "front"
+to = "tool"
+kind = "call"
+label = "start as the subject's uid: image by digest, workspace, internal network, credential by class"
+evidence = "ADR-0036 decision 4 · ADR-0036 decision 5 · ADR-0036 decision 13"
+note = "Agent: the agent's own uid, only the task's own directory mounted. Operator: current or path; never home; protected folders masked."
+
+[[step]]
+from = "tool"
+to = "proxy"
+kind = "call"
+label = "CONNECT api.github.com:443, through the front end's relay"
+evidence = "ADR-0036 decision 9"
+note = "The container has no other route: no DNS, no direct TCP (measured 2026-11-18)."
+
+[[step]]
+from = "proxy"
+to = "kernel"
+kind = "call"
+label = "decide this CONNECT: identity, host, port"
+evidence = "ADR-0035 decision 5"
+
+[[step]]
+from = "kernel"
+to = "proxy"
+kind = "reply"
+label = "Permit or Deny; connection recorded"
+evidence = "ADR-0035 decision 5"
+
+[[step]]
+from = "proxy"
+to = "site"
+kind = "call"
+label = "tunnel; TLS end to end"
+note = "The proxy sees the host and port only, never content."
+
+[[step]]
+from = "tool"
+to = "front"
+kind = "reply"
+label = "exit status + output"
+
+[[step]]
+from = "front"
+to = "front"
+kind = "self"
+label = "redact every credential value it delivered"
+evidence = "ADR-0036 decision 14"
+note = "Default redacted, with a marker saying a Maknae-managed credential was used; status only for secret-reading entries."
+
+[[step]]
+from = "front"
+to = "kernel"
+kind = "call"
+label = "outcome + redacted output; per-invocation credential revoked"
+evidence = "ADR-0036 decision 1 · ADR-0036 decision 13"
+
+[[step]]
+from = "kernel"
+to = "model"
+kind = "reply"
+label = "released in the next model turn: redacted, or status only"
+evidence = "ADR-0023 decision 3 · ADR-0036 decision 14"
+note = "The release is a kernel decision. Today only the front end's redaction screens tool output: category detection is not built, and the ceiling treats it as unmarked. In full it travels maknaed → maknae-egress → the provider, with the next session.prompt."
