@@ -46,7 +46,8 @@ This Terraform is one way to create the Vault objects Maknae uses, not a require
 - **`maknae-users` group** — an internal identity group whose members are those entities;
   it carries the `maknae-user` policy, so every user token gets it as an identity policy.
 - **KV v2 mount** (`maknae-kv`) — provider API keys, one subtree per user. The Egress
-  Daemon holds no Vault identity; it opens only the single-use wrapping token a user's
+  Daemon reads no key with a Vault identity of its own (where minting is configured, its
+  AppRole may only sign with Transit); it opens only the single-use wrapping token a user's
   CLI sends it.
 - **Agent AppRole mount** (`maknae-agent-approle`, #168) — the mount Agent Daemons log in
   through, separate from `maknaed`'s.

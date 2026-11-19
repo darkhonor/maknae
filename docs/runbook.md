@@ -1087,7 +1087,7 @@ Search with `grep`: on a STIG'd Rocky 10 host `ausearch -m AVC` was measured mis
 
 - **A packaged Maknae acts as an agent against a real provider:** one conversation, one read, one write, and every leg decided by `maknaed` and audited before its delivery or effect.
 - **The write is performed by the client under your own permissions**; the kernel only decides it and records it.
-- **The provider key lives only in Vault, under your own login.** Each turn the CLI makes a wrapped read of it and seals the wrapping token to the Egress Daemon's `seal.pub`; the kernel admits the turn on the provider, the model and your account name and never sees the key; the deputy, which has no Vault identity of its own, opens the seal and unwraps the key once. Your own processes can read the key too (step 13).
+- **The provider key lives only in Vault, under your own login.** Each turn the CLI makes a wrapped read of it and seals the wrapping token to the Egress Daemon's `seal.pub`; the kernel admits the turn on the provider, the model and your account name and never sees the key; the deputy, which reads no key with a Vault identity of its own (where minting is configured, its AppRole may only sign with Transit), opens the seal and unwraps the key once. Your own processes can read the key too (step 13).
 - **The trail shows each decision and its outcome in order**, with the boot composition record ahead of them.
 
 ### Teardown

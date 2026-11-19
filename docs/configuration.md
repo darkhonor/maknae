@@ -99,7 +99,7 @@ same list as `UnsetEnvironment=`):
 
 - **`maknaed` is the only AppRole holder** (`AuthMethod` has one variant, `AppRole`): it logs in with its RoleID artifact plus a sealed SecretID.
 - **Each user authenticates with userpass through `maknae login`** (`bins/maknae/src/login.rs`), which prompts for the password without echo, logs in as the local account name on the `vault.user_auth` mount (§6.1.2), and stores only the returned token (§2).
-- **The Egress Daemon has no Vault identity** (ADR-0028 decision 6). It calls only `sys/wrapping/lookup` (unauthenticated, with the wrapping token in the request body) and `sys/wrapping/unwrap` (authenticated by that single-use wrapping token, which a user sealed to it) (`bins/maknae-egress/src/main.rs`, `opener.rs`; `crates/maknae-vault/src/wrap.rs`, `api_request.rs`).
+- **The Egress Daemon has no Vault identity unless `/etc/maknae/egress/minting.yaml` is configured** (ADR-0028 decision 6, ADR-0038); then it logs in with its own AppRole, whose policy is Transit sign only, and only to sign. For model calls it uses only `sys/wrapping/lookup` (unauthenticated, with the wrapping token in the request body) and `sys/wrapping/unwrap` (authenticated by that single-use wrapping token, which a user sealed to it) (`bins/maknae-egress/src/main.rs`, `opener.rs`; `crates/maknae-vault/src/wrap.rs`, `api_request.rs`).
 - The operator's own token appears only during `maknae enroll`, supplied by `--token-file` or a no-echo prompt.
 
 An exported `VAULT_ADDR` or `VAULT_TOKEN` is for **your** `vault` CLI, as `docs/runbook.md` uses it; it never reaches ours.
