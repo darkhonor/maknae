@@ -358,7 +358,7 @@ class Workspace(unittest.TestCase):
         self.put("coverage-tiers.toml", TIERS)
         self.put(".cargo/mutants.toml", 'exclude_globs = ["crates/alpha/src/skip.rs"]\n')
         self.put("rust-toolchain.toml", '[toolchain]\nchannel = "1.99.1"\n')
-        self.put(".github/workflows/ci.yml", "run: cargo install cargo-mutants --version 27.1.0 --locked\n")
+        self.put(".github/workflows/ci.yml", "run: echo base\n")
         self.put("ci/gates/mutation-terminated.txt",
                  "# header\nLinux\tcrates/alpha/src/a.rs\tf\t\\*=\twhy\n")
         self.commit("base")

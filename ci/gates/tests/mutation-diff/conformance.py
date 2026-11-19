@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""mutation-diff.py's changed lines select exactly the mutants real cargo-mutants 27.1.0 selects
+"""mutation-diff.py's changed lines select exactly the mutants real cargo-mutants (VERSION) selects
 with --in-diff, on diffs made by coverage-tiers.sh's own in_diff_generate."""
 import importlib.util
 import json

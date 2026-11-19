@@ -1,4 +1,4 @@
-nextest-version = { required = "0.9.151" }
+nextest-version = { required = "0.9.152" }
 
 [profile.mutants]
 slow-timeout = { period = "10s", terminate-after = 2 }
