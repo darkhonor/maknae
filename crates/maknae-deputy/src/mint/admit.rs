@@ -60,6 +60,9 @@ pub fn admit_revoke<'a>(
     minting: Option<&'a MintingConfig>,
 ) -> Result<(AgentId, TrustPlaneKind, &'a GithubAppConfig), MintRefusal> {
     let admitted = admit_target(minting, &req.agent, &req.kind, &req.app)?;
+    if usize::from(req.set) >= MINT_MAX_SETS {
+        return Err(MintRefusal::Request);
+    }
     fields_fit_aad(&[&req.task, &req.agent, &req.class, &req.kind, &req.app])?;
     Ok(admitted)
 }
@@ -86,6 +89,11 @@ fn set_is_admissible(set: &PermissionSet) -> bool {
             .repositories
             .iter()
             .all(|r| repository_name_is_admissible(r))
+        && !set.repositories.iter().enumerate().any(|(i, a)| {
+            set.repositories[i + 1..]
+                .iter()
+                .any(|b| a.eq_ignore_ascii_case(b))
+        })
 }
 
 fn repository_name_is_admissible(name: &str) -> bool {
@@ -364,6 +372,43 @@ mod tests {
                 "{bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn duplicate_repository_names_in_a_set_are_refused() {
+        let read = [(GithubPermission::Contents, AccessLevel::Read)];
+        for pair in [
+            ["maknae", "Maknae"],
+            ["maknae", "maknae"],
+            ["A-b.c", "a-B.C"],
+        ] {
+            assert_eq!(
+                mint_with(|r| r.sets = vec![set(&pair, &read)]),
+                Err(MintRefusal::Request),
+                "{pair:?}"
+            );
+            assert_eq!(
+                mint_with(|r| r.sets = vec![one_set(), set(&["x", pair[0], pair[1]], &read)]),
+                Err(MintRefusal::Request),
+                "{pair:?}"
+            );
+        }
+        assert_eq!(
+            mint_with(|r| r.sets = vec![set(&["maknae", "maknae-x"], &read)]),
+            Ok(())
+        );
+        assert_eq!(
+            mint_with(|r| r.sets = vec![set(&["maknae"], &read), set(&["Maknae"], &read)]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_revoke_set_index_is_bounded() {
+        let last = u8::try_from(MINT_MAX_SETS - 1).expect("fits u8");
+        assert_eq!(revoke_with(|r| r.set = last), Ok(()));
+        assert_eq!(revoke_with(|r| r.set = last + 1), Err(MintRefusal::Request));
+        assert_eq!(revoke_with(|r| r.set = u8::MAX), Err(MintRefusal::Request));
     }
 
     #[test]
