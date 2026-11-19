@@ -90,6 +90,16 @@ pub enum ContentKind {
     Posture,
     /// The degraded plaintext SecretID (opt-in only, `--insecure-plaintext-secret`).
     PlaintextSecret,
+    /// The Egress Daemon's AppRole role id for minting (`egress/role-id`).
+    MintRoleId,
+    /// The Egress Daemon's minting SecretID, sealed by `systemd-creds`.
+    SealedEgressSecretId,
+    /// A systemd unit drop-in.
+    UnitDropIn,
+    /// An Agent Daemon's public seal key, read by the Egress Daemon.
+    AgentSealPub,
+    /// An Agent Daemon's private seal key, sealed by `systemd-creds`.
+    SealedAgentSealKey,
     /// The deputy's own copy of the Vault TLS CA (`egress/vault-ca.crt`):
     /// `tls/vault-ca.crt` is `root:_maknae` under a `0750` dir the deputy
     /// cannot enter, so it gets its own copy under its own group.
@@ -333,6 +343,70 @@ pub fn seal_pub_rows(home: maknae_vault::SealPubHome) -> Vec<Artifact> {
         ContentKind::SealPub,
     ));
     rows
+}
+
+/// The rows `maknae enroll` writes when `egress/minting.yaml` exists (#168).
+pub fn minting_rows() -> Vec<Artifact> {
+    let etc = Path::new("/etc/maknae");
+    let units = Path::new("/etc/systemd/system/maknae-egress.service.d");
+    vec![
+        row(
+            etc.join("egress").join(maknae_config::MINT_ROLE_ID_FILE),
+            Owner::RootMaknaeEgressGroup,
+            0o640,
+            ContentKind::MintRoleId,
+        ),
+        row(
+            etc.join("private/maknae-egress-secret-id.cred"),
+            Owner::RootRoot,
+            0o400,
+            ContentKind::SealedEgressSecretId,
+        ),
+        row(
+            etc.join("private/maknae-egress-enroll-state.yaml"),
+            Owner::RootRoot,
+            0o600,
+            ContentKind::EnrollState,
+        ),
+        row(
+            units.to_path_buf(),
+            Owner::RootRoot,
+            0o755,
+            ContentKind::Dir,
+        ),
+        row(
+            units.join("50-minting.conf"),
+            Owner::RootRoot,
+            0o644,
+            ContentKind::UnitDropIn,
+        ),
+    ]
+}
+
+/// The rows of one Agent Daemon's seal key pair (#168).
+pub fn agent_seal_rows(agent: &maknae_vault::agent_enroll::AgentId) -> Vec<Artifact> {
+    let etc = Path::new("/etc/maknae");
+    let agents = etc.join("egress/agents");
+    vec![
+        row(
+            agents.clone(),
+            Owner::RootMaknaeEgressGroup,
+            0o750,
+            ContentKind::Dir,
+        ),
+        row(
+            agents.join(format!("{}.seal.pub", agent.as_str())),
+            Owner::RootMaknaeEgressGroup,
+            0o640,
+            ContentKind::AgentSealPub,
+        ),
+        row(
+            etc.join(format!("private/agent-{}-seal-key.cred", agent.as_str())),
+            Owner::RootRoot,
+            0o400,
+            ContentKind::SealedAgentSealKey,
+        ),
+    ]
 }
 
 #[cfg(test)]

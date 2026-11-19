@@ -4,6 +4,7 @@
 #![cfg_attr(target_os = "macos", allow(dead_code))]
 use super::agent::{io_error, is_not_found};
 use super::agent_access::Run;
+use super::artifact_table;
 use super::EnrollError;
 use maknae_io::program::Program;
 use maknae_vault::agent_enroll::AgentId;
@@ -29,13 +30,24 @@ pub(crate) fn drop_in_dir(agent: &AgentId) -> String {
     format!("{}.d", unit_name(agent))
 }
 
-pub(crate) fn drop_in(account: &ServiceAccount) -> String {
+/// The name the agent's seal key is sealed under and its drop-in loads.
+pub(crate) fn seal_key_cred_name(agent: &AgentId) -> String {
+    format!("agent-{}-seal-key", agent.as_str())
+}
+
+pub(crate) fn drop_in(agent: &AgentId, account: &ServiceAccount) -> String {
+    let seal_key = artifact_table::agent_seal_rows(agent)
+        .into_iter()
+        .find(|a| a.content == artifact_table::ContentKind::SealedAgentSealKey)
+        .expect("agent_seal_rows emits the custody row");
     format!(
-        "[Service]\nUser={}\nGroup={}\nSupplementaryGroups={}\nReadWritePaths={}\n",
+        "[Service]\nUser={}\nGroup={}\nSupplementaryGroups={}\nReadWritePaths={}\nLoadCredentialEncrypted={}:{}\n",
         account.uid,
         account.gid,
         maknae_io::MAKNAE_AGENTS_GROUP,
-        account.home
+        account.home,
+        seal_key_cred_name(agent),
+        seal_key.path.display()
     )
 }
 
@@ -79,6 +91,12 @@ pub(crate) fn start(
     systemctl(r, &["enable", &unit])?;
     systemctl(r, &["reset-failed", &unit])?;
     systemctl(r, &["restart", &unit])
+}
+
+/// `try-restart` leaves a stopped unit stopped; its socket starts it on demand.
+pub(crate) fn reload_and_try_restart(r: &dyn Run, unit: &str) -> Result<(), EnrollError> {
+    systemctl(r, &["daemon-reload"])?;
+    systemctl(r, &["try-restart", unit])
 }
 
 pub(crate) const UNENROLLED_ACCOUNT: &str = "maknae-agent-unenrolled";
@@ -283,8 +301,8 @@ mod tests {
         ] {
             assert!(!text.contains(UNENROLLED), "{name} names {UNENROLLED}");
         }
-        assert!(!drop_in(&account()).contains(UNENROLLED));
-        assert!(drop_in(&account()).contains("\nUser=990\n"));
+        assert!(!drop_in(&hobi(), &account()).contains(UNENROLLED));
+        assert!(drop_in(&hobi(), &account()).contains("\nUser=990\n"));
     }
 
     #[test]
@@ -350,8 +368,8 @@ mod tests {
     #[test]
     fn the_drop_in_binds_the_instance_to_the_enrolled_uid_and_its_home() {
         assert_eq!(
-            drop_in(&account()),
-            "[Service]\nUser=990\nGroup=991\nSupplementaryGroups=maknae-agents\nReadWritePaths=/home/hobi-svc\n"
+            drop_in(&hobi(), &account()),
+            "[Service]\nUser=990\nGroup=991\nSupplementaryGroups=maknae-agents\nReadWritePaths=/home/hobi-svc\nLoadCredentialEncrypted=agent-hobi-seal-key:/etc/maknae/private/agent-hobi-seal-key.cred\n"
         );
         assert_eq!(unit_name(&hobi()), "maknae-agent@hobi.service");
         assert_eq!(drop_in_dir(&hobi()), "maknae-agent@hobi.service.d");
@@ -426,7 +444,7 @@ mod tests {
         let d = dir.join(drop_in_dir(&hobi()));
         std::fs::create_dir(&d).unwrap();
         remove_drop_in(&units, &hobi()).unwrap();
-        std::fs::write(d.join(DROP_IN_FILE), drop_in(&account())).unwrap();
+        std::fs::write(d.join(DROP_IN_FILE), drop_in(&hobi(), &account())).unwrap();
         std::fs::write(d.join("operator.conf"), "").unwrap();
         remove_drop_in(&units, &hobi()).unwrap();
         assert!(!d.join(DROP_IN_FILE).exists());

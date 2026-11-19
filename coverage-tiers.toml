@@ -950,6 +950,18 @@ path = "bins/maknae/src/enroll/remove_agent.rs"
 why = "#609: maknae enroll remove-agent's orchestration behind the RemoveOps seam; the step order, the refusal that names what remains, the retained accessor after a failed destroy and the policy.yaml-untouched property carry real unit tests against the recording fake from agent.rs"
 
 [[t3]]
+path = "bins/maknae/src/enroll/secret_slot.rs"
+why = "#168: rotate-new-first for one AppRole SecretID in custody, shared by enroll agent and the Egress Daemon's minting identity: mint, record pending, seal, roll back or name the orphan, then retire the rest; exercised through agent.rs's recording fake (every rotation, rollback and retire test) and egress_minting.rs's tests"
+
+[[t3]]
+path = "bins/maknae/src/enroll/agent_seal.rs"
+why = "#168: an Agent Daemon's seal key pair; generate-when-missing, keep-when-present, rotate, the public half's owner, mode, link count and path as the Egress Daemon's recipient read requires, and removal of both halves carry unit tests against real directories and a fake custody; the custody that runs systemd-creds is bin I/O"
+
+[[t3]]
+path = "bins/maknae/src/enroll/egress_minting.rs"
+why = "#168: the Egress Daemon's minting enrollment behind the MintingOps seam; the role id, sealed SecretID and drop-in written while minting.yaml exists, their withdrawal and the SecretIDs' destruction when it is gone, rotate-new-first with the restart before any destroy, the refused mounts, minting.yaml left untouched and the refusal naming the path and its requirement carry unit tests against real directories and a recording fake; the Vault calls and systemd-creds are bin I/O"
+
+[[t3]]
 path = "bins/maknae/src/enroll/helper.rs"
 why = "the operator-context helper — self-verification and the CLI configuration write; the id-G parser and the identity refusal carry real unit tests, the write runs through artifact_write's tested writer"
 

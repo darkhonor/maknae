@@ -98,6 +98,12 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         MsgId::EnrollAgentEnrolled => {
             "에이전트 데몬 {agent} 등록이 완료됐어요. {role}의 SecretID를 이 호스트에 봉인했고, {cidrs}에서만 사용할 수 있어요"
         }
+        MsgId::EnrollMintingEnrolled => {
+            "Egress Daemon의 발급용 SecretID를 AppRole 마운트 {mount}에 대해 봉인하고 유닛 드롭인으로 불러오게 했어요. 이전 SecretID {count}개를 폐기했어요"
+        }
+        MsgId::EnrollMintingWithdrawn => {
+            "minting.yaml이 없어서 Egress Daemon의 발급용 드롭인, role id, 봉인된 SecretID를 지우고 SecretID {count}개를 폐기했어요"
+        }
         MsgId::EnrollAgentRetired => "이 에이전트의 이전 SecretID {count}개를 폐기했어요",
         MsgId::EnrollAgentReload => {
             "maknaed가 실행 중이라면 다시 불러와서 이 등록을 반영하세요: {command}"

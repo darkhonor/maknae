@@ -112,6 +112,10 @@ pub enum MsgId {
     EnrollAgentRetired,
     /// `maknaed` must be reloaded to see the enrollment. Carries `{command}`.
     EnrollAgentReload,
+    /// The Egress Daemon's minting SecretID is sealed and loaded. Carries `{mount}` and `{count}`.
+    EnrollMintingEnrolled,
+    /// Minting is off and its SecretID was withdrawn. Carries `{count}`.
+    EnrollMintingWithdrawn,
     /// An enrolled agent's read access was granted again. Carries `{agent}` and `{account}`.
     EnrollAgentAccessRefreshed,
     /// `maknae enroll remove-agent` started. Carries `{agent}`.
@@ -180,6 +184,8 @@ pub const ALL: &[MsgId] = &[
     MsgId::EnrollAgentEnrolled,
     MsgId::EnrollAgentRetired,
     MsgId::EnrollAgentReload,
+    MsgId::EnrollMintingEnrolled,
+    MsgId::EnrollMintingWithdrawn,
     MsgId::EnrollAgentAccessRefreshed,
     MsgId::EnrollAgentRemoveStarted,
     MsgId::EnrollAgentRemoved,
@@ -372,6 +378,8 @@ mod tests {
                 | MsgId::EnrollAgentEnrolled
                 | MsgId::EnrollAgentRetired
                 | MsgId::EnrollAgentReload
+                | MsgId::EnrollMintingEnrolled
+                | MsgId::EnrollMintingWithdrawn
                 | MsgId::EnrollAgentAccessRefreshed
                 | MsgId::EnrollAgentRemoveStarted
                 | MsgId::EnrollAgentRemoved
@@ -382,7 +390,7 @@ mod tests {
                 | MsgId::CryptoPolicyDrift => {}
             }
         }
-        const VARIANT_COUNT: usize = 54;
+        const VARIANT_COUNT: usize = 56;
         assert_eq!(ALL.len(), VARIANT_COUNT);
         for &id in ALL {
             assert_covered(id);

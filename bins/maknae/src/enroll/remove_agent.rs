@@ -298,7 +298,10 @@ impl RemoveOps for RealRemoveOps {
     }
 
     fn remove_enrollment(&self, agent: &AgentId) -> Result<(), EnrollError> {
-        remove_enrollment_file(&self.agents, agent)
+        remove_enrollment_file(&self.agents, agent)?;
+        #[cfg(not(target_os = "macos"))]
+        super::agent_seal::remove(&super::agent_seal::removal_pair(&self.root, 0), agent)?;
+        Ok(())
     }
 
     async fn remove_sealed_secret(&self, agent: &AgentId) -> Result<(), EnrollError> {
