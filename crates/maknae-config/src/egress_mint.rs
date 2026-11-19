@@ -231,23 +231,23 @@ mod tests {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::path::PathBuf;
 
-    const FULL: &str = "\
-vault:
-  approle_mount: approle-mint
-github_apps:
-  ci-bot:
-    app_id: 12345
-    installation_id: 67890
-    api: https://api.github.com
-    transit_mount: transit
-    transit_key: gh-app_1
-  ghe:
-    app_id: 7
-    installation_id: 8
-    api: https://ghe.example:8443/
-    transit_mount: transit-ghe
-    transit_key: key-2
-";
+    const FULL: &str = concat!(
+        "vault:\n",
+        "  approle_mount: approle-mint\n",
+        "github_apps:\n",
+        "  ci-bot:\n",
+        "    app_id: 12345\n",
+        "    installation_id: 67890\n",
+        "    api: https://api.github.com\n",
+        "    transit_mount: transit\n",
+        "    transit_key: gh-app_1\n",
+        "  ghe:\n",
+        "    app_id: 7\n",
+        "    installation_id: 8\n",
+        "    api: https://ghe.example:8443/\n",
+        "    transit_mount: transit-ghe\n",
+        "    transit_key: key-2\n",
+    );
 
     fn parse(text: &str) -> Result<MintingConfig, ConfigError> {
         minting_from_document(&crate::load_str(text).unwrap())

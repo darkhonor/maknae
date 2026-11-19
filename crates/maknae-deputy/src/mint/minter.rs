@@ -266,8 +266,8 @@ fn kind_spelling(kind: TrustPlaneKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::super::admit::admit_mint;
-    use super::super::recipient::tests::{coder, euid, EgressDir};
     use super::super::signer::FakeSigner;
+    use super::super::testutil::{coder, euid, EgressDir};
     use super::*;
     use maknae_config::{MintVault, MintingConfig};
     use maknae_proto::{

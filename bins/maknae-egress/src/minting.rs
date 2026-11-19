@@ -264,7 +264,7 @@ impl MintFrames for EgressMinting {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::serve::tests::{canned_reply, prompt_frame, served_frame};
+    use crate::test_frames::{canned_reply, prompt_frame, served_frame};
     use maknae_config::{ApiBase, MintVault};
     use maknae_deputy::mint::admit::admit_mint;
     use maknae_deputy::mint::signer::Signer;
@@ -558,6 +558,69 @@ mod tests {
             RevokeReply::Refused(MintRefusal::Request),
             "a blob not sealed to this key does not open"
         );
+    }
+
+    #[test]
+    fn file_reads_go_to_the_minting_loaders() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            FileReads.minting(&d.path().join(MINTING_FILE)),
+            Ok(None)
+        ));
+        assert!(matches!(
+            FileReads.role_id(&d.path().join(MINT_ROLE_ID_FILE)),
+            Err(ConfigError::NotFound { .. })
+        ));
+        assert!(matches!(
+            FileReads.secret_id(None),
+            Err(VaultError::CredentialSource(_))
+        ));
+    }
+
+    #[test]
+    fn unavailable_minting_refuses_a_direct_mint_and_revoke_and_revokes_nothing() {
+        let (_d, api) = dead_vault();
+        let reads = Reads::new(Ok(Some(config())), Ok("role"), Err(()));
+        let rt = runtime();
+        let (m, _egress) = frames_for(state(&reads, &api), &rt);
+        let m = m.unwrap();
+        let cfg = config();
+        let EgressFrame::Mint(req) = mint_frame(vec![set("a")]) else {
+            unreachable!()
+        };
+        let admitted = admit_mint(&req, Some(&cfg)).unwrap();
+        let (reply, live) = m.mint(&admitted);
+        assert_eq!(reply, MintReply::Refused(MintRefusal::Signer));
+        assert!(live.tokens.is_empty());
+        assert_eq!(live.api, cfg.github_apps["deploy"].api);
+
+        let EgressFrame::Revoke(r) = revoke_frame() else {
+            unreachable!()
+        };
+        let agent = AgentId::parse("coder").unwrap();
+        assert_eq!(
+            m.revoke(&r, &agent, &cfg.github_apps["deploy"]),
+            RevokeReply::Refused(MintRefusal::Signer)
+        );
+        m.revoke_all(LiveTokens {
+            api: ApiBase::parse("https://127.0.0.1:1").unwrap(),
+            tokens: vec![Zeroizing::new("ghs_SENTINEL".into())],
+        });
+    }
+
+    #[test]
+    fn ready_minting_attempts_every_live_token_on_revoke_all() {
+        let (_d, api) = dead_vault();
+        let reads = Reads::new(Ok(Some(config())), Ok("role"), Ok("secret"));
+        let rt = runtime();
+        let (m, _egress) = frames_for(state(&reads, &api), &rt);
+        m.unwrap().revoke_all(LiveTokens {
+            api: ApiBase::parse("https://127.0.0.1:1").unwrap(),
+            tokens: vec![
+                Zeroizing::new("ghs_SENTINEL1".into()),
+                Zeroizing::new("ghs_SENTINEL2".into()),
+            ],
+        });
     }
 
     #[test]

@@ -124,10 +124,31 @@ mod tests {
     fn a_non_utf8_plaintext_is_refused_on_open() {
         let key = SealPrivateKey::generate().unwrap();
         let aad = SealAad::credential(&cctx()).unwrap();
-        let blob = seal(key.public_key(), &aad, &[0xff, 0xfe]).unwrap();
+        let plaintext = [0xff; 64];
+        let blob = seal(key.public_key(), &aad, &plaintext).unwrap();
+        assert_eq!(
+            open(&key, &aad, blob.as_bytes()).unwrap().as_slice(),
+            plaintext,
+            "the blob itself opens, so only the UTF-8 check can refuse it"
+        );
         assert_eq!(
             open_credential(&key, &cctx(), blob.as_bytes()).unwrap_err(),
             SealError::Open
+        );
+    }
+
+    #[test]
+    fn an_empty_context_field_is_refused_before_sealing_or_opening() {
+        let key = SealPrivateKey::generate().unwrap();
+        let blob = seal_credential(key.public_key(), &cctx(), TOKEN).unwrap();
+        let empty = CredentialSealContext { app: "", ..cctx() };
+        assert_eq!(
+            seal_credential(key.public_key(), &empty, TOKEN).unwrap_err(),
+            SealError::AadField
+        );
+        assert_eq!(
+            open_credential(&key, &empty, blob.as_bytes()).unwrap_err(),
+            SealError::AadField
         );
     }
 }
