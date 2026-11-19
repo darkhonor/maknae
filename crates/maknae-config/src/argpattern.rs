@@ -341,6 +341,30 @@ mod tests {
     }
 
     #[test]
+    fn every_pattern_error_has_its_own_message() {
+        let shown = [
+            ArgPatternError::Empty,
+            ArgPatternError::Spacing,
+            ArgPatternError::RestNotLast,
+            ArgPatternError::LoneRest,
+            ArgPatternError::MalformedBound("{x}".to_string()),
+            ArgPatternError::BoundWithStar("{a.b}*".to_string()),
+            ArgPatternError::StarInsideToken("a*b".to_string()),
+        ]
+        .map(|e| e.to_string());
+        assert_eq!(
+            shown
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            7
+        );
+        assert!(
+            shown[4].contains("{x}") && shown[5].contains("{a.b}*") && shown[6].contains("a*b")
+        );
+    }
+
+    #[test]
     fn empty_or_bare_star_deny_is_rejected() {
         assert!(matches!(DenyArg::parse(""), Err(ArgPatternError::Empty)));
         assert!(matches!(

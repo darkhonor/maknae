@@ -1265,6 +1265,109 @@ mod tests {
     }
 
     #[test]
+    fn errors_display_their_cause() {
+        let invalid = ToolsError::Invalid("because".to_string());
+        assert_eq!(invalid.to_string(), "tools.yaml: because");
+        let config = ToolsError::Config(ConfigError::Io("disk".to_string()));
+        assert_eq!(
+            config.to_string(),
+            ConfigError::Io("disk".to_string()).to_string()
+        );
+    }
+
+    #[test]
+    fn whole_file_shapes_are_checked() {
+        for text in [
+            "- a\n",
+            "schema_version: 1\ntools: 3\n",
+            "schema_version: 1\ncredential_classes: [a]\n",
+        ] {
+            assert!(
+                matches!(ToolsCatalog::parse(text), Err(ToolsError::Invalid(_))),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            ToolsCatalog::parse("schema_version: 1\n"),
+            Ok(ToolsCatalog::empty())
+        );
+    }
+
+    #[test]
+    fn ill_formed_nested_values_disable_the_entry() {
+        for field in [
+            "labels: 3",
+            "volumes: 3",
+            "volumes: { \"a b\": { access: ro } }",
+            "binds: 3",
+            "binds: { git: { resolver: git, extra: 1 } }",
+            "binds: { git: {} }",
+            "commands: 3",
+            "commands: { \"a b\": {} }",
+            "commands: { echo: { nonsense: 1 } }",
+            "commands: { echo: { subcommands: x } }",
+            "network: { via: maknae-proxy, sites: x }",
+            "resources: { cpus: soon }",
+            "resources: { cpus: -1.5 }",
+            "lifetime: { max: 5m, extra: 1 }",
+        ] {
+            let c = catalog(&doc(
+                "  {}\n",
+                &format!("  {SENTINEL}:\n    executes_workspace: false\n    {field}\n"),
+            ));
+            assert!(c.entry(SENTINEL).is_none(), "{field}");
+            assert!(!reason(&c, SENTINEL).is_empty(), "{field}");
+        }
+        let c = catalog(&doc(
+            "  {}\n",
+            "  fine:\n    executes_workspace: false\n    resources: { cpus: 1.5, memory: 8Gi }\n",
+        ));
+        assert_eq!(
+            c.entry("fine")
+                .unwrap()
+                .resources
+                .as_ref()
+                .unwrap()
+                .cpus
+                .as_deref(),
+            Some("1.5")
+        );
+    }
+
+    #[test]
+    fn bad_names_are_refused_where_they_are_keys() {
+        let c = catalog(&doc(
+            "  \"a b\":\n    kind: github-machine-user\n",
+            "  \"c d\":\n    executes_workspace: false\n",
+        ));
+        assert!(reason(&c, "credential_classes.a b").contains("class name"));
+        assert!(reason(&c, "c d").contains("entry name"));
+    }
+
+    #[test]
+    fn class_lifetime_errors_are_reported() {
+        for body in [
+            "    kind: vault-child-token\n    lifetime: { expires: 1h, revoke_on: sometime }\n",
+            "    kind: vault-child-token\n    lifetime: { expires: 1h }\n",
+            "    kind: vault-child-token\n    lifetime: { revoke_on: task-outcome }\n",
+            "    kind: vault-child-token\n    delivery: x\n",
+        ] {
+            assert!(
+                catalog(&doc(&format!("  c:\n{body}"), ""))
+                    .class("c")
+                    .is_none(),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_production_door_reads_only_root_owned_files() {
+        let got = load_host_tools(&std::env::temp_dir().join("sentinel-674-no-such-dir"));
+        assert!(got.is_err() || got == Ok(ToolsCatalog::empty()), "{got:?}");
+    }
+
+    #[test]
     fn has_reach_check_only_for_github_app_installation() {
         use CredentialKind::*;
         for (kind, want) in [
@@ -1522,6 +1625,19 @@ mod tests {
                 got,
                 Err(ToolsError::Config(ConfigError::InsecurePermissions { .. }))
             ));
+        }
+
+        #[test]
+        fn a_writable_directory_is_refused() {
+            let d = dir("wdir");
+            write(&d, HOMELAB.as_bytes(), 0o640);
+            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o770)).unwrap();
+            let got = load_tools_with_requirement(&d, own());
+            let _ = std::fs::remove_dir_all(&d);
+            assert!(
+                matches!(&got, Err(ToolsError::Config(ConfigError::Io(m))) if m.contains("must be owned by root") && m.contains(TOOLS_FILE)),
+                "{got:?}"
+            );
         }
     }
 }
