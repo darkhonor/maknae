@@ -28,6 +28,8 @@ mod listen;
 mod minting;
 mod opener;
 mod serve;
+#[cfg(test)]
+mod test_frames;
 
 use maknae_deputy::call;
 
@@ -365,6 +367,8 @@ mod tests {
                 concat!("vault", "rs"),
                 concat!("AppRole", "Auth"),
                 concat!(".login", "("),
+                concat!("VaultApi", "::login"),
+                concat!("Operator", "Client"),
             ] {
                 assert!(!text.contains(never), "{name} uses {never}");
             }
