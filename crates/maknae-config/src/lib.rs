@@ -104,6 +104,7 @@ pub use authz::{
     destination_entry_is_acceptable, load_authz, parse_authz, parse_subject_entry, ActionPattern,
     AgentMatch, AuthzError, AuthzPolicy, HomeUnbound, Match3, ModelRef, PathGlob, Pattern,
     RawActionGrants, RawDestinations, Request, SubjectActions, SubjectPermissions, SubjectPolicy,
+    ToolCall, ToolPattern,
 };
 pub use banner::{banner_from_document, load_banner, BANNER_FILE, BANNER_PATH};
 pub use baseline_doc::{document_sections, value_from_canonical_json, BaselineSections};

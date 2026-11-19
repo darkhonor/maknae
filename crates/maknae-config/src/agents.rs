@@ -253,7 +253,10 @@ fn refuse_denied_tasks(entry: &SubjectPolicy) -> Result<(), AuthzError> {
         return Ok(());
     };
     for (pattern, source) in perms.deny.iter().zip(perms.deny_sources()) {
-        let (Pattern::Read(glob) | Pattern::Write(glob)) = pattern;
+        let glob = match pattern {
+            Pattern::Read(glob) | Pattern::Write(glob) => glob,
+            Pattern::Tool(_) => continue,
+        };
         if glob.within_home_tasks() {
             return Err(AuthzError::Yaml(format!(
                 "permissions.deny {source:?} cannot deny the agent's own ~/tasks"

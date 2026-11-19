@@ -38,6 +38,7 @@
 //! variant to a `MsgId` is the daemon call site's job (`run.rs`), not this
 //! crate's — keeps `maknae-config` off the `maknae-msgs` dependency (spec §4.3).
 
+use crate::argpattern::{ArgPattern, Bound};
 use crate::{ConfigError, Value};
 use std::path::Path;
 
@@ -235,6 +236,16 @@ pub enum AgentMatch {
 pub enum Request<'a> {
     Read(&'a Path),
     Write(&'a Path),
+    Tool(&'a ToolCall),
+}
+
+/// One tool invocation a `Tool(...)` pattern is matched against.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolCall {
+    pub entry: String,
+    pub program: String,
+    pub argv: Vec<String>,
+    pub bound: Bound,
 }
 
 /// A `~` pattern was evaluated with no home, or with one that is not an
@@ -441,14 +452,14 @@ impl AuthzPolicy {
 fn write_glob(p: &Pattern) -> Option<&PathGlob> {
     match p {
         Pattern::Write(g) => Some(g),
-        Pattern::Read(_) => None,
+        Pattern::Read(_) | Pattern::Tool(_) => None,
     }
 }
 
 fn read_glob(p: &Pattern) -> Option<&PathGlob> {
     match p {
         Pattern::Read(g) => Some(g),
-        Pattern::Write(_) => None,
+        Pattern::Write(_) | Pattern::Tool(_) => None,
     }
 }
 
@@ -581,6 +592,49 @@ fn unbound_home(
 pub enum Pattern {
     Read(PathGlob),
     Write(PathGlob),
+    Tool(ToolPattern),
+}
+
+/// `Tool(<entry> <program> <argv pattern>)`: decides `tool.invoke`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolPattern {
+    pub entry: String,
+    pub program: String,
+    pub args: ArgPattern,
+}
+
+impl ToolPattern {
+    fn parse(spec: &str, inner: &str) -> Result<ToolPattern, AuthzError> {
+        let bad = || AuthzError::BadPattern(spec.to_string());
+        let mut parts = inner.splitn(3, ' ');
+        let (Some(entry), Some(program), Some(rest)) = (parts.next(), parts.next(), parts.next())
+        else {
+            return Err(bad());
+        };
+        let entry_ok = entry.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+            && entry
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-'));
+        let program_ok = !program.is_empty()
+            && program
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'));
+        if !entry_ok || !program_ok {
+            return Err(bad());
+        }
+        let args = ArgPattern::parse(rest).map_err(|_| bad())?;
+        Ok(ToolPattern {
+            entry: entry.to_string(),
+            program: program.to_string(),
+            args,
+        })
+    }
+
+    fn matches(&self, call: &ToolCall) -> bool {
+        self.entry == call.entry
+            && self.program == call.program
+            && self.args.matches(&call.argv, &call.bound)
+    }
 }
 
 impl Pattern {
@@ -589,13 +643,18 @@ impl Pattern {
             (Pattern::Read(g), Request::Read(p)) | (Pattern::Write(g), Request::Write(p)) => {
                 Some((g, *p))
             }
-            _ => None,
+            (Pattern::Read(_) | Pattern::Write(_) | Pattern::Tool(_), _) => None,
         }
     }
 
     fn matches_req(&self, req: &Request<'_>, home: Option<&Path>) -> Result<bool, HomeUnbound> {
-        self.glob_for(req)
-            .map_or(Ok(false), |(g, p)| g.matches(p, home))
+        match (self, req) {
+            (Pattern::Tool(t), Request::Tool(call)) => Ok(t.matches(call)),
+            (Pattern::Tool(_), Request::Read(_) | Request::Write(_)) => Ok(false),
+            (Pattern::Read(_) | Pattern::Write(_), _) => self
+                .glob_for(req)
+                .map_or(Ok(false), |(g, p)| g.matches(p, home)),
+        }
     }
 }
 
@@ -944,6 +1003,7 @@ fn parse_pattern(spec: &str) -> Result<Pattern, AuthzError> {
     match capability {
         "Read" => Ok(Pattern::Read(PathGlob::parse(inner)?)),
         "Write" => Ok(Pattern::Write(PathGlob::parse(inner)?)),
+        "Tool" => Ok(Pattern::Tool(ToolPattern::parse(spec, inner)?)),
         _ => Err(bad()),
     }
 }
@@ -3546,6 +3606,130 @@ mod tests {
                 "{spec}"
             );
         }
+    }
+
+    fn tool_call(entry: &str, program: &str, argv: &[&str]) -> ToolCall {
+        ToolCall {
+            entry: entry.into(),
+            program: program.into(),
+            argv: argv.iter().map(|a| (*a).into()).collect(),
+            bound: Bound::empty(),
+        }
+    }
+
+    #[test]
+    fn tool_capability_parses() {
+        let Pattern::Tool(t) = parse_pattern("Tool(cargo-test cargo test *)").unwrap() else {
+            panic!("expected a Tool pattern");
+        };
+        assert_eq!(t.entry, "cargo-test");
+        assert_eq!(t.program, "cargo");
+        assert_eq!(t.args, ArgPattern::parse("test *").unwrap());
+    }
+
+    #[test]
+    fn tool_capability_needs_entry_program_and_pattern() {
+        for bad in [
+            "Tool()",
+            "Tool(cargo-test)",
+            "Tool(cargo-test cargo)",
+            "Tool(cargo-test  cargo test)",
+            "Tool( cargo test)",
+            "Tool(Cargo cargo test)",
+            "Tool(-x cargo test)",
+            "Tool(a b/c test)",
+            "Tool(a cargo  test)",
+            "Tool(a cargo *)",
+        ] {
+            assert_eq!(
+                parse_pattern(bad),
+                Err(AuthzError::BadPattern(bad.into())),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_pattern_never_matches_a_path_request() {
+        let p = parse_pattern("Tool(a prog run *)").unwrap();
+        for req in [
+            Request::Read(Path::new("/sentinel-674-p")),
+            Request::Write(Path::new("/sentinel-674-p")),
+        ] {
+            assert_eq!(p.matches_req(&req, None), Ok(false));
+        }
+    }
+
+    #[test]
+    fn path_pattern_never_matches_a_tool_request() {
+        let call = tool_call("a", "prog", &["x"]);
+        for spec in ["Read(/**)", "Write(/**)"] {
+            let p = parse_pattern(spec).unwrap();
+            assert_eq!(p.matches_req(&Request::Tool(&call), None), Ok(false));
+        }
+    }
+
+    #[test]
+    fn tool_request_matches_on_entry_program_and_argv() {
+        let p = parse_pattern("Tool(a prog build *)").unwrap();
+        let hit = |c: &ToolCall| p.matches_req(&Request::Tool(c), None).unwrap();
+        assert!(hit(&tool_call("a", "prog", &["build", "x"])));
+        assert!(!hit(&tool_call("b", "prog", &["build", "x"])));
+        assert!(!hit(&tool_call("a", "other", &["build", "x"])));
+        assert!(!hit(&tool_call("a", "prog", &["test", "x"])));
+    }
+
+    #[test]
+    fn tool_request_evaluates_without_a_home() {
+        let p = parse_authz(
+            "schema_version: 1\npermissions:\n  allow: [\"Tool(a prog run *)\", \"Read(~/**)\"]\n",
+        )
+        .unwrap();
+        let call = tool_call("a", "prog", &["run", "sentinel-674-x"]);
+        assert_eq!(
+            p.evaluate3(&Request::Tool(&call), None),
+            Ok(Match3::AllowMatch {
+                source: "Tool(a prog run *)".into()
+            })
+        );
+    }
+
+    #[test]
+    fn tool_deny_beats_tool_allow_in_evaluate3_floored() {
+        let p = parse_authz(
+            "schema_version: 1\npermissions:\n  allow: [\"Tool(a prog run *)\"]\n  deny: [\"Tool(a prog run build *)\"]\n",
+        )
+        .unwrap();
+        let denied = tool_call("a", "prog", &["run", "build", "sentinel-674-x"]);
+        let allowed = tool_call("a", "prog", &["run", "sentinel-674-x"]);
+        assert_eq!(
+            p.evaluate3_floored(None, &Request::Tool(&denied), None),
+            Ok(Match3::DenyMatch {
+                source: "Tool(a prog run build *)".into()
+            })
+        );
+        assert_eq!(
+            p.evaluate3_floored(None, &Request::Tool(&allowed), None),
+            Ok(Match3::AllowMatch {
+                source: "Tool(a prog run *)".into()
+            })
+        );
+    }
+
+    #[test]
+    fn tool_allow_in_agent_policy_matches_in_evaluate3_agent() {
+        let p = parse_authz(
+            "schema_version: 1\npermissions:\n  allow: []\nsubjects:\n  right:\n    permissions:\n      allow: [\"Tool(a prog run *)\"]\n",
+        )
+        .unwrap();
+        let right = p.subjects["right"].permissions.as_ref().unwrap();
+        let call = tool_call("a", "prog", &["run", "sentinel-674-x"]);
+        assert_eq!(
+            p.evaluate3_agent(right, None, &Request::Tool(&call), None),
+            Ok(AgentMatch::Right {
+                source: "Tool(a prog run *)".into()
+            })
+        );
     }
 
     #[test]
