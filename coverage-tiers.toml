@@ -1053,14 +1053,8 @@ why = "a successful AppRole login needs a live Vault; the failure arm beside it 
 [[exception]]
 path = "bins/maknae-egress/src/minting.rs"
 anchor = "async fn sign("
-end_anchor = "journal(format_args!(\"Transit sign failed: {e}\"));"
+end_anchor = "(self.journal)(&format!(\"Transit sign failed: {e}\"));"
 why = "Transit sign runs only after a successful login, which needs a live Vault; sign_failure, the mapping it ends in, is tested on a table"
-
-[[exception]]
-path = "bins/maknae-egress/src/minting.rs"
-anchor = "fn refused_after_fresh_login(&self) {"
-end_anchor = "the AppRole's policy may lack Transit sign on this key"
-why = "a journal line ServiceSigner calls when Transit refuses a token minted moments before, which needs a live Vault; the decision to call it is T1 in maknae-deputy's signer.rs, tested with its fake login"
 
 # #240: the egress socket's budget, both legs (egress_socket.rs). Errno
 # passthroughs with no decision, or a retry that needs a signal or a transient

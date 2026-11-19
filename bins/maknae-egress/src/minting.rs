@@ -22,11 +22,18 @@ fn journal(line: impl Display) {
     eprintln!("maknae-egress: {line}");
 }
 
+type Journal = fn(&str);
+
+fn stderr_journal(line: &str) {
+    journal(line);
+}
+
 pub(crate) struct ApproleLogin {
     api: Arc<VaultApi>,
     mount: String,
     role_id: String,
     secret_id: Zeroizing<String>,
+    journal: Journal,
 }
 
 impl std::fmt::Debug for ApproleLogin {
@@ -48,7 +55,7 @@ impl VaultLogin for ApproleLogin {
         {
             Ok(login) => Ok((login.token, login.ttl)),
             Err(e) => {
-                journal(format_args!("Vault login failed: {e}"));
+                (self.journal)(&format!("Vault login failed: {e}"));
                 Err(SignError)
             }
         }
@@ -65,13 +72,13 @@ impl VaultLogin for ApproleLogin {
             .transit_sign_rs256(token, mount, key, input)
             .await
             .map_err(|e| {
-                journal(format_args!("Transit sign failed: {e}"));
+                (self.journal)(&format!("Transit sign failed: {e}"));
                 sign_failure(&e)
             })
     }
 
     fn refused_after_fresh_login(&self) {
-        journal(
+        (self.journal)(
             "Transit sign was refused again right after a fresh Vault login: \
              the AppRole's policy may lack Transit sign on this key",
         );
@@ -139,6 +146,7 @@ pub(crate) fn minting_state(
         mount: config.vault.approle_mount.clone(),
         role_id,
         secret_id,
+        journal: stderr_journal,
     };
     MintingState::Ready(ServiceSigner::new(login), config)
 }
@@ -177,6 +185,7 @@ impl Ready {
 
 pub(crate) struct EgressMinting {
     ready: Result<Ready, &'static str>,
+    journal: Journal,
 }
 
 /// The `MintFrames` serve is handed: none when minting is off.
@@ -185,6 +194,16 @@ pub(crate) fn frames(
     own_key: Arc<SealPrivateKey>,
     egress_dir: PathBuf,
     rt: tokio::runtime::Handle,
+) -> Option<Arc<dyn MintFrames>> {
+    frames_journaled(state, own_key, egress_dir, rt, stderr_journal)
+}
+
+fn frames_journaled(
+    state: MintingState,
+    own_key: Arc<SealPrivateKey>,
+    egress_dir: PathBuf,
+    rt: tokio::runtime::Handle,
+    journal: Journal,
 ) -> Option<Arc<dyn MintFrames>> {
     let ready = match state {
         MintingState::Off => return None,
@@ -199,12 +218,12 @@ pub(crate) fn frames(
                 rt,
             }),
             Err(e) => {
-                journal(format_args!("minting is unavailable: GitHub client: {e:?}"));
+                journal(&format!("minting is unavailable: GitHub client: {e:?}"));
                 Err("the GitHub client could not be built")
             }
         },
     };
-    Some(Arc::new(EgressMinting { ready }))
+    Some(Arc::new(EgressMinting { ready, journal }))
 }
 
 fn unix_now() -> Option<u64> {
@@ -233,10 +252,10 @@ impl MintFrames for EgressMinting {
             return refused();
         };
         let Some(now) = unix_now() else {
-            journal("mint refused: the clock is before 1970");
+            (self.journal)("mint refused: the clock is before 1970");
             return refused();
         };
-        let mut log = |l: &str| journal(l);
+        let mut log = |l: &str| (self.journal)(l);
         let mut d = r.deps(now, &mut log);
         r.rt.block_on(minter::mint(admitted, &mut d))
     }
@@ -246,17 +265,19 @@ impl MintFrames for EgressMinting {
             return RevokeReply::Refused(MintRefusal::Signer);
         };
         let Some(now) = unix_now() else {
-            journal("revoke refused: the clock is before 1970");
+            (self.journal)("revoke refused: the clock is before 1970");
             return RevokeReply::Refused(MintRefusal::Signer);
         };
-        let mut log = |l: &str| journal(l);
+        let mut log = |l: &str| (self.journal)(l);
         let mut d = r.deps(now, &mut log);
         r.rt.block_on(minter::revoke(req, agent, app, &mut d))
     }
 
     fn revoke_all(&self, live: LiveTokens) {
         if let Ok(r) = &self.ready {
-            r.rt.block_on(minter::revoke_all(&r.github, live, &mut |l| journal(l)));
+            r.rt.block_on(minter::revoke_all(&r.github, live, &mut |l| {
+                (self.journal)(l)
+            }));
         }
     }
 }
@@ -278,6 +299,18 @@ mod tests {
     fn fips() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| maknae_crypto::init().unwrap());
+    }
+
+    thread_local! {
+        static LINES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    fn record(line: &str) {
+        LINES.with(|l| l.borrow_mut().push(line.to_owned()));
+    }
+
+    fn recorded() -> Vec<String> {
+        LINES.with(|l| std::mem::take(&mut *l.borrow_mut()))
     }
 
     fn dead_vault() -> (tempfile::TempDir, Arc<VaultApi>) {
@@ -384,11 +417,12 @@ mod tests {
         rt: &tokio::runtime::Runtime,
     ) -> (Option<Arc<dyn MintFrames>>, tempfile::TempDir) {
         let egress = tempfile::tempdir().unwrap();
-        let m = frames(
+        let m = frames_journaled(
             st,
             Arc::new(SealPrivateKey::generate().unwrap()),
             egress.path().to_owned(),
             rt.handle().clone(),
+            record,
         );
         (m, egress)
     }
@@ -439,7 +473,15 @@ mod tests {
         let st = state(&reads, &api);
         assert!(matches!(st, MintingState::Off), "{st:?}");
         assert_eq!(reads.calls(), [("minting", minting_yaml())]);
-        assert!(frames_for(st, &runtime()).0.is_none());
+        let rt = runtime();
+        let egress = tempfile::tempdir().unwrap();
+        let m = frames(
+            st,
+            Arc::new(SealPrivateKey::generate().unwrap()),
+            egress.path().to_owned(),
+            rt.handle().clone(),
+        );
+        assert!(m.is_none());
     }
 
     #[test]
@@ -602,10 +644,12 @@ mod tests {
             m.revoke(&r, &agent, &cfg.github_apps["deploy"]),
             RevokeReply::Refused(MintRefusal::Signer)
         );
+        recorded();
         m.revoke_all(LiveTokens {
             api: ApiBase::parse("https://127.0.0.1:1").unwrap(),
             tokens: vec![Zeroizing::new("ghs_SENTINEL".into())],
         });
+        assert_eq!(recorded(), Vec::<String>::new(), "no client, no attempt");
     }
 
     #[test]
@@ -614,6 +658,7 @@ mod tests {
         let reads = Reads::new(Ok(Some(config())), Ok("role"), Ok("secret"));
         let rt = runtime();
         let (m, _egress) = frames_for(state(&reads, &api), &rt);
+        recorded();
         m.unwrap().revoke_all(LiveTokens {
             api: ApiBase::parse("https://127.0.0.1:1").unwrap(),
             tokens: vec![
@@ -621,6 +666,36 @@ mod tests {
                 Zeroizing::new("ghs_SENTINEL2".into()),
             ],
         });
+        let lines = recorded();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        for (set, line) in lines.iter().enumerate() {
+            assert!(
+                line.starts_with(&format!("set={set}: a minted token could not be revoked: ")),
+                "{line}"
+            );
+            assert!(!line.contains("SENTINEL"), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_refusal_right_after_a_fresh_login_is_journalled_naming_the_policy() {
+        let (_d, api) = dead_vault();
+        let login = ApproleLogin {
+            api,
+            mount: "approle-mint".into(),
+            role_id: "role".into(),
+            secret_id: Zeroizing::new("SECRET-SENTINEL".into()),
+            journal: record,
+        };
+        recorded();
+        login.refused_after_fresh_login();
+        assert_eq!(
+            recorded(),
+            [
+                "Transit sign was refused again right after a fresh Vault login: \
+              the AppRole's policy may lack Transit sign on this key"
+            ]
+        );
     }
 
     #[test]
@@ -631,7 +706,27 @@ mod tests {
             mount: "approle-mint".into(),
             role_id: "role".into(),
             secret_id: Zeroizing::new("SECRET-SENTINEL".into()),
+            journal: record,
         });
+        recorded();
+        assert_eq!(
+            runtime().block_on(signer.sign("transit", "deploy-app", b"a.b")),
+            Err(SignError)
+        );
+        let lines = recorded();
+        assert!(
+            lines.iter().any(|l| l.starts_with("Vault login failed: ")),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn the_signer_minting_state_builds_fails_closed_over_a_dead_vault() {
+        let (_d, api) = dead_vault();
+        let reads = Reads::new(Ok(Some(config())), Ok("role"), Ok("secret"));
+        let MintingState::Ready(signer, _) = state(&reads, &api) else {
+            panic!("expected Ready");
+        };
         assert_eq!(
             runtime().block_on(signer.sign("transit", "deploy-app", b"a.b")),
             Err(SignError)
@@ -668,6 +763,7 @@ mod tests {
             mount: "approle-mint".into(),
             role_id: "ROLE-SENTINEL".into(),
             secret_id: Zeroizing::new("SECRET-SENTINEL".into()),
+            journal: record,
         };
         let shown = format!("{login:?}");
         assert_eq!(shown, "ApproleLogin { mount: \"approle-mint\", .. }");

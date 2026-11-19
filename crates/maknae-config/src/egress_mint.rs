@@ -292,7 +292,13 @@ mod tests {
         if owner == 0 {
             assert_eq!(got, Ok(Some(parse(FULL).unwrap())));
         } else {
-            assert!(got.is_err(), "a minting.yaml not owned by root: {got:?}");
+            assert_eq!(
+                got,
+                Err(ConfigError::Io(format!(
+                    "owned by {owner}, require 0: {}",
+                    p.display()
+                )))
+            );
         }
     }
 
