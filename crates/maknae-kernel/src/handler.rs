@@ -822,8 +822,8 @@ mod tests {
     #[test]
     fn build_tool_request_stamps_argv_as_ordered_list_and_kernel_subject() {
         use maknae_config::{Bound, ToolCall};
-        use maknae_security::AttrValue;
-        let local = maknae_security::Lane::Local;
+        use maknae_security::{AttrValue, Attributes};
+        let s = |v: &str| AttrValue::Str(v.into());
         let call = ToolCall {
             entry: "sentinel-674-entry".into(),
             program: "sentinel-674-prog".into(),
@@ -831,50 +831,71 @@ mod tests {
             bound: Bound::empty(),
         };
         let hobi = maknae_config::AgentId::parse("hobi").unwrap();
-        let home = std::path::Path::new("/home/hobi-svc");
+        let task = TaskStamp {
+            id: maknae_proto::TaskId([0x74; 16]),
+            tasker: "uid:1002".into(),
+            root: "users/1000".into(),
+            start: 0,
+        };
         let facts = crate::conversation::facts::ConversationFacts {
             state: crate::conversation::facts::FactState::Active,
             owner_uid: Some(1000),
             extends: None,
         };
-        for stamp in [
-            Stamp::Client,
-            Stamp::Agent {
-                agent: &hobi,
-                task: None,
-            },
-        ] {
-            let want = build_authz_request(
-                &Verb::Whoami,
+        let stamps = [
+            (Stamp::Client, &[("channel", "client")][..]),
+            (
+                Stamp::Agent {
+                    agent: &hobi,
+                    task: None,
+                },
+                &[("channel", "agent"), ("agent", "hobi")][..],
+            ),
+            (
+                Stamp::Agent {
+                    agent: &hobi,
+                    task: Some(&task),
+                },
+                &[
+                    ("channel", "agent"),
+                    ("agent", "hobi"),
+                    ("task", "74747474747474747474747474747474"),
+                    ("tasker", "uid:1002"),
+                    ("root_tasker", "users/1000"),
+                ][..],
+            ),
+        ];
+        for (stamp, stamped) in &stamps {
+            let got = build_tool_request(
+                stamp,
                 2001,
-                Some(home),
-                local,
-                None,
+                Some(std::path::Path::new("/home/hobi-svc")),
+                maknae_security::Lane::Local,
                 Some(&facts),
-                &stamp,
+                &call,
             );
-            let got = build_tool_request(&stamp, 2001, Some(home), local, Some(&facts), &call);
-            assert_eq!(got.subject, want.subject);
-            assert_eq!(got.context, want.context);
+            let mut subject = Attributes::new();
+            subject.insert("uid", AttrValue::Int(2001));
+            subject.insert("home", s("/home/hobi-svc"));
+            for &(k, v) in *stamped {
+                subject.insert(k, s(v));
+            }
+            assert_eq!(got.subject.0, subject, "{stamped:?}");
+            let mut context = Attributes::new();
+            context.insert("dac_lane", s("local"));
+            assert_eq!(got.context.0, context);
             assert_eq!(got.action.0, "tool.invoke");
-            let mut expected = want.resource.0.clone();
-            expected.insert(
-                maknae_security::RESOURCE_TOOL_ENTRY,
-                AttrValue::Str("sentinel-674-entry".into()),
-            );
-            expected.insert(
-                maknae_security::RESOURCE_TOOL_PROGRAM,
-                AttrValue::Str("sentinel-674-prog".into()),
-            );
-            expected.insert(
-                maknae_security::RESOURCE_TOOL_ARGV,
+            let mut resource = Attributes::new();
+            resource.insert("conversation_state", s("active"));
+            resource.insert("conversation_owner", AttrValue::Int(1000));
+            resource.insert("tool.entry", s("sentinel-674-entry"));
+            resource.insert("tool.program", s("sentinel-674-prog"));
+            resource.insert(
+                "tool.argv",
                 AttrValue::List(vec!["test".into(), "a b".into(), String::new()]),
             );
-            expected.insert(
-                maknae_security::RESOURCE_BINDING_KINDS,
-                AttrValue::Set(Default::default()),
-            );
-            assert_eq!(got.resource.0, expected);
+            resource.insert("binding.kinds", AttrValue::Set(Default::default()));
+            assert_eq!(got.resource.0, resource);
         }
     }
 
