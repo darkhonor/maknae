@@ -777,10 +777,10 @@ mod tests {
             &["alpha"],
             &[(GithubPermission::Contents, AccessLevel::Read)],
         );
-        assert_eq!(
-            c.mint(&api(), 7, JWT, &asked).await.unwrap_err(),
-            ForgeError::Status(ForgeStatus::Other)
-        );
+        let got = tokio::time::timeout(Duration::from_secs(5), c.mint(&api(), 7, JWT, &asked))
+            .await
+            .expect("the redirect was followed to a target that never answers");
+        assert_eq!(got.unwrap_err(), ForgeError::Status(ForgeStatus::Other));
         assert_eq!(h.await.unwrap().requests.len(), 1);
         assert!(
             tokio::time::timeout(Duration::from_millis(300), elsewhere.accept())
@@ -1037,6 +1037,39 @@ mod tests {
     fn the_github_bounds_are_pinned() {
         assert_eq!(GITHUB_REPLY_MAX_BYTES, 1_048_576);
         assert_eq!(GITHUB_CALL_TIMEOUT, Duration::from_secs(20));
+    }
+
+    #[test]
+    fn a_grant_of_the_wrong_shape_is_refused_naming_what_was_expected() {
+        let token = serde_json::from_str::<Grant>(
+            r#"{"token":5,"expires_at":"x","permissions":{},"repository_selection":null,"repositories":null}"#,
+        )
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(token.contains("expected a string"), "{token}");
+        let perms = serde_json::from_str::<Grant>(
+            r#"{"token":"t","expires_at":"x","permissions":[],"repository_selection":null,"repositories":null}"#,
+        )
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(
+            perms.contains("expected a map of permissions, each named once"),
+            "{perms}"
+        );
+    }
+
+    #[test]
+    fn the_client_s_debug_shows_no_field() {
+        fips();
+        assert_eq!(
+            format!(
+                "{:?}",
+                GithubClient::loopback_for_tests("http://127.0.0.1:1")
+            ),
+            "GithubClient { .. }"
+        );
     }
 
     #[test]

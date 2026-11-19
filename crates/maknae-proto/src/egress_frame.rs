@@ -1147,6 +1147,18 @@ mod tests {
     }
 
     #[test]
+    fn permissions_that_are_not_a_map_are_refused_naming_the_shape() {
+        use serde::de::IntoDeserializer;
+        let d: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
+            "contents".into_deserializer();
+        let msg = permissions_without_duplicates(d).unwrap_err().to_string();
+        assert!(
+            msg.contains("a map of GitHub permissions, each named once"),
+            "{msg}"
+        );
+    }
+
+    #[test]
     fn sealed_credential_bytes_outside_the_seal_bounds_do_not_decode() {
         for n in [crate::SEALED_KEY_MIN_BYTES, crate::SEALED_KEY_MAX_BYTES] {
             let got: SealedCredentialBytes =

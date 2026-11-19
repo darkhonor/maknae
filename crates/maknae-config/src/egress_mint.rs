@@ -285,6 +285,18 @@ mod tests {
     }
 
     #[test]
+    fn the_production_loader_reads_a_present_file_held_to_root() {
+        let p = write("present", FULL, 0o640);
+        let (owner, got) = (me(&p), load_minting(&p));
+        let _ = std::fs::remove_file(&p);
+        if owner == 0 {
+            assert_eq!(got, Ok(Some(parse(FULL).unwrap())));
+        } else {
+            assert!(got.is_err(), "a minting.yaml not owned by root: {got:?}");
+        }
+    }
+
+    #[test]
     fn a_full_file_parses_to_the_pinned_values() {
         let got = parse(FULL).unwrap();
         assert_eq!(got.vault.approle_mount, "approle-mint");
