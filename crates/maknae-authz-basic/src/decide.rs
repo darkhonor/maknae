@@ -856,24 +856,7 @@ pub(crate) fn decide_loaded_cited(
     if let Some(reason) = channel_refusal(&lp.agents, uid, req) {
         return undecided(Verdict::Deny { reason });
     }
-    let resolution = lp.roles.role_for(uid, principal.uid);
-    let tool_call = match (req.action.0 == "tool.invoke", &resolution) {
-        (false, _) => None,
-        (true, resolved) => match tool_ceiling(lp, req, uid) {
-            Ok(call) => Some(call),
-            Err((verdict, cited)) => {
-                return Decided {
-                    verdict,
-                    role: match resolved {
-                        Resolution::Role(r) => Some(r.key()),
-                        Resolution::NoRole => None,
-                    },
-                    cited,
-                }
-            }
-        },
-    };
-    let role = match resolution {
+    let role = match lp.roles.role_for(uid, principal.uid) {
         Resolution::Role(r) => r,
         // Case-1 testimony (#181): the FACT, audit-only. The absence still
         // composes as an absence -- an extension may yet grant.
@@ -895,6 +878,11 @@ pub(crate) fn decide_loaded_cited(
             },
             None,
         ),
+        Role::Admin | Role::User | Role::Guest
+            if let Some(refused) = tool_ceiling_refusal(lp, req, uid) =>
+        {
+            refused
+        }
         Role::Admin | Role::User | Role::Guest
             if let Some(decided) = holding_arm(&lp.agents, uid, role, req) =>
         {
@@ -950,8 +938,11 @@ pub(crate) fn decide_loaded_cited(
         Role::Admin | Role::User if req.action.0 == "session.task" => {
             decide_task(lp, req, role.key(), uid, principal.uid)
         }
-        Role::Admin | Role::User if let Some(call) = &tool_call => {
-            decide_tool(lp, call, role.key(), uid)
+        Role::Admin | Role::User if req.action.0 == "tool.invoke" => {
+            match tool_ceiling(lp, req, uid) {
+                Ok(call) => decide_tool(lp, &call, role.key(), uid),
+                Err(refused) => refused,
+            }
         }
         Role::Guest | Role::User => match class {
             Some(Class::Liveness) => (permit_with_audit(), None),
@@ -1433,7 +1424,15 @@ fn decide_grants(
     }
 }
 
-/// `tool.invoke` (#674): the `tools.yaml` ceiling, decided for every subject before its role.
+/// `tool.invoke` (#674): the `tools.yaml` ceiling's refusal, decided for every role but
+/// `adversary` before any other arm.
+fn tool_ceiling_refusal(lp: &LoadedPolicy, req: &SecRequest, uid: u32) -> Option<Decision> {
+    if req.action.0 != "tool.invoke" {
+        return None;
+    }
+    tool_ceiling(lp, req, uid).err()
+}
+
 fn tool_ceiling(
     lp: &LoadedPolicy,
     req: &SecRequest,
@@ -5788,15 +5787,20 @@ mod tests {
             ("tadmin", TOOL_ADMIN),
             ("tuser", TOOL_USER),
             ("tguest", TOOL_GUEST),
+            ("tadversary", TOOL_ADVERSARY),
         ]
         .into_iter()
         .map(|(n, u)| (n.to_string(), Some(u)))
         .collect();
-        let bindings: BTreeMap<String, Vec<String>> =
-            [("admin", "tadmin"), ("user", "tuser"), ("guest", "tguest")]
-                .into_iter()
-                .map(|(r, n)| (r.to_string(), vec![n.to_string()]))
-                .collect();
+        let bindings: BTreeMap<String, Vec<String>> = [
+            ("admin", "tadmin"),
+            ("user", "tuser"),
+            ("guest", "tguest"),
+            ("adversary", "tadversary"),
+        ]
+        .into_iter()
+        .map(|(r, n)| (r.to_string(), vec![n.to_string()]))
+        .collect();
         LoadedPolicy {
             roles: Roles::File(resolve(&Some(bindings), &crate::found(&lookups)).unwrap()),
             action_grants: tool_grants(allow, deny),
@@ -6111,31 +6115,58 @@ mod tests {
     }
 
     const TOOL_NOBODY: u32 = 1199;
+    const TOOL_ADVERSARY: u32 = 1104;
 
     #[test]
-    fn the_ceiling_binds_a_guest_and_a_subject_with_no_role() {
-        let lp = lp_tool(TOOL_SITE_ALLOW, &["guest"], &[]);
-        for (uid, role) in [(TOOL_GUEST, Some("guest")), (TOOL_NOBODY, None)] {
-            for e in ["sentinel-674-missing", "sentinel-674-off"] {
-                let d = tool_decided(&lp, &tool_req(uid, e, "cargo", &["build"]));
-                assert_eq!(
-                    (d.verdict, d.role),
-                    (deny("tool: unknown or disabled entry"), role),
-                    "{uid} {e}"
-                );
-            }
+    fn containment_is_decided_before_the_ceiling() {
+        let lp = lp_tool(TOOL_SITE_ALLOW, &["admin", "user", "guest"], &[]);
+        for (entry, argv) in [
+            ("sentinel-674-missing", &["build"][..]),
+            ("sentinel-674-build", &["build", "--config=x"][..]),
+        ] {
+            let d = tool_decided(&lp, &tool_req(TOOL_ADVERSARY, entry, "cargo", argv));
             assert_eq!(
-                tool_decided(&lp, &build(uid, &["build", "--config=x"])).verdict,
-                deny("tool: denied argument 1 for sentinel-674-build/cargo"),
-                "{uid}"
+                (d.verdict, d.role, d.cited),
+                (
+                    deny("subject contained: role=adversary"),
+                    Some("adversary"),
+                    None
+                ),
+                "{entry}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_ceiling_binds_a_guest_and_a_roleless_subject_abstains() {
+        let lp = lp_tool(TOOL_SITE_ALLOW, &["guest"], &[]);
+        for e in ["sentinel-674-missing", "sentinel-674-off"] {
+            let d = tool_decided(&lp, &tool_req(TOOL_GUEST, e, "cargo", &["build"]));
+            assert_eq!(
+                (d.verdict, d.role),
+                (deny("tool: unknown or disabled entry"), Some("guest")),
+                "{e}"
             );
         }
         assert_eq!(
-            tool_decided(&lp, &build(TOOL_NOBODY, &["build"])).verdict,
-            Verdict::NotApplicable {
-                note: Some("subject resolves to no role".into())
-            }
+            tool_decided(&lp, &build(TOOL_GUEST, &["build", "--config=x"])).verdict,
+            deny("tool: denied argument 1 for sentinel-674-build/cargo")
         );
+        for argv in [&["build"][..], &["build", "--config=x"]] {
+            for e in ["sentinel-674-missing", "sentinel-674-build"] {
+                let d = tool_decided(&lp, &tool_req(TOOL_NOBODY, e, "cargo", argv));
+                assert_eq!(
+                    (d.verdict, d.role),
+                    (
+                        Verdict::NotApplicable {
+                            note: Some("subject resolves to no role".into())
+                        },
+                        None
+                    ),
+                    "{e} {argv:?}"
+                );
+            }
+        }
     }
 
     #[test]

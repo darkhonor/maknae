@@ -775,7 +775,7 @@ agent jimin root=users/1 fs.stat Some("read") "/home/operator/tasks/users/1/x" -
 agent jimin fs.stat Some("read") "/home/operator/tasks/users/1/x" -> Deny { reason: "partition: the request cites no task" } Some("user") None
 agent jimin root=users/1 fs.stat Some("read") "/home/operator/tasks/users/2/x" -> Deny { reason: "partition: the path is in another tasker's partition" } Some("user") None
 agent jimin fs.stat Some("read") "/home/operator/tasks/users/2/x" -> Deny { reason: "partition: the request cites no task" } Some("user") None
-# tool.invoke through the Composition, against tools-homelab.yaml: the tools.yaml ceiling decides first, for every subject; the role step has no rule for tool.invoke, so every row that passes the ceiling finalizes to Deny.
+# tool.invoke through the Composition, against tools-homelab.yaml: the tools.yaml ceiling decides first for every subject with a role, a subject with no role abstains, and the role step has no rule for tool.invoke, so every row finalizes to Deny.
 principal tool.invoke github-read gh ["pr", "view", "1"] -> Deny { reason: "tool: missing binding git for github-read" } Some("admin") None => Deny { reason: "tool: missing binding git for github-read" }
 principal tool.invoke github-read git ["fetch", "origin"] -> Deny { reason: "tool: missing binding git for github-read" } Some("admin") None => Deny { reason: "tool: missing binding git for github-read" }
 principal tool.invoke github-read gh ["pr", "diff", "1"] -> Deny { reason: "tool: missing binding git for github-read" } Some("admin") None => Deny { reason: "tool: missing binding git for github-read" }
@@ -816,11 +816,11 @@ agent jin tasked tool.invoke rust-build cargo ["build", "--config=x"] -> Deny { 
 agent jin tasked tool.invoke rust-build cargo ["check"] -> NotApplicable { note: Some("role user: no rule for tool.invoke") } Some("user") None => Deny { reason: "role user: no rule for tool.invoke" }
 agent jin tasked tool.invoke rust-fetch cargo ["fetch", "--locked"] -> NotApplicable { note: Some("role user: no rule for tool.invoke") } Some("user") None => Deny { reason: "role user: no rule for tool.invoke" }
 agent jin tasked tool.invoke sentinel-674-absent cargo ["build"] -> Deny { reason: "tool: unknown or disabled entry" } Some("user") None => Deny { reason: "tool: unknown or disabled entry" }
-unbound tool.invoke github-read gh ["pr", "view", "1"] -> Deny { reason: "tool: missing binding git for github-read" } None None => Deny { reason: "tool: missing binding git for github-read" }
-unbound tool.invoke github-read git ["fetch", "origin"] -> Deny { reason: "tool: missing binding git for github-read" } None None => Deny { reason: "tool: missing binding git for github-read" }
-unbound tool.invoke github-read gh ["pr", "diff", "1"] -> Deny { reason: "tool: missing binding git for github-read" } None None => Deny { reason: "tool: missing binding git for github-read" }
+unbound tool.invoke github-read gh ["pr", "view", "1"] -> NotApplicable { note: Some("subject resolves to no role") } None None => Deny { reason: "subject resolves to no role" }
+unbound tool.invoke github-read git ["fetch", "origin"] -> NotApplicable { note: Some("subject resolves to no role") } None None => Deny { reason: "subject resolves to no role" }
+unbound tool.invoke github-read gh ["pr", "diff", "1"] -> NotApplicable { note: Some("subject resolves to no role") } None None => Deny { reason: "subject resolves to no role" }
 unbound tool.invoke rust-build cargo ["build", "--release"] -> NotApplicable { note: Some("subject resolves to no role") } None None => Deny { reason: "subject resolves to no role" }
-unbound tool.invoke rust-build cargo ["build", "--config=x"] -> Deny { reason: "tool: denied argument 1 for rust-build/cargo" } None None => Deny { reason: "tool: denied argument 1 for rust-build/cargo" }
+unbound tool.invoke rust-build cargo ["build", "--config=x"] -> NotApplicable { note: Some("subject resolves to no role") } None None => Deny { reason: "subject resolves to no role" }
 unbound tool.invoke rust-build cargo ["check"] -> NotApplicable { note: Some("subject resolves to no role") } None None => Deny { reason: "subject resolves to no role" }
 unbound tool.invoke rust-fetch cargo ["fetch", "--locked"] -> NotApplicable { note: Some("subject resolves to no role") } None None => Deny { reason: "subject resolves to no role" }
-unbound tool.invoke sentinel-674-absent cargo ["build"] -> Deny { reason: "tool: unknown or disabled entry" } None None => Deny { reason: "tool: unknown or disabled entry" }
+unbound tool.invoke sentinel-674-absent cargo ["build"] -> NotApplicable { note: Some("subject resolves to no role") } None None => Deny { reason: "subject resolves to no role" }

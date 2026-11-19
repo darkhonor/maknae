@@ -470,7 +470,7 @@ color: "#ffd700"
 
 **The `Tool(...)` capability.** A grant is `Tool(<entry> <program> <argument pattern>)`, for example `Tool(rust-build cargo test *)`, in `authz.yaml`'s site `permissions:`, in a `subjects:` entry's `permissions:`, or in an agent's `policy.yaml`. A role's `roles:` entry holds action terms only, so a `Tool(...)` grant is never per role. A `tool.invoke` request is decided in this order:
 
-1. The `tools.yaml` ceiling, for every subject, whatever its role, before the role is resolved: the entry exists and is enabled, it runs the program, the arguments match one of the program's `subcommands` and none of its `deny_args`, the entry's bindings are present, and in a task its credential class has a reach check. A call outside the ceiling is refused, and no grant or other engine can permit it.
+1. The `tools.yaml` ceiling, for every subject that holds a role (`admin`, `user` or `guest`), before any role grant: a contained subject is refused as contained first, and a subject with no role is not decided by `-basic` at all. The ceiling checks that the entry exists and is enabled, it runs the program, the arguments match one of the program's `subcommands` and none of its `deny_args`, the entry's bindings are present, and in a task its credential class has a reach check. A call outside the ceiling is refused, and no grant or other engine can permit it.
 2. The role's grant of `tool.invoke`. It is not grantable in `roles:` yet (#479), so every call that passes the ceiling ends here, refused.
 3. The `Tool(...)` entries, deny first, as for `Read(...)` and `Write(...)`.
 
