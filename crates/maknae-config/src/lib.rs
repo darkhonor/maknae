@@ -77,6 +77,7 @@ pub use agents::{
     ENROLLMENT_FILE, NON_LOGIN_SHELLS, PERSONA_FILE, POLICY_FILE, RESERVED_AGENT_IDS,
     STARTER_POLICY, TASKS_RIGHT_PATHS, TASKS_RIGHT_SESSION,
 };
+pub use argpattern::{first_denied, ArgPattern, ArgPatternError, ArgToken, Bound, DenyArg};
 pub use audit_cfg::{
     audit_from_section, resolve_readers, AuditConfig, ReaderAccount, ReaderLookup, AUDIT_SECTION,
     READER_UID_FLOOR, REFUSED_READER_NAMES, REFUSED_READER_UIDS,
@@ -98,7 +99,6 @@ pub use bindings_sync::{
 // Re-exported so downstream seam constructors (maknae-authz-basic's
 // HermeticAuthorizer, #77) can NAME the requirement type without a maknae-io
 // dependency of their own; unix-gated like the fn whose signature carries it.
-pub use argpattern::{first_denied, ArgPattern, ArgPatternError, ArgToken, Bound, DenyArg};
 pub use authz::{
     destination_entry_is_acceptable, load_authz, parse_authz, parse_subject_entry, ActionPattern,
     AgentMatch, AuthzError, AuthzPolicy, HomeUnbound, Match3, ModelRef, PathGlob, Pattern,

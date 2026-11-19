@@ -152,10 +152,14 @@ impl DenyArg {
         }
         match s.strip_suffix('*') {
             Some("") => Err(ArgPatternError::LoneRest),
+            Some(text) if text.contains('*') => {
+                Err(ArgPatternError::StarInsideToken(s.to_string()))
+            }
             Some(text) => Ok(Self {
                 text: text.to_string(),
                 prefix: true,
             }),
+            None if s.contains('*') => Err(ArgPatternError::StarInsideToken(s.to_string())),
             None => Ok(Self {
                 text: s.to_string(),
                 prefix: false,
@@ -172,7 +176,6 @@ impl DenyArg {
     }
 }
 
-/// The index in `argv` of the first argument any entry denies.
 pub fn first_denied(denies: &[DenyArg], argv: &[String]) -> Option<usize> {
     argv.iter().position(|a| denies.iter().any(|d| d.hits(a)))
 }
@@ -339,7 +342,39 @@ mod tests {
 
     #[test]
     fn empty_or_bare_star_deny_is_rejected() {
-        assert!(DenyArg::parse("").is_err());
-        assert!(DenyArg::parse("*").is_err());
+        assert!(matches!(DenyArg::parse(""), Err(ArgPatternError::Empty)));
+        assert!(matches!(
+            DenyArg::parse("*"),
+            Err(ArgPatternError::LoneRest)
+        ));
+    }
+
+    #[test]
+    fn deny_star_other_than_trailing_is_rejected() {
+        for bad in ["--c*nfig", "**", "a**", "*a", "*a*"] {
+            assert!(
+                matches!(
+                    DenyArg::parse(bad),
+                    Err(ArgPatternError::StarInsideToken(_))
+                ),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejections_name_their_reason() {
+        let err = |s: &str| ArgPattern::parse(s).unwrap_err();
+        assert!(matches!(err(""), ArgPatternError::Empty));
+        assert!(matches!(err("a  b"), ArgPatternError::Spacing));
+        assert!(matches!(err("* a"), ArgPatternError::RestNotLast));
+        assert!(matches!(err("*"), ArgPatternError::LoneRest));
+        assert!(matches!(err("{git}"), ArgPatternError::MalformedBound(_)));
+        assert!(matches!(
+            err("{git.base}*"),
+            ArgPatternError::BoundWithStar(_)
+        ));
+        assert!(matches!(err("a**"), ArgPatternError::StarInsideToken(_)));
+        assert!(matches!(err("a*b"), ArgPatternError::StarInsideToken(_)));
     }
 }
