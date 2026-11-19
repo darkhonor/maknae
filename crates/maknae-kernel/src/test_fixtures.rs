@@ -448,3 +448,38 @@ pub(crate) fn shipped_composition_with(
         crate::composition::Composition::with_us_baseline_ceiling(basic),
     )
 }
+
+pub(crate) fn build_tool_request(
+    stamp: &crate::handler::Stamp<'_>,
+    peer_uid: u32,
+    home: Option<&std::path::Path>,
+    lane: maknae_security::Lane,
+    conversation: Option<&crate::conversation::facts::ConversationFacts>,
+    call: &maknae_config::ToolCall,
+) -> maknae_security::Request {
+    use maknae_security::{Action, AttrValue, Attributes, Context, Resource};
+    let mut resource = Attributes::new();
+    crate::handler::stamp_conversation(&mut resource, conversation);
+    resource.insert(
+        maknae_security::RESOURCE_TOOL_ENTRY,
+        AttrValue::Str(call.entry.clone()),
+    );
+    resource.insert(
+        maknae_security::RESOURCE_TOOL_PROGRAM,
+        AttrValue::Str(call.program.clone()),
+    );
+    resource.insert(
+        maknae_security::RESOURCE_TOOL_ARGV,
+        AttrValue::List(call.argv.clone()),
+    );
+    resource.insert(
+        maknae_security::RESOURCE_BINDING_KINDS,
+        AttrValue::Set(Default::default()),
+    );
+    maknae_security::Request {
+        subject: crate::handler::stamp_subject(peer_uid, home, stamp),
+        resource: Resource(resource),
+        action: Action("tool.invoke".into()),
+        context: Context(crate::handler::lane_context(lane)),
+    }
+}

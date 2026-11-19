@@ -884,7 +884,189 @@ mod tests {
                 }
             }
         }
+        out.push_str(&tool_invoke_decisions());
         out
+    }
+
+    const TOOL_SITE_POLICY: &str = "schema_version: 1\npermissions:\n  allow: [\"Tool(github-read gh pr view *)\", \"Tool(rust-build cargo build *)\"]\n  deny: [\"Tool(rust-build cargo build --config*)\"]\nsubjects:\n  operator:\n    permissions:\n      allow: [\"Tool(github-read git fetch *)\"]\nroles:\n  admin:\n    allow: [\"session.new\"]\n  user:\n    allow: [\"session.new\"]\n";
+
+    const TOOL_AGENT_POLICY: &str =
+        "schema_version: 1\npermissions:\n  allow: [\"Tool(rust-build cargo check *)\"]\n";
+
+    fn tool_invoke_decisions() -> String {
+        use crate::handler::{Stamp, TaskStamp};
+        use crate::test_fixtures::build_tool_request;
+        use maknae_authz_basic::Baseline;
+        let (g, basic) =
+            crate::test_fixtures::fixture("tool-invoke-golden", TOOL_SITE_POLICY, None);
+        crate::test_fixtures::write_sensitive(
+            &g.0,
+            include_str!("../../../packaging/common/sensitive.yaml"),
+        );
+        crate::test_fixtures::write_tools(
+            &g.0,
+            include_str!("../../../packaging/common/tools-homelab.yaml"),
+        );
+        basic.set_hosts(crate::test_fixtures::BTS_HOSTS);
+        for (id, uid, policy) in [("hobi", 2001, Some(TOOL_AGENT_POLICY)), ("jin", 2002, None)] {
+            crate::test_fixtures::write_agent(&g.0, id, &format!("{id}-svc"), uid, "user");
+            if let Some(policy) = policy {
+                crate::test_fixtures::write_agent_policy(&g.0, id, policy);
+            }
+        }
+        basic.install(basic.compile_from_file().unwrap());
+        let c = Composition::with_us_baseline_ceiling(basic);
+
+        let principal = nix::unistd::geteuid().as_raw();
+        let task = TaskStamp {
+            id: maknae_proto::TaskId([0x74; 16]),
+            tasker: "uid:1000".into(),
+            root: "users/1000".into(),
+            start: 0,
+        };
+        let hobi = maknae_config::AgentId::parse("hobi").unwrap();
+        let jin = maknae_config::AgentId::parse("jin").unwrap();
+        let calls: &[(&str, &str, &[&str])] = &[
+            ("github-read", "gh", &["pr", "view", "1"]),
+            ("github-read", "git", &["fetch", "origin"]),
+            ("github-read", "gh", &["pr", "diff", "1"]),
+            ("rust-build", "cargo", &["build", "--release"]),
+            ("rust-build", "cargo", &["build", "--config=x"]),
+            ("rust-build", "cargo", &["check"]),
+            ("rust-fetch", "cargo", &["fetch", "--locked"]),
+            ("sentinel-674-absent", "cargo", &["build"]),
+        ];
+        let subjects: [(&str, u32, Stamp, bool); 6] = [
+            ("principal", principal, Stamp::Client, false),
+            (
+                "agent hobi",
+                2001,
+                Stamp::Agent {
+                    agent: &hobi,
+                    task: None,
+                },
+                false,
+            ),
+            (
+                "agent hobi",
+                2001,
+                Stamp::Agent {
+                    agent: &hobi,
+                    task: Some(&task),
+                },
+                true,
+            ),
+            (
+                "agent jin",
+                2002,
+                Stamp::Agent {
+                    agent: &jin,
+                    task: None,
+                },
+                false,
+            ),
+            (
+                "agent jin",
+                2002,
+                Stamp::Agent {
+                    agent: &jin,
+                    task: Some(&task),
+                },
+                true,
+            ),
+            ("unbound", 4242, Stamp::Client, false),
+        ];
+        let mut out = String::from(
+            "# tool.invoke through the Composition, against tools-homelab.yaml: the role step has no rule for it, so every row finalizes to Deny.\n",
+        );
+        for (who, uid, stamp, tasked) in &subjects {
+            let tasked = if *tasked { " tasked" } else { "" };
+            for (entry, program, argv) in calls {
+                let call = maknae_config::ToolCall {
+                    entry: (*entry).into(),
+                    program: (*program).into(),
+                    argv: argv.iter().map(|a| (*a).to_owned()).collect(),
+                    bound: maknae_config::Bound::empty(),
+                };
+                let r = build_tool_request(
+                    stamp,
+                    *uid,
+                    Some(std::path::Path::new("/home/operator")),
+                    maknae_security::Lane::Local,
+                    None,
+                    &call,
+                );
+                let d = c.decide_cited(&r);
+                let rule = d.rule.map(|c| {
+                    let section = c.section.rsplit('#').next().unwrap_or_default().to_owned();
+                    format!("{} in #{section}", c.key)
+                });
+                out.push_str(&format!(
+                    "{who}{tasked} tool.invoke {entry} {argv:?} -> {:?} {:?} {rule:?} => {:?}\n",
+                    d.verdict,
+                    d.role,
+                    maknae_security::finalize(d.verdict.clone())
+                ));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_mandatory_operands_abstain_for_tool_invoke() {
+        use crate::handler::{Stamp, TaskStamp};
+        use crate::test_fixtures::build_tool_request;
+        use maknae_security::{Authorizer, Verdict};
+        let task = TaskStamp {
+            id: maknae_proto::TaskId([0x74; 16]),
+            tasker: "uid:1000".into(),
+            root: "users/1000".into(),
+            start: 0,
+        };
+        let agent = maknae_config::AgentId::parse("hobi").unwrap();
+        let call = maknae_config::ToolCall {
+            entry: "sentinel-674-entry".into(),
+            program: "cargo".into(),
+            argv: vec!["build".into()],
+            bound: maknae_config::Bound::empty(),
+        };
+        let host = maknae_config::SensitiveList::empty();
+        let ceiling = ceiling(Ceiling::baseline_for(US));
+        let sensitive = crate::sensitive_authz::SensitiveAuthorizer::new(&host);
+        let partition = crate::partition_authz::PartitionOperand;
+        let operands: [(&str, &dyn Authorizer); 3] = [
+            ("ceiling", &ceiling),
+            ("sensitive", &sensitive),
+            ("partition", &partition),
+        ];
+        let stamps = [
+            Stamp::Client,
+            Stamp::Agent {
+                agent: &agent,
+                task: None,
+            },
+            Stamp::Agent {
+                agent: &agent,
+                task: Some(&task),
+            },
+        ];
+        for stamp in &stamps {
+            let r = build_tool_request(
+                stamp,
+                2001,
+                Some(std::path::Path::new("/home/hobi-svc")),
+                maknae_security::Lane::Local,
+                None,
+                &call,
+            );
+            for (name, operand) in operands {
+                assert_eq!(
+                    operand.decide(&r),
+                    Verdict::NotApplicable { note: None },
+                    "{name}"
+                );
+            }
+        }
     }
 
     const TASKS_TARGETS: &[&str] = &[
