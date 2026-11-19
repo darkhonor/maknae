@@ -1,8 +1,10 @@
 use crate::api_request::{
-    login_body, login_request, lookup_body, lookup_request, revoke_self_request, unwrap_request,
+    approle_login_body, approle_login_request, login_body, login_request, lookup_body,
+    lookup_request, revoke_self_request, transit_sign_body, transit_sign_request, unwrap_request,
     wrapped_read_request, ApiBase,
 };
 use crate::api_shape::{admit_response, append_bounded, oversize, VaultOp, MAX_VAULT_BODY_BYTES};
+use crate::transit::{parse_service_login, parse_sign_reply, ServiceLogin, ServiceToken};
 use crate::user_login::{parse_login, Password, UserLogin, UserToken};
 use crate::wrap::{
     kv_data_path, parse_lookup, parse_wrapped_read, unwrap_checked, CheckedLookup, UnwrapOps,
@@ -87,6 +89,31 @@ impl VaultApi {
     pub async fn revoke_self(&self, token: &UserToken) -> Result<(), VaultError> {
         let req = revoke_self_request(&self.http, &self.base, token)?;
         self.execute(VaultOp::RevokeSelf, req).await.map(drop)
+    }
+
+    pub async fn approle_login(
+        &self,
+        mount: &str,
+        role_id: &str,
+        secret_id: &Zeroizing<String>,
+    ) -> Result<ServiceLogin, VaultError> {
+        let body = approle_login_body(role_id, secret_id)?;
+        let req = approle_login_request(&self.http, &self.base, mount, body)?;
+        let body = self.execute(VaultOp::AppRoleLogin, req).await?;
+        parse_service_login(&body)
+    }
+
+    pub async fn transit_sign_rs256(
+        &self,
+        token: &ServiceToken,
+        mount: &str,
+        key: &str,
+        input: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+        let body = transit_sign_body(input)?;
+        let req = transit_sign_request(&self.http, &self.base, token, mount, key, body)?;
+        let body = self.execute(VaultOp::TransitSign, req).await?;
+        parse_sign_reply(&body)
     }
 
     async fn execute(
@@ -198,6 +225,41 @@ mod tests {
         assert!(matches!(
             rt.block_on(api.revoke_self(&user)),
             Err(VaultError::VaultTransport { .. })
+        ));
+    }
+
+    #[test]
+    fn a_dead_vault_fails_the_service_calls_as_transport_errors() {
+        maknae_crypto::init().unwrap();
+        let (_dir, ca) = ca();
+        let api = VaultApi::new("https://127.0.0.1:1", &ca).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let secret = Zeroizing::new("0f1e2d3c".to_string());
+        assert!(matches!(
+            rt.block_on(api.approle_login("approle", "role", &secret)),
+            Err(VaultError::VaultTransport {
+                op: "AppRole login",
+                ..
+            })
+        ));
+        let service = ServiceToken::new(Zeroizing::new("hvs.s".into())).unwrap();
+        assert!(matches!(
+            rt.block_on(api.transit_sign_rs256(&service, "transit", "github-app", b"a.b")),
+            Err(VaultError::VaultTransport {
+                op: "Transit sign",
+                ..
+            })
+        ));
+        assert!(matches!(
+            rt.block_on(api.transit_sign_rs256(&service, "transit", "../k", b"a.b")),
+            Err(VaultError::InvalidMount(_))
+        ));
+        assert!(matches!(
+            rt.block_on(api.approle_login("approle", "role", &Zeroizing::new(String::new()))),
+            Err(VaultError::InvalidSecret { .. })
         ));
     }
 

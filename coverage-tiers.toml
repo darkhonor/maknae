@@ -189,6 +189,8 @@ files = [
   "crates/maknae-vault/src/api_shape.rs",
   "crates/maknae-vault/src/user_login.rs",
   "crates/maknae-vault/src/wrap.rs",
+  # #168: the Egress Daemon's service token, AppRole and Transit paths, and the signature parse.
+  "crates/maknae-vault/src/transit.rs",
   "crates/maknae-vault/src/token_record.rs",
   "crates/maknae-vault/src/password_line.rs",
   "crates/maknae-vault/src/seal_pub_store.rs",
@@ -740,7 +742,7 @@ why = "#153: reqwest request glue; its header, build and serializer error arms c
 
 [[t3]]
 path = "crates/maknae-vault/src/vault_api.rs"
-why = "#153: sends the five user-credential Vault calls (login, wrapped read, lookup, unwrap, revoke-self); no Vault stub by design. Offline, the dead-address test reaches only execute()'s transport-error path; the response path runs in the operator-gated tests/live_user_wrap.rs. The status and Content-Length admission (admit_response) and the body cap (append_bounded) are T1 in api_shape.rs, every parse and check is T1 in user_login.rs and wrap.rs, and request construction is asserted in api_request.rs. Mutation-excluded like client.rs"
+why = "#153, #168: sends the five user-credential Vault calls (login, wrapped read, lookup, unwrap, revoke-self) and the Egress Daemon's AppRole login and Transit sign; no Vault stub by design. Offline, the dead-address test reaches only execute()'s transport-error path; the response path runs in the operator-gated tests/live_user_wrap.rs. The status and Content-Length admission (admit_response) and the body cap (append_bounded) are T1 in api_shape.rs, every parse and check is T1 in user_login.rs, wrap.rs and transit.rs, and request construction is asserted in api_request.rs. Mutation-excluded like client.rs"
 
 [[t3]]
 path = "crates/maknae-vault/src/token_store.rs"
@@ -752,7 +754,7 @@ why = "#153: reads the host-wide seal.pub through maknae-io (open_anchor, then r
 
 [[t3]]
 path = "crates/maknae-vault/src/seal_key_io.rs"
-why = "#153: reads the Egress Daemon's seal private key from $CREDENTIALS_DIRECTORY (Linux) or from the System-keychain item the egress pointer names (macOS); the source choice, the length bound and the hex codec are T1 in secret_source.rs, and the pointer and account gate are keychain_policy.rs. The credential arm is unit-tested on every OS, the keychain arm up to the account gate on macOS; mutation-excluded like secret_io.rs"
+why = "#153, #168: reads the Egress Daemon's seal private key from $CREDENTIALS_DIRECTORY (Linux) or from the System-keychain item the egress pointer names (macOS), and its AppRole SecretID from $CREDENTIALS_DIRECTORY on Linux only; the source choices, the length bound and the hex codec are T1 in secret_source.rs, the SecretID shape check is T1 in transit.rs, and the pointer and account gate are keychain_policy.rs. The credential arm is unit-tested on every OS, the keychain arm up to the account gate on macOS; mutation-excluded like secret_io.rs"
 
 [[t3]]
 path = "crates/maknae-vault/src/graph_key_io.rs"

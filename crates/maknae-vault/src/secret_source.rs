@@ -23,6 +23,7 @@ pub fn daemon_sealed_credential(config_dir: &Path) -> PathBuf {
 }
 
 pub const EGRESS_SEAL_KEY_CRED_NAME: &str = "maknae-egress-seal-key";
+pub const EGRESS_SECRET_ID_CRED_NAME: &str = "maknae-egress-secret-id";
 pub const MAX_SEAL_KEY_BYTES: usize = 512;
 pub const GRAPH_KEY_CRED_NAME: &str = "maknaed-graph-key";
 pub const GRAPH_KEY_BYTES: usize = 32;
@@ -135,6 +136,22 @@ pub fn resolve_egress_seal_key_source(
         (None, None) => Err(VaultError::CredentialSource(
             "no egress seal key source: $CREDENTIALS_DIRECTORY is unset and no keychain pointer is enrolled"
                 .to_string(),
+        )),
+    }
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn resolve_egress_secret_id_source(
+    credentials_dir_env: Option<&Path>,
+) -> Result<PathBuf, VaultError> {
+    match credentials_dir_env {
+        Some(dir) if dir.as_os_str().is_empty() => Err(VaultError::CredentialSource(
+            "$CREDENTIALS_DIRECTORY is exported but empty — refusing rather than falling through"
+                .to_string(),
+        )),
+        Some(dir) => Ok(dir.join(EGRESS_SECRET_ID_CRED_NAME)),
+        None => Err(VaultError::CredentialSource(
+            "no egress SecretID source: $CREDENTIALS_DIRECTORY is unset".to_string(),
         )),
     }
 }
@@ -598,6 +615,25 @@ mod tests {
             Err(VaultError::CredentialSource(m)) if m.contains("exported but empty")
         ));
         assert_eq!(EGRESS_SEAL_KEY_CRED_NAME, "maknae-egress-seal-key");
+    }
+
+    #[test]
+    fn the_egress_secret_id_resolves_only_under_credentials_directory() {
+        assert_eq!(
+            resolve_egress_secret_id_source(Some(Path::new(
+                "/run/credentials/maknae-egress.service"
+            )))
+            .unwrap(),
+            PathBuf::from("/run/credentials/maknae-egress.service/maknae-egress-secret-id")
+        );
+        assert!(matches!(
+            resolve_egress_secret_id_source(None),
+            Err(VaultError::CredentialSource(m)) if m.starts_with("no egress SecretID source")
+        ));
+        assert!(matches!(
+            resolve_egress_secret_id_source(Some(Path::new(""))),
+            Err(VaultError::CredentialSource(m)) if m.contains("exported but empty")
+        ));
     }
 
     #[test]

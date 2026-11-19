@@ -1379,6 +1379,7 @@ name = "maknae-vault"
 version = "0.0.0"
 dependencies = [
  "arc-swap",
+ "base64 0.23.1",
  "bytes",
  "ciborium",
  "maknae-config",

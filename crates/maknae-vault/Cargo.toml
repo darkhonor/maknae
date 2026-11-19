@@ -49,6 +49,8 @@ maknae-msgs = { path = "../maknae-msgs" }
 x509-parser = "0.18"  # also parses CA/leaf PEM->DER (rustls-pemfile is unmaintained, RUSTSEC-2025-0134)
 url = "2"             # validate vault.addr is a well-formed https:// URL (fail-closed, no plaintext)
 zeroize = "1"
+# The version reqwest and pem already resolve, so decoding Transit signatures adds no second base64 0.23.
+base64 = "=0.23.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bytes = "1.10.1"  # below 1.10.1, to_vec on a Bytes::from_owner buffer leaks the owner, so the zeroizing body is never wiped

@@ -5,6 +5,7 @@ use crate::secret_source::{
 };
 use crate::{KeychainPlane, VaultError, MAX_SEAL_KEY_BYTES};
 use std::path::Path;
+use zeroize::Zeroizing;
 
 pub fn read_egress_seal_key(
     credentials_dir: Option<&str>,
@@ -26,10 +27,34 @@ pub fn read_egress_seal_key(
     }
 }
 
+#[cfg(target_os = "linux")]
+pub fn read_egress_secret_id(
+    credentials_dir: Option<&Path>,
+) -> Result<Zeroizing<String>, VaultError> {
+    let path = crate::secret_source::resolve_egress_secret_id_source(credentials_dir)?;
+    let bytes = crate::read_storage_within(&path, Some(crate::MAX_TOKEN_BYTES as u64))?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| VaultError::InvalidSecret {
+        what: "egress SecretID",
+        why: "not UTF-8",
+    })?;
+    let text = text.trim();
+    crate::transit::approle_credential("egress SecretID", text)?;
+    Ok(Zeroizing::new(text.to_owned()))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn read_egress_secret_id(
+    _credentials_dir: Option<&Path>,
+) -> Result<Zeroizing<String>, VaultError> {
+    Err(VaultError::CredentialSource(format!(
+        "the egress SecretID has no custody on {}: it is read only from $CREDENTIALS_DIRECTORY on Linux",
+        std::env::consts::OS
+    )))
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use zeroize::Zeroizing;
 
     fn der() -> Zeroizing<Vec<u8>> {
         maknae_seal::SealPrivateKey::generate()
@@ -45,6 +70,91 @@ mod tests {
     }
 
     const NO_EGRESS_DIR: &str = "/nonexistent/maknae-egress";
+
+    fn creds_named(name: &str, bytes: &[u8]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(name), bytes).unwrap();
+        dir
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_secret_id_is_read_from_credentials_directory_only_under_its_name() {
+        assert_eq!(crate::EGRESS_SECRET_ID_CRED_NAME, "maknae-egress-secret-id");
+        let creds = creds_named(
+            crate::EGRESS_SECRET_ID_CRED_NAME,
+            b"0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0\n",
+        );
+        let got = read_egress_secret_id(Some(creds.path())).unwrap();
+        assert!(got.as_str() == "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0");
+        assert_eq!(got.capacity(), got.len());
+        for other in [
+            crate::DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME,
+            crate::EGRESS_SEAL_KEY_CRED_NAME,
+            "maknae-agent-secret-id",
+            "secret-id",
+        ] {
+            let elsewhere = creds_named(other, b"0f1e2d3c");
+            assert!(
+                matches!(
+                    read_egress_secret_id(Some(elsewhere.path())),
+                    Err(VaultError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound
+                ),
+                "{other}"
+            );
+        }
+        assert!(matches!(
+            read_egress_secret_id(None),
+            Err(VaultError::CredentialSource(m)) if m.contains("$CREDENTIALS_DIRECTORY is unset")
+        ));
+        assert!(matches!(
+            read_egress_secret_id(Some(Path::new(""))),
+            Err(VaultError::CredentialSource(m)) if m.contains("exported but empty")
+        ));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn off_linux_the_secret_id_is_refused_by_platform() {
+        let creds = creds_named(crate::EGRESS_SECRET_ID_CRED_NAME, b"0f1e2d3c");
+        assert!(matches!(
+            read_egress_secret_id(Some(creds.path())),
+            Err(VaultError::CredentialSource(m)) if m.contains(std::env::consts::OS)
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_secret_id_that_is_empty_oversized_or_misshapen_is_refused() {
+        for bad in [&b""[..], b"\n", b"a b", b"a\"b", b"\xff\xfe"] {
+            let creds = creds_named(crate::EGRESS_SECRET_ID_CRED_NAME, bad);
+            assert!(
+                read_egress_secret_id(Some(creds.path())).is_err(),
+                "{bad:?}"
+            );
+        }
+        let creds = creds_named(
+            crate::EGRESS_SECRET_ID_CRED_NAME,
+            &vec![b'a'; crate::MAX_TOKEN_BYTES + 1],
+        );
+        assert!(matches!(
+            read_egress_secret_id(Some(creds.path())),
+            Err(VaultError::Io { source, .. }) if source.kind() == std::io::ErrorKind::FileTooLarge
+        ));
+        let creds = creds_named(
+            crate::EGRESS_SECRET_ID_CRED_NAME,
+            &vec![b'a'; crate::MAX_TOKEN_BYTES],
+        );
+        assert_eq!(
+            read_egress_secret_id(Some(creds.path())).unwrap().len(),
+            crate::MAX_TOKEN_BYTES
+        );
+        let creds = creds_named(crate::EGRESS_SECRET_ID_CRED_NAME, b"SENTINEL x");
+        let e = read_egress_secret_id(Some(creds.path()))
+            .unwrap_err()
+            .to_string();
+        assert!(!e.contains("SENTINEL"), "{e}");
+    }
 
     #[test]
     fn a_credential_holding_a_seal_key_is_read_whole() {

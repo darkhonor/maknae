@@ -2,6 +2,7 @@ use crate::api_shape::{
     de_secret, json_refusal, token_is_acceptable, url_path_is_safe, SecretStr, VaultOp,
     WrapMismatch,
 };
+use crate::transit::ServiceToken;
 use crate::user_login::UserToken;
 use crate::VaultError;
 use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, Visitor};
@@ -107,13 +108,17 @@ pub(crate) fn client_token<'a>(
     op: VaultOp,
     user: Option<&'a UserToken>,
     wrapping: Option<&'a WrappingToken>,
+    service: Option<&'a ServiceToken>,
 ) -> Result<Option<&'a str>, VaultError> {
     match op {
-        VaultOp::UserpassLogin | VaultOp::WrapLookup => Ok(None),
+        VaultOp::UserpassLogin | VaultOp::WrapLookup | VaultOp::AppRoleLogin => Ok(None),
         VaultOp::WrappedRead | VaultOp::RevokeSelf => user
             .map(|t| Some(t.expose()))
             .ok_or_else(missing_client_token),
         VaultOp::Unwrap => wrapping
+            .map(|t| Some(t.expose()))
+            .ok_or_else(missing_client_token),
+        VaultOp::TransitSign => service
             .map(|t| Some(t.expose()))
             .ok_or_else(missing_client_token),
     }
@@ -461,33 +466,62 @@ mod tests {
         let user = UserToken::new(Zeroizing::new("hvs.user".into())).unwrap();
         let wrap = wrapping("hvs.wrap");
         let (u, w) = (Some(&user), Some(&wrap));
-        let pick = |op| client_token(op, u, w).unwrap();
+        let pick = |op| client_token(op, u, w, None).unwrap();
         assert_eq!(pick(VaultOp::UserpassLogin), None);
         assert_eq!(pick(VaultOp::WrapLookup), None);
         assert!(pick(VaultOp::WrappedRead) == Some("hvs.user"));
         assert!(pick(VaultOp::Unwrap) == Some("hvs.wrap"));
         assert!(pick(VaultOp::RevokeSelf) == Some("hvs.user"));
         assert!(matches!(
-            client_token(VaultOp::RevokeSelf, None, Some(&wrap)),
+            client_token(VaultOp::RevokeSelf, None, Some(&wrap), None),
             Err(VaultError::InvalidSecret {
                 what: "client token",
                 ..
             })
         ));
         assert!(matches!(
-            client_token(VaultOp::WrappedRead, None, Some(&wrap)),
+            client_token(VaultOp::WrappedRead, None, Some(&wrap), None),
             Err(VaultError::InvalidSecret {
                 what: "client token",
                 ..
             })
         ));
         assert!(matches!(
-            client_token(VaultOp::Unwrap, Some(&user), None),
+            client_token(VaultOp::Unwrap, Some(&user), None, None),
             Err(VaultError::InvalidSecret {
                 what: "client token",
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn client_token_requires_the_service_token_for_transit_sign() {
+        let user = UserToken::new(Zeroizing::new("hvs.user".into())).unwrap();
+        let wrap = wrapping("hvs.wrap");
+        let service = ServiceToken::new(Zeroizing::new("hvs.service".into())).unwrap();
+        let (u, w, s) = (Some(&user), Some(&wrap), Some(&service));
+        assert!(client_token(VaultOp::TransitSign, u, w, s).unwrap() == Some("hvs.service"));
+        assert_eq!(client_token(VaultOp::AppRoleLogin, u, w, s).unwrap(), None);
+        assert!(matches!(
+            client_token(VaultOp::TransitSign, u, w, None),
+            Err(VaultError::InvalidSecret {
+                what: "client token",
+                ..
+            })
+        ));
+        for op in [
+            VaultOp::UserpassLogin,
+            VaultOp::WrapLookup,
+            VaultOp::WrappedRead,
+            VaultOp::Unwrap,
+            VaultOp::RevokeSelf,
+        ] {
+            assert!(
+                client_token(op, u, w, s).unwrap() != Some("hvs.service"),
+                "{op:?}"
+            );
+        }
     }
 
     #[test]
