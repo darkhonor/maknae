@@ -479,6 +479,12 @@ impl SourcedList<'_> {
 
 type DenyLists<'a> = [Option<SourcedList<'a>>; 2];
 
+#[derive(Clone, Copy)]
+enum Side {
+    Allow,
+    Deny,
+}
+
 fn evaluate3_over(
     deny: &DenyLists<'_>,
     allow: &SourcedList<'_>,
@@ -493,7 +499,7 @@ fn evaluate3_over(
     }
     for list in deny.iter().flatten() {
         for (i, p) in list.patterns.iter().enumerate() {
-            if p.matches_req(req, home)? {
+            if p.matches_req(req, home, Side::Deny)? {
                 return Ok(Match3::DenyMatch {
                     source: list.source(i, "deny"),
                 });
@@ -501,7 +507,7 @@ fn evaluate3_over(
         }
     }
     for (i, p) in allow.patterns.iter().enumerate() {
-        if p.matches_req(req, home)? {
+        if p.matches_req(req, home, Side::Allow)? {
             return Ok(Match3::AllowMatch {
                 source: allow.source(i, "allow"),
             });
@@ -623,10 +629,13 @@ impl ToolPattern {
         })
     }
 
-    fn matches(&self, call: &ToolCall) -> bool {
+    fn matches(&self, call: &ToolCall, side: Side) -> bool {
         self.entry == call.entry
             && self.program == call.program
-            && self.args.matches(&call.argv, &call.bound)
+            && match side {
+                Side::Allow => self.args.matches(&call.argv, &call.bound),
+                Side::Deny => self.args.matches_for_deny(&call.argv, &call.bound),
+            }
     }
 }
 
@@ -640,9 +649,14 @@ impl Pattern {
         }
     }
 
-    fn matches_req(&self, req: &Request<'_>, home: Option<&Path>) -> Result<bool, HomeUnbound> {
+    fn matches_req(
+        &self,
+        req: &Request<'_>,
+        home: Option<&Path>,
+        side: Side,
+    ) -> Result<bool, HomeUnbound> {
         match (self, req) {
-            (Pattern::Tool(t), Request::Tool(call)) => Ok(t.matches(call)),
+            (Pattern::Tool(t), Request::Tool(call)) => Ok(t.matches(call, side)),
             (Pattern::Tool(_), Request::Read(_) | Request::Write(_)) => Ok(false),
             (Pattern::Read(_) | Pattern::Write(_), _) => self
                 .glob_for(req)
@@ -3649,7 +3663,9 @@ mod tests {
             Request::Read(Path::new("/sentinel-674-p")),
             Request::Write(Path::new("/sentinel-674-p")),
         ] {
-            assert_eq!(p.matches_req(&req, None), Ok(false));
+            for side in [Side::Allow, Side::Deny] {
+                assert_eq!(p.matches_req(&req, None, side), Ok(false));
+            }
         }
     }
 
@@ -3658,18 +3674,22 @@ mod tests {
         let call = tool_call("a", "prog", &["x"]);
         for spec in ["Read(/**)", "Write(/**)"] {
             let p = parse_pattern(spec).unwrap();
-            assert_eq!(p.matches_req(&Request::Tool(&call), None), Ok(false));
+            for side in [Side::Allow, Side::Deny] {
+                assert_eq!(p.matches_req(&Request::Tool(&call), None, side), Ok(false));
+            }
         }
     }
 
     #[test]
     fn tool_request_matches_on_entry_program_and_argv() {
         let p = parse_pattern("Tool(a prog build *)").unwrap();
-        let hit = |c: &ToolCall| p.matches_req(&Request::Tool(c), None).unwrap();
-        assert!(hit(&tool_call("a", "prog", &["build", "x"])));
-        assert!(!hit(&tool_call("b", "prog", &["build", "x"])));
-        assert!(!hit(&tool_call("a", "other", &["build", "x"])));
-        assert!(!hit(&tool_call("a", "prog", &["test", "x"])));
+        for side in [Side::Allow, Side::Deny] {
+            let hit = |c: &ToolCall| p.matches_req(&Request::Tool(c), None, side).unwrap();
+            assert!(hit(&tool_call("a", "prog", &["build", "x"])));
+            assert!(!hit(&tool_call("b", "prog", &["build", "x"])));
+            assert!(!hit(&tool_call("a", "other", &["build", "x"])));
+            assert!(!hit(&tool_call("a", "prog", &["test", "x"])));
+        }
     }
 
     #[test]
@@ -3706,6 +3726,67 @@ mod tests {
             Ok(Match3::AllowMatch {
                 source: "Tool(a prog run *)".into()
             })
+        );
+    }
+
+    #[test]
+    fn an_unresolved_bound_in_a_deny_fails_closed() {
+        let p = parse_authz(
+            "schema_version: 1\npermissions:\n  allow: [\"Tool(e git checkout *)\"]\n  deny: [\"Tool(e git checkout {git.base})\"]\nsubjects:\n  s:\n    permissions:\n      allow: [\"Tool(e git checkout *)\"]\n      deny: [\"Tool(e git status {git.base})\"]\n",
+        )
+        .unwrap();
+        let checkout = tool_call("e", "git", &["checkout", "sentinel-674-main"]);
+        let denied = Ok(Match3::DenyMatch {
+            source: "Tool(e git checkout {git.base})".into(),
+        });
+        assert_eq!(
+            p.evaluate3_floored(None, &Request::Tool(&checkout), None),
+            denied
+        );
+        let own = p.subjects["s"].permissions.as_ref().unwrap();
+        assert_eq!(
+            p.evaluate3_floored(Some(own), &Request::Tool(&checkout), None),
+            denied
+        );
+        let status = tool_call("e", "git", &["status", "x"]);
+        assert_eq!(
+            p.evaluate3_floored(Some(own), &Request::Tool(&status), None),
+            Ok(Match3::DenyMatch {
+                source: "Tool(e git status {git.base})".into(),
+            })
+        );
+        assert_eq!(
+            p.evaluate3_agent(own, None, &Request::Tool(&checkout), None),
+            Ok(AgentMatch::Floored(Match3::DenyMatch {
+                source: "Tool(e git checkout {git.base})".into(),
+            }))
+        );
+    }
+
+    #[test]
+    fn an_unresolved_bound_in_an_allow_never_matches() {
+        let p = parse_authz(
+            "schema_version: 1\npermissions:\n  allow: [\"Tool(e git checkout {git.base})\"]\n",
+        )
+        .unwrap();
+        let call = tool_call("e", "git", &["checkout", "sentinel-674-main"]);
+        assert_eq!(
+            p.evaluate3_floored(None, &Request::Tool(&call), None),
+            Ok(Match3::NoMatch)
+        );
+        let mut bound = call.clone();
+        bound.bound.insert("git.base", "sentinel-674-main");
+        assert_eq!(
+            p.evaluate3_floored(None, &Request::Tool(&bound), None),
+            Ok(Match3::AllowMatch {
+                source: "Tool(e git checkout {git.base})".into(),
+            })
+        );
+        bound.bound = Bound::empty();
+        bound.bound.insert("git.base", "other");
+        assert_eq!(
+            p.evaluate3_floored(None, &Request::Tool(&bound), None),
+            Ok(Match3::NoMatch)
         );
     }
 

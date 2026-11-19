@@ -6231,6 +6231,26 @@ mod tests {
     }
 
     #[test]
+    fn an_unresolved_bound_in_a_deny_refuses_what_a_wildcard_allow_grants() {
+        let mut lp = lp_tool(
+            "permissions:\n  allow: [\"Tool(sentinel-674-co git checkout *)\"]\n  deny: [\"Tool(sentinel-674-co git checkout {git.base})\"]\n",
+            &["user"],
+            &[],
+        );
+        lp.tools = std::sync::Arc::new(
+            maknae_config::ToolsCatalog::parse("schema_version: 1\ntools:\n  sentinel-674-co:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      git:\n        subcommands: [\"checkout *\"]\n").unwrap(),
+        );
+        let ask = |argv: &[&str]| {
+            tool_decided(&lp, &tool_req(TOOL_USER, "sentinel-674-co", "git", argv)).verdict
+        };
+        assert_eq!(
+            ask(&["checkout", "sentinel-674-main"]),
+            deny("denied by policy entry Tool(sentinel-674-co git checkout {git.base})")
+        );
+        assert_eq!(ask(&["checkout", "-b", "x"]), permit_with_audit());
+    }
+
+    #[test]
     fn wrong_attr_variant_is_indeterminate() {
         let lp = lp_tool(TOOL_SITE_ALLOW, &["user"], &[]);
         for (key, value) in [

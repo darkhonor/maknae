@@ -122,7 +122,16 @@ impl ArgPattern {
         Ok(Self(tokens))
     }
 
+    /// An unresolved `{kind.field}` matches any one argument, so a deny fails closed.
+    pub fn matches_for_deny(&self, argv: &[String], bound: &Bound) -> bool {
+        self.matches_with(argv, bound, true)
+    }
+
     pub fn matches(&self, argv: &[String], bound: &Bound) -> bool {
+        self.matches_with(argv, bound, false)
+    }
+
+    fn matches_with(&self, argv: &[String], bound: &Bound, unresolved_matches: bool) -> bool {
         let (fixed, open) = match self.0.split_last() {
             Some((ArgToken::Rest, fixed)) => (fixed, true),
             _ => (self.0.as_slice(), false),
@@ -133,7 +142,10 @@ impl ArgPattern {
         fixed.iter().zip(argv).all(|(t, arg)| match t {
             ArgToken::Literal(s) => arg == s,
             ArgToken::Prefix(p) => arg.starts_with(p.as_str()),
-            ArgToken::Bound { kind, field } => bound.get(kind, field) == Some(arg.as_str()),
+            ArgToken::Bound { kind, field } => match bound.get(kind, field) {
+                Some(value) => value == arg,
+                None => unresolved_matches,
+            },
             ArgToken::Rest => false,
         })
     }
@@ -247,6 +259,20 @@ mod tests {
         assert!(p.matches(&argv(&["diff", "sentinel-674-main"]), &b));
         assert!(!p.matches(&argv(&["diff", "other"]), &b));
         assert!(!p.matches(&argv(&["diff"]), &b));
+    }
+
+    #[test]
+    fn a_deny_treats_an_unresolved_bound_as_any_one_argument() {
+        let p = ArgPattern::parse("checkout {git.base}").unwrap();
+        let none = Bound::empty();
+        assert!(p.matches_for_deny(&argv(&["checkout", "sentinel-674-main"]), &none));
+        assert!(p.matches_for_deny(&argv(&["checkout", ""]), &none));
+        assert!(!p.matches_for_deny(&argv(&["checkout"]), &none));
+        assert!(!p.matches_for_deny(&argv(&["checkout", "a", "b"]), &none));
+        assert!(!p.matches(&argv(&["checkout", "sentinel-674-main"]), &none));
+        let b = bound(&[("git.base", "sentinel-674-main")]);
+        assert!(p.matches_for_deny(&argv(&["checkout", "sentinel-674-main"]), &b));
+        assert!(!p.matches_for_deny(&argv(&["checkout", "other"]), &b));
     }
 
     #[test]
