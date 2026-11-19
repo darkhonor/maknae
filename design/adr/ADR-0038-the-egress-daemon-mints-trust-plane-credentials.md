@@ -1,0 +1,96 @@
+# ADR-0038: The Egress Daemon mints trust-plane credentials — it is the trust plane's authenticated-egress PEP; credential kinds behind one closed interface; a Transit-sign-only Vault identity; the GitHub App installation token first
+
+- **Status:** Accepted (maintainer-ruled 2026-11-19)
+- **Date:** 2026-11-19
+- **Deciders:** Alex Ackerman (maintainer)
+- **Raised by:** [#168](https://github.com/darkhonor/maknae/issues/168) (slice 3, rescoped 2026-11-19)
+- **Amends:** [ADR-0028](ADR-0028-per-user-model-providers-and-kernel-blind-credentials.md) decision 6 and its control-mapping table; [ADR-0036](ADR-0036-the-tool-model.md) decision 13
+- **Builds on:** [ADR-0035](ADR-0035-policy-enforcement-points-placement-and-trust-tiers.md) (PEP placement); [ADR-0036](ADR-0036-the-tool-model.md) decision 13 (credential classes and their minting authority); [ADR-0037](ADR-0037-task-bindings-labels-and-tool-authorization.md) decision 7 (the reach check); [ADR-0026](ADR-0026-memory-hygiene-boundary.md) (secret-class buffers)
+
+## Context
+
+[ADR-0036](ADR-0036-the-tool-model.md) decision 13 gives every tool entry a credential class, and says a class whose minting key must not reach the subject, a GitHub App's private key, "is minted in the trust plane". It did not say which trust-plane process mints. [ADR-0037](ADR-0037-task-bindings-labels-and-tool-authorization.md) decision 7 puts the reach check for a task's bindings in the Egress Daemon, and slice 1 of #168 (`tools.yaml` and `CredentialKind`, now [#674](https://github.com/darkhonor/maknae/issues/674)) gives each class a `kind` and a `minting` field whose value `trust-plane` has no named process behind it.
+
+The Egress Daemon (`maknae-egress`, running as `_maknae-egress`) already makes every outbound model call, and by [ADR-0028](ADR-0028-per-user-model-providers-and-kernel-blind-credentials.md) decision 6 it holds no Vault identity: its old AppRole, with a KV read over every provider key, was removed so that no process acting for many users holds a standing grant over their credentials. Minting an installation token needs a signature from the App's private key, so whichever process mints needs some standing access to that key.
+
+The maintainer's rulings of 2026-11-19, in the design session for #168 slice 3:
+
+- The App's private key lives in Vault Transit, imported once and non-exportable. The minter asks Transit to sign the App's JWT, so no Maknae process ever holds key bytes.
+- `maknae-egress` mints. No new process. It is the trust plane's **authenticated-egress PEP**: every outbound call that spends or mints a credential goes through it. `maknae-proxy` (planned, `design/egress-and-tool-execution.md` §6) never holds a credential.
+- One installation token per permission set, so no single activity is granted more than it needs.
+- The token returns sealed to the Agent Daemon, the per-turn credential path (`design/diagrams/credential-path.toml`) in reverse: `maknaed` relays bytes it cannot open, so the kernel stays blind.
+- Minting is a general capability, not a GitHub feature. Each use case (an unattended help-desk agent's OAuth2 client credentials, say) adds a credential kind, not a component.
+- Slice 3 stops at the Egress Daemon. Nothing in production calls the minter until slice 4 gives tasks their `reach`, and the kernel gets no stand-in caller.
+
+**Measured, 2026-11-19**, on the maintainer's HomeLab Vault and a test GitHub App (recorded in a dated banner on #168):
+
+- Transit `sign/<key>/sha2-256` with `signature_algorithm=pkcs1v15` produced an RS256 JWT that GitHub accepted.
+- For an installation token, the `permissions` block of `GET /repos/{owner}/{repo}` came back all `false`, `pull` included.
+- A token minted for one repository got 404 for a second repository installed for the same App, so GitHub enforces the narrowing.
+- `DELETE /installation/token` answered 204, and the same token then answered 401.
+
+## Decision
+
+1. **The Egress Daemon is the trust plane's authenticated-egress PEP.** Every trust-plane outbound call that spends or mints a credential is made by `maknae-egress`: the model provider calls ([ADR-0028](ADR-0028-per-user-model-providers-and-kernel-blind-credentials.md)), credential minting and revocation for every credential class whose `minting` is `trust-plane` ([ADR-0036](ADR-0036-the-tool-model.md) decision 13), and the reach checks of [ADR-0037](ADR-0037-task-bindings-labels-and-tool-authorization.md) decision 7. `maknae-proxy` decides tool tunnels and holds no credential. `maknaed` stays the sole PDP ([ADR-0035](ADR-0035-policy-enforcement-points-placement-and-trust-tiers.md)): the Egress Daemon mints only on a frame from `maknaed`, and checks that frame against its own bounds before any I/O.
+
+2. **A credential kind is one implementation of a closed interface.** The interface is mint and revoke, selected by an exhaustive `match` on `maknae_config::CredentialKind` (#674) with no `_` arm, so a new kind fails to compile until someone decides whether the trust plane mints it. A kind the trust plane does not mint is refused before any I/O. A new use case adds a kind, never a process. The reach check joins the interface with #168 slice 4, which builds it; slice 3 adds no slot for it. `github-app-installation` is the first kind. The stored-token kind (`github-machine-user`) has no minting step here: the Agent Daemon can already read its own stored token, so the front end delivers it (`minting: front-end`), and the Egress Daemon's only role for it is slice 4's reach check.
+
+3. **The GitHub App kind signs through Vault Transit and mints one token per permission set.**
+   - **The JWT.** The App's private key is imported into a Transit key once and is not exportable. For each mint the Egress Daemon builds the signing input (header `{"alg":"RS256","typ":"JWT"}`; claims `iat` = now − 60 s, `exp` = now + 540 s, `iss` = the App id, inside GitHub's 10-minute maximum) and asks Transit to sign it at `<mount>/sign/<key>/sha2-256` with `pkcs1v15`. The hash is pinned in the path, matching the Vault policy (decision 5). A JWT is never cached, so no credential that can mint stays in the Egress Daemon's memory between mints.
+   - **The mint.** `POST {api}/app/installations/{installation_id}/access_tokens` with the set's repositories and permissions, once per set. A request carries 1 to 8 sets, each of 1 to 50 repositories (names `[A-Za-z0-9._-]{1,100}`, never `.` or `..`) and 1 to 6 permissions from a closed list (`contents`, `pull_requests`, `issues`, `checks`, `statuses`, `metadata`) at `read` or `write` (`metadata` at `read` only); anything outside those bounds is refused before any I/O.
+   - **The grant is verified.** GitHub's reply must name exactly the repositories and permissions asked for. Any other grant is refused, and the token just minted is revoked at once.
+   - **No partial success.** If anything fails after any token is minted, every token minted for the request so far is revoked before the refusal is returned. If the reply cannot be written to `maknaed`, every minted token is revoked.
+   - **The HTTP client** is the reqwest client `maknae-llm` builds, on the process-installed provider, with `maknae_crypto::assert_fips_provider()`; there is no second HTTP stack. Each call has a pinned timeout, the reply size is bounded before it is parsed, redirects are refused, and nothing is retried automatically, because a retried mint creates a second live token.
+
+4. **The token goes back sealed to the agent, and the kernel stays blind.**
+   - The token is sealed to the receiving agent's public key with associated data in its own domain (`maknae-seal-aad-credential-v1`, distinct from the provider-key domain `maknae-seal-aad-v1`), binding the direction, agent, task, class, kind, App and set. A blob sealed for one purpose never opens under another.
+   - **The recipient's public key comes from a root-owned file, never from the frame**: `/etc/maknae/egress/agents/<id>.seal.pub`. A kernel that supplied the recipient key could substitute its own and read the token; this rule is the kernel-blindness control. `maknae enroll agent` generates the agent's pair, puts the private key in custody as `agent-<id>-seal-key`, and publishes the public key there.
+   - **No Vault response-wrap.** A wrapping token is a bearer token that the relaying kernel could redeem, so wrapping alone gives tamper evidence and not confidentiality. The seal is what keeps the kernel blind.
+   - **Revocation.** GitHub revokes an installation token only through `DELETE /installation/token` authenticated with that token; there is no revocation by JWT. The Egress Daemon caches nothing, so each sealed token comes with a revocation blob: the same token sealed to the Egress Daemon's own seal key in the `to-revoke` direction. The kernel keeps the blob with the task and sends it back in a revoke frame; the Egress Daemon opens it and revokes. 204 is revoked, 401 is already gone (expired or revoked), anything else is a refusal.
+   - **The frames.** The kernel↔egress socket carries a tagged frame (`Prompt`, `Mint`, `Revoke`). It is the internal socket, not the client wire, so `PROTOCOL_VERSION` is unchanged. Refusals are closed enums; the reason text goes only to the Egress Daemon's journal.
+
+5. **Amends [ADR-0028](ADR-0028-per-user-model-providers-and-kernel-blind-credentials.md) decision 6: the Egress Daemon gains a Vault identity, and it never holds a KV grant.**
+   - It is an AppRole whose policy grows only by what the site's enabled kinds need. For `github-app-installation` that is `update` on `<transit mount>/sign/<key>/sha2-256` for each configured App, and nothing else. The AppRole that decision 6 removed held a read over every provider key's KV prefix; that read stays removed, and that is the distinction this amendment records.
+   - The token's TTL is 15 minutes with a 1-hour maximum and no period. The SecretID never sits in a configuration file: it is in custody as `maknae-egress-secret-id` (a TPM2-sealed `systemd-creds` credential), loaded by a unit drop-in that `maknae enroll` writes only when minting is configured.
+   - The Egress Daemon logs in lazily, only when a mint or revoke frame arrives and minting is configured. Without the configuration it makes no Vault login and reads no SecretID. The login has its own path in `maknae-vault` (`VaultApi::approle_login`) rather than `AppRoleAuth::authenticate`, because the latter returns the token as a non-zeroizing `String` through vaultrs; the token is a secret-class buffer under [ADR-0026](ADR-0026-memory-hygiene-boundary.md). A test holds the Egress Daemon's only Vault login to its minting module.
+
+6. **Amends [ADR-0036](ADR-0036-the-tool-model.md) decision 13:** `minting: trust-plane` means the Egress Daemon.
+
+7. **Minting configuration and agent keys live under `/etc/maknae/egress/`.** `minting.yaml` (`root:_maknae-egress 0640`), `role-id` and `agents/<id>.seal.pub` sit beside the directory's other artifacts, not in `egress-bounds.yaml` or under `/etc/maknae/agents/<id>/`: enroll regenerates `egress-bounds.yaml`, and `/etc/maknae/agents` is closed to the Egress Daemon by DAC, AppArmor and SELinux. An absent `minting.yaml` turns minting off, and every mint frame is refused. A `minting.yaml` that does not parse, or whose owner or mode is wrong, or a role id or SecretID that cannot be read, makes minting unavailable while the provider path keeps running: minting fails closed without taking model calls down with it.
+
+8. **The minter is its own module, so a split is a move and not a rewrite.** The decision code (admission, kind dispatch, the JWT, the GitHub client, the re-login state machine) is in `maknae-deputy`'s `mint` module, where the mutation gates reach it; the binary holds only the Vault login over its own Vault client handle.
+
+9. **Split trigger.** Minting moves to its own process when the Egress Daemon gains another external parsing surface, when a memory-safety advisory hits its HTTP or TLS stack, or when a deployment pairs a LAN provider endpoint with an App installed on many repositories.
+
+10. **What the Egress Daemon records.** The trail is the kernel's ([ADR-0019](ADR-0019-audit-record-model.md)), and the intent and outcome pair for a mint or revoke lands with slice 4's caller. The Egress Daemon's journal records, per frame, the task, agent, class, App, set count and outcome class, and for a refusal its closed reason. It never records the token, the JWT, the signature, sealed bytes or the SecretID.
+
+## Consequences
+
+- **Residuals.**
+  1. **A compromised Egress Daemon holds every enabled kind's minting power.** For the App kind, a remote-code-execution bug in the provider-response path (a LAN model endpoint is the realistic way in) becomes an unrestricted installation token: push access to every repository the App is installed on. Bounds: the App is installed on selected repositories only, with minimal permissions (an operator requirement in the runbook); the Egress Daemon's Vault token lives 15 minutes, at most an hour; every signature is in Vault's audit log. Decision 9 names when this stops being acceptable.
+  2. **A token can outlive its request unrevoked.** A 2xx mint reply the Egress Daemon cannot parse, or a panic after a mint, leaves a token at GitHub that nothing revokes. It is sealed to no one and expires within an hour.
+  3. **Mint and provider frames share one capacity pool.** A slot is taken before the frame is read, so a separate pool for mints would need the slot taken after the read, which the accept loop does not allow. Heavy model traffic can refuse a mint `AtCapacity`; mints are rare.
+  4. **macOS custody of the two new keys, `maknae-egress-secret-id` and `agent-<id>-seal-key`, is not built.** That is a supported-platform gap, not a reduced profile: minting is Linux-only until it is built.
+  5. GitHub Enterprise Server is unmeasured; the `api` base accepts it, but nothing has been tested against it.
+  6. The token passes through reqwest and serde_json on its way into a zeroizing buffer: [ADR-0026](ADR-0026-memory-hygiene-boundary.md)'s named residual for third-party intermediates.
+- **Tests do not verify the JWT's signature.** crypto-profile offers RSA verification with SHA-384 only, so the signing input and the JWT's assembly are pinned instead, and the live run of 2026-11-19 is the evidence that GitHub accepts Transit's RS256.
+- **For [ADR-0037](ADR-0037-task-bindings-labels-and-tool-authorization.md) decision 7:** the agent side of the intersection cannot be read from an installation token's `GET /repos` `permissions` block, which reports `false` throughout (measured above). Slice 4 builds the agent side on the other basis that decision names.
+- **Owed by #168 slice 4, none built:** the kernel's call at task claim, the relay to the Agent Daemon, storing the revocation blob with the task, revocation at the task's outcome, re-minting before expiry, the reach check, and the trail pair. The front end's delivery and redaction are [#479](https://github.com/darkhonor/maknae/issues/479)'s. `CredentialKind` and `tools.yaml` are [#674](https://github.com/darkhonor/maknae/issues/674)'s.
+- **Amended in place:** [ADR-0028](ADR-0028-per-user-model-providers-and-kernel-blind-credentials.md) decision 6 and its control-mapping table; [ADR-0036](ADR-0036-the-tool-model.md) decision 13.
+
+## Security control mapping (informative; per ADR-0001)
+
+| Property | Control | Status |
+|---|---|---|
+| The Egress Daemon's Vault identity may only sign with the configured Transit keys; it holds no KV grant | NIST SP 800-53 rev 5 AC-6 (least privilege) | Implements, once built |
+| The App's private key never leaves Vault Transit; no JWT is cached | SC-12 (key establishment and management), SC-28 (protection of information at rest) | Implements, once built |
+| One token per permission set, the grant verified against the request, narrowed by GitHub | AC-6 (least privilege), AC-3 (access enforcement) | Implements, once built |
+| The token crosses `maknaed` only sealed to an agent key the kernel cannot supply | SC-8 (transmission confidentiality and integrity), SC-13 (cryptographic protection) | Implements, once built |
+| Every signature is in Vault's audit log; the journal never records token material | AU-3 (content of audit records), AU-9 (protection of audit information) | Implements, once built |
+
+## References
+
+- [ADR-0019](ADR-0019-audit-record-model.md), [ADR-0026](ADR-0026-memory-hygiene-boundary.md), [ADR-0028](ADR-0028-per-user-model-providers-and-kernel-blind-credentials.md), [ADR-0035](ADR-0035-policy-enforcement-points-placement-and-trust-tiers.md), [ADR-0036](ADR-0036-the-tool-model.md), [ADR-0037](ADR-0037-task-bindings-labels-and-tool-authorization.md)
+- `design/egress-and-tool-execution.md` §6; `design/diagrams/credential-path.toml`
+- [#168](https://github.com/darkhonor/maknae/issues/168), [#674](https://github.com/darkhonor/maknae/issues/674), [#479](https://github.com/darkhonor/maknae/issues/479)
+- GitHub's REST documentation for GitHub App installation access tokens and `DELETE /installation/token`; HashiCorp Vault's Transit secrets engine (`sign`, `signature_algorithm`)
