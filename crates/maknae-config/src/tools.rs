@@ -1723,7 +1723,7 @@ mod tests {
     }
 
     #[test]
-    fn homelab_post_denies_approve() {
+    fn homelab_post_refuses_off_shape_forms() {
         let c = catalog(HOMELAB);
         let gh = &c.entry("github-post").unwrap().commands["gh"];
         let bound = post_bound();
@@ -1765,6 +1765,16 @@ mod tests {
             &["pr", "review", "--approve"],
             &[
                 "pr",
+                "review",
+                "345",
+                "-R",
+                "o/r",
+                "--approve=true",
+                "--body-file",
+                "-",
+            ],
+            &[
+                "pr",
                 "comment",
                 "345",
                 "-R",
@@ -1802,7 +1812,7 @@ mod tests {
             "--approve=true",
         ] {
             let hit = first_denied(&gh.deny_args, &argv(&["pr", "review", denied]));
-            assert_eq!(hit.is_some(), !denied.starts_with("-ca"), "{denied}");
+            assert_eq!(hit.is_some(), denied.starts_with("-a"), "{denied}");
         }
     }
 
@@ -1825,6 +1835,18 @@ mod tests {
             "-",
         ]);
         assert!(gh.subcommands.iter().any(|p| p.matches(&review, &bound)));
+        let approve = argv(&[
+            "pr",
+            "review",
+            "345",
+            "-R",
+            "o/r",
+            "--approve",
+            "--body-file",
+            "-",
+        ]);
+        assert!(gh.subcommands.iter().any(|p| p.matches(&approve, &bound)));
+        assert_eq!(first_denied(&gh.deny_args, &approve), None);
         assert!(!gh
             .subcommands
             .iter()

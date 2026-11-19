@@ -29,7 +29,6 @@
 # the model's text, so posting never reads a file and no path can be steered
 # to a mounted credential.
 # Posting is a separate entry and credential class so it is a separate grant.
-# `--approve` is refused here until self-approval is settled (#480).
 schema_version: 1
 credential_classes:
   github-read:
@@ -94,8 +93,9 @@ tools:
         subcommands:
           - "pr review {git.change} -R {git.base} --comment --body-file -"
           - "pr review {git.change} -R {git.base} --request-changes --body-file -"
+          - "pr review {git.change} -R {git.base} --approve --body-file -"
           - "pr comment {git.change} -R {git.base} --body-file -"
-        deny_args: ["--approve*", "-a*"]
+        deny_args: ["-a*"]
         timeout: 2m
         output: 1MiB
   rust-fetch:
