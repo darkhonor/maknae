@@ -26,6 +26,7 @@ maintainer scripts (`postinst`/`prerm`/`postrm`).
 | `/etc/apparmor.d/tunables/maknae-agents.d/` | directory; `maknae enroll agent` writes one file per agent | `0755 root:root` |
 | `/usr/libexec/maknae/maknae-selinux-ports.sh` | `common/maknae-selinux-ports.sh` | `0750` |
 | `/etc/maknae/authz.yaml`, `/etc/maknae/bindings.yaml`, `/etc/maknae/maknae.yaml`, `/etc/maknae/sensitive.yaml` | `common/` (conffiles) | `root:_maknae 0640` (set in postinst) |
+| `/usr/share/maknae/tools-homelab.yaml` | `common/tools-homelab.yaml` | `root:root 0644`; the inactive HomeLab tools baseline, never read by `maknaed` and copied by no maintainer script |
 | `/var/log/maknae/audit.jsonl` | created in postinst, not payload | `_maknae:_maknae 0640`, `chattr +a` |
 
 Directories created by `postinst` at their §4.6 modes: `/etc/maknae`

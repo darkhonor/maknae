@@ -387,7 +387,8 @@ phase1() {
                 "./usr/local/share/maknae/defaults/authz.yaml" \
                 "./usr/local/share/maknae/defaults/bindings.yaml" \
                 "./usr/local/share/maknae/defaults/maknae.yaml" \
-                "./usr/local/share/maknae/defaults/sensitive.yaml" | sort > "$x/want"
+                "./usr/local/share/maknae/defaults/sensitive.yaml" \
+                "./usr/local/share/maknae/tools-homelab.yaml" | sort > "$x/want"
             lsbom -s "$bom" \
               | sed -e 's|^\.$||' -e 's|libaws_lc_fips_.*_crypto\.dylib|FIPSDYLIB|' \
               | grep -v '^$' | sort > "$x/got"

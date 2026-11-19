@@ -33,6 +33,7 @@ Source16:       80-maknae.preset
 Source17:       sensitive.yaml
 Source18:       maknae-agentd
 Source19:       maknae-agent@.service
+Source20:       tools-homelab.yaml
 
 ExclusiveArch:  x86_64
 
@@ -114,6 +115,7 @@ install -D -m 0640 %{SOURCE8} %{buildroot}%{_sysconfdir}/maknae/authz.yaml
 install -D -m 0640 %{SOURCE9} %{buildroot}%{_sysconfdir}/maknae/maknae.yaml
 install -D -m 0640 %{SOURCE17} %{buildroot}%{_sysconfdir}/maknae/sensitive.yaml
 install -D -m 0644 %{SOURCE13} %{buildroot}%{_datadir}/maknae/bindings.yaml
+install -D -m 0644 %{SOURCE20} %{buildroot}%{_datadir}/maknae/tools-homelab.yaml
 install -d -m 0750 %{buildroot}%{_sysconfdir}/maknae/private
 # #240b: the deputy's credential set dir (files written by `maknae enroll`).
 install -d -m 0750 %{buildroot}%{_sysconfdir}/maknae/egress
@@ -283,6 +285,7 @@ fi
 %{_libexecdir}/maknae/maknae-selinux-ports.sh
 %dir %{_datadir}/maknae
 %{_datadir}/maknae/bindings.yaml
+%{_datadir}/maknae/tools-homelab.yaml
 %config(noreplace) %{_sysconfdir}/fapolicyd/trust.d/maknae
 %dir %attr(0750,root,_maknae) %{_sysconfdir}/maknae
 %config(noreplace) %attr(0640,root,_maknae) %{_sysconfdir}/maknae/authz.yaml

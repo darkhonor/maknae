@@ -203,6 +203,7 @@ install -m 0644 "$REPO/packaging/common/authz.yaml"  "$D/usr/local/share/maknae/
 install -m 0644 "$REPO/packaging/common/bindings.yaml" "$D/usr/local/share/maknae/defaults/bindings.yaml"
 install -m 0644 "$REPO/packaging/common/maknae.yaml" "$D/usr/local/share/maknae/defaults/maknae.yaml"
 install -m 0644 "$REPO/packaging/common/sensitive.yaml" "$D/usr/local/share/maknae/defaults/sensitive.yaml"
+install -m 0644 "$REPO/packaging/common/tools-homelab.yaml" "$D/usr/local/share/maknae/tools-homelab.yaml"
 # The shipped skeleton is LINUX-SHAPED and would be wrong here if left alone:
 # maknae.yaml carries no `transport:` section, and maknae-config's compiled default
 # is /run/maknae/maknaed.sock (crates/maknae-config/src/transport.rs:15, no darwin
