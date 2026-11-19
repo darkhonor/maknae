@@ -9,14 +9,21 @@ use std::time::Duration;
 use zeroize::Zeroizing;
 
 pub const GITHUB_CALL_TIMEOUT: Duration = Duration::from_secs(20);
-pub const GITHUB_REPLY_MAX_BYTES: usize = 65_536;
+pub const GITHUB_REPLY_MAX_BYTES: usize = 1_048_576;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForgeError {
+    /// GitHub answered non-2xx: no token was issued.
     Status(ForgeStatus),
-    Mismatch,
+    /// The grant was not the set asked for: a live token may exist unless `revoked`.
+    Mismatch { revoked: bool },
+    /// No status was received: no token was issued.
     Transport,
+    /// The body failed after a 2xx: a live token may exist.
+    Unread,
+    /// The body exceeded the cap after a 2xx: a live token may exist.
     Oversize,
+    /// The body did not parse after a 2xx: a live token may exist.
     Shape,
 }
 
@@ -108,8 +115,11 @@ impl GithubClient {
         let bytes = read_capped(resp).await?;
         let grant: Grant = serde_json::from_slice(&bytes).map_err(|_| ForgeError::Shape)?;
         if !grant_matches(set, &grant) {
-            let _ = self.revoke(api, &grant.token).await;
-            return Err(ForgeError::Mismatch);
+            let revoked = matches!(
+                self.revoke(api, &grant.token).await,
+                Ok(RevokeReply::Revoked | RevokeReply::AlreadyGone)
+            );
+            return Err(ForgeError::Mismatch { revoked });
         }
         Ok(MintedToken {
             token: grant.token,
@@ -136,6 +146,8 @@ fn builder() -> reqwest::ClientBuilder {
         .timeout(GITHUB_CALL_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
+        .retry(reqwest::retry::never())
+        .pool_max_idle_per_host(0)
         .user_agent("maknae-egress")
 }
 
@@ -170,7 +182,7 @@ async fn read_capped(mut resp: reqwest::Response) -> Result<Zeroizing<Vec<u8>>, 
         return Err(ForgeError::Oversize);
     }
     let mut body = Zeroizing::new(Vec::with_capacity(GITHUB_REPLY_MAX_BYTES));
-    while let Some(chunk) = resp.chunk().await.map_err(|_| ForgeError::Transport)? {
+    while let Some(chunk) = resp.chunk().await.map_err(|_| ForgeError::Unread)? {
         if chunk.len() > GITHUB_REPLY_MAX_BYTES - body.len() {
             return Err(ForgeError::Oversize);
         }
@@ -435,10 +447,18 @@ mod tests {
             &["alpha"],
             &[(GithubPermission::Contents, AccessLevel::Read)],
         );
-        for (perms, revoke_status) in [
-            (r#"{"contents":"write"}"#, "204 No Content"),
-            (r#"{"contents":"read","issues":"read"}"#, "204 No Content"),
-            (r#"{"contents":"write"}"#, "500 Internal Server Error"),
+        for (perms, revoke_status, revoked) in [
+            (r#"{"contents":"write"}"#, "204 No Content", true),
+            (
+                r#"{"contents":"read","issues":"read"}"#,
+                "204 No Content",
+                true,
+            ),
+            (
+                r#"{"contents":"write"}"#,
+                "500 Internal Server Error",
+                false,
+            ),
         ] {
             let (base, h) = stub(vec![
                 reply("201 Created", &grant("ghs_wider", perms, &["alpha"])),
@@ -448,7 +468,7 @@ mod tests {
             let c = GithubClient::loopback_for_tests(&base);
             assert_eq!(
                 c.mint(&api(), 7, JWT, &asked).await.unwrap_err(),
-                ForgeError::Mismatch,
+                ForgeError::Mismatch { revoked },
                 "{perms}"
             );
             let seen = h.await.unwrap();
@@ -486,7 +506,7 @@ mod tests {
         let c = GithubClient::loopback_for_tests(&base);
         assert_eq!(
             c.mint(&api(), 7, JWT, &asked).await.unwrap_err(),
-            ForgeError::Mismatch
+            ForgeError::Mismatch { revoked: true }
         );
         assert_eq!(h.await.unwrap().requests.len(), 2);
     }
@@ -514,7 +534,7 @@ mod tests {
             let c = GithubClient::loopback_for_tests(&base);
             assert_eq!(
                 c.mint(&api(), 7, JWT, &asked).await.unwrap_err(),
-                ForgeError::Mismatch,
+                ForgeError::Mismatch { revoked: true },
                 "{repos:?}"
             );
             let seen = h.await.unwrap();
@@ -541,7 +561,7 @@ mod tests {
             let c = GithubClient::loopback_for_tests(&base);
             assert_eq!(
                 c.mint(&api(), 7, JWT, &asked).await.unwrap_err(),
-                ForgeError::Mismatch,
+                ForgeError::Mismatch { revoked: true },
                 "{body}"
             );
             assert_eq!(h.await.unwrap().requests.len(), 2, "{body}");
@@ -587,7 +607,7 @@ mod tests {
         let c = GithubClient::loopback_for_tests(&base);
         assert_eq!(
             c.mint(&api(), 7, JWT, &asked).await.unwrap_err(),
-            ForgeError::Mismatch
+            ForgeError::Mismatch { revoked: true }
         );
         assert_eq!(h.await.unwrap().requests.len(), 2);
 
@@ -606,7 +626,7 @@ mod tests {
         let c = GithubClient::loopback_for_tests(&base);
         assert_eq!(
             c.mint(&api(), 7, JWT, &asked_write).await.unwrap_err(),
-            ForgeError::Mismatch
+            ForgeError::Mismatch { revoked: true }
         );
         assert_eq!(h.await.unwrap().requests.len(), 2);
     }
@@ -897,6 +917,83 @@ mod tests {
         let shown = format!("{minted:?} {c:?} {minted:#?} {c:#?}");
         assert!(!shown.contains(sentinel), "{shown}");
         assert!(shown.contains("2026-11-19T01:00:00Z"), "{shown}");
+    }
+
+    async fn mismatch_then_revoke(revoke: String) -> (Result<MintedToken, ForgeError>, Seen) {
+        fips();
+        let asked = set(
+            &["alpha"],
+            &[(GithubPermission::Contents, AccessLevel::Read)],
+        );
+        let (base, h) = stub(vec![
+            reply(
+                "201 Created",
+                &grant("ghs_live", r#"{"contents":"write"}"#, &["alpha"]),
+            ),
+            revoke,
+        ])
+        .await;
+        let c = GithubClient::loopback_for_tests(&base);
+        let out = c.mint(&api(), 7, JWT, &asked).await;
+        (out, h.await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_mismatch_whose_revoke_fails_reports_unrevoked() {
+        for revoke in [
+            reply("500 Internal Server Error", ""),
+            reply("403 Forbidden", ""),
+            reply("200 OK", ""),
+            "HTTP/1.1 garbage\r\n\r\n".to_string(),
+        ] {
+            let (out, seen) = mismatch_then_revoke(revoke.clone()).await;
+            assert_eq!(
+                out.unwrap_err(),
+                ForgeError::Mismatch { revoked: false },
+                "{revoke}"
+            );
+            assert_eq!(seen.requests.len(), 2, "{revoke}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_mismatch_whose_revoke_succeeds_reports_revoked() {
+        for revoke in [reply("204 No Content", ""), reply("401 Unauthorized", "")] {
+            let (out, seen) = mismatch_then_revoke(revoke.clone()).await;
+            assert_eq!(
+                out.unwrap_err(),
+                ForgeError::Mismatch { revoked: true },
+                "{revoke}"
+            );
+            assert_eq!(seen.requests.len(), 2, "{revoke}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_body_cut_off_after_201_is_unread_not_transport() {
+        fips();
+        let asked = set(
+            &["alpha"],
+            &[(GithubPermission::Contents, AccessLevel::Read)],
+        );
+        let cut = format!(
+            "HTTP/1.1 201 Created\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n{}",
+            r#"{"token":"ghs_cut""#
+        );
+        let (base, h) = stub(vec![cut]).await;
+        let c = GithubClient::loopback_for_tests(&base);
+        assert_eq!(
+            c.mint(&api(), 7, JWT, &asked).await.unwrap_err(),
+            ForgeError::Unread
+        );
+        let seen = h.await.unwrap();
+        assert_eq!((seen.requests.len(), seen.extra), (1, 0));
+    }
+
+    #[test]
+    fn the_github_bounds_are_pinned() {
+        assert_eq!(GITHUB_REPLY_MAX_BYTES, 1_048_576);
+        assert_eq!(GITHUB_CALL_TIMEOUT, Duration::from_secs(20));
     }
 
     #[test]
