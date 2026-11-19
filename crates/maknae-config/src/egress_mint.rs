@@ -394,6 +394,28 @@ github_apps:
         }
     }
 
+    #[test]
+    fn the_grammar_edges_are_accepted() {
+        for n in ["-a", "a-", "_a", "a_"] {
+            assert!(parse(&app("https://x.example", n, n)).is_ok(), "{n:?}");
+        }
+        for n in ["-a", "a-"] {
+            let text = format!(
+                "vault:\n  approle_mount: m\ngithub_apps:\n  \"{n}\":\n    app_id: 1\n    installation_id: 2\n    api: https://x.example\n    transit_mount: t\n    transit_key: k\n"
+            );
+            assert!(parse(&text).is_ok(), "app {n:?}");
+        }
+    }
+
+    #[test]
+    fn an_ipv6_literal_host_is_admitted_and_an_unclosed_one_is_not() {
+        assert_eq!(
+            ApiBase::parse("https://[::1]:8443").unwrap().as_str(),
+            "https://[::1]:8443"
+        );
+        assert!(ApiBase::parse("https://[::1").is_none());
+    }
+
     fn requirement(uid: u32) -> maknae_io::TargetRequired {
         maknae_io::TargetRequired {
             owner: Some(uid),
