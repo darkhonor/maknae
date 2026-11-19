@@ -58,7 +58,8 @@ pub enum RevokeOn {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClassLifetime {
-    pub expires: String,
+    pub expires: Option<String>,
+    pub ttl: Option<String>,
     pub revoke_on: RevokeOn,
 }
 
@@ -71,6 +72,7 @@ pub struct CredentialClass {
     pub narrowing: Option<Narrowing>,
     pub minting: Option<Minting>,
     pub lifetime: Option<ClassLifetime>,
+    pub policies: Vec<String>,
     pub delivery: Vec<String>,
 }
 
@@ -225,6 +227,14 @@ impl ToolsCatalog {
                 ));
             }
             classes.insert(name, parse_class(name, body));
+        }
+        for (name, class) in &classes {
+            if let Err(reason) = class {
+                catalog.disabled.push(Disabled {
+                    entry: format!("credential_classes.{name}"),
+                    reason: reason.clone(),
+                });
+            }
         }
         for (name, body) in section("tools")? {
             let parsed = parse_entry(name, body, &classes);
@@ -406,6 +416,7 @@ fn parse_class(name: &str, v: &Value) -> Result<CredentialClass, String> {
             "minting",
             "delivery",
             "app",
+            "policies",
         ],
     )?;
     let kind = choice(
@@ -463,14 +474,42 @@ fn parse_class(name: &str, v: &Value) -> Result<CredentialClass, String> {
             )
         })
         .transpose()?;
+    let vault = matches!(
+        kind,
+        CredentialKind::VaultChildToken | CredentialKind::VaultDynamicSecret
+    );
+    let policies = match get(map, "policies") {
+        None => Vec::new(),
+        Some(_) if !vault => return Err("policies applies to vault kinds only".to_string()),
+        Some(v) => {
+            let items = strings(v, "policies")?;
+            if items.is_empty() {
+                return Err("policies must not be empty".to_string());
+            }
+            items.into_iter().map(str::to_string).collect()
+        }
+    };
     let lifetime = get(map, "lifetime")
         .map(|v| {
-            let m = fields(v, "lifetime", &["expires", "revoke_on"])?;
+            let m = fields(v, "lifetime", &["expires", "ttl", "revoke_on"])?;
+            let expires = get(m, "expires")
+                .map(|v| duration(v, "lifetime.expires"))
+                .transpose()?;
+            let ttl = get(m, "ttl")
+                .map(|v| match v {
+                    Value::Str(s) if s == "invocation-timeout" => Ok(s.clone()),
+                    _ => duration(v, "lifetime.ttl"),
+                })
+                .transpose()?;
+            if ttl.is_some() && !vault {
+                return Err("lifetime.ttl applies to vault kinds only".to_string());
+            }
+            if expires.is_some() == ttl.is_some() {
+                return Err("lifetime needs exactly one of expires and ttl".to_string());
+            }
             Ok::<_, String>(ClassLifetime {
-                expires: duration(
-                    get(m, "expires").ok_or("lifetime.expires is required")?,
-                    "lifetime.expires",
-                )?,
+                expires,
+                ttl,
                 revoke_on: choice(
                     get(m, "revoke_on").ok_or("lifetime.revoke_on is required")?,
                     "lifetime.revoke_on",
@@ -525,6 +564,7 @@ fn parse_class(name: &str, v: &Value) -> Result<CredentialClass, String> {
         narrowing,
         minting,
         lifetime,
+        policies,
         delivery,
     })
 }
@@ -554,7 +594,7 @@ fn image_ref_ok(r: &str) -> bool {
 fn host_ok(h: &str) -> bool {
     !h.is_empty()
         && h.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'*'))
 }
 
 fn parse_entry(
@@ -632,6 +672,13 @@ fn parse_entry(
             },
         },
     };
+    if executes_workspace && credential.is_some() {
+        if let Network::Proxy { sites } = &network {
+            if sites.iter().any(|h| h.contains('*')) {
+                return Err("executes_workspace with a credential and network must name its sites explicitly, with no `*` (ADR-0036 decision 8)".to_string());
+            }
+        }
+    }
     let output_to_model = get(map, "output_to_model").map_or(Ok(OutputToModel::Redacted), |v| {
         choice(
             v,
@@ -1114,6 +1161,66 @@ mod tests {
         assert!(catalog(&doc(&format!("  c:\n{ok}"), ""))
             .class("c")
             .is_some());
+    }
+
+    #[test]
+    fn workspace_executing_credentialed_entry_must_name_sites() {
+        let class = "  c:\n    kind: github-machine-user\n";
+        let entry = |net: &str, exec: &str| {
+            format!("  {SENTINEL}:\n    executes_workspace: {exec}\n    credential: c\n    network: {net}\n")
+        };
+        let wild = "{ via: maknae-proxy, sites: [\"*.github.com\"] }";
+        let named = "{ via: maknae-proxy, sites: [github.com] }";
+        let c = catalog(&doc(class, &entry(wild, "true")));
+        assert!(c.entry(SENTINEL).is_none());
+        assert!(reason(&c, SENTINEL).contains("decision 8"));
+        let c = catalog(&doc(class, &entry(named, "true")));
+        assert!(c.entry(SENTINEL).is_some(), "{:?}", c.disabled());
+        let c = catalog(&doc(class, &entry(wild, "false")));
+        assert!(c.entry(SENTINEL).is_some(), "{:?}", c.disabled());
+        let c = catalog(&doc(class, &entry("none", "true")));
+        assert!(c.entry(SENTINEL).is_some());
+    }
+
+    #[test]
+    fn workspace_executing_credentialed_entry_without_sites_is_disabled() {
+        let class = "  c:\n    kind: github-machine-user\n";
+        let text = format!("  {SENTINEL}:\n    executes_workspace: true\n    credential: c\n    network: {{ via: maknae-proxy }}\n");
+        let c = catalog(&doc(class, &text));
+        assert!(c.entry(SENTINEL).is_none());
+        assert!(reason(&c, SENTINEL).contains("sites"));
+    }
+
+    #[test]
+    fn vault_classes_take_ttl_and_policies() {
+        let adr = "  vault-invocation:\n    kind: vault-child-token\n    source: minted-per-invocation\n    narrowing: provider\n    lifetime: { ttl: invocation-timeout, revoke_on: invocation-outcome }\n    minting: front-end\n    policies: [kv-read-infra]\n    delivery: [env:VAULT_TOKEN]\n";
+        let c = catalog(&doc(adr, ""));
+        assert!(c.disabled().is_empty(), "{:?}", c.disabled());
+        let class = c.class("vault-invocation").unwrap();
+        assert_eq!(class.policies, ["kv-read-infra"]);
+        assert_eq!(
+            class.lifetime.as_ref().unwrap().ttl.as_deref(),
+            Some("invocation-timeout")
+        );
+        let timed = "  v:\n    kind: vault-dynamic-secret\n    lifetime: { ttl: 30m, revoke_on: task-outcome }\n";
+        assert!(catalog(&doc(timed, "")).class("v").is_some());
+        for body in [
+            "    kind: github-machine-user\n    policies: [p]\n",
+            "    kind: github-machine-user\n    lifetime: { ttl: 30m, revoke_on: task-outcome }\n",
+            "    kind: vault-child-token\n    policies: []\n",
+            "    kind: vault-child-token\n    lifetime: { ttl: soon, revoke_on: task-outcome }\n",
+            "    kind: vault-child-token\n    lifetime: { ttl: 1h, expires: 1h, revoke_on: task-outcome }\n",
+        ] {
+            assert!(catalog(&doc(&format!("  c:\n{body}"), "")).class("c").is_none(), "{body}");
+        }
+    }
+
+    #[test]
+    fn failed_class_is_reported_even_when_unnamed() {
+        let c = catalog(&doc("  weird:\n    kind: sentinel-674-kind\n", ""));
+        assert!(c.class("weird").is_none());
+        assert!(reason(&c, "credential_classes.weird").contains("sentinel-674-kind"));
+        assert_eq!(c.disabled().len(), 1);
     }
 
     #[test]
