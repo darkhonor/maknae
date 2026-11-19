@@ -1185,6 +1185,9 @@ dependencies = [
  "maknae-crypto",
  "maknae-llm",
  "maknae-proto",
+ "reqwest",
+ "serde",
+ "serde_json",
  "tokio",
  "zeroize",
 ]

@@ -443,7 +443,7 @@ mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kerne
 # Contract: every key MUST appear in mutants_crates; every value MUST be a
 # list of strings; an absent table is legal. Validated in coverage-tiers.sh's
 # prologue (BOTH lanes).
-mutants_features = { maknae-config = ["hermetic-test-seam"], maknae-authz-basic = ["hermetic-test-seam"], maknae-state = ["hermetic-test-seam"], maknae-crypto = ["test-support"], maknae-audit-append = ["test-support"] }
+mutants_features = { maknae-config = ["hermetic-test-seam"], maknae-authz-basic = ["hermetic-test-seam"], maknae-state = ["hermetic-test-seam"], maknae-crypto = ["test-support"], maknae-audit-append = ["test-support"], maknae-deputy = ["test-support"] }
 
 [t2]
 floor_production_region = 90
@@ -485,6 +485,10 @@ files = [
   # #321: the deputy's connection-slot accounting. T2: a leaked slot refuses
   # every later prompt (availability), and it carries no verdict.
   "bins/maknae-egress/src/capacity.rs",
+  # #168: the GitHub App mint and revoke calls. T2: transport to the forge; the
+  # grant check refuses and revokes any token wider or narrower than the set,
+  # pinned by the loopback-stub tests beside it.
+  "crates/maknae-deputy/src/mint/github.rs",
   "crates/maknae-plane/src/fd.rs", "crates/maknae-plane/src/send.rs",
   # Cooperative execution in the untrusted CLI: cannot issue a PDP Permit or
   # kernel-observed completion. Guard failures can damage the subject's own
@@ -687,6 +691,10 @@ why = "scaffold stub — re-tier at body landing"
 [[t3]]
 path = "crates/maknae-deputy/src/lib.rs"
 why = "module declarations only; the decisions are handle/unseal/call (T1)"
+
+[[t3]]
+path = "crates/maknae-deputy/src/mint/mod.rs"
+why = "#168: module declarations only; the GitHub client is mint/github.rs (T2)"
 
 [[t3]]
 path = "crates/maknae-vault/src/lib.rs"
