@@ -1,7 +1,12 @@
 //! The seam through which the App JWT's signing input is signed by Vault Transit.
 
 use std::future::Future;
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
+
+/// A cached Vault token is not used within this margin of its expiry.
+pub const TOKEN_EXPIRY_MARGIN: Duration = Duration::from_secs(30);
 
 /// The signature could not be had. Opaque: no Vault detail reaches the frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,6 +19,101 @@ pub trait Signer {
         key: &str,
         input: &[u8],
     ) -> impl Future<Output = Result<Zeroizing<Vec<u8>>, SignError>> + Send;
+}
+
+/// Why Vault refused a Transit sign: a refused token is the only one worth a re-login.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VaultSignError {
+    TokenRefused,
+    Failed,
+}
+
+pub trait VaultLogin: Send + Sync {
+    type Token: Clone + Send + Sync;
+
+    fn login(&self) -> impl Future<Output = Result<(Self::Token, Duration), SignError>> + Send;
+
+    fn sign(
+        &self,
+        token: &Self::Token,
+        mount: &str,
+        key: &str,
+        input: &[u8],
+    ) -> impl Future<Output = Result<Zeroizing<Vec<u8>>, VaultSignError>> + Send;
+}
+
+pub type Clock = Box<dyn Fn() -> Instant + Send + Sync>;
+
+/// A Transit signer over a lazily logged-in Vault token, re-logging in at most once per sign.
+pub struct ServiceSigner<L: VaultLogin> {
+    login: L,
+    now: Clock,
+    slot: Mutex<Option<(L::Token, Instant)>>,
+}
+
+impl<L: VaultLogin> std::fmt::Debug for ServiceSigner<L> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServiceSigner").finish_non_exhaustive()
+    }
+}
+
+impl<L: VaultLogin> ServiceSigner<L> {
+    pub fn new(login: L) -> Self {
+        Self::with_clock(login, Box::new(Instant::now))
+    }
+
+    pub fn with_clock(login: L, now: Clock) -> Self {
+        Self {
+            login,
+            now,
+            slot: Mutex::new(None),
+        }
+    }
+}
+
+impl<L: VaultLogin> ServiceSigner<L> {
+    fn cached(&self) -> Option<L::Token> {
+        let usable_until = (self.now)() + TOKEN_EXPIRY_MARGIN;
+        // The slot is only ever replaced whole, so a poisoned one still holds a valid value.
+        let slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
+        match &*slot {
+            Some((token, expiry)) if usable_until < *expiry => Some(token.clone()),
+            _ => None,
+        }
+    }
+
+    async fn fresh(&self) -> Result<L::Token, SignError> {
+        let started = (self.now)();
+        let (token, ttl) = self.login.login().await?;
+        let entry = started.checked_add(ttl).map(|e| (token.clone(), e));
+        *self.slot.lock().unwrap_or_else(PoisonError::into_inner) = entry;
+        Ok(token)
+    }
+}
+
+impl<L: VaultLogin> Signer for ServiceSigner<L> {
+    async fn sign(
+        &self,
+        mount: &str,
+        key: &str,
+        input: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, SignError> {
+        let (token, cached) = match self.cached() {
+            Some(t) => (t, true),
+            None => (self.fresh().await?, false),
+        };
+        match self.login.sign(&token, mount, key, input).await {
+            Ok(signature) => Ok(signature),
+            Err(VaultSignError::TokenRefused) if cached => {
+                let token = self.fresh().await?;
+                self.login
+                    .sign(&token, mount, key, input)
+                    .await
+                    .map_err(|_| SignError)
+            }
+            Err(_) => Err(SignError),
+        }
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -81,6 +181,232 @@ impl Signer for FakeSigner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::sync::Arc;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct Tok(u32);
+
+    struct FakeLogin {
+        ttl: Duration,
+        clock: Arc<Mutex<Instant>>,
+        login_takes: Duration,
+        logins: Mutex<Vec<Result<(), ()>>>,
+        login_calls: Mutex<u32>,
+        sign_script: Mutex<VecDeque<Result<(), VaultSignError>>>,
+        signed_with: Mutex<Vec<Tok>>,
+    }
+
+    impl FakeLogin {
+        fn new(ttl: Duration, signs: Vec<Result<(), VaultSignError>>) -> Self {
+            Self {
+                ttl,
+                clock: Arc::new(Mutex::new(Instant::now())),
+                login_takes: Duration::ZERO,
+                logins: Mutex::new(Vec::new()),
+                login_calls: Mutex::new(0),
+                sign_script: Mutex::new(signs.into()),
+                signed_with: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn failing_login(self) -> Self {
+            self.logins.lock().unwrap().push(Err(()));
+            self
+        }
+    }
+
+    impl VaultLogin for Arc<FakeLogin> {
+        type Token = Tok;
+
+        async fn login(&self) -> Result<(Tok, Duration), SignError> {
+            let mut n = self.login_calls.lock().unwrap();
+            *n += 1;
+            *self.clock.lock().unwrap() += self.login_takes;
+            if self.logins.lock().unwrap().pop() == Some(Err(())) {
+                return Err(SignError);
+            }
+            Ok((Tok(*n), self.ttl))
+        }
+
+        async fn sign(
+            &self,
+            token: &Tok,
+            mount: &str,
+            key: &str,
+            input: &[u8],
+        ) -> Result<Zeroizing<Vec<u8>>, VaultSignError> {
+            assert_eq!((mount, key, input), ("transit", "app", &b"in"[..]));
+            self.signed_with.lock().unwrap().push(token.clone());
+            let next = self
+                .sign_script
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(Ok(()));
+            next.map(|()| Zeroizing::new(vec![token.0 as u8]))
+        }
+    }
+
+    struct Rig {
+        fake: Arc<FakeLogin>,
+        clock: Arc<Mutex<Instant>>,
+        signer: ServiceSigner<Arc<FakeLogin>>,
+    }
+
+    fn rig(fake: FakeLogin) -> Rig {
+        let fake = Arc::new(fake);
+        let clock = Arc::clone(&fake.clock);
+        let c = Arc::clone(&clock);
+        let signer =
+            ServiceSigner::with_clock(Arc::clone(&fake), Box::new(move || *c.lock().unwrap()));
+        Rig {
+            fake,
+            clock,
+            signer,
+        }
+    }
+
+    impl Rig {
+        async fn sign(&self) -> Result<Vec<u8>, SignError> {
+            self.signer
+                .sign("transit", "app", b"in")
+                .await
+                .map(|s| s.to_vec())
+        }
+
+        fn advance(&self, by: Duration) {
+            *self.clock.lock().unwrap() += by;
+        }
+
+        fn logins(&self) -> u32 {
+            *self.fake.login_calls.lock().unwrap()
+        }
+
+        fn signed_with(&self) -> Vec<Tok> {
+            self.fake.signed_with.lock().unwrap().clone()
+        }
+    }
+
+    const TTL: Duration = Duration::from_secs(900);
+
+    #[tokio::test]
+    async fn an_expired_vault_token_is_replaced_once() {
+        let r = rig(FakeLogin::new(TTL, vec![]));
+        assert_eq!(r.sign().await, Ok(vec![1]));
+        assert_eq!(r.sign().await, Ok(vec![1]));
+        assert_eq!(r.logins(), 1);
+        r.advance(TTL - TOKEN_EXPIRY_MARGIN - Duration::from_secs(1));
+        assert_eq!(r.sign().await, Ok(vec![1]), "still outside the margin");
+        assert_eq!(r.logins(), 1);
+        r.advance(Duration::from_secs(1));
+        assert_eq!(r.sign().await, Ok(vec![2]), "inside the margin: replaced");
+        assert_eq!(r.sign().await, Ok(vec![2]));
+        assert_eq!(r.logins(), 2);
+        assert_eq!(r.signed_with(), [Tok(1), Tok(1), Tok(1), Tok(2), Tok(2)]);
+        assert_eq!(TOKEN_EXPIRY_MARGIN, Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn the_expiry_is_counted_from_before_the_login() {
+        let slow = Duration::from_secs(10);
+        let r = rig(FakeLogin {
+            login_takes: slow,
+            ..FakeLogin::new(TTL, vec![])
+        });
+        assert_eq!(r.sign().await, Ok(vec![1]));
+        r.advance(TTL - TOKEN_EXPIRY_MARGIN - slow);
+        assert_eq!(r.sign().await, Ok(vec![2]));
+        assert_eq!(r.logins(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_sign_403_does_not_relogin_in_a_loop() {
+        let refused = Err(VaultSignError::TokenRefused);
+        let fresh = rig(FakeLogin::new(TTL, vec![refused, refused, refused]));
+        assert_eq!(fresh.sign().await, Err(SignError), "a fresh token refused");
+        assert_eq!(fresh.logins(), 1);
+        assert_eq!(fresh.signed_with(), [Tok(1)]);
+
+        let cached = rig(FakeLogin::new(TTL, vec![Ok(()), refused, refused, refused]));
+        assert_eq!(cached.sign().await, Ok(vec![1]));
+        assert_eq!(cached.sign().await, Err(SignError));
+        assert_eq!(cached.logins(), 2, "one re-login, then the refusal stands");
+        assert_eq!(cached.signed_with(), [Tok(1), Tok(1), Tok(2)]);
+    }
+
+    #[tokio::test]
+    async fn a_refused_cached_token_is_replaced_and_the_sign_retried_once() {
+        let r = rig(FakeLogin::new(
+            TTL,
+            vec![Ok(()), Err(VaultSignError::TokenRefused)],
+        ));
+        assert_eq!(r.sign().await, Ok(vec![1]));
+        assert_eq!(r.sign().await, Ok(vec![2]));
+        assert_eq!(r.sign().await, Ok(vec![2]));
+        assert_eq!(r.logins(), 2);
+        assert_eq!(r.signed_with(), [Tok(1), Tok(1), Tok(2), Tok(2)]);
+    }
+
+    #[tokio::test]
+    async fn a_sign_failure_that_is_not_a_refused_token_is_not_retried() {
+        let r = rig(FakeLogin::new(
+            TTL,
+            vec![Ok(()), Err(VaultSignError::Failed)],
+        ));
+        assert_eq!(r.sign().await, Ok(vec![1]));
+        assert_eq!(r.sign().await, Err(SignError));
+        assert_eq!(r.logins(), 1);
+        assert_eq!(r.signed_with(), [Tok(1), Tok(1)]);
+        assert_eq!(r.sign().await, Ok(vec![1]), "the token is still cached");
+    }
+
+    #[tokio::test]
+    async fn a_failed_login_signs_nothing_and_caches_nothing() {
+        let r = rig(FakeLogin::new(TTL, vec![]).failing_login());
+        assert_eq!(r.sign().await, Err(SignError));
+        assert!(r.signed_with().is_empty());
+        assert_eq!(r.sign().await, Ok(vec![2]));
+        assert_eq!(r.logins(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_failed_re_login_is_a_sign_error() {
+        let r = rig(FakeLogin::new(
+            TTL,
+            vec![Ok(()), Err(VaultSignError::TokenRefused)],
+        ));
+        assert_eq!(r.sign().await, Ok(vec![1]));
+        r.fake.logins.lock().unwrap().push(Err(()));
+        assert_eq!(r.sign().await, Err(SignError));
+        assert_eq!(r.logins(), 2);
+        assert_eq!(r.signed_with(), [Tok(1), Tok(1)]);
+    }
+
+    #[tokio::test]
+    async fn a_ttl_past_the_clock_s_range_is_used_once_and_not_cached() {
+        let r = rig(FakeLogin::new(Duration::MAX, vec![]));
+        assert_eq!(r.sign().await, Ok(vec![1]));
+        assert_eq!(r.sign().await, Ok(vec![2]));
+        assert_eq!(r.logins(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_poisoned_token_slot_still_signs() {
+        let r = rig(FakeLogin::new(TTL, vec![]));
+        assert_eq!(r.sign().await, Ok(vec![1]));
+        let _ = std::thread::scope(|s| {
+            s.spawn(|| {
+                let _held = r.signer.slot.lock().unwrap();
+                panic!("poison the slot");
+            })
+            .join()
+        });
+        assert!(r.signer.slot.is_poisoned());
+        assert_eq!(r.sign().await, Ok(vec![1]));
+        assert_eq!(r.logins(), 1);
+        assert_eq!(format!("{:?}", r.signer), "ServiceSigner { .. }");
+    }
 
     #[tokio::test]
     async fn the_fake_records_each_call_and_answers_as_built() {

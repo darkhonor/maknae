@@ -129,8 +129,8 @@ pub use egress_cfg::{
     EGRESS_DEADLINE_MS_MAX, EGRESS_SECTION, MACOS_EGRESS_SOCKET_PATH, VAULT_CALLS_MS,
 };
 pub use egress_mint::{
-    load_minting, minting_from_document, ApiBase, GithubAppConfig, MintVault, MintingConfig,
-    MINTING_FILE,
+    load_mint_role_id, load_minting, minting_from_document, ApiBase, GithubAppConfig, MintVault,
+    MintingConfig, MINTING_FILE, MINT_ROLE_ID_FILE,
 };
 pub use error::ConfigError;
 #[cfg(all(unix, feature = "hermetic-test-seam"))]

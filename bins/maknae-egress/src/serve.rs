@@ -66,9 +66,10 @@ pub enum ServeError {
 }
 
 /// Egress's minting, driven on the connection's own thread. Absent, every
-/// mint and revoke frame is refused `Request`.
+/// mint and revoke frame is refused `Request`; unavailable (`config` is `Err`),
+/// every one is refused `Signer` before admission.
 pub trait MintFrames: Send + Sync {
-    fn config(&self) -> &MintingConfig;
+    fn config(&self) -> Result<&MintingConfig, &'static str>;
     fn mint(&self, admitted: &AdmittedMint<'_>) -> (MintReply, LiveTokens);
     fn revoke(&self, req: &RevokeRequest, agent: &AgentId, app: &GithubAppConfig) -> RevokeReply;
     fn revoke_all(&self, live: LiveTokens);
@@ -264,7 +265,14 @@ fn serve_mint(
     let Some(m) = minting else {
         return refused(stream, MintRefusal::Request);
     };
-    let admitted = match admit_mint(req, Some(m.config())) {
+    let config = match m.config() {
+        Ok(c) => c,
+        Err(why) => {
+            unavailable("mint", &req.task, &req.agent, why);
+            return refused(stream, MintRefusal::Signer);
+        }
+    };
+    let admitted = match admit_mint(req, Some(config)) {
         Ok(a) => a,
         Err(r) => return refused(stream, r),
     };
@@ -282,6 +290,10 @@ fn serve_mint(
     written
 }
 
+fn unavailable(verb: &str, task: &str, agent: &str, why: &str) {
+    eprintln!("maknae-egress: {verb} task={task:?} agent={agent:?}: refused, minting is unavailable: {why}");
+}
+
 fn serve_revoke(
     stream: &mut UnixStream,
     req: &RevokeRequest,
@@ -289,13 +301,19 @@ fn serve_revoke(
     io_timeout: Duration,
     committed: &AtomicBool,
 ) -> Result<(), ServeError> {
-    let reply = match minting.map(|m| (m, admit_revoke(req, Some(m.config())))) {
+    let reply = match minting.map(|m| (m, m.config())) {
         None => RevokeReply::Refused(MintRefusal::Request),
-        Some((_, Err(r))) => RevokeReply::Refused(r),
-        Some((m, Ok((agent, _, app)))) => {
-            committed.store(true, Ordering::Release);
-            m.revoke(req, &agent, app)
+        Some((_, Err(why))) => {
+            unavailable("revoke", &req.task, &req.agent, why);
+            RevokeReply::Refused(MintRefusal::Signer)
         }
+        Some((m, Ok(config))) => match admit_revoke(req, Some(config)) {
+            Err(r) => RevokeReply::Refused(r),
+            Ok((agent, _, app)) => {
+                committed.store(true, Ordering::Release);
+                m.revoke(req, &agent, app)
+            }
+        },
     };
     write_reply(
         stream,
@@ -519,7 +537,7 @@ fn write_reply(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use maknae_deputy::call::{fulfil, CallBounds};
     use maknae_deputy::unseal::{KeyOpener, OpenRequest};
@@ -1593,6 +1611,52 @@ mod tests {
         );
     }
 
+    pub(crate) fn prompt_frame() -> EgressFrame {
+        EgressFrame::Prompt(request(ALICE))
+    }
+
+    pub(crate) fn canned_reply() -> EgressSocketReply {
+        EgressSocketReply::Prompt(EgressFrameReply::Reply(maknae_proto::PromptReply {
+            reasoning: None,
+            blocks: vec![],
+            tool_calls: vec![],
+            usage: None,
+        }))
+    }
+
+    /// One connection carrying `frame`, served with `minting` and the canned provider.
+    pub(crate) fn served_frame(
+        frame: &EgressFrame,
+        minting: Option<&dyn MintFrames>,
+    ) -> (Result<(), ServeError>, Option<EgressSocketReply>) {
+        let (a, b) = UnixStream::pair().unwrap();
+        let bytes = prefixed(&encoded_frame(frame));
+        let h = std::thread::spawn(move || {
+            let mut c = a;
+            c.write_all(&bytes).unwrap();
+            let mut back = Vec::new();
+            c.read_to_end(&mut back).unwrap();
+            back
+        });
+        let me = nix::unistd::getuid().as_raw();
+        let out = serve_one(
+            b,
+            me,
+            &bounds(),
+            FRAME_IO_TIMEOUT,
+            &AtomicBool::new(false),
+            minting,
+            canned,
+        );
+        let back = h.join().unwrap();
+        let reply = (!back.is_empty()).then(|| {
+            let n = u32::from_be_bytes(back[..4].try_into().unwrap()) as usize;
+            assert_eq!(back.len(), 4 + n);
+            maknae_proto::decode_egress_socket_reply(&back[4..]).unwrap()
+        });
+        (out, reply)
+    }
+
     #[test]
     fn a_mint_or_revoke_frame_is_refused_as_a_request_and_never_fulfilled() {
         let sealed = || {
@@ -1708,8 +1772,8 @@ mod tests {
         }
 
         impl MintFrames for TestMinting {
-            fn config(&self) -> &MintingConfig {
-                &self.config
+            fn config(&self) -> Result<&MintingConfig, &'static str> {
+                Ok(&self.config)
             }
 
             fn mint(&self, admitted: &AdmittedMint<'_>) -> (MintReply, LiveTokens) {

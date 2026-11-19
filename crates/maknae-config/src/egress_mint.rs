@@ -172,6 +172,47 @@ fn load_minting_with(
     }
 }
 
+pub const MINT_ROLE_ID_FILE: &str = "role-id";
+
+const ROLE_ID_MAX_BYTES: usize = 128;
+
+#[cfg(unix)]
+const ROLE_ID_ARTIFACT: maknae_io::TargetRequired = maknae_io::TargetRequired {
+    max_bytes: Some(ROLE_ID_MAX_BYTES as u64 + 2),
+    ..MINTING_ARTIFACT
+};
+
+#[cfg(unix)]
+fn load_mint_role_id_with(
+    path: &Path,
+    requirement: maknae_io::TargetRequired,
+) -> Result<String, ConfigError> {
+    let text = crate::loader::read_secure_required(path, requirement)?;
+    let role = text.trim();
+    if !(1..=ROLE_ID_MAX_BYTES).contains(&role.len()) {
+        return Err(ConfigError::InvalidMintRoleId("empty or too long"));
+    }
+    if !role.bytes().all(|b| b.is_ascii_graphic()) {
+        return Err(ConfigError::InvalidMintRoleId(
+            "a byte outside printable ASCII",
+        ));
+    }
+    Ok(role.to_owned())
+}
+
+/// The Egress Daemon's AppRole role id, beside `minting.yaml` and held to its owner and mode.
+pub fn load_mint_role_id(path: &Path) -> Result<String, ConfigError> {
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(ConfigError::PermissionsUnsupported)
+    }
+    #[cfg(unix)]
+    {
+        load_mint_role_id_with(path, ROLE_ID_ARTIFACT)
+    }
+}
+
 pub fn load_minting(path: &Path) -> Result<Option<MintingConfig>, ConfigError> {
     #[cfg(not(unix))]
     {
@@ -451,6 +492,91 @@ github_apps:
         assert!(!other.contains("approle-mint"), "{other}");
         let _ = std::fs::remove_file(&ok);
         let _ = std::fs::remove_file(&ok_ro);
+    }
+
+    fn role_requirement(uid: u32) -> maknae_io::TargetRequired {
+        maknae_io::TargetRequired {
+            owner: Some(uid),
+            ..ROLE_ID_ARTIFACT
+        }
+    }
+
+    #[test]
+    fn a_role_id_is_read_trimmed_from_a_file_held_to_the_minting_owner_and_mode() {
+        let ok = write("role_ok", "  5f0c-role.ID_1\n", 0o640);
+        let uid = me(&ok);
+        assert_eq!(
+            load_mint_role_id_with(&ok, role_requirement(uid)).unwrap(),
+            "5f0c-role.ID_1"
+        );
+        for (name, mode) in [("role_gw", 0o660), ("role_or", 0o644), ("role_ux", 0o740)] {
+            let p = write(name, "role", mode);
+            let got = load_mint_role_id_with(&p, role_requirement(uid));
+            let _ = std::fs::remove_file(&p);
+            assert!(got.is_err(), "mode {mode:o}");
+        }
+        assert!(load_mint_role_id_with(&ok, role_requirement(uid + 1)).is_err());
+        let _ = std::fs::remove_file(&ok);
+        assert!(matches!(
+            load_mint_role_id_with(&tmp("role_absent"), role_requirement(uid)),
+            Err(ConfigError::NotFound { .. })
+        ));
+        assert_eq!(MINT_ROLE_ID_FILE, "role-id");
+        assert_eq!(ROLE_ID_ARTIFACT.owner, Some(0));
+        assert_eq!(ROLE_ID_ARTIFACT.mode_mask, MINTING_ARTIFACT.mode_mask);
+    }
+
+    #[test]
+    fn a_role_id_outside_its_grammar_is_refused_without_echoing_it() {
+        let max = "r".repeat(ROLE_ID_MAX_BYTES);
+        let long = "r".repeat(ROLE_ID_MAX_BYTES + 1);
+        for (i, text) in ["", " \n", "a b", "SENTINEL\u{e9}", long.as_str(), "a\tb"]
+            .into_iter()
+            .enumerate()
+        {
+            let p = write(&format!("role_bad{i}"), text, 0o640);
+            let got = load_mint_role_id_with(&p, role_requirement(me(&p)));
+            let _ = std::fs::remove_file(&p);
+            let e = got.unwrap_err();
+            assert!(
+                matches!(e, ConfigError::InvalidMintRoleId(_)),
+                "{text:?}: {e:?}"
+            );
+            assert!(!e.to_string().contains("SENTINEL"), "{e}");
+        }
+        let p = write("role_max", &max, 0o640);
+        let got = load_mint_role_id_with(&p, role_requirement(me(&p)));
+        let _ = std::fs::remove_file(&p);
+        assert_eq!(got.unwrap(), max);
+    }
+
+    #[test]
+    fn a_role_id_file_is_bounded_before_it_is_read_and_held_to_root() {
+        let edge = format!("{}\n\n", "r".repeat(ROLE_ID_MAX_BYTES));
+        let p = write("role_edge", &edge, 0o640);
+        let got = load_mint_role_id_with(&p, role_requirement(me(&p)));
+        let _ = std::fs::remove_file(&p);
+        assert_eq!(got.unwrap(), "r".repeat(ROLE_ID_MAX_BYTES));
+        let p = write("role_over", &format!("{edge}\n"), 0o640);
+        let got = load_mint_role_id_with(&p, role_requirement(me(&p)));
+        let _ = std::fs::remove_file(&p);
+        let e = got.unwrap_err();
+        assert!(
+            !matches!(e, ConfigError::InvalidMintRoleId(_)),
+            "refused by the read bound, not the grammar: {e:?}"
+        );
+
+        let mine = write("role_mine", "role", 0o640);
+        let (owner, got) = (me(&mine), load_mint_role_id(&mine));
+        let _ = std::fs::remove_file(&mine);
+        assert!(
+            owner == 0 || got.is_err(),
+            "a role-id not owned by root: {got:?}"
+        );
+        assert!(matches!(
+            load_mint_role_id(&tmp("role_absent_public")),
+            Err(ConfigError::NotFound { .. })
+        ));
     }
 
     #[test]

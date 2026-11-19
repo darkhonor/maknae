@@ -81,6 +81,8 @@ pub enum ConfigError {
     InvalidEgressBounds(String),
     /// `minting.yaml` was read and refused by its parser (#168).
     InvalidMinting(String),
+    /// The Egress Daemon's `role-id` was read and is outside its grammar (#168).
+    InvalidMintRoleId(&'static str),
     /// The `egress` section (#240): a present field out of range or of the
     /// wrong type, a non-map section, an unknown key.
     InvalidEgress(String),
@@ -196,6 +198,7 @@ impl std::fmt::Display for ConfigError {
                 write!(f, "egress-bounds.yaml: {reason}")
             }
             ConfigError::InvalidMinting(reason) => write!(f, "minting.yaml: {reason}"),
+            ConfigError::InvalidMintRoleId(reason) => write!(f, "egress role-id: {reason}"),
             ConfigError::InvalidEgress(reason) => write!(f, "invalid egress config: {reason}"),
             ConfigError::ProviderPlaintextKey { field } => {
                 write!(f, "provider config carries a plaintext credential under '{field}': each user's key lives in Vault under their own login, never in the config")

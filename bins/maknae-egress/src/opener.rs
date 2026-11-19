@@ -6,11 +6,12 @@ use maknae_vault::{
     USER_KEY_WRAP_TTL,
 };
 use std::future::Future;
+use std::sync::Arc;
 use zeroize::Zeroizing;
 
 pub struct SealedOpener {
-    pub key: SealPrivateKey,
-    pub api: VaultApi,
+    pub key: Arc<SealPrivateKey>,
+    pub api: Arc<VaultApi>,
 }
 
 pub trait Unwrapper {
@@ -102,12 +103,12 @@ impl KeyOpener for SealedOpener {
         sealed: &[u8],
         req: &OpenRequest<'_>,
     ) -> impl Future<Output = Result<Zeroizing<String>, OpenFailure>> + Send {
-        open_with(&self.key, &self.api, sealed, req)
+        open_with(&self.key, &*self.api, sealed, req)
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::{Mutex, Once};
 
@@ -117,7 +118,7 @@ mod tests {
     const BOB_CREATION_PATH: &str = "maknae-kv/data/maknae/users/bob/openai/personal";
     const TOKEN: &[u8] = b"hvs.CAESIJ-egress-opener-wrapping-token-sentinel";
 
-    const TEST_CA_PEM: &str = "-----BEGIN CERTIFICATE-----
+    pub(crate) const TEST_CA_PEM: &str = "-----BEGIN CERTIFICATE-----
 MIIBtTCCATygAwIBAgIUULDH6JmXYLo3iF5hxI4/L1j2+DYwCgYIKoZIzj0EAwIw
 EjEQMA4GA1UEAwwHY2EudGVzdDAeFw0yNjA5MTQxMjE0NDhaFw0zNjA5MTExMjE0
 NDhaMBIxEDAOBgNVBAMMB2NhLnRlc3QwdjAQBgcqhkjOPQIBBgUrgQQAIgNiAASZ
@@ -443,8 +444,8 @@ ampbv97Rcx9j
         let key = SealPrivateKey::generate().unwrap();
         let blob = sealed_like_the_cli(&key, &alice(), TOKEN);
         let opener = SealedOpener {
-            key,
-            api: VaultApi::new("https://127.0.0.1:1", &ca).unwrap(),
+            key: Arc::new(key),
+            api: Arc::new(VaultApi::new("https://127.0.0.1:1", &ca).unwrap()),
         };
         assert_eq!(
             run(opener.open(&blob, &alice())).map(|_| ()),

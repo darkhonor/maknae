@@ -495,6 +495,11 @@ files = [
   # #321: the deputy's connection-slot accounting. T2: a leaked slot refuses
   # every later prompt (availability), and it carries no verdict.
   "bins/maknae-egress/src/capacity.rs",
+  # #168: minting's start-up state and the Egress Daemon's one Vault login over
+  # VaultApi. T2: an absent file turns minting off, an unreadable one makes it
+  # unavailable without stopping the provider path; the re-login state machine
+  # is T1 in maknae-deputy's mint/signer.rs.
+  "bins/maknae-egress/src/minting.rs",
   # #168: the GitHub App mint and revoke calls. T2: transport to the forge; the
   # grant check refuses and revokes any token wider or narrower than the set,
   # pinned by the loopback-stub tests beside it.
@@ -588,7 +593,7 @@ why = "#153: reads ~/.maknae/providers.yaml through maknae-config's existing mak
 
 [[t3]]
 path = "bins/maknae-egress/src/main.rs"
-why = "thin main: env scrub + FIPS install + arg parse + bounds load + uid resolve + seal-key load + Vault client + socket acquire + the runtime and accept-loop wiring (#321, its runtime proven able to drive concurrent block_on calls by a test here); every decision it makes is fail-closed exit-1, the behaviour lives in maknae-deputy's handle.rs/unseal.rs/call.rs (T1), serve.rs (T2), opener.rs and listen.rs (T3) and maknae-vault's env.rs (T1), and its load-bearing ORDERINGS (scrub first, keys loaded before the listener) are pinned by a source-order test in its OWN test module. Same treatment as bins/maknaed/src/main.rs"
+why = "thin main: env scrub + FIPS install + arg parse + bounds load + uid resolve + seal-key load + Vault client + minting state (minting.rs, T2) + socket acquire + the runtime and accept-loop wiring (#321, its runtime proven able to drive concurrent block_on calls by a test here); every decision it makes is fail-closed exit-1, the behaviour lives in maknae-deputy's handle.rs/unseal.rs/call.rs (T1), serve.rs (T2), opener.rs and listen.rs (T3) and maknae-vault's env.rs (T1), and its load-bearing ORDERINGS (scrub first, keys loaded before the listener) are pinned by a source-order test in its OWN test module. Same treatment as bins/maknaed/src/main.rs"
 
 [[t3]]
 path = "bins/maknae-agentd/src/main.rs"

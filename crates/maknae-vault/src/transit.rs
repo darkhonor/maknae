@@ -29,6 +29,12 @@ impl ServiceToken {
     }
 }
 
+impl Clone for ServiceToken {
+    fn clone(&self) -> Self {
+        Self(Zeroizing::new(self.0.as_str().to_owned()))
+    }
+}
+
 impl fmt::Debug for ServiceToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("ServiceToken(<redacted>)")
@@ -164,6 +170,14 @@ mod tests {
         let t = ServiceToken::new(Zeroizing::new("hvs.SENTINEL".into())).unwrap();
         assert!(t.expose() == "hvs.SENTINEL");
         assert_eq!(format!("{t:?}"), "ServiceToken(<redacted>)");
+    }
+
+    #[test]
+    fn a_cloned_service_token_is_its_own_copy_of_the_same_secret() {
+        let t = ServiceToken::new(Zeroizing::new("hvs.SENTINEL".into())).unwrap();
+        let c = t.clone();
+        drop(t);
+        assert_eq!(c.expose(), "hvs.SENTINEL");
     }
 
     #[test]
