@@ -206,7 +206,7 @@ fn live_token_may_remain(e: ForgeError) -> bool {
 
 fn frame_label(verb: &str, task: &str, agent: &AgentId, class: &str, app: &str) -> String {
     format!(
-        "{verb} task={task:?} agent={} class={class:?} app={app}",
+        "{verb} task={task:?} agent={} class={class:?} app={app:?}",
         agent.as_str()
     )
 }
@@ -215,7 +215,7 @@ pub async fn revoke_all(github: &GithubClient, live: LiveTokens, journal: &mut d
     for (set, token) in live.tokens.iter().enumerate() {
         let failure = match github.revoke(&live.api, token).await {
             Ok(RevokeReply::Revoked | RevokeReply::AlreadyGone) => continue,
-            Ok(other) => format!("{other:?}"),
+            Ok(RevokeReply::Refused(r)) => format!("{:?}", RevokeReply::Refused(r)),
             Err(e) => format!("{e:?}"),
         };
         journal(&format!(
@@ -865,7 +865,7 @@ mod tests {
                 "task=\"task-1\"",
                 "agent=coder",
                 "class=\"git-write\"",
-                "app=deploy",
+                "app=\"deploy\"",
                 "set=0",
                 variant,
             ] {
