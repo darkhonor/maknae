@@ -11,14 +11,18 @@ use zeroize::Zeroizing;
 pub const GITHUB_CALL_TIMEOUT: Duration = Duration::from_secs(20);
 pub const GITHUB_REPLY_MAX_BYTES: usize = 1_048_576;
 
+/// From `revoke`, `Transport` means nothing was sent (the token is still live);
+/// `Status` and `Unanswered` mean the token's state is unknown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForgeError {
     /// GitHub answered non-2xx: no token was issued.
     Status(ForgeStatus),
     /// The grant was not the set asked for: a live token may exist unless `revoked`.
     Mismatch { revoked: bool },
-    /// No status was received: no token was issued.
+    /// Nothing was sent (no connection, FIPS refusal, client build): no token was issued.
     Transport,
+    /// The request may have reached GitHub but no status came back: a live token may exist.
+    Unanswered,
     /// The body failed after a 2xx: a live token may exist.
     Unread,
     /// The body exceeded the cap after a 2xx: a live token may exist.
@@ -107,7 +111,7 @@ impl GithubClient {
             .json(&body)
             .send()
             .await
-            .map_err(|_| ForgeError::Transport)?;
+            .map_err(send_failure)?;
         let status = resp.status();
         if !status.is_success() {
             return Err(ForgeError::Status(forge_status(status.as_u16())));
@@ -132,7 +136,7 @@ impl GithubClient {
         let resp = with_headers(self.http.delete(url), token)
             .send()
             .await
-            .map_err(|_| ForgeError::Transport)?;
+            .map_err(send_failure)?;
         match resp.status().as_u16() {
             204 => Ok(RevokeReply::Revoked),
             401 => Ok(RevokeReply::AlreadyGone),
@@ -155,6 +159,14 @@ fn with_headers(req: reqwest::RequestBuilder, bearer: &str) -> reqwest::RequestB
     req.bearer_auth(bearer)
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
+}
+
+fn send_failure(e: reqwest::Error) -> ForgeError {
+    if e.is_connect() {
+        ForgeError::Transport
+    } else {
+        ForgeError::Unanswered
+    }
 }
 
 fn forge_status(code: u16) -> ForgeStatus {
@@ -843,7 +855,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_dead_forge_is_transport() {
+    async fn a_refused_connection_is_transport() {
         fips();
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", l.local_addr().unwrap());
@@ -985,6 +997,33 @@ mod tests {
         assert_eq!(
             c.mint(&api(), 7, JWT, &asked).await.unwrap_err(),
             ForgeError::Unread
+        );
+        let seen = h.await.unwrap();
+        assert_eq!((seen.requests.len(), seen.extra), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn a_request_answered_by_a_close_is_unanswered_not_transport() {
+        fips();
+        let asked = set(
+            &["alpha"],
+            &[(GithubPermission::Contents, AccessLevel::Read)],
+        );
+        let (base, h) = stub(vec![String::new()]).await;
+        let c = GithubClient::loopback_for_tests(&base);
+        assert_eq!(
+            c.mint(&api(), 7, JWT, &asked).await.unwrap_err(),
+            ForgeError::Unanswered
+        );
+        let seen = h.await.unwrap();
+        assert_eq!((seen.requests.len(), seen.extra), (1, 0));
+        assert!(head_of(&seen.requests[0]).starts_with("post /app/installations/7/access_tokens"));
+
+        let (base, h) = stub(vec![String::new()]).await;
+        let c = GithubClient::loopback_for_tests(&base);
+        assert_eq!(
+            c.revoke(&api(), "ghs_x").await.unwrap_err(),
+            ForgeError::Unanswered
         );
         let seen = h.await.unwrap();
         assert_eq!((seen.requests.len(), seen.extra), (1, 0));
