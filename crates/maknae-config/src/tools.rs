@@ -582,7 +582,12 @@ fn image_ref_ok(r: &str) -> bool {
     let Some((name, digest)) = r.split_once("@sha256:") else {
         return false;
     };
-    !name.is_empty()
+    let slash = |c: char| c == '/';
+    let first = name.split(slash).next().unwrap_or_default();
+    let last = name.rsplit(slash).next().unwrap_or_default();
+    name.contains('/')
+        && !first.is_empty()
+        && !last.is_empty()
         && !name.contains(char::is_whitespace)
         && !name.contains('@')
         && digest.len() == 64
@@ -594,7 +599,7 @@ fn image_ref_ok(r: &str) -> bool {
 fn host_ok(h: &str) -> bool {
     !h.is_empty()
         && h.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'*'))
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
 }
 
 fn parse_entry(
@@ -644,8 +649,10 @@ fn parse_entry(
             &[("container", Isolation::Container), ("vm", Isolation::Vm)],
         )
     })?;
-    let executes_workspace =
-        get(map, "executes_workspace").map_or(Ok(false), |v| flag(v, "executes_workspace"))?;
+    let executes_workspace = flag(
+        get(map, "executes_workspace").ok_or("executes_workspace is required")?,
+        "executes_workspace",
+    )?;
     let network = get(map, "network").map_or(Ok(Network::None), parse_network)?;
     let workspace = get(map, "workspace").map_or(Ok(WorkspaceAccess::None), |v| {
         choice(
@@ -677,6 +684,11 @@ fn parse_entry(
             if sites.iter().any(|h| h.contains('*')) {
                 return Err("executes_workspace with a credential and network must name its sites explicitly, with no `*` (ADR-0036 decision 8)".to_string());
             }
+        }
+    }
+    if let Network::Proxy { sites } = &network {
+        if let Some(bad) = sites.iter().find(|h| !host_ok(h)) {
+            return Err(format!("network site `{bad}` is not a host name"));
         }
     }
     let output_to_model = get(map, "output_to_model").map_or(Ok(OutputToModel::Redacted), |v| {
@@ -782,9 +794,6 @@ fn parse_network(v: &Value) -> Result<Network, String> {
     )?;
     if sites.is_empty() {
         return Err("network.sites must not be empty (use `network: none`)".to_string());
-    }
-    if let Some(bad) = sites.iter().find(|h| !host_ok(h)) {
-        return Err(format!("network site `{bad}` is not a host name"));
     }
     Ok(Network::Proxy {
         sites: sites.into_iter().map(str::to_string).collect(),
@@ -926,7 +935,7 @@ mod tests {
             .unwrap_or_else(|| panic!("{entry} is not disabled: {:?}", c.disabled()))
     }
 
-    const GOOD: &str = "  good:\n    commands:\n      echo: { subcommands: [\"hi *\"] }\n";
+    const GOOD: &str = "  good:\n    executes_workspace: false\n    commands:\n      echo: { subcommands: [\"hi *\"] }\n";
 
     fn doc(classes: &str, tools: &str) -> String {
         format!("schema_version: 1\ncredential_classes:\n{classes}\ntools:\n{tools}{GOOD}")
@@ -1000,7 +1009,10 @@ mod tests {
 
     #[test]
     fn unknown_entry_field_disables_only_that_entry() {
-        let c = catalog(&doc("  {}\n", &format!("  {SENTINEL}:\n    nonsense: 1\n")));
+        let c = catalog(&doc(
+            "  {}\n",
+            &format!("  {SENTINEL}:\n    executes_workspace: false\n    nonsense: 1\n"),
+        ));
         assert!(c.entry(SENTINEL).is_none());
         assert!(c.entry("good").is_some());
         assert!(reason(&c, SENTINEL).contains("nonsense"));
@@ -1012,6 +1024,9 @@ mod tests {
         for bad in [
             "registry.example/x/rust:1.80".to_string(),
             format!("registry.example/x@sha256:{}", &DIGEST[..63]),
+            format!("x@sha256:{DIGEST}"),
+            format!("/x@sha256:{DIGEST}"),
+            format!("reg/@sha256:{DIGEST}"),
             format!(
                 "registry.example/x@sha256:{}",
                 DIGEST.to_uppercase().replace('0', "A")
@@ -1021,7 +1036,7 @@ mod tests {
         ] {
             let c = catalog(&doc(
                 "  {}\n",
-                &format!("  {SENTINEL}:\n    image: {{ ref: \"{bad}\" }}\n"),
+                &format!("  {SENTINEL}:\n    executes_workspace: false\n    image: {{ ref: \"{bad}\" }}\n"),
             ));
             assert!(c.entry(SENTINEL).is_none(), "{bad}");
             assert!(reason(&c, SENTINEL).contains("image.ref"), "{bad}");
@@ -1029,7 +1044,7 @@ mod tests {
         let ok = format!("registry.example/x@sha256:{DIGEST}");
         let c = catalog(&doc(
             "  {}\n",
-            &format!("  fine:\n    image: {{ ref: \"{ok}\" }}\n"),
+            &format!("  fine:\n    executes_workspace: false\n    image: {{ ref: \"{ok}\" }}\n"),
         ));
         assert!(c.entry("fine").is_some());
     }
@@ -1038,11 +1053,16 @@ mod tests {
     fn undefined_credential_class_disables_entry() {
         let c = catalog(&doc(
             "  {}\n",
-            &format!("  {SENTINEL}:\n    credential: missing-class\n"),
+            &format!(
+                "  {SENTINEL}:\n    executes_workspace: false\n    credential: missing-class\n"
+            ),
         ));
         assert!(c.entry(SENTINEL).is_none());
         assert!(reason(&c, SENTINEL).contains("missing-class"));
-        let c = catalog(&doc("  {}\n", "  explicit-none:\n    credential: none\n"));
+        let c = catalog(&doc(
+            "  {}\n",
+            "  explicit-none:\n    executes_workspace: false\n    credential: none\n",
+        ));
         assert_eq!(c.entry("explicit-none").unwrap().credential, None);
     }
 
@@ -1058,7 +1078,9 @@ mod tests {
             let classes = format!("  bad-class:\n{body}");
             let c = catalog(&doc(
                 &classes,
-                &format!("  {SENTINEL}:\n    credential: bad-class\n"),
+                &format!(
+                    "  {SENTINEL}:\n    executes_workspace: false\n    credential: bad-class\n"
+                ),
             ));
             assert!(c.class("bad-class").is_none(), "{body}");
             assert!(c.entry(SENTINEL).is_none(), "{body}");
@@ -1072,7 +1094,7 @@ mod tests {
         let classes = "  weird:\n    kind: sentinel-674-kind\n";
         let c = catalog(&doc(
             classes,
-            &format!("  {SENTINEL}:\n    credential: weird\n"),
+            &format!("  {SENTINEL}:\n    executes_workspace: false\n    credential: weird\n"),
         ));
         assert!(c.class("weird").is_none());
         assert!(c.entry(SENTINEL).is_none());
@@ -1088,14 +1110,14 @@ mod tests {
         ] {
             let c = catalog(&doc(
                 "  {}\n",
-                &format!("  {SENTINEL}:\n    binds: {binds}\n"),
+                &format!("  {SENTINEL}:\n    executes_workspace: false\n    binds: {binds}\n"),
             ));
             assert!(c.entry(SENTINEL).is_none(), "{binds}");
             assert!(reason(&c, SENTINEL).contains("sentinel-674"), "{binds}");
         }
         let c = catalog(&doc(
             "  {}\n",
-            "  bound:\n    binds: { git: { resolver: git } }\n",
+            "  bound:\n    executes_workspace: false\n    binds: { git: { resolver: git } }\n",
         ));
         assert!(c.entry("bound").unwrap().binds.contains("git"));
     }
@@ -1104,7 +1126,7 @@ mod tests {
     fn labelled_entry_is_disabled_unclaimed() {
         let c = catalog(&doc(
             "  {}\n",
-            &format!("  {SENTINEL}:\n    labels: {{ entry.tier: high }}\n"),
+            &format!("  {SENTINEL}:\n    executes_workspace: false\n    labels: {{ entry.tier: high }}\n"),
         ));
         assert!(c.entry(SENTINEL).is_none());
         assert!(reason(&c, SENTINEL).contains("unclaimed label"));
@@ -1121,18 +1143,24 @@ mod tests {
             "network: { via: elsewhere, sites: [a.example] }",
             "network: { via: maknae-proxy, sites: [] }",
             "network: { via: maknae-proxy, sites: [\"a b\"] }",
+            "network: { via: maknae-proxy, sites: [\"*\"] }",
+            "network: { via: maknae-proxy, sites: [\"**\"] }",
+            "network: { via: maknae-proxy, sites: [\"a*b\"] }",
+            "network: { via: maknae-proxy, sites: [\"*.*\"] }",
             "volumes: { v: { access: sentinel } }",
             "volumes: { v: { access: ro, scope: sentinel } }",
             "resources: { memory: lots }",
             "resources: { cpus: 0 }",
             "lifetime: { max: soon }",
-            "executes_workspace: maybe",
             "commands: { echo: { subcommands: [\"* x\"] } }",
             "commands: { echo: { deny_args: [\"a*b\"] } }",
             "commands: { echo: { timeout: \"\" } }",
             "commands: { echo: { output: 16 } }",
         ] {
-            let c = catalog(&doc("  {}\n", &format!("  {SENTINEL}:\n    {field}\n")));
+            let c = catalog(&doc(
+                "  {}\n",
+                &format!("  {SENTINEL}:\n    executes_workspace: false\n    {field}\n"),
+            ));
             assert!(c.entry(SENTINEL).is_none(), "{field}");
             assert!(!reason(&c, SENTINEL).is_empty(), "{field}");
         }
@@ -1152,7 +1180,7 @@ mod tests {
         ] {
             let c = catalog(&doc(
                 &format!("  c:\n{body}"),
-                "  user:\n    credential: c\n",
+                "  user:\n    executes_workspace: false\n    credential: c\n",
             ));
             assert!(c.class("c").is_none(), "{body}");
             assert!(c.entry("user").is_none(), "{body}");
@@ -1177,7 +1205,8 @@ mod tests {
         let c = catalog(&doc(class, &entry(named, "true")));
         assert!(c.entry(SENTINEL).is_some(), "{:?}", c.disabled());
         let c = catalog(&doc(class, &entry(wild, "false")));
-        assert!(c.entry(SENTINEL).is_some(), "{:?}", c.disabled());
+        assert!(c.entry(SENTINEL).is_none());
+        assert!(reason(&c, SENTINEL).contains("not a host name"));
         let c = catalog(&doc(class, &entry("none", "true")));
         assert!(c.entry(SENTINEL).is_some());
     }
@@ -1224,6 +1253,18 @@ mod tests {
     }
 
     #[test]
+    fn executes_workspace_is_required_and_boolean() {
+        for body in ["    description: x\n", "    executes_workspace: maybe\n"] {
+            let c = catalog(&doc("  {}\n", &format!("  {SENTINEL}:\n{body}")));
+            assert!(c.entry(SENTINEL).is_none(), "{body}");
+            assert!(
+                reason(&c, SENTINEL).contains("executes_workspace"),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
     fn has_reach_check_only_for_github_app_installation() {
         use CredentialKind::*;
         for (kind, want) in [
@@ -1265,7 +1306,7 @@ mod tests {
     fn disabled_entry_is_not_returned_by_entry() {
         let text = doc(
             "  {}\n",
-            &format!("  {SENTINEL}:\n    nonsense: 1\n  off:\n    enabled: false\n"),
+            &format!("  {SENTINEL}:\n    executes_workspace: false\n    nonsense: 1\n  off:\n    executes_workspace: false\n    enabled: false\n"),
         );
         let c = catalog(&text);
         assert!(c.entry(SENTINEL).is_none());
