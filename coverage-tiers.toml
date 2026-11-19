@@ -232,6 +232,10 @@ files = [
   # #240: the `egress` section — the deputy's socket and the provider deadline,
   # range-checked, fail-closed like `transport`.
   "crates/maknae-config/src/egress_cfg.rs",
+  # #168: `minting.yaml`, the Egress Daemon's minting settings. A mis-parse
+  # points the deputy at the wrong App, Vault mount or API host. In [t1].files
+  # ONLY (own 95% floor; NOT ratchet_cohort).
+  "crates/maknae-config/src/egress_mint.rs",
   # #240a: the deputy's decision — bounds containment and shape admission, and
   # the absence of any path by which it could chain to another call.
   "crates/maknae-deputy/src/handle.rs",

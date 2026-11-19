@@ -79,6 +79,8 @@ pub enum ConfigError {
     /// "could not be read", and never routes a bounds error through the
     /// `provider` section's message.
     InvalidEgressBounds(String),
+    /// `minting.yaml` was read and refused by its parser (#168).
+    InvalidMinting(String),
     /// The `egress` section (#240): a present field out of range or of the
     /// wrong type, a non-map section, an unknown key.
     InvalidEgress(String),
@@ -193,6 +195,7 @@ impl std::fmt::Display for ConfigError {
             ConfigError::InvalidEgressBounds(reason) => {
                 write!(f, "egress-bounds.yaml: {reason}")
             }
+            ConfigError::InvalidMinting(reason) => write!(f, "minting.yaml: {reason}"),
             ConfigError::InvalidEgress(reason) => write!(f, "invalid egress config: {reason}"),
             ConfigError::ProviderPlaintextKey { field } => {
                 write!(f, "provider config carries a plaintext credential under '{field}': each user's key lives in Vault under their own login, never in the config")

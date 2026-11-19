@@ -149,6 +149,7 @@ The host side, `<config-dir>` (`/etc/maknae` when packaged):
 ├── egress-bounds.yaml    # required WHEN any provider is authorized (§6.1.3); written by `maknae enroll`, 0644 root:root
 ├── egress/               # 0750 root:_maknae-egress, created by the package; files written by `maknae enroll`
 │   ├── vault-ca.crt      # 0640 root:_maknae-egress — the deputy's Vault TLS anchor
+│   ├── minting.yaml      # optional, operator-written, never regenerated; 0640 root:_maknae-egress (§6.1.4)
 │   └── maknae-egress-secret-id.keychain   # macOS only: points at the System-keychain item holding the deputy's seal key
 ├── private/
 │   └── maknae-egress-seal-key.cred        # Linux only: the deputy's seal key, sealed by systemd-creds, 0400 root:root
@@ -916,6 +917,29 @@ call_timeout_ms: 120000   # optional
 - **Not in `config.d/`.** It is a standalone document with its own reader, never merged or shadowed.
 - **The same address appears twice, independently.** `vault.addr` here is where the deputy unwraps; `maknae.yaml`'s `vault.addr` is `maknaed`'s. The two are never compared.
 - On an SELinux host, run `restorecon -R /etc/maknae` after creating the file by hand or after enroll creates `egress/`: a new file or directory inherits `maknae_etc_t`, and the deputy is granted the file's own type (`maknae_egress_bounds_t`) and the directory's (`maknae_egress_etc_t`, `packaging/common/maknae.fc`), not the parent's.
+
+### 6.1.4 `minting.yaml`
+
+`/etc/maknae/egress/minting.yaml` holds the Egress Daemon's credential-minting settings. It is operator-owned: `maknae enroll` never writes or regenerates it, and `egress-bounds.yaml` is unaffected by it. A missing file means no minting is configured. Parser: `crates/maknae-config/src/egress_mint.rs`.
+
+```yaml
+vault:
+  approle_mount: approle-mint
+github_apps:
+  ci-bot:
+    app_id: 12345
+    installation_id: 67890
+    api: https://api.github.com
+    transit_mount: transit
+    transit_key: gh-app-1
+```
+
+- **`vault.approle_mount`** (required): the AppRole mount the daemon's minting identity logs in at. The role id is not here; enroll writes it to `egress/role-id`.
+- **`github_apps`** (optional mapping): one entry per GitHub App, keyed by a name of 1 to 64 characters in `[a-z0-9-]`. Each entry takes exactly `app_id` and `installation_id` (positive integers), `api`, `transit_mount` and `transit_key` (1 to 64 characters in `[A-Za-z0-9_-]`, naming the Vault transit key that signs the App's JWT). Any other key refuses with `unknown key '<key>' in 'minting.yaml'` (or `in 'minting.yaml/vault'`, `in 'minting.yaml/github_apps.<name>'`); a private key in this file is one of them.
+- **`api`**: `https://host[:port]` and nothing else. `http://` is refused, loopback included. A path, query, userinfo or fragment is refused; one trailing `/` is accepted and dropped. Host and port follow the provider endpoint rules (§6.1).
+- **Owner and mode: `root:_maknae-egress 0640`.** The file is read through `maknae-io`: it must be a regular file owned by root with no mode bit beyond `0640`. The loader requires owner root and refuses a group-write, any execute bit and any bit for other users; it cannot name the group, so setting it to `_maknae-egress` is the operator's job (`chown root:_maknae-egress`, `chmod 0640`).
+- **Refusals.** A file that is present but has the wrong owner or mode, or fails to parse, is an error naming the path and what was wrong; its contents are never quoted.
+- On an SELinux host, run `restorecon -R /etc/maknae` after creating the file.
 
 ---
 
