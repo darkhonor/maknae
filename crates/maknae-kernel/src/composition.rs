@@ -977,7 +977,7 @@ mod tests {
             ("unbound", 4242, Stamp::Client, false),
         ];
         let mut out = String::from(
-            "# tool.invoke through the Composition, against tools-homelab.yaml: the role step has no rule for it, so every row finalizes to Deny.\n",
+            "# tool.invoke through the Composition, against tools-homelab.yaml: the tools.yaml ceiling decides first, for every subject; the role step has no rule for tool.invoke, so every row that passes the ceiling finalizes to Deny.\n",
         );
         for (who, uid, stamp, tasked) in &subjects {
             let tasked = if *tasked { " tasked" } else { "" };

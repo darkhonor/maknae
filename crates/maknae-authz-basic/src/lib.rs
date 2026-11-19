@@ -731,6 +731,7 @@ impl PolicySource {
         self
     }
 
+    #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
     fn problems_with_tools(&self) -> Vec<IdentityProblem> {
         self.resolved
             .problems

@@ -856,7 +856,24 @@ pub(crate) fn decide_loaded_cited(
     if let Some(reason) = channel_refusal(&lp.agents, uid, req) {
         return undecided(Verdict::Deny { reason });
     }
-    let role = match lp.roles.role_for(uid, principal.uid) {
+    let resolution = lp.roles.role_for(uid, principal.uid);
+    let tool_call = match (req.action.0 == "tool.invoke", &resolution) {
+        (false, _) => None,
+        (true, resolved) => match tool_ceiling(lp, req, uid) {
+            Ok(call) => Some(call),
+            Err((verdict, cited)) => {
+                return Decided {
+                    verdict,
+                    role: match resolved {
+                        Resolution::Role(r) => Some(r.key()),
+                        Resolution::NoRole => None,
+                    },
+                    cited,
+                }
+            }
+        },
+    };
+    let role = match resolution {
         Resolution::Role(r) => r,
         // Case-1 testimony (#181): the FACT, audit-only. The absence still
         // composes as an absence -- an extension may yet grant.
@@ -933,8 +950,8 @@ pub(crate) fn decide_loaded_cited(
         Role::Admin | Role::User if req.action.0 == "session.task" => {
             decide_task(lp, req, role.key(), uid, principal.uid)
         }
-        Role::Admin | Role::User if req.action.0 == "tool.invoke" => {
-            decide_tool(lp, req, role.key(), uid)
+        Role::Admin | Role::User if let Some(call) = &tool_call => {
+            decide_tool(lp, call, role.key(), uid)
         }
         Role::Guest | Role::User => match class {
             Some(Class::Liveness) => (permit_with_audit(), None),
@@ -1416,21 +1433,25 @@ fn decide_grants(
     }
 }
 
-/// `tool.invoke` (#674): the role's grant, then the `tools.yaml` ceiling, then the
-/// `Tool(...)` entries.
-fn decide_tool(lp: &LoadedPolicy, req: &SecRequest, role_key: &'static str, uid: u32) -> Decision {
+/// `tool.invoke` (#674): the `tools.yaml` ceiling, decided for every subject before its role.
+fn tool_ceiling(
+    lp: &LoadedPolicy,
+    req: &SecRequest,
+    uid: u32,
+) -> Result<maknae_config::ToolCall, Decision> {
     use maknae_security::{
         RESOURCE_BINDING_KINDS, RESOURCE_TOOL_ARGV, RESOURCE_TOOL_ENTRY, RESOURCE_TOOL_PROGRAM,
         SUBJECT_TASK,
     };
-    let undecidable = (Verdict::Indeterminate, None);
+    let undecidable = || Err((Verdict::Indeterminate, None));
+    let deny = |reason: &str| Err(refused(reason));
     let attrs = &req.resource.0;
     let (Some(name), Some(program), Some(argv)) = (
         attrs.str(RESOURCE_TOOL_ENTRY),
         attrs.str(RESOURCE_TOOL_PROGRAM),
         attrs.list(RESOURCE_TOOL_ARGV),
     ) else {
-        return undecidable;
+        return undecidable();
     };
     let none = std::collections::BTreeSet::new();
     let kinds = match (
@@ -1439,7 +1460,7 @@ fn decide_tool(lp: &LoadedPolicy, req: &SecRequest, role_key: &'static str, uid:
     ) {
         (None, _) => &none,
         (Some(_), Some(kinds)) => kinds,
-        (Some(_), None) => return undecidable,
+        (Some(_), None) => return undecidable(),
     };
     let task = match (
         req.subject.0.get(SUBJECT_TASK),
@@ -1447,56 +1468,65 @@ fn decide_tool(lp: &LoadedPolicy, req: &SecRequest, role_key: &'static str, uid:
     ) {
         (None, _) => false,
         (Some(_), Some(_)) => true,
-        (Some(_), None) => return undecidable,
+        (Some(_), None) => return undecidable(),
     };
     match conversation(req, uid) {
         Some(Conversation::Absent | Conversation::Active { owned: true }) => {}
-        Some(Conversation::Unknown) => return refused(NOT_ACTIVE),
-        Some(Conversation::Active { owned: false }) => return refused(FOREIGN),
-        None => return undecidable,
-    }
-    if let Err(decision) = granted(lp, role_key, "tool.invoke") {
-        return decision;
+        Some(Conversation::Unknown) => return deny(NOT_ACTIVE),
+        Some(Conversation::Active { owned: false }) => return deny(FOREIGN),
+        None => return undecidable(),
     }
     if lp.tools.is_empty() {
-        return refused("tool: no tools configured");
+        return deny("tool: no tools configured");
     }
     let Some(entry) = lp.tools.entry(name) else {
-        return refused(&format!("tool: unknown or disabled entry {name}"));
+        return deny(&format!("tool: unknown or disabled entry {name}"));
     };
     let Some(command) = entry.commands.get(program) else {
-        return refused(&format!("tool: program {program} not in entry {name}"));
+        return deny(&format!("tool: program {program} not in entry {name}"));
     };
     let bound = maknae_config::Bound::empty();
     if !command.subcommands.iter().any(|p| p.matches(argv, &bound)) {
-        return refused(&format!(
+        return deny(&format!(
             "tool: arguments outside entry {name}'s subcommands"
         ));
     }
     if let Some(n) = maknae_config::first_denied(&command.deny_args, argv) {
-        return refused(&format!("tool: denied argument {n} for {name}/{program}"));
+        return deny(&format!("tool: denied argument {n} for {name}/{program}"));
     }
     if let Some(kind) = entry.binds.iter().find(|k| !kinds.contains(*k)) {
-        return refused(&format!("tool: missing binding {kind} for {name}"));
+        return deny(&format!("tool: missing binding {kind} for {name}"));
     }
     if let (true, Some(class)) = (task, entry.credential.as_deref()) {
         match lp.tools.class(class).map(|c| c.kind.has_reach_check()) {
             Some(true) => {}
             Some(false) => {
-                return refused(&format!(
+                return deny(&format!(
                     "tool: credential class {class} has no reach check (task)"
                 ))
             }
-            None => return undecidable,
+            None => return undecidable(),
         }
     }
-    let call = maknae_config::ToolCall {
+    Ok(maknae_config::ToolCall {
         entry: name.to_string(),
         program: program.to_string(),
         argv: argv.to_vec(),
         bound,
-    };
-    let request = maknae_config::Request::Tool(&call);
+    })
+}
+
+/// `tool.invoke` past the ceiling: the role's grant, then the `Tool(...)` entries.
+fn decide_tool(
+    lp: &LoadedPolicy,
+    call: &maknae_config::ToolCall,
+    role_key: &'static str,
+    uid: u32,
+) -> Decision {
+    if let Err(decision) = granted(lp, role_key, "tool.invoke") {
+        return decision;
+    }
+    let request = maknae_config::Request::Tool(call);
     decide_grants(
         lp,
         lp.subjects.get(uid),
@@ -6037,16 +6067,46 @@ mod tests {
     }
 
     #[test]
-    fn the_role_grant_is_decided_before_the_ceiling() {
+    fn the_ceiling_is_decided_before_the_role_grant() {
         let lp = lp_tool(TOOL_SITE_ALLOW, &[], &[]);
+        let d = tool_decided(
+            &lp,
+            &tool_req(TOOL_USER, "sentinel-674-missing", "cargo", &["build"]),
+        );
         assert_eq!(
-            tool_decided(
-                &lp,
-                &tool_req(TOOL_USER, "sentinel-674-missing", "cargo", &["build"])
+            (d.verdict, d.cited, d.role),
+            (
+                deny("tool: unknown or disabled entry sentinel-674-missing"),
+                None,
+                Some("user")
             )
-            .verdict,
+        );
+    }
+
+    const TOOL_NOBODY: u32 = 1199;
+
+    #[test]
+    fn the_ceiling_binds_a_guest_and_a_subject_with_no_role() {
+        let lp = lp_tool(TOOL_SITE_ALLOW, &["guest"], &[]);
+        for (uid, role) in [(TOOL_GUEST, Some("guest")), (TOOL_NOBODY, None)] {
+            for e in ["sentinel-674-missing", "sentinel-674-off"] {
+                let d = tool_decided(&lp, &tool_req(uid, e, "cargo", &["build"]));
+                assert_eq!(
+                    (d.verdict, d.role),
+                    (deny(&format!("tool: unknown or disabled entry {e}")), role),
+                    "{uid} {e}"
+                );
+            }
+            assert_eq!(
+                tool_decided(&lp, &build(uid, &["build", "--config=x"])).verdict,
+                deny("tool: denied argument 1 for sentinel-674-build/cargo"),
+                "{uid}"
+            );
+        }
+        assert_eq!(
+            tool_decided(&lp, &build(TOOL_NOBODY, &["build"])).verdict,
             Verdict::NotApplicable {
-                note: Some("role user: no rule for tool.invoke".into())
+                note: Some("subject resolves to no role".into())
             }
         );
     }
@@ -6244,9 +6304,8 @@ mod tests {
     const LIMITED_SUBJECT: &str = "permissions:\n  allow: []\nsubjects:\n  tuser:\n    permissions:\n      allow: [\"Tool(sentinel-674-build cargo build *)\"]\n";
 
     #[test]
-    fn actions_limit_without_tool_invoke_refuses_before_role_and_ceiling() {
+    fn actions_limit_without_tool_invoke_refuses_after_the_ceiling_and_before_the_role() {
         let mut lp = lp_tool(LIMITED_SUBJECT, &[], &[]);
-        lp.tools = Default::default();
         limit(&mut lp, TOOL_USER, &["session.new"]);
         let d = tool_decided(&lp, &build(TOOL_USER, &["build"]));
         assert!(
@@ -6254,6 +6313,11 @@ mod tests {
             "{d:?}"
         );
         assert_eq!(d.role, Some("user"));
+        lp.tools = Default::default();
+        assert_eq!(
+            tool_decided(&lp, &build(TOOL_USER, &["build"])).verdict,
+            deny("tool: no tools configured")
+        );
         let mut denied = lp_tool(LIMITED_SUBJECT, &["user"], &[]);
         denied.subjects.0.get_mut(&TOOL_USER).unwrap().actions = Some(SubjectActionSet {
             allow: BTreeMap::new(),
