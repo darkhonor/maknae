@@ -8,8 +8,8 @@
 //! **`panic = "unwind"` is load-bearing:** the parser has internal
 //! `assert!`/`unreachable!` paths and the depth ceiling deliberately panics; both
 //! are converted to [`ConfigError::Parse`] by the `catch_unwind` boundary in
-//! [`load_str`]. A CI gate asserts no profile sets `abort` — but the gate is
-//! best-effort (a downstream workspace / `RUSTFLAGS=-Cpanic=abort` can override).
+//! [`load_str`]. The workspace pins `unwind` and `ci/gates/panic-strategy.sh` holds
+//! it (#544), but a downstream workspace or ambient `RUSTFLAGS` can still override it.
 //! Even then the failure mode is a **process abort (fail-closed)** on a malformed/
 //! deep config: no wrong `Value` is ever produced — never a fail-open.
 //!

@@ -3,6 +3,7 @@ set -euo pipefail
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_ALTERNATE_OBJECT_DIRECTORIES \
   GIT_LITERAL_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_GLOB_PATHSPECS GIT_ICASE_PATHSPECS GIT_GRAFT_FILE
 export GIT_NO_REPLACE_OBJECTS=1
+here="$(cd "$(dirname "$0")" && pwd)"; source "$here/lib.sh"
 root="${1:-$(git rev-parse --show-toplevel)}"; fail=0   # arg override for the negative-control
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/maknae-build-invocation-lint.XXXXXXXX")"; trap 'rm -rf "$tmp"' EXIT
 
@@ -34,11 +35,7 @@ tmp="$(mktemp -d "${TMPDIR:-/tmp}/maknae-build-invocation-lint.XXXXXXXX")"; trap
 # another branch fails the main checkout's gate. Sharpened by this change --
 # the awk-status check below turns a `chmod 000` fixture left behind in a
 # sibling worktree into a hard failure where the old `2>/dev/null` shrugged.
-if ! find "$root" -type d \( -name target -o -name '.claude' -o -path '*/ci/gates' \) -prune -o -type f \
-        \( -path '*/.github/workflows/*.yml' -o -path '*/.github/workflows/*.yaml' \
-           -o -name 'Dockerfile*' -o -name 'justfile' -o -name 'Justfile' \
-           -o -name 'Makefile' -o -name 'makefile' -o -name 'GNUmakefile' -o -name '*.mk' \
-           -o -name '*.sh' \) -print > "$tmp/files"; then
+if ! build_surface_files "$root" "$tmp/files"; then
   echo "FAIL build-invocation-lint: the file scan errored under '$root' (see above)."
   echo "  A partial scan cannot show the ABSENCE of a bad build invocation."
   exit 1
@@ -61,20 +58,12 @@ fi
 # Scan the WORKING TREE (find). Join backslash line-continuations first, so a cargo build split
 # across lines cannot hide its flags from a line-by-line scan (Codex hardening).
 while IFS= read -r f; do
-  # awk: strip a trailing "\" and buffer the line, emitting one LOGICAL line per shell command.
-  #
   # Its status is READ, for the same reason as the find above. `find` lists a
   # file it cannot read (it needs permission on the DIRECTORY, not the file), so
   # `awk` then failed with `can't open file`, the process substitution swallowed
   # the status, the inner loop saw no lines, and a file carrying a REAL violation
   # was scanned as clean at `ok` / rc 0 -- verified before this change (#219).
-  if ! awk '{ if (sub(/\\[[:space:]]*$/,"")) { buf = buf $0 " " } else { print buf $0; buf = "" } } END { if (buf != "") print buf }' \
-       "$f" > "$tmp/logical"; then
-    # No `--` guard here, deliberately: this awk treats `--` as a FILENAME, not
-    # an end-of-options marker, and adding it made the gate fail on its first
-    # real file. `$root` is absolute on every invocation (the default is
-    # `git rev-parse --show-toplevel`; the override is passed absolute), so no
-    # path reaching this line can begin with a dash.
+  if ! join_continuations "$f" "$tmp/logical"; then
     echo "FAIL build-invocation-lint: could not read '$f' (see above)."
     echo "  A file that cannot be read has not been cleared."
     exit 1

@@ -185,11 +185,8 @@ jobs:
         run: cargo fmt --all --check
       - name: Unsafe confinement (ADR-0027)
         run: ci/gates/unsafe-confinement.sh
-      - name: Panic strategy must be unwind (the catch_unwind boundaries in maknae-security, maknae-config and maknae-egress depend on it)
-        run: |
-          if grep -rEln 'panic[[:space:]]*=[[:space:]]*["'\'']abort["'\'']' Cargo.toml crates/*/Cargo.toml bins/*/Cargo.toml .cargo/config.toml 2>/dev/null; then
-            echo "ERROR: a manifest sets panic = \"abort\"; the catch_unwind boundaries in maknae-security, maknae-config and maknae-egress require unwind"; exit 1
-          fi
+      - name: Panic strategy stays unwind (#544)
+        run: ci/gates/panic-strategy.sh
       # #74: the package set is DERIVED from `cargo metadata`, not listed here.
       # The old hand-written loop named 13 of 21 workspace members, and a copy of
       # the same list lived in CONTRIBUTING.md. MEASURED, because the first
@@ -219,6 +216,8 @@ jobs:
           [ -n "$bins" ] || { echo "ERROR: derived an EMPTY binary set — refusing to report success"; exit 1; }
           echo "auditable-building: $bins"
           for p in $bins; do cargo auditable build --locked -p "$p" --release; done
+      - name: The release-built panic boundary unwinds (#544)
+        run: ci/gates/panic-strategy.sh --release-proof
       - name: Tests (workspace test IS permitted; does NOT establish isolation)
         run: cargo test --locked --workspace
       - name: cargo-deny
@@ -374,6 +373,8 @@ jobs:
           fetch-depth: 0
       - name: Install toolchain (pinned)
         run: rustup show
+      - name: The release-built panic boundary unwinds on macOS (#544)
+        run: ci/gates/panic-strategy.sh --release-proof
       # aws-lc-fips-sys builds the FIPS module with cmake AND Go (its build
       # script runs aws-lc's `cmake/go.cmake`); the macos-26 image ships cmake
       # but no Go on PATH, and the first whole-workspace run died on exactly
