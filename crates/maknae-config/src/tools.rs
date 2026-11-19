@@ -19,6 +19,29 @@ pub enum CredentialKind {
 }
 
 impl CredentialKind {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "github-app-installation" => Some(Self::GithubAppInstallation),
+            "github-machine-user" => Some(Self::GithubMachineUser),
+            "gitlab-project-token" => Some(Self::GitlabProjectToken),
+            "gitlab-bot-token" => Some(Self::GitlabBotToken),
+            "vault-child-token" => Some(Self::VaultChildToken),
+            "vault-dynamic-secret" => Some(Self::VaultDynamicSecret),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::GithubAppInstallation => "github-app-installation",
+            Self::GithubMachineUser => "github-machine-user",
+            Self::GitlabProjectToken => "gitlab-project-token",
+            Self::GitlabBotToken => "gitlab-bot-token",
+            Self::VaultChildToken => "vault-child-token",
+            Self::VaultDynamicSecret => "vault-dynamic-secret",
+        }
+    }
+
     pub fn has_reach_check(self) -> bool {
         match self {
             Self::GithubAppInstallation => true,
@@ -419,21 +442,9 @@ fn parse_class(name: &str, v: &Value) -> Result<CredentialClass, String> {
             "policies",
         ],
     )?;
-    let kind = choice(
-        get(map, "kind").ok_or("`kind` is required")?,
-        "kind",
-        &[
-            (
-                "github-app-installation",
-                CredentialKind::GithubAppInstallation,
-            ),
-            ("github-machine-user", CredentialKind::GithubMachineUser),
-            ("gitlab-project-token", CredentialKind::GitlabProjectToken),
-            ("gitlab-bot-token", CredentialKind::GitlabBotToken),
-            ("vault-child-token", CredentialKind::VaultChildToken),
-            ("vault-dynamic-secret", CredentialKind::VaultDynamicSecret),
-        ],
-    )?;
+    let spelled = text(get(map, "kind").ok_or("`kind` is required")?, "kind")?;
+    let kind = CredentialKind::parse(spelled)
+        .ok_or_else(|| format!("kind `{spelled}` is not a known credential kind"))?;
     let source = get(map, "source")
         .map(|v| {
             choice(
@@ -1379,6 +1390,42 @@ mod tests {
             (VaultDynamicSecret, false),
         ] {
             assert_eq!(kind.has_reach_check(), want, "{kind:?}");
+        }
+    }
+
+    const KINDS: [CredentialKind; 6] = {
+        use CredentialKind::*;
+        [
+            GithubAppInstallation,
+            GithubMachineUser,
+            GitlabProjectToken,
+            GitlabBotToken,
+            VaultChildToken,
+            VaultDynamicSecret,
+        ]
+    };
+
+    fn kind_is_listed(k: CredentialKind) -> bool {
+        match k {
+            CredentialKind::GithubAppInstallation
+            | CredentialKind::GithubMachineUser
+            | CredentialKind::GitlabProjectToken
+            | CredentialKind::GitlabBotToken
+            | CredentialKind::VaultChildToken
+            | CredentialKind::VaultDynamicSecret => KINDS.contains(&k),
+        }
+    }
+
+    #[test]
+    fn credential_kind_spellings_round_trip() {
+        for k in KINDS {
+            assert!(kind_is_listed(k), "{k:?}");
+            assert_eq!(CredentialKind::parse(k.as_str()), Some(k));
+        }
+        let spellings: std::collections::BTreeSet<_> = KINDS.iter().map(|k| k.as_str()).collect();
+        assert_eq!(spellings.len(), KINDS.len());
+        for bad in ["GithubAppInstallation", "", "github-app"] {
+            assert_eq!(CredentialKind::parse(bad), None, "{bad}");
         }
     }
 
