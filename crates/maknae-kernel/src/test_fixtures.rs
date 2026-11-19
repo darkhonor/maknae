@@ -144,6 +144,13 @@ pub(crate) fn write_sensitive(dir: &Path, body: &str) {
     std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
 }
 
+pub(crate) fn write_tools(dir: &Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let p = dir.join(maknae_config::TOOLS_FILE);
+    std::fs::write(&p, body).unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
+}
+
 pub(crate) fn write_empty_sensitive(dir: &Path) {
     write_sensitive(dir, "schema_version: 1\nsensitive: []\n");
 }

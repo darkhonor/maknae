@@ -698,6 +698,30 @@ mod tests {
     }
 
     #[test]
+    fn boot_refuses_a_malformed_tools_yaml() {
+        for body in [
+            "schema_version: 1\ntools: [\n",
+            "schema_version: 2\n",
+            "schema_version: 1\nsentinel-674-key: 1\n",
+        ] {
+            let d = policy_dir("badtools", EMPTY_POLICY, Some(ADMIN_ROOT));
+            crate::test_fixtures::write_tools(&d, body);
+            let got = authz_policy_source_with(&d, Some(principal()), hermetic_load);
+            let _ = std::fs::remove_dir_all(&d);
+            let m = construct_load(got);
+            assert!(m.contains(maknae_config::TOOLS_FILE), "{body:?}: {m}");
+        }
+    }
+
+    #[test]
+    fn boot_accepts_an_absent_tools_yaml_as_an_empty_catalog() {
+        let d = policy_dir("notools", EMPTY_POLICY, Some(ADMIN_ROOT));
+        let source = authz_policy_source_with(&d, Some(principal()), hermetic_load);
+        let _ = std::fs::remove_dir_all(&d);
+        assert!(source.unwrap().tools().is_empty());
+    }
+
+    #[test]
     fn the_host_list_reaches_the_boot_snapshot() {
         let d = policy_dir("sens", EMPTY_POLICY, Some(ADMIN_ROOT));
         write_sensitive(

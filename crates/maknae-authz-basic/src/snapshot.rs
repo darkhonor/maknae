@@ -157,6 +157,10 @@ impl Snapshot {
         self.loaded.agents.0.get(&uid).map(String::as_str)
     }
 
+    pub fn tools(&self) -> &Arc<maknae_config::ToolsCatalog> {
+        &self.loaded.tools
+    }
+
     pub fn sensitive(&self) -> &Arc<maknae_config::SensitiveList> {
         &self.loaded.sensitive
     }
@@ -608,6 +612,7 @@ pub fn compile(
         agents: source.agent_uids(),
         taskers: source.agent_taskers().clone(),
         sensitive: Arc::clone(source.sensitive()),
+        tools: Arc::clone(source.tools()),
     };
     Ok(Snapshot {
         graph,

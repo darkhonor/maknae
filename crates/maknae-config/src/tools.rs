@@ -291,6 +291,10 @@ impl ToolsCatalog {
         &self.disabled
     }
 
+    pub fn canonical(&self) -> String {
+        format!("{self:?}")
+    }
+
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty() && self.classes.is_empty() && self.disabled.is_empty()
     }

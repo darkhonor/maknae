@@ -19,9 +19,10 @@ pub fn record_fields(p: &IdentityProblem) -> (&'static str, String, &'static str
         IdentityProblem::Released { .. } | IdentityProblem::PrincipalAdmin { .. } => {
             ("permit", p.to_string(), "authorized")
         }
-        IdentityProblem::UnresolvedAdversary { .. } | IdentityProblem::AgentSkipped { .. } => {
-            ("deny", p.to_string(), "unavailable")
-        }
+        IdentityProblem::UnresolvedAdversary { .. }
+        | IdentityProblem::AgentSkipped { .. }
+        | IdentityProblem::ToolEntryDisabled { .. }
+        | IdentityProblem::ToolGrantUnknownEntry { .. } => ("deny", p.to_string(), "unavailable"),
         IdentityProblem::Unresolved { .. }
         | IdentityProblem::Contained { .. }
         | IdentityProblem::Unbound { .. }
@@ -363,6 +364,28 @@ mod tests {
             assert_eq!(record_fields(&p).1, p.to_string());
         }
         assert_eq!(GRAPH_IDENTITY_ACTION, "graph.identity");
+    }
+
+    #[test]
+    fn tool_problems_are_recorded_as_unavailable_denials() {
+        let p = [
+            IdentityProblem::ToolEntryDisabled {
+                entry: "sentinel-674-bad".into(),
+                reason: "isolation is not a known mode".into(),
+            },
+            IdentityProblem::ToolGrantUnknownEntry {
+                source: "authz.yaml".into(),
+            },
+        ];
+        assert_eq!(
+            counts(&p),
+            ["tool_entry_disabled=1", "tool_grant_unknown_entry=1"]
+        );
+        for p in &p {
+            let (result, reason, posture) = record_fields(p);
+            assert_eq!((result, posture), ("deny", "unavailable"));
+            assert_eq!(reason, p.to_string());
+        }
     }
 
     #[test]
