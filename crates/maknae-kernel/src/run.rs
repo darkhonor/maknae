@@ -21807,7 +21807,11 @@ mod reload_tests {
             .is_some());
         let before = fx.baseline().snapshot();
         let store = fx.store_bytes();
-        for body in ["schema_version: 1\ntools: [\n", "schema_version: 2\n"] {
+        for body in [
+            "schema_version: 1\ntools: [\n",
+            "schema_version: 2\n",
+            "schema_version: 1\nsentinel-674-key: 1\n",
+        ] {
             crate::test_fixtures::write_tools(&fx.dir, body);
             let got = bounded(fx.reloader.run()).await;
             assert!(

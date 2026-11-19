@@ -1022,7 +1022,8 @@ impl PolicySource {
     }
 
     /// `authz.yaml`'s top-level sections, `"bindings"` from `bindings.yaml` when it has
-    /// the key, `"sensitive"` from `sensitive.yaml`, `"tools"` from `tools.yaml`, `"agents.<id>"` for each enrolled
+    /// the key, `"sensitive"` from `sensitive.yaml`, `"tools"` from `tools.yaml` (its
+    /// authored document, disabled entries included), `"agents.<id>"` for each enrolled
     /// agent's `policy.yaml` and `"agents.<id>#tasks-right"` for every enrolled agent,
     /// each canonical JSON through the caller's digest, by key.
     pub fn section_digests(
@@ -1054,12 +1055,7 @@ impl PolicySource {
 }
 
 fn tools_load_error(e: maknae_config::ToolsError) -> AuthzBasicError {
-    let text = e.to_string();
-    AuthzBasicError::Load(if text.contains(maknae_config::TOOLS_FILE) {
-        text
-    } else {
-        format!("{}: {text}", maknae_config::TOOLS_FILE)
-    })
+    AuthzBasicError::Load(e.to_string())
 }
 
 fn tool_problems(

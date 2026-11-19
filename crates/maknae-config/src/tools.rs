@@ -198,6 +198,7 @@ pub struct ToolsCatalog {
     entries: BTreeMap<String, ToolEntry>,
     classes: BTreeMap<String, CredentialClass>,
     disabled: Vec<Disabled>,
+    canonical: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -209,7 +210,7 @@ pub enum ToolsError {
 impl fmt::Display for ToolsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Config(e) => write!(f, "{e}"),
+            Self::Config(e) => write!(f, "{TOOLS_FILE}: {e}"),
             Self::Invalid(reason) => write!(f, "{TOOLS_FILE}: {reason}"),
         }
     }
@@ -242,6 +243,7 @@ impl ToolsCatalog {
             Some(_) => Err(ToolsError::Invalid(format!("`{key}` must be a mapping"))),
         };
         let mut catalog = Self::empty();
+        catalog.canonical = crate::canonical_json(&Value::Map(top.clone()));
         let mut classes: BTreeMap<&str, Result<CredentialClass, String>> = BTreeMap::new();
         for (name, body) in section("credential_classes")? {
             if name == "none" {
@@ -292,7 +294,11 @@ impl ToolsCatalog {
     }
 
     pub fn canonical(&self) -> String {
-        format!("{self:?}")
+        if self.canonical.is_empty() {
+            "{}".to_string()
+        } else {
+            self.canonical.clone()
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1280,13 +1286,41 @@ mod tests {
     }
 
     #[test]
+    fn canonical_is_the_authored_document_as_sorted_compact_json() {
+        let text = "schema_version: 1\ntools:\n  sentinel-674-t:\n    executes_workspace: false\n";
+        assert_eq!(
+            catalog(text).canonical(),
+            r#"{"schema_version":1,"tools":{"sentinel-674-t":{"executes_workspace":false}}}"#
+        );
+        assert_eq!(ToolsCatalog::empty().canonical(), "{}");
+    }
+
+    #[test]
+    fn canonical_ignores_key_order_and_whitespace() {
+        let a = "schema_version: 1\ntools:\n  t:\n    executes_workspace: false\n    isolation: container\n";
+        let b = "tools:   {t: {isolation: container,   executes_workspace: false}}\n\nschema_version:    1\n";
+        assert_eq!(catalog(a).canonical(), catalog(b).canonical());
+        let c = a.replace("container", "vm");
+        assert_ne!(catalog(a).canonical(), catalog(&c).canonical());
+    }
+
+    #[test]
+    fn canonical_includes_disabled_entries() {
+        let c = catalog(&doc(
+            "  {}\n",
+            "  sentinel-674-bad:\n    isolation: nope\n    executes_workspace: false\n",
+        ));
+        assert!(c.canonical().contains("sentinel-674-bad"));
+    }
+
+    #[test]
     fn errors_display_their_cause() {
         let invalid = ToolsError::Invalid("because".to_string());
         assert_eq!(invalid.to_string(), "tools.yaml: because");
         let config = ToolsError::Config(ConfigError::Io("disk".to_string()));
         assert_eq!(
             config.to_string(),
-            ConfigError::Io("disk".to_string()).to_string()
+            format!("tools.yaml: {}", ConfigError::Io("disk".to_string()))
         );
     }
 
@@ -1302,10 +1336,9 @@ mod tests {
                 "{text}"
             );
         }
-        assert_eq!(
-            ToolsCatalog::parse("schema_version: 1\n"),
-            Ok(ToolsCatalog::empty())
-        );
+        assert!(ToolsCatalog::parse("schema_version: 1\n")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
