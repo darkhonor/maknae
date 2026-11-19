@@ -16,11 +16,15 @@
 #                 Tool(github-read gh pr checks *)  Tool(github-read git fetch *)
 #                 Tool(github-read git checkout *)
 #   github-post:  Tool(github-post gh pr review *)  Tool(github-post gh pr comment *)
+#                 (the entry's own patterns still bound every argument)
 #   rust-fetch:   Tool(rust-fetch cargo fetch --locked*)
 #   rust-build:   Tool(rust-build cargo build *)  Tool(rust-build cargo check *)
 #                 Tool(rust-build cargo clippy *)  Tool(rust-build cargo test *)
 #                 Tool(rust-build cargo fmt --check*)
 #
+# github-post is shaped as an exact allowlist (fixed argument shapes, no
+# trailing `*`) because gh's short-flag clustering (`-ca`, `-a=true`, `-ab x`)
+# defeats denylists; its deny_args are belt and braces.
 # Posting is a separate entry and credential class so it is a separate grant.
 # `--approve` is refused here until self-approval is settled (#480).
 schema_version: 1
@@ -81,10 +85,14 @@ tools:
     output_to_model: redacted
     resources: { cpus: 1, memory: 512Mi }
     lifetime: { max: 5m }
+    binds: { git: { resolver: git } }
     commands:
       gh:
-        subcommands: ["pr review *", "pr comment *"]
-        deny_args: ["--approve*", "-a"]
+        subcommands:
+          - "pr review {git.change} -R {git.base} --comment --body-file /workspace/*"
+          - "pr review {git.change} -R {git.base} --request-changes --body-file /workspace/*"
+          - "pr comment {git.change} -R {git.base} --body-file /workspace/*"
+        deny_args: ["--approve*", "-a*"]
         timeout: 2m
         output: 1MiB
   rust-fetch:

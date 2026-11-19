@@ -1289,25 +1289,107 @@ mod tests {
         assert!(c.class("github-post").unwrap().kind.has_reach_check());
     }
 
+    fn post_bound() -> crate::Bound {
+        let mut b = crate::Bound::empty();
+        b.insert("git.change", "345");
+        b.insert("git.base", "o/r");
+        b
+    }
+
     #[test]
     fn homelab_post_denies_approve() {
         let c = catalog(HOMELAB);
         let gh = &c.entry("github-post").unwrap().commands["gh"];
+        let bound = post_bound();
         for refused in [
-            &["pr", "review", "--approve"][..],
-            &["pr", "review", "-a"],
-            &["pr", "review", "--comment", "--approve"],
-            &["pr", "review", "--approve=true"],
+            &[
+                "pr",
+                "review",
+                "345",
+                "-R",
+                "o/r",
+                "--comment",
+                "--body-file",
+                "/workspace/x",
+                "-a",
+            ][..],
+            &[
+                "pr",
+                "review",
+                "345",
+                "-R",
+                "o/r",
+                "-ca",
+                "--body-file",
+                "/workspace/x",
+            ],
+            &[
+                "pr",
+                "review",
+                "345",
+                "-R",
+                "o/r",
+                "--comment",
+                "--body-file",
+                "/workspace/x",
+                "--approve",
+            ],
+            &["pr", "review", "345", "-R", "o/r", "-a=true"],
+            &["pr", "review", "345", "-ab", "x"],
+            &["pr", "review", "--approve"],
         ] {
+            let args = argv(refused);
+            let allowed = gh.subcommands.iter().any(|p| p.matches(&args, &bound));
             assert!(
-                first_denied(&gh.deny_args, &argv(refused)).is_some(),
+                !allowed || first_denied(&gh.deny_args, &args).is_some(),
                 "{refused:?}"
             );
+            assert!(!allowed, "{refused:?}");
         }
-        assert_eq!(
-            first_denied(&gh.deny_args, &argv(&["pr", "review", "--comment"])),
-            None
-        );
+        for denied in [
+            "-a",
+            "-a=true",
+            "-ab",
+            "-ca-x",
+            "--approve",
+            "--approve=true",
+        ] {
+            let hit = first_denied(&gh.deny_args, &argv(&["pr", "review", denied]));
+            assert_eq!(hit.is_some(), !denied.starts_with("-ca"), "{denied}");
+        }
+    }
+
+    #[test]
+    fn homelab_post_allows_only_the_exact_shapes() {
+        let c = catalog(HOMELAB);
+        let gh = &c.entry("github-post").unwrap().commands["gh"];
+        let bound = post_bound();
+        let ok = argv(&[
+            "pr",
+            "comment",
+            "345",
+            "-R",
+            "o/r",
+            "--body-file",
+            "/workspace/x",
+        ]);
+        assert!(gh.subcommands.iter().any(|p| p.matches(&ok, &bound)));
+        assert_eq!(first_denied(&gh.deny_args, &ok), None);
+        let review = argv(&[
+            "pr",
+            "review",
+            "345",
+            "-R",
+            "o/r",
+            "--request-changes",
+            "--body-file",
+            "/workspace/x",
+        ]);
+        assert!(gh.subcommands.iter().any(|p| p.matches(&review, &bound)));
+        assert!(!gh
+            .subcommands
+            .iter()
+            .any(|p| p.matches(&ok, &crate::Bound::empty())));
     }
 
     #[test]
