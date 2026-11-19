@@ -783,7 +783,7 @@ principal tool.invoke rust-build cargo ["build", "--release"] -> NotApplicable {
 principal tool.invoke rust-build cargo ["build", "--config=x"] -> Deny { reason: "tool: denied argument 1 for rust-build/cargo" } Some("admin") None => Deny { reason: "tool: denied argument 1 for rust-build/cargo" }
 principal tool.invoke rust-build cargo ["check"] -> NotApplicable { note: Some("role admin: no rule for tool.invoke") } Some("admin") None => Deny { reason: "role admin: no rule for tool.invoke" }
 principal tool.invoke rust-fetch cargo ["fetch", "--locked"] -> NotApplicable { note: Some("role admin: no rule for tool.invoke") } Some("admin") None => Deny { reason: "role admin: no rule for tool.invoke" }
-principal tool.invoke sentinel-674-absent cargo ["build"] -> Deny { reason: "tool: unknown or disabled entry sentinel-674-absent" } Some("admin") None => Deny { reason: "tool: unknown or disabled entry sentinel-674-absent" }
+principal tool.invoke sentinel-674-absent cargo ["build"] -> Deny { reason: "tool: unknown or disabled entry" } Some("admin") None => Deny { reason: "tool: unknown or disabled entry" }
 agent hobi tool.invoke github-read gh ["pr", "view", "1"] -> Deny { reason: "tool: missing binding git for github-read" } Some("user") None => Deny { reason: "tool: missing binding git for github-read" }
 agent hobi tool.invoke github-read git ["fetch", "origin"] -> Deny { reason: "tool: missing binding git for github-read" } Some("user") None => Deny { reason: "tool: missing binding git for github-read" }
 agent hobi tool.invoke github-read gh ["pr", "diff", "1"] -> Deny { reason: "tool: missing binding git for github-read" } Some("user") None => Deny { reason: "tool: missing binding git for github-read" }
@@ -791,7 +791,7 @@ agent hobi tool.invoke rust-build cargo ["build", "--release"] -> NotApplicable 
 agent hobi tool.invoke rust-build cargo ["build", "--config=x"] -> Deny { reason: "tool: denied argument 1 for rust-build/cargo" } Some("user") None => Deny { reason: "tool: denied argument 1 for rust-build/cargo" }
 agent hobi tool.invoke rust-build cargo ["check"] -> NotApplicable { note: Some("role user: no rule for tool.invoke") } Some("user") None => Deny { reason: "role user: no rule for tool.invoke" }
 agent hobi tool.invoke rust-fetch cargo ["fetch", "--locked"] -> NotApplicable { note: Some("role user: no rule for tool.invoke") } Some("user") None => Deny { reason: "role user: no rule for tool.invoke" }
-agent hobi tool.invoke sentinel-674-absent cargo ["build"] -> Deny { reason: "tool: unknown or disabled entry sentinel-674-absent" } Some("user") None => Deny { reason: "tool: unknown or disabled entry sentinel-674-absent" }
+agent hobi tool.invoke sentinel-674-absent cargo ["build"] -> Deny { reason: "tool: unknown or disabled entry" } Some("user") None => Deny { reason: "tool: unknown or disabled entry" }
 agent hobi tasked tool.invoke github-read gh ["pr", "view", "1"] -> Deny { reason: "tool: missing binding git for github-read" } Some("user") None => Deny { reason: "tool: missing binding git for github-read" }
 agent hobi tasked tool.invoke github-read git ["fetch", "origin"] -> Deny { reason: "tool: missing binding git for github-read" } Some("user") None => Deny { reason: "tool: missing binding git for github-read" }
 agent hobi tasked tool.invoke github-read gh ["pr", "diff", "1"] -> Deny { reason: "tool: missing binding git for github-read" } Some("user") None => Deny { reason: "tool: missing binding git for github-read" }
@@ -799,7 +799,7 @@ agent hobi tasked tool.invoke rust-build cargo ["build", "--release"] -> NotAppl
 agent hobi tasked tool.invoke rust-build cargo ["build", "--config=x"] -> Deny { reason: "tool: denied argument 1 for rust-build/cargo" } Some("user") None => Deny { reason: "tool: denied argument 1 for rust-build/cargo" }
 agent hobi tasked tool.invoke rust-build cargo ["check"] -> NotApplicable { note: Some("role user: no rule for tool.invoke") } Some("user") None => Deny { reason: "role user: no rule for tool.invoke" }
 agent hobi tasked tool.invoke rust-fetch cargo ["fetch", "--locked"] -> NotApplicable { note: Some("role user: no rule for tool.invoke") } Some("user") None => Deny { reason: "role user: no rule for tool.invoke" }
-agent hobi tasked tool.invoke sentinel-674-absent cargo ["build"] -> Deny { reason: "tool: unknown or disabled entry sentinel-674-absent" } Some("user") None => Deny { reason: "tool: unknown or disabled entry sentinel-674-absent" }
+agent hobi tasked tool.invoke sentinel-674-absent cargo ["build"] -> Deny { reason: "tool: unknown or disabled entry" } Some("user") None => Deny { reason: "tool: unknown or disabled entry" }
 agent jin tool.invoke github-read gh ["pr", "view", "1"] -> Deny { reason: "tool: missing binding git for github-read" } Some("user") None => Deny { reason: "tool: missing binding git for github-read" }
 agent jin tool.invoke github-read git ["fetch", "origin"] -> Deny { reason: "tool: missing binding git for github-read" } Some("user") None => Deny { reason: "tool: missing binding git for github-read" }
 agent jin tool.invoke github-read gh ["pr", "diff", "1"] -> Deny { reason: "tool: missing binding git for github-read" } Some("user") None => Deny { reason: "tool: missing binding git for github-read" }
@@ -807,7 +807,7 @@ agent jin tool.invoke rust-build cargo ["build", "--release"] -> NotApplicable {
 agent jin tool.invoke rust-build cargo ["build", "--config=x"] -> Deny { reason: "tool: denied argument 1 for rust-build/cargo" } Some("user") None => Deny { reason: "tool: denied argument 1 for rust-build/cargo" }
 agent jin tool.invoke rust-build cargo ["check"] -> NotApplicable { note: Some("role user: no rule for tool.invoke") } Some("user") None => Deny { reason: "role user: no rule for tool.invoke" }
 agent jin tool.invoke rust-fetch cargo ["fetch", "--locked"] -> NotApplicable { note: Some("role user: no rule for tool.invoke") } Some("user") None => Deny { reason: "role user: no rule for tool.invoke" }
-agent jin tool.invoke sentinel-674-absent cargo ["build"] -> Deny { reason: "tool: unknown or disabled entry sentinel-674-absent" } Some("user") None => Deny { reason: "tool: unknown or disabled entry sentinel-674-absent" }
+agent jin tool.invoke sentinel-674-absent cargo ["build"] -> Deny { reason: "tool: unknown or disabled entry" } Some("user") None => Deny { reason: "tool: unknown or disabled entry" }
 agent jin tasked tool.invoke github-read gh ["pr", "view", "1"] -> Deny { reason: "tool: missing binding git for github-read" } Some("user") None => Deny { reason: "tool: missing binding git for github-read" }
 agent jin tasked tool.invoke github-read git ["fetch", "origin"] -> Deny { reason: "tool: missing binding git for github-read" } Some("user") None => Deny { reason: "tool: missing binding git for github-read" }
 agent jin tasked tool.invoke github-read gh ["pr", "diff", "1"] -> Deny { reason: "tool: missing binding git for github-read" } Some("user") None => Deny { reason: "tool: missing binding git for github-read" }
@@ -815,7 +815,7 @@ agent jin tasked tool.invoke rust-build cargo ["build", "--release"] -> NotAppli
 agent jin tasked tool.invoke rust-build cargo ["build", "--config=x"] -> Deny { reason: "tool: denied argument 1 for rust-build/cargo" } Some("user") None => Deny { reason: "tool: denied argument 1 for rust-build/cargo" }
 agent jin tasked tool.invoke rust-build cargo ["check"] -> NotApplicable { note: Some("role user: no rule for tool.invoke") } Some("user") None => Deny { reason: "role user: no rule for tool.invoke" }
 agent jin tasked tool.invoke rust-fetch cargo ["fetch", "--locked"] -> NotApplicable { note: Some("role user: no rule for tool.invoke") } Some("user") None => Deny { reason: "role user: no rule for tool.invoke" }
-agent jin tasked tool.invoke sentinel-674-absent cargo ["build"] -> Deny { reason: "tool: unknown or disabled entry sentinel-674-absent" } Some("user") None => Deny { reason: "tool: unknown or disabled entry sentinel-674-absent" }
+agent jin tasked tool.invoke sentinel-674-absent cargo ["build"] -> Deny { reason: "tool: unknown or disabled entry" } Some("user") None => Deny { reason: "tool: unknown or disabled entry" }
 unbound tool.invoke github-read gh ["pr", "view", "1"] -> Deny { reason: "tool: missing binding git for github-read" } None None => Deny { reason: "tool: missing binding git for github-read" }
 unbound tool.invoke github-read git ["fetch", "origin"] -> Deny { reason: "tool: missing binding git for github-read" } None None => Deny { reason: "tool: missing binding git for github-read" }
 unbound tool.invoke github-read gh ["pr", "diff", "1"] -> Deny { reason: "tool: missing binding git for github-read" } None None => Deny { reason: "tool: missing binding git for github-read" }
@@ -823,4 +823,4 @@ unbound tool.invoke rust-build cargo ["build", "--release"] -> NotApplicable { n
 unbound tool.invoke rust-build cargo ["build", "--config=x"] -> Deny { reason: "tool: denied argument 1 for rust-build/cargo" } None None => Deny { reason: "tool: denied argument 1 for rust-build/cargo" }
 unbound tool.invoke rust-build cargo ["check"] -> NotApplicable { note: Some("subject resolves to no role") } None None => Deny { reason: "subject resolves to no role" }
 unbound tool.invoke rust-fetch cargo ["fetch", "--locked"] -> NotApplicable { note: Some("subject resolves to no role") } None None => Deny { reason: "subject resolves to no role" }
-unbound tool.invoke sentinel-674-absent cargo ["build"] -> Deny { reason: "tool: unknown or disabled entry sentinel-674-absent" } None None => Deny { reason: "tool: unknown or disabled entry sentinel-674-absent" }
+unbound tool.invoke sentinel-674-absent cargo ["build"] -> Deny { reason: "tool: unknown or disabled entry" } None None => Deny { reason: "tool: unknown or disabled entry" }

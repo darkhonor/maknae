@@ -1480,10 +1480,10 @@ fn tool_ceiling(
         return deny("tool: no tools configured");
     }
     let Some(entry) = lp.tools.entry(name) else {
-        return deny(&format!("tool: unknown or disabled entry {name}"));
+        return deny("tool: unknown or disabled entry");
     };
     let Some(command) = entry.commands.get(program) else {
-        return deny(&format!("tool: program {program} not in entry {name}"));
+        return deny(&format!("tool: program not in entry {name}"));
     };
     let bound = maknae_config::Bound::empty();
     if !command.subcommands.iter().any(|p| p.matches(argv, &bound)) {
@@ -5954,8 +5954,39 @@ mod tests {
         for e in ["sentinel-674-missing", "sentinel-674-off"] {
             assert_eq!(
                 tool_decided(&lp, &tool_req(TOOL_USER, e, "cargo", &["build"])).verdict,
-                deny(&format!("tool: unknown or disabled entry {e}"))
+                deny("tool: unknown or disabled entry")
             );
+        }
+    }
+
+    #[test]
+    fn no_ceiling_reason_echoes_the_requested_entry_or_program() {
+        const EVIL: &str = "sentinel-674-evil\n";
+        let lp = lp_tool(TOOL_SITE_ALLOW, &["admin", "user", "guest"], &[]);
+        let requests = [
+            (EVIL, "cargo", &["build"][..]),
+            (EVIL, EVIL, &["build"][..]),
+            ("sentinel-674-build", EVIL, &["build"][..]),
+            ("sentinel-674-build", "cargo", &[EVIL][..]),
+            (
+                "sentinel-674-build",
+                "cargo",
+                &["build", EVIL, "--config=x"][..],
+            ),
+        ];
+        for uid in [TOOL_ADMIN, TOOL_USER, TOOL_GUEST, TOOL_NOBODY] {
+            for (entry, program, argv) in requests {
+                let d = tool_decided(&lp, &tool_req(uid, entry, program, argv));
+                let text = match &d.verdict {
+                    Verdict::Deny { reason } => reason.clone(),
+                    Verdict::NotApplicable { note } => note.clone().unwrap_or_default(),
+                    other => panic!("{uid} {entry:?} {program:?}: {other:?}"),
+                };
+                assert!(
+                    !text.contains("sentinel-674-evil"),
+                    "{uid} {entry:?} {program:?} {argv:?}: {text}"
+                );
+            }
         }
     }
 
@@ -5968,7 +5999,7 @@ mod tests {
                 &tool_req(TOOL_USER, "sentinel-674-build", "rustc", &["build"])
             )
             .verdict,
-            deny("tool: program rustc not in entry sentinel-674-build")
+            deny("tool: program not in entry sentinel-674-build")
         );
     }
 
@@ -6075,11 +6106,7 @@ mod tests {
         );
         assert_eq!(
             (d.verdict, d.cited, d.role),
-            (
-                deny("tool: unknown or disabled entry sentinel-674-missing"),
-                None,
-                Some("user")
-            )
+            (deny("tool: unknown or disabled entry"), None, Some("user"))
         );
     }
 
@@ -6093,7 +6120,7 @@ mod tests {
                 let d = tool_decided(&lp, &tool_req(uid, e, "cargo", &["build"]));
                 assert_eq!(
                     (d.verdict, d.role),
-                    (deny(&format!("tool: unknown or disabled entry {e}")), role),
+                    (deny("tool: unknown or disabled entry"), role),
                     "{uid} {e}"
                 );
             }
@@ -6178,10 +6205,7 @@ mod tests {
         );
         for e in ["sentinel-674-gone", "sentinel-674-off"] {
             let d = tool_decided(&lp, &tool_req(TOOL_USER, e, "cargo", &["build"]));
-            assert_eq!(
-                d.verdict,
-                deny(&format!("tool: unknown or disabled entry {e}"))
-            );
+            assert_eq!(d.verdict, deny("tool: unknown or disabled entry"));
         }
         assert_eq!(
             tool_decided(&lp, &build(TOOL_USER, &["build"])).verdict,
