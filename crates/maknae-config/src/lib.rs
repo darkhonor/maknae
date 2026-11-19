@@ -32,6 +32,7 @@
 
 #[cfg(unix)]
 mod agents;
+mod argpattern;
 mod audit_cfg;
 mod authz;
 mod banner;
@@ -97,6 +98,7 @@ pub use bindings_sync::{
 // Re-exported so downstream seam constructors (maknae-authz-basic's
 // HermeticAuthorizer, #77) can NAME the requirement type without a maknae-io
 // dependency of their own; unix-gated like the fn whose signature carries it.
+pub use argpattern::{first_denied, ArgPattern, ArgPatternError, ArgToken, Bound, DenyArg};
 pub use authz::{
     destination_entry_is_acceptable, load_authz, parse_authz, parse_subject_entry, ActionPattern,
     AgentMatch, AuthzError, AuthzPolicy, HomeUnbound, Match3, ModelRef, PathGlob, Pattern,
