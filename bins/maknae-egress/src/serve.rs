@@ -16,12 +16,15 @@
 //! are each bounded as a whole, not per call.
 
 use crate::capacity::{Slot, Slots};
-use maknae_config::EgressBounds;
+use maknae_config::{AgentId, EgressBounds, GithubAppConfig, MintingConfig};
 use maknae_deputy::call::FulfilError;
 use maknae_deputy::handle::{decide, Refusal};
+use maknae_deputy::mint::admit::{admit_mint, admit_revoke, AdmittedMint};
+use maknae_deputy::mint::minter::LiveTokens;
 use maknae_deputy::unseal::OpenFailure;
 use maknae_proto::{
-    EgressFrame, EgressFrameReply, EgressSocketReply, MintRefusal, MintReply, RevokeReply,
+    EgressFrame, EgressFrameReply, EgressSocketReply, MintRefusal, MintReply, MintRequest,
+    RevokeReply, RevokeRequest,
 };
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use std::io::{Read, Write};
@@ -60,6 +63,15 @@ pub enum ServeError {
     OversizeFrame(usize),
     Io(String),
     Refused(Refusal),
+}
+
+/// Egress's minting, driven on the connection's own thread. Absent, every
+/// mint and revoke frame is refused `Request`.
+pub trait MintFrames: Send + Sync {
+    fn config(&self) -> &MintingConfig;
+    fn mint(&self, admitted: &AdmittedMint<'_>) -> (MintReply, LiveTokens);
+    fn revoke(&self, req: &RevokeRequest, agent: &AgentId, app: &GithubAppConfig) -> RevokeReply;
+    fn revoke_all(&self, live: LiveTokens);
 }
 
 /// The one `FulfilError` mapping, shared by `main` and the tests.
@@ -187,6 +199,7 @@ pub fn serve_one<F>(
     bounds: &EgressBounds,
     io_timeout: Duration,
     committed: &AtomicBool,
+    minting: Option<&dyn MintFrames>,
     fulfil: F,
 ) -> Result<(), ServeError>
 where
@@ -198,21 +211,11 @@ where
 
     let req = match maknae_proto::decode_egress_frame(&body).map_err(io)? {
         EgressFrame::Prompt(req) => req,
-        EgressFrame::Mint(_) => {
-            return write_reply(
-                &mut stream,
-                &EgressSocketReply::Mint(MintReply::Refused(MintRefusal::Request)),
-                io_timeout,
-                committed,
-            )
+        EgressFrame::Mint(req) => {
+            return serve_mint(&mut stream, &req, minting, io_timeout, committed)
         }
-        EgressFrame::Revoke(_) => {
-            return write_reply(
-                &mut stream,
-                &EgressSocketReply::Revoke(RevokeReply::Refused(MintRefusal::Request)),
-                io_timeout,
-                committed,
-            )
+        EgressFrame::Revoke(req) => {
+            return serve_revoke(&mut stream, &req, minting, io_timeout, committed)
         }
     };
     let admitted = match decide(&req, bounds) {
@@ -240,6 +243,66 @@ where
         ),
         Err(e) => Err(e),
     }
+}
+
+/// The minted tokens are held until the reply is delivered; undelivered, they are revoked.
+fn serve_mint(
+    stream: &mut UnixStream,
+    req: &MintRequest,
+    minting: Option<&dyn MintFrames>,
+    io_timeout: Duration,
+    committed: &AtomicBool,
+) -> Result<(), ServeError> {
+    let refused = |stream: &mut UnixStream, r| {
+        write_reply(
+            stream,
+            &EgressSocketReply::Mint(MintReply::Refused(r)),
+            io_timeout,
+            committed,
+        )
+    };
+    let Some(m) = minting else {
+        return refused(stream, MintRefusal::Request);
+    };
+    let admitted = match admit_mint(req, Some(m.config())) {
+        Ok(a) => a,
+        Err(r) => return refused(stream, r),
+    };
+    committed.store(true, Ordering::Release);
+    let (reply, live) = m.mint(&admitted);
+    let written = write_reply(
+        stream,
+        &EgressSocketReply::Mint(reply),
+        io_timeout,
+        committed,
+    );
+    if written.is_err() {
+        m.revoke_all(live);
+    }
+    written
+}
+
+fn serve_revoke(
+    stream: &mut UnixStream,
+    req: &RevokeRequest,
+    minting: Option<&dyn MintFrames>,
+    io_timeout: Duration,
+    committed: &AtomicBool,
+) -> Result<(), ServeError> {
+    let reply = match minting.map(|m| (m, admit_revoke(req, Some(m.config())))) {
+        None => RevokeReply::Refused(MintRefusal::Request),
+        Some((_, Err(r))) => RevokeReply::Refused(r),
+        Some((m, Ok((agent, _, app)))) => {
+            committed.store(true, Ordering::Release);
+            m.revoke(req, &agent, app)
+        }
+    };
+    write_reply(
+        stream,
+        &EgressSocketReply::Revoke(reply),
+        io_timeout,
+        committed,
+    )
 }
 
 /// The peer check, BEFORE the first read: a peer we have not authenticated
@@ -287,6 +350,7 @@ pub fn accept_loop<H>(
     expected_uid: u32,
     bounds: Arc<EgressBounds>,
     io_timeout: Duration,
+    minting: Option<Arc<dyn MintFrames>>,
     handler: Arc<H>,
 ) where
     H: Fn(&maknae_deputy::handle::Admitted<'_>) -> Result<EgressFrameReply, ServeError>
@@ -308,7 +372,8 @@ pub fn accept_loop<H>(
             continue;
         };
         let fallback = stream.try_clone();
-        let (bounds, handler) = (Arc::clone(&bounds), Arc::clone(&handler));
+        let (bounds, handler, minting) =
+            (Arc::clone(&bounds), Arc::clone(&handler), minting.clone());
         let spawned = spawn_contained(
             "maknae-egress-conn",
             slot,
@@ -316,11 +381,15 @@ pub fn accept_loop<H>(
             io_timeout,
             EgressSocketReply::RefusedBeforeSend,
             move |stream, committed| {
-                if let Err(e) =
-                    serve_one(stream, expected_uid, &bounds, io_timeout, committed, |a| {
-                        handler(a)
-                    })
-                {
+                if let Err(e) = serve_one(
+                    stream,
+                    expected_uid,
+                    &bounds,
+                    io_timeout,
+                    committed,
+                    minting.as_deref(),
+                    |a| handler(a),
+                ) {
                     eprintln!("maknae-egress: connection refused: {e:?}");
                 }
             },
@@ -473,6 +542,7 @@ mod tests {
             bounds,
             io_timeout,
             &AtomicBool::new(false),
+            None,
             fulfil,
         )
     }
@@ -789,6 +859,7 @@ mod tests {
                 me,
                 Arc::new(bounds()),
                 Duration::from_secs(5),
+                None,
                 Arc::new(handler),
             )
         });
@@ -1560,6 +1631,393 @@ mod tests {
             });
             assert_eq!(out, Ok(()));
             assert_eq!(reply, Some(want));
+        }
+    }
+
+    mod minting {
+        use super::*;
+        use maknae_config::{ApiBase, MintVault};
+        use maknae_deputy::mint::github::GithubClient;
+        use maknae_deputy::mint::minter::{self, MintDeps};
+        use maknae_deputy::mint::signer::FakeSigner;
+        use maknae_proto::{AccessLevel, GithubPermission, PermissionSet, SealedCredentialBytes};
+        use maknae_seal::{
+            open_credential, CredentialDirection, CredentialSealContext, SealPrivateKey,
+        };
+        use std::collections::BTreeMap;
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Mutex;
+
+        const KIND: &str = "github-app-installation";
+
+        struct TestMinting {
+            config: MintingConfig,
+            signer: FakeSigner,
+            github: GithubClient,
+            own: SealPrivateKey,
+            egress: tempfile::TempDir,
+            rt: tokio::runtime::Runtime,
+            mints: AtomicUsize,
+            revoke_alls: AtomicUsize,
+            journal: Mutex<Vec<String>>,
+        }
+
+        impl TestMinting {
+            fn new(github_base: &str) -> (Self, SealPrivateKey) {
+                fips();
+                let egress = tempfile::tempdir().unwrap();
+                let agents = egress.path().join("agents");
+                std::fs::create_dir(&agents).unwrap();
+                for d in [egress.path(), agents.as_path()] {
+                    std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o750)).unwrap();
+                }
+                let agent_key = SealPrivateKey::generate().unwrap();
+                let file = agents.join("coder.seal.pub");
+                std::fs::write(&file, agent_key.public_key().to_pem()).unwrap();
+                std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+                let app = GithubAppConfig {
+                    app_id: 5834363,
+                    installation_id: 77,
+                    api: ApiBase::parse("https://api.github.example").unwrap(),
+                    transit_mount: "transit".into(),
+                    transit_key: "deploy-app".into(),
+                };
+                let m = Self {
+                    config: MintingConfig {
+                        vault: MintVault {
+                            approle_mount: "approle".into(),
+                        },
+                        github_apps: BTreeMap::from([("deploy".to_string(), app)]),
+                    },
+                    signer: FakeSigner::signing(b"sig"),
+                    github: GithubClient::loopback_for_tests(github_base),
+                    own: SealPrivateKey::generate().unwrap(),
+                    egress,
+                    rt: runtime(),
+                    mints: AtomicUsize::new(0),
+                    revoke_alls: AtomicUsize::new(0),
+                    journal: Mutex::new(Vec::new()),
+                };
+                (m, agent_key)
+            }
+
+            fn record(&self) -> impl FnMut(&str) + '_ {
+                |l: &str| self.journal.lock().unwrap().push(l.to_string())
+            }
+        }
+
+        impl MintFrames for TestMinting {
+            fn config(&self) -> &MintingConfig {
+                &self.config
+            }
+
+            fn mint(&self, admitted: &AdmittedMint<'_>) -> (MintReply, LiveTokens) {
+                self.mints.fetch_add(1, Ordering::SeqCst);
+                let mut journal = self.record();
+                let mut d = MintDeps {
+                    signer: &self.signer,
+                    github: &self.github,
+                    own_pub: self.own.public_key(),
+                    own_key: &self.own,
+                    egress_dir: self.egress.path(),
+                    now: 1_800_000_000,
+                    journal: &mut journal,
+                };
+                let owner = nix::unistd::getuid().as_raw();
+                self.rt
+                    .block_on(minter::mint_with_recipient_owner(admitted, &mut d, owner))
+            }
+
+            fn revoke(
+                &self,
+                req: &RevokeRequest,
+                agent: &AgentId,
+                app: &GithubAppConfig,
+            ) -> RevokeReply {
+                let mut journal = self.record();
+                let mut d = MintDeps {
+                    signer: &self.signer,
+                    github: &self.github,
+                    own_pub: self.own.public_key(),
+                    own_key: &self.own,
+                    egress_dir: self.egress.path(),
+                    now: 1_800_000_000,
+                    journal: &mut journal,
+                };
+                self.rt.block_on(minter::revoke(req, agent, app, &mut d))
+            }
+
+            fn revoke_all(&self, live: LiveTokens) {
+                self.revoke_alls.fetch_add(1, Ordering::SeqCst);
+                let mut journal = self.record();
+                self.rt
+                    .block_on(minter::revoke_all(&self.github, live, &mut journal));
+            }
+        }
+
+        fn read_http(s: &mut std::net::TcpStream) -> String {
+            let mut seen = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = s.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                seen.extend_from_slice(&buf[..n]);
+                let Some(brk) = seen.windows(4).position(|w| w == b"\r\n\r\n") else {
+                    continue;
+                };
+                let head = String::from_utf8_lossy(&seen[..brk]).to_lowercase();
+                let want = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if seen.len() - (brk + 4) >= want {
+                    break;
+                }
+            }
+            String::from_utf8_lossy(&seen).to_string()
+        }
+
+        fn github_stub(script: Vec<String>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.set_nonblocking(true).unwrap();
+            let base = format!("http://{}", l.local_addr().unwrap());
+            let h = std::thread::spawn(move || {
+                let mut seen = Vec::new();
+                for resp in script {
+                    let by = Instant::now() + Duration::from_secs(5);
+                    let mut s = loop {
+                        match l.accept() {
+                            Ok((s, _)) => break s,
+                            Err(_) if Instant::now() < by => {
+                                std::thread::sleep(Duration::from_millis(10))
+                            }
+                            Err(_) => return seen,
+                        }
+                    };
+                    s.set_nonblocking(false).unwrap();
+                    seen.push(read_http(&mut s));
+                    s.write_all(resp.as_bytes()).unwrap();
+                }
+                seen
+            });
+            (base, h)
+        }
+
+        fn http(status: &str, body: &str) -> String {
+            format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+        }
+
+        fn granted(token: &str, repo: &str) -> String {
+            http(
+                "201 Created",
+                &format!(
+                    r#"{{"token":"{token}","expires_at":"2026-11-19T01:00:00Z","permissions":{{"contents":"write"}},"repository_selection":"selected","repositories":[{{"name":"{repo}"}}]}}"#
+                ),
+            )
+        }
+
+        fn revoked() -> String {
+            "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n".into()
+        }
+
+        fn bearers(seen: &[String], method: &str) -> Vec<String> {
+            seen.iter()
+                .filter(|r| r.starts_with(method))
+                .filter_map(|r| {
+                    r.lines().find_map(|l| {
+                        l.strip_prefix("authorization: Bearer ")
+                            .or_else(|| l.strip_prefix("Authorization: Bearer "))
+                            .map(|t| t.trim().to_string())
+                    })
+                })
+                .collect()
+        }
+
+        fn set(repo: &str) -> PermissionSet {
+            PermissionSet {
+                repositories: vec![repo.into()],
+                permissions: BTreeMap::from([(GithubPermission::Contents, AccessLevel::Write)]),
+            }
+        }
+
+        fn mint_frame(sets: Vec<PermissionSet>) -> EgressFrame {
+            EgressFrame::Mint(MintRequest {
+                task: "task-1".into(),
+                agent: "coder".into(),
+                class: "git-write".into(),
+                kind: KIND.into(),
+                app: "deploy".into(),
+                sets,
+            })
+        }
+
+        fn revoke_frame(set: u8, blob: SealedCredentialBytes) -> EgressFrame {
+            EgressFrame::Revoke(RevokeRequest {
+                task: "task-1".into(),
+                agent: "coder".into(),
+                class: "git-write".into(),
+                kind: KIND.into(),
+                app: "deploy".into(),
+                set,
+                for_revocation: blob,
+            })
+        }
+
+        /// The peer writes its frame and, when `close_before_reply`, shuts the
+        /// connection down while keeping it open, so the reply write fails.
+        fn served_minting(
+            frame: &EgressFrame,
+            m: &dyn MintFrames,
+            close_before_reply: bool,
+        ) -> (Result<(), ServeError>, Option<EgressSocketReply>) {
+            let (a, b) = UnixStream::pair().unwrap();
+            let bytes = prefixed(&encoded_frame(frame));
+            let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+            let h = std::thread::spawn(move || {
+                let mut c = a;
+                c.write_all(&bytes).unwrap();
+                let mut back = Vec::new();
+                if close_before_reply {
+                    c.shutdown(std::net::Shutdown::Both).unwrap();
+                } else {
+                    c.read_to_end(&mut back).unwrap();
+                }
+                let _ = done_rx.recv();
+                back
+            });
+            let me = nix::unistd::getuid().as_raw();
+            let out = serve_one(
+                b,
+                me,
+                &bounds(),
+                FRAME_IO_TIMEOUT,
+                &AtomicBool::new(false),
+                Some(m),
+                |_| panic!("a credential frame reached the provider path"),
+            );
+            let _ = done_tx.send(());
+            let back = h.join().unwrap();
+            let reply = (!back.is_empty()).then(|| {
+                let n = u32::from_be_bytes(back[..4].try_into().unwrap()) as usize;
+                assert_eq!(back.len(), 4 + n);
+                maknae_proto::decode_egress_socket_reply(&back[4..]).unwrap()
+            });
+            (out, reply)
+        }
+
+        #[test]
+        fn a_failed_reply_write_revokes_every_minted_token() {
+            let (base, stub) = github_stub(vec![
+                granted("ghs_one", "a"),
+                granted("ghs_two", "b"),
+                revoked(),
+                revoked(),
+            ]);
+            let (m, _agent) = TestMinting::new(&base);
+            let (out, reply) = served_minting(&mint_frame(vec![set("a"), set("b")]), &m, true);
+            assert!(matches!(out, Err(ServeError::Io(_))), "{out:?}");
+            assert_eq!(reply, None);
+            assert_eq!(m.mints.load(Ordering::SeqCst), 1);
+            assert_eq!(m.revoke_alls.load(Ordering::SeqCst), 1);
+            let seen = stub.join().unwrap();
+            assert_eq!(bearers(&seen, "DELETE"), ["ghs_one", "ghs_two"]);
+            let journal = m.journal.lock().unwrap();
+            assert!(
+                !journal.iter().any(|l| l.contains("could not be revoked")),
+                "{journal:?}"
+            );
+        }
+
+        #[test]
+        fn a_delivered_mint_reply_keeps_its_tokens_live() {
+            let (base, stub) = github_stub(vec![granted("ghs_one", "a"), granted("ghs_two", "b")]);
+            let (m, agent) = TestMinting::new(&base);
+            let (out, reply) = served_minting(&mint_frame(vec![set("a"), set("b")]), &m, false);
+            assert_eq!(out, Ok(()));
+            let Some(EgressSocketReply::Mint(MintReply::Minted(creds))) = reply else {
+                panic!("expected Minted, got {reply:?}");
+            };
+            assert_eq!(m.revoke_alls.load(Ordering::SeqCst), 0);
+            let seen = stub.join().unwrap();
+            assert_eq!(bearers(&seen, "DELETE").len(), 0);
+            for (i, want) in [(0u8, "ghs_one"), (1, "ghs_two")] {
+                let ctx = CredentialSealContext {
+                    direction: CredentialDirection::ToAgent,
+                    agent: "coder",
+                    task: "task-1",
+                    class: "git-write",
+                    kind: KIND,
+                    app: "deploy",
+                    set: i,
+                };
+                let c = &creds[usize::from(i)];
+                assert_eq!(c.set, i);
+                assert_eq!(
+                    open_credential(&agent, &ctx, c.for_agent.as_bytes())
+                        .unwrap()
+                        .as_str(),
+                    want
+                );
+            }
+        }
+
+        #[test]
+        fn an_inadmissible_mint_with_minting_configured_is_refused_and_never_minted() {
+            let (base, stub) = github_stub(vec![]);
+            let (m, _agent) = TestMinting::new(&base);
+            for frame in [
+                mint_frame(vec![]),
+                EgressFrame::Mint(MintRequest {
+                    app: "unknown".into(),
+                    ..match mint_frame(vec![set("a")]) {
+                        EgressFrame::Mint(r) => r,
+                        _ => unreachable!(),
+                    }
+                }),
+            ] {
+                let (out, reply) = served_minting(&frame, &m, false);
+                assert_eq!(out, Ok(()));
+                assert_eq!(
+                    reply,
+                    Some(EgressSocketReply::Mint(MintReply::Refused(
+                        MintRefusal::Request
+                    )))
+                );
+            }
+            assert_eq!(m.mints.load(Ordering::SeqCst), 0);
+            assert!(m.signer.calls().is_empty());
+            assert!(stub.join().unwrap().is_empty());
+        }
+
+        #[test]
+        fn a_revoke_frame_opens_its_blob_and_deletes_that_token() {
+            let (base, stub) = github_stub(vec![granted("ghs_one", "a"), revoked()]);
+            let (m, _agent) = TestMinting::new(&base);
+            let (_, reply) = served_minting(&mint_frame(vec![set("a")]), &m, false);
+            let Some(EgressSocketReply::Mint(MintReply::Minted(mut creds))) = reply else {
+                panic!("expected Minted, got {reply:?}");
+            };
+            let blob = creds.pop().unwrap().for_revocation;
+            let (out, reply) = served_minting(&revoke_frame(9, blob.clone()), &m, false);
+            assert_eq!(out, Ok(()));
+            assert_eq!(
+                reply,
+                Some(EgressSocketReply::Revoke(RevokeReply::Refused(
+                    MintRefusal::Request
+                )))
+            );
+            let (out, reply) = served_minting(&revoke_frame(0, blob), &m, false);
+            assert_eq!(out, Ok(()));
+            assert_eq!(reply, Some(EgressSocketReply::Revoke(RevokeReply::Revoked)));
+            let seen = stub.join().unwrap();
+            assert_eq!(bearers(&seen, "DELETE"), ["ghs_one"]);
         }
     }
 }
