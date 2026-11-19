@@ -181,8 +181,7 @@ resource "vault_policy" "maknae_kernel" {
 # addresses auth methods under `auth/<mount>` — omitting the prefix 403s every
 # enroll op). The PKI issuer path takes NO prefix (secret engines mount at root),
 # mirroring how maknae_kernel/maknae_user interpolate the int-mount path.
-# No `list` anywhere (§4.5): enroll destroys SecretID accessors by the id it
-# recorded at creation time, never by listing the mount's accessors.
+# The maknaed paths carry no `list` (§4.5); the egress `secret-id` path keeps `list` because enroll's rotation reconciles orphaned SecretID accessors, as the agent policy does.
 resource "vault_policy" "maknae_enroll" {
   name   = "maknae-enroll"
   policy = <<-EOT

@@ -20,8 +20,8 @@ run "no_apps_plans_no_minting" {
 run "one_app" {
   command = plan
   variables {
-    github_apps        = { acme = { transit_key = "gh-acme" } }
-    egress_bind_cidrs  = ["10.0.0.5/32"]
+    github_apps       = { acme = { transit_key = "gh-acme" } }
+    egress_bind_cidrs = ["10.0.0.5/32"]
   }
 
   assert {
