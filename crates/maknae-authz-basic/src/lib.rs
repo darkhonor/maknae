@@ -526,6 +526,7 @@ struct Parts {
     policy: maknae_config::AuthzPolicy,
     bindings: maknae_config::Bindings,
     sensitive: Arc<maknae_config::SensitiveList>,
+    tools: Arc<maknae_config::ToolsCatalog>,
     lookups: Lookups,
     lookup: NssLookup,
     hosts: HostLookups,
@@ -546,6 +547,7 @@ pub struct PolicySource {
     policy: maknae_config::AuthzPolicy,
     bindings: maknae_config::Bindings,
     sensitive: Arc<maknae_config::SensitiveList>,
+    tools: Arc<maknae_config::ToolsCatalog>,
     lookups: Lookups,
     lookup: NssLookup,
     hosts: HostLookups,
@@ -578,10 +580,12 @@ impl PolicySource {
             .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
         let sensitive = maknae_config::load_host_sensitive(&paths.sensitive)
             .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
+        let tools = maknae_config::load_host_tools(&paths.config_dir).map_err(tools_load_error)?;
         Self::resolved_from(
             policy,
             bindings,
             sensitive,
+            tools,
             agents,
             lookup_uid,
             HostLookups::HOST,
@@ -617,10 +621,13 @@ impl PolicySource {
         let agents =
             maknae_config::load_agents_with_requirement(&paths.config_dir, dir, req.clone())
                 .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
-        let sensitive = maknae_config::load_host_sensitive_with_requirement(&paths.sensitive, req)
-            .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
+        let sensitive =
+            maknae_config::load_host_sensitive_with_requirement(&paths.sensitive, req.clone())
+                .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
+        let tools = maknae_config::load_tools_with_requirement(&paths.config_dir, req)
+            .map_err(tools_load_error)?;
         Self::resolved_from(
-            policy, bindings, sensitive, agents, lookup_uid, hosts, principal, paths,
+            policy, bindings, sensitive, tools, agents, lookup_uid, hosts, principal, paths,
         )
     }
 
@@ -629,6 +636,7 @@ impl PolicySource {
         policy: maknae_config::AuthzPolicy,
         bindings: maknae_config::Bindings,
         sensitive: maknae_config::SensitiveList,
+        tools: maknae_config::ToolsCatalog,
         agents: maknae_config::AgentsLoad,
         lookup: NssLookup,
         hosts: HostLookups,
@@ -641,6 +649,7 @@ impl PolicySource {
             policy,
             bindings,
             sensitive: Arc::new(sensitive),
+            tools: Arc::new(tools),
             lookups,
             lookup,
             hosts,
@@ -699,6 +708,7 @@ impl PolicySource {
             policy,
             bindings,
             sensitive: Arc::new(maknae_config::SensitiveList::empty()),
+            tools: Arc::new(maknae_config::ToolsCatalog::empty()),
             lookups,
             lookup: lookup_uid,
             hosts,
@@ -714,11 +724,30 @@ impl PolicySource {
         self
     }
 
+    #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
+    pub fn with_tools(mut self, tools: maknae_config::ToolsCatalog) -> Self {
+        self.tools = Arc::new(tools);
+        self.problems = self.problems_with_tools();
+        self
+    }
+
+    #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
+    fn problems_with_tools(&self) -> Vec<IdentityProblem> {
+        self.resolved
+            .problems
+            .iter()
+            .chain(&self.agents.problems)
+            .cloned()
+            .chain(tool_problems(&self.policy, &self.agents, &self.tools))
+            .collect()
+    }
+
     fn from_lookups(parts: Parts) -> Result<Self, AuthzBasicError> {
         let Parts {
             policy,
             bindings,
             sensitive,
+            tools,
             lookups,
             lookup,
             hosts,
@@ -748,11 +777,13 @@ impl PolicySource {
             .iter()
             .chain(&agents.problems)
             .cloned()
+            .chain(tool_problems(&policy, &agents, &tools))
             .collect();
         Ok(Self {
             policy,
             bindings,
             sensitive,
+            tools,
             lookups,
             lookup,
             hosts,
@@ -782,6 +813,7 @@ impl PolicySource {
             policy: self.policy.clone(),
             bindings,
             sensitive: Arc::clone(&self.sensitive),
+            tools: Arc::clone(&self.tools),
             lookups,
             lookup: self.lookup,
             hosts: self.hosts,
@@ -822,6 +854,7 @@ impl PolicySource {
             policy: self.policy.clone(),
             bindings,
             sensitive: Arc::clone(&self.sensitive),
+            tools: Arc::clone(&self.tools),
             lookups,
             lookup: self.lookup,
             hosts: self.hosts,
@@ -857,6 +890,10 @@ impl PolicySource {
 
     pub fn sensitive(&self) -> &Arc<maknae_config::SensitiveList> {
         &self.sensitive
+    }
+
+    pub fn tools(&self) -> &Arc<maknae_config::ToolsCatalog> {
+        &self.tools
     }
 
     pub fn principal(&self) -> &maknae_config::Principal {
@@ -986,7 +1023,8 @@ impl PolicySource {
     }
 
     /// `authz.yaml`'s top-level sections, `"bindings"` from `bindings.yaml` when it has
-    /// the key, `"sensitive"` from `sensitive.yaml`, `"agents.<id>"` for each enrolled
+    /// the key, `"sensitive"` from `sensitive.yaml`, `"tools"` from `tools.yaml` (its
+    /// authored document, disabled entries included), `"agents.<id>"` for each enrolled
     /// agent's `policy.yaml` and `"agents.<id>#tasks-right"` for every enrolled agent,
     /// each canonical JSON through the caller's digest, by key.
     pub fn section_digests(
@@ -1005,6 +1043,7 @@ impl PolicySource {
             "sensitive".into(),
             digest(self.sensitive.canonical().as_bytes()),
         );
+        out.insert("tools".into(), digest(self.tools.canonical().as_bytes()));
         for (id, _, p) in self.agent_policies() {
             out.insert(format!("agents.{id}"), digest(p.canonical.as_bytes()));
         }
@@ -1014,6 +1053,79 @@ impl PolicySource {
         }
         out
     }
+}
+
+fn tools_load_error(e: maknae_config::ToolsError) -> AuthzBasicError {
+    AuthzBasicError::Load(e.to_string())
+}
+
+fn tool_problems(
+    policy: &maknae_config::AuthzPolicy,
+    agents: &AgentOutcome,
+    tools: &maknae_config::ToolsCatalog,
+) -> Vec<IdentityProblem> {
+    let disabled = tools
+        .disabled()
+        .iter()
+        .map(|d| IdentityProblem::ToolEntryDisabled {
+            entry: d.entry.clone(),
+            reason: d.reason.clone(),
+        });
+    let subjects = policy.subjects.iter().filter_map(|(name, s)| {
+        Some((
+            format!("subjects.{name}.permissions"),
+            s.permissions.as_ref()?,
+        ))
+    });
+    let agent_lists = agents
+        .load
+        .policies
+        .iter()
+        .filter(|p| agents.enrolled.contains_key(&p.id))
+        .filter_map(|p| {
+            Some((
+                format!("agents.{}.permissions", p.id.as_str()),
+                p.entry.permissions.as_ref()?,
+            ))
+        });
+    let site = std::iter::once((
+        "permissions".to_string(),
+        (&policy.deny[..], policy.deny_sources()),
+        (&policy.allow[..], policy.allow_sources()),
+    ));
+    let lists = site
+        .chain(subjects.chain(agent_lists).map(|(section, p)| {
+            (
+                section,
+                (&p.deny[..], p.deny_sources()),
+                (&p.allow[..], p.allow_sources()),
+            )
+        }))
+        .flat_map(|(section, deny, allow)| {
+            [
+                (format!("{section}.deny"), deny.0, deny.1),
+                (format!("{section}.allow"), allow.0, allow.1),
+            ]
+        });
+    let unknown = lists.flat_map(|(section, patterns, sources)| {
+        patterns
+            .iter()
+            .zip(sources)
+            .filter_map(move |(pattern, source)| {
+                let source = format!("{section} {source}");
+                match pattern {
+                    maknae_config::Pattern::Tool(t) => match tools.entry(&t.entry) {
+                        None => Some(IdentityProblem::ToolGrantUnknownEntry { source }),
+                        Some(e) if !e.commands.contains_key(&t.program) => {
+                            Some(IdentityProblem::ToolGrantUnknownProgram { source })
+                        }
+                        Some(_) => None,
+                    },
+                    maknae_config::Pattern::Read(_) | maknae_config::Pattern::Write(_) => None,
+                }
+            })
+    });
+    disabled.chain(unknown).collect()
 }
 
 fn tasker_names(load: &maknae_config::AgentsLoad) -> Vec<String> {
@@ -2277,6 +2389,7 @@ mod tests {
                 agents: src.agent_uids(),
                 taskers: src.agent_taskers().clone(),
                 sensitive: std::sync::Arc::clone(src.sensitive()),
+                tools: std::sync::Arc::clone(src.tools()),
             })
         }
 
@@ -2550,6 +2663,7 @@ mod tests {
         let lookups = resolve_uid_map_with(&policy, &bindings, &[], classify(lookup_uid))?;
         PolicySource::from_lookups(Parts {
             sensitive: Default::default(),
+            tools: Default::default(),
             policy,
             bindings,
             lookups,
@@ -2652,6 +2766,7 @@ mod tests {
     fn source_with_lookups(lookups: &[(&str, Option<u32>)]) -> PolicySource {
         PolicySource::from_lookups(Parts {
             sensitive: Default::default(),
+            tools: Default::default(),
             policy: parse(EMPTY),
             bindings: bound(
                 "schema_version: 1\nbindings:\n  admin: [\"alice\"]\n  user: [\"ghost\"]\n",
@@ -2867,6 +2982,61 @@ mod tests {
 
     const SHIPPED: &str = include_str!("../../../packaging/common/authz.yaml");
 
+    pub(crate) fn tool_request(
+        uid: u32,
+        entry: &str,
+        program: &str,
+        argv: &[&str],
+    ) -> maknae_security::Request {
+        use maknae_security::{Action, AttrValue, Attributes, Context, Resource, Subject};
+        let mut subject = Attributes::new();
+        subject.insert(decide::SUBJECT_UID, AttrValue::Int(i64::from(uid)));
+        let mut resource = Attributes::new();
+        resource.insert(
+            maknae_security::RESOURCE_TOOL_ENTRY,
+            AttrValue::Str(entry.into()),
+        );
+        resource.insert(
+            maknae_security::RESOURCE_TOOL_PROGRAM,
+            AttrValue::Str(program.into()),
+        );
+        resource.insert(
+            maknae_security::RESOURCE_TOOL_ARGV,
+            AttrValue::List(argv.iter().map(|a| a.to_string()).collect()),
+        );
+        resource.insert(
+            maknae_security::RESOURCE_BINDING_KINDS,
+            AttrValue::Set(Default::default()),
+        );
+        maknae_security::Request {
+            subject: Subject(subject),
+            resource: Resource(resource),
+            action: Action("tool.invoke".into()),
+            context: Context(Attributes::new()),
+        }
+    }
+
+    pub(crate) fn granting_tool_invoke(l: &decide::LoadedPolicy) -> decide::LoadedPolicy {
+        let invoke = || vec![("tool.invoke", "tool.invoke".to_string())];
+        decide::LoadedPolicy {
+            policy: l.policy.clone(),
+            roles: l.roles.clone(),
+            action_grants: crate::decide::ActionGrants::from_validated(
+                [
+                    ("admin".to_string(), (invoke(), Vec::new())),
+                    ("user".to_string(), (invoke(), Vec::new())),
+                ]
+                .into(),
+            ),
+            destinations: l.destinations.clone(),
+            subjects: l.subjects.clone(),
+            agents: l.agents.clone(),
+            taskers: l.taskers.clone(),
+            sensitive: Arc::clone(&l.sensitive),
+            tools: Arc::clone(&l.tools),
+        }
+    }
+
     /// The shipped file with the nine credential denies restored, for deny-path tests.
     pub(crate) fn shipped_denying() -> &'static str {
         static DENYING: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
@@ -2919,6 +3089,7 @@ mod tests {
             agents: Default::default(),
             taskers: Default::default(),
             sensitive: Default::default(),
+            tools: Default::default(),
         };
         let ask = |uid: i64, action: &str| {
             let mut r = liveness_req(Some(uid));
@@ -4553,6 +4724,7 @@ mod tests {
         let lookups = resolve_uid_map_with(&policy, &bindings, &[], lookup)?;
         PolicySource::from_lookups(Parts {
             sensitive: Default::default(),
+            tools: Default::default(),
             policy,
             bindings,
             lookups,
@@ -5121,6 +5293,116 @@ mod tests {
         );
     }
 
+    const TOOLS_ONE: &str = "schema_version: 1\ntools:\n  sentinel-674-one:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      echo: { subcommands: [\"hi *\"] }\n";
+    const TOOLS_TWO: &str = "schema_version: 1\ntools:\n  sentinel-674-one:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      echo: { subcommands: [\"bye *\"] }\n";
+    const TOOLS_674_BUILD: &str = "schema_version: 1\ntools:\n  sentinel-674-build:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      cargo: { subcommands: [\"build *\"] }\n";
+    const TOOLS_BAD_ENTRY: &str = "schema_version: 1\ntools:\n  sentinel-674-bad:\n    isolation: sentinel-674-nope\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n";
+
+    fn tools(text: &str) -> maknae_config::ToolsCatalog {
+        maknae_config::ToolsCatalog::parse(text).unwrap()
+    }
+
+    #[test]
+    fn tools_section_digest_changes_with_the_file() {
+        let digest = |t: &str| {
+            let src = source_with(SHIPPED, None, &[]).with_tools(tools(t));
+            src.section_digests(stand_in_digest)["tools"]
+        };
+        let empty = source_with(SHIPPED, None, &[]);
+        assert_eq!(
+            empty.section_digests(stand_in_digest)["tools"],
+            stand_in_digest(maknae_config::ToolsCatalog::empty().canonical().as_bytes())
+        );
+        assert_ne!(digest(TOOLS_ONE), digest(TOOLS_TWO));
+        assert_ne!(
+            digest(TOOLS_ONE),
+            empty.section_digests(stand_in_digest)["tools"]
+        );
+        assert_eq!(digest(TOOLS_ONE), digest(TOOLS_ONE));
+        assert_ne!(
+            compiled(&empty).policy_sha256(test_digest),
+            compiled(&empty.clone().with_tools(tools(TOOLS_ONE))).policy_sha256(test_digest)
+        );
+    }
+
+    #[test]
+    fn disabled_entries_appear_in_problems() {
+        let src = source_with(SHIPPED, None, &[]).with_tools(tools(TOOLS_BAD_ENTRY));
+        let snap = compiled(&src);
+        let problems = snap.identity_problems();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        match &problems[0] {
+            IdentityProblem::ToolEntryDisabled { entry, reason } => {
+                assert_eq!(entry, "sentinel-674-bad");
+                assert!(reason.contains("isolation"), "{reason}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(snap.tools().entry("sentinel-674-bad").is_none());
+        assert!(compiled(&source_with(SHIPPED, None, &[]))
+            .identity_problems()
+            .is_empty());
+    }
+
+    #[test]
+    fn grant_naming_missing_entry_grants_nothing_and_is_a_problem() {
+        let text = "schema_version: 1\ntools:\n  sentinel-674-build:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      cargo: { subcommands: [\"build *\"] }\n  sentinel-674-off:\n    enabled: false\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n";
+        let authz = "schema_version: 1\npermissions:\n  allow: [\"Tool(sentinel-674-build cargo build *)\", \"Tool(sentinel-674-gone cargo build *)\", \"Tool(sentinel-674-off cargo build *)\"]\n  deny: [\"Tool(sentinel-674-gone-deny cargo build *)\"]\nsubjects:\n  ursula:\n    permissions:\n      allow: [\"Tool(sentinel-674-subject cargo build *)\", \"Read(~/**)\"]\n      deny: [\"Tool(sentinel-674-subject-deny cargo build *)\", \"Tool(sentinel-674-build cargo build --x)\"]\n";
+        let src = source_with(authz, None, &[("ursula", 1001)]).with_tools(tools(text));
+        let unknown = |snap_problems: &[IdentityProblem]| -> Vec<String> {
+            snap_problems
+                .iter()
+                .filter_map(|p| match p {
+                    IdentityProblem::ToolGrantUnknownEntry { source } => Some(source.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let expected = [
+            "permissions.deny Tool(sentinel-674-gone-deny cargo build *)",
+            "permissions.allow Tool(sentinel-674-gone cargo build *)",
+            "permissions.allow Tool(sentinel-674-off cargo build *)",
+            "subjects.ursula.permissions.deny Tool(sentinel-674-subject-deny cargo build *)",
+            "subjects.ursula.permissions.allow Tool(sentinel-674-subject cargo build *)",
+        ];
+        assert_eq!(unknown(src.identity_problems()), expected);
+        let snap = compiled(&src);
+        assert_eq!(unknown(snap.identity_problems()), expected);
+        assert_eq!(snap.identity_problems().len(), 5);
+    }
+
+    #[test]
+    fn grant_naming_a_program_its_entry_lacks_is_a_problem() {
+        let authz = "schema_version: 1\npermissions:\n  allow: [\"Tool(sentinel-674-build rustc build *)\", \"Tool(sentinel-674-build cargo build *)\"]\n  deny: [\"Tool(sentinel-674-build sentinel-674-prog x)\"]\nsubjects:\n  ursula:\n    permissions:\n      allow: [\"Tool(sentinel-674-build git status)\"]\n";
+        let src = source_with(authz, None, &[("ursula", 1001)]).with_tools(tools(TOOLS_674_BUILD));
+        let expected = [
+            IdentityProblem::ToolGrantUnknownProgram {
+                source: "permissions.deny Tool(sentinel-674-build sentinel-674-prog x)".into(),
+            },
+            IdentityProblem::ToolGrantUnknownProgram {
+                source: "permissions.allow Tool(sentinel-674-build rustc build *)".into(),
+            },
+            IdentityProblem::ToolGrantUnknownProgram {
+                source: "subjects.ursula.permissions.allow Tool(sentinel-674-build git status)"
+                    .into(),
+            },
+        ];
+        assert_eq!(src.identity_problems(), expected);
+        assert_eq!(compiled(&src).identity_problems()[..], expected);
+    }
+
+    #[test]
+    fn a_failed_credential_class_is_reported_under_its_qualified_name() {
+        let text = "schema_version: 1\ncredential_classes:\n  sentinel-674-class:\n    kind: sentinel-674-nope\n";
+        let src = source_with(SHIPPED, None, &[]).with_tools(tools(text));
+        let problems = compiled(&src).identity_problems().to_vec();
+        assert!(
+            matches!(&problems[..], [IdentityProblem::ToolEntryDisabled { entry, .. }]
+                if entry == "credential_classes.sentinel-674-class"),
+            "{problems:?}"
+        );
+    }
+
     #[test]
     fn the_bindings_digest_is_the_section_of_bindings_yaml_under_the_same_key() {
         let s = source_with(
@@ -5147,7 +5429,8 @@ mod tests {
                 "permissions",
                 "roles",
                 "schema_version",
-                "sensitive"
+                "sensitive",
+                "tools"
             ]
         );
         let empty = source_with(SHIPPED, Some("schema_version: 1\nbindings: {}\n"), &[])
@@ -5558,7 +5841,7 @@ mod tests {
         use super::super::*;
         use super::{
             arrives, audit_permit, bound, contained, no_role, principal, whoami, CONTAINED, EMPTY,
-            LABEL,
+            LABEL, TOOLS_BAD_ENTRY, TOOLS_ONE,
         };
         use maknae_security::{Authorizer, Verdict};
         use std::os::unix::fs::PermissionsExt;
@@ -5687,6 +5970,58 @@ mod tests {
             let mut r = whoami(uid);
             r.action = maknae_security::Action(action.into());
             r
+        }
+
+        fn write_tools(fx: &Fixture, body: &str) {
+            write(&fx.0.join(maknae_config::TOOLS_FILE), body);
+        }
+
+        #[test]
+        fn load_without_tools_yaml_has_empty_catalog() {
+            let fx = Fixture::new("tools_absent");
+            let auth = fx.authorizer("admin");
+            assert!(auth.snapshot().tools().is_empty());
+            assert!(auth.snapshot().identity_problems().is_empty());
+        }
+
+        #[test]
+        fn malformed_tools_yaml_fails_policy_load() {
+            let fx = Fixture::new("tools_bad");
+            write(&fx.policy(), EMPTY);
+            fx.bind("admin");
+            for body in [
+                "schema_version: 1\ntools: [\n",
+                "schema_version: 2\n",
+                "schema_version: 1\nsentinel-674-key: 1\n",
+            ] {
+                write_tools(&fx, body);
+                let got =
+                    PolicySource::load_with_requirement(fx.paths(), principal(), fixture_req());
+                assert!(
+                    matches!(&got, Err(AuthzBasicError::Load(m)) if m.contains(maknae_config::TOOLS_FILE)),
+                    "{body:?}: {got:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_present_tools_yaml_reaches_the_snapshot() {
+            let fx = Fixture::new("tools_present");
+            write_tools(&fx, TOOLS_ONE);
+            let auth = fx.authorizer("admin");
+            assert!(auth.snapshot().tools().entry("sentinel-674-one").is_some());
+        }
+
+        #[test]
+        fn a_disabled_entry_in_the_file_is_reported_by_the_loaded_snapshot() {
+            let fx = Fixture::new("tools_disabled");
+            write_tools(&fx, TOOLS_BAD_ENTRY);
+            let auth = fx.authorizer("admin");
+            let snap = auth.snapshot();
+            assert!(matches!(
+                snap.identity_problems().as_ref(),
+                [IdentityProblem::ToolEntryDisabled { entry, .. }] if entry == "sentinel-674-bad"
+            ));
         }
 
         #[test]
@@ -7141,6 +7476,76 @@ mod tests {
                     .map(|s| (s.uid, s.name.as_str(), s.role.as_str()))
                     .collect::<Vec<_>>(),
                 [(HOBI, "hobi-svc", "user"), (SUGA, "suga-svc", "user")]
+            );
+        }
+
+        #[test]
+        fn an_agent_tool_citation_resolves_through_a_compiled_snapshot() {
+            let src = source(
+                None,
+                &[],
+                load(
+                    vec![hobi()],
+                    &[(
+                        "hobi",
+                        "schema_version: 1\npermissions:\n  allow: [\"Tool(sentinel-674-build cargo build *)\"]\n",
+                    )],
+                ),
+            )
+            .with_tools(tools(TOOLS_674_BUILD));
+            let snap = compiled(&src);
+            let lp = super::granting_tool_invoke(snap.loaded());
+            let d = decide::decide_loaded_cited(
+                &lp,
+                &principal(),
+                &agent_channel(
+                    super::tool_request(HOBI, "sentinel-674-build", "cargo", &["build"]),
+                    "hobi",
+                ),
+            );
+            assert!(
+                matches!(d.verdict, maknae_security::Verdict::Permit { .. }),
+                "{d:?}"
+            );
+            assert_eq!(
+                d.cited,
+                Some(decide::Cited::AgentPath {
+                    agent: "hobi".into(),
+                    effect: decide::Effect::Allow,
+                    source: "Tool(sentinel-674-build cargo build *)".into(),
+                })
+            );
+            let c = snap.cite(d.cited.as_ref().unwrap()).unwrap();
+            assert!(c.section.ends_with("#agents.hobi"), "{}", c.section);
+        }
+
+        #[test]
+        fn an_agent_tool_grant_naming_a_missing_entry_is_a_problem() {
+            let src = source(
+                None,
+                &[],
+                load(
+                    vec![hobi()],
+                    &[(
+                        "hobi",
+                        "schema_version: 1\npermissions:\n  allow: [\"Tool(sentinel-674-gone cargo build *)\"]\n  deny: [\"Tool(sentinel-674-gone-deny cargo build *)\"]\n",
+                    )],
+                ),
+            )
+            .with_tools(maknae_config::ToolsCatalog::empty());
+            assert_eq!(
+                src.identity_problems(),
+                [
+                    IdentityProblem::ToolGrantUnknownEntry {
+                        source:
+                            "agents.hobi.permissions.deny Tool(sentinel-674-gone-deny cargo build *)"
+                                .into()
+                    },
+                    IdentityProblem::ToolGrantUnknownEntry {
+                        source: "agents.hobi.permissions.allow Tool(sentinel-674-gone cargo build *)"
+                            .into()
+                    }
+                ]
             );
         }
 

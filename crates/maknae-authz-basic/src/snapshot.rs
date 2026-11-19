@@ -157,6 +157,10 @@ impl Snapshot {
         self.loaded.agents.0.get(&uid).map(String::as_str)
     }
 
+    pub fn tools(&self) -> &Arc<maknae_config::ToolsCatalog> {
+        &self.loaded.tools
+    }
+
     pub fn sensitive(&self) -> &Arc<maknae_config::SensitiveList> {
         &self.loaded.sensitive
     }
@@ -608,6 +612,7 @@ pub fn compile(
         agents: source.agent_uids(),
         taskers: source.agent_taskers().clone(),
         sensitive: Arc::clone(source.sensitive()),
+        tools: Arc::clone(source.tools()),
     };
     Ok(Snapshot {
         graph,
@@ -804,7 +809,7 @@ mod tests {
         let snap = snap(&s);
         let g = snap.graph();
         assert_eq!(g.nodes().iter().filter(|n| n.kind == TERM).count(), 61);
-        assert_eq!(g.nodes().iter().filter(|n| n.kind == CLASS).count(), 7);
+        assert_eq!(g.nodes().iter().filter(|n| n.kind == CLASS).count(), 8);
         let rules: Vec<_> = g.nodes().iter().filter(|n| n.kind == RULE).collect();
         assert_eq!(rules.len(), 37);
         let admin = g.lookup(ROLE, "admin").unwrap();
@@ -902,6 +907,108 @@ mod tests {
             g.lookup(SUBJECT, "uid:666").map(|n| n.id),
             snap.persisted().lookup(SUBJECT, "uid:666").map(|n| n.id)
         );
+    }
+
+    const TOOLS_674: &str = "schema_version: 1\ntools:\n  sentinel-674-build:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      cargo: { subcommands: [\"build *\"] }\n";
+
+    #[test]
+    fn tool_citation_resolves_through_a_compiled_snapshot() {
+        let s = source_with(
+            "schema_version: 1\npermissions:\n  allow: [\"Tool(sentinel-674-build cargo build *)\"]\n",
+            Some(BINDINGS),
+        )
+        .with_tools(maknae_config::ToolsCatalog::parse(TOOLS_674).unwrap());
+        let snap = snap(&s);
+        let lp = crate::tests::granting_tool_invoke(snap.loaded());
+        let d = crate::decide::decide_loaded_cited(
+            &lp,
+            &principal(),
+            &crate::tests::tool_request(
+                1001,
+                "sentinel-674-build",
+                "cargo",
+                &["build", "--release"],
+            ),
+        );
+        assert!(
+            matches!(d.verdict, maknae_security::Verdict::Permit { .. }),
+            "{d:?}"
+        );
+        let c = snap.cite(d.cited.as_ref().unwrap()).unwrap();
+        let node = snap.graph().node(NodeId(c.node)).unwrap();
+        assert_eq!(node.kind, RULE);
+        assert_eq!(
+            str_attr(node, ATTR_ENTRY),
+            Some("Tool(sentinel-674-build cargo build *)")
+        );
+        assert_eq!(c.section, "/etc/maknae/authz.yaml#permissions");
+    }
+
+    #[test]
+    fn a_subject_tool_citation_resolves_through_a_compiled_snapshot() {
+        let s = source_with(
+            "schema_version: 1\npermissions:\n  allow: []\nsubjects:\n  ursula:\n    permissions:\n      allow: [\"Tool(sentinel-674-build cargo build *)\"]\n",
+            Some(BINDINGS),
+        )
+        .with_tools(maknae_config::ToolsCatalog::parse(TOOLS_674).unwrap());
+        let snap = snap(&s);
+        let lp = crate::tests::granting_tool_invoke(snap.loaded());
+        let d = crate::decide::decide_loaded_cited(
+            &lp,
+            &principal(),
+            &crate::tests::tool_request(1001, "sentinel-674-build", "cargo", &["build"]),
+        );
+        assert_eq!(
+            d.cited,
+            Some(Cited::SubjectPath {
+                subject: "ursula".into(),
+                effect: Effect::Allow,
+                source: "Tool(sentinel-674-build cargo build *)".into(),
+            })
+        );
+        let c = snap.cite(d.cited.as_ref().unwrap()).unwrap();
+        let node = snap.graph().node(NodeId(c.node)).unwrap();
+        assert_eq!(node.kind, RULE);
+        assert_eq!(
+            str_attr(node, ATTR_ENTRY),
+            Some("Tool(sentinel-674-build cargo build *)")
+        );
+        assert_eq!(c.section, "/etc/maknae/authz.yaml#subjects");
+    }
+
+    #[test]
+    fn shipped_policy_never_permits_tool_invoke() {
+        let catalog = maknae_config::ToolsCatalog::parse(include_str!(
+            "../../../packaging/common/tools-homelab.yaml"
+        ))
+        .unwrap();
+        let s = source_with(SHIPPED, Some(BINDINGS)).with_tools(catalog);
+        let snap = snap(&s);
+        let calls: &[(&str, &str, &[&str])] = &[
+            ("github-read", "gh", &["pr", "view", "1"]),
+            ("github-read", "git", &["fetch", "origin"]),
+            (
+                "github-post",
+                "gh",
+                &["pr", "comment", "1", "--body-file", "-"],
+            ),
+            ("rust-fetch", "cargo", &["fetch", "--locked"]),
+            ("rust-build", "cargo", &["build"]),
+            ("rust-build", "cargo", &["test", "--workspace"]),
+        ];
+        for uid in [1000, 1001, 1002, 666, 501] {
+            for (entry, program, argv) in calls {
+                let d = crate::decide::decide_loaded_cited(
+                    snap.loaded(),
+                    &principal(),
+                    &crate::tests::tool_request(uid, entry, program, argv),
+                );
+                assert!(
+                    !matches!(d.verdict, maknae_security::Verdict::Permit { .. }),
+                    "{uid} {entry} {program} {argv:?}: {d:?}"
+                );
+            }
+        }
     }
 
     #[test]

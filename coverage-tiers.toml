@@ -285,6 +285,10 @@ files = [
   "crates/maknae-config/src/baseline_doc.rs",
   # #617: the sensitive.yaml grammar and matcher the mandatory deny decides by; a missed match permits a protected path.
   "crates/maknae-config/src/sensitive.rs",
+  # #674: the tool argument grammar and deny matcher; a wrong match permits a refused argument.
+  "crates/maknae-config/src/argpattern.rs",
+  # #674: the tools.yaml catalog; a wrong arm enables an entry or credential class the file disabled.
+  "crates/maknae-config/src/tools.rs",
   # #79: the posture marker enroll writes and maknaed reads; a mis-parse records a sealed boot as unverified, or the reverse.
   "crates/maknae-config/src/posture_marker.rs",
   "crates/maknae-audit-append/src/record.rs",

@@ -21792,6 +21792,49 @@ mod reload_tests {
     }
 
     #[tokio::test]
+    async fn reload_with_malformed_tools_yaml_keeps_previous_snapshot() {
+        let fx = fixture("tools_bad", AUTHZ, Some(ROOT_ADMIN)).await;
+        crate::test_fixtures::write_tools(
+            &fx.dir,
+            "schema_version: 1\ntools:\n  sentinel-674-one:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n",
+        );
+        bounded(fx.reloader.run()).await.unwrap();
+        assert!(fx
+            .baseline()
+            .snapshot()
+            .tools()
+            .entry("sentinel-674-one")
+            .is_some());
+        let before = fx.baseline().snapshot();
+        let store = fx.store_bytes();
+        for body in [
+            "schema_version: 1\ntools: [\n",
+            "schema_version: 2\n",
+            "schema_version: 1\nsentinel-674-key: 1\n",
+        ] {
+            crate::test_fixtures::write_tools(&fx.dir, body);
+            let got = bounded(fx.reloader.run()).await;
+            assert!(
+                matches!(&got, Err(crate::reload::Refusal::Load(m)) if m.contains(maknae_config::TOOLS_FILE)),
+                "{body:?}: {got:?}"
+            );
+            assert!(Arc::ptr_eq(&before, &fx.baseline().snapshot()));
+            assert_eq!(fx.store_bytes(), store);
+            let last = outcomes(&fx.reload_records()).pop().unwrap();
+            assert_eq!((last.0.as_str(), last.1.as_str()), ("graph.reload", "deny"));
+            assert!(
+                last.2.starts_with("reload refused: policy load:")
+                    && last.2.contains(maknae_config::TOOLS_FILE),
+                "{}",
+                last.2
+            );
+        }
+        std::fs::remove_file(fx.dir.join(maknae_config::TOOLS_FILE)).unwrap();
+        bounded(fx.reloader.run()).await.unwrap();
+        assert!(fx.baseline().snapshot().tools().is_empty());
+    }
+
+    #[tokio::test]
     async fn a_reload_with_an_invalid_banner_keeps_the_running_one() {
         let fx = fixture("banner_bad", AUTHZ, Some(ROOT_ADMIN)).await;
         let banner = fx.dir.join(maknae_config::BANNER_FILE);

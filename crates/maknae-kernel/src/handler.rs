@@ -501,7 +501,41 @@ pub fn build_authz_request(
     facts: Option<&crate::conversation::facts::ConversationFacts>,
     stamp: &Stamp<'_>,
 ) -> maknae_security::Request {
-    use maknae_security::{Action, AttrValue, Attributes, Context, Resource, Subject};
+    use maknae_security::{Action, AttrValue, Attributes, Context, Resource};
+    let subject = stamp_subject(peer_uid, home, stamp);
+    let mut resource = Attributes::new();
+    if let Verb::Read { path, .. } = verb {
+        resource.insert("path", AttrValue::Str(path.clone()));
+    }
+    stamp_conversation(&mut resource, facts);
+    if let (Verb::SessionPrompt { .. }, Some(a)) = (verb, admitted) {
+        resource.insert(
+            "destination",
+            AttrValue::Str(format!("provider:{}", a.provider.name)),
+        );
+        resource.insert(
+            "model",
+            AttrValue::Str(format!("{}/{}", a.provider.name, a.model)),
+        );
+    }
+    let mut context = lane_context(lane);
+    if let Some(op) = task_op(verb) {
+        context.insert(maknae_security::CONTEXT_TASK_OP, AttrValue::Str(op.into()));
+    }
+    maknae_security::Request {
+        subject,
+        resource: Resource(resource),
+        action: Action(verb_to_action(verb).to_string()),
+        context: Context(context),
+    }
+}
+
+pub(crate) fn stamp_subject(
+    peer_uid: u32,
+    home: Option<&std::path::Path>,
+    stamp: &Stamp<'_>,
+) -> maknae_security::Subject {
+    use maknae_security::{AttrValue, Attributes, Subject};
     let mut subject = Attributes::new();
     subject.insert("uid", AttrValue::Int(i64::from(peer_uid)));
     let channel = match stamp {
@@ -535,10 +569,14 @@ pub fn build_authz_request(
     if let Some(h) = home.and_then(std::path::Path::to_str) {
         subject.insert(maknae_security::SUBJECT_HOME, AttrValue::Str(h.to_owned()));
     }
-    let mut resource = Attributes::new();
-    if let Verb::Read { path, .. } = verb {
-        resource.insert("path", AttrValue::Str(path.clone()));
-    }
+    Subject(subject)
+}
+
+pub(crate) fn stamp_conversation(
+    resource: &mut maknae_security::Attributes,
+    facts: Option<&crate::conversation::facts::ConversationFacts>,
+) {
+    use maknae_security::AttrValue;
     if let Some(f) = facts {
         resource.insert(
             maknae_authz_basic::RESOURCE_CONVERSATION_STATE_KEY,
@@ -557,34 +595,19 @@ pub fn build_authz_request(
             );
         }
     }
-    if let (Verb::SessionPrompt { .. }, Some(a)) = (verb, admitted) {
-        resource.insert(
-            "destination",
-            AttrValue::Str(format!("provider:{}", a.provider.name)),
-        );
-        resource.insert(
-            "model",
-            AttrValue::Str(format!("{}/{}", a.provider.name, a.model)),
-        );
-    }
-    // The lane is an ARGUMENT, never derived from `verb`. That is the point: the
-    // caller is the accept loop, which knows which listener accepted, and there is
-    // therefore no code path by which client-supplied content could reach it
-    // (ADR-0009 decision 8).
+}
+
+/// The lane is an ARGUMENT, never derived from the verb: the caller is the accept loop,
+/// which knows which listener accepted, so no client-supplied content can reach it
+/// (ADR-0009 decision 8).
+pub(crate) fn lane_context(lane: maknae_security::Lane) -> maknae_security::Attributes {
+    use maknae_security::{AttrValue, Attributes};
     let mut context = Attributes::new();
     context.insert(
         maknae_security::CONTEXT_DAC_LANE,
         AttrValue::Str(lane.as_str().to_string()),
     );
-    if let Some(op) = task_op(verb) {
-        context.insert(maknae_security::CONTEXT_TASK_OP, AttrValue::Str(op.into()));
-    }
-    maknae_security::Request {
-        subject: Subject(subject),
-        resource: Resource(resource),
-        action: Action(verb_to_action(verb).to_string()),
-        context: Context(context),
-    }
+    context
 }
 
 /// The kernel's own request.
@@ -691,6 +714,7 @@ pub fn delegated_plan() -> maknae_io::DelegatedRequired {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_fixtures::build_tool_request;
     use maknae_proto::ContainTarget;
 
     #[test]
@@ -793,6 +817,86 @@ mod tests {
         assert_eq!(get(&tasked, SUBJECT_TASK), s(&task.id.to_string()));
         assert_eq!(get(&tasked, SUBJECT_TASKER), s("uid:1002"));
         assert_eq!(get(&tasked, SUBJECT_ROOT_TASKER), s("users/1000"));
+    }
+
+    #[test]
+    fn build_tool_request_stamps_argv_as_ordered_list_and_kernel_subject() {
+        use maknae_config::{Bound, ToolCall};
+        use maknae_security::{AttrValue, Attributes};
+        let s = |v: &str| AttrValue::Str(v.into());
+        let call = ToolCall {
+            entry: "sentinel-674-entry".into(),
+            program: "sentinel-674-prog".into(),
+            argv: vec!["test".into(), "a b".into(), String::new()],
+            bound: Bound::empty(),
+        };
+        let hobi = maknae_config::AgentId::parse("hobi").unwrap();
+        let task = TaskStamp {
+            id: maknae_proto::TaskId([0x74; 16]),
+            tasker: "uid:1002".into(),
+            root: "users/1000".into(),
+            start: 0,
+        };
+        let facts = crate::conversation::facts::ConversationFacts {
+            state: crate::conversation::facts::FactState::Active,
+            owner_uid: Some(1000),
+            extends: None,
+        };
+        let stamps = [
+            (Stamp::Client, &[("channel", "client")][..]),
+            (
+                Stamp::Agent {
+                    agent: &hobi,
+                    task: None,
+                },
+                &[("channel", "agent"), ("agent", "hobi")][..],
+            ),
+            (
+                Stamp::Agent {
+                    agent: &hobi,
+                    task: Some(&task),
+                },
+                &[
+                    ("channel", "agent"),
+                    ("agent", "hobi"),
+                    ("task", "74747474747474747474747474747474"),
+                    ("tasker", "uid:1002"),
+                    ("root_tasker", "users/1000"),
+                ][..],
+            ),
+        ];
+        for (stamp, stamped) in &stamps {
+            let got = build_tool_request(
+                stamp,
+                2001,
+                Some(std::path::Path::new("/home/hobi-svc")),
+                maknae_security::Lane::Local,
+                Some(&facts),
+                &call,
+            );
+            let mut subject = Attributes::new();
+            subject.insert("uid", AttrValue::Int(2001));
+            subject.insert("home", s("/home/hobi-svc"));
+            for &(k, v) in *stamped {
+                subject.insert(k, s(v));
+            }
+            assert_eq!(got.subject.0, subject, "{stamped:?}");
+            let mut context = Attributes::new();
+            context.insert("dac_lane", s("local"));
+            assert_eq!(got.context.0, context);
+            assert_eq!(got.action.0, "tool.invoke");
+            let mut resource = Attributes::new();
+            resource.insert("conversation_state", s("active"));
+            resource.insert("conversation_owner", AttrValue::Int(1000));
+            resource.insert("tool.entry", s("sentinel-674-entry"));
+            resource.insert("tool.program", s("sentinel-674-prog"));
+            resource.insert(
+                "tool.argv",
+                AttrValue::List(vec!["test".into(), "a b".into(), String::new()]),
+            );
+            resource.insert("binding.kinds", AttrValue::Set(Default::default()));
+            assert_eq!(got.resource.0, resource);
+        }
     }
 
     #[test]
@@ -2299,18 +2403,18 @@ mod tests {
         assert_eq!(decidable, compiled);
     }
 
-    /// Every term resolves to one of the seven closed classes. A term whose
+    /// Every term resolves to one of the closed classes. A term whose
     /// class prefix is wrong would fall to `None` -> Deny at runtime and be
     /// invisible; this fails the suite instead.
     #[test]
     fn every_term_resolves_to_a_closed_class() {
-        const CLASSES: [&str; 7] = [
-            "liveness", "admin", "session", "fs", "terminal", "mcp", "kernel",
-        ];
         for v in all_verbs() {
             let a = verb_to_action(&v);
             let head = a.split('.').next().unwrap();
-            assert!(CLASSES.contains(&head), "{a} resolves to no closed class");
+            assert!(
+                maknae_authz_basic::CLASSES.contains(&head),
+                "{a} resolves to no closed class"
+            );
         }
     }
 

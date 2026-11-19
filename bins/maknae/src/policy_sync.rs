@@ -680,7 +680,17 @@ mod tests {
             prod.contains("publish_owned(\n        Path::new(BINDINGS_FILE),")
                 || prod.contains("publish_owned(Path::new(BINDINGS_FILE),")
         );
-        for other in ["authz.yaml", "maknae.yaml", "config.d", "AUTHZ", "publish("] {
+        for other in [
+            "authz.yaml",
+            "maknae.yaml",
+            "sensitive.yaml",
+            "tools.yaml",
+            "config.d",
+            "AUTHZ",
+            "SENSITIVE_FILE",
+            "TOOLS_FILE",
+            "publish(",
+        ] {
             assert!(!prod.contains(other), "{other}");
         }
         use clap::Parser;
@@ -698,6 +708,8 @@ mod tests {
         let fx = Fx::new();
         fx.config("authz.yaml", "schema_version: 1\n");
         fx.config("maknae.yaml", "core: {}\n");
+        fx.config("sensitive.yaml", "schema_version: 1\nsensitive: []\n");
+        fx.config("tools.yaml", "schema_version: 1\n");
         fx.config("bindings.yaml", BASE);
         fx.mirror(&mirror_over(BASE, LIVE, &[]));
         let ino = |n: &str| {
@@ -705,7 +717,9 @@ mod tests {
                 .unwrap()
                 .ino()
         };
-        let (a, m, b) = (ino("authz.yaml"), ino("maknae.yaml"), ino("bindings.yaml"));
+        let others = ["authz.yaml", "maknae.yaml", "sensitive.yaml", "tools.yaml"];
+        let before: Vec<_> = others.iter().map(|n| ino(n)).collect();
+        let b = ino("bindings.yaml");
         let (r, out) = fx.sync_out(false, "", true);
         assert!(matches!(r, Ok(Outcome::Installed)), "{r:?}");
         assert!(out.contains("adversary: +uid:4242"), "{out}");
@@ -716,7 +730,7 @@ mod tests {
             )),
             "{out}"
         );
-        assert_eq!((ino("authz.yaml"), ino("maknae.yaml")), (a, m));
+        assert_eq!(others.iter().map(|n| ino(n)).collect::<Vec<_>>(), before);
         assert_ne!(ino("bindings.yaml"), b);
         let md = std::fs::symlink_metadata(fx.config_dir().join("bindings.yaml")).unwrap();
         assert_eq!(md.permissions().mode() & 0o7777, 0o640);
@@ -730,7 +744,7 @@ mod tests {
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
-        assert_eq!(names.len(), 3, "{names:?}");
+        assert_eq!(names.len(), 5, "{names:?}");
     }
 
     #[test]

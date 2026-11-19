@@ -1,0 +1,147 @@
+# HomeLab tool baseline (#674, ADR-0036 decision 7).
+#
+# Not active where it is installed. To use it:
+#   install -o root -g _maknae -m 0640 /usr/share/maknae/tools-homelab.yaml /etc/maknae/tools.yaml
+# then adjust it and reload maknaed (SIGHUP). macOS installs it at
+# /usr/local/share/maknae/tools-homelab.yaml.
+#
+# Every image digest below is a PLACEHOLDER (64 zeros). Replace each with the
+# digest of the signed maknae-rust-build image you run before you install this file.
+#
+# Each credential class names an App defined in the Egress Daemon's config; the
+# `app:` values below are examples to replace with your own.
+#
+# An entry is only callable once policy grants it. Grants, per subject or agent:
+#   github-read:  Tool(github-read gh pr view *)  Tool(github-read gh pr diff *)
+#                 Tool(github-read gh pr checks *)  Tool(github-read git fetch *)
+#                 Tool(github-read git checkout *)
+#   github-post:  Tool(github-post gh pr review *)  Tool(github-post gh pr comment *)
+#                 (the entry's own patterns still bound every argument)
+#   rust-fetch:   Tool(rust-fetch cargo fetch --locked*)
+#   rust-build:   Tool(rust-build cargo build *)  Tool(rust-build cargo check *)
+#                 Tool(rust-build cargo clippy *)  Tool(rust-build cargo test *)
+#                 Tool(rust-build cargo fmt --check*)
+#
+# github-post is shaped as an exact allowlist (fixed argument shapes, no
+# trailing `*`) because gh's short-flag clustering (`-ca`, `-a=true`, `-ab x`)
+# defeats denylists; its deny_args are belt and braces.
+# The body comes on stdin (`--body-file -`), which the front end supplies from
+# the model's text, so posting never reads a file and no path can be steered
+# to a mounted credential.
+# Posting is a separate entry and credential class so it is a separate grant.
+schema_version: 1
+credential_classes:
+  github-read:
+    kind: github-app-installation
+    source: minted-per-task
+    narrowing: provider
+    lifetime: { expires: 1h, revoke_on: task-outcome }
+    minting: trust-plane
+    delivery: [env:GH_TOKEN, git-credential-file]
+    app: maknae-github-read
+  github-post:
+    kind: github-app-installation
+    source: minted-per-task
+    narrowing: provider
+    lifetime: { expires: 1h, revoke_on: task-outcome }
+    minting: trust-plane
+    delivery: [env:GH_TOKEN]
+    app: maknae-github-post
+tools:
+  github-read:
+    enabled: true
+    description: Read pull requests and fetch or check out their branches.
+    image:
+      ref: ghcr.io/example/maknae-rust-build@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      verify: { signature: required, sbom: required }
+    isolation: container
+    executes_workspace: true
+    network: { via: maknae-proxy, sites: [github.com, api.github.com] }
+    workspace: rw
+    credential: github-read
+    output_to_model: redacted
+    resources: { cpus: 1, memory: 1Gi }
+    lifetime: { max: 10m }
+    binds: { git: { resolver: git } }
+    commands:
+      gh:
+        subcommands: ["pr view *", "pr diff *", "pr checks *"]
+        timeout: 5m
+        output: 4MiB
+      git:
+        subcommands: ["fetch *", "checkout *"]
+        deny_args: ["--upl*", "-c*", "--config*"]
+        timeout: 5m
+        output: 4MiB
+  github-post:
+    enabled: true
+    description: Post review comments on a pull request.
+    image:
+      ref: ghcr.io/example/maknae-rust-build@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      verify: { signature: required, sbom: required }
+    isolation: container
+    executes_workspace: false
+    network: { via: maknae-proxy, sites: [github.com, api.github.com] }
+    workspace: ro
+    credential: github-post
+    output_to_model: redacted
+    resources: { cpus: 1, memory: 512Mi }
+    lifetime: { max: 5m }
+    binds: { git: { resolver: git } }
+    commands:
+      gh:
+        subcommands:
+          - "pr review {git.change} -R {git.base} --comment --body-file -"
+          - "pr review {git.change} -R {git.base} --request-changes --body-file -"
+          - "pr review {git.change} -R {git.base} --approve --body-file -"
+          - "pr comment {git.change} -R {git.base} --body-file -"
+        deny_args: ["-a*"]
+        timeout: 2m
+        output: 1MiB
+  rust-fetch:
+    enabled: true
+    description: Fetch Cargo dependencies into the registry cache.
+    image:
+      ref: ghcr.io/example/maknae-rust-build@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      verify: { signature: required, sbom: required }
+    isolation: container
+    executes_workspace: true
+    network: { via: maknae-proxy, sites: [index.crates.io, static.crates.io, github.com] }
+    workspace: rw
+    volumes:
+      shared_tools: { access: ro, scope: tasker }
+      cargo_registry: { access: rw, scope: tasker }
+    credential: none
+    output_to_model: redacted
+    resources: { cpus: 2, memory: 2Gi }
+    lifetime: { max: 15m }
+    commands:
+      cargo:
+        subcommands: ["fetch --locked*"]
+        deny_args: ["--config*", "-Z*", "+*"]
+        timeout: 10m
+        output: 4MiB
+  rust-build:
+    enabled: true
+    description: Build, check, lint and test a workspace with no network.
+    image:
+      ref: ghcr.io/example/maknae-rust-build@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      verify: { signature: required, sbom: required }
+    isolation: container
+    executes_workspace: true
+    network: none
+    workspace: rw
+    volumes:
+      shared_tools: { access: ro, scope: tasker }
+      cargo_registry: { access: ro, scope: tasker }
+      cargo_target: { access: rw, scope: task }
+    credential: none
+    output_to_model: redacted
+    resources: { cpus: 4, memory: 8Gi }
+    lifetime: { max: 30m }
+    commands:
+      cargo:
+        subcommands: ["build *", "check *", "clippy *", "test *", "fmt --check*"]
+        deny_args: ["--config*", "-Z*", "+*"]
+        timeout: 30m
+        output: 16MiB

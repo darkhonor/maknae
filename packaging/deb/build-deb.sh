@@ -128,6 +128,7 @@ install -D -m 0640 "$COMMON/authz.yaml"  "$PKG_ROOT/etc/maknae/authz.yaml"
 install -D -m 0640 "$COMMON/bindings.yaml" "$PKG_ROOT/etc/maknae/bindings.yaml"
 install -D -m 0640 "$COMMON/maknae.yaml" "$PKG_ROOT/etc/maknae/maknae.yaml"
 install -D -m 0640 "$COMMON/sensitive.yaml" "$PKG_ROOT/etc/maknae/sensitive.yaml"
+install -D -m 0644 "$COMMON/tools-homelab.yaml" "$PKG_ROOT/usr/share/maknae/tools-homelab.yaml"
 
 # NOTE: /var/log/maknae/audit.jsonl is NOT a payload file — postinst creates it
 # when absent, then chattr +a.

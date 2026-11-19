@@ -32,6 +32,7 @@
 
 #[cfg(unix)]
 mod agents;
+mod argpattern;
 mod audit_cfg;
 mod authz;
 mod banner;
@@ -55,6 +56,7 @@ mod providers;
 mod scalar;
 mod sensitive;
 pub mod state;
+mod tools;
 mod transport;
 mod user_providers;
 mod user_providers_io;
@@ -76,6 +78,7 @@ pub use agents::{
     ENROLLMENT_FILE, NON_LOGIN_SHELLS, PERSONA_FILE, POLICY_FILE, RESERVED_AGENT_IDS,
     STARTER_POLICY, TASKS_RIGHT_PATHS, TASKS_RIGHT_SESSION,
 };
+pub use argpattern::{first_denied, ArgPattern, ArgPatternError, ArgToken, Bound, DenyArg};
 pub use audit_cfg::{
     audit_from_section, resolve_readers, AuditConfig, ReaderAccount, ReaderLookup, AUDIT_SECTION,
     READER_UID_FLOOR, REFUSED_READER_NAMES, REFUSED_READER_UIDS,
@@ -101,6 +104,7 @@ pub use authz::{
     destination_entry_is_acceptable, load_authz, parse_authz, parse_subject_entry, ActionPattern,
     AgentMatch, AuthzError, AuthzPolicy, HomeUnbound, Match3, ModelRef, PathGlob, Pattern,
     RawActionGrants, RawDestinations, Request, SubjectActions, SubjectPermissions, SubjectPolicy,
+    ToolCall, ToolPattern,
 };
 pub use banner::{banner_from_document, load_banner, BANNER_FILE, BANNER_PATH};
 pub use baseline_doc::{document_sections, value_from_canonical_json, BaselineSections};
@@ -149,6 +153,15 @@ pub use sensitive::{
     SENSITIVE_FILE,
 };
 pub use state::{MARKER_FILE, MIRROR_FILE, STATE_DIR, STORE_FILE};
+#[cfg(all(unix, feature = "hermetic-test-seam"))]
+pub use tools::load_tools_with_requirement;
+pub use tools::{
+    load_host_tools, ClassLifetime, CredentialClass, CredentialKind, CredentialMinting,
+    CredentialNarrowing, CredentialRevokeOn, CredentialSource, Disabled, OutputToModel,
+    ToolCommand, ToolEntry, ToolImage, ToolIsolation, ToolNetwork, ToolResources, ToolVerify,
+    ToolVolume, ToolVolumeAccess, ToolVolumeScope, ToolWorkspaceAccess, ToolsCatalog, ToolsError,
+    TOOLS_FILE,
+};
 pub use transport::{
     content_write_bound, transport_from_section, TransportConfig, ADMIN_REPLY_MARGIN_MS,
     ADMISSION_AUDIT_TIMEOUT_MS, AGENT_LIST_REPLY_STAGES, BASELINE_ACCEPT_REPLY_STAGES,

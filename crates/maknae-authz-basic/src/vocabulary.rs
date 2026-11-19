@@ -20,8 +20,8 @@ pub const ACTION_TERMS: [&str; 59] = [
     "mcp.connect", "mcp.disconnect", "mcp.message", "mcp.tool.call", "mcp.resource.read", "mcp.prompt.get", "mcp.sampling.create",
 ];
 pub const KERNEL_TERMS: [&str; 2] = ["kernel.contain", "kernel.session.terminate"];
-pub const CLASSES: [&str; 7] = [
-    "liveness", "admin", "session", "fs", "terminal", "mcp", "kernel",
+pub const CLASSES: [&str; 8] = [
+    "liveness", "admin", "session", "fs", "terminal", "mcp", "kernel", "tool",
 ];
 const ATTR_CLASS: &str = "class";
 
@@ -34,6 +34,7 @@ pub fn class_name(term: &str) -> Option<&'static str> {
         Class::Terminal => "terminal",
         Class::Mcp => "mcp",
         Class::Kernel => "kernel",
+        Class::Tool => "tool",
     })
 }
 
@@ -119,6 +120,7 @@ mod tests {
                 Class::Terminal => "terminal",
                 Class::Mcp => "mcp",
                 Class::Kernel => "kernel",
+                Class::Tool => "tool",
             }
         }
         let variants = [
@@ -129,6 +131,7 @@ mod tests {
             Class::Terminal,
             Class::Mcp,
             Class::Kernel,
+            Class::Tool,
         ];
         assert_eq!(variants.map(name), CLASSES);
         for v in variants {
@@ -162,7 +165,7 @@ mod tests {
             set.iter()
                 .filter(|c| c.kind == maknae_graph::kernel::CLASS)
                 .count(),
-            7
+            8
         );
         let t = set.get(maknae_graph::kernel::TERM, "fs.read").unwrap();
         assert_eq!(
