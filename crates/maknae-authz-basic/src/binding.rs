@@ -281,7 +281,7 @@ impl std::fmt::Display for IdentityProblem {
             ),
             Self::ToolGrantUnknownEntry { source } => write!(
                 f,
-                "{} grants a tool entry that is missing or disabled; it grants nothing",
+                "{} names a tool entry that is missing or disabled; it has no effect",
                 shown(source)
             ),
         }
@@ -1039,7 +1039,7 @@ mod tests {
                 None,
                 vec!["agents/sentinel-674-x"],
                 vec![],
-                "agents/sentinel-674-x grants a tool entry that is missing or disabled; it grants nothing",
+                "agents/sentinel-674-x names a tool entry that is missing or disabled; it has no effect",
             ),
         ];
         for (p, kind, uid, names, roles, text) in cases {

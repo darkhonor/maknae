@@ -1502,7 +1502,7 @@ fn decide_tool(lp: &LoadedPolicy, req: &SecRequest, role_key: &'static str, uid:
         lp.subjects.get(uid),
         |right, set| lp.policy.evaluate3_agent(right, set, &request, None),
         |set| lp.policy.evaluate3_floored(set, &request, None),
-        no_rule_note(role_key, "tool.invoke"),
+        format!("role {role_key}: no capability entry for tool.invoke"),
     )
 }
 
@@ -5806,6 +5806,12 @@ mod tests {
         tool_req(uid, "sentinel-674-build", "cargo", argv)
     }
 
+    fn no_tool_entry(role: &str) -> Verdict {
+        Verdict::NotApplicable {
+            note: Some(format!("role {role}: no capability entry for tool.invoke")),
+        }
+    }
+
     fn tool_decided(lp: &LoadedPolicy, r: &SecRequest) -> Decided {
         decide_loaded_cited(lp, &principal(), r)
     }
@@ -6045,15 +6051,7 @@ mod tests {
         let lp = lp_tool("permissions:\n  allow: []\n", &["admin", "user"], &[]);
         for (uid, role) in [(TOOL_ADMIN, "admin"), (TOOL_USER, "user")] {
             let d = tool_decided(&lp, &build(uid, &["build"]));
-            assert_eq!(
-                (d.verdict.clone(), d.cited),
-                (
-                    Verdict::NotApplicable {
-                        note: Some(no_rule_note(role, "tool.invoke"))
-                    },
-                    None
-                )
-            );
+            assert_eq!((d.verdict.clone(), d.cited), (no_tool_entry(role), None));
             assert!(matches!(
                 maknae_security::finalize(d.verdict),
                 maknae_security::Decision::Deny { .. }
@@ -6077,9 +6075,7 @@ mod tests {
         }
         assert_eq!(
             tool_decided(&lp, &build(TOOL_USER, &["build"])).verdict,
-            Verdict::NotApplicable {
-                note: Some(no_rule_note("user", "tool.invoke"))
-            }
+            no_tool_entry("user")
         );
     }
 
@@ -6092,9 +6088,7 @@ mod tests {
         );
         assert_eq!(
             tool_decided(&lp, &build(TOOL_ADMIN, &["build", "x"])).verdict,
-            Verdict::NotApplicable {
-                note: Some(no_rule_note("admin", "tool.invoke"))
-            }
+            no_tool_entry("admin")
         );
         assert_eq!(
             tool_decided(&lp, &build(TOOL_ADMIN, &["test", "x"])).verdict,
@@ -6265,12 +6259,7 @@ mod tests {
                 source: "Tool(sentinel-674-build cargo build *)".into(),
             })
         );
-        assert_eq!(
-            ask(&lp, &["test"]).verdict,
-            Verdict::NotApplicable {
-                note: Some(no_rule_note("user", "tool.invoke"))
-            }
-        );
+        assert_eq!(ask(&lp, &["test"]).verdict, no_tool_entry("user"));
         let off = tool_decided(&lp, &build(HOBI_UID, &["build"]));
         assert_eq!(off.verdict, deny("agent hobi: not on the agent channel"));
         limit(&mut lp, HOBI_UID, &["session.new"]);

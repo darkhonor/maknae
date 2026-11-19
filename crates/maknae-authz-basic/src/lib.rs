@@ -1087,16 +1087,25 @@ fn tool_problems(
                 p.entry.permissions.as_ref()?,
             ))
         });
-    let lists = std::iter::once((
+    let site = std::iter::once((
         "permissions".to_string(),
-        &policy.allow[..],
-        policy.allow_sources(),
-    ))
-    .chain(
-        subjects
-            .chain(agent_lists)
-            .map(|(section, p)| (section, &p.allow[..], p.allow_sources())),
-    );
+        (&policy.deny[..], policy.deny_sources()),
+        (&policy.allow[..], policy.allow_sources()),
+    ));
+    let lists = site
+        .chain(subjects.chain(agent_lists).map(|(section, p)| {
+            (
+                section,
+                (&p.deny[..], p.deny_sources()),
+                (&p.allow[..], p.allow_sources()),
+            )
+        }))
+        .flat_map(|(section, deny, allow)| {
+            [
+                (format!("{section}.deny"), deny.0, deny.1),
+                (format!("{section}.allow"), allow.0, allow.1),
+            ]
+        });
     let unknown = lists.flat_map(|(section, patterns, sources)| {
         patterns
             .iter()
@@ -1104,7 +1113,7 @@ fn tool_problems(
             .filter_map(move |(pattern, source)| match pattern {
                 maknae_config::Pattern::Tool(t) if tools.entry(&t.entry).is_none() => {
                     Some(IdentityProblem::ToolGrantUnknownEntry {
-                        source: format!("{section}.allow {source}"),
+                        source: format!("{section} {source}"),
                     })
                 }
                 maknae_config::Pattern::Tool(_)
@@ -5278,7 +5287,7 @@ mod tests {
     #[test]
     fn grant_naming_missing_entry_grants_nothing_and_is_a_problem() {
         let text = "schema_version: 1\ntools:\n  sentinel-674-build:\n    executes_workspace: false\n    commands:\n      cargo: { subcommands: [\"build *\"] }\n  sentinel-674-off:\n    enabled: false\n    executes_workspace: false\n";
-        let authz = "schema_version: 1\npermissions:\n  allow: [\"Tool(sentinel-674-build cargo build *)\", \"Tool(sentinel-674-gone cargo build *)\", \"Tool(sentinel-674-off cargo build *)\"]\n  deny: [\"Tool(sentinel-674-gone-deny cargo build *)\"]\nsubjects:\n  ursula:\n    permissions:\n      allow: [\"Tool(sentinel-674-subject cargo build *)\", \"Read(~/**)\"]\n";
+        let authz = "schema_version: 1\npermissions:\n  allow: [\"Tool(sentinel-674-build cargo build *)\", \"Tool(sentinel-674-gone cargo build *)\", \"Tool(sentinel-674-off cargo build *)\"]\n  deny: [\"Tool(sentinel-674-gone-deny cargo build *)\"]\nsubjects:\n  ursula:\n    permissions:\n      allow: [\"Tool(sentinel-674-subject cargo build *)\", \"Read(~/**)\"]\n      deny: [\"Tool(sentinel-674-subject-deny cargo build *)\", \"Tool(sentinel-674-build cargo build --x)\"]\n";
         let src = source_with(authz, None, &[("ursula", 1001)]).with_tools(tools(text));
         let unknown = |snap_problems: &[IdentityProblem]| -> Vec<String> {
             snap_problems
@@ -5290,14 +5299,16 @@ mod tests {
                 .collect()
         };
         let expected = [
+            "permissions.deny Tool(sentinel-674-gone-deny cargo build *)",
             "permissions.allow Tool(sentinel-674-gone cargo build *)",
             "permissions.allow Tool(sentinel-674-off cargo build *)",
+            "subjects.ursula.permissions.deny Tool(sentinel-674-subject-deny cargo build *)",
             "subjects.ursula.permissions.allow Tool(sentinel-674-subject cargo build *)",
         ];
         assert_eq!(unknown(src.identity_problems()), expected);
         let snap = compiled(&src);
         assert_eq!(unknown(snap.identity_problems()), expected);
-        assert_eq!(snap.identity_problems().len(), 3);
+        assert_eq!(snap.identity_problems().len(), 5);
     }
 
     #[test]
@@ -7397,17 +7408,24 @@ mod tests {
                     vec![hobi()],
                     &[(
                         "hobi",
-                        "schema_version: 1\npermissions:\n  allow: [\"Tool(sentinel-674-gone cargo build *)\"]\n",
+                        "schema_version: 1\npermissions:\n  allow: [\"Tool(sentinel-674-gone cargo build *)\"]\n  deny: [\"Tool(sentinel-674-gone-deny cargo build *)\"]\n",
                     )],
                 ),
             )
             .with_tools(maknae_config::ToolsCatalog::empty());
             assert_eq!(
                 src.identity_problems(),
-                [IdentityProblem::ToolGrantUnknownEntry {
-                    source: "agents.hobi.permissions.allow Tool(sentinel-674-gone cargo build *)"
-                        .into()
-                }]
+                [
+                    IdentityProblem::ToolGrantUnknownEntry {
+                        source:
+                            "agents.hobi.permissions.deny Tool(sentinel-674-gone-deny cargo build *)"
+                                .into()
+                    },
+                    IdentityProblem::ToolGrantUnknownEntry {
+                        source: "agents.hobi.permissions.allow Tool(sentinel-674-gone cargo build *)"
+                            .into()
+                    }
+                ]
             );
         }
 
