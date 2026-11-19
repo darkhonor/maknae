@@ -2299,18 +2299,18 @@ mod tests {
         assert_eq!(decidable, compiled);
     }
 
-    /// Every term resolves to one of the seven closed classes. A term whose
+    /// Every term resolves to one of the closed classes. A term whose
     /// class prefix is wrong would fall to `None` -> Deny at runtime and be
     /// invisible; this fails the suite instead.
     #[test]
     fn every_term_resolves_to_a_closed_class() {
-        const CLASSES: [&str; 7] = [
-            "liveness", "admin", "session", "fs", "terminal", "mcp", "kernel",
-        ];
         for v in all_verbs() {
             let a = verb_to_action(&v);
             let head = a.split('.').next().unwrap();
-            assert!(CLASSES.contains(&head), "{a} resolves to no closed class");
+            assert!(
+                maknae_authz_basic::CLASSES.contains(&head),
+                "{a} resolves to no closed class"
+            );
         }
     }
 
