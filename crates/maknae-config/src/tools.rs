@@ -314,8 +314,13 @@ pub fn load_host_tools(config_dir: &Path) -> Result<ToolsCatalog, ToolsError> {
     }
     #[cfg(unix)]
     {
-        load_required(config_dir, crate::authz::root_policy_file_required())
+        load_required(config_dir, host_tools_required())
     }
+}
+
+#[cfg(unix)]
+fn host_tools_required() -> maknae_io::TargetRequired {
+    crate::authz::root_policy_file_required()
 }
 
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
@@ -1438,10 +1443,47 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
-    fn the_production_door_reads_only_root_owned_files() {
-        let got = load_host_tools(&std::env::temp_dir().join("sentinel-674-no-such-dir"));
-        assert!(got.is_err() || got == Ok(ToolsCatalog::empty()), "{got:?}");
+    fn the_production_door_refuses_a_file_root_does_not_own() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("tools_door_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let d = d.canonicalize().unwrap();
+        let p = d.join(TOOLS_FILE);
+        std::fs::write(&p, "schema_version: 1\n").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
+        crate::tests::test_owner::hand_to_nobody_when_root(&[&d, &p]);
+        let got = load_host_tools(&d);
+        let _ = std::fs::remove_dir_all(&d);
+        assert_eq!(
+            got,
+            Err(ToolsError::Config(ConfigError::Io(
+                crate::authz::insecure_directory(&d.display().to_string(), TOOLS_FILE)
+            )))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_production_door_requires_root_ownership_and_no_world_access() {
+        assert_eq!(
+            host_tools_required(),
+            maknae_io::TargetRequired {
+                owner: Some(0),
+                mode_mask: Some(0o027),
+                nlink_exactly_one: false,
+                regular_file: true,
+                max_bytes: None,
+            }
+        );
+        let src = include_str!("tools.rs");
+        let door = &src[src.find("pub fn load_host_tools(").unwrap()..];
+        let door = &door[..door.find("\n}\n").unwrap()];
+        assert_eq!(door.matches("load_required(").count(), 1, "{door}");
+        assert!(door.contains("load_required(config_dir, host_tools_required())"));
     }
 
     #[test]
