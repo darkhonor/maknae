@@ -172,6 +172,8 @@ pub enum EnrollError {
     EgressRetireFailed {
         accessors: Vec<String>,
     },
+    /// maknaed's enrollment completed; the minting step after it did not.
+    MintingFailed(Box<EnrollError>),
     /// Rotate's PRE-MINT cleanup (spec §4.1) could not destroy every
     /// previously-recorded accessor — FATAL: enroll aborts before minting
     /// anything new or overwriting `enroll-state.yaml`, so the still-live old
@@ -370,6 +372,10 @@ impl std::fmt::Display for EnrollError {
                 f,
                 "these Egress Daemon SecretID accessors could not be destroyed: {}; they stay recorded in /etc/maknae/private/maknae-egress-enroll-state.yaml, and the next `maknae enroll` retries them",
                 accessors.join(", ")
+            ),
+            EnrollError::MintingFailed(e) => write!(
+                f,
+                "maknaed is enrolled; enrolling the Egress Daemon for minting failed: {e}"
             ),
             EnrollError::RotateDestroyFailed { mount, detail } => write!(
                 f,
@@ -2736,17 +2742,20 @@ async fn place_minting(
         operator_uid: operator.uid,
         operator_gid: operator.gid,
     };
+    let files = egress_minting::MintingFiles::host(&resolver)
+        .map_err(|e| EnrollError::MintingFailed(Box::new(e)))?;
     let outcome = egress_minting::enroll_minting(
         &egress_minting::RealMintingOps {
             client,
             verbose: args.verbose,
         },
-        &egress_minting::MintingFiles::host(&resolver)?,
+        &files,
         &agent_access::Host,
         minting,
         &args.approle_mount,
     )
-    .await?;
+    .await
+    .map_err(|e| EnrollError::MintingFailed(Box::new(e)))?;
     let line = match outcome {
         egress_minting::Minting::Off => return Ok(summary),
         egress_minting::Minting::Enrolled { retired } => msg(locale, MsgId::EnrollMintingEnrolled)
@@ -3151,6 +3160,15 @@ mod tests {
                 "an operator message still says x-only: {bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_minting_failure_says_maknaed_is_enrolled() {
+        let e = EnrollError::MintingFailed(Box::new(EnrollError::State("boom".into())));
+        assert_eq!(
+            e.to_string(),
+            "maknaed is enrolled; enrolling the Egress Daemon for minting failed: boom"
+        );
     }
 
     #[test]

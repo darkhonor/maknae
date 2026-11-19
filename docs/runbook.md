@@ -1702,13 +1702,13 @@ The Egress Daemon can mint short-lived GitHub App installation tokens for an age
 
 8. **Delete the intermediate file:** `shred -u /tmp/app-key.b64` (or `rm -P` on macOS).
 
-9. **Lock the key** against deletion:
+9. **Check it cannot leave Transit.** `vault read maknae-transit/keys/gh-acme` must show `exportable false` and `allow_plaintext_backup false`. If either is `true`, delete the key and import it again without that option, before you lock it.
 
-   ```bash
-   vault write maknae-transit/keys/gh-acme/config deletion_allowed=false
-   ```
+10. **Lock the key** against deletion:
 
-10. **Check it cannot leave Transit.** `vault read maknae-transit/keys/gh-acme` must show `exportable false` and `allow_plaintext_backup false`. If either is `true`, delete the key and import it again without that option.
+    ```bash
+    vault write maknae-transit/keys/gh-acme/config deletion_allowed=false
+    ```
 
 11. **Delete the PEM** GitHub gave you. Transit now holds the only copy; a lost key is replaced by generating a new one in GitHub and importing it under a new Transit key name.
 
@@ -1732,7 +1732,7 @@ The Egress Daemon can mint short-lived GitHub App installation tokens for an age
 
 13. **Run `maknae enroll`** as for [Chapter 4 step 3](#3-enroll), with the same operator token: the `maknae-enroll` policy also reads the `maknae-egress` role id and mints, lists and destroys its SecretIDs. Enroll reads `minting.yaml` first and stops, naming the file and its requirement, when it does not parse or is not `root`-owned with mode `0640` or tighter. Otherwise it writes the role id to `/etc/maknae/egress/role-id` (`root:_maknae-egress 0640`), mints a SecretID on the `minting.yaml` mount and seals it with `systemd-creds` to `/etc/maknae/private/maknae-egress-secret-id.cred`, writes the drop-in `/etc/systemd/system/maknae-egress.service.d/50-minting.conf` that loads it as `maknae-egress-secret-id`, runs `systemctl daemon-reload` and `systemctl try-restart maknae-egress.service`, and only then destroys the SecretIDs it replaced. It records them in `/etc/maknae/private/maknae-egress-enroll-state.yaml`; one it could not destroy stays recorded, and the next `maknae enroll` retries it. Enroll never writes `minting.yaml`. Each agent that receives tokens needs its seal key pair ([Enroll an Agent Daemon](#enroll-an-agent-daemon) step 3).
 
-**Turning minting off.** Remove `/etc/maknae/egress/minting.yaml` and run `maknae enroll`. Enroll removes the drop-in and restarts the Egress Daemon, removes the sealed SecretID and the role id, and destroys the recorded SecretIDs. A host enrolled without `minting.yaml` never gets the drop-in, so its Egress Daemon runs with no Vault identity.
+**Turning minting off.** Remove `/etc/maknae/egress/minting.yaml` and run `maknae enroll` before you remove the App from `github_apps` in Terraform, so the egress AppRole still exists when enroll destroys its SecretIDs. Enroll removes the drop-in and restarts the Egress Daemon, removes the sealed SecretID and the role id, and destroys the recorded SecretIDs. When Vault no longer has the egress mount or role, those SecretIDs went with it, and enroll finishes the withdrawal without them. A host enrolled without `minting.yaml` never gets the drop-in, so its Egress Daemon runs with no Vault identity.
 
 ## Task an agent
 

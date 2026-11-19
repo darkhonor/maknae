@@ -2937,10 +2937,10 @@ pub(crate) mod tests {
             src.lines().skip(start).take_while(|l| *l != "}").collect()
         };
         let agent = body_of(include_str!("agent.rs"), "pub(crate) async fn enroll_agent");
-        let slot = body_of(
-            include_str!("secret_slot.rs"),
-            "pub(crate) async fn mint_and_seal",
-        );
+        let slot: Vec<&str> = include_str!("secret_slot.rs")
+            .lines()
+            .take_while(|l| *l != "#[cfg(test)]")
+            .collect();
         assert!(agent.iter().any(|l| l.contains("mint_and_seal(")));
         assert!(slot.iter().any(|l| l.contains("slot.seal(")));
         let body: Vec<&str> = agent.into_iter().chain(slot).collect();

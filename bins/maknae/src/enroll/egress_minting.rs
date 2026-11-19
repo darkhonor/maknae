@@ -23,6 +23,8 @@ pub(crate) trait MintingOps {
     async fn mint(&self, mount: &str) -> Result<(Zeroizing<String>, String), EnrollError>;
     async fn list_accessors(&self, mount: &str) -> Result<Vec<String>, EnrollError>;
     async fn destroy(&self, mount: &str, accessor: &str) -> Result<(), EnrollError>;
+    /// `false` when Vault has no such mount or role.
+    async fn role_exists(&self, mount: &str) -> Result<bool, EnrollError>;
     async fn seal(&self, secret: &Zeroizing<String>, custody: &Path) -> Result<(), EnrollError>;
 }
 
@@ -401,7 +403,8 @@ async fn withdraw<O: MintingOps>(
         mount: &mount,
     };
     let (_, failures) = secret_slot::retire(&slot, retiring).await?;
-    if !failures.is_empty() {
+    // A deleted mount or role took its SecretIDs with it.
+    if !failures.is_empty() && ops.role_exists(&mount).await? {
         return Err(EnrollError::EgressRetireFailed {
             accessors: failures,
         });
@@ -435,6 +438,10 @@ impl MintingOps for RealMintingOps<'_> {
             .client
             .destroy_accessor_if_present(mount, ROLE, accessor)
             .await?)
+    }
+
+    async fn role_exists(&self, mount: &str) -> Result<bool, EnrollError> {
+        Ok(self.client.find_role_id(mount, ROLE).await?.is_some())
     }
 
     async fn seal(&self, secret: &Zeroizing<String>, custody: &Path) -> Result<(), EnrollError> {
@@ -479,6 +486,7 @@ mod tests {
         log: RefCell<Vec<String>>,
         listed: Vec<String>,
         fail: HashSet<String>,
+        role_gone: bool,
     }
 
     impl Fake {
@@ -515,6 +523,11 @@ mod tests {
 
         async fn destroy(&self, mount: &str, accessor: &str) -> Result<(), EnrollError> {
             self.push(format!("destroy {mount} {accessor}"))
+        }
+
+        async fn role_exists(&self, mount: &str) -> Result<bool, EnrollError> {
+            self.push(format!("role_exists {mount}"))?;
+            Ok(!self.role_gone)
         }
 
         async fn seal(
@@ -728,6 +741,32 @@ mod tests {
         );
         assert_eq!(h.read_state().retiring, strings(&["a1"]));
         assert!(e.to_string().contains("maknae-egress-enroll-state.yaml"));
+        assert_eq!(fake.log().last().unwrap(), &format!("role_exists {MOUNT}"));
+    }
+
+    #[tokio::test]
+    async fn withdrawal_completes_once_vault_no_longer_has_the_role_or_mount() {
+        let h = host("withdraw-gone");
+        h.write_state(&["a1", "a2"]);
+        let fake = Fake {
+            fail: [format!("destroy {MOUNT} a1"), format!("destroy {MOUNT} a2")].into(),
+            role_gone: true,
+            ..Fake::default()
+        };
+        assert_eq!(
+            on(&h, &fake, false).await.unwrap(),
+            Minting::Withdrawn { destroyed: 2 }
+        );
+        assert!(!h.state().exists());
+        assert_eq!(
+            fake.log(),
+            strings(&[
+                &format!("destroy {MOUNT} a1"),
+                &format!("destroy {MOUNT} a2"),
+                &format!("role_exists {MOUNT}"),
+            ])
+        );
+        assert!(on(&h, &Fake::default(), false).await.is_ok());
     }
 
     #[tokio::test]

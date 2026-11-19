@@ -304,14 +304,19 @@ JWTs. With the map empty (the default) nothing below is created. Otherwise Terra
   `<transit_mount_path>/sign/<transit_key>/sha2-256` per App, ordered by App name, and nothing
   else.
 
-The App's private key is never in Terraform, so it never reaches state. The operator imports it
-into Transit by CLI, non-exportable:
+The App's private key is never in Terraform, so it never reaches state. The operator converts
+it to base64 PKCS #8 DER and imports it into Transit by CLI, non-exportable, then checks and
+locks it, as the runbook's
+[Mint GitHub App tokens](../../docs/runbook.md#mint-github-app-tokens) sets out step by step:
 
 ```bash
-vault transit import maknae-transit/keys/gh-acme @app-key.pem type=rsa-2048
+umask 077
+openssl pkcs8 -topk8 -nocrypt -in app-key.pem -outform DER | base64 | tr -d '\n' > /tmp/app-key.b64
+vault transit import maknae-transit/keys/gh-acme @/tmp/app-key.b64 type=rsa-2048
 ```
 
-`exportable` stays false (the default); delete `app-key.pem` afterwards.
+Run `maknae enroll` with `minting.yaml` removed before removing an App from `github_apps`, so
+enroll destroys the egress SecretIDs while the mount still exists.
 `maknae enroll` reads the egress RoleID and mints its SecretID, so `maknae-enroll` carries
 `read` on `auth/<egress_approle_path>/role/maknae-egress/role-id`, `create`, `update` and `list`
 on `.../secret-id`, and `update` on `.../secret-id-accessor/destroy`.
