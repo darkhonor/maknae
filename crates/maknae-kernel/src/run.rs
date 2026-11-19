@@ -21796,7 +21796,7 @@ mod reload_tests {
         let fx = fixture("tools_bad", AUTHZ, Some(ROOT_ADMIN)).await;
         crate::test_fixtures::write_tools(
             &fx.dir,
-            "schema_version: 1\ntools:\n  sentinel-674-one:\n    executes_workspace: false\n",
+            "schema_version: 1\ntools:\n  sentinel-674-one:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n",
         );
         bounded(fx.reloader.run()).await.unwrap();
         assert!(fx

@@ -611,15 +611,8 @@ impl ToolPattern {
         else {
             return Err(bad());
         };
-        let entry_ok = entry.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
-            && entry
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-'));
-        let program_ok = !program.is_empty()
-            && program
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'));
-        if !entry_ok || !program_ok {
+        if !crate::tools::tool_entry_name_ok(entry) || !crate::tools::tool_program_name_ok(program)
+        {
             return Err(bad());
         }
         let args = ArgPattern::parse(rest).map_err(|_| bad())?;

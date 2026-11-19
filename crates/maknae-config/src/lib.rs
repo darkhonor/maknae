@@ -156,10 +156,11 @@ pub use state::{MARKER_FILE, MIRROR_FILE, STATE_DIR, STORE_FILE};
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
 pub use tools::load_tools_with_requirement;
 pub use tools::{
-    load_host_tools, ClassLifetime, Command, CredentialClass, CredentialKind, CredentialSource,
-    Disabled, Image, Isolation, Minting, Narrowing, Network, OutputToModel, Resources, RevokeOn,
-    ToolEntry, ToolsCatalog, ToolsError, Verify, Volume, VolumeAccess, VolumeScope,
-    WorkspaceAccess, TOOLS_FILE,
+    load_host_tools, ClassLifetime, CredentialClass, CredentialKind, CredentialMinting,
+    CredentialNarrowing, CredentialRevokeOn, CredentialSource, Disabled, OutputToModel,
+    ToolCommand, ToolEntry, ToolImage, ToolIsolation, ToolNetwork, ToolResources, ToolVerify,
+    ToolVolume, ToolVolumeAccess, ToolVolumeScope, ToolWorkspaceAccess, ToolsCatalog, ToolsError,
+    TOOLS_FILE,
 };
 pub use transport::{
     content_write_bound, transport_from_section, TransportConfig, ADMIN_REPLY_MARGIN_MS,

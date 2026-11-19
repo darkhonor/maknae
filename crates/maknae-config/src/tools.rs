@@ -62,19 +62,19 @@ pub enum CredentialSource {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Narrowing {
+pub enum CredentialNarrowing {
     Provider,
     Maknae,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Minting {
+pub enum CredentialMinting {
     TrustPlane,
     FrontEnd,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RevokeOn {
+pub enum CredentialRevokeOn {
     TaskOutcome,
     InvocationOutcome,
 }
@@ -83,7 +83,7 @@ pub enum RevokeOn {
 pub struct ClassLifetime {
     pub expires: Option<String>,
     pub ttl: Option<String>,
-    pub revoke_on: RevokeOn,
+    pub revoke_on: CredentialRevokeOn,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -92,61 +92,61 @@ pub struct CredentialClass {
     pub kind: CredentialKind,
     pub app: Option<String>,
     pub source: Option<CredentialSource>,
-    pub narrowing: Option<Narrowing>,
-    pub minting: Option<Minting>,
+    pub narrowing: Option<CredentialNarrowing>,
+    pub minting: Option<CredentialMinting>,
     pub lifetime: Option<ClassLifetime>,
     pub policies: Vec<String>,
     pub delivery: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Verify {
+pub enum ToolVerify {
     Required,
     Optional,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Image {
+pub struct ToolImage {
     pub reference: String,
-    pub signature: Option<Verify>,
-    pub sbom: Option<Verify>,
+    pub signature: Option<ToolVerify>,
+    pub sbom: Option<ToolVerify>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Isolation {
+pub enum ToolIsolation {
     Container,
     Vm,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Network {
+pub enum ToolNetwork {
     None,
     Proxy { sites: Vec<String> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WorkspaceAccess {
+pub enum ToolWorkspaceAccess {
     Rw,
     Ro,
     None,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum VolumeAccess {
+pub enum ToolVolumeAccess {
     Ro,
     Rw,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum VolumeScope {
+pub enum ToolVolumeScope {
     Task,
     Tasker,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Volume {
-    pub access: VolumeAccess,
-    pub scope: Option<VolumeScope>,
+pub struct ToolVolume {
+    pub access: ToolVolumeAccess,
+    pub scope: Option<ToolVolumeScope>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -156,13 +156,13 @@ pub enum OutputToModel {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Resources {
+pub struct ToolResources {
     pub cpus: Option<String>,
     pub memory: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Command {
+pub struct ToolCommand {
     pub subcommands: Vec<ArgPattern>,
     pub deny_args: Vec<DenyArg>,
     pub timeout: Option<String>,
@@ -174,16 +174,16 @@ pub struct ToolEntry {
     pub name: String,
     pub credential: Option<String>,
     pub binds: BTreeSet<String>,
-    pub commands: BTreeMap<String, Command>,
+    pub commands: BTreeMap<String, ToolCommand>,
     pub description: Option<String>,
-    pub image: Option<Image>,
-    pub isolation: Isolation,
+    pub image: Option<ToolImage>,
+    pub isolation: ToolIsolation,
     pub executes_workspace: bool,
-    pub network: Network,
-    pub workspace: WorkspaceAccess,
-    pub volumes: BTreeMap<String, Volume>,
+    pub network: ToolNetwork,
+    pub workspace: ToolWorkspaceAccess,
+    pub volumes: BTreeMap<String, ToolVolume>,
     pub output_to_model: OutputToModel,
-    pub resources: Option<Resources>,
+    pub resources: Option<ToolResources>,
     pub lifetime_max: Option<String>,
 }
 
@@ -434,6 +434,20 @@ fn name_ok(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
+pub(crate) fn tool_entry_name_ok(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-'))
+}
+
+pub(crate) fn tool_program_name_ok(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'+' | b'-'))
+}
+
 fn parse_class(name: &str, v: &Value) -> Result<CredentialClass, String> {
     if !name_ok(name) {
         return Err("the class name must be letters, digits, `.`, `_` or `-`".to_string());
@@ -477,8 +491,8 @@ fn parse_class(name: &str, v: &Value) -> Result<CredentialClass, String> {
                 v,
                 "narrowing",
                 &[
-                    ("provider", Narrowing::Provider),
-                    ("maknae", Narrowing::Maknae),
+                    ("provider", CredentialNarrowing::Provider),
+                    ("maknae", CredentialNarrowing::Maknae),
                 ],
             )
         })
@@ -489,8 +503,8 @@ fn parse_class(name: &str, v: &Value) -> Result<CredentialClass, String> {
                 v,
                 "minting",
                 &[
-                    ("trust-plane", Minting::TrustPlane),
-                    ("front-end", Minting::FrontEnd),
+                    ("trust-plane", CredentialMinting::TrustPlane),
+                    ("front-end", CredentialMinting::FrontEnd),
                 ],
             )
         })
@@ -535,8 +549,8 @@ fn parse_class(name: &str, v: &Value) -> Result<CredentialClass, String> {
                     get(m, "revoke_on").ok_or("lifetime.revoke_on is required")?,
                     "lifetime.revoke_on",
                     &[
-                        ("task-outcome", RevokeOn::TaskOutcome),
-                        ("invocation-outcome", RevokeOn::InvocationOutcome),
+                        ("task-outcome", CredentialRevokeOn::TaskOutcome),
+                        ("invocation-outcome", CredentialRevokeOn::InvocationOutcome),
                     ],
                 )?,
             })
@@ -568,8 +582,8 @@ fn parse_class(name: &str, v: &Value) -> Result<CredentialClass, String> {
         .transpose()?;
     if kind == CredentialKind::GithubAppInstallation {
         if source != Some(CredentialSource::MintedPerTask)
-            || narrowing != Some(Narrowing::Provider)
-            || minting != Some(Minting::TrustPlane)
+            || narrowing != Some(CredentialNarrowing::Provider)
+            || minting != Some(CredentialMinting::TrustPlane)
             || app.is_none()
         {
             return Err("github-app-installation requires source minted-per-task, narrowing provider, minting trust-plane and an app".to_string());
@@ -607,7 +621,7 @@ fn image_ref_ok(r: &str) -> bool {
     let first = name.split(slash).next().unwrap_or_default();
     let last = name.rsplit(slash).next().unwrap_or_default();
     name.contains('/')
-        && !first.is_empty()
+        && (first.contains(['.', ':']) || first == "localhost")
         && !last.is_empty()
         && !name.contains(char::is_whitespace)
         && !name.contains('@')
@@ -628,8 +642,11 @@ fn parse_entry(
     v: &Value,
     classes: &BTreeMap<&str, Result<CredentialClass, String>>,
 ) -> Result<(bool, ToolEntry), String> {
-    if !name_ok(name) {
-        return Err("the entry name must be letters, digits, `.`, `_` or `-`".to_string());
+    if !tool_entry_name_ok(name) {
+        return Err(
+            "the entry name must be lowercase letters, digits, `_` or `-`, starting with a letter or digit"
+                .to_string(),
+        );
     }
     let map = fields(
         v,
@@ -663,26 +680,29 @@ fn parse_entry(
         .map(|v| text(v, "description").map(str::to_string))
         .transpose()?;
     let image = get(map, "image").map(parse_image).transpose()?;
-    let isolation = get(map, "isolation").map_or(Ok(Isolation::Container), |v| {
+    let isolation = get(map, "isolation").map_or(Ok(ToolIsolation::Container), |v| {
         choice(
             v,
             "isolation",
-            &[("container", Isolation::Container), ("vm", Isolation::Vm)],
+            &[
+                ("container", ToolIsolation::Container),
+                ("vm", ToolIsolation::Vm),
+            ],
         )
     })?;
     let executes_workspace = flag(
         get(map, "executes_workspace").ok_or("executes_workspace is required")?,
         "executes_workspace",
     )?;
-    let network = get(map, "network").map_or(Ok(Network::None), parse_network)?;
-    let workspace = get(map, "workspace").map_or(Ok(WorkspaceAccess::None), |v| {
+    let network = get(map, "network").map_or(Ok(ToolNetwork::None), parse_network)?;
+    let workspace = get(map, "workspace").map_or(Ok(ToolWorkspaceAccess::None), |v| {
         choice(
             v,
             "workspace",
             &[
-                ("rw", WorkspaceAccess::Rw),
-                ("ro", WorkspaceAccess::Ro),
-                ("none", WorkspaceAccess::None),
+                ("rw", ToolWorkspaceAccess::Rw),
+                ("ro", ToolWorkspaceAccess::Ro),
+                ("none", ToolWorkspaceAccess::None),
             ],
         )
     })?;
@@ -701,31 +721,29 @@ fn parse_entry(
         },
     };
     if executes_workspace && credential.is_some() {
-        if let Network::Proxy { sites } = &network {
+        if let ToolNetwork::Proxy { sites } = &network {
             if sites.iter().any(|h| h.contains('*')) {
                 return Err("executes_workspace with a credential and network must name its sites explicitly, with no `*` (ADR-0036 decision 8)".to_string());
             }
         }
     }
-    if let Network::Proxy { sites } = &network {
+    if let ToolNetwork::Proxy { sites } = &network {
         if let Some(bad) = sites.iter().find(|h| !host_ok(h)) {
             return Err(format!("network site `{bad}` is not a host name"));
         }
     }
-    let output_to_model = get(map, "output_to_model").map_or(Ok(OutputToModel::Redacted), |v| {
-        choice(
-            v,
-            "output_to_model",
-            &[
-                ("redacted", OutputToModel::Redacted),
-                ("status_only", OutputToModel::StatusOnly),
-            ],
-        )
-    })?;
+    let output_to_model = choice(
+        get(map, "output_to_model").ok_or("output_to_model is required")?,
+        "output_to_model",
+        &[
+            ("redacted", OutputToModel::Redacted),
+            ("status_only", OutputToModel::StatusOnly),
+        ],
+    )?;
     let resources = get(map, "resources")
         .map(|v| {
             let m = fields(v, "resources", &["cpus", "memory"])?;
-            Ok::<_, String>(Resources {
+            Ok::<_, String>(ToolResources {
                 cpus: get(m, "cpus").map(cpus).transpose()?,
                 memory: get(m, "memory")
                     .map(|v| size(v, "resources.memory"))
@@ -744,6 +762,9 @@ fn parse_entry(
         .transpose()?;
     let binds = get(map, "binds").map_or(Ok(BTreeSet::new()), parse_binds)?;
     let commands = get(map, "commands").map_or(Ok(BTreeMap::new()), parse_commands)?;
+    if enabled && image.is_none() {
+        return Err("an enabled entry needs an image".to_string());
+    }
     Ok((
         enabled,
         ToolEntry {
@@ -765,7 +786,7 @@ fn parse_entry(
     ))
 }
 
-fn parse_image(v: &Value) -> Result<Image, String> {
+fn parse_image(v: &Value) -> Result<ToolImage, String> {
     let m = fields(v, "image", &["ref", "verify"])?;
     let reference = text(get(m, "ref").ok_or("image.ref is required")?, "image.ref")?;
     if !image_ref_ok(reference) {
@@ -780,8 +801,8 @@ fn parse_image(v: &Value) -> Result<Image, String> {
                     v,
                     key,
                     &[
-                        ("required", Verify::Required),
-                        ("optional", Verify::Optional),
+                        ("required", ToolVerify::Required),
+                        ("optional", ToolVerify::Optional),
                     ],
                 )
             })
@@ -794,16 +815,16 @@ fn parse_image(v: &Value) -> Result<Image, String> {
             (verify(vm, "signature")?, verify(vm, "sbom")?)
         }
     };
-    Ok(Image {
+    Ok(ToolImage {
         reference: reference.to_string(),
         signature,
         sbom,
     })
 }
 
-fn parse_network(v: &Value) -> Result<Network, String> {
+fn parse_network(v: &Value) -> Result<ToolNetwork, String> {
     if matches!(v, Value::Str(s) if s == "none") {
-        return Ok(Network::None);
+        return Ok(ToolNetwork::None);
     }
     let m = fields(v, "network", &["via", "sites"])?;
     if !matches!(get(m, "via"), Some(Value::Str(s)) if s == "maknae-proxy") {
@@ -816,12 +837,12 @@ fn parse_network(v: &Value) -> Result<Network, String> {
     if sites.is_empty() {
         return Err("network.sites must not be empty (use `network: none`)".to_string());
     }
-    Ok(Network::Proxy {
+    Ok(ToolNetwork::Proxy {
         sites: sites.into_iter().map(str::to_string).collect(),
     })
 }
 
-fn parse_volumes(v: &Value) -> Result<BTreeMap<String, Volume>, String> {
+fn parse_volumes(v: &Value) -> Result<BTreeMap<String, ToolVolume>, String> {
     let Value::Map(items) = v else {
         return Err("volumes must be a mapping".to_string());
     };
@@ -835,18 +856,21 @@ fn parse_volumes(v: &Value) -> Result<BTreeMap<String, Volume>, String> {
             let access = choice(
                 get(m, "access").ok_or("volume access is required")?,
                 "volume access",
-                &[("ro", VolumeAccess::Ro), ("rw", VolumeAccess::Rw)],
+                &[("ro", ToolVolumeAccess::Ro), ("rw", ToolVolumeAccess::Rw)],
             )?;
             let scope = get(m, "scope")
                 .map(|v| {
                     choice(
                         v,
                         "volume scope",
-                        &[("task", VolumeScope::Task), ("tasker", VolumeScope::Tasker)],
+                        &[
+                            ("task", ToolVolumeScope::Task),
+                            ("tasker", ToolVolumeScope::Tasker),
+                        ],
                     )
                 })
                 .transpose()?;
-            Ok((role.clone(), Volume { access, scope }))
+            Ok((role.clone(), ToolVolume { access, scope }))
         })
         .collect()
 }
@@ -880,16 +904,17 @@ fn parse_binds(v: &Value) -> Result<BTreeSet<String>, String> {
         .collect()
 }
 
-fn parse_commands(v: &Value) -> Result<BTreeMap<String, Command>, String> {
+fn parse_commands(v: &Value) -> Result<BTreeMap<String, ToolCommand>, String> {
     let Value::Map(items) = v else {
         return Err("commands must be a mapping".to_string());
     };
     items
         .iter()
         .map(|(program, body)| {
-            if program.is_empty() || program.contains(char::is_whitespace) || program.contains('/')
-            {
-                return Err(format!("command `{program}` must be a bare program name"));
+            if !tool_program_name_ok(program) {
+                return Err(format!(
+                    "command `{program}` must be a program name of letters, digits, `.`, `_`, `+` or `-`"
+                ));
             }
             let m = fields(
                 body,
@@ -918,7 +943,7 @@ fn parse_commands(v: &Value) -> Result<BTreeMap<String, Command>, String> {
             };
             Ok((
                 program.clone(),
-                Command {
+                ToolCommand {
                     subcommands,
                     deny_args,
                     timeout: get(m, "timeout")
@@ -956,7 +981,10 @@ mod tests {
             .unwrap_or_else(|| panic!("{entry} is not disabled: {:?}", c.disabled()))
     }
 
-    const GOOD: &str = "  good:\n    executes_workspace: false\n    commands:\n      echo: { subcommands: [\"hi *\"] }\n";
+    const IMAGE: &str =
+        "registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000";
+    const ESS: &str = "    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n";
+    const GOOD: &str = "  good:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      echo: { subcommands: [\"hi *\"] }\n";
 
     fn doc(classes: &str, tools: &str) -> String {
         format!("schema_version: 1\ncredential_classes:\n{classes}\ntools:\n{tools}{GOOD}")
@@ -1032,7 +1060,7 @@ mod tests {
     fn unknown_entry_field_disables_only_that_entry() {
         let c = catalog(&doc(
             "  {}\n",
-            &format!("  {SENTINEL}:\n    executes_workspace: false\n    nonsense: 1\n"),
+            &format!("  {SENTINEL}:\n    executes_workspace: false\n{ESS}    nonsense: 1\n"),
         ));
         assert!(c.entry(SENTINEL).is_none());
         assert!(c.entry("good").is_some());
@@ -1057,7 +1085,7 @@ mod tests {
         ] {
             let c = catalog(&doc(
                 "  {}\n",
-                &format!("  {SENTINEL}:\n    executes_workspace: false\n    image: {{ ref: \"{bad}\" }}\n"),
+                &format!("  {SENTINEL}:\n    executes_workspace: false\n    output_to_model: redacted\n    image: {{ ref: \"{bad}\" }}\n"),
             ));
             assert!(c.entry(SENTINEL).is_none(), "{bad}");
             assert!(reason(&c, SENTINEL).contains("image.ref"), "{bad}");
@@ -1065,7 +1093,7 @@ mod tests {
         let ok = format!("registry.example/x@sha256:{DIGEST}");
         let c = catalog(&doc(
             "  {}\n",
-            &format!("  fine:\n    executes_workspace: false\n    image: {{ ref: \"{ok}\" }}\n"),
+            &format!("  fine:\n    executes_workspace: false\n    output_to_model: redacted\n    image: {{ ref: \"{ok}\" }}\n"),
         ));
         assert!(c.entry("fine").is_some());
     }
@@ -1075,14 +1103,16 @@ mod tests {
         let c = catalog(&doc(
             "  {}\n",
             &format!(
-                "  {SENTINEL}:\n    executes_workspace: false\n    credential: missing-class\n"
+                "  {SENTINEL}:\n    executes_workspace: false\n{ESS}    credential: missing-class\n"
             ),
         ));
         assert!(c.entry(SENTINEL).is_none());
         assert!(reason(&c, SENTINEL).contains("missing-class"));
         let c = catalog(&doc(
             "  {}\n",
-            "  explicit-none:\n    executes_workspace: false\n    credential: none\n",
+            &format!(
+                "  explicit-none:\n    executes_workspace: false\n{ESS}    credential: none\n"
+            ),
         ));
         assert_eq!(c.entry("explicit-none").unwrap().credential, None);
     }
@@ -1100,7 +1130,7 @@ mod tests {
             let c = catalog(&doc(
                 &classes,
                 &format!(
-                    "  {SENTINEL}:\n    executes_workspace: false\n    credential: bad-class\n"
+                    "  {SENTINEL}:\n    executes_workspace: false\n{ESS}    credential: bad-class\n"
                 ),
             ));
             assert!(c.class("bad-class").is_none(), "{body}");
@@ -1115,7 +1145,7 @@ mod tests {
         let classes = "  weird:\n    kind: sentinel-674-kind\n";
         let c = catalog(&doc(
             classes,
-            &format!("  {SENTINEL}:\n    executes_workspace: false\n    credential: weird\n"),
+            &format!("  {SENTINEL}:\n    executes_workspace: false\n{ESS}    credential: weird\n"),
         ));
         assert!(c.class("weird").is_none());
         assert!(c.entry(SENTINEL).is_none());
@@ -1131,14 +1161,14 @@ mod tests {
         ] {
             let c = catalog(&doc(
                 "  {}\n",
-                &format!("  {SENTINEL}:\n    executes_workspace: false\n    binds: {binds}\n"),
+                &format!("  {SENTINEL}:\n    executes_workspace: false\n{ESS}    binds: {binds}\n"),
             ));
             assert!(c.entry(SENTINEL).is_none(), "{binds}");
             assert!(reason(&c, SENTINEL).contains("sentinel-674"), "{binds}");
         }
         let c = catalog(&doc(
             "  {}\n",
-            "  bound:\n    executes_workspace: false\n    binds: { git: { resolver: git } }\n",
+            &format!("  bound:\n    executes_workspace: false\n{ESS}    binds: {{ git: {{ resolver: git }} }}\n"),
         ));
         assert!(c.entry("bound").unwrap().binds.contains("git"));
     }
@@ -1147,7 +1177,7 @@ mod tests {
     fn labelled_entry_is_disabled_unclaimed() {
         let c = catalog(&doc(
             "  {}\n",
-            &format!("  {SENTINEL}:\n    executes_workspace: false\n    labels: {{ entry.tier: high }}\n"),
+            &format!("  {SENTINEL}:\n    executes_workspace: false\n{ESS}    labels: {{ entry.tier: high }}\n"),
         ));
         assert!(c.entry(SENTINEL).is_none());
         assert!(reason(&c, SENTINEL).contains("unclaimed label"));
@@ -1159,7 +1189,6 @@ mod tests {
             "timeout_x: 1",
             "isolation: sentinel",
             "workspace: sentinel",
-            "output_to_model: sentinel",
             "network: sentinel",
             "network: { via: elsewhere, sites: [a.example] }",
             "network: { via: maknae-proxy, sites: [] }",
@@ -1180,7 +1209,7 @@ mod tests {
         ] {
             let c = catalog(&doc(
                 "  {}\n",
-                &format!("  {SENTINEL}:\n    executes_workspace: false\n    {field}\n"),
+                &format!("  {SENTINEL}:\n    executes_workspace: false\n{ESS}    {field}\n"),
             ));
             assert!(c.entry(SENTINEL).is_none(), "{field}");
             assert!(!reason(&c, SENTINEL).is_empty(), "{field}");
@@ -1201,7 +1230,7 @@ mod tests {
         ] {
             let c = catalog(&doc(
                 &format!("  c:\n{body}"),
-                "  user:\n    executes_workspace: false\n    credential: c\n",
+                &format!("  user:\n    executes_workspace: false\n{ESS}    credential: c\n"),
             ));
             assert!(c.class("c").is_none(), "{body}");
             assert!(c.entry("user").is_none(), "{body}");
@@ -1216,7 +1245,7 @@ mod tests {
     fn workspace_executing_credentialed_entry_must_name_sites() {
         let class = "  c:\n    kind: github-machine-user\n";
         let entry = |net: &str, exec: &str| {
-            format!("  {SENTINEL}:\n    executes_workspace: {exec}\n    credential: c\n    network: {net}\n")
+            format!("  {SENTINEL}:\n    executes_workspace: {exec}\n{ESS}    credential: c\n    network: {net}\n")
         };
         let wild = "{ via: maknae-proxy, sites: [\"*.github.com\"] }";
         let named = "{ via: maknae-proxy, sites: [github.com] }";
@@ -1235,7 +1264,7 @@ mod tests {
     #[test]
     fn workspace_executing_credentialed_entry_without_sites_is_disabled() {
         let class = "  c:\n    kind: github-machine-user\n";
-        let text = format!("  {SENTINEL}:\n    executes_workspace: true\n    credential: c\n    network: {{ via: maknae-proxy }}\n");
+        let text = format!("  {SENTINEL}:\n    executes_workspace: true\n{ESS}    credential: c\n    network: {{ via: maknae-proxy }}\n");
         let c = catalog(&doc(class, &text));
         assert!(c.entry(SENTINEL).is_none());
         assert!(reason(&c, SENTINEL).contains("sites"));
@@ -1361,14 +1390,14 @@ mod tests {
         ] {
             let c = catalog(&doc(
                 "  {}\n",
-                &format!("  {SENTINEL}:\n    executes_workspace: false\n    {field}\n"),
+                &format!("  {SENTINEL}:\n    executes_workspace: false\n{ESS}    {field}\n"),
             ));
             assert!(c.entry(SENTINEL).is_none(), "{field}");
             assert!(!reason(&c, SENTINEL).is_empty(), "{field}");
         }
         let c = catalog(&doc(
             "  {}\n",
-            "  fine:\n    executes_workspace: false\n    resources: { cpus: 1.5, memory: 8Gi }\n",
+            &format!("  fine:\n    executes_workspace: false\n{ESS}    resources: {{ cpus: 1.5, memory: 8Gi }}\n"),
         ));
         assert_eq!(
             c.entry("fine")
@@ -1493,7 +1522,7 @@ mod tests {
     fn disabled_entry_is_not_returned_by_entry() {
         let text = doc(
             "  {}\n",
-            &format!("  {SENTINEL}:\n    executes_workspace: false\n    nonsense: 1\n  off:\n    executes_workspace: false\n    enabled: false\n"),
+            &format!("  {SENTINEL}:\n    executes_workspace: false\n{ESS}    nonsense: 1\n  off:\n    executes_workspace: false\n{ESS}    enabled: false\n"),
         );
         let c = catalog(&text);
         assert!(c.entry(SENTINEL).is_none());
@@ -1513,8 +1542,135 @@ mod tests {
             Some("github-read")
         );
         assert!(c.entry("github-read").unwrap().binds.contains("git"));
-        assert_eq!(c.entry("rust-build").unwrap().network, Network::None);
+        assert_eq!(c.entry("rust-build").unwrap().network, ToolNetwork::None);
         assert!(c.class("github-post").unwrap().kind.has_reach_check());
+    }
+
+    #[test]
+    fn homelab_header_installs_a_file_maknaed_can_read() {
+        assert!(HOMELAB.contains("install -o root -g _maknae -m 0640 "));
+        assert!(!HOMELAB.contains("-g root"));
+        assert!(HOMELAB.contains("before you install this file"));
+    }
+
+    fn sound(name: &str, extra: &str) -> String {
+        format!("  \"{name}\":\n    executes_workspace: false\n    image: {{ ref: \"{IMAGE}\" }}\n    output_to_model: redacted\n{extra}")
+    }
+
+    #[test]
+    fn entry_and_program_names_follow_the_tool_capability_grammar() {
+        for name in ["a", "0", "a_b-9", "sentinel-674-x"] {
+            let c = catalog(&doc("  {}\n", &sound(name, "")));
+            assert!(c.entry(name).is_some(), "{name}: {:?}", c.disabled());
+        }
+        for name in ["A", "aB", "-a", "_a", "a.b", "a+b"] {
+            let c = catalog(&doc("  {}\n", &sound(name, "")));
+            assert!(c.entry(name).is_none(), "{name}");
+            assert!(reason(&c, name).contains("entry name"), "{name}");
+        }
+        for program in ["cargo", "Cargo", "x86_64-gcc", "g++", "a.b-c"] {
+            let c = catalog(&doc(
+                "  {}\n",
+                &sound(
+                    SENTINEL,
+                    &format!("    commands: {{ \"{program}\": {{}} }}\n"),
+                ),
+            ));
+            assert!(c.entry(SENTINEL).is_some(), "{program}: {:?}", c.disabled());
+        }
+        for program in ["a b", "a/b", "a@b", "a*b", "a:b", "a=b"] {
+            let c = catalog(&doc(
+                "  {}\n",
+                &sound(
+                    SENTINEL,
+                    &format!("    commands: {{ \"{program}\": {{}} }}\n"),
+                ),
+            ));
+            assert!(c.entry(SENTINEL).is_none(), "{program}");
+            assert!(reason(&c, SENTINEL).contains("program name"), "{program}");
+        }
+    }
+
+    #[test]
+    fn a_name_tools_yaml_enables_is_one_a_tool_grant_can_name() {
+        let names = [
+            ("a", "p"),
+            ("a_b-9", "x86_64-gcc"),
+            ("A", "p"),
+            ("a.b", "p"),
+            ("-a", "p"),
+            ("a", "g++"),
+            ("a", "a@b"),
+            ("a", "a*b"),
+        ];
+        for (entry, program) in names {
+            let c = catalog(&doc(
+                "  {}\n",
+                &sound(entry, &format!("    commands: {{ \"{program}\": {{}} }}\n")),
+            ));
+            let granted = crate::parse_authz(&format!(
+                "schema_version: 1\npermissions:\n  allow: [\"Tool({entry} {program} x)\"]\n"
+            ));
+            assert_eq!(
+                c.entry(entry).is_some(),
+                granted.is_ok(),
+                "{entry} {program}: {granted:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_enabled_entry_needs_an_image() {
+        let c = catalog(&doc(
+            "  {}\n",
+            &format!(
+                "  {SENTINEL}:\n    executes_workspace: false\n    output_to_model: redacted\n"
+            ),
+        ));
+        assert!(c.entry(SENTINEL).is_none());
+        assert!(reason(&c, SENTINEL).contains("image"));
+        let off = catalog(&doc(
+            "  {}\n",
+            "  off:\n    enabled: false\n    executes_workspace: false\n    output_to_model: redacted\n",
+        ));
+        assert!(off.disabled().is_empty(), "{:?}", off.disabled());
+    }
+
+    #[test]
+    fn every_entry_needs_output_to_model() {
+        for enabled in ["true", "false"] {
+            let c = catalog(&doc(
+                "  {}\n",
+                &format!("  {SENTINEL}:\n    enabled: {enabled}\n    executes_workspace: false\n    image: {{ ref: \"{IMAGE}\" }}\n"),
+            ));
+            assert!(c.entry(SENTINEL).is_none(), "{enabled}");
+            assert!(
+                reason(&c, SENTINEL).contains("output_to_model"),
+                "{enabled}"
+            );
+        }
+        let c = catalog(&doc(
+            "  {}\n",
+            &format!("  {SENTINEL}:\n    executes_workspace: false\n    image: {{ ref: \"{IMAGE}\" }}\n    output_to_model: sentinel\n"),
+        ));
+        assert!(reason(&c, SENTINEL).contains("output_to_model `sentinel`"));
+    }
+
+    #[test]
+    fn image_ref_names_a_registry_host_first() {
+        for bad in ["example/x", "library/rust", "a/b/c"] {
+            let r = format!("{bad}@sha256:{DIGEST}");
+            assert!(!image_ref_ok(&r), "{r}");
+        }
+        for good in [
+            "localhost/x",
+            "registry.example/x",
+            "reg:5000/x",
+            "ghcr.io/a/b",
+        ] {
+            let r = format!("{good}@sha256:{DIGEST}");
+            assert!(image_ref_ok(&r), "{r}");
+        }
     }
 
     fn post_bound() -> crate::Bound {

@@ -5289,10 +5289,10 @@ mod tests {
         );
     }
 
-    const TOOLS_ONE: &str = "schema_version: 1\ntools:\n  sentinel-674-one:\n    executes_workspace: false\n    commands:\n      echo: { subcommands: [\"hi *\"] }\n";
-    const TOOLS_TWO: &str = "schema_version: 1\ntools:\n  sentinel-674-one:\n    executes_workspace: false\n    commands:\n      echo: { subcommands: [\"bye *\"] }\n";
-    const TOOLS_674_BUILD: &str = "schema_version: 1\ntools:\n  sentinel-674-build:\n    executes_workspace: false\n    commands:\n      cargo: { subcommands: [\"build *\"] }\n";
-    const TOOLS_BAD_ENTRY: &str = "schema_version: 1\ntools:\n  sentinel-674-bad:\n    isolation: sentinel-674-nope\n    executes_workspace: false\n";
+    const TOOLS_ONE: &str = "schema_version: 1\ntools:\n  sentinel-674-one:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      echo: { subcommands: [\"hi *\"] }\n";
+    const TOOLS_TWO: &str = "schema_version: 1\ntools:\n  sentinel-674-one:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      echo: { subcommands: [\"bye *\"] }\n";
+    const TOOLS_674_BUILD: &str = "schema_version: 1\ntools:\n  sentinel-674-build:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      cargo: { subcommands: [\"build *\"] }\n";
+    const TOOLS_BAD_ENTRY: &str = "schema_version: 1\ntools:\n  sentinel-674-bad:\n    isolation: sentinel-674-nope\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n";
 
     fn tools(text: &str) -> maknae_config::ToolsCatalog {
         maknae_config::ToolsCatalog::parse(text).unwrap()
@@ -5342,7 +5342,7 @@ mod tests {
 
     #[test]
     fn grant_naming_missing_entry_grants_nothing_and_is_a_problem() {
-        let text = "schema_version: 1\ntools:\n  sentinel-674-build:\n    executes_workspace: false\n    commands:\n      cargo: { subcommands: [\"build *\"] }\n  sentinel-674-off:\n    enabled: false\n    executes_workspace: false\n";
+        let text = "schema_version: 1\ntools:\n  sentinel-674-build:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      cargo: { subcommands: [\"build *\"] }\n  sentinel-674-off:\n    enabled: false\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n";
         let authz = "schema_version: 1\npermissions:\n  allow: [\"Tool(sentinel-674-build cargo build *)\", \"Tool(sentinel-674-gone cargo build *)\", \"Tool(sentinel-674-off cargo build *)\"]\n  deny: [\"Tool(sentinel-674-gone-deny cargo build *)\"]\nsubjects:\n  ursula:\n    permissions:\n      allow: [\"Tool(sentinel-674-subject cargo build *)\", \"Read(~/**)\"]\n      deny: [\"Tool(sentinel-674-subject-deny cargo build *)\", \"Tool(sentinel-674-build cargo build --x)\"]\n";
         let src = source_with(authz, None, &[("ursula", 1001)]).with_tools(tools(text));
         let unknown = |snap_problems: &[IdentityProblem]| -> Vec<String> {

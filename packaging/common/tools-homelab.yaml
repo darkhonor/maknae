@@ -1,12 +1,12 @@
 # HomeLab tool baseline (#674, ADR-0036 decision 7).
 #
 # Not active where it is installed. To use it:
-#   install -o root -g root -m 0640 /usr/share/maknae/tools-homelab.yaml /etc/maknae/tools.yaml
+#   install -o root -g _maknae -m 0640 /usr/share/maknae/tools-homelab.yaml /etc/maknae/tools.yaml
 # then adjust it and reload maknaed (SIGHUP). macOS installs it at
 # /usr/local/share/maknae/tools-homelab.yaml.
 #
 # Every image digest below is a PLACEHOLDER (64 zeros). Replace each with the
-# digest of the signed maknae-rust-build image you run before enabling an entry.
+# digest of the signed maknae-rust-build image you run before you install this file.
 #
 # Each credential class names an App defined in the Egress Daemon's config; the
 # `app:` values below are examples to replace with your own.

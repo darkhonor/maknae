@@ -909,7 +909,7 @@ mod tests {
         );
     }
 
-    const TOOLS_674: &str = "schema_version: 1\ntools:\n  sentinel-674-build:\n    executes_workspace: false\n    commands:\n      cargo: { subcommands: [\"build *\"] }\n";
+    const TOOLS_674: &str = "schema_version: 1\ntools:\n  sentinel-674-build:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      cargo: { subcommands: [\"build *\"] }\n";
 
     #[test]
     fn tool_citation_resolves_through_a_compiled_snapshot() {
