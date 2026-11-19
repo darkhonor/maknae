@@ -56,6 +56,7 @@ mod providers;
 mod scalar;
 mod sensitive;
 pub mod state;
+mod tools;
 mod transport;
 mod user_providers;
 mod user_providers_io;
@@ -151,6 +152,14 @@ pub use sensitive::{
     SENSITIVE_FILE,
 };
 pub use state::{MARKER_FILE, MIRROR_FILE, STATE_DIR, STORE_FILE};
+#[cfg(all(unix, feature = "hermetic-test-seam"))]
+pub use tools::load_tools_with_requirement;
+pub use tools::{
+    load_host_tools, ClassLifetime, Command, CredentialClass, CredentialKind, CredentialSource,
+    Disabled, Image, Isolation, Minting, Narrowing, Network, OutputToModel, Resources, RevokeOn,
+    ToolEntry, ToolsCatalog, ToolsError, Verify, Volume, VolumeAccess, VolumeScope,
+    WorkspaceAccess, TOOLS_FILE,
+};
 pub use transport::{
     content_write_bound, transport_from_section, TransportConfig, ADMIN_REPLY_MARGIN_MS,
     ADMISSION_AUDIT_TIMEOUT_MS, AGENT_LIST_REPLY_STAGES, BASELINE_ACCEPT_REPLY_STAGES,
