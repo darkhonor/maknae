@@ -378,7 +378,11 @@ mod tests {
         let h = tokio::spawn(async move {
             let mut requests = Vec::new();
             for resp in script {
-                let (mut s, _) = l.accept().await.unwrap();
+                let Ok(accepted) = tokio::time::timeout(Duration::from_secs(5), l.accept()).await
+                else {
+                    break;
+                };
+                let (mut s, _) = accepted.unwrap();
                 requests.push(read_request(&mut s).await);
                 s.write_all(resp.as_bytes()).await.unwrap();
                 s.flush().await.unwrap();
