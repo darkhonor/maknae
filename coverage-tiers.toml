@@ -245,6 +245,10 @@ files = [
   # a provider call cannot be made on a frame whose bounds were never checked.
   "crates/maknae-deputy/src/call.rs",
   "crates/maknae-deputy/src/unseal.rs",
+  # #168: mint admission against the pinned bounds and `minting.yaml`, the
+  # exhaustive credential-kind dispatch, and the App JWT's pinned bytes.
+  "crates/maknae-deputy/src/mint/admit.rs",
+  "crates/maknae-deputy/src/mint/jwt.rs",
   # #318: what ALL THREE binaries refuse to inherit from their environment, and
   # the disjoint list of what they must never stop inheriting. Moved here from
   # bins/maknae-egress/src/env.rs (#240b) when maknaed and maknae adopted the

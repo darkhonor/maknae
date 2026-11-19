@@ -15,10 +15,13 @@ workspace = true
 test-support = []
 
 [dependencies]
+# The version reqwest and pem already resolve, so encoding the App JWT adds no second base64 0.23.
+base64 = "=0.23.1"
 maknae-config = { path = "../maknae-config" }
 maknae-crypto = { path = "../maknae-crypto" }
 maknae-llm = { path = "../maknae-llm" }
 maknae-proto = { path = "../maknae-proto" }
+maknae-seal = { path = "../maknae-seal" }
 # The pin and features maknae-llm uses: one reqwest in the tree, and
 # `rustls-no-provider` so no stock (non-FIPS) provider is installed as the
 # process default ahead of maknae-crypto's init().
