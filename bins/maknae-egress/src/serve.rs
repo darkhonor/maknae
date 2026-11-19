@@ -20,7 +20,9 @@ use maknae_config::EgressBounds;
 use maknae_deputy::call::FulfilError;
 use maknae_deputy::handle::{decide, Refusal};
 use maknae_deputy::unseal::OpenFailure;
-use maknae_proto::EgressFrameReply;
+use maknae_proto::{
+    EgressFrame, EgressFrameReply, EgressSocketReply, MintRefusal, MintReply, RevokeReply,
+};
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use std::io::{Read, Write};
 use std::os::fd::AsFd;
@@ -194,7 +196,25 @@ where
 
     let body = read_body_zeroizing(&mut stream, Instant::now() + io_timeout)?;
 
-    let req = maknae_proto::decode_egress_frame_request(&body).map_err(io)?;
+    let req = match maknae_proto::decode_egress_frame(&body).map_err(io)? {
+        EgressFrame::Prompt(req) => req,
+        EgressFrame::Mint(_) => {
+            return write_reply(
+                &mut stream,
+                &EgressSocketReply::Mint(MintReply::Refused(MintRefusal::Request)),
+                io_timeout,
+                committed,
+            )
+        }
+        EgressFrame::Revoke(_) => {
+            return write_reply(
+                &mut stream,
+                &EgressSocketReply::Revoke(RevokeReply::Refused(MintRefusal::Request)),
+                io_timeout,
+                committed,
+            )
+        }
+    };
     let admitted = match decide(&req, bounds) {
         Ok(a) => a,
         Err(r) => {
@@ -203,13 +223,18 @@ where
     };
     committed.store(true, Ordering::Release);
     match fulfil(&admitted) {
-        Ok(reply) => write_reply(&mut stream, &reply, io_timeout, committed),
+        Ok(reply) => write_reply(
+            &mut stream,
+            &EgressSocketReply::Prompt(reply),
+            io_timeout,
+            committed,
+        ),
         Err(e @ ServeError::OpenFailed(_)) => {
             refuse_before_send(&mut stream, e, io_timeout, committed)
         }
         Err(ServeError::Unusable { defect, usage }) => write_reply(
             &mut stream,
-            &EgressFrameReply::Unusable { defect, usage },
+            &EgressSocketReply::Prompt(EgressFrameReply::Unusable { defect, usage }),
             io_timeout,
             committed,
         ),
@@ -247,7 +272,7 @@ fn refuse_at_capacity_committing(
     )?);
     write_reply(
         &mut stream,
-        &EgressFrameReply::AtCapacity,
+        &EgressSocketReply::AtCapacity,
         io_timeout,
         committed,
     )
@@ -289,7 +314,7 @@ pub fn accept_loop<H>(
             slot,
             stream,
             io_timeout,
-            EgressFrameReply::RefusedBeforeSend,
+            EgressSocketReply::RefusedBeforeSend,
             move |stream, committed| {
                 if let Err(e) =
                     serve_one(stream, expected_uid, &bounds, io_timeout, committed, |a| {
@@ -329,7 +354,7 @@ fn answer_at_capacity(
         slot,
         stream,
         io_timeout,
-        EgressFrameReply::AtCapacity,
+        EgressSocketReply::AtCapacity,
         move |stream, committed| match refuse_at_capacity_committing(
             stream,
             expected_uid,
@@ -356,7 +381,7 @@ fn spawn_contained(
     slot: Slot,
     stream: UnixStream,
     io_timeout: Duration,
-    unsent: EgressFrameReply,
+    unsent: EgressSocketReply,
     work: impl FnOnce(UnixStream, &AtomicBool) + Send + 'static,
 ) -> std::io::Result<()> {
     let spare = stream.try_clone();
@@ -393,7 +418,7 @@ fn refuse_before_send(
 ) -> Result<(), ServeError> {
     if let Err(w) = write_reply(
         stream,
-        &EgressFrameReply::RefusedBeforeSend,
+        &EgressSocketReply::RefusedBeforeSend,
         io_timeout,
         committed,
     ) {
@@ -404,7 +429,7 @@ fn refuse_before_send(
 
 fn write_reply(
     stream: &mut UnixStream,
-    reply: &EgressFrameReply,
+    reply: &EgressSocketReply,
     io_timeout: Duration,
     committed: &AtomicBool,
 ) -> Result<(), ServeError> {
@@ -415,7 +440,7 @@ fn write_reply(
     // back, and the growing buffer this replaces freed a partly-written copy
     // of it on every realloc. A reply past the headroom is a codec error
     // here — before the length prefix, so the kernel reads nothing.
-    let out = maknae_proto::encode_egress_frame_reply(
+    let out = maknae_proto::encode_egress_socket_reply(
         reply,
         maknae_proto::EGRESS_REPLY_FRAME_ENCODE_BYTES,
     )
@@ -505,12 +530,13 @@ mod tests {
     }
 
     fn encoded(r: &EgressFrameRequest) -> Vec<u8> {
-        maknae_proto::encode_egress_frame_request(
-            r,
-            maknae_proto::EGRESS_REQUEST_FRAME_ENCODE_BYTES,
-        )
-        .unwrap()
-        .to_vec()
+        encoded_frame(&EgressFrame::Prompt(r.clone()))
+    }
+
+    fn encoded_frame(f: &EgressFrame) -> Vec<u8> {
+        maknae_proto::encode_egress_frame(f, maknae_proto::EGRESS_REQUEST_FRAME_ENCODE_BYTES)
+            .unwrap()
+            .to_vec()
     }
 
     fn frame(key: &str) -> Vec<u8> {
@@ -549,7 +575,7 @@ mod tests {
     fn served_with<F>(
         bytes: Vec<u8>,
         fulfil: F,
-    ) -> (Result<(), ServeError>, Option<EgressFrameReply>)
+    ) -> (Result<(), ServeError>, Option<EgressSocketReply>)
     where
         F: FnOnce(&maknae_deputy::handle::Admitted<'_>) -> Result<EgressFrameReply, ServeError>,
     {
@@ -567,7 +593,7 @@ mod tests {
         let reply = (!back.is_empty()).then(|| {
             let n = u32::from_be_bytes(back[..4].try_into().unwrap()) as usize;
             assert_eq!(back.len(), 4 + n, "one reply frame and nothing after it");
-            maknae_proto::decode_egress_frame_reply(&back[4..]).unwrap()
+            maknae_proto::decode_egress_socket_reply(&back[4..]).unwrap()
         });
         (out, reply)
     }
@@ -678,18 +704,18 @@ mod tests {
             c.read_exact(&mut len).unwrap();
             let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
             c.read_exact(&mut body).unwrap();
-            maknae_proto::decode_egress_frame_reply(&body).unwrap()
+            maknae_proto::decode_egress_socket_reply(&body).unwrap()
         });
         serve_one_unmarked(b, me, &bounds(), FRAME_IO_TIMEOUT, canned).unwrap();
         let reply = h.join().unwrap();
         assert_eq!(
             reply,
-            maknae_proto::EgressFrameReply::Reply(maknae_proto::PromptReply {
+            EgressSocketReply::Prompt(EgressFrameReply::Reply(maknae_proto::PromptReply {
                 reasoning: None,
                 blocks: vec![],
                 tool_calls: vec![],
                 usage: None,
-            })
+            }))
         );
     }
 
@@ -734,7 +760,10 @@ mod tests {
     fn the_accept_loop_survives_a_refused_connection_and_serves_the_next() {
         let (_d, path, slots) = looping(4, canned);
         drop(UnixStream::connect(&path).unwrap());
-        assert!(matches!(ask(&path), EgressFrameReply::Reply(_)));
+        assert!(matches!(
+            ask(&path),
+            EgressSocketReply::Prompt(EgressFrameReply::Reply(_))
+        ));
         eventually("the served connection kept its slot", || {
             slots.in_use() == 0
         });
@@ -766,11 +795,11 @@ mod tests {
         (d, path, slots)
     }
 
-    fn ask(path: &std::path::Path) -> EgressFrameReply {
+    fn ask(path: &std::path::Path) -> EgressSocketReply {
         ask_with(path, &prefixed(&frame(ALICE)))
     }
 
-    fn ask_with(path: &std::path::Path, request: &[u8]) -> EgressFrameReply {
+    fn ask_with(path: &std::path::Path, request: &[u8]) -> EgressSocketReply {
         let mut c = UnixStream::connect(path).unwrap();
         c.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
         c.write_all(request).unwrap();
@@ -778,7 +807,7 @@ mod tests {
         c.read_exact(&mut len).unwrap();
         let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
         c.read_exact(&mut body).unwrap();
-        maknae_proto::decode_egress_frame_reply(&body).unwrap()
+        maknae_proto::decode_egress_socket_reply(&body).unwrap()
     }
 
     fn eventually(what: &str, cond: impl Fn() -> bool) {
@@ -812,8 +841,14 @@ mod tests {
         });
         let p = path.clone();
         let other = std::thread::spawn(move || ask(&p));
-        assert!(matches!(ask(&path), EgressFrameReply::Reply(_)));
-        assert!(matches!(other.join().unwrap(), EgressFrameReply::Reply(_)));
+        assert!(matches!(
+            ask(&path),
+            EgressSocketReply::Prompt(EgressFrameReply::Reply(_))
+        ));
+        assert!(matches!(
+            other.join().unwrap(),
+            EgressSocketReply::Prompt(EgressFrameReply::Reply(_))
+        ));
         assert_eq!(
             both_seen.load(std::sync::atomic::Ordering::SeqCst),
             2,
@@ -839,12 +874,18 @@ mod tests {
         eventually("the first connection never took its slot", || {
             slots.in_use() == 1
         });
-        assert_eq!(ask(&path), EgressFrameReply::AtCapacity);
+        assert_eq!(ask(&path), EgressSocketReply::AtCapacity);
         release_tx.send(()).unwrap();
-        assert!(matches!(held.join().unwrap(), EgressFrameReply::Reply(_)));
+        assert!(matches!(
+            held.join().unwrap(),
+            EgressSocketReply::Prompt(EgressFrameReply::Reply(_))
+        ));
         eventually("the slot was not given back", || slots.in_use() == 0);
         release_tx.send(()).unwrap();
-        assert!(matches!(ask(&path), EgressFrameReply::Reply(_)));
+        assert!(matches!(
+            ask(&path),
+            EgressSocketReply::Prompt(EgressFrameReply::Reply(_))
+        ));
     }
 
     /// #321: one connection's panic is that connection's alone. B, in flight
@@ -898,8 +939,14 @@ mod tests {
             back.is_empty(),
             "a call that began must not be answered as unsent"
         );
-        assert!(matches!(second.join().unwrap(), EgressFrameReply::Reply(_)));
-        assert!(matches!(ask(&path), EgressFrameReply::Reply(_)));
+        assert!(matches!(
+            second.join().unwrap(),
+            EgressSocketReply::Prompt(EgressFrameReply::Reply(_))
+        ));
+        assert!(matches!(
+            ask(&path),
+            EgressSocketReply::Prompt(EgressFrameReply::Reply(_))
+        ));
         eventually("a slot was kept", || slots.in_use() == 0);
     }
 
@@ -914,12 +961,12 @@ mod tests {
             slots.try_take().unwrap(),
             b,
             FRAME_IO_TIMEOUT,
-            EgressFrameReply::AtCapacity,
+            EgressSocketReply::AtCapacity,
             |stream, committed| {
                 let mut s = stream;
                 write_reply(
                     &mut s,
-                    &EgressFrameReply::AtCapacity,
+                    &EgressSocketReply::AtCapacity,
                     FRAME_IO_TIMEOUT,
                     committed,
                 )
@@ -947,7 +994,7 @@ mod tests {
             slots.try_take().unwrap(),
             b,
             FRAME_IO_TIMEOUT,
-            EgressFrameReply::RefusedBeforeSend,
+            EgressSocketReply::RefusedBeforeSend,
             |_stream, _began| panic!("before the call"),
         )
         .unwrap();
@@ -958,8 +1005,8 @@ mod tests {
         let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
         c.read_exact(&mut body).unwrap();
         assert_eq!(
-            maknae_proto::decode_egress_frame_reply(&body).unwrap(),
-            EgressFrameReply::RefusedBeforeSend
+            maknae_proto::decode_egress_socket_reply(&body).unwrap(),
+            EgressSocketReply::RefusedBeforeSend
         );
         eventually("the slot was kept", || slots.in_use() == 0);
     }
@@ -989,7 +1036,10 @@ mod tests {
         let mut rest = Vec::new();
         let _ = c.read_to_end(&mut rest);
         eventually("the slot was kept", || slots.in_use() == 0);
-        assert!(matches!(ask(&path), EgressFrameReply::Reply(_)));
+        assert!(matches!(
+            ask(&path),
+            EgressSocketReply::Prompt(EgressFrameReply::Reply(_))
+        ));
         assert!(
             DROPPED.load(std::sync::atomic::Ordering::SeqCst),
             "the payload was leaked"
@@ -1012,8 +1062,8 @@ mod tests {
         let n = u32::from_be_bytes(back[..4].try_into().unwrap()) as usize;
         assert_eq!(back.len(), 4 + n);
         assert_eq!(
-            maknae_proto::decode_egress_frame_reply(&back[4..]).unwrap(),
-            EgressFrameReply::AtCapacity
+            maknae_proto::decode_egress_socket_reply(&back[4..]).unwrap(),
+            EgressSocketReply::AtCapacity
         );
     }
 
@@ -1159,7 +1209,10 @@ mod tests {
             ),
         }
         release_tx.send(()).unwrap();
-        assert!(matches!(held.join().unwrap(), EgressFrameReply::Reply(_)));
+        assert!(matches!(
+            held.join().unwrap(),
+            EgressSocketReply::Prompt(EgressFrameReply::Reply(_))
+        ));
         drop(stalled);
     }
 
@@ -1188,7 +1241,7 @@ mod tests {
         let request = prefixed(&frame(ALICE));
         let stalled = UnixStream::connect(&path).unwrap();
         let started = std::time::Instant::now();
-        assert_eq!(ask_with(&path, &request), EgressFrameReply::AtCapacity);
+        assert_eq!(ask_with(&path, &request), EgressSocketReply::AtCapacity);
         assert!(
             started.elapsed() < Duration::from_secs(3),
             "the answer waited behind the stalled connection"
@@ -1197,7 +1250,10 @@ mod tests {
             release_tx.send(()).unwrap();
         }
         for h in held {
-            assert!(matches!(h.join().unwrap(), EgressFrameReply::Reply(_)));
+            assert!(matches!(
+                h.join().unwrap(),
+                EgressSocketReply::Prompt(EgressFrameReply::Reply(_))
+            ));
         }
         drop(stalled);
     }
@@ -1289,7 +1345,7 @@ mod tests {
     fn a_decide_refusal_is_answered_refused_before_send() {
         let (out, reply) = served_with(prefixed(&frame("maknae/users-evil/alice/key")), canned);
         assert_eq!(out, Err(ServeError::Refused(Refusal::KeyPathOutsideBounds)));
-        assert_eq!(reply, Some(EgressFrameReply::RefusedBeforeSend));
+        assert_eq!(reply, Some(EgressSocketReply::RefusedBeforeSend));
     }
 
     #[test]
@@ -1305,7 +1361,7 @@ mod tests {
             .map_err(serve_error)
         });
         assert_eq!(out, Err(ServeError::OpenFailed(OpenFailure::Seal)));
-        assert_eq!(reply, Some(EgressFrameReply::RefusedBeforeSend));
+        assert_eq!(reply, Some(EgressSocketReply::RefusedBeforeSend));
     }
 
     #[test]
@@ -1394,10 +1450,10 @@ mod tests {
             assert!(matches!(out, Ok(())), "{status}: {out:?}");
             assert_eq!(
                 reply,
-                Some(EgressFrameReply::Unusable {
+                Some(EgressSocketReply::Prompt(EgressFrameReply::Unusable {
                     defect: want,
                     usage: None
-                }),
+                })),
                 "{status}"
             );
         }
@@ -1464,5 +1520,46 @@ mod tests {
             ),
             Err(ServeError::Refused(Refusal::KeyPathOutsideBounds))
         );
+    }
+
+    #[test]
+    fn a_mint_or_revoke_frame_is_refused_as_a_request_and_never_fulfilled() {
+        let sealed = || {
+            maknae_proto::SealedCredentialBytes::new(vec![5; maknae_proto::SEALED_KEY_MIN_BYTES])
+                .unwrap()
+        };
+        let mint = EgressFrame::Mint(maknae_proto::MintRequest {
+            task: "task-1".into(),
+            agent: "coder".into(),
+            class: "github".into(),
+            kind: "github-app-installation".into(),
+            app: "maknae-bot".into(),
+            sets: vec![],
+        });
+        let revoke = EgressFrame::Revoke(maknae_proto::RevokeRequest {
+            task: "task-1".into(),
+            agent: "coder".into(),
+            class: "github".into(),
+            kind: "github-app-installation".into(),
+            app: "maknae-bot".into(),
+            set: 0,
+            for_revocation: sealed(),
+        });
+        for (frame, want) in [
+            (
+                mint,
+                EgressSocketReply::Mint(MintReply::Refused(MintRefusal::Request)),
+            ),
+            (
+                revoke,
+                EgressSocketReply::Revoke(RevokeReply::Refused(MintRefusal::Request)),
+            ),
+        ] {
+            let (out, reply) = served_with(prefixed(&encoded_frame(&frame)), |_| {
+                panic!("a credential frame reached the provider path")
+            });
+            assert_eq!(out, Ok(()));
+            assert_eq!(reply, Some(want));
+        }
     }
 }

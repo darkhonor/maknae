@@ -5,18 +5,42 @@ use std::fmt;
 pub const SEALED_KEY_MIN_BYTES: usize = 127;
 pub const SEALED_KEY_MAX_BYTES: usize = 1150;
 
+fn bounded(what: &str, bytes: Vec<u8>) -> Result<Vec<u8>, ProtoCodecError> {
+    if !(SEALED_KEY_MIN_BYTES..=SEALED_KEY_MAX_BYTES).contains(&bytes.len()) {
+        return Err(ProtoCodecError::Encode(format!(
+            "{what} is {} bytes; it must be {SEALED_KEY_MIN_BYTES}..={SEALED_KEY_MAX_BYTES}",
+            bytes.len()
+        )));
+    }
+    Ok(bytes)
+}
+
+struct BoundedBytes<T> {
+    what: &'static str,
+    make: fn(Vec<u8>) -> Result<T, ProtoCodecError>,
+}
+
+impl<'de, T> de::Visitor<'de> for BoundedBytes<T> {
+    type Value = T;
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "a {} of {SEALED_KEY_MIN_BYTES}..={SEALED_KEY_MAX_BYTES} bytes",
+            self.what
+        )
+    }
+    fn visit_byte_buf<E: de::Error>(self, v: Vec<u8>) -> Result<T, E> {
+        let n = v.len();
+        (self.make)(v).map_err(|_| E::invalid_length(n, &self))
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct SealedKey(Vec<u8>);
 
 impl SealedKey {
     pub fn new(bytes: Vec<u8>) -> Result<Self, ProtoCodecError> {
-        if !(SEALED_KEY_MIN_BYTES..=SEALED_KEY_MAX_BYTES).contains(&bytes.len()) {
-            return Err(ProtoCodecError::Encode(format!(
-                "sealed key is {} bytes; it must be {SEALED_KEY_MIN_BYTES}..={SEALED_KEY_MAX_BYTES}",
-                bytes.len()
-            )));
-        }
-        Ok(Self(bytes))
+        bounded("sealed key", bytes).map(Self)
     }
 
     pub fn as_bytes(&self) -> &[u8] {
@@ -38,21 +62,45 @@ impl Serialize for SealedKey {
 
 impl<'de> Deserialize<'de> for SealedKey {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct V;
-        impl<'de> de::Visitor<'de> for V {
-            type Value = SealedKey;
-            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                write!(
-                    f,
-                    "a sealed key of {SEALED_KEY_MIN_BYTES}..={SEALED_KEY_MAX_BYTES} bytes"
-                )
-            }
-            fn visit_byte_buf<E: de::Error>(self, v: Vec<u8>) -> Result<SealedKey, E> {
-                let n = v.len();
-                SealedKey::new(v).map_err(|_| E::invalid_length(n, &self))
-            }
-        }
-        d.deserialize_byte_buf(V)
+        d.deserialize_byte_buf(BoundedBytes {
+            what: "sealed key",
+            make: SealedKey::new,
+        })
+    }
+}
+
+/// A credential sealed to one recipient, inside the same length bounds as a [`SealedKey`].
+#[derive(Clone, PartialEq, Eq)]
+pub struct SealedCredentialBytes(Vec<u8>);
+
+impl SealedCredentialBytes {
+    pub fn new(bytes: Vec<u8>) -> Result<Self, ProtoCodecError> {
+        bounded("sealed credential", bytes).map(Self)
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SealedCredentialBytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SealedCredentialBytes(<{} bytes>)", self.0.len())
+    }
+}
+
+impl Serialize for SealedCredentialBytes {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_bytes(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for SealedCredentialBytes {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        d.deserialize_byte_buf(BoundedBytes {
+            what: "sealed credential",
+            make: SealedCredentialBytes::new,
+        })
     }
 }
 
