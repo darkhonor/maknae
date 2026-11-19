@@ -25,6 +25,9 @@
 # github-post is shaped as an exact allowlist (fixed argument shapes, no
 # trailing `*`) because gh's short-flag clustering (`-ca`, `-a=true`, `-ab x`)
 # defeats denylists; its deny_args are belt and braces.
+# The body comes on stdin (`--body-file -`), which the front end supplies from
+# the model's text, so posting never reads a file and no path can be steered
+# to a mounted credential.
 # Posting is a separate entry and credential class so it is a separate grant.
 # `--approve` is refused here until self-approval is settled (#480).
 schema_version: 1
@@ -89,9 +92,9 @@ tools:
     commands:
       gh:
         subcommands:
-          - "pr review {git.change} -R {git.base} --comment --body-file /workspace/*"
-          - "pr review {git.change} -R {git.base} --request-changes --body-file /workspace/*"
-          - "pr comment {git.change} -R {git.base} --body-file /workspace/*"
+          - "pr review {git.change} -R {git.base} --comment --body-file -"
+          - "pr review {git.change} -R {git.base} --request-changes --body-file -"
+          - "pr comment {git.change} -R {git.base} --body-file -"
         deny_args: ["--approve*", "-a*"]
         timeout: 2m
         output: 1MiB

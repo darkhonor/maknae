@@ -1310,7 +1310,7 @@ mod tests {
                 "o/r",
                 "--comment",
                 "--body-file",
-                "/workspace/x",
+                "-",
                 "-a",
             ][..],
             &[
@@ -1321,7 +1321,7 @@ mod tests {
                 "o/r",
                 "-ca",
                 "--body-file",
-                "/workspace/x",
+                "-",
             ],
             &[
                 "pr",
@@ -1331,12 +1331,33 @@ mod tests {
                 "o/r",
                 "--comment",
                 "--body-file",
-                "/workspace/x",
+                "-",
                 "--approve",
             ],
             &["pr", "review", "345", "-R", "o/r", "-a=true"],
             &["pr", "review", "345", "-ab", "x"],
             &["pr", "review", "--approve"],
+            &[
+                "pr",
+                "comment",
+                "345",
+                "-R",
+                "o/r",
+                "--body-file",
+                "/workspace/x",
+            ],
+            &[
+                "pr",
+                "comment",
+                "345",
+                "-R",
+                "o/r",
+                "--body-file",
+                "/workspace/../run/secrets/x",
+            ],
+            &["pr", "comment", "345", "-R", "o/r", "--body", "x"],
+            &["pr", "comment", "345", "-R", "o/r", "--body=x"],
+            &["pr", "comment", "345", "-R", "o/r", "-b", "x"],
         ] {
             let args = argv(refused);
             let allowed = gh.subcommands.iter().any(|p| p.matches(&args, &bound));
@@ -1364,15 +1385,7 @@ mod tests {
         let c = catalog(HOMELAB);
         let gh = &c.entry("github-post").unwrap().commands["gh"];
         let bound = post_bound();
-        let ok = argv(&[
-            "pr",
-            "comment",
-            "345",
-            "-R",
-            "o/r",
-            "--body-file",
-            "/workspace/x",
-        ]);
+        let ok = argv(&["pr", "comment", "345", "-R", "o/r", "--body-file", "-"]);
         assert!(gh.subcommands.iter().any(|p| p.matches(&ok, &bound)));
         assert_eq!(first_denied(&gh.deny_args, &ok), None);
         let review = argv(&[
@@ -1383,7 +1396,7 @@ mod tests {
             "o/r",
             "--request-changes",
             "--body-file",
-            "/workspace/x",
+            "-",
         ]);
         assert!(gh.subcommands.iter().any(|p| p.matches(&review, &bound)));
         assert!(!gh
