@@ -3,11 +3,11 @@
 //! The only process with a route out, running as `_maknae-egress`. It holds
 //! its seal key and a socket, and no Vault identity unless `minting.yaml` is
 //! configured, when it holds a Transit-sign-only AppRole (ADR-0038). It holds
-//! no policy, no provider registry, no identity map, no audit sink. It makes no identity
-//! decision: the kernel decided who the subject is before the frame existed,
-//! and the `key_vault_path` it is handed carries the requester's user segment
-//! only so it can act on that user's behalf. It never originates a call of its
-//! own.
+//! no policy, no provider registry, no identity map, no audit sink. It makes
+//! no identity decision: the kernel decided who the subject is before the
+//! frame existed, and the `key_vault_path` it is handed carries the
+//! requester's user segment only so it can act on that user's behalf. It never
+//! originates a call of its own.
 //!
 //! **Amended 2026-09-21 by #264:** the binary also links `maknae-llm`'s
 //! compiled-in core prompt and baseline tool definitions, and composes them
@@ -306,6 +306,7 @@ mod tests {
             "(der.expose())"
         ));
         let client = at(concat!("maknae_vault::VaultApi::new", "("));
+        let mint_state = at(concat!("minting::minting_state", "("));
         let listener = at(concat!("listen::from_init_system", "()"));
         let mapped = at(concat!(".map_err(serve::", "serve_error)"));
         assert!(scrub < fips, "the scrub must precede the FIPS install");
@@ -324,6 +325,11 @@ mod tests {
             client < listener,
             "the Vault client must exist before the listener is adopted"
         );
+        assert!(client < mint_state, "minting logs in through that client");
+        assert!(
+            mint_state < listener,
+            "minting's state must be settled before the listener is adopted"
+        );
         assert!(
             listener < mapped,
             "the accept loop maps fulfil failures through serve::serve_error"
@@ -331,7 +337,7 @@ mod tests {
     }
 
     /// ADR-0038 decision 5: the Egress Daemon's one Vault login is the minting
-    /// module's AppRole, and the vaultrs login path is not used at all.
+    /// module's AppRole; no plane client, agent login or userpass login is built.
     #[test]
     fn the_only_vault_login_is_in_minting_rs() {
         fn sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
@@ -353,7 +359,13 @@ mod tests {
         for f in &files {
             let text = std::fs::read_to_string(f).unwrap();
             let name = f.strip_prefix(&root).unwrap().display().to_string();
-            for never in [concat!("AppRole", "Auth"), concat!("probe", "_login")] {
+            for never in [
+                concat!("Plane", "Client"),
+                concat!("Agent", "Login"),
+                concat!("vault", "rs"),
+                concat!("AppRole", "Auth"),
+                concat!(".login", "("),
+            ] {
                 assert!(!text.contains(never), "{name} uses {never}");
             }
             if text.contains(login) {

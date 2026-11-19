@@ -40,6 +40,9 @@ pub trait VaultLogin: Send + Sync {
         key: &str,
         input: &[u8],
     ) -> impl Future<Output = Result<Zeroizing<Vec<u8>>, VaultSignError>> + Send;
+
+    /// Vault refused a token it had just issued, so its policy may lack this Transit sign.
+    fn refused_after_fresh_login(&self);
 }
 
 pub type Clock = Box<dyn Fn() -> Instant + Send + Sync>;
@@ -82,6 +85,13 @@ impl<L: VaultLogin> ServiceSigner<L> {
         }
     }
 
+    fn refusal(&self, after_fresh_login: VaultSignError) -> SignError {
+        if after_fresh_login == VaultSignError::TokenRefused {
+            self.login.refused_after_fresh_login();
+        }
+        SignError
+    }
+
     async fn fresh(&self) -> Result<L::Token, SignError> {
         let started = (self.now)();
         let (token, ttl) = self.login.login().await?;
@@ -102,17 +112,15 @@ impl<L: VaultLogin> Signer for ServiceSigner<L> {
             Some(t) => (t, true),
             None => (self.fresh().await?, false),
         };
-        match self.login.sign(&token, mount, key, input).await {
-            Ok(signature) => Ok(signature),
-            Err(VaultSignError::TokenRefused) if cached => {
-                let token = self.fresh().await?;
-                self.login
-                    .sign(&token, mount, key, input)
-                    .await
-                    .map_err(|_| SignError)
-            }
-            Err(_) => Err(SignError),
-        }
+        let token = match self.login.sign(&token, mount, key, input).await {
+            Ok(signature) => return Ok(signature),
+            Err(VaultSignError::TokenRefused) if cached => self.fresh().await?,
+            Err(e) => return Err(self.refusal(e)),
+        };
+        self.login
+            .sign(&token, mount, key, input)
+            .await
+            .map_err(|e| self.refusal(e))
     }
 }
 
@@ -195,6 +203,7 @@ mod tests {
         login_calls: Mutex<u32>,
         sign_script: Mutex<VecDeque<Result<(), VaultSignError>>>,
         signed_with: Mutex<Vec<Tok>>,
+        refused_fresh: Mutex<u32>,
     }
 
     impl FakeLogin {
@@ -207,6 +216,7 @@ mod tests {
                 login_calls: Mutex::new(0),
                 sign_script: Mutex::new(signs.into()),
                 signed_with: Mutex::new(Vec::new()),
+                refused_fresh: Mutex::new(0),
             }
         }
 
@@ -245,6 +255,10 @@ mod tests {
                 .pop_front()
                 .unwrap_or(Ok(()));
             next.map(|()| Zeroizing::new(vec![token.0 as u8]))
+        }
+
+        fn refused_after_fresh_login(&self) {
+            *self.refused_fresh.lock().unwrap() += 1;
         }
     }
 
@@ -285,6 +299,10 @@ mod tests {
 
         fn signed_with(&self) -> Vec<Tok> {
             self.fake.signed_with.lock().unwrap().clone()
+        }
+
+        fn refused_fresh(&self) -> u32 {
+            *self.fake.refused_fresh.lock().unwrap()
         }
     }
 
@@ -327,12 +345,18 @@ mod tests {
         assert_eq!(fresh.sign().await, Err(SignError), "a fresh token refused");
         assert_eq!(fresh.logins(), 1);
         assert_eq!(fresh.signed_with(), [Tok(1)]);
+        assert_eq!(fresh.refused_fresh(), 1);
 
         let cached = rig(FakeLogin::new(TTL, vec![Ok(()), refused, refused, refused]));
         assert_eq!(cached.sign().await, Ok(vec![1]));
         assert_eq!(cached.sign().await, Err(SignError));
         assert_eq!(cached.logins(), 2, "one re-login, then the refusal stands");
         assert_eq!(cached.signed_with(), [Tok(1), Tok(1), Tok(2)]);
+        assert_eq!(
+            cached.refused_fresh(),
+            1,
+            "the cached token's refusal is not it"
+        );
     }
 
     #[tokio::test]
@@ -346,6 +370,7 @@ mod tests {
         assert_eq!(r.sign().await, Ok(vec![2]));
         assert_eq!(r.logins(), 2);
         assert_eq!(r.signed_with(), [Tok(1), Tok(1), Tok(2), Tok(2)]);
+        assert_eq!(r.refused_fresh(), 0);
     }
 
     #[tokio::test]
@@ -359,6 +384,22 @@ mod tests {
         assert_eq!(r.logins(), 1);
         assert_eq!(r.signed_with(), [Tok(1), Tok(1)]);
         assert_eq!(r.sign().await, Ok(vec![1]), "the token is still cached");
+        assert_eq!(r.refused_fresh(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_failure_after_a_fresh_login_that_is_not_a_refusal_is_not_reported_as_one() {
+        let failed = Err(VaultSignError::Failed);
+        let fresh = rig(FakeLogin::new(TTL, vec![failed]));
+        assert_eq!(fresh.sign().await, Err(SignError));
+        let relogged = rig(FakeLogin::new(
+            TTL,
+            vec![Ok(()), Err(VaultSignError::TokenRefused), failed],
+        ));
+        assert_eq!(relogged.sign().await, Ok(vec![1]));
+        assert_eq!(relogged.sign().await, Err(SignError));
+        assert_eq!(relogged.logins(), 2);
+        assert_eq!((fresh.refused_fresh(), relogged.refused_fresh()), (0, 0));
     }
 
     #[tokio::test]

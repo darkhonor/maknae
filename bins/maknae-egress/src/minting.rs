@@ -69,6 +69,13 @@ impl VaultLogin for ApproleLogin {
                 sign_failure(&e)
             })
     }
+
+    fn refused_after_fresh_login(&self) {
+        journal(
+            "Transit sign was refused again right after a fresh Vault login: \
+             the AppRole's policy may lack Transit sign on this key",
+        );
+    }
 }
 
 fn sign_failure(e: &VaultError) -> VaultSignError {
@@ -238,8 +245,12 @@ impl MintFrames for EgressMinting {
         let Ok(r) = &self.ready else {
             return RevokeReply::Refused(MintRefusal::Signer);
         };
+        let Some(now) = unix_now() else {
+            journal("revoke refused: the clock is before 1970");
+            return RevokeReply::Refused(MintRefusal::Signer);
+        };
         let mut log = |l: &str| journal(l);
-        let mut d = r.deps(unix_now().unwrap_or_default(), &mut log);
+        let mut d = r.deps(now, &mut log);
         r.rt.block_on(minter::revoke(req, agent, app, &mut d))
     }
 
