@@ -70,3 +70,4 @@ An agent in Maknae remembers in three spaces: its own self, curated by its owner
 - [ADR-0024](../adr/ADR-0024-tenancy-model-and-agent-identity.md) decision 6 and [ADR-0037](../adr/ADR-0037-task-bindings-labels-and-tool-authorization.md) name the shared-memory residual this document describes.
 - [`graph-native-memory-idea.md`](../graph-native-memory-idea.md) describes a person's memory and the shared reference corpus as two spaces of one graph; an agent's three spaces would sit beside them.
 - [`agentic-patterns-and-what-maknae-does-differently.md`](agentic-patterns-and-what-maknae-does-differently.md) notes that memory and sessions were not in its first milestone.
+- [`long-term-memory.md`](long-term-memory.md) describes what an agent *knows*, as opposed to what it remembers of itself and others, and how much each source's word is worth.
