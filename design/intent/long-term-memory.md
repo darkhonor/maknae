@@ -20,7 +20,15 @@ The two fail differently. A wrong behavioural memory makes an agent clumsy or, i
 
 ## The lesson from the Knowledge Lake: closeness is not authority
 
-The Knowledge Lake is a curated corpus the maintainer built so that a model would know not only what a document says, but **how much that document's word is worth against another's**. Its central lesson is that the most common retrieval design, embedding the corpus and returning what is nearest to the question, cannot answer that.
+The Knowledge Lake is a curated corpus the maintainer built so that a model would know not only what a document says, but **how much that document's word is worth against another's**. It holds extracts of the sources a security engineer works from:
+- **Security control catalogues**, such as NIST SP 800-53, so a control is quoted as written rather than as remembered.
+- **DoD Security Technical Implementation Guides (STIGs)**, rule by rule, so a hardening answer names the rule it rests on.
+- **Policies, directives and instructions**, the documents that bind, with what each supersedes.
+- **Vendor documentation**, for what a product can actually do, kept apart from what policy requires.
+
+Each answers a different question, and a model working in a regulated environment needs all of them, current and with their standing attached. Training data cannot supply that: it is frozen at a cut-off, mixes versions, and never says which document governs.
+
+Its central lesson is that the most common retrieval design, embedding the corpus and returning what is nearest to the question, cannot answer that.
 
 - **Similarity has no notion of currency.** Vector search returns every version of a document that resembles the question, side by side, with nothing to say which one still governs.
 - **The document that revokes another often shares no words with it.** A new directive can withdraw an old one while discussing an entirely different subject. Similarity search never retrieves the revoking document, so the answer is fluent, sourced and wrong. No ranking improvement fixes this; only a recorded relationship ("this supersedes that") does. It has to be captured; it cannot be retrieved.
