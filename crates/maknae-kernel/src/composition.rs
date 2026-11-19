@@ -888,10 +888,25 @@ mod tests {
         out
     }
 
-    const TOOL_SITE_POLICY: &str = "schema_version: 1\npermissions:\n  allow: [\"Tool(github-read gh pr view *)\", \"Tool(rust-build cargo build *)\"]\n  deny: [\"Tool(rust-build cargo build --config*)\"]\nsubjects:\n  operator:\n    permissions:\n      allow: [\"Tool(github-read git fetch *)\"]\nroles:\n  admin:\n    allow: [\"session.new\"]\n  user:\n    allow: [\"session.new\"]\n";
+    const TOOL_SITE_POLICY: &str = r#"schema_version: 1
+permissions:
+  allow: ["Tool(github-read gh pr view *)", "Tool(rust-build cargo build *)"]
+  deny: ["Tool(rust-build cargo build --release *)"]
+subjects:
+  operator:
+    permissions:
+      allow: ["Tool(github-read git fetch *)"]
+roles:
+  admin:
+    allow: ["session.new"]
+  user:
+    allow: ["session.new"]
+"#;
 
-    const TOOL_AGENT_POLICY: &str =
-        "schema_version: 1\npermissions:\n  allow: [\"Tool(rust-build cargo check *)\"]\n";
+    const TOOL_AGENT_POLICY: &str = r#"schema_version: 1
+permissions:
+  allow: ["Tool(rust-build cargo check *)"]
+"#;
 
     fn tool_invoke_decisions() -> String {
         use crate::handler::{Stamp, TaskStamp};
@@ -1002,7 +1017,7 @@ mod tests {
                     format!("{} in #{section}", c.key)
                 });
                 out.push_str(&format!(
-                    "{who}{tasked} tool.invoke {entry} {argv:?} -> {:?} {:?} {rule:?} => {:?}\n",
+                    "{who}{tasked} tool.invoke {entry} {program} {argv:?} -> {:?} {:?} {rule:?} => {:?}\n",
                     d.verdict,
                     d.role,
                     maknae_security::finalize(d.verdict.clone())
