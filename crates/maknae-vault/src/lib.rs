@@ -126,7 +126,9 @@ pub use token_record::{
 pub use token_store::{
     erase_user_token, load_user_token, observe_systemd_creds, read_user_token, store_user_token,
 };
-pub use transit::{parse_transit_signature, ServiceLogin, ServiceToken};
+pub use transit::{
+    parse_transit_signature, ServiceLogin, ServiceToken, TRANSIT_SIGN_INPUT_MAX_BYTES,
+};
 pub use trust_bundle::TrustBundle;
 pub use user_login::{
     userpass_username_is_acceptable, Password, UserLogin, UserToken, MAX_PASSWORD_BYTES,

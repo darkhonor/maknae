@@ -1,5 +1,8 @@
 use crate::api_shape::{addr_refusal, VaultOp};
-use crate::transit::{approle_credential, approle_login_path, transit_sign_path, ServiceToken};
+use crate::transit::{
+    approle_credential, approle_login_path, transit_sign_path, ServiceToken,
+    TRANSIT_SIGN_INPUT_MAX_BYTES,
+};
 use crate::user_login::{login_path, Password, UserToken};
 use crate::wrap::{client_token, wrap_ttl_value, KvDataPath, WrappingToken};
 use crate::{UserAuth, VaultError};
@@ -105,6 +108,12 @@ pub(crate) fn approle_login_body(
 }
 
 pub(crate) fn transit_sign_body(input: &[u8]) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+    if input.len() > TRANSIT_SIGN_INPUT_MAX_BYTES {
+        return Err(VaultError::InvalidSecret {
+            what: "Transit sign input",
+            why: "over 8192 bytes",
+        });
+    }
     let input = STANDARD.encode(input);
     json_body(
         SIGN_BODY_OVERHEAD + input.len(),
@@ -533,6 +542,20 @@ mod tests {
         let body = transit_sign_body(&[0xfb, 0xff]).unwrap();
         let req = transit_sign_request(&http(), &base(), &service, "t", "k", body).unwrap();
         assert!(body_json(&req)["input"] == "+/8=");
+    }
+
+    #[test]
+    fn the_sign_input_is_capped_before_any_encoding() {
+        use crate::transit::TRANSIT_SIGN_INPUT_MAX_BYTES;
+        assert_eq!(TRANSIT_SIGN_INPUT_MAX_BYTES, 8192);
+        assert!(matches!(
+            transit_sign_body(&vec![b'a'; TRANSIT_SIGN_INPUT_MAX_BYTES + 1]),
+            Err(VaultError::InvalidSecret {
+                what: "Transit sign input",
+                ..
+            })
+        ));
+        assert!(transit_sign_body(&vec![b'a'; TRANSIT_SIGN_INPUT_MAX_BYTES]).is_ok());
     }
 
     #[test]

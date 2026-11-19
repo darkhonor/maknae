@@ -10,6 +10,8 @@ use zeroize::Zeroizing;
 
 const TRANSIT_HASH: &str = "sha2-256";
 const SIGNATURE_PREFIX: &str = "vault:v";
+pub const TRANSIT_SIGN_INPUT_MAX_BYTES: usize = 8192;
+const RSA_SIGNATURE_BYTES: [usize; 3] = [256, 384, 512];
 
 pub struct ServiceToken(Zeroizing<String>);
 
@@ -113,7 +115,15 @@ pub(crate) fn parse_sign_reply(body: &[u8]) -> Result<Zeroizing<Vec<u8>>, VaultE
         op: VaultOp::TransitSign.as_str(),
         why: "the response carried no data block".into(),
     })?;
-    parse_transit_signature(&data.signature)
+    let signature = parse_transit_signature(&data.signature)?;
+    if !RSA_SIGNATURE_BYTES.contains(&signature.len()) {
+        return Err(VaultError::VaultBody {
+            op: VaultOp::TransitSign.as_str(),
+            why: "the signature length is not RSA-2048, 3072 or 4096; the Transit key is not RSA"
+                .into(),
+        });
+    }
+    Ok(signature)
 }
 
 fn malformed_signature() -> VaultError {
@@ -306,10 +316,39 @@ mod tests {
         );
     }
 
+    fn reply_of(len: usize) -> String {
+        let sig = vec![0x5au8; len];
+        format!(
+            r#"{{"data":{{"signature":"vault:v1:{}"}}}}"#,
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, sig)
+        )
+    }
+
+    #[test]
+    fn a_non_rsa_length_signature_is_refused() {
+        for len in [64, 1, 255, 257, 383, 511, 513] {
+            let e = parse_sign_reply(reply_of(len).as_bytes()).unwrap_err();
+            assert!(
+                matches!(&e, VaultError::VaultBody { op: "Transit sign", why } if why.contains("not RSA")),
+                "{len}: {e}"
+            );
+        }
+        for len in [256, 384, 512] {
+            assert_eq!(
+                parse_sign_reply(reply_of(len).as_bytes()).unwrap().len(),
+                len
+            );
+        }
+    }
+
     #[test]
     fn a_sign_reply_yields_the_signature_bytes() {
-        let body = br#"{"request_id":"r","data":{"key_version":1,"signature":"vault:v1:AAEC"}}"#;
-        assert_eq!(parse_sign_reply(body).unwrap().as_slice(), &[0, 1, 2]);
+        let sig = [0xa5u8; 256];
+        let body = format!(
+            r#"{{"request_id":"r","data":{{"key_version":1,"signature":"vault:v1:{}"}}}}"#,
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, sig)
+        );
+        assert_eq!(parse_sign_reply(body.as_bytes()).unwrap().as_slice(), sig);
         assert!(matches!(
             parse_sign_reply(br#"{"data":null}"#),
             Err(VaultError::VaultBody { why, .. }) if why.contains("no data block")
