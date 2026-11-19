@@ -226,3 +226,7 @@ Dated as-built amendment; rides the #628 PR. Seven statements:
 
 - **The operand bounds what the kernel releases to the model, not the agent runtime's own uid.** The runtime's account owns its whole home, every partition included, and can read or write any of it without asking the kernel. Bounding the runtime process is the confinement work in #629.
 - **Hard links.** A file in one partition that is also linked into another is one object with two paths. The operand decides the kernel-reported path, and relies on [ADR-0034](ADR-0034-the-models-file-boundary.md) decision 2's single-link check to refuse a multiply-linked file.
+
+## Amendment 2026-11-19 (#474): the ceiling's inputs widen
+
+Recorded by [ADR-0037](ADR-0037-task-bindings-labels-and-tool-authorization.md) decision 8. Besides the object's own `classification` key, the ceiling claims the client-supplied labels `task.classification` and `binding.classification`, and refuses when either ranks above the declared level or cannot be ranked. Those labels can only add refusals: no label writes `classification`, and the ceiling still never permits. Owed, not built.

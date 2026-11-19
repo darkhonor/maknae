@@ -307,7 +307,7 @@
   <text x="1250" y="738" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="700" fill="#3A3936">#475</text>
   <text x="1288" y="738" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#3A3936">Task intake envelope</text>
   <text x="1256" y="755" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#3A3936">agent.task (superseded)</text>
-  <text x="1250" y="779" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#7A7873">verb is session.task (ADR-0024); blocked by #474</text>
+  <text x="1250" y="779" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#7A7873">verb is session.task (ADR-0033); bindings and reach: ADR-0037</text>
   </g>
   <g><title>Issue 482: Console task status and results</title>
   <rect x="1238" y="800" width="280" height="69" rx="9" fill="#F3F2EF" stroke="#7A7873" stroke-width="1.1"/>

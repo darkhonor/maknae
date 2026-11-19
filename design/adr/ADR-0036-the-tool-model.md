@@ -6,6 +6,7 @@
 - **Raised by:** [#420](https://github.com/darkhonor/maknae/issues/420) (decisions 3, 4, 10 and 12), [#477](https://github.com/darkhonor/maknae/issues/477)
 - **Amends:** [ADR-0004](ADR-0004-modular-authorization-architecture.md) (the 2026-08-29 retirement of `Bash(argv)`); [ADR-0034](ADR-0034-the-models-file-boundary.md) decision 10 (the first command verb); [ADR-0023](ADR-0023-runtime-loop-role-and-placement.md) decisions 2, 4 and 6; [ADR-0024](ADR-0024-tenancy-model-and-agent-identity.md) decision 6 and its workspace residual
 - **Builds on:** [ADR-0035](ADR-0035-policy-enforcement-points-placement-and-trust-tiers.md) (PEP placement and trust tiers)
+- **Amended:** 2026-11-19 by [ADR-0037](ADR-0037-task-bindings-labels-and-tool-authorization.md) (maintainer ruling): tool entries declare `binds:`; credential classes narrow from a task's bindings; the model sees a filtered view of the entries it may call; a tool entry carrying an unclaimed label is disabled. See the banners at decisions 7 and 13.
 
 ## Context
 
@@ -120,6 +121,8 @@ Three approaches were surveyed: a host fence (bubblewrap or systemd sandboxing o
          vault: { subcommands: ["kv get *", "read *"], deny_args: ["-address*", "-ca-*", "-tls-skip-verify*", "-namespace*"], timeout: 2m, output: 1MiB }
    ```
 
+   **Amended 2026-11-19 ([#474](https://github.com/darkhonor/maknae/issues/474), [ADR-0037](ADR-0037-task-bindings-labels-and-tool-authorization.md) decisions 4, 5 and 8):** an entry also declares `binds:`, the binding kinds it consumes and, for each, a resolver from a closed list; an entry whose binding kind the conversation or task lacks is not offered and is refused if called. Patterns may reference bound values. Entries may carry `entry.<namespace>.<key>` labels; an entry carrying one no loaded operand claims is disabled with a load warning. An accreditation label is evaluated only by an operand that decides destination dominance, which the default build does not have. The model never sees this file: it is offered a filtered view of what it may call.
+
 8. **Maknae bounds what workspace code can do; it does not judge whether that code is trustworthy.** Maknae cannot control the code an operator brings in or is tasked with. Its job is that everything inside Maknae is bounded and policy-decided. Outside Maknae, the operating system and the use of the same code are not Maknae's to govern.
    - An entry declares `executes_workspace: true` when its tool runs code from the workspace: cargo's `build.rs`, procedural macros and tests; Terraform's providers and `data "external"`; Packer's provisioners.
    - **Validator rule:** an entry with `executes_workspace: true` that holds a credential and has network must name its sites explicitly, with no wildcard. If the workspace's code steals the credential, the channel it can use is at most that credential's own provider, through connections each decided, on the trail.
@@ -160,6 +163,8 @@ Three approaches were surveyed: a host fence (bubblewrap or systemd sandboxing o
     | Vault dynamic secret | leased per task from a secrets engine | Vault | the lease; revoked at task end | cloud and database credentials |
 
     A delivered credential file (git's store-helper file, say) is written where the shipped host `sensitive.yaml` list covers it, so the model's own `fs.read` is refused whatever the subject's grants: for an operator under `/run/user/<uid>/maknae/` (the list's `/run/user/*/**`); for the Agent Daemon, which as a service account has no `/run/user/<uid>`, under a runtime directory its unit owns (for example `/run/maknae-agent/<id>/`), which needs both the unit setting and a host-list entry (decision 19). A front end that cannot write to its location denies. The file is removed when the invocation ends. Where each minting key lives, and the per-forge detail, belong to [#168](https://github.com/darkhonor/maknae/issues/168). This decision supersedes #168's scope item 3, under which a tool container held no token and the Egress Daemon added GitHub's `Authorization` header: that would have required the Egress Daemon to terminate TLS for tool traffic, which decision 9's proxy, deciding each tunnel, does not do.
+
+    **Amended 2026-11-19 ([#474](https://github.com/darkhonor/maknae/issues/474), [ADR-0037](ADR-0037-task-bindings-labels-and-tool-authorization.md) decision 7):** "the task's repositories" are the task's sealed `git` bindings, and the permission is the intersection of the tasker's reach and the agent's, observed at submission; the installation token is minted at hand-out, and each re-mint re-checks the agent's reach. A credential class's `kind` implements that reach check, and an entry whose class kind implements none is refused in tasks.
 
 14. **Secrets go to tools; the model gets redacted output.** Redaction prevents accidental disclosure; it is not a barrier against code that holds the credential (below).
     - A credential reaches a container only through its class's delivery, and is never placed in arguments the model writes.
