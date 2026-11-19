@@ -249,6 +249,12 @@ files = [
   # exhaustive credential-kind dispatch, and the App JWT's pinned bytes.
   "crates/maknae-deputy/src/mint/admit.rs",
   "crates/maknae-deputy/src/mint/jwt.rs",
+  # #168: one mint end to end, no partial success (every token minted in a
+  # refused frame is revoked), the live-token journal, and the revoke opener;
+  # the recipient key read from a root-owned file only; the Transit signing seam.
+  "crates/maknae-deputy/src/mint/minter.rs",
+  "crates/maknae-deputy/src/mint/recipient.rs",
+  "crates/maknae-deputy/src/mint/signer.rs",
   # #318: what ALL THREE binaries refuse to inherit from their environment, and
   # the disjoint list of what they must never stop inheriting. Moved here from
   # bins/maknae-egress/src/env.rs (#240b) when maknaed and maknae adopted the
