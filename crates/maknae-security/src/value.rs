@@ -16,6 +16,7 @@ pub enum AttrValue {
     Int(i64),
     Bool(bool),
     Set(BTreeSet<String>),
+    List(Vec<String>),
 }
 
 /// An opaque bag of typed attributes. Deterministic ordering via `BTreeMap`.
@@ -47,6 +48,14 @@ impl Attributes {
     pub fn set_of(&self, k: &str) -> Option<&BTreeSet<String>> {
         match self.0.get(k) {
             Some(AttrValue::Set(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The list value at `k`, or `None` if absent or not a `List`.
+    pub fn list(&self, k: &str) -> Option<&[String]> {
+        match self.0.get(k) {
+            Some(AttrValue::List(l)) => Some(l.as_slice()),
             _ => None,
         }
     }
@@ -85,5 +94,35 @@ mod tests {
         let mut b = Attributes::new();
         b.insert("flag", AttrValue::Bool(true));
         assert_eq!(b.set_of("flag"), None); // wrong type
+    }
+
+    #[test]
+    fn list_preserves_order() {
+        let mut a = Attributes::new();
+        let v = vec!["b".to_string(), "a".to_string(), "b".to_string()];
+        a.insert("tool.argv", AttrValue::List(v.clone()));
+        assert_eq!(a.list("tool.argv"), Some(v.as_slice()));
+    }
+
+    #[test]
+    fn list_accessor_is_none_for_other_variants() {
+        let mut a = Attributes::new();
+        a.insert("s", AttrValue::Str("x".into()));
+        a.insert("set", AttrValue::Set(BTreeSet::new()));
+        assert_eq!(a.list("s"), None);
+        assert_eq!(a.list("set"), None);
+        assert_eq!(a.list("missing"), None);
+        a.insert("l", AttrValue::List(vec![]));
+        assert_eq!(a.str("l"), None);
+        assert_eq!(a.set_of("l"), None);
+        assert_eq!(a.list("l"), Some(&[][..]));
+    }
+
+    #[test]
+    fn list_equality_is_order_sensitive() {
+        let ab = AttrValue::List(vec!["a".into(), "b".into()]);
+        let ba = AttrValue::List(vec!["b".into(), "a".into()]);
+        assert_ne!(ab, ba);
+        assert_eq!(ab, ab.clone());
     }
 }

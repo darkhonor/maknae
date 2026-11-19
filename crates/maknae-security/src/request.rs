@@ -147,6 +147,12 @@ impl FsOperation {
 /// principle 2 forbids.
 pub const RESOURCE_CLASSIFICATION: &str = "classification";
 
+pub const RESOURCE_TOOL_ENTRY: &str = "tool.entry";
+pub const RESOURCE_TOOL_PROGRAM: &str = "tool.program";
+pub const RESOURCE_TOOL_ARGV: &str = "tool.argv";
+pub const RESOURCE_BINDING_KINDS: &str = "binding.kinds";
+pub const ENTRY_LABEL_PREFIX: &str = "entry.";
+
 /// Which boundary a request arrived on.
 ///
 /// **Derived from the accepting listener and from nothing else.** Never from a request
