@@ -2978,6 +2978,61 @@ mod tests {
 
     const SHIPPED: &str = include_str!("../../../packaging/common/authz.yaml");
 
+    pub(crate) fn tool_request(
+        uid: u32,
+        entry: &str,
+        program: &str,
+        argv: &[&str],
+    ) -> maknae_security::Request {
+        use maknae_security::{Action, AttrValue, Attributes, Context, Resource, Subject};
+        let mut subject = Attributes::new();
+        subject.insert(decide::SUBJECT_UID, AttrValue::Int(i64::from(uid)));
+        let mut resource = Attributes::new();
+        resource.insert(
+            maknae_security::RESOURCE_TOOL_ENTRY,
+            AttrValue::Str(entry.into()),
+        );
+        resource.insert(
+            maknae_security::RESOURCE_TOOL_PROGRAM,
+            AttrValue::Str(program.into()),
+        );
+        resource.insert(
+            maknae_security::RESOURCE_TOOL_ARGV,
+            AttrValue::List(argv.iter().map(|a| a.to_string()).collect()),
+        );
+        resource.insert(
+            maknae_security::RESOURCE_BINDING_KINDS,
+            AttrValue::Set(Default::default()),
+        );
+        maknae_security::Request {
+            subject: Subject(subject),
+            resource: Resource(resource),
+            action: Action("tool.invoke".into()),
+            context: Context(Attributes::new()),
+        }
+    }
+
+    pub(crate) fn granting_tool_invoke(l: &decide::LoadedPolicy) -> decide::LoadedPolicy {
+        let invoke = || vec![("tool.invoke", "tool.invoke".to_string())];
+        decide::LoadedPolicy {
+            policy: l.policy.clone(),
+            roles: l.roles.clone(),
+            action_grants: crate::decide::ActionGrants::from_validated(
+                [
+                    ("admin".to_string(), (invoke(), Vec::new())),
+                    ("user".to_string(), (invoke(), Vec::new())),
+                ]
+                .into(),
+            ),
+            destinations: l.destinations.clone(),
+            subjects: l.subjects.clone(),
+            agents: l.agents.clone(),
+            taskers: l.taskers.clone(),
+            sensitive: Arc::clone(&l.sensitive),
+            tools: Arc::clone(&l.tools),
+        }
+    }
+
     /// The shipped file with the nine credential denies restored, for deny-path tests.
     pub(crate) fn shipped_denying() -> &'static str {
         static DENYING: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
@@ -5236,6 +5291,7 @@ mod tests {
 
     const TOOLS_ONE: &str = "schema_version: 1\ntools:\n  sentinel-674-one:\n    executes_workspace: false\n    commands:\n      echo: { subcommands: [\"hi *\"] }\n";
     const TOOLS_TWO: &str = "schema_version: 1\ntools:\n  sentinel-674-one:\n    executes_workspace: false\n    commands:\n      echo: { subcommands: [\"bye *\"] }\n";
+    const TOOLS_674_BUILD: &str = "schema_version: 1\ntools:\n  sentinel-674-build:\n    executes_workspace: false\n    commands:\n      cargo: { subcommands: [\"build *\"] }\n";
     const TOOLS_BAD_ENTRY: &str = "schema_version: 1\ntools:\n  sentinel-674-bad:\n    isolation: sentinel-674-nope\n    executes_workspace: false\n";
 
     fn tools(text: &str) -> maknae_config::ToolsCatalog {
@@ -7397,6 +7453,46 @@ mod tests {
                     .collect::<Vec<_>>(),
                 [(HOBI, "hobi-svc", "user"), (SUGA, "suga-svc", "user")]
             );
+        }
+
+        #[test]
+        fn an_agent_tool_citation_resolves_through_a_compiled_snapshot() {
+            let src = source(
+                None,
+                &[],
+                load(
+                    vec![hobi()],
+                    &[(
+                        "hobi",
+                        "schema_version: 1\npermissions:\n  allow: [\"Tool(sentinel-674-build cargo build *)\"]\n",
+                    )],
+                ),
+            )
+            .with_tools(tools(TOOLS_674_BUILD));
+            let snap = compiled(&src);
+            let lp = super::granting_tool_invoke(snap.loaded());
+            let d = decide::decide_loaded_cited(
+                &lp,
+                &principal(),
+                &agent_channel(
+                    super::tool_request(HOBI, "sentinel-674-build", "cargo", &["build"]),
+                    "hobi",
+                ),
+            );
+            assert!(
+                matches!(d.verdict, maknae_security::Verdict::Permit { .. }),
+                "{d:?}"
+            );
+            assert_eq!(
+                d.cited,
+                Some(decide::Cited::AgentPath {
+                    agent: "hobi".into(),
+                    effect: decide::Effect::Allow,
+                    source: "Tool(sentinel-674-build cargo build *)".into(),
+                })
+            );
+            let c = snap.cite(d.cited.as_ref().unwrap()).unwrap();
+            assert!(c.section.ends_with("#agents.hobi"), "{}", c.section);
         }
 
         #[test]

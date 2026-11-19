@@ -5733,8 +5733,8 @@ mod tests {
     const TOOL_ADMIN: u32 = 1101;
     const TOOL_USER: u32 = 1102;
     const TOOL_GUEST: u32 = 1103;
-    const TOOLS_674: &str = "schema_version: 1\ncredential_classes:\n  sentinel-674-vault-class:\n    kind: vault-child-token\n    delivery: [\"env:VAULT_TOKEN\"]\ntools:\n  sentinel-674-build:\n    executes_workspace: false\n    commands:\n      cargo:\n        subcommands: [\"build *\", \"test *\"]\n        deny_args: [\"--config*\", \"-Z*\"]\n  sentinel-674-bound:\n    executes_workspace: false\n    binds: { git: { resolver: git } }\n    commands:\n      git:\n        subcommands: [\"status\"]\n  sentinel-674-vault:\n    executes_workspace: false\n    credential: sentinel-674-vault-class\n    commands:\n      vault:\n        subcommands: [\"read *\"]\n  sentinel-674-off:\n    enabled: false\n    executes_workspace: false\n    commands:\n      cargo:\n        subcommands: [\"build *\"]\n";
-    const TOOL_SITE_ALLOW: &str = "permissions:\n  allow: [\"Tool(sentinel-674-build cargo build *)\", \"Tool(sentinel-674-build cargo test *)\", \"Tool(sentinel-674-bound git status)\", \"Tool(sentinel-674-vault vault read *)\", \"Tool(sentinel-674-off cargo build *)\"]\n";
+    const TOOLS_674: &str = "schema_version: 1\ncredential_classes:\n  sentinel-674-vault-class:\n    kind: vault-child-token\n    delivery: [\"env:VAULT_TOKEN\"]\n  sentinel-674-app:\n    kind: github-app-installation\n    source: minted-per-task\n    narrowing: provider\n    minting: trust-plane\n    app: sentinel-674-app\ntools:\n  sentinel-674-app:\n    executes_workspace: false\n    credential: sentinel-674-app\n    commands:\n      gh:\n        subcommands: [\"pr view *\"]\n  sentinel-674-build:\n    executes_workspace: false\n    commands:\n      cargo:\n        subcommands: [\"build *\", \"test *\"]\n        deny_args: [\"--config*\", \"-Z*\"]\n  sentinel-674-bound:\n    executes_workspace: false\n    binds: { git: { resolver: git } }\n    commands:\n      git:\n        subcommands: [\"status\"]\n  sentinel-674-vault:\n    executes_workspace: false\n    credential: sentinel-674-vault-class\n    commands:\n      vault:\n        subcommands: [\"read *\"]\n  sentinel-674-off:\n    enabled: false\n    executes_workspace: false\n    commands:\n      cargo:\n        subcommands: [\"build *\"]\n";
+    const TOOL_SITE_ALLOW: &str = "permissions:\n  allow: [\"Tool(sentinel-674-build cargo build *)\", \"Tool(sentinel-674-build cargo test *)\", \"Tool(sentinel-674-bound git status)\", \"Tool(sentinel-674-vault vault read *)\", \"Tool(sentinel-674-off cargo build *)\", \"Tool(sentinel-674-app gh pr view *)\"]\n";
 
     fn tool_grants(allow: &[&str], deny: &[&str]) -> ActionGrants {
         let invoke = |roles: &[&str], role: &str| -> Vec<Grant> {
@@ -6014,6 +6014,56 @@ mod tests {
             .0
             .insert(maknae_security::SUBJECT_TASK, AttrValue::Int(7));
         assert_eq!(tool_decided(&lp, &r).verdict, Verdict::Indeterminate);
+    }
+
+    #[test]
+    fn a_task_proceeds_to_grants_for_a_credential_class_with_a_reach_check() {
+        let lp = lp_tool(TOOL_SITE_ALLOW, &["user"], &[]);
+        assert!(lp
+            .tools
+            .class("sentinel-674-app")
+            .is_some_and(|c| c.kind.has_reach_check()));
+        let mut r = tool_req(TOOL_USER, "sentinel-674-app", "gh", &["pr", "view", "1"]);
+        r.subject.0.insert(
+            maknae_security::SUBJECT_TASK,
+            AttrValue::Str("sentinel-674-task".into()),
+        );
+        let d = tool_decided(&lp, &r);
+        assert_eq!(d.verdict, permit_with_audit());
+        assert_eq!(
+            d.cited,
+            site_cite(Effect::Allow, "Tool(sentinel-674-app gh pr view *)")
+        );
+    }
+
+    #[test]
+    fn the_role_grant_is_decided_before_the_ceiling() {
+        let lp = lp_tool(TOOL_SITE_ALLOW, &[], &[]);
+        assert_eq!(
+            tool_decided(
+                &lp,
+                &tool_req(TOOL_USER, "sentinel-674-missing", "cargo", &["build"])
+            )
+            .verdict,
+            Verdict::NotApplicable {
+                note: Some("role user: no rule for tool.invoke".into())
+            }
+        );
+    }
+
+    #[test]
+    fn the_conversation_is_decided_before_the_role_grant() {
+        let lp = lp_tool(TOOL_SITE_ALLOW, &[], &[]);
+        let mut r = build(TOOL_USER, &["build"]);
+        r.resource.0.insert(
+            RESOURCE_CONVERSATION_STATE,
+            AttrValue::Str(CONVERSATION_ACTIVE.into()),
+        );
+        r.resource.0.insert(
+            RESOURCE_CONVERSATION_OWNER,
+            AttrValue::Int(i64::from(TOOL_ADMIN)),
+        );
+        assert_eq!(tool_decided(&lp, &r).verdict, deny(FOREIGN));
     }
 
     #[test]
