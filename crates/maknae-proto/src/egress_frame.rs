@@ -164,7 +164,36 @@ impl std::fmt::Debug for MintRequest {
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionSet {
     pub repositories: Vec<String>,
+    #[serde(deserialize_with = "permissions_without_duplicates")]
     pub permissions: std::collections::BTreeMap<GithubPermission, AccessLevel>,
+}
+
+fn permissions_without_duplicates<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<std::collections::BTreeMap<GithubPermission, AccessLevel>, D::Error> {
+    struct V;
+    impl<'de> serde::de::Visitor<'de> for V {
+        type Value = std::collections::BTreeMap<GithubPermission, AccessLevel>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a map of GitHub permissions, each named once")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut m: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut out = std::collections::BTreeMap::new();
+            while let Some((k, v)) = m.next_entry::<GithubPermission, AccessLevel>()? {
+                if out.insert(k, v).is_some() {
+                    return Err(serde::de::Error::custom(format_args!(
+                        "duplicate permission {}",
+                        k.as_str()
+                    )));
+                }
+            }
+            Ok(out)
+        }
+    }
+    d.deserialize_map(V)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -176,6 +205,19 @@ pub enum GithubPermission {
     Checks,
     Statuses,
     Metadata,
+}
+
+impl GithubPermission {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Contents => "contents",
+            Self::PullRequests => "pull_requests",
+            Self::Issues => "issues",
+            Self::Checks => "checks",
+            Self::Statuses => "statuses",
+            Self::Metadata => "metadata",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1055,6 +1097,7 @@ mod tests {
                 ciborium::Value::serialized(&p).unwrap().as_text(),
                 Some(wire)
             );
+            assert_eq!(p.as_str(), wire);
         }
         for (l, wire) in [(AccessLevel::Read, "read"), (AccessLevel::Write, "write")] {
             assert_eq!(
@@ -1084,6 +1127,23 @@ mod tests {
             with("contents", "admin").is_err(),
             "access levels are closed"
         );
+    }
+
+    #[test]
+    fn a_duplicate_permission_key_fails_to_decode() {
+        let buf = frame_bytes(&EgressFrame::Mint(mint()));
+        let mut v: ciborium::Value = ciborium::from_reader(&buf[..]).unwrap();
+        let ciborium::Value::Array(sets) = field(field(&mut v, "mint"), "sets") else {
+            panic!("sets is an array");
+        };
+        let ciborium::Value::Map(perms) = field(&mut sets[1], "permissions") else {
+            panic!("permissions is a map");
+        };
+        perms.push(("issues".into(), "write".into()));
+        let msg = crate::decode_egress_frame(&cbor(&v))
+            .expect_err("issues: read then issues: write")
+            .to_string();
+        assert!(msg.contains("duplicate permission issues"), "{msg}");
     }
 
     #[test]
