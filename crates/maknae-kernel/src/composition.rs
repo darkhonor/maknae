@@ -888,25 +888,27 @@ mod tests {
         out
     }
 
-    const TOOL_SITE_POLICY: &str = r#"schema_version: 1
-permissions:
-  allow: ["Tool(github-read gh pr view *)", "Tool(rust-build cargo build *)"]
-  deny: ["Tool(rust-build cargo build --release *)"]
-subjects:
-  operator:
-    permissions:
-      allow: ["Tool(github-read git fetch *)"]
-roles:
-  admin:
-    allow: ["session.new"]
-  user:
-    allow: ["session.new"]
-"#;
+    const TOOL_SITE_POLICY: &str = concat!(
+        "schema_version: 1\n",
+        "permissions:\n",
+        "  allow: [\"Tool(github-read gh pr view *)\", \"Tool(rust-build cargo build *)\"]\n",
+        "  deny: [\"Tool(rust-build cargo build --release *)\"]\n",
+        "subjects:\n",
+        "  operator:\n",
+        "    permissions:\n",
+        "      allow: [\"Tool(github-read git fetch *)\"]\n",
+        "roles:\n",
+        "  admin:\n",
+        "    allow: [\"session.new\"]\n",
+        "  user:\n",
+        "    allow: [\"session.new\"]\n",
+    );
 
-    const TOOL_AGENT_POLICY: &str = r#"schema_version: 1
-permissions:
-  allow: ["Tool(rust-build cargo check *)"]
-"#;
+    const TOOL_AGENT_POLICY: &str = concat!(
+        "schema_version: 1\n",
+        "permissions:\n",
+        "  allow: [\"Tool(rust-build cargo check *)\"]\n",
+    );
 
     fn tool_invoke_decisions() -> String {
         use crate::handler::{Stamp, TaskStamp};
