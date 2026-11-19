@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use super::recipient::{AGENTS_DIR, SEAL_PUB_SUFFIX};
 use maknae_config::AgentId;
 use maknae_seal::SealPrivateKey;

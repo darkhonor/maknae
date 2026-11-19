@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use crate::serve::{serve_one, MintFrames, ServeError, FRAME_IO_TIMEOUT};
 use maknae_config::EgressBounds;
 use maknae_proto::{
