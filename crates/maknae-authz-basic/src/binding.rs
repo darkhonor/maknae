@@ -80,6 +80,9 @@ pub enum IdentityProblem {
     ToolGrantUnknownEntry {
         source: String,
     },
+    ToolGrantUnknownProgram {
+        source: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -144,6 +147,7 @@ impl IdentityProblem {
             Self::AgentSkipped { .. } => "agent_skipped",
             Self::ToolEntryDisabled { .. } => "tool_entry_disabled",
             Self::ToolGrantUnknownEntry { .. } => "tool_grant_unknown_entry",
+            Self::ToolGrantUnknownProgram { .. } => "tool_grant_unknown_program",
         }
     }
 
@@ -153,7 +157,8 @@ impl IdentityProblem {
             | Self::UnresolvedAdversary { .. }
             | Self::AgentSkipped { .. }
             | Self::ToolEntryDisabled { .. }
-            | Self::ToolGrantUnknownEntry { .. } => None,
+            | Self::ToolGrantUnknownEntry { .. }
+            | Self::ToolGrantUnknownProgram { .. } => None,
             Self::Contained { uid, .. }
             | Self::Unbound { uid, .. }
             | Self::CarriedForward { uid, .. }
@@ -179,7 +184,9 @@ impl IdentityProblem {
             Self::AgentSkipped { entry, .. } | Self::ToolEntryDisabled { entry, .. } => {
                 vec![entry.clone()]
             }
-            Self::ToolGrantUnknownEntry { source } => vec![source.clone()],
+            Self::ToolGrantUnknownEntry { source } | Self::ToolGrantUnknownProgram { source } => {
+                vec![source.clone()]
+            }
             Self::PrincipalAdmin { .. } => Vec::new(),
         }
     }
@@ -204,7 +211,8 @@ impl IdentityProblem {
             }
             | Self::AgentSkipped { .. }
             | Self::ToolEntryDisabled { .. }
-            | Self::ToolGrantUnknownEntry { .. } => Vec::new(),
+            | Self::ToolGrantUnknownEntry { .. }
+            | Self::ToolGrantUnknownProgram { .. } => Vec::new(),
         }
     }
 }
@@ -282,6 +290,11 @@ impl std::fmt::Display for IdentityProblem {
             Self::ToolGrantUnknownEntry { source } => write!(
                 f,
                 "{} names a tool entry that is missing or disabled; it has no effect",
+                shown(source)
+            ),
+            Self::ToolGrantUnknownProgram { source } => write!(
+                f,
+                "{} names a program its tool entry does not run; it has no effect",
                 shown(source)
             ),
         }
@@ -542,7 +555,8 @@ impl GraphBindings {
                 | IdentityProblem::AgentRefused { .. }
                 | IdentityProblem::AgentSkipped { .. }
                 | IdentityProblem::ToolEntryDisabled { .. }
-                | IdentityProblem::ToolGrantUnknownEntry { .. } => continue,
+                | IdentityProblem::ToolGrantUnknownEntry { .. }
+                | IdentityProblem::ToolGrantUnknownProgram { .. } => continue,
             });
         }
         if !self.explicit && out.is_empty() {
@@ -1040,6 +1054,16 @@ mod tests {
                 vec!["agents/sentinel-674-x"],
                 vec![],
                 "agents/sentinel-674-x names a tool entry that is missing or disabled; it has no effect",
+            ),
+            (
+                IdentityProblem::ToolGrantUnknownProgram {
+                    source: "agents/sentinel-674-y".into(),
+                },
+                "tool_grant_unknown_program",
+                None,
+                vec!["agents/sentinel-674-y"],
+                vec![],
+                "agents/sentinel-674-y names a program its tool entry does not run; it has no effect",
             ),
         ];
         for (p, kind, uid, names, roles, text) in cases {

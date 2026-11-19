@@ -22,7 +22,8 @@ pub fn record_fields(p: &IdentityProblem) -> (&'static str, String, &'static str
         IdentityProblem::UnresolvedAdversary { .. }
         | IdentityProblem::AgentSkipped { .. }
         | IdentityProblem::ToolEntryDisabled { .. }
-        | IdentityProblem::ToolGrantUnknownEntry { .. } => ("deny", p.to_string(), "unavailable"),
+        | IdentityProblem::ToolGrantUnknownEntry { .. }
+        | IdentityProblem::ToolGrantUnknownProgram { .. } => ("deny", p.to_string(), "unavailable"),
         IdentityProblem::Unresolved { .. }
         | IdentityProblem::Contained { .. }
         | IdentityProblem::Unbound { .. }
@@ -376,10 +377,17 @@ mod tests {
             IdentityProblem::ToolGrantUnknownEntry {
                 source: "authz.yaml".into(),
             },
+            IdentityProblem::ToolGrantUnknownProgram {
+                source: "authz.yaml".into(),
+            },
         ];
         assert_eq!(
             counts(&p),
-            ["tool_entry_disabled=1", "tool_grant_unknown_entry=1"]
+            [
+                "tool_entry_disabled=1",
+                "tool_grant_unknown_entry=1",
+                "tool_grant_unknown_program=1"
+            ]
         );
         for p in &p {
             let (result, reason, posture) = record_fields(p);

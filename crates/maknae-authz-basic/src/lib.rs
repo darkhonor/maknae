@@ -1111,15 +1111,18 @@ fn tool_problems(
         patterns
             .iter()
             .zip(sources)
-            .filter_map(move |(pattern, source)| match pattern {
-                maknae_config::Pattern::Tool(t) if tools.entry(&t.entry).is_none() => {
-                    Some(IdentityProblem::ToolGrantUnknownEntry {
-                        source: format!("{section} {source}"),
-                    })
+            .filter_map(move |(pattern, source)| {
+                let source = format!("{section} {source}");
+                match pattern {
+                    maknae_config::Pattern::Tool(t) => match tools.entry(&t.entry) {
+                        None => Some(IdentityProblem::ToolGrantUnknownEntry { source }),
+                        Some(e) if !e.commands.contains_key(&t.program) => {
+                            Some(IdentityProblem::ToolGrantUnknownProgram { source })
+                        }
+                        Some(_) => None,
+                    },
+                    maknae_config::Pattern::Read(_) | maknae_config::Pattern::Write(_) => None,
                 }
-                maknae_config::Pattern::Tool(_)
-                | maknae_config::Pattern::Read(_)
-                | maknae_config::Pattern::Write(_) => None,
             })
     });
     disabled.chain(unknown).collect()
@@ -5366,6 +5369,26 @@ mod tests {
         let snap = compiled(&src);
         assert_eq!(unknown(snap.identity_problems()), expected);
         assert_eq!(snap.identity_problems().len(), 5);
+    }
+
+    #[test]
+    fn grant_naming_a_program_its_entry_lacks_is_a_problem() {
+        let authz = "schema_version: 1\npermissions:\n  allow: [\"Tool(sentinel-674-build rustc build *)\", \"Tool(sentinel-674-build cargo build *)\"]\n  deny: [\"Tool(sentinel-674-build sentinel-674-prog x)\"]\nsubjects:\n  ursula:\n    permissions:\n      allow: [\"Tool(sentinel-674-build git status)\"]\n";
+        let src = source_with(authz, None, &[("ursula", 1001)]).with_tools(tools(TOOLS_674_BUILD));
+        let expected = [
+            IdentityProblem::ToolGrantUnknownProgram {
+                source: "permissions.deny Tool(sentinel-674-build sentinel-674-prog x)".into(),
+            },
+            IdentityProblem::ToolGrantUnknownProgram {
+                source: "permissions.allow Tool(sentinel-674-build rustc build *)".into(),
+            },
+            IdentityProblem::ToolGrantUnknownProgram {
+                source: "subjects.ursula.permissions.allow Tool(sentinel-674-build git status)"
+                    .into(),
+            },
+        ];
+        assert_eq!(src.identity_problems(), expected);
+        assert_eq!(compiled(&src).identity_problems()[..], expected);
     }
 
     #[test]
