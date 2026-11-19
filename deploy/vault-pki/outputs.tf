@@ -114,3 +114,28 @@ output "agent_entity_names" {
   description = "Identity entity name per agent id."
   value       = { for id, e in vault_identity_entity.agent : id => e.name }
 }
+
+output "egress_approle_mount_path" {
+  description = "AppRole auth mount maknae-egress logs in through (null with no github_apps)."
+  value       = one(vault_auth_backend.egress_approle[*].path)
+}
+
+output "egress_role_name" {
+  description = "AppRole role name for maknae-egress (null with no github_apps)."
+  value       = one(vault_approle_auth_backend_role.egress[*].role_name)
+}
+
+output "egress_role_id" {
+  description = "AppRole RoleID for maknae-egress. Non-secret; pair with a SecretID to log in (null with no github_apps)."
+  value       = one(vault_approle_auth_backend_role.egress[*].role_id)
+}
+
+output "egress_minting_policy_name" {
+  description = "Policy maknae-egress's token carries: sign with each configured GitHub App's Transit key, nothing else (null with no github_apps)."
+  value       = one(vault_policy.egress_minting[*].name)
+}
+
+output "transit_mount_path" {
+  description = "Transit mount holding the GitHub App signing keys (null with no github_apps)."
+  value       = one(vault_mount.transit[*].path)
+}

@@ -290,6 +290,32 @@ read -rsp "Admin token: " VT && echo && read -rsp "Credential: " CRED && echo &&
 Do not use `vault kv put`: it preflights `sys/internal/ui/mounts` and was measured not to
 work for a policy-scoped token (see "Loading a user's provider key").
 
+## GitHub App minting (#168)
+
+`github_apps = { acme = { transit_key = "gh-acme" } }` lets `maknae-egress` sign GitHub App
+JWTs. With the map empty (the default) nothing below is created. Otherwise Terraform creates:
+
+- a Transit mount at `transit_mount_path` (default `maknae-transit`);
+- an AppRole mount at `egress_approle_path` (default `maknae-egress-approle`, which must differ
+  from `approle_path` and `agent_approle_path`) with the role `maknae-egress`, whose SecretID
+  and token are bound to `egress_bind_cidrs` (required, CIDRs) and whose token lives
+  `egress_token_ttl` (default 900 s) up to `egress_token_max_ttl` (default 3600 s);
+- the policy `maknae-egress-minting`, one `update` grant on
+  `<transit_mount_path>/sign/<transit_key>/sha2-256` per App, ordered by App name, and nothing
+  else.
+
+The App's private key is never in Terraform, so it never reaches state. The operator imports it
+into Transit by CLI, non-exportable:
+
+```bash
+vault transit import maknae-transit/keys/gh-acme @app-key.pem type=rsa-2048
+```
+
+`exportable` stays false (the default); delete `app-key.pem` afterwards.
+`maknae enroll` reads the egress RoleID and mints its SecretID, so `maknae-enroll` carries
+`read` on `auth/<egress_approle_path>/role/maknae-egress/role-id`, `create`, `update` and `list`
+on `.../secret-id`, and `update` on `.../secret-id-accessor/destroy`.
+
 ## Offline validation (no Vault needed)
 
 ```bash
@@ -299,8 +325,8 @@ terraform validate
 terraform test
 ```
 
-`terraform test` runs `tests/agents.tftest.hcl` and `tests/plane_key.tftest.hcl` under a
-mocked Vault provider: it needs `init` but no Vault. It pins the agent policies byte for byte,
+`terraform test` runs `tests/agents.tftest.hcl`, `tests/minting.tftest.hcl` and `tests/plane_key.tftest.hcl` under a
+mocked Vault provider: it needs `init` but no Vault. It pins the agent and egress minting policies byte for byte,
 the validations that guard the agent ids, prefix, mount and token lifetimes, and the key
 algorithm of the root, intermediate and roles for each `plane_key_algorithm` (with `ecdsa-p384-sha384`
 planning exactly the pre-#573 hierarchy). It does not exercise `prevent_destroy`, which needs

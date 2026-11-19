@@ -190,6 +190,9 @@ resource "vault_policy" "maknae_enroll" {
     path "auth/${vault_auth_backend.approle.path}/role/maknaed/secret-id"                   { capabilities = ["create","update"] }
     path "auth/${vault_auth_backend.approle.path}/role/maknaed/secret-id-accessor/destroy" { capabilities = ["update"] }
     path "${vault_mount.maknae_int.path}/issuer/default/json"                               { capabilities = ["read"] }
+    path "auth/${var.egress_approle_path}/role/maknae-egress/role-id"                    { capabilities = ["read"] }
+    path "auth/${var.egress_approle_path}/role/maknae-egress/secret-id"                  { capabilities = ["create", "update", "list"] }
+    path "auth/${var.egress_approle_path}/role/maknae-egress/secret-id-accessor/destroy" { capabilities = ["update"] }
   EOT
 }
 
