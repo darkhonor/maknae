@@ -121,6 +121,21 @@ impl MintingFiles<'_> {
             .join(leaf(&row(ContentKind::SealedEgressSecretId)))
     }
 
+    /// Held from the state read through retirement, so two enrolls never each
+    /// retire the SecretID the other just installed.
+    fn lock_slot(&self) -> Result<Option<maknae_io::AnchorLock>, EnrollError> {
+        let Some(private) = self.anchor(&self.private, 0o027)? else {
+            return Ok(None);
+        };
+        private.try_lock_exclusive().map(Some).map_err(|e| match e {
+            maknae_io::IoError::Locked { .. } => EnrollError::State(
+                "another maknae enroll is running; the Egress Daemon's SecretID is left as it was"
+                    .to_string(),
+            ),
+            e => io_error(&self.private, e),
+        })
+    }
+
     fn state_path(&self) -> PathBuf {
         self.private.join(leaf(&row(ContentKind::EnrollState)))
     }
@@ -318,6 +333,7 @@ pub(crate) async fn enroll_minting<O: MintingOps>(
     daemon_mount: &str,
     agent_mounts: &[String],
 ) -> Result<Minting, EnrollError> {
+    let _slot = files.lock_slot()?;
     let prior = files.read_state()?;
     match minting {
         Some(config) => {
@@ -914,6 +930,33 @@ mod tests {
         }
         assert!(check_mount(&c, DAEMON_MOUNT, &strings(&["maknae-agent-approle"])).is_ok());
         assert!(fake.log().is_empty());
+        assert!(!h.role_id().exists());
+    }
+
+    #[tokio::test]
+    async fn a_second_enroll_while_one_holds_the_slot_is_refused_before_any_call() {
+        let h = host("locked");
+        let fake = Fake::default();
+        h.write_state(&["old"]);
+        let held = maknae_io::open_anchor(
+            &h.files.private,
+            AnchorRequired {
+                owner: None,
+                mode_mask: None,
+            },
+            StrategyPref::Auto,
+        )
+        .unwrap();
+        let _lock = held.try_lock_exclusive().unwrap();
+        for minting in [true, false] {
+            let e = on(&h, &fake, minting).await.unwrap_err();
+            assert!(
+                matches!(&e, EnrollError::State(m) if m.contains("another maknae enroll is running")),
+                "{e:?}"
+            );
+        }
+        assert!(fake.log().is_empty(), "{:?}", fake.log());
+        assert_eq!(h.read_state().live, strings(&["old"]));
         assert!(!h.role_id().exists());
     }
 
