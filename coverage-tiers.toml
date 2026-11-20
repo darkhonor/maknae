@@ -252,6 +252,9 @@ files = [
   # exhaustive credential-kind dispatch, and the App JWT's pinned bytes.
   "crates/maknae-deputy/src/mint/admit.rs",
   "crates/maknae-deputy/src/mint/jwt.rs",
+  # #168: the grant check. A token wider or narrower than the set asked for,
+  # or with a token or expiry of the wrong shape, is refused.
+  "crates/maknae-deputy/src/mint/grant.rs",
   # #168: one mint end to end, no partial success (every token minted in a
   # refused frame is revoked), the live-token journal, and the revoke opener;
   # the recipient key read from a root-owned file only; the Transit signing seam.
@@ -504,8 +507,8 @@ files = [
   # is T1 in maknae-deputy's mint/signer.rs.
   "bins/maknae-egress/src/minting.rs",
   # #168: the GitHub App mint and revoke calls. T2: transport to the forge; the
-  # grant check refuses and revokes any token wider or narrower than the set,
-  # pinned by the loopback-stub tests beside it.
+  # grant check they apply is mint/grant.rs (T1), pinned end to end by the
+  # loopback-stub tests here.
   "crates/maknae-deputy/src/mint/github.rs",
   "crates/maknae-plane/src/fd.rs", "crates/maknae-plane/src/send.rs",
   # Cooperative execution in the untrusted CLI: cannot issue a PDP Permit or
@@ -720,7 +723,7 @@ why = "module declarations only; the decisions are handle/unseal/call (T1)"
 
 [[t3]]
 path = "crates/maknae-deputy/src/mint/mod.rs"
-why = "#168: module declarations only; the GitHub client is mint/github.rs (T2)"
+why = "#168: module declarations only; the GitHub client is mint/github.rs (T2), its grant check mint/grant.rs (T1)"
 
 [[t3]]
 path = "crates/maknae-vault/src/lib.rs"

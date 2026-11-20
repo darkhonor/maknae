@@ -6508,7 +6508,7 @@ open(p, "w").write(s.replace(old, new))' "$f" "$2" "$3"; then
   expect_accept "mint/deputy-github-suite-is-green" "conversation-suite: maknae-deputy" \
     cv_suite maknae-deputy mint::github
   expect_reject_because "mint/a-minted-grant-unchecked-against-the-set-goes-red" \
-    "a_wider_grant_is_revoked_and_refused" cv_mutant crates/maknae-deputy/src/mint/github.rs \
+    "a_wider_grant_is_revoked_and_refused" cv_mutant crates/maknae-deputy/src/mint/grant.rs \
     '    grant.repository_selection.as_deref() == Some("selected")
         && got == want
         && got_repos == want_repos
