@@ -25,8 +25,6 @@ pub fn native_fold() -> Fold {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Entry {
     glob: PathGlob,
-    lowered: PathGlob,
-    mapped: PathGlob,
     text: String,
 }
 
@@ -143,7 +141,7 @@ impl SensitiveList {
         let test = |glob: &PathGlob, p: &str, h: Option<&Path>| glob.may_intersect_subtree(p, h);
         let mut hits = std::collections::BTreeSet::new();
         for e in &self.entries {
-            if e.hit(&path, home, folded.as_ref(), test)? {
+            if e.glob.hit(&path, home, folded.as_ref(), test)? {
                 hits.insert(e.glob.expanded(home)?);
             }
         }
@@ -162,7 +160,7 @@ impl SensitiveList {
         let folded = (fold == Fold::Case).then(|| Folded::new(&path, home, subtree));
         let mut unbound = false;
         for e in &self.entries {
-            match e.hit(&path, home, folded.as_ref(), &test) {
+            match e.glob.hit(&path, home, folded.as_ref(), &test) {
                 Ok(true) => return Ok(Some(&e.text)),
                 Ok(false) => {}
                 Err(HomeUnbound) => unbound = true,
@@ -173,34 +171,6 @@ impl SensitiveList {
         } else {
             Ok(None)
         }
-    }
-}
-
-impl Entry {
-    fn hit(
-        &self,
-        path: &str,
-        home: Option<&Path>,
-        folded: Option<&Folded>,
-        test: impl Fn(&PathGlob, &str, Option<&Path>) -> Result<bool, HomeUnbound>,
-    ) -> Result<bool, HomeUnbound> {
-        let Some(f) = folded else {
-            return test(&self.glob, path, home);
-        };
-        if test(
-            &self.lowered,
-            &f.lowered,
-            f.home_lowered.as_deref().map(Path::new),
-        )? {
-            return Ok(true);
-        }
-        let home = f.home_mapped.as_deref().map(Path::new);
-        for root in &f.mapped {
-            if test(&self.mapped, root, home)? {
-                return Ok(true);
-            }
-        }
-        Ok(false)
     }
 }
 
@@ -257,19 +227,15 @@ fn entry(text: &str) -> Result<Entry, ConfigError> {
     if text.split('/').any(|c| matches!(c, "." | "..")) {
         return Err(bad());
     }
-    let glob = |spec: &str| PathGlob::parse(spec).map_err(|_| bad());
-    let lowered = case_folded(text);
     Ok(Entry {
-        glob: glob(text)?,
-        mapped: glob(&mapped(&lowered))?,
-        lowered: glob(&lowered)?,
+        glob: PathGlob::parse(text).map_err(|_| bad())?,
         text: text.to_string(),
     })
 }
 
 /// One spelling for names APFS treats as the same: NFC, full Unicode case
 /// folding, NFC again, so a fold that decomposes cannot leave a second form.
-fn case_folded(text: &str) -> String {
+pub(crate) fn case_folded(text: &str) -> String {
     let nfc = icu_normalizer::ComposingNormalizerBorrowed::new_nfc();
     let fold = icu_casemap::CaseMapperBorrowed::new();
     nfc.normalize(&fold.fold_string(&nfc.normalize(text)))
@@ -279,7 +245,7 @@ fn case_folded(text: &str) -> String {
 /// The one spelling macOS gives a path the kernel may report under another:
 /// the Data volume's firmlink prefix removed, then `/private/{etc,tmp,var}`
 /// as `/{etc,tmp,var}`. Expects case-folded text; a relative text is returned as is.
-fn mapped(text: &str) -> String {
+pub(crate) fn mapped(text: &str) -> String {
     if !text.starts_with('/') {
         return text.to_string();
     }
@@ -357,15 +323,15 @@ pub fn fold_path(path: &str, fold: Fold, reach: Reach) -> FoldedPath {
     }
 }
 
-struct Folded {
-    lowered: String,
-    mapped: Vec<String>,
-    home_lowered: Option<String>,
-    home_mapped: Option<String>,
+pub(crate) struct Folded {
+    pub(crate) lowered: String,
+    pub(crate) mapped: Vec<String>,
+    pub(crate) home_lowered: Option<String>,
+    pub(crate) home_mapped: Option<String>,
 }
 
 impl Folded {
-    fn new(path: &str, home: Option<&Path>, subtree: bool) -> Self {
+    pub(crate) fn new(path: &str, home: Option<&Path>, subtree: bool) -> Self {
         let reach = if subtree { Reach::Subtree } else { Reach::Path };
         let FoldedPath { lowered, mapped } = fold_path(path, Fold::Case, reach);
         let home = home
@@ -408,6 +374,16 @@ mod tests {
         fold: Fold,
     ) -> Result<Option<&'a str>, HomeUnbound> {
         l.subtree_matching(Path::new(dir), home.map(Path::new), fold)
+    }
+
+    #[test]
+    fn an_entry_matches_its_written_spelling_under_every_fold() {
+        let l = list(&["/srv/Re*"]);
+        let nfd = "/srv/Re\u{301}sume\u{301}";
+        for fold in [Fold::None, Fold::Case] {
+            assert_eq!(at(&l, nfd, None, fold), Ok(Some("/srv/Re*")), "{fold:?}");
+            assert_eq!(below(&l, nfd, None, fold), Ok(Some("/srv/Re*")), "{fold:?}");
+        }
     }
 
     #[test]

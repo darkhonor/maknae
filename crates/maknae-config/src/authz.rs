@@ -800,6 +800,8 @@ impl Pattern {
 pub struct PathGlob {
     anchor: Anchor,
     segments: Vec<GlobSeg>,
+    /// The case-folded and mapped spellings (`crate::fold_path`); `None` on those two.
+    folded: Option<Box<[PathGlob; 2]>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -818,6 +820,17 @@ impl PathGlob {
     /// `~` is kept symbolic and bound at match time to the home the request carries (#435);
     /// `~name` is refused (#438).
     pub(crate) fn parse(spec: &str) -> Result<PathGlob, AuthzError> {
+        let lowered = crate::sensitive::case_folded(spec);
+        let mapped = crate::sensitive::mapped(&lowered);
+        let mut glob = Self::parse_one(spec)?;
+        glob.folded = Some(Box::new([
+            Self::parse_one(&lowered)?,
+            Self::parse_one(&mapped)?,
+        ]));
+        Ok(glob)
+    }
+
+    fn parse_one(spec: &str) -> Result<PathGlob, AuthzError> {
         let bad = || AuthzError::BadPattern(spec.to_string());
         let (anchor, rest) = if let Some(rest) = spec.strip_prefix('~') {
             if !rest.is_empty() && !rest.starts_with('/') {
@@ -840,11 +853,46 @@ impl PathGlob {
                 }
             })
             .collect();
-        Ok(PathGlob { anchor, segments })
+        Ok(PathGlob {
+            anchor,
+            segments,
+            folded: None,
+        })
     }
 
     fn is_home(&self) -> bool {
         self.anchor == Anchor::Home
+    }
+
+    /// `test` on the glob as written against `path`; then, when `folded` is given, on the
+    /// case-folded glob against the folded path and on the mapped glob against each mapped root.
+    pub(crate) fn hit(
+        &self,
+        path: &str,
+        home: Option<&Path>,
+        folded: Option<&crate::sensitive::Folded>,
+        test: impl Fn(&PathGlob, &str, Option<&Path>) -> Result<bool, HomeUnbound>,
+    ) -> Result<bool, HomeUnbound> {
+        if test(self, path, home)? {
+            return Ok(true);
+        }
+        let (Some(f), Some([lowered, mapped])) = (folded, self.folded.as_deref()) else {
+            return Ok(false);
+        };
+        if test(
+            lowered,
+            &f.lowered,
+            f.home_lowered.as_deref().map(Path::new),
+        )? {
+            return Ok(true);
+        }
+        let home = f.home_mapped.as_deref().map(Path::new);
+        for root in &f.mapped {
+            if test(mapped, root, home)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     pub(crate) fn within_home_tasks(&self) -> bool {
