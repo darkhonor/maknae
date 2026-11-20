@@ -447,6 +447,94 @@ impl AuthzPolicy {
         let (deny, allow) = self.lists(subject);
         evaluate_subtree_over(&deny, &allow, root, home, glob_of)
     }
+
+    /// A workspace mount of `root`: a deny of the side's capability refuses only when it
+    /// matches `root` itself; the allow must cover the whole subtree. List order is
+    /// [`Self::evaluate3_floored`]'s.
+    pub fn evaluate_mount_floored(
+        &self,
+        subject: Option<&SubjectPermissions>,
+        side: MountSide,
+        root: &Path,
+        home: Option<&Path>,
+    ) -> Result<Match3, HomeUnbound> {
+        let (deny, allow) = self.lists(subject);
+        evaluate_mount_over(&deny, &allow, root, home, side.glob_of())
+    }
+
+    /// [`Self::evaluate3_agent`] for [`Self::evaluate_mount_floored`].
+    pub fn evaluate_mount_agent(
+        &self,
+        right: &SubjectPermissions,
+        subject: Option<&SubjectPermissions>,
+        side: MountSide,
+        root: &Path,
+        home: Option<&Path>,
+    ) -> Result<AgentMatch, HomeUnbound> {
+        let (deny, allow) = self.right_lists(right);
+        agent_match(
+            evaluate_mount_over(&deny, &allow, root, home, side.glob_of())?,
+            || self.evaluate_mount_floored(subject, side, root, home),
+        )
+    }
+
+    /// The deny patterns of the side's capability that may reach beneath `root`, from the
+    /// deny lists that decide the mount: the site floor alone when `right` decides it,
+    /// otherwise the site floor and `subject`'s denies. `~` is written as `home`;
+    /// deduplicated and sorted.
+    pub fn mount_masks(
+        &self,
+        right: Option<&SubjectPermissions>,
+        subject: Option<&SubjectPermissions>,
+        side: MountSide,
+        root: &Path,
+        home: Option<&Path>,
+    ) -> Result<Vec<String>, HomeUnbound> {
+        let by_right = match right {
+            Some(r) => matches!(
+                self.evaluate_mount_agent(r, subject, side, root, home)?,
+                AgentMatch::Right { .. }
+            ),
+            None => false,
+        };
+        let (deny, _) = if by_right {
+            self.lists(None)
+        } else {
+            self.lists(subject)
+        };
+        let Some(text) = canonical_root(root) else {
+            return Ok(Vec::new());
+        };
+        let glob_of = side.glob_of();
+        let mut masks = std::collections::BTreeSet::new();
+        for glob in deny
+            .iter()
+            .flatten()
+            .flat_map(|l| l.patterns)
+            .filter_map(glob_of)
+        {
+            if glob.may_intersect_subtree(text, home)? {
+                masks.insert(glob.expanded(home)?);
+            }
+        }
+        Ok(masks.into_iter().collect())
+    }
+}
+
+/// Which side of a workspace mount is decided: the read, or the write a read-write mount adds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MountSide {
+    Read,
+    Write,
+}
+
+impl MountSide {
+    fn glob_of(self) -> fn(&Pattern) -> Option<&PathGlob> {
+        match self {
+            MountSide::Read => read_glob,
+            MountSide::Write => write_glob,
+        }
+    }
 }
 
 fn write_glob(p: &Pattern) -> Option<&PathGlob> {
@@ -516,22 +604,57 @@ fn evaluate3_over(
     Ok(Match3::NoMatch)
 }
 
+fn canonical_root(root: &Path) -> Option<&str> {
+    let text = root.to_str()?;
+    (text.starts_with('/')
+        && !text.contains('\0')
+        && (text == "/" || !text[1..].split('/').any(|c| matches!(c, "" | "." | ".."))))
+    .then_some(text)
+}
+
+type GlobOf = fn(&Pattern) -> Option<&PathGlob>;
+type DenyHit = fn(&PathGlob, &str, Option<&Path>) -> Result<bool, HomeUnbound>;
+
 fn evaluate_subtree_over(
     deny: &DenyLists<'_>,
     allow: &SourcedList<'_>,
     root: &Path,
     home: Option<&Path>,
-    glob_of: fn(&Pattern) -> Option<&PathGlob>,
+    glob_of: GlobOf,
 ) -> Result<Match3, HomeUnbound> {
-    let Some(text) = root.to_str() else {
+    decide_tree_over(
+        deny,
+        allow,
+        root,
+        home,
+        glob_of,
+        PathGlob::may_intersect_subtree,
+    )
+}
+
+fn evaluate_mount_over(
+    deny: &DenyLists<'_>,
+    allow: &SourcedList<'_>,
+    root: &Path,
+    home: Option<&Path>,
+    glob_of: GlobOf,
+) -> Result<Match3, HomeUnbound> {
+    decide_tree_over(deny, allow, root, home, glob_of, |g, r, h| {
+        g.matches(Path::new(r), h)
+    })
+}
+
+fn decide_tree_over(
+    deny: &DenyLists<'_>,
+    allow: &SourcedList<'_>,
+    root: &Path,
+    home: Option<&Path>,
+    glob_of: GlobOf,
+    deny_hit: DenyHit,
+) -> Result<Match3, HomeUnbound> {
+    let Some(text) = canonical_root(root) else {
         return Ok(Match3::NoMatch);
     };
-    if !text.starts_with('/')
-        || text.contains('\0')
-        || (text != "/" && text[1..].split('/').any(|c| matches!(c, "" | "." | "..")))
-    {
-        return Ok(Match3::NoMatch);
-    }
     let home = valid_home(home);
     if unbound_home(home, deny, allow, |p| {
         glob_of(p).is_some_and(PathGlob::is_home)
@@ -541,7 +664,7 @@ fn evaluate_subtree_over(
     for list in deny.iter().flatten() {
         for (i, pattern) in list.patterns.iter().enumerate() {
             if let Some(glob) = glob_of(pattern) {
-                if glob.may_intersect_subtree(text, home)? {
+                if deny_hit(glob, text, home)? {
                     return Ok(Match3::DenyMatch {
                         source: list.source(i, "deny"),
                     });
@@ -765,6 +888,19 @@ impl PathGlob {
                 GlobSeg::Comp(literal) => components.next() == Some(literal.as_str()),
                 _ => false,
             }))
+    }
+
+    /// The glob's text, with a leading `~` written as `home`.
+    pub(crate) fn expanded(&self, home: Option<&Path>) -> Result<String, HomeUnbound> {
+        let comps: Vec<&str> = self
+            .base(home)?
+            .into_iter()
+            .chain(self.segments.iter().map(|seg| match seg {
+                GlobSeg::DoubleStar => "**",
+                GlobSeg::Comp(c) => c.as_str(),
+            }))
+            .collect();
+        Ok(format!("/{}", comps.join("/")))
     }
 
     pub(crate) fn may_intersect_subtree(
@@ -3893,6 +4029,163 @@ mod tests {
         assert_ne!(
             a.section_canonical("subjects"),
             c.section_canonical("subjects")
+        );
+    }
+
+    fn mount_policy(allow: &str, deny: &str) -> AuthzPolicy {
+        parse_authz(&format!(
+            "schema_version: 1\npermissions:\n  allow: [{allow}]\n  deny: [{deny}]\n"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn mount_deny_beneath_is_not_a_refusal() {
+        let p = mount_policy("\"Read(/w/**)\"", "\"Read(/w/secret/**)\"");
+        let w = Path::new("/w");
+        assert_eq!(
+            p.evaluate_mount_floored(None, MountSide::Read, w, None),
+            Ok(Match3::AllowMatch {
+                source: "Read(/w/**)".into()
+            })
+        );
+        assert_eq!(
+            p.mount_masks(None, None, MountSide::Read, w, None),
+            Ok(vec!["/w/secret/**".to_string()])
+        );
+    }
+
+    #[test]
+    fn mount_deny_on_root_refuses() {
+        for (deny, root) in [("Read(/w)", "/w"), ("Read(/w/**)", "/w/x")] {
+            let p = mount_policy("\"Read(/w/**)\"", &format!("\"{deny}\""));
+            assert_eq!(
+                p.evaluate_mount_floored(None, MountSide::Read, Path::new(root), None),
+                Ok(Match3::DenyMatch {
+                    source: deny.into()
+                }),
+                "{deny} {root}"
+            );
+        }
+    }
+
+    #[test]
+    fn mount_needs_a_covering_allow() {
+        let p = mount_policy("\"Read(/w/*.rs)\"", "");
+        assert_eq!(
+            p.evaluate_mount_floored(None, MountSide::Read, Path::new("/w"), None),
+            Ok(Match3::NoMatch)
+        );
+    }
+
+    #[test]
+    fn mount_write_side_reads_write_patterns() {
+        let p = mount_policy("\"Read(/w/**)\", \"Write(/w/**)\"", "\"Write(/w/out/**)\"");
+        let w = Path::new("/w");
+        assert_eq!(
+            p.mount_masks(None, None, MountSide::Write, w, None),
+            Ok(vec!["/w/out/**".to_string()])
+        );
+        assert_eq!(
+            p.mount_masks(None, None, MountSide::Read, w, None),
+            Ok(Vec::new())
+        );
+        assert_eq!(
+            p.evaluate_mount_floored(None, MountSide::Write, w, None),
+            Ok(Match3::AllowMatch {
+                source: "Write(/w/**)".into()
+            })
+        );
+        assert_eq!(
+            p.evaluate_mount_floored(None, MountSide::Write, Path::new("/w/out"), None),
+            Ok(Match3::DenyMatch {
+                source: "Write(/w/out/**)".into()
+            })
+        );
+    }
+
+    #[test]
+    fn mount_masks_tilde_expands() {
+        let p = mount_policy("\"Read(~/w/**)\"", "\"Read(~/w/.env)\"");
+        assert_eq!(
+            p.mount_masks(
+                None,
+                None,
+                MountSide::Read,
+                Path::new("/h/w"),
+                Some(Path::new("/h"))
+            ),
+            Ok(vec!["/h/w/.env".to_string()])
+        );
+    }
+
+    #[test]
+    fn mount_masks_unbound_home_is_an_error() {
+        let p = mount_policy("\"Read(~/w/**)\"", "\"Read(~/w/.env)\"");
+        assert_eq!(
+            p.mount_masks(None, None, MountSide::Read, Path::new("/h/w"), None),
+            Err(HomeUnbound)
+        );
+        assert_eq!(
+            p.evaluate_mount_floored(None, MountSide::Read, Path::new("/h/w"), None),
+            Err(HomeUnbound)
+        );
+    }
+
+    #[test]
+    fn mount_masks_are_deduplicated_and_sorted() {
+        let p = mount_policy(
+            "\"Read(/w/**)\"",
+            "\"Read(/w/z/**)\", \"Read(/w/a)\", \"Read(/w//z/**)\", \"Read(/other/**)\"",
+        );
+        assert_eq!(
+            p.mount_masks(None, None, MountSide::Read, Path::new("/w"), None),
+            Ok(vec!["/w/a".to_string(), "/w/z/**".to_string()])
+        );
+    }
+
+    #[test]
+    fn mount_masks_right_keeps_the_floor() {
+        let p = parse_authz(
+            "schema_version: 1\npermissions:\n  allow: []\n  deny: [\"Read(/**/.env)\"]\nsubjects:\n  right:\n    permissions:\n      allow: [\"Read(/a/tasks/**)\"]\n  agent:\n    permissions:\n      allow: [\"Read(/a/**)\"]\n      deny: [\"Read(/a/tasks/users/u1/build/**)\"]\n",
+        )
+        .unwrap();
+        let right = p.subjects["right"].permissions.as_ref().unwrap();
+        let agent = p.subjects["agent"].permissions.as_ref();
+        let root = Path::new("/a/tasks/users/u1");
+        assert_eq!(
+            p.evaluate_mount_agent(right, agent, MountSide::Read, root, None),
+            Ok(AgentMatch::Right {
+                source: "Read(/a/tasks/**)".into()
+            })
+        );
+        assert_eq!(
+            p.mount_masks(Some(right), agent, MountSide::Read, root, None),
+            Ok(vec!["/**/.env".to_string()])
+        );
+        assert_eq!(
+            p.mount_masks(None, agent, MountSide::Read, root, None),
+            Ok(vec![
+                "/**/.env".to_string(),
+                "/a/tasks/users/u1/build/**".to_string()
+            ])
+        );
+        let notes = Path::new("/a/notes");
+        assert_eq!(
+            p.evaluate_mount_agent(right, agent, MountSide::Read, notes, None),
+            Ok(AgentMatch::Floored(Match3::AllowMatch {
+                source: "Read(/a/**)".into()
+            }))
+        );
+        assert_eq!(
+            p.mount_masks(
+                Some(right),
+                agent,
+                MountSide::Read,
+                Path::new("/a/tasks/users/u1/build"),
+                None
+            ),
+            Ok(vec!["/**/.env".to_string()])
         );
     }
 }

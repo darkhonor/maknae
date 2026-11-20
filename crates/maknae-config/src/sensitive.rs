@@ -129,6 +129,27 @@ impl SensitiveList {
         })
     }
 
+    /// Every entry that could match `dir` or a path beneath it, with a leading `~`
+    /// written as `home`; deduplicated and sorted. `HomeUnbound` when a `~` entry
+    /// could not be evaluated.
+    pub fn subtree_entries(
+        &self,
+        dir: &Path,
+        home: Option<&Path>,
+        fold: Fold,
+    ) -> Result<Vec<String>, HomeUnbound> {
+        let path = dir.to_string_lossy();
+        let folded = (fold == Fold::Case).then(|| Folded::new(&path, home, true));
+        let test = |glob: &PathGlob, p: &str, h: Option<&Path>| glob.may_intersect_subtree(p, h);
+        let mut hits = std::collections::BTreeSet::new();
+        for e in &self.entries {
+            if e.hit(&path, home, folded.as_ref(), test)? {
+                hits.insert(e.glob.expanded(home)?);
+            }
+        }
+        Ok(hits.into_iter().collect())
+    }
+
     fn first(
         &self,
         path: &Path,
@@ -141,27 +162,7 @@ impl SensitiveList {
         let folded = (fold == Fold::Case).then(|| Folded::new(&path, home, subtree));
         let mut unbound = false;
         for e in &self.entries {
-            let hit = match &folded {
-                None => test(&e.glob, &path, home),
-                Some(f) => test(
-                    &e.lowered,
-                    &f.lowered,
-                    f.home_lowered.as_deref().map(Path::new),
-                )
-                .and_then(|hit| {
-                    let home = f.home_mapped.as_deref().map(Path::new);
-                    if hit {
-                        return Ok(true);
-                    }
-                    for root in &f.mapped {
-                        if test(&e.mapped, root, home)? {
-                            return Ok(true);
-                        }
-                    }
-                    Ok(false)
-                }),
-            };
-            match hit {
+            match e.hit(&path, home, folded.as_ref(), &test) {
                 Ok(true) => return Ok(Some(&e.text)),
                 Ok(false) => {}
                 Err(HomeUnbound) => unbound = true,
@@ -172,6 +173,34 @@ impl SensitiveList {
         } else {
             Ok(None)
         }
+    }
+}
+
+impl Entry {
+    fn hit(
+        &self,
+        path: &str,
+        home: Option<&Path>,
+        folded: Option<&Folded>,
+        test: impl Fn(&PathGlob, &str, Option<&Path>) -> Result<bool, HomeUnbound>,
+    ) -> Result<bool, HomeUnbound> {
+        let Some(f) = folded else {
+            return test(&self.glob, path, home);
+        };
+        if test(
+            &self.lowered,
+            &f.lowered,
+            f.home_lowered.as_deref().map(Path::new),
+        )? {
+            return Ok(true);
+        }
+        let home = f.home_mapped.as_deref().map(Path::new);
+        for root in &f.mapped {
+            if test(&self.mapped, root, home)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 
@@ -895,6 +924,45 @@ mod tests {
         assert_ne!(
             a.canonical(),
             list(&["~/.ssh/**", "/etc/shadow"]).canonical()
+        );
+    }
+
+    #[test]
+    fn sensitive_subtree_entries_lists_every_match() {
+        let l = list(&["~/.ssh/**", "/w/.env", "/elsewhere/**"]);
+        let h = Some(Path::new("/h"));
+        assert_eq!(
+            l.subtree_entries(Path::new("/w"), h, Fold::None),
+            Ok(vec!["/w/.env".to_string()])
+        );
+        assert_eq!(
+            l.subtree_entries(Path::new("/h"), h, Fold::None),
+            Ok(vec!["/h/.ssh/**".to_string()])
+        );
+        assert_eq!(
+            l.subtree_entries(Path::new("/"), h, Fold::None),
+            Ok(vec![
+                "/elsewhere/**".to_string(),
+                "/h/.ssh/**".to_string(),
+                "/w/.env".to_string()
+            ])
+        );
+        assert_eq!(
+            l.subtree_entries(Path::new("/w"), None, Fold::None),
+            Err(HomeUnbound)
+        );
+        assert_eq!(
+            l.subtree_entries(Path::new("/private/etc"), h, Fold::Case),
+            Ok(Vec::new())
+        );
+        let etc = list(&["/etc/shadow", "/etc/shadow"]);
+        assert_eq!(
+            etc.subtree_entries(Path::new("/private/etc"), h, Fold::Case),
+            Ok(vec!["/etc/shadow".to_string()])
+        );
+        assert_eq!(
+            etc.subtree_entries(Path::new("/private/etc"), h, Fold::None),
+            Ok(Vec::new())
         );
     }
 
