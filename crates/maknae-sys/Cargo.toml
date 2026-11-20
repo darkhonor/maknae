@@ -29,4 +29,4 @@ libc = "0.2.189"
 [dev-dependencies]
 # term — openpty, which hands the window-size test a real terminal whose size the test
 # chose. Test-only: the version is the one Cargo.lock already resolves for maknae-io.
-nix = { version = "0.31", default-features = false, features = ["term"] }
+nix = { version = "0.32", default-features = false, features = ["term"] }

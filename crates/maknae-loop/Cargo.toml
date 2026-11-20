@@ -42,6 +42,6 @@ maknae-crypto = { path = "../maknae-crypto", features = ["test-support"] }
 maknae-vault = { path = "../maknae-vault", features = ["test-support"] }
 tempfile = "3"
 # mutation.rs's tests stat files and check the euid; #421's real-buffer test sets socket buffer sizes.
-nix = { version = "0.31", default-features = false, features = ["fs", "user", "socket"] }
+nix = { version = "0.32", default-features = false, features = ["fs", "user", "socket"] }
 # start_paused timing tests and #421's UnixStream pair.
 tokio = { workspace = true, features = ["test-util", "net", "rt-multi-thread"] }

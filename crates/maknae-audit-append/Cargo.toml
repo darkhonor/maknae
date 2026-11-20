@@ -37,7 +37,7 @@ tokio = { workspace = true, features = ["rt", "sync", "time", "io-util"] }
 # FORMAT-STRING VULNERABILITY IN A PRIVILEGED DAEMON. A future hand-rolled
 # `libc::syslog(pri, msg.as_ptr())` would reintroduce it silently; recorded here
 # so that change is visible as the regression it would be.
-nix = { version = "0.31", default-features = false, features = ["user", "syslog"] }
+nix = { version = "0.32", default-features = false, features = ["user", "syslog"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
