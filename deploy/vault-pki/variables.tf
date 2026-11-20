@@ -208,8 +208,8 @@ variable "github_apps" {
   default = {}
 
   validation {
-    condition     = alltrue([for name, app in var.github_apps : can(regex("^[a-z0-9_]([a-z0-9._-]{0,30}[a-z0-9_])?$", name)) && can(regex("^[A-Za-z0-9_-]{1,64}$", app.transit_key))])
-    error_message = "Each github_apps key must be 1-32 bytes of [a-z0-9._-] starting and ending with [a-z0-9_], and each transit_key 1-64 bytes of [A-Za-z0-9_-]: both land in Vault paths and must never carry a glob ('*'), a '/' or a space."
+    condition     = alltrue([for name, app in var.github_apps : can(regex("^[a-z0-9-]{1,64}$", name)) && can(regex("^[A-Za-z0-9_-]{1,64}$", app.transit_key))])
+    error_message = "Each github_apps key must be 1-64 bytes of [a-z0-9-] and each transit_key 1-64 bytes of [A-Za-z0-9_-], the grammar minting.yaml accepts for an App name and a key."
   }
 }
 
@@ -219,8 +219,8 @@ variable "transit_mount_path" {
   default     = "maknae-transit"
 
   validation {
-    condition     = can(regex("^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$", var.transit_mount_path)) && !contains(split("/", var.transit_mount_path), ".") && !contains(split("/", var.transit_mount_path), "..") && length(var.transit_mount_path) <= 256
-    error_message = "transit_mount_path must be 1-256 bytes of '/'-separated [A-Za-z0-9._-] segments, with no empty, '.' or '..' segment and no leading or trailing '/'."
+    condition     = can(regex("^[A-Za-z0-9_-]{1,64}$", var.transit_mount_path))
+    error_message = "transit_mount_path must be 1-64 bytes of [A-Za-z0-9_-], the grammar minting.yaml accepts for transit_mount."
   }
 }
 
@@ -230,8 +230,8 @@ variable "egress_approle_path" {
   default     = "maknae-egress-approle"
 
   validation {
-    condition     = can(regex("^[A-Za-z0-9._-]+$", var.egress_approle_path))
-    error_message = "egress_approle_path must be a non-empty bare mount name of [A-Za-z0-9._-]."
+    condition     = can(regex("^[A-Za-z0-9_-]{1,64}$", var.egress_approle_path))
+    error_message = "egress_approle_path must be 1-64 bytes of [A-Za-z0-9_-], the grammar minting.yaml accepts for vault.approle_mount."
   }
   validation {
     condition     = var.egress_approle_path != var.approle_path && var.egress_approle_path != var.agent_approle_path

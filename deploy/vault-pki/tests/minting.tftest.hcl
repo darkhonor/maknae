@@ -196,3 +196,85 @@ run "zero_egress_token_ttl_refused" {
   }
   expect_failures = [var.egress_token_ttl]
 }
+
+run "app_name_with_an_underscore_refused" {
+  command = plan
+  variables {
+    github_apps       = { "ac_me" = { transit_key = "gh-acme" } }
+    egress_bind_cidrs = ["10.0.0.5/32"]
+  }
+  expect_failures = [var.github_apps]
+}
+
+run "app_name_with_a_dot_refused" {
+  command = plan
+  variables {
+    github_apps       = { "ac.me" = { transit_key = "gh-acme" } }
+    egress_bind_cidrs = ["10.0.0.5/32"]
+  }
+  expect_failures = [var.github_apps]
+}
+
+run "app_name_over_64_bytes_refused" {
+  command = plan
+  variables {
+    github_apps       = { "${join("", [for i in range(65) : "a"])}" = { transit_key = "gh-acme" } }
+    egress_bind_cidrs = ["10.0.0.5/32"]
+  }
+  expect_failures = [var.github_apps]
+}
+
+run "transit_mount_with_a_slash_refused" {
+  command = plan
+  variables {
+    transit_mount_path = "a/b"
+  }
+  expect_failures = [var.transit_mount_path]
+}
+
+run "transit_mount_with_a_dot_refused" {
+  command = plan
+  variables {
+    transit_mount_path = "tr.ansit"
+  }
+  expect_failures = [var.transit_mount_path]
+}
+
+run "transit_mount_over_64_bytes_refused" {
+  command = plan
+  variables {
+    transit_mount_path = join("", [for i in range(65) : "t"])
+  }
+  expect_failures = [var.transit_mount_path]
+}
+
+run "egress_mount_with_a_dot_refused" {
+  command = plan
+  variables {
+    egress_approle_path = "eg.ress"
+  }
+  expect_failures = [var.egress_approle_path]
+}
+
+run "egress_mount_over_64_bytes_refused" {
+  command = plan
+  variables {
+    egress_approle_path = join("", [for i in range(65) : "e"])
+  }
+  expect_failures = [var.egress_approle_path]
+}
+
+run "names_at_the_minting_yaml_limits_accepted" {
+  command = plan
+  variables {
+    github_apps         = { "${join("", [for i in range(16) : "a-1-"])}" = { transit_key = "gh-acme" } }
+    egress_bind_cidrs   = ["10.0.0.5/32"]
+    transit_mount_path  = "Tr_${join("", [for i in range(61) : "x"])}"
+    egress_approle_path = "Eg-${join("", [for i in range(61) : "x"])}"
+  }
+
+  assert {
+    condition     = vault_mount.transit[0].path == "Tr_${join("", [for i in range(61) : "x"])}"
+    error_message = "a 64-byte transit mount of [A-Za-z0-9_-] is accepted"
+  }
+}
