@@ -307,6 +307,10 @@ mod tests {
         let folded = |path: &str| decide_partition(&mount("fs.read", path, MINE), Fold::Case);
         assert_eq!(folded("/HOME/HOBI-SVC/TASKS/users/1000"), NA);
         assert_eq!(
+            folded("/System/Volumes/Data/home/hobi-svc/tasks/users/1000"),
+            NA
+        );
+        assert_eq!(
             folded("/System/Volumes/Data/home/hobi-svc/tasks/users/1001"),
             Verdict::Deny {
                 reason: "partition: the mount lies outside the task's partition".into()
