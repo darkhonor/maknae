@@ -118,7 +118,7 @@ impl MintingReads for FileReads {
 #[derive(Debug)]
 pub(crate) enum MintingState {
     Off,
-    Ready(ServiceSigner<ApproleLogin>, MintingConfig),
+    Ready(Box<ServiceSigner<ApproleLogin>>, MintingConfig),
     Unavailable(&'static str),
 }
 
@@ -148,7 +148,7 @@ pub(crate) fn minting_state(
         secret_id,
         journal: stderr_journal,
     };
-    MintingState::Ready(ServiceSigner::new(login), config)
+    MintingState::Ready(Box::new(ServiceSigner::new(login)), config)
 }
 
 fn unavailable(why: &'static str, e: impl Display) -> MintingState {
@@ -210,7 +210,7 @@ fn frames_journaled(
         MintingState::Ready(signer, config) => match GithubClient::new() {
             Ok(github) => Ok(Ready {
                 config,
-                signer,
+                signer: *signer,
                 github,
                 own_key,
                 egress_dir,
