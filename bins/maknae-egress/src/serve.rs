@@ -1885,7 +1885,7 @@ mod tests {
                 c.write_all(&bytes).unwrap();
                 let mut back = Vec::new();
                 if close_before_reply {
-                    c.shutdown(std::net::Shutdown::Both).unwrap();
+                    drop(c);
                 } else {
                     c.read_to_end(&mut back).unwrap();
                 }
