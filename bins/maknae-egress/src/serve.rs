@@ -1659,6 +1659,7 @@ mod tests {
             egress: tempfile::TempDir,
             rt: tokio::runtime::Runtime,
             mints: AtomicUsize,
+            minting_started: std::sync::Arc<AtomicBool>,
             revoke_alls: AtomicUsize,
             journal: Mutex<Vec<String>>,
         }
@@ -1696,6 +1697,7 @@ mod tests {
                     egress,
                     rt: runtime(),
                     mints: AtomicUsize::new(0),
+                    minting_started: std::sync::Arc::new(AtomicBool::new(false)),
                     revoke_alls: AtomicUsize::new(0),
                     journal: Mutex::new(Vec::new()),
                 };
@@ -1714,6 +1716,7 @@ mod tests {
 
             fn mint(&self, admitted: &AdmittedMint<'_>) -> (MintReply, LiveTokens) {
                 self.mints.fetch_add(1, Ordering::SeqCst);
+                self.minting_started.store(true, Ordering::SeqCst);
                 let mut journal = self.record();
                 let mut d = MintDeps {
                     signer: &self.signer,
@@ -1870,12 +1873,13 @@ mod tests {
             })
         }
 
-        /// The peer writes its frame and, when `close_before_reply`, shuts the
-        /// connection down while keeping it open, so the reply write fails.
+        /// The peer writes its frame and, given `close_once_minting`, closes the
+        /// connection after minting has begun, so the peer check has already
+        /// passed and only the reply write fails.
         fn served_minting(
             frame: &EgressFrame,
             m: &dyn MintFrames,
-            close_before_reply: bool,
+            close_once_minting: Option<std::sync::Arc<AtomicBool>>,
         ) -> (Result<(), ServeError>, Option<EgressSocketReply>) {
             let (a, b) = UnixStream::pair().unwrap();
             let bytes = prefixed(&encoded_frame(frame));
@@ -1884,7 +1888,11 @@ mod tests {
                 let mut c = a;
                 c.write_all(&bytes).unwrap();
                 let mut back = Vec::new();
-                if close_before_reply {
+                if let Some(started) = close_once_minting {
+                    let by = Instant::now() + Duration::from_secs(10);
+                    while !started.load(Ordering::SeqCst) && Instant::now() < by {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
                     drop(c);
                 } else {
                     c.read_to_end(&mut back).unwrap();
@@ -1921,7 +1929,11 @@ mod tests {
                 revoked(),
             ]);
             let (m, _agent) = TestMinting::new(&base);
-            let (out, reply) = served_minting(&mint_frame(vec![set("a"), set("b")]), &m, true);
+            let (out, reply) = served_minting(
+                &mint_frame(vec![set("a"), set("b")]),
+                &m,
+                Some(m.minting_started.clone()),
+            );
             assert!(matches!(out, Err(ServeError::Io(_))), "{out:?}");
             assert_eq!(reply, None);
             assert_eq!(m.mints.load(Ordering::SeqCst), 1);
@@ -1939,7 +1951,7 @@ mod tests {
         fn a_delivered_mint_reply_keeps_its_tokens_live() {
             let (base, stub) = github_stub(vec![granted("ghs_one", "a"), granted("ghs_two", "b")]);
             let (m, agent) = TestMinting::new(&base);
-            let (out, reply) = served_minting(&mint_frame(vec![set("a"), set("b")]), &m, false);
+            let (out, reply) = served_minting(&mint_frame(vec![set("a"), set("b")]), &m, None);
             assert_eq!(out, Ok(()));
             let Some(EgressSocketReply::Mint(MintReply::Minted(creds))) = reply else {
                 panic!("expected Minted, got {reply:?}");
@@ -1982,7 +1994,7 @@ mod tests {
                     }
                 }),
             ] {
-                let (out, reply) = served_minting(&frame, &m, false);
+                let (out, reply) = served_minting(&frame, &m, None);
                 assert_eq!(out, Ok(()));
                 assert_eq!(
                     reply,
@@ -2000,12 +2012,12 @@ mod tests {
         fn a_revoke_frame_opens_its_blob_and_deletes_that_token() {
             let (base, stub) = github_stub(vec![granted("ghs_one", "a"), revoked()]);
             let (m, _agent) = TestMinting::new(&base);
-            let (_, reply) = served_minting(&mint_frame(vec![set("a")]), &m, false);
+            let (_, reply) = served_minting(&mint_frame(vec![set("a")]), &m, None);
             let Some(EgressSocketReply::Mint(MintReply::Minted(mut creds))) = reply else {
                 panic!("expected Minted, got {reply:?}");
             };
             let blob = creds.pop().unwrap().for_revocation;
-            let (out, reply) = served_minting(&revoke_frame(9, blob.clone()), &m, false);
+            let (out, reply) = served_minting(&revoke_frame(9, blob.clone()), &m, None);
             assert_eq!(out, Ok(()));
             assert_eq!(
                 reply,
@@ -2013,7 +2025,7 @@ mod tests {
                     MintRefusal::Request
                 )))
             );
-            let (out, reply) = served_minting(&revoke_frame(0, blob), &m, false);
+            let (out, reply) = served_minting(&revoke_frame(0, blob), &m, None);
             assert_eq!(out, Ok(()));
             assert_eq!(reply, Some(EgressSocketReply::Revoke(RevokeReply::Revoked)));
             let seen = stub.join().unwrap();
