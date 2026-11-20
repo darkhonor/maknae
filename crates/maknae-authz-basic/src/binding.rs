@@ -1541,6 +1541,7 @@ mod tests {
             policy,
             sensitive: Default::default(),
             tools: Default::default(),
+            fold: maknae_config::Fold::None,
         }
     }
 

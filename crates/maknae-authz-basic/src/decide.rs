@@ -47,6 +47,7 @@ pub(crate) struct LoadedPolicy {
     pub(crate) taskers: AgentTaskers,
     pub(crate) sensitive: std::sync::Arc<maknae_config::SensitiveList>,
     pub(crate) tools: std::sync::Arc<maknae_config::ToolsCatalog>,
+    pub(crate) fold: maknae_config::Fold,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -894,7 +895,7 @@ pub(crate) fn decide_loaded_cited(
             (decided, None)
         }
         Role::Admin | Role::User | Role::Guest
-            if let Some(limited) = action_limit(&lp.policy, lp.subjects.get(uid), req) =>
+            if let Some(limited) = action_limit(lp, lp.subjects.get(uid), req) =>
         {
             (limited, None)
         }
@@ -1147,7 +1148,7 @@ fn agent_arm(agents: &AgentUids, uid: u32, role: Role, req: &SecRequest) -> Opti
 
 /// The operator's `actions:` limit, except on a file request the entry's built-in right decides.
 fn action_limit(
-    policy: &maknae_config::AuthzPolicy,
+    lp: &LoadedPolicy,
     entry: Option<&SubjectEntry>,
     req: &SecRequest,
 ) -> Option<Verdict> {
@@ -1162,7 +1163,7 @@ fn action_limit(
     match class_of(action) {
         Some(Class::Liveness | Class::Kernel) | None => return None,
         Some(Class::Admin) if action == "admin.whoami" => return None,
-        Some(Class::Fs) if right_decides(policy, entry, req) => return None,
+        Some(Class::Fs) if right_decides(lp, entry, req) => return None,
         Some(
             Class::Admin | Class::Session | Class::Fs | Class::Terminal | Class::Mcp | Class::Tool,
         ) => {}
@@ -1208,6 +1209,18 @@ enum FsScope {
     ReadSubtree,
     Write,
     WriteSubtree,
+    MountRead,
+    MountWrite,
+}
+
+impl FsScope {
+    fn mount_side(self) -> Option<maknae_config::MountSide> {
+        match self {
+            FsScope::MountRead => Some(maknae_config::MountSide::Read),
+            FsScope::MountWrite => Some(maknae_config::MountSide::Write),
+            FsScope::Read | FsScope::ReadSubtree | FsScope::Write | FsScope::WriteSubtree => None,
+        }
+    }
 }
 
 fn attempt_scope(req: &SecRequest) -> Result<FsScope, Verdict> {
@@ -1233,6 +1246,8 @@ fn attempt_scope(req: &SecRequest) -> Result<FsScope, Verdict> {
         | ("fs.mkdir", FsOperation::Mkdir) => FsScope::Write,
         ("fs.delete", FsOperation::DeleteTree) => FsScope::WriteSubtree,
         ("fs.read", FsOperation::DeleteTree) => FsScope::ReadSubtree,
+        ("fs.read", FsOperation::Mount) => FsScope::MountRead,
+        ("fs.write", FsOperation::Mount) => FsScope::MountWrite,
         _ => {
             return Err(refuse(
                 "filesystem attempt preparation does not match action",
@@ -1269,22 +1284,46 @@ fn fs_target(req: &SecRequest) -> Result<(&std::path::Path, Option<&std::path::P
 }
 
 fn evaluate_floored(
-    policy: &maknae_config::AuthzPolicy,
+    lp: &LoadedPolicy,
     set: Option<&maknae_config::SubjectPermissions>,
     scope: FsScope,
     path: &std::path::Path,
     home: Option<&std::path::Path>,
 ) -> Result<maknae_config::Match3, maknae_config::HomeUnbound> {
     match scope {
-        FsScope::Read => policy.evaluate3_floored(set, &maknae_config::Request::Read(path), home),
-        FsScope::Write => policy.evaluate3_floored(set, &maknae_config::Request::Write(path), home),
-        FsScope::ReadSubtree => policy.evaluate_read_subtree_floored(set, path, home),
-        FsScope::WriteSubtree => policy.evaluate_write_subtree_floored(set, path, home),
+        FsScope::Read => {
+            lp.policy
+                .evaluate3_floored(set, &maknae_config::Request::Read(path), home, lp.fold)
+        }
+        FsScope::Write => {
+            lp.policy
+                .evaluate3_floored(set, &maknae_config::Request::Write(path), home, lp.fold)
+        }
+        FsScope::ReadSubtree => lp
+            .policy
+            .evaluate_read_subtree_floored(set, path, home, lp.fold),
+        FsScope::WriteSubtree => lp
+            .policy
+            .evaluate_write_subtree_floored(set, path, home, lp.fold),
+        FsScope::MountRead => lp.policy.evaluate_mount_floored(
+            set,
+            maknae_config::MountSide::Read,
+            path,
+            home,
+            lp.fold,
+        ),
+        FsScope::MountWrite => lp.policy.evaluate_mount_floored(
+            set,
+            maknae_config::MountSide::Write,
+            path,
+            home,
+            lp.fold,
+        ),
     }
 }
 
 fn evaluate_agent(
-    policy: &maknae_config::AuthzPolicy,
+    lp: &LoadedPolicy,
     right: &maknae_config::SubjectPermissions,
     set: Option<&maknae_config::SubjectPermissions>,
     scope: FsScope,
@@ -1292,22 +1331,46 @@ fn evaluate_agent(
     home: Option<&std::path::Path>,
 ) -> Result<AgentMatch, maknae_config::HomeUnbound> {
     match scope {
-        FsScope::Read => {
-            policy.evaluate3_agent(right, set, &maknae_config::Request::Read(path), home)
-        }
-        FsScope::Write => {
-            policy.evaluate3_agent(right, set, &maknae_config::Request::Write(path), home)
-        }
-        FsScope::ReadSubtree => policy.evaluate_read_subtree_agent(right, set, path, home),
-        FsScope::WriteSubtree => policy.evaluate_write_subtree_agent(right, set, path, home),
+        FsScope::Read => lp.policy.evaluate3_agent(
+            right,
+            set,
+            &maknae_config::Request::Read(path),
+            home,
+            lp.fold,
+        ),
+        FsScope::Write => lp.policy.evaluate3_agent(
+            right,
+            set,
+            &maknae_config::Request::Write(path),
+            home,
+            lp.fold,
+        ),
+        FsScope::ReadSubtree => lp
+            .policy
+            .evaluate_read_subtree_agent(right, set, path, home, lp.fold),
+        FsScope::WriteSubtree => lp
+            .policy
+            .evaluate_write_subtree_agent(right, set, path, home, lp.fold),
+        FsScope::MountRead => lp.policy.evaluate_mount_agent(
+            right,
+            set,
+            maknae_config::MountSide::Read,
+            path,
+            home,
+            lp.fold,
+        ),
+        FsScope::MountWrite => lp.policy.evaluate_mount_agent(
+            right,
+            set,
+            maknae_config::MountSide::Write,
+            path,
+            home,
+            lp.fold,
+        ),
     }
 }
 
-fn right_decides(
-    policy: &maknae_config::AuthzPolicy,
-    entry: &SubjectEntry,
-    req: &SecRequest,
-) -> bool {
+fn right_decides(lp: &LoadedPolicy, entry: &SubjectEntry, req: &SecRequest) -> bool {
     let Some((_, right)) = entry.agent_right() else {
         return false;
     };
@@ -1315,7 +1378,7 @@ fn right_decides(
         return false;
     };
     matches!(
-        evaluate_agent(policy, right, entry.permissions.as_ref(), scope, path, home),
+        evaluate_agent(lp, right, entry.permissions.as_ref(), scope, path, home),
         Ok(AgentMatch::Right { .. })
     )
 }
@@ -1338,16 +1401,40 @@ fn decide_fs(
         Ok(target) => target,
         Err(decision) => return decision,
     };
-    decide_grants(
+    let decided = decide_grants(
         lp,
         entry,
-        |right, set| evaluate_agent(&lp.policy, right, set, scope, path, home),
-        |set| evaluate_floored(&lp.policy, set, scope, path, home),
+        |right, set| evaluate_agent(lp, right, set, scope, path, home),
+        |set| evaluate_floored(lp, set, scope, path, home),
         // Case-5 testimony (#181): role and term ONLY -- never the path (the
         // D9 hazard). "No capability entry" is accurate where "no rule" would
         // be false: a rule for fs.read exists; no ENTRY matched this request.
         format!("role {role_key}: no capability entry for {}", req.action.0),
-    )
+    );
+    let Some(side) = scope.mount_side() else {
+        return decided;
+    };
+    let (Verdict::Permit { mut obligations }, cited) = decided else {
+        return decided;
+    };
+    let right = entry.and_then(SubjectEntry::agent_right).map(|(_, r)| r);
+    let set = entry.and_then(|e| e.permissions.as_ref());
+    match lp.policy.mount_masks(right, set, side, path, home, lp.fold) {
+        Ok(masks) => {
+            obligations.push(mask_obligation(masks));
+            (Verdict::Permit { obligations }, cited)
+        }
+        Err(_) => (Verdict::Indeterminate, None),
+    }
+}
+
+fn mask_obligation(patterns: Vec<String>) -> Obligation {
+    let mut params = Attributes::new();
+    params.insert("patterns", AttrValue::List(patterns));
+    Obligation {
+        id: "workspace.mask".into(),
+        params,
+    }
 }
 
 /// Deny-first over the site and the subject's or agent's own lists, citing the entry that
@@ -1529,8 +1616,11 @@ fn decide_tool(
     decide_grants(
         lp,
         lp.subjects.get(uid),
-        |right, set| lp.policy.evaluate3_agent(right, set, &request, None),
-        |set| lp.policy.evaluate3_floored(set, &request, None),
+        |right, set| {
+            lp.policy
+                .evaluate3_agent(right, set, &request, None, lp.fold)
+        },
+        |set| lp.policy.evaluate3_floored(set, &request, None, lp.fold),
         format!("role {role_key}: no capability entry for tool.invoke"),
     )
 }
@@ -1583,6 +1673,7 @@ mod tests {
             taskers: Default::default(),
             sensitive: Default::default(),
             tools: Default::default(),
+            fold: maknae_config::Fold::None,
         }
     }
 
@@ -1720,6 +1811,197 @@ mod tests {
                 "{role}"
             );
         }
+    }
+
+    fn mount_req(uid: u32, action: &str, op: &str, path: &str) -> SecRequest {
+        let mut req = request(Some(i64::from(uid)), action, Some(path));
+        req.context.0.insert(
+            maknae_security::CONTEXT_FS_OPERATION,
+            AttrValue::Str(op.into()),
+        );
+        req
+    }
+
+    fn masked(patterns: &[&str]) -> Verdict {
+        let mut params = Attributes::new();
+        params.insert(
+            "patterns",
+            AttrValue::List(patterns.iter().map(|p| p.to_string()).collect()),
+        );
+        Verdict::Permit {
+            obligations: vec![
+                audit_obligation(),
+                Obligation {
+                    id: "workspace.mask".into(),
+                    params,
+                },
+            ],
+        }
+    }
+
+    fn lp_mount(site: &str) -> LoadedPolicy {
+        let mut lp = lp_with(
+            Some(&[("user", &["operator"])]),
+            &[("operator", OPERATOR_UID)],
+        );
+        lp.policy = maknae_config::parse_authz(site).unwrap();
+        lp
+    }
+
+    #[test]
+    fn mount_read_permits_with_mask() {
+        let lp = lp_mount("schema_version: 1\npermissions:\n  allow: [\"Read(/w/**)\"]\n  deny: [\"Read(/w/secret/**)\"]\n");
+        let req = mount_req(OPERATOR_UID, "fs.read", "mount", "/w");
+        assert_eq!(
+            decide_loaded(&lp, &principal(), &req),
+            masked(&["/w/secret/**"])
+        );
+    }
+
+    #[test]
+    fn mount_write_is_its_own_side() {
+        let lp = lp_mount("schema_version: 1\npermissions:\n  allow: [\"Write(/w/**)\"]\n  deny: [\"Read(/w/secret/**)\"]\n");
+        let write = mount_req(OPERATOR_UID, "fs.write", "mount", "/w");
+        assert_eq!(decide_loaded(&lp, &principal(), &write), masked(&[]));
+        let read = mount_req(OPERATOR_UID, "fs.read", "mount", "/w");
+        assert!(matches!(
+            decide_loaded(&lp, &principal(), &read),
+            Verdict::NotApplicable { .. }
+        ));
+    }
+
+    #[test]
+    fn mount_deny_on_root_denies() {
+        let lp = lp_mount(
+            "schema_version: 1\npermissions:\n  allow: [\"Read(/w/**)\"]\n  deny: [\"Read(/w)\"]\n",
+        );
+        let req = mount_req(OPERATOR_UID, "fs.read", "mount", "/w");
+        assert_eq!(
+            decide_loaded(&lp, &principal(), &req),
+            Verdict::Deny {
+                reason: "denied by policy entry Read(/w)".into()
+            }
+        );
+    }
+
+    #[test]
+    fn mount_wrong_action_refused() {
+        let lp = lp_mount(
+            "schema_version: 1\npermissions:\n  allow: [\"Read(/w/**)\", \"Write(/w/**)\"]\n",
+        );
+        for action in ["fs.delete", "fs.mkdir", "fs.stat", "fs.list"] {
+            let req = mount_req(OPERATOR_UID, action, "mount", "/w");
+            assert_eq!(
+                decide_loaded(&lp, &principal(), &req),
+                Verdict::Deny {
+                    reason: "filesystem attempt preparation does not match action".into()
+                },
+                "{action}"
+            );
+        }
+    }
+
+    #[test]
+    fn mount_agent_right_permits() {
+        let mut lp = lp_agent(
+            "user",
+            Some("schema_version: 1\npermissions:\n  deny: [\"Read(/**/.own-deny)\"]\n"),
+        );
+        lp.policy = maknae_config::parse_authz(&AGENT_SITE.replace(
+            "deny: [\"Read(~/.ssh/**)\"]",
+            "deny: [\"Read(~/.ssh/**)\", \"Read(/**/.env)\"]",
+        ))
+        .unwrap();
+        for (action, patterns) in [("fs.read", &["/**/.env"][..]), ("fs.write", &[][..])] {
+            let req = on_channel(
+                mount_req(HOBI_UID, action, "mount", "/home/operator/tasks/users/1"),
+                Some(maknae_security::CHANNEL_AGENT),
+                Some("hobi"),
+            );
+            let d = decide_loaded_cited(&lp, &principal(), &req);
+            assert_eq!(d.verdict, masked(patterns), "{action}");
+            assert!(
+                matches!(d.cited, Some(Cited::AgentRight { ref agent, .. }) if agent == "hobi"),
+                "{action}: {d:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mount_masks_carry_the_subjects_own_denies_when_no_right_decides() {
+        let mut lp = lp_agent(
+            "user",
+            Some("schema_version: 1\npermissions:\n  allow: [\"Read(/w/**)\"]\n  deny: [\"Read(/w/own/**)\"]\n"),
+        );
+        lp.policy = maknae_config::parse_authz(&AGENT_SITE.replace(
+            "deny: [\"Read(~/.ssh/**)\"]",
+            "deny: [\"Read(~/.ssh/**)\", \"Read(/**/.env)\"]",
+        ))
+        .unwrap();
+        let req = on_channel(
+            mount_req(HOBI_UID, "fs.read", "mount", "/w"),
+            Some(maknae_security::CHANNEL_AGENT),
+            Some("hobi"),
+        );
+        let d = decide_loaded_cited(&lp, &principal(), &req);
+        assert_eq!(d.verdict, masked(&["/**/.env", "/w/own/**"]));
+    }
+
+    #[test]
+    fn a_deny_decides_through_the_policys_fold() {
+        let mut lp = lp_mount("schema_version: 1\npermissions:\n  allow: [\"Read(/w/**)\"]\n  deny: [\"Read(/w/Secret/**)\"]\n");
+        let req = mount_req(OPERATOR_UID, "fs.read", "mount", "/w/secret");
+        assert!(matches!(
+            decide_loaded(&lp, &principal(), &req),
+            Verdict::Permit { .. }
+        ));
+        lp.fold = maknae_config::Fold::Case;
+        assert!(matches!(
+            decide_loaded(&lp, &principal(), &req),
+            Verdict::Deny { .. }
+        ));
+    }
+
+    fn read_at_home(lp: &LoadedPolicy, req: SecRequest, home: &str) -> Verdict {
+        let mut req = req;
+        req.subject
+            .0
+            .insert(maknae_security::SUBJECT_HOME, AttrValue::Str(home.into()));
+        decide_loaded(lp, &principal(), &req)
+    }
+
+    #[test]
+    fn a_home_deny_decides_through_the_folded_home() {
+        let mut lp = lp_mount("schema_version: 1\npermissions:\n  allow: [\"Read(/**)\"]\n  deny: [\"Read(~/.ssh/**)\"]\n");
+        let req = || {
+            request(
+                Some(i64::from(OPERATOR_UID)),
+                "fs.read",
+                Some("/users/alex/.SSH/id_rsa"),
+            )
+        };
+        assert!(matches!(
+            read_at_home(&lp, req(), "/Users/Alex"),
+            Verdict::Permit { .. }
+        ));
+        lp.fold = maknae_config::Fold::Case;
+        assert!(matches!(
+            read_at_home(&lp, req(), "/Users/Alex"),
+            Verdict::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn mount_with_an_unbound_home_is_indeterminate() {
+        let lp = lp_mount("schema_version: 1\npermissions:\n  allow: [\"Read(/w/**)\"]\n  deny: [\"Read(~/x/**)\"]\n");
+        let mut req = mount_req(OPERATOR_UID, "fs.read", "mount", "/w");
+        let mut subject = Attributes::new();
+        subject.insert(SUBJECT_UID, AttrValue::Int(i64::from(OPERATOR_UID)));
+        req.subject = Subject(subject);
+        assert_eq!(
+            decide_loaded(&lp, &principal(), &req),
+            Verdict::Indeterminate
+        );
     }
 
     #[test]
@@ -2826,6 +3108,7 @@ mod tests {
             policy,
             sensitive: Default::default(),
             tools: Default::default(),
+            fold: maknae_config::Fold::None,
         }
     }
 
@@ -3610,6 +3893,7 @@ mod tests {
             policy,
             sensitive: Default::default(),
             tools: Default::default(),
+            fold: maknae_config::Fold::None,
         }
     }
 
@@ -4162,6 +4446,7 @@ mod tests {
             policy,
             sensitive: Default::default(),
             tools: Default::default(),
+            fold: maknae_config::Fold::None,
         }
     }
 
@@ -4702,6 +4987,7 @@ mod tests {
             policy,
             sensitive: Default::default(),
             tools: Default::default(),
+            fold: maknae_config::Fold::None,
         };
         let at = |path: &str| request(Some(UID.into()), "session.new", Some(path));
         for path in ["/home/operator/projects/x", "/home/operator/docs/x"] {
@@ -4771,6 +5057,7 @@ mod tests {
             policy,
             sensitive: Default::default(),
             tools: Default::default(),
+            fold: maknae_config::Fold::None,
         }
     }
 
@@ -4798,6 +5085,43 @@ mod tests {
             Some(maknae_security::CHANNEL_AGENT),
             Some("hobi"),
         )
+    }
+
+    #[test]
+    fn an_agent_deny_decides_through_the_policys_fold() {
+        let site = AGENT_SITE.replace(
+            "deny: [\"Read(~/.ssh/**)\"]",
+            "deny: [\"Read(~/.ssh/**)\", \"Read(~/tasks/Blocked/**)\"]",
+        );
+        for path in ["/Users/Hobi/tasks/blocked/x", "/Users/Hobi/.SSH/id_rsa"] {
+            let mut lp = lp_agent(
+                "user",
+                Some("schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n"),
+            );
+            lp.policy = maknae_config::parse_authz(&site).unwrap();
+            let req = || {
+                on_channel(
+                    request(Some(i64::from(HOBI_UID)), "fs.read", Some(path)),
+                    Some(maknae_security::CHANNEL_AGENT),
+                    Some("hobi"),
+                )
+            };
+            assert!(
+                matches!(
+                    read_at_home(&lp, req(), "/Users/Hobi"),
+                    Verdict::Permit { .. }
+                ),
+                "{path}"
+            );
+            lp.fold = maknae_config::Fold::Case;
+            assert!(
+                matches!(
+                    read_at_home(&lp, req(), "/Users/Hobi"),
+                    Verdict::Deny { .. }
+                ),
+                "{path}"
+            );
+        }
     }
 
     fn admin_terms() -> impl Iterator<Item = &'static str> {
@@ -5235,6 +5559,7 @@ mod tests {
             policy,
             sensitive: Default::default(),
             tools: Default::default(),
+            fold: maknae_config::Fold::None,
         }
     }
 
@@ -5811,6 +6136,7 @@ mod tests {
             policy,
             sensitive: Default::default(),
             tools: std::sync::Arc::new(maknae_config::ToolsCatalog::parse(TOOLS_674).unwrap()),
+            fold: maknae_config::Fold::None,
         }
     }
 

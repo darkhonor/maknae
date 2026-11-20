@@ -2390,6 +2390,7 @@ mod tests {
                 taskers: src.agent_taskers().clone(),
                 sensitive: std::sync::Arc::clone(src.sensitive()),
                 tools: std::sync::Arc::clone(src.tools()),
+                fold: maknae_config::native_fold(),
             })
         }
 
@@ -3034,6 +3035,7 @@ mod tests {
             taskers: l.taskers.clone(),
             sensitive: Arc::clone(&l.sensitive),
             tools: Arc::clone(&l.tools),
+            fold: l.fold,
         }
     }
 
@@ -3090,6 +3092,7 @@ mod tests {
             taskers: Default::default(),
             sensitive: Default::default(),
             tools: Default::default(),
+            fold: maknae_config::Fold::None,
         };
         let ask = |uid: i64, action: &str| {
             let mut r = liveness_req(Some(uid));
@@ -6845,6 +6848,7 @@ mod tests {
                 FsOperation::DeleteTree,
                 FsOperation::Mkdir,
                 FsOperation::Read,
+                FsOperation::Mount,
             ]
             .into_iter()
             .map(|o| Some(o.as_str()))
@@ -6920,7 +6924,7 @@ mod tests {
             let (uids, paths, homes, ops) = (uids(), paths(), homes(), operations());
             assert_eq!(
                 (uids.len(), paths.len(), homes.len(), ops.len()),
-                (9, 22, 5, 7)
+                (9, 22, 5, 8)
             );
             let destinations = [
                 Some(AttrValue::Str("provider:openai".into())),
@@ -6944,7 +6948,7 @@ mod tests {
                     distinct(&ops),
                     distinct(&destinations),
                 ),
-                (61, 9, 22, 5, 7, 4)
+                (61, 9, 22, 5, 8, 4)
             );
             let mut cells = 0usize;
             let mut mismatches: Vec<String> = Vec::new();
@@ -7093,7 +7097,7 @@ mod tests {
                 mismatches.len(),
                 &mismatches[..mismatches.len().min(10)]
             );
-            let fs_cells = 6 * 7 * 22 * 5 + 7 * 22 * 5;
+            let fs_cells = 6 * 8 * 22 * 5 + 8 * 22 * 5;
             let other_cells = 54 + 4;
             assert_eq!(cells, 12 * 9 * (fs_cells + other_cells));
             assert_eq!(subject_entries, 1);
@@ -8375,6 +8379,38 @@ mod tests {
             );
             assert_eq!(
                 a.decide(&hobi_fs("fs.read", "read", "/home/operator/notes/x")),
+                Verdict::Deny {
+                    reason: "subject hobi-svc: fs.read is not in agents.hobi.policy.actions allow"
+                        .into()
+                }
+            );
+        }
+
+        #[test]
+        fn an_actions_list_limits_a_mount_the_right_does_not_decide() {
+            let src = source(
+                None,
+                &[],
+                load(
+                    vec![hobi()],
+                    &[(
+                        "hobi",
+                        "schema_version: 1\npermissions:\n  allow: [\"Read(~/notes/**)\"]\nactions:\n  allow: [\"session.prompt\"]\n",
+                    )],
+                ),
+            );
+            let a = auth(&src, 501);
+            let tasks = a.decide_cited(&hobi_fs("fs.read", "mount", &format!("{TASKS}/users/1")));
+            assert!(
+                matches!(&tasks.verdict, Verdict::Permit { obligations } if obligations.iter().any(|o| o.id == "workspace.mask")),
+                "{tasks:?}"
+            );
+            assert_eq!(
+                tasks.rule.map(|r| r.key),
+                Some("rule:agents.hobi.tasks-right:allow:0".to_string())
+            );
+            assert_eq!(
+                a.decide(&hobi_fs("fs.read", "mount", "/home/operator/notes")),
                 Verdict::Deny {
                     reason: "subject hobi-svc: fs.read is not in agents.hobi.policy.actions allow"
                         .into()

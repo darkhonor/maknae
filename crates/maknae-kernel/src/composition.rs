@@ -231,7 +231,10 @@ impl<B: Baseline> Composition<B> {
     }
 
     /// The live operands, all over the one snapshot installed when the batch starts.
-    fn on_live<R>(&self, decide: impl FnOnce(&[&dyn Authorizer; 4]) -> R) -> R {
+    fn on_live<R>(
+        &self,
+        decide: impl FnOnce(&[&dyn Authorizer; 4], &Arc<maknae_config::SensitiveList>) -> R,
+    ) -> R {
         let _turn = self.baseline.live_turn().share();
         let snap = self.baseline.snapshot();
         let base = OnSnapshot {
@@ -239,7 +242,16 @@ impl<B: Baseline> Composition<B> {
             snap: &snap,
         };
         let sensitive = SensitiveAuthorizer::new(snap.sensitive());
-        decide(&self.operands_with(&base, &sensitive))
+        decide(&self.operands_with(&base, &sensitive), snap.sensitive())
+    }
+}
+
+impl<B: Baseline> crate::workspace::DecidesPinned for Composition<B> {
+    fn decide_all_pinned(
+        &self,
+        reqs: &[Request],
+    ) -> (Vec<Decided>, Arc<maknae_config::SensitiveList>) {
+        self.on_live(|ops, host| (compose_decide_cited_all(ops, reqs), Arc::clone(host)))
     }
 }
 
@@ -344,11 +356,11 @@ impl<B: Baseline> Authorizer for Composition<B> {
     /// projections, so every existing composition test covers what production
     /// runs.
     fn decide_cited(&self, req: &Request) -> Decided {
-        self.on_live(|ops| compose_decide_cited(ops, req))
+        self.on_live(|ops, _| compose_decide_cited(ops, req))
     }
 
     fn decide_cited_all(&self, reqs: &[Request]) -> Vec<Decided> {
-        self.on_live(|ops| compose_decide_cited_all(ops, reqs))
+        self.on_live(|ops, _| compose_decide_cited_all(ops, reqs))
     }
 
     fn subjects(&self) -> Option<Vec<SubjectBinding>> {
@@ -885,6 +897,7 @@ mod tests {
             }
         }
         out.push_str(&tool_invoke_decisions());
+        out.push_str(&workspace_mount_decisions());
         out
     }
 
@@ -1025,6 +1038,244 @@ mod tests {
                     maknae_security::finalize(d.verdict.clone())
                 ));
             }
+        }
+        out
+    }
+
+    const MOUNT_SITE_POLICY: &str = concat!(
+        "schema_version: 1\n",
+        "permissions:\n",
+        "  allow: [\"Read(~/**)\", \"Write(~/projects/**)\", \"Read(/home/**)\"]\n",
+        "  deny: [\"Read(/**/.env)\", \"Read(~/projects/secret/**)\"]\n",
+        "roles:\n",
+        "  admin:\n",
+        "    allow: [\"session.new\"]\n",
+        "  user:\n",
+        "    allow: [\"session.new\"]\n",
+    );
+
+    fn workspace_mount_decisions() -> String {
+        use crate::handler::{Stamp, TaskStamp};
+        use crate::workspace::{MountDecision, MountMode};
+        use maknae_authz_basic::Baseline;
+        use maknae_config::Fold;
+        use std::path::Path;
+        let (_s, shipped) = crate::test_fixtures::shipped_composition();
+        let (g, basic) =
+            crate::test_fixtures::fixture("workspace-mount-golden", MOUNT_SITE_POLICY, None);
+        crate::test_fixtures::write_sensitive(
+            &g.0,
+            include_str!("../../../packaging/common/sensitive.yaml"),
+        );
+        basic.set_hosts(crate::test_fixtures::BTS_HOSTS);
+        crate::test_fixtures::write_agent(&g.0, "hobi", "hobi-svc", 2001, "user");
+        basic.install(basic.compile_from_file().unwrap());
+        let site = Composition::with_us_baseline_ceiling(basic);
+
+        let principal = nix::unistd::geteuid().as_raw();
+        let task = TaskStamp {
+            id: maknae_proto::TaskId([0x67; 16]),
+            tasker: "uid:1000".into(),
+            root: "users/1000".into(),
+            start: 0,
+        };
+        let hobi = maknae_config::AgentId::parse("hobi").unwrap();
+        let tasked = Stamp::Agent {
+            agent: &hobi,
+            task: Some(&task),
+        };
+        let untasked = Stamp::Agent {
+            agent: &hobi,
+            task: None,
+        };
+        const OPERATOR: &str = "/home/operator";
+        const HOBI: &str = "/var/lib/maknae-agents/hobi";
+        type Row<'a> = (
+            &'a str,
+            bool,
+            u32,
+            &'a str,
+            &'a Stamp<'a>,
+            &'a str,
+            MountMode,
+        );
+        use MountMode::{ReadOnly as RO, ReadWrite as RW};
+        let mut rows: Vec<Row> = vec![
+            (
+                "principal",
+                false,
+                principal,
+                OPERATOR,
+                &Stamp::Client,
+                "/home/operator/projects/x",
+                RO,
+            ),
+            (
+                "principal",
+                false,
+                principal,
+                OPERATOR,
+                &Stamp::Client,
+                "/home/operator/projects/x",
+                RW,
+            ),
+            (
+                "principal",
+                false,
+                principal,
+                OPERATOR,
+                &Stamp::Client,
+                "/home/operator/docs",
+                RW,
+            ),
+        ];
+        for root in [
+            "/run",
+            "/tmp",
+            "/var/tmp",
+            "/var/run",
+            "/var/folders",
+            "/proc",
+            "/sys",
+            "/dev",
+            "/etc",
+            "/usr",
+            "/var/lib/maknae",
+            "/var/log/maknae",
+            "/usr/lib",
+            "/var",
+            "/var/lib",
+            "/var/log",
+            "/",
+            "/home/operator",
+            "/home",
+        ] {
+            rows.push((
+                "principal",
+                false,
+                principal,
+                OPERATOR,
+                &Stamp::Client,
+                root,
+                RO,
+            ));
+        }
+        rows.extend::<[Row; 9]>([
+            (
+                "principal",
+                false,
+                principal,
+                OPERATOR,
+                &Stamp::Client,
+                "/home/operator/.config",
+                RO,
+            ),
+            (
+                "principal",
+                false,
+                principal,
+                OPERATOR,
+                &Stamp::Client,
+                "/home/operator/.ssh",
+                RO,
+            ),
+            (
+                "agent hobi tasked",
+                false,
+                2001,
+                HOBI,
+                &tasked,
+                "/var/lib/maknae-agents/hobi/tasks/users/1000",
+                RW,
+            ),
+            (
+                "agent hobi tasked",
+                false,
+                2001,
+                HOBI,
+                &tasked,
+                "/var/lib/maknae-agents/hobi/tasks/users/1001",
+                RO,
+            ),
+            (
+                "agent hobi",
+                false,
+                2001,
+                HOBI,
+                &untasked,
+                "/var/lib/maknae-agents/hobi/tasks/users/1000",
+                RO,
+            ),
+            (
+                "principal",
+                true,
+                principal,
+                OPERATOR,
+                &Stamp::Client,
+                "/home/alice",
+                RO,
+            ),
+            (
+                "principal",
+                true,
+                principal,
+                OPERATOR,
+                &Stamp::Client,
+                "/home/operator/projects/secret",
+                RO,
+            ),
+            (
+                "principal",
+                true,
+                principal,
+                OPERATOR,
+                &Stamp::Client,
+                "/home/operator/projects",
+                RO,
+            ),
+            (
+                "agent hobi tasked",
+                true,
+                2001,
+                HOBI,
+                &tasked,
+                "/var/lib/maknae-agents/hobi/tasks/users/1000",
+                RO,
+            ),
+        ]);
+        let mut out = String::from(
+            "# workspace.mount: decide_mount through the Composition, under the shipped authz.yaml and sensitive.yaml, or a site fixture with a covering Read(/home/**) and denies on and beneath the root.\n",
+        );
+        for (who, fixture, uid, home, stamp, root, mode) in rows {
+            let c = if fixture { &site } else { &shipped };
+            let decide = |fold| {
+                MountDecision::with_fold(
+                    c,
+                    fold,
+                    maknae_security::Lane::Local,
+                    uid,
+                    Some(Path::new(home)),
+                    None,
+                    None,
+                    stamp,
+                    root,
+                    mode,
+                )
+            };
+            let d = decide(Fold::None);
+            assert_eq!(d, decide(Fold::Case), "{who} {root}");
+            let files = if fixture { "site-fixture" } else { "shipped" };
+            let mode = match mode {
+                RO => "ro",
+                RW => "rw",
+            };
+            let outcome = match d {
+                MountDecision::Refused { audit, .. } => format!("Refused {audit:?}"),
+                MountDecision::Permitted { masks, .. } => format!("Permitted {masks:?}"),
+            };
+            out.push_str(&format!(
+                "{who} [{files}] mount {mode} {root} => {outcome}\n"
+            ));
         }
         out
     }

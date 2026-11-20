@@ -85,6 +85,7 @@ pub enum FsOperation {
     DeleteTree,
     Mkdir,
     Read,
+    Mount,
 }
 
 impl FsOperation {
@@ -96,6 +97,7 @@ impl FsOperation {
             Self::DeleteTree => "delete-tree",
             Self::Mkdir => "mkdir",
             Self::Read => "read",
+            Self::Mount => "mount",
         }
     }
 
@@ -107,6 +109,7 @@ impl FsOperation {
             "delete-tree" => Some(Self::DeleteTree),
             "mkdir" => Some(Self::Mkdir),
             "read" => Some(Self::Read),
+            "mount" => Some(Self::Mount),
             _ => None,
         }
     }
@@ -252,6 +255,7 @@ mod operation_tests {
             (FsOperation::DeleteTree, "delete-tree"),
             (FsOperation::Mkdir, "mkdir"),
             (FsOperation::Read, "read"),
+            (FsOperation::Mount, "mount"),
         ] {
             assert_eq!(operation.as_str(), spelling);
             assert_eq!(FsOperation::parse(spelling), Some(operation));

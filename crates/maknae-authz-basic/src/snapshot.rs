@@ -613,6 +613,7 @@ pub fn compile(
         taskers: source.agent_taskers().clone(),
         sensitive: Arc::clone(source.sensitive()),
         tools: Arc::clone(source.tools()),
+        fold: maknae_config::native_fold(),
     };
     Ok(Snapshot {
         graph,
@@ -910,6 +911,22 @@ mod tests {
     }
 
     const TOOLS_674: &str = "schema_version: 1\ntools:\n  sentinel-674-build:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      cargo: { subcommands: [\"build *\"] }\n";
+
+    #[test]
+    fn a_compiled_snapshot_decides_under_the_hosts_fold() {
+        let s = source_with(
+            "schema_version: 1\npermissions:\n  allow: []\n",
+            Some(BINDINGS),
+        );
+        let snap = snap(&s);
+        assert_eq!(snap.loaded().fold, maknae_config::native_fold());
+        assert_eq!(
+            crate::tests::granting_tool_invoke(snap.loaded()).fold,
+            snap.loaded().fold
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(snap.loaded().fold, maknae_config::Fold::Case);
+    }
 
     #[test]
     fn tool_citation_resolves_through_a_compiled_snapshot() {

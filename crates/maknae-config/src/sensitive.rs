@@ -25,8 +25,6 @@ pub fn native_fold() -> Fold {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Entry {
     glob: PathGlob,
-    lowered: PathGlob,
-    mapped: PathGlob,
     text: String,
 }
 
@@ -129,6 +127,27 @@ impl SensitiveList {
         })
     }
 
+    /// Every entry that could match `dir` or a path beneath it, with a leading `~`
+    /// written as `home`; deduplicated and sorted. `HomeUnbound` when a `~` entry
+    /// could not be evaluated.
+    pub fn subtree_entries(
+        &self,
+        dir: &Path,
+        home: Option<&Path>,
+        fold: Fold,
+    ) -> Result<Vec<String>, HomeUnbound> {
+        let path = dir.to_string_lossy();
+        let folded = (fold == Fold::Case).then(|| Folded::new(&path, home, true));
+        let test = |glob: &PathGlob, p: &str, h: Option<&Path>| glob.may_intersect_subtree(p, h);
+        let mut hits = std::collections::BTreeSet::new();
+        for e in &self.entries {
+            if e.glob.hit(&path, home, folded.as_ref(), test)? {
+                hits.insert(e.glob.expanded(home)?);
+            }
+        }
+        Ok(hits.into_iter().collect())
+    }
+
     fn first(
         &self,
         path: &Path,
@@ -141,27 +160,7 @@ impl SensitiveList {
         let folded = (fold == Fold::Case).then(|| Folded::new(&path, home, subtree));
         let mut unbound = false;
         for e in &self.entries {
-            let hit = match &folded {
-                None => test(&e.glob, &path, home),
-                Some(f) => test(
-                    &e.lowered,
-                    &f.lowered,
-                    f.home_lowered.as_deref().map(Path::new),
-                )
-                .and_then(|hit| {
-                    let home = f.home_mapped.as_deref().map(Path::new);
-                    if hit {
-                        return Ok(true);
-                    }
-                    for root in &f.mapped {
-                        if test(&e.mapped, root, home)? {
-                            return Ok(true);
-                        }
-                    }
-                    Ok(false)
-                }),
-            };
-            match hit {
+            match e.glob.hit(&path, home, folded.as_ref(), &test) {
                 Ok(true) => return Ok(Some(&e.text)),
                 Ok(false) => {}
                 Err(HomeUnbound) => unbound = true,
@@ -228,22 +227,18 @@ fn entry(text: &str) -> Result<Entry, ConfigError> {
     if text.split('/').any(|c| matches!(c, "." | "..")) {
         return Err(bad());
     }
-    let glob = |spec: &str| PathGlob::parse(spec).map_err(|_| bad());
-    let lowered = case_folded(text);
     Ok(Entry {
-        glob: glob(text)?,
-        mapped: glob(&mapped(&lowered))?,
-        lowered: glob(&lowered)?,
+        glob: PathGlob::parse(text).map_err(|_| bad())?,
         text: text.to_string(),
     })
 }
 
-/// One spelling for names APFS treats as the same: NFC, full Unicode case
-/// folding, NFC again, so a fold that decomposes cannot leave a second form.
-fn case_folded(text: &str) -> String {
-    let nfc = icu_normalizer::ComposingNormalizerBorrowed::new_nfc();
+/// One spelling for names APFS treats as the same: NFD, full Unicode case folding,
+/// NFD again. Decomposed, so a `*` beside an accented letter sees its base letter.
+pub(crate) fn case_folded(text: &str) -> String {
+    let nfd = icu_normalizer::DecomposingNormalizerBorrowed::new_nfd();
     let fold = icu_casemap::CaseMapperBorrowed::new();
-    nfc.normalize(&fold.fold_string(&nfc.normalize(text)))
+    nfd.normalize(&fold.fold_string(&nfd.normalize(text)))
         .into_owned()
 }
 
@@ -328,15 +323,15 @@ pub fn fold_path(path: &str, fold: Fold, reach: Reach) -> FoldedPath {
     }
 }
 
-struct Folded {
-    lowered: String,
-    mapped: Vec<String>,
-    home_lowered: Option<String>,
-    home_mapped: Option<String>,
+pub(crate) struct Folded {
+    pub(crate) lowered: String,
+    pub(crate) mapped: Vec<String>,
+    pub(crate) home_lowered: Option<String>,
+    pub(crate) home_mapped: Option<String>,
 }
 
 impl Folded {
-    fn new(path: &str, home: Option<&Path>, subtree: bool) -> Self {
+    pub(crate) fn new(path: &str, home: Option<&Path>, subtree: bool) -> Self {
         let reach = if subtree { Reach::Subtree } else { Reach::Path };
         let FoldedPath { lowered, mapped } = fold_path(path, Fold::Case, reach);
         let home = home
@@ -379,6 +374,57 @@ mod tests {
         fold: Fold,
     ) -> Result<Option<&'a str>, HomeUnbound> {
         l.subtree_matching(Path::new(dir), home.map(Path::new), fold)
+    }
+
+    #[test]
+    fn an_entry_matches_its_written_spelling_under_every_fold() {
+        let l = list(&["/srv/Re*"]);
+        let nfd = "/srv/Re\u{301}sume\u{301}";
+        for fold in [Fold::None, Fold::Case] {
+            assert_eq!(at(&l, nfd, None, fold), Ok(Some("/srv/Re*")), "{fold:?}");
+            assert_eq!(below(&l, nfd, None, fold), Ok(Some("/srv/Re*")), "{fold:?}");
+        }
+    }
+
+    #[test]
+    fn every_spelling_of_a_name_meets_a_wildcard_alike() {
+        let l = list(&["/srv/Re*"]);
+        for path in [
+            "/srv/Re\u{301}sume\u{301}",
+            "/srv/re\u{301}sume\u{301}",
+            "/srv/r\u{e9}sum\u{e9}",
+            "/srv/R\u{c9}SUM\u{c9}",
+        ] {
+            assert_eq!(
+                at(&l, path, None, Fold::Case),
+                Ok(Some("/srv/Re*")),
+                "{path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_entry_above_an_alias_covers_what_the_alias_names() {
+        for (entry, path) in [
+            ("/System/Volumes/**", "/Users/a/secret"),
+            ("/private/**", "/tmp/x"),
+            ("/private/*/shadow", "/etc/shadow"),
+            (
+                "/private/*/shadow",
+                "/System/Volumes/Data/private/etc/shadow",
+            ),
+            ("/System/Volumes/Data/private/etc", "/etc"),
+        ] {
+            let l = list(&[entry]);
+            assert_eq!(
+                at(&l, path, None, Fold::Case),
+                Ok(Some(entry)),
+                "{entry} {path}"
+            );
+            assert_eq!(at(&l, path, None, Fold::None), Ok(None), "{entry} {path}");
+        }
+        let l = list(&["/private/x"]);
+        assert_eq!(at(&l, "/x", None, Fold::Case), Ok(None));
     }
 
     #[test]
@@ -790,7 +836,7 @@ mod tests {
     #[test]
     fn fold_path_gives_one_spelling_for_case_nfd_and_the_data_volume() {
         let one = |p: &str| fold_path(p, Fold::Case, Reach::Path).mapped().to_vec();
-        let want = vec!["/users/hobi/tasks/users/caf\u{e9}".to_string()];
+        let want = vec!["/users/hobi/tasks/users/cafe\u{301}".to_string()];
         for spelling in [
             "/Users/hobi/tasks/users/caf\u{e9}",
             "/USERS/Hobi/Tasks/USERS/CAF\u{c9}",
@@ -895,6 +941,45 @@ mod tests {
         assert_ne!(
             a.canonical(),
             list(&["~/.ssh/**", "/etc/shadow"]).canonical()
+        );
+    }
+
+    #[test]
+    fn sensitive_subtree_entries_lists_every_match() {
+        let l = list(&["~/.ssh/**", "/w/.env", "/elsewhere/**"]);
+        let h = Some(Path::new("/h"));
+        assert_eq!(
+            l.subtree_entries(Path::new("/w"), h, Fold::None),
+            Ok(vec!["/w/.env".to_string()])
+        );
+        assert_eq!(
+            l.subtree_entries(Path::new("/h"), h, Fold::None),
+            Ok(vec!["/h/.ssh/**".to_string()])
+        );
+        assert_eq!(
+            l.subtree_entries(Path::new("/"), h, Fold::None),
+            Ok(vec![
+                "/elsewhere/**".to_string(),
+                "/h/.ssh/**".to_string(),
+                "/w/.env".to_string()
+            ])
+        );
+        assert_eq!(
+            l.subtree_entries(Path::new("/w"), None, Fold::None),
+            Err(HomeUnbound)
+        );
+        assert_eq!(
+            l.subtree_entries(Path::new("/private/etc"), h, Fold::Case),
+            Ok(Vec::new())
+        );
+        let etc = list(&["/etc/shadow", "/etc/shadow"]);
+        assert_eq!(
+            etc.subtree_entries(Path::new("/private/etc"), h, Fold::Case),
+            Ok(vec!["/etc/shadow".to_string()])
+        );
+        assert_eq!(
+            etc.subtree_entries(Path::new("/private/etc"), h, Fold::None),
+            Ok(Vec::new())
         );
     }
 

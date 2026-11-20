@@ -60,6 +60,8 @@ files = [
   "crates/maknae-kernel/src/sensitive_authz.rs",
   # #628: the partition operand; a wrong arm serves another tasker's partition.
   "crates/maknae-kernel/src/partition_authz.rs",
+  # #674: the workspace-mount decision; a wrong arm mounts a system directory or a home.
+  "crates/maknae-kernel/src/workspace.rs",
   # #161: fs.list's per-entry decisions, bounds and order; a wrong arm releases a
   # withheld name.
   "crates/maknae-kernel/src/listing.rs",
