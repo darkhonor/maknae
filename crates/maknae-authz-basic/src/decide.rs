@@ -1208,6 +1208,18 @@ enum FsScope {
     ReadSubtree,
     Write,
     WriteSubtree,
+    MountRead,
+    MountWrite,
+}
+
+impl FsScope {
+    fn mount_side(self) -> Option<maknae_config::MountSide> {
+        match self {
+            FsScope::MountRead => Some(maknae_config::MountSide::Read),
+            FsScope::MountWrite => Some(maknae_config::MountSide::Write),
+            FsScope::Read | FsScope::ReadSubtree | FsScope::Write | FsScope::WriteSubtree => None,
+        }
+    }
 }
 
 fn attempt_scope(req: &SecRequest) -> Result<FsScope, Verdict> {
@@ -1233,6 +1245,8 @@ fn attempt_scope(req: &SecRequest) -> Result<FsScope, Verdict> {
         | ("fs.mkdir", FsOperation::Mkdir) => FsScope::Write,
         ("fs.delete", FsOperation::DeleteTree) => FsScope::WriteSubtree,
         ("fs.read", FsOperation::DeleteTree) => FsScope::ReadSubtree,
+        ("fs.read", FsOperation::Mount) => FsScope::MountRead,
+        ("fs.write", FsOperation::Mount) => FsScope::MountWrite,
         _ => {
             return Err(refuse(
                 "filesystem attempt preparation does not match action",
@@ -1280,6 +1294,12 @@ fn evaluate_floored(
         FsScope::Write => policy.evaluate3_floored(set, &maknae_config::Request::Write(path), home),
         FsScope::ReadSubtree => policy.evaluate_read_subtree_floored(set, path, home),
         FsScope::WriteSubtree => policy.evaluate_write_subtree_floored(set, path, home),
+        FsScope::MountRead => {
+            policy.evaluate_mount_floored(set, maknae_config::MountSide::Read, path, home)
+        }
+        FsScope::MountWrite => {
+            policy.evaluate_mount_floored(set, maknae_config::MountSide::Write, path, home)
+        }
     }
 }
 
@@ -1300,6 +1320,12 @@ fn evaluate_agent(
         }
         FsScope::ReadSubtree => policy.evaluate_read_subtree_agent(right, set, path, home),
         FsScope::WriteSubtree => policy.evaluate_write_subtree_agent(right, set, path, home),
+        FsScope::MountRead => {
+            policy.evaluate_mount_agent(right, set, maknae_config::MountSide::Read, path, home)
+        }
+        FsScope::MountWrite => {
+            policy.evaluate_mount_agent(right, set, maknae_config::MountSide::Write, path, home)
+        }
     }
 }
 
@@ -1338,7 +1364,7 @@ fn decide_fs(
         Ok(target) => target,
         Err(decision) => return decision,
     };
-    decide_grants(
+    let decided = decide_grants(
         lp,
         entry,
         |right, set| evaluate_agent(&lp.policy, right, set, scope, path, home),
@@ -1347,7 +1373,31 @@ fn decide_fs(
         // D9 hazard). "No capability entry" is accurate where "no rule" would
         // be false: a rule for fs.read exists; no ENTRY matched this request.
         format!("role {role_key}: no capability entry for {}", req.action.0),
-    )
+    );
+    let Some(side) = scope.mount_side() else {
+        return decided;
+    };
+    let (Verdict::Permit { mut obligations }, cited) = decided else {
+        return decided;
+    };
+    let right = entry.and_then(SubjectEntry::agent_right).map(|(_, r)| r);
+    let set = entry.and_then(|e| e.permissions.as_ref());
+    match lp.policy.mount_masks(right, set, side, path, home) {
+        Ok(masks) => {
+            obligations.push(mask_obligation(masks));
+            (Verdict::Permit { obligations }, cited)
+        }
+        Err(_) => (Verdict::Indeterminate, None),
+    }
+}
+
+fn mask_obligation(patterns: Vec<String>) -> Obligation {
+    let mut params = Attributes::new();
+    params.insert("patterns", AttrValue::List(patterns));
+    Obligation {
+        id: "workspace.mask".into(),
+        params,
+    }
 }
 
 /// Deny-first over the site and the subject's or agent's own lists, citing the entry that
@@ -1720,6 +1770,153 @@ mod tests {
                 "{role}"
             );
         }
+    }
+
+    fn mount_req(uid: u32, action: &str, op: &str, path: &str) -> SecRequest {
+        let mut req = request(Some(i64::from(uid)), action, Some(path));
+        req.context.0.insert(
+            maknae_security::CONTEXT_FS_OPERATION,
+            AttrValue::Str(op.into()),
+        );
+        req
+    }
+
+    fn masked(patterns: &[&str]) -> Verdict {
+        let mut params = Attributes::new();
+        params.insert(
+            "patterns",
+            AttrValue::List(patterns.iter().map(|p| p.to_string()).collect()),
+        );
+        Verdict::Permit {
+            obligations: vec![
+                audit_obligation(),
+                Obligation {
+                    id: "workspace.mask".into(),
+                    params,
+                },
+            ],
+        }
+    }
+
+    fn lp_mount(site: &str) -> LoadedPolicy {
+        let mut lp = lp_with(
+            Some(&[("user", &["operator"])]),
+            &[("operator", OPERATOR_UID)],
+        );
+        lp.policy = maknae_config::parse_authz(site).unwrap();
+        lp
+    }
+
+    #[test]
+    fn mount_read_permits_with_mask() {
+        let lp = lp_mount("schema_version: 1\npermissions:\n  allow: [\"Read(/w/**)\"]\n  deny: [\"Read(/w/secret/**)\"]\n");
+        let req = mount_req(OPERATOR_UID, "fs.read", "mount", "/w");
+        assert_eq!(
+            decide_loaded(&lp, &principal(), &req),
+            masked(&["/w/secret/**"])
+        );
+    }
+
+    #[test]
+    fn mount_write_is_its_own_side() {
+        let lp = lp_mount("schema_version: 1\npermissions:\n  allow: [\"Write(/w/**)\"]\n  deny: [\"Read(/w/secret/**)\"]\n");
+        let write = mount_req(OPERATOR_UID, "fs.write", "mount", "/w");
+        assert_eq!(decide_loaded(&lp, &principal(), &write), masked(&[]));
+        let read = mount_req(OPERATOR_UID, "fs.read", "mount", "/w");
+        assert!(matches!(
+            decide_loaded(&lp, &principal(), &read),
+            Verdict::NotApplicable { .. }
+        ));
+    }
+
+    #[test]
+    fn mount_deny_on_root_denies() {
+        let lp = lp_mount(
+            "schema_version: 1\npermissions:\n  allow: [\"Read(/w/**)\"]\n  deny: [\"Read(/w)\"]\n",
+        );
+        let req = mount_req(OPERATOR_UID, "fs.read", "mount", "/w");
+        assert_eq!(
+            decide_loaded(&lp, &principal(), &req),
+            Verdict::Deny {
+                reason: "denied by policy entry Read(/w)".into()
+            }
+        );
+    }
+
+    #[test]
+    fn mount_wrong_action_refused() {
+        let lp = lp_mount(
+            "schema_version: 1\npermissions:\n  allow: [\"Read(/w/**)\", \"Write(/w/**)\"]\n",
+        );
+        for action in ["fs.delete", "fs.mkdir", "fs.stat", "fs.list"] {
+            let req = mount_req(OPERATOR_UID, action, "mount", "/w");
+            assert_eq!(
+                decide_loaded(&lp, &principal(), &req),
+                Verdict::Deny {
+                    reason: "filesystem attempt preparation does not match action".into()
+                },
+                "{action}"
+            );
+        }
+    }
+
+    #[test]
+    fn mount_agent_right_permits() {
+        let mut lp = lp_agent(
+            "user",
+            Some("schema_version: 1\npermissions:\n  deny: [\"Read(/**/.own-deny)\"]\n"),
+        );
+        lp.policy = maknae_config::parse_authz(&AGENT_SITE.replace(
+            "deny: [\"Read(~/.ssh/**)\"]",
+            "deny: [\"Read(~/.ssh/**)\", \"Read(/**/.env)\"]",
+        ))
+        .unwrap();
+        for (action, patterns) in [("fs.read", &["/**/.env"][..]), ("fs.write", &[][..])] {
+            let req = on_channel(
+                mount_req(HOBI_UID, action, "mount", "/home/operator/tasks/users/1"),
+                Some(maknae_security::CHANNEL_AGENT),
+                Some("hobi"),
+            );
+            let d = decide_loaded_cited(&lp, &principal(), &req);
+            assert_eq!(d.verdict, masked(patterns), "{action}");
+            assert!(
+                matches!(d.cited, Some(Cited::AgentRight { ref agent, .. }) if agent == "hobi"),
+                "{action}: {d:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mount_masks_carry_the_subjects_own_denies_when_no_right_decides() {
+        let mut lp = lp_agent(
+            "user",
+            Some("schema_version: 1\npermissions:\n  allow: [\"Read(/w/**)\"]\n  deny: [\"Read(/w/own/**)\"]\n"),
+        );
+        lp.policy = maknae_config::parse_authz(&AGENT_SITE.replace(
+            "deny: [\"Read(~/.ssh/**)\"]",
+            "deny: [\"Read(~/.ssh/**)\", \"Read(/**/.env)\"]",
+        ))
+        .unwrap();
+        let req = on_channel(
+            mount_req(HOBI_UID, "fs.read", "mount", "/w"),
+            Some(maknae_security::CHANNEL_AGENT),
+            Some("hobi"),
+        );
+        let d = decide_loaded_cited(&lp, &principal(), &req);
+        assert_eq!(d.verdict, masked(&["/**/.env", "/w/own/**"]));
+    }
+
+    #[test]
+    fn mount_mask_with_an_unbound_home_is_indeterminate() {
+        let lp = lp_mount("schema_version: 1\npermissions:\n  allow: [\"Read(/w/**)\"]\n  deny: [\"Read(~/x/**)\"]\n");
+        let mut req = mount_req(OPERATOR_UID, "fs.read", "mount", "/w");
+        let mut subject = Attributes::new();
+        subject.insert(SUBJECT_UID, AttrValue::Int(i64::from(OPERATOR_UID)));
+        req.subject = Subject(subject);
+        assert_eq!(
+            decide_loaded(&lp, &principal(), &req),
+            Verdict::Indeterminate
+        );
     }
 
     #[test]
