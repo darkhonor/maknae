@@ -202,8 +202,14 @@ fn live_token_may_remain(e: ForgeError) -> bool {
         | ForgeError::Oversize
         | ForgeError::Shape
         | ForgeError::Mismatch { revoked: false }
-        | ForgeError::Malformed { revoked: false } => true,
-        ForgeError::Status(_)
+        | ForgeError::Malformed { revoked: false }
+        | ForgeError::Status(ForgeStatus::Other) => true,
+        ForgeError::Status(
+            ForgeStatus::Unauthorized
+            | ForgeStatus::Forbidden
+            | ForgeStatus::NotFound
+            | ForgeStatus::Unprocessable,
+        )
         | ForgeError::Transport
         | ForgeError::Mismatch { revoked: true }
         | ForgeError::Malformed { revoked: true } => false,
@@ -1023,6 +1029,28 @@ mod tests {
                 "{plaintext:?}"
             );
             assert_eq!(seen.requests.len(), 0, "{plaintext:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_ambiguous_status_is_journaled_live_and_a_definitive_one_is_not() {
+        for (status, live) in [
+            ("502 Bad Gateway", true),
+            ("500 Internal Server Error", true),
+            ("408 Request Timeout", true),
+            ("429 Too Many Requests", true),
+            ("400 Bad Request", true),
+            ("401 Unauthorized", false),
+            ("403 Forbidden", false),
+            ("404 Not Found", false),
+            ("422 Unprocessable Entity", false),
+        ] {
+            let rig = Rig::new();
+            let (_, _, _, lines) = rig
+                .mint(&request(vec![set(&["a"])]), vec![http(status, "{}")])
+                .await;
+            let hits = lines.iter().filter(|l| l.contains("live token")).count();
+            assert_eq!(hits, usize::from(live), "{status}: {lines:?}");
         }
     }
 
