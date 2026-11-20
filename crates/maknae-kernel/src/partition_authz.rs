@@ -97,10 +97,10 @@ fn decide_partition(req: &Request, fold: Fold) -> Verdict {
         reason: format!("partition: {why}"),
     };
     if operation == Some(FsOperation::Mount) {
-        let asked = fold_path(path, fold, Reach::Path);
+        let root = fold_path(path, fold, Reach::Path);
         return match own.as_deref() {
             None => deny("the request cites no task"),
-            Some(own) if asked.mapped().iter().all(|p| within(p, own)) => ABSTAIN,
+            Some(own) if root.mapped().iter().all(|p| within(p, own)) => ABSTAIN,
             Some(_) => deny("the mount lies outside the task's partition"),
         };
     }
@@ -300,6 +300,18 @@ mod tests {
         for path in ["/home/hobi-svc/tasks/users/1000", "/opt/x"] {
             refused(&mount("fs.read", path, None), "the request cites no task");
         }
+    }
+
+    #[test]
+    fn partition_mount_decides_under_the_case_fold() {
+        let folded = |path: &str| decide_partition(&mount("fs.read", path, MINE), Fold::Case);
+        assert_eq!(folded("/HOME/HOBI-SVC/TASKS/users/1000"), NA);
+        assert_eq!(
+            folded("/System/Volumes/Data/home/hobi-svc/tasks/users/1001"),
+            Verdict::Deny {
+                reason: "partition: the mount lies outside the task's partition".into()
+            }
+        );
     }
 
     #[test]
