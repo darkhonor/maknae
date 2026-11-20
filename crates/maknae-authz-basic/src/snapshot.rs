@@ -613,6 +613,7 @@ pub fn compile(
         taskers: source.agent_taskers().clone(),
         sensitive: Arc::clone(source.sensitive()),
         tools: Arc::clone(source.tools()),
+        fold: maknae_config::native_fold(),
     };
     Ok(Snapshot {
         graph,

@@ -39,6 +39,7 @@
 //! crate's — keeps `maknae-config` off the `maknae-msgs` dependency (spec §4.3).
 
 use crate::argpattern::{ArgPattern, Bound};
+use crate::sensitive::{Fold, Folded};
 use crate::{ConfigError, Value};
 use std::path::Path;
 
@@ -288,8 +289,13 @@ impl AuthzPolicy {
     /// (audit-only — never onto the wire, spec §4.4). `HomeUnbound` when any
     /// `~` pattern of the request's capability has no valid `home`, whatever
     /// its position in either list.
-    pub fn evaluate3(&self, req: &Request<'_>, home: Option<&Path>) -> Result<Match3, HomeUnbound> {
-        self.evaluate3_floored(None, req, home)
+    pub fn evaluate3(
+        &self,
+        req: &Request<'_>,
+        home: Option<&Path>,
+        fold: Fold,
+    ) -> Result<Match3, HomeUnbound> {
+        self.evaluate3_floored(None, req, home, fold)
     }
 
     /// [`Self::evaluate3`] under a subject's own permission set (#608): `None`
@@ -300,9 +306,10 @@ impl AuthzPolicy {
         subject: Option<&SubjectPermissions>,
         req: &Request<'_>,
         home: Option<&Path>,
+        fold: Fold,
     ) -> Result<Match3, HomeUnbound> {
         let (deny, allow) = self.lists(subject);
-        evaluate3_over(&deny, &allow, req, home)
+        evaluate3_over(&deny, &allow, req, home, fold)
     }
 
     /// [`Self::evaluate3_floored`] for an agent: the site deny, then the built-in
@@ -313,10 +320,11 @@ impl AuthzPolicy {
         subject: Option<&SubjectPermissions>,
         req: &Request<'_>,
         home: Option<&Path>,
+        fold: Fold,
     ) -> Result<AgentMatch, HomeUnbound> {
         let (deny, allow) = self.right_lists(right);
-        agent_match(evaluate3_over(&deny, &allow, req, home)?, || {
-            self.evaluate3_floored(subject, req, home)
+        agent_match(evaluate3_over(&deny, &allow, req, home, fold)?, || {
+            self.evaluate3_floored(subject, req, home, fold)
         })
     }
 
@@ -374,8 +382,9 @@ impl AuthzPolicy {
         &self,
         root: &Path,
         home: Option<&Path>,
+        fold: Fold,
     ) -> Result<Match3, HomeUnbound> {
-        self.evaluate_write_subtree_floored(None, root, home)
+        self.evaluate_write_subtree_floored(None, root, home, fold)
     }
 
     /// [`Self::evaluate_write_subtree`] under a subject's own permission set;
@@ -385,8 +394,9 @@ impl AuthzPolicy {
         subject: Option<&SubjectPermissions>,
         root: &Path,
         home: Option<&Path>,
+        fold: Fold,
     ) -> Result<Match3, HomeUnbound> {
-        self.evaluate_subtree_floored(subject, root, home, write_glob)
+        self.evaluate_subtree_floored(subject, root, home, fold, write_glob)
     }
 
     /// [`Self::evaluate_write_subtree_floored`] over `Read` patterns: a read of every
@@ -396,8 +406,9 @@ impl AuthzPolicy {
         subject: Option<&SubjectPermissions>,
         root: &Path,
         home: Option<&Path>,
+        fold: Fold,
     ) -> Result<Match3, HomeUnbound> {
-        self.evaluate_subtree_floored(subject, root, home, read_glob)
+        self.evaluate_subtree_floored(subject, root, home, fold, read_glob)
     }
 
     /// [`Self::evaluate3_agent`] for [`Self::evaluate_write_subtree_floored`].
@@ -407,8 +418,9 @@ impl AuthzPolicy {
         subject: Option<&SubjectPermissions>,
         root: &Path,
         home: Option<&Path>,
+        fold: Fold,
     ) -> Result<AgentMatch, HomeUnbound> {
-        self.subtree_agent(right, subject, root, home, write_glob)
+        self.subtree_agent(right, subject, root, home, fold, write_glob)
     }
 
     /// [`Self::evaluate3_agent`] for [`Self::evaluate_read_subtree_floored`].
@@ -418,8 +430,9 @@ impl AuthzPolicy {
         subject: Option<&SubjectPermissions>,
         root: &Path,
         home: Option<&Path>,
+        fold: Fold,
     ) -> Result<AgentMatch, HomeUnbound> {
-        self.subtree_agent(right, subject, root, home, read_glob)
+        self.subtree_agent(right, subject, root, home, fold, read_glob)
     }
 
     fn subtree_agent(
@@ -428,12 +441,13 @@ impl AuthzPolicy {
         subject: Option<&SubjectPermissions>,
         root: &Path,
         home: Option<&Path>,
+        fold: Fold,
         glob_of: fn(&Pattern) -> Option<&PathGlob>,
     ) -> Result<AgentMatch, HomeUnbound> {
         let (deny, allow) = self.right_lists(right);
         agent_match(
-            evaluate_subtree_over(&deny, &allow, root, home, glob_of)?,
-            || self.evaluate_subtree_floored(subject, root, home, glob_of),
+            evaluate_subtree_over(&deny, &allow, root, home, fold, glob_of)?,
+            || self.evaluate_subtree_floored(subject, root, home, fold, glob_of),
         )
     }
 
@@ -442,10 +456,11 @@ impl AuthzPolicy {
         subject: Option<&SubjectPermissions>,
         root: &Path,
         home: Option<&Path>,
+        fold: Fold,
         glob_of: fn(&Pattern) -> Option<&PathGlob>,
     ) -> Result<Match3, HomeUnbound> {
         let (deny, allow) = self.lists(subject);
-        evaluate_subtree_over(&deny, &allow, root, home, glob_of)
+        evaluate_subtree_over(&deny, &allow, root, home, fold, glob_of)
     }
 
     /// A workspace mount of `root`: a deny of the side's capability refuses only when it
@@ -457,9 +472,10 @@ impl AuthzPolicy {
         side: MountSide,
         root: &Path,
         home: Option<&Path>,
+        fold: Fold,
     ) -> Result<Match3, HomeUnbound> {
         let (deny, allow) = self.lists(subject);
-        evaluate_mount_over(&deny, &allow, root, home, side.glob_of())
+        evaluate_mount_over(&deny, &allow, root, home, fold, side.glob_of())
     }
 
     /// [`Self::evaluate3_agent`] for [`Self::evaluate_mount_floored`].
@@ -470,11 +486,12 @@ impl AuthzPolicy {
         side: MountSide,
         root: &Path,
         home: Option<&Path>,
+        fold: Fold,
     ) -> Result<AgentMatch, HomeUnbound> {
         let (deny, allow) = self.right_lists(right);
         agent_match(
-            evaluate_mount_over(&deny, &allow, root, home, side.glob_of())?,
-            || self.evaluate_mount_floored(subject, side, root, home),
+            evaluate_mount_over(&deny, &allow, root, home, fold, side.glob_of())?,
+            || self.evaluate_mount_floored(subject, side, root, home, fold),
         )
     }
 
@@ -489,10 +506,11 @@ impl AuthzPolicy {
         side: MountSide,
         root: &Path,
         home: Option<&Path>,
+        fold: Fold,
     ) -> Result<Vec<String>, HomeUnbound> {
         let by_right = match right {
             Some(r) => matches!(
-                self.evaluate_mount_agent(r, subject, side, root, home)?,
+                self.evaluate_mount_agent(r, subject, side, root, home, fold)?,
                 AgentMatch::Right { .. }
             ),
             None => false,
@@ -506,6 +524,7 @@ impl AuthzPolicy {
             return Ok(Vec::new());
         };
         let glob_of = side.glob_of();
+        let folded = folded_at(text, home, fold, true);
         let mut masks = std::collections::BTreeSet::new();
         for glob in deny
             .iter()
@@ -513,7 +532,7 @@ impl AuthzPolicy {
             .flat_map(|l| l.patterns)
             .filter_map(glob_of)
         {
-            if glob.may_intersect_subtree(text, home)? {
+            if glob.hit(text, home, folded.as_ref(), PathGlob::may_intersect_subtree)? {
                 masks.insert(glob.expanded(home)?);
             }
         }
@@ -578,6 +597,7 @@ fn evaluate3_over(
     allow: &SourcedList<'_>,
     req: &Request<'_>,
     home: Option<&Path>,
+    fold: Fold,
 ) -> Result<Match3, HomeUnbound> {
     let home = valid_home(home);
     if unbound_home(home, deny, allow, |p| {
@@ -585,9 +605,15 @@ fn evaluate3_over(
     }) {
         return Err(HomeUnbound);
     }
+    let folded = match req {
+        Request::Read(p) | Request::Write(p) => {
+            p.to_str().and_then(|t| folded_at(t, home, fold, false))
+        }
+        Request::Tool(_) => None,
+    };
     for list in deny.iter().flatten() {
         for (i, p) in list.patterns.iter().enumerate() {
-            if p.matches_req(req, home, Side::Deny)? {
+            if p.deny_hit(req, home, folded.as_ref())? {
                 return Ok(Match3::DenyMatch {
                     source: list.source(i, "deny"),
                 });
@@ -620,6 +646,7 @@ fn evaluate_subtree_over(
     allow: &SourcedList<'_>,
     root: &Path,
     home: Option<&Path>,
+    fold: Fold,
     glob_of: GlobOf,
 ) -> Result<Match3, HomeUnbound> {
     decide_tree_over(
@@ -628,7 +655,7 @@ fn evaluate_subtree_over(
         root,
         home,
         glob_of,
-        PathGlob::may_intersect_subtree,
+        (fold, true, PathGlob::may_intersect_subtree),
     )
 }
 
@@ -637,11 +664,17 @@ fn evaluate_mount_over(
     allow: &SourcedList<'_>,
     root: &Path,
     home: Option<&Path>,
+    fold: Fold,
     glob_of: GlobOf,
 ) -> Result<Match3, HomeUnbound> {
-    decide_tree_over(deny, allow, root, home, glob_of, |g, r, h| {
-        g.matches(Path::new(r), h)
-    })
+    decide_tree_over(
+        deny,
+        allow,
+        root,
+        home,
+        glob_of,
+        (fold, false, |g, r, h| g.matches(Path::new(r), h)),
+    )
 }
 
 fn decide_tree_over(
@@ -650,7 +683,7 @@ fn decide_tree_over(
     root: &Path,
     home: Option<&Path>,
     glob_of: GlobOf,
-    deny_hit: DenyHit,
+    (fold, subtree, deny_hit): (Fold, bool, DenyHit),
 ) -> Result<Match3, HomeUnbound> {
     let Some(text) = canonical_root(root) else {
         return Ok(Match3::NoMatch);
@@ -661,10 +694,11 @@ fn decide_tree_over(
     }) {
         return Err(HomeUnbound);
     }
+    let folded = folded_at(text, home, fold, subtree);
     for list in deny.iter().flatten() {
         for (i, pattern) in list.patterns.iter().enumerate() {
             if let Some(glob) = glob_of(pattern) {
-                if deny_hit(glob, text, home)? {
+                if glob.hit(text, home, folded.as_ref(), deny_hit)? {
                     return Ok(Match3::DenyMatch {
                         source: list.source(i, "deny"),
                     });
@@ -684,6 +718,10 @@ fn decide_tree_over(
         }
     }
     Ok(Match3::NoMatch)
+}
+
+fn folded_at(path: &str, home: Option<&Path>, fold: Fold, subtree: bool) -> Option<Folded> {
+    (fold == Fold::Case).then(|| Folded::new(path, home, subtree))
 }
 
 fn agent_match(
@@ -770,6 +808,21 @@ impl Pattern {
             }
             (Pattern::Read(_) | Pattern::Write(_) | Pattern::Tool(_), _) => None,
         }
+    }
+
+    fn deny_hit(
+        &self,
+        req: &Request<'_>,
+        home: Option<&Path>,
+        folded: Option<&Folded>,
+    ) -> Result<bool, HomeUnbound> {
+        let Some((glob, path)) = self.glob_for(req) else {
+            return self.matches_req(req, home, Side::Deny);
+        };
+        let Some(text) = path.to_str() else {
+            return Ok(false);
+        };
+        glob.hit(text, home, folded, |g, p, h| g.matches(Path::new(p), h))
     }
 
     fn matches_req(
@@ -1871,7 +1924,8 @@ mod tests {
             policy
                 .evaluate3(
                     &Request::Write(&home().join("projects/code.rs")),
-                    Some(&home())
+                    Some(&home()),
+                    Fold::None
                 )
                 .unwrap(),
             Match3::AllowMatch {
@@ -1888,7 +1942,11 @@ mod tests {
             assert!(
                 !matches!(
                     policy
-                        .evaluate3(&Request::Write(&home().join(relative)), Some(&home()))
+                        .evaluate3(
+                            &Request::Write(&home().join(relative)),
+                            Some(&home()),
+                            Fold::None
+                        )
                         .unwrap(),
                     Match3::AllowMatch { .. }
                 ),
@@ -1897,7 +1955,7 @@ mod tests {
         }
         assert_eq!(
             policy
-                .evaluate_write_subtree(&home().join("projects/repo"), Some(&home()))
+                .evaluate_write_subtree(&home().join("projects/repo"), Some(&home()), Fold::None)
                 .unwrap(),
             Match3::AllowMatch {
                 source: "Write(~/projects/**)".into()
@@ -1972,7 +2030,8 @@ mod tests {
             policy
                 .evaluate3(
                     &Request::Read(&home().join("projects/sentinel")),
-                    Some(&home())
+                    Some(&home()),
+                    Fold::None
                 )
                 .unwrap(),
             Match3::NoMatch,
@@ -2032,7 +2091,7 @@ mod tests {
             let policy = parse_policy(&yaml).unwrap();
             assert_eq!(
                 policy
-                    .evaluate_write_subtree(Path::new(root), None)
+                    .evaluate_write_subtree(Path::new(root), None, Fold::None)
                     .unwrap(),
                 expected,
                 "{allow} on {root}"
@@ -2069,7 +2128,7 @@ mod tests {
             };
             assert_eq!(
                 policy
-                    .evaluate_write_subtree(Path::new("/h/u/projects/p"), None)
+                    .evaluate_write_subtree(Path::new("/h/u/projects/p"), None, Fold::None)
                     .unwrap(),
                 expected,
                 "{deny}"
@@ -2092,7 +2151,7 @@ mod tests {
         ] {
             assert_eq!(
                 policy
-                    .evaluate_write_subtree(Path::new(root), None)
+                    .evaluate_write_subtree(Path::new(root), None, Fold::None)
                     .unwrap(),
                 Match3::NoMatch,
                 "{root:?}"
@@ -2101,7 +2160,7 @@ mod tests {
         let empty = parse_policy("schema_version: 1\npermissions: {}\n").unwrap();
         assert_eq!(
             empty
-                .evaluate_write_subtree(Path::new("/h/u"), None)
+                .evaluate_write_subtree(Path::new("/h/u"), None, Fold::None)
                 .unwrap(),
             Match3::NoMatch
         );
@@ -2110,7 +2169,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             deny_only
-                .evaluate_write_subtree(Path::new("/h/u"), None)
+                .evaluate_write_subtree(Path::new("/h/u"), None, Fold::None)
                 .unwrap(),
             Match3::DenyMatch {
                 source: "Write(/h/u/secret/**)".into()
@@ -2126,7 +2185,11 @@ mod tests {
             parse_policy("schema_version: 1\npermissions:\n  allow: [\"Write(/**)\"]\n").unwrap();
         assert_eq!(
             policy
-                .evaluate_write_subtree(Path::new(std::ffi::OsStr::from_bytes(b"/h/\xff")), None)
+                .evaluate_write_subtree(
+                    Path::new(std::ffi::OsStr::from_bytes(b"/h/\xff")),
+                    None,
+                    Fold::None
+                )
                 .unwrap(),
             Match3::NoMatch
         );
@@ -2138,7 +2201,7 @@ mod tests {
         policy.deny_sources.clear();
         assert_eq!(
             policy
-                .evaluate_write_subtree(Path::new("/h/u"), None)
+                .evaluate_write_subtree(Path::new("/h/u"), None, Fold::None)
                 .unwrap(),
             Match3::DenyMatch {
                 source: "<unknown deny entry>".into()
@@ -2154,7 +2217,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             policy
-                .evaluate_write_subtree(&home().join("projects/build"), Some(&home()))
+                .evaluate_write_subtree(&home().join("projects/build"), Some(&home()), Fold::None)
                 .unwrap(),
             Match3::AllowMatch {
                 source: "Write(~/**)".into()
@@ -2162,7 +2225,7 @@ mod tests {
         );
         assert_eq!(
             policy
-                .evaluate_write_subtree(&home(), Some(&home()))
+                .evaluate_write_subtree(&home(), Some(&home()), Fold::None)
                 .unwrap(),
             Match3::DenyMatch {
                 source: "Write(~/.*_history)".into()
@@ -2187,7 +2250,7 @@ mod tests {
             );
             let got = parse_policy(&yaml)
                 .unwrap()
-                .evaluate_write_subtree(Path::new(root), None)
+                .evaluate_write_subtree(Path::new(root), None, Fold::None)
                 .unwrap();
             assert_eq!(
                 matches!(got, Match3::DenyMatch { .. }),
@@ -2227,7 +2290,9 @@ mod tests {
             let path = home().join(path);
             let request = Request::Write(&path);
             assert_eq!(
-                policy.evaluate3(&request, Some(&home())).unwrap(),
+                policy
+                    .evaluate3(&request, Some(&home()), Fold::None)
+                    .unwrap(),
                 expected,
                 "{}",
                 path.display()
@@ -2240,7 +2305,8 @@ mod tests {
             read_policy
                 .evaluate3(
                     &Request::Read(&home().join("projects/source.rs")),
-                    Some(&home())
+                    Some(&home()),
+                    Fold::None
                 )
                 .unwrap(),
             Match3::AllowMatch {
@@ -2478,7 +2544,7 @@ mod tests {
         // deny beats allow: inside ~ AND inside the denied ~/.ssh subtree.
         let denied = Request::Read(Path::new("/home/operator/.ssh/id_rsa"));
         assert_eq!(
-            policy.evaluate3(&denied, Some(&home())),
+            policy.evaluate3(&denied, Some(&home()), Fold::None),
             Ok(Match3::DenyMatch {
                 source: "Read(~/.ssh/**)".into()
             })
@@ -2487,7 +2553,7 @@ mod tests {
         // allowed: inside ~ but outside the deny list.
         let allowed = Request::Read(Path::new("/home/operator/docs/notes.txt"));
         assert_eq!(
-            policy.evaluate3(&allowed, Some(&home())),
+            policy.evaluate3(&allowed, Some(&home()), Fold::None),
             Ok(Match3::AllowMatch {
                 source: "Read(~/**)".into()
             })
@@ -2496,7 +2562,7 @@ mod tests {
         // default-deny: matches neither list (outside the allow's ~ scope).
         let unmatched = Request::Read(Path::new("/etc/passwd"));
         assert_eq!(
-            policy.evaluate3(&unmatched, Some(&home())),
+            policy.evaluate3(&unmatched, Some(&home()), Fold::None),
             Ok(Match3::NoMatch)
         );
     }
@@ -2505,7 +2571,10 @@ mod tests {
     fn empty_policy_permits_nothing() {
         let policy = AuthzPolicy::default();
         let req = Request::Read(Path::new("/home/operator/anything"));
-        assert_eq!(policy.evaluate3(&req, Some(&home())), Ok(Match3::NoMatch));
+        assert_eq!(
+            policy.evaluate3(&req, Some(&home()), Fold::None),
+            Ok(Match3::NoMatch)
+        );
     }
 
     // ---- AuthzError Display ----
@@ -2918,7 +2987,7 @@ mod tests {
         let p = parse_authz("schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Read(/opt/**)\"]\n  deny: []\n").unwrap();
         let home = Path::new("/home/x");
         assert_eq!(
-            p.evaluate3(&Request::Read(Path::new("/opt/a")), Some(home))
+            p.evaluate3(&Request::Read(Path::new("/opt/a")), Some(home), Fold::None)
                 .unwrap(),
             Match3::AllowMatch {
                 source: "Read(/opt/**)".into()
@@ -2935,7 +3004,8 @@ mod tests {
     fn write_subtree_allow_match_names_its_entry() {
         let p = parse_authz("schema_version: 1\npermissions:\n  allow: [\"Write(/srv/**)\", \"Write(/opt/**)\"]\n  deny: [\"Read(/x)\"]\n").unwrap();
         assert_eq!(
-            p.evaluate_write_subtree(Path::new("/opt/a"), None).unwrap(),
+            p.evaluate_write_subtree(Path::new("/opt/a"), None, Fold::None)
+                .unwrap(),
             Match3::AllowMatch {
                 source: "Write(/opt/**)".into()
             }
@@ -2948,7 +3018,7 @@ mod tests {
         let p = parse_authz("schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Write(~/projects/**)\", \"Write(/srv/**)\"]\n  deny: [\"Read(~/projects/hidden-660/**)\", \"Write(~/notes/**)\"]\n").unwrap();
         let home = home();
         let read = |root: &str| {
-            p.evaluate_read_subtree_floored(None, Path::new(root), Some(&home))
+            p.evaluate_read_subtree_floored(None, Path::new(root), Some(&home), Fold::None)
                 .unwrap()
         };
         assert_eq!(
@@ -2968,7 +3038,8 @@ mod tests {
             p.evaluate_write_subtree_floored(
                 None,
                 Path::new("/home/operator/projects"),
-                Some(&home)
+                Some(&home),
+                Fold::None
             )
             .unwrap(),
             Match3::AllowMatch {
@@ -2984,6 +3055,7 @@ mod tests {
             .evaluate3(
                 &Request::Read(Path::new("/home/operator/.ssh/id_rsa")),
                 Some(&home()),
+                Fold::None,
             )
             .unwrap()
         {
@@ -3000,14 +3072,19 @@ mod tests {
         assert!(matches!(
             p.evaluate3(
                 &Request::Read(Path::new("/home/operator/notes.txt")),
-                Some(&home())
+                Some(&home()),
+                Fold::None
             )
             .unwrap(),
             Match3::AllowMatch { .. }
         ));
         assert!(matches!(
-            p.evaluate3(&Request::Read(Path::new("/etc/hosts")), Some(&home()))
-                .unwrap(),
+            p.evaluate3(
+                &Request::Read(Path::new("/etc/hosts")),
+                Some(&home()),
+                Fold::None
+            )
+            .unwrap(),
             Match3::NoMatch
         ));
     }
@@ -3019,7 +3096,7 @@ mod tests {
         let p = parse_authz(SSH_DENYING).unwrap();
         let r = Request::Read(Path::new("/home/operator/.ssh/config"));
         assert_eq!(
-            p.evaluate3(&r, Some(&home())),
+            p.evaluate3(&r, Some(&home()), Fold::None),
             Ok(Match3::DenyMatch {
                 source: "Read(~/.ssh/**)".into()
             })
@@ -3304,13 +3381,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            p.evaluate3(&Request::Read(Path::new("/home/b/.maknae/token")), None),
+            p.evaluate3(
+                &Request::Read(Path::new("/home/b/.maknae/token")),
+                None,
+                Fold::None
+            ),
             Err(HomeUnbound)
         );
         assert_eq!(
             p.evaluate3(
                 &Request::Read(Path::new("/home/b/.maknae/token")),
-                Some(Path::new("/home/b"))
+                Some(Path::new("/home/b")),
+                Fold::None
             ),
             Ok(Match3::DenyMatch {
                 source: "Read(~/.maknae/**)".into()
@@ -3325,7 +3407,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            p.evaluate3(&Request::Read(Path::new("/srv/x")), None),
+            p.evaluate3(&Request::Read(Path::new("/srv/x")), None, Fold::None),
             Err(HomeUnbound)
         );
     }
@@ -3338,7 +3420,11 @@ mod tests {
         .unwrap();
         for h in ["/", "home/b", "/home/../b"] {
             assert_eq!(
-                p.evaluate3(&Request::Read(Path::new("/srv/x")), Some(Path::new(h))),
+                p.evaluate3(
+                    &Request::Read(Path::new("/srv/x")),
+                    Some(Path::new(h)),
+                    Fold::None
+                ),
                 Err(HomeUnbound),
                 "{h}"
             );
@@ -3352,7 +3438,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            p.evaluate3(&Request::Read(Path::new("/srv/x")), None),
+            p.evaluate3(&Request::Read(Path::new("/srv/x")), None, Fold::None),
             Ok(Match3::AllowMatch {
                 source: "Read(/srv/**)".into()
             })
@@ -3367,25 +3453,25 @@ mod tests {
         .unwrap();
         let b = Some(Path::new("/home/b"));
         assert_eq!(
-            p.evaluate_write_subtree(Path::new("/home/b/projects/repo"), b),
+            p.evaluate_write_subtree(Path::new("/home/b/projects/repo"), b, Fold::None),
             Ok(Match3::AllowMatch {
                 source: "Write(~/projects/**)".into()
             })
         );
         assert!(matches!(
-            p.evaluate_write_subtree(Path::new("/home/b/projects"), b),
+            p.evaluate_write_subtree(Path::new("/home/b/projects"), b, Fold::None),
             Ok(Match3::DenyMatch { .. })
         ));
         assert_eq!(
-            p.evaluate_write_subtree(Path::new("/home/a/projects/repo"), b),
+            p.evaluate_write_subtree(Path::new("/home/a/projects/repo"), b, Fold::None),
             Ok(Match3::NoMatch)
         );
         assert!(matches!(
-            p.evaluate_write_subtree(Path::new("/home"), b),
+            p.evaluate_write_subtree(Path::new("/home"), b, Fold::None),
             Ok(Match3::DenyMatch { .. })
         ));
         assert_eq!(
-            p.evaluate_write_subtree(Path::new("/home/b/projects/repo"), None),
+            p.evaluate_write_subtree(Path::new("/home/b/projects/repo"), None, Fold::None),
             Err(HomeUnbound)
         );
     }
@@ -3398,11 +3484,11 @@ mod tests {
         .unwrap();
         let b = Some(Path::new("/home/b"));
         assert_eq!(
-            p.evaluate_write_subtree(Path::new("/projects/repo"), b),
+            p.evaluate_write_subtree(Path::new("/projects/repo"), b, Fold::None),
             Ok(Match3::NoMatch)
         );
         assert!(!matches!(
-            p.evaluate_write_subtree(Path::new("/projects/keep/x"), b),
+            p.evaluate_write_subtree(Path::new("/projects/keep/x"), b, Fold::None),
             Ok(Match3::DenyMatch { .. })
         ));
     }
@@ -3414,7 +3500,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            p.evaluate_write_subtree(Path::new("/srv/x"), None),
+            p.evaluate_write_subtree(Path::new("/srv/x"), None, Fold::None),
             Err(HomeUnbound)
         );
     }
@@ -3426,7 +3512,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            p.evaluate_write_subtree(Path::new("/srv/x"), None),
+            p.evaluate_write_subtree(Path::new("/srv/x"), None, Fold::None),
             Ok(Match3::AllowMatch {
                 source: "Write(/srv/**)".into()
             })
@@ -3693,7 +3779,7 @@ mod tests {
             .unwrap();
             let s = p.subjects["alice"].permissions.as_ref();
             assert_eq!(
-                p.evaluate3_floored(s, &req, None),
+                p.evaluate3_floored(s, &req, None, Fold::None),
                 want,
                 "{site_allow} {site_deny} {sub_allow} {sub_deny}"
             );
@@ -3718,38 +3804,38 @@ mod tests {
         let ok = home.join("tasks/a/x");
         let notes = home.join("notes/x");
         assert_eq!(
-            p.evaluate3_agent(right, sub, &Request::Write(&blocked), h),
+            p.evaluate3_agent(right, sub, &Request::Write(&blocked), h, Fold::None),
             Ok(deny("Write(~/tasks/blocked/**)"))
         );
         assert_eq!(
-            p.evaluate3_agent(right, sub, &Request::Write(&ok), h),
+            p.evaluate3_agent(right, sub, &Request::Write(&ok), h, Fold::None),
             Ok(granted.clone())
         );
         assert_eq!(
-            p.evaluate3_agent(right, sub, &Request::Write(&notes), h),
+            p.evaluate3_agent(right, sub, &Request::Write(&notes), h, Fold::None),
             Ok(deny("Write(~/**)"))
         );
         assert_eq!(
-            p.evaluate3_agent(right, sub, &Request::Read(&notes), h),
+            p.evaluate3_agent(right, sub, &Request::Read(&notes), h, Fold::None),
             Ok(AgentMatch::Floored(Match3::NoMatch))
         );
 
         let tasks_a = home.join("tasks/a");
         let tasks_blocked = home.join("tasks/blocked");
         assert_eq!(
-            p.evaluate_write_subtree_agent(right, sub, &tasks_blocked, h),
+            p.evaluate_write_subtree_agent(right, sub, &tasks_blocked, h, Fold::None),
             Ok(deny("Write(~/tasks/blocked/**)"))
         );
         assert_eq!(
-            p.evaluate_write_subtree_agent(right, sub, &tasks_a, h),
+            p.evaluate_write_subtree_agent(right, sub, &tasks_a, h, Fold::None),
             Ok(granted)
         );
         assert_eq!(
-            p.evaluate_write_subtree_agent(right, sub, &home.join("notes"), h),
+            p.evaluate_write_subtree_agent(right, sub, &home.join("notes"), h, Fold::None),
             Ok(deny("Write(~/**)"))
         );
         assert_eq!(
-            p.evaluate_read_subtree_agent(right, sub, &home.join("notes"), h),
+            p.evaluate_read_subtree_agent(right, sub, &home.join("notes"), h, Fold::None),
             Ok(AgentMatch::Floored(Match3::NoMatch))
         );
         let read_right = parse_authz(
@@ -3759,21 +3845,21 @@ mod tests {
         let r = read_right.subjects["right"].permissions.as_ref().unwrap();
         let s = read_right.subjects["sub"].permissions.as_ref();
         assert_eq!(
-            read_right.evaluate_read_subtree_agent(r, s, &tasks_blocked, h),
+            read_right.evaluate_read_subtree_agent(r, s, &tasks_blocked, h, Fold::None),
             Ok(deny("Read(~/tasks/blocked/**)"))
         );
         assert_eq!(
-            read_right.evaluate_read_subtree_agent(r, s, &tasks_a, h),
+            read_right.evaluate_read_subtree_agent(r, s, &tasks_a, h, Fold::None),
             Ok(AgentMatch::Right {
                 source: "Read(~/tasks/**)".into()
             })
         );
         assert_eq!(
-            read_right.evaluate_read_subtree_agent(r, s, &home.join("notes"), h),
+            read_right.evaluate_read_subtree_agent(r, s, &home.join("notes"), h, Fold::None),
             Ok(deny("Read(~/**)"))
         );
         assert_eq!(
-            read_right.evaluate_write_subtree_agent(r, s, &home.join("notes"), h),
+            read_right.evaluate_write_subtree_agent(r, s, &home.join("notes"), h, Fold::None),
             Ok(AgentMatch::Floored(Match3::NoMatch))
         );
     }
@@ -3884,7 +3970,7 @@ mod tests {
         .unwrap();
         let call = tool_call("a", "prog", &["run", "sentinel-674-x"]);
         assert_eq!(
-            p.evaluate3(&Request::Tool(&call), None),
+            p.evaluate3(&Request::Tool(&call), None, Fold::None),
             Ok(Match3::AllowMatch {
                 source: "Tool(a prog run *)".into()
             })
@@ -3900,13 +3986,13 @@ mod tests {
         let denied = tool_call("a", "prog", &["run", "build", "sentinel-674-x"]);
         let allowed = tool_call("a", "prog", &["run", "sentinel-674-x"]);
         assert_eq!(
-            p.evaluate3_floored(None, &Request::Tool(&denied), None),
+            p.evaluate3_floored(None, &Request::Tool(&denied), None, Fold::None),
             Ok(Match3::DenyMatch {
                 source: "Tool(a prog run build *)".into()
             })
         );
         assert_eq!(
-            p.evaluate3_floored(None, &Request::Tool(&allowed), None),
+            p.evaluate3_floored(None, &Request::Tool(&allowed), None, Fold::None),
             Ok(Match3::AllowMatch {
                 source: "Tool(a prog run *)".into()
             })
@@ -3924,23 +4010,23 @@ mod tests {
             source: "Tool(e git checkout {git.base})".into(),
         });
         assert_eq!(
-            p.evaluate3_floored(None, &Request::Tool(&checkout), None),
+            p.evaluate3_floored(None, &Request::Tool(&checkout), None, Fold::None),
             denied
         );
         let own = p.subjects["s"].permissions.as_ref().unwrap();
         assert_eq!(
-            p.evaluate3_floored(Some(own), &Request::Tool(&checkout), None),
+            p.evaluate3_floored(Some(own), &Request::Tool(&checkout), None, Fold::None),
             denied
         );
         let status = tool_call("e", "git", &["status", "x"]);
         assert_eq!(
-            p.evaluate3_floored(Some(own), &Request::Tool(&status), None),
+            p.evaluate3_floored(Some(own), &Request::Tool(&status), None, Fold::None),
             Ok(Match3::DenyMatch {
                 source: "Tool(e git status {git.base})".into(),
             })
         );
         assert_eq!(
-            p.evaluate3_agent(own, None, &Request::Tool(&checkout), None),
+            p.evaluate3_agent(own, None, &Request::Tool(&checkout), None, Fold::None),
             Ok(AgentMatch::Floored(Match3::DenyMatch {
                 source: "Tool(e git checkout {git.base})".into(),
             }))
@@ -3955,13 +4041,13 @@ mod tests {
         .unwrap();
         let call = tool_call("e", "git", &["checkout", "sentinel-674-main"]);
         assert_eq!(
-            p.evaluate3_floored(None, &Request::Tool(&call), None),
+            p.evaluate3_floored(None, &Request::Tool(&call), None, Fold::None),
             Ok(Match3::NoMatch)
         );
         let mut bound = call.clone();
         bound.bound.insert("git.base", "sentinel-674-main");
         assert_eq!(
-            p.evaluate3_floored(None, &Request::Tool(&bound), None),
+            p.evaluate3_floored(None, &Request::Tool(&bound), None, Fold::None),
             Ok(Match3::AllowMatch {
                 source: "Tool(e git checkout {git.base})".into(),
             })
@@ -3969,7 +4055,7 @@ mod tests {
         bound.bound = Bound::empty();
         bound.bound.insert("git.base", "other");
         assert_eq!(
-            p.evaluate3_floored(None, &Request::Tool(&bound), None),
+            p.evaluate3_floored(None, &Request::Tool(&bound), None, Fold::None),
             Ok(Match3::NoMatch)
         );
     }
@@ -3983,7 +4069,7 @@ mod tests {
         let right = p.subjects["right"].permissions.as_ref().unwrap();
         let call = tool_call("a", "prog", &["run", "sentinel-674-x"]);
         assert_eq!(
-            p.evaluate3_agent(right, None, &Request::Tool(&call), None),
+            p.evaluate3_agent(right, None, &Request::Tool(&call), None, Fold::None),
             Ok(AgentMatch::Right {
                 source: "Tool(a prog run *)".into()
             })
@@ -4000,7 +4086,7 @@ mod tests {
         let s = p.subjects["alice"].permissions.as_ref();
         let home = Some(Path::new("/home/a"));
         let eval = |path: &str| {
-            p.evaluate3_floored(s, &Request::Read(Path::new(path)), home)
+            p.evaluate3_floored(s, &Request::Read(Path::new(path)), home, Fold::None)
                 .unwrap()
         };
         assert_eq!(
@@ -4023,11 +4109,16 @@ mod tests {
         );
         assert_eq!(eval("/srv/site/f"), Match3::NoMatch);
         assert_eq!(
-            p.evaluate3_floored(None, &Request::Read(Path::new("/srv/site/f")), home),
-            p.evaluate3(&Request::Read(Path::new("/srv/site/f")), home)
+            p.evaluate3_floored(
+                None,
+                &Request::Read(Path::new("/srv/site/f")),
+                home,
+                Fold::None
+            ),
+            p.evaluate3(&Request::Read(Path::new("/srv/site/f")), home, Fold::None)
         );
         assert_eq!(
-            p.evaluate3(&Request::Read(Path::new("/srv/site/f")), home)
+            p.evaluate3(&Request::Read(Path::new("/srv/site/f")), home, Fold::None)
                 .unwrap(),
             Match3::AllowMatch {
                 source: "Read(/srv/site/**)".into()
@@ -4043,23 +4134,23 @@ mod tests {
         .unwrap();
         let s = p.subjects["alice"].permissions.as_ref();
         assert_eq!(
-            p.evaluate_write_subtree_floored(s, Path::new("/srv/a/d"), None),
+            p.evaluate_write_subtree_floored(s, Path::new("/srv/a/d"), None, Fold::None),
             Ok(Match3::AllowMatch {
                 source: "Write(/srv/a/**)".into()
             })
         );
         assert_eq!(
-            p.evaluate_write_subtree_floored(s, Path::new("/etc/x"), None),
+            p.evaluate_write_subtree_floored(s, Path::new("/etc/x"), None, Fold::None),
             Ok(Match3::DenyMatch {
                 source: "Write(/etc/**)".into()
             })
         );
         assert_eq!(
-            p.evaluate_write_subtree_floored(None, Path::new("/srv/a/d"), None),
+            p.evaluate_write_subtree_floored(None, Path::new("/srv/a/d"), None, Fold::None),
             Err(HomeUnbound)
         );
         assert_eq!(
-            p.evaluate_write_subtree(Path::new("/srv/a/d"), None),
+            p.evaluate_write_subtree(Path::new("/srv/a/d"), None, Fold::None),
             Err(HomeUnbound)
         );
     }
@@ -4092,13 +4183,13 @@ mod tests {
         let p = mount_policy("\"Read(/w/**)\"", "\"Read(/w/secret/**)\"");
         let w = Path::new("/w");
         assert_eq!(
-            p.evaluate_mount_floored(None, MountSide::Read, w, None),
+            p.evaluate_mount_floored(None, MountSide::Read, w, None, Fold::None),
             Ok(Match3::AllowMatch {
                 source: "Read(/w/**)".into()
             })
         );
         assert_eq!(
-            p.mount_masks(None, None, MountSide::Read, w, None),
+            p.mount_masks(None, None, MountSide::Read, w, None, Fold::None),
             Ok(vec!["/w/secret/**".to_string()])
         );
     }
@@ -4108,7 +4199,7 @@ mod tests {
         for (deny, root) in [("Read(/w)", "/w"), ("Read(/w/**)", "/w/x")] {
             let p = mount_policy("\"Read(/w/**)\"", &format!("\"{deny}\""));
             assert_eq!(
-                p.evaluate_mount_floored(None, MountSide::Read, Path::new(root), None),
+                p.evaluate_mount_floored(None, MountSide::Read, Path::new(root), None, Fold::None),
                 Ok(Match3::DenyMatch {
                     source: deny.into()
                 }),
@@ -4121,7 +4212,7 @@ mod tests {
     fn mount_needs_a_covering_allow() {
         let p = mount_policy("\"Read(/w/*.rs)\"", "");
         assert_eq!(
-            p.evaluate_mount_floored(None, MountSide::Read, Path::new("/w"), None),
+            p.evaluate_mount_floored(None, MountSide::Read, Path::new("/w"), None, Fold::None),
             Ok(Match3::NoMatch)
         );
     }
@@ -4131,21 +4222,27 @@ mod tests {
         let p = mount_policy("\"Read(/w/**)\", \"Write(/w/**)\"", "\"Write(/w/out/**)\"");
         let w = Path::new("/w");
         assert_eq!(
-            p.mount_masks(None, None, MountSide::Write, w, None),
+            p.mount_masks(None, None, MountSide::Write, w, None, Fold::None),
             Ok(vec!["/w/out/**".to_string()])
         );
         assert_eq!(
-            p.mount_masks(None, None, MountSide::Read, w, None),
+            p.mount_masks(None, None, MountSide::Read, w, None, Fold::None),
             Ok(Vec::new())
         );
         assert_eq!(
-            p.evaluate_mount_floored(None, MountSide::Write, w, None),
+            p.evaluate_mount_floored(None, MountSide::Write, w, None, Fold::None),
             Ok(Match3::AllowMatch {
                 source: "Write(/w/**)".into()
             })
         );
         assert_eq!(
-            p.evaluate_mount_floored(None, MountSide::Write, Path::new("/w/out"), None),
+            p.evaluate_mount_floored(
+                None,
+                MountSide::Write,
+                Path::new("/w/out"),
+                None,
+                Fold::None
+            ),
             Ok(Match3::DenyMatch {
                 source: "Write(/w/out/**)".into()
             })
@@ -4161,7 +4258,8 @@ mod tests {
                 None,
                 MountSide::Read,
                 Path::new("/h/w"),
-                Some(Path::new("/h"))
+                Some(Path::new("/h")),
+                Fold::None
             ),
             Ok(vec!["/h/w/.env".to_string()])
         );
@@ -4171,11 +4269,18 @@ mod tests {
     fn mount_masks_unbound_home_is_an_error() {
         let p = mount_policy("\"Read(~/w/**)\"", "\"Read(~/w/.env)\"");
         assert_eq!(
-            p.mount_masks(None, None, MountSide::Read, Path::new("/h/w"), None),
+            p.mount_masks(
+                None,
+                None,
+                MountSide::Read,
+                Path::new("/h/w"),
+                None,
+                Fold::None
+            ),
             Err(HomeUnbound)
         );
         assert_eq!(
-            p.evaluate_mount_floored(None, MountSide::Read, Path::new("/h/w"), None),
+            p.evaluate_mount_floored(None, MountSide::Read, Path::new("/h/w"), None, Fold::None),
             Err(HomeUnbound)
         );
     }
@@ -4187,7 +4292,14 @@ mod tests {
             "\"Read(/w/z/**)\", \"Read(/w/a)\", \"Read(/w//z/**)\", \"Read(/other/**)\"",
         );
         assert_eq!(
-            p.mount_masks(None, None, MountSide::Read, Path::new("/w"), None),
+            p.mount_masks(
+                None,
+                None,
+                MountSide::Read,
+                Path::new("/w"),
+                None,
+                Fold::None
+            ),
             Ok(vec!["/w/a".to_string(), "/w/z/**".to_string()])
         );
     }
@@ -4202,17 +4314,17 @@ mod tests {
         let agent = p.subjects["agent"].permissions.as_ref();
         let root = Path::new("/a/tasks/users/u1");
         assert_eq!(
-            p.evaluate_mount_agent(right, agent, MountSide::Read, root, None),
+            p.evaluate_mount_agent(right, agent, MountSide::Read, root, None, Fold::None),
             Ok(AgentMatch::Right {
                 source: "Read(/a/tasks/**)".into()
             })
         );
         assert_eq!(
-            p.mount_masks(Some(right), agent, MountSide::Read, root, None),
+            p.mount_masks(Some(right), agent, MountSide::Read, root, None, Fold::None),
             Ok(vec!["/**/.env".to_string()])
         );
         assert_eq!(
-            p.mount_masks(None, agent, MountSide::Read, root, None),
+            p.mount_masks(None, agent, MountSide::Read, root, None, Fold::None),
             Ok(vec![
                 "/**/.env".to_string(),
                 "/a/tasks/users/u1/build/**".to_string()
@@ -4220,7 +4332,7 @@ mod tests {
         );
         let notes = Path::new("/a/notes");
         assert_eq!(
-            p.evaluate_mount_agent(right, agent, MountSide::Read, notes, None),
+            p.evaluate_mount_agent(right, agent, MountSide::Read, notes, None, Fold::None),
             Ok(AgentMatch::Floored(Match3::AllowMatch {
                 source: "Read(/a/**)".into()
             }))
@@ -4231,9 +4343,142 @@ mod tests {
                 agent,
                 MountSide::Read,
                 Path::new("/a/tasks/users/u1/build"),
-                None
+                None,
+                Fold::None
             ),
             Ok(vec!["/**/.env".to_string()])
         );
+    }
+
+    fn deny_at(p: &AuthzPolicy, path: &str, home: Option<&str>, fold: Fold) -> Match3 {
+        p.evaluate3(&Request::Read(Path::new(path)), home.map(Path::new), fold)
+            .unwrap()
+    }
+
+    fn denied(deny: &str) -> Match3 {
+        Match3::DenyMatch {
+            source: deny.into(),
+        }
+    }
+
+    #[test]
+    fn a_deny_matches_a_case_variant_through_the_folded_home() {
+        let p = mount_policy("\"Read(/**)\"", "\"Read(~/.ssh/**)\"");
+        let (home, path) = (Some("/Users/Alex"), "/users/alex/.SSH/id_rsa");
+        assert_eq!(
+            deny_at(&p, path, home, Fold::Case),
+            denied("Read(~/.ssh/**)")
+        );
+        assert_eq!(
+            deny_at(&p, path, home, Fold::None),
+            Match3::AllowMatch {
+                source: "Read(/**)".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_deny_matches_the_firmlink_and_private_spellings() {
+        let p = mount_policy("\"Read(/**)\"", "\"Read(/etc/shadow)\"");
+        for path in [
+            "/private/etc/shadow",
+            "/System/Volumes/Data/private/etc/shadow",
+        ] {
+            assert_eq!(
+                deny_at(&p, path, None, Fold::Case),
+                denied("Read(/etc/shadow)"),
+                "{path}"
+            );
+            assert_ne!(
+                deny_at(&p, path, None, Fold::None),
+                denied("Read(/etc/shadow)"),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_deny_matches_its_written_spelling_under_every_fold() {
+        let p = mount_policy("\"Read(/**)\"", "\"Read(/srv/Re*)\"");
+        let nfd = "/srv/Re\u{301}sume\u{301}";
+        for fold in [Fold::None, Fold::Case] {
+            assert_eq!(
+                deny_at(&p, nfd, None, fold),
+                denied("Read(/srv/Re*)"),
+                "{fold:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_allow_does_not_fold() {
+        let p = mount_policy("\"Read(/Users/me/proj/**)\"", "");
+        assert_eq!(
+            deny_at(&p, "/Users/me/PROJ/x", None, Fold::Case),
+            Match3::NoMatch
+        );
+        assert_eq!(
+            p.evaluate_mount_floored(
+                None,
+                MountSide::Read,
+                Path::new("/Users/me/PROJ"),
+                None,
+                Fold::Case
+            ),
+            Ok(Match3::NoMatch)
+        );
+    }
+
+    #[test]
+    fn a_mount_mask_is_found_through_the_fold_and_keeps_its_spelling() {
+        let p = mount_policy("\"Read(/users/me/**)\"", "\"Read(~/.SSH/**)\"");
+        let (root, home) = (Path::new("/users/me"), Some(Path::new("/Users/Me")));
+        assert_eq!(
+            p.mount_masks(None, None, MountSide::Read, root, home, Fold::Case),
+            Ok(vec!["/Users/Me/.SSH/**".to_string()])
+        );
+        assert_eq!(
+            p.mount_masks(None, None, MountSide::Read, root, home, Fold::None),
+            Ok(vec![])
+        );
+        assert_eq!(
+            p.evaluate_mount_floored(
+                None,
+                MountSide::Read,
+                Path::new("/users/me/.ssh"),
+                home,
+                Fold::Case
+            ),
+            Ok(denied("Read(~/.SSH/**)"))
+        );
+    }
+
+    #[test]
+    fn a_subtree_deny_intersects_through_the_mapped_roots() {
+        let p = mount_policy("\"Write(/**)\"", "\"Write(/tmp/w/keep)\"");
+        let root = Path::new("/private/tmp/w");
+        assert_eq!(
+            p.evaluate_write_subtree(root, None, Fold::Case),
+            Ok(denied("Write(/tmp/w/keep)"))
+        );
+        assert_eq!(
+            p.evaluate_write_subtree(root, None, Fold::None),
+            Ok(Match3::AllowMatch {
+                source: "Write(/**)".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_non_utf8_path_never_matches_a_deny_under_either_fold() {
+        use std::os::unix::ffi::OsStrExt;
+        let p = mount_policy("", "\"Read(/**)\"");
+        let path = Path::new(std::ffi::OsStr::from_bytes(b"/x/\xff"));
+        for fold in [Fold::None, Fold::Case] {
+            assert_eq!(
+                p.evaluate3(&Request::Read(path), None, fold),
+                Ok(Match3::NoMatch)
+            );
+        }
     }
 }

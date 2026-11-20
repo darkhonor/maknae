@@ -2390,6 +2390,7 @@ mod tests {
                 taskers: src.agent_taskers().clone(),
                 sensitive: std::sync::Arc::clone(src.sensitive()),
                 tools: std::sync::Arc::clone(src.tools()),
+                fold: maknae_config::native_fold(),
             })
         }
 
@@ -3034,6 +3035,7 @@ mod tests {
             taskers: l.taskers.clone(),
             sensitive: Arc::clone(&l.sensitive),
             tools: Arc::clone(&l.tools),
+            fold: l.fold,
         }
     }
 
@@ -3090,6 +3092,7 @@ mod tests {
             taskers: Default::default(),
             sensitive: Default::default(),
             tools: Default::default(),
+            fold: maknae_config::Fold::None,
         };
         let ask = |uid: i64, action: &str| {
             let mut r = liveness_req(Some(uid));

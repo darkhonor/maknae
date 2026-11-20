@@ -120,6 +120,7 @@ pub(crate) fn decide_mount<P: DecidesPinned>(
 }
 
 impl MountDecision {
+    /// `fold` reaches the structural rules and the sensitive masks; `-basic` folds by its snapshot's `native_fold()`.
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn with_fold<P: DecidesPinned>(

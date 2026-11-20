@@ -47,6 +47,7 @@ pub(crate) struct LoadedPolicy {
     pub(crate) taskers: AgentTaskers,
     pub(crate) sensitive: std::sync::Arc<maknae_config::SensitiveList>,
     pub(crate) tools: std::sync::Arc<maknae_config::ToolsCatalog>,
+    pub(crate) fold: maknae_config::Fold,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -894,7 +895,7 @@ pub(crate) fn decide_loaded_cited(
             (decided, None)
         }
         Role::Admin | Role::User | Role::Guest
-            if let Some(limited) = action_limit(&lp.policy, lp.subjects.get(uid), req) =>
+            if let Some(limited) = action_limit(lp, lp.subjects.get(uid), req) =>
         {
             (limited, None)
         }
@@ -1147,7 +1148,7 @@ fn agent_arm(agents: &AgentUids, uid: u32, role: Role, req: &SecRequest) -> Opti
 
 /// The operator's `actions:` limit, except on a file request the entry's built-in right decides.
 fn action_limit(
-    policy: &maknae_config::AuthzPolicy,
+    lp: &LoadedPolicy,
     entry: Option<&SubjectEntry>,
     req: &SecRequest,
 ) -> Option<Verdict> {
@@ -1162,7 +1163,7 @@ fn action_limit(
     match class_of(action) {
         Some(Class::Liveness | Class::Kernel) | None => return None,
         Some(Class::Admin) if action == "admin.whoami" => return None,
-        Some(Class::Fs) if right_decides(policy, entry, req) => return None,
+        Some(Class::Fs) if right_decides(lp, entry, req) => return None,
         Some(
             Class::Admin | Class::Session | Class::Fs | Class::Terminal | Class::Mcp | Class::Tool,
         ) => {}
@@ -1283,28 +1284,46 @@ fn fs_target(req: &SecRequest) -> Result<(&std::path::Path, Option<&std::path::P
 }
 
 fn evaluate_floored(
-    policy: &maknae_config::AuthzPolicy,
+    lp: &LoadedPolicy,
     set: Option<&maknae_config::SubjectPermissions>,
     scope: FsScope,
     path: &std::path::Path,
     home: Option<&std::path::Path>,
 ) -> Result<maknae_config::Match3, maknae_config::HomeUnbound> {
     match scope {
-        FsScope::Read => policy.evaluate3_floored(set, &maknae_config::Request::Read(path), home),
-        FsScope::Write => policy.evaluate3_floored(set, &maknae_config::Request::Write(path), home),
-        FsScope::ReadSubtree => policy.evaluate_read_subtree_floored(set, path, home),
-        FsScope::WriteSubtree => policy.evaluate_write_subtree_floored(set, path, home),
-        FsScope::MountRead => {
-            policy.evaluate_mount_floored(set, maknae_config::MountSide::Read, path, home)
+        FsScope::Read => {
+            lp.policy
+                .evaluate3_floored(set, &maknae_config::Request::Read(path), home, lp.fold)
         }
-        FsScope::MountWrite => {
-            policy.evaluate_mount_floored(set, maknae_config::MountSide::Write, path, home)
+        FsScope::Write => {
+            lp.policy
+                .evaluate3_floored(set, &maknae_config::Request::Write(path), home, lp.fold)
         }
+        FsScope::ReadSubtree => lp
+            .policy
+            .evaluate_read_subtree_floored(set, path, home, lp.fold),
+        FsScope::WriteSubtree => lp
+            .policy
+            .evaluate_write_subtree_floored(set, path, home, lp.fold),
+        FsScope::MountRead => lp.policy.evaluate_mount_floored(
+            set,
+            maknae_config::MountSide::Read,
+            path,
+            home,
+            lp.fold,
+        ),
+        FsScope::MountWrite => lp.policy.evaluate_mount_floored(
+            set,
+            maknae_config::MountSide::Write,
+            path,
+            home,
+            lp.fold,
+        ),
     }
 }
 
 fn evaluate_agent(
-    policy: &maknae_config::AuthzPolicy,
+    lp: &LoadedPolicy,
     right: &maknae_config::SubjectPermissions,
     set: Option<&maknae_config::SubjectPermissions>,
     scope: FsScope,
@@ -1312,28 +1331,46 @@ fn evaluate_agent(
     home: Option<&std::path::Path>,
 ) -> Result<AgentMatch, maknae_config::HomeUnbound> {
     match scope {
-        FsScope::Read => {
-            policy.evaluate3_agent(right, set, &maknae_config::Request::Read(path), home)
-        }
-        FsScope::Write => {
-            policy.evaluate3_agent(right, set, &maknae_config::Request::Write(path), home)
-        }
-        FsScope::ReadSubtree => policy.evaluate_read_subtree_agent(right, set, path, home),
-        FsScope::WriteSubtree => policy.evaluate_write_subtree_agent(right, set, path, home),
-        FsScope::MountRead => {
-            policy.evaluate_mount_agent(right, set, maknae_config::MountSide::Read, path, home)
-        }
-        FsScope::MountWrite => {
-            policy.evaluate_mount_agent(right, set, maknae_config::MountSide::Write, path, home)
-        }
+        FsScope::Read => lp.policy.evaluate3_agent(
+            right,
+            set,
+            &maknae_config::Request::Read(path),
+            home,
+            lp.fold,
+        ),
+        FsScope::Write => lp.policy.evaluate3_agent(
+            right,
+            set,
+            &maknae_config::Request::Write(path),
+            home,
+            lp.fold,
+        ),
+        FsScope::ReadSubtree => lp
+            .policy
+            .evaluate_read_subtree_agent(right, set, path, home, lp.fold),
+        FsScope::WriteSubtree => lp
+            .policy
+            .evaluate_write_subtree_agent(right, set, path, home, lp.fold),
+        FsScope::MountRead => lp.policy.evaluate_mount_agent(
+            right,
+            set,
+            maknae_config::MountSide::Read,
+            path,
+            home,
+            lp.fold,
+        ),
+        FsScope::MountWrite => lp.policy.evaluate_mount_agent(
+            right,
+            set,
+            maknae_config::MountSide::Write,
+            path,
+            home,
+            lp.fold,
+        ),
     }
 }
 
-fn right_decides(
-    policy: &maknae_config::AuthzPolicy,
-    entry: &SubjectEntry,
-    req: &SecRequest,
-) -> bool {
+fn right_decides(lp: &LoadedPolicy, entry: &SubjectEntry, req: &SecRequest) -> bool {
     let Some((_, right)) = entry.agent_right() else {
         return false;
     };
@@ -1341,7 +1378,7 @@ fn right_decides(
         return false;
     };
     matches!(
-        evaluate_agent(policy, right, entry.permissions.as_ref(), scope, path, home),
+        evaluate_agent(lp, right, entry.permissions.as_ref(), scope, path, home),
         Ok(AgentMatch::Right { .. })
     )
 }
@@ -1367,8 +1404,8 @@ fn decide_fs(
     let decided = decide_grants(
         lp,
         entry,
-        |right, set| evaluate_agent(&lp.policy, right, set, scope, path, home),
-        |set| evaluate_floored(&lp.policy, set, scope, path, home),
+        |right, set| evaluate_agent(lp, right, set, scope, path, home),
+        |set| evaluate_floored(lp, set, scope, path, home),
         // Case-5 testimony (#181): role and term ONLY -- never the path (the
         // D9 hazard). "No capability entry" is accurate where "no rule" would
         // be false: a rule for fs.read exists; no ENTRY matched this request.
@@ -1382,7 +1419,7 @@ fn decide_fs(
     };
     let right = entry.and_then(SubjectEntry::agent_right).map(|(_, r)| r);
     let set = entry.and_then(|e| e.permissions.as_ref());
-    match lp.policy.mount_masks(right, set, side, path, home) {
+    match lp.policy.mount_masks(right, set, side, path, home, lp.fold) {
         Ok(masks) => {
             obligations.push(mask_obligation(masks));
             (Verdict::Permit { obligations }, cited)
@@ -1579,8 +1616,11 @@ fn decide_tool(
     decide_grants(
         lp,
         lp.subjects.get(uid),
-        |right, set| lp.policy.evaluate3_agent(right, set, &request, None),
-        |set| lp.policy.evaluate3_floored(set, &request, None),
+        |right, set| {
+            lp.policy
+                .evaluate3_agent(right, set, &request, None, lp.fold)
+        },
+        |set| lp.policy.evaluate3_floored(set, &request, None, lp.fold),
         format!("role {role_key}: no capability entry for tool.invoke"),
     )
 }
@@ -1633,6 +1673,7 @@ mod tests {
             taskers: Default::default(),
             sensitive: Default::default(),
             tools: Default::default(),
+            fold: maknae_config::Fold::None,
         }
     }
 
@@ -1904,6 +1945,21 @@ mod tests {
         );
         let d = decide_loaded_cited(&lp, &principal(), &req);
         assert_eq!(d.verdict, masked(&["/**/.env", "/w/own/**"]));
+    }
+
+    #[test]
+    fn a_deny_decides_through_the_policys_fold() {
+        let mut lp = lp_mount("schema_version: 1\npermissions:\n  allow: [\"Read(/w/**)\"]\n  deny: [\"Read(/w/Secret/**)\"]\n");
+        let req = mount_req(OPERATOR_UID, "fs.read", "mount", "/w/secret");
+        assert!(matches!(
+            decide_loaded(&lp, &principal(), &req),
+            Verdict::Permit { .. }
+        ));
+        lp.fold = maknae_config::Fold::Case;
+        assert!(matches!(
+            decide_loaded(&lp, &principal(), &req),
+            Verdict::Deny { .. }
+        ));
     }
 
     #[test]
@@ -3023,6 +3079,7 @@ mod tests {
             policy,
             sensitive: Default::default(),
             tools: Default::default(),
+            fold: maknae_config::Fold::None,
         }
     }
 
@@ -3807,6 +3864,7 @@ mod tests {
             policy,
             sensitive: Default::default(),
             tools: Default::default(),
+            fold: maknae_config::Fold::None,
         }
     }
 
@@ -4359,6 +4417,7 @@ mod tests {
             policy,
             sensitive: Default::default(),
             tools: Default::default(),
+            fold: maknae_config::Fold::None,
         }
     }
 
@@ -4899,6 +4958,7 @@ mod tests {
             policy,
             sensitive: Default::default(),
             tools: Default::default(),
+            fold: maknae_config::Fold::None,
         };
         let at = |path: &str| request(Some(UID.into()), "session.new", Some(path));
         for path in ["/home/operator/projects/x", "/home/operator/docs/x"] {
@@ -4968,6 +5028,7 @@ mod tests {
             policy,
             sensitive: Default::default(),
             tools: Default::default(),
+            fold: maknae_config::Fold::None,
         }
     }
 
@@ -5432,6 +5493,7 @@ mod tests {
             policy,
             sensitive: Default::default(),
             tools: Default::default(),
+            fold: maknae_config::Fold::None,
         }
     }
 
@@ -6008,6 +6070,7 @@ mod tests {
             policy,
             sensitive: Default::default(),
             tools: std::sync::Arc::new(maknae_config::ToolsCatalog::parse(TOOLS_674).unwrap()),
+            fold: maknae_config::Fold::None,
         }
     }
 
