@@ -60,10 +60,12 @@ pub(super) fn grant_matches(set: &PermissionSet, grant: &Grant) -> bool {
         .iter()
         .map(|r| r.name.to_ascii_lowercase())
         .collect();
+    if got_repos.len() != repositories.len() {
+        return false;
+    }
     grant.repository_selection.as_deref() == Some("selected")
         && got == want
         && got_repos == want_repos
-        && got_repos.len() == repositories.len()
 }
 
 /// The token alone, parsed before the rest of the grant so a grant that fails
