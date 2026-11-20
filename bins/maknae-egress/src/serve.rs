@@ -291,7 +291,22 @@ fn serve_mint(
 }
 
 fn unavailable(verb: &str, task: &str, agent: &str, why: &str) {
-    eprintln!("maknae-egress: {verb} task={task:?} agent={agent:?}: refused, minting is unavailable: {why}");
+    eprintln!("{}", unavailable_line(verb, task, agent, why));
+}
+
+fn unavailable_line(verb: &str, task: &str, agent: &str, why: &str) -> String {
+    let (task, agent) = (bounded(task), bounded(agent));
+    format!(
+        "maknae-egress: {verb} task={task} agent={agent}: refused, minting is unavailable: {why}"
+    )
+}
+
+fn bounded(field: &str) -> String {
+    if field.len() > maknae_seal::MAX_AAD_FIELD_BYTES {
+        format!("<{} bytes>", field.len())
+    } else {
+        format!("{field:?}")
+    }
 }
 
 fn serve_revoke(
@@ -539,6 +554,26 @@ fn write_reply(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unadmitted_frame_s_task_and_agent_reach_the_journal_bounded() {
+        let at = "t".repeat(maknae_seal::MAX_AAD_FIELD_BYTES);
+        let line = unavailable_line("mint", &at, "coder", "no SecretID");
+        assert!(line.contains(&format!("task={at:?}")), "{line}");
+        assert!(line.contains("agent=\"coder\""), "{line}");
+
+        let huge = "t".repeat(1 << 20);
+        for (task, agent) in [(huge.as_str(), "coder"), ("task-1", huge.as_str())] {
+            let line = unavailable_line("revoke", task, agent, "no SecretID");
+            assert!(line.len() < 512, "{} bytes", line.len());
+            assert!(!line.contains(&"t".repeat(65)), "{line}");
+            assert!(line.contains(&format!("<{} bytes>", 1 << 20)), "{line}");
+            assert!(
+                line.ends_with("minting is unavailable: no SecretID"),
+                "{line}"
+            );
+        }
+    }
     use crate::test_frames::{bounds, canned, encoded_frame, prefixed, request, ALICE};
     use maknae_deputy::call::{fulfil, CallBounds};
     use maknae_deputy::unseal::{KeyOpener, OpenRequest};
