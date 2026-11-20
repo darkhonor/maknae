@@ -1044,7 +1044,7 @@ mod tests {
 
     fn workspace_mount_decisions() -> String {
         use crate::handler::{Stamp, TaskStamp};
-        use crate::workspace::{decide_mount, MountDecision, MountMode};
+        use crate::workspace::{MountDecision, MountMode};
         use maknae_authz_basic::Baseline;
         use maknae_config::Fold;
         use std::path::Path;
@@ -1129,9 +1129,11 @@ mod tests {
             "/etc",
             "/usr",
             "/var/lib/maknae",
+            "/var/log/maknae",
             "/usr/lib",
             "/var",
             "/var/lib",
+            "/var/log",
             "/",
             "/home/operator",
             "/home",
@@ -1235,9 +1237,10 @@ mod tests {
         for (who, fixture, uid, home, stamp, root, mode) in rows {
             let c = if fixture { &site } else { &shipped };
             let decide = |fold| {
-                decide_mount(
+                MountDecision::with_fold(
                     c,
                     fold,
+                    maknae_security::Lane::Local,
                     uid,
                     Some(Path::new(home)),
                     None,
@@ -1255,8 +1258,8 @@ mod tests {
                 RW => "rw",
             };
             let outcome = match d {
-                MountDecision::Refused { reason } => format!("Refused {reason:?}"),
-                MountDecision::Permitted { masks } => format!("Permitted {masks:?}"),
+                MountDecision::Refused { audit, .. } => format!("Refused {audit:?}"),
+                MountDecision::Permitted { masks, .. } => format!("Permitted {masks:?}"),
             };
             out.push_str(&format!(
                 "{who} [{files}] mount {mode} {root} => {outcome}\n"

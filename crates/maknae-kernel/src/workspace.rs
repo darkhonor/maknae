@@ -7,14 +7,14 @@ use std::path::Path;
 
 use maknae_config::{fold_path, Fold, Reach, SensitiveList};
 use maknae_security::{
-    AttrValue, Authorizer, Decision, FsOperation, Lane, Obligation, Request, Verdict,
+    AttrValue, Authorizer, Decision, FsOperation, Lane, Obligation, Request, RuleCitation, Verdict,
 };
 
 use crate::conversation::facts::ConversationFacts;
 use crate::handler::{lane_context, lexical_pregate, stamp_conversation, stamp_subject, Stamp};
 use crate::sensitive_authz::SensitiveNow;
 
-const SYSTEM_PATHS: [&str; 11] = [
+const SYSTEM_PATHS: [&str; 12] = [
     "/run",
     "/tmp",
     "/var/tmp",
@@ -26,6 +26,7 @@ const SYSTEM_PATHS: [&str; 11] = [
     "/etc",
     "/usr",
     "/var/lib/maknae",
+    "/var/log/maknae",
 ];
 
 const MASK: &str = "workspace.mask";
@@ -41,18 +42,47 @@ pub(crate) enum MountMode {
     ReadWrite,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum MountDecision {
-    Refused { reason: String },
-    Permitted { masks: Vec<String> },
+/// The role and rule a decision was made on, for the audit record.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Citation {
+    pub(crate) role: Option<&'static str>,
+    pub(crate) rule: Option<RuleCitation>,
 }
 
-fn refused(reason: impl Into<String>) -> MountDecision {
+/// `audit` reaches the trail only; `wire` is what the client is answered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum MountDecision {
+    Refused {
+        audit: String,
+        wire: String,
+        cited: Citation,
+    },
+    Permitted {
+        masks: Vec<String>,
+        cited: Citation,
+    },
+}
+
+const NOT_AUTHORIZED: &str = "not authorized";
+
+fn structural_refusal(reason: impl Into<String>) -> MountDecision {
+    let reason = reason.into();
     MountDecision::Refused {
-        reason: reason.into(),
+        wire: reason.clone(),
+        audit: reason,
+        cited: Citation::default(),
     }
 }
 
+fn denied(reason: impl Into<String>, cited: Citation) -> MountDecision {
+    MountDecision::Refused {
+        audit: reason.into(),
+        wire: NOT_AUTHORIZED.into(),
+        cited,
+    }
+}
+
+/// `home` is the subject's canonical home (`maknae_io::canonical_home` or `session_home`).
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "called by the tool-invocation verb, #479")
@@ -60,7 +90,64 @@ fn refused(reason: impl Into<String>) -> MountDecision {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn decide_mount<P: Authorizer + SensitiveNow>(
     authorizer: &P,
+    lane: Lane,
+    uid: u32,
+    home: Option<&Path>,
+    conversation: Option<&ConversationFacts>,
+    personal: Option<&AttrValue>,
+    stamp: &Stamp<'_>,
+    root: &str,
+    mode: MountMode,
+) -> MountDecision {
+    folded(
+        authorizer,
+        maknae_config::native_fold(),
+        lane,
+        uid,
+        home,
+        conversation,
+        personal,
+        stamp,
+        root,
+        mode,
+    )
+}
+
+impl MountDecision {
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn with_fold<P: Authorizer + SensitiveNow>(
+        authorizer: &P,
+        fold: Fold,
+        lane: Lane,
+        uid: u32,
+        home: Option<&Path>,
+        conversation: Option<&ConversationFacts>,
+        personal: Option<&AttrValue>,
+        stamp: &Stamp<'_>,
+        root: &str,
+        mode: MountMode,
+    ) -> Self {
+        folded(
+            authorizer,
+            fold,
+            lane,
+            uid,
+            home,
+            conversation,
+            personal,
+            stamp,
+            root,
+            mode,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn folded<P: Authorizer + SensitiveNow>(
+    authorizer: &P,
     fold: Fold,
+    lane: Lane,
     uid: u32,
     home: Option<&Path>,
     conversation: Option<&ConversationFacts>,
@@ -70,13 +157,13 @@ pub(crate) fn decide_mount<P: Authorizer + SensitiveNow>(
     mode: MountMode,
 ) -> MountDecision {
     if let Err(why) = lexical_pregate(root) {
-        return refused(format!("workspace: {why}"));
+        return structural_refusal(format!("workspace: {why}"));
     }
     let Some(home) = usable_home(home, fold) else {
-        return refused("workspace: no home to evaluate");
+        return structural_refusal("workspace: no home to evaluate");
     };
     if let Err(why) = structural(root, home, fold) {
-        return refused(why);
+        return structural_refusal(why);
     }
     let personal = match stamp {
         Stamp::Client => personal,
@@ -89,37 +176,49 @@ pub(crate) fn decide_mount<P: Authorizer + SensitiveNow>(
     };
     let requests: Vec<Request> = actions
         .iter()
-        .map(|action| mount_request(uid, home, conversation, personal, stamp, root, action))
+        .map(|action| mount_request(uid, home, conversation, personal, stamp, lane, root, action))
         .collect();
     let mut masks = BTreeSet::new();
+    let mut cited = Citation::default();
     for decided in maknae_security::guarded_decide_cited_all(authorizer, &requests) {
+        cited = Citation {
+            role: decided.role,
+            rule: decided.rule,
+        };
         let obligations = match decided.verdict {
             Verdict::Indeterminate => {
-                return refused("workspace: the decision could not be evaluated")
+                return denied("workspace: the decision could not be evaluated", cited)
             }
             v => match maknae_security::finalize(maknae_security::combine(vec![v])) {
                 Decision::Permit { obligations } => obligations,
-                Decision::Deny { reason } => return refused(reason),
+                Decision::Deny { reason } => return denied(reason, cited),
             },
         };
         for ob in &obligations {
             match mask_patterns(ob) {
                 Some(patterns) => masks.extend(patterns.iter().cloned()),
-                None => return refused("workspace: an obligation the mount cannot honor"),
+                None => return denied("workspace: an obligation the mount cannot honor", cited),
             }
         }
     }
     let dir = Path::new(root);
     let Ok(listed) = host.subtree_entries(dir, Some(home), fold) else {
-        return refused("workspace: the host sensitive list could not be evaluated");
+        return denied(
+            "workspace: the host sensitive list could not be evaluated",
+            cited,
+        );
     };
     masks.extend(listed);
     let Some(own) = personal_entries(personal, dir, home, fold) else {
-        return refused("workspace: the personal sensitive list could not be evaluated");
+        return denied(
+            "workspace: the personal sensitive list could not be evaluated",
+            cited,
+        );
     };
     masks.extend(own);
     MountDecision::Permitted {
         masks: masks.into_iter().collect(),
+        cited,
     }
 }
 
@@ -192,12 +291,14 @@ fn personal_entries(
         .ok()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn mount_request(
     uid: u32,
     home: &Path,
     conversation: Option<&ConversationFacts>,
     personal: Option<&AttrValue>,
     stamp: &Stamp<'_>,
+    lane: Lane,
     root: &str,
     action: &str,
 ) -> Request {
@@ -207,7 +308,7 @@ fn mount_request(
         maknae_authz_basic::RESOURCE_PATH_KEY,
         AttrValue::Str(root.to_owned()),
     );
-    let mut context = lane_context(Lane::Local);
+    let mut context = lane_context(lane);
     context.insert(
         maknae_security::CONTEXT_FS_OPERATION,
         AttrValue::Str(FsOperation::Mount.as_str().into()),
@@ -269,7 +370,7 @@ mod tests {
         root: &str,
         mode: MountMode,
     ) -> MountDecision {
-        decide_mount(
+        uncited_mount(
             a,
             fold,
             operator(),
@@ -282,15 +383,66 @@ mod tests {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn uncited_mount<P: Authorizer + SensitiveNow>(
+        a: &P,
+        fold: Fold,
+        uid: u32,
+        home: Option<&Path>,
+        conversation: Option<&ConversationFacts>,
+        personal: Option<&AttrValue>,
+        stamp: &Stamp<'_>,
+        root: &str,
+        mode: MountMode,
+    ) -> MountDecision {
+        uncited(MountDecision::with_fold(
+            a,
+            fold,
+            Lane::Local,
+            uid,
+            home,
+            conversation,
+            personal,
+            stamp,
+            root,
+            mode,
+        ))
+    }
+
     fn refused(reason: &str) -> MountDecision {
         MountDecision::Refused {
-            reason: reason.into(),
+            audit: reason.into(),
+            wire: reason.into(),
+            cited: Citation::default(),
+        }
+    }
+
+    fn denied(reason: &str) -> MountDecision {
+        MountDecision::Refused {
+            audit: reason.into(),
+            wire: NOT_AUTHORIZED.into(),
+            cited: Citation::default(),
         }
     }
 
     fn permitted(masks: &[&str]) -> MountDecision {
         MountDecision::Permitted {
             masks: masks.iter().map(|m| (*m).to_owned()).collect(),
+            cited: Citation::default(),
+        }
+    }
+
+    fn uncited(d: MountDecision) -> MountDecision {
+        match d {
+            MountDecision::Refused { audit, wire, .. } => MountDecision::Refused {
+                audit,
+                wire,
+                cited: Citation::default(),
+            },
+            MountDecision::Permitted { masks, .. } => MountDecision::Permitted {
+                masks,
+                cited: Citation::default(),
+            },
         }
     }
 
@@ -303,7 +455,7 @@ mod tests {
         }
     }
 
-    const SYSTEM_PATHS: [&str; 11] = [
+    const SYSTEM_PATHS: [&str; 12] = [
         "/run",
         "/tmp",
         "/var/tmp",
@@ -315,6 +467,7 @@ mod tests {
         "/etc",
         "/usr",
         "/var/lib/maknae",
+        "/var/log/maknae",
     ];
 
     #[test]
@@ -419,7 +572,7 @@ mod tests {
             task: Some(&task),
         };
         assert_eq!(
-            decide_mount(
+            uncited_mount(
                 &c,
                 Fold::None,
                 2001,
@@ -446,7 +599,7 @@ mod tests {
         for fold in [Fold::None, Fold::Case] {
             for mode in [MountMode::ReadOnly, MountMode::ReadWrite] {
                 assert_eq!(
-                    decide_mount(
+                    uncited_mount(
                         &c,
                         fold,
                         2001,
@@ -583,7 +736,7 @@ mod tests {
                 "/home/alice/projects/x/.secrets",
                 MountMode::ReadOnly
             ),
-            refused("denied by policy entry Read(~/projects/x/.secrets/**)")
+            denied("denied by policy entry Read(~/projects/x/.secrets/**)")
         );
     }
 
@@ -636,7 +789,7 @@ mod tests {
                 .collect(),
         );
         let decide = |uid: u32, home: &str, stamp: &Stamp<'_>| {
-            decide_mount(
+            uncited_mount(
                 &c,
                 Fold::None,
                 uid,
@@ -683,7 +836,7 @@ mod tests {
                 task: cited,
             };
             assert_eq!(
-                decide_mount(
+                uncited_mount(
                     &c,
                     Fold::None,
                     2001,
@@ -694,8 +847,165 @@ mod tests {
                     root,
                     MountMode::ReadOnly,
                 ),
-                refused(reason),
+                denied(reason),
                 "{root}"
+            );
+        }
+    }
+
+    fn cited_by<P: Authorizer>(a: &P, root: &str, action: &str) -> Citation {
+        let request = mount_request(
+            operator(),
+            Path::new(ALICE),
+            None,
+            None,
+            &Stamp::Client,
+            Lane::Local,
+            root,
+            action,
+        );
+        let d = maknae_security::guarded_decide_cited(a, &request);
+        Citation {
+            role: d.role,
+            rule: d.rule,
+        }
+    }
+
+    #[test]
+    fn a_decision_cites_the_refusing_rule_or_the_last_permit() {
+        let (_g, c) = composition(MASKED, HOST);
+        let decide = |root: &str, mode| {
+            MountDecision::with_fold(
+                &c,
+                Fold::None,
+                Lane::Local,
+                operator(),
+                Some(Path::new(ALICE)),
+                None,
+                None,
+                &Stamp::Client,
+                root,
+                mode,
+            )
+        };
+        let secrets = "/home/alice/projects/x/.secrets";
+        let MountDecision::Refused { audit, wire, cited } = decide(secrets, MountMode::ReadOnly)
+        else {
+            panic!("a denied root refuses");
+        };
+        assert_eq!(
+            audit,
+            "denied by policy entry Read(~/projects/x/.secrets/**)"
+        );
+        assert_eq!(wire, NOT_AUTHORIZED);
+        assert!(cited.rule.is_some());
+        assert_eq!(cited, cited_by(&c, secrets, "fs.read"));
+
+        let project = "/home/alice/projects/x";
+        let read = cited_by(&c, project, "fs.read");
+        let write = cited_by(&c, project, "fs.write");
+        assert!(write.rule.is_some());
+        assert_ne!(read, write);
+        let MountDecision::Permitted { cited, .. } = decide(project, MountMode::ReadWrite) else {
+            panic!("the project mounts read-write");
+        };
+        assert_eq!(cited, write);
+    }
+
+    #[test]
+    fn a_structural_refusal_cites_nothing() {
+        let (_g, c) = broad();
+        assert_eq!(
+            MountDecision::with_fold(
+                &c,
+                Fold::None,
+                Lane::Local,
+                operator(),
+                Some(Path::new(ALICE)),
+                None,
+                None,
+                &Stamp::Client,
+                "/etc",
+                MountMode::ReadOnly,
+            ),
+            refused(SYSTEM)
+        );
+    }
+
+    #[test]
+    fn a_remote_lane_refuses() {
+        let (_g, c) = broad();
+        assert_eq!(
+            uncited(MountDecision::with_fold(
+                &c,
+                Fold::None,
+                Lane::Remote,
+                operator(),
+                Some(Path::new(ALICE)),
+                None,
+                None,
+                &Stamp::Client,
+                "/srv/x",
+                MountMode::ReadOnly,
+            )),
+            denied("filesystem attempt requires a local subject")
+        );
+    }
+
+    #[test]
+    fn decide_mount_folds_natively() {
+        let (_g, c) = broad();
+        let home = Some(Path::new(ALICE));
+        let root = "/ETC";
+        let at = |fold| {
+            MountDecision::with_fold(
+                &c,
+                fold,
+                Lane::Local,
+                operator(),
+                home,
+                None,
+                None,
+                &Stamp::Client,
+                root,
+                MountMode::ReadOnly,
+            )
+        };
+        assert_ne!(at(Fold::None), at(Fold::Case));
+        assert_eq!(
+            decide_mount(
+                &c,
+                Lane::Local,
+                operator(),
+                home,
+                None,
+                None,
+                &Stamp::Client,
+                root,
+                MountMode::ReadOnly,
+            ),
+            at(maknae_config::native_fold())
+        );
+    }
+
+    #[test]
+    fn the_audit_log_is_a_system_path() {
+        let (_g, c) = broad();
+        for fold in [Fold::None, Fold::Case] {
+            for root in [
+                "/var/log/maknae",
+                "/var/log/maknae/sentinel-674",
+                "/var/log",
+            ] {
+                assert_eq!(
+                    mount(&c, fold, Some(ALICE), root, MountMode::ReadOnly),
+                    refused(SYSTEM),
+                    "{root}"
+                );
+            }
+            assert_eq!(
+                mount(&c, fold, Some(ALICE), "/var/log/other", MountMode::ReadOnly),
+                permitted(&[])
             );
         }
     }
@@ -711,7 +1021,7 @@ mod tests {
                 "/home/alice/.ssh",
                 MountMode::ReadOnly
             ),
-            refused("sensitive: host ~/.ssh/**")
+            denied("sensitive: host ~/.ssh/**")
         );
     }
 
@@ -789,7 +1099,7 @@ mod tests {
                     "/srv/x",
                     MountMode::ReadOnly
                 ),
-                refused(UNHONORABLE),
+                denied(UNHONORABLE),
                 "{ob:?}"
             );
         }
@@ -842,7 +1152,7 @@ mod tests {
                     "/srv/x",
                     MountMode::ReadOnly
                 ),
-                refused(reason)
+                denied(reason)
             );
         }
     }
@@ -855,7 +1165,7 @@ mod tests {
             AttrValue::Set(["relative/x".to_owned()].into_iter().collect()),
         ] {
             assert_eq!(
-                decide_mount(
+                uncited_mount(
                     &stub,
                     Fold::None,
                     operator(),
@@ -866,7 +1176,7 @@ mod tests {
                     "/srv/x",
                     MountMode::ReadOnly,
                 ),
-                refused("workspace: the personal sensitive list could not be evaluated"),
+                denied("workspace: the personal sensitive list could not be evaluated"),
                 "{personal:?}"
             );
         }
@@ -919,6 +1229,7 @@ mod tests {
             Some(&facts),
             Some(&personal),
             &Stamp::Client,
+            Lane::Remote,
             "/srv/x",
             "fs.write",
         );
@@ -930,7 +1241,7 @@ mod tests {
         );
         assert_eq!(
             client.context.0.str(maknae_security::CONTEXT_DAC_LANE),
-            Some(maknae_security::Lane::Local.as_str())
+            Some(Lane::Remote.as_str())
         );
         assert_eq!(
             client
@@ -957,7 +1268,20 @@ mod tests {
                 .get(maknae_authz_basic::RESOURCE_CONVERSATION_OWNER_KEY),
             Some(&AttrValue::Int(7))
         );
-        let tasked = mount_request(7, home, None, None, &agent, "/srv/x", "fs.read");
+        let tasked = mount_request(
+            7,
+            home,
+            None,
+            None,
+            &agent,
+            Lane::Local,
+            "/srv/x",
+            "fs.read",
+        );
+        assert_eq!(
+            tasked.context.0.str(maknae_security::CONTEXT_DAC_LANE),
+            Some(Lane::Local.as_str())
+        );
         assert_eq!(
             tasked.subject.0.str(maknae_security::SUBJECT_ROOT_TASKER),
             Some("users/1000")
@@ -973,6 +1297,7 @@ mod tests {
             None,
             None,
             &Stamp::Client,
+            Lane::Local,
             "/home/alice/projects/x",
             "fs.read",
         );
