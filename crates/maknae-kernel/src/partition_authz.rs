@@ -70,16 +70,20 @@ fn decide_partition(req: &Request, fold: Fold) -> Verdict {
         Some(AttrValue::Str(key)) if is_partition_key(key) => Some(key.as_str()),
         Some(_) => return Verdict::Indeterminate,
     };
-    let delete = match req.context.0.get(CONTEXT_FS_OPERATION) {
-        None => action == "fs.delete",
+    let operation = match req.context.0.get(CONTEXT_FS_OPERATION) {
+        None => None,
         Some(AttrValue::Str(op)) => match FsOperation::parse(op) {
-            Some(op) => {
-                matches!(op, FsOperation::DeleteEntry | FsOperation::DeleteTree)
-                    || action == "fs.delete"
-            }
+            Some(op) => Some(op),
             None => return Verdict::Indeterminate,
         },
         Some(_) => return Verdict::Indeterminate,
+    };
+    let delete = match operation {
+        None => action == "fs.delete",
+        Some(op) => {
+            matches!(op, FsOperation::DeleteEntry | FsOperation::DeleteTree)
+                || action == "fs.delete"
+        }
     };
     let under = |tail: &str| {
         let joined = format!("{}/{TASKS_DIR}{tail}", home.trim_end_matches('/'));
@@ -92,6 +96,14 @@ fn decide_partition(req: &Request, fold: Fold) -> Verdict {
     let deny = |why: &str| Verdict::Deny {
         reason: format!("partition: {why}"),
     };
+    if operation == Some(FsOperation::Mount) {
+        let asked = fold_path(path, fold, Reach::Path);
+        return match own.as_deref() {
+            None => deny("the request cites no task"),
+            Some(own) if asked.mapped().iter().all(|p| within(p, own)) => ABSTAIN,
+            Some(_) => deny("the mount lies outside the task's partition"),
+        };
+    }
     let reach = if delete { Reach::Subtree } else { Reach::Path };
     let asked = fold_path(path, fold, reach);
     if delete && asked.mapped().iter().any(|p| within(&tasks, p)) {
@@ -219,6 +231,81 @@ mod tests {
                     "{action} {path}"
                 );
             }
+        }
+    }
+
+    fn mount(action: &str, path: &str, root: Option<&str>) -> Request {
+        let mut r = agent(action, Some(path), root);
+        r.context.0.insert(
+            CONTEXT_FS_OPERATION,
+            AttrValue::Str(FsOperation::Mount.as_str().into()),
+        );
+        r
+    }
+
+    fn refused(r: &Request, why: &str) {
+        assert_eq!(
+            decide(r),
+            Verdict::Deny {
+                reason: format!("partition: {why}")
+            }
+        );
+    }
+
+    #[test]
+    fn partition_mount_inside_own_partition_abstains() {
+        for action in ["fs.read", "fs.write"] {
+            for path in [
+                "/home/hobi-svc/tasks/users/1000",
+                "/home/hobi-svc/tasks/users/1000/work",
+            ] {
+                assert_eq!(decide(&mount(action, path, MINE)), NA, "{action} {path}");
+            }
+        }
+    }
+
+    #[test]
+    fn partition_mount_outside_tasks_denies() {
+        for path in [
+            "/opt/x",
+            "/home/hobi-svc",
+            "/home/hobi-svc/notes",
+            "/home/hobi-svc/tasks",
+            "/home/hobi-svc/tasks/users",
+            "/home/hobi-svc/tasksx/users/1000",
+        ] {
+            refused(
+                &mount("fs.read", path, MINE),
+                "the mount lies outside the task's partition",
+            );
+        }
+    }
+
+    #[test]
+    fn partition_mount_other_partition_denies() {
+        for path in [
+            "/home/hobi-svc/tasks/users/1001",
+            "/home/hobi-svc/tasks/users/1000x",
+            "/home/hobi-svc/tasks/agents/jin/out",
+        ] {
+            refused(
+                &mount("fs.write", path, MINE),
+                "the mount lies outside the task's partition",
+            );
+        }
+    }
+
+    #[test]
+    fn partition_mount_no_task_denies() {
+        for path in ["/home/hobi-svc/tasks/users/1000", "/opt/x"] {
+            refused(&mount("fs.read", path, None), "the request cites no task");
+        }
+    }
+
+    #[test]
+    fn partition_mount_off_agent_channel_abstains() {
+        for path in ["/opt/x", "/home/hobi-svc/tasks/users/1001"] {
+            assert_eq!(decide(&person(mount("fs.read", path, None))), NA);
         }
     }
 

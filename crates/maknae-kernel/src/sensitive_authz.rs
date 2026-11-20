@@ -331,6 +331,29 @@ mod tests {
     }
 
     #[test]
+    fn sensitive_mount_is_a_point_decision() {
+        let mount = |host: &SensitiveList, action, path| {
+            SensitiveAuthorizer::new(host).decide(&with_op(
+                req(action, Some(path), Some("/home/u")),
+                FsOperation::Mount,
+            ))
+        };
+        let host = list(&["/w/.env"]);
+        for action in ["fs.read", "fs.write"] {
+            assert_eq!(mount(&host, action, "/w"), NA);
+            assert_eq!(
+                mount(&host, action, "/w/.env"),
+                deny("sensitive: host /w/.env")
+            );
+        }
+        let host = list(&["/w/**"]);
+        assert_eq!(
+            mount(&host, "fs.read", "/w/sub"),
+            deny("sensitive: host /w/**")
+        );
+    }
+
+    #[test]
     fn a_read_twin_of_a_tree_delete_is_refused_by_an_entry_beneath_its_root() {
         let host = list(&["/home/u/keys-660/id"]);
         let op = SensitiveAuthorizer::new(&host);
