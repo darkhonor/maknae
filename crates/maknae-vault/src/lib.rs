@@ -52,6 +52,7 @@ mod tls;
 mod token_record;
 #[cfg(unix)]
 mod token_store;
+mod transit;
 mod trust_bundle;
 mod user_login;
 mod vault_api;
@@ -89,7 +90,7 @@ pub use peer_identity::{creds_match_listener_uid, creds_match_uid, listener_uid_
 pub use peercred::PeerCreds;
 pub use plane::{agent_uri_san, Plane, PlaneSubject};
 pub use refusal::crypto_refusal_message;
-pub use seal_key_io::read_egress_seal_key;
+pub use seal_key_io::{read_egress_seal_key, read_egress_secret_id};
 #[cfg(unix)]
 pub use seal_pub_io::read_seal_pub_pem;
 #[cfg(unix)]
@@ -103,8 +104,8 @@ pub use secret_source::{
     resolve_graph_key_source, seal_key_from_hex, seal_key_to_hex, AgentSecret,
     CredentialSourceKind, DaemonSecretSource, EgressSealKeySource, GraphKey, GraphKeySource,
     SealKeyDer, SealKeyHex, SecretSourceError, DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME,
-    EGRESS_SEAL_KEY_CRED_NAME, GRAPH_KEY_BYTES, GRAPH_KEY_CRED_NAME, MAX_AGENT_SECRET_BYTES,
-    MAX_SEAL_KEY_BYTES,
+    EGRESS_SEAL_KEY_CRED_NAME, EGRESS_SECRET_ID_CRED_NAME, GRAPH_KEY_BYTES, GRAPH_KEY_CRED_NAME,
+    MAX_AGENT_SECRET_BYTES, MAX_SEAL_KEY_BYTES,
 };
 #[cfg(unix)]
 pub use socket::bind_listener as bind_group_gated_uds;
@@ -124,6 +125,9 @@ pub use token_record::{
 #[cfg(unix)]
 pub use token_store::{
     erase_user_token, load_user_token, observe_systemd_creds, read_user_token, store_user_token,
+};
+pub use transit::{
+    parse_transit_signature, ServiceLogin, ServiceToken, TRANSIT_SIGN_INPUT_MAX_BYTES,
 };
 pub use trust_bundle::TrustBundle;
 pub use user_login::{

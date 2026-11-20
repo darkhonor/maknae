@@ -199,3 +199,79 @@ variable "agent_token_max_ttl" {
     error_message = "agent_token_max_ttl must be > 0: an agent token is never unbounded (ADR-0006 decision 9)."
   }
 }
+
+variable "github_apps" {
+  description = "GitHub Apps maknae-egress may sign with, keyed by App name. Each transit_key names a Transit key that is imported by CLI (never through Terraform: a key resource would put the private key in state). Empty disables minting: no Transit mount, egress AppRole or policy is created."
+  type = map(object({
+    transit_key = string
+  }))
+  default = {}
+
+  validation {
+    condition     = alltrue([for name, app in var.github_apps : can(regex("^[a-z0-9-]{1,64}$", name)) && can(regex("^[A-Za-z0-9_-]{1,64}$", app.transit_key))])
+    error_message = "Each github_apps key must be 1-64 bytes of [a-z0-9-] and each transit_key 1-64 bytes of [A-Za-z0-9_-], the grammar minting.yaml accepts for an App name and a key."
+  }
+}
+
+variable "transit_mount_path" {
+  description = "Mount path of the Transit engine holding the GitHub App signing keys."
+  type        = string
+  default     = "maknae-transit"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9_-]{1,64}$", var.transit_mount_path))
+    error_message = "transit_mount_path must be 1-64 bytes of [A-Za-z0-9_-], the grammar minting.yaml accepts for transit_mount."
+  }
+}
+
+variable "egress_approle_path" {
+  description = "AppRole auth mount for maknae-egress. Must differ from approle_path (maknaed's) and agent_approle_path."
+  type        = string
+  default     = "maknae-egress-approle"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9_-]{1,64}$", var.egress_approle_path))
+    error_message = "egress_approle_path must be 1-64 bytes of [A-Za-z0-9_-], the grammar minting.yaml accepts for vault.approle_mount."
+  }
+  validation {
+    condition     = var.egress_approle_path != var.approle_path && var.egress_approle_path != var.agent_approle_path
+    error_message = "egress_approle_path must differ from approle_path and agent_approle_path: egress, maknaed and agent logins must not share a lease prefix."
+  }
+}
+
+variable "egress_bind_cidrs" {
+  description = "Addresses maknae-egress may log in from: binds both its SecretID and its token. Required when github_apps is non-empty."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for c in var.egress_bind_cidrs : can(cidrhost(c, 0))])
+    error_message = "Each egress_bind_cidrs entry must be a CIDR such as 10.0.0.5/32."
+  }
+  validation {
+    condition     = length(var.github_apps) == 0 || length(var.egress_bind_cidrs) > 0
+    error_message = "egress_bind_cidrs must name at least one CIDR when github_apps is set: the egress login is never unbound."
+  }
+}
+
+variable "egress_token_ttl" {
+  description = "maknae-egress token TTL, in seconds. Default 15m."
+  type        = number
+  default     = 900
+
+  validation {
+    condition     = var.egress_token_ttl > 0 && var.egress_token_ttl <= var.egress_token_max_ttl
+    error_message = "egress_token_ttl must be > 0 and <= egress_token_max_ttl."
+  }
+}
+
+variable "egress_token_max_ttl" {
+  description = "Hard ceiling on a maknae-egress token's life, in seconds. Never 0. Default 1h."
+  type        = number
+  default     = 3600
+
+  validation {
+    condition     = var.egress_token_max_ttl > 0
+    error_message = "egress_token_max_ttl must be > 0: an egress token is never unbounded."
+  }
+}

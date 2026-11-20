@@ -95,6 +95,12 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         MsgId::EnrollAgentEnrolled => {
             "Agent Daemon {agent} is enrolled: the SecretID for {role} is sealed on this host and works only from {cidrs}"
         }
+        MsgId::EnrollMintingEnrolled => {
+            "Sealed the Egress Daemon's minting SecretID for AppRole mount {mount}, loaded it through its unit drop-in, and destroyed {count} earlier one(s)"
+        }
+        MsgId::EnrollMintingWithdrawn => {
+            "minting.yaml is absent: removed the Egress Daemon's minting drop-in, role id and sealed SecretID, and destroyed {count} SecretID(s)"
+        }
         MsgId::EnrollAgentRetired => "Destroyed {count} earlier SecretID(s) of this agent",
         MsgId::EnrollAgentReload => {
             "If maknaed is running, reload it so it sees this enrollment: {command}"

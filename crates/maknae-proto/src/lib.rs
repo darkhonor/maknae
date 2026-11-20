@@ -14,6 +14,6 @@ pub use egress_frame::*;
 pub use error::*;
 pub use frame::*;
 pub use mutation::*;
-pub use sealed::{SealedKey, SEALED_KEY_MAX_BYTES, SEALED_KEY_MIN_BYTES};
+pub use sealed::{SealedCredentialBytes, SealedKey, SEALED_KEY_MAX_BYTES, SEALED_KEY_MIN_BYTES};
 pub use task::*;
 pub use wire::*;

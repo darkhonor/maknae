@@ -181,8 +181,7 @@ resource "vault_policy" "maknae_kernel" {
 # addresses auth methods under `auth/<mount>` — omitting the prefix 403s every
 # enroll op). The PKI issuer path takes NO prefix (secret engines mount at root),
 # mirroring how maknae_kernel/maknae_user interpolate the int-mount path.
-# No `list` anywhere (§4.5): enroll destroys SecretID accessors by the id it
-# recorded at creation time, never by listing the mount's accessors.
+# The maknaed paths carry no `list` (§4.5); the egress `secret-id` path keeps `list` because enroll's rotation reconciles orphaned SecretID accessors, as the agent policy does.
 resource "vault_policy" "maknae_enroll" {
   name   = "maknae-enroll"
   policy = <<-EOT
@@ -190,6 +189,9 @@ resource "vault_policy" "maknae_enroll" {
     path "auth/${vault_auth_backend.approle.path}/role/maknaed/secret-id"                   { capabilities = ["create","update"] }
     path "auth/${vault_auth_backend.approle.path}/role/maknaed/secret-id-accessor/destroy" { capabilities = ["update"] }
     path "${vault_mount.maknae_int.path}/issuer/default/json"                               { capabilities = ["read"] }
+    path "auth/${var.egress_approle_path}/role/maknae-egress/role-id"                    { capabilities = ["read"] }
+    path "auth/${var.egress_approle_path}/role/maknae-egress/secret-id"                  { capabilities = ["create", "update", "list"] }
+    path "auth/${var.egress_approle_path}/role/maknae-egress/secret-id-accessor/destroy" { capabilities = ["update"] }
   EOT
 }
 

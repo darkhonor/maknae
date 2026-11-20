@@ -189,6 +189,8 @@ files = [
   "crates/maknae-vault/src/api_shape.rs",
   "crates/maknae-vault/src/user_login.rs",
   "crates/maknae-vault/src/wrap.rs",
+  # #168: the Egress Daemon's service token, AppRole and Transit paths, and the signature parse.
+  "crates/maknae-vault/src/transit.rs",
   "crates/maknae-vault/src/token_record.rs",
   "crates/maknae-vault/src/password_line.rs",
   "crates/maknae-vault/src/seal_pub_store.rs",
@@ -196,6 +198,9 @@ files = [
   "crates/maknae-seal/src/aad.rs",
   "crates/maknae-seal/src/seal.rs",
   "crates/maknae-seal/src/error.rs",
+  # #168: sealing a minted credential to the agent; a wrong AAD binding lets a
+  # token sealed for one task, agent or app open under another.
+  "crates/maknae-seal/src/credential.rs",
   # Stage-3a "it responds" cohort (Task 9): the wire/frame decode-and-dispatch
   # + config-range + audit-canonicalization + connection/verb decision seams.
   # Each holds fail-closed decision logic per the T1 line-drawing rule (a
@@ -232,6 +237,10 @@ files = [
   # #240: the `egress` section — the deputy's socket and the provider deadline,
   # range-checked, fail-closed like `transport`.
   "crates/maknae-config/src/egress_cfg.rs",
+  # #168: `minting.yaml`, the Egress Daemon's minting settings. A mis-parse
+  # points the deputy at the wrong App, Vault mount or API host. In [t1].files
+  # ONLY (own 95% floor; NOT ratchet_cohort).
+  "crates/maknae-config/src/egress_mint.rs",
   # #240a: the deputy's decision — bounds containment and shape admission, and
   # the absence of any path by which it could chain to another call.
   "crates/maknae-deputy/src/handle.rs",
@@ -239,6 +248,19 @@ files = [
   # a provider call cannot be made on a frame whose bounds were never checked.
   "crates/maknae-deputy/src/call.rs",
   "crates/maknae-deputy/src/unseal.rs",
+  # #168: mint admission against the pinned bounds and `minting.yaml`, the
+  # exhaustive credential-kind dispatch, and the App JWT's pinned bytes.
+  "crates/maknae-deputy/src/mint/admit.rs",
+  "crates/maknae-deputy/src/mint/jwt.rs",
+  # #168: the grant check. A token wider or narrower than the set asked for,
+  # or with a token or expiry of the wrong shape, is refused.
+  "crates/maknae-deputy/src/mint/grant.rs",
+  # #168: one mint end to end, no partial success (every token minted in a
+  # refused frame is revoked), the live-token journal, and the revoke opener;
+  # the recipient key read from a root-owned file only; the Transit signing seam.
+  "crates/maknae-deputy/src/mint/minter.rs",
+  "crates/maknae-deputy/src/mint/recipient.rs",
+  "crates/maknae-deputy/src/mint/signer.rs",
   # #318: what ALL THREE binaries refuse to inherit from their environment, and
   # the disjoint list of what they must never stop inheriting. Moved here from
   # bins/maknae-egress/src/env.rs (#240b) when maknaed and maknae adopted the
@@ -437,7 +459,7 @@ mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kerne
 # Contract: every key MUST appear in mutants_crates; every value MUST be a
 # list of strings; an absent table is legal. Validated in coverage-tiers.sh's
 # prologue (BOTH lanes).
-mutants_features = { maknae-config = ["hermetic-test-seam"], maknae-authz-basic = ["hermetic-test-seam"], maknae-state = ["hermetic-test-seam"], maknae-crypto = ["test-support"], maknae-audit-append = ["test-support"] }
+mutants_features = { maknae-config = ["hermetic-test-seam"], maknae-authz-basic = ["hermetic-test-seam"], maknae-state = ["hermetic-test-seam"], maknae-crypto = ["test-support"], maknae-audit-append = ["test-support"], maknae-deputy = ["test-support"] }
 
 [t2]
 floor_production_region = 90
@@ -479,6 +501,15 @@ files = [
   # #321: the deputy's connection-slot accounting. T2: a leaked slot refuses
   # every later prompt (availability), and it carries no verdict.
   "bins/maknae-egress/src/capacity.rs",
+  # #168: minting's start-up state and the Egress Daemon's one Vault login over
+  # VaultApi. T2: an absent file turns minting off, an unreadable one makes it
+  # unavailable without stopping the provider path; the re-login state machine
+  # is T1 in maknae-deputy's mint/signer.rs.
+  "bins/maknae-egress/src/minting.rs",
+  # #168: the GitHub App mint and revoke calls. T2: transport to the forge; the
+  # grant check they apply is mint/grant.rs (T1), pinned end to end by the
+  # loopback-stub tests here.
+  "crates/maknae-deputy/src/mint/github.rs",
   "crates/maknae-plane/src/fd.rs", "crates/maknae-plane/src/send.rs",
   # Cooperative execution in the untrusted CLI: cannot issue a PDP Permit or
   # kernel-observed completion. Guard failures can damage the subject's own
@@ -568,7 +599,7 @@ why = "#153: reads ~/.maknae/providers.yaml through maknae-config's existing mak
 
 [[t3]]
 path = "bins/maknae-egress/src/main.rs"
-why = "thin main: env scrub + FIPS install + arg parse + bounds load + uid resolve + seal-key load + Vault client + socket acquire + the runtime and accept-loop wiring (#321, its runtime proven able to drive concurrent block_on calls by a test here); every decision it makes is fail-closed exit-1, the behaviour lives in maknae-deputy's handle.rs/unseal.rs/call.rs (T1), serve.rs (T2), opener.rs and listen.rs (T3) and maknae-vault's env.rs (T1), and its load-bearing ORDERINGS (scrub first, keys loaded before the listener) are pinned by a source-order test in its OWN test module. Same treatment as bins/maknaed/src/main.rs"
+why = "thin main: env scrub + FIPS install + arg parse + bounds load + uid resolve + seal-key load + Vault client + minting state (minting.rs, T2) + socket acquire + the runtime and accept-loop wiring (#321, its runtime proven able to drive concurrent block_on calls by a test here); every decision it makes is fail-closed exit-1, the behaviour lives in maknae-deputy's handle.rs/unseal.rs/call.rs (T1), serve.rs (T2), opener.rs and listen.rs (T3) and maknae-vault's env.rs (T1), and its load-bearing ORDERINGS (scrub first, keys loaded before the listener) are pinned by a source-order test in its OWN test module. Same treatment as bins/maknaed/src/main.rs"
 
 [[t3]]
 path = "bins/maknae-agentd/src/main.rs"
@@ -609,6 +640,14 @@ why = "type declarations (subject/resource/action/context/request) + derives; no
 [[t3]]
 path = "crates/maknae-kernel/src/test_fixtures.rs"
 why = "test-only fixtures shared by the kernel's module test suites (the gate requires `#[cfg(test)]` to be followed by a line beginning `mod `, which rules out `pub(crate) mod tests`); declared under `#[cfg(test)]` in lib.rs, so it has no production regions"
+
+[[t3]]
+path = "bins/maknae-egress/src/test_frames.rs"
+why = "#168: test-only frame fixtures shared by serve.rs's and minting.rs's test suites (the gate requires `#[cfg(test)]` to be followed by a line beginning `mod `, which rules out `pub(crate) mod tests`); declared under `#[cfg(test)]` in main.rs, so it has no production regions"
+
+[[t3]]
+path = "crates/maknae-deputy/src/mint/testutil.rs"
+why = "#168: test-only fixtures (the egress directory and agent key files) shared by recipient.rs's and minter.rs's test suites (the gate requires `#[cfg(test)]` to be followed by a line beginning `mod `, which rules out `pub(crate) mod tests`); declared under `#[cfg(test)]` in mint/mod.rs, so it has no production regions"
 
 [[t3]]
 path = "crates/maknae-kernel/src/conversation/mod.rs"
@@ -683,6 +722,10 @@ path = "crates/maknae-deputy/src/lib.rs"
 why = "module declarations only; the decisions are handle/unseal/call (T1)"
 
 [[t3]]
+path = "crates/maknae-deputy/src/mint/mod.rs"
+why = "#168: module declarations only; the GitHub client is mint/github.rs (T2), its grant check mint/grant.rs (T1)"
+
+[[t3]]
 path = "crates/maknae-vault/src/lib.rs"
 why = "module declarations + re-exports; the decision logic is verify/csr/plane/config/fips (T1)"
 
@@ -736,7 +779,7 @@ why = "#153: reqwest request glue; its header, build and serializer error arms c
 
 [[t3]]
 path = "crates/maknae-vault/src/vault_api.rs"
-why = "#153: sends the five user-credential Vault calls (login, wrapped read, lookup, unwrap, revoke-self); no Vault stub by design. Offline, the dead-address test reaches only execute()'s transport-error path; the response path runs in the operator-gated tests/live_user_wrap.rs. The status and Content-Length admission (admit_response) and the body cap (append_bounded) are T1 in api_shape.rs, every parse and check is T1 in user_login.rs and wrap.rs, and request construction is asserted in api_request.rs. Mutation-excluded like client.rs"
+why = "#153, #168: sends the five user-credential Vault calls (login, wrapped read, lookup, unwrap, revoke-self) and the Egress Daemon's AppRole login and Transit sign; no Vault stub by design. Offline, the dead-address test reaches only execute()'s transport-error path; the response path runs in the operator-gated tests/live_user_wrap.rs. The status and Content-Length admission (admit_response) and the body cap (append_bounded) are T1 in api_shape.rs, every parse and check is T1 in user_login.rs, wrap.rs and transit.rs, and request construction is asserted in api_request.rs. Mutation-excluded like client.rs"
 
 [[t3]]
 path = "crates/maknae-vault/src/token_store.rs"
@@ -748,7 +791,7 @@ why = "#153: reads the host-wide seal.pub through maknae-io (open_anchor, then r
 
 [[t3]]
 path = "crates/maknae-vault/src/seal_key_io.rs"
-why = "#153: reads the Egress Daemon's seal private key from $CREDENTIALS_DIRECTORY (Linux) or from the System-keychain item the egress pointer names (macOS); the source choice, the length bound and the hex codec are T1 in secret_source.rs, and the pointer and account gate are keychain_policy.rs. The credential arm is unit-tested on every OS, the keychain arm up to the account gate on macOS; mutation-excluded like secret_io.rs"
+why = "#153, #168: reads the Egress Daemon's seal private key from $CREDENTIALS_DIRECTORY (Linux) or from the System-keychain item the egress pointer names (macOS), and its AppRole SecretID from $CREDENTIALS_DIRECTORY on Linux only; the source choices, the length bound and the hex codec are T1 in secret_source.rs, the SecretID shape check is T1 in transit.rs, and the pointer and account gate are keychain_policy.rs. The credential arm is unit-tested on every OS, the keychain arm up to the account gate on macOS; mutation-excluded like secret_io.rs"
 
 [[t3]]
 path = "crates/maknae-vault/src/graph_key_io.rs"
@@ -921,6 +964,18 @@ path = "bins/maknae/src/enroll/remove_agent.rs"
 why = "#609: maknae enroll remove-agent's orchestration behind the RemoveOps seam; the step order, the refusal that names what remains, the retained accessor after a failed destroy and the policy.yaml-untouched property carry real unit tests against the recording fake from agent.rs"
 
 [[t3]]
+path = "bins/maknae/src/enroll/secret_slot.rs"
+why = "#168: rotate-new-first for one AppRole SecretID in custody, shared by enroll agent and the Egress Daemon's minting identity: mint, record pending, seal, roll back or name the orphan, then retire the rest; exercised through agent.rs's recording fake (every rotation, rollback and retire test) and egress_minting.rs's tests"
+
+[[t3]]
+path = "bins/maknae/src/enroll/agent_seal.rs"
+why = "#168: an Agent Daemon's seal key pair; generate-when-missing, keep-when-present, rotate, the public half's owner, mode, link count and path as the Egress Daemon's recipient read requires, and removal of both halves carry unit tests against real directories and a fake custody; the custody that runs systemd-creds is bin I/O"
+
+[[t3]]
+path = "bins/maknae/src/enroll/egress_minting.rs"
+why = "#168: the Egress Daemon's minting enrollment behind the MintingOps seam; the role id, sealed SecretID and drop-in written while minting.yaml exists, their withdrawal and the SecretIDs' destruction when it is gone, rotate-new-first with the restart before any destroy, the refused mounts, minting.yaml left untouched and the refusal naming the path and its requirement carry unit tests against real directories and a recording fake; the Vault calls and systemd-creds are bin I/O"
+
+[[t3]]
 path = "bins/maknae/src/enroll/helper.rs"
 why = "the operator-context helper — self-verification and the CLI configuration write; the id-G parser and the identity refusal carry real unit tests, the write runs through artifact_write's tested writer"
 
@@ -987,6 +1042,22 @@ why = "serde_json writes only UTF-8, so from_utf8 on its output cannot fail; the
 path = "crates/maknae-agent/src/render.rs"
 anchor = "None => Zeroizing::new(UNAVAILABLE.to_string()),"
 why = "json_exact returns None only if serde fails on a plain struct of strings, integers and booleans, which it cannot; json_exact's None paths are tested directly"
+
+# #168: the Egress Daemon's AppRole login and Transit sign over VaultApi
+# (minting.rs). Both need a Vault that answers; VaultApi has no stub by design
+# (see vault_api.rs's [[t3]] entry), and the dead-Vault test reaches only the
+# login's failure arm. The re-login and refusal decisions are T1 in
+# maknae-deputy's signer.rs; the 403 mapping is tested on a table here.
+[[exception]]
+path = "bins/maknae-egress/src/minting.rs"
+anchor = "Ok(login) => Ok((login.token, login.ttl)),"
+why = "a successful AppRole login needs a live Vault; the failure arm beside it is tested against a dead address"
+
+[[exception]]
+path = "bins/maknae-egress/src/minting.rs"
+anchor = "async fn sign("
+end_anchor = "(self.journal)(&format!(\"Transit sign failed: {e}\"));"
+why = "Transit sign runs only after a successful login, which needs a live Vault; sign_failure, the mapping it ends in, is tested on a table"
 
 # #240: the egress socket's budget, both legs (egress_socket.rs). Errno
 # passthroughs with no decision, or a retry that needs a signal or a transient

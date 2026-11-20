@@ -1,8 +1,13 @@
 mod aad;
+mod credential;
 mod error;
 mod seal;
 
-pub use aad::{SealAad, SealContext, AAD_DOMAIN, MAX_AAD_FIELD_BYTES};
+pub use aad::{
+    CredentialDirection, CredentialSealContext, SealAad, SealContext, AAD_DOMAIN,
+    CREDENTIAL_AAD_DOMAIN, MAX_AAD_FIELD_BYTES,
+};
+pub use credential::{open_credential, seal_credential};
 pub use error::SealError;
 pub use seal::{
     open, seal, SealPrivateKey, SealPublicKey, SealedBlob, EPHEMERAL_KEY_LEN, HEADER_LEN,

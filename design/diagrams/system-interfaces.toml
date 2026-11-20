@@ -48,7 +48,7 @@ kind = "external"
 [[node]]
 id = "egress"
 label = "maknae-egress"
-sub = "Egress Daemon · no Vault identity"
+sub = "Egress Daemon · no KV grant"
 col = 1
 row = 0
 kind = "trusted"

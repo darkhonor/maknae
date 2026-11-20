@@ -1087,7 +1087,7 @@ Search with `grep`: on a STIG'd Rocky 10 host `ausearch -m AVC` was measured mis
 
 - **A packaged Maknae acts as an agent against a real provider:** one conversation, one read, one write, and every leg decided by `maknaed` and audited before its delivery or effect.
 - **The write is performed by the client under your own permissions**; the kernel only decides it and records it.
-- **The provider key lives only in Vault, under your own login.** Each turn the CLI makes a wrapped read of it and seals the wrapping token to the Egress Daemon's `seal.pub`; the kernel admits the turn on the provider, the model and your account name and never sees the key; the deputy, which has no Vault identity of its own, opens the seal and unwraps the key once. Your own processes can read the key too (step 13).
+- **The provider key lives only in Vault, under your own login.** Each turn the CLI makes a wrapped read of it and seals the wrapping token to the Egress Daemon's `seal.pub`; the kernel admits the turn on the provider, the model and your account name and never sees the key; the deputy, which reads no key with a Vault identity of its own (where minting is configured, its AppRole may only sign with Transit), opens the seal and unwraps the key once. Your own processes can read the key too (step 13).
 - **The trail shows each decision and its outcome in order**, with the boot composition record ahead of them.
 
 ### Teardown
@@ -1622,7 +1622,7 @@ An Agent Daemon runs under its own service account, one per agent, and reaches `
 
    `--bind-cidr` is the address Vault sees, after any NAT, proxy or tunnel between this host and Vault ([configuration §6.4](configuration.md#64-enrolling-an-agent-daemon)). A SecretID bound to any other address fails every login: the agent's journal repeats `minting the plane leaf failed (AppRole login failed: … (status code 400))`, and no task is ever claimed. Vault's audit log shows the address it saw as `request.remote_address`; enroll again with that address and `--rotate`.
 
-   Every agent is bound to `user`; enroll also writes a commented starter `/etc/maknae/agents/hobi/policy.yaml` when none exists and never replaces one. `--persona self` lets the agent keep its own persona instead of `persona.md`; a `persona.md` in the agent's home is outside its tasks right, so its `policy.yaml` must grant `Read(~/persona.md)` for the daemon to read it. Enroll seals the SecretID on this host, writes `/etc/maknae/agents/hobi/enrollment.yaml` and `agent.yaml`, and gives the `hobi` account read access to those files, `persona.md`, the directories above them and the three certificates in `/etc/maknae/tls`, and to nothing else. If enroll reports that it could not grant an entry, the agent is enrolled but cannot read its configuration: fix the cause and run `sudo maknae enroll agent hobi --refresh-access`. On Linux enroll then starts the agent as `maknae-agent@hobi.service`, after naming its home to the AppArmor profile and reloading it on a Debian host; on macOS as the launchd job `io.maknae.maknae-agentd.hobi`, whose stderr is `/usr/local/var/log/maknae-agent/hobi/agentd.err`. Run `--refresh-access` too after replacing `persona.md` or changing the account's home; it touches no Vault, and on Linux it rewrites the instance's drop-in and restarts it.
+   Every agent is bound to `user`; enroll also writes a commented starter `/etc/maknae/agents/hobi/policy.yaml` when none exists and never replaces one. `--persona self` lets the agent keep its own persona instead of `persona.md`; a `persona.md` in the agent's home is outside its tasks right, so its `policy.yaml` must grant `Read(~/persona.md)` for the daemon to read it. Enroll seals the SecretID on this host, writes `/etc/maknae/agents/hobi/enrollment.yaml` and `agent.yaml`, and gives the `hobi` account read access to those files, `persona.md`, the directories above them and the three certificates in `/etc/maknae/tls`, and to nothing else. If enroll reports that it could not grant an entry, the agent is enrolled but cannot read its configuration: fix the cause and run `sudo maknae enroll agent hobi --refresh-access`. On Linux enroll also gives the agent a seal key pair when either half is missing: the private key is sealed with `systemd-creds` to `/etc/maknae/private/agent-hobi-seal-key.cred`, which the instance's drop-in loads as `agent-hobi-seal-key`, and the public key goes to `/etc/maknae/egress/agents/hobi.seal.pub` (`root:_maknae-egress 0640`, in a `root:_maknae-egress 0750` directory), where the Egress Daemon reads it to seal each GitHub App token it mints for the agent ([Mint GitHub App tokens](#mint-github-app-tokens)). `--rotate-seal-key` replaces both halves, also with `--refresh-access`. On Linux enroll then starts the agent as `maknae-agent@hobi.service`, after naming its home to the AppArmor profile and reloading it on a Debian host; on macOS as the launchd job `io.maknae.maknae-agentd.hobi`, whose stderr is `/usr/local/var/log/maknae-agent/hobi/agentd.err`. Run `--refresh-access` too after replacing `persona.md` or changing the account's home; it touches no Vault, and on Linux it rewrites the instance's drop-in and restarts it.
 
 4. **Grant more than the agent's tasks.** Every agent already holds the built-in tasks right, whatever its `policy.yaml` says or whether it has one:
 
@@ -1671,7 +1671,74 @@ An Agent Daemon runs under its own service account, one per agent, and reaches `
    sudo maknae enroll remove-agent hobi
    ```
 
-   On Linux it first stops and disables `maknae-agent@hobi.service` and removes its drop-in and, on a Debian host, the home it named to the AppArmor profile; on macOS it boots out `io.maknae.maknae-agentd.hobi`, removes its plist and `/usr/local/var/log/maknae-agent/hobi`, and runs `launchctl enable` on the label so no `launchctl disable` outlives the agent. It then removes the account's read access, then `agent.yaml` and `enrollment.yaml`, disables the Vault entity, destroys the SecretIDs and removes the sealed SecretID. Then reload: until a reload succeeds, the agent stays admitted. After it, the agent's next request is refused, each of its open tasks is closed `agent-gone` for its tasker to collect, and the account is an ordinary account again. `policy.yaml`, `persona.md` and the directory stay; delete them by hand if you will not re-enroll. On macOS, if the `hobi` account was deleted first, it warns that the account's ACEs stay on `/etc/maknae` and its files and continues; remove them by hand with `chmod -h -a`. When the command fails, run it again before deleting the directory; it still completes once the directory is gone. A login token the agent already holds stays valid until `agent_token_max_ttl`, refused only while the entity stays disabled. When the role and the entity were both already absent, nothing is disabled, and a held token lives until `agent_token_max_ttl`. Re-enrolling re-enables the entity, and such a token works again until `agent_token_max_ttl`.
+   On Linux it first stops and disables `maknae-agent@hobi.service` and removes its drop-in and, on a Debian host, the home it named to the AppArmor profile; on macOS it boots out `io.maknae.maknae-agentd.hobi`, removes its plist and `/usr/local/var/log/maknae-agent/hobi`, and runs `launchctl enable` on the label so no `launchctl disable` outlives the agent. It then removes the account's read access, then `agent.yaml` and `enrollment.yaml` and, on Linux, both halves of the agent's seal key, disables the Vault entity, destroys the SecretIDs and removes the sealed SecretID. Then reload: until a reload succeeds, the agent stays admitted. After it, the agent's next request is refused, each of its open tasks is closed `agent-gone` for its tasker to collect, and the account is an ordinary account again. `policy.yaml`, `persona.md` and the directory stay; delete them by hand if you will not re-enroll. On macOS, if the `hobi` account was deleted first, it warns that the account's ACEs stay on `/etc/maknae` and its files and continues; remove them by hand with `chmod -h -a`. When the command fails, run it again before deleting the directory; it still completes once the directory is gone. A login token the agent already holds stays valid until `agent_token_max_ttl`, refused only while the entity stays disabled. When the role and the entity were both already absent, nothing is disabled, and a held token lives until `agent_token_max_ttl`. Re-enrolling re-enables the entity, and such a token works again until `agent_token_max_ttl`.
+
+## Mint GitHub App tokens
+
+The Egress Daemon can mint short-lived GitHub App installation tokens for an agent's task and seal each one to that agent's public seal key, so `maknaed` relays a token it cannot read ([ADR-0038](../design/adr/ADR-0038-the-egress-daemon-mints-trust-plane-credentials.md)). The App's private key lives only in Vault Transit, which signs for the Egress Daemon and never returns the key. Minting is off until `/etc/maknae/egress/minting.yaml` exists, and it is Linux-only: on macOS enroll refuses a host with `minting.yaml`. The steps below use the App name `acme`, the Transit mount `maknae-transit` and the Transit key `gh-acme`. They are not yet measured on a live host.
+
+1. **Create the GitHub App.** Give it the least it needs: repository permissions **Contents: Read-only**, **Pull requests: Read-only** and **Metadata: Read-only**, and nothing else. Turn the webhook off (clear **Active**). An agent's token can never hold more than the App holds.
+
+2. **Generate a private key** for the App. GitHub downloads it once, as a PEM file.
+
+3. **Install the App on selected repositories only**, never on all repositories: the installation is the outer bound on every token minted from it.
+
+4. **Note the App ID** (the App's settings page) **and the installation ID** (the number at the end of the installation's settings URL).
+
+5. **Convert the key** to the base64 PKCS #8 DER that Transit imports, in a shell whose files only you can read:
+
+   ```bash
+   umask 077
+   openssl pkcs8 -topk8 -nocrypt -in <app-key.pem> -outform DER | base64 | tr -d '\n' > /tmp/app-key.b64
+   ```
+
+6. **Create the Vault objects.** In `deploy/vault-pki`, set `github_apps = { acme = { transit_key = "gh-acme" } }` and `egress_bind_cidrs` to the address Vault sees for this host, then apply: that creates the Transit mount, the `maknae-egress` AppRole on its own mount (default `maknae-egress-approle`) and a policy that may only sign with `gh-acme`. The private key never enters Terraform, because a key resource would put it in Terraform state; you import it in the next step.
+
+7. **Import the key** into Transit, with a token allowed to import:
+
+   ```bash
+   vault transit import maknae-transit/keys/gh-acme @/tmp/app-key.b64 type=rsa-2048
+   ```
+
+8. **Delete the intermediate file:** `shred -u /tmp/app-key.b64` (or `rm -P` on macOS).
+
+9. **Check it cannot leave Transit.** `vault read maknae-transit/keys/gh-acme` must show `exportable false` and `allow_plaintext_backup false`. If either is `true`, delete the key and import it again without that option, before you lock it.
+
+10. **Lock the key** against deletion:
+
+    ```bash
+    vault write maknae-transit/keys/gh-acme/config deletion_allowed=false
+    ```
+
+    `deletion_allowed=false` stops a key deletion, not an unmount. Terraform destroys the Transit mount, and with it every App key imported into it, when you remove the last App from `github_apps` or change `transit_mount_path`. The only recovery is to generate a new private key in GitHub and import it again (steps 2, 5 and 7 to 11).
+
+11. **Delete the PEM** GitHub gave you. Transit now holds the only copy; a lost key is replaced by generating a new one in GitHub and importing it under a new Transit key name.
+
+12. **Write `minting.yaml`** as `root:_maknae-egress 0640`. `vault.approle_mount` is the Egress Daemon's own AppRole mount (step 6), never `maknaed`'s or an agent's; enroll refuses either:
+
+    ```yaml
+    vault:
+      approle_mount: maknae-egress-approle
+    github_apps:
+      acme:
+        app_id: <app id>
+        installation_id: <installation id>
+        api: https://api.github.com
+        transit_mount: maknae-transit
+        transit_key: gh-acme
+    ```
+
+    ```bash
+    sudo install -o root -g _maknae-egress -m 0640 minting.yaml /etc/maknae/egress/minting.yaml
+    ```
+
+13. **Run `maknae enroll`** as for [Chapter 4 step 3](#3-enroll), with the same operator token: the `maknae-enroll` policy also reads the `maknae-egress` role id and mints, lists and destroys its SecretIDs. Enroll reads `minting.yaml` first and stops, naming the file and its requirement, when it does not parse or is not `root`-owned with mode `0640` or tighter. Otherwise it writes the role id to `/etc/maknae/egress/role-id` (`root:_maknae-egress 0640`), mints a SecretID on the `minting.yaml` mount and seals it with `systemd-creds` to `/etc/maknae/private/maknae-egress-secret-id.cred`, writes the drop-in `/etc/systemd/system/maknae-egress.service.d/50-minting.conf` that loads it as `maknae-egress-secret-id`, runs `systemctl daemon-reload` and `systemctl try-restart maknae-egress.service`, and only then destroys the SecretIDs it replaced. It records them in `/etc/maknae/private/maknae-egress-enroll-state.yaml`; one it could not destroy stays recorded, and the next `maknae enroll` retries it. Enroll never writes `minting.yaml`. Each agent that receives tokens needs its seal key pair ([Enroll an Agent Daemon](#enroll-an-agent-daemon) step 3).
+
+    Every `maknae enroll` run while `minting.yaml` is present does this again: it mints a new egress SecretID and restarts `maknae-egress`. The restart drops every provider call and mint in flight. A user's turn in flight fails, and a token minted for a request in flight is not revoked: it stays live at GitHub until it expires, within an hour. Run `maknae enroll` when no turn or task is in flight.
+
+**Turning minting off.** Remove `/etc/maknae/egress/minting.yaml` and run `maknae enroll` before you remove the App from `github_apps` in Terraform, so the egress AppRole still exists when enroll destroys its SecretIDs. Enroll removes the drop-in and restarts the Egress Daemon, removes the sealed SecretID and the role id, and destroys the recorded SecretIDs. When Vault no longer has the egress mount or role, those SecretIDs went with it, and enroll finishes the withdrawal without them. A host enrolled without `minting.yaml` never gets the drop-in, so its Egress Daemon runs with no Vault identity. Removing the last App from `github_apps` destroys the Transit mount and every App key imported into it, whatever `deletion_allowed` says; turning minting on again means generating a new private key in GitHub and importing it again.
+
+**One minting host per egress AppRole.** Each `maknae enroll` retires every SecretID on the `maknae-egress` role it logs in to, so two hosts that share one `egress_approle_path` destroy each other's SecretIDs. Give each minting host its own `egress_approle_path` (and so its own role and mount), as each agent id is enrolled on one host only.
 
 ## Task an agent
 

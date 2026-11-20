@@ -1,12 +1,13 @@
 //! `maknae-egress` — the egress deputy (#240a).
 //!
 //! The only process with a route out, running as `_maknae-egress`. It holds
-//! its seal key and a socket and nothing else: no Vault identity, no policy,
-//! no provider registry, no identity map, no audit sink. It makes no identity
-//! decision: the kernel decided who the subject is before the frame existed,
-//! and the `key_vault_path` it is handed carries the requester's user segment
-//! only so it can act on that user's behalf. It never originates a call of its
-//! own.
+//! its seal key and a socket, and no Vault identity unless `minting.yaml` is
+//! configured, when it holds a Transit-sign-only AppRole (ADR-0038). It holds
+//! no policy, no provider registry, no identity map, no audit sink. It makes
+//! no identity decision: the kernel decided who the subject is before the
+//! frame existed, and the `key_vault_path` it is handed carries the
+//! requester's user segment only so it can act on that user's behalf. It never
+//! originates a call of its own.
 //!
 //! **Amended 2026-09-21 by #264:** the binary also links `maknae-llm`'s
 //! compiled-in core prompt and baseline tool definitions, and composes them
@@ -24,8 +25,11 @@
 
 mod capacity;
 mod listen;
+mod minting;
 mod opener;
 mod serve;
+#[cfg(test)]
+mod test_frames;
 
 use maknae_deputy::call;
 
@@ -116,7 +120,7 @@ fn main() {
     };
     let key = match maknae_vault::read_egress_seal_key(credentials_dir.as_deref(), &egress_dir) {
         Ok(der) => match maknae_seal::SealPrivateKey::from_pkcs8_der(der.expose()) {
-            Ok(k) => k,
+            Ok(k) => Arc::new(k),
             Err(e) => fail(format!("egress seal key: {e}")),
         },
         Err(e) => fail(format!("egress seal key: {e}")),
@@ -125,10 +129,20 @@ fn main() {
         &bounds.vault_addr,
         &egress_dir.join(maknae_vault::EGRESS_VAULT_CA_FILE),
     ) {
-        Ok(a) => a,
+        Ok(a) => Arc::new(a),
         Err(e) => fail(format!("vault client: {e}")),
     };
-    let opener = Arc::new(opener::SealedOpener { key, api });
+    let opener = Arc::new(opener::SealedOpener {
+        key: Arc::clone(&key),
+        api: Arc::clone(&api),
+    });
+    let mint_state = minting::minting_state(
+        &egress_dir,
+        credentials_dir.as_deref().map(std::path::Path::new),
+        &api,
+        &minting::FileReads,
+    );
+    let mint_frames = minting::frames(mint_state, key, egress_dir, rt.handle().clone());
 
     let listener = match listen::from_init_system() {
         Ok(Some(l)) => l,
@@ -166,6 +180,7 @@ fn main() {
         expected_uid,
         Arc::new(bounds),
         serve::FRAME_IO_TIMEOUT,
+        mint_frames,
         Arc::new(fulfil),
     );
 }
@@ -293,6 +308,7 @@ mod tests {
             "(der.expose())"
         ));
         let client = at(concat!("maknae_vault::VaultApi::new", "("));
+        let mint_state = at(concat!("minting::minting_state", "("));
         let listener = at(concat!("listen::from_init_system", "()"));
         let mapped = at(concat!(".map_err(serve::", "serve_error)"));
         assert!(scrub < fips, "the scrub must precede the FIPS install");
@@ -311,14 +327,56 @@ mod tests {
             client < listener,
             "the Vault client must exist before the listener is adopted"
         );
+        assert!(client < mint_state, "minting logs in through that client");
+        assert!(
+            mint_state < listener,
+            "minting's state must be settled before the listener is adopted"
+        );
         assert!(
             listener < mapped,
             "the accept loop maps fulfil failures through serve::serve_error"
         );
-        assert!(
-            !src.contains(concat!("App", "Role")) && !src.contains(concat!("probe", "_login")),
-            "the Egress Daemon holds no Vault identity and logs in to nothing"
-        );
+    }
+
+    /// ADR-0038 decision 5: the Egress Daemon's one Vault login is the minting
+    /// module's AppRole; no plane client, agent login or userpass login is built.
+    #[test]
+    fn the_only_vault_login_is_in_minting_rs() {
+        fn sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    sources(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        sources(&root, &mut files);
+        assert!(files.len() >= 6, "{files:?}");
+        let login = concat!("approle", "_login");
+        let mut holders = Vec::new();
+        for f in &files {
+            let text = std::fs::read_to_string(f).unwrap();
+            let name = f.strip_prefix(&root).unwrap().display().to_string();
+            for never in [
+                concat!("Plane", "Client"),
+                concat!("Agent", "Login"),
+                concat!("vault", "rs"),
+                concat!("AppRole", "Auth"),
+                concat!(".login", "("),
+                concat!("VaultApi", "::login"),
+                concat!("Operator", "Client"),
+            ] {
+                assert!(!text.contains(never), "{name} uses {never}");
+            }
+            if text.contains(login) {
+                holders.push(name);
+            }
+        }
+        assert_eq!(holders, ["minting.rs"]);
     }
 
     /// The shipped unit socket-activates: its ExecStart carries no --bind.

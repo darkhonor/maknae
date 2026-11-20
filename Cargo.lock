@@ -1181,10 +1181,17 @@ dependencies = [
 name = "maknae-deputy"
 version = "0.0.0"
 dependencies = [
+ "base64 0.23.1",
  "maknae-config",
  "maknae-crypto",
+ "maknae-io",
  "maknae-llm",
  "maknae-proto",
+ "maknae-seal",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
  "zeroize",
 ]
@@ -1379,6 +1386,7 @@ name = "maknae-vault"
 version = "0.0.0"
 dependencies = [
  "arc-swap",
+ "base64 0.23.1",
  "bytes",
  "ciborium",
  "maknae-config",

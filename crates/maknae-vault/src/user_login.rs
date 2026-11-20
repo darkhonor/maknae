@@ -110,10 +110,10 @@ struct LoginDto {
 }
 
 #[derive(Deserialize)]
-struct LoginAuthDto {
+pub(crate) struct LoginAuthDto {
     #[serde(deserialize_with = "de_secret")]
-    client_token: Zeroizing<String>,
-    lease_duration: u64,
+    pub(crate) client_token: Zeroizing<String>,
+    pub(crate) lease_duration: u64,
     renewable: bool,
     metadata: Option<LoginMetaDto>,
 }
@@ -123,10 +123,13 @@ struct LoginMetaDto {
     username: Option<String>,
 }
 
+pub(crate) fn parse_auth(body: &[u8], op: VaultOp) -> Result<Option<LoginAuthDto>, VaultError> {
+    let dto: LoginDto = serde_json::from_slice(body).map_err(|e| json_refusal(op, &e))?;
+    Ok(dto.auth)
+}
+
 pub(crate) fn parse_login(body: &[u8], username: &str) -> Result<UserLogin, VaultError> {
-    let dto: LoginDto =
-        serde_json::from_slice(body).map_err(|e| json_refusal(VaultOp::UserpassLogin, &e))?;
-    let auth = dto.auth.ok_or(VaultError::UserpassLogin(
+    let auth = parse_auth(body, VaultOp::UserpassLogin)?.ok_or(VaultError::UserpassLogin(
         "the response carried no auth block",
     ))?;
     let echoed = auth.metadata.and_then(|m| m.username);

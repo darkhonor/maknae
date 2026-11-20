@@ -40,6 +40,8 @@ pub(crate) enum VaultOp {
     WrapLookup,
     Unwrap,
     RevokeSelf,
+    AppRoleLogin,
+    TransitSign,
 }
 
 impl VaultOp {
@@ -50,6 +52,8 @@ impl VaultOp {
             VaultOp::WrapLookup => "wrapping lookup",
             VaultOp::Unwrap => "unwrap",
             VaultOp::RevokeSelf => "token revoke-self",
+            VaultOp::AppRoleLogin => "AppRole login",
+            VaultOp::TransitSign => "Transit sign",
         }
     }
 }
@@ -108,6 +112,10 @@ pub(crate) fn refuse_status(op: VaultOp, status: u16) -> VaultError {
         }
         (VaultOp::WrappedRead, 404) => "no secret at this path",
         (VaultOp::RevokeSelf, 403) => "no permission to revoke, or the token is already invalid",
+        (VaultOp::AppRoleLogin, 400) => "the role_id or SecretID was refused",
+        (VaultOp::TransitSign, 403) => {
+            "the service token is expired or its policy does not grant Transit sign on this key"
+        }
         _ => "",
     };
     VaultError::VaultStatus {
@@ -239,6 +247,38 @@ mod tests {
                 "token revoke-self"
             ]
         );
+    }
+
+    #[test]
+    fn the_service_op_names_are_stable() {
+        assert_eq!(
+            [
+                VaultOp::AppRoleLogin.as_str(),
+                VaultOp::TransitSign.as_str()
+            ],
+            ["AppRole login", "Transit sign"]
+        );
+    }
+
+    #[test]
+    fn the_service_ops_name_their_refusals() {
+        assert!(matches!(
+            refuse_status(VaultOp::AppRoleLogin, 400),
+            VaultError::VaultStatus { op: "AppRole login", status: 400, hint } if hint.contains("SecretID")
+        ));
+        assert!(matches!(
+            refuse_status(VaultOp::TransitSign, 403),
+            VaultError::VaultStatus { op: "Transit sign", status: 403, hint } if hint.contains("Transit sign")
+        ));
+        for (op, status) in [(VaultOp::AppRoleLogin, 403), (VaultOp::TransitSign, 400)] {
+            assert!(
+                matches!(
+                    refuse_status(op, status),
+                    VaultError::VaultStatus { hint: "", .. }
+                ),
+                "{op:?} {status}"
+            );
+        }
     }
 
     #[test]

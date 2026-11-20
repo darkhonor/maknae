@@ -1937,6 +1937,53 @@ mod tests {
     }
 
     #[test]
+    fn enroll_agent_takes_rotate_seal_key_with_or_without_refresh_access() {
+        use crate::enroll::EnrollSub;
+        let agent_of = |v: &[&str]| match Cli::try_parse_from(v.iter().copied())
+            .unwrap()
+            .command
+            .unwrap()
+        {
+            Command::Enroll(args) => match args.sub {
+                Some(EnrollSub::Agent(a)) => a,
+                _ => panic!("expected the agent subcommand"),
+            },
+            other => panic!("expected Command::Enroll, got {other:?}"),
+        };
+        let refresh = agent_of(&[
+            "maknae",
+            "enroll",
+            "agent",
+            "hobi",
+            "--refresh-access",
+            "--rotate-seal-key",
+        ]);
+        assert!(refresh.refresh_access && refresh.rotate_seal_key);
+        let enroll = agent_of(&[
+            "maknae",
+            "enroll",
+            "agent",
+            "hobi",
+            "--account",
+            "hobi-svc",
+            "--bind-cidr",
+            "10.0.0.5",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-5.6",
+            "--key-subpath",
+            "openai/hobi",
+            "--key-field",
+            "api_key",
+            "--context-tokens",
+            "128000",
+            "--rotate",
+        ]);
+        assert!(!enroll.rotate_seal_key);
+    }
+
+    #[test]
     fn enroll_agent_parses_and_plain_enroll_is_unchanged() {
         use crate::enroll::EnrollSub;
         let parse = |v: &[&str]| Cli::try_parse_from(v.iter().copied());

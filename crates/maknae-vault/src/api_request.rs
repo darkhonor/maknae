@@ -1,7 +1,13 @@
 use crate::api_shape::{addr_refusal, VaultOp};
+use crate::transit::{
+    approle_credential, approle_login_path, transit_sign_path, ServiceToken,
+    TRANSIT_SIGN_INPUT_MAX_BYTES,
+};
 use crate::user_login::{login_path, Password, UserToken};
 use crate::wrap::{client_token, wrap_ttl_value, KvDataPath, WrappingToken};
 use crate::{UserAuth, VaultError};
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use reqwest::header::{HeaderValue, CONTENT_TYPE};
 use reqwest::{Body, Client, Method, Request, RequestBuilder};
 use serde::Serialize;
@@ -14,6 +20,9 @@ const X_VAULT_REQUEST: &str = "X-Vault-Request";
 const JSON: &str = "application/json";
 const LOGIN_BODY_OVERHEAD: usize = r#"{"password":""}"#.len();
 const LOOKUP_BODY_OVERHEAD: usize = r#"{"token":""}"#.len();
+const APPROLE_BODY_OVERHEAD: usize = r#"{"role_id":"","secret_id":""}"#.len();
+const SIGN_BODY_OVERHEAD: usize = r#"{"input":"","signature_algorithm":"pkcs1v15"}"#.len();
+const PKCS1V15: &str = "pkcs1v15";
 
 pub(crate) struct ApiBase(String);
 
@@ -52,6 +61,18 @@ struct LookupBody<'a> {
     token: &'a str,
 }
 
+#[derive(Serialize)]
+struct AppRoleBody<'a> {
+    role_id: &'a str,
+    secret_id: &'a str,
+}
+
+#[derive(Serialize)]
+struct SignBody<'a> {
+    input: &'a str,
+    signature_algorithm: &'a str,
+}
+
 fn json_body<T: Serialize>(capacity: usize, value: &T) -> Result<Zeroizing<Vec<u8>>, VaultError> {
     let mut body = Zeroizing::new(Vec::with_capacity(capacity));
     serde_json::to_writer(&mut *body, value).map_err(|e| VaultError::VaultBody {
@@ -72,6 +93,35 @@ pub(crate) fn login_body(password: &Password) -> Result<Zeroizing<Vec<u8>>, Vaul
 pub(crate) fn lookup_body(token: &WrappingToken) -> Result<Zeroizing<Vec<u8>>, VaultError> {
     let token = token.expose();
     json_body(LOOKUP_BODY_OVERHEAD + token.len(), &LookupBody { token })
+}
+
+pub(crate) fn approle_login_body(
+    role_id: &str,
+    secret_id: &Zeroizing<String>,
+) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+    approle_credential("AppRole role_id", role_id)?;
+    approle_credential("AppRole SecretID", secret_id)?;
+    json_body(
+        APPROLE_BODY_OVERHEAD + role_id.len() + secret_id.len(),
+        &AppRoleBody { role_id, secret_id },
+    )
+}
+
+pub(crate) fn transit_sign_body(input: &[u8]) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+    if input.len() > TRANSIT_SIGN_INPUT_MAX_BYTES {
+        return Err(VaultError::InvalidSecret {
+            what: "Transit sign input",
+            why: "over 8192 bytes",
+        });
+    }
+    let input = STANDARD.encode(input);
+    json_body(
+        SIGN_BODY_OVERHEAD + input.len(),
+        &SignBody {
+            input: &input,
+            signature_algorithm: PKCS1V15,
+        },
+    )
 }
 
 fn sensitive(value: &str) -> Result<HeaderValue, VaultError> {
@@ -115,7 +165,7 @@ pub(crate) fn login_request(
     body: Zeroizing<Vec<u8>>,
 ) -> Result<Request, VaultError> {
     let path = login_path(auth, username)?;
-    let token = client_token(VaultOp::UserpassLogin, None, None)?;
+    let token = client_token(VaultOp::UserpassLogin, None, None, None)?;
     let builder = authed(start(http, Method::POST, base.url(&path)), token)?;
     finish(body_request(builder, body))
 }
@@ -128,7 +178,7 @@ pub(crate) fn wrapped_read_request(
     wrap_ttl: Duration,
 ) -> Result<Request, VaultError> {
     let ttl = wrap_ttl_value(wrap_ttl)?;
-    let token = client_token(VaultOp::WrappedRead, Some(token), None)?;
+    let token = client_token(VaultOp::WrappedRead, Some(token), None, None)?;
     let builder = authed(start(http, Method::GET, base.url(path.as_str())), token)?;
     finish(builder.header(X_VAULT_WRAP_TTL, ttl))
 }
@@ -138,7 +188,7 @@ pub(crate) fn lookup_request(
     base: &ApiBase,
     body: Zeroizing<Vec<u8>>,
 ) -> Result<Request, VaultError> {
-    let token = client_token(VaultOp::WrapLookup, None, None)?;
+    let token = client_token(VaultOp::WrapLookup, None, None, None)?;
     let builder = authed(
         start(http, Method::POST, base.url("sys/wrapping/lookup")),
         token,
@@ -151,7 +201,7 @@ pub(crate) fn unwrap_request(
     base: &ApiBase,
     token: &WrappingToken,
 ) -> Result<Request, VaultError> {
-    let token = client_token(VaultOp::Unwrap, None, Some(token))?;
+    let token = client_token(VaultOp::Unwrap, None, Some(token), None)?;
     finish(authed(
         start(http, Method::POST, base.url("sys/wrapping/unwrap")),
         token,
@@ -163,11 +213,37 @@ pub(crate) fn revoke_self_request(
     base: &ApiBase,
     token: &UserToken,
 ) -> Result<Request, VaultError> {
-    let token = client_token(VaultOp::RevokeSelf, Some(token), None)?;
+    let token = client_token(VaultOp::RevokeSelf, Some(token), None, None)?;
     finish(authed(
         start(http, Method::POST, base.url("auth/token/revoke-self")),
         token,
     )?)
+}
+
+pub(crate) fn approle_login_request(
+    http: &Client,
+    base: &ApiBase,
+    mount: &str,
+    body: Zeroizing<Vec<u8>>,
+) -> Result<Request, VaultError> {
+    let path = approle_login_path(mount)?;
+    let token = client_token(VaultOp::AppRoleLogin, None, None, None)?;
+    let builder = authed(start(http, Method::POST, base.url(&path)), token)?;
+    finish(body_request(builder, body))
+}
+
+pub(crate) fn transit_sign_request(
+    http: &Client,
+    base: &ApiBase,
+    token: &ServiceToken,
+    mount: &str,
+    key: &str,
+    body: Zeroizing<Vec<u8>>,
+) -> Result<Request, VaultError> {
+    let path = transit_sign_path(mount, key)?;
+    let token = client_token(VaultOp::TransitSign, None, None, Some(token))?;
+    let builder = authed(start(http, Method::POST, base.url(&path)), token)?;
+    finish(body_request(builder, body))
 }
 
 #[cfg(test)]
@@ -379,6 +455,148 @@ mod tests {
         let t = req.headers().get(X_VAULT_TOKEN).unwrap();
         assert!(t.to_str().unwrap() == "hvs.user" && t.is_sensitive());
         assert!(req.body().is_none());
+    }
+
+    fn secret_id() -> Zeroizing<String> {
+        Zeroizing::new("0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0".into())
+    }
+
+    #[test]
+    fn the_approle_login_request_carries_role_and_secret_id_and_no_client_token() {
+        let body = approle_login_body("role-1234", &secret_id()).unwrap();
+        let req = approle_login_request(&http(), &base(), "maknae-approle", body).unwrap();
+        assert_eq!(*req.method(), Method::POST);
+        assert_eq!(header(&req, "content-type"), JSON);
+        assert_eq!(header(&req, X_VAULT_REQUEST), "true");
+        assert_eq!(
+            req.url().as_str(),
+            "https://vault.example:8200/v1/auth/maknae-approle/login"
+        );
+        assert!(req.headers().get(X_VAULT_TOKEN).is_none());
+        assert!(
+            body_json(&req)
+                == serde_json::json!({
+                    "role_id": "role-1234",
+                    "secret_id": "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
+                })
+        );
+    }
+
+    #[test]
+    fn a_malformed_approle_credential_or_mount_is_refused_before_any_request() {
+        for (role, secret) in [
+            ("", "s"),
+            ("r", ""),
+            ("r\"", "s"),
+            ("r", "s\nx"),
+            ("r", "s x"),
+        ] {
+            assert!(
+                matches!(
+                    approle_login_body(role, &Zeroizing::new(secret.into())),
+                    Err(VaultError::InvalidSecret { .. })
+                ),
+                "{role:?} {secret:?}"
+            );
+        }
+        let e = approle_login_body("r", &Zeroizing::new("SENTINEL x".into()))
+            .unwrap_err()
+            .to_string();
+        assert!(!e.contains("SENTINEL"), "{e}");
+        let body = approle_login_body("r", &secret_id()).unwrap();
+        assert!(matches!(
+            approle_login_request(&http(), &base(), "../root", body),
+            Err(VaultError::InvalidMount(_))
+        ));
+    }
+
+    #[test]
+    fn the_transit_sign_request_pins_the_hash_in_the_path_and_pkcs1v15_in_the_body() {
+        let service = ServiceToken::new(Zeroizing::new("hvs.service".into())).unwrap();
+        let body = transit_sign_body(b"eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiIxIn0").unwrap();
+        let req = transit_sign_request(
+            &http(),
+            &base(),
+            &service,
+            "maknae-transit",
+            "github-app",
+            body,
+        )
+        .unwrap();
+        assert_eq!(*req.method(), Method::POST);
+        assert_eq!(header(&req, "content-type"), JSON);
+        assert_eq!(header(&req, X_VAULT_REQUEST), "true");
+        assert_eq!(
+            req.url().as_str(),
+            "https://vault.example:8200/v1/maknae-transit/sign/github-app/sha2-256"
+        );
+        let t = req.headers().get(X_VAULT_TOKEN).unwrap();
+        assert!(t.to_str().unwrap() == "hvs.service" && t.is_sensitive());
+        assert!(
+            body_json(&req)
+                == serde_json::json!({
+                    "input": "ZXlKaGJHY2lPaUpTVXpJMU5pSjkuZXlKcGMzTWlPaUl4SW4w",
+                    "signature_algorithm": "pkcs1v15"
+                })
+        );
+        let body = transit_sign_body(&[0xfb, 0xff]).unwrap();
+        let req = transit_sign_request(&http(), &base(), &service, "t", "k", body).unwrap();
+        assert!(body_json(&req)["input"] == "+/8=");
+    }
+
+    #[test]
+    fn the_sign_input_is_capped_before_any_encoding() {
+        use crate::transit::TRANSIT_SIGN_INPUT_MAX_BYTES;
+        assert_eq!(TRANSIT_SIGN_INPUT_MAX_BYTES, 8192);
+        assert!(matches!(
+            transit_sign_body(&vec![b'a'; TRANSIT_SIGN_INPUT_MAX_BYTES + 1]),
+            Err(VaultError::InvalidSecret {
+                what: "Transit sign input",
+                ..
+            })
+        ));
+        assert!(transit_sign_body(&vec![b'a'; TRANSIT_SIGN_INPUT_MAX_BYTES]).is_ok());
+    }
+
+    #[test]
+    fn a_malformed_transit_mount_or_key_is_refused_before_any_request() {
+        let service = ServiceToken::new(Zeroizing::new("hvs.service".into())).unwrap();
+        for (mount, key) in [("../x", "k"), ("t", "a/b"), ("t", "..")] {
+            let body = transit_sign_body(b"x").unwrap();
+            assert!(
+                matches!(
+                    transit_sign_request(&http(), &base(), &service, mount, key, body),
+                    Err(VaultError::InvalidMount(_))
+                ),
+                "{mount:?} {key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_service_request_bodies_are_sized_once_and_never_grow() {
+        let secret = Zeroizing::new("s".repeat(MAX_TOKEN_BYTES));
+        let body = approle_login_body(&"r".repeat(MAX_TOKEN_BYTES), &secret).unwrap();
+        let want = APPROLE_BODY_OVERHEAD + 2 * MAX_TOKEN_BYTES;
+        assert_eq!((body.len(), body.capacity()), (want, want));
+        for n in [0usize, 1, 2, 3, 4, 300] {
+            let body = transit_sign_body(&vec![0xfb; n]).unwrap();
+            let want = SIGN_BODY_OVERHEAD + n.div_ceil(3) * 4;
+            assert_eq!((body.len(), body.capacity()), (want, want), "{n}");
+        }
+    }
+
+    #[test]
+    fn the_service_requests_send_the_zeroizing_buffer_itself() {
+        let body = approle_login_body("r", &secret_id()).unwrap();
+        let passed = (body.as_ptr(), body.len());
+        let req = approle_login_request(&http(), &base(), "approle", body).unwrap();
+        assert_eq!(sent(&req), passed);
+        let service = ServiceToken::new(Zeroizing::new("hvs.service".into())).unwrap();
+        let body = transit_sign_body(b"x.y").unwrap();
+        let passed = (body.as_ptr(), body.len());
+        let req = transit_sign_request(&http(), &base(), &service, "t", "k", body).unwrap();
+        assert_eq!(sent(&req), passed);
     }
 
     fn sent(req: &Request) -> (*const u8, usize) {

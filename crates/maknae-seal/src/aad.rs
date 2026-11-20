@@ -2,7 +2,34 @@ use crate::SealError;
 use std::fmt;
 
 pub const AAD_DOMAIN: &[u8] = b"maknae-seal-aad-v1";
+pub const CREDENTIAL_AAD_DOMAIN: &[u8] = b"maknae-seal-aad-credential-v1";
 pub const MAX_AAD_FIELD_BYTES: usize = 1024;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CredentialDirection {
+    ToAgent,
+    ToRevoke,
+}
+
+impl CredentialDirection {
+    fn as_str(self) -> &'static str {
+        match self {
+            CredentialDirection::ToAgent => "to-agent",
+            CredentialDirection::ToRevoke => "to-revoke",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct CredentialSealContext<'a> {
+    pub direction: CredentialDirection,
+    pub agent: &'a str,
+    pub task: &'a str,
+    pub class: &'a str,
+    pub kind: &'a str,
+    pub app: &'a str,
+    pub set: u8,
+}
 
 #[derive(Clone, Copy)]
 pub struct SealContext<'a> {
@@ -20,10 +47,10 @@ fn aad_field_ok(field: &[u8]) -> bool {
     (1..=MAX_AAD_FIELD_BYTES).contains(&field.len())
 }
 
-fn encode(fields: &[&str; 5]) -> Vec<u8> {
-    let len = AAD_DOMAIN.len() + fields.iter().map(|f| 2 + f.len()).sum::<usize>();
+fn encode(domain: &[u8], fields: &[&str]) -> Vec<u8> {
+    let len = domain.len() + fields.iter().map(|f| 2 + f.len()).sum::<usize>();
     let mut out = Vec::with_capacity(len);
-    out.extend_from_slice(AAD_DOMAIN);
+    out.extend_from_slice(domain);
     for field in fields {
         out.extend_from_slice(&(field.len() as u16).to_be_bytes());
         out.extend_from_slice(field.as_bytes());
@@ -43,7 +70,24 @@ impl SealAad {
         if !fields.iter().all(|f| aad_field_ok(f.as_bytes())) {
             return Err(SealError::AadField);
         }
-        Ok(Self(encode(&fields)))
+        Ok(Self(encode(AAD_DOMAIN, &fields)))
+    }
+
+    pub fn credential(ctx: &CredentialSealContext<'_>) -> Result<Self, SealError> {
+        let set = ctx.set.to_string();
+        let fields = [
+            ctx.direction.as_str(),
+            ctx.agent,
+            ctx.task,
+            ctx.class,
+            ctx.kind,
+            ctx.app,
+            &set,
+        ];
+        if !fields.iter().all(|f| aad_field_ok(f.as_bytes())) {
+            return Err(SealError::AadField);
+        }
+        Ok(Self(encode(CREDENTIAL_AAD_DOMAIN, &fields)))
     }
 
     pub fn as_bytes(&self) -> &[u8] {
@@ -98,13 +142,13 @@ mod tests {
 
     #[test]
     fn encode_writes_the_domain_and_each_length_prefixed_field_at_exact_capacity() {
-        let out = encode(&["ab", "c", "", "def", "g"]);
+        let out = encode(AAD_DOMAIN, &["ab", "c", "", "def", "g"]);
         let mut want = AAD_DOMAIN.to_vec();
         want.extend_from_slice(b"\x00\x02ab\x00\x01c\x00\x00\x00\x03def\x00\x01g");
         assert_eq!(out, want);
         assert_eq!(out.capacity(), AAD_DOMAIN.len() + 2 * 5 + 7);
         let long = "y".repeat(300);
-        let out = encode(&[&long, "a", "b", "c", "d"]);
+        let out = encode(AAD_DOMAIN, &[&long, "a", "b", "c", "d"]);
         assert_eq!(&out[AAD_DOMAIN.len()..AAD_DOMAIN.len() + 2], &[0x01, 0x2c]);
         assert_eq!(out.len(), out.capacity());
     }
@@ -202,6 +246,110 @@ mod tests {
         for (i, c) in bad.iter().enumerate() {
             assert_eq!(
                 SealAad::new(c).unwrap_err(),
+                SealError::AadField,
+                "case {i}"
+            );
+        }
+    }
+
+    fn cctx() -> CredentialSealContext<'static> {
+        CredentialSealContext {
+            direction: CredentialDirection::ToAgent,
+            agent: "agent-1",
+            task: "task-1",
+            class: "git-write",
+            kind: "github-app-installation",
+            app: "app-1",
+            set: 3,
+        }
+    }
+
+    #[test]
+    fn credential_encoding_is_its_domain_then_fields_in_fixed_order() {
+        let aad = SealAad::credential(&cctx()).unwrap();
+        let mut want = CREDENTIAL_AAD_DOMAIN.to_vec();
+        for f in [
+            "to-agent",
+            "agent-1",
+            "task-1",
+            "git-write",
+            "github-app-installation",
+            "app-1",
+            "3",
+        ] {
+            want.extend_from_slice(&(f.len() as u16).to_be_bytes());
+            want.extend_from_slice(f.as_bytes());
+        }
+        assert_eq!(aad.as_bytes(), &want[..]);
+        assert_eq!(aad.as_bytes().len(), aad.0.capacity());
+        let revoke = SealAad::credential(&CredentialSealContext {
+            direction: CredentialDirection::ToRevoke,
+            ..cctx()
+        })
+        .unwrap();
+        assert_eq!(
+            &revoke.as_bytes()[CREDENTIAL_AAD_DOMAIN.len()..][..11],
+            b"\x00\x09to-revoke"
+        );
+    }
+
+    #[test]
+    fn the_two_directions_and_the_provider_domain_never_collide() {
+        let a = SealAad::credential(&cctx()).unwrap();
+        let r = SealAad::credential(&CredentialSealContext {
+            direction: CredentialDirection::ToRevoke,
+            ..cctx()
+        })
+        .unwrap();
+        let p = SealAad::new(&ctx()).unwrap();
+        assert_ne!(a, r);
+        assert_ne!(a, p);
+        assert_ne!(r, p);
+        assert!(!CREDENTIAL_AAD_DOMAIN.starts_with(AAD_DOMAIN));
+        assert!(!AAD_DOMAIN.starts_with(CREDENTIAL_AAD_DOMAIN));
+    }
+
+    #[test]
+    fn an_empty_or_oversized_credential_field_is_refused() {
+        let over = "x".repeat(MAX_AAD_FIELD_BYTES + 1);
+        let ok = "x".repeat(MAX_AAD_FIELD_BYTES);
+        assert!(SealAad::credential(&CredentialSealContext { app: &ok, ..cctx() }).is_ok());
+        let bad = [
+            CredentialSealContext {
+                agent: "",
+                ..cctx()
+            },
+            CredentialSealContext { task: "", ..cctx() },
+            CredentialSealContext {
+                class: "",
+                ..cctx()
+            },
+            CredentialSealContext { kind: "", ..cctx() },
+            CredentialSealContext { app: "", ..cctx() },
+            CredentialSealContext {
+                agent: &over,
+                ..cctx()
+            },
+            CredentialSealContext {
+                task: &over,
+                ..cctx()
+            },
+            CredentialSealContext {
+                class: &over,
+                ..cctx()
+            },
+            CredentialSealContext {
+                kind: &over,
+                ..cctx()
+            },
+            CredentialSealContext {
+                app: &over,
+                ..cctx()
+            },
+        ];
+        for (i, c) in bad.iter().enumerate() {
+            assert_eq!(
+                SealAad::credential(c).unwrap_err(),
                 SealError::AadField,
                 "case {i}"
             );

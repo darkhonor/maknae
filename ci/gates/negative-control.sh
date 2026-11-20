@@ -6505,8 +6505,18 @@ open(p, "w").write(s.replace(old, new))' "$f" "$2" "$3"; then
     '                    self.reached(&removed);' \
     '' \
     maknae-loop mutation::tests::a_delete_stopped_after
+  expect_accept "mint/deputy-github-suite-is-green" "conversation-suite: maknae-deputy" \
+    cv_suite maknae-deputy mint::github
+  expect_reject_because "mint/a-minted-grant-unchecked-against-the-set-goes-red" \
+    "a_wider_grant_is_revoked_and_refused" cv_mutant crates/maknae-deputy/src/mint/grant.rs \
+    '    grant.repository_selection.as_deref() == Some("selected")
+        && got == want
+        && got_repos == want_repos
+' '    let _ = (got, want, got_repos, want_repos);
+    grant.repository_selection.as_deref() == Some("selected")
+' maknae-deputy mint::github
 else
-  skipped=$((skipped+21))
+  skipped=$((skipped+23))
 fi
 
 # ---- panic-strategy (#544): the panic strategy stays unwind ----------------

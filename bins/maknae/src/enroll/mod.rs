@@ -22,13 +22,17 @@ mod agent_access;
 mod agent_apparmor;
 #[cfg(any(target_os = "macos", test))]
 mod agent_launchd;
+#[cfg(not(target_os = "macos"))]
+mod agent_seal;
 mod agent_unit;
 pub mod artifact_table;
 pub mod artifact_write;
+mod egress_minting;
 mod helper;
 #[cfg(any(target_os = "macos", test))]
 mod keychain_write;
 mod remove_agent;
+mod secret_slot;
 pub mod vault_ops;
 
 use crate::stderr::errln;
@@ -153,6 +157,24 @@ pub enum EnrollError {
         path: String,
     },
     PlaintextOptOutOnMacos,
+    #[cfg(target_os = "macos")]
+    MintingOnMacos,
+    /// `egress/minting.yaml` is present but unusable.
+    MintingConfig {
+        path: PathBuf,
+        detail: String,
+    },
+    EgressOrphanedAccessor {
+        accessor: String,
+        cause: String,
+        recorded: bool,
+    },
+    EgressRetireFailed {
+        accessors: Vec<String>,
+    },
+    /// maknaed's enrollment completed; the minting step after it did not.
+    #[cfg(not(target_os = "macos"))]
+    MintingFailed(Box<EnrollError>),
     /// Rotate's PRE-MINT cleanup (spec §4.1) could not destroy every
     /// previously-recorded accessor — FATAL: enroll aborts before minting
     /// anything new or overwriting `enroll-state.yaml`, so the still-live old
@@ -320,6 +342,42 @@ impl std::fmt::Display for EnrollError {
             EnrollError::PlaintextOptOutOnMacos => write!(
                 f,
                 "--insecure-plaintext-secret does not apply on macOS: every supported Mac has the System keychain (ADR-0018 decision 6)"
+            ),
+            #[cfg(target_os = "macos")]
+            EnrollError::MintingOnMacos => write!(
+                f,
+                "credential minting is Linux-only: custody of maknae-egress-secret-id and agent-<id>-seal-key is not built on macOS (ADR-0038); remove /etc/maknae/egress/minting.yaml and do not pass --rotate-seal-key"
+            ),
+            EnrollError::MintingConfig { path, detail } => write!(
+                f,
+                "{}: {detail}; it must be owned root:_maknae-egress with mode 0640 (no other bits) and hold a valid minting configuration, or be absent to turn minting off",
+                path.display()
+            ),
+            EnrollError::EgressOrphanedAccessor {
+                accessor,
+                cause,
+                recorded: false,
+            } => write!(
+                f,
+                "{cause}; the Egress Daemon SecretID just minted (accessor {accessor}) could not be destroyed and is not recorded; the next `maknae enroll` finds it in Vault's accessor list and retires it"
+            ),
+            EnrollError::EgressOrphanedAccessor {
+                accessor,
+                cause,
+                recorded: true,
+            } => write!(
+                f,
+                "{cause}; the Egress Daemon SecretID just minted (accessor {accessor}) could not be destroyed; it stays recorded under pending in /etc/maknae/private/maknae-egress-enroll-state.yaml, and the next `maknae enroll` retires it"
+            ),
+            EnrollError::EgressRetireFailed { accessors } => write!(
+                f,
+                "these Egress Daemon SecretID accessors could not be destroyed: {}; they stay recorded in /etc/maknae/private/maknae-egress-enroll-state.yaml, and the next `maknae enroll` retries them",
+                accessors.join(", ")
+            ),
+            #[cfg(not(target_os = "macos"))]
+            EnrollError::MintingFailed(e) => write!(
+                f,
+                "maknaed is enrolled; enrolling the Egress Daemon for minting failed: {e}"
             ),
             EnrollError::RotateDestroyFailed { mount, detail } => write!(
                 f,
@@ -2500,6 +2558,23 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
     check_vault_reachable(vault_addr)?;
     let seal_home = seal_pub_home(macos, read_os_release)
         .inspect_err(|_| errln!("{}", msg(locale, MsgId::EnrollPreflightFailed)))?;
+    let (minting, agent_mounts) = egress_minting::load(&egress_minting::minting_path())
+        .and_then(|m| {
+            #[cfg(target_os = "macos")]
+            if m.is_some() {
+                return Err(EnrollError::MintingOnMacos);
+            }
+            let agent_mounts = match &m {
+                Some(c) => {
+                    let agent_mounts = agent::recorded_agent_mounts()?;
+                    egress_minting::check_mount(c, &args.approle_mount, &agent_mounts)?;
+                    agent_mounts
+                }
+                None => Vec::new(),
+            };
+            Ok((m, agent_mounts))
+        })
+        .inspect_err(|_| errln!("{}", msg(locale, MsgId::EnrollPreflightFailed)))?;
 
     // Daemon-surface gate, pre-mint: Linux's TPM2 round-trip; macOS's release checks.
     #[cfg(target_os = "macos")]
@@ -2650,12 +2725,82 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
     )
     .await
     {
-        Ok(summary) => Ok(summary),
+        Ok(summary) => {
+            place_minting(
+                args,
+                locale,
+                &operator,
+                &client,
+                minting.as_ref(),
+                &agent_mounts,
+                summary,
+            )
+            .await
+        }
         Err(e) => {
             destroy_and_report(&client, &args.approle_mount, &minted, locale).await;
             Err(e)
         }
     }
+}
+
+/// Runs once maknaed's enrollment is complete, so a minting failure leaves it in place.
+#[cfg(not(target_os = "macos"))]
+async fn place_minting(
+    args: &EnrollArgs,
+    locale: Locale,
+    operator: &Operator,
+    client: &maknae_vault::OperatorClient,
+    minting: Option<&maknae_config::MintingConfig>,
+    agent_mounts: &[String],
+    summary: String,
+) -> Result<String, EnrollError> {
+    let resolver = artifact_write::RealOwnerResolver {
+        operator_uid: operator.uid,
+        operator_gid: operator.gid,
+    };
+    let files = egress_minting::MintingFiles::host(&resolver)
+        .map_err(|e| EnrollError::MintingFailed(Box::new(e)))?;
+    let outcome = egress_minting::enroll_minting(
+        &egress_minting::RealMintingOps {
+            client,
+            verbose: args.verbose,
+        },
+        &files,
+        &agent_access::Host,
+        minting,
+        &args.approle_mount,
+        agent_mounts,
+    )
+    .await
+    .map_err(|e| EnrollError::MintingFailed(Box::new(e)))?;
+    let line = match outcome {
+        egress_minting::Minting::Off => return Ok(summary),
+        egress_minting::Minting::Enrolled { retired } => msg(locale, MsgId::EnrollMintingEnrolled)
+            .replace(
+                "{mount}",
+                minting.map_or("", |c| c.vault.approle_mount.as_str()),
+            )
+            .replace("{count}", &retired.to_string()),
+        egress_minting::Minting::Withdrawn { destroyed } => {
+            msg(locale, MsgId::EnrollMintingWithdrawn).replace("{count}", &destroyed.to_string())
+        }
+    };
+    Ok(format!("{line}\n{summary}"))
+}
+
+/// Preflight refused a present `minting.yaml` on macOS (ADR-0038).
+#[cfg(target_os = "macos")]
+async fn place_minting(
+    _args: &EnrollArgs,
+    _locale: Locale,
+    _operator: &Operator,
+    _client: &maknae_vault::OperatorClient,
+    _minting: Option<&maknae_config::MintingConfig>,
+    _agent_mounts: &[String],
+    summary: String,
+) -> Result<String, EnrollError> {
+    Ok(summary)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3034,6 +3179,16 @@ mod tests {
                 "an operator message still says x-only: {bad:?}"
             );
         }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_minting_failure_says_maknaed_is_enrolled() {
+        let e = EnrollError::MintingFailed(Box::new(EnrollError::State("boom".into())));
+        assert_eq!(
+            e.to_string(),
+            "maknaed is enrolled; enrolling the Egress Daemon for minting failed: boom"
+        );
     }
 
     #[test]

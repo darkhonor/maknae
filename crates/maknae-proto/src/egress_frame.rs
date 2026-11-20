@@ -97,18 +97,223 @@ impl std::fmt::Debug for EgressFrameRequest {
     }
 }
 
-/// The deputy's answer: the provider's reply, or a refusal made before any provider I/O.
+/// The deputy's answer to a prompt frame: the provider's reply, or why it is unusable.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EgressFrameReply {
     Reply(crate::PromptReply),
-    RefusedBeforeSend,
-    /// The deputy had no free slot: the frame was read and discarded, and nothing left the host.
-    AtCapacity,
     Unusable {
         defect: crate::ReplyDefect,
         usage: Option<crate::Usage>,
     },
+}
+
+/// One frame on the kernel → deputy socket.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EgressFrame {
+    Prompt(EgressFrameRequest),
+    Mint(MintRequest),
+    Revoke(RevokeRequest),
+}
+
+/// One reply on the deputy → kernel socket.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EgressSocketReply {
+    Prompt(EgressFrameReply),
+    Mint(MintReply),
+    Revoke(RevokeReply),
+    /// The deputy had no free slot: the frame was read and discarded, and nothing left the host.
+    AtCapacity,
+    /// Refused before any provider or forge I/O.
+    RefusedBeforeSend,
+}
+
+pub const MINT_MAX_SETS: usize = 8;
+pub const MINT_MAX_REPOS_PER_SET: usize = 50;
+pub const MINT_MAX_PERMISSIONS_PER_SET: usize = 6;
+
+/// A request to mint one credential per permission set for a task's agent.
+///
+/// `kind` is `maknae_config::CredentialKind`'s spelling: this crate does not depend on
+/// `maknae-config`.
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
+pub struct MintRequest {
+    pub task: String,
+    pub agent: String,
+    pub class: String,
+    pub kind: String,
+    pub app: String,
+    pub sets: Vec<PermissionSet>,
+}
+
+impl std::fmt::Debug for MintRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MintRequest")
+            .field("task", &self.task)
+            .field("agent", &self.agent)
+            .field("class", &self.class)
+            .field("kind", &self.kind)
+            .field("app", &self.app)
+            .field("sets", &format_args!("<{} sets>", self.sets.len()))
+            .finish()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionSet {
+    pub repositories: Vec<String>,
+    #[serde(deserialize_with = "permissions_without_duplicates")]
+    pub permissions: std::collections::BTreeMap<GithubPermission, AccessLevel>,
+}
+
+fn permissions_without_duplicates<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<std::collections::BTreeMap<GithubPermission, AccessLevel>, D::Error> {
+    struct V;
+    impl<'de> serde::de::Visitor<'de> for V {
+        type Value = std::collections::BTreeMap<GithubPermission, AccessLevel>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a map of GitHub permissions, each named once")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut m: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut out = std::collections::BTreeMap::new();
+            while let Some((k, v)) = m.next_entry::<GithubPermission, AccessLevel>()? {
+                if out.insert(k, v).is_some() {
+                    return Err(serde::de::Error::custom(format_args!(
+                        "duplicate permission {}",
+                        k.as_str()
+                    )));
+                }
+            }
+            Ok(out)
+        }
+    }
+    d.deserialize_map(V)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GithubPermission {
+    Contents,
+    PullRequests,
+    Issues,
+    Checks,
+    Statuses,
+    Metadata,
+}
+
+impl GithubPermission {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Contents => "contents",
+            Self::PullRequests => "pull_requests",
+            Self::Issues => "issues",
+            Self::Checks => "checks",
+            Self::Statuses => "statuses",
+            Self::Metadata => "metadata",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessLevel {
+    Read,
+    Write,
+}
+
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MintReply {
+    Minted(Vec<SealedCredential>),
+    Refused(MintRefusal),
+}
+
+impl std::fmt::Debug for MintReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Minted(c) => write!(f, "Minted(<{} credentials>)", c.len()),
+            Self::Refused(r) => f.debug_tuple("Refused").field(r).finish(),
+        }
+    }
+}
+
+/// One minted credential: `for_agent` sealed to the agent, `for_revocation` to the deputy.
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
+pub struct SealedCredential {
+    pub set: u8,
+    pub expires_at: String,
+    pub for_agent: crate::SealedCredentialBytes,
+    pub for_revocation: crate::SealedCredentialBytes,
+}
+
+impl std::fmt::Debug for SealedCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SealedCredential")
+            .field("set", &self.set)
+            .field("expires_at", &self.expires_at)
+            .field("for_agent", &self.for_agent)
+            .field("for_revocation", &self.for_revocation)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MintRefusal {
+    Request,
+    Signer,
+    Forge(ForgeStatus),
+    Mismatch,
+    Recipient,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForgeStatus {
+    Unauthorized,
+    Forbidden,
+    NotFound,
+    Unprocessable,
+    Other,
+}
+
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevokeRequest {
+    pub task: String,
+    pub agent: String,
+    pub class: String,
+    pub kind: String,
+    pub app: String,
+    pub set: u8,
+    pub for_revocation: crate::SealedCredentialBytes,
+}
+
+impl std::fmt::Debug for RevokeRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RevokeRequest")
+            .field("task", &self.task)
+            .field("agent", &self.agent)
+            .field("class", &self.class)
+            .field("kind", &self.kind)
+            .field("app", &self.app)
+            .field("set", &self.set)
+            .field("for_revocation", &self.for_revocation)
+            .finish()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevokeReply {
+    Revoked,
+    AlreadyGone,
+    Refused(MintRefusal),
 }
 
 /// The largest request frame that crosses the kernel→deputy socket, stated
@@ -136,7 +341,7 @@ pub const EGRESS_REQUEST_FRAME_MAX_BYTES: usize = 16_842_752;
 /// further over the cap — 2 MiB over, say — still died in the encoder as
 /// `failed to write whole buffer`, with no size, no cap and no operator line.
 /// Measured and observed RED. The kernel now calls
-/// [`crate::egress_frame_request_encoded_len`] BEFORE it allocates, so its own
+/// [`crate::egress_frame_encoded_len`] BEFORE it allocates, so its own
 /// refusal is what every over-cap size meets and the headroom has nothing left
 /// to protect.)*
 ///
@@ -207,6 +412,8 @@ pub fn egress_frame_request_is_acceptable(r: &EgressFrameRequest) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SealedCredentialBytes;
+    use std::collections::BTreeMap;
     use zeroize::Zeroizing;
 
     #[test]
@@ -219,10 +426,10 @@ mod tests {
             }),
         ] {
             for defect in crate::ReplyDefect::ALL {
-                let r = EgressFrameReply::Unusable { defect, usage };
+                let r = EgressSocketReply::Prompt(EgressFrameReply::Unusable { defect, usage });
                 let buf =
-                    crate::encode_egress_frame_reply(&r, EGRESS_REPLY_FRAME_ENCODE_BYTES).unwrap();
-                assert_eq!(crate::decode_egress_frame_reply(&buf).unwrap(), r);
+                    crate::encode_egress_socket_reply(&r, EGRESS_REPLY_FRAME_ENCODE_BYTES).unwrap();
+                assert_eq!(crate::decode_egress_socket_reply(&buf).unwrap(), r);
             }
         }
     }
@@ -456,7 +663,7 @@ mod tests {
     fn the_request_encoder_writes_one_preallocation_and_never_grows() {
         // Two results in one step, each over 8 KiB — the trace codex gave.
         let big = "x".repeat(9 * 1024);
-        let r = req(
+        let r = EgressFrame::Prompt(req(
             "conv1",
             vec![
                 crate::Turn::Tool {
@@ -468,9 +675,8 @@ mod tests {
                     content: vec![text(&big)],
                 },
             ],
-        );
-        let buf =
-            crate::encode_egress_frame_request(&r, EGRESS_REQUEST_FRAME_ENCODE_BYTES).unwrap();
+        ));
+        let buf = crate::encode_egress_frame(&r, EGRESS_REQUEST_FRAME_ENCODE_BYTES).unwrap();
         // Byte-identical to what the growing encoder produced: this is a
         // buffer change, not a wire change.
         let mut reference = Vec::new();
@@ -489,13 +695,11 @@ mod tests {
         // exact length is the discriminator — it is the largest bound that
         // fails under a `<`-shaped mutant and the smallest that succeeds.
         assert!(matches!(
-            crate::encode_egress_frame_request(&r, buf.len() - 1),
+            crate::encode_egress_frame(&r, buf.len() - 1),
             Err(crate::ProtoCodecError::Encode(_))
         ));
         assert_eq!(
-            crate::encode_egress_frame_request(&r, buf.len())
-                .unwrap()
-                .len(),
+            crate::encode_egress_frame(&r, buf.len()).unwrap().len(),
             buf.len()
         );
     }
@@ -515,14 +719,14 @@ mod tests {
             9 * 1024,
             EGRESS_REQUEST_FRAME_MAX_BYTES + 2 * 1024 * 1024,
         ] {
-            let r = req(
+            let r = EgressFrame::Prompt(req(
                 "conv1",
                 vec![crate::Turn::Tool {
                     call_id: "c1".into(),
                     content: vec![text(&"x".repeat(n))],
                 }],
-            );
-            let counted = crate::egress_frame_request_encoded_len(&r).unwrap();
+            ));
+            let counted = crate::egress_frame_encoded_len(&r).unwrap();
             // The oracle is the ENCODER, not a second length formula: any
             // divergence would put the kernel's refusal on the wrong side of
             // the cap by exactly that amount.
@@ -534,13 +738,11 @@ mod tests {
             // the measured length succeeds, one byte less does not.
             if n <= 9 * 1024 {
                 assert_eq!(
-                    crate::encode_egress_frame_request(&r, counted)
-                        .unwrap()
-                        .len(),
+                    crate::encode_egress_frame(&r, counted).unwrap().len(),
                     counted
                 );
                 assert!(matches!(
-                    crate::encode_egress_frame_request(&r, counted - 1),
+                    crate::encode_egress_frame(&r, counted - 1),
                     Err(crate::ProtoCodecError::Encode(_))
                 ));
             }
@@ -549,16 +751,15 @@ mod tests {
 
     #[test]
     fn the_request_codec_round_trips_and_refuses_garbage() {
-        let r = req(
+        let r = EgressFrame::Prompt(req(
             "conv1",
             vec![crate::Turn::User {
                 content: vec![text("hello")],
             }],
-        );
-        let buf =
-            crate::encode_egress_frame_request(&r, EGRESS_REQUEST_FRAME_ENCODE_BYTES).unwrap();
-        assert_eq!(crate::decode_egress_frame_request(&buf).unwrap(), r);
-        assert!(crate::decode_egress_frame_request(&[0xffu8, 0xff, 0xff]).is_err());
+        ));
+        let buf = crate::encode_egress_frame(&r, EGRESS_REQUEST_FRAME_ENCODE_BYTES).unwrap();
+        assert_eq!(crate::decode_egress_frame(&buf).unwrap(), r);
+        assert!(crate::decode_egress_frame(&[0xffu8, 0xff, 0xff]).is_err());
     }
 
     /// codex round 2, item B — the request encoder's finding, on the reply.
@@ -572,13 +773,13 @@ mod tests {
         // Over 8 KiB of quoted content — the size codex's trace used on the
         // request leg, and what a model echoing a read file produces here.
         let big = "y".repeat(9 * 1024);
-        let r = EgressFrameReply::Reply(crate::PromptReply {
+        let r = EgressSocketReply::Prompt(EgressFrameReply::Reply(crate::PromptReply {
             reasoning: None,
             blocks: vec![text(&big), text(&big)],
             tool_calls: vec![],
             usage: None,
-        });
-        let buf = crate::encode_egress_frame_reply(&r, EGRESS_REPLY_FRAME_ENCODE_BYTES).unwrap();
+        }));
+        let buf = crate::encode_egress_socket_reply(&r, EGRESS_REPLY_FRAME_ENCODE_BYTES).unwrap();
         // Byte-identical to what the growing encoder produced: a buffer
         // change, not a wire change.
         let mut reference = Vec::new();
@@ -596,11 +797,11 @@ mod tests {
         // frame needs is the codec's own error — never a panic, and never a
         // silent realloc. The exact length is the discriminator.
         assert!(matches!(
-            crate::encode_egress_frame_reply(&r, buf.len() - 1),
+            crate::encode_egress_socket_reply(&r, buf.len() - 1),
             Err(crate::ProtoCodecError::Encode(_))
         ));
         assert_eq!(
-            crate::encode_egress_frame_reply(&r, buf.len())
+            crate::encode_egress_socket_reply(&r, buf.len())
                 .unwrap()
                 .len(),
             buf.len()
@@ -615,58 +816,60 @@ mod tests {
             arguments: crate::SecretText(zeroize::Zeroizing::new(String::new())),
             refused: Some(crate::CallRefusal::ArgumentsOverBound { bytes: 70_000 }),
         };
-        let r = EgressFrameReply::Reply(crate::PromptReply {
+        let r = EgressSocketReply::Prompt(EgressFrameReply::Reply(crate::PromptReply {
             reasoning: None,
             blocks: vec![text("ok")],
             tool_calls: vec![stub.clone()],
             usage: None,
-        });
-        let buf = crate::encode_egress_frame_reply(&r, EGRESS_REPLY_FRAME_ENCODE_BYTES).unwrap();
-        match crate::decode_egress_frame_reply(&buf).unwrap() {
-            EgressFrameReply::Reply(p) => assert_eq!(p.tool_calls, vec![stub]),
+        }));
+        let buf = crate::encode_egress_socket_reply(&r, EGRESS_REPLY_FRAME_ENCODE_BYTES).unwrap();
+        match crate::decode_egress_socket_reply(&buf).unwrap() {
+            EgressSocketReply::Prompt(EgressFrameReply::Reply(p)) => {
+                assert_eq!(p.tool_calls, vec![stub])
+            }
             other => panic!("unexpected {other:?}"),
         }
     }
 
     #[test]
     fn the_reply_codec_round_trips_and_refuses_garbage() {
-        let r = EgressFrameReply::Reply(crate::PromptReply {
+        let r = EgressSocketReply::Prompt(EgressFrameReply::Reply(crate::PromptReply {
             reasoning: None,
             blocks: vec![text("ok")],
             tool_calls: vec![],
             usage: None,
-        });
-        let buf = crate::encode_egress_frame_reply(&r, EGRESS_REPLY_FRAME_ENCODE_BYTES).unwrap();
-        assert_eq!(crate::decode_egress_frame_reply(&buf).unwrap(), r);
-        assert!(crate::decode_egress_frame_reply(&[0xffu8, 0xff, 0xff]).is_err());
+        }));
+        let buf = crate::encode_egress_socket_reply(&r, EGRESS_REPLY_FRAME_ENCODE_BYTES).unwrap();
+        assert_eq!(crate::decode_egress_socket_reply(&buf).unwrap(), r);
+        assert!(crate::decode_egress_socket_reply(&[0xffu8, 0xff, 0xff]).is_err());
     }
 
     #[test]
     fn a_refusal_before_send_round_trips_and_carries_nothing_but_its_tag() {
-        let r = EgressFrameReply::RefusedBeforeSend;
-        let buf = crate::encode_egress_frame_reply(&r, EGRESS_REPLY_FRAME_ENCODE_BYTES).unwrap();
-        assert_eq!(crate::decode_egress_frame_reply(&buf).unwrap(), r);
+        let r = EgressSocketReply::RefusedBeforeSend;
+        let buf = crate::encode_egress_socket_reply(&r, EGRESS_REPLY_FRAME_ENCODE_BYTES).unwrap();
+        assert_eq!(crate::decode_egress_socket_reply(&buf).unwrap(), r);
         let mut tag_only = Vec::new();
         ciborium::into_writer(&"refused_before_send", &mut tag_only).unwrap();
         assert_eq!(&buf[..], &tag_only[..]);
-        let reply = EgressFrameReply::Reply(crate::PromptReply {
+        let reply = EgressSocketReply::Prompt(EgressFrameReply::Reply(crate::PromptReply {
             reasoning: None,
             blocks: vec![],
             tool_calls: vec![],
             usage: None,
-        });
+        }));
         assert_ne!(reply, r);
     }
 
     #[test]
     fn an_at_capacity_refusal_round_trips_as_its_own_tag() {
-        let r = EgressFrameReply::AtCapacity;
-        let buf = crate::encode_egress_frame_reply(&r, EGRESS_REPLY_FRAME_ENCODE_BYTES).unwrap();
-        assert_eq!(crate::decode_egress_frame_reply(&buf).unwrap(), r);
+        let r = EgressSocketReply::AtCapacity;
+        let buf = crate::encode_egress_socket_reply(&r, EGRESS_REPLY_FRAME_ENCODE_BYTES).unwrap();
+        assert_eq!(crate::decode_egress_socket_reply(&buf).unwrap(), r);
         let mut tag_only = Vec::new();
         ciborium::into_writer(&"at_capacity", &mut tag_only).unwrap();
         assert_eq!(&buf[..], &tag_only[..]);
-        assert_ne!(r, EgressFrameReply::RefusedBeforeSend);
+        assert_ne!(r, EgressSocketReply::RefusedBeforeSend);
     }
 
     /// Every field of the shape check earns its place: drop any one and a
@@ -732,15 +935,21 @@ mod tests {
                 content: vec![text("x")],
             }],
         );
-        let good =
-            crate::encode_egress_frame_request(&r, EGRESS_REQUEST_FRAME_ENCODE_BYTES).unwrap();
-        assert_eq!(crate::decode_egress_frame_request(&good).unwrap(), r);
-        let unmodified = ciborium::Value::serialized(&r).unwrap();
+        let good = crate::encode_egress_frame(
+            &EgressFrame::Prompt(r.clone()),
+            EGRESS_REQUEST_FRAME_ENCODE_BYTES,
+        )
+        .unwrap();
+        assert_eq!(
+            crate::decode_egress_frame(&good).unwrap(),
+            EgressFrame::Prompt(r.clone())
+        );
+        let unmodified = ciborium::Value::serialized(&EgressFrame::Prompt(r.clone())).unwrap();
         let mut same = Vec::new();
         ciborium::into_writer(&unmodified, &mut same).unwrap();
         assert_eq!(
-            crate::decode_egress_frame_request(&same).unwrap(),
-            r,
+            crate::decode_egress_frame(&same).unwrap(),
+            EgressFrame::Prompt(r),
             "the Value round trip alone must not be what breaks the frame"
         );
         for len in [
@@ -748,8 +957,11 @@ mod tests {
             crate::SEALED_KEY_MAX_BYTES + 1,
         ] {
             let mut v = unmodified.clone();
-            let ciborium::Value::Map(fields) = &mut v else {
+            let ciborium::Value::Map(outer) = &mut v else {
                 panic!("a frame encodes as a map");
+            };
+            let ciborium::Value::Map(fields) = &mut outer[0].1 else {
+                panic!("a prompt frame's request encodes as a map");
             };
             let slot = fields
                 .iter_mut()
@@ -758,7 +970,7 @@ mod tests {
             slot.1 = ciborium::Value::Bytes(vec![0x5a; len]);
             let mut bad = Vec::new();
             ciborium::into_writer(&v, &mut bad).unwrap();
-            let msg = crate::decode_egress_frame_request(&bad)
+            let msg = crate::decode_egress_frame(&bad)
                 .expect_err("an out-of-bounds sealed key")
                 .to_string();
             assert!(
@@ -766,6 +978,320 @@ mod tests {
                     && msg.contains("a sealed key of 127..=1150 bytes"),
                 "{len}: {msg}"
             );
+        }
+    }
+
+    fn prompt_frame() -> EgressFrame {
+        EgressFrame::Prompt(req(
+            "conv1",
+            vec![crate::Turn::User {
+                content: vec![text("hello")],
+            }],
+        ))
+    }
+
+    fn sealed(n: usize, b: u8) -> SealedCredentialBytes {
+        SealedCredentialBytes::new(vec![b; n]).unwrap()
+    }
+
+    fn mint() -> MintRequest {
+        MintRequest {
+            task: "task-1".into(),
+            agent: "coder".into(),
+            class: "github".into(),
+            kind: "github-app-installation".into(),
+            app: "maknae-bot".into(),
+            sets: vec![
+                PermissionSet {
+                    repositories: vec!["maknae".into(), "maknae-docs".into()],
+                    permissions: BTreeMap::from([
+                        (GithubPermission::Contents, AccessLevel::Write),
+                        (GithubPermission::PullRequests, AccessLevel::Write),
+                        (GithubPermission::Metadata, AccessLevel::Read),
+                    ]),
+                },
+                PermissionSet {
+                    repositories: vec!["infra".into()],
+                    permissions: BTreeMap::from([
+                        (GithubPermission::Issues, AccessLevel::Read),
+                        (GithubPermission::Checks, AccessLevel::Read),
+                        (GithubPermission::Statuses, AccessLevel::Read),
+                    ]),
+                },
+            ],
+        }
+    }
+
+    fn revoke() -> RevokeRequest {
+        RevokeRequest {
+            task: "task-1".into(),
+            agent: "coder".into(),
+            class: "github".into(),
+            kind: "github-app-installation".into(),
+            app: "maknae-bot".into(),
+            set: 1,
+            for_revocation: sealed(crate::SEALED_KEY_MIN_BYTES, 0x52),
+        }
+    }
+
+    fn frame_bytes(f: &EgressFrame) -> Vec<u8> {
+        crate::encode_egress_frame(f, EGRESS_REQUEST_FRAME_ENCODE_BYTES)
+            .unwrap()
+            .to_vec()
+    }
+
+    fn cbor(v: &ciborium::Value) -> Vec<u8> {
+        let mut out = Vec::new();
+        ciborium::into_writer(v, &mut out).unwrap();
+        out
+    }
+
+    fn field<'a>(v: &'a mut ciborium::Value, name: &str) -> &'a mut ciborium::Value {
+        let ciborium::Value::Map(m) = v else {
+            panic!("not a map: {v:?}");
+        };
+        &mut m
+            .iter_mut()
+            .find(|(k, _)| k.as_text() == Some(name))
+            .unwrap_or_else(|| panic!("no {name}"))
+            .1
+    }
+
+    #[test]
+    fn a_prompt_frame_round_trips_inside_the_enum() {
+        let buf = frame_bytes(&prompt_frame());
+        assert_eq!(crate::decode_egress_frame(&buf).unwrap(), prompt_frame());
+        let v: ciborium::Value = ciborium::from_reader(&buf[..]).unwrap();
+        let outer = v.as_map().unwrap();
+        assert_eq!(outer.len(), 1);
+        assert_eq!(outer[0].0.as_text(), Some("prompt"));
+        let EgressFrame::Prompt(inner) = prompt_frame() else {
+            unreachable!()
+        };
+        let mut bare = Vec::new();
+        ciborium::into_writer(&inner, &mut bare).unwrap();
+        assert_eq!(cbor(&outer[0].1), bare);
+        assert!(
+            crate::decode_egress_frame(&bare).is_err(),
+            "an untagged request must not decode as a frame"
+        );
+    }
+
+    #[test]
+    fn a_mint_frame_round_trips_and_permissions_are_closed() {
+        let f = EgressFrame::Mint(mint());
+        let buf = frame_bytes(&f);
+        assert_eq!(crate::decode_egress_frame(&buf).unwrap(), f);
+        let r = EgressFrame::Revoke(revoke());
+        assert_eq!(crate::decode_egress_frame(&frame_bytes(&r)).unwrap(), r);
+
+        for (p, wire) in [
+            (GithubPermission::Contents, "contents"),
+            (GithubPermission::PullRequests, "pull_requests"),
+            (GithubPermission::Issues, "issues"),
+            (GithubPermission::Checks, "checks"),
+            (GithubPermission::Statuses, "statuses"),
+            (GithubPermission::Metadata, "metadata"),
+        ] {
+            assert_eq!(
+                ciborium::Value::serialized(&p).unwrap().as_text(),
+                Some(wire)
+            );
+            assert_eq!(p.as_str(), wire);
+        }
+        for (l, wire) in [(AccessLevel::Read, "read"), (AccessLevel::Write, "write")] {
+            assert_eq!(
+                ciborium::Value::serialized(&l).unwrap().as_text(),
+                Some(wire)
+            );
+        }
+
+        let with = |name: &str, level: &str| {
+            let mut v: ciborium::Value = ciborium::from_reader(&buf[..]).unwrap();
+            let sets = field(field(&mut v, "mint"), "sets");
+            let ciborium::Value::Array(sets) = sets else {
+                panic!("sets is an array");
+            };
+            let ciborium::Value::Map(perms) = field(&mut sets[1], "permissions") else {
+                panic!("permissions is a map");
+            };
+            perms.push((name.into(), level.into()));
+            crate::decode_egress_frame(&cbor(&v))
+        };
+        assert!(with("contents", "write").is_ok(), "the control must decode");
+        let msg = with("administration", "read")
+            .expect_err("administration is not a permission Maknae mints")
+            .to_string();
+        assert!(msg.contains("administration"), "{msg}");
+        assert!(
+            with("contents", "admin").is_err(),
+            "access levels are closed"
+        );
+    }
+
+    #[test]
+    fn a_duplicate_permission_key_fails_to_decode() {
+        let buf = frame_bytes(&EgressFrame::Mint(mint()));
+        let mut v: ciborium::Value = ciborium::from_reader(&buf[..]).unwrap();
+        let ciborium::Value::Array(sets) = field(field(&mut v, "mint"), "sets") else {
+            panic!("sets is an array");
+        };
+        let ciborium::Value::Map(perms) = field(&mut sets[1], "permissions") else {
+            panic!("permissions is a map");
+        };
+        perms.push(("issues".into(), "write".into()));
+        let msg = crate::decode_egress_frame(&cbor(&v))
+            .expect_err("issues: read then issues: write")
+            .to_string();
+        assert!(msg.contains("duplicate permission issues"), "{msg}");
+    }
+
+    #[test]
+    fn permissions_that_are_not_a_map_are_refused_naming_the_shape() {
+        use serde::de::IntoDeserializer;
+        let d: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
+            "contents".into_deserializer();
+        let msg = permissions_without_duplicates(d).unwrap_err().to_string();
+        assert!(
+            msg.contains("a map of GitHub permissions, each named once"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn sealed_credential_bytes_outside_the_seal_bounds_do_not_decode() {
+        for n in [crate::SEALED_KEY_MIN_BYTES, crate::SEALED_KEY_MAX_BYTES] {
+            let got: SealedCredentialBytes =
+                ciborium::from_reader(&cbor(&ciborium::Value::Bytes(vec![3; n]))[..]).unwrap();
+            assert_eq!(got.as_bytes(), vec![3u8; n]);
+            assert_eq!(sealed(n, 3), got);
+        }
+        for n in [
+            0,
+            crate::SEALED_KEY_MIN_BYTES - 1,
+            crate::SEALED_KEY_MAX_BYTES + 1,
+        ] {
+            let msg = ciborium::from_reader::<SealedCredentialBytes, _>(
+                &cbor(&ciborium::Value::Bytes(vec![3; n]))[..],
+            )
+            .expect_err("out of bounds")
+            .to_string();
+            assert!(
+                msg.contains(&format!("invalid length {n}"))
+                    && msg.contains("a sealed credential of 127..=1150 bytes"),
+                "{n}: {msg}"
+            );
+            assert!(SealedCredentialBytes::new(vec![3; n]).is_err(), "{n}");
+        }
+        assert!(ciborium::from_reader::<SealedCredentialBytes, _>(
+            &cbor(&ciborium::Value::Text(
+                "x".repeat(crate::SEALED_KEY_MIN_BYTES)
+            ))[..]
+        )
+        .is_err());
+
+        let mut v: ciborium::Value =
+            ciborium::from_reader(&frame_bytes(&EgressFrame::Revoke(revoke()))[..]).unwrap();
+        *field(field(&mut v, "revoke"), "for_revocation") =
+            ciborium::Value::Bytes(vec![3; crate::SEALED_KEY_MAX_BYTES + 1]);
+        assert!(crate::decode_egress_frame(&cbor(&v)).is_err());
+
+        let reply = EgressSocketReply::Mint(MintReply::Minted(vec![SealedCredential {
+            set: 0,
+            expires_at: "2026-11-19T10:00:00Z".into(),
+            for_agent: sealed(crate::SEALED_KEY_MIN_BYTES, 1),
+            for_revocation: sealed(crate::SEALED_KEY_MIN_BYTES, 2),
+        }]));
+        let buf =
+            crate::encode_egress_socket_reply(&reply, EGRESS_REPLY_FRAME_ENCODE_BYTES).unwrap();
+        assert_eq!(crate::decode_egress_socket_reply(&buf).unwrap(), reply);
+        let mut v: ciborium::Value = ciborium::from_reader(&buf[..]).unwrap();
+        let ciborium::Value::Array(creds) = field(field(&mut v, "mint"), "minted") else {
+            panic!("minted is an array");
+        };
+        *field(&mut creds[0], "for_agent") =
+            ciborium::Value::Bytes(vec![1; crate::SEALED_KEY_MIN_BYTES - 1]);
+        assert!(crate::decode_egress_socket_reply(&cbor(&v)).is_err());
+    }
+
+    #[test]
+    fn mint_and_revoke_debug_show_lengths_and_counts_only() {
+        assert_eq!(
+            format!("{:?}", mint()),
+            r#"MintRequest { task: "task-1", agent: "coder", class: "github", kind: "github-app-installation", app: "maknae-bot", sets: <2 sets> }"#
+        );
+        assert_eq!(
+            format!("{:?}", revoke()),
+            r#"RevokeRequest { task: "task-1", agent: "coder", class: "github", kind: "github-app-installation", app: "maknae-bot", set: 1, for_revocation: SealedCredentialBytes(<127 bytes>) }"#
+        );
+        let cred = SealedCredential {
+            set: 0,
+            expires_at: "2026-11-19T10:00:00Z".into(),
+            for_agent: sealed(200, 0x41),
+            for_revocation: sealed(300, 0x42),
+        };
+        assert_eq!(
+            format!("{cred:?}"),
+            r#"SealedCredential { set: 0, expires_at: "2026-11-19T10:00:00Z", for_agent: SealedCredentialBytes(<200 bytes>), for_revocation: SealedCredentialBytes(<300 bytes>) }"#
+        );
+        assert_eq!(
+            format!("{:?}", MintReply::Minted(vec![cred])),
+            "Minted(<1 credentials>)"
+        );
+        assert_eq!(
+            format!(
+                "{:?}",
+                MintReply::Refused(MintRefusal::Forge(ForgeStatus::NotFound))
+            ),
+            "Refused(Forge(NotFound))"
+        );
+        assert_eq!(
+            format!("{:?}", sealed(crate::SEALED_KEY_MAX_BYTES, 0x43)),
+            "SealedCredentialBytes(<1150 bytes>)"
+        );
+    }
+
+    #[test]
+    fn the_mint_bounds_are_pinned_by_value() {
+        assert_eq!(
+            (
+                MINT_MAX_SETS,
+                MINT_MAX_REPOS_PER_SET,
+                MINT_MAX_PERMISSIONS_PER_SET
+            ),
+            (8, 50, 6)
+        );
+    }
+
+    #[test]
+    fn refusals_round_trip_on_both_credential_replies() {
+        for refusal in [
+            MintRefusal::Request,
+            MintRefusal::Signer,
+            MintRefusal::Mismatch,
+            MintRefusal::Recipient,
+            MintRefusal::Forge(ForgeStatus::Unauthorized),
+            MintRefusal::Forge(ForgeStatus::Forbidden),
+            MintRefusal::Forge(ForgeStatus::NotFound),
+            MintRefusal::Forge(ForgeStatus::Unprocessable),
+            MintRefusal::Forge(ForgeStatus::Other),
+        ] {
+            for r in [
+                EgressSocketReply::Mint(MintReply::Refused(refusal)),
+                EgressSocketReply::Revoke(RevokeReply::Refused(refusal)),
+            ] {
+                let buf =
+                    crate::encode_egress_socket_reply(&r, EGRESS_REPLY_FRAME_ENCODE_BYTES).unwrap();
+                assert_eq!(crate::decode_egress_socket_reply(&buf).unwrap(), r);
+            }
+        }
+        for r in [
+            EgressSocketReply::Revoke(RevokeReply::Revoked),
+            EgressSocketReply::Revoke(RevokeReply::AlreadyGone),
+        ] {
+            let buf =
+                crate::encode_egress_socket_reply(&r, EGRESS_REPLY_FRAME_ENCODE_BYTES).unwrap();
+            assert_eq!(crate::decode_egress_socket_reply(&buf).unwrap(), r);
         }
     }
 }

@@ -11,12 +11,32 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
+# The version reqwest and pem already resolve, so encoding the App JWT adds no second base64 0.23.
+base64 = "=0.23.1"
 maknae-config = { path = "../maknae-config" }
+maknae-crypto = { path = "../maknae-crypto" }
+maknae-io = { path = "../maknae-io" }
 maknae-llm = { path = "../maknae-llm" }
 maknae-proto = { path = "../maknae-proto" }
+maknae-seal = { path = "../maknae-seal" }
+# The pin and features maknae-llm uses: one reqwest in the tree, and
+# `rustls-no-provider` so no stock (non-FIPS) provider is installed as the
+# process default ahead of maknae-crypto's init().
+reqwest = { version = "=0.13.5", default-features = false, features = [
+  "rustls-no-provider",
+  "json",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The async mutex that makes the Transit signer's Vault login single-flight;
+# tokio is already in the graph through reqwest.
+tokio = { workspace = true, features = ["sync"] }
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
-maknae-crypto = { path = "../maknae-crypto" }
-tokio = { version = "1", features = ["rt", "macros", "net", "io-util"] }
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "macros", "net", "io-util", "time"] }

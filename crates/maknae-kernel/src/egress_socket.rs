@@ -22,7 +22,8 @@
 use crate::egress::DurableEgressIntent;
 use crate::egress::{Egress, EgressFailure, EgressReply, EgressRequest};
 use maknae_proto::{
-    decode_egress_frame_reply, encode_egress_frame_request, EgressFrameReply, EgressFrameRequest,
+    decode_egress_socket_reply, encode_egress_frame, EgressFrame, EgressFrameReply,
+    EgressFrameRequest, EgressSocketReply,
 };
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -263,7 +264,7 @@ impl Egress for SocketEgress {
             ));
         }
 
-        let frame = frame_of(req, self.timeout);
+        let frame = EgressFrame::Prompt(frame_of(req, self.timeout));
         // MEASURED FIRST, allocated second (#241, codex round 2 item C). The
         // counting pass serializes through a sink that stores nothing, so the
         // exact encoded length is known before a byte of frame content is
@@ -275,8 +276,7 @@ impl Egress for SocketEgress {
         // opaque `failed to write whole buffer` — no size, no cap, and none of
         // the operator line below. Now every over-cap size meets this
         // refusal, and the buffer needs no headroom to avoid shadowing it.
-        let len =
-            maknae_proto::egress_frame_request_encoded_len(&frame).map_err(Self::transport)?;
+        let len = maknae_proto::egress_frame_encoded_len(&frame).map_err(Self::transport)?;
         // BEFORE the first write, so an over-cap request is a pre-send failure
         // (`Failed`, nothing left) and never "outcome unknown" (the deputy
         // would refuse it as oversize only after reading it).
@@ -299,7 +299,7 @@ impl Egress for SocketEgress {
         // freed a partly-written copy of it on every realloc. The encode
         // cannot overflow — it was measured — and an `Encode` here would still
         // be pre-send: nothing written, nothing left with the peer.
-        let buf = encode_egress_frame_request(&frame, len).map_err(Self::transport)?;
+        let buf = encode_egress_frame(&frame, len).map_err(Self::transport)?;
 
         let mut s = stream;
         Self::arm(&s, deadline_at)?;
@@ -340,16 +340,21 @@ impl Egress for SocketEgress {
         // decode drops this buffer just the same.
         let mut body = maknae_io::Zeroizing::new(vec![0u8; n]);
         Self::read_exact_by(&mut s, &mut body, deadline_at).map_err(Self::after_send)?;
-        match decode_egress_frame_reply(&body)
+        match decode_egress_socket_reply(&body)
             .map_err(Self::transport)
             .map_err(Self::after_send)?
         {
-            EgressFrameReply::Reply(reply) => Ok(EgressReply { reply }),
-            EgressFrameReply::RefusedBeforeSend => Err(EgressFailure::RefusedBeforeSend),
-            EgressFrameReply::AtCapacity => Err(EgressFailure::DeputyAtCapacity),
-            EgressFrameReply::Unusable { defect, usage } => {
+            EgressSocketReply::Prompt(EgressFrameReply::Reply(reply)) => Ok(EgressReply { reply }),
+            EgressSocketReply::Prompt(EgressFrameReply::Unusable { defect, usage }) => {
                 Err(EgressFailure::ReplyUnusable { defect, usage })
             }
+            EgressSocketReply::RefusedBeforeSend => Err(EgressFailure::RefusedBeforeSend),
+            EgressSocketReply::AtCapacity => Err(EgressFailure::DeputyAtCapacity),
+            EgressSocketReply::Mint(_) | EgressSocketReply::Revoke(_) => Err(Self::after_send(
+                Self::transport(maknae_proto::ProtoCodecError::Decode(
+                    "a credential reply to a prompt frame".into(),
+                )),
+            )),
         }
     }
 }
@@ -444,7 +449,7 @@ mod tests {
     /// that a refused connection wrote NOTHING.
     fn fake_deputy(
         dir: &std::path::Path,
-        reply: Option<maknae_proto::EgressFrameReply>,
+        reply: Option<EgressSocketReply>,
     ) -> (PathBuf, StdArc<AtomicUsize>) {
         let path = dir.join("egress.sock");
         let l = UnixListener::bind(&path).unwrap();
@@ -459,7 +464,7 @@ mod tests {
                     if c.read_exact(&mut body).is_ok() {
                         s2.fetch_add(4 + n, Ordering::SeqCst);
                         if let Some(r) = reply {
-                            let out = maknae_proto::encode_egress_frame_reply(
+                            let out = maknae_proto::encode_egress_socket_reply(
                                 &r,
                                 maknae_proto::EGRESS_REPLY_FRAME_ENCODE_BYTES,
                             )
@@ -709,7 +714,9 @@ mod tests {
         };
         let (path, seen) = fake_deputy(
             d.path(),
-            Some(maknae_proto::EgressFrameReply::Reply(reply.clone())),
+            Some(EgressSocketReply::Prompt(EgressFrameReply::Reply(
+                reply.clone(),
+            ))),
         );
         let me = nix::unistd::getuid().as_raw();
         let e = SocketEgress::new(path, me, Duration::from_secs(2), 64 * 1024);
@@ -722,10 +729,7 @@ mod tests {
     #[test]
     fn a_deputy_that_refuses_before_any_provider_io_is_refused_before_send() {
         let d = tempfile::tempdir().unwrap();
-        let (path, seen) = fake_deputy(
-            d.path(),
-            Some(maknae_proto::EgressFrameReply::RefusedBeforeSend),
-        );
+        let (path, seen) = fake_deputy(d.path(), Some(EgressSocketReply::RefusedBeforeSend));
         let me = nix::unistd::getuid().as_raw();
         let e = SocketEgress::new(path, me, Duration::from_secs(2), 64 * 1024);
         let intent = crate::egress::DurableEgressIntent::canned_for_test();
@@ -739,7 +743,7 @@ mod tests {
     #[test]
     fn a_deputy_at_capacity_is_a_named_refusal_not_a_lost_send() {
         let d = tempfile::tempdir().unwrap();
-        let (path, seen) = fake_deputy(d.path(), Some(maknae_proto::EgressFrameReply::AtCapacity));
+        let (path, seen) = fake_deputy(d.path(), Some(EgressSocketReply::AtCapacity));
         let me = nix::unistd::getuid().as_raw();
         let e = SocketEgress::new(path, me, Duration::from_secs(2), 64 * 1024);
         let intent = crate::egress::DurableEgressIntent::canned_for_test();
@@ -755,10 +759,10 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let (path, _seen) = fake_deputy(
             d.path(),
-            Some(maknae_proto::EgressFrameReply::Unusable {
+            Some(EgressSocketReply::Prompt(EgressFrameReply::Unusable {
                 defect: maknae_proto::ReplyDefect::ProviderRateLimit,
                 usage: None,
-            }),
+            })),
         );
         let me = nix::unistd::getuid().as_raw();
         let e = SocketEgress::new(path, me, Duration::from_secs(2), 64 * 1024);
@@ -1103,5 +1107,163 @@ mod tests {
     fn the_frame_carries_the_kernels_egress_deadline() {
         let f = frame_of(req(), Duration::from_millis(280_000));
         assert_eq!(f.deadline_ms, Some(280_000));
+    }
+
+    fn deputy_answering(dir: &std::path::Path, reply: Vec<u8>) -> PathBuf {
+        let path = dir.join("egress.sock");
+        let l = UnixListener::bind(&path).unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut c, _)) = l.accept() {
+                let mut len = [0u8; 4];
+                if c.read_exact(&mut len).is_ok() {
+                    let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
+                    let _ = c.read_exact(&mut body);
+                    let _ = c.write_all(&(reply.len() as u32).to_be_bytes());
+                    let _ = c.write_all(&reply);
+                }
+            }
+        });
+        path
+    }
+
+    fn cbor(v: &impl serde::Serialize) -> Vec<u8> {
+        let mut out = Vec::new();
+        ciborium::into_writer(v, &mut out).unwrap();
+        out
+    }
+
+    fn turn_of(n: usize) -> Turn {
+        Turn::User {
+            content: vec![ContentBlock::Text {
+                text: SecretText(maknae_io::Zeroizing::new("x".repeat(n))),
+            }],
+        }
+    }
+
+    const CAP_TEST_TIMEOUT: Duration = Duration::from_secs(20);
+
+    fn tagged_len(r: &EgressRequest) -> usize {
+        maknae_proto::egress_frame_encoded_len(&EgressFrame::Prompt(frame_of(
+            r.clone(),
+            CAP_TEST_TIMEOUT,
+        )))
+        .unwrap()
+    }
+
+    /// A request whose TAGGED frame is exactly `target` bytes.
+    fn request_of_tagged_len(target: usize) -> EgressRequest {
+        let mut r = req();
+        let probe = 1 << 20;
+        r.turns = vec![turn_of(probe)];
+        let base = tagged_len(&r) - probe;
+        r.turns = vec![turn_of(target - base)];
+        assert_eq!(tagged_len(&r), target);
+        r
+    }
+
+    #[test]
+    fn the_cap_counts_the_tagged_frame() {
+        let cap = crate::egress::EGRESS_MAX_REQUEST_FRAME_BYTES;
+        let me = nix::unistd::getuid().as_raw();
+        let intent = crate::egress::DurableEgressIntent::canned_for_test();
+
+        let at = request_of_tagged_len(cap);
+        let d = tempfile::tempdir().unwrap();
+        let (path, seen) = fake_deputy(d.path(), Some(EgressSocketReply::AtCapacity));
+        let e = SocketEgress::new(path, me, CAP_TEST_TIMEOUT, 64 * 1024);
+        assert_eq!(
+            e.send(&intent, at).unwrap_err(),
+            EgressFailure::DeputyAtCapacity
+        );
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            4 + cap,
+            "the bytes sent are the bytes measured"
+        );
+
+        let over = request_of_tagged_len(cap + 1);
+        let bare = cbor(&frame_of(over.clone(), CAP_TEST_TIMEOUT)).len();
+        assert!(bare <= cap, "the bare request alone fits: {bare}");
+        let d = tempfile::tempdir().unwrap();
+        let (path, seen) = fake_deputy(d.path(), None);
+        let e = SocketEgress::new(path, me, CAP_TEST_TIMEOUT, 64 * 1024);
+        match e.send(&intent, over) {
+            Err(EgressFailure::Transport(m)) => assert!(
+                m.contains(&format!("request frame of {} bytes", cap + 1)),
+                "{m}"
+            ),
+            other => panic!("the tagged frame is over the cap, got {other:?}"),
+        }
+        std::thread::sleep(Duration::from_millis(120));
+        assert_eq!(seen.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn an_at_capacity_reply_is_top_level_and_maps_to_the_prompts_at_capacity() {
+        let me = nix::unistd::getuid().as_raw();
+        let intent = crate::egress::DurableEgressIntent::canned_for_test();
+        let top = maknae_proto::encode_egress_socket_reply(
+            &EgressSocketReply::AtCapacity,
+            maknae_proto::EGRESS_REPLY_FRAME_ENCODE_BYTES,
+        )
+        .unwrap();
+        assert_eq!(&top[..], &cbor(&"at_capacity")[..]);
+        for (bytes, want) in [
+            (top.to_vec(), EgressFailure::DeputyAtCapacity),
+            (
+                cbor(&"refused_before_send"),
+                EgressFailure::RefusedBeforeSend,
+            ),
+        ] {
+            let d = tempfile::tempdir().unwrap();
+            let e = SocketEgress::new(
+                deputy_answering(d.path(), bytes),
+                me,
+                Duration::from_secs(2),
+                64 * 1024,
+            );
+            let got = e.send(&intent, req()).unwrap_err();
+            assert_eq!(
+                crate::egress::outcome_for_failure(&got),
+                crate::egress::SendOutcome::Failed
+            );
+            assert_eq!(got, want);
+        }
+        for nested in ["at_capacity", "refused_before_send"] {
+            let d = tempfile::tempdir().unwrap();
+            let bytes = cbor(&std::collections::BTreeMap::from([("prompt", nested)]));
+            let e = SocketEgress::new(
+                deputy_answering(d.path(), bytes),
+                me,
+                Duration::from_secs(2),
+                64 * 1024,
+            );
+            assert!(
+                matches!(e.send(&intent, req()), Err(EgressFailure::AfterSend(m)) if m.starts_with("proto decode")),
+                "{nested} is no longer a prompt reply"
+            );
+        }
+    }
+
+    #[test]
+    fn a_credential_reply_to_a_prompt_is_a_post_send_codec_failure() {
+        let me = nix::unistd::getuid().as_raw();
+        let intent = crate::egress::DurableEgressIntent::canned_for_test();
+        for reply in [
+            EgressSocketReply::Mint(maknae_proto::MintReply::Refused(
+                maknae_proto::MintRefusal::Request,
+            )),
+            EgressSocketReply::Revoke(maknae_proto::RevokeReply::Revoked),
+        ] {
+            let d = tempfile::tempdir().unwrap();
+            let (path, _seen) = fake_deputy(d.path(), Some(reply));
+            let e = SocketEgress::new(path, me, Duration::from_secs(2), 64 * 1024);
+            match e.send(&intent, req()) {
+                Err(EgressFailure::AfterSend(m)) => {
+                    assert_eq!(m, "proto decode: a credential reply to a prompt frame")
+                }
+                other => panic!("expected a post-send codec failure, got {other:?}"),
+            }
+        }
     }
 }

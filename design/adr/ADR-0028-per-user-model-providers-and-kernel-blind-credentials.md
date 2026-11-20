@@ -68,6 +68,8 @@ Measured 2026-10-01 with OpenSSL 3.6.4 on Apple Silicon (`openssl speed`): P-384
 
 ### 6. The Egress Daemon has no provider and no Vault identity of its own
 
+**Amended 2026-11-19 by [ADR-0038](ADR-0038-the-egress-daemon-mints-trust-plane-credentials.md) (#168):** the Egress Daemon gains a Vault AppRole whose policy grows only by the enabled credential kinds' needs (Transit sign for the GitHub App kind); it never holds a KV grant. The removed AppRole's KV prefix read stays removed. The heading's "no Vault identity" and this decision's removal of "its AppRole, SecretID and KV read policy" are superseded to that extent: the new AppRole's SecretID is in custody as `maknae-egress-secret-id`, and the Egress Daemon logs in only when minting is configured.
+
 It acts only on behalf of a user, within the authorized set, using what a single-use wrapping token opens. *(Amended 2026-11-13, #629: it also acts on behalf of an enrolled agent, whose key path `maknaed` builds from the agent id stamped on the session, decision 3's amendment.)* Its AppRole, SecretID and KV read policy are removed. It holds the sealing key pair: the private key in its own custody (a systemd encrypted credential on Linux; on macOS the System keychain item of ADR-0018 decision 6, whose contents change from a SecretID to this key), the public key published to each user as decision 5 describes.
 
 **Amended 2026-10-02 (#153 PR 4):**
@@ -101,7 +103,8 @@ It acts only on behalf of a user, within the authorized set, using what a single
 | Local humans individually identified to Vault; shared CLI AppRole removed | IA-2 (identification and authentication), IA-5 (authenticator management) | Strengthens, once built |
 | Keys never at rest outside Vault; plaintext only inside the Egress Daemon for one call, then zeroized | SC-28 (protection of information at rest), SC-4 (information in shared system resources) | Implements, once built |
 | The credential crosses `maknaed` only sealed to the Egress Daemon and bound to its request | SC-8 (transmission confidentiality and integrity), SC-12 (key establishment), SC-13 (cryptographic protection) | Implements, once built |
-| The Egress Daemon holds no standing credential grant | AC-6 (least privilege) | Strengthens, once built |
+| The Egress Daemon holds no standing credential grant *(amended 2026-11-19, ADR-0038: no standing grant over any stored credential; its Vault identity may only sign with the Transit keys the enabled credential kinds need, the next row)* | AC-6 (least privilege) | Strengthens, once built |
+| The Egress Daemon's AppRole policy grows only by the enabled credential kinds' needs (Transit sign for the GitHub App kind) and never holds a KV grant (amended 2026-11-19, ADR-0038) | AC-6 (least privilege), IA-9 (service identification and authentication) | Implements, once built |
 | An agent's key path is built from its kernel-stamped id under `agent_prefix`; it never resolves into a user's tree, nor a user's into the agent tree (amended 2026-11-13, #629) | AC-3 (access enforcement), AC-6 (least privilege), IA-9 (service identification and authentication) | Implements |
 | The trail names user, provider and model, never key material | AU-3 (content of audit records), AU-9 (protection of audit information) | Implements, once built |
 | Key reads outside a turn are detectable | SI-4 (system monitoring), by correlating Vault's audit device with Maknae's trail | Enables detection; the correlation is not built (#429) |

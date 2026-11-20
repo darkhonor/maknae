@@ -1392,8 +1392,8 @@ pub fn encode_response_zeroizing(
 /// partly-written copy of that content on every realloc. A frame that will
 /// not fit in `max_bytes` is an [`ProtoCodecError::Encode`], never a silent
 /// growth — and, at every caller, a PRE-SEND failure.
-pub fn encode_egress_frame_request(
-    r: &crate::EgressFrameRequest,
+pub fn encode_egress_frame(
+    r: &crate::EgressFrame,
     max_bytes: usize,
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, ProtoCodecError> {
     let mut buf = zeroize::Zeroizing::new(vec![0; max_bytes]);
@@ -1404,7 +1404,7 @@ pub fn encode_egress_frame_request(
     Ok(buf)
 }
 
-/// How many bytes [`encode_egress_frame_request`] will produce, WITHOUT
+/// How many bytes [`encode_egress_frame`] will produce, WITHOUT
 /// producing them (#241, codex round 2 item C).
 ///
 /// A counting `io::Write` sink: ciborium serializes through it exactly as it
@@ -1420,9 +1420,7 @@ pub fn encode_egress_frame_request(
 /// and no operator line. Measuring first makes the kernel's own refusal what
 /// EVERY over-cap frame meets, and removes the headroom the buffer needed to
 /// avoid shadowing it.
-pub fn egress_frame_request_encoded_len(
-    r: &crate::EgressFrameRequest,
-) -> Result<usize, ProtoCodecError> {
+pub fn egress_frame_encoded_len(r: &crate::EgressFrame) -> Result<usize, ProtoCodecError> {
     /// Counts, stores nothing. Not `io::sink()`, which discards without
     /// reporting, and not a `Vec`, which would hold the content this exists
     /// to avoid allocating.
@@ -1441,12 +1439,12 @@ pub fn egress_frame_request_encoded_len(
     Ok(counter.0)
 }
 
-pub fn decode_egress_frame_request(b: &[u8]) -> Result<crate::EgressFrameRequest, ProtoCodecError> {
+pub fn decode_egress_frame(b: &[u8]) -> Result<crate::EgressFrame, ProtoCodecError> {
     ciborium::from_reader(b).map_err(|e| ProtoCodecError::Decode(e.to_string()))
 }
 
 /// Encode a reply into a zeroizing buffer, BOUNDED and PREALLOCATED on
-/// `encode_egress_frame_request`'s precedent — the fixed `max_bytes` buffer
+/// `encode_egress_frame`'s precedent — the fixed `max_bytes` buffer
 /// through a `Cursor`, not `encode_response_zeroizing`'s growable
 /// `Vec::with_capacity` form — and for the reason
 /// [`crate::EGRESS_REPLY_FRAME_ENCODE_BYTES`] records (#241, codex round 2
@@ -1456,8 +1454,8 @@ pub fn decode_egress_frame_request(b: &[u8]) -> Result<crate::EgressFrameRequest
 /// [`ProtoCodecError::Encode`] — never a panic, never a silent growth — and at
 /// its one production caller it is a pre-write failure: the deputy has read
 /// nothing to the kernel yet.
-pub fn encode_egress_frame_reply(
-    r: &crate::EgressFrameReply,
+pub fn encode_egress_socket_reply(
+    r: &crate::EgressSocketReply,
     max_bytes: usize,
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, ProtoCodecError> {
     let mut buf = zeroize::Zeroizing::new(vec![0; max_bytes]);
@@ -1468,7 +1466,7 @@ pub fn encode_egress_frame_reply(
     Ok(buf)
 }
 
-pub fn decode_egress_frame_reply(b: &[u8]) -> Result<crate::EgressFrameReply, ProtoCodecError> {
+pub fn decode_egress_socket_reply(b: &[u8]) -> Result<crate::EgressSocketReply, ProtoCodecError> {
     ciborium::from_reader(b).map_err(|e| ProtoCodecError::Decode(e.to_string()))
 }
 

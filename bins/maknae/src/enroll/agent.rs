@@ -6,6 +6,7 @@ use super::agent_launchd;
 use super::agent_unit;
 use super::artifact_table::{Artifact, ContentKind, Owner};
 use super::artifact_write::{self, emit_yaml, yaml_map, OwnerResolver};
+use super::secret_slot;
 use super::EnrollError;
 use crate::stderr::errln;
 use clap::{Args, ValueEnum};
@@ -76,6 +77,9 @@ pub struct AgentArgs {
     /// Replace an enrolled agent's SecretID and destroy the earlier ones.
     #[arg(long)]
     pub rotate: bool,
+    /// Replace the agent's seal key pair even if both halves are in place.
+    #[arg(long)]
+    pub rotate_seal_key: bool,
     /// Grant the enrolled agent's account its read access again; touches no Vault.
     #[arg(long, conflicts_with_all = [
         "account", "bind_cidr", "provider", "model", "key_subpath", "key_field",
@@ -460,6 +464,7 @@ pub(crate) trait AgentOps: AgentVaultOps {
         agent: &AgentId,
         account: &agent_access::Account,
     ) -> Result<(), EnrollError>;
+    async fn place_seal_key(&self, agent: &AgentId, rotate: bool) -> Result<(), EnrollError>;
     fn start_agent(
         &self,
         agent: &AgentId,
@@ -485,6 +490,7 @@ pub(crate) struct AgentPlan {
     pub cidrs: BindCidrs,
     pub role: AgentRole,
     pub rotate: bool,
+    pub rotate_seal_key: bool,
     pub client: ClientPlan,
 }
 
@@ -561,57 +567,20 @@ pub(crate) async fn enroll_agent<O: AgentOps>(
             })
         }
     };
-    let (secret, acc) = ops.mint(mount, &role, &plan.cidrs).await?;
-
     let base = AgentState {
         approle_mount: plan.mount.clone(),
         role: role.clone(),
         ..prior_state
     };
-    let mut pending = base.clone();
-    pending.pending.push(acc.clone());
-    if let Err(e) = ops.write_state(&plan.agent, &pending) {
-        drop(secret);
-        return Err(match ops.destroy(mount, &role, &acc).await {
-            Ok(()) => e,
-            Err(_) => EnrollError::AgentOrphanedAccessor {
-                accessor: acc,
-                cause: e.to_string(),
-                recorded: false,
-            },
-        });
-    }
-
-    let sealed = ops.seal(&plan.agent, &secret).await;
-    drop(secret);
-    let source = match sealed {
-        Ok(source) => source,
-        Err(e) => {
-            return Err(match ops.destroy(mount, &role, &acc).await {
-                Ok(()) => {
-                    let _ = ops.write_state(&plan.agent, &base);
-                    e
-                }
-                Err(_) => EnrollError::AgentOrphanedAccessor {
-                    accessor: acc,
-                    cause: e.to_string(),
-                    recorded: true,
-                },
-            });
-        }
+    let slot = AgentSlot {
+        ops,
+        plan,
+        role: &role,
     };
+    let (acc, source) = secret_slot::mint_and_seal(&slot, &base).await?;
 
     let listed = ops.list_accessors(mount, &role).await?;
-    let retiring: Vec<String> = dedup(
-        base.live
-            .iter()
-            .chain(&base.pending)
-            .chain(&base.retiring)
-            .chain(&listed),
-    )
-    .into_iter()
-    .filter(|a| *a != acc)
-    .collect();
+    let retiring = secret_slot::retiring(&base, &listed, &acc);
     let record = AgentRecord {
         agent_id: id.to_string(),
         account: plan.account.clone(),
@@ -634,18 +603,8 @@ pub(crate) async fn enroll_agent<O: AgentOps>(
     };
     ops.write_state(&plan.agent, &live)?;
 
-    let mut failures = Vec::new();
-    for a in &retiring {
-        if ops.destroy(mount, &role, a).await.is_err() {
-            failures.push(a.clone());
-        }
-    }
+    let (_, failures) = secret_slot::retire(&slot, live).await?;
     let retired = retiring.len() - failures.len();
-    let done = AgentState {
-        retiring: failures.clone(),
-        ..live
-    };
-    ops.write_state(&plan.agent, &done)?;
     if reenable && failures.is_empty() {
         ops.set_entity_disabled(&entity, false).await?;
     }
@@ -664,6 +623,8 @@ pub(crate) async fn enroll_agent<O: AgentOps>(
         });
     }
     granted?;
+    ops.place_seal_key(&plan.agent, plan.rotate_seal_key)
+        .await?;
     ops.start_agent(
         &plan.agent,
         &agent_unit::ServiceAccount {
@@ -674,6 +635,44 @@ pub(crate) async fn enroll_agent<O: AgentOps>(
         },
     )?;
     Ok(AgentOutcome { record, retired })
+}
+
+struct AgentSlot<'a, O> {
+    ops: &'a O,
+    plan: &'a AgentPlan,
+    role: &'a str,
+}
+
+impl<O: AgentOps> secret_slot::SecretSlot for AgentSlot<'_, O> {
+    type Sealed = SecretSource;
+
+    async fn mint(&self) -> Result<(Zeroizing<String>, String), EnrollError> {
+        self.ops
+            .mint(&self.plan.mount, self.role, &self.plan.cidrs)
+            .await
+    }
+
+    fn write_state(&self, state: &AgentState) -> Result<(), EnrollError> {
+        self.ops.write_state(&self.plan.agent, state)
+    }
+
+    async fn seal(&self, secret: &Zeroizing<String>) -> Result<SecretSource, EnrollError> {
+        self.ops.seal(&self.plan.agent, secret).await
+    }
+
+    async fn destroy(&self, accessor: &str) -> Result<(), EnrollError> {
+        self.ops
+            .destroy(&self.plan.mount, self.role, accessor)
+            .await
+    }
+
+    fn orphaned(&self, accessor: String, cause: EnrollError, recorded: bool) -> EnrollError {
+        EnrollError::AgentOrphanedAccessor {
+            accessor,
+            cause: cause.to_string(),
+            recorded,
+        }
+    }
 }
 
 pub(crate) fn dedup<'a>(items: impl Iterator<Item = &'a String>) -> Vec<String> {
@@ -738,7 +737,7 @@ fn render(args: std::fmt::Arguments<'_>) -> Zeroizing<String> {
     out
 }
 
-fn scrub_secret(e: EnrollError, secret: &Zeroizing<String>) -> EnrollError {
+pub(crate) fn scrub_secret(e: EnrollError, secret: &Zeroizing<String>) -> EnrollError {
     let secret = secret.as_str();
     if secret.is_empty() {
         return e;
@@ -991,6 +990,17 @@ impl AgentOps for RealAgentOps {
         )
     }
 
+    async fn place_seal_key(&self, agent: &AgentId, rotate: bool) -> Result<(), EnrollError> {
+        place_seal_key(
+            &self.resolver,
+            agent,
+            rotate,
+            #[cfg(not(target_os = "macos"))]
+            self.verbose,
+        )
+        .await
+    }
+
     fn start_agent(
         &self,
         agent: &AgentId,
@@ -998,6 +1008,34 @@ impl AgentOps for RealAgentOps {
     ) -> Result<(), EnrollError> {
         start_instance(&*self.runner, agent, account)
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn place_seal_key(
+    resolver: &artifact_write::RealOwnerResolver,
+    agent: &AgentId,
+    rotate: bool,
+    verbose: bool,
+) -> Result<(), EnrollError> {
+    use super::agent_seal;
+    agent_seal::place(
+        &agent_seal::host_pair(resolver)?,
+        &agent_seal::SystemdCustody { verbose },
+        agent,
+        rotate,
+    )
+    .await
+    .map(drop)
+}
+
+/// macOS custody of the agent seal key is not built (ADR-0038).
+#[cfg(target_os = "macos")]
+async fn place_seal_key(
+    _resolver: &artifact_write::RealOwnerResolver,
+    _agent: &AgentId,
+    _rotate: bool,
+) -> Result<(), EnrollError> {
+    Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1062,7 +1100,7 @@ fn write_drop_in(agent: &AgentId, account: &agent_unit::ServiceAccount) -> Resul
         .publish_owned(
             Path::new(agent_unit::DROP_IN_FILE),
             None,
-            agent_unit::drop_in(account).as_bytes(),
+            agent_unit::drop_in(agent, account).as_bytes(),
             Mode(0o644),
             FileOwner { uid: 0, gid: 0 },
         )
@@ -1222,12 +1260,48 @@ pub(crate) fn read_records(
     agents: &maknae_io::Anchor,
     agent: &AgentId,
 ) -> Result<(Option<AgentRecord>, Vec<OtherAgent>), EnrollError> {
+    let mut prior = None;
+    let mut others = Vec::new();
+    for record in records(agents)? {
+        if record.agent_id == agent.as_str() {
+            prior = Some(record);
+        } else {
+            others.push((record.agent_id, record.uid));
+        }
+    }
+    Ok((prior, others))
+}
+
+/// The AppRole mount of every enrolled agent; none when the agents directory
+/// does not exist yet.
+pub(crate) fn recorded_agent_mounts() -> Result<Vec<String>, EnrollError> {
+    match maknae_io::open_anchor(
+        Path::new(AGENTS_DIR),
+        AnchorRequired {
+            owner: Some(0),
+            mode_mask: Some(0o022),
+        },
+        StrategyPref::Auto,
+    ) {
+        Ok(agents) => agent_mounts(&agents),
+        Err(e) if is_not_found(&e) => Ok(Vec::new()),
+        Err(e) => Err(io_error(Path::new(AGENTS_DIR), e)),
+    }
+}
+
+pub(crate) fn agent_mounts(agents: &maknae_io::Anchor) -> Result<Vec<String>, EnrollError> {
+    Ok(records(agents)?
+        .into_iter()
+        .map(|r| r.approle_mount)
+        .collect())
+}
+
+fn records(agents: &maknae_io::Anchor) -> Result<Vec<AgentRecord>, EnrollError> {
     let entries = agents
         .enumerate(Path::new(""), None)
         .map_err(|e| io_error(Path::new(AGENTS_DIR), e))?
         .value;
-    let mut prior = None;
-    let mut others = Vec::new();
+    let mut out = Vec::new();
     for entry in entries {
         let Some(name) = entry.name.to_str() else {
             continue;
@@ -1251,13 +1325,9 @@ pub(crate) fn read_records(
                 record.agent_id
             )));
         }
-        if name == agent.as_str() {
-            prior = Some(record);
-        } else {
-            others.push((record.agent_id, record.uid));
-        }
+        out.push(record);
     }
-    Ok((prior, others))
+    Ok(out)
 }
 
 pub(crate) fn read_state(
@@ -1568,7 +1638,12 @@ fn daemon_gid(resolver: &artifact_write::RealOwnerResolver) -> Result<u32, Enrol
     }
 }
 
-fn run_refresh_access(agent: &AgentId, locale: Locale) -> Result<String, EnrollError> {
+async fn run_refresh_access(
+    agent: &AgentId,
+    rotate_seal_key: bool,
+    #[cfg(not(target_os = "macos"))] verbose: bool,
+    locale: Locale,
+) -> Result<String, EnrollError> {
     agents_dir_check(agents_dir_kind()?)?;
     let agents = open_dir(AGENTS_DIR, 0o022)?;
     let _lock = agents.try_lock_exclusive().map_err(|e| match e {
@@ -1593,6 +1668,14 @@ fn run_refresh_access(agent: &AgentId, locale: Locale) -> Result<String, EnrollE
     };
     let daemon_gid = daemon_gid(&resolver)?;
     write_starter_policy(&agents, agent, daemon_gid)?;
+    place_seal_key(
+        &resolver,
+        agent,
+        rotate_seal_key,
+        #[cfg(not(target_os = "macos"))]
+        verbose,
+    )
+    .await?;
     refresh_and_restart(
         &agent_access::Host,
         agent_access::Platform::HOST,
@@ -1618,8 +1701,19 @@ pub(crate) async fn run_enroll_agent(
         .inspect_err(|_| errln!("{}", msg(locale, MsgId::EnrollPreflightFailed)))?;
 
     let agent = AgentId::parse(&args.id)?;
+    #[cfg(target_os = "macos")]
+    if args.rotate_seal_key {
+        return Err(EnrollError::MintingOnMacos);
+    }
     if args.refresh_access {
-        return run_refresh_access(&agent, locale);
+        return run_refresh_access(
+            &agent,
+            args.rotate_seal_key,
+            #[cfg(not(target_os = "macos"))]
+            args.verbose,
+            locale,
+        )
+        .await;
     }
     let account = given(&args.account, "--account")?;
     let cidrs = BindCidrs::parse(&args.bind_cidr)?;
@@ -1668,6 +1762,7 @@ pub(crate) async fn run_enroll_agent(
         cidrs,
         role: AgentRole::User,
         rotate: args.rotate,
+        rotate_seal_key: args.rotate_seal_key,
         client,
     };
     let outcome = admit_then_enroll(
@@ -1959,6 +2054,13 @@ pub(crate) mod tests {
             self.check("grant")
         }
 
+        async fn place_seal_key(&self, agent: &AgentId, rotate: bool) -> Result<(), EnrollError> {
+            self.log
+                .borrow_mut()
+                .push(format!("seal_key {} {rotate}", agent.as_str()));
+            self.check("seal_key")
+        }
+
         fn start_agent(
             &self,
             agent: &AgentId,
@@ -2031,6 +2133,7 @@ pub(crate) mod tests {
             cidrs: BindCidrs::parse(&["10.0.0.5".to_string()]).unwrap(),
             role: AgentRole::User,
             rotate,
+            rotate_seal_key: false,
             client: client_plan_of(),
         }
     }
@@ -2140,6 +2243,7 @@ pub(crate) mod tests {
                 "state",
                 "state",
                 "grant hobi hobi-svc:990",
+                "seal_key hobi false",
                 "start hobi 990:991 /home/hobi-svc",
             ])
         );
@@ -2270,6 +2374,7 @@ pub(crate) mod tests {
                 "destroy:r",
                 "state",
                 "grant hobi hobi-svc:990",
+                "seal_key hobi false",
                 "start hobi 990:991 /home/hobi-svc",
             ])
         );
@@ -2308,6 +2413,7 @@ pub(crate) mod tests {
                 "destroy:gone",
                 "state",
                 "grant hobi hobi-svc:990",
+                "seal_key hobi false",
                 "start hobi 990:991 /home/hobi-svc",
             ])[..]
         );
@@ -2506,6 +2612,34 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn the_seal_key_is_placed_before_the_start_and_a_failure_stops_there() {
+        let fake = Fake::default();
+        let p = AgentPlan {
+            rotate_seal_key: true,
+            ..plan(false)
+        };
+        enroll_agent(&fake, &p, &host(), None, AgentState::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            fake.log()[fake.log().len() - 2..],
+            strings(&["seal_key hobi true", "start hobi 990:991 /home/hobi-svc"])[..]
+        );
+
+        let fake = Fake::failing(&["seal_key"]);
+        let e = first(&fake).await.unwrap_err();
+        assert!(
+            matches!(&e, EnrollError::State(m) if m == "seal_key failed"),
+            "{e:?}"
+        );
+        assert_eq!(
+            fake.log().last().map(String::as_str),
+            Some("seal_key hobi false")
+        );
+        assert_eq!(fake.states().last(), Some(&state(&["acc-new"], &[], &[])));
+    }
+
+    #[tokio::test]
     async fn a_start_failure_comes_last_and_keeps_the_enrollment() {
         let fake = Fake::failing(&["start"]);
         let e = rotate(&fake, &["a"], &[], &[]).await.unwrap_err();
@@ -2668,6 +2802,7 @@ pub(crate) mod tests {
                 "destroy:stray",
                 "state",
                 "grant hobi hobi-svc:990",
+                "seal_key hobi false",
                 "start hobi 990:991 /home/hobi-svc",
             ])[..]
         );
@@ -2826,13 +2961,21 @@ pub(crate) mod tests {
 
     #[test]
     fn enroll_agent_prints_nothing() {
-        let src = include_str!("agent.rs");
-        let start = src
+        let body_of = |src: &'static str, head: &str| -> Vec<&'static str> {
+            let start = src
+                .lines()
+                .position(|l| l.starts_with(head))
+                .expect("the function is defined at top level");
+            src.lines().skip(start).take_while(|l| *l != "}").collect()
+        };
+        let agent = body_of(include_str!("agent.rs"), "pub(crate) async fn enroll_agent");
+        let slot: Vec<&str> = include_str!("secret_slot.rs")
             .lines()
-            .position(|l| l.starts_with("pub(crate) async fn enroll_agent"))
-            .expect("enroll_agent is defined at top level");
-        let body: Vec<&str> = src.lines().skip(start).take_while(|l| *l != "}").collect();
-        assert!(body.iter().any(|l| l.contains("ops.seal(")));
+            .take_while(|l| *l != "#[cfg(test)]")
+            .collect();
+        assert!(agent.iter().any(|l| l.contains("mint_and_seal(")));
+        assert!(slot.iter().any(|l| l.contains("slot.seal(")));
+        let body: Vec<&str> = agent.into_iter().chain(slot).collect();
         for mac in [
             "println!",
             "eprintln!",
@@ -3392,10 +3535,11 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(
-            fake.log()[fake.log().len() - 3..],
+            fake.log()[fake.log().len() - 4..],
             strings(&[
                 "set_entity_disabled maknae-agent-hobi false",
                 "grant hobi hobi-svc:990",
+                "seal_key hobi false",
                 "start hobi 990:991 /home/hobi-svc",
             ])[..]
         );
@@ -3934,6 +4078,34 @@ pub(crate) mod tests {
                 "{got:?}"
             );
         }
+    }
+
+    #[test]
+    fn agent_mounts_names_every_recorded_agent_s_mount() {
+        let (d, agents) = scratch_anchor("records-mounts");
+        for (id, mount) in [("hobi", "m-hobi"), ("jin", "m-jin")] {
+            std::fs::create_dir(d.join(id)).unwrap();
+            let mut r = record();
+            r.agent_id = id.into();
+            r.approle_mount = mount.into();
+            write_0640(
+                &d.join(id).join(maknae_config::ENROLLMENT_FILE),
+                &r.to_yaml(),
+            );
+        }
+        let got = agent_mounts(&agents);
+        if running_as_root() {
+            let mut got = got.unwrap();
+            got.sort();
+            assert_eq!(got, strings(&["m-hobi", "m-jin"]));
+        } else {
+            assert!(
+                matches!(&got, Err(EnrollError::Io { source, .. }) if source.contains("require 0")),
+                "{got:?}"
+            );
+        }
+        let (_e, empty) = scratch_anchor("records-mounts-empty");
+        assert_eq!(agent_mounts(&empty).unwrap(), Vec::<String>::new());
     }
 
     #[test]

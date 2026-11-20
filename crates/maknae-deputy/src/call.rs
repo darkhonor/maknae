@@ -1067,13 +1067,14 @@ mod tests {
             .into_boxed_str(),
         );
         let (r, _, _) = fulfil_against(body).await;
-        let out = maknae_proto::encode_egress_frame_reply(
-            &r.unwrap(),
+        let out = maknae_proto::encode_egress_socket_reply(
+            &maknae_proto::EgressSocketReply::Prompt(r.unwrap()),
             maknae_proto::EGRESS_REPLY_FRAME_ENCODE_BYTES,
         )
         .unwrap();
         assert!(!out.windows(12).any(|w| w == b"SENTINEL-426"));
-        let EgressFrameReply::Reply(reply) = maknae_proto::decode_egress_frame_reply(&out).unwrap()
+        let maknae_proto::EgressSocketReply::Prompt(EgressFrameReply::Reply(reply)) =
+            maknae_proto::decode_egress_socket_reply(&out).unwrap()
         else {
             panic!("not a reply frame")
         };
