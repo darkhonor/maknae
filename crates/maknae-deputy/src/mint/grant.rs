@@ -66,6 +66,14 @@ pub(super) fn grant_matches(set: &PermissionSet, grant: &Grant) -> bool {
         && got_repos.len() == repositories.len()
 }
 
+/// The token alone, parsed before the rest of the grant so a grant that fails
+/// to parse can still be revoked with it.
+#[derive(Deserialize)]
+pub(super) struct Bearer {
+    #[serde(deserialize_with = "de_secret")]
+    pub(super) token: Zeroizing<String>,
+}
+
 #[derive(Deserialize)]
 pub(super) struct Grant {
     #[serde(deserialize_with = "de_secret")]

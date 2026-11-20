@@ -1,7 +1,9 @@
 //! The GitHub App installation-token calls: mint one token per permission set,
 //! revoke one, and refuse a grant that is not exactly what was asked.
 
-use super::grant::{grant_matches, is_github_timestamp, is_installation_token, level, Grant};
+use super::grant::{
+    grant_matches, is_github_timestamp, is_installation_token, level, Bearer, Grant,
+};
 use maknae_config::ApiBase;
 use maknae_proto::{ForgeStatus, PermissionSet, RevokeReply};
 use serde::Serialize;
@@ -16,7 +18,9 @@ pub const GITHUB_REPLY_MAX_BYTES: usize = 1_048_576;
 /// `Status` and `Unanswered` mean the token's state is unknown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForgeError {
-    /// GitHub answered non-2xx: no token was issued.
+    /// GitHub answered non-2xx. 401, 403, 404 and 422 are definitive: no token
+    /// was issued. Any other status (`Other`: 5xx, 408, 429, ...) may have come
+    /// from a gateway after GitHub minted: a live token may exist.
     Status(ForgeStatus),
     /// The grant was not the set asked for: a live token may exist unless `revoked`.
     Mismatch { revoked: bool },
@@ -28,11 +32,11 @@ pub enum ForgeError {
     Unread,
     /// The body exceeded the cap after a 2xx: a live token may exist.
     Oversize,
-    /// The body did not parse after a 2xx, or its token is not a token: a live
-    /// token may exist.
+    /// After a 2xx, the body carried no single well-formed token: a live token
+    /// may exist.
     Shape,
-    /// The grant's token is well formed but another field is not: a live token
-    /// may exist unless `revoked`.
+    /// The grant's token is well formed but the rest of the grant does not
+    /// parse or is malformed: a live token may exist unless `revoked`.
     Malformed { revoked: bool },
 }
 
@@ -122,16 +126,20 @@ impl GithubClient {
             return Err(ForgeError::Status(forge_status(status.as_u16())));
         }
         let bytes = read_capped(resp).await?;
-        let grant: Grant = serde_json::from_slice(&bytes).map_err(|_| ForgeError::Shape)?;
-        if !is_installation_token(&grant.token) {
+        let bearer: Bearer = serde_json::from_slice(&bytes).map_err(|_| ForgeError::Shape)?;
+        if !is_installation_token(&bearer.token) {
             return Err(ForgeError::Shape);
         }
+        let Ok(grant) = serde_json::from_slice::<Grant>(&bytes) else {
+            let revoked = self.revoked(api, &bearer.token).await;
+            return Err(ForgeError::Malformed { revoked });
+        };
         if !grant_matches(set, &grant) {
-            let revoked = self.revoked(api, &grant.token).await;
+            let revoked = self.revoked(api, &bearer.token).await;
             return Err(ForgeError::Mismatch { revoked });
         }
         if !is_github_timestamp(&grant.expires_at) {
-            let revoked = self.revoked(api, &grant.token).await;
+            let revoked = self.revoked(api, &bearer.token).await;
             return Err(ForgeError::Malformed { revoked });
         }
         Ok(MintedToken {
@@ -614,20 +622,78 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_duplicate_permission_in_the_grant_is_shape() {
+    async fn a_duplicate_permission_in_the_grant_is_malformed_and_revoked() {
         fips();
         let asked = set(
             &["alpha"],
             &[(GithubPermission::Contents, AccessLevel::Read)],
         );
-        let (base, h) = stub(vec![reply(
-            "201 Created",
-            &grant(
-                "ghs_d",
-                r#"{"contents":"admin","contents":"read"}"#,
-                &["alpha"],
+        let (base, h) = stub(vec![
+            reply(
+                "201 Created",
+                &grant(
+                    "ghs_d",
+                    r#"{"contents":"admin","contents":"read"}"#,
+                    &["alpha"],
+                ),
             ),
-        )])
+            reply("204 No Content", ""),
+        ])
+        .await;
+        let c = GithubClient::loopback_for_tests(&base);
+        assert_eq!(
+            c.mint(&api(), 7, JWT, &asked).await.unwrap_err(),
+            ForgeError::Malformed { revoked: true }
+        );
+        assert_eq!(h.await.unwrap().requests.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_grant_that_fails_to_parse_around_a_usable_token_is_revoked() {
+        fips();
+        let asked = set(
+            &["alpha"],
+            &[(GithubPermission::Contents, AccessLevel::Read)],
+        );
+        for body in [
+            r#"{"token":"ghs_ok","expires_at":5,"permissions":{"contents":"read"},"repository_selection":"selected","repositories":[{"name":"alpha"}]}"#,
+            r#"{"token":"ghs_ok","expires_at":"2026-11-19T01:00:00Z","permissions":{"contents":"read"},"repository_selection":"selected","repositories":[{"id":1}]}"#,
+            r#"{"token":"ghs_ok"}"#,
+        ] {
+            let (base, h) = stub(vec![
+                reply("201 Created", body),
+                reply("204 No Content", ""),
+            ])
+            .await;
+            let c = GithubClient::loopback_for_tests(&base);
+            assert_eq!(
+                c.mint(&api(), 7, JWT, &asked).await.unwrap_err(),
+                ForgeError::Malformed { revoked: true },
+                "{body}"
+            );
+            let seen = h.await.unwrap();
+            assert_eq!(seen.requests.len(), 2, "{body}");
+            let head = head_of(&seen.requests[1]);
+            assert!(
+                head.starts_with("delete /installation/token http/1.1")
+                    && head.contains("authorization: bearer ghs_ok"),
+                "{head}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn two_token_fields_are_shape_and_neither_is_used() {
+        fips();
+        let asked = set(
+            &["alpha"],
+            &[(GithubPermission::Contents, AccessLevel::Read)],
+        );
+        let body = r#"{"token":"ghs_a","token":"ghs_b","expires_at":"2026-11-19T01:00:00Z","permissions":{"contents":"read"},"repository_selection":"selected","repositories":[{"name":"alpha"}]}"#;
+        let (base, h) = stub(vec![
+            reply("201 Created", body),
+            reply("204 No Content", ""),
+        ])
         .await;
         let c = GithubClient::loopback_for_tests(&base);
         assert_eq!(
