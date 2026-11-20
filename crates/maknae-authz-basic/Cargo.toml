@@ -23,7 +23,7 @@ maknae-io = { path = "../maknae-io" }
 # kernel bounds with spawn_blocking+timeout; resolution happens per load, over
 # names root wrote into the policy file).
 # the kernel's admin verbs resolve a request's TARGET through bounded NSS after the decision (#165); decide itself never looks up an account
-nix = { version = "0.31", default-features = false, features = ["user"] }
+nix = { version = "0.32", default-features = false, features = ["user"] }
 
 [features]
 # Test-only door over the production decide sequence (#77): exports

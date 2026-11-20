@@ -50,7 +50,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "pr
 # `signal` — SigSet masks for that prompt: SIGINT/SIGTERM/SIGHUP/SIGQUIT from another process would end it with echo off.
 # `poll` — the session screen's wait for input (#630): a readiness wait that carries no bytes.
 # `process` — getpgid/getsid: Ctrl-Z stops the session only where a shell can continue it (#630).
-nix = { version = "0.31", default-features = false, features = ["user", "fs", "term", "signal", "poll", "process"] }
+nix = { version = "0.32", default-features = false, features = ["user", "fs", "term", "signal", "poll", "process"] }
 # Zeroizing wrapper for the operator's Vault token + the minted SecretIDs in transit
 # through the enroll flow (never argv/env/log). PR-J1 Task 8.
 zeroize = "1"

@@ -24,7 +24,7 @@ maknae-loop = { path = "../../crates/maknae-loop" }
 maknae-seal = { path = "../../crates/maknae-seal" }
 maknae-vault = { path = "../../crates/maknae-vault" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "signal", "sync"] }
-nix = { version = "0.31", default-features = false, features = ["user"] }
+nix = { version = "0.32", default-features = false, features = ["user"] }
 
 [dev-dependencies]
 maknae-proto = { path = "../../crates/maknae-proto" }
