@@ -63,6 +63,7 @@ pub(super) fn grant_matches(set: &PermissionSet, grant: &Grant) -> bool {
     grant.repository_selection.as_deref() == Some("selected")
         && got == want
         && got_repos == want_repos
+        && got_repos.len() == repositories.len()
 }
 
 #[derive(Deserialize)]

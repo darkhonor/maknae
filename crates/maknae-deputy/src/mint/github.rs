@@ -448,6 +448,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_repository_granted_twice_is_a_mismatch_whatever_its_case() {
+        fips();
+        let asked = set(
+            &["alpha"],
+            &[(GithubPermission::Contents, AccessLevel::Read)],
+        );
+        for repos in [&["alpha", "alpha"][..], &["alpha", "ALPHA"][..]] {
+            let (base, h) = stub(vec![
+                reply(
+                    "201 Created",
+                    &grant("ghs_r", r#"{"contents":"read"}"#, repos),
+                ),
+                reply("204 No Content", ""),
+            ])
+            .await;
+            let c = GithubClient::loopback_for_tests(&base);
+            assert_eq!(
+                c.mint(&api(), 7, JWT, &asked).await.unwrap_err(),
+                ForgeError::Mismatch { revoked: true },
+                "{repos:?}"
+            );
+            assert_eq!(h.await.unwrap().requests.len(), 2, "{repos:?}");
+        }
+    }
+
+    #[tokio::test]
     async fn extra_repositories_in_the_grant_are_a_mismatch() {
         fips();
         let asked = set(
