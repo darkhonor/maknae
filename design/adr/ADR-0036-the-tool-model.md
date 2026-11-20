@@ -7,6 +7,7 @@
 - **Amends:** [ADR-0004](ADR-0004-modular-authorization-architecture.md) (the 2026-08-29 retirement of `Bash(argv)`); [ADR-0034](ADR-0034-the-models-file-boundary.md) decision 10 (the first command verb); [ADR-0023](ADR-0023-runtime-loop-role-and-placement.md) decisions 2, 4 and 6; [ADR-0024](ADR-0024-tenancy-model-and-agent-identity.md) decision 6 and its workspace residual
 - **Builds on:** [ADR-0035](ADR-0035-policy-enforcement-points-placement-and-trust-tiers.md) (PEP placement and trust tiers)
 - **Amended:** 2026-11-19 by [ADR-0037](ADR-0037-task-bindings-labels-and-tool-authorization.md) (maintainer ruling): tool entries declare `binds:`; credential classes narrow from a task's bindings; the model sees a filtered view of the entries it may call; a tool entry carrying an unclaimed label is disabled. See the banners at decisions 7 and 13.
+- **Amended:** 2026-11-19 by [ADR-0038](ADR-0038-the-egress-daemon-mints-trust-plane-credentials.md) (maintainer ruling): `minting: trust-plane` means the Egress Daemon. See decision 13.
 
 ## Context
 
