@@ -230,3 +230,13 @@ Dated as-built amendment; rides the #628 PR. Seven statements:
 ## Amendment 2026-11-19 (#474): the ceiling's inputs widen
 
 Recorded by [ADR-0037](ADR-0037-task-bindings-labels-and-tool-authorization.md) decision 8. Besides the object's own `classification` key, the ceiling claims the client-supplied labels `task.classification` and `binding.classification`, and refuses when either ranks above the declared level or cannot be ranked. Those labels can only add refusals: no label writes `classification`, and the ceiling still never permits. Owed, not built.
+
+## Amendment 2026-11-20 (#674): how the operands decide a workspace mount
+
+Recorded by [ADR-0036](ADR-0036-the-tool-model.md) decision 5. Five statements:
+
+1. **A mount is an `fs.read` request, and for a read-write mount an `fs.write` request as well, each with the `mount` operation (`FsOperation::Mount`) on the workspace root.** Both must Permit. The action vocabulary does not change.
+2. **`maknae-authz-basic`** decides the denies on the root as a point, so a deny beneath the root does not refuse the mount, and requires the allow to cover the whole subtree. On a Permit it attaches a `workspace.mask` obligation whose `patterns` list holds the deny patterns of the side the request decides that may intersect the subtree, with a leading `~` expanded to the subject's home. The lists that decided supply them. When an agent's built-in tasks right decides the root, that is the site `permissions.deny` floor only, because the right outranks the agent's own denies and never the floor. Otherwise it is the site floor and the subject's own denies.
+3. **The `sensitive` operand** decides a mount on the root as a point: a root that is, or lies inside, a listed path is refused, whatever any role grants. Listed entries beneath the root do not refuse the mount. The kernel adds them to the mask set.
+4. **The partition operand** decides a mount for an agent: the root must lie inside the cited task's partition, otherwise `partition: the mount lies outside the task's partition`, and a mount that cites no task is refused with `partition: the request cites no task`. Off the agent channel it abstains. Neither mandatory operand grants.
+5. **`workspace.mask` is honored only by a mount's discharge.** It and `audit` are the only obligations the mount's discharge accepts. Every other verb's discharge still refuses `workspace.mask`, so an obligation attached to any other request denies. Two engines that attach different `workspace.mask` params conflict under `merge_obligations` and deny; that is accepted until a second engine exists.
