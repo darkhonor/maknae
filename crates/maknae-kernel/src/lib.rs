@@ -42,6 +42,7 @@ pub mod task_store;
 mod task_verbs;
 mod uid_gate;
 pub mod vocabulary;
+mod workspace;
 pub use authz::*;
 pub use blocking_guard::BLOCKING_BREAKER_MAX_IN_FLIGHT;
 pub use boot::{boot, read_files, BootConfig};
