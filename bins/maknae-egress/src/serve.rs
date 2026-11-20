@@ -1721,7 +1721,7 @@ mod tests {
                     own_pub: self.own.public_key(),
                     own_key: &self.own,
                     egress_dir: self.egress.path(),
-                    now: 1_800_000_000,
+                    clock: &|| Some(1_800_000_000),
                     journal: &mut journal,
                 };
                 let owner = nix::unistd::getuid().as_raw();
@@ -1742,7 +1742,7 @@ mod tests {
                     own_pub: self.own.public_key(),
                     own_key: &self.own,
                     egress_dir: self.egress.path(),
-                    now: 1_800_000_000,
+                    clock: &|| Some(1_800_000_000),
                     journal: &mut journal,
                 };
                 self.rt.block_on(minter::revoke(req, agent, app, &mut d))

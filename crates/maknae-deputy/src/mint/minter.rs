@@ -25,7 +25,8 @@ pub struct MintDeps<'a, S: Signer> {
     pub own_pub: &'a SealPublicKey,
     pub own_key: &'a SealPrivateKey,
     pub egress_dir: &'a Path,
-    pub now: u64,
+    /// Unix seconds, read once for each set's JWT; `None` refuses `Signer`.
+    pub clock: &'a dyn Fn() -> Option<u64>,
     pub journal: &'a mut dyn FnMut(&str),
 }
 
@@ -155,7 +156,8 @@ async fn mint_one<S: Signer>(
     set: &PermissionSet,
     d: &MintDeps<'_, S>,
 ) -> Result<MintedToken, Failure> {
-    let input = signing_input(app.app_id, d.now);
+    let now = (d.clock)().ok_or(Failure::Signer)?;
+    let input = signing_input(app.app_id, now);
     let signature = d
         .signer
         .sign(&app.transit_mount, &app.transit_key, input.as_bytes())
@@ -463,9 +465,22 @@ mod tests {
         signer: FakeSigner,
         minting: MintingConfig,
         owner: u32,
+        clock_steps: Option<Vec<Option<u64>>>,
+        clock_reads: std::cell::Cell<usize>,
     }
 
     impl Rig {
+        fn clock(&self) -> impl Fn() -> Option<u64> + '_ {
+            move || {
+                let n = self.clock_reads.get();
+                self.clock_reads.set(n + 1);
+                match &self.clock_steps {
+                    None => Some(NOW),
+                    Some(steps) => steps[n.min(steps.len() - 1)],
+                }
+            }
+        }
+
         fn new() -> Self {
             fips();
             let egress = EgressDir::new();
@@ -477,6 +492,8 @@ mod tests {
                 signer: FakeSigner::signing(SIGNATURE),
                 minting: minting(),
                 owner: euid(),
+                clock_steps: None,
+                clock_reads: std::cell::Cell::new(0),
             }
         }
 
@@ -496,7 +513,7 @@ mod tests {
                 own_pub: self.own.public_key(),
                 own_key: &self.own,
                 egress_dir: self.egress.path(),
-                now: NOW,
+                clock: &self.clock(),
                 journal: &mut journal,
             };
             let (reply, live) = mint_with_recipient_owner(&admitted, &mut d, self.owner).await;
@@ -520,7 +537,7 @@ mod tests {
                 own_pub: self.own.public_key(),
                 own_key: &self.own,
                 egress_dir: self.egress.path(),
-                now: NOW,
+                clock: &self.clock(),
                 journal: &mut journal,
             };
             let reply = revoke(req, &agent, app, &mut d).await;
@@ -591,6 +608,47 @@ mod tests {
                 "{label}: GitHub called"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn each_set_s_jwt_is_dated_by_its_own_clock_reading() {
+        let mut rig = Rig::new();
+        rig.clock_steps = Some(vec![Some(NOW), Some(NOW + 400), Some(NOW + 900)]);
+        let (reply, _, _, _) = rig
+            .mint(
+                &request(vec![set(&["a"]), set(&["b"]), set(&["c"])]),
+                vec![
+                    granted("ghs_one", &["a"]),
+                    granted("ghs_two", &["b"]),
+                    granted("ghs_three", &["c"]),
+                ],
+            )
+            .await;
+        assert_eq!(minted(reply).len(), 3);
+        let inputs: Vec<Vec<u8>> = rig.signer.calls().into_iter().map(|c| c.input).collect();
+        let want: Vec<Vec<u8>> = [NOW, NOW + 400, NOW + 900]
+            .iter()
+            .map(|t| super::super::jwt::signing_input(5834363, *t).into_bytes())
+            .collect();
+        assert_eq!(inputs, want);
+        assert_eq!(rig.clock_reads.get(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_clock_before_1970_on_a_later_set_refuses_signer_and_revokes_the_earlier() {
+        let mut rig = Rig::new();
+        rig.clock_steps = Some(vec![Some(NOW), None]);
+        let (reply, live, seen, _) = rig
+            .mint(
+                &request(vec![set(&["a"]), set(&["b"])]),
+                vec![granted("ghs_one", &["a"]), revoked()],
+            )
+            .await;
+        assert_eq!(reply, MintReply::Refused(MintRefusal::Signer));
+        assert!(live.tokens.is_empty());
+        assert_eq!(seen.mints(), 1);
+        assert_eq!(seen.revoked_tokens(), ["ghs_one"]);
+        assert_eq!(rig.signer.calls().len(), 1);
     }
 
     #[tokio::test]
@@ -810,7 +868,7 @@ mod tests {
             own_pub: rig.own.public_key(),
             own_key: &rig.own,
             egress_dir: rig.egress.path(),
-            now: NOW,
+            clock: &|| Some(NOW),
             journal: &mut journal,
         };
         let (reply, live) = mint_with_recipient_owner(&admitted, &mut d, rig.owner).await;

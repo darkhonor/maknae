@@ -168,7 +168,6 @@ struct Ready {
 impl Ready {
     fn deps<'a>(
         &'a self,
-        now: u64,
         journal: &'a mut dyn FnMut(&str),
     ) -> MintDeps<'a, ServiceSigner<ApproleLogin>> {
         MintDeps {
@@ -177,7 +176,7 @@ impl Ready {
             own_pub: self.own_key.public_key(),
             own_key: &self.own_key,
             egress_dir: &self.egress_dir,
-            now,
+            clock: &unix_now,
             journal,
         }
     }
@@ -251,12 +250,8 @@ impl MintFrames for EgressMinting {
         let Ok(r) = &self.ready else {
             return refused();
         };
-        let Some(now) = unix_now() else {
-            (self.journal)("mint refused: the clock is before 1970");
-            return refused();
-        };
         let mut log = |l: &str| (self.journal)(l);
-        let mut d = r.deps(now, &mut log);
+        let mut d = r.deps(&mut log);
         r.rt.block_on(minter::mint(admitted, &mut d))
     }
 
@@ -264,12 +259,8 @@ impl MintFrames for EgressMinting {
         let Ok(r) = &self.ready else {
             return RevokeReply::Refused(MintRefusal::Signer);
         };
-        let Some(now) = unix_now() else {
-            (self.journal)("revoke refused: the clock is before 1970");
-            return RevokeReply::Refused(MintRefusal::Signer);
-        };
         let mut log = |l: &str| (self.journal)(l);
-        let mut d = r.deps(now, &mut log);
+        let mut d = r.deps(&mut log);
         r.rt.block_on(minter::revoke(req, agent, app, &mut d))
     }
 
