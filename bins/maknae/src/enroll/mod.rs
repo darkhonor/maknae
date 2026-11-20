@@ -173,6 +173,7 @@ pub enum EnrollError {
         accessors: Vec<String>,
     },
     /// maknaed's enrollment completed; the minting step after it did not.
+    #[cfg(not(target_os = "macos"))]
     MintingFailed(Box<EnrollError>),
     /// Rotate's PRE-MINT cleanup (spec §4.1) could not destroy every
     /// previously-recorded accessor — FATAL: enroll aborts before minting
@@ -373,6 +374,7 @@ impl std::fmt::Display for EnrollError {
                 "these Egress Daemon SecretID accessors could not be destroyed: {}; they stay recorded in /etc/maknae/private/maknae-egress-enroll-state.yaml, and the next `maknae enroll` retries them",
                 accessors.join(", ")
             ),
+            #[cfg(not(target_os = "macos"))]
             EnrollError::MintingFailed(e) => write!(
                 f,
                 "maknaed is enrolled; enrolling the Egress Daemon for minting failed: {e}"
@@ -3179,6 +3181,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_minting_failure_says_maknaed_is_enrolled() {
         let e = EnrollError::MintingFailed(Box::new(EnrollError::State("boom".into())));
