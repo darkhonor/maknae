@@ -435,6 +435,36 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_mounts_its_partition_under_the_production_home() {
+        let (_g, c) = shipped_composition();
+        let hobi = maknae_config::AgentId::parse("hobi").unwrap();
+        let task = task();
+        let agent = Stamp::Agent {
+            agent: &hobi,
+            task: Some(&task),
+        };
+        for fold in [Fold::None, Fold::Case] {
+            for mode in [MountMode::ReadOnly, MountMode::ReadWrite] {
+                assert_eq!(
+                    decide_mount(
+                        &c,
+                        fold,
+                        2001,
+                        Some(Path::new("/var/lib/maknae-agents/hobi")),
+                        None,
+                        None,
+                        &agent,
+                        "/var/lib/maknae-agents/hobi/tasks/users/1000",
+                        mode,
+                    ),
+                    permitted(&[]),
+                    "{fold:?} {mode:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn structural_rule_compares_components() {
         let (_g, c) = broad();
         for fold in [Fold::None, Fold::Case] {
@@ -878,10 +908,15 @@ mod tests {
             task: Some(&task),
         };
         let home = Path::new(ALICE);
+        let facts = ConversationFacts {
+            state: crate::conversation::facts::FactState::Active,
+            owner_uid: Some(7),
+            extends: None,
+        };
         let client = mount_request(
             7,
             home,
-            None,
+            Some(&facts),
             Some(&personal),
             &Stamp::Client,
             "/srv/x",
@@ -907,6 +942,20 @@ mod tests {
         assert_eq!(
             client.subject.0.str(maknae_security::SUBJECT_HOME),
             Some(ALICE)
+        );
+        assert_eq!(
+            client
+                .resource
+                .0
+                .str(maknae_authz_basic::RESOURCE_CONVERSATION_STATE_KEY),
+            Some(maknae_authz_basic::CONVERSATION_ACTIVE)
+        );
+        assert_eq!(
+            client
+                .resource
+                .0
+                .get(maknae_authz_basic::RESOURCE_CONVERSATION_OWNER_KEY),
+            Some(&AttrValue::Int(7))
         );
         let tasked = mount_request(7, home, None, None, &agent, "/srv/x", "fs.read");
         assert_eq!(
