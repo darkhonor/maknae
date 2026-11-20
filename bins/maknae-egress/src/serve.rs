@@ -1800,7 +1800,7 @@ mod tests {
                     };
                     s.set_nonblocking(false).unwrap();
                     seen.push(read_http(&mut s));
-                    s.write_all(resp.as_bytes()).unwrap();
+                    let _ = s.write_all(resp.as_bytes());
                 }
                 seen
             });

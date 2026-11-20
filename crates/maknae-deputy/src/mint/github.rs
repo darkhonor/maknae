@@ -312,8 +312,8 @@ mod tests {
                 };
                 let (mut s, _) = accepted.unwrap();
                 requests.push(read_request(&mut s).await);
-                s.write_all(resp.as_bytes()).await.unwrap();
-                s.flush().await.unwrap();
+                let _ = s.write_all(resp.as_bytes()).await;
+                let _ = s.flush().await;
             }
             let extra = usize::from(
                 tokio::time::timeout(Duration::from_millis(300), l.accept())
