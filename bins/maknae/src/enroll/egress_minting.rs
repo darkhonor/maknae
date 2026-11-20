@@ -66,12 +66,22 @@ pub(crate) fn load(path: &Path) -> Result<Option<MintingConfig>, EnrollError> {
     })
 }
 
-/// The Egress Daemon must not log in on maknaed's own mount.
-pub(crate) fn check_mount(config: &MintingConfig, daemon_mount: &str) -> Result<(), EnrollError> {
+/// The Egress Daemon must not log in on maknaed's or an agent's mount.
+pub(crate) fn check_mount(
+    config: &MintingConfig,
+    daemon_mount: &str,
+    agent_mounts: &[String],
+) -> Result<(), EnrollError> {
     let mount = &config.vault.approle_mount;
-    if mount.trim_matches('/') == daemon_mount.trim_matches('/') {
+    let same = |other: &str| mount.trim_matches('/') == other.trim_matches('/');
+    if same(daemon_mount) {
         return Err(EnrollError::InvalidVaultMount(format!(
             "minting.yaml vault.approle_mount {mount} is maknaed's own AppRole mount; the Egress Daemon logs in on its own mount"
+        )));
+    }
+    if agent_mounts.iter().any(|m| same(m)) {
+        return Err(EnrollError::InvalidVaultMount(format!(
+            "minting.yaml vault.approle_mount {mount} is an agent's AppRole mount; the Egress Daemon logs in on its own mount"
         )));
     }
     super::agent::check_mount("minting.yaml vault.approle_mount", mount)
@@ -306,11 +316,12 @@ pub(crate) async fn enroll_minting<O: MintingOps>(
     run: &dyn Run,
     minting: Option<&MintingConfig>,
     daemon_mount: &str,
+    agent_mounts: &[String],
 ) -> Result<Minting, EnrollError> {
     let prior = files.read_state()?;
     match minting {
         Some(config) => {
-            check_mount(config, daemon_mount)?;
+            check_mount(config, daemon_mount, agent_mounts)?;
             enroll(ops, files, run, &config.vault.approle_mount, prior).await
         }
         None => withdraw(ops, files, run, prior).await,
@@ -634,7 +645,15 @@ mod tests {
 
     async fn on(h: &Host, fake: &Fake, minting: bool) -> Result<Minting, EnrollError> {
         let c = config();
-        enroll_minting(fake, &h.files, fake, minting.then_some(&c), DAEMON_MOUNT).await
+        enroll_minting(
+            fake,
+            &h.files,
+            fake,
+            minting.then_some(&c),
+            DAEMON_MOUNT,
+            &[],
+        )
+        .await
     }
 
     const RELOAD: &str = "/usr/bin/systemctl daemon-reload";
@@ -857,7 +876,7 @@ mod tests {
         let h = host("mounts");
         let fake = Fake::default();
         let c = config();
-        let e = enroll_minting(&fake, &h.files, &fake, Some(&c), MOUNT)
+        let e = enroll_minting(&fake, &h.files, &fake, Some(&c), MOUNT, &[])
             .await
             .unwrap_err();
         assert!(matches!(e, EnrollError::InvalidVaultMount(_)), "{e:?}");
@@ -870,6 +889,30 @@ mod tests {
             .unwrap();
         let e = on(&h, &fake, true).await.unwrap_err();
         assert!(e.to_string().contains("elsewhere"), "{e}");
+        assert!(fake.log().is_empty());
+        assert!(!h.role_id().exists());
+    }
+
+    #[tokio::test]
+    async fn an_agent_s_approle_mount_is_refused_before_any_call() {
+        let h = host("agent-mount");
+        let fake = Fake::default();
+        let c = config();
+        for agents in [
+            strings(&[MOUNT]),
+            strings(&["maknae-agent-approle", &format!("/{MOUNT}/")]),
+        ] {
+            let e = check_mount(&c, DAEMON_MOUNT, &agents).unwrap_err();
+            assert!(
+                matches!(&e, EnrollError::InvalidVaultMount(m) if m.contains("an agent's AppRole mount")),
+                "{e:?}"
+            );
+            let e = enroll_minting(&fake, &h.files, &fake, Some(&c), DAEMON_MOUNT, &agents)
+                .await
+                .unwrap_err();
+            assert!(matches!(e, EnrollError::InvalidVaultMount(_)), "{e:?}");
+        }
+        assert!(check_mount(&c, DAEMON_MOUNT, &strings(&["maknae-agent-approle"])).is_ok());
         assert!(fake.log().is_empty());
         assert!(!h.role_id().exists());
     }

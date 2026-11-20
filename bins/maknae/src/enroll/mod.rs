@@ -2556,16 +2556,21 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
     check_vault_reachable(vault_addr)?;
     let seal_home = seal_pub_home(macos, read_os_release)
         .inspect_err(|_| errln!("{}", msg(locale, MsgId::EnrollPreflightFailed)))?;
-    let minting = egress_minting::load(&egress_minting::minting_path())
+    let (minting, agent_mounts) = egress_minting::load(&egress_minting::minting_path())
         .and_then(|m| {
             #[cfg(target_os = "macos")]
             if m.is_some() {
                 return Err(EnrollError::MintingOnMacos);
             }
-            if let Some(c) = &m {
-                egress_minting::check_mount(c, &args.approle_mount)?;
-            }
-            Ok(m)
+            let agent_mounts = match &m {
+                Some(c) => {
+                    let agent_mounts = agent::recorded_agent_mounts()?;
+                    egress_minting::check_mount(c, &args.approle_mount, &agent_mounts)?;
+                    agent_mounts
+                }
+                None => Vec::new(),
+            };
+            Ok((m, agent_mounts))
         })
         .inspect_err(|_| errln!("{}", msg(locale, MsgId::EnrollPreflightFailed)))?;
 
@@ -2719,7 +2724,16 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
     .await
     {
         Ok(summary) => {
-            place_minting(args, locale, &operator, &client, minting.as_ref(), summary).await
+            place_minting(
+                args,
+                locale,
+                &operator,
+                &client,
+                minting.as_ref(),
+                &agent_mounts,
+                summary,
+            )
+            .await
         }
         Err(e) => {
             destroy_and_report(&client, &args.approle_mount, &minted, locale).await;
@@ -2736,6 +2750,7 @@ async fn place_minting(
     operator: &Operator,
     client: &maknae_vault::OperatorClient,
     minting: Option<&maknae_config::MintingConfig>,
+    agent_mounts: &[String],
     summary: String,
 ) -> Result<String, EnrollError> {
     let resolver = artifact_write::RealOwnerResolver {
@@ -2753,6 +2768,7 @@ async fn place_minting(
         &agent_access::Host,
         minting,
         &args.approle_mount,
+        agent_mounts,
     )
     .await
     .map_err(|e| EnrollError::MintingFailed(Box::new(e)))?;
@@ -2779,6 +2795,7 @@ async fn place_minting(
     _operator: &Operator,
     _client: &maknae_vault::OperatorClient,
     _minting: Option<&maknae_config::MintingConfig>,
+    _agent_mounts: &[String],
     summary: String,
 ) -> Result<String, EnrollError> {
     Ok(summary)

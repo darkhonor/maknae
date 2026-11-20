@@ -1260,12 +1260,48 @@ pub(crate) fn read_records(
     agents: &maknae_io::Anchor,
     agent: &AgentId,
 ) -> Result<(Option<AgentRecord>, Vec<OtherAgent>), EnrollError> {
+    let mut prior = None;
+    let mut others = Vec::new();
+    for record in records(agents)? {
+        if record.agent_id == agent.as_str() {
+            prior = Some(record);
+        } else {
+            others.push((record.agent_id, record.uid));
+        }
+    }
+    Ok((prior, others))
+}
+
+/// The AppRole mount of every enrolled agent; none when the agents directory
+/// does not exist yet.
+pub(crate) fn recorded_agent_mounts() -> Result<Vec<String>, EnrollError> {
+    match maknae_io::open_anchor(
+        Path::new(AGENTS_DIR),
+        AnchorRequired {
+            owner: Some(0),
+            mode_mask: Some(0o022),
+        },
+        StrategyPref::Auto,
+    ) {
+        Ok(agents) => agent_mounts(&agents),
+        Err(e) if is_not_found(&e) => Ok(Vec::new()),
+        Err(e) => Err(io_error(Path::new(AGENTS_DIR), e)),
+    }
+}
+
+pub(crate) fn agent_mounts(agents: &maknae_io::Anchor) -> Result<Vec<String>, EnrollError> {
+    Ok(records(agents)?
+        .into_iter()
+        .map(|r| r.approle_mount)
+        .collect())
+}
+
+fn records(agents: &maknae_io::Anchor) -> Result<Vec<AgentRecord>, EnrollError> {
     let entries = agents
         .enumerate(Path::new(""), None)
         .map_err(|e| io_error(Path::new(AGENTS_DIR), e))?
         .value;
-    let mut prior = None;
-    let mut others = Vec::new();
+    let mut out = Vec::new();
     for entry in entries {
         let Some(name) = entry.name.to_str() else {
             continue;
@@ -1289,13 +1325,9 @@ pub(crate) fn read_records(
                 record.agent_id
             )));
         }
-        if name == agent.as_str() {
-            prior = Some(record);
-        } else {
-            others.push((record.agent_id, record.uid));
-        }
+        out.push(record);
     }
-    Ok((prior, others))
+    Ok(out)
 }
 
 pub(crate) fn read_state(
@@ -4046,6 +4078,34 @@ pub(crate) mod tests {
                 "{got:?}"
             );
         }
+    }
+
+    #[test]
+    fn agent_mounts_names_every_recorded_agent_s_mount() {
+        let (d, agents) = scratch_anchor("records-mounts");
+        for (id, mount) in [("hobi", "m-hobi"), ("jin", "m-jin")] {
+            std::fs::create_dir(d.join(id)).unwrap();
+            let mut r = record();
+            r.agent_id = id.into();
+            r.approle_mount = mount.into();
+            write_0640(
+                &d.join(id).join(maknae_config::ENROLLMENT_FILE),
+                &r.to_yaml(),
+            );
+        }
+        let got = agent_mounts(&agents);
+        if running_as_root() {
+            let mut got = got.unwrap();
+            got.sort();
+            assert_eq!(got, strings(&["m-hobi", "m-jin"]));
+        } else {
+            assert!(
+                matches!(&got, Err(EnrollError::Io { source, .. }) if source.contains("require 0")),
+                "{got:?}"
+            );
+        }
+        let (_e, empty) = scratch_anchor("records-mounts-empty");
+        assert_eq!(agent_mounts(&empty).unwrap(), Vec::<String>::new());
     }
 
     #[test]
