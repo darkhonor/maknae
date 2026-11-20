@@ -288,7 +288,7 @@ impl AuthzPolicy {
     /// deny entry's ORIGINAL text rides in `source` for the audit record
     /// (audit-only — never onto the wire, spec §4.4). `HomeUnbound` when any
     /// `~` pattern of the request's capability has no valid `home`, whatever
-    /// its position in either list.
+    /// its position in either list. `fold` applies to denies only; allows match as written.
     pub fn evaluate3(
         &self,
         req: &Request<'_>,
@@ -4480,5 +4480,101 @@ mod tests {
                 Ok(Match3::NoMatch)
             );
         }
+    }
+
+    #[test]
+    fn a_subtree_spans_every_mapped_root_it_holds() {
+        let p = mount_policy(
+            "\"Read(/**)\", \"Write(/**)\"",
+            "\"Write(/etc/x)\", \"Read(/etc/shadow)\"",
+        );
+        for root in ["/private", "/System/Volumes"] {
+            let root = Path::new(root);
+            assert_eq!(
+                p.evaluate_write_subtree(root, None, Fold::Case),
+                Ok(denied("Write(/etc/x)")),
+                "{root:?}"
+            );
+            assert_eq!(
+                p.evaluate_write_subtree(root, None, Fold::None),
+                Ok(Match3::AllowMatch {
+                    source: "Write(/**)".into()
+                }),
+                "{root:?}"
+            );
+        }
+        let root = Path::new("/private");
+        assert_eq!(
+            p.mount_masks(None, None, MountSide::Read, root, None, Fold::Case),
+            Ok(vec!["/etc/shadow".to_string()])
+        );
+        assert_eq!(
+            p.mount_masks(None, None, MountSide::Read, root, None, Fold::None),
+            Ok(vec![])
+        );
+    }
+
+    #[test]
+    fn the_agent_paths_carry_the_fold() {
+        let p = parse_authz(
+            "schema_version: 1\npermissions:\n  allow: []\n  deny: [\"Read(~/tasks/Blocked/**)\", \"Write(~/tasks/Blocked/**)\"]\nsubjects:\n  right:\n    permissions:\n      allow: [\"Read(~/tasks/**)\", \"Write(~/tasks/**)\"]\n  sub:\n    permissions:\n      allow: [\"Read(~/**)\", \"Write(~/**)\"]\n      deny: [\"Read(~/Notes/**)\", \"Write(~/Notes/**)\", \"Read(~/tasks/blocked/own)\"]\n",
+        )
+        .unwrap();
+        let right = p.subjects["right"].permissions.as_ref().unwrap();
+        let sub = p.subjects["sub"].permissions.as_ref();
+        let h = Some(Path::new("/h/a"));
+        let (blocked, notes) = (Path::new("/h/a/tasks/blocked"), Path::new("/h/a/notes"));
+        let site = |s: &str| AgentMatch::Floored(denied(s));
+        let by_right = |s: &str| AgentMatch::Right { source: s.into() };
+        let floored_allow = |s: &str| AgentMatch::Floored(Match3::AllowMatch { source: s.into() });
+        let cases: [(Fold, [AgentMatch; 4]); 2] = [
+            (
+                Fold::Case,
+                [
+                    site("Write(~/tasks/Blocked/**)"),
+                    site("Read(~/tasks/Blocked/**)"),
+                    AgentMatch::Floored(denied("Write(~/Notes/**)")),
+                    AgentMatch::Floored(denied("Read(~/Notes/**)")),
+                ],
+            ),
+            (
+                Fold::None,
+                [
+                    by_right("Write(~/tasks/**)"),
+                    by_right("Read(~/tasks/**)"),
+                    floored_allow("Write(~/**)"),
+                    floored_allow("Read(~/**)"),
+                ],
+            ),
+        ];
+        for (fold, [sub_blocked, mount_blocked, sub_notes, mount_notes]) in cases {
+            assert_eq!(
+                p.evaluate_write_subtree_agent(right, sub, blocked, h, fold),
+                Ok(sub_blocked),
+                "{fold:?}"
+            );
+            assert_eq!(
+                p.evaluate_mount_agent(right, sub, MountSide::Read, blocked, h, fold),
+                Ok(mount_blocked),
+                "{fold:?}"
+            );
+            assert_eq!(
+                p.evaluate_write_subtree_agent(right, sub, notes, h, fold),
+                Ok(sub_notes),
+                "{fold:?}"
+            );
+            assert_eq!(
+                p.evaluate_mount_agent(right, sub, MountSide::Read, notes, h, fold),
+                Ok(mount_notes),
+                "{fold:?}"
+            );
+        }
+        let masks = |fold| p.mount_masks(Some(right), sub, MountSide::Read, blocked, h, fold);
+        assert!(masks(Fold::Case)
+            .unwrap()
+            .contains(&"/h/a/tasks/blocked/own".to_string()));
+        assert!(!masks(Fold::None)
+            .unwrap()
+            .contains(&"/h/a/tasks/blocked/own".to_string()));
     }
 }

@@ -1962,6 +1962,35 @@ mod tests {
         ));
     }
 
+    fn read_at_home(lp: &LoadedPolicy, req: SecRequest, home: &str) -> Verdict {
+        let mut req = req;
+        req.subject
+            .0
+            .insert(maknae_security::SUBJECT_HOME, AttrValue::Str(home.into()));
+        decide_loaded(lp, &principal(), &req)
+    }
+
+    #[test]
+    fn a_home_deny_decides_through_the_folded_home() {
+        let mut lp = lp_mount("schema_version: 1\npermissions:\n  allow: [\"Read(/**)\"]\n  deny: [\"Read(~/.ssh/**)\"]\n");
+        let req = || {
+            request(
+                Some(i64::from(OPERATOR_UID)),
+                "fs.read",
+                Some("/users/alex/.SSH/id_rsa"),
+            )
+        };
+        assert!(matches!(
+            read_at_home(&lp, req(), "/Users/Alex"),
+            Verdict::Permit { .. }
+        ));
+        lp.fold = maknae_config::Fold::Case;
+        assert!(matches!(
+            read_at_home(&lp, req(), "/Users/Alex"),
+            Verdict::Deny { .. }
+        ));
+    }
+
     #[test]
     fn mount_with_an_unbound_home_is_indeterminate() {
         let lp = lp_mount("schema_version: 1\npermissions:\n  allow: [\"Read(/w/**)\"]\n  deny: [\"Read(~/x/**)\"]\n");
@@ -5056,6 +5085,43 @@ mod tests {
             Some(maknae_security::CHANNEL_AGENT),
             Some("hobi"),
         )
+    }
+
+    #[test]
+    fn an_agent_deny_decides_through_the_policys_fold() {
+        let site = AGENT_SITE.replace(
+            "deny: [\"Read(~/.ssh/**)\"]",
+            "deny: [\"Read(~/.ssh/**)\", \"Read(~/tasks/Blocked/**)\"]",
+        );
+        for path in ["/Users/Hobi/tasks/blocked/x", "/Users/Hobi/.SSH/id_rsa"] {
+            let mut lp = lp_agent(
+                "user",
+                Some("schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n"),
+            );
+            lp.policy = maknae_config::parse_authz(&site).unwrap();
+            let req = || {
+                on_channel(
+                    request(Some(i64::from(HOBI_UID)), "fs.read", Some(path)),
+                    Some(maknae_security::CHANNEL_AGENT),
+                    Some("hobi"),
+                )
+            };
+            assert!(
+                matches!(
+                    read_at_home(&lp, req(), "/Users/Hobi"),
+                    Verdict::Permit { .. }
+                ),
+                "{path}"
+            );
+            lp.fold = maknae_config::Fold::Case;
+            assert!(
+                matches!(
+                    read_at_home(&lp, req(), "/Users/Hobi"),
+                    Verdict::Deny { .. }
+                ),
+                "{path}"
+            );
+        }
     }
 
     fn admin_terms() -> impl Iterator<Item = &'static str> {
