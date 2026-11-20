@@ -673,6 +673,7 @@ async fn commit_intent<E: AuditEmit>(
         FsOperation::DeleteTree => MutationOperation::DeleteTree,
         FsOperation::Mkdir => MutationOperation::Mkdir,
         FsOperation::Read => MutationOperation::Read,
+        FsOperation::Mount => return Err(()),
     });
     meta.authorized_paths = paths;
     meta.label = Some(label_audit(label));

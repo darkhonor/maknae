@@ -6845,6 +6845,7 @@ mod tests {
                 FsOperation::DeleteTree,
                 FsOperation::Mkdir,
                 FsOperation::Read,
+                FsOperation::Mount,
             ]
             .into_iter()
             .map(|o| Some(o.as_str()))
@@ -6920,7 +6921,7 @@ mod tests {
             let (uids, paths, homes, ops) = (uids(), paths(), homes(), operations());
             assert_eq!(
                 (uids.len(), paths.len(), homes.len(), ops.len()),
-                (9, 22, 5, 7)
+                (9, 22, 5, 8)
             );
             let destinations = [
                 Some(AttrValue::Str("provider:openai".into())),
@@ -6944,7 +6945,7 @@ mod tests {
                     distinct(&ops),
                     distinct(&destinations),
                 ),
-                (61, 9, 22, 5, 7, 4)
+                (61, 9, 22, 5, 8, 4)
             );
             let mut cells = 0usize;
             let mut mismatches: Vec<String> = Vec::new();
@@ -7093,7 +7094,7 @@ mod tests {
                 mismatches.len(),
                 &mismatches[..mismatches.len().min(10)]
             );
-            let fs_cells = 6 * 7 * 22 * 5 + 7 * 22 * 5;
+            let fs_cells = 6 * 8 * 22 * 5 + 8 * 22 * 5;
             let other_cells = 54 + 4;
             assert_eq!(cells, 12 * 9 * (fs_cells + other_cells));
             assert_eq!(subject_entries, 1);
