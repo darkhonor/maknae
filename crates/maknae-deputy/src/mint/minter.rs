@@ -34,6 +34,8 @@ pub struct MintDeps<'a, S: Signer> {
 /// they can be revoked if it is not.
 pub struct LiveTokens {
     pub api: ApiBase,
+    /// The frame's task, agent, class and App, for the journal.
+    pub label: String,
     pub tokens: Vec<Zeroizing<String>>,
 }
 
@@ -67,6 +69,7 @@ async fn mint_for<S: Signer>(
     let label = frame_label("mint", &m.req.task, &m.agent, &m.req.class, &m.req.app);
     let mut live = LiveTokens {
         api: m.app.api.clone(),
+        label: label.clone(),
         tokens: Vec::with_capacity(m.req.sets.len()),
     };
     let reply = match mint_sets(m, d, owner, &label, &mut live).await {
@@ -76,11 +79,11 @@ async fn mint_for<S: Signer>(
                 &mut live,
                 LiveTokens {
                     api: m.app.api.clone(),
+                    label: label.clone(),
                     tokens: Vec::new(),
                 },
             );
-            let journal = &mut *d.journal;
-            revoke_all(d.github, minted, &mut |l| journal(&format!("{label} {l}"))).await;
+            revoke_all(d.github, minted, d.journal).await;
             MintReply::Refused(refusal)
         }
     };
@@ -231,7 +234,8 @@ pub async fn revoke_all(github: &GithubClient, live: LiveTokens, journal: &mut d
             Err(e) => format!("{e:?}"),
         };
         journal(&format!(
-            "set={set}: a minted token could not be revoked: {failure}"
+            "{} set={set}: a minted token could not be revoked: {failure}",
+            live.label
         ));
     }
 }
@@ -1097,6 +1101,7 @@ mod tests {
         let github = GithubClient::loopback_for_tests(&base);
         let live = LiveTokens {
             api: ApiBase::parse("https://api.github.example").unwrap(),
+            label: "mint task=\"t\"".into(),
             tokens: ["t0", "t1", "t2", "t3"]
                 .iter()
                 .map(|t| Zeroizing::new(t.to_string()))
@@ -1115,6 +1120,33 @@ mod tests {
             lines[1].contains("set=3") && lines[1].contains("Status(Other)"),
             "{lines:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_delivery_rollback_journals_the_frame_coordinates() {
+        let rig = Rig::new();
+        let (reply, live, _, _) = rig
+            .mint(
+                &request(vec![set(&["a"])]),
+                vec![granted("ghs_one", &["a"])],
+            )
+            .await;
+        assert_eq!(minted(reply).len(), 1);
+        let (base, h) = stub(vec![http("500 Internal Server Error", "{}")]).await;
+        let github = GithubClient::loopback_for_tests(&base);
+        let mut lines = Vec::new();
+        revoke_all(&github, live, &mut |l| lines.push(l.to_string())).await;
+        assert_eq!(h.await.unwrap().revoked_tokens(), ["ghs_one"]);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        for part in [
+            "mint task=\"task-1\"",
+            "agent=coder",
+            "class=\"git-write\"",
+            "app=\"deploy\"",
+            "set=0: a minted token could not be revoked",
+        ] {
+            assert!(lines[0].contains(part), "{part} not in {}", lines[0]);
+        }
     }
 
     #[tokio::test]
@@ -1298,6 +1330,7 @@ mod tests {
     fn live_tokens_debug_shows_the_count_only() {
         let live = LiveTokens {
             api: ApiBase::parse("https://api.github.example").unwrap(),
+            label: String::new(),
             tokens: vec![Zeroizing::new("ghs_secret".into())],
         };
         assert_eq!(format!("{live:?}"), "LiveTokens(<1 tokens>)");

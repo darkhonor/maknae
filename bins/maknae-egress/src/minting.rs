@@ -243,6 +243,7 @@ impl MintFrames for EgressMinting {
                 MintReply::Refused(MintRefusal::Signer),
                 LiveTokens {
                     api: admitted.app.api.clone(),
+                    label: String::new(),
                     tokens: Vec::new(),
                 },
             )
@@ -638,6 +639,7 @@ mod tests {
         recorded();
         m.revoke_all(LiveTokens {
             api: ApiBase::parse("https://127.0.0.1:1").unwrap(),
+            label: String::new(),
             tokens: vec![Zeroizing::new("ghs_SENTINEL".into())],
         });
         assert_eq!(recorded(), Vec::<String>::new(), "no client, no attempt");
@@ -652,6 +654,7 @@ mod tests {
         recorded();
         m.unwrap().revoke_all(LiveTokens {
             api: ApiBase::parse("https://127.0.0.1:1").unwrap(),
+            label: "mint task=\"t\" agent=coder".into(),
             tokens: vec![
                 Zeroizing::new("ghs_SENTINEL1".into()),
                 Zeroizing::new("ghs_SENTINEL2".into()),
@@ -661,7 +664,9 @@ mod tests {
         assert_eq!(lines.len(), 2, "{lines:?}");
         for (set, line) in lines.iter().enumerate() {
             assert!(
-                line.starts_with(&format!("set={set}: a minted token could not be revoked: ")),
+                line.starts_with(&format!(
+                    "mint task=\"t\" agent=coder set={set}: a minted token could not be revoked: "
+                )),
                 "{line}"
             );
             assert!(!line.contains("SENTINEL"), "{line}");
