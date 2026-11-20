@@ -1,7 +1,7 @@
 //! The GitHub App installation-token calls: mint one token per permission set,
 //! revoke one, and refuse a grant that is not exactly what was asked.
 
-use super::grant::{grant_matches, level, Grant};
+use super::grant::{grant_matches, is_github_timestamp, is_installation_token, level, Grant};
 use maknae_config::ApiBase;
 use maknae_proto::{ForgeStatus, PermissionSet, RevokeReply};
 use serde::Serialize;
@@ -28,8 +28,12 @@ pub enum ForgeError {
     Unread,
     /// The body exceeded the cap after a 2xx: a live token may exist.
     Oversize,
-    /// The body did not parse after a 2xx: a live token may exist.
+    /// The body did not parse after a 2xx, or its token is not a token: a live
+    /// token may exist.
     Shape,
+    /// The grant's token is well formed but another field is not: a live token
+    /// may exist unless `revoked`.
+    Malformed { revoked: bool },
 }
 
 pub struct MintedToken {
@@ -119,17 +123,28 @@ impl GithubClient {
         }
         let bytes = read_capped(resp).await?;
         let grant: Grant = serde_json::from_slice(&bytes).map_err(|_| ForgeError::Shape)?;
+        if !is_installation_token(&grant.token) {
+            return Err(ForgeError::Shape);
+        }
         if !grant_matches(set, &grant) {
-            let revoked = matches!(
-                self.revoke(api, &grant.token).await,
-                Ok(RevokeReply::Revoked | RevokeReply::AlreadyGone)
-            );
+            let revoked = self.revoked(api, &grant.token).await;
             return Err(ForgeError::Mismatch { revoked });
+        }
+        if !is_github_timestamp(&grant.expires_at) {
+            let revoked = self.revoked(api, &grant.token).await;
+            return Err(ForgeError::Malformed { revoked });
         }
         Ok(MintedToken {
             token: grant.token,
             expires_at: grant.expires_at,
         })
+    }
+
+    async fn revoked(&self, api: &ApiBase, token: &str) -> bool {
+        matches!(
+            self.revoke(api, token).await,
+            Ok(RevokeReply::Revoked | RevokeReply::AlreadyGone)
+        )
     }
 
     pub async fn revoke(&self, api: &ApiBase, token: &str) -> Result<RevokeReply, ForgeError> {
@@ -760,6 +775,80 @@ mod tests {
                 "{body}"
             );
             assert_eq!(h.await.unwrap().requests.len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_grant_whose_token_is_not_a_token_is_shape_and_never_used_as_a_bearer() {
+        fips();
+        let asked = set(
+            &["alpha"],
+            &[(GithubPermission::Contents, AccessLevel::Read)],
+        );
+        let long = "a".repeat(256);
+        for token in [
+            "",
+            "ghs bad",
+            "ghs-bad",
+            "ghs\\r\\nX-Injected: 1",
+            long.as_str(),
+        ] {
+            let (base, h) = stub(vec![
+                reply(
+                    "201 Created",
+                    &grant(token, r#"{"contents":"read"}"#, &["alpha"]),
+                ),
+                reply("204 No Content", ""),
+            ])
+            .await;
+            let c = GithubClient::loopback_for_tests(&base);
+            assert_eq!(
+                c.mint(&api(), 7, JWT, &asked).await.unwrap_err(),
+                ForgeError::Shape,
+                "{token:?}"
+            );
+            let seen = h.await.unwrap();
+            assert_eq!(seen.requests.len(), 1, "{token:?}: no revoke is sent");
+        }
+    }
+
+    fn with_expiry(token: &str, expires_at: &str) -> String {
+        grant(token, r#"{"contents":"read"}"#, &["alpha"])
+            .replace("2026-11-19T01:00:00Z", expires_at)
+    }
+
+    #[tokio::test]
+    async fn a_grant_with_a_malformed_expiry_is_revoked_and_refused() {
+        fips();
+        let asked = set(
+            &["alpha"],
+            &[(GithubPermission::Contents, AccessLevel::Read)],
+        );
+        let long = "2".repeat(65);
+        for (expires_at, revoke, revoked) in [
+            ("tomorrow", reply("204 No Content", ""), true),
+            (long.as_str(), reply("401 Unauthorized", ""), true),
+            ("2026-11-19T01:00:00.5Z", reply("500 Oops", ""), false),
+        ] {
+            let (base, h) = stub(vec![
+                reply("201 Created", &with_expiry("ghs_live", expires_at)),
+                revoke,
+            ])
+            .await;
+            let c = GithubClient::loopback_for_tests(&base);
+            assert_eq!(
+                c.mint(&api(), 7, JWT, &asked).await.unwrap_err(),
+                ForgeError::Malformed { revoked },
+                "{expires_at}"
+            );
+            let seen = h.await.unwrap();
+            assert_eq!((seen.requests.len(), seen.extra), (2, 0), "{expires_at}");
+            let head = head_of(&seen.requests[1]);
+            assert!(
+                head.starts_with("delete /installation/token http/1.1")
+                    && head.contains("authorization: bearer ghs_live"),
+                "{head}"
+            );
         }
     }
 

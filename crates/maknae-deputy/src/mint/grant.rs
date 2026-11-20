@@ -13,6 +13,26 @@ pub(super) fn level(l: AccessLevel) -> &'static str {
     }
 }
 
+pub const TOKEN_MAX_BYTES: usize = 255;
+
+/// GitHub's installation-token alphabet; anything else is never sent as a bearer.
+pub fn is_installation_token(token: &str) -> bool {
+    (1..=TOKEN_MAX_BYTES).contains(&token.len())
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// `YYYY-MM-DDTHH:MM:SSZ`, the one form GitHub writes `expires_at` in.
+pub(super) fn is_github_timestamp(at: &str) -> bool {
+    const FORM: &[u8; 20] = b"0000-00-00T00:00:00Z";
+    at.len() == FORM.len()
+        && at.bytes().zip(FORM).all(|(b, f)| match f {
+            b'0' => b.is_ascii_digit(),
+            _ => b == *f,
+        })
+}
+
 pub(super) fn grant_matches(set: &PermissionSet, grant: &Grant) -> bool {
     let want: BTreeMap<&str, &str> = set
         .permissions
@@ -106,6 +126,66 @@ fn unique_keys<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<(String, String)>,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_installation_token_is_1_to_255_bytes_of_alphanumerics_and_underscore() {
+        let longest = "a".repeat(TOKEN_MAX_BYTES);
+        let over = "a".repeat(TOKEN_MAX_BYTES + 1);
+        for ok in [
+            "g",
+            "ghs_16C7e42F292c6912E7710c838347Ae178B4a",
+            "Z_9",
+            &longest,
+        ] {
+            assert!(is_installation_token(ok), "{ok:?}");
+        }
+        for bad in [
+            "",
+            &over,
+            "ghs-x",
+            "ghs x",
+            "ghs.x",
+            "ghs/x",
+            "ghs\nx",
+            "ghs\r\nx: y",
+            "gh\u{e9}s",
+        ] {
+            assert!(!is_installation_token(bad), "{bad:?}");
+        }
+        assert_eq!(TOKEN_MAX_BYTES, 255);
+    }
+
+    #[test]
+    fn expires_at_is_exactly_github_s_utc_timestamp_form() {
+        assert!(is_github_timestamp("2026-11-19T01:00:00Z"));
+        assert!(is_github_timestamp("0000-00-00T00:00:00Z"));
+        for bad in [
+            "",
+            "x",
+            "2026-11-19T01:00:00",
+            "2026-11-19T01:00:00ZZ",
+            "2026-11-19T01:00:00.000Z",
+            "2026-11-19T01:00:00+00:00",
+            "2026-11-19 01:00:00Z",
+            "2026-11-19t01:00:00Z",
+            "2026-11-19T01:00:00z",
+            "2026/11-19T01:00:00Z",
+            "2026-11/19T01:00:00Z",
+            "2026-11-19T01-00:00Z",
+            "2026-11-19T01:00-00Z",
+            "a026-11-19T01:00:00Z",
+            "2026-1a-19T01:00:00Z",
+            "2026-11-1aT01:00:00Z",
+            "2026-11-19Ta1:00:00Z",
+            "2026-11-19T01:a0:00Z",
+            "2026-11-19T01:00:0aZ",
+            "2026-11-19T01:00:00\u{0}",
+            "\u{e9}026-11-19T01:00:00Z",
+        ] {
+            assert!(!is_github_timestamp(bad), "{bad:?}");
+        }
+        assert!(!is_github_timestamp(&"2".repeat(1 << 20)));
+    }
 
     #[test]
     fn a_grant_of_the_wrong_shape_is_refused_naming_what_was_expected() {

@@ -3,6 +3,7 @@
 
 use super::admit::{AdmittedMint, TrustPlaneKind};
 use super::github::{ForgeError, GithubClient, MintedToken};
+use super::grant::is_installation_token;
 use super::jwt::{assemble_jwt, signing_input};
 use super::recipient::recipient_key_owned_by;
 use super::signer::Signer;
@@ -187,7 +188,8 @@ fn forge_refusal(e: ForgeError) -> MintRefusal {
         | ForgeError::Unanswered
         | ForgeError::Unread
         | ForgeError::Oversize
-        | ForgeError::Shape => MintRefusal::Forge(ForgeStatus::Other),
+        | ForgeError::Shape
+        | ForgeError::Malformed { .. } => MintRefusal::Forge(ForgeStatus::Other),
     }
 }
 
@@ -197,10 +199,12 @@ fn live_token_may_remain(e: ForgeError) -> bool {
         | ForgeError::Unread
         | ForgeError::Oversize
         | ForgeError::Shape
-        | ForgeError::Mismatch { revoked: false } => true,
-        ForgeError::Status(_) | ForgeError::Transport | ForgeError::Mismatch { revoked: true } => {
-            false
-        }
+        | ForgeError::Mismatch { revoked: false }
+        | ForgeError::Malformed { revoked: false } => true,
+        ForgeError::Status(_)
+        | ForgeError::Transport
+        | ForgeError::Mismatch { revoked: true }
+        | ForgeError::Malformed { revoked: true } => false,
     }
 }
 
@@ -242,6 +246,7 @@ pub async fn revoke<S: Signer>(
     let label = frame_label("revoke", &r.task, agent, &r.class, &r.app);
     let reply = match open_credential(d.own_key, &ctx, r.for_revocation.as_bytes()) {
         Err(_) => RevokeReply::Refused(MintRefusal::Request),
+        Ok(token) if !is_installation_token(&token) => RevokeReply::Refused(MintRefusal::Request),
         Ok(token) => match d.github.revoke(&app.api, &token).await {
             Ok(reply) => reply,
             Err(e) => {
@@ -704,7 +709,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_seal_failure_on_the_current_set_revokes_it_and_the_earlier_sets() {
+    async fn a_token_too_long_to_seal_is_shape_and_the_earlier_sets_are_revoked() {
         let rig = Rig::new();
         let long = "g".repeat(maknae_seal::MAX_PLAINTEXT_LEN + 1);
         let (reply, live, seen, lines) = rig
@@ -713,7 +718,6 @@ mod tests {
                 vec![
                     granted("ghs_one", &["a"]),
                     granted(&long, &["b"]),
-                    revoked(),
                     revoked(),
                 ],
             )
@@ -724,9 +728,15 @@ mod tests {
         );
         assert!(live.tokens.is_empty());
         assert_eq!(seen.mints(), 2, "set three is never asked for");
-        assert_eq!(seen.revoked_tokens(), ["ghs_one".to_string(), long]);
+        assert_eq!(seen.revoked_tokens(), ["ghs_one"]);
         assert_eq!(seen.extra, 0);
         assert_eq!(rig.signer.calls().len(), 2);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("set=1") && l.contains("live token") && l.contains("Shape")),
+            "{lines:?}"
+        );
         assert!(
             !lines.iter().any(|l| l.contains("could not be revoked")),
             "{lines:?}"
@@ -885,6 +895,76 @@ mod tests {
                 !lines.iter().any(|l| l.contains("live token")),
                 "{label}: {lines:?}"
             );
+        }
+    }
+
+    fn granted_expiring(token: &str, expires_at: &str) -> Step {
+        http(
+            "201 Created",
+            &format!(
+                r#"{{"token":"{token}","expires_at":"{expires_at}","permissions":{{"contents":"write"}},"repository_selection":"selected","repositories":[{{"name":"a"}}]}}"#
+            ),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_malformed_grant_is_journaled_live_only_when_no_revoke_closed_it() {
+        let cases: Vec<(&str, Vec<Step>, Vec<&str>, bool)> = vec![
+            (
+                "a revoked malformed expiry",
+                vec![granted_expiring("ghs_one", "soon"), revoked()],
+                vec!["ghs_one"],
+                false,
+            ),
+            (
+                "an unrevoked malformed expiry",
+                vec![
+                    granted_expiring("ghs_one", "soon"),
+                    http("500 Internal Server Error", "{}"),
+                ],
+                vec!["ghs_one"],
+                true,
+            ),
+            (
+                "a token that is not a token",
+                vec![granted("ghs not-a-token", &["a"]), revoked()],
+                vec![],
+                true,
+            ),
+        ];
+        for (label, script, want_revoked, live) in cases {
+            let rig = Rig::new();
+            let (reply, held, seen, lines) = rig.mint(&request(vec![set(&["a"])]), script).await;
+            assert_eq!(
+                reply,
+                MintReply::Refused(MintRefusal::Forge(ForgeStatus::Other)),
+                "{label}"
+            );
+            assert!(held.tokens.is_empty(), "{label}");
+            assert_eq!(seen.revoked_tokens(), want_revoked, "{label}");
+            let hits = lines.iter().filter(|l| l.contains("live token")).count();
+            assert_eq!(hits, usize::from(live), "{label}: {lines:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_revoke_blob_that_opens_to_no_token_is_refused_request_and_sends_nothing() {
+        let rig = Rig::new();
+        for plaintext in ["ghs bad", "ghs_x\r\nX-Injected: 1", "ghs-x"] {
+            let blob = maknae_seal::seal_credential(
+                rig.own.public_key(),
+                &ctx(CredentialDirection::ToRevoke, 0),
+                plaintext,
+            )
+            .unwrap();
+            let blob = SealedCredentialBytes::new(blob.into_bytes()).unwrap();
+            let (got, seen, _) = rig.revoke(&revoke_request(0, blob), vec![revoked()]).await;
+            assert_eq!(
+                got,
+                RevokeReply::Refused(MintRefusal::Request),
+                "{plaintext:?}"
+            );
+            assert_eq!(seen.requests.len(), 0, "{plaintext:?}");
         }
     }
 
