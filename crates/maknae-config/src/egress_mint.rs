@@ -151,13 +151,15 @@ pub fn minting_from_document(v: &Value) -> Result<MintingConfig, ConfigError> {
 
 /// `root:_maknae-egress 0640`. The loader holds the owner to root and refuses
 /// every bit beyond 0640; it cannot name the group, which enroll sets.
+const MINTING_MAX_BYTES: usize = 64 * 1024;
+
 #[cfg(unix)]
 const MINTING_ARTIFACT: maknae_io::TargetRequired = maknae_io::TargetRequired {
     owner: Some(0),
     mode_mask: Some(0o137),
     nlink_exactly_one: false,
     regular_file: true,
-    max_bytes: None,
+    max_bytes: Some(MINTING_MAX_BYTES as u64),
 };
 
 #[cfg(unix)]
@@ -510,6 +512,27 @@ mod tests {
         assert!(!other.contains("approle-mint"), "{other}");
         let _ = std::fs::remove_file(&ok);
         let _ = std::fs::remove_file(&ok_ro);
+    }
+
+    #[test]
+    fn a_minting_yaml_over_64_kib_is_refused_before_it_is_parsed() {
+        let pad = |total: usize| {
+            let mut text = format!("{FULL}#");
+            text.push_str(&"x".repeat(total - text.len() - 1));
+            text.push('\n');
+            text
+        };
+        let p = write("cap_edge", &pad(MINTING_MAX_BYTES), 0o640);
+        let got = load_minting_with(&p, requirement(me(&p)));
+        let _ = std::fs::remove_file(&p);
+        assert!(got.unwrap().is_some());
+        let p = write("cap_over", &pad(MINTING_MAX_BYTES + 1), 0o640);
+        let got = load_minting_with(&p, requirement(me(&p)));
+        let _ = std::fs::remove_file(&p);
+        let e = got.unwrap_err();
+        assert!(!matches!(e, ConfigError::Parse { .. }), "{e:?}");
+        assert_eq!(MINTING_MAX_BYTES, 64 * 1024);
+        assert_eq!(MINTING_ARTIFACT.max_bytes, Some(64 * 1024));
     }
 
     fn role_requirement(uid: u32) -> maknae_io::TargetRequired {
