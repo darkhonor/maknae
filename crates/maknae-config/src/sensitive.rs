@@ -233,19 +233,19 @@ fn entry(text: &str) -> Result<Entry, ConfigError> {
     })
 }
 
-/// One spelling for names APFS treats as the same: NFC, full Unicode case
-/// folding, NFC again, so a fold that decomposes cannot leave a second form.
+/// One spelling for names APFS treats as the same: NFD, full Unicode case folding,
+/// NFD again. Decomposed, so a `*` beside an accented letter sees its base letter.
 pub(crate) fn case_folded(text: &str) -> String {
-    let nfc = icu_normalizer::ComposingNormalizerBorrowed::new_nfc();
+    let nfd = icu_normalizer::DecomposingNormalizerBorrowed::new_nfd();
     let fold = icu_casemap::CaseMapperBorrowed::new();
-    nfc.normalize(&fold.fold_string(&nfc.normalize(text)))
+    nfd.normalize(&fold.fold_string(&nfd.normalize(text)))
         .into_owned()
 }
 
 /// The one spelling macOS gives a path the kernel may report under another:
 /// the Data volume's firmlink prefix removed, then `/private/{etc,tmp,var}`
 /// as `/{etc,tmp,var}`. Expects case-folded text; a relative text is returned as is.
-pub(crate) fn mapped(text: &str) -> String {
+fn mapped(text: &str) -> String {
     if !text.starts_with('/') {
         return text.to_string();
     }
@@ -384,6 +384,47 @@ mod tests {
             assert_eq!(at(&l, nfd, None, fold), Ok(Some("/srv/Re*")), "{fold:?}");
             assert_eq!(below(&l, nfd, None, fold), Ok(Some("/srv/Re*")), "{fold:?}");
         }
+    }
+
+    #[test]
+    fn every_spelling_of_a_name_meets_a_wildcard_alike() {
+        let l = list(&["/srv/Re*"]);
+        for path in [
+            "/srv/Re\u{301}sume\u{301}",
+            "/srv/re\u{301}sume\u{301}",
+            "/srv/r\u{e9}sum\u{e9}",
+            "/srv/R\u{c9}SUM\u{c9}",
+        ] {
+            assert_eq!(
+                at(&l, path, None, Fold::Case),
+                Ok(Some("/srv/Re*")),
+                "{path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_entry_above_an_alias_covers_what_the_alias_names() {
+        for (entry, path) in [
+            ("/System/Volumes/**", "/Users/a/secret"),
+            ("/private/**", "/tmp/x"),
+            ("/private/*/shadow", "/etc/shadow"),
+            (
+                "/private/*/shadow",
+                "/System/Volumes/Data/private/etc/shadow",
+            ),
+            ("/System/Volumes/Data/private/etc", "/etc"),
+        ] {
+            let l = list(&[entry]);
+            assert_eq!(
+                at(&l, path, None, Fold::Case),
+                Ok(Some(entry)),
+                "{entry} {path}"
+            );
+            assert_eq!(at(&l, path, None, Fold::None), Ok(None), "{entry} {path}");
+        }
+        let l = list(&["/private/x"]);
+        assert_eq!(at(&l, "/x", None, Fold::Case), Ok(None));
     }
 
     #[test]
@@ -795,7 +836,7 @@ mod tests {
     #[test]
     fn fold_path_gives_one_spelling_for_case_nfd_and_the_data_volume() {
         let one = |p: &str| fold_path(p, Fold::Case, Reach::Path).mapped().to_vec();
-        let want = vec!["/users/hobi/tasks/users/caf\u{e9}".to_string()];
+        let want = vec!["/users/hobi/tasks/users/cafe\u{301}".to_string()];
         for spelling in [
             "/Users/hobi/tasks/users/caf\u{e9}",
             "/USERS/Hobi/Tasks/USERS/CAF\u{c9}",

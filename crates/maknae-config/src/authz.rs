@@ -853,8 +853,8 @@ impl Pattern {
 pub struct PathGlob {
     anchor: Anchor,
     segments: Vec<GlobSeg>,
-    /// The case-folded and mapped spellings (`crate::fold_path`); `None` on those two.
-    folded: Option<Box<[PathGlob; 2]>>,
+    /// The case-folded glob and the globs it reads as beneath each macOS alias; `None` on those.
+    folded: Option<Box<(PathGlob, Vec<PathGlob>)>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -873,14 +873,48 @@ impl PathGlob {
     /// `~` is kept symbolic and bound at match time to the home the request carries (#435);
     /// `~name` is refused (#438).
     pub(crate) fn parse(spec: &str) -> Result<PathGlob, AuthzError> {
-        let lowered = crate::sensitive::case_folded(spec);
-        let mapped = crate::sensitive::mapped(&lowered);
         let mut glob = Self::parse_one(spec)?;
-        glob.folded = Some(Box::new([
-            Self::parse_one(&lowered)?,
-            Self::parse_one(&mapped)?,
-        ]));
+        let lowered = Self::parse_one(&crate::sensitive::case_folded(spec))?;
+        let aliased = lowered.aliased();
+        glob.folded = Some(Box::new((lowered, aliased)));
         Ok(glob)
+    }
+
+    /// This glob and, for each alias `crate::fold_path` maps away, the glob of what it
+    /// matches beneath the alias, rewritten to the mapped spelling.
+    fn aliased(&self) -> Vec<PathGlob> {
+        let mut out = vec![self.clone()];
+        if self.anchor != Anchor::Root {
+            return out;
+        }
+        for (alias, mapped) in ALIASES {
+            let mut rests = vec![self.segments.clone()];
+            for comp in alias {
+                let mut next: Vec<Vec<GlobSeg>> = Vec::new();
+                for rest in rests.iter().flat_map(|r| beneath(r, comp)) {
+                    if !next.contains(&rest) {
+                        next.push(rest);
+                    }
+                }
+                rests = next;
+            }
+            for rest in rests {
+                let segments = mapped
+                    .iter()
+                    .map(|c| GlobSeg::Comp((*c).to_string()))
+                    .chain(rest)
+                    .collect();
+                let glob = PathGlob {
+                    anchor: Anchor::Root,
+                    segments,
+                    folded: None,
+                };
+                if !out.contains(&glob) {
+                    out.push(glob);
+                }
+            }
+        }
+        out
     }
 
     fn parse_one(spec: &str) -> Result<PathGlob, AuthzError> {
@@ -929,7 +963,7 @@ impl PathGlob {
         if test(self, path, home)? {
             return Ok(true);
         }
-        let (Some(f), Some([lowered, mapped])) = (folded, self.folded.as_deref()) else {
+        let (Some(f), Some((lowered, aliased))) = (folded, self.folded.as_deref()) else {
             return Ok(false);
         };
         if test(
@@ -941,8 +975,10 @@ impl PathGlob {
         }
         let home = f.home_mapped.as_deref().map(Path::new);
         for root in &f.mapped {
-            if test(mapped, root, home)? {
-                return Ok(true);
+            for glob in aliased {
+                if test(glob, root, home)? {
+                    return Ok(true);
+                }
             }
         }
         Ok(false)
@@ -1013,6 +1049,31 @@ impl PathGlob {
         let root: Vec<&str> = root.split('/').filter(|c| !c.is_empty()).collect();
         let shared = base.len().min(root.len());
         Ok(base[..shared] == root[..shared] && reaches_beneath(&self.segments, &root[shared..]))
+    }
+}
+
+/// The case-folded components `crate::fold_path` removes or rewrites, and what replaces them.
+const ALIASES: [(&[&str], &[&str]); 7] = [
+    (&["system", "volumes", "data", "private", "etc"], &["etc"]),
+    (&["system", "volumes", "data", "private", "tmp"], &["tmp"]),
+    (&["system", "volumes", "data", "private", "var"], &["var"]),
+    (&["system", "volumes", "data"], &[]),
+    (&["private", "etc"], &["etc"]),
+    (&["private", "tmp"], &["tmp"]),
+    (&["private", "var"], &["var"]),
+];
+
+/// What remains of `pat` to match after it has matched the component `comp`.
+fn beneath(pat: &[GlobSeg], comp: &str) -> Vec<Vec<GlobSeg>> {
+    match pat.split_first() {
+        None => Vec::new(),
+        Some((GlobSeg::Comp(p), rest)) if component_matches(p, comp) => vec![rest.to_vec()],
+        Some((GlobSeg::Comp(_), _)) => Vec::new(),
+        Some((GlobSeg::DoubleStar, rest)) => {
+            let mut out = vec![pat.to_vec()];
+            out.extend(beneath(rest, comp));
+            out
+        }
     }
 }
 
@@ -4576,5 +4637,31 @@ mod tests {
         assert!(!masks(Fold::None)
             .unwrap()
             .contains(&"/h/a/tasks/blocked/own".to_string()));
+    }
+
+    #[test]
+    fn a_deny_meets_every_spelling_and_every_alias() {
+        let p = mount_policy(
+            "\"Read(/**)\"",
+            "\"Read(/srv/Re*)\", \"Read(/System/Volumes/**)\"",
+        );
+        assert_eq!(
+            deny_at(&p, "/srv/r\u{e9}sum\u{e9}", None, Fold::Case),
+            denied("Read(/srv/Re*)")
+        );
+        assert_eq!(
+            deny_at(&p, "/Users/a/secret", None, Fold::Case),
+            denied("Read(/System/Volumes/**)")
+        );
+        assert_eq!(
+            p.evaluate_mount_floored(
+                None,
+                MountSide::Read,
+                Path::new("/Users/a"),
+                None,
+                Fold::Case
+            ),
+            Ok(denied("Read(/System/Volumes/**)"))
+        );
     }
 }
