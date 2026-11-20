@@ -1710,6 +1710,8 @@ The Egress Daemon can mint short-lived GitHub App installation tokens for an age
     vault write maknae-transit/keys/gh-acme/config deletion_allowed=false
     ```
 
+    `deletion_allowed=false` stops a key deletion, not an unmount. Terraform destroys the Transit mount, and with it every App key imported into it, when you remove the last App from `github_apps` or change `transit_mount_path`. The only recovery is to generate a new private key in GitHub and import it again (steps 2, 5 and 7 to 11).
+
 11. **Delete the PEM** GitHub gave you. Transit now holds the only copy; a lost key is replaced by generating a new one in GitHub and importing it under a new Transit key name.
 
 12. **Write `minting.yaml`** as `root:_maknae-egress 0640`. `vault.approle_mount` is the Egress Daemon's own AppRole mount (step 6), never `maknaed`'s or an agent's; enroll refuses either:
@@ -1734,7 +1736,9 @@ The Egress Daemon can mint short-lived GitHub App installation tokens for an age
 
     Every `maknae enroll` run while `minting.yaml` is present does this again: it mints a new egress SecretID and restarts `maknae-egress`. The restart drops every provider call and mint in flight. A user's turn in flight fails, and a token minted for a request in flight is not revoked: it stays live at GitHub until it expires, within an hour. Run `maknae enroll` when no turn or task is in flight.
 
-**Turning minting off.** Remove `/etc/maknae/egress/minting.yaml` and run `maknae enroll` before you remove the App from `github_apps` in Terraform, so the egress AppRole still exists when enroll destroys its SecretIDs. Enroll removes the drop-in and restarts the Egress Daemon, removes the sealed SecretID and the role id, and destroys the recorded SecretIDs. When Vault no longer has the egress mount or role, those SecretIDs went with it, and enroll finishes the withdrawal without them. A host enrolled without `minting.yaml` never gets the drop-in, so its Egress Daemon runs with no Vault identity.
+**Turning minting off.** Remove `/etc/maknae/egress/minting.yaml` and run `maknae enroll` before you remove the App from `github_apps` in Terraform, so the egress AppRole still exists when enroll destroys its SecretIDs. Enroll removes the drop-in and restarts the Egress Daemon, removes the sealed SecretID and the role id, and destroys the recorded SecretIDs. When Vault no longer has the egress mount or role, those SecretIDs went with it, and enroll finishes the withdrawal without them. A host enrolled without `minting.yaml` never gets the drop-in, so its Egress Daemon runs with no Vault identity. Removing the last App from `github_apps` destroys the Transit mount and every App key imported into it, whatever `deletion_allowed` says; turning minting on again means generating a new private key in GitHub and importing it again.
+
+**One minting host per egress AppRole.** Each `maknae enroll` retires every SecretID on the `maknae-egress` role it logs in to, so two hosts that share one `egress_approle_path` destroy each other's SecretIDs. Give each minting host its own `egress_approle_path` (and so its own role and mount), as each agent id is enrolled on one host only.
 
 ## Task an agent
 

@@ -317,6 +317,15 @@ vault transit import maknae-transit/keys/gh-acme @/tmp/app-key.b64 type=rsa-2048
 
 Run `maknae enroll` with `minting.yaml` removed before removing an App from `github_apps`, so
 enroll destroys the egress SecretIDs while the mount still exists.
+
+Removing the last App from `github_apps`, or changing `transit_mount_path`, destroys the Transit
+mount and every App key imported into it; `deletion_allowed=false` on a key does not prevent
+it. Recovery means generating a new private key in GitHub and importing it again.
+`minting.yaml`'s `transit_mount` must equal `transit_mount_path`, or every sign is refused 403.
+
+Each egress AppRole serves one minting host: enroll retires every SecretID on the
+`maknae-egress` role, so a second host on the same `egress_approle_path` destroys the first's.
+Give each minting host its own `egress_approle_path`.
 `maknae enroll` reads the egress RoleID and mints its SecretID, so `maknae-enroll` carries
 `read` on `auth/<egress_approle_path>/role/maknae-egress/role-id`, `create`, `update` and `list`
 on `.../secret-id`, and `update` on `.../secret-id-accessor/destroy`.
