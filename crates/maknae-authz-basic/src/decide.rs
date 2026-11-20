@@ -1907,7 +1907,7 @@ mod tests {
     }
 
     #[test]
-    fn mount_mask_with_an_unbound_home_is_indeterminate() {
+    fn mount_with_an_unbound_home_is_indeterminate() {
         let lp = lp_mount("schema_version: 1\npermissions:\n  allow: [\"Read(/w/**)\"]\n  deny: [\"Read(~/x/**)\"]\n");
         let mut req = mount_req(OPERATOR_UID, "fs.read", "mount", "/w");
         let mut subject = Attributes::new();
