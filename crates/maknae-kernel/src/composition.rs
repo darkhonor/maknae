@@ -231,7 +231,10 @@ impl<B: Baseline> Composition<B> {
     }
 
     /// The live operands, all over the one snapshot installed when the batch starts.
-    fn on_live<R>(&self, decide: impl FnOnce(&[&dyn Authorizer; 4]) -> R) -> R {
+    fn on_live<R>(
+        &self,
+        decide: impl FnOnce(&[&dyn Authorizer; 4], &Arc<maknae_config::SensitiveList>) -> R,
+    ) -> R {
         let _turn = self.baseline.live_turn().share();
         let snap = self.baseline.snapshot();
         let base = OnSnapshot {
@@ -239,7 +242,16 @@ impl<B: Baseline> Composition<B> {
             snap: &snap,
         };
         let sensitive = SensitiveAuthorizer::new(snap.sensitive());
-        decide(&self.operands_with(&base, &sensitive))
+        decide(&self.operands_with(&base, &sensitive), snap.sensitive())
+    }
+}
+
+impl<B: Baseline> crate::workspace::DecidesPinned for Composition<B> {
+    fn decide_all_pinned(
+        &self,
+        reqs: &[Request],
+    ) -> (Vec<Decided>, Arc<maknae_config::SensitiveList>) {
+        self.on_live(|ops, host| (compose_decide_cited_all(ops, reqs), Arc::clone(host)))
     }
 }
 
@@ -344,11 +356,11 @@ impl<B: Baseline> Authorizer for Composition<B> {
     /// projections, so every existing composition test covers what production
     /// runs.
     fn decide_cited(&self, req: &Request) -> Decided {
-        self.on_live(|ops| compose_decide_cited(ops, req))
+        self.on_live(|ops, _| compose_decide_cited(ops, req))
     }
 
     fn decide_cited_all(&self, reqs: &[Request]) -> Vec<Decided> {
-        self.on_live(|ops| compose_decide_cited_all(ops, reqs))
+        self.on_live(|ops, _| compose_decide_cited_all(ops, reqs))
     }
 
     fn subjects(&self) -> Option<Vec<SubjectBinding>> {

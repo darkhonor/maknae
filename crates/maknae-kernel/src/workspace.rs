@@ -4,15 +4,15 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::Arc;
 
 use maknae_config::{fold_path, Fold, Reach, SensitiveList};
 use maknae_security::{
-    AttrValue, Authorizer, Decision, FsOperation, Lane, Obligation, Request, RuleCitation, Verdict,
+    AttrValue, Decided, Decision, FsOperation, Lane, Obligation, Request, RuleCitation, Verdict,
 };
 
 use crate::conversation::facts::ConversationFacts;
 use crate::handler::{lane_context, lexical_pregate, stamp_conversation, stamp_subject, Stamp};
-use crate::sensitive_authz::SensitiveNow;
 
 const SYSTEM_PATHS: [&str; 12] = [
     "/run",
@@ -63,7 +63,13 @@ pub(crate) enum MountDecision {
     },
 }
 
+/// Decides a batch and returns the host `sensitive.yaml` list of the snapshot it decided on.
+pub(crate) trait DecidesPinned {
+    fn decide_all_pinned(&self, reqs: &[Request]) -> (Vec<Decided>, Arc<SensitiveList>);
+}
+
 const NOT_AUTHORIZED: &str = "not authorized";
+const UNEVALUATED: &str = "workspace: the decision could not be evaluated";
 
 fn structural_refusal(reason: impl Into<String>) -> MountDecision {
     let reason = reason.into();
@@ -88,7 +94,7 @@ fn denied(reason: impl Into<String>, cited: Citation) -> MountDecision {
     expect(dead_code, reason = "called by the tool-invocation verb, #479")
 )]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn decide_mount<P: Authorizer + SensitiveNow>(
+pub(crate) fn decide_mount<P: DecidesPinned>(
     authorizer: &P,
     lane: Lane,
     uid: u32,
@@ -116,7 +122,7 @@ pub(crate) fn decide_mount<P: Authorizer + SensitiveNow>(
 impl MountDecision {
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn with_fold<P: Authorizer + SensitiveNow>(
+    pub(crate) fn with_fold<P: DecidesPinned>(
         authorizer: &P,
         fold: Fold,
         lane: Lane,
@@ -144,7 +150,7 @@ impl MountDecision {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn folded<P: Authorizer + SensitiveNow>(
+fn folded<P: DecidesPinned>(
     authorizer: &P,
     fold: Fold,
     lane: Lane,
@@ -169,7 +175,6 @@ fn folded<P: Authorizer + SensitiveNow>(
         Stamp::Client => personal,
         Stamp::Agent { .. } => None,
     };
-    let host = authorizer.sensitive_now();
     let actions: &[&str] = match mode {
         MountMode::ReadOnly => &["fs.read"],
         MountMode::ReadWrite => &["fs.read", "fs.write"],
@@ -178,17 +183,22 @@ fn folded<P: Authorizer + SensitiveNow>(
         .iter()
         .map(|action| mount_request(uid, home, conversation, personal, stamp, lane, root, action))
         .collect();
+    let pinned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        authorizer.decide_all_pinned(&requests)
+    }));
+    let (all, host) = match pinned {
+        Ok((all, host)) if all.len() == requests.len() => (all, host),
+        _ => return denied(UNEVALUATED, Citation::default()),
+    };
     let mut masks = BTreeSet::new();
     let mut cited = Citation::default();
-    for decided in maknae_security::guarded_decide_cited_all(authorizer, &requests) {
+    for decided in all {
         cited = Citation {
             role: decided.role,
             rule: decided.rule,
         };
         let obligations = match decided.verdict {
-            Verdict::Indeterminate => {
-                return denied("workspace: the decision could not be evaluated", cited)
-            }
+            Verdict::Indeterminate => return denied(UNEVALUATED, cited),
             v => match maknae_security::finalize(maknae_security::combine(vec![v])) {
                 Decision::Permit { obligations } => obligations,
                 Decision::Deny { reason } => return denied(reason, cited),
@@ -334,8 +344,7 @@ mod tests {
     use crate::handler::TaskStamp;
     use crate::test_fixtures::{fixture, shipped_composition, write_sensitive, DirGuard};
     use maknae_authz_basic::{Baseline, HermeticAuthorizer};
-    use maknae_security::{Decided, Obligation, Request, Verdict};
-    use std::sync::Arc;
+    use maknae_security::{Authorizer, Obligation, Request, Verdict};
 
     const SYSTEM: &str = "workspace: a system directory or a folder above one";
     const HOME: &str = "workspace: the home or a folder above it";
@@ -363,7 +372,7 @@ mod tests {
         nix::unistd::geteuid().as_raw()
     }
 
-    fn mount<P: Authorizer + SensitiveNow>(
+    fn mount<P: DecidesPinned>(
         a: &P,
         fold: Fold,
         home: Option<&str>,
@@ -384,7 +393,7 @@ mod tests {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn uncited_mount<P: Authorizer + SensitiveNow>(
+    fn uncited_mount<P: DecidesPinned>(
         a: &P,
         fold: Fold,
         uid: u32,
@@ -1048,9 +1057,12 @@ mod tests {
         }
     }
 
-    impl SensitiveNow for Stub {
-        fn sensitive_now(&self) -> Arc<SensitiveList> {
-            Arc::clone(&self.host)
+    impl DecidesPinned for Stub {
+        fn decide_all_pinned(&self, reqs: &[Request]) -> (Vec<Decided>, Arc<SensitiveList>) {
+            (
+                maknae_security::decide_each_cited(self, reqs),
+                Arc::clone(&self.host),
+            )
         }
     }
 
@@ -1206,6 +1218,104 @@ mod tests {
             ),
             permitted(&["/srv/x/sentinel-674/**"])
         );
+    }
+
+    struct Torn {
+        decided_on: Arc<SensitiveList>,
+    }
+
+    impl Authorizer for Torn {
+        fn decide_cited_all(&self, reqs: &[Request]) -> Vec<Decided> {
+            maknae_security::decide_each_cited(self, reqs)
+        }
+        fn decide(&self, _: &Request) -> Verdict {
+            Verdict::Permit {
+                obligations: vec![obligation("audit", &[])],
+            }
+        }
+    }
+
+    impl DecidesPinned for Torn {
+        fn decide_all_pinned(&self, reqs: &[Request]) -> (Vec<Decided>, Arc<SensitiveList>) {
+            (
+                maknae_security::decide_each_cited(self, reqs),
+                Arc::clone(&self.decided_on),
+            )
+        }
+    }
+
+    impl crate::SensitiveNow for Torn {
+        fn sensitive_now(&self) -> Arc<SensitiveList> {
+            Arc::new(SensitiveList::empty())
+        }
+    }
+
+    #[test]
+    fn the_masks_come_from_the_snapshot_the_decision_ran_on() {
+        let torn = Torn {
+            decided_on: Arc::new(
+                SensitiveList::from_entries(&["/srv/x/sentinel-674-pinned/**".to_owned()]).unwrap(),
+            ),
+        };
+        assert_eq!(
+            mount(
+                &torn,
+                Fold::None,
+                Some(ALICE),
+                "/srv/x",
+                MountMode::ReadOnly
+            ),
+            permitted(&["/srv/x/sentinel-674-pinned/**"])
+        );
+    }
+
+    enum Broken {
+        Short,
+        Long,
+        Panics,
+    }
+
+    impl DecidesPinned for Broken {
+        fn decide_all_pinned(&self, reqs: &[Request]) -> (Vec<Decided>, Arc<SensitiveList>) {
+            let permit = Decided {
+                verdict: Verdict::Permit {
+                    obligations: vec![],
+                },
+                role: Some("sentinel-674-role"),
+                rule: None,
+            };
+            let n = match self {
+                Broken::Short => reqs.len() - 1,
+                Broken::Long => reqs.len() + 1,
+                Broken::Panics => panic!("sentinel-674-panic"),
+            };
+            (vec![permit; n], Arc::new(SensitiveList::empty()))
+        }
+    }
+
+    #[test]
+    fn a_batch_answer_that_panics_or_miscounts_refuses() {
+        for broken in [Broken::Short, Broken::Long, Broken::Panics] {
+            assert_eq!(
+                MountDecision::with_fold(
+                    &broken,
+                    Fold::None,
+                    Lane::Local,
+                    operator(),
+                    Some(Path::new(ALICE)),
+                    None,
+                    None,
+                    &Stamp::Client,
+                    "/srv/x",
+                    MountMode::ReadOnly,
+                ),
+                MountDecision::Refused {
+                    audit: UNEVALUATED.into(),
+                    wire: NOT_AUTHORIZED.into(),
+                    cited: Citation::default(),
+                }
+            );
+        }
     }
 
     #[test]
