@@ -1810,7 +1810,7 @@ async fn a_too_large_catalog_is_recorded_and_refused() {
 }
 
 #[tokio::test]
-async fn a_contained_subject_is_refused_and_unstamped() {
+async fn a_contained_subject_is_refused_tool_catalog_and_session_new() {
     for role in ["adversary", "guest"] {
         let rig = catalog_rig(&format!("catalog-{role}"), role, &sentinel_tools());
         for resp in [
