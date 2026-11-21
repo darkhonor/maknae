@@ -41,6 +41,10 @@ disclose	providers[].models	the admin-pinned model list, as a sequence
 disclose	providers[].models[]	each admin-pinned model identifier
 disclose	providers[].reasoning_effort	the reasoning level sent with the model, when the operator sets one (#242)
 disclose	providers[].output_tokens_field	the request field that carries the reply cap for this endpoint (#372)
+disclose	forges[].name	the operator's label for an authorized forge (#674)
+disclose	forges[].kind	the binding kind the forge serves; git only (#674)
+disclose	forges[].host	the forge's link server, host and optional port; a link server, not a fenced network site (#674)
+disclose	forges[].provider	which link forms the client recognizes for this forge: github or gitlab (#674)
 disclose	egress.socket_path	the socket the daemon connects to for egress (#240)
 disclose	egress.deadline_ms	the outer bound on one provider call — deployment shape (#240)
 disclose	transport.socket_path	the socket the daemon is listening on

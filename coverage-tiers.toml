@@ -287,6 +287,8 @@ files = [
   # #115: the `deployment` section; a wrong arm boots a container as a host, or
   # checks no account state on a host that declared a source.
   "crates/maknae-config/src/deployment.rs",
+  # #674: the `forges` section; a wrong arm authorizes a forge host the site never named.
+  "crates/maknae-config/src/forges.rs",
   # PR-J1 Task 6: the authz policy schema v1 (spec §7; RBAC-decided per ADR-0020) — the
   # Claude-Code/Codex-style permission grammar (Read patterns) a future
   # per-request PDP evaluates, plus the secure fail-closed load (symlink

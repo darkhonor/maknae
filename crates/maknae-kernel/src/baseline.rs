@@ -196,6 +196,7 @@ pub fn apply_of(a: &BaselineSections, b: &BaselineSections) -> Apply {
             "principal" => true,
             "providers" => non_empty_seq(old) && non_empty_seq(new),
             "audit" => equal_without(old, new, &["readers"]),
+            "forges" => false,
             _ => false,
         }
     });
@@ -1195,6 +1196,32 @@ mod tests {
         let mut both = with("principal", PRINCIPAL_B);
         both.insert("vault".into(), VAULT_B.into());
         assert_eq!(apply_of(&base, &both), Apply::Restart);
+    }
+
+    #[test]
+    fn forges_is_restart_only() {
+        let one = r#"[{"host":"github.com","kind":"git","name":"github","provider":"github"}]"#;
+        let two = r#"[{"host":"github.com","kind":"git","name":"github","provider":"github"},{"host":"gitlab.example","kind":"git","name":"lab","provider":"gitlab"}]"#;
+        let base = s(&[("core", CORE), ("principal", PRINCIPAL_A), ("forges", one)]);
+        let with = |k: &str, v: &str| {
+            let mut b = base.clone();
+            b.insert(k.into(), v.into());
+            b
+        };
+        let without = |k: &str| {
+            let mut b = base.clone();
+            b.remove(k);
+            b
+        };
+        assert_eq!(apply_of(&base, &base), Apply::Live);
+        assert_eq!(apply_of(&base, &with("forges", two)), Apply::Restart);
+        assert_eq!(apply_of(&with("forges", two), &base), Apply::Restart);
+        assert_eq!(apply_of(&base, &with("forges", "[]")), Apply::Restart);
+        assert_eq!(apply_of(&base, &without("forges")), Apply::Restart);
+        assert_eq!(apply_of(&without("forges"), &base), Apply::Restart);
+        let mut alongside_live = with("forges", two);
+        alongside_live.insert("principal".into(), PRINCIPAL_B.into());
+        assert_eq!(apply_of(&base, &alongside_live), Apply::Restart);
     }
 
     #[test]

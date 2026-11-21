@@ -342,6 +342,10 @@ const DISCLOSABLE: &[&str] = &[
     "providers[].models[]",
     "providers[].reasoning_effort",
     "providers[].output_tokens_field",
+    "forges[].name",
+    "forges[].kind",
+    "forges[].host",
+    "forges[].provider",
     // The `egress` section (#240): where the daemon finds the deputy and how
     // long one send may take — deployment shape, never a credential.
     "egress.socket_path",
@@ -1504,7 +1508,7 @@ mod tests {
     /// (`audit_cfg.rs`) and named by neither list, so deriving the allow-lists
     /// FROM this inventory would refuse a shipped, valid config.
     ///
-    /// COVERS the six sections whose lists live in this crate. `core`'s TOP
+    /// COVERS the seven sections whose lists live in this crate. `core`'s TOP
     /// level (list in `maknae-kernel`'s `boot.rs`, where core is consumed) and
     /// `vault` (in `maknae-vault`) are out of reach from here. `core.handling`
     /// and `core.handling.ceiling` ARE in this crate (`ceiling.rs`) and are
@@ -1519,6 +1523,7 @@ mod tests {
             (crate::PRINCIPAL_SECTION, &crate::principal::PRINCIPAL_KEYS),
             (crate::EGRESS_SECTION, &crate::egress_cfg::EGRESS_KEYS),
             (crate::PROVIDERS_SECTION, &crate::providers::PROVIDER_KEYS),
+            (crate::FORGES_SECTION, &crate::forges::FORGE_KEYS),
             (
                 crate::DEPLOYMENT_SECTION,
                 &crate::deployment::DEPLOYMENT_KEYS,
@@ -1566,7 +1571,7 @@ mod tests {
     /// floor, not a count. `ci/gates/config-disclosure-drift.sh` already
     /// inventories the same `file|struct|section|count|kind` rows for its own
     /// purpose, which is why these structs are the right authority. Covered
-    /// here: the six whose allow-lists live beside them in this crate. `Ceiling`
+    /// here: the seven whose allow-lists live beside them in this crate. `Ceiling`
     /// is deliberately outside — its seven fields span TWO YAML levels
     /// (`accreditation_ref` is a sibling of `ceiling`, not a field under it), so
     /// plain equality cannot hold. `VaultConfig` is in another crate.
@@ -1646,6 +1651,11 @@ mod tests {
                 &crate::providers::PROVIDER_KEYS,
             ),
             (
+                include_str!("forges.rs"),
+                "AuthorizedForge",
+                &crate::forges::FORGE_KEYS,
+            ),
+            (
                 include_str!("deployment.rs"),
                 "Deployment",
                 &crate::deployment::DEPLOYMENT_KEYS,
@@ -1707,6 +1717,34 @@ mod tests {
         assert_eq!(p["1.name"], "local");
         assert_eq!(p["1.models.0"], "llama");
         assert!(!p.contains_key("0.models"), "{p:?}");
+    }
+
+    #[test]
+    fn the_forges_section_discloses_each_entry() {
+        let entry = |name: &str, host: &str, provider: &str| {
+            map(vec![
+                ("name", Value::Str(name.into())),
+                ("kind", Value::Str("git".into())),
+                ("host", Value::Str(host.into())),
+                ("provider", Value::Str(provider.into())),
+            ])
+        };
+        let d = doc(vec![(
+            "forges",
+            Value::Seq(vec![
+                entry("github", "github.com", "github"),
+                entry("lab", "gitlab.lab.local:8443", "gitlab"),
+            ]),
+        )]);
+        let v = d.disclosable_view();
+        let f = &v["forges"];
+        assert_eq!(f["0.name"], "github");
+        assert_eq!(f["0.kind"], "git");
+        assert_eq!(f["0.host"], "github.com");
+        assert_eq!(f["0.provider"], "github");
+        assert_eq!(f["1.name"], "lab");
+        assert_eq!(f["1.host"], "gitlab.lab.local:8443");
+        assert_eq!(f["1.provider"], "gitlab");
     }
 
     #[test]

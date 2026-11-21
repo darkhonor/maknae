@@ -144,6 +144,51 @@ pub fn reasoning_effort_is_acceptable(s: &str) -> bool {
         && s.chars().all(|c| c.is_ascii_lowercase())
 }
 
+pub(crate) fn host_port_is_acceptable(s: &str) -> bool {
+    host_port(s).is_some()
+}
+
+/// `host[:port]`, answering whether the host is loopback.
+fn host_port(authority: &str) -> Option<bool> {
+    let (loopback, port) = if let Some(v6) = authority.strip_prefix('[') {
+        let (h, rest) = v6.split_once(']')?;
+        let addr = h.parse::<std::net::Ipv6Addr>().ok()?;
+        let port = match rest.strip_prefix(':') {
+            Some(p) => Some(p),
+            None if rest.is_empty() => None,
+            None => return None,
+        };
+        (addr.is_loopback(), port)
+    } else {
+        let (h, port) = match authority.split_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (authority, None),
+        };
+        let ok = !h.is_empty()
+            && h.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+            && !h.starts_with(['-', '.'])
+            && !h.ends_with(['-', '.'])
+            && !h.contains("..");
+        if !ok {
+            return None;
+        }
+        let loopback = if h.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+            h.parse::<std::net::Ipv4Addr>().ok()?.is_loopback()
+        } else {
+            h == "localhost"
+        };
+        (loopback, port)
+    };
+    if let Some(p) = port {
+        let digits = !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
+        if !digits || p.starts_with('0') || p.parse::<u16>().is_err() {
+            return None;
+        }
+    }
+    Some(loopback)
+}
+
 pub fn endpoint_is_acceptable(url: &str) -> bool {
     if url.chars().any(char::is_whitespace) {
         return false;
@@ -159,52 +204,10 @@ pub fn endpoint_is_acceptable(url: &str) -> bool {
     if authority.contains('@') {
         return false;
     }
-    let (loopback, port) = if let Some(v6) = authority.strip_prefix('[') {
-        match v6.split_once(']') {
-            Some((h, rest)) => {
-                let Ok(addr) = h.parse::<std::net::Ipv6Addr>() else {
-                    return false;
-                };
-                let port = match rest.strip_prefix(':') {
-                    Some(p) => Some(p),
-                    None if rest.is_empty() => None,
-                    None => return false,
-                };
-                (addr.is_loopback(), port)
-            }
-            None => return false,
-        }
-    } else {
-        let (h, port) = match authority.split_once(':') {
-            Some((h, p)) => (h, Some(p)),
-            None => (authority, None),
-        };
-        let ok = !h.is_empty()
-            && h.chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
-            && !h.starts_with(['-', '.'])
-            && !h.ends_with(['-', '.'])
-            && !h.contains("..");
-        if !ok {
-            return false;
-        }
-        let loopback = if h.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
-            match h.parse::<std::net::Ipv4Addr>() {
-                Ok(addr) => addr.is_loopback(),
-                Err(_) => return false,
-            }
-        } else {
-            h == "localhost"
-        };
-        (loopback, port)
-    };
-    if let Some(p) = port {
-        let digits = !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
-        if !digits || p.starts_with('0') || p.parse::<u16>().is_err() {
-            return false;
-        }
+    match host_port(authority) {
+        Some(loopback) => secure || loopback,
+        None => false,
     }
-    secure || loopback
 }
 
 pub fn refuse_plaintext_keys(v: &Value) -> Result<(), ConfigError> {

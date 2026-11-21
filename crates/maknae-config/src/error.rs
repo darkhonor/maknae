@@ -74,6 +74,8 @@ pub enum ConfigError {
     UnknownClassificationPolicy { name: String },
     /// The `providers` section or one of its entries is malformed (an unknown key raises `UnknownKey` instead).
     InvalidProvider(String),
+    /// The `forges` section or one of its entries is malformed (an unknown key raises `UnknownKey` instead).
+    InvalidForge(String),
     /// `egress-bounds.yaml` was read and refused by its parser (#240b). Its
     /// own variant, so the daemon's boot refusal says "refused", never
     /// "could not be read", and never routes a bounds error through the
@@ -194,6 +196,7 @@ impl std::fmt::Display for ConfigError {
             ConfigError::InvalidProvider(reason) => {
                 write!(f, "invalid provider config: {reason}")
             }
+            ConfigError::InvalidForge(reason) => write!(f, "invalid forge config: {reason}"),
             ConfigError::InvalidEgressBounds(reason) => {
                 write!(f, "egress-bounds.yaml: {reason}")
             }
@@ -259,6 +262,14 @@ mod tests {
             col: 4,
         };
         assert!(format!("{p}").contains("bad") && format!("{p}").contains("2:4"));
+    }
+
+    #[test]
+    fn display_covers_invalid_forge() {
+        assert_eq!(
+            ConfigError::InvalidForge("forges[0]: missing 'host'".into()).to_string(),
+            "invalid forge config: forges[0]: missing 'host'"
+        );
     }
 
     #[test]

@@ -48,6 +48,7 @@ mod document;
 mod egress_cfg;
 mod egress_mint;
 mod error;
+mod forges;
 mod loader;
 pub mod mirror;
 mod policy;
@@ -133,6 +134,10 @@ pub use egress_mint::{
     MintingConfig, MINTING_FILE, MINT_ROLE_ID_FILE,
 };
 pub use error::ConfigError;
+pub use forges::{
+    forges_from_section, AuthorizedForge, ForgeKind, ForgeProvider, ForgeSet, FORGES_SECTION,
+    FORGE_KEYS, MAX_FORGES, MAX_FORGE_NAME_BYTES,
+};
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
 pub use maknae_io::TargetRequired;
 pub use maknae_security::{ClassificationPolicy, Level};
@@ -184,13 +189,14 @@ pub use value::{canonical_json, Value};
 use builder::Builder;
 
 /// The sections `maknaed` reads from `maknae.yaml` and `config.d`.
-pub const DAEMON_SECTIONS: [&str; 8] = [
+pub const DAEMON_SECTIONS: [&str; 9] = [
     "lake",
     "vault",
     "transport",
     "audit",
     "principal",
     "providers",
+    "forges",
     "egress",
     "deployment",
 ];
@@ -333,6 +339,7 @@ mod tests {
             AUDIT_SECTION,
             PRINCIPAL_SECTION,
             PROVIDERS_SECTION,
+            FORGES_SECTION,
             EGRESS_SECTION,
             DEPLOYMENT_SECTION,
         ] {
