@@ -289,13 +289,7 @@ impl<B: Baseline> CatalogNow for B {
     }
 
     fn catalog_stamp(&self, uid: u32, forges: &maknae_config::ForgeSet) -> Option<CatalogDigest> {
-        let principal = self.principal().uid;
-        let snap = self.snapshot();
-        if snap.no_role(uid, principal) || snap.contained(uid, principal) {
-            return None;
-        }
-        self.catalog_for(uid, principal, forges)
-            .ok()
+        self.admitted_catalog(uid, self.principal().uid, forges)
             .map(|c| c.digest)
     }
 }

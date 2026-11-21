@@ -590,6 +590,18 @@ mod tests {
     }
 
     #[test]
+    fn only_an_admitted_subject_has_an_admitted_catalog() {
+        let s = snap(&site(&["Tool(rust-build cargo build *)"], &[]), HOMELAB);
+        let auth = authorizer(s.clone());
+        let bob = Baseline::admitted_catalog(&auth, BOB, PRINCIPAL, &forges()).unwrap();
+        assert_eq!(bob.digest, catalog(&s, BOB).digest);
+        assert!(s.no_role(4242, PRINCIPAL));
+        for uid in [MALLORY, 4242] {
+            assert!(Baseline::admitted_catalog(&auth, uid, PRINCIPAL, &forges()).is_none());
+        }
+    }
+
+    #[test]
     fn the_digest_is_content_only() {
         let authz = site(&["Tool(rust-build cargo build *)"], &[]);
         let first = snap(&authz, HOMELAB);
