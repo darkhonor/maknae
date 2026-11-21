@@ -118,6 +118,8 @@ macOS on Apple Silicon is a production target, so each provider and path ships o
 ## Consequences
 
 - **This graph sets the shape the lake and user graphs extend:** the record envelope (with `space` and `label`), the format-v1 codec and its canonical-encoding rule, atomic commit, encryption, recovery and migration. `maknae-graph` owns the envelope, schema machinery and codec; the kernel vocabulary sits in its own module, the seam the lake and user vocabularies will sit beside.
+
+  *Amended 2026-11-21 ([#674](https://github.com/darkhonor/maknae/issues/674), [ADR-0039](ADR-0039-the-per-subject-tool-catalog-and-forges.md)): a `catalog` vocabulary, the per-subject tool catalog sent to clients, is the first to use this seam beside the kernel's; the kernel and the clients share it through `maknae-graph`.*
 - **What ships now and what does not.** #487 delivers the crate, the compiled kernel schema and permitted-triple table, format v1, key indexes and validation, with no other crate depending on it and no behaviour change. Until #489 lands, the PDP still re-reads `authz.yaml` per request and nothing decides from the graph; until #488, nothing is encrypted or persisted; until #490 and #491, there is no `admin.baseline.accept` and no sync. Total containment (#165) lands on #489, and its "the stop survives a reinstall" property needs #491. Scoped carves (#486) also depend on this graph.
 
   *Amended 2026-10-07 (#489): #489 has landed. The PDP decides from the compiled snapshot of decision 1, the store is seeded from `authz.yaml`'s identity layer, and the per-request re-read is gone.*
