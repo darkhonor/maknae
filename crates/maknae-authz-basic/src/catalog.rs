@@ -25,18 +25,20 @@ pub enum CatalogError {
 }
 
 /// What `uid` sees: each entry's own ceiling patterns that a stage of its effective
-/// lists admits, and the forges serving the binding kinds those entries bind.
+/// lists admits, and the forges serving the binding kinds those entries bind. `TooLarge`
+/// once the graph keys and pattern text would pass `budget` bytes, before any is built.
 pub(crate) fn input(
     lp: &LoadedPolicy,
     uid: u32,
     principal_uid: u32,
     forges: &ForgeSet,
-) -> CatalogInput {
+    budget: usize,
+) -> Result<CatalogInput, CatalogError> {
     if matches!(
         lp.roles.role_for(uid, principal_uid),
         Resolution::Role(Role::Adversary) | Resolution::NoRole
     ) {
-        return CatalogInput::default();
+        return Ok(CatalogInput::default());
     }
     let subject = lp.subjects.get(uid);
     let lists = lp.policy.effective_lists(
@@ -45,12 +47,20 @@ pub(crate) fn input(
     );
     let stages: Vec<&Stage<'_>> = lists.right.iter().chain([&lists.floored]).collect();
     let agent = lp.agents.get(uid).is_some();
-    let entries: Vec<CatalogEntry> = lp
+    let mut spent = 0usize;
+    let mut entries = Vec::new();
+    for entry in lp
         .tools
         .entries()
         .filter(|e| !agent || reach_checked(e, &lp.tools))
         .filter_map(|e| granted(e, &stages))
-        .collect();
+    {
+        spent = spent.saturating_add(graph_text(&entry));
+        if spent > budget {
+            return Err(CatalogError::TooLarge);
+        }
+        entries.push(entry);
+    }
     let bound: BTreeSet<&str> = entries
         .iter()
         .flat_map(|e| &e.binds)
@@ -66,7 +76,22 @@ pub(crate) fn input(
             provider: f.provider.as_str().into(),
         })
         .collect();
-    CatalogInput { entries, forges }
+    Ok(CatalogInput { entries, forges })
+}
+
+/// A lower bound on the bytes `entry` puts in the graph: each program and pattern key
+/// repeats the entry and program names, and each pattern carries its text again.
+fn graph_text(entry: &CatalogEntry) -> usize {
+    entry
+        .programs
+        .iter()
+        .map(|(program, patterns)| {
+            let key = entry.name.len() + 1 + program.len();
+            patterns
+                .iter()
+                .fold(key, |n, text| n.saturating_add(key + 1 + 2 * text.len()))
+        })
+        .fold(0, usize::saturating_add)
 }
 
 pub(crate) fn build(
@@ -76,8 +101,8 @@ pub(crate) fn build(
     forges: &ForgeSet,
     digest: fn(&[u8]) -> [u8; 32],
 ) -> Result<SubjectCatalog, CatalogError> {
-    let bytes = maknae_graph::catalog::encode(&input(lp, uid, principal_uid, forges))
-        .map_err(|_| CatalogError::Build)?;
+    let input = input(lp, uid, principal_uid, forges, TOOL_CATALOG_MAX_BYTES)?;
+    let bytes = maknae_graph::catalog::encode(&input).map_err(|_| CatalogError::Build)?;
     let bytes = within(bytes, TOOL_CATALOG_MAX_BYTES)?;
     Ok(SubjectCatalog {
         digest: CatalogDigest(digest(&bytes)),
@@ -300,7 +325,7 @@ mod tests {
                 }));
         }
         entry.right = Some(right);
-        let got = input(&lp, HOBI, PRINCIPAL, &forges());
+        let got = input(&lp, HOBI, PRINCIPAL, &forges(), usize::MAX).unwrap();
         assert_eq!(got.entries.len(), 1);
         assert_eq!(got.entries[0].name, "rust-build");
         assert_eq!(
@@ -378,8 +403,8 @@ mod tests {
         let s = snap(&site(&["Tool(rust-build cargo build *)"], &[]), HOMELAB);
         assert!(s.contained(MALLORY, PRINCIPAL));
         assert_eq!(
-            input(s.loaded(), MALLORY, PRINCIPAL, &forges()),
-            CatalogInput::default()
+            input(s.loaded(), MALLORY, PRINCIPAL, &forges(), usize::MAX),
+            Ok(CatalogInput::default())
         );
         assert_eq!(
             *catalog(&s, MALLORY).bytes,
@@ -445,9 +470,12 @@ mod tests {
         let unbound = snap(&site(&["Tool(rust-build cargo build *)"], &[]), HOMELAB);
         let g = graph(&unbound, ALICE);
         assert!(cat::forges(&g, "git").is_empty());
-        assert!(input(unbound.loaded(), ALICE, PRINCIPAL, &forges())
-            .forges
-            .is_empty());
+        assert!(
+            input(unbound.loaded(), ALICE, PRINCIPAL, &forges(), usize::MAX)
+                .unwrap()
+                .forges
+                .is_empty()
+        );
         let bound = snap(&site(&["Tool(github-read gh pr view *)"], &[]), HOMELAB);
         let g = graph(&bound, ALICE);
         assert_eq!(cat::forges(&g, "git"), [(FORGE_HOST, "github")]);
@@ -583,12 +611,57 @@ mod tests {
     }
 
     #[test]
+    fn a_catalog_whose_keys_pass_the_bound_is_refused_before_it_is_encoded() {
+        let program = "p".repeat(1000);
+        let subcommands: Vec<String> = (0..80).map(|i| format!("\"s{i}\"")).collect();
+        let tools = format!(
+            "schema_version: 1\ntools:\n  wide:\n    executes_workspace: false\n    image: {{ ref: \"{IMAGE}\" }}\n    output_to_model: redacted\n    commands:\n      {program}: {{ subcommands: [{}] }}\n",
+            subcommands.join(", ")
+        );
+        let s = snap(&site(&[&format!("Tool(wide {program} s*)")], &[]), &tools);
+        let max = TOOL_CATALOG_MAX_BYTES;
+        assert_eq!(
+            input(s.loaded(), BOB, PRINCIPAL, &forges(), max),
+            Err(CatalogError::TooLarge)
+        );
+        let under = input(s.loaded(), BOB, PRINCIPAL, &forges(), usize::MAX).unwrap();
+        assert_eq!(under.entries[0].programs[0].1.len(), 80);
+        let need = graph_text(&under.entries[0]);
+        assert!(input(s.loaded(), BOB, PRINCIPAL, &forges(), need).is_ok());
+        assert_eq!(
+            input(s.loaded(), BOB, PRINCIPAL, &forges(), need - 1),
+            Err(CatalogError::TooLarge)
+        );
+        assert_eq!(
+            s.catalog_for(BOB, PRINCIPAL, &forges(), test_digest)
+                .map(|c| c.digest),
+            Err(CatalogError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn graph_text_counts_each_key_and_each_pattern_text() {
+        let entry = CatalogEntry {
+            name: "e".into(),
+            description: Some("not counted".into()),
+            executes_workspace: false,
+            output: CatalogOutput::Redacted,
+            binds: vec![],
+            programs: vec![
+                ("p".into(), vec!["ab".into(), "c".into()]),
+                ("qq".into(), vec![]),
+            ],
+        };
+        assert_eq!(graph_text(&entry), 3 + (3 + 1 + 4) + (3 + 1 + 2) + 4);
+    }
+
+    #[test]
     fn a_no_role_subject_gets_empty() {
         let s = snap(&site(&["Tool(rust-build cargo build *)"], &[]), HOMELAB);
         assert!(s.no_role(4242, PRINCIPAL));
         assert_eq!(
-            input(s.loaded(), 4242, PRINCIPAL, &forges()),
-            CatalogInput::default()
+            input(s.loaded(), 4242, PRINCIPAL, &forges(), usize::MAX),
+            Ok(CatalogInput::default())
         );
     }
 
