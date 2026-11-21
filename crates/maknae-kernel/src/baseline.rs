@@ -196,7 +196,6 @@ pub fn apply_of(a: &BaselineSections, b: &BaselineSections) -> Apply {
             "principal" => true,
             "providers" => non_empty_seq(old) && non_empty_seq(new),
             "audit" => equal_without(old, new, &["readers"]),
-            "forges" => false,
             _ => false,
         }
     });

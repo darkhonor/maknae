@@ -43,7 +43,7 @@ pub struct AuthorizedForge {
     pub provider: ForgeProvider,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ForgeSet(Vec<AuthorizedForge>);
 
 impl ForgeSet {
