@@ -152,16 +152,16 @@ mod tests {
     use crate::load_str;
     use crate::providers::{endpoint_is_acceptable, host_port_is_acceptable};
 
-    const FULL: &str = "\
-- name: github
-  kind: git
-  host: github.com
-  provider: github
-- name: lab
-  kind: git
-  host: GitLab.Lab.Local:8443
-  provider: gitlab
-";
+    const FULL: &str = concat!(
+        "- name: github\n",
+        "  kind: git\n",
+        "  host: github.com\n",
+        "  provider: github\n",
+        "- name: lab\n",
+        "  kind: git\n",
+        "  host: GitLab.Lab.Local:8443\n",
+        "  provider: gitlab\n",
+    );
 
     fn parse(yaml: &str) -> Result<ForgeSet, ConfigError> {
         let v = load_str(yaml).expect("test yaml parses");
