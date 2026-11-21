@@ -1146,6 +1146,7 @@ dependencies = [
  "maknae-config",
  "maknae-graph",
  "maknae-io",
+ "maknae-proto",
  "maknae-security",
  "nix",
 ]

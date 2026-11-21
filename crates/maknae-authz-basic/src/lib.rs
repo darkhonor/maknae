@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 mod binding;
+pub mod catalog;
 mod decide;
 
 /// The grantable term set, re-exported for CROSS-CRATE tripwires (#181).
@@ -1749,6 +1750,13 @@ pub trait Baseline: maknae_security::Authorizer + sealed::Sealed + Send + Sync +
     fn load_source(&self) -> Result<PolicySource, AuthzBasicError>;
     /// The section digest this baseline's snapshots are compiled with.
     fn digest(&self) -> fn(&[u8]) -> [u8; 32];
+    /// The installed snapshot's catalog for `uid`, built once per snapshot.
+    fn catalog_for(
+        &self,
+        uid: u32,
+        principal_uid: u32,
+        forges: &maknae_config::ForgeSet,
+    ) -> Result<Arc<catalog::SubjectCatalog>, catalog::CatalogError>;
 
     /// The installed snapshot's [`Snapshot::policy_sha256`].
     fn policy_sha256(&self) -> String {
@@ -1808,6 +1816,16 @@ impl Baseline for BasicAuthorizer {
     fn digest(&self) -> fn(&[u8]) -> [u8; 32] {
         self.digest
     }
+
+    fn catalog_for(
+        &self,
+        uid: u32,
+        principal_uid: u32,
+        forges: &maknae_config::ForgeSet,
+    ) -> Result<Arc<catalog::SubjectCatalog>, catalog::CatalogError> {
+        self.snapshot()
+            .catalog_for(uid, principal_uid, forges, self.digest)
+    }
 }
 
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
@@ -1857,6 +1875,15 @@ impl Baseline for HermeticAuthorizer {
 
     fn digest(&self) -> fn(&[u8]) -> [u8; 32] {
         self.inner.digest
+    }
+
+    fn catalog_for(
+        &self,
+        uid: u32,
+        principal_uid: u32,
+        forges: &maknae_config::ForgeSet,
+    ) -> Result<Arc<catalog::SubjectCatalog>, catalog::CatalogError> {
+        Baseline::catalog_for(&self.inner, uid, principal_uid, forges)
     }
 }
 
@@ -2841,7 +2868,7 @@ mod tests {
         );
     }
 
-    fn compiled(src: &PolicySource) -> Arc<Snapshot> {
+    pub(crate) fn compiled(src: &PolicySource) -> Arc<Snapshot> {
         snapshot_over(src, LABEL, test_digest, None).unwrap()
     }
 
@@ -6008,6 +6035,30 @@ mod tests {
         }
 
         #[test]
+        fn the_hermetic_baseline_serves_the_installed_snapshots_catalog() {
+            let fx = Fixture::new("tools_catalog");
+            write_tools(&fx, TOOLS_ONE);
+            write(
+                &fx.policy(),
+                "schema_version: 1\npermissions:\n  allow: [\"Tool(sentinel-674-one echo hi *)\"]\n",
+            );
+            fx.bind("user");
+            let auth = HermeticAuthorizer::new(fx.paths(), principal(), fixture_req(), test_digest)
+                .unwrap();
+            let forges = maknae_config::ForgeSet::empty();
+            let got = Baseline::catalog_for(&auth, 0, 501, &forges).unwrap();
+            assert!(Arc::ptr_eq(
+                &got,
+                &auth
+                    .snapshot()
+                    .catalog_for(0, 501, &forges, test_digest)
+                    .unwrap()
+            ));
+            let g = maknae_graph::catalog::decode(&got.bytes).unwrap();
+            assert_eq!(maknae_graph::catalog::entries(&g), ["sentinel-674-one"]);
+        }
+
+        #[test]
         fn a_present_tools_yaml_reaches_the_snapshot() {
             let fx = Fixture::new("tools_present");
             write_tools(&fx, TOOLS_ONE);
@@ -7256,12 +7307,12 @@ mod tests {
         }
     }
 
-    mod agents {
+    pub(crate) mod agents {
         use super::*;
         use maknae_config::{AccountRefusal, AgentEnrollment, AgentId, AgentRole, AgentsLoad};
         use maknae_io::{DaemonFacts, HostAccount};
 
-        const HOBI: u32 = 2001;
+        pub(crate) const HOBI: u32 = 2001;
         const SUGA: u32 = 2002;
         const JIN: u32 = 2003;
         const SHELLED: u32 = 2004;
@@ -7357,11 +7408,14 @@ mod tests {
             }
         }
 
-        fn hobi() -> AgentEnrollment {
+        pub(crate) fn hobi() -> AgentEnrollment {
             enrollment("hobi", "hobi-svc", HOBI, AgentRole::User)
         }
 
-        fn load(enrollments: Vec<AgentEnrollment>, policies: &[(&str, &str)]) -> AgentsLoad {
+        pub(crate) fn load(
+            enrollments: Vec<AgentEnrollment>,
+            policies: &[(&str, &str)],
+        ) -> AgentsLoad {
             AgentsLoad {
                 enrollments,
                 policies: policies
@@ -7375,7 +7429,7 @@ mod tests {
             }
         }
 
-        fn try_source(
+        pub(crate) fn try_source(
             authz: &str,
             bindings: Option<&str>,
             uids: &[(&str, u32)],

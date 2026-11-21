@@ -2,6 +2,7 @@
 //! binary's vocabulary, compiled into one immutable in-memory graph with a rule index.
 
 use crate::binding::{GraphBindings, Roles};
+use crate::catalog::{CatalogError, SubjectCatalog};
 use crate::decide::{Cited, Effect, LoadedPolicy};
 use crate::{IdentityProblem, PolicySource};
 use maknae_graph::graph::{Graph, GraphBuilder};
@@ -18,7 +19,7 @@ use maknae_graph::schema::CompiledSet;
 use maknae_security::RuleCitation;
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 const ATTR_CLASS: &str = "class";
 const ATTR_ENTRY: &str = "entry";
@@ -53,7 +54,12 @@ pub struct Snapshot {
     index: BTreeMap<Cited, RuleCitation>,
     sections: BTreeMap<String, [u8; 32]>,
     problems: Arc<[IdentityProblem]>,
+    catalogs: Mutex<CatalogCache>,
+    #[cfg(test)]
+    pub(crate) catalog_builds: std::sync::atomic::AtomicUsize,
 }
+
+type CatalogCache = BTreeMap<(u32, u32), Result<Arc<SubjectCatalog>, CatalogError>>;
 
 impl fmt::Debug for Snapshot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -163,6 +169,29 @@ impl Snapshot {
 
     pub fn sensitive(&self) -> &Arc<maknae_config::SensitiveList> {
         &self.loaded.sensitive
+    }
+
+    /// `uid`'s tool catalog over this snapshot, built on first use and kept for its life.
+    /// The cache is not keyed by `forges`: they are restart-only (ADR-0039).
+    pub fn catalog_for(
+        &self,
+        uid: u32,
+        principal_uid: u32,
+        forges: &maknae_config::ForgeSet,
+        digest: fn(&[u8]) -> [u8; 32],
+    ) -> Result<Arc<SubjectCatalog>, CatalogError> {
+        let key = (uid, principal_uid);
+        // A value is inserted whole, so a poisoned cache holds no partial entry.
+        let cache = || self.catalogs.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(hit) = cache().get(&key) {
+            return hit.clone();
+        }
+        #[cfg(test)]
+        self.catalog_builds
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let built =
+            crate::catalog::build(&self.loaded, uid, principal_uid, forges, digest).map(Arc::new);
+        cache().entry(key).or_insert(built).clone()
     }
 
     pub(crate) fn loaded(&self) -> &LoadedPolicy {
@@ -622,6 +651,9 @@ pub fn compile(
         index: c.index,
         sections: section_sha256.clone(),
         problems: carried_problems(source.identity_problems(), &carried, source.bindings()).into(),
+        catalogs: Mutex::new(BTreeMap::new()),
+        #[cfg(test)]
+        catalog_builds: std::sync::atomic::AtomicUsize::new(0),
     })
 }
 
