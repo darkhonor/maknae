@@ -4329,6 +4329,29 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_digest_or_graph_names_what_was_expected() {
+        let mut buf = Vec::new();
+        ciborium::into_writer(&ciborium::Value::Bytes(vec![0; 31]), &mut buf).unwrap();
+        let err = ciborium::from_reader::<CatalogDigest, _>(buf.as_slice()).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("expected a 32-byte byte string"),
+            "{err:?}"
+        );
+        let reply = ciborium::Value::Map(vec![
+            ("digest".into(), ciborium::Value::Bytes(vec![0; 32])),
+            (
+                "graph".into(),
+                ciborium::Value::Bytes(vec![0; TOOL_CATALOG_MAX_BYTES + 1]),
+            ),
+        ]);
+        let mut buf = Vec::new();
+        ciborium::into_writer(&reply, &mut buf).unwrap();
+        let err = ciborium::from_reader::<ToolCatalogReply, _>(buf.as_slice()).unwrap_err();
+        let want = format!("expected a catalog graph of at most {TOOL_CATALOG_MAX_BYTES} bytes");
+        assert!(format!("{err:?}").contains(&want), "{err:?}");
+    }
+
+    #[test]
     fn a_response_with_a_digest_round_trips() {
         let response = Response {
             protocol_version: PROTOCOL_VERSION,
