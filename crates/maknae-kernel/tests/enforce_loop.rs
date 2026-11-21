@@ -170,7 +170,12 @@ async fn read_attempt<P>(
     delegate: &std::path::Path,
 ) -> common::ReadRun
 where
-    P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
+    P: maknae_security::Authorizer
+        + maknae_kernel::SensitiveNow
+        + maknae_kernel::CatalogNow
+        + Send
+        + Sync
+        + 'static,
 {
     read_attempt_as(
         Some(fx_home),
@@ -195,7 +200,12 @@ async fn read_attempt_as<P>(
     delegate: &std::path::Path,
 ) -> common::ReadRun
 where
-    P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
+    P: maknae_security::Authorizer
+        + maknae_kernel::SensitiveNow
+        + maknae_kernel::CatalogNow
+        + Send
+        + Sync
+        + 'static,
 {
     read_attempt_with(
         peer_home,
@@ -223,7 +233,12 @@ async fn read_page_attempt<P>(
     window: maknae_io::PageWindow,
 ) -> common::ReadRun
 where
-    P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
+    P: maknae_security::Authorizer
+        + maknae_kernel::SensitiveNow
+        + maknae_kernel::CatalogNow
+        + Send
+        + Sync
+        + 'static,
 {
     read_attempt_with(
         Some(fx_home),
@@ -254,7 +269,12 @@ async fn read_attempt_with<P>(
     before_read: impl FnOnce(),
 ) -> common::ReadRun
 where
-    P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
+    P: maknae_security::Authorizer
+        + maknae_kernel::SensitiveNow
+        + maknae_kernel::CatalogNow
+        + Send
+        + Sync
+        + 'static,
 {
     let _turn = common::fs_turn(&verb).await;
     let held = maknae_io::open_path_for_delegation(delegate).ok();
@@ -312,7 +332,12 @@ async fn drive<P>(
     timeout: Duration,
 ) -> Option<Vec<u8>>
 where
-    P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
+    P: maknae_security::Authorizer
+        + maknae_kernel::SensitiveNow
+        + maknae_kernel::CatalogNow
+        + Send
+        + Sync
+        + 'static,
 {
     drive_with(
         Some(fx_home),
@@ -339,7 +364,12 @@ async fn drive_with_ops<P>(
     ops: Arc<impl maknae_kernel::AdminOps + 'static>,
 ) -> Option<Vec<u8>>
 where
-    P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
+    P: maknae_security::Authorizer
+        + maknae_kernel::SensitiveNow
+        + maknae_kernel::CatalogNow
+        + Send
+        + Sync
+        + 'static,
 {
     drive_admin(
         Some(fx_home),
@@ -373,7 +403,12 @@ async fn drive_with<P>(
     kernel_graph: Arc<Option<maknae_kernel::KernelGraphStatus>>,
 ) -> Option<Vec<u8>>
 where
-    P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
+    P: maknae_security::Authorizer
+        + maknae_kernel::SensitiveNow
+        + maknae_kernel::CatalogNow
+        + Send
+        + Sync
+        + 'static,
 {
     drive_admin(
         peer_home,
@@ -415,7 +450,12 @@ async fn drive_admin<P>(
     ops: Arc<dyn maknae_kernel::AdminOps>,
 ) -> Option<Vec<u8>>
 where
-    P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
+    P: maknae_security::Authorizer
+        + maknae_kernel::SensitiveNow
+        + maknae_kernel::CatalogNow
+        + Send
+        + Sync
+        + 'static,
 {
     let _turn = common::fs_turn(&verb).await;
     let (mut client, server) = tokio::io::duplex(256 * 1024);

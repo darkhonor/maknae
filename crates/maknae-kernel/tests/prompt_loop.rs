@@ -1656,6 +1656,27 @@ impl<B: maknae_authz_basic::Baseline + Send + Sync> maknae_security::Authorizer
     }
 }
 
+impl<B: maknae_authz_basic::Baseline> maknae_kernel::CatalogNow for InstallsAtTheFirstDecision<B> {
+    fn catalog_now(
+        &self,
+        uid: u32,
+        forges: &maknae_config::ForgeSet,
+    ) -> Result<
+        std::sync::Arc<maknae_authz_basic::catalog::SubjectCatalog>,
+        maknae_authz_basic::catalog::CatalogError,
+    > {
+        self.pdp.catalog_now(uid, forges)
+    }
+
+    fn catalog_stamp(
+        &self,
+        uid: u32,
+        forges: &maknae_config::ForgeSet,
+    ) -> Option<maknae_proto::CatalogDigest> {
+        self.pdp.catalog_stamp(uid, forges)
+    }
+}
+
 impl<B: maknae_authz_basic::Baseline> maknae_kernel::SensitiveNow
     for InstallsAtTheFirstDecision<B>
 {

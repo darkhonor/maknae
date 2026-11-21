@@ -54,7 +54,7 @@ impl LiveConfig {
         Self::with_forges(config_view_of(v), providers_of(v), v.boot.forges().clone())
     }
 
-    pub fn forges(&self) -> &Arc<ForgeSet> {
+    pub(crate) fn forges(&self) -> &Arc<ForgeSet> {
         &self.forges
     }
 

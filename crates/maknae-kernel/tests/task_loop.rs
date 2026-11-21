@@ -3974,3 +3974,88 @@ async fn a_queued_task_waits_on_nothing_even_while_due_a_hold() {
     w.working(&tj);
     w.give("jin", "hobi", tj).await;
 }
+
+const HOMELAB_TOOLS: &str = include_str!("../../../packaging/common/tools-homelab.yaml");
+const RUST_BUILD: &str =
+    "schema_version: 1\npermissions:\n  allow: [\"Tool(rust-build cargo build *)\"]\n";
+
+impl World {
+    async fn agent_response(&self, agent: &str, verb: Verb) -> Response {
+        let raw = self.agent_raw(agent, verb, None, &Records::new(0)).await;
+        let mut cursor = &raw[..];
+        let frame = common::read_frame(&mut cursor, 1 << 20)
+            .await
+            .expect("one frame");
+        maknae_proto::decode_response(&frame).unwrap()
+    }
+
+    fn catalog_digest(&self, uid: u32) -> maknae_proto::CatalogDigest {
+        self.pdp
+            .catalog_for(uid, self.me + 1, &maknae_config::ForgeSet::empty())
+            .unwrap()
+            .digest
+    }
+
+    fn tools(&self, body: &str) {
+        common::write_0640(&self.root.join(maknae_config::TOOLS_FILE), body);
+        self.pdp.baseline().reload_from_file().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn every_task_claim_reply_kind_is_stamped() {
+    let w = world_with("stamp-kinds", "user", true, RUST_BUILD, PLAIN);
+    w.tools(HOMELAB_TOOLS);
+    let want = Some(w.catalog_digest(HOBI_UID));
+    let stamped = |resp: Response, kind: &str| {
+        assert_eq!(resp.catalog_digest, want, "{kind}: {resp:?}");
+        resp.result
+    };
+    let idle = stamped(w.agent_response("hobi", CLAIM).await, "claim idle");
+    assert!(
+        matches!(idle, RespResult::Ok(Payload::TaskIdle)),
+        "{idle:?}"
+    );
+    let beat = || Verb::TaskClaim {
+        seen_follow_ups: Some(0),
+    };
+    let idle = stamped(w.agent_response("hobi", beat()).await, "heartbeat idle");
+    assert!(
+        matches!(idle, RespResult::Ok(Payload::TaskIdle)),
+        "{idle:?}"
+    );
+
+    let id = w.submit("hobi", "a").await;
+    w.submit("hobi", "b").await;
+    let delivered = stamped(w.agent_response("hobi", CLAIM).await, "delivered");
+    assert!(
+        matches!(delivered, RespResult::Ok(Payload::TaskDelivered(_))),
+        "{delivered:?}"
+    );
+    let follow_ups = stamped(w.agent_response("hobi", beat()).await, "follow-ups");
+    assert!(
+        matches!(follow_ups, RespResult::Ok(Payload::TaskFollowUps(_))),
+        "{follow_ups:?}"
+    );
+    w.ask(Verb::TaskStop { task: r(&id) }).await;
+    let closed = stamped(w.agent_response("hobi", beat()).await, "closed");
+    assert!(
+        matches!(closed, RespResult::Ok(Payload::TaskState(_))),
+        "{closed:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_tools_reload_changes_the_next_stamp() {
+    let w = world_with("stamp-reload", "user", true, RUST_BUILD, PLAIN);
+    w.tools(HOMELAB_TOOLS);
+    let before = w.agent_response("hobi", CLAIM).await.catalog_digest;
+    assert_eq!(before, Some(w.catalog_digest(HOBI_UID)));
+    w.tools(&HOMELAB_TOOLS.replace(
+        "Build, check, lint and test a workspace with no network.",
+        "sentinel-674 reloaded",
+    ));
+    let after = w.agent_response("hobi", CLAIM).await.catalog_digest;
+    assert_eq!(after, Some(w.catalog_digest(HOBI_UID)));
+    assert_ne!(after, before);
+}

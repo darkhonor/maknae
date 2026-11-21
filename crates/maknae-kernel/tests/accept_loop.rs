@@ -1736,7 +1736,12 @@ async fn drive_channel<P>(
     agents: maknae_kernel::AgentAdmission,
 ) -> Vec<AuditRecord>
 where
-    P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
+    P: maknae_security::Authorizer
+        + maknae_kernel::SensitiveNow
+        + maknae_kernel::CatalogNow
+        + Send
+        + Sync
+        + 'static,
 {
     let emit = RecEmit::new();
     let acceptor = FakeAccept::authenticating(script, class.peer_auth.clone());
@@ -2519,6 +2524,27 @@ async fn an_agents_session_new_is_decided_by_its_role() {
         ("deny", "denied by role grant session.new", Some("hobi")),
         "{new:?}"
     );
+}
+
+impl<P: maknae_kernel::CatalogNow> maknae_kernel::CatalogNow for Seen<P> {
+    fn catalog_now(
+        &self,
+        uid: u32,
+        forges: &maknae_config::ForgeSet,
+    ) -> Result<
+        std::sync::Arc<maknae_authz_basic::catalog::SubjectCatalog>,
+        maknae_authz_basic::catalog::CatalogError,
+    > {
+        self.inner.catalog_now(uid, forges)
+    }
+
+    fn catalog_stamp(
+        &self,
+        uid: u32,
+        forges: &maknae_config::ForgeSet,
+    ) -> Option<maknae_proto::CatalogDigest> {
+        self.inner.catalog_stamp(uid, forges)
+    }
 }
 
 impl<P: maknae_kernel::SensitiveNow> maknae_kernel::SensitiveNow for Seen<P> {

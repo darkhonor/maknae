@@ -97,6 +97,8 @@ pub enum Dispatch {
     ConversationDeleteRequested,
     /// A tasker verb or a submission; the arm reads the operands and gathers the task facts.
     TaskRequested,
+    /// The peer asked for its own tool catalog. No datum: the catalog is the installed snapshot's.
+    ToolCatalogRequested,
 }
 
 /// The verbs routed to `mutation::handle`; only these resolve the requester's home.
@@ -167,8 +169,8 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         | Verb::McpToolCall
         | Verb::McpResourceRead
         | Verb::McpPromptGet
-        | Verb::McpSamplingCreate
-        | Verb::ToolCatalog {} => Dispatch::NoBehaviour,
+        | Verb::McpSamplingCreate => Dispatch::NoBehaviour,
+        Verb::ToolCatalog {} => Dispatch::ToolCatalogRequested,
         Verb::TaskSubmit { .. }
         | Verb::TaskAdd { .. }
         | Verb::TaskStatus { .. }
@@ -1309,7 +1311,8 @@ mod tests {
                 "session.close",
                 "session.list",
                 "session.delete",
-                "session.task"
+                "session.task",
+                "tool.catalog"
             ],
             "the hand-copied list in the class test above must match the constant"
         );
@@ -2150,6 +2153,7 @@ mod tests {
                 seen_follow_ups: None,
             },
             Verb::AgentList { after: None },
+            Verb::ToolCatalog {},
         ]
     }
 
@@ -2159,7 +2163,7 @@ mod tests {
 
     /// #148: every term is EXACTLY one of control plane or content-bearing, and
     /// the split is what the vocabulary says it is. Pinned over `all_verbs()`
-    /// (59 client action terms) + the two `kernel.*` pseudo-actions, AND
+    /// (60 client action terms) + the two `kernel.*` pseudo-actions, AND
     /// `all_verbs()` is cross-checked against `ci/gates/verb-manifest.txt`'s
     /// `action` rows (critical-review round 1 of PR B: the manifest is
     /// extracted from `verb_to_action`, which the compiler forces a new
@@ -2310,11 +2314,11 @@ mod tests {
 
     /// #67 D4: the vocabulary is the size the spec says.
     #[test]
-    fn the_vocabulary_is_fifty_nine_client_reachable_terms() {
+    fn the_vocabulary_is_sixty_client_reachable_terms() {
         let terms: std::collections::BTreeSet<&str> =
             all_verbs().iter().map(verb_to_action).collect();
-        assert_eq!(terms.len(), 59);
-        assert_eq!(all_verbs().len(), 70);
+        assert_eq!(terms.len(), 60);
+        assert_eq!(all_verbs().len(), 71);
     }
 
     /// Two terms sharing an action string would be decided as one another —

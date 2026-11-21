@@ -53,7 +53,7 @@ pub use boot_gate::{
     AuthzBootRefusal, EgressBoundsRefusal,
 };
 pub use ceiling_authz::CeilingAuthorizer;
-pub use composition::Composition;
+pub use composition::{CatalogNow, Composition};
 pub use conversation::chain::ChainHead;
 #[cfg(any(test, feature = "hermetic-test-seam"))]
 pub use conversation::dir_store::DirStore;

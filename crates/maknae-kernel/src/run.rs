@@ -43,7 +43,7 @@ use maknae_config::TransportConfig;
 use maknae_graph::baseline::BaselineLayer;
 use maknae_proto::{
     admits, class_of, decode_request, encode_response, read_frame_zeroizing, write_frame,
-    FrameCaps, FrameClass, Payload, RespResult, Response, Verb, CONTROL_REQUEST_MAX,
+    CatalogDigest, FrameCaps, FrameClass, Payload, RespResult, Response, Verb, CONTROL_REQUEST_MAX,
     PROTOCOL_VERSION,
 };
 use maknae_state::anchor::{parse_checkpoint, CHECKPOINT_ACTION};
@@ -778,7 +778,7 @@ pub async fn handle<S, E, P>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     E: AuditEmit + Send + Sync + 'static,
-    P: Authorizer + crate::SensitiveNow + Send + Sync + 'static,
+    P: Authorizer + crate::SensitiveNow + crate::CatalogNow + Send + Sync + 'static,
 {
     handle_with_attempt_caps(
         stream,
@@ -861,7 +861,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     E: AuditEmit + Send + Sync + 'static,
-    P: Authorizer + crate::SensitiveNow + Send + Sync + 'static,
+    P: Authorizer + crate::SensitiveNow + crate::CatalogNow + Send + Sync + 'static,
 {
     let emit = Arc::new(SessionEmit {
         inner: emit,
@@ -1642,6 +1642,130 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             close_bounded(&mut stream).await;
             return;
         }
+        Dispatch::ToolCatalogRequested => {
+            let action = verb_to_action(&request.verb);
+            let catalog = match authorizer.catalog_now(peer_uid, live.forges()) {
+                Ok(catalog) => catalog,
+                Err(e) => {
+                    let (reason, posture, code, message) = match e {
+                        maknae_authz_basic::catalog::CatalogError::TooLarge => (
+                            "tool catalog too large",
+                            "refused-oversize",
+                            ProtoErrCode::TooLarge,
+                            "tool catalog exceeds the frame limit",
+                        ),
+                        maknae_authz_basic::catalog::CatalogError::Build => (
+                            "tool catalog build failed",
+                            "unavailable",
+                            ProtoErrCode::Internal,
+                            "tool catalog unavailable",
+                        ),
+                    };
+                    let appended = emit_request_outcome(
+                        &emit,
+                        &host,
+                        &socket,
+                        peer_uid,
+                        peer_uri.as_deref(),
+                        peer_user.as_deref(),
+                        decided_role,
+                        decided_rule.as_ref(),
+                        session_id,
+                        seq.next(),
+                        action,
+                        None,
+                        None,
+                        "deny",
+                        reason,
+                        posture,
+                        &au3_1,
+                    )
+                    .await;
+                    if may_respond(appended) {
+                        write_error_bounded(&mut stream, &cfg, class, code, message).await;
+                    }
+                    close_bounded(&mut stream).await;
+                    return;
+                }
+            };
+            let appended = emit_request_outcome(
+                &emit,
+                &host,
+                &socket,
+                peer_uid,
+                peer_uri.as_deref(),
+                peer_user.as_deref(),
+                decided_role,
+                decided_rule.as_ref(),
+                session_id,
+                seq.next(),
+                action,
+                Some(&lower_hex(&catalog.digest.0)),
+                None,
+                "permit",
+                "authorized",
+                "authorized",
+                &au3_1,
+            )
+            .await;
+            if !may_respond(appended) {
+                close_bounded(&mut stream).await;
+                return;
+            }
+            let response = Response {
+                protocol_version: PROTOCOL_VERSION,
+                result: RespResult::Ok(Payload::ToolCatalog(maknae_proto::ToolCatalogReply {
+                    digest: catalog.digest,
+                    graph: maknae_proto::Bytes::new((*catalog.bytes).clone().into()),
+                })),
+                catalog_digest: None,
+            };
+            match encode_response(&response) {
+                Ok(bytes) => {
+                    write_frame_bounded(
+                        &mut stream,
+                        &cfg,
+                        class,
+                        &bytes,
+                        &emit,
+                        &host,
+                        &socket,
+                        peer_uid,
+                        peer_uri.as_deref(),
+                        peer_user.as_deref(),
+                        decided_role,
+                        decided_rule.as_ref(),
+                        session_id,
+                        seq,
+                        action,
+                        &au3_1,
+                    )
+                    .await
+                }
+                Err(_) => {
+                    refuse_unencodable_bounded(
+                        &mut stream,
+                        &cfg,
+                        class,
+                        &emit,
+                        &host,
+                        &socket,
+                        peer_uid,
+                        peer_uri.as_deref(),
+                        peer_user.as_deref(),
+                        decided_role,
+                        decided_rule.as_ref(),
+                        session_id,
+                        seq,
+                        action,
+                        &au3_1,
+                    )
+                    .await
+                }
+            }
+            close_bounded(&mut stream).await;
+            return;
+        }
         Dispatch::NoBehaviour => {
             // Decided and PERMITTED above; the term simply has no behaviour.
             // Same audit-then-respond gate as every sibling path — the record
@@ -2144,6 +2268,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                     }
                 }
                 Dispatch::NoBehaviour
+                | Dispatch::ToolCatalogRequested
                 | Dispatch::MutationRequested
                 | Dispatch::PromptRequested
                 | Dispatch::ConversationNewRequested
@@ -2941,13 +3066,48 @@ impl<E: AuditEmit + Send + Sync> Trail<'_, E> {
     ) where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
+        self.respond(stream, outcome, payload, role, rule, action, None)
+            .await;
+    }
+
+    /// [`Self::deliver`] with the subject's catalog digest on the reply.
+    #[allow(clippy::too_many_arguments)]
+    async fn deliver_stamped<S>(
+        &self,
+        stream: &mut S,
+        outcome: &AuditRecord,
+        payload: Payload,
+        role: Option<&'static str>,
+        rule: Option<&RuleCitation>,
+        action: &str,
+        catalog_digest: Option<CatalogDigest>,
+    ) where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        self.respond(stream, outcome, payload, role, rule, action, catalog_digest)
+            .await;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn respond<S>(
+        &self,
+        stream: &mut S,
+        outcome: &AuditRecord,
+        payload: Payload,
+        role: Option<&'static str>,
+        rule: Option<&RuleCitation>,
+        action: &str,
+        catalog_digest: Option<CatalogDigest>,
+    ) where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
         if !may_respond(self.record_bounded(outcome).await) {
             return;
         }
         let response = Response {
             protocol_version: PROTOCOL_VERSION,
             result: RespResult::Ok(payload),
-            catalog_digest: None,
+            catalog_digest,
         };
         match encode_response(&response) {
             Ok(bytes) => {
@@ -3059,7 +3219,7 @@ async fn serve_conversation_verb<S, E, P>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     E: AuditEmit + Send + Sync + 'static,
-    P: Authorizer + Send + Sync + 'static,
+    P: Authorizer + crate::CatalogNow + Send + Sync + 'static,
 {
     use crate::conversation::{bounds, facts, record};
     let action = verb_to_action(verb);
@@ -3246,8 +3406,17 @@ async fn serve_conversation_verb<S, E, P>(
                     trail.unreadable(action, &scan.unreadable).await;
                     let outcome = trail.outcome(&intent, "conversation opened", "authorized");
                     let payload = Payload::ConversationOpened(record::view(&rec));
+                    let stamp = authorizer.catalog_stamp(uid, live.forges());
                     trail
-                        .deliver(stream, &outcome, payload, role, rule.as_ref(), action)
+                        .deliver_stamped(
+                            stream,
+                            &outcome,
+                            payload,
+                            role,
+                            rule.as_ref(),
+                            action,
+                            stamp,
+                        )
                         .await;
                 }
                 Err(f) => {
@@ -3430,7 +3599,7 @@ async fn serve_task_verb<S, E, P>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     E: AuditEmit + Send + Sync + 'static,
-    P: Authorizer + Send + Sync + 'static,
+    P: Authorizer + crate::CatalogNow + Send + Sync + 'static,
 {
     use crate::task::TaskRefusal;
     use crate::task_verbs::{self as tv, TaskVerb};
@@ -3844,6 +4013,7 @@ async fn serve_task_verb<S, E, P>(
                     cite_task(rec, id, Some(maknae_proto::tasker_text(tasker)))
                 };
             let idle = || without_tasker(decided("permit", "idle", "authorized"));
+            let stamp = || authorizer.catalog_stamp(trail.uid, live.forges());
             if let Some(seen) = seen {
                 let budget = maknae_proto::prompt_request_cap(tasks.text_max);
                 let (outcome, payload) = match store.heartbeat(&agent, trail.uid, seen, budget) {
@@ -3886,20 +4056,29 @@ async fn serve_task_verb<S, E, P>(
                     crate::task::Heartbeat::Idle => (idle(), Payload::TaskIdle),
                 };
                 trail
-                    .deliver(stream, &outcome, payload, role, rule.as_ref(), action)
+                    .deliver_stamped(
+                        stream,
+                        &outcome,
+                        payload,
+                        role,
+                        rule.as_ref(),
+                        action,
+                        stamp(),
+                    )
                     .await;
                 return;
             }
             let decided_on = match store.next_for(&agent, trail.uid) {
                 None => {
                     trail
-                        .deliver(
+                        .deliver_stamped(
                             stream,
                             &idle(),
                             Payload::TaskIdle,
                             role,
                             rule.as_ref(),
                             action,
+                            stamp(),
                         )
                         .await;
                     return;
@@ -3938,7 +4117,15 @@ async fn serve_task_verb<S, E, P>(
                             tasker.as_ref().map(maknae_proto::tasker_text),
                         );
                         trail
-                            .deliver(stream, &rec, Payload::TaskIdle, role, rule.as_ref(), action)
+                            .deliver_stamped(
+                                stream,
+                                &rec,
+                                Payload::TaskIdle,
+                                role,
+                                rule.as_ref(),
+                                action,
+                                stamp(),
+                            )
                             .await;
                         return;
                     }
@@ -3979,13 +4166,14 @@ async fn serve_task_verb<S, E, P>(
                 Ok(None) => {
                     let outcome = trail.outcome(&intent, "idle", "authorized");
                     trail
-                        .deliver(
+                        .deliver_stamped(
                             stream,
                             &outcome,
                             Payload::TaskIdle,
                             role,
                             rule.as_ref(),
                             action,
+                            stamp(),
                         )
                         .await;
                 }
@@ -4001,7 +4189,15 @@ async fn serve_task_verb<S, E, P>(
                         fresh,
                     });
                     trail
-                        .deliver(stream, &outcome, payload, role, rule.as_ref(), action)
+                        .deliver_stamped(
+                            stream,
+                            &outcome,
+                            payload,
+                            role,
+                            rule.as_ref(),
+                            action,
+                            stamp(),
+                        )
                         .await;
                 }
                 Err(r) => trail.unauthorized(stream, &refused(&intent, &r)).await,
@@ -5288,7 +5484,7 @@ pub async fn accept_loop<A, E, P>(
 where
     A: PlaneAccept + Send + Sync + 'static,
     E: AuditEmit + Send + Sync + 'static,
-    P: Authorizer + crate::SensitiveNow + Send + Sync + 'static,
+    P: Authorizer + crate::SensitiveNow + crate::CatalogNow + Send + Sync + 'static,
 {
     let channel_mismatch = acceptor.peer_auth() != &class.peer_auth;
     if channel_mismatch {
