@@ -809,7 +809,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_claim_or_heartbeat_goes_uncited() {
+    fn only_a_claim_heartbeat_or_catalog_fetch_goes_uncited() {
         let id = Some(TaskId([1; 16]));
         let text = || maknae_proto::SecretText(zeroize::Zeroizing::new("r".into()));
         for seen in [None, Some(0)] {

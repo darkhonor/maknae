@@ -749,6 +749,7 @@ mod tests {
             Err("the persona is not UTF-8".to_string())
         );
     }
+
     #[tokio::test]
     async fn agent_plane_refetches_after_a_claim_reply_with_a_new_digest() {
         use crate::plane::fake::FakeKernel;
@@ -825,6 +826,7 @@ mod tests {
             .collect();
         assert_eq!(verbs, [false, true, false, false, true]);
     }
+
     #[tokio::test]
     async fn a_refused_catalog_fetch_drops_the_held_catalog_and_the_claim_still_answers() {
         use crate::plane::fake::{refused, FakeKernel};
