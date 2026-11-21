@@ -373,6 +373,15 @@ mod tests {
     }
 
     #[test]
+    fn only_an_unbound_uid_holds_no_role() {
+        let s = snap(&site(&[], &[]), HOMELAB);
+        assert!(s.no_role(4242, PRINCIPAL));
+        for bound in [ALICE, BOB, MALLORY] {
+            assert!(!s.no_role(bound, PRINCIPAL), "{bound}");
+        }
+    }
+
+    #[test]
     fn ceiling_shapes_not_grant_text() {
         let s = snap(&site(&["Tool(github-post gh pr review *)"], &[]), HOMELAB);
         let g = graph(&s, ALICE);

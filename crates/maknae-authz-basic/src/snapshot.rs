@@ -131,6 +131,10 @@ impl Snapshot {
             == crate::binding::Resolution::Role(crate::role::Role::Adversary)
     }
 
+    pub fn no_role(&self, uid: u32, principal_uid: u32) -> bool {
+        self.loaded.roles.role_for(uid, principal_uid) == crate::binding::Resolution::NoRole
+    }
+
     /// Whether `uid` holds no role in a load that could not resolve every name it binds:
     /// the uid may belong to one of those names, so "no role" is not a decided fact.
     pub fn unresolved(&self, uid: u32, principal_uid: u32) -> bool {
