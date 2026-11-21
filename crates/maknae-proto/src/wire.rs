@@ -809,7 +809,7 @@ pub enum Payload {
     HeldTasks(crate::HeldPage),
     HeldReleased(crate::ReleasePage),
     /// The requesting subject's catalog, released only on the `tool.catalog` Permit.
-    ToolCatalog(ToolCatalogView),
+    ToolCatalog(ToolCatalogReply),
 }
 
 pub const TOOL_CATALOG_ENVELOPE: usize = 1024;
@@ -853,7 +853,7 @@ impl<'de> Deserialize<'de> for CatalogDigest {
 
 /// The `maknae-graph` format-v1 bytes of a subject's catalog, and their digest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ToolCatalogView {
+pub struct ToolCatalogReply {
     pub digest: CatalogDigest,
     #[serde(deserialize_with = "bounded_catalog_graph")]
     pub graph: crate::Bytes,
@@ -4244,8 +4244,8 @@ mod tests {
         assert_eq!(decode_request(&encoded).unwrap(), request);
     }
 
-    fn catalog_view(n: usize) -> ToolCatalogView {
-        ToolCatalogView {
+    fn catalog_view(n: usize) -> ToolCatalogReply {
+        ToolCatalogReply {
             digest: CatalogDigest([0x5a; 32]),
             graph: crate::Bytes::new(zeroize::Zeroizing::new(vec![0x47; n])),
         }
@@ -4284,10 +4284,10 @@ mod tests {
             buf
         };
         let at_max = encode(TOOL_CATALOG_MAX_BYTES);
-        let back: ToolCatalogView = ciborium::from_reader(at_max.as_slice()).unwrap();
+        let back: ToolCatalogReply = ciborium::from_reader(at_max.as_slice()).unwrap();
         assert_eq!(back, catalog_view(TOOL_CATALOG_MAX_BYTES));
         let over = encode(TOOL_CATALOG_MAX_BYTES + 1);
-        assert!(ciborium::from_reader::<ToolCatalogView, _>(over.as_slice()).is_err());
+        assert!(ciborium::from_reader::<ToolCatalogReply, _>(over.as_slice()).is_err());
         let response = Response {
             protocol_version: PROTOCOL_VERSION,
             result: RespResult::Ok(Payload::ToolCatalog(catalog_view(
@@ -4349,7 +4349,7 @@ mod tests {
 
     #[test]
     fn debug_shows_no_graph_bytes() {
-        let view = ToolCatalogView {
+        let view = ToolCatalogReply {
             digest: CatalogDigest([0xab; 32]),
             graph: crate::Bytes::new(zeroize::Zeroizing::new(b"SENTINEL-GRAPH".to_vec())),
         };
