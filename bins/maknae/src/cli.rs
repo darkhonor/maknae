@@ -467,6 +467,7 @@ fn payload_kind(p: &Payload) -> &'static str {
         Payload::Agents(_) => "agent list",
         Payload::HeldTasks(_) => "held task list",
         Payload::HeldReleased(_) => "held task release",
+        Payload::ToolCatalog(_) => "tool catalog",
     }
 }
 
@@ -1360,7 +1361,8 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
         | (v, p @ Payload::TaskIdle)
         | (v, p @ Payload::Agents(_))
         | (v, p @ Payload::HeldTasks(_))
-        | (v, p @ Payload::HeldReleased(_)) => Err(format!(
+        | (v, p @ Payload::HeldReleased(_))
+        | (v, p @ Payload::ToolCatalog(_)) => Err(format!(
             "protocol error: daemon returned a {} payload for a {} request",
             payload_kind(&p),
             v.kind()

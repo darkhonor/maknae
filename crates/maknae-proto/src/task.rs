@@ -1196,6 +1196,7 @@ mod tests {
             let resp = crate::Response {
                 protocol_version: crate::PROTOCOL_VERSION,
                 result: crate::RespResult::Ok(payload),
+                catalog_digest: None,
             };
             let back = crate::decode_response(&crate::encode_response(&resp).unwrap()).unwrap();
             assert_eq!(back, resp);
@@ -1528,6 +1529,7 @@ mod tests {
             let resp = crate::Response {
                 protocol_version: crate::PROTOCOL_VERSION,
                 result: crate::RespResult::Ok(payload),
+                catalog_digest: None,
             };
             let bytes = crate::encode_response(&resp).unwrap();
             let back = crate::decode_response(&bytes).unwrap();
@@ -1562,6 +1564,7 @@ mod tests {
         let resp = crate::Response {
             protocol_version: crate::PROTOCOL_VERSION,
             result: crate::RespResult::Ok(crate::Payload::Agents(page)),
+            catalog_digest: None,
         };
         let bytes = crate::encode_response(&resp).unwrap();
         assert!(
@@ -1575,6 +1578,7 @@ mod tests {
         let resp = crate::Response {
             protocol_version: crate::PROTOCOL_VERSION,
             result: crate::RespResult::Ok(payload),
+            catalog_digest: None,
         };
         let bytes = crate::encode_response(&resp).unwrap();
         assert!(

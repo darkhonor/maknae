@@ -384,6 +384,8 @@ pub enum Verb {
     /// It does NOT return the resolved role — it discloses identity, not
     /// entitlement.
     Whoami,
+    /// The subject's tool catalog: the tools, forges and patterns it may use, as a hint.
+    ToolCatalog {},
     /// Runtime posture: version, protocol version, listener, policy load time,
     /// active authz backend, and the identity problems of the last applied load as
     /// counts by kind, with no names or uids. A disclosure of trust-plane state — useful to an
@@ -806,6 +808,76 @@ pub enum Payload {
     Agents(crate::AgentPage),
     HeldTasks(crate::HeldPage),
     HeldReleased(crate::ReleasePage),
+    /// The requesting subject's catalog, released only on the `tool.catalog` Permit.
+    ToolCatalog(ToolCatalogView),
+}
+
+pub const TOOL_CATALOG_ENVELOPE: usize = 1024;
+pub const TOOL_CATALOG_MAX_BYTES: usize =
+    crate::frame::CONTROL_RESPONSE_MAX - TOOL_CATALOG_ENVELOPE;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CatalogDigest(pub [u8; 32]);
+
+impl std::fmt::Debug for CatalogDigest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CatalogDigest(")?;
+        self.0.iter().try_for_each(|b| write!(f, "{b:02x}"))?;
+        f.write_str(")")
+    }
+}
+
+impl Serialize for CatalogDigest {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_bytes(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for CatalogDigest {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = CatalogDigest;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a 32-byte byte string")
+            }
+            fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<CatalogDigest, E> {
+                <[u8; 32]>::try_from(v.as_slice())
+                    .map(CatalogDigest)
+                    .map_err(|_| E::invalid_length(v.len(), &self))
+            }
+        }
+        d.deserialize_byte_buf(V)
+    }
+}
+
+/// The `maknae-graph` format-v1 bytes of a subject's catalog, and their digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolCatalogView {
+    pub digest: CatalogDigest,
+    #[serde(deserialize_with = "bounded_catalog_graph")]
+    pub graph: crate::Bytes,
+}
+
+fn bounded_catalog_graph<'de, D: Deserializer<'de>>(d: D) -> Result<crate::Bytes, D::Error> {
+    struct V;
+    impl<'de> serde::de::Visitor<'de> for V {
+        type Value = crate::Bytes;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(
+                f,
+                "a catalog graph of at most {TOOL_CATALOG_MAX_BYTES} bytes"
+            )
+        }
+        fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<crate::Bytes, E> {
+            let v = zeroize::Zeroizing::new(v);
+            if v.len() > TOOL_CATALOG_MAX_BYTES {
+                return Err(E::invalid_length(v.len(), &self));
+            }
+            Ok(crate::Bytes::new(v))
+        }
+    }
+    d.deserialize_byte_buf(V)
 }
 
 /// What a permitted `fs.stat` discloses: never uid, gid, mode, inode or link count.
@@ -1246,6 +1318,7 @@ pub fn class_of(verb: &Verb) -> FrameClass {
         | Verb::FsChown => FrameClass::Attempt,
         Verb::Ping
         | Verb::Whoami
+        | Verb::ToolCatalog {}
         | Verb::AdminStatus
         | Verb::AdminConfigShow
         | Verb::AdminAuditTail
@@ -1312,6 +1385,8 @@ pub struct Request {
 pub struct Response {
     pub protocol_version: u16,
     pub result: RespResult,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_digest: Option<CatalogDigest>,
 }
 
 fn enc<T: Serialize>(v: &T) -> Result<Vec<u8>, ProtoCodecError> {
@@ -1546,6 +1621,7 @@ mod tests {
                 code: ProtoErrCode::EgressUnavailable,
                 message: EGRESS_UNAVAILABLE_MESSAGE.into(),
             }),
+            catalog_digest: None,
         };
         let mut buf = Vec::new();
         ciborium::into_writer(&resp, &mut buf).unwrap();
@@ -1561,6 +1637,7 @@ mod tests {
                 code: ProtoErrCode::Protected,
                 message: protected_message(HOST_SENSITIVE_LIST, "~/.ssh/**"),
             }),
+            catalog_digest: None,
         };
         let mut buf = Vec::new();
         ciborium::into_writer(&resp, &mut buf).unwrap();
@@ -1590,6 +1667,7 @@ mod tests {
                     code: ProtoErrCode::ReplyUnusable(d),
                     message: REPLY_UNUSABLE_MESSAGE.into(),
                 }),
+                catalog_digest: None,
             };
             let mut buf = Vec::new();
             ciborium::into_writer(&resp, &mut buf).unwrap();
@@ -1615,6 +1693,7 @@ mod tests {
                 identity_sync: vec![],
                 containment: vec![],
             })),
+            catalog_digest: None,
         }
     }
 
@@ -1703,6 +1782,7 @@ mod tests {
         let r = Response {
             protocol_version: PROTOCOL_VERSION,
             result: RespResult::Ok(Payload::SubjectList(vec![entry, agent, principal])),
+            catalog_digest: None,
         };
         assert_eq!(decode_response(&encode_response(&r).unwrap()).unwrap(), r);
     }
@@ -1790,6 +1870,7 @@ mod tests {
                 apply: "live".into(),
                 changes: vec!["principal.uid: 1000 -> 1001".into()],
             })),
+            catalog_digest: None,
         };
         assert_eq!(decode_response(&encode_response(&r).unwrap()).unwrap(), r);
     }
@@ -1862,6 +1943,7 @@ mod tests {
         let bytes = encode_response(&Response {
             protocol_version: PROTOCOL_VERSION,
             result: RespResult::Ok(Payload::PromptReply(r.clone())),
+            catalog_digest: None,
         })
         .unwrap();
         let RespResult::Ok(Payload::PromptReply(back)) = decode_response(&bytes).unwrap().result
@@ -1878,6 +1960,7 @@ mod tests {
         let bytes = encode_response(&Response {
             protocol_version: PROTOCOL_VERSION,
             result: RespResult::Ok(Payload::PromptReply(none)),
+            catalog_digest: None,
         })
         .unwrap();
         assert!(!bytes.windows(5).any(|w| w == b"usage"));
@@ -2013,6 +2096,7 @@ mod tests {
                 mtime_secs: -2,
                 kind: StatKind::Symlink,
             })),
+            catalog_digest: None,
         };
         let encoded = encode_response(&reply).unwrap();
         assert_eq!(decode_response(&encoded).unwrap(), reply);
@@ -2047,6 +2131,7 @@ mod tests {
                     mtime_secs: 0,
                     kind,
                 })),
+                catalog_digest: None,
             };
             assert_eq!(
                 decode_response(&encode_response(&reply).unwrap()).unwrap(),
@@ -2135,6 +2220,7 @@ mod tests {
                 entries: vec![entry("b-161", true)],
                 truncated: true,
             })),
+            catalog_digest: None,
         };
         let encoded = encode_response(&grant).unwrap();
         assert_eq!(decode_response(&encoded).unwrap(), grant);
@@ -2152,6 +2238,7 @@ mod tests {
         let more = Response {
             protocol_version: PROTOCOL_VERSION,
             result: RespResult::Ok(Payload::ListContinue),
+            catalog_digest: None,
         };
         assert_eq!(
             decode_response(&encode_response(&more).unwrap()).unwrap(),
@@ -2383,6 +2470,7 @@ mod tests {
                 blocks: vec![text("hi there")],
                 usage: None,
             })),
+            catalog_digest: None,
         };
         let bytes = encode_response(&resp).unwrap();
         assert_eq!(decode_response(&bytes).unwrap(), resp);
@@ -2541,6 +2629,7 @@ mod tests {
         let response = Response {
             protocol_version: PROTOCOL_VERSION,
             result: RespResult::Ok(grant),
+            catalog_digest: None,
         };
         assert_eq!(
             decode_response(&encode_response(&response).unwrap()).unwrap(),
@@ -2568,6 +2657,7 @@ mod tests {
                 peer_plane_uri_san: Some("spiffe://d/plane/cli".into()),
                 peer_uid: 501,
             })),
+            catalog_digest: None,
         };
         let bytes = encode_response(&r).unwrap();
         match decode_response(&bytes).unwrap().result {
@@ -2601,6 +2691,7 @@ mod tests {
         let r = Response {
             protocol_version: 999,
             result: RespResult::Ok(Payload::Pong),
+            catalog_digest: None,
         };
         let bytes = {
             let mut b = Vec::new();
@@ -2632,7 +2723,7 @@ mod tests {
     /// this crate's own well-formed types.
     struct AlwaysFailsToSerialize;
     impl Serialize for AlwaysFailsToSerialize {
-        fn serialize<S: serde::Serializer>(&self, _s: S) -> Result<S::Ok, S::Error> {
+        fn serialize<S: Serializer>(&self, _s: S) -> Result<S::Ok, S::Error> {
             Err(serde::ser::Error::custom("deliberate test failure"))
         }
     }
@@ -2683,6 +2774,7 @@ mod tests {
                     code: ProtoErrCode::TooLarge,
                     message: "resource too large".into(),
                 }),
+                catalog_digest: None,
             };
             match decode_response(&encode_response(&r).unwrap())
                 .unwrap()
@@ -2793,6 +2885,7 @@ mod tests {
                     tool_calls: vec![],
                     usage: None,
                 })),
+                catalog_digest: None,
             };
             let cap = 1000 + 1024;
             let buf = encode_response_zeroizing(&r, cap).unwrap();
@@ -3445,6 +3538,7 @@ mod tests {
         let r = Response {
             protocol_version: PROTOCOL_VERSION,
             result: RespResult::Ok(Payload::Containment(view.clone())),
+            catalog_digest: None,
         };
         assert_eq!(decode_response(&encode_response(&r).unwrap()).unwrap(), r);
         let mut b = Vec::new();
@@ -3691,6 +3785,7 @@ mod tests {
             let resp = encode_response(&Response {
                 protocol_version: PROTOCOL_VERSION,
                 result: RespResult::Ok(page),
+                catalog_digest: None,
             })
             .unwrap();
             assert!(
@@ -3704,6 +3799,7 @@ mod tests {
             vec![
                 (Verb::Ping, FrameClass::Control),
                 (Verb::Whoami, FrameClass::Control),
+                (Verb::ToolCatalog {}, FrameClass::Control),
                 (Verb::AdminStatus, FrameClass::Control),
                 (Verb::AdminConfigShow, FrameClass::Control),
                 (Verb::AdminAuditTail, FrameClass::Control),
@@ -3865,7 +3961,7 @@ mod tests {
         #[test]
         fn class_of_pins_every_verb() {
             let all = every_verb();
-            assert_eq!(all.len(), 60);
+            assert_eq!(all.len(), 61);
             for (verb, class) in all {
                 assert_eq!(class_of(&verb), class, "{verb:?}");
             }
@@ -3967,6 +4063,7 @@ mod tests {
             let bytes = encode_response(&Response {
                 protocol_version: PROTOCOL_VERSION,
                 result: RespResult::Ok(Payload::MutationAttempt(grant)),
+                catalog_digest: None,
             })
             .unwrap();
             assert!(bytes.len() <= ATTEMPT_RESPONSE_MAX);
@@ -4145,5 +4242,120 @@ mod tests {
         let encoded = encode_request_zeroizing(&request, PROMPT_MAX_BYTES_FLOOR).unwrap();
         assert!(encoded.len() > crate::CONTROL_REQUEST_MAX);
         assert_eq!(decode_request(&encoded).unwrap(), request);
+    }
+
+    fn catalog_view(n: usize) -> ToolCatalogView {
+        ToolCatalogView {
+            digest: CatalogDigest([0x5a; 32]),
+            graph: crate::Bytes::new(zeroize::Zeroizing::new(vec![0x47; n])),
+        }
+    }
+
+    #[test]
+    fn the_catalog_budget_is_the_control_frame_less_its_envelope() {
+        assert_eq!(TOOL_CATALOG_ENVELOPE, 1024);
+        assert_eq!(
+            TOOL_CATALOG_MAX_BYTES,
+            crate::frame::CONTROL_RESPONSE_MAX - 1024
+        );
+    }
+
+    #[test]
+    fn a_max_size_catalog_reply_fits_the_control_frame() {
+        let response = Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(Payload::ToolCatalog(catalog_view(TOOL_CATALOG_MAX_BYTES))),
+            catalog_digest: Some(CatalogDigest([0xa5; 32])),
+        };
+        let bytes = encode_response(&response).unwrap();
+        assert!(
+            bytes.len() <= crate::frame::CONTROL_RESPONSE_MAX,
+            "{}",
+            bytes.len()
+        );
+        assert_eq!(decode_response(&bytes).unwrap(), response);
+    }
+
+    #[test]
+    fn an_oversize_graph_does_not_decode() {
+        let encode = |n| {
+            let mut buf = Vec::new();
+            ciborium::into_writer(&catalog_view(n), &mut buf).unwrap();
+            buf
+        };
+        let at_max = encode(TOOL_CATALOG_MAX_BYTES);
+        let back: ToolCatalogView = ciborium::from_reader(at_max.as_slice()).unwrap();
+        assert_eq!(back, catalog_view(TOOL_CATALOG_MAX_BYTES));
+        let over = encode(TOOL_CATALOG_MAX_BYTES + 1);
+        assert!(ciborium::from_reader::<ToolCatalogView, _>(over.as_slice()).is_err());
+        let response = Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(Payload::ToolCatalog(catalog_view(
+                TOOL_CATALOG_MAX_BYTES + 1,
+            ))),
+            catalog_digest: None,
+        };
+        let bytes = encode_response(&response).unwrap();
+        assert!(decode_response(&bytes).is_err());
+    }
+
+    #[test]
+    fn a_response_without_a_digest_encodes_byte_identically() {
+        let pinned: [u8; 35] = [
+            0xa2, 0x70, b'p', b'r', b'o', b't', b'o', b'c', b'o', b'l', b'_', b'v', b'e', b'r',
+            b's', b'i', b'o', b'n', 0x01, 0x66, b'r', b'e', b's', b'u', b'l', b't', 0xa1, 0x62,
+            b'O', b'k', 0x64, b'P', b'o', b'n', b'g',
+        ];
+        let response = Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(Payload::Pong),
+            catalog_digest: None,
+        };
+        assert_eq!(encode_response(&response).unwrap(), pinned.to_vec());
+        assert_eq!(decode_response(&pinned).unwrap(), response);
+    }
+
+    #[test]
+    fn a_digest_is_a_cbor_byte_string() {
+        let mut buf = Vec::new();
+        ciborium::into_writer(&CatalogDigest([0x11; 32]), &mut buf).unwrap();
+        let value: ciborium::Value = ciborium::from_reader(buf.as_slice()).unwrap();
+        assert_eq!(value, ciborium::Value::Bytes(vec![0x11; 32]));
+        for n in [31, 33] {
+            let mut buf = Vec::new();
+            ciborium::into_writer(&ciborium::Value::Bytes(vec![0; n]), &mut buf).unwrap();
+            assert!(ciborium::from_reader::<CatalogDigest, _>(buf.as_slice()).is_err());
+        }
+    }
+
+    #[test]
+    fn a_response_with_a_digest_round_trips() {
+        let response = Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(Payload::TaskIdle),
+            catalog_digest: Some(CatalogDigest([0x3c; 32])),
+        };
+        let bytes = encode_response(&response).unwrap();
+        assert_eq!(decode_response(&bytes).unwrap(), response);
+        let value: ciborium::Value = ciborium::from_reader(bytes.as_slice()).unwrap();
+        let digest = value
+            .as_map()
+            .unwrap()
+            .iter()
+            .find(|(k, _)| k.as_text() == Some("catalog_digest"))
+            .map(|(_, v)| v.clone());
+        assert_eq!(digest, Some(ciborium::Value::Bytes(vec![0x3c; 32])));
+    }
+
+    #[test]
+    fn debug_shows_no_graph_bytes() {
+        let view = ToolCatalogView {
+            digest: CatalogDigest([0xab; 32]),
+            graph: crate::Bytes::new(zeroize::Zeroizing::new(b"SENTINEL-GRAPH".to_vec())),
+        };
+        let shown = format!("{:?}", Payload::ToolCatalog(view));
+        assert!(!shown.contains("SENTINEL-GRAPH"), "{shown}");
+        assert!(shown.contains("<14 bytes>"), "{shown}");
+        assert!(shown.contains(&"ab".repeat(32)), "{shown}");
     }
 }

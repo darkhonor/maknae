@@ -753,6 +753,7 @@ pub(crate) async fn refuse_with<S: AsyncWrite + Unpin, E: AuditEmit>(
             Response {
                 protocol_version: PROTOCOL_VERSION,
                 result: RespResult::Err(answer),
+                catalog_digest: None,
             },
         )
         .await;
@@ -787,6 +788,7 @@ pub(crate) async fn disclose<S: AsyncWrite + Unpin, E: AuditEmit>(
     let encoded = match maknae_proto::encode_response(&Response {
         protocol_version: PROTOCOL_VERSION,
         result: RespResult::Ok(answer),
+        catalog_digest: None,
     }) {
         _ if tokio::time::Instant::now() >= deadline => {
             Err("deadline passed before the answer was recorded")
@@ -1193,6 +1195,7 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
             limits,
             label,
         })),
+        catalog_digest: None,
     })
     .ok()
     .filter(|bytes| bytes.len() <= caps.response);
@@ -2814,6 +2817,7 @@ mod tests {
                 code: ProtoErrCode::Unauthorized,
                 message: "not authorized".into(),
             }),
+            catalog_digest: None,
         })
         .unwrap()
     }
@@ -3290,6 +3294,7 @@ mod tests {
                 code: ProtoErrCode::Protected,
                 message: maknae_proto::protected_message(maknae_proto::HOST_SENSITIVE_LIST, &entry),
             }),
+            catalog_digest: None,
         })
         .unwrap();
         let armed = maknae_io::open_path_for_stat(&file).ok();
@@ -3826,6 +3831,7 @@ mod tests {
                     "~/.ssh/**",
                 ),
             }),
+            catalog_digest: None,
         })
         .unwrap();
         for fd in [maknae_io::open_directory_for_delegation(&ssh).ok(), None] {
@@ -4864,6 +4870,7 @@ mod tests {
         let exact = maknae_proto::encode_response(&Response {
             protocol_version: PROTOCOL_VERSION,
             result: RespResult::Ok(stat161()),
+            catalog_digest: None,
         })
         .unwrap()
         .len();

@@ -135,6 +135,7 @@ pub(crate) fn task_verb(verb: &Verb) -> Option<TaskVerb<'_>> {
         }),
         Verb::Ping
         | Verb::Whoami
+        | Verb::ToolCatalog {}
         | Verb::AdminStatus
         | Verb::AdminConfigShow
         | Verb::AdminAuditTail
@@ -939,6 +940,7 @@ mod tests {
                         next: Some(TaskCursor::from_seq(u64::MAX)),
                     },
                 )),
+                catalog_digest: None,
             })
             .unwrap()
             .len()

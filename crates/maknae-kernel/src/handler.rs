@@ -167,7 +167,8 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         | Verb::McpToolCall
         | Verb::McpResourceRead
         | Verb::McpPromptGet
-        | Verb::McpSamplingCreate => Dispatch::NoBehaviour,
+        | Verb::McpSamplingCreate
+        | Verb::ToolCatalog {} => Dispatch::NoBehaviour,
         Verb::TaskSubmit { .. }
         | Verb::TaskAdd { .. }
         | Verb::TaskStatus { .. }
@@ -196,6 +197,7 @@ pub fn task_op(verb: &Verb) -> Option<&'static str> {
         Verb::AgentList { .. } => None,
         Verb::Ping
         | Verb::Whoami
+        | Verb::ToolCatalog {}
         | Verb::AdminStatus
         | Verb::AdminConfigShow
         | Verb::AdminAuditTail
@@ -370,6 +372,7 @@ pub fn verb_to_action(verb: &Verb) -> &'static str {
     match verb {
         Verb::Ping => "liveness.ping",
         Verb::Whoami => "admin.whoami",
+        Verb::ToolCatalog {} => "tool.catalog",
         Verb::AdminStatus => "admin.status",
         Verb::AdminConfigShow => "admin.config.show",
         Verb::AdminAuditTail => "admin.audit.tail",

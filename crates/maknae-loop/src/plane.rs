@@ -642,6 +642,7 @@ pub(crate) mod fake {
                     let reply = maknae_proto::encode_response(&Response {
                         protocol_version: maknae_proto::PROTOCOL_VERSION,
                         result,
+                        catalog_digest: None,
                     })
                     .unwrap();
                     let _ = maknae_proto::write_frame(&mut server, class, &reply).await;

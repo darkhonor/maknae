@@ -426,6 +426,7 @@ PAYLOAD_DISPOSITIONS=(
   "Agents|struct:AgentPage"
   "HeldTasks|struct:HeldPage"
   "HeldReleased|struct:ReleasePage"
+  "ToolCatalog|bytes"   # #674: the subject's own catalog, released only on the tool.catalog Permit
 )
 payload_variants="$(awk '
   /^pub enum Payload \{/ { inenum=1; next }

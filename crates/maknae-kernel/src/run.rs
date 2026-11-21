@@ -2157,6 +2157,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             let response = Response {
                 protocol_version: PROTOCOL_VERSION,
                 result: RespResult::Ok(payload),
+                catalog_digest: None,
             };
             // Bound the response write by read_timeout_ms (it doubles as the
             // write bound — both cap how long one peer may hold this permit).
@@ -2574,6 +2575,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         let response = Response {
                             protocol_version: PROTOCOL_VERSION,
                             result: RespResult::Ok(Payload::PromptReply(reply)),
+                            catalog_digest: None,
                         };
                         match encode_response_zeroizing(&response, cap) {
                             Ok(bytes) => {
@@ -2945,6 +2947,7 @@ impl<E: AuditEmit + Send + Sync> Trail<'_, E> {
         let response = Response {
             protocol_version: PROTOCOL_VERSION,
             result: RespResult::Ok(payload),
+            catalog_digest: None,
         };
         match encode_response(&response) {
             Ok(bytes) => {
@@ -4693,6 +4696,7 @@ async fn write_error_bounded<S>(
             code,
             message: msg.to_string(),
         }),
+        catalog_digest: None,
     };
     if let Ok(bytes) = encode_response(&response) {
         let _ = tokio::time::timeout(
@@ -23314,6 +23318,7 @@ mod reload_tests {
         let encoded = maknae_proto::encode_response(&Response {
             protocol_version: PROTOCOL_VERSION,
             result: RespResult::Ok(maknae_proto::Payload::HeldTasks(page)),
+            catalog_digest: None,
         })
         .unwrap();
         assert!(!encoded

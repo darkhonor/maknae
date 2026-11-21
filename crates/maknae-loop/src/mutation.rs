@@ -1642,6 +1642,7 @@ mod tests {
         proto::encode_response(&proto::Response {
             protocol_version: proto::PROTOCOL_VERSION,
             result,
+            catalog_digest: None,
         })
         .unwrap()
     }

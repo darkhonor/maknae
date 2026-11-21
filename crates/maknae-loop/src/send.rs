@@ -521,6 +521,7 @@ mod tests {
                 tool_calls: vec![],
                 usage: None,
             })),
+            catalog_digest: None,
         };
         let body = maknae_proto::encode_response(&reply).unwrap();
         assert!(body.len() > maknae_proto::CONTROL_RESPONSE_MAX);
@@ -713,6 +714,7 @@ mod tests {
                 tool_calls: vec![],
                 usage: None,
             })),
+            catalog_digest: None,
         })
         .unwrap()
     }
