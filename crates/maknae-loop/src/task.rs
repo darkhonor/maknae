@@ -41,9 +41,7 @@ impl<D: Dial> TaskClient<D> {
         match self.send(Verb::ToolCatalog {}).await? {
             WireOutcome::Payload(Payload::ToolCatalog(reply)) => Ok(reply),
             WireOutcome::Refused { code, message, .. } => Err(format!("{code:?}: {message}")),
-            other => Err(format!(
-                "protocol error: unexpected reply to tool.catalog: {other:?}"
-            )),
+            _ => Err("protocol error: unexpected reply to tool.catalog".into()),
         }
     }
 
@@ -317,6 +315,15 @@ mod tests {
             Ok(ReportOutcome::Refused(_))
         ));
         assert_eq!(plane.link_for_test().finish().await.requests.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_unexpected_catalog_reply_is_named_not_printed() {
+        let plane = plane(vec![RespResult::Ok(Payload::Pong)]);
+        assert_eq!(
+            plane.tasks().tool_catalog().await,
+            Err("protocol error: unexpected reply to tool.catalog".to_string())
+        );
     }
 
     #[test]
