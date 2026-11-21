@@ -1251,6 +1251,44 @@ async fn an_agent_claims_in_fifo_order_across_taskers() {
 }
 
 #[tokio::test]
+async fn an_agent_fetches_the_catalog_its_claim_stamped() {
+    let w = world_in(
+        "catalog-fetch",
+        "user",
+        "roles:\n  user:\n    allow: [\"session.task\", \"tool.catalog\"]\n",
+        PLAIN,
+        PLAIN,
+    );
+    let records = Records::new(0);
+    let reply = |raw: Vec<u8>| async move {
+        let mut cursor = &raw[..];
+        let frame = common::read_frame(&mut cursor, 1 << 20)
+            .await
+            .expect("one frame");
+        maknae_proto::decode_response(&frame).unwrap()
+    };
+    let claim = reply(w.agent_raw("hobi", CLAIM, None, &records).await).await;
+    assert!(
+        matches!(claim.result, RespResult::Ok(Payload::TaskIdle)),
+        "{claim:?}"
+    );
+    let stamp = claim.catalog_digest.expect("a claim reply is stamped");
+    let fetched = reply(
+        w.agent_raw("hobi", Verb::ToolCatalog {}, None, &records)
+            .await,
+    )
+    .await;
+    let RespResult::Ok(Payload::ToolCatalog(view)) = fetched.result else {
+        panic!("tool.catalog: {fetched:?} {:?}", reasons(&records));
+    };
+    assert_eq!(view.digest, stamp);
+    assert_eq!(
+        maknae_proto::CatalogDigest(maknae_crypto::sha256(&view.graph.0)),
+        view.digest
+    );
+}
+
+#[tokio::test]
 async fn claim_with_none_redelivers_the_working_task_and_some_returns_only_new_follow_ups() {
     let w = world("claim-again", "user", true);
     let id = w.submit("hobi", "a").await;
