@@ -6515,8 +6515,16 @@ open(p, "w").write(s.replace(old, new))' "$f" "$2" "$3"; then
 ' '    let _ = (got, want, got_repos, want_repos);
     grant.repository_selection.as_deref() == Some("selected")
 ' maknae-deputy mint::github
+  expect_accept "catalog/graph-catalog-suite-is-green" "conversation-suite: maknae-graph" \
+    cv_suite maknae-graph catalog::tests
+  expect_reject_because "catalog/a-credential-attribute-in-the-catalog-goes-red" \
+    "the_vocabulary_names_no_fence_attribute" cv_mutant crates/maknae-graph/src/catalog.rs \
+    '        attrs.insert(ATTR_OUTPUT.into(), AttrValue::Str(e.output.as_str().into()));
+' '        attrs.insert(ATTR_OUTPUT.into(), AttrValue::Str(e.output.as_str().into()));
+        attrs.insert("credential".into(), AttrValue::Str("homelab".into()));
+' maknae-graph catalog::tests
 else
-  skipped=$((skipped+23))
+  skipped=$((skipped+25))
 fi
 
 # ---- panic-strategy (#544): the panic strategy stays unwind ----------------
