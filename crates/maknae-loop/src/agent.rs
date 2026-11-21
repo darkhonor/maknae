@@ -217,7 +217,7 @@ impl<K: KeySupply, R: PersonaRead, D: Dial> TaskPlane for AgentPlane<K, R, D> {
         if self.catalog.should_fetch(stamp) {
             match tasks.tool_catalog().await {
                 Ok(view) => {
-                    let _rejected = self.catalog.accept(view, maknae_crypto::sha256);
+                    let _rejected = self.catalog.accept(view);
                 }
                 Err(_) => self.catalog.refused(),
             }

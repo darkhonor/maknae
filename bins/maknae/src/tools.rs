@@ -3,13 +3,14 @@
 use crate::cli::terminal_safe;
 use maknae_graph::catalog::{self, BINDING_KIND, ENTRY, RUNS};
 use maknae_graph::graph::Graph;
-use maknae_proto::{CatalogDigest, ToolCatalogReply};
+use maknae_loop::catalog::{verify, CatalogRejected};
+use maknae_proto::ToolCatalogReply;
 
 pub(crate) fn catalog_lines(reply: &ToolCatalogReply) -> Result<Vec<String>, String> {
-    if CatalogDigest(maknae_crypto::sha256(&reply.graph.0)) != reply.digest {
-        return Err("protocol error: the catalog does not match its digest".into());
-    }
-    let g = catalog::decode(&reply.graph.0).map_err(|e| format!("protocol error: {e}"))?;
+    let g = verify(reply).map_err(|e| match e {
+        CatalogRejected::DigestMismatch => "protocol error: the catalog does not match its digest",
+        CatalogRejected::Undecodable => "protocol error: the catalog does not decode",
+    })?;
     Ok(lines(&g))
 }
 
@@ -59,6 +60,7 @@ fn lines(g: &Graph) -> Vec<String> {
 mod tests {
     use super::*;
     use maknae_graph::catalog::{CatalogEntry, CatalogForge, CatalogInput, CatalogOutput};
+    use maknae_proto::CatalogDigest;
 
     fn reply() -> ToolCatalogReply {
         let bytes = catalog::encode(&CatalogInput {
@@ -99,6 +101,14 @@ mod tests {
         let mut bad = reply();
         bad.digest = CatalogDigest([0; 32]);
         assert!(catalog_lines(&bad).is_err());
+    }
+
+    #[test]
+    fn the_tools_command_reads_nothing_under_etc_maknae() {
+        let code = include_str!("tools.rs").split("#[cfg(test)]").next().unwrap();
+        for needle in ["/etc/maknae", "tools.yaml", "maknae.yaml", "std::fs"] {
+            assert!(!code.contains(needle), "{needle}");
+        }
     }
 
     #[test]

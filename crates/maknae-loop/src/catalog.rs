@@ -32,16 +32,9 @@ impl CatalogHolder {
         true
     }
 
-    pub fn accept(
-        &mut self,
-        view: ToolCatalogReply,
-        digest: fn(&[u8]) -> [u8; 32],
-    ) -> Result<(), CatalogRejected> {
+    pub fn accept(&mut self, view: ToolCatalogReply) -> Result<(), CatalogRejected> {
         self.held = None;
-        if CatalogDigest(digest(&view.graph.0)) != view.digest {
-            return Err(CatalogRejected::DigestMismatch);
-        }
-        let graph = catalog::decode(&view.graph.0).map_err(|_| CatalogRejected::Undecodable)?;
+        let graph = verify(&view)?;
         self.held = Some((view.digest, Arc::new(graph)));
         Ok(())
     }
@@ -49,6 +42,14 @@ impl CatalogHolder {
     pub fn refused(&mut self) {
         self.held = None;
     }
+}
+
+/// The reply's graph, once its bytes match their digest and decode.
+pub fn verify(reply: &ToolCatalogReply) -> Result<Graph, CatalogRejected> {
+    if CatalogDigest(maknae_crypto::sha256(&reply.graph.0)) != reply.digest {
+        return Err(CatalogRejected::DigestMismatch);
+    }
+    catalog::decode(&reply.graph.0).map_err(|_| CatalogRejected::Undecodable)
 }
 
 #[cfg(test)]
@@ -83,7 +84,7 @@ mod tests {
         assert!(!h.should_fetch(None));
         assert!(h.should_fetch(Some(d)));
         assert!(!h.should_fetch(Some(d)));
-        h.accept(v, maknae_crypto::sha256).unwrap();
+        h.accept(v).unwrap();
         assert!(h.current().is_some());
         assert!(!h.should_fetch(Some(d)));
         let other = view("cargo").digest;
@@ -94,7 +95,7 @@ mod tests {
     fn a_refused_fetch_does_not_refetch_until_the_digest_changes() {
         let mut h = CatalogHolder::default();
         let held = view("git");
-        h.accept(held, maknae_crypto::sha256).unwrap();
+        h.accept(held).unwrap();
         let d = view("cargo").digest;
         let fetches = (0..5)
             .filter(|_| {
@@ -114,11 +115,11 @@ mod tests {
     fn a_digest_mismatch_or_bad_bytes_leaves_no_catalog_and_no_retry_loop() {
         let mut h = CatalogHolder::default();
         let good = view("git");
-        h.accept(good, maknae_crypto::sha256).unwrap();
+        h.accept(good).unwrap();
         let mut wrong = view("cargo");
         wrong.digest = CatalogDigest([0; 32]);
         assert_eq!(
-            h.accept(wrong, maknae_crypto::sha256),
+            h.accept(wrong),
             Err(CatalogRejected::DigestMismatch)
         );
         assert!(h.current().is_none());
@@ -131,7 +132,7 @@ mod tests {
         let d = bad.digest;
         assert!(h.should_fetch(Some(d)));
         assert_eq!(
-            h.accept(bad, maknae_crypto::sha256),
+            h.accept(bad),
             Err(CatalogRejected::Undecodable)
         );
         assert!(h.current().is_none());
@@ -142,11 +143,6 @@ mod tests {
     fn no_catalog_module_reads_etc_maknae() {
         let src = include_str!("catalog.rs");
         let code = src.split("#[cfg(test)]").next().unwrap();
-        for needle in ["/etc/maknae", "tools.yaml", "maknae.yaml", "std::fs"] {
-            assert!(!code.contains(needle), "{needle}");
-        }
-        let cli = include_str!("../../../bins/maknae/src/tools.rs");
-        let code = cli.split("#[cfg(test)]").next().unwrap();
         for needle in ["/etc/maknae", "tools.yaml", "maknae.yaml", "std::fs"] {
             assert!(!code.contains(needle), "{needle}");
         }
