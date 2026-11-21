@@ -11,8 +11,9 @@ pub enum CatalogRejected {
     Undecodable,
 }
 
-/// Why a `tool.catalog` fetch produced no catalog. `NoReply` is retried on the next
-/// claim; `Refused`, which includes a protocol fault, waits for a new digest.
+/// Why a `tool.catalog` fetch produced no catalog. `NoReply` (no complete frame came) is
+/// retried on the next claim; `Refused`, which includes a protocol fault or a frame that
+/// does not decode, waits for a new digest.
 #[derive(Debug, PartialEq, Eq)]
 pub enum CatalogFetchError {
     NoReply(String),

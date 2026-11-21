@@ -239,6 +239,8 @@ pub async fn send_verb(
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct SendFailure {
     pub(crate) after_write: bool,
+    /// A complete reply frame arrived and did not decode.
+    pub(crate) answered: bool,
     pub(crate) why: String,
 }
 
@@ -308,14 +310,23 @@ fn settle_located(
     mutating: bool,
     sent: Result<SentOutcome, Failed>,
 ) -> Result<SentOutcome, SendFailure> {
-    let failure = |after_write, why| SendFailure { after_write, why };
+    let failure = |after_write, answered, why| SendFailure {
+        after_write,
+        answered,
+        why,
+    };
     match sent {
         Ok(sent) => Ok(sent),
-        Err(Failed::Unsent(why)) => before_grant(mutating, why).map_err(|why| failure(false, why)),
-        Err(Failed::BeforeGrant(why)) => {
-            before_grant(mutating, why).map_err(|why| failure(true, why))
+        Err(Failed::Unsent(why)) => {
+            before_grant(mutating, why).map_err(|why| failure(false, false, why))
         }
-        Err(Failed::After(why)) => Err(failure(true, why)),
+        Err(Failed::BeforeGrant(why)) => {
+            before_grant(mutating, why).map_err(|why| failure(true, false, why))
+        }
+        Err(Failed::Malformed(why)) => {
+            before_grant(mutating, why).map_err(|why| failure(true, true, why))
+        }
+        Err(Failed::After(why)) => Err(failure(true, false, why)),
     }
 }
 
@@ -323,6 +334,8 @@ enum Failed {
     /// No request frame had been written: nothing the kernel could have acted on.
     Unsent(String),
     BeforeGrant(String),
+    /// A complete reply frame that is not a response this client can read.
+    Malformed(String),
     After(String),
 }
 
@@ -424,7 +437,7 @@ async fn exchange<S: Wire>(
     )
     .await
     .map_err(before)?;
-    let response = decode_response(&resp_body).map_err(|e| before(e.to_string()))?;
+    let response = decode_response(&resp_body).map_err(|e| Failed::Malformed(e.to_string()))?;
 
     let catalog_digest = response.catalog_digest;
     let (prepared, grant) = match first_answer(mutating, prepared, response.result, armed)? {

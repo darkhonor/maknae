@@ -39,11 +39,18 @@ impl<D: Dial> TaskClient<D> {
     }
 
     pub async fn tool_catalog(&self) -> Result<ToolCatalogReply, CatalogFetchError> {
-        match self
-            .send(Verb::ToolCatalog {})
+        let sent = self
+            .link
+            .send_located(Verb::ToolCatalog {})
             .await
-            .map_err(CatalogFetchError::NoReply)?
-        {
+            .map_err(|f| {
+                if f.answered {
+                    CatalogFetchError::Refused(f.why)
+                } else {
+                    CatalogFetchError::NoReply(f.why)
+                }
+            })?;
+        match WireOutcome::from(sent) {
             WireOutcome::Payload(Payload::ToolCatalog(reply)) => Ok(reply),
             WireOutcome::Refused { code, message, .. } => {
                 Err(CatalogFetchError::Refused(format!("{code:?}: {message}")))

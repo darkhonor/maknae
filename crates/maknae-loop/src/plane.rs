@@ -608,11 +608,17 @@ pub(crate) mod fake {
 
     type Answer = (RespResult, Option<maknae_proto::CatalogDigest>);
 
-    /// Answers the first frame on each connection with the next scripted answer;
-    /// a `None` answer hangs up unanswered.
+    pub enum Scripted {
+        Answer(Box<Answer>),
+        HangUp,
+        /// A complete frame whose body is not a response.
+        Garbage,
+    }
+
+    /// Answers the first frame on each connection with the next scripted answer.
     #[derive(Default)]
     pub struct FakeKernel {
-        answers: Mutex<VecDeque<Option<Answer>>>,
+        answers: Mutex<VecDeque<Scripted>>,
         seen: Arc<Mutex<Seen>>,
         servers: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     }
@@ -623,10 +629,15 @@ pub(crate) mod fake {
         }
 
         pub fn stamped(answers: Vec<Answer>) -> Self {
-            Self::scripted(answers.into_iter().map(Some).collect())
+            Self::scripted(
+                answers
+                    .into_iter()
+                    .map(|a| Scripted::Answer(Box::new(a)))
+                    .collect(),
+            )
         }
 
-        pub fn scripted(answers: Vec<Option<Answer>>) -> Self {
+        pub fn scripted(answers: Vec<Scripted>) -> Self {
             FakeKernel {
                 answers: Mutex::new(answers.into()),
                 ..Default::default()
@@ -646,7 +657,7 @@ pub(crate) mod fake {
         type Stream = tokio::io::DuplexStream;
         fn dial(&self) -> impl Future<Output = Result<tokio::io::DuplexStream, VaultError>> + Send {
             let (client, mut server) = tokio::io::duplex(1 << 16);
-            let mut answer = self.answers.lock().unwrap().pop_front().flatten();
+            let mut answer = self.answers.lock().unwrap().pop_front();
             let seen = Arc::clone(&self.seen);
             self.servers.lock().unwrap().push(tokio::spawn(async move {
                 let caps = FrameCaps {
@@ -661,16 +672,19 @@ pub(crate) mod fake {
                     frames += 1;
                     let request = maknae_proto::decode_request(&body).unwrap();
                     seen.lock().unwrap().requests.push(request);
-                    let Some(result) = answer.take() else {
-                        break;
+                    let reply = match answer.take() {
+                        None | Some(Scripted::HangUp) => break,
+                        Some(Scripted::Garbage) => vec![0xff, 0xff],
+                        Some(Scripted::Answer(answer)) => {
+                            let (result, catalog_digest) = *answer;
+                            maknae_proto::encode_response(&Response {
+                                protocol_version: maknae_proto::PROTOCOL_VERSION,
+                                result,
+                                catalog_digest,
+                            })
+                            .unwrap()
+                        }
                     };
-                    let (result, catalog_digest) = result;
-                    let reply = maknae_proto::encode_response(&Response {
-                        protocol_version: maknae_proto::PROTOCOL_VERSION,
-                        result,
-                        catalog_digest,
-                    })
-                    .unwrap();
                     let _ = maknae_proto::write_frame(&mut server, class, &reply).await;
                 }
                 seen.lock().unwrap().frames_per_connection.push(frames);

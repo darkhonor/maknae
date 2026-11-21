@@ -830,7 +830,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_catalog_fetch_that_got_no_reply_is_retried_on_the_next_claim() {
-        use crate::plane::fake::FakeKernel;
+        use crate::plane::fake::{FakeKernel, Scripted};
         use maknae_graph::catalog::{self, CatalogEntry, CatalogInput, CatalogOutput};
         use maknae_proto::{CatalogDigest, Payload, RespResult, ToolCatalogReply, Verb};
         let bytes = catalog::encode(&CatalogInput {
@@ -849,12 +849,20 @@ mod tests {
             digest: CatalogDigest(maknae_crypto::sha256(&bytes)),
             graph: Bytes::new(Zeroizing::new(bytes)),
         };
-        let idle = Some((RespResult::Ok(Payload::TaskIdle), Some(one.digest)));
+        let idle = || {
+            Scripted::Answer(Box::new((
+                RespResult::Ok(Payload::TaskIdle),
+                Some(one.digest),
+            )))
+        };
         let fake = FakeKernel::scripted(vec![
-            idle.clone(),
-            None,
-            idle,
-            Some((RespResult::Ok(Payload::ToolCatalog(one.clone())), None)),
+            idle(),
+            Scripted::HangUp,
+            idle(),
+            Scripted::Answer(Box::new((
+                RespResult::Ok(Payload::ToolCatalog(one.clone())),
+                None,
+            ))),
         ]);
         let lp = LoopPlane::with_dial(
             fake,
@@ -888,6 +896,47 @@ mod tests {
             .map(|r| matches!(r.verb, Verb::ToolCatalog {}))
             .collect();
         assert_eq!(verbs, [false, true, false, true]);
+    }
+
+    #[tokio::test]
+    async fn a_malformed_catalog_reply_is_not_refetched_for_the_same_digest() {
+        use crate::plane::fake::{FakeKernel, Scripted};
+        use maknae_proto::{CatalogDigest, Payload, RespResult, Verb};
+        let stamp = CatalogDigest([7; 32]);
+        let idle = || Scripted::Answer(Box::new((RespResult::Ok(Payload::TaskIdle), Some(stamp))));
+        let fake = FakeKernel::scripted(vec![idle(), Scripted::Garbage, idle(), idle()]);
+        let lp = LoopPlane::with_dial(
+            fake,
+            maknae_config::TransportConfig::default(),
+            None,
+            4096,
+            Keys,
+        );
+        let ca = TestCa::new(PlaneKey::MlDsa87);
+        let mut plane = AgentPlane::new(
+            lp,
+            TaskTrust {
+                trust: ca.trust(),
+                trust_domain: TRUST_DOMAIN.into(),
+                agent: hobi(),
+            },
+            PartitionPersona(PathBuf::from("/home/hobi")),
+            Box::new(|_| {}),
+        );
+        for _ in 0..3 {
+            assert_eq!(plane.claim().await, Ok(ClaimAnswer::Idle));
+        }
+        assert!(plane.catalog().is_none());
+        let verbs: Vec<_> = plane
+            .plane
+            .link_for_test()
+            .finish()
+            .await
+            .requests
+            .iter()
+            .map(|r| matches!(r.verb, Verb::ToolCatalog {}))
+            .collect();
+        assert_eq!(verbs, [false, true, false, false]);
     }
 
     #[tokio::test]
