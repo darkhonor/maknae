@@ -44,6 +44,7 @@ impl CatalogHolder {
         self.held = None;
         let graph = verify(&view)?;
         self.held = Some((view.digest, Arc::new(graph)));
+        self.last_attempted = None;
         Ok(())
     }
 
@@ -115,6 +116,15 @@ mod tests {
         h.fetch_failed();
         assert!(h.current().is_none());
         assert!(h.should_fetch(Some(d)));
+    }
+
+    #[test]
+    fn a_catalog_accepted_under_another_stamp_leaves_the_stamp_fetchable() {
+        let mut h = CatalogHolder::default();
+        let a = view("git").digest;
+        assert!(h.should_fetch(Some(a)));
+        h.accept(view("cargo")).unwrap();
+        assert!(h.should_fetch(Some(a)));
     }
 
     #[test]
