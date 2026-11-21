@@ -2,6 +2,7 @@
 
 pub mod baseline;
 mod bytes;
+pub mod catalog;
 pub mod format;
 pub mod graph;
 pub mod identity;
