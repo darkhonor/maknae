@@ -892,6 +892,17 @@ roles:
       - "session.close"
       - "session.list"
       - "session.delete"
+      - "session.task"
+      - "tool.catalog"
+  user:
+    allow:
+      - "session.prompt"
+      - "session.new"
+      - "session.close"
+      - "session.list"
+      - "session.delete"
+      - "session.task"
+      - "tool.catalog"
 destinations:
   admin:
     allow: ["provider:openai"]
