@@ -70,12 +70,11 @@ maknae-crypto = { path = "../../crates/maknae-crypto" }
 # NO privileged crate (maknae-kernel/-subject-ctx-mint/-audit-append/-spif-compile) — spec §3 P1.
 # STRICTLY non-privileged: the closed set of direct deps this crate links is
 # maknae-proto, maknae-vault, maknae-config, maknae-msgs, maknae-io, maknae-agent, maknae-loop, maknae-seal,
-# maknae-graph (`tools.rs` decodes the catalog `maknae tools` prints, #674), clap, tokio, nix, zeroize,
-# yaml-rust2, rpassword and maknae-crypto (policy_sync.rs's digest, `tools.rs`'s catalog digest check, the TLS
-# provider) — no maknae-mcp either. maknae-agent is non-privileged; it is the loop's decision code and its
-# five direct deps are maknae-proto, serde, serde_json, zeroize and unicode-width (checked 2026-11-21 with
-# `cargo tree -p maknae-agent -e no-dev --depth 1`; this task adds none). No gate enforces this
-# set, so this comment IS the record.
+# maknae-graph (`tools.rs` walks the catalog `maknae tools` prints, #674), clap, tokio, nix, zeroize,
+# yaml-rust2, rpassword and maknae-crypto (policy_sync.rs's digest, the TLS provider) — no
+# maknae-mcp either. maknae-agent is non-privileged; it is the loop's decision code and its
+# five direct deps are maknae-proto, serde, serde_json, zeroize and unicode-width. No gate
+# enforces this set, so this comment IS the record.
 # (Corrected 2026-09-22, #344: "— no I/O crate" struck here as well. tokio arrives in
 # maknae-agent's graph transitively, via maknae-proto; what holds is the absence of
 # filesystem, socket and process CALLS in that crate's code, not the absence of an I/O
