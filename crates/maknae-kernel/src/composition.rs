@@ -269,6 +269,7 @@ impl<B: Baseline> crate::workspace::DecidesPinned for Composition<B> {
 
 /// The tool catalog the request path serves and stamps, on the installed snapshot.
 pub trait CatalogNow {
+    /// `NotAdmitted` for a uid that holds no role or is contained on the snapshot built from.
     fn catalog_now(
         &self,
         uid: u32,
@@ -285,11 +286,12 @@ impl<B: Baseline> CatalogNow for B {
         uid: u32,
         forges: &maknae_config::ForgeSet,
     ) -> Result<Arc<SubjectCatalog>, CatalogError> {
-        self.catalog_for(uid, self.principal().uid, forges)
+        self.admitted_catalog(uid, self.principal().uid, forges)
     }
 
     fn catalog_stamp(&self, uid: u32, forges: &maknae_config::ForgeSet) -> Option<CatalogDigest> {
         self.admitted_catalog(uid, self.principal().uid, forges)
+            .ok()
             .map(|c| c.digest)
     }
 }

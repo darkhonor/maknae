@@ -20,6 +20,8 @@ pub struct SubjectCatalog {
 pub enum CatalogError {
     TooLarge,
     Build,
+    /// The subject holds no role or is contained on the snapshot the build used.
+    NotAdmitted,
 }
 
 /// What `uid` sees: each entry's own ceiling patterns that a stage of its effective
@@ -30,7 +32,10 @@ pub(crate) fn input(
     principal_uid: u32,
     forges: &ForgeSet,
 ) -> CatalogInput {
-    if lp.roles.role_for(uid, principal_uid) == Resolution::Role(Role::Adversary) {
+    if matches!(
+        lp.roles.role_for(uid, principal_uid),
+        Resolution::Role(Role::Adversary) | Resolution::NoRole
+    ) {
         return CatalogInput::default();
     }
     let subject = lp.subjects.get(uid);
@@ -577,6 +582,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_no_role_subject_gets_empty() {
+        let s = snap(&site(&["Tool(rust-build cargo build *)"], &[]), HOMELAB);
+        assert!(s.no_role(4242, PRINCIPAL));
+        assert_eq!(
+            input(s.loaded(), 4242, PRINCIPAL, &forges()),
+            CatalogInput::default()
+        );
+    }
+
     fn authorizer(s: std::sync::Arc<Snapshot>) -> BasicAuthorizer {
         BasicAuthorizer::from_snapshot(
             maknae_config::Principal {
@@ -597,7 +612,10 @@ mod tests {
         assert_eq!(bob.digest, catalog(&s, BOB).digest);
         assert!(s.no_role(4242, PRINCIPAL));
         for uid in [MALLORY, 4242] {
-            assert!(Baseline::admitted_catalog(&auth, uid, PRINCIPAL, &forges()).is_none());
+            assert_eq!(
+                Baseline::admitted_catalog(&auth, uid, PRINCIPAL, &forges()),
+                Err(CatalogError::NotAdmitted)
+            );
         }
     }
 

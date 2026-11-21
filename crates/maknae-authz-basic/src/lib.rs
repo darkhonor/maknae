@@ -1759,20 +1759,19 @@ pub trait Baseline: maknae_security::Authorizer + sealed::Sealed + Send + Sync +
         forges: &maknae_config::ForgeSet,
     ) -> Result<Arc<catalog::SubjectCatalog>, catalog::CatalogError>;
 
-    /// [`Baseline::catalog_for`], or `None` for a uid that holds no role or is contained,
-    /// with the check and the build on one snapshot.
+    /// [`Baseline::catalog_for`], refused as `NotAdmitted` for a uid that holds no role or
+    /// is contained, with the check and the build on one snapshot.
     fn admitted_catalog(
         &self,
         uid: u32,
         principal_uid: u32,
         forges: &maknae_config::ForgeSet,
-    ) -> Option<Arc<catalog::SubjectCatalog>> {
+    ) -> Result<Arc<catalog::SubjectCatalog>, catalog::CatalogError> {
         let snap = self.snapshot();
         if snap.no_role(uid, principal_uid) || snap.contained(uid, principal_uid) {
-            return None;
+            return Err(catalog::CatalogError::NotAdmitted);
         }
         snap.catalog_for(uid, principal_uid, forges, self.digest())
-            .ok()
     }
 
     /// The installed snapshot's [`Snapshot::policy_sha256`].

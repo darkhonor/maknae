@@ -1654,6 +1654,12 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                             ProtoErrCode::TooLarge,
                             "tool catalog exceeds the frame limit",
                         ),
+                        maknae_authz_basic::catalog::CatalogError::NotAdmitted => (
+                            "tool catalog subject not admitted",
+                            "unauthorized",
+                            ProtoErrCode::Unauthorized,
+                            "not authorized",
+                        ),
                         maknae_authz_basic::catalog::CatalogError::Build => (
                             "tool catalog build failed",
                             "unavailable",

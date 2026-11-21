@@ -600,6 +600,36 @@ async fn admin_whoami_permits_with_both_records() {
     assert!(req.object.is_none(), "whoami is resource-free");
 }
 
+#[tokio::test]
+async fn a_catalog_for_a_subject_not_admitted_at_build_is_refused_and_recorded() {
+    let fx = Fixture::new("catalog-not-admitted");
+    let emit = RecEmit::new();
+    let frame = drive(
+        &fx.dir,
+        Arc::new(common::PermitThenNotAdmitted),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::ToolCatalog {},
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("a refused catalog still answers");
+    let resp = maknae_proto::decode_response(&frame).unwrap();
+    assert!(
+        matches!(&resp.result, RespResult::Err(e) if e.code == ProtoErrCode::Unauthorized),
+        "{resp:?}"
+    );
+    let req = request_record(&emit.records()).clone();
+    assert_eq!(
+        (
+            req.action.as_str(),
+            req.outcome.result.as_str(),
+            req.outcome.reason.as_str()
+        ),
+        ("tool.catalog", "deny", "tool catalog subject not admitted")
+    );
+}
+
 async fn whoami_on(
     fx: &Fixture,
     authorizer: Arc<HermeticAuthorizer>,

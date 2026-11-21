@@ -1595,6 +1595,47 @@ impl maknae_kernel::CatalogNow for AlwaysPermit {
     }
 }
 
+/// Permits every request, then finds the subject not admitted when the catalog is built:
+/// a reload between the decision and the build.
+pub struct PermitThenNotAdmitted;
+
+impl Authorizer for PermitThenNotAdmitted {
+    fn decide_cited_all(&self, reqs: &[maknae_security::Request]) -> Vec<maknae_security::Decided> {
+        maknae_security::decide_each_cited(self, reqs)
+    }
+
+    fn decide(&self, r: &Request) -> Verdict {
+        AlwaysPermit.decide(r)
+    }
+}
+
+impl maknae_kernel::CatalogNow for PermitThenNotAdmitted {
+    fn catalog_now(
+        &self,
+        _uid: u32,
+        _forges: &maknae_config::ForgeSet,
+    ) -> Result<
+        std::sync::Arc<maknae_authz_basic::catalog::SubjectCatalog>,
+        maknae_authz_basic::catalog::CatalogError,
+    > {
+        Err(maknae_authz_basic::catalog::CatalogError::NotAdmitted)
+    }
+
+    fn catalog_stamp(
+        &self,
+        _uid: u32,
+        _forges: &maknae_config::ForgeSet,
+    ) -> Option<maknae_proto::CatalogDigest> {
+        None
+    }
+}
+
+impl maknae_kernel::SensitiveNow for PermitThenNotAdmitted {
+    fn sensitive_now(&self) -> std::sync::Arc<maknae_config::SensitiveList> {
+        std::sync::Arc::new(maknae_config::SensitiveList::empty())
+    }
+}
+
 impl maknae_kernel::SensitiveNow for AlwaysPermit {
     fn sensitive_now(&self) -> std::sync::Arc<maknae_config::SensitiveList> {
         std::sync::Arc::new(maknae_config::SensitiveList::empty())
