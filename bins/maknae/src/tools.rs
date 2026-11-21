@@ -105,7 +105,10 @@ mod tests {
 
     #[test]
     fn the_tools_command_reads_nothing_under_etc_maknae() {
-        let code = include_str!("tools.rs").split("#[cfg(test)]").next().unwrap();
+        let code = include_str!("tools.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
         for needle in ["/etc/maknae", "tools.yaml", "maknae.yaml", "std::fs"] {
             assert!(!code.contains(needle), "{needle}");
         }

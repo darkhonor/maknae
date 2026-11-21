@@ -129,10 +129,7 @@ mod tests {
         h.accept(good).unwrap();
         let mut wrong = view("cargo");
         wrong.digest = CatalogDigest([0; 32]);
-        assert_eq!(
-            h.accept(wrong),
-            Err(CatalogRejected::DigestMismatch)
-        );
+        assert_eq!(h.accept(wrong), Err(CatalogRejected::DigestMismatch));
         assert!(h.current().is_none());
 
         let junk = vec![1u8, 2, 3];
@@ -142,10 +139,7 @@ mod tests {
         };
         let d = bad.digest;
         assert!(h.should_fetch(Some(d)));
-        assert_eq!(
-            h.accept(bad),
-            Err(CatalogRejected::Undecodable)
-        );
+        assert_eq!(h.accept(bad), Err(CatalogRejected::Undecodable));
         assert!(h.current().is_none());
         assert!(!h.should_fetch(Some(d)));
     }
