@@ -78,7 +78,7 @@ pub use agents::{
     AgentPolicy, AgentProvider, AgentRole, AgentsLoad, HostAccounts, InvalidAgentId, PersonaMode,
     SkippedAgentEntry, TaskerRef, AGENTS_DIR, AGENT_CLIENT_FILE, AGENT_ENTITY_PREFIX,
     ENROLLMENT_FILE, NON_LOGIN_SHELLS, PERSONA_FILE, POLICY_FILE, RESERVED_AGENT_IDS,
-    STARTER_POLICY, TASKS_RIGHT_PATHS, TASKS_RIGHT_SESSION,
+    STARTER_POLICY, TASKS_RIGHT_ACTIONS, TASKS_RIGHT_PATHS,
 };
 pub use argpattern::{first_denied, ArgPattern, ArgPatternError, ArgToken, Bound, DenyArg};
 pub use audit_cfg::{

@@ -38,13 +38,14 @@ use snapshot::Snapshot;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock};
 
-pub(crate) const USER_GRANTABLE: [&str; 6] = [
+pub(crate) const USER_GRANTABLE: [&str; 7] = [
     "session.prompt",
     "session.new",
     "session.close",
     "session.list",
     "session.delete",
     "session.task",
+    "tool.catalog",
 ];
 
 /// Subject attribute key for the authenticated uid (pinned for #77; ADR-0018:
@@ -188,7 +189,7 @@ impl std::fmt::Display for AuthzBasicError {
             AuthzBasicError::AgentDeniesTasksRight { agent, action } => write!(
                 f,
                 "authz agents: agents/{agent}/policy.yaml denies `{action}`, but every agent holds {} to work its tasks",
-                tasks_right_session_list()
+                tasks_right_action_list()
             ),
             AuthzBasicError::Compile(e) => write!(f, "authz {e}"),
             AuthzBasicError::PromptWithoutNew { scope } => write!(
@@ -201,9 +202,9 @@ impl std::fmt::Display for AuthzBasicError {
 
 impl std::error::Error for AuthzBasicError {}
 
-fn tasks_right_session_list() -> String {
-    match maknae_config::TASKS_RIGHT_SESSION {
-        [a, b, c] => format!("{a}, {b} and {c}"),
+fn tasks_right_action_list() -> String {
+    match maknae_config::TASKS_RIGHT_ACTIONS {
+        [a, b, c, d] => format!("{a}, {b}, {c} and {d}"),
     }
 }
 
@@ -1355,7 +1356,7 @@ fn agent_subjects(
     let mut entries = std::collections::BTreeMap::new();
     for p in &agents.load.policies {
         let actions = action_set(&p.entry)?.map(|mut set| {
-            for term in maknae_config::TASKS_RIGHT_SESSION {
+            for term in maknae_config::TASKS_RIGHT_ACTIONS {
                 set.allow
                     .entry(term)
                     .or_insert_with(|| "tasks-right".into());
@@ -1363,7 +1364,7 @@ fn agent_subjects(
             set
         });
         if let Some(action) = actions.as_ref().and_then(|set| {
-            maknae_config::TASKS_RIGHT_SESSION
+            maknae_config::TASKS_RIGHT_ACTIONS
                 .iter()
                 .find_map(|t| set.deny.get(t))
         }) {
@@ -2167,7 +2168,8 @@ mod tests {
                 "session.close",
                 "session.list",
                 "session.delete",
-                "session.task"
+                "session.task",
+                "tool.catalog"
             ]
         );
     }
@@ -3226,6 +3228,83 @@ mod tests {
     }
 
     #[test]
+    fn tool_catalog_is_permitted_for_admin_and_user_and_refused_for_guest() {
+        let src = source_with(
+            SHIPPED,
+            Some("schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"daemon\"]\n  guest: [\"bin\"]\n  adversary: [\"sys\"]\n"),
+            &[("root", 0), ("daemon", 1), ("bin", 2), ("sys", 3)],
+        );
+        let auth =
+            BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, compiled(&src));
+        let ask = |uid: i64| {
+            let mut r = liveness_req(Some(uid));
+            r.action = Action("tool.catalog".into());
+            auth.decide_cited(&r)
+        };
+        for (uid, role, entry) in [(0, "admin", 11), (1, "user", 6)] {
+            let d = ask(uid);
+            assert_eq!(d.verdict, audit_permit(), "{role}");
+            assert_eq!(d.role, Some(role));
+            assert_eq!(
+                d.rule.map(|r| r.key),
+                Some(format!("rule:roles.{role}:allow:{entry}")),
+                "{role}"
+            );
+        }
+        assert_eq!(
+            ask(2).verdict,
+            Verdict::NotApplicable {
+                note: Some("role guest: no rule for tool.catalog".into())
+            }
+        );
+        assert_eq!(
+            ask(3).verdict,
+            Verdict::Deny {
+                reason: "subject contained: role=adversary".into()
+            }
+        );
+        assert_eq!(
+            ask(4242).verdict,
+            Verdict::NotApplicable {
+                note: Some("subject resolves to no role".into())
+            }
+        );
+    }
+
+    #[test]
+    fn tool_catalog_is_subject_limitable_and_deniable_by_role() {
+        let limited = source_with(
+            &format!("{SHIPPED}subjects:\n  daemon:\n    actions:\n      allow: [\"session.*\"]\n"),
+            Some("schema_version: 1\nbindings:\n  user: [\"daemon\"]\n"),
+            &[("daemon", 1)],
+        );
+        let auth =
+            BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, compiled(&limited));
+        let mut r = liveness_req(Some(1));
+        r.action = Action("tool.catalog".into());
+        assert_eq!(
+            auth.decide(&r),
+            Verdict::Deny {
+                reason: "subject daemon: tool.catalog is not in subjects.daemon.actions allow"
+                    .into()
+            }
+        );
+        let denied = source_with(
+            "schema_version: 1\nroles:\n  user:\n    allow: [\"session.new\"]\n    deny: [\"tool.catalog\"]\n",
+            Some("schema_version: 1\nbindings:\n  user: [\"daemon\"]\n"),
+            &[("daemon", 1)],
+        );
+        let auth =
+            BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, compiled(&denied));
+        assert_eq!(
+            auth.decide(&r),
+            Verdict::Deny {
+                reason: "denied by role grant tool.catalog".into()
+            }
+        );
+    }
+
+    #[test]
     fn the_shipped_file_grants_both_roles_their_terms() {
         let policy = maknae_config::parse_authz(SHIPPED).expect("shipped authz.yaml parses");
         let roles: Vec<&String> = policy.action_grants.keys().collect();
@@ -3238,7 +3317,7 @@ mod tests {
                 .collect()
         };
         let mut admin_terms = SHIPPED_ADMIN_TERMS.to_vec();
-        admin_terms.push("session.task");
+        admin_terms.extend(["session.task", "tool.catalog"]);
         assert_eq!(allowed("admin"), admin_terms);
         assert_eq!(allowed("user"), USER_GRANTABLE);
         assert!(policy.action_grants.values().all(|g| g.deny.is_empty()));
@@ -4689,7 +4768,7 @@ mod tests {
     #[test]
     fn role_grants_take_family_wildcards_under_todays_role_rule() {
         let src = finish(parse_with_roles(
-            "roles:\n  admin:\n    allow: [\"admin.*\", \"session.*\"]\n    deny: [\"admin.contain\"]\n  user:\n    allow: [\"session.*\"]\n",
+            "roles:\n  admin:\n    allow: [\"admin.*\", \"session.*\"]\n    deny: [\"admin.contain\"]\n  user:\n    allow: [\"session.*\", \"tool.*\"]\n",
         ))
         .unwrap();
         let grants = validate_grants(&src.policy().action_grants).unwrap();
@@ -4719,7 +4798,7 @@ mod tests {
             grants.0["user"],
             (
                 USER_GRANTABLE
-                    .map(|t| (t, "session.*".to_string()))
+                    .map(|t| (t, format!("{}.*", t.split('.').next().unwrap())))
                     .to_vec(),
                 vec![]
             )
@@ -6971,7 +7050,7 @@ mod tests {
                 .chain(KERNEL_TERMS.iter())
                 .copied()
                 .collect();
-            assert_eq!(terms.len(), 61);
+            assert_eq!(terms.len(), 62);
             let (uids, paths, homes, ops) = (uids(), paths(), homes(), operations());
             assert_eq!(
                 (uids.len(), paths.len(), homes.len(), ops.len()),
@@ -6999,7 +7078,7 @@ mod tests {
                     distinct(&ops),
                     distinct(&destinations),
                 ),
-                (61, 9, 22, 5, 8, 4)
+                (62, 9, 22, 5, 8, 4)
             );
             let mut cells = 0usize;
             let mut mismatches: Vec<String> = Vec::new();
@@ -7149,7 +7228,7 @@ mod tests {
                 &mismatches[..mismatches.len().min(10)]
             );
             let fs_cells = 6 * 8 * 22 * 5 + 8 * 22 * 5;
-            let other_cells = 54 + 4;
+            let other_cells = 55 + 4;
             assert_eq!(cells, 12 * 9 * (fs_cells + other_cells));
             assert_eq!(subject_entries, 1);
             assert_eq!(
@@ -8559,6 +8638,51 @@ mod tests {
         }
 
         #[test]
+        fn an_agent_gets_its_catalog_by_its_built_in_right() {
+            let src = try_source(
+                super::shipped_denying(),
+                None,
+                &[],
+                load(
+                    vec![hobi()],
+                    &[("hobi", "schema_version: 1\nactions:\n  allow: [\"fs.*\"]\n")],
+                ),
+            )
+            .unwrap();
+            let mut r = agent_channel(whoami(i64::from(HOBI)), "hobi");
+            r.action = Action("tool.catalog".into());
+            let d = auth(&src, 501).decide_cited(&r);
+            assert_eq!(d.verdict, audit_permit(), "{d:?}");
+            assert_eq!(d.role, Some("user"));
+        }
+
+        #[test]
+        fn an_agent_policy_denying_tool_catalog_refuses_load() {
+            for denied in ["tool.catalog", "tool.*"] {
+                let got = try_source(
+                    super::shipped_denying(),
+                    None,
+                    &[],
+                    load(
+                        vec![hobi()],
+                        &[(
+                            "hobi",
+                            &format!("schema_version: 1\nactions:\n  deny: [\"{denied}\"]\n"),
+                        )],
+                    ),
+                );
+                assert_eq!(
+                    got.err(),
+                    Some(AuthzBasicError::AgentDeniesTasksRight {
+                        agent: "hobi".into(),
+                        action: denied.into()
+                    }),
+                    "{denied}"
+                );
+            }
+        }
+
+        #[test]
         fn the_session_half_is_granted_under_an_actions_list() {
             let src = try_source(
                 &with_destination(),
@@ -8613,7 +8737,7 @@ mod tests {
                     action: "session.*".into()
                 }
                 .to_string(),
-                "authz agents: agents/hobi/policy.yaml denies `session.*`, but every agent holds session.new, session.prompt and session.close to work its tasks"
+                "authz agents: agents/hobi/policy.yaml denies `session.*`, but every agent holds session.new, session.prompt, session.close and tool.catalog to work its tasks"
             );
             for denied in ["session.task", "fs.write"] {
                 try_source(

@@ -71,14 +71,19 @@ pub const AGENT_ENTITY_PREFIX: &str = "maknae-agent-";
 
 pub const TASKS_RIGHT_PATHS: [&str; 3] =
     ["Read(~/tasks/**)", "Write(~/tasks)", "Write(~/tasks/**)"];
-pub const TASKS_RIGHT_SESSION: [&str; 3] = ["session.new", "session.prompt", "session.close"];
+pub const TASKS_RIGHT_ACTIONS: [&str; 4] = [
+    "session.new",
+    "session.prompt",
+    "session.close",
+    "tool.catalog",
+];
 
 pub const STARTER_POLICY: &str = "\
 schema_version: 1
 
 ## Every agent already holds, whatever this file says:
 ##   files:    Read(~/tasks/**), Write(~/tasks), Write(~/tasks/**)
-##   sessions: session.new, session.prompt, session.close
+##   actions:  session.new, session.prompt, session.close, tool.catalog
 ## Add only what the agent needs beyond its own ~/tasks.
 ## Lines starting with a single # are examples; remove the # to use one.
 
@@ -1044,7 +1049,7 @@ mod tests {
         assert_eq!(policy.entry.actions, None);
         assert_eq!(policy.entry.models, None);
         assert_eq!(policy.taskers, None);
-        for held in TASKS_RIGHT_PATHS.iter().chain(TASKS_RIGHT_SESSION.iter()) {
+        for held in TASKS_RIGHT_PATHS.iter().chain(TASKS_RIGHT_ACTIONS.iter()) {
             assert!(STARTER_POLICY.contains(held), "{held}");
         }
         assert!(

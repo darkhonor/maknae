@@ -384,6 +384,11 @@
 1002 mcp.sampling.create None -> NotApplicable { note: Some("role guest: no rule for mcp.sampling.create") } Some("guest") None
 666 mcp.sampling.create None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
 4242 mcp.sampling.create None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 tool.catalog None -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:roles.admin:allow:11 in /etc/maknae/authz.yaml#roles.admin")
+1001 tool.catalog None -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:roles.user:allow:6 in /etc/maknae/authz.yaml#roles.user")
+1002 tool.catalog None -> NotApplicable { note: Some("role guest: no rule for tool.catalog") } Some("guest") None
+666 tool.catalog None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 tool.catalog None -> NotApplicable { note: Some("subject resolves to no role") } None None
 1000 kernel.contain None -> NotApplicable { note: Some("kernel action requested by a subject that is not the kernel: kernel.contain") } None None
 1001 kernel.contain None -> NotApplicable { note: Some("kernel action requested by a subject that is not the kernel: kernel.contain") } None None
 1002 kernel.contain None -> NotApplicable { note: Some("kernel action requested by a subject that is not the kernel: kernel.contain") } None None

@@ -192,11 +192,11 @@ impl DestinationGrants {
 /// [`crate::USER_GRANTABLE`] may be granted to `user`; `admin.baseline.accept` changes state.
 // One line: the drift gate's extractor reads only the matched line.
 #[rustfmt::skip]
-pub(crate) const GRANTABLE_ACTIONS: [&str; 13] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt", "session.new", "session.close", "session.list", "session.delete", "session.task"];
+pub(crate) const GRANTABLE_ACTIONS: [&str; 14] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt", "session.new", "session.close", "session.list", "session.delete", "session.task", "tool.catalog"];
 
 /// The terms a `subjects:` action list or a family wildcard can name.
 #[rustfmt::skip]
-pub(crate) const ACTION_VOCABULARY: [&str; 17] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt", "session.new", "session.close", "session.list", "session.delete", "session.task", "fs.read", "fs.write", "fs.delete", "fs.mkdir"];
+pub(crate) const ACTION_VOCABULARY: [&str; 18] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt", "session.new", "session.close", "session.list", "session.delete", "session.task", "tool.catalog", "fs.read", "fs.write", "fs.delete", "fs.mkdir"];
 
 /// Decided as `fs.read` wherever an action is limited, and never named by a list (#161 M15).
 pub(crate) const DECIDED_AS_READ: [&str; 2] = ["fs.stat", "fs.list"];
@@ -271,7 +271,7 @@ const fn str_eq(a: &str, b: &str) -> bool {
 /// demands the fourth assertion, which is the failure mode an unrolled check
 /// would otherwise have had.
 const _: () = {
-    let [a, b, c, d, e, f, g, h, i, j, k, l, m] = GRANTABLE_ACTIONS;
+    let [a, b, c, d, e, f, g, h, i, j, k, l, m, n] = GRANTABLE_ACTIONS;
     const WHY: &str = "admin.whoami is unconditional for admins and must not be grantable";
     assert!(!str_eq(a, "admin.whoami"), "{}", WHY);
     assert!(!str_eq(b, "admin.whoami"), "{}", WHY);
@@ -286,6 +286,7 @@ const _: () = {
     assert!(!str_eq(k, "admin.whoami"), "{}", WHY);
     assert!(!str_eq(l, "admin.whoami"), "{}", WHY);
     assert!(!str_eq(m, "admin.whoami"), "{}", WHY);
+    assert!(!str_eq(n, "admin.whoami"), "{}", WHY);
 };
 
 /// One expanded grant: the term and the entry it was written as.
@@ -935,6 +936,12 @@ pub(crate) fn decide_loaded_cited(
             ) =>
         {
             decide_session(lp, req, role.key(), uid)
+        }
+        Role::Admin | Role::User if req.action.0 == "tool.catalog" => {
+            match granted(lp, role.key(), "tool.catalog") {
+                Ok(source) => grant_permit(role.key(), source),
+                Err(decision) => decision,
+            }
         }
         Role::Admin | Role::User if req.action.0 == "session.task" => {
             decide_task(lp, req, role.key(), uid, principal.uid)
@@ -2743,7 +2750,7 @@ mod tests {
         );
         assert!(terms("terminal.*").is_empty());
         assert!(terms("mcp.*").is_empty());
-        assert!(terms("tool.*").is_empty());
+        assert_eq!(terms("tool.*"), ["tool.catalog"]);
         assert_eq!(terms("fs.write"), ["fs.write"]);
         assert_eq!(terms("admin.status"), ["admin.status"]);
     }
@@ -2768,9 +2775,12 @@ mod tests {
 
     #[test]
     fn the_vocabulary_is_the_grantable_terms_and_the_four_fs_terms() {
-        assert_eq!(ACTION_VOCABULARY[..13], GRANTABLE_ACTIONS);
         assert_eq!(
-            ACTION_VOCABULARY[13..],
+            ACTION_VOCABULARY[..GRANTABLE_ACTIONS.len()],
+            GRANTABLE_ACTIONS
+        );
+        assert_eq!(
+            ACTION_VOCABULARY[GRANTABLE_ACTIONS.len()..],
             ["fs.read", "fs.write", "fs.delete", "fs.mkdir"]
         );
     }
