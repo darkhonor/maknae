@@ -104,9 +104,9 @@ pub use bindings_sync::{
 // dependency of their own; unix-gated like the fn whose signature carries it.
 pub use authz::{
     destination_entry_is_acceptable, load_authz, parse_authz, parse_subject_entry, ActionPattern,
-    AgentMatch, AuthzError, AuthzPolicy, HomeUnbound, Match3, ModelRef, MountSide, PathGlob,
-    Pattern, RawActionGrants, RawDestinations, Request, SubjectActions, SubjectPermissions,
-    SubjectPolicy, ToolCall, ToolPattern,
+    AgentMatch, AuthzError, AuthzPolicy, EffectiveLists, HomeUnbound, Match3, ModelRef, MountSide,
+    PathGlob, Pattern, RawActionGrants, RawDestinations, Request, Stage, SubjectActions,
+    SubjectPermissions, SubjectPolicy, ToolCall, ToolPattern,
 };
 pub use banner::{banner_from_document, load_banner, BANNER_FILE, BANNER_PATH};
 pub use baseline_doc::{document_sections, value_from_canonical_json, BaselineSections};
