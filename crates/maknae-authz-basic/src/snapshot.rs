@@ -173,7 +173,7 @@ impl Snapshot {
 
     /// `uid`'s tool catalog over this snapshot, built on first use and kept for its life.
     /// The cache is not keyed by `forges`: they are restart-only (ADR-0039).
-    pub fn catalog_for(
+    pub(crate) fn catalog_for(
         &self,
         uid: u32,
         principal_uid: u32,
