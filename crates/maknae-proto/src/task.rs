@@ -1174,6 +1174,52 @@ mod tests {
     }
 
     #[test]
+    fn a_max_size_task_delivery_fits_with_a_stamp() {
+        const CATALOG_DIGEST_ENCODED_MAX: usize = 49;
+        let prompt_max = 1 << 20;
+        let agent = "a".repeat(32);
+        let alg = "ml-dsa-87";
+        let each = (TASK_SIGNATURE_MAX_BYTES - alg.len()) / (2 + TASK_CHAIN_MAX);
+        let part = vec![0xa5; each];
+        let chain: Vec<&[u8]> = vec![&part; TASK_CHAIN_MAX];
+        let rest = TASK_SIGNATURE_MAX_BYTES - alg.len() - each * (1 + TASK_CHAIN_MAX);
+        let signed = SignedTask {
+            task: TaskObject {
+                schema: TASK_SCHEMA.into(),
+                version: TASK_VERSION,
+                task_id: id(0xf0),
+                tasker: Tasker::Agent {
+                    agent: agent.clone(),
+                    uid: u32::MAX,
+                },
+                parent: Some(id(0x0f)),
+                agent: agent.clone(),
+                ask: prompt(&"p".repeat(prompt_max)),
+                labels: Labels {},
+            },
+            signature: signature(alg, &part, &chain, &vec![0x5a; rest]),
+        };
+        assert_eq!(dec::<SignedTask>(&enc(&signed)).unwrap(), signed);
+        let response = |catalog_digest| crate::Response {
+            protocol_version: crate::PROTOCOL_VERSION,
+            result: crate::RespResult::Ok(crate::Payload::TaskDelivered(TaskDelivery {
+                signed: Bytes::new(enc(&signed).into()),
+                partition: format!("tasks/agents/{agent}"),
+                fresh: true,
+            })),
+            catalog_digest,
+        };
+        let bare = crate::encode_response(&response(None)).unwrap().len();
+        let stamped = crate::encode_response(&response(Some(crate::CatalogDigest([0xff; 32]))))
+            .unwrap()
+            .len();
+        assert_eq!(stamped - bare, CATALOG_DIGEST_ENCODED_MAX);
+        let envelope = stamped - prompt_max - TASK_SIGNATURE_MAX_BYTES;
+        assert!(envelope <= TASK_ENVELOPE_MARGIN, "{envelope}");
+        assert!(stamped <= prompt_response_cap(prompt_max), "{stamped}");
+    }
+
+    #[test]
     fn the_prompt_caps_add_the_envelope_and_then_the_signature() {
         assert_eq!(prompt_request_cap(65_536), 65_536 + 4096);
         assert_eq!(prompt_response_cap(65_536), 65_536 + 4096 + 32 * 1024);
