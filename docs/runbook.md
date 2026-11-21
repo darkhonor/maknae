@@ -865,7 +865,7 @@ As yourself, not root, store your own API key in Vault under your own login: [fi
 
 ### 7. Grant the prompt
 
-Edit `/etc/maknae/authz.yaml` in place. The packaged file already has a `roles:` key granting `admin` and `user` their terms, and a second `roles:` key refuses the whole file, so append a `destinations:` key; the packaged list already holds `session.prompt` and the four conversation terms beside it. `sudoedit` and `tee -a` keep the file's owner, mode and label. Step 9's restart applies it; a daemon that is already serving applies it at the next reload, `sudo systemctl reload maknaed` ([Reload the policy](#reload-the-policy)):
+Edit `/etc/maknae/authz.yaml` in place. The packaged file already has a `roles:` key granting `admin` and `user` their terms, and a second `roles:` key refuses the whole file, so append a `destinations:` key; the packaged lists already hold `session.prompt`, the four conversation terms beside it, `session.task` and `tool.catalog`. `sudoedit` and `tee -a` keep the file's owner, mode and label. Step 9's restart applies it; a daemon that is already serving applies it at the next reload, `sudo systemctl reload maknaed` ([Reload the policy](#reload-the-policy)):
 
 ```bash
 sudo tee -a /etc/maknae/authz.yaml >/dev/null <<'EOF'
