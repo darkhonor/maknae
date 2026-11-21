@@ -305,6 +305,17 @@ mod tests {
     }
 
     #[test]
+    fn a_grant_reaches_only_its_own_entry_and_program() {
+        let tools = format!(
+            "schema_version: 1\ntools:\n{}{}",
+            tool_entry("sentinel-674-granted", None, "gh"),
+            tool_entry("sentinel-674-same-program", None, "gh"),
+        );
+        let s = snap(&site(&["Tool(sentinel-674-granted gh run *)"], &[]), &tools);
+        assert_eq!(cat::entries(&graph(&s, ALICE)), ["sentinel-674-granted"]);
+    }
+
+    #[test]
     fn an_agent_never_sees_a_kind_without_a_reach_check() {
         let tools = format!(
             "schema_version: 1\ncredential_classes:\n{APP_CLASS}{PAT_CLASS}tools:\n{}{}",
