@@ -85,11 +85,11 @@ pub(crate) struct Link<D> {
     cite: Mutex<Option<TaskId>>,
 }
 
-/// A claim or heartbeat never cites (the kernel ends a connection whose cited task
+/// A claim, heartbeat or catalog fetch never cites (the kernel ends a connection whose cited task
 /// is not `Working`); every other verb a loop sends carries the cite.
 fn cite_for(verb: &Verb, cited: Option<TaskId>) -> Option<TaskId> {
     match verb {
-        Verb::TaskClaim { .. } => None,
+        Verb::TaskClaim { .. } | Verb::ToolCatalog {} => None,
         _ => cited,
     }
 }
@@ -800,6 +800,12 @@ mod tests {
         let seen = plane.link.dial.finish().await;
         assert_eq!(seen.requests.len(), VERBS.len() + 2);
         assert_eq!(seen.frames_per_connection, vec![1; VERBS.len() + 2]);
+    }
+
+    #[test]
+    fn a_tool_catalog_fetch_goes_uncited() {
+        let id = Some(TaskId([1; 16]));
+        assert_eq!(cite_for(&Verb::ToolCatalog {}, id), None);
     }
 
     #[test]

@@ -93,7 +93,9 @@ mod tests {
     #[test]
     fn a_refused_fetch_does_not_refetch_until_the_digest_changes() {
         let mut h = CatalogHolder::default();
-        let d = view("git").digest;
+        let held = view("git");
+        h.accept(held, maknae_crypto::sha256).unwrap();
+        let d = view("cargo").digest;
         let fetches = (0..5)
             .filter(|_| {
                 let fetch = h.should_fetch(Some(d));
@@ -105,7 +107,7 @@ mod tests {
             .count();
         assert_eq!(fetches, 1);
         assert!(h.current().is_none());
-        assert!(h.should_fetch(Some(view("cargo").digest)));
+        assert!(h.should_fetch(Some(view("hobi").digest)));
     }
 
     #[test]

@@ -825,4 +825,68 @@ mod tests {
             .collect();
         assert_eq!(verbs, [false, true, false, false, true]);
     }
+    #[tokio::test]
+    async fn a_refused_catalog_fetch_drops_the_held_catalog_and_the_claim_still_answers() {
+        use crate::plane::fake::{refused, FakeKernel};
+        use maknae_graph::catalog::{self, CatalogEntry, CatalogInput, CatalogOutput};
+        use maknae_proto::{CatalogDigest, Payload, RespResult, ToolCatalogReply, Verb};
+        let bytes = catalog::encode(&CatalogInput {
+            entries: vec![CatalogEntry {
+                name: "git".into(),
+                description: None,
+                executes_workspace: false,
+                output: CatalogOutput::Redacted,
+                binds: vec![],
+                programs: vec![],
+            }],
+            forges: vec![],
+        })
+        .unwrap();
+        let one = ToolCatalogReply {
+            digest: CatalogDigest(maknae_crypto::sha256(&bytes)),
+            graph: Bytes::new(Zeroizing::new(bytes)),
+        };
+        let two = CatalogDigest([9; 32]);
+        let idle = |d: CatalogDigest| (RespResult::Ok(Payload::TaskIdle), Some(d));
+        let fake = FakeKernel::stamped(vec![
+            idle(one.digest),
+            (RespResult::Ok(Payload::ToolCatalog(one.clone())), None),
+            idle(two),
+            (refused(), None),
+            idle(two),
+        ]);
+        let lp = LoopPlane::with_dial(
+            fake,
+            maknae_config::TransportConfig::default(),
+            None,
+            4096,
+            Keys,
+        );
+        let ca = TestCa::new(PlaneKey::MlDsa87);
+        let mut plane = AgentPlane::new(
+            lp,
+            TaskTrust {
+                trust: ca.trust(),
+                trust_domain: TRUST_DOMAIN.into(),
+                agent: hobi(),
+            },
+            PartitionPersona(PathBuf::from("/home/hobi")),
+            Box::new(|_| {}),
+        );
+        assert_eq!(plane.claim().await, Ok(ClaimAnswer::Idle));
+        assert!(plane.catalog().is_some());
+        assert_eq!(plane.claim().await, Ok(ClaimAnswer::Idle));
+        assert!(plane.catalog().is_none());
+        assert_eq!(plane.claim().await, Ok(ClaimAnswer::Idle));
+        let verbs: Vec<_> = plane
+            .plane
+            .link_for_test()
+            .finish()
+            .await
+            .requests
+            .iter()
+            .map(|r| matches!(r.verb, Verb::ToolCatalog {}))
+            .collect();
+        assert_eq!(verbs, [false, true, false, true, false]);
+    }
 }
