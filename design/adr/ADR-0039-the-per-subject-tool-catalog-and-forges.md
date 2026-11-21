@@ -31,7 +31,7 @@ The maintainer's framing of the purpose, 2026-11-21: *"helping to inform models 
 4. **Delivery is pull with a digest stamp** (maintainer, 2026-11-21).
    - A new verb, `tool.catalog`, returns `Payload::ToolCatalog { digest, graph }`: the subject's graph as format-v1 bytes and their SHA-256. The verb and payload are additive CBOR variants; `PROTOCOL_VERSION` is unchanged.
    - `Response` gains `catalog_digest`, omitted from the encoding when absent. It is set on the replies clients already poll, and only there: **every `TaskClaim` reply** (idle, delivered, follow-ups, closed or held), which `maknae-agentd` polls every 5 s, and **the `session.new` reply**, which starts each CLI conversation. Every other reply is byte-identical to before.
-   - A client fetches at start and fetches again when a stamp differs from the digest it holds. A fetch that is refused or a graph that does not decode leaves the client with **no catalog**, never a stale one it cannot verify, and the client keeps working without a menu. A client fetches at most once per new digest, not once per poll.
+   - `maknae-agentd` fetches on its first stamped claim and again whenever a claim's stamp differs from the digest it holds. The CLI fetches on demand, with `maknae tools`. Nothing consumes the `session.new` stamp until [#479](https://github.com/darkhonor/maknae/issues/479). A fetch that is refused, or a graph that does not match its digest or does not decode, leaves the client with **no catalog**, never a stale one it cannot verify, and the client keeps working without a menu. The agent fetches at most once per new digest, not once per poll.
    - **The bound.** `TOOL_CATALOG_MAX_BYTES` is the control frame's response maximum less a 1024-byte envelope, and a test proves a catalog of that size fits the frame. A larger catalog is refused, never truncated.
    - **Rejected:** a server push channel. Every exchange today is client-initiated, one request per connection.
 
@@ -64,28 +64,30 @@ The maintainer's framing of the purpose, 2026-11-21: *"helping to inform models 
 
 8. **`tool.catalog` is a decided, subject-limitable action term.** The shipped `authz.yaml` grants it to `admin` and `user`; `guest` holds no grant. It joins every agent's built-in tasks right ([ADR-0033](ADR-0033-agent-identity-admission-and-tasks.md), amendment 2026-11-17), because an agent needs its menu to work, so an agent `policy.yaml` whose `actions.deny` covers it refuses to load, as one covering a session action does. A subject without the grant still receives stamps; a stamp is not a grant, and its client stops asking after one refusal per digest. The trail record for `tool.catalog` cites the digest, never the graph bytes. The disclosure gate classifies the payload as subject-scoped opaque bytes released only on a `tool.catalog` permit, as it does a prompt reply; that the fence stays out of those bytes is pinned by a sentinel test over the encoded catalog, not by the disclosure manifest.
 
-9. **Clients.** `maknae-loop` owns the one client holder, used by the CLI and by `maknae-agentd`, with the walk functions `entries`, `entries_for_binding`, `forges` and `patterns`. The first human-visible consumer is `maknae tools`, which lists the subject's entries and patterns from the catalog. The model menu ([#479](https://github.com/darkhonor/maknae/issues/479)) and binding recognition (#168 slice 4) consume the holder later.
+9. **Clients.** `maknae-loop` owns the one client holder, used by `maknae-agentd`, and the one verifier (`catalog::verify`: the digest check, then the decode), which the holder and `maknae tools` both call. The walk functions `entries`, `entries_for_binding`, `forges` and `patterns` live in `maknae-graph`'s `catalog` module, beside the schema, not on the holder. The first human-visible consumer is `maknae tools`, which lists the subject's entries and patterns from the catalog. The model menu ([#479](https://github.com/darkhonor/maknae/issues/479)) and binding recognition (#168 slice 4) consume the holder later.
 
 ## Consequences
 
 - **Residuals.**
   1. **Enumeration is conservative.** A catalog may list a pattern that a concrete call still refuses: a deny that refuses only some argv a pattern admits, a positional deny, a bound value the call does not carry, or a mandatory operand. The kernel decides the call, and the refusal says "not available".
   2. **A reload racing a reply delays the change by at most one poll.** The stamp is taken from the snapshot installed when the reply is written, so a reload that lands just after is seen on the next `TaskClaim` reply, about 5 s later.
-  3. **A catalog is only as fresh as the client's last stamped reply.** An agent sees a change within one poll. A CLI conversation is stamped at `session.new` only, so it keeps the catalog it started with until its next conversation.
+  3. **A catalog is only as fresh as the client's last fetch.** An agent sees a change within one poll. `maknae tools` fetches afresh each time it runs; no CLI conversation holds a catalog until #479.
   4. **The client side is untrusted.** A compromised client can ignore, alter or invent a catalog; it gains no authority by doing so, because nothing decides from it. The catalog bounds what an honest client offers a model, not what a subject can ask for.
   5. **An entry's `description` is administrator text sent to the model.** The vocabulary keeps the fence's fields out, but it cannot stop an administrator writing a credential class or a site into a description.
+  6. **A rejected catalog is dropped silently.** A reply whose bytes do not match its digest, or that does not decode, leaves the agent with no catalog and no diagnostic. The catalog is a hint, and the only cause would be a kernel defect.
+  7. **A fetch that fails before a reply counts as a refusal.** A connection, I/O or timeout error leaves the agent with no catalog until its stamp next changes, because `TaskClient::tool_catalog` reports a transport failure and a refusal as the same error.
 - **The tasks right grows.** An existing agent `policy.yaml` that denies `tool.*` or `tool.catalog` stops loading after this change, with the reason named.
-- **Owed, none built:** `forges:`; pattern rendering, overlap and cover; the `catalog` vocabulary and its walks; the enumeration and per-snapshot cache; the verb, payload, stamp and bound; the decision arm and grants; the client holder and `maknae tools`. Shapes (#674 PR 3), the model menu (#479), binding recognition (#168 slice 4 PR A) and the per-user `forges.yaml` (#479) consume this later.
+- **Built (#674 PR 2.5):** `forges:`; pattern rendering, overlap and cover; the `catalog` vocabulary and its walks; the enumeration and per-snapshot cache; the verb, payload, stamp and bound; the decision arm and grants; the client holder, the verifier and `maknae tools`. **Owed:** shapes (#674 PR 3; the `SHAPE` node kind is reserved and nothing emits it); the CLI and run-path consumers, among them the model menu, the `session.new` stamp and the per-user `forges.yaml` (#479); binding recognition and reach against `forges:` (#168 slice 4).
 - **Amended in place:** [ADR-0037](ADR-0037-task-bindings-labels-and-tool-authorization.md) decision 3 (the authorized server is `forges:`) and decision 5 (the filtered view reaches clients as this catalog); [ADR-0029](ADR-0029-kernel-enforcement-state-graph.md) (the `catalog` vocabulary uses the seam it names); [ADR-0033](ADR-0033-agent-identity-admission-and-tasks.md) amendment 2026-11-17, statement 2 (the tasks right includes `tool.catalog`).
 
 ## Security control mapping (informative; per ADR-0001)
 
 | Property | Control | Status |
 |---|---|---|
-| The catalog is never an input to a decision; the kernel never accepts one from a client | NIST SP 800-53 rev 5 AC-3 (access enforcement) | Implements, once built |
-| A subject's catalog lists only entries its own grants overlap; contained subjects and adversaries get none | AC-6 (least privilege) | Implements, once built |
-| No credential class, image, site, volume or argument denial enters the catalog's vocabulary | AC-4 (information flow enforcement) | Implements, once built |
-| `tool.catalog` is decided per request and its record cites the digest, never the bytes | AU-3 (content of audit records) | Implements, once built |
+| The catalog is never an input to a decision; the kernel never accepts one from a client | NIST SP 800-53 rev 5 AC-3 (access enforcement) | Implements |
+| A subject's catalog lists only entries its own grants overlap; contained subjects and adversaries get none | AC-6 (least privilege) | Implements |
+| No credential class, image, site, volume or argument denial enters the catalog's vocabulary | AC-4 (information flow enforcement) | Implements |
+| `tool.catalog` is decided per request and its record cites the digest, never the bytes | AU-3 (content of audit records) | Implements |
 
 ## References
 
