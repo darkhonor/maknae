@@ -92,6 +92,17 @@ mod tests {
     }
 
     #[test]
+    fn the_held_digest_is_not_fetched_after_another_was_attempted() {
+        let mut h = CatalogHolder::default();
+        let a = view("git");
+        let d = a.digest;
+        assert!(h.should_fetch(Some(d)));
+        h.accept(a).unwrap();
+        assert!(h.should_fetch(Some(view("cargo").digest)));
+        assert!(!h.should_fetch(Some(d)));
+    }
+
+    #[test]
     fn a_refused_fetch_does_not_refetch_until_the_digest_changes() {
         let mut h = CatalogHolder::default();
         let held = view("git");
