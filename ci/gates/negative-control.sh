@@ -1145,6 +1145,7 @@ pub enum Payload {
     Agents(crate::AgentPage),
     HeldTasks(crate::HeldPage),
     HeldReleased(crate::ReleasePage),
+    ToolCatalog(ToolCatalogReply),
 }
 
 pub struct SecretText(pub zeroize::Zeroizing<String>);
