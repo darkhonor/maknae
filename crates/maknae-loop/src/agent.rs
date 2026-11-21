@@ -1,6 +1,6 @@
 //! The agent host's plane (#629): the loop's [`LoopPlane`] with the task verbs,
 //! the signature check and the persona reads the task driver asks for.
-use crate::catalog::CatalogHolder;
+use crate::catalog::{CatalogFetchError, CatalogHolder};
 use crate::keys::KeySupply;
 use crate::plane::{Dial, LoopPlane, PlaneDial};
 use crate::tasker::TaskerError;
@@ -219,7 +219,8 @@ impl<K: KeySupply, R: PersonaRead, D: Dial> TaskPlane for AgentPlane<K, R, D> {
                 Ok(view) => {
                     let _rejected = self.catalog.accept(view);
                 }
-                Err(_) => self.catalog.refused(),
+                Err(CatalogFetchError::NoReply(_)) => self.catalog.fetch_failed(),
+                Err(CatalogFetchError::Refused(_)) => self.catalog.refused(),
             }
         }
         Ok(answer)
@@ -825,6 +826,68 @@ mod tests {
             .map(|r| matches!(r.verb, Verb::ToolCatalog {}))
             .collect();
         assert_eq!(verbs, [false, true, false, false, true]);
+    }
+
+    #[tokio::test]
+    async fn a_catalog_fetch_that_got_no_reply_is_retried_on_the_next_claim() {
+        use crate::plane::fake::FakeKernel;
+        use maknae_graph::catalog::{self, CatalogEntry, CatalogInput, CatalogOutput};
+        use maknae_proto::{CatalogDigest, Payload, RespResult, ToolCatalogReply, Verb};
+        let bytes = catalog::encode(&CatalogInput {
+            entries: vec![CatalogEntry {
+                name: "git".into(),
+                description: None,
+                executes_workspace: false,
+                output: CatalogOutput::Redacted,
+                binds: vec![],
+                programs: vec![],
+            }],
+            forges: vec![],
+        })
+        .unwrap();
+        let one = ToolCatalogReply {
+            digest: CatalogDigest(maknae_crypto::sha256(&bytes)),
+            graph: Bytes::new(Zeroizing::new(bytes)),
+        };
+        let idle = Some((RespResult::Ok(Payload::TaskIdle), Some(one.digest)));
+        let fake = FakeKernel::scripted(vec![
+            idle.clone(),
+            None,
+            idle,
+            Some((RespResult::Ok(Payload::ToolCatalog(one.clone())), None)),
+        ]);
+        let lp = LoopPlane::with_dial(
+            fake,
+            maknae_config::TransportConfig::default(),
+            None,
+            4096,
+            Keys,
+        );
+        let ca = TestCa::new(PlaneKey::MlDsa87);
+        let mut plane = AgentPlane::new(
+            lp,
+            TaskTrust {
+                trust: ca.trust(),
+                trust_domain: TRUST_DOMAIN.into(),
+                agent: hobi(),
+            },
+            PartitionPersona(PathBuf::from("/home/hobi")),
+            Box::new(|_| {}),
+        );
+        assert_eq!(plane.claim().await, Ok(ClaimAnswer::Idle));
+        assert!(plane.catalog().is_none());
+        assert_eq!(plane.claim().await, Ok(ClaimAnswer::Idle));
+        assert!(plane.catalog().is_some());
+        let verbs: Vec<_> = plane
+            .plane
+            .link_for_test()
+            .finish()
+            .await
+            .requests
+            .iter()
+            .map(|r| matches!(r.verb, Verb::ToolCatalog {}))
+            .collect();
+        assert_eq!(verbs, [false, true, false, true]);
     }
 
     #[tokio::test]

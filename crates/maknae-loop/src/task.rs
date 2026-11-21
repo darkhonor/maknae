@@ -3,6 +3,7 @@
 //! task is not `Working`. A report carries the loop's cite and is bounded by the
 //! host's `prompt_max_bytes` as enrollment copied it; answers are read at the
 //! ceiling cap, so a bound raised on the host since then cannot cut one short.
+use crate::catalog::CatalogFetchError;
 use crate::plane::{Dial, Link, PlaneDial};
 use maknae_agent::task::{
     beat_answer, claim_answer, report_answer, BeatAnswer, ClaimAnswer, ReportOutcome,
@@ -37,11 +38,19 @@ impl<D: Dial> TaskClient<D> {
         claim_answer(Ok(WireOutcome::from(sent.outcome))).map(|answer| (answer, stamp))
     }
 
-    pub async fn tool_catalog(&self) -> Result<ToolCatalogReply, String> {
-        match self.send(Verb::ToolCatalog {}).await? {
+    pub async fn tool_catalog(&self) -> Result<ToolCatalogReply, CatalogFetchError> {
+        match self
+            .send(Verb::ToolCatalog {})
+            .await
+            .map_err(CatalogFetchError::NoReply)?
+        {
             WireOutcome::Payload(Payload::ToolCatalog(reply)) => Ok(reply),
-            WireOutcome::Refused { code, message, .. } => Err(format!("{code:?}: {message}")),
-            _ => Err("protocol error: unexpected reply to tool.catalog".into()),
+            WireOutcome::Refused { code, message, .. } => {
+                Err(CatalogFetchError::Refused(format!("{code:?}: {message}")))
+            }
+            _ => Err(CatalogFetchError::Refused(
+                "protocol error: unexpected reply to tool.catalog".into(),
+            )),
         }
     }
 
@@ -322,7 +331,9 @@ mod tests {
         let plane = plane(vec![RespResult::Ok(Payload::Pong)]);
         assert_eq!(
             plane.tasks().tool_catalog().await,
-            Err("protocol error: unexpected reply to tool.catalog".to_string())
+            Err(crate::catalog::CatalogFetchError::Refused(
+                "protocol error: unexpected reply to tool.catalog".to_string()
+            ))
         );
     }
 

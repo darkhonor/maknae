@@ -11,6 +11,14 @@ pub enum CatalogRejected {
     Undecodable,
 }
 
+/// Why a `tool.catalog` fetch produced no catalog. `NoReply` is retried on the next
+/// claim; `Refused`, which includes a protocol fault, waits for a new digest.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CatalogFetchError {
+    NoReply(String),
+    Refused(String),
+}
+
 #[derive(Default)]
 pub struct CatalogHolder {
     held: Option<(CatalogDigest, Arc<Graph>)>,
@@ -41,6 +49,11 @@ impl CatalogHolder {
 
     pub fn refused(&mut self) {
         self.held = None;
+    }
+
+    pub fn fetch_failed(&mut self) {
+        self.held = None;
+        self.last_attempted = None;
     }
 }
 
@@ -89,6 +102,19 @@ mod tests {
         assert!(!h.should_fetch(Some(d)));
         let other = view("cargo").digest;
         assert!(h.should_fetch(Some(other)));
+    }
+
+    #[test]
+    fn a_fetch_that_failed_drops_the_catalog_and_fetches_the_same_digest_again() {
+        let mut h = CatalogHolder::default();
+        let a = view("git");
+        assert!(h.should_fetch(Some(a.digest)));
+        h.accept(a).unwrap();
+        let d = view("cargo").digest;
+        assert!(h.should_fetch(Some(d)));
+        h.fetch_failed();
+        assert!(h.current().is_none());
+        assert!(h.should_fetch(Some(d)));
     }
 
     #[test]

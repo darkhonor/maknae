@@ -606,10 +606,13 @@ pub(crate) mod fake {
         pub frames_per_connection: Vec<usize>,
     }
 
-    /// Answers the first frame on each connection with the next scripted answer.
+    type Answer = (RespResult, Option<maknae_proto::CatalogDigest>);
+
+    /// Answers the first frame on each connection with the next scripted answer;
+    /// a `None` answer hangs up unanswered.
     #[derive(Default)]
     pub struct FakeKernel {
-        answers: Mutex<VecDeque<(RespResult, Option<maknae_proto::CatalogDigest>)>>,
+        answers: Mutex<VecDeque<Option<Answer>>>,
         seen: Arc<Mutex<Seen>>,
         servers: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     }
@@ -619,7 +622,11 @@ pub(crate) mod fake {
             Self::stamped(answers.into_iter().map(|a| (a, None)).collect())
         }
 
-        pub fn stamped(answers: Vec<(RespResult, Option<maknae_proto::CatalogDigest>)>) -> Self {
+        pub fn stamped(answers: Vec<Answer>) -> Self {
+            Self::scripted(answers.into_iter().map(Some).collect())
+        }
+
+        pub fn scripted(answers: Vec<Option<Answer>>) -> Self {
             FakeKernel {
                 answers: Mutex::new(answers.into()),
                 ..Default::default()
@@ -639,7 +646,7 @@ pub(crate) mod fake {
         type Stream = tokio::io::DuplexStream;
         fn dial(&self) -> impl Future<Output = Result<tokio::io::DuplexStream, VaultError>> + Send {
             let (client, mut server) = tokio::io::duplex(1 << 16);
-            let mut answer = self.answers.lock().unwrap().pop_front();
+            let mut answer = self.answers.lock().unwrap().pop_front().flatten();
             let seen = Arc::clone(&self.seen);
             self.servers.lock().unwrap().push(tokio::spawn(async move {
                 let caps = FrameCaps {
