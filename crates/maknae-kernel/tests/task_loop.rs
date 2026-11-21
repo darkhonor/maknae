@@ -3981,7 +3981,17 @@ const RUST_BUILD: &str =
 
 impl World {
     async fn agent_response(&self, agent: &str, verb: Verb) -> Response {
-        let raw = self.agent_raw(agent, verb, None, &Records::new(0)).await;
+        self.agent_response_with(agent, verb, &Records::new(0))
+            .await
+    }
+
+    async fn agent_response_with(
+        &self,
+        agent: &str,
+        verb: Verb,
+        records: &Arc<Records>,
+    ) -> Response {
+        let raw = self.agent_raw(agent, verb, None, records).await;
         let mut cursor = &raw[..];
         let frame = common::read_frame(&mut cursor, 1 << 20)
             .await
@@ -4058,4 +4068,95 @@ async fn a_tools_reload_changes_the_next_stamp() {
     let after = w.agent_response("hobi", CLAIM).await.catalog_digest;
     assert_eq!(after, Some(w.catalog_digest(HOBI_UID)));
     assert_ne!(after, before);
+}
+
+#[tokio::test]
+async fn an_idle_claim_whose_tasker_standing_is_undecided_is_stamped() {
+    let w = world("stamp-undecided", "user", true);
+    let queued = w.anothers("hobi");
+    common::write_0640(
+        &maknae_authz_basic::PolicyPaths::in_dir(&w.root).bindings,
+        &format!(
+            "schema_version: 1\nbindings:\n  user: [\"{}\", \"sentinel-674-no-such-user\"]\n",
+            w.user
+        ),
+    );
+    w.pdp.baseline().reload_from_file().unwrap();
+    let records = Records::new(0);
+    let resp = w.agent_response_with("hobi", CLAIM, &records).await;
+    assert!(
+        matches!(resp.result, RespResult::Ok(Payload::TaskIdle)),
+        "{resp:?}"
+    );
+    let rec = task_records(&records).pop().unwrap();
+    assert!(
+        rec.outcome
+            .reason
+            .starts_with("idle: the tasker's standing could not be decided: "),
+        "{}",
+        rec.outcome.reason
+    );
+    assert_eq!(rec.subject.task_id, Some(queued.to_string()));
+    assert_eq!(resp.catalog_digest, Some(w.catalog_digest(HOBI_UID)));
+}
+
+/// `inner`, whose load reads as another after its first `stable` readings.
+struct LoadChangesAfter {
+    inner: Arc<dyn maknae_kernel::EnrollmentView>,
+    stable: usize,
+    reads: std::sync::atomic::AtomicUsize,
+    first: Arc<dyn std::any::Any + Send + Sync>,
+}
+
+impl maknae_kernel::EnrollmentView for LoadChangesAfter {
+    fn agent_uid(&self, id: &maknae_config::AgentId) -> Option<u32> {
+        self.inner.agent_uid(id)
+    }
+    fn agents(&self) -> Vec<(maknae_config::AgentId, u32)> {
+        self.inner.agents()
+    }
+    fn is_enrolled(&self, uid: u32) -> bool {
+        self.inner.is_enrolled(uid)
+    }
+    fn contained(&self, uid: u32) -> bool {
+        self.inner.contained(uid)
+    }
+    fn unresolved(&self, uid: u32) -> bool {
+        self.inner.unresolved(uid)
+    }
+    fn load(&self) -> maknae_kernel::Load {
+        let n = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if n < self.stable {
+            maknae_kernel::Load::installed(Arc::clone(&self.first))
+        } else {
+            maknae_kernel::Load::installed(Arc::new(n))
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_claim_that_loses_the_race_to_a_reload_is_idle_and_stamped() {
+    let mut w = world("stamp-lost-race", "user", true);
+    let queued = w.submit("hobi", "a").await;
+    w.agents.view = Arc::new(LoadChangesAfter {
+        inner: Arc::clone(&w.agents.view),
+        stable: 2,
+        reads: Default::default(),
+        first: Arc::new(()),
+    });
+    let records = Records::new(0);
+    let resp = w.agent_response_with("hobi", CLAIM, &records).await;
+    assert!(
+        matches!(resp.result, RespResult::Ok(Payload::TaskIdle)),
+        "{resp:?}"
+    );
+    let said = task_records(&records);
+    assert_eq!(
+        said.iter()
+            .map(|r| r.outcome.reason.as_str())
+            .collect::<Vec<_>>(),
+        ["intent recorded", "idle"]
+    );
+    assert_eq!(w.store().record(&queued).unwrap().state, TaskState::Queued);
+    assert_eq!(resp.catalog_digest, Some(w.catalog_digest(HOBI_UID)));
 }
