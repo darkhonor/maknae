@@ -35,6 +35,7 @@ pub const PROVENANCE: Provenance = Provenance {
     transition: 0,
 };
 
+/// Decode a catalog only through [`decode`], never `format::decode` with this schema.
 pub static SCHEMA: Schema = Schema {
     version: SCHEMA_VERSION,
     node_kinds: &[
@@ -171,7 +172,18 @@ fn kind_label(name: Option<&'static str>) -> String {
 
 fn records(input: &CatalogInput) -> Result<Records, GraphError> {
     let mut r = Records::default();
+    let mut seen: BTreeMap<&str, &CatalogEntry> = BTreeMap::new();
     for e in &input.entries {
+        match seen.insert(&e.name, e) {
+            Some(prior) if prior != e => {
+                return Err(GraphError::DuplicateKey {
+                    kind: ENTRY,
+                    key: e.name.clone(),
+                })
+            }
+            Some(_) => continue,
+            None => {}
+        }
         let mut attrs = Attrs::new();
         if let Some(d) = &e.description {
             attrs.insert(ATTR_DESCRIPTION.into(), AttrValue::Str(d.clone()));
@@ -670,6 +682,40 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_entries_must_be_identical() {
+        let a = entry("a", &["git"], &[("git", &["status"])]);
+        let same = CatalogInput {
+            entries: vec![a.clone(), a.clone()],
+            forges: vec![],
+        };
+        assert_eq!(
+            encode(&same).unwrap(),
+            encode(&CatalogInput {
+                entries: vec![a.clone()],
+                forges: vec![],
+            })
+            .unwrap()
+        );
+        let refused = GraphError::DuplicateKey {
+            kind: ENTRY,
+            key: "a".into(),
+        };
+        for other in [
+            entry("a", &[], &[("git", &["status"])]),
+            entry("a", &["git"], &[("git", &["status", "log"])]),
+            entry("a", &["git"], &[("git", &["status"]), ("gh", &[])]),
+        ] {
+            for entries in [vec![a.clone(), other.clone()], vec![other, a.clone()]] {
+                let input = CatalogInput {
+                    entries,
+                    forges: vec![],
+                };
+                assert_eq!(build(&input).unwrap_err(), refused);
+            }
+        }
+    }
+
+    #[test]
     fn shape_is_reserved_and_never_emitted() {
         assert_eq!(SCHEMA.node_kind_name(SHAPE), Some("Shape"));
         assert!(!SCHEMA
@@ -735,18 +781,17 @@ mod tests {
 
     #[test]
     fn decode_refuses_a_shared_space_graph_built_against_another_schema() {
-        use crate::kernel;
-        assert_eq!(kernel::SCHEMA.version, SCHEMA.version);
-        assert_eq!(kernel::CONFIG_SOURCE, ENTRY);
+        static OTHER: Schema = Schema {
+            version: SCHEMA_VERSION,
+            node_kinds: &[(ENTRY, "ConfigSource")],
+            edge_kinds: &[],
+            triples: &[],
+            compiled_kinds: &[],
+            forbidden_targets: &[],
+        };
         let foreign = GraphBuilder::new(GraphSpace::Shared, 0)
-            .node(shared_node(
-                1,
-                kernel::CONFIG_SOURCE,
-                "tools",
-                "UNCLASSIFIED",
-                Attrs::new(),
-            ))
-            .build(&kernel::SCHEMA, &CompiledSet::default())
+            .node(shared_node(1, ENTRY, "tools", "UNCLASSIFIED", Attrs::new()))
+            .build(&OTHER, &CompiledSet::default())
             .unwrap();
         let bytes = crate::format::encode(&foreign);
         assert!(crate::format::decode(

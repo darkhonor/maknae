@@ -540,8 +540,8 @@ files = [
   # arm overruns the stop bound or leaves a 990 s wait unstoppable (availability);
   # it carries no verdict.
   "bins/maknae-agentd/src/shutdown.rs",
-  # #674: the tool catalog, a hint no decision reads (ADR-0039). T2: a defect misinforms
-  # a model and carries no verdict; the codec checks it relies on are format.rs (T1).
+  # #674: the tool catalog, a hint no decision reads (ADR-0039). T2: a defect
+  # misinforms a model and carries no verdict.
   "crates/maknae-graph/src/catalog.rs",
 ]
 
