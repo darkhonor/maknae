@@ -9,7 +9,7 @@ use maknae_agent::task::{
 };
 use maknae_agent::task_driver::VerifyClass;
 use maknae_agent::wire::WireOutcome;
-use maknae_proto::{SecretText, Verb};
+use maknae_proto::{CatalogDigest, Payload, SecretText, ToolCatalogReply, Verb};
 use maknae_vault::task_sig::TaskSignatureError;
 use std::sync::Arc;
 
@@ -23,12 +23,28 @@ impl<D: Dial> TaskClient<D> {
     }
 
     pub async fn claim(&self) -> Result<ClaimAnswer, String> {
-        claim_answer(
-            self.send(Verb::TaskClaim {
+        self.claim_stamped().await.map(|(answer, _stamp)| answer)
+    }
+
+    pub async fn claim_stamped(&self) -> Result<(ClaimAnswer, Option<CatalogDigest>), String> {
+        let sent = self
+            .link
+            .send_stamped(Verb::TaskClaim {
                 seen_follow_ups: None,
             })
-            .await,
-        )
+            .await?;
+        let stamp = sent.catalog_digest;
+        claim_answer(Ok(WireOutcome::from(sent.outcome))).map(|answer| (answer, stamp))
+    }
+
+    pub async fn tool_catalog(&self) -> Result<ToolCatalogReply, String> {
+        match self.send(Verb::ToolCatalog {}).await? {
+            WireOutcome::Payload(Payload::ToolCatalog(reply)) => Ok(reply),
+            WireOutcome::Refused { code, message, .. } => Err(format!("{code:?}: {message}")),
+            other => Err(format!(
+                "protocol error: unexpected reply to tool.catalog: {other:?}"
+            )),
+        }
     }
 
     pub async fn heartbeat(&self, seen: u32) -> Result<BeatAnswer, String> {

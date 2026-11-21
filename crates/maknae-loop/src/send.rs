@@ -257,6 +257,13 @@ pub(crate) async fn send_via<S: Wire>(
         .map_err(|f| f.why)
 }
 
+/// What one verb came back as, with the catalog stamp the reply carried.
+#[derive(Debug)]
+pub(crate) struct Sent {
+    pub(crate) outcome: SentOutcome,
+    pub(crate) catalog_digest: Option<maknae_proto::CatalogDigest>,
+}
+
 /// [`send_via`], with the failure saying whether it came after the request was written.
 pub(crate) async fn send_located<S: Wire>(
     connect: impl std::future::Future<Output = Result<S, maknae_vault::VaultError>>,
@@ -267,11 +274,29 @@ pub(crate) async fn send_located<S: Wire>(
     transport: &maknae_config::TransportConfig,
     diag: &mut (dyn FnMut(String) + Send),
 ) -> Result<SentOutcome, SendFailure> {
+    send_stamped(connect, task, request_verb, content, check, transport, diag)
+        .await
+        .map(|sent| sent.outcome)
+}
+
+/// [`send_located`], keeping the catalog stamp of the reply.
+pub(crate) async fn send_stamped<S: Wire>(
+    connect: impl std::future::Future<Output = Result<S, maknae_vault::VaultError>>,
+    task: Option<maknae_proto::TaskId>,
+    request_verb: maknae_proto::Verb,
+    content: Option<maknae_proto::Bytes>,
+    check: crate::mutation::WriteCheck,
+    transport: &maknae_config::TransportConfig,
+    diag: &mut (dyn FnMut(String) + Send),
+) -> Result<Sent, SendFailure> {
     let mutating = mutates(&request_verb);
-    settle_located(
-        mutating,
-        exchange(connect, task, request_verb, content, check, transport, diag).await,
-    )
+    match exchange(connect, task, request_verb, content, check, transport, diag).await {
+        Ok(sent) => Ok(sent),
+        Err(failed) => settle_located(mutating, Err(failed)).map(|outcome| Sent {
+            outcome,
+            catalog_digest: None,
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -327,9 +352,13 @@ async fn exchange<S: Wire>(
     check: crate::mutation::WriteCheck,
     transport: &maknae_config::TransportConfig,
     diag: &mut (dyn FnMut(String) + Send),
-) -> Result<SentOutcome, Failed> {
+) -> Result<Sent, Failed> {
     let mutating = mutates(&request_verb);
     let before = Failed::BeforeGrant;
+    let unstamped = |outcome| Sent {
+        outcome,
+        catalog_digest: None,
+    };
     let unsent = Failed::Unsent;
     // Bound the client-side TLS handshake by the configured `handshake_timeout_ms`: a
     // process that accepts the Unix socket but never completes TLS must not hang the CLI
@@ -397,12 +426,18 @@ async fn exchange<S: Wire>(
     .map_err(before)?;
     let response = decode_response(&resp_body).map_err(|e| before(e.to_string()))?;
 
+    let catalog_digest = response.catalog_digest;
     let (prepared, grant) = match first_answer(mutating, prepared, response.result, armed)? {
-        FirstAnswer::Done(sent) => return Ok(sent),
+        FirstAnswer::Done(outcome) => {
+            return Ok(Sent {
+                outcome,
+                catalog_digest,
+            })
+        }
         FirstAnswer::Grant(prepared, grant) => (prepared, grant),
     };
     if matches!(prepared.request(), maknae_proto::Verb::FsList { .. }) {
-        return Ok(
+        return Ok(unstamped(
             match crate::mutation::execute_list(
                 prepared,
                 grant,
@@ -421,24 +456,24 @@ async fn exchange<S: Wire>(
                     armed: true,
                 },
             },
-        );
+        ));
     }
     if matches!(prepared.request(), maknae_proto::Verb::Read { .. }) {
         let read =
             crate::mutation::execute_read(prepared, grant, &mut stream, transport, written, diag)
                 .await
                 .map_err(Failed::After)?;
-        return Ok(SentOutcome::ReadDone { read });
+        return Ok(unstamped(SentOutcome::ReadDone { read }));
     }
     let end = crate::mutation::execute(prepared, grant, &mut stream, transport, written, diag)
         .await
         .map_err(Failed::After)?;
-    Ok(SentOutcome::WriteDone {
+    Ok(unstamped(SentOutcome::WriteDone {
         applied: end.applied,
         stale: end.stale,
         withheld: end.withheld,
         version: end.version,
-    })
+    }))
 }
 
 enum FirstAnswer {
@@ -980,7 +1015,8 @@ mod tests {
             &maknae_config::TransportConfig::default(),
             &mut |_| {},
         )
-        .await;
+        .await
+        .map(|sent| sent.outcome);
         let settled = settle(true, sent);
         assert!(
             matches!(&settled, Ok(SentOutcome::NotAttempted { why }) if why.contains("connection refused")),

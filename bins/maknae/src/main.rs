@@ -13,6 +13,7 @@ mod policy_sync;
 mod reseed;
 mod screen;
 mod stderr;
+mod tools;
 mod tty;
 
 use crate::stderr::errln;

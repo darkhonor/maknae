@@ -1,5 +1,6 @@
 //! The agent host's plane (#629): the loop's [`LoopPlane`] with the task verbs,
 //! the signature check and the persona reads the task driver asks for.
+use crate::catalog::CatalogHolder;
 use crate::keys::KeySupply;
 use crate::plane::{Dial, LoopPlane, PlaneDial};
 use crate::tasker::TaskerError;
@@ -10,6 +11,7 @@ use maknae_agent::plane::{
 use maknae_agent::task::{BeatAnswer, ClaimAnswer, ReportOutcome, TaskerFail};
 use maknae_agent::task_driver::{DriverEvent, PersonaAt, TaskPlane, Unverified};
 use maknae_config::AgentId;
+use maknae_graph::graph::Graph;
 use maknae_io::{
     AnchorRequired, DescendantRequired, IoError, IoKind, StrategyPref, TargetRequired, Zeroizing,
 };
@@ -129,6 +131,7 @@ pub struct AgentPlane<K: KeySupply, R: PersonaRead, D: Dial = PlaneDial> {
     trust: TaskTrust,
     personas: R,
     note: Box<dyn FnMut(DriverEvent) + Send>,
+    catalog: CatalogHolder,
 }
 
 impl<K: KeySupply, R: PersonaRead, D: Dial> AgentPlane<K, R, D> {
@@ -143,7 +146,12 @@ impl<K: KeySupply, R: PersonaRead, D: Dial> AgentPlane<K, R, D> {
             trust,
             personas,
             note,
+            catalog: CatalogHolder::default(),
         }
+    }
+
+    pub fn catalog(&self) -> Option<Arc<Graph>> {
+        self.catalog.current()
     }
 }
 
@@ -204,7 +212,17 @@ impl<K: KeySupply, R: PersonaRead, D: Dial> Plane for AgentPlane<K, R, D> {
 
 impl<K: KeySupply, R: PersonaRead, D: Dial> TaskPlane for AgentPlane<K, R, D> {
     async fn claim(&mut self) -> Result<ClaimAnswer, String> {
-        self.plane.tasks().claim().await
+        let tasks = self.plane.tasks();
+        let (answer, stamp) = tasks.claim_stamped().await?;
+        if self.catalog.should_fetch(stamp) {
+            match tasks.tool_catalog().await {
+                Ok(view) => {
+                    let _rejected = self.catalog.accept(view, maknae_crypto::sha256);
+                }
+                Err(_) => self.catalog.refused(),
+            }
+        }
+        Ok(answer)
     }
     async fn heartbeat(&mut self, seen: u32) -> Result<BeatAnswer, String> {
         self.plane.tasks().heartbeat(seen).await
@@ -730,5 +748,81 @@ mod tests {
             text(Zeroizing::new(vec![0xff, 0xfe])).map(|t| t.0.to_string()),
             Err("the persona is not UTF-8".to_string())
         );
+    }
+    #[tokio::test]
+    async fn agent_plane_refetches_after_a_claim_reply_with_a_new_digest() {
+        use crate::plane::fake::FakeKernel;
+        use maknae_graph::catalog::{self, CatalogEntry, CatalogInput, CatalogOutput};
+        use maknae_proto::{CatalogDigest, Payload, RespResult, ToolCatalogReply, Verb};
+        let view = |name: &str| {
+            let bytes = catalog::encode(&CatalogInput {
+                entries: vec![CatalogEntry {
+                    name: name.into(),
+                    description: None,
+                    executes_workspace: false,
+                    output: CatalogOutput::Redacted,
+                    binds: vec![],
+                    programs: vec![],
+                }],
+                forges: vec![],
+            })
+            .unwrap();
+            ToolCatalogReply {
+                digest: CatalogDigest(maknae_crypto::sha256(&bytes)),
+                graph: Bytes::new(Zeroizing::new(bytes)),
+            }
+        };
+        let (one, two) = (view("git"), view("cargo"));
+        let idle = |d: CatalogDigest| (RespResult::Ok(Payload::TaskIdle), Some(d));
+        let fake = FakeKernel::stamped(vec![
+            idle(one.digest),
+            (RespResult::Ok(Payload::ToolCatalog(one.clone())), None),
+            idle(one.digest),
+            idle(two.digest),
+            (RespResult::Ok(Payload::ToolCatalog(two.clone())), None),
+        ]);
+        let lp = LoopPlane::with_dial(
+            fake,
+            maknae_config::TransportConfig::default(),
+            None,
+            4096,
+            Keys,
+        );
+        let ca = TestCa::new(PlaneKey::MlDsa87);
+        let mut plane = AgentPlane::new(
+            lp,
+            TaskTrust {
+                trust: ca.trust(),
+                trust_domain: TRUST_DOMAIN.into(),
+                agent: hobi(),
+            },
+            PartitionPersona(PathBuf::from("/home/hobi")),
+            Box::new(|_| {}),
+        );
+        assert!(plane.catalog().is_none());
+        for _ in 0..3 {
+            assert_eq!(plane.claim().await, Ok(ClaimAnswer::Idle));
+        }
+        let names = |p: &AgentPlane<Keys, PartitionPersona, _>| {
+            p.catalog()
+                .map(|g| {
+                    maknae_graph::catalog::entries(&g)
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap()
+        };
+        assert_eq!(names(&plane), ["cargo"]);
+        let verbs: Vec<_> = plane
+            .plane
+            .link_for_test()
+            .finish()
+            .await
+            .requests
+            .iter()
+            .map(|r| matches!(r.verb, Verb::ToolCatalog {}))
+            .collect();
+        assert_eq!(verbs, [false, true, false, false, true]);
     }
 }

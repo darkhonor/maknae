@@ -131,6 +131,11 @@ fn route(cli: Cli) -> Option<Route> {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn is_tools(cli: &Cli) -> bool {
+    matches!(cli.command, Some(Command::Tools))
+}
+
 /// The top-level subcommand surface. `Ping`/`Whoami` route to the existing
 /// wire-path `execute()` below (unchanged behavior); `Enroll`/`EnrollHelper`
 /// route to `enroll/` (spec §4.1-§4.6, PR-J1 Task 8). `EnrollHelper` is hidden
@@ -141,6 +146,8 @@ enum Command {
     Ping,
     /// Report the verified peer plane identity (URI-SAN + uid).
     Whoami,
+    /// List the tools your role's grants reach, and the forges they bind (a hint, not a grant).
+    Tools,
     /// Read a file under your home: the daemon decides (the policy in
     /// /etc/maknae/authz.yaml), and the CLI reads under your credentials; raw
     /// bytes to stdout. Paths are sent lexically absolute; `..` is refused by
@@ -338,9 +345,10 @@ enum PolicyCommand {
 /// internal wire-path type `execute`/`round_trip`/`print_payload_for_verb`
 /// were already built around.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Verb {
+pub(crate) enum Verb {
     Ping,
     Whoami,
+    ToolCatalog,
     Read {
         path: String,
         page: Option<maknae_proto::PageRequest>,
@@ -386,10 +394,11 @@ enum Verb {
 
 impl Verb {
     /// The verb's kind, for messages that must not carry its operands.
-    fn kind(&self) -> &'static str {
+    pub(crate) fn kind(&self) -> &'static str {
         match self {
             Verb::Ping => "ping",
             Verb::Whoami => "whoami",
+            Verb::ToolCatalog => "tools",
             Verb::Read { .. } => "read",
             Verb::Write { .. } => "write",
             Verb::Delete { .. } => "delete",
@@ -473,7 +482,7 @@ fn payload_kind(p: &Payload) -> &'static str {
 
 /// The accept operand; Debug shows only the prefix the trail carries.
 #[derive(Clone, PartialEq, Eq)]
-struct AcceptHash(String);
+pub(crate) struct AcceptHash(String);
 
 impl AcceptHash {
     fn short(&self) -> &str {
@@ -498,6 +507,7 @@ impl From<Verb> for maknae_proto::Verb {
         match v {
             Verb::Ping => maknae_proto::Verb::Ping,
             Verb::Whoami => maknae_proto::Verb::Whoami,
+            Verb::ToolCatalog => maknae_proto::Verb::ToolCatalog {},
             Verb::Read { path, page } => maknae_proto::Verb::Read {
                 path,
                 conversation: None,
@@ -1270,7 +1280,7 @@ pub fn whoami_line(w: &maknae_proto::WhoamiView) -> String {
 /// (`Ping`→`Pong`, `Whoami`→`Whoami(_)`). A mismatched variant means the daemon
 /// answered a different question than we asked — a protocol error: return `Err`
 /// (the caller exits non-zero).
-fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
+pub(crate) fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
     match (verb, payload) {
         (Verb::Ping, Payload::Pong) => {
             println!("pong");
@@ -1278,6 +1288,12 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
         }
         (Verb::Whoami, Payload::Whoami(w)) => {
             println!("{}", whoami_line(&w));
+            Ok(())
+        }
+        (Verb::ToolCatalog, Payload::ToolCatalog(reply)) => {
+            for line in crate::tools::catalog_lines(&reply)? {
+                println!("{line}");
+            }
             Ok(())
         }
         (Verb::AdminStatus, Payload::Status(s)) => {
@@ -1394,6 +1410,7 @@ pub async fn run_cli() -> ExitCode {
     match command {
         Command::Ping => wire_exit_code(execute(Verb::Ping).await, &mut std::io::stderr()),
         Command::Whoami => wire_exit_code(execute(Verb::Whoami).await, &mut std::io::stderr()),
+        Command::Tools => wire_exit_code(execute(Verb::ToolCatalog).await, &mut std::io::stderr()),
         Command::Status => wire_exit_code(execute(Verb::AdminStatus).await, &mut std::io::stderr()),
         Command::ConfigShow => {
             wire_exit_code(execute(Verb::AdminConfigShow).await, &mut std::io::stderr())

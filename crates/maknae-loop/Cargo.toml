@@ -19,6 +19,8 @@ test-support = []
 # The loop's decision code; this crate is its hands.
 maknae-agent = { path = "../maknae-agent" }
 maknae-proto = { path = "../maknae-proto" }
+# The catalog the kernel releases is a maknae-graph graph, decoded here.
+maknae-graph = { path = "../maknae-graph" }
 maknae-config = { path = "../maknae-config" }
 # ADR-0009: the subject's open and the delegated attempt run through maknae-io,
 # so the std-fs-drift gate needs no client-side exemption.

@@ -2,6 +2,7 @@
 //! the kernel for everything and decides nothing; the decisions are in
 //! `maknae-agent`. `maknaed` never links this crate.
 pub mod agent;
+pub mod catalog;
 pub mod keys;
 pub mod mutation;
 pub mod outcome;

@@ -2,7 +2,7 @@
 //! live daemon, Vault and certificates, so it is T3; every decision it feeds
 //! is T1 in `maknae_agent::wire`.
 use crate::keys::{AgentKeys, KeySupply};
-use crate::send::{send_located, send_via, write_request, SendFailure, Wire};
+use crate::send::{send_located, send_stamped, send_via, write_request, SendFailure, Sent, Wire};
 use maknae_agent::plane::{
     DeleteOutcome, ListOutcome, MkdirOutcome, Plane, PlaneError, ReadBasis, ReadOutcome,
     StatOutcome, WriteOutcome,
@@ -131,6 +131,20 @@ impl<D: Dial> Link<D> {
             &mut |_| {},
         )
         .await
+    }
+
+    pub(crate) async fn send_stamped(&self, verb: Verb) -> Result<Sent, String> {
+        send_stamped(
+            self.dial.dial(),
+            cite_for(&verb, self.cited()),
+            verb,
+            None,
+            crate::mutation::WriteCheck::Unchecked,
+            &self.transport,
+            &mut |_| {},
+        )
+        .await
+        .map_err(|f| f.why)
     }
 
     pub(crate) async fn send(
@@ -595,13 +609,17 @@ pub(crate) mod fake {
     /// Answers the first frame on each connection with the next scripted answer.
     #[derive(Default)]
     pub struct FakeKernel {
-        answers: Mutex<VecDeque<RespResult>>,
+        answers: Mutex<VecDeque<(RespResult, Option<maknae_proto::CatalogDigest>)>>,
         seen: Arc<Mutex<Seen>>,
         servers: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     }
 
     impl FakeKernel {
         pub fn answering(answers: Vec<RespResult>) -> Self {
+            Self::stamped(answers.into_iter().map(|a| (a, None)).collect())
+        }
+
+        pub fn stamped(answers: Vec<(RespResult, Option<maknae_proto::CatalogDigest>)>) -> Self {
             FakeKernel {
                 answers: Mutex::new(answers.into()),
                 ..Default::default()
@@ -639,10 +657,11 @@ pub(crate) mod fake {
                     let Some(result) = answer.take() else {
                         break;
                     };
+                    let (result, catalog_digest) = result;
                     let reply = maknae_proto::encode_response(&Response {
                         protocol_version: maknae_proto::PROTOCOL_VERSION,
                         result,
-                        catalog_digest: None,
+                        catalog_digest,
                     })
                     .unwrap();
                     let _ = maknae_proto::write_frame(&mut server, class, &reply).await;
