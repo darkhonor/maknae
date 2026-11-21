@@ -238,6 +238,13 @@ mod tests {
         assert!(refusal("github\n").contains("sequence"));
         assert!(refusal("name: github\n").contains("sequence"));
         assert!(refusal("- github\n").contains("forges[0] must be a map"));
+        match forges_from_section(Some(&Value::Null)) {
+            Err(ConfigError::InvalidForge(m)) => {
+                assert_eq!(m, "forges must be a sequence of forge entries")
+            }
+            other => panic!("expected InvalidForge, got {other:?}"),
+        }
+        assert!(refusal("~\n").contains("sequence"));
         let fields = [
             ("name", "g"),
             ("kind", "git"),
