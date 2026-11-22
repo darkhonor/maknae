@@ -7486,17 +7486,17 @@ where
     }
 
     /// Installs `snapshot`, or keeps the installed one when only the live values changed, then
-    /// marks every open task whose agent it no longer enrolls, without I/O. Called after
-    /// the install's own locks are released: `mark_unenrolled` reads the snapshot under the
-    /// store lock. [`Reloader::settle_tasks`] follows once the turn is released.
+    /// marks every open task whose agent it no longer enrolls, and the board's posts to hold
+    /// and cursors to drop, without I/O. Called after the install's own locks are released:
+    /// `mark_unenrolled` and `mark` read the snapshot under their store's lock.
+    /// [`Reloader::settle_tasks`] follows once the turn is released.
     fn install_and_reconcile(&self, snapshot: Option<Arc<maknae_authz_basic::snapshot::Snapshot>>) {
         if let Some(snapshot) = snapshot {
             self.authorizer.baseline().install(snapshot);
         }
-        self.tasks
-            .mark_unenrolled(&crate::enrollment::SnapshotEnrollment(Arc::clone(
-                &self.authorizer,
-            )));
+        let view = crate::enrollment::SnapshotEnrollment(Arc::clone(&self.authorizer));
+        self.tasks.mark_unenrolled(&view);
+        self.board.mark(&view);
     }
 
     /// Records and performs the closes `install_and_reconcile` marked, in a session of its
@@ -9826,11 +9826,91 @@ async fn close_due<E: AuditEmit>(
     }
 }
 
+/// [`close_due`] for the board store: one record per due expiry, hold or cursor removal,
+/// then the store performs that batch.
+async fn board_due<E: AuditEmit>(
+    board: &Arc<crate::board::BoardStore>,
+    emit: &E,
+    ctx: &BootCtx<'_>,
+    deadline: tokio::time::Instant,
+) -> Swept {
+    let mut stopped = None;
+    while stopped.is_none() {
+        let mut recorded = Vec::new();
+        for due in board.due(TASK_CLOSE_BATCH) {
+            if tokio::time::Instant::now() >= deadline {
+                stopped = Some("the pass ran out of time".into());
+                break;
+            }
+            if !due.recorded {
+                if let Err(e) = emit
+                    .emit_within(&board_due_record(ctx, &due), AUDIT_APPEND_TIMEOUT)
+                    .await
+                {
+                    stopped = Some(format!("the trail refused a board record: {e}"));
+                    break;
+                }
+            }
+            recorded.push(due);
+        }
+        if recorded.is_empty() {
+            break;
+        }
+        let b = Arc::clone(board);
+        match crate::task::offload(ctx.euid, deadline, move || Ok(b.perform(&recorded))).await {
+            Ok(0) => stopped = stopped.or(Some("the board store stored none".into())),
+            Ok(_) => {}
+            Err(e) => stopped = Some(e.to_string()),
+        }
+    }
+    Swept {
+        remaining: board.due(usize::MAX).len(),
+        stopped,
+    }
+}
+
+/// [`record_task_notices`] for the board store.
+async fn record_board_notices<E: AuditEmit>(
+    board: &crate::board::BoardStore,
+    emit: &E,
+    ctx: &BootCtx<'_>,
+) -> bool {
+    let mut notices = std::collections::VecDeque::from(board.take_notices());
+    while let Some(notice) = notices.pop_front() {
+        let rec = board_notice_record(ctx, &notice);
+        if emit.emit_within(&rec, AUDIT_APPEND_TIMEOUT).await.is_err() {
+            notices.push_front(notice);
+            board.return_notices(notices.into());
+            return false;
+        }
+    }
+    true
+}
+
+/// [`record_task_failure`] for the board store.
+async fn record_board_failure<E: AuditEmit>(emit: &E, ctx: &BootCtx<'_>, why: &str) {
+    let ctx = BootCtx {
+        event: "board",
+        ..*ctx
+    };
+    let rec = ctx.record(
+        "board.manage",
+        "deny",
+        &format!("store: {why}"),
+        "unavailable",
+        None,
+    );
+    if let Err(e) = emit.emit_within(&rec, AUDIT_APPEND_TIMEOUT).await {
+        eprintln!("maknaed: AUDIT WRITE FAILED on a board store record ({why}): {e}");
+    }
+}
+
 /// One pass: the due closes and expiries, the counters when `counters`, then the store's
-/// notices. Whatever it leaves undone is itself recorded.
+/// notices; then the board's due items and notices. Whatever it leaves undone is itself
+/// recorded.
 async fn settle_tasks<E: AuditEmit>(
     tasks: &Arc<crate::task::TaskStore>,
-    _board: &Arc<crate::board::BoardStore>,
+    board: &Arc<crate::board::BoardStore>,
     emit: &E,
     ctx: &BootCtx<'_>,
     budget: Duration,
@@ -9864,6 +9944,19 @@ async fn settle_tasks<E: AuditEmit>(
     for why in [left, unstored, unsaid].into_iter().flatten() {
         record_task_failure(emit, ctx, &why, AUDIT_APPEND_TIMEOUT).await;
     }
+    let swept = board_due(board, emit, ctx, deadline).await;
+    let said = record_board_notices(board, emit, ctx).await;
+    let left = match (swept.remaining, swept.stopped) {
+        (0, _) => None,
+        (n, why) => Some(format!(
+            "{n} board expiries, holds or cursor removals remain due: {}",
+            why.unwrap_or_else(|| "the pass ended".into())
+        )),
+    };
+    let unsaid = (!said).then(|| "the trail refused a board store record".to_string());
+    for why in [left, unsaid].into_iter().flatten() {
+        record_board_failure(emit, ctx, &why).await;
+    }
 }
 
 /// A task-store failure goes to the trail; stderr only when the trail itself refuses it.
@@ -9892,13 +9985,14 @@ async fn record_task_failure<E: AuditEmit>(
 /// is recorded and left to the sweep; only a trail that refuses that record refuses boot.
 async fn reconcile_tasks_at_boot<E: AuditEmit>(
     tasks: &Arc<crate::task::TaskStore>,
-    _board: &Arc<crate::board::BoardStore>,
+    board: &Arc<crate::board::BoardStore>,
     view: &dyn crate::enrollment::EnrollmentView,
     emit: &E,
     ctx: &BootCtx<'_>,
     budget: Duration,
 ) -> Result<(), RunError> {
     tasks.mark_unenrolled(view);
+    board.mark(view);
     let ctx = task_ctx(ctx);
     let swept = close_due(tasks, emit, &ctx, tokio::time::Instant::now() + budget).await;
     if swept.remaining == 0 {
@@ -10029,6 +10123,59 @@ fn board_finding_record(
             rec.object = Some(format!("board:{name}"));
             rec
         }
+    }
+}
+
+fn board_record(
+    ctx: &BootCtx<'_>,
+    (result, posture, reason): (&str, &str, &str),
+    op: &str,
+    key: crate::board_store::BoardKey,
+    audit: Option<maknae_audit_append::BoardAudit>,
+) -> AuditRecord {
+    let ctx = BootCtx {
+        event: "board",
+        ..*ctx
+    };
+    let mut rec = crate::board_verbs::on_board(
+        ctx.record("board.manage", result, reason, posture, None),
+        Some(key),
+    );
+    rec.subject.board_op = Some(op.into());
+    rec.board = audit;
+    rec
+}
+
+/// The record of a post expiry, a hold or a cursor removal, appended before the store
+/// performs it.
+fn board_due_record(ctx: &BootCtx<'_>, due: &crate::board::BoardDue) -> AuditRecord {
+    let (op, reason) = crate::board_verbs::due_said(due.why);
+    board_record(
+        ctx,
+        ("deny", "unavailable", reason),
+        op,
+        due.key,
+        crate::board_verbs::due_audit(due),
+    )
+}
+
+fn board_notice_record(ctx: &BootCtx<'_>, notice: &crate::board::BoardNotice) -> AuditRecord {
+    use crate::board::BoardNotice;
+    match notice {
+        BoardNotice::Settled { key, id } => board_record(
+            ctx,
+            (
+                "permit",
+                "authorized",
+                "settled: an unknown post was removed",
+            ),
+            "expire",
+            *key,
+            Some(maknae_audit_append::BoardAudit {
+                post_id: Some(id.to_string()),
+                ..maknae_audit_append::BoardAudit::default()
+            }),
+        ),
     }
 }
 
@@ -28916,5 +29063,255 @@ mod task_sweep_tests {
             trail.reasons(),
             ["store: the final task sweep was aborted at shutdown"]
         );
+    }
+
+    const BOARD_T0: i64 = 1_800_000_000;
+    const BOARD_RETAIN: i64 = crate::board_store::BOARD_RETENTION.as_secs() as i64;
+
+    fn board_mem() -> (
+        MemTaskBlobs,
+        Arc<ManualClock>,
+        Arc<crate::board::BoardStore>,
+    ) {
+        let (blobs, clock) = (MemTaskBlobs::default(), Arc::new(ManualClock::at(BOARD_T0)));
+        let store = Arc::new(
+            crate::board::BoardStore::open(Box::new(blobs.clone()), clock.clone()).unwrap(),
+        );
+        (blobs, clock, store)
+    }
+
+    fn board_post(
+        store: &crate::board::BoardStore,
+        uid: u32,
+        body: &str,
+    ) -> Arc<crate::board_store::Stored> {
+        store
+            .post(
+                crate::board_store::BoardKey(uid),
+                maknae_proto::Author::Agent("hobi".into()),
+                Some(2001),
+                None,
+                crate::board_store::PostLabels::default(),
+                maknae_proto::PostDraft {
+                    kind: maknae_proto::PostKind::Note,
+                    to: maknae_proto::Addressee::Board,
+                    in_reply_to: None,
+                    body: maknae_proto::SecretText(maknae_io::Zeroizing::new(body.into())),
+                    attachments: Vec::new(),
+                },
+            )
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_sweep_records_a_post_expiry_before_performing_it() {
+        const BODY: &str = "sentinel-695-expiring-body";
+        let (_tblobs, _tclock, tasks) = mem(1_000);
+        let (blobs, clock, board) = board_mem();
+        let post = board_post(&board, 1000, BODY);
+        let key = crate::board_store::BoardKey(1000);
+        clock.set(BOARD_T0 + BOARD_RETAIN);
+        let (seq, au) = (Seq::new(), serde_json::json!({}));
+        let refusing = Trail::new(1);
+        settle_tasks(
+            &tasks,
+            &board,
+            &*refusing,
+            &ctx(&seq, &au),
+            soon_budget(),
+            true,
+        )
+        .await;
+        assert!(refusing.recs().is_empty());
+        assert!(
+            board.get(key, post.post.id).is_some(),
+            "a refused record leaves the post live"
+        );
+        assert!(blobs.has(&format!("post.1000.{}", post.post.id)));
+        let trail = Trail::new(0);
+        settle_tasks(
+            &tasks,
+            &board,
+            &*trail,
+            &ctx(&seq, &au),
+            soon_budget(),
+            true,
+        )
+        .await;
+        let recs = trail.recs();
+        assert_eq!(recs.len(), 1, "{:?}", trail.reasons());
+        let r = &recs[0];
+        assert_eq!(
+            (
+                r.event.as_str(),
+                r.action.as_str(),
+                r.outcome.result.as_str()
+            ),
+            ("board", "board.manage", "deny")
+        );
+        assert_eq!(
+            (r.outcome.reason.as_str(), r.outcome.posture.as_str()),
+            ("expired", "unavailable")
+        );
+        assert_eq!(r.object.as_deref(), Some("board:users/1000"));
+        assert_eq!(r.subject.board_op.as_deref(), Some("expire"));
+        let audit = r.board.as_ref().unwrap();
+        assert_eq!(audit.post_id, Some(post.post.id.to_string()));
+        assert_eq!(audit.seq, Some(post.seq));
+        assert!(!serde_json::to_string(r).unwrap().contains(BODY));
+        assert!(board.get(key, post.post.id).is_none());
+        assert!(!blobs.has(&format!("post.1000.{}", post.post.id)));
+    }
+
+    fn soon_budget() -> Duration {
+        Duration::from_secs(30)
+    }
+
+    #[test]
+    fn each_board_due_and_notice_has_its_record() {
+        use crate::board::{BoardDue, BoardDueFor, BoardNotice};
+        use crate::board_store::{BoardKey, HeldFor};
+        let (seq, au) = (Seq::new(), serde_json::json!({}));
+        let ctx = ctx(&seq, &au);
+        let id = maknae_proto::PostId([0x69; 16]);
+        let post = |why| BoardDue {
+            key: BoardKey(1000),
+            post: Some(id),
+            seq: Some(7),
+            reader: None,
+            why,
+            recorded: false,
+        };
+        let cursor = BoardDue {
+            key: BoardKey(1001),
+            post: None,
+            seq: None,
+            reader: Some(maknae_config::AgentId::parse("rm").unwrap()),
+            why: BoardDueFor::DropCursor,
+            recorded: false,
+        };
+        let shape = |r: AuditRecord| {
+            assert_eq!(
+                (r.event.as_str(), r.action.as_str()),
+                ("board", "board.manage")
+            );
+            let audit = r.board.unwrap_or_default();
+            (
+                r.outcome.result,
+                r.outcome.posture,
+                r.outcome.reason,
+                r.subject.board_op,
+                r.object,
+                audit.post_id,
+                audit.seq,
+            )
+        };
+        let on = |uid: u32| Some(format!("board:users/{uid}"));
+        let op = |s: &str| Some(s.to_string());
+        let deny = || ("deny".to_string(), "unavailable".to_string());
+        let (d, u) = deny();
+        assert_eq!(
+            shape(board_due_record(&ctx, &post(BoardDueFor::Expire))),
+            (
+                d.clone(),
+                u.clone(),
+                "expired".into(),
+                op("expire"),
+                on(1000),
+                Some(id.to_string()),
+                Some(7)
+            )
+        );
+        for f in [HeldFor::Author, HeldFor::Person] {
+            assert_eq!(
+                shape(board_due_record(&ctx, &post(BoardDueFor::Hold(f)))),
+                (
+                    d.clone(),
+                    u.clone(),
+                    "post held: contained".into(),
+                    op("hold"),
+                    on(1000),
+                    Some(id.to_string()),
+                    Some(7)
+                )
+            );
+        }
+        assert_eq!(
+            shape(board_due_record(&ctx, &cursor)),
+            (
+                d.clone(),
+                u.clone(),
+                "cursor removed: agent gone".into(),
+                op("expire"),
+                on(1001),
+                None,
+                None
+            )
+        );
+        let settled = shape(board_notice_record(
+            &ctx,
+            &BoardNotice::Settled {
+                key: BoardKey(1000),
+                id,
+            },
+        ));
+        assert_eq!(
+            (
+                settled.2.as_str(),
+                settled.3.clone(),
+                settled.4.clone(),
+                settled.5.clone()
+            ),
+            (
+                "settled: an unknown post was removed",
+                op("expire"),
+                on(1000),
+                Some(id.to_string())
+            )
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_board_failure_does_not_stop_the_task_sweep() {
+        let (_tblobs, _tclock, tasks) = mem(1_000);
+        let id = working(&tasks, "hobi", Tasker::Uid(1000));
+        tasks.mark_unenrolled(&nobody());
+        let (blobs, clock, board) = board_mem();
+        let post = board_post(&board, 1000, "sentinel-695-stuck");
+        clock.set(BOARD_T0 + BOARD_RETAIN);
+        blobs.fail(Some(Fail::Every));
+        let (seq, au) = (Seq::new(), serde_json::json!({}));
+        let trail = Trail::new(0);
+        settle_tasks(
+            &tasks,
+            &board,
+            &*trail,
+            &ctx(&seq, &au),
+            soon_budget(),
+            true,
+        )
+        .await;
+        let recs = trail.recs();
+        let said: Vec<(&str, &str)> = recs
+            .iter()
+            .map(|r| (r.event.as_str(), r.outcome.reason.as_str()))
+            .collect();
+        assert_eq!(
+            said,
+            [
+                ("task", "closed:agent-gone"),
+                ("board", "expired"),
+                (
+                    "board",
+                    "store: 1 board expiries, holds or cursor removals remain due: the board store stored none"
+                ),
+            ]
+        );
+        assert_eq!(recs[2].action, "board.manage");
+        assert_eq!(recs[2].outcome.posture, "unavailable");
+        assert_eq!(tasks.record(&id).unwrap().close, Some(TaskClose::AgentGone));
+        assert!(board
+            .get(crate::board_store::BoardKey(1000), post.post.id)
+            .is_some());
     }
 }

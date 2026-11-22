@@ -11,8 +11,8 @@ use maknae_proto::{
 use maknae_security::{AttrValue, Attributes, Authorizer, Decision, Verdict};
 
 use crate::blocking_guard::{admit_blocking, Offload};
-use crate::board::{BoardRefusal, BoardStore};
-use crate::board_store::{BoardKey, LabelValue, Stored};
+use crate::board::{BoardDue, BoardDueFor, BoardRefusal, BoardStore};
+use crate::board_store::{BoardKey, HeldFor, LabelValue, Stored};
 use crate::task::CitedTask;
 
 pub trait BoardSwitches: Send + Sync {
@@ -412,6 +412,24 @@ pub(crate) fn read_audit(walk: &Walk, cursor: u64) -> BoardAudit {
         cursor: Some(cursor),
         ..BoardAudit::default()
     }
+}
+
+/// A due item's `board_op` and reason.
+pub(crate) fn due_said(why: BoardDueFor) -> (&'static str, &'static str) {
+    match why {
+        BoardDueFor::Expire => ("expire", "expired"),
+        BoardDueFor::Hold(HeldFor::Author | HeldFor::Person) => ("hold", "post held: contained"),
+        BoardDueFor::DropCursor => ("expire", "cursor removed: agent gone"),
+    }
+}
+
+/// A due post's id and sequence; nothing for a cursor.
+pub(crate) fn due_audit(due: &BoardDue) -> Option<BoardAudit> {
+    due.post.map(|id| BoardAudit {
+        post_id: Some(id.to_string()),
+        seq: due.seq,
+        ..BoardAudit::default()
+    })
 }
 
 pub(crate) fn cursor_audit(cursor: u64) -> BoardAudit {
