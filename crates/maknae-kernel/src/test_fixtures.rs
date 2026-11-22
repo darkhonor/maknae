@@ -456,6 +456,7 @@ pub(crate) fn build_tool_request(
     lane: maknae_security::Lane,
     conversation: Option<&crate::conversation::facts::ConversationFacts>,
     call: &maknae_config::ToolCall,
+    cited: Option<&crate::task::CitedTask>,
 ) -> maknae_security::Request {
     use maknae_security::{Action, AttrValue, Attributes, Context, Resource};
     let mut resource = Attributes::new();
@@ -476,10 +477,35 @@ pub(crate) fn build_tool_request(
         maknae_security::RESOURCE_BINDING_KINDS,
         AttrValue::Set(Default::default()),
     );
+    if let Some(cited) = cited {
+        crate::handler::stamp_task_bindings(&mut resource, cited);
+    }
     maknae_security::Request {
         subject: crate::handler::stamp_subject(peer_uid, home, stamp),
         resource: Resource(resource),
         action: Action("tool.invoke".into()),
         context: Context(crate::handler::lane_context(lane)),
     }
+}
+
+/// hobi's `Working` task, tasked by uid 1000 with `bindings`, as the store resolves it.
+pub(crate) fn cited_task(bindings: Vec<maknae_proto::Binding>) -> crate::task::CitedTask {
+    use crate::task::TaskObjectForTest;
+    let mut task = maknae_proto::TaskObject::for_test("hobi", 1000);
+    task.bindings = bindings;
+    let signed = maknae_proto::SignedTask {
+        task,
+        signature: maknae_proto::TaskSignature {
+            alg: "test".into(),
+            leaf: maknae_proto::Bytes::new(vec![1].into()),
+            chain: Vec::new(),
+            sig: maknae_proto::Bytes::new(vec![2].into()),
+        },
+    };
+    let store = crate::task::TaskStore::new();
+    let id = store.insert_for_test(signed, 2001).task.task_id;
+    store.start_for_test(&id);
+    store
+        .working(&id, &maknae_config::AgentId::parse("hobi").unwrap(), 2001)
+        .unwrap()
 }
