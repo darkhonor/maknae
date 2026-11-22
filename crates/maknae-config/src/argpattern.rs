@@ -201,6 +201,24 @@ impl ArgPattern {
         self.matches_with(argv, bound, false)
     }
 
+    /// True when one binding resolves the whole pattern; no bindings is one empty binding.
+    pub fn matches_any(&self, argv: &[String], bindings: &[Bound]) -> bool {
+        self.matches_any_with(argv, bindings, false)
+    }
+
+    pub fn matches_any_for_deny(&self, argv: &[String], bindings: &[Bound]) -> bool {
+        self.matches_any_with(argv, bindings, true)
+    }
+
+    fn matches_any_with(&self, argv: &[String], bindings: &[Bound], unresolved: bool) -> bool {
+        if bindings.is_empty() {
+            return self.matches_with(argv, &Bound::empty(), unresolved);
+        }
+        bindings
+            .iter()
+            .any(|b| self.matches_with(argv, b, unresolved))
+    }
+
     fn matches_with(&self, argv: &[String], bound: &Bound, unresolved_matches: bool) -> bool {
         let (fixed, open) = match self.0.split_last() {
             Some((ArgToken::Rest, fixed)) => (fixed, true),
@@ -352,6 +370,69 @@ mod tests {
         assert!(!p.matches(&argv(&["diff", ""]), &Bound::empty()));
         let other = bound(&[("git.head", "x")]);
         assert!(!p.matches(&argv(&["diff", "x"]), &other));
+    }
+
+    const REVIEW: &str = "pr review {git.change} -R {git.base}";
+
+    fn two_bindings() -> Vec<Bound> {
+        vec![
+            bound(&[("git.base", "o/a"), ("git.change", "1")]),
+            bound(&[("git.base", "o/b"), ("git.change", "2")]),
+        ]
+    }
+
+    fn review(change: &str, base: &str) -> Vec<String> {
+        argv(&["pr", "review", change, "-R", base])
+    }
+
+    #[test]
+    fn a_placeholder_pattern_matches_only_within_one_binding() {
+        let p = ArgPattern::parse(REVIEW).unwrap();
+        let b = two_bindings();
+        assert!(!p.matches_any(&review("2", "o/a"), &b));
+        assert!(p.matches_any(&review("2", "o/b"), &b));
+        assert!(p.matches_any(&review("1", "o/a"), &b));
+        assert!(!p.matches_any(&review("1", "o/b"), &b));
+    }
+
+    #[test]
+    fn a_deny_matches_within_one_binding_and_without_bindings_fails_closed() {
+        let p = ArgPattern::parse(REVIEW).unwrap();
+        let b = two_bindings();
+        assert!(!p.matches_any_for_deny(&review("2", "o/a"), &b));
+        assert!(p.matches_any_for_deny(&review("2", "o/b"), &b));
+        assert!(p.matches_any_for_deny(&review("1", "o/a"), &b));
+        assert!(!p.matches_any_for_deny(&review("1", "o/b"), &b));
+        assert!(p.matches_any_for_deny(&review("sentinel-9", "sentinel/x"), &[]));
+        assert!(!p.matches_any_for_deny(&argv(&["pr", "review", "1"]), &[]));
+        assert!(!p.matches_any(&review("sentinel-9", "sentinel/x"), &[]));
+    }
+
+    #[test]
+    fn a_binding_without_the_field_leaves_a_deny_unresolved() {
+        let p = ArgPattern::parse(REVIEW).unwrap();
+        let b = vec![
+            bound(&[("git.base", "o/a")]),
+            bound(&[("git.base", "o/b"), ("git.change", "2")]),
+        ];
+        assert!(p.matches_any_for_deny(&review("sentinel-9", "o/a"), &b));
+        assert!(!p.matches_any_for_deny(&review("sentinel-9", "o/b"), &b));
+        assert!(!p.matches_any_for_deny(&review("sentinel-9", "o/c"), &b));
+        assert!(!p.matches_any(&review("sentinel-9", "o/a"), &b));
+        assert!(p.matches_any(&review("2", "o/b"), &b));
+    }
+
+    #[test]
+    fn a_pattern_without_placeholders_matches_whatever_the_bindings() {
+        let p = ArgPattern::parse("pr view *").unwrap();
+        let hit = argv(&["pr", "view", "7"]);
+        let miss = argv(&["pr", "merge", "7"]);
+        for b in [Vec::new(), two_bindings()] {
+            assert!(p.matches_any(&hit, &b));
+            assert!(p.matches_any_for_deny(&hit, &b));
+            assert!(!p.matches_any(&miss, &b));
+            assert!(!p.matches_any_for_deny(&miss, &b));
+        }
     }
 
     #[test]

@@ -826,14 +826,14 @@ mod tests {
 
     #[test]
     fn build_tool_request_stamps_argv_as_ordered_list_and_kernel_subject() {
-        use maknae_config::{Bound, ToolCall};
+        use maknae_config::ToolCall;
         use maknae_security::{AttrValue, Attributes};
         let s = |v: &str| AttrValue::Str(v.into());
         let call = ToolCall {
             entry: "sentinel-674-entry".into(),
             program: "sentinel-674-prog".into(),
             argv: vec!["test".into(), "a b".into(), String::new()],
-            bound: Bound::empty(),
+            bound: Vec::new(),
         };
         let hobi = maknae_config::AgentId::parse("hobi").unwrap();
         let task = TaskStamp {

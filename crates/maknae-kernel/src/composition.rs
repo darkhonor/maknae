@@ -1096,7 +1096,7 @@ mod tests {
                     entry: (*entry).into(),
                     program: (*program).into(),
                     argv: argv.iter().map(|a| (*a).to_owned()).collect(),
-                    bound: maknae_config::Bound::empty(),
+                    bound: Vec::new(),
                 };
                 let r = build_tool_request(
                     stamp,
@@ -1376,7 +1376,7 @@ mod tests {
             entry: "sentinel-674-entry".into(),
             program: "cargo".into(),
             argv: vec!["build".into()],
-            bound: maknae_config::Bound::empty(),
+            bound: Vec::new(),
         };
         let host = maknae_config::SensitiveList::empty();
         let ceiling = ceiling(Ceiling::baseline_for(US));

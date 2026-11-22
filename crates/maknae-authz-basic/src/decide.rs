@@ -1578,8 +1578,12 @@ fn tool_ceiling(
     let Some(command) = entry.commands.get(program) else {
         return deny(&format!("tool: program not in entry {name}"));
     };
-    let bound = maknae_config::Bound::empty();
-    if !command.subcommands.iter().any(|p| p.matches(argv, &bound)) {
+    let bound: Vec<maknae_config::Bound> = Vec::new();
+    if !command
+        .subcommands
+        .iter()
+        .any(|p| p.matches_any(argv, &bound))
+    {
         return deny(&format!(
             "tool: arguments outside entry {name}'s subcommands"
         ));
