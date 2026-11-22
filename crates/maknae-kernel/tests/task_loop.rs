@@ -35,6 +35,7 @@ struct World {
     me: u32,
     user: String,
     cfg: maknae_config::TransportConfig,
+    forges: maknae_config::ForgeSet,
 }
 
 /// The uid of `nobody`, whom every test world binds to `user`.
@@ -245,6 +246,7 @@ fn world_of(tag: &str, role: &str, roles: &str, agents: &[(&str, u32, &str)]) ->
         me,
         user,
         cfg,
+        forges: maknae_config::ForgeSet::empty(),
     }
 }
 
@@ -404,6 +406,7 @@ impl World {
             me: self.me,
             user: self.user.clone(),
             cfg: self.cfg.clone(),
+            forges: self.forges.clone(),
         }
     }
 
@@ -424,7 +427,11 @@ impl World {
             records,
             dir,
             Wiring {
-                live: Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
+                live: Arc::new(maknae_kernel::LiveConfig::with_forges_for_test(
+                    Default::default(),
+                    None,
+                    self.forges.clone(),
+                )),
                 egress: maknae_kernel::unavailable_egress(),
                 conversations: common::conversations(),
             },
@@ -712,6 +719,85 @@ async fn a_person_submits_and_sees_the_task_queued() {
         .snapshot()
         .iter()
         .all(|r| !format!("{r:?}").contains("sentinel-628-ask")));
+}
+
+/// Signs with a kernel leaf of a test CA, so an agent can verify what it is handed.
+struct CaSigner(maknae_vault::PlaneIdentity);
+
+impl maknae_kernel::TaskSigner for CaSigner {
+    fn sign(
+        &self,
+        task: maknae_proto::TaskObject,
+    ) -> Result<maknae_proto::SignedTask, TaskRefusal> {
+        maknae_vault::task_sig::sign_task(&self.0, task).map_err(|_| TaskRefusal::Unsigned)
+    }
+    fn current_leaf(&self) -> Option<[u8; 32]> {
+        maknae_vault::task_sig::identity_fingerprint(&self.0).ok()
+    }
+}
+
+#[tokio::test]
+async fn a_bound_task_is_accepted_sealed_and_delivered_verified() {
+    use maknae_crypto::plane_key::PlaneKey;
+    const HOST: &str = "git.sentinel-168a.example";
+    const STRANGER: &str = "git.stranger-168a.example";
+    const REPO: &str = "sentinel-168a/alpha";
+    let mut w = world("bound", "user", true);
+    let ca = maknae_vault::test_pki::TestCa::new(PlaneKey::MlDsa87);
+    w.agents.signer = Arc::new(CaSigner(ca.kernel(PlaneKey::MlDsa87, None)));
+    w.forges = maknae_config::forges_from_section(Some(
+        &maknae_config::load_str(&format!(
+            "- {{ name: sentinel-168a-forge, kind: git, host: {HOST}, provider: github }}\n"
+        ))
+        .unwrap(),
+    ))
+    .unwrap();
+    let bound_to = |server: &str| {
+        let Verb::TaskSubmit { mut task } = submit("hobi", "sentinel-168a-ask") else {
+            unreachable!()
+        };
+        task.bindings = vec![maknae_proto::BindingRequest::Git(maknae_proto::GitRef {
+            server: server.into(),
+            base: REPO.into(),
+            change: Some(5),
+        })];
+        Verb::TaskSubmit { task }
+    };
+    let records = Records::new(0);
+    let refused = w.ask_with(bound_to(STRANGER), &records).await;
+    assert!(unauthorized(&refused), "{refused:?}");
+    let trail = reasons(&records);
+    assert!(
+        trail
+            .iter()
+            .any(|t| t.starts_with("deny") && t.contains(STRANGER)),
+        "{trail:?}"
+    );
+    assert!(w.claim("hobi").await.is_none(), "nothing was stored");
+    let sealed = vec![maknae_proto::Binding::Git(maknae_proto::GitBinding {
+        server: HOST.into(),
+        base: REPO.into(),
+        head: None,
+        change: Some(5),
+    })];
+    let view = match w.ask(bound_to(HOST)).await {
+        RespResult::Ok(Payload::TaskAccepted(v)) => v,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(view.bindings, sealed);
+    let (signed, _) = w.claim("hobi").await.expect("the bound task is delivered");
+    assert_eq!(signed.task.task_id, view.task.to_id());
+    assert_eq!(signed.task.bindings, sealed);
+    assert_eq!(
+        maknae_vault::task_sig::verify_task(
+            &ca.trust(),
+            maknae_vault::test_pki::TRUST_DOMAIN,
+            &hobi(),
+            &signed,
+            maknae_io::now_since_epoch().unwrap(),
+        ),
+        Ok(())
+    );
 }
 
 #[tokio::test]
@@ -2026,6 +2112,7 @@ async fn pending_records_are_invisible_to_claim_list_and_status() {
             Tasker::Uid(w.me),
             None,
             sub,
+            Vec::new(),
         )
         .unwrap()
         .task

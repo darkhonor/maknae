@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use maknae_audit_append::AuditEmit;
 use maknae_config::AgentId;
 use maknae_proto::{
-    SecretText, SignedTask, TaskClose, TaskId, TaskObject, TaskReportPage, TaskState,
+    Binding, SecretText, SignedTask, TaskClose, TaskId, TaskObject, TaskReportPage, TaskState,
     TaskSubmission, TaskView, Tasker,
 };
 use maknae_security::Authorizer;
@@ -285,6 +285,7 @@ pub enum TaskRefusal {
     FollowUpsUnseen,
     NotWorking,
     Unavailable(String),
+    Unbound(String),
 }
 
 impl std::fmt::Display for TaskRefusal {
@@ -326,6 +327,7 @@ impl std::fmt::Display for TaskRefusal {
             }
             TaskRefusal::NotWorking => f.write_str("the task is not working"),
             TaskRefusal::Unavailable(why) => f.write_str(why),
+            TaskRefusal::Unbound(why) => write!(f, "task not bound: {why}"),
         }
     }
 }
@@ -1441,6 +1443,7 @@ impl TaskStore {
         tasker: Tasker,
         parent: Option<TaskId>,
         sub: TaskSubmission,
+        bindings: Vec<Binding>,
     ) -> Result<Arc<SignedTask>, TaskRefusal> {
         self.mint_with(
             &mut draw_id,
@@ -1450,6 +1453,7 @@ impl TaskStore {
             tasker,
             parent,
             sub,
+            bindings,
             None,
         )
     }
@@ -1464,6 +1468,7 @@ impl TaskStore {
         tasker: Tasker,
         parent: Option<TaskId>,
         sub: TaskSubmission,
+        bindings: Vec<Binding>,
         ticket: Option<&Ticket>,
     ) -> Result<Arc<SignedTask>, TaskRefusal> {
         let agent = target(&sub)?;
@@ -1476,7 +1481,7 @@ impl TaskStore {
             agent: sub.agent,
             ask: sub.ask,
             labels: sub.labels,
-            bindings: Vec::new(),
+            bindings,
         };
         for attempt in 1..=ID_DRAWS {
             let signed = Arc::new(signer.sign(task)?);
@@ -2456,8 +2461,9 @@ impl TaskStore {
         tasker: Tasker,
         parent: Option<TaskId>,
         sub: TaskSubmission,
+        bindings: Vec<Binding>,
     ) -> Result<Arc<SignedTask>, TaskRefusal> {
-        let t = self.mint(signer, view, enrolled, tasker, parent, sub)?;
+        let t = self.mint(signer, view, enrolled, tasker, parent, sub, bindings)?;
         self.confirm(&t.task.task_id, None, Confirm::Queued)?;
         Ok(t)
     }
@@ -2473,8 +2479,11 @@ impl TaskStore {
         tasker: Tasker,
         parent: Option<TaskId>,
         sub: TaskSubmission,
+        bindings: Vec<Binding>,
     ) -> Result<Arc<SignedTask>, TaskRefusal> {
-        let t = self.mint_with(draw, signer, view, enrolled, tasker, parent, sub, None)?;
+        let t = self.mint_with(
+            draw, signer, view, enrolled, tasker, parent, sub, bindings, None,
+        )?;
         self.confirm(&t.task.task_id, None, Confirm::Queued)?;
         Ok(t)
     }
@@ -2803,6 +2812,7 @@ pub(crate) struct SubmitCtx<'a> {
     pub lane: maknae_security::Lane,
     pub decide_timeout: std::time::Duration,
     pub text_max: usize,
+    pub forges: &'a maknae_config::ForgeSet,
 }
 
 struct Attempt {
@@ -3168,6 +3178,12 @@ async fn decide<P: Authorizer + Send + Sync + 'static>(
         ),
     };
     attempt.parent = parent.as_ref().map(|t| t.signed.task.task_id);
+    let bindings = seal_bindings(
+        &attempt.tasker,
+        parent.as_ref().map(|t| &t.signed.task),
+        &sub.bindings,
+        ctx.forges,
+    )?;
     let (generation, enrolled) = store.observe(&**view, &target);
     let req = task_request(by, target.as_str(), parent.as_ref(), &sub, ctx.lane);
     let decided = decide_admitted(pdp, ctx.decide_timeout, req).await?;
@@ -3201,10 +3217,74 @@ async fn decide<P: Authorizer + Send + Sync + 'static>(
             tasker,
             parent,
             sub,
+            bindings,
             Some(&ticket),
         )
     })
     .await
+}
+
+/// Each binding's server must be a `git` forge's host; a sub-task's is copied from the
+/// parent binding equal on (server, base, change), `head` included.
+pub(crate) fn seal_bindings(
+    tasker: &Tasker,
+    parent: Option<&TaskObject>,
+    asked: &[maknae_proto::BindingRequest],
+    forges: &maknae_config::ForgeSet,
+) -> Result<Vec<Binding>, TaskRefusal> {
+    use maknae_proto::{BindingRequest, GitBinding};
+    if asked.is_empty() {
+        return Ok(Vec::new());
+    }
+    if let Tasker::Remote(_) = tasker {
+        return Err(TaskRefusal::Unbound(
+            "a remote tasker's task takes no binding".into(),
+        ));
+    }
+    let mut sealed = Vec::with_capacity(asked.len());
+    for BindingRequest::Git(r) in asked {
+        let forge = forges
+            .iter()
+            .any(|f| f.kind == maknae_config::ForgeKind::Git && f.host == r.server);
+        if !forge {
+            return Err(TaskRefusal::Unbound(format!(
+                "server {} is not the host of a git forge",
+                r.server
+            )));
+        }
+        let binding = match parent {
+            None => Binding::Git(GitBinding {
+                server: r.server.clone(),
+                base: r.base.clone(),
+                head: None,
+                change: r.change,
+            }),
+            Some(p) => p
+                .bindings
+                .iter()
+                .find(|Binding::Git(g)| {
+                    g.server == r.server && g.base == r.base && g.change == r.change
+                })
+                .cloned()
+                .ok_or_else(|| {
+                    TaskRefusal::Unbound(format!(
+                        "{} {}{} is not bound to the parent task",
+                        r.server,
+                        r.base,
+                        r.change.map(|c| format!(" change {c}")).unwrap_or_default()
+                    ))
+                })?,
+        };
+        sealed.push(binding);
+    }
+    let len = maknae_proto::bindings_encoded_len(&sealed);
+    if len > maknae_proto::TASK_BINDINGS_MAX_BYTES {
+        return Err(TaskRefusal::Unbound(format!(
+            "the sealed bindings encode to {len} bytes, more than {}",
+            maknae_proto::TASK_BINDINGS_MAX_BYTES
+        )));
+    }
+    Ok(sealed)
 }
 
 async fn decide_admitted<P: Authorizer + Send + Sync + 'static>(
@@ -3344,7 +3424,8 @@ mod tests {
                     at(0, HOBI),
                     Tasker::Uid(1000),
                     None,
-                    sub("hobi")
+                    sub("hobi"),
+                    Vec::new()
                 )
                 .unwrap_err(),
             TaskRefusal::Unsigned
@@ -3360,6 +3441,7 @@ mod tests {
                     Tasker::Uid(1000),
                     None,
                     sub("hobi"),
+                    Vec::new(),
                 )
                 .unwrap();
             assert_eq!(signing.verify(&held), Ok(()), "{k:?}");
@@ -3383,6 +3465,7 @@ mod tests {
                     Tasker::Uid(1),
                     None,
                     sub("hobi"),
+                    Vec::new(),
                 )
                 .unwrap();
             assert_eq!(signer().verify(&signed), Ok(()));
@@ -3436,6 +3519,7 @@ mod tests {
                 Tasker::Uid(1000),
                 None,
                 sub("hobi"),
+                Vec::new(),
             )
             .unwrap();
         signing.rotate();
@@ -3481,6 +3565,7 @@ mod tests {
                 Tasker::Uid(1000),
                 None,
                 sub("hobi"),
+                Vec::new(),
             )
             .unwrap();
         let task_id = old.task.task_id;
@@ -3570,7 +3655,15 @@ mod tests {
             let v = view(&[("hobi", HOBI), ("jin", JIN)]);
             let mint_by = |s: &LeafSigner, to: &str| {
                 store
-                    .mint_live(s, &v, at(0, v.0[&id(to)]), Tasker::Uid(1000), None, sub(to))
+                    .mint_live(
+                        s,
+                        &v,
+                        at(0, v.0[&id(to)]),
+                        Tasker::Uid(1000),
+                        None,
+                        sub(to),
+                        Vec::new(),
+                    )
                     .unwrap()
             };
             let before = mint_by(&signing, "hobi");
@@ -3646,6 +3739,7 @@ mod tests {
                 Tasker::Uid(1000),
                 None,
                 sub(agent),
+                Vec::new(),
             )
             .unwrap()
     }
@@ -3674,6 +3768,7 @@ mod tests {
                 tasker.clone(),
                 Some(parent),
                 sub("hobi"),
+                Vec::new(),
             )
             .unwrap();
         let b = mint(&store, &v, "hobi");
@@ -3708,6 +3803,7 @@ mod tests {
                 Tasker::Uid(1),
                 None,
                 sub("hobi"),
+                Vec::new(),
             )
             .unwrap();
         let second = store
@@ -3719,6 +3815,7 @@ mod tests {
                 Tasker::Uid(1),
                 None,
                 sub("hobi"),
+                Vec::new(),
             )
             .unwrap();
         assert_eq!(first.task.task_id, TaskId([1; 16]));
@@ -3734,7 +3831,8 @@ mod tests {
                     at(0, HOBI),
                     Tasker::Uid(1),
                     None,
-                    sub("hobi")
+                    sub("hobi"),
+                    Vec::new()
                 )
                 .unwrap_err(),
             TaskRefusal::Random
@@ -4018,7 +4116,15 @@ mod tests {
         let v = view(&[("hobi", HOBI)]);
         let me = Tasker::Uid(1000);
         let pending = store
-            .mint(signer(), &v, at(0, HOBI), me.clone(), None, sub("hobi"))
+            .mint(
+                signer(),
+                &v,
+                at(0, HOBI),
+                me.clone(),
+                None,
+                sub("hobi"),
+                Vec::new(),
+            )
             .unwrap()
             .task
             .task_id;
@@ -4029,7 +4135,15 @@ mod tests {
         }
         assert_eq!(
             store
-                .mint(signer(), &v, at(0, HOBI), me.clone(), None, sub("hobi"))
+                .mint(
+                    signer(),
+                    &v,
+                    at(0, HOBI),
+                    me.clone(),
+                    None,
+                    sub("hobi"),
+                    Vec::new()
+                )
                 .unwrap_err(),
             TaskRefusal::TaskerLive {
                 agent: "hobi".into()
@@ -4059,6 +4173,7 @@ mod tests {
                         Tasker::Uid(i as u32),
                         None,
                         sub("hobi"),
+                        Vec::new(),
                     )
                     .unwrap()
             })
@@ -4071,7 +4186,8 @@ mod tests {
                     at(0, HOBI),
                     Tasker::Uid(1000),
                     None,
-                    sub("hobi")
+                    sub("hobi"),
+                    Vec::new()
                 )
                 .unwrap_err(),
             TaskRefusal::AtCapacity {
@@ -4096,7 +4212,8 @@ mod tests {
                     at(0, HOBI),
                     Tasker::Uid(1000),
                     None,
-                    sub("hobi")
+                    sub("hobi"),
+                    Vec::new()
                 )
                 .unwrap_err(),
             TaskRefusal::AgentGone
@@ -4109,7 +4226,8 @@ mod tests {
                 at(0, 0),
                 Tasker::Uid(1000),
                 None,
-                sub("Not An Id")
+                sub("Not An Id"),
+                Vec::new()
             ),
             Err(TaskRefusal::Schema(_))
         ));
@@ -4129,7 +4247,8 @@ mod tests {
                     at(read, HOBI),
                     Tasker::Uid(1000),
                     None,
-                    sub("hobi")
+                    sub("hobi"),
+                    Vec::new()
                 )
                 .unwrap_err(),
             TaskRefusal::AgentGone
@@ -4381,7 +4500,25 @@ mod tests {
         by: Submitter,
         sub: TaskSubmission,
         emit: &impl AuditEmit,
+        under: (std::time::Duration, Option<Breaker>),
+    ) -> Result<Arc<SignedTask>, TaskRefusal> {
+        let none = maknae_config::ForgeSet::empty();
+        submit_in(a, store, v, by, sub, emit, under, &none).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn submit_in<
+        P: Authorizer + Send + Sync + 'static,
+        V: EnrollmentView + Clone + 'static,
+    >(
+        a: Arc<P>,
+        store: &Arc<TaskStore>,
+        v: &V,
+        by: Submitter,
+        sub: TaskSubmission,
+        emit: &impl AuditEmit,
         (bound, breaker): (std::time::Duration, Option<Breaker>),
+        forges: &maknae_config::ForgeSet,
     ) -> Result<Arc<SignedTask>, TaskRefusal> {
         let w = wctx();
         let seq = maknae_audit_append::Seq::new();
@@ -4394,6 +4531,7 @@ mod tests {
             lane: maknae_security::Lane::Local,
             decide_timeout: bound,
             text_max: 1 << 20,
+            forges,
         };
         let pdp = Decider {
             authorizer: a,
@@ -4699,7 +4837,15 @@ mod tests {
         let v = view(&[("hobi", HOBI)]);
         let enrolled = at(store.generation(&id("hobi")), HOBI);
         let task = store
-            .mint(signer(), &v, enrolled, Tasker::Uid(1000), None, sub("hobi"))
+            .mint(
+                signer(),
+                &v,
+                enrolled,
+                Tasker::Uid(1000),
+                None,
+                sub("hobi"),
+                Vec::new(),
+            )
             .unwrap()
             .task
             .task_id;
@@ -4729,7 +4875,15 @@ mod tests {
         let v = view(&[("hobi", HOBI)]);
         let enrolled = at(store.generation(&id("hobi")), HOBI);
         let task = store
-            .mint(signer(), &v, enrolled, Tasker::Uid(1000), None, sub("hobi"))
+            .mint(
+                signer(),
+                &v,
+                enrolled,
+                Tasker::Uid(1000),
+                None,
+                sub("hobi"),
+                Vec::new(),
+            )
             .unwrap()
             .task
             .task_id;
@@ -5230,6 +5384,7 @@ mod tests {
                     hobis(),
                     Some(parent),
                     sub("jin"),
+                    Vec::new(),
                 )
                 .map(|t| t.task.task_id)
         };
@@ -5286,6 +5441,7 @@ mod tests {
                 by("hobi", HOBI),
                 Some(t1),
                 sub("jin"),
+                Vec::new(),
             )
             .unwrap();
         assert!(store.record(&first.task.task_id).is_none(), "still pending");
@@ -5297,7 +5453,8 @@ mod tests {
                     at(0, HOBI),
                     by("jin", JIN),
                     Some(t3),
-                    sub("hobi")
+                    sub("hobi"),
+                    Vec::new()
                 )
                 .unwrap_err(),
             TaskRefusal::Denied("task chain already waits on agent hobi".into())
@@ -5325,6 +5482,7 @@ mod tests {
                 Tasker::Uid(1000),
                 None,
                 sub("hobi"),
+                Vec::new(),
             );
             assert_eq!(
                 said.map(|t| t.task.task_id),
@@ -5348,6 +5506,7 @@ mod tests {
                 Tasker::Uid(1000),
                 None,
                 sub("hobi"),
+                Vec::new(),
             )
             .unwrap()
             .task
@@ -5401,6 +5560,7 @@ mod tests {
                     Tasker::Uid(1000),
                     None,
                     sub("hobi"),
+                    Vec::new(),
                 )
                 .unwrap()
                 .task
@@ -5591,13 +5751,29 @@ mod tests {
             uid: JIN,
         };
         let given = store
-            .mint_live(signer(), &v, at(0, JIN), hobis, None, sub("jin"))
+            .mint_live(
+                signer(),
+                &v,
+                at(0, JIN),
+                hobis,
+                None,
+                sub("jin"),
+                Vec::new(),
+            )
             .unwrap()
             .task
             .task_id;
         store.start_for_test(&given);
         let under = store
-            .mint_live(signer(), &v, at(0, SUGA), jins, Some(given), sub("suga"))
+            .mint_live(
+                signer(),
+                &v,
+                at(0, SUGA),
+                jins,
+                Some(given),
+                sub("suga"),
+                Vec::new(),
+            )
             .unwrap()
             .task
             .task_id;
@@ -5612,6 +5788,7 @@ mod tests {
                 Tasker::Uid(1000),
                 None,
                 sub("jin"),
+                Vec::new(),
             )
             .unwrap()
             .task
@@ -5664,6 +5841,7 @@ mod tests {
                 hobis,
                 Some(t1),
                 sub("jin"),
+                Vec::new(),
             )
             .unwrap()
             .task
@@ -5999,6 +6177,7 @@ mod tests {
                     bob.clone(),
                     None,
                     sub("jin"),
+                    Vec::new(),
                 )
                 .unwrap()
                 .task
@@ -6243,13 +6422,29 @@ mod tests {
             uid: JIN,
         };
         let g = store
-            .mint_live(signer(), &all, at(0, JIN), hobis, None, sub("jin"))
+            .mint_live(
+                signer(),
+                &all,
+                at(0, JIN),
+                hobis,
+                None,
+                sub("jin"),
+                Vec::new(),
+            )
             .unwrap()
             .task
             .task_id;
         store.start_for_test(&g);
         let u = store
-            .mint_live(signer(), &all, at(0, SUGA), jins, Some(g), sub("suga"))
+            .mint_live(
+                signer(),
+                &all,
+                at(0, SUGA),
+                jins,
+                Some(g),
+                sub("suga"),
+                Vec::new(),
+            )
             .unwrap()
             .task
             .task_id;
@@ -6261,6 +6456,7 @@ mod tests {
                 Tasker::Uid(1001),
                 None,
                 sub("suga"),
+                Vec::new(),
             )
             .unwrap()
             .task
@@ -7595,7 +7791,15 @@ mod tests {
         let v = view(&[("hobi", HOBI)]);
         let enrolled = at(store.generation(&id("hobi")), HOBI);
         let task = store
-            .mint(signer(), &v, enrolled, Tasker::Uid(1000), None, sub("hobi"))
+            .mint(
+                signer(),
+                &v,
+                enrolled,
+                Tasker::Uid(1000),
+                None,
+                sub("hobi"),
+                Vec::new(),
+            )
             .unwrap()
             .task
             .task_id;
@@ -7625,7 +7829,15 @@ mod tests {
         let v = view(&[("hobi", HOBI)]);
         let enrolled = at(store.generation(&id("hobi")), HOBI);
         let task = store
-            .mint(signer(), &v, enrolled, Tasker::Uid(1000), None, sub("hobi"))
+            .mint(
+                signer(),
+                &v,
+                enrolled,
+                Tasker::Uid(1000),
+                None,
+                sub("hobi"),
+                Vec::new(),
+            )
             .unwrap()
             .task
             .task_id;
@@ -7653,7 +7865,15 @@ mod tests {
         let v = view(&[("hobi", HOBI)]);
         let enrolled = at(store.generation(&id("hobi")), HOBI);
         let unconfirmed = store
-            .mint(signer(), &v, enrolled, Tasker::Uid(1000), None, sub("hobi"))
+            .mint(
+                signer(),
+                &v,
+                enrolled,
+                Tasker::Uid(1000),
+                None,
+                sub("hobi"),
+                Vec::new(),
+            )
             .unwrap()
             .task
             .task_id;
@@ -7891,6 +8111,559 @@ mod tests {
         submit(&pdp, &store, agent("hobi", HOBI, None), "jin", &emit)
             .await
             .unwrap();
+    }
+
+    const FORGE_HOST: &str = "git.sentinel-168a.example";
+    const REPO: &str = "sentinel-168a/alpha";
+
+    fn forges_of(hosts: &[&str]) -> maknae_config::ForgeSet {
+        let yaml: String = hosts
+            .iter()
+            .enumerate()
+            .map(|(i, h)| {
+                format!("- {{ name: sentinel-168a-forge{i}, kind: git, host: \"{h}\", provider: github }}\n")
+            })
+            .collect();
+        if yaml.is_empty() {
+            return maknae_config::ForgeSet::empty();
+        }
+        maknae_config::forges_from_section(Some(&maknae_config::load_str(&yaml).unwrap())).unwrap()
+    }
+
+    fn git(server: &str, base: &str, change: Option<u64>) -> maknae_proto::BindingRequest {
+        maknae_proto::BindingRequest::Git(maknae_proto::GitRef {
+            server: server.into(),
+            base: base.into(),
+            change,
+        })
+    }
+
+    fn sealed(server: &str, base: &str, head: Option<&str>, change: Option<u64>) -> Binding {
+        Binding::Git(maknae_proto::GitBinding {
+            server: server.into(),
+            base: base.into(),
+            head: head.map(Into::into),
+            change,
+        })
+    }
+
+    fn bound(agent: &str, asked: Vec<maknae_proto::BindingRequest>) -> TaskSubmission {
+        TaskSubmission {
+            bindings: asked,
+            ..sub(agent)
+        }
+    }
+
+    async fn submit_bound(
+        pdp: &Pdp,
+        store: &Arc<TaskStore>,
+        by: Submitter,
+        sub: TaskSubmission,
+        forges: &maknae_config::ForgeSet,
+        emit: &Recorder,
+    ) -> Result<Arc<SignedTask>, TaskRefusal> {
+        let view = SnapshotEnrollment(pdp.clone());
+        submit_in(
+            pdp.clone(),
+            store,
+            &view,
+            by,
+            sub,
+            emit,
+            (BOUND, None),
+            forges,
+        )
+        .await
+    }
+
+    /// A refused submission stores nothing and its trail record denies, naming `named`.
+    fn refused_naming(
+        got: Result<Arc<SignedTask>, TaskRefusal>,
+        named: &str,
+        store: &TaskStore,
+        held: usize,
+        emit: &Recorder,
+    ) {
+        let Err(TaskRefusal::Unbound(why)) = &got else {
+            panic!("expected an unbound refusal, got {got:?}");
+        };
+        assert!(why.contains(named), "{why}");
+        assert_eq!(store.len(), held);
+        let last = emit.records().pop().unwrap();
+        assert_eq!(last.outcome.result, "deny");
+        assert!(
+            last.outcome.reason.contains(named),
+            "{}",
+            last.outcome.reason
+        );
+    }
+
+    /// A working task of hobi's, tasked by this uid, holding exactly `bindings`.
+    fn bound_parent(pdp: &Pdp, store: &Arc<TaskStore>, bindings: Vec<Binding>) -> Arc<SignedTask> {
+        let v = SnapshotEnrollment(pdp.clone());
+        let parent = store
+            .mint_live(
+                signer(),
+                &v,
+                at(store.generation(&id("hobi")), HOBI),
+                Tasker::Uid(me()),
+                None,
+                sub("hobi"),
+                bindings,
+            )
+            .unwrap();
+        store.start_for_test(&parent.task.task_id);
+        parent
+    }
+
+    #[tokio::test]
+    async fn a_binding_to_a_host_not_in_forges_is_refused_naming_it() {
+        let (_g, pdp) = pdp("unbound-host");
+        let store = Arc::new(TaskStore::new());
+        let emit = Recorder::new();
+        let stranger = "git.stranger-168a.example";
+        for (forges, named) in [
+            (forges_of(&[FORGE_HOST]), stranger),
+            (forges_of(&[]), FORGE_HOST),
+        ] {
+            let got = submit_bound(
+                &pdp,
+                &store,
+                user(),
+                bound(
+                    "hobi",
+                    vec![git(FORGE_HOST, REPO, None), git(stranger, REPO, Some(1))],
+                ),
+                &forges,
+                &emit,
+            )
+            .await;
+            refused_naming(got, named, &store, 0, &emit);
+        }
+        submit_bound(
+            &pdp,
+            &store,
+            user(),
+            bound("hobi", vec![git(FORGE_HOST, REPO, None)]),
+            &forges_of(&[FORGE_HOST]),
+            &emit,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_forge_name_is_not_a_server() {
+        let (_g, pdp) = pdp("forge-name");
+        let store = Arc::new(TaskStore::new());
+        let emit = Recorder::new();
+        let forges = forges_of(&[FORGE_HOST]);
+        assert!(forges.get("sentinel-168a-forge0").is_some());
+        let got = submit_bound(
+            &pdp,
+            &store,
+            user(),
+            bound("hobi", vec![git("sentinel-168a-forge0", REPO, None)]),
+            &forges,
+            &emit,
+        )
+        .await;
+        refused_naming(got, "sentinel-168a-forge0", &store, 0, &emit);
+    }
+
+    #[tokio::test]
+    async fn a_forge_host_with_another_port_is_not_that_forge() {
+        let (_g, pdp) = pdp("forge-port");
+        let store = Arc::new(TaskStore::new());
+        let emit = Recorder::new();
+        let ported = format!("{FORGE_HOST}:8443");
+        for (forge, asked) in [
+            (ported.as_str(), FORGE_HOST.to_owned()),
+            (FORGE_HOST, format!("{FORGE_HOST}:443")),
+            (ported.as_str(), format!("{FORGE_HOST}:443")),
+        ] {
+            let got = submit_bound(
+                &pdp,
+                &store,
+                user(),
+                bound("hobi", vec![git(&asked, REPO, None)]),
+                &forges_of(&[forge]),
+                &emit,
+            )
+            .await;
+            refused_naming(got, &asked, &store, 0, &emit);
+        }
+        let task = submit_bound(
+            &pdp,
+            &store,
+            user(),
+            bound("hobi", vec![git(&ported, REPO, None)]),
+            &forges_of(&[&ported]),
+            &emit,
+        )
+        .await
+        .unwrap();
+        assert_eq!(task.task.bindings, vec![sealed(&ported, REPO, None, None)]);
+    }
+
+    #[tokio::test]
+    async fn the_sealed_binding_has_no_head() {
+        let (_g, pdp) = pdp("no-head");
+        let store = Arc::new(TaskStore::new());
+        let emit = Recorder::new();
+        let task = submit_bound(
+            &pdp,
+            &store,
+            user(),
+            bound(
+                "hobi",
+                vec![
+                    git(FORGE_HOST, REPO, Some(7)),
+                    git(FORGE_HOST, "sentinel-168a/beta", None),
+                ],
+            ),
+            &forges_of(&[FORGE_HOST]),
+            &emit,
+        )
+        .await
+        .unwrap();
+        let want = vec![
+            sealed(FORGE_HOST, REPO, None, Some(7)),
+            sealed(FORGE_HOST, "sentinel-168a/beta", None, None),
+        ];
+        assert_eq!(task.task.bindings, want);
+        assert_eq!(signer().verify(&task), Ok(()));
+        let stored = store.record(&task.task.task_id).unwrap();
+        assert_eq!(stored.signed.task.bindings, want);
+    }
+
+    #[test]
+    fn mint_seals_only_what_intake_passed() {
+        let store = TaskStore::new();
+        let v = view(&[("hobi", HOBI)]);
+        let asked = bound("hobi", vec![git(FORGE_HOST, REPO, Some(1))]);
+        let passed = vec![sealed(FORGE_HOST, "sentinel-168a/beta", None, Some(2))];
+        let task = store
+            .mint_live(
+                signer(),
+                &v,
+                at(0, HOBI),
+                Tasker::Uid(1000),
+                None,
+                asked.clone(),
+                passed.clone(),
+            )
+            .unwrap();
+        assert_eq!(task.task.bindings, passed);
+        let task = store
+            .mint_live(
+                signer(),
+                &v,
+                at(0, HOBI),
+                Tasker::Uid(1000),
+                None,
+                asked,
+                Vec::new(),
+            )
+            .unwrap();
+        assert_eq!(task.task.bindings, Vec::new());
+    }
+
+    #[tokio::test]
+    async fn a_sub_task_binding_its_parent_holds_is_copied_from_the_parent() {
+        let (_g, pdp) = pdp("sub-copied");
+        let store = Arc::new(TaskStore::new());
+        let emit = Recorder::new();
+        let held = sealed(FORGE_HOST, REPO, Some("sentinel-168a-fork/alpha"), Some(1));
+        let other = sealed(FORGE_HOST, "sentinel-168a/beta", None, None);
+        let parent = bound_parent(&pdp, &store, vec![other, held.clone()]);
+        let child = submit_bound(
+            &pdp,
+            &store,
+            agent("hobi", HOBI, Some(parent.task.task_id)),
+            bound("jin", vec![git(FORGE_HOST, REPO, Some(1))]),
+            &forges_of(&[FORGE_HOST]),
+            &emit,
+        )
+        .await
+        .unwrap();
+        assert_eq!(child.task.bindings, vec![held]);
+    }
+
+    #[tokio::test]
+    async fn a_sub_task_binding_its_parent_lacks_is_refused() {
+        let (_g, pdp) = pdp("sub-lacks");
+        let store = Arc::new(TaskStore::new());
+        let emit = Recorder::new();
+        let parent = bound_parent(&pdp, &store, vec![sealed(FORGE_HOST, REPO, None, Some(1))]);
+        let under = || agent("hobi", HOBI, Some(parent.task.task_id));
+        for asked in [
+            vec![git(FORGE_HOST, REPO, Some(2))],
+            vec![
+                git(FORGE_HOST, REPO, Some(1)),
+                git(FORGE_HOST, REPO, Some(2)),
+            ],
+            vec![git(FORGE_HOST, "sentinel-168a/beta", Some(1))],
+            vec![git("git.other-168a.example", REPO, Some(1))],
+        ] {
+            let got = submit_bound(
+                &pdp,
+                &store,
+                under(),
+                bound("jin", asked),
+                &forges_of(&[FORGE_HOST, "git.other-168a.example"]),
+                &emit,
+            )
+            .await;
+            refused_naming(got, "parent", &store, 1, &emit);
+        }
+        let none = submit_bound(
+            &pdp,
+            &store,
+            under(),
+            sub("jin"),
+            &forges_of(&[FORGE_HOST]),
+            &emit,
+        )
+        .await
+        .unwrap();
+        assert_eq!(none.task.bindings, Vec::new());
+    }
+
+    #[tokio::test]
+    async fn a_repository_binding_does_not_match_a_parent_change_binding() {
+        let (_g, pdp) = pdp("sub-repo");
+        let store = Arc::new(TaskStore::new());
+        let emit = Recorder::new();
+        let parent = bound_parent(&pdp, &store, vec![sealed(FORGE_HOST, REPO, None, Some(1))]);
+        let got = submit_bound(
+            &pdp,
+            &store,
+            agent("hobi", HOBI, Some(parent.task.task_id)),
+            bound("jin", vec![git(FORGE_HOST, REPO, None)]),
+            &forges_of(&[FORGE_HOST]),
+            &emit,
+        )
+        .await;
+        refused_naming(got, REPO, &store, 1, &emit);
+    }
+
+    #[tokio::test]
+    async fn a_parent_binding_whose_host_left_forges_is_refused_for_the_sub_task() {
+        let (_g, pdp) = pdp("sub-host-left");
+        let store = Arc::new(TaskStore::new());
+        let emit = Recorder::new();
+        let parent = bound_parent(&pdp, &store, vec![sealed(FORGE_HOST, REPO, None, Some(1))]);
+        let under = || agent("hobi", HOBI, Some(parent.task.task_id));
+        let asked = || bound("jin", vec![git(FORGE_HOST, REPO, Some(1))]);
+        for forges in [forges_of(&["git.other-168a.example"]), forges_of(&[])] {
+            let got = submit_bound(&pdp, &store, under(), asked(), &forges, &emit).await;
+            refused_naming(got, FORGE_HOST, &store, 1, &emit);
+        }
+        submit_bound(
+            &pdp,
+            &store,
+            under(),
+            asked(),
+            &forges_of(&[FORGE_HOST]),
+            &emit,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_own_initiative_agent_task_passes_the_persons_intake() {
+        let (_g, pdp) = pdp("own-initiative-bound");
+        let store = Arc::new(TaskStore::new());
+        let emit = Recorder::new();
+        let forges = forges_of(&[FORGE_HOST]);
+        let stranger = "git.stranger-168a.example";
+        let got = submit_bound(
+            &pdp,
+            &store,
+            agent("hobi", HOBI, None),
+            bound("jin", vec![git(stranger, REPO, Some(1))]),
+            &forges,
+            &emit,
+        )
+        .await;
+        refused_naming(got, stranger, &store, 0, &emit);
+        let task = submit_bound(
+            &pdp,
+            &store,
+            agent("hobi", HOBI, None),
+            bound("jin", vec![git(FORGE_HOST, REPO, Some(1))]),
+            &forges,
+            &emit,
+        )
+        .await
+        .unwrap();
+        assert_eq!(task.task.parent, None);
+        assert_eq!(
+            task.task.bindings,
+            vec![sealed(FORGE_HOST, REPO, None, Some(1))]
+        );
+    }
+
+    #[test]
+    fn a_remote_tasker_with_a_binding_is_refused() {
+        let remote = Tasker::Remote("site-b/ops".into());
+        let forges = forges_of(&[FORGE_HOST]);
+        let got = seal_bindings(&remote, None, &[git(FORGE_HOST, REPO, Some(1))], &forges);
+        assert!(matches!(got, Err(TaskRefusal::Unbound(_))), "{got:?}");
+        assert_eq!(seal_bindings(&remote, None, &[], &forges), Ok(Vec::new()));
+        assert_eq!(
+            seal_bindings(
+                &Tasker::Uid(1000),
+                None,
+                &[git(FORGE_HOST, REPO, Some(1))],
+                &forges
+            ),
+            Ok(vec![sealed(FORGE_HOST, REPO, None, Some(1))])
+        );
+    }
+
+    #[tokio::test]
+    async fn the_task_view_carries_the_sealed_bindings() {
+        let (_g, pdp) = pdp("view-bound");
+        let store = Arc::new(TaskStore::new());
+        let emit = Recorder::new();
+        let task = submit_bound(
+            &pdp,
+            &store,
+            user(),
+            bound("hobi", vec![git(FORGE_HOST, REPO, Some(3))]),
+            &forges_of(&[FORGE_HOST]),
+            &emit,
+        )
+        .await
+        .unwrap();
+        let want = vec![sealed(FORGE_HOST, REPO, None, Some(3))];
+        let me = Tasker::Uid(me());
+        assert_eq!(
+            store.status(&task.task.task_id, &me).unwrap().bindings,
+            want
+        );
+        assert_eq!(store.list(&me, &id("hobi"), None, 8).0[0].bindings, want);
+    }
+
+    /// Eight requests on [`FORGE_HOST`] whose request form encodes to exactly `total`.
+    fn requests_of_len(total: usize) -> Vec<maknae_proto::BindingRequest> {
+        let mut bases: Vec<String> = (0..maknae_proto::TASK_BINDINGS_MAX)
+            .map(|i| format!("sentinel-168a/bound-{i}-padding-xxxx"))
+            .collect();
+        let of = |bases: &[String]| -> Vec<maknae_proto::BindingRequest> {
+            bases
+                .iter()
+                .enumerate()
+                .map(|(i, b)| git(FORGE_HOST, b, Some(i as u64 + 1)))
+                .collect()
+        };
+        let mut at = 0;
+        while maknae_proto::bindings_encoded_len(&of(&bases)) < total {
+            if bases[at].len() == maknae_proto::REPOSITORY_PATH_MAX_BYTES {
+                at += 1;
+            }
+            bases[at].push('x');
+        }
+        let asked = of(&bases);
+        assert_eq!(maknae_proto::bindings_encoded_len(&asked), total);
+        asked
+    }
+
+    #[tokio::test]
+    async fn a_submission_at_the_byte_bound_survives_sealing_delivery_and_reload() {
+        let (_g, pdp) = pdp("byte-bound");
+        let (blobs, store) = mem();
+        let store = Arc::new(store);
+        let emit = Recorder::new();
+        let asked = bound(
+            "hobi",
+            requests_of_len(maknae_proto::TASK_BINDING_REQUESTS_MAX_BYTES),
+        );
+        let mut wire = Vec::new();
+        ciborium::into_writer(&asked, &mut wire).unwrap();
+        let decoded: TaskSubmission = ciborium::from_reader(wire.as_slice()).unwrap();
+        assert_eq!(decoded, asked, "the submission decodes at its bound");
+        let task = submit_bound(
+            &pdp,
+            &store,
+            user(),
+            asked,
+            &forges_of(&[FORGE_HOST]),
+            &emit,
+        )
+        .await
+        .unwrap();
+        let id_ = task.task.task_id;
+        assert_eq!(
+            maknae_proto::bindings_encoded_len(&task.task.bindings),
+            maknae_proto::TASK_BINDINGS_MAX_BYTES
+        );
+        let me = Tasker::Uid(me());
+        let accepted = store.status(&id_, &me).unwrap();
+        let body = maknae_proto::encode_response(&maknae_proto::Response {
+            protocol_version: maknae_proto::PROTOCOL_VERSION,
+            result: maknae_proto::RespResult::Ok(maknae_proto::Payload::TaskAccepted(
+                accepted.clone(),
+            )),
+            catalog_digest: None,
+        })
+        .unwrap();
+        assert_eq!(
+            maknae_proto::decode_response(&body).unwrap().result,
+            maknae_proto::RespResult::Ok(maknae_proto::Payload::TaskAccepted(accepted))
+        );
+        let Ok(Claimed::Delivered { signed, .. }) = claim_head(&store, &id("hobi"), HOBI, signer())
+        else {
+            panic!("the bound task is delivered");
+        };
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&*signed, &mut bytes).unwrap();
+        let delivered: SignedTask = ciborium::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(delivered.task.bindings, task.task.bindings);
+        assert_eq!(signer().verify(&delivered), Ok(()));
+        let again = reopen(&blobs);
+        assert_eq!(again.take_boot_findings(), Vec::new());
+        assert_eq!(
+            again.record(&id_).unwrap().signed.task.bindings,
+            task.task.bindings
+        );
+    }
+
+    #[test]
+    fn a_sealed_list_over_its_byte_bound_is_refused() {
+        let forges = forges_of(&[FORGE_HOST]);
+        let held: Vec<Binding> = requests_of_len(maknae_proto::TASK_BINDING_REQUESTS_MAX_BYTES)
+            .into_iter()
+            .map(|maknae_proto::BindingRequest::Git(r)| {
+                Binding::Git(maknae_proto::GitBinding {
+                    head: Some("h/".to_owned() + &"x".repeat(8)),
+                    server: r.server,
+                    base: r.base,
+                    change: r.change,
+                })
+            })
+            .collect();
+        let parent = TaskObject {
+            bindings: held.clone(),
+            ..TaskObject::for_test("hobi", 1000)
+        };
+        let asked: Vec<_> = held
+            .iter()
+            .map(|Binding::Git(g)| git(&g.server, &g.base, g.change))
+            .collect();
+        let tasker = Tasker::Agent {
+            agent: "hobi".into(),
+            uid: HOBI,
+        };
+        let got = seal_bindings(&tasker, Some(&parent), &asked, &forges);
+        assert!(matches!(got, Err(TaskRefusal::Unbound(_))), "{got:?}");
+        assert_eq!(
+            seal_bindings(&tasker, Some(&parent), &asked[..1], &forges),
+            Ok(held[..1].to_vec())
+        );
     }
 
     #[tokio::test]
@@ -8321,6 +9094,7 @@ mod tests {
             lane: maknae_security::Lane::Remote,
             decide_timeout: BOUND,
             text_max: 1 << 20,
+            forges: &maknae_config::ForgeSet::empty(),
         };
         let pdp_under = Decider {
             authorizer: capturing.clone(),
@@ -8366,6 +9140,7 @@ mod tests {
             lane: maknae_security::Lane::Local,
             decide_timeout: BOUND,
             text_max: 1 << 20,
+            forges: &maknae_config::ForgeSet::empty(),
         };
         let view: Arc<dyn EnrollmentView> = Arc::new(SnapshotEnrollment(pdp.clone()));
         submit_task(
@@ -8931,6 +9706,7 @@ mod tests {
                 Tasker::Uid(1),
                 None,
                 sub("hobi"),
+                Vec::new(),
             )
         };
         assert!(mint(&mut draw).is_ok());

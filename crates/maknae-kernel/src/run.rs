@@ -3666,6 +3666,7 @@ async fn serve_task_verb<S, E, P>(
             lane,
             decide_timeout: timeout,
             text_max: tasks.text_max,
+            forges: live.forges(),
         };
         let submitted = crate::task::submit_task(
             Arc::clone(authorizer),
@@ -11186,6 +11187,7 @@ mod record_widths {
             TaskRefusal::FollowUpsUnseen,
             TaskRefusal::NotWorking,
             TaskRefusal::Unavailable(String::new()),
+            TaskRefusal::Unbound(String::new()),
         ];
         kinds
             .iter()
@@ -11671,7 +11673,8 @@ mod record_widths {
             | TaskRefusal::Denied(_)
             | TaskRefusal::Audit(_)
             | TaskRefusal::Store(_)
-            | TaskRefusal::Unavailable(_) => None,
+            | TaskRefusal::Unavailable(_)
+            | TaskRefusal::Unbound(_) => None,
             TaskRefusal::AtCapacity { .. } => Some(TaskRefusal::AtCapacity {
                 agent: agent.to_owned(),
             }),

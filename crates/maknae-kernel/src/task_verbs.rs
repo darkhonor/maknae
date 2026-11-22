@@ -366,7 +366,7 @@ pub(crate) fn view(rec: &TaskRecord, hot: &Hot, now: i64) -> TaskView {
         actions: hot.actions,
         last_action_secs: hot.last_action,
         cursor: TaskCursor::from_seq(rec.tseq),
-        bindings: Vec::new(),
+        bindings: rec.signed.task.bindings.clone(),
     }
 }
 

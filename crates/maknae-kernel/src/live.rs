@@ -39,6 +39,15 @@ impl LiveConfig {
         Self::with_forges(view, providers, ForgeSet::empty())
     }
 
+    #[cfg(any(test, feature = "hermetic-test-seam"))]
+    pub fn with_forges_for_test(
+        view: ConfigView,
+        providers: Option<ProviderAuthority>,
+        forges: ForgeSet,
+    ) -> Self {
+        Self::with_forges(view, providers, forges)
+    }
+
     fn with_forges(
         view: ConfigView,
         providers: Option<ProviderAuthority>,
