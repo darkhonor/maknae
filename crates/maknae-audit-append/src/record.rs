@@ -49,6 +49,26 @@ pub struct Subject {
     /// `uid:<n>`, `agent:<id>` or `remote:<id>` (`maknae_proto::tasker_text`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tasker: Option<String>,
+    /// The task's sealed bindings, on the submission records that name a task.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bindings: Vec<RecordBinding>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BindingKind {
+    Git,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordBinding {
+    pub kind: BindingKind,
+    pub server: String,
+    pub base: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<u64>,
 }
 
 /// AU-3c: where the event occurred.
@@ -469,6 +489,7 @@ mod tests {
                 parent_task_id: None,
                 task_op: None,
                 tasker: None,
+                bindings: Vec::new(),
             },
             action: "connect".into(),
             object: None,
@@ -746,6 +767,41 @@ mod tests {
     }
 
     #[test]
+    fn bindings_are_omitted_when_empty_and_canonical_when_present() {
+        let s = canonical_json(&sample()).unwrap();
+        assert!(!s.contains("\"bindings\""), "{s}");
+        let mut rec = sample();
+        rec.subject.bindings = vec![
+            RecordBinding {
+                kind: BindingKind::Git,
+                server: "git.sentinel-168c.example:8443".into(),
+                base: "sentinel-168c/alpha".into(),
+                head: Some("sentinel-168c-fork/alpha".into()),
+                change: Some(u64::MAX),
+            },
+            RecordBinding {
+                kind: BindingKind::Git,
+                server: "git.sentinel-168c.example".into(),
+                base: "sentinel-168c/beta".into(),
+                head: None,
+                change: None,
+            },
+        ];
+        let s = canonical_json(&rec).unwrap();
+        let want = format!(
+            "\"bindings\":[{{\"base\":\"sentinel-168c/alpha\",\"change\":{},\"head\":\"sentinel-168c-fork/alpha\",\"kind\":\"git\",\"server\":\"git.sentinel-168c.example:8443\"}},{{\"base\":\"sentinel-168c/beta\",\"kind\":\"git\",\"server\":\"git.sentinel-168c.example\"}}]",
+            u64::MAX
+        );
+        assert!(s.contains(&want), "{s}");
+        assert_eq!(canonical_json(&rec).unwrap(), s);
+        let back: AuditRecord = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.subject.bindings, rec.subject.bindings);
+        let old: Subject =
+            serde_json::from_str(r#"{"user":"alice","plane_uri_san":null}"#).unwrap();
+        assert!(old.bindings.is_empty());
+    }
+
+    #[test]
     fn integrity_round_trips_empty() {
         let s = canonical_json(&sample()).unwrap();
         assert!(s.contains("\"integrity\""));
@@ -889,6 +945,7 @@ mod tests {
                     parent_task_id: None,
                     task_op: None,
                     tasker: None,
+                    bindings: Vec::new(),
                 },
                 action: "fs.read".into(),
                 object,

@@ -2858,6 +2858,8 @@ impl Attempt {
         let mut rec = crate::run::decision_record(rec, self.role, None);
         rec.subject.agent = self.agent.as_ref().map(|a| a.as_str().to_string());
         rec.subject.task_id = task.map(|t| t.task_id.to_string());
+        rec.subject.bindings =
+            task.map_or_else(Vec::new, |t| crate::run::record_bindings(&t.bindings));
         rec.subject.parent_task_id = self.parent.map(|p| p.to_string());
         rec.subject.tasker = Some(maknae_proto::tasker_text(&self.tasker));
         rec.subject.task_op = Some("submit".into());
@@ -8546,6 +8548,95 @@ mod tests {
             want
         );
         assert_eq!(store.list(&me, &id("hobi"), None, 8).0[0].bindings, want);
+    }
+
+    fn recorded(
+        server: &str,
+        base: &str,
+        head: Option<&str>,
+        change: Option<u64>,
+    ) -> maknae_audit_append::RecordBinding {
+        maknae_audit_append::RecordBinding {
+            kind: maknae_audit_append::BindingKind::Git,
+            server: server.into(),
+            base: base.into(),
+            head: head.map(Into::into),
+            change,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_submission_records_carry_the_sealed_bindings() {
+        let (_g, pdp) = pdp("records-bound");
+        let store = Arc::new(TaskStore::new());
+        let emit = Recorder::new();
+        let fork = "sentinel-168c-fork/alpha";
+        let parent = bound_parent(
+            &pdp,
+            &store,
+            vec![sealed(FORGE_HOST, REPO, Some(fork), Some(1))],
+        );
+        let child = submit_bound(
+            &pdp,
+            &store,
+            agent("hobi", HOBI, Some(parent.task.task_id)),
+            bound("jin", vec![git(FORGE_HOST, REPO, Some(1))]),
+            &forges_of(&[FORGE_HOST]),
+            &emit,
+        )
+        .await
+        .unwrap();
+        let want = vec![recorded(FORGE_HOST, REPO, Some(fork), Some(1))];
+        let stored = emit.records().pop().unwrap();
+        assert_eq!(stored.outcome.reason, "task stored");
+        assert_eq!(stored.subject.bindings, want);
+        let mut base = stored.clone();
+        base.subject.bindings.clear();
+        for said in ["task queued", "task held"] {
+            base.outcome.reason = said.into();
+            let rec = crate::run::submit_outcome_record(base.clone(), &child.task);
+            assert_eq!(rec.subject.bindings, want, "{said}");
+        }
+
+        let store = Arc::new(TaskStore::new());
+        let emit = ContainsOnAudit(Recorder::new(), Arc::clone(&store), false);
+        let view = SnapshotEnrollment(pdp.clone());
+        submit_in(
+            pdp.clone(),
+            &store,
+            &view,
+            user(),
+            bound("hobi", vec![git(FORGE_HOST, REPO, Some(7))]),
+            &emit,
+            (BOUND, None),
+            &forges_of(&[FORGE_HOST]),
+        )
+        .await
+        .unwrap();
+        let trail = emit.0.records();
+        let said: Vec<&str> = trail.iter().map(|r| r.outcome.reason.as_str()).collect();
+        assert_eq!(said, ["task stored", "task held: tasker contained"]);
+        for rec in &trail {
+            assert_eq!(
+                rec.subject.bindings,
+                vec![recorded(FORGE_HOST, REPO, None, Some(7))],
+                "{}",
+                rec.outcome.reason
+            );
+        }
+
+        let refused = Recorder::new();
+        let got = submit_bound(
+            &pdp,
+            &store,
+            user(),
+            bound("hobi", vec![git("git.stranger-168c.example", REPO, None)]),
+            &forges_of(&[FORGE_HOST]),
+            &refused,
+        )
+        .await;
+        assert!(matches!(got, Err(TaskRefusal::Unbound(_))), "{got:?}");
+        assert!(refused.records().pop().unwrap().subject.bindings.is_empty());
     }
 
     /// Eight requests on [`FORGE_HOST`] whose request form encodes to exactly `total`.

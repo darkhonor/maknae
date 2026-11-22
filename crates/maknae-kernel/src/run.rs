@@ -709,6 +709,7 @@ pub(crate) fn make_record(
             parent_task_id: None,
             task_op: None,
             tasker: None,
+            bindings: Vec::new(),
         },
         action: action.to_string(),
         object: object.map(str::to_string),
@@ -2930,13 +2931,31 @@ pub(crate) fn task_verb_record(
 
 pub(crate) fn submit_outcome_record(
     mut outcome: AuditRecord,
-    id: &maknae_proto::TaskId,
-    parent: Option<&maknae_proto::TaskId>,
+    task: &maknae_proto::TaskObject,
 ) -> AuditRecord {
-    outcome.object = Some(format!("task:{id}"));
-    outcome.subject.task_id = Some(id.to_string());
-    outcome.subject.parent_task_id = parent.map(ToString::to_string);
+    outcome.object = Some(format!("task:{}", task.task_id));
+    outcome.subject.task_id = Some(task.task_id.to_string());
+    outcome.subject.parent_task_id = task.parent.as_ref().map(ToString::to_string);
+    outcome.subject.bindings = record_bindings(&task.bindings);
     outcome
+}
+
+pub(crate) fn record_bindings(
+    bindings: &[maknae_proto::Binding],
+) -> Vec<maknae_audit_append::RecordBinding> {
+    use maknae_audit_append::{BindingKind, RecordBinding};
+    bindings
+        .iter()
+        .map(|b| match b {
+            maknae_proto::Binding::Git(g) => RecordBinding {
+                kind: BindingKind::Git,
+                server: g.server.clone(),
+                base: g.base.clone(),
+                head: g.head.clone(),
+                change: g.change,
+            },
+        })
+        .collect()
 }
 
 pub(crate) fn refusal_posture(r: &crate::task::TaskRefusal) -> &'static str {
@@ -3695,8 +3714,7 @@ async fn serve_task_verb<S, E, P>(
                 };
                 let mut outcome = submit_outcome_record(
                     stamped(trail.record(action, "permit", said, "authorized")),
-                    &id,
-                    signed.task.parent.as_ref(),
+                    &signed.task,
                 );
                 match shown {
                     Some(view) => {
@@ -11087,6 +11105,37 @@ mod record_widths {
         "u".repeat(MAX_SUBJECT_USER_BYTES)
     }
 
+    fn maximal_bindings() -> Vec<maknae_proto::Binding> {
+        let mut heads = vec![String::new(); maknae_proto::TASK_BINDINGS_MAX];
+        let of = |heads: &[String]| -> Vec<maknae_proto::Binding> {
+            heads
+                .iter()
+                .enumerate()
+                .map(|(i, h)| {
+                    maknae_proto::Binding::Git(maknae_proto::GitBinding {
+                        server: "g".into(),
+                        base: format!("o/{i}"),
+                        head: Some(format!("f/{h}")),
+                        change: Some(u64::MAX),
+                    })
+                })
+                .collect()
+        };
+        let mut at = 0;
+        while maknae_proto::bindings_encoded_len(&of(&heads))
+            < maknae_proto::TASK_BINDINGS_MAX_BYTES
+        {
+            heads[at].push('x');
+            at = (at + 1) % heads.len();
+        }
+        let bound = of(&heads);
+        assert_eq!(
+            maknae_proto::bindings_encoded_len(&bound),
+            maknae_proto::TASK_BINDINGS_MAX_BYTES
+        );
+        bound
+    }
+
     fn task_verbs(agent: &str) -> Vec<Verb> {
         let text = || maknae_proto::SecretText(String::new().into());
         let task = || maknae_proto::TaskRef::from_id(&TASK);
@@ -11374,6 +11423,17 @@ mod record_widths {
             (!self.person).then_some(PARENT)
         }
 
+        fn submitted(&self) -> maknae_proto::TaskObject {
+            let mut task = <maknae_proto::TaskObject as crate::task::TaskObjectForTest>::for_test(
+                &widest_agent_id(),
+                u32::MAX,
+            );
+            task.task_id = TASK;
+            task.parent = self.parent();
+            task.bindings = maximal_bindings();
+            task
+        }
+
         fn socket(&self) -> &'static str {
             if self.person {
                 MACOS_DAEMON_SOCKET_PATH
@@ -11509,7 +11569,7 @@ mod record_widths {
                         Some(TASK.to_string()),
                         self.parent().map(|p| p.to_string()),
                     );
-                    submit_outcome_record(rec, &TASK, self.parent().as_ref())
+                    submit_outcome_record(rec, &self.submitted())
                 }
                 shape => {
                     let (role, rule) = self.decided(&verb);
@@ -11718,6 +11778,12 @@ mod record_widths {
         if let Some(op) = c.op {
             assert!(line.contains(&format!("op={op}")), "op in {line}");
         }
+        let bound = c.rec.subject.bindings.len();
+        match c.label.starts_with("submit: ") {
+            true => assert_eq!(bound, maknae_proto::TASK_BINDINGS_MAX, "{at}"),
+            false => assert_eq!(bound, 0, "{at}"),
+        }
+        assert_eq!(line.matches("\"kind\":\"git\"").count(), bound, "{at}");
     }
 
     fn assert_each_case_mirrors_as_measured(cases: &[Case], in_full: &[&str]) {
