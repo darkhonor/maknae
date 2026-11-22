@@ -12256,6 +12256,195 @@ mod record_widths {
         assert!(widest_label(&cases).starts_with("collect: permit acknowledged "));
     }
 
+    fn widest_addressees() -> Vec<String> {
+        let id = widest_agent_id();
+        let stem = &id[..id.len() - 1];
+        let ids: Vec<String> = ('a'..='h').map(|c| format!("{stem}{c}")).collect();
+        assert!(ids.iter().all(|a| AgentId::parse(a).is_ok()));
+        ids
+    }
+
+    fn widest_post() -> maknae_proto::PostDraft {
+        let secret = |n: usize| maknae_proto::SecretText("b".repeat(n).into());
+        maknae_proto::PostDraft {
+            kind: maknae_proto::PostKind::Question,
+            to: maknae_proto::Addressee::Agents(widest_addressees()),
+            in_reply_to: Some(maknae_proto::PostId([0xff; 16])),
+            body: secret(maknae_proto::BOARD_POST_MAX_BYTES),
+            attachments: (0..maknae_proto::BOARD_ATTACHMENTS_MAX)
+                .map(|_| maknae_proto::Attachment {
+                    label: "l".repeat(maknae_proto::BOARD_LABEL_MAX_BYTES),
+                    media: maknae_proto::Media::TextMarkdown,
+                    content: secret(maknae_proto::BOARD_POST_MAX_BYTES),
+                })
+                .collect(),
+        }
+    }
+
+    impl Who {
+        fn board_case(
+            &self,
+            verb: &Verb,
+            (result, reason, posture): (&str, &str, &str),
+            board: maknae_audit_append::BoardAudit,
+        ) -> Case {
+            let (role, rule) = self.decided(verb);
+            let action = crate::handler::verb_to_action(verb);
+            let mut rec = decision_record(
+                crate::board_verbs::on_board(
+                    request_outcome_record(
+                        &host(),
+                        self.socket(),
+                        u32::MAX,
+                        None,
+                        Some(&widest_user()),
+                        None,
+                        None,
+                        u64::MAX,
+                        u64::MAX,
+                        (action, None, None),
+                        (result, reason, posture),
+                        &serde_json::Value::Null,
+                    ),
+                    Some(crate::board_store::BoardKey(u32::MAX)),
+                ),
+                role,
+                rule.as_ref(),
+            );
+            rec.board = Some(board);
+            self.session().stamp(&mut rec);
+            Case {
+                label: format!("{action}: {result} {reason}"),
+                rec,
+                tasker: Some(held_tasker()),
+                task: Some(TASK.to_string()),
+                parent: None,
+                op: None,
+            }
+        }
+
+        fn board_cases(&self) -> Vec<Case> {
+            use crate::board::BoardRefusal as R;
+            use crate::board_verbs as bv;
+            let draft = widest_post();
+            let digest = bv::post_digest(&draft).expect("the widest post encodes");
+            assert_eq!(digest.len(), 64);
+            let posted = bv::posted_audit(
+                bv::post_audit(&draft, &digest),
+                &crate::board_store::Stored {
+                    post: maknae_proto::Post {
+                        id: maknae_proto::PostId([0xff; 16]),
+                        author: maknae_proto::Author::Agent(widest_agent_id()),
+                        task: Some(TASK),
+                        at_secs: i64::MAX,
+                        labels: maknae_proto::Labels {},
+                        draft: draft.clone(),
+                    },
+                    seq: u64::MAX,
+                    author_uid: Some(u32::MAX),
+                    labels: crate::board_store::PostLabels::default(),
+                    held: std::collections::BTreeSet::new(),
+                },
+            );
+            let refusals = [
+                R::Full,
+                R::AuthorAtCap,
+                R::NoSuchPost,
+                R::Random,
+                R::Store("not done: the board store was busy".into()),
+                R::Unavailable(format!(
+                    "{}the board store did not answer in time",
+                    crate::task::OUTCOME_UNKNOWN
+                )),
+            ];
+            let post = Verb::BoardPost {
+                post: draft.clone(),
+            };
+            let described = bv::post_audit(&draft, &digest);
+            let mut all = vec![
+                self.board_case(
+                    &post,
+                    ("permit", "intent recorded", "authorized"),
+                    described.clone(),
+                ),
+                self.board_case(&post, ("permit", "done", "authorized"), posted),
+                self.board_case(
+                    &post,
+                    ("deny", &R::NoSuchPost.to_string(), "unauthorized"),
+                    described.clone(),
+                ),
+            ];
+            for r in &refusals {
+                let reason = r.to_string();
+                let said = ("permit", reason.as_str(), bv::posture(r));
+                all.push(self.board_case(&post, said, described.clone()));
+            }
+            let read = Verb::BoardRead {
+                seen_through: Some(maknae_proto::PostId([0xff; 16])),
+            };
+            let walk = bv::Walk {
+                page: maknae_proto::BoardPage {
+                    posts: Vec::new(),
+                    more: true,
+                },
+                first_seq: Some(u64::MAX),
+                last_seq: Some(u64::MAX),
+                returned: u32::MAX,
+                withheld: u32::MAX,
+                skip_to: None,
+                walked_to: u64::MAX,
+            };
+            let at = bv::cursor_audit(u64::MAX);
+            all.extend([
+                self.board_case(
+                    &read,
+                    ("permit", "intent recorded", "authorized"),
+                    at.clone(),
+                ),
+                self.board_case(
+                    &read,
+                    ("permit", "done", "authorized"),
+                    bv::read_audit(&walk, u64::MAX),
+                ),
+                self.board_case(
+                    &read,
+                    ("deny", bv::UNDECIDED, "unavailable"),
+                    bv::read_audit(&walk, u64::MAX),
+                ),
+            ]);
+            for r in &refusals[4..] {
+                let reason = format!("read {r}");
+                let mut case = self.board_case(
+                    &read,
+                    ("permit", &r.to_string(), bv::posture(r)),
+                    at.clone(),
+                );
+                case.label = reason;
+                all.push(case);
+            }
+            all
+        }
+    }
+
+    #[test]
+    fn the_board_records_of_the_widest_agent_mirror_as_measured() {
+        let cases = Who::new(false).board_cases();
+        assert_each_case_mirrors_as_measured(&cases, &[]);
+        assert_eq!(
+            widest_label(&cases),
+            "board.post: permit done",
+            "the post outcome, with its id and sequence, is the widest"
+        );
+        let widest = cases
+            .iter()
+            .find(|c| c.label == "board.post: permit done")
+            .expect("the post outcome");
+        let line = macos_mirror(&widest.rec).full_line;
+        let digest = widest.rec.board.as_ref().and_then(|b| b.digest.clone());
+        assert!(line.contains(&digest.expect("a digest")), "{line}");
+        assert!(!line.contains(&"b".repeat(64)), "no content");
+    }
+
     const WIDEST_RELEASE: &str =
         "written: task release outcome unknown: the task store did not answer in time";
 
