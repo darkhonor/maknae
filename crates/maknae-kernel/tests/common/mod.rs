@@ -1776,3 +1776,234 @@ impl<A: maknae_kernel::SensitiveNow> maknae_kernel::SensitiveNow for Counting<A>
         self.inner.sensitive_now()
     }
 }
+
+/// Whether `req`'s resource bag holds `label`.
+fn holds(req: &Request, label: &str) -> bool {
+    req.resource.0.get(label).is_some()
+}
+
+/// Delegates every method to `inner`, then lets `adjust` replace each request's verdict.
+macro_rules! board_double {
+    ($name:ident) => {
+        impl<P: Authorizer> Authorizer for $name<P> {
+            fn decide(&self, req: &Request) -> Verdict {
+                self.adjust(req, self.inner.decide(req))
+            }
+            fn decide_reporting_role(&self, req: &Request) -> (Verdict, Option<&'static str>) {
+                let (verdict, role) = self.inner.decide_reporting_role(req);
+                (self.adjust(req, verdict), role)
+            }
+            fn decide_cited(&self, req: &Request) -> maknae_security::Decided {
+                let mut d = self.inner.decide_cited(req);
+                d.verdict = self.adjust(req, d.verdict);
+                d
+            }
+            fn decide_cited_all(&self, reqs: &[Request]) -> Vec<maknae_security::Decided> {
+                self.before_all(reqs);
+                self.inner
+                    .decide_cited_all(reqs)
+                    .into_iter()
+                    .zip(reqs)
+                    .map(|(mut d, r)| {
+                        d.verdict = self.adjust(r, d.verdict);
+                        d
+                    })
+                    .collect()
+            }
+            fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
+                self.inner.subjects()
+            }
+            fn backend_name(&self) -> String {
+                self.inner.backend_name()
+            }
+        }
+
+        impl<P: maknae_kernel::CatalogNow> maknae_kernel::CatalogNow for $name<P> {
+            fn catalog_now(
+                &self,
+                uid: u32,
+                forges: &maknae_config::ForgeSet,
+            ) -> Result<
+                std::sync::Arc<maknae_authz_basic::catalog::SubjectCatalog>,
+                maknae_authz_basic::catalog::CatalogError,
+            > {
+                self.inner.catalog_now(uid, forges)
+            }
+
+            fn catalog_stamp(
+                &self,
+                uid: u32,
+                forges: &maknae_config::ForgeSet,
+            ) -> Option<maknae_proto::CatalogDigest> {
+                self.inner.catalog_stamp(uid, forges)
+            }
+        }
+
+        impl<P: maknae_kernel::SensitiveNow> maknae_kernel::SensitiveNow for $name<P> {
+            fn sensitive_now(&self) -> std::sync::Arc<maknae_config::SensitiveList> {
+                self.inner.sensitive_now()
+            }
+        }
+    };
+}
+
+/// Denies a request holding `label` to each agent in `readers`.
+pub struct DeniesLabel<P> {
+    pub inner: Arc<P>,
+    pub label: &'static str,
+    pub readers: std::collections::BTreeSet<String>,
+}
+
+impl<P> DeniesLabel<P> {
+    fn adjust(&self, req: &Request, verdict: Verdict) -> Verdict {
+        let reader = req.subject.0.str(maknae_security::SUBJECT_AGENT);
+        if holds(req, self.label) && reader.is_some_and(|r| self.readers.contains(r)) {
+            Verdict::Deny {
+                reason: "sentinel-695: label withheld".into(),
+            }
+        } else {
+            verdict
+        }
+    }
+
+    fn before_all(&self, _: &[Request]) {}
+}
+
+board_double!(DeniesLabel);
+
+/// Turns a `Permit` on a request holding `label` into one whose obligation has no handler.
+pub struct PermitsWithObligation<P> {
+    pub inner: Arc<P>,
+    pub label: &'static str,
+}
+
+impl<P> PermitsWithObligation<P> {
+    fn adjust(&self, req: &Request, verdict: Verdict) -> Verdict {
+        match verdict {
+            Verdict::Permit { .. } if holds(req, self.label) => Verdict::Permit {
+                obligations: vec![Obligation {
+                    id: "sentinel-695-unhonourable".into(),
+                    params: maknae_security::Attributes::new(),
+                }],
+            },
+            other => other,
+        }
+    }
+
+    fn before_all(&self, _: &[Request]) {}
+}
+
+board_double!(PermitsWithObligation);
+
+/// Answers `Indeterminate` for a request holding `label`, and only for that request.
+pub struct UndecidedOnLabel<P> {
+    pub inner: Arc<P>,
+    pub label: &'static str,
+}
+
+impl<P> UndecidedOnLabel<P> {
+    fn adjust(&self, req: &Request, verdict: Verdict) -> Verdict {
+        if holds(req, self.label) {
+            Verdict::Indeterminate
+        } else {
+            verdict
+        }
+    }
+
+    fn before_all(&self, _: &[Request]) {}
+}
+
+board_double!(UndecidedOnLabel);
+
+/// Panics in a batch that holds a request carrying `label`.
+pub struct PanicsOnLabel<P> {
+    pub inner: Arc<P>,
+    pub label: &'static str,
+}
+
+impl<P> PanicsOnLabel<P> {
+    fn adjust(&self, _: &Request, verdict: Verdict) -> Verdict {
+        verdict
+    }
+
+    fn before_all(&self, reqs: &[Request]) {
+        if reqs.iter().any(|r| holds(r, self.label)) {
+            panic!("sentinel-695: the batch panics");
+        }
+    }
+}
+
+board_double!(PanicsOnLabel);
+
+/// Stamps another person's board on a board request before the composition decides it.
+pub struct OtherBoard<P> {
+    pub inner: Arc<P>,
+    pub board: &'static str,
+}
+
+impl<P: Authorizer> OtherBoard<P> {
+    fn restamped(&self, req: &Request) -> Request {
+        let mut req = req.clone();
+        if req
+            .resource
+            .0
+            .get(maknae_security::RESOURCE_BOARD)
+            .is_some()
+        {
+            req.resource.0.insert(
+                maknae_security::RESOURCE_BOARD,
+                maknae_security::AttrValue::Str(self.board.into()),
+            );
+        }
+        req
+    }
+}
+
+impl<P: Authorizer> Authorizer for OtherBoard<P> {
+    fn decide(&self, req: &Request) -> Verdict {
+        self.inner.decide(&self.restamped(req))
+    }
+    fn decide_reporting_role(&self, req: &Request) -> (Verdict, Option<&'static str>) {
+        self.inner.decide_reporting_role(&self.restamped(req))
+    }
+    fn decide_cited(&self, req: &Request) -> maknae_security::Decided {
+        self.inner.decide_cited(&self.restamped(req))
+    }
+    fn decide_cited_all(&self, reqs: &[Request]) -> Vec<maknae_security::Decided> {
+        let reqs: Vec<Request> = reqs.iter().map(|r| self.restamped(r)).collect();
+        self.inner.decide_cited_all(&reqs)
+    }
+    fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
+        self.inner.subjects()
+    }
+    fn backend_name(&self) -> String {
+        self.inner.backend_name()
+    }
+}
+
+impl<P: maknae_kernel::CatalogNow> maknae_kernel::CatalogNow for OtherBoard<P> {
+    fn catalog_now(
+        &self,
+        uid: u32,
+        forges: &maknae_config::ForgeSet,
+    ) -> Result<
+        std::sync::Arc<maknae_authz_basic::catalog::SubjectCatalog>,
+        maknae_authz_basic::catalog::CatalogError,
+    > {
+        self.inner.catalog_now(uid, forges)
+    }
+
+    fn catalog_stamp(
+        &self,
+        uid: u32,
+        forges: &maknae_config::ForgeSet,
+    ) -> Option<maknae_proto::CatalogDigest> {
+        self.inner.catalog_stamp(uid, forges)
+    }
+}
+
+impl<P: maknae_kernel::SensitiveNow> maknae_kernel::SensitiveNow for OtherBoard<P> {
+    fn sensitive_now(&self) -> std::sync::Arc<maknae_config::SensitiveList> {
+        self.inner.sensitive_now()
+    }
+}

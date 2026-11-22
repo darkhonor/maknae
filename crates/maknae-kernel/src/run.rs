@@ -80,7 +80,7 @@ use crate::handler::{
     AUTHZ_DECIDE_TIMEOUT,
 };
 use crate::session::{gather, FactsGate, SessionChannel, SessionRecord};
-use maknae_proto::{encode_response_zeroizing, ProtoErrCode, ProtoError};
+use maknae_proto::{encode_response_zeroizing, BoardDefect, ProtoErrCode, ProtoError};
 use maknae_security::{
     combine, finalize, guarded_decide_cited, Authorizer, Decision, RuleCitation,
 };
@@ -1091,14 +1091,14 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         .await;
         return;
     }
-    let task = match task_for(
+    let cited = match task_for(
         session.admission,
         request.task.as_ref(),
         session.agent(),
         peer_uid,
         &agents.tasks,
     ) {
-        Ok(task) => task,
+        Ok(cited) => cited,
         Err(cause) => {
             end_session(
                 &mut stream,
@@ -1115,7 +1115,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             return;
         }
     };
-    let task = task.as_ref().map(crate::handler::TaskStamp::of);
+    let task = cited.as_ref().map(crate::handler::TaskStamp::of);
     let stamp = match &session.channel {
         SessionChannel::Client => Stamp::Client,
         SessionChannel::Agent { agent, .. } => Stamp::Agent {
@@ -1212,6 +1212,18 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         }
         Verb::AgentList { after: Some(after) } if maknae_config::AgentId::parse(after).is_err() => {
             Some(("agent list", "cursor not acceptable".to_string()))
+        }
+        Verb::BoardPost {
+            post:
+                maknae_proto::PostDraft {
+                    to: maknae_proto::Addressee::Agents(ids),
+                    ..
+                },
+        } if ids
+            .iter()
+            .any(|id| maknae_config::AgentId::parse(id).is_err()) =>
+        {
+            Some(("board.post", "addressee not an agent id".to_string()))
         }
         Verb::AdminHeldList {
             filter: Some(maknae_proto::HeldFilter::Agent(agent)),
@@ -1334,6 +1346,40 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             authz_decide_timeout,
             &stamp,
             tasks,
+        )
+        .await;
+        close_bounded(&mut stream).await;
+        return;
+    }
+
+    if dispatch_verb(&request.verb) == Dispatch::BoardRequested {
+        let trail = Trail {
+            emit: &emit,
+            cfg: &cfg,
+            class,
+            host: &host,
+            socket: &socket,
+            uid: peer_uid,
+            peer_uri: peer_uri.as_deref(),
+            peer_user: peer_user.as_deref(),
+            session_id,
+            seq,
+            au3_1: &au3_1,
+        };
+        serve_board_verb(
+            &mut stream,
+            &trail,
+            &request.verb,
+            lane,
+            &authorizer,
+            &live,
+            authz_decide_timeout,
+            &stamp,
+            BoardCtx {
+                agents: &agents,
+                channel_agent: session.agent(),
+                cited: cited.as_ref(),
+            },
         )
         .await;
         close_bounded(&mut stream).await;
@@ -1611,7 +1657,8 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         | Dispatch::ConversationCloseRequested
         | Dispatch::ConversationListRequested
         | Dispatch::ConversationDeleteRequested
-        | Dispatch::TaskRequested => {
+        | Dispatch::TaskRequested
+        | Dispatch::BoardRequested => {
             let appended = emit_request_outcome(
                 &emit,
                 &host,
@@ -1749,7 +1796,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         action,
                         &au3_1,
                     )
-                    .await
+                    .await;
                 }
                 Err(_) => {
                     refuse_unencodable_bounded(
@@ -1771,40 +1818,6 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                     )
                     .await
                 }
-            }
-            close_bounded(&mut stream).await;
-            return;
-        }
-        Dispatch::BoardRequested => {
-            let appended = emit_request_outcome(
-                &emit,
-                &host,
-                &socket,
-                peer_uid,
-                peer_uri.as_deref(),
-                peer_user.as_deref(),
-                decided_role,
-                decided_rule.as_ref(),
-                session_id,
-                seq.next(),
-                verb_to_action(&request.verb),
-                None,
-                None,
-                "deny",
-                "board off: site",
-                "unavailable",
-                &au3_1,
-            )
-            .await;
-            if may_respond(appended) {
-                write_error_bounded(
-                    &mut stream,
-                    &cfg,
-                    class,
-                    ProtoErrCode::Unauthorized,
-                    "not authorized",
-                )
-                .await;
             }
             close_bounded(&mut stream).await;
             return;
@@ -2353,7 +2366,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         verb_to_action(&request.verb),
                         &au3_1,
                     )
-                    .await
+                    .await;
                 }
                 Err(_) => {
                     refuse_unencodable_bounded(
@@ -2766,7 +2779,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                                     "session.prompt",
                                     &au3_1,
                                 )
-                                .await
+                                .await;
                             }
                             Err(_) => {
                                 refuse_unencodable_bounded(
@@ -3103,6 +3116,19 @@ impl<E: AuditEmit + Send + Sync> Trail<'_, E> {
             .await;
     }
 
+    async fn refuse_board<S>(&self, stream: &mut S, rec: &AuditRecord, defect: BoardDefect)
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        self.refuse(
+            stream,
+            rec,
+            ProtoErrCode::BoardRefused(defect),
+            maknae_proto::board_refused_message(defect),
+        )
+        .await;
+    }
+
     async fn unreadable(&self, action: &str, names: &[String]) {
         for name in names {
             let mut rec = self.record(
@@ -3125,11 +3151,12 @@ impl<E: AuditEmit + Send + Sync> Trail<'_, E> {
         role: Option<&'static str>,
         rule: Option<&RuleCitation>,
         action: &str,
-    ) where
+    ) -> bool
+    where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         self.respond(stream, outcome, payload, role, rule, action, None)
-            .await;
+            .await
     }
 
     /// [`Self::deliver`] with the subject's catalog digest on the reply.
@@ -3143,13 +3170,15 @@ impl<E: AuditEmit + Send + Sync> Trail<'_, E> {
         rule: Option<&RuleCitation>,
         action: &str,
         catalog_digest: Option<CatalogDigest>,
-    ) where
+    ) -> bool
+    where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         self.respond(stream, outcome, payload, role, rule, action, catalog_digest)
-            .await;
+            .await
     }
 
+    /// Whether the outcome record was appended and the reply written within its bound.
     #[allow(clippy::too_many_arguments)]
     async fn respond<S>(
         &self,
@@ -3160,11 +3189,12 @@ impl<E: AuditEmit + Send + Sync> Trail<'_, E> {
         rule: Option<&RuleCitation>,
         action: &str,
         catalog_digest: Option<CatalogDigest>,
-    ) where
+    ) -> bool
+    where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         if !may_respond(self.record_bounded(outcome).await) {
-            return;
+            return false;
         }
         let response = Response {
             protocol_version: PROTOCOL_VERSION,
@@ -3211,7 +3241,8 @@ impl<E: AuditEmit + Send + Sync> Trail<'_, E> {
                     action,
                     self.au3_1,
                 )
-                .await
+                .await;
+                false
             }
         }
     }
@@ -3618,6 +3649,259 @@ async fn serve_conversation_verb<S, E, P>(
                 .await;
         }
     }
+}
+
+/// Who asks on this channel, the task it cites, and the board store and switches.
+struct BoardCtx<'a> {
+    agents: &'a AgentAdmission,
+    channel_agent: Option<&'a maknae_config::AgentId>,
+    cited: Option<&'a crate::task::CitedTask>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn serve_board_verb<S, E, P>(
+    stream: &mut S,
+    trail: &Trail<'_, E>,
+    verb: &Verb,
+    lane: maknae_security::Lane,
+    authorizer: &Arc<P>,
+    live: &Arc<crate::live::LiveConfig>,
+    timeout: Duration,
+    stamp: &Stamp<'_>,
+    board: BoardCtx<'_>,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    E: AuditEmit + Send + Sync + 'static,
+    P: Authorizer + Send + Sync + 'static,
+{
+    use crate::board_verbs as bv;
+    let action = verb_to_action(verb);
+    let store = &board.agents.board;
+    let known = board
+        .cited
+        .and_then(|c| crate::board_store::BoardKey::of(&c.root));
+    let gated = bv::gate(
+        board.channel_agent,
+        board.cited,
+        &*board.agents.switches,
+        store,
+    );
+    let key = match gated {
+        Ok(key) => key,
+        Err(off) => {
+            let rec = bv::on_board(
+                trail.record(action, "deny", &off.to_string(), "unavailable"),
+                known,
+            );
+            trail.unauthorized(stream, &rec).await;
+            return;
+        }
+    };
+    let (_, _, generation) = live.admission();
+    let request = build_authz_request(verb, trail.uid, None, lane, None, None, stamp);
+    let (verdict, role, rule) =
+        decide_bounded(authorizer, live, request.clone(), generation, timeout).await;
+    let decided = |result: &str, reason: &str, posture: &str| {
+        decision_record(
+            bv::on_board(trail.record(action, result, reason, posture), known),
+            role,
+            rule.as_ref(),
+        )
+    };
+    match finalize(verdict) {
+        Decision::Deny { reason } => {
+            trail
+                .unauthorized(stream, &decided("deny", &reason, "unauthorized"))
+                .await;
+            return;
+        }
+        Decision::Permit { obligations } => {
+            if let Err(unhonorable) = discharge_plan(&obligations) {
+                let reason = format!("unhonorable obligation: {}", unhonorable.0);
+                trail
+                    .unauthorized(stream, &decided("deny", &reason, "unauthorized"))
+                    .await;
+                return;
+            }
+        }
+    }
+    let (Some(key), Some(cited), Some(agent)) = (key, board.cited, board.channel_agent) else {
+        let reason = bv::Off::NoTask.to_string();
+        trail
+            .unauthorized(stream, &decided("deny", &reason, "unavailable"))
+            .await;
+        return;
+    };
+    let deadline = || tokio::time::Instant::now() + timeout;
+
+    if let Verb::BoardPost { post } = verb {
+        let digest = match bv::post_digest(post) {
+            Ok(digest) => digest,
+            Err(e) => {
+                let r = crate::board::BoardRefusal::Store(format!("the post does not encode: {e}"));
+                let rec = decided("deny", &r.to_string(), bv::posture(&r));
+                trail.refuse_board(stream, &rec, bv::defect_of(&r)).await;
+                return;
+            }
+        };
+        let audit = bv::post_audit(post, &digest);
+        let described = |mut rec: AuditRecord| {
+            rec.board = Some(audit.clone());
+            rec
+        };
+        if let Some(target) = post.in_reply_to {
+            let visible = match store.get(key, target) {
+                None => false,
+                Some(target) => {
+                    let asked = vec![bv::post_request(&request, key, &target)];
+                    bv::decide_posts(authorizer, live, generation, timeout, asked).await
+                        == [bv::PostVerdict::Permit]
+                }
+            };
+            if !visible {
+                let r = crate::board::BoardRefusal::NoSuchPost;
+                let rec = described(decided("deny", &r.to_string(), bv::posture(&r)));
+                trail.refuse_board(stream, &rec, bv::defect_of(&r)).await;
+                return;
+            }
+        }
+        let intent = described(decided("permit", "intent recorded", "authorized"));
+        if !trail.record_bounded(&intent).await {
+            return;
+        }
+        let (s, author, uid) = (
+            Arc::clone(store),
+            maknae_proto::Author::Agent(agent.as_str().to_owned()),
+            trail.uid,
+        );
+        let (task, labels, draft) = (
+            cited.signed.task.task_id,
+            crate::board_store::labels_of(&cited.signed.task.labels),
+            post.clone(),
+        );
+        let done = bv::offload(trail.uid, deadline(), move || {
+            s.post(key, author, Some(uid), Some(task), labels, draft)
+        })
+        .await;
+        match done {
+            Ok(stored) => {
+                let mut outcome = trail.outcome(&intent, "done", "authorized");
+                outcome.board = Some(bv::posted_audit(audit.clone(), &stored));
+                let payload = Payload::BoardPosted(stored.post.id);
+                trail
+                    .deliver(stream, &outcome, payload, role, rule.as_ref(), action)
+                    .await;
+            }
+            Err(r) => {
+                let outcome = trail.outcome(&intent, &r.to_string(), bv::posture(&r));
+                trail
+                    .refuse_board(stream, &outcome, bv::defect_of(&r))
+                    .await;
+            }
+        }
+        return;
+    }
+
+    if let Verb::BoardRead { seen_through } = verb {
+        let plan = store.plan_read(key, agent, *seen_through);
+        let mut intent = decided("permit", "intent recorded", "authorized");
+        intent.board = Some(bv::cursor_audit(plan.cursor));
+        if !trail.record_bounded(&intent).await {
+            return;
+        }
+        let advance = |to: u64| {
+            let (s, a) = (Arc::clone(store), agent.clone());
+            bv::offload(trail.uid, deadline(), move || s.advance(key, &a, to))
+        };
+        let mut cursor = plan.cursor;
+        if let Some(to) = plan.ack_to {
+            match advance(to).await {
+                Ok(moved) => cursor = moved,
+                Err(r) => {
+                    let outcome = trail.outcome(&intent, &r.to_string(), bv::posture(&r));
+                    trail
+                        .refuse_board(stream, &outcome, bv::defect_of(&r))
+                        .await;
+                    return;
+                }
+            }
+        }
+        let budget = maknae_proto::board_page_budget(trail.cfg.prompt_max_bytes);
+        let mut walker = bv::Walker::new(cursor, budget);
+        let mut after = cursor;
+        loop {
+            let chunk = store.candidates(key, after, maknae_proto::BOARD_READ_PAGE_POSTS);
+            let Some(last) = chunk.last() else {
+                break;
+            };
+            after = last.seq;
+            let asked = chunk
+                .iter()
+                .map(|s| bv::post_request(&request, key, s))
+                .collect();
+            let verdicts = bv::decide_posts(authorizer, live, generation, timeout, asked).await;
+            if !walker.take(&chunk, &verdicts) {
+                break;
+            }
+        }
+        let stalled = walker.stalled();
+        let mut visible = std::collections::BTreeSet::new();
+        if !stalled {
+            let targets: Vec<_> = walker
+                .reply_targets()
+                .into_iter()
+                .filter_map(|id| store.get(key, id))
+                .collect();
+            let asked = targets
+                .iter()
+                .map(|t| bv::post_request(&request, key, t))
+                .collect();
+            let verdicts = bv::decide_posts(authorizer, live, generation, timeout, asked).await;
+            visible = targets
+                .iter()
+                .zip(verdicts)
+                .filter(|(_, v)| *v == bv::PostVerdict::Permit)
+                .map(|(t, _)| t.post.id)
+                .collect();
+        }
+        let walk = walker.finish(&visible);
+        if let Some(skip_to) = walk.skip_to.filter(|s| *s > cursor) {
+            match advance(skip_to).await {
+                Ok(moved) => cursor = moved,
+                Err(r) => {
+                    let outcome = trail.outcome(&intent, &r.to_string(), bv::posture(&r));
+                    trail
+                        .refuse_board(stream, &outcome, bv::defect_of(&r))
+                        .await;
+                    return;
+                }
+            }
+        }
+        if stalled && walk.page.posts.is_empty() {
+            let mut outcome = trail.outcome(&intent, bv::UNDECIDED, "unavailable");
+            outcome.outcome.result = "deny".into();
+            outcome.board = Some(bv::read_audit(&walk, cursor));
+            trail
+                .refuse_board(stream, &outcome, BoardDefect::TryAgain)
+                .await;
+            return;
+        }
+        let mut outcome = trail.outcome(&intent, "done", "authorized");
+        outcome.board = Some(bv::read_audit(&walk, cursor));
+        let walked_to = walk.walked_to;
+        let payload = Payload::BoardPage(walk.page);
+        if trail
+            .deliver(stream, &outcome, payload, role, rule.as_ref(), action)
+            .await
+        {
+            store.walked(key, agent, walked_to);
+        }
+        return;
+    }
+
+    trail
+        .unauthorized(stream, &decided("deny", "not a board verb", "unauthorized"))
+        .await;
 }
 
 type StoreChange = Box<
@@ -4892,7 +5176,8 @@ async fn write_frame_bounded<S, E: AuditEmit + Send + Sync>(
     seq: &Seq,
     action: &str,
     au3_1: &serde_json::Value,
-) where
+) -> bool
+where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     // A task verb answers with what was stored under any cap the range allows (#628).
@@ -4907,14 +5192,15 @@ async fn write_frame_bounded<S, E: AuditEmit + Send + Sync>(
             session_id, seq, action, au3_1,
         )
         .await;
-        return;
+        return false;
     }
     let written = tokio::time::timeout(
         Duration::from_millis(cfg.read_timeout_ms),
         write_frame(stream, class, bytes),
     )
     .await;
-    if !matches!(written, Ok(Ok(()))) {
+    let written = matches!(written, Ok(Ok(())));
+    if !written {
         emit_request_outcome(
             emit,
             host,
@@ -4936,6 +5222,7 @@ async fn write_frame_bounded<S, E: AuditEmit + Send + Sync>(
         )
         .await;
     }
+    written
 }
 
 /// Write one generic error frame, bounded like every response write. The

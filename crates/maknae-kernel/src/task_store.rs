@@ -276,7 +276,7 @@ impl TaskBlobs for DirBlobs {
     }
 }
 
-struct Counted(usize);
+pub(crate) struct Counted(pub(crate) usize);
 
 impl std::io::Write for Counted {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
