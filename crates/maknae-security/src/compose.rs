@@ -26,6 +26,18 @@ use crate::obligation::{merge_obligations, Obligation};
 use crate::request::Request;
 use crate::verdict::Verdict;
 
+pub const INDETERMINATE_BLOCKS: &str = "indeterminate operand blocks (fail-closed)";
+
+/// Whether `v` records a decision that did not complete: an `Indeterminate`, or the
+/// `Deny` [`combine`] folds one into.
+pub fn undecided(v: &Verdict) -> bool {
+    match v {
+        Verdict::Indeterminate => true,
+        Verdict::Deny { reason } => reason == INDETERMINATE_BLOCKS,
+        Verdict::Permit { .. } | Verdict::NotApplicable { .. } => false,
+    }
+}
+
 /// Fold operand verdicts:
 /// 1. any `Deny` → `Deny`;
 /// 2. else any `Indeterminate` → `Deny` (never masked by a peer `Permit`);
@@ -60,7 +72,7 @@ pub fn combine(verdicts: Vec<Verdict>) -> Verdict {
     // 2. any Indeterminate (never masked by a peer Permit)
     if verdicts.iter().any(|v| matches!(v, Verdict::Indeterminate)) {
         return Verdict::Deny {
-            reason: "indeterminate operand blocks (fail-closed)".into(),
+            reason: INDETERMINATE_BLOCKS.into(),
         };
     }
     // 3. any Permit → union obligations
@@ -797,6 +809,22 @@ mod tests {
             combine(vec![permit(vec![]), Verdict::Deny { reason: "n".into() }]),
             Verdict::Deny { .. }
         ));
+    }
+
+    #[test]
+    fn a_composed_indeterminate_is_undecided_and_a_real_deny_is_not() {
+        assert!(undecided(&combine(vec![Verdict::Indeterminate])));
+        assert!(undecided(&Verdict::Indeterminate));
+        let real = Verdict::Deny {
+            reason: "sentinel-695-real-deny".into(),
+        };
+        assert!(!undecided(&real));
+        assert!(!undecided(&combine(vec![
+            real.clone(),
+            Verdict::Indeterminate
+        ])));
+        assert!(!undecided(&permit(vec![])));
+        assert!(!undecided(&Verdict::NotApplicable { note: None }));
     }
 
     #[test]

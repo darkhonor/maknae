@@ -156,6 +156,11 @@ pub const RESOURCE_TOOL_ARGV: &str = "tool.argv";
 pub const RESOURCE_BINDING_KINDS: &str = "binding.kinds";
 pub const ENTRY_LABEL_PREFIX: &str = "entry.";
 
+/// The board a `board.*` request names, `users/<uid>`: stamped by the kernel from the
+/// cited task's root partition, never from the request.
+pub const RESOURCE_BOARD: &str = "board";
+pub const POST_LABEL_PREFIX: &str = "post.";
+
 /// Which boundary a request arrived on.
 ///
 /// **Derived from the accepting listener and from nothing else.** Never from a request

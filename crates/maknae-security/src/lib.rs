@@ -24,18 +24,18 @@ pub use compose::{
     combine, compose_backend_name, compose_decide, compose_decide_cited, compose_decide_cited_all,
     compose_decide_reporting_role, compose_subjects, guarded_backend_name, guarded_decide,
     guarded_decide_cited, guarded_decide_cited_all, guarded_decide_reporting_role,
-    guarded_subjects, ConjunctionAuthorizer,
+    guarded_subjects, undecided, ConjunctionAuthorizer, INDETERMINATE_BLOCKS,
 };
 pub use obligation::{merge_obligations, Obligation, ObligationConflict};
 pub use request::{
     bound_key, decode_git_bound, encode_git_bound, Action, BoundEncodingError, Context,
     FsOperation, GitBoundValues, Lane, Request, Resource, Subject, CHANNEL_AGENT, CHANNEL_CLIENT,
     CONTEXT_DAC_LANE, CONTEXT_FS_OPERATION, CONTEXT_SENSITIVE_PERSONAL, CONTEXT_TASK_OP,
-    ENTRY_LABEL_PREFIX, GIT_BOUND_FIELDS, INITIATOR_KERNEL, RESOURCE_AGENT, RESOURCE_BINDING_KINDS,
-    RESOURCE_BOUND_PREFIX, RESOURCE_CLASSIFICATION, RESOURCE_OS_ACCESSIBLE, RESOURCE_TASK_HELD,
-    RESOURCE_TASK_OWNED, RESOURCE_TASK_STATE, RESOURCE_TOOL_ARGV, RESOURCE_TOOL_ENTRY,
-    RESOURCE_TOOL_PROGRAM, SUBJECT_AGENT, SUBJECT_CHANNEL, SUBJECT_HOME, SUBJECT_INITIATOR,
-    SUBJECT_ROOT_TASKER, SUBJECT_TASK, SUBJECT_TASKER,
+    ENTRY_LABEL_PREFIX, GIT_BOUND_FIELDS, INITIATOR_KERNEL, POST_LABEL_PREFIX, RESOURCE_AGENT,
+    RESOURCE_BINDING_KINDS, RESOURCE_BOARD, RESOURCE_BOUND_PREFIX, RESOURCE_CLASSIFICATION,
+    RESOURCE_OS_ACCESSIBLE, RESOURCE_TASK_HELD, RESOURCE_TASK_OWNED, RESOURCE_TASK_STATE,
+    RESOURCE_TOOL_ARGV, RESOURCE_TOOL_ENTRY, RESOURCE_TOOL_PROGRAM, SUBJECT_AGENT, SUBJECT_CHANNEL,
+    SUBJECT_HOME, SUBJECT_INITIATOR, SUBJECT_ROOT_TASKER, SUBJECT_TASK, SUBJECT_TASKER,
 };
 pub use value::{AttrValue, Attributes};
 // NOTE: `Verdict` and `Decision` implement `Default` as a deliberate *fail-closed

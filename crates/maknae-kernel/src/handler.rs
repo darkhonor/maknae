@@ -553,6 +553,20 @@ pub fn build_authz_request(
         resource.insert("path", AttrValue::Str(path.clone()));
     }
     stamp_conversation(&mut resource, facts);
+    if let (
+        Verb::BoardPost { .. } | Verb::BoardRead { .. },
+        Stamp::Agent {
+            task: Some(task), ..
+        },
+    ) = (verb, stamp)
+    {
+        if task.root.starts_with("users/") {
+            resource.insert(
+                maknae_security::RESOURCE_BOARD,
+                AttrValue::Str(task.root.clone()),
+            );
+        }
+    }
     if let (Verb::SessionPrompt { .. }, Some(a)) = (verb, admitted) {
         resource.insert(
             "destination",
@@ -862,6 +876,65 @@ mod tests {
         assert_eq!(get(&tasked, SUBJECT_TASK), s(&task.id.to_string()));
         assert_eq!(get(&tasked, SUBJECT_TASKER), s("uid:1002"));
         assert_eq!(get(&tasked, SUBJECT_ROOT_TASKER), s("users/1000"));
+    }
+
+    #[test]
+    fn a_board_request_is_stamped_with_the_cited_tasks_board() {
+        use maknae_security::{AttrValue, RESOURCE_BOARD};
+        let hobi = maknae_config::AgentId::parse("hobi").unwrap();
+        let stamp_of = |root: &str| TaskStamp {
+            id: maknae_proto::TaskId([0x69; 16]),
+            tasker: "uid:1000".into(),
+            root: root.into(),
+            start: 0,
+        };
+        let person = stamp_of("users/1000");
+        let agent_rooted = stamp_of("agents/hobi");
+        let board = |verb: &Verb, task: Option<&TaskStamp>| {
+            build_authz_request(
+                verb,
+                2001,
+                None,
+                maknae_security::Lane::Local,
+                None,
+                None,
+                &Stamp::Agent { agent: &hobi, task },
+            )
+            .resource
+            .0
+            .get(RESOURCE_BOARD)
+            .cloned()
+        };
+        let verbs = all_verbs();
+        let board_verbs: Vec<&Verb> = verbs
+            .iter()
+            .filter(|v| matches!(v, Verb::BoardPost { .. } | Verb::BoardRead { .. }))
+            .collect();
+        assert_eq!(board_verbs.len(), 2);
+        for verb in &board_verbs {
+            assert_eq!(
+                board(verb, Some(&person)),
+                Some(AttrValue::Str("users/1000".into()))
+            );
+            assert_eq!(board(verb, Some(&agent_rooted)), None);
+            assert_eq!(board(verb, None), None);
+            let client = build_authz_request(
+                verb,
+                1000,
+                None,
+                maknae_security::Lane::Local,
+                None,
+                None,
+                &Stamp::Client,
+            );
+            assert_eq!(client.resource.0.get(RESOURCE_BOARD), None);
+        }
+        for verb in verbs
+            .iter()
+            .filter(|v| !matches!(v, Verb::BoardPost { .. } | Verb::BoardRead { .. }))
+        {
+            assert_eq!(board(verb, Some(&person)), None, "{}", verb_to_action(verb));
+        }
     }
 
     #[test]
