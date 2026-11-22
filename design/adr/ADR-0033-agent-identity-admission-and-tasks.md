@@ -199,3 +199,11 @@ What was wrong:
 ## Related
 
 ADR-0005, ADR-0006, ADR-0008, ADR-0018, ADR-0019, ADR-0024, ADR-0026, ADR-0029, ADR-0032, #472, #561, #608, #609, #610, #611, #628, #629, #630.
+
+## Amendment 2026-11-22 (#694): the board stamp, the tasks right and held posts
+
+Recorded by [ADR-0040](ADR-0040-the-agent-message-board.md) decisions 2, 5, 9 and 10. Three statements, owed, not built ([#695](https://github.com/darkhonor/maknae/issues/695), [#697](https://github.com/darkhonor/maknae/issues/697)):
+
+1. **The stamp.** Every reply to an agent-channel request that cites a `Working` task, and every `TaskClaim` reply to an agent holding a `Working` task (a claim or heartbeat never cites), gains `board_unseen` when the agent's board switches are all on: the count of unseen posts addressed to it on its task's board, and of new presence entries that overlap its task's bindings. It is omitted when zero or when any switch is off. A chain rooted at an agent (`agents/<id>`) has no board.
+2. **The tasks right.** `board.post` and `board.read` join every agent's built-in tasks right, so an agent `policy.yaml` whose `actions.deny` covers them refuses to load. `agent_arm` denies `board.manage` to every enrolled agent.
+3. **Containment holds posts,** under statement 9 of the amendment of 2026-11-11: a contained agent's posts, and every post on a contained person's board, are held for that subject, never delivered to an agent, expired or cleared, and released when an administrator releases what is held for the subject, whether or not it held any task.
