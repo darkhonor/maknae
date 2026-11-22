@@ -87,6 +87,8 @@ files = [
   "crates/maknae-kernel/src/board.rs",
   # #695: the board store at rest; a wrong arm loads a post onto another person's board.
   "crates/maknae-kernel/src/board_store.rs",
+  # #695: the board's site and agent switches; a wrong arm serves the board where it is off.
+  "crates/maknae-kernel/src/board_verbs.rs",
   # #628: the task facts a tasker verb is decided on; a wrong arm stamps another's task as owned.
   "crates/maknae-kernel/src/task_verbs.rs",
   "crates/maknae-kernel/src/enrollment.rs",

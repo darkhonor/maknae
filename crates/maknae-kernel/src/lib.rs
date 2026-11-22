@@ -9,6 +9,7 @@ pub mod baseline_check;
 mod blocking_guard;
 mod board;
 mod board_store;
+mod board_verbs;
 mod boot;
 mod boot_gate;
 mod ceiling_authz;
@@ -54,6 +55,9 @@ pub use board_store::{
     labels_of, BoardFinding, BoardKey, HeldFor, LabelValue, PostLabels, ReadPlan, Report, Settings,
     Stored, BOARD, BOARD_RECORD_MAX, BOARD_RETENTION,
 };
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+pub use board_verbs::FixedSwitches;
+pub use board_verbs::{BoardSwitches, SwitchesOff};
 pub use boot::{boot, read_files, BootConfig};
 #[cfg(any(test, feature = "hermetic-test-seam"))]
 pub use boot::{boot_as_owner, read_files_as_owner};

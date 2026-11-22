@@ -205,6 +205,7 @@ verify "/var/log/maknae ownership/mode" "$MUID $MGID 700" "$(stat -f '%u %g %Lp'
 STATE="/usr/local/var/db/maknae/state"
 CONV="$STATE/conversations"
 TASKS="$STATE/tasks"
+BOARD="$STATE/board"
 install -d -m 0700 -o "$MUID" -g "$MGID" "$STATE"
 hold_dir "$STATE" || { echo "maknae: cannot hold $STATE as root 0700 with no ACL; it is left root-owned" >&2; exit 1; }
 find "$STATE" -xdev -mindepth 1 -maxdepth 1 -type f -links 1 -nouser \
@@ -229,6 +230,16 @@ find "$TASKS" -xdev -mindepth 1 -maxdepth 1 -type f -links 1 -nouser \
     -exec chown -h "$MUID:$MGID" {} +
 chown -h "$MUID:$MGID" "$TASKS"
 verify "$TASKS ownership/mode" "$MUID $MGID 700" "$(stat -f '%u %g %Lp' "$TASKS")"
+if [ -L "$BOARD" ] || { [ -e "$BOARD" ] && [ ! -d "$BOARD" ]; }; then
+    echo "maknae: $BOARD is not a directory; $STATE is left root-owned" >&2
+    exit 1
+fi
+[ -d "$BOARD" ] || mkdir -m 0700 "$BOARD"
+hold_dir "$BOARD" || { echo "maknae: cannot hold $BOARD as root 0700 with no ACL; it is left root-owned" >&2; exit 1; }
+find "$BOARD" -xdev -mindepth 1 -maxdepth 1 -type f -links 1 -nouser \
+    -exec chown -h "$MUID:$MGID" {} +
+chown -h "$MUID:$MGID" "$BOARD"
+verify "$BOARD ownership/mode" "$MUID $MGID 700" "$(stat -f '%u %g %Lp' "$BOARD")"
 chown -h "$MUID:$MGID" "$STATE"
 verify "$STATE ownership/mode" "$MUID $MGID 700" "$(stat -f '%u %g %Lp' "$STATE")"
 

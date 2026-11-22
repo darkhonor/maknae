@@ -234,6 +234,8 @@ fn world_of(tag: &str, role: &str, roles: &str, agents: &[(&str, u32, &str)]) ->
         tasks,
         signer: Arc::new(FixedSigner),
         banner: Default::default(),
+        board: Arc::new(maknae_kernel::BoardStore::new()),
+        switches: Arc::new(maknae_kernel::SwitchesOff),
     };
     let mut cfg = maknae_config::transport_from_section(None).unwrap();
     cfg.prompt_max_bytes = maknae_config::PROMPT_MAX_BYTES_FLOOR;
@@ -400,6 +402,8 @@ impl World {
                 tasks,
                 signer: self.agents.signer.clone(),
                 banner: self.agents.banner.clone(),
+                board: Arc::new(maknae_kernel::BoardStore::new()),
+                switches: Arc::new(maknae_kernel::SwitchesOff),
             },
             clock: self.clock.clone(),
             blobs: self.blobs.clone(),

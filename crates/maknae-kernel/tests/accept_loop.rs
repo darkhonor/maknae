@@ -1646,6 +1646,8 @@ fn agents(pairs: &[(&str, u32)]) -> maknae_kernel::AgentAdmission {
         tasks: Arc::new(maknae_kernel::TaskStore::new()),
         signer: Arc::new(maknae_kernel::UnverifiedSigner),
         banner: Default::default(),
+        board: Arc::new(maknae_kernel::BoardStore::new()),
+        switches: Arc::new(maknae_kernel::SwitchesOff),
     }
 }
 

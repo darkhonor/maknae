@@ -1320,7 +1320,7 @@ mod tests {
     fn the_state_directory_line_names_tasks() {
         let unit = include_str!("../../../packaging/common/maknaed.service");
         let lines: Vec<&str> = unit.lines().map(str::trim).collect();
-        let want = "StateDirectory=maknae maknae/conversations maknae/tasks";
+        let want = "StateDirectory=maknae maknae/conversations maknae/tasks maknae/board";
         assert_eq!(lines.iter().filter(|l| **l == want).count(), 1);
         assert_eq!(maknae_config::state::TASKS_DIR, "tasks");
     }

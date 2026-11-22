@@ -5263,6 +5263,8 @@ pub struct AgentAdmission {
     pub tasks: Arc<crate::task::TaskStore>,
     pub signer: Arc<dyn crate::task::TaskSigner>,
     pub banner: Banner,
+    pub board: Arc<crate::board::BoardStore>,
+    pub switches: Arc<dyn crate::board_verbs::BoardSwitches>,
 }
 
 /// The operator's banner: loaded at start, replaced by each applied reload.
@@ -5276,6 +5278,8 @@ impl AgentAdmission {
             tasks: Arc::new(crate::task::TaskStore::new()),
             signer: Arc::new(crate::task::UnverifiedSigner),
             banner: Banner::default(),
+            board: Arc::new(crate::board::BoardStore::new()),
+            switches: Arc::new(crate::board_verbs::SwitchesOff),
         }
     }
 }
@@ -6017,6 +6021,7 @@ pub fn run(config_dir: &Path) -> ExitCode {
         policy_load: maknae_authz_basic::PolicySource::load,
         conversations_open: production_conversations,
         tasks_open: production_tasks,
+        board_open: production_board,
         banner_load: maknae_config::load_banner,
     };
     let code = runtime.block_on(async move {
@@ -7061,6 +7066,8 @@ struct Reloader<B: maknae_authz_basic::Baseline, E> {
     containment: Arc<ContainmentStatus>,
     /// Reconciled against every installed snapshot.
     tasks: Arc<crate::task::TaskStore>,
+    board: Arc<crate::board::BoardStore>,
+    switches: Arc<dyn crate::board_verbs::BoardSwitches>,
     banner: Banner,
     banner_load: BannerLoader,
     #[cfg(test)]
@@ -7184,6 +7191,8 @@ where
             tasks: Arc::clone(&self.tasks),
             signer,
             banner: Arc::clone(&self.banner),
+            board: Arc::clone(&self.board),
+            switches: Arc::clone(&self.switches),
         }
     }
 
@@ -7216,6 +7225,7 @@ where
         };
         settle_tasks(
             &self.tasks,
+            &self.board,
             self.sink.as_ref(),
             &ctx,
             BLOCKING_OPERATION_TIMEOUT,
@@ -9160,6 +9170,7 @@ struct BootSeams {
     policy_load: PolicyLoader,
     conversations_open: ConversationsOpener,
     tasks_open: TasksOpener,
+    board_open: BoardOpener,
     banner_load: BannerLoader,
 }
 
@@ -9221,6 +9232,53 @@ async fn open_tasks(
         sink.emit_within(&task_finding_record(ctx, &finding), AUDIT_APPEND_TIMEOUT)
             .await
             .map_err(|e| refused(format!("the trail refused a task record: {e}")))?;
+        store.settle(&finding).map_err(|e| refused(e.to_string()))?;
+    }
+    Ok(store)
+}
+
+type BoardOpener = fn(
+    &Path,
+    u32,
+    WrappingKey,
+) -> Result<Arc<crate::board::BoardStore>, crate::task_store::StoreError>;
+
+fn production_board(
+    dir: &Path,
+    owner: u32,
+    key: WrappingKey,
+) -> Result<Arc<crate::board::BoardStore>, crate::task_store::StoreError> {
+    let blobs =
+        crate::conversation::dir_store::DirBlobs::open(dir, owner, key, crate::board_store::BOARD)
+            .map_err(|e| crate::task_store::StoreError::Io(e.to_string()))?;
+    crate::board::BoardStore::open(Box::new(blobs), Arc::new(crate::task_store::SystemClock))
+        .map(Arc::new)
+}
+
+/// Opens the board store with the graph key, records each unreadable record in the
+/// trail, then quarantines it.
+async fn open_board<E: AuditEmit>(
+    config_dir: &Path,
+    state_dir: &Path,
+    seams: &BootSeams,
+    owner: u32,
+    sink: &E,
+    ctx: &BootCtx<'_>,
+) -> Result<Arc<crate::board::BoardStore>, RunError> {
+    let dir = state_dir.join(maknae_config::state::BOARD_DIR);
+    let refused = |e: String| {
+        RunError::Other(format!(
+            "board store {} cannot be opened: {e}",
+            dir.display()
+        ))
+    };
+    let key = (seams.graph_key)(config_dir).map_err(|e| refused(e.to_string()))?;
+    let store = (seams.board_open)(&dir, owner, WrappingKey::new(key.into_bytes()))
+        .map_err(|e| refused(e.to_string()))?;
+    for finding in store.take_boot_findings() {
+        sink.emit_within(&board_finding_record(ctx, &finding), AUDIT_APPEND_TIMEOUT)
+            .await
+            .map_err(|e| refused(format!("the trail refused a board record: {e}")))?;
         store.settle(&finding).map_err(|e| refused(e.to_string()))?;
     }
     Ok(store)
@@ -9483,6 +9541,7 @@ async fn close_due<E: AuditEmit>(
 /// notices. Whatever it leaves undone is itself recorded.
 async fn settle_tasks<E: AuditEmit>(
     tasks: &Arc<crate::task::TaskStore>,
+    _board: &Arc<crate::board::BoardStore>,
     emit: &E,
     ctx: &BootCtx<'_>,
     budget: Duration,
@@ -9544,6 +9603,7 @@ async fn record_task_failure<E: AuditEmit>(
 /// is recorded and left to the sweep; only a trail that refuses that record refuses boot.
 async fn reconcile_tasks_at_boot<E: AuditEmit>(
     tasks: &Arc<crate::task::TaskStore>,
+    _board: &Arc<crate::board::BoardStore>,
     view: &dyn crate::enrollment::EnrollmentView,
     emit: &E,
     ctx: &BootCtx<'_>,
@@ -9572,6 +9632,7 @@ async fn reconcile_tasks_at_boot<E: AuditEmit>(
 /// `TASK_SWEEP_STOP_TIMEOUT`, when `stop` is notified.
 async fn sweep_tasks<E: AuditEmit>(
     tasks: Arc<crate::task::TaskStore>,
+    board: Arc<crate::board::BoardStore>,
     emit: Arc<E>,
     where_: WhereCtx,
     euid: u32,
@@ -9595,7 +9656,7 @@ async fn sweep_tasks<E: AuditEmit>(
             _ = tick.tick() => (false, BLOCKING_OPERATION_TIMEOUT),
             _ = stop.notified() => (true, TASK_SWEEP_STOP_TIMEOUT),
         };
-        settle_tasks(&tasks, &*emit, &ctx, budget, true).await;
+        settle_tasks(&tasks, &board, &*emit, &ctx, budget, true).await;
         if stopping {
             return;
         }
@@ -9653,6 +9714,30 @@ fn task_finding_record(ctx: &BootCtx<'_>, finding: &crate::task_store::BootFindi
                 None,
             );
             rec.object = Some(format!("task-record:{name}"));
+            rec
+        }
+    }
+}
+
+fn board_finding_record(
+    ctx: &BootCtx<'_>,
+    finding: &crate::board_store::BoardFinding,
+) -> AuditRecord {
+    use crate::board_store::BoardFinding;
+    let ctx = BootCtx {
+        event: "board",
+        ..*ctx
+    };
+    match finding {
+        BoardFinding::Quarantined { name, why } => {
+            let mut rec = ctx.record(
+                "board.manage",
+                "deny",
+                &format!("quarantined: {why}"),
+                "unavailable",
+                None,
+            );
+            rec.object = Some(format!("board:{name}"));
             rec
         }
     }
@@ -10314,6 +10399,15 @@ async fn boot_after_sink(
         &graph_ctx,
     )
     .await?;
+    let board = open_board(
+        config_dir,
+        state_dir,
+        seams,
+        euid,
+        sink.as_ref(),
+        &graph_ctx,
+    )
+    .await?;
     booted.status.baseline = crate::baseline::BaselineStatus::new(crate::baseline::BaselineState {
         accepted: run,
         pending: pending.clone(),
@@ -10413,6 +10507,7 @@ async fn boot_after_sink(
     let authorizer = Arc::new(authorizer);
     reconcile_tasks_at_boot(
         &tasks,
+        &board,
         &crate::enrollment::SnapshotEnrollment(Arc::clone(&authorizer)),
         sink.as_ref(),
         &graph_ctx,
@@ -10566,6 +10661,8 @@ async fn boot_after_sink(
         lookup_breaker: account_lookup_breaker(),
         containment: containment_status,
         tasks,
+        board,
+        switches: Arc::new(crate::board_verbs::SwitchesOff),
         banner: Arc::new(std::sync::RwLock::new(banner)),
         banner_load: seams.banner_load,
         #[cfg(test)]
@@ -10746,6 +10843,7 @@ where
     let sweep_stop = Arc::new(tokio::sync::Notify::new());
     let mut sweeper = tokio::spawn(sweep_tasks(
         Arc::clone(&reloader.tasks),
+        Arc::clone(&reloader.board),
         Arc::clone(sink),
         wctx.clone(),
         reloader.euid,
@@ -15816,6 +15914,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             policy_load: maknae_authz_basic::PolicySource::load,
             conversations_open: memory_conversations,
             tasks_open: memory_tasks,
+            board_open: memory_board,
             banner_load: owned_banner,
         }
     }
@@ -15839,6 +15938,14 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         _: WrappingKey,
     ) -> Result<Arc<crate::task::TaskStore>, crate::task_store::StoreError> {
         Ok(Arc::new(crate::task::TaskStore::new()))
+    }
+
+    fn memory_board(
+        _: &Path,
+        _: u32,
+        _: WrappingKey,
+    ) -> Result<Arc<crate::board::BoardStore>, crate::task_store::StoreError> {
+        Ok(Arc::new(crate::board::BoardStore::new()))
     }
 
     fn memory_conversations(
@@ -16173,6 +16280,196 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             .all(|r| r.event == "boot" && r.outcome.result == "deny"));
         assert!(!blobs.has(pending));
         assert_eq!(blobs.aside(), vec!["sentinel-628-unreadable".to_string()]);
+    }
+
+    fn corrupt_board() -> (crate::task_store::MemTaskBlobs, String) {
+        let b = crate::task_store::MemTaskBlobs::default();
+        let name = format!("post.1000.{}", maknae_proto::PostId([0x95; 16]));
+        b.put(&name, b"sentinel-695-corrupt-post");
+        (b, name)
+    }
+
+    fn mem_board(
+        b: &crate::task_store::MemTaskBlobs,
+    ) -> Result<Arc<crate::board::BoardStore>, crate::task_store::StoreError> {
+        crate::board::BoardStore::open(
+            Box::new(b.clone()),
+            Arc::new(crate::task_store::SystemClock),
+        )
+        .map(Arc::new)
+    }
+
+    static BOARD_AT_BOOT: std::sync::OnceLock<(crate::task_store::MemTaskBlobs, String)> =
+        std::sync::OnceLock::new();
+    static BOARD_OPENED_AT: Mutex<Option<(PathBuf, u32)>> = Mutex::new(None);
+
+    fn board_found_at_boot(
+        dir: &Path,
+        owner: u32,
+        _: WrappingKey,
+    ) -> Result<Arc<crate::board::BoardStore>, crate::task_store::StoreError> {
+        *BOARD_OPENED_AT.lock().unwrap() = Some((dir.to_path_buf(), owner));
+        mem_board(&BOARD_AT_BOOT.get_or_init(corrupt_board).0)
+    }
+
+    #[test]
+    fn the_board_store_opens_beside_the_task_store() {
+        let _g = env_lock();
+        let d = fixture("board-opens");
+        let _ = block_on_run_inner_with(
+            &d.0,
+            BootSeams {
+                board_open: board_found_at_boot,
+                ..seams_with(TestEnv::default())
+            },
+        );
+        let (dir, owner) = BOARD_OPENED_AT
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("boot opens the board store");
+        assert_eq!(dir, state_dir(&d.0).join(maknae_config::state::BOARD_DIR));
+        assert_eq!(owner, nix::unistd::geteuid().as_raw());
+        let recs: Vec<AuditRecord> = trail_of(&d, "audit.jsonl")
+            .into_iter()
+            .filter(|r| r.event == "board")
+            .collect();
+        let (blobs, name) = BOARD_AT_BOOT.get().unwrap();
+        assert_eq!(recs.len(), 1, "{recs:?}");
+        assert_eq!(recs[0].object, Some(format!("board:{name}")));
+        assert_eq!(blobs.aside(), vec![name.clone()]);
+    }
+
+    struct BoardWitness {
+        blobs: crate::task_store::MemTaskBlobs,
+        refuse: bool,
+        seen: Mutex<Vec<(AuditRecord, Vec<String>)>>,
+    }
+
+    impl AuditEmit for BoardWitness {
+        fn emit(
+            &self,
+            rec: &AuditRecord,
+        ) -> impl Future<Output = Result<(), maknae_audit_append::AuditError>> + Send {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((rec.clone(), self.blobs.aside()));
+            let r = match self.refuse {
+                true => Err(maknae_audit_append::AuditError::WritePrimary(
+                    "sentinel-695-trail-refused".into(),
+                )),
+                false => Ok(()),
+            };
+            async move { r }
+        }
+    }
+
+    static BOARD_ORDERED: std::sync::OnceLock<(crate::task_store::MemTaskBlobs, String)> =
+        std::sync::OnceLock::new();
+    static BOARD_REFUSED: std::sync::OnceLock<(crate::task_store::MemTaskBlobs, String)> =
+        std::sync::OnceLock::new();
+
+    fn board_ordered(
+        _: &Path,
+        _: u32,
+        _: WrappingKey,
+    ) -> Result<Arc<crate::board::BoardStore>, crate::task_store::StoreError> {
+        mem_board(&BOARD_ORDERED.get_or_init(corrupt_board).0)
+    }
+
+    fn board_refused(
+        _: &Path,
+        _: u32,
+        _: WrappingKey,
+    ) -> Result<Arc<crate::board::BoardStore>, crate::task_store::StoreError> {
+        mem_board(&BOARD_REFUSED.get_or_init(corrupt_board).0)
+    }
+
+    async fn open_board_into(
+        opener: BoardOpener,
+        witness: &BoardWitness,
+    ) -> Result<Arc<crate::board::BoardStore>, RunError> {
+        let (seq, au3_1) = (Seq::new(), serde_json::json!({}));
+        let ctx = BootCtx {
+            event: "boot",
+            host: "h",
+            socket: "s",
+            euid: 77,
+            session_id: 9,
+            seq: &seq,
+            au3_1: &au3_1,
+        };
+        let seams = BootSeams {
+            board_open: opener,
+            ..test_seams()
+        };
+        open_board(
+            Path::new("/sentinel-695-config"),
+            Path::new("/sentinel-695-state"),
+            &seams,
+            77,
+            witness,
+            &ctx,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_board_finding_is_recorded_before_it_is_settled() {
+        let (blobs, name) = BOARD_ORDERED.get_or_init(corrupt_board);
+        let witness = BoardWitness {
+            blobs: blobs.clone(),
+            refuse: false,
+            seen: Mutex::default(),
+        };
+        let opened = open_board_into(board_ordered, &witness).await;
+        assert!(opened.is_ok(), "{:?}", opened.err());
+        let seen = witness.seen.into_inner().unwrap();
+        assert_eq!(seen.len(), 1);
+        let (rec, aside_when_recorded) = &seen[0];
+        assert!(
+            aside_when_recorded.is_empty(),
+            "settled before it was recorded"
+        );
+        assert_eq!(
+            (rec.event.as_str(), rec.action.as_str()),
+            ("board", "board.manage")
+        );
+        assert_eq!(
+            (
+                rec.outcome.result.as_str(),
+                rec.outcome.posture.as_str(),
+                rec.outcome.reason.as_str()
+            ),
+            (
+                "deny",
+                "unavailable",
+                "quarantined: the record does not decode"
+            )
+        );
+        assert_eq!(rec.object, Some(format!("board:{name}")));
+        assert_eq!(blobs.aside(), vec![name.clone()]);
+    }
+
+    #[tokio::test]
+    async fn boot_refuses_when_the_trail_refuses_a_board_finding() {
+        let (blobs, name) = BOARD_REFUSED.get_or_init(corrupt_board);
+        let witness = BoardWitness {
+            blobs: blobs.clone(),
+            refuse: true,
+            seen: Mutex::default(),
+        };
+        let opened = open_board_into(board_refused, &witness).await;
+        assert!(
+            matches!(&opened, Err(RunError::Other(m))
+                if m.contains("the trail refused a board record")
+                    && m.contains("sentinel-695-trail-refused")),
+            "{:?}",
+            opened.err()
+        );
+        assert!(blobs.aside().is_empty());
+        assert!(blobs.has(name));
     }
 
     fn store_graph(d: &Dir) -> maknae_graph::graph::Graph {
@@ -19600,6 +19897,8 @@ mod reload_fixture {
                 .unwrap(),
                 None => crate::task::TaskStore::new(),
             }),
+            board: Arc::new(crate::board::BoardStore::new()),
+            switches: Arc::new(crate::board_verbs::SwitchesOff),
             banner: Banner::default(),
             banner_load: super::boot_gate_tests::owned_banner,
             load_gate: opts.load_gate.map(|g| Arc::new(std::sync::Mutex::new(g))),
@@ -27974,6 +28273,7 @@ mod task_sweep_tests {
         blobs.fail(Some(Fail::Records));
         settle_tasks(
             &store,
+            &Arc::new(crate::board::BoardStore::new()),
             &*trail,
             &ctx(&seq, &au),
             Duration::from_secs(30),
@@ -27995,6 +28295,7 @@ mod task_sweep_tests {
         blobs.fail(None);
         settle_tasks(
             &store,
+            &Arc::new(crate::board::BoardStore::new()),
             &*trail,
             &ctx(&seq, &au),
             Duration::from_secs(30),
@@ -28015,6 +28316,7 @@ mod task_sweep_tests {
         blobs.slow(Some(Duration::from_millis(400)));
         let booted = reconcile_tasks_at_boot(
             &store,
+            &Arc::new(crate::board::BoardStore::new()),
             &nobody(),
             &*trail,
             &ctx(&seq, &au),
@@ -28043,6 +28345,7 @@ mod task_sweep_tests {
             assert!(Instant::now() < until, "the pass that outlived boot lands");
             settle_tasks(
                 &store,
+                &Arc::new(crate::board::BoardStore::new()),
                 &*trail,
                 &ctx(&seq, &au),
                 Duration::from_secs(5),
@@ -28065,6 +28368,7 @@ mod task_sweep_tests {
         let refusing = Trail::new(1);
         let refused = reconcile_tasks_at_boot(
             &store,
+            &Arc::new(crate::board::BoardStore::new()),
             &nobody(),
             &*refusing,
             &ctx(&seq, &au),
@@ -28092,6 +28396,7 @@ mod task_sweep_tests {
         };
         let mut sweeping = tokio::spawn(sweep_tasks(
             Arc::clone(&store),
+            Arc::new(crate::board::BoardStore::new()),
             Arc::clone(&trail),
             where_,
             77,
