@@ -8724,6 +8724,77 @@ mod tests {
         }
 
         #[test]
+        fn board_terms_are_subject_limitable_and_deniable_by_role() {
+            let limited = super::source_with(
+                &format!(
+                    "{}subjects:\n  daemon:\n    actions:\n      allow: [\"session.*\"]\n",
+                    super::SHIPPED
+                ),
+                Some("schema_version: 1\nbindings:\n  user: [\"daemon\"]\n"),
+                &[("daemon", 1)],
+            );
+            let pdp = BasicAuthorizer::from_snapshot(
+                super::principal(),
+                super::paths(),
+                super::test_digest,
+                super::compiled(&limited),
+            );
+            for action in ["board.post", "board.read"] {
+                let mut r = super::liveness_req(Some(1));
+                r.action = Action(action.into());
+                assert_eq!(
+                    pdp.decide(&r),
+                    Verdict::Deny {
+                        reason: format!(
+                            "subject daemon: {action} is not in subjects.daemon.actions allow"
+                        )
+                    }
+                );
+            }
+            let denied = super::source_with(
+                "schema_version: 1\nroles:\n  user:\n    allow: [\"session.new\", \"board.post\"]\n    deny: [\"board.read\"]\n",
+                Some("schema_version: 1\nbindings:\n  user: [\"daemon\"]\n"),
+                &[("daemon", 1)],
+            );
+            let pdp = BasicAuthorizer::from_snapshot(
+                super::principal(),
+                super::paths(),
+                super::test_digest,
+                super::compiled(&denied),
+            );
+            let mut r = super::liveness_req(Some(1));
+            r.action = Action("board.read".into());
+            assert_eq!(
+                pdp.decide(&r),
+                Verdict::Deny {
+                    reason: "denied by role grant board.read".into()
+                }
+            );
+            let ungranted = try_source(
+                "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nroles:\n  user:\n    allow: [\"session.new\"]\n",
+                None,
+                &[],
+                load(
+                    vec![hobi()],
+                    &[("hobi", "schema_version: 1\nactions:\n  allow: [\"fs.*\"]\n")],
+                ),
+            )
+            .unwrap();
+            let a = auth(&ungranted, 501);
+            for action in ["board.post", "board.read"] {
+                let mut r = agent_channel(whoami(i64::from(HOBI)), "hobi");
+                r.action = Action(action.into());
+                assert_eq!(
+                    a.decide(&r),
+                    Verdict::NotApplicable {
+                        note: Some(format!("role user: no rule for {action}"))
+                    },
+                    "{action}"
+                );
+            }
+        }
+
+        #[test]
         fn an_agent_gets_the_board_terms_by_its_built_in_right() {
             let src = try_source(
                 super::shipped_denying(),

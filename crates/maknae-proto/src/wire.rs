@@ -745,7 +745,7 @@ pub enum Verb {
     AgentList {
         after: Option<String>,
     },
-    /// Post to the board of the cited task's root tasker (ADR-0040); a prompt frame because it carries content.
+    /// Post to the board of the cited task's root tasker (ADR-0040).
     BoardPost {
         post: crate::PostDraft,
     },
