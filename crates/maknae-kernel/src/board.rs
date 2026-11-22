@@ -401,12 +401,14 @@ impl BoardStore {
         Ok(())
     }
 
+    /// Poison is recovered: `held` changes only by whole inserts and assignments made after
+    /// the I/O that justifies them, so a panicking holder leaves it valid.
     fn held(&self) -> std::sync::MutexGuard<'_, Held> {
         self.held.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The write path's own lock: held across I/O, never by a reader. Whoever takes it
-    /// first retries every owed removal.
+    /// first retries every owed removal. Poison is recovered: it guards no state of its own.
     fn writing(&self) -> std::sync::MutexGuard<'_, ()> {
         let w = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
         let owed: Vec<String> = self.held().owed.iter().cloned().collect();
@@ -715,6 +717,7 @@ mod tests {
         );
         assert!(store.get(BOB, PostId([1; 16])).is_none());
         assert!(store.candidates(BOB, 0, 10).is_empty());
+        assert!(!b.has(&crate::board_store::Name::Post(BOB, PostId([1; 16])).text()));
         b.crash(0);
         let store = open_mem(&b, SMALL);
         assert!(store.get(BOB, PostId([1; 16])).is_none());
