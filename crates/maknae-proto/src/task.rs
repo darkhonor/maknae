@@ -2438,15 +2438,11 @@ mod tests {
         assert!(err.contains("more than 8 bindings"), "{err}");
         let err = view_with(sealed).unwrap_err();
         assert!(err.contains("more than 8 bindings"), "{err}");
-        let mut not_a_list = submission_value(None);
-        if let ciborium::Value::Map(m) = &mut not_a_list {
-            m.push((
-                ciborium::Value::Text("bindings".into()),
-                ciborium::Value::Integer(8.into()),
-            ));
-        }
-        let err = dec::<TaskSubmission>(&enc(&not_a_list)).unwrap_err();
-        assert!(err.contains("expected array"), "{err}");
+        type Primitive = serde::de::value::U32Deserializer<serde::de::value::Error>;
+        let err = bounded_requests(Primitive::new(8)).unwrap_err().to_string();
+        assert!(err.contains("a list of at most 8 bindings"), "{err}");
+        let err = bounded_bindings(Primitive::new(8)).unwrap_err().to_string();
+        assert!(err.contains("a list of at most 8 bindings"), "{err}");
     }
 
     #[test]
