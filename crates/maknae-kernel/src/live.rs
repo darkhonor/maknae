@@ -1,17 +1,20 @@
 //! What an accepted baseline swaps in for the next request (#490): the redacted
 //! config view and the providers authority. The principal is the baseline
-//! operand's own holder, installed in the same live turn; the ceiling is not live.
+//! operand's own holder, installed in the same live turn; the ceiling and the
+//! forges are not live.
 
 use std::sync::{Arc, PoisonError, RwLock};
 
 use crate::baseline_check::Validated;
 use crate::provider_choice::ProviderAuthority;
 use crate::run::ConfigView;
+use maknae_config::ForgeSet;
 
 type Served = (Arc<ConfigView>, Arc<Option<ProviderAuthority>>, u64);
 
 pub struct LiveConfig {
     served: RwLock<Arc<Served>>,
+    forges: Arc<ForgeSet>,
 }
 
 /// One accepted live baseline, installed whole in the composition's live turn.
@@ -33,13 +36,26 @@ impl LiveValues {
 
 impl LiveConfig {
     pub fn new(view: ConfigView, providers: Option<ProviderAuthority>) -> Self {
+        Self::with_forges(view, providers, ForgeSet::empty())
+    }
+
+    fn with_forges(
+        view: ConfigView,
+        providers: Option<ProviderAuthority>,
+        forges: ForgeSet,
+    ) -> Self {
         Self {
             served: RwLock::new(Arc::new((Arc::new(view), Arc::new(providers), 0))),
+            forges: Arc::new(forges),
         }
     }
 
     pub fn of(v: &Validated) -> Self {
-        Self::new(config_view_of(v), providers_of(v))
+        Self::with_forges(config_view_of(v), providers_of(v), v.boot.forges().clone())
+    }
+
+    pub(crate) fn forges(&self) -> &Arc<ForgeSet> {
+        &self.forges
     }
 
     fn served(&self) -> Arc<Served> {
@@ -256,6 +272,25 @@ mod tests {
             matches!(pdp.decide(&marked), Verdict::Deny { ref reason } if reason.starts_with("ceiling: ")),
             "the booted ceiling still refuses SECRET content"
         );
+    }
+
+    #[test]
+    fn the_forges_are_the_validated_baselines_and_an_install_never_changes_them() {
+        const FORGES: &str =
+            r#"[{"host":"github.com","kind":"git","name":"github","provider":"github"}]"#;
+        let env = FakeEnv::default();
+        let first = validated(&with(&[("forges", FORGES)]), &env).unwrap();
+        let live = LiveConfig::of(&first);
+        assert_eq!(**live.forges(), *first.boot.forges());
+        assert_eq!(live.forges().get("github").unwrap().host, "github.com");
+        let held = Arc::clone(live.forges());
+        let next = validated(&minimal(), &env).unwrap();
+        assert!(next.boot.forges().is_empty());
+        let values = LiveValues::of(&next);
+        install_view(&live, values.view, values.providers);
+        assert!(Arc::ptr_eq(&held, live.forges()));
+        assert_eq!(live.forges().len(), 1);
+        assert!(LiveConfig::new(view("a", "1"), None).forges().is_empty());
     }
 
     #[test]

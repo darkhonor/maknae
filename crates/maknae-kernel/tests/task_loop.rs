@@ -1251,6 +1251,44 @@ async fn an_agent_claims_in_fifo_order_across_taskers() {
 }
 
 #[tokio::test]
+async fn an_agent_fetches_the_catalog_its_claim_stamped() {
+    let w = world_in(
+        "catalog-fetch",
+        "user",
+        "roles:\n  user:\n    allow: [\"session.task\", \"tool.catalog\"]\n",
+        PLAIN,
+        PLAIN,
+    );
+    let records = Records::new(0);
+    let reply = |raw: Vec<u8>| async move {
+        let mut cursor = &raw[..];
+        let frame = common::read_frame(&mut cursor, 1 << 20)
+            .await
+            .expect("one frame");
+        maknae_proto::decode_response(&frame).unwrap()
+    };
+    let claim = reply(w.agent_raw("hobi", CLAIM, None, &records).await).await;
+    assert!(
+        matches!(claim.result, RespResult::Ok(Payload::TaskIdle)),
+        "{claim:?}"
+    );
+    let stamp = claim.catalog_digest.expect("a claim reply is stamped");
+    let fetched = reply(
+        w.agent_raw("hobi", Verb::ToolCatalog {}, None, &records)
+            .await,
+    )
+    .await;
+    let RespResult::Ok(Payload::ToolCatalog(view)) = fetched.result else {
+        panic!("tool.catalog: {fetched:?} {:?}", reasons(&records));
+    };
+    assert_eq!(view.digest, stamp);
+    assert_eq!(
+        maknae_proto::CatalogDigest(maknae_crypto::sha256(&view.graph.0)),
+        view.digest
+    );
+}
+
+#[tokio::test]
 async fn claim_with_none_redelivers_the_working_task_and_some_returns_only_new_follow_ups() {
     let w = world("claim-again", "user", true);
     let id = w.submit("hobi", "a").await;
@@ -3973,4 +4011,190 @@ async fn a_queued_task_waits_on_nothing_even_while_due_a_hold() {
     let tj = w.mine("jin");
     w.working(&tj);
     w.give("jin", "hobi", tj).await;
+}
+
+const HOMELAB_TOOLS: &str = include_str!("../../../packaging/common/tools-homelab.yaml");
+const RUST_BUILD: &str =
+    "schema_version: 1\npermissions:\n  allow: [\"Tool(rust-build cargo build *)\"]\n";
+
+impl World {
+    async fn agent_response(&self, agent: &str, verb: Verb) -> Response {
+        self.agent_response_with(agent, verb, &Records::new(0))
+            .await
+    }
+
+    async fn agent_response_with(
+        &self,
+        agent: &str,
+        verb: Verb,
+        records: &Arc<Records>,
+    ) -> Response {
+        let raw = self.agent_raw(agent, verb, None, records).await;
+        let mut cursor = &raw[..];
+        let frame = common::read_frame(&mut cursor, 1 << 20)
+            .await
+            .expect("one frame");
+        maknae_proto::decode_response(&frame).unwrap()
+    }
+
+    fn catalog_digest(&self, uid: u32) -> maknae_proto::CatalogDigest {
+        self.pdp
+            .catalog_for(uid, self.me + 1, &maknae_config::ForgeSet::empty())
+            .unwrap()
+            .digest
+    }
+
+    fn tools(&self, body: &str) {
+        common::write_0640(&self.root.join(maknae_config::TOOLS_FILE), body);
+        self.pdp.baseline().reload_from_file().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn every_task_claim_reply_kind_is_stamped() {
+    let w = world_with("stamp-kinds", "user", true, RUST_BUILD, PLAIN);
+    w.tools(HOMELAB_TOOLS);
+    let want = Some(w.catalog_digest(HOBI_UID));
+    let stamped = |resp: Response, kind: &str| {
+        assert_eq!(resp.catalog_digest, want, "{kind}: {resp:?}");
+        resp.result
+    };
+    let idle = stamped(w.agent_response("hobi", CLAIM).await, "claim idle");
+    assert!(
+        matches!(idle, RespResult::Ok(Payload::TaskIdle)),
+        "{idle:?}"
+    );
+    let beat = || Verb::TaskClaim {
+        seen_follow_ups: Some(0),
+    };
+    let idle = stamped(w.agent_response("hobi", beat()).await, "heartbeat idle");
+    assert!(
+        matches!(idle, RespResult::Ok(Payload::TaskIdle)),
+        "{idle:?}"
+    );
+
+    let id = w.submit("hobi", "a").await;
+    w.submit("hobi", "b").await;
+    let delivered = stamped(w.agent_response("hobi", CLAIM).await, "delivered");
+    assert!(
+        matches!(delivered, RespResult::Ok(Payload::TaskDelivered(_))),
+        "{delivered:?}"
+    );
+    let follow_ups = stamped(w.agent_response("hobi", beat()).await, "follow-ups");
+    assert!(
+        matches!(follow_ups, RespResult::Ok(Payload::TaskFollowUps(_))),
+        "{follow_ups:?}"
+    );
+    w.ask(Verb::TaskStop { task: r(&id) }).await;
+    let closed = stamped(w.agent_response("hobi", beat()).await, "closed");
+    assert!(
+        matches!(closed, RespResult::Ok(Payload::TaskState(_))),
+        "{closed:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_tools_reload_changes_the_next_stamp() {
+    let w = world_with("stamp-reload", "user", true, RUST_BUILD, PLAIN);
+    w.tools(HOMELAB_TOOLS);
+    let before = w.agent_response("hobi", CLAIM).await.catalog_digest;
+    assert_eq!(before, Some(w.catalog_digest(HOBI_UID)));
+    w.tools(&HOMELAB_TOOLS.replace(
+        "Build, check, lint and test a workspace with no network.",
+        "sentinel-674 reloaded",
+    ));
+    let after = w.agent_response("hobi", CLAIM).await.catalog_digest;
+    assert_eq!(after, Some(w.catalog_digest(HOBI_UID)));
+    assert_ne!(after, before);
+}
+
+#[tokio::test]
+async fn an_idle_claim_whose_tasker_standing_is_undecided_is_stamped() {
+    let w = world("stamp-undecided", "user", true);
+    let queued = w.anothers("hobi");
+    common::write_0640(
+        &maknae_authz_basic::PolicyPaths::in_dir(&w.root).bindings,
+        &format!(
+            "schema_version: 1\nbindings:\n  user: [\"{}\", \"sentinel-674-no-such-user\"]\n",
+            w.user
+        ),
+    );
+    w.pdp.baseline().reload_from_file().unwrap();
+    let records = Records::new(0);
+    let resp = w.agent_response_with("hobi", CLAIM, &records).await;
+    assert!(
+        matches!(resp.result, RespResult::Ok(Payload::TaskIdle)),
+        "{resp:?}"
+    );
+    let rec = task_records(&records).pop().unwrap();
+    assert!(
+        rec.outcome
+            .reason
+            .starts_with("idle: the tasker's standing could not be decided: "),
+        "{}",
+        rec.outcome.reason
+    );
+    assert_eq!(rec.subject.task_id, Some(queued.to_string()));
+    assert_eq!(resp.catalog_digest, Some(w.catalog_digest(HOBI_UID)));
+}
+
+/// `inner`, whose load reads as another after its first `stable` readings.
+struct LoadChangesAfter {
+    inner: Arc<dyn maknae_kernel::EnrollmentView>,
+    stable: usize,
+    reads: std::sync::atomic::AtomicUsize,
+    first: Arc<dyn std::any::Any + Send + Sync>,
+}
+
+impl maknae_kernel::EnrollmentView for LoadChangesAfter {
+    fn agent_uid(&self, id: &maknae_config::AgentId) -> Option<u32> {
+        self.inner.agent_uid(id)
+    }
+    fn agents(&self) -> Vec<(maknae_config::AgentId, u32)> {
+        self.inner.agents()
+    }
+    fn is_enrolled(&self, uid: u32) -> bool {
+        self.inner.is_enrolled(uid)
+    }
+    fn contained(&self, uid: u32) -> bool {
+        self.inner.contained(uid)
+    }
+    fn unresolved(&self, uid: u32) -> bool {
+        self.inner.unresolved(uid)
+    }
+    fn load(&self) -> maknae_kernel::Load {
+        let n = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if n < self.stable {
+            maknae_kernel::Load::installed(Arc::clone(&self.first))
+        } else {
+            maknae_kernel::Load::installed(Arc::new(n))
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_claim_that_loses_the_race_to_a_reload_is_idle_and_stamped() {
+    let mut w = world("stamp-lost-race", "user", true);
+    let queued = w.submit("hobi", "a").await;
+    w.agents.view = Arc::new(LoadChangesAfter {
+        inner: Arc::clone(&w.agents.view),
+        stable: 2,
+        reads: Default::default(),
+        first: Arc::new(()),
+    });
+    let records = Records::new(0);
+    let resp = w.agent_response_with("hobi", CLAIM, &records).await;
+    assert!(
+        matches!(resp.result, RespResult::Ok(Payload::TaskIdle)),
+        "{resp:?}"
+    );
+    let said = task_records(&records);
+    assert_eq!(
+        said.iter()
+            .map(|r| r.outcome.reason.as_str())
+            .collect::<Vec<_>>(),
+        ["intent recorded", "idle"]
+    );
+    assert_eq!(w.store().record(&queued).unwrap().state, TaskState::Queued);
+    assert_eq!(resp.catalog_digest, Some(w.catalog_digest(HOBI_UID)));
 }

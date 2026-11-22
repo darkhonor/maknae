@@ -328,6 +328,18 @@ impl AuthzPolicy {
         })
     }
 
+    /// The lists `evaluate3_agent` (with `right`) and `evaluate3_floored` consult, by stage.
+    pub fn effective_lists<'a>(
+        &'a self,
+        right: Option<&'a SubjectPermissions>,
+        subject: Option<&'a SubjectPermissions>,
+    ) -> EffectiveLists<'a> {
+        EffectiveLists {
+            right: right.map(|r| Stage::of(self.right_lists(r))),
+            floored: Stage::of(self.lists(subject)),
+        }
+    }
+
     fn lists<'a>(
         &'a self,
         subject: Option<&'a SubjectPermissions>,
@@ -568,6 +580,29 @@ fn read_glob(p: &Pattern) -> Option<&PathGlob> {
         Pattern::Read(g) => Some(g),
         Pattern::Write(_) | Pattern::Tool(_) => None,
     }
+}
+
+/// One stage of a decision: its denies, in the order consulted, then its allow list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stage<'a> {
+    pub allow: &'a [Pattern],
+    pub deny: Vec<&'a [Pattern]>,
+}
+
+impl<'a> Stage<'a> {
+    fn of((deny, allow): (DenyLists<'a>, SourcedList<'a>)) -> Self {
+        Stage {
+            allow: allow.patterns,
+            deny: deny.iter().flatten().map(|l| l.patterns).collect(),
+        }
+    }
+}
+
+/// [`AuthzPolicy::effective_lists`]: an agent's built-in right, then the floored stage.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EffectiveLists<'a> {
+    pub right: Option<Stage<'a>>,
+    pub floored: Stage<'a>,
 }
 
 struct SourcedList<'a> {
@@ -4036,6 +4071,48 @@ mod tests {
                 source: "Tool(a prog run *)".into()
             })
         );
+    }
+
+    #[test]
+    fn effective_lists_are_the_lists_the_pdp_evaluates() {
+        let p = parse_authz(
+            "schema_version: 1\npermissions:\n  allow: [\"Tool(e p a *)\"]\n  deny: [\"Tool(e p a b)\"]\nsubjects:\n  alice:\n    permissions:\n      allow: [\"Tool(e p c *)\"]\n      deny: [\"Tool(e p c d)\"]\n",
+        )
+        .unwrap();
+        let alice = p.subjects["alice"].permissions.as_ref().unwrap();
+        let right = crate::tasks_right().unwrap();
+        fn same(stage: &Stage<'_>, (deny, allow): (DenyLists<'_>, SourcedList<'_>)) -> bool {
+            let deny: Vec<&[Pattern]> = deny.iter().flatten().map(|l| l.patterns).collect();
+            std::ptr::eq(stage.allow, allow.patterns)
+                && stage.deny.len() == deny.len()
+                && stage
+                    .deny
+                    .iter()
+                    .zip(&deny)
+                    .all(|(a, b)| std::ptr::eq(*a, *b))
+        }
+
+        let site = p.effective_lists(None, None);
+        assert!(site.right.is_none());
+        assert!(same(&site.floored, p.lists(None)));
+        assert_eq!(site.floored.allow, p.allow.as_slice());
+        assert_eq!(site.floored.deny, [p.deny.as_slice()]);
+
+        let replacing = p.effective_lists(None, Some(alice));
+        assert!(replacing.right.is_none());
+        assert!(same(&replacing.floored, p.lists(Some(alice))));
+        assert_eq!(replacing.floored.allow, alice.allow.as_slice());
+        assert_eq!(
+            replacing.floored.deny,
+            [p.deny.as_slice(), alice.deny.as_slice()]
+        );
+
+        let agent = p.effective_lists(Some(&right), Some(alice));
+        let r = agent.right.as_ref().unwrap();
+        assert!(same(r, p.right_lists(&right)));
+        assert_eq!(r.allow, right.allow.as_slice());
+        assert_eq!(r.deny, [p.deny.as_slice()]);
+        assert!(same(&agent.floored, p.lists(Some(alice))));
     }
 
     #[test]

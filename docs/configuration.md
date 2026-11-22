@@ -488,6 +488,11 @@ color: "#ffd700"
 - **A workspace mount is decided as a subtree.** The subject needs a covering `Read` grant over the workspace root, and `Write` as well for a read-write mount. A root at or above the subject's own home is refused, as is a root at, beneath or above `/run`, `/tmp`, `/var/tmp`, `/var/run`, `/var/folders`, `/proc`, `/sys`, `/dev`, `/etc`, `/usr`, `/var/lib/maknae` or `/var/log/maknae`. An agent's root must lie inside its task's partition. A deny, or a `sensitive.yaml` entry, on the root refuses the mount. One beneath the root does not: it is added to the mask set. The mask set is computed now; the launch obligation carries it (#674) and the front end applies it (#479). No verb calls this decision yet (#479).
 - A grant naming an entry that `tools.yaml` lacks or disables, or a program its entry does not run, loads and grants nothing; a `graph.identity` record names it (`tool_grant_unknown_entry`, `tool_grant_unknown_program`).
 
+**The tool catalog (`tool.catalog`).** A subject fetches its own catalog with the action `tool.catalog`: each enabled entry its `Tool(...)` grants reach, with the entry's own `subcommands` that some effective allow overlaps and no deny covers, and the forges (§6.6) serving the binding kinds those entries bind. It never carries an entry's image, isolation, network, volumes, resources, `deny_args` or credential class. The packaged `authz.yaml` grants `tool.catalog` to `admin` and `user`, and every agent holds it through its tasks right (§6.4). It is grantable in `roles:`, and a `subjects:` entry's `actions:` limit refuses it like any other limited term. A contained subject is refused `tool.catalog` and its catalog is empty, and an agent's catalog leaves out every entry whose credential class has no reach check. The catalog is a menu, not a permission: the PDP decides every tool call, whatever the catalog lists.
+
+- **From the CLI.** `maknae tools` prints each entry, then one line per program and subcommand, then the forges under `forges:`. It refuses a reply whose bytes do not match the digest the kernel sent.
+- **In the Agent Daemon.** The reply to an agent's task claim carries the digest of its catalog. The Agent Daemon fetches the catalog again only when that digest changes, and drops the one it holds when a fetch is refused, or the reply does not match its digest or does not decode.
+
 ---
 
 ## 3. Sections and precedence
@@ -504,6 +509,7 @@ color: "#ffd700"
 > | `vault` | `addr`, `approle_mount`, `pki_int_mount`, `deployment_id`, `insecure_plaintext_secret_path`, `user_auth`, `kv_mount`, `user_prefix`, `plane_key` (`crates/maknae-vault/src/config.rs`). In the **root** `maknae.yaml`, `kv_mount` and `user_prefix` refuse boot — `vault.kv_mount in the root maknae.yaml is not read by maknaed: set kv_mount in egress-bounds.yaml` (likewise `user_prefix`), shadowed `config.d/` blocks included — because the host's copy lives in `egress-bounds.yaml` (§6.1.3); they belong in each user's `maknae.yaml` (§6.1.2) |
 > | `vault.user_auth` | `type`, `mount` |
 > | `providers` (each entry) | `name`, `endpoint`, `models`, `reasoning_effort`, `output_tokens_field` (§6.1) |
+> | `forges` (each entry) | `name`, `kind`, `host`, `provider` (§6.6) |
 > | `egress` | `socket_path`, `deadline_ms` (§6.2) |
 > | `deployment` | `mode`, `account_source` (§6.5) |
 >
@@ -566,7 +572,7 @@ maknae baseline-accept <hash>        # the 64-character hash baseline-show print
 |---|---|
 | `principal`, and `providers` while it stays non-empty | **live**: the next decision uses it |
 | `audit.readers` | **live**: no restart; `maknaed` reads nothing from it. The grant follows the file: the packages and the runbook's "Grant the declared readers" block read `maknae.yaml`, and the accept records the list and resolves each account (§6.3) |
-| everything else, including all of `core.handling`: adding the block, the ceiling and its level, `accreditation_ref` and `policy` (the classification system); every other `core` key, `vault`, `deployment`, `transport`, `egress`, `lake`, the other `audit` keys, `providers` going from empty to non-empty or back, and a section added or removed | **by restart** |
+| everything else, including all of `core.handling`: adding the block, the ceiling and its level, `accreditation_ref` and `policy` (the classification system); every other `core` key, `vault`, `deployment`, `transport`, `egress`, `forges`, `lake`, the other `audit` keys, `providers` going from empty to non-empty or back, and a section added or removed | **by restart** |
 
 A set that contains any restart change applies by restart as a whole. A live accept is persisted, then installed in one step once the decisions in flight have finished; no decision sees part of it. A restart accept is persisted and checkpointed, then `maknaed` stops admitting connections (each is closed unserved, recorded as `connect` denied `draining to apply an accepted baseline`), lets the requests in flight finish under the old baseline, and exits **6**. systemd (`Restart=on-failure`) and launchd (`KeepAlive` with `SuccessfulExit` false) start it again, and the new process runs the accepted baseline. A live accept whose install fails after the persist applies by restart in the same way. A restart accept whose persist fails after admission stopped exits 1, and the supervisor restarts the daemon on the unchanged baseline, with the set still pending.
 
@@ -762,12 +768,13 @@ an `UnknownSection` error.
 
 ## 6. Extension sections
 
-A section the daemon does not register is `ConfigError::UnknownSection`, which **refuses boot** and names the file it came from: `unknown config section '<section>' in '<path>' (no registered spec)`. The registered set is `crates/maknae-kernel/src/boot.rs`'s `boot_specs()` — `lake`, `vault`, `transport`, `audit`, `principal`, `providers`, `egress`, `deployment`, plus `core` — so every row below marked Forthcoming or Withdrawn stops the daemon if written, rather than being ignored. Of the extension sections, `providers` (§6.1), `egress` (§6.2), `audit` (§6.3) and `deployment` (§6.5) can be configured today.
+A section the daemon does not register is `ConfigError::UnknownSection`, which **refuses boot** and names the file it came from: `unknown config section '<section>' in '<path>' (no registered spec)`. The registered set is `crates/maknae-kernel/src/boot.rs`'s `boot_specs()` — `lake`, `vault`, `transport`, `audit`, `principal`, `providers`, `forges`, `egress`, `deployment`, plus `core` — so every row below marked Forthcoming or Withdrawn stops the daemon if written, rather than being ignored. Of the extension sections, `providers` (§6.1), `egress` (§6.2), `audit` (§6.3), `deployment` (§6.5) and `forges` (§6.6) can be configured today.
 
 | Section | Owner | Status |
 |---|---|---|
 | `authz` | authorization policy *(the config-section registration; the policy FILES `/etc/maknae/authz.yaml` and `/etc/maknae/bindings.yaml` (§2.3) are separate and are enforced per request from a snapshot compiled at start and at `SIGHUP` reload — see the runbook)* | Forthcoming |
 | `providers` | the model providers this host authorizes (ADR-0028 decision 1) — **see §6.1** | **Shipped** |
+| `forges` | the git servers this host authorizes (#674) — **see §6.6** | **Shipped** |
 | `egress` | where `maknaed` finds the egress deputy, and the outer bound on one provider call (#240) — **see §6.2** | **Shipped** |
 | `deployment` | the kind of host `maknaed` runs on, and the account-state source it asks (#115) — **see §6.5** | **Shipped**; required |
 | `provider` | the single registered provider, replaced by `providers` (#153) | Withdrawn — **writing it refuses boot** |
@@ -1163,9 +1170,9 @@ taskers:
   - "agent:hobi"
 ```
 
-- Every agent holds a built-in tasks right whatever its `policy.yaml` says or whether it has one. Files: `Read(~/tasks/**)`, `Write(~/tasks)` and `Write(~/tasks/**)`, decided after the site `deny` and before the agent's own `permissions`, cited `rule:agents.<id>.tasks-right:allow:<i>` in the section `agents.<id>.tasks-right`. Sessions: `session.new`, `session.prompt` and `session.close`, added to an `actions.allow` the agent writes. The agent's `actions:` limit never refuses a file request the right decides; the role decides the session actions, and the packaged `user` role holds all three.
+- Every agent holds a built-in tasks right whatever its `policy.yaml` says or whether it has one. Files: `Read(~/tasks/**)`, `Write(~/tasks)` and `Write(~/tasks/**)`, decided after the site `deny` and before the agent's own `permissions`, cited `rule:agents.<id>.tasks-right:allow:<i>` in the section `agents.<id>.tasks-right`. Actions: `session.new`, `session.prompt`, `session.close` and `tool.catalog`, added to an `actions.allow` the agent writes. The agent's `actions:` limit never refuses a file request the right decides; the role decides these actions, and the packaged `user` role holds all four.
 - Without `permissions`, the agent holds no file access beyond its tasks right. `permissions.allow` replaces the site allow list for the agent and adds to the right.
-- A `permissions.deny` whose path is `~/tasks` or begins `~/tasks/`, and an `actions.deny` that covers `session.new`, `session.prompt` or `session.close` (`session.*` included), refuse the reload. Any other deny loads and is outranked inside `~/tasks`.
+- A `permissions.deny` whose path is `~/tasks` or begins `~/tasks/`, and an `actions.deny` that covers `session.new`, `session.prompt`, `session.close` or `tool.catalog` (`session.*` and `tool.*` included), refuse the reload. Any other deny loads and is outranked inside `~/tasks`.
 - `actions` limits `fs.stat` and `fs.list` by its `fs.read` entry; naming either refuses the reload (§2.5).
 - `admin.*` is always refused to an agent, except `admin.whoami`; no file can grant it.
 - `taskers` names who may task this agent with `session.task`: account names, `uid:<n>` entries and `agent:<id>` entries. Without the key, only people may task it; another agent may task it only when listed. `taskers: []` admits nobody. Each tasker also needs `session.task` from its own role; the shipped `authz.yaml` grants it to `admin` and `user`. How tasks are stored and bounded, and the partition each works in, are in §2.6.
@@ -1210,6 +1217,32 @@ deployment:
 A marker that cannot be examined refuses the boot. The check applies to the baseline the start runs (§3.2): over an accepted baseline whose mode the host confirms, a file whose mode it contradicts is recorded as an invalid change and the accepted mode runs. The environment variables only ever let `container` start; they never refuse `linux-host`. On `linux-host` and `macos-host` the daemon binds the client socket and checks every session as the runbook's "Session checks" describes. On `container` it binds no client socket at all and logs `maknaed: deployment.mode is container; no client listener is bound`; the human path in a container deployment is the gateway (#117).
 
 **`account_source`** is where the daemon asks a local account's state on every request. `userdb` (the default on `linux-host`) asks `systemd-userdbd` (`/run/systemd/userdb/io.systemd.Multiplexer`) about each account listed in `/etc/passwd`; a locked, expired or not-yet-valid account is refused, and a userdbd that does not answer refuses every local account. `none` checks no account state, and each admission record says so (`admitted (account: not-checked:configured)`). Set `none` only on a host without `systemd-userdbd`, and set `userdb` once it is installed. On `macos-host` only `none` is accepted (omit the key); `container` mode checks no account state, so on `container` the key may not be set at all. A directory-backed account (SSSD, LDAP, AD) is never asked; its admission record reads `not-checked:directory` (#117).
+
+### 6.6 The `forges` section
+
+The git servers ("forges") this host authorizes, beside `providers` (§6.1). `maknaed` reads the list at start. A forge's `host` is a link server: listing one grants no network reach, and it is not a container network site.
+
+```yaml
+forges:
+  - { name: github, kind: git, host: github.com,            provider: github }
+  - { name: lab,    kind: git, host: gitlab.lab.local:8443, provider: gitlab }
+```
+
+The value is a list of at most **32** entries, and each `name` may appear once (`forges[<i>].name '<name>' is listed more than once`). Each entry has exactly the keys `name`, `kind`, `host` and `provider`, all required; any other key refuses with `unknown key '<key>' in 'forges'` (`crates/maknae-config/src/forges.rs`).
+
+| Key | Accepted |
+|---|---|
+| `name` | 1 to 64 bytes of lowercase ASCII letters, digits and `-`. |
+| `kind` | `git`, the only binding kind today. |
+| `host` | a host name, an IPv4 literal or a bracketed IPv6 literal, with an optional `:port` in 1–65535 and no leading zero. It follows the same host rules as a provider `endpoint` (§6.1): refused are a scheme (`https://github.com`), a path, userinfo, whitespace, an empty host (`:22`), `a..b`, a leading or trailing `-` or `.`, and a port of `0`, `08` or `65536`. It is stored lowercased. |
+| `provider` | `github` or `gitlab`. It tells the client which link forms to recognize. |
+
+A malformed entry refuses start with `InvalidForge`, which reads `invalid forge config: <reason>` and names the entry by index, for example `invalid forge config: forges[0].host must be a host name or IP address with an optional port in 1 to 65535, and no scheme, path or userinfo`.
+
+- **No forges is a valid state.** An absent section, or `forges: []`, starts with an empty list. A `forges:` key with no value (YAML `null`) refuses start: `invalid forge config: forges must be a sequence of forge entries`.
+- **A change applies by restart** (§3.2). An accepted change to `forges` is never installed live, alone or beside a live change.
+- **Who may write the section.** The same as `providers` (§6.1): the file that contributes it, and the config directory and `config.d/`, must be root-owned and not group- or world-writable.
+- **Disclosure.** `admin.config.show` shows `forges[].name`, `forges[].kind`, `forges[].host` and `forges[].provider` in the clear (`ci/gates/config-disclosure-manifest.txt`). None of them is a credential.
 
 ---
 
@@ -1272,10 +1305,11 @@ boot gate (`crates/maknae-kernel/src/boot_gate.rs`).
 | A duplicate section name in the registration | `DuplicateSpec` |
 | `egress-bounds.yaml` read but refused: a missing `vault` block or key, a fragment outside `[A-Za-z0-9._/-]` or with an empty, `.`, `..` or `data` segment, a value over 256 bytes, a `call_timeout_ms` that is not an integer or is outside `1000..=440000` (§6.1.3). Reads `egress-bounds.yaml: <reason>`; an unknown key such as `key_vault_path_prefix` or `approle_mount` is `UnknownKey` | `InvalidEgressBounds` |
 | The `egress` section (§6.2): a non-map section, a value of the wrong type or out of range (#240) | `InvalidEgress` |
-| **A key no parser reads** — in `maknae.yaml`'s `core` (own level), `transport`, `audit`, `principal`, each `providers` entry, `egress`, `deployment`, `vault` and `vault.user_auth`; in `core.handling` and `core.handling.ceiling`; in `egress-bounds.yaml` and its `vault` block (`egress-bounds.yaml/vault`); in `providers.yaml` at its top level (`providers.yaml`), each entry (`providers.yaml/providers`) and each entry's `key` (`providers.yaml/providers/key`); and at `authz.yaml`'s map levels (the document, `permissions`, each role body under `roles:`/`destinations:`, each `subjects:` entry, and its `permissions`, `actions` and `models` maps — a mistyped ROLE NAME is `UnknownRole`, not this). **Not** `lake` or `core.identity`, which are deliberately open (§3) (#210) | **`UnknownKey`** |
+| **A key no parser reads** — in `maknae.yaml`'s `core` (own level), `transport`, `audit`, `principal`, each `providers` entry, each `forges` entry, `egress`, `deployment`, `vault` and `vault.user_auth`; in `core.handling` and `core.handling.ceiling`; in `egress-bounds.yaml` and its `vault` block (`egress-bounds.yaml/vault`); in `providers.yaml` at its top level (`providers.yaml`), each entry (`providers.yaml/providers`) and each entry's `key` (`providers.yaml/providers/key`); and at `authz.yaml`'s map levels (the document, `permissions`, each role body under `roles:`/`destinations:`, each `subjects:` entry, and its `permissions`, `actions` and `models` maps — a mistyped ROLE NAME is `UnknownRole`, not this). **Not** `lake` or `core.identity`, which are deliberately open (§3) (#210) | **`UnknownKey`** |
 | A present-but-malformed `core.handling` ceiling | `InvalidCeiling` |
 | `transport.prompt_max_bytes` outside 65536..=16777216 (default 1048576 since #372; it bounds prompt-class frames only, and control and attempt frames have fixed caps) | `InvalidTransport` |
 | The `providers` section (§6.1): not a list (a null `providers:` included), more than 32 entries, a duplicate `name`, an entry that is not a map, a missing or malformed `name`, `endpoint` or `models`, a malformed `reasoning_effort`, an `output_tokens_field` other than `max_completion_tokens` or `max_tokens`. Reads `invalid provider config: <reason>` | `InvalidProvider` |
+| The `forges` section (§6.6): not a list (a null `forges:` included), more than 32 entries, a duplicate `name`, an entry that is not a map, a missing or malformed `name`, `kind`, `host` or `provider`. Reads `invalid forge config: <reason>` | `InvalidForge` |
 | A key named `key`, `api_key`, `apikey`, `token`, `secret`, `secret_key` or `bearer` in any `providers` contribution, shadowed ones included: `provider config carries a plaintext credential under '<field>': each user's key lives in Vault under their own login, never in the config` | `ProviderPlaintextKey` |
 | `maknae.yaml`, any `config.d/` member, `<config-dir>` or `config.d/` not root-owned, or group/other-writable: `<path> must be owned by root and not group- or world-writable, as must every maknae.yaml and config.d source and the directories that hold them` | `SourceNotRootOwned` |
 | `core.handling.policy` names a system the build does not carry: `core.handling.policy names a classification system this build does not carry: '<name>'` | `UnknownClassificationPolicy` |

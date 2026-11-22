@@ -1080,6 +1080,7 @@ dependencies = [
  "maknae-agent",
  "maknae-config",
  "maknae-crypto",
+ "maknae-graph",
  "maknae-io",
  "maknae-loop",
  "maknae-msgs",
@@ -1146,6 +1147,7 @@ dependencies = [
  "maknae-config",
  "maknae-graph",
  "maknae-io",
+ "maknae-proto",
  "maknae-security",
  "nix",
 ]
@@ -1282,6 +1284,7 @@ dependencies = [
  "maknae-agent",
  "maknae-config",
  "maknae-crypto",
+ "maknae-graph",
  "maknae-io",
  "maknae-proto",
  "maknae-seal",

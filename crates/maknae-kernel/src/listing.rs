@@ -240,6 +240,7 @@ async fn answer<S: AsyncWrite + Unpin>(
     match maknae_proto::encode_response(&Response {
         protocol_version: PROTOCOL_VERSION,
         result,
+        catalog_digest: None,
     }) {
         Ok(bytes) if bytes.len() <= caps.response && tokio::time::Instant::now() < deadline => {
             matches!(
@@ -529,6 +530,7 @@ mod tests {
         let encoded = maknae_proto::encode_response(&Response {
             protocol_version: PROTOCOL_VERSION,
             result: RespResult::Ok(Payload::ListGrant(page.clone())),
+            catalog_digest: None,
         })
         .unwrap();
         assert!(encoded.len() <= cap, "{} bytes", encoded.len());
@@ -597,6 +599,7 @@ mod tests {
         let exact = maknae_proto::encode_response(&Response {
             protocol_version: PROTOCOL_VERSION,
             result: RespResult::Ok(Payload::ListContinue),
+            catalog_digest: None,
         })
         .unwrap()
         .len();
@@ -682,6 +685,7 @@ mod tests {
                         entries,
                         truncated: false,
                     })),
+                    catalog_digest: None,
                 })
                 .unwrap()
                 .len()
@@ -708,6 +712,7 @@ mod tests {
                 entries,
                 truncated: true,
             })),
+            catalog_digest: None,
         })
         .unwrap()
         .len();

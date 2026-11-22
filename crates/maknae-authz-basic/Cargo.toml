@@ -15,6 +15,8 @@ workspace = true
 maknae-security = { path = "../maknae-security" }
 maknae-config = { path = "../maknae-config" }
 maknae-graph = { path = "../maknae-graph" }
+# The tool catalog's digest type and frame bound (#674); already in the graph through maknae-config.
+maknae-proto = { path = "../maknae-proto" }
 maknae-io = { path = "../maknae-io" }
 
 [target.'cfg(unix)'.dependencies]

@@ -44,8 +44,10 @@ use std::time::{Duration, Instant};
 use crate::ceiling_authz::CeilingAuthorizer;
 use crate::partition_authz::PartitionOperand;
 use crate::sensitive_authz::{SensitiveAuthorizer, SensitiveOperand};
+use maknae_authz_basic::catalog::{CatalogError, SubjectCatalog};
 use maknae_authz_basic::snapshot::Snapshot;
 use maknae_authz_basic::Baseline;
+use maknae_proto::CatalogDigest;
 use maknae_security::{
     compose_backend_name, compose_decide_cited, compose_decide_cited_all, compose_subjects,
     Authorizer, Decided, Request, SubjectBinding, Verdict,
@@ -126,6 +128,16 @@ impl<B: Baseline> Composition<B> {
     /// The installed snapshot's host `sensitive.yaml` list.
     pub fn sensitive_now(&self) -> Arc<maknae_config::SensitiveList> {
         Arc::clone(self.baseline.snapshot().sensitive())
+    }
+
+    /// `uid`'s tool catalog on the installed baseline snapshot.
+    pub fn catalog_for(
+        &self,
+        uid: u32,
+        principal_uid: u32,
+        forges: &maknae_config::ForgeSet,
+    ) -> Result<Arc<SubjectCatalog>, CatalogError> {
+        self.baseline.catalog_for(uid, principal_uid, forges)
     }
 
     #[cfg(any(test, feature = "hermetic-test-seam"))]
@@ -252,6 +264,49 @@ impl<B: Baseline> crate::workspace::DecidesPinned for Composition<B> {
         reqs: &[Request],
     ) -> (Vec<Decided>, Arc<maknae_config::SensitiveList>) {
         self.on_live(|ops, host| (compose_decide_cited_all(ops, reqs), Arc::clone(host)))
+    }
+}
+
+/// The tool catalog the request path serves and stamps, on the installed snapshot.
+pub trait CatalogNow {
+    /// `NotAdmitted` for a uid that holds no role or is contained on the snapshot built from.
+    fn catalog_now(
+        &self,
+        uid: u32,
+        forges: &maknae_config::ForgeSet,
+    ) -> Result<Arc<SubjectCatalog>, CatalogError>;
+
+    /// `None` for a uid that holds no role or is contained, and for a catalog that cannot be built.
+    fn catalog_stamp(&self, uid: u32, forges: &maknae_config::ForgeSet) -> Option<CatalogDigest>;
+}
+
+impl<B: Baseline> CatalogNow for B {
+    fn catalog_now(
+        &self,
+        uid: u32,
+        forges: &maknae_config::ForgeSet,
+    ) -> Result<Arc<SubjectCatalog>, CatalogError> {
+        self.admitted_catalog(uid, self.principal().uid, forges)
+    }
+
+    fn catalog_stamp(&self, uid: u32, forges: &maknae_config::ForgeSet) -> Option<CatalogDigest> {
+        self.admitted_catalog(uid, self.principal().uid, forges)
+            .ok()
+            .map(|c| c.digest)
+    }
+}
+
+impl<B: Baseline> CatalogNow for Composition<B> {
+    fn catalog_now(
+        &self,
+        uid: u32,
+        forges: &maknae_config::ForgeSet,
+    ) -> Result<Arc<SubjectCatalog>, CatalogError> {
+        self.baseline.catalog_now(uid, forges)
+    }
+
+    fn catalog_stamp(&self, uid: u32, forges: &maknae_config::ForgeSet) -> Option<CatalogDigest> {
+        self.baseline.catalog_stamp(uid, forges)
     }
 }
 
@@ -414,6 +469,30 @@ mod tests {
             action: Action(action.into()),
             context: Context(context),
         }
+    }
+
+    #[test]
+    fn the_stamp_is_the_installed_catalogs_digest_and_none_without_a_live_role() {
+        let (_g, basic) = fixture(
+            "stamp",
+            "schema_version: 1\n",
+            Some("schema_version: 1\nbindings:\n  user: [\"root\"]\n  adversary: [\"daemon\"]\n"),
+        );
+        let c = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
+        let forges = maknae_config::ForgeSet::empty();
+        let principal = c.baseline().principal().uid;
+        let daemon = nix::unistd::User::from_name("daemon")
+            .unwrap()
+            .expect("the host has a daemon account")
+            .uid
+            .as_raw();
+        let root = c.catalog_for(0, principal, &forges).unwrap();
+        assert_eq!(c.catalog_stamp(0, &forges), Some(root.digest));
+        assert!(c.baseline().snapshot().contained(daemon, principal));
+        assert!(c.catalog_for(daemon, principal, &forges).is_ok());
+        assert_eq!(c.catalog_stamp(daemon, &forges), None);
+        assert!(c.catalog_for(4242, principal, &forges).is_ok());
+        assert_eq!(c.catalog_stamp(4242, &forges), None);
     }
 
     #[test]
@@ -797,6 +876,7 @@ mod tests {
         let cases: &[Case] = &[
             ("liveness.ping", None, &[""], &[]),
             ("session.new", None, &[""], &[]),
+            ("tool.catalog", None, &[""], &[]),
             ("fs.read", Some("read"), FS_TARGETS, TASKS_AND_PARENTS),
             (
                 "fs.write",

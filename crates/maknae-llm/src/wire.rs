@@ -748,6 +748,7 @@ mod tests {
         let cbor = maknae_proto::encode_response(&maknae_proto::Response {
             protocol_version: maknae_proto::PROTOCOL_VERSION,
             result: maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(c)),
+            catalog_digest: None,
         })
         .unwrap();
         assert!(!cbor.windows(12).any(|w| w == b"SENTINEL-426"));

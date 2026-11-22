@@ -96,6 +96,31 @@ fn token(text: &str) -> Result<ArgToken, ArgPatternError> {
     }
 }
 
+fn tokens_overlap(a: &ArgToken, b: &ArgToken) -> bool {
+    match (a, b) {
+        (ArgToken::Bound { .. }, _) | (_, ArgToken::Bound { .. }) => true,
+        (ArgToken::Rest, _) | (_, ArgToken::Rest) => true,
+        (ArgToken::Literal(x), ArgToken::Literal(y)) => x == y,
+        (ArgToken::Literal(l), ArgToken::Prefix(p))
+        | (ArgToken::Prefix(p), ArgToken::Literal(l)) => l.starts_with(p.as_str()),
+        (ArgToken::Prefix(p), ArgToken::Prefix(q)) => {
+            p.starts_with(q.as_str()) || q.starts_with(p.as_str())
+        }
+    }
+}
+
+fn token_covers(a: &ArgToken, b: &ArgToken) -> bool {
+    match a {
+        ArgToken::Rest => false,
+        ArgToken::Literal(l) => matches!(b, ArgToken::Literal(m) if m == l),
+        ArgToken::Prefix(p) => match b {
+            ArgToken::Literal(s) | ArgToken::Prefix(s) => s.starts_with(p.as_str()),
+            ArgToken::Rest | ArgToken::Bound { .. } => false,
+        },
+        ArgToken::Bound { .. } => a == b,
+    }
+}
+
 impl ArgPattern {
     pub fn parse(spec: &str) -> Result<Self, ArgPatternError> {
         if spec.is_empty() {
@@ -120,6 +145,51 @@ impl ArgPattern {
             }
         }
         Ok(Self(tokens))
+    }
+
+    pub fn canonical(&self) -> String {
+        self.0
+            .iter()
+            .map(|t| match t {
+                ArgToken::Literal(s) => s.clone(),
+                ArgToken::Prefix(p) => format!("{p}*"),
+                ArgToken::Rest => "*".to_string(),
+                ArgToken::Bound { kind, field } => format!("{{{kind}.{field}}}"),
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn split_rest(&self) -> (&[ArgToken], bool) {
+        match self.0.split_last() {
+            Some((ArgToken::Rest, fixed)) => (fixed, true),
+            _ => (self.0.as_slice(), false),
+        }
+    }
+
+    pub fn overlaps(&self, other: &ArgPattern) -> bool {
+        let (a, a_open) = self.split_rest();
+        let (b, b_open) = other.split_rest();
+        if !a.iter().zip(b).all(|(x, y)| tokens_overlap(x, y)) {
+            return false;
+        }
+        match a.len().cmp(&b.len()) {
+            std::cmp::Ordering::Less => a_open,
+            std::cmp::Ordering::Equal => true,
+            std::cmp::Ordering::Greater => b_open,
+        }
+    }
+
+    /// Conservative: true only when every argv `other` matches is provably matched by `self`.
+    pub fn covers(&self, other: &ArgPattern) -> bool {
+        let (a, a_open) = self.split_rest();
+        let (b, b_open) = other.split_rest();
+        let shape = if a_open {
+            b.len() >= a.len()
+        } else {
+            !b_open && b.len() == a.len()
+        };
+        shape && a.iter().zip(b).all(|(x, y)| token_covers(x, y))
     }
 
     /// An unresolved `{kind.field}` matches any one argument, so a deny fails closed.
@@ -426,5 +496,166 @@ mod tests {
         ));
         assert!(matches!(err("a**"), ArgPatternError::StarInsideToken(_)));
         assert!(matches!(err("a*b"), ArgPatternError::StarInsideToken(_)));
+    }
+
+    fn pat(s: &str) -> ArgPattern {
+        ArgPattern::parse(s).unwrap()
+    }
+
+    #[test]
+    fn canonical_round_trips() {
+        for spec in [
+            "test",
+            "a b c",
+            "test *",
+            "log --format*",
+            "diff {git.base}",
+            "pr review {git.change} -R {git.base} --body-file -",
+            "a b* {x.y} *",
+            "{git_2.base_1}",
+            "x* y*",
+            "{a.b} {c.d} z",
+        ] {
+            let p = pat(spec);
+            assert_eq!(p.canonical(), spec);
+            assert_eq!(ArgPattern::parse(&p.canonical()).unwrap(), p);
+        }
+    }
+
+    const CEILING: [&str; 4] = [
+        "pr review {git.change} -R {git.base} --comment --body-file -",
+        "pr review {git.change} -R {git.base} --request-changes --body-file -",
+        "pr review {git.change} -R {git.base} --approve --body-file -",
+        "pr comment {git.change} -R {git.base} --body-file -",
+    ];
+
+    #[test]
+    fn overlap_against_the_homelab_ceiling() {
+        let hits = |grant: &str| -> Vec<bool> {
+            CEILING
+                .iter()
+                .map(|c| pat(grant).overlaps(&pat(c)))
+                .collect()
+        };
+        assert_eq!(hits("pr review *"), [true, true, true, false]);
+        assert_eq!(hits("pr comment *"), [false, false, false, true]);
+        assert_eq!(hits("pr view *"), [false, false, false, false]);
+        assert_eq!(hits("pr *"), [true, true, true, true]);
+    }
+
+    #[test]
+    fn overlap_table() {
+        let rows: &[(&str, &str, bool)] = &[
+            ("a", "a", true),
+            ("a", "b", false),
+            ("a", "a b", false),
+            ("a b", "a", false),
+            ("a", "a*", true),
+            ("a", "b*", false),
+            ("ab", "a*", true),
+            ("a", "ab*", false),
+            ("a*", "ab*", true),
+            ("ab*", "a*", true),
+            ("a*", "b*", false),
+            ("{x.y}", "anything", true),
+            ("{x.y}", "p*", true),
+            ("{x.y}", "{u.v}", true),
+            ("{x.y} b", "a c", false),
+            ("a *", "a", true),
+            ("a *", "a b c", true),
+            ("a *", "b", false),
+            ("a *", "a *", true),
+            ("a b *", "a *", true),
+            ("a b *", "a c *", false),
+            ("a b *", "a", false),
+            ("a *", "a {x.y} z", true),
+            ("a b", "a b *", true),
+            ("a b", "a b c *", false),
+            ("a c *", "a b", false),
+            ("a *", "b *", false),
+            ("a {x.y}", "a *", true),
+        ];
+        for (l, r, want) in rows {
+            assert_eq!(pat(l).overlaps(&pat(r)), *want, "{l} / {r}");
+            assert_eq!(pat(r).overlaps(&pat(l)), *want, "{r} / {l}");
+        }
+    }
+
+    #[test]
+    fn overlap_is_symmetric() {
+        let specs = [
+            "a",
+            "a b",
+            "a *",
+            "a*",
+            "ab*",
+            "{x.y}",
+            "{x.y} b",
+            "a b *",
+            "b",
+            "a b c",
+            "p* *",
+            "a {x.y} *",
+        ];
+        for l in specs {
+            for r in specs {
+                assert_eq!(
+                    pat(l).overlaps(&pat(r)),
+                    pat(r).overlaps(&pat(l)),
+                    "{l} / {r}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cover_table() {
+        let rows: &[(&str, &str, bool)] = &[
+            ("a *", "a b c", true),
+            ("a *", "a", true),
+            ("a *", "a b *", true),
+            ("a b *", "a *", false),
+            ("a b *", "a b", true),
+            ("a *", "b c", false),
+            ("a", "a", true),
+            ("a", "b", false),
+            ("a", "a b", false),
+            ("a b", "a", false),
+            ("a", "a *", false),
+            ("a", "a*", false),
+            ("a*", "a", true),
+            ("a*", "ab", true),
+            ("a*", "b", false),
+            ("ab*", "a*", false),
+            ("a*", "ab*", true),
+            ("a*", "a*", true),
+            ("{x.y}", "{x.y}", true),
+            ("{x.y}", "{x.z}", false),
+            ("{x.y}", "{w.y}", false),
+            ("{x.y}", "a", false),
+            ("a", "{x.y}", false),
+            ("a*", "{x.y}", false),
+            ("{x.y} b", "{x.y} b", true),
+            ("a *", "{x.y}", false),
+            ("a *", "a {x.y}", true),
+            ("a *", "a b*", true),
+            ("a b", "a b *", false),
+            ("a* *", "ab c", true),
+            ("a b*", "a b", true),
+            ("a b*", "a bc", true),
+            ("a b*", "a bc d", false),
+        ];
+        for (l, r, want) in rows {
+            assert_eq!(pat(l).covers(&pat(r)), *want, "{l} covers {r}");
+        }
+    }
+
+    #[test]
+    fn a_deny_cover_removes_only_the_covered_ceiling_shapes() {
+        let covered: Vec<bool> = CEILING
+            .iter()
+            .map(|c| pat("pr review *").covers(&pat(c)))
+            .collect();
+        assert_eq!(covered, [true, true, true, false]);
     }
 }

@@ -1,6 +1,7 @@
 # The shipped authz.yaml and sensitive.yaml, decided through the Composition.
 principal liveness.ping None "" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") None
 principal session.new None "" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:roles.admin:allow:6 in #roles.admin")
+principal tool.catalog None "" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:roles.admin:allow:11 in #roles.admin")
 principal fs.read Some("read") "/home/operator/notes" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:0 in #permissions")
 principal fs.read Some("read") "/home/operator/projects/x" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:0 in #permissions")
 principal fs.read Some("read") "/home/operator/.ssh/id" -> Deny { reason: "sensitive: host ~/.ssh/**" } Some("admin") None
@@ -81,6 +82,7 @@ principal fs.mkdir Some("mkdir") "/proc/1/environ" -> Deny { reason: "sensitive:
 principal fs.mkdir read-twin Some("read") "/proc/1/environ" -> Deny { reason: "sensitive: host /proc/*/environ" } Some("admin") None
 unbound liveness.ping None "" -> NotApplicable { note: Some("subject resolves to no role") } None None
 unbound session.new None "" -> NotApplicable { note: Some("subject resolves to no role") } None None
+unbound tool.catalog None "" -> NotApplicable { note: Some("subject resolves to no role") } None None
 unbound fs.read Some("read") "/home/operator/notes" -> NotApplicable { note: Some("subject resolves to no role") } None None
 unbound fs.read Some("read") "/home/operator/projects/x" -> NotApplicable { note: Some("subject resolves to no role") } None None
 unbound fs.read Some("read") "/home/operator/.ssh/id" -> Deny { reason: "sensitive: host ~/.ssh/**" } None None
@@ -161,6 +163,7 @@ unbound fs.mkdir Some("mkdir") "/proc/1/environ" -> Deny { reason: "sensitive: h
 unbound fs.mkdir read-twin Some("read") "/proc/1/environ" -> Deny { reason: "sensitive: host /proc/*/environ" } None None
 agent hobi liveness.ping None "" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") None
 agent hobi session.new None "" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:roles.user:allow:1 in #roles.user")
+agent hobi tool.catalog None "" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:roles.user:allow:6 in #roles.user")
 agent hobi fs.read Some("read") "/home/operator/notes" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.hobi.permissions:allow:0 in #agents.hobi")
 agent hobi fs.read Some("read") "/home/operator/projects/x" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.hobi.permissions:allow:0 in #agents.hobi")
 agent hobi fs.read Some("read") "/home/operator/.ssh/id" -> Deny { reason: "sensitive: host ~/.ssh/**" } Some("user") None
@@ -315,6 +318,7 @@ agent hobi root=users/1 fs.stat Some("read") "/home/operator/tasks/users/2/x" ->
 agent hobi fs.stat Some("read") "/home/operator/tasks/users/2/x" -> Deny { reason: "partition: the request cites no task" } Some("user") None
 agent jin liveness.ping None "" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") None
 agent jin session.new None "" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:roles.user:allow:1 in #roles.user")
+agent jin tool.catalog None "" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:roles.user:allow:6 in #roles.user")
 agent jin fs.read Some("read") "/home/operator/notes" -> NotApplicable { note: Some("role user: no capability entry for fs.read") } Some("user") None
 agent jin fs.read Some("read") "/home/operator/projects/x" -> NotApplicable { note: Some("role user: no capability entry for fs.read") } Some("user") None
 agent jin fs.read Some("read") "/home/operator/.ssh/id" -> Deny { reason: "sensitive: host ~/.ssh/**" } Some("user") None
@@ -469,6 +473,7 @@ agent jin root=users/1 fs.stat Some("read") "/home/operator/tasks/users/2/x" -> 
 agent jin fs.stat Some("read") "/home/operator/tasks/users/2/x" -> Deny { reason: "partition: the request cites no task" } Some("user") None
 agent suga liveness.ping None "" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") None
 agent suga session.new None "" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:roles.user:allow:1 in #roles.user")
+agent suga tool.catalog None "" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:roles.user:allow:6 in #roles.user")
 agent suga fs.read Some("read") "/home/operator/notes" -> NotApplicable { note: Some("role user: no capability entry for fs.read") } Some("user") None
 agent suga fs.read Some("read") "/home/operator/projects/x" -> NotApplicable { note: Some("role user: no capability entry for fs.read") } Some("user") None
 agent suga fs.read Some("read") "/home/operator/.ssh/id" -> Deny { reason: "sensitive: host ~/.ssh/**" } Some("user") None
@@ -623,6 +628,7 @@ agent suga root=users/1 fs.stat Some("read") "/home/operator/tasks/users/2/x" ->
 agent suga fs.stat Some("read") "/home/operator/tasks/users/2/x" -> Deny { reason: "partition: the request cites no task" } Some("user") None
 agent jimin liveness.ping None "" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") None
 agent jimin session.new None "" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:roles.user:allow:1 in #roles.user")
+agent jimin tool.catalog None "" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:roles.user:allow:6 in #roles.user")
 agent jimin fs.read Some("read") "/home/operator/notes" -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:agents.jimin.permissions:allow:0 in #agents.jimin")
 agent jimin fs.read Some("read") "/home/operator/projects/x" -> NotApplicable { note: Some("role user: no capability entry for fs.read") } Some("user") None
 agent jimin fs.read Some("read") "/home/operator/.ssh/id" -> Deny { reason: "sensitive: host ~/.ssh/**" } Some("user") None

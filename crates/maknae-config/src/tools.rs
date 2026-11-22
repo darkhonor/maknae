@@ -285,6 +285,10 @@ impl ToolsCatalog {
         self.entries.get(name)
     }
 
+    pub fn entries(&self) -> impl Iterator<Item = &ToolEntry> {
+        self.entries.values()
+    }
+
     pub fn class(&self, name: &str) -> Option<&CredentialClass> {
         self.classes.get(name)
     }
@@ -996,6 +1000,26 @@ mod tests {
     }
 
     const APP_CLASS: &str = "  app-class:\n    kind: github-app-installation\n    source: minted-per-task\n    narrowing: provider\n    minting: trust-plane\n    app: my-app\n";
+
+    #[test]
+    fn entries_are_every_enabled_entry_in_name_order() {
+        let c = catalog(HOMELAB);
+        let names: Vec<&str> = c.entries().map(|e| e.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["github-post", "github-read", "rust-build", "rust-fetch"]
+        );
+        assert_eq!(
+            c.entries()
+                .map(|e| e as *const ToolEntry)
+                .collect::<Vec<_>>(),
+            names
+                .iter()
+                .map(|n| c.entry(n).unwrap() as *const ToolEntry)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(ToolsCatalog::empty().entries().count(), 0);
+    }
 
     #[test]
     fn empty_catalog_has_nothing() {

@@ -50,6 +50,8 @@ SURFACE=(
   "crates/maknae-config/src/deployment.rs|Deployment|deployment|2|config"
   # The `providers` section (#153): five disclosed leaves per authorized provider; keys are per user, never here.
   "crates/maknae-config/src/providers.rs|AuthorizedProvider|providers[]|5|config"
+  # The `forges` section (#674): the git servers the site authorizes; link hosts, never a credential.
+  "crates/maknae-config/src/forges.rs|AuthorizedForge|forges[]|4|config"
   # NOTE: `Ceiling` spans TWO YAML levels. Six fields sit under
   # `core.handling.ceiling`, but `accreditation_ref` is a SIBLING of `ceiling`
   # (`parse_handling` accepts exactly those two keys), so the synthesised
@@ -129,6 +131,8 @@ LEAF_ENUMS=(
   "vault.plane_key|crates/maknae-crypto/src/plane_key.rs|PlaneKey"
   "deployment.mode|crates/maknae-config/src/deployment.rs|DeploymentMode"
   "deployment.account_source|crates/maknae-config/src/deployment.rs|AccountSource"
+  "forges[].kind|crates/maknae-config/src/forges.rs|ForgeKind"
+  "forges[].provider|crates/maknae-config/src/forges.rs|ForgeProvider"
   "stat.kind|crates/maknae-proto/src/wire.rs|StatKind"
   "task.state|crates/maknae-proto/src/task.rs|TaskState"
   "task.close|crates/maknae-proto/src/task.rs|TaskClose"
@@ -422,6 +426,7 @@ PAYLOAD_DISPOSITIONS=(
   "Agents|struct:AgentPage"
   "HeldTasks|struct:HeldPage"
   "HeldReleased|struct:ReleasePage"
+  "ToolCatalog|bytes"   # #674: the subject's own catalog, released only on the tool.catalog Permit
 )
 payload_variants="$(awk '
   /^pub enum Payload \{/ { inenum=1; next }

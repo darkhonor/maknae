@@ -48,6 +48,7 @@ mod document;
 mod egress_cfg;
 mod egress_mint;
 mod error;
+mod forges;
 mod loader;
 pub mod mirror;
 mod policy;
@@ -77,7 +78,7 @@ pub use agents::{
     AgentPolicy, AgentProvider, AgentRole, AgentsLoad, HostAccounts, InvalidAgentId, PersonaMode,
     SkippedAgentEntry, TaskerRef, AGENTS_DIR, AGENT_CLIENT_FILE, AGENT_ENTITY_PREFIX,
     ENROLLMENT_FILE, NON_LOGIN_SHELLS, PERSONA_FILE, POLICY_FILE, RESERVED_AGENT_IDS,
-    STARTER_POLICY, TASKS_RIGHT_PATHS, TASKS_RIGHT_SESSION,
+    STARTER_POLICY, TASKS_RIGHT_ACTIONS, TASKS_RIGHT_PATHS,
 };
 pub use argpattern::{first_denied, ArgPattern, ArgPatternError, ArgToken, Bound, DenyArg};
 pub use audit_cfg::{
@@ -103,9 +104,9 @@ pub use bindings_sync::{
 // dependency of their own; unix-gated like the fn whose signature carries it.
 pub use authz::{
     destination_entry_is_acceptable, load_authz, parse_authz, parse_subject_entry, ActionPattern,
-    AgentMatch, AuthzError, AuthzPolicy, HomeUnbound, Match3, ModelRef, MountSide, PathGlob,
-    Pattern, RawActionGrants, RawDestinations, Request, SubjectActions, SubjectPermissions,
-    SubjectPolicy, ToolCall, ToolPattern,
+    AgentMatch, AuthzError, AuthzPolicy, EffectiveLists, HomeUnbound, Match3, ModelRef, MountSide,
+    PathGlob, Pattern, RawActionGrants, RawDestinations, Request, Stage, SubjectActions,
+    SubjectPermissions, SubjectPolicy, ToolCall, ToolPattern,
 };
 pub use banner::{banner_from_document, load_banner, BANNER_FILE, BANNER_PATH};
 pub use baseline_doc::{document_sections, value_from_canonical_json, BaselineSections};
@@ -133,6 +134,10 @@ pub use egress_mint::{
     MintingConfig, MINTING_FILE, MINT_ROLE_ID_FILE,
 };
 pub use error::ConfigError;
+pub use forges::{
+    forges_from_section, AuthorizedForge, ForgeKind, ForgeProvider, ForgeSet, FORGES_SECTION,
+    FORGE_KEYS, MAX_FORGES, MAX_FORGE_NAME_BYTES,
+};
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
 pub use maknae_io::TargetRequired;
 pub use maknae_security::{ClassificationPolicy, Level};
@@ -184,13 +189,14 @@ pub use value::{canonical_json, Value};
 use builder::Builder;
 
 /// The sections `maknaed` reads from `maknae.yaml` and `config.d`.
-pub const DAEMON_SECTIONS: [&str; 8] = [
+pub const DAEMON_SECTIONS: [&str; 9] = [
     "lake",
     "vault",
     "transport",
     "audit",
     "principal",
     "providers",
+    "forges",
     "egress",
     "deployment",
 ];
@@ -333,6 +339,7 @@ mod tests {
             AUDIT_SECTION,
             PRINCIPAL_SECTION,
             PROVIDERS_SECTION,
+            FORGES_SECTION,
             EGRESS_SECTION,
             DEPLOYMENT_SECTION,
         ] {

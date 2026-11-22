@@ -119,7 +119,7 @@ sudo chmod 0640 /etc/maknae/config.d/10-provider.yaml
 
 ### 4. Allow the prompt
 
-Nothing may reach a model until policy says so. The packaged `authz.yaml` already has a `roles:` key granting `admin` its five administrative terms and the five conversation terms, and a second `roles:` key refuses the whole file, so edit it in place (`sudoedit /etc/maknae/authz.yaml`): add a `destinations:` key. The end of the file then reads:
+Nothing may reach a model until policy says so. The packaged `authz.yaml` already has a `roles:` key granting `admin` its five administrative terms, and both `admin` and `user` the five conversation terms, `session.task` and `tool.catalog`, and a second `roles:` key refuses the whole file, so edit it in place (`sudoedit /etc/maknae/authz.yaml`): add a `destinations:` key. The end of the file then reads:
 
 ```yaml
 roles:
@@ -135,6 +135,17 @@ roles:
       - "session.close"
       - "session.list"
       - "session.delete"
+      - "session.task"
+      - "tool.catalog"
+  user:
+    allow:
+      - "session.prompt"
+      - "session.new"
+      - "session.close"
+      - "session.list"
+      - "session.delete"
+      - "session.task"
+      - "tool.catalog"
 destinations:
   admin:
     allow: ["provider:openai"]
@@ -220,6 +231,7 @@ Enroll writes `~/.maknae` only for the account that ran it. Each further local u
          - "session.list"
          - "session.delete"
          - "session.task"
+         - "tool.catalog"
      user:
        allow:
          - "session.prompt"
@@ -228,6 +240,7 @@ Enroll writes `~/.maknae` only for the account that ran it. Each further local u
          - "session.list"
          - "session.delete"
          - "session.task"
+         - "tool.catalog"
    destinations:
      admin:
        allow: ["provider:openai"]

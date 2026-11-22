@@ -35,6 +35,9 @@ files = [
   "crates/maknae-authz-basic/src/decide.rs",
   "crates/maknae-authz-basic/src/vocabulary.rs",
   "crates/maknae-authz-basic/src/snapshot.rs",
+  # #674: the per-subject tool catalog over the PDP's own policy (ADR-0039); a wrong arm
+  # lists an entry no grant reaches, or carries the fence into the catalog.
+  "crates/maknae-authz-basic/src/catalog.rs",
   # The classification seam (ADR-0022): the `ClassificationPolicy` contract
   # and `first_token`, the two systems that implement it (US in the kernel's
   # config crate, PSPF in its own crate), and the registry that selects one by
@@ -287,6 +290,8 @@ files = [
   # #115: the `deployment` section; a wrong arm boots a container as a host, or
   # checks no account state on a host that declared a source.
   "crates/maknae-config/src/deployment.rs",
+  # #674: the `forges` section; a wrong arm authorizes a forge host the site never named.
+  "crates/maknae-config/src/forges.rs",
   # PR-J1 Task 6: the authz policy schema v1 (spec §7; RBAC-decided per ADR-0020) — the
   # Claude-Code/Codex-style permission grammar (Read patterns) a future
   # per-request PDP evaluates, plus the secure fail-closed load (symlink
@@ -538,6 +543,12 @@ files = [
   # arm overruns the stop bound or leaves a 990 s wait unstoppable (availability);
   # it carries no verdict.
   "bins/maknae-agentd/src/shutdown.rs",
+  # #674: the tool catalog, a hint no decision reads (ADR-0039). T2: a defect
+  # misinforms a model and carries no verdict.
+  "crates/maknae-graph/src/catalog.rs",
+  # #674: the loop's held catalog. T2: it refetches on a changed stamp and drops a
+  # catalog whose digest or decode fails; a defect misinforms a model and carries no verdict.
+  "crates/maknae-loop/src/catalog.rs",
 ]
 
 [project]
@@ -881,6 +892,10 @@ why = "credential-supervisor I/O driver; the decisions it drives (retry_action/r
 [[t3]]
 path = "bins/maknae/src/cli.rs"
 why = "clap arg parsing + the CLI's connect/mint/request/response I/O orchestration; no fail-closed decision logic of its own (delegates to maknae-vault/maknae-proto) Amended 2026-11-03 (#470): send_verb, SentOutcome and the frame helpers moved to maknae-loop (send.rs T3, outcome.rs T2); this file keeps argument parsing and the CLI own verbs. Amended 2026-11-08 (#170): maknae session list and close; the paging and the --cwd filter are T1 in maknae-agent::conversations, the id rule is ConversationId::parse in maknae-proto, and session_verb's parsing is tested here."
+
+[[t3]]
+path = "bins/maknae/src/tools.rs"
+why = "#674: maknae tools, on the bins/maknae/src/cli.rs precedent: it checks the reply's digest, decodes the catalog through maknae-graph::catalog (T2) and prints it terminal-safe; it decides nothing, since the catalog is a hint no decision reads (ADR-0039). The digest refusal, the print order and the command's parsing are tested here."
 
 [[t3]]
 path = "bins/maknae/src/stderr.rs"

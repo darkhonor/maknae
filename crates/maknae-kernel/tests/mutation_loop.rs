@@ -1325,6 +1325,7 @@ fn largest_ack_fits_below_every_grant_encoding_lower_bound() {
                     categories: vec![],
                 },
             })),
+            catalog_digest: None,
         })
         .unwrap();
         assert!(

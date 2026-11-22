@@ -3,13 +3,14 @@
 //! task is not `Working`. A report carries the loop's cite and is bounded by the
 //! host's `prompt_max_bytes` as enrollment copied it; answers are read at the
 //! ceiling cap, so a bound raised on the host since then cannot cut one short.
+use crate::catalog::CatalogFetchError;
 use crate::plane::{Dial, Link, PlaneDial};
 use maknae_agent::task::{
     beat_answer, claim_answer, report_answer, BeatAnswer, ClaimAnswer, ReportOutcome,
 };
 use maknae_agent::task_driver::VerifyClass;
 use maknae_agent::wire::WireOutcome;
-use maknae_proto::{SecretText, Verb};
+use maknae_proto::{CatalogDigest, Payload, SecretText, ToolCatalogReply, Verb};
 use maknae_vault::task_sig::TaskSignatureError;
 use std::sync::Arc;
 
@@ -23,12 +24,41 @@ impl<D: Dial> TaskClient<D> {
     }
 
     pub async fn claim(&self) -> Result<ClaimAnswer, String> {
-        claim_answer(
-            self.send(Verb::TaskClaim {
+        self.claim_stamped().await.map(|(answer, _stamp)| answer)
+    }
+
+    pub async fn claim_stamped(&self) -> Result<(ClaimAnswer, Option<CatalogDigest>), String> {
+        let sent = self
+            .link
+            .send_stamped(Verb::TaskClaim {
                 seen_follow_ups: None,
             })
-            .await,
-        )
+            .await?;
+        let stamp = sent.catalog_digest;
+        claim_answer(Ok(WireOutcome::from(sent.outcome))).map(|answer| (answer, stamp))
+    }
+
+    pub async fn tool_catalog(&self) -> Result<ToolCatalogReply, CatalogFetchError> {
+        let sent = self
+            .link
+            .send_located(Verb::ToolCatalog {})
+            .await
+            .map_err(|f| {
+                if f.answered {
+                    CatalogFetchError::Refused(f.why)
+                } else {
+                    CatalogFetchError::NoReply(f.why)
+                }
+            })?;
+        match WireOutcome::from(sent) {
+            WireOutcome::Payload(Payload::ToolCatalog(reply)) => Ok(reply),
+            WireOutcome::Refused { code, message, .. } => {
+                Err(CatalogFetchError::Refused(format!("{code:?}: {message}")))
+            }
+            _ => Err(CatalogFetchError::Refused(
+                "protocol error: unexpected reply to tool.catalog".into(),
+            )),
+        }
     }
 
     pub async fn heartbeat(&self, seen: u32) -> Result<BeatAnswer, String> {
@@ -301,6 +331,17 @@ mod tests {
             Ok(ReportOutcome::Refused(_))
         ));
         assert_eq!(plane.link_for_test().finish().await.requests.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_unexpected_catalog_reply_is_named_not_printed() {
+        let plane = plane(vec![RespResult::Ok(Payload::Pong)]);
+        assert_eq!(
+            plane.tasks().tool_catalog().await,
+            Err(crate::catalog::CatalogFetchError::Refused(
+                "protocol error: unexpected reply to tool.catalog".to_string()
+            ))
+        );
     }
 
     #[test]

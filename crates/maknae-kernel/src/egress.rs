@@ -1006,6 +1006,7 @@ mod tests {
         let r = maknae_proto::Response {
             protocol_version: maknae_proto::PROTOCOL_VERSION,
             result: maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(reply)),
+            catalog_digest: None,
         };
         let buf = maknae_proto::encode_response_zeroizing(&r, cap).unwrap();
         assert_eq!(
@@ -1154,6 +1155,7 @@ mod tests {
         let r = maknae_proto::Response {
             protocol_version: maknae_proto::PROTOCOL_VERSION,
             result: maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(reply)),
+            catalog_digest: None,
         };
         let buf = maknae_proto::encode_response_zeroizing(&r, cap).unwrap();
         assert_eq!(buf.capacity(), cap);
@@ -1953,6 +1955,7 @@ mod tests {
                 result: maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(
                     reply.clone(),
                 )),
+                catalog_digest: None,
             };
             let buf = maknae_proto::encode_response_zeroizing(&resp, cap).unwrap();
             assert_eq!(
@@ -2140,6 +2143,7 @@ mod tests {
             &maknae_proto::Response {
                 protocol_version: maknae_proto::PROTOCOL_VERSION,
                 result: maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(reply)),
+                catalog_digest: None,
             },
             cap,
         )
@@ -2162,6 +2166,7 @@ mod tests {
                             usage,
                         },
                     )),
+                    catalog_digest: None,
                 },
                 1 << 16,
             )
@@ -2494,6 +2499,7 @@ mod tests {
         let r = maknae_proto::Response {
             protocol_version: maknae_proto::PROTOCOL_VERSION,
             result: maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(reply)),
+            catalog_digest: None,
         };
         let buf = maknae_proto::encode_response_zeroizing(&r, cap).unwrap();
         assert_eq!(buf.capacity(), cap, "encode grew the buffer");
@@ -2649,6 +2655,7 @@ mod tests {
                 result: maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(reply_of(
                     vec![c.clone()],
                 ))),
+                catalog_digest: None,
             })
             .unwrap()
             .len()
@@ -2664,6 +2671,7 @@ mod tests {
         let r = maknae_proto::Response {
             protocol_version: maknae_proto::PROTOCOL_VERSION,
             result: maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(reply)),
+            catalog_digest: None,
         };
         let buf = maknae_proto::encode_response_zeroizing(&r, cap).unwrap();
         assert_eq!(buf.capacity(), cap);

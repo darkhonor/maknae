@@ -183,6 +183,7 @@ mod tests {
                 entries: vec![view; page_limit()],
                 next: Some(id),
             })),
+            catalog_digest: None,
         })
         .unwrap();
         assert!(bytes.len() <= CONTROL_RESPONSE_MAX, "{}", bytes.len());

@@ -533,7 +533,12 @@ impl Fixture {
         Vec<u8>,
     )
     where
-        P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
+        P: maknae_security::Authorizer
+            + maknae_kernel::SensitiveNow
+            + maknae_kernel::CatalogNow
+            + Send
+            + Sync
+            + 'static,
     {
         self.start_with_authorizer_and_caps(
             authz,
@@ -587,7 +592,12 @@ impl Fixture {
         Vec<u8>,
     )
     where
-        P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
+        P: maknae_security::Authorizer
+            + maknae_kernel::SensitiveNow
+            + maknae_kernel::CatalogNow
+            + Send
+            + Sync
+            + 'static,
     {
         self.start_with_live(
             authz,
@@ -621,7 +631,12 @@ impl Fixture {
         Vec<u8>,
     )
     where
-        P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
+        P: maknae_security::Authorizer
+            + maknae_kernel::SensitiveNow
+            + maknae_kernel::CatalogNow
+            + Send
+            + Sync
+            + 'static,
     {
         self.start_in(
             Arc::new(self.session()),
@@ -684,7 +699,12 @@ impl Fixture {
         Vec<u8>,
     )
     where
-        P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
+        P: maknae_security::Authorizer
+            + maknae_kernel::SensitiveNow
+            + maknae_kernel::CatalogNow
+            + Send
+            + Sync
+            + 'static,
     {
         let fds = maknae_io::DelegatedFds::new(4);
         if let Some(fd) = fd {
@@ -750,7 +770,12 @@ impl Fixture {
         turn: bool,
     ) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<()>)
     where
-        P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
+        P: maknae_security::Authorizer
+            + maknae_kernel::SensitiveNow
+            + maknae_kernel::CatalogNow
+            + Send
+            + Sync
+            + 'static,
     {
         let (client, server) = tokio::io::duplex(65536);
         let served = maknae_kernel::handle_with_attempt_caps(
@@ -854,7 +879,12 @@ impl Fixture {
         egress: Arc<dyn maknae_kernel::Egress>,
     ) -> Option<Response>
     where
-        P: maknae_security::Authorizer + maknae_kernel::SensitiveNow + Send + Sync + 'static,
+        P: maknae_security::Authorizer
+            + maknae_kernel::SensitiveNow
+            + maknae_kernel::CatalogNow
+            + Send
+            + Sync
+            + 'static,
     {
         let (client, task, body) = self.start_with_authorizer(
             authz,
@@ -1544,9 +1574,92 @@ pub fn non_member() -> maknae_kernel::Facts {
     f
 }
 
+impl maknae_kernel::CatalogNow for AlwaysPermit {
+    fn catalog_now(
+        &self,
+        _uid: u32,
+        _forges: &maknae_config::ForgeSet,
+    ) -> Result<
+        std::sync::Arc<maknae_authz_basic::catalog::SubjectCatalog>,
+        maknae_authz_basic::catalog::CatalogError,
+    > {
+        Err(maknae_authz_basic::catalog::CatalogError::Build)
+    }
+
+    fn catalog_stamp(
+        &self,
+        _uid: u32,
+        _forges: &maknae_config::ForgeSet,
+    ) -> Option<maknae_proto::CatalogDigest> {
+        None
+    }
+}
+
+/// Permits every request, then finds the subject not admitted when the catalog is built:
+/// a reload between the decision and the build.
+pub struct PermitThenNotAdmitted;
+
+impl Authorizer for PermitThenNotAdmitted {
+    fn decide_cited_all(&self, reqs: &[maknae_security::Request]) -> Vec<maknae_security::Decided> {
+        maknae_security::decide_each_cited(self, reqs)
+    }
+
+    fn decide(&self, r: &Request) -> Verdict {
+        AlwaysPermit.decide(r)
+    }
+}
+
+impl maknae_kernel::CatalogNow for PermitThenNotAdmitted {
+    fn catalog_now(
+        &self,
+        _uid: u32,
+        _forges: &maknae_config::ForgeSet,
+    ) -> Result<
+        std::sync::Arc<maknae_authz_basic::catalog::SubjectCatalog>,
+        maknae_authz_basic::catalog::CatalogError,
+    > {
+        Err(maknae_authz_basic::catalog::CatalogError::NotAdmitted)
+    }
+
+    fn catalog_stamp(
+        &self,
+        _uid: u32,
+        _forges: &maknae_config::ForgeSet,
+    ) -> Option<maknae_proto::CatalogDigest> {
+        None
+    }
+}
+
+impl maknae_kernel::SensitiveNow for PermitThenNotAdmitted {
+    fn sensitive_now(&self) -> std::sync::Arc<maknae_config::SensitiveList> {
+        std::sync::Arc::new(maknae_config::SensitiveList::empty())
+    }
+}
+
 impl maknae_kernel::SensitiveNow for AlwaysPermit {
     fn sensitive_now(&self) -> std::sync::Arc<maknae_config::SensitiveList> {
         std::sync::Arc::new(maknae_config::SensitiveList::empty())
+    }
+}
+
+impl maknae_kernel::CatalogNow for SleepAuthorizer {
+    fn catalog_now(
+        &self,
+        _uid: u32,
+        _forges: &maknae_config::ForgeSet,
+    ) -> Result<
+        std::sync::Arc<maknae_authz_basic::catalog::SubjectCatalog>,
+        maknae_authz_basic::catalog::CatalogError,
+    > {
+        Err(maknae_authz_basic::catalog::CatalogError::Build)
+    }
+
+    fn catalog_stamp(
+        &self,
+        _uid: u32,
+        _forges: &maknae_config::ForgeSet,
+    ) -> Option<maknae_proto::CatalogDigest> {
+        None
     }
 }
 
@@ -1556,9 +1669,51 @@ impl maknae_kernel::SensitiveNow for SleepAuthorizer {
     }
 }
 
+impl maknae_kernel::CatalogNow for HostileObligation {
+    fn catalog_now(
+        &self,
+        _uid: u32,
+        _forges: &maknae_config::ForgeSet,
+    ) -> Result<
+        std::sync::Arc<maknae_authz_basic::catalog::SubjectCatalog>,
+        maknae_authz_basic::catalog::CatalogError,
+    > {
+        Err(maknae_authz_basic::catalog::CatalogError::Build)
+    }
+
+    fn catalog_stamp(
+        &self,
+        _uid: u32,
+        _forges: &maknae_config::ForgeSet,
+    ) -> Option<maknae_proto::CatalogDigest> {
+        None
+    }
+}
+
 impl maknae_kernel::SensitiveNow for HostileObligation {
     fn sensitive_now(&self) -> std::sync::Arc<maknae_config::SensitiveList> {
         std::sync::Arc::new(maknae_config::SensitiveList::empty())
+    }
+}
+
+impl maknae_kernel::CatalogNow for CitingPermit {
+    fn catalog_now(
+        &self,
+        _uid: u32,
+        _forges: &maknae_config::ForgeSet,
+    ) -> Result<
+        std::sync::Arc<maknae_authz_basic::catalog::SubjectCatalog>,
+        maknae_authz_basic::catalog::CatalogError,
+    > {
+        Err(maknae_authz_basic::catalog::CatalogError::Build)
+    }
+
+    fn catalog_stamp(
+        &self,
+        _uid: u32,
+        _forges: &maknae_config::ForgeSet,
+    ) -> Option<maknae_proto::CatalogDigest> {
+        None
     }
 }
 
@@ -1568,9 +1723,51 @@ impl maknae_kernel::SensitiveNow for CitingPermit {
     }
 }
 
+impl maknae_kernel::CatalogNow for PanickingName {
+    fn catalog_now(
+        &self,
+        _uid: u32,
+        _forges: &maknae_config::ForgeSet,
+    ) -> Result<
+        std::sync::Arc<maknae_authz_basic::catalog::SubjectCatalog>,
+        maknae_authz_basic::catalog::CatalogError,
+    > {
+        Err(maknae_authz_basic::catalog::CatalogError::Build)
+    }
+
+    fn catalog_stamp(
+        &self,
+        _uid: u32,
+        _forges: &maknae_config::ForgeSet,
+    ) -> Option<maknae_proto::CatalogDigest> {
+        None
+    }
+}
+
 impl maknae_kernel::SensitiveNow for PanickingName {
     fn sensitive_now(&self) -> std::sync::Arc<maknae_config::SensitiveList> {
         std::sync::Arc::new(maknae_config::SensitiveList::empty())
+    }
+}
+
+impl<A: maknae_kernel::CatalogNow> maknae_kernel::CatalogNow for Counting<A> {
+    fn catalog_now(
+        &self,
+        uid: u32,
+        forges: &maknae_config::ForgeSet,
+    ) -> Result<
+        std::sync::Arc<maknae_authz_basic::catalog::SubjectCatalog>,
+        maknae_authz_basic::catalog::CatalogError,
+    > {
+        self.inner.catalog_now(uid, forges)
+    }
+
+    fn catalog_stamp(
+        &self,
+        uid: u32,
+        forges: &maknae_config::ForgeSet,
+    ) -> Option<maknae_proto::CatalogDigest> {
+        self.inner.catalog_stamp(uid, forges)
     }
 }
 

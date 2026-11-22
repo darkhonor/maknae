@@ -1661,3 +1661,214 @@ async fn the_largest_personal_list_one_frame_carries_is_stored_and_read_back() {
     rig.reopen();
     assert_eq!(rig.store().get(&id(&conv)).unwrap().sensitive, entries);
 }
+
+const HOMELAB_TOOLS: &str = include_str!("../../../packaging/common/tools-homelab.yaml");
+const TRAIL_SENTINEL: &str = "sentinel-674-trail-description";
+const IMAGE: &str =
+    "registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000";
+
+/// The peer bound to `role`, granted `rust-build` and, as `admin` or `user`, `tool.catalog`.
+fn catalog_rig(tag: &str, role: &str, tools: &str) -> Rig {
+    let rig = Rig::new(tag, Kind::Mem);
+    let paths = rig.fx.paths();
+    common::write_0640(
+        &paths.authz,
+        "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Tool(rust-build cargo build *)\"]\n  deny: []\nroles:\n  admin:\n    allow: [\"session.new\", \"session.list\", \"tool.catalog\"]\n  user:\n    allow: [\"session.new\", \"session.list\", \"tool.catalog\"]\n",
+    );
+    let name = rig.fx.peer_user.clone().unwrap();
+    common::write_0640(
+        &paths.bindings,
+        &format!("schema_version: 1\nbindings:\n  {role}: [\"{name}\"]\n"),
+    );
+    common::write_0640(&paths.config_dir.join(maknae_config::TOOLS_FILE), tools);
+    rig
+}
+
+fn sentinel_tools() -> String {
+    HOMELAB_TOOLS.replace(
+        "Build, check, lint and test a workspace with no network.",
+        TRAIL_SENTINEL,
+    )
+}
+
+impl Rig {
+    fn catalog(&self) -> Arc<maknae_authz_basic::catalog::SubjectCatalog> {
+        self.fx
+            .authorizer()
+            .catalog_for(
+                self.uid(),
+                self.fx.principal.uid,
+                &maknae_config::ForgeSet::empty(),
+            )
+            .unwrap()
+    }
+    async fn new_here(&self, records: &Arc<Records>) -> Response {
+        let cwd = self.cwd();
+        let fd = maknae_io::open_directory_for_delegation(&cwd).unwrap();
+        self.new_at(&cwd, Some(fd), records).await.unwrap()
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[tokio::test]
+async fn the_session_new_reply_is_stamped() {
+    let rig = catalog_rig("stamp-new", "user", &sentinel_tools());
+    let want = rig.catalog();
+    assert!(
+        String::from_utf8_lossy(&want.bytes).contains(TRAIL_SENTINEL),
+        "premise: the catalog lists the granted entry"
+    );
+    let resp = rig.new_here(&Records::new(0)).await;
+    assert!(
+        matches!(resp.result, RespResult::Ok(Payload::ConversationOpened(_))),
+        "{resp:?}"
+    );
+    assert_eq!(resp.catalog_digest, Some(want.digest));
+}
+
+#[tokio::test]
+async fn tool_catalog_returns_the_subjects_graph_and_its_digest() {
+    let rig = catalog_rig("catalog-verb", "user", &sentinel_tools());
+    let want = rig.catalog();
+    let resp = rig
+        .control(Verb::ToolCatalog {}, &Records::new(0))
+        .await
+        .unwrap();
+    let RespResult::Ok(Payload::ToolCatalog(got)) = resp.result else {
+        panic!("{resp:?}")
+    };
+    assert_eq!(got.digest, want.digest);
+    assert_eq!(got.graph.0.as_slice(), want.bytes.as_slice());
+    assert_eq!(resp.catalog_digest, None);
+}
+
+#[tokio::test]
+async fn the_trail_cites_the_digest_never_the_bytes() {
+    let rig = catalog_rig("catalog-trail", "user", &sentinel_tools());
+    let want = rig.catalog();
+    let records = Records::new(0);
+    let resp = rig.control(Verb::ToolCatalog {}, &records).await.unwrap();
+    assert!(
+        matches!(resp.result, RespResult::Ok(Payload::ToolCatalog(_))),
+        "{resp:?}"
+    );
+    let rec = last_of(&records, "tool.catalog");
+    assert_eq!(
+        (rec.outcome.result.as_str(), rec.object.as_deref()),
+        ("permit", Some(hex(&want.digest.0).as_str()))
+    );
+    for r in records.snapshot() {
+        let shown = serde_json::to_string(&r).unwrap();
+        assert!(!shown.contains(TRAIL_SENTINEL), "{shown}");
+        assert!(!shown.contains("rust-build"), "{shown}");
+    }
+}
+
+#[tokio::test]
+async fn a_too_large_catalog_is_recorded_and_refused() {
+    let mut tools = String::from("schema_version: 1\ntools:\n");
+    let mut grants = Vec::new();
+    for i in 0..80 {
+        let description: String = (0..80).map(|j| format!("sentinel-674-{i}-{j} ")).collect();
+        tools.push_str(&format!("  sentinel-674-e{i}:\n    description: {description}\n    executes_workspace: false\n    image: {{ ref: \"{IMAGE}\" }}\n    output_to_model: redacted\n    commands:\n      run: {{ subcommands: [\"go *\"] }}\n"));
+        grants.push(format!("\"Tool(sentinel-674-e{i} run go *)\""));
+    }
+    let rig = catalog_rig("catalog-large", "user", &tools);
+    common::write_0640(
+        &rig.fx.paths().authz,
+        &format!(
+            "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", {}]\n  deny: []\nroles:\n  user:\n    allow: [\"session.new\", \"tool.catalog\"]\n",
+            grants.join(", ")
+        ),
+    );
+    let records = Records::new(0);
+    let resp = rig.control(Verb::ToolCatalog {}, &records).await.unwrap();
+    let RespResult::Err(e) = &resp.result else {
+        panic!("{resp:?}")
+    };
+    assert_eq!(e.code, ProtoErrCode::TooLarge);
+    let trail = of_action(&records, "tool.catalog");
+    assert_eq!(
+        trail
+            .iter()
+            .map(|r| (r.outcome.result.as_str(), r.outcome.reason.as_str()))
+            .collect::<Vec<_>>(),
+        [("deny", "tool catalog too large")]
+    );
+    let opened = rig.new_here(&Records::new(0)).await;
+    assert!(
+        matches!(
+            opened.result,
+            RespResult::Ok(Payload::ConversationOpened(_))
+        ),
+        "{opened:?}"
+    );
+    assert_eq!(opened.catalog_digest, None);
+}
+
+#[tokio::test]
+async fn a_contained_subject_is_refused_tool_catalog_and_session_new() {
+    for role in ["adversary", "guest"] {
+        let rig = catalog_rig(&format!("catalog-{role}"), role, &sentinel_tools());
+        for resp in [
+            rig.new_here(&Records::new(0)).await,
+            rig.control(Verb::ToolCatalog {}, &Records::new(0))
+                .await
+                .unwrap(),
+        ] {
+            assert!(
+                matches!(&resp.result, RespResult::Err(e) if e.code == ProtoErrCode::Unauthorized),
+                "{role}: {resp:?}"
+            );
+            assert_eq!(resp.catalog_digest, None, "{role}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn other_replies_are_unstamped_and_byte_identical() {
+    let rig = catalog_rig("catalog-others", "admin", &sentinel_tools());
+    let unstamped = |resp: &Response, raw: &[u8], what: &str| {
+        assert!(matches!(resp.result, RespResult::Ok(_)), "{what}: {resp:?}");
+        assert_eq!(resp.catalog_digest, None, "{what}");
+        assert_eq!(maknae_proto::encode_response(resp).unwrap(), raw, "{what}");
+        assert!(
+            !raw.windows(b"catalog_digest".len())
+                .any(|w| w == b"catalog_digest"),
+            "{what}"
+        );
+    };
+    for verb in [Verb::Whoami, Verb::SessionList { cursor: None }] {
+        let (client, task, body) = rig.fx.start(verb.clone(), None, Records::new(0));
+        let raw = Fixture::exchange_raw(client, task, &body).await;
+        let mut cursor = &raw[..];
+        let frame = common::read_frame(&mut cursor, 65536).await.unwrap();
+        let resp = maknae_proto::decode_response(&frame).unwrap();
+        unstamped(&resp, &frame, &format!("{verb:?}"));
+    }
+    let target = rig.fx.root.join("catalog-others-read");
+    std::fs::write(&target, b"content").unwrap();
+    let held = maknae_io::open_path_for_delegation(&target).unwrap();
+    let (mut client, task, body) = rig.fx.start(
+        Verb::Read {
+            path: target.to_str().unwrap().into(),
+            conversation: None,
+            page: None,
+        },
+        Some(held.try_clone().unwrap()),
+        Records::new(0),
+    );
+    common::write_frame(&mut client, &body).await.unwrap();
+    let run = common::read_as_subject(&mut client, Some(&held)).await;
+    drop(client);
+    task.await.unwrap();
+    let first = run.first.expect("the read's grant frame");
+    unstamped(
+        &maknae_proto::decode_response(&first).unwrap(),
+        &first,
+        "fs.read",
+    );
+}

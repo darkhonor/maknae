@@ -39,6 +39,8 @@ maknae-agent = { path = "../../crates/maknae-agent" }
 # The loop's I/O half (#470): the wire client, the subject-side mutation client
 # and the real Plane. The CLI's own verbs use the same wire client.
 maknae-loop = { path = "../../crates/maknae-loop" }
+# `maknae tools` decodes the catalog the kernel releases (#674).
+maknae-graph = { path = "../../crates/maknae-graph" }
 # Without it each turn's wrapping token would cross maknaed readable (ADR-0028).
 maknae-seal = { path = "../../crates/maknae-seal" }
 clap = { version = "4", features = ["derive"] }
@@ -67,11 +69,12 @@ maknae-crypto = { path = "../../crates/maknae-crypto" }
 
 # NO privileged crate (maknae-kernel/-subject-ctx-mint/-audit-append/-spif-compile) — spec §3 P1.
 # STRICTLY non-privileged: the closed set of direct deps this crate links is
-# maknae-proto, maknae-vault, maknae-config, maknae-msgs, maknae-io, maknae-agent, maknae-loop, maknae-seal, clap,
-# tokio, nix, zeroize, yaml-rust2, rpassword and maknae-crypto (policy_sync.rs's digest, the TLS provider) — no
+# maknae-proto, maknae-vault, maknae-config, maknae-msgs, maknae-io, maknae-agent, maknae-loop, maknae-seal,
+# maknae-graph (`tools.rs` walks the catalog `maknae tools` prints, #674), clap, tokio, nix, zeroize,
+# yaml-rust2, rpassword and maknae-crypto (policy_sync.rs's digest, the TLS provider) — no
 # maknae-mcp either. maknae-agent is non-privileged; it is the loop's decision code and its
-# five direct deps are maknae-proto, serde, serde_json, zeroize and unicode-width. No gate enforces this
-# set, so this comment IS the record.
+# five direct deps are maknae-proto, serde, serde_json, zeroize and unicode-width. No gate
+# enforces this set, so this comment IS the record.
 # (Corrected 2026-09-22, #344: "— no I/O crate" struck here as well. tokio arrives in
 # maknae-agent's graph transitively, via maknae-proto; what holds is the absence of
 # filesystem, socket and process CALLS in that crate's code, not the absence of an I/O

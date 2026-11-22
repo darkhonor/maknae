@@ -2,7 +2,7 @@
 //! live daemon, Vault and certificates, so it is T3; every decision it feeds
 //! is T1 in `maknae_agent::wire`.
 use crate::keys::{AgentKeys, KeySupply};
-use crate::send::{send_located, send_via, write_request, SendFailure, Wire};
+use crate::send::{send_located, send_stamped, send_via, write_request, SendFailure, Sent, Wire};
 use maknae_agent::plane::{
     DeleteOutcome, ListOutcome, MkdirOutcome, Plane, PlaneError, ReadBasis, ReadOutcome,
     StatOutcome, WriteOutcome,
@@ -85,11 +85,11 @@ pub(crate) struct Link<D> {
     cite: Mutex<Option<TaskId>>,
 }
 
-/// A claim or heartbeat never cites (the kernel ends a connection whose cited task
+/// A claim, heartbeat or catalog fetch never cites (the kernel ends a connection whose cited task
 /// is not `Working`); every other verb a loop sends carries the cite.
 fn cite_for(verb: &Verb, cited: Option<TaskId>) -> Option<TaskId> {
     match verb {
-        Verb::TaskClaim { .. } => None,
+        Verb::TaskClaim { .. } | Verb::ToolCatalog {} => None,
         _ => cited,
     }
 }
@@ -131,6 +131,20 @@ impl<D: Dial> Link<D> {
             &mut |_| {},
         )
         .await
+    }
+
+    pub(crate) async fn send_stamped(&self, verb: Verb) -> Result<Sent, String> {
+        send_stamped(
+            self.dial.dial(),
+            cite_for(&verb, self.cited()),
+            verb,
+            None,
+            crate::mutation::WriteCheck::Unchecked,
+            &self.transport,
+            &mut |_| {},
+        )
+        .await
+        .map_err(|f| f.why)
     }
 
     pub(crate) async fn send(
@@ -592,16 +606,38 @@ pub(crate) mod fake {
         pub frames_per_connection: Vec<usize>,
     }
 
+    type Answer = (RespResult, Option<maknae_proto::CatalogDigest>);
+
+    pub enum Scripted {
+        Answer(Box<Answer>),
+        HangUp,
+        /// A complete frame whose body is not a response.
+        Garbage,
+    }
+
     /// Answers the first frame on each connection with the next scripted answer.
     #[derive(Default)]
     pub struct FakeKernel {
-        answers: Mutex<VecDeque<RespResult>>,
+        answers: Mutex<VecDeque<Scripted>>,
         seen: Arc<Mutex<Seen>>,
         servers: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     }
 
     impl FakeKernel {
         pub fn answering(answers: Vec<RespResult>) -> Self {
+            Self::stamped(answers.into_iter().map(|a| (a, None)).collect())
+        }
+
+        pub fn stamped(answers: Vec<Answer>) -> Self {
+            Self::scripted(
+                answers
+                    .into_iter()
+                    .map(|a| Scripted::Answer(Box::new(a)))
+                    .collect(),
+            )
+        }
+
+        pub fn scripted(answers: Vec<Scripted>) -> Self {
             FakeKernel {
                 answers: Mutex::new(answers.into()),
                 ..Default::default()
@@ -636,14 +672,19 @@ pub(crate) mod fake {
                     frames += 1;
                     let request = maknae_proto::decode_request(&body).unwrap();
                     seen.lock().unwrap().requests.push(request);
-                    let Some(result) = answer.take() else {
-                        break;
+                    let reply = match answer.take() {
+                        None | Some(Scripted::HangUp) => break,
+                        Some(Scripted::Garbage) => vec![0xff, 0xff],
+                        Some(Scripted::Answer(answer)) => {
+                            let (result, catalog_digest) = *answer;
+                            maknae_proto::encode_response(&Response {
+                                protocol_version: maknae_proto::PROTOCOL_VERSION,
+                                result,
+                                catalog_digest,
+                            })
+                            .unwrap()
+                        }
                     };
-                    let reply = maknae_proto::encode_response(&Response {
-                        protocol_version: maknae_proto::PROTOCOL_VERSION,
-                        result,
-                    })
-                    .unwrap();
                     let _ = maknae_proto::write_frame(&mut server, class, &reply).await;
                 }
                 seen.lock().unwrap().frames_per_connection.push(frames);
@@ -783,7 +824,13 @@ mod tests {
     }
 
     #[test]
-    fn only_a_claim_or_heartbeat_goes_uncited() {
+    fn a_tool_catalog_fetch_goes_uncited() {
+        let id = Some(TaskId([1; 16]));
+        assert_eq!(cite_for(&Verb::ToolCatalog {}, id), None);
+    }
+
+    #[test]
+    fn only_a_claim_heartbeat_or_catalog_fetch_goes_uncited() {
         let id = Some(TaskId([1; 16]));
         let text = || maknae_proto::SecretText(zeroize::Zeroizing::new("r".into()));
         for seen in [None, Some(0)] {

@@ -5,10 +5,11 @@
 //! Maknae reads only its own config; nothing external is read at boot.
 
 use maknae_config::{
-    ceiling_from_core, deployment_from_section, load_config_root_owned, policy_name_from_core,
-    providers_from_section, refuse_plaintext_keys, Ceiling, ClassificationPolicy, ConfigError,
-    Deployment, Document, IngestPosture, ProviderSet, SectionSpec, Value, AUDIT_SECTION,
-    DEPLOYMENT_SECTION, EGRESS_SECTION, PRINCIPAL_SECTION, PROVIDERS_SECTION, TRANSPORT_SECTION,
+    ceiling_from_core, deployment_from_section, forges_from_section, load_config_root_owned,
+    policy_name_from_core, providers_from_section, refuse_plaintext_keys, Ceiling,
+    ClassificationPolicy, ConfigError, Deployment, Document, ForgeSet, IngestPosture, ProviderSet,
+    SectionSpec, Value, AUDIT_SECTION, DEPLOYMENT_SECTION, EGRESS_SECTION, FORGES_SECTION,
+    PRINCIPAL_SECTION, PROVIDERS_SECTION, TRANSPORT_SECTION,
 };
 use maknae_vault::VAULT_SECTION;
 use std::path::Path;
@@ -25,6 +26,7 @@ pub struct BootConfig {
     ceiling: Ceiling,
     policy: &'static dyn ClassificationPolicy,
     providers: ProviderSet,
+    forges: ForgeSet,
     deployment: Deployment,
 }
 
@@ -34,6 +36,7 @@ pub(crate) struct Declared {
     pub(crate) ceiling: Ceiling,
     pub(crate) policy: &'static dyn ClassificationPolicy,
     pub(crate) providers: ProviderSet,
+    pub(crate) forges: ForgeSet,
 }
 
 impl std::fmt::Debug for BootConfig {
@@ -42,6 +45,7 @@ impl std::fmt::Debug for BootConfig {
             .field("document", &self.document)
             .field("policy", &self.policy.name())
             .field("providers", &self.providers)
+            .field("forges", &self.forges)
             .field("deployment", &self.deployment)
             .finish_non_exhaustive()
     }
@@ -72,6 +76,10 @@ impl BootConfig {
 
     pub fn providers(&self) -> &ProviderSet {
         &self.providers
+    }
+
+    pub fn forges(&self) -> &ForgeSet {
+        &self.forges
     }
 
     pub fn deployment(&self) -> Deployment {
@@ -129,7 +137,7 @@ pub fn read_files_as_owner(config_dir: &Path) -> Result<Document, ConfigError> {
 /// The sections the daemon registers, as literal blocks: the disclosure drift
 /// gate reads each registration's `name:` operand from this file, so the list
 /// is never built by a loop (and this comment never spells the block's opener).
-fn boot_specs() -> [SectionSpec; 8] {
+fn boot_specs() -> [SectionSpec; 9] {
     [
         SectionSpec {
             name: LAKE_SECTION.to_string(),
@@ -156,6 +164,10 @@ fn boot_specs() -> [SectionSpec; 8] {
             required: false,
         },
         SectionSpec {
+            name: FORGES_SECTION.to_string(),
+            required: false,
+        },
+        SectionSpec {
             name: EGRESS_SECTION.to_string(),
             required: false,
         },
@@ -179,6 +191,7 @@ pub(crate) fn assemble(document: Document) -> Result<BootConfig, ConfigError> {
         ceiling,
         policy,
         providers,
+        forges,
     } = declared(&document)?;
     let deployment = deployment_from_section(document.section(DEPLOYMENT_SECTION))?;
     Ok(BootConfig {
@@ -186,6 +199,7 @@ pub(crate) fn assemble(document: Document) -> Result<BootConfig, ConfigError> {
         ceiling,
         policy,
         providers,
+        forges,
         deployment,
     })
 }
@@ -227,10 +241,12 @@ pub(crate) fn declared(document: &Document) -> Result<Declared, ConfigError> {
         refuse_plaintext_keys(shadowed)?;
     }
     let providers = providers_from_section(document.section(PROVIDERS_SECTION))?;
+    let forges = forges_from_section(document.section(FORGES_SECTION))?;
     Ok(Declared {
         ceiling,
         policy,
         providers,
+        forges,
     })
 }
 
@@ -798,6 +814,43 @@ mod tests {
         );
         assert_eq!(cfg.providers().len(), 1);
         assert!(format!("{cfg:?}").contains("openai"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_authorized_forges_are_carried_and_an_absent_section_is_empty() {
+        let d = new_dir("forges");
+        let base = "core:\n  identity:\n    name: t\ndeployment:\n  mode: linux-host\n";
+        put(&d.0, "maknae.yaml", base, 0o640);
+        assert!(owned(&d.0).unwrap().forges().is_empty());
+        put(
+            &d.0,
+            "maknae.yaml",
+            &format!("{base}forges:\n  - {{ name: lab, kind: git, host: GitLab.Lab.Local:8443, provider: gitlab }}\n"),
+            0o640,
+        );
+        let cfg = owned(&d.0).unwrap();
+        let f = cfg.forges().get("lab").expect("authorized");
+        assert_eq!(
+            (f.kind, f.host.as_str(), f.provider),
+            (
+                maknae_config::ForgeKind::Git,
+                "gitlab.lab.local:8443",
+                maknae_config::ForgeProvider::Gitlab
+            )
+        );
+        assert_eq!(cfg.forges().len(), 1);
+        assert!(format!("{cfg:?}").contains("gitlab.lab.local:8443"));
+        put(
+            &d.0,
+            "maknae.yaml",
+            &format!("{base}forges:\n  - {{ name: lab, kind: git, host: 'https://x', provider: gitlab }}\n"),
+            0o640,
+        );
+        match owned(&d.0) {
+            Err(ConfigError::InvalidForge(m)) => assert!(m.contains("forges[0].host"), "{m}"),
+            other => panic!("expected InvalidForge, got {other:?}"),
+        }
     }
 
     #[cfg(unix)]
