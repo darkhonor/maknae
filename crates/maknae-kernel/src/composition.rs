@@ -1687,6 +1687,26 @@ mod tests {
             denied > 0,
             "premise: the partition operand decides board actions"
         );
+        let (_g, shipped) = crate::test_fixtures::shipped_composition();
+        for verb in &board_verbs() {
+            let mut r = build_authz_request(
+                verb,
+                2001,
+                Some(std::path::Path::new("/home/hobi-svc")),
+                maknae_security::Lane::Local,
+                None,
+                None,
+                &stamps[3],
+            );
+            r.resource.0.insert(
+                maknae_security::RESOURCE_BOARD,
+                AttrValue::Str(agent_rooted.root.clone()),
+            );
+            let v = partition.decide(&r);
+            assert!(!matches!(v, Verdict::NotApplicable { .. }), "{v:?}");
+            let composed = shipped.decide(&r);
+            assert!(!matches!(composed, Verdict::Permit { .. }), "{composed:?}");
+        }
     }
 
     const TASKS_TARGETS: &[&str] = &[

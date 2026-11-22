@@ -42,7 +42,9 @@ fn decide_partition(req: &Request, fold: Fold) -> Verdict {
     const ABSTAIN: Verdict = Verdict::NotApplicable { note: None };
     let action = req.action.0.as_str();
     match req.subject.0.get(SUBJECT_CHANNEL) {
-        None if action.starts_with("fs.") => return Verdict::Indeterminate,
+        None if action.starts_with("fs.") || BOARD_ACTIONS.contains(&action) => {
+            return Verdict::Indeterminate
+        }
         None => return ABSTAIN,
         Some(AttrValue::Str(c)) if c == CHANNEL_CLIENT => return ABSTAIN,
         Some(AttrValue::Str(c)) if c == CHANNEL_AGENT => {}
@@ -143,7 +145,7 @@ fn decide_board(req: &Request) -> Verdict {
     let Some(AttrValue::Str(board)) = req.resource.0.get(RESOURCE_BOARD) else {
         return Verdict::Indeterminate;
     };
-    if !is_partition_key(board) {
+    if !is_partition_key(board) || !board.starts_with("users/") {
         return Verdict::Indeterminate;
     }
     if board == root {
@@ -382,7 +384,7 @@ mod tests {
     #[test]
     fn partition_board_of_another_person_denies() {
         for action in BOARD_ACTIONS {
-            for other in ["users/1002", "users/10000", "agents/hobi"] {
+            for other in ["users/1002", "users/10000"] {
                 refused(
                     &board(action, MINE, key(other)),
                     "the board is outside the task's partition",
@@ -424,6 +426,13 @@ mod tests {
                 r.subject.0.insert(SUBJECT_ROOT_TASKER, root.clone());
                 assert_eq!(decide(&r), Verdict::Indeterminate, "{action} {root:?}");
             }
+            for root in [Some("agents/hobi"), MINE] {
+                assert_eq!(
+                    decide(&board(action, root, key("agents/hobi"))),
+                    Verdict::Indeterminate,
+                    "{action} {root:?}: a board is a person's partition"
+                );
+            }
         }
     }
 
@@ -432,12 +441,22 @@ mod tests {
         for action in BOARD_ACTIONS {
             for root in [MINE, None] {
                 for k in [key("users/1002"), None, Some(AttrValue::Int(1))] {
-                    assert_eq!(decide(&person(board(action, root, k.clone()))), NA);
+                    assert_eq!(decide(&person(board(action, root, k))), NA);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn partition_board_with_no_channel_is_indeterminate() {
+        for action in BOARD_ACTIONS {
+            for root in [MINE, None] {
+                for k in [key("users/1000"), key("users/1002"), None] {
                     let mut unstamped = asked(None, Some(HOME), action, None, root);
                     if let Some(k) = k {
                         unstamped.resource.0.insert(RESOURCE_BOARD, k);
                     }
-                    assert_eq!(decide(&unstamped), NA, "{action}");
+                    assert_eq!(decide(&unstamped), Verdict::Indeterminate, "{action}");
                 }
             }
         }
@@ -694,7 +713,7 @@ mod tests {
                     );
                     assert_eq!(decide(&person(on_agent)), NA, "{action} {path:?}");
                     let unstamped = asked(None, Some(HOME), action, path, root);
-                    let want = if action.starts_with("fs.") {
+                    let want = if action.starts_with("fs.") || BOARD_ACTIONS.contains(&action) {
                         Verdict::Indeterminate
                     } else {
                         NA
