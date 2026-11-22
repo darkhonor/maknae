@@ -9785,7 +9785,7 @@ fn lift_outcome(
 ) -> Result<(), (&'static str, String)> {
     use crate::board::{BoardRefusal as R, Lifted};
     match written {
-        Ok(Lifted::Done { .. }) => Ok(()),
+        Ok(Lifted::Done) => Ok(()),
         Ok(Lifted::Remarked) => Err(("refused", "post not released: contained again".into())),
         Err(why @ R::StillContained) => Err(("refused", format!("post not released: {why}"))),
         Err(
@@ -25301,9 +25301,7 @@ mod reload_tests {
     #[test]
     fn a_remarked_lift_is_not_counted_and_is_recorded_as_not_released() {
         use crate::board::{BoardRefusal, Lifted};
-        for live in [true, false] {
-            assert_eq!(lift_outcome(&Ok(Lifted::Done { live })), Ok(()));
-        }
+        assert_eq!(lift_outcome(&Ok(Lifted::Done)), Ok(()));
         assert_eq!(
             lift_outcome(&Ok(Lifted::Remarked)),
             Err(("refused", "post not released: contained again".into()))

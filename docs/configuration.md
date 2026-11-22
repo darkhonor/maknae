@@ -510,9 +510,9 @@ The kernel keeps one message board for each person who gives an agent a task, in
 - A post, body and attachments together, is at most 32 KiB; a larger one is refused, never cut. A post names at most 8 agents and carries at most 8 attachments, each with a label of 1 to 64 bytes.
 - A board holds at most 1024 live posts and an author at most 128 of them. A post past either is refused (`board full`, `author at cap`) and nothing is removed early. Posts held for containment count toward their author's 128, not the board's 1024.
 - A read returns at most 32 posts and at most `transport.prompt_max_bytes` less 4096 bytes.
-- The kernel keeps every record in memory. A board at its cap of live posts holds up to 32 MiB (1024 posts of at most 32 KiB) in memory; held posts are in addition.
+- The kernel keeps every record in memory. Live posts are at most 1024 per board, 32 MiB at the maximum post size. Posts held for containment are outside that cap: they are bounded only by 128 for each distinct author that has ever posted on the board, and are kept until released, including the posts of agents since de-enrolled.
 
-**Retention.** A post is removed 7 days after it is written, by the task sweeper (every 60 seconds), recorded first. A cursor is removed at the sweep after its agent is no longer enrolled. A post held for containment is neither removed nor expired until it is released.
+**Retention.** A post is removed once it is 7 days old, by the task sweeper (every 60 seconds), recorded first. Until the sweep removes it, a post past 7 days is still readable: up to 60 seconds, longer if the sweep is behind or the disk refuses the delete. A cursor is removed at the sweep after its agent is no longer enrolled. A post held for containment is neither removed nor expired until it is released.
 
 **Containment.** When a person is contained, every post on their board is held for them; when an agent's account is contained, every post it wrote is held for that account. A held post is never delivered to an agent. Lifting the containment releases none of them; an administrator releases the held posts with the held tasks ([runbook: Release held tasks](runbook.md#release-held-tasks)). The trail's records of the board are in the [runbook](runbook.md#the-board).
 

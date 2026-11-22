@@ -46,7 +46,8 @@ pub struct Subject {
     /// `drop`, `collect`, `claim` or `report`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_op: Option<String>,
-    /// The `session.board` operation: `post` or `read`.
+    /// The kernel's own board operation: `expire` or `hold` on a `board.manage` record,
+    /// `release` on an `admin.release` record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub board_op: Option<String>,
     /// `uid:<n>`, `agent:<id>` or `remote:<id>` (`maknae_proto::tasker_text`).
@@ -178,7 +179,8 @@ pub struct EgressAudit {
     pub refused_tool_calls: Vec<RefusedToolCall>,
 }
 
-/// The board block of a `session.board` record (ADR-0040 decision 12).
+/// The board block of a `board.post`, `board.read`, `board.manage` or `admin.release`
+/// record (ADR-0040 decision 12).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoardAudit {
     /// 32 hex.
@@ -596,7 +598,7 @@ mod tests {
     #[test]
     fn a_board_block_round_trips_and_omits_what_is_absent() {
         let mut rec = sample();
-        rec.subject.board_op = Some("post".into());
+        rec.subject.board_op = Some("hold".into());
         rec.board = Some(BoardAudit {
             post_id: Some("ab".repeat(16)),
             seq: Some(3),
@@ -605,7 +607,7 @@ mod tests {
         });
         let json = canonical_json(&rec).unwrap();
         assert!(json.contains(r#""board":{"post_id":"#), "{json}");
-        assert!(json.contains(r#""board_op":"post""#), "{json}");
+        assert!(json.contains(r#""board_op":"hold""#), "{json}");
         for absent in [
             "kind",
             "in_reply_to",
@@ -623,7 +625,7 @@ mod tests {
         }
         let back: AuditRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(back.board, rec.board);
-        assert_eq!(back.subject.board_op.as_deref(), Some("post"));
+        assert_eq!(back.subject.board_op.as_deref(), Some("hold"));
     }
 
     #[test]

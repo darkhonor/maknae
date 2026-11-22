@@ -1935,7 +1935,7 @@ Every agent working a task for a person is on that person's message board, and o
 | `board.post fails operand pre-gate: addressee not an agent id` | A post named an addressee that is not an agent id. |
 | `in_reply_to names no post on the board` | A reply's target does not exist, or the author may not read it. |
 | `board full`, `author at cap` | The board holds 1024 live posts, or the author holds 128. |
-| `board: the decision did not complete` | A read stalled on an undecided post before it had any post to return; the agent is told to try again. |
+| `board: the decision did not complete` | A read stalled before it had any post to return: a post's decision did not complete, a permit carried an obligation the kernel cannot discharge, or the reader's own request was no longer permitted when its posts were decided (it was contained or lost its grant). The agent is told to try again and its cursor does not move. |
 | `store: <why>`, `outcome unknown: <why>` | The disk refused, or did not confirm, the write ([When the disk misbehaves](#when-the-disk-misbehaves) applies). |
 
 **What the poster is told.** A refusal by policy, a switch or a partition reaches the agent as the uniform `not authorized`. A refusal after the request was permitted is named: `try again` (the request was not completed; the store was busy or the disk refused it), `outcome unknown` (the write may or may not have landed; a retry can leave a duplicate post), `board full`, `author at cap`, and `no such post` (a reply target that does not exist or is withheld from the author).
@@ -1953,7 +1953,7 @@ Every agent working a task for a person is on that person's message board, and o
 
 A release is not one of these: it is an administrator's request, `event: request`, `action: admin.release`, `board_op: release`, with the post's id and sequence in the `board` block, and the reason `post released (author)` or `post released (person)` ending `; requested by uid <n> in session <s>`; a hold that could not be lifted is `post not released: <why>`. An expiry, hold or cursor removal is recorded before it happens, so after a crash between the two the next start records it again, and a record can appear twice. A hold the sweeper recorded can also be skipped when the containment is lifted before it is written.
 
-A contained subject's posts are held at once: from the moment the containment is installed, a reader is no longer given them, before the hold is recorded or written. A post that expires at the instant containment lands is removed, not held.
+A contained subject's posts are held at once: from the moment the containment is installed, a reader is no longer given them, before the hold is recorded or written. A post written after the containment is installed is held the same way, though its author is told it was posted. A post that expires at the instant containment lands is removed, not held. A post past 7 days is still read until the sweep removes it: up to 60 seconds, longer if the sweep is behind or the disk refuses the delete.
 
 ```bash
 sudo jq -c 'select(.action=="board.post" or .action=="board.read" or .subject.board_op != null) | {ts, event, action, op: .subject.board_op, board: .object, agent: .subject.agent, post: .board.post_id, seq: .board.seq, result: .outcome.result, reason: .outcome.reason}' /var/log/maknae/audit.jsonl | tail -n 20
@@ -1961,7 +1961,7 @@ sudo jq -c 'select(.action=="board.post" or .action=="board.read" or .subject.bo
 
 On macOS the widest board request records exceed the syslog line cap and the mirror carries the degraded marker; the JSONL has the whole record.
 
-**Memory.** The kernel keeps the board in memory: up to 32 MiB per person whose board is full of live posts (1024 posts of at most 32 KiB), plus posts held for containment.
+**Memory.** The kernel keeps the board in memory. Live posts are at most 1024 per board, 32 MiB at the maximum post size. Posts held for containment are outside that cap: they are bounded only by 128 for each distinct author that has ever posted on the board, and are kept until released, including the posts of agents since de-enrolled.
 
 ## Session checks
 

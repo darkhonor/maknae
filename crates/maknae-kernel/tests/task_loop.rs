@@ -4519,7 +4519,8 @@ mod board {
     use super::*;
     use maknae_audit_append::AuditRecord;
     use maknae_kernel::{
-        BoardKey, BoardStore, Caps, Fail, FixedSwitches, LabelValue, PostLabels, Settings,
+        BoardKey, BoardSeam, BoardStore, Caps, Fail, FixedSwitches, LabelValue, PostLabels,
+        Settings,
     };
     use maknae_proto::{
         Addressee, Author, BoardDefect, BoardPage, Labels, PostDraft, PostId, PostKind,
@@ -5403,7 +5404,7 @@ mod board {
         for (key, id, _, lifted) in held {
             assert_eq!(
                 board.release(key, id, lifted, &everyone),
-                Ok(maknae_kernel::Lifted::Done { live: true })
+                Ok(maknae_kernel::Lifted::Done)
             );
         }
         assert_eq!(jin_reads().await, all);

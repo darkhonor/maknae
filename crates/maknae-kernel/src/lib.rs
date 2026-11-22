@@ -48,9 +48,9 @@ pub mod vocabulary;
 mod workspace;
 pub use authz::*;
 pub use blocking_guard::BLOCKING_BREAKER_MAX_IN_FLIGHT;
-#[cfg(any(test, feature = "hermetic-test-seam"))]
-pub use board::Caps;
 pub use board::{BoardRefusal, BoardStore, Lifted};
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+pub use board::{BoardSeam, Caps};
 pub use board_store::{
     labels_of, BoardFinding, BoardKey, HeldFor, LabelValue, PostLabels, ReadPlan, Report, Settings,
     Stored, BOARD, BOARD_RECORD_MAX, BOARD_RETENTION,

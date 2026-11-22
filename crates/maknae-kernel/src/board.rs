@@ -56,9 +56,7 @@ impl std::error::Error for BoardRefusal {}
 /// What [`BoardStore::release`] did with a hold it lifted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lifted {
-    Done {
-        live: bool,
-    },
+    Done,
     /// The subject was found contained after the write; the hold is written back.
     Remarked,
 }
@@ -246,7 +244,11 @@ impl BoardStore {
             .map_or_else(Settings::default, |b| b.settings)
     }
 
-    pub fn set_settings(&self, key: BoardKey, settings: Settings) -> Result<(), BoardRefusal> {
+    pub(crate) fn set_settings(
+        &self,
+        key: BoardKey,
+        settings: Settings,
+    ) -> Result<(), BoardRefusal> {
         let _w = self.writing();
         let mut rec = self.board_record(key);
         rec.settings = settings;
@@ -366,7 +368,7 @@ impl BoardStore {
     /// uid, or whose board's uid, the view holds contained, dropping any mark it no longer
     /// bears out; and notes each cursor, and forgets each walk, of a reader it no longer
     /// enrolls.
-    pub fn mark(&self, view: &dyn EnrollmentView) {
+    pub(crate) fn mark(&self, view: &dyn EnrollmentView) {
         let mut guard = self.held();
         let held = &mut *guard;
         let mut seen: BTreeMap<u32, bool> = BTreeMap::new();
@@ -422,7 +424,7 @@ impl BoardStore {
 
     /// What is due, at most `limit`, from memory only: marked holds, then posts past
     /// retention that are neither held nor marked, then noted cursors.
-    pub fn due(&self, limit: usize) -> Vec<BoardDue> {
+    pub(crate) fn due(&self, limit: usize) -> Vec<BoardDue> {
         let now = self.clock.now_secs();
         let guard = self.held();
         let held = &*guard;
@@ -476,7 +478,7 @@ impl BoardStore {
 
     /// Performs what the kernel has recorded: each item still due is written until the disk
     /// first refuses; memory follows only a synced write. The count is of those done.
-    pub fn perform(&self, due: &[BoardDue]) -> usize {
+    pub(crate) fn perform(&self, due: &[BoardDue]) -> usize {
         let _w = self.writing();
         let mut done = 0;
         for d in due {
@@ -616,7 +618,7 @@ impl BoardStore {
     }
 
     /// Lifts one written hold unless `view` holds its subject contained.
-    pub fn release(
+    pub(crate) fn release(
         &self,
         key: BoardKey,
         id: PostId,
@@ -665,9 +667,7 @@ impl BoardStore {
             }
             // A containment installed since the check is marked here, so `mark` cannot miss it.
             if !subject.is_some_and(|uid| view.contained(uid)) {
-                return Ok(Lifted::Done {
-                    live: !held.withheld(key, &next),
-                });
+                return Ok(Lifted::Done);
             }
             held.marked.entry((key, seq)).or_default().insert(lifted);
         }
@@ -892,6 +892,51 @@ impl BoardStore {
             }
         }
         w
+    }
+}
+
+/// [`BoardStore`]'s kernel-only operations, for the integration tests.
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+pub trait BoardSeam {
+    fn set_settings(&self, key: BoardKey, settings: Settings) -> Result<(), BoardRefusal>;
+    fn mark(&self, view: &dyn EnrollmentView);
+    fn due(&self, limit: usize) -> Vec<BoardDue>;
+    fn perform(&self, due: &[BoardDue]) -> usize;
+    fn release(
+        &self,
+        key: BoardKey,
+        id: PostId,
+        lifted: HeldFor,
+        view: &dyn EnrollmentView,
+    ) -> Result<Lifted, BoardRefusal>;
+}
+
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+impl BoardSeam for BoardStore {
+    fn set_settings(&self, key: BoardKey, settings: Settings) -> Result<(), BoardRefusal> {
+        BoardStore::set_settings(self, key, settings)
+    }
+
+    fn mark(&self, view: &dyn EnrollmentView) {
+        BoardStore::mark(self, view)
+    }
+
+    fn due(&self, limit: usize) -> Vec<BoardDue> {
+        BoardStore::due(self, limit)
+    }
+
+    fn perform(&self, due: &[BoardDue]) -> usize {
+        BoardStore::perform(self, due)
+    }
+
+    fn release(
+        &self,
+        key: BoardKey,
+        id: PostId,
+        lifted: HeldFor,
+        view: &dyn EnrollmentView,
+    ) -> Result<Lifted, BoardRefusal> {
+        BoardStore::release(self, key, id, lifted, view)
     }
 }
 
@@ -2490,7 +2535,7 @@ mod tests {
         store.mark(&containing(&[], &[]));
         assert_eq!(
             store.release(BOB, id, HeldFor::Author, &free()),
-            Ok(Lifted::Done { live: false })
+            Ok(Lifted::Done)
         );
         assert_eq!(
             stored_on_disk(&b, BOB, id).held,
@@ -2510,7 +2555,7 @@ mod tests {
         );
         assert_eq!(
             store.release(BOB, id, HeldFor::Person, &free()),
-            Ok(Lifted::Done { live: true })
+            Ok(Lifted::Done)
         );
         assert!(stored_on_disk(&b, BOB, id).held.is_empty());
         assert!(store.get(BOB, id).is_some());
@@ -2590,8 +2635,9 @@ mod tests {
         assert!(store.due(10).is_empty(), "a held post does not expire");
         assert_eq!(
             store.release(BOB, post.post.id, HeldFor::Author, &free()),
-            Ok(Lifted::Done { live: true })
+            Ok(Lifted::Done)
         );
+        assert!(store.get(BOB, post.post.id).is_some());
         let due = store.due(10);
         assert_eq!(
             whys(&due),
@@ -2624,7 +2670,7 @@ mod tests {
         );
         assert_eq!(
             store.release(BOB, held.post.id, HeldFor::Author, &free()),
-            Ok(Lifted::Done { live: true })
+            Ok(Lifted::Done)
         );
         assert!(store.get(BOB, held.post.id).is_some());
         assert_eq!(store.held_count(2001), 0);
@@ -2652,7 +2698,7 @@ mod tests {
         assert_eq!(store.held_count(1000), 1);
         assert_eq!(
             store.release(BOB, id, HeldFor::Author, &containing(&[], &[1000])),
-            Ok(Lifted::Done { live: false }),
+            Ok(Lifted::Done),
             "the board's person contained does not keep the author's hold"
         );
         assert_eq!(

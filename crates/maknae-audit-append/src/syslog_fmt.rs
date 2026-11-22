@@ -745,12 +745,12 @@ mod tests {
     #[test]
     fn the_summary_line_carries_a_board_op() {
         let mut r = rec("no");
-        r.subject.board_op = Some("post".into());
+        r.subject.board_op = Some("hold".into());
         let s = format_record(&r, PrimaryOutcome::Ok)
             .unwrap()
             .into_full()
             .unwrap();
-        assert!(s.contains(" op=post session=7"), "{s}");
+        assert!(s.contains(" op=hold session=7"), "{s}");
         r.subject.task_op = Some("collect".into());
         let s = format_record(&r, PrimaryOutcome::Ok)
             .unwrap()

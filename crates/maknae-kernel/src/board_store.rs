@@ -103,7 +103,7 @@ pub struct ReadPlan {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PostRecord<S> {
+pub(crate) struct PostRecord<S> {
     pub board: u32,
     pub stored: S,
 }
@@ -124,7 +124,7 @@ pub struct CursorRecord {
     pub cursor: u64,
 }
 
-pub enum Name {
+pub(crate) enum Name {
     Post(BoardKey, PostId),
     Board(BoardKey),
     Cursor(BoardKey, AgentId),
@@ -155,7 +155,7 @@ impl Name {
     }
 }
 
-pub struct Board {
+pub(crate) struct Board {
     pub next_seq: u64,
     pub settings: Settings,
     pub posts: BTreeMap<u64, Arc<Stored>>,
@@ -187,7 +187,7 @@ impl Board {
     }
 }
 
-pub struct Loaded {
+pub(crate) struct Loaded {
     pub boards: BTreeMap<BoardKey, Board>,
     pub findings: Vec<BoardFinding>,
 }
@@ -201,7 +201,7 @@ const MISNAMED: &str = "the record names another";
 
 /// Every record, read once at open. A board's sequence, `FIRST_SEQ` when its record is
 /// missing, must be above every stored post's and cursor's.
-pub fn load(blobs: &dyn TaskBlobs) -> Result<Loaded, StoreError> {
+pub(crate) fn load(blobs: &dyn TaskBlobs) -> Result<Loaded, StoreError> {
     let mut names = blobs.names()?;
     names.sort();
     let mut boards: BTreeMap<BoardKey, Board> = BTreeMap::new();
