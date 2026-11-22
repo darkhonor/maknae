@@ -225,6 +225,8 @@ files = [
   "crates/maknae-proto/src/task.rs",
   # #168: the host grammar every binding's server is checked against.
   "crates/maknae-proto/src/host.rs",
+  # #695: the board wire types; their decode-time bounds are the refusal control.
+  "crates/maknae-proto/src/board.rs",
   # #240a D3-A: the PURE peer-identity decision. It is a separate file from
   # peercred.rs because that one is whole-file mutation-excluded (syscall I/O),
   # which would make a T1 tier there vacuous — zero mutants, zero missed.
