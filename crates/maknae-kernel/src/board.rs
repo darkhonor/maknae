@@ -53,6 +53,16 @@ impl std::fmt::Display for BoardRefusal {
 
 impl std::error::Error for BoardRefusal {}
 
+/// What [`BoardStore::release`] did with a hold it lifted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lifted {
+    Done {
+        live: bool,
+    },
+    /// The subject was found contained after the write; the hold is written back.
+    Remarked,
+}
+
 fn store(e: StoreError) -> BoardRefusal {
     BoardRefusal::Store(e.to_string())
 }
@@ -603,15 +613,14 @@ impl BoardStore {
         self.held().holds_of(uid).count()
     }
 
-    /// Lifts one written hold unless `view` holds its subject contained; the post is live
-    /// again when nothing withholds it.
+    /// Lifts one written hold unless `view` holds its subject contained.
     pub fn release(
         &self,
         key: BoardKey,
         id: PostId,
         lifted: HeldFor,
         view: &dyn EnrollmentView,
-    ) -> Result<bool, BoardRefusal> {
+    ) -> Result<Lifted, BoardRefusal> {
         let _w = self.writing();
         let prior = {
             let held = self.held();
@@ -646,18 +655,46 @@ impl BoardStore {
             Err(e @ (StoreError::Io(_) | StoreError::Counters(_))) => return Err(store(e)),
         }
         let next = Arc::new(next);
+        let seq = next.seq;
+        {
+            let mut held = self.held();
+            if let Some(board) = held.boards.get_mut(&key) {
+                board.posts.insert(seq, Arc::clone(&next));
+            }
+            // A containment installed since the check is marked here, so `mark` cannot miss it.
+            if !subject.is_some_and(|uid| view.contained(uid)) {
+                return Ok(Lifted::Done {
+                    live: !held.withheld(key, &next),
+                });
+            }
+            held.marked.entry((key, seq)).or_default().insert(lifted);
+        }
+        let restored = encode(&PostRecord {
+            board: key.0,
+            stored: &*prior,
+        })
+        .map_err(store)
+        .and_then(|plain| {
+            self.blobs
+                .save(&Name::Post(key, id).text(), &plain)
+                .map_err(store)
+        });
+        if let Err(why) = restored {
+            return Err(BoardRefusal::Unavailable(format!(
+                "{OUTCOME_UNKNOWN}contained again; the hold is not written back: {why}"
+            )));
+        }
         let mut held = self.held();
         if let Some(board) = held.boards.get_mut(&key) {
-            board.posts.insert(next.seq, Arc::clone(&next));
+            board.posts.insert(seq, prior);
         }
-        // A containment installed since the check is marked here, so `mark` cannot miss it.
-        if subject.is_some_and(|uid| view.contained(uid)) {
-            held.marked
-                .entry((key, next.seq))
-                .or_default()
-                .insert(lifted);
+        if let Some(why) = held.marked.get_mut(&(key, seq)) {
+            why.remove(&lifted);
+            if why.is_empty() {
+                held.marked.remove(&(key, seq));
+            }
         }
-        Ok(!held.withheld(key, &next))
+        Ok(Lifted::Remarked)
     }
 
     /// What the kernel has yet to record, oldest first.
@@ -2260,7 +2297,10 @@ mod tests {
         let both: BTreeSet<HeldFor> = [HeldFor::Author, HeldFor::Person].into_iter().collect();
         assert_eq!(stored_on_disk(&b, BOB, id).held, both);
         store.mark(&containing(&[], &[]));
-        assert_eq!(store.release(BOB, id, HeldFor::Author, &free()), Ok(false));
+        assert_eq!(
+            store.release(BOB, id, HeldFor::Author, &free()),
+            Ok(Lifted::Done { live: false })
+        );
         assert_eq!(
             stored_on_disk(&b, BOB, id).held,
             [HeldFor::Person].into_iter().collect()
@@ -2277,7 +2317,10 @@ mod tests {
             store.get(BOB, id).is_none(),
             "a refused write lifts nothing"
         );
-        assert_eq!(store.release(BOB, id, HeldFor::Person, &free()), Ok(true));
+        assert_eq!(
+            store.release(BOB, id, HeldFor::Person, &free()),
+            Ok(Lifted::Done { live: true })
+        );
         assert!(stored_on_disk(&b, BOB, id).held.is_empty());
         assert!(store.get(BOB, id).is_some());
         assert_eq!(ids(&store.candidates(BOB, 0, 10)), vec![id]);
@@ -2356,7 +2399,7 @@ mod tests {
         assert!(store.due(10).is_empty(), "a held post does not expire");
         assert_eq!(
             store.release(BOB, post.post.id, HeldFor::Author, &free()),
-            Ok(true)
+            Ok(Lifted::Done { live: true })
         );
         let due = store.due(10);
         assert_eq!(
@@ -2390,7 +2433,7 @@ mod tests {
         );
         assert_eq!(
             store.release(BOB, held.post.id, HeldFor::Author, &free()),
-            Ok(true)
+            Ok(Lifted::Done { live: true })
         );
         assert!(store.get(BOB, held.post.id).is_some());
         assert_eq!(store.held_count(2001), 0);
@@ -2418,7 +2461,7 @@ mod tests {
         assert_eq!(store.held_count(1000), 1);
         assert_eq!(
             store.release(BOB, id, HeldFor::Author, &containing(&[], &[1000])),
-            Ok(false),
+            Ok(Lifted::Done { live: false }),
             "the board's person contained does not keep the author's hold"
         );
         assert_eq!(
@@ -2455,16 +2498,34 @@ mod tests {
         let (store, _) = clocked(&b);
         let post = by(&store, BOB, hobi(), Some(2001), "sentinel-695-late-contain");
         holding(&store, &[2001]);
-        let late = ContainedAfterOne(std::sync::atomic::AtomicBool::new(false));
+        let late = || ContainedAfterOne(std::sync::atomic::AtomicBool::new(false));
+        let id = post.post.id;
+        let author: BTreeSet<HeldFor> = [HeldFor::Author].into_iter().collect();
         assert_eq!(
-            store.release(BOB, post.post.id, HeldFor::Author, &late),
-            Ok(false)
+            store.release(BOB, id, HeldFor::Author, &late()),
+            Ok(Lifted::Remarked)
         );
-        assert!(store.get(BOB, post.post.id).is_none(), "marked again");
+        assert!(store.get(BOB, id).is_none(), "withheld");
+        assert_eq!(stored_on_disk(&b, BOB, id).held, author, "written back");
+        assert_eq!(store.held_count(2001), 1);
+        assert!(store.due(10).is_empty(), "nothing left for the sweep");
+
+        let armed = b.clone();
+        b.after_save(move || armed.fail(Some(Fail::Every)));
+        let got = store.release(BOB, id, HeldFor::Author, &late());
+        b.fail(None);
+        assert!(
+            matches!(&got, Err(BoardRefusal::Unavailable(why)) if why.starts_with(OUTCOME_UNKNOWN)),
+            "{got:?}"
+        );
+        assert!(store.get(BOB, id).is_none(), "the mark keeps it withheld");
+        assert!(stored_on_disk(&b, BOB, id).held.is_empty());
         assert_eq!(
             whys(&store.due(10)),
-            vec![(Some(post.post.id), None, BoardDueFor::Hold(HeldFor::Author))]
+            vec![(Some(id), None, BoardDueFor::Hold(HeldFor::Author))]
         );
+        assert_eq!(store.perform(&store.due(10)), 1);
+        assert_eq!(stored_on_disk(&b, BOB, id).held, author);
     }
 
     #[test]

@@ -8573,18 +8573,7 @@ where
                 board.release(key, id, lifted, &writer_view)
             })
             .await;
-            if let Err(why) = written {
-                use crate::board::BoardRefusal as R;
-                let posture = match why {
-                    R::StillContained => "refused",
-                    R::Store(_)
-                    | R::Unavailable(_)
-                    | R::Full
-                    | R::AuthorAtCap
-                    | R::NoSuchPost
-                    | R::Random => "unavailable",
-                };
-                let reason = format!("post not released: {why}");
+            if let Err((posture, reason)) = lift_outcome(&written) {
                 let rec =
                     post_release_record(ctx, requester, key, id, seq, ("deny", posture, &reason));
                 self.append_post_release(&rec).await;
@@ -9773,6 +9762,26 @@ fn held_release_record(
     rec.subject.parent_task_id = parent.map(ToString::to_string);
     rec.source.uid = requester.0;
     rec
+}
+
+/// `Ok` for a lift that counts; otherwise the posture and reason of its corrective record.
+fn lift_outcome(
+    written: &Result<crate::board::Lifted, crate::board::BoardRefusal>,
+) -> Result<(), (&'static str, String)> {
+    use crate::board::{BoardRefusal as R, Lifted};
+    match written {
+        Ok(Lifted::Done { .. }) => Ok(()),
+        Ok(Lifted::Remarked) => Err(("refused", "post not released: contained again".into())),
+        Err(why @ R::StillContained) => Err(("refused", format!("post not released: {why}"))),
+        Err(
+            why @ (R::Store(_)
+            | R::Unavailable(_)
+            | R::Full
+            | R::AuthorAtCap
+            | R::NoSuchPost
+            | R::Random),
+        ) => Err(("unavailable", format!("post not released: {why}"))),
+    }
 }
 
 /// An administrator's release of one hold on a post, appended before it is written.
@@ -25268,6 +25277,30 @@ mod reload_tests {
             .candidates(crate::board_store::BoardKey(1002), 0, 10)
             .is_empty());
         assert_eq!(fx.reloader.board.held_count(HOBI_UID), 2);
+        assert!(
+            post_records(&fx).is_empty(),
+            "the check under the turn writes no post record"
+        );
+    }
+
+    #[test]
+    fn a_remarked_lift_is_not_counted_and_is_recorded_as_not_released() {
+        use crate::board::{BoardRefusal, Lifted};
+        for live in [true, false] {
+            assert_eq!(lift_outcome(&Ok(Lifted::Done { live })), Ok(()));
+        }
+        assert_eq!(
+            lift_outcome(&Ok(Lifted::Remarked)),
+            Err(("refused", "post not released: contained again".into()))
+        );
+        assert_eq!(
+            lift_outcome(&Err(BoardRefusal::StillContained)),
+            Err(("refused", "post not released: still contained".into()))
+        );
+        assert_eq!(
+            lift_outcome(&Err(BoardRefusal::Store("x".into()))),
+            Err(("unavailable", "post not released: store: x".into()))
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
