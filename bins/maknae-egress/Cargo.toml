@@ -18,6 +18,7 @@ maknae-proto = { path = "../../crates/maknae-proto" }
 maknae-seal = { path = "../../crates/maknae-seal" }
 maknae-crypto = { path = "../../crates/maknae-crypto" }
 maknae-vault = { path = "../../crates/maknae-vault" }
+maknae-io = { path = "../../crates/maknae-io" }
 # #240a D4-A, maintainer ruling 2026-09-12 (option b). Adopting an inherited
 # listening fd requires `UnixListener::from_raw_fd`, which is `unsafe`, and
 # `[workspace.lints.rust] unsafe_code = "forbid"` cannot be lifted by an

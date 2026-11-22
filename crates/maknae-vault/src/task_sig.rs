@@ -8,7 +8,7 @@ use maknae_crypto::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use maknae_proto::{
     task_signing_bytes, Ask, Bytes, SignedTask, TaskObject, TaskSignature, TASK_ENVELOPE_MARGIN,
 };
-use std::time::SystemTime;
+use std::time::Duration;
 use x509_parser::certificate::X509Certificate;
 use x509_parser::prelude::FromDer;
 
@@ -83,7 +83,7 @@ fn kernel_leaf<'a>(
     trust: &TrustBundle,
     trust_domain: &str,
     sig: &'a TaskSignature,
-    now: SystemTime,
+    now: Duration,
 ) -> Option<X509Certificate<'a>> {
     let verifier =
         crate::tls::server_verifier(trust, SanRule::for_plane(Plane::Kernel, trust_domain)).ok()?;
@@ -92,7 +92,7 @@ fn kernel_leaf<'a>(
         .iter()
         .map(|c| CertificateDer::from(c.0.as_slice()))
         .collect();
-    let at = UnixTime::since_unix_epoch(now.duration_since(std::time::UNIX_EPOCH).ok()?);
+    let at = UnixTime::since_unix_epoch(now);
     let name = ServerName::try_from("maknae.invalid").ok()?;
     verifier
         .verify_server_cert(
@@ -111,7 +111,7 @@ pub fn verify_task(
     trust_domain: &str,
     expected_agent: &AgentId,
     signed: &SignedTask,
-    now: SystemTime,
+    now: Duration,
 ) -> Result<(), TaskSignatureError> {
     if signed.task.agent != expected_agent.as_str() {
         return Err(TaskSignatureError::AgentMismatch);
@@ -139,7 +139,6 @@ mod tests {
     use super::*;
     use crate::test_pki::{TestCa, TRUST_DOMAIN};
     use maknae_proto::{Labels, SecretText, TaskId, Tasker, TASK_SCHEMA, TASK_VERSION};
-    use std::time::{Duration, UNIX_EPOCH};
 
     const PROMPT: &str = "task-12-prompt-sentinel";
 
@@ -162,12 +161,12 @@ mod tests {
         }
     }
 
-    fn year(y: u64) -> SystemTime {
-        UNIX_EPOCH + Duration::from_secs((y - 1970) * 365 * 86_400 + 30 * 86_400)
+    fn year(y: u64) -> Duration {
+        Duration::from_secs((y - 1970) * 365 * 86_400 + 30 * 86_400)
     }
 
-    fn now() -> SystemTime {
-        SystemTime::now()
+    fn now() -> Duration {
+        maknae_io::now_since_epoch().unwrap()
     }
 
     fn verify(ca: &TestCa, expected: &str, signed: &SignedTask) -> Result<(), TaskSignatureError> {
@@ -358,18 +357,6 @@ mod tests {
         assert_eq!(fa, leaf_fingerprint(&signed.signature.leaf.0));
         assert_eq!(fa, maknae_crypto::sha256(&signed.signature.leaf.0));
         assert_ne!(fa, identity_fingerprint(&b).unwrap());
-    }
-
-    #[test]
-    fn a_time_before_the_epoch_fails() {
-        let k = PlaneKey::EcdsaP384Sha384;
-        let ca = TestCa::new(k);
-        let signed = sign_task(&ca.kernel(k, None), task("suga")).unwrap();
-        let before = UNIX_EPOCH - Duration::from_secs(1);
-        assert_eq!(
-            verify_task(&ca.trust(), TRUST_DOMAIN, &agent("suga"), &signed, before),
-            Err(TaskSignatureError::NotKernel)
-        );
     }
 
     #[test]

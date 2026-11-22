@@ -6809,9 +6809,7 @@ fn kernel_graph_status(report: &BootReport) -> KernelGraphStatus {
 }
 
 pub(crate) fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
+    maknae_io::now_unix().unwrap_or(0)
 }
 
 /// Publishes the boot load's problems and releases; records its
@@ -10997,9 +10995,7 @@ pub(crate) fn hostname() -> String {
 }
 
 pub(crate) fn rfc3339_now() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
+    let now = maknae_io::now_since_epoch().unwrap_or_default();
     maknae_proto::epoch_to_rfc3339(now.as_secs(), now.subsec_millis())
 }
 
@@ -12309,6 +12305,25 @@ mod record_widths {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_kernel_clocks_read_the_wall_clock() {
+        let read = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+        };
+        let stamp =
+            |d: std::time::Duration| maknae_proto::epoch_to_rfc3339(d.as_secs(), d.subsec_millis());
+        let before = read();
+        let (secs, text) = (unix_now(), rfc3339_now());
+        let after = read();
+        assert!(
+            (before.as_secs()..=after.as_secs()).contains(&secs),
+            "{secs}"
+        );
+        assert!(stamp(before) <= text && text <= stamp(after), "{text}");
+    }
 
     #[test]
     fn the_drivers_waits_derive_from_the_lease_and_one_prompt_exchange_fits_inside_it() {

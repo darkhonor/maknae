@@ -23,12 +23,19 @@ pub fn presence(path: &Path) -> io::Result<bool> {
     }
 }
 
+fn since_epoch(t: std::time::SystemTime) -> Result<std::time::Duration, String> {
+    t.duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "the system clock reads before 1970; set the clock, then retry".to_string())
+}
+
+/// The clock since the Unix epoch; a clock before 1970 is an error.
+pub fn now_since_epoch() -> Result<std::time::Duration, String> {
+    since_epoch(std::time::SystemTime::now())
+}
+
 /// The clock in whole seconds since the Unix epoch; a clock before 1970 is an error.
 pub fn now_unix() -> Result<u64, String> {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .map_err(|_| "the system clock reads before 1970; set the clock, then retry".to_string())
+    now_since_epoch().map(|d| d.as_secs())
 }
 
 #[cfg(test)]
@@ -54,6 +61,37 @@ mod tests {
             .unwrap()
             .as_secs();
         assert!((before..=after).contains(&now), "{before} {now} {after}");
+    }
+
+    #[test]
+    fn a_time_before_the_epoch_is_an_error() {
+        let before = std::time::UNIX_EPOCH - std::time::Duration::from_secs(1);
+        assert_eq!(
+            since_epoch(before),
+            Err("the system clock reads before 1970; set the clock, then retry".to_string())
+        );
+    }
+
+    #[test]
+    fn a_time_after_the_epoch_is_its_offset() {
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_millis(1500);
+        assert_eq!(since_epoch(t), Ok(std::time::Duration::from_millis(1500)));
+    }
+
+    #[test]
+    fn now_since_epoch_is_the_clock() {
+        let read = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+        };
+        let before = read();
+        let now = now_since_epoch().unwrap();
+        let after = read();
+        assert!(
+            (before..=after).contains(&now),
+            "{before:?} {now:?} {after:?}"
+        );
     }
 
     #[test]

@@ -15,7 +15,7 @@ use maknae_vault::{ServiceToken, VaultApi, VaultError};
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use zeroize::Zeroizing;
 
 fn journal(line: impl Display) {
@@ -226,10 +226,7 @@ fn frames_journaled(
 }
 
 fn unix_now() -> Option<u64> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .map(|d| d.as_secs())
+    maknae_io::now_unix().ok()
 }
 
 impl MintFrames for EgressMinting {
@@ -287,6 +284,19 @@ mod tests {
     };
     use std::collections::BTreeMap;
     use std::sync::Mutex;
+
+    #[test]
+    fn the_minting_clock_is_the_wall_clock() {
+        let read = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        };
+        let before = read();
+        let now = unix_now().unwrap();
+        assert!((before..=read()).contains(&now), "{now}");
+    }
 
     fn fips() {
         static ONCE: std::sync::Once = std::sync::Once::new();

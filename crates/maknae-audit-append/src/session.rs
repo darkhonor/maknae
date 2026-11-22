@@ -7,7 +7,6 @@
 //! here), so the layout is pinned exhaustively rather than trusted to "it
 //! compiles."
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Process-wide session-id allocator. `session_id = (boot_nonce << 32) +
 /// per-connection counter`: the high 32 bits are a per-boot nonce (real-clock
@@ -24,10 +23,7 @@ pub struct SessionIds {
 impl SessionIds {
     /// Real-clock constructor for the running daemon.
     pub fn new() -> Self {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as u32)
-            .unwrap_or(0);
+        let nonce = maknae_io::now_unix().map_or(0, |s| s as u32);
         Self::with_nonce(nonce)
     }
 
@@ -94,6 +90,14 @@ impl Default for Seq {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_takes_its_nonce_from_the_wall_clock() {
+        let read = || maknae_io::now_unix().unwrap() as u32;
+        let before = read();
+        let nonce = SessionIds::new().boot_nonce();
+        assert!((before..=read()).contains(&nonce), "{nonce}");
+    }
 
     #[test]
     fn session_id_packs_nonce_high_ctr_low() {

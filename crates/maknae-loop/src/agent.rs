@@ -36,10 +36,14 @@ impl TaskTrust {
     pub fn verify(
         &self,
         signed: &Bytes,
-        now: std::time::SystemTime,
+        now: Result<std::time::Duration, String>,
     ) -> Result<SignedTask, Unverified> {
         let task: SignedTask =
             ciborium::from_reader(signed.0.as_slice()).map_err(|_| Unverified::Undecodable)?;
+        let now = now.map_err(|_| Unverified::Failed {
+            task: task.task.task_id,
+            class: crate::task::verify_class(maknae_vault::task_sig::TaskSignatureError::NotKernel),
+        })?;
         maknae_vault::task_sig::verify_task(
             &self.trust,
             &self.trust_domain,
@@ -242,7 +246,7 @@ impl<K: KeySupply, R: PersonaRead, D: Dial> TaskPlane for AgentPlane<K, R, D> {
         self.plane.mkdir(path, true, None).await
     }
     fn verify(&mut self, signed: &Bytes) -> Result<SignedTask, Unverified> {
-        self.trust.verify(signed, std::time::SystemTime::now())
+        self.trust.verify(signed, maknae_io::now_since_epoch())
     }
     async fn persona(&mut self, at: PersonaAt<'_>) -> Result<Option<SecretText>, String> {
         let rel = match at {
@@ -567,7 +571,7 @@ mod tests {
             agent: hobi(),
         };
         let got = trust
-            .verify(&wire(&signed), std::time::SystemTime::now())
+            .verify(&wire(&signed), maknae_io::now_since_epoch())
             .unwrap();
         assert_eq!(got, signed);
     }
@@ -582,10 +586,10 @@ mod tests {
             trust_domain: TRUST_DOMAIN.into(),
             agent: hobi(),
         };
-        let now = std::time::SystemTime::now();
+        let now = || maknae_io::now_since_epoch();
         let suga = maknae_vault::task_sig::sign_task(&kernel, task("suga")).unwrap();
         assert_eq!(
-            trust.verify(&wire(&suga), now),
+            trust.verify(&wire(&suga), now()),
             Err(Unverified::Failed {
                 task: TaskId([0x62; 16]),
                 class: VerifyClass::Agent
@@ -596,7 +600,7 @@ mod tests {
             prompt: SecretText(Zeroizing::new("sentinel-629-forged".into())),
         };
         assert_eq!(
-            trust.verify(&wire(&forged), now),
+            trust.verify(&wire(&forged), now()),
             Err(Unverified::Failed {
                 task: TaskId([0x62; 16]),
                 class: VerifyClass::Signature
@@ -607,7 +611,31 @@ mod tests {
             maknae_vault::task_sig::sign_task(&other.kernel(PlaneKey::MlDsa87, None), task("hobi"))
                 .unwrap();
         assert_eq!(
-            trust.verify(&wire(&foreign), now),
+            trust.verify(&wire(&foreign), now()),
+            Err(Unverified::Failed {
+                task: TaskId([0x62; 16]),
+                class: VerifyClass::NotKernel
+            })
+        );
+    }
+
+    #[test]
+    fn a_clock_before_the_epoch_fails_as_not_kernel_before_any_other_check() {
+        maknae_crypto::init().unwrap();
+        let ca = TestCa::new(PlaneKey::MlDsa87);
+        let signed =
+            maknae_vault::task_sig::sign_task(&ca.kernel(PlaneKey::MlDsa87, None), task("suga"))
+                .unwrap();
+        let trust = TaskTrust {
+            trust: ca.trust(),
+            trust_domain: TRUST_DOMAIN.into(),
+            agent: hobi(),
+        };
+        assert_eq!(
+            trust.verify(
+                &wire(&signed),
+                Err("the system clock reads before 1970".into())
+            ),
             Err(Unverified::Failed {
                 task: TaskId([0x62; 16]),
                 class: VerifyClass::NotKernel
@@ -627,7 +655,7 @@ mod tests {
             assert_eq!(
                 trust.verify(
                     &Bytes::new(Zeroizing::new(junk)),
-                    std::time::SystemTime::now()
+                    maknae_io::now_since_epoch()
                 ),
                 Err(Unverified::Undecodable)
             );

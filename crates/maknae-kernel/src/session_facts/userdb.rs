@@ -2,7 +2,7 @@
 //! whether an account is local at all.
 
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use maknae_io::TargetRequired;
 
@@ -37,12 +37,13 @@ fn account_linux_at(path: &Path, listener_uid: u32, uid: u32, deadline: Duration
         Ok(v) => v,
         Err(_) => return unknown("userdb: malformed reply"),
     };
-    let now_usec = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(u64::MAX, |d| {
-            u64::try_from(d.as_micros()).unwrap_or(u64::MAX)
-        });
-    map_record(&reply, uid, now_usec)
+    map_record(&reply, uid, usec(maknae_io::now_since_epoch()))
+}
+
+fn usec(now: Result<Duration, String>) -> u64 {
+    now.map_or(u64::MAX, |d| {
+        u64::try_from(d.as_micros()).unwrap_or(u64::MAX)
+    })
 }
 
 fn request_frame(uid: u32) -> Vec<u8> {
@@ -156,6 +157,12 @@ mod tests {
     use std::io::{Read, Write};
     use std::os::unix::net::UnixListener;
     use std::time::Instant;
+
+    #[test]
+    fn the_clock_reaches_the_record_in_microseconds_and_an_unreadable_clock_is_never() {
+        assert_eq!(usec(Ok(Duration::from_millis(1500))), 1_500_000);
+        assert_eq!(usec(Err("before 1970".into())), u64::MAX);
+    }
 
     const NOW: u64 = 1_800_000_000_000_000;
 
