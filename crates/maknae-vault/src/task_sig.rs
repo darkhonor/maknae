@@ -138,7 +138,10 @@ pub fn verify_task(
 mod tests {
     use super::*;
     use crate::test_pki::{TestCa, TRUST_DOMAIN};
-    use maknae_proto::{Labels, SecretText, TaskId, Tasker, TASK_SCHEMA, TASK_VERSION};
+    use maknae_proto::{
+        Binding, GitBinding, Labels, SecretText, TaskId, Tasker, TASK_SCHEMA, TASK_SIGNING_CONTEXT,
+        TASK_VERSION,
+    };
 
     const PROMPT: &str = "task-12-prompt-sentinel";
 
@@ -172,6 +175,90 @@ mod tests {
 
     fn verify(ca: &TestCa, expected: &str, signed: &SignedTask) -> Result<(), TaskSignatureError> {
         verify_task(&ca.trust(), TRUST_DOMAIN, &agent(expected), signed, now())
+    }
+
+    const V1_OBJECT: &str = "a8
+         66 736368656d61 6b 6d616b6e61652e7461736b
+         67 76657273696f6e 01
+         67 7461736b5f6964 50 000102030405060708090a0b0c0d0e0f
+         66 7461736b6572 a1 63 556964 19 03e8
+         66 706172656e74 f6
+         65 6167656e74 64 686f6269
+         63 61736b a1 66 50726f6d7074 a1 66 70726f6d7074 62 6869
+         66 6c6162656c73 a0";
+
+    fn hex(s: &str) -> Vec<u8> {
+        let s: String = s.split_whitespace().collect();
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    fn binding(change: u64) -> Binding {
+        Binding::Git(GitBinding {
+            server: "forge.example".into(),
+            base: "owner/repo".into(),
+            head: None,
+            change: Some(change),
+        })
+    }
+
+    #[test]
+    fn a_task_signed_before_bindings_existed_still_verifies() {
+        let golden = hex(V1_OBJECT);
+        let mut msg = TASK_SIGNING_CONTEXT.to_vec();
+        msg.extend_from_slice(&golden);
+        for k in PlaneKey::ALL {
+            let ca = TestCa::new(k);
+            let identity = ca.kernel(k, None);
+            let template = sign_task(&identity, task("hobi")).unwrap();
+            let signed = SignedTask {
+                task: ciborium::from_reader(golden.as_slice()).unwrap(),
+                signature: TaskSignature {
+                    sig: Bytes::new(identity.sign(&msg).unwrap().into()),
+                    ..template.signature
+                },
+            };
+            assert!(signed.task.bindings.is_empty());
+            assert_eq!(verify(&ca, "hobi", &signed), Ok(()), "{k:?}");
+        }
+    }
+
+    #[test]
+    fn a_task_with_bindings_signs_and_verifies() {
+        for k in PlaneKey::ALL {
+            let ca = TestCa::new(k);
+            let mut t = task("suga");
+            t.bindings = vec![binding(7)];
+            let signed = sign_task(&ca.kernel(k, None), t).unwrap();
+            assert_eq!(verify(&ca, "suga", &signed), Ok(()), "{k:?}");
+        }
+    }
+
+    #[test]
+    fn a_binding_changed_after_signing_does_not_verify() {
+        type Tamper = fn(&mut TaskObject);
+        let tampers: [(&str, Tamper); 3] = [
+            ("changed", |t| t.bindings = vec![binding(8)]),
+            ("removed", |t| t.bindings.clear()),
+            ("added", |t| t.bindings.push(binding(9))),
+        ];
+        for k in PlaneKey::ALL {
+            let ca = TestCa::new(k);
+            let mut t = task("suga");
+            t.bindings = vec![binding(7)];
+            let signed = sign_task(&ca.kernel(k, None), t).unwrap();
+            for (what, tamper) in tampers {
+                let mut forged = signed.clone();
+                tamper(&mut forged.task);
+                assert_eq!(
+                    verify(&ca, "suga", &forged),
+                    Err(TaskSignatureError::BadSignature),
+                    "{k:?}: {what}"
+                );
+            }
+        }
     }
 
     #[test]
