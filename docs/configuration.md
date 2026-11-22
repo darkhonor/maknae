@@ -1234,10 +1234,10 @@ The value is a list of at most **32** entries, and each `name` may appear once (
 |---|---|
 | `name` | 1 to 64 bytes of lowercase ASCII letters, digits and `-`. |
 | `kind` | `git`, the only binding kind today. |
-| `host` | a host name, an IPv4 literal or a bracketed IPv6 literal, with an optional `:port` in 1–65535 and no leading zero. It follows the same host rules as a provider `endpoint` (§6.1): refused are a scheme (`https://github.com`), a path, userinfo, whitespace, an empty host (`:22`), `a..b`, a leading or trailing `-` or `.`, and a port of `0`, `08` or `65536`. It is stored lowercased. |
+| `host` | a host name, an IPv4 literal or a bracketed IPv6 literal, with an optional `:port` in 1–65535 and no leading zero. It follows the same host rules as a provider `endpoint` (§6.1): refused are a scheme (`https://github.com`), a path, userinfo, whitespace, an empty host (`:22`), `a..b`, a leading or trailing `-` or `.`, and a port of `0`, `08` or `65536`. It is stored lowercased, and at most 255 bytes, so every forge can be a task binding's server. |
 | `provider` | `github` or `gitlab`. It tells the client which link forms to recognize. |
 
-A malformed entry refuses start with `InvalidForge`, which reads `invalid forge config: <reason>` and names the entry by index, for example `invalid forge config: forges[0].host must be a host name or IP address with an optional port in 1 to 65535, and no scheme, path or userinfo`.
+A malformed entry refuses start with `InvalidForge`, which reads `invalid forge config: <reason>` and names the entry by index, for example `invalid forge config: forges[0].host must be a host name or IP address with an optional port in 1 to 65535, at most 255 bytes, and no scheme, path or userinfo`.
 
 - **No forges is a valid state.** An absent section, or `forges: []`, starts with an empty list. A `forges:` key with no value (YAML `null`) refuses start: `invalid forge config: forges must be a sequence of forge entries`.
 - **A change applies by restart** (§3.2). An accepted change to `forges` is never installed live, alone or beside a live change.

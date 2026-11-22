@@ -128,9 +128,11 @@ fn forge_entry(i: usize, item: &Value) -> Result<AuthorizedForge, ConfigError> {
         _ => return Err(err(format!("{at}.kind must be git"))),
     };
     let host = required_str(m, &at, "host")?;
-    if !crate::providers::host_port_is_acceptable(host) {
+    let host = host.to_ascii_lowercase();
+    if !maknae_proto::server_is_acceptable(&host) {
         return Err(err(format!(
-            "{at}.host must be a host name or IP address with an optional port in 1 to 65535, and no scheme, path or userinfo"
+            "{at}.host must be a host name or IP address with an optional port in 1 to 65535, at most {} bytes, and no scheme, path or userinfo",
+            maknae_proto::SERVER_MAX_BYTES
         )));
     }
     let provider = match required_str(m, &at, "provider")? {
@@ -141,7 +143,7 @@ fn forge_entry(i: usize, item: &Value) -> Result<AuthorizedForge, ConfigError> {
     Ok(AuthorizedForge {
         name: name.to_string(),
         kind,
-        host: host.to_ascii_lowercase(),
+        host,
         provider,
     })
 }
@@ -150,7 +152,11 @@ fn forge_entry(i: usize, item: &Value) -> Result<AuthorizedForge, ConfigError> {
 mod tests {
     use super::*;
     use crate::load_str;
-    use crate::providers::{endpoint_is_acceptable, host_port_is_acceptable};
+    use crate::providers::endpoint_is_acceptable;
+
+    fn host_port_is_acceptable(s: &str) -> bool {
+        maknae_proto::host_port(s).is_some()
+    }
 
     const FULL: &str = concat!(
         "- name: github\n",
@@ -314,6 +320,16 @@ mod tests {
             let m = refusal(&entry("g", "git", bad, "github"));
             assert!(m.contains("forges[0].host"), "{bad:?}: {m}");
         }
+    }
+
+    #[test]
+    fn a_host_over_255_bytes_is_refused_so_every_forge_can_be_bound() {
+        let at_cap = format!("{}.com", "A".repeat(251));
+        assert_eq!(at_cap.len(), 255);
+        let set = parse(&entry("g", "git", &at_cap, "github")).unwrap();
+        assert_eq!(set.get("g").unwrap().host, at_cap.to_ascii_lowercase());
+        let m = refusal(&entry("g", "git", &format!("{at_cap}x"), "github"));
+        assert!(m.contains("forges[0].host"), "{m}");
     }
 
     #[test]
