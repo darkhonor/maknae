@@ -27,13 +27,16 @@ use crate::request::Request;
 use crate::verdict::Verdict;
 
 pub const INDETERMINATE_BLOCKS: &str = "indeterminate operand blocks (fail-closed)";
+pub const CONFLICTING_OBLIGATIONS: &str = "conflicting obligations (fail-closed)";
 
-/// Whether `v` records a decision that did not complete: an `Indeterminate`, or the
-/// `Deny` [`combine`] folds one into.
+/// Whether `v` records a decision that did not complete: an `Indeterminate`, or a
+/// `Deny` [`combine`] makes when it cannot complete the fold.
 pub fn undecided(v: &Verdict) -> bool {
     match v {
         Verdict::Indeterminate => true,
-        Verdict::Deny { reason } => reason == INDETERMINATE_BLOCKS,
+        Verdict::Deny { reason } => {
+            reason == INDETERMINATE_BLOCKS || reason == CONFLICTING_OBLIGATIONS
+        }
         Verdict::Permit { .. } | Verdict::NotApplicable { .. } => false,
     }
 }
@@ -85,7 +88,7 @@ pub fn combine(verdicts: Vec<Verdict>) -> Verdict {
                 Ok(m) => acc = m,
                 Err(_) => {
                     return Verdict::Deny {
-                        reason: "conflicting obligations (fail-closed)".into(),
+                        reason: CONFLICTING_OBLIGATIONS.into(),
                     }
                 }
             }
@@ -825,6 +828,21 @@ mod tests {
         ])));
         assert!(!undecided(&permit(vec![])));
         assert!(!undecided(&Verdict::NotApplicable { note: None }));
+    }
+
+    #[test]
+    fn conflicting_obligations_are_undecided() {
+        let with = |v: &str| {
+            let mut params = crate::Attributes::new();
+            params.insert("sentinel-695-param", crate::AttrValue::Str(v.into()));
+            permit(vec![Obligation {
+                id: "sentinel-695-ob".into(),
+                params,
+            }])
+        };
+        let conflicted = combine(vec![with("a"), with("b")]);
+        assert!(matches!(conflicted, Verdict::Deny { .. }), "{conflicted:?}");
+        assert!(undecided(&conflicted));
     }
 
     #[test]

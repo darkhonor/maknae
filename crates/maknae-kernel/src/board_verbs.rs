@@ -887,9 +887,44 @@ mod tests {
             (Verdict::NotApplicable { note: None }, D),
             (Verdict::Indeterminate, U),
             (deny(maknae_security::INDETERMINATE_BLOCKS), U),
+            (conflicted(), U),
         ] {
             assert_eq!(post_verdict(verdict.clone()), want, "{verdict:?}");
         }
+    }
+
+    /// Two operands' permits whose obligations conflict, as `combine` folds them.
+    fn conflicted() -> Verdict {
+        let with = |v: &str| {
+            let mut params = Attributes::new();
+            params.insert("sentinel-695-param", AttrValue::Str(v.into()));
+            Verdict::Permit {
+                obligations: vec![maknae_security::Obligation {
+                    id: "sentinel-695-ob".into(),
+                    params,
+                }],
+            }
+        };
+        maknae_security::combine(vec![with("a"), with("b")])
+    }
+
+    #[test]
+    fn a_leading_post_whose_obligations_conflict_stalls_the_walk_and_skips_nothing() {
+        let verdicts: Vec<_> = [
+            conflicted(),
+            Verdict::Permit {
+                obligations: vec![],
+            },
+        ]
+        .into_iter()
+        .map(post_verdict)
+        .collect();
+        let mut w = Walker::new(0, BIG);
+        assert!(!w.take(&plain(1..=2), &verdicts));
+        assert!(w.stalled());
+        let walk = w.finish(&BTreeSet::new());
+        assert_eq!(walk.skip_to, None);
+        assert!(walk.page.posts.is_empty());
     }
 
     /// Answers `base` for a request without the post label and permits every other one.
