@@ -147,6 +147,7 @@ pub(crate) struct Opening {
     pub(crate) wait: bool,
     pub(crate) input_cap: usize,
     pub(crate) workdir: Workdir,
+    pub(crate) notes: Box<dyn std::io::Write + Send>,
 }
 
 pub(crate) struct Workdir {
@@ -360,6 +361,7 @@ pub(crate) async fn run_session(name: &str, wait: bool) -> ExitCode {
             wait,
             input_cap: plane.input_cap,
             workdir,
+            notes: Box::new(std::io::stderr()),
         },
         io,
     )
@@ -464,6 +466,7 @@ pub(crate) async fn open<T: Tasker, L: Leaf>(
         wait,
         input_cap,
         workdir,
+        mut notes,
     } = opening;
     let refused = (End::Failed, Left::default());
     let roster = match tasker.agents().await {
@@ -486,7 +489,7 @@ pub(crate) async fn open<T: Tasker, L: Leaf>(
     }
     let forges = tasker.forges().await.ok();
     if let Some(note) = workdir.note {
-        errln!("maknae: {note}");
+        crate::stderr::line(&mut notes, format_args!("maknae: {note}"));
     }
     let kernel = Kernel {
         tasker,
@@ -1146,6 +1149,7 @@ mod tests {
                 wait: false,
                 input_cap: 4096,
                 workdir: Workdir::of(Ok(None)),
+                notes: Box::new(std::io::sink()),
             },
             io.io(),
         ))
@@ -1159,12 +1163,67 @@ mod tests {
         );
     }
 
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_checkout_says_so_once_without_its_path_and_binds_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        struct Scratch(std::path::PathBuf);
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let t =
+            Scratch(std::env::temp_dir().join(format!("maknae-checkout-{}", std::process::id())));
+        let checkout = t.0.join("fixture-checkout-168");
+        std::fs::create_dir_all(checkout.join(".git")).unwrap();
+        std::fs::write(
+            checkout.join(".git/config"),
+            "[remote \"o\"]\nurl = https://github.com/o/r\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&checkout, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let workdir = Workdir::read(&checkout, nix::unistd::geteuid().as_raw());
+        assert!(workdir.remotes.is_empty());
+        let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
+        let mut io = pipes("see o/r\n");
+        let notes = Captured::default();
+        let (end, _) = bounded(open(
+            fake.clone(),
+            fresh_leaf(),
+            u64::MAX,
+            "hobi",
+            Opening {
+                wait: false,
+                input_cap: 4096,
+                workdir,
+                notes: Box::new(notes.clone()),
+            },
+            io.io(),
+        ))
+        .await;
+        assert_eq!(end, End::Left);
+        let said = String::from_utf8(notes.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(said, format!("maknae: {CHECKOUT_UNREADABLE}\n"));
+        assert!(!said.contains("fixture-checkout-168"));
+        assert!(!io.output().contains("fixture-checkout-168"));
+        assert!(!io.output().contains(CHECKOUT_UNREADABLE));
+    }
+
     #[test]
-    fn an_unreadable_checkout_says_so_once_and_binds_nothing() {
-        let w = Workdir::of(Err(Unreadable::Config("/w/.git/config".into())));
-        assert_eq!(w.note, Some(CHECKOUT_UNREADABLE));
-        assert!(w.remotes.is_empty());
-        assert!(!CHECKOUT_UNREADABLE.contains("/w"));
+    fn outside_a_checkout_nothing_is_said() {
         let outside = Workdir::of(Ok(None));
         assert_eq!(outside.note, None);
         assert!(outside.remotes.is_empty());
@@ -1299,6 +1358,7 @@ mod tests {
                     wait,
                     input_cap: 4096,
                     workdir: Workdir::of(Ok(None)),
+                    notes: Box::new(std::io::sink()),
                 },
                 io(),
             ));
@@ -1367,6 +1427,7 @@ mod tests {
                 wait: false,
                 input_cap: 4096,
                 workdir: Workdir::of(Ok(None)),
+                notes: Box::new(std::io::sink()),
             },
             io.io(),
         ))
@@ -1400,6 +1461,7 @@ mod tests {
                 wait: false,
                 input_cap: 4096,
                 workdir: Workdir::of(Ok(None)),
+                notes: Box::new(std::io::sink()),
             },
             io.io(),
         ))

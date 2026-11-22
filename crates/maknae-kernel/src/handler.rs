@@ -490,7 +490,6 @@ impl TaskStamp {
     }
 }
 
-/// A task with no bindings stamps the empty set and no list.
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "called by the tool-invocation verb, #479")

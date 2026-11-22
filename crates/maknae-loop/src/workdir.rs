@@ -36,13 +36,15 @@ pub fn remotes(cwd: &Path, uid: u32) -> Result<Option<Vec<RemoteUrl>>, Unreadabl
     let Some(dir) = nearest_checkout(cwd)? else {
         return Ok(None);
     };
+    let checkout =
+        maknae_io::open_anchor(dir, owned(uid), StrategyPref::Auto).map_err(Unreadable::Io)?;
     let dot_git = dir.join(".git");
     let (anchor, config) = match maknae_io::open_anchor(&dot_git, owned(uid), StrategyPref::Auto) {
         Ok(anchor) => (anchor, dot_git.join("config")),
         Err(IoError::Io {
             kind: IoKind::NotADirectory,
             ..
-        }) => common_dir(dir, &dot_git, uid)?,
+        }) => common_dir(&checkout, dir, &dot_git, uid)?,
         Err(e) => return Err(Unreadable::Io(e)),
     };
     let bytes = anchor
@@ -73,8 +75,14 @@ fn nearest_checkout(cwd: &Path) -> Result<Option<&Path>, Unreadable> {
 
 /// A worktree's or submodule's `.git` file: `gitdir:` names the git directory,
 /// whose `commondir`, when present, names the one holding `config`.
-fn common_dir(dir: &Path, dot_git: &Path, uid: u32) -> Result<(Anchor, PathBuf), Unreadable> {
-    let line = maknae_io::read_absolute(dot_git, file(uid, GIT_FILE_MAX_BYTES), StrategyPref::Auto)
+fn common_dir(
+    checkout: &Anchor,
+    dir: &Path,
+    dot_git: &Path,
+    uid: u32,
+) -> Result<(Anchor, PathBuf), Unreadable> {
+    let line = checkout
+        .read(Path::new(".git"), None, file(uid, GIT_FILE_MAX_BYTES))
         .map_err(Unreadable::Io)?
         .value;
     let gitdir = path_line(&line, Some("gitdir: "))
@@ -295,6 +303,34 @@ mod tests {
         match remotes(t.path(), me().wrapping_add(1)) {
             Err(Unreadable::Io(IoError::NotOwned { .. })) => {}
             other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_checkout_directory_others_can_write_is_not_read() {
+        let t = tempfile::tempdir().unwrap();
+        let main = t.path().join("main");
+        git_dir(&main, "git@github.com:o/r.git");
+        let wt = t.path().join("wt");
+        write(
+            &wt.join(".git"),
+            &format!("gitdir: {}\n", main.join(".git").display()),
+            0o644,
+        );
+        for checkout in [&main, &wt] {
+            std::fs::set_permissions(checkout, std::fs::Permissions::from_mode(0o775)).unwrap();
+            assert_eq!(
+                hosts(remotes(checkout, me()).unwrap()),
+                pair("github.com", "o/r"),
+                "{}",
+                checkout.display()
+            );
+            std::fs::set_permissions(checkout, std::fs::Permissions::from_mode(0o777)).unwrap();
+            match remotes(checkout, me()) {
+                Err(Unreadable::Io(IoError::InsecurePermissions { .. })) => {}
+                other => panic!("{}: {other:?}", checkout.display()),
+            }
+            std::fs::set_permissions(checkout, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
     }
 

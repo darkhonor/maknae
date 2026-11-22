@@ -5,6 +5,7 @@
 use maknae_proto::{Binding, BindingRequest, GitRef};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use zeroize::Zeroizing;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Provider {
@@ -28,10 +29,32 @@ pub struct Forge {
     pub provider: Provider,
 }
 
+/// What the tasker wrote, zeroizing from allocation at its exact length (ADR-0026).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct WrittenText(Zeroizing<Box<str>>);
+
+impl WrittenText {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for WrittenText {
+    fn from(text: &str) -> WrittenText {
+        WrittenText(Zeroizing::new(Box::from(text)))
+    }
+}
+
+impl std::hash::Hash for WrittenText {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.as_str().hash(state);
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Subject {
     Host(String),
-    Written(String),
+    Written(WrittenText),
     Ref(GitRef),
     More(usize),
 }
@@ -68,6 +91,11 @@ pub enum Found {
     Bare {
         at: Range<usize>,
         quoted: bool,
+    },
+    /// A shorthand at `at` in the prompt that cannot bind, copied only if it is listed.
+    Written {
+        at: Range<usize>,
+        reason: Reason,
     },
     Unbound(Unbound),
 }
@@ -124,12 +152,25 @@ const LINK_ENDS: &[char] = &[
 ];
 const TRAILING: &[char] = &['.', ',', ';', ':', '!', '?'];
 
+/// A link whose authority carries userinfo (an `@`) is neither bound nor named.
 fn link(word: &str, https: bool, forges: Option<&[Forge]>) -> Option<Found> {
     let after = &word[word.find("://")? + 3..];
-    let after = after.split(LINK_ENDS).next().unwrap_or("");
-    let after = after.trim_end_matches(TRAILING);
     let authority_end = after.find(['/', '?', '#']).unwrap_or(after.len());
-    let host_port = after[..authority_end].rsplit('@').next().unwrap_or("");
+    if after[..authority_end].contains('@') {
+        return None;
+    }
+    let literal = match after
+        .strip_prefix('[')
+        .and_then(|a| a[..authority_end - 1].find(']'))
+    {
+        Some(close) => close + 2,
+        None => 0,
+    };
+    let rest = &after[literal..];
+    let rest = rest.split(LINK_ENDS).next().unwrap_or("");
+    let after = &after[..literal + rest.trim_end_matches(TRAILING).len()];
+    let authority_end = authority_end.min(after.len());
+    let host_port = &after[..authority_end];
     let path = &after[authority_end..];
     let path = &path[..path.find(['?', '#']).unwrap_or(path.len())];
     let unbound = |reason| {
@@ -282,12 +323,11 @@ fn written_ref(prompt: &str, word: &str, forges: Option<&[Forge]>) -> Option<Fou
     if inner.contains('`') {
         return None;
     }
+    let start = inner.as_ptr() as usize - prompt.as_ptr() as usize;
+    let span = start..start + inner.len();
     let Some(at) = inner.find(['#', '!']) else {
-        let start = inner.as_ptr() as usize - prompt.as_ptr() as usize;
-        return maknae_proto::repository_path_is_acceptable(inner).then_some(Found::Bare {
-            at: start..start + inner.len(),
-            quoted,
-        });
+        return maknae_proto::repository_path_is_acceptable(inner)
+            .then_some(Found::Bare { at: span, quoted });
     };
     let (base, n) = (&inner[..at], number(&inner[at + 1..])?);
     let sigil = if inner.as_bytes()[at] == b'#' {
@@ -300,12 +340,7 @@ fn written_ref(prompt: &str, word: &str, forges: Option<&[Forge]>) -> Option<Fou
     }
     let forge = match the_one_forge(forges) {
         Ok(forge) => forge,
-        Err(reason) => {
-            return Some(Found::Unbound(Unbound {
-                subject: Subject::Written(inner.to_owned()),
-                reason,
-            }))
-        }
+        Err(reason) => return Some(Found::Written { at: span, reason }),
     };
     let change = shorthand_change(forge.provider, sigil)?.then_some(n);
     git_ref(forge, base, change).map(Found::Ref)
@@ -864,12 +899,13 @@ pub struct Chosen {
 pub const NOTES_MAX: usize = 32;
 
 #[derive(Default)]
-struct Notes {
+struct Notes<'p> {
     listed: Vec<Unbound>,
     more: HashSet<Unbound>,
+    more_written: HashSet<(&'p str, Reason)>,
 }
 
-impl Notes {
+impl<'p> Notes<'p> {
     fn note(&mut self, u: Unbound) {
         if self.listed.contains(&u) {
             return;
@@ -881,10 +917,28 @@ impl Notes {
         }
     }
 
-    fn finish(mut self) -> Vec<Unbound> {
-        if !self.more.is_empty() {
+    fn note_written(&mut self, text: &'p str, reason: Reason) {
+        let listed = self.listed.iter().any(|u| {
+            u.reason == reason && matches!(&u.subject, Subject::Written(w) if w.as_str() == text)
+        });
+        if listed {
+            return;
+        }
+        if self.listed.len() < NOTES_MAX {
             self.listed.push(Unbound {
-                subject: Subject::More(self.more.len()),
+                subject: Subject::Written(text.into()),
+                reason,
+            });
+        } else {
+            self.more_written.insert((text, reason));
+        }
+    }
+
+    fn finish(mut self) -> Vec<Unbound> {
+        let more = self.more.len() + self.more_written.len();
+        if more > 0 {
+            self.listed.push(Unbound {
+                subject: Subject::More(more),
                 reason: Reason::NotListed,
             });
         }
@@ -922,6 +976,12 @@ pub fn choose(
                 notes.note(u.clone());
                 None
             }
+            Found::Written { at, reason } => {
+                if let Some(text) = prompt.get(at.clone()) {
+                    notes.note_written(text, *reason);
+                }
+                None
+            }
             Found::Bare { at, quoted } => {
                 let Some(base) = prompt.get(at.clone()) else {
                     continue;
@@ -938,10 +998,7 @@ pub fn choose(
                     }),
                     (None, Ok(forge)) => git_ref(forge, base, None),
                     (None, Err(reason)) => {
-                        notes.note(Unbound {
-                            subject: Subject::Written(base.to_owned()),
-                            reason,
-                        });
+                        notes.note_written(base, reason);
                         None
                     }
                 }
@@ -1151,8 +1208,6 @@ mod tests {
             ("https://evilgithub.com/o/r/pull/1", "evilgithub.com"),
             ("https://github.co/o/r/pull/1", "github.co"),
             ("https://github.com:444/o/r/pull/1", "github.com:444"),
-            ("https://github.com@evil.example/o/r/pull/1", "evil.example"),
-            ("https://u:github.com@evil.example/o/r", "evil.example"),
             ("https://Evil.Example/o/r", "evil.example"),
         ] {
             let c = links(prompt, &[gh()]);
@@ -1762,8 +1817,7 @@ mod tests {
         assert!(!format!("{c:?}").contains("SENTINEL"));
         let prompt = format!("https://u:{TOKEN}@evil.example/o/r");
         let c = links(&prompt, &[gh()]);
-        assert!(!format!("{c:?}").contains("SENTINEL"));
-        assert_eq!(c.unbound, [host("evil.example", Reason::UnknownServer)]);
+        assert_eq!(c, Chosen::default());
         let long = format!("https://{}.example/o/r", "h".repeat(260));
         for prompt in [format!("https://x:{TOKEN}/@github.com/o/n"), long] {
             for forges in [Some(&[gh()][..]), None] {
@@ -1772,6 +1826,66 @@ mod tests {
             }
             let c = links(&prompt.replacen("https", "http", 1), &[gh()]);
             assert_eq!(c, Chosen::default(), "{prompt}");
+        }
+    }
+
+    #[test]
+    fn a_link_carrying_userinfo_is_never_bound_or_named() {
+        for prompt in [
+            "https://token(part)@github.com/org/repo",
+            "https://a@b(c)@github.com/o/r",
+            "https://tok%40en@github.com/o/r/pull/1",
+            "see (https://token@github.com/o/r/pull/1).",
+            "https://github.com@evil.example/o/r/pull/1",
+            "https://u:github.com@evil.example/o/r",
+        ] {
+            let http = prompt.replacen("https", "http", 1);
+            for forges in [Some(&[gh()][..]), None] {
+                for prompt in [prompt, http.as_str()] {
+                    let found = Links.hints(prompt, forges);
+                    assert!(found.is_empty(), "{prompt}: {found:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_bracketed_ipv6_forge_binds_from_a_link() {
+        let v6 = Forge {
+            host: "[2001:db8::1]:8443".into(),
+            provider: Provider::Github,
+        };
+        for prompt in [
+            "https://[2001:db8::1]:8443/org/repo/pull/7",
+            "(https://[2001:db8::1]:8443/org/repo/pull/7).",
+            "[pr](https://[2001:DB8::1]:8443/org/repo/pull/7)",
+        ] {
+            let c = links(prompt, &[gh(), v6.clone()]);
+            assert_eq!(
+                bound(&c),
+                [git("[2001:db8::1]:8443", "org/repo", Some(7))],
+                "{prompt}"
+            );
+            assert!(c.unbound.is_empty(), "{prompt}: {:?}", c.unbound);
+        }
+        let c = links("https://[2001:DB8::2]:8443/o/r", std::slice::from_ref(&v6));
+        assert!(c.bindings.is_empty());
+        assert_eq!(
+            c.unbound,
+            [host("[2001:db8::2]:8443", Reason::UnknownServer)]
+        );
+        let c = links("https://[2001:db8::1]/o/r", std::slice::from_ref(&v6));
+        assert_eq!(c.unbound, [host("[2001:db8::1]", Reason::UnknownServer)]);
+        for prompt in [
+            "https://[2001:db8::zz]:8443/o/r",
+            "https://[2001:db8::1]x/o/r",
+            "https://[2001:db8::1/o/r",
+        ] {
+            assert_eq!(
+                links(prompt, std::slice::from_ref(&v6)),
+                Chosen::default(),
+                "{prompt}"
+            );
         }
     }
 
@@ -1803,6 +1917,31 @@ mod tests {
             ]
         );
         assert!(!format!("{found:?}").contains("SENTINEL"));
+    }
+
+    #[test]
+    fn unbound_written_text_is_held_zeroizing_up_to_the_notes_cap() {
+        let shorthand = |i: usize| format!("o/r{i}#5");
+        let words: Vec<String> = (0..NOTES_MAX + 3)
+            .map(shorthand)
+            .chain([shorthand(NOTES_MAX + 1), shorthand(0), "`o/x`".into()])
+            .collect();
+        let prompt = words.join(" ");
+        let c = choose(&[&Links], &prompt, None, None);
+        let listed: Vec<Unbound> = (0..NOTES_MAX)
+            .map(|i| written(&shorthand(i), Reason::NoForgeList))
+            .collect();
+        assert_eq!(c.unbound[..NOTES_MAX], listed);
+        assert_eq!(
+            c.unbound[NOTES_MAX..],
+            [Unbound {
+                subject: Subject::More(4),
+                reason: Reason::NotListed,
+            }]
+        );
+        assert!(!format!("{c:?}").contains("o/r0#5"));
+        let lines = crate::tasking::text::echo_lines(&[], &c.unbound);
+        assert_eq!(lines[0], "not bound: o/r0#5: no forge list");
     }
 
     #[test]

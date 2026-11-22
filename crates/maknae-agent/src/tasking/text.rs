@@ -222,7 +222,8 @@ fn unbound_reason(reason: Reason) -> String {
 
 fn unbound_line(u: &Unbound) -> String {
     let subject = match &u.subject {
-        Subject::Host(s) | Subject::Written(s) => safe(s),
+        Subject::Host(s) => safe(s),
+        Subject::Written(w) => safe(w.as_str()),
         Subject::Ref(g) => ref_name(&g.server, &g.base, g.change),
         Subject::More(k) => format!("{k} more candidates"),
     };
