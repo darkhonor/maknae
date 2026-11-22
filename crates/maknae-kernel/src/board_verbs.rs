@@ -555,6 +555,22 @@ mod tests {
                 Err(Off::Tasker),
             ),
             (
+                "all off",
+                Some(&agent),
+                Some(&person),
+                switches(false, false),
+                false,
+                Err(Off::Site),
+            ),
+            (
+                "agent and tasker off",
+                Some(&agent),
+                Some(&person),
+                switches(true, false),
+                false,
+                Err(Off::Agent),
+            ),
+            (
                 "on",
                 Some(&agent),
                 Some(&person),

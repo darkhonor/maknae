@@ -4769,17 +4769,19 @@ mod board {
         assert_eq!(got.draft.kind, PostKind::Question);
         assert_eq!(got.draft.to, Addressee::Agents(vec!["jin".into()]));
         assert_eq!(got.draft.body.0.as_str(), "sentinel-695-question");
+        assert_eq!(
+            bodies(&page_of(w.board("hobi", read(None), h).await.0)),
+            ["sentinel-695-question"]
+        );
         let a = posted(
             w.board("jin", post(reply("sentinel-695-answer", q)), j)
                 .await
                 .0,
         );
-        let page = page_of(w.board("hobi", read(None), h).await.0);
-        assert_eq!(
-            bodies(&page),
-            ["sentinel-695-question", "sentinel-695-answer"]
-        );
-        let answer = &page.posts[1];
+        let page = page_of(w.board("hobi", read(Some(q)), h).await.0);
+        assert_eq!(w.cursor("hobi"), w.seq(q));
+        assert_eq!(bodies(&page), ["sentinel-695-answer"]);
+        let answer = &page.posts[0];
         assert_eq!(answer.id, a);
         assert_eq!(answer.author, Author::Agent("jin".into()));
         assert_eq!(answer.task, Some(j));
@@ -5171,6 +5173,7 @@ mod board {
         let p2 = w.stored("hobi", "p2", PostLabels::default());
         w.stored("hobi", "l", labelled());
         w.stored("hobi", "p4", PostLabels::default());
+        let own = posted(w.board("jin", post(note("j")), j).await.0);
         let pdp = Arc::new(common::UndecidedOnLabel {
             inner: Arc::clone(&w.pdp),
             label: LABEL,
@@ -5182,10 +5185,12 @@ mod board {
         let b = read_outcome(&records);
         assert_eq!((b.returned, b.withheld), (Some(2), Some(0)));
         assert_eq!(w.cursor("jin"), 0);
+        assert!(w.cursor("jin") <= w.seq(p2));
         assert_eq!(
-            bodies(&page_of(w.board("jin", read(Some(p2)), j).await.0)),
-            ["l", "p4"]
+            bodies(&page_of(w.board("jin", read(Some(own)), j).await.0)),
+            ["l", "p4", "j"]
         );
+        assert_eq!(w.cursor("jin"), w.seq(p2));
     }
 
     #[tokio::test]
