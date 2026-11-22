@@ -145,7 +145,7 @@ fn decide_board(req: &Request) -> Verdict {
     let Some(AttrValue::Str(board)) = req.resource.0.get(RESOURCE_BOARD) else {
         return Verdict::Indeterminate;
     };
-    if !is_partition_key(board) || !board.starts_with("users/") {
+    if !is_partition_key(board) || !is_person_board(board) {
         return Verdict::Indeterminate;
     }
     if board == root {
@@ -155,6 +155,12 @@ fn decide_board(req: &Request) -> Verdict {
             reason: "partition: the board is outside the task's partition".into(),
         }
     }
+}
+
+/// `users/<uid>` with the uid in canonical decimal, as `BoardKey::partition` writes it.
+fn is_person_board(key: &str) -> bool {
+    key.strip_prefix("users/")
+        .is_some_and(|uid| uid.parse::<u32>().is_ok_and(|n| n.to_string() == uid))
 }
 
 /// `users/<name>` or `agents/<name>`, as `RootTasker::partition` writes it.
@@ -431,6 +437,19 @@ mod tests {
                     decide(&board(action, root, key("agents/hobi"))),
                     Verdict::Indeterminate,
                     "{action} {root:?}: a board is a person's partition"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn partition_board_key_must_be_a_canonical_uid() {
+        for action in BOARD_ACTIONS {
+            for k in ["users/alice", "users/001", "users/-1", "users/4294967296"] {
+                assert_eq!(
+                    decide(&board(action, Some(k), key(k))),
+                    Verdict::Indeterminate,
+                    "{action} {k}: even when the root names the same board"
                 );
             }
         }

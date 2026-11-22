@@ -100,7 +100,7 @@ impl PostKind {
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Addressee {
-    Agents(Vec<String>),
+    Agents(#[serde(deserialize_with = "bounded_agents")] Vec<String>),
     Tasker,
     Board,
 }
@@ -147,7 +147,64 @@ struct PostDraftWire {
     to: Addressee,
     in_reply_to: Option<PostId>,
     body: SecretText,
+    #[serde(deserialize_with = "bounded_attachments")]
     attachments: Vec<Attachment>,
+}
+
+fn bounded_agents<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    bounded(d, BOARD_ADDRESSEES_MAX, |n| {
+        format!("board post addresses {n} agents, not 1 to {BOARD_ADDRESSEES_MAX}")
+    })
+}
+
+fn bounded_attachments<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Attachment>, D::Error> {
+    bounded(d, BOARD_ATTACHMENTS_MAX, |n| {
+        format!("board post has {n} attachments, over {BOARD_ATTACHMENTS_MAX}")
+    })
+}
+
+/// A sequence of at most `max` entries: past `max` the rest are counted, never decoded.
+fn bounded<'de, D, T>(d: D, max: usize, over: fn(usize) -> String) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct V<T> {
+        max: usize,
+        over: fn(usize) -> String,
+        of: std::marker::PhantomData<T>,
+    }
+    impl<'de, T: Deserialize<'de>> de::Visitor<'de> for V<T> {
+        type Value = Vec<T>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(f, "a sequence of at most {} entries", self.max)
+        }
+        fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
+            if let Some(n) = seq.size_hint().filter(|n| *n > self.max) {
+                return Err(de::Error::custom((self.over)(n)));
+            }
+            let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(self.max));
+            while out.len() < self.max {
+                match seq.next_element()? {
+                    Some(item) => out.push(item),
+                    None => return Ok(out),
+                }
+            }
+            let mut n = self.max;
+            while seq.next_element::<de::IgnoredAny>()?.is_some() {
+                n = n.saturating_add(1);
+            }
+            if n > self.max {
+                return Err(de::Error::custom((self.over)(n)));
+            }
+            Ok(out)
+        }
+    }
+    d.deserialize_seq(V {
+        max,
+        over,
+        of: std::marker::PhantomData,
+    })
 }
 
 impl TryFrom<PostDraftWire> for PostDraft {
@@ -473,6 +530,53 @@ mod tests {
             let err = dec::<PostDraft>(&enc(&d)).unwrap_err();
             assert!(err.contains(fragment), "{err} lacks {fragment}");
         }
+    }
+
+    /// `d` encoded, with `extra` appended to the array found under `path` from the top.
+    fn with_extra(d: &PostDraft, path: &[&str], extra: ciborium::Value) -> Vec<u8> {
+        let mut v = ciborium::Value::serialized(d).unwrap();
+        let mut at = &mut v;
+        for key in path {
+            let ciborium::Value::Map(entries) = at else {
+                panic!("not a map at {key}");
+            };
+            at = entries
+                .iter_mut()
+                .find(|(k, _)| k.as_text() == Some(*key))
+                .map(|(_, v)| v)
+                .unwrap();
+        }
+        let ciborium::Value::Array(items) = at else {
+            panic!("not an array");
+        };
+        items.push(extra);
+        enc(&v)
+    }
+
+    #[test]
+    fn a_ninth_entry_is_refused_for_the_count_before_it_is_decoded() {
+        let malformed = ciborium::Value::Integer(7.into());
+        let mut d = draft();
+        d.attachments = vec![d.attachments[0].clone(); 8];
+        let err =
+            dec::<PostDraft>(&with_extra(&d, &["attachments"], malformed.clone())).unwrap_err();
+        assert!(err.contains("9 attachments"), "{err}");
+        let mut d = draft();
+        d.to = Addressee::Agents((0..8).map(|i| format!("a{i}")).collect());
+        let err = dec::<PostDraft>(&with_extra(&d, &["to", "Agents"], malformed)).unwrap_err();
+        assert!(err.contains("addresses 9 agents"), "{err}");
+    }
+
+    #[test]
+    fn a_sequence_of_unknown_length_is_counted_past_the_bound() {
+        use serde::de::value::{Error, SeqDeserializer};
+        let names: Vec<String> = (0..10).map(|i| format!("a{i}")).collect();
+        let unsized_seq = |n: usize| {
+            SeqDeserializer::<_, Error>::new(names[..n].iter().map(String::as_str).filter(|_| true))
+        };
+        assert_eq!(bounded_agents(unsized_seq(8)).unwrap(), names[..8]);
+        let err = bounded_agents(unsized_seq(10)).unwrap_err().to_string();
+        assert!(err.contains("addresses 10 agents"), "{err}");
     }
 
     #[test]
