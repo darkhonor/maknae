@@ -6,14 +6,19 @@ use crate::screen::plain::{Line, Lines};
 use crate::screen::run::{Caller, Driver, Ending, Exit, Pace, Step};
 use crate::screen::term::{both_terminals, Session, TermError};
 use crate::stderr::errln;
+use maknae_agent::hints::{choose, Forge, Links, RemoteUrl, Remotes};
 use maknae_agent::screen::blocks::{Conversation, EntryId, EntryKind};
 use maknae_agent::screen::{Commands, HeaderLine, MenuItem};
 use maknae_agent::tasking::book::{joined, Alloc, Answer, Book, Entered, Failure, Op, Standing};
 use maknae_agent::tasking::text;
 use maknae_config::AgentId;
 use maknae_loop::tasker::{AgentRoster, TaskerClient, TaskerError};
-use maknae_proto::{SecretText, TaskCursor, TaskPage, TaskRef, TaskReportPage, TaskView};
+use maknae_loop::workdir::Unreadable;
+use maknae_proto::{
+    BindingRequest, SecretText, TaskCursor, TaskPage, TaskRef, TaskReportPage, TaskView,
+};
 use maknae_vault::PlaneClient;
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,7 +35,13 @@ const CUT_OFF: &str =
 /// The tasker verbs the session sends, so tests can stand in for the kernel.
 pub(crate) trait Tasker {
     async fn agents(&self) -> Result<AgentRoster, TaskerError>;
-    async fn submit(&self, agent: &AgentId, text: SecretText) -> Result<TaskView, TaskerError>;
+    async fn forges(&self) -> Result<Vec<Forge>, TaskerError>;
+    async fn submit(
+        &self,
+        agent: &AgentId,
+        text: SecretText,
+        bindings: Vec<BindingRequest>,
+    ) -> Result<TaskView, TaskerError>;
     async fn add(&self, task: &TaskRef, text: SecretText) -> Result<TaskView, TaskerError>;
     async fn status(&self, task: &TaskRef) -> Result<TaskView, TaskerError>;
     async fn stop(&self, task: &TaskRef) -> Result<TaskView, TaskerError>;
@@ -52,8 +63,16 @@ impl Tasker for TaskerClient {
     async fn agents(&self) -> Result<AgentRoster, TaskerError> {
         self.all_agents().await
     }
-    async fn submit(&self, agent: &AgentId, text: SecretText) -> Result<TaskView, TaskerError> {
-        TaskerClient::submit(self, agent, text, Vec::new()).await
+    async fn forges(&self) -> Result<Vec<Forge>, TaskerError> {
+        TaskerClient::forges(self).await
+    }
+    async fn submit(
+        &self,
+        agent: &AgentId,
+        text: SecretText,
+        bindings: Vec<BindingRequest>,
+    ) -> Result<TaskView, TaskerError> {
+        TaskerClient::submit(self, agent, text, bindings).await
     }
     async fn add(&self, task: &TaskRef, text: SecretText) -> Result<TaskView, TaskerError> {
         TaskerClient::add(self, task, text).await
@@ -116,6 +135,48 @@ pub(crate) struct Kernel<T, L> {
     leaf: L,
     login_expires_at: u64,
     agent: AgentId,
+    hints: Hints,
+}
+
+/// What the session recognizes repositories against, fixed when it opens.
+pub(crate) struct Hints {
+    forges: Option<Vec<Forge>>,
+    remotes: Remotes,
+}
+
+/// How a session opens: whether it waits for reports, its input bound, and the
+/// working directory it was started in.
+pub(crate) struct Opening {
+    pub(crate) wait: bool,
+    pub(crate) input_cap: usize,
+    pub(crate) workdir: Workdir,
+}
+
+/// The working directory's remotes, read once, and what to say if it could not be.
+pub(crate) struct Workdir {
+    remotes: Vec<RemoteUrl>,
+    note: Option<&'static str>,
+}
+
+const CHECKOUT_UNREADABLE: &str = "this directory's git checkout could not be read (not owned by you, unreadable or malformed): its repository is not bound";
+
+impl Workdir {
+    fn of(read: Result<Option<Vec<RemoteUrl>>, Unreadable>) -> Workdir {
+        match read {
+            Ok(remotes) => Workdir {
+                remotes: remotes.unwrap_or_default(),
+                note: None,
+            },
+            Err(_) => Workdir {
+                remotes: Vec::new(),
+                note: Some(CHECKOUT_UNREADABLE),
+            },
+        }
+    }
+
+    pub(crate) fn read(cwd: &Path, uid: u32) -> Workdir {
+        Workdir::of(maknae_loop::workdir::remotes(cwd, uid))
+    }
 }
 
 impl<T: Tasker, L: Leaf> Kernel<T, L> {
@@ -140,10 +201,18 @@ impl<T: Tasker, L: Leaf> Kernel<T, L> {
             Op::Collect { after } => t.collect(a, after).await.map(Answer::Reports),
             Op::Poll { after } => t.list_page(a, after).await.map(Answer::Page),
             Op::ListAll => t.list(a).await.map(Answer::Tasks),
-            Op::Submit { text } => t
-                .submit(a, text)
-                .await
-                .map(|view| Answer::Submitted(view, Vec::new())),
+            Op::Submit { text } => {
+                let remotes = &self.hints.remotes;
+                let chosen = choose(
+                    &[&Links, remotes],
+                    text.0.as_str(),
+                    self.hints.forges.as_deref(),
+                    None,
+                );
+                t.submit(a, text, chosen.bindings)
+                    .await
+                    .map(|view| Answer::Submitted(view, chosen.unbound))
+            }
             Op::Add { task, text } => t.add(&task, text).await.map(Answer::View),
             Op::Stop { task } => t.stop(&task).await.map(Answer::View),
             Op::Drop { task } => t.drop(&task).await.map(Answer::View),
@@ -282,13 +351,20 @@ pub(crate) async fn run_session(name: &str, wait: bool) -> ExitCode {
         }
     };
     let leaf = PlaneLeaf(Arc::clone(&plane.client));
+    let workdir = match std::env::current_dir() {
+        Ok(cwd) => Workdir::read(&cwd, nix::unistd::geteuid().as_raw()),
+        Err(_) => Workdir::of(Ok(None)),
+    };
     let (end, left) = open(
         plane.tasker,
         leaf,
         plane.login_expires_at,
         name,
-        wait,
-        plane.input_cap,
+        Opening {
+            wait,
+            input_cap: plane.input_cap,
+            workdir,
+        },
         io,
     )
     .await;
@@ -385,10 +461,14 @@ pub(crate) async fn open<T: Tasker, L: Leaf>(
     leaf: L,
     login_expires_at: u64,
     name: &str,
-    wait: bool,
-    input_cap: usize,
+    opening: Opening,
     io: Io,
 ) -> (End, Left) {
+    let Opening {
+        wait,
+        input_cap,
+        workdir,
+    } = opening;
     let refused = (End::Failed, Left::default());
     let roster = match tasker.agents().await {
         Ok(roster) => roster,
@@ -408,11 +488,19 @@ pub(crate) async fn open<T: Tasker, L: Leaf>(
         errln!("maknae: the kernel's banner is not valid ({e}); the session was not opened");
         return refused;
     }
+    let forges = tasker.forges().await.ok();
+    if let Some(note) = workdir.note {
+        errln!("maknae: {note}");
+    }
     let kernel = Kernel {
         tasker,
         leaf,
         login_expires_at,
         agent,
+        hints: Hints {
+            forges,
+            remotes: Remotes(workdir.remotes),
+        },
     };
     match io {
         Io::Screen(enter) => full_screen(&kernel, standing, roster.banner, input_cap, enter).await,
@@ -726,6 +814,8 @@ mod tests {
         seq: u64,
         report_with: Option<&'static str>,
         refuse_submit: bool,
+        forges: Option<Vec<Forge>>,
+        submitted: Vec<Vec<BindingRequest>>,
         /// Every collect waits while this is set.
         hold: bool,
         holding: bool,
@@ -823,8 +913,25 @@ mod tests {
             self.note("agents");
             Ok(self.roster.clone())
         }
-        async fn submit(&self, _: &AgentId, _: SecretText) -> Result<TaskView, TaskerError> {
+        async fn forges(&self) -> Result<Vec<Forge>, TaskerError> {
+            self.note("forges");
+            self.state
+                .lock()
+                .unwrap()
+                .forges
+                .clone()
+                .ok_or(TaskerError::Refused {
+                    outcome_unknown: false,
+                })
+        }
+        async fn submit(
+            &self,
+            _: &AgentId,
+            _: SecretText,
+            bindings: Vec<BindingRequest>,
+        ) -> Result<TaskView, TaskerError> {
             let mut s = self.call("submit");
+            s.submitted.push(bindings);
             if s.refuse_submit {
                 return Err(TaskerError::Refused {
                     outcome_unknown: false,
@@ -966,6 +1073,107 @@ mod tests {
         FakeLeaf::expiring_at(now() + 3600)
     }
 
+    fn no_hints() -> Hints {
+        Hints {
+            forges: None,
+            remotes: Remotes(Vec::new()),
+        }
+    }
+
+    fn github() -> Forge {
+        Forge {
+            host: "github.com".into(),
+            provider: maknae_agent::hints::Provider::Github,
+        }
+    }
+
+    fn git(server: &str, base: &str, change: Option<u64>) -> BindingRequest {
+        BindingRequest::Git(maknae_proto::GitRef {
+            server: server.into(),
+            base: base.into(),
+            change,
+        })
+    }
+
+    fn remote_of(url: &str) -> Remotes {
+        let config = format!("[remote \"origin\"]\nurl = {url}\n");
+        Remotes(maknae_agent::hints::git_config_remotes(config.as_bytes()).unwrap())
+    }
+
+    fn submit_op(prompt: &str) -> Op {
+        Op::Submit {
+            text: SecretText(Zeroizing::new(prompt.into())),
+        }
+    }
+
+    #[tokio::test]
+    async fn perform_submits_the_hinted_bindings_and_returns_the_unbound() {
+        let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
+        let kernel = Kernel {
+            tasker: fake.clone(),
+            leaf: fresh_leaf(),
+            login_expires_at: u64::MAX,
+            agent: agent(),
+            hints: Hints {
+                forges: Some(vec![github()]),
+                remotes: remote_of("git@github.com:darkhonor/maknae.git"),
+            },
+        };
+        let prompt = "review https://github.com/o/r/pull/7 and https://elsewhere.example/x/y";
+        let Ok(Answer::Submitted(_, unbound)) = kernel.perform(submit_op(prompt)).await else {
+            panic!("not submitted");
+        };
+        assert_eq!(
+            fake.state.lock().unwrap().submitted,
+            [vec![
+                git("github.com", "o/r", Some(7)),
+                git("github.com", "darkhonor/maknae", None),
+            ]]
+        );
+        assert_eq!(unbound.len(), 1, "{unbound:?}");
+        assert_eq!(
+            unbound[0].reason,
+            maknae_agent::hints::Reason::UnknownServer
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_catalog_leaves_each_candidate_not_bound_with_no_forge_list() {
+        let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
+        let mut io = pipes("see https://github.com/o/r\n");
+        let (end, _) = bounded(open(
+            fake.clone(),
+            fresh_leaf(),
+            u64::MAX,
+            "hobi",
+            Opening {
+                wait: false,
+                input_cap: 4096,
+                workdir: Workdir::of(Ok(None)),
+            },
+            io.io(),
+        ))
+        .await;
+        assert_eq!(end, End::Left);
+        assert_eq!(fake.state.lock().unwrap().submitted, [vec![]]);
+        assert!(
+            io.output().contains("not bound: github.com: no forge list"),
+            "{}",
+            io.output()
+        );
+    }
+
+    #[test]
+    fn an_unreadable_checkout_says_so_once_and_binds_nothing() {
+        let w = Workdir::of(Err(Unreadable::Config("/w/.git/config".into())));
+        assert_eq!(w.note, Some(CHECKOUT_UNREADABLE));
+        assert!(w.remotes.is_empty());
+        assert!(!CHECKOUT_UNREADABLE.contains("/w"));
+        let outside = Workdir::of(Ok(None));
+        assert_eq!(outside.note, None);
+        assert!(outside.remotes.is_empty());
+    }
+
     fn agent() -> AgentId {
         AgentId::parse("hobi").unwrap()
     }
@@ -1091,8 +1299,11 @@ mod tests {
                 leaf,
                 login_expires_at,
                 "hobi",
-                wait,
-                4096,
+                Opening {
+                    wait,
+                    input_cap: 4096,
+                    workdir: Workdir::of(Ok(None)),
+                },
                 io(),
             ));
             let _ = tx.send(ended);
@@ -1156,8 +1367,11 @@ mod tests {
             fresh_leaf(),
             u64::MAX,
             "summarize my files",
-            false,
-            4096,
+            Opening {
+                wait: false,
+                input_cap: 4096,
+                workdir: Workdir::of(Ok(None)),
+            },
             io.io(),
         ))
         .await;
@@ -1186,8 +1400,11 @@ mod tests {
             fresh_leaf(),
             u64::MAX,
             "hobi",
-            false,
-            4096,
+            Opening {
+                wait: false,
+                input_cap: 4096,
+                workdir: Workdir::of(Ok(None)),
+            },
             io.io(),
         ))
         .await;
@@ -1235,6 +1452,7 @@ mod tests {
             leaf: FakeLeaf::expiring_at(now + 3600),
             login_expires_at: now + 7200,
             agent: agent(),
+            hints: no_hints(),
         };
         assert!(matches!(
             kernel.send(Op::Collect { after: None }, now).await,
@@ -1262,6 +1480,7 @@ mod tests {
             leaf: FakeLeaf::expiring_at(now + 10),
             login_expires_at: now,
             agent: agent(),
+            hints: no_hints(),
         };
         assert!(matches!(
             expired.send(Op::Collect { after: None }, now).await,
@@ -1606,6 +1825,7 @@ mod tests {
             leaf: Refusing(Mutex::new(Some(now + 30)), AtomicU32::new(0)),
             login_expires_at: now + 7200,
             agent: agent(),
+            hints: no_hints(),
         };
         assert!(matches!(
             kernel.send(Op::Collect { after: None }, now).await,
