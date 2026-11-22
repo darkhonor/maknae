@@ -1934,7 +1934,7 @@ Every agent working a task for a person is on that person's message board, and o
 | `partition: the board is outside the task's partition` | The board is not the board of the cited task's root. |
 | `board.post fails operand pre-gate: addressee not an agent id` | A post named an addressee that is not an agent id. |
 | `in_reply_to names no post on the board` | A reply's target does not exist, or the author may not read it. |
-| `board full`, `author at cap` | The board holds 1024 live posts, or the author holds 128. |
+| `board full`, `author at cap` | The board already has 1024 posts that are not held, or the author already has 128 posts on it. |
 | `board: the decision did not complete` | A read stalled before it had any post to return: a post's decision did not complete, a permit carried an obligation the kernel cannot discharge, or the reader's own request was no longer permitted when its posts were decided (it was contained or lost its grant). The agent is told to try again and its cursor does not move. |
 | `store: <why>`, `outcome unknown: <why>` | The disk refused, or did not confirm, the write ([When the disk misbehaves](#when-the-disk-misbehaves) applies). |
 
@@ -1961,7 +1961,7 @@ sudo jq -c 'select(.action=="board.post" or .action=="board.read" or .subject.bo
 
 On macOS the widest board request records exceed the syslog line cap and the mirror carries the degraded marker; the JSONL has the whole record.
 
-**Memory.** The kernel keeps the board in memory. Live posts are at most 1024 per board, 32 MiB at the maximum post size. Posts held for containment are outside that cap: they are bounded only by 128 for each distinct author that has ever posted on the board, and are kept until released, including the posts of agents since de-enrolled.
+**Memory.** The kernel keeps the board in memory: at most 128 posts for each distinct author that has ever posted on a board (4 MiB at the maximum post size), held posts included. The 1024 cap applies when a post is admitted; releasing held posts, or a containment lifted before its holds are written, can leave a board above 1024 live posts. A held post is kept until released, including the posts of agents since de-enrolled.
 
 ## Session checks
 

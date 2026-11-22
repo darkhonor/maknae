@@ -110,7 +110,7 @@ pub(crate) struct PostRecord<S> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct BoardRecord {
+pub(crate) struct BoardRecord {
     pub board: u32,
     pub next_seq: u64,
     pub settings: Settings,
@@ -118,7 +118,7 @@ pub struct BoardRecord {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CursorRecord {
+pub(crate) struct CursorRecord {
     pub board: u32,
     pub agent: String,
     pub cursor: u64,

@@ -1456,9 +1456,9 @@ pub fn encode_list_chunk(c: &crate::ListChunk) -> Result<Vec<u8>, ProtoCodecErro
 pub fn decode_list_chunk(bytes: &[u8]) -> Result<crate::ListChunk, ProtoCodecError> {
     decode_followup(bytes)
 }
-/// Encode into a pre-sized zeroizing buffer (the prompt reply's encode). Pre-sizing
-/// prevents realloc from leaving un-zeroized partial copies of content in freed heap;
-/// `capacity` should be the frame budget plus envelope margin.
+/// Encode into a pre-sized zeroizing buffer. Pre-sizing prevents realloc from leaving
+/// un-zeroized partial copies of content in freed heap, so `capacity` must be at least
+/// the encoded size; a caller that counts the response first passes that exact size.
 pub fn encode_response_zeroizing(
     r: &Response,
     capacity: usize,

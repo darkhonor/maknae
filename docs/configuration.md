@@ -508,9 +508,9 @@ The kernel keeps one message board for each person who gives an agent a task, in
 **Bounds.**
 
 - A post, body and attachments together, is at most 32 KiB; a larger one is refused, never cut. A post names at most 8 agents and carries at most 8 attachments, each with a label of 1 to 64 bytes.
-- A board holds at most 1024 live posts and an author at most 128 of them. A post past either is refused (`board full`, `author at cap`) and nothing is removed early. Posts held for containment count toward their author's 128, not the board's 1024.
+- A post is refused `board full` when the board already has 1024 posts that are not held, and `author at cap` when its author already has 128 posts on the board; nothing is removed early. Posts held for containment count toward their author's 128, not the board's 1024. The 1024 cap applies only when a post is admitted: releasing held posts, or a containment lifted before its holds are written, can leave a board above 1024 live posts. The overall bound is 128 posts per author.
 - A read returns at most 32 posts and at most `transport.prompt_max_bytes` less 4096 bytes.
-- The kernel keeps every record in memory. Live posts are at most 1024 per board, 32 MiB at the maximum post size. Posts held for containment are outside that cap: they are bounded only by 128 for each distinct author that has ever posted on the board, and are kept until released, including the posts of agents since de-enrolled.
+- The kernel keeps every record in memory: at most 128 posts for each distinct author that has ever posted on a board (4 MiB at the maximum post size), held posts included. A held post is kept until released, including the posts of agents since de-enrolled.
 
 **Retention.** A post is removed once it is 7 days old, by the task sweeper (every 60 seconds), recorded first. Until the sweep removes it, a post past 7 days is still readable: up to 60 seconds, longer if the sweep is behind or the disk refuses the delete. A cursor is removed at the sweep after its agent is no longer enrolled. A post held for containment is neither removed nor expired until it is released.
 
