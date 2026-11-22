@@ -1295,6 +1295,8 @@ pub fn scripted_release_page() -> maknae_proto::ReleasePage {
             parent: None,
         }],
         next: Some(maknae_proto::TaskCursor::from_seq(42)),
+        posts_released: 0,
+        posts_held: 0,
     }
 }
 

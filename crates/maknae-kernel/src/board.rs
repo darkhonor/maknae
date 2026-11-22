@@ -115,6 +115,20 @@ impl Held {
         board.posts.get(seq).filter(|s| !self.withheld(key, s))
     }
 
+    fn holds_of(&self, uid: u32) -> impl Iterator<Item = (BoardKey, PostId, u64, HeldFor)> + '_ {
+        self.boards.iter().flat_map(move |(key, b)| {
+            b.posts.values().flat_map(move |s| {
+                s.held
+                    .iter()
+                    .filter(move |f| match f {
+                        HeldFor::Author => s.author_uid == Some(uid),
+                        HeldFor::Person => key.0 == uid,
+                    })
+                    .map(move |f| (*key, s.post.id, s.seq, *f))
+            })
+        })
+    }
+
     fn at(&self, key: BoardKey, seq: u64, id: Option<PostId>) -> Option<&Arc<Stored>> {
         let s = self.boards.get(&key)?.posts.get(&seq)?;
         (Some(s.post.id) == id).then_some(s)
@@ -554,6 +568,57 @@ impl BoardStore {
         held.noted.remove(&noted);
         held.said.remove(&item);
         Step::Done
+    }
+
+    /// The written holds for `uid`: as a post's recorded author, and as the person whose
+    /// board it is; in board, sequence and hold order.
+    pub fn held_for(&self, uid: u32, limit: usize) -> Vec<(BoardKey, PostId, u64, HeldFor)> {
+        self.held().holds_of(uid).take(limit).collect()
+    }
+
+    pub fn held_count(&self, uid: u32) -> usize {
+        self.held().holds_of(uid).count()
+    }
+
+    /// Lifts one written hold; the post is live again when nothing withholds it.
+    pub fn release(
+        &self,
+        key: BoardKey,
+        id: PostId,
+        lifted: HeldFor,
+    ) -> Result<bool, BoardRefusal> {
+        let _w = self.writing();
+        let prior = {
+            let held = self.held();
+            let board = held.boards.get(&key);
+            board
+                .and_then(|b| b.posts.get(b.ids.get(&id)?))
+                .filter(|s| s.held.contains(&lifted))
+                .cloned()
+        };
+        let Some(prior) = prior else {
+            return Err(BoardRefusal::Store("the post is not held for that".into()));
+        };
+        let mut next = Stored::clone(&prior);
+        next.held.remove(&lifted);
+        let plain = encode(&PostRecord {
+            board: key.0,
+            stored: &next,
+        })
+        .map_err(store)?;
+        match self.blobs.save(&Name::Post(key, id).text(), &plain) {
+            Ok(()) => {}
+            Err(StoreError::NotDurable(why)) => {
+                return Err(BoardRefusal::Unavailable(format!("{OUTCOME_UNKNOWN}{why}")))
+            }
+            Err(e @ (StoreError::Io(_) | StoreError::Counters(_))) => return Err(store(e)),
+        }
+        let next = Arc::new(next);
+        let mut held = self.held();
+        if let Some(board) = held.boards.get_mut(&key) {
+            board.posts.insert(next.seq, Arc::clone(&next));
+        }
+        Ok(!held.withheld(key, &next))
     }
 
     /// What the kernel has yet to record, oldest first.
@@ -2081,6 +2146,152 @@ mod tests {
         assert!(store.take_notices().is_empty());
         store.return_notices(settled.clone());
         assert_eq!(store.take_notices(), settled);
+    }
+
+    fn holding(store: &BoardStore, uids: &[u32]) {
+        store.mark(&containing(&[], uids));
+        let due = store.due(100);
+        assert_eq!(store.perform(&due), due.len());
+    }
+
+    #[test]
+    fn a_post_held_for_two_is_live_only_after_both_are_lifted() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = clocked(&b);
+        let post = by(&store, BOB, hobi(), Some(2001), "sentinel-695-two");
+        holding(&store, &[1000, 2001]);
+        let id = post.post.id;
+        let both: BTreeSet<HeldFor> = [HeldFor::Author, HeldFor::Person].into_iter().collect();
+        assert_eq!(stored_on_disk(&b, BOB, id).held, both);
+        store.mark(&containing(&[], &[]));
+        assert_eq!(store.release(BOB, id, HeldFor::Author), Ok(false));
+        assert_eq!(
+            stored_on_disk(&b, BOB, id).held,
+            [HeldFor::Person].into_iter().collect()
+        );
+        assert!(store.get(BOB, id).is_none(), "the person's hold remains");
+        assert!(store.candidates(BOB, 0, 10).is_empty());
+        let before = b.attempts();
+        assert!(store.release(BOB, id, HeldFor::Author).is_err());
+        assert_eq!(b.attempts(), before, "a hold already lifted writes nothing");
+        b.fail(Some(Fail::Every));
+        assert!(store.release(BOB, id, HeldFor::Person).is_err());
+        b.fail(None);
+        assert!(
+            store.get(BOB, id).is_none(),
+            "a refused write lifts nothing"
+        );
+        assert_eq!(store.release(BOB, id, HeldFor::Person), Ok(true));
+        assert!(stored_on_disk(&b, BOB, id).held.is_empty());
+        assert!(store.get(BOB, id).is_some());
+        assert_eq!(ids(&store.candidates(BOB, 0, 10)), vec![id]);
+        drop(store);
+        let (store, _) = clocked(&b);
+        assert!(store.get(BOB, id).is_some(), "the lift is durable");
+    }
+
+    #[test]
+    fn an_unsynced_lift_is_outcome_unknown_and_changes_nothing_in_memory() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = clocked(&b);
+        let post = by(
+            &store,
+            BOB,
+            hobi(),
+            Some(2001),
+            "sentinel-695-unsynced-lift",
+        );
+        holding(&store, &[2001]);
+        store.mark(&containing(&[], &[]));
+        b.fail(Some(Fail::Unsynced));
+        let got = store.release(BOB, post.post.id, HeldFor::Author);
+        b.fail(None);
+        assert!(
+            matches!(&got, Err(BoardRefusal::Unavailable(why)) if why.starts_with(OUTCOME_UNKNOWN)),
+            "{got:?}"
+        );
+        assert!(store.get(BOB, post.post.id).is_none());
+        assert_eq!(store.held_count(2001), 1);
+    }
+
+    #[test]
+    fn held_for_lists_a_uids_author_and_person_holds() {
+        const MINE: BoardKey = BoardKey(2001);
+        let b = MemTaskBlobs::default();
+        let (store, _) = clocked(&b);
+        let a = by(&store, BOB, hobi(), Some(2001), "a");
+        let c = by(&store, BOB, jin(), Some(2002), "c");
+        let d = by(&store, ALICE, hobi(), Some(2001), "d");
+        let bb = by(&store, MINE, jin(), Some(2002), "b");
+        let f = by(&store, MINE, hobi(), Some(2001), "f");
+        holding(&store, &[2001]);
+        let e = by(
+            &store,
+            ALICE,
+            hobi(),
+            Some(2001),
+            "sentinel-695-marked-only",
+        );
+        store.mark(&containing(&[], &[2001]));
+        assert!(store.get(ALICE, e.post.id).is_none(), "marked");
+        let all = vec![
+            (BOB, a.post.id, a.seq, HeldFor::Author),
+            (ALICE, d.post.id, d.seq, HeldFor::Author),
+            (MINE, bb.post.id, bb.seq, HeldFor::Person),
+            (MINE, f.post.id, f.seq, HeldFor::Author),
+            (MINE, f.post.id, f.seq, HeldFor::Person),
+        ];
+        assert_eq!(store.held_for(2001, 100), all);
+        assert_eq!(store.held_count(2001), all.len());
+        assert_eq!(store.held_for(2001, 2), all[..2]);
+        assert!(store.held_for(2002, 100).is_empty());
+        assert_eq!(store.held_count(2002), 0);
+        assert!(store.get(BOB, c.post.id).is_some());
+    }
+
+    #[test]
+    fn a_released_post_past_retention_expires_at_the_next_sweep() {
+        let b = MemTaskBlobs::default();
+        let (store, clock) = clocked(&b);
+        let post = by(&store, BOB, hobi(), Some(2001), "sentinel-695-late");
+        holding(&store, &[2001]);
+        store.mark(&containing(&[], &[]));
+        clock.set(T0 + 2 * RETAIN);
+        assert!(store.due(10).is_empty(), "a held post does not expire");
+        assert_eq!(store.release(BOB, post.post.id, HeldFor::Author), Ok(true));
+        let due = store.due(10);
+        assert_eq!(
+            whys(&due),
+            vec![(Some(post.post.id), None, BoardDueFor::Expire)]
+        );
+        assert_eq!(store.perform(&due), 1);
+        assert!(!b.has(&post_name(BOB, post.post.id)));
+    }
+
+    #[test]
+    fn a_post_held_on_disk_for_a_subject_no_longer_contained_is_released() {
+        let b = MemTaskBlobs::default();
+        let held = held_post([0x33; 16], FIRST_SEQ, hobi());
+        plant(&b, BOB, &held);
+        b.put(
+            "board.1000",
+            &encode(&crate::board_store::BoardRecord {
+                board: 1000,
+                next_seq: held.seq + 1,
+                settings: Settings::default(),
+            })
+            .unwrap(),
+        );
+        let (store, _) = clocked(&b);
+        store.mark(&enrolled(&[("hobi", 2001)]));
+        assert!(store.get(BOB, held.post.id).is_none());
+        assert_eq!(
+            store.held_for(2001, 10),
+            vec![(BOB, held.post.id, held.seq, HeldFor::Author)]
+        );
+        assert_eq!(store.release(BOB, held.post.id, HeldFor::Author), Ok(true));
+        assert!(store.get(BOB, held.post.id).is_some());
+        assert_eq!(store.held_count(2001), 0);
     }
 
     #[test]

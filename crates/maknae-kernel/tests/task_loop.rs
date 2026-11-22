@@ -5354,4 +5354,45 @@ mod board {
             (2, Some(T0 + 80), T0 + 80 + lease)
         );
     }
+
+    #[tokio::test]
+    async fn a_contained_agents_posts_disappear_from_reads_and_return_on_release() {
+        let w = board_world("board-held-release");
+        let (h, j) = (w.at_work("hobi"), w.at_work("jin"));
+        for body in ["sentinel-695-held-a", "sentinel-695-held-b"] {
+            posted(w.board("hobi", post(note(body)), h).await.0);
+        }
+        posted(w.board("jin", post(note("sentinel-695-free")), j).await.0);
+        let all = [
+            "sentinel-695-held-a",
+            "sentinel-695-held-b",
+            "sentinel-695-free",
+        ];
+        let jin_reads = || async { bodies(&page_of(w.board("jin", read(None), j).await.0)) };
+        assert_eq!(jin_reads().await, all);
+        let everyone = only(&[("hobi", HOBI_UID), ("suga", SUGA_UID), ("jin", JIN_UID)]);
+        let board = &w.agents.board;
+        board.mark(&maknae_kernel::Containing(
+            everyone.clone(),
+            [HOBI_UID].into_iter().collect(),
+        ));
+        let due = board.due(100);
+        assert_eq!(board.perform(&due), 2);
+        assert_eq!(jin_reads().await, ["sentinel-695-free"]);
+        assert_eq!(w.cursor("jin"), 0);
+        board.mark(&everyone);
+        assert_eq!(
+            jin_reads().await,
+            ["sentinel-695-free"],
+            "a written hold outlives the containment"
+        );
+        let held = board.held_for(HOBI_UID, maknae_proto::HELD_PAGE_MAX);
+        assert_eq!(held.len(), 2);
+        for (key, id, _, lifted) in held {
+            assert_eq!(board.release(key, id, lifted), Ok(true));
+        }
+        assert_eq!(jin_reads().await, all);
+        assert_eq!(w.cursor("jin"), 0);
+        assert_eq!(board.held_count(HOBI_UID), 0);
+    }
 }

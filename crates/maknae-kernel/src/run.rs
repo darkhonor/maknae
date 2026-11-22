@@ -8327,21 +8327,34 @@ where
                 }))
             }
             HeldOp::Release { target, after } => {
+                use crate::enrollment::EnrollmentView;
                 let after = after.map(maknae_proto::TaskCursor::seq);
-                let (ids, more) = match target {
+                let (ids, more, subject) = match target {
                     maknae_proto::HeldTarget::Task(t) => {
                         let id = t.to_id();
                         let seq = self.tasks.record(&id).map_or(0, |rec| rec.seq);
-                        (vec![(seq, id)], false)
+                        (vec![(seq, id)], false, None)
                     }
                     maknae_proto::HeldTarget::User(t) => {
-                        self.held_seqs(&view, self.held_user(t).await?, after)
+                        let who = self.held_user(t).await?;
+                        let uid = match &who {
+                            HeldWho::Uid(uid) => Some(*uid),
+                            HeldWho::Every | HeldWho::Agent(_) => None,
+                        };
+                        let (ids, more) = self.held_seqs(&view, who, after);
+                        (ids, more, uid)
                     }
                     maknae_proto::HeldTarget::Agent(a) => {
-                        self.held_seqs(&view, held_agent(a)?, after)
+                        let who = held_agent(a)?;
+                        let uid = match &who {
+                            HeldWho::Agent(id) => view.agent_uid(id),
+                            HeldWho::Every | HeldWho::Uid(_) => None,
+                        };
+                        let (ids, more) = self.held_seqs(&view, who, after);
+                        (ids, more, uid)
                     }
                 };
-                self.release_held(&r, view, ids, after, more).await
+                self.release_held(&r, view, ids, after, more, subject).await
             }
         }
     }
@@ -8381,8 +8394,10 @@ where
         ids: Vec<(u64, maknae_proto::TaskId)>,
         after: Option<u64>,
         more: bool,
+        subject: Option<u32>,
     ) -> Result<maknae_proto::Payload, ContainAnswer> {
         use crate::containment::{Kind, LiveRefusal};
+        use crate::enrollment::EnrollmentView;
         use crate::task_verbs as tv;
         use maknae_config::{HELD_LOOP_STAGES, HELD_TASK_STAGES};
         use maknae_proto::ReleaseResult;
@@ -8401,6 +8416,7 @@ where
         let mut outcomes = Vec::new();
         let mut attempted = Vec::new();
         let mut unreached = false;
+        let mut broke = false;
         for (seq_no, id) in ids {
             if started.elapsed() + self.held_stage * HELD_TASK_STAGES as u32
                 > self.held_stage * HELD_LOOP_STAGES as u32
@@ -8456,6 +8472,7 @@ where
                     | ReleaseResult::OutcomeUnknown
                     | ReleaseResult::Unauthorized
             ) {
+                broke = true;
                 break;
             }
             #[cfg(test)]
@@ -8467,12 +8484,110 @@ where
                 }
             }
         }
+        let mut next = tv::release_next(&attempted, after, more || unreached);
+        let (mut posts_released, mut posts_held) = (0, 0);
+        let stopped = broke || unreached || more;
+        if let Some(uid) = subject.filter(|uid| !stopped && self.board.held_count(*uid) > 0) {
+            match attempted.last() {
+                Some((last, _)) => next = Some(maknae_proto::TaskCursor::from_seq(*last)),
+                None => {
+                    if !view.contained(uid) {
+                        posts_released =
+                            self.release_posts(r, &ctx, requester, uid, started).await?;
+                    }
+                    let held = self.board.held_count(uid);
+                    posts_held = u32::try_from(held).unwrap_or(u32::MAX);
+                    next = (posts_released > 0 && held > 0)
+                        .then(|| maknae_proto::TaskCursor::from_seq(after.unwrap_or(0)));
+                }
+            }
+        }
         Ok(maknae_proto::Payload::HeldReleased(
             maknae_proto::ReleasePage {
-                next: tv::release_next(&attempted, after, more || unreached),
+                next,
                 outcomes,
+                posts_released,
+                posts_held,
             },
         ))
+    }
+
+    /// One page of the posts held for `uid`, under the turn and re-authorized once; each
+    /// lift recorded before it is written. The count is of holds lifted.
+    async fn release_posts(
+        &self,
+        r: &HeldRequest<'_>,
+        ctx: &BootCtx<'_>,
+        requester: (u32, u64),
+        uid: u32,
+        started: tokio::time::Instant,
+    ) -> Result<u32, ContainAnswer> {
+        use crate::containment::{Kind, LiveRefusal};
+        use maknae_config::{HELD_LOOP_STAGES, HELD_TASK_STAGES};
+        let turn = tokio::time::timeout(self.turn_wait, self.lock.lock()).await;
+        let decided = match turn {
+            Err(_) => Err(LiveRefusal::Busy),
+            Ok(_) if *self.stopping.borrow() || *self.drain.borrow() != Drain::Serving => {
+                Err(LiveRefusal::Stopping)
+            }
+            Ok(_) => self.reauthorize(r.action).await,
+        };
+        if let Err(refusal) = decided {
+            return Err(live_refused(Kind::Held, None, None, refusal));
+        }
+        let mut released = 0;
+        let held = self.board.held_for(uid, maknae_proto::HELD_PAGE_MAX);
+        for (i, (key, id, seq, lifted)) in held.into_iter().enumerate() {
+            if started.elapsed() + self.held_stage * HELD_TASK_STAGES as u32
+                > self.held_stage * HELD_LOOP_STAGES as u32
+            {
+                break;
+            }
+            let rec = board_release_record(ctx, requester, key, id, seq);
+            if !self.append_post_release(&rec).await {
+                if i == 0 {
+                    return Err(live_refused(
+                        Kind::Held,
+                        None,
+                        None,
+                        LiveRefusal::Failed("the trail refused the record".into()),
+                    ));
+                }
+                break;
+            }
+            let board = Arc::clone(&self.board);
+            let deadline = tokio::time::Instant::now() + HELD_TASK_WRITE_BOUND;
+            let written = crate::board_verbs::offload(requester.0, deadline, move || {
+                board.release(key, id, lifted)
+            })
+            .await;
+            if let Err(why) = written {
+                let reason = format!("post not released: {why}");
+                let rec = post_release_record(
+                    ctx,
+                    requester,
+                    key,
+                    id,
+                    seq,
+                    ("deny", "unavailable", &reason),
+                );
+                self.append_post_release(&rec).await;
+                break;
+            }
+            released += 1;
+        }
+        drop(turn);
+        Ok(released)
+    }
+
+    async fn append_post_release(&self, rec: &AuditRecord) -> bool {
+        match self.sink.emit_within(rec, self.append_bound).await {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("maknaed: AUDIT WRITE FAILED on a held-post release record: {e}");
+                false
+            }
+        }
     }
 
     async fn release_one(
@@ -9640,6 +9755,47 @@ fn held_release_record(
     rec.subject.task_id = Some(task.to_string());
     rec.subject.tasker = tasker.map(maknae_proto::tasker_text);
     rec.subject.parent_task_id = parent.map(ToString::to_string);
+    rec.source.uid = requester.0;
+    rec
+}
+
+/// An administrator's release of one hold on a post, appended before it is written.
+fn board_release_record(
+    ctx: &BootCtx<'_>,
+    requester: (u32, u64),
+    key: crate::board_store::BoardKey,
+    id: maknae_proto::PostId,
+    seq: u64,
+) -> AuditRecord {
+    post_release_record(
+        ctx,
+        requester,
+        key,
+        id,
+        seq,
+        ("permit", "authorized", "post released"),
+    )
+}
+
+fn post_release_record(
+    ctx: &BootCtx<'_>,
+    requester: (u32, u64),
+    key: crate::board_store::BoardKey,
+    id: maknae_proto::PostId,
+    seq: u64,
+    (result, posture, reason): (&str, &str, &str),
+) -> AuditRecord {
+    let reason = format!("{reason}{}", crate::task_verbs::requested_by(requester));
+    let mut rec = crate::board_verbs::on_board(
+        ctx.record("admin.release", result, &reason, posture, None),
+        Some(key),
+    );
+    rec.subject.board_op = Some("release".into());
+    rec.board = Some(maknae_audit_append::BoardAudit {
+        post_id: Some(id.to_string()),
+        seq: Some(seq),
+        ..maknae_audit_append::BoardAudit::default()
+    });
     rec.source.uid = requester.0;
     rec
 }
@@ -20219,6 +20375,7 @@ mod reload_fixture {
         pub(super) gate: Option<Arc<maknae_authz_basic::EvaluationGate>>,
         pub(super) held_stage: Duration,
         pub(super) task_blobs: Option<crate::task_store::MemTaskBlobs>,
+        pub(super) board_blobs: Option<crate::task_store::MemTaskBlobs>,
     }
 
     impl Default for Opts<'_> {
@@ -20237,6 +20394,7 @@ mod reload_fixture {
                 turn_wait: BLOCKING_OPERATION_TIMEOUT,
                 held_stage: Duration::from_millis(maknae_config::BLOCKING_STAGE_TIMEOUT_MS),
                 task_blobs: None,
+                board_blobs: None,
                 count_decisions: false,
                 accounts: Arc::new(maknae_vault::account_uid),
                 lookup_bound: BLOCKING_OPERATION_TIMEOUT,
@@ -20527,7 +20685,14 @@ mod reload_fixture {
                 .unwrap(),
                 None => crate::task::TaskStore::new(),
             }),
-            board: Arc::new(crate::board::BoardStore::new()),
+            board: Arc::new(match opts.board_blobs {
+                Some(blobs) => crate::board::BoardStore::open(
+                    Box::new(blobs),
+                    Arc::new(crate::task_store::SystemClock),
+                )
+                .unwrap(),
+                None => crate::board::BoardStore::new(),
+            }),
             switches: Arc::new(crate::board_verbs::SwitchesOff),
             banner: Banner::default(),
             banner_load: super::boot_gate_tests::owned_banner,
@@ -25294,6 +25459,449 @@ mod reload_tests {
             .await,
         );
         assert_eq!((page.outcomes.len(), page.next), (0, None));
+    }
+
+    const POST_BODY: &str = "sentinel-695-held-post-body";
+
+    struct Posted {
+        key: crate::board_store::BoardKey,
+        id: maknae_proto::PostId,
+        seq: u64,
+    }
+
+    fn posted_by(fx: &Fx, board: u32, (agent, uid): (&str, u32)) -> Posted {
+        let key = crate::board_store::BoardKey(board);
+        let stored = fx
+            .reloader
+            .board
+            .post(
+                key,
+                maknae_proto::Author::Agent(agent.into()),
+                Some(uid),
+                None,
+                crate::board_store::PostLabels::default(),
+                maknae_proto::PostDraft {
+                    kind: maknae_proto::PostKind::Note,
+                    to: maknae_proto::Addressee::Board,
+                    in_reply_to: None,
+                    body: maknae_proto::SecretText(POST_BODY.to_string().into()),
+                    attachments: Vec::new(),
+                },
+            )
+            .unwrap();
+        Posted {
+            key,
+            id: stored.post.id,
+            seq: stored.seq,
+        }
+    }
+
+    fn live(fx: &Fx, post: &Posted) -> bool {
+        fx.reloader.board.get(post.key, post.id).is_some()
+    }
+
+    fn post_records(fx: &Fx) -> Vec<AuditRecord> {
+        held_records(fx)
+            .into_iter()
+            .filter(|r| r.subject.board_op.as_deref() == Some("release"))
+            .collect()
+    }
+
+    /// Follows `next` as the CLI does, failing if it does not end within `max` pages.
+    async fn follow(
+        fx: &Fx,
+        target: &maknae_proto::HeldTarget,
+        max: usize,
+    ) -> Vec<maknae_proto::ReleasePage> {
+        let mut pages = Vec::new();
+        let mut after = None;
+        loop {
+            assert!(pages.len() < max, "paging did not end: {pages:?}");
+            let page = release_page(
+                fx.held(
+                    HeldOp::Release {
+                        target,
+                        after: after.as_ref(),
+                    },
+                    0,
+                )
+                .await,
+            );
+            after = page.next.clone();
+            pages.push(page);
+            if after.is_none() {
+                return pages;
+            }
+        }
+    }
+
+    fn counts(page: &maknae_proto::ReleasePage) -> (u32, u32, Option<maknae_proto::TaskCursor>) {
+        (page.posts_released, page.posts_held, page.next.clone())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn releasing_a_subject_with_no_held_task_releases_its_posts() {
+        use maknae_proto::HeldTarget;
+        let fx = fixture("held-posts", CONTAIN_AND_RELEASE_TO_ADMIN, Some(ROOT_ADMIN)).await;
+        let fx = with_agents(fx, &[HOBI, JIN]).await;
+        let mine: Vec<_> = (0..3).map(|_| posted_by(&fx, 1002, HOBI)).collect();
+        let theirs = posted_by(&fx, 1003, JIN);
+        bounded(fx.contain_uid(HOBI_UID, 0)).await.unwrap();
+        bounded(fx.contain_uid(1003, 0)).await.unwrap();
+        assert!(mine.iter().all(|p| !live(&fx, p)) && !live(&fx, &theirs));
+        assert_eq!(
+            answer_code(&fx.release(ContainTarget::Uid(HOBI_UID), 0).await),
+            ContainmentOutcome::Released
+        );
+        assert!(
+            mine.iter().all(|p| !live(&fx, p)),
+            "a release lifts no hold"
+        );
+        let target = HeldTarget::Agent("hobi".into());
+        let page = release_page(
+            fx.held(
+                HeldOp::Release {
+                    target: &target,
+                    after: None,
+                },
+                0,
+            )
+            .await,
+        );
+        let session = fx.last_session();
+        assert!(page.outcomes.is_empty());
+        assert_eq!(counts(&page), (3, 0, None));
+        assert!(mine.iter().all(|p| live(&fx, p)));
+        assert!(!live(&fx, &theirs), "another subject's post stays held");
+        let seen: Vec<_> = post_records(&fx)
+            .iter()
+            .map(|r| {
+                (
+                    r.event.clone(),
+                    r.source.uid,
+                    r.object.clone(),
+                    r.outcome.result.clone(),
+                    r.outcome.posture.clone(),
+                    r.outcome.reason.clone(),
+                    r.board.as_ref().map(|b| (b.post_id.clone(), b.seq)),
+                )
+            })
+            .collect();
+        let want: Vec<_> = mine
+            .iter()
+            .map(|p| {
+                (
+                    "request".to_string(),
+                    0,
+                    Some("board:users/1002".to_string()),
+                    "permit".to_string(),
+                    "authorized".to_string(),
+                    format!("post released; requested by uid 0 in session {session}"),
+                    Some((Some(p.id.to_string()), Some(p.seq))),
+                )
+            })
+            .collect();
+        assert_eq!(seen, want);
+        for r in fx.records() {
+            assert!(!serde_json::to_string(&r).unwrap().contains(POST_BODY));
+        }
+
+        assert_eq!(
+            answer_code(&fx.release(ContainTarget::Uid(1003), 0).await),
+            ContainmentOutcome::Released
+        );
+        let person = HeldTarget::User(ContainTarget::Uid(1003));
+        let pages = follow(&fx, &person, 3).await;
+        assert_eq!(pages.iter().map(counts).collect::<Vec<_>>(), [(1, 0, None)]);
+        assert!(live(&fx, &theirs));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn posts_are_released_only_after_the_subjects_tasks() {
+        use maknae_proto::{HeldTarget, ReleaseResult as R, TaskState};
+        let fx = fixture("held-order", CONTAIN_AND_RELEASE_TO_ADMIN, Some(ROOT_ADMIN)).await;
+        let fx = with_agents(fx, &[HOBI, JIN]).await;
+        let posts = [posted_by(&fx, 1002, JIN), posted_by(&fx, 1002, JIN)];
+        let ids = held_by_a_released_tasker(&fx, 1002, 2).await;
+        assert!(posts.iter().all(|p| !live(&fx, p)));
+        let target = HeldTarget::User(ContainTarget::Uid(1002));
+        let first = release_page(
+            fx.held(
+                HeldOp::Release {
+                    target: &target,
+                    after: None,
+                },
+                0,
+            )
+            .await,
+        );
+        assert_eq!(
+            first.outcomes,
+            [
+                outcome(&ids[0], R::Released, Some(TaskState::Queued)),
+                outcome(&ids[1], R::Released, Some(TaskState::Queued)),
+            ]
+        );
+        assert_eq!(counts(&first), (0, 0, Some(cursor_of(&fx, &ids[1]))));
+        assert!(
+            posts.iter().all(|p| !live(&fx, p)),
+            "no post on a task page"
+        );
+        assert!(post_records(&fx).is_empty());
+        let second = release_page(
+            fx.held(
+                HeldOp::Release {
+                    target: &target,
+                    after: first.next.as_ref(),
+                },
+                0,
+            )
+            .await,
+        );
+        assert!(second.outcomes.is_empty());
+        assert_eq!(counts(&second), (2, 0, None));
+        assert!(posts.iter().all(|p| live(&fx, p)));
+        let records = held_records(&fx);
+        let tasks_end = records
+            .iter()
+            .rposition(|r| r.object.as_deref().is_some_and(|o| o.starts_with("task:")))
+            .unwrap();
+        let posts_start = records
+            .iter()
+            .position(|r| r.subject.board_op.as_deref() == Some("release"))
+            .unwrap();
+        assert!(tasks_end < posts_start);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_task_that_stays_held_does_not_block_the_posts_or_loop() {
+        use maknae_proto::{HeldTarget, ReleaseResult as R, TaskState, Tasker};
+        let fx = fixture("held-stays", CONTAIN_AND_RELEASE_TO_ADMIN, Some(ROOT_ADMIN)).await;
+        let fx = with_agents(fx, &[HOBI, JIN]).await;
+        let t = given(&fx, HOBI, Tasker::Uid(1002), None);
+        let post = posted_by(&fx, 1002, JIN);
+        bounded(fx.contain_uid(1002, 0)).await.unwrap();
+        bounded(fx.contain_uid(HOBI_UID, 0)).await.unwrap();
+        assert_eq!(
+            answer_code(&fx.release(ContainTarget::Uid(1002), 0).await),
+            ContainmentOutcome::Released
+        );
+        let target = HeldTarget::User(ContainTarget::Uid(1002));
+        let pages = follow(&fx, &target, 4).await;
+        assert_eq!(pages.len(), 2, "{pages:?}");
+        assert_eq!(
+            pages[0].outcomes,
+            [outcome(&t, R::AgentContained, Some(TaskState::Held))]
+        );
+        assert_eq!(counts(&pages[0]), (0, 0, Some(cursor_of(&fx, &t))));
+        assert!(pages[1].outcomes.is_empty());
+        assert_eq!(counts(&pages[1]), (1, 0, None));
+        assert!(live(&fx, &post));
+        assert_eq!(task_state(&fx, &t), TaskState::Held);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn releasing_while_the_subject_is_still_contained_terminates_and_reports_posts_held() {
+        use maknae_proto::{HeldTarget, ReleaseResult as R, TaskState, Tasker};
+        let fx = fixture("held-still", CONTAIN_AND_RELEASE_TO_ADMIN, Some(ROOT_ADMIN)).await;
+        let fx = with_agents(fx, &[HOBI]).await;
+        let t = given(&fx, HOBI, Tasker::Uid(1002), None);
+        let posts = [posted_by(&fx, 1002, HOBI), posted_by(&fx, 1003, HOBI)];
+        bounded(fx.contain_uid(HOBI_UID, 0)).await.unwrap();
+        let target = HeldTarget::Agent("hobi".into());
+        let pages = follow(&fx, &target, 4).await;
+        assert_eq!(pages.len(), 2, "{pages:?}");
+        assert_eq!(
+            pages[0].outcomes,
+            [outcome(&t, R::AgentContained, Some(TaskState::Held))]
+        );
+        assert_eq!(counts(&pages[0]), (0, 0, Some(cursor_of(&fx, &t))));
+        assert_eq!(counts(&pages[1]), (0, 2, None));
+        assert!(posts.iter().all(|p| !live(&fx, p)));
+        assert!(post_records(&fx).is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_release_page_releases_at_most_a_page_of_posts_and_continues() {
+        use maknae_proto::{HeldTarget, TaskCursor, HELD_PAGE_MAX};
+        let fx = fixture("held-page", CONTAIN_AND_RELEASE_TO_ADMIN, Some(ROOT_ADMIN)).await;
+        let fx = with_agents(fx, &[HOBI]).await;
+        let posts: Vec<_> = (0..40).map(|_| posted_by(&fx, 1002, HOBI)).collect();
+        bounded(fx.contain_uid(HOBI_UID, 0)).await.unwrap();
+        assert_eq!(fx.reloader.board.held_count(HOBI_UID), 40);
+        assert_eq!(
+            answer_code(&fx.release(ContainTarget::Uid(HOBI_UID), 0).await),
+            ContainmentOutcome::Released
+        );
+        let target = HeldTarget::Agent("hobi".into());
+        let pages = follow(&fx, &target, 4).await;
+        assert_eq!(
+            pages.iter().map(counts).collect::<Vec<_>>(),
+            [
+                (HELD_PAGE_MAX as u32, 8, Some(TaskCursor::from_seq(0))),
+                (8, 0, None)
+            ]
+        );
+        assert!(posts[..HELD_PAGE_MAX]
+            .iter()
+            .all(|p| post_records(&fx).iter().any(|r| r
+                .board
+                .as_ref()
+                .and_then(|b| b.post_id.clone())
+                == Some(p.id.to_string()))));
+        assert!(posts.iter().all(|p| live(&fx, p)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_post_release_is_recorded_before_it_is_written() {
+        use maknae_proto::HeldTarget;
+        let fx = fixture(
+            "held-post-trail",
+            CONTAIN_AND_RELEASE_TO_ADMIN,
+            Some(ROOT_ADMIN),
+        )
+        .await;
+        let fx = with_agents(fx, &[HOBI]).await;
+        let posts = [posted_by(&fx, 1002, HOBI), posted_by(&fx, 1002, HOBI)];
+        bounded(fx.contain_uid(HOBI_UID, 0)).await.unwrap();
+        assert_eq!(
+            answer_code(&fx.release(ContainTarget::Uid(HOBI_UID), 0).await),
+            ContainmentOutcome::Released
+        );
+        fx.refuse("admin.release");
+        let target = HeldTarget::Agent("hobi".into());
+        let got = fx
+            .held(
+                HeldOp::Release {
+                    target: &target,
+                    after: None,
+                },
+                0,
+            )
+            .await;
+        let Err(ContainAnswer::Unavailable { why, .. }) = got else {
+            panic!("{got:?}")
+        };
+        assert_eq!(why, "the trail refused the record");
+        assert!(posts.iter().all(|p| !live(&fx, p)));
+        assert_eq!(fx.reloader.board.held_count(HOBI_UID), 2);
+        *fx.reloader.sink.refuse.lock().unwrap() = None;
+        let pages = follow(&fx, &target, 3).await;
+        assert_eq!(pages.iter().map(counts).collect::<Vec<_>>(), [(2, 0, None)]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_post_release_whose_write_fails_is_recorded_again_and_ends_the_page() {
+        use crate::task_store::Fail;
+        use maknae_proto::HeldTarget;
+        let blobs = crate::task_store::MemTaskBlobs::default();
+        let fx = fixture_with(
+            "held-post-write",
+            Opts {
+                authz: CONTAIN_AND_RELEASE_TO_ADMIN,
+                board_blobs: Some(blobs.clone()),
+                ..Opts::default()
+            },
+        )
+        .await;
+        let fx = with_agents(fx, &[HOBI]).await;
+        let posts = [posted_by(&fx, 1002, HOBI), posted_by(&fx, 1002, HOBI)];
+        bounded(fx.contain_uid(HOBI_UID, 0)).await.unwrap();
+        assert_eq!(
+            answer_code(&fx.release(ContainTarget::Uid(HOBI_UID), 0).await),
+            ContainmentOutcome::Released
+        );
+        let target = HeldTarget::Agent("hobi".into());
+        blobs.fail(Some(Fail::Every));
+        let pages = follow(&fx, &target, 3).await;
+        blobs.fail(None);
+        assert_eq!(pages.iter().map(counts).collect::<Vec<_>>(), [(0, 2, None)]);
+        let by = format!("; requested by uid 0 in session {}", fx.last_session());
+        let said: Vec<_> = post_records(&fx)
+            .iter()
+            .map(|r| {
+                (
+                    r.outcome.result.clone(),
+                    r.outcome.posture.clone(),
+                    r.outcome.reason.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            said,
+            [
+                (
+                    "permit".to_string(),
+                    "authorized".to_string(),
+                    format!("post released{by}")
+                ),
+                (
+                    "deny".to_string(),
+                    "unavailable".to_string(),
+                    format!("post not released: store: sentinel-628-write-refused{by}")
+                ),
+            ]
+        );
+        assert!(posts.iter().all(|p| !live(&fx, p)));
+        let pages = follow(&fx, &target, 3).await;
+        assert_eq!(pages.iter().map(counts).collect::<Vec<_>>(), [(2, 0, None)]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn releasing_one_task_releases_no_posts() {
+        use maknae_proto::{HeldTarget, ReleaseResult as R, TaskRef, TaskState};
+        let fx = fixture("held-one", CONTAIN_AND_RELEASE_TO_ADMIN, Some(ROOT_ADMIN)).await;
+        let fx = with_agents(fx, &[HOBI, JIN]).await;
+        let post = posted_by(&fx, 1002, JIN);
+        let ids = held_by_a_released_tasker(&fx, 1002, 2).await;
+        assert_eq!(fx.reloader.board.held_count(1002), 1);
+        let target = HeldTarget::Task(TaskRef::from_id(&ids[0]));
+        let page = release_page(
+            fx.held(
+                HeldOp::Release {
+                    target: &target,
+                    after: None,
+                },
+                0,
+            )
+            .await,
+        );
+        assert_eq!(
+            page.outcomes,
+            [outcome(&ids[0], R::Released, Some(TaskState::Queued))]
+        );
+        assert_eq!(counts(&page), (0, 0, None));
+        assert!(!live(&fx, &post));
+        assert_eq!(fx.reloader.board.held_count(1002), 1);
+        assert!(post_records(&fx).is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_page_that_lifts_one_of_two_holds_counts_it_and_continues() {
+        use maknae_proto::HeldTarget;
+        let fx = fixture("held-two", CONTAIN_AND_RELEASE_TO_ADMIN, Some(ROOT_ADMIN)).await;
+        let fx = with_agents(fx, &[HOBI]).await;
+        let both = posted_by(&fx, 1002, HOBI);
+        let one = posted_by(&fx, 1003, HOBI);
+        bounded(fx.contain_uid(1002, 0)).await.unwrap();
+        bounded(fx.contain_uid(HOBI_UID, 0)).await.unwrap();
+        assert_eq!(
+            answer_code(&fx.release(ContainTarget::Uid(HOBI_UID), 0).await),
+            ContainmentOutcome::Released
+        );
+        let agent = HeldTarget::Agent("hobi".into());
+        let pages = follow(&fx, &agent, 3).await;
+        assert_eq!(pages.iter().map(counts).collect::<Vec<_>>(), [(2, 0, None)]);
+        assert!(!live(&fx, &both), "the person's hold remains");
+        assert!(live(&fx, &one));
+        assert_eq!(
+            answer_code(&fx.release(ContainTarget::Uid(1002), 0).await),
+            ContainmentOutcome::Released
+        );
+        let person = HeldTarget::User(ContainTarget::Uid(1002));
+        let pages = follow(&fx, &person, 3).await;
+        assert_eq!(pages.iter().map(counts).collect::<Vec<_>>(), [(1, 0, None)]);
+        assert!(live(&fx, &both));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
