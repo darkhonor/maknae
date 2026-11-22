@@ -223,6 +223,8 @@ files = [
   "crates/maknae-proto/src/sealed.rs",
   # #609: the task object; its decode refusals and redacting Debug are the control.
   "crates/maknae-proto/src/task.rs",
+  # #168: the host grammar every binding's server is checked against.
+  "crates/maknae-proto/src/host.rs",
   # #240a D3-A: the PURE peer-identity decision. It is a separate file from
   # peercred.rs because that one is whole-file mutation-excluded (syscall I/O),
   # which would make a T1 tier there vacuous — zero mutants, zero missed.
@@ -552,7 +554,7 @@ files = [
   # catalog whose digest or decode fails; a defect misinforms a model and carries no verdict.
   "crates/maknae-loop/src/catalog.rs",
   # #168: the remotes of the tasker's checkout, read only from files and directories
-  # the tasker owns and no one else can write, a symlinked .git or config refused.
+  # owned by the tasker and not world-writable, a symlinked .git or config refused.
   # T2: a defect proposes a binding the kernel re-checks at intake, and carries no verdict.
   "crates/maknae-loop/src/workdir.rs",
 ]

@@ -144,7 +144,7 @@ fn binding_refusal(
 }
 
 /// A repository, and optionally one change in it, that a tasker asks a task be bound to.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, try_from = "GitRefWire")]
 pub struct GitRef {
     pub server: String,

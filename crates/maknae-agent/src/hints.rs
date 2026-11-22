@@ -3,6 +3,7 @@
 //! forges the catalog names. The kernel re-checks every binding at intake.
 
 use maknae_proto::{Binding, BindingRequest, GitRef};
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -27,14 +28,15 @@ pub struct Forge {
     pub provider: Provider,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Subject {
     Host(String),
     Written(String),
     Ref(GitRef),
+    More(usize),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Reason {
     UnknownServer,
     NotHttps,
@@ -44,9 +46,10 @@ pub enum Reason {
     NotInParent,
     NoForgeList,
     AmbiguousGitlabPath,
+    NotListed,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Unbound {
     pub subject: Subject,
     pub reason: Reason,
@@ -177,10 +180,12 @@ fn link(word: &str, https: bool, forges: Option<&[Forge]>) -> Option<Found> {
                 None => {
                     let project = path.trim_end_matches('/');
                     if project.split('/').skip(2).any(gitlab_route_segment) {
-                        return Some(Found::Unbound(Unbound {
-                            subject: Subject::Host(forge.host.clone()),
-                            reason: Reason::AmbiguousGitlabPath,
-                        }));
+                        return nameable_host(&forge.host).map(|host| {
+                            Found::Unbound(Unbound {
+                                subject: Subject::Host(host),
+                                reason: Reason::AmbiguousGitlabPath,
+                            })
+                        });
                     }
                     (project, None)
                 }
@@ -191,8 +196,7 @@ fn link(word: &str, https: bool, forges: Option<&[Forge]>) -> Option<Found> {
     git_ref(forge, base, change).map(Found::Ref)
 }
 
-/// The link's host, lowercase, when it is one a note may name: checked before it
-/// is copied, so that its copy passes [`maknae_proto::server_is_acceptable`].
+/// The host, lowercase, when a note may name it: checked before it is copied, so that its copy passes [`maknae_proto::server_is_acceptable`].
 fn nameable_host(host_port: &str) -> Option<String> {
     (host_port.len() <= maknae_proto::SERVER_MAX_BYTES
         && maknae_proto::host_port(host_port).is_some())
@@ -237,7 +241,6 @@ fn number(s: &str) -> Option<u64> {
     s.parse().ok().filter(|n| *n > 0)
 }
 
-/// Whether `base` names a repository on `provider`.
 fn names_a_repository(provider: Provider, base: &str) -> bool {
     maknae_proto::repository_path_is_acceptable(base)
         && match provider {
@@ -349,10 +352,12 @@ fn hostname(host: &str) -> &str {
 
 fn remote_found(remote: &RemoteUrl, forges: Option<&[Forge]>) -> Option<Found> {
     let unbound = |reason| {
-        Some(Found::Unbound(Unbound {
-            subject: Subject::Host(remote.host.clone()),
-            reason,
-        }))
+        nameable_host(&remote.host).map(|host| {
+            Found::Unbound(Unbound {
+                subject: Subject::Host(host),
+                reason,
+            })
+        })
     };
     let Some(forges) = forges else {
         return unbound(Reason::NoForgeList);
@@ -690,7 +695,7 @@ pub enum Sigil {
     Bang,
 }
 
-/// F11: whether `owner/repo<sigil>N` names change `N` on `provider` (`Some(true)`),
+/// Whether `owner/repo<sigil>N` names change `N` on `provider` (`Some(true)`),
 /// only the repository (`Some(false)`), or is not a shorthand there (`None`).
 pub fn shorthand_change(provider: Provider, sigil: Sigil) -> Option<bool> {
     match (provider, sigil) {
@@ -701,12 +706,12 @@ pub fn shorthand_change(provider: Provider, sigil: Sigil) -> Option<bool> {
     }
 }
 
-/// F10: a bare `owner/repo` binds only in backticks or when it is a working-directory remote.
+/// A bare `owner/repo` binds only in backticks or when it is a working-directory remote.
 pub fn bare_owner_repo_binds(quoted: bool, equals_a_remote: bool) -> bool {
     quoted || equals_a_remote
 }
 
-/// F12: first path segments that are GitHub's own pages, not owners.
+/// First path segments that are GitHub's own pages, not owners.
 const GITHUB_RESERVED: [&str; 55] = [
     "about",
     "account",
@@ -857,9 +862,41 @@ pub struct Chosen {
     pub unbound: Vec<Unbound>,
 }
 
+pub const NOTES_MAX: usize = 32;
+
+#[derive(Default)]
+struct Notes {
+    listed: Vec<Unbound>,
+    more: HashSet<Unbound>,
+}
+
+impl Notes {
+    fn note(&mut self, u: Unbound) {
+        if self.listed.contains(&u) {
+            return;
+        }
+        if self.listed.len() < NOTES_MAX {
+            self.listed.push(u);
+        } else {
+            self.more.insert(u);
+        }
+    }
+
+    fn finish(mut self) -> Vec<Unbound> {
+        if !self.more.is_empty() {
+            self.listed.push(Unbound {
+                subject: Subject::More(self.more.len()),
+                reason: Reason::NotListed,
+            });
+        }
+        self.listed
+    }
+}
+
 /// The bindings to submit: `sources`' candidates in order, without duplicates or a
 /// repository a change on it already names, only what `parent` holds when there is
-/// one, cut to what a submission may carry. Everything not bound is in `unbound`.
+/// one, cut to what a submission may carry. Everything not bound is in `unbound`,
+/// the first [`NOTES_MAX`] listed and the rest counted in one last note.
 pub fn choose(
     sources: &[&dyn HintSource],
     prompt: &str,
@@ -870,32 +907,27 @@ pub fn choose(
         .iter()
         .flat_map(|s| s.hints(prompt, forges))
         .collect();
-    let remotes: Vec<&GitRef> = hints
-        .iter()
-        .filter_map(|h| match (&h.origin, &h.found) {
-            (Origin::WorkingDirectory, Found::Ref(g)) => Some(g),
-            _ => None,
-        })
-        .collect();
-    let mut unbound = Vec::new();
-    let mut note = |u: Unbound| {
-        if !unbound.contains(&u) {
-            unbound.push(u);
+    let mut remotes: HashMap<&str, &GitRef> = HashMap::new();
+    for h in &hints {
+        if let (Origin::WorkingDirectory, Found::Ref(g)) = (&h.origin, &h.found) {
+            remotes.entry(g.base.as_str()).or_insert(g);
         }
-    };
+    }
+    let mut notes = Notes::default();
     let mut refs: Vec<GitRef> = Vec::new();
+    let mut held: HashSet<GitRef> = HashSet::new();
     for hint in &hints {
         let found = match &hint.found {
             Found::Ref(g) => Some(g.clone()),
             Found::Unbound(u) => {
-                note(u.clone());
+                notes.note(u.clone());
                 None
             }
             Found::Bare { at, quoted } => {
                 let Some(base) = prompt.get(at.clone()) else {
                     continue;
                 };
-                let remote = remotes.iter().find(|r| r.base == base);
+                let remote = remotes.get(base);
                 if !bare_owner_repo_binds(*quoted, remote.is_some()) {
                     continue;
                 }
@@ -907,7 +939,7 @@ pub fn choose(
                     }),
                     (None, Ok(forge)) => git_ref(forge, base, None),
                     (None, Err(reason)) => {
-                        note(Unbound {
+                        notes.note(Unbound {
                             subject: Subject::Written(base.to_owned()),
                             reason,
                         });
@@ -916,17 +948,19 @@ pub fn choose(
                 }
             }
         };
-        if let Some(g) = found.filter(|g| !refs.contains(g)) {
+        if let Some(g) = found.filter(|g| held.insert(g.clone())) {
             refs.push(g);
         }
     }
     if let Some(parent) = parent {
+        let parent: HashSet<(&str, &str, Option<u64>)> = parent
+            .iter()
+            .map(|Binding::Git(p)| (p.server.as_str(), p.base.as_str(), p.change))
+            .collect();
         refs.retain(|g| {
-            let held = parent.iter().any(|Binding::Git(p)| {
-                p.server == g.server && p.base == g.base && p.change == g.change
-            });
+            let held = parent.contains(&(g.server.as_str(), g.base.as_str(), g.change));
             if !held {
-                note(Unbound {
+                notes.note(Unbound {
                     subject: Subject::Ref(g.clone()),
                     reason: Reason::NotInParent,
                 });
@@ -934,12 +968,16 @@ pub fn choose(
             held
         });
     }
-    let changed: Vec<(String, String)> = refs
+    let changed: HashSet<(&str, &str)> = refs
         .iter()
         .filter(|g| g.change.is_some())
-        .map(|g| (g.server.clone(), g.base.clone()))
+        .map(|g| (g.server.as_str(), g.base.as_str()))
         .collect();
-    refs.retain(|g| g.change.is_some() || !changed.contains(&(g.server.clone(), g.base.clone())));
+    let refs: Vec<GitRef> = refs
+        .iter()
+        .filter(|g| g.change.is_some() || !changed.contains(&(g.server.as_str(), g.base.as_str())))
+        .cloned()
+        .collect();
     let mut bindings = Vec::new();
     let mut cut = false;
     for g in refs {
@@ -953,12 +991,15 @@ pub fn choose(
             bindings.pop();
         }
         cut = true;
-        note(Unbound {
+        notes.note(Unbound {
             subject: Subject::Ref(g),
             reason: Reason::OverTheBound,
         });
     }
-    Chosen { bindings, unbound }
+    Chosen {
+        bindings,
+        unbound: notes.finish(),
+    }
 }
 
 #[cfg(test)]
@@ -1780,6 +1821,51 @@ mod tests {
             git_config_remotes(b"[remote \"bb\"]\nurl = git@bitbucket.org:o/r.git\n").unwrap();
         let c = choose(&[&Remotes(found)], "", None, None);
         assert_eq!(c.unbound, [host("bitbucket.org", Reason::NoForgeList)]);
+    }
+
+    #[test]
+    fn a_remote_host_outside_the_host_grammar_is_never_named() {
+        let config = "[remote \"a\"]\nurl = git@a..b:o/r\n\
+                      [remote \"b\"]\nurl = ssh://-x/o/r\n\
+                      [remote \"c\"]\nurl = git@-x:o/r\n\
+                      [remote \"d\"]\nurl = ssh://a]b[c/o/r\n\
+                      [remote \"e\"]\nurl = https://a..b/o/r\n";
+        let found = git_config_remotes(config.as_bytes()).unwrap();
+        assert!(found.len() >= 4, "{found:?}");
+        for forges in [Some(&[gh()][..]), None] {
+            let c = choose(&[&Remotes(found.clone())], "", forges, None);
+            assert_eq!(c, Chosen::default(), "{forges:?}");
+        }
+        let gitlab = Forge {
+            host: "a..b".into(),
+            provider: Provider::Gitlab,
+        };
+        let c = links("https://a..b/g/p/tree", &[gitlab]);
+        assert_eq!(c, Chosen::default());
+    }
+
+    #[test]
+    fn thousands_of_candidates_are_bound_to_the_cut_and_noted_to_the_cap() {
+        let once: String = (0..5000)
+            .map(|n| format!("https://github.com/o/r{n} https://evil{n}.example/x "))
+            .collect();
+        let c = links(&once.repeat(2), &[gh()]);
+        let want: Vec<_> = (0..8)
+            .map(|n| git("github.com", &format!("o/r{n}"), None))
+            .collect();
+        assert_eq!(bound(&c), want);
+        assert_eq!(c.unbound.len(), NOTES_MAX + 1);
+        let listed: Vec<_> = (0..NOTES_MAX)
+            .map(|n| host(&format!("evil{n}.example"), Reason::UnknownServer))
+            .collect();
+        assert_eq!(c.unbound[..NOTES_MAX], listed);
+        assert_eq!(
+            c.unbound[NOTES_MAX],
+            Unbound {
+                subject: Subject::More(5000 + 4992 - NOTES_MAX),
+                reason: Reason::NotListed,
+            }
+        );
     }
 
     #[test]

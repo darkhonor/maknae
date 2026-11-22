@@ -214,6 +214,10 @@ fn unbound_reason(reason: Reason) -> String {
         Reason::NotInParent => "not in the parent task".into(),
         Reason::NoForgeList => "no forge list".into(),
         Reason::AmbiguousGitlabPath => "ambiguous GitLab path".into(),
+        Reason::NotListed => format!(
+            "notes past the first {} are not listed",
+            crate::hints::NOTES_MAX
+        ),
     }
 }
 
@@ -221,6 +225,7 @@ fn unbound_line(u: &Unbound) -> String {
     let subject = match &u.subject {
         Subject::Host(s) | Subject::Written(s) => safe(s),
         Subject::Ref(g) => ref_name(&g.server, &g.base, g.change),
+        Subject::More(k) => format!("{k} more candidates"),
     };
     format!("not bound: {subject}: {}", unbound_reason(u.reason))
 }
@@ -446,6 +451,7 @@ mod tests {
                     Reason::AmbiguousGitlabPath,
                 ),
                 not(Subject::Host("a\u{1b}[2Jb".into()), Reason::UnknownServer),
+                not(Subject::More(9960), Reason::NotListed),
             ],
         );
         assert_eq!(
@@ -462,6 +468,7 @@ mod tests {
                 "not bound: github.com: no forge list",
                 "not bound: gitlab.lab.local:8443: ambiguous GitLab path",
                 "not bound: a\\u{001b}[2Jb: unknown server",
+                "not bound: 9960 more candidates: notes past the first 32 are not listed",
             ]
         );
         assert!(echo_lines(&[], &[]).is_empty());
