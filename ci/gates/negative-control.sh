@@ -3494,6 +3494,89 @@ expect_reject_because "clippy-all/disallowed-entry-only-a-feature-pass-resolves-
   "a problem in clippy.toml on feature pass" \
   "$here/clippy-all.sh" --root "$fx_disf"
 
+# #645: the gate pins CLIPPY_CONF_DIR on every host, so any other config clippy would read is refused.
+fx_ai="$(lint_fixture clean)"
+printf 'disallowed-methods = []\n' > "$fx_ai/.clippy.toml"
+expect_reject_because "clippy-all/a-dot-clippy-toml-is-refused" \
+  "only the root clippy.toml, a regular file, may configure clippy here" "$here/clippy-all.sh" --root "$fx_ai"
+fx_ai="$(lint_fixture clean)"
+printf 'disallowed-methods = []\n' > "$fx_ai/crates/leaf/clippy.toml"
+expect_reject_because "clippy-all/a-member-clippy-toml-is-refused" \
+  "only the root clippy.toml, a regular file, may configure clippy here" "$here/clippy-all.sh" --root "$fx_ai"
+fx_ai="$(lint_fixture clean)"
+mkdir -p "$fx_ai/elsewhere" && printf 'disallowed-methods = []\n' > "$fx_ai/elsewhere/x.toml"
+ln -s ../../elsewhere/x.toml "$fx_ai/crates/leaf/.clippy.toml"
+expect_reject_because "clippy-all/a-symlinked-member-config-is-refused" \
+  "only the root clippy.toml, a regular file, may configure clippy here" "$here/clippy-all.sh" --root "$fx_ai"
+fx_ai="$(lint_fixture clean)"
+mkdir "$fx_ai/clippy.toml"
+expect_reject_because "clippy-all/a-root-clippy-toml-directory-is-refused" \
+  "only the root clippy.toml, a regular file, may configure clippy here" "$here/clippy-all.sh" --root "$fx_ai"
+fx_ai="$(lint_fixture clean)"
+ln -s elsewhere.toml "$fx_ai/clippy.toml" && printf 'disallowed-methods = []\n' > "$fx_ai/elsewhere.toml"
+expect_reject_because "clippy-all/a-symlinked-root-clippy-toml-is-refused" \
+  "only the root clippy.toml, a regular file, may configure clippy here" "$here/clippy-all.sh" --root "$fx_ai"
+
+# #645: `allow-invalid` silences an unresolvable entry, so on Linux the gate lints
+# with a copy that drops it. These read the gate's stripped copy, so they are Linux-only.
+if [ "$(uname -s)" != Linux ]; then
+  echo "neg-skip: [clippy-all/allow-invalid] the gate strips allow-invalid on Linux only"
+  skipped=$((skipped+7))
+else
+  fx_ai="$(lint_fixture clean)"
+  printf 'disallowed-methods = [{ path = "std::nosuch::f", allow-invalid = true }]\n' > "$fx_ai/clippy.toml"
+  expect_reject_because "clippy-all/flagged-typo-is-still-refused" \
+    "a problem in clippy.toml on the base" "$here/clippy-all.sh" --root "$fx_ai"
+
+  fx_ai="$(lint_fixture clean)"
+  mkdir -p "$fx_ai/crates/extra/src"
+  printf '[workspace]\nresolver = "3"\nmembers = ["crates/root", "crates/leaf"]\nexclude = ["crates/extra"]\n' > "$fx_ai/Cargo.toml"
+  printf '[package]\nname = "extra"\nversion = "0.0.0"\nedition = "2021"\n' > "$fx_ai/crates/extra/Cargo.toml"
+  printf 'pub fn e() {}\n' > "$fx_ai/crates/extra/src/lib.rs"
+  printf '[package]\nname = "leaf"\nversion = "0.0.0"\nedition = "2021"\n[dependencies]\nextra = { path = "../extra", optional = true }\n[features]\ndark = ["dep:extra"]\n' > "$fx_ai/crates/leaf/Cargo.toml"
+  printf 'pub fn l() -> u8 { 7 }\n#[cfg(feature = "dark")]\npub fn d() { extra::e() }\n' > "$fx_ai/crates/leaf/src/lib.rs"
+  ( cd "$fx_ai" && cargo generate-lockfile --offline >/dev/null 2>&1 )
+  printf 'disallowed-methods = [{ path = "extra::nosuch", allow-invalid = true }]\n' > "$fx_ai/clippy.toml"
+  expect_reject_because "clippy-all/flagged-typo-only-a-feature-pass-resolves-is-still-refused" \
+    "a problem in clippy.toml on feature pass" "$here/clippy-all.sh" --root "$fx_ai"
+
+  # A flagged entry that resolves is enforced. These two would pass without the copy too;
+  # the two typo controls above are the ones that prove the copy is read.
+  fx_ai="$(lint_fixture clean)"
+  printf 'pub fn x() { std::process::exit(0) }\n' >> "$fx_ai/crates/leaf/src/lib.rs"
+  printf 'disallowed-methods = [{ path = "std::process::exit", reason = "x", allow-invalid = true }]\n' > "$fx_ai/clippy.toml"
+  expect_reject_because "clippy-all/flagged-entry-is-enforced-by-the-base-pass" \
+    "use of a disallowed method \`std::process::exit\`" "$here/clippy-all.sh" --root "$fx_ai"
+
+  fx_ai="$(lint_fixture clean)"
+  printf '#[cfg(feature = "dark")]\npub fn x() { std::process::exit(0) }\n' >> "$fx_ai/crates/leaf/src/lib.rs"
+  printf 'disallowed-methods = [{ path = "std::process::exit", reason = "x", allow-invalid = true }]\n' > "$fx_ai/clippy.toml"
+  expect_reject_because "clippy-all/flagged-entry-is-enforced-by-a-feature-pass" \
+    "use of a disallowed method \`std::process::exit\`" "$here/clippy-all.sh" --root "$fx_ai"
+
+  fx_ai="$(lint_fixture clean)"
+  printf 'disallowed-methods = [{ allow-invalid = true, path = "std::process::exit" }]\n' > "$fx_ai/clippy.toml"
+  expect_reject_because "clippy-all/unstrippable-allow-invalid-is-refused" \
+    "does not match the file with every allow-invalid key removed" "$here/clippy-all.sh" --root "$fx_ai"
+
+  ai_py="$(mktemp -d -p "$NC_TMP")"
+  printf '#!/bin/sh\ncase "$*" in *version_info*) echo False;; *) exec %s "$@";; esac\n' "$(command -v python3)" > "$ai_py/python3"
+  chmod 755 "$ai_py/python3"
+  fx_ai="$(lint_fixture clean)"
+  printf 'disallowed-methods = [{ path = "std::process::exit", allow-invalid = true }]\n' > "$fx_ai/clippy.toml"
+  expect_reject_because "clippy-all/python-older-than-3.11-is-refused" \
+    "python3 >= 3.11 is required to read clippy.toml" env PATH="$ai_py:$PATH" "$here/clippy-all.sh" --root "$fx_ai"
+
+  fx_ai="$(lint_fixture clean)"
+  printf 'disallowed-methods = [{ path = "std::process::exit", reason = "x", allow-invalid = true }]\n' > "$fx_ai/clippy.toml"
+  total=$((total+1))
+  if out="$("$here/clippy-all.sh" --root "$fx_ai" 2>&1)"; then
+    echo "neg-ok: [clippy-all/flagged-entry-nothing-calls-passes] clean fixture permitted"; pass=$((pass+1))
+  else
+    echo "NEG-FAIL: [clippy-all/flagged-entry-nothing-calls-passes] gate rejected a clean fixture: $out"
+  fi
+fi
+
 # REJECT: a lint in an UNSELECTED crate's TEST target must be caught by the
 # base pass. Kills `--workspace` -> `-p root` (leaf's tests unlinted),
 # dropping `--all-targets` (no tests linted), and dropping `-D warnings`

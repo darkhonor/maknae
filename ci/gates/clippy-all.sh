@@ -353,6 +353,48 @@ for n in sorted({p["name"] for p in json.load(sys.stdin)["packages"]}):
     print("[profile.dev.package." + q + "]\ndebug-assertions = true\n[profile.test.package." + q + "]\ndebug-assertions = true")' > "$pin_file"
 [ -s "$pin_file" ] || fail "the per-package profile pin file is empty; refusing to lint without it"
 CLIPPY_PIN+=(--config "$pin_file")
+# #645: the Linux passes read a copy without `allow-invalid`, so #564's check still sees an
+# entry that refuses nothing. CLIPPY_CONF_DIR replaces clippy's own lookup (each member's directory
+# up to the root), so nothing on that path but the root's regular clippy.toml may exist.
+if ! others="$(printf '%s' "$meta" | python3 -c '
+import json, os, sys
+root = os.path.realpath(sys.argv[1])
+found = set()
+for package in json.load(sys.stdin)["packages"]:
+    d = os.path.dirname(os.path.realpath(package["manifest_path"]))
+    while True:
+        for name in ("clippy.toml", ".clippy.toml"):
+            path = os.path.join(d, name)
+            if os.path.lexists(path) and ((d, name) != (root, "clippy.toml") or not os.path.isfile(path)) or os.path.islink(path):
+                found.add(path)
+        if d == root or d == os.path.dirname(d):
+            break
+        d = os.path.dirname(d)
+print(" ".join(sorted(found)))' "$root")"; then
+  fail "cannot list the clippy configs on the members' lookup paths"
+fi
+[ -z "$others" ] || fail "only the root clippy.toml, a regular file, may configure clippy here; found: $others"
+conf_dir="$root"
+if [ "$(uname -s)" = Linux ] && [ -f "$root/clippy.toml" ]; then
+  [ "$(python3 -c 'import sys; print(sys.version_info >= (3, 11))')" = True ] \
+    || fail "python3 >= 3.11 is required to read clippy.toml (stdlib tomllib)"
+  sed -E 's/,[[:space:]]*allow-invalid[[:space:]]*=[[:space:]]*true//g' "$root/clippy.toml" > "$pin_dir/clippy.toml" \
+    || fail "cannot write the gate's copy of clippy.toml"
+  python3 - "$root/clippy.toml" "$pin_dir/clippy.toml" <<'PYEOF' || fail "the gate strips the text \`, allow-invalid = true\` from clippy.toml, and the result does not match the file with every allow-invalid key removed (another spelling, or a file that does not parse)"
+import sys, tomllib
+def drop(v):
+    if isinstance(v, dict):
+        return {k: drop(x) for k, x in v.items() if k != "allow-invalid"}
+    if isinstance(v, list):
+        return [drop(x) for x in v]
+    return v
+original, copy = (tomllib.load(open(path, "rb")) for path in sys.argv[1:3])
+sys.exit(drop(original) != copy)
+PYEOF
+  conf_dir="$pin_dir"
+fi
+CLIPPY_PIN+=(--config "env.CLIPPY_CONF_DIR.value=$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$conf_dir")"
+             --config 'env.CLIPPY_CONF_DIR.force=true')
 fi
 
 # Feature passes: ONE PER DECLARED NON-DEFAULT FEATURE, redundant or not.
@@ -414,6 +456,9 @@ lint_pass() { # <label> [extra clippy args...]
   cat "$lint_log" >&2
   # A clippy.toml entry that does not resolve to a function is only a warning, which `-D warnings` does not deny (#564).
   if grep -qE -- '--> .*clippy\.toml:[0-9]+' "$lint_log"; then
+    if [ "$conf_dir" != "$root" ]; then
+      fail "clippy reported a problem in clippy.toml on $label, so a disallowed entry may refuse nothing (see above; the path is the gate's copy, which drops allow-invalid on Linux and keeps the line numbers of $root/clippy.toml)"
+    fi
     fail "clippy reported a problem in clippy.toml on $label, so a disallowed entry may refuse nothing (see above)"
   fi
   ran=$((ran + 1))
@@ -431,7 +476,11 @@ run_lints() {
 if [ "$mode" = "host" ]; then
   cd "$root" || fail "cannot enter '$root'"
   run_lints
-  echo "clippy-all: ok (${count} workspace packages linted, ${ran} clippy pass(es) RUN = 1 base + ${featc} per declared feature, toolchain ${channel}, mode host)"
+  unproven=""
+  if [ "$conf_dir" = "$root" ] && grep -q 'allow-invalid' "$root/clippy.toml" 2>/dev/null; then
+    unproven="; allow-invalid entries were not proven to resolve on this host, Linux proves them"
+  fi
+  echo "clippy-all: ok (${count} workspace packages linted, ${ran} clippy pass(es) RUN = 1 base + ${featc} per declared feature, toolchain ${channel}, mode host${unproven})"
   exit 0
 fi
 
