@@ -266,12 +266,6 @@ impl std::fmt::Debug for Post {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BoardPosted {
-    pub id: PostId,
-}
-
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BoardPage {
@@ -285,6 +279,37 @@ impl std::fmt::Debug for BoardPage {
             .field("posts", &self.posts)
             .field("more", &self.more)
             .finish()
+    }
+}
+
+/// Why a permitted board request was not carried out; availability, never policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BoardDefect {
+    TryAgain,
+    OutcomeUnknown,
+    Full,
+    AuthorAtCap,
+    NoSuchPost,
+}
+
+impl BoardDefect {
+    pub const ALL: [BoardDefect; 5] = [
+        BoardDefect::TryAgain,
+        BoardDefect::OutcomeUnknown,
+        BoardDefect::Full,
+        BoardDefect::AuthorAtCap,
+        BoardDefect::NoSuchPost,
+    ];
+}
+
+pub fn board_refused_message(d: BoardDefect) -> &'static str {
+    match d {
+        BoardDefect::TryAgain => "try again",
+        BoardDefect::OutcomeUnknown => "outcome unknown",
+        BoardDefect::Full => "board full",
+        BoardDefect::AuthorAtCap => "author at cap",
+        BoardDefect::NoSuchPost => "no such post",
     }
 }
 

@@ -1773,6 +1773,40 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             close_bounded(&mut stream).await;
             return;
         }
+        Dispatch::BoardRequested => {
+            let appended = emit_request_outcome(
+                &emit,
+                &host,
+                &socket,
+                peer_uid,
+                peer_uri.as_deref(),
+                peer_user.as_deref(),
+                decided_role,
+                decided_rule.as_ref(),
+                session_id,
+                seq.next(),
+                verb_to_action(&request.verb),
+                None,
+                None,
+                "deny",
+                "board off: site",
+                "unavailable",
+                &au3_1,
+            )
+            .await;
+            if may_respond(appended) {
+                write_error_bounded(
+                    &mut stream,
+                    &cfg,
+                    class,
+                    ProtoErrCode::Unauthorized,
+                    "not authorized",
+                )
+                .await;
+            }
+            close_bounded(&mut stream).await;
+            return;
+        }
         Dispatch::NoBehaviour => {
             // Decided and PERMITTED above; the term simply has no behaviour.
             // Same audit-then-respond gate as every sibling path — the record
@@ -2276,6 +2310,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 }
                 Dispatch::NoBehaviour
                 | Dispatch::ToolCatalogRequested
+                | Dispatch::BoardRequested
                 | Dispatch::MutationRequested
                 | Dispatch::PromptRequested
                 | Dispatch::ConversationNewRequested

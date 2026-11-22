@@ -4,7 +4,7 @@ use maknae_graph::record::{AttrValue, Attrs};
 use maknae_graph::schema::{CompiledNode, CompiledSet};
 
 #[rustfmt::skip]
-pub const ACTION_TERMS: [&str; 60] = [
+pub const ACTION_TERMS: [&str; 62] = [
     "liveness.ping",
     "admin.whoami", "admin.status", "admin.config.show", "admin.audit.tail", "admin.policy.reload",
     "admin.subject.list", "admin.subject.bind", "admin.subject.unbind", "admin.contain", "admin.release",
@@ -19,10 +19,11 @@ pub const ACTION_TERMS: [&str; 60] = [
     "terminal.create", "terminal.output", "terminal.wait_for_exit", "terminal.kill", "terminal.release", "terminal.input",
     "mcp.connect", "mcp.disconnect", "mcp.message", "mcp.tool.call", "mcp.resource.read", "mcp.prompt.get", "mcp.sampling.create",
     "tool.catalog",
+    "board.post", "board.read",
 ];
 pub const KERNEL_TERMS: [&str; 2] = ["kernel.contain", "kernel.session.terminate"];
-pub const CLASSES: [&str; 8] = [
-    "liveness", "admin", "session", "fs", "terminal", "mcp", "kernel", "tool",
+pub const CLASSES: [&str; 9] = [
+    "liveness", "admin", "session", "fs", "terminal", "mcp", "kernel", "tool", "board",
 ];
 const ATTR_CLASS: &str = "class";
 
@@ -36,6 +37,7 @@ pub fn class_name(term: &str) -> Option<&'static str> {
         Class::Mcp => "mcp",
         Class::Kernel => "kernel",
         Class::Tool => "tool",
+        Class::Board => "board",
     })
 }
 
@@ -122,6 +124,7 @@ mod tests {
                 Class::Mcp => "mcp",
                 Class::Kernel => "kernel",
                 Class::Tool => "tool",
+                Class::Board => "board",
             }
         }
         let variants = [
@@ -133,6 +136,7 @@ mod tests {
             Class::Mcp,
             Class::Kernel,
             Class::Tool,
+            Class::Board,
         ];
         assert_eq!(variants.map(name), CLASSES);
         for v in variants {
@@ -160,13 +164,13 @@ mod tests {
             set.iter()
                 .filter(|c| c.kind == maknae_graph::kernel::TERM)
                 .count(),
-            62
+            64
         );
         assert_eq!(
             set.iter()
                 .filter(|c| c.kind == maknae_graph::kernel::CLASS)
                 .count(),
-            8
+            9
         );
         let t = set.get(maknae_graph::kernel::TERM, "fs.read").unwrap();
         assert_eq!(

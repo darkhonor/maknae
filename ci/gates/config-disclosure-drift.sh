@@ -430,6 +430,8 @@ PAYLOAD_DISPOSITIONS=(
   "HeldTasks|struct:HeldPage"
   "HeldReleased|struct:ReleasePage"
   "ToolCatalog|bytes"   # #674: the subject's own catalog, released only on the tool.catalog Permit
+  "BoardPosted|bytes"   # #695: the id of the caller's own post, 16 opaque random bytes, released only on its board.post Permit
+  "BoardPage|bytes"   # #695: posts released only on the board.read Permit of each post
 )
 payload_variants="$(awk '
   /^pub enum Payload \{/ { inenum=1; next }

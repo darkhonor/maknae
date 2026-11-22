@@ -71,11 +71,13 @@ pub const AGENT_ENTITY_PREFIX: &str = "maknae-agent-";
 
 pub const TASKS_RIGHT_PATHS: [&str; 3] =
     ["Read(~/tasks/**)", "Write(~/tasks)", "Write(~/tasks/**)"];
-pub const TASKS_RIGHT_ACTIONS: [&str; 4] = [
+pub const TASKS_RIGHT_ACTIONS: [&str; 6] = [
     "session.new",
     "session.prompt",
     "session.close",
     "tool.catalog",
+    "board.post",
+    "board.read",
 ];
 
 pub const STARTER_POLICY: &str = "\
@@ -83,7 +85,7 @@ schema_version: 1
 
 ## Every agent already holds, whatever this file says:
 ##   files:    Read(~/tasks/**), Write(~/tasks), Write(~/tasks/**)
-##   actions:  session.new, session.prompt, session.close, tool.catalog
+##   actions:  session.new, session.prompt, session.close, tool.catalog, board.post, board.read
 ## Add only what the agent needs beyond its own ~/tasks.
 ## Lines starting with a single # are examples; remove the # to use one.
 

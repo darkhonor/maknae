@@ -1394,6 +1394,57 @@ async fn an_agent_fetches_the_catalog_its_claim_stamped() {
 }
 
 #[tokio::test]
+async fn a_board_request_is_refused_board_off_site() {
+    let w = world_in(
+        "board-off",
+        "user",
+        "roles:\n  user:\n    allow: [\"session.task\", \"board.post\", \"board.read\"]\n",
+        PLAIN,
+        PLAIN,
+    );
+    let id = w.submit("hobi", "a").await;
+    assert_eq!(w.claimed("hobi").await, id);
+    let records = Records::new(0);
+    let post = Verb::BoardPost {
+        post: maknae_proto::PostDraft {
+            kind: maknae_proto::PostKind::Note,
+            to: maknae_proto::Addressee::Board,
+            in_reply_to: None,
+            body: secret("sentinel-695-board-off"),
+            attachments: vec![],
+        },
+    };
+    let read = Verb::BoardRead { seen_through: None };
+    for (verb, action) in [(post, "board.post"), (read, "board.read")] {
+        let answer = w
+            .agent_with("hobi", verb, Some(id), &records)
+            .await
+            .expect("an answer");
+        assert!(unauthorized(&answer), "{action}: {answer:?}");
+        let trail: Vec<_> = records
+            .snapshot()
+            .into_iter()
+            .filter(|r| r.action == action)
+            .map(|r| (r.outcome.result, r.outcome.reason, r.outcome.posture))
+            .collect();
+        assert_eq!(
+            trail,
+            [(
+                "deny".to_string(),
+                "board off: site".to_string(),
+                "unavailable".to_string()
+            )],
+            "{action}"
+        );
+    }
+    assert!(records
+        .snapshot()
+        .iter()
+        .all(|r| !format!("{r:?}").contains("sentinel-695-board-off")));
+    assert_eq!(w.store().hot(&id).unwrap().actions, 2);
+}
+
+#[tokio::test]
 async fn claim_with_none_redelivers_the_working_task_and_some_returns_only_new_follow_ups() {
     let w = world("claim-again", "user", true);
     let id = w.submit("hobi", "a").await;

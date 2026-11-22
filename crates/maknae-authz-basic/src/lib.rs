@@ -38,7 +38,7 @@ use snapshot::Snapshot;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock};
 
-pub(crate) const USER_GRANTABLE: [&str; 7] = [
+pub(crate) const USER_GRANTABLE: [&str; 9] = [
     "session.prompt",
     "session.new",
     "session.close",
@@ -46,6 +46,8 @@ pub(crate) const USER_GRANTABLE: [&str; 7] = [
     "session.delete",
     "session.task",
     "tool.catalog",
+    "board.post",
+    "board.read",
 ];
 
 /// Subject attribute key for the authenticated uid (pinned for #77; ADR-0018:
@@ -204,7 +206,7 @@ impl std::error::Error for AuthzBasicError {}
 
 fn tasks_right_action_list() -> String {
     match maknae_config::TASKS_RIGHT_ACTIONS {
-        [a, b, c, d] => format!("{a}, {b}, {c} and {d}"),
+        [a, b, c, d, e, f] => format!("{a}, {b}, {c}, {d}, {e} and {f}"),
     }
 }
 
@@ -2184,7 +2186,9 @@ mod tests {
                 "session.list",
                 "session.delete",
                 "session.task",
-                "tool.catalog"
+                "tool.catalog",
+                "board.post",
+                "board.read"
             ]
         );
     }
@@ -3287,6 +3291,54 @@ mod tests {
     }
 
     #[test]
+    fn board_post_and_read_are_permitted_for_admin_and_user_and_refused_for_guest() {
+        let src = source_with(
+            SHIPPED,
+            Some("schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"daemon\"]\n  guest: [\"bin\"]\n  adversary: [\"sys\"]\n"),
+            &[("root", 0), ("daemon", 1), ("bin", 2), ("sys", 3)],
+        );
+        let auth =
+            BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, compiled(&src));
+        for (action, admin_entry, user_entry) in [("board.post", 12, 7), ("board.read", 13, 8)] {
+            let ask = |uid: i64| {
+                let mut r = liveness_req(Some(uid));
+                r.action = Action(action.into());
+                auth.decide_cited(&r)
+            };
+            for (uid, role, entry) in [(0, "admin", admin_entry), (1, "user", user_entry)] {
+                let d = ask(uid);
+                assert_eq!(d.verdict, audit_permit(), "{action} {role}");
+                assert_eq!(d.role, Some(role));
+                assert_eq!(
+                    d.rule.map(|r| r.key),
+                    Some(format!("rule:roles.{role}:allow:{entry}")),
+                    "{action} {role}"
+                );
+            }
+            let guest = ask(2);
+            assert_eq!(
+                guest.verdict,
+                Verdict::NotApplicable {
+                    note: Some(format!("role guest: no rule for {action}"))
+                }
+            );
+            assert_eq!(guest.role, Some("guest"));
+            assert_eq!(
+                ask(3).verdict,
+                Verdict::Deny {
+                    reason: "subject contained: role=adversary".into()
+                }
+            );
+            assert_eq!(
+                ask(4242).verdict,
+                Verdict::NotApplicable {
+                    note: Some("subject resolves to no role".into())
+                }
+            );
+        }
+    }
+
+    #[test]
     fn tool_catalog_is_subject_limitable_and_deniable_by_role() {
         let limited = source_with(
             &format!("{SHIPPED}subjects:\n  daemon:\n    actions:\n      allow: [\"session.*\"]\n"),
@@ -3332,7 +3384,7 @@ mod tests {
                 .collect()
         };
         let mut admin_terms = SHIPPED_ADMIN_TERMS.to_vec();
-        admin_terms.extend(["session.task", "tool.catalog"]);
+        admin_terms.extend(["session.task", "tool.catalog", "board.post", "board.read"]);
         assert_eq!(allowed("admin"), admin_terms);
         assert_eq!(allowed("user"), USER_GRANTABLE);
         assert!(policy.action_grants.values().all(|g| g.deny.is_empty()));
@@ -4783,7 +4835,7 @@ mod tests {
     #[test]
     fn role_grants_take_family_wildcards_under_todays_role_rule() {
         let src = finish(parse_with_roles(
-            "roles:\n  admin:\n    allow: [\"admin.*\", \"session.*\"]\n    deny: [\"admin.contain\"]\n  user:\n    allow: [\"session.*\", \"tool.*\"]\n",
+            "roles:\n  admin:\n    allow: [\"admin.*\", \"session.*\"]\n    deny: [\"admin.contain\"]\n  user:\n    allow: [\"session.*\", \"tool.*\", \"board.*\"]\n",
         ))
         .unwrap();
         let grants = validate_grants(&src.policy().action_grants).unwrap();
@@ -7065,7 +7117,7 @@ mod tests {
                 .chain(KERNEL_TERMS.iter())
                 .copied()
                 .collect();
-            assert_eq!(terms.len(), 62);
+            assert_eq!(terms.len(), 64);
             let (uids, paths, homes, ops) = (uids(), paths(), homes(), operations());
             assert_eq!(
                 (uids.len(), paths.len(), homes.len(), ops.len()),
@@ -7093,7 +7145,7 @@ mod tests {
                     distinct(&ops),
                     distinct(&destinations),
                 ),
-                (62, 9, 22, 5, 8, 4)
+                (64, 9, 22, 5, 8, 4)
             );
             let mut cells = 0usize;
             let mut mismatches: Vec<String> = Vec::new();
@@ -7243,7 +7295,7 @@ mod tests {
                 &mismatches[..mismatches.len().min(10)]
             );
             let fs_cells = 6 * 8 * 22 * 5 + 8 * 22 * 5;
-            let other_cells = 55 + 4;
+            let other_cells = 57 + 4;
             assert_eq!(cells, 12 * 9 * (fs_cells + other_cells));
             assert_eq!(subject_entries, 1);
             assert_eq!(
@@ -8672,6 +8724,59 @@ mod tests {
         }
 
         #[test]
+        fn an_agent_gets_the_board_terms_by_its_built_in_right() {
+            let src = try_source(
+                super::shipped_denying(),
+                None,
+                &[],
+                load(
+                    vec![hobi()],
+                    &[("hobi", "schema_version: 1\nactions:\n  allow: [\"fs.*\"]\n")],
+                ),
+            )
+            .unwrap();
+            let a = auth(&src, 501);
+            for action in ["board.post", "board.read"] {
+                let mut r = agent_channel(whoami(i64::from(HOBI)), "hobi");
+                r.action = Action(action.into());
+                let d = a.decide_cited(&r);
+                assert_eq!(d.verdict, audit_permit(), "{action}: {d:?}");
+                assert_eq!(d.role, Some("user"), "{action}");
+            }
+        }
+
+        #[test]
+        fn an_agent_policy_denying_a_board_term_refuses_load() {
+            for denied in ["board.post", "board.read", "board.*"] {
+                let got = try_source(
+                    super::shipped_denying(),
+                    None,
+                    &[],
+                    load(
+                        vec![hobi()],
+                        &[(
+                            "hobi",
+                            &format!("schema_version: 1\nactions:\n  deny: [\"{denied}\"]\n"),
+                        )],
+                    ),
+                );
+                let err = got.err();
+                assert_eq!(
+                    err,
+                    Some(AuthzBasicError::AgentDeniesTasksRight {
+                        agent: "hobi".into(),
+                        action: denied.into()
+                    }),
+                    "{denied}"
+                );
+                assert_eq!(
+                    err.unwrap().to_string(),
+                    format!("authz agents: agents/hobi/policy.yaml denies `{denied}`, but every agent holds session.new, session.prompt, session.close, tool.catalog, board.post and board.read to work its tasks")
+                );
+            }
+        }
+
+        #[test]
         fn an_agent_policy_denying_tool_catalog_refuses_load() {
             for denied in ["tool.catalog", "tool.*"] {
                 let got = try_source(
@@ -8752,7 +8857,7 @@ mod tests {
                     action: "session.*".into()
                 }
                 .to_string(),
-                "authz agents: agents/hobi/policy.yaml denies `session.*`, but every agent holds session.new, session.prompt, session.close and tool.catalog to work its tasks"
+                "authz agents: agents/hobi/policy.yaml denies `session.*`, but every agent holds session.new, session.prompt, session.close, tool.catalog, board.post and board.read to work its tasks"
             );
             for denied in ["session.task", "fs.write"] {
                 try_source(
