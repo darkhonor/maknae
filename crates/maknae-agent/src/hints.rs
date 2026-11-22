@@ -640,8 +640,7 @@ fn remote_url<I: Iterator<Item = u8> + Clone>(url: I) -> Option<RemoteUrl> {
         .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
         .count();
     let mut after_scheme = url.clone().skip(scheme_len);
-    let is_url = scheme_len > 0
-        && after_scheme.next() == Some(b':')
+    let is_url = after_scheme.next() == Some(b':')
         && after_scheme.next() == Some(b'/')
         && after_scheme.next() == Some(b'/');
     let (host_at, host_len, path_at) = if is_url {
@@ -1118,8 +1117,25 @@ mod tests {
         choose(&[&Links], prompt, Some(forges), None)
     }
 
+    /// `f`'s result; aborts the test binary if `f` has not returned within five
+    /// seconds, since a thread that never returns would hold a CPU until the binary exits.
+    fn in_time<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(f()));
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap_or_else(|_| {
+                eprintln!("the parser did not return within five seconds");
+                std::process::abort()
+            })
+    }
+
+    fn parse(text: &[u8]) -> Result<Vec<RemoteUrl>, Malformed> {
+        let text = text.to_vec();
+        in_time(move || git_config_remotes(&text))
+    }
+
     fn remotes(config: &str, forges: &[Forge]) -> Chosen {
-        let found = git_config_remotes(config.as_bytes()).expect("well-formed");
+        let found = parse(config.as_bytes()).expect("well-formed");
         choose(&[&Remotes(found)], "", Some(forges), None)
     }
 
@@ -1524,7 +1540,7 @@ mod tests {
             &[
                 &Links,
                 &Remotes(
-                    git_config_remotes(
+                    parse(
                         b"[remote \"o\"]\nurl = git@github.com:z/z.git\nurl = git@github.com:b/b\n",
                     )
                     .unwrap(),
@@ -1747,10 +1763,8 @@ mod tests {
         assert!(!bare_owner_repo_binds(false, false));
         let c = links("and/or TCP/IP src/main.rs N/A o/r", &[gh()]);
         assert!(c.bindings.is_empty() && c.unbound.is_empty(), "{c:?}");
-        let wd = Remotes(
-            git_config_remotes(b"[remote \"origin\"]\nurl = git@gitlab.lab.local:g/p.git\n")
-                .unwrap(),
-        );
+        let wd =
+            Remotes(parse(b"[remote \"origin\"]\nurl = git@gitlab.lab.local:g/p.git\n").unwrap());
         let c = choose(&[&Links, &wd], "fix g/p and o/r", Some(&[gh(), gl()]), None);
         assert_eq!(bound(&c), [git("gitlab.lab.local:8443", "g/p", None)]);
         assert!(c.unbound.is_empty());
@@ -1898,7 +1912,7 @@ mod tests {
              url = https://x:{TOKEN}/@github.com/o/n\n\
              url = git@github.com:o/{TOKEN}@x\n"
         );
-        let found = git_config_remotes(config.as_bytes()).unwrap();
+        let found = parse(config.as_bytes()).unwrap();
         assert_eq!(
             found,
             [
@@ -1955,8 +1969,7 @@ mod tests {
         );
         assert!(c.bindings.is_empty());
         assert_eq!(c.unbound, [host("bitbucket.org", Reason::UnknownServer)]);
-        let found =
-            git_config_remotes(b"[remote \"bb\"]\nurl = git@bitbucket.org:o/r.git\n").unwrap();
+        let found = parse(b"[remote \"bb\"]\nurl = git@bitbucket.org:o/r.git\n").unwrap();
         let c = choose(&[&Remotes(found)], "", None, None);
         assert_eq!(c.unbound, [host("bitbucket.org", Reason::NoForgeList)]);
     }
@@ -1968,7 +1981,7 @@ mod tests {
                       [remote \"c\"]\nurl = git@-x:o/r\n\
                       [remote \"d\"]\nurl = ssh://a]b[c/o/r\n\
                       [remote \"e\"]\nurl = https://a..b/o/r\n";
-        let found = git_config_remotes(config.as_bytes()).unwrap();
+        let found = parse(config.as_bytes()).unwrap();
         assert!(found.len() >= 4, "{found:?}");
         for forges in [Some(&[gh()][..]), None] {
             let c = choose(&[&Remotes(found.clone())], "", forges, None);
@@ -2045,7 +2058,7 @@ mod tests {
              [remotes \"z\"]\nurl = https://github.com/no/z\n\
              [core]\nurl = https://github.com/no/core\n\tbare\n\
              [remote]\nurl = https://github.com/no/sectionless\n";
-        let found = git_config_remotes(config.as_bytes()).unwrap();
+        let found = parse(config.as_bytes()).unwrap();
         let paths: Vec<_> = found.iter().map(RemoteUrl::path).collect();
         assert_eq!(paths, ["o/a", "o/b", "o/c", "o/d", "o/e"]);
         for bad in [
@@ -2056,17 +2069,13 @@ mod tests {
             "[remote \"o\"]\nurl ; x\n",
             "[remote \"o\"]\n=x\n",
         ] {
-            assert_eq!(
-                git_config_remotes(bad.as_bytes()),
-                Err(Malformed),
-                "{bad:?}"
-            );
+            assert_eq!(parse(bad.as_bytes()), Err(Malformed), "{bad:?}");
         }
     }
 
     #[test]
     fn pushurl_and_other_keys_are_ignored() {
-        let found = git_config_remotes(
+        let found = parse(
             b"[remote \"o\"]\n\tpushurl = git@github.com:p/q\n\tfetch = +refs/*:refs/*\n\
               \turls = git@github.com:p/r\n\
               [branch \"main\"]\n\tremote = origin\n\turl = git@github.com:p/s\n\
@@ -2074,5 +2083,145 @@ mod tests {
         )
         .unwrap();
         assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn a_provider_name_parses_only_as_written() {
+        assert_eq!(Provider::parse("github"), Some(Provider::Github));
+        assert_eq!(Provider::parse("gitlab"), Some(Provider::Gitlab));
+        for other in ["GitHub", "bitbucket", ""] {
+            assert_eq!(Provider::parse(other), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn written_text_hashes_by_its_content() {
+        use std::hash::{BuildHasher, BuildHasherDefault};
+        let hash = |t: &str| {
+            BuildHasherDefault::<std::collections::hash_map::DefaultHasher>::default()
+                .hash_one(WrittenText::from(t))
+        };
+        assert_eq!(hash("o/r#5"), hash("o/r#5"));
+        assert_ne!(hash("o/r#5"), hash("o/r#6"));
+    }
+
+    #[test]
+    fn a_change_number_is_positive_decimal_digits() {
+        for (n, change) in [("5", Some(5)), ("+5", None), ("0", None), ("05", Some(5))] {
+            let c = links(&format!("https://github.com/o/r/pull/{n}"), &[gh()]);
+            assert_eq!(bound(&c), [git("github.com", "o/r", change)], "{n}");
+        }
+        for word in ["o/r#+5", "o/r#0"] {
+            assert_eq!(links(word, &[gh()]), Chosen::default(), "{word}");
+        }
+    }
+
+    #[test]
+    fn a_bracketed_link_without_a_path_names_its_host() {
+        let v6 = Forge {
+            host: "[2001:db8::1]:8443".into(),
+            provider: Provider::Github,
+        };
+        let c = links("https://[2001:db8::2]:8443", std::slice::from_ref(&v6));
+        assert_eq!(
+            c.unbound,
+            [host("[2001:db8::2]:8443", Reason::UnknownServer)]
+        );
+        let c = links("https://[2001:db8::1]:8443", std::slice::from_ref(&v6));
+        assert_eq!(c, Chosen::default());
+    }
+
+    #[test]
+    fn a_bracketed_ipv6_forge_binds_from_a_remote() {
+        let v6 = Forge {
+            host: "[2001:db8::1]:8443".into(),
+            provider: Provider::Github,
+        };
+        for url in ["git@[2001:db8::1]:o/r", "ssh://git@[2001:db8::1]:22/o/r"] {
+            let c = remotes(
+                &format!("[remote \"o\"]\nurl = {url}\n"),
+                &[gh(), v6.clone()],
+            );
+            assert_eq!(bound(&c), [git("[2001:db8::1]:8443", "o/r", None)], "{url}");
+        }
+        assert_eq!(hostname("[::1]:22"), "[::1]");
+        assert_eq!(hostname("ghe.example:8443"), "ghe.example");
+        assert_eq!(hostname("a:1]"), "a");
+    }
+
+    #[test]
+    fn a_remote_exposes_its_host_and_path() {
+        let found = parse(b"[remote \"o\"]\nurl = ssh://git@GitHub.com:22/o/r.git\n").unwrap();
+        let parts: Vec<_> = found.iter().map(|r| (r.host(), r.path())).collect();
+        assert_eq!(parts, [("github.com", "o/r")]);
+    }
+
+    #[test]
+    fn a_comment_ends_after_its_newline() {
+        assert_eq!(line_end(b"; c\nurl", 0), 4);
+        assert_eq!(line_end(b"x # c\r\ny", 2), 7);
+        assert_eq!(line_end(b"x # c", 2), 5);
+    }
+
+    #[test]
+    fn an_escaped_quote_in_a_subsection_name_is_skipped() {
+        let found = parse(
+            b"[remote \"o\\\"x\"]\nurl = git@github.com:o/r\n\
+              [branch \"a\\\\\"]\nurl = git@github.com:o/s\n",
+        )
+        .unwrap();
+        let paths: Vec<_> = found.iter().map(RemoteUrl::path).collect();
+        assert_eq!(paths, ["o/r"]);
+    }
+
+    #[test]
+    fn inner_whitespace_stays_in_a_value_and_trailing_whitespace_does_not() {
+        let found = parse(
+            b"[remote \"o\"]\nurl = git@github.com:o/r x\n\
+              url = git@github.com:o/s  \t ; c\n",
+        )
+        .unwrap();
+        let paths: Vec<_> = found.iter().map(RemoteUrl::path).collect();
+        assert_eq!(paths, ["o/s"]);
+    }
+
+    #[test]
+    fn a_value_decodes_as_git_reads_it() {
+        let value = |text: &'static [u8]| in_time(move || Value::at(text, 0).collect::<Vec<u8>>());
+        let end = |text: &'static [u8]| in_time(move || Value::at(text, 3).end());
+        assert_eq!(
+            value(b" \ta \t b\\tc\\bd\\ne\\\\f\\\"g \"h  ;#i\" j ; k\nl"),
+            b"a   b\tc\x08d\ne\\f\"g h  ;#i j"
+        );
+        assert_eq!(value(b"a\\\n b\n"), b"a b");
+        assert_eq!(end(b"x = a\\qb\n"), Err(Malformed));
+        assert_eq!(end(b"x = a b \nc"), Ok(9));
+    }
+
+    #[test]
+    fn a_remote_host_is_present_bounded_and_well_formed() {
+        let long = "h".repeat(maknae_proto::SERVER_MAX_BYTES + 1);
+        let fits = "h".repeat(maknae_proto::SERVER_MAX_BYTES);
+        let config = format!(
+            "[remote \"o\"]\nurl = ssh:///o/a\nurl = ssh://{long}/o/b\nurl = ssh://{fits}/o/c\n\
+             url = ssh://git@github.com:22x/o/d\nurl = git@[::1]/x:o/e\nurl = ://github.com/o/f\n"
+        );
+        let found = parse(config.as_bytes()).unwrap();
+        let parts: Vec<_> = found.iter().map(|r| (r.host(), r.path())).collect();
+        assert_eq!(parts, [(fits.as_str(), "o/c")]);
+    }
+
+    #[test]
+    fn a_remote_path_is_bounded() {
+        let path = |n: usize| format!("/o/{}", "r".repeat(n - 3));
+        assert_eq!(path(REMOTE_PART_MAX).len(), REMOTE_PART_MAX);
+        let config = format!(
+            "[remote \"o\"]\nurl = ssh://github.com{}\nurl = ssh://github.com{}\n",
+            path(REMOTE_PART_MAX + 1),
+            path(REMOTE_PART_MAX)
+        );
+        let found = parse(config.as_bytes()).unwrap();
+        let paths: Vec<_> = found.iter().map(RemoteUrl::path).collect();
+        assert_eq!(paths, [&path(REMOTE_PART_MAX)[1..]]);
     }
 }
