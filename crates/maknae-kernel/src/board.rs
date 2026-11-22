@@ -135,6 +135,21 @@ impl Held {
     }
 }
 
+/// Clears an `expiring` entry if `expire` unwinds before it clears the entry itself.
+struct Expiring<'a> {
+    store: &'a BoardStore,
+    at: (BoardKey, u64),
+    armed: bool,
+}
+
+impl Drop for Expiring<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.store.held().expiring.remove(&self.at);
+        }
+    }
+}
+
 enum Step {
     Skipped,
     Done,
@@ -484,9 +499,15 @@ impl BoardStore {
             held.expiring.insert((key, seq));
             name
         };
+        let mut marker = Expiring {
+            store: self,
+            at: (key, seq),
+            armed: true,
+        };
         let deleted = self.blobs.delete(&name);
         let mut held = self.held();
         held.expiring.remove(&(key, seq));
+        marker.armed = false;
         if deleted.is_err() {
             return Step::Refused;
         }
@@ -783,8 +804,8 @@ impl BoardStore {
         Ok(())
     }
 
-    /// Poison is recovered: `held` changes only by whole inserts and assignments made after
-    /// the I/O that justifies them, so a panicking holder leaves it valid.
+    /// Poison is recovered: what a reader acts on changes only after the I/O that justifies
+    /// it; `marked` and `expiring` only withhold, so a panic leaves at worst more withheld.
     fn held(&self) -> std::sync::MutexGuard<'_, Held> {
         self.held.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -2074,6 +2095,59 @@ mod tests {
         due.iter()
             .filter(|d| matches!(d.why, BoardDueFor::Hold(_)))
             .count()
+    }
+
+    #[test]
+    fn an_expiring_post_is_withheld_while_its_delete_is_under_way() {
+        for refused in [false, true] {
+            let b = MemTaskBlobs::default();
+            let (store, clock) = clocked(&b);
+            let store = Arc::new(store);
+            let post = by(&store, BOB, hobi(), Some(2001), "sentinel-695-expiring");
+            clock.set(T0 + RETAIN);
+            if refused {
+                b.fail(Some(Fail::UnsyncedUnlinks));
+            }
+            b.slow(Some(std::time::Duration::from_millis(300)));
+            let performing = Arc::clone(&store);
+            let due = store.due(10);
+            let worker = std::thread::spawn(move || performing.perform(&due));
+            b.await_stalls(1);
+            assert!(store.get(BOB, post.post.id).is_none(), "refused: {refused}");
+            assert!(!ids(&store.candidates(BOB, 0, 10)).contains(&post.post.id));
+            let done = worker.join().unwrap();
+            b.slow(None);
+            b.fail(None);
+            assert_eq!(done, usize::from(!refused));
+            assert_eq!(store.get(BOB, post.post.id).is_some(), refused);
+            assert_eq!(
+                ids(&store.candidates(BOB, 0, 10)).contains(&post.post.id),
+                refused
+            );
+        }
+    }
+
+    #[test]
+    fn a_delete_that_panics_clears_the_expiring_marker() {
+        let b = MemTaskBlobs::default();
+        let (store, clock) = clocked(&b);
+        let post = by(&store, BOB, hobi(), Some(2001), "sentinel-695-panic");
+        clock.set(T0 + RETAIN);
+        let due = store.due(10);
+        b.fail(Some(Fail::Panics));
+        let panicked =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| store.perform(&due)));
+        b.fail(None);
+        assert!(panicked.is_err());
+        assert!(store.get(BOB, post.post.id).is_some());
+        assert_eq!(ids(&store.candidates(BOB, 0, 10)), vec![post.post.id]);
+        assert_eq!(
+            whys(&store.due(10)),
+            vec![(Some(post.post.id), None, BoardDueFor::Expire)]
+        );
+        assert_eq!(store.perform(&store.due(10)), 1);
+        assert!(store.get(BOB, post.post.id).is_none());
+        assert!(!b.has(&post_name(BOB, post.post.id)));
     }
 
     #[test]
