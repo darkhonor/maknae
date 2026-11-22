@@ -3201,7 +3201,7 @@ impl<E: AuditEmit + Send + Sync> Trail<'_, E> {
             result: RespResult::Ok(payload),
             catalog_digest,
         };
-        match encode_response(&response) {
+        match encode_reply(&response) {
             Ok(bytes) => {
                 write_frame_bounded(
                     stream,
@@ -5154,6 +5154,16 @@ async fn refuse_unencodable_bounded<S, E: AuditEmit + Send + Sync>(
         )
         .await;
     }
+}
+
+/// A reply encoded into a zeroizing buffer sized to it before it is filled, so it never grows.
+fn encode_reply(
+    response: &Response,
+) -> Result<maknae_io::Zeroizing<Vec<u8>>, maknae_proto::ProtoCodecError> {
+    let mut size = crate::task_store::Counted(0);
+    ciborium::into_writer(response, &mut size)
+        .map_err(|e| maknae_proto::ProtoCodecError::Encode(e.to_string()))?;
+    encode_response_zeroizing(response, size.0)
 }
 
 /// SIZE-BOUNDED write of an already-encoded response: a
@@ -30202,5 +30212,59 @@ mod task_sweep_tests {
             "due again next pass"
         );
         assert_eq!(board.due(10).len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod reply_encoding_tests {
+    use super::*;
+    use maknae_proto::{Addressee, Author, BoardPage, Labels, Post, PostDraft, PostId, PostKind};
+
+    fn page(posts: usize, body: usize) -> Response {
+        let posts = (0..posts)
+            .map(|i| Post {
+                id: PostId([i as u8; 16]),
+                author: Author::Agent("sentinel-695-hobi".into()),
+                task: None,
+                at_secs: 1_800_000_000,
+                labels: Labels {},
+                draft: PostDraft {
+                    kind: PostKind::Note,
+                    to: Addressee::Board,
+                    in_reply_to: None,
+                    body: maknae_proto::SecretText(maknae_io::Zeroizing::new("b".repeat(body))),
+                    attachments: Vec::new(),
+                },
+            })
+            .collect();
+        Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(Payload::BoardPage(BoardPage { posts, more: true })),
+            catalog_digest: None,
+        }
+    }
+
+    #[test]
+    fn a_board_page_reply_is_encoded_into_a_buffer_that_never_grew() {
+        let prompt_max = maknae_config::PROMPT_MAX_BYTES_FLOOR;
+        let budget = maknae_proto::board_page_budget(prompt_max);
+        let cap = FrameCaps::responses(maknae_proto::prompt_response_cap(prompt_max))
+            .cap(FrameClass::Prompt);
+        let n = maknae_proto::BOARD_READ_PAGE_POSTS;
+        for (posts, body) in [(1, 0), (1, 1000), (n, budget / n - 128)] {
+            let response = page(posts, body);
+            let bytes = encode_reply(&response).unwrap();
+            assert_eq!(
+                bytes.capacity(),
+                bytes.len(),
+                "{posts} posts of {body}: the buffer grew"
+            );
+            assert!(bytes.len() <= cap, "{} > {cap}", bytes.len());
+            assert_eq!(
+                bytes.as_slice(),
+                encode_response(&response).unwrap().as_slice(),
+                "the reply's bytes are unchanged"
+            );
+        }
     }
 }
