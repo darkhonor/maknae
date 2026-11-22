@@ -7,7 +7,6 @@ use crate::role::Role;
 use maknae_config::{ArgPattern, ForgeSet, OutputToModel, Pattern, Stage, ToolEntry, ToolsCatalog};
 use maknae_graph::catalog::{CatalogEntry, CatalogForge, CatalogInput, CatalogOutput};
 use maknae_proto::{CatalogDigest, TOOL_CATALOG_MAX_BYTES};
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,8 +24,8 @@ pub enum CatalogError {
 }
 
 /// What `uid` sees: each entry's own ceiling patterns that a stage of its effective
-/// lists admits, and the forges serving the binding kinds those entries bind. `TooLarge`
-/// once the graph keys and pattern text would pass `budget` bytes, before any is built.
+/// lists admits, and every forge. `TooLarge` once the graph keys and pattern text would
+/// pass `budget` bytes, before any is built.
 pub(crate) fn input(
     lp: &LoadedPolicy,
     uid: u32,
@@ -61,14 +60,8 @@ pub(crate) fn input(
         }
         entries.push(entry);
     }
-    let bound: BTreeSet<&str> = entries
-        .iter()
-        .flat_map(|e| &e.binds)
-        .map(String::as_str)
-        .collect();
     let forges = forges
         .iter()
-        .filter(|f| bound.contains(f.kind.as_str()))
         .map(|f| CatalogForge {
             name: f.name.clone(),
             kind: f.kind.as_str().into(),
@@ -466,20 +459,26 @@ mod tests {
     }
 
     #[test]
-    fn forges_appear_only_for_bound_kinds() {
+    fn git_forges_appear_in_every_permitted_catalog() {
         let unbound = snap(&site(&["Tool(rust-build cargo build *)"], &[]), HOMELAB);
         let g = graph(&unbound, ALICE);
-        assert!(cat::forges(&g, "git").is_empty());
-        assert!(
-            input(unbound.loaded(), ALICE, PRINCIPAL, &forges(), usize::MAX)
-                .unwrap()
-                .forges
-                .is_empty()
-        );
+        assert_eq!(cat::forges(&g, "git"), [(FORGE_HOST, "github")]);
+        assert!(cat::entries_for_binding(&g, "git").is_empty());
+        let nothing = snap(&site(&[], &[]), HOMELAB);
+        let g = graph(&nothing, ALICE);
+        assert!(cat::entries(&g).is_empty());
+        assert_eq!(cat::forges(&g, "git"), [(FORGE_HOST, "github")]);
         let bound = snap(&site(&["Tool(github-read gh pr view *)"], &[]), HOMELAB);
         let g = graph(&bound, ALICE);
         assert_eq!(cat::forges(&g, "git"), [(FORGE_HOST, "github")]);
         assert_eq!(cat::entries_for_binding(&g, "git"), ["github-read"]);
+        for uid in [MALLORY, 4242] {
+            assert_eq!(
+                input(unbound.loaded(), uid, PRINCIPAL, &forges(), usize::MAX),
+                Ok(CatalogInput::default()),
+                "{uid}"
+            );
+        }
     }
 
     const SENTINEL_TOOLS: &str = "schema_version: 1\ncredential_classes:\n  sentinel-674-cred-class:\n    kind: github-app-installation\n    source: minted-per-task\n    narrowing: provider\n    minting: trust-plane\n    app: sentinel-674-app\ntools:\n  sentinel-674-entry:\n    description: Read a pull request.\n    image: { ref: \"registry.example/sentinel-674-img@sha256:5e175e175e175e175e175e175e175e175e175e175e175e175e175e175e175e17\" }\n    isolation: container\n    executes_workspace: true\n    network: { via: maknae-proxy, sites: [sentinel-674-site.example] }\n    workspace: rw\n    volumes:\n      sentinel-674-vol: { access: ro, scope: tasker }\n    credential: sentinel-674-cred-class\n    output_to_model: redacted\n    binds: { git: { resolver: git } }\n    commands:\n      gh:\n        subcommands: [\"pr view *\"]\n        deny_args: [\"--sentinel-674-deny-xq\"]\n";

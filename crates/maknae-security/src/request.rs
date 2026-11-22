@@ -215,6 +215,7 @@ pub enum BoundEncodingError {
     NotAList,
     Misaligned,
     Empty,
+    MissingField,
 }
 
 /// One `List` per field of [`GIT_BOUND_FIELDS`], index-aligned with `bindings`;
@@ -240,7 +241,8 @@ pub fn encode_git_bound(bindings: &[GitBoundValues]) -> Vec<(String, AttrValue)>
 }
 
 /// The inverse of [`encode_git_bound`]: per binding, the present fields as
-/// `("git.<field>", value)`. No `bound.git.*` key at all is no bindings.
+/// `("git.<field>", value)`; `server` and `base` are never absent. No `bound.git.*` key
+/// at all is no bindings.
 pub fn decode_git_bound(
     resource: &Attributes,
 ) -> Result<Vec<Vec<(String, String)>>, BoundEncodingError> {
@@ -265,6 +267,13 @@ pub fn decode_git_bound(
     }
     if len == 0 {
         return Err(BoundEncodingError::Empty);
+    }
+    if GIT_BOUND_FIELDS
+        .iter()
+        .zip(&columns)
+        .any(|(field, c)| matches!(*field, "server" | "base") && c.iter().any(String::is_empty))
+    {
+        return Err(BoundEncodingError::MissingField);
     }
     Ok((0..len)
         .map(|i| {
@@ -464,6 +473,21 @@ mod bound_tests {
             let mut a = stamped(&values()[..1]);
             a.insert("bound.git.base", wrong);
             assert_eq!(decode_git_bound(&a), Err(BoundEncodingError::NotAList));
+        }
+    }
+
+    #[test]
+    fn a_binding_without_its_server_or_base_is_refused() {
+        for blank in [
+            |v: &mut GitBoundValues| v.server.clear(),
+            |v: &mut GitBoundValues| v.base.clear(),
+        ] {
+            let mut v = values();
+            blank(&mut v[1]);
+            assert_eq!(
+                decode_git_bound(&stamped(&v)),
+                Err(BoundEncodingError::MissingField)
+            );
         }
     }
 

@@ -1555,6 +1555,22 @@ fn tool_ceiling(
         (Some(_), Some(kinds)) => kinds,
         (Some(_), None) => return undecidable(),
     };
+    let Ok(bound) = maknae_security::decode_git_bound(attrs) else {
+        return undecidable();
+    };
+    if kinds.contains("git") == bound.is_empty() {
+        return undecidable();
+    }
+    let bound: Vec<maknae_config::Bound> = bound
+        .iter()
+        .map(|fields| {
+            let mut b = maknae_config::Bound::empty();
+            for (k, v) in fields {
+                b.insert(k, v);
+            }
+            b
+        })
+        .collect();
     let task = match (
         req.subject.0.get(SUBJECT_TASK),
         req.subject.0.str(SUBJECT_TASK),
@@ -1578,7 +1594,6 @@ fn tool_ceiling(
     let Some(command) = entry.commands.get(program) else {
         return deny(&format!("tool: program not in entry {name}"));
     };
-    let bound: Vec<maknae_config::Bound> = Vec::new();
     if !command
         .subcommands
         .iter()
@@ -6389,11 +6404,194 @@ mod tests {
             tool_decided(&lp, &r).verdict,
             deny("tool: missing binding git for sentinel-674-bound")
         );
+        stamp_bound(&mut r, &[("o/a", Some(1))]);
+        assert_eq!(tool_decided(&lp, &r).verdict, permit_with_audit());
+    }
+
+    const BOUND_ENTRY: &str = "sentinel-168a-entry";
+    const BOUND_SERVER: &str = "sentinel-168a.example";
+    const BOUND_REFUSED: &str = "tool: arguments outside entry sentinel-168a-entry's subcommands";
+
+    fn git_bound(bindings: &[(&str, Option<u64>)]) -> Vec<maknae_security::GitBoundValues> {
+        bindings
+            .iter()
+            .map(|(base, change)| maknae_security::GitBoundValues {
+                server: BOUND_SERVER.into(),
+                base: (*base).into(),
+                head: None,
+                change: *change,
+            })
+            .collect()
+    }
+
+    fn stamp_bound(r: &mut SecRequest, bindings: &[(&str, Option<u64>)]) {
         r.resource.0.insert(
             maknae_security::RESOURCE_BINDING_KINDS,
             AttrValue::Set(["git".to_string()].into()),
         );
+        for (k, v) in maknae_security::encode_git_bound(&git_bound(bindings)) {
+            r.resource.0.insert(k, v);
+        }
+    }
+
+    fn lp_bound() -> LoadedPolicy {
+        let mut lp = lp_tool(
+            "permissions:\n  allow: [\"Tool(sentinel-168a-entry gh pr review *)\"]\n",
+            &["user"],
+            &[],
+        );
+        lp.tools = std::sync::Arc::new(
+            maknae_config::ToolsCatalog::parse("schema_version: 1\ntools:\n  sentinel-168a-entry:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    binds: { git: { resolver: git } }\n    commands:\n      gh:\n        subcommands: [\"pr review {git.change} -R {git.base}\"]\n").unwrap(),
+        );
+        lp
+    }
+
+    fn review<'a>(change: &'a str, base: &'a str) -> [&'a str; 5] {
+        ["pr", "review", change, "-R", base]
+    }
+
+    fn bound_decided(bindings: &[(&str, Option<u64>)], argv: &[&str]) -> Decided {
+        let mut r = tool_req(TOOL_USER, BOUND_ENTRY, "gh", argv);
+        stamp_bound(&mut r, bindings);
+        tool_decided(&lp_bound(), &r)
+    }
+
+    fn undecidable(d: Decided) {
+        assert_eq!((d.verdict, d.cited), (Verdict::Indeterminate, None));
+    }
+
+    #[test]
+    fn tool_ceiling_reads_one_bound_per_binding() {
+        let two = [("o/a", Some(1)), ("o/b", Some(2))];
+        for (change, base, admitted) in [
+            ("2", "o/a", false),
+            ("2", "o/b", true),
+            ("1", "o/a", true),
+            ("1", "o/b", false),
+            ("3", "o/c", false),
+        ] {
+            let want = if admitted {
+                permit_with_audit()
+            } else {
+                deny(BOUND_REFUSED)
+            };
+            assert_eq!(
+                bound_decided(&two, &review(change, base)).verdict,
+                want,
+                "review {change} -R {base}"
+            );
+        }
+        assert_eq!(
+            bound_decided(&two, &review("{git.change}", "{git.base}")).verdict,
+            deny(BOUND_REFUSED)
+        );
+    }
+
+    #[test]
+    fn unequal_bound_lists_are_undecidable() {
+        let mut r = tool_req(TOOL_USER, BOUND_ENTRY, "gh", &review("1", "o/a"));
+        stamp_bound(&mut r, &[("o/a", Some(1)), ("o/b", Some(2))]);
+        r.resource.0.insert(
+            maknae_security::bound_key("git", "base"),
+            AttrValue::List(vec!["o/a".into()]),
+        );
+        undecidable(tool_decided(&lp_bound(), &r));
+    }
+
+    #[test]
+    fn a_kind_without_its_bound_lists_is_undecidable() {
+        let lp = lp_bound();
+        let mut r = tool_req(TOOL_USER, BOUND_ENTRY, "gh", &review("1", "o/a"));
+        r.resource.0.insert(
+            maknae_security::RESOURCE_BINDING_KINDS,
+            AttrValue::Set(["git".to_string()].into()),
+        );
+        undecidable(tool_decided(&lp, &r));
+        for field in maknae_security::GIT_BOUND_FIELDS {
+            r.resource.0.insert(
+                maknae_security::bound_key("git", field),
+                AttrValue::List(Vec::new()),
+            );
+        }
+        undecidable(tool_decided(&lp, &r));
+    }
+
+    #[test]
+    fn bound_lists_for_an_absent_kind_are_undecidable() {
+        let lp = lp_bound();
+        let mut r = tool_req(TOOL_USER, BOUND_ENTRY, "gh", &review("1", "o/a"));
+        stamp_bound(&mut r, &[("o/a", Some(1))]);
         assert_eq!(tool_decided(&lp, &r).verdict, permit_with_audit());
+        r.resource.0.insert(
+            maknae_security::RESOURCE_BINDING_KINDS,
+            AttrValue::Set(Default::default()),
+        );
+        undecidable(tool_decided(&lp, &r));
+        let mut kept = Attributes::new();
+        for k in [
+            maknae_security::RESOURCE_TOOL_ENTRY,
+            maknae_security::RESOURCE_TOOL_PROGRAM,
+            maknae_security::RESOURCE_TOOL_ARGV,
+        ] {
+            kept.insert(k, r.resource.0.get(k).unwrap().clone());
+        }
+        for field in maknae_security::GIT_BOUND_FIELDS {
+            let k = maknae_security::bound_key("git", field);
+            kept.insert(k.clone(), r.resource.0.get(&k).unwrap().clone());
+        }
+        r.resource.0 = kept;
+        undecidable(tool_decided(&lp, &r));
+    }
+
+    #[test]
+    fn a_bound_attribute_of_the_wrong_type_is_undecidable() {
+        let lp = lp_bound();
+        for wrong in [
+            AttrValue::Str("1".into()),
+            AttrValue::Set(["1".to_string()].into()),
+            AttrValue::Int(1),
+            AttrValue::Bool(true),
+        ] {
+            let mut r = tool_req(TOOL_USER, BOUND_ENTRY, "gh", &review("1", "o/a"));
+            stamp_bound(&mut r, &[("o/a", Some(1))]);
+            r.resource
+                .0
+                .insert(maknae_security::bound_key("git", "change"), wrong.clone());
+            undecidable(tool_decided(&lp, &r));
+            let mut unbound = build(TOOL_USER, &["build"]);
+            unbound
+                .resource
+                .0
+                .insert(maknae_security::bound_key("git", "change"), wrong.clone());
+            undecidable(tool_decided(
+                &lp_tool(TOOL_SITE_ALLOW, &["user"], &[]),
+                &unbound,
+            ));
+        }
+    }
+
+    #[test]
+    fn an_empty_string_is_an_absent_field() {
+        let one = [("o/a", None)];
+        for change in ["", "{git.change}", "1"] {
+            assert_eq!(
+                bound_decided(&one, &review(change, "o/a")).verdict,
+                deny(BOUND_REFUSED),
+                "review {change:?} -R o/a"
+            );
+        }
+        assert_eq!(
+            bound_decided(&[("o/a", Some(1))], &review("1", "o/a")).verdict,
+            permit_with_audit()
+        );
+        undecidable(bound_decided(&[("", Some(1))], &review("1", "")));
+        let mut r = tool_req(TOOL_USER, BOUND_ENTRY, "gh", &review("1", "o/a"));
+        stamp_bound(&mut r, &[("o/a", Some(1))]);
+        r.resource.0.insert(
+            maknae_security::bound_key("git", "server"),
+            AttrValue::List(vec![String::new()]),
+        );
+        undecidable(tool_decided(&lp_bound(), &r));
     }
 
     #[test]
