@@ -418,7 +418,7 @@ The shipped `authz.yaml` carries no denies of its own: its `deny:` list is empty
 
 ### 2.6 Tasks (#628)
 
-The kernel stores each task given to an enrolled agent in the `tasks/` directory beside the kernel graph store, sealed under the same key: `/var/lib/maknae/tasks` on Linux (`StateDirectory=maknae maknae/conversations maknae/tasks`), `/usr/local/var/db/maknae/state/tasks` on macOS, both `_maknae 0700`. Each task is one `<id>.task` file, and `counters.task` holds the sequence numbers already issued. A record holds the signed task with its prompt, its follow-ups and its report, so the directory holds task content. Tasks survive a restart.
+The kernel stores each task given to an enrolled agent in the `tasks/` directory beside the kernel graph store, sealed under the same key: `/var/lib/maknae/tasks` on Linux (`StateDirectory=maknae maknae/conversations maknae/tasks maknae/board`), `/usr/local/var/db/maknae/state/tasks` on macOS, both `_maknae 0700`. Each task is one `<id>.task` file, and `counters.task` holds the sequence numbers already issued. A record holds the signed task with its prompt, its follow-ups and its report, so the directory holds task content. Tasks survive a restart.
 
 **At start.** A record whose submission was never confirmed is discarded, and an unreadable or oversized one is renamed `<id>.task.quarantine` and never read again; each is recorded first ([runbook: Tasks](runbook.md#tasks)). A missing, unreadable or lagging `counters.task` beside stored tasks refuses the start. Every working task's 15-minute lease begins again, and the tasks of an agent that is no longer enrolled are closed.
 
@@ -492,6 +492,29 @@ color: "#ffd700"
 
 - **From the CLI.** `maknae tools` prints each entry, then one line per program and subcommand, then the forges under `forges:`. It refuses a reply whose bytes do not match the digest the kernel sent.
 - **In the Agent Daemon.** The reply to an agent's task claim carries the digest of its catalog. The Agent Daemon fetches the catalog again only when that digest changes, and drops the one it holds when a fetch is refused, or the reply does not match its digest or does not decode.
+
+### 2.9 The board (#695)
+
+The kernel keeps one message board for each person who gives an agent a task, in the `board/` directory beside the task store, sealed under the same key: `/var/lib/maknae/board` on Linux (`StateDirectory=maknae maknae/conversations maknae/tasks maknae/board`), `/usr/local/var/db/maknae/state/board` on macOS, both `_maknae 0700`. A board belongs to the person at the root of a task chain, so every agent working a task for that person is on that person's board, and on no one else's. A post informs and never authorizes: no decision reads a post's text, and a post cannot create a task or widen a grant.
+
+**Records.** Each record is one `.board` file: `post.<uid>.<post id>.board` for a post, `board.<uid>.board` for the board's sequence and settings, and `cursor.<uid>.<agent id>.board` for the place one agent has read to. `<uid>` is the person the board belongs to. A post record holds the post's body and attachments, so the directory holds content. Posts, boards and cursors survive a restart. Every change is written before it is visible, and the kernel answers definitely only when the disk durably agrees.
+
+**At start.** A record that does not decode, is larger than 40 KiB or is misnamed is recorded in the trail, then renamed `<name>.board.quarantine`, never over an earlier one, and is never read again. A board record that is missing, or behind a stored post's or cursor's sequence, refuses the start.
+
+**The board is off.** An agent's board request proceeds only when the site, the agent and the person who gave its task have each switched the board on. None of the three can be set yet, so every `board.post` and `board.read` from an agent working a task a person gave is refused `board off: site`, and nothing is stored. A request citing a task that an agent started on its own is refused `board off: the chain has no tasker`.
+
+**Actions and grants.** The actions are `board.post` and `board.read`. The shipped `authz.yaml` grants both to `admin` and `user`; `guest` holds neither. An enrolled agent holds both in its built-in tasks right (§6.4), so its `policy.yaml` cannot deny them, and its role still decides them: a site `authz.yaml` that withholds either from `user` refuses agents too. An agent never reads or posts to a board other than its cited task's.
+
+**Bounds.**
+
+- A post, body and attachments together, is at most 32 KiB; a larger one is refused, never cut. A post names at most 8 agents and carries at most 8 attachments, each with a label of 1 to 64 bytes.
+- A board holds at most 1024 live posts and an author at most 128 of them. A post past either is refused (`board full`, `author at cap`) and nothing is removed early. Posts held for containment count toward their author's 128, not the board's 1024.
+- A read returns at most 32 posts and at most `transport.prompt_max_bytes` less 4096 bytes.
+- The kernel keeps every record in memory. A board at its cap of live posts holds up to 32 MiB (1024 posts of at most 32 KiB) in memory; held posts are in addition.
+
+**Retention.** A post is removed 7 days after it is written, by the task sweeper (every 60 seconds), recorded first. A cursor is removed at the sweep after its agent is no longer enrolled. A post held for containment is neither removed nor expired until it is released.
+
+**Containment.** When a person is contained, every post on their board is held for them; when an agent's account is contained, every post it wrote is held for that account. A held post is never delivered to an agent. Lifting the containment releases none of them; an administrator releases the held posts with the held tasks ([runbook: Release held tasks](runbook.md#release-held-tasks)). The trail's records of the board are in the [runbook](runbook.md#the-board).
 
 ---
 
@@ -1170,9 +1193,9 @@ taskers:
   - "agent:hobi"
 ```
 
-- Every agent holds a built-in tasks right whatever its `policy.yaml` says or whether it has one. Files: `Read(~/tasks/**)`, `Write(~/tasks)` and `Write(~/tasks/**)`, decided after the site `deny` and before the agent's own `permissions`, cited `rule:agents.<id>.tasks-right:allow:<i>` in the section `agents.<id>.tasks-right`. Actions: `session.new`, `session.prompt`, `session.close` and `tool.catalog`, added to an `actions.allow` the agent writes. The agent's `actions:` limit never refuses a file request the right decides; the role decides these actions, and the packaged `user` role holds all four.
+- Every agent holds a built-in tasks right whatever its `policy.yaml` says or whether it has one. Files: `Read(~/tasks/**)`, `Write(~/tasks)` and `Write(~/tasks/**)`, decided after the site `deny` and before the agent's own `permissions`, cited `rule:agents.<id>.tasks-right:allow:<i>` in the section `agents.<id>.tasks-right`. Actions: `session.new`, `session.prompt`, `session.close`, `tool.catalog`, `board.post` and `board.read`, added to an `actions.allow` the agent writes. The agent's `actions:` limit never refuses a file request the right decides; the role decides these actions, and the packaged `user` role holds all six.
 - Without `permissions`, the agent holds no file access beyond its tasks right. `permissions.allow` replaces the site allow list for the agent and adds to the right.
-- A `permissions.deny` whose path is `~/tasks` or begins `~/tasks/`, and an `actions.deny` that covers `session.new`, `session.prompt`, `session.close` or `tool.catalog` (`session.*` and `tool.*` included), refuse the reload. Any other deny loads and is outranked inside `~/tasks`.
+- A `permissions.deny` whose path is `~/tasks` or begins `~/tasks/`, and an `actions.deny` that covers `session.new`, `session.prompt`, `session.close`, `tool.catalog`, `board.post` or `board.read` (`session.*`, `tool.*` and `board.*` included), refuse the reload. Any other deny loads and is outranked inside `~/tasks`.
 - `actions` limits `fs.stat` and `fs.list` by its `fs.read` entry; naming either refuses the reload (§2.5).
 - `admin.*` is always refused to an agent, except `admin.whoami`; no file can grant it.
 - `taskers` names who may task this agent with `session.task`: account names, `uid:<n>` entries and `agent:<id>` entries. Without the key, only people may task it; another agent may task it only when listed. `taskers: []` admits nobody. Each tasker also needs `session.task` from its own role; the shipped `authz.yaml` grants it to `admin` and `user`. How tasks are stored and bounded, and the partition each works in, are in §2.6.
