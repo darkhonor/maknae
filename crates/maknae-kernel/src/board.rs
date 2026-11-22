@@ -166,6 +166,22 @@ enum Step {
     Refused,
 }
 
+/// The holds `view` calls for on a post by `author_uid` on `key`'s board.
+fn contained_for(
+    key: BoardKey,
+    author_uid: Option<u32>,
+    view: &dyn EnrollmentView,
+) -> BTreeSet<HeldFor> {
+    let mut why = BTreeSet::new();
+    if author_uid.is_some_and(|uid| view.contained(uid)) {
+        why.insert(HeldFor::Author);
+    }
+    if view.contained(key.0) {
+        why.insert(HeldFor::Person);
+    }
+    why
+}
+
 fn expired(s: &Stored, now: i64) -> bool {
     s.post
         .at_secs
@@ -479,12 +495,12 @@ impl BoardStore {
 
     /// Performs what the kernel has recorded: each item still due is written until the disk
     /// first refuses; memory follows only a synced write. The count is of those done.
-    pub(crate) fn perform(&self, due: &[BoardDue]) -> usize {
+    pub(crate) fn perform(&self, due: &[BoardDue], view: &dyn EnrollmentView) -> usize {
         let _w = self.writing();
         let mut done = 0;
         for d in due {
             let step = match (d.why, d.seq, &d.reader) {
-                (BoardDueFor::Expire, Some(seq), _) => self.expire(d.key, seq, d.post),
+                (BoardDueFor::Expire, Some(seq), _) => self.expire(d.key, seq, d.post, view),
                 (BoardDueFor::Hold(f), Some(seq), _) => self.hold(d.key, seq, d.post, f),
                 (BoardDueFor::DropCursor, _, Some(reader)) => self.drop_cursor(d.key, reader),
                 (BoardDueFor::Expire | BoardDueFor::Hold(_), None, _)
@@ -499,19 +515,31 @@ impl BoardStore {
         done
     }
 
-    fn expire(&self, key: BoardKey, seq: u64, id: Option<PostId>) -> Step {
+    fn expire(
+        &self,
+        key: BoardKey,
+        seq: u64,
+        id: Option<PostId>,
+        view: &dyn EnrollmentView,
+    ) -> Step {
         let item = Item::Post(key, seq, BoardDueFor::Expire);
         let now = self.clock.now_secs();
         let name = {
             let mut held = self.held();
-            let name = held
+            let found = held
                 .at(key, seq, id)
                 .filter(|s| !held.withheld(key, s) && expired(s, now))
-                .map(|s| Name::Post(key, s.post.id).text());
-            let Some(name) = name else {
+                .map(|s| (Name::Post(key, s.post.id).text(), s.author_uid));
+            let Some((name, author_uid)) = found else {
                 held.said.remove(&item);
                 return Step::Skipped;
             };
+            let why = contained_for(key, author_uid, view);
+            if !why.is_empty() {
+                held.said.remove(&item);
+                held.marked.entry((key, seq)).or_default().extend(why);
+                return Step::Skipped;
+            }
             held.said.insert(item.clone());
             held.expiring.insert((key, seq));
             name
@@ -773,13 +801,7 @@ impl BoardStore {
                 board.posts.insert(seq, Arc::clone(&stored));
                 // A containment installed before this insert is in `view`; one installed after
                 // it is `mark`'s, which finds this post.
-                let mut why = BTreeSet::new();
-                if author_uid.is_some_and(|uid| view.contained(uid)) {
-                    why.insert(HeldFor::Author);
-                }
-                if view.contained(key.0) {
-                    why.insert(HeldFor::Person);
-                }
+                let why = contained_for(key, author_uid, view);
                 if !why.is_empty() {
                     held.marked.insert((key, seq), why);
                 }
@@ -902,7 +924,7 @@ pub trait BoardSeam {
     fn set_settings(&self, key: BoardKey, settings: Settings) -> Result<(), BoardRefusal>;
     fn mark(&self, view: &dyn EnrollmentView);
     fn due(&self, limit: usize) -> Vec<BoardDue>;
-    fn perform(&self, due: &[BoardDue]) -> usize;
+    fn perform(&self, due: &[BoardDue], view: &dyn EnrollmentView) -> usize;
     fn release(
         &self,
         key: BoardKey,
@@ -926,8 +948,8 @@ impl BoardSeam for BoardStore {
         BoardStore::due(self, limit)
     }
 
-    fn perform(&self, due: &[BoardDue]) -> usize {
-        BoardStore::perform(self, due)
+    fn perform(&self, due: &[BoardDue], view: &dyn EnrollmentView) -> usize {
+        BoardStore::perform(self, due, view)
     }
 
     fn release(
@@ -1191,7 +1213,7 @@ mod tests {
         assert!(store.get(BOB, posted.post.id).is_some());
         store.settle(&found[0]).unwrap();
         store.mark(&containing(&[], &[1000, 2001]));
-        assert_eq!(store.perform(&store.due(10)), 4);
+        assert_eq!(store.perform(&store.due(10), &free()), 4);
         drop(store);
         let name = t.path().join(format!("post.1000.{}.board", posted.post.id));
         let len = std::fs::metadata(name).unwrap().len();
@@ -1903,7 +1925,7 @@ mod tests {
             (due[0].key, due[0].seq, due[0].recorded),
             (BOB, Some(old.seq), false)
         );
-        assert_eq!(store.perform(&due), 1);
+        assert_eq!(store.perform(&due, &free()), 1);
         assert!(store.get(BOB, old.post.id).is_none());
         assert!(!b.has(&post_name(BOB, old.post.id)));
         assert_eq!(ids(&store.candidates(BOB, 0, 10)), vec![young.post.id]);
@@ -1913,10 +1935,39 @@ mod tests {
         assert!(store.get(BOB, old.post.id).is_none());
         assert!(b.has("board.1000"));
         clock.set(T0 + 10 + RETAIN);
-        assert_eq!(store.perform(&store.due(10)), 1);
+        assert_eq!(store.perform(&store.due(10), &free()), 1);
         assert!(store.candidates(BOB, 0, 10).is_empty());
         assert!(b.has("board.1000"), "a board's record outlives its posts");
         assert_eq!(by(&store, BOB, hobi(), None, "next").seq, young.seq + 1);
+    }
+
+    #[test]
+    fn a_published_containment_stops_an_expiry_before_mark_runs() {
+        for (uids, f) in [(2001, HeldFor::Author), (1000, HeldFor::Person)] {
+            let b = MemTaskBlobs::default();
+            let (store, clock) = clocked(&b);
+            let old = by(&store, BOB, hobi(), Some(2001), "sentinel-695-overdue");
+            clock.set(T0 + RETAIN);
+            let due = store.due(10);
+            assert_eq!(
+                whys(&due),
+                vec![(Some(old.post.id), None, BoardDueFor::Expire)]
+            );
+            let view = containing(&[], &[uids]);
+            assert_eq!(store.perform(&due, &view), 0, "{f:?}");
+            assert!(b.has(&post_name(BOB, old.post.id)), "{f:?}: not deleted");
+            assert!(store.get(BOB, old.post.id).is_none(), "{f:?}: withheld");
+            let due = store.due(10);
+            assert_eq!(
+                whys(&due),
+                vec![(Some(old.post.id), None, BoardDueFor::Hold(f))]
+            );
+            assert_eq!(store.perform(&due, &view), 1);
+            assert_eq!(
+                stored_on_disk(&b, BOB, old.post.id).held,
+                [f].into_iter().collect()
+            );
+        }
     }
 
     #[test]
@@ -1953,7 +2004,7 @@ mod tests {
             recorded: false,
         };
         let before = b.attempts();
-        assert_eq!(store.perform(&[forged]), 0);
+        assert_eq!(store.perform(&[forged], &free()), 0);
         assert_eq!(b.attempts(), before, "nothing is written for a held post");
         assert!(b.has(&post_name(BOB, held.post.id)));
         store.mark(&containing(&[], &[]));
@@ -2058,7 +2109,7 @@ mod tests {
             BoardRefusal::Full,
             "held posts are outside the board cap"
         );
-        assert_eq!(store.perform(&due), 4);
+        assert_eq!(store.perform(&due, &free()), 4);
         assert!(store.due(10).is_empty());
         assert_eq!(
             stored_on_disk(&b, ALICE, both.post.id).held,
@@ -2176,7 +2227,7 @@ mod tests {
                 BoardDueFor::Hold(HeldFor::Author)
             )]
         );
-        assert_eq!(store.perform(&due), 1);
+        assert_eq!(store.perform(&due, &free()), 1);
         assert!(store.due(10).is_empty());
         assert_eq!(
             stored_on_disk(&b, BOB, before.post.id).held,
@@ -2224,7 +2275,7 @@ mod tests {
         ];
         want.sort();
         assert_eq!(got, want);
-        assert_eq!(store.perform(&store.due(10)), 3);
+        assert_eq!(store.perform(&store.due(10), &free()), 3);
         assert!(store.due(10).is_empty());
         assert_eq!(
             stored_on_disk(&b, BOB, mine.post.id).held,
@@ -2276,7 +2327,7 @@ mod tests {
             .due(10)
             .iter()
             .all(|d| d.post.is_none() && d.seq.is_none()));
-        assert_eq!(store.perform(&store.due(10)), 2);
+        assert_eq!(store.perform(&store.due(10), &free()), 2);
         assert!(store.due(10).is_empty());
         assert!(!b.has("cursor.1000.rm") && !b.has("cursor.1001.rm"));
         assert!(
@@ -2318,10 +2369,10 @@ mod tests {
         );
         b.fail(Some(Fail::Unsynced));
         let before = b.attempts();
-        assert_eq!(store.perform(&due), 0);
+        assert_eq!(store.perform(&due, &free()), 0);
         assert_eq!(b.attempts(), before + 1, "stops at the first refusal");
-        assert_eq!(store.perform(&due[1..]), 0);
-        assert_eq!(store.perform(&due[2..]), 0);
+        assert_eq!(store.perform(&due[1..], &free()), 0);
+        assert_eq!(store.perform(&due[2..], &free()), 0);
         assert!(!b.has(&post_name(BOB, old.post.id)) && !b.has("cursor.1000.rm"));
         assert!(
             store.get(BOB, old.post.id).is_some(),
@@ -2340,7 +2391,11 @@ mod tests {
         assert_eq!(whys(&store.due(10)), whys(&due[1..]));
         b.fail(None);
         let before = b.attempts();
-        assert_eq!(store.perform(&due[..1]), 0, "a dropped mark is not written");
+        assert_eq!(
+            store.perform(&due[..1], &free()),
+            0,
+            "a dropped mark is not written"
+        );
         assert_eq!(b.attempts(), before);
         store.mark(&containing(&[], &[2002]));
         let last = store.due(10);
@@ -2348,13 +2403,13 @@ mod tests {
             last.iter().map(|d| d.recorded).collect::<Vec<_>>(),
             [false, true, true]
         );
-        assert_eq!(store.perform(&last), 3);
+        assert_eq!(store.perform(&last, &free()), 3);
         assert!(store.get(BOB, old.post.id).is_none());
         assert!(store.get(BOB, young.post.id).is_none());
         assert_eq!(store.plan_read(BOB, &reader("rm"), None).cursor, 0);
         assert!(store.due(10).is_empty());
         let before = b.attempts();
-        assert_eq!(store.perform(&due), 0, "nothing is due any more");
+        assert_eq!(store.perform(&due, &free()), 0, "nothing is due any more");
         assert_eq!(b.attempts(), before);
     }
 
@@ -2372,7 +2427,7 @@ mod tests {
             whys(&due),
             vec![(Some(post.post.id), None, BoardDueFor::Expire)]
         );
-        let worker = std::thread::spawn(move || performing.perform(&due));
+        let worker = std::thread::spawn(move || performing.perform(&due, &free()));
         b.await_stalls(1);
         store.mark(&containing(&[], &[2001]));
         let during = store.due(10);
@@ -2403,7 +2458,7 @@ mod tests {
             b.slow(Some(std::time::Duration::from_millis(300)));
             let performing = Arc::clone(&store);
             let due = store.due(10);
-            let worker = std::thread::spawn(move || performing.perform(&due));
+            let worker = std::thread::spawn(move || performing.perform(&due, &free()));
             b.await_stalls(1);
             assert!(store.get(BOB, post.post.id).is_none(), "refused: {refused}");
             assert!(!ids(&store.candidates(BOB, 0, 10)).contains(&post.post.id));
@@ -2427,8 +2482,9 @@ mod tests {
         clock.set(T0 + RETAIN);
         let due = store.due(10);
         b.fail(Some(Fail::Panics));
-        let panicked =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| store.perform(&due)));
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store.perform(&due, &free())
+        }));
         b.fail(None);
         assert!(panicked.is_err());
         assert!(store.get(BOB, post.post.id).is_some());
@@ -2437,7 +2493,7 @@ mod tests {
             whys(&store.due(10)),
             vec![(Some(post.post.id), None, BoardDueFor::Expire)]
         );
-        assert_eq!(store.perform(&store.due(10)), 1);
+        assert_eq!(store.perform(&store.due(10), &free()), 1);
         assert!(store.get(BOB, post.post.id).is_none());
         assert!(!b.has(&post_name(BOB, post.post.id)));
     }
@@ -2480,7 +2536,7 @@ mod tests {
             whys(&store.due(10)),
             vec![(Some(post.post.id), None, BoardDueFor::Hold(HeldFor::Author))]
         );
-        assert_eq!(store.perform(&store.due(10)), 1);
+        assert_eq!(store.perform(&store.due(10), &free()), 1);
         assert_eq!(
             stored_on_disk(&b, BOB, post.post.id).held,
             [HeldFor::Author].into_iter().collect()
@@ -2521,7 +2577,7 @@ mod tests {
     fn holding(store: &BoardStore, uids: &[u32]) {
         store.mark(&containing(&[], uids));
         let due = store.due(100);
-        assert_eq!(store.perform(&due), due.len());
+        assert_eq!(store.perform(&due, &free()), due.len());
     }
 
     #[test]
@@ -2644,7 +2700,7 @@ mod tests {
             whys(&due),
             vec![(Some(post.post.id), None, BoardDueFor::Expire)]
         );
-        assert_eq!(store.perform(&due), 1);
+        assert_eq!(store.perform(&due, &free()), 1);
         assert!(!b.has(&post_name(BOB, post.post.id)));
     }
 
@@ -2762,7 +2818,7 @@ mod tests {
             whys(&store.due(10)),
             vec![(Some(id), None, BoardDueFor::Hold(HeldFor::Author))]
         );
-        assert_eq!(store.perform(&store.due(10)), 1);
+        assert_eq!(store.perform(&store.due(10), &free()), 1);
         assert_eq!(stored_on_disk(&b, BOB, id).held, author);
     }
 

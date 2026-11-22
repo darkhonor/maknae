@@ -5390,7 +5390,7 @@ mod board {
             [HOBI_UID].into_iter().collect(),
         ));
         let due = board.due(100);
-        assert_eq!(board.perform(&due), 2);
+        assert_eq!(board.perform(&due, &*w.agents.view), 2);
         assert_eq!(jin_reads().await, ["sentinel-695-free"]);
         assert_eq!(w.cursor("jin"), 0);
         board.mark(&everyone);
@@ -5529,7 +5529,7 @@ mod board {
         assert!(board.candidates(w.key(), 0, 10).is_empty());
         let due = board.due(10);
         assert_eq!(due.iter().map(|d| d.post).collect::<Vec<_>>(), [Some(id)]);
-        assert_eq!(board.perform(&due), 1);
+        assert_eq!(board.perform(&due, &*w.agents.view), 1);
         let held: Vec<_> = board
             .held_for(w.me, 10)
             .into_iter()

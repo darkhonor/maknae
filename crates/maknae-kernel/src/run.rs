@@ -7527,9 +7527,13 @@ where
             seq: &seq,
             au3_1: &self.au3_1,
         };
+        let view: Arc<dyn crate::enrollment::EnrollmentView> = Arc::new(
+            crate::enrollment::SnapshotEnrollment(Arc::clone(&self.authorizer)),
+        );
         settle_tasks(
             &self.tasks,
             &self.board,
+            &view,
             self.sink.as_ref(),
             &ctx,
             BLOCKING_OPERATION_TIMEOUT,
@@ -10032,6 +10036,7 @@ async fn close_due<E: AuditEmit>(
 /// then the store performs that batch.
 async fn board_due<E: AuditEmit>(
     board: &Arc<crate::board::BoardStore>,
+    view: &Arc<dyn crate::enrollment::EnrollmentView>,
     emit: &E,
     ctx: &BootCtx<'_>,
     deadline: tokio::time::Instant,
@@ -10058,8 +10063,9 @@ async fn board_due<E: AuditEmit>(
         if recorded.is_empty() {
             break;
         }
-        let b = Arc::clone(board);
-        match crate::task::offload(ctx.euid, deadline, move || Ok(b.perform(&recorded))).await {
+        let (b, v) = (Arc::clone(board), Arc::clone(view));
+        match crate::task::offload(ctx.euid, deadline, move || Ok(b.perform(&recorded, &*v))).await
+        {
             Ok(0) => stopped = stopped.or(Some("the board store stored none".into())),
             Ok(_) => {}
             Err(e) => stopped = Some(e.to_string()),
@@ -10113,6 +10119,7 @@ async fn record_board_failure<E: AuditEmit>(emit: &E, ctx: &BootCtx<'_>, why: &s
 async fn settle_tasks<E: AuditEmit>(
     tasks: &Arc<crate::task::TaskStore>,
     board: &Arc<crate::board::BoardStore>,
+    view: &Arc<dyn crate::enrollment::EnrollmentView>,
     emit: &E,
     ctx: &BootCtx<'_>,
     budget: Duration,
@@ -10149,7 +10156,7 @@ async fn settle_tasks<E: AuditEmit>(
     if tokio::time::Instant::now() >= deadline {
         return;
     }
-    let swept = board_due(board, emit, ctx, deadline).await;
+    let swept = board_due(board, view, emit, ctx, deadline).await;
     let said = record_board_notices(board, emit, ctx).await;
     let left = match (swept.remaining, swept.stopped) {
         (0, _) => None,
@@ -10221,6 +10228,7 @@ async fn reconcile_tasks_at_boot<E: AuditEmit>(
 async fn sweep_tasks<E: AuditEmit>(
     tasks: Arc<crate::task::TaskStore>,
     board: Arc<crate::board::BoardStore>,
+    view: Arc<dyn crate::enrollment::EnrollmentView>,
     emit: Arc<E>,
     where_: WhereCtx,
     euid: u32,
@@ -10244,7 +10252,7 @@ async fn sweep_tasks<E: AuditEmit>(
             _ = tick.tick() => (false, BLOCKING_OPERATION_TIMEOUT),
             _ = stop.notified() => (true, TASK_SWEEP_STOP_TIMEOUT),
         };
-        settle_tasks(&tasks, &board, &*emit, &ctx, budget, true).await;
+        settle_tasks(&tasks, &board, &view, &*emit, &ctx, budget, true).await;
         if stopping {
             return;
         }
@@ -11487,6 +11495,7 @@ where
     let mut sweeper = tokio::spawn(sweep_tasks(
         Arc::clone(&reloader.tasks),
         Arc::clone(&reloader.board),
+        Arc::clone(&agents.view),
         Arc::clone(sink),
         wctx.clone(),
         reloader.euid,
@@ -28544,6 +28553,11 @@ mod task_sweep_tests {
     use crate::task_store::{Fail, ManualClock, MemTaskBlobs, CLAIM_LEASE};
     use maknae_proto::{TaskClose, TaskId, TaskState, Tasker};
 
+    /// A view that contains no one.
+    fn no_one() -> Arc<dyn crate::enrollment::EnrollmentView> {
+        Arc::new(FixedEnrollment(Default::default()))
+    }
+
     /// Records every append, and refuses the `fail`th and every one after it. With a
     /// store, it notes whether each close it records finds its task still open.
     struct Trail {
@@ -29740,6 +29754,7 @@ mod task_sweep_tests {
         settle_tasks(
             &store,
             &Arc::new(crate::board::BoardStore::new()),
+            &no_one(),
             &*trail,
             &ctx(&seq, &au),
             Duration::from_secs(30),
@@ -29762,6 +29777,7 @@ mod task_sweep_tests {
         settle_tasks(
             &store,
             &Arc::new(crate::board::BoardStore::new()),
+            &no_one(),
             &*trail,
             &ctx(&seq, &au),
             Duration::from_secs(30),
@@ -29812,6 +29828,7 @@ mod task_sweep_tests {
             settle_tasks(
                 &store,
                 &Arc::new(crate::board::BoardStore::new()),
+                &no_one(),
                 &*trail,
                 &ctx(&seq, &au),
                 Duration::from_secs(5),
@@ -29863,6 +29880,7 @@ mod task_sweep_tests {
         let mut sweeping = tokio::spawn(sweep_tasks(
             Arc::clone(&store),
             Arc::new(crate::board::BoardStore::new()),
+            no_one(),
             Arc::clone(&trail),
             where_,
             77,
@@ -29957,6 +29975,7 @@ mod task_sweep_tests {
         settle_tasks(
             &tasks,
             &board,
+            &no_one(),
             &*refusing,
             &ctx(&seq, &au),
             soon_budget(),
@@ -29973,6 +29992,7 @@ mod task_sweep_tests {
         settle_tasks(
             &tasks,
             &board,
+            &no_one(),
             &*trail,
             &ctx(&seq, &au),
             soon_budget(),
@@ -30138,6 +30158,7 @@ mod task_sweep_tests {
         settle_tasks(
             &tasks,
             &board,
+            &no_one(),
             &*trail,
             &ctx(&seq, &au),
             soon_budget(),
@@ -30179,6 +30200,7 @@ mod task_sweep_tests {
             settle_tasks(
                 &tasks,
                 &board,
+                &no_one(),
                 &*trail,
                 &ctx(&seq, &au),
                 Duration::ZERO,
