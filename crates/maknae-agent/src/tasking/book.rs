@@ -1,5 +1,6 @@
 use super::commands::{parse, Parsed};
 use super::text::{self, Unknown};
+use crate::hints::Unbound;
 use crate::render::display_safe_len;
 use crate::screen::blocks::{Conversation, EntryId, EntryKind};
 use crate::screen::HeaderLine;
@@ -78,6 +79,8 @@ pub enum Answer {
     Page(TaskPage),
     Tasks(Vec<TaskView>),
     View(TaskView),
+    /// The kernel's view of a submitted task, and the candidates the client did not bind.
+    Submitted(TaskView, Vec<Unbound>),
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -707,7 +710,9 @@ impl Book {
                 self.say(conv, &read_failure(&e))
             }
             (Asked::ListAll { opening: true }, Err(_)) => self.reread = true,
-            (Asked::Submit, Ok(Answer::View(view))) => self.submitted(view, now, conv),
+            (Asked::Submit, Ok(Answer::Submitted(view, unbound))) => {
+                self.submitted(view, &unbound, now, conv)
+            }
             (Asked::Add(n), Ok(Answer::View(view))) => {
                 self.update(view, now, conv);
                 self.say(conv, &format!("added to #{n}"));
@@ -977,7 +982,14 @@ impl Book {
         }
     }
 
-    fn submitted(&mut self, view: TaskView, now: u64, conv: &mut Conversation) {
+    fn submitted(
+        &mut self,
+        view: TaskView,
+        unbound: &[Unbound],
+        now: u64,
+        conv: &mut Conversation,
+    ) {
+        let echo = text::echo_lines(&view.bindings, unbound);
         let others = self.tasks.iter().any(Task::open);
         let n = match self.index_of(&view.task) {
             Some(at) => {
@@ -997,6 +1009,9 @@ impl Book {
             );
         } else {
             self.say(conv, &format!("#{n} submitted"));
+        }
+        for line in &echo {
+            self.say(conv, line);
         }
     }
 
@@ -1129,6 +1144,11 @@ impl Book {
             view.actions,
             if view.actions == 1 { "" } else { "s" }
         ));
+        if !view.bindings.is_empty() {
+            let names: Vec<String> = view.bindings.iter().map(text::binding_name).collect();
+            line.push_str(" · bound: ");
+            line.push_str(&names.join(", "));
+        }
         line
     }
 }
@@ -1306,7 +1326,10 @@ mod tests {
                 Op::Submit { text } => assert_eq!(text.0.as_str(), line),
                 other => panic!("expected a submit, got {other:?}"),
             }
-            self.answer(Ok(Answer::View(view(n, seq, TaskState::Queued))));
+            self.answer(Ok(Answer::Submitted(
+                view(n, seq, TaskState::Queued),
+                vec![],
+            )));
         }
 
         fn texts(&self) -> Vec<String> {
@@ -2581,7 +2604,7 @@ mod tests {
         run.answer(page(vec![view(1, 5, TaskState::Working)], Some(5)));
         run.enter("two");
         assert!(matches!(run.op(), Op::Submit { .. }));
-        run.answer(Ok(Answer::View(view(2, 4, TaskState::Queued))));
+        run.answer(Ok(Answer::Submitted(view(2, 4, TaskState::Queued), vec![])));
         assert!(matches!(run.op(), Op::Poll { after: Some(a) } if a.seq() == 5));
         run.answer(page(vec![], None));
         assert_eq!(run.book.status().len(), 2, "{:?}", run.book.status());
@@ -2933,5 +2956,76 @@ mod tests {
         let mut run = Run::new(Standing::Enrolled);
         run.book.hurry();
         run.none_due();
+    }
+
+    fn sealed(server: &str, base: &str, change: Option<u64>) -> maknae_proto::Binding {
+        maknae_proto::Binding::Git(maknae_proto::GitBinding {
+            server: server.into(),
+            base: base.into(),
+            head: None,
+            change,
+        })
+    }
+
+    #[test]
+    fn a_submission_echoes_what_the_kernel_sealed_not_what_was_sent() {
+        use crate::hints::{Reason, Subject};
+        for announce in [false, true] {
+            let mut run = Run::with(Standing::Enrolled, announce, vec![], vec![]);
+            run.enter("review https://github.com/o/r/pull/12 and https://github.com/o/r/pull/13");
+            assert!(matches!(run.op(), Op::Submit { .. }));
+            let mut queued = view(1, 1, TaskState::Queued);
+            queued.bindings = vec![sealed("github.com", "o/r", Some(12))];
+            let unbound = vec![Unbound {
+                subject: Subject::Host("evil.example".into()),
+                reason: Reason::UnknownServer,
+            }];
+            run.answer(Ok(Answer::Submitted(queued, unbound)));
+            let texts = run.texts();
+            assert_eq!(
+                texts[texts.len() - 3..],
+                [
+                    "#1 submitted",
+                    "bound: github.com/o/r change 12",
+                    "not bound: evil.example: unknown server",
+                ],
+                "announce {announce}"
+            );
+            assert!(!texts.iter().any(|t| t.contains("change 13")), "{texts:?}");
+        }
+    }
+
+    #[test]
+    fn status_lists_the_bindings() {
+        let mut run = Run::new(Standing::Enrolled);
+        run.submit("one", 1, 1);
+        run.enter("/status 1");
+        assert!(matches!(run.op(), Op::Status { .. }));
+        let mut working = view(1, 1, TaskState::Working);
+        working.bindings = vec![
+            sealed("github.com", "o/r", Some(12)),
+            sealed("gitlab.lab.local:8443", "g/p", None),
+        ];
+        run.answer(Ok(Answer::View(working)));
+        assert_eq!(
+            run.last_text(),
+            "#1 working · 0:00 elapsed · 0 actions · bound: github.com/o/r change 12, gitlab.lab.local:8443/g/p"
+        );
+        run.enter("/status 1");
+        assert!(matches!(run.op(), Op::Status { .. }));
+        run.answer(Ok(Answer::View(view(1, 1, TaskState::Working))));
+        assert_eq!(run.last_text(), "#1 working · 0:00 elapsed · 0 actions");
+    }
+
+    #[test]
+    fn a_submission_answered_with_a_bare_view_is_unreadable() {
+        let mut run = Run::new(Standing::Enrolled);
+        run.enter("one");
+        assert!(matches!(run.op(), Op::Submit { .. }));
+        run.answer(Ok(Answer::View(view(1, 1, TaskState::Queued))));
+        assert_eq!(
+            run.last_text(),
+            "the kernel answered with something other than what was asked"
+        );
     }
 }

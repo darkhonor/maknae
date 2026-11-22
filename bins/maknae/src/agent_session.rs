@@ -140,7 +140,10 @@ impl<T: Tasker, L: Leaf> Kernel<T, L> {
             Op::Collect { after } => t.collect(a, after).await.map(Answer::Reports),
             Op::Poll { after } => t.list_page(a, after).await.map(Answer::Page),
             Op::ListAll => t.list(a).await.map(Answer::Tasks),
-            Op::Submit { text } => t.submit(a, text).await.map(Answer::View),
+            Op::Submit { text } => t
+                .submit(a, text)
+                .await
+                .map(|view| Answer::Submitted(view, Vec::new())),
             Op::Add { task, text } => t.add(&task, text).await.map(Answer::View),
             Op::Stop { task } => t.stop(&task).await.map(Answer::View),
             Op::Drop { task } => t.drop(&task).await.map(Answer::View),

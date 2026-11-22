@@ -416,6 +416,8 @@ files = [
   "crates/maknae-agent/src/tasking/book.rs",
   "crates/maknae-agent/src/tasking/commands.rs",
   "crates/maknae-agent/src/tasking/text.rs",
+  # #168: the tasker's binding candidates. A look-alike host read as a forge binds a task to a repository the tasker never named; a remote's userinfo copied out of .git/config puts a token in the echo.
+  "crates/maknae-agent/src/hints.rs",
   "crates/maknae-sys/src/reply.rs",
   "crates/maknae-sys/src/macos.rs",
   # #490: whether a prepared audit trail carries the append-only flag; a false "yes" moves the trail to a file the daemon can rewrite.

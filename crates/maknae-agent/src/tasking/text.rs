@@ -1,7 +1,8 @@
+use crate::hints::{Reason, Subject, Unbound};
 use crate::render::display_piece;
 use crate::render::DISPLAY_PIECE_MAX;
 use crate::screen::MenuItem;
-use maknae_proto::{AgentEntry, AgentStanding, TaskClose, TaskState};
+use maknae_proto::{AgentEntry, AgentStanding, Binding, TaskClose, TaskState};
 
 pub const NO_AGENTS: &str = "no agents can be tasked by you";
 pub const LIST_INCOMPLETE: &str = "the list may be incomplete; try again";
@@ -185,6 +186,53 @@ pub fn undecided_agent(name: &str) -> String {
 pub const LIST_INCOMPLETE_REFUSAL: &str =
     "maknae: could not check every agent right now; try again";
 
+/// A binding as `server/base`, with ` change N` when it names one.
+pub fn binding_name(binding: &Binding) -> String {
+    let Binding::Git(g) = binding;
+    ref_name(&g.server, &g.base, g.change)
+}
+
+fn ref_name(server: &str, base: &str, change: Option<u64>) -> String {
+    let mut name = safe(&format!("{server}/{base}"));
+    if let Some(n) = change {
+        name.push_str(&format!(" change {n}"));
+    }
+    name
+}
+
+fn unbound_reason(reason: Reason) -> String {
+    match reason {
+        Reason::UnknownServer => "unknown server".into(),
+        Reason::NotHttps => "not https".into(),
+        Reason::AmbiguousShorthand => "ambiguous shorthand: more than one forge is known".into(),
+        Reason::AmbiguousForge => "ambiguous forge: the host matches more than one forge".into(),
+        Reason::OverTheBound => format!(
+            "over the bound of {} bindings or {} bytes",
+            maknae_proto::TASK_BINDINGS_MAX,
+            maknae_proto::TASK_BINDING_REQUESTS_MAX_BYTES
+        ),
+        Reason::NotInParent => "not in the parent task".into(),
+        Reason::NoForgeList => "no forge list".into(),
+    }
+}
+
+fn unbound_line(u: &Unbound) -> String {
+    let subject = match &u.subject {
+        Subject::Host(s) | Subject::Written(s) => safe(s),
+        Subject::Ref(g) => ref_name(&g.server, &g.base, g.change),
+    };
+    format!("not bound: {subject}: {}", unbound_reason(u.reason))
+}
+
+/// One line per binding the kernel sealed, then one per candidate not bound and why.
+pub fn echo_lines(bindings: &[Binding], unbound: &[Unbound]) -> Vec<String> {
+    bindings
+        .iter()
+        .map(|b| format!("bound: {}", binding_name(b)))
+        .chain(unbound.iter().map(unbound_line))
+        .collect()
+}
+
 pub fn menu(prefix: &str) -> Vec<MenuItem> {
     COMMANDS
         .iter()
@@ -360,5 +408,60 @@ mod tests {
         assert!(menu("/x").is_empty());
         assert_eq!(help_lines().len(), 13);
         assert!(help_lines()[0].starts_with("/add "));
+    }
+
+    fn sealed(server: &str, base: &str, change: Option<u64>) -> Binding {
+        Binding::Git(maknae_proto::GitBinding {
+            server: server.into(),
+            base: base.into(),
+            head: None,
+            change,
+        })
+    }
+
+    #[test]
+    fn echo_lines_name_each_sealed_binding_and_each_unbound_reason() {
+        let git = |base: &str, change| maknae_proto::GitRef {
+            server: "github.com".into(),
+            base: base.into(),
+            change,
+        };
+        let not = |subject, reason| Unbound { subject, reason };
+        let lines = echo_lines(
+            &[
+                sealed("github.com", "o/r", Some(12)),
+                sealed("gitlab.lab.local:8443", "g/s/p", None),
+            ],
+            &[
+                not(Subject::Host("evil.example".into()), Reason::UnknownServer),
+                not(Subject::Host("github.com".into()), Reason::NotHttps),
+                not(Subject::Written("o/r#5".into()), Reason::AmbiguousShorthand),
+                not(Subject::Host("ghe.example".into()), Reason::AmbiguousForge),
+                not(Subject::Ref(git("o/r", Some(9))), Reason::OverTheBound),
+                not(Subject::Ref(git("o/s", None)), Reason::NotInParent),
+                not(Subject::Host("github.com".into()), Reason::NoForgeList),
+                not(Subject::Host("a\u{1b}[2Jb".into()), Reason::UnknownServer),
+            ],
+        );
+        assert_eq!(
+            lines,
+            [
+                "bound: github.com/o/r change 12",
+                "bound: gitlab.lab.local:8443/g/s/p",
+                "not bound: evil.example: unknown server",
+                "not bound: github.com: not https",
+                "not bound: o/r#5: ambiguous shorthand: more than one forge is known",
+                "not bound: ghe.example: ambiguous forge: the host matches more than one forge",
+                "not bound: github.com/o/r change 9: over the bound of 8 bindings or 976 bytes",
+                "not bound: github.com/o/s: not in the parent task",
+                "not bound: github.com: no forge list",
+                "not bound: a\\u{001b}[2Jb: unknown server",
+            ]
+        );
+        assert!(echo_lines(&[], &[]).is_empty());
+        assert_eq!(
+            binding_name(&sealed("x\u{202e}", "o/r", None)),
+            "x\\u{202e}/o/r"
+        );
     }
 }

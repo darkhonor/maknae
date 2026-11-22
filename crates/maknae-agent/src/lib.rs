@@ -12,6 +12,7 @@
 pub mod budget;
 pub mod conversations;
 pub mod drive;
+pub mod hints;
 pub mod plane;
 pub mod render;
 pub mod route;
