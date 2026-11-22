@@ -6,6 +6,9 @@ targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-app
 unmaintained = "all"          # spec §5/§6: escalate archived/unmaintained deps to error, incl. transitive
 yanked = "deny"
 unsound = "all"
+ignore = [
+  { id = "RUSTSEC-2026-0592", reason = "#702 removes this when url 2.5.9 clears the dependabot.yml cooldown (2026-11-25 23:03 UTC); nothing in the graph calls Url::origin or url::quirks::origin" },
+]
 
 [bans]
 multiple-versions = "warn"
