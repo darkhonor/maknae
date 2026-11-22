@@ -418,7 +418,8 @@ pub(crate) fn read_audit(walk: &Walk, cursor: u64) -> BoardAudit {
 pub(crate) fn due_said(why: BoardDueFor) -> (&'static str, &'static str) {
     match why {
         BoardDueFor::Expire => ("expire", "expired"),
-        BoardDueFor::Hold(HeldFor::Author | HeldFor::Person) => ("hold", "post held: contained"),
+        BoardDueFor::Hold(HeldFor::Author) => ("hold", "post held: contained (author)"),
+        BoardDueFor::Hold(HeldFor::Person) => ("hold", "post held: contained (person)"),
         BoardDueFor::DropCursor => ("expire", "cursor removed: agent gone"),
     }
 }

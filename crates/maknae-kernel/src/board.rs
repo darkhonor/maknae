@@ -94,16 +94,19 @@ struct Held {
     boot: Vec<BoardFinding>,
     /// Holds not yet stored, by board and sequence.
     marked: BTreeMap<(BoardKey, u64), BTreeSet<HeldFor>>,
-    /// Cursors due removal: their reader is not enrolled as it was last seen.
+    /// Cursors due removal: their reader is no longer enrolled.
     noted: BTreeSet<(BoardKey, AgentId)>,
-    readers: BTreeMap<AgentId, u32>,
+    /// Posts whose expiry passed its check and whose delete is under way.
+    expiring: BTreeSet<(BoardKey, u64)>,
     said: BTreeSet<Item>,
     notices: Vec<BoardNotice>,
 }
 
 impl Held {
     fn withheld(&self, key: BoardKey, s: &Stored) -> bool {
-        !s.held.is_empty() || self.marked.contains_key(&(key, s.seq))
+        !s.held.is_empty()
+            || self.marked.contains_key(&(key, s.seq))
+            || self.expiring.contains(&(key, s.seq))
     }
 
     fn live(&self, key: BoardKey, id: PostId) -> Option<&Arc<Stored>> {
@@ -318,7 +321,8 @@ impl BoardStore {
 
     /// Without the writer and without I/O: marks for a hold each post whose recorded author
     /// uid, or whose board's uid, the view holds contained, dropping any mark it no longer
-    /// bears out; and notes each cursor whose reader is not enrolled as it was last seen.
+    /// bears out; and notes each cursor, and forgets each walk, of a reader it no longer
+    /// enrolls.
     pub fn mark(&self, view: &dyn EnrollmentView) {
         let mut guard = self.held();
         let held = &mut *guard;
@@ -350,24 +354,16 @@ impl BoardStore {
         });
         held.marked = marked;
 
-        let readers: BTreeSet<AgentId> = held
+        let gone: BTreeSet<AgentId> = held
             .boards
             .values()
-            .flat_map(|b| b.cursors.keys())
+            .flat_map(|b| b.cursors.keys().chain(b.walked.keys()))
+            .filter(|agent| view.agent_uid(agent).is_none())
             .cloned()
             .collect();
-        let mut gone = BTreeSet::new();
-        for agent in &readers {
-            let now = view.agent_uid(agent);
-            if now.is_none() || held.readers.get(agent).is_some_and(|u| now != Some(*u)) {
-                gone.insert(agent.clone());
-            }
-            match now {
-                Some(uid) => held.readers.insert(agent.clone(), uid),
-                None => held.readers.remove(agent),
-            };
+        for board in held.boards.values_mut() {
+            board.walked.retain(|agent, _| !gone.contains(agent));
         }
-        held.readers.retain(|agent, _| readers.contains(agent));
         let noted: Vec<(BoardKey, AgentId)> = held
             .boards
             .iter()
@@ -387,24 +383,28 @@ impl BoardStore {
         let now = self.clock.now_secs();
         let guard = self.held();
         let held = &*guard;
-        let holds = held.marked.iter().flat_map(|((key, seq), fors)| {
-            let id = held
-                .boards
-                .get(key)
-                .and_then(|b| b.posts.get(seq))
-                .map(|s| s.post.id);
-            fors.iter().filter_map(move |f| {
-                let why = BoardDueFor::Hold(*f);
-                Some(BoardDue {
-                    key: *key,
-                    post: Some(id?),
-                    seq: Some(*seq),
-                    reader: None,
-                    why,
-                    recorded: held.said.contains(&Item::Post(*key, *seq, why)),
+        let holds = held
+            .marked
+            .iter()
+            .filter(|(at, _)| !held.expiring.contains(at))
+            .flat_map(|((key, seq), fors)| {
+                let id = held
+                    .boards
+                    .get(key)
+                    .and_then(|b| b.posts.get(seq))
+                    .map(|s| s.post.id);
+                fors.iter().filter_map(move |f| {
+                    let why = BoardDueFor::Hold(*f);
+                    Some(BoardDue {
+                        key: *key,
+                        post: Some(id?),
+                        seq: Some(*seq),
+                        reader: None,
+                        why,
+                        recorded: held.said.contains(&Item::Post(*key, *seq, why)),
+                    })
                 })
-            })
-        });
+            });
         let expiries = held.boards.iter().flat_map(|(key, b)| {
             b.posts
                 .values()
@@ -467,19 +467,23 @@ impl BoardStore {
                 return Step::Skipped;
             };
             held.said.insert(item.clone());
+            held.expiring.insert((key, seq));
             name
         };
-        if self.blobs.delete(&name).is_err() {
+        let deleted = self.blobs.delete(&name);
+        let mut held = self.held();
+        held.expiring.remove(&(key, seq));
+        if deleted.is_err() {
             return Step::Refused;
         }
-        let mut held = self.held();
         if let Some(board) = held.boards.get_mut(&key) {
             if let Some(gone) = board.posts.remove(&seq) {
                 board.ids.remove(&gone.post.id);
             }
         }
         held.marked.remove(&(key, seq));
-        held.said.remove(&item);
+        held.said
+            .retain(|i| !matches!(i, Item::Post(k, s, _) if (*k, *s) == (key, seq)));
         Step::Done
     }
 
@@ -984,6 +988,26 @@ mod tests {
         let BoardFinding::Quarantined { name, .. } = &found[0];
         assert_eq!(*name, format!("post.1000.{}", PostId([0xee; 16])));
         assert!(store.get(BOB, posted.post.id).is_some());
+        store.settle(&found[0]).unwrap();
+        store.mark(&containing(&[], &[1000, 2001]));
+        assert_eq!(store.perform(&store.due(10)), 4);
+        drop(store);
+        let name = t.path().join(format!("post.1000.{}.board", posted.post.id));
+        let len = std::fs::metadata(name).unwrap().len();
+        assert!(len <= BOARD_RECORD_MAX, "held for both: {len}");
+        let store = open_dir(t.path()).unwrap();
+        assert!(store.take_boot_findings().is_empty());
+        assert!(store.get(BOB, posted.post.id).is_none());
+        drop(store);
+        let uid = nix::unistd::geteuid().as_raw();
+        let blobs = DirBlobs::open(t.path(), uid, key(), BOARD).unwrap();
+        let plain = TaskBlobs::load(&blobs, &post_name(BOB, posted.post.id)).unwrap();
+        let rec: PostRecord<Stored> = ciborium::from_reader(plain.as_slice()).unwrap();
+        assert_eq!(
+            rec.stored.held,
+            [HeldFor::Author, HeldFor::Person].into_iter().collect()
+        );
+        assert!(rec.stored.post.draft == max);
     }
 
     #[test]
@@ -1852,24 +1876,35 @@ mod tests {
         store.advance(ALICE, &reader("rm"), q.seq).unwrap();
         store.mark(&enrolled(&[("rm", 3000), ("suga", 3001), ("jimin", 3002)]));
         assert!(store.due(10).is_empty());
+        store.walked(BOB, &reader("v"), p.seq);
+        assert_eq!(
+            store.plan_read(BOB, &reader("v"), Some(p.post.id)).ack_to,
+            Some(p.seq)
+        );
         store.mark(&enrolled(&[("suga", 3001), ("jimin", 3005)]));
+        assert_eq!(
+            store.plan_read(BOB, &reader("v"), Some(p.post.id)).ack_to,
+            None,
+            "a de-enrolled reader's walk is forgotten"
+        );
         let mut got = whys(&store.due(10));
         got.sort();
-        let mut want = vec![
+        let want = vec![
             (None, Some(reader("rm")), BoardDueFor::DropCursor),
             (None, Some(reader("rm")), BoardDueFor::DropCursor),
-            (None, Some(reader("jimin")), BoardDueFor::DropCursor),
         ];
-        want.sort();
         assert_eq!(got, want);
         assert!(store
             .due(10)
             .iter()
             .all(|d| d.post.is_none() && d.seq.is_none()));
-        assert_eq!(store.perform(&store.due(10)), 3);
+        assert_eq!(store.perform(&store.due(10)), 2);
         assert!(store.due(10).is_empty());
         assert!(!b.has("cursor.1000.rm") && !b.has("cursor.1001.rm"));
-        assert!(!b.has("cursor.1000.jimin"));
+        assert!(
+            b.has("cursor.1000.jimin"),
+            "a re-enrolled agent id keeps its cursor"
+        );
         assert!(b.has("cursor.1000.suga"));
         assert_eq!(store.plan_read(BOB, &reader("rm"), None).cursor, 0);
         assert_eq!(store.plan_read(BOB, &reader("suga"), None).cursor, p.seq);
@@ -1943,6 +1978,82 @@ mod tests {
         let before = b.attempts();
         assert_eq!(store.perform(&due), 0, "nothing is due any more");
         assert_eq!(b.attempts(), before);
+    }
+
+    /// `mark` runs while `expire`'s delete is stalled inside the blobs, after the expiry's
+    /// check and before its outcome.
+    fn mark_during_the_delete(
+        b: &MemTaskBlobs,
+        store: &Arc<BoardStore>,
+        post: &Arc<Stored>,
+    ) -> (usize, Vec<BoardDue>) {
+        b.slow(Some(std::time::Duration::from_millis(300)));
+        let performing = Arc::clone(store);
+        let due = store.due(10);
+        assert_eq!(
+            whys(&due),
+            vec![(Some(post.post.id), None, BoardDueFor::Expire)]
+        );
+        let worker = std::thread::spawn(move || performing.perform(&due));
+        b.await_stalls(1);
+        store.mark(&containing(&[], &[2001]));
+        let during = store.due(10);
+        assert!(store.get(BOB, post.post.id).is_none(), "being removed");
+        assert!(store.candidates(BOB, 0, 10).is_empty());
+        let done = worker.join().unwrap();
+        b.slow(None);
+        (done, during)
+    }
+
+    fn holds(due: &[BoardDue]) -> usize {
+        due.iter()
+            .filter(|d| matches!(d.why, BoardDueFor::Hold(_)))
+            .count()
+    }
+
+    #[test]
+    fn an_expiry_committed_at_its_check_wins_over_a_later_mark() {
+        let b = MemTaskBlobs::default();
+        let (store, clock) = clocked(&b);
+        let store = Arc::new(store);
+        let post = by(&store, BOB, hobi(), Some(2001), "sentinel-695-race");
+        clock.set(T0 + RETAIN);
+        let (done, during) = mark_during_the_delete(&b, &store, &post);
+        assert_eq!(holds(&during), 0, "no hold is due for a post being removed");
+        assert_eq!(done, 1);
+        assert!(!b.has(&post_name(BOB, post.post.id)));
+        assert!(store.get(BOB, post.post.id).is_none());
+        assert!(
+            store.due(10).is_empty(),
+            "no mark is left for the deleted sequence"
+        );
+        store.mark(&containing(&[], &[2001]));
+        assert!(store.due(10).is_empty());
+    }
+
+    #[test]
+    fn an_expiry_whose_delete_is_refused_leaves_the_later_mark_due() {
+        let b = MemTaskBlobs::default();
+        let (store, clock) = clocked(&b);
+        let store = Arc::new(store);
+        let post = by(&store, BOB, hobi(), Some(2001), "sentinel-695-race-refused");
+        clock.set(T0 + RETAIN);
+        b.fail(Some(Fail::UnsyncedUnlinks));
+        let (done, during) = mark_during_the_delete(&b, &store, &post);
+        b.fail(None);
+        assert_eq!(holds(&during), 0);
+        assert_eq!(done, 0);
+        assert!(store.get(BOB, post.post.id).is_none(), "withheld");
+        assert!(store.candidates(BOB, 0, 10).is_empty());
+        assert_eq!(
+            whys(&store.due(10)),
+            vec![(Some(post.post.id), None, BoardDueFor::Hold(HeldFor::Author))]
+        );
+        assert_eq!(store.perform(&store.due(10)), 1);
+        assert_eq!(
+            stored_on_disk(&b, BOB, post.post.id).held,
+            [HeldFor::Author].into_iter().collect()
+        );
     }
 
     #[test]

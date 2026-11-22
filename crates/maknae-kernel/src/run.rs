@@ -9944,6 +9944,9 @@ async fn settle_tasks<E: AuditEmit>(
     for why in [left, unstored, unsaid].into_iter().flatten() {
         record_task_failure(emit, ctx, &why, AUDIT_APPEND_TIMEOUT).await;
     }
+    if tokio::time::Instant::now() >= deadline {
+        return;
+    }
     let swept = board_due(board, emit, ctx, deadline).await;
     let said = record_board_notices(board, emit, ctx).await;
     let left = match (swept.remaining, swept.stopped) {
@@ -10150,13 +10153,15 @@ fn board_record(
 /// performs it.
 fn board_due_record(ctx: &BootCtx<'_>, due: &crate::board::BoardDue) -> AuditRecord {
     let (op, reason) = crate::board_verbs::due_said(due.why);
-    board_record(
+    let mut rec = board_record(
         ctx,
         ("deny", "unavailable", reason),
         op,
         due.key,
         crate::board_verbs::due_audit(due),
-    )
+    );
+    rec.subject.agent = due.reader.as_ref().map(|a| a.as_str().to_owned());
+    rec
 }
 
 fn board_notice_record(ctx: &BootCtx<'_>, notice: &crate::board::BoardNotice) -> AuditRecord {
@@ -29222,13 +29227,18 @@ mod task_sweep_tests {
                 Some(7)
             )
         );
-        for f in [HeldFor::Author, HeldFor::Person] {
+        for (f, said) in [
+            (HeldFor::Author, "post held: contained (author)"),
+            (HeldFor::Person, "post held: contained (person)"),
+        ] {
+            let rec = board_due_record(&ctx, &post(BoardDueFor::Hold(f)));
+            assert_eq!(rec.subject.agent, None);
             assert_eq!(
-                shape(board_due_record(&ctx, &post(BoardDueFor::Hold(f)))),
+                shape(rec),
                 (
                     d.clone(),
                     u.clone(),
-                    "post held: contained".into(),
+                    said.into(),
                     op("hold"),
                     on(1000),
                     Some(id.to_string()),
@@ -29236,8 +29246,10 @@ mod task_sweep_tests {
                 )
             );
         }
+        let dropped = board_due_record(&ctx, &cursor);
+        assert_eq!(dropped.subject.agent.as_deref(), Some("rm"));
         assert_eq!(
-            shape(board_due_record(&ctx, &cursor)),
+            shape(dropped),
             (
                 d.clone(),
                 u.clone(),
@@ -29255,6 +29267,11 @@ mod task_sweep_tests {
                 id,
             },
         ));
+        assert_eq!(
+            (settled.0.as_str(), settled.1.as_str()),
+            ("permit", "authorized"),
+            "a settled notice keeps the task store's shape"
+        );
         assert_eq!(
             (
                 settled.2.as_str(),
@@ -29313,5 +29330,49 @@ mod task_sweep_tests {
         assert!(board
             .get(crate::board_store::BoardKey(1000), post.post.id)
             .is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pass_past_its_deadline_skips_the_board_steps() {
+        let pass = |board: Arc<crate::board::BoardStore>| async move {
+            let (_tblobs, _tclock, tasks) = mem(1_000);
+            working(&tasks, "hobi", Tasker::Uid(1000));
+            tasks.mark_unenrolled(&nobody());
+            let (seq, au) = (Seq::new(), serde_json::json!({}));
+            let trail = Trail::new(0);
+            settle_tasks(
+                &tasks,
+                &board,
+                &*trail,
+                &ctx(&seq, &au),
+                Duration::ZERO,
+                false,
+            )
+            .await;
+            trail.recs()
+        };
+        let (_blobs, clock, board) = board_mem();
+        let post = board_post(&board, 1000, "sentinel-695-late");
+        clock.set(BOARD_T0 + BOARD_RETAIN);
+        let late = pass(Arc::clone(&board)).await;
+        let empty = pass(Arc::new(crate::board::BoardStore::new())).await;
+        let shape = |recs: &[AuditRecord]| {
+            recs.iter()
+                .map(|r| (r.event.clone(), r.outcome.reason.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert!(!late.is_empty());
+        assert_eq!(
+            shape(&late),
+            shape(&empty),
+            "the task steps' records are unchanged"
+        );
+        assert!(late.iter().all(|r| r.event == "task"), "{:?}", shape(&late));
+        let key = crate::board_store::BoardKey(1000);
+        assert!(
+            board.get(key, post.post.id).is_some(),
+            "due again next pass"
+        );
+        assert_eq!(board.due(10).len(), 1);
     }
 }
