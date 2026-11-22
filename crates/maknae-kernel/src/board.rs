@@ -244,6 +244,7 @@ impl BoardStore {
             .map_or_else(Settings::default, |b| b.settings)
     }
 
+    #[cfg(any(test, feature = "hermetic-test-seam"))]
     pub(crate) fn set_settings(
         &self,
         key: BoardKey,
