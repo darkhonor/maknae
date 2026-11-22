@@ -3830,7 +3830,7 @@ async fn serve_board_verb<S, E, P>(
             }
         }
         let budget = maknae_proto::board_page_budget(trail.cfg.prompt_max_bytes);
-        let mut walker = bv::Walker::new(cursor, budget);
+        let mut walker = bv::Walker::new(budget);
         let mut after = cursor;
         loop {
             let chunk = store.candidates(key, after, maknae_proto::BOARD_READ_PAGE_POSTS);
@@ -3902,13 +3902,13 @@ async fn serve_board_verb<S, E, P>(
         }
         let mut outcome = trail.outcome(&intent, "done", "authorized");
         outcome.board = Some(bv::read_audit(&walk, cursor));
-        let walked_to = walk.walked_to;
+        let sent = walk.sent.clone();
         let payload = Payload::BoardPage(walk.page);
         if trail
             .deliver(stream, &outcome, payload, role, rule.as_ref(), action)
             .await
         {
-            store.walked(key, agent, walked_to);
+            store.sent(key, agent, &sent);
         }
         return;
     }
@@ -12770,7 +12770,7 @@ mod record_widths {
                 returned: u32::MAX,
                 withheld: u32::MAX,
                 skip_to: None,
-                walked_to: u64::MAX,
+                sent: Vec::new(),
             };
             let at = bv::cursor_audit(u64::MAX);
             all.extend([

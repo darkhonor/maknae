@@ -161,7 +161,8 @@ pub(crate) struct Board {
     pub posts: BTreeMap<u64, Arc<Stored>>,
     pub ids: BTreeMap<PostId, u64>,
     pub cursors: BTreeMap<AgentId, u64>,
-    pub walked: BTreeMap<AgentId, u64>,
+    /// Per reader, the sequences sent in a written reply and not yet acknowledged past.
+    pub sent: BTreeMap<AgentId, BTreeSet<u64>>,
 }
 
 impl Default for Board {
@@ -172,7 +173,7 @@ impl Default for Board {
             posts: BTreeMap::new(),
             ids: BTreeMap::new(),
             cursors: BTreeMap::new(),
-            walked: BTreeMap::new(),
+            sent: BTreeMap::new(),
         }
     }
 }

@@ -5017,7 +5017,7 @@ mod board {
         assert_eq!(
             bodies(&page_of(w.board("jin", read(Some(p2)), j).await.0)),
             ["p2"],
-            "after a restart nothing was walked, so the acknowledgement moves nothing"
+            "after a restart nothing was sent, so the acknowledgement moves nothing"
         );
         assert_eq!(
             bodies(&page_of(w.board("jin", read(Some(p2)), j).await.0)),
@@ -5198,9 +5198,15 @@ mod board {
         let b = read_outcome(&records);
         assert_eq!((b.returned, b.withheld), (Some(2), Some(0)));
         assert_eq!(w.cursor("jin"), 0);
-        assert!(w.cursor("jin") <= w.seq(p2));
+        let again = page_of(w.board_as(&pdp, "jin", read(Some(own)), j).await.0);
+        assert_eq!(bodies(&again), ["p1", "p2"]);
         assert_eq!(
-            bodies(&page_of(w.board("jin", read(Some(own)), j).await.0)),
+            w.cursor("jin"),
+            0,
+            "a post past what was sent is not acknowledged"
+        );
+        assert_eq!(
+            bodies(&page_of(w.board("jin", read(Some(p2)), j).await.0)),
             ["l", "p4", "j"]
         );
         assert_eq!(w.cursor("jin"), w.seq(p2));
@@ -5615,5 +5621,32 @@ mod board {
             ["sentinel-695-a", "sentinel-695-b", "sentinel-695-c"],
             "the post was not acknowledged over"
         );
+    }
+
+    #[tokio::test]
+    async fn an_acknowledgement_of_a_post_never_sent_is_ignored() {
+        let w = board_world("board-ack-unsent");
+        let j = w.at_work("jin");
+        w.stored("hobi", "sentinel-695-a", PostLabels::default());
+        let b = w.stored("hobi", "sentinel-695-b", labelled());
+        let c = w.stored("hobi", "sentinel-695-c", PostLabels::default());
+        w.stored("hobi", "sentinel-695-d", PostLabels::default());
+        let pdp = denies(&w, &["jin"]);
+        let page = page_of(w.board_as(&pdp, "jin", read(None), j).await.0);
+        assert_eq!(
+            bodies(&page),
+            ["sentinel-695-a", "sentinel-695-c", "sentinel-695-d"]
+        );
+        let unknown = page_of(
+            w.board_as(&pdp, "jin", read(Some(PostId([0x5e; 16]))), j)
+                .await
+                .0,
+        );
+        assert_eq!(w.cursor("jin"), 0);
+        let withheld = page_of(w.board_as(&pdp, "jin", read(Some(b)), j).await.0);
+        assert_eq!(w.cursor("jin"), 0, "the withheld id moves nothing");
+        assert_eq!(bodies(&withheld), bodies(&unknown));
+        page_of(w.board_as(&pdp, "jin", read(Some(c)), j).await.0);
+        assert_eq!(w.cursor("jin"), w.seq(c));
     }
 }

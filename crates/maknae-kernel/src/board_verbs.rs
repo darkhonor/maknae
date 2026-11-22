@@ -199,7 +199,8 @@ pub(crate) struct Walk {
     pub returned: u32,
     pub withheld: u32,
     pub skip_to: Option<u64>,
-    pub walked_to: u64,
+    /// The sequences of the posts on the page.
+    pub sent: Vec<u64>,
 }
 
 /// One read's page, built post by post in board order.
@@ -209,7 +210,6 @@ pub(crate) struct Walker {
     kept: Vec<Arc<Stored>>,
     withheld: u32,
     skip_to: Option<u64>,
-    walked_to: u64,
     permitted: bool,
     more: bool,
     stalled: bool,
@@ -225,14 +225,13 @@ pub(crate) fn post_size(stored: &Stored) -> usize {
 }
 
 impl Walker {
-    pub(crate) fn new(cursor: u64, budget: usize) -> Self {
+    pub(crate) fn new(budget: usize) -> Self {
         Walker {
             budget,
             used: 0,
             kept: Vec::new(),
             withheld: 0,
             skip_to: None,
-            walked_to: cursor,
             permitted: false,
             more: false,
             stalled: false,
@@ -266,7 +265,6 @@ impl Walker {
                     self.kept.push(Arc::clone(stored));
                 }
             }
-            self.walked_to = stored.seq;
         }
         true
     }
@@ -322,7 +320,7 @@ impl Walker {
             returned: u32::try_from(self.kept.len()).unwrap_or(u32::MAX),
             withheld: self.withheld,
             skip_to: self.skip_to,
-            walked_to: self.walked_to,
+            sent: self.kept.iter().map(|s| s.seq).collect(),
         }
     }
 }
@@ -746,7 +744,7 @@ mod tests {
 
     #[test]
     fn a_walk_skips_a_withheld_post_without_ending() {
-        let mut w = Walker::new(0, BIG);
+        let mut w = Walker::new(BIG);
         assert!(w.take(&plain(1..=3), &[P, D, P]));
         assert!(!w.stalled());
         let walk = w.finish(&BTreeSet::new());
@@ -754,38 +752,38 @@ mod tests {
         assert_eq!((walk.withheld, walk.returned), (1, 2));
         assert_eq!((walk.first_seq, walk.last_seq), (Some(1), Some(3)));
         assert_eq!(walk.skip_to, None);
-        assert_eq!(walk.walked_to, 3);
+        assert_eq!(walk.sent, [1, 3], "only what is returned is sent");
         assert!(!walk.page.more);
     }
 
     #[test]
     fn an_undecided_post_stops_the_walk_and_is_not_withheld() {
-        let mut w = Walker::new(0, BIG);
+        let mut w = Walker::new(BIG);
         assert!(!w.take(&plain(1..=3), &[P, U, P]));
         assert!(w.stalled());
         let walk = w.finish(&BTreeSet::new());
         assert_eq!(seqs(&walk), [id(1)]);
         assert_eq!(walk.withheld, 0);
-        assert_eq!(walk.walked_to, 1);
+        assert_eq!(walk.sent, [1], "a stalled walk sends only what it kept");
         assert_eq!(walk.skip_to, None);
         assert!(walk.page.more, "a stalled walk says more");
     }
 
     #[test]
     fn a_leading_run_ends_at_an_undecided_post() {
-        let mut w = Walker::new(0, BIG);
+        let mut w = Walker::new(BIG);
         assert!(!w.take(&plain(1..=4), &[D, D, U, D]));
         assert!(w.stalled());
         let walk = w.finish(&BTreeSet::new());
         assert!(walk.page.posts.is_empty());
         assert_eq!(walk.skip_to, Some(2));
         assert_eq!(walk.withheld, 2);
-        assert_eq!(walk.walked_to, 2);
+        assert!(walk.sent.is_empty(), "a denied post is never sent");
     }
 
     #[test]
     fn a_leading_withheld_run_sets_skip_to_and_a_later_one_does_not() {
-        let mut w = Walker::new(0, BIG);
+        let mut w = Walker::new(BIG);
         let posts = plain(1..=5);
         assert!(w.take(&posts[..2], &[D, D]));
         assert!(w.take(&posts[2..], &[P, D, D]));
@@ -793,17 +791,17 @@ mod tests {
         assert_eq!(seqs(&walk), [id(3)]);
         assert_eq!(walk.skip_to, Some(2));
         assert_eq!(walk.withheld, 4);
-        assert_eq!(walk.walked_to, 5);
-        let mut none = Walker::new(9, BIG);
+        assert_eq!(walk.sent, [3]);
+        let mut none = Walker::new(BIG);
         assert!(none.take(&[], &[]));
         let walk = none.finish(&BTreeSet::new());
-        assert_eq!((walk.skip_to, walk.walked_to), (None, 9));
+        assert_eq!((walk.skip_to, walk.sent), (None, vec![]));
     }
 
     #[test]
     fn more_is_set_only_by_a_permitted_post_left_out() {
         let page = BOARD_READ_PAGE_POSTS as u64;
-        let mut full = Walker::new(0, BIG);
+        let mut full = Walker::new(BIG);
         let posts = plain(1..=page + 2);
         let mut verdicts = vec![P; BOARD_READ_PAGE_POSTS];
         verdicts.extend([D, D]);
@@ -816,40 +814,44 @@ mod tests {
         );
         assert_eq!(walk.withheld, 2);
 
-        let mut over = Walker::new(0, BIG);
+        let mut over = Walker::new(BIG);
         assert!(!over.take(&plain(1..=page + 1), &[P; BOARD_READ_PAGE_POSTS + 1]));
         assert!(!over.stalled());
         let walk = over.finish(&BTreeSet::new());
         assert_eq!(walk.page.posts.len(), BOARD_READ_PAGE_POSTS);
         assert!(walk.page.more);
-        assert_eq!(walk.walked_to, page);
+        assert_eq!(
+            walk.sent,
+            (1..=page).collect::<Vec<_>>(),
+            "the post left out is not sent"
+        );
 
         let one = post_size(&stored(1, None, PostLabels::default()));
-        let mut budget = Walker::new(0, one + one / 2);
+        let mut budget = Walker::new(one + one / 2);
         assert!(!budget.take(&plain(1..=2), &[P, P]));
         let walk = budget.finish(&BTreeSet::new());
         assert_eq!(seqs(&walk), [id(1)]);
         assert!(walk.page.more);
-        assert_eq!(walk.walked_to, 1);
+        assert_eq!(walk.sent, [1]);
     }
 
     #[test]
     fn withheld_counts_only_posts_walked() {
         let page = BOARD_READ_PAGE_POSTS as u64;
-        let mut w = Walker::new(0, BIG);
+        let mut w = Walker::new(BIG);
         let mut verdicts = vec![P; BOARD_READ_PAGE_POSTS + 1];
         verdicts.push(D);
         assert!(!w.take(&plain(1..=page + 2), &verdicts));
         let walk = w.finish(&BTreeSet::new());
         assert_eq!(walk.withheld, 0);
-        let mut stalled = Walker::new(0, BIG);
+        let mut stalled = Walker::new(BIG);
         assert!(!stalled.take(&plain(1..=3), &[D, U, D]));
         assert_eq!(stalled.finish(&BTreeSet::new()).withheld, 1);
     }
 
     #[test]
     fn the_first_permitted_post_is_always_kept() {
-        let mut w = Walker::new(0, 0);
+        let mut w = Walker::new(0);
         assert!(!w.take(&plain(1..=2), &[P, P]));
         let walk = w.finish(&BTreeSet::new());
         assert_eq!(seqs(&walk), [id(1)]);
@@ -864,7 +866,7 @@ mod tests {
             stored(11, Some(98), PostLabels::default()),
             stored(12, Some(99), PostLabels::default()),
         ];
-        let mut w = Walker::new(0, BIG);
+        let mut w = Walker::new(BIG);
         assert!(w.take(&posts, &[P, P, P, P]));
         let targets: BTreeSet<PostId> = w.reply_targets().into_iter().collect();
         assert_eq!(targets, [id(98), id(99)].into());
@@ -928,7 +930,7 @@ mod tests {
         .into_iter()
         .map(post_verdict)
         .collect();
-        let mut w = Walker::new(0, BIG);
+        let mut w = Walker::new(BIG);
         assert!(!w.take(&plain(1..=2), &verdicts));
         assert!(w.stalled());
         let walk = w.finish(&BTreeSet::new());

@@ -325,7 +325,8 @@ impl BoardStore {
             .collect()
     }
 
-    /// An acknowledgement moves the cursor to `seen_through`, never past what was walked.
+    /// An acknowledgement moves the cursor to `seen_through` only when that post was sent to
+    /// `reader` and is above its cursor.
     pub fn plan_read(
         &self,
         key: BoardKey,
@@ -341,8 +342,8 @@ impl BoardStore {
         let ack_to = seen_through.and_then(|id| {
             let board = board?;
             let seq = *board.ids.get(&id)?;
-            let to = seq.min(*board.walked.get(reader)?);
-            (to > cursor).then_some(to)
+            let sent = board.sent.get(reader)?.contains(&seq);
+            (sent && seq > cursor).then_some(seq)
         });
         ReadPlan { cursor, ack_to }
     }
@@ -376,12 +377,12 @@ impl BoardStore {
         let plain = encode(&rec).map_err(store)?;
         let name = Name::Cursor(key, reader.clone()).text();
         self.blobs.save(&name, &plain).map_err(store)?;
-        self.held()
-            .boards
-            .entry(key)
-            .or_default()
-            .cursors
-            .insert(reader.clone(), to);
+        let mut held = self.held();
+        let board = held.boards.entry(key).or_default();
+        board.cursors.insert(reader.clone(), to);
+        if let Some(sent) = board.sent.get_mut(reader) {
+            sent.retain(|seq| *seq > to);
+        }
         Ok(to)
     }
 
@@ -438,12 +439,12 @@ impl BoardStore {
         let gone: BTreeSet<AgentId> = held
             .boards
             .values()
-            .flat_map(|b| b.cursors.keys().chain(b.walked.keys()))
+            .flat_map(|b| b.cursors.keys().chain(b.sent.keys()))
             .filter(|agent| view.agent_uid(agent).is_none())
             .cloned()
             .collect();
         for board in held.boards.values_mut() {
-            board.walked.retain(|agent, _| !gone.contains(agent));
+            board.sent.retain(|agent, _| !gone.contains(agent));
         }
         let noted: Vec<(BoardKey, AgentId)> = held
             .boards
@@ -648,7 +649,7 @@ impl BoardStore {
         let mut held = self.held();
         if let Some(board) = held.boards.get_mut(&key) {
             board.cursors.remove(reader);
-            board.walked.remove(reader);
+            board.sent.remove(reader);
         }
         held.noted.remove(&noted);
         held.said.remove(&item);
@@ -759,16 +760,16 @@ impl BoardStore {
         held.notices = back;
     }
 
-    pub fn walked(&self, key: BoardKey, reader: &AgentId, upto: u64) {
+    /// Notes `seqs` as sent to `reader`, after their reply was written.
+    pub fn sent(&self, key: BoardKey, reader: &AgentId, seqs: &[u64]) {
         let mut held = self.held();
-        let walked = held
-            .boards
-            .entry(key)
-            .or_default()
-            .walked
+        let board = held.boards.entry(key).or_default();
+        let cursor = board.cursors.get(reader).copied().unwrap_or(0);
+        board
+            .sent
             .entry(reader.clone())
-            .or_insert(upto);
-        *walked = (*walked).max(upto);
+            .or_default()
+            .extend(seqs.iter().filter(|seq| **seq > cursor));
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1571,7 +1572,7 @@ mod tests {
     }
 
     #[test]
-    fn an_acknowledgement_moves_the_cursor_only_to_what_was_walked() {
+    fn an_acknowledgement_moves_the_cursor_only_to_a_post_sent() {
         let b = MemTaskBlobs::default();
         let store = open_mem(&b, SMALL);
         let posted: Vec<_> = (0..3).map(|_| put(&store, BOB, hobi(), "p")).collect();
@@ -1584,8 +1585,12 @@ mod tests {
                 ack_to: None
             }
         );
-        store.walked(BOB, &r, posted[1].seq);
-        assert_eq!(store.plan_read(BOB, &r, last).ack_to, Some(posted[1].seq));
+        store.sent(BOB, &r, &[posted[0].seq, posted[1].seq]);
+        assert_eq!(store.plan_read(BOB, &r, last).ack_to, None, "never sent");
+        assert_eq!(
+            store.plan_read(BOB, &r, Some(posted[1].post.id)).ack_to,
+            Some(posted[1].seq)
+        );
         assert_eq!(
             store.plan_read(BOB, &r, Some(posted[0].post.id)).ack_to,
             Some(posted[0].seq)
@@ -1605,16 +1610,22 @@ mod tests {
     }
 
     #[test]
-    fn walked_keeps_the_maximum() {
+    fn sent_accumulates_across_replies() {
         let b = MemTaskBlobs::default();
         let store = open_mem(&b, SMALL);
         let posted: Vec<_> = (0..3).map(|_| put(&store, BOB, hobi(), "p")).collect();
         let r = reader("rm");
-        store.walked(BOB, &r, posted[1].seq);
-        store.walked(BOB, &r, posted[0].seq);
+        store.sent(BOB, &r, &[posted[1].seq]);
+        store.sent(BOB, &r, &[posted[0].seq]);
+        for p in &posted[..2] {
+            assert_eq!(
+                store.plan_read(BOB, &r, Some(p.post.id)).ack_to,
+                Some(p.seq)
+            );
+        }
         assert_eq!(
             store.plan_read(BOB, &r, Some(posted[2].post.id)).ack_to,
-            Some(posted[1].seq)
+            None
         );
     }
 
@@ -1645,12 +1656,12 @@ mod tests {
     }
 
     #[test]
-    fn after_a_restart_an_acknowledgement_moves_nothing_until_posts_are_walked_again() {
+    fn after_a_restart_an_acknowledgement_moves_nothing_until_posts_are_sent_again() {
         let b = MemTaskBlobs::default();
         let store = open_mem(&b, SMALL);
         let posted: Vec<_> = (0..2).map(|_| put(&store, BOB, hobi(), "p")).collect();
         let r = reader("rm");
-        store.walked(BOB, &r, posted[1].seq);
+        store.sent(BOB, &r, &[posted[1].seq]);
         assert_eq!(
             store.plan_read(BOB, &r, Some(posted[1].post.id)).ack_to,
             Some(posted[1].seq)
@@ -1661,7 +1672,7 @@ mod tests {
             store.plan_read(BOB, &r, Some(posted[1].post.id)).ack_to,
             None
         );
-        store.walked(BOB, &r, posted[1].seq);
+        store.sent(BOB, &r, &[posted[1].seq]);
         assert_eq!(
             store.plan_read(BOB, &r, Some(posted[1].post.id)).ack_to,
             Some(posted[1].seq)
@@ -1675,7 +1686,7 @@ mod tests {
         let r = reader("rm");
         assert!(store.candidates(ALICE, 0, 10).is_empty());
         assert!(store.get(ALICE, bob.post.id).is_none());
-        store.walked(ALICE, &r, bob.seq);
+        store.sent(ALICE, &r, &[bob.seq]);
         assert_eq!(store.plan_read(ALICE, &r, Some(bob.post.id)).ack_to, None);
         let alice = put(&store, ALICE, hobi(), "alice");
         assert_eq!(alice.seq, bob.seq);
@@ -2372,7 +2383,7 @@ mod tests {
         store.advance(ALICE, &reader("rm"), q.seq).unwrap();
         store.mark(&enrolled(&[("rm", 3000), ("suga", 3001), ("jimin", 3002)]));
         assert!(store.due(10).is_empty());
-        store.walked(BOB, &reader("v"), p.seq);
+        store.sent(BOB, &reader("v"), &[p.seq]);
         assert_eq!(
             store.plan_read(BOB, &reader("v"), Some(p.post.id)).ack_to,
             Some(p.seq)
@@ -2381,7 +2392,7 @@ mod tests {
         assert_eq!(
             store.plan_read(BOB, &reader("v"), Some(p.post.id)).ack_to,
             None,
-            "a de-enrolled reader's walk is forgotten"
+            "a de-enrolled reader's sent posts are forgotten"
         );
         let mut got = whys(&store.due(10));
         got.sort();
