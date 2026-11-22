@@ -663,6 +663,7 @@ mod tests {
                     agent: "hobi".into(),
                     ask: Ask::Prompt { prompt: text() },
                     labels: Labels {},
+                    bindings: vec![],
                 },
             },
             Verb::TaskAdd {

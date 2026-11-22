@@ -2571,6 +2571,7 @@ mod tests {
             actions: 0,
             last_action_secs: None,
             cursor: maknae_proto::TaskCursor::from_seq(1),
+            bindings: vec![],
         }
     }
 

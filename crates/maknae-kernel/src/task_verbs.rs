@@ -2,7 +2,7 @@
 use maknae_config::AgentId;
 use maknae_proto::{
     AgentEntry, AgentPage, AgentStanding, SecretText, TaskCursor, TaskId, TaskRef, TaskReportPage,
-    TaskReportView, TaskState, TaskSubmission, TaskView, Tasker, Verb,
+    TaskReportView, TaskState, TaskSubmission, TaskView, Tasker, Verb, TASK_PAGE_MAX,
 };
 use maknae_security::{AttrValue, Request};
 
@@ -12,8 +12,6 @@ use maknae_proto::{HeldCause, HeldView, ReleaseResult};
 use crate::handler::Stamp;
 use crate::task::{Contained, HeldTask, Holding, ReleaseRefusal, Released};
 use crate::task_store::{Hot, TaskRecord};
-
-pub(crate) const TASK_PAGE_MAX: usize = 32;
 
 /// An upper bound on one report entry's encoding beyond its text.
 pub(crate) const REPORT_ENTRY_OVERHEAD: usize = 256;
@@ -368,6 +366,7 @@ pub(crate) fn view(rec: &TaskRecord, hot: &Hot, now: i64) -> TaskView {
         actions: hot.actions,
         last_action_secs: hot.last_action,
         cursor: TaskCursor::from_seq(rec.tseq),
+        bindings: Vec::new(),
     }
 }
 
@@ -874,6 +873,7 @@ mod tests {
                     prompt: SecretText(Zeroizing::new("p".into())),
                 },
                 labels: maknae_proto::Labels {},
+                bindings: vec![],
             },
         };
         assert_eq!(task_verb(&sub).unwrap().object(), Some("agent:jin".into()));
@@ -976,6 +976,7 @@ mod tests {
                 actions: 4,
                 last_action_secs: Some(140),
                 cursor: TaskCursor::from_seq(7),
+                bindings: vec![],
             }
         );
         assert_eq!(view(&r, &hot, 50).elapsed_secs, 0);

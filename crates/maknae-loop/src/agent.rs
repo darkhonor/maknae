@@ -336,6 +336,7 @@ mod tests {
                 prompt: SecretText(Zeroizing::new("sentinel-629-agentd-prompt".into())),
             },
             labels: Labels {},
+            bindings: vec![],
         }
     }
 

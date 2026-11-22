@@ -95,6 +95,7 @@ impl<D: Dial> TaskerClient<D> {
             agent: agent.as_str().into(),
             ask: Ask::Prompt { prompt },
             labels: Labels {},
+            bindings: Vec::new(),
         };
         match self.call(Verb::TaskSubmit { task }, true).await? {
             Payload::TaskAccepted(view) => Ok(view),
@@ -258,6 +259,7 @@ mod tests {
             actions: 0,
             last_action_secs: None,
             cursor: TaskCursor::from_seq(seq),
+            bindings: vec![],
         }
     }
 

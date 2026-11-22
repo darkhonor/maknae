@@ -158,6 +158,7 @@ mod tests {
                 prompt: SecretText(String::from(PROMPT).into()),
             },
             labels: Labels {},
+            bindings: vec![],
         }
     }
 

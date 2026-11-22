@@ -4165,6 +4165,7 @@ mod tests {
                     prompt: SecretText(zeroize::Zeroizing::new("p".repeat(prompt_bytes))),
                 },
                 labels: crate::Labels {},
+                bindings: vec![],
             },
         }
     }

@@ -1476,6 +1476,7 @@ impl TaskStore {
             agent: sub.agent,
             ask: sub.ask,
             labels: sub.labels,
+            bindings: Vec::new(),
         };
         for attempt in 1..=ID_DRAWS {
             let signed = Arc::new(signer.sign(task)?);
@@ -2740,6 +2741,7 @@ impl TaskObjectForTest for TaskObject {
                 prompt: maknae_proto::SecretText(String::new().into()),
             },
             labels: maknae_proto::Labels {},
+            bindings: Vec::new(),
         }
     }
 }
@@ -3627,6 +3629,7 @@ mod tests {
                 prompt: SecretText(String::from(PROMPT).into()),
             },
             labels: Labels {},
+            bindings: vec![],
         }
     }
 

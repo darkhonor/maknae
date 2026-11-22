@@ -439,6 +439,7 @@ fn submit(agent: &str) -> Verb {
                 prompt: secret("sentinel-630-prompt"),
             },
             labels: maknae_proto::Labels {},
+            bindings: vec![],
         },
     }
 }

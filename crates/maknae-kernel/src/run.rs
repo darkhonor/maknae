@@ -3931,7 +3931,7 @@ async fn serve_task_verb<S, E, P>(
                     .await;
                 return;
             };
-            let (entries, next) = store.list(reach, &agent, after, tv::TASK_PAGE_MAX);
+            let (entries, next) = store.list(reach, &agent, after, maknae_proto::TASK_PAGE_MAX);
             let outcome = decided(
                 "permit",
                 &format!("listed {} tasks", entries.len()),
@@ -4363,6 +4363,7 @@ async fn submit_authority<P: Authorizer + Send + Sync + 'static>(
                 prompt: maknae_proto::SecretText(String::new().into()),
             },
             labels: maknae_proto::Labels {},
+            bindings: Vec::new(),
         },
     };
     authority(authorizer, &verb, uid, stamp, target, lane, timeout).await
@@ -11096,6 +11097,7 @@ mod record_widths {
                     agent: agent.into(),
                     ask: maknae_proto::Ask::Prompt { prompt: text() },
                     labels: maknae_proto::Labels {},
+                    bindings: Vec::new(),
                 },
             },
             Verb::TaskAdd {
@@ -11193,7 +11195,7 @@ mod record_widths {
 
     fn says(op: &str, person: bool, tasker: &str) -> Vec<Say> {
         let held = Shape::Cites(Some(held_tasker()));
-        let ids = vec![TASK; tv::TASK_PAGE_MAX + 1];
+        let ids = vec![TASK; maknae_proto::TASK_PAGE_MAX + 1];
         let collected = format!("collected {} reports{}", ids.len(), tv::named(&ids));
         let permit = |reason: String, shape: Shape| Say {
             result: "permit",
@@ -11237,7 +11239,10 @@ mod record_widths {
                 deny("task gone".into(), Shape::Plain),
             ],
             ("list", _) => vec![
-                permit(format!("listed {} tasks", tv::TASK_PAGE_MAX), Shape::Plain),
+                permit(
+                    format!("listed {} tasks", maknae_proto::TASK_PAGE_MAX),
+                    Shape::Plain,
+                ),
                 deny(no_agent, Shape::Plain),
             ],
             ("stop" | "drop", _) => {

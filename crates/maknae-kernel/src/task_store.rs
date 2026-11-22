@@ -756,6 +756,7 @@ mod tests {
                     prompt: secret(prompt),
                 },
                 labels: Labels {},
+                bindings: vec![],
             },
             signature: TaskSignature {
                 alg: "test".into(),
@@ -826,6 +827,7 @@ mod tests {
                 prompt: secret(SENTINEL),
             },
             labels: Labels {},
+            bindings: vec![],
         };
         let enrolled = Enrolled {
             generation: store.generation(&hobi()),

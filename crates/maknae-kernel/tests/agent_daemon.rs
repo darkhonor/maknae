@@ -529,6 +529,7 @@ impl World {
                     prompt: secret(prompt),
                 },
                 labels: maknae_proto::Labels {},
+                bindings: vec![],
             },
         };
         match self.ask(verb).await {

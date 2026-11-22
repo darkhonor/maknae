@@ -811,6 +811,7 @@ mod tests {
             actions: 0,
             last_action_secs: None,
             cursor: TaskCursor::from_seq(seq),
+            bindings: vec![],
         }
     }
 

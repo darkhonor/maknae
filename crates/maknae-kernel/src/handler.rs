@@ -2127,6 +2127,7 @@ mod tests {
                         prompt: maknae_proto::SecretText(maknae_io::Zeroizing::new("p".into())),
                     },
                     labels: maknae_proto::Labels {},
+                    bindings: vec![],
                 },
             },
             Verb::TaskAdd {

@@ -1323,6 +1323,7 @@ mod tests {
                 agent: "hobi".into(),
                 ask: Ask::Prompt { prompt: st(prompt) },
                 labels: Labels {},
+                bindings: vec![],
             },
             signature: TaskSignature {
                 alg: "alg".into(),
@@ -1356,6 +1357,7 @@ mod tests {
             actions: 0,
             last_action_secs: None,
             cursor: maknae_proto::TaskCursor::from_seq(1),
+            bindings: vec![],
         }
     }
     fn refused() -> Refused {
