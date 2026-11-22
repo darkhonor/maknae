@@ -3,6 +3,7 @@
 //! forges the catalog names. The kernel re-checks every binding at intake.
 
 use maknae_proto::{Binding, BindingRequest, GitRef};
+use std::ops::Range;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Provider {
@@ -42,6 +43,7 @@ pub enum Reason {
     OverTheBound,
     NotInParent,
     NoForgeList,
+    AmbiguousGitlabPath,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -59,7 +61,11 @@ pub enum Origin {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Found {
     Ref(GitRef),
-    Bare { base: String, quoted: bool },
+    /// A bare `owner/repo` at `at` in the prompt, copied only once it binds.
+    Bare {
+        at: Range<usize>,
+        quoted: bool,
+    },
     Unbound(Unbound),
 }
 
@@ -81,7 +87,7 @@ impl HintSource for Links {
             .split(char::is_whitespace)
             .filter_map(|word| match link_start(word) {
                 Some((at, https)) => link(&word[at..], https, forges),
-                None => written_ref(word, forges),
+                None => written_ref(prompt, word, forges),
             })
             .map(|found| Hint {
                 origin: Origin::Prompt,
@@ -120,19 +126,16 @@ fn link(word: &str, https: bool, forges: Option<&[Forge]>) -> Option<Found> {
     let after = after.split(LINK_ENDS).next().unwrap_or("");
     let after = after.trim_end_matches(TRAILING);
     let authority_end = after.find(['/', '?', '#']).unwrap_or(after.len());
-    let authority = &after[..authority_end];
-    let host_port = authority.rsplit('@').next().unwrap_or("");
-    if host_port.is_empty() {
-        return None;
-    }
-    let host_port = host_port.to_ascii_lowercase();
+    let host_port = after[..authority_end].rsplit('@').next().unwrap_or("");
     let path = &after[authority_end..];
     let path = &path[..path.find(['?', '#']).unwrap_or(path.len())];
     let unbound = |reason| {
-        Some(Found::Unbound(Unbound {
-            subject: Subject::Host(host_port.clone()),
-            reason,
-        }))
+        nameable_host(host_port).map(|host| {
+            Found::Unbound(Unbound {
+                subject: Subject::Host(host),
+                reason,
+            })
+        })
     };
     if !https {
         return unbound(Reason::NotHttps);
@@ -140,36 +143,60 @@ fn link(word: &str, https: bool, forges: Option<&[Forge]>) -> Option<Found> {
     let Some(forges) = forges else {
         return unbound(Reason::NoForgeList);
     };
-    let forge = match one_of(forges.iter().filter(|f| f.host == host_port)) {
+    let forge = match one_of(
+        forges
+            .iter()
+            .filter(|f| f.host.eq_ignore_ascii_case(host_port)),
+    ) {
         Match::One(forge) => forge,
         Match::None => return unbound(Reason::UnknownServer),
         Match::Several => return unbound(Reason::AmbiguousForge),
     };
-    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let path = path.trim_start_matches('/');
+    let mut segments = path.split('/');
     let (base, change) = match forge.provider {
         Provider::Github => {
-            let (owner, repo) = (segments.first()?, segments.get(1)?);
-            let change = match (segments.get(2), segments.get(3)) {
-                (Some(&"pull"), Some(n)) => number(n),
+            let owner = segments.next()?;
+            let repo = segments.next()?;
+            let change = match (segments.next(), segments.next()) {
+                (Some("pull"), Some(n)) => number(n),
                 _ => None,
             };
-            (format!("{owner}/{}", without_git(repo)), change)
+            (&path[..owner.len() + 1 + without_git(repo).len()], change)
         }
         Provider::Gitlab => {
-            let dash = segments.iter().position(|s| *s == "-");
-            let project = &segments[..dash.unwrap_or(segments.len())];
-            let change = match dash.map(|d| (segments.get(d + 1), segments.get(d + 2))) {
-                Some((Some(&"merge_requests"), Some(n))) => number(n),
-                _ => None,
+            let (project, change) = match path.split_once("/-/") {
+                Some((project, rest)) => {
+                    let mut rest = rest.split('/');
+                    let change = match (rest.next(), rest.next()) {
+                        (Some("merge_requests"), Some(n)) => number(n),
+                        _ => None,
+                    };
+                    (project, change)
+                }
+                None => {
+                    let project = path.trim_end_matches('/');
+                    if project.split('/').skip(2).any(gitlab_route_segment) {
+                        return Some(Found::Unbound(Unbound {
+                            subject: Subject::Host(forge.host.clone()),
+                            reason: Reason::AmbiguousGitlabPath,
+                        }));
+                    }
+                    (project, None)
+                }
             };
-            let (last, group) = project.split_last()?;
-            let mut base = group.join("/");
-            base.push('/');
-            base.push_str(without_git(last));
-            (base, change)
+            (without_git(project), change)
         }
     };
     git_ref(forge, base, change).map(Found::Ref)
+}
+
+/// The link's host, lowercase, when it is one a note may name: checked before it
+/// is copied, so that its copy passes [`maknae_proto::server_is_acceptable`].
+fn nameable_host(host_port: &str) -> Option<String> {
+    (host_port.len() <= maknae_proto::SERVER_MAX_BYTES
+        && maknae_proto::host_port(host_port).is_some())
+    .then(|| host_port.to_ascii_lowercase())
 }
 
 enum Match<'f> {
@@ -221,15 +248,18 @@ fn names_a_repository(provider: Provider, base: &str) -> bool {
                     .is_some_and(|owner| !github_reserved_first_segment(owner))
                     && segments.count() == 1
             }
-            Provider::Gitlab => true,
+            Provider::Gitlab => base
+                .split('/')
+                .next()
+                .is_some_and(|group| !gitlab_reserved_first_segment(group)),
         }
 }
 
-fn git_ref(forge: &Forge, base: String, change: Option<u64>) -> Option<GitRef> {
-    (maknae_proto::server_is_acceptable(&forge.host) && names_a_repository(forge.provider, &base))
+fn git_ref(forge: &Forge, base: &str, change: Option<u64>) -> Option<GitRef> {
+    (maknae_proto::server_is_acceptable(&forge.host) && names_a_repository(forge.provider, base))
         .then(|| GitRef {
             server: forge.host.clone(),
-            base,
+            base: base.to_owned(),
             change,
         })
 }
@@ -240,7 +270,7 @@ const CLOSERS: &[char] = &[
 ];
 
 /// A shorthand `owner/repo#N` or `owner/repo!N`, or a bare `owner/repo`.
-fn written_ref(word: &str, forges: Option<&[Forge]>) -> Option<Found> {
+fn written_ref(prompt: &str, word: &str, forges: Option<&[Forge]>) -> Option<Found> {
     let core = word.trim_start_matches(OPENERS).trim_end_matches(CLOSERS);
     let (inner, quoted) = match core.strip_prefix('`').and_then(|c| c.strip_suffix('`')) {
         Some(inner) => (inner, true),
@@ -250,8 +280,9 @@ fn written_ref(word: &str, forges: Option<&[Forge]>) -> Option<Found> {
         return None;
     }
     let Some(at) = inner.find(['#', '!']) else {
-        return maknae_proto::repository_path_is_acceptable(inner).then(|| Found::Bare {
-            base: inner.to_owned(),
+        let start = inner.as_ptr() as usize - prompt.as_ptr() as usize;
+        return maknae_proto::repository_path_is_acceptable(inner).then_some(Found::Bare {
+            at: start..start + inner.len(),
             quoted,
         });
     };
@@ -274,7 +305,7 @@ fn written_ref(word: &str, forges: Option<&[Forge]>) -> Option<Found> {
         }
     };
     let change = shorthand_change(forge.provider, sigil)?.then_some(n);
-    git_ref(forge, base.to_owned(), change).map(Found::Ref)
+    git_ref(forge, base, change).map(Found::Ref)
 }
 
 /// A remote's host (no userinfo, no port, lowercase) and repository path.
@@ -327,7 +358,7 @@ fn remote_found(remote: &RemoteUrl, forges: Option<&[Forge]>) -> Option<Found> {
         return unbound(Reason::NoForgeList);
     };
     match one_of(forges.iter().filter(|f| hostname(&f.host) == remote.host)) {
-        Match::One(forge) => git_ref(forge, remote.path.clone(), None).map(Found::Ref),
+        Match::One(forge) => git_ref(forge, &remote.path, None).map(Found::Ref),
         Match::None => unbound(Reason::UnknownServer),
         Match::Several => unbound(Reason::AmbiguousForge),
     }
@@ -676,38 +707,148 @@ pub fn bare_owner_repo_binds(quoted: bool, equals_a_remote: bool) -> bool {
 }
 
 /// F12: first path segments that are GitHub's own pages, not owners.
-const GITHUB_RESERVED: [&str; 25] = [
-    "features",
-    "orgs",
-    "settings",
-    "marketplace",
-    "topics",
+const GITHUB_RESERVED: [&str; 55] = [
+    "about",
+    "account",
+    "advisories",
+    "apps",
+    "codespaces",
     "collections",
-    "sponsors",
+    "contact",
+    "copilot",
+    "customer-stories",
+    "dashboard",
+    "discussions",
+    "education",
+    "enterprise",
+    "enterprises",
+    "events",
+    "explore",
+    "features",
+    "github-copilot",
+    "home",
+    "issues",
+    "join",
     "login",
     "logout",
-    "join",
-    "pricing",
-    "explore",
-    "notifications",
-    "about",
-    "site",
-    "security",
-    "enterprise",
-    "apps",
-    "organizations",
-    "users",
-    "search",
-    "trending",
+    "marketplace",
+    "mobile",
+    "models",
     "new",
-    "codespaces",
-    "copilot",
+    "nonprofit",
+    "notifications",
+    "open-source",
+    "organizations",
+    "orgs",
+    "partners",
+    "password_reset",
+    "premium-support",
+    "pricing",
+    "pulls",
+    "readme",
+    "resources",
+    "search",
+    "security",
+    "sessions",
+    "settings",
+    "signup",
+    "site",
+    "solutions",
+    "sponsors",
+    "stars",
+    "team",
+    "topics",
+    "trending",
+    "user-attachments",
+    "users",
+    "watching",
+    "why-github",
 ];
 
 pub fn github_reserved_first_segment(segment: &str) -> bool {
     GITHUB_RESERVED
         .iter()
         .any(|r| r.eq_ignore_ascii_case(segment))
+}
+
+/// GitLab's reserved top-level group names (its "Reserved project and group names").
+const GITLAB_RESERVED: [&str; 39] = [
+    "-",
+    ".well-known",
+    "404.html",
+    "422.html",
+    "500.html",
+    "502.html",
+    "503.html",
+    "admin",
+    "api",
+    "apple-touch-icon.png",
+    "assets",
+    "dashboard",
+    "deploy.html",
+    "explore",
+    "favicon.ico",
+    "favicon.png",
+    "files",
+    "groups",
+    "health_check",
+    "help",
+    "import",
+    "jwt",
+    "login",
+    "oauth",
+    "profile",
+    "projects",
+    "public",
+    "robots.txt",
+    "s",
+    "search",
+    "sitemap",
+    "sitemap.xml",
+    "sitemap.xml.gz",
+    "slash-command-logo.png",
+    "snippets",
+    "unsubscribes",
+    "uploads",
+    "users",
+    "v2",
+];
+
+pub fn gitlab_reserved_first_segment(segment: &str) -> bool {
+    GITLAB_RESERVED
+        .iter()
+        .any(|r| r.eq_ignore_ascii_case(segment))
+}
+
+/// Route segments a GitLab path without `/-/` may carry after its project: the
+/// legacy routes and GitLab's reserved project names.
+const GITLAB_ROUTES: [&str; 22] = [
+    "merge_requests",
+    "issues",
+    "tree",
+    "blob",
+    "commit",
+    "commits",
+    "pipelines",
+    "jobs",
+    "wikis",
+    "edit",
+    "badges",
+    "blame",
+    "builds",
+    "create",
+    "create_dir",
+    "files",
+    "find_file",
+    "new",
+    "preview",
+    "raw",
+    "refs",
+    "update",
+];
+
+pub fn gitlab_route_segment(segment: &str) -> bool {
+    GITLAB_ROUTES.contains(&segment)
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
@@ -750,21 +891,24 @@ pub fn choose(
                 note(u.clone());
                 None
             }
-            Found::Bare { base, quoted } => {
-                let remote = remotes.iter().find(|r| r.base == *base);
+            Found::Bare { at, quoted } => {
+                let Some(base) = prompt.get(at.clone()) else {
+                    continue;
+                };
+                let remote = remotes.iter().find(|r| r.base == base);
                 if !bare_owner_repo_binds(*quoted, remote.is_some()) {
                     continue;
                 }
                 match (remote, the_one_forge(forges)) {
                     (Some(r), _) => Some(GitRef {
                         server: r.server.clone(),
-                        base: base.clone(),
+                        base: base.to_owned(),
                         change: None,
                     }),
-                    (None, Ok(forge)) => git_ref(forge, base.clone(), None),
+                    (None, Ok(forge)) => git_ref(forge, base, None),
                     (None, Err(reason)) => {
                         note(Unbound {
-                            subject: Subject::Written(base.clone()),
+                            subject: Subject::Written(base.to_owned()),
                             reason,
                         });
                         None
@@ -969,6 +1113,7 @@ mod tests {
             ("https://github.com:444/o/r/pull/1", "github.com:444"),
             ("https://github.com@evil.example/o/r/pull/1", "evil.example"),
             ("https://u:github.com@evil.example/o/r", "evil.example"),
+            ("https://Evil.Example/o/r", "evil.example"),
         ] {
             let c = links(prompt, &[gh()]);
             assert!(c.bindings.is_empty(), "{prompt}");
@@ -1058,31 +1203,61 @@ mod tests {
     #[test]
     fn github_reserved_first_segments_are_not_repositories() {
         let reserved = [
-            "features",
-            "orgs",
-            "settings",
-            "marketplace",
-            "topics",
+            "about",
+            "account",
+            "advisories",
+            "apps",
+            "codespaces",
             "collections",
-            "sponsors",
+            "contact",
+            "copilot",
+            "customer-stories",
+            "dashboard",
+            "discussions",
+            "education",
+            "enterprise",
+            "enterprises",
+            "events",
+            "explore",
+            "features",
+            "github-copilot",
+            "home",
+            "issues",
+            "join",
             "login",
             "logout",
-            "join",
-            "pricing",
-            "explore",
-            "notifications",
-            "about",
-            "site",
-            "security",
-            "enterprise",
-            "apps",
-            "organizations",
-            "users",
-            "search",
-            "trending",
+            "marketplace",
+            "mobile",
+            "models",
             "new",
-            "codespaces",
-            "copilot",
+            "nonprofit",
+            "notifications",
+            "open-source",
+            "organizations",
+            "orgs",
+            "partners",
+            "password_reset",
+            "premium-support",
+            "pricing",
+            "pulls",
+            "readme",
+            "resources",
+            "search",
+            "security",
+            "sessions",
+            "settings",
+            "signup",
+            "site",
+            "solutions",
+            "sponsors",
+            "stars",
+            "team",
+            "topics",
+            "trending",
+            "user-attachments",
+            "users",
+            "watching",
+            "why-github",
         ];
         for seg in reserved {
             assert!(github_reserved_first_segment(seg), "{seg}");
@@ -1104,6 +1279,148 @@ mod tests {
             bound(&c),
             [git("gitlab.lab.local:8443", "settings/x", None)]
         );
+    }
+
+    #[test]
+    fn gitlab_reserved_first_segments_are_not_repositories() {
+        let reserved = [
+            "-",
+            ".well-known",
+            "404.html",
+            "422.html",
+            "500.html",
+            "502.html",
+            "503.html",
+            "admin",
+            "api",
+            "apple-touch-icon.png",
+            "assets",
+            "dashboard",
+            "deploy.html",
+            "explore",
+            "favicon.ico",
+            "favicon.png",
+            "files",
+            "groups",
+            "health_check",
+            "help",
+            "import",
+            "jwt",
+            "login",
+            "oauth",
+            "profile",
+            "projects",
+            "public",
+            "robots.txt",
+            "s",
+            "search",
+            "sitemap",
+            "sitemap.xml",
+            "sitemap.xml.gz",
+            "slash-command-logo.png",
+            "snippets",
+            "unsubscribes",
+            "uploads",
+            "users",
+            "v2",
+        ];
+        for seg in reserved {
+            assert!(gitlab_reserved_first_segment(seg), "{seg}");
+            let c = links(
+                &format!("https://gitlab.lab.local:8443/{seg}/x/-/merge_requests/3"),
+                &[gl()],
+            );
+            assert!(
+                c.bindings.is_empty() && c.unbound.is_empty(),
+                "{seg}: {c:?}"
+            );
+            let c = links(&format!("`{seg}/x`"), &[gl()]);
+            assert!(
+                c.bindings.is_empty() && c.unbound.is_empty(),
+                "{seg}: {c:?}"
+            );
+        }
+        assert!(gitlab_reserved_first_segment("Users"));
+        assert!(!gitlab_reserved_first_segment("settings"));
+        assert!(!gitlab_reserved_first_segment("darkhonor"));
+    }
+
+    #[test]
+    fn a_gitlab_path_with_a_legacy_route_and_no_dash_is_ambiguous() {
+        let routes = [
+            "merge_requests",
+            "issues",
+            "tree",
+            "blob",
+            "commit",
+            "commits",
+            "pipelines",
+            "jobs",
+            "wikis",
+            "edit",
+            "badges",
+            "blame",
+            "builds",
+            "create",
+            "create_dir",
+            "files",
+            "find_file",
+            "new",
+            "preview",
+            "raw",
+            "refs",
+            "update",
+        ];
+        let ambiguous = [Unbound {
+            subject: Subject::Host("gitlab.lab.local:8443".into()),
+            reason: Reason::AmbiguousGitlabPath,
+        }];
+        for route in routes {
+            assert!(gitlab_route_segment(route), "{route}");
+            for path in [format!("g/p/{route}"), format!("g/sub/p/{route}/3")] {
+                let c = links(&format!("https://gitlab.lab.local:8443/{path}"), &[gl()]);
+                assert!(c.bindings.is_empty(), "{path}");
+                assert_eq!(c.unbound, ambiguous, "{path}");
+            }
+            let c = links(
+                &format!("https://gitlab.lab.local:8443/g/p/-/{route}/3"),
+                &[gl()],
+            );
+            assert_eq!(
+                bound(&c),
+                [git(
+                    "gitlab.lab.local:8443",
+                    "g/p",
+                    (route == "merge_requests").then_some(3)
+                )],
+                "{route}"
+            );
+        }
+        assert!(!gitlab_route_segment("pull"));
+        let c = links(
+            "https://gitlab.lab.local:8443/g/sub/p/-/merge_requests/4",
+            &[gl()],
+        );
+        assert_eq!(
+            bound(&c),
+            [git("gitlab.lab.local:8443", "g/sub/p", Some(4))]
+        );
+    }
+
+    #[test]
+    fn unquoted_bare_words_are_held_as_ranges_not_copies() {
+        let prompt = "edit src/main.rs and/or TCP/IP";
+        let hints = Links.hints(prompt, Some(&[gh()]));
+        let held: Vec<&str> = hints
+            .iter()
+            .map(|h| match &h.found {
+                Found::Bare { at, quoted: false } => &prompt[at.clone()],
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(held, ["src/main.rs", "and/or", "TCP/IP"]);
+        let c = choose(&[&Links], prompt, Some(&[gh()]), None);
+        assert_eq!(c, Chosen::default());
     }
 
     #[test]
@@ -1406,6 +1723,16 @@ mod tests {
         let prompt = format!("https://u:{TOKEN}@evil.example/o/r");
         let c = links(&prompt, &[gh()]);
         assert!(!format!("{c:?}").contains("SENTINEL"));
+        assert_eq!(c.unbound, [host("evil.example", Reason::UnknownServer)]);
+        let long = format!("https://{}.example/o/r", "h".repeat(260));
+        for prompt in [format!("https://x:{TOKEN}/@github.com/o/n"), long] {
+            for forges in [Some(&[gh()][..]), None] {
+                let c = choose(&[&Links], &prompt, forges, None);
+                assert_eq!(c, Chosen::default(), "{prompt}");
+            }
+            let c = links(&prompt.replacen("https", "http", 1), &[gh()]);
+            assert_eq!(c, Chosen::default(), "{prompt}");
+        }
     }
 
     #[test]

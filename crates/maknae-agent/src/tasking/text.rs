@@ -213,6 +213,7 @@ fn unbound_reason(reason: Reason) -> String {
         ),
         Reason::NotInParent => "not in the parent task".into(),
         Reason::NoForgeList => "no forge list".into(),
+        Reason::AmbiguousGitlabPath => "ambiguous GitLab path".into(),
     }
 }
 
@@ -440,6 +441,10 @@ mod tests {
                 not(Subject::Ref(git("o/r", Some(9))), Reason::OverTheBound),
                 not(Subject::Ref(git("o/s", None)), Reason::NotInParent),
                 not(Subject::Host("github.com".into()), Reason::NoForgeList),
+                not(
+                    Subject::Host("gitlab.lab.local:8443".into()),
+                    Reason::AmbiguousGitlabPath,
+                ),
                 not(Subject::Host("a\u{1b}[2Jb".into()), Reason::UnknownServer),
             ],
         );
@@ -455,6 +460,7 @@ mod tests {
                 "not bound: github.com/o/r change 9: over the bound of 8 bindings or 976 bytes",
                 "not bound: github.com/o/s: not in the parent task",
                 "not bound: github.com: no forge list",
+                "not bound: gitlab.lab.local:8443: ambiguous GitLab path",
                 "not bound: a\\u{001b}[2Jb: unknown server",
             ]
         );
