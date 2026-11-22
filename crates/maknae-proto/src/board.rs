@@ -166,7 +166,6 @@ impl TryFrom<PostDraftWire> for PostDraft {
 }
 
 impl PostDraft {
-    /// Body plus each attachment's label and content, in bytes.
     pub fn content_len(&self) -> usize {
         self.attachments
             .iter()
@@ -261,6 +260,7 @@ impl std::fmt::Debug for Post {
             .field("author", &self.author)
             .field("task", &self.task)
             .field("at_secs", &self.at_secs)
+            .field("labels", &self.labels)
             .field("draft", &self.draft)
             .finish()
     }
@@ -304,7 +304,6 @@ impl std::io::Write for Counter {
     }
 }
 
-/// The CBOR of `(body, attachments)`, measured first and written into one buffer that never grows.
 pub fn post_content_bytes(
     draft: &PostDraft,
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, ProtoCodecError> {
@@ -375,16 +374,32 @@ mod tests {
         ] {
             assert_eq!(bad.parse::<PostId>(), Err(PostIdTextError), "{bad}");
         }
-        assert!(dec::<PostId>(&enc(&crate::Bytes::new(vec![0u8; 15].into()))).is_err());
+        for n in [15, 17] {
+            assert!(dec::<PostId>(&enc(&crate::Bytes::new(vec![0u8; n].into()))).is_err());
+        }
     }
 
     #[test]
     fn a_draft_decodes_when_it_is_within_every_bound() {
         let mut d = draft();
-        d.to = Addressee::Agents((0..8).map(|i| format!("agent-{i}")).collect());
+        d.to = Addressee::Agents(
+            (0..8)
+                .map(|i| {
+                    if i == 0 {
+                        "a".repeat(32)
+                    } else {
+                        format!("agent-{i}")
+                    }
+                })
+                .collect(),
+        );
         d.attachments = (0..8)
             .map(|i| Attachment {
-                label: format!("a{i}"),
+                label: if i == 0 {
+                    "l".repeat(64)
+                } else {
+                    format!("a{i}")
+                },
                 media: Media::TextDiff,
                 content: text("x"),
             })
@@ -471,5 +486,6 @@ mod tests {
         assert_eq!(board_page_budget(10_000), 10_000 - BOARD_ENVELOPE);
         assert_eq!(board_page_budget(BOARD_ENVELOPE), 0);
         assert_eq!(board_page_budget(1), 0);
+        assert_eq!(board_page_budget(0), 0);
     }
 }
