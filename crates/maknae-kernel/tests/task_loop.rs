@@ -4626,11 +4626,11 @@ mod board {
                 .board
                 .post(
                     self.key(),
-                    Author::Agent(author.into()),
-                    Some(uid_of(author)),
+                    (Author::Agent(author.into()), Some(uid_of(author))),
                     None,
                     labels,
                     note(body),
+                    &*self.agents.view,
                 )
                 .unwrap()
                 .post
@@ -5397,5 +5397,121 @@ mod board {
         assert_eq!(jin_reads().await, all);
         assert_eq!(w.cursor("jin"), 0);
         assert_eq!(board.held_count(HOBI_UID), 0);
+    }
+
+    /// Runs `then` once, while the trail appends `action`'s intent record.
+    struct OnIntent {
+        inner: Arc<Records>,
+        action: &'static str,
+        then: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    }
+
+    impl maknae_audit_append::AuditEmit for OnIntent {
+        fn emit(
+            &self,
+            record: &AuditRecord,
+        ) -> impl std::future::Future<Output = Result<(), maknae_audit_append::AuditError>> + Send
+        {
+            if record.action == self.action && record.outcome.reason == "intent recorded" {
+                if let Some(then) = self.then.lock().unwrap().take() {
+                    then();
+                }
+            }
+            self.inner.emit(record)
+        }
+    }
+
+    impl World {
+        /// `verb` from `agent`, with `then` run while its intent record is appended.
+        async fn board_during_intent(
+            &self,
+            agent: &str,
+            verb: Verb,
+            task: TaskId,
+            then: impl FnOnce() + Send + 'static,
+        ) -> (RespResult, Vec<AuditRecord>) {
+            let action = match verb {
+                Verb::BoardPost { .. } => "board.post",
+                _ => "board.read",
+            };
+            let records = Records::new(0);
+            let emit = Arc::new(OnIntent {
+                inner: Arc::clone(&records),
+                action,
+                then: std::sync::Mutex::new(Some(Box::new(then))),
+            });
+            let raw = {
+                let _shared = STORE.read().await;
+                let (session, gate) = self.agent_session(agent);
+                self.serve(session, gate, verb, Some(task), &emit, None)
+                    .await
+            };
+            let mut cursor = &raw[..];
+            let frame = common::read_frame(&mut cursor, 1 << 20).await.unwrap();
+            let answer = maknae_proto::decode_response(&frame).unwrap().result;
+            let records = records
+                .snapshot()
+                .into_iter()
+                .filter(|r| r.action.starts_with("board."))
+                .collect();
+            (answer, records)
+        }
+
+        /// Rewrites the bindings and reloads the policy, as an admin's edit installs it.
+        fn rebind(&self, bindings: &str) -> impl Fn() + Send + Sync + 'static {
+            let (pdp, path, text) = (
+                Arc::clone(&self.pdp),
+                maknae_authz_basic::PolicyPaths::in_dir(&self.root).bindings,
+                format!("schema_version: 1\nbindings:\n{bindings}"),
+            );
+            move || {
+                common::write_0640(&path, &text);
+                pdp.baseline().reload_from_file().unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_post_written_after_its_board_is_contained_is_withheld() {
+        let w = board_world("board-post-contained");
+        let h = w.at_work("hobi");
+        let contain = w.rebind(&format!(
+            "  adversary: [\"{}\"]\n  user: [\"nobody\"]\n",
+            w.user
+        ));
+        let (board, view) = (Arc::clone(&w.agents.board), w.agents.view.clone());
+        let (answer, records) = w
+            .board_during_intent(
+                "hobi",
+                post(note("sentinel-695-after-contain")),
+                h,
+                move || {
+                    contain();
+                    board.mark(&*view);
+                },
+            )
+            .await;
+        let id = posted(answer);
+        assert_eq!(
+            said(&records)
+                .iter()
+                .map(|(_, reason, _)| reason.as_str())
+                .collect::<Vec<_>>(),
+            ["intent recorded", "done"],
+            "the post was accepted and stored"
+        );
+        assert!(w.agents.view.contained(w.me));
+        let board = &w.agents.board;
+        assert!(board.get(w.key(), id).is_none());
+        assert!(board.candidates(w.key(), 0, 10).is_empty());
+        let due = board.due(10);
+        assert_eq!(due.iter().map(|d| d.post).collect::<Vec<_>>(), [Some(id)]);
+        assert_eq!(board.perform(&due), 1);
+        let held: Vec<_> = board
+            .held_for(w.me, 10)
+            .into_iter()
+            .map(|(key, id, _, lifted)| (key, id, lifted))
+            .collect();
+        assert_eq!(held, [(w.key(), id, maknae_kernel::HeldFor::Person)]);
     }
 }

@@ -3769,10 +3769,13 @@ async fn serve_board_verb<S, E, P>(
         if !trail.record_bounded(&intent).await {
             return;
         }
-        let (s, author, uid) = (
+        let (s, view, by) = (
             Arc::clone(store),
-            maknae_proto::Author::Agent(agent.as_str().to_owned()),
-            trail.uid,
+            Arc::clone(&board.agents.view),
+            (
+                maknae_proto::Author::Agent(agent.as_str().to_owned()),
+                Some(trail.uid),
+            ),
         );
         let (task, labels, draft) = (
             cited.signed.task.task_id,
@@ -3780,7 +3783,7 @@ async fn serve_board_verb<S, E, P>(
             post.clone(),
         );
         let done = bv::offload(trail.uid, deadline(), move || {
-            s.post(key, author, Some(uid), Some(task), labels, draft)
+            s.post(key, by, Some(task), labels, draft, &*view)
         })
         .await;
         match done {
@@ -25691,8 +25694,7 @@ mod reload_tests {
             .board
             .post(
                 key,
-                maknae_proto::Author::Agent(agent.into()),
-                Some(uid),
+                (maknae_proto::Author::Agent(agent.into()), Some(uid)),
                 None,
                 crate::board_store::PostLabels::default(),
                 maknae_proto::PostDraft {
@@ -25702,6 +25704,7 @@ mod reload_tests {
                     body: maknae_proto::SecretText(POST_BODY.to_string().into()),
                     attachments: Vec::new(),
                 },
+                &crate::enrollment::FixedEnrollment(Default::default()),
             )
             .unwrap();
         Posted {
@@ -29916,8 +29919,7 @@ mod task_sweep_tests {
         store
             .post(
                 crate::board_store::BoardKey(uid),
-                maknae_proto::Author::Agent("hobi".into()),
-                Some(2001),
+                (maknae_proto::Author::Agent("hobi".into()), Some(2001)),
                 None,
                 crate::board_store::PostLabels::default(),
                 maknae_proto::PostDraft {
@@ -29927,6 +29929,7 @@ mod task_sweep_tests {
                     body: maknae_proto::SecretText(maknae_io::Zeroizing::new(body.into())),
                     attachments: Vec::new(),
                 },
+                &crate::enrollment::FixedEnrollment(Default::default()),
             )
             .unwrap()
     }

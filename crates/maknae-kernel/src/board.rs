@@ -253,17 +253,19 @@ impl BoardStore {
         self.save_board(key, rec)
     }
 
+    /// `by` is the author and its uid. A post whose author uid or whose board's uid `view`
+    /// holds contained is stored marked for a hold, as [`Self::mark`] would mark it.
     pub fn post(
         &self,
         key: BoardKey,
-        author: Author,
-        author_uid: Option<u32>,
+        by: (Author, Option<u32>),
         task: Option<TaskId>,
         labels: PostLabels,
         draft: PostDraft,
+        view: &dyn EnrollmentView,
     ) -> Result<Arc<Stored>, BoardRefusal> {
         let mut draw = || draw_id().map_err(|_| BoardRefusal::Random);
-        self.place(&mut draw, key, author, author_uid, task, labels, draft)
+        self.place(&mut draw, key, by, task, labels, draft, view)
     }
 
     #[cfg(any(test, feature = "hermetic-test-seam"))]
@@ -272,13 +274,13 @@ impl BoardStore {
         &self,
         draw: &mut dyn FnMut() -> Result<[u8; 16], BoardRefusal>,
         key: BoardKey,
-        author: Author,
-        author_uid: Option<u32>,
+        by: (Author, Option<u32>),
         task: Option<TaskId>,
         labels: PostLabels,
         draft: PostDraft,
+        view: &dyn EnrollmentView,
     ) -> Result<Arc<Stored>, BoardRefusal> {
-        self.place(draw, key, author, author_uid, task, labels, draft)
+        self.place(draw, key, by, task, labels, draft, view)
     }
 
     pub fn get(&self, key: BoardKey, id: PostId) -> Option<Arc<Stored>> {
@@ -726,11 +728,11 @@ impl BoardStore {
         &self,
         draw: &mut dyn FnMut() -> Result<[u8; 16], BoardRefusal>,
         key: BoardKey,
-        author: Author,
-        author_uid: Option<u32>,
+        (author, author_uid): (Author, Option<u32>),
         task: Option<TaskId>,
         labels: PostLabels,
         draft: PostDraft,
+        view: &dyn EnrollmentView,
     ) -> Result<Arc<Stored>, BoardRefusal> {
         let _w = self.writing();
         self.room(key, &author, draft.in_reply_to)?;
@@ -768,6 +770,18 @@ impl BoardStore {
                 let board = held.boards.entry(key).or_default();
                 board.ids.insert(id, seq);
                 board.posts.insert(seq, Arc::clone(&stored));
+                // A containment installed before this insert is in `view`; one installed after
+                // it is `mark`'s, which finds this post.
+                let mut why = BTreeSet::new();
+                if author_uid.is_some_and(|uid| view.contained(uid)) {
+                    why.insert(HeldFor::Author);
+                }
+                if view.contained(key.0) {
+                    why.insert(HeldFor::Person);
+                }
+                if !why.is_empty() {
+                    held.marked.insert((key, seq), why);
+                }
                 return Ok(stored);
             }
             Err(StoreError::NotDurable(why)) => why,
@@ -941,11 +955,11 @@ mod tests {
         store
             .post(
                 key,
-                author,
-                Some(2001),
+                (author, Some(2001)),
                 None,
                 PostLabels::default(),
                 draft(body),
+                &free(),
             )
             .unwrap()
     }
@@ -963,11 +977,11 @@ mod tests {
         store.post_with(
             &mut fixed(ids),
             BOB,
-            hobi(),
-            Some(2001),
+            (hobi(), Some(2001)),
             None,
             PostLabels::default(),
             draft(body),
+            &free(),
         )
     }
 
@@ -1033,11 +1047,11 @@ mod tests {
         let posted = store
             .post(
                 BOB,
-                hobi(),
-                Some(2001),
+                (hobi(), Some(2001)),
                 Some(task),
                 labels.clone(),
                 draft(BODY),
+                &free(),
             )
             .unwrap();
         assert_eq!(posted.post.at_secs, T0);
@@ -1101,11 +1115,11 @@ mod tests {
         let posted = store
             .post(
                 BOB,
-                hobi(),
-                Some(2001),
+                (hobi(), Some(2001)),
                 Some(TaskId([6; 16])),
                 labels,
                 max.clone(),
+                &free(),
             )
             .unwrap();
         drop(store);
@@ -1156,7 +1170,14 @@ mod tests {
         let b = MemTaskBlobs::default();
         let store = open_mem(&b, SMALL);
         b.fail(Some(Fail::Unsynced));
-        let refused = store.post(BOB, hobi(), None, None, PostLabels::default(), draft("x"));
+        let refused = store.post(
+            BOB,
+            (hobi(), None),
+            None,
+            PostLabels::default(),
+            draft("x"),
+            &free(),
+        );
         assert!(
             matches!(refused, Err(BoardRefusal::Store(_))),
             "{refused:?}"
@@ -1177,7 +1198,14 @@ mod tests {
             .unwrap(),
         );
         let store = open_mem(&full, SMALL);
-        let refused = store.post(BOB, hobi(), None, None, PostLabels::default(), draft("x"));
+        let refused = store.post(
+            BOB,
+            (hobi(), None),
+            None,
+            PostLabels::default(),
+            draft("x"),
+            &free(),
+        );
         assert_eq!(
             refused.unwrap_err(),
             BoardRefusal::Store("the sequence is exhausted".into())
@@ -1298,11 +1326,11 @@ mod tests {
                 Ok([1; 16])
             },
             BOB,
-            hobi(),
-            None,
+            (hobi(), None),
             None,
             PostLabels::default(),
             draft("third"),
+            &free(),
         );
         assert_eq!(refused.unwrap_err(), BoardRefusal::Random);
         assert_eq!(draws, 4);
@@ -1331,7 +1359,14 @@ mod tests {
         let posted: Vec<_> = (0..4)
             .map(|i| put(&store, BOB, [hobi(), jin()][i % 2].clone(), "p"))
             .collect();
-        let refused = store.post(BOB, hobi(), None, None, PostLabels::default(), draft("x"));
+        let refused = store.post(
+            BOB,
+            (hobi(), None),
+            None,
+            PostLabels::default(),
+            draft("x"),
+            &free(),
+        );
         assert_eq!(refused.unwrap_err(), BoardRefusal::Full);
         assert_eq!(ids(&store.candidates(BOB, 0, 10)), ids(&posted));
         assert_eq!(BoardRefusal::Full.to_string(), "board full");
@@ -1354,7 +1389,14 @@ mod tests {
         let store = open_mem(&b, SMALL);
         put(&store, BOB, hobi(), "one");
         put(&store, BOB, hobi(), "two");
-        let refused = store.post(BOB, hobi(), None, None, PostLabels::default(), draft("x"));
+        let refused = store.post(
+            BOB,
+            (hobi(), None),
+            None,
+            PostLabels::default(),
+            draft("x"),
+            &free(),
+        );
         assert_eq!(refused.unwrap_err(), BoardRefusal::AuthorAtCap);
         assert_eq!(BoardRefusal::AuthorAtCap.to_string(), "author at cap");
         put(&store, BOB, jin(), "jin");
@@ -1388,22 +1430,22 @@ mod tests {
         let answered = store
             .post(
                 BOB,
-                jin(),
-                None,
+                (jin(), None),
                 None,
                 PostLabels::default(),
                 reply("ok", root.post.id),
+                &free(),
             )
             .unwrap();
         assert_eq!(answered.post.draft.in_reply_to, Some(root.post.id));
         for target in [PostId([7; 16]), PostId([9; 16]), elsewhere.post.id] {
             let refused = store.post(
                 BOB,
-                jin(),
-                None,
+                (jin(), None),
                 None,
                 PostLabels::default(),
                 reply("no", target),
+                &free(),
             );
             assert_eq!(refused.unwrap_err(), BoardRefusal::NoSuchPost);
         }
@@ -1760,7 +1802,14 @@ mod tests {
         body: &str,
     ) -> Arc<Stored> {
         store
-            .post(key, author, uid, None, PostLabels::default(), draft(body))
+            .post(
+                key,
+                (author, uid),
+                None,
+                PostLabels::default(),
+                draft(body),
+                &free(),
+            )
             .unwrap()
     }
 
@@ -1868,6 +1917,148 @@ mod tests {
             .all(|s| s.post.id != held.post.id));
     }
 
+    /// Contains the uids in its set, which a test changes while a post is written.
+    #[derive(Clone, Default)]
+    struct Installed(Arc<Mutex<BTreeSet<u32>>>);
+
+    impl EnrollmentView for Installed {
+        fn agent_uid(&self, _: &AgentId) -> Option<u32> {
+            None
+        }
+
+        fn agents(&self) -> Vec<(AgentId, u32)> {
+            Vec::new()
+        }
+
+        fn is_enrolled(&self, _: u32) -> bool {
+            false
+        }
+
+        fn contained(&self, uid: u32) -> bool {
+            self.0.lock().unwrap().contains(&uid)
+        }
+
+        fn unresolved(&self, _: u32) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn a_post_written_under_a_containment_is_stored_marked_for_each_hold() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = clocked(&b);
+        let posted = |key, author, uid, view: &dyn EnrollmentView| {
+            store
+                .post(
+                    key,
+                    (author, Some(uid)),
+                    None,
+                    PostLabels::default(),
+                    draft("sentinel-695-contained-at-insert"),
+                    view,
+                )
+                .unwrap()
+        };
+        let author = posted(BOB, hobi(), 2001, &containing(&[], &[2001]));
+        let person = posted(BOB, jin(), 2002, &containing(&[], &[1000]));
+        let both = posted(ALICE, jin(), 2002, &containing(&[], &[1001, 2002]));
+        for (key, s) in [(BOB, &author), (BOB, &person), (ALICE, &both)] {
+            assert!(store.get(key, s.post.id).is_none());
+            assert!(stored_on_disk(&b, key, s.post.id).held.is_empty());
+        }
+        assert!(store.candidates(BOB, 0, 10).is_empty());
+        assert!(store.candidates(ALICE, 0, 10).is_empty());
+        let due = store.due(10);
+        let mut got = whys(&due);
+        got.sort();
+        let mut want = vec![
+            (
+                Some(author.post.id),
+                None,
+                BoardDueFor::Hold(HeldFor::Author),
+            ),
+            (
+                Some(person.post.id),
+                None,
+                BoardDueFor::Hold(HeldFor::Person),
+            ),
+            (Some(both.post.id), None, BoardDueFor::Hold(HeldFor::Author)),
+            (Some(both.post.id), None, BoardDueFor::Hold(HeldFor::Person)),
+        ];
+        want.sort();
+        assert_eq!(got, want);
+        let refused = store.post(
+            BOB,
+            (jin(), Some(2002)),
+            None,
+            PostLabels::default(),
+            reply("r", author.post.id),
+            &free(),
+        );
+        assert_eq!(refused.unwrap_err(), BoardRefusal::NoSuchPost);
+        for (author, uid) in [(hobi(), 2001), (hobi(), 2001), (jin(), 2002), (jin(), 2002)] {
+            by(&store, BOB, author, Some(uid), "live");
+        }
+        let full = store.post(
+            BOB,
+            (Author::Tasker(1000), None),
+            None,
+            PostLabels::default(),
+            draft("x"),
+            &free(),
+        );
+        assert_eq!(
+            full.unwrap_err(),
+            BoardRefusal::Full,
+            "held posts are outside the board cap"
+        );
+        assert_eq!(store.perform(&due), 4);
+        assert!(store.due(10).is_empty());
+        assert_eq!(
+            stored_on_disk(&b, ALICE, both.post.id).held,
+            [HeldFor::Author, HeldFor::Person].into_iter().collect()
+        );
+        assert_eq!(
+            stored_on_disk(&b, BOB, person.post.id).held,
+            [HeldFor::Person].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn a_containment_installed_while_a_post_is_written_holds_the_post() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = clocked(&b);
+        let store = Arc::new(store);
+        let view = Installed::default();
+        let (inner, installed, marking) = (b.clone(), view.clone(), Arc::clone(&store));
+        b.after_save(move || {
+            inner.after_save(move || {
+                installed.0.lock().unwrap().insert(2001);
+                marking.mark(&installed);
+            });
+        });
+        let posted = store
+            .post(
+                BOB,
+                (hobi(), Some(2001)),
+                None,
+                PostLabels::default(),
+                draft("sentinel-695-raced"),
+                &view,
+            )
+            .unwrap();
+        assert!(store.get(BOB, posted.post.id).is_none());
+        assert!(store.candidates(BOB, 0, 10).is_empty());
+        assert_eq!(
+            whys(&store.due(10)),
+            vec![(
+                Some(posted.post.id),
+                None,
+                BoardDueFor::Hold(HeldFor::Author)
+            )]
+        );
+    }
+
     #[test]
     fn a_marked_post_is_withheld_before_the_hold_is_written() {
         let b = MemTaskBlobs::default();
@@ -1876,11 +2067,11 @@ mod tests {
         let other = by(&store, BOB, jin(), Some(2002), "other");
         let replied = store.post(
             BOB,
-            jin(),
-            Some(2002),
+            (jin(), Some(2002)),
             None,
             PostLabels::default(),
             reply("r", first.post.id),
+            &free(),
         );
         assert!(replied.is_ok());
         b.fail(Some(Fail::Every));
@@ -1903,11 +2094,11 @@ mod tests {
         b.fail(None);
         let refused = store.post(
             BOB,
-            jin(),
-            Some(2002),
+            (jin(), Some(2002)),
             None,
             PostLabels::default(),
             reply("r2", first.post.id),
+            &free(),
         );
         assert_eq!(refused.unwrap_err(), BoardRefusal::NoSuchPost);
         assert!(stored_on_disk(&b, BOB, first.post.id).held.is_empty());
