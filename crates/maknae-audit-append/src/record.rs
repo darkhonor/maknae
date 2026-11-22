@@ -569,6 +569,31 @@ mod tests {
     }
 
     #[test]
+    fn a_board_block_with_every_field_set_round_trips() {
+        let full = BoardAudit {
+            post_id: Some("ab".repeat(16)),
+            seq: Some(3),
+            kind: Some("note".into()),
+            to: Some("board".into()),
+            in_reply_to: Some("cd".repeat(16)),
+            attachments: Some(2),
+            body_bytes: Some(100),
+            attachment_bytes: Some(200),
+            digest: Some("ef".repeat(32)),
+            first_seq: Some(1),
+            last_seq: Some(9),
+            returned: Some(5),
+            withheld: Some(4),
+            cursor: Some(10),
+        };
+        let mut rec = sample();
+        rec.board = Some(full.clone());
+        let back: AuditRecord = serde_json::from_str(&canonical_json(&rec).unwrap()).unwrap();
+        assert_eq!(back.board, Some(full));
+        assert_eq!(serde_json::to_string(&BoardAudit::default()).unwrap(), "{}");
+    }
+
+    #[test]
     fn a_board_block_round_trips_and_omits_what_is_absent() {
         let mut rec = sample();
         rec.subject.board_op = Some("post".into());
