@@ -3286,7 +3286,7 @@ mod tests {
                 TRUST_DOMAIN,
                 &id(&signed.task.agent),
                 signed,
-                std::time::SystemTime::now(),
+                maknae_io::now_since_epoch().unwrap(),
             )
         }
     }

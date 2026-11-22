@@ -51,6 +51,7 @@ use zeroize::Zeroizing;
 
 #[derive(Debug)]
 pub enum EnrollError {
+    Clock(String),
     /// Preflight: not running as root (euid != 0).
     NotRoot,
     /// Preflight: root but `$SUDO_UID`/`$SUDO_USER` absent — bare root refused
@@ -307,6 +308,7 @@ impl std::fmt::Display for EnrollError {
             }
             EnrollError::InvalidCaChain(msg) => write!(f, "{msg}"),
             EnrollError::State(msg) => write!(f, "{msg}"),
+            EnrollError::Clock(msg) => write!(f, "{msg}"),
             #[cfg(any(target_os = "macos", test))]
             EnrollError::SecretIdShape => write!(
                 f,
@@ -1014,7 +1016,7 @@ fn build_egress_bounds_yaml(vault_addr: &str, kv_mount: &str, user_prefix: &str)
     ]))
 }
 
-fn build_enroll_state_yaml(mount: &str, records: &[(String, String)]) -> String {
+fn build_enroll_state_yaml(now: u64, mount: &str, records: &[(String, String)]) -> String {
     let accessors: Vec<Yaml> = records
         .iter()
         .map(|(role, accessor)| {
@@ -1024,14 +1026,10 @@ fn build_enroll_state_yaml(mount: &str, records: &[(String, String)]) -> String 
             ])
         })
         .collect();
-    let enrolled_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
     artifact_write::emit_yaml(artifact_write::yaml_map(vec![
         ("approle_mount", Yaml::String(mount.to_string())),
         ("accessors", Yaml::Array(accessors)),
-        ("enrolled_at_unix", Yaml::Integer(enrolled_at as i64)),
+        ("enrolled_at_unix", Yaml::Integer(now as i64)),
     ]))
 }
 
@@ -1043,15 +1041,11 @@ fn posture_mechanism(macos: bool) -> &'static str {
     }
 }
 
-fn build_posture_yaml(mechanism: &str, target: &str) -> String {
-    let sealed_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+fn build_posture_yaml(now: u64, mechanism: &str, target: &str) -> String {
     maknae_config::PostureMarker {
         mechanism: mechanism.to_string(),
         target: target.to_string(),
-        timestamp: sealed_at.to_string(),
+        timestamp: now.to_string(),
     }
     .render()
 }
@@ -2530,6 +2524,10 @@ fn bindings_owners() -> Result<crate::policy_sync::Owners, EnrollError> {
     ))
 }
 
+fn enroll_clock(now: Result<u64, String>) -> Result<u64, EnrollError> {
+    now.map_err(EnrollError::Clock)
+}
+
 async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, EnrollError> {
     // ---- Step 1: preflight ------------------------------------------------
     let euid = nix::unistd::geteuid().as_raw();
@@ -2537,6 +2535,7 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
     let sudo_user = std::env::var("SUDO_USER").ok();
     let operator = preflight_check(euid, sudo_uid, sudo_user.as_deref(), &RealPasswd)
         .inspect_err(|_| errln!("{}", msg(locale, MsgId::EnrollPreflightFailed)))?;
+    enroll_clock(maknae_io::now_unix())?;
     let bindings_owners = bindings_owners()?;
     plan_bindings(
         Path::new(crate::policy_sync::CONFIG_DIR),
@@ -2851,7 +2850,8 @@ async fn finish_enrollment(
         operator,
         &args.plane_key,
     );
-    let enroll_state_yaml = build_enroll_state_yaml(&args.approle_mount, minted);
+    let now = enroll_clock(maknae_io::now_unix())?;
+    let enroll_state_yaml = build_enroll_state_yaml(now, &args.approle_mount, minted);
     // `target` is the sealed daemon secret's own row path — the single source
     // of truth `artifact_table` already computes (reused again below at the
     // actual seal step), never a second hardcoded copy of
@@ -2860,8 +2860,11 @@ async fn finish_enrollment(
         .iter()
         .find(|a| a.content == artifact_table::ContentKind::SealedDaemonSecret)
         .expect("artifact_table always emits exactly one SealedDaemonSecret row");
-    let posture_yaml =
-        build_posture_yaml(posture_mechanism(macos), &sealed_row.path.to_string_lossy());
+    let posture_yaml = build_posture_yaml(
+        now,
+        posture_mechanism(macos),
+        &sealed_row.path.to_string_lossy(),
+    );
 
     let etc = Path::new("/etc/maknae");
     let mut contents: BTreeMap<PathBuf, Vec<u8>> = BTreeMap::new();
@@ -4053,6 +4056,7 @@ mod tests {
     #[test]
     fn build_enroll_state_yaml_round_trips_accessors() {
         let text = build_enroll_state_yaml(
+            1_700_000_000,
             "maknae-approle",
             &[
                 ("maknaed".to_string(), "acc-1".to_string()),
@@ -4089,22 +4093,42 @@ mod tests {
 
     #[test]
     fn the_posture_marker_carries_its_arguments_and_the_seal_time() {
-        let now = || {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs()
-        };
-        let before = now();
-        let text = build_posture_yaml("keychain", "/etc/maknae/private/x.keychain");
-        let after = now();
+        let text = build_posture_yaml(1_700_000_123, "keychain", "/etc/maknae/private/x.keychain");
         let marker =
             maknae_config::PostureMarker::from_value(&maknae_config::load_str(&text).unwrap())
                 .expect("enroll writes a marker the daemon parses");
         assert_eq!(marker.mechanism, "keychain");
         assert_eq!(marker.target, "/etc/maknae/private/x.keychain");
-        let sealed_at: u64 = marker.timestamp.parse().expect("seconds since the epoch");
-        assert!((before..=after).contains(&sealed_at), "{sealed_at}");
+        assert_eq!(marker.timestamp, "1700000123");
+    }
+
+    #[test]
+    fn the_enroll_state_carries_the_enrollment_time() {
+        let text = build_enroll_state_yaml(1_700_000_456, "maknae-approle", &[]);
+        assert!(text.contains("enrolled_at_unix: 1700000456"), "{text}");
+    }
+
+    #[test]
+    fn the_clock_is_read_before_any_vault_step() {
+        let src = include_str!("mod.rs");
+        let body = &src[src.find("async fn enroll_inner(").unwrap()..];
+        let clock = body.find("enroll_clock(maknae_io::now_unix())?;").unwrap();
+        for later in [
+            "bindings_owners()",
+            "check_vault_reachable(",
+            "egress_minting::load(",
+        ] {
+            assert!(clock < body.find(later).unwrap(), "{later}");
+        }
+    }
+
+    #[test]
+    fn a_clock_before_the_epoch_refuses_enrollment() {
+        let clock = "the system clock reads before 1970".to_string();
+        assert!(
+            matches!(enroll_clock(Err(clock.clone())), Err(EnrollError::Clock(m)) if m == clock)
+        );
+        assert!(matches!(enroll_clock(Ok(7)), Ok(7)));
     }
 
     // ---- round-1 review Important #2: rotate destroys against the RECORDED
@@ -4112,7 +4136,7 @@ mod tests {
 
     #[test]
     fn parse_state_mount_round_trips() {
-        let text = build_enroll_state_yaml("maknae-approle", &[]);
+        let text = build_enroll_state_yaml(1_700_000_000, "maknae-approle", &[]);
         assert_eq!(parse_state_mount(&text).unwrap(), "maknae-approle");
     }
 
@@ -4124,6 +4148,7 @@ mod tests {
         // target "old-approle" — what parse_state_mount returns — never
         // whatever `args.approle_mount` happens to be right now.
         let text = build_enroll_state_yaml(
+            1_700_000_000,
             "old-approle",
             &[("maknaed".to_string(), "acc-1".to_string())],
         );
@@ -4246,6 +4271,7 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
     #[test]
     fn an_old_enroll_state_keeps_only_the_maknaed_accessor_for_destruction() {
         let old = build_enroll_state_yaml(
+            1_700_000_000,
             "maknae-approle",
             &[
                 ("maknaed".to_string(), "acc-1".to_string()),
@@ -4263,6 +4289,7 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
     async fn rotate_skips_a_previous_enrollments_removed_roles_without_calling_vault() {
         let client = fixture_operator_client("removed-roles");
         let previous = parse_state_accessors(&build_enroll_state_yaml(
+            1_700_000_000,
             "maknae-approle",
             &[
                 ("maknae".to_string(), "acc-2".to_string()),

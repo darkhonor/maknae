@@ -88,16 +88,14 @@ pub(crate) fn kernel_uid() -> Result<u32, String> {
         .ok_or_else(|| format!("no such user: {KERNEL_USER}; is maknae installed?"))
 }
 
-fn reseed(euid: u32, now: u64) -> Result<Marker, String> {
+fn reseed(euid: u32, now: Result<u64, String>) -> Result<Marker, String> {
+    let now = now?;
     preflight(euid)?;
     write_reseed_marker(Path::new(STATE_DIR), kernel_uid()?, 0, now)
 }
 
 pub(crate) fn run_reseed() -> ExitCode {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    match reseed(nix::unistd::geteuid().as_raw(), now) {
+    match reseed(nix::unistd::geteuid().as_raw(), maknae_io::now_unix()) {
         Ok(Marker::Written) => {
             println!(
                 "reseed authorized; restart maknaed to seed a fresh kernel graph (a readable \
@@ -257,8 +255,14 @@ mod tests {
         let err = preflight(1000).unwrap_err();
         assert!(err.contains("sudo maknae reseed"), "{err}");
         if euid() != 0 {
-            assert_eq!(reseed(euid(), 1), Err(err));
+            assert_eq!(reseed(euid(), Ok(1)), Err(err));
         }
+    }
+
+    #[test]
+    fn a_clock_before_the_epoch_is_refused_before_preflight() {
+        let clock = "the system clock reads before 1970".to_string();
+        assert_eq!(reseed(1000, Err(clock.clone())), Err(clock));
     }
 
     #[test]

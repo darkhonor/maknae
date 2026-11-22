@@ -88,7 +88,7 @@ pub use delegated::{
 };
 pub use error::{IoError, IoKind};
 pub use home::{canonical_home, session_home, unit_safe_home, UnsafeHome};
-pub use host_facts::{now_unix, presence};
+pub use host_facts::{now_since_epoch, now_unix, presence};
 pub use mutation::{
     held_file_is_readable, read_held_file, read_held_page, replace_held_file,
     verify_mutation_directory, verify_unconfined_directory, DirectoryCursor, EffectState,

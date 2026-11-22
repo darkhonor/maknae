@@ -1028,11 +1028,6 @@ why = "declaration-only string-table match arms, no decision logic (precedent: m
 # Fail-closed: zero/multi-match anchors, zero-region spans, all-covered
 # (stale) spans, blank why. Never a dodge for testable logic.
 [[exception]]
-path = "crates/maknae-io/src/host_facts.rs"
-anchor = ".map_err(|_| \"the system clock reads before 1970; set the clock, then retry\".to_string())"
-why = "now_unix's error for a system clock before the Unix epoch; a unit test cannot set the host clock, and the function takes no clock to inject. The success path is tested against the clock it reads"
-
-[[exception]]
 path = "crates/maknae-proto/src/frame.rs"
 anchor = "map_err(|_| ProtoFrameError::Oversize {"
 end_anchor = "max: u32::MAX as usize,"

@@ -36,9 +36,7 @@ pub struct SystemClock;
 
 impl Clock for SystemClock {
     fn now_secs(&self) -> i64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs() as i64)
+        maknae_io::now_unix().map_or(0, |s| s as i64)
     }
 }
 
@@ -722,6 +720,19 @@ mod tests {
     use maknae_proto::{Ask, Bytes, Labels, TaskObject, TaskSignature, TaskSubmission};
     use maknae_state::envelope::{WrappingKey, KEY_LEN};
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn the_system_clock_is_the_wall_clock() {
+        let read = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64
+        };
+        let before = read();
+        let now = SystemClock.now_secs();
+        assert!((before..=read()).contains(&now), "{now}");
+    }
 
     const HOBI: u32 = 2001;
     const SENTINEL: &str = "sentinel-628-task-store-prompt";

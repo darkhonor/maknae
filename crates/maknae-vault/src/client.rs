@@ -920,10 +920,7 @@ impl SupervisorCtx {
     pub(crate) fn leaf_age_and_ttl_secs(&self) -> (u64, u64) {
         let issued = self.leaf_issued_at.load(Ordering::Relaxed);
         let ttl = self.leaf_ttl_secs.load(Ordering::Relaxed);
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now = maknae_io::now_unix().unwrap_or(0);
         (now.saturating_sub(issued), ttl)
     }
 
@@ -1573,6 +1570,27 @@ mod tests {
             .start_paused(paused)
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn the_leaf_age_is_measured_against_the_wall_clock() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let fx = DispatchFixture::with_addr("leaf-age", DEAD_VAULT, "");
+        let client = PlaneClient::for_user(&fx.doc(), &fx.0, user_token()).unwrap();
+        let read = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        };
+        let issued = read() - 100;
+        client.leaf_issued_at.store(issued, Ordering::Relaxed);
+        client.leaf_ttl_secs.store(300, Ordering::Relaxed);
+        let before = read();
+        let (age, ttl) = client.supervisor_ctx().leaf_age_and_ttl_secs();
+        let after = read();
+        assert!((before - issued..=after - issued).contains(&age), "{age}");
+        assert_eq!(ttl, 300);
     }
 
     #[test]
