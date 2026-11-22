@@ -7,6 +7,8 @@ mod authz;
 pub mod baseline;
 pub mod baseline_check;
 mod blocking_guard;
+mod board;
+mod board_store;
 mod boot;
 mod boot_gate;
 mod ceiling_authz;
@@ -45,6 +47,13 @@ pub mod vocabulary;
 mod workspace;
 pub use authz::*;
 pub use blocking_guard::BLOCKING_BREAKER_MAX_IN_FLIGHT;
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+pub use board::Caps;
+pub use board::{BoardRefusal, BoardStore};
+pub use board_store::{
+    labels_of, BoardFinding, BoardKey, HeldFor, LabelValue, PostLabels, ReadPlan, Report, Settings,
+    Stored, BOARD, BOARD_RECORD_MAX, BOARD_RETENTION,
+};
 pub use boot::{boot, read_files, BootConfig};
 #[cfg(any(test, feature = "hermetic-test-seam"))]
 pub use boot::{boot_as_owner, read_files_as_owner};

@@ -82,6 +82,11 @@ files = [
   "crates/maknae-kernel/src/task.rs",
   # #628: the task store at rest; a wrong arm resets a counter or loads an unaudited task.
   "crates/maknae-kernel/src/task_store.rs",
+  # #695: the board store's write-through and cursor rules; a wrong arm loses a post or
+  # moves a reader's cursor past a post it was never sent.
+  "crates/maknae-kernel/src/board.rs",
+  # #695: the board store at rest; a wrong arm loads a post onto another person's board.
+  "crates/maknae-kernel/src/board_store.rs",
   # #628: the task facts a tasker verb is decided on; a wrong arm stamps another's task as owned.
   "crates/maknae-kernel/src/task_verbs.rs",
   "crates/maknae-kernel/src/enrollment.rs",
