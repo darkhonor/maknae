@@ -174,6 +174,137 @@ mod tests {
         vec![(host.into(), path.into())]
     }
 
+    fn wt_with_gitfile(t: &Path, name: &str, bytes: &[u8]) -> PathBuf {
+        let wt = t.join(name);
+        mkdir(&wt);
+        std::fs::write(wt.join(".git"), bytes).unwrap();
+        std::fs::set_permissions(wt.join(".git"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        wt
+    }
+
+    #[test]
+    fn every_unreadable_names_its_path_or_cause() {
+        let p = PathBuf::from("/x/.git");
+        assert_eq!(
+            Unreadable::Walk {
+                path: p.clone(),
+                why: "denied".into()
+            }
+            .to_string(),
+            "/x/.git: denied"
+        );
+        assert_eq!(
+            Unreadable::GitFile(p.clone()).to_string(),
+            "/x/.git: no gitdir line"
+        );
+        assert_eq!(
+            Unreadable::CommonDir(p.clone()).to_string(),
+            "/x/.git: no path line"
+        );
+        assert_eq!(
+            Unreadable::Config(p).to_string(),
+            "/x/.git: not a git config"
+        );
+        let io = IoError::Symlink { path: "/y".into() };
+        assert_eq!(Unreadable::Io(io.clone()).to_string(), io.to_string());
+    }
+
+    #[test]
+    fn an_unsearchable_ancestor_stops_the_walk() {
+        let t = tempfile::tempdir().unwrap();
+        let locked = t.path().join("locked");
+        let inner = locked.join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let got = remotes(&inner, me());
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        match got {
+            Err(Unreadable::Walk { path, .. }) => assert_eq!(path, inner.join(".git")),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_config_that_is_not_git_config_is_refused() {
+        let t = tempfile::tempdir().unwrap();
+        git_dir(t.path(), "git@github.com:o/r.git");
+        write(&t.path().join(".git/config"), "url = x\n", 0o644);
+        assert_eq!(
+            remotes(t.path(), me()),
+            Err(Unreadable::Config(t.path().join(".git/config")))
+        );
+    }
+
+    #[test]
+    fn a_git_or_commondir_file_without_a_usable_first_line_is_refused() {
+        let t = tempfile::tempdir().unwrap();
+        for (name, bytes) in [
+            ("empty", &b""[..]),
+            ("nonutf8", &b"gitdir: \xff\n"[..]),
+            ("bare-prefix", &b"gitdir: \n"[..]),
+        ] {
+            let wt = wt_with_gitfile(t.path(), name, bytes);
+            assert_eq!(
+                remotes(&wt, me()),
+                Err(Unreadable::GitFile(wt.join(".git"))),
+                "{name}"
+            );
+        }
+        let gitdir = t.path().join("gd");
+        write(&gitdir.join("commondir"), "", 0o644);
+        std::fs::write(gitdir.join("commondir"), b"\xff\n").unwrap();
+        let wt = wt_with_gitfile(
+            t.path(),
+            "wt-bad-common",
+            format!("gitdir: {}\n", gitdir.display()).as_bytes(),
+        );
+        assert_eq!(
+            remotes(&wt, me()),
+            Err(Unreadable::CommonDir(gitdir.join("commondir")))
+        );
+    }
+
+    #[test]
+    fn a_gitdir_or_common_dir_that_cannot_be_opened_is_refused() {
+        let t = tempfile::tempdir().unwrap();
+        let wt = wt_with_gitfile(
+            t.path(),
+            "wt-missing",
+            format!("gitdir: {}\n", t.path().join("absent").display()).as_bytes(),
+        );
+        match remotes(&wt, me()) {
+            Err(Unreadable::Io(IoError::Io {
+                kind: IoKind::NotFound,
+                ..
+            })) => {}
+            other => panic!("{other:?}"),
+        }
+
+        let gitdir = t.path().join("gd");
+        write(&gitdir.join("commondir"), "../absent-common\n", 0o644);
+        let wt = wt_with_gitfile(
+            t.path(),
+            "wt-missing-common",
+            format!("gitdir: {}\n", gitdir.display()).as_bytes(),
+        );
+        match remotes(&wt, me()) {
+            Err(Unreadable::Io(IoError::Io {
+                kind: IoKind::NotFound,
+                ..
+            })) => {}
+            other => panic!("{other:?}"),
+        }
+
+        let gitdir = t.path().join("gd2");
+        mkdir(&gitdir.join("commondir"));
+        let wt = wt_with_gitfile(
+            t.path(),
+            "wt-dir-common",
+            format!("gitdir: {}\n", gitdir.display()).as_bytes(),
+        );
+        assert!(matches!(remotes(&wt, me()), Err(Unreadable::Io(_))));
+    }
+
     #[test]
     fn the_nearest_git_dirs_config_is_read() {
         let t = tempfile::tempdir().unwrap();
