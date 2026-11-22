@@ -372,6 +372,16 @@ mod tests {
             vec![RespResult::Ok(Payload::ToolCatalog(reply))],
         );
         assert!(matches!(c.forges().await, Err(TaskerError::Protocol(_))));
+        let junk = b"not a catalog".to_vec();
+        let undecodable = maknae_proto::ToolCatalogReply {
+            digest: maknae_proto::CatalogDigest(maknae_crypto::sha256(&junk)),
+            graph: maknae_proto::Bytes::new(zeroize::Zeroizing::new(junk)),
+        };
+        let c = client(
+            Default::default(),
+            vec![RespResult::Ok(Payload::ToolCatalog(undecodable))],
+        );
+        assert!(matches!(c.forges().await, Err(TaskerError::Protocol(_))));
         let c = client(Default::default(), vec![refused()]);
         assert_eq!(
             c.forges().await,

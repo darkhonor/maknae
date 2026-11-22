@@ -13,6 +13,7 @@ pub enum Unreadable {
     Io(IoError),
     Walk { path: PathBuf, why: String },
     GitFile(PathBuf),
+    CommonDir(PathBuf),
     Config(PathBuf),
 }
 
@@ -22,13 +23,15 @@ impl std::fmt::Display for Unreadable {
             Unreadable::Io(e) => write!(f, "{e}"),
             Unreadable::Walk { path, why } => write!(f, "{}: {why}", path.display()),
             Unreadable::GitFile(p) => write!(f, "{}: no gitdir line", p.display()),
+            Unreadable::CommonDir(p) => write!(f, "{}: no path line", p.display()),
             Unreadable::Config(p) => write!(f, "{}: not a git config", p.display()),
         }
     }
 }
 
 /// `None` outside a checkout. `cwd` is absolute; `uid` must own every file read and
-/// every directory it is read from. A symlinked `.git` is refused, never followed.
+/// every directory it is read from, and no one else may write them. A symlinked
+/// `.git` is refused, never followed.
 pub fn remotes(cwd: &Path, uid: u32) -> Result<Option<Vec<RemoteUrl>>, Unreadable> {
     let Some(dir) = nearest_checkout(cwd)? else {
         return Ok(None);
@@ -43,7 +46,11 @@ pub fn remotes(cwd: &Path, uid: u32) -> Result<Option<Vec<RemoteUrl>>, Unreadabl
         Err(e) => return Err(Unreadable::Io(e)),
     };
     let bytes = anchor
-        .read(Path::new("config"), None, file(uid, GIT_CONFIG_MAX_BYTES))
+        .read(
+            Path::new("config"),
+            None,
+            file(uid, GIT_CONFIG_MAX_BYTES, false),
+        )
         .map_err(Unreadable::Io)?
         .value;
     git_config_remotes(&bytes)
@@ -71,17 +78,25 @@ fn nearest_checkout(cwd: &Path) -> Result<Option<&Path>, Unreadable> {
 /// A worktree's or submodule's `.git` file: `gitdir:` names the git directory,
 /// whose `commondir`, when present, names the one holding `config`.
 fn common_dir(dir: &Path, dot_git: &Path, uid: u32) -> Result<(Anchor, PathBuf), Unreadable> {
-    let line = maknae_io::read_absolute(dot_git, file(uid, GIT_FILE_MAX_BYTES), StrategyPref::Auto)
-        .map_err(Unreadable::Io)?
-        .value;
+    let line = maknae_io::read_absolute(
+        dot_git,
+        file(uid, GIT_FILE_MAX_BYTES, true),
+        StrategyPref::Auto,
+    )
+    .map_err(Unreadable::Io)?
+    .value;
     let gitdir = path_line(&line, Some("gitdir: "))
         .ok_or_else(|| Unreadable::GitFile(dot_git.to_path_buf()))?;
     let gitdir = dir.join(gitdir);
     let anchor = resolved(&gitdir, uid)?;
-    let common = match anchor.read(Path::new("commondir"), None, file(uid, GIT_FILE_MAX_BYTES)) {
+    let common = match anchor.read(
+        Path::new("commondir"),
+        None,
+        file(uid, GIT_FILE_MAX_BYTES, true),
+    ) {
         Ok(read) => path_line(&read.value, None)
             .map(|common| gitdir.join(common))
-            .ok_or_else(|| Unreadable::GitFile(gitdir.join("commondir")))?,
+            .ok_or_else(|| Unreadable::CommonDir(gitdir.join("commondir")))?,
         Err(IoError::Io {
             kind: IoKind::NotFound,
             ..
@@ -108,15 +123,15 @@ fn resolved(dir: &Path, uid: u32) -> Result<Anchor, Unreadable> {
 fn owned(uid: u32) -> AnchorRequired {
     AnchorRequired {
         owner: Some(uid),
-        mode_mask: Some(0o022),
+        mode_mask: Some(0o002),
     }
 }
 
-fn file(uid: u32, max: u64) -> TargetRequired {
+fn file(uid: u32, max: u64, single_link: bool) -> TargetRequired {
     TargetRequired {
         owner: Some(uid),
-        mode_mask: Some(0o022),
-        nlink_exactly_one: false,
+        mode_mask: Some(0o002),
+        nlink_exactly_one: single_link,
         regular_file: true,
         max_bytes: Some(max),
     }
@@ -231,6 +246,21 @@ mod tests {
             remotes(&lost, me()),
             Err(Unreadable::GitFile(lost.join(".git")))
         );
+
+        let empty = main.join(".git/worktrees/empty");
+        write(&empty.join("commondir"), "\n", 0o644);
+        let wt2 = t.path().join("wt2");
+        write(
+            &wt2.join(".git"),
+            &format!("gitdir: {}\n", empty.display()),
+            0o644,
+        );
+        let got = remotes(&wt2, me());
+        assert_eq!(got, Err(Unreadable::CommonDir(empty.join("commondir"))));
+        assert!(got
+            .unwrap_err()
+            .to_string()
+            .ends_with("commondir: no path line"));
     }
 
     #[test]
@@ -248,7 +278,7 @@ mod tests {
 
     #[test]
     fn a_config_others_can_write_is_not_read() {
-        for mode in [0o646, 0o664] {
+        for mode in [0o646, 0o666] {
             let t = tempfile::tempdir().unwrap();
             git_dir(t.path(), "git@github.com:o/r.git");
             let cfg = t.path().join(".git/config");
@@ -260,6 +290,20 @@ mod tests {
         }
         let t = tempfile::tempdir().unwrap();
         git_dir(t.path(), "git@github.com:o/r.git");
+        let git = t.path().join(".git");
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o775)).unwrap();
+        std::fs::set_permissions(git.join("config"), std::fs::Permissions::from_mode(0o664))
+            .unwrap();
+        assert_eq!(
+            hosts(remotes(t.path(), me()).unwrap()),
+            pair("github.com", "o/r")
+        );
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o777)).unwrap();
+        match remotes(t.path(), me()) {
+            Err(Unreadable::Io(IoError::InsecurePermissions { .. })) => {}
+            other => panic!("{other:?}"),
+        }
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
         match remotes(t.path(), me().wrapping_add(1)) {
             Err(Unreadable::Io(IoError::NotOwned { .. })) => {}
             other => panic!("{other:?}"),
@@ -338,22 +382,57 @@ mod tests {
     }
     #[test]
     fn every_file_and_directory_read_must_be_the_taskers_alone() {
-        assert_eq!(
-            file(7, 9),
-            TargetRequired {
-                owner: Some(7),
-                mode_mask: Some(0o022),
-                nlink_exactly_one: false,
-                regular_file: true,
-                max_bytes: Some(9),
-            }
-        );
+        for single_link in [false, true] {
+            assert_eq!(
+                file(7, 9, single_link),
+                TargetRequired {
+                    owner: Some(7),
+                    mode_mask: Some(0o002),
+                    nlink_exactly_one: single_link,
+                    regular_file: true,
+                    max_bytes: Some(9),
+                }
+            );
+        }
         assert_eq!(
             owned(7),
             AnchorRequired {
                 owner: Some(7),
-                mode_mask: Some(0o022),
+                mode_mask: Some(0o002),
             }
         );
+    }
+    #[test]
+    fn a_hardlinked_git_file_or_commondir_is_refused() {
+        let t = tempfile::tempdir().unwrap();
+        let main = t.path().join("main");
+        git_dir(&main, "git@github.com:o/r.git");
+        let planted = t.path().join("planted");
+        write(
+            &planted,
+            &format!("gitdir: {}\n", main.join(".git").display()),
+            0o644,
+        );
+        let wt = t.path().join("wt");
+        mkdir(&wt);
+        std::fs::hard_link(&planted, wt.join(".git")).unwrap();
+        match remotes(&wt, me()) {
+            Err(Unreadable::Io(IoError::MultiplyLinked { .. })) => {}
+            other => panic!("{other:?}"),
+        }
+
+        let gitdir = main.join(".git/worktrees/x");
+        write(&gitdir.join("commondir"), "../..\n", 0o644);
+        std::fs::hard_link(gitdir.join("commondir"), t.path().join("second")).unwrap();
+        let wt2 = t.path().join("wt2");
+        write(
+            &wt2.join(".git"),
+            &format!("gitdir: {}\n", gitdir.display()),
+            0o644,
+        );
+        match remotes(&wt2, me()) {
+            Err(Unreadable::Io(IoError::MultiplyLinked { .. })) => {}
+            other => panic!("{other:?}"),
+        }
     }
 }
