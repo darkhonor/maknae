@@ -798,7 +798,7 @@ mod tests {
         let tasker = plane.tasker();
         let hobi = maknae_config::AgentId::parse("hobi").unwrap();
         let text = maknae_proto::SecretText(zeroize::Zeroizing::new("p".into()));
-        let _ = tasker.submit(&hobi, text).await;
+        let _ = tasker.submit(&hobi, text, Vec::new()).await;
         let sub = maknae_proto::TaskRef::from_id(&TaskId([4; 16]));
         let _ = tasker.status(&sub).await;
         plane.cite(None);

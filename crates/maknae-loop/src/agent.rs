@@ -4,6 +4,7 @@ use crate::catalog::{CatalogFetchError, CatalogHolder};
 use crate::keys::KeySupply;
 use crate::plane::{Dial, LoopPlane, PlaneDial};
 use crate::tasker::TaskerError;
+use maknae_agent::hints::Forge;
 use maknae_agent::plane::{
     DeleteOutcome, ListOutcome, MkdirOutcome, Plane, PlaneError, ReadBasis, ReadOutcome,
     StatOutcome, WriteOutcome,
@@ -16,8 +17,8 @@ use maknae_io::{
     AnchorRequired, DescendantRequired, IoError, IoKind, StrategyPref, TargetRequired, Zeroizing,
 };
 use maknae_proto::{
-    Bytes, ConversationId, ConversationView, SecretText, SignedTask, TaskCursor, TaskId, TaskRef,
-    TaskReportPage, TaskView, Turn,
+    BindingRequest, Bytes, ConversationId, ConversationView, SecretText, SignedTask, TaskCursor,
+    TaskId, TaskRef, TaskReportPage, TaskView, Turn,
 };
 use maknae_vault::TrustBundle;
 use std::path::{Path, PathBuf};
@@ -270,11 +271,19 @@ impl<K: KeySupply, R: PersonaRead, D: Dial> TaskPlane for AgentPlane<K, R, D> {
     fn note(&mut self, event: DriverEvent) {
         (self.note)(event);
     }
-    async fn submit(&mut self, agent: &str, prompt: SecretText) -> Result<TaskView, TaskerFail> {
+    fn forges(&self) -> Option<Vec<Forge>> {
+        self.catalog.current().map(|g| crate::catalog::forges(&g))
+    }
+    async fn submit(
+        &mut self,
+        agent: &str,
+        prompt: SecretText,
+        bindings: Vec<BindingRequest>,
+    ) -> Result<TaskView, TaskerFail> {
         let agent = AgentId::parse(agent).map_err(|_| TaskerFail::Refused)?;
         self.plane
             .tasker()
-            .submit(&agent, prompt)
+            .submit(&agent, prompt, bindings)
             .await
             .map_err(fail)
     }
@@ -463,7 +472,10 @@ mod tests {
         );
         let sub = maknae_proto::TaskRef::from_id(&TaskId([0x30; 16]));
         let asked = SecretText(Zeroizing::new("sentinel-609-agent-plane".into()));
-        assert_eq!(plane.submit("jin", asked).await, Err(TaskerFail::Refused));
+        assert_eq!(
+            plane.submit("jin", asked, Vec::new()).await,
+            Err(TaskerFail::Refused)
+        );
         assert_eq!(plane.sub_status(&sub).await, Err(TaskerFail::Refused));
         let cursor = Some(maknae_proto::TaskCursor::from_seq(4));
         let _ = plane.collect_one("jin", &sub, cursor).await;
@@ -777,6 +789,59 @@ mod tests {
         assert_eq!(
             text(Zeroizing::new(vec![0xff, 0xfe])).map(|t| t.0.to_string()),
             Err("the persona is not UTF-8".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn the_planes_forges_are_the_held_catalogs() {
+        use crate::plane::fake::FakeKernel;
+        use maknae_agent::hints::Provider;
+        use maknae_graph::catalog::{self, CatalogForge, CatalogInput};
+        use maknae_proto::{CatalogDigest, Payload, RespResult, ToolCatalogReply};
+        let bytes = catalog::encode(&CatalogInput {
+            entries: vec![],
+            forges: vec![CatalogForge {
+                name: "hub".into(),
+                kind: "git".into(),
+                host: "github.com".into(),
+                provider: "github".into(),
+            }],
+        })
+        .unwrap();
+        let reply = ToolCatalogReply {
+            digest: CatalogDigest(maknae_crypto::sha256(&bytes)),
+            graph: Bytes::new(Zeroizing::new(bytes)),
+        };
+        let fake = FakeKernel::stamped(vec![
+            (RespResult::Ok(Payload::TaskIdle), Some(reply.digest)),
+            (RespResult::Ok(Payload::ToolCatalog(reply.clone())), None),
+        ]);
+        let lp = LoopPlane::with_dial(
+            fake,
+            maknae_config::TransportConfig::default(),
+            None,
+            4096,
+            Keys,
+        );
+        let ca = TestCa::new(PlaneKey::MlDsa87);
+        let mut plane = AgentPlane::new(
+            lp,
+            TaskTrust {
+                trust: ca.trust(),
+                trust_domain: TRUST_DOMAIN.into(),
+                agent: hobi(),
+            },
+            PartitionPersona(PathBuf::from("/home/hobi")),
+            Box::new(|_| {}),
+        );
+        assert_eq!(plane.forges(), None);
+        assert_eq!(plane.claim().await, Ok(ClaimAnswer::Idle));
+        assert_eq!(
+            plane.forges(),
+            Some(vec![Forge {
+                host: "github.com".into(),
+                provider: Provider::Github,
+            }])
         );
     }
 

@@ -551,6 +551,10 @@ files = [
   # #674: the loop's held catalog. T2: it refetches on a changed stamp and drops a
   # catalog whose digest or decode fails; a defect misinforms a model and carries no verdict.
   "crates/maknae-loop/src/catalog.rs",
+  # #168: the remotes of the tasker's checkout, read only from files and directories
+  # the tasker owns and no one else can write, a symlinked .git or config refused.
+  # T2: a defect proposes a binding the kernel re-checks at intake, and carries no verdict.
+  "crates/maknae-loop/src/workdir.rs",
 ]
 
 [project]

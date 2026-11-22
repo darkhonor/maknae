@@ -53,7 +53,7 @@ impl Tasker for TaskerClient {
         self.all_agents().await
     }
     async fn submit(&self, agent: &AgentId, text: SecretText) -> Result<TaskView, TaskerError> {
-        TaskerClient::submit(self, agent, text).await
+        TaskerClient::submit(self, agent, text, Vec::new()).await
     }
     async fn add(&self, task: &TaskRef, text: SecretText) -> Result<TaskView, TaskerError> {
         TaskerClient::add(self, task, text).await
