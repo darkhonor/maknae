@@ -5588,4 +5588,32 @@ mod board {
         w.regrant(BOARD_ROLES)();
         assert_eq!(bodies(&page_of(w.board("jin", read(None), j).await.0)), all);
     }
+
+    #[tokio::test]
+    async fn a_post_marked_while_its_read_is_decided_is_not_delivered() {
+        let w = board_world("board-marked-mid-read");
+        let j = w.at_work("jin");
+        w.stored("hobi", "sentinel-695-a", PostLabels::default());
+        w.stored("suga", "sentinel-695-b", PostLabels::default());
+        w.stored("hobi", "sentinel-695-c", PostLabels::default());
+        let everyone = only(&[("hobi", HOBI_UID), ("suga", SUGA_UID), ("jin", JIN_UID)]);
+        let pdp = Arc::new(common::MarksDuringBatch {
+            inner: Arc::clone(&w.pdp),
+            board: Arc::clone(&w.agents.board),
+            view: maknae_kernel::Containing(everyone.clone(), [SUGA_UID].into_iter().collect()),
+            armed: true.into(),
+        });
+        let (answer, records) = w.board_as(&pdp, "jin", read(None), j).await;
+        let page = page_of(answer);
+        assert_eq!(bodies(&page), ["sentinel-695-a", "sentinel-695-c"]);
+        assert!(!page.more);
+        assert_eq!(read_outcome(&records).returned, Some(2));
+        assert_eq!(w.cursor("jin"), 0);
+        w.agents.board.mark(&everyone);
+        assert_eq!(
+            bodies(&page_of(w.board("jin", read(None), j).await.0)),
+            ["sentinel-695-a", "sentinel-695-b", "sentinel-695-c"],
+            "the post was not acknowledged over"
+        );
+    }
 }

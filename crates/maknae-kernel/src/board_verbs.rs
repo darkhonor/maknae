@@ -275,6 +275,15 @@ impl Walker {
         self.stalled
     }
 
+    pub(crate) fn kept_seqs(&self) -> Vec<u64> {
+        self.kept.iter().map(|s| s.seq).collect()
+    }
+
+    /// Drops each kept post whose sequence `live` does not hold.
+    pub(crate) fn keep_live(&mut self, live: &BTreeSet<u64>) {
+        self.kept.retain(|s| live.contains(&s.seq));
+    }
+
     pub(crate) fn reply_targets(&self) -> Vec<PostId> {
         let kept: BTreeSet<PostId> = self.kept.iter().map(|s| s.post.id).collect();
         let targets: BTreeSet<PostId> = self

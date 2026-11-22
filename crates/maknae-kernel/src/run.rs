@@ -3849,26 +3849,35 @@ async fn serve_board_verb<S, E, P>(
             }
         }
         let stalled = walker.stalled();
-        let mut visible = std::collections::BTreeSet::new();
+        let mut targets = Vec::new();
         if !stalled {
-            let targets: Vec<_> = walker
+            let asked: Vec<_> = walker
                 .reply_targets()
                 .into_iter()
                 .filter_map(|id| store.get(key, id))
                 .collect();
-            let asked = targets
+            let requests = asked
                 .iter()
                 .map(|t| bv::post_request(&request, key, t))
                 .collect();
             let verdicts =
-                bv::decide_posts(authorizer, live, generation, timeout, &request, asked).await;
-            visible = targets
-                .iter()
+                bv::decide_posts(authorizer, live, generation, timeout, &request, requests).await;
+            targets = asked
+                .into_iter()
                 .zip(verdicts)
                 .filter(|(_, v)| *v == bv::PostVerdict::Permit)
-                .map(|(t, _)| t.post.id)
+                .map(|(t, _)| t)
                 .collect();
         }
+        let mut seqs = walker.kept_seqs();
+        seqs.extend(targets.iter().map(|t| t.seq));
+        let still = store.still_live(key, &seqs, &*board.agents.view);
+        walker.keep_live(&still);
+        let visible = targets
+            .iter()
+            .filter(|t| still.contains(&t.seq))
+            .map(|t| t.post.id)
+            .collect();
         let walk = walker.finish(&visible);
         if let Some(skip_to) = walk.skip_to.filter(|s| *s > cursor) {
             match advance(skip_to).await {
@@ -10225,10 +10234,9 @@ async fn reconcile_tasks_at_boot<E: AuditEmit>(
 
 /// Sweeps the task store every `TASK_SWEEP_EVERY` and once more, within
 /// `TASK_SWEEP_STOP_TIMEOUT`, when `stop` is notified.
+/// `agents` gives the task and board stores and the enrollment view the sweep acts on.
 async fn sweep_tasks<E: AuditEmit>(
-    tasks: Arc<crate::task::TaskStore>,
-    board: Arc<crate::board::BoardStore>,
-    view: Arc<dyn crate::enrollment::EnrollmentView>,
+    agents: AgentAdmission,
     emit: Arc<E>,
     where_: WhereCtx,
     euid: u32,
@@ -10252,7 +10260,16 @@ async fn sweep_tasks<E: AuditEmit>(
             _ = tick.tick() => (false, BLOCKING_OPERATION_TIMEOUT),
             _ = stop.notified() => (true, TASK_SWEEP_STOP_TIMEOUT),
         };
-        settle_tasks(&tasks, &board, &view, &*emit, &ctx, budget, true).await;
+        settle_tasks(
+            &agents.tasks,
+            &agents.board,
+            &agents.view,
+            &*emit,
+            &ctx,
+            budget,
+            true,
+        )
+        .await;
         if stopping {
             return;
         }
@@ -11493,9 +11510,7 @@ where
     let agents = reloader.agent_admission(Arc::new(crate::task::PlaneSigner(Arc::clone(client))));
     let sweep_stop = Arc::new(tokio::sync::Notify::new());
     let mut sweeper = tokio::spawn(sweep_tasks(
-        Arc::clone(&reloader.tasks),
-        Arc::clone(&reloader.board),
-        Arc::clone(&agents.view),
+        agents.clone(),
         Arc::clone(sink),
         wctx.clone(),
         reloader.euid,
@@ -29878,9 +29893,10 @@ mod task_sweep_tests {
             au3_1: serde_json::json!({}),
         };
         let mut sweeping = tokio::spawn(sweep_tasks(
-            Arc::clone(&store),
-            Arc::new(crate::board::BoardStore::new()),
-            no_one(),
+            AgentAdmission {
+                tasks: Arc::clone(&store),
+                ..AgentAdmission::none()
+            },
             Arc::clone(&trail),
             where_,
             77,

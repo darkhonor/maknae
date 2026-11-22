@@ -306,6 +306,25 @@ impl BoardStore {
         self.held().live(key, id).cloned()
     }
 
+    /// Those of `seqs` that are on the board, not withheld, and whose author and person
+    /// `view` does not contain, now.
+    pub(crate) fn still_live(
+        &self,
+        key: BoardKey,
+        seqs: &[u64],
+        view: &dyn EnrollmentView,
+    ) -> BTreeSet<u64> {
+        let held = self.held();
+        let Some(board) = held.boards.get(&key) else {
+            return BTreeSet::new();
+        };
+        seqs.iter()
+            .filter_map(|seq| board.posts.get(seq))
+            .filter(|s| !held.withheld(key, s) && contained_for(key, s.author_uid, view).is_empty())
+            .map(|s| s.seq)
+            .collect()
+    }
+
     /// An acknowledgement moves the cursor to `seen_through`, never past what was walked.
     pub fn plan_read(
         &self,
@@ -764,7 +783,7 @@ impl BoardStore {
         view: &dyn EnrollmentView,
     ) -> Result<Arc<Stored>, BoardRefusal> {
         let _w = self.writing();
-        self.room(key, &author, draft.in_reply_to)?;
+        self.room(key, &author, draft.in_reply_to, view)?;
         let mut rec = self.board_record(key);
         let seq = rec.next_seq;
         rec.next_seq = seq
@@ -826,6 +845,7 @@ impl BoardStore {
         key: BoardKey,
         author: &Author,
         in_reply_to: Option<PostId>,
+        view: &dyn EnrollmentView,
     ) -> Result<(), BoardRefusal> {
         let held = self.held();
         if let Some(board) = held.boards.get(&key) {
@@ -846,8 +866,12 @@ impl BoardStore {
                 return Err(BoardRefusal::AuthorAtCap);
             }
         }
+        let gone = |target| {
+            held.live(key, target)
+                .is_none_or(|s| !contained_for(key, s.author_uid, view).is_empty())
+        };
         match in_reply_to {
-            Some(target) if held.live(key, target).is_none() => Err(BoardRefusal::NoSuchPost),
+            Some(target) if gone(target) => Err(BoardRefusal::NoSuchPost),
             Some(_) | None => Ok(()),
         }
     }
@@ -1939,6 +1963,49 @@ mod tests {
         assert!(store.candidates(BOB, 0, 10).is_empty());
         assert!(b.has("board.1000"), "a board's record outlives its posts");
         assert_eq!(by(&store, BOB, hobi(), None, "next").seq, young.seq + 1);
+    }
+
+    #[test]
+    fn still_live_and_a_reply_consult_the_view_and_the_marks() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = clocked(&b);
+        let free_post = by(&store, BOB, hobi(), Some(2001), "sentinel-695-free");
+        let author = by(&store, BOB, jin(), Some(2002), "sentinel-695-author");
+        let marked = by(&store, BOB, hobi(), Some(2003), "sentinel-695-marked");
+        store.mark(&containing(&[], &[2003]));
+        let all = [free_post.seq, author.seq, marked.seq, 99];
+        let view = containing(&[], &[2002]);
+        assert_eq!(
+            store.still_live(BOB, &all, &view),
+            [free_post.seq].into_iter().collect()
+        );
+        assert_eq!(
+            store.still_live(BOB, &all, &free()),
+            [free_post.seq, author.seq].into_iter().collect()
+        );
+        assert!(store
+            .still_live(BOB, &all, &containing(&[], &[1000]))
+            .is_empty());
+        let replied = |to: PostId| {
+            store.post(
+                BOB,
+                (hobi(), Some(2001)),
+                None,
+                PostLabels::default(),
+                reply("r", to),
+                &view,
+            )
+        };
+        assert_eq!(
+            replied(author.post.id).unwrap_err(),
+            BoardRefusal::NoSuchPost,
+            "a target whose author the view contains, before any mark"
+        );
+        assert_eq!(
+            replied(marked.post.id).unwrap_err(),
+            BoardRefusal::NoSuchPost
+        );
+        assert!(replied(free_post.post.id).is_ok());
     }
 
     #[test]
