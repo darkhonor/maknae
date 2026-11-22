@@ -5123,7 +5123,7 @@ mod board {
     }
 
     #[tokio::test]
-    async fn a_permit_with_an_obligation_the_kernel_cannot_honour_withholds_the_post() {
+    async fn a_permit_with_an_obligation_the_kernel_cannot_honour_is_undecided() {
         let w = board_world("board-obligation");
         let j = w.at_work("jin");
         w.stored("hobi", "sentinel-695-labelled", labelled());
@@ -5133,8 +5133,20 @@ mod board {
             label: LABEL,
         });
         let (answer, records) = w.board_as(&pdp, "jin", read(None), j).await;
-        assert_eq!(bodies(&page_of(answer)), ["p"]);
-        assert_eq!(read_outcome(&records).withheld, Some(1));
+        assert_eq!(refused(&answer), Some(BoardDefect::TryAgain), "{answer:?}");
+        assert_eq!(
+            said(&records)[1..],
+            one(
+                "deny",
+                "board: the decision did not complete",
+                "unavailable"
+            )
+        );
+        assert_eq!(w.cursor("jin"), 0, "neither delivered nor skipped");
+        assert_eq!(
+            bodies(&page_of(w.board("jin", read(None), j).await.0)),
+            ["sentinel-695-labelled", "p"]
+        );
     }
 
     #[tokio::test]
@@ -5459,11 +5471,21 @@ mod board {
 
         /// Rewrites the bindings and reloads the policy, as an admin's edit installs it.
         fn rebind(&self, bindings: &str) -> impl Fn() + Send + Sync + 'static {
-            let (pdp, path, text) = (
-                Arc::clone(&self.pdp),
-                maknae_authz_basic::PolicyPaths::in_dir(&self.root).bindings,
-                format!("schema_version: 1\nbindings:\n{bindings}"),
-            );
+            let path = maknae_authz_basic::PolicyPaths::in_dir(&self.root).bindings;
+            self.reload(path, format!("schema_version: 1\nbindings:\n{bindings}"))
+        }
+
+        /// Rewrites the role grants and reloads the policy.
+        fn regrant(&self, roles: &str) -> impl Fn() + Send + Sync + 'static {
+            let path = maknae_authz_basic::PolicyPaths::in_dir(&self.root).authz;
+            self.reload(
+                path,
+                format!("schema_version: 1\npermissions:\n  allow: []\n  deny: []\n{roles}"),
+            )
+        }
+
+        fn reload(&self, path: PathBuf, text: String) -> impl Fn() + Send + Sync + 'static {
+            let pdp = Arc::clone(&self.pdp);
             move || {
                 common::write_0640(&path, &text);
                 pdp.baseline().reload_from_file().unwrap();
@@ -5513,5 +5535,56 @@ mod board {
             .map(|(key, id, _, lifted)| (key, id, lifted))
             .collect();
         assert_eq!(held, [(w.key(), id, maknae_kernel::HeldFor::Person)]);
+    }
+
+    #[tokio::test]
+    async fn a_reader_contained_mid_read_is_refused_and_keeps_every_post() {
+        let w = board_world("board-read-contained");
+        let (h, j) = (w.at_work("hobi"), w.at_work("jin"));
+        let all = ["sentinel-695-mid-a", "sentinel-695-mid-b"];
+        for body in all {
+            posted(w.board("hobi", post(note(body)), h).await.0);
+        }
+        let bound = format!("  user: [\"{}\", \"nobody\"]\n", w.user);
+        let contain = w.rebind(&format!("{bound}  adversary: [{{uid: {JIN_UID}}}]\n"));
+        let (answer, records) = w.board_during_intent("jin", read(None), j, contain).await;
+        assert!(w.agents.view.contained(JIN_UID));
+        assert_eq!(refused(&answer), Some(BoardDefect::TryAgain), "{answer:?}");
+        assert_eq!(
+            said(&records)[1..],
+            one(
+                "deny",
+                "board: the decision did not complete",
+                "unavailable"
+            )
+        );
+        assert_eq!(w.cursor("jin"), 0, "the cursor did not move");
+        w.rebind(&bound)();
+        assert!(!w.agents.view.contained(JIN_UID));
+        assert_eq!(bodies(&page_of(w.board("jin", read(None), j).await.0)), all);
+    }
+
+    #[tokio::test]
+    async fn a_reader_whose_grant_is_removed_mid_read_is_refused_and_keeps_every_post() {
+        let w = board_world("board-read-ungranted");
+        let (h, j) = (w.at_work("hobi"), w.at_work("jin"));
+        let all = ["sentinel-695-grant-a", "sentinel-695-grant-b"];
+        for body in all {
+            posted(w.board("hobi", post(note(body)), h).await.0);
+        }
+        let ungrant = w.regrant("roles:\n  user:\n    allow: [\"session.task\", \"board.post\"]\n");
+        let (answer, records) = w.board_during_intent("jin", read(None), j, ungrant).await;
+        assert_eq!(refused(&answer), Some(BoardDefect::TryAgain), "{answer:?}");
+        assert_eq!(
+            said(&records)[1..],
+            one(
+                "deny",
+                "board: the decision did not complete",
+                "unavailable"
+            )
+        );
+        assert_eq!(w.cursor("jin"), 0, "the cursor did not move");
+        w.regrant(BOARD_ROLES)();
+        assert_eq!(bodies(&page_of(w.board("jin", read(None), j).await.0)), all);
     }
 }

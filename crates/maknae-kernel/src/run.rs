@@ -3754,7 +3754,7 @@ async fn serve_board_verb<S, E, P>(
                 None => false,
                 Some(target) => {
                     let asked = vec![bv::post_request(&request, key, &target)];
-                    bv::decide_posts(authorizer, live, generation, timeout, asked).await
+                    bv::decide_posts(authorizer, live, generation, timeout, &request, asked).await
                         == [bv::PostVerdict::Permit]
                 }
             };
@@ -3842,7 +3842,8 @@ async fn serve_board_verb<S, E, P>(
                 .iter()
                 .map(|s| bv::post_request(&request, key, s))
                 .collect();
-            let verdicts = bv::decide_posts(authorizer, live, generation, timeout, asked).await;
+            let verdicts =
+                bv::decide_posts(authorizer, live, generation, timeout, &request, asked).await;
             if !walker.take(&chunk, &verdicts) {
                 break;
             }
@@ -3859,7 +3860,8 @@ async fn serve_board_verb<S, E, P>(
                 .iter()
                 .map(|t| bv::post_request(&request, key, t))
                 .collect();
-            let verdicts = bv::decide_posts(authorizer, live, generation, timeout, asked).await;
+            let verdicts =
+                bv::decide_posts(authorizer, live, generation, timeout, &request, asked).await;
             visible = targets
                 .iter()
                 .zip(verdicts)

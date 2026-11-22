@@ -142,38 +142,49 @@ fn post_verdict(verdict: Verdict) -> PostVerdict {
         return PostVerdict::Undecided;
     }
     match maknae_security::finalize(maknae_security::combine(vec![verdict])) {
-        Decision::Permit { obligations }
-            if crate::handler::discharge_plan(&obligations).is_ok() =>
-        {
-            PostVerdict::Permit
-        }
-        Decision::Permit { .. } | Decision::Deny { .. } => PostVerdict::Deny,
+        Decision::Permit { obligations } => match crate::handler::discharge_plan(&obligations) {
+            Ok(()) => PostVerdict::Permit,
+            Err(_) => PostVerdict::Undecided,
+        },
+        Decision::Deny { .. } => PostVerdict::Deny,
     }
 }
 
 /// One guarded batch, under the decision breaker and timeout, on one view of the policy.
+/// `base`, the verb's own request, is decided again at the head of the batch; unless it is
+/// permitted, every post is undecided. An empty batch decides nothing and permits nothing.
 pub(crate) async fn decide_posts<P: Authorizer + Send + Sync + 'static>(
     authorizer: &Arc<P>,
     live: &Arc<crate::live::LiveConfig>,
     admitted_generation: u64,
     timeout: Duration,
+    base: &maknae_security::Request,
     requests: Vec<maknae_security::Request>,
 ) -> Vec<PostVerdict> {
     let n = requests.len();
     if n == 0 {
         return Vec::new();
     }
+    let mut batch = Vec::with_capacity(n + 1);
+    batch.push(base.clone());
+    batch.extend(requests);
     let (a, live) = (Arc::clone(authorizer), Arc::clone(live));
     let breaker = crate::run::authz_decide_breaker();
     let decided: Result<_, Offload> =
         admit_blocking(&breaker, timeout, "board post decision", move || {
-            let all = maknae_security::guarded_decide_cited_all(&*a, &requests);
+            let all = maknae_security::guarded_decide_cited_all(&*a, &batch);
             (all, live.generation())
         })
         .await;
     match decided {
-        Ok((all, generation)) if generation == admitted_generation && all.len() == n => {
-            all.into_iter().map(|d| post_verdict(d.verdict)).collect()
+        Ok((all, generation)) if generation == admitted_generation && all.len() == n + 1 => {
+            let mut all = all.into_iter().map(|d| post_verdict(d.verdict));
+            match all.next() {
+                Some(PostVerdict::Permit) => all.collect(),
+                Some(PostVerdict::Deny | PostVerdict::Undecided) | None => {
+                    vec![PostVerdict::Undecided; n]
+                }
+            }
         }
         Ok(_) | Err(Offload::Open | Offload::AtCapacity | Offload::Join | Offload::TimedOut) => {
             vec![PostVerdict::Undecided; n]
@@ -871,7 +882,7 @@ mod tests {
         };
         for (verdict, want) in [
             (permit("audit"), P),
-            (permit("sentinel-695-unhonourable"), D),
+            (permit("sentinel-695-unhonourable"), U),
             (deny("sentinel-695-withheld"), D),
             (Verdict::NotApplicable { note: None }, D),
             (Verdict::Indeterminate, U),
@@ -879,6 +890,107 @@ mod tests {
         ] {
             assert_eq!(post_verdict(verdict.clone()), want, "{verdict:?}");
         }
+    }
+
+    /// Answers `base` for a request without the post label and permits every other one.
+    struct Scripted {
+        base: Verdict,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Authorizer for Scripted {
+        fn decide_cited_all(
+            &self,
+            reqs: &[maknae_security::Request],
+        ) -> Vec<maknae_security::Decided> {
+            maknae_security::decide_each_cited(self, reqs)
+        }
+
+        fn decide(&self, req: &maknae_security::Request) -> Verdict {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match req.resource.0.get("post.sentinel-695.level") {
+                Some(_) => Verdict::Permit {
+                    obligations: Vec::new(),
+                },
+                None => self.base.clone(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_batch_is_undecided_unless_the_verbs_own_request_is_permitted_again() {
+        let base = maknae_security::Request {
+            subject: maknae_security::Subject(Attributes::new()),
+            resource: maknae_security::Resource(Attributes::new()),
+            action: maknae_security::Action("board.read".into()),
+            context: maknae_security::Context(Attributes::new()),
+        };
+        let labels = PostLabels(
+            [(
+                "sentinel-695.level".to_string(),
+                LabelValue::Str("x".into()),
+            )]
+            .into(),
+        );
+        let posts: Vec<_> = (1..=2)
+            .map(|seq| post_request(&base, BOB, &stored(seq, None, labels.clone())))
+            .collect();
+        let live = Arc::new(crate::live::LiveConfig::new(Default::default(), None));
+        let generation = live.generation();
+        let unhonourable = Verdict::Permit {
+            obligations: vec![maknae_security::Obligation {
+                id: "sentinel-695-unhonourable".into(),
+                params: Attributes::new(),
+            }],
+        };
+        for (verdict, want) in [
+            (
+                Verdict::Permit {
+                    obligations: Vec::new(),
+                },
+                vec![P, P],
+            ),
+            (
+                Verdict::Deny {
+                    reason: "sentinel-695-contained".into(),
+                },
+                vec![U, U],
+            ),
+            (Verdict::NotApplicable { note: None }, vec![U, U]),
+            (unhonourable, vec![U, U]),
+        ] {
+            let pdp = Arc::new(Scripted {
+                base: verdict.clone(),
+                calls: Default::default(),
+            });
+            let got = decide_posts(
+                &pdp,
+                &live,
+                generation,
+                Duration::from_secs(5),
+                &base,
+                posts.clone(),
+            )
+            .await;
+            assert_eq!(got, want, "{verdict:?}");
+        }
+        let pdp = Arc::new(Scripted {
+            base: Verdict::Permit {
+                obligations: Vec::new(),
+            },
+            calls: Default::default(),
+        });
+        let none = decide_posts(
+            &pdp,
+            &live,
+            generation,
+            Duration::from_secs(5),
+            &base,
+            Vec::new(),
+        )
+        .await;
+        assert!(none.is_empty(), "an empty batch permits nothing");
+        assert_eq!(pdp.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[test]
