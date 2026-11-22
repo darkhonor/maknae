@@ -3832,62 +3832,67 @@ async fn serve_board_verb<S, E, P>(
         let budget = maknae_proto::board_page_budget(trail.cfg.prompt_max_bytes);
         let mut walker = bv::Walker::new(budget);
         let mut after = cursor;
-        loop {
-            let chunk = store.candidates(key, after, maknae_proto::BOARD_READ_PAGE_POSTS);
-            let Some(last) = chunk.last() else {
-                break;
-            };
-            after = last.seq;
-            let asked = chunk
-                .iter()
-                .map(|s| bv::post_request(&request, key, s))
-                .collect();
-            let verdicts =
-                bv::decide_posts(authorizer, live, generation, timeout, &request, asked).await;
-            if !walker.take(&chunk, &verdicts) {
-                break;
+        let visible = loop {
+            loop {
+                let chunk = store.candidates(key, after, maknae_proto::BOARD_READ_PAGE_POSTS);
+                let Some(last) = chunk.last() else {
+                    break;
+                };
+                after = last.seq;
+                let asked = chunk
+                    .iter()
+                    .map(|s| bv::post_request(&request, key, s))
+                    .collect();
+                let verdicts =
+                    bv::decide_posts(authorizer, live, generation, timeout, &request, asked).await;
+                if !walker.take(&chunk, &verdicts) {
+                    break;
+                }
             }
-        }
+            let mut targets = Vec::new();
+            if !walker.stalled() {
+                let asked: Vec<_> = walker
+                    .reply_targets()
+                    .into_iter()
+                    .filter_map(|id| store.get(key, id))
+                    .collect();
+                let requests = asked
+                    .iter()
+                    .map(|t| bv::post_request(&request, key, t))
+                    .collect();
+                let verdicts =
+                    bv::decide_posts(authorizer, live, generation, timeout, &request, requests)
+                        .await;
+                targets = asked
+                    .into_iter()
+                    .zip(verdicts)
+                    .filter(|(_, v)| *v == bv::PostVerdict::Permit)
+                    .map(|(t, _)| t)
+                    .collect();
+            }
+            let mut seqs = walker.checked_seqs();
+            seqs.extend(targets.iter().map(|t| t.seq));
+            let still = store.still_live(key, &seqs, &*board.agents.view);
+            match walker.revalidate(&still) {
+                Some(resume) => after = resume,
+                None => {
+                    break targets
+                        .iter()
+                        .filter(|t| still.contains(&t.seq))
+                        .map(|t| t.post.id)
+                        .collect();
+                }
+            }
+        };
         let stalled = walker.stalled();
-        let mut targets = Vec::new();
-        if !stalled {
-            let asked: Vec<_> = walker
-                .reply_targets()
-                .into_iter()
-                .filter_map(|id| store.get(key, id))
-                .collect();
-            let requests = asked
-                .iter()
-                .map(|t| bv::post_request(&request, key, t))
-                .collect();
-            let verdicts =
-                bv::decide_posts(authorizer, live, generation, timeout, &request, requests).await;
-            targets = asked
-                .into_iter()
-                .zip(verdicts)
-                .filter(|(_, v)| *v == bv::PostVerdict::Permit)
-                .map(|(t, _)| t)
-                .collect();
-        }
-        let mut seqs = walker.kept_seqs();
-        seqs.extend(targets.iter().map(|t| t.seq));
-        let still = store.still_live(key, &seqs, &*board.agents.view);
-        walker.keep_live(&still);
-        let visible = targets
-            .iter()
-            .filter(|t| still.contains(&t.seq))
-            .map(|t| t.post.id)
-            .collect();
         let walk = walker.finish(&visible);
         if let Some(skip_to) = walk.skip_to.filter(|s| *s > cursor) {
             match advance(skip_to).await {
                 Ok(moved) => cursor = moved,
                 Err(r) => {
-                    let outcome = trail.outcome(&intent, &r.to_string(), bv::posture(&r));
-                    trail
-                        .refuse_board(stream, &outcome, bv::defect_of(&r))
-                        .await;
-                    return;
+                    let mut failed = trail.outcome(&intent, &r.to_string(), "unavailable");
+                    failed.outcome.result = "deny".into();
+                    trail.record_bounded(&failed).await;
                 }
             }
         }

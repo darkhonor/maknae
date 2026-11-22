@@ -212,6 +212,8 @@ pub(crate) struct Walker {
     skip_to: Option<u64>,
     permitted: bool,
     more: bool,
+    /// The permitted post the page had no room for: what `more` stands on.
+    lookahead: Option<Arc<Stored>>,
     stalled: bool,
 }
 
@@ -234,6 +236,7 @@ impl Walker {
             skip_to: None,
             permitted: false,
             more: false,
+            lookahead: None,
             stalled: false,
         }
     }
@@ -258,6 +261,7 @@ impl Walker {
                         && self.used.saturating_add(size) <= self.budget;
                     if !self.kept.is_empty() && !fits {
                         self.more = true;
+                        self.lookahead = Some(Arc::clone(stored));
                         return false;
                     }
                     self.permitted = true;
@@ -273,13 +277,43 @@ impl Walker {
         self.stalled
     }
 
-    pub(crate) fn kept_seqs(&self) -> Vec<u64> {
-        self.kept.iter().map(|s| s.seq).collect()
+    /// The sequences the final check must find live: the kept posts and the lookahead.
+    pub(crate) fn checked_seqs(&self) -> Vec<u64> {
+        self.kept
+            .iter()
+            .chain(&self.lookahead)
+            .map(|s| s.seq)
+            .collect()
     }
 
-    /// Drops each kept post whose sequence `live` does not hold.
-    pub(crate) fn keep_live(&mut self, live: &BTreeSet<u64>) {
+    /// Drops each kept post `live` does not hold. When that frees room, or the lookahead is
+    /// no longer live, the walk is not what it would be without those posts: returns the
+    /// sequence to resume walking after, with the lookahead taken again if it is live.
+    pub(crate) fn revalidate(&mut self, live: &BTreeSet<u64>) -> Option<u64> {
+        let before = self.kept.len();
         self.kept.retain(|s| live.contains(&s.seq));
+        let dropped = self.kept.len() != before;
+        if dropped {
+            self.used = self
+                .kept
+                .iter()
+                .map(|s| post_size(s))
+                .fold(0, usize::saturating_add);
+        }
+        if self.stalled {
+            return None;
+        }
+        let lookahead = self.lookahead.take()?;
+        if !dropped && live.contains(&lookahead.seq) {
+            self.lookahead = Some(lookahead);
+            return None;
+        }
+        self.more = false;
+        let at = lookahead.seq;
+        if live.contains(&at) && !self.take(&[lookahead], &[PostVerdict::Permit]) {
+            return None;
+        }
+        Some(at)
     }
 
     pub(crate) fn reply_targets(&self) -> Vec<PostId> {

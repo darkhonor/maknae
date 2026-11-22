@@ -5608,6 +5608,7 @@ mod board {
             board: Arc::clone(&w.agents.board),
             view: maknae_kernel::Containing(everyone.clone(), [SUGA_UID].into_iter().collect()),
             armed: true.into(),
+            label: None,
         });
         let (answer, records) = w.board_as(&pdp, "jin", read(None), j).await;
         let page = page_of(answer);
@@ -5648,5 +5649,93 @@ mod board {
         assert_eq!(bodies(&withheld), bodies(&unknown));
         page_of(w.board_as(&pdp, "jin", read(Some(c)), j).await.0);
         assert_eq!(w.cursor("jin"), w.seq(c));
+    }
+
+    /// Reads as jin while suga is contained inside the batch that decides suga's labelled post.
+    async fn read_while_suga_is_contained(w: &World, j: TaskId) -> BoardPage {
+        let everyone = only(&[("hobi", HOBI_UID), ("suga", SUGA_UID), ("jin", JIN_UID)]);
+        let pdp = Arc::new(common::MarksDuringBatch {
+            inner: Arc::clone(&w.pdp),
+            board: Arc::clone(&w.agents.board),
+            view: maknae_kernel::Containing(everyone, [SUGA_UID].into_iter().collect()),
+            armed: true.into(),
+            label: Some(LABEL),
+        });
+        page_of(w.board_as(&pdp, "jin", read(None), j).await.0)
+    }
+
+    fn hobi_posts(w: &World, range: std::ops::Range<usize>) -> Vec<String> {
+        range
+            .map(|n| {
+                let body = format!("sentinel-695-h{n}");
+                w.stored("hobi", &body, PostLabels::default());
+                body
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_lookahead_contained_while_its_read_is_decided_does_not_set_more() {
+        let w = board_world("board-lookahead-alone");
+        let j = w.at_work("jin");
+        let page_posts = hobi_posts(&w, 0..maknae_proto::BOARD_READ_PAGE_POSTS);
+        w.stored("suga", "sentinel-695-lookahead", labelled());
+        let page = read_while_suga_is_contained(&w, j).await;
+        assert_eq!(bodies(&page), page_posts);
+        assert!(!page.more, "as if the lookahead were not there");
+    }
+
+    #[tokio::test]
+    async fn a_lookahead_contained_while_its_read_is_decided_looks_further() {
+        let w = board_world("board-lookahead-further");
+        let j = w.at_work("jin");
+        let page_posts = hobi_posts(&w, 0..maknae_proto::BOARD_READ_PAGE_POSTS);
+        w.stored("suga", "sentinel-695-lookahead", labelled());
+        w.stored("hobi", "sentinel-695-after", PostLabels::default());
+        let page = read_while_suga_is_contained(&w, j).await;
+        assert_eq!(bodies(&page), page_posts);
+        assert!(page.more, "the next live post beyond it is still more");
+    }
+
+    #[tokio::test]
+    async fn a_post_dropped_at_delivery_leaves_its_room_to_the_next_post() {
+        let w = board_world("board-dropped-room");
+        let j = w.at_work("jin");
+        w.stored("suga", "sentinel-695-dropped", labelled());
+        let want = hobi_posts(&w, 0..maknae_proto::BOARD_READ_PAGE_POSTS);
+        let page = read_while_suga_is_contained(&w, j).await;
+        assert_eq!(
+            bodies(&page),
+            want,
+            "the page the read would give without it"
+        );
+        assert!(!page.more);
+    }
+
+    #[tokio::test]
+    async fn a_failed_skip_past_withheld_posts_is_recorded_and_the_page_is_given() {
+        let w = board_world("board-skip-fails");
+        let j = w.at_work("jin");
+        let withheld = w.stored("hobi", "sentinel-695-withheld", labelled());
+        let pdp = denies(&w, &["jin"]);
+        w.board_blobs.fail(Some(Fail::Every));
+        let (answer, records) = w.board_as(&pdp, "jin", read(None), j).await;
+        w.board_blobs.fail(None);
+        let page = page_of(answer);
+        assert!(
+            page.posts.is_empty() && !page.more,
+            "the page of an empty board"
+        );
+        assert_eq!(w.cursor("jin"), 0);
+        let said = said(&records);
+        assert_eq!(said.len(), 3, "{said:?}");
+        assert_eq!(
+            (said[1].0.as_str(), said[1].2.as_str()),
+            ("deny", "unavailable")
+        );
+        assert!(said[1].1.starts_with("store: "), "{said:?}");
+        assert_eq!((said[2].0.as_str(), said[2].1.as_str()), ("permit", "done"));
+        page_of(w.board_as(&pdp, "jin", read(None), j).await.0);
+        assert_eq!(w.cursor("jin"), w.seq(withheld));
     }
 }

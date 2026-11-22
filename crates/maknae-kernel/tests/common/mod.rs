@@ -1937,13 +1937,15 @@ impl<P> PanicsOnLabel<P> {
 
 board_double!(PanicsOnLabel);
 
-/// Marks `board` under `view` once, inside the first batch of more than one request, as a
-/// containment installed while a read's posts are decided.
+/// Marks `board` under `view` once, inside the first batch of more than one request (that
+/// holds `label`, when one is given), as a containment installed while a read's posts are
+/// decided.
 pub struct MarksDuringBatch<P> {
     pub inner: Arc<P>,
     pub board: Arc<maknae_kernel::BoardStore>,
     pub view: maknae_kernel::Containing<maknae_kernel::FixedEnrollment>,
     pub armed: std::sync::atomic::AtomicBool,
+    pub label: Option<&'static str>,
 }
 
 impl<P> MarksDuringBatch<P> {
@@ -1953,7 +1955,11 @@ impl<P> MarksDuringBatch<P> {
 
     fn before_all(&self, reqs: &[Request]) {
         use maknae_kernel::BoardSeam;
-        if reqs.len() > 1 && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        let holding = self
+            .label
+            .is_none_or(|label| reqs.iter().any(|r| holds(r, label)));
+        if reqs.len() > 1 && holding && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
             self.board.mark(&self.view);
         }
     }
