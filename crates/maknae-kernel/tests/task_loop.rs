@@ -780,11 +780,28 @@ async fn a_bound_task_is_accepted_sealed_and_delivered_verified() {
         head: None,
         change: Some(5),
     })];
-    let view = match w.ask(bound_to(HOST)).await {
+    let records = Records::new(0);
+    let view = match w.ask_with(bound_to(HOST), &records).await {
         RespResult::Ok(Payload::TaskAccepted(v)) => v,
         other => panic!("{other:?}"),
     };
     assert_eq!(view.bindings, sealed);
+    let queued: Vec<_> = records
+        .snapshot()
+        .into_iter()
+        .filter(|r| r.action == "session.task" && r.outcome.reason == "task queued")
+        .collect();
+    assert_eq!(queued.len(), 1, "{:?}", reasons(&records));
+    assert_eq!(
+        queued[0].subject.bindings,
+        [maknae_audit_append::RecordBinding {
+            kind: maknae_audit_append::BindingKind::Git,
+            server: HOST.into(),
+            base: REPO.into(),
+            head: None,
+            change: Some(5),
+        }]
+    );
     let (signed, _) = w.claim("hobi").await.expect("the bound task is delivered");
     assert_eq!(signed.task.task_id, view.task.to_id());
     assert_eq!(signed.task.bindings, sealed);

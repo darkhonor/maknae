@@ -3180,23 +3180,23 @@ async fn decide<P: Authorizer + Send + Sync + 'static>(
         ),
     };
     attempt.parent = parent.as_ref().map(|t| t.signed.task.task_id);
-    let bindings = seal_bindings(
-        &attempt.tasker,
-        parent.as_ref().map(|t| &t.signed.task),
-        &sub.bindings,
-        ctx.forges,
-    )?;
     let (generation, enrolled) = store.observe(&**view, &target);
     let req = task_request(by, target.as_str(), parent.as_ref(), &sub, ctx.lane);
     let decided = decide_admitted(pdp, ctx.decide_timeout, req).await?;
     attempt.role = decided.role;
-    match maknae_security::finalize(decided.verdict) {
+    let bindings = match maknae_security::finalize(decided.verdict) {
         maknae_security::Decision::Permit { obligations } => {
             crate::handler::discharge_plan(&obligations)
                 .map_err(|u| TaskRefusal::Denied(format!("unhonorable obligation: {}", u.0)))?;
+            seal_bindings(
+                &attempt.tasker,
+                parent.as_ref().map(|t| &t.signed.task),
+                &sub.bindings,
+                ctx.forges,
+            )?
         }
         maknae_security::Decision::Deny { reason } => return Err(TaskRefusal::Denied(reason)),
-    }
+    };
     let agent_uid = enrolled.ok_or(TaskRefusal::AgentGone)?;
     let first = store.next_id()?;
     let ticket = Arc::clone(&attempt.ticket);
@@ -8252,6 +8252,33 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_unauthorized_subject_with_a_bad_binding_gets_the_pdp_deny() {
+        let (_g, pdp) = pdp("unbound-unauthorized");
+        let store = Arc::new(TaskStore::new());
+        let emit = Recorder::new();
+        let stranger = "git.stranger-168a-deny.example";
+        let got = submit_bound(
+            &pdp,
+            &store,
+            user(),
+            bound("jin", vec![git(stranger, REPO, Some(1))]),
+            &forges_of(&[FORGE_HOST]),
+            &emit,
+        )
+        .await;
+        let why = format!("agent jin: uid {} is not a tasker", me());
+        assert_eq!(got.unwrap_err(), TaskRefusal::Denied(why.clone()));
+        assert_eq!(store.len(), 0);
+        let r = emit.records().pop().unwrap();
+        assert_eq!(r.outcome.result, "deny");
+        assert_eq!(r.outcome.reason, why);
+        assert_eq!(r.subject.role.as_deref(), Some("user"));
+        assert!(!maknae_audit_append::canonical_json(&r)
+            .unwrap()
+            .contains(stranger));
     }
 
     #[tokio::test]

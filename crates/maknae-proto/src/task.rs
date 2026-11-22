@@ -104,8 +104,6 @@ pub const TASK_BINDING_REQUESTS_MAX_BYTES: usize = TASK_BINDINGS_MAX_BYTES - 6 *
 pub const TASK_REACH_MAX_BYTES: usize = 1024;
 pub const REPOSITORY_PATH_MAX_BYTES: usize = 255;
 
-/// Two or more `/`-separated segments of `[A-Za-z0-9._-]`, none empty, `.`, `..` or
-/// starting with `-`, with no trailing `.git`.
 pub fn repository_path_is_acceptable(path: &str) -> bool {
     path.len() <= REPOSITORY_PATH_MAX_BYTES
         && !path.ends_with(".git")
@@ -143,7 +141,6 @@ fn binding_refusal(
     Ok(())
 }
 
-/// A repository, and optionally one change in it, that a tasker asks a task be bound to.
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, try_from = "GitRefWire")]
 pub struct GitRef {

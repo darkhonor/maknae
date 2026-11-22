@@ -490,8 +490,7 @@ impl TaskStamp {
     }
 }
 
-/// Stamps `binding.kinds` and the `bound.<kind>.*` lists from the cited task's sealed
-/// bindings; a task with no bindings stamps the empty set and no list.
+/// A task with no bindings stamps the empty set and no list.
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "called by the tool-invocation verb, #479")

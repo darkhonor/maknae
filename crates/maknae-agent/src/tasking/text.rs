@@ -186,7 +186,6 @@ pub fn undecided_agent(name: &str) -> String {
 pub const LIST_INCOMPLETE_REFUSAL: &str =
     "maknae: could not check every agent right now; try again";
 
-/// A binding as `server/base`, with ` change N` when it names one.
 pub fn binding_name(binding: &Binding) -> String {
     let Binding::Git(g) = binding;
     ref_name(&g.server, &g.base, g.change)

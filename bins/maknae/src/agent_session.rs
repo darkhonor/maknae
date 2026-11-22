@@ -138,21 +138,17 @@ pub(crate) struct Kernel<T, L> {
     hints: Hints,
 }
 
-/// What the session recognizes repositories against, fixed when it opens.
 pub(crate) struct Hints {
     forges: Option<Vec<Forge>>,
     remotes: Remotes,
 }
 
-/// How a session opens: whether it waits for reports, its input bound, and the
-/// working directory it was started in.
 pub(crate) struct Opening {
     pub(crate) wait: bool,
     pub(crate) input_cap: usize,
     pub(crate) workdir: Workdir,
 }
 
-/// The working directory's remotes, read once, and what to say if it could not be.
 pub(crate) struct Workdir {
     remotes: Vec<RemoteUrl>,
     note: Option<&'static str>,

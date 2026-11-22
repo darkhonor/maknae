@@ -1,6 +1,6 @@
 //! The remotes of the checkout a tasker runs in: the nearest `.git` above the
-//! working directory, its `config` read only when the tasker owns it and no one
-//! else can write it.
+//! working directory, its `config` read only when it is owned by the tasker and
+//! not world-writable.
 use maknae_agent::hints::{git_config_remotes, RemoteUrl};
 use maknae_io::{Anchor, AnchorRequired, IoError, IoKind, StrategyPref, TargetRequired};
 use std::path::{Path, PathBuf};
@@ -29,9 +29,9 @@ impl std::fmt::Display for Unreadable {
     }
 }
 
-/// `None` outside a checkout. `cwd` is absolute; `uid` must own every file read and
-/// every directory it is read from, and no one else may write them. A symlinked
-/// `.git` is refused, never followed.
+/// `None` outside a checkout. `cwd` is absolute; every file read and every directory
+/// it is read from must be owned by `uid` and not world-writable, and every file
+/// read must have a single link. A symlinked `.git` is refused, never followed.
 pub fn remotes(cwd: &Path, uid: u32) -> Result<Option<Vec<RemoteUrl>>, Unreadable> {
     let Some(dir) = nearest_checkout(cwd)? else {
         return Ok(None);
@@ -46,11 +46,7 @@ pub fn remotes(cwd: &Path, uid: u32) -> Result<Option<Vec<RemoteUrl>>, Unreadabl
         Err(e) => return Err(Unreadable::Io(e)),
     };
     let bytes = anchor
-        .read(
-            Path::new("config"),
-            None,
-            file(uid, GIT_CONFIG_MAX_BYTES, false),
-        )
+        .read(Path::new("config"), None, file(uid, GIT_CONFIG_MAX_BYTES))
         .map_err(Unreadable::Io)?
         .value;
     git_config_remotes(&bytes)
@@ -78,22 +74,14 @@ fn nearest_checkout(cwd: &Path) -> Result<Option<&Path>, Unreadable> {
 /// A worktree's or submodule's `.git` file: `gitdir:` names the git directory,
 /// whose `commondir`, when present, names the one holding `config`.
 fn common_dir(dir: &Path, dot_git: &Path, uid: u32) -> Result<(Anchor, PathBuf), Unreadable> {
-    let line = maknae_io::read_absolute(
-        dot_git,
-        file(uid, GIT_FILE_MAX_BYTES, true),
-        StrategyPref::Auto,
-    )
-    .map_err(Unreadable::Io)?
-    .value;
+    let line = maknae_io::read_absolute(dot_git, file(uid, GIT_FILE_MAX_BYTES), StrategyPref::Auto)
+        .map_err(Unreadable::Io)?
+        .value;
     let gitdir = path_line(&line, Some("gitdir: "))
         .ok_or_else(|| Unreadable::GitFile(dot_git.to_path_buf()))?;
     let gitdir = dir.join(gitdir);
     let anchor = resolved(&gitdir, uid)?;
-    let common = match anchor.read(
-        Path::new("commondir"),
-        None,
-        file(uid, GIT_FILE_MAX_BYTES, true),
-    ) {
+    let common = match anchor.read(Path::new("commondir"), None, file(uid, GIT_FILE_MAX_BYTES)) {
         Ok(read) => path_line(&read.value, None)
             .map(|common| gitdir.join(common))
             .ok_or_else(|| Unreadable::CommonDir(gitdir.join("commondir")))?,
@@ -127,11 +115,11 @@ fn owned(uid: u32) -> AnchorRequired {
     }
 }
 
-fn file(uid: u32, max: u64, single_link: bool) -> TargetRequired {
+fn file(uid: u32, max: u64) -> TargetRequired {
     TargetRequired {
         owner: Some(uid),
         mode_mask: Some(0o002),
-        nlink_exactly_one: single_link,
+        nlink_exactly_one: true,
         regular_file: true,
         max_bytes: Some(max),
     }
@@ -381,19 +369,17 @@ mod tests {
         }
     }
     #[test]
-    fn every_file_and_directory_read_must_be_the_taskers_alone() {
-        for single_link in [false, true] {
-            assert_eq!(
-                file(7, 9, single_link),
-                TargetRequired {
-                    owner: Some(7),
-                    mode_mask: Some(0o002),
-                    nlink_exactly_one: single_link,
-                    regular_file: true,
-                    max_bytes: Some(9),
-                }
-            );
-        }
+    fn every_file_and_directory_read_is_owned_by_the_tasker_and_not_world_writable() {
+        assert_eq!(
+            file(7, 9),
+            TargetRequired {
+                owner: Some(7),
+                mode_mask: Some(0o002),
+                nlink_exactly_one: true,
+                regular_file: true,
+                max_bytes: Some(9),
+            }
+        );
         assert_eq!(
             owned(7),
             AnchorRequired {
@@ -402,6 +388,18 @@ mod tests {
             }
         );
     }
+    #[test]
+    fn a_hardlinked_config_is_refused() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("r");
+        git_dir(&root, "git@github.com:o/r.git");
+        std::fs::hard_link(root.join(".git/config"), t.path().join("second")).unwrap();
+        match remotes(&root, me()) {
+            Err(Unreadable::Io(IoError::MultiplyLinked { .. })) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[test]
     fn a_hardlinked_git_file_or_commondir_is_refused() {
         let t = tempfile::tempdir().unwrap();

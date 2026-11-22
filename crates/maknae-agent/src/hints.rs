@@ -509,7 +509,6 @@ impl<'a> Value<'a> {
         }
     }
 
-    /// Where the entry after this value starts.
     fn end(mut self) -> Result<usize, Malformed> {
         while self.next().is_some() {}
         if self.error {
